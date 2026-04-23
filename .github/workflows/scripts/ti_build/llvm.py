@@ -14,27 +14,46 @@ from .misc import banner, get_cache_home, is_manylinux2014
 
 # -- code --
 # LLVM 19.1.x (stock upstream, built with specific CMake flags — no custom
-# source patches). The Windows binary is produced by
-# .github/workflows/build_llvm19_windows.yml and published as a release
-# asset on this repo. Linux/macOS prebuilts are not yet re-produced for
-# LLVM 19 — if LLVM19_OVERRIDE_URL is not provided, those platforms fall
-# back to the legacy LLVM 15 prebuilt (deprecated, to be removed once
-# platform-specific LLVM 19 zips exist).
+# source patches).
 #
-# If you already have LLVM 19 installed locally, set LLVM_DIR to point at
-# <prefix>/lib/cmake/llvm and this downloader will be bypassed.
+# This fork has diverged from upstream Taichi and no longer ships a
+# public LLVM 19 prebuilt. The recommended flow is:
+#
+#   1. Run `scripts/build_llvm19_local.ps1` once to produce
+#      `dist/taichi-llvm-19/` (takes ~15-25 minutes on a modern desktop).
+#   2. Export `LLVM_DIR=<repo>/dist/taichi-llvm-19/lib/cmake/llvm`
+#      (or just the install prefix — `setup_llvm` accepts either).
+#   3. Run `python build.py ...` normally.
+#
+# Alternatively, set `LLVM19_WIN_URL` / `LLVM19_LINUX_URL` / etc. to a zip
+# URL you have hosted yourself. If none of the above is set, `setup_llvm`
+# falls back to the legacy LLVM 15 prebuilts on Linux/macOS and raises a
+# clear error on Windows.
 
-_LLVM19_WIN_URL = os.environ.get(
-    "LLVM19_WIN_URL",
-    # Placeholder. Replace with the release asset URL produced by
-    # build_llvm19_windows.yml once the first build is published.
-    "https://github.com/taichi-dev/taichi_assets/releases/download/llvm19/taichi-llvm-19-msvc2022.zip",
-)
+_LLVM19_WIN_URL = os.environ.get("LLVM19_WIN_URL", "")
 _LLVM19_LINUX_URL = os.environ.get("LLVM19_LINUX_URL", "")
 _LLVM19_LINUX_MANYLINUX_URL = os.environ.get("LLVM19_LINUX_MANYLINUX_URL", "")
 _LLVM19_LINUX_AMDGPU_URL = os.environ.get("LLVM19_LINUX_AMDGPU_URL", "")
 _LLVM19_MAC_ARM64_URL = os.environ.get("LLVM19_MAC_ARM64_URL", "")
 _LLVM19_MAC_X64_URL = os.environ.get("LLVM19_MAC_X64_URL", "")
+
+
+def _repo_root() -> str:
+    """Return the absolute path to the Taichi repo root (…/.github/workflows/scripts/ti_build/llvm.py → …)."""
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+
+
+def _find_local_llvm19() -> str:
+    """Look for a local LLVM 19 install produced by build_llvm19_local.ps1.
+
+    Returns the install prefix (not the lib/cmake/llvm subdir) so callers
+    can point LLVM_DIR at it — the Taichi CMake scripts accept either the
+    prefix or the cmake subdir.
+    """
+    candidate = os.path.join(_repo_root(), "dist", "taichi-llvm-19")
+    if os.path.isdir(os.path.join(candidate, "lib", "cmake", "llvm")):
+        return candidate
+    return ""
 
 
 @banner("Setup LLVM")
@@ -49,6 +68,13 @@ def setup_llvm() -> None:
     """
     existing = os.environ.get("LLVM_DIR", "")
     if existing and os.path.isdir(existing):
+        return
+
+    # Auto-detect a local build produced by scripts/build_llvm19_local.ps1
+    local = _find_local_llvm19()
+    if local:
+        os.environ["LLVM_DIR"] = local
+        print(f":: Using local LLVM 19 install at {local}")
         return
 
     u = platform.uname()
@@ -92,6 +118,17 @@ def setup_llvm() -> None:
             out = get_cache_home() / "llvm15-mac"
             download_dep(legacy_url, out, strip=1)
     elif (u.system, u.machine) == ("Windows", "AMD64"):
+        if not _LLVM19_WIN_URL:
+            raise RuntimeError(
+                "LLVM 19 for Windows is not available for download and no local "
+                "install was found.\n\n"
+                "Please build it once locally:\n"
+                "    pwsh -File scripts/build_llvm19_local.ps1\n\n"
+                "Then re-run `python build.py`. The script installs to "
+                "dist/taichi-llvm-19 which setup_llvm auto-detects.\n\n"
+                "Alternatively, set LLVM19_WIN_URL to a zip URL you host "
+                "yourself, or set LLVM_DIR to an existing install prefix."
+            )
         out = get_cache_home() / "llvm19"
         download_dep(_LLVM19_WIN_URL, out, strip=0)
     else:
