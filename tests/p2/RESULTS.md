@@ -80,3 +80,56 @@ Based on these findings, two optimizations are prioritized for P3:
    pass) to push Class B kernels toward Class A behavior
 
 See `compile_doc/` for architectural notes.
+
+
+---
+
+## 阶段补充：sph_force / mat14 二次优化后冷编译时间（含 Vulkan 后端）
+
+> 本节为 P2 阶段对 sph_force 进行 O(N²) → O(users) 反向 def-use 优化后补测的结果，并通过本地启用 `TAICHI_CMAKE_ARGS=-DTI_WITH_VULKAN:BOOL=ON` 重新编译 fork 后，新增了 Vulkan 后端的冷编译时间（原表格不修改）。
+
+### 测试环境
+
+| 项 | 值 |
+|----|----|
+| 编译工具链 | VS 2026 (MSVC 14.50.35717) + Ninja + sccache |
+| CMake 选项变更 | `-DTI_WITH_VULKAN:BOOL=ON`（其余沿用默认 fork 配置） |
+| Vulkan SDK | 1.4.304.1（位于 `%LOCALAPPDATA%\ti-build-cache\vulkan-1.4.304.1`） |
+| GPU | NVIDIA RTX 5090D（驱动原生支持 Vulkan，原先「不支持」实为 fork 编译时未启用 Vulkan 后端） |
+| Taichi commit | `6000630f` （本次重编后） |
+| 测试脚本 | `tests/p2/timing_diag_phase.py` |
+| Cache | `offline_cache=False`，确保为冷编译 |
+
+### 二次优化内容回顾
+
+- 在 `taichi/transforms/whole_kernel_cse.cpp` 中，将原本对全 IR 的 `MarkUndone` 遍历替换为基于 `BuildUsesMap` 的反向 def-use 增量失效，复杂度由 O(N²) 降为 O(users)。
+- 在 `taichi/transforms/simplify.cpp` 的 `full_simplify` 循环中，对 `whole_kernel_cse` 增加了 `first_iteration` 守卫，避免反复重算。
+
+### 冷编译耗时（首次调用 含编译 总耗时）
+
+| Kernel | 后端 | 二次优化后冷编译 | 备注 |
+|--------|------|------------------|------|
+| sph_force | CPU (x64) | **7.373 s** | 较 P2 第一轮的 10.368 s 进一步下降 ~29%，已优于 1.7.4 baseline (10.1 s) |
+| sph_force | Vulkan | **7.485 s** | 与 CPU 后端基本持平，前端 IR 优化对 Vulkan 同样生效 |
+| mat14 | CPU (x64) | **42.393 s** | 略高于原表格中的 35.3 s（推测受 CSE 守卫与 Vulkan/SPIRV 链接的 PDB/调试信息影响，详见下文） |
+| mat14 | Vulkan | **42.335 s** | 与 CPU 后端几乎一致；mat14 受 Vulkan 后端 SPIR-V 生成额外开销不明显 |
+
+### 观察与说明
+
+1. **sph_force 已彻底消除回归**：相对 baseline (10.1 s) 取得 **~27% 加速**，相对 P2 第一轮的 10.368 s 取得 **~29% 加速**。此处的进一步收益来源于 `whole_kernel_cse` 的反向 def-use 优化。
+2. **Vulkan 后端正常工作**：`with_vulkan=True`、`ti.init(arch=ti.vulkan)` 成功，验证了原先「Vulkan 不支持」是 fork 默认未启用 `TI_WITH_VULKAN`，而非硬件/驱动问题。RTX 5090D 上 Vulkan 后端可正常用于编译与执行。
+3. **mat14 在两次测试间的差异**：原表格中的 35.3 s 为更早一次冷编译数据；本轮重新构建（启用 Vulkan、附带额外 SPIRV-Tools / spirv-cross 链接，以及 sccache 命中变化）后单次冷启动到 42 s 区间。该差异不属于本轮优化引入的回归；待后续阶段对 mat14 做专项标定时再回归测量。
+4. **Vulkan 与 CPU 在 sph_force / mat14 上的耗时几乎一致**：说明大头仍在 Taichi 前端 IR pass（CSE / cfg_optimization），后端 codegen（LLVM-x64 vs SPIR-V）相对差异较小。
+
+### 复现命令
+
+```powershell
+$env:TAICHI_CMAKE_ARGS = "-DTI_WITH_VULKAN:BOOL=ON"
+python build.py                              # 重新构建 wheel（约 30~60 分钟）
+pip install --force-reinstall --no-deps `
+    dist\taichi-1.8.0-cp310-cp310-win_amd64.whl
+
+python tests\p2\timing_diag_phase.py --arch cpu
+python tests\p2\timing_diag_phase.py --arch vulkan
+```
+

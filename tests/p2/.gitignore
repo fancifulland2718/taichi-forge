@@ -1,0 +1,8 @@
+# Exploratory benchmark outputs (kept local only)
+timing_out*.txt
+phase_*.log
+vulkan_build.log
+diag_*.py
+timing_diag.py
+timing_diag2.py
+__pycache__/
