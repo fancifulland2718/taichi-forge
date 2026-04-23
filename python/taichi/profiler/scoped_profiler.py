@@ -31,4 +31,33 @@ def clear_scoped_profiler_info():
     _ti_core.clear_profile_info()
 
 
-__all__ = ["print_scoped_profiler_info", "clear_scoped_profiler_info"]
+def export_scoped_profiler_csv(path):
+    """Write the scoped (host/compile) profiler tree to a CSV file.
+
+    Columns: ``thread,path,calls,total_s,avg_s,tpe_s`` where ``path`` is the
+    slash-joined scope hierarchy.
+
+    Returns True on success.
+    """
+    return _ti_core.export_compile_profile_csv(str(path))
+
+
+def export_scoped_profiler_trace(path):
+    """Write the scoped (host/compile) profiler events as a Chrome Trace
+    JSON file. Open the resulting ``.json`` in ``chrome://tracing`` or
+    Perfetto.
+
+    Trace events are only collected when the ``TI_COMPILE_PROFILE``
+    environment variable is set before importing ``taichi``.
+
+    Returns True on success.
+    """
+    return _ti_core.export_compile_profile_trace(str(path))
+
+
+__all__ = [
+    "print_scoped_profiler_info",
+    "clear_scoped_profiler_info",
+    "export_scoped_profiler_csv",
+    "export_scoped_profiler_trace",
+]
