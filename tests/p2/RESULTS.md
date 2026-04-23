@@ -133,3 +133,72 @@ python tests\p2\timing_diag_phase.py --arch cpu
 python tests\p2\timing_diag_phase.py --arch vulkan
 ```
 
+
+---
+
+## Baseline vs Candidate – 2026-04-24 02:01
+
+| Field | Value |
+|---|---|
+| baseline | taichi **(1, 7, 4)** (ti174 env) |
+| candidate | taichi **(1, 8, 0)** (our build, commit `f4fef6e1a`) |
+| machine | AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD |
+| python | 3.10.20 |
+| platform | win32 |
+| arches | ['cpu', 'cuda', 'vulkan'] |
+
+### arch = cpu
+
+| kernel | baseline | candidate | speedup |
+|---|---|---|---|
+| mat14 | 61.7 s | 39.8 s | 1.55x↑ |
+| sph_force | 9089 ms | 6934 ms | 1.31x↑ |
+
+> speedup = baseline / candidate. ↑ = candidate faster, ↓ = candidate slower.
+
+### arch = cuda
+
+| kernel | baseline | candidate | speedup |
+|---|---|---|---|
+| mat14 | 61.6 s | 40.2 s | 1.54x↑ |
+| sph_force | 9045 ms | 7072 ms | 1.28x↑ |
+
+> speedup = baseline / candidate. ↑ = candidate faster, ↓ = candidate slower.
+
+### arch = vulkan
+
+| kernel | baseline | candidate | speedup |
+|---|---|---|---|
+| mat14 | 60.9 s | 38.8 s | 1.57x↑ |
+| sph_force | 8856 ms | 6939 ms | 1.28x↑ |
+
+> speedup = baseline / candidate. ↑ = candidate faster, ↓ = candidate slower.
+
+
+### P2.a 解读：对 ``Simplified II`` 的 dirty-flag 去重
+
+本轮新增的 P2.a 优化：在 `taichi/transforms/compile_to_offloads.cpp` 中，将 `Simplified II` 全量重跑改为依据 `dirty_since_simplify_i` 标志的条件触发：
+
+- `irpass::handle_external_ptr_boundary(...)` 改为返回 `bool`，调用者据此判断是否真正变更了 IR；
+- `flag_access` 仅修改 `GlobalPtrStmt::activate` 元数据，不计入 dirty；
+- `autodiff` 路径内部已含 simplify，标记为 not-dirty；
+- `debug` / `check_out_of_bound` 路径标记为 dirty。
+
+**对常见 non-autodiff / non-debug / non-external-array kernel，``Simplified II`` 现在被完全跳过**，节省一次完整 `full_simplify` 调用。
+
+#### 与上一节 fork 数据的对比（同环境，仅追加 P2.a 改动）
+
+| Kernel | 后端 | 上一节（不含 P2.a） | 本表（含 P2.a） | 进一步加速 |
+|--------|------|---------------------|------------------|------------|
+| sph_force | CPU | 7.373 s | 6.934 s | ~6% |
+| sph_force | Vulkan | 7.485 s | 6.939 s | ~7% |
+| mat14 | CPU | 42.393 s | 39.8 s | ~6% |
+| mat14 | Vulkan | 42.335 s | 38.8 s | ~8% |
+
+P2.a 在两个 kernel × 三种后端上一致带来 6–8% 的额外冷编译收益；与 1.7.4 baseline 综合对比为 **mat14ʹ ~1.55x、sph_forceʹ ~1.30x** 加速。
+
+#### 正确性回归
+
+- `tests/p2/smoke_3backends.py` ：CPU/CUDA/Vulkan 全部通过；
+- `tests/p2/correctness_3backends.py` ：mat14 与 sph_force 在三后端的相对误差 < 1.7e-6（< 1e-4 阈值），与 P2.a 改动无关的容差范围内，未观察到正确性回归。
+

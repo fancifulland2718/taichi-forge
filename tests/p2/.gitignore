@@ -6,3 +6,24 @@ diag_*.py
 timing_diag.py
 timing_diag2.py
 __pycache__/
+
+# P2.a runtime status / temporary files
+ping.txt
+status*.txt
+procs*.txt
+pwsh.txt
+final*.txt
+heartbeat.txt
+hb.txt
+loop*.txt
+done.txt
+dt.txt
+sleep_done.txt
+check.txt
+append_done.txt
+correct_p2a.*
+correct_p2a_v2.txt
+bench_p2a.log
+build_p2a.log
+p2_timings_cpu.txt
+run_timing_check.py
