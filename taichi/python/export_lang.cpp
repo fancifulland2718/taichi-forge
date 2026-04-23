@@ -158,6 +158,7 @@ void export_lang(py::module &m) {
       .def(py::init<>())
       .def_readwrite("arch", &CompileConfig::arch)
       .def_readwrite("opt_level", &CompileConfig::opt_level)
+      .def_readwrite("llvm_opt_level", &CompileConfig::llvm_opt_level)
       .def_readwrite("print_ir", &CompileConfig::print_ir)
       .def_readwrite("print_preprocessed_ir",
                      &CompileConfig::print_preprocessed_ir)
@@ -256,7 +257,9 @@ void export_lang(py::module &m) {
                      &CompileConfig::offline_cache_cleaning_factor)
       .def_readwrite("num_compile_threads", &CompileConfig::num_compile_threads)
       .def_readwrite("vk_api_version", &CompileConfig::vk_api_version)
-      .def_readwrite("cuda_stack_limit", &CompileConfig::cuda_stack_limit);
+      .def_readwrite("cuda_stack_limit", &CompileConfig::cuda_stack_limit)
+      .def_readwrite("external_optimization_level",
+                     &CompileConfig::external_optimization_level);
 
   m.def("reset_default_compile_config",
         [&]() { default_compile_config = CompileConfig(); });

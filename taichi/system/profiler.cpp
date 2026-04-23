@@ -1,6 +1,12 @@
 #include "taichi/system/profiler.h"
 #include "spdlog/fmt/bundled/color.h"
 
+#include <atomic>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <sstream>
+
 namespace taichi {
 
 // A profiler's records form a tree structure
@@ -231,6 +237,16 @@ void ScopedProfiler::stop() {
     ProfilerRecords::get_this_thread_instance().insert_sample(elapsed);
   }
   ProfilerRecords::get_this_thread_instance().pop();
+
+  // Phase 0': also record as a flat trace event when tracing is enabled.
+  // Cheap predicate (single atomic load) when disabled.
+  if (Profiling::is_tracing_enabled()) {
+    std::stringstream ss;
+    ss << std::this_thread::get_id();
+    uint64 tid = std::hash<std::string>{}(ss.str());
+    Profiling::get_instance().record_trace_event(
+        TraceEvent{name_, tid, start_time_ * 1e6, elapsed * 1e6});
+  }
 }
 
 void ScopedProfiler::disable() {
@@ -276,6 +292,147 @@ void Profiling::clear_profile_info() {
   for (auto p : profilers_) {
     p.second->clear();
   }
+  std::lock_guard<std::mutex> _t(trace_mut_);
+  trace_events_.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 0': CSV + Chrome trace export
+// ---------------------------------------------------------------------------
+
+bool Profiling::is_tracing_enabled() {
+  // Evaluated once per process. Flip by setting TI_COMPILE_PROFILE to a
+  // non-empty string before importing Taichi.
+  static std::atomic<int> cached{-1};
+  int v = cached.load(std::memory_order_relaxed);
+  if (v >= 0) {
+    return v != 0;
+  }
+  const char *env = std::getenv("TI_COMPILE_PROFILE");
+  int enabled = (env != nullptr && env[0] != '\0' && std::strcmp(env, "0") != 0)
+                    ? 1
+                    : 0;
+  cached.store(enabled, std::memory_order_relaxed);
+  if (enabled) {
+    // Best-effort auto-flush on process exit. Users can still call the
+    // export_* methods explicitly.
+    static std::atomic<bool> registered{false};
+    bool expected = false;
+    if (registered.compare_exchange_strong(expected, true)) {
+      std::atexit([]() {
+        const char *out = std::getenv("TI_COMPILE_PROFILE");
+        if (!out || out[0] == '\0')
+          return;
+        std::string base = out;
+        // If user set =1/=on we derive a default file name.
+        if (base == "1" || base == "on" || base == "ON" || base == "true") {
+          base = "taichi_compile_profile";
+        }
+        Profiling::get_instance().export_csv(base + ".csv");
+        Profiling::get_instance().export_chrome_trace(base + ".json");
+      });
+    }
+  }
+  return enabled != 0;
+}
+
+void Profiling::record_trace_event(TraceEvent &&ev) {
+  std::lock_guard<std::mutex> _(trace_mut_);
+  trace_events_.push_back(std::move(ev));
+}
+
+namespace {
+
+// Recursive CSV walker. Path is '/'-joined ancestor names.
+void write_csv_node(std::ostream &os,
+                    const std::string &thread_label,
+                    const std::string &parent_path,
+                    const ProfilerRecordNode *node) {
+  std::string path = parent_path.empty()
+                         ? node->name
+                         : parent_path + "/" + node->name;
+  // Skip the synthetic root (it has no samples) but still recurse.
+  if (node->num_samples > 0) {
+    double total = node->total_time;
+    double avg = node->get_averaged();
+    double tpe = node->account_tpe ? node->get_averaged_tpe() : 0.0;
+    // CSV: thread,path,calls,total_s,avg_s,tpe_s
+    os << '"' << thread_label << "\",\"" << path << "\","
+       << node->num_samples << "," << total << "," << avg << "," << tpe
+       << "\n";
+  }
+  for (const auto &ch : node->childs) {
+    write_csv_node(os, thread_label, path, ch.get());
+  }
+}
+
+// Basic JSON string escape (Chrome trace event names).
+std::string json_escape(const std::string &s) {
+  std::string out;
+  out.reserve(s.size() + 2);
+  for (char c : s) {
+    switch (c) {
+      case '"':  out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\b': out += "\\b";  break;
+      case '\f': out += "\\f";  break;
+      case '\n': out += "\\n";  break;
+      case '\r': out += "\\r";  break;
+      case '\t': out += "\\t";  break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          char buf[8];
+          std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+          out += buf;
+        } else {
+          out += c;
+        }
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+bool Profiling::export_csv(const std::string &path) {
+  std::ofstream os(path);
+  if (!os) {
+    return false;
+  }
+  os << "thread,path,calls,total_s,avg_s,tpe_s\n";
+  std::lock_guard<std::mutex> _(mut_);
+  for (auto &p : profilers_) {
+    std::stringstream tid_ss;
+    tid_ss << p.first;
+    write_csv_node(os, tid_ss.str(), "", p.second->root.get());
+  }
+  return static_cast<bool>(os);
+}
+
+bool Profiling::export_chrome_trace(const std::string &path) {
+  std::ofstream os(path);
+  if (!os) {
+    return false;
+  }
+  // Chrome Trace "JSON Array Format": bare array of events.
+  os << "[\n";
+  std::lock_guard<std::mutex> _(trace_mut_);
+  bool first = true;
+  for (const auto &ev : trace_events_) {
+    if (!first) {
+      os << ",\n";
+    }
+    first = false;
+    // 'X' complete event: requires ts + dur.
+    os << "{\"name\":\"" << json_escape(ev.name)
+       << "\",\"ph\":\"X\",\"pid\":1"
+       << ",\"tid\":" << ev.tid
+       << ",\"ts\":" << ev.ts_us
+       << ",\"dur\":" << ev.dur_us
+       << ",\"cat\":\"taichi.compile\"}";
+  }
+  os << "\n]\n";
+  return static_cast<bool>(os);
 }
 
 }  // namespace taichi

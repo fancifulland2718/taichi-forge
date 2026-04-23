@@ -39,17 +39,47 @@ class ScopedProfiler {
   bool stopped_;
 };
 
+// Phase 0': trace event for Chrome Tracing export.
+// Only populated when tracing is enabled (env TI_COMPILE_PROFILE / explicit
+// API). Zero cost when disabled.
+struct TraceEvent {
+  std::string name;
+  uint64 tid;
+  // Wall-clock timestamps in microseconds (double keeps sub-us precision).
+  double ts_us;
+  double dur_us;
+};
+
 // A profiling system for multithreaded applications
 class Profiling {
  public:
   void print_profile_info();
   void clear_profile_info();
   ProfilerRecords *get_this_thread_profiler();
+
+  // Phase 0': flat dumps of the scoped profiler state.
+  //   export_csv          — recursive flatten of the per-thread tree.
+  //   export_chrome_trace — events captured while tracing was enabled
+  //                         (chrome://tracing / Perfetto compatible).
+  // Returns false on I/O failure.
+  bool export_csv(const std::string &path);
+  bool export_chrome_trace(const std::string &path);
+
+  // Low-overhead: guarded by is_tracing_enabled(); use record_trace_event
+  // unconditionally from ScopedProfiler::stop().
+  void record_trace_event(TraceEvent &&ev);
+
+  // One-shot check of TI_COMPILE_PROFILE env variable. Evaluated lazily.
+  static bool is_tracing_enabled();
+
   static Profiling &get_instance();
 
  private:
   std::mutex mut_;
   std::unordered_map<std::thread::id, ProfilerRecords *> profilers_;
+
+  std::mutex trace_mut_;
+  std::vector<TraceEvent> trace_events_;
 };
 
 #define TI_PROFILER(name) taichi::ScopedProfiler _profiler_##__LINE__(name);

@@ -7,6 +7,7 @@
 #include "taichi/program/compile_config.h"
 #include "taichi/program/kernel.h"
 #include "taichi/rhi/device_capability.h"
+#include "taichi/system/profiler.h"
 
 #include "picosha2.h"
 
@@ -42,6 +43,7 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
   serializer(config.check_out_of_bound);
   serializer(config.opt_level);
   serializer(config.external_optimization_level);
+  serializer(config.llvm_opt_level);
   serializer(config.move_loop_invariant_outside_if);
   serializer(config.demote_dense_struct_fors);
   serializer(config.advanced_optimization);
@@ -65,7 +67,12 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
   }
   serializer(config.ad_stack_size);
   serializer(config.default_ad_stack_size);
-  serializer(config.random_seed);
+  // NOTE: config.random_seed is intentionally NOT part of the offline cache
+  // key.  It only affects the runtime PRNG seed (see
+  // LlvmRuntimeExecutor::materialize_runtime); the generated IR / LLVM module /
+  // SPIR-V are identical regardless of its value.  Including it here caused
+  // spurious cache misses whenever the user changes ti.init(random_seed=...)
+  // between sessions.  [P1.a cache-key trim]
   if (config.arch == Arch::opengl || config.arch == Arch::gles) {
     serializer(config.allow_nv_shader_extension);
   }
@@ -170,6 +177,7 @@ std::string get_hashed_offline_cache_key_of_snode(const SNode *snode) {
 std::string get_hashed_offline_cache_key(const CompileConfig &config,
                                          const DeviceCapabilityConfig &caps,
                                          Kernel *kernel) {
+  TI_AUTO_PROF;
   std::vector<std::uint8_t> kernel_params_string, kernel_rets_string;
   std::string kernel_body_string;
   if (kernel) {  // param_list, rets, body
@@ -177,7 +185,10 @@ std::string get_hashed_offline_cache_key(const CompileConfig &config,
         get_offline_cache_key_of_parameter_list(kernel->parameter_list);
     kernel_rets_string = get_offline_cache_key_of_rets(kernel->rets);
     std::ostringstream oss;
-    gen_offline_cache_key(kernel->ir.get(), &oss);
+    {
+      TI_PROFILER("gen_offline_cache_key.body");
+      gen_offline_cache_key(kernel->ir.get(), &oss);
+    }
     kernel_body_string = oss.str();
   }
 

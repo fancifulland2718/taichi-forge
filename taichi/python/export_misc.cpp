@@ -126,6 +126,12 @@ void export_misc(py::module &m) {
         [&]() { Profiling::get_instance().print_profile_info(); });
   m.def("clear_profile_info",
         [&]() { Profiling::get_instance().clear_profile_info(); });
+  m.def("export_compile_profile_csv", [](const std::string &path) {
+    return Profiling::get_instance().export_csv(path);
+  });
+  m.def("export_compile_profile_trace", [](const std::string &path) {
+    return Profiling::get_instance().export_chrome_trace(path);
+  });
   m.def("start_memory_monitoring", start_memory_monitoring);
   m.def("get_repo_dir", get_repo_dir);
   m.def("get_python_package_dir", get_python_package_dir);
