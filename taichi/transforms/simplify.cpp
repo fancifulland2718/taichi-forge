@@ -559,7 +559,11 @@ void full_simplify(IRNode *root,
       if (die(root))
         modified = true;
       print("die");
-      if (config.opt_level > 0 && whole_kernel_cse(root))
+      // Run whole_kernel_cse only in the first iteration: it is expensive for
+      // large kernels (O(N^2) without the use-def map) and subsequent
+      // iterations rarely expose new CSE opportunities.  This mirrors the
+      // existing first_iteration guard on cfg_optimization.
+      if (config.opt_level > 0 && first_iteration && whole_kernel_cse(root))
         modified = true;
       // Don't do this time-consuming optimization pass again if the IR is
       // not modified.
