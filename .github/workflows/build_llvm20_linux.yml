@@ -32,7 +32,14 @@ jobs:
     steps:
       - name: Install build deps
         run: |
-          yum install -y ninja-build cmake git || dnf install -y ninja-build cmake git
+          # Install cmake and git from system repos.
+          # Do NOT install ninja-build from yum/dnf — the repo version (1.10.x) has a
+          # known depslog bug ("multiple outputs aren't supported") that breaks LLVM 20.
+          # Install a modern Ninja (1.12+) via pip instead.
+          yum install -y cmake git || dnf install -y cmake git
+          pip3 install --upgrade ninja
+          # Verify ninja ≥ 1.11 is on PATH
+          ninja --version
 
       - name: Clone LLVM
         run: |
