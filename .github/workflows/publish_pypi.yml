@@ -148,7 +148,8 @@ jobs:
 
       - name: Install python build deps
         run: |
-          python -m pip install --upgrade pip wheel build setuptools scikit-build cmake
+          python -m pip install --upgrade pip build
+          python -m pip install --upgrade "scikit-build-core>=0.10" cmake "pybind11>=2.13"
 
       - name: Override version
         shell: bash
@@ -236,7 +237,8 @@ jobs:
       - name: Install python build deps
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip wheel build setuptools scikit-build cmake
+          python -m pip install --upgrade pip build
+          python -m pip install --upgrade "scikit-build-core>=0.10" cmake "pybind11>=2.13"
 
       - name: Override version
         shell: pwsh

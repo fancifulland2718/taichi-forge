@@ -189,7 +189,12 @@ function(install_taichi_c_api INSTALL_NAME TAICHI_C_API_INSTALL_DIR)
 endfunction()
 
 if (TI_WITH_PYTHON)
-  install_taichi_c_api(PyTaichi python/taichi/_lib/c_api)
+  if(DEFINED SKBUILD_PLATLIB_DIR)
+    # scikit-build-core: install as a relative path under platlib.
+    install_taichi_c_api(PyTaichi taichi/_lib/c_api)
+  else()
+    install_taichi_c_api(PyTaichi python/taichi/_lib/c_api)
+  endif()
 else()
   install_taichi_c_api(Distribute c_api)
 endif()

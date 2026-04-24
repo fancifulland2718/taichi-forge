@@ -20,7 +20,19 @@ set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 # Suppress warnings from submodules introduced by the above symbol visibility change
 set(CMAKE_POLICY_DEFAULT_CMP0063 NEW)
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
-set(INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/python/taichi/_lib)
+# scikit-build-core treats `install(DESTINATION ...)` as relative to the
+# platlib. Legacy scikit-build consumes absolute paths under
+# `${CMAKE_INSTALL_PREFIX}/python/taichi`. Pick the correct layout.
+if(DEFINED SKBUILD AND SKBUILD)
+    # Old scikit-build: keep legacy absolute path.
+    set(INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/python/taichi/_lib)
+elseif(DEFINED SKBUILD_PLATLIB_DIR)
+    # scikit-build-core: install into <platlib>/taichi/_lib via a relative
+    # path so the wheel ends up with `taichi/_lib/...` at its root.
+    set(INSTALL_LIB_DIR taichi/_lib)
+else()
+    set(INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/python/taichi/_lib)
+endif()
 
 if (TI_WITH_AMDGPU AND TI_WITH_CUDA)
     message(WARNING "Compiling CUDA and AMDGPU backends simultaneously")

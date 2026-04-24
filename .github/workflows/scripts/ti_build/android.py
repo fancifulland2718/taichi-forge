@@ -44,9 +44,16 @@ def build_android(python: Command, pip: Command) -> None:
     cmake_args["TI_WITH_C_API"] = True
     cmake_args["TI_BUILD_TESTS"] = False
     cmake_args.writeback()
-    os.environ["TAICHI_FORCE_PLAT_NAME"] = "android-arm64"  # affects setup.py
+    # scikit-build-core reads `SKBUILD_WHEEL_TAG_PLATFORM` to override the
+    # wheel platform tag. The legacy scikit-build path used the env var
+    # `TAICHI_FORCE_PLAT_NAME`; keep it set so user-level scripts still
+    # produce the right tag.
+    os.environ["TAICHI_FORCE_PLAT_NAME"] = "android-arm64"
+    os.environ["SKBUILD_WHEEL_TAG_PLATFORM"] = "android_arm64"
     pip.install("-r", "requirements_dev.txt")
     python("setup.py", "clean")
-    python("setup.py", "build_ext")
+    # Trigger a CMake-only build via `pip install -e .` (runs the full
+    # scikit-build-core configure+build pipeline without packaging a wheel).
+    python("-m", "pip", "install", "-e", ".", "--no-build-isolation", "-v")
     for p in Path(os.getcwd()).glob("**/libtaichi_c_api.so"):
         sh("aarch64-linux-android-strip", p)

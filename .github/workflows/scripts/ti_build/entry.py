@@ -30,20 +30,11 @@ from .tinysh import Command, CommandFailed, git, nice
 @banner("Build Taichi Wheel")
 def build_wheel(python: Command, pip: Command) -> None:
     """
-    Build the Taichi wheel
+    Build the Taichi wheel via PEP 517 (`python -m build`). The backend is
+    scikit-build-core (see pyproject.toml).
     """
 
-    # scikit-build 0.19.x imports `setuptools.command.build_py`, which in turn
-    # does `import distutils.command.build_py as orig`. Recent setuptools
-    # (>=79) have removed the `build_py` submodule attribute from their
-    # bundled `_distutils.command` shim, which breaks the import when
-    # SETUPTOOLS_USE_DISTUTILS defaults to the vendored copy. Forcing the
-    # stdlib distutils works on Python <= 3.11 where it is still available,
-    # and is the recommended fallback until we migrate to scikit-build-core.
-    os.environ.setdefault("SETUPTOOLS_USE_DISTUTILS", "stdlib")
-
     git.fetch("origin", "master", "--tags", "--force")
-    proj_tags = []
     extra = []
 
     cmake_args.writeback()
@@ -54,19 +45,25 @@ def build_wheel(python: Command, pip: Command) -> None:
     else:
         wheel_tag = ""
 
+    # The nightly / local-tag workflow used to rely on ``egg_info
+    # --tag-build=...``. scikit-build-core reads the version straight from
+    # ``pyproject.toml``. We forward local/nightly tags through an env var
+    # that ``pyproject.toml`` interpolates via ``tool.scikit-build.metadata``.
     if misc.options.nightly:
-        os.environ["PROJECT_NAME"] = "taichi-nightly"
         now = datetime.datetime.now().strftime("%Y%m%d")
-        proj_tags.extend(["egg_info", f"--tag-build=.post{now}{wheel_tag}"])
+        os.environ["TAICHI_FORGE_VERSION_SUFFIX"] = f".post{now}{wheel_tag}"
     elif wheel_tag:
-        proj_tags.extend(["egg_info", f"--tag-build={wheel_tag}"])
+        os.environ["TAICHI_FORGE_VERSION_SUFFIX"] = wheel_tag
 
     if platform.system() == "Linux":
         if is_manylinux2014():
-            extra.extend(["-p", "manylinux2014_x86_64"])
+            extra.extend(["-C", "wheel.tag=manylinux2014_x86_64"])
         else:
-            extra.extend(["-p", "manylinux_2_27_x86_64"])
+            extra.extend(["-C", "wheel.tag=manylinux_2_27_x86_64"])
 
+    python("-m", "pip", "install", "-U", "build")
+    # Ensure artifacts from a previous scikit-build-legacy run don't poison
+    # this invocation.
     python("setup.py", "clean")
     try:
         python("misc/make_changelog.py", "--ver", "origin/master", "--repo_dir", "./", "--save")
@@ -78,7 +75,7 @@ def build_wheel(python: Command, pip: Command) -> None:
         misc.info(f"make_changelog.py failed (non-fatal, skipping): {e}")
 
     with nice():
-        python("setup.py", *proj_tags, "bdist_wheel", *extra)
+        python("-m", "build", "-w", *extra)
 
 
 @banner("Install Build Wheel Dependencies")

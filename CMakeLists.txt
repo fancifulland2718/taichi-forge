@@ -240,3 +240,24 @@ if (TI_WITH_GRAPHVIZ)
       WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
   )
 endif()
+
+# -----------------------------------------------------------------------------
+# scikit-build-core integration
+# -----------------------------------------------------------------------------
+# Legacy scikit-build ran a Python pre-build step (`copy_assets()` in
+# setup.py) that copied `external/assets/*` into
+# `python/taichi/assets/*` before bundling the wheel. scikit-build-core
+# does not run arbitrary Python hooks, so we perform the copy via CMake
+# install rules directly. The SKBUILD_PLATLIB_DIR guard (defined only by
+# scikit-build-core, never by legacy scikit-build) avoids running the
+# install during plain in-tree CMake builds or C-API-only builds.
+if (DEFINED SKBUILD_PLATLIB_DIR AND TI_WITH_PYTHON)
+    if (IS_DIRECTORY "${CMAKE_SOURCE_DIR}/external/assets")
+        install(
+            DIRECTORY "${CMAKE_SOURCE_DIR}/external/assets/"
+            DESTINATION "taichi/assets"
+            USE_SOURCE_PERMISSIONS
+        )
+    endif()
+endif()
+
