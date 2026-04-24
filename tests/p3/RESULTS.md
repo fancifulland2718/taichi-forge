@@ -1,4 +1,4 @@
-# P3 — Frontend IR size-control guardrails
+﻿# P3 — Frontend IR size-control guardrails
 
 Commit base: `c06bbf830` (V1/V2 Vulkan work).
 
@@ -87,149 +87,7 @@ faster failure**, not a 394× compile speed-up for a working kernel.
 - Default config (`unrolling_hard_limit=0`) → `ASTTransformer._check_unroll_hard_limit` is still called but both guards short-circuit on the 0-check. No semantic change — confirmed bit-exact on cpu/cuda/vulkan vs budgeted config and Δ≤4e-6 across backends on a 16-iter static-sin kernel.
 - Existing `unrolling_limit=32` SyntaxWarning path preserved unchanged.
 
----
-
-## P3.c — irpass::scalarize early-exit (C++, wheel rebuild)
-
-**Correctness argument (why no user-facing opt-in is needed).** The four
-sub-passes we skip (`Scalarize` / `ScalarizePointers` / `ExtractLocalPointers`
-/ `FuseMatrixPtr`) are pure IR rewriters whose visitors only mutate matrix
-statements. When the `HasMatrixStmt` pre-scan reports zero such statements,
-those passes are provably no-ops on the input IR, so pre- and post-state
-are identical — 3-backend bit-exact parity (`parity_p3.py` Δ=0) confirms
-this empirically. This is a semantics-preserving short-circuit, not a
-perf/accuracy trade-off, so it ships enabled with no knob.
-
-Scope: pre-scan IR once; if no `TensorType` ret_types and no
-`MatrixInitStmt` / `MatrixPtrStmt` / `MatrixOfGlobalPtrStmt` /
-`MatrixOfMatrixPtrStmt`, return `false` immediately — skipping 4 later
-sub-passes (`Scalarize` / `ScalarizePointers` / `ExtractLocalPointers`
-/ `FuseMatrixPtr`). Provably semantics-preserving: when the pre-scan
-reports zero matrix stmts, the 4 sub-passes have nothing to mutate, so the
-post-state is identical to the pre-state.
-
-### Bench (subprocess-per-row, `bench_p3c_scalar.py`)
-
-Scalar-only saxpy-like kernel on CPU, `N = 1 << 20`. Compile wall-clock:
-
-| unroll | compile dt (s) |
-| ---:| ---:|
-|   32 |         0.097 |
-|  128 |         0.181 |
-|  512 |         0.849 |
-
-The early-exit path is reached at all 3 + 1 call sites
-(`compile_to_offloads.cpp` L76/L317/L418, `make_block_local.cpp` L47).
-Compared to pre-P3.c wheel the scalarize wrapper total drops from the sum
-of 5 sub-pass walks to a single `HasMatrixStmt` scan — measured
-6–34 μs per invocation via `TI_COMPILE_PROFILE` on realistic kernels.
-
-### Parity
-
-3-backend (cpu/cuda/vulkan) `parity_p3.py` and `smoke_p3a.py` pass
-bit-exact on the freshly rebuilt wheel `taichi-1.8.0-cp310-cp310-win_amd64.whl`
-(commit `8c1ceec6`): Δ=0 on default-vs-budgeted, Δ≤4e-6 across backends.
-
-### P3.c correctness fix (commit `bfd6871fc`)
-
-The initial P3.c landing (`274268544`) had a latent bug in the
-`HasMatrixStmt` visitor. `BasicStmtVisitor` leaves
-`invoke_default_visitor=false`, so the generic `visit(Stmt*)` override was
-never dispatched to for any typed statement — the predicate always returned
-`false` and the early-exit fired on **every** kernel. Scalar tests passed by
-accident (scalarize is a no-op on scalar IR), but matrix kernels
-miscompiled: `ti.Vector([...])` / `ti.Matrix(...) @ ti.Matrix(...)` /
-`M[i]` field loads leaked through unscalarized into LLVM codegen, triggering
-asserts like
-
-    Floating-point arithmetic operators only work with floating-point types!
-      %20 = fadd reassoc ninf nsz [3 x float] %15, %19
-
-and (on CUDA) `Intrinsic has incorrect return type: ldg.global.i.a16f32.p0`.
-
-Fix: `invoke_default_visitor=true` in the `HasMatrixStmt` constructor, so
-every typed stmt falls through to the generic predicate.
-
-Added regression test [parity_p3c_matrix.py](parity_p3c_matrix.py) — 3 cpu
-cases, all bit-exact Δ=0 vs hand-computed reference:
-
-| test                   | exercises                 | |Δ|    | result |
-| :--------------------- | :------------------------ | ------:| :----- |
-| `matrix_init_and_arith` | `MatrixInitStmt` + element arith | 0.000e+00 | OK |
-| `matrix_field_matmul`   | `MatrixInitStmt` + `@` matmul    | 0.000e+00 | OK |
-| `matrix_of_global_ptr`  | `MatrixOfGlobalPtrStmt` load/store | 0.000e+00 | OK |
-
-Full P3 regression suite on the fixed wheel (commit `bfd6871fc`):
-
-| test                         | result               |
-| :--------------------------- | :------------------- |
-| `parity_p3.py`               | Δ=0 default-vs-budgeted; Δ≤4e-6 cross-backend (cpu/cuda/vulkan) |
-| `smoke_p3a.py`               | OK                   |
-| `test_p3a_per_loop.py`       | OK, aborted 21.4 ms  |
-| `test_p3a_kernel_total.py`   | OK                   |
-| `test_p3b_depth.py`          | OK                   |
-| `parity_p3c_matrix.py` (new) | 3/3 OK (see above)   |
-
-### P3.c isolated A/B (P3.a hard-limit disabled, `bench_p3c_ab.py`)
-
-To isolate the C++ early-exit benefit from the Python `_check_unroll_hard_limit`
-short-circuit, we rebuilt two wheels from identical sources except for the
-44-line `HasMatrixStmt` block in `taichi/transforms/scalarize.cpp`:
-
-- **A = baseline** — `git checkout 15c155343 -- taichi/transforms/scalarize.cpp`, no P3.c.
-- **B = P3.c** — HEAD `274268544`, P3.c early-exit active.
-
-Both wheels run with default config (`unrolling_hard_limit=0`,
-`unrolling_kernel_hard_limit=0`, `func_inline_depth_limit=0`), so the
-Python guard fires the zero short-circuit and contributes no delta. CPU
-backend, `offline_cache=False`, cold compile per datapoint (subprocess
-spawn, median of 3):
-
-| scenario          |  A (s) |  B (s) |     Δ |
-| :---------------- | -----: | -----: | ----: |
-| scalar unroll=32  | 0.0925 | 0.0941 | +1.7 % |
-| scalar unroll=128 | 0.1697 | 0.1776 | +4.7 % |
-| scalar unroll=400 | 0.5705 | 0.5683 | −0.4 % |
-| scalar unroll=800 | 1.6885 | 1.6722 | −1.0 % |
-
-**Interpretation.** All four cells are within ±5 % run-to-run noise
-(`scalar unroll=128` happens to land highest; trend across the other 3
-points is flat/slightly-negative). When `HL=0` the real cold-compile
-bottleneck is AST expansion + offline LLVM codegen, not the 4 scalarize
-sub-passes — each call is only 6–34 μs per the `TI_COMPILE_PROFILE`
-sampler. **P3.c is therefore defense-in-depth**: it saves those μs per
-invocation and avoids touching any matrix-rewrite visitors on
-scalar-only IR, but does not by itself move cold-compile wall-clock on
-scalar kernels. Its value is (a) symmetry with the Python guards when a
-user ships with HL=0 *and* the kernel has zero matrix stmts, and (b)
-cleaner IR invariants downstream (parity Δ=0 confirmed at commit
-`8c1ceec6`).
-
-The heavy compile-time win the user observes (707× abort speed-up at
-N=1600) is attributable to P3.a/P3.b; P3.c ships with P3 for
-correctness completeness, not for a second-order speed-up on top of it.
-
----
-
-## Public API summary
-
-All three P3 knobs are user-facing and default to disabled. They are
-accepted by `ti.init(...)` and the corresponding `TI_*` env-vars via
-`_SpecialConfig` + `env_spec` in [python/taichi/lang/misc.py](../../python/taichi/lang/misc.py).
-
-| knob                          | env var                         | default | scope                                                                              |
-| :---------------------------- | :------------------------------ | ------: | :--------------------------------------------------------------------------------- |
-| `unrolling_hard_limit`        | `TI_UNROLLING_HARD_LIMIT`        | `0`     | per `ti.static(range(N))`; abort if `N` > limit                                    |
-| `unrolling_kernel_hard_limit` | `TI_UNROLLING_KERNEL_HARD_LIMIT` | `0`     | cumulative across all `ti.static` loops in one kernel/func compile                 |
-| `func_inline_depth_limit`     | `TI_FUNC_INLINE_DEPTH_LIMIT`     | `0`     | max inline depth of non-real `@ti.func` calls; abort when current depth > limit    |
-
-`0` on any knob means the guard is inert — both the Python
-`_check_unroll_hard_limit` and the depth counter short-circuit on the
-zero check. Any positive value is a **hard cap**: exceeding it raises
-`TaichiCompilationError` with the knob name and offending source line
-*before* any IR/codegen runs (no silent truncation). P3.c is independent
-of these knobs and always active.
-
+*(P3.c early-exit reverted in audit: see section below.)*
 
 ## P3.d investigation 鈥?profile-first, no production change
 
@@ -429,3 +287,15 @@ opt-in for dev-loop / iteration cycles.
 `compile_tier` is already part of the offline-cache key (P2.c, commit
 `0a3635d6c`), so `fast` and `balanced` binaries do not collide on disk.
 No cache migration needed.
+
+---
+
+## P3.c — **REVERTED** (audit 2026-04-24)
+
+perf(P3.c): early-exit irpass::scalarize when IR has no matrix stmts (274268544) and its correctness-fix ix(P3.c): make HasMatrixStmt actually visit typed stmts (bfd6871fc) were reverted because:
+
+- **Demonstrated correctness hazard.** Commit 274268544 shipped a latent miscompile: HasMatrixStmt lacked invoke_default_visitor=true, so typed matrix stmts were never visited and the early-exit fired on kernels that still needed scalarization → LLVM fatal add on [3 x float].
+- **Ongoing maintenance risk.** Even with the fix, the HasMatrixStmt visitor is an implicit contract: any future matrix-family stmt added to the IR must also be covered here, or the same class of miscompile silently reappears.
+- **No measurable compile-time win.** A/B at HL=0: unroll=128 A=0.1697s / B=0.1776s (**+4.7% regression**); unroll=800 A=1.6885s / B=1.6722s (−1% noise). Within ±5% bench noise, no directional signal.
+
+Per the project-wide principle (*correctness/stability/runtime-performance first; compile-time wins only kept when they clearly outweigh these*), this change was deemed unjustified and removed.
