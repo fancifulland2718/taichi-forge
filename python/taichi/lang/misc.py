@@ -265,6 +265,20 @@ class _SpecialConfig:
         self.short_circuit_operators = True
         self.print_full_traceback = False
         self.unrolling_limit = 32
+        # P3.a — hard stop for a single ti.static(for ...) unroll. 0 = disabled.
+        # When > 0 and a static-for would emit more than this many iterations,
+        # compilation aborts with TaichiCompilationError instead of running to
+        # completion (which can take tens of seconds on nested unrolls).
+        self.unrolling_hard_limit = 0
+        # P3.a — hard stop for the cumulative unroll iteration count within
+        # a single kernel/function compile. 0 = disabled. Catches pathological
+        # nested ti.static loops (e.g. 27^3 = 19683) that individually fall
+        # under unrolling_hard_limit but collectively explode the IR.
+        self.unrolling_kernel_hard_limit = 0
+        # P3.b — hard stop for the @ti.func inline recursion depth. 0 = disabled.
+        # Counts nested non-real @ti.func calls; raises when the chain would
+        # inline more than this many frames deep.
+        self.func_inline_depth_limit = 0
 
 
 def prepare_sandbox():
@@ -418,6 +432,9 @@ def init(
     env_spec.add("short_circuit_operators")
     env_spec.add("print_full_traceback")
     env_spec.add("unrolling_limit")
+    env_spec.add("unrolling_hard_limit")
+    env_spec.add("unrolling_kernel_hard_limit")
+    env_spec.add("func_inline_depth_limit")
 
     # compiler configurations (ti.cfg):
     for key in dir(cfg):
@@ -439,6 +456,9 @@ def init(
         impl.get_runtime().short_circuit_operators = spec_cfg.short_circuit_operators
         impl.get_runtime().print_full_traceback = spec_cfg.print_full_traceback
         impl.get_runtime().unrolling_limit = spec_cfg.unrolling_limit
+        impl.get_runtime().unrolling_hard_limit = spec_cfg.unrolling_hard_limit
+        impl.get_runtime().unrolling_kernel_hard_limit = spec_cfg.unrolling_kernel_hard_limit
+        impl.get_runtime().func_inline_depth_limit = spec_cfg.func_inline_depth_limit
         _logging.set_logging_level(spec_cfg.log_level.lower())
 
     # select arch (backend):
@@ -763,6 +783,63 @@ def get_host_arch_list():
     return [_ti_core.host_arch()]
 
 
+def compile_kernels(kernels):
+    """P5.b — Pre-compile a batch of kernels in parallel.
+
+    Parameters
+    ----------
+    kernels : iterable
+        Each element is either a decorated Taichi kernel (no template
+        specialization needed, i.e. can be called with no args) or a
+        ``(kernel, args_tuple)`` pair that describes the exact specialization
+        to compile.
+
+    Notes
+    -----
+    * Compilation is dispatched to ``compile_config.num_compile_threads``
+      worker threads at the C++ layer. Supports CPU (LLVM), CUDA and Vulkan.
+    * Ordering of the input list is irrelevant; each kernel is compiled as an
+      independent unit.
+    * Do NOT destroy SNode trees / fields while this call is in progress.
+
+    Returns
+    -------
+    int
+        Number of kernels submitted to the compiler.
+    """
+    from taichi.lang import impl as _impl
+
+    # Materialize every C++ Kernel object on the main thread FIRST. This is
+    # essential: the Python-side AST transformation mutates lots of global
+    # state (template specialization table, frontend IR builder) and cannot
+    # be parallelized. Only the subsequent C++ compile_kernel step is
+    # thread-safe (guarded by the P5.a cache mutex).
+    specs = []
+    for item in kernels:
+        if isinstance(item, tuple):
+            k, args = item[0], tuple(item[1]) if len(item) > 1 else tuple()
+        else:
+            k, args = item, tuple()
+        # Unwrap the @ti.kernel decorator wrapper to the underlying Kernel.
+        if hasattr(k, "_primal") and not hasattr(k, "ensure_compiled"):
+            k = k._primal
+        if not hasattr(k, "ensure_compiled"):
+            raise TypeError(
+                f"compile_kernels: expected a Taichi kernel, got {type(k).__name__}"
+            )
+        key = k.ensure_compiled(*args)
+        kernel_cpp = k.compiled_kernels[key]
+        specs.append(kernel_cpp)
+
+    if not specs:
+        return 0
+
+    prog = _impl.get_runtime().prog
+    # Releases the GIL internally so worker threads can run concurrently.
+    prog.compile_kernels(prog.config(), specs)
+    return len(specs)
+
+
 __all__ = [
     "i",
     "ij",
@@ -803,4 +880,5 @@ __all__ = [
     "no_activate",
     "reset",
     "mesh_patch_idx",
+    "compile_kernels",
 ]

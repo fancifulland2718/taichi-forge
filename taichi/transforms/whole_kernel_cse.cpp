@@ -9,37 +9,40 @@
 
 namespace taichi::lang {
 
-// A helper class to maintain WholeKernelCSE::visited
-class MarkUndone : public BasicStmtVisitor {
- private:
-  std::unordered_set<int> *const visited_;
-  Stmt *const modified_operand_;
-
+// Build the reverse def-use map: for each stmt, which stmts reference it as
+// an operand.  O(N) to build; allows O(direct-users) MarkUndone instead of
+// the previous O(N) full-IR traversal.
+class BuildUsesMap : public BasicStmtVisitor {
  public:
-  using BasicStmtVisitor::visit;
+  using UsesMap = std::unordered_map<int, std::vector<Stmt *>>;
 
-  MarkUndone(std::unordered_set<int> *visited, Stmt *modified_operand)
-      : visited_(visited), modified_operand_(modified_operand) {
+  explicit BuildUsesMap(UsesMap &uses) : uses_(uses) {
     allow_undefined_visitor = true;
     invoke_default_visitor = true;
   }
 
   void visit(Stmt *stmt) override {
-    if (stmt->has_operand(modified_operand_)) {
-      visited_->erase(stmt->instance_id);
+    for (Stmt *op : stmt->get_operands()) {
+      if (op)
+        uses_[op->instance_id].push_back(stmt);
     }
   }
 
   void preprocess_container_stmt(Stmt *stmt) override {
-    if (stmt->has_operand(modified_operand_)) {
-      visited_->erase(stmt->instance_id);
+    for (Stmt *op : stmt->get_operands()) {
+      if (op)
+        uses_[op->instance_id].push_back(stmt);
     }
   }
 
-  static void run(std::unordered_set<int> *visited, Stmt *modified_operand) {
-    MarkUndone marker(visited, modified_operand);
-    modified_operand->get_ir_root()->accept(&marker);
+  static void run(IRNode *root, UsesMap &uses) {
+    uses.clear();
+    BuildUsesMap builder(uses);
+    root->accept(&builder);
   }
+
+ private:
+  UsesMap &uses_;
 };
 
 // Whole Kernel Common Subexpression Elimination
@@ -50,6 +53,10 @@ class WholeKernelCSE : public BasicStmtVisitor {
   std::vector<std::unordered_map<std::size_t, std::unordered_set<Stmt *> > >
       visible_stmts_;
   DelayedIRModifier modifier_;
+
+  // Reverse def-use map: stmt instance_id -> stmts that use it as operand.
+  // Rebuilt once per inner iteration; used for O(direct-users) MarkUndone.
+  BuildUsesMap::UsesMap uses_;
 
  public:
   using BasicStmtVisitor::visit;
@@ -65,6 +72,22 @@ class WholeKernelCSE : public BasicStmtVisitor {
 
   void set_done(Stmt *stmt) {
     visited_.insert(stmt->instance_id);
+  }
+
+  // Mark all direct users of `replaced` as needing reprocessing, then
+  // transfer ownership of those users to `replacement` in the uses_ map so
+  // that subsequent eliminations of `replacement` can find them.
+  void mark_undone_and_transfer(Stmt *replaced, Stmt *replacement) {
+    auto it = uses_.find(replaced->instance_id);
+    if (it == uses_.end())
+      return;
+    auto &users = it->second;
+    auto &rep_users = uses_[replacement->instance_id];
+    for (Stmt *user : users) {
+      visited_.erase(user->instance_id);
+      rep_users.push_back(user);
+    }
+    users.clear();
   }
 
   static std::size_t operand_hash(const Stmt *stmt) {
@@ -134,7 +157,9 @@ class WholeKernelCSE : public BasicStmtVisitor {
     for (auto &scope : visible_stmts_) {
       for (auto &prev_stmt : scope[hash_value]) {
         if (common_statement_eliminable(stmt, prev_stmt)) {
-          MarkUndone::run(&visited_, stmt);
+          // Un-mark direct users of stmt using the O(users) fast path,
+          // and transfer them to prev_stmt in the uses_ map.
+          mark_undone_and_transfer(stmt, prev_stmt);
           stmt->replace_usages_with(prev_stmt);
           modifier_.erase(stmt);
           return;
@@ -207,6 +232,12 @@ class WholeKernelCSE : public BasicStmtVisitor {
     WholeKernelCSE eliminator;
     bool modified = false;
     while (true) {
+      // Rebuild the reverse def-use map once per inner iteration (O(N)).
+      // This lets mark_undone_and_transfer run in O(direct-users) rather than
+      // the previous O(N) full-IR traversal (MarkUndone), giving an overall
+      // improvement from O(N_replacements * N) to O(N + N_replacements *
+      // avg_users) per iteration.
+      BuildUsesMap::run(node, eliminator.uses_);
       node->accept(&eliminator);
       if (eliminator.modifier_.modify_ir())
         modified = true;

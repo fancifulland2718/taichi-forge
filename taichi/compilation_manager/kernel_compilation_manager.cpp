@@ -1,7 +1,10 @@
 #include "taichi/compilation_manager/kernel_compilation_manager.h"
 
+#include <sstream>
+
 #include "taichi/analysis/offline_cache_util.h"
 #include "taichi/codegen/compiled_kernel_data.h"
+#include "taichi/compilation_manager/inproc_disk_mirror.h"
 #include "taichi/util/offline_cache.h"
 
 namespace taichi::lang {
@@ -74,14 +77,56 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
     const Kernel &kernel_def) {
   auto cache_mode = get_cache_mode(compile_config, kernel_def);
   const auto kernel_key = make_kernel_key(compile_config, caps, kernel_def);
-  auto cached_kernel = try_load_cached_kernel(kernel_def, kernel_key,
-                                              compile_config.arch, cache_mode);
-  return cached_kernel ? *cached_kernel
-                       : compile_and_cache_kernel(kernel_key, compile_config,
-                                                  caps, kernel_def);
+
+  // P5.a — serialize all cache-map mutation with cache_mutex_. Heavy
+  // compile work happens OUTSIDE the lock inside
+  // compile_and_cache_kernel().
+  std::unique_lock<std::mutex> lock(cache_mutex_);
+
+  // Wait-loop: another worker may already be compiling this exact key. If
+  // so, we block on cache_cv_ and re-probe the cache on wake-up.
+  while (true) {
+    if (const auto *cached = try_load_cached_kernel_locked(
+            kernel_def, kernel_key, compile_config.arch, cache_mode)) {
+      return *cached;
+    }
+    if (in_progress_keys_.count(kernel_key) == 0) {
+      break;  // We are responsible for compiling this key.
+    }
+    cache_cv_.wait(lock);
+  }
+
+  in_progress_keys_.insert(kernel_key);
+  // Drop the lock across compile() — the compile step is pure work on
+  // kernel_def / compile_config (both const here) plus per-thread LLVM
+  // context, so it is safe to run concurrently with other workers.
+  lock.unlock();
+
+  std::unique_ptr<CompiledKernelData> compiled;
+  try {
+    compiled = compile_kernel(compile_config, caps, kernel_def);
+  } catch (...) {
+    lock.lock();
+    in_progress_keys_.erase(kernel_key);
+    cache_cv_.notify_all();
+    throw;
+  }
+
+  lock.lock();
+  const auto &result = install_compiled_kernel_locked(
+      kernel_key, cache_mode, std::move(compiled));
+  in_progress_keys_.erase(kernel_key);
+  cache_cv_.notify_all();
+  return result;
 }
 
 void KernelCompilationManager::dump() {
+  // P5.a — take a consistent snapshot of the in-memory caches before
+  // touching disk. `dump()` is typically called at Program shutdown from
+  // the main thread, but lock defensively so it stays correct if a worker
+  // is still finishing a compile during shutdown.
+  std::lock_guard<std::mutex> guard(cache_mutex_);
+
   if (caching_kernels_.empty()) {
     return;
   }
@@ -125,13 +170,22 @@ void KernelCompilationManager::dump() {
   for (auto &[_, k] : kernels) {
     if (k.compiled_kernel_data) {
       auto cache_filename = make_filename(k.kernel_key);
-      std::ofstream fs{cache_filename, std::ios::out | std::ios::binary};
-      TI_ASSERT(fs.is_open());
-      auto err = k.compiled_kernel_data->dump(fs);
+      // Serialize once into an in-memory buffer so we can both write the
+      // file and populate the in-process mirror without re-serializing.
+      std::ostringstream oss(std::ios::out | std::ios::binary);
+      auto err = k.compiled_kernel_data->dump(oss);
       if (err == CompiledKernelData::Err::kNoError) {
+        std::string bytes = oss.str();
+        std::ofstream fs{cache_filename,
+                         std::ios::out | std::ios::binary};
+        TI_ASSERT(fs.is_open());
+        fs.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
         TI_ASSERT(!!fs);
-        k.size = fs.tellp();
+        k.size = bytes.size();
         data.size += k.size;
+        // P1.b — seed the mirror so the *next* Program within the same
+        // process skips disk entirely.
+        InprocDiskMirror::put(k.kernel_key, std::move(bytes));
       } else {
         TI_DEBUG("Dump cached CompiledKernelData(kernel_key={}) failed: {}",
                  k.kernel_key, CompiledKernelData::get_err_msg(err));
@@ -195,11 +249,12 @@ std::string KernelCompilationManager::make_kernel_key(
   return kernel_key;
 }
 
-const CompiledKernelData *KernelCompilationManager::try_load_cached_kernel(
+const CompiledKernelData *KernelCompilationManager::try_load_cached_kernel_locked(
     const Kernel &kernel_def,
     const std::string &kernel_key,
     Arch arch,
     CacheData::CacheMode cache_mode) {
+  // Precondition: cache_mutex_ held by caller.
   {  // Find in memory-cache (caching_kernels_)
     const auto &kernels = caching_kernels_;
     auto iter = kernels.find(kernel_key);
@@ -233,20 +288,23 @@ const CompiledKernelData *KernelCompilationManager::try_load_cached_kernel(
   return nullptr;
 }
 
-const CompiledKernelData &KernelCompilationManager::compile_and_cache_kernel(
+const CompiledKernelData &
+KernelCompilationManager::install_compiled_kernel_locked(
     const std::string &kernel_key,
-    const CompileConfig &compile_config,
-    const DeviceCapabilityConfig &caps,
-    const Kernel &kernel_def) {
-  auto cache_mode = get_cache_mode(compile_config, kernel_def);
+    CacheData::CacheMode cache_mode,
+    std::unique_ptr<CompiledKernelData> compiled) {
+  // Precondition: cache_mutex_ held by caller; `kernel_key` is present in
+  // `in_progress_keys_` and is NOT yet in caching_kernels_.
   TI_DEBUG_IF(cache_mode == CacheData::MemAndDiskCache,
-              "Cache kernel '{}' (key='{}')", kernel_def.get_name(),
-              kernel_key);
+              "Cache kernel (key='{}')", kernel_key);
+  // Another thread may have raced us to the cache while we held
+  // in_progress_keys_, but by contract only one thread owns any given
+  // kernel_key at a time, so this must still be absent.
   TI_ASSERT(caching_kernels_.find(kernel_key) == caching_kernels_.end());
   KernelCacheData k;
   k.kernel_key = kernel_key;
   k.created_at = k.last_used_at = std::time(nullptr);
-  k.compiled_kernel_data = compile_kernel(compile_config, caps, kernel_def);
+  k.compiled_kernel_data = std::move(compiled);
   k.size = 0;  // Populate `size` within the KernelCompilationManager::dump()
   k.cache_mode = cache_mode;
   const auto &kernel_data = (caching_kernels_[kernel_key] = std::move(k));
@@ -256,24 +314,52 @@ const CompiledKernelData &KernelCompilationManager::compile_and_cache_kernel(
 std::unique_ptr<CompiledKernelData> KernelCompilationManager::load_ckd(
     const std::string &kernel_key,
     Arch arch) {
-  const auto filename = make_filename(kernel_key);
-  if (std::ifstream ifs(filename, std::ios::in | std::ios::binary);
-      ifs.is_open()) {
+  // P1.b — try the in-process bytes mirror first. On a hit we skip the
+  // file open + read entirely; on a miss we fall through to disk and
+  // populate the mirror with the bytes we just read so that the *next*
+  // Program hits it.
+  auto deserialize_from = [&](std::istream &is) -> std::unique_ptr<CompiledKernelData> {
     CompiledKernelData::Err err;
-    auto ckd = CompiledKernelData::load(ifs, &err);
+    auto ckd = CompiledKernelData::load(is, &err);
     if (err != CompiledKernelData::Err::kNoError) {
-      TI_DEBUG("Load cache file {} failed: {}", filename,
-               CompiledKernelData::get_err_msg(err));
       return nullptr;
     }
-    if (auto err = ckd->check(); err != CompiledKernelData::Err::kNoError) {
-      TI_DEBUG("Check CompiledKernelData loaded from {} failed: {}", filename,
-               CompiledKernelData::get_err_msg(err));
+    if (auto cerr = ckd->check(); cerr != CompiledKernelData::Err::kNoError) {
       return nullptr;
     }
     return ckd;
+  };
+
+  if (auto cached_bytes = InprocDiskMirror::get(kernel_key)) {
+    std::istringstream iss(*cached_bytes, std::ios::in | std::ios::binary);
+    if (auto ckd = deserialize_from(iss)) {
+      return ckd;
+    }
+    // If the mirrored bytes are somehow corrupt, fall through to disk —
+    // don't propagate the error as a hard miss. The disk copy (if any)
+    // will also re-populate the mirror below.
   }
-  return nullptr;
+
+  const auto filename = make_filename(kernel_key);
+  std::ifstream ifs(filename, std::ios::in | std::ios::binary);
+  if (!ifs.is_open()) {
+    return nullptr;
+  }
+  // Read the whole file into a string so we can (a) deserialize from it
+  // and (b) stash it into the mirror without re-reading from disk.
+  std::string bytes{std::istreambuf_iterator<char>(ifs),
+                    std::istreambuf_iterator<char>()};
+  ifs.close();
+
+  std::istringstream iss(bytes, std::ios::in | std::ios::binary);
+  auto ckd = deserialize_from(iss);
+  if (ckd == nullptr) {
+    TI_DEBUG("Load cache file {} failed or is corrupt", filename);
+    return nullptr;
+  }
+  // Only cache well-formed bytes so that mirror hits are always valid.
+  InprocDiskMirror::put(kernel_key, std::move(bytes));
+  return ckd;
 }
 
 CacheData::CacheMode KernelCompilationManager::get_cache_mode(

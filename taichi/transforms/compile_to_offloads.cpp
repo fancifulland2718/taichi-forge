@@ -86,7 +86,13 @@ void compile_to_offloads(IRNode *ir,
   print("Simplified I");
   irpass::analysis::verify(ir);
 
-  irpass::handle_external_ptr_boundary(ir, config);
+  // Track whether any IR-mutating pass has run since "Simplified I". If not,
+  // "Simplified II" below is a no-op (full_simplify on an already-simplified
+  // IR converges in one round) and can be skipped — saving one full pass over
+  // every kernel that has no external arrays / no autodiff / no debug checks.
+  // (P2.a: full_simplify dirty-flag dedupe.)
+  bool dirty_since_simplify_i =
+      irpass::handle_external_ptr_boundary(ir, config);
   print("External ptr boundary processed");
 
   if (is_extension_supported(config.arch, Extension::mesh)) {
@@ -101,6 +107,8 @@ void compile_to_offloads(IRNode *ir,
     irpass::demote_atomics(ir, config);
     irpass::differentiation_validation_check(ir, config, kernel->get_name());
     irpass::analysis::verify(ir);
+    // demote_atomics + differentiation_validation_check both mutate IR.
+    dirty_since_simplify_i = true;
   }
 
   if (autodiff_mode == AutodiffMode::kReverse ||
@@ -118,23 +126,35 @@ void compile_to_offloads(IRNode *ir,
         {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
     print("Gradient");
     irpass::analysis::verify(ir);
+    // The two full_simplify calls above already left the IR in a fixed-point
+    // state, so the post-flag_access full_simplify below is also redundant
+    // for this branch. Keep the dirty flag false.
+    dirty_since_simplify_i = false;
   }
 
   if (config.check_out_of_bound) {
     irpass::check_out_of_bound(ir, config, {kernel->get_name()});
     print("Bound checked");
     irpass::analysis::verify(ir);
+    dirty_since_simplify_i = true;
   }
 
   irpass::flag_access(ir);
   print("Access flagged I");
   irpass::analysis::verify(ir);
+  // flag_access only mutates GlobalPtrStmt::activate metadata; full_simplify
+  // ignores that field entirely. So flag_access does NOT make the IR dirty
+  // for the purposes of simplification.
 
-  irpass::full_simplify(
-      ir, config,
-      {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
-  print("Simplified II");
-  irpass::analysis::verify(ir);
+  if (dirty_since_simplify_i) {
+    irpass::full_simplify(
+        ir, config,
+        {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
+    print("Simplified II");
+    irpass::analysis::verify(ir);
+  } else {
+    print("Simplified II (skipped: IR unchanged since Simplified I)");
+  }
 
   irpass::offload(ir, config);
   print("Offloaded");

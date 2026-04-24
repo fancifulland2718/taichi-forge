@@ -74,7 +74,10 @@ void replace_all_usages_with(IRNode *root, Stmt *old_stmt, Stmt *new_stmt);
 bool check_out_of_bound(IRNode *root,
                         const CompileConfig &config,
                         const CheckOutOfBoundPass::Args &args);
-void handle_external_ptr_boundary(IRNode *root, const CompileConfig &config);
+// Returns true iff the IR was structurally modified (any new statement
+// inserted). Callers may use this to skip a subsequent full_simplify pass when
+// no other transformation has run since the previous simplify.
+bool handle_external_ptr_boundary(IRNode *root, const CompileConfig &config);
 void make_thread_local(IRNode *root, const CompileConfig &config);
 std::unique_ptr<ScratchPads> initialize_scratch_pad(OffloadedStmt *root);
 void make_block_local(IRNode *root,

@@ -4,6 +4,7 @@ add_library(compilation_manager)
 target_sources(compilation_manager
   PRIVATE
     kernel_compilation_manager.cpp
+    inproc_disk_mirror.cpp
   )
 
 target_include_directories(compilation_manager

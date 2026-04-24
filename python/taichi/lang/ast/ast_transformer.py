@@ -20,6 +20,7 @@ from taichi.lang.exception import (
     TaichiIndexError,
     TaichiSyntaxError,
     TaichiTypeError,
+    TaichiCompilationError,
     handle_exception_from_cpp,
 )
 from taichi.lang.expr import Expr, make_expr_group
@@ -1199,6 +1200,35 @@ class ASTTransformer(Builder):
         return [name.id for name in node.target.elts]
 
     @staticmethod
+    def _check_unroll_hard_limit(ctx, node, iter_time):
+        # P3.a — enforce hard caps on static-for unroll size. Called once per
+        # iteration, immediately after iter_time increments. Aborts the
+        # compile with a clear error message before the body is built again,
+        # so the user does not pay for tens of seconds of AST expansion on a
+        # runaway static loop / nested ti.static pyramid.
+        runtime = impl.get_runtime()
+        per_loop = getattr(runtime, "unrolling_hard_limit", 0)
+        kernel_total = getattr(runtime, "unrolling_kernel_hard_limit", 0)
+        if per_loop and iter_time > per_loop:
+            raise TaichiCompilationError(
+                f"ti.static(for ...) tried to unroll more than "
+                f"unrolling_hard_limit={per_loop} iterations at "
+                f"line {node.lineno + ctx.lineno_offset}. "
+                f"Either raise ti.init(unrolling_hard_limit=...) or replace "
+                f"the static loop with a runtime for-loop."
+            )
+        ctx.unrolled_iterations += 1
+        if kernel_total and ctx.unrolled_iterations > kernel_total:
+            raise TaichiCompilationError(
+                f"Kernel/function compile exceeded "
+                f"unrolling_kernel_hard_limit={kernel_total} total "
+                f"ti.static iterations. Nested ti.static loops tend to "
+                f"multiply (e.g. 27\u00b3 = 19683). Either raise the limit "
+                f"via ti.init(unrolling_kernel_hard_limit=...) or switch the "
+                f"outermost loop to a runtime for."
+            )
+
+    @staticmethod
     def build_static_for(ctx, node, is_grouped):
         ti_unroll_limit = impl.get_runtime().unrolling_limit
         if is_grouped:
@@ -1215,6 +1245,7 @@ class ASTTransformer(Builder):
 
             for value in impl.grouped(ndrange_arg):
                 iter_time += 1
+                ASTTransformer._check_unroll_hard_limit(ctx, node, iter_time)
                 if not alert_already and ti_unroll_limit and iter_time > ti_unroll_limit:
                     alert_already = True
                     warnings.warn_explicit(
@@ -1247,6 +1278,7 @@ class ASTTransformer(Builder):
                     target_values = [target_values]
 
                 iter_time += 1
+                ASTTransformer._check_unroll_hard_limit(ctx, node, iter_time)
                 if not alert_already and ti_unroll_limit and iter_time > ti_unroll_limit:
                     alert_already = True
                     warnings.warn_explicit(

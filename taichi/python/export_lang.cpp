@@ -159,6 +159,7 @@ void export_lang(py::module &m) {
       .def_readwrite("arch", &CompileConfig::arch)
       .def_readwrite("opt_level", &CompileConfig::opt_level)
       .def_readwrite("llvm_opt_level", &CompileConfig::llvm_opt_level)
+      .def_readwrite("compile_tier", &CompileConfig::compile_tier)
       .def_readwrite("print_ir", &CompileConfig::print_ir)
       .def_readwrite("print_preprocessed_ir",
                      &CompileConfig::print_preprocessed_ir)
@@ -487,6 +488,14 @@ void export_lang(py::module &m) {
            [](Program *program) { return program->get_graphics_device(); })
       .def("compile_kernel", &Program::compile_kernel,
            py::return_value_policy::reference)
+      .def(
+          "compile_kernels",
+          [](Program *program, const CompileConfig &cfg,
+             const std::vector<Kernel *> &kernels) {
+            std::vector<const Kernel *> ks(kernels.begin(), kernels.end());
+            program->compile_kernels(cfg, ks);
+          },
+          py::call_guard<py::gil_scoped_release>())
       .def("launch_kernel", &Program::launch_kernel)
       .def("get_device_caps", &Program::get_device_caps);
 

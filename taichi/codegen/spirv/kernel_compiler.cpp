@@ -35,8 +35,28 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   params.compiled_structs = *config_.compiled_struct_data;
   params.arch = compile_config.arch;
   params.caps = device_caps;
-  params.enable_spv_opt = compile_config.external_optimization_level > 0;
-  params.spv_opt_level = compile_config.external_optimization_level;
+  // P1.d + V1: compile_tier-aware SPIR-V opt level.
+  //   "fast"     — skip the spvtools optimizer entirely (level 0, 0 passes).
+  //                V1 revision: previously capped at level 1 (3 cheap passes),
+  //                but DCE/DeadBranchElim are cheap and their savings do not
+  //                materialise over pass registration + Run() overhead on
+  //                SPV-bound kernels. Going straight to 0 gives the largest
+  //                compile-time win for the "fast" tier and is safe because
+  //                TaskCodegen already emits legal SPIR-V (no optimiser
+  //                required to pass Vulkan driver validation, and the
+  //                spvtools validator is disabled anyway).
+  //   "balanced" — no change vs legacy (default external_optimization_level=3,
+  //                23 passes). Preserves default runtime perf.
+  //   "full"     — no change vs legacy (23 passes).
+  // Different tiers produce different artifacts and are segregated by the
+  // P2.c offline-cache key (compile_tier is already serialized into the
+  // hash; see taichi/analysis/offline_cache_util.cpp).
+  int spv_level = compile_config.external_optimization_level;
+  if (compile_config.compile_tier == "fast") {
+    spv_level = 0;
+  }
+  params.enable_spv_opt = spv_level > 0;
+  params.spv_opt_level = spv_level;
   spirv::KernelCodegen codegen(params);
   spirv::CompiledKernelData::InternalData internal_data;
   codegen.run(internal_data.metadata.kernel_attribs,

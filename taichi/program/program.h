@@ -130,6 +130,15 @@ class TI_DLL_EXPORT Program {
                                            const DeviceCapabilityConfig &caps,
                                            const Kernel &kernel_def);
 
+  // P5.b — parallel batch compilation. Compiles every kernel in `kernels`
+  // through the shared KernelCompilationManager, dispatching to
+  // `compile_config.num_compile_threads` worker threads. Kernel order is
+  // irrelevant: each Kernel is already self-contained C++-level IR, so no
+  // inter-kernel dependency exists at this layer. SNode tree lifetime must
+  // be stable across this call (do not call destroy_snode_tree concurrently).
+  void compile_kernels(const CompileConfig &compile_config,
+                       const std::vector<const Kernel *> &kernels);
+
   void launch_kernel(const CompiledKernelData &compiled_kernel_data,
                      LaunchContextBuilder &ctx);
 

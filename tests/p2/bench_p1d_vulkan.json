@@ -1,0 +1,56 @@
+[
+  {
+    "tier": "fast",
+    "kernel": "mat14",
+    "cold_s": 39.06792739999946,
+    "warm_s": 0.000591500021982938
+  },
+  {
+    "tier": "balanced",
+    "kernel": "mat14",
+    "cold_s": 39.24098150001373,
+    "warm_s": 0.0007080000068526715
+  },
+  {
+    "tier": "full",
+    "kernel": "mat14",
+    "cold_s": 51.40561629997683,
+    "warm_s": 0.0006508999795187265
+  },
+  {
+    "tier": "fast",
+    "kernel": "sph_force",
+    "cold_s": 7.059809200000018,
+    "warm_s": 0.0013914000010117888
+  },
+  {
+    "tier": "balanced",
+    "kernel": "sph_force",
+    "cold_s": 7.125796200009063,
+    "warm_s": 0.001197999983560294
+  },
+  {
+    "tier": "full",
+    "kernel": "sph_force",
+    "cold_s": 8.593930499977432,
+    "warm_s": 0.000759599992306903
+  },
+  {
+    "tier": "fast",
+    "kernel": "spv_branchy",
+    "cold_s": 0.34952559997327626,
+    "warm_s": 0.000522000016644597
+  },
+  {
+    "tier": "balanced",
+    "kernel": "spv_branchy",
+    "cold_s": 0.3793936000147369,
+    "warm_s": 0.00035960000241175294
+  },
+  {
+    "tier": "full",
+    "kernel": "spv_branchy",
+    "cold_s": 0.4471964999975171,
+    "warm_s": 0.0004681000136770308
+  }
+]

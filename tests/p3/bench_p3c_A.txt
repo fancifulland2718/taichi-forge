@@ -1,0 +1,6 @@
+﻿# label=A_no_P3c
+scenario	param	median_s
+scalar	unroll=32	0.0881
+scalar	unroll=128	0.1698
+scalar	unroll=400	0.5677
+scalar	unroll=800	1.6818

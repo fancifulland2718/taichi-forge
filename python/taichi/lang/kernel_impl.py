@@ -244,7 +244,25 @@ class Func:
             ast_builder=impl.get_runtime().current_kernel.ast_builder(),
             is_real_function=self.is_real_function,
         )
-        ret = transform_tree(tree, ctx)
+        # P3.b — enforce @ti.func inline recursion depth cap. 0 = disabled.
+        # Only non-real @ti.func calls are counted: they perform a Python-level
+        # AST expansion that compounds with each nested call, whereas
+        # is_real_function uses a C++-side call and caches per-signature IR.
+        runtime = impl.get_runtime()
+        depth_limit = getattr(runtime, "func_inline_depth_limit", 0)
+        runtime.func_inline_depth += 1
+        try:
+            if depth_limit and runtime.func_inline_depth > depth_limit:
+                raise TaichiCompilationError(
+                    f"@ti.func inline depth exceeded "
+                    f"func_inline_depth_limit={depth_limit}. Either raise the "
+                    f"limit via ti.init(func_inline_depth_limit=...) or mark "
+                    f"the innermost function with is_real_function=True so "
+                    f"the inliner stops at a C++ call site."
+                )
+            ret = transform_tree(tree, ctx)
+        finally:
+            runtime.func_inline_depth -= 1
         if not self.is_real_function:
             if self.return_type and ctx.returned != ReturnStatus.ReturnedValue:
                 raise TaichiSyntaxError("Function has a return type but does not have a return statement")

@@ -184,6 +184,11 @@ class ASTTransformerContext:
         self.visited_funcdef = False
         self.is_real_function = is_real_function
         self.kernel_args = []
+        # P3.a — cumulative unroll count for this kernel/function compile.
+        # Incremented by every ti.static(for ...) iteration in
+        # ASTTransformer.build_static_for; compared against
+        # impl.get_runtime().unrolling_kernel_hard_limit.
+        self.unrolled_iterations = 0
 
     # e.g.: FunctionDef, Module, Global
     def variable_scope_guard(self):
