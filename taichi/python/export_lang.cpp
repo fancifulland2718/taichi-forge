@@ -488,6 +488,14 @@ void export_lang(py::module &m) {
            [](Program *program) { return program->get_graphics_device(); })
       .def("compile_kernel", &Program::compile_kernel,
            py::return_value_policy::reference)
+      .def(
+          "compile_kernels",
+          [](Program *program, const CompileConfig &cfg,
+             const std::vector<Kernel *> &kernels) {
+            std::vector<const Kernel *> ks(kernels.begin(), kernels.end());
+            program->compile_kernels(cfg, ks);
+          },
+          py::call_guard<py::gil_scoped_release>())
       .def("launch_kernel", &Program::launch_kernel)
       .def("get_device_caps", &Program::get_device_caps);
 

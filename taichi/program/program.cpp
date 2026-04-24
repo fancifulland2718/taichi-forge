@@ -15,6 +15,7 @@
 #include "taichi/program/snode_expr_utils.h"
 #include "taichi/math/arithmetic.h"
 #include "taichi/rhi/common/host_memory_pool.h"
+#include "taichi/program/parallel_executor.h"
 
 #ifdef TI_WITH_LLVM
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
@@ -185,6 +186,82 @@ const CompiledKernelData &Program::compile_kernel(
   const auto &ckd = mgr.load_or_compile(compile_config, caps, kernel_def);
   total_compilation_time_ += Time::get_time() - start_t;
   return ckd;
+}
+
+// P5.b — batch / parallel kernel compilation.
+//
+// Design:
+// 1. Compilation is dispatched to a ParallelExecutor with
+//    `compile_config.num_compile_threads` workers.
+// 2. All heavy lifting (IR passes, LLVM opt, SPIR-V codegen, GPU module load)
+//    runs on worker threads. The main thread only submits + flushes.
+// 3. Ordering: kernel compilation is order-independent at the C++ level —
+//    @ti.func inlining and template specialization are resolved in Python
+//    before a `Kernel` object ever reaches C++. Each kernel is compiled as a
+//    self-contained unit.
+// 4. Thread-safety:
+//    - `KernelCompilationManager::load_or_compile` is guarded by its own
+//      cache_mutex_ (P5.a) so concurrent cache hits/inserts are safe.
+//    - LLVM: TaichiLLVMContext maintains per-thread_id state under
+//      thread_map_mut_; first-touch on a worker lazily clones the runtime
+//      module + struct_modules from the main thread (which is already
+//      quiescent after materialize_runtime).
+//    - CUDA: `cuModuleLoadDataEx` is serialized by CUDAContext::get_lock_guard
+//      inside JITSessionCUDA; all optimization runs in parallel.
+//    - Vulkan: SPIR-V codegen touches no shared state.
+// 5. Error propagation: the first exception from any worker is captured and
+//    rethrown on the calling thread after flush(); remaining workers still
+//    finish their in-flight tasks so we never leave the executor in a bad
+//    state.
+//
+// Caller contract: do NOT destroy SNode trees concurrently with this call.
+void Program::compile_kernels(
+    const CompileConfig &compile_config,
+    const std::vector<const Kernel *> &kernels) {
+  if (kernels.empty()) {
+    return;
+  }
+  auto start_t = Time::get_time();
+  const auto caps = get_device_caps();
+
+  int n_workers = std::max(1, compile_config.num_compile_threads);
+  n_workers = std::min<int>(n_workers, (int)kernels.size());
+
+  auto &mgr = program_impl_->get_kernel_compilation_manager();
+  if (n_workers <= 1) {
+    // Fast path: honour the same serial path as compile_kernel.
+    for (auto *k : kernels) {
+      mgr.load_or_compile(compile_config, caps, *k);
+    }
+    total_compilation_time_ += Time::get_time() - start_t;
+    return;
+  }
+
+  std::mutex err_mu;
+  std::exception_ptr first_error;
+
+  {
+    ParallelExecutor exec("compile_kernels", n_workers);
+    for (auto *k : kernels) {
+      exec.enqueue([&, k]() {
+        try {
+          mgr.load_or_compile(compile_config, caps, *k);
+        } catch (...) {
+          std::lock_guard<std::mutex> g(err_mu);
+          if (!first_error) {
+            first_error = std::current_exception();
+          }
+        }
+      });
+    }
+    // ~ParallelExecutor runs flush() implicitly via its destructor.
+    exec.flush();
+  }
+
+  total_compilation_time_ += Time::get_time() - start_t;
+  if (first_error) {
+    std::rethrow_exception(first_error);
+  }
 }
 
 void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,

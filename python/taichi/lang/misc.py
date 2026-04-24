@@ -783,6 +783,63 @@ def get_host_arch_list():
     return [_ti_core.host_arch()]
 
 
+def compile_kernels(kernels):
+    """P5.b — Pre-compile a batch of kernels in parallel.
+
+    Parameters
+    ----------
+    kernels : iterable
+        Each element is either a decorated Taichi kernel (no template
+        specialization needed, i.e. can be called with no args) or a
+        ``(kernel, args_tuple)`` pair that describes the exact specialization
+        to compile.
+
+    Notes
+    -----
+    * Compilation is dispatched to ``compile_config.num_compile_threads``
+      worker threads at the C++ layer. Supports CPU (LLVM), CUDA and Vulkan.
+    * Ordering of the input list is irrelevant; each kernel is compiled as an
+      independent unit.
+    * Do NOT destroy SNode trees / fields while this call is in progress.
+
+    Returns
+    -------
+    int
+        Number of kernels submitted to the compiler.
+    """
+    from taichi.lang import impl as _impl
+
+    # Materialize every C++ Kernel object on the main thread FIRST. This is
+    # essential: the Python-side AST transformation mutates lots of global
+    # state (template specialization table, frontend IR builder) and cannot
+    # be parallelized. Only the subsequent C++ compile_kernel step is
+    # thread-safe (guarded by the P5.a cache mutex).
+    specs = []
+    for item in kernels:
+        if isinstance(item, tuple):
+            k, args = item[0], tuple(item[1]) if len(item) > 1 else tuple()
+        else:
+            k, args = item, tuple()
+        # Unwrap the @ti.kernel decorator wrapper to the underlying Kernel.
+        if hasattr(k, "_primal") and not hasattr(k, "ensure_compiled"):
+            k = k._primal
+        if not hasattr(k, "ensure_compiled"):
+            raise TypeError(
+                f"compile_kernels: expected a Taichi kernel, got {type(k).__name__}"
+            )
+        key = k.ensure_compiled(*args)
+        kernel_cpp = k.compiled_kernels[key]
+        specs.append(kernel_cpp)
+
+    if not specs:
+        return 0
+
+    prog = _impl.get_runtime().prog
+    # Releases the GIL internally so worker threads can run concurrently.
+    prog.compile_kernels(prog.config(), specs)
+    return len(specs)
+
+
 __all__ = [
     "i",
     "ij",
@@ -823,4 +880,5 @@ __all__ = [
     "no_activate",
     "reset",
     "mesh_patch_idx",
+    "compile_kernels",
 ]
