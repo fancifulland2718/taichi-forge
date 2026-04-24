@@ -1,7 +1,10 @@
 #include "taichi/compilation_manager/kernel_compilation_manager.h"
 
+#include <sstream>
+
 #include "taichi/analysis/offline_cache_util.h"
 #include "taichi/codegen/compiled_kernel_data.h"
+#include "taichi/compilation_manager/inproc_disk_mirror.h"
 #include "taichi/util/offline_cache.h"
 
 namespace taichi::lang {
@@ -167,13 +170,22 @@ void KernelCompilationManager::dump() {
   for (auto &[_, k] : kernels) {
     if (k.compiled_kernel_data) {
       auto cache_filename = make_filename(k.kernel_key);
-      std::ofstream fs{cache_filename, std::ios::out | std::ios::binary};
-      TI_ASSERT(fs.is_open());
-      auto err = k.compiled_kernel_data->dump(fs);
+      // Serialize once into an in-memory buffer so we can both write the
+      // file and populate the in-process mirror without re-serializing.
+      std::ostringstream oss(std::ios::out | std::ios::binary);
+      auto err = k.compiled_kernel_data->dump(oss);
       if (err == CompiledKernelData::Err::kNoError) {
+        std::string bytes = oss.str();
+        std::ofstream fs{cache_filename,
+                         std::ios::out | std::ios::binary};
+        TI_ASSERT(fs.is_open());
+        fs.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
         TI_ASSERT(!!fs);
-        k.size = fs.tellp();
+        k.size = bytes.size();
         data.size += k.size;
+        // P1.b — seed the mirror so the *next* Program within the same
+        // process skips disk entirely.
+        InprocDiskMirror::put(k.kernel_key, std::move(bytes));
       } else {
         TI_DEBUG("Dump cached CompiledKernelData(kernel_key={}) failed: {}",
                  k.kernel_key, CompiledKernelData::get_err_msg(err));
@@ -302,24 +314,52 @@ KernelCompilationManager::install_compiled_kernel_locked(
 std::unique_ptr<CompiledKernelData> KernelCompilationManager::load_ckd(
     const std::string &kernel_key,
     Arch arch) {
-  const auto filename = make_filename(kernel_key);
-  if (std::ifstream ifs(filename, std::ios::in | std::ios::binary);
-      ifs.is_open()) {
+  // P1.b — try the in-process bytes mirror first. On a hit we skip the
+  // file open + read entirely; on a miss we fall through to disk and
+  // populate the mirror with the bytes we just read so that the *next*
+  // Program hits it.
+  auto deserialize_from = [&](std::istream &is) -> std::unique_ptr<CompiledKernelData> {
     CompiledKernelData::Err err;
-    auto ckd = CompiledKernelData::load(ifs, &err);
+    auto ckd = CompiledKernelData::load(is, &err);
     if (err != CompiledKernelData::Err::kNoError) {
-      TI_DEBUG("Load cache file {} failed: {}", filename,
-               CompiledKernelData::get_err_msg(err));
       return nullptr;
     }
-    if (auto err = ckd->check(); err != CompiledKernelData::Err::kNoError) {
-      TI_DEBUG("Check CompiledKernelData loaded from {} failed: {}", filename,
-               CompiledKernelData::get_err_msg(err));
+    if (auto cerr = ckd->check(); cerr != CompiledKernelData::Err::kNoError) {
       return nullptr;
     }
     return ckd;
+  };
+
+  if (auto cached_bytes = InprocDiskMirror::get(kernel_key)) {
+    std::istringstream iss(*cached_bytes, std::ios::in | std::ios::binary);
+    if (auto ckd = deserialize_from(iss)) {
+      return ckd;
+    }
+    // If the mirrored bytes are somehow corrupt, fall through to disk —
+    // don't propagate the error as a hard miss. The disk copy (if any)
+    // will also re-populate the mirror below.
   }
-  return nullptr;
+
+  const auto filename = make_filename(kernel_key);
+  std::ifstream ifs(filename, std::ios::in | std::ios::binary);
+  if (!ifs.is_open()) {
+    return nullptr;
+  }
+  // Read the whole file into a string so we can (a) deserialize from it
+  // and (b) stash it into the mirror without re-reading from disk.
+  std::string bytes{std::istreambuf_iterator<char>(ifs),
+                    std::istreambuf_iterator<char>()};
+  ifs.close();
+
+  std::istringstream iss(bytes, std::ios::in | std::ios::binary);
+  auto ckd = deserialize_from(iss);
+  if (ckd == nullptr) {
+    TI_DEBUG("Load cache file {} failed or is corrupt", filename);
+    return nullptr;
+  }
+  // Only cache well-formed bytes so that mirror hits are always valid.
+  InprocDiskMirror::put(kernel_key, std::move(bytes));
+  return ckd;
 }
 
 CacheData::CacheMode KernelCompilationManager::get_cache_mode(
