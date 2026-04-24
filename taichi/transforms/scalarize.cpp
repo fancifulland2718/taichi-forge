@@ -1348,6 +1348,15 @@ class HasMatrixStmt : public BasicStmtVisitor {
   using BasicStmtVisitor::visit;
   bool found_ = false;
 
+  HasMatrixStmt() {
+    // BasicStmtVisitor sets allow_undefined_visitor=true but leaves
+    // invoke_default_visitor=false, which would swallow every typed
+    // stmt (MatrixInitStmt, AllocaStmt, ...) before reaching our
+    // visit(Stmt*). Flip the flag so each typed stmt falls through
+    // to our single generic predicate.
+    invoke_default_visitor = true;
+  }
+
   void visit(Stmt *stmt) override {
     if (found_) {
       return;

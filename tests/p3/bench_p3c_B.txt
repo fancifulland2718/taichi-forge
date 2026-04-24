@@ -1,6 +1,6 @@
-﻿# label=B_with_P3c
+﻿# label=B2_with_P3c_fixed
 scenario	param	median_s
-scalar	unroll=32	0.0941
-scalar	unroll=128	0.1776
-scalar	unroll=400	0.5683
-scalar	unroll=800	1.6722
+scalar	unroll=32	0.0906
+scalar	unroll=128	0.1789
+scalar	unroll=400	0.5759
+scalar	unroll=800	1.7020
