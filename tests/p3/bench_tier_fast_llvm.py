@@ -17,7 +17,7 @@ def run_one(tier: str, N: int) -> tuple[float, str]:
     # We use _p3d_child.py but inject TI_TIER env var. Simpler: new tiny child.
     src = """
 import sys, time
-import taichi as ti
+import taichi_forge as ti
 tier = sys.argv[1]
 N = int(sys.argv[2])
 ti.init(arch=ti.cpu, offline_cache=False, compile_tier=tier)

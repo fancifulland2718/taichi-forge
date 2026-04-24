@@ -25,7 +25,7 @@ videos**. This tutorial demonstrates how to use them step by step.
 - We recommend using `png` format. For example:
 
 ```python {23}
-import taichi as ti
+import taichi_forge as ti
 import os
 
 ti.init()
@@ -58,7 +58,7 @@ To save images without invoking `ti.GUI.show(filename)`, use
 `ti.tools.imwrite(filename)`. For example:
 
 ```python {14}
-import taichi as ti
+import taichi_forge as ti
 
 ti.init()
 
@@ -125,7 +125,7 @@ instructions of `ffmpeg` at the end of this page.
   format. For example,
 
 ```python {13,24}
-import taichi as ti
+import taichi_forge as ti
 
 ti.init()
 
@@ -227,7 +227,7 @@ brew install ffmpeg
   with vertices randomly colored,
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 import numpy as np
 
 ti.init(arch=ti.cpu)

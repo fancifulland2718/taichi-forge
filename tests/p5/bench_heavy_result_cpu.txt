@@ -1,0 +1,6 @@
+[p5b-heavy] n=16 threads=8 repeat=1 py=['py', '-3.10']
+------------------------------------------------------------------------------
+  cpu      skipped (parallel): worker failed rc=1: stderr=Traceback (most recent call last):
+  File "D:\taichi\tests\p5\_bench_worker_heavy.py", line 62, in <module>
+    prog.compile_kernels(prog.config(), specs)
+AttributeError: 'taichi._lib.core.taichi_python.Program' object has no attribute 'compile_kernels'. Did you mean: 'com

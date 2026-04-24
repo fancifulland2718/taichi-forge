@@ -335,7 +335,7 @@ OK
 ### 对外 API
 
 `python
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.cpu)                        # 默认 balanced
 ti.init(arch=ti.cpu, compile_tier="full")   # 遇到疑似 P2.0/P2.b 过激导致的代码退化时启用
 ti.init(arch=ti.cpu, compile_tier="fast")   # 目前 == balanced；P2.d 落地后提供 opt-on-warm

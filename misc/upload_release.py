@@ -41,7 +41,7 @@ def upload_artifact(is_taichi):
         sys.exit(f"Missing password env var {pwd_env}")
     command = [sys.executable, "-m", "twine", "upload"]
     if not is_taichi:
-        command.extend(["--repository-url", "https://pypi.taichi.graphics/simple/"])
+        command.extend(["--repository-url", "https://pypi.taichi_forge.graphics/simple/"])
     uname = "__token__" if is_taichi else os.getenv("NIGHT_USERNAME")
     command.extend(["--verbose", "-u", uname, "-p", twine_password, "dist/*"])
 
@@ -53,7 +53,7 @@ def upload_artifact(is_taichi):
 
 if __name__ == "__main__":
     if os.getenv("GITHUB_REPOSITORY", "taichi-dev/taichi") != "taichi-dev/taichi":
-        print("This script should be run from taichi repo")
+        print("This script should be run from taichi_forge repo")
         sys.exit(0)
     is_taichi = os.getenv("PROJECT_NAME", "taichi") == "taichi"
     upload_artifact(is_taichi)

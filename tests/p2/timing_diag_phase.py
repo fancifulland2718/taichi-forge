@@ -11,7 +11,7 @@ import time
 sys.path.insert(0, os.path.dirname(__file__))
 os.environ["TI_PRINT_IR"] = "0"
 
-import taichi as ti  # noqa: E402
+import taichi_forge as ti  # noqa: E402
 from heavy_kernels import make_sph_force, make_mat14  # noqa: E402
 
 

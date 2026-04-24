@@ -2,9 +2,9 @@ import platform
 
 import numpy as np
 import pytest
-from taichi.lang.exception import TaichiCompilationError
+from taichi_forge.lang.exception import TaichiCompilationError
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 supported_floating_types = [ti.f32] if platform.system() == "Darwin" else [ti.f32, ti.f64]

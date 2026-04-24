@@ -29,7 +29,7 @@ if not kernel_name:
     print("_HK_NAME not set", file=sys.stderr)
     sys.exit(1)
 
-import taichi as ti  # noqa: E402
+import taichi_forge as ti  # noqa: E402
 
 arch_map = {
     "cpu":    ti.cpu,

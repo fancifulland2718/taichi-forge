@@ -1,7 +1,7 @@
 """CUDA sanity for tier=fast: compile + run and ensure numerical parity
 versus tier=balanced within 1e-5 relative tolerance (Taichi cross-backend bar).
 """
-import taichi as ti
+import taichi_forge as ti
 
 
 def run(tier):

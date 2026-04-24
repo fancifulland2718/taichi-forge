@@ -250,7 +250,7 @@ assign_vectorized()
 ## Reference examples
 
 The following examples are from the
-[QuanTaichi paper](https://yuanming.taichi.graphics/publication/2021-quantaichi/quantaichi.pdf),
+[QuanTaichi paper](https://yuanming.taichi_forge.graphics/publication/2021-quantaichi/quantaichi.pdf),
 so you can dig into details there.
 
 ### [Game of Life](https://github.com/taichi-dev/quantaichi/tree/main/gol)

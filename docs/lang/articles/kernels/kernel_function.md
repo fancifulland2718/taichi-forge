@@ -14,7 +14,7 @@ Taichi and Python share a similar syntax, but they are not identical. To disting
 In the following example, `inv_square()` is decorated with `@ti.func` and is a Taichi function. `partial_sum()` is decorated with `@ti.kernel` and is a kernel. The former (`inv_square()`) is called by the latter (`partial_sum()`). The arguments and return value in `partial_sum()` are type hinted, while those in the Taichi function `inv_square()` are not.
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.cpu)
 
 @ti.func
@@ -48,7 +48,7 @@ Let's introduce two important concepts: *Taichi scope* and *Python scope*.
 Calling a Taichi function in the Python scope results in a syntax error raised by Taichi. For example:
 
 ```python skip-ci:NotRunnable
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.cpu)
 
 @ti.func
@@ -134,7 +134,7 @@ In the example below, `x` is updated after `my_kernel()` is called since it is p
 
 ```python {9,10,11}
 import numpy as np
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.cpu)
 
 x = np.array([1, 2, 3])
@@ -251,7 +251,7 @@ def test_sign(x: float) -> float:
 In Taichi, a kernel treats global variables as compile-time constants. This means that it takes in the current values of the global variables at the time it is compiled and does not track changes to them afterwards. Consider the following example:
 
 ```python skip-ci:ToyDemo
-import taichi as ti
+import taichi_forge as ti
 ti.init()
 
 a = 1

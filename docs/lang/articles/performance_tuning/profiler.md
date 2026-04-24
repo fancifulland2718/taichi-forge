@@ -20,7 +20,7 @@ Currently, Taichi provides two profiling tools:
 For example:
 
 ```python {12}
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.cpu)
 var = ti.field(ti.f32, shape=1)
@@ -51,7 +51,7 @@ ti.profiler.print_scoped_profiler_info()
 For example:
 
 ```python {3,13,14,18}
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(ti.cpu, kernel_profiler=True)
 x = ti.field(ti.f32, shape=1024*1024)

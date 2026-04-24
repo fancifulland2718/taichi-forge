@@ -398,7 +398,7 @@ class Module:
     @staticmethod
     def load_all(builtin_tys):
         j = None
-        with open("c_api/taichi.json") as f:
+        with open("c_api/taichi_forge.json") as f:
             j = json.load(f)
 
         version = Version("v0")

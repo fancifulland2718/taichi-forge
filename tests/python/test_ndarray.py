@@ -2,13 +2,13 @@ import copy
 
 import numpy as np
 import pytest
-from taichi.lang import impl
-from taichi.lang.exception import TaichiIndexError, TaichiRuntimeError, TaichiTypeError
-from taichi.lang.misc import get_host_arch_list
-from taichi.lang.util import has_pytorch
-from taichi.math import vec3, ivec3
+from taichi_forge.lang import impl
+from taichi_forge.lang.exception import TaichiIndexError, TaichiRuntimeError, TaichiTypeError
+from taichi_forge.lang.misc import get_host_arch_list
+from taichi_forge.lang.util import has_pytorch
+from taichi_forge.math import vec3, ivec3
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 if has_pytorch():

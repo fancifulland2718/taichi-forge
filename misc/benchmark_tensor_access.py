@@ -2,7 +2,7 @@ import ctypes
 import math
 import time
 
-import taichi as ti
+import taichi_forge as ti
 
 libm = ctypes.CDLL("libm.so.6")
 

@@ -29,8 +29,8 @@ pip install taichi
 A basic fractal example, the [Julia fractal](https://en.wikipedia.org/wiki/Julia_set), can be a good starting point for you to understand the fundamentals of the Taichi programming language.
 
 ```python title=fractal.py
-import taichi as ti
-import taichi.math as tm
+import taichi_forge as ti
+import taichi_forge.math as tm
 
 ti.init(arch=ti.gpu)
 
@@ -84,8 +84,8 @@ Let's dive into this simple Taichi program.
 ### Import Taichi
 
 ```python skip-ci:Trivial
-import taichi as ti
-import taichi.math as tm
+import taichi_forge as ti
+import taichi_forge.math as tm
 ```
 
 The first two lines import Taichi and its `math` module. The `math` module contains built-in vectors and matrices of small dimensions, such as `vec2` for 2D real vectors and `mat3` for 3&times;3 real matrices. See the [Math Module](../math/math_module.md) for more information.

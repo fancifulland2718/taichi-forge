@@ -1,7 +1,7 @@
 import argparse
 import os
 
-import taichi as ti
+import taichi_forge as ti
 
 
 def main(arch):

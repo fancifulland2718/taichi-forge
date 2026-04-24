@@ -7,7 +7,7 @@ high budgets is unaffected.
 import os
 import sys
 import numpy as np
-import taichi as ti
+import taichi_forge as ti
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "p2"))
 

@@ -2,7 +2,7 @@ import autograd.numpy as np
 from autograd import grad
 from pytest import approx
 
-import taichi as ti
+import taichi_forge as ti
 
 
 @ti.test()

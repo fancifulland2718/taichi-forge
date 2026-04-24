@@ -8,7 +8,7 @@ import math
 
 import numpy as np
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 

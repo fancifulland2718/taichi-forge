@@ -141,7 +141,7 @@ One feasible solution is `field.from_numpy(ti.tools.imread('filename.png'))`.
 Yes, Taichi supports many popular Python packages. Taichi provides helper functions such as `from_numpy` and `to_numpy` to transfer data between Taichi fields and NumPy arrays, so that you can also use your favorite Python packages (e.g., `numpy`, `pytorch`, `matplotlib`) together with Taichi as below:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -181,7 +181,7 @@ You can follow the instructions provided [here](https://github.com/taichi-dev/ta
 To better understand the question, look at the program below:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 ti.init()
 
@@ -216,7 +216,7 @@ A Taichi kernel **cannot** take a Python list directly. You need to use NumPy ar
 For example, the following code snippet does not work:
 
 ```python skip-ci:Error
-import taichi as ti
+import taichi_forge as ti
 import numpy as np
 ti.init()
 x = ti.field(ti.i32, shape=3)
@@ -232,7 +232,7 @@ test(array)
 You need to import NumPy:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 import numpy as np
 ti.init(arch=ti.cpu)
 x = ti.field(ti.i32, shape=3)
@@ -319,7 +319,7 @@ You cannot save data in Taichi fields directly, but there is a workaround. Taich
 A simple example:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 import numpy as np
 
 ti.init(arch=ti.cpu)

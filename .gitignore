@@ -96,3 +96,5 @@ imgui.ini
 tests/p2/*.txt
 tests/p2/*.log
 
+/.llvm20
+/.llvm20_build.log

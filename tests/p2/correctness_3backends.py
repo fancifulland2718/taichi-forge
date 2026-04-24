@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
-import taichi as ti
+import taichi_forge as ti
 
 ARCHES = [("cpu", ti.cpu), ("cuda", ti.cuda), ("vulkan", ti.vulkan)]
 

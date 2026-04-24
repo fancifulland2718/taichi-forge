@@ -2,7 +2,7 @@ cmake>=3.20,<4.0.0
 colorama
 coverage
 Pillow
-pybind11
+pybind11>=2.13
 GitPython
 yapf
 distro
@@ -10,13 +10,10 @@ isort
 pylint
 requests
 twine
-wheel
 pre-commit
-# scikit-build 0.19.x still references `distutils.command.build_py` via the
-# setuptools legacy-distutils shim, which setuptools >=80 removed. Pinning
-# setuptools below that boundary keeps the existing scikit-build-based
-# setup.py working until we migrate to scikit-build-core.
-setuptools<80
-scikit-build
+# scikit-build-core is a PEP 517 backend — no more `wheel` FutureWarning
+# and compatible with Python 3.14 + setuptools 80+ out of the box.
+scikit-build-core>=0.10
+build
 numpy
 ninja; platform_system != 'Windows'

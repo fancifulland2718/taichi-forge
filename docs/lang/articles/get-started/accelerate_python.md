@@ -58,7 +58,7 @@ sys        0m0.000s
 2.  Now, let's change the code a bit: import Taichi to your Python code and initialize it using the CPU backend:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.cpu)
 ```
 
@@ -122,7 +122,7 @@ The example below follows the philosophy of DP to work out the length of the lon
 1. Import NumPy and Taichi to your Python program:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 import numpy as np
 ```
 
@@ -176,7 +176,7 @@ def compute_lcs(a: ti.types.ndarray(), b: ti.types.ndarray()) -> ti.i32:
    *Now you get the following program:*
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 import numpy as np
 
 ti.init(arch=ti.cpu)

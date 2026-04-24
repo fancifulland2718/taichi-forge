@@ -12,8 +12,8 @@ import tempfile
 
 RUNNER = r'''
 import sys, time
-import taichi as ti
-from taichi.lang.exception import TaichiCompilationError
+import taichi_forge as ti
+from taichi_forge.lang.exception import TaichiCompilationError
 
 N = {N}
 HL = {HL}

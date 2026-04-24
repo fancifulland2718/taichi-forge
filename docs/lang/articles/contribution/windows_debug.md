@@ -29,7 +29,7 @@ After cleaning up the _skbuild folder, if the previously used generator is Ninja
 
 ## Step 2. Navigate to the generated Visual Studio Project file
 
-Go to the build folder, which is `_skbuild\win-amd64-3.9\cmake-build` in the author's case, and double click `taichi.sln`. You can also open this SLN solution file from Visual Studio. This should open Visual Studio IDE with the setup for Taichi.
+Go to the build folder, which is `_skbuild\win-amd64-3.9\cmake-build` in the author's case, and double click `taichi_forge.sln`. You can also open this SLN solution file from Visual Studio. This should open Visual Studio IDE with the setup for Taichi.
 The following image shows a possible layout after Visual Studio is launched. The layout is open to reconfiguration.
 
 ![image13](https://user-images.githubusercontent.com/11663476/212577220-92a8a7cb-f6ff-4365-9808-0a7299be87cd.png)

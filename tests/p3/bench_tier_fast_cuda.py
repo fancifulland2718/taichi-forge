@@ -6,7 +6,7 @@ HERE = Path(__file__).parent
 
 SRC = r"""
 import sys, time
-import taichi as ti
+import taichi_forge as ti
 tier = sys.argv[1]; N = int(sys.argv[2])
 ti.init(arch=ti.cuda, offline_cache=False, compile_tier=tier)
 x = ti.field(ti.f64, shape=256)

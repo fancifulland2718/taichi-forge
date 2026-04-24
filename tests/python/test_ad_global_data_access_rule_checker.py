@@ -1,7 +1,7 @@
 import pytest
-from taichi.lang.enums import AutodiffMode
+from taichi_forge.lang.enums import AutodiffMode
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 

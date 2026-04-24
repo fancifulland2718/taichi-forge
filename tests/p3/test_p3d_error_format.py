@@ -10,7 +10,7 @@ has the key properties:
      the source line in output order).
 """
 from __future__ import annotations
-import taichi as ti
+import taichi_forge as ti
 
 
 def _assert_error_format(src_fragment: str, trigger):

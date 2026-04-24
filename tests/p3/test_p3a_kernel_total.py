@@ -3,8 +3,8 @@
 Two modest nested ti.static loops (8 x 8 = 64 iters) pass per-loop limit=16
 but exceed the kernel-total cap=32. Must abort.
 """
-import taichi as ti
-from taichi.lang.exception import TaichiCompilationError
+import taichi_forge as ti
+from taichi_forge.lang.exception import TaichiCompilationError
 
 
 def main():

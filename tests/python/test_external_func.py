@@ -4,9 +4,9 @@ import shutil
 import tempfile
 
 import pytest
-from taichi.lang.util import has_clangpp
+from taichi_forge.lang.util import has_clangpp
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 

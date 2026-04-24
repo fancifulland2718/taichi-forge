@@ -9,9 +9,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from taichi._main import TaichiMain
+from taichi_forge._main import TaichiMain
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 

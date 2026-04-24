@@ -4,10 +4,10 @@ To test our new `ti.field` API is functional (#1500)
 
 import numpy as np
 import pytest
-from taichi.lang import impl
-from taichi.lang.misc import get_host_arch_list
+from taichi_forge.lang import impl
+from taichi_forge.lang.misc import get_host_arch_list
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 data_types = [ti.i32, ti.f32, ti.i64, ti.f64]

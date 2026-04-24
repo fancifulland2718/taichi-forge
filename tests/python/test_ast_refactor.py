@@ -2,10 +2,10 @@ import sys
 
 import numpy as np
 import pytest
-from taichi.lang import impl
-from taichi.lang.util import has_pytorch
+from taichi_forge.lang import impl
+from taichi_forge.lang.util import has_pytorch
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 if sys.version_info >= (3, 8):
@@ -759,7 +759,7 @@ def test_recreate_variable():
 
 @test_utils.test()
 def test_taichi_other_than_ti():
-    import taichi as tc
+    import taichi_forge as tc
 
     @tc.func
     def bar(x: tc.template()):

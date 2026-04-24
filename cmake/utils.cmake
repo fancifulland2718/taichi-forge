@@ -8,11 +8,11 @@ function(target_enable_function_level_linking TARGET)
     endif()
 endfunction()
 
-# Silence LLVM 19 [[deprecated]] warnings on legacy PassManager /
-# PassManagerBuilder APIs that Taichi still uses. The migration to
-# `llvm::PassBuilder` + `llvm::ModulePassManager` is scheduled for
-# Phase 6 (LLVM 22). Applying the suppression here keeps `-Werror`
-# builds green on the interim LLVM 19 baseline.
+# Silence LLVM 19/20 [[deprecated]] warnings on legacy PassManager /
+# PassManagerBuilder APIs that Taichi still uses in the codegen-to-machine-
+# code (`addPassesToEmitFile`) path. The migration away from
+# `legacy::PassManager` is scheduled for Phase 6 (LLVM 21+). Applying the
+# suppression here keeps `-Werror` builds green on LLVM 19 and 20.
 function(target_silence_llvm_deprecated_warnings TARGET)
     if(MSVC)
         target_compile_options(${TARGET} PRIVATE /wd4996)

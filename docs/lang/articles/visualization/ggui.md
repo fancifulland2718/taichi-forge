@@ -135,7 +135,7 @@ If a mesh has `num` triangles, the `indices` should be a 1D scalar field with a 
 1. An example of drawing 3d-lines
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.cuda)
 
@@ -227,7 +227,7 @@ scene.mesh(
 2. An example of drawing part of lines
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.cuda)
 

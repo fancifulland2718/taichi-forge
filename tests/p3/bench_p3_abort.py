@@ -9,8 +9,8 @@ for tens of seconds on a pathological static loop, they get a clear error
 in a few milliseconds.
 """
 import time
-import taichi as ti
-from taichi.lang.exception import TaichiCompilationError
+import taichi_forge as ti
+from taichi_forge.lang.exception import TaichiCompilationError
 
 
 SIZES = [400, 800, 1600]

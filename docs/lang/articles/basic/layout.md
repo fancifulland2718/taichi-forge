@@ -346,7 +346,7 @@ In this scenario, Taichi provides the `FieldsBuilder` for manual field memory al
 Let's see a simple example:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init()
 
 @ti.kernel

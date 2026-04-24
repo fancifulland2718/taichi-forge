@@ -1,4 +1,4 @@
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(ti.opengl, saturating_grid_dim=8)
 ti.set_logging_level(ti.DEBUG)

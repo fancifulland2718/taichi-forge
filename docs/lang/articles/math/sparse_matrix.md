@@ -20,7 +20,7 @@ The sparse matrix feature is still under development. There are some limitations
 :::
 Here's an example:
 ```python
-import taichi as ti
+import taichi_forge as ti
 arch = ti.cpu # or ti.cuda
 ti.init(arch=arch)
 

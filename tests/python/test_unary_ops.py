@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
-from taichi.lang.exception import TaichiTypeError
+from taichi_forge.lang.exception import TaichiTypeError
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 

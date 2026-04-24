@@ -4,7 +4,7 @@ Used after each P2.x sub-stage to catch regressions before bench runs.
 Exits with non-zero if any backend produces wrong numbers.
 """
 import sys
-import taichi as ti
+import taichi_forge as ti
 
 EXPECTED_HEAD = [1.5, 2.5, 5.5, 10.5]    # i*i + 1.5 for i=0..3
 EXPECTED_TAIL = [3845.5, 3970.5]         # i=62, 63

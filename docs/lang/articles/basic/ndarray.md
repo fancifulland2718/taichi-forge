@@ -91,7 +91,7 @@ It is important to note that the `dtype` and `ndim` arguments are optional when 
 In certain scenarios, it may be necessary to process arrays with vector or matrix elements, such as an RGB pixel map (vec3). Taichi provides support for these types of arrays through the use of vector and matrix data types. An example of this would be creating an ndarray for a pixel map with vec3 elements, as demonstrated in the following code snippet:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.cuda)
 

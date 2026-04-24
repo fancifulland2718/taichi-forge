@@ -1,9 +1,9 @@
 import math
 
 import pytest
-from taichi.linalg import LinearOperator, MatrixFreeCG
+from taichi_forge.linalg import LinearOperator, MatrixFreeCG
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 vk_on_mac = (ti.vulkan, "Darwin")

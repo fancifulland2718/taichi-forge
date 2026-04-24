@@ -1,6 +1,6 @@
 """P5.b parity — parallel batch compile must produce same results as serial launches."""
 
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.cpu, offline_cache=False, num_compile_threads=4)
 

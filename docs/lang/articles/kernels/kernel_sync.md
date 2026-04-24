@@ -10,7 +10,7 @@ For example, to measure the execution time of a kernel on the GPU using Python's
 
 ```python
 import time
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.gpu)
 
 @ti.kernel
@@ -33,7 +33,7 @@ To wait for the `benchmark` function to finish before executing subsequent state
 
 ```python skip-ci
 import time
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.gpu)
 
 @ti.kernel

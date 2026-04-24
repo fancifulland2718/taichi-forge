@@ -17,8 +17,8 @@ Taichi provides a built-in `math` module that supports frequently used mathemati
 You must call the mathematical functions provided by Taichi's `math` module from within the Taichi scope. For example:
 
 ```python
-import taichi as ti
-import taichi.math as tm
+import taichi_forge as ti
+import taichi_forge.math as tm
 ti.init()
 
 @ti.kernel
@@ -132,8 +132,8 @@ u = v.rraa  # vec4(1, 1, 2, 2)
 Taichi's math module also supports a few [GLSL standard functions](https://registry.khronos.org/OpenGL-Refpages/gl4/index.php). These functions follow the GLSL standard, except that they accept arbitrary vectors and matrices as arguments and operate on them element-wise. For example:
 
 ```python
-import taichi as ti
-import taichi.math as tm
+import taichi_forge as ti
+import taichi_forge.math as tm
 
 @ti.kernel
 def example():
@@ -159,8 +159,8 @@ You can use a 2D vector of type `ti.math.vec2` to represent a complex number. In
 
 
 ```python
-import taichi as ti
-import taichi.math as tm
+import taichi_forge as ti
+import taichi_forge.math as tm
 ti.init()
 
 @ti.kernel

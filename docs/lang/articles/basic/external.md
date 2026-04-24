@@ -159,7 +159,7 @@ Use type hint `ti.types.ndarray()` to pass external arrays as kernel arguments.
 The following example shows the most basic way to call `ti.types.ndarray()`:
 
 ```python {10}
-import taichi as ti
+import taichi_forge as ti
 import numpy as np
 ti.init()
 

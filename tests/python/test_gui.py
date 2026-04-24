@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
-from taichi.lang.misc import get_host_arch_list
+from taichi_forge.lang.misc import get_host_arch_list
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 
@@ -74,7 +74,7 @@ def test_set_image_fast_gui_with_offset(channel, dtype, color, offset):
     fast_image = gui.img
 
     alpha = 0xFF << 24
-    from taichi._lib.utils import get_os_name  # pylint: disable=C0415
+    from taichi_forge._lib.utils import get_os_name  # pylint: disable=C0415
 
     rgb_color = (
         (color << 16) + (color << 8) + color

@@ -1,6 +1,6 @@
 """P3.a — smoke test: a plain ti.static(range(N)) loop unrolled below
 unrolling_hard_limit must compile and run correctly (semantics unchanged)."""
-import taichi as ti
+import taichi_forge as ti
 
 
 def main():

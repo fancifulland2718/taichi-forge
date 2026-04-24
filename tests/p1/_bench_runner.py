@@ -30,7 +30,7 @@ if spec is None:
     print(f"Unknown kernel: {kernel_name!r}", file=sys.stderr)
     sys.exit(1)
 
-ti = importlib.import_module("taichi")
+ti = importlib.import_module("taichi_forge")
 arch = getattr(ti, arch_str, ti.cpu)
 
 # No offline cache → guaranteed cold compile.

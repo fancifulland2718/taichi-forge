@@ -1,10 +1,10 @@
-import taichi as ti
+import taichi_forge as ti
 
 import pytest
-from taichi.lang.exception import TaichiRuntimeError
+from taichi_forge.lang.exception import TaichiRuntimeError
 
 from tests import test_utils
-from taichi.lang.util import has_pytorch
+from taichi_forge.lang.util import has_pytorch
 
 if has_pytorch():
     import torch

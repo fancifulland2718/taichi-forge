@@ -90,7 +90,7 @@ Taking
 as an example:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init()
 
 N = 8
@@ -175,7 +175,7 @@ will always be multiplied to the `grad` with respect to the inputs at the end of
 By calling `ti.ad.Tape()`, you have the program do this under the hood.
 
 ```python {13-14}
-import taichi as ti
+import taichi_forge as ti
 ti.init()
 
 N = 16
@@ -232,7 +232,7 @@ Once you read an element in a field, the element cannot be mutated anymore.
 :::
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init()
 
 N = 16
@@ -271,7 +271,7 @@ If a global field element is written more than once, then starting from the seco
 :::
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init()
 
 N = 16
@@ -313,7 +313,7 @@ A checker is provided for detecting potential violations of global data access r
 For example:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init(debug=True)
 
 N = 5
@@ -336,7 +336,7 @@ with ti.ad.Tape(loss, validation=True):
     func_2()
 
 """
-taichi.lang.exception.TaichiAssertionError:
+taichi_forge.lang.exception.TaichiAssertionError:
 (kernel=func_2_c78_0) Breaks the global data access rule. Snode S10 is overwritten unexpectedly.
 File "across_kernel.py", line 16, in func_2:
     b[None] += 100
@@ -380,7 +380,7 @@ Taichi's compiler only captures the code in the Taichi scope when performing the
 Example:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 ti.init()
 x = ti.field(dtype=float, shape=(), needs_grad=True)
@@ -429,7 +429,7 @@ automatic differentiation behavior.
 The following is a simple example to use customized gradient function in autodiff:
 
 ```
-import taichi as ti
+import taichi_forge as ti
 ti.init()
 
 x = ti.field(ti.f32)
@@ -512,7 +512,7 @@ The usage of `ti.ad.FwdMode()` is similar to that of `ti.ad.Tape()`. Here we reu
 The following code snippet explains the steps above:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init()
 
 x = ti.field(dtype=ti.f32, shape=(), needs_dual=True)
@@ -543,7 +543,7 @@ print('dy/dx =', y.dual[None], ' at x =', x[None])
 The following code snippet shows another two cases with multiple inputs and outputs: With `seed=[1.0, 0.0] `or `seed=[0.0, 1.0]` , we can compute derivatives solely with respect to `x_0` or `x_1`.
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init()
 N_param = 2
 N_loss = 5

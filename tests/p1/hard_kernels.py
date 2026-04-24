@@ -14,7 +14,7 @@ compiled kernel.  The factories are intentionally *heavy*:
 Design rule: each kernel should take ≥ 200 ms to compile cold on a modern CPU.
 """
 from __future__ import annotations
-import taichi as _ti_placeholder  # used only for type hints in forward-declarations
+import taichi_forge as _ti_placeholder  # used only for type hints in forward-declarations
 
 
 # ---------------------------------------------------------------------------

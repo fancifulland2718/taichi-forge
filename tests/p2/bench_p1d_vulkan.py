@@ -30,7 +30,7 @@ def wipe_cache() -> None:
 CHILD = r"""
 import sys, time, json
 sys.path.insert(0, r"d:\taichi\tests\p2")
-import taichi as ti
+import taichi_forge as ti
 import heavy_kernels as hk
 
 tier = sys.argv[1]
