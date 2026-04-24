@@ -265,6 +265,20 @@ class _SpecialConfig:
         self.short_circuit_operators = True
         self.print_full_traceback = False
         self.unrolling_limit = 32
+        # P3.a — hard stop for a single ti.static(for ...) unroll. 0 = disabled.
+        # When > 0 and a static-for would emit more than this many iterations,
+        # compilation aborts with TaichiCompilationError instead of running to
+        # completion (which can take tens of seconds on nested unrolls).
+        self.unrolling_hard_limit = 0
+        # P3.a — hard stop for the cumulative unroll iteration count within
+        # a single kernel/function compile. 0 = disabled. Catches pathological
+        # nested ti.static loops (e.g. 27^3 = 19683) that individually fall
+        # under unrolling_hard_limit but collectively explode the IR.
+        self.unrolling_kernel_hard_limit = 0
+        # P3.b — hard stop for the @ti.func inline recursion depth. 0 = disabled.
+        # Counts nested non-real @ti.func calls; raises when the chain would
+        # inline more than this many frames deep.
+        self.func_inline_depth_limit = 0
 
 
 def prepare_sandbox():
@@ -418,6 +432,9 @@ def init(
     env_spec.add("short_circuit_operators")
     env_spec.add("print_full_traceback")
     env_spec.add("unrolling_limit")
+    env_spec.add("unrolling_hard_limit")
+    env_spec.add("unrolling_kernel_hard_limit")
+    env_spec.add("func_inline_depth_limit")
 
     # compiler configurations (ti.cfg):
     for key in dir(cfg):
@@ -439,6 +456,9 @@ def init(
         impl.get_runtime().short_circuit_operators = spec_cfg.short_circuit_operators
         impl.get_runtime().print_full_traceback = spec_cfg.print_full_traceback
         impl.get_runtime().unrolling_limit = spec_cfg.unrolling_limit
+        impl.get_runtime().unrolling_hard_limit = spec_cfg.unrolling_hard_limit
+        impl.get_runtime().unrolling_kernel_hard_limit = spec_cfg.unrolling_kernel_hard_limit
+        impl.get_runtime().func_inline_depth_limit = spec_cfg.func_inline_depth_limit
         _logging.set_logging_level(spec_cfg.log_level.lower())
 
     # select arch (backend):

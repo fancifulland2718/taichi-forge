@@ -339,6 +339,14 @@ class PyTaichi:
         self.kernels = kernels or []
         self._signal_handler_registry = None
         self.unfinalized_fields_builder = {}
+        # P3 — frontend IR size-control knobs. Default 0 = disabled (no
+        # behavior change). Set via ti.init(...) in misc.py.
+        self.unrolling_limit = 32
+        self.unrolling_hard_limit = 0
+        self.unrolling_kernel_hard_limit = 0
+        self.func_inline_depth_limit = 0
+        # Live counters used by the enforcement hooks; reset per kernel compile.
+        self.func_inline_depth = 0
 
     def initialize_fields_builder(self, builder):
         self.unfinalized_fields_builder[builder] = get_traceback(2)
