@@ -186,7 +186,7 @@ jobs:
   build_windows:
     name: Windows wheel (py${{ matrix.python }})
     needs: resolve_version
-    runs-on: windows-2026
+    runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
@@ -277,7 +277,7 @@ jobs:
       github.event.inputs.publish == 'true'
     environment:
       name: ${{ github.event.inputs.target == 'pypi' && 'pypi' || 'testpypi' }}
-      url: ${{ github.event.inputs.target == 'pypi' && 'https://pypi.org/p/taichi' || 'https://test.pypi.org/p/taichi' }}
+      url: ${{ github.event.inputs.target == 'pypi' && 'https://pypi.org/p/taichi-forge' || 'https://test.pypi.org/p/taichi-forge' }}
     steps:
       - uses: actions/checkout@v4
 
