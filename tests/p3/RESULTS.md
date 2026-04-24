@@ -55,6 +55,24 @@ Baseline scales roughly O(N); abort time is constant (≈13 ms — the budget
 check fires on the 51st iteration before body expansion balloons). At
 N=1600 the user gets a clear error in 13 ms instead of waiting 9 s.
 
+### Cold-process verification (`bench_p3_abort_cold.py`)
+
+Each row spawns a fresh python interpreter — zero in-process cache. Inner
+`dt` measures just the kernel compile + sync (excludes `import taichi`).
+
+|   N | HL |  inner dt (s) | status |
+| ---:| ---:| ---:| ---:|
+|  800 |  0 |        2.499 |     ok |
+|  800 | 50 |        0.023 | aborted |
+| 1600 |  0 |        9.062 |     ok |
+| 1600 | 50 |        0.023 | aborted |
+
+Baselines match the in-process bench within <1 % (2.46 s→2.50 s, 9.04 s→9.06 s):
+the savings are genuinely cold-compile, not a JIT-warm artefact. The abort
+floor is ~23 ms in a fresh interpreter vs ~13 ms when warm; the delta is the
+one-time kernel-wrap / launcher initialisation inside `run()` on the first
+call. Cold speed-up at N=1600 is 9.062 s → 23 ms = **≈394×**.
+
 ## Parity vs V1/V2
 
 - Default config (`unrolling_hard_limit=0`) → `ASTTransformer._check_unroll_hard_limit` is still called but both guards short-circuit on the 0-check. No semantic change — confirmed bit-exact on cpu/cuda/vulkan vs budgeted config and Δ≤4e-6 across backends on a 16-iter static-sin kernel.
