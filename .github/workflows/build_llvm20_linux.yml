@@ -1,0 +1,84 @@
+# Builds a stock LLVM 20.1.x distribution on manylinux_2_28 (quay.io
+# image) and uploads the tarball to a GitHub Release. The release asset
+# URL is then wired into the PyPI publish workflow via the
+# `LLVM20_LINUX_URL` repo variable.
+name: Build LLVM 20 for Linux
+
+on:
+  workflow_dispatch:
+    inputs:
+      llvm_tag:
+        description: "LLVM git tag (e.g. llvmorg-20.1.7)"
+        required: true
+        default: "llvmorg-20.1.7"
+      release_tag:
+        description: "GitHub release tag to create / update"
+        required: true
+        default: "llvm20"
+      variant:
+        description: "manylinux_2_28 | manylinux2014"
+        required: true
+        default: "manylinux_2_28"
+
+permissions:
+  contents: write
+
+jobs:
+  build-llvm20-linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    container:
+      image: ${{ github.event.inputs.variant == 'manylinux2014' && 'quay.io/pypa/manylinux2014_x86_64:latest' || 'quay.io/pypa/manylinux_2_28_x86_64:latest' }}
+    steps:
+      - name: Install build deps
+        run: |
+          yum install -y ninja-build cmake git || dnf install -y ninja-build cmake git
+
+      - name: Clone LLVM
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.llvm_tag }}" \
+            https://github.com/llvm/llvm-project.git llvm-project
+
+      - name: Configure LLVM
+        run: |
+          cmake -S llvm-project/llvm -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/dist/taichi-llvm-20" \
+            -DLLVM_ENABLE_PROJECTS="" \
+            -DLLVM_TARGETS_TO_BUILD="X86;NVPTX;AMDGPU" \
+            -DLLVM_ENABLE_RTTI=ON \
+            -DLLVM_ENABLE_ASSERTIONS=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_BUILD_LLVM_C_DYLIB=OFF \
+            -DLLVM_BUILD_TOOLS=OFF \
+            -DLLVM_BUILD_UTILS=OFF
+
+      - name: Build & install LLVM
+        run: cmake --build build --target install --config Release
+
+      - name: Package zip
+        run: |
+          ZIP="taichi-llvm-20-${{ github.event.inputs.variant }}.zip"
+          cd dist/taichi-llvm-20
+          zip -r "../../$ZIP" .
+          cd ../..
+          sha256sum "$ZIP" | tee "$ZIP.sha256.txt"
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          name: LLVM 20 Linux (${{ github.event.inputs.variant }})
+          files: |
+            taichi-llvm-20-${{ github.event.inputs.variant }}.zip
+            taichi-llvm-20-${{ github.event.inputs.variant }}.zip.sha256.txt
+          draft: false
+          prerelease: false
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}

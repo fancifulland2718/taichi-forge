@@ -113,8 +113,8 @@ class Clean(clean):
             if os.path.exists(d):
                 remove_tree(d, dry_run=self.dry_run)
         # Selectively clean dist/: remove wheels/eggs but preserve the local
-        # LLVM install (dist/taichi-llvm-19[…]) produced by
-        # scripts/build_llvm19_local.ps1 — otherwise the subsequent
+        # LLVM install (dist/taichi-llvm-{20,19}) produced by
+        # scripts/build_llvm{20,19}_local.ps1 — otherwise the subsequent
         # bdist_wheel step loses its LLVM toolchain.
         if os.path.exists("dist"):
             for name in os.listdir("dist"):
