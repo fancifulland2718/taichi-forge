@@ -130,6 +130,46 @@ of 5 sub-pass walks to a single `HasMatrixStmt` scan — measured
 bit-exact on the freshly rebuilt wheel `taichi-1.8.0-cp310-cp310-win_amd64.whl`
 (commit `8c1ceec6`): Δ=0 on default-vs-budgeted, Δ≤4e-6 across backends.
 
+### P3.c correctness fix (commit `bfd6871fc`)
+
+The initial P3.c landing (`274268544`) had a latent bug in the
+`HasMatrixStmt` visitor. `BasicStmtVisitor` leaves
+`invoke_default_visitor=false`, so the generic `visit(Stmt*)` override was
+never dispatched to for any typed statement — the predicate always returned
+`false` and the early-exit fired on **every** kernel. Scalar tests passed by
+accident (scalarize is a no-op on scalar IR), but matrix kernels
+miscompiled: `ti.Vector([...])` / `ti.Matrix(...) @ ti.Matrix(...)` /
+`M[i]` field loads leaked through unscalarized into LLVM codegen, triggering
+asserts like
+
+    Floating-point arithmetic operators only work with floating-point types!
+      %20 = fadd reassoc ninf nsz [3 x float] %15, %19
+
+and (on CUDA) `Intrinsic has incorrect return type: ldg.global.i.a16f32.p0`.
+
+Fix: `invoke_default_visitor=true` in the `HasMatrixStmt` constructor, so
+every typed stmt falls through to the generic predicate.
+
+Added regression test [parity_p3c_matrix.py](parity_p3c_matrix.py) — 3 cpu
+cases, all bit-exact Δ=0 vs hand-computed reference:
+
+| test                   | exercises                 | |Δ|    | result |
+| :--------------------- | :------------------------ | ------:| :----- |
+| `matrix_init_and_arith` | `MatrixInitStmt` + element arith | 0.000e+00 | OK |
+| `matrix_field_matmul`   | `MatrixInitStmt` + `@` matmul    | 0.000e+00 | OK |
+| `matrix_of_global_ptr`  | `MatrixOfGlobalPtrStmt` load/store | 0.000e+00 | OK |
+
+Full P3 regression suite on the fixed wheel (commit `bfd6871fc`):
+
+| test                         | result               |
+| :--------------------------- | :------------------- |
+| `parity_p3.py`               | Δ=0 default-vs-budgeted; Δ≤4e-6 cross-backend (cpu/cuda/vulkan) |
+| `smoke_p3a.py`               | OK                   |
+| `test_p3a_per_loop.py`       | OK, aborted 21.4 ms  |
+| `test_p3a_kernel_total.py`   | OK                   |
+| `test_p3b_depth.py`          | OK                   |
+| `parity_p3c_matrix.py` (new) | 3/3 OK (see above)   |
+
 ### P3.c isolated A/B (P3.a hard-limit disabled, `bench_p3c_ab.py`)
 
 To isolate the C++ early-exit benefit from the Python `_check_unroll_hard_limit`
