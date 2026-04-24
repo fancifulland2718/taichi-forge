@@ -129,3 +129,64 @@ of 5 sub-pass walks to a single `HasMatrixStmt` scan — measured
 3-backend (cpu/cuda/vulkan) `parity_p3.py` and `smoke_p3a.py` pass
 bit-exact on the freshly rebuilt wheel `taichi-1.8.0-cp310-cp310-win_amd64.whl`
 (commit `8c1ceec6`): Δ=0 on default-vs-budgeted, Δ≤4e-6 across backends.
+
+### P3.c isolated A/B (P3.a hard-limit disabled, `bench_p3c_ab.py`)
+
+To isolate the C++ early-exit benefit from the Python `_check_unroll_hard_limit`
+short-circuit, we rebuilt two wheels from identical sources except for the
+44-line `HasMatrixStmt` block in `taichi/transforms/scalarize.cpp`:
+
+- **A = baseline** — `git checkout 15c155343 -- taichi/transforms/scalarize.cpp`, no P3.c.
+- **B = P3.c** — HEAD `274268544`, P3.c early-exit active.
+
+Both wheels run with default config (`unrolling_hard_limit=0`,
+`unrolling_kernel_hard_limit=0`, `func_inline_depth_limit=0`), so the
+Python guard fires the zero short-circuit and contributes no delta. CPU
+backend, `offline_cache=False`, cold compile per datapoint (subprocess
+spawn, median of 3):
+
+| scenario          |  A (s) |  B (s) |     Δ |
+| :---------------- | -----: | -----: | ----: |
+| scalar unroll=32  | 0.0925 | 0.0941 | +1.7 % |
+| scalar unroll=128 | 0.1697 | 0.1776 | +4.7 % |
+| scalar unroll=400 | 0.5705 | 0.5683 | −0.4 % |
+| scalar unroll=800 | 1.6885 | 1.6722 | −1.0 % |
+
+**Interpretation.** All four cells are within ±5 % run-to-run noise
+(`scalar unroll=128` happens to land highest; trend across the other 3
+points is flat/slightly-negative). When `HL=0` the real cold-compile
+bottleneck is AST expansion + offline LLVM codegen, not the 4 scalarize
+sub-passes — each call is only 6–34 μs per the `TI_COMPILE_PROFILE`
+sampler. **P3.c is therefore defense-in-depth**: it saves those μs per
+invocation and avoids touching any matrix-rewrite visitors on
+scalar-only IR, but does not by itself move cold-compile wall-clock on
+scalar kernels. Its value is (a) symmetry with the Python guards when a
+user ships with HL=0 *and* the kernel has zero matrix stmts, and (b)
+cleaner IR invariants downstream (parity Δ=0 confirmed at commit
+`8c1ceec6`).
+
+The heavy compile-time win the user observes (707× abort speed-up at
+N=1600) is attributable to P3.a/P3.b; P3.c ships with P3 for
+correctness completeness, not for a second-order speed-up on top of it.
+
+---
+
+## Public API summary
+
+All three P3 knobs are user-facing and default to disabled. They are
+accepted by `ti.init(...)` and the corresponding `TI_*` env-vars via
+`_SpecialConfig` + `env_spec` in [python/taichi/lang/misc.py](../../python/taichi/lang/misc.py).
+
+| knob                          | env var                         | default | scope                                                                              |
+| :---------------------------- | :------------------------------ | ------: | :--------------------------------------------------------------------------------- |
+| `unrolling_hard_limit`        | `TI_UNROLLING_HARD_LIMIT`        | `0`     | per `ti.static(range(N))`; abort if `N` > limit                                    |
+| `unrolling_kernel_hard_limit` | `TI_UNROLLING_KERNEL_HARD_LIMIT` | `0`     | cumulative across all `ti.static` loops in one kernel/func compile                 |
+| `func_inline_depth_limit`     | `TI_FUNC_INLINE_DEPTH_LIMIT`     | `0`     | max inline depth of non-real `@ti.func` calls; abort when current depth > limit    |
+
+`0` on any knob means the guard is inert — both the Python
+`_check_unroll_hard_limit` and the depth counter short-circuit on the
+zero check. Any positive value is a **hard cap**: exceeding it raises
+`TaichiCompilationError` with the knob name and offending source line
+*before* any IR/codegen runs (no silent truncation). P3.c is independent
+of these knobs and always active.
+
