@@ -3,7 +3,10 @@
 #include <ctime>
 #include <string>
 #include <memory>
+#include <mutex>
+#include <condition_variable>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "taichi/util/offline_cache.h"
 #include "taichi/codegen/kernel_compiler.h"
@@ -83,17 +86,19 @@ class KernelCompilationManager final {
                               const DeviceCapabilityConfig &caps,
                               const Kernel &kernel_def) const;
 
-  const CompiledKernelData *try_load_cached_kernel(
+  const CompiledKernelData *try_load_cached_kernel_locked(
       const Kernel &kernel_def,
       const std::string &kernel_key,
       Arch arch,
       CacheData::CacheMode cache_mode);
 
-  const CompiledKernelData &compile_and_cache_kernel(
+  // Inserts a freshly compiled kernel into the in-memory cache and returns
+  // a stable reference to it. Caller must hold `cache_mutex_` and must have
+  // previously registered `kernel_key` in `in_progress_keys_`.
+  const CompiledKernelData &install_compiled_kernel_locked(
       const std::string &kernel_key,
-      const CompileConfig &compile_config,
-      const DeviceCapabilityConfig &caps,
-      const Kernel &kernel_def);
+      CacheData::CacheMode cache_mode,
+      std::unique_ptr<CompiledKernelData> compiled);
 
   std::unique_ptr<CompiledKernelData> load_ckd(const std::string &kernel_key,
                                                Arch arch);
@@ -106,6 +111,26 @@ class KernelCompilationManager final {
   CachingKernels caching_kernels_;
   CacheData cached_data_;
   std::vector<KernelCacheData *> updated_data_;
+
+  // P5.a — thread-safety for parallel kernel compilation.
+  //
+  // `cache_mutex_` protects every access to `caching_kernels_`,
+  // `cached_data_.kernels`, `updated_data_`, and `in_progress_keys_`.
+  // The mutex is intentionally dropped across the actual
+  // `KernelCompiler::compile()` call (the heavy work) so multiple worker
+  // threads can compile *different* kernels concurrently.
+  //
+  // `in_progress_keys_` prevents duplicate work: if two threads request the
+  // same kernel_key, only one compiles and the other waits on `cache_cv_`.
+  //
+  // Reference-stability note: `load_or_compile` returns
+  // `const CompiledKernelData&` whose target lives on the heap (owned by a
+  // `unique_ptr` inside `KernelCacheData`). The heap address is stable across
+  // map rehashes, so the returned reference remains valid even if other
+  // threads insert into `caching_kernels_` afterwards.
+  mutable std::mutex cache_mutex_;
+  std::condition_variable cache_cv_;
+  std::unordered_set<std::string> in_progress_keys_;
 };
 
 }  // namespace taichi::lang

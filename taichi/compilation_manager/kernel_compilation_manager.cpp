@@ -74,14 +74,56 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
     const Kernel &kernel_def) {
   auto cache_mode = get_cache_mode(compile_config, kernel_def);
   const auto kernel_key = make_kernel_key(compile_config, caps, kernel_def);
-  auto cached_kernel = try_load_cached_kernel(kernel_def, kernel_key,
-                                              compile_config.arch, cache_mode);
-  return cached_kernel ? *cached_kernel
-                       : compile_and_cache_kernel(kernel_key, compile_config,
-                                                  caps, kernel_def);
+
+  // P5.a — serialize all cache-map mutation with cache_mutex_. Heavy
+  // compile work happens OUTSIDE the lock inside
+  // compile_and_cache_kernel().
+  std::unique_lock<std::mutex> lock(cache_mutex_);
+
+  // Wait-loop: another worker may already be compiling this exact key. If
+  // so, we block on cache_cv_ and re-probe the cache on wake-up.
+  while (true) {
+    if (const auto *cached = try_load_cached_kernel_locked(
+            kernel_def, kernel_key, compile_config.arch, cache_mode)) {
+      return *cached;
+    }
+    if (in_progress_keys_.count(kernel_key) == 0) {
+      break;  // We are responsible for compiling this key.
+    }
+    cache_cv_.wait(lock);
+  }
+
+  in_progress_keys_.insert(kernel_key);
+  // Drop the lock across compile() — the compile step is pure work on
+  // kernel_def / compile_config (both const here) plus per-thread LLVM
+  // context, so it is safe to run concurrently with other workers.
+  lock.unlock();
+
+  std::unique_ptr<CompiledKernelData> compiled;
+  try {
+    compiled = compile_kernel(compile_config, caps, kernel_def);
+  } catch (...) {
+    lock.lock();
+    in_progress_keys_.erase(kernel_key);
+    cache_cv_.notify_all();
+    throw;
+  }
+
+  lock.lock();
+  const auto &result = install_compiled_kernel_locked(
+      kernel_key, cache_mode, std::move(compiled));
+  in_progress_keys_.erase(kernel_key);
+  cache_cv_.notify_all();
+  return result;
 }
 
 void KernelCompilationManager::dump() {
+  // P5.a — take a consistent snapshot of the in-memory caches before
+  // touching disk. `dump()` is typically called at Program shutdown from
+  // the main thread, but lock defensively so it stays correct if a worker
+  // is still finishing a compile during shutdown.
+  std::lock_guard<std::mutex> guard(cache_mutex_);
+
   if (caching_kernels_.empty()) {
     return;
   }
@@ -195,11 +237,12 @@ std::string KernelCompilationManager::make_kernel_key(
   return kernel_key;
 }
 
-const CompiledKernelData *KernelCompilationManager::try_load_cached_kernel(
+const CompiledKernelData *KernelCompilationManager::try_load_cached_kernel_locked(
     const Kernel &kernel_def,
     const std::string &kernel_key,
     Arch arch,
     CacheData::CacheMode cache_mode) {
+  // Precondition: cache_mutex_ held by caller.
   {  // Find in memory-cache (caching_kernels_)
     const auto &kernels = caching_kernels_;
     auto iter = kernels.find(kernel_key);
@@ -233,20 +276,23 @@ const CompiledKernelData *KernelCompilationManager::try_load_cached_kernel(
   return nullptr;
 }
 
-const CompiledKernelData &KernelCompilationManager::compile_and_cache_kernel(
+const CompiledKernelData &
+KernelCompilationManager::install_compiled_kernel_locked(
     const std::string &kernel_key,
-    const CompileConfig &compile_config,
-    const DeviceCapabilityConfig &caps,
-    const Kernel &kernel_def) {
-  auto cache_mode = get_cache_mode(compile_config, kernel_def);
+    CacheData::CacheMode cache_mode,
+    std::unique_ptr<CompiledKernelData> compiled) {
+  // Precondition: cache_mutex_ held by caller; `kernel_key` is present in
+  // `in_progress_keys_` and is NOT yet in caching_kernels_.
   TI_DEBUG_IF(cache_mode == CacheData::MemAndDiskCache,
-              "Cache kernel '{}' (key='{}')", kernel_def.get_name(),
-              kernel_key);
+              "Cache kernel (key='{}')", kernel_key);
+  // Another thread may have raced us to the cache while we held
+  // in_progress_keys_, but by contract only one thread owns any given
+  // kernel_key at a time, so this must still be absent.
   TI_ASSERT(caching_kernels_.find(kernel_key) == caching_kernels_.end());
   KernelCacheData k;
   k.kernel_key = kernel_key;
   k.created_at = k.last_used_at = std::time(nullptr);
-  k.compiled_kernel_data = compile_kernel(compile_config, caps, kernel_def);
+  k.compiled_kernel_data = std::move(compiled);
   k.size = 0;  // Populate `size` within the KernelCompilationManager::dump()
   k.cache_mode = cache_mode;
   const auto &kernel_data = (caching_kernels_[kernel_key] = std::move(k));
