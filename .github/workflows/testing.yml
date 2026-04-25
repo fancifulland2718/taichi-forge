@@ -137,7 +137,7 @@ jobs:
 # ─────────────────────────────────────────────────────────────────────────────
   build_smoke_windows:
     name: Build + smoke (Windows, py${{ inputs.python || '3.11' }})
-    runs-on: windows-2026
+    runs-on: windows-latest
     env:
       PY: ${{ inputs.python || '3.11' }}
       TAICHI_CMAKE_ARGS: >-

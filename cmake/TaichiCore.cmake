@@ -20,18 +20,34 @@ set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 # Suppress warnings from submodules introduced by the above symbol visibility change
 set(CMAKE_POLICY_DEFAULT_CMP0063 NEW)
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
-# scikit-build-core treats `install(DESTINATION ...)` as relative to the
-# platlib. Legacy scikit-build consumes absolute paths under
-# `${CMAKE_INSTALL_PREFIX}/python/taichi`. Pick the correct layout.
-if(DEFINED SKBUILD AND SKBUILD)
-    # Old scikit-build: keep legacy absolute path.
-    set(INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/python/taichi/_lib)
-elseif(DEFINED SKBUILD_PLATLIB_DIR)
-    # scikit-build-core: install into <platlib>/taichi/_lib via a relative
-    # path so the wheel ends up with `taichi/_lib/...` at its root.
-    set(INSTALL_LIB_DIR taichi/_lib)
+# Pick the install layout based on which build front-end is driving us.
+#
+# scikit-build-core (PEP 517 backend, used by `pip install` / `python -m
+# build`) sets `SKBUILD_PROJECT_NAME` and treats `install(DESTINATION ...)`
+# as wheel-relative — files installed to `taichi_forge/_lib/...` end up at
+# the wheel root as `taichi_forge/_lib/...`, alongside the Python source
+# from `wheel.packages = ["python/taichi_forge"]`.
+#
+# Legacy scikit-build (still used by `python setup.py bdist_wheel` in some
+# local scripts) only defines `SKBUILD` and expects an absolute install
+# path under `${CMAKE_INSTALL_PREFIX}/python/taichi_forge`.
+#
+# IMPORTANT: scikit-build-core ALSO sets `SKBUILD=2`, so a naive
+# `if(DEFINED SKBUILD)` check matches both backends and silently picks
+# the wrong (legacy) layout for scikit-build-core builds. The result is
+# that `taichi_python.pyd` lands at `python/taichi_forge/_lib/core/...`
+# inside the wheel — separate from the Python `taichi_forge/` package —
+# and the wheel ships without `taichi_forge._lib.core`, breaking
+# `import taichi_forge`. Detect scikit-build-core via its uniquely
+# defined `SKBUILD_PROJECT_NAME` variable instead.
+if(DEFINED SKBUILD_PROJECT_NAME)
+    # scikit-build-core: relative path lands directly at wheel root.
+    set(INSTALL_LIB_DIR taichi_forge/_lib)
+elseif(DEFINED SKBUILD AND SKBUILD)
+    # Legacy scikit-build: absolute staging path.
+    set(INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/python/taichi_forge/_lib)
 else()
-    set(INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/python/taichi/_lib)
+    set(INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/python/taichi_forge/_lib)
 endif()
 
 if (TI_WITH_AMDGPU AND TI_WITH_CUDA)

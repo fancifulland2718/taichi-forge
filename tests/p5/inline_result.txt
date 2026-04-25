@@ -1,0 +1,7 @@
+taichi=C:\Users\Administrator\AppData\Local\Programs\Python\Python310\lib\site-packages\taichi\__init__.py
+has compile_kernels on ti: True
+serial compile+launch: 21610.1 ms
+kernel _k_p_0: type=Kernel, has ensure_compiled=True
+  key=(<function _k at 0x00000149DBAA5480>, 0, <AutodiffMode.NONE: 2>), has compiled_kernels=True
+specs count=1
+materialize 1 kernel took 303.9 ms

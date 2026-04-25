@@ -8,7 +8,7 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "taichi-forge"
 dynamic = ["version"]
-description = "Taichi Forge - a community-maintained fork of the Taichi Programming Language (import name: taichi)."
+description = "Taichi Forge - a community-maintained fork of the Taichi Programming Language (import name: taichi_forge)."
 readme = "README_FORGE.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10,<4.0"
@@ -43,7 +43,7 @@ Homepage = "https://github.com/fancifulland2718/taichi-forge"
 Issues = "https://github.com/fancifulland2718/taichi-forge/issues"
 
 [project.scripts]
-ti = "taichi._main:main"
+ti = "taichi_forge._main:main"
 
 [tool.scikit-build]
 # Pin CMake to <4. CMake 4 removed compatibility with policy versions <3.5,
@@ -55,7 +55,7 @@ ti = "taichi._main:main"
 cmake.version = ">=3.20,<4"
 cmake.build-type = "Release"
 build-dir = "_skbuild/{wheel_tag}"
-wheel.packages = ["python/taichi"]
+wheel.packages = ["python/taichi_forge"]
 wheel.exclude = [
   "**/libSPIRV-Tools-shared.so",
   "**/libSPIRV-Tools-shared.dll",

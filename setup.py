@@ -28,11 +28,11 @@ LEGACY_DIRS = (
     "bin",
     "build",
     "dist",  # caller can keep LLVM snapshots inside; see README
-    "python/taichi/assets",
-    "python/taichi/_lib/runtime",
-    "python/taichi/_lib/c_api",
-    "taichi.egg-info",
-    "python/taichi.egg-info",
+    "python/taichi_forge/assets",
+    "python/taichi_forge/_lib/runtime",
+    "python/taichi_forge/_lib/c_api",
+    "taichi_forge.egg-info",
+    "python/taichi_forge.egg-info",
 )
 
 
