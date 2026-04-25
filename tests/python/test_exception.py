@@ -4,7 +4,7 @@ from sys import version_info
 import pytest
 from tests import test_utils
 
-import taichi as ti
+import taichi_forge as ti
 
 
 @test_utils.test()

@@ -6,7 +6,7 @@ p = os.path.join(home, ".cache", "taichi", "ticache")
 if os.path.isdir(p):
     shutil.rmtree(p, ignore_errors=True)
 sys.path.insert(0, r"d:\taichi\tests\p2")
-import taichi as ti
+import taichi_forge as ti
 import heavy_kernels as hk
 print(f"[child] tier={tier} kernel={kernel_name}", flush=True)
 ti.init(arch=ti.vulkan, offline_cache=False, compile_tier=tier,

@@ -1,5 +1,5 @@
 """
-import taichi as ti
+import taichi_forge as ti
 
 ti.lang.impl.current_cfg().print_ir = True
 

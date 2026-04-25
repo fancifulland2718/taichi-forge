@@ -45,7 +45,7 @@ def _reg(name):
 
 @_reg("saxpy_1m")
 def _make_saxpy(ti):
-    import taichi as ti  # noqa: F811 – re-imported inside factory
+    import taichi_forge as ti  # noqa: F811 – re-imported inside factory
 
     x = ti.field(ti.f32, shape=1 << 20)
     y = ti.field(ti.f32, shape=1 << 20)
@@ -60,7 +60,7 @@ def _make_saxpy(ti):
 
 @_reg("stencil_laplacian_512")
 def _make_stencil(ti):
-    import taichi as ti  # noqa: F811
+    import taichi_forge as ti  # noqa: F811
 
     N = 512
     f = ti.field(ti.f32, shape=(N, N))
@@ -77,7 +77,7 @@ def _make_stencil(ti):
 
 @_reg("reduction_1m")
 def _make_reduction(ti):
-    import taichi as ti  # noqa: F811
+    import taichi_forge as ti  # noqa: F811
 
     n = 1 << 20
     arr = ti.field(ti.f32, shape=n)
@@ -94,7 +94,7 @@ def _make_reduction(ti):
 
 @_reg("matrix_mul_64")
 def _make_matmul(ti):
-    import taichi as ti  # noqa: F811
+    import taichi_forge as ti  # noqa: F811
 
     N = 64
     A = ti.field(ti.f32, shape=(N, N))
@@ -114,7 +114,7 @@ def _make_matmul(ti):
 
 @_reg("autodiff_simple")
 def _make_autodiff(ti):
-    import taichi as ti  # noqa: F811
+    import taichi_forge as ti  # noqa: F811
 
     n = 1024
     x = ti.field(ti.f32, shape=n, needs_grad=True)
@@ -133,7 +133,7 @@ def _make_autodiff(ti):
 # ---------------------------------------------------------------------------
 
 def _get_cache_dir() -> str:
-    import taichi as ti
+    import taichi_forge as ti
     cfg = ti.impl.default_cfg()
     return os.path.abspath(cfg.offline_cache_file_path)
 
@@ -159,7 +159,7 @@ def _clear_cache(cache_dir: str) -> None:
 def _time_kernel(kernel_spec: dict, arch_str: str) -> float:
     """Initialise Taichi, compile + run the kernel once, return compile_ms."""
     import importlib
-    ti = importlib.import_module("taichi")
+    ti = importlib.import_module("taichi_forge")
 
     arch = getattr(ti, arch_str, ti.cpu)
     # offline_cache=False so the compile result is NOT saved yet (pure cold).

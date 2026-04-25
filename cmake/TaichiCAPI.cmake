@@ -177,10 +177,26 @@ function(install_taichi_c_api INSTALL_NAME TAICHI_C_API_INSTALL_DIR)
       )
 
   if(TI_WITH_LLVM)
-  # Install runtime .bc files for LLVM backend
+  # Install runtime .bc files for LLVM backend.
+  #
+  # NOTE: under scikit-build-core `INSTALL_LIB_DIR` is a *wheel-relative*
+  # path (e.g. "taichi_forge/_lib"). CMake interprets a relative
+  # `install(DIRECTORY <src> ...)` source against `CMAKE_CURRENT_SOURCE_DIR`,
+  # so a bare `${INSTALL_LIB_DIR}/runtime` would point at the source tree
+  # (where it doesn't exist) instead of the install staging tree where the
+  # .bc files were just placed by `taichi/runtime/llvm/runtime_module/
+  # CMakeLists.txt`. Anchor it explicitly to the wheel staging prefix
+  # (CMAKE_INSTALL_PREFIX_BACKUP holds the original value before this
+  # function rewrote CMAKE_INSTALL_PREFIX for the EXPORT helper above).
+  if(IS_ABSOLUTE "${INSTALL_LIB_DIR}")
+    set(_TAICHI_RUNTIME_STAGED_DIR "${INSTALL_LIB_DIR}/runtime")
+  else()
+    set(_TAICHI_RUNTIME_STAGED_DIR "${CMAKE_INSTALL_PREFIX_BACKUP}/${INSTALL_LIB_DIR}/runtime")
+  endif()
   install(DIRECTORY
-        ${INSTALL_LIB_DIR}/runtime
-        DESTINATION ${TAICHI_C_API_INSTALL_DIR})
+        ${_TAICHI_RUNTIME_STAGED_DIR}
+        DESTINATION ${TAICHI_C_API_INSTALL_DIR}
+        OPTIONAL)
   endif()
 
   # (penguinliong) Recover the original value in case it's used by other

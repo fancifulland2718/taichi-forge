@@ -1,5 +1,5 @@
 """Quick smoke test for P1 changes."""
-import taichi as ti
+import taichi_forge as ti
 
 # Test P1.b: llvm_opt_level config
 ti.init(arch=ti.cpu, log_level='error', llvm_opt_level=2)
@@ -20,7 +20,7 @@ ti.reset()
 
 # Test P1.b: default llvm_opt_level=3 (backward compat)
 ti.init(arch=ti.cpu, log_level='error')
-from taichi.lang import impl
+from taichi_forge.lang import impl
 cfg = impl.default_cfg()
 assert cfg.llvm_opt_level == 3, f"Expected default=3, got {cfg.llvm_opt_level}"
 

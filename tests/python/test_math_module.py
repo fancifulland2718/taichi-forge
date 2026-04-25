@@ -2,8 +2,8 @@ import errno
 
 import pytest
 
-import taichi as ti
-from taichi.math import inf, isinf, isnan, nan, pi, vdir
+import taichi_forge as ti
+from taichi_forge.math import inf, isinf, isnan, nan, pi, vdir
 from tests import test_utils
 
 

@@ -8,7 +8,7 @@ import math
 import sys
 from pathlib import Path
 
-import taichi as ti
+import taichi_forge as ti
 
 
 def run_matrix(tier):

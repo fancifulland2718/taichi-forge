@@ -6,7 +6,7 @@ unchanged). 3-backend bit/near-bit parity + a pre-P3.c (commit
 import os
 import sys
 import numpy as np
-import taichi as ti
+import taichi_forge as ti
 
 
 def run_matmul(arch):

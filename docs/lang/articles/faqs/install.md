@@ -72,7 +72,7 @@ sidebar_position: 2
 - If Taichi exits with message "Out of CUDA pre-allocated memory", e.g.,
 
   ```python
-  import taichi as ti
+  import taichi_forge as ti
 
   ti.init(arch=ti.cuda)
 

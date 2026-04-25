@@ -2,9 +2,9 @@ import math
 import tempfile
 
 import pytest
-from taichi._lib import core as _ti_core
+from taichi_forge._lib import core as _ti_core
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 
@@ -90,7 +90,7 @@ def test_remove_is_is_not():
 def test_deprecate_initialization_of_scene():
     with pytest.warns(
         DeprecationWarning,
-        match=r"Instantiating ti.ui.Scene directly is deprecated, use the get_scene\(\) function from a taichi.ui.Window object instead.",
+        match=r"Instantiating ti.ui.Scene directly is deprecated, use the get_scene\(\) function from a taichi_forge.ui.Window object instead.",
     ):
         ti.ui.Scene()
 

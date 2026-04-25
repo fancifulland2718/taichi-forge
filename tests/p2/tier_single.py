@@ -15,7 +15,7 @@ sys.path.insert(0, str(HERE))
 ARCH = sys.argv[1] if len(sys.argv) >= 2 else "cpu"
 OUT = HERE / f"tier_single_{ARCH}.out"
 
-import taichi as ti  # noqa: E402
+import taichi_forge as ti  # noqa: E402
 from heavy_kernels import make_mat14  # noqa: E402
 
 ARCH_MAP = {"cpu": ti.cpu, "cuda": ti.cuda, "vulkan": ti.vulkan}

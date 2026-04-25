@@ -84,7 +84,7 @@ In Taichi scope, you can print both scalar and matrix values using the `print` f
 For instance, suppose you have a scalar field `a` and want to print its value. Here are some examples:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.cpu)
 
 a = ti.field(ti.f32, 4)
@@ -189,7 +189,7 @@ If your program works well in serial but fails in parallel, check if there are p
 By default, Taichi automatically parallelizes the for loops at the outermost scope in a Taichi kernel. But some scenarios require serial execution. In this case, you can prevent automatic parallelization with `ti.loop_config(serialize=True)`. Note that only the outermost for loop that immediately follows this line is serialized. To illustrate:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.cpu)
 n = 1024
@@ -223,7 +223,7 @@ The array index out of bounds error occurs frequently. However, Taichi disables 
 Taichi detects array index out of bound errors in debug mode. You can activate this mode by setting `debug=True` in the `ti.init()` call:
 
 ```python {2}
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.cpu, debug=True)
 f = ti.field(dtype=ti.i32, shape=(32, 32))
 @ti.kernel
@@ -252,7 +252,7 @@ You can use `assert` statements in the Taichi scope to verify the assertion cond
 Ensure that you activate `debug` mode before using `assert` statements in the Taichi scope:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.cpu, debug=True)
 
 x = ti.field(ti.f32, 128)
@@ -292,7 +292,7 @@ def copy(dst: ti.template(), src: ti.template()):
 Taichi reports the traceback of an error in the **Taichi scope**. For example, the code snippet below triggers an `AssertionError`, with a lengthy traceback message:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init()
 
 @ti.func
@@ -361,7 +361,7 @@ Traceback (most recent call last):
     build_stmt(ctx, node.value)
   File "/Users/lanhaidong/taichi/taichi/python/taichi/lang/ast/ast_transformer_utils.py", line 32, in __call__
     raise TaichiCompilationError(msg)
-taichi.lang.exception.TaichiCompilationError: File "misc/demo_traceback.py", line 10:
+taichi_forge.lang.exception.TaichiCompilationError: File "misc/demo_traceback.py", line 10:
     ti.static_assert(1 + 1 == 3)
     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 AssertionError:
@@ -374,7 +374,7 @@ It takes time to read through the message. In addition, many stack frames reveal
 Taichi allows you to access a conciser and more intuitive version of traceback messages via `sys.tracebacklimit`:
 
 ```python {2}
-import taichi as ti
+import taichi_forge as ti
 import sys
 sys.tracebacklimit=0
 ...
@@ -387,7 +387,7 @@ AssertionError
 
 During handling of the above exception, another exception occurred:
 
-taichi.lang.exception.TaichiCompilationError: File "misc/demo_traceback.py", line 10:
+taichi_forge.lang.exception.TaichiCompilationError: File "misc/demo_traceback.py", line 10:
     ti.static_assert(1 + 1 == 3)
     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 AssertionError:

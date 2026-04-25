@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-import taichi as ti
-from taichi.math import vec4
+import taichi_forge as ti
+from taichi_forge.math import vec4
 from tests import test_utils
 
 

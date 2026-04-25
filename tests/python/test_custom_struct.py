@@ -1,8 +1,8 @@
 import numpy as np
 from pytest import approx
-from taichi.lang.misc import get_host_arch_list
+from taichi_forge.lang.misc import get_host_arch_list
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 
@@ -216,7 +216,7 @@ def test_dataclass():
     # test function usage from python scope
     assert np.isclose(Sphere(center=vec3f(0.0), radius=2.0).py_scope_area(), 4.0 * 3.14 * 4.0)
 
-    # test function usage from taichi scope
+    # test function usage from taichi_forge scope
     @ti.kernel
     def get_area() -> ti.f32:
         sphere = Sphere(center=vec3f(0.0), radius=2.0)
@@ -224,7 +224,7 @@ def test_dataclass():
 
     assert np.isclose(get_area(), 4.0 * 3.14 * 4.0)
 
-    # test function usage from taichi scope with field
+    # test function usage from taichi_forge scope with field
     struct_field = Sphere.field(shape=(4,))
     struct_field[3] = Sphere(center=vec3f(0.0), radius=2.0)
 

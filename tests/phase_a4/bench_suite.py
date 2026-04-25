@@ -22,7 +22,7 @@ import time
 from typing import Any, Callable, Dict, List, Tuple
 
 import numpy as np
-import taichi as ti
+import taichi_forge as ti
 
 # ---------------------------------------------------------------------------
 # Helpers

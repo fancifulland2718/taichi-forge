@@ -25,7 +25,7 @@ if not kernel_name:
     print("_HK_NAME not set", file=sys.stderr)
     sys.exit(1)
 
-import taichi as ti  # noqa: E402
+import taichi_forge as ti  # noqa: E402
 
 # Initialise with the requested optimisation levels; no offline cache → cold compile.
 # external_optimization_level is only relevant for GPU/Vulkan (SPIR-V) paths.

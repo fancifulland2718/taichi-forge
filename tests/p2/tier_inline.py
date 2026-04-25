@@ -25,7 +25,7 @@ def child(tier: str, arch: str) -> None:
         ticache = pathlib.Path(os.path.expanduser("~")) / ".cache" / "taichi"
         shutil.rmtree(ticache, ignore_errors=True)
 
-        import taichi as ti
+        import taichi_forge as ti
         arch_map = {"cpu": ti.cpu, "cuda": ti.cuda, "vulkan": ti.vulkan}
         ti.init(arch=arch_map[arch], offline_cache=False, compile_tier=tier,
                 kernel_profiler=False)

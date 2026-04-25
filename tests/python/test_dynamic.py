@@ -1,7 +1,7 @@
 import pytest
-from taichi.lang.exception import TaichiCompilationError
+from taichi_forge.lang.exception import TaichiCompilationError
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 

@@ -4,11 +4,11 @@ import operator
 import numpy as np
 import pytest
 from pytest import approx
-from taichi.lang import impl
-from taichi.lang.exception import TaichiCompilationError, TaichiTypeError
-from taichi.lang.misc import get_host_arch_list
+from taichi_forge.lang import impl
+from taichi_forge.lang.exception import TaichiCompilationError, TaichiTypeError
+from taichi_forge.lang.misc import get_host_arch_list
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 matrix_operation_types = [operator.add, operator.sub, operator.matmul]

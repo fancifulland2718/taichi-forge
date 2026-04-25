@@ -1,4 +1,4 @@
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 # The walrus operator is not supported until python 3.8,

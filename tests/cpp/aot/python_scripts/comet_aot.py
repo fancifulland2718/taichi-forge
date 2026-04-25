@@ -2,9 +2,9 @@ import argparse
 import math
 import os
 
-from taichi.lang.impl import grouped
+from taichi_forge.lang.impl import grouped
 
-import taichi as ti
+import taichi_forge as ti
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--arch", type=str)

@@ -130,5 +130,5 @@ python build.py --python 3.10
 python -m pytest tests/python/test_offline_cache.py -x -q
 ```
 
-CI 上 wheels 构建完毕后下载一个 artifact 本地 `pip install` 并导入 `import taichi as ti; ti.init()`
+CI 上 wheels 构建完毕后下载一个 artifact 本地 `pip install` 并导入 `import taichi_forge as ti; ti.init()`
 以确认运行时加载正常——wheel tag 对不上 Python/OS 是最常见的隐性发行 bug。

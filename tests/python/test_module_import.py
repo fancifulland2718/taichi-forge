@@ -1,4 +1,4 @@
-import taichi as myowntaichi
+import taichi_forge as myowntaichi
 from tests import test_utils
 
 

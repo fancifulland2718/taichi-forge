@@ -68,7 +68,7 @@ def _git_head(root: str) -> str:
 def _taichi_version(python_exe: str) -> str:
     try:
         r = subprocess.run(
-            [python_exe, "-c", "import taichi; print(taichi.__version__)"],
+            [python_exe, "-c", "import taichi_forge; print(taichi_forge.__version__)"],
             capture_output=True, text=True, timeout=15
         )
         # Last line of output (strips banners)

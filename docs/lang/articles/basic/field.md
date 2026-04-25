@@ -174,7 +174,7 @@ When accessing a 0D field `x`, use `x[None] = 0`, *not* `x = 0`.
 You can use a 2D scalar field to represent a 2D grid of values. The following code snippet creates and displays a 640&times;480 gray scale image of randomly-generated values:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.cpu)
 
 width, height = 640,480
@@ -361,7 +361,7 @@ To access the 0D matrix field `x = ti.Matrix.field(n=3, m=4, dtype=ti.f32, shape
 Matrix operations are unrolled at compile time. Take a look at the following example:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init()
 
 a = ti.Matrix.field(n=2, m=3, dtype=ti.f32, shape=(2, 2))
@@ -423,7 +423,7 @@ particle_field = ti.Struct.field({
 Besides *directly* using `ti.Struct.field()`, you can first declare a compound type `particle` and then create a field of it:
 
 ```python
-# vec3 is a built-in vector type suppied in the `taichi.math` module
+# vec3 is a built-in vector type suppied in the `taichi_forge.math` module
 vec3 = ti.math.vec3
 n = 10
 # Declares a struct comprising three vectors and one floating-point number

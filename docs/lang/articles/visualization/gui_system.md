@@ -360,7 +360,7 @@ mouse_x, mouse_y = gui.get_cursor_pos()
 Taichi's GUI system also provides widgets, including `slider()`, `label()`, and `button()`, for you to customize your control interface. Take a look at the following code snippet:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 gui = ti.GUI('GUI widgets')
 
 radius = gui.slider('Radius', 1, 50, step=1)

@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 from pytest import approx
-from taichi.lang.simt import subgroup
+from taichi_forge.lang.simt import subgroup
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 

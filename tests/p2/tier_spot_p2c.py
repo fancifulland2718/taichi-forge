@@ -8,7 +8,7 @@ def child():
     cache = os.path.expanduser("~/.cache/taichi")
     if os.path.exists(cache):
         shutil.rmtree(cache, ignore_errors=True)
-    import taichi as ti
+    import taichi_forge as ti
     ti.init(arch=getattr(ti, arch), offline_cache=False, compile_tier=tier)
     here = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, here)

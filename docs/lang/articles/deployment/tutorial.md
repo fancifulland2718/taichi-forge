@@ -36,7 +36,7 @@ In this section, we will write a Taichi kernel for generating images for [Julia 
 Before we start, it is recommended to install Taichi through `taichi-nightly` Python wheels using the following command. Be aware that there's no strong version compatibility enforced yet, so it's highly recommended to use the Taichi built from exactly the same commit.
 
 ```shell
-pip install -i https://pypi.taichi.graphics/simple/ taichi-nightly
+pip install -i https://pypi.taichi_forge.graphics/simple/ taichi-nightly
 ```
 
 ### 1. Compile Taichi kernel in Python script
@@ -44,7 +44,7 @@ pip install -i https://pypi.taichi.graphics/simple/ taichi-nightly
 We firstly write a Python script named `app.py`, which compiles the Taichi kernel as an artifact. Save the following code to your local machine and run the program, you will obtain an archived `module.tcm` in the same directory as `app.py`.
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.vulkan)
 if ti.lang.impl.current_cfg().arch != ti.vulkan:
@@ -78,7 +78,7 @@ if ti.lang.impl.current_cfg().arch != ti.vulkan:
 
 Then, we define our Taichi kernel for computing each pixel in our program. A Taichi kernel describes two aspects of a computer program: the computation itself, and the data it operates on. Because we don't know what kind of data will be fed into the kernel before execution, we have to clearly annotate the argument types for the AOT compiler.
 
-Taichi AOT module supports the following argument types: `ti.i32`, `ti.f32`, `ti.Ndarray`. Despite integers and floating-point numbers, we have a commonly-used data container called [`Ndarray`](https://docs.taichi-lang.org/api/taichi/lang/_ndarray/#taichi.lang._ndarray.Ndarray). It's similar to an [`ndarray`](https://numpy.org/doc/stable/reference/generated/numpy.ndarray.html) in NumPy, or a [`Tensor`](https://pytorch.org/docs/stable/tensors.html) in PyTorch. It can be multidimensional and is laid out continuously in memory. If you have experienced the multidimensional arrays in C++, You can treat it as a nested array type like `float[6][14]`.
+Taichi AOT module supports the following argument types: `ti.i32`, `ti.f32`, `ti.Ndarray`. Despite integers and floating-point numbers, we have a commonly-used data container called [`Ndarray`](https://docs.taichi-lang.org/api/taichi/lang/_ndarray/#taichi_forge.lang._ndarray.Ndarray). It's similar to an [`ndarray`](https://numpy.org/doc/stable/reference/generated/numpy.ndarray.html) in NumPy, or a [`Tensor`](https://pytorch.org/docs/stable/tensors.html) in PyTorch. It can be multidimensional and is laid out continuously in memory. If you have experienced the multidimensional arrays in C++, You can treat it as a nested array type like `float[6][14]`.
 
 Our Taichi kernel accepts an integer `n`, a float-pointing number `t` and a 2-dimensional Ndarray `pixels` as arguments. Each element of `pixels` is a floating-point number ranges from 0.0 to 1.0.
 
@@ -110,7 +110,7 @@ We are now done with Python and well prepared to build our application. The comp
 Firstly, we need to include the C++ wrapper header of Taichi C-API.
 
 ```c++
-#include <taichi/cpp/taichi.hpp>
+#include <taichi/cpp/taichi_forge.hpp>
 ```
 
 Next, create a Taichi runtime with target architecture. We will further load the compiled artifacts from `module.tcm` and load our `paint` kernel from the module.
@@ -151,7 +151,7 @@ The complete C++ source code is shown below, which is saved as `app.cpp` in the 
 
 ```c++
 #include <fstream>
-#include <taichi/cpp/taichi.hpp>
+#include <taichi/cpp/taichi_forge.hpp>
 
 void save_ppm(const float* pixels, uint32_t w, uint32_t h, const char* path) {
   std::fstream f(path, std::ios::out | std::ios::trunc);
@@ -310,6 +310,6 @@ Please note that due to the nature of Ndarray handling in Taichi, the generated 
 
 ### How can I set values for ndarrays in C++?
 
-In the C++ wrapper we provide these convenient read/write() methods on NdArray class. <https://github.com/taichi-dev/taichi/blob/master/c_api/include/taichi/cpp/taichi.hpp#L192-L215>
+In the C++ wrapper we provide these convenient read/write() methods on NdArray class. <https://github.com/taichi-dev/taichi/blob/master/c_api/include/taichi/cpp/taichi_forge.hpp#L192-L215>
 
 In C API you can allocate your memory as host accessible and then use map/unmap. <https://docs.taichi-lang.org/docs/taichi_core>

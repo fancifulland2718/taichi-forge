@@ -1,6 +1,6 @@
-from taichi.lang.misc import loop_unique
+from taichi_forge.lang.misc import loop_unique
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 

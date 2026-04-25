@@ -4,7 +4,7 @@ import os
 import shutil
 import tempfile
 
-import taichi as ti
+import taichi_forge as ti
 
 
 def _test_python(args, default_dir="python"):

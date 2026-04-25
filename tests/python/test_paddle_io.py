@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
-from taichi.lang import impl
-from taichi.lang.util import has_paddle
+from taichi_forge.lang import impl
+from taichi_forge.lang.util import has_paddle
 
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 if has_paddle():

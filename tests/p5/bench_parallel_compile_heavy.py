@@ -19,7 +19,7 @@ import argparse, json, os, subprocess, sys
 
 WORKER_SCRIPT = r"""
 import json, os, shutil, sys, time
-import taichi as ti
+import taichi_forge as ti
 
 mode   = sys.argv[1]
 arch   = sys.argv[2]
@@ -67,7 +67,7 @@ for idx in range(n):
 
 t0 = time.perf_counter()
 if mode == 'parallel':
-    from taichi.lang import impl as _impl
+    from taichi_forge.lang import impl as _impl
     t_mat0 = time.perf_counter()
     specs = []
     for (k, args) in kernels:

@@ -27,7 +27,7 @@ To solve a linear system whose coefficient matrix is a `SparseMatrix` using a di
 Here's a full example.
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 arch = ti.cpu # or ti.cuda
 ti.init(arch=arch)
@@ -84,7 +84,7 @@ To solve a linear system whose coefficient matrix is a `SparseMatrix` using a it
 2. Call `x, exit_code = solver.solve()` to obtain the solution `x` along with the `exit_code` that indicates the status of the solution. `exit_code` should be `True` if the solving was successful. Here is an example:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.cpu)
 
@@ -133,8 +133,8 @@ Keep in mind that matrices can be seen as a linear transformation from an input 
 
 To create a `LinearOperator` in Taichi, we first need to define a kernel that represent the linear transformation:
 ```python
-import taichi as ti
-from taichi.linalg import LinearOperator
+import taichi_forge as ti
+from taichi_forge.linalg import LinearOperator
 
 ti.init(arch=ti.cpu)
 
@@ -158,9 +158,9 @@ A = LinearOperator(compute_matrix_vector)
 To solve a system of linear equations represented by this `LinearOperator`, we can use the built-in matrix-free solver `MatrixFreeCG`. Here is a full example:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 import math
-from taichi.linalg import MatrixFreeCG, LinearOperator
+from taichi_forge.linalg import MatrixFreeCG, LinearOperator
 
 ti.init(arch=ti.cpu)
 

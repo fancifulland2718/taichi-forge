@@ -1,6 +1,6 @@
 import time
 
-import taichi as ti
+import taichi_forge as ti
 
 ti.init()
 

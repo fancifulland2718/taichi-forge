@@ -41,7 +41,7 @@ from pathlib import Path
 WORKER = textwrap.dedent(
     """
     import os, sys, time, json
-    import taichi as ti
+    import taichi_forge as ti
 
     arch_name = os.environ['BENCH_ARCH']
     cache_dir = os.environ['BENCH_CACHE']

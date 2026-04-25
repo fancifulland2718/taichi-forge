@@ -4,8 +4,8 @@ A single ti.static loop exceeding unrolling_hard_limit must abort with a
 TaichiCompilationError early (before fully expanding the body N times).
 """
 import time
-import taichi as ti
-from taichi.lang.exception import TaichiCompilationError
+import taichi_forge as ti
+from taichi_forge.lang.exception import TaichiCompilationError
 
 
 def main():

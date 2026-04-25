@@ -9,7 +9,7 @@ def run_one(tier: str):
     p = os.path.join(home, ".cache", "taichi", "ticache")
     if os.path.isdir(p):
         shutil.rmtree(p, ignore_errors=True)
-    import taichi as ti
+    import taichi_forge as ti
     ti.reset()
     ti.init(arch=ti.vulkan, offline_cache=False, compile_tier=tier,
             random_seed=42, default_fp=ti.f32, log_level=ti.WARN)

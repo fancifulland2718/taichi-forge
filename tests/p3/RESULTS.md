@@ -1,4 +1,4 @@
-﻿# P3 — Frontend IR size-control guardrails
+# P3 — Frontend IR size-control guardrails
 
 Commit base: `c06bbf830` (V1/V2 Vulkan work).
 
@@ -58,7 +58,7 @@ N=1600 the user gets a clear error in 13 ms instead of waiting 9 s.
 ### Cold-process verification (`bench_p3_abort_cold.py`)
 
 Each row spawns a fresh python interpreter — zero in-process cache. Inner
-`dt` measures just the kernel compile + sync (excludes `import taichi`).
+`dt` measures just the kernel compile + sync (excludes `import taichi_forge`).
 
 |   N | HL |  inner dt (s) | result |
 | ---:| ---:| ---:| ---:|

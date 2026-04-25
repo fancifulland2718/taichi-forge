@@ -1,4 +1,4 @@
-import taichi as ti
+import taichi_forge as ti
 
 for tier in ("fast", "balanced", "full"):
     ti.reset()

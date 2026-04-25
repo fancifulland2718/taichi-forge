@@ -1,7 +1,7 @@
 import os
 
 import yaml
-from taichi.core import settings
+from taichi_forge.core import settings
 
 
 def extract_doc(doc_filename=None):

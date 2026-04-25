@@ -34,7 +34,7 @@ Add a function, the function name **must** start with `test_` so
 that `pytest` could find it. e.g:
 
 ```python {3}
-import taichi as ti
+import taichi_forge as ti
 
 def test_log10():
     pass
@@ -45,7 +45,7 @@ well. Hint: You may pass/return values to/from Taichi-scope using 0-D
 fields, i.e. `r[None]`.
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 def test_log10():
     ti.init(arch=ti.cpu)
@@ -69,7 +69,7 @@ Execute `python tests/run_tests.py logarithm`, and the functions starting with `
 The line `ti.init(arch=ti.cpu)` in the test above means that it will only test on the CPU backend. In order to test against multiple backends, please use the `@ti.test` decorator, as illustrated below:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 # will test against both CPU and CUDA backends
 @ti.test(arch=[ti.cpu, ti.cuda])
@@ -91,7 +91,7 @@ And you may test against all available backends (depends on your system and buil
 argument:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 # will test against all backends available on your end
 @ti.test()
@@ -117,7 +117,7 @@ such errors on different backends, for example `2.001 == ti.approx(2)`
 will return `True` on the OpenGL backend.
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 # will test against all backends available on your end
 @ti.test()
@@ -147,7 +147,7 @@ fail on the OpenGL backend.
 In the test above, `r[None] = 100` means that it will only test that `ti.log10` works correctly for the input `100`. In order to test against different input values, you may use the `@pytest.mark.parametrize` decorator:
 
 ```python {5}
-import taichi as ti
+import taichi_forge as ti
 import pytest
 import math
 
@@ -168,7 +168,7 @@ def test_log10(x):
 Use a comma-separated list for multiple input values:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 import pytest
 import math
 
@@ -192,7 +192,7 @@ Use two separate `parametrize` to test **all combinations** of input
 arguments:
 
 ```python {5-6}
-import taichi as ti
+import taichi_forge as ti
 import pytest
 import math
 

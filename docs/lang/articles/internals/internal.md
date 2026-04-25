@@ -14,7 +14,7 @@ Taichi's computation IR is designed to be
 
 For example, a simple Taichi kernel
 ```python {4-8} title=show_ir.py
-import taichi as ti
+import taichi_forge as ti
 ti.init(print_ir=True)
 
 @ti.kernel
@@ -175,7 +175,7 @@ For example,
 ```python {14-17}
 # misc/listgen_demo.py
 
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(print_ir=True)
 

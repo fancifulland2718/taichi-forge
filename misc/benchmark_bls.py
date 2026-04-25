@@ -1,6 +1,6 @@
 import sys
 
-import taichi as ti
+import taichi_forge as ti
 
 sys.path.append("../tests/python/")
 

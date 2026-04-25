@@ -19,7 +19,7 @@ Before using Taichi in your Python program, you need to import Taichi to your na
 1. Import Taichi:
 
 ```python skip-ci:Trivial
-import taichi as ti
+import taichi_forge as ti
 ```
 
 2. Initialize Taichi:
@@ -350,7 +350,7 @@ As for rendering the ball, the `ball_center` and `ball_radius` variable previous
 ## Source code
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.vulkan)  # Alternatively, ti.init(arch=ti.cpu)
 
 n = 128

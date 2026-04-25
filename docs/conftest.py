@@ -16,7 +16,7 @@ from pytest import ExceptionInfo
 import marko
 import matplotlib.pyplot as plt
 import pytest
-import taichi as ti
+import taichi_forge as ti
 
 # -- own --
 
@@ -47,7 +47,7 @@ PRELUDES = {}
 PRELUDES[
     "init"
 ] = """
-import taichi as ti
+import taichi_forge as ti
 import numpy as np
 import math
 import random

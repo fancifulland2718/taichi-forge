@@ -4,7 +4,7 @@ compile' scenario where P3.d FFI batch was hypothesized to help.
 from __future__ import annotations
 import cProfile, pstats, io, os, time
 
-import taichi as ti
+import taichi_forge as ti
 
 
 def _build_many(x, n_kernels: int, body_stmts: int):

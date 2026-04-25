@@ -8,11 +8,11 @@ from tempfile import NamedTemporaryFile, mkstemp
 
 import numpy as np
 import pytest
-from taichi._lib import core as _ti_core
-from taichi.lang import cpu, cuda, dx11, gles, gpu, metal, opengl, vulkan
-from taichi.lang.misc import is_arch_supported
+from taichi_forge._lib import core as _ti_core
+from taichi_forge.lang import cpu, cuda, dx11, gles, gpu, metal, opengl, vulkan
+from taichi_forge.lang.misc import is_arch_supported
 
-import taichi as ti
+import taichi_forge as ti
 
 
 # Helper functions
@@ -285,7 +285,7 @@ def test(arch=None, exclude=None, require=None, **options):
 
 def torch_op(*, output_shapes=[(1,)]):
     def inner(f):
-        from taichi.lang.util import has_pytorch
+        from taichi_forge.lang.util import has_pytorch
 
         if has_pytorch():
             import torch

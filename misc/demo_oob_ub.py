@@ -1,5 +1,5 @@
-# https://forum.taichi.graphics/t/taichi/1003
-import taichi as ti
+# https://forum.taichi_forge.graphics/t/taichi/1003
+import taichi_forge as ti
 
 ti.init(arch=ti.cpu)
 

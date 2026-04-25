@@ -6,7 +6,7 @@ out = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "inline_resu
 def say(m):
     print(m, flush=True); out.write(m + "\n"); out.flush()
 
-import taichi as ti
+import taichi_forge as ti
 say(f"taichi={ti.__file__}")
 say(f"has compile_kernels on ti: {'compile_kernels' in dir(ti)}")
 
@@ -61,7 +61,7 @@ for idx in range(N):
     _k.__name__ = f"_k_p_{idx}"
     kernels.append((_k, f))
 
-from taichi.lang import impl as _impl
+from taichi_forge.lang import impl as _impl
 t_m0 = time.perf_counter()
 specs = []
 for k, f in kernels:

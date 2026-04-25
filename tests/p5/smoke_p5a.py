@@ -1,5 +1,5 @@
 """P5.a smoke test — serial path must still work after adding cache mutex."""
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.cpu)
 

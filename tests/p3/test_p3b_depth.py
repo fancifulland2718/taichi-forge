@@ -3,8 +3,8 @@
 Three nested @ti.func calls (depth 3) must be rejected when the limit is
 set to 2.
 """
-import taichi as ti
-from taichi.lang.exception import TaichiCompilationError
+import taichi_forge as ti
+from taichi_forge.lang.exception import TaichiCompilationError
 
 
 def main():

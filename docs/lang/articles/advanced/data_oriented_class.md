@@ -33,7 +33,7 @@ a.inc()
 Definitions of Taichi fields can be made not only in _init_ functions, but also at any place of a Python-scope function in a Data-Oriented class.
 
 ```python {21,25}
-import taichi as ti
+import taichi_forge as ti
 
 ti.init()
 
@@ -67,7 +67,7 @@ print(a.temp)  # will print [1 1 1 1 1 1 1 1]
 
 Another memory recycling example:
 ```python known-error
-import taichi as ti
+import taichi_forge as ti
 
 ti.init()
 
@@ -107,7 +107,7 @@ The Data-Oriented property is automatically carried along with the Python class 
 
 An example:
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.cuda)
 
@@ -167,7 +167,7 @@ Common decorators that are pre-built in Python, `@staticmethod`[^1] and `@classm
 `staticmethod` example:
 
 ```python {16}
-import taichi as ti
+import taichi_forge as ti
 
 ti.init()
 
@@ -184,7 +184,7 @@ class Array2D:
 
 `classmethod` example:
 ```python {12}
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.cuda)
 

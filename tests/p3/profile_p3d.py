@@ -15,7 +15,7 @@ import time
 # Ensure cold offline_cache
 os.environ.setdefault("TI_OFFLINE_CACHE", "0")
 
-import taichi as ti
+import taichi_forge as ti
 
 
 def _build_kernel(x):

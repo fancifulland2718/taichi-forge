@@ -1,4 +1,4 @@
-import taichi as ti
+import taichi_forge as ti
 from tests import test_utils
 
 from .bls_test_template import bls_particle_grid

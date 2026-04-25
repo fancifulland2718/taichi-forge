@@ -4,7 +4,7 @@ import os
 
 import numpy as np
 
-import taichi as ti
+import taichi_forge as ti
 
 screen_res = (1000, 1000)
 
