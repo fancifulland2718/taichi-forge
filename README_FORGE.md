@@ -41,7 +41,7 @@ Taichi Forge is the rolling result of those maintenance upgrades **plus** a comp
 
 ### Toolchain
 
-| Area | Upstream 1.7.4 | Taichi Forge 0.1.1 |
+| Area | Upstream 1.7.4 | Taichi Forge 0.1.2 |
 |---|---|---|
 | LLVM | 15.x | **20.1.7** (Phase A.1 → A.4 migration: typed→opaque pointers, legacy-PM→NewPM, `nvvm_ldg_global_{f,i}` → `load + !invariant.load`) |
 | CUDA PTX | via LLVM 15 NVPTX | via LLVM 20 NVPTX (NVCC 12.x compatible) |
@@ -159,7 +159,7 @@ The build is driven entirely by `pyproject.toml` / `scikit-build-core`. See [`do
 
 ## Versioning
 
-Taichi Forge uses its own SemVer track starting at **0.1.1**. Fork release numbers do **not** match upstream `taichi` versions.
+Taichi Forge uses its own SemVer track starting at **0.1.2**. Fork release numbers do **not** match upstream `taichi` versions.
 
 * `0.1.x` — LLVM 20 + VS 2026 + Python 3.14 + compile-perf work (P1–P5). Backend coverage: Linux/Windows x86_64, CUDA, Vulkan, OpenGL, GLES, CPU.
 * `0.2.x` — planned: macOS/Metal regression suite, scikit-build-core wheel tags for manylinux_2_28.

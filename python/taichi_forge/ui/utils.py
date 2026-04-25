@@ -69,7 +69,7 @@ def check_ggui_availability():
         # Try identifying the reason
         import taichi_forge  # pylint: disable=import-outside-toplevel
 
-        wheel_tag = try_get_wheel_tag(taichi)
+        wheel_tag = try_get_wheel_tag(taichi_forge)
         if platform.system() == "Linux" and wheel_tag and "manylinux2014" in wheel_tag:
             raise GGUINotAvailableException(
                 "GGUI is not available since you have installed a restricted version of taichi. "

@@ -4,7 +4,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-project(taichi)
+project(taichi-forge)
 
 include("cmake/utils.cmake")
 

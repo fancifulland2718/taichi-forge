@@ -1201,7 +1201,7 @@ class ASTTransformer(Builder):
 
     @staticmethod
     def _check_unroll_hard_limit(ctx, node, iter_time):
-        # P3.a â€?enforce hard caps on static-for unroll size. Called once per
+        # P3.a ï¿½?enforce hard caps on static-for unroll size. Called once per
         # iteration, immediately after iter_time increments. Aborts the
         # compile with a clear error message before the body is built again,
         # so the user does not pay for tens of seconds of AST expansion on a
