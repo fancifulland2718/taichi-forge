@@ -57,6 +57,13 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   }
   params.enable_spv_opt = spv_level > 0;
   params.spv_opt_level = spv_level;
+  // V2: opt-in parallel per-task SPIR-V codegen + spvtools::Optimizer::Run.
+  // Default false in CompileConfig so behaviour is unchanged for users
+  // who do not set ti.init(spirv_parallel_codegen=True).
+  params.parallel_codegen = compile_config.spirv_parallel_codegen;
+  params.num_compile_threads = std::max(1, compile_config.num_compile_threads);
+  // V6: opt-in skip of CreateLoopUnrollPass at level 3.
+  params.skip_loop_unroll = compile_config.spirv_skip_loop_unroll;
   spirv::KernelCodegen codegen(params);
   spirv::CompiledKernelData::InternalData internal_data;
   codegen.run(internal_data.metadata.kernel_attribs,

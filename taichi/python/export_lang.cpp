@@ -172,6 +172,10 @@ void export_lang(py::module &m) {
       .def_readwrite("use_fused_passes", &CompileConfig::use_fused_passes)
       .def_readwrite("fused_pass_verify",
                      &CompileConfig::fused_pass_verify)
+      .def_readwrite("spirv_parallel_codegen",
+                     &CompileConfig::spirv_parallel_codegen)
+      .def_readwrite("spirv_skip_loop_unroll",
+                     &CompileConfig::spirv_skip_loop_unroll)
       .def_readwrite("print_ir", &CompileConfig::print_ir)
       .def_readwrite("print_preprocessed_ir",
                      &CompileConfig::print_preprocessed_ir)

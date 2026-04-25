@@ -29,6 +29,22 @@ class KernelCodegen {
     // 2 = standard (+ inlining, mem2reg-equivalent)
     // 3 = full  (all passes; legacy default behaviour)
     int spv_opt_level{3};
+    // V2 (2026-04-26): when true and there are >= 2 offload tasks, run
+    // per-task TaskCodegen + spvtools::Optimizer::Run on a fan-out of
+    // worker threads. SPIR-V output is byte-identical to the serial path.
+    bool parallel_codegen{false};
+    // Cap on workers when parallel_codegen is true. Mirrors
+    // CompileConfig::num_compile_threads. Single-task kernels always run
+    // serially regardless of this value.
+    int num_compile_threads{4};
+    // V6 (2026-04-26): when true and spv_opt_level == 3, the level-3 pass
+    // chain skips spvtools::CreateLoopUnrollPass(true). Saves a meaningful
+    // fraction of compile time for loop-heavy kernels at the cost of
+    // letting the GPU driver do the unrolling instead. Output SPIR-V will
+    // differ from the unrolled version, so we extend the thread_local
+    // OptCacheKey with this flag to keep cached Optimizer instances
+    // separate.
+    bool skip_loop_unroll{false};
   };
 
   explicit KernelCodegen(const Params &params);
@@ -39,13 +55,13 @@ class KernelCodegen {
  private:
   Params params_;
   KernelContextAttributes ctx_attribs_;
-
-  // V3 (2026-04-26): non-owning pointers into a thread_local cache keyed
-  // by (target_env, spv_opt_level). Construction of Optimizer + repeated
-  // RegisterPass() calls happens once per (env, level) per thread instead
-  // of once per kernel. Lifetime managed by static cache in spirv_codegen.cpp.
-  spvtools::Optimizer *spirv_opt_{nullptr};
-  spvtools::SpirvTools *spirv_tools_{nullptr};
+  // V2 (2026-04-26): no per-instance Optimizer pointer. Each task body
+  // (whether on caller thread or a worker thread) fetches its own
+  // thread_local Optimizer/SpirvTools via the file-scope helper in
+  // spirv_codegen.cpp, keyed by (target_env, spv_opt_level). This keeps
+  // the parallel path lock-free and respects spvtools' single-instance
+  // thread-safety contract.
+  spv_target_env target_env_{SPV_ENV_VULKAN_1_0};
   spvtools::OptimizerOptions spirv_opt_options_;
 };
 

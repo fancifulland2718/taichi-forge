@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <vector>
 #include <variant>
+#include <future>
 
 #include "taichi/codegen/codegen_utils.h"
 #include "taichi/program/program.h"
@@ -2667,61 +2668,72 @@ KernelCodegen::KernelCodegen(const Params &params)
 
   uint32_t spirv_version = params.caps.get(DeviceCapability::spirv_version);
 
-  spv_target_env target_env;
   if (spirv_version >= 0x10600) {
-    target_env = SPV_ENV_VULKAN_1_3;
+    target_env_ = SPV_ENV_VULKAN_1_3;
   } else if (spirv_version >= 0x10500) {
-    target_env = SPV_ENV_VULKAN_1_2;
+    target_env_ = SPV_ENV_VULKAN_1_2;
   } else if (spirv_version >= 0x10400) {
-    target_env = SPV_ENV_VULKAN_1_1_SPIRV_1_4;
+    target_env_ = SPV_ENV_VULKAN_1_1_SPIRV_1_4;
   } else if (spirv_version >= 0x10300) {
-    target_env = SPV_ENV_VULKAN_1_1;
+    target_env_ = SPV_ENV_VULKAN_1_1;
   } else {
-    target_env = SPV_ENV_VULKAN_1_0;
+    target_env_ = SPV_ENV_VULKAN_1_0;
   }
 
-  // V3 (2026-04-26): cache Optimizer/SpirvTools in a thread_local map keyed
-  // by (target_env, spv_opt_level). The Optimizer's RegisterPass calls and
-  // its internal pass-token vector are reused across kernels in the same
-  // thread, eliminating per-kernel construction/registration overhead.
-  // Thread-locality keeps the cache lock-free even when KernelCompiler is
-  // invoked from a worker pool.
-  struct OptCacheKey {
-    int target_env_int;
-    int spv_opt_level;
-    bool operator==(const OptCacheKey &o) const noexcept {
-      return target_env_int == o.target_env_int &&
-             spv_opt_level == o.spv_opt_level;
-    }
-  };
-  struct OptCacheKeyHash {
-    size_t operator()(const OptCacheKey &k) const noexcept {
-      return (static_cast<size_t>(k.target_env_int) << 4) ^
-             static_cast<size_t>(k.spv_opt_level);
-    }
-  };
-  struct OptCacheEntry {
-    std::unique_ptr<spvtools::Optimizer> opt;
-    std::unique_ptr<spvtools::SpirvTools> tools;
-  };
+  spirv_opt_options_.set_run_validator(false);
+}
+
+namespace {
+
+// V3 + V2 (2026-04-26): per-thread cached spvtools::Optimizer/SpirvTools.
+// Each OS thread that hits this helper builds its own Optimizer once per
+// (target_env, spv_opt_level) combination, then reuses it across kernels.
+// Thread-locality lets the parallel SPIR-V codegen path (V2) fan out
+// work to worker threads without violating spvtools' single-instance
+// thread-safety contract.
+struct OptCacheKey {
+  int target_env_int;
+  int spv_opt_level;
+  bool skip_loop_unroll;
+  bool operator==(const OptCacheKey &o) const noexcept {
+    return target_env_int == o.target_env_int &&
+           spv_opt_level == o.spv_opt_level &&
+           skip_loop_unroll == o.skip_loop_unroll;
+  }
+};
+struct OptCacheKeyHash {
+  size_t operator()(const OptCacheKey &k) const noexcept {
+    return (static_cast<size_t>(k.target_env_int) << 5) ^
+           (static_cast<size_t>(k.spv_opt_level) << 1) ^
+           static_cast<size_t>(k.skip_loop_unroll ? 1u : 0u);
+  }
+};
+struct OptCacheEntry {
+  std::unique_ptr<spvtools::Optimizer> opt;
+  std::unique_ptr<spvtools::SpirvTools> tools;
+};
+
+void get_thread_local_opt(spv_target_env target_env,
+                          int spv_opt_level,
+                          bool skip_loop_unroll,
+                          spvtools::Optimizer **out_opt,
+                          spvtools::SpirvTools **out_tools) {
   static thread_local std::unordered_map<OptCacheKey, OptCacheEntry,
                                          OptCacheKeyHash>
       opt_cache;
-
-  OptCacheKey key{static_cast<int>(target_env), params.spv_opt_level};
+  OptCacheKey key{static_cast<int>(target_env), spv_opt_level,
+                  skip_loop_unroll};
   auto it = opt_cache.find(key);
   if (it == opt_cache.end()) {
     OptCacheEntry entry;
     entry.opt = std::make_unique<spvtools::Optimizer>(target_env);
     entry.opt->SetMessageConsumer(spriv_message_consumer);
-    if (params.spv_opt_level >= 1) {
-      // Level 1 — fast: dead-code / dead-branch elimination only.
+    if (spv_opt_level >= 1) {
       entry.opt->RegisterPass(spvtools::CreateWrapOpKillPass())
           .RegisterPass(spvtools::CreateDeadBranchElimPass())
           .RegisterPass(spvtools::CreateAggressiveDCEPass());
     }
-    if (params.spv_opt_level >= 2) {
-      // Level 2 — standard: add inlining + mem2reg-equivalent local opts.
+    if (spv_opt_level >= 2) {
       entry.opt->RegisterPass(spvtools::CreateInlineExhaustivePass())
           .RegisterPass(spvtools::CreateEliminateDeadFunctionsPass())
           .RegisterPass(spvtools::CreatePrivateToLocalPass())
@@ -2732,12 +2744,15 @@ KernelCodegen::KernelCodegen(const Params &params)
           .RegisterPass(spvtools::CreateLocalMultiStoreElimPass())
           .RegisterPass(spvtools::CreateCCPPass());
     }
-    if (params.spv_opt_level >= 3) {
-      // Level 3 — full: loop unrolling + the remaining cleanup passes
-      // (legacy default behaviour).
-      entry.opt->RegisterPass(spvtools::CreateMergeReturnPass())
-          .RegisterPass(spvtools::CreateLoopUnrollPass(true))
-          .RegisterPass(spvtools::CreateRedundancyEliminationPass())
+    if (spv_opt_level >= 3) {
+      entry.opt->RegisterPass(spvtools::CreateMergeReturnPass());
+      // V6 (2026-04-26): CreateLoopUnrollPass is the most expensive pass
+      // in the level-3 chain. When skip_loop_unroll is true we drop it
+      // entirely and rely on the GPU driver's own loop unrolling.
+      if (!skip_loop_unroll) {
+        entry.opt->RegisterPass(spvtools::CreateLoopUnrollPass(true));
+      }
+      entry.opt->RegisterPass(spvtools::CreateRedundancyEliminationPass())
           .RegisterPass(spvtools::CreateCombineAccessChainsPass())
           .RegisterPass(spvtools::CreateSimplificationPass())
           .RegisterPass(spvtools::CreateSSARewritePass())
@@ -2751,16 +2766,37 @@ KernelCodegen::KernelCodegen(const Params &params)
     entry.tools = std::make_unique<spvtools::SpirvTools>(target_env);
     it = opt_cache.emplace(key, std::move(entry)).first;
   }
-  spirv_opt_ = it->second.opt.get();
-  spirv_tools_ = it->second.tools.get();
-  spirv_opt_options_.set_run_validator(false);
+  *out_opt = it->second.opt.get();
+  *out_tools = it->second.tools.get();
 }
+
+}  // namespace
 
 void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
                         std::vector<std::vector<uint32_t>> &generated_spirv) {
   auto *root = params_.ir_root->as<Block>();
   auto &tasks = root->statements;
-  for (int i = 0; i < tasks.size(); ++i) {
+  const int n = static_cast<int>(tasks.size());
+
+  // Per-task results, indexed by task_id so iteration order matches the
+  // serial path even when codegen runs on worker threads.
+  struct TaskOut {
+    std::vector<uint32_t> spv;
+    TaskAttributes attribs;
+    std::unordered_map<std::vector<int>,
+                       irpass::ExternalPtrAccess,
+                       hashing::Hasher<std::vector<int>>>
+        arr_access;
+  };
+  std::vector<TaskOut> outs(n);
+
+  // V2 (2026-04-26): per-task SPIR-V emission + spvtools::Optimizer::Run
+  // are independent (no shared mutable state across tasks; ctx_attribs_
+  // is read-only inside TaskCodegen, mutated only in the post-loop
+  // aggregation below). The lambda is thread-safe: each invocation
+  // constructs its own TaskCodegen + IRBuilder and fetches its caller
+  // thread's thread_local Optimizer via get_thread_local_opt().
+  auto run_task = [&, this](int i) {
     TaskCodegen::Params tp;
     tp.task_ir = tasks[i]->as<OffloadedStmt>();
     tp.task_id_in_kernel = i;
@@ -2773,53 +2809,69 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
     TaskCodegen cgen(tp);
     auto task_res = cgen.run();
 
-    for (auto &[id, access] : task_res.arr_access) {
+    std::vector<uint32_t> optimized_spv(task_res.spirv_code);
+
+    if (params_.spv_opt_level > 0) {
+      spvtools::Optimizer *opt = nullptr;
+      spvtools::SpirvTools *tools = nullptr;
+      get_thread_local_opt(target_env_, params_.spv_opt_level,
+                           params_.skip_loop_unroll, &opt, &tools);
+      bool result = false;
+      TI_WARN_IF(
+          (result = !opt->Run(optimized_spv.data(), optimized_spv.size(),
+                              &optimized_spv, spirv_opt_options_)),
+          "SPIRV optimization failed");
+      (void)result;
+    }
+
+    TI_TRACE("SPIRV-Tools-opt: binary size, before={}, after={}",
+             task_res.spirv_code.size(), optimized_spv.size());
+
+    outs[i].spv = std::move(optimized_spv);
+    outs[i].attribs = std::move(task_res.task_attribs);
+    outs[i].arr_access = std::move(task_res.arr_access);
+  };
+
+  // Single-task kernels always go through the serial path: thread-spawn
+  // overhead dwarfs any potential gain.
+  const bool use_parallel = params_.parallel_codegen && n >= 2;
+  if (use_parallel) {
+    const int n_workers = std::max(1, std::min(n, params_.num_compile_threads));
+    // Fan out tasks in chunks of n_workers; each chunk's std::async
+    // futures join before the next chunk starts. This caps live worker
+    // threads at n_workers and keeps memory footprint bounded.
+    std::vector<std::future<void>> futs;
+    futs.reserve(n_workers);
+    int i = 0;
+    while (i < n) {
+      const int end = std::min(n, i + n_workers);
+      futs.clear();
+      for (int j = i; j < end; ++j) {
+        futs.emplace_back(
+            std::async(std::launch::async, [&run_task, j]() { run_task(j); }));
+      }
+      for (auto &f : futs) {
+        f.get();
+      }
+      i = end;
+    }
+  } else {
+    for (int i = 0; i < n; ++i) {
+      run_task(i);
+    }
+  }
+
+  // Aggregate results sequentially in task order.
+  for (int i = 0; i < n; ++i) {
+    for (auto &[id, access] : outs[i].arr_access) {
       for (auto &arr_access_element : ctx_attribs_.arr_access) {
         if (arr_access_element.first == id) {
           arr_access_element.second = arr_access_element.second | access;
         }
       }
     }
-
-    std::vector<uint32_t> optimized_spv(task_res.spirv_code);
-
-    bool success = true;
-    // V1: guard Optimizer::Run() on spv_opt_level>0. At level 0 the pass
-    // list is empty and Run() would still traverse the whole binary for
-    // nothing — on fast-tier compiles this adds up across many tasks.
-    if (params_.spv_opt_level > 0) {
-      bool result = false;
-      TI_WARN_IF(
-          (result = !spirv_opt_->Run(optimized_spv.data(), optimized_spv.size(),
-                                     &optimized_spv, spirv_opt_options_)),
-          "SPIRV optimization failed");
-      if (result) {
-        success = false;
-      }
-    }
-
-    TI_TRACE("SPIRV-Tools-opt: binary size, before={}, after={}",
-             task_res.spirv_code.size(), optimized_spv.size());
-
-    // Enable to dump SPIR-V assembly of kernels
-    if constexpr (false) {
-      std::vector<uint32_t> &spirv =
-          success ? optimized_spv : task_res.spirv_code;
-
-      std::string spirv_asm;
-      spirv_tools_->Disassemble(optimized_spv, &spirv_asm);
-      auto kernel_name = tp.ti_kernel_name;
-      TI_WARN("SPIR-V Assembly dump for {} :\n{}\n\n", kernel_name, spirv_asm);
-
-      std::ofstream fout(kernel_name + ".spv",
-                         std::ios::binary | std::ios::out);
-      fout.write(reinterpret_cast<const char *>(spirv.data()),
-                 spirv.size() * sizeof(uint32_t));
-      fout.close();
-    }
-
-    kernel_attribs.tasks_attribs.push_back(std::move(task_res.task_attribs));
-    generated_spirv.push_back(std::move(optimized_spv));
+    kernel_attribs.tasks_attribs.push_back(std::move(outs[i].attribs));
+    generated_spirv.push_back(std::move(outs[i].spv));
   }
   kernel_attribs.ctx_attribs = std::move(ctx_attribs_);
   kernel_attribs.name = params_.ti_kernel_name;
