@@ -33,6 +33,15 @@ struct CompileConfig {
   //              a few more redundant stmts.
   // Included in the offline-cache key.
   std::string compile_tier{"balanced"};
+  // P-Compile-1 phase 1: short-circuit consecutive full_simplify /
+  // type_check calls in compile_to_offloads.cpp when no IR-mutating pass
+  // has run since the previous one. Default false → behavior is bit-
+  // identical to the pre-P-Compile-1 pipeline (including the existing
+  // P2.a `dirty_since_simplify_i` short-circuit, which is unconditional
+  // and orthogonal). When true and TI_DEBUG is set, a verifier sandwich
+  // re-runs the skipped pass and asserts it returns no-modification.
+  // Included in the offline-cache key.
+  bool use_fused_passes{false};
   int max_vector_width;
   bool print_preprocessed_ir;
   bool print_ir;

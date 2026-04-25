@@ -45,6 +45,7 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
   serializer(config.external_optimization_level);
   serializer(config.llvm_opt_level);
   serializer(config.compile_tier);
+  serializer(config.use_fused_passes);
   serializer(config.move_loop_invariant_outside_if);
   serializer(config.demote_dense_struct_fors);
   serializer(config.advanced_optimization);
@@ -197,7 +198,17 @@ std::string get_hashed_offline_cache_key(const CompileConfig &config,
   auto device_caps_key = get_offline_cache_key_of_device_caps(caps);
   std::string autodiff_mode =
       std::to_string(static_cast<std::size_t>(kernel->autodiff_mode));
+  // [P-Compile-2-A] Mix in cache schema version so future key-algo changes
+  // automatically invalidate old .tic files without bumping TI_VERSION_*.
+  // v1 is intentionally hash-equivalent to the pre-P-Compile-2-A algorithm
+  // so existing .tic caches keep hitting; only v>=2 actually injects a
+  // schema tag. See offline_cache_util.h for rationale.
   picosha2::hash256_one_by_one hasher;
+  if constexpr (kOfflineCacheSchemaVersion >= 2) {
+    std::string schema_tag =
+        "tcs:" + std::to_string(kOfflineCacheSchemaVersion);
+    hasher.process(schema_tag.begin(), schema_tag.end());
+  }
   hasher.process(compile_config_key.begin(), compile_config_key.end());
   hasher.process(device_caps_key.begin(), device_caps_key.end());
   hasher.process(kernel_params_string.begin(), kernel_params_string.end());

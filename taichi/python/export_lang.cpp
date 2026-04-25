@@ -46,6 +46,15 @@ namespace taichi::lang {
 
 std::string libdevice_path();
 
+namespace irpass {
+void get_full_simplify_stats(uint64_t *run, uint64_t *skipped);
+void reset_full_simplify_stats();
+void get_fs_inner_stats(uint64_t *entries,
+                        uint64_t *noop_returns,
+                        uint64_t *total_iterations);
+void reset_fs_inner_stats();
+}  // namespace irpass
+
 }  // namespace taichi::lang
 
 namespace taichi {
@@ -160,6 +169,7 @@ void export_lang(py::module &m) {
       .def_readwrite("opt_level", &CompileConfig::opt_level)
       .def_readwrite("llvm_opt_level", &CompileConfig::llvm_opt_level)
       .def_readwrite("compile_tier", &CompileConfig::compile_tier)
+      .def_readwrite("use_fused_passes", &CompileConfig::use_fused_passes)
       .def_readwrite("print_ir", &CompileConfig::print_ir)
       .def_readwrite("print_preprocessed_ir",
                      &CompileConfig::print_preprocessed_ir)
@@ -269,6 +279,22 @@ void export_lang(py::module &m) {
       "default_compile_config",
       [&]() -> CompileConfig & { return default_compile_config; },
       py::return_value_policy::reference);
+
+  m.def("get_full_simplify_stats", []() {
+    uint64_t r = 0, s = 0;
+    taichi::lang::irpass::get_full_simplify_stats(&r, &s);
+    return py::make_tuple(r, s);
+  });
+  m.def("reset_full_simplify_stats",
+        &taichi::lang::irpass::reset_full_simplify_stats);
+
+  m.def("get_fs_inner_stats", []() {
+    uint64_t e = 0, n = 0, it = 0;
+    taichi::lang::irpass::get_fs_inner_stats(&e, &n, &it);
+    return py::make_tuple(e, n, it);
+  });
+  m.def("reset_fs_inner_stats",
+        &taichi::lang::irpass::reset_fs_inner_stats);
 
   py::class_<Program::KernelProfilerQueryResult>(m, "KernelProfilerQueryResult")
       .def_readwrite("counter", &Program::KernelProfilerQueryResult::counter)
