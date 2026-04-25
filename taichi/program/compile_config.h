@@ -51,6 +51,25 @@ struct CompileConfig {
   // Default false (zero overhead). Not part of the offline-cache key
   // because it is a runtime safety knob, not a codegen toggle.
   bool fused_pass_verify{false};
+  // V2 (2026-04-26): when true, the SPIR-V backend's KernelCodegen::run
+  // dispatches per-task TaskCodegen + spvtools::Optimizer::Run on parallel
+  // worker threads (cap = num_compile_threads). Each worker fetches its own
+  // thread_local Optimizer cache (V3), so spvtools' single-instance
+  // thread-safety constraints are not violated. Default false to keep
+  // legacy serial behaviour for all existing users; opt-in via
+  // ti.init(spirv_parallel_codegen=True). Not part of the offline-cache
+  // key (per-task SPIR-V output must be byte-identical between OFF and ON).
+  bool spirv_parallel_codegen{false};
+  // V6 (2026-04-26): when true and spv_opt_level == 3, the SPIR-V backend
+  // skips spvtools' CreateLoopUnrollPass(true) — the single most expensive
+  // optimizer pass in the level-3 chain. Modern Vulkan drivers (NV / AMD /
+  // Intel / Mesa) all unroll loops in their own shader compilers, so the
+  // spvtools-side unroll is largely redundant and only inflates compile
+  // time. Default false to preserve legacy SPIR-V output bit-exactly;
+  // opt-in via ti.init(spirv_skip_loop_unroll=True). Not part of the
+  // offline-cache key (treated like spirv_parallel_codegen — the user
+  // explicitly accepts a different optimizer chain when toggling).
+  bool spirv_skip_loop_unroll{false};
   int max_vector_width;
   bool print_preprocessed_ir;
   bool print_ir;
