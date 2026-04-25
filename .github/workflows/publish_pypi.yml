@@ -100,7 +100,13 @@ jobs:
       # No CMAKE_POLICY_VERSION_MINIMUM shim: we instead pin cmake<4 in the
       # build deps below (mirrors the local VS2026-bundled CMake 3.x which
       # is the configuration we validate against).
-      TAICHI_CMAKE_ARGS: >-
+      #
+      # IMPORTANT: must be CMAKE_ARGS (read by scikit-build-core), NOT
+      # TAICHI_CMAKE_ARGS (only honored by the legacy setup.py build,
+      # which no longer exists after the scikit-build-core migration).
+      # Setting TAICHI_CMAKE_ARGS here is a silent no-op and produces a
+      # wheel with all backends OFF (no GGUI, no CUDA, no C-API).
+      CMAKE_ARGS: >-
         -DTI_WITH_VULKAN:BOOL=ON
         -DTI_WITH_OPENGL:BOOL=ON
         -DTI_WITH_CUDA:BOOL=ON
@@ -204,7 +210,9 @@ jobs:
       PY: ${{ matrix.python }}
       # See build_linux comment: we pin cmake<4 instead of using the
       # CMAKE_POLICY_VERSION_MINIMUM shim.
-      TAICHI_CMAKE_ARGS: >-
+      # Must be CMAKE_ARGS (read by scikit-build-core); TAICHI_CMAKE_ARGS
+      # is a silent no-op under the new build backend.
+      CMAKE_ARGS: >-
         -DTI_WITH_VULKAN:BOOL=ON
         -DTI_WITH_OPENGL:BOOL=ON
         -DTI_WITH_CUDA:BOOL=ON
