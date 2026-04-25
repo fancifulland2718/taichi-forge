@@ -519,12 +519,16 @@ bool simplify(IRNode *root, const CompileConfig &config) {
   return modified;
 }
 
-void full_simplify(IRNode *root,
+bool full_simplify(IRNode *root,
                    const CompileConfig &config,
                    const FullSimplifyPass::Args &args) {
   auto print = make_pass_printer(args.verbose, config.print_ir_dbg_info,
                                  args.kernel_name + ".simplify", root);
   TI_AUTO_PROF;
+  // Aggregated across all outer-loop iterations. Returned to the caller so
+  // that compile_to_offloads.cpp can short-circuit the next full_simplify
+  // when nothing dirty has happened since (P-Compile-1 phase 1).
+  bool any_modified = false;
   if (config.advanced_optimization) {
     // P2.c CompileTier:
     //   "fast"     — alias of "balanced" at the IR-pass layer; P2.d will
@@ -603,21 +607,28 @@ void full_simplify(IRNode *root,
         modified = true;
       print("cfg_optimization");
       first_iteration = false;
+      if (modified)
+        any_modified = true;
       if (!modified)
         break;
     }
-    return;
+    return any_modified;
   }
   if (config.constant_folding) {
-    constant_fold(root);
+    if (constant_fold(root))
+      any_modified = true;
     print("constant_fold");
-    die(root);
+    if (die(root))
+      any_modified = true;
     print("die");
   }
-  simplify(root, config);
+  if (simplify(root, config))
+    any_modified = true;
   print("simplify");
-  die(root);
+  if (die(root))
+    any_modified = true;
   print("die");
+  return any_modified;
 }
 
 }  // namespace irpass

@@ -81,8 +81,14 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
 
   auto &offloads = block->statements;
   std::vector<std::unique_ptr<LLVMCompiledTask>> data(offloads.size());
-  for (int i = 0; i < offloads.size(); i++) {
-    auto compile_func = [&, i] {
+
+  // P-Compile-4: 单 offload kernel 直接 inline 编译，跳过 compilation_workers 入队 /
+  // flush 的线程池开销。这类 kernel 占常见用例的多数（单层 range_for / 顺序 kernel），
+  // 在 P5 引入的外层 kernel 级线程池上叠加一次内层池入队会带来 CV 唤醒、TLS 切换和
+  // 队列锁竞争，实测 CPU 路径出现 0.89x 回归（见 compile_doc/P5_并行编译.md）。
+  // 多 offload 场景仍走原有 compilation_workers 路径以保持并行编译收益。
+  if (offloads.size() <= 1) {
+    for (int i = 0; i < (int)offloads.size(); i++) {
       tlctx_.fetch_this_thread_struct_module();
       auto offload = irpass::analysis::clone(offloads[i].get());
       irpass::re_id(offload.get());
@@ -91,10 +97,23 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
       blk.insert(std::move(offload));
       auto new_data = this->compile_task(i, compile_config_, nullptr, &blk);
       data[i] = std::make_unique<LLVMCompiledTask>(std::move(new_data));
-    };
-    worker.enqueue(compile_func);
+    }
+  } else {
+    for (int i = 0; i < (int)offloads.size(); i++) {
+      auto compile_func = [&, i] {
+        tlctx_.fetch_this_thread_struct_module();
+        auto offload = irpass::analysis::clone(offloads[i].get());
+        irpass::re_id(offload.get());
+
+        Block blk;
+        blk.insert(std::move(offload));
+        auto new_data = this->compile_task(i, compile_config_, nullptr, &blk);
+        data[i] = std::make_unique<LLVMCompiledTask>(std::move(new_data));
+      };
+      worker.enqueue(compile_func);
+    }
+    worker.flush();
   }
-  worker.flush();
 
   auto llvm_compiled_kernel = tlctx_.link_compiled_tasks(std::move(data));
   optimize_module(llvm_compiled_kernel.module.get());

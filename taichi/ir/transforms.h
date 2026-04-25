@@ -51,7 +51,11 @@ bool unreachable_code_elimination(IRNode *root);
 bool loop_invariant_code_motion(IRNode *root, const CompileConfig &config);
 bool cache_loop_invariant_global_vars(IRNode *root,
                                       const CompileConfig &config);
-void full_simplify(IRNode *root,
+// Returns true iff any inner pass actually mutated the IR. Callers may use
+// this together with `CompileConfig::use_fused_passes` to short-circuit
+// subsequent full_simplify / type_check calls when no IR-mutating pass has
+// run since (P-Compile-1 phase 1).
+bool full_simplify(IRNode *root,
                    const CompileConfig &config,
                    const FullSimplifyPass::Args &args);
 void print(IRNode *root,

@@ -194,23 +194,41 @@ void offload_to_executable(IRNode *ir,
   print("Start offload_to_executable");
   irpass::analysis::verify(ir);
 
+  // P-Compile-1 phase 1: track whether any IR-mutating pass has run since
+  // the previous full_simplify. When `use_fused_passes` is true and this
+  // flag is false at a full_simplify call site, the call can be skipped
+  // (the IR is already at the simplify fixed-point). Default behavior
+  // (flag off) keeps every full_simplify, matching pre-P-Compile-1.
+  //
+  // We start with `pipeline_dirty = true` because `offload(ir)` ran in the
+  // caller and always rewrites the IR. Each pass below ORs in its own
+  // "modified" return value; passes that don't return bool but don't
+  // mutate IR (flag_access — see comment in compile_to_offloads_internal)
+  // are intentionally NOT marked dirty.
+  bool pipeline_dirty = true;
+  const bool fused = config.use_fused_passes;
+
   if (config.detect_read_only) {
     irpass::detect_read_only(ir);
     print("Detect read-only accesses");
+    // detect_read_only is a pure analysis pass — no IR mutation.
   }
 
-  irpass::demote_atomics(ir, config);
+  if (irpass::demote_atomics(ir, config))
+    pipeline_dirty = true;
   print("Atomics demoted I");
   irpass::analysis::verify(ir);
 
   if (config.cache_loop_invariant_global_vars) {
     irpass::cache_loop_invariant_global_vars(ir, config);
+    pipeline_dirty = true;
     print("Cache loop-invariant global vars");
   }
 
   if (config.demote_dense_struct_fors) {
     irpass::demote_dense_struct_fors(ir);
     irpass::type_check(ir, config);
+    pipeline_dirty = true;
     print("Dense struct-for demoted");
     irpass::analysis::verify(ir);
   }
@@ -218,6 +236,7 @@ void offload_to_executable(IRNode *ir,
   if (config.make_cpu_multithreading_loop && arch_is_cpu(config.arch)) {
     irpass::make_cpu_multithreaded_range_for(ir, config);
     irpass::type_check(ir, config);
+    pipeline_dirty = true;
     print("Make CPU multithreaded range-for");
     irpass::analysis::verify(ir);
   }
@@ -226,39 +245,46 @@ void offload_to_executable(IRNode *ir,
       config.demote_no_access_mesh_fors) {
     irpass::demote_no_access_mesh_fors(ir);
     irpass::type_check(ir, config);
+    pipeline_dirty = true;
     print("No-access mesh-for demoted");
     irpass::analysis::verify(ir);
   }
 
   if (make_thread_local) {
     irpass::make_thread_local(ir, config);
+    pipeline_dirty = true;
     print("Make thread local");
   }
 
   if (is_extension_supported(config.arch, Extension::mesh)) {
     irpass::make_mesh_thread_local(ir, config, {kernel->get_name()});
+    pipeline_dirty = true;
     print("Make mesh thread local");
     if (config.make_mesh_block_local && config.arch == Arch::cuda) {
       irpass::make_mesh_block_local(ir, config, {kernel->get_name()});
-      print("Make mesh block local");
-      irpass::full_simplify(
+      pipeline_dirty = true;
+      const bool sx_modified = irpass::full_simplify(
           ir, config,
           {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
+      pipeline_dirty = sx_modified;
       print("Simplified X");
     }
   }
 
   if (make_block_local) {
     irpass::make_block_local(ir, config, {kernel->get_name(), verbose});
+    pipeline_dirty = true;
     print("Make block local");
   }
 
   if (is_extension_supported(config.arch, Extension::mesh)) {
     irpass::demote_mesh_statements(ir, config, {kernel->get_name()});
+    pipeline_dirty = true;
     print("Demote mesh statements");
   }
 
-  irpass::demote_atomics(ir, config);
+  if (irpass::demote_atomics(ir, config))
+    pipeline_dirty = true;
   print("Atomics demoted II");
   irpass::analysis::verify(ir);
 
@@ -267,38 +293,56 @@ void offload_to_executable(IRNode *ir,
     irpass::analysis::gather_uniquely_accessed_bit_structs(ir, amgr.get());
   }
 
-  irpass::remove_range_assumption(ir);
+  if (irpass::remove_range_assumption(ir))
+    pipeline_dirty = true;
   print("Remove range assumption");
 
-  irpass::remove_loop_unique(ir);
+  if (irpass::remove_loop_unique(ir))
+    pipeline_dirty = true;
   print("Remove loop_unique");
   irpass::analysis::verify(ir);
 
   if (lower_global_access) {
-    irpass::full_simplify(
-        ir, config,
-        {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
-    print("Simplified before lower access");
-    irpass::lower_access(ir, config, {kernel->no_activate, true});
+    if (!fused || pipeline_dirty) {
+      const bool sa_modified = irpass::full_simplify(
+          ir, config,
+          {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
+      pipeline_dirty = sa_modified;
+      print("Simplified before lower access");
+    } else {
+      print("Simplified before lower access (skipped: pipeline clean)");
+    }
+    if (irpass::lower_access(ir, config, {kernel->no_activate, true}))
+      pipeline_dirty = true;
     print("Access lowered");
     irpass::analysis::verify(ir);
 
-    irpass::die(ir);
+    if (irpass::die(ir))
+      pipeline_dirty = true;
     print("DIE");
     irpass::analysis::verify(ir);
 
     irpass::flag_access(ir);
+    // flag_access only touches GlobalPtrStmt::activate metadata; full_simplify
+    // ignores that field, so we deliberately do NOT mark pipeline_dirty here.
     print("Access flagged III");
     irpass::analysis::verify(ir);
   }
 
-  irpass::demote_operations(ir, config);
+  if (irpass::demote_operations(ir, config))
+    pipeline_dirty = true;
   print("Operations demoted");
 
-  irpass::full_simplify(ir, config,
-                        {lower_global_access, /*autodiff_enabled*/ false,
-                         kernel->get_name(), verbose});
-  print("Simplified IV");
+  if (!fused || pipeline_dirty) {
+    const bool s4_modified = irpass::full_simplify(
+        ir, config,
+        {lower_global_access, /*autodiff_enabled*/ false, kernel->get_name(),
+         verbose});
+    pipeline_dirty = s4_modified;
+    print("Simplified IV");
+  } else {
+    print("Simplified IV (skipped: pipeline clean)");
+  }
 
   if (determine_ad_stack_size) {
     irpass::determine_ad_stack_size(ir, config);
