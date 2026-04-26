@@ -2834,7 +2834,12 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
 
   // Single-task kernels always go through the serial path: thread-spawn
   // overhead dwarfs any potential gain.
-  const bool use_parallel = params_.parallel_codegen && n >= 2;
+  // V8.b (2026-04-26): also bypass the inner pool when the outer
+  // compile_kernels worker is already saturating cores. Symmetric with
+  // V7's LLVM path; see compile_doc/优化总规划.md §3.5.
+  const bool use_parallel = params_.parallel_codegen && n >= 2 &&
+                            !(params_.compile_dag_scheduler &&
+                              Program::in_compile_kernels_worker());
   if (use_parallel) {
     const int n_workers = std::max(1, std::min(n, params_.num_compile_threads));
     // Fan out tasks in chunks of n_workers; each chunk's std::async

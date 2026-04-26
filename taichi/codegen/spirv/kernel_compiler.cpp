@@ -64,6 +64,9 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   params.num_compile_threads = std::max(1, compile_config.num_compile_threads);
   // V6: opt-in skip of CreateLoopUnrollPass at level 3.
   params.skip_loop_unroll = compile_config.spirv_skip_loop_unroll;
+  // V8.b: anti-double-pool — when the surrounding compile_kernels outer
+  // pool is active, suppress this inner per-task fan-out.
+  params.compile_dag_scheduler = compile_config.compile_dag_scheduler;
   spirv::KernelCodegen codegen(params);
   spirv::CompiledKernelData::InternalData internal_data;
   codegen.run(internal_data.metadata.kernel_attribs,

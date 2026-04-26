@@ -139,6 +139,14 @@ class TI_DLL_EXPORT Program {
   void compile_kernels(const CompileConfig &compile_config,
                        const std::vector<const Kernel *> &kernels);
 
+  // V7 (2026-04-26) — detector used by KernelCodeGen::compile_kernel_to_module
+  // to know whether the calling thread is currently acting as a
+  // compile_kernels outer worker. When true, the LLVM codegen path skips its
+  // own inner compilation_workers pool to avoid double-pool oversubscription
+  // (see compile_doc/P5_\u5e76\u884c\u7f16\u8bd1.md and \u4f18\u5316\u603b\u89c4\u5212.md \u00a73.4).
+  // Only set when compile_config.compile_dag_scheduler is true.
+  static bool in_compile_kernels_worker();
+
   void launch_kernel(const CompiledKernelData &compiled_kernel_data,
                      LaunchContextBuilder &ctx);
 

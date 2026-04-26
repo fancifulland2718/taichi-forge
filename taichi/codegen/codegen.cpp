@@ -87,7 +87,16 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
   // 在 P5 引入的外层 kernel 级线程池上叠加一次内层池入队会带来 CV 唤醒、TLS 切换和
   // 队列锁竞争，实测 CPU 路径出现 0.89x 回归（见 compile_doc/P5_并行编译.md）。
   // 多 offload 场景仍走原有 compilation_workers 路径以保持并行编译收益。
-  if (offloads.size() <= 1) {
+  //
+  // V7 (2026-04-26): 当 compile_config_.compile_dag_scheduler=True 且当前线程已是
+  // Program::compile_kernels 的外层 worker 时，外层池已在 kernel 维度饱和，
+  // 内层池再 fan-out offload 任务会造成 N*M 线程过载。此时把多 offload 也
+  // 走 inline 串行路径。详见 compile_doc/优化总规划.md §3.4。
+  const bool serial_offloads =
+      offloads.size() <= 1 ||
+      (compile_config_.compile_dag_scheduler &&
+       Program::in_compile_kernels_worker());
+  if (serial_offloads) {
     for (int i = 0; i < (int)offloads.size(); i++) {
       tlctx_.fetch_this_thread_struct_module();
       auto offload = irpass::analysis::clone(offloads[i].get());

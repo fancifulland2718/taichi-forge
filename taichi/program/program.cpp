@@ -214,6 +214,19 @@ const CompiledKernelData &Program::compile_kernel(
 //    finish their in-flight tasks so we never leave the executor in a bad
 //    state.
 //
+// V7 (2026-04-26) — thread-local depth counter that tracks whether the
+// current thread is acting as a compile_kernels outer worker. The LLVM
+// codegen path consults this via Program::in_compile_kernels_worker() to
+// avoid double-pool oversubscription. Only incremented when
+// compile_config.compile_dag_scheduler is true.
+namespace {
+thread_local int g_compile_kernels_worker_depth = 0;
+}  // namespace
+
+bool Program::in_compile_kernels_worker() {
+  return g_compile_kernels_worker_depth > 0;
+}
+
 // Caller contract: do NOT destroy SNode trees concurrently with this call.
 void Program::compile_kernels(
     const CompileConfig &compile_config,
@@ -224,11 +237,22 @@ void Program::compile_kernels(
   auto start_t = Time::get_time();
   const auto caps = get_device_caps();
 
-  int n_workers = std::max(1, compile_config.num_compile_threads);
-  n_workers = std::min<int>(n_workers, (int)kernels.size());
+  const int n_compile_threads =
+      std::max(1, compile_config.num_compile_threads);
+  int n_workers = std::min<int>(n_compile_threads, (int)kernels.size());
 
   auto &mgr = program_impl_->get_kernel_compilation_manager();
-  if (n_workers <= 1) {
+  const bool dag_mode = compile_config.compile_dag_scheduler;
+  // V8.a (2026-04-26): when dag_mode is on and there are fewer kernels than
+  // compile threads, skip the outer ParallelExecutor entirely. The serial
+  // outer loop lets each kernel's inner offload pool (LLVM
+  // compilation_workers / SPIR-V V2 std::async) consume the full T-wide
+  // worker budget on its own. With V7 enabled the previous behaviour would
+  // create only N outer workers and force inner-serial, leaving (T-N) cores
+  // idle. See compile_doc/优化总规划.md §3.5.
+  const bool prefer_inner_parallelism =
+      dag_mode && (int)kernels.size() < n_compile_threads;
+  if (n_workers <= 1 || prefer_inner_parallelism) {
     // Fast path: honour the same serial path as compile_kernel.
     for (auto *k : kernels) {
       mgr.load_or_compile(compile_config, caps, *k);
@@ -244,6 +268,10 @@ void Program::compile_kernels(
     ParallelExecutor exec("compile_kernels", n_workers);
     for (auto *k : kernels) {
       exec.enqueue([&, k]() {
+        // V7: mark this worker so the LLVM inner pool stays serial.
+        if (dag_mode) {
+          ++g_compile_kernels_worker_depth;
+        }
         try {
           mgr.load_or_compile(compile_config, caps, *k);
         } catch (...) {
@@ -251,6 +279,9 @@ void Program::compile_kernels(
           if (!first_error) {
             first_error = std::current_exception();
           }
+        }
+        if (dag_mode) {
+          --g_compile_kernels_worker_depth;
         }
       });
     }
