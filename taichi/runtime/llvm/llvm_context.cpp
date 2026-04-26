@@ -1002,8 +1002,27 @@ llvm::Function *TaichiLLVMContext::get_struct_function(const std::string &name,
 }
 
 llvm::Type *TaichiLLVMContext::get_runtime_type(const std::string &name) {
-  auto ty = llvm::StructType::getTypeByName(
-      get_this_thread_runtime_module()->getContext(), ("struct." + name));
+  auto *runtime_mod = get_this_thread_runtime_module();
+  auto &ctx = runtime_mod->getContext();
+  const std::string full = "struct." + name;
+  llvm::StructType *ty = llvm::StructType::getTypeByName(ctx, full);
+  if (!ty) {
+    // V8.d (2026-04-26): on worker threads, runtime_module is loaded fresh
+    // via parseBitcodeFile into the per-thread LLVMContext. In LLVM 19,
+    // identified struct types are not always registered with the context's
+    // type-name map until first materialised by client code; this is fine on
+    // the main thread (which performs many module operations during
+    // start-up) but causes getTypeByName() to return nullptr for the very
+    // first lookup on a worker. Fall back to scanning the module's
+    // identified struct types directly. This is O(N) over the runtime
+    // module's named types but only triggers when the fast path missed.
+    for (llvm::StructType *st : runtime_mod->getIdentifiedStructTypes()) {
+      if (st->hasName() && st->getName() == full) {
+        ty = st;
+        break;
+      }
+    }
+  }
   if (!ty) {
     TI_ERROR("LLVMRuntime type {} not found.", name);
   }
@@ -1032,6 +1051,38 @@ TaichiLLVMContext::ThreadLocalData::~ThreadLocalData() {
 
 LLVMCompiledKernel TaichiLLVMContext::link_compiled_tasks(
     std::vector<std::unique_ptr<LLVMCompiledTask>> data_list) {
+  // V8.e (2026-04-26): two-stage link for thread-safe parallel codegen.
+  //
+  // History:
+  //   * V8.c serialised link_compiled_tasks() with linking_mut_ to fix
+  //     0xC0000005 / 0xC0000374 crashes from concurrent shared-context
+  //     writes during link. That fix worked for the link itself, but
+  //     KernelCodeGen::compile_kernel_to_module() immediately calls
+  //     optimize_module() on the linked module which still lived in the
+  //     SHARED linking_context_data->llvm_context. Optimization is the
+  //     heaviest LLVM phase; running it in parallel on a single
+  //     LLVMContext re-introduced a ~8% crash rate on N=16/T=8.
+  //   * V8.d attempted to do the link in the calling thread's TLS
+  //     context. That removed the shared-context contention but linking
+  //     a CLONE of data->runtime_module BACK INTO the same context that
+  //     owns data->runtime_module makes llvm::Linker rename duplicate
+  //     identified struct types in-place, mutating the per-context type
+  //     registry. The next kernel compiled on the same thread then fails
+  //     get_runtime_type("RuntimeContext"). Symptom: serial fast-path of
+  //     compile_kernels() with N>=2 errors with "RuntimeContext not
+  //     found" on kernel #2.
+  //   * V8.e: link in linking_context_data->llvm_context like V8.c (safe
+  //     because linking_mut_ serialises this stage and, more importantly,
+  //     none of the per-thread contexts get touched), THEN bitcode-
+  //     round-trip the linked module back into the calling thread's TLS
+  //     context so that downstream optimize_module() / verifyModule() /
+  //     module->print() operate on a per-thread module with zero shared-
+  //     context contention. The link stage is fast (microseconds for
+  //     typical kernels); the heavy optimization stage runs fully in
+  //     parallel.
+  fetch_this_thread_struct_module();
+  std::lock_guard<std::mutex> _(linking_mut_);
+
   LLVMCompiledKernel linked;
   std::unordered_set<int> used_tree_ids;
   std::unordered_set<int> tls_sizes;
@@ -1068,7 +1119,10 @@ LLVMCompiledKernel TaichiLLVMContext::link_compiled_tasks(
   eliminate_unused_functions(mod.get(), [&](std::string func_name) -> bool {
     return offloaded_names.count(func_name);
   });
-  linked.module = std::move(mod);
+  // Hand off to caller's TLS context so subsequent optimize/verify/print
+  // are free of shared-context contention.
+  auto *caller_ctx = get_this_thread_data()->llvm_context;
+  linked.module = clone_module_to_context(mod.get(), caller_ctx);
   return linked;
 }
 

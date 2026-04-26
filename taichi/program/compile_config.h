@@ -70,6 +70,22 @@ struct CompileConfig {
   // offline-cache key (treated like spirv_parallel_codegen — the user
   // explicitly accepts a different optimizer chain when toggling).
   bool spirv_skip_loop_unroll{false};
+  // V7 (2026-04-26): anti double-pool oversubscription in the batched
+  // Program::compile_kernels path. The outer ParallelExecutor already
+  // saturates `num_compile_threads` worker threads with kernel-level tasks;
+  // the inner LLVM compilation_workers pool would then fan out each
+  // kernel's offloads on top of that, producing N*M concurrent threads on
+  // a machine with far fewer CPU cores. P5_并行编译.md §4 measured this as
+  // a 0.89x CPU regression. When true, while a thread is acting as an
+  // outer compile_kernels worker, KernelCodeGen::compile_kernel_to_module
+  // bypasses the inner pool and processes offloads serially inline (same
+  // path as the single-offload bypass). Default true after V8.e validated
+  // the LLVMContext type-pollution fix (tests/p4/v8d_validate.py: 20/20
+  // stress reps incl. scalar N=16 T=8, sincos N=8 T=8, multi-offload N=16
+  // T=8). Opt-out via ti.init(compile_dag_scheduler=False). Not part of
+  // the offline-cache key (pure scheduling toggle — emitted bytecode is
+  // byte-identical between OFF and ON).
+  bool compile_dag_scheduler{true};
   int max_vector_width;
   bool print_preprocessed_ir;
   bool print_ir;

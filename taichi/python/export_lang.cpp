@@ -176,6 +176,8 @@ void export_lang(py::module &m) {
                      &CompileConfig::spirv_parallel_codegen)
       .def_readwrite("spirv_skip_loop_unroll",
                      &CompileConfig::spirv_skip_loop_unroll)
+      .def_readwrite("compile_dag_scheduler",
+                     &CompileConfig::compile_dag_scheduler)
       .def_readwrite("print_ir", &CompileConfig::print_ir)
       .def_readwrite("print_preprocessed_ir",
                      &CompileConfig::print_preprocessed_ir)

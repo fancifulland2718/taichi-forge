@@ -45,6 +45,13 @@ class KernelCodegen {
     // OptCacheKey with this flag to keep cached Optimizer instances
     // separate.
     bool skip_loop_unroll{false};
+    // V8.b (2026-04-26): when true, the run() per-task fan-out checks
+    // Program::in_compile_kernels_worker() and falls back to serial when
+    // already inside an outer compile_kernels worker. Mirrors V7's LLVM
+    // anti-double-pool behaviour. Symmetric with parallel_codegen so both
+    // flags must be enabled to get the V2 inner pool, and the inner pool
+    // is bypassed only when the outer pool is active.
+    bool compile_dag_scheduler{false};
   };
 
   explicit KernelCodegen(const Params &params);

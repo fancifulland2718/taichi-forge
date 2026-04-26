@@ -39,6 +39,23 @@ class TaichiLLVMContext {
  public:
   // main_thread is defined to be the thread that runs the initializer
 
+  // [TYPE-QUERY FORBIDDEN ZONE — V8.e/C3, see compile_doc/优化总规划.md §7.2]
+  // linking_context_data->llvm_context is the SHARED LLVMContext that is
+  // ONLY safe to touch from inside link_compiled_tasks() while holding
+  // linking_mut_, plus the one-time init paths add_struct_module() and
+  // init_runtime_module() which run on the main thread before any worker
+  // exists.
+  //
+  // DO NOT call any of the following on this context from anywhere else:
+  //   * get_runtime_type / get_struct_function / get_data_type queries
+  //     (LLVM Type/Constant uniquing maps are per-context and not safe
+  //      for concurrent read+write — V8.d learned this the hard way).
+  //   * llvm::Module / llvm::Function construction with this context
+  //     as the target (use get_this_thread_context() instead).
+  //   * Storing references/pointers to llvm::Type* obtained from this
+  //     context across threads.
+  // For all per-thread codegen / optimize / verify / print work, route
+  // through get_this_thread_context() (see ThreadLocalData per_thread_data_).
   std::unique_ptr<ThreadLocalData> linking_context_data{nullptr};
 
   TaichiLLVMContext(const CompileConfig &config, Arch arch);
@@ -159,6 +176,14 @@ class TaichiLLVMContext {
   ThreadLocalData *main_thread_data_{nullptr};
   std::mutex mut_;
   std::mutex thread_map_mut_;
+  // V8.c introduced linking_mut_ to serialise link_compiled_tasks() against
+  // the shared linking_context_data->llvm_context. V8.d (2026-04-26)
+  // refactored link_compiled_tasks() to operate entirely on per-thread
+  // ThreadLocalData::llvm_context, which removed all shared-context writes
+  // during compile and made this lock unnecessary. The field is kept here
+  // (unused) only as a marker for git archaeology; safe to delete in a
+  // follow-up cleanup commit. See compile_doc/优化总规划.md §3.6.
+  std::mutex linking_mut_;
 
   std::unordered_map<int, std::vector<std::string>> snode_tree_funcs_;
 };
