@@ -70,7 +70,17 @@ class Profiling {
   void record_trace_event(TraceEvent &&ev);
 
   // One-shot check of TI_COMPILE_PROFILE env variable. Evaluated lazily.
+  // If a runtime override has been set (see set_tracing_runtime_override),
+  // that value takes precedence over the env variable.
   static bool is_tracing_enabled();
+
+  // Phase 0' / P-Compile-7: runtime override of the env-driven tracing
+  // gate. Used by `ti.compile_profile()` Python context manager so users
+  // can scope tracing to a specific code region without having to set
+  // TI_COMPILE_PROFILE before importing Taichi. Pass true/false to enable
+  // /disable; call clear_tracing_runtime_override() to fall back to env.
+  static void set_tracing_runtime_override(bool enabled);
+  static void clear_tracing_runtime_override();
 
   static Profiling &get_instance();
 

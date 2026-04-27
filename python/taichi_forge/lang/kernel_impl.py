@@ -551,7 +551,10 @@ def _get_global_vars(_func):
 class Kernel:
     counter = 0
 
-    def __init__(self, _func, autodiff_mode, _classkernel=False):
+    # P-Compile-6: valid per-kernel compile_tier override values.
+    _VALID_OPT_LEVELS = ("fast", "balanced", "full")
+
+    def __init__(self, _func, autodiff_mode, _classkernel=False, opt_level=None):
         self.func = _func
         self.kernel_counter = Kernel.counter
         Kernel.counter += 1
@@ -566,6 +569,16 @@ class Kernel:
         self.arguments = []
         self.return_type = None
         self.classkernel = _classkernel
+        # P-Compile-6: per-kernel compile_tier override. None = use program
+        # default (CompileConfig::compile_tier from ti.init). String value is
+        # validated here so users see errors at decoration time, not first
+        # invocation.
+        if opt_level is not None and opt_level not in Kernel._VALID_OPT_LEVELS:
+            raise ValueError(
+                f"@ti.kernel(opt_level=...) must be one of {Kernel._VALID_OPT_LEVELS} "
+                f"or None, got {opt_level!r}."
+            )
+        self.opt_level = opt_level
         self.extract_arguments()
         self.template_slot_locations = []
         for i, arg in enumerate(self.arguments):
@@ -697,6 +710,13 @@ class Kernel:
                 self.runtime.compiling_callable = None
 
         taichi_kernel = impl.get_runtime().prog.create_kernel(taichi_ast_generator, kernel_name, self.autodiff_mode)
+        # P-Compile-6: apply per-kernel compile_tier override (if set on the
+        # decorator). Stored on the C++ Kernel; consumed in
+        # Program::compile_kernel by copying CompileConfig and overriding the
+        # tier. Cache key already includes compile_tier so cache entries are
+        # auto-segregated.
+        if self.opt_level is not None:
+            taichi_kernel.set_compile_tier_override(self.opt_level)
         assert key not in self.compiled_kernels
         self.compiled_kernels[key] = taichi_kernel
 
@@ -1095,15 +1115,15 @@ def _inside_class(level_of_class_stackframe):
     return False
 
 
-def _kernel_impl(_func, level_of_class_stackframe, verbose=False):
+def _kernel_impl(_func, level_of_class_stackframe, verbose=False, opt_level=None):
     # Can decorators determine if a function is being defined inside a class?
     # https://stackoverflow.com/a/8793684/12003165
     is_classkernel = _inside_class(level_of_class_stackframe + 1)
 
     if verbose:
         print(f"kernel={_func.__name__} is_classkernel={is_classkernel}")
-    primal = Kernel(_func, autodiff_mode=AutodiffMode.NONE, _classkernel=is_classkernel)
-    adjoint = Kernel(_func, autodiff_mode=AutodiffMode.REVERSE, _classkernel=is_classkernel)
+    primal = Kernel(_func, autodiff_mode=AutodiffMode.NONE, _classkernel=is_classkernel, opt_level=opt_level)
+    adjoint = Kernel(_func, autodiff_mode=AutodiffMode.REVERSE, _classkernel=is_classkernel, opt_level=opt_level)
     # Having |primal| contains |grad| makes the tape work.
     primal.grad = adjoint
 
@@ -1143,7 +1163,7 @@ def _kernel_impl(_func, level_of_class_stackframe, verbose=False):
     return wrapped
 
 
-def kernel(fn):
+def kernel(fn=None, *, opt_level=None):
     """Marks a function as a Taichi kernel.
 
     A Taichi kernel is a function written in Python, and gets JIT compiled by
@@ -1157,6 +1177,11 @@ def kernel(fn):
 
     Args:
         fn (Callable): the Python function to be decorated
+        opt_level (Optional[str]): per-kernel ``compile_tier`` override.
+            One of ``"fast"`` / ``"balanced"`` / ``"full"`` or ``None`` (default,
+            inherits ``ti.init(compile_tier=...)``). ``"fast"`` skips expensive
+            IR + LLVM passes — recommended for cold-path / serial / I/O-bound
+            kernels where compile time dominates and runtime is insensitive.
 
     Returns:
         Callable: The decorated function
@@ -1167,11 +1192,26 @@ def kernel(fn):
         >>>
         >>> @ti.kernel
         >>> def run():
-        >>>     # Assigns all the elements of `x` in parallel.
         >>>     for i in x:
         >>>         x[i] = i
+        >>>
+        >>> @ti.kernel(opt_level="fast")
+        >>> def cold_path_kernel():
+        >>>     # Compiled with reduced optimization for faster compile time.
+        >>>     pass
     """
-    return _kernel_impl(fn, level_of_class_stackframe=3)
+    # Support both bare `@ti.kernel` and parameterized `@ti.kernel(opt_level=...)`.
+    # When called bare, fn is the user function (level_of_class_stackframe=3:
+    # _kernel_impl -> kernel -> user). When called with parens, fn is None and
+    # we return the inner decorator (level_of_class_stackframe=4:
+    # _kernel_impl -> _decorator -> kernel(...) call site -> user).
+    if fn is not None:
+        return _kernel_impl(fn, level_of_class_stackframe=3, opt_level=opt_level)
+
+    def _decorator(_fn):
+        return _kernel_impl(_fn, level_of_class_stackframe=4, opt_level=opt_level)
+
+    return _decorator
 
 
 class _BoundedDifferentiableMethod:

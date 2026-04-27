@@ -823,6 +823,18 @@ void export_lang(py::module &m) {
       .def("finalize_rets", &Kernel::finalize_rets)
       .def("finalize_params", &Kernel::finalize_params)
       .def("make_launch_context", &Kernel::make_launch_context)
+      .def("set_compile_tier_override",
+           &Kernel::set_compile_tier_override)
+      .def("clear_compile_tier_override",
+           &Kernel::clear_compile_tier_override)
+      .def("get_compile_tier_override",
+           [](Kernel *self) -> py::object {
+             const auto &v = self->get_compile_tier_override();
+             if (v.has_value()) {
+               return py::cast(*v);
+             }
+             return py::none();
+           })
       .def(
           "ast_builder",
           [](Kernel *self) -> ASTBuilder * {

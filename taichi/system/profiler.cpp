@@ -300,7 +300,26 @@ void Profiling::clear_profile_info() {
 // Phase 0': CSV + Chrome trace export
 // ---------------------------------------------------------------------------
 
+// P-Compile-7: TU-static runtime override of the env-driven tracing gate.
+// -1 = use env cache (default), 0 = forced off, 1 = forced on.
+static std::atomic<int> g_tracing_runtime_override{-1};
+
+void Profiling::set_tracing_runtime_override(bool enabled) {
+  g_tracing_runtime_override.store(enabled ? 1 : 0, std::memory_order_relaxed);
+}
+
+void Profiling::clear_tracing_runtime_override() {
+  g_tracing_runtime_override.store(-1, std::memory_order_relaxed);
+}
+
 bool Profiling::is_tracing_enabled() {
+  // Runtime override (set by `ti.compile_profile()` ctx mgr) takes
+  // precedence over the env-cached value.
+  int ov = g_tracing_runtime_override.load(std::memory_order_relaxed);
+  if (ov >= 0) {
+    return ov != 0;
+  }
+
   // Evaluated once per process. Flip by setting TI_COMPILE_PROFILE to a
   // non-empty string before importing Taichi.
   static std::atomic<int> cached{-1};

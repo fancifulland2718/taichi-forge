@@ -1150,13 +1150,21 @@ class ASTTransformer(Builder):
         ops_static = {
             ast.In: lambda l, r: l in r,
             ast.NotIn: lambda l, r: l not in r,
+            # P-Compile-5: allow `is` / `is not` only in `ti.static(...)`
+            # context so users can write e.g.
+            #     if ti.static(self._sdf is not None):
+            # The result is a Python bool, folded by `build_If`'s static-if
+            # path (no dead branch enters AST trace). In non-static Taichi
+            # scope, these ops still raise (handled below).
+            ast.Is: lambda l, r: l is r,
+            ast.IsNot: lambda l, r: l is not r,
         }
         if ctx.is_in_static_scope():
             ops = {**ops, **ops_static}
         operands = [node.left.ptr] + [comparator.ptr for comparator in node.comparators]
         val = True
         for i, node_op in enumerate(node.ops):
-            if isinstance(node_op, (ast.Is, ast.IsNot)):
+            if isinstance(node_op, (ast.Is, ast.IsNot)) and not ctx.is_in_static_scope():
                 name = "is" if isinstance(node_op, ast.Is) else "is not"
                 raise TaichiSyntaxError(f'Operator "{name}" in Taichi scope is not supported.')
             l = operands[i]

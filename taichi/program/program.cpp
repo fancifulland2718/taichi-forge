@@ -183,6 +183,19 @@ const CompiledKernelData &Program::compile_kernel(
   auto start_t = Time::get_time();
   TI_AUTO_PROF;
   auto &mgr = program_impl_->get_kernel_compilation_manager();
+  // P-Compile-6: apply per-kernel compile_tier override (if set) by passing
+  // an effective CompileConfig copy down. CompileConfig::compile_tier is
+  // already part of the offline cache key (offline_cache_util.cpp), so cache
+  // entries for the same kernel under different tiers are automatically
+  // segregated.
+  const auto &override = kernel_def.get_compile_tier_override();
+  if (override.has_value() && *override != compile_config.compile_tier) {
+    CompileConfig effective_config = compile_config;
+    effective_config.compile_tier = *override;
+    const auto &ckd = mgr.load_or_compile(effective_config, caps, kernel_def);
+    total_compilation_time_ += Time::get_time() - start_t;
+    return ckd;
+  }
   const auto &ckd = mgr.load_or_compile(compile_config, caps, kernel_def);
   total_compilation_time_ += Time::get_time() - start_t;
   return ckd;

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <optional>
+#include <string>
+
 #include "taichi/util/lang_util.h"
 #include "taichi/ir/snode.h"
 #include "taichi/ir/ir.h"
@@ -54,6 +57,23 @@ class TI_DLL_EXPORT Kernel : public Callable {
     return kernel_key_;
   }
 
+  // P-Compile-6: per-kernel compile_tier override.
+  // When set, takes precedence over CompileConfig::compile_tier for this
+  // kernel only. Empty optional = use program-level compile_tier (default).
+  // Valid values: "fast", "balanced", "full". Invalid values are rejected at
+  // the Python boundary; C++ side stores the string verbatim.
+  void set_compile_tier_override(const std::string &tier) {
+    compile_tier_override_ = tier;
+  }
+
+  void clear_compile_tier_override() {
+    compile_tier_override_.reset();
+  }
+
+  const std::optional<std::string> &get_compile_tier_override() const {
+    return compile_tier_override_;
+  }
+
  private:
   void init(Program &program,
             const std::function<void()> &func,
@@ -63,6 +83,7 @@ class TI_DLL_EXPORT Kernel : public Callable {
   // True if |ir| is a frontend AST. False if it's already offloaded to CHI IR.
   bool ir_is_ast_{false};
   mutable std::string kernel_key_;
+  std::optional<std::string> compile_tier_override_;
 };
 
 }  // namespace taichi::lang

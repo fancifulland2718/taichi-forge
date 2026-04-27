@@ -132,6 +132,12 @@ void export_misc(py::module &m) {
   m.def("export_compile_profile_trace", [](const std::string &path) {
     return Profiling::get_instance().export_chrome_trace(path);
   });
+  // P-Compile-7: runtime toggle for ti.compile_profile() context manager.
+  m.def("set_compile_profile_runtime_enabled",
+        &Profiling::set_tracing_runtime_override);
+  m.def("clear_compile_profile_runtime_override",
+        &Profiling::clear_tracing_runtime_override);
+  m.def("is_compile_profile_enabled", &Profiling::is_tracing_enabled);
   m.def("start_memory_monitoring", start_memory_monitoring);
   m.def("get_repo_dir", get_repo_dir);
   m.def("get_python_package_dir", get_python_package_dir);
