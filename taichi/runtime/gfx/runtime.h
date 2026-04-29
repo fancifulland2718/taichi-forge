@@ -80,6 +80,9 @@ class TI_DLL_EXPORT GfxRuntime {
   struct Params {
     Device *device{nullptr};
     KernelProfilerBase *profiler{nullptr};
+    // R2.a: Vulkan launch args/ret buffer pool.
+    bool enable_buffer_pool{false};
+    int buffer_pool_capacity{64};
   };
 
   explicit GfxRuntime(const Params &params);
@@ -155,6 +158,34 @@ class TI_DLL_EXPORT GfxRuntime {
   std::unique_ptr<DeviceAllocationGuard> listgen_buffer_;
 
   std::vector<std::unique_ptr<DeviceAllocationGuard>> ctx_buffers_;
+
+  // R2.a: Vulkan launch args/ret buffer pool. Three-stage to be GPU-safe:
+  //   pending_pool_   : in-flight on current_cmdlist_ (recording)
+  //   submitted_pool_ : submitted to stream, GPU may still be using
+  //   free_pool_      : safe to reuse (only filled after wait_idle)
+  // Each entry is keyed by (size, usage). Pool cap drops oldest free entries.
+  struct PooledBuffer {
+    std::unique_ptr<DeviceAllocationGuard> guard;
+    size_t size{0};
+    AllocUsage usage{AllocUsage::None};
+  };
+  bool buffer_pool_enabled_{false};
+  size_t buffer_pool_capacity_{64};
+  std::vector<PooledBuffer> pending_pool_;
+  std::vector<PooledBuffer> submitted_pool_;
+  std::vector<PooledBuffer> free_pool_;
+  size_t buffer_pool_hits_{0};
+  size_t buffer_pool_misses_{0};
+
+  // Try to take a buffer from free_pool_ matching (size, usage). Returns
+  // nullptr if pool disabled or no match.
+  std::unique_ptr<DeviceAllocationGuard> try_take_pooled_buffer(
+      size_t size,
+      AllocUsage usage);
+  // Move pending_pool_ -> submitted_pool_ (called on flush).
+  void flush_pending_pool_to_submitted();
+  // Move submitted_pool_ + pending_pool_ -> free_pool_ (called after wait_idle).
+  void recycle_pools_to_free();
 
   std::unique_ptr<CommandList> current_cmdlist_{nullptr};
   high_res_clock::time_point current_cmdlist_pending_since_;

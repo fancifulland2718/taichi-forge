@@ -29,7 +29,10 @@ void *DeviceMemoryPool::allocate_with_cache(
     const LlvmDevice::LlvmRuntimeAllocParams &params) {
   std::lock_guard<std::mutex> _(mut_allocation_);
 
-  return allocator_->allocate(device, params);
+  void *ret = allocator_->allocate(device, params);
+  ++allocate_count_;
+  bytes_allocated_total_ += params.size;
+  return ret;
 }
 
 void *DeviceMemoryPool::allocate(std::size_t size,
@@ -37,7 +40,10 @@ void *DeviceMemoryPool::allocate(std::size_t size,
                                  bool managed) {
   std::lock_guard<std::mutex> _(mut_allocation_);
 
-  return allocate_raw_memory(size, managed);
+  void *ret = allocate_raw_memory(size, managed);
+  ++allocate_count_;
+  bytes_allocated_total_ += size;
+  return ret;
 }
 
 void DeviceMemoryPool::release(std::size_t size, void *ptr, bool release_raw) {
@@ -48,6 +54,30 @@ void DeviceMemoryPool::release(std::size_t size, void *ptr, bool release_raw) {
   } else {
     allocator_->release(size, (uint64_t *)ptr);
   }
+  ++release_count_;
+  bytes_released_total_ += size;
+}
+
+DeviceMemoryPoolStats DeviceMemoryPool::get_stats() {
+  std::lock_guard<std::mutex> _(mut_allocation_);
+  DeviceMemoryPoolStats s;
+  s.allocate_count = allocate_count_;
+  s.release_count = release_count_;
+  s.bytes_allocated_total = bytes_allocated_total_;
+  s.bytes_released_total = bytes_released_total_;
+  s.raw_chunks = raw_memory_chunks_.size();
+  uint64_t raw_bytes = 0;
+  for (auto &kv : raw_memory_chunks_) {
+    raw_bytes += kv.second;
+  }
+  s.raw_bytes = raw_bytes;
+  if (allocator_) {
+    s.cache_hit_count = allocator_->cache_hit_count();
+    s.cache_miss_count = allocator_->cache_miss_count();
+    s.cached_blocks = allocator_->cached_block_count();
+    s.cached_bytes = allocator_->cached_bytes();
+  }
+  return s;
 }
 
 void *DeviceMemoryPool::allocate_raw_memory(std::size_t size, bool managed) {

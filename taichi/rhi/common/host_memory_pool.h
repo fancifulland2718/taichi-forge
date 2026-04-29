@@ -11,6 +11,18 @@ namespace taichi::lang {
 
 // A memory pool that runs on the host
 
+// R1.c: read-only diagnostic snapshot. All values are sampled under the
+// HostMemoryPool's own mutex, so the snapshot is internally consistent.
+struct HostMemoryPoolStats {
+  uint64_t allocate_count{0};      // # of HostMemoryPool::allocate calls
+  uint64_t release_count{0};       // # of HostMemoryPool::release calls
+  uint64_t bytes_allocated_total{0};  // sum of all `size` requested ever
+  uint64_t bytes_released_total{0};   // sum of all `size` released ever
+  uint64_t raw_chunks{0};          // # OS-level chunks currently alive
+  uint64_t raw_bytes{0};           // sum of OS-level chunk sizes
+  uint64_t unified_chunks{0};      // # UnifiedAllocator slab chunks
+};
+
 class TI_DLL_EXPORT HostMemoryPool {
  public:
   static const size_t page_size;
@@ -25,6 +37,10 @@ class TI_DLL_EXPORT HostMemoryPool {
   HostMemoryPool();
   ~HostMemoryPool();
 
+  // R1.c diagnostic stats. Read-only, takes the same lock allocate/release
+  // take, so adds only one extra mutex acquire per call (off the hot path).
+  HostMemoryPoolStats get_stats();
+
  protected:
   void *allocate_raw_memory(std::size_t size);
   void deallocate_raw_memory(void *ptr);
@@ -35,6 +51,12 @@ class TI_DLL_EXPORT HostMemoryPool {
 
   std::unique_ptr<UnifiedAllocator> allocator_;
   std::mutex mut_allocation_;
+
+  // R1.c counters; updated under mut_allocation_, no extra atomics.
+  uint64_t allocate_count_{0};
+  uint64_t release_count_{0};
+  uint64_t bytes_allocated_total_{0};
+  uint64_t bytes_released_total_{0};
 
   friend class UnifiedAllocator;
 };
