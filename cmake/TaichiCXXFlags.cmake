@@ -41,6 +41,9 @@ if (WIN32)
     if (MSVC)
         # C++17, and C++ conformance
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zc:__cplusplus /Zc:inline /std:c++17")
+        # UTF-8 source/exec charset (required by fmt 11 / spdlog 1.15+; all
+        # non-ASCII source files in this repo verified valid UTF-8 2026-04-29).
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /utf-8")
         # Linker & object related flags
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /bigobj")
         # Debugging (generate PDB files)

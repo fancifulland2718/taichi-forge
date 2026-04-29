@@ -10,6 +10,9 @@
 // before including "spdlog/fmt/fmt.h"
 #include "spdlog/common.h"
 #include "spdlog/fmt/fmt.h"
+// fmt 11 (bundled with spdlog 1.15+) split fmt::join into <fmt/ranges.h>; pull
+// it in centrally so every TU using logging.h continues to see fmt::join.
+#include "spdlog/fmt/bundled/ranges.h"
 namespace spdlog {
 class logger;
 }
