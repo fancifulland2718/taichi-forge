@@ -275,7 +275,13 @@ Pipeline *CompiledTaichiKernel::get_pipeline(int i) {
 }
 
 GfxRuntime::GfxRuntime(const Params &params)
-    : device_(params.device), profiler_(params.profiler) {
+    : device_(params.device),
+      profiler_(params.profiler),
+      buffer_pool_enabled_(params.enable_buffer_pool),
+      buffer_pool_capacity_(
+          params.buffer_pool_capacity > 0
+              ? static_cast<size_t>(params.buffer_pool_capacity)
+              : size_t{64}) {
   current_cmdlist_pending_since_ = high_res_clock::now();
   init_nonroot_buffers();
 
@@ -410,21 +416,32 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
       ret_buffer{nullptr};
 
   if (ti_kernel->get_args_buffer_size()) {
-    auto [buf, res] = device_->allocate_memory_unique(
-        {ti_kernel->get_args_buffer_size(),
-         /*host_write=*/true, /*host_read=*/false,
-         /*export_sharing=*/false, AllocUsage::Uniform});
-    TI_ASSERT_INFO(res == RhiResult::success, "Failed to allocate args buffer");
-    args_buffer = std::move(buf);
+    if (auto pooled = try_take_pooled_buffer(ti_kernel->get_args_buffer_size(),
+                                             AllocUsage::Uniform)) {
+      args_buffer = std::move(pooled);
+    } else {
+      auto [buf, res] = device_->allocate_memory_unique(
+          {ti_kernel->get_args_buffer_size(),
+           /*host_write=*/true, /*host_read=*/false,
+           /*export_sharing=*/false, AllocUsage::Uniform});
+      TI_ASSERT_INFO(res == RhiResult::success,
+                     "Failed to allocate args buffer");
+      args_buffer = std::move(buf);
+    }
   }
 
   if (ti_kernel->get_ret_buffer_size()) {
-    auto [buf, res] = device_->allocate_memory_unique(
-        {ti_kernel->get_ret_buffer_size(),
-         /*host_write=*/false, /*host_read=*/true,
-         /*export_sharing=*/false, AllocUsage::Storage});
-    TI_ASSERT_INFO(res == RhiResult::success, "Failed to allocate ret buffer");
-    ret_buffer = std::move(buf);
+    if (auto pooled = try_take_pooled_buffer(ti_kernel->get_ret_buffer_size(),
+                                             AllocUsage::Storage)) {
+      ret_buffer = std::move(pooled);
+    } else {
+      auto [buf, res] = device_->allocate_memory_unique(
+          {ti_kernel->get_ret_buffer_size(),
+           /*host_write=*/false, /*host_read=*/true,
+           /*export_sharing=*/false, AllocUsage::Storage});
+      TI_ASSERT_INFO(res == RhiResult::success, "Failed to allocate ret buffer");
+      ret_buffer = std::move(buf);
+    }
   }
 
   // Create context blitter
@@ -610,10 +627,22 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
 
   // Keep context buffers used in this dispatch
   if (ti_kernel->get_args_buffer_size()) {
-    ctx_buffers_.push_back(std::move(args_buffer));
+    if (buffer_pool_enabled_) {
+      pending_pool_.push_back({std::move(args_buffer),
+                               ti_kernel->get_args_buffer_size(),
+                               AllocUsage::Uniform});
+    } else {
+      ctx_buffers_.push_back(std::move(args_buffer));
+    }
   }
   if (ti_kernel->get_ret_buffer_size()) {
-    ctx_buffers_.push_back(std::move(ret_buffer));
+    if (buffer_pool_enabled_) {
+      pending_pool_.push_back({std::move(ret_buffer),
+                               ti_kernel->get_ret_buffer_size(),
+                               AllocUsage::Storage});
+    } else {
+      ctx_buffers_.push_back(std::move(ret_buffer));
+    }
   }
 
   // If we need to host sync, sync and remove in-flight references
@@ -622,6 +651,11 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
                                     ext_array_size)) {
       current_cmdlist_ = nullptr;
       ctx_buffers_.clear();
+      // R2.a: device_to_host internally syncs (wait_idle / submit_synced),
+      // so all pool buffers are safe to recycle here.
+      if (buffer_pool_enabled_) {
+        recycle_pools_to_free();
+      }
     }
   }
 
@@ -681,6 +715,10 @@ void GfxRuntime::synchronize() {
     }
   }
   ctx_buffers_.clear();
+  // R2.a: after wait_idle, all submitted/pending pool buffers are GPU-safe.
+  if (buffer_pool_enabled_) {
+    recycle_pools_to_free();
+  }
   ndarrays_in_use_.clear();
   fflush(stdout);
 }
@@ -691,6 +729,9 @@ StreamSemaphore GfxRuntime::flush() {
     sema = device_->get_compute_stream()->submit(current_cmdlist_.get());
     current_cmdlist_ = nullptr;
     ctx_buffers_.clear();
+    if (buffer_pool_enabled_) {
+      flush_pending_pool_to_submitted();
+    }
   } else {
     auto [cmdlist, res] =
         device_->get_compute_stream()->new_command_list_unique();
@@ -703,6 +744,50 @@ StreamSemaphore GfxRuntime::flush() {
 
 Device *GfxRuntime::get_ti_device() const {
   return device_;
+}
+
+// R2.a: Try to take a buffer from free_pool_ matching (size, usage).
+// Returns nullptr if pool disabled or no match. Performs O(N) scan; pool
+// capacity is bounded (default 64) so this is acceptable.
+std::unique_ptr<DeviceAllocationGuard> GfxRuntime::try_take_pooled_buffer(
+    size_t size,
+    AllocUsage usage) {
+  if (!buffer_pool_enabled_) {
+    return nullptr;
+  }
+  for (auto it = free_pool_.begin(); it != free_pool_.end(); ++it) {
+    if (it->size == size && it->usage == usage) {
+      auto guard = std::move(it->guard);
+      free_pool_.erase(it);
+      ++buffer_pool_hits_;
+      return guard;
+    }
+  }
+  ++buffer_pool_misses_;
+  return nullptr;
+}
+
+void GfxRuntime::flush_pending_pool_to_submitted() {
+  for (auto &entry : pending_pool_) {
+    submitted_pool_.push_back(std::move(entry));
+  }
+  pending_pool_.clear();
+}
+
+void GfxRuntime::recycle_pools_to_free() {
+  // Caller must guarantee GPU has finished (wait_idle / submit_synced).
+  auto move_to_free = [this](std::vector<PooledBuffer> &src) {
+    for (auto &entry : src) {
+      if (free_pool_.size() >= buffer_pool_capacity_) {
+        // Drop oldest free entry to bound memory; releases its DeviceAlloc.
+        free_pool_.erase(free_pool_.begin());
+      }
+      free_pool_.push_back(std::move(entry));
+    }
+    src.clear();
+  };
+  move_to_free(submitted_pool_);
+  move_to_free(pending_pool_);
 }
 
 void GfxRuntime::ensure_current_cmdlist() {

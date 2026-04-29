@@ -288,6 +288,10 @@ void export_lang(py::module &m) {
                      &CompileConfig::offline_cache_cleaning_factor)
       .def_readwrite("num_compile_threads", &CompileConfig::num_compile_threads)
       .def_readwrite("vk_api_version", &CompileConfig::vk_api_version)
+      .def_readwrite("vulkan_launch_buffer_pool",
+                     &CompileConfig::vulkan_launch_buffer_pool)
+      .def_readwrite("vulkan_launch_buffer_pool_capacity",
+                     &CompileConfig::vulkan_launch_buffer_pool_capacity)
       .def_readwrite("cuda_stack_limit", &CompileConfig::cuda_stack_limit)
       .def_readwrite("external_optimization_level",
                      &CompileConfig::external_optimization_level);

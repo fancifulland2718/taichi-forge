@@ -15,6 +15,8 @@
 #include "taichi/python/exception.h"
 #include "taichi/python/export.h"
 #include "taichi/python/memory_usage_monitor.h"
+#include "taichi/rhi/common/host_memory_pool.h"
+#include "taichi/rhi/llvm/device_memory_pool.h"
 #include "taichi/system/benchmark.h"
 #include "taichi/system/hacked_signal_handler.h"
 #include "taichi/system/profiler.h"
@@ -138,6 +140,37 @@ void export_misc(py::module &m) {
   m.def("clear_compile_profile_runtime_override",
         &Profiling::clear_tracing_runtime_override);
   m.def("is_compile_profile_enabled", &Profiling::is_tracing_enabled);
+
+  // R1.c: read-only memory pool diagnostic snapshots. Adds one extra mutex
+  // acquire per call; not on any hot path. See compile_doc/运行时优化规划.md
+  // §3.1 for the exposed-fields contract.
+  m.def("get_host_memory_pool_stats", []() {
+    auto s = taichi::lang::HostMemoryPool::get_instance().get_stats();
+    py::dict d;
+    d["allocate_count"] = s.allocate_count;
+    d["release_count"] = s.release_count;
+    d["bytes_allocated_total"] = s.bytes_allocated_total;
+    d["bytes_released_total"] = s.bytes_released_total;
+    d["raw_chunks"] = s.raw_chunks;
+    d["raw_bytes"] = s.raw_bytes;
+    d["unified_chunks"] = s.unified_chunks;
+    return d;
+  });
+  m.def("get_device_memory_pool_stats", []() {
+    auto s = taichi::lang::DeviceMemoryPool::get_instance().get_stats();
+    py::dict d;
+    d["allocate_count"] = s.allocate_count;
+    d["release_count"] = s.release_count;
+    d["bytes_allocated_total"] = s.bytes_allocated_total;
+    d["bytes_released_total"] = s.bytes_released_total;
+    d["cache_hit_count"] = s.cache_hit_count;
+    d["cache_miss_count"] = s.cache_miss_count;
+    d["raw_chunks"] = s.raw_chunks;
+    d["raw_bytes"] = s.raw_bytes;
+    d["cached_blocks"] = s.cached_blocks;
+    d["cached_bytes"] = s.cached_bytes;
+    return d;
+  });
   m.def("start_memory_monitoring", start_memory_monitoring);
   m.def("get_repo_dir", get_repo_dir);
   m.def("get_python_package_dir", get_python_package_dir);

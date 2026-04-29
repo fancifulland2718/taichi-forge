@@ -246,6 +246,12 @@ struct CompileConfig {
   int num_compile_threads{4};
   std::string vk_api_version;
 
+  // R2.a: Vulkan launch args/ret buffer pool. Default OFF (vanilla behavior).
+  // Only effective on gfx backends (vulkan/opengl/metal/dx). Buffers are
+  // recycled across `synchronize()` boundaries; capacity bounded.
+  bool vulkan_launch_buffer_pool{false};
+  int vulkan_launch_buffer_pool_capacity{64};
+
   size_t cuda_stack_limit{0};
 
   CompileConfig();

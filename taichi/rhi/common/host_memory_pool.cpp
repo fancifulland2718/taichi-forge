@@ -26,6 +26,9 @@ void *HostMemoryPool::allocate(std::size_t size,
     TI_ERROR("Memory pool is already destroyed");
   }
   void *ret = allocator_->allocate(size, alignment, exclusive);
+  // R1.c counters: update under existing lock (no extra cost on hot path).
+  ++allocate_count_;
+  bytes_allocated_total_ += size;
   return ret;
 }
 
@@ -41,6 +44,25 @@ void HostMemoryPool::release(std::size_t size, void *ptr) {
       deallocate_raw_memory(ptr);  // release raw memory as well
     }
   }
+  ++release_count_;
+  bytes_released_total_ += size;
+}
+
+HostMemoryPoolStats HostMemoryPool::get_stats() {
+  std::lock_guard<std::mutex> _(mut_allocation_);
+  HostMemoryPoolStats s;
+  s.allocate_count = allocate_count_;
+  s.release_count = release_count_;
+  s.bytes_allocated_total = bytes_allocated_total_;
+  s.bytes_released_total = bytes_released_total_;
+  s.raw_chunks = raw_memory_chunks_.size();
+  uint64_t raw_bytes = 0;
+  for (auto &kv : raw_memory_chunks_) {
+    raw_bytes += kv.second;
+  }
+  s.raw_bytes = raw_bytes;
+  s.unified_chunks = allocator_ ? allocator_->chunks_.size() : 0;
+  return s;
 }
 
 void *HostMemoryPool::allocate_raw_memory(std::size_t size) {

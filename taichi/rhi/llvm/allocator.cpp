@@ -49,10 +49,12 @@ uint64_t *CachingAllocator::allocate(
     ret = reinterpret_cast<uint64_t *>(it_blk->second);
     mem_blocks_.erase(it_blk);
     ptr_map_.erase(it_blk->second);
+    ++cache_hit_count_;
 
   } else {
     ret = reinterpret_cast<uint64_t *>(
         device->allocate_llvm_runtime_memory_jit(params));
+    ++cache_miss_count_;
   }
   return ret;
 }

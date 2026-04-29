@@ -8,6 +8,7 @@
 from taichi_forge.tools.compile_profile import *
 from taichi_forge.tools.diagnose import *
 from taichi_forge.tools.image import *
+from taichi_forge.tools.memory_pool_stats import *
 from taichi_forge.tools.np2ply import *
 from taichi_forge.tools.video import *
 from taichi_forge.tools.vtk import *
