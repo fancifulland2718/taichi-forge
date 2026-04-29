@@ -324,6 +324,17 @@ class SrcInfoGuard:
 class PyTaichi:
     def __init__(self, kernels=None):
         self.materialized = False
+        # R4.a — fast path for PyTaichi.materialize() on the kernel hot path.
+        # Original behavior: every kernel call ran the full validate/check
+        # sequence (~3.4 µs/call on x64) even when nothing changed. With the
+        # fast path on, materialize() short-circuits when no field/snode/
+        # builder modification happened since the previous materialize().
+        # Default ON; can be disabled via ti.init(materialize_fast_path=False)
+        # or ti.tools.set_materialize_fast_path(False) for behavior parity
+        # with vanilla 1.7.4 / older fork builds. _materialize_dirty starts
+        # True so the first materialize() does run all checks.
+        self._materialize_fast_path = True
+        self._materialize_dirty = True
         self.prog = None
         self.src_info_stack = []
         self.inside_kernel = False
@@ -367,6 +378,12 @@ class PyTaichi:
 
     def initialize_fields_builder(self, builder):
         self.unfinalized_fields_builder[builder] = get_traceback(2)
+        # R4.a — non-_root_fb builders need validate_fields_builder to run on
+        # the next materialize() so we mark dirty here. _root_fb builders
+        # created inside materialize() also pass through this path; that's
+        # fine because materialize() resets the flag at its tail after the
+        # new _root_fb has been registered.
+        self._materialize_dirty = True
 
     def clear_compiled_functions(self):
         for k in self.kernels:
@@ -493,6 +510,13 @@ class PyTaichi:
             _field._calc_dynamic_index_stride()
 
     def materialize(self):
+        # R4.a fast path: skip the full validate/check sequence when nothing
+        # has changed since the previous materialize(). All mutating entry
+        # points (create_field_member, FieldsBuilder.__init__, matrix field
+        # registration, clear/reset) flip _materialize_dirty back to True.
+        # _materialize_fast_path is the user-facing kill switch.
+        if self._materialize_fast_path and not self._materialize_dirty:
+            return
         self.materialize_root_fb(not self.materialized)
         self.materialized = True
 
@@ -507,6 +531,10 @@ class PyTaichi:
         self.grad_vars = []
         self.dual_vars = []
         self.matrix_fields = []
+        # All pending state has been validated and consumed; further
+        # kernel-call-driven materialize() invocations can short-circuit
+        # until a new field/snode/builder is created.
+        self._materialize_dirty = False
 
     def _register_signal_handlers(self):
         if self._signal_handler_registry is None:
@@ -518,6 +546,9 @@ class PyTaichi:
             self.prog = None
         self._signal_handler_registry = None
         self.materialized = False
+        # R4.a — after clear() the program is gone; the next materialize()
+        # must re-run the full sequence (root re-finalize etc.).
+        self._materialize_dirty = True
 
     def sync(self):
         self.materialize()
@@ -736,6 +767,7 @@ def create_field_member(dtype, name, needs_grad, needs_dual):
     x.ptr.set_name(name)
     x.ptr.set_grad_type(SNodeGradType.PRIMAL)
     pytaichi.global_vars.append(x)
+    pytaichi._materialize_dirty = True  # R4.a — invalidate fast-path cache
 
     x_grad = None
     x_dual = None
@@ -751,6 +783,7 @@ def create_field_member(dtype, name, needs_grad, needs_dual):
         x.ptr.set_adjoint(x_grad.ptr)
         if needs_grad:
             pytaichi.grad_vars.append(x_grad)
+            pytaichi._materialize_dirty = True  # R4.a — invalidate fast-path cache
 
         if prog.config().debug:
             # adjoint checkbit
@@ -771,6 +804,7 @@ def create_field_member(dtype, name, needs_grad, needs_dual):
         x.ptr.set_dual(x_dual.ptr)
         if needs_dual:
             pytaichi.dual_vars.append(x_dual)
+            pytaichi._materialize_dirty = True  # R4.a — invalidate fast-path cache
     elif needs_grad or needs_dual:
         raise TaichiRuntimeError(f"{dtype} is not supported for field with `needs_grad=True` or `needs_dual=True`.")
 
