@@ -892,6 +892,7 @@ class Matrix(TaichiOperations):
             entries._set_dual(entries_dual)
 
         impl.get_runtime().matrix_fields.append(entries)
+        impl.get_runtime()._materialize_dirty = True  # R4.a — invalidate fast-path cache
 
         if shape is None:
             if offset is not None:
