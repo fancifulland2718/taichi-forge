@@ -41,6 +41,17 @@ struct SNodeDescriptor {
   size_t pointer_pool_offset_in_root = 0;
   size_t pointer_watermark_offset_in_root = 0;
   size_t pointer_pool_capacity = 0;
+  // G1.b (vulkan_sparse_experimental, pointer SNode only,
+  // gated by TI_VULKAN_POINTER_FREELIST at codegen time):
+  //   freelist_head:  u32 sentinel; 0 = empty, otherwise (pool_index + 1).
+  //   freelist_links: u32[pool_capacity]; per-pool-slot "next" pointer in
+  //                   the same encoding (0 = tail, otherwise pool_index+1).
+  // Both are zero-initialized by GfxRuntime::add_root_buffer (every root
+  // buffer is memset(0) on construction). Layout is stable across
+  // alloc/deactivate; activate either pops freelist (if non-empty) or
+  // bumps watermark; deactivate pushes onto freelist.
+  size_t pointer_freelist_head_offset_in_root = 0;
+  size_t pointer_freelist_links_offset_in_root = 0;
 
   SNode *get_child(int ch_i) const {
     return snode->ch[ch_i].get();
