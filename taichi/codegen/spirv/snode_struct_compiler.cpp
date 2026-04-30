@@ -102,6 +102,17 @@ class StructCompiler {
       desc.pointer_pool_offset_in_root = result.root_size;
       desc.pointer_pool_capacity = capacity;
       result.root_size += cell_bytes * capacity;
+#if defined(TI_VULKAN_POINTER_AMBIENT_ZONE)
+      // G10-P2: append a zero-initialized cell-sized ambient zone.
+      // pointer_lookup_or_activate(do_activate=false) returns this offset
+      // when slot==0, so inactive reads always observe zero (matches
+      // LLVM ambient_val_addr semantics). Never written by any kernel.
+      // Root buffer is memset(0) by GfxRuntime::add_root_buffer, so no
+      // additional init is required.
+      result.root_size = (result.root_size + 3u) & ~size_t(3);
+      desc.pointer_ambient_offset_in_root = result.root_size;
+      result.root_size += cell_bytes;
+#endif
     }
 
     result.snode_descriptors = std::move(snode_descriptors_);

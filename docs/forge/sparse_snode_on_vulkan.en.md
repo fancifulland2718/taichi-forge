@@ -57,6 +57,46 @@ Optional build-time switches (default ON; touch only when bisecting a regression
 
 ---
 
+## ⚠️ Known correctness / stability issues (2026-04-30 user feedback, G10 in flight)
+
+> **In 0.3.0 the Vulkan sparse-SNode backend deviates from the LLVM cpu/cuda backend on two semantic contracts. Until G10 lands, please follow the workarounds below.** Tracking: `compile_doc/SNode_Vulkan_规划.md` §9.
+
+### ✅ Fixed bug 1 (0.3.1, 2026-04-30): inactive sparse-cell reads return zero
+
+LLVM cpu / cuda guarantees that reading an inactive sparse cell returns the dtype's zero value (routed to `ambient_val_addr`, a separate read-only zero region). This is the contract that lets SDF lookups, ray-marching, and neighborhood sampling code "just work" on sparse fields.
+
+**0.3.0 behavior (replaced)**: inactive reads were routed to the *real* address of pool slot 0. Once any kernel legitimately activated and wrote to cell 0, every inactive read returned cell-0's actual data — typical symptom: an SDF ray-march reading garbage values > 500 in empty voxels.
+
+**0.3.1 fix**: [`spirv_codegen.cpp` `pointer_lookup_or_activate(do_activate=false)`](../../taichi/codegen/spirv/spirv_codegen.cpp) now redirects inactive reads to an ambient zone appended at the end of the root buffer (per pointer SNode, `cell_stride` bytes of zero memory, memset at startup, never written by any kernel). All three backends now byte-equivalently return 0 for inactive reads. Acceptance test: [tests/p4/g10_inactive_read_zero.py](../../tests/p4/g10_inactive_read_zero.py). The CMake option `TI_VULKAN_POINTER_AMBIENT_ZONE` (default ON) gates the new path; turning it OFF restores 0.3.0 slot-0 fallback.
+
+**Remaining limitation**: inactive **writes** (out-of-capacity OOC) keep the documented silent-loss slot-0 path described in §3.1; this fix only changes inactive-read semantics.
+
+### ⚠️ Known bug 2: full-grid `ti.ndrange` writes to a 3D pointer field cause device-lost (**stability**)
+
+For a 64³ sparse grid laid out as `pointer(8) → bitmasked(4) → dense(2)` (or `pointer(8) → dense(8)`), running `for i,j,k in ti.ndrange(64, 64, 64): field[i,j,k] = ...` to fill every cell: the write itself succeeds, but **any listgen-dependent kernel that follows** (struct-for / `to_numpy()` / another kernel reading that field) triggers GPU TDR / device-lost. CPU/CUDA on the same code is fine.
+
+**Counter-examples (work fine)**: 1D pointer full-fill, 2D pointer full-fill, 3D pointer with only a small number of active cells, and 3D pointer in *brick-scatter* mode (parallelize over block coordinates, serialize voxels inside the block). MPM-128 is brick-scatter, hence unaffected.
+
+**Workaround today**: rewrite the fill kernel as brick-scatter:
+
+```python
+@ti.kernel
+def fill():
+    # parallel over coarse blocks, serial inside
+    for bi, bj, bk in ti.ndrange(N // BS, N // BS, N // BS):
+        for ci, cj, ck in ti.static(ti.ndrange(BS, BS, BS)):
+            i, j, k = bi * BS + ci, bj * BS + cj, bk * BS + ck
+            field[i, j, k] = compute(i, j, k)
+```
+
+### Honest recommendation for Vulkan sparse SNodes today
+
+- ✅ Suitable: MPM-style atomic_add scatter (one cell per thread); small-active-set + dense compute; offline / host-synchronized small demos.
+- ⚠️ Not suitable yet: 64³+ "fill the entire grid via `ti.ndrange`" workloads (blocked by bug 2).
+- Until that bug is fixed in G10, please keep using the LLVM cpu / cuda backend for that workload.
+
+---
+
 ## 3. Important limitations (read before use)
 
 ### 3.1 Pointer / dynamic capacity is **statically sized at compile time**

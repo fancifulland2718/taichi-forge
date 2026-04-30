@@ -53,6 +53,20 @@ struct SNodeDescriptor {
   size_t pointer_freelist_head_offset_in_root = 0;
   size_t pointer_freelist_links_offset_in_root = 0;
 
+  // G10-P2 (2026-04-30, vulkan_sparse_experimental, pointer SNode only,
+  // gated by TI_VULKAN_POINTER_AMBIENT_ZONE at codegen time):
+  // A single zero-initialized cell-sized region appended after the pool
+  // data. When `pointer_lookup_or_activate(do_activate=false)` finds the
+  // slot to be 0 (inactive cell), the returned cell_byte_offset is this
+  // ambient zone instead of `pool[0]`. This matches LLVM's
+  // `ambient_val_addr` semantics (inactive sparse reads return zero) and
+  // fixes the user-reported "inactive read returns garbage" issue. The
+  // zone is sized = cell_stride bytes and never written by any kernel
+  // (do_activate=true OOC fallback still routes to pool[0] to preserve
+  // the documented silent-loss behavior). Zero-init is provided by
+  // GfxRuntime::add_root_buffer's memset(0) on root buffer creation.
+  size_t pointer_ambient_offset_in_root = 0;
+
   // G4 (vulkan_sparse_experimental, dynamic SNode only,
   // gated by TI_VULKAN_DYNAMIC at codegen time):
   // Each dynamic container is laid out as
