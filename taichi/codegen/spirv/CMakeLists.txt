@@ -88,3 +88,20 @@ option(TI_VULKAN_POINTER_POOL_FRACTION
 if(TI_VULKAN_POINTER_POOL_FRACTION)
   target_compile_definitions(spirv_codegen PRIVATE TI_VULKAN_POINTER_POOL_FRACTION=1)
 endif()
+
+# G10-P2 (2026-04-30): ambient-zone fallback for inactive pointer-SNode reads.
+# Default ON: appends a zero-initialized cell-sized region per pointer SNode
+# at the end of its pool, and routes `pointer_lookup_or_activate(
+# do_activate=false)` (i.e. read accesses to inactive cells) to that region
+# instead of pool[0]. Aligns Vulkan's behavior with LLVM's `ambient_val_addr`
+# semantics — `x[inactive_idx]` reads as zero rather than as whatever
+# pool[0] currently contains. Fixes the user-reported "inactive read
+# returns garbage" issue (compile_doc/SNode_Vulkan_规划.md §9.2). Memory
+# overhead is one cell_stride per pointer SNode (typically a few KiB).
+# Default OFF would only be used as an emergency rollback to the legacy
+# pool[0] fallback.
+option(TI_VULKAN_POINTER_AMBIENT_ZONE
+  "Route inactive pointer-SNode reads to a zero ambient zone (LLVM-equivalent)" ON)
+if(TI_VULKAN_POINTER_AMBIENT_ZONE)
+  target_compile_definitions(spirv_codegen PRIVATE TI_VULKAN_POINTER_AMBIENT_ZONE=1)
+endif()

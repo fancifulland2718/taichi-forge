@@ -57,6 +57,46 @@ fill()
 
 ---
 
+## ⚠️ 已知正确性 / 稳定性问题（2026-04-30 用户反馈，G10 修复中）
+
+> **当前 0.3.0 版本下，Vulkan 稀疏 SNode 在两条语义合同上偏离 LLVM cpu/cuda 后端，未修复前请按本节指引规避。** 详细立项见 `compile_doc/SNode_Vulkan_规划.md` §9。
+
+### ✅ 已修复 Bug 1（0.3.1，2026-04-30）：inactive 稀疏 cell 读返回 0
+
+LLVM cpu/cuda 后端：读取 inactive 稀疏 cell **保证返回该 dtype 的零值**（路由到 `ambient_val_addr` 这块独立只读零内存）。这是 SDF 查找、ray-march、邻域采样代码可以「无脑写」的语义基础。
+
+**0.3.0 行为（已被替换）**：inactive 读路由到 pool 第 0 号槽的真实地址。一旦 cell-0 被任何 kernel 合法激活并写入，**所有 inactive 读都会返回 cell-0 的真实数据**——典型表现：SDF ray-march 在空 voxel 读到 > 500 的脏值。
+
+**0.3.1 修复**：[`spirv_codegen.cpp` `pointer_lookup_or_activate(do_activate=false)`](../../taichi/codegen/spirv/spirv_codegen.cpp) 现把 inactive 读重定向到 root buffer 末尾的 ambient zone（per pointer SNode 一段 `cell_stride` 字节零内存，启动时 memset 零，永不被 kernel 写）。三后端 inactive 读字节等价返回 0。验收脚本：[tests/p4/g10_inactive_read_zero.py](../../tests/p4/g10_inactive_read_zero.py)。CMake 选项 `TI_VULKAN_POINTER_AMBIENT_ZONE`（默认 ON）控制此路径；OFF 时还原 0.3.0 slot-0 fallback。
+
+**仍保留的限制**：inactive **写**（容量越界 OOC）保留 silent-loss slot-0 路径，与 §3.1 documented behavior 一致；本次修复**只改正 inactive 读语义**。
+
+### ⚠️ 已知 Bug 2：全 grid `ti.ndrange` 并发写 3D pointer 触发 device-lost（**稳定性**）
+
+对 `pointer(8) → bitmasked(4) → dense(2)`（或 `pointer(8) → dense(8)`）的 64³ 稀疏 grid，做 `for i,j,k in ti.ndrange(64, 64, 64): field[i,j,k] = ...` 全填充：写本身成功，但**紧接的任何 listgen 依赖 kernel**（struct-for / `to_numpy()` / 读该字段的另一个 kernel）会触发 GPU TDR / device-lost。CPU/CUDA 同代码完全正常。
+
+**反例（正常工作）**：1D pointer 全填充、2D pointer 全填充、3D pointer 仅激活少量 cell、3D pointer 用 brick-scatter 模式（parallel 在 block 坐标上、serial 在 block 内 voxel 上）。MPM-128 demo 正是 brick-scatter 模式所以不受影响。
+
+**当前规避**：把 fill kernel 改写为 brick-scatter 模式：
+
+```python
+@ti.kernel
+def fill():
+    # parallel over coarse blocks, serial inside
+    for bi, bj, bk in ti.ndrange(N // BS, N // BS, N // BS):
+        for ci, cj, ck in ti.static(ti.ndrange(BS, BS, BS)):
+            i, j, k = bi * BS + ci, bj * BS + cj, bk * BS + ck
+            field[i, j, k] = compute(i, j, k)
+```
+
+### 当前对 Vulkan 稀疏 SNode 的诚实推荐
+
+- ✅ 适合：MPM 风格的 atomic_add scatter（每线程一 cell 的写入分布）；少量 cell 激活后的密集计算；离线/带 host 同步的小规模 demo。
+- ⚠️ 暂不适合：64³ 及以上「全 grid `ti.ndrange` 写满」的密集激活模式（受 Bug 2 阻塞）。
+- 这类工作流目前请继续使用 LLVM cpu / cuda 后端。
+
+---
+
 ## 3. 关键限制（**用前必读**）
 
 ### 3.1 Pointer / Dynamic 的 capacity 是**编译期静态**的

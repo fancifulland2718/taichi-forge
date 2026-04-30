@@ -61,6 +61,8 @@ Highlights:
 
 📖 **Full usage guide and limitations** (bilingual): [docs/forge/sparse_snode_on_vulkan.en.md](docs/forge/sparse_snode_on_vulkan.en.md) / [docs/forge/sparse_snode_on_vulkan.zh.md](docs/forge/sparse_snode_on_vulkan.zh.md) — covers static-capacity semantics, the `TI_VULKAN_POOL_FRACTION` knob, dynamic-protocol differences, troubleshooting, and the verification matrix.
 
+> ⚠️ **One remaining stability gap in 0.3.1** (G10-P1 in flight, see `compile_doc/SNode_Vulkan_规划.md` §9): full-grid `ti.ndrange` writes to a 3D `pointer.*.dense` field cause GPU device-lost on subsequent listgen-dependent kernels. Until that lands, prefer brick-scatter writes for dense fills, or stay on the LLVM cpu/cuda backend for that workload. ✅ The 0.3.0 inactive-read correctness gap (inner-loop reads of inactive sparse cells returning pool-slot-0 data) is **fixed in 0.3.1** via the new ambient-zone path (CMake `TI_VULKAN_POINTER_AMBIENT_ZONE`, default ON). The user guide's "Known issues" section gives the complete current status.
+
 📖 **All fork-only knobs** (compile / runtime / architecture / modernization options): [docs/forge/forge_options.en.md](docs/forge/forge_options.en.md) / [docs/forge/forge_options.zh.md](docs/forge/forge_options.zh.md).
 
 > `hash` SNode remains permanently deferred (no real-time physics or rendering pipeline depends on it; see the user guide §6.1 for the survey). `quant_array` / `bit_struct` ship **experimental scaffolding** on Vulkan in 0.3.0 — frontend gate is opt-in via `vulkan_quant_experimental=True`; codegen is incremental. See user guide §7.

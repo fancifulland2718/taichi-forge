@@ -855,6 +855,22 @@ class TaskCodegen : public IRVisitor {
         u32_t, (uint32_t)desc.pointer_pool_offset_in_root);
     auto cell_byte_offset = ir_->add(
         pool_offset_v, ir_->mul(effective_slot, cell_stride_v));
+#if defined(TI_VULKAN_POINTER_AMBIENT_ZONE)
+    // G10-P2 (2026-04-30): for inactive reads (do_activate=false), route
+    // the byte offset to the per-pointer-SNode ambient zone instead of
+    // pool[0]. The ambient zone is cell_stride bytes of zero-initialized
+    // memory at desc.pointer_ambient_offset_in_root, never written by
+    // any kernel; this matches LLVM's ambient_val_addr semantics so that
+    // x[inactive_idx] reads as 0 (was: garbage = whatever pool[0]
+    // happens to contain at that moment). do_activate=true keeps the
+    // legacy pool[0] fallback for OOC writes (silent loss, documented).
+    if (!do_activate) {
+      auto ambient_offset_v = ir_->uint_immediate_number(
+          u32_t, (uint32_t)desc.pointer_ambient_offset_in_root);
+      cell_byte_offset = ir_->make_value(
+          spv::OpSelect, u32_t, is_zero, ambient_offset_v, cell_byte_offset);
+    }
+#endif
     return cell_byte_offset;
   }
 
