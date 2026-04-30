@@ -31,4 +31,12 @@ bool is_extension_supported(Arch arch, Extension ext);
 // env-var semantics where one ti.init call decided the whole run).
 void set_vulkan_sparse_experimental(bool enabled);
 
+// G9.1 (taichi-forge 0.3.0): toggles the experimental quant-on-Vulkan path
+// (Extension::quant / Extension::quant_basic on Arch::vulkan). Sourced from
+// ti.init(vulkan_quant_experimental=True) /
+// CompileConfig::vulkan_quant_experimental, with the env var
+// TI_VULKAN_QUANT=1 retained as a compatible fallback. Sticky once enabled
+// (same rationale as the sparse flag above).
+void set_vulkan_quant_experimental(bool enabled);
+
 }  // namespace taichi::lang

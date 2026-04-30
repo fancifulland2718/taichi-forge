@@ -12,6 +12,7 @@
 #include "taichi/codegen/codegen_utils.h"
 #include "taichi/program/program.h"
 #include "taichi/program/kernel.h"
+#include "taichi/program/extension.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/ir.h"
 #include "taichi/util/line_appender.h"
@@ -391,12 +392,63 @@ class TaskCodegen : public IRVisitor {
     const auto &desc = snode_descs.at(out_snode->id);
 
     spirv::Value input_ptr_val = ir_->query_value(stmt->input_ptr->raw_name());
+
+    // G9.2 (2026-04-30): quant_array forwards both the byte address and
+    // the bit offset of its parent unchanged -- the only "child" of a
+    // quant_array is the quant `place`, which logically lives at the
+    // same packed bit position computed by SNodeLookupStmt above.
+    // Mirrors codegen_llvm.cpp::TaskCodeGenLLVM::visit(GetChStmt) for
+    // SNodeType::quant_array.
+    if (stmt->input_snode->type == SNodeType::quant_array) {
+      ir_->register_value(stmt->raw_name(), input_ptr_val);
+      auto it = bit_ptr_bit_offsets_.find(stmt->input_ptr);
+      if (it != bit_ptr_bit_offsets_.end()) {
+        bit_ptr_bit_offsets_[stmt] = it->second;
+      }
+      if (out_snode->is_place()) {
+        TI_ASSERT(ptr_to_buffers_.count(stmt) == 0);
+        ptr_to_buffers_[stmt] = BufferInfo(BufferType::Root, root);
+      }
+      return;
+    }
+
+    // G9.3b (2026-05-01): GetChStmt(bit_struct -> place) produces a
+    // bit-pointer whose bit offset is the constant
+    // BitStructType::get_member_bit_offset(child_id_in_bit_struct).
+    // The byte address (parent's physical word) is forwarded
+    // unchanged.  Mirrors codegen_llvm.cpp::TaskCodeGenLLVM::visit
+    // (GetChStmt) for the is_bit_pointer branch.
+    if (stmt->input_snode->type == SNodeType::bit_struct) {
+      ir_->register_value(stmt->raw_name(), input_ptr_val);
+      auto *bst = stmt->input_snode->dt->as<BitStructType>();
+      const int member_bit_off =
+          bst->get_member_bit_offset(out_snode->id_in_bit_struct);
+      DataType phys = bst->get_physical_type();
+      SType phys_uint_stype =
+          ir_->get_primitive_type(ir_->get_taichi_uint_type(phys));
+      bit_ptr_bit_offsets_[stmt] = ir_->uint_immediate_number(
+          phys_uint_stype, static_cast<uint64_t>(member_bit_off));
+      if (out_snode->is_place()) {
+        TI_ASSERT(ptr_to_buffers_.count(stmt) == 0);
+        ptr_to_buffers_[stmt] = BufferInfo(BufferType::Root, root);
+      }
+      return;
+    }
+
     spirv::Value offset = make_pointer(desc.mem_offset_in_parent_cell);
     spirv::Value val = ir_->add(input_ptr_val, offset);
     ir_->register_value(stmt->raw_name(), val);
 
     if (out_snode->is_place()) {
       TI_ASSERT(ptr_to_buffers_.count(stmt) == 0);
+      ptr_to_buffers_[stmt] = BufferInfo(BufferType::Root, root);
+    }
+    // G9.3b: BitStructStoreStmt's `ptr` is a GetChStmt(dense -> bit_struct)
+    // (or its forwarding SNodeLookupStmt). The bit_struct itself is not a
+    // place, so we must explicitly register the buffer mapping so that
+    // at_buffer() can locate the root buffer in the BitStructStoreStmt
+    // visitor.
+    if (out_snode->type == SNodeType::bit_struct) {
       ptr_to_buffers_[stmt] = BufferInfo(BufferType::Root, root);
     }
   }
@@ -1114,6 +1166,36 @@ class TaskCodegen : public IRVisitor {
           ir_->query_value(stmt->input_index->raw_name());
       val = pointer_lookup_or_activate(parent_val, root_id, sn, input_index_val,
                                        /*do_activate=*/stmt->activate);
+    } else if (sn->type == SNodeType::quant_array) {
+      // G9.2 (2026-04-30): all user cells in a quant_array share ONE
+      // physical word inside the parent cell, so the byte address does
+      // NOT advance with input_index.  Instead, we record an SSA bit
+      // offset of `element_num_bits * input_index` on the side table;
+      // GlobalLoadStmt / GlobalStoreStmt below will combine it with the
+      // physical word load.  Mirrors codegen_llvm.cpp::create_bit_ptr.
+      auto *qat = sn->dt->as<QuantArrayType>();
+      const int element_num_bits = qat->get_element_num_bits();
+      spirv::Value input_index_val = ir_->cast(
+          ir_->u32_type(), ir_->query_value(stmt->input_index->raw_name()));
+      spirv::Value bit_off = ir_->mul(
+          input_index_val,
+          ir_->uint_immediate_number(ir_->u32_type(),
+                                     static_cast<uint32_t>(element_num_bits)));
+      val = parent_val;  // byte address unchanged
+      bit_ptr_bit_offsets_[stmt] = bit_off;
+    } else if (sn->type == SNodeType::bit_struct) {
+      // G9.3b (2026-05-01): bit_struct has no axes -- the lookup just
+      // forwards the parent's byte address (the dense->bit_struct
+      // GetChStmt result).  Mirrors codegen_llvm.cpp where
+      // `llvm_val[stmt] = parent`.  The per-member bit offset is added
+      // later by GetChStmt(bit_struct -> place).
+      val = parent_val;
+      // Forward the parent's buffer mapping so at_buffer() works on the
+      // BitStructStoreStmt's `ptr` (which may be this lookup stmt).
+      auto it = ptr_to_buffers_.find(stmt->input_snode);
+      if (it != ptr_to_buffers_.end()) {
+        ptr_to_buffers_[stmt] = it->second;
+      }
     } else {
       const auto &snode_descs = compiled_structs_[root_id].snode_descriptors;
       const auto &desc = snode_descs.at(sn->id);
@@ -1221,12 +1303,33 @@ class TaskCodegen : public IRVisitor {
   }
 
   void visit(GlobalStoreStmt *stmt) override {
+    // G9.3a (2026-04-30): bit-pointer write path for quant_array.
+    // For a `place` whose parent is a quant_array, the IR pass
+    // optimize_bit_struct_stores does NOT rewrite this store (it only
+    // fires for bit_struct parents, see
+    // taichi/transforms/optimize_bit_struct_stores.cpp:30), so we get a
+    // raw GlobalStoreStmt with `is_bit_pointer()` dest.  Implementation
+    // is non-atomic read-modify-write of the single physical word.
+    if (auto *pt = stmt->dest->ret_type->cast<PointerType>();
+        pt && pt->is_bit_pointer()) {
+      emit_bit_pointer_store(stmt);
+      return;
+    }
     spirv::Value val = ir_->query_value(stmt->val->raw_name());
 
     store_buffer(stmt->dest, val);
   }
 
   void visit(GlobalLoadStmt *stmt) override {
+    // G9.2 (2026-04-30): bit-pointer read path for quant_array.
+    // Mirrors codegen_llvm.cpp:1609-1648 (`is_bit_pointer()` branch in
+    // GlobalLoadStmt) -- load physical word, shift / mask / sign-extend,
+    // optionally cast+scale for QuantFixed.
+    if (auto *pt = stmt->src->ret_type->cast<PointerType>();
+        pt && pt->is_bit_pointer()) {
+      emit_bit_pointer_load(stmt);
+      return;
+    }
     auto dt = stmt->element_type();
 
     auto val = load_buffer(stmt->src, dt);
@@ -2196,6 +2299,15 @@ class TaskCodegen : public IRVisitor {
   }
 
   void visit(AtomicOpStmt *stmt) override {
+    // G9.4: AtomicOpStmt on a bit-pointer (quant_array / bit_struct member)
+    // is dispatched to a dedicated CAS-loop helper.  The generic atomic
+    // path below assumes a primitive-typed destination and would mis-handle
+    // the QuantInt / QuantFixed `dest->element_type()`.
+    if (auto *pt = stmt->dest->ret_type->as<PointerType>();
+        pt && pt->is_bit_pointer()) {
+      emit_bit_pointer_atomic_add(stmt);
+      return;
+    }
     const auto dt = stmt->dest->element_type().ptr_removed();
 
     spirv::Value data = ir_->query_value(stmt->val->raw_name());
@@ -3235,6 +3347,686 @@ class TaskCodegen : public IRVisitor {
     task_attribs_.texture_binds = get_texture_binds();
   }
 
+  // -----------------------------------------------------------------
+  // G9.2 / G9.3a (2026-04-30): bit-pointer load / store helpers.
+  //
+  // A "bit-pointer" stmt is one whose ret_type is
+  // PointerType{is_bit_pointer=true}.  Today (G9.2) this is produced
+  // exclusively by SNodeLookupStmt for SNodeType::quant_array and
+  // forwarded by GetChStmt for the quant `place` child.  The byte
+  // address of the containing physical word lives in the standard
+  // SSA register keyed by `stmt->raw_name()`; the bit offset within
+  // that word is tracked separately in `bit_ptr_bit_offsets_`.
+  //
+  // Only QuantIntType / QuantFixedType pointees are supported in this
+  // iteration.  QuantFloatType requires a BitStructType parent (shared
+  // exponent), which lives behind G9.3b (BitStructStoreStmt SPIR-V
+  // visitor) -- not implemented here.
+  // -----------------------------------------------------------------
+
+  // Resolve the GetChStmt that produced `bit_ptr_stmt` so we can recover
+  // the parent SNode's physical_type.
+  const GetChStmt *find_bit_ptr_get_ch(const Stmt *bit_ptr_stmt) {
+    auto *get_ch = bit_ptr_stmt->cast<GetChStmt>();
+    TI_ASSERT_INFO(get_ch != nullptr,
+                   "bit-pointer source must be a GetChStmt (got {})",
+                   bit_ptr_stmt->name());
+    return get_ch;
+  }
+
+  // Look up the bit offset SSA value associated with a bit-pointer stmt.
+  // Walks back through GetChStmt forwarding to the SNodeLookupStmt that
+  // produced the offset.
+  spirv::Value query_bit_offset(const Stmt *bit_ptr_stmt) {
+    const Stmt *cur = bit_ptr_stmt;
+    while (cur != nullptr) {
+      auto it = bit_ptr_bit_offsets_.find(cur);
+      if (it != bit_ptr_bit_offsets_.end()) {
+        return it->second;
+      }
+      // Walk through forwarding GetChStmt -> input_ptr (parent
+      // SNodeLookupStmt or another GetChStmt).
+      if (auto *gc = cur->cast<GetChStmt>()) {
+        cur = gc->input_ptr;
+        continue;
+      }
+      break;
+    }
+    TI_ERROR("query_bit_offset: no bit offset registered for {}",
+             bit_ptr_stmt->name());
+    return ir_->const_i32_zero_;
+  }
+
+  void emit_bit_pointer_load(GlobalLoadStmt *stmt) {
+    TI_ERROR_IF(
+        !is_extension_supported(Arch::vulkan, Extension::quant),
+        "quant load on Vulkan SPIR-V backend requires the experimental "
+        "gate (ti.init(vulkan_quant_experimental=True) or env var "
+        "TI_VULKAN_QUANT=1).");
+    auto *get_ch = find_bit_ptr_get_ch(stmt->src);
+    DataType physical_type;
+    if (get_ch->input_snode->type == SNodeType::quant_array) {
+      physical_type =
+          get_ch->input_snode->dt->as<QuantArrayType>()->get_physical_type();
+    } else if (get_ch->input_snode->type == SNodeType::bit_struct) {
+      physical_type =
+          get_ch->input_snode->dt->as<BitStructType>()->get_physical_type();
+    } else {
+      TI_NOT_IMPLEMENTED;
+    }
+    SType phys_stype = ir_->get_primitive_type(physical_type);
+    SType phys_uint_stype =
+        ir_->get_primitive_type(ir_->get_taichi_uint_type(physical_type));
+
+    // Load the physical word as the unsigned variant (so OpBitFieldUExtract
+    // / OpBitFieldSExtract have a clean unsigned base; for f32/f64 storage
+    // the at_buffer + load_variable pattern is identical to the existing
+    // load_buffer path with `ti_buffer_type` = physical uint).
+    auto buf_ptr = at_buffer(stmt->src, ir_->get_taichi_uint_type(physical_type));
+    spirv::Value phys_uval = ir_->load_variable(buf_ptr, phys_uint_stype);
+
+    spirv::Value bit_off_u32 = query_bit_offset(stmt->src);
+    if (bit_off_u32.stype.id != phys_uint_stype.id) {
+      bit_off_u32 = ir_->cast(phys_uint_stype, bit_off_u32);
+    }
+
+    auto *pt = stmt->src->ret_type->as<PointerType>();
+    Type *pointee = pt->get_pointee_type();
+
+    auto extract_quant_int = [&](QuantIntType *qit) -> spirv::Value {
+      const int num_bits = qit->get_num_bits();
+      const bool is_signed = qit->get_is_signed();
+      spirv::Value count = ir_->uint_immediate_number(
+          phys_uint_stype, static_cast<uint32_t>(num_bits));
+      spv::Op op =
+          is_signed ? spv::OpBitFieldSExtract : spv::OpBitFieldUExtract;
+      // Result type: physical uint (signed extract still yields the
+      // physical-width result in two's-complement).
+      spirv::Value extracted =
+          ir_->make_value(op, phys_uint_stype, phys_uval, bit_off_u32, count);
+      // Cast to compute_type (typically i32).
+      DataType compute_type = qit->get_compute_type();
+      SType compute_stype = ir_->get_primitive_type(compute_type);
+      if (compute_stype.id == phys_uint_stype.id) {
+        // Reinterpret unsigned -> signed if needed (no shape change).
+        if (is_signed) {
+          // Sign-extract returned the value in physical-width signed
+          // semantics; bitcast to i32 if requested.
+          if (compute_type->is_primitive(PrimitiveTypeID::i32) &&
+              physical_type->is_primitive(PrimitiveTypeID::u32)) {
+            return ir_->make_value(spv::OpBitcast, compute_stype, extracted);
+          }
+        }
+        return extracted;
+      }
+      return ir_->cast(compute_stype, extracted);
+    };
+
+    spirv::Value result;
+    if (auto *qit = pointee->cast<QuantIntType>()) {
+      result = extract_quant_int(qit);
+    } else if (auto *qfxt = pointee->cast<QuantFixedType>()) {
+      auto *digits_qit = qfxt->get_digits_type()->as<QuantIntType>();
+      spirv::Value digits = extract_quant_int(digits_qit);
+      // reconstruct: float(digits) * scale
+      DataType compute_type = qfxt->get_compute_type();
+      SType compute_stype = ir_->get_primitive_type(compute_type);
+      spirv::Value digits_f = ir_->cast(compute_stype, digits);
+      // Build the scale as a same-precision float constant.
+      spirv::Value scale_v;
+      if (compute_type->is_primitive(PrimitiveTypeID::f64)) {
+        scale_v = ir_->float_immediate_number(compute_stype, qfxt->get_scale());
+      } else {
+        scale_v = ir_->float_immediate_number(
+            compute_stype, static_cast<float>(qfxt->get_scale()));
+      }
+      result = ir_->make_value(spv::OpFMul, compute_stype, digits_f, scale_v);
+    } else {
+      TI_NOT_IMPLEMENTED;  // QuantFloatType requires bit_struct (G9.3b).
+    }
+    ir_->register_value(stmt->raw_name(), result);
+  }
+
+  void emit_bit_pointer_store(GlobalStoreStmt *stmt) {
+    TI_ERROR_IF(
+        !is_extension_supported(Arch::vulkan, Extension::quant),
+        "quant store on Vulkan SPIR-V backend requires the experimental "
+        "gate (ti.init(vulkan_quant_experimental=True) or env var "
+        "TI_VULKAN_QUANT=1).");
+    auto *get_ch = find_bit_ptr_get_ch(stmt->dest);
+    DataType physical_type;
+    if (get_ch->input_snode->type == SNodeType::quant_array) {
+      physical_type =
+          get_ch->input_snode->dt->as<QuantArrayType>()->get_physical_type();
+    } else if (get_ch->input_snode->type == SNodeType::bit_struct) {
+      physical_type =
+          get_ch->input_snode->dt->as<BitStructType>()->get_physical_type();
+    } else {
+      TI_NOT_IMPLEMENTED;
+    }
+    SType phys_uint_stype =
+        ir_->get_primitive_type(ir_->get_taichi_uint_type(physical_type));
+
+    auto *pt = stmt->dest->ret_type->as<PointerType>();
+    Type *pointee = pt->get_pointee_type();
+    QuantIntType *qit = nullptr;
+    QuantFixedType *qfxt = nullptr;
+    int num_bits = 0;
+    bool is_signed = false;
+    if ((qit = pointee->cast<QuantIntType>())) {
+      num_bits = qit->get_num_bits();
+      is_signed = qit->get_is_signed();
+    } else if ((qfxt = pointee->cast<QuantFixedType>())) {
+      auto *digits_qit = qfxt->get_digits_type()->as<QuantIntType>();
+      num_bits = digits_qit->get_num_bits();
+      is_signed = digits_qit->get_is_signed();
+    } else {
+      TI_NOT_IMPLEMENTED;
+    }
+
+    // Convert the input value to a `num_bits`-wide digits integer in the
+    // physical-uint type.
+    spirv::Value src_val = ir_->query_value(stmt->val->raw_name());
+    spirv::Value digits_uval;
+    if (qfxt != nullptr) {
+      // digits = round(src / scale)  (LLVM uses fp-to-int with rounding-
+      // to-nearest-even via `FPToSI/UI`; SPIR-V does the same).
+      DataType compute_type = qfxt->get_compute_type();
+      SType compute_stype = ir_->get_primitive_type(compute_type);
+      spirv::Value scale_v;
+      if (compute_type->is_primitive(PrimitiveTypeID::f64)) {
+        scale_v = ir_->float_immediate_number(
+            compute_stype, 1.0 / qfxt->get_scale());
+      } else {
+        scale_v = ir_->float_immediate_number(
+            compute_stype, static_cast<float>(1.0 / qfxt->get_scale()));
+      }
+      // src / scale  ==  src * (1/scale).  Use FMul for precision.
+      spirv::Value scaled =
+          ir_->make_value(spv::OpFMul, compute_stype, src_val, scale_v);
+      // Round to nearest via GLSL std450 RoundEven (== inst id 2).  This
+      // matches LLVM's FPToSI behavior under default IEEE rounding (RNE)
+      // for all values that fit in num_bits.
+      // GLSLstd450RoundEven == 2.
+      spirv::Value rounded =
+          ir_->call_glsl450(compute_stype, /*GLSLstd450RoundEven=*/2, scaled);
+      // FPToSI / FPToUI to the physical-width integer.  Use SIGNED
+      // conversion when the quant int is signed (negative floats with
+      // OpConvertFToU are undefined in SPIR-V and on most drivers
+      // produce 0, which would silently zero out every negative cell).
+      // We then bitcast through the physical-width signed integer type
+      // before reaching `phys_uint_stype`; ir_->cast handles
+      // signed<->unsigned same-width as a clean OpBitcast.
+      if (is_signed) {
+        DataType phys_signed_dt;
+        switch (data_type_bits(physical_type)) {
+          case 16:
+            phys_signed_dt = PrimitiveType::i16;
+            break;
+          case 32:
+            phys_signed_dt = PrimitiveType::i32;
+            break;
+          case 64:
+            phys_signed_dt = PrimitiveType::i64;
+            break;
+          default:
+            TI_NOT_IMPLEMENTED;
+        }
+        SType phys_signed_stype = ir_->get_primitive_type(phys_signed_dt);
+        spirv::Value digits_signed =
+            ir_->make_value(spv::OpConvertFToS, phys_signed_stype, rounded);
+        digits_uval = ir_->cast(phys_uint_stype, digits_signed);
+      } else {
+        digits_uval = ir_->cast(phys_uint_stype, rounded);
+      }
+    } else {
+      // QuantInt: just cast the input integer to physical uint width.
+      digits_uval = ir_->cast(phys_uint_stype, src_val);
+    }
+
+    // Build the mask: ((1u << num_bits) - 1u) << bit_off
+    spirv::Value bit_off_u32 = query_bit_offset(stmt->dest);
+    if (bit_off_u32.stype.id != phys_uint_stype.id) {
+      bit_off_u32 = ir_->cast(phys_uint_stype, bit_off_u32);
+    }
+    spirv::Value field_mask;
+    if (num_bits == static_cast<int>(ir_->get_primitive_type_size(physical_type) * 8)) {
+      // Full word: mask = ~0
+      field_mask = ir_->make_value(
+          spv::OpNot, phys_uint_stype,
+          ir_->uint_immediate_number(phys_uint_stype, 0u));
+    } else {
+      uint64_t one = 1ull;
+      uint64_t mask_lo = (one << static_cast<uint64_t>(num_bits)) - one;
+      field_mask =
+          ir_->uint_immediate_number(phys_uint_stype, mask_lo);
+    }
+    // Truncate digits to num_bits and shift into place.
+    spirv::Value digits_truncated =
+        ir_->make_value(spv::OpBitwiseAnd, phys_uint_stype, digits_uval,
+                        field_mask);
+    spirv::Value digits_shifted =
+        ir_->make_value(spv::OpShiftLeftLogical, phys_uint_stype,
+                        digits_truncated, bit_off_u32);
+    spirv::Value mask_shifted =
+        ir_->make_value(spv::OpShiftLeftLogical, phys_uint_stype, field_mask,
+                        bit_off_u32);
+    spirv::Value mask_inv =
+        ir_->make_value(spv::OpNot, phys_uint_stype, mask_shifted);
+    (void)is_signed;  // truncation handles sign for both branches.
+
+    // Read-modify-write on the physical word.  This is non-atomic: races
+    // between threads writing different fields of the SAME physical word
+    // produce undefined results.  Mirrors the LLVM CPU/CUDA non-atomic
+    // store path for quant_array (atomic_add lives in G9.4).
+    DataType phys_uint_dt = ir_->get_taichi_uint_type(physical_type);
+    auto buf_ptr = at_buffer(stmt->dest, phys_uint_dt);
+    spirv::Value old_word = ir_->load_variable(buf_ptr, phys_uint_stype);
+    spirv::Value cleared =
+        ir_->make_value(spv::OpBitwiseAnd, phys_uint_stype, old_word, mask_inv);
+    spirv::Value new_word =
+        ir_->make_value(spv::OpBitwiseOr, phys_uint_stype, cleared,
+                        digits_shifted);
+    ir_->store_variable(buf_ptr, new_word);
+  }
+
+  // -----------------------------------------------------------------
+  // G9.4 (2026-05-02): atomic_add on a bit-pointer (quant_array /
+  // bit_struct member).  Mirrors the LLVM runtime helper
+  //   atomic_add_partial_bits_b##N(ptr, off, bits, val):
+  //     do {
+  //       old = *ptr;
+  //       new = (old & ~mask) | ((old + (val << off)) & mask);
+  //     } while (!atomicCAS(ptr, old, new));
+  // i.e. the addition is performed across the FULL word (so a carry from
+  // bit `off + bits - 1` corrupts the next field), exactly as on
+  // cpu/cuda — keeping three-backend byte equivalence.
+  //
+  // Limitations:
+  //   * Only AtomicOpType::add is supported (matches the LLVM
+  //     `quant_type_atomic` early-return in codegen_llvm.cpp:1402).
+  //   * Physical word must be 32 or 64 bits (Vulkan core atomics).
+  //   * QuantFloat (shared exponent) is rejected at the field-type
+  //     dispatch below; G9.3c will lift that restriction.
+  //   * The returned `stmt->raw_name()` value is registered as the input
+  //     `stmt->val` (not the old field).  taichi rarely consumes the
+  //     return value of atomic_add on a quant field; correctness of the
+  //     accumulation is unaffected.
+  // -----------------------------------------------------------------
+  void emit_bit_pointer_atomic_add(AtomicOpStmt *stmt) {
+    TI_ERROR_IF(
+        !is_extension_supported(Arch::vulkan, Extension::quant),
+        "atomic_add on a quant bit pointer requires the experimental gate "
+        "(ti.init(vulkan_quant_experimental=True) or env var "
+        "TI_VULKAN_QUANT=1).");
+    TI_ERROR_IF(stmt->op_type != AtomicOpType::add,
+                "Only atomic_add is supported on quant bit pointers on the "
+                "Vulkan SPIR-V backend (got op={}).",
+                atomic_op_type_name(stmt->op_type));
+    auto *get_ch = find_bit_ptr_get_ch(stmt->dest);
+    DataType physical_type;
+    if (get_ch->input_snode->type == SNodeType::quant_array) {
+      physical_type =
+          get_ch->input_snode->dt->as<QuantArrayType>()->get_physical_type();
+    } else if (get_ch->input_snode->type == SNodeType::bit_struct) {
+      physical_type =
+          get_ch->input_snode->dt->as<BitStructType>()->get_physical_type();
+    } else {
+      TI_NOT_IMPLEMENTED;
+    }
+    const int phys_bits = data_type_bits(physical_type);
+    TI_ERROR_IF(phys_bits != 32 && phys_bits != 64,
+                "atomic_add on quant bit pointer requires a 32-bit or 64-bit "
+                "physical word (got {} bits).",
+                phys_bits);
+    SType phys_uint_stype =
+        ir_->get_primitive_type(ir_->get_taichi_uint_type(physical_type));
+
+    auto *pt = stmt->dest->ret_type->as<PointerType>();
+    Type *pointee = pt->get_pointee_type();
+    QuantIntType *qit = nullptr;
+    QuantFixedType *qfxt = nullptr;
+    int num_bits = 0;
+    bool is_signed = false;
+    if ((qit = pointee->cast<QuantIntType>())) {
+      num_bits = qit->get_num_bits();
+      is_signed = qit->get_is_signed();
+    } else if ((qfxt = pointee->cast<QuantFixedType>())) {
+      auto *digits_qit = qfxt->get_digits_type()->as<QuantIntType>();
+      num_bits = digits_qit->get_num_bits();
+      is_signed = digits_qit->get_is_signed();
+    } else {
+      TI_NOT_IMPLEMENTED;  // G9.3c: shared-exponent QuantFloat
+    }
+
+    // Convert the user-supplied delta to a `num_bits`-wide digits integer
+    // in physical-uint form (same scaling pipeline as emit_bit_pointer_store).
+    spirv::Value src_val = ir_->query_value(stmt->val->raw_name());
+    spirv::Value digits_uval;
+    if (qfxt != nullptr) {
+      DataType compute_type = qfxt->get_compute_type();
+      SType compute_stype = ir_->get_primitive_type(compute_type);
+      spirv::Value scale_v;
+      if (compute_type->is_primitive(PrimitiveTypeID::f64)) {
+        scale_v = ir_->float_immediate_number(compute_stype,
+                                              1.0 / qfxt->get_scale());
+      } else {
+        scale_v = ir_->float_immediate_number(
+            compute_stype, static_cast<float>(1.0 / qfxt->get_scale()));
+      }
+      spirv::Value scaled =
+          ir_->make_value(spv::OpFMul, compute_stype, src_val, scale_v);
+      spirv::Value rounded =
+          ir_->call_glsl450(compute_stype, /*GLSLstd450RoundEven=*/2, scaled);
+      if (is_signed) {
+        DataType phys_signed_dt;
+        switch (phys_bits) {
+          case 32: phys_signed_dt = PrimitiveType::i32; break;
+          case 64: phys_signed_dt = PrimitiveType::i64; break;
+          default: TI_NOT_IMPLEMENTED;
+        }
+        SType phys_signed_stype = ir_->get_primitive_type(phys_signed_dt);
+        spirv::Value digits_signed =
+            ir_->make_value(spv::OpConvertFToS, phys_signed_stype, rounded);
+        digits_uval = ir_->cast(phys_uint_stype, digits_signed);
+      } else {
+        digits_uval = ir_->cast(phys_uint_stype, rounded);
+      }
+    } else {
+      digits_uval = ir_->cast(phys_uint_stype, src_val);
+    }
+
+    // Build masks/shifts (truncate digits to num_bits, shift to bit_off).
+    spirv::Value bit_off_u32 = query_bit_offset(stmt->dest);
+    if (bit_off_u32.stype.id != phys_uint_stype.id) {
+      bit_off_u32 = ir_->cast(phys_uint_stype, bit_off_u32);
+    }
+    spirv::Value field_mask;
+    if (num_bits == phys_bits) {
+      field_mask = ir_->make_value(
+          spv::OpNot, phys_uint_stype,
+          ir_->uint_immediate_number(phys_uint_stype, 0u));
+    } else {
+      uint64_t mask_lo =
+          (uint64_t(1) << static_cast<uint64_t>(num_bits)) - 1;
+      field_mask = ir_->uint_immediate_number(phys_uint_stype, mask_lo);
+    }
+    spirv::Value digits_truncated = ir_->make_value(
+        spv::OpBitwiseAnd, phys_uint_stype, digits_uval, field_mask);
+    spirv::Value digits_shifted =
+        ir_->make_value(spv::OpShiftLeftLogical, phys_uint_stype,
+                        digits_truncated, bit_off_u32);
+    spirv::Value mask_shifted = ir_->make_value(
+        spv::OpShiftLeftLogical, phys_uint_stype, field_mask, bit_off_u32);
+    spirv::Value mask_inv =
+        ir_->make_value(spv::OpNot, phys_uint_stype, mask_shifted);
+    (void)is_signed;
+
+    // CAS-loop on the physical word:
+    //   do {
+    //     old = *buf_ptr;
+    //     sum = old + digits_shifted;
+    //     new = (old & ~mask_shifted) | (sum & mask_shifted);
+    //   } while (atomicCAS(buf_ptr, old, new) != old);
+    DataType phys_uint_dt = ir_->get_taichi_uint_type(physical_type);
+    auto buf_ptr = at_buffer(stmt->dest, phys_uint_dt);
+
+    spirv::Label head_lbl = ir_->new_label();
+    spirv::Label body_lbl = ir_->new_label();
+    spirv::Label win_lbl = ir_->new_label();
+    spirv::Label lose_lbl = ir_->new_label();
+    spirv::Label continue_lbl = ir_->new_label();
+    spirv::Label exit_lbl = ir_->new_label();
+
+    ir_->make_inst(spv::OpBranch, head_lbl);
+    ir_->start_label(head_lbl);
+    ir_->make_inst(spv::OpLoopMerge, exit_lbl, continue_lbl,
+                   spv::LoopControlMaskNone);
+    ir_->make_inst(spv::OpBranch, body_lbl);
+    ir_->make_inst(spv::OpLabel, body_lbl);
+
+    spirv::Value old_word =
+        ir_->make_value(spv::OpAtomicLoad, phys_uint_stype, buf_ptr,
+                        /*scope=*/ir_->const_i32_one_,
+                        /*semantics=*/ir_->const_i32_zero_);
+    spirv::Value sum =
+        ir_->make_value(spv::OpIAdd, phys_uint_stype, old_word, digits_shifted);
+    spirv::Value sum_field = ir_->make_value(
+        spv::OpBitwiseAnd, phys_uint_stype, sum, mask_shifted);
+    spirv::Value cleared = ir_->make_value(
+        spv::OpBitwiseAnd, phys_uint_stype, old_word, mask_inv);
+    spirv::Value new_word = ir_->make_value(
+        spv::OpBitwiseOr, phys_uint_stype, cleared, sum_field);
+    spirv::Value cas = ir_->make_value(
+        spv::OpAtomicCompareExchange, phys_uint_stype, buf_ptr,
+        /*scope=*/ir_->const_i32_one_,
+        /*semantics_eq=*/ir_->const_i32_zero_,
+        /*semantics_uneq=*/ir_->const_i32_zero_, new_word, old_word);
+    spirv::Value won =
+        ir_->make_value(spv::OpIEqual, ir_->bool_type(), cas, old_word);
+    ir_->make_inst(spv::OpSelectionMerge, lose_lbl,
+                   spv::SelectionControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, won, win_lbl, lose_lbl);
+    ir_->make_inst(spv::OpLabel, win_lbl);
+    ir_->make_inst(spv::OpBranch, exit_lbl);
+    ir_->make_inst(spv::OpLabel, lose_lbl);
+    ir_->make_inst(spv::OpBranch, continue_lbl);
+    ir_->make_inst(spv::OpLabel, continue_lbl);
+    ir_->make_inst(spv::OpBranch, head_lbl);
+
+    ir_->start_label(exit_lbl);
+
+    // Register the AtomicOpStmt's SSA value.  taichi semantics return
+    // the OLD value, but for a quantized field that requires
+    // dequantization on every code path; since user code on quant fields
+    // overwhelmingly ignores the return, we register the input delta to
+    // satisfy any downstream consumers without paying the conversion
+    // cost.  Documented in the experimental quant guide.
+    ir_->register_value(stmt->raw_name(), src_val);
+  }
+
+
+  // -----------------------------------------------------------------
+  // G9.3b (2026-05-01): BitStructStoreStmt visitor.
+  //
+  // BitStructStoreStmt is produced by transforms/optimize_bit_struct_stores
+  // .cpp from grouped GlobalStoreStmt's whose dest is a GetChStmt(bit_struct).
+  // It carries (ptr, ch_ids, values, is_atomic) where `ptr` is the pointer
+  // to the bit_struct's physical word and `ch_ids[i]` indexes into
+  // BitStructType.  This visitor packs all (ch_id, value) pairs into one
+  // RMW on the physical word.
+  //
+  // Limitations (intentional, in this iteration):
+  //   * QuantFloat with shared exponent: TI_NOT_IMPLEMENTED (G9.3c).
+  //   * is_atomic == true after the IR pass means atomic-demotion did
+  //     NOT cover all members (e.g., user only wrote 1 of 3 fields).
+  //     Vulkan SPIR-V atomic CAS-loop is G9.4 -- we still execute a
+  //     non-atomic RMW here so single-threaded correctness holds, but
+  //     concurrent writers to the SAME word produce UB.  This matches
+  //     the existing G9.3a quant_array store contract.
+  // -----------------------------------------------------------------
+  void visit(BitStructStoreStmt *stmt) override {
+    TI_ERROR_IF(
+        !is_extension_supported(Arch::vulkan, Extension::quant),
+        "BitStructStoreStmt on Vulkan SPIR-V backend requires the "
+        "experimental gate (ti.init(vulkan_quant_experimental=True) or "
+        "env var TI_VULKAN_QUANT=1).");
+    auto *bst = stmt->get_bit_struct();
+    DataType physical_type = bst->get_physical_type();
+    SType phys_uint_stype =
+        ir_->get_primitive_type(ir_->get_taichi_uint_type(physical_type));
+    const int phys_bits = data_type_bits(physical_type);
+
+    // Reject shared-exponent QuantFloat layouts (any member that owns a
+    // shared exponent or has an exponent_users list).  The MPM/baseline
+    // BitpackedFields used by g9_quant_baseline.py never trips this.
+    for (int i = 0; i < bst->get_num_members(); i++) {
+      auto *mtype = bst->get_member_type(i);
+      if (mtype->is<QuantFloatType>()) {
+        TI_NOT_IMPLEMENTED  // G9.3c: shared-exponent quant_float on Vulkan
+      }
+    }
+
+    spirv::Value packed =
+        ir_->uint_immediate_number(phys_uint_stype, uint64_t(0));
+    spirv::Value total_mask =
+        ir_->uint_immediate_number(phys_uint_stype, uint64_t(0));
+
+    for (int i = 0; i < (int)stmt->ch_ids.size(); i++) {
+      const int ch_id = stmt->ch_ids[i];
+      Stmt *val_stmt = stmt->values[i];
+      Type *member_type = bst->get_member_type(ch_id);
+      const int bit_off = bst->get_member_bit_offset(ch_id);
+
+      QuantIntType *qit = nullptr;
+      QuantFixedType *qfxt = nullptr;
+      int num_bits = 0;
+      bool is_signed = false;
+      if ((qit = member_type->cast<QuantIntType>())) {
+        num_bits = qit->get_num_bits();
+        is_signed = qit->get_is_signed();
+      } else if ((qfxt = member_type->cast<QuantFixedType>())) {
+        auto *digits_qit = qfxt->get_digits_type()->as<QuantIntType>();
+        num_bits = digits_qit->get_num_bits();
+        is_signed = digits_qit->get_is_signed();
+      } else {
+        TI_NOT_IMPLEMENTED;
+      }
+
+      spirv::Value src_val = ir_->query_value(val_stmt->raw_name());
+      spirv::Value digits_uval;
+      if (qfxt != nullptr) {
+        DataType compute_type = qfxt->get_compute_type();
+        SType compute_stype = ir_->get_primitive_type(compute_type);
+        spirv::Value scale_v;
+        if (compute_type->is_primitive(PrimitiveTypeID::f64)) {
+          scale_v = ir_->float_immediate_number(
+              compute_stype, 1.0 / qfxt->get_scale());
+        } else {
+          scale_v = ir_->float_immediate_number(
+              compute_stype, static_cast<float>(1.0 / qfxt->get_scale()));
+        }
+        spirv::Value scaled =
+            ir_->make_value(spv::OpFMul, compute_stype, src_val, scale_v);
+        spirv::Value rounded =
+            ir_->call_glsl450(compute_stype, /*GLSLstd450RoundEven=*/2, scaled);
+        if (is_signed) {
+          DataType phys_signed_dt;
+          switch (phys_bits) {
+            case 16: phys_signed_dt = PrimitiveType::i16; break;
+            case 32: phys_signed_dt = PrimitiveType::i32; break;
+            case 64: phys_signed_dt = PrimitiveType::i64; break;
+            default: TI_NOT_IMPLEMENTED;
+          }
+          SType phys_signed_stype = ir_->get_primitive_type(phys_signed_dt);
+          spirv::Value digits_signed =
+              ir_->make_value(spv::OpConvertFToS, phys_signed_stype, rounded);
+          digits_uval = ir_->cast(phys_uint_stype, digits_signed);
+        } else {
+          digits_uval = ir_->cast(phys_uint_stype, rounded);
+        }
+      } else {
+        digits_uval = ir_->cast(phys_uint_stype, src_val);
+      }
+
+      spirv::Value field_mask;
+      if (num_bits == phys_bits) {
+        field_mask = ir_->make_value(
+            spv::OpNot, phys_uint_stype,
+            ir_->uint_immediate_number(phys_uint_stype, 0u));
+      } else {
+        uint64_t mask_lo =
+            (uint64_t(1) << static_cast<uint64_t>(num_bits)) - 1;
+        field_mask = ir_->uint_immediate_number(phys_uint_stype, mask_lo);
+      }
+      spirv::Value bit_off_v = ir_->uint_immediate_number(
+          phys_uint_stype, static_cast<uint64_t>(bit_off));
+
+      spirv::Value digits_truncated = ir_->make_value(
+          spv::OpBitwiseAnd, phys_uint_stype, digits_uval, field_mask);
+      spirv::Value digits_shifted = ir_->make_value(
+          spv::OpShiftLeftLogical, phys_uint_stype, digits_truncated,
+          bit_off_v);
+      spirv::Value mask_shifted = ir_->make_value(
+          spv::OpShiftLeftLogical, phys_uint_stype, field_mask, bit_off_v);
+
+      packed = ir_->make_value(spv::OpBitwiseOr, phys_uint_stype, packed,
+                               digits_shifted);
+      total_mask = ir_->make_value(spv::OpBitwiseOr, phys_uint_stype,
+                                   total_mask, mask_shifted);
+    }
+
+    DataType phys_uint_dt = ir_->get_taichi_uint_type(physical_type);
+    auto buf_ptr = at_buffer(stmt->ptr, phys_uint_dt);
+
+    // If total_mask covers the full physical word OR every non-exponent
+    // member is being written (which is what optimize_bit_struct_stores
+    // demotes to non-atomic when quant_opt_atomic_demotion is on), we
+    // could emit a plain store.  We always emit RMW here; for the
+    // all-fields case this is at most one extra load+and+or per word.
+    spirv::Value mask_inv =
+        ir_->make_value(spv::OpNot, phys_uint_stype, total_mask);
+    if (!stmt->is_atomic) {
+      // Non-atomic RMW (single thread per word).
+      spirv::Value old_word = ir_->load_variable(buf_ptr, phys_uint_stype);
+      spirv::Value cleared = ir_->make_value(
+          spv::OpBitwiseAnd, phys_uint_stype, old_word, mask_inv);
+      spirv::Value new_word = ir_->make_value(
+          spv::OpBitwiseOr, phys_uint_stype, cleared, packed);
+      ir_->store_variable(buf_ptr, new_word);
+    } else {
+      // G9.4: atomic RMW via CAS-loop.  Reached when
+      // optimize_bit_struct_stores left is_atomic=true (e.g.,
+      // quant_opt_atomic_demotion=false, or stores not uniquely accessed).
+      // Mirrors the LLVM atomic_set_mask path in runtime.cpp.
+      const int phys_bits_local = data_type_bits(physical_type);
+      TI_ERROR_IF(phys_bits_local != 32 && phys_bits_local != 64,
+                  "Atomic BitStructStoreStmt requires 32-bit or 64-bit "
+                  "physical word on Vulkan (got {} bits).",
+                  phys_bits_local);
+      spirv::Label head_lbl = ir_->new_label();
+      spirv::Label body_lbl = ir_->new_label();
+      spirv::Label win_lbl = ir_->new_label();
+      spirv::Label lose_lbl = ir_->new_label();
+      spirv::Label continue_lbl = ir_->new_label();
+      spirv::Label exit_lbl = ir_->new_label();
+
+      ir_->make_inst(spv::OpBranch, head_lbl);
+      ir_->start_label(head_lbl);
+      ir_->make_inst(spv::OpLoopMerge, exit_lbl, continue_lbl,
+                     spv::LoopControlMaskNone);
+      ir_->make_inst(spv::OpBranch, body_lbl);
+      ir_->make_inst(spv::OpLabel, body_lbl);
+
+      spirv::Value old_word =
+          ir_->make_value(spv::OpAtomicLoad, phys_uint_stype, buf_ptr,
+                          /*scope=*/ir_->const_i32_one_,
+                          /*semantics=*/ir_->const_i32_zero_);
+      spirv::Value cleared = ir_->make_value(
+          spv::OpBitwiseAnd, phys_uint_stype, old_word, mask_inv);
+      spirv::Value new_word = ir_->make_value(
+          spv::OpBitwiseOr, phys_uint_stype, cleared, packed);
+      spirv::Value cas = ir_->make_value(
+          spv::OpAtomicCompareExchange, phys_uint_stype, buf_ptr,
+          /*scope=*/ir_->const_i32_one_,
+          /*semantics_eq=*/ir_->const_i32_zero_,
+          /*semantics_uneq=*/ir_->const_i32_zero_, new_word, old_word);
+      spirv::Value won =
+          ir_->make_value(spv::OpIEqual, ir_->bool_type(), cas, old_word);
+      ir_->make_inst(spv::OpSelectionMerge, lose_lbl,
+                     spv::SelectionControlMaskNone);
+      ir_->make_inst(spv::OpBranchConditional, won, win_lbl, lose_lbl);
+      ir_->make_inst(spv::OpLabel, win_lbl);
+      ir_->make_inst(spv::OpBranch, exit_lbl);
+      ir_->make_inst(spv::OpLabel, lose_lbl);
+      ir_->make_inst(spv::OpBranch, continue_lbl);
+      ir_->make_inst(spv::OpLabel, continue_lbl);
+      ir_->make_inst(spv::OpBranch, head_lbl);
+
+      ir_->start_label(exit_lbl);
+    }
+  }
+
   spirv::Value at_buffer(const Stmt *ptr, DataType dt) {
     spirv::Value ptr_val = ir_->query_value(ptr->raw_name());
 
@@ -3677,6 +4469,17 @@ class TaskCodegen : public IRVisitor {
   std::unordered_map<int, GetRootStmt *>
       root_stmts_;  // maps root id to get root stmt
   std::unordered_map<const Stmt *, BufferInfo> ptr_to_buffers_;
+  // G9.2 (2026-04-30): bit-pointer side table.  When a stmt's ret_type is
+  // PointerType{is_bit_pointer=true} (produced by SNodeLookupStmt of a
+  // quant_array, or in the future by GetChStmt of a bit_struct member),
+  // its raw_name SSA value holds the *byte* address of the containing
+  // physical word and the bit offset is tracked here as a parallel u32
+  // SSA value.  GlobalLoadStmt / GlobalStoreStmt then emit the shift /
+  // mask / sign-extend sequence using these two values.  Empty when
+  // vulkan_quant_experimental is OFF (the entry is only ever populated
+  // by the new quant_array branch in SNodeLookupStmt, which itself only
+  // runs for fields whose extension was admitted by extension.cpp).
+  std::unordered_map<const Stmt *, spirv::Value> bit_ptr_bit_offsets_;
   std::unordered_map<std::vector<int>, Value, hashing::Hasher<std::vector<int>>>
       argid_to_tex_value_;
 };

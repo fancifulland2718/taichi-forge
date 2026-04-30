@@ -35,6 +35,57 @@ Taichi Forge is the rolling result of those maintenance upgrades, along with com
 
 ---
 
+## Headline feature: sparse SNode on Vulkan
+
+Vanilla Taichi 1.7.4's Vulkan/SPIRV backend supports **only** `dense` + `root`. Every other SNode type — `pointer`, `bitmasked`, `dynamic`, `hash` — falls back to a `TI_NOT_IMPLEMENTED` on Vulkan, blocking macOS-via-MoltenVK, Linux-AMD-without-ROCm, and mobile / embedded users from running sparse data structures at all.
+
+**Taichi Forge 0.3.0 ships `pointer` / `bitmasked` / `dynamic` on Vulkan** with end-to-end three-backend (cpu / cuda / vulkan) numerical equivalence. This is the fork's headline functional differentiator and is fully validated under the regression matrix in [tests/p4/](tests/p4/) (`vulkan_pointer_*.py`, `vulkan_bitmasked_*.py`, `vulkan_dynamic_basic.py`, `g2_pool_fraction.py`, `g4_probe.py`, `g8_cache_compat.py`).
+
+| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.3.0 Vulkan |
+|---|---|---|
+| `dense` | ✅ | ✅ |
+| `bitmasked` | ❌ | ✅ |
+| `pointer` | ❌ | ✅ |
+| `dynamic` | ❌ | ✅ |
+| `quant_array` / `bit_struct` | ❌ | ⚠️ experimental (read + write + concurrent `ti.atomic_add` via CAS-loop; opt-in via `vulkan_quant_experimental=True`) |
+| `hash` | ❌ | ❌ (default-disabled in upstream Python frontend; see feasibility note below) |
+
+Highlights:
+
+- **No new public API** — existing `ti.root.pointer(...).dense(...).place(...)` / `ti.activate` / `ti.deactivate` / `ti.is_active` / `ti.length` / `ti.append` Just Work on Vulkan with the same semantics as the LLVM backends.
+- **Static capacity by design** — Vulkan has no device-side dynamic allocator, so each `pointer` / `dynamic` SNode reserves its worst-case cell pool in the root buffer at compile time. Out-of-capacity activates degrade silently rather than crashing (a `cap_v` guard verified by `vulkan_pointer_race.py`).
+- **Memory knob `TI_VULKAN_POOL_FRACTION`** — opt-in env var (∈ (0, 1], default 1.0) shrinks the pointer pool to `max(num_cells_per_container, round(total × fraction))`. Combine with the `G1.b` deactivate-freelist (always on) to handle steady-state working sets far below the worst case. Verified at `0.25` against three-backend equivalence.
+- **`dynamic` uses a flat-array + length-suffix protocol** on Vulkan instead of LLVM's chunk-list (no shader-side `malloc` exists). `ti.append` / `ti.length` / `ti.deactivate` preserve full LLVM semantics; total capacity is the static `N`.
+- **Offline cache cross-version safety** — corrupt or version-mismatched `ticache.tcb` automatically triggers fallback recompile, never crashes (verified end-to-end by `g8_cache_compat.py`).
+- **Experimental `quant_array` / `bit_struct` on Vulkan** — opt-in via `ti.init(arch=ti.vulkan, vulkan_quant_experimental=True)` or env var `TI_VULKAN_QUANT=1`. With the gate ON, `QuantInt` / `QuantFixed` member reads, writes, and concurrent multi-thread `ti.atomic_add` (via SPIR-V `OpAtomicCompareExchange` spin RMW) are byte-equivalent to the LLVM backends, including multi-field `BitpackedFields` packing (verified by `tests/p4/g9_quant_baseline.py` MPM-style 11/11/10 packing, `tests/p4/g9_quant_array_baseline.py`, and the same-word race baseline `tests/p4/g9_quant_atomic_race.py`). Default OFF preserves vanilla 1.7.4 behaviour exactly. `QuantFloat` shared-exponent and the non-add atomic ops (`atomic_min/max/and/or/xor`, identical restriction to LLVM) are **explicitly out of scope** (G9 closed; see `compile_doc/SNode_Vulkan_规划.md` §8.9 for the deferral rationale and unblock conditions) and raise a clear `TI_NOT_IMPLEMENTED` rather than miscompiling.
+
+📖 **Full usage guide and limitations** (bilingual): [docs/forge/sparse_snode_on_vulkan.en.md](docs/forge/sparse_snode_on_vulkan.en.md) / [docs/forge/sparse_snode_on_vulkan.zh.md](docs/forge/sparse_snode_on_vulkan.zh.md) — covers static-capacity semantics, the `TI_VULKAN_POOL_FRACTION` knob, dynamic-protocol differences, troubleshooting, and the verification matrix.
+
+📖 **All fork-only knobs** (compile / runtime / architecture / modernization options): [docs/forge/forge_options.en.md](docs/forge/forge_options.en.md) / [docs/forge/forge_options.zh.md](docs/forge/forge_options.zh.md).
+
+> `hash` SNode remains permanently deferred (no real-time physics or rendering pipeline depends on it; see the user guide §6.1 for the survey). `quant_array` / `bit_struct` ship **experimental scaffolding** on Vulkan in 0.3.0 — frontend gate is opt-in via `vulkan_quant_experimental=True`; codegen is incremental. See user guide §7.
+
+### Quick example (Vulkan-on-anything)
+
+```python
+import taichi as ti
+ti.init(arch=ti.vulkan)              # works on macOS via MoltenVK, Linux-AMD without ROCm, etc.
+
+x = ti.field(ti.f32)
+ti.root.pointer(ti.ij, 32).dense(ti.ij, 8).place(x)
+
+@ti.kernel
+def fill():
+    for i, j in ti.ndrange(256, 256):
+        if (i + j) % 17 == 0:
+            x[i, j] = i * 0.1 + j * 0.01
+
+fill()
+print(x.to_numpy().sum())            # identical to ti.cpu / ti.cuda
+```
+
+---
+
 ## Supported toolchain
 
 | Area | Requirement |
@@ -172,16 +223,27 @@ The build is driven entirely by `pyproject.toml` / `scikit-build-core`. On Windo
 Taichi Forge uses its own SemVer track starting at **0.1.2**. Fork release numbers do **not** match upstream `taichi` versions.
 
 - `0.1.x` — LLVM 20 + VS 2026 + Python 3.14 + initial compile-performance improvements. Backends: Linux/Windows x86_64, CUDA, Vulkan, OpenGL, GLES, CPU.
-- `0.2.x` — deeper compile-time, runtime cache, and toolchain modernization. **Current line.**
-- `0.3.x` — planned: additional feature support on top of the 0.2.x stabilization line.
+- `0.2.x` — deeper compile-time, runtime cache, and toolchain modernization. **Stabilization line, superseded by 0.3.0.**
+- `0.3.x` — sparse SNode (`pointer` / `bitmasked` / `dynamic`) on Vulkan + experimental `quant_array` scaffolding on Vulkan. **Current line.**
 
 ---
 
 ## Release notes
 
-### 0.2.4 (current)
+### 0.3.0 (current)
 
-This release rolls up the full 0.2.x compile-time, runtime-cache, IR-pass, and dependency-modernization work into a single wheel. All new behaviour is opt-in via `ti.init(...)` / `CompileConfig` knobs (already documented above); defaults remain bit-identical to upstream Taichi 1.7.4.
+First release with **sparse SNode on Vulkan** as a public feature. Inherits the full 0.2.x compile-time, runtime-cache, IR-pass, and dependency-modernization stack (every knob below remains available and bit-identical to 0.2.4 with defaults off).
+
+**Sparse SNode on Vulkan (headline functional differentiator)**
+
+- `pointer` / `bitmasked` / `dynamic` SNodes now run end-to-end on the Vulkan/SPIRV backend, with three-backend (cpu / cuda / vulkan) numerical equivalence verified across 30+ tests in [tests/p4/](tests/p4/).
+- Static-capacity model: pool size = `total_num_cells_from_root` (worst case), no shader-side dynamic allocator. Out-of-capacity activates degrade silently via the `cap_v` guard rather than crashing the device.
+- New env var `TI_VULKAN_POOL_FRACTION` (∈ (0, 1], default 1.0) shrinks per-pointer pool capacity for memory-tight steady-state workloads. Combined with the deactivate-freelist (always on), supports re-activation cycles without leaking root-buffer space.
+- `dynamic` SNode uses a **flat-array + length-suffix protocol** on Vulkan (length atomic-stored at `cell_stride * N` offset of each container) — full LLVM `ti.append` / `ti.length` / `ti.deactivate` semantics preserved, no chunk-list.
+- Offline cache cross-version safety: corrupt or version-mismatched `ticache.tcb` triggers fallback recompile, never crashes (validated by `g8_cache_compat.py` three-phase test).
+- Build-time guards: `TI_VULKAN_POINTER` / `TI_VULKAN_DYNAMIC` / `TI_VULKAN_POINTER_POOL_FRACTION` CMake flags (all default ON) allow byte-for-byte revert to vanilla 1.7.4 behaviour for regression bisecting.
+- `hash` SNode remains unimplemented on every backend in this fork — vanilla taichi 1.7.4 itself default-disables `ti.root.hash(...)` in the Python frontend, and no real-world demo currently depends on it. See the user guide §6 for substitutes (`pointer` + `TI_VULKAN_POOL_FRACTION`, or user-level hash + `dense` buckets).
+- Full user guide (limitations, env vars, troubleshooting, verification matrix): [docs/forge/sparse_snode_on_vulkan.en.md](docs/forge/sparse_snode_on_vulkan.en.md) / [docs/forge/sparse_snode_on_vulkan.zh.md](docs/forge/sparse_snode_on_vulkan.zh.md).
 
 **Compile-time performance**
 
