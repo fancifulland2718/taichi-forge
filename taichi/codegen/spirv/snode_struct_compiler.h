@@ -30,6 +30,18 @@ struct SNodeDescriptor {
   // starts at a fixed offset in its parent cell's memory.
   size_t mem_offset_in_parent_cell = 0;
 
+  // Phase 2b (vulkan_sparse_experimental, pointer SNode only):
+  // For pointer SNodes, the slot array lives at the regular SNode container
+  // position in the parent cell (size = 4 * num_cells_per_container, each u32
+  // slot stores 0 = inactive, otherwise (pool_index + 1)). The actual child
+  // cells live in a per-pointer-SNode pool appended to the end of the root
+  // buffer; the bump watermark is a single u32 also appended at the end.
+  // These three fields are only meaningful when snode->type == pointer; for
+  // all other SNode types they remain zero.
+  size_t pointer_pool_offset_in_root = 0;
+  size_t pointer_watermark_offset_in_root = 0;
+  size_t pointer_pool_capacity = 0;
+
   SNode *get_child(int ch_i) const {
     return snode->ch[ch_i].get();
   }

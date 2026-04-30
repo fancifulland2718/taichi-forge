@@ -12,6 +12,40 @@ class StructCompiler {
     CompiledSNodeStructs result;
     result.root = &root;
     result.root_size = compute_snode_size(&root);
+
+    // Phase 2b: append per-pointer-SNode pool + watermark to the end of the
+    // root buffer. The slot array (sized num_cells * 4) already lives at the
+    // container position via compute_snode_size(); here we only reserve the
+    // pool data region and the u32 watermark counter. Both regions are part
+    // of the root buffer and are zero-filled by GfxRuntime::add_root_buffer.
+    for (auto &kv : snode_descriptors_) {
+      auto &desc = kv.second;
+      if (desc.snode->type != SNodeType::pointer) {
+        continue;
+      }
+      // Pool capacity = total instances of this pointer SNode globally
+      // (parent.total_num_cells * num_cells_per_container). Using
+      // num_cells_per_container alone would only fit a single instance and
+      // silently corrupt nested pointer trees (e.g. pointer.pointer.dense)
+      // where the same descriptor is re-instantiated under every parent
+      // cell.
+      const size_t capacity = desc.total_num_cells_from_root;
+      const size_t cell_bytes = desc.cell_stride;
+      // u32 alignment for atomic ops on the watermark (root_size is already a
+      // multiple of 4 because every preceding container size is, but be
+      // explicit for safety against future container types).
+      result.root_size = (result.root_size + 3u) & ~size_t(3);
+      desc.pointer_watermark_offset_in_root = result.root_size;
+      result.root_size += 4;
+      // Pool data starts on a 4-byte boundary; cell_bytes itself is a
+      // multiple of 4 in practice (smallest primitive is 4-byte i32/f32),
+      // but keep the rounding for defensiveness.
+      result.root_size = (result.root_size + 3u) & ~size_t(3);
+      desc.pointer_pool_offset_in_root = result.root_size;
+      desc.pointer_pool_capacity = capacity;
+      result.root_size += cell_bytes * capacity;
+    }
+
     result.snode_descriptors = std::move(snode_descriptors_);
     /*
     result.type_factory = new tinyir::Block;
@@ -104,6 +138,16 @@ class StructCompiler {
             num_cells % 32 == 0 ? (num_cells / 32) : (num_cells / 32 + 1);
         sn_desc.container_stride =
             cell_stride * num_cells + bitmask_num_words * 4;
+      } else if (sn->type == SNodeType::pointer) {
+        // Phase 2b: the pointer SNode container resident in the parent cell
+        // holds only the slot array (4 bytes per cell). The actual child
+        // cells (`cell_stride` bytes each, capacity = num_cells_per_container)
+        // live in a separate pool that is appended to the end of the root
+        // buffer in StructCompiler::run() once tree size is known. Per-cell
+        // recycle is intentionally not done in 2a/2b -- whole-pool reset
+        // happens via the device allocator's clear_all() (Phase 2c hook).
+        sn_desc.container_stride =
+            sn_desc.snode->num_cells_per_container * 4;
       } else {
         sn_desc.container_stride =
             cell_stride * sn_desc.snode->num_cells_per_container;

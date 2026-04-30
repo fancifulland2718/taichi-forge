@@ -451,6 +451,176 @@ class TaskCodegen : public IRVisitor {
     }
   }
 
+  // ----------------------------------------------------------------------
+  // Phase 2b: pointer SNode helpers (vulkan_sparse_experimental).
+  //
+  // The container at `parent_ptr + 4*i` stores a u32 slot value:
+  //   slot == 0      -> cell is inactive
+  //   slot == k+1    -> cell currently maps to pool index k
+  //
+  // Pool data and the bump watermark live at fixed absolute offsets in the
+  // root buffer (see snode_struct_compiler.cpp). On activate we bump the
+  // watermark and CAS the slot; on read we just translate slot to pool
+  // address. Per-cell deactivate writes 0 to the slot but never recycles
+  // the pool entry -- whole-pool reset goes through the device allocator's
+  // clear_all() (Phase 2c hook).
+  // ----------------------------------------------------------------------
+
+  // Translate a u32 byte offset into root buffer to a u32 slot pointer.
+  spirv::Value pointer_slot_ptr(spirv::Value root_buffer_u32,
+                                spirv::Value parent_byte_offset,
+                                spirv::Value index_u32) {
+    auto u32_t = ir_->u32_type();
+    // word_offset = parent_byte_offset / 4 + index
+    auto parent_word = ir_->make_value(
+        spv::OpShiftRightLogical, u32_t, parent_byte_offset,
+        ir_->uint_immediate_number(u32_t, 2));
+    auto slot_word_idx = ir_->add(parent_word, index_u32);
+    return ir_->struct_array_access(u32_t, root_buffer_u32, slot_word_idx);
+  }
+
+  // Returns the byte offset (in root buffer) of cell `index_u32` in the
+  // pointer SNode `sn`. If `do_activate` is true, atomically allocates a
+  // pool slot when the cell is currently inactive. If `do_activate` is
+  // false and the cell is inactive, returns the pool's cell-0 address as a
+  // safe fallback (matches LLVM's "ambient_elements" semantics for the
+  // smoke-test purpose; reads of inactive cells are user error).
+  spirv::Value pointer_lookup_or_activate(spirv::Value parent_byte_offset,
+                                          int root_id,
+                                          const SNode *sn,
+                                          spirv::Value index_u32,
+                                          bool do_activate) {
+    const auto &snode_descs = compiled_structs_[root_id].snode_descriptors;
+    const auto &desc = snode_descs.at(sn->id);
+
+    auto u32_t = ir_->u32_type();
+    auto root_buffer = get_buffer_value(BufferInfo(BufferType::Root, root_id),
+                                        PrimitiveType::u32);
+
+    auto idx_u32 = ir_->cast(u32_t, index_u32);
+    auto slot_ptr =
+        pointer_slot_ptr(root_buffer, parent_byte_offset, idx_u32);
+
+    spirv::Value final_slot;
+    if (do_activate) {
+      // Read current slot non-atomically. The CAS below is the source of
+      // truth for "who allocated"; a stale 0-read just sends us through
+      // the allocate path where the CAS will tell us the real owner.
+      auto cur_slot = ir_->load_variable(slot_ptr, u32_t);
+      auto cond_zero = ir_->make_value(spv::OpIEqual, ir_->bool_type(),
+                                       cur_slot,
+                                       ir_->uint_immediate_number(u32_t, 0));
+
+      spirv::Label alloc_label = ir_->new_label();
+      spirv::Label use_label = ir_->new_label();
+      spirv::Label merge_label = ir_->new_label();
+      ir_->make_inst(spv::OpSelectionMerge, merge_label,
+                     spv::SelectionControlMaskNone);
+      ir_->make_inst(spv::OpBranchConditional, cond_zero, alloc_label,
+                     use_label);
+
+      // alloc path
+      ir_->start_label(alloc_label);
+      auto wm_word_idx = ir_->uint_immediate_number(
+          u32_t, (uint32_t)(desc.pointer_watermark_offset_in_root / 4));
+      auto wm_ptr =
+          ir_->struct_array_access(u32_t, root_buffer, wm_word_idx);
+      auto old_wm = ir_->make_value(spv::OpAtomicIAdd, u32_t, wm_ptr,
+                                    /*scope=*/ir_->const_i32_one_,
+                                    /*semantics=*/ir_->const_i32_zero_,
+                                    ir_->uint_immediate_number(u32_t, 1));
+      // Capacity guard: if watermark already saturated the pool, do not
+      // perform the CAS (would otherwise generate a slot index past the
+      // pool, leading to buffer OOB writes via cell_byte_offset). Substitute
+      // sentinel slot value 0 ("inactive") -- caller falls back to cell 0
+      // matching LLVM ambient_elements semantics for OOB activation.
+      auto cap_v = ir_->uint_immediate_number(
+          u32_t, (uint32_t)desc.pointer_pool_capacity);
+      auto in_cap = ir_->make_value(spv::OpULessThan, ir_->bool_type(),
+                                    old_wm, cap_v);
+      // new_slot = in_cap ? (old_wm + 1) : 0
+      auto new_slot_raw = ir_->add(old_wm, ir_->uint_immediate_number(u32_t, 1));
+      auto new_slot = ir_->make_value(spv::OpSelect, u32_t, in_cap,
+                                      new_slot_raw,
+                                      ir_->uint_immediate_number(u32_t, 0));
+      // CAS(slot, 0, new_slot). Returns prior value. Only meaningful when
+      // new_slot != 0; with new_slot == 0 the CAS is a no-op (compare 0 vs
+      // 0 == swap 0 in, equal to current state for an inactive slot, and
+      // equal to current state for an active slot since we_won will be
+      // false).
+      auto cas_old = ir_->make_value(
+          spv::OpAtomicCompareExchange, u32_t, slot_ptr,
+          /*scope=*/ir_->const_i32_one_,
+          /*semantics_eq=*/ir_->const_i32_zero_,
+          /*semantics_uneq=*/ir_->const_i32_zero_, new_slot,
+          ir_->uint_immediate_number(u32_t, 0));
+      auto we_won = ir_->make_value(spv::OpIEqual, ir_->bool_type(), cas_old,
+                                    ir_->uint_immediate_number(u32_t, 0));
+      // alloc_slot = we_won ? new_slot : cas_old
+      auto alloc_slot = ir_->make_value(spv::OpSelect, u32_t, we_won, new_slot,
+                                        cas_old);
+      ir_->make_inst(spv::OpBranch, merge_label);
+
+      // use path
+      ir_->start_label(use_label);
+      ir_->make_inst(spv::OpBranch, merge_label);
+
+      ir_->start_label(merge_label);
+      // Phi(alloc_slot from alloc_label, cur_slot from use_label)
+      final_slot = ir_->make_value(spv::OpPhi, u32_t, alloc_slot, alloc_label,
+                                   cur_slot, use_label);
+    } else {
+      final_slot = ir_->load_variable(slot_ptr, u32_t);
+    }
+
+    // effective_slot = (final_slot == 0) ? 0 : (final_slot - 1)
+    auto is_zero = ir_->make_value(spv::OpIEqual, ir_->bool_type(), final_slot,
+                                   ir_->uint_immediate_number(u32_t, 0));
+    auto slot_minus_one =
+        ir_->sub(final_slot, ir_->uint_immediate_number(u32_t, 1));
+    auto effective_slot = ir_->make_value(
+        spv::OpSelect, u32_t, is_zero,
+        ir_->uint_immediate_number(u32_t, 0), slot_minus_one);
+
+    auto cell_stride_v =
+        ir_->uint_immediate_number(u32_t, (uint32_t)desc.cell_stride);
+    auto pool_offset_v = ir_->uint_immediate_number(
+        u32_t, (uint32_t)desc.pointer_pool_offset_in_root);
+    auto cell_byte_offset = ir_->add(
+        pool_offset_v, ir_->mul(effective_slot, cell_stride_v));
+    return cell_byte_offset;
+  }
+
+  // is_active: returns u32 (1 if active, else 0) -- callers cast to ret_type.
+  spirv::Value pointer_is_active(spirv::Value parent_byte_offset,
+                                 int root_id,
+                                 const SNode *sn,
+                                 spirv::Value index_u32) {
+    auto u32_t = ir_->u32_type();
+    auto root_buffer = get_buffer_value(BufferInfo(BufferType::Root, root_id),
+                                        PrimitiveType::u32);
+    auto idx_u32 = ir_->cast(u32_t, index_u32);
+    auto slot_ptr =
+        pointer_slot_ptr(root_buffer, parent_byte_offset, idx_u32);
+    auto slot_value = ir_->load_variable(slot_ptr, u32_t);
+    return ir_->make_value(spv::OpUGreaterThan, ir_->bool_type(), slot_value,
+                           ir_->uint_immediate_number(u32_t, 0));
+  }
+
+  // deactivate: write 0 to slot. The pool entry is leaked until clear_all.
+  void pointer_deactivate(spirv::Value parent_byte_offset,
+                          int root_id,
+                          const SNode *sn,
+                          spirv::Value index_u32) {
+    auto u32_t = ir_->u32_type();
+    auto root_buffer = get_buffer_value(BufferInfo(BufferType::Root, root_id),
+                                        PrimitiveType::u32);
+    auto idx_u32 = ir_->cast(u32_t, index_u32);
+    auto slot_ptr =
+        pointer_slot_ptr(root_buffer, parent_byte_offset, idx_u32);
+    ir_->store_variable(slot_ptr, ir_->uint_immediate_number(u32_t, 0));
+  }
+
   void visit(SNodeOpStmt *stmt) override {
     const int root_id = snode_to_root_.at(stmt->snode->id);
     std::string parent = stmt->ptr->raw_name();
@@ -474,6 +644,27 @@ class TaskCodegen : public IRVisitor {
       } else if (stmt->op_type == SNodeOpType::activate) {
         bitmasked_activation(ActivationOp::activate, parent_val, root_id,
                              stmt->snode, input_index_val);
+      } else {
+        TI_NOT_IMPLEMENTED;
+      }
+    } else if (stmt->snode->type == SNodeType::pointer) {
+      // Phase 2b: pointer SNode ops on Vulkan. Pool-backed bump allocator.
+      spirv::Value input_index_val = ir_->query_value(stmt->val->raw_name());
+
+      if (stmt->op_type == SNodeOpType::is_active) {
+        auto is_active = pointer_is_active(parent_val, root_id, stmt->snode,
+                                           input_index_val);
+        is_active =
+            ir_->cast(ir_->get_primitive_type(stmt->ret_type), is_active);
+        is_active = ir_->make_value(spv::OpSNegate, is_active.stype, is_active);
+        ir_->register_value(stmt->raw_name(), is_active);
+      } else if (stmt->op_type == SNodeOpType::deactivate) {
+        pointer_deactivate(parent_val, root_id, stmt->snode, input_index_val);
+      } else if (stmt->op_type == SNodeOpType::activate) {
+        // Discard the address result; activate is a side-effecting op.
+        (void)pointer_lookup_or_activate(parent_val, root_id, stmt->snode,
+                                         input_index_val,
+                                         /*do_activate=*/true);
       } else {
         TI_NOT_IMPLEMENTED;
       }
@@ -506,6 +697,10 @@ class TaskCodegen : public IRVisitor {
             ir_->query_value(stmt->input_index->raw_name());
         bitmasked_activation(ActivationOp::activate, parent_val, root_id, sn,
                              input_index_val);
+      } else if (sn->type == SNodeType::pointer) {
+        // Pointer activation is folded into the lookup below: when activate
+        // is requested we run pointer_lookup_or_activate(do_activate=true)
+        // which both allocates (if needed) and produces the cell address.
       } else {
         TI_NOT_IMPLEMENTED;
       }
@@ -514,6 +709,12 @@ class TaskCodegen : public IRVisitor {
     spirv::Value val;
     if (is_root) {
       val = parent_val;  // Assert Root[0] access at first time
+    } else if (sn->type == SNodeType::pointer) {
+      // Phase 2b: pointer indirection -> pool cell byte offset.
+      spirv::Value input_index_val =
+          ir_->query_value(stmt->input_index->raw_name());
+      val = pointer_lookup_or_activate(parent_val, root_id, sn, input_index_val,
+                                       /*do_activate=*/stmt->activate);
     } else {
       const auto &snode_descs = compiled_structs_[root_id].snode_descriptors;
       const auto &desc = snode_descs.at(sn->id);
@@ -2287,13 +2488,14 @@ class TaskCodegen : public IRVisitor {
     std::reverse(path.begin(), path.end());
     TI_ASSERT(!path.empty());
 
-    // Phase 1d only handles dense + bitmasked nodes. Reject anything else
-    // (pointer / dynamic / hash / quant_array) early with a clear message.
+    // Phase 1d/2c handles dense + bitmasked + pointer nodes. Reject
+    // everything else (dynamic / hash / quant_array) early.
     for (auto *sn : path) {
       TI_ERROR_IF(sn->type != SNodeType::dense &&
-                      sn->type != SNodeType::bitmasked,
+                      sn->type != SNodeType::bitmasked &&
+                      sn->type != SNodeType::pointer,
                   "SPIR-V listgen for SNode type '{}' is not implemented "
-                  "(Phase 1d supports only dense + bitmasked).",
+                  "(supports dense + bitmasked + pointer).",
                   snode_type_name(sn->type));
     }
 
@@ -2395,7 +2597,40 @@ class TaskCodegen : public IRVisitor {
 
     for (int k = 0; k < n; ++k) {
       const auto &desc_k = snode_descs.at(path[k]->id);
-      if (path[k]->type == SNodeType::bitmasked) {
+      // Pointer slot lookup is computed once per level when path[k] is a
+      // pointer; reused both for the active-mask AND and for the next-
+      // level addr advance.
+      spirv::Value pointer_effective_slot;  // (slot == 0) ? 0 : slot - 1
+      bool path_k_is_pointer = (path[k]->type == SNodeType::pointer);
+      if (path_k_is_pointer) {
+        // slot_byte_addr = addr + 4 * i_path[k]
+        auto slot_byte_off = ir_->make_value(
+            spv::OpShiftLeftLogical, u32_t, i_path[k],
+            ir_->uint_immediate_number(u32_t, 2));
+        auto slot_byte_addr = ir_->add(addr, slot_byte_off);
+        auto slot_word_idx = ir_->make_value(
+            spv::OpShiftRightLogical, u32_t, slot_byte_addr,
+            ir_->uint_immediate_number(u32_t, 2));
+        auto slot_ptr =
+            ir_->struct_array_access(u32_t, root_buffer, slot_word_idx);
+        auto slot_value = ir_->load_variable(slot_ptr, u32_t);
+        // active &= (slot != 0)
+        auto is_zero = ir_->make_value(
+            spv::OpIEqual, ir_->bool_type(), slot_value,
+            ir_->uint_immediate_number(u32_t, 0));
+        auto bit = ir_->make_value(
+            spv::OpSelect, u32_t, is_zero,
+            ir_->uint_immediate_number(u32_t, 0),
+            ir_->uint_immediate_number(u32_t, 1));
+        active = ir_->make_value(spv::OpBitwiseAnd, u32_t, active, bit);
+        // effective_slot = (slot == 0) ? 0 : slot - 1; clamp avoids OOB on
+        // inactive cells (the `active` bit will gate the listgen write).
+        auto slot_minus_one =
+            ir_->sub(slot_value, ir_->uint_immediate_number(u32_t, 1));
+        pointer_effective_slot = ir_->make_value(
+            spv::OpSelect, u32_t, is_zero,
+            ir_->uint_immediate_number(u32_t, 0), slot_minus_one);
+      } else if (path[k]->type == SNodeType::bitmasked) {
         auto mask_area_offset_const = ir_->uint_immediate_number(
             u32_t,
             (uint32_t)(desc_k.cell_stride * path[k]->num_cells_per_container));
@@ -2426,6 +2661,22 @@ class TaskCodegen : public IRVisitor {
       if (k < n - 1) {
         auto cell_stride_v =
             ir_->uint_immediate_number(u32_t, (uint32_t)desc_k.cell_stride);
+        if (path_k_is_pointer) {
+          // Pool jump: addr = pool_offset + effective_slot * cell_stride.
+          // The pointer SNode has a single child whose mem_offset is 0 in
+          // the pool entry, so we add path[k+1].mem_offset for symmetry
+          // with the dense path (in practice this is 0 today).
+          auto pool_offset_v = ir_->uint_immediate_number(
+              u32_t, (uint32_t)desc_k.pointer_pool_offset_in_root);
+          auto step = ir_->mul(pointer_effective_slot, cell_stride_v);
+          addr = ir_->add(pool_offset_v, step);
+          addr = ir_->add(
+              addr,
+              ir_->uint_immediate_number(
+                  u32_t, (uint32_t)snode_descs.at(path[k + 1]->id)
+                             .mem_offset_in_parent_cell));
+          continue;
+        }
         auto step = ir_->mul(i_path[k], cell_stride_v);
         addr = ir_->add(addr, step);
         addr = ir_->add(
