@@ -141,6 +141,8 @@ Program::Program(Arch desired_arch) : snode_rw_accessors_bank_(this) {
   // query (the very next block already calls it for Extension::assertion).
   // Sticky once true; OR'd with the legacy TI_VULKAN_SPARSE env var.
   set_vulkan_sparse_experimental(config.vulkan_sparse_experimental);
+  // G9.1: same propagation pattern for quant_array / bit_struct on Vulkan.
+  set_vulkan_quant_experimental(config.vulkan_quant_experimental);
 
   Device *compute_device = nullptr;
   compute_device = program_impl_->get_compute_device();

@@ -1,4 +1,5 @@
 #include "taichi/codegen/spirv/snode_struct_compiler.h"
+#include "taichi/ir/type_factory.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -159,8 +160,21 @@ class StructCompiler {
     SNodeDescriptor sn_desc;
     sn_desc.snode = sn;
     if (is_place) {
-      sn_desc.cell_stride = data_type_size(sn->dt);
-      sn_desc.container_stride = sn_desc.cell_stride;
+      // G9.2 (2026-04-30): a `place` whose dt is a quant scalar
+      // (QuantIntType / QuantFixedType / QuantFloatType) lives entirely
+      // INSIDE the parent quant_array / bit_struct's physical word.  It
+      // consumes no bytes of its own; differentiation is done by bit
+      // shifts at GlobalLoadStmt / GlobalStoreStmt time.  Reporting size
+      // 0 here lets the parent quant_array branch below override
+      // cell_stride / container_stride to the physical_type's size.
+      if (sn->dt->is<QuantIntType>() || sn->dt->is<QuantFixedType>() ||
+          sn->dt->is<QuantFloatType>()) {
+        sn_desc.cell_stride = 0;
+        sn_desc.container_stride = 0;
+      } else {
+        sn_desc.cell_stride = data_type_size(sn->dt);
+        sn_desc.container_stride = sn_desc.cell_stride;
+      }
     } else {
       // Sort by size, so that smaller subfields are placed first.
       // This accelerates Nvidia's GLSL compiler, as the compiler tries to
@@ -218,6 +232,47 @@ class StructCompiler {
         sn_desc.container_stride =
             cell_stride * sn_desc.snode->num_cells_per_container;
 #endif
+      } else if (sn->type == SNodeType::quant_array) {
+        // G9.2 (2026-04-30): quant_array packs num_cells_per_container
+        // user-visible cells into ONE physical word (i32 by default; the
+        // LLVM contract requires element_num_bits * num_cells <=
+        // physical_type bits).  Both cell_stride and container_stride
+        // therefore equal the physical_type's size; the per-cell
+        // differentiation is done by bit shifts at the GlobalLoadStmt /
+        // GlobalStoreStmt visitor (see spirv_codegen.cpp).
+        // Note: the children loop above set cell_stride to the sum of
+        // the single quant child's cell_stride, which is 0 by the new
+        // is_place branch.  We override it here unconditionally to the
+        // physical word size.
+        TI_ASSERT(sn->ch.size() == 1);
+        TI_ERROR_IF(data_type_bits(sn->physical_type) < 32,
+                    "quant_array physical type must be at least 32 bits on "
+                    "Vulkan/SPIR-V backend.");
+        // Mirror taichi/codegen/llvm/struct_llvm.cpp:97-100 -- assign the
+        // QuantArrayType to sn->dt so downstream codegen
+        // (SNodeLookupStmt / GetChStmt / GlobalLoadStmt / GlobalStoreStmt
+        // bit-pointer paths in spirv_codegen.cpp) can recover
+        // element_num_bits via `sn->dt->as<QuantArrayType>()`.
+        sn->dt = TypeFactory::get_instance().get_quant_array_type(
+            sn->physical_type, sn->ch[0]->dt,
+            sn->num_cells_per_container);
+        std::size_t phys_bytes = data_type_size(sn->physical_type);
+        sn_desc.cell_stride = phys_bytes;
+        sn_desc.container_stride = phys_bytes;
+      } else if (sn->type == SNodeType::bit_struct) {
+        // G9.3b (2026-05-01): a bit_struct (BitpackedFields) packs all
+        // child quant scalars into ONE physical word.  Both
+        // cell_stride and container_stride equal the physical word
+        // size; child differentiation is via member_bit_offset at
+        // BitStructStoreStmt / GlobalLoadStmt time.  sn->dt is already
+        // a BitStructType assigned in SNode::bit_struct() at frontend
+        // time (see taichi/ir/snode.cpp).
+        TI_ERROR_IF(data_type_bits(sn->physical_type) < 32,
+                    "bit_struct physical type must be at least 32 bits on "
+                    "Vulkan/SPIR-V backend.");
+        std::size_t phys_bytes = data_type_size(sn->physical_type);
+        sn_desc.cell_stride = phys_bytes;
+        sn_desc.container_stride = phys_bytes;
       } else {
         sn_desc.container_stride =
             cell_stride * sn_desc.snode->num_cells_per_container;

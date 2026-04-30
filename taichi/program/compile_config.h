@@ -82,6 +82,21 @@ struct CompileConfig {
   // declares sparse SNodes, which already segregates the cache by SNode tree
   // hash.
   bool vulkan_sparse_experimental{false};
+  // G9.1 (taichi-forge 0.3.0): opt-in for the experimental quant_array /
+  // bit_struct path on the Vulkan backend. Default false matches vanilla
+  // taichi 1.7.4 (quant_array is LLVM-only). When true, Program ctor calls
+  // set_vulkan_quant_experimental(true) which makes
+  // is_extension_supported(Arch::vulkan, Extension::quant) and
+  // is_extension_supported(Arch::vulkan, Extension::quant_basic) return
+  // true; the env var TI_VULKAN_QUANT=1 is honoured as a fallback. Codegen
+  // is delivered incrementally: unimplemented sites (atomic add on
+  // bit_struct, bit-pack/unpack on SPIR-V, etc.) raise TI_NOT_IMPLEMENTED
+  // rather than silently miscompiling. Not part of the offline-cache key:
+  // the resulting SPIR-V only differs when the user actually declares
+  // bit_struct fields, which already segregates the cache by SNode tree
+  // hash. Production quant_array workloads should remain on cpu / cuda
+  // until the Vulkan codegen completes.
+  bool vulkan_quant_experimental{false};
   // B2 (2026-04-26): user-facing fine-grained SPIR-V optimizer pass
   // disable list. Each entry is a pass name (case-sensitive) matching one
   // of the spvtools::Create*Pass identifiers used in

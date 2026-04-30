@@ -35,6 +35,23 @@ bool &vulkan_sparse_flag() {
 bool vulkan_sparse_experimental_enabled() {
   return vulkan_sparse_flag();
 }
+
+// G9.1 (taichi-forge 0.3.0): mirrors the sparse flag for quant_array /
+// bit_struct on Vulkan. The frontend extension gate gates only whether
+// is_extension_supported(Arch::vulkan, Extension::quant{,_basic}) returns
+// true. Whether codegen actually succeeds is a separate question handled
+// inside spirv_codegen.cpp (incremental TI_NOT_IMPLEMENTED).
+bool &vulkan_quant_flag() {
+  static bool flag = []() {
+    const char *v = std::getenv("TI_VULKAN_QUANT");
+    return v != nullptr && std::strcmp(v, "1") == 0;
+  }();
+  return flag;
+}
+
+bool vulkan_quant_experimental_enabled() {
+  return vulkan_quant_flag();
+}
 }  // namespace
 
 void set_vulkan_sparse_experimental(bool enabled) {
@@ -44,6 +61,13 @@ void set_vulkan_sparse_experimental(bool enabled) {
   // were already produced with sparse=true.
   if (enabled) {
     vulkan_sparse_flag() = true;
+  }
+}
+
+void set_vulkan_quant_experimental(bool enabled) {
+  // OR-set, same rationale as the sparse flag.
+  if (enabled) {
+    vulkan_quant_flag() = true;
   }
 }
 
@@ -72,6 +96,11 @@ bool is_extension_supported(Arch arch, Extension ext) {
   // arch2ext[Arch::opengl].insert(Extension::data64); // TODO: singleton
   if (arch == Arch::vulkan && ext == Extension::sparse &&
       vulkan_sparse_experimental_enabled()) {
+    return true;
+  }
+  if (arch == Arch::vulkan &&
+      (ext == Extension::quant || ext == Extension::quant_basic) &&
+      vulkan_quant_experimental_enabled()) {
     return true;
   }
   const auto &exts = arch2ext[arch];
