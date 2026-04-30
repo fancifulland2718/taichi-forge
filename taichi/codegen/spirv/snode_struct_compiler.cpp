@@ -37,6 +37,16 @@ class StructCompiler {
       result.root_size = (result.root_size + 3u) & ~size_t(3);
       desc.pointer_watermark_offset_in_root = result.root_size;
       result.root_size += 4;
+#if defined(TI_VULKAN_POINTER_FREELIST)
+      // G1.b: insert freelist header + links between watermark and the
+      // pool data region. freelist_head is a single u32 sentinel; the
+      // links table is u32[capacity]. Both zero-initialized by the
+      // root buffer memset on construction (= empty freelist).
+      desc.pointer_freelist_head_offset_in_root = result.root_size;
+      result.root_size += 4;
+      desc.pointer_freelist_links_offset_in_root = result.root_size;
+      result.root_size += 4 * capacity;
+#endif
       // Pool data starts on a 4-byte boundary; cell_bytes itself is a
       // multiple of 4 in practice (smallest primitive is 4-byte i32/f32),
       // but keep the rounding for defensiveness.
