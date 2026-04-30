@@ -984,6 +984,89 @@ class TaskCodegen : public IRVisitor {
       } else {
         TI_NOT_IMPLEMENTED;
       }
+    } else if (stmt->snode->type == SNodeType::dynamic) {
+#if defined(TI_VULKAN_DYNAMIC)
+      // G4: dynamic SNode on Vulkan via flat layout + length suffix.
+      //   container = [data: cell_stride * N][length u32]
+      // length is zero-initialized by root buffer memset. activate uses
+      // OpAtomicUMax(length, idx+1); allocate uses OpAtomicIAdd(length,1);
+      // is_active reads length and compares idx < length; deactivate stores
+      // 0 to length. The cell address for a given index i is
+      //   parent_byte_offset + i * cell_stride
+      // matching the flat container layout (no chunk indirection).
+      const auto &snode_descs = compiled_structs_[root_id].snode_descriptors;
+      const auto &desc = snode_descs.at(stmt->snode->id);
+      auto u32_t = ir_->u32_type();
+      auto root_buffer = get_buffer_value(BufferInfo(BufferType::Root, root_id),
+                                          PrimitiveType::u32);
+      auto len_byte_off = ir_->add(
+          parent_val,
+          ir_->uint_immediate_number(
+              u32_t, (uint32_t)desc.dynamic_length_offset_in_container));
+      auto len_word_idx = ir_->make_value(
+          spv::OpShiftRightLogical, u32_t, len_byte_off,
+          ir_->uint_immediate_number(u32_t, 2));
+      auto len_ptr =
+          ir_->struct_array_access(u32_t, root_buffer, len_word_idx);
+
+      if (stmt->op_type == SNodeOpType::length) {
+        auto len_val = ir_->make_value(
+            spv::OpAtomicLoad, u32_t, len_ptr,
+            /*scope=*/ir_->const_i32_one_,
+            /*semantics=*/ir_->const_i32_zero_);
+        auto ret =
+            ir_->cast(ir_->get_primitive_type(stmt->ret_type), len_val);
+        ir_->register_value(stmt->raw_name(), ret);
+      } else if (stmt->op_type == SNodeOpType::deactivate) {
+        ir_->make_inst(spv::OpAtomicStore, len_ptr,
+                       /*scope=*/ir_->const_i32_one_,
+                       /*semantics=*/ir_->const_i32_zero_,
+                       ir_->uint_immediate_number(u32_t, 0));
+      } else if (stmt->op_type == SNodeOpType::is_active) {
+        auto idx =
+            ir_->cast(u32_t, ir_->query_value(stmt->val->raw_name()));
+        auto len_val = ir_->make_value(
+            spv::OpAtomicLoad, u32_t, len_ptr,
+            /*scope=*/ir_->const_i32_one_,
+            /*semantics=*/ir_->const_i32_zero_);
+        auto active = ir_->make_value(spv::OpULessThan, ir_->bool_type(),
+                                      idx, len_val);
+        auto active_int =
+            ir_->cast(ir_->get_primitive_type(stmt->ret_type), active);
+        active_int = ir_->make_value(spv::OpSNegate, active_int.stype,
+                                     active_int);
+        ir_->register_value(stmt->raw_name(), active_int);
+      } else if (stmt->op_type == SNodeOpType::activate) {
+        auto idx =
+            ir_->cast(u32_t, ir_->query_value(stmt->val->raw_name()));
+        auto idx_plus_one =
+            ir_->add(idx, ir_->uint_immediate_number(u32_t, 1));
+        (void)ir_->make_value(spv::OpAtomicUMax, u32_t, len_ptr,
+                              /*scope=*/ir_->const_i32_one_,
+                              /*semantics=*/ir_->const_i32_zero_,
+                              idx_plus_one);
+      } else if (stmt->op_type == SNodeOpType::allocate) {
+        // ti.append: i = atomicAdd(length, 1); store i to alloca; the
+        // resulting cell address is parent_val + i * cell_stride.
+        auto idx = ir_->make_value(
+            spv::OpAtomicIAdd, u32_t, len_ptr,
+            /*scope=*/ir_->const_i32_one_,
+            /*semantics=*/ir_->const_i32_zero_,
+            ir_->uint_immediate_number(u32_t, 1));
+        auto alloca_ptr = ir_->query_value(stmt->val->raw_name());
+        auto idx_i32 = ir_->cast(ir_->i32_type(), idx);
+        ir_->store_variable(alloca_ptr, idx_i32);
+        auto cell_stride = ir_->uint_immediate_number(
+            u32_t, (uint32_t)desc.cell_stride);
+        auto cell_off = ir_->mul(idx, cell_stride);
+        auto cell_addr = ir_->add(parent_val, cell_off);
+        ir_->register_value(stmt->raw_name(), cell_addr);
+      } else {
+        TI_NOT_IMPLEMENTED;
+      }
+#else
+      TI_NOT_IMPLEMENTED;
+#endif
     } else {
       TI_NOT_IMPLEMENTED;
     }
@@ -2818,14 +2901,17 @@ class TaskCodegen : public IRVisitor {
     std::reverse(path.begin(), path.end());
     TI_ASSERT(!path.empty());
 
-    // Phase 1d/2c handles dense + bitmasked + pointer nodes. Reject
-    // everything else (dynamic / hash / quant_array) early.
+    // Phase 1d/2c handles dense + bitmasked + pointer nodes. G4 adds
+    // dynamic. Reject everything else (hash / quant_array) early.
     for (auto *sn : path) {
-      TI_ERROR_IF(sn->type != SNodeType::dense &&
-                      sn->type != SNodeType::bitmasked &&
-                      sn->type != SNodeType::pointer,
-                  "SPIR-V listgen for SNode type '{}' is not implemented "
-                  "(supports dense + bitmasked + pointer).",
+      bool ok = sn->type == SNodeType::dense ||
+                sn->type == SNodeType::bitmasked ||
+                sn->type == SNodeType::pointer;
+#if defined(TI_VULKAN_DYNAMIC)
+      ok = ok || (sn->type == SNodeType::dynamic);
+#endif
+      TI_ERROR_IF(!ok,
+                  "SPIR-V listgen for SNode type '{}' is not implemented.",
                   snode_type_name(sn->type));
     }
 
@@ -2987,6 +3073,32 @@ class TaskCodegen : public IRVisitor {
                                    ir_->uint_immediate_number(u32_t, 1));
         active = ir_->make_value(spv::OpBitwiseAnd, u32_t, active, bit);
       }
+#if defined(TI_VULKAN_DYNAMIC)
+      else if (path[k]->type == SNodeType::dynamic) {
+        // active &= (i_path[k] < atomicLoad(length))
+        auto len_byte_off = ir_->add(
+            addr,
+            ir_->uint_immediate_number(
+                u32_t,
+                (uint32_t)desc_k.dynamic_length_offset_in_container));
+        auto len_word_idx = ir_->make_value(
+            spv::OpShiftRightLogical, u32_t, len_byte_off,
+            ir_->uint_immediate_number(u32_t, 2));
+        auto len_ptr =
+            ir_->struct_array_access(u32_t, root_buffer, len_word_idx);
+        auto len_val = ir_->make_value(
+            spv::OpAtomicLoad, u32_t, len_ptr,
+            /*scope=*/ir_->const_i32_one_,
+            /*semantics=*/ir_->const_i32_zero_);
+        auto in_range = ir_->make_value(spv::OpULessThan, ir_->bool_type(),
+                                        i_path[k], len_val);
+        auto bit = ir_->make_value(
+            spv::OpSelect, u32_t, in_range,
+            ir_->uint_immediate_number(u32_t, 1),
+            ir_->uint_immediate_number(u32_t, 0));
+        active = ir_->make_value(spv::OpBitwiseAnd, u32_t, active, bit);
+      }
+#endif
 
       if (k < n - 1) {
         auto cell_stride_v =
