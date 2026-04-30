@@ -53,6 +53,18 @@ struct SNodeDescriptor {
   size_t pointer_freelist_head_offset_in_root = 0;
   size_t pointer_freelist_links_offset_in_root = 0;
 
+  // G4 (vulkan_sparse_experimental, dynamic SNode only,
+  // gated by TI_VULKAN_DYNAMIC at codegen time):
+  // Each dynamic container is laid out as
+  //   [data: cell_stride * num_cells_per_container][length u32]
+  // where length holds the number of currently appended elements (capped
+  // at num_cells_per_container by user contract; runtime does NOT bounds-
+  // check beyond clamping the resulting cell index in `is_active` reads
+  // and listgen). length is zero-initialized by the root buffer memset.
+  // dynamic_length_offset_in_container == cell_stride * num_cells_per_container
+  // when dynamic is enabled, else 0 (legacy flat layout).
+  size_t dynamic_length_offset_in_container = 0;
+
   SNode *get_child(int ch_i) const {
     return snode->ch[ch_i].get();
   }

@@ -58,3 +58,17 @@ if(TI_VULKAN_POINTER_FREELIST)
   endif()
   target_compile_definitions(spirv_codegen PRIVATE TI_VULKAN_POINTER_FREELIST=1)
 endif()
+
+# G4 (2026-04-30): dynamic SNode support on Vulkan.
+# Default ON: enables ti.append / ti.length / ti.deactivate / struct_for on
+# dynamic SNodes via a flat-array protocol (no chunked allocator). Each
+# dynamic container is laid out as [data][length u32]; length is an atomic
+# counter capped at num_cells_per_container by user contract. struct_for
+# walks [0, length) per container.
+# Default OFF would only be used to fall back to the legacy "dynamic
+# unsupported on SPIR-V" behavior.
+option(TI_VULKAN_DYNAMIC
+  "Enable dynamic-SNode codegen + listgen on Vulkan" ON)
+if(TI_VULKAN_DYNAMIC)
+  target_compile_definitions(spirv_codegen PRIVATE TI_VULKAN_DYNAMIC=1)
+endif()

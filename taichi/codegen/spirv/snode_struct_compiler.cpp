@@ -158,6 +158,19 @@ class StructCompiler {
         // happens via the device allocator's clear_all() (Phase 2c hook).
         sn_desc.container_stride =
             sn_desc.snode->num_cells_per_container * 4;
+      } else if (sn->type == SNodeType::dynamic) {
+#if defined(TI_VULKAN_DYNAMIC)
+        // G4: append a u32 length counter at the end of each dynamic
+        // container. Layout = [data: cell_stride * N][length u32]. The
+        // length is zero-initialized by the root buffer memset.
+        sn_desc.dynamic_length_offset_in_container =
+            cell_stride * sn_desc.snode->num_cells_per_container;
+        sn_desc.container_stride =
+            sn_desc.dynamic_length_offset_in_container + 4;
+#else
+        sn_desc.container_stride =
+            cell_stride * sn_desc.snode->num_cells_per_container;
+#endif
       } else {
         sn_desc.container_stride =
             cell_stride * sn_desc.snode->num_cells_per_container;
