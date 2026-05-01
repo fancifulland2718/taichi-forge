@@ -102,6 +102,12 @@ struct CompiledSNodeStructs {
   // key = SNode id（仅 type==pointer 的 SNode 入表）。
   std::unordered_map<int, SpirvAllocatorContract> pointer_contracts;
 
+  // B-3.b（2026-05）：每个 pointer SNode 在 root_buffer 中的 layout footprint
+  // （字节数 = watermark + freelist + pool_data + ambient + alignment 累计）。
+  // SNodeTreeManager 在 contract.pool_buffer_binding_id >= 0 时按此值申请独立
+  // DeviceAllocation。key = SNode id；空表示该 pointer 走 root_buffer 子区间。
+  std::unordered_map<int, size_t> pool_buffer_sizes;
+
   // TODO: Use the new type compiler
   // tinyir::Block *type_factory;
   // const tinyir::Type *root_type;
@@ -116,6 +122,10 @@ struct PointerLayoutPolicy {
   bool ambient_zone{true};   // G10-P2
   bool cas_marker{true};     // G1.a
   double pool_fraction{1.0}; // G2
+  // B-3.b（2026-05）：当且仅当此 flag=true && SNodeTree 内恰好 1 个 pointer SNode
+  // 时，把该 pointer 的 pool 元数据切到独立 NodeAllocatorPool buffer。
+  // 默认 false 与历史行为字节等价。多 pointer / 嵌套 pointer 仍走 root_buffer fallback。
+  bool independent_pool{false};
 };
 
 CompiledSNodeStructs compile_snode_structs(

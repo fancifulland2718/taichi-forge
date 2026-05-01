@@ -59,6 +59,13 @@ struct SpirvAllocatorContract {
   // 这里保留是为日志 / 离线缓存键 / 调试可见性，codegen 端不读取）。
   // 1.0 = 100% 容量（vanilla 1.7.4 等价）；(0,1) 区间收缩；其余值视为 1.0。
   double pool_fraction{1.0};
+
+  // 路线 B B-3.b（2026-05）：> 0 表示该 pointer SNode 的池数据已迁出 root_buffer，
+  // 走独立的 NodeAllocatorPool descriptor（root_id[0] = pool_buffer_binding_id）；
+  // -1（默认）= 池仍寄居 root_buffer 子区间（B-1/B-2 行为）。B-3.b 只做 plumbing：
+  // 即便此值 >= 0，codegen 仍读 root_buffer 上的偏移（offset 字段不变）；独立
+  // buffer 是 dead allocation，待 B-3.c 把 codegen 切到独立 buffer 寻址。
+  int32_t pool_buffer_binding_id{-1};
 };
 
 }  // namespace spirv

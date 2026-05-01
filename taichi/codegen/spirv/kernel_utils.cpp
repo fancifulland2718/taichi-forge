@@ -27,6 +27,10 @@ std::string TaskAttributes::buffers_name(BufferInfo b) {
   if (b.type == BufferType::Root) {
     return std::string("Root: ") + fmt::format("{}", fmt::join(b.root_id, "_"));
   }
+  if (b.type == BufferType::NodeAllocatorPool) {
+    return std::string("NodeAllocatorPool: ") +
+           fmt::format("{}", fmt::join(b.root_id, "_"));
+  }
   TI_ERROR("unrecognized buffer type");
 }
 

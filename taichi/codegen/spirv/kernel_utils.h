@@ -27,7 +27,13 @@ struct TaskAttributes {
     Rets,
     ListGen,
     ExtArr,
-    ArgPack
+    ArgPack,
+    // B-3.a (2026-05): per-pointer-SNode allocator pool buffer. `root_id[0]`
+    // carries the SNode id (or a stable allocator-pool index assigned by
+    // SNodeTreeManager). Codegen will not emit this BufferType until B-3.b;
+    // the value sits at the END of the enum to preserve offline-cache hash
+    // stability for existing kernels (which serialize BufferType as int).
+    NodeAllocatorPool,
   };
 
   struct BufferInfo {
@@ -52,7 +58,8 @@ struct TaskAttributes {
       if (type != other.type) {
         return false;
       }
-      if (type == BufferType::Root || type == BufferType::ExtArr) {
+      if (type == BufferType::Root || type == BufferType::ExtArr ||
+          type == BufferType::NodeAllocatorPool) {
         return root_id == other.root_id;
       }
       return true;

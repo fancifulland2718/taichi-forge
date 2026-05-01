@@ -115,6 +115,11 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
     serializer(config.vulkan_pointer_ambient_zone);
     serializer(config.vulkan_pointer_cas_marker);
     serializer(config.vulkan_pointer_pool_fraction);
+    // B-3.b (2026-05): independent_pool 影响 SpirvAllocatorContract.
+    // pool_buffer_binding_id 与 SNodeTree allocator 申请独立 DeviceAllocation。
+    // 即使 codegen 在 B-3.b 不读 binding_id，提前纳入 cache key 避免 B-3.c
+    // 切换 codegen 后命中旧缓存。默认 false 哈希稳定。
+    serializer(config.vulkan_pointer_independent_pool);
   }
   serializer.finalize();
 
