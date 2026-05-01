@@ -19,6 +19,7 @@ void GfxProgramImpl::compile_snode_tree_types(SNodeTree *tree) {
   policy.ambient_zone = config->vulkan_pointer_ambient_zone;
   policy.cas_marker = config->vulkan_pointer_cas_marker;
   policy.pool_fraction = config->vulkan_pointer_pool_fraction;
+  policy.independent_pool = config->vulkan_pointer_independent_pool;
   if (runtime_) {
     snode_tree_mgr_->materialize_snode_tree(tree, policy);
   } else {
@@ -35,6 +36,7 @@ void GfxProgramImpl::materialize_snode_tree(SNodeTree *tree,
   policy.ambient_zone = config->vulkan_pointer_ambient_zone;
   policy.cas_marker = config->vulkan_pointer_cas_marker;
   policy.pool_fraction = config->vulkan_pointer_pool_fraction;
+  policy.independent_pool = config->vulkan_pointer_independent_pool;
   snode_tree_mgr_->materialize_snode_tree(tree, policy);
 }
 

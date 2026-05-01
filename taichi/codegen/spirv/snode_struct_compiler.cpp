@@ -72,42 +72,56 @@ class StructCompiler {
         capacity = std::max<size_t>(scaled, lower_bound);
       }
       const size_t cell_bytes = desc.cell_stride;
-      // u32 alignment for atomic ops on the watermark (root_size is already a
-      // multiple of 4 because every preceding container size is, but be
-      // explicit for safety against future container types).
-      result.root_size = (result.root_size + 3u) & ~size_t(3);
-      desc.pointer_watermark_offset_in_root = result.root_size;
-      result.root_size += 4;
-      // B-2.b: 原 #if TI_VULKAN_POINTER_FREELIST 布局下放为运行时 policy_.freelist。
-      // OFF 时不预留 head/links，contract.has_freelist=false，codegen 也不走 freelist 路径。
-      if (policy_.freelist) {
-        // G1.b: insert freelist header + links between watermark and the
-        // pool data region. freelist_head is a single u32 sentinel; the
-        // links table is u32[capacity]. Both zero-initialized by the
-        // root buffer memset on construction (= empty freelist).
-        desc.pointer_freelist_head_offset_in_root = result.root_size;
-        result.root_size += 4;
-        desc.pointer_freelist_links_offset_in_root = result.root_size;
-        result.root_size += 4 * capacity;
+      // B-3.c-2（2026-05）：在独立池开启时，pointer 池**整体**（元数据 +
+      // pool_data + ambient）迁出 root_buffer，落在每个 pointer 自己的
+      // NodeAllocatorPool buffer 中；root_size 不再含池数据。`cursor`
+      // 是该 pointer SNode 的池 footprint 的统一游标：indep=ON 时从 0
+      // 起算（即"offset_in_pool"），OFF 时与 root_size 对齐共享游标
+      // （即"offset_in_root"，旧行为）。pointer_*_offset_in_root 字段的
+      // 实际语义因此分裂："binding_id>=0" 时它表示池内偏移；OFF 时它
+      // 仍是 root buffer 内绝对偏移。codegen 通过 container_buffer_value
+      // / pool_meta_buffer 选择正确 base buffer。
+      const bool indep_pool = policy_.independent_pool;
+      size_t cursor;
+      if (indep_pool) {
+        cursor = 0;
+      } else {
+        result.root_size = (result.root_size + 3u) & ~size_t(3);
+        cursor = result.root_size;
       }
-      // Pool data starts on a 4-byte boundary; cell_bytes itself is a
-      // multiple of 4 in practice (smallest primitive is 4-byte i32/f32),
-      // but keep the rounding for defensiveness.
-      result.root_size = (result.root_size + 3u) & ~size_t(3);
-      desc.pointer_pool_offset_in_root = result.root_size;
+      desc.pointer_watermark_offset_in_root = cursor;
+      cursor += 4;
+      // B-2.b: 原 #if TI_VULKAN_POINTER_FREELIST 布局下放为运行时 policy_.freelist。
+      if (policy_.freelist) {
+        // G1.b: freelist_head + freelist_links[capacity]。零初始化由
+        // 池 buffer 在 SNodeTreeManager 中通过 buffer_fill(0) 提供。
+        desc.pointer_freelist_head_offset_in_root = cursor;
+        cursor += 4;
+        desc.pointer_freelist_links_offset_in_root = cursor;
+        cursor += 4 * capacity;
+      }
+      cursor = (cursor + 3u) & ~size_t(3);
+      desc.pointer_pool_offset_in_root = cursor;
       desc.pointer_pool_capacity = capacity;
-      result.root_size += cell_bytes * capacity;
+      cursor += cell_bytes * capacity;
       // B-2.b: 原 #if TI_VULKAN_POINTER_AMBIENT_ZONE 下放为运行时 policy_.ambient_zone。
       if (policy_.ambient_zone) {
-        // G10-P2: append a zero-initialized cell-sized ambient zone.
-        // pointer_lookup_or_activate(do_activate=false) returns this offset
-        // when slot==0, so inactive reads always observe zero (matches
-        // LLVM ambient_val_addr semantics). Never written by any kernel.
-        // Root buffer is memset(0) by GfxRuntime::add_root_buffer, so no
-        // additional init is required.
-        result.root_size = (result.root_size + 3u) & ~size_t(3);
-        desc.pointer_ambient_offset_in_root = result.root_size;
-        result.root_size += cell_bytes;
+        // G10-P2: 零初始化 cell-sized ambient zone。pointer_lookup_or_activate
+        // (do_activate=false) 在 slot==0 时返回此偏移，使 inactive 读结果
+        // 恒为 0（与 LLVM ambient_val_addr 语义一致）。从未被任何 kernel
+        // 写入；零初始化由池 buffer 的 fill(0) 或 root buffer 的 memset(0)
+        // 提供（按 indep_pool 决定）。
+        cursor = (cursor + 3u) & ~size_t(3);
+        desc.pointer_ambient_offset_in_root = cursor;
+        cursor += cell_bytes;
+      }
+      cursor = (cursor + 3u) & ~size_t(3);
+      if (indep_pool) {
+        // 独立池：池整体 footprint = cursor；root_size 不动。
+        result.pool_buffer_sizes[desc.snode->id] = cursor;
+      } else {
+        // OFF 默认：池整体仍追加在 root buffer 末尾，老行为字节等价。
+        result.root_size = cursor;
       }
     }
 
@@ -149,6 +163,16 @@ class StructCompiler {
       c.pool_fraction =
           resolve_pool_fraction(policy_.pool_fraction);
       result.pointer_contracts.emplace(sid, c);
+    }
+    // B-3.c-1（2026-05）：独立池 ON 时为所有 pointer SNode 设
+    // pool_buffer_binding_id = sid（不再限制为单 pointer）。嵌套 / 多 pointer
+    // 场景下每个 pointer 有各自独立 DeviceAllocation，各自为其 watermark/
+    // freelist 元数据提供 base buffer（B-3.c-1 仅迁元数据，pool_data +
+    // ambient 仍在 root_buffer，cell 寻址语义不变）。
+    if (policy_.independent_pool) {
+      for (auto &kv : result.pointer_contracts) {
+        kv.second.pool_buffer_binding_id = kv.second.snode_id;
+      }
     }
     /*
     result.type_factory = new tinyir::Block;

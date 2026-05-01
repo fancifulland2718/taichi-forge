@@ -42,6 +42,20 @@ void SNodeTreeManager::materialize_snode_tree(
       p.alloc_protocol = contract.alloc_protocol;
       p.pool_fraction = contract.pool_fraction;
       p.root_buffer_alloc = root_alloc;
+      // B-3.b (2026-05): contract.pool_buffer_binding_id >= 0 表示 layout 端
+      // 已选定该 pointer SNode 走独立 NodeAllocatorPool；此处申请独立
+      // DeviceAllocation 并交由 allocator 管理生命周期。size 来自 layout pass
+      // 计算的 footprint（覆盖 watermark + freelist + pool_data + ambient）。
+      if (contract.pool_buffer_binding_id >= 0) {
+        const auto sz_it = compiled_structs.pool_buffer_sizes.find(sid);
+        TI_ASSERT_INFO(
+            sz_it != compiled_structs.pool_buffer_sizes.end() &&
+                sz_it->second > 0,
+            "B-3.b: pool_buffer_size missing or zero for pointer SNode {}",
+            sid);
+        p.use_independent_pool = true;
+        p.independent_pool_size = sz_it->second;
+      }
       allocators_for_tree.emplace(sid, create_device_node_allocator(p));
     }
   }

@@ -46,6 +46,13 @@ class CompiledTaichiKernel {
     std::vector<DeviceAllocation *> root_buffers;
     DeviceAllocation *global_tmps_buffer{nullptr};
     DeviceAllocation *listgen_buffer{nullptr};
+#if defined(TI_WITH_VULKAN_POINTER)
+    // B-3.b (2026-05): 路线 B 阶段开启 vulkan_pointer_independent_pool 后，
+    // 每个走独立池的 pointer SNode 对应一块独立 DeviceAllocation；在这里打
+    // 包传入，CompiledTaichiKernel 构造时按 sid 注册到 input_buffers_ 以供
+    // descriptor set fallback 路径绑定。key = SNode id。默认 (OFF) 为空。
+    std::vector<std::pair<int, DeviceAllocation *>> node_allocator_pool_buffers;
+#endif
 
     PipelineCache *backend_cache{nullptr};
   };

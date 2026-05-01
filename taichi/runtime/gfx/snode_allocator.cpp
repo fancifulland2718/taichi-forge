@@ -38,6 +38,37 @@ BumpOnlyDeviceNodeAllocator::BumpOnlyDeviceNodeAllocator(const Params &p)
   TI_ASSERT(p.cell_payload_bytes % 4 == 0);
   // watermark 占 4 字节，必须严格在 pool_data 之前不重叠
   TI_ASSERT(p.pool_data_offset_in_root >= p.watermark_offset_in_root + 4);
+
+  // B-3.b (2026-05): 可选申请独立 pool DeviceAllocation。B-3.b 阶段
+  // codegen 仍读 root_buffer，该 buffer 只被 runtime 注入 descriptor set
+  // （实际 dead allocation），B-3.c 才切 codegen 路径。
+  if (p.use_independent_pool) {
+    TI_ASSERT_INFO(
+        p.independent_pool_size > 0,
+        "BumpOnlyDeviceNodeAllocator: use_independent_pool requires "
+        "independent_pool_size > 0 (snode_id={})",
+        p.snode_id);
+    Device::AllocParams alloc_params;
+    alloc_params.size = p.independent_pool_size;
+    alloc_params.host_write = false;
+    alloc_params.host_read = false;
+    alloc_params.export_sharing = false;
+    alloc_params.usage = AllocUsage::Storage;
+    auto [guard, res] = p.device->allocate_memory_unique(alloc_params);
+    TI_ASSERT_INFO(
+        res == RhiResult::success,
+        "BumpOnlyDeviceNodeAllocator: failed to allocate independent pool "
+        "buffer of {} bytes (snode_id={}, RhiResult={})",
+        p.independent_pool_size, p.snode_id, static_cast<int>(res));
+    // 零初始化独立 buffer（与 add_root_buffer 对称；保证 watermark / pool /
+    // freelist / ambient 在 B-3.c 切 codegen 后语义不变）。
+    Stream *stream = p.device->get_compute_stream();
+    auto [cmdlist, cmd_res] = stream->new_command_list_unique();
+    TI_ASSERT(cmd_res == RhiResult::success);
+    cmdlist->buffer_fill(guard->get_ptr(0), kBufferSizeEntireSize, /*data=*/0);
+    stream->submit_synced(cmdlist.get());
+    independent_pool_guard_ = std::move(guard);
+  }
 }
 
 BumpOnlyDeviceNodeAllocator::~BumpOnlyDeviceNodeAllocator() = default;
@@ -45,8 +76,16 @@ BumpOnlyDeviceNodeAllocator::~BumpOnlyDeviceNodeAllocator() = default;
 DeviceAllocation BumpOnlyDeviceNodeAllocator::pool_buffer() const {
   // 当前实现把池放在 root_buffer 子区间，所以「pool_buffer」就是 root_buffer
   // alloc 自身；codegen 端通过 spirv_contract() 拿到子区间偏移做 indexing。
-  // 未来若改为独立 buffer 实现，仅需改这里返回独立 alloc 即可，外部接口不变。
+  // B-3.b (2026-05): 开独立池后返回独立 DeviceAllocation；但 B-3.b 阶段
+  // codegen 未切过来，实际返回哪个不影响运行为。
+  if (independent_pool_guard_) {
+    return *independent_pool_guard_;
+  }
   return params_.root_buffer_alloc;
+}
+
+DeviceAllocation *BumpOnlyDeviceNodeAllocator::independent_pool_alloc() const {
+  return independent_pool_guard_ ? independent_pool_guard_.get() : nullptr;
 }
 
 void BumpOnlyDeviceNodeAllocator::clear_all(CommandList *cmd) {

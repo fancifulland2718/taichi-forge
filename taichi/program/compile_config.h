@@ -140,6 +140,12 @@ struct CompileConfig {
   bool vulkan_pointer_ambient_zone{true};
   bool vulkan_pointer_cas_marker{true};
   double vulkan_pointer_pool_fraction{1.0};
+  // B-3.b (2026-05): 当 SNodeTree 内恰好 1 个 pointer SNode 时，把该 pointer 的
+  // pool 元数据切到独立 NodeAllocatorPool descriptor binding（B-3.b 仅做 plumbing：
+  // 申请独立 DeviceAllocation + 注册 input_buffer，codegen 仍读 root_buffer 子区
+  // 间，行为字节等价）。多 pointer / 嵌套 pointer 自动回退 root。默认 false 与历史
+  // 行为字节等价。详见 compile_doc/SNode_Vulkan_规划.md §10.4.2 B-3.b。
+  bool vulkan_pointer_independent_pool{false};
   int max_vector_width;
   bool print_preprocessed_ir;
   bool print_ir;

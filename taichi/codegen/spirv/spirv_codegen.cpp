@@ -66,6 +66,10 @@ std::string buffer_instance_name(BufferInfo b) {
     case BufferType::ArgPack:
       return std::string(kArgPackBufferName) + "_" +
              fmt::format("{}", fmt::join(b.root_id, "_"));
+    case BufferType::NodeAllocatorPool:
+      // B-3.a: stable name; the actual binding is unused until B-3.b.
+      return std::string("node_pool_") +
+             fmt::format("{}", fmt::join(b.root_id, "_"));
     default:
       TI_NOT_IMPLEMENTED;
       break;
@@ -407,7 +411,10 @@ class TaskCodegen : public IRVisitor {
       }
       if (out_snode->is_place()) {
         TI_ASSERT(ptr_to_buffers_.count(stmt) == 0);
-        ptr_to_buffers_[stmt] = BufferInfo(BufferType::Root, root);
+        // B-3.c-2: leaves under a pointer ancestor live in that pointer's
+        // independent pool buffer (when independent_pool=ON); otherwise
+        // root_buffer (OFF default, byte-equal).
+        ptr_to_buffers_[stmt] = container_buffer_info(out_snode, root);
       }
       return;
     }
@@ -430,7 +437,8 @@ class TaskCodegen : public IRVisitor {
           phys_uint_stype, static_cast<uint64_t>(member_bit_off));
       if (out_snode->is_place()) {
         TI_ASSERT(ptr_to_buffers_.count(stmt) == 0);
-        ptr_to_buffers_[stmt] = BufferInfo(BufferType::Root, root);
+        // B-3.c-2: see container_buffer_info note above.
+        ptr_to_buffers_[stmt] = container_buffer_info(out_snode, root);
       }
       return;
     }
@@ -441,7 +449,8 @@ class TaskCodegen : public IRVisitor {
 
     if (out_snode->is_place()) {
       TI_ASSERT(ptr_to_buffers_.count(stmt) == 0);
-      ptr_to_buffers_[stmt] = BufferInfo(BufferType::Root, root);
+      // B-3.c-2: see container_buffer_info note above.
+      ptr_to_buffers_[stmt] = container_buffer_info(out_snode, root);
     }
     // G9.3b: BitStructStoreStmt's `ptr` is a GetChStmt(dense -> bit_struct)
     // (or its forwarding SNodeLookupStmt). The bit_struct itself is not a
@@ -449,11 +458,38 @@ class TaskCodegen : public IRVisitor {
     // at_buffer() can locate the root buffer in the BitStructStoreStmt
     // visitor.
     if (out_snode->type == SNodeType::bit_struct) {
-      ptr_to_buffers_[stmt] = BufferInfo(BufferType::Root, root);
+      // B-3.c-2: bit_struct under a pointer ancestor uses that pool buffer.
+      ptr_to_buffers_[stmt] = container_buffer_info(out_snode, root);
     }
   }
 
   enum class ActivationOp { activate, deactivate, query };
+
+  // B-3.c-2（2026-05）：返回一个 byte_offset 用于寻址 `sn` 容器（slot 表 /
+  // bitmask 字 / dynamic length / cell 数据）时所在的 buffer。当 sn 有最近
+  // pointer 祖先且该祖先 pool_buffer_binding_id>=0 时，sn 的容器位于该
+  // pointer 的独立 NodeAllocatorPool buffer；否则位于 root buffer。OFF
+  // 默认所有 pointer.binding_id==-1，结果总是 (Root, root_id)，行为字节
+  // 等价旧路径。
+  BufferInfo container_buffer_info(const SNode *sn, int root_id) {
+    for (auto *p = sn ? sn->parent : nullptr; p != nullptr; p = p->parent) {
+      if (p->type == SNodeType::pointer) {
+        const auto &cs = compiled_structs_[root_id];
+        auto it = cs.pointer_contracts.find(p->id);
+        if (it != cs.pointer_contracts.end() &&
+            it->second.pool_buffer_binding_id >= 0) {
+          return BufferInfo(BufferType::NodeAllocatorPool,
+                            it->second.pool_buffer_binding_id);
+        }
+      }
+    }
+    return BufferInfo(BufferType::Root, root_id);
+  }
+
+  spirv::Value container_buffer_value(const SNode *sn, int root_id) {
+    return get_buffer_value(container_buffer_info(sn, root_id),
+                            PrimitiveType::u32);
+  }
 
   spirv::Value bitmasked_activation(ActivationOp op,
                                     spirv::Value parent_ptr,
@@ -473,8 +509,10 @@ class TaskCodegen : public IRVisitor {
     auto bitmask_mask = ir_->make_value(spv::OpShiftLeftLogical, ptr_dt,
                                         ir_->const_i32_one_, bitmask_bit_index);
 
-    auto buffer = get_buffer_value(BufferInfo(BufferType::Root, root_id),
-                                   PrimitiveType::u32);
+    // B-3.c-2: bitmasked container lives in the parent's container buffer
+    // (root_buffer when no pointer ancestor; pointer ancestor's pool buffer
+    // otherwise). OFF default has no pointer.binding_id>=0 → root buffer.
+    auto buffer = container_buffer_value(sn, root_id);
     auto bitmask_word_ptr =
         ir_->make_value(spv::OpShiftLeftLogical, ptr_dt, bitmask_word_index,
                         ir_->uint_immediate_number(ir_->u32_type(), 2));
@@ -557,8 +595,21 @@ class TaskCodegen : public IRVisitor {
         compiled_structs_[root_id].pointer_contracts.at(sn->id);
 
     auto u32_t = ir_->u32_type();
-    auto root_buffer = get_buffer_value(BufferInfo(BufferType::Root, root_id),
-                                        PrimitiveType::u32);
+    // B-3.c-2（2026-05）：parent_byte_offset 寻址在 sn 的容器 buffer 里
+    // （= sn 最近 pointer 祖先的独立池，或 root）。OFF 默认无 pointer 祖
+    // 先有 binding_id>=0，等价于 root buffer。变量名保留 root_buffer 以
+    // 减小本次 diff，但实际语义为 "parent container buffer"。
+    auto root_buffer = container_buffer_value(sn, root_id);
+    // B-3.c-1（2026-05）：sn 自身池的元数据 + pool_data + ambient 在 ON
+    // 时位于 sn 自身的独立 NodeAllocatorPool buffer（B-3.c-2 把
+    // pool_data + ambient 一并移入）；OFF 时退化为 root buffer。
+    auto pool_meta_buffer =
+        contract.pool_buffer_binding_id >= 0
+            ? get_buffer_value(
+                  BufferInfo(BufferType::NodeAllocatorPool,
+                             contract.pool_buffer_binding_id),
+                  PrimitiveType::u32)
+            : root_buffer;
 
     auto idx_u32 = ir_->cast(u32_t, index_u32);
     auto slot_ptr =
@@ -624,7 +675,7 @@ class TaskCodegen : public IRVisitor {
       auto wm_word_idx = ir_->uint_immediate_number(
           u32_t, contract.watermark_offset_in_root / 4u);
       auto wm_ptr =
-          ir_->struct_array_access(u32_t, root_buffer, wm_word_idx);
+          ir_->struct_array_access(u32_t, pool_meta_buffer, wm_word_idx);
       // Outputs of the winner block, joined into the alloc_done OpPhi:
       //   new_slot                  -- the slot value to publish
       //   winner_terminator_label   -- block whose terminator branches to
@@ -660,7 +711,7 @@ class TaskCodegen : public IRVisitor {
         auto fhead_word_idx = ir_->uint_immediate_number(
             u32_t, contract.freelist_head_offset_in_root / 4u);
         auto fhead_ptr =
-            ir_->struct_array_access(u32_t, root_buffer, fhead_word_idx);
+            ir_->struct_array_access(u32_t, pool_meta_buffer, fhead_word_idx);
         auto flinks_word_base = ir_->uint_immediate_number(
             u32_t, contract.freelist_links_offset_in_root / 4u);
 
@@ -692,7 +743,7 @@ class TaskCodegen : public IRVisitor {
             ir_->sub(fhead_cur, ir_->uint_immediate_number(u32_t, 1));
         auto link_word_idx = ir_->add(flinks_word_base, fhead_node);
         auto link_ptr =
-            ir_->struct_array_access(u32_t, root_buffer, link_word_idx);
+            ir_->struct_array_access(u32_t, pool_meta_buffer, link_word_idx);
         auto fhead_next =
             ir_->make_value(spv::OpAtomicLoad, u32_t, link_ptr,
                             /*scope=*/ir_->const_i32_one_,
@@ -826,7 +877,7 @@ class TaskCodegen : public IRVisitor {
       auto wm_word_idx = ir_->uint_immediate_number(
           u32_t, contract.watermark_offset_in_root / 4u);
       auto wm_ptr =
-          ir_->struct_array_access(u32_t, root_buffer, wm_word_idx);
+          ir_->struct_array_access(u32_t, pool_meta_buffer, wm_word_idx);
       auto old_wm = ir_->make_value(spv::OpAtomicIAdd, u32_t, wm_ptr,
                                     /*scope=*/ir_->const_i32_one_,
                                     /*semantics=*/ir_->const_i32_zero_,
@@ -906,8 +957,8 @@ class TaskCodegen : public IRVisitor {
                                  const SNode *sn,
                                  spirv::Value index_u32) {
     auto u32_t = ir_->u32_type();
-    auto root_buffer = get_buffer_value(BufferInfo(BufferType::Root, root_id),
-                                        PrimitiveType::u32);
+    // B-3.c-2: parent's container buffer; OFF default = root.
+    auto root_buffer = container_buffer_value(sn, root_id);
     auto idx_u32 = ir_->cast(u32_t, index_u32);
     auto slot_ptr =
         pointer_slot_ptr(root_buffer, parent_byte_offset, idx_u32);
@@ -927,8 +978,17 @@ class TaskCodegen : public IRVisitor {
     const auto &contract =
         compiled_structs_[root_id].pointer_contracts.at(sn->id);
     auto u32_t = ir_->u32_type();
-    auto root_buffer = get_buffer_value(BufferInfo(BufferType::Root, root_id),
-                                        PrimitiveType::u32);
+    // B-3.c-2: parent's container buffer; OFF default = root.
+    auto root_buffer = container_buffer_value(sn, root_id);
+    // B-3.c-1/c-2：sn 自身池的元数据 (freelist) 在 ON 时走 sn 自己的
+    // NodeAllocatorPool buffer；slot_ptr 走 parent 的容器 buffer。
+    auto pool_meta_buffer =
+        contract.pool_buffer_binding_id >= 0
+            ? get_buffer_value(
+                  BufferInfo(BufferType::NodeAllocatorPool,
+                             contract.pool_buffer_binding_id),
+                  PrimitiveType::u32)
+            : root_buffer;
     auto idx_u32 = ir_->cast(u32_t, index_u32);
     auto slot_ptr =
         pointer_slot_ptr(root_buffer, parent_byte_offset, idx_u32);
@@ -966,7 +1026,7 @@ class TaskCodegen : public IRVisitor {
       auto fhead_word_idx = ir_->uint_immediate_number(
           u32_t, contract.freelist_head_offset_in_root / 4u);
       auto fhead_ptr =
-          ir_->struct_array_access(u32_t, root_buffer, fhead_word_idx);
+          ir_->struct_array_access(u32_t, pool_meta_buffer, fhead_word_idx);
       auto flinks_word_base = ir_->uint_immediate_number(
           u32_t, contract.freelist_links_offset_in_root / 4u);
 
@@ -1008,7 +1068,7 @@ class TaskCodegen : public IRVisitor {
           ir_->sub(old_slot, ir_->uint_immediate_number(u32_t, 1));
       auto link_word_idx = ir_->add(flinks_word_base, old_node);
       auto link_ptr =
-          ir_->struct_array_access(u32_t, root_buffer, link_word_idx);
+          ir_->struct_array_access(u32_t, pool_meta_buffer, link_word_idx);
       // Stage links[old_node] = head before the CAS publishes the new head.
       ir_->make_inst(spv::OpAtomicStore, link_ptr,
                      /*scope=*/ir_->const_i32_one_,
@@ -1095,8 +1155,8 @@ class TaskCodegen : public IRVisitor {
       const auto &snode_descs = compiled_structs_[root_id].snode_descriptors;
       const auto &desc = snode_descs.at(stmt->snode->id);
       auto u32_t = ir_->u32_type();
-      auto root_buffer = get_buffer_value(BufferInfo(BufferType::Root, root_id),
-                                          PrimitiveType::u32);
+      // B-3.c-2: dynamic 容器（含 length 后缀）位于 parent's container buffer。
+      auto root_buffer = container_buffer_value(stmt->snode, root_id);
       auto len_byte_off = ir_->add(
           parent_val,
           ir_->uint_immediate_number(
@@ -3109,6 +3169,29 @@ class TaskCodegen : public IRVisitor {
 
     auto u32_t = ir_->u32_type();
 
+    // B-3.c-2（2026-05）：listgen 全扫描在不同 level 上访问的容器可能位于
+    // 不同 buffer——每跨过一个 pointer SNode（且其 binding_id>=0），后续
+    // level 的 slot/mask/length 都从该 pointer 自己的独立池 buffer 读。
+    // OFF 默认所有 binding_id==-1，level_buffers 全等于 root_buffer，行为
+    // 字节等价旧路径。
+    std::vector<spirv::Value> level_buffers((size_t)n);
+    {
+      spirv::Value cur = root_buffer;
+      for (int k = 0; k < n; ++k) {
+        level_buffers[(size_t)k] = cur;
+        if (path[k]->type == SNodeType::pointer) {
+          const auto &c =
+              compiled_structs_[root_id].pointer_contracts.at(path[k]->id);
+          if (c.pool_buffer_binding_id >= 0) {
+            cur = get_buffer_value(
+                BufferInfo(BufferType::NodeAllocatorPool,
+                           c.pool_buffer_binding_id),
+                PrimitiveType::u32);
+          }
+        }
+      }
+    }
+
     auto gid = ir_->cast(u32_t, ir_->get_global_invocation_id(0));
     auto num_cells_const = ir_->uint_immediate_number(u32_t, total_cells);
 
@@ -3186,7 +3269,7 @@ class TaskCodegen : public IRVisitor {
             spv::OpShiftRightLogical, u32_t, slot_byte_addr,
             ir_->uint_immediate_number(u32_t, 2));
         auto slot_ptr =
-            ir_->struct_array_access(u32_t, root_buffer, slot_word_idx);
+            ir_->struct_array_access(u32_t, level_buffers[(size_t)k], slot_word_idx);
         auto slot_value = ir_->load_variable(slot_ptr, u32_t);
         // active &= (slot != 0)
         auto is_zero = ir_->make_value(
@@ -3220,7 +3303,7 @@ class TaskCodegen : public IRVisitor {
             spv::OpShiftRightLogical, u32_t, word_byte_addr,
             ir_->uint_immediate_number(u32_t, 2));
         auto word_ptr =
-            ir_->struct_array_access(u32_t, root_buffer, word_u32_idx);
+            ir_->struct_array_access(u32_t, level_buffers[(size_t)k], word_u32_idx);
         auto mask_word = ir_->load_variable(word_ptr, u32_t);
         auto bit_idx = ir_->make_value(
             spv::OpBitwiseAnd, u32_t, i_path[k],
@@ -3243,7 +3326,7 @@ class TaskCodegen : public IRVisitor {
             spv::OpShiftRightLogical, u32_t, len_byte_off,
             ir_->uint_immediate_number(u32_t, 2));
         auto len_ptr =
-            ir_->struct_array_access(u32_t, root_buffer, len_word_idx);
+            ir_->struct_array_access(u32_t, level_buffers[(size_t)k], len_word_idx);
         auto len_val = ir_->make_value(
             spv::OpAtomicLoad, u32_t, len_ptr,
             /*scope=*/ir_->const_i32_one_,

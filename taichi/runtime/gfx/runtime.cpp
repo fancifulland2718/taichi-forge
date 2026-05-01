@@ -233,6 +233,14 @@ CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
     BufferInfo buffer = {BufferType::Root, root};
     input_buffers_[buffer] = ti_params.root_buffers[root];
   }
+#if defined(TI_WITH_VULKAN_POINTER)
+  // B-3.b (2026-05): 注册独立 NodeAllocatorPool buffer。key 中 root_id[0] = sid。
+  // OFF 默认该 vector 为空，与历史 input_buffers_ 内容字节等价。
+  for (const auto &[sid, alloc] : ti_params.node_allocator_pool_buffers) {
+    BufferInfo buffer = {BufferType::NodeAllocatorPool, sid};
+    input_buffers_[buffer] = alloc;
+  }
+#endif
 
   const auto arg_sz = ti_kernel_attribs_.ctx_attribs.args_bytes();
   const auto ret_sz = ti_kernel_attribs_.ctx_attribs.rets_bytes();
@@ -376,6 +384,24 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
   }
   params.global_tmps_buffer = global_tmps_buffer_.get();
   params.listgen_buffer = listgen_buffer_.get();
+#if defined(TI_WITH_VULKAN_POINTER)
+  // B-3.b (2026-05): 枚举所有独立 pool buffer。allocator->independent_pool_alloc()
+  // 返回 nullptr 表示该 SNode 仍走 root_buffer 子区间（在 vector 中跳过）。
+  for (const auto &[rid, sid_to_alloc] : node_allocators_) {
+    (void)rid;
+    for (const auto &[sid, allocator_ptr] : sid_to_alloc) {
+      auto *bump = dynamic_cast<BumpOnlyDeviceNodeAllocator *>(
+          allocator_ptr.get());
+      if (bump == nullptr) {
+        continue;
+      }
+      DeviceAllocation *indep = bump->independent_pool_alloc();
+      if (indep != nullptr) {
+        params.node_allocator_pool_buffers.emplace_back(sid, indep);
+      }
+    }
+  }
+#endif
   params.backend_cache = backend_cache_.get();
 
   for (int i = 0; i < reg_params.task_spirv_source_codes.size(); ++i) {

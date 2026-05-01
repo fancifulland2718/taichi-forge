@@ -117,6 +117,12 @@ class BumpOnlyDeviceNodeAllocator final : public DeviceNodeAllocator {
                            AllocProtocol::CasMarker};
     double pool_fraction{1.0};
     DeviceAllocation root_buffer_alloc;
+    // B-3.b (2026-05): 当 use_independent_pool=true 时，构造器会额外申请
+    // 一块 independent_pool_size 字节的独立 DeviceAllocation。B-3.b 阶段
+    // codegen 仍读 root_buffer，独立 buffer 仅被注册到 input_buffers_ 供
+    // descriptor binding 使用，实际上是 dead allocation（B-3.c 切 codegen）。
+    bool use_independent_pool{false};
+    std::size_t independent_pool_size{0};
   };
 
   explicit BumpOnlyDeviceNodeAllocator(const Params &p);
@@ -130,8 +136,15 @@ class BumpOnlyDeviceNodeAllocator final : public DeviceNodeAllocator {
   void clear_all(CommandList *cmd) override;
   SpirvAllocatorContract spirv_contract() const override;
 
+  // B-3.b (2026-05): 返回独立 pool DeviceAllocation 指针供 runtime 注入
+  // descriptor set；nullptr = 未开独立池（走 root_buffer 子区间）。
+  DeviceAllocation *independent_pool_alloc() const;
+
  private:
   Params params_;
+  // B-3.b: 独立 pool DeviceAllocation。use_independent_pool=false 时为
+  // nullptr，pool_buffer() 返回 root_buffer_alloc（与 B-1/B-2 行为一致）。
+  std::unique_ptr<DeviceAllocationGuard> independent_pool_guard_;
 };
 
 // 工厂：路线切换的唯一入口（未来 freelist 实现也走这里）
