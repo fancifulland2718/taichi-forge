@@ -1385,8 +1385,17 @@ void TaskCodeGenLLVM::visit(SNodeOpStmt *stmt) {
   } else if (stmt->op_type == SNodeOpType::deactivate) {
     if (snode->type == SNodeType::pointer || snode->type == SNodeType::hash ||
         snode->type == SNodeType::bitmasked) {
+      // G11-A (2026-05): bitmasked + opt-in flag → 路由到清 data slot 的变体
+      // 函数（runtime 中 Bitmasked_deactivate_and_clear）。其他 SNode 类型
+      // 维持 vanilla 行为（pointer 走 NodeManager gc 自带 memset；hash
+      // 暂未发现真实场景）。
+      const char *method = "deactivate";
+      if (snode->type == SNodeType::bitmasked &&
+          compile_config.bitmasked_clear_data_on_deactivate) {
+        method = "deactivate_and_clear";
+      }
       llvm_val[stmt] =
-          call(snode, llvm_val[stmt->ptr], "deactivate", {llvm_val[stmt->val]});
+          call(snode, llvm_val[stmt->ptr], method, {llvm_val[stmt->val]});
     } else if (snode->type == SNodeType::dynamic) {
       llvm_val[stmt] = call(snode, llvm_val[stmt->ptr], "deactivate", {});
     }

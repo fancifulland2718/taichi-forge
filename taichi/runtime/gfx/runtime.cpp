@@ -74,7 +74,17 @@ class HostDeviceContextBlitter {
                                         });
           TI_ASSERT(access_it != ctx_attribs_->arr_access.end());
           uint32_t access = uint32_t(access_it->second);
-          if (access & uint32_t(irpass::ExternalPtrAccess::READ)) {
+          // Bug B/C fix (forge 2026-05): always blit host→device for ext
+          // arrs regardless of ExternalPtrAccess flag. The previous READ-only
+          // optimization left WRITE-only device buffers uninitialized with
+          // recycled GPU memory; for kernels whose struct-for over a sparse
+          // SNode only writes a subset of cells (e.g. tensor_to_ext_arr from
+          // to_numpy on bitmasked/pointer fields after deactivate), the
+          // unwritten cells leaked stale data back to the user. The host
+          // ndarray (e.g. np.zeros from to_numpy) is the user's contract for
+          // the initial state of the buffer; device buffer must match it.
+          (void)access;
+          {
             DeviceAllocation buffer = ext_arrays.at(indices);
             void *device_arr_ptr{nullptr};
             TI_ASSERT(device_->map(buffer, &device_arr_ptr) ==
@@ -562,7 +572,14 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
           uint32_t access = uint32_t(access_it->second);
           // Alloc ext arr
           size_t alloc_size = std::max(size_t(32), ext_array_size.at(indices));
-          bool host_write = access & uint32_t(irpass::ExternalPtrAccess::READ);
+          // Bug B/C fix (forge 2026-05): host_write must be true regardless
+          // of the kernel's READ/WRITE access pattern, because we now always
+          // blit host→device for ext arrs (see host_to_device above) and the
+          // buffer therefore must be host-visible. The previous code keyed
+          // host_write off the READ flag, but mis-named it host_write — it's
+          // really "host-can-map".
+          (void)access;
+          bool host_write = true;
           auto [allocated, res] = device_->allocate_memory_unique(
               {alloc_size, host_write, false, /*export_sharing=*/false,
                AllocUsage::Storage});
@@ -657,10 +674,18 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     if (attribs.task_type == OffloadedTaskType::listgen) {
       for (auto &bind : attribs.buffer_binds) {
         if (bind.buffer.type == BufferType::ListGen) {
-          // FIXME: properlly support multiple list
+          // Bug D fix (forge 2026-05): only zero the count slot (4 bytes
+          // at offset 0), not the entire 32MB listgen buffer. The listgen
+          // kernel writes count via atomic_add starting from 0 and writes
+          // entries to listgen[1 + slot] for each unique slot it claims;
+          // the consuming struct_for only reads listgen[1..count], so any
+          // stale data past `count` is unreachable. Filling the full 32MB
+          // every dispatch was costing ~0.15ms per listgen task on
+          // discrete GPUs (sparse warm 0.785 -> 0.539 ms expected).
+          // FIXME: properly support multiple lists at distinct offsets.
           current_cmdlist_->buffer_fill(
               ti_kernel->get_buffer_bind(bind.buffer)->get_ptr(0),
-              kBufferSizeEntireSize,
+              /*size=*/sizeof(uint32_t),
               /*data=*/0);
           current_cmdlist_->buffer_barrier(
               *ti_kernel->get_buffer_bind(bind.buffer));

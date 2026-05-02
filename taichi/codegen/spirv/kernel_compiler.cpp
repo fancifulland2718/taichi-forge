@@ -69,6 +69,9 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   // V8.b: anti-double-pool — when the surrounding compile_kernels outer
   // pool is active, suppress this inner per-task fan-out.
   params.compile_dag_scheduler = compile_config.compile_dag_scheduler;
+  // G11-A (2026-05): bitmasked deactivate clears data slot opt-in.
+  params.bitmasked_clear_data_on_deactivate =
+      compile_config.bitmasked_clear_data_on_deactivate;
   spirv::KernelCodegen codegen(params);
   spirv::CompiledKernelData::InternalData internal_data;
   codegen.run(internal_data.metadata.kernel_attribs,

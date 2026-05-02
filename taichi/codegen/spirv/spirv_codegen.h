@@ -59,6 +59,11 @@ class KernelCodegen {
     // flags must be enabled to get the V2 inner pool, and the inner pool
     // is bypassed only when the outer pool is active.
     bool compile_dag_scheduler{false};
+    // G11-A (2026-05): mirror of CompileConfig::bitmasked_clear_data_on_deactivate.
+    // 当 true 时 TaskCodegen 在 SNodeOpType::deactivate(bitmasked) 路径上
+    // 多发射一段「if (was_active) memset(cell, 0)」序列。改变 SPIR-V 输出，
+    // 已通过 offline_cache_util.cpp 进入 cache key。
+    bool bitmasked_clear_data_on_deactivate{false};
   };
 
   explicit KernelCodegen(const Params &params);
