@@ -187,6 +187,20 @@ struct CompileConfig {
   //   `capacity >= worst_capacity && allocator_kind == "bump"`，不满足时强制
   //   降级到 cas_marker 路径（与本节落地前字节等价）。设 false 也可整体降级。
   bool vulkan_pointer_deterministic_slot{true};
+  // G11-A (2026-05): bitmasked SNode 在 deactivate 时是否同时把 cell 的 data
+  // slot 清零。默认 true != vanilla 1.7.4 / taichi-dev 行为（仅翻 mask 位，
+  // 不动 data；下次 activate 看到的是上次写入的旧值）。设为 true 后，
+  // deactivate 路径上**唯一翻 1→0 的线程**（atomic_and 旧值的 bit==1）会
+  // 额外把 `node + element_size * i` 处的 element_size 字节 memset 0。
+  // 这与 dense 的"零初始化"语义对齐，也对齐 OpenVDB / NanoVDB 的
+  // setValueOff → background_value(0) 约定，使 `parent.deactivate_all()
+  // → 重 activate → += dx` 这种典型 sparse 累加 workload 在 sparse 与
+  // dense 上得到等价结果。
+  // 只覆盖 bitmasked SNode；pointer SNode 的 LLVM 后端已通过 NodeManager
+  // gc 的 memset 自动满足；SPIR-V pointer 的 deterministic-slot 语义不在
+  // 本字段范围（详见 SNode_Vulkan_规划.md §15.4）。
+  // 进入 cache key（offline_cache_util.cpp）。
+  bool bitmasked_clear_data_on_deactivate{true};
   int max_vector_width;
   bool print_preprocessed_ir;
   bool print_ir;

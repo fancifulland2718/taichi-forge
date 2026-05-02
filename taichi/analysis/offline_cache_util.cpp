@@ -128,6 +128,10 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
     // C-9 (2026-05): deterministic_slot 改变 alloc 协议（idx_u32+1 直写
     // vs CasMarker 抢占），必须进入 cache key。详见规划 §14。
     serializer(config.vulkan_pointer_deterministic_slot);
+    // G11-A (2026-05): bitmasked deactivate 是否清 data slot。改变
+    // codegen（LLVM 改调函数名、SPIR-V 多发射条件 memset），必须进
+    // cache key。默认 false 保持哈希稳定。
+    serializer(config.bitmasked_clear_data_on_deactivate);
   }
   serializer.finalize();
 

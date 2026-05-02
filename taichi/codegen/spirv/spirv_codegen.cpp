@@ -87,6 +87,8 @@ class TaskCodegen : public IRVisitor {
     const KernelContextAttributes *ctx_attribs;
     std::string ti_kernel_name;
     int task_id_in_kernel;
+    // G11-A (2026-05): bitmasked deactivate 清 data slot 开关。
+    bool bitmasked_clear_data_on_deactivate{false};
   };
 
   const bool use_64bit_pointers = false;
@@ -99,7 +101,9 @@ class TaskCodegen : public IRVisitor {
         ctx_attribs_(params.ctx_attribs),
         task_name_(fmt::format("{}_t{:02d}",
                                params.ti_kernel_name,
-                               params.task_id_in_kernel)) {
+                               params.task_id_in_kernel)),
+        bitmasked_clear_data_on_deactivate_(
+            params.bitmasked_clear_data_on_deactivate) {
     allow_undefined_visitor = true;
     invoke_default_visitor = true;
 
@@ -1221,8 +1225,64 @@ class TaskCodegen : public IRVisitor {
         is_active = ir_->make_value(spv::OpSNegate, is_active.stype, is_active);
         ir_->register_value(stmt->raw_name(), is_active);
       } else if (stmt->op_type == SNodeOpType::deactivate) {
-        bitmasked_activation(ActivationOp::deactivate, parent_val, root_id,
-                             stmt->snode, input_index_val);
+        spirv::Value prev_word = bitmasked_activation(
+            ActivationOp::deactivate, parent_val, root_id, stmt->snode,
+            input_index_val);
+        if (bitmasked_clear_data_on_deactivate_) {
+          // G11-A: emit "if I am the unique 1->0 flipper, memset cell=0".
+          // OpAtomicAnd 返回 pre-AND 旧 word；旧 word 中我的 bit==1 即唯一
+          // 翻位者。memset 序列对外部读者无可见 race：mask 翻 0 后
+          // is_active=false，runtime 路径不再 sample 该 cell。
+          auto u32_t = ir_->u32_type();
+          auto idx_u32 = ir_->cast(u32_t, input_index_val);
+          auto bit_idx =
+              ir_->make_value(spv::OpBitwiseAnd, u32_t, idx_u32,
+                              ir_->uint_immediate_number(u32_t, 31));
+          auto bit_mask = ir_->make_value(
+              spv::OpShiftLeftLogical, u32_t,
+              ir_->uint_immediate_number(u32_t, 1), bit_idx);
+          auto and_v =
+              ir_->make_value(spv::OpBitwiseAnd, u32_t, prev_word, bit_mask);
+          auto was_active =
+              ir_->ne(and_v, ir_->uint_immediate_number(u32_t, 0));
+
+          spirv::Label clear_lbl = ir_->new_label();
+          spirv::Label merge_lbl = ir_->new_label();
+          ir_->make_inst(spv::OpSelectionMerge, merge_lbl,
+                         spv::SelectionControlMaskNone);
+          ir_->make_inst(spv::OpBranchConditional, was_active, clear_lbl,
+                         merge_lbl);
+          ir_->start_label(clear_lbl);
+
+          const auto &snode_descs =
+              compiled_structs_[root_id].snode_descriptors;
+          const auto &desc = snode_descs.at(stmt->snode->id);
+          const uint32_t cell_stride =
+              static_cast<uint32_t>(desc.cell_stride);
+          TI_ASSERT_INFO(
+              cell_stride % 4 == 0,
+              "bitmasked_clear_data_on_deactivate requires 4-byte aligned "
+              "cell_stride; got {} for snode id={}",
+              cell_stride, stmt->snode->id);
+          auto buffer = container_buffer_value(stmt->snode, root_id);
+          auto cell_byte_off = ir_->mul(
+              idx_u32, ir_->uint_immediate_number(u32_t, cell_stride));
+          cell_byte_off = ir_->add(parent_val, cell_byte_off);
+          auto zero_v = ir_->uint_immediate_number(u32_t, 0);
+          const uint32_t num_words = cell_stride / 4u;
+          for (uint32_t w = 0; w < num_words; ++w) {
+            auto wbyte = ir_->add(
+                cell_byte_off,
+                ir_->uint_immediate_number(u32_t, w * 4u));
+            auto windex = ir_->make_value(
+                spv::OpShiftRightLogical, u32_t, wbyte,
+                ir_->uint_immediate_number(u32_t, 2));
+            auto wptr = ir_->struct_array_access(u32_t, buffer, windex);
+            ir_->store_variable(wptr, zero_v);
+          }
+          ir_->make_inst(spv::OpBranch, merge_lbl);
+          ir_->start_label(merge_lbl);
+        }
       } else if (stmt->op_type == SNodeOpType::activate) {
         bitmasked_activation(ActivationOp::activate, parent_val, root_id,
                              stmt->snode, input_index_val);
@@ -4763,6 +4823,11 @@ class TaskCodegen : public IRVisitor {
   std::unordered_map<int, int> snode_to_root_;
   const KernelContextAttributes *const ctx_attribs_;  // not owned
   const std::string task_name_;
+  // G11-A (2026-05): mirrored from KernelCodegen::Params; controls whether
+  // SNodeOpType::deactivate on a bitmasked SNode emits an extra "if 1->0
+  // flipper: memset(cell, 0)" sequence after OpAtomicAnd. Default false =
+  // vanilla 1.7.4 / taichi-dev 行为（仅翻 mask 位）。
+  const bool bitmasked_clear_data_on_deactivate_{false};
   std::vector<spirv::Label> continue_label_stack_;
   std::vector<spirv::Label> merge_label_stack_;
 
@@ -5038,6 +5103,8 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
     tp.ti_kernel_name = fmt::format("{}_{}", params_.ti_kernel_name, i);
     tp.arch = params_.arch;
     tp.caps = &params_.caps;
+    tp.bitmasked_clear_data_on_deactivate =
+        params_.bitmasked_clear_data_on_deactivate;
 
     TaskCodegen cgen(tp);
     auto task_res = cgen.run();
