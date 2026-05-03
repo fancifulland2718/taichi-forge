@@ -69,7 +69,16 @@ class FrontendTypeCheck : public IRVisitor {
                           stmt->snode->type != SNodeType::dynamic;
     check_indices(is_cell_access ? stmt->snode : stmt->snode->parent);
     for (int i = 0; i < stmt->indices.size(); i++) {
-      if (!stmt->indices[i]->ret_type->is_primitive(PrimitiveTypeID::i32)) {
+      // G11-A2 (2026-05-03): IndexExpression::type_check 会把 ret_type 包成
+      // pointer（见 frontend_ir.cpp 中 ret_type =
+      // get_pointer_type(ret_type)）。这里走 ptr_removed 取实际元素类型再判
+      // i32，避免对 `for I in grouped(b): deactivate(b, I)` 这类
+      // 自动生成的 kernel（_kernels.snode_deactivate）误报
+      // "Field index N not int32"。真实的非 i32 用户索引（i64/f32 等）
+      // 走 ptr_removed 后仍非 i32，警告依旧会触发。
+      if (!stmt->indices[i]
+               ->ret_type.ptr_removed()
+               ->is_primitive(PrimitiveTypeID::i32)) {
         ErrorEmitter(
             TaichiCastWarning(), stmt,
             fmt::format(

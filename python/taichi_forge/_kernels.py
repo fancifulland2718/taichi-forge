@@ -267,6 +267,27 @@ def snode_deactivate(b: template()):
         deactivate(b, I)
 
 
+# G11-D2 (P-Vulkan-Sparse-Deact-Merge): fused two-level deactivate.
+#
+# Background: `SNode.deactivate_all()` on a pointer with a bitmasked child
+# (the canonical sparse layout) post-order recurses, issuing two separate
+# Python @kernel calls — one per sparse SNode. On Vulkan each Python kernel
+# call is a separate vk command-buffer submit, so per-frame `deactivate_all`
+# pays double submit overhead (~0.13 ms each on RTX-class HW). Fusing both
+# struct-fors into a single @kernel keeps them as two offloads but only one
+# command-buffer submit; the inter-offload pipeline barrier already preserves
+# child→parent ordering (child mask cleared before parent slot freed).
+#
+# Used by `SNode.deactivate_all` fast-path when self and its single child are
+# both sparse (pointer/bitmasked) and the grandchildren are only `place`.
+@kernel
+def snode_deactivate_pair(parent: template(), child: template()):
+    for I in grouped(child):
+        deactivate(child, I)
+    for J in grouped(parent):
+        deactivate(parent, J)
+
+
 @kernel
 def snode_deactivate_dynamic(b: template()):
     for I in grouped(b.parent()):

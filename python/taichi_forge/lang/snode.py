@@ -318,10 +318,34 @@ class SNode:
 
     def deactivate_all(self):
         """Recursively deactivate all children components of `self`."""
+        SNodeType = _ti_core.SNodeType
+        # G11-D2 (P-Vulkan-Sparse-Deact-Merge): fast-path for the canonical
+        # two-level sparse layout (pointer→bitmasked, or any pointer/bitmasked
+        # parent with a single pointer/bitmasked child whose grandchildren are
+        # only `place`). The recursive default issues two separate Python
+        # @kernel calls = two vk command-buffer submits per `deactivate_all`,
+        # and Vulkan submit overhead alone is ~0.13 ms on RTX-class HW. Fusing
+        # them into one `@kernel` keeps the two struct-fors as two offloads
+        # but only one submit; the inter-offload pipeline barrier preserves
+        # child-mask-cleared-before-parent-slot-freed ordering.
+        if self.ptr.type in (SNodeType.pointer, SNodeType.bitmasked):
+            ch = self._get_children()
+            if (
+                len(ch) == 1
+                and ch[0].ptr.type in (SNodeType.pointer, SNodeType.bitmasked)
+                and all(g.ptr.type == SNodeType.place for g in ch[0]._get_children())
+            ):
+                from taichi_forge._kernels import (  # pylint: disable=C0415
+                    snode_deactivate_pair,
+                )
+
+                snode_deactivate_pair(self, ch[0])
+                return
+        # Fallback: original recursive path (covers >2 sparse layers, dynamic,
+        # mixed dense/sparse trees, etc.).
         ch = self._get_children()
         for c in ch:
             c.deactivate_all()
-        SNodeType = _ti_core.SNodeType
         if self.ptr.type == SNodeType.pointer or self.ptr.type == SNodeType.bitmasked:
             from taichi_forge._kernels import snode_deactivate  # pylint: disable=C0415
 
