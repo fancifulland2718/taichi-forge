@@ -1,6 +1,6 @@
 # Taichi Forge — Compile, Runtime, Architecture & Modernization Options
 
-> Applies to **Taichi Forge 0.3.0**. Every option listed here is **opt-in**; defaults preserve bit-identical behaviour vs. upstream Taichi 1.7.4.
+> Applies to **Taichi Forge 0.3.5**. Every option listed here is **opt-in**; defaults preserve bit-identical behaviour vs. upstream Taichi 1.7.4 unless explicitly noted (the only default-changed surface in 0.3.5 is the CUDA sparse-pool sizing path, see §2.6).
 >
 > 中文版：[forge_options.zh.md](forge_options.zh.md)
 
@@ -69,6 +69,28 @@ All defaults match upstream 1.7.4 unless noted.
 |---|---|---|
 | `offline_cache_l_sem` | (off) | Internal / testing flag, not for production use. |
 | `vulkan_quant_experimental` | `False` | **New in 0.3.0.** When ON, the Vulkan backend accepts `quant_array` / `bit_struct` fields (i.e. `Extension::quant` / `Extension::quant_basic` are reported supported on Vulkan). Supported: `QuantInt` / `QuantFixed` read, write, and concurrent multi-thread `ti.atomic_add` (via SPIR-V `OpAtomicCompareExchange` spin RMW) on `quant_array` and on multi-field `BitpackedFields` / `bit_struct`, byte-equivalent to cpu / cuda. **Explicitly not supported**: `QuantFloat` shared-exponent and the non-add atomic ops (`atomic_min/max/and/or/xor`, identical restriction to the LLVM backend). Unsupported sites raise `TI_NOT_IMPLEMENTED` / `TI_ERROR` rather than silently miscompile. Equivalent env var: `TI_VULKAN_QUANT=1`. |
+
+### 2.6 CUDA sparse memory pool (new in 0.3.5)
+
+The CUDA sparse SNode dynamic-allocation pool is decoupled from `device_memory_GB` and auto-sized by default. Workloads that previously over-provisioned `device_memory_GB` solely to give sparse activation room can now drop it back to the dense requirement.
+
+| Kwarg | Default | Purpose |
+|---|---|---|
+| `cuda_sparse_pool_size_GB` | `0.0` (auto) | Explicit override for the CUDA sparse SNode dynamic-allocation pool. `0` enables auto-sizing from the SNode tree (default), capped by `device_memory_GB`, floored at `cuda_sparse_pool_size_floor_MiB`. Set to a positive float to force a fixed pool size in GiB and bypass auto-sizing. |
+| `cuda_sparse_pool_size_floor_MiB` | `128` | Floor (MiB) for the auto-sized pool. Each `NodeAllocator` chunk is ~16 MiB, so 128 MiB ≈ 8 chunks. Raise to `192` / `256` for sparse workloads with peak working sets > 8 chunks. |
+
+Measured on the validated mpm-shaped 64³ workload (250 step), default CUDA sparse VRAM drops from **1764 MiB (vanilla 1.7.4) → 868 MiB (≈ −51%)** with no change to dense-only workloads or to the Vulkan backend.
+
+`device_memory_fraction > 0` and `cuda_sparse_pool_size_GB > 0` both still bypass auto-sizing and behave exactly as before — no behaviour change for users who already set those knobs.
+
+### 2.7 Sparse struct-for / listgen optimisations (new in 0.3.5)
+
+Both flags default OFF and are bit-identical to the legacy path when off. Enabling them changes generated kernel code (CUDA grid_dim or SPIR-V atomics), and the change is keyed into the offline cache hash.
+
+| Kwarg | Default | Purpose |
+|---|---|---|
+| `spirv_listgen_subgroup_ballot` | `False` | Vulkan/SPIR-V only. Aggregates per-thread `OpAtomicIAdd` into one subgroup-ballot atomic per active subgroup inside the listgen kernel. Reduces atomic contention on dense-active sparse struct-for. Requires the device to support subgroup ballot (the Vulkan adapter advertises this in standard SPIR-V capabilities); otherwise the flag has no effect. |
+| `listgen_static_grid_dim` | `False` | CUDA / AMDGPU only. Launches sparse-listgen kernels with a `grid_dim` derived from the static upper bound on parent-element count (= product of `num_cells_per_container` of strict ancestors of the listed SNode, root excluded), capped by the hardware-saturating value. Eliminates idle blocks on shallow sparse trees. The Vulkan backend already computes the equivalent quantity via task attribs, so this flag is a no-op there. Correctness is preserved by the existing grid-stride loop in `element_listgen_nonroot`. |
 
 ---
 

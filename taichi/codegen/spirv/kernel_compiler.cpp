@@ -72,6 +72,8 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   // G11-A (2026-05): bitmasked deactivate clears data slot opt-in.
   params.bitmasked_clear_data_on_deactivate =
       compile_config.bitmasked_clear_data_on_deactivate;
+  params.listgen_subgroup_ballot =
+      compile_config.spirv_listgen_subgroup_ballot;
   spirv::KernelCodegen codegen(params);
   spirv::CompiledKernelData::InternalData internal_data;
   codegen.run(internal_data.metadata.kernel_attribs,

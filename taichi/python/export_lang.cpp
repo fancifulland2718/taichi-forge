@@ -256,12 +256,20 @@ void export_lang(py::module &m) {
                      &CompileConfig::demote_dense_struct_fors)
       .def_readwrite("spirv_skip_intermediate_listgen",
                      &CompileConfig::spirv_skip_intermediate_listgen)
+      .def_readwrite("spirv_listgen_subgroup_ballot",
+                     &CompileConfig::spirv_listgen_subgroup_ballot)
+      .def_readwrite("listgen_static_grid_dim",
+                     &CompileConfig::listgen_static_grid_dim)
       .def_readwrite("kernel_profiler", &CompileConfig::kernel_profiler)
       .def_readwrite("timeline", &CompileConfig::timeline)
       .def_readwrite("default_fp", &CompileConfig::default_fp)
       .def_readwrite("default_ip", &CompileConfig::default_ip)
       .def_readwrite("default_up", &CompileConfig::default_up)
       .def_readwrite("device_memory_GB", &CompileConfig::device_memory_GB)
+      .def_readwrite("cuda_sparse_pool_size_GB",
+                     &CompileConfig::cuda_sparse_pool_size_GB)
+      .def_readwrite("cuda_sparse_pool_size_floor_MiB",
+                     &CompileConfig::cuda_sparse_pool_size_floor_MiB)
       .def_readwrite("device_memory_fraction",
                      &CompileConfig::device_memory_fraction)
       .def_readwrite("fast_math", &CompileConfig::fast_math)

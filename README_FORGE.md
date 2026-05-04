@@ -61,8 +61,6 @@ Highlights:
 
 📖 **Full usage guide and limitations** (bilingual): [docs/forge/sparse_snode_on_vulkan.en.md](docs/forge/sparse_snode_on_vulkan.en.md) / [docs/forge/sparse_snode_on_vulkan.zh.md](docs/forge/sparse_snode_on_vulkan.zh.md) — covers static-capacity semantics, the `TI_VULKAN_POOL_FRACTION` knob, dynamic-protocol differences, troubleshooting, and the verification matrix.
 
-> ✅ **Both historical Vulkan-sparse stability gaps are now fixed.** The 0.3.0 inactive-read correctness gap (inner-loop reads of inactive sparse cells returning pool-slot-0 data) was fixed in **0.3.1** via the ambient-zone path (CMake `TI_VULKAN_POINTER_AMBIENT_ZONE`, default ON). The 0.3.1 device-lost on 3D pointer full-activation (every cell of a `pointer.*.dense` 3D field first-written within a single frame, then immediately read by a listgen-dependent kernel) is fixed in **0.3.2** via the *C-9 deterministic-slot codegen* path (CompileConfig `vulkan_pointer_deterministic_slot`, default ON): pointer activation collapses to a single `OpAtomicCompareExchange` per outer cell with no spin-loop, byte-eliminating the warp-lockstep deadlock. Manual opt-out is available via `ti.init(vulkan_pointer_deterministic_slot=False)` to fall back to the 0.3.1 CAS-marker path. See the user guide's “Known issues” section for the complete status, fallback conditions, and verification matrix.
-
 📖 **All fork-only knobs** (compile / runtime / architecture / modernization options): [docs/forge/forge_options.en.md](docs/forge/forge_options.en.md) / [docs/forge/forge_options.zh.md](docs/forge/forge_options.zh.md).
 
 > `hash` SNode remains permanently deferred (no real-time physics or rendering pipeline depends on it; see the user guide §6.1 for the survey). `quant_array` / `bit_struct` ship **experimental scaffolding** on Vulkan in 0.3.0 — frontend gate is opt-in via `vulkan_quant_experimental=True`; codegen is incremental. See user guide §7.
@@ -151,6 +149,10 @@ All additions are strictly opt-in; default values preserve bit-identical behavio
 | `spirv_disabled_passes` | `[]` | Per-call disable list for individual `spirv-opt` passes (e.g. `["loop-unroll"]`). |
 | `auto_real_function` | `False` | Auto-promote expensive `@ti.func` instances to `is_real_function=True` (LLVM-only, non-autodiff). |
 | `auto_real_function_threshold_us` | `1000` | Promotion threshold in microseconds of estimated compile cost. |
+| `cuda_sparse_pool_size_GB` | `0.0` (auto) | CUDA-only. Explicit override for the sparse SNode dynamic-allocation pool. `0` enables auto-sizing (default), set to a positive float to force a fixed pool size in GiB. Decoupled from `device_memory_GB` so dense workloads stay unaffected. |
+| `cuda_sparse_pool_size_floor_MiB` | `128` | CUDA-only. Floor (in MiB) for the auto-sized sparse pool when `cuda_sparse_pool_size_GB == 0` and `device_memory_fraction == 0`. Each NodeAllocator chunk is ~16 MiB; raise to e.g. `192` or `256` for sparse workloads with peak working sets > 8 chunks. |
+| `spirv_listgen_subgroup_ballot` | `False` | Vulkan/SPIR-V only. Aggregates the per-thread `OpAtomicIAdd` into one subgroup-ballot atomic per active subgroup in the listgen kernel. Reduces atomic contention on dense-active sparse struct-for. Output SPIR-V differs and is keyed into the offline cache hash. |
+| `listgen_static_grid_dim` | `False` | CUDA / AMDGPU only. Launches sparse-listgen kernels with a grid_dim derived from the static upper bound on parent-element count, eliminating idle blocks on shallow sparse trees. Vulkan already computes the equivalent quantity, so this flag is a no-op for SPIR-V. |
 
 ### Compatibility note
 
@@ -232,7 +234,28 @@ Taichi Forge uses its own SemVer track starting at **0.1.2**. Fork release numbe
 
 ## Release notes
 
-### 0.3.0 (current)
+### 0.3.5 (current) — 2026-05 maintenance
+
+Maintenance line on top of 0.3.0; no public API removals, fully drop-in.
+
+**CUDA sparse memory footprint**
+
+- Default CUDA sparse SNode VRAM usage on the validated mpm-shaped 64³ workload drops from **1764 MiB → 868 MiB (≈ −51%)** versus vanilla 1.7.4 / pre-0.3.5, with no change to dense-only workloads or to Vulkan.
+- New `cuda_sparse_pool_size_GB` `ti.init(...)` kwarg (default `0.0`) decouples the sparse dynamic-allocation pool from `device_memory_GB`. When zero, the pool is auto-sized from the SNode tree, capped at `device_memory_GB`, with a configurable floor (default 128 MiB ≈ 8 NodeAllocator chunks). Workloads that previously over-provisioned the dense path solely to leave headroom for sparse activation can now drop `device_memory_GB` back to dense requirements.
+- New `cuda_sparse_pool_size_floor_MiB` (default `128`) tunes the auto-sizing floor for sparse workloads with peak working sets > 8 chunks.
+- Existing `device_memory_GB` and `device_memory_fraction` semantics are unchanged. Set `cuda_sparse_pool_size_GB` to a positive value to bypass auto-sizing entirely.
+
+**Sparse struct-for performance**
+
+- New `spirv_listgen_subgroup_ballot` knob (Vulkan/SPIR-V, opt-in) — aggregates the per-thread atomic in the listgen kernel into one subgroup-ballot atomic per subgroup, reducing contention on dense-active sparse struct-for. Output SPIR-V is offline-cache-keyed.
+- New `listgen_static_grid_dim` knob (CUDA / AMDGPU, opt-in) — derives sparse-listgen `grid_dim` from the static parent-element upper bound, eliminating idle blocks on shallow sparse trees. No-op on Vulkan (which already computes the equivalent quantity).
+- Both flags default OFF; output is bit-identical to the legacy path with the flag off, and offline-cache-keyed when on.
+
+**Compatibility**
+
+- Public Python and C-API surfaces unchanged versus 0.3.0. Every new knob defaults to upstream/0.3.0 behaviour.
+
+### 0.3.0
 
 First release with **sparse SNode on Vulkan** as a public feature. Inherits the full 0.2.x compile-time, runtime-cache, IR-pass, and dependency-modernization stack (every knob below remains available and bit-identical to 0.2.4 with defaults off).
 

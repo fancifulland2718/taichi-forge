@@ -102,7 +102,12 @@ class LlvmRuntimeExecutor {
 
   void *preallocate_memory(std::size_t prealloc_size,
                            DeviceAllocationUnique &devalloc);
-  void preallocate_runtime_memory();
+  // P-Sparse-Mem-2-A: when override_size > 0, use it as the lazy sparse pool
+  // size instead of the device_memory_GB / cuda_sparse_pool_size_GB knobs.
+  // Used by initialize_llvm_runtime_snodes() to feed an auto-computed size
+  // derived from snode_metas. Default 0 keeps the legacy P-Sparse-Mem-1
+  // behavior intact for callers that don't pass an override.
+  void preallocate_runtime_memory(std::size_t override_size = 0);
 
   /* ------------------------- */
   /* ---- Runtime Helpers ---- */

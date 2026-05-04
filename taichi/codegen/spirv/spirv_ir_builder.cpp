@@ -76,6 +76,23 @@ void IRBuilder::init_header() {
         .commit(&header_);
   }
 
+  // §16.12 (S2, 2026-05-05): when the device supports subgroup ballot,
+  // declare GroupNonUniform + GroupNonUniformBallot capabilities so that
+  // OpGroupNonUniformBallot / OpGroupNonUniformBallotBitCount /
+  // OpGroupNonUniformBroadcastFirst (used by the listgen ballot path)
+  // pass SPIR-V validation. Cheap: 4 SPIR-V words, declared even if the
+  // listgen-ballot CompileConfig flag is off (existing
+  // OpGroupNonUniformElect / OpGroupNonUniformBroadcast paths also need
+  // GroupNonUniform; declaring it here is forward-compatible).
+  if (caps_->get(cap::spirv_has_subgroup_ballot)) {
+    ib_.begin(spv::OpCapability)
+        .add(spv::CapabilityGroupNonUniform)
+        .commit(&header_);
+    ib_.begin(spv::OpCapability)
+        .add(spv::CapabilityGroupNonUniformBallot)
+        .commit(&header_);
+  }
+
   ib_.begin(spv::OpExtension)
       .add("SPV_KHR_storage_buffer_storage_class")
       .commit(&header_);
@@ -200,6 +217,18 @@ void IRBuilder::init_pre_defs() {
       .add(t_v3_uint_)
       .add_seq(t_uint32_, 3)
       .commit(&global_);
+
+  // §16.12 (S2, 2026-05-05): uvec4 result type for OpGroupNonUniformBallot.
+  // Gated on device cap to avoid changing SPIR-V output on devices that
+  // do not support subgroup ballot. Used iff
+  // CompileConfig::spirv_listgen_subgroup_ballot is on at codegen time.
+  if (caps_->get(cap::spirv_has_subgroup_ballot)) {
+    t_v4_uint_.id = id_counter_++;
+    ib_.begin(spv::OpTypeVector)
+        .add(t_v4_uint_)
+        .add_seq(t_uint32_, 4)
+        .commit(&global_);
+  }
 
   t_v4_fp32_.id = id_counter_++;
   ib_.begin(spv::OpTypeVector)

@@ -410,7 +410,54 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
   }
 
   if (config_.arch == Arch::cuda && use_device_memory_pool() && !all_dense) {
-    preallocate_runtime_memory();
+    // P-Sparse-Mem-2-A (always-on auto-sizing as of 2026-05-05):
+    // Derive a tight pool size from the SNode tree unless the user has
+    // explicitly opted into a legacy knob:
+    //   * device_memory_fraction > 0  -> use fraction-of-total path
+    //   * cuda_sparse_pool_size_GB > 0 -> use explicit pool size override
+    // Otherwise (default), each gc_able snode contributes
+    //   pointer  : cell_size_bytes
+    //   dynamic  : sizeof(void*) + cell_size_bytes * chunk_size
+    // multiplied by a per-snode heuristic chunk count, capped by
+    // device_memory_GB and floored at 256 MiB (chunk granularity).
+    std::size_t override_size = 0;
+    if (config_.device_memory_fraction == 0 &&
+        config_.cuda_sparse_pool_size_GB == 0) {
+      constexpr int kHeuristicChunks = 1024;
+      // 128 MiB floor (P-Sparse-Mem-3, 2026-05-05): each NodeAllocator
+      // chunk is ~16 MiB, so 128 MiB == 8 chunks, covering the validated
+      // mpm-shaped 64^3 workload (peak 5 chunks) with margin. Configurable
+      // via CompileConfig::cuda_sparse_pool_size_floor_MiB if a workload
+      // needs higher headroom. The previous 256 MiB floor was an
+      // overly-defensive setting from §16.10 initial bring-up.
+      const std::size_t kMinPoolSize =
+          std::size_t(std::max(0, config_.cuda_sparse_pool_size_floor_MiB))
+          << 20;
+      std::size_t auto_size = 0;
+      for (size_t i = 0; i < snode_metas.size(); i++) {
+        if (!is_gc_able(snode_metas[i].type))
+          continue;
+        std::size_t element_size = snode_metas[i].cell_size_bytes;
+        std::size_t node_size;
+        if (snode_metas[i].type == SNodeType::pointer) {
+          node_size = element_size;
+        } else {
+          node_size =
+              sizeof(void *) + element_size * snode_metas[i].chunk_size;
+        }
+        auto_size += node_size * kHeuristicChunks;
+      }
+      auto_size = std::max(auto_size, kMinPoolSize);
+      std::size_t cap =
+          std::size_t(config_.device_memory_GB * (1UL << 30));
+      override_size = std::min(auto_size, cap);
+      TI_TRACE(
+          "P-Sparse-Mem-2-A: auto-sized sparse pool = {:.2f} MiB "
+          "(snode-derived {:.2f} MiB, capped by device_memory_GB={:.2f})",
+          override_size / 1048576.0, auto_size / 1048576.0,
+          config_.device_memory_GB);
+    }
+    preallocate_runtime_memory(override_size);
   }
 
   TI_TRACE("Allocating data structure of size {} bytes", root_size);
@@ -604,15 +651,30 @@ void *LlvmRuntimeExecutor::preallocate_memory(
   return preallocated_device_buffer;
 }
 
-void LlvmRuntimeExecutor::preallocate_runtime_memory() {
+void LlvmRuntimeExecutor::preallocate_runtime_memory(
+    std::size_t override_size) {
   if (preallocated_runtime_memory_allocs_ != nullptr)
     return;
 
   std::size_t total_prealloc_size = 0;
   const auto total_mem = llvm_device()->get_total_memory();
-  if (config_.device_memory_fraction == 0) {
-    TI_ASSERT(config_.device_memory_GB > 0);
-    total_prealloc_size = std::size_t(config_.device_memory_GB * (1UL << 30));
+  if (override_size > 0) {
+    // P-Sparse-Mem-2-A: caller-supplied size derived from snode_metas. Skip
+    // the device_memory_GB / fraction / cuda_sparse_pool_size_GB logic; the
+    // caller is responsible for sizing.
+    total_prealloc_size = override_size;
+  } else if (config_.device_memory_fraction == 0) {
+    // P-Sparse-Mem-1: cuda_sparse_pool_size_GB > 0 overrides device_memory_GB
+    // for the sparse-trigger lazy pool only. This path is only entered on
+    // cuda+sparse via initialize_llvm_runtime_snodes(), so capping it here
+    // does not affect dense-only programs (which never call this).
+    float64 effective_GB = config_.device_memory_GB;
+    if (config_.arch == Arch::cuda && use_device_memory_pool() &&
+        config_.cuda_sparse_pool_size_GB > 0) {
+      effective_GB = config_.cuda_sparse_pool_size_GB;
+    }
+    TI_ASSERT(effective_GB > 0);
+    total_prealloc_size = std::size_t(effective_GB * (1UL << 30));
   } else {
     total_prealloc_size =
         std::size_t(config_.device_memory_fraction * total_mem);

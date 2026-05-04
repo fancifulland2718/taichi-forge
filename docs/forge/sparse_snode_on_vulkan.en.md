@@ -86,7 +86,7 @@ LLVM cpu / cuda guarantees that reading an inactive sparse cell returns the dtyp
 
 **0.3.2 fix (C-9 deterministic-slot codegen)**: after observing that the default `pool_capacity == total_num_cells_from_root` (i.e. always equals the number of outer cells), pointer activation no longer needs an atomic allocator — every outer cell gets a statically assigned unique pool slot `new_slot = idx_u32 + 1 ∈ [1, capacity]`. The SPIR-V emission collapses to a single `OpAtomicCompareExchange(slot, 0, new_slot)`, replacing the previous four-instruction chain (`CAS-marker + atomicIAdd(watermark) + atomicStore + structured spin-loop`). All threads racing on the same outer cell compute the same `new_slot`, so the spin-loop disappears entirely along with the warp-lockstep deadlock.
 
-For full analysis and the regression matrix see `compile_doc/SNode_Vulkan_规划.md` §14. Acceptance test: [tests/p4/g10p1_user_repro.py](../../tests/p4/g10p1_user_repro.py) (5 consecutive runs Vulkan rc=0, cpu/cuda/vulkan sums equivalent within ±1e-5 single-precision tolerance).
+Acceptance test: [tests/p4/g10p1_user_repro.py](../../tests/p4/g10p1_user_repro.py) (5 consecutive runs Vulkan rc=0, cpu/cuda/vulkan sums equivalent within ±1e-5 single-precision tolerance).
 
 **Default-on**: CompileConfig `vulkan_pointer_deterministic_slot` (default **`True`**), automatically engaged whenever `ti.init(arch=ti.vulkan, vulkan_sparse_experimental=True)`. The codegen falls back to the legacy CAS-marker path (byte-equivalent to 0.3.1) in three cases:
 - `vk_max_active` hint shrinks capacity below `worst_capacity`;

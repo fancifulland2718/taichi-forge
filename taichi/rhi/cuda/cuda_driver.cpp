@@ -1,5 +1,7 @@
 #include "taichi/rhi/cuda/cuda_driver.h"
 
+#include <cstdlib>
+
 #include "taichi/common/dynamic_loader.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/util/environ_config.h"
@@ -20,6 +22,50 @@ CUDADriverBase::CUDADriverBase() {
   if (disabled_by_env_) {
     TI_TRACE("CUDA driver disabled by enviroment variable \"TI_ENABLE_CUDA\".");
   }
+}
+
+static void maybe_set_cuda_lazy_loading(int driver_version) {
+  // P-Sparse-Mem-2-VRAM (2026-05-04, refined 2026-05-05):
+  // CUDA_MODULE_LOADING=LAZY defers cublas/cusparse/cufft/etc. symbol mapping
+  // until first reference, saving 200-500 MiB of VRAM that the Taichi LLVM
+  // backend never uses.
+  //
+  // Driver-version timeline:
+  //   * < 11070  : env var unsupported, driver default EAGER. setenv is a
+  //                no-op (driver ignores unknown env vars), so harmless.
+  //   * 11070..12009 : env var honored, driver default EAGER. setenv saves
+  //                    real VRAM here. THIS IS THE TARGET WINDOW.
+  //   * >= 12010 : driver default already LAZY. setenv is a no-op.
+  //
+  // We only setenv when the user hasn't chosen a value, so explicit `EAGER`
+  // overrides for debugging remain honored. We also avoid touching env in the
+  // >=12010 case to keep environment minimal on modern stacks.
+  if (std::getenv("CUDA_MODULE_LOADING") != nullptr) {
+    return;
+  }
+  if (driver_version < 11070) {
+    TI_TRACE(
+        "CUDA driver v{}.{} predates CUDA_MODULE_LOADING (introduced in "
+        "11.7); skipping LAZY override.",
+        driver_version / 1000, driver_version % 1000 / 10);
+    return;
+  }
+  if (driver_version >= 12010) {
+    TI_TRACE(
+        "CUDA driver v{}.{} already defaults to LAZY module loading; "
+        "skipping explicit override.",
+        driver_version / 1000, driver_version % 1000 / 10);
+    return;
+  }
+#if defined(TI_PLATFORM_WINDOWS)
+  _putenv_s("CUDA_MODULE_LOADING", "LAZY");
+#else
+  setenv("CUDA_MODULE_LOADING", "LAZY", 1);
+#endif
+  TI_TRACE(
+      "Set CUDA_MODULE_LOADING=LAZY for driver v{}.{} (saves VRAM by "
+      "deferring unused device-library mapping).",
+      driver_version / 1000, driver_version % 1000 / 10);
 }
 
 bool CUDADriverBase::load_lib(std::string lib_linux, std::string lib_windows) {
@@ -128,6 +174,10 @@ CUDADriver::CUDADriver() {
   driver_get_version(&version);
   TI_TRACE("CUDA driver API (v{}.{}) loaded.", version / 1000,
            version % 1000 / 10);
+
+  // Set CUDA_MODULE_LOADING=LAZY based on driver version, before any other
+  // cu* call. driver_get_version itself does not require cuInit.
+  maybe_set_cuda_lazy_loading(version);
 
   // CUDA versions should >= 10.
   if (version < 10000) {
