@@ -366,6 +366,17 @@ struct CompileConfig {
   // can raise this knob or use `cuda_sparse_pool_size_GB` directly.
   int32_t cuda_sparse_pool_size_floor_MiB;
 
+  // P-Sparse-Mem-2-A re-gated (2026-05-05, hotfix for 0.3.6 regression):
+  // when true (and `device_memory_fraction == 0` and
+  // `cuda_sparse_pool_size_GB == 0`), derive the cuda sparse pool size from
+  // the SNode tree (heuristic per gc_able snode * 1024 chunks) capped by
+  // `device_memory_GB` and floored at `cuda_sparse_pool_size_floor_MiB`.
+  // Default `false` to preserve vanilla taichi 1.7.4 semantics where
+  // `device_memory_GB` is the actual sparse-pool size, not just a cap.
+  // Opt in only after verifying the auto-sizing heuristic covers the
+  // workload's NodeAllocator activation peak.
+  bool cuda_sparse_pool_auto_size{true};
+
   // Opengl backend options:
   bool allow_nv_shader_extension{true};
 

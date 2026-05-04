@@ -421,7 +421,8 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
     // multiplied by a per-snode heuristic chunk count, capped by
     // device_memory_GB and floored at 256 MiB (chunk granularity).
     std::size_t override_size = 0;
-    if (config_.device_memory_fraction == 0 &&
+    if (config_.cuda_sparse_pool_auto_size &&
+        config_.device_memory_fraction == 0 &&
         config_.cuda_sparse_pool_size_GB == 0) {
       constexpr int kHeuristicChunks = 1024;
       // 128 MiB floor (P-Sparse-Mem-3, 2026-05-05): each NodeAllocator
