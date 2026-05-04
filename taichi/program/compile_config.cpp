@@ -17,6 +17,10 @@ CompileConfig::CompileConfig() {
   print_accessor_ir = false;
   use_llvm = true;
   demote_dense_struct_fors = true;
+  // P-Sparse-Listgen-1 (forge 2026-05): default ON. fit() will additionally
+  // force-on for spirv archs; LLVM backends are unaffected because the
+  // arch_uses_spirv() gate in offload.cpp short-circuits this flag.
+  spirv_skip_intermediate_listgen = true;
   advanced_optimization = true;
   constant_folding = true;
   max_vector_width = 8;
@@ -72,6 +76,9 @@ void CompileConfig::fit() {
   }
   if (arch_uses_spirv(arch)) {
     demote_dense_struct_fors = true;
+    // P-Sparse-Listgen-1: spirv backend's intermediate listgen tasks are
+    // dispatch overhead with no functional effect; force-enable the skip.
+    spirv_skip_intermediate_listgen = true;
   }
   offline_cache::disable_offline_cache_if_needed(this);
 }

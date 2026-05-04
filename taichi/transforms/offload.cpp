@@ -194,7 +194,21 @@ class Offloader {
     Kernel *kernel = dynamic_cast<Kernel *>(root_block->parent_callable());
     TI_ASSERT(kernel);
     if (!demotable) {
-      for (int i = 1; i < path.size(); i++) {
+      // P-Sparse-Listgen-1 (forge 2026-05): on SPIR-V archs only the final
+      // (clear+listgen) pair along the path contributes to listgen_buffer;
+      // intermediate ones overwrite the same buffer with their own (smaller)
+      // active subset, then get overwritten themselves by the final listgen
+      // which does the full ancestor-mask AND scan independently. ClearList
+      // is also a no-op kernel on SPIR-V. So path_len-2 (clear+listgen)
+      // pairs are pure dispatch+barrier overhead — skip them.
+      // LLVM (cpu/cuda) backends keep emitting all pairs because their
+      // element_listgen_root/nonroot runtime helpers actually build a per-
+      // level runtime element list that struct_for body code reads from.
+      int start_i = 1;
+      if (config.spirv_skip_intermediate_listgen && arch_uses_spirv(arch)) {
+        start_i = std::max<int>(1, (int)path.size() - 1);
+      }
+      for (int i = start_i; i < path.size(); i++) {
         auto snode_child = path[i];
         if (snode_child->type == SNodeType::quant_array &&
             for_stmt->is_bit_vectorized) {

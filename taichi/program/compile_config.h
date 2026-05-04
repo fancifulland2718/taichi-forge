@@ -274,6 +274,16 @@ struct CompileConfig {
   // telemetry confirms the real distribution warrants activation.
   int auto_real_function_inline_budget{0};
   bool demote_dense_struct_fors;
+  // P-Sparse-Listgen-1 (forge 2026-05): on SPIR-V backends, only the FINAL
+  // (clear+listgen) pair along the SNode path actually contributes to
+  // listgen_buffer; every intermediate listgen overwrites the same buffer
+  // and ClearListStmt is a no-op kernel on SPIR-V. When true and
+  // arch_uses_spirv(arch), offload.cpp::emit_struct_for emits only the final
+  // (clear+listgen) pair, skipping path_len-2 redundant dispatches per
+  // sparse struct_for. LLVM (cpu/cuda) backends are unaffected because
+  // their element_listgen_root/nonroot runtime helpers actually build per
+  // level element lists. fit() force-enables on spirv archs.
+  bool spirv_skip_intermediate_listgen;
   bool advanced_optimization;
   bool constant_folding;
   bool use_llvm;
