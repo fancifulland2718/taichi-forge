@@ -1,6 +1,6 @@
 # Taichi Forge — 编译 / 运行时 / 架构 / 现代化选项一览
 
-> 适用于 **Taichi Forge 0.3.0**。本文列出的所有选项均为**可选启用**；默认值与 vanilla taichi 1.7.4 字节等价。
+> 适用于 **Taichi Forge 0.3.5**。本文列出的所有选项均为**可选启用**；默认值与 vanilla taichi 1.7.4 字节等价，唯一默认行为变动面为 0.3.5 的 CUDA sparse pool 自动调尺路径（详见 §2.6）。
 >
 > English: [forge_options.en.md](forge_options.en.md)
 
@@ -69,6 +69,28 @@
 |---|---|---|
 | `offline_cache_l_sem` | （关） | 内部测试 flag，不应在生产中使用。 |
 | `vulkan_quant_experimental` | `False` | **0.3.0 新增**。启用后 Vulkan 后端接受 `quant_array` / `bit_struct` 字段（即 `Extension::quant` / `Extension::quant_basic` 在 Vulkan 上可用）。已支持 `QuantInt` / `QuantFixed` 的读、写与多线程并发 `ti.atomic_add`（`OpAtomicCompareExchange` 自旋 RMW，`quant_array` 与 `BitpackedFields` / `bit_struct` 多字段同字均 OK），三后端字节等价。明确不支持：`QuantFloat` 共享指数、非 add 的原子操作（`atomic_min/max/and/or/xor`，与 LLVM 后端一致）。未实现路径会抛 `TI_NOT_IMPLEMENTED` / `TI_ERROR` 而非静默误编译。等价 env var：`TI_VULKAN_QUANT=1`。 |
+
+### 2.6 CUDA sparse 内存池（0.3.5 新增）
+
+CUDA sparse SNode 的动态分配 pool 与 `device_memory_GB` 解耦，默认改为根据 SNode 树自动调尺。以前仅为了给 sparse 预留空间而调高 `device_memory_GB` 的工作负载可以调回 dense 本身需求的值。
+
+| 参数 | 默认 | 用途 |
+|---|---|---|
+| `cuda_sparse_pool_size_GB` | `0.0`（自动） | CUDA sparse SNode 动态分配 pool 的显式大小覆盖。`0` 表示启用自动调尺（默认），封顶为 `device_memory_GB`，下限为 `cuda_sparse_pool_size_floor_MiB`。设为正浮点则完全跳过自动调尺，按 GiB 固定分配。 |
+| `cuda_sparse_pool_size_floor_MiB` | `128` | 自动调尺的下限（MiB）。每个 `NodeAllocator` chunk 约 16 MiB，128 MiB ≈ 8 chunk。巅值 > 8 chunk 的 sparse 工作负载可上调至 `192` / `256`。 |
+
+在验证的 mpm-shape 64³ 工作负载（250 step）上，CUDA sparse 默认显存从 **1764 MiB（vanilla 1.7.4）→ 868 MiB（≈ −51%）**，dense 路径与 Vulkan 后端不受影响。
+
+`device_memory_fraction > 0` 与 `cuda_sparse_pool_size_GB > 0` 仍然跳过自动调尺，行为与以前完全一致——已设过这些 knob 的用户无需改动。
+
+### 2.7 Sparse struct-for / listgen 优化（0.3.5 新增）
+
+两个 flag 均默认关闭，关闭时产出与 legacy 路径字节一致。启用后会改变 kernel 代码（CUDA grid_dim 或 SPIR-V 原子操作），变化已纳入 offline cache hash。
+
+| 参数 | 默认 | 用途 |
+|---|---|---|
+| `spirv_listgen_subgroup_ballot` | `False` | 仅 Vulkan/SPIR-V。在 listgen kernel 内将逐线程 `OpAtomicIAdd` 聚合为每活跃 subgroup 一次 ballot 原子操作，降低 dense-active sparse struct-for 的原子争用。需设备支持 subgroup ballot（标准 SPIR-V 能力，Vulkan adapter 上报），否则该 flag 无效。 |
+| `listgen_static_grid_dim` | `False` | 仅 CUDA / AMDGPU。sparse-listgen kernel 使用静态上限推出的 `grid_dim`（= 被列 SNode 严格祖先的 `num_cells_per_container` 乘积，不含 root），并以硬件饱和值封顶。消除浅稀疏树上的空闲 block。Vulkan 已通过 task attribs 计算等价量，该 flag 在 SPIR-V 后端为空操作。正确性由 `element_listgen_nonroot` 现有 grid-stride 循环保证。 |
 
 ---
 

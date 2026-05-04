@@ -563,6 +563,11 @@ class IRBuilder {
   SType u32_type() const {
     return t_uint32_;
   }
+  // §16.12 (S2): uvec4 result type for OpGroupNonUniformBallot. Valid
+  // only when the device cap spirv_has_subgroup_ballot is on.
+  SType v4_uint_type() const {
+    return t_v4_uint_;
+  }
   SType f32_type() const {
     return t_fp32_;
   }
@@ -649,6 +654,7 @@ class IRBuilder {
   SType t_v2_int_;
   SType t_v3_int_;
   SType t_v3_uint_;
+  SType t_v4_uint_;  // §16.12 (S2): uvec4 result type for OpGroupNonUniformBallot
   SType t_v4_fp32_;
   SType t_v3_fp32_;
   SType t_v2_fp32_;

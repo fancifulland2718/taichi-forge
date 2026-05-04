@@ -89,6 +89,8 @@ class TaskCodegen : public IRVisitor {
     int task_id_in_kernel;
     // G11-A (2026-05): bitmasked deactivate 清 data slot 开关。
     bool bitmasked_clear_data_on_deactivate{false};
+    // §16.12 (S2): subgroup-ballot 聚合 listgen atomic。
+    bool listgen_subgroup_ballot{false};
   };
 
   const bool use_64bit_pointers = false;
@@ -103,7 +105,8 @@ class TaskCodegen : public IRVisitor {
                                params.ti_kernel_name,
                                params.task_id_in_kernel)),
         bitmasked_clear_data_on_deactivate_(
-            params.bitmasked_clear_data_on_deactivate) {
+            params.bitmasked_clear_data_on_deactivate),
+        listgen_subgroup_ballot_(params.listgen_subgroup_ballot) {
     allow_undefined_visitor = true;
     invoke_default_visitor = true;
 
@@ -3564,99 +3567,195 @@ class TaskCodegen : public IRVisitor {
     auto active_cond = ir_->make_value(spv::OpUGreaterThan, ir_->bool_type(),
                                        active,
                                        ir_->uint_immediate_number(u32_t, 0));
-    spirv::Label active_label = ir_->new_label();
-    spirv::Label after_active = ir_->new_label();
-    ir_->make_inst(spv::OpSelectionMerge, after_active,
-                   spv::SelectionControlMaskNone);
-    ir_->make_inst(spv::OpBranchConditional, active_cond, active_label,
-                   after_active);
-    ir_->start_label(active_label);
 
-    // Compute the *globally* flat axis index expected by the loop body's
-    // LoopIndexStmt decoder. The decoder uses leaf->num_elements_from_root
-    // per axis, so we must emit:
-    //   flat_global = sum_a global_axis[a] * (prod_{a'>a} num_from_root[a'])
-    // where global_axis[a] = sum_k local_axis_a_k * (prod_{k'>k} shape_a_k')
-    // and local_axis_a_k decomposes i_path[k] within level k's container
-    // using that level's own extractors.
-    //
-    // Important: an axis is "active" for the listgen output iff *any* level
-    // along the path activates it. The leaf SNode's `extractors[a].active`
-    // alone is insufficient for mixed-axis nested layouts (e.g.
-    // `bitmasked(ij, ...).bitmasked(i, ...)` where the leaf does not
-    // activate `j` itself but `j` still carries a non-trivial shape from
-    // the ancestor). Use the path-wide union.
-    bool path_active[taichi_max_num_indices] = {};
-    for (int kk = 0; kk < n; ++kk) {
+    // §16.12 (S2, 2026-05-05): factor flat_global computation so the
+    // legacy path and the new subgroup-ballot path can share it. The
+    // lambda emits the same SPIR-V instructions in the same order as
+    // before — when the ballot flag is OFF the legacy branch below is
+    // byte-equivalent to the pre-§16.12 emission (modulo cache-key
+    // changes which already invalidate old artifacts).
+    auto compute_flat_global = [&]() -> spirv::Value {
+      bool path_active[taichi_max_num_indices] = {};
+      for (int kk = 0; kk < n; ++kk) {
+        for (int a = 0; a < taichi_max_num_indices; ++a) {
+          if (path[kk]->extractors[a].active) path_active[a] = true;
+        }
+      }
+      std::vector<spirv::Value> global_axis(taichi_max_num_indices);
       for (int a = 0; a < taichi_max_num_indices; ++a) {
-        if (path[kk]->extractors[a].active) path_active[a] = true;
+        global_axis[a] = ir_->uint_immediate_number(u32_t, 0);
       }
-    }
-
-    std::vector<spirv::Value> global_axis(taichi_max_num_indices);
-    for (int a = 0; a < taichi_max_num_indices; ++a) {
-      global_axis[a] = ir_->uint_immediate_number(u32_t, 0);
-    }
-    for (int k = 0; k < n; ++k) {
+      for (int k = 0; k < n; ++k) {
+        for (int a = 0; a < taichi_max_num_indices; ++a) {
+          if (!path[k]->extractors[a].active) continue;
+          int local_acc = path[k]->extractors[a].acc_shape;
+          int local_shape = path[k]->extractors[a].shape;
+          spirv::Value local = i_path[k];
+          if (local_acc > 1) {
+            local = ir_->make_value(
+                spv::OpUDiv, u32_t, local,
+                ir_->uint_immediate_number(u32_t, local_acc));
+          }
+          if (local_shape > 1) {
+            local = ir_->make_value(
+                spv::OpUMod, u32_t, local,
+                ir_->uint_immediate_number(u32_t, local_shape));
+          }
+          int desc_prod = 1;
+          for (int kk = k + 1; kk < n; ++kk) {
+            if (path[kk]->extractors[a].active)
+              desc_prod *= path[kk]->extractors[a].shape;
+          }
+          if (desc_prod > 1) {
+            local = ir_->mul(
+                local, ir_->uint_immediate_number(u32_t, desc_prod));
+          }
+          global_axis[a] = ir_->add(global_axis[a], local);
+        }
+      }
+      spirv::Value fg = ir_->uint_immediate_number(u32_t, 0);
       for (int a = 0; a < taichi_max_num_indices; ++a) {
-        if (!path[k]->extractors[a].active) continue;
-        int local_acc = path[k]->extractors[a].acc_shape;
-        int local_shape = path[k]->extractors[a].shape;
-        spirv::Value local = i_path[k];
-        if (local_acc > 1) {
-          local = ir_->make_value(
-              spv::OpUDiv, u32_t, local,
-              ir_->uint_immediate_number(u32_t, local_acc));
+        if (!path_active[a]) continue;
+        int axis_acc = 1;
+        for (int aa = a + 1; aa < taichi_max_num_indices; ++aa) {
+          if (path_active[aa])
+            axis_acc *=
+                (int)child_sn->extractors[aa].num_elements_from_root;
         }
-        if (local_shape > 1) {
-          local = ir_->make_value(
-              spv::OpUMod, u32_t, local,
-              ir_->uint_immediate_number(u32_t, local_shape));
+        spirv::Value contrib = global_axis[a];
+        if (axis_acc > 1) {
+          contrib = ir_->mul(
+              contrib, ir_->uint_immediate_number(u32_t, axis_acc));
         }
-        int desc_prod = 1;
-        for (int kk = k + 1; kk < n; ++kk) {
-          if (path[kk]->extractors[a].active)
-            desc_prod *= path[kk]->extractors[a].shape;
-        }
-        if (desc_prod > 1) {
-          local = ir_->mul(
-              local, ir_->uint_immediate_number(u32_t, desc_prod));
-        }
-        global_axis[a] = ir_->add(global_axis[a], local);
+        fg = ir_->add(fg, contrib);
       }
-    }
-    spirv::Value flat_global = ir_->uint_immediate_number(u32_t, 0);
-    for (int a = 0; a < taichi_max_num_indices; ++a) {
-      if (!path_active[a]) continue;
-      int axis_acc = 1;
-      for (int aa = a + 1; aa < taichi_max_num_indices; ++aa) {
-        if (path_active[aa])
-          axis_acc *=
-              (int)child_sn->extractors[aa].num_elements_from_root;
-      }
-      spirv::Value contrib = global_axis[a];
-      if (axis_acc > 1) {
-        contrib = ir_->mul(
-            contrib, ir_->uint_immediate_number(u32_t, axis_acc));
-      }
-      flat_global = ir_->add(flat_global, contrib);
-    }
+      return fg;
+    };
 
-    // slot = atomicAdd(listgen_buffer[0], 1); listgen_buffer[1 + slot] = flat_global
-    auto count_ptr = ir_->struct_array_access(u32_t, listgen_buffer,
-                                              ir_->const_i32_zero_);
-    auto slot = ir_->make_value(spv::OpAtomicIAdd, u32_t, count_ptr,
-                                /*scope=*/ir_->const_i32_one_,
-                                /*semantics=*/ir_->const_i32_zero_,
-                                ir_->uint_immediate_number(u32_t, 1));
-    auto idx_in_buffer =
-        ir_->add(slot, ir_->uint_immediate_number(u32_t, 1));
-    auto idx_ptr =
-        ir_->struct_array_access(u32_t, listgen_buffer, idx_in_buffer);
-    ir_->store_variable(idx_ptr, flat_global);
+    // Belt-and-suspenders: the ballot path requires both the
+    // CompileConfig opt-in AND a device that exposes the subgroup
+    // ballot capability. Otherwise fall through to the legacy
+    // per-thread atomic.
+    const bool use_ballot = listgen_subgroup_ballot_ &&
+                            caps_->get(DeviceCapability::spirv_has_subgroup_ballot);
 
-    ir_->make_inst(spv::OpBranch, after_active);
-    ir_->start_label(after_active);
+    if (use_ballot) {
+      // §16.12 (S2): subgroup-ballot aggregated atomic.
+      //
+      // Replace the per-active-thread `OpAtomicIAdd(count,1); store at slot`
+      // with one atomic per subgroup that reserves a contiguous range of
+      // `popcount(ballot)` slots. Each active lane then writes at
+      // base + lane's exclusive prefix popcount within the ballot.
+      //
+      // Correctness key: OpGroupNonUniformElect and
+      // OpGroupNonUniformBroadcastFirst both target the lowest-id active
+      // lane in the dynamic instance, so the leader (which performs the
+      // atomic) and the broadcast source are the same lane. A function-
+      // scope OpVariable `base_var` carries the leader's atomic result
+      // through the merge block; non-leader lanes' base_var values are
+      // initialized to 0 but discarded by BroadcastFirst.
+      //
+      // Atomic count: was N atomics (one per active lane in subgroup);
+      // now 1 atomic per non-empty ballot. ~32-64x reduction in
+      // contention on listgen_buffer[0] for dense subgroups.
+
+      auto flat_global = compute_flat_global();
+
+      auto base_var = ir_->alloca_variable(u32_t);
+      ir_->store_variable(base_var, ir_->uint_immediate_number(u32_t, 0));
+
+      auto subgroup_scope =
+          ir_->int_immediate_number(ir_->i32_type(), spv::ScopeSubgroup);
+
+      // ballot = OpGroupNonUniformBallot(Subgroup, active_cond)  -> uvec4
+      auto ballot = ir_->make_value(spv::OpGroupNonUniformBallot,
+                                    ir_->v4_uint_type(), subgroup_scope,
+                                    active_cond);
+
+      // total = popcount over whole subgroup ballot (Reduce)
+      auto total = ir_->make_value(
+          spv::OpGroupNonUniformBallotBitCount, u32_t, subgroup_scope,
+          spv::GroupOperationReduce, ballot);
+      // local_offset = exclusive-scan popcount within ballot for this lane
+      auto local_offset = ir_->make_value(
+          spv::OpGroupNonUniformBallotBitCount, u32_t, subgroup_scope,
+          spv::GroupOperationExclusiveScan, ballot);
+      // is_leader = true on the lowest-id active lane in the subgroup
+      auto is_leader = ir_->make_value(spv::OpGroupNonUniformElect,
+                                       ir_->bool_type(), subgroup_scope);
+      auto total_nonzero = ir_->make_value(
+          spv::OpUGreaterThan, ir_->bool_type(), total,
+          ir_->uint_immediate_number(u32_t, 0));
+      auto leader_does_atomic = ir_->make_value(
+          spv::OpLogicalAnd, ir_->bool_type(), is_leader, total_nonzero);
+
+      spirv::Label leader_label = ir_->new_label();
+      spirv::Label after_leader = ir_->new_label();
+      ir_->make_inst(spv::OpSelectionMerge, after_leader,
+                     spv::SelectionControlMaskNone);
+      ir_->make_inst(spv::OpBranchConditional, leader_does_atomic,
+                     leader_label, after_leader);
+      ir_->start_label(leader_label);
+      auto count_ptr = ir_->struct_array_access(u32_t, listgen_buffer,
+                                                ir_->const_i32_zero_);
+      auto leader_base = ir_->make_value(
+          spv::OpAtomicIAdd, u32_t, count_ptr,
+          /*scope=*/ir_->const_i32_one_,
+          /*semantics=*/ir_->const_i32_zero_, total);
+      ir_->store_variable(base_var, leader_base);
+      ir_->make_inst(spv::OpBranch, after_leader);
+      ir_->start_label(after_leader);
+
+      // Broadcast leader's stored base to all subgroup lanes.
+      auto local_base_loaded = ir_->load_variable(base_var, u32_t);
+      auto base = ir_->make_value(spv::OpGroupNonUniformBroadcastFirst,
+                                  u32_t, subgroup_scope, local_base_loaded);
+
+      // Active lanes write at base + local_offset (+1 for header word).
+      spirv::Label write_label = ir_->new_label();
+      spirv::Label after_write = ir_->new_label();
+      ir_->make_inst(spv::OpSelectionMerge, after_write,
+                     spv::SelectionControlMaskNone);
+      ir_->make_inst(spv::OpBranchConditional, active_cond, write_label,
+                     after_write);
+      ir_->start_label(write_label);
+      auto idx_in_buffer = ir_->add(
+          ir_->add(base, local_offset),
+          ir_->uint_immediate_number(u32_t, 1));
+      auto idx_ptr =
+          ir_->struct_array_access(u32_t, listgen_buffer, idx_in_buffer);
+      ir_->store_variable(idx_ptr, flat_global);
+      ir_->make_inst(spv::OpBranch, after_write);
+      ir_->start_label(after_write);
+    } else {
+      // Legacy path: byte-identical to pre-§16.12 (modulo cache-key
+      // shifts already accounted for).
+      spirv::Label active_label = ir_->new_label();
+      spirv::Label after_active = ir_->new_label();
+      ir_->make_inst(spv::OpSelectionMerge, after_active,
+                     spv::SelectionControlMaskNone);
+      ir_->make_inst(spv::OpBranchConditional, active_cond, active_label,
+                     after_active);
+      ir_->start_label(active_label);
+
+      auto flat_global = compute_flat_global();
+
+      // slot = atomicAdd(listgen_buffer[0], 1); listgen_buffer[1+slot] = flat_global
+      auto count_ptr = ir_->struct_array_access(u32_t, listgen_buffer,
+                                                ir_->const_i32_zero_);
+      auto slot = ir_->make_value(spv::OpAtomicIAdd, u32_t, count_ptr,
+                                  /*scope=*/ir_->const_i32_one_,
+                                  /*semantics=*/ir_->const_i32_zero_,
+                                  ir_->uint_immediate_number(u32_t, 1));
+      auto idx_in_buffer =
+          ir_->add(slot, ir_->uint_immediate_number(u32_t, 1));
+      auto idx_ptr =
+          ir_->struct_array_access(u32_t, listgen_buffer, idx_in_buffer);
+      ir_->store_variable(idx_ptr, flat_global);
+
+      ir_->make_inst(spv::OpBranch, after_active);
+      ir_->start_label(after_active);
+    }
     ir_->make_inst(spv::OpBranch, after_bounds);
     ir_->start_label(after_bounds);
 
@@ -4828,6 +4927,7 @@ class TaskCodegen : public IRVisitor {
   // flipper: memset(cell, 0)" sequence after OpAtomicAnd. Default false =
   // vanilla 1.7.4 / taichi-dev 行为（仅翻 mask 位）。
   const bool bitmasked_clear_data_on_deactivate_{false};
+  const bool listgen_subgroup_ballot_{false};
   std::vector<spirv::Label> continue_label_stack_;
   std::vector<spirv::Label> merge_label_stack_;
 
@@ -5105,6 +5205,7 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
     tp.caps = &params_.caps;
     tp.bitmasked_clear_data_on_deactivate =
         params_.bitmasked_clear_data_on_deactivate;
+    tp.listgen_subgroup_ballot = params_.listgen_subgroup_ballot;
 
     TaskCodegen cgen(tp);
     auto task_res = cgen.run();

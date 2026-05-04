@@ -393,7 +393,24 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
         int num_SMs;
         AMDGPUDriver::get_instance().device_get_attribute(
             &num_SMs, HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, 0);
-        current_task->grid_dim = num_SMs * query_max_block_per_sm;
+        const int saturating = num_SMs * query_max_block_per_sm;
+        int chosen = saturating;
+        // §16.13 (S3): mirror codegen_cuda.cpp listgen static grid_dim.
+        if (compile_config.listgen_static_grid_dim && stmt->snode != nullptr) {
+          size_t parent_list_max = 1;
+          for (auto *sn = stmt->snode->parent;
+               sn != nullptr && sn->type != SNodeType::root;
+               sn = sn->parent) {
+            parent_list_max *= (size_t)sn->num_cells_per_container;
+            if (parent_list_max >= (size_t)saturating) {
+              parent_list_max = (size_t)saturating;
+              break;
+            }
+          }
+          chosen =
+              std::max(1, std::min(saturating, (int)parent_list_max));
+        }
+        current_task->grid_dim = chosen;
       }
       current_task->block_dim = stmt->block_dim;
       TI_ASSERT(current_task->grid_dim != 0);

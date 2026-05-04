@@ -699,7 +699,35 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
         int num_SMs;
         CUDADriver::get_instance().device_get_attribute(
             &num_SMs, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, nullptr);
-        current_task->grid_dim = num_SMs * query_max_block_per_sm;
+        const int saturating = num_SMs * query_max_block_per_sm;
+        int chosen = saturating;
+        // §16.13 (S3, 2026-05-05): when the opt-in flag is set, derive a
+        // static upper bound on the number of parent_list elements (i.e.
+        // the i-axis count of element_listgen_nonroot's outer loop, see
+        // taichi/runtime/llvm/runtime_module/runtime.cpp) and cap the
+        // grid_dim to it. The bound is the product of
+        // num_cells_per_container of every strict ancestor of stmt->snode
+        // (root excluded). Underestimating is safe because the runtime
+        // loop is grid-stride: any extra parent elements get serviced by
+        // existing blocks. On a typical sparse tree
+        // `root.bitmasked(64).f32`, parent_list has exactly 1 entry, so
+        // saturating to thousands of blocks wastes >99% of launched
+        // threads on dispatch overhead and atomic contention.
+        if (compile_config.listgen_static_grid_dim && stmt->snode != nullptr) {
+          size_t parent_list_max = 1;
+          for (auto *sn = stmt->snode->parent;
+               sn != nullptr && sn->type != SNodeType::root;
+               sn = sn->parent) {
+            parent_list_max *= (size_t)sn->num_cells_per_container;
+            if (parent_list_max >= (size_t)saturating) {
+              parent_list_max = (size_t)saturating;
+              break;
+            }
+          }
+          chosen =
+              std::max(1, std::min(saturating, (int)parent_list_max));
+        }
+        current_task->grid_dim = chosen;
       }
       current_task->block_dim = stmt->block_dim;
       current_task->dynamic_shared_array_bytes = dynamic_shared_array_bytes;

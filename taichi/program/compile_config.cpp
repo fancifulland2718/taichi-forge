@@ -21,6 +21,10 @@ CompileConfig::CompileConfig() {
   // force-on for spirv archs; LLVM backends are unaffected because the
   // arch_uses_spirv() gate in offload.cpp short-circuits this flag.
   spirv_skip_intermediate_listgen = true;
+  // §16.12 (S2): default OFF; opt-in via ti.init(spirv_listgen_subgroup_ballot=True).
+  spirv_listgen_subgroup_ballot = false;
+  // §16.13 (S3): default OFF; opt-in via ti.init(listgen_static_grid_dim=True).
+  listgen_static_grid_dim = false;
   advanced_optimization = true;
   constant_folding = true;
   max_vector_width = 8;
@@ -67,6 +71,12 @@ CompileConfig::CompileConfig() {
   // CUDA/AMDGPU backend options:
   device_memory_GB = 1;  // by default, preallocate 1 GB GPU memory
   device_memory_fraction = 0.0;
+  // P-Sparse-Mem-1: 0 = fall back to device_memory_GB (legacy behavior).
+  cuda_sparse_pool_size_GB = 0.0;
+  // P-Sparse-Mem-3 (2026-05-05): default 128 MiB floor for auto-sized
+  // sparse pool. Lowered from a previous hardcoded 256 MiB after empirical
+  // validation on the mpm-shaped 64^3 reference workload.
+  cuda_sparse_pool_size_floor_MiB = 128;
 }
 
 void CompileConfig::fit() {

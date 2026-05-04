@@ -204,9 +204,31 @@ class Offloader {
       // LLVM (cpu/cuda) backends keep emitting all pairs because their
       // element_listgen_root/nonroot runtime helpers actually build a per-
       // level runtime element list that struct_for body code reads from.
+      //
+      // Tightened conditions (forge 2026-05-04): the skip is only correct
+      // when SPIR-V listgen codegen actually supports the full-scan over
+      // the path, which is restricted to {dense, bitmasked, pointer,
+      // dynamic} (see spirv_codegen.cpp::generate_listgen_kernel
+      // `TI_ERROR_IF`). For any other node type (hash, quant_array, ...)
+      // the SPIR-V backend already errors out anyway, but in case of
+      // future relaxation we conservatively fall back to per-level emit
+      // when the path has any unsupported type. We also require path size
+      // >= 2 (otherwise start_i==1 == old behaviour, no-op).
       int start_i = 1;
-      if (config.spirv_skip_intermediate_listgen && arch_uses_spirv(arch)) {
-        start_i = std::max<int>(1, (int)path.size() - 1);
+      if (config.spirv_skip_intermediate_listgen && arch_uses_spirv(arch) &&
+          (int)path.size() >= 2) {
+        bool path_listgen_supported = true;
+        for (size_t i = 1; i < path.size(); ++i) {
+          auto t = path[i]->type;
+          if (t != SNodeType::dense && t != SNodeType::bitmasked &&
+              t != SNodeType::pointer && t != SNodeType::dynamic) {
+            path_listgen_supported = false;
+            break;
+          }
+        }
+        if (path_listgen_supported) {
+          start_i = std::max<int>(1, (int)path.size() - 1);
+        }
       }
       for (int i = start_i; i < path.size(); i++) {
         auto snode_child = path[i];

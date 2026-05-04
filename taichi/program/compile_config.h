@@ -284,6 +284,25 @@ struct CompileConfig {
   // their element_listgen_root/nonroot runtime helpers actually build per
   // level element lists. fit() force-enables on spirv archs.
   bool spirv_skip_intermediate_listgen;
+  // §16.12 (S2, 2026-05-05): when true AND device cap
+  // spirv_has_subgroup_ballot is supported, generate_listgen_kernel emits
+  // a subgroup-ballot aggregated atomic instead of one OpAtomicIAdd per
+  // active thread. Reduces atomic contention on listgen_buffer[0] from N
+  // (active lanes) to 1 per subgroup. Default false (opt-in). Output
+  // SPIR-V differs and is keyed into the offline cache hash.
+  bool spirv_listgen_subgroup_ballot{false};
+  // §16.13 (S3, 2026-05-05): when ON, CUDA / AMDGPU listgen kernels
+  // launch with a grid_dim derived from the static upper bound on
+  // num_parent_elements (= product of num_cells_per_container of all
+  // strict ancestors of the listed SNode, root excluded), capped by the
+  // hardware-saturating value. This eliminates idle blocks on shallow
+  // sparse trees (e.g. root.bitmasked(...) where parent_list size is 1)
+  // without affecting correctness (grid-stride loop in
+  // element_listgen_nonroot covers any underestimate). Vulkan already
+  // computes the equivalent quantity via
+  // task_attribs_.advisory_total_num_threads, so this flag is a no-op
+  // for the SPIR-V backend. Default false (opt-in).
+  bool listgen_static_grid_dim{false};
   bool advanced_optimization;
   bool constant_folding;
   bool use_llvm;
@@ -328,6 +347,24 @@ struct CompileConfig {
   // CUDA/AMDGPU backend options:
   float64 device_memory_GB;
   float64 device_memory_fraction;
+  // P-Sparse-Mem-1: when > 0, overrides the size of the lazy sparse-trigger
+  // runtime memory pool on CUDA (the pool used by NodeAllocatorPool for
+  // sparse SNode dynamic chunk allocation). Default 0 means "fall back to
+  // device_memory_GB", preserving legacy behavior. Setting this lower than
+  // device_memory_GB lets sparse programs that don't need 1 GB of dynamic
+  // allocation avoid the up-front lazy preallocation; runtime activate()
+  // beyond this size will fail in the same way it currently fails when
+  // exceeding device_memory_GB.
+  float64 cuda_sparse_pool_size_GB;
+
+  // P-Sparse-Mem-3 (2026-05-05): floor (MiB) for the auto-sized sparse pool
+  // when both `device_memory_fraction` and `cuda_sparse_pool_size_GB` are 0.
+  // Each NodeAllocator chunk is ~16 MiB; the floor controls how many chunks
+  // are pre-reserved for sparse activation when the SNode-derived heuristic
+  // is small. 128 MiB (= 8 chunks) covers the validated mpm-shaped 64^3
+  // workload (peak 5 chunks). Workloads with higher sparse activation peaks
+  // can raise this knob or use `cuda_sparse_pool_size_GB` directly.
+  int32_t cuda_sparse_pool_size_floor_MiB;
 
   // Opengl backend options:
   bool allow_nv_shader_extension{true};

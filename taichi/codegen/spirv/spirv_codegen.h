@@ -64,6 +64,12 @@ class KernelCodegen {
     // 多发射一段「if (was_active) memset(cell, 0)」序列。改变 SPIR-V 输出，
     // 已通过 offline_cache_util.cpp 进入 cache key。
     bool bitmasked_clear_data_on_deactivate{false};
+    // §16.12 (S2, 2026-05-05): mirror of
+    // CompileConfig::spirv_listgen_subgroup_ballot. When true AND device
+    // cap spirv_has_subgroup_ballot, generate_listgen_kernel emits
+    // ballot-aggregated atomic. Output SPIR-V differs; serialized in
+    // offline cache key.
+    bool listgen_subgroup_ballot{false};
   };
 
   explicit KernelCodegen(const Params &params);
