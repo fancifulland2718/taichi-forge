@@ -149,8 +149,9 @@ All additions are strictly opt-in; default values preserve bit-identical behavio
 | `spirv_disabled_passes` | `[]` | Per-call disable list for individual `spirv-opt` passes (e.g. `["loop-unroll"]`). |
 | `auto_real_function` | `False` | Auto-promote expensive `@ti.func` instances to `is_real_function=True` (LLVM-only, non-autodiff). |
 | `auto_real_function_threshold_us` | `1000` | Promotion threshold in microseconds of estimated compile cost. |
-| `cuda_sparse_pool_size_GB` | `0.0` (auto) | CUDA-only. Explicit override for the sparse SNode dynamic-allocation pool. `0` enables auto-sizing (default), set to a positive float to force a fixed pool size in GiB. Decoupled from `device_memory_GB` so dense workloads stay unaffected. |
-| `cuda_sparse_pool_size_floor_MiB` | `128` | CUDA-only. Floor (in MiB) for the auto-sized sparse pool when `cuda_sparse_pool_size_GB == 0` and `device_memory_fraction == 0`. Each NodeAllocator chunk is ~16 MiB; raise to e.g. `192` or `256` for sparse workloads with peak working sets > 8 chunks. |
+| `cuda_sparse_pool_size_GB` | `0.0` (use `device_memory_GB`) | CUDA-only. Explicit override for the sparse SNode dynamic-allocation pool, in GiB. `0` (default) preserves vanilla 1.7.4 semantics: the pool size equals `device_memory_GB` (or `device_memory_fraction × total_VRAM`). Set to a positive value to size the sparse pool independently of the dense allocation. |
+| `cuda_sparse_pool_auto_size` | `False` | CUDA-only, opt-in. When `True` and neither `device_memory_fraction` nor `cuda_sparse_pool_size_GB` is set, the sparse pool is auto-sized from the SNode tree (capped by `device_memory_GB`, floored at `cuda_sparse_pool_size_floor_MiB`). Default `False` preserves vanilla 1.7.4 behaviour where `device_memory_GB` is the actual pool size, not just a cap. Verify the heuristic covers your workload's NodeAllocator activation peak before enabling. |
+| `cuda_sparse_pool_size_floor_MiB` | `128` | CUDA-only. Floor (in MiB) for the auto-sized sparse pool when `cuda_sparse_pool_auto_size=True`. Each NodeAllocator chunk is ~16 MiB. No-op when auto-sizing is off. |
 | `spirv_listgen_subgroup_ballot` | `False` | Vulkan/SPIR-V only. Aggregates the per-thread `OpAtomicIAdd` into one subgroup-ballot atomic per active subgroup in the listgen kernel. Reduces atomic contention on dense-active sparse struct-for. Output SPIR-V differs and is keyed into the offline cache hash. |
 | `listgen_static_grid_dim` | `False` | CUDA / AMDGPU only. Launches sparse-listgen kernels with a grid_dim derived from the static upper bound on parent-element count, eliminating idle blocks on shallow sparse trees. Vulkan already computes the equivalent quantity, so this flag is a no-op for SPIR-V. |
 
@@ -234,26 +235,32 @@ Taichi Forge uses its own SemVer track starting at **0.1.2**. Fork release numbe
 
 ## Release notes
 
-### 0.3.5 (current) — 2026-05 maintenance
+### 0.3.7 (current) — sparse-pool sizing hotfix
 
-Maintenance line on top of 0.3.0; no public API removals, fully drop-in.
+Reverts the default behaviour change introduced in 0.3.5/0.3.6 that broke `device_memory_GB` semantics for sparse workloads.
 
-**CUDA sparse memory footprint**
+**Bug fix**
 
-- Default CUDA sparse SNode VRAM usage on the validated mpm-shaped 64³ workload drops from **1764 MiB → 868 MiB (≈ −51%)** versus vanilla 1.7.4 / pre-0.3.5, with no change to dense-only workloads or to Vulkan.
-- New `cuda_sparse_pool_size_GB` `ti.init(...)` kwarg (default `0.0`) decouples the sparse dynamic-allocation pool from `device_memory_GB`. When zero, the pool is auto-sized from the SNode tree, capped at `device_memory_GB`, with a configurable floor (default 128 MiB ≈ 8 NodeAllocator chunks). Workloads that previously over-provisioned the dense path solely to leave headroom for sparse activation can now drop `device_memory_GB` back to dense requirements.
-- New `cuda_sparse_pool_size_floor_MiB` (default `128`) tunes the auto-sizing floor for sparse workloads with peak working sets > 8 chunks.
-- Existing `device_memory_GB` and `device_memory_fraction` semantics are unchanged. Set `cuda_sparse_pool_size_GB` to a positive value to bypass auto-sizing entirely.
+- 0.3.5 and 0.3.6 unconditionally auto-sized the CUDA sparse pool from the SNode tree, treating `device_memory_GB` as a cap rather than the actual pool size. On MPM-shaped sparse trees the heuristic produced pools too small to accommodate runtime `NodeAllocator` activation, causing silent OOM on `from_numpy` / first-write kernels even when the user explicitly raised `device_memory_GB`.
+- Auto-sizing is now opt-in via the new `cuda_sparse_pool_auto_size=True` kwarg (default `False`). Default behaviour matches vanilla taichi 1.7.4 exactly: the sparse pool size equals `device_memory_GB` (or `device_memory_fraction × total_VRAM` when set).
+- `cuda_sparse_pool_size_GB > 0` continues to act as an explicit override; it bypasses every other sizing path.
+- `cuda_sparse_pool_size_floor_MiB` is now a no-op when `cuda_sparse_pool_auto_size=False` (the default).
 
-**Sparse struct-for performance**
+**Compatibility**
+
+- Default `device_memory_GB` semantics restored to vanilla 1.7.4.
+- Users who relied on the 0.3.5/0.3.6 implicit auto-sizing should add `cuda_sparse_pool_auto_size=True` to their `ti.init(...)` call.
+- Public Python and C-API surfaces unchanged versus 0.3.0.
+
+### 0.3.5 / 0.3.6
+
+Maintenance line on top of 0.3.0; introduced new sparse-pool sizing knobs and listgen optimisation flags. **Note**: the implicit sparse-pool auto-sizing default introduced in this line was reverted in 0.3.7 (see above) because it silently changed `device_memory_GB` semantics for sparse workloads.
+
+**Sparse struct-for performance (still active in 0.3.7)**
 
 - New `spirv_listgen_subgroup_ballot` knob (Vulkan/SPIR-V, opt-in) — aggregates the per-thread atomic in the listgen kernel into one subgroup-ballot atomic per subgroup, reducing contention on dense-active sparse struct-for. Output SPIR-V is offline-cache-keyed.
 - New `listgen_static_grid_dim` knob (CUDA / AMDGPU, opt-in) — derives sparse-listgen `grid_dim` from the static parent-element upper bound, eliminating idle blocks on shallow sparse trees. No-op on Vulkan (which already computes the equivalent quantity).
 - Both flags default OFF; output is bit-identical to the legacy path with the flag off, and offline-cache-keyed when on.
-
-**Compatibility**
-
-- Public Python and C-API surfaces unchanged versus 0.3.0. Every new knob defaults to upstream/0.3.0 behaviour.
 
 ### 0.3.0
 

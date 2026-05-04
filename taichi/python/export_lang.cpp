@@ -270,6 +270,8 @@ void export_lang(py::module &m) {
                      &CompileConfig::cuda_sparse_pool_size_GB)
       .def_readwrite("cuda_sparse_pool_size_floor_MiB",
                      &CompileConfig::cuda_sparse_pool_size_floor_MiB)
+      .def_readwrite("cuda_sparse_pool_auto_size",
+                     &CompileConfig::cuda_sparse_pool_auto_size)
       .def_readwrite("device_memory_fraction",
                      &CompileConfig::device_memory_fraction)
       .def_readwrite("fast_math", &CompileConfig::fast_math)
