@@ -410,51 +410,114 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
   }
 
   if (config_.arch == Arch::cuda && use_device_memory_pool() && !all_dense) {
-    // P-Sparse-Mem-2-A (always-on auto-sizing as of 2026-05-05):
-    // Derive a tight pool size from the SNode tree unless the user has
-    // explicitly opted into a legacy knob:
-    //   * device_memory_fraction > 0  -> use fraction-of-total path
-    //   * cuda_sparse_pool_size_GB > 0 -> use explicit pool size override
-    // Otherwise (default), each gc_able snode contributes
-    //   pointer  : cell_size_bytes
-    //   dynamic  : sizeof(void*) + cell_size_bytes * chunk_size
-    // multiplied by a per-snode heuristic chunk count, capped by
-    // device_memory_GB and floored at 256 MiB (chunk granularity).
+    // P-Sparse-Mem-2-A v2 (2026-05-05): when opted-in via
+    // `cuda_sparse_pool_auto_size`, mirror the device-side `NodeManager`
+    // geometry exactly (runtime.cpp:1026-1031 and NodeManager ctor) to
+    // estimate first-activation footprint accurately. The previous
+    // `cell_size_bytes * 1024` heuristic ignored chunk halving and
+    // underestimated by 10x+ for SNode shapes with large container size,
+    // causing silent OOM in `allocate_from_reserved_memory` even with
+    // `device_memory_GB` raised (the cap was the actual bug surface).
+    //
+    // Default OFF preserves vanilla taichi 1.7.4 semantics
+    // (`pool_size = device_memory_GB * 1GiB`). Opt-in is now safe for the
+    // SNode shapes covered by the per-NodeManager headroom below.
     std::size_t override_size = 0;
     if (config_.cuda_sparse_pool_auto_size &&
         config_.device_memory_fraction == 0 &&
         config_.cuda_sparse_pool_size_GB == 0) {
-      constexpr int kHeuristicChunks = 1024;
-      // 128 MiB floor (P-Sparse-Mem-3, 2026-05-05): each NodeAllocator
-      // chunk is ~16 MiB, so 128 MiB == 8 chunks, covering the validated
-      // mpm-shaped 64^3 workload (peak 5 chunks) with margin. Configurable
-      // via CompileConfig::cuda_sparse_pool_size_floor_MiB if a workload
-      // needs higher headroom. The previous 256 MiB floor was an
-      // overly-defensive setting from §16.10 initial bring-up.
-      const std::size_t kMinPoolSize =
-          std::size_t(std::max(0, config_.cuda_sparse_pool_size_floor_MiB))
-          << 20;
-      std::size_t auto_size = 0;
+      // Mirror runtime.cpp constants:
+      //   * runtime_NodeAllocator_initialize: chunk_num_elements = 16 * 1024
+      //   * NodeManager ctor: while (chunk_elements > 1 &&
+      //         chunk_elements * element_size > 128 MiB) chunk_elements /= 2
+      // ListManager has `Ptr chunks[128 * 1024]` (= 1 MiB on 64-bit) plus
+      // small POD fields; allocate_aligned uses 4 KiB pages. Each NodeManager
+      // creates 3 ListManager instances (free / recycled / data). At first
+      // activation, only the data_list's first chunk is touched.
+      constexpr std::size_t kNodeMgrChunkElementsDefault = 16UL * 1024;
+      constexpr std::size_t kNodeMgrMaxChunkBytes = 128UL << 20;
+      constexpr std::size_t kListManagerBytes =
+          (128UL << 10) * sizeof(void *) + 4096;
+      constexpr int kListManagersPerNodeManager = 3;
+      // Headroom: extra data_list chunks beyond the first. 2 covers typical
+      // gc / re-activation cycles; raise via cuda_sparse_pool_size_floor_MiB
+      // if a workload activates more chunks per NodeManager.
+      constexpr int kHeadroomChunks = 2;
+      // Baseline for misc allocations (LLVMRuntime fields, NodeManager
+      // structs themselves, ambient_elements, rand_states, etc).
+      constexpr std::size_t kBaselineBytes = 32UL << 20;
+
+      std::size_t auto_size = kBaselineBytes;
       for (size_t i = 0; i < snode_metas.size(); i++) {
         if (!is_gc_able(snode_metas[i].type))
           continue;
         std::size_t element_size = snode_metas[i].cell_size_bytes;
-        std::size_t node_size;
-        if (snode_metas[i].type == SNodeType::pointer) {
-          node_size = element_size;
-        } else {
-          node_size =
-              sizeof(void *) + element_size * snode_metas[i].chunk_size;
+        if (element_size == 0)
+          continue;
+        std::size_t chunk_elements = kNodeMgrChunkElementsDefault;
+        while (chunk_elements > 1 &&
+               chunk_elements * element_size > kNodeMgrMaxChunkBytes) {
+          chunk_elements /= 2;
         }
-        auto_size += node_size * kHeuristicChunks;
+        std::size_t chunk_bytes = chunk_elements * element_size;
+        auto_size += std::size_t(kListManagersPerNodeManager) * kListManagerBytes;
+        // Phase 0.5 (2026-05): when the user provided
+        // `vk_max_active=N` on the SNode, size the per-NodeManager data
+        // region to fit ceil(N / chunk_elements) chunks plus a small
+        // safety margin (kHintHeadroomChunks) instead of the legacy
+        // worst-case (1 + kHeadroomChunks) chunks. Lower-bound is one
+        // `num_cells_per_container` (a single container must always fit).
+        // Default (-1) keeps the legacy worst-case path bit-for-bit.
+        //
+        // The hint headroom (1 chunk) covers gc/re-activation transient
+        // overcommit and miscellaneous runtime allocations that draw from
+        // the same preallocated pool; setting it to 0 produced silent
+        // `allocate_from_reserved_memory: Out of CUDA pre-allocated
+        // memory` errors on workloads where the dominant chunk is large
+        // (>50 MiB) and only a single chunk gets reserved. With +1 chunk,
+        // savings vs legacy = 1 chunk per gc-able SNode (typically the
+        // largest one) which still meaningfully reduces footprint when
+        // chunks are big but activations are sparse.
+        constexpr int kHintHeadroomChunks = 1;
+        std::size_t data_chunks = std::size_t(1 + kHeadroomChunks);
+        const int64_t hint = snode_metas[i].vk_max_active_hint;
+        if (hint > 0) {
+          int64_t lower_bound = snode_metas[i].num_cells_per_container > 0
+                                    ? snode_metas[i].num_cells_per_container
+                                    : 1;
+          int64_t effective = std::max<int64_t>(hint, lower_bound);
+          std::size_t needed_chunks =
+              (std::size_t(effective) + chunk_elements - 1) / chunk_elements;
+          data_chunks = std::max<std::size_t>(needed_chunks, 1) +
+                        std::size_t(kHintHeadroomChunks);
+        }
+        auto_size += data_chunks * chunk_bytes;
       }
-      auto_size = std::max(auto_size, kMinPoolSize);
+      // User-tunable lower bound (defensive floor for tiny SNode trees).
+      const std::size_t floor_bytes =
+          std::size_t(std::max(0, config_.cuda_sparse_pool_size_floor_MiB))
+          << 20;
+      auto_size = std::max(auto_size, floor_bytes);
+
+      // device_memory_GB acts as a sanity ceiling, NOT a silent cap. If
+      // the heuristic asks for more, warn and clamp; the user can either
+      // raise device_memory_GB or set cuda_sparse_pool_size_GB explicitly.
       std::size_t cap =
           std::size_t(config_.device_memory_GB * (1UL << 30));
-      override_size = std::min(auto_size, cap);
+      if (auto_size > cap) {
+        TI_WARN(
+            "cuda_sparse_pool_auto_size: SNode-derived sparse pool "
+            "{:.2f} MiB exceeds device_memory_GB cap {:.2f} MiB; clamping. "
+            "Raise device_memory_GB or set cuda_sparse_pool_size_GB to "
+            "avoid runtime OOM in allocate_from_reserved_memory.",
+            auto_size / 1048576.0, cap / 1048576.0);
+        override_size = cap;
+      } else {
+        override_size = auto_size;
+      }
       TI_TRACE(
-          "P-Sparse-Mem-2-A: auto-sized sparse pool = {:.2f} MiB "
-          "(snode-derived {:.2f} MiB, capped by device_memory_GB={:.2f})",
+          "P-Sparse-Mem-2-A v2: auto-sized sparse pool = {:.2f} MiB "
+          "(NodeManager-mirrored {:.2f} MiB, ceiling device_memory_GB={:.2f})",
           override_size / 1048576.0, auto_size / 1048576.0,
           config_.device_memory_GB);
     }

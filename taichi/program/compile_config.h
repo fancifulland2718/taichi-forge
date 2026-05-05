@@ -366,15 +366,20 @@ struct CompileConfig {
   // can raise this knob or use `cuda_sparse_pool_size_GB` directly.
   int32_t cuda_sparse_pool_size_floor_MiB;
 
-  // P-Sparse-Mem-2-A re-gated (2026-05-05, hotfix for 0.3.6 regression):
-  // when true (and `device_memory_fraction == 0` and
-  // `cuda_sparse_pool_size_GB == 0`), derive the cuda sparse pool size from
-  // the SNode tree (heuristic per gc_able snode * 1024 chunks) capped by
-  // `device_memory_GB` and floored at `cuda_sparse_pool_size_floor_MiB`.
-  // Default `false` to preserve vanilla taichi 1.7.4 semantics where
-  // `device_memory_GB` is the actual sparse-pool size, not just a cap.
-  // Opt in only after verifying the auto-sizing heuristic covers the
-  // workload's NodeAllocator activation peak.
+  // P-Sparse-Mem-2-A v2 (2026-05-05): when true (and `device_memory_fraction
+  // == 0` and `cuda_sparse_pool_size_GB == 0`), derive the cuda sparse pool
+  // size from the SNode tree by mirroring the device-side `NodeManager`
+  // chunk geometry (3 ListManager + (1 + headroom) data chunks per gc-able
+  // snode, plus baseline). `device_memory_GB` becomes a sanity ceiling
+  // (warn-and-clamp), no longer a silent cap.
+  //
+  // Default `false` preserves vanilla taichi 1.7.4 semantics where
+  // `device_memory_GB` is the actual sparse-pool size. Opt in to save
+  // memory on tiny SNode trees; for unusually deep activation patterns
+  // (more chunks per NodeManager than the headroom covers), raise
+  // `cuda_sparse_pool_size_floor_MiB` or set `cuda_sparse_pool_size_GB`
+  // explicitly. Earlier `* 1024` heuristic (pre-v2) was bogus and is the
+  // reason this knob defaults off until each user validates their workload.
   bool cuda_sparse_pool_auto_size{true};
 
   // Opengl backend options:

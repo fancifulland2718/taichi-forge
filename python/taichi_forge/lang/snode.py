@@ -44,15 +44,18 @@ class SNode:
         Args:
             axes (List[Axis]): Axes to activate.
             dimensions (Union[List[int], int]): Shape of each axis.
-            vk_max_active (Optional[int]): Vulkan-only hint for the maximum
+            vk_max_active (Optional[int]): Per-SNode hint for the maximum
                 number of cells expected to be activated under this pointer
-                SNode. When provided, the Vulkan backend uses this value
-                directly as the pointer pool capacity, bypassing the
-                worst-case ``total_num_cells_from_root`` and any global
-                ``vulkan_pointer_pool_fraction`` setting. Other backends
-                ignore this hint. If the value is below the per-container
-                lower bound or above the worst-case upper bound, it is
-                clamped (with a warning).
+                SNode. Vulkan uses this directly as the pointer pool
+                capacity, bypassing worst-case ``total_num_cells_from_root``
+                and any global ``vulkan_pointer_pool_fraction``. CUDA uses
+                it (when ``cuda_sparse_pool_auto_size`` is enabled) to size
+                the sparse pool to ``ceil(hint / chunk_elements) * chunk_bytes``
+                instead of the per-NodeManager worst-case, dramatically
+                reducing first-activation footprint for large dense parents.
+                The CPU LLVM backend allocates on demand and ignores this
+                hint. Out-of-range values are clamped (with a warning) on
+                Vulkan; CUDA only enforces the per-container lower bound.
 
         Returns:
             The added :class:`~taichi_forge.lang.SNode` instance.
@@ -68,20 +71,17 @@ class SNode:
             raise TaichiRuntimeError(
                 f"vk_max_active must be a positive integer, got {vk_max_active!r}."
             )
-        # C-1 (2026-05): warn early if user pinned vk_max_active on a backend
-        # that does not honor it (LLVM cpu/cuda allocate on demand and ignore
-        # the hint entirely). This catches the common pitfall of "I set
-        # vk_max_active=1024 but my CPU run still allocates worst-case" /
-        # "switching arch from vulkan to cuda silently changed memory
-        # behavior".
+        # Phase 0.5 (2026-05): warn only when the hint will truly be ignored
+        # (CPU LLVM allocates on demand). Vulkan and CUDA both honor the
+        # hint; CUDA path consumes it via cuda_sparse_pool_auto_size during
+        # initialize_llvm_runtime_snodes.
         cur_arch = impl.current_cfg().arch
-        if cur_arch != _ti_core.vulkan:
+        if cur_arch != _ti_core.vulkan and cur_arch != _ti_core.cuda:
             warnings.warn(
-                f"vk_max_active={vk_max_active} is set on a non-Vulkan backend "
-                f"(arch={cur_arch}); the hint will be ignored. The Vulkan "
-                "backend is the only consumer of this kwarg; LLVM backends "
-                "allocate sparse pointer storage on demand and do not need "
-                "(or honor) a static capacity hint.",
+                f"vk_max_active={vk_max_active} is set on a backend that "
+                f"does not consume the hint (arch={cur_arch}); the value "
+                "will be ignored. Vulkan and CUDA are the consumers; the "
+                "CPU LLVM backend allocates sparse storage on demand.",
                 stacklevel=2,
             )
         return SNode(self.ptr.pointer_with_hint(axes, dimensions, int(vk_max_active), dbg))
