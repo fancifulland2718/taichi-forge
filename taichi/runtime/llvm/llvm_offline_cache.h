@@ -69,8 +69,22 @@ struct LlvmOfflineCache {
       SNodeType type = SNodeType::undefined;
       size_t cell_size_bytes{0};
       size_t chunk_size{0};
+      // P-Sparse-Mem-2-A Phase 0.5 (2026-05): per-SNode user-provided
+      // capacity hint (mirrors SNode::vk_max_active_hint, -1 = unset) and
+      // the cached `num_cells_per_container` lower bound. Consumed by the
+      // CUDA sparse pool sizing path in initialize_llvm_runtime_snodes to
+      // avoid worst-case `(1 + headroom) * chunk_bytes` over-allocation.
+      // Vulkan reads the live SNode field directly; here we serialize so
+      // the LLVM offline cache reload path keeps Phase 0.5 sizing.
+      int64_t vk_max_active_hint{-1};
+      int64_t num_cells_per_container{1};
 
-      TI_IO_DEF(id, type, cell_size_bytes, chunk_size);
+      TI_IO_DEF(id,
+                type,
+                cell_size_bytes,
+                chunk_size,
+                vk_max_active_hint,
+                num_cells_per_container);
     };
 
     int tree_id{0};
