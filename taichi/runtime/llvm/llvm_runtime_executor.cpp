@@ -477,6 +477,15 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       // per-snode element_list budget here so the global region scales
       // with snode_metas.size().
       auto_size += snode_metas.size() * kListManagerBytes;
+      // Phase 1-E (2026-05): emit a budget breakdown so users can see
+      // how much of the global pool is consumed by per-SNode element_list
+      // metadata vs. data regions vs. headroom. Useful for diagnosing
+      // implicit allocation pressure on large SNode trees.
+      TI_TRACE(
+          "Phase-1-E element_list budget: {} SNode(s) × {:.2f} MiB = "
+          "{:.2f} MiB",
+          snode_metas.size(), kListManagerBytes / 1048576.0,
+          (snode_metas.size() * kListManagerBytes) / 1048576.0);
       for (size_t i = 0; i < snode_metas.size(); i++) {
         if (!is_gc_able(snode_metas[i].type))
           continue;
