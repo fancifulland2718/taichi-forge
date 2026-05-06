@@ -64,7 +64,10 @@ void Pointer_activate(Ptr meta_, Ptr node, int i) {
         (Ptr)((uint64_t)nm->dedicated_chunk.preallocated_tail - det_bytes);
     Ptr pool_cell =
         (Ptr)((uint64_t)pool_base + (uint64_t)i * meta->element_size);
-    atomic_exchange_u64((u64 *)data_ptr, (u64)pool_cell);
+    auto old = atomic_exchange_u64((u64 *)data_ptr, (u64)pool_cell);
+    if (old == 0) {
+      mark_element_lists_dirty_if_reuse(meta);
+    }
     return;
   }
 
@@ -83,6 +86,7 @@ void Pointer_activate(Ptr meta_, Ptr node, int i) {
             // TODO: Not sure if we really need atomic_exchange here,
             // just to be safe.
             atomic_exchange_u64((u64 *)data_ptr, allocated);
+            mark_element_lists_dirty_if_reuse(meta);
           },
           [&]() { return *data_ptr == nullptr; });
     }
@@ -94,16 +98,40 @@ void Pointer_deactivate(Ptr meta, Ptr node, int i) {
   auto num_elements = Pointer_get_num_elements(meta, node);
   Ptr lock = node + 8 * i;
   Ptr &data_ptr = *(Ptr *)(node + 8 * (num_elements + i));
+  // CS-1 (2026-05): deterministic-slot SNodes skip recycle — the GC chain
+  // is bypassed entirely; slots are reset via Pointer_reset_all bulk memset.
   if (data_ptr != nullptr) {
+    auto smeta = (StructMeta *)meta;
+    if (((PointerMeta *)smeta)->deterministic_slot) {
+      // Fast path: just clear the slot. No lock, no recycle, no GC.
+      // The bulk Pointer_reset_all kernel handles full cleanup later.
+      data_ptr = nullptr;
+      mark_element_lists_dirty_if_reuse(smeta);
+      return;
+    }
+    // Legacy path: lock + recycle for GC
     locked_task(lock, [&] {
       if (data_ptr != nullptr) {
-        auto smeta = (StructMeta *)meta;
         auto rt = smeta->context->runtime;
         auto alloc = rt->node_allocators[smeta->snode_id];
         alloc->recycle(data_ptr);
         data_ptr = nullptr;
+        mark_element_lists_dirty_if_reuse(smeta);
       }
     });
+  }
+}
+
+// CS-1 (2026-05): bulk reset all pointer slots to null for deterministic-slot
+// SNodes. Called from a single kernel launch replacing the 3-stage GC chain.
+// Each thread handles a chunk of slots; all threads write null in parallel
+// (no locks — the slots are already individually cleared by
+// Pointer_deactivate's fast path, and this just ensures a clean sweep).
+void Pointer_reset_all(Ptr meta, Ptr node) {
+  auto num_elements = Pointer_get_num_elements(meta, node);
+  Ptr *slot_base = (Ptr *)(node + 8 * num_elements);
+  for (int i = thread_idx(); i < num_elements; i += block_dim() * grid_dim()) {
+    slot_base[i] = nullptr;
   }
 }
 

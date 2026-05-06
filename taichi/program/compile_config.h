@@ -197,6 +197,18 @@ struct CompileConfig {
   // NodeManager::allocate path. Default false preserves vanilla 1.7.4
   // semantics.
   bool cuda_pointer_deterministic_slot{false};
+  // CS-1 (2026-05): CUDA pointer fast deactivate/reset. When true AND
+  // cuda_pointer_deterministic_slot is ON, deterministic-slot pointer
+  // SNodes skip the 3-stage GC kernel chain and use a single parallel
+  // memset kernel to clear pointer slots and bitmask. Reduces
+  // deactivate_all fixed cost from ~170 us to ~20 us. Default false
+  // preserves vanilla 1.7.4 semantics.
+  bool cuda_pointer_fast_reset{false};
+  // CS-3 (2026-05): CUDA LLVM sparse element-list reuse. When true,
+  // clear_list/listgen keep an epoch per element list and skip rebuilding
+  // a list if no pointer/bitmasked/dynamic active-set mutation has happened
+  // since the previous build. Default false preserves legacy listgen behavior.
+  bool cuda_listgen_reuse{false};
   // G11-A (2026-05): bitmasked SNode 在 deactivate 时是否同时把 cell 的 data
   // slot 清零。默认 true != vanilla 1.7.4 / taichi-dev 行为（仅翻 mask 位，
   // 不动 data；下次 activate 看到的是上次写入的旧值）。设为 true 后，

@@ -136,6 +136,15 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
     // cache key。默认 false 保持哈希稳定。
     serializer(config.bitmasked_clear_data_on_deactivate);
   }
+  if (config.arch == Arch::cuda) {
+    // CS-1/2/3 (2026-05): these CUDA sparse flags alter emitted LLVM IR or
+    // runtime metadata decisions. Include them so ON/OFF runs do not reuse
+    // stale offline-cache entries.
+    serializer(config.cuda_pointer_deterministic_slot);
+    serializer(config.cuda_pointer_fast_reset);
+    serializer(config.cuda_listgen_reuse);
+    serializer(config.bitmasked_clear_data_on_deactivate);
+  }
   serializer.finalize();
 
   return serializer.data;

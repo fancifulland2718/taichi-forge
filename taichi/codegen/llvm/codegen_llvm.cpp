@@ -307,6 +307,9 @@ void TaskCodeGenLLVM::emit_struct_meta_base(const std::string &name,
   common.set("element_size", tlctx->get_constant((uint64)element_size));
   common.set("max_num_elements",
              tlctx->get_constant(snode->max_num_elements()));
+  common.set("listgen_reuse",
+             tlctx->get_constant(compile_config.arch == Arch::cuda &&
+                                 compile_config.cuda_listgen_reuse));
   common.set("context", get_context());
 
   /*
@@ -1176,8 +1179,24 @@ void TaskCodeGenLLVM::emit_list_gen(OffloadedStmt *listgen) {
 }
 
 void TaskCodeGenLLVM::emit_gc(OffloadedStmt *stmt) {
-  auto snode = stmt->snode->id;
-  call("node_gc", get_runtime(), tlctx->get_constant(snode));
+  auto snode = stmt->snode;
+  // CS-1 (2026-05): deterministic-slot pointer SNodes skip the 3-stage GC
+  // chain entirely. Pointer slots are zeroed by Pointer_deactivate during
+  // the struct-for kernel; bitmask is zeroed by bitmasked deactivation.
+  // The NodeManager free/recycled/data lists are never touched by the
+  // deterministic allocation path — GC is a no-op. Skipping saves ~170 us.
+  if (compile_config.cuda_pointer_fast_reset &&
+      compile_config.cuda_pointer_deterministic_slot &&
+      snode->type == SNodeType::pointer) {
+    int64 total_from_root = 1;
+    for (int j = 0; j < taichi_max_num_indices; j++) {
+      total_from_root *= snode->extractors[j].num_elements_from_root;
+    }
+    if (snode->num_cells_per_container == total_from_root) {
+      return;  // skip GC — slots already cleared, allocator state is idle
+    }
+  }
+  call("node_gc", get_runtime(), tlctx->get_constant(snode->id));
 }
 
 void TaskCodeGenLLVM::create_increment(llvm::Value *ptr, llvm::Value *value) {
