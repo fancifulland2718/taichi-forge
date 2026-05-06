@@ -467,6 +467,16 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       constexpr std::size_t kBaselineBytes = 32UL << 20;
 
       std::size_t auto_size = kBaselineBytes;
+      // Phase 1-E (2026-05): runtime_initialize_snodes creates ONE
+      // element_list (ListManager, ~1 MiB struct) per SNode in the tree,
+      // not just per gc_able SNode. With workloads that place many
+      // fields on a single bitmasked node (e.g. 9 fields on one
+      // pointer.bitmasked → ~25 snodes), the unaccounted element_list
+      // metadata easily exceeds the 24 MiB headroom and triggers
+      // `Out of CUDA pre-allocated memory` during snode init. Add the
+      // per-snode element_list budget here so the global region scales
+      // with snode_metas.size().
+      auto_size += snode_metas.size() * kListManagerBytes;
       for (size_t i = 0; i < snode_metas.size(); i++) {
         if (!is_gc_able(snode_metas[i].type))
           continue;
@@ -600,7 +610,13 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       // Total VRAM = global_region + Σ(data_regions) ≈ auto_size + 16 MiB.
       if (do_per_snode_pool && !snode_entries.empty()) {
         constexpr std::size_t kPerSnodePoolGlobalHeadroom = 24UL << 20;
-        std::size_t global_region = kBaselineBytes + kPerSnodePoolGlobalHeadroom;
+        // Phase 1-E (2026-05): include per-SNode element_list metadata
+        // budget (one ListManager per SNode in the tree). This mirrors
+        // the addition in `auto_size` above and prevents snode-init OOM
+        // on trees with many leaf places.
+        std::size_t global_region = kBaselineBytes +
+                                    kPerSnodePoolGlobalHeadroom +
+                                    snode_metas.size() * kListManagerBytes;
         std::size_t total_buffer = global_region;
         for (const auto &e : snode_entries) {
           global_region += e.metadata_bytes;
@@ -734,7 +750,13 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
     constexpr int kHeadroomChunks = 2;
     constexpr int kHintHeadroomChunks = 1;
 
-    std::size_t global_region = kBaseline + kHeadroom;
+    // Phase 1-E (2026-05): account for per-SNode element_list metadata
+    // (one ListManager per SNode in the tree, ~1 MiB each), which lives
+    // in the global region. Without this, the carved global_region can
+    // be too small when a sparse tree has many leaf places (e.g. 9
+    // fields on one bitmasked node), causing snode-init OOM.
+    std::size_t global_region =
+        kBaseline + kHeadroom + snode_metas.size() * kMgrBytes;
     std::vector<std::pair<int, std::size_t>> snode_pools;  // (id, data_bytes)
     for (size_t i = 0; i < snode_metas.size(); i++) {
       if (!is_gc_able(snode_metas[i].type))
