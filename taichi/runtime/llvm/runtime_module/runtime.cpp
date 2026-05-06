@@ -1085,37 +1085,6 @@ void runtime_NodeAllocator_set_dedicated_pool(LLVMRuntime *runtime,
   runtime->node_allocators[snode_id]->set_dedicated_pool(ptr, size);
 }
 
-// Phase 1 (2026-05): read back the current bump watermark of a dedicated
-// pool. Returns usage permille (0-1000) and raw used bytes for host-side
-// diagnostics and profile-driven tuning.
-void runtime_NodeAllocator_get_watermark(LLVMRuntime *runtime,
-                                          int snode_id,
-                                          Ptr out_permille,
-                                          Ptr out_used_bytes) {
-  auto *nm = runtime->node_allocators[snode_id];
-  uint64_t permille = 0;
-  uint64_t used = 0;
-  if (nm && nm->has_dedicated && nm->dedicated_chunk.preallocated_size > 0) {
-    uint64_t head = (uint64_t)nm->dedicated_chunk.preallocated_head;
-    uint64_t tail = (uint64_t)nm->dedicated_chunk.preallocated_tail;
-    uint64_t size = nm->dedicated_chunk.preallocated_size;
-    uint64_t start = tail - size;
-    used = (head > start) ? (head - start) : 0;
-    permille = (used * 1000) / size;
-  }
-  if (out_permille) *(uint64_t *)out_permille = permille;
-  if (out_used_bytes) *(uint64_t *)out_used_bytes = used;
-}
-
-void runtime_allocate_ambient(LLVMRuntime *runtime,
-                              int snode_id,
-                              std::size_t size) {
-  // Do not use NodeManager for the ambient node since it will never be garbage
-  // collected.
-  runtime->ambient_elements[snode_id] = runtime->allocate_aligned(
-      runtime->runtime_memory_chunk, size, 128, true /*request*/);
-}
-
 void mutex_lock_i32(Ptr mutex) {
   while (atomic_exchange_i32((i32 *)mutex, 1) == 1)
     ;

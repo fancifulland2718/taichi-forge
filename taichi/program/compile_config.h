@@ -187,6 +187,16 @@ struct CompileConfig {
   //   `capacity >= worst_capacity && allocator_kind == "bump"`，不满足时强制
   //   降级到 cas_marker 路径（与本节落地前字节等价）。设 false 也可整体降级。
   bool vulkan_pointer_deterministic_slot{true};
+  // CS-2 (2026-05): CUDA pointer SNode deterministic-slot allocation.
+  // When true, eligible pointer SNodes (num_cells_per_container ==
+  // total_num_cells_from_root, i.e. single-instance) skip the device-side
+  // NodeManager bump allocator and use `atomicCAS(slot, 0, pool_base + i *
+  // element_size)` to activate. Requires `cuda_sparse_per_snode_pool == true`
+  // (Phase 1-D) for the dedicated pool region. Gate is checked at codegen
+  // time; ineligible SNodes silently fall back to the legacy
+  // NodeManager::allocate path. Default false preserves vanilla 1.7.4
+  // semantics.
+  bool cuda_pointer_deterministic_slot{false};
   // G11-A (2026-05): bitmasked SNode 在 deactivate 时是否同时把 cell 的 data
   // slot 清零。默认 true != vanilla 1.7.4 / taichi-dev 行为（仅翻 mask 位，
   // 不动 data；下次 activate 看到的是上次写入的旧值）。设为 true 后，

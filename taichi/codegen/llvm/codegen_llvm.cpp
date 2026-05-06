@@ -235,6 +235,34 @@ std::unique_ptr<RuntimeObject> TaskCodeGenLLVM::emit_struct_meta_object(
   } else if (snode->type == SNodeType::pointer) {
     meta = std::make_unique<RuntimeObject>("PointerMeta", this, builder.get());
     emit_struct_meta_base("Pointer", meta->ptr, snode);
+    // CS-2 (2026-05): set deterministic_slot flag in PointerMeta.
+    // Gate: (a) CompileConfig flag is ON, (b) single-instance SNode
+    // (num_cells_per_container == total_num_cells_from_root, computed
+    // as the product of num_elements_from_root across all axes),
+    // (c) CUDA backend (non-CPU). Falls through silently if any
+    // condition fails — Pointer_activate uses legacy path.
+    bool det_slot = false;
+    if (compile_config.cuda_pointer_deterministic_slot &&
+        !arch_is_cpu(compile_config.arch)) {
+      int64 total_from_root = 1;
+      for (int j = 0; j < taichi_max_num_indices; j++) {
+        total_from_root *= snode->extractors[j].num_elements_from_root;
+      }
+      if (snode->num_cells_per_container == total_from_root) {
+        det_slot = true;
+      }
+    }
+    // CS-2: write deterministic_slot directly into the PointerMeta struct.
+    // Use GEP to reach the field, avoiding a runtime function lookup
+    // (PointerMeta_set_deterministic_slot may not be visible to the JIT).
+    // PointerMeta layout: { StructMeta, bool deterministic_slot }.
+    auto *ptr_meta_ty = get_runtime_type("PointerMeta");
+    auto *cast_ptr = builder->CreateBitCast(
+        meta->ptr, llvm::PointerType::get(ptr_meta_ty, 0));
+    // GEP to the second struct element (deterministic_slot is at index 1).
+    auto *det_field = builder->CreateStructGEP(
+        ptr_meta_ty, cast_ptr, 1, "det_slot_gep");
+    builder->CreateStore(tlctx->get_constant(det_slot), det_field);
   } else if (snode->type == SNodeType::root) {
     meta = std::make_unique<RuntimeObject>("RootMeta", this, builder.get());
     emit_struct_meta_base("Root", meta->ptr, snode);

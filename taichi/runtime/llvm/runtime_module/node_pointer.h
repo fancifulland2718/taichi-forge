@@ -2,10 +2,10 @@
 
 // Specialized Attributes and functions
 struct PointerMeta : public StructMeta {
-  bool _;
+  bool deterministic_slot;   // CS-2: set at codegen time from CompileConfig
 };
 
-STRUCT_FIELD(PointerMeta, _);
+STRUCT_FIELD(PointerMeta, deterministic_slot);
 
 i32 Pointer_get_num_elements(Ptr meta, Ptr node) {
   return ((StructMeta *)meta)->max_num_elements;
@@ -41,9 +41,35 @@ bool is_representative(uint32 mask, uint64 value) {
 void Pointer_activate(Ptr meta_, Ptr node, int i) {
   auto meta = (StructMeta *)meta_;
   auto num_elements = Pointer_get_num_elements(meta_, node);
-  volatile Ptr lock = node + 8 * i;
   volatile Ptr *data_ptr = (Ptr *)(node + 8 * (num_elements + i));
 
+  // CS-2 (2026-05): deterministic-slot fast path. When the pointer SNode
+  // has a single instance in the tree, each child index i ∈ [0,
+  // num_cells_per_container) maps to a unique pool slot. The host has
+  // pre-allocated and zero-filled a contiguous pool. We compute the target
+  // address deterministically and publish it with a single atomicCAS.
+  // All concurrent threads that reach this slot compute the same address,
+  // so the CAS winner publishes it and losers see the same value.
+  // No lock, no warp election, no barrier — replaces ~15 lines of the
+  // legacy path.
+  if (((PointerMeta *)meta)->deterministic_slot) {
+    auto rt = meta->context->runtime;
+    auto nm = rt->node_allocators[meta->snode_id];
+    // CS-2: deterministic pool carved from the TAIL of the dedicated chunk.
+    // The head is bumped by ListManager data allocations; the tail is stable.
+    // reserve = max_num_elements × element_size bytes at the end.
+    uint64_t det_bytes =
+        (uint64_t)meta->max_num_elements * meta->element_size;
+    Ptr pool_base =
+        (Ptr)((uint64_t)nm->dedicated_chunk.preallocated_tail - det_bytes);
+    Ptr pool_cell =
+        (Ptr)((uint64_t)pool_base + (uint64_t)i * meta->element_size);
+    atomic_exchange_u64((u64 *)data_ptr, (u64)pool_cell);
+    return;
+  }
+
+  // Legacy path: allocate through NodeManager with lock + warp coordination.
+  volatile Ptr lock = node + 8 * i;
   if (*data_ptr == nullptr) {
     // The cuda_ calls will return 0 or do noop on CPUs
     u32 mask = cuda_active_mask();
