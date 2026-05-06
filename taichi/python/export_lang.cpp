@@ -202,6 +202,10 @@ void export_lang(py::module &m) {
                      &CompileConfig::vulkan_pointer_deterministic_slot)
       .def_readwrite("cuda_pointer_deterministic_slot",
                      &CompileConfig::cuda_pointer_deterministic_slot)
+      .def_readwrite("cuda_pointer_fast_reset",
+                     &CompileConfig::cuda_pointer_fast_reset)
+      .def_readwrite("cuda_listgen_reuse",
+            &CompileConfig::cuda_listgen_reuse)
       .def_readwrite("bitmasked_clear_data_on_deactivate",
                      &CompileConfig::bitmasked_clear_data_on_deactivate)
       .def_readwrite("print_ir", &CompileConfig::print_ir)

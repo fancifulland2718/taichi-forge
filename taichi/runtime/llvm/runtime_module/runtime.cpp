@@ -308,6 +308,7 @@ struct StructMeta {
   i32 snode_id;
   std::size_t element_size;
   i64 max_num_elements;
+  u1 listgen_reuse;
 
   Ptr (*lookup_element)(Ptr, Ptr, int i);
 
@@ -327,6 +328,7 @@ struct StructMeta {
 STRUCT_FIELD(StructMeta, snode_id)
 STRUCT_FIELD(StructMeta, element_size)
 STRUCT_FIELD(StructMeta, max_num_elements)
+STRUCT_FIELD(StructMeta, listgen_reuse)
 STRUCT_FIELD(StructMeta, get_num_elements);
 STRUCT_FIELD(StructMeta, lookup_element);
 STRUCT_FIELD(StructMeta, from_parent_element);
@@ -574,6 +576,8 @@ struct LLVMRuntime {
   Ptr thread_pool;
   parallel_for_type parallel_for;
   ListManager *element_lists[taichi_max_num_snodes];
+  i32 element_list_dirty_epoch;
+  i32 element_list_clean_epoch[taichi_max_num_snodes];
   NodeManager *node_allocators[taichi_max_num_snodes];
   Ptr ambient_elements[taichi_max_num_snodes];
   Ptr temporaries;
@@ -623,9 +627,11 @@ struct LLVMRuntime {
 
 // TODO: are these necessary?
 STRUCT_FIELD_ARRAY(LLVMRuntime, element_lists);
+STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_clean_epoch);
 STRUCT_FIELD_ARRAY(LLVMRuntime, node_allocators);
 STRUCT_FIELD_ARRAY(LLVMRuntime, roots);
 STRUCT_FIELD_ARRAY(LLVMRuntime, root_mem_sizes);
+STRUCT_FIELD(LLVMRuntime, element_list_dirty_epoch);
 STRUCT_FIELD(LLVMRuntime, temporaries);
 STRUCT_FIELD(LLVMRuntime, assert_failed);
 STRUCT_FIELD(LLVMRuntime, host_printf);
@@ -778,7 +784,9 @@ void runtime_ListManager_get_num_active_chunks(LLVMRuntime *runtime,
 
 RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, node_allocators);
 RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_lists);
+RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_clean_epoch);
 RUNTIME_STRUCT_FIELD(LLVMRuntime, total_requested_memory);
+RUNTIME_STRUCT_FIELD(LLVMRuntime, element_list_dirty_epoch);
 
 RUNTIME_STRUCT_FIELD(NodeManager, free_list);
 RUNTIME_STRUCT_FIELD(NodeManager, recycled_list);
@@ -788,6 +796,23 @@ RUNTIME_STRUCT_FIELD(NodeManager, free_list_used);
 RUNTIME_STRUCT_FIELD(ListManager, num_elements);
 RUNTIME_STRUCT_FIELD(ListManager, max_num_elements_per_chunk);
 RUNTIME_STRUCT_FIELD(ListManager, element_size);
+
+void mark_element_lists_dirty_if_reuse(StructMeta *meta) {
+  if (!meta->listgen_reuse) {
+    return;
+  }
+  atomic_add_i32(&meta->context->runtime->element_list_dirty_epoch, 1);
+}
+
+u1 element_list_is_current(LLVMRuntime *runtime, StructMeta *child) {
+  return runtime->element_list_clean_epoch[child->snode_id] ==
+         runtime->element_list_dirty_epoch;
+}
+
+void mark_element_list_current(LLVMRuntime *runtime, StructMeta *child) {
+  runtime->element_list_clean_epoch[child->snode_id] =
+      runtime->element_list_dirty_epoch;
+}
 
 void taichi_assert(RuntimeContext *context, u1 test, const char *msg) {
   taichi_assert_runtime(context->runtime, test, msg);
@@ -987,6 +1012,10 @@ void runtime_initialize(
   runtime->rand_states = (RandState *)runtime->allocate_aligned(
       runtime->runtime_objects_chunk,
       sizeof(RandState) * runtime->num_rand_states, taichi_page_size);
+  runtime->element_list_dirty_epoch = 1;
+  for (int i = 0; i < taichi_max_num_snodes; i++) {
+    runtime->element_list_clean_epoch[i] = 0;
+  }
 }
 
 void runtime_initialize_memory(LLVMRuntime *runtime,
@@ -1071,6 +1100,14 @@ void runtime_NodeAllocator_initialize_ex(LLVMRuntime *runtime,
                                           int chunk_num_elements) {
   runtime->node_allocators[snode_id] =
       runtime->create<NodeManager>(runtime, node_size, chunk_num_elements);
+}
+
+void runtime_allocate_ambient(LLVMRuntime *runtime,
+                              int snode_id,
+                              std::size_t node_size) {
+  auto ambient = runtime->node_allocators[snode_id]->allocate();
+  std::memset(ambient, 0, node_size);
+  runtime->ambient_elements[snode_id] = ambient;
 }
 
 // Phase 1 (2026-05): assign a dedicated bump region (carved from the global
@@ -1314,6 +1351,9 @@ DEFINE_REDUCTION(xor, i32);
 // "Element", "component" are different concepts
 
 void clear_list(LLVMRuntime *runtime, StructMeta *parent, StructMeta *child) {
+  if (child->listgen_reuse && element_list_is_current(runtime, child)) {
+    return;
+  }
   auto child_list = runtime->element_lists[child->snode_id];
   child_list->clear();
 }
@@ -1328,6 +1368,9 @@ void clear_list(LLVMRuntime *runtime, StructMeta *parent, StructMeta *child) {
 void element_listgen_root(LLVMRuntime *runtime,
                           StructMeta *parent,
                           StructMeta *child) {
+  if (child->listgen_reuse && element_list_is_current(runtime, child)) {
+    return;
+  }
   // If there's just one element in the parent list, we need to use the blocks
   // (instead of threads) to split the parent container
   auto parent_list = runtime->element_lists[parent->snode_id];
@@ -1372,11 +1415,17 @@ void element_listgen_root(LLVMRuntime *runtime,
     elem.pcoord = element.pcoord;
     child_list->append(&elem);
   }
+  if (child->listgen_reuse) {
+    mark_element_list_current(runtime, child);
+  }
 }
 
 void element_listgen_nonroot(LLVMRuntime *runtime,
                              StructMeta *parent,
                              StructMeta *child) {
+  if (child->listgen_reuse && element_list_is_current(runtime, child)) {
+    return;
+  }
   auto parent_list = runtime->element_lists[parent->snode_id];
   int num_parent_elements = parent_list->size();
   auto child_list = runtime->element_lists[child->snode_id];
@@ -1425,6 +1474,9 @@ void element_listgen_nonroot(LLVMRuntime *runtime,
         }
       }
     }
+  }
+  if (child->listgen_reuse) {
+    mark_element_list_current(runtime, child);
   }
 }
 

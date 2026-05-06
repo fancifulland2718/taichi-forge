@@ -18,7 +18,10 @@ void Dynamic_activate(Ptr meta_, Ptr node_, int i) {
   auto node = (DynamicNode *)(node_);
   // We need to not only update node->n, but also make sure the chunk containing
   // element i is allocated.
-  atomic_max_i32(&node->n, i + 1);
+  auto old_n = atomic_max_i32(&node->n, i + 1);
+  if (old_n < i + 1) {
+    mark_element_lists_dirty_if_reuse((StructMeta *)meta);
+  }
   int chunk_start = 0;
   auto p_chunk_ptr = &node->ptr;
   auto chunk_size = meta->chunk_size;
@@ -46,6 +49,7 @@ void Dynamic_deactivate(Ptr meta_, Ptr node_) {
   if (node->n > 0) {
     locked_task(Ptr(&node->lock), [&] {
       node->n = 0;
+      mark_element_lists_dirty_if_reuse((StructMeta *)meta);
       auto p_chunk_ptr = &node->ptr;
       auto rt = meta->context->runtime;
       auto alloc = rt->node_allocators[meta->snode_id];
@@ -63,6 +67,7 @@ Ptr Dynamic_allocate(Ptr meta_, Ptr node_, i32 *len) {
   auto node = (DynamicNode *)(node_);
   auto chunk_size = meta->chunk_size;
   auto i = atomic_add_i32(&node->n, 1);
+  mark_element_lists_dirty_if_reuse((StructMeta *)meta);
   *len = i;
   int chunk_start = 0;
   auto p_chunk_ptr = &node->ptr;
