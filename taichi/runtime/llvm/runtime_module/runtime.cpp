@@ -421,6 +421,9 @@ A simple list data structure that is infinitely long.
 Data are organized in chunks, where each chunk is allocated on demand.
 */
 
+// Forward decl for Phase 1 per-SNode dedicated pool pointer in ListManager.
+struct PreallocatedMemoryChunk;
+
 // TODO: there are many i32 types in this class, which may be an issue if there
 // are >= 2 ** 31 elements.
 struct ListManager {
@@ -432,13 +435,19 @@ struct ListManager {
   i32 lock;
   i32 num_elements;
   LLVMRuntime *runtime;
+  // Phase 1 (2026-05): when non-null, touch_chunk allocates from this
+  // dedicated PreallocatedMemoryChunk instead of runtime_memory_chunk.
+  // NodeManager sets this for its data_list/free_list/recycled_list.
+  PreallocatedMemoryChunk *backing_chunk{nullptr};
 
   ListManager(LLVMRuntime *runtime,
               std::size_t element_size,
-              std::size_t num_elements_per_chunk)
+              std::size_t num_elements_per_chunk,
+              PreallocatedMemoryChunk *backing = nullptr)
       : element_size(element_size),
         max_num_elements_per_chunk(num_elements_per_chunk),
-        runtime(runtime) {
+        runtime(runtime),
+        backing_chunk(backing) {
     taichi_assert_runtime(runtime, is_power_of_two(max_num_elements_per_chunk),
                           "max_num_elements_per_chunk must be POT.");
     lock = 0;
@@ -638,6 +647,13 @@ struct NodeManager {
   ListManager *free_list, *recycled_list, *data_list;
   i32 recycle_list_size_backup;
 
+  // Phase 1 (2026-05): per-SNode dedicated bump region carved from the
+  // global pool buffer. When has_dedicated is true, all 3 ListManagers
+  // route data chunk allocations to dedicated_chunk instead of
+  // runtime->runtime_memory_chunk. Zero-init = legacy path.
+  PreallocatedMemoryChunk dedicated_chunk;
+  bool has_dedicated{false};
+
   using list_data_type = i32;
 
   NodeManager(LLVMRuntime *runtime,
@@ -661,6 +677,20 @@ struct NodeManager {
         runtime, sizeof(list_data_type), chunk_num_elements);
     data_list =
         runtime->create<ListManager>(runtime, element_size, chunk_num_elements);
+  }
+
+  // Phase 1 (2026-05): assign a dedicated bump region to this NodeManager
+  // AFTER construction. ptr+size define the PreallocatedMemoryChunk sub-range
+  // carved from the global pool buffer. All 3 ListManagers are retroactively
+  // pointed to this chunk for data allocations.
+  void set_dedicated_pool(Ptr ptr, std::size_t size) {
+    dedicated_chunk.preallocated_head = ptr;
+    dedicated_chunk.preallocated_tail = ptr + size;
+    dedicated_chunk.preallocated_size = size;
+    has_dedicated = true;
+    free_list->backing_chunk = &dedicated_chunk;
+    recycled_list->backing_chunk = &dedicated_chunk;
+    data_list->backing_chunk = &dedicated_chunk;
   }
 
   Ptr allocate() {
@@ -1028,6 +1058,53 @@ void runtime_NodeAllocator_initialize(LLVMRuntime *runtime,
                                       std::size_t node_size) {
   runtime->node_allocators[snode_id] =
       runtime->create<NodeManager>(runtime, node_size, 1024 * 16);
+}
+
+// Phase 1-D (2026-05): initialize a NodeAllocator with a custom
+// chunk_num_elements. When num_cells_per_container is small, a
+// reduced chunk size dramatically cuts per-SNode pool VRAM (e.g.
+// 112.5 MiB → 14.7 MiB for MPM pointer). The NodeManager ctor
+// still applies its 128 MiB ceiling halving as a safety clamp.
+void runtime_NodeAllocator_initialize_ex(LLVMRuntime *runtime,
+                                          int snode_id,
+                                          std::size_t node_size,
+                                          int chunk_num_elements) {
+  runtime->node_allocators[snode_id] =
+      runtime->create<NodeManager>(runtime, node_size, chunk_num_elements);
+}
+
+// Phase 1 (2026-05): assign a dedicated bump region (carved from the global
+// pool buffer) to an already-initialized NodeManager. ptr+size define the
+// PreallocatedMemoryChunk sub-range. All 3 ListManagers (free/recycled/data)
+// will route their data chunk allocations to this region instead of
+// runtime->runtime_memory_chunk.
+void runtime_NodeAllocator_set_dedicated_pool(LLVMRuntime *runtime,
+                                              int snode_id,
+                                              Ptr ptr,
+                                              std::size_t size) {
+  runtime->node_allocators[snode_id]->set_dedicated_pool(ptr, size);
+}
+
+// Phase 1 (2026-05): read back the current bump watermark of a dedicated
+// pool. Returns usage permille (0-1000) and raw used bytes for host-side
+// diagnostics and profile-driven tuning.
+void runtime_NodeAllocator_get_watermark(LLVMRuntime *runtime,
+                                          int snode_id,
+                                          Ptr out_permille,
+                                          Ptr out_used_bytes) {
+  auto *nm = runtime->node_allocators[snode_id];
+  uint64_t permille = 0;
+  uint64_t used = 0;
+  if (nm && nm->has_dedicated && nm->dedicated_chunk.preallocated_size > 0) {
+    uint64_t head = (uint64_t)nm->dedicated_chunk.preallocated_head;
+    uint64_t tail = (uint64_t)nm->dedicated_chunk.preallocated_tail;
+    uint64_t size = nm->dedicated_chunk.preallocated_size;
+    uint64_t start = tail - size;
+    used = (head > start) ? (head - start) : 0;
+    permille = (used * 1000) / size;
+  }
+  if (out_permille) *(uint64_t *)out_permille = permille;
+  if (out_used_bytes) *(uint64_t *)out_used_bytes = used;
 }
 
 void runtime_allocate_ambient(LLVMRuntime *runtime,
@@ -1669,9 +1746,13 @@ void ListManager::touch_chunk(int chunk_id) {
       // may have been allocated during lock contention
       if (!chunks[chunk_id]) {
         grid_memfence();
+        // Phase 1 (2026-05): route data allocations to per-SNode dedicated
+        // chunk when set, otherwise fall back to global runtime_memory_chunk.
+        PreallocatedMemoryChunk &mc =
+            backing_chunk ? *backing_chunk : runtime->runtime_memory_chunk;
         auto chunk_ptr = runtime->allocate_aligned(
-            runtime->runtime_memory_chunk,
-            max_num_elements_per_chunk * element_size, 4096, true /*request*/);
+            mc, max_num_elements_per_chunk * element_size, 4096,
+            true /*request*/);
         atomic_exchange_u64((u64 *)&chunks[chunk_id], (u64)chunk_ptr);
       }
     });

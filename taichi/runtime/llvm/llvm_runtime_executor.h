@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <vector>
 
 #ifdef TI_WITH_LLVM
 
@@ -159,6 +160,17 @@ class LlvmRuntimeExecutor {
   DeviceAllocationUnique preallocated_runtime_memory_allocs_ = nullptr;
   std::unordered_map<DeviceAllocationId, DeviceAllocation>
       allocated_runtime_memory_allocs_;
+
+  // Phase 1 (2026-05): per-SNode carved data regions. Each gc-able SNode
+  // owns a DeviceAllocationGuard tracking the same underlying buffer as
+  // preallocated_runtime_memory_allocs_; freed in finalize(). Empty when
+  // cuda_sparse_per_snode_pool is OFF.
+  std::vector<DeviceAllocationUnique> per_snode_pool_allocs_;
+
+  // Phase 1 (2026-05): query per-SNode pool usage watermark.
+  // Returns vector of (snode_id, permille_used) for diagnostics.
+  // Requires an active CUDA context and initialized runtime.
+  std::vector<std::pair<int, int>> query_snode_pool_watermarks();
 
   // good buddy
   friend LlvmProgramImpl;

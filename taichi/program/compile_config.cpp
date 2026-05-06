@@ -73,10 +73,11 @@ CompileConfig::CompileConfig() {
   device_memory_fraction = 0.0;
   // P-Sparse-Mem-1: 0 = fall back to device_memory_GB (legacy behavior).
   cuda_sparse_pool_size_GB = 0.0;
-  // P-Sparse-Mem-3 (2026-05-05): default 128 MiB floor for auto-sized
-  // sparse pool. Lowered from a previous hardcoded 256 MiB after empirical
-  // validation on the mpm-shaped 64^3 reference workload.
-  cuda_sparse_pool_size_floor_MiB = 128;
+  // P-Sparse-Mem-3 (2026-05-06): floor removed (set to 0). Phase 1-D's
+  // dynamic chunk_elements + auto-hint from num_cells_per_container
+  // provides exact worst-case sizing, making a defensive floor unnecessary.
+  // Users who want a safety net can still set this explicitly.
+  cuda_sparse_pool_size_floor_MiB = 0;
 }
 
 void CompileConfig::fit() {

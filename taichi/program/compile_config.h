@@ -382,6 +382,14 @@ struct CompileConfig {
   // reason this knob defaults off until each user validates their workload.
   bool cuda_sparse_pool_auto_size{true};
 
+  // Phase 1 (2026-05-06): carve per-SNode data regions from within the
+  // single global pool buffer. When true (and cuda_sparse_pool_auto_size is
+  // active), each gc-able SNode gets its own bump region for data chunks,
+  // decoupling per-SNode allocation from the global metadata pool without
+  // extra cuMemAlloc calls. Default true — Phase 1-D eliminates the VRAM
+  // penalty that previously kept this off.
+  bool cuda_sparse_per_snode_pool{true};
+
   // Opengl backend options:
   bool allow_nv_shader_extension{true};
 
