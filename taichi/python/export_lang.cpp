@@ -266,6 +266,16 @@ void export_lang(py::module &m) {
                      &CompileConfig::spirv_listgen_subgroup_ballot)
       .def_readwrite("listgen_static_grid_dim",
                      &CompileConfig::listgen_static_grid_dim)
+      .def_readwrite("vulkan_listgen_dynamic_size",
+                     &CompileConfig::vulkan_listgen_dynamic_size)
+      .def_readwrite("vulkan_listgen_buffer_MB",
+                     &CompileConfig::vulkan_listgen_buffer_MB)
+      .def_readwrite("vulkan_dispatch_cache",
+                     &CompileConfig::vulkan_dispatch_cache)
+      .def_readwrite("vulkan_listgen_reuse",
+             &CompileConfig::vulkan_listgen_reuse)
+            .def_readwrite("vulkan_spv_stats",
+            &CompileConfig::vulkan_spv_stats)
       .def_readwrite("kernel_profiler", &CompileConfig::kernel_profiler)
       .def_readwrite("timeline", &CompileConfig::timeline)
       .def_readwrite("default_fp", &CompileConfig::default_fp)

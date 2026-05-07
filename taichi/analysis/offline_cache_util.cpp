@@ -135,6 +135,9 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
     // codegen（LLVM 改调函数名、SPIR-V 多发射条件 memset），必须进
     // cache key。默认 false 保持哈希稳定。
     serializer(config.bitmasked_clear_data_on_deactivate);
+    // VS-3 (2026-05): toggles SPIR-V TaskAttributes sparse-list metadata
+    // consumed by GfxRuntime host-side listgen skipping.
+    serializer(config.vulkan_listgen_reuse);
   }
   if (config.arch == Arch::cuda) {
     // CS-1/2/3 (2026-05): these CUDA sparse flags alter emitted LLVM IR or

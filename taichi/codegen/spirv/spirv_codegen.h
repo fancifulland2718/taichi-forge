@@ -70,6 +70,13 @@ class KernelCodegen {
     // ballot-aggregated atomic. Output SPIR-V differs; serialized in
     // offline cache key.
     bool listgen_subgroup_ballot{false};
+    // VS-3 (2026-05): mirror of CompileConfig::vulkan_listgen_reuse. This
+    // does not change SPIR-V instructions, but emits TaskAttributes metadata
+    // used by GfxRuntime to skip current listgen dispatches.
+    bool vulkan_listgen_reuse{false};
+    // VS-4 (2026-05): diagnostic-only SPIR-V optimizer stats. Does not change
+    // emitted SPIR-V; only controls per-task logging in KernelCodegen::run().
+    bool vulkan_spv_stats{false};
   };
 
   explicit KernelCodegen(const Params &params);

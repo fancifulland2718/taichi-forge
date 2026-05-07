@@ -762,6 +762,14 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize() {
     layout_ = new_layout;
   }
 
+  if (device_->descriptor_set_cache_enabled()) {
+    if (auto cached_set = device_->find_cached_desc_set(*this)) {
+      set_ = cached_set;
+      dirty_ = false;
+      return {RhiResult::success, set_};
+    }
+  }
+
   if (!set_) {
     // If set_ is null, create a new one
     auto [status, new_set] = device_->alloc_desc_set(layout_);
@@ -860,6 +868,9 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize() {
                          /*pDescriptorCopies=*/nullptr);
 
   dirty_ = false;
+  if (device_->descriptor_set_cache_enabled()) {
+    device_->cache_desc_set(*this, set_);
+  }
 
   return {RhiResult::success, set_};
 }
@@ -1661,6 +1672,7 @@ VulkanDevice::~VulkanDevice() {
   graphics_streams_.reset();
 
   renderpass_pools_.clear();
+  desc_set_cache_.clear();
   desc_set_layouts_.clear();
   desc_pool_ = nullptr;
 
@@ -2473,6 +2485,30 @@ vkapi::IVkDescriptorSetLayout VulkanDevice::get_desc_set_layout(
   } else {
     return desc_set_layouts_.at(set);
   }
+}
+
+vkapi::IVkDescriptorSet VulkanDevice::find_cached_desc_set(
+    const VulkanResourceSet &set) const {
+  if (!descriptor_set_cache_enabled_) {
+    return nullptr;
+  }
+  auto it = desc_set_cache_.find(set);
+  if (it == desc_set_cache_.end()) {
+    return nullptr;
+  }
+  return it->second;
+}
+
+void VulkanDevice::cache_desc_set(const VulkanResourceSet &set,
+                                  vkapi::IVkDescriptorSet desc_set) {
+  if (!descriptor_set_cache_enabled_ || !desc_set) {
+    return;
+  }
+  constexpr size_t kMaxCachedDescriptorSets = 1024;
+  if (desc_set_cache_.size() >= kMaxCachedDescriptorSets) {
+    desc_set_cache_.clear();
+  }
+  desc_set_cache_.emplace(set, desc_set);
 }
 
 RhiReturn<vkapi::IVkDescriptorSet> VulkanDevice::alloc_desc_set(

@@ -328,6 +328,37 @@ struct CompileConfig {
   // task_attribs_.advisory_total_num_threads, so this flag is a no-op
   // for the SPIR-V backend. Default false (opt-in).
   bool listgen_static_grid_dim{false};
+  // VS-1 (2026-05): Vulkan/GFX listgen scratch buffer sizing.
+  // Default false preserves the legacy single 32 MiB allocation. When true
+  // and vulkan_listgen_buffer_MB == 0, GfxRuntime grows the shared
+  // [count, idx...] listgen buffer from the materialized SNodeTree/listgen
+  // task upper bound instead of preallocating 32 MiB for small sparse trees.
+  // This is runtime-only; emitted SPIR-V is unchanged.
+  bool vulkan_listgen_dynamic_size{false};
+  // Explicit Vulkan listgen buffer size in MiB. 0 means no override. When set,
+  // this is a hard cap: launch-time capacity checks report an error instead
+  // of silently writing past the [count, idx...] buffer.
+  int vulkan_listgen_buffer_MB{0};
+  // VS-2 (2026-05): opt-in Vulkan dispatch/barrier runtime cache. When true,
+  // Vulkan reuses identical descriptor sets and GfxRuntime replaces per-dispatch
+  // global memory barriers with deferred shader-buffer barriers. Runtime-only;
+  // emitted SPIR-V and offline cache keys are unchanged.
+  bool vulkan_dispatch_cache{false};
+  // VS-3 (2026-05): Vulkan listgen host-side reuse. When true,
+  // SPIR-V task metadata records sparse list SNode ids and topology mutation
+  // hints, and GfxRuntime may skip a listgen dispatch if the shared listgen
+  // buffer already holds a current list for that SNode. Runtime metadata-only;
+  // included in the offline cache key so ON/OFF runs do not reuse stale task
+  // attributes. Default true after the VS-1/VS-2/VS-3 matrix showed no
+  // correctness, VRAM, mean/median/p95 regression for VS-3 alone.
+  bool vulkan_listgen_reuse{true};
+  // VS-4 (2026-05): opt-in Vulkan SPIR-V optimizer diagnostics. When true,
+  // KernelCodegen logs per-offload optimizer stats (task type, sparse/listgen
+  // classification, optimizer run/ok, before/after SPIR-V words, skipped
+  // passes). Diagnostic-only: does not change emitted SPIR-V and is not part
+  // of the offline cache key. Default OFF to avoid log noise and compile-time
+  // measurement perturbation.
+  bool vulkan_spv_stats{false};
   bool advanced_optimization;
   bool constant_folding;
   bool use_llvm;

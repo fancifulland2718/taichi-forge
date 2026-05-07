@@ -54,7 +54,11 @@ class Kernel;
 //       from a boolean to an optional SNode id so CUDA host-side listgen reuse
 //       can invalidate only the mutated list when safe. Old cached kernels lack
 //       this id and would fall back to over-conservative/global behavior.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 5;
+//   6 - VS-3 (2026-05). SPIR-V TaskAttributes serialization now carries
+//       sparse listgen host-elision metadata (list child/parent ids and
+//       topology-mutation id). Old cached Vulkan kernels lack the metadata,
+//       so force a miss before GFX runtime listgen skipping is used.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 6;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key(const CompileConfig &config,

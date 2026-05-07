@@ -16,6 +16,7 @@ void SNodeTreeManager::materialize_snode_tree(
     const taichi::lang::spirv::PointerLayoutPolicy &policy) {
   auto *const root = tree->root();
   CompiledSNodeStructs compiled_structs = compile_snode_structs(*root, policy);
+  runtime_->update_listgen_buffer_for_snode_tree(compiled_structs);
   runtime_->add_root_buffer(compiled_structs.root_size);
 #if defined(TI_WITH_VULKAN_POINTER)
   // 路线 B B-1（2026-04-30）：用 contracts 在该 root_buffer 上构造 BumpOnly

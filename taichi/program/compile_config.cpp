@@ -25,6 +25,12 @@ CompileConfig::CompileConfig() {
   spirv_listgen_subgroup_ballot = false;
   // §16.13 (S3): default OFF; opt-in via ti.init(listgen_static_grid_dim=True).
   listgen_static_grid_dim = false;
+  // VS-2: default OFF; opt-in via ti.init(vulkan_dispatch_cache=True).
+  vulkan_dispatch_cache = false;
+  // VS-3: default ON after the 3-run VS-1/VS-2/VS-3 Vulkan matrix.
+  vulkan_listgen_reuse = true;
+  // VS-4: default OFF; opt-in diagnostics via ti.init(vulkan_spv_stats=True).
+  vulkan_spv_stats = false;
   advanced_optimization = true;
   constant_folding = true;
   max_vector_width = 8;

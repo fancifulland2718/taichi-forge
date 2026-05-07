@@ -754,6 +754,22 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
     return v == 0u ? UINT32_MAX : v;
   }
 
+  void set_descriptor_set_cache_enabled(bool enabled) {
+    descriptor_set_cache_enabled_ = enabled;
+    if (!enabled) {
+      desc_set_cache_.clear();
+    }
+  }
+
+  bool descriptor_set_cache_enabled() const {
+    return descriptor_set_cache_enabled_;
+  }
+
+  vkapi::IVkDescriptorSet find_cached_desc_set(
+      const VulkanResourceSet &set) const;
+  void cache_desc_set(const VulkanResourceSet &set,
+                      vkapi::IVkDescriptorSet desc_set);
+
   const VkPhysicalDeviceProperties &get_vk_physical_device_props() const {
     return vk_device_properties_;
   }
@@ -841,7 +857,13 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
                 VulkanResourceSet::SetLayoutHasher,
                 VulkanResourceSet::SetLayoutCmp>
       desc_set_layouts_;
+  unordered_map<VulkanResourceSet,
+                vkapi::IVkDescriptorSet,
+                VulkanResourceSet::DescSetHasher,
+                VulkanResourceSet::SetCmp>
+      desc_set_cache_;
   vkapi::IVkDescriptorPool desc_pool_{nullptr};
+  bool descriptor_set_cache_enabled_{false};
 
   // Internal implementaion functions
   inline static AllocationInternal &get_alloc_internal(

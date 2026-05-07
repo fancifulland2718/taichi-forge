@@ -6,8 +6,10 @@
 // in the future.
 #include "taichi/codegen/spirv/spirv_codegen.h"
 
+#include <algorithm>
 #include <chrono>
 #include <array>
+#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -226,6 +228,35 @@ class HostDeviceContextBlitter {
 
 constexpr size_t kGtmpBufferSize = 1024 * 1024;
 constexpr size_t kListGenBufferSize = 32 << 20;
+constexpr size_t kListGenMinBufferSize = sizeof(uint32_t);
+constexpr size_t kListGenAutoSlackEntries = 1024;
+constexpr size_t kListGenBufferAlignment = 4096;
+
+size_t align_up_to(size_t value, size_t alignment) {
+  return ((value + alignment - 1) / alignment) * alignment;
+}
+
+bool snode_can_use_spirv_listgen(const SNode *snode) {
+  if (snode == nullptr || snode->type == SNodeType::root ||
+      snode->is_place() || snode->is_path_all_dense) {
+    return false;
+  }
+  return snode->type == SNodeType::dense ||
+         snode->type == SNodeType::bitmasked ||
+         snode->type == SNodeType::pointer ||
+         snode->type == SNodeType::dynamic;
+}
+
+size_t estimate_listgen_entries(const CompiledSNodeStructs &compiled_structs) {
+  size_t result = 0;
+  for (const auto &[sid, desc] : compiled_structs.snode_descriptors) {
+    (void)sid;
+    if (snode_can_use_spirv_listgen(desc.snode)) {
+      result = std::max(result, desc.total_num_cells_from_root);
+    }
+  }
+  return result;
+}
 
 // Info for launching a compiled Taichi kernel, which consists of a series of
 // Unified Device API pipelines.
@@ -306,7 +337,22 @@ GfxRuntime::GfxRuntime(const Params &params)
       buffer_pool_capacity_(
           params.buffer_pool_capacity > 0
               ? static_cast<size_t>(params.buffer_pool_capacity)
-              : size_t{64}) {
+              : size_t{64}),
+      listgen_dynamic_size_(params.listgen_dynamic_size),
+      listgen_explicit_size_(params.listgen_buffer_MB > 0),
+      dispatch_cache_(params.dispatch_cache),
+      listgen_reuse_(params.listgen_reuse) {
+  TI_ERROR_IF(params.listgen_buffer_MB < 0,
+              "vulkan_listgen_buffer_MB must be >= 0, got {}",
+              params.listgen_buffer_MB);
+  if (listgen_explicit_size_) {
+    listgen_initial_buffer_size_ =
+        static_cast<size_t>(params.listgen_buffer_MB) * 1024u * 1024u;
+  } else if (listgen_dynamic_size_) {
+    listgen_initial_buffer_size_ = kListGenMinBufferSize;
+  } else {
+    listgen_initial_buffer_size_ = kListGenBufferSize;
+  }
   current_cmdlist_pending_since_ = high_res_clock::now();
   init_nonroot_buffers();
 
@@ -389,6 +435,89 @@ GfxRuntime::~GfxRuntime() {
   listgen_buffer_.reset();
 }
 
+int64 GfxRuntime::get_sparse_list_version(int snode_id) const {
+  auto it = sparse_list_states_.find(snode_id);
+  if (it == sparse_list_states_.end()) {
+    return 0;
+  }
+  return it->second.version;
+}
+
+bool GfxRuntime::sparse_list_task_is_current(
+    const TaskAttributes &attribs) const {
+  if (!listgen_reuse_ ||
+      attribs.sparse_list_op != TaskAttributes::kSparseListOpListgen ||
+      attribs.sparse_list_snode_id < 0 ||
+      attribs.sparse_list_parent_snode_id < 0 ||
+      resident_sparse_list_snode_id_ != attribs.sparse_list_snode_id) {
+    return false;
+  }
+
+  auto it = sparse_list_states_.find(attribs.sparse_list_snode_id);
+  if (it == sparse_list_states_.end()) {
+    return false;
+  }
+  const auto &state = it->second;
+  return state.clean_epoch == state.dirty_epoch &&
+         state.clean_parent_version ==
+             get_sparse_list_version(attribs.sparse_list_parent_snode_id);
+}
+
+void GfxRuntime::mark_sparse_list_task_launched(
+    const TaskAttributes &attribs) {
+  if (!listgen_reuse_ || attribs.task_type != OffloadedTaskType::listgen) {
+    return;
+  }
+  if (attribs.sparse_list_op != TaskAttributes::kSparseListOpListgen ||
+      attribs.sparse_list_snode_id < 0 ||
+      attribs.sparse_list_parent_snode_id < 0) {
+    resident_sparse_list_snode_id_ = -1;
+    return;
+  }
+
+  auto &state = sparse_list_states_[attribs.sparse_list_snode_id];
+  state.clean_epoch = state.dirty_epoch;
+  state.clean_parent_version =
+      get_sparse_list_version(attribs.sparse_list_parent_snode_id);
+  state.parent_snode_id = attribs.sparse_list_parent_snode_id;
+  state.version++;
+  resident_sparse_list_snode_id_ = attribs.sparse_list_snode_id;
+}
+
+void GfxRuntime::invalidate_sparse_list_cache(int sparse_mutation_snode_id) {
+  if (!listgen_reuse_) {
+    return;
+  }
+  if (sparse_mutation_snode_id < 0) {
+    for (auto &kv : sparse_list_states_) {
+      kv.second.dirty_epoch++;
+    }
+    return;
+  }
+
+  std::unordered_set<int> affected;
+  affected.insert(sparse_mutation_snode_id);
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const auto &kv : sparse_list_states_) {
+      if (affected.count(kv.first) == 0 &&
+          affected.count(kv.second.parent_snode_id) != 0) {
+        affected.insert(kv.first);
+        changed = true;
+      }
+    }
+  }
+  for (int snode_id : affected) {
+    sparse_list_states_[snode_id].dirty_epoch++;
+  }
+}
+
+void GfxRuntime::clear_sparse_list_cache_resident() {
+  sparse_list_states_.clear();
+  resident_sparse_list_snode_id_ = -1;
+}
+
 GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
     GfxRuntime::RegisterParams reg_params) {
   CompiledTaichiKernel::Params params;
@@ -466,6 +595,8 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     }
   }
 #endif
+
+  ensure_listgen_capacity_for_kernel(*ti_kernel);
 
   std::unique_ptr<DeviceAllocationGuard> args_buffer{nullptr},
       ret_buffer{nullptr};
@@ -612,8 +743,57 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
   // Record commands
   const auto &task_attribs = ti_kernel->ti_kernel_attribs().tasks_attribs;
 
+  auto mark_storage_buffer_write = [&](const BufferBind &bind) {
+    switch (bind.buffer.type) {
+      case BufferType::Args:
+      case BufferType::ArgPack:
+        return;
+      case BufferType::ExtArr:
+        add_pending_dispatch_barrier(any_arrays.at(bind.buffer.root_id));
+        return;
+      case BufferType::Rets:
+        if (ret_buffer) {
+          add_pending_dispatch_barrier(*ret_buffer);
+        }
+        return;
+      case BufferType::NodeAllocatorPool:
+        if (bind.chunk_count > 0u) {
+          if (auto *chunks = ti_kernel->get_chunk_array(bind.buffer)) {
+            for (const auto &chunk : *chunks) {
+              add_pending_dispatch_barrier(chunk);
+            }
+            return;
+          }
+        }
+        break;
+      default:
+        break;
+    }
+    DeviceAllocation *alloc = ti_kernel->get_buffer_bind(bind.buffer);
+    if (alloc != nullptr) {
+      add_pending_dispatch_barrier(*alloc);
+    }
+  };
+  auto mark_task_writes = [&](const TaskAttributes &attribs) {
+    if (!dispatch_cache_) {
+      return;
+    }
+    if (!attribs.texture_binds.empty()) {
+      pending_dispatch_global_barrier_ = true;
+      return;
+    }
+    for (const auto &bind : attribs.buffer_binds) {
+      mark_storage_buffer_write(bind);
+    }
+  };
+
   for (int i = 0; i < task_attribs.size(); ++i) {
     const auto &attribs = task_attribs[i];
+    if (sparse_list_task_is_current(attribs)) {
+      TI_TRACE("Skipping current Vulkan sparse list kernel {}", attribs.name);
+      continue;
+    }
+    insert_pending_dispatch_barriers();
     auto vp = ti_kernel->get_pipeline(i);
     const int group_x = (attribs.advisory_total_num_threads +
                          attribs.advisory_num_threads_per_group - 1) /
@@ -687,8 +867,14 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
               ti_kernel->get_buffer_bind(bind.buffer)->get_ptr(0),
               /*size=*/sizeof(uint32_t),
               /*data=*/0);
-          current_cmdlist_->buffer_barrier(
-              *ti_kernel->get_buffer_bind(bind.buffer));
+          if (dispatch_cache_) {
+            current_cmdlist_->buffer_barrier(
+                ti_kernel->get_buffer_bind(bind.buffer)->get_ptr(0),
+                sizeof(uint32_t));
+          } else {
+            current_cmdlist_->buffer_barrier(
+                *ti_kernel->get_buffer_bind(bind.buffer));
+          }
         }
       }
     }
@@ -710,7 +896,15 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
 
     TI_ERROR_IF(status != RhiResult::success, "Dispatch error : RhiResult({})",
                 status);
-    current_cmdlist_->memory_barrier();
+    mark_sparse_list_task_launched(attribs);
+    if (attribs.may_mutate_sparse_topology) {
+      invalidate_sparse_list_cache(attribs.sparse_mutation_snode_id);
+    }
+    if (dispatch_cache_) {
+      mark_task_writes(attribs);
+    } else {
+      current_cmdlist_->memory_barrier();
+    }
   }
 
   // Keep context buffers used in this dispatch
@@ -735,6 +929,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
 
   // If we need to host sync, sync and remove in-flight references
   if (ctx_blitter) {
+    insert_pending_dispatch_barriers();
     if (ctx_blitter->device_to_host(current_cmdlist_.get(), any_arrays,
                                     ext_array_size)) {
       current_cmdlist_ = nullptr;
@@ -752,6 +947,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
 
 void GfxRuntime::buffer_copy(DevicePtr dst, DevicePtr src, size_t size) {
   ensure_current_cmdlist();
+  insert_pending_dispatch_barriers();
   current_cmdlist_->buffer_barrier(src);
   current_cmdlist_->buffer_copy(dst, src, size);
   current_cmdlist_->buffer_barrier(dst);
@@ -761,6 +957,7 @@ void GfxRuntime::copy_image(DeviceAllocation dst,
                             DeviceAllocation src,
                             const ImageCopyParams &params) {
   ensure_current_cmdlist();
+  insert_pending_dispatch_barriers();
   transition_image(dst, ImageLayout::transfer_dst);
   transition_image(src, ImageLayout::transfer_src);
   current_cmdlist_->copy_image(dst, src, ImageLayout::transfer_dst,
@@ -787,6 +984,7 @@ void GfxRuntime::untrack_image(DeviceAllocation image) {
 void GfxRuntime::transition_image(DeviceAllocation image, ImageLayout layout) {
   ImageLayout &last_layout = last_image_layouts_.at(image.alloc_id);
   ensure_current_cmdlist();
+  insert_pending_dispatch_barriers();
   current_cmdlist_->image_transition(image, last_layout, layout);
   last_layout = layout;
 }
@@ -814,6 +1012,7 @@ void GfxRuntime::synchronize() {
 StreamSemaphore GfxRuntime::flush() {
   StreamSemaphore sema;
   if (current_cmdlist_) {
+    insert_pending_dispatch_barriers();
     sema = device_->get_compute_stream()->submit(current_cmdlist_.get());
     current_cmdlist_ = nullptr;
     ctx_buffers_.clear();
@@ -889,6 +1088,39 @@ void GfxRuntime::ensure_current_cmdlist() {
   }
 }
 
+void GfxRuntime::clear_pending_dispatch_barriers() {
+  pending_dispatch_global_barrier_ = false;
+  pending_dispatch_barrier_buffers_.clear();
+  pending_dispatch_barrier_buffer_ids_.clear();
+}
+
+void GfxRuntime::add_pending_dispatch_barrier(DeviceAllocation alloc) {
+  if (!dispatch_cache_ || alloc == kDeviceNullAllocation) {
+    return;
+  }
+  if (pending_dispatch_global_barrier_) {
+    return;
+  }
+  if (pending_dispatch_barrier_buffer_ids_.insert(alloc.alloc_id).second) {
+    pending_dispatch_barrier_buffers_.push_back(alloc);
+  }
+}
+
+void GfxRuntime::insert_pending_dispatch_barriers() {
+  if (!dispatch_cache_ || !current_cmdlist_) {
+    return;
+  }
+  if (pending_dispatch_global_barrier_) {
+    current_cmdlist_->memory_barrier();
+    clear_pending_dispatch_barriers();
+    return;
+  }
+  for (DeviceAllocation alloc : pending_dispatch_barrier_buffers_) {
+    current_cmdlist_->buffer_barrier(alloc);
+  }
+  clear_pending_dispatch_barriers();
+}
+
 void GfxRuntime::submit_current_cmdlist_if_timeout() {
   // If we have accumulated some work but does not require sync
   // and if the accumulated cmdlist has been pending for some time
@@ -903,6 +1135,109 @@ void GfxRuntime::submit_current_cmdlist_if_timeout() {
   }
 }
 
+void GfxRuntime::ensure_listgen_buffer_bytes(size_t requested_bytes,
+                                             const char *reason) {
+  requested_bytes = std::max(requested_bytes, kListGenMinBufferSize);
+  requested_bytes = align_up_to(requested_bytes, sizeof(uint32_t));
+  if (requested_bytes > kListGenMinBufferSize) {
+    requested_bytes = align_up_to(requested_bytes, kListGenBufferAlignment);
+  }
+
+  if (listgen_buffer_ && requested_bytes <= listgen_buffer_size_) {
+    return;
+  }
+  if (listgen_buffer_ && listgen_explicit_size_) {
+    TI_ERROR(
+        "Vulkan listgen buffer capacity is fixed at {:.3f} MiB by "
+        "vulkan_listgen_buffer_MB, but {} requires {:.3f} MiB. Increase "
+        "vulkan_listgen_buffer_MB or unset it and enable "
+        "vulkan_listgen_dynamic_size.",
+        listgen_buffer_size_ / 1048576.0, reason,
+        requested_bytes / 1048576.0);
+  }
+
+  if (listgen_buffer_) {
+    synchronize();
+  }
+
+  auto [buf, res] = device_->allocate_memory_unique(
+      {requested_bytes,
+       /*host_write=*/false, /*host_read=*/false,
+       /*export_sharing=*/false, AllocUsage::Storage});
+  TI_ASSERT_INFO(res == RhiResult::success, "listgen allocation failed");
+  listgen_buffer_ = std::move(buf);
+  listgen_buffer_size_ = requested_bytes;
+  listgen_capacity_entries_ =
+      requested_bytes / sizeof(uint32_t) > 0
+          ? requested_bytes / sizeof(uint32_t) - 1
+          : 0;
+
+  for (auto &kernel : ti_kernels_) {
+    kernel->set_listgen_buffer(listgen_buffer_.get());
+  }
+  clear_sparse_list_cache_resident();
+
+  Stream *stream = device_->get_compute_stream();
+  auto [cmdlist, cmd_res] =
+      device_->get_compute_stream()->new_command_list_unique();
+  TI_ASSERT(cmd_res == RhiResult::success);
+  cmdlist->buffer_fill(listgen_buffer_->get_ptr(0), kBufferSizeEntireSize,
+                       /*data=*/0);
+  stream->submit_synced(cmdlist.get());
+
+  if (listgen_dynamic_size_ && !listgen_explicit_size_ &&
+      requested_bytes > kListGenMinBufferSize) {
+    TI_WARN(
+        "Vulkan listgen buffer auto-sized to {:.3f} MiB for {} "
+        "(capacity {} entries). Set ti.init(vulkan_listgen_buffer_MB=32) "
+        "to force the legacy 32 MiB capacity.",
+        requested_bytes / 1048576.0, reason, listgen_capacity_entries_);
+  }
+}
+
+void GfxRuntime::ensure_listgen_capacity_entries(size_t requested_entries,
+                                                 const char *reason) {
+  if (requested_entries <= listgen_capacity_entries_) {
+    return;
+  }
+  if (!listgen_dynamic_size_ || listgen_explicit_size_) {
+    TI_ERROR(
+        "Vulkan listgen buffer capacity {} entries ({:.3f} MiB) is smaller "
+        "than {} required entries for {}. Set ti.init("
+        "vulkan_listgen_buffer_MB=...) high enough or enable "
+        "vulkan_listgen_dynamic_size=True for auto sizing.",
+        listgen_capacity_entries_, listgen_buffer_size_ / 1048576.0,
+        requested_entries, reason);
+  }
+  const size_t required_words =
+      requested_entries + 1 + kListGenAutoSlackEntries;
+  ensure_listgen_buffer_bytes(required_words * sizeof(uint32_t), reason);
+}
+
+void GfxRuntime::ensure_listgen_capacity_for_kernel(
+    const CompiledTaichiKernel &kernel) {
+  size_t requested_entries = 0;
+  for (const auto &attribs : kernel.ti_kernel_attribs().tasks_attribs) {
+    if (attribs.task_type == OffloadedTaskType::listgen) {
+      requested_entries = std::max(
+          requested_entries,
+          static_cast<size_t>(std::max(attribs.advisory_total_num_threads, 0)));
+    }
+  }
+  if (requested_entries > 0) {
+    ensure_listgen_capacity_entries(requested_entries, "kernel launch");
+  }
+}
+
+void GfxRuntime::update_listgen_buffer_for_snode_tree(
+    const CompiledSNodeStructs &compiled_structs) {
+  const size_t requested_entries = estimate_listgen_entries(compiled_structs);
+  if (requested_entries > 0) {
+    ensure_listgen_capacity_entries(requested_entries,
+                                    "SNodeTree materialization");
+  }
+}
+
 void GfxRuntime::init_nonroot_buffers() {
   {
     auto [buf, res] = device_->allocate_memory_unique(
@@ -913,14 +1248,7 @@ void GfxRuntime::init_nonroot_buffers() {
     global_tmps_buffer_ = std::move(buf);
   }
 
-  {
-    auto [buf, res] = device_->allocate_memory_unique(
-        {kListGenBufferSize,
-         /*host_write=*/false, /*host_read=*/false,
-         /*export_sharing=*/false, AllocUsage::Storage});
-    TI_ASSERT_INFO(res == RhiResult::success, "listgen allocation failed");
-    listgen_buffer_ = std::move(buf);
-  }
+  ensure_listgen_buffer_bytes(listgen_initial_buffer_size_, "initialization");
 
   // Need to zero fill the buffers, otherwise there could be NaN.
   Stream *stream = device_->get_compute_stream();
@@ -929,8 +1257,6 @@ void GfxRuntime::init_nonroot_buffers() {
   TI_ASSERT(res == RhiResult::success);
 
   cmdlist->buffer_fill(global_tmps_buffer_->get_ptr(0), kBufferSizeEntireSize,
-                       /*data=*/0);
-  cmdlist->buffer_fill(listgen_buffer_->get_ptr(0), kBufferSizeEntireSize,
                        /*data=*/0);
   stream->submit_synced(cmdlist.get());
 }
@@ -982,6 +1308,7 @@ void GfxRuntime::enqueue_compute_op_lambda(
   }
 
   ensure_current_cmdlist();
+  insert_pending_dispatch_barriers();
   op(device_, current_cmdlist_.get());
 
   for (const auto &ref : image_refs) {
@@ -1006,6 +1333,7 @@ GfxRuntime::RegisterParams run_codegen(
   params.arch = arch;
   params.caps = caps;
   params.enable_spv_opt = compile_config.external_optimization_level > 0;
+  params.vulkan_listgen_reuse = compile_config.vulkan_listgen_reuse;
   spirv::KernelCodegen codegen(params);
   GfxRuntime::RegisterParams res;
   codegen.run(res.kernel_attribs, res.task_spirv_source_codes);

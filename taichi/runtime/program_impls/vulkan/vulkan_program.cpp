@@ -136,12 +136,19 @@ void VulkanProgramImpl::materialize_runtime(KernelProfilerBase *profiler,
 #endif
 
   embedded_device_ = std::make_unique<VulkanDeviceCreator>(evd_params);
+  if (config->vulkan_dispatch_cache) {
+    embedded_device_->device()->set_descriptor_set_cache_enabled(true);
+  }
 
   gfx::GfxRuntime::Params params;
   params.device = embedded_device_->device();
   params.profiler = profiler;
   params.enable_buffer_pool = config->vulkan_launch_buffer_pool;
   params.buffer_pool_capacity = config->vulkan_launch_buffer_pool_capacity;
+  params.listgen_dynamic_size = config->vulkan_listgen_dynamic_size;
+  params.listgen_buffer_MB = config->vulkan_listgen_buffer_MB;
+  params.dispatch_cache = config->vulkan_dispatch_cache;
+  params.listgen_reuse = config->vulkan_listgen_reuse;
   runtime_ = std::make_unique<gfx::GfxRuntime>(std::move(params));
   snode_tree_mgr_ = std::make_unique<gfx::SNodeTreeManager>(runtime_.get());
 }

@@ -20,6 +20,12 @@ namespace spirv {
  * Per offloaded task attributes.
  */
 struct TaskAttributes {
+  static constexpr int kSparseListOpNone = 0;
+  static constexpr int kSparseListOpClearList = 1;
+  static constexpr int kSparseListOpListgen = 2;
+  static constexpr int kSparseMutationNone = -1;
+  static constexpr int kSparseMutationUnknown = -2;
+
   enum class BufferType {
     Root,
     GlobalTmps,
@@ -138,6 +144,13 @@ struct TaskAttributes {
   std::vector<TextureBind> texture_binds;
   // Only valid when |task_type| is range_for.
   std::optional<RangeForAttributes> range_for_attribs;
+  // VS-3 (2026-05): host-side sparse listgen reuse metadata. Defaults mean
+  // "not eligible" and preserve legacy launch behavior.
+  int sparse_list_op{kSparseListOpNone};
+  int sparse_list_snode_id{-1};
+  int sparse_list_parent_snode_id{-1};
+  bool may_mutate_sparse_topology{false};
+  int sparse_mutation_snode_id{kSparseMutationNone};
 
   static std::string buffers_name(BufferInfo b);
 
@@ -149,7 +162,12 @@ struct TaskAttributes {
             task_type,
             buffer_binds,
             texture_binds,
-            range_for_attribs);
+            range_for_attribs,
+            sparse_list_op,
+            sparse_list_snode_id,
+            sparse_list_parent_snode_id,
+            may_mutate_sparse_topology,
+            sparse_mutation_snode_id);
 };
 
 /**

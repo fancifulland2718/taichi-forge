@@ -8,6 +8,7 @@
 #include <variant>
 #include <future>
 #include <algorithm>
+#include <chrono>
 
 #include "taichi/codegen/codegen_utils.h"
 #include "taichi/program/program.h"
@@ -77,6 +78,60 @@ std::string buffer_instance_name(BufferInfo b) {
   return {};
 }
 
+struct SparseTopologyMutationInfo {
+  bool may_mutate{false};
+  int snode_id{TaskAttributes::kSparseMutationNone};
+};
+
+class SparseTopologyMutationDetector : public BasicStmtVisitor {
+ public:
+  SparseTopologyMutationDetector() {
+    allow_undefined_visitor = true;
+    invoke_default_visitor = true;
+  }
+
+  using BasicStmtVisitor::visit;
+
+  void record_mutation(SNode *snode) {
+    may_mutate = true;
+    const int snode_id = snode ? snode->id
+                               : TaskAttributes::kSparseMutationUnknown;
+    if (mutation_snode_id == TaskAttributes::kSparseMutationNone) {
+      mutation_snode_id = snode_id;
+    } else if (mutation_snode_id != snode_id) {
+      mutation_snode_id = TaskAttributes::kSparseMutationUnknown;
+    }
+  }
+
+  void visit(SNodeLookupStmt *stmt) override {
+    if (stmt->activate) {
+      record_mutation(stmt->snode);
+    }
+  }
+
+  void visit(SNodeOpStmt *stmt) override {
+    if (stmt->op_type == SNodeOpType::activate ||
+        stmt->op_type == SNodeOpType::deactivate ||
+        stmt->op_type == SNodeOpType::append ||
+        stmt->op_type == SNodeOpType::allocate ||
+        stmt->op_type == SNodeOpType::clear) {
+      record_mutation(stmt->snode);
+    }
+  }
+
+  bool may_mutate{false};
+  int mutation_snode_id{TaskAttributes::kSparseMutationNone};
+};
+
+SparseTopologyMutationInfo detect_sparse_topology_mutation(
+    OffloadedStmt *stmt) {
+  SparseTopologyMutationDetector detector;
+  stmt->accept(&detector);
+  return {detector.may_mutate,
+          detector.may_mutate ? detector.mutation_snode_id
+                              : TaskAttributes::kSparseMutationNone};
+}
+
 class TaskCodegen : public IRVisitor {
  public:
   struct Params {
@@ -91,6 +146,8 @@ class TaskCodegen : public IRVisitor {
     bool bitmasked_clear_data_on_deactivate{false};
     // §16.12 (S2): subgroup-ballot 聚合 listgen atomic。
     bool listgen_subgroup_ballot{false};
+    // VS-3: emit sparse-list metadata for GfxRuntime host-side reuse.
+    bool listgen_reuse{false};
   };
 
   const bool use_64bit_pointers = false;
@@ -106,7 +163,8 @@ class TaskCodegen : public IRVisitor {
                                params.task_id_in_kernel)),
         bitmasked_clear_data_on_deactivate_(
             params.bitmasked_clear_data_on_deactivate),
-        listgen_subgroup_ballot_(params.listgen_subgroup_ballot) {
+        listgen_subgroup_ballot_(params.listgen_subgroup_ballot),
+        listgen_reuse_(params.listgen_reuse) {
     allow_undefined_visitor = true;
     invoke_default_visitor = true;
 
@@ -168,6 +226,7 @@ class TaskCodegen : public IRVisitor {
       TI_ERROR("Unsupported offload type={} on SPIR-V codegen",
                task_ir_->task_name());
     }
+    annotate_sparse_list_metadata(task_ir_);
     // Headers need global information, so it has to be delayed after visiting
     // the task IR.
     emit_headers();
@@ -182,6 +241,23 @@ class TaskCodegen : public IRVisitor {
 
   void visit(OffloadedStmt *) override {
     TI_ERROR("This codegen is supposed to deal with one offloaded task");
+  }
+
+  void annotate_sparse_list_metadata(OffloadedStmt *stmt) {
+    if (!listgen_reuse_) {
+      return;
+    }
+
+    auto mutation = detect_sparse_topology_mutation(stmt);
+    task_attribs_.may_mutate_sparse_topology = mutation.may_mutate;
+    task_attribs_.sparse_mutation_snode_id = mutation.snode_id;
+
+    if (stmt->task_type == OffloadedTaskType::listgen &&
+        stmt->snode != nullptr && stmt->snode->parent != nullptr) {
+      task_attribs_.sparse_list_op = TaskAttributes::kSparseListOpListgen;
+      task_attribs_.sparse_list_snode_id = stmt->snode->id;
+      task_attribs_.sparse_list_parent_snode_id = stmt->snode->parent->id;
+    }
   }
 
   void visit(Block *stmt) override {
@@ -4928,6 +5004,7 @@ class TaskCodegen : public IRVisitor {
   // vanilla 1.7.4 / taichi-dev 行为（仅翻 mask 位）。
   const bool bitmasked_clear_data_on_deactivate_{false};
   const bool listgen_subgroup_ballot_{false};
+  const bool listgen_reuse_{false};
   std::vector<spirv::Label> continue_label_stack_;
   std::vector<spirv::Label> merge_label_stack_;
 
@@ -5076,6 +5153,43 @@ size_t hash_disabled_passes(const std::vector<std::string> &passes) {
   return h;
 }
 
+std::string skipped_passes_summary(int spv_opt_level,
+                                   bool skip_loop_unroll,
+                                   const std::vector<std::string> &passes) {
+  if (spv_opt_level <= 0) {
+    return "all(opt_level=0)";
+  }
+  std::vector<std::string> skipped = passes;
+  if (spv_opt_level >= 3 && skip_loop_unroll &&
+      std::find(skipped.begin(), skipped.end(), "LoopUnroll") ==
+          skipped.end()) {
+    skipped.push_back("LoopUnroll(spirv_skip_loop_unroll)");
+  }
+  if (skipped.empty()) {
+    return "none";
+  }
+  std::sort(skipped.begin(), skipped.end());
+  return fmt::format("[{}]", fmt::join(skipped, ","));
+}
+
+bool snode_chain_contains_pointer(const SNode *snode) {
+  for (auto *sn = snode; sn != nullptr; sn = sn->parent) {
+    if (sn->type == SNodeType::pointer) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool has_node_allocator_pool_bind(const TaskAttributes &attribs) {
+  for (const auto &bind : attribs.buffer_binds) {
+    if (bind.buffer.type == TaskAttributes::BufferType::NodeAllocatorPool) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void get_thread_local_opt(spv_target_env target_env,
                           int spv_opt_level,
                           bool skip_loop_unroll,
@@ -5181,6 +5295,19 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
   struct TaskOut {
     std::vector<uint32_t> spv;
     TaskAttributes attribs;
+    struct SpvStats {
+      bool enabled{false};
+      std::string task_type;
+      int snode_id{-1};
+      bool listgen_related{false};
+      bool pointer_related{false};
+      bool opt_run{false};
+      bool opt_ok{true};
+      size_t before_words{0};
+      size_t after_words{0};
+      double opt_us{0.0};
+      std::string skipped_passes;
+    } spv_stats;
     std::unordered_map<std::vector<int>,
                        irpass::ExternalPtrAccess,
                        hashing::Hasher<std::vector<int>>>
@@ -5206,28 +5333,55 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
     tp.bitmasked_clear_data_on_deactivate =
         params_.bitmasked_clear_data_on_deactivate;
     tp.listgen_subgroup_ballot = params_.listgen_subgroup_ballot;
+    tp.listgen_reuse = params_.vulkan_listgen_reuse;
 
     TaskCodegen cgen(tp);
     auto task_res = cgen.run();
 
     std::vector<uint32_t> optimized_spv(task_res.spirv_code);
+    bool opt_run = false;
+    bool opt_ok = true;
+    auto opt_begin = std::chrono::steady_clock::now();
 
     if (params_.spv_opt_level > 0) {
+      opt_run = true;
       spvtools::Optimizer *opt = nullptr;
       spvtools::SpirvTools *tools = nullptr;
       get_thread_local_opt(target_env_, params_.spv_opt_level,
                            params_.skip_loop_unroll,
                            params_.disabled_passes, &opt, &tools);
-      bool result = false;
-      TI_WARN_IF(
-          (result = !opt->Run(optimized_spv.data(), optimized_spv.size(),
-                              &optimized_spv, spirv_opt_options_)),
-          "SPIRV optimization failed");
-      (void)result;
+      opt_ok = opt->Run(optimized_spv.data(), optimized_spv.size(),
+                        &optimized_spv, spirv_opt_options_);
+      TI_WARN_IF(!opt_ok, "SPIRV optimization failed");
     }
+    const double opt_us =
+        std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - opt_begin)
+            .count();
 
     TI_TRACE("SPIRV-Tools-opt: binary size, before={}, after={}",
              task_res.spirv_code.size(), optimized_spv.size());
+
+    if (params_.vulkan_spv_stats) {
+      outs[i].spv_stats.enabled = true;
+      outs[i].spv_stats.task_type = offloaded_task_type_name(tp.task_ir->task_type);
+      outs[i].spv_stats.snode_id = tp.task_ir->snode ? tp.task_ir->snode->id : -1;
+      outs[i].spv_stats.listgen_related =
+          tp.task_ir->task_type == OffloadedTaskType::listgen ||
+          task_res.task_attribs.sparse_list_op ==
+              TaskAttributes::kSparseListOpListgen;
+      outs[i].spv_stats.pointer_related =
+          snode_chain_contains_pointer(tp.task_ir->snode) ||
+          has_node_allocator_pool_bind(task_res.task_attribs);
+      outs[i].spv_stats.opt_run = opt_run;
+      outs[i].spv_stats.opt_ok = opt_ok;
+      outs[i].spv_stats.before_words = task_res.spirv_code.size();
+      outs[i].spv_stats.after_words = optimized_spv.size();
+      outs[i].spv_stats.opt_us = opt_us;
+      outs[i].spv_stats.skipped_passes = skipped_passes_summary(
+          params_.spv_opt_level, params_.skip_loop_unroll,
+          params_.disabled_passes);
+    }
 
     outs[i].spv = std::move(optimized_spv);
     outs[i].attribs = std::move(task_res.task_attribs);
@@ -5266,6 +5420,39 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
     for (int i = 0; i < n; ++i) {
       run_task(i);
     }
+  }
+
+  if (params_.vulkan_spv_stats) {
+    size_t total_before = 0;
+    size_t total_after = 0;
+    int optimizer_skipped = 0;
+    int optimizer_failed = 0;
+    int listgen_tasks = 0;
+    int pointer_tasks = 0;
+    for (int i = 0; i < n; ++i) {
+      const auto &s = outs[i].spv_stats;
+      if (!s.enabled) {
+        continue;
+      }
+      total_before += s.before_words;
+      total_after += s.after_words;
+      optimizer_skipped += s.opt_run ? 0 : 1;
+      optimizer_failed += s.opt_ok ? 0 : 1;
+      listgen_tasks += s.listgen_related ? 1 : 0;
+      pointer_tasks += s.pointer_related ? 1 : 0;
+      TI_INFO(
+          "[VS-4][SPV_STATS] kernel={} task={} type={} snode={} listgen={} "
+          "pointer={} opt_run={} opt_ok={} words={}=>{} opt_us={:.3f} "
+          "skipped_passes={}",
+          params_.ti_kernel_name, i, s.task_type, s.snode_id,
+          s.listgen_related, s.pointer_related, s.opt_run, s.opt_ok,
+          s.before_words, s.after_words, s.opt_us, s.skipped_passes);
+    }
+    TI_INFO(
+        "[VS-4][SPV_STATS] kernel={} summary tasks={} listgen_tasks={} "
+        "pointer_tasks={} opt_skipped={} opt_failed={} words={}=>{}",
+        params_.ti_kernel_name, n, listgen_tasks, pointer_tasks,
+        optimizer_skipped, optimizer_failed, total_before, total_after);
   }
 
   // Aggregate results sequentially in task order.

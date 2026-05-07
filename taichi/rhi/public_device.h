@@ -4,6 +4,7 @@
 #include <vector>
 #include <assert.h>
 #include <memory>
+#include <limits>
 
 // https://gcc.gnu.org/wiki/Visibility
 #if defined _WIN32 || defined _WIN64 || defined __CYGWIN__

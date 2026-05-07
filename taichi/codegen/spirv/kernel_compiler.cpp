@@ -74,6 +74,8 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
       compile_config.bitmasked_clear_data_on_deactivate;
   params.listgen_subgroup_ballot =
       compile_config.spirv_listgen_subgroup_ballot;
+  params.vulkan_listgen_reuse = compile_config.vulkan_listgen_reuse;
+  params.vulkan_spv_stats = compile_config.vulkan_spv_stats;
   spirv::KernelCodegen codegen(params);
   spirv::CompiledKernelData::InternalData internal_data;
   codegen.run(internal_data.metadata.kernel_attribs,

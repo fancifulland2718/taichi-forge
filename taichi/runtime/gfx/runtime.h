@@ -3,6 +3,8 @@
 
 #include <vector>
 #include <chrono>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "taichi/rhi/device.h"
 #include "taichi/codegen/spirv/snode_struct_compiler.h"
@@ -75,6 +77,10 @@ class CompiledTaichiKernel {
 
   Pipeline *get_pipeline(int i);
 
+  void set_listgen_buffer(DeviceAllocation *listgen_buffer) {
+    input_buffers_[BufferInfo(BufferType::ListGen)] = listgen_buffer;
+  }
+
   DeviceAllocation *get_buffer_bind(const BufferInfo &bind) {
     return input_buffers_[bind];
   }
@@ -116,6 +122,13 @@ class TI_DLL_EXPORT GfxRuntime {
     // R2.a: Vulkan launch args/ret buffer pool.
     bool enable_buffer_pool{false};
     int buffer_pool_capacity{64};
+    // VS-1: Vulkan listgen scratch sizing. Defaults keep legacy 32 MiB.
+    bool listgen_dynamic_size{false};
+    int listgen_buffer_MB{0};
+    // VS-2: opt-in descriptor cache plus deferred shader-buffer barriers.
+    bool dispatch_cache{false};
+    // VS-3: opt-in host-side current-list skip for Vulkan listgen tasks.
+    bool listgen_reuse{false};
   };
 
   explicit GfxRuntime(const Params &params);
@@ -152,6 +165,9 @@ class TI_DLL_EXPORT GfxRuntime {
 
   void add_root_buffer(size_t root_buffer_size);
 
+  void update_listgen_buffer_for_snode_tree(
+      const CompiledSNodeStructs &compiled_structs);
+
   DeviceAllocation *get_root_buffer(int id) const;
 
   size_t get_root_buffer_size(int id) const;
@@ -179,6 +195,19 @@ class TI_DLL_EXPORT GfxRuntime {
   void submit_current_cmdlist_if_timeout();
 
   void init_nonroot_buffers();
+  void ensure_listgen_buffer_bytes(size_t requested_bytes,
+                                   const char *reason);
+  void ensure_listgen_capacity_entries(size_t requested_entries,
+                                       const char *reason);
+  void ensure_listgen_capacity_for_kernel(const CompiledTaichiKernel &kernel);
+  void insert_pending_dispatch_barriers();
+  void add_pending_dispatch_barrier(DeviceAllocation alloc);
+  void clear_pending_dispatch_barriers();
+  int64 get_sparse_list_version(int snode_id) const;
+  bool sparse_list_task_is_current(const TaskAttributes &attribs) const;
+  void mark_sparse_list_task_launched(const TaskAttributes &attribs);
+  void invalidate_sparse_list_cache(int sparse_mutation_snode_id);
+  void clear_sparse_list_cache_resident();
 
   Device *device_{nullptr};
   KernelProfilerBase *profiler_;
@@ -198,8 +227,26 @@ class TI_DLL_EXPORT GfxRuntime {
       node_allocators_;
 #endif
   std::unique_ptr<DeviceAllocationGuard> global_tmps_buffer_;
-  // FIXME: Support proper multiple lists
   std::unique_ptr<DeviceAllocationGuard> listgen_buffer_;
+  bool listgen_dynamic_size_{false};
+  bool listgen_explicit_size_{false};
+  size_t listgen_initial_buffer_size_{0};
+  size_t listgen_buffer_size_{0};
+  size_t listgen_capacity_entries_{0};
+  bool dispatch_cache_{false};
+  bool listgen_reuse_{false};
+  struct SparseListState {
+    int64 dirty_epoch{0};
+    int64 clean_epoch{-1};
+    int64 version{0};
+    int64 clean_parent_version{-1};
+    int parent_snode_id{-1};
+  };
+  std::unordered_map<int, SparseListState> sparse_list_states_;
+  int resident_sparse_list_snode_id_{-1};
+  bool pending_dispatch_global_barrier_{false};
+  std::vector<DeviceAllocation> pending_dispatch_barrier_buffers_;
+  std::unordered_set<DeviceAllocationId> pending_dispatch_barrier_buffer_ids_;
 
   std::vector<std::unique_ptr<DeviceAllocationGuard>> ctx_buffers_;
 
