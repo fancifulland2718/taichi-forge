@@ -742,6 +742,7 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
       }
       current_task->block_dim = stmt->block_dim;
       current_task->dynamic_shared_array_bytes = dynamic_shared_array_bytes;
+      annotate_current_task_metadata(stmt);
       TI_ASSERT(current_task->grid_dim != 0);
       TI_ASSERT(current_task->block_dim != 0);
       offloaded_tasks.push_back(*current_task);

@@ -112,6 +112,112 @@ CodeGenStmtGuard make_while_after_loop_guard(TaskCodeGenLLVM *cg) {
                           });
 }
 
+class SparseTopologyMutationDetector : public BasicStmtVisitor {
+ public:
+  bool may_mutate{false};
+  int mutation_snode_id{OffloadedTask::kSparseMutationNone};
+
+  void record_mutation(SNode *snode) {
+    may_mutate = true;
+    const int snode_id = snode ? snode->id : OffloadedTask::kSparseMutationUnknown;
+    if (mutation_snode_id == OffloadedTask::kSparseMutationNone) {
+      mutation_snode_id = snode_id;
+    } else if (mutation_snode_id != snode_id) {
+      mutation_snode_id = OffloadedTask::kSparseMutationUnknown;
+    }
+  }
+
+  void visit(SNodeLookupStmt *stmt) override {
+    if (stmt->activate) {
+      record_mutation(stmt->snode);
+    }
+  }
+
+  void visit(SNodeOpStmt *stmt) override {
+    if (stmt->op_type == SNodeOpType::activate ||
+        stmt->op_type == SNodeOpType::deactivate ||
+        stmt->op_type == SNodeOpType::append ||
+        stmt->op_type == SNodeOpType::allocate ||
+        stmt->op_type == SNodeOpType::clear) {
+      record_mutation(stmt->snode);
+    }
+  }
+};
+
+bool is_single_instance_pointer_snode(SNode *snode) {
+  if (snode == nullptr || snode->type != SNodeType::pointer) {
+    return false;
+  }
+  int64 total_from_root = 1;
+  for (int j = 0; j < taichi_max_num_indices; j++) {
+    total_from_root *= snode->extractors[j].num_elements_from_root;
+  }
+  return snode->num_cells_per_container == total_from_root;
+}
+
+class PurePointerDeactivateDetector : public BasicStmtVisitor {
+ public:
+  explicit PurePointerDeactivateDetector(SNode *target) : target_(target) {
+    allow_undefined_visitor = true;
+    invoke_default_visitor = true;
+  }
+
+  using BasicStmtVisitor::visit;
+
+  void visit(SNodeOpStmt *stmt) override {
+    if (stmt->op_type == SNodeOpType::deactivate && stmt->snode == target_) {
+      deactivate_count_++;
+      return;
+    }
+    has_disallowed_effect_ = true;
+  }
+
+  void visit(Stmt *stmt) override {
+    if (stmt->has_global_side_effect()) {
+      has_disallowed_effect_ = true;
+    }
+  }
+
+  bool matched() const {
+    return !has_disallowed_effect_ && deactivate_count_ == 1;
+  }
+
+ private:
+  SNode *target_{nullptr};
+  int deactivate_count_{0};
+  bool has_disallowed_effect_{false};
+};
+
+bool is_cuda_pointer_bulk_reset_task(const CompileConfig &config,
+                                     OffloadedStmt *stmt) {
+  if (config.arch != Arch::cuda || !config.cuda_pointer_fast_reset ||
+      !config.cuda_pointer_deterministic_slot || stmt == nullptr ||
+      stmt->task_type != OffloadedStmt::TaskType::struct_for ||
+      stmt->snode == nullptr || !is_single_instance_pointer_snode(stmt->snode) ||
+      stmt->tls_prologue != nullptr || stmt->tls_epilogue != nullptr ||
+      stmt->bls_prologue != nullptr || stmt->bls_epilogue != nullptr ||
+      stmt->is_bit_vectorized) {
+    return false;
+  }
+
+  PurePointerDeactivateDetector detector(stmt->snode);
+  stmt->body->accept(&detector);
+  return detector.matched();
+}
+
+struct SparseTopologyMutationInfo {
+  bool may_mutate{false};
+  int snode_id{OffloadedTask::kSparseMutationNone};
+};
+
+SparseTopologyMutationInfo detect_sparse_topology_mutation(OffloadedStmt *stmt) {
+  SparseTopologyMutationDetector detector;
+  stmt->accept(&detector);
+  return {detector.may_mutate,
+          detector.may_mutate ? detector.mutation_snode_id
+                              : OffloadedTask::kSparseMutationNone};
+}
+
 }  // namespace
 
 // TaskCodeGenLLVM
@@ -2098,6 +2204,32 @@ std::string TaskCodeGenLLVM::init_offloaded_task_function(OffloadedStmt *stmt,
   return task_kernel_name;
 }
 
+void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
+  TI_ASSERT(current_task != nullptr);
+  auto mutation = detect_sparse_topology_mutation(stmt);
+  current_task->may_mutate_sparse_topology = mutation.may_mutate;
+  current_task->sparse_mutation_snode_id = mutation.snode_id;
+
+  if (!(compile_config.arch == Arch::cuda &&
+        compile_config.cuda_listgen_reuse)) {
+    return;
+  }
+
+  if (stmt->task_type == OffloadedStmt::TaskType::listgen &&
+      stmt->snode != nullptr && stmt->snode->parent != nullptr) {
+    current_task->sparse_list_op = OffloadedTask::kSparseListOpListgen;
+    current_task->sparse_list_snode_id = stmt->snode->id;
+    current_task->sparse_list_parent_snode_id = stmt->snode->parent->id;
+  } else if (is_clear_list_task(stmt)) {
+    auto *clear_list = stmt->body->back()->as<ClearListStmt>();
+    TI_ASSERT(clear_list->snode != nullptr);
+    TI_ASSERT(clear_list->snode->parent != nullptr);
+    current_task->sparse_list_op = OffloadedTask::kSparseListOpClearList;
+    current_task->sparse_list_snode_id = clear_list->snode->id;
+    current_task->sparse_list_parent_snode_id = clear_list->snode->parent->id;
+  }
+}
+
 void TaskCodeGenLLVM::finalize_offloaded_task_function() {
   if (!returned) {
     builder->CreateBr(final_block);
@@ -2152,6 +2284,20 @@ void TaskCodeGenLLVM::create_offload_struct_for(OffloadedStmt *stmt) {
 
   llvm::Function *body = nullptr;
   auto leaf_block = stmt->snode;
+
+  if (is_cuda_pointer_bulk_reset_task(compile_config, stmt)) {
+    call(stmt->snode, get_root(stmt->snode->get_snode_tree_id()), "reset_all",
+         {});
+    const int64 num_slots = stmt->snode->max_num_elements();
+    const int block_dim = std::max(1, stmt->block_dim);
+    const int grid_dim = std::max<int64>(1, (num_slots + block_dim - 1) /
+                                                block_dim);
+    stmt->grid_dim = std::min(stmt->grid_dim, grid_dim);
+    current_coordinates = nullptr;
+    parent_coordinates = nullptr;
+    block_corner_coordinates = nullptr;
+    return;
+  }
 
   // For a bit-vectorized loop over a quant array, we generate struct for on its
   // parent node (must be "dense") instead of itself for higher performance.

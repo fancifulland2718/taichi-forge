@@ -339,6 +339,8 @@ class TaskCodeGenLLVM : public IRVisitor, public LLVMModuleBuilder {
   std::string init_offloaded_task_function(OffloadedStmt *stmt,
                                            std::string suffix = "");
 
+  void annotate_current_task_metadata(OffloadedStmt *stmt);
+
   void finalize_offloaded_task_function();
 
   FunctionCreationGuard get_function_creation_guard(

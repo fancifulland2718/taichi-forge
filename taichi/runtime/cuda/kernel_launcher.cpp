@@ -12,6 +12,58 @@ bool KernelLauncher::on_cuda_device(void *ptr) {
   return ret_code == CUDA_SUCCESS && attr_val == CU_MEMORYTYPE_DEVICE;
 }
 
+int64 KernelLauncher::get_sparse_list_version(int snode_id) const {
+  auto it = sparse_list_states_.find(snode_id);
+  if (it == sparse_list_states_.end()) {
+    return 0;
+  }
+  return it->second.version;
+}
+
+bool KernelLauncher::sparse_list_task_is_current(
+    const OffloadedTask &task) const {
+  if (task.sparse_list_op == OffloadedTask::kSparseListOpNone ||
+      task.sparse_list_snode_id < 0 ||
+      task.sparse_list_parent_snode_id < 0) {
+    return false;
+  }
+
+  auto it = sparse_list_states_.find(task.sparse_list_snode_id);
+  if (it == sparse_list_states_.end()) {
+    return false;
+  }
+  const auto &state = it->second;
+  return state.clean_epoch == state.dirty_epoch &&
+         state.clean_parent_version ==
+             get_sparse_list_version(task.sparse_list_parent_snode_id);
+}
+
+void KernelLauncher::mark_sparse_list_task_launched(
+    const OffloadedTask &task) {
+  if (task.sparse_list_op != OffloadedTask::kSparseListOpListgen ||
+      task.sparse_list_snode_id < 0 ||
+      task.sparse_list_parent_snode_id < 0) {
+    return;
+  }
+
+  auto &state = sparse_list_states_[task.sparse_list_snode_id];
+  state.clean_epoch = state.dirty_epoch;
+  state.clean_parent_version =
+      get_sparse_list_version(task.sparse_list_parent_snode_id);
+  state.version++;
+}
+
+void KernelLauncher::invalidate_sparse_list_cache(
+    int sparse_mutation_snode_id) {
+  if (sparse_mutation_snode_id >= 0) {
+    sparse_list_states_[sparse_mutation_snode_id].dirty_epoch++;
+    return;
+  }
+  for (auto &kv : sparse_list_states_) {
+    kv.second.dirty_epoch++;
+  }
+}
+
 void KernelLauncher::launch_llvm_kernel(Handle handle,
                                         LaunchContextBuilder &ctx) {
   TI_ASSERT(handle.get_launch_id() < contexts_.size());
@@ -157,10 +209,18 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   }
 
   for (auto task : offloaded_tasks) {
+    if (sparse_list_task_is_current(task)) {
+      TI_TRACE("Skipping current sparse list kernel {}", task.name);
+      continue;
+    }
     TI_TRACE("Launching kernel {}<<<{}, {}>>>", task.name, task.grid_dim,
              task.block_dim);
     cuda_module->launch(task.name, task.grid_dim, task.block_dim, 0,
                         {&ctx.get_context()}, {});
+    mark_sparse_list_task_launched(task);
+    if (task.may_mutate_sparse_topology) {
+      invalidate_sparse_list_cache(task.sparse_mutation_snode_id);
+    }
   }
   if (ctx.arg_buffer_size > 0) {
     CUDADriver::get_instance().mem_free_async(device_arg_buffer, nullptr);

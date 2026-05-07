@@ -10,10 +10,21 @@ namespace taichi::lang {
 
 class OffloadedTask {
  public:
+  static constexpr int kSparseListOpNone = 0;
+  static constexpr int kSparseListOpClearList = 1;
+  static constexpr int kSparseListOpListgen = 2;
+  static constexpr int kSparseMutationNone = -1;
+  static constexpr int kSparseMutationUnknown = -2;
+
   std::string name;
   int block_dim{0};
   int grid_dim{0};
   int dynamic_shared_array_bytes{0};
+  int sparse_list_op{kSparseListOpNone};
+  int sparse_list_snode_id{-1};
+  int sparse_list_parent_snode_id{-1};
+  bool may_mutate_sparse_topology{false};
+  int sparse_mutation_snode_id{kSparseMutationNone};
 
   explicit OffloadedTask(const std::string &name = "",
                          int block_dim = 0,
@@ -23,7 +34,15 @@ class OffloadedTask {
         block_dim(block_dim),
         grid_dim(grid_dim),
         dynamic_shared_array_bytes(dynamic_shared_array_bytes) {};
-  TI_IO_DEF(name, block_dim, grid_dim, dynamic_shared_array_bytes);
+  TI_IO_DEF(name,
+            block_dim,
+            grid_dim,
+            dynamic_shared_array_bytes,
+            sparse_list_op,
+            sparse_list_snode_id,
+            sparse_list_parent_snode_id,
+            may_mutate_sparse_topology,
+            sparse_mutation_snode_id);
 };
 
 struct LLVMCompiledTask {

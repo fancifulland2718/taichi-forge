@@ -46,7 +46,15 @@ class Kernel;
 //       Old CUDA LLVM kernels embed LLVMRuntime field offsets, so reusing old
 //       .tic files after the runtime layout change can launch kernels with
 //       stale offsets. Force a cache miss and silent recompile.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 3;
+//   4 - CS-3.D (2026-05). LLVM OffloadedTask serialization now carries sparse
+//       listgen host-elision metadata (clear/listgen child/parent ids and
+//       topology-mutation flag). Old cached kernels do not have the metadata,
+//       so force a miss before host-side current-list launch skipping is used.
+//   5 - CS-3.F (2026-05). OffloadedTask topology-mutation metadata is refined
+//       from a boolean to an optional SNode id so CUDA host-side listgen reuse
+//       can invalidate only the mutated list when safe. Old cached kernels lack
+//       this id and would fall back to over-conservative/global behavior.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 5;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key(const CompileConfig &config,

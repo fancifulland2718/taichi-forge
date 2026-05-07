@@ -812,6 +812,9 @@ void mark_element_lists_dirty_if_reuse(StructMeta *meta) {
   }
   auto runtime = meta->context->runtime;
   auto snode_id = meta->snode_id;
+  if (runtime->element_list_dirty_flag[snode_id] != 0) {
+    return;
+  }
   if (atomic_exchange_i32(&runtime->element_list_dirty_flag[snode_id], 1) ==
       0) {
     atomic_add_i32(&runtime->element_list_dirty_epoch[snode_id], 1);
@@ -834,11 +837,11 @@ void mark_element_list_current(LLVMRuntime *runtime,
                                StructMeta *child) {
   auto child_id = child->snode_id;
   auto parent_id = parent->snode_id;
-  runtime->element_list_clean_epoch[child_id] =
-      runtime->element_list_dirty_epoch[child_id];
-  runtime->element_list_clean_parent_version[child_id] =
-      runtime->element_list_version[parent_id];
   if (block_idx() == 0 && thread_idx() == 0) {
+    runtime->element_list_clean_epoch[child_id] =
+        runtime->element_list_dirty_epoch[child_id];
+    runtime->element_list_clean_parent_version[child_id] =
+        runtime->element_list_version[parent_id];
     runtime->element_list_dirty_flag[child_id] = 0;
     atomic_add_i32(&runtime->element_list_version[child_id], 1);
   }

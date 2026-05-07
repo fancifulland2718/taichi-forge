@@ -99,12 +99,12 @@ void Pointer_deactivate(Ptr meta, Ptr node, int i) {
   Ptr lock = node + 8 * i;
   Ptr &data_ptr = *(Ptr *)(node + 8 * (num_elements + i));
   // CS-1 (2026-05): deterministic-slot SNodes skip recycle — the GC chain
-  // is bypassed entirely; slots are reset via Pointer_reset_all bulk memset.
+  // is bypassed entirely. Generic deactivate calls clear this slot here;
+  // pure deactivate_all kernels may instead be lowered to Pointer_reset_all.
   if (data_ptr != nullptr) {
     auto smeta = (StructMeta *)meta;
     if (((PointerMeta *)smeta)->deterministic_slot) {
       // Fast path: just clear the slot. No lock, no recycle, no GC.
-      // The bulk Pointer_reset_all kernel handles full cleanup later.
       data_ptr = nullptr;
       mark_element_lists_dirty_if_reuse(smeta);
       return;
@@ -128,9 +128,14 @@ void Pointer_deactivate(Ptr meta, Ptr node, int i) {
 // (no locks — the slots are already individually cleared by
 // Pointer_deactivate's fast path, and this just ensures a clean sweep).
 void Pointer_reset_all(Ptr meta, Ptr node) {
+  auto smeta = (StructMeta *)meta;
   auto num_elements = Pointer_get_num_elements(meta, node);
   Ptr *slot_base = (Ptr *)(node + 8 * num_elements);
-  for (int i = thread_idx(); i < num_elements; i += block_dim() * grid_dim()) {
+  if (block_idx() == 0 && thread_idx() == 0) {
+    mark_element_lists_dirty_if_reuse(smeta);
+  }
+  int linear = block_idx() * block_dim() + thread_idx();
+  for (int i = linear; i < num_elements; i += block_dim() * grid_dim()) {
     slot_base[i] = nullptr;
   }
 }
