@@ -569,6 +569,17 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
   }
 
   void emit_cuda_gc(OffloadedStmt *stmt) {
+    if (compile_config.cuda_pointer_fast_reset &&
+        compile_config.cuda_pointer_deterministic_slot &&
+        stmt->snode->type == SNodeType::pointer) {
+      int64 total_from_root = 1;
+      for (int j = 0; j < taichi_max_num_indices; j++) {
+        total_from_root *= stmt->snode->extractors[j].num_elements_from_root;
+      }
+      if (stmt->snode->num_cells_per_container == total_from_root) {
+        return;
+      }
+    }
     auto snode_id = tlctx->get_constant(stmt->snode->id);
     {
       init_offloaded_task_function(stmt, "gather_list");

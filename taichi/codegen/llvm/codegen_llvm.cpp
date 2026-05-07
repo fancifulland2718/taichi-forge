@@ -239,11 +239,10 @@ std::unique_ptr<RuntimeObject> TaskCodeGenLLVM::emit_struct_meta_object(
     // Gate: (a) CompileConfig flag is ON, (b) single-instance SNode
     // (num_cells_per_container == total_num_cells_from_root, computed
     // as the product of num_elements_from_root across all axes),
-    // (c) CUDA backend (non-CPU). Falls through silently if any
+    // (c) CUDA backend only. Falls through silently if any
     // condition fails — Pointer_activate uses legacy path.
     bool det_slot = false;
-    if (compile_config.cuda_pointer_deterministic_slot &&
-        !arch_is_cpu(compile_config.arch)) {
+    if (compile_config.cuda_pointer_deterministic_slot && compile_config.arch == Arch::cuda) {
       int64 total_from_root = 1;
       for (int j = 0; j < taichi_max_num_indices; j++) {
         total_from_root *= snode->extractors[j].num_elements_from_root;
@@ -1185,7 +1184,8 @@ void TaskCodeGenLLVM::emit_gc(OffloadedStmt *stmt) {
   // the struct-for kernel; bitmask is zeroed by bitmasked deactivation.
   // The NodeManager free/recycled/data lists are never touched by the
   // deterministic allocation path — GC is a no-op. Skipping saves ~170 us.
-  if (compile_config.cuda_pointer_fast_reset &&
+  if (compile_config.arch == Arch::cuda &&
+      compile_config.cuda_pointer_fast_reset &&
       compile_config.cuda_pointer_deterministic_slot &&
       snode->type == SNodeType::pointer) {
     int64 total_from_root = 1;

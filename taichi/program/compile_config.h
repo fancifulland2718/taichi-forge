@@ -194,9 +194,10 @@ struct CompileConfig {
   // element_size)` to activate. Requires `cuda_sparse_per_snode_pool == true`
   // (Phase 1-D) for the dedicated pool region. Gate is checked at codegen
   // time; ineligible SNodes silently fall back to the legacy
-  // NodeManager::allocate path. Default false preserves vanilla 1.7.4
-  // semantics.
-  bool cuda_pointer_deterministic_slot{false};
+  // NodeManager::allocate path. Default true: CS matrix 2026-05-07 shows
+  // consistent positive gain on pointer rebuild workloads while neutral on
+  // topology-stable struct-for reuse cases.
+  bool cuda_pointer_deterministic_slot{true};
   // CS-1 (2026-05): CUDA pointer fast deactivate/reset. When true AND
   // cuda_pointer_deterministic_slot is ON, deterministic-slot pointer
   // SNodes skip the 3-stage GC kernel chain and use a single parallel
