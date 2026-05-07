@@ -576,7 +576,13 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
           data_chunks = std::max<std::size_t>(needed_chunks, 1) +
                         std::size_t(kHintHeadroomChunks);
         }
-        auto_size += data_chunks * chunk_bytes;
+        // The dedicated pool backs all three ListManagers. data_list chunks
+        // dominate, but legacy deactivate/GC can also touch recycled_list and
+        // free_list index chunks. Budget those tiny index chunks explicitly so
+        // all-OFF behavior remains safe when per-SNode pools are enabled.
+        std::size_t index_bytes =
+            std::size_t(2) * data_chunks * chunk_elements * sizeof(int32);
+        auto_size += data_chunks * chunk_bytes + index_bytes;
         // Phase 1-D: record optimal chunk_elements for NodeAllocator init
         snode_chunk_elems.push_back(
             {snode_metas[i].id, (int)chunk_elements});
@@ -585,7 +591,7 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
           snode_entries.push_back(
               {snode_metas[i].id,
                std::size_t(kListManagersPerNodeManager) * kListManagerBytes,
-               data_chunks * chunk_bytes, chunk_bytes});
+               data_chunks * chunk_bytes + index_bytes, chunk_bytes});
         }
       }
       // User-tunable lower bound (defensive floor for tiny SNode trees).
@@ -594,22 +600,22 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
           << 20;
       auto_size = std::max(auto_size, floor_bytes);
 
-      // device_memory_GB acts as a sanity ceiling, NOT a silent cap. If
-      // the heuristic asks for more, warn and clamp; the user can either
-      // raise device_memory_GB or set cuda_sparse_pool_size_GB explicitly.
+      // device_memory_GB is not a silent cap for the auto-sizer. If the
+      // SNode-derived geometry asks for more, warn but keep the derived size;
+      // clamping here under-sizes the preallocated pool and later manifests as
+      // device-side OOM/illegal-address inside allocate_from_reserved_memory.
       std::size_t cap =
           std::size_t(config_.device_memory_GB * (1UL << 30));
       if (auto_size > cap) {
         TI_WARN(
             "cuda_sparse_pool_auto_size: SNode-derived sparse pool "
-            "{:.2f} MiB exceeds device_memory_GB cap {:.2f} MiB; clamping. "
-            "Raise device_memory_GB or set cuda_sparse_pool_size_GB to "
-            "avoid runtime OOM in allocate_from_reserved_memory.",
+            "{:.2f} MiB exceeds device_memory_GB {:.2f} MiB; using the "
+            "derived size to avoid runtime OOM in "
+            "allocate_from_reserved_memory. Set cuda_sparse_pool_size_GB "
+            "explicitly if you need a hard sparse-pool budget.",
             auto_size / 1048576.0, cap / 1048576.0);
-        override_size = cap;
-      } else {
-        override_size = auto_size;
       }
+      override_size = auto_size;
 
       // Phase 1 (2026-05): carve per-SNode data regions from a single
       // buffer instead of using a monolithic global pool. The global
@@ -634,13 +640,12 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
         for (const auto &e : snode_entries) {
           total_buffer += e.data_bytes;
         }
-        // Clamp to device_memory_GB ceiling (if auto_size exceeded cap,
-        // scale down proportionally; if not, use computed values).
         if (total_buffer > cap) {
-          double scale = (double)cap / (double)total_buffer;
-          global_region = std::max(kBaselineBytes,
-                                   (std::size_t)((double)global_region * scale));
-          total_buffer = cap;
+          TI_WARN(
+              "cuda_sparse_pool_auto_size: per-SNode sparse pool {:.2f} MiB "
+              "exceeds device_memory_GB {:.2f} MiB; using the derived size. "
+              "Set cuda_sparse_pool_size_GB explicitly if this is too large.",
+              total_buffer / 1048576.0, cap / 1048576.0);
         }
         TI_TRACE(
             "Phase-1 per-SNode pools: global={:.2f} MiB total={:.2f} MiB "
@@ -732,10 +737,6 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       runtime_jit->call<void *, int, std::size_t, int>(
           "runtime_NodeAllocator_initialize_ex", llvm_runtime_, snode_id,
           node_size, chunk_elems);
-      TI_TRACE("Allocating ambient element for snode {} (node size {})",
-               snode_id, node_size);
-      runtime_jit->call<void *, int>("runtime_allocate_ambient", llvm_runtime_,
-                                     snode_id, node_size);
     }
   }
 
@@ -772,8 +773,8 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
         continue;
       std::size_t elem_sz = snode_metas[i].cell_size_bytes;
       // Phase 1 (2026-05): mirror NodeAllocator init's pointer handling.
-      if (snode_metas[i].type == SNodeType::pointer && elem_sz == 0) {
-        elem_sz = sizeof(int32);
+      if (snode_metas[i].type == SNodeType::pointer) {
+        elem_sz = std::max(elem_sz, (std::size_t)sizeof(int32));
       }
       if (elem_sz == 0)
         continue;
@@ -816,7 +817,9 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
         data_chunks =
             std::max<std::size_t>(need, 1) + std::size_t(kHintHeadroomChunks);
       }
-      std::size_t data_bytes = data_chunks * chunk_bytes;
+      std::size_t index_bytes =
+          std::size_t(2) * data_chunks * chunk_elems * sizeof(int32);
+      std::size_t data_bytes = data_chunks * chunk_bytes + index_bytes;
       if (data_bytes > 0)
         snode_pools.push_back({snode_metas[i].id, data_bytes});
     }
@@ -833,6 +836,30 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
             p.first, region_ptr, p.second);
         offset += p.second;
       }
+    }
+  }
+
+  // Allocate ambient elements after per-SNode dedicated pools are installed.
+  // Otherwise the first data_list chunk of a large pointer/dynamic SNode is
+  // charged to the smaller global region and can OOM during field creation
+  // before the dedicated pool has a chance to take over.
+  for (size_t i = 0; i < snode_metas.size(); i++) {
+    if (is_gc_able(snode_metas[i].type)) {
+      const auto snode_id = snode_metas[i].id;
+      auto element_size = snode_metas[i].cell_size_bytes;
+      if (snode_metas[i].type == SNodeType::pointer) {
+        element_size = std::max(element_size, (std::size_t)sizeof(int32));
+      }
+      std::size_t node_size;
+      if (snode_metas[i].type == SNodeType::pointer) {
+        node_size = element_size;
+      } else {
+        node_size = sizeof(void *) + element_size * snode_metas[i].chunk_size;
+      }
+      TI_TRACE("Allocating ambient element for snode {} (node size {})",
+               snode_id, node_size);
+      runtime_jit->call<void *, int>("runtime_allocate_ambient", llvm_runtime_,
+                                     snode_id, node_size);
     }
   }
 }

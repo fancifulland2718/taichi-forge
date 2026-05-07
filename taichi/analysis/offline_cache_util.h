@@ -41,7 +41,12 @@ class Kernel;
 //       into the hasher, so all v1 caches naturally miss once. New cache
 //       artifacts capture the use_fused_passes setting alongside other
 //       config bits.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 2;
+//   3 - CS-3.B/C (2026-05). LLVMRuntime listgen-reuse state changed from a
+//       scalar dirty epoch to per-SNode arrays and list-version dependencies.
+//       Old CUDA LLVM kernels embed LLVMRuntime field offsets, so reusing old
+//       .tic files after the runtime layout change can launch kernels with
+//       stale offsets. Force a cache miss and silent recompile.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 3;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key(const CompileConfig &config,

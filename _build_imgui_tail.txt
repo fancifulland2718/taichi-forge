@@ -1,0 +1,80 @@
+﻿[108/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\program\graph_builder.cpp.obj
+[109/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\program\function.cpp.obj
+[110/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\binary_op_simplify.cpp.obj
+[111/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\cfg_optimization.cpp.obj
+[112/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\program\argpack.cpp.obj
+[113/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\program\snode_rw_accessors_bank.cpp.obj
+[114/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\compile_taichi_functions.cpp.obj
+[115/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\cache_loop_invariant_global_vars.cpp.obj
+[116/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\check_out_of_bound.cpp.obj
+[117/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\auto_diff.cpp.obj
+[118/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\program\texture.cpp.obj
+[119/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\codegen\codegen.cpp.obj
+[120/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\compile_to_offloads.cpp.obj
+[121/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\program\ndarray.cpp.obj
+[122/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\alg_simp.cpp.obj
+[123/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\bit_loop_vectorize.cpp.obj
+[124/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\demote_atomics.cpp.obj
+[125/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\demote_dense_struct_fors.cpp.obj
+[126/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\demote_mesh_statements.cpp.obj
+[127/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\demote_no_access_mesh_fors.cpp.obj
+[128/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\detect_read_only.cpp.obj
+[129/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\determine_ad_stack_size.cpp.obj
+[130/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\program\kernel.cpp.obj
+[131/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\die.cpp.obj
+[132/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\constant_fold.cpp.obj
+[133/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\eliminate_immutable_local_vars.cpp.obj
+[134/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\flag_access.cpp.obj
+[135/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\extract_constant.cpp.obj
+[136/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\demote_operations.cpp.obj
+[137/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\insert_scratch_pad.cpp.obj
+[138/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\handle_external_ptr_boundary.cpp.obj
+[139/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\program\sparse_matrix.cpp.obj
+[140/179] Linking CXX static library taichi\codegen\cpu\cpu_codegen.lib
+[141/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\loop_invariant_code_motion.cpp.obj
+[142/179] Linking CXX static library taichi\codegen\cuda\cuda_codegen.lib
+[143/179] Linking CXX static library taichi\runtime\program_impls\llvm\llvm_program_impl.lib
+[144/179] Linking CXX static library taichi\runtime\program_impls\opengl\opengl_program_impl.lib
+[145/179] Linking CXX static library taichi\runtime\program_impls\vulkan\vulkan_program_impl.lib
+[146/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\frontend_type_check.cpp.obj
+[147/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\inlining.cpp.obj
+[148/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\program\program.cpp.obj
+[149/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\make_block_local.cpp.obj
+[150/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\lower_ast.cpp.obj
+[151/179] Linking CXX static library taichi\ui\taichi_ui.lib
+[152/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\lower_matrix_ptr.cpp.obj
+[153/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\make_cpu_multithreaded_range_for.cpp.obj
+[154/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\make_mesh_block_local.cpp.obj
+D:\taichi\taichi\transforms\make_mesh_block_local.cpp(494): warning C4805: “|=”: 在操作中将类型“bool”与类型“taichi::lang::AccessFlag”混合不安全
+D:\taichi\taichi\transforms\make_mesh_block_local.cpp(494): warning C4805: “|”: 在操作中将类型“bool”与类型“taichi::lang::AccessFlag”混合不安全
+[155/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\make_mesh_thread_local.cpp.obj
+[156/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\optimize_bit_struct_stores.cpp.obj
+[157/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\make_thread_local.cpp.obj
+[158/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\remove_assume_in_range.cpp.obj
+[159/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\re_id.cpp.obj
+[160/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\scalar_pointer_lowerer.cpp.obj
+[161/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\replace_statements.cpp.obj
+[162/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\lower_access.cpp.obj
+[163/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\ir_printer.cpp.obj
+[164/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\program\sparse_solver.cpp.obj
+[165/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\reverse_segments.cpp.obj
+[166/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\remove_loop_unique.cpp.obj
+[167/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\offload.cpp.obj
+[168/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\statement_usage_replace.cpp.obj
+[169/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\unreachable_code_elimination.cpp.obj
+[170/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\transform_statements.cpp.obj
+[171/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\whole_kernel_cse.cpp.obj
+D:\taichi\taichi\transforms\whole_kernel_cse.cpp(108): warning C4311: “reinterpret_cast”: 从“_Ty”到“unsigned long”的指针截断
+        with
+        [
+            _Ty=taichi::lang::Stmt *
+        ]
+[172/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\type_check.cpp.obj
+[173/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\simplify.cpp.obj
+[174/179] Building CXX object CMakeFiles\taichi_core.dir\taichi\transforms\scalarize.cpp.obj
+[175/179] Building CXX object CMakeFiles\taichi_python.dir\taichi\python\snode_registry.cpp.obj
+[176/179] Building CXX object CMakeFiles\taichi_python.dir\taichi\python\export_misc.cpp.obj
+[177/179] Building CXX object CMakeFiles\taichi_python.dir\taichi\python\export_ggui.cpp.obj
+[178/179] Building CXX object CMakeFiles\taichi_python.dir\taichi\python\export_lang.cpp.obj
+[179/179] Linking CXX shared module taichi_python.cp310-win_amd64.pyd
+

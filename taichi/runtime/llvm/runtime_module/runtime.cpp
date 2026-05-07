@@ -576,8 +576,11 @@ struct LLVMRuntime {
   Ptr thread_pool;
   parallel_for_type parallel_for;
   ListManager *element_lists[taichi_max_num_snodes];
-  i32 element_list_dirty_epoch;
+  i32 element_list_dirty_epoch[taichi_max_num_snodes];
+  i32 element_list_dirty_flag[taichi_max_num_snodes];
+  i32 element_list_version[taichi_max_num_snodes];
   i32 element_list_clean_epoch[taichi_max_num_snodes];
+  i32 element_list_clean_parent_version[taichi_max_num_snodes];
   NodeManager *node_allocators[taichi_max_num_snodes];
   Ptr ambient_elements[taichi_max_num_snodes];
   Ptr temporaries;
@@ -627,11 +630,14 @@ struct LLVMRuntime {
 
 // TODO: are these necessary?
 STRUCT_FIELD_ARRAY(LLVMRuntime, element_lists);
+STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_dirty_epoch);
+STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_dirty_flag);
+STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_version);
 STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_clean_epoch);
+STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_clean_parent_version);
 STRUCT_FIELD_ARRAY(LLVMRuntime, node_allocators);
 STRUCT_FIELD_ARRAY(LLVMRuntime, roots);
 STRUCT_FIELD_ARRAY(LLVMRuntime, root_mem_sizes);
-STRUCT_FIELD(LLVMRuntime, element_list_dirty_epoch);
 STRUCT_FIELD(LLVMRuntime, temporaries);
 STRUCT_FIELD(LLVMRuntime, assert_failed);
 STRUCT_FIELD(LLVMRuntime, host_printf);
@@ -784,9 +790,12 @@ void runtime_ListManager_get_num_active_chunks(LLVMRuntime *runtime,
 
 RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, node_allocators);
 RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_lists);
+RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_dirty_epoch);
+RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_dirty_flag);
+RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_version);
 RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_clean_epoch);
+RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_clean_parent_version);
 RUNTIME_STRUCT_FIELD(LLVMRuntime, total_requested_memory);
-RUNTIME_STRUCT_FIELD(LLVMRuntime, element_list_dirty_epoch);
 
 RUNTIME_STRUCT_FIELD(NodeManager, free_list);
 RUNTIME_STRUCT_FIELD(NodeManager, recycled_list);
@@ -801,17 +810,38 @@ void mark_element_lists_dirty_if_reuse(StructMeta *meta) {
   if (!meta->listgen_reuse) {
     return;
   }
-  atomic_add_i32(&meta->context->runtime->element_list_dirty_epoch, 1);
+  auto runtime = meta->context->runtime;
+  auto snode_id = meta->snode_id;
+  if (atomic_exchange_i32(&runtime->element_list_dirty_flag[snode_id], 1) ==
+      0) {
+    atomic_add_i32(&runtime->element_list_dirty_epoch[snode_id], 1);
+  }
 }
 
-u1 element_list_is_current(LLVMRuntime *runtime, StructMeta *child) {
-  return runtime->element_list_clean_epoch[child->snode_id] ==
-         runtime->element_list_dirty_epoch;
+u1 element_list_is_current(LLVMRuntime *runtime,
+                           StructMeta *parent,
+                           StructMeta *child) {
+  auto child_id = child->snode_id;
+  auto parent_id = parent->snode_id;
+  return runtime->element_list_clean_epoch[child_id] ==
+             runtime->element_list_dirty_epoch[child_id] &&
+         runtime->element_list_clean_parent_version[child_id] ==
+             runtime->element_list_version[parent_id];
 }
 
-void mark_element_list_current(LLVMRuntime *runtime, StructMeta *child) {
-  runtime->element_list_clean_epoch[child->snode_id] =
-      runtime->element_list_dirty_epoch;
+void mark_element_list_current(LLVMRuntime *runtime,
+                               StructMeta *parent,
+                               StructMeta *child) {
+  auto child_id = child->snode_id;
+  auto parent_id = parent->snode_id;
+  runtime->element_list_clean_epoch[child_id] =
+      runtime->element_list_dirty_epoch[child_id];
+  runtime->element_list_clean_parent_version[child_id] =
+      runtime->element_list_version[parent_id];
+  if (block_idx() == 0 && thread_idx() == 0) {
+    runtime->element_list_dirty_flag[child_id] = 0;
+    atomic_add_i32(&runtime->element_list_version[child_id], 1);
+  }
 }
 
 void taichi_assert(RuntimeContext *context, u1 test, const char *msg) {
@@ -1012,9 +1042,12 @@ void runtime_initialize(
   runtime->rand_states = (RandState *)runtime->allocate_aligned(
       runtime->runtime_objects_chunk,
       sizeof(RandState) * runtime->num_rand_states, taichi_page_size);
-  runtime->element_list_dirty_epoch = 1;
   for (int i = 0; i < taichi_max_num_snodes; i++) {
+    runtime->element_list_dirty_epoch[i] = 1;
+    runtime->element_list_dirty_flag[i] = 1;
+    runtime->element_list_version[i] = 0;
     runtime->element_list_clean_epoch[i] = 0;
+    runtime->element_list_clean_parent_version[i] = 0;
   }
 }
 
@@ -1073,6 +1106,11 @@ void runtime_initialize_snodes(LLVMRuntime *runtime,
   }
 
   runtime->element_lists[root_id]->append(&elem);
+  runtime->element_list_clean_epoch[root_id] =
+      runtime->element_list_dirty_epoch[root_id];
+  runtime->element_list_dirty_flag[root_id] = 0;
+  runtime->element_list_clean_parent_version[root_id] = 0;
+  runtime->element_list_version[root_id] = 1;
 }
 
 void LLVMRuntime_initialize_thread_pool(LLVMRuntime *runtime,
@@ -1351,7 +1389,7 @@ DEFINE_REDUCTION(xor, i32);
 // "Element", "component" are different concepts
 
 void clear_list(LLVMRuntime *runtime, StructMeta *parent, StructMeta *child) {
-  if (child->listgen_reuse && element_list_is_current(runtime, child)) {
+  if (child->listgen_reuse && element_list_is_current(runtime, parent, child)) {
     return;
   }
   auto child_list = runtime->element_lists[child->snode_id];
@@ -1368,7 +1406,7 @@ void clear_list(LLVMRuntime *runtime, StructMeta *parent, StructMeta *child) {
 void element_listgen_root(LLVMRuntime *runtime,
                           StructMeta *parent,
                           StructMeta *child) {
-  if (child->listgen_reuse && element_list_is_current(runtime, child)) {
+  if (child->listgen_reuse && element_list_is_current(runtime, parent, child)) {
     return;
   }
   // If there's just one element in the parent list, we need to use the blocks
@@ -1416,14 +1454,14 @@ void element_listgen_root(LLVMRuntime *runtime,
     child_list->append(&elem);
   }
   if (child->listgen_reuse) {
-    mark_element_list_current(runtime, child);
+    mark_element_list_current(runtime, parent, child);
   }
 }
 
 void element_listgen_nonroot(LLVMRuntime *runtime,
                              StructMeta *parent,
                              StructMeta *child) {
-  if (child->listgen_reuse && element_list_is_current(runtime, child)) {
+  if (child->listgen_reuse && element_list_is_current(runtime, parent, child)) {
     return;
   }
   auto parent_list = runtime->element_lists[parent->snode_id];
@@ -1476,7 +1514,7 @@ void element_listgen_nonroot(LLVMRuntime *runtime,
     }
   }
   if (child->listgen_reuse) {
-    mark_element_list_current(runtime, child);
+    mark_element_list_current(runtime, parent, child);
   }
 }
 
