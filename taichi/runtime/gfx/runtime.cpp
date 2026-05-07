@@ -349,7 +349,7 @@ GfxRuntime::GfxRuntime(const Params &params)
     listgen_initial_buffer_size_ =
         static_cast<size_t>(params.listgen_buffer_MB) * 1024u * 1024u;
   } else if (listgen_dynamic_size_) {
-    listgen_initial_buffer_size_ = kListGenMinBufferSize;
+    listgen_initial_buffer_size_ = 0;
   } else {
     listgen_initial_buffer_size_ = kListGenBufferSize;
   }
@@ -459,6 +459,7 @@ bool GfxRuntime::sparse_list_task_is_current(
   }
   const auto &state = it->second;
   return state.clean_epoch == state.dirty_epoch &&
+      state.global_dirty_seen == sparse_list_global_dirty_epoch_ &&
          state.clean_parent_version ==
              get_sparse_list_version(attribs.sparse_list_parent_snode_id);
 }
@@ -476,10 +477,24 @@ void GfxRuntime::mark_sparse_list_task_launched(
   }
 
   auto &state = sparse_list_states_[attribs.sparse_list_snode_id];
+  if (state.parent_snode_id != attribs.sparse_list_parent_snode_id) {
+    if (state.parent_snode_id >= 0) {
+      auto old_children = child_lists_by_parent_.find(state.parent_snode_id);
+      if (old_children != child_lists_by_parent_.end()) {
+        old_children->second.erase(attribs.sparse_list_snode_id);
+        if (old_children->second.empty()) {
+          child_lists_by_parent_.erase(old_children);
+        }
+      }
+    }
+    child_lists_by_parent_[attribs.sparse_list_parent_snode_id].insert(
+        attribs.sparse_list_snode_id);
+    state.parent_snode_id = attribs.sparse_list_parent_snode_id;
+  }
   state.clean_epoch = state.dirty_epoch;
   state.clean_parent_version =
       get_sparse_list_version(attribs.sparse_list_parent_snode_id);
-  state.parent_snode_id = attribs.sparse_list_parent_snode_id;
+  state.global_dirty_seen = sparse_list_global_dirty_epoch_;
   state.version++;
   resident_sparse_list_snode_id_ = attribs.sparse_list_snode_id;
 }
@@ -489,32 +504,38 @@ void GfxRuntime::invalidate_sparse_list_cache(int sparse_mutation_snode_id) {
     return;
   }
   if (sparse_mutation_snode_id < 0) {
-    for (auto &kv : sparse_list_states_) {
-      kv.second.dirty_epoch++;
-    }
+    sparse_list_global_dirty_epoch_++;
     return;
   }
 
   std::unordered_set<int> affected;
-  affected.insert(sparse_mutation_snode_id);
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (const auto &kv : sparse_list_states_) {
-      if (affected.count(kv.first) == 0 &&
-          affected.count(kv.second.parent_snode_id) != 0) {
-        affected.insert(kv.first);
-        changed = true;
+  std::vector<int> stack;
+  stack.push_back(sparse_mutation_snode_id);
+  while (!stack.empty()) {
+    const int snode_id = stack.back();
+    stack.pop_back();
+    if (!affected.insert(snode_id).second) {
+      continue;
+    }
+    auto children = child_lists_by_parent_.find(snode_id);
+    if (children != child_lists_by_parent_.end()) {
+      for (int child_snode_id : children->second) {
+        stack.push_back(child_snode_id);
       }
     }
   }
   for (int snode_id : affected) {
-    sparse_list_states_[snode_id].dirty_epoch++;
+    auto it = sparse_list_states_.find(snode_id);
+    if (it != sparse_list_states_.end()) {
+      it->second.dirty_epoch++;
+    }
   }
 }
 
 void GfxRuntime::clear_sparse_list_cache_resident() {
   sparse_list_states_.clear();
+  child_lists_by_parent_.clear();
+  sparse_list_global_dirty_epoch_ = 0;
   resident_sparse_list_snode_id_ = -1;
 }
 
@@ -896,6 +917,9 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
 
     TI_ERROR_IF(status != RhiResult::success, "Dispatch error : RhiResult({})",
                 status);
+    if (attribs.task_type == OffloadedTaskType::listgen) {
+      listgen_buffer_used_ = true;
+    }
     mark_sparse_list_task_launched(attribs);
     if (attribs.may_mutate_sparse_topology) {
       invalidate_sparse_list_cache(attribs.sparse_mutation_snode_id);
@@ -1156,7 +1180,8 @@ void GfxRuntime::ensure_listgen_buffer_bytes(size_t requested_bytes,
         requested_bytes / 1048576.0);
   }
 
-  if (listgen_buffer_) {
+  const bool replacing_used_buffer = listgen_buffer_ && listgen_buffer_used_;
+  if (replacing_used_buffer) {
     synchronize();
   }
 
@@ -1175,7 +1200,10 @@ void GfxRuntime::ensure_listgen_buffer_bytes(size_t requested_bytes,
   for (auto &kernel : ti_kernels_) {
     kernel->set_listgen_buffer(listgen_buffer_.get());
   }
-  clear_sparse_list_cache_resident();
+  if (replacing_used_buffer) {
+    clear_sparse_list_cache_resident();
+  }
+  listgen_buffer_used_ = false;
 
   Stream *stream = device_->get_compute_stream();
   auto [cmdlist, cmd_res] =
@@ -1248,7 +1276,9 @@ void GfxRuntime::init_nonroot_buffers() {
     global_tmps_buffer_ = std::move(buf);
   }
 
-  ensure_listgen_buffer_bytes(listgen_initial_buffer_size_, "initialization");
+  if (listgen_initial_buffer_size_ > 0) {
+    ensure_listgen_buffer_bytes(listgen_initial_buffer_size_, "initialization");
+  }
 
   // Need to zero fill the buffers, otherwise there could be NaN.
   Stream *stream = device_->get_compute_stream();

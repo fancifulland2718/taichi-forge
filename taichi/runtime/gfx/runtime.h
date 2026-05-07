@@ -233,16 +233,20 @@ class TI_DLL_EXPORT GfxRuntime {
   size_t listgen_initial_buffer_size_{0};
   size_t listgen_buffer_size_{0};
   size_t listgen_capacity_entries_{0};
+  bool listgen_buffer_used_{false};
   bool dispatch_cache_{false};
   bool listgen_reuse_{false};
   struct SparseListState {
     int64 dirty_epoch{0};
     int64 clean_epoch{-1};
+    int64 global_dirty_seen{-1};
     int64 version{0};
     int64 clean_parent_version{-1};
     int parent_snode_id{-1};
   };
   std::unordered_map<int, SparseListState> sparse_list_states_;
+  std::unordered_map<int, std::unordered_set<int>> child_lists_by_parent_;
+  int64 sparse_list_global_dirty_epoch_{0};
   int resident_sparse_list_snode_id_{-1};
   bool pending_dispatch_global_barrier_{false};
   std::vector<DeviceAllocation> pending_dispatch_barrier_buffers_;
