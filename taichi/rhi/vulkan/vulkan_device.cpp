@@ -641,15 +641,22 @@ VulkanResourceSet::VulkanResourceSet(VulkanDevice *device) : device_(device) {
 VulkanResourceSet::~VulkanResourceSet() {
 }
 
+void VulkanResourceSet::set_binding(uint32_t binding, Binding new_binding) {
+  auto it = bindings_.find(binding);
+  if (it != bindings_.end() && it->second == new_binding) {
+    return;
+  }
+  bindings_[binding] = std::move(new_binding);
+  dirty_ = true;
+}
+
 ShaderResourceSet &VulkanResourceSet::rw_buffer(uint32_t binding,
                                                 DevicePtr ptr,
                                                 size_t size) {
-  dirty_ = true;
-
   vkapi::IVkBuffer buffer =
       (ptr != kDeviceNullPtr) ? device_->get_vkbuffer(ptr) : nullptr;
-  bindings_[binding] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                        Buffer{buffer, ptr.offset, size}};
+  set_binding(binding, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        Buffer{buffer, ptr.offset, size}});
   return *this;
 }
 
@@ -661,12 +668,10 @@ ShaderResourceSet &VulkanResourceSet::rw_buffer(uint32_t binding,
 ShaderResourceSet &VulkanResourceSet::buffer(uint32_t binding,
                                              DevicePtr ptr,
                                              size_t size) {
-  dirty_ = true;
-
   vkapi::IVkBuffer buffer =
       (ptr != kDeviceNullPtr) ? device_->get_vkbuffer(ptr) : nullptr;
-  bindings_[binding] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                        Buffer{buffer, ptr.offset, size}};
+  set_binding(binding, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                        Buffer{buffer, ptr.offset, size}});
   return *this;
 }
 
@@ -678,32 +683,18 @@ ShaderResourceSet &VulkanResourceSet::buffer(uint32_t binding,
 ShaderResourceSet &VulkanResourceSet::image(uint32_t binding,
                                             DeviceAllocation alloc,
                                             ImageSamplerConfig sampler_config) {
-  dirty_ = true;
+  (void)sampler_config;
 
   vkapi::IVkSampler sampler = nullptr;
   vkapi::IVkImageView view = nullptr;
 
   if (alloc != kDeviceNullAllocation) {
-    VkSamplerCreateInfo sampler_info{};
-    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    sampler_info.magFilter = VK_FILTER_LINEAR;
-    sampler_info.minFilter = VK_FILTER_LINEAR;
-    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    sampler_info.anisotropyEnable = VK_FALSE;
-    sampler_info.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-    sampler_info.unnormalizedCoordinates = VK_FALSE;
-    sampler_info.compareEnable = VK_FALSE;
-    sampler_info.compareOp = VK_COMPARE_OP_ALWAYS;
-    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-
-    sampler = vkapi::create_sampler(device_->vk_device(), sampler_info);
+    sampler = device_->get_default_sampler();
     view = device_->get_vk_imageview(alloc);
   }
 
-  bindings_[binding] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                        Texture{view, sampler}};
+  set_binding(binding, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                        Texture{view, sampler}});
 
   return *this;
 }
@@ -711,13 +702,11 @@ ShaderResourceSet &VulkanResourceSet::image(uint32_t binding,
 ShaderResourceSet &VulkanResourceSet::rw_image(uint32_t binding,
                                                DeviceAllocation alloc,
                                                int lod) {
-  dirty_ = true;
-
   vkapi::IVkImageView view = (alloc != kDeviceNullAllocation)
                                  ? device_->get_vk_lod_imageview(alloc, lod)
                                  : nullptr;
 
-  bindings_[binding] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, Image{view}};
+  set_binding(binding, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, Image{view}});
 
   return *this;
 }
@@ -730,7 +719,6 @@ ShaderResourceSet &VulkanResourceSet::rw_buffer_array(
   // via OpAccessChain on the array variable. Empty allocs is treated as
   // an empty descriptor write (caller's responsibility to ensure non-empty
   // when shader actually reads).
-  dirty_ = true;
   BufferArray ba;
   ba.buffers.reserve(allocs.size());
   for (const auto &alloc : allocs) {
@@ -740,7 +728,7 @@ ShaderResourceSet &VulkanResourceSet::rw_buffer_array(
             : nullptr;
     ba.buffers.push_back(buffer);
   }
-  bindings_[binding] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, std::move(ba)};
+  set_binding(binding, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, std::move(ba)});
   return *this;
 }
 
@@ -755,20 +743,21 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize() {
     return {RhiResult::invalid_usage, nullptr};
   }
 
+  if (device_->descriptor_set_cache_enabled()) {
+    if (auto cached_set = device_->find_cached_desc_set(*this)) {
+      set_ = cached_set;
+      layout_ = set_->ref_layout;
+      dirty_ = false;
+      return {RhiResult::success, set_};
+    }
+  }
+
   vkapi::IVkDescriptorSetLayout new_layout =
       device_->get_desc_set_layout(*this);
   if (new_layout != layout_) {
     // Layout changed, reset `set`
     set_ = nullptr;
     layout_ = new_layout;
-  }
-
-  if (device_->descriptor_set_cache_enabled()) {
-    if (auto cached_set = device_->find_cached_desc_set(*this)) {
-      set_ = cached_set;
-      dirty_ = false;
-      return {RhiResult::success, set_};
-    }
   }
 
   if (!set_) {
@@ -1677,6 +1666,7 @@ VulkanDevice::~VulkanDevice() {
   desc_set_cache_lru_.clear();
   desc_set_layouts_.clear();
   desc_pool_ = nullptr;
+  default_sampler_ = nullptr;
 
   vmaDestroyAllocator(allocator_);
   vmaDestroyAllocator(allocator_export_);
@@ -2244,6 +2234,27 @@ vkapi::IVkFramebuffer VulkanDevice::get_framebuffer(
   return framebuffer;
 }
 
+vkapi::IVkSampler VulkanDevice::get_default_sampler() {
+  if (!default_sampler_) {
+    VkSamplerCreateInfo sampler_info{};
+    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler_info.magFilter = VK_FILTER_LINEAR;
+    sampler_info.minFilter = VK_FILTER_LINEAR;
+    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler_info.anisotropyEnable = VK_FALSE;
+    sampler_info.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    sampler_info.unnormalizedCoordinates = VK_FALSE;
+    sampler_info.compareEnable = VK_FALSE;
+    sampler_info.compareOp = VK_COMPARE_OP_ALWAYS;
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+
+    default_sampler_ = vkapi::create_sampler(device_, sampler_info);
+  }
+  return default_sampler_;
+}
+
 DeviceAllocation VulkanDevice::import_vkbuffer(vkapi::IVkBuffer buffer,
                                                size_t size,
                                                VkDeviceMemory memory,
@@ -2514,29 +2525,29 @@ vkapi::IVkRenderPass VulkanDevice::get_renderpass(
 
 vkapi::IVkDescriptorSetLayout VulkanDevice::get_desc_set_layout(
     VulkanResourceSet &set) {
-  if (desc_set_layouts_.find(set) == desc_set_layouts_.end()) {
-    std::vector<VkDescriptorSetLayoutBinding> bindings;
-    for (const auto &pair : set.get_bindings()) {
-      bindings.push_back(VkDescriptorSetLayoutBinding{
-          /*binding=*/pair.first, pair.second.type, /*descriptorCount=*/1,
-          VK_SHADER_STAGE_ALL,
-          /*pImmutableSamplers=*/nullptr});
-    }
-
-    VkDescriptorSetLayoutCreateInfo create_info{};
-    create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    create_info.pNext = nullptr;
-    create_info.flags = 0;
-    create_info.bindingCount = bindings.size();
-    create_info.pBindings = bindings.data();
-
-    auto layout = vkapi::create_descriptor_set_layout(device_, &create_info);
-    desc_set_layouts_[set] = layout;
-
-    return layout;
-  } else {
-    return desc_set_layouts_.at(set);
+  auto it = desc_set_layouts_.find(set);
+  if (it != desc_set_layouts_.end()) {
+    return it->second;
   }
+
+  std::vector<VkDescriptorSetLayoutBinding> bindings;
+  for (const auto &pair : set.get_bindings()) {
+    bindings.push_back(VkDescriptorSetLayoutBinding{
+        /*binding=*/pair.first, pair.second.type, /*descriptorCount=*/1,
+        VK_SHADER_STAGE_ALL,
+        /*pImmutableSamplers=*/nullptr});
+  }
+
+  VkDescriptorSetLayoutCreateInfo create_info{};
+  create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  create_info.pNext = nullptr;
+  create_info.flags = 0;
+  create_info.bindingCount = bindings.size();
+  create_info.pBindings = bindings.data();
+
+  auto layout = vkapi::create_descriptor_set_layout(device_, &create_info);
+  auto inserted = desc_set_layouts_.emplace(set, layout);
+  return inserted.first->second;
 }
 
 vkapi::IVkDescriptorSet VulkanDevice::find_cached_desc_set(

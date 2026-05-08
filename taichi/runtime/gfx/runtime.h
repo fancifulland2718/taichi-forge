@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <chrono>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -76,6 +77,7 @@ class CompiledTaichiKernel {
   size_t get_ret_buffer_size() const;
 
   Pipeline *get_pipeline(int i);
+  ShaderResourceSet *get_cached_resource_set(int i);
 
   void set_listgen_buffer(DeviceAllocation *listgen_buffer) {
     input_buffers_[BufferInfo(BufferType::ListGen)] = listgen_buffer;
@@ -112,6 +114,7 @@ class CompiledTaichiKernel {
   size_t args_buffer_size_{0};
   size_t ret_buffer_size_{0};
   std::vector<std::unique_ptr<Pipeline>> pipelines_;
+  std::vector<std::unique_ptr<ShaderResourceSet>> cached_resource_sets_;
 };
 
 class TI_DLL_EXPORT GfxRuntime {

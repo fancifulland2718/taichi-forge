@@ -299,6 +299,7 @@ CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
   const auto &task_attribs = ti_kernel_attribs_.tasks_attribs;
   const auto &spirv_bins = ti_params.spirv_bins;
   TI_ASSERT(task_attribs.size() == spirv_bins.size());
+  cached_resource_sets_.resize(task_attribs.size());
 
   for (int i = 0; i < task_attribs.size(); ++i) {
     PipelineSourceDesc source_desc{PipelineSourceType::spirv_binary,
@@ -328,6 +329,13 @@ size_t CompiledTaichiKernel::get_ret_buffer_size() const {
 
 Pipeline *CompiledTaichiKernel::get_pipeline(int i) {
   return pipelines_[i].get();
+}
+
+ShaderResourceSet *CompiledTaichiKernel::get_cached_resource_set(int i) {
+  if (!cached_resource_sets_[i]) {
+    cached_resource_sets_[i] = device_->create_resource_set_unique();
+  }
+  return cached_resource_sets_[i].get();
 }
 
 GfxRuntime::GfxRuntime(const Params &params)
@@ -812,9 +820,11 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     if (!dispatch_cache_) {
       return;
     }
-    if (!attribs.texture_binds.empty()) {
-      pending_dispatch_global_barrier_ = true;
-      return;
+    for (const auto &bind : attribs.texture_binds) {
+      if (bind.is_storage) {
+        pending_dispatch_global_barrier_ = true;
+        return;
+      }
     }
     for (const auto &bind : attribs.buffer_binds) {
       mark_storage_buffer_write(bind);
@@ -840,8 +850,14 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     const int group_x = (attribs.advisory_total_num_threads +
                          attribs.advisory_num_threads_per_group - 1) /
                         attribs.advisory_num_threads_per_group;
-    std::unique_ptr<ShaderResourceSet> bindings =
-        device_->create_resource_set_unique();
+    std::unique_ptr<ShaderResourceSet> one_shot_bindings;
+    ShaderResourceSet *bindings = nullptr;
+    if (dispatch_cache_) {
+      bindings = ti_kernel->get_cached_resource_set(i);
+    } else {
+      one_shot_bindings = device_->create_resource_set_unique();
+      bindings = one_shot_bindings.get();
+    }
     for (auto &bind : attribs.buffer_binds) {
       // We might have to bind a invalid buffer (this is fine as long as
       // shader don't do anything with it)
@@ -922,7 +938,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     }
 
     current_cmdlist_->bind_pipeline(vp);
-    RhiResult status = current_cmdlist_->bind_shader_resources(bindings.get());
+    RhiResult status = current_cmdlist_->bind_shader_resources(bindings);
     TI_ERROR_IF(status != RhiResult::success,
                 "Resource binding error : RhiResult({})", status);
 
@@ -1252,6 +1268,10 @@ void GfxRuntime::add_pending_dispatch_barrier(DeviceAllocation alloc) {
 
 void GfxRuntime::insert_pending_dispatch_barriers() {
   if (!dispatch_cache_ || !current_cmdlist_) {
+    return;
+  }
+  if (!pending_dispatch_global_barrier_ &&
+      pending_dispatch_barrier_buffers_.empty()) {
     return;
   }
   if (pending_dispatch_global_barrier_) {
