@@ -1673,6 +1673,7 @@ VulkanDevice::~VulkanDevice() {
 
   renderpass_pools_.clear();
   desc_set_cache_.clear();
+  desc_set_cache_lru_.clear();
   desc_set_layouts_.clear();
   desc_pool_ = nullptr;
 
@@ -2034,6 +2035,32 @@ void VulkanDevice::wait_idle() {
   }
 }
 
+bool VulkanStreamSemaphoreObject::is_ready() const {
+  if (!fence_ref) {
+    return false;
+  }
+  VkResult res = vkGetFenceStatus(fence_ref->device, fence_ref->fence);
+  if (res == VK_SUCCESS) {
+    return true;
+  }
+  if (res == VK_NOT_READY) {
+    return false;
+  }
+  BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to query Vulkan fence status");
+  return false;
+}
+
+bool VulkanStreamSemaphoreObject::wait() const {
+  if (!fence_ref) {
+    return false;
+  }
+  BAIL_ON_VK_BAD_RESULT_NO_RETURN(
+      vkWaitForFences(fence_ref->device, /*fenceCount=*/1, &fence_ref->fence,
+                      VK_TRUE, UINT64_MAX),
+      "failed to wait for Vulkan fence");
+  return true;
+}
+
 RhiResult VulkanStream::new_command_list(CommandList **out_cmdlist) noexcept {
   vkapi::IVkCommandBuffer buffer =
       vkapi::allocate_command_buffer(command_pool_);
@@ -2044,6 +2071,29 @@ RhiResult VulkanStream::new_command_list(CommandList **out_cmdlist) noexcept {
 
   *out_cmdlist = new VulkanCommandList(&device_, this, buffer);
   return RhiResult::success;
+}
+
+void VulkanStream::retire_completed_cmdbuffers() {
+  if (submitted_cmdbuffers_.empty()) {
+    return;
+  }
+  std::vector<TrackedCmdbuf> still_submitted;
+  still_submitted.reserve(submitted_cmdbuffers_.size());
+  for (auto &tracked : submitted_cmdbuffers_) {
+    VkResult res = vkGetFenceStatus(tracked.fence->device,
+                                    tracked.fence->fence);
+    if (res == VK_SUCCESS) {
+      continue;
+    }
+    if (res == VK_NOT_READY) {
+      still_submitted.push_back(std::move(tracked));
+      continue;
+    }
+    BAIL_ON_VK_BAD_RESULT_NO_RETURN(res,
+                                    "failed to query Vulkan fence status");
+    still_submitted.push_back(std::move(tracked));
+  }
+  submitted_cmdbuffers_ = std::move(still_submitted);
 }
 
 StreamSemaphore VulkanStream::submit(
@@ -2087,6 +2137,7 @@ StreamSemaphore VulkanStream::submit(
   auto fence = vkapi::create_fence(buffer->device, 0);
 
   // Resource tracking, check previously submitted commands
+  retire_completed_cmdbuffers();
   submitted_cmdbuffers_.push_back(TrackedCmdbuf{fence, buffer});
 
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(
@@ -2094,7 +2145,7 @@ StreamSemaphore VulkanStream::submit(
                     /*fence=*/fence->fence),
       "Vulkan device might be lost (vkQueueSubmit failed)");
 
-  return std::make_shared<VulkanStreamSemaphoreObject>(semaphore);
+  return std::make_shared<VulkanStreamSemaphoreObject>(semaphore, fence);
 }
 
 StreamSemaphore VulkanStream::submit_synced(
@@ -2488,13 +2539,25 @@ vkapi::IVkDescriptorSetLayout VulkanDevice::get_desc_set_layout(
 }
 
 vkapi::IVkDescriptorSet VulkanDevice::find_cached_desc_set(
-    const VulkanResourceSet &set) const {
+    const VulkanResourceSet &set) {
   if (!descriptor_set_cache_enabled_) {
     return nullptr;
   }
   auto it = desc_set_cache_.find(set);
   if (it == desc_set_cache_.end()) {
+    ++desc_set_cache_misses_;
     return nullptr;
+  }
+  ++desc_set_cache_hits_;
+  if (descriptor_set_cache_lru_) {
+    for (auto lit = desc_set_cache_lru_.begin();
+         lit != desc_set_cache_lru_.end(); ++lit) {
+      if (VulkanResourceSet::SetCmp()(*lit, set)) {
+        desc_set_cache_lru_.erase(lit);
+        break;
+      }
+    }
+    desc_set_cache_lru_.push_back(set);
   }
   return it->second;
 }
@@ -2504,11 +2567,44 @@ void VulkanDevice::cache_desc_set(const VulkanResourceSet &set,
   if (!descriptor_set_cache_enabled_ || !desc_set) {
     return;
   }
-  constexpr size_t kMaxCachedDescriptorSets = 1024;
-  if (desc_set_cache_.size() >= kMaxCachedDescriptorSets) {
-    desc_set_cache_.clear();
+  if (desc_set_cache_.find(set) != desc_set_cache_.end()) {
+    if (descriptor_set_cache_lru_) {
+      for (auto lit = desc_set_cache_lru_.begin();
+           lit != desc_set_cache_lru_.end(); ++lit) {
+        if (VulkanResourceSet::SetCmp()(*lit, set)) {
+          desc_set_cache_lru_.erase(lit);
+          break;
+        }
+      }
+      desc_set_cache_lru_.push_back(set);
+    }
+    return;
+  }
+  if (desc_set_cache_.size() >= desc_set_cache_capacity_) {
+    if (descriptor_set_cache_lru_) {
+      if (desc_set_cache_lru_.empty() && !desc_set_cache_.empty()) {
+        desc_set_cache_evictions_ += desc_set_cache_.size();
+        desc_set_cache_.clear();
+      }
+      size_t evict_count = desc_set_cache_capacity_ / 4u;
+      if (evict_count == 0) {
+        evict_count = 1;
+      }
+      while (evict_count-- > 0 && !desc_set_cache_lru_.empty()) {
+        desc_set_cache_.erase(desc_set_cache_lru_.front());
+        desc_set_cache_lru_.pop_front();
+        ++desc_set_cache_evictions_;
+      }
+    } else {
+      desc_set_cache_evictions_ += desc_set_cache_.size();
+      desc_set_cache_.clear();
+      desc_set_cache_lru_.clear();
+    }
   }
   desc_set_cache_.emplace(set, desc_set);
+  if (descriptor_set_cache_lru_) {
+    desc_set_cache_lru_.push_back(set);
+  }
 }
 
 RhiReturn<vkapi::IVkDescriptorSet> VulkanDevice::alloc_desc_set(

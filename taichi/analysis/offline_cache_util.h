@@ -58,7 +58,11 @@ class Kernel;
 //       sparse listgen host-elision metadata (list child/parent ids and
 //       topology-mutation id). Old cached Vulkan kernels lack the metadata,
 //       so force a miss before GFX runtime listgen skipping is used.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 6;
+//   7 - VS-2.3/G-3.1 (2026-05). SPIR-V BufferBind serialization now carries
+//       conservative read/write access metadata for deferred dispatch barrier
+//       coalescing. Old cached Vulkan kernels lack access bits, so force a
+//       miss and recompile before runtime consumes this metadata.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 7;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key(const CompileConfig &config,

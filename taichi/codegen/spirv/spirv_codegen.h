@@ -4,6 +4,7 @@
 
 #include "taichi/codegen/spirv/snode_struct_compiler.h"
 #include "taichi/codegen/spirv/kernel_utils.h"
+#include "taichi/codegen/spirv/spv_stats.h"
 
 #include <spirv-tools/libspirv.hpp>
 #include <spirv-tools/optimizer.hpp>
@@ -77,12 +78,19 @@ class KernelCodegen {
     // VS-4 (2026-05): diagnostic-only SPIR-V optimizer stats. Does not change
     // emitted SPIR-V; only controls per-task logging in KernelCodegen::run().
     bool vulkan_spv_stats{false};
+    std::string vulkan_spv_stats_filter{"sparse"};
+    int vulkan_spv_stats_capacity{4096};
+    bool vulkan_spv_stats_to_stderr{false};
   };
 
   explicit KernelCodegen(const Params &params);
 
   void run(TaichiKernelAttributes &kernel_attribs,
            std::vector<std::vector<uint32_t>> &generated_spirv);
+
+  const std::vector<SpvStats> &last_run_stats() const {
+    return last_run_stats_;
+  }
 
  private:
   Params params_;
@@ -95,6 +103,7 @@ class KernelCodegen {
   // thread-safety contract.
   spv_target_env target_env_{SPV_ENV_VULKAN_1_0};
   spvtools::OptimizerOptions spirv_opt_options_;
+  std::vector<SpvStats> last_run_stats_;
 };
 
 }  // namespace spirv

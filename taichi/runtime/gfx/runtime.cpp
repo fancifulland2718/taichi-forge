@@ -341,7 +341,13 @@ GfxRuntime::GfxRuntime(const Params &params)
       listgen_dynamic_size_(params.listgen_dynamic_size),
       listgen_explicit_size_(params.listgen_buffer_MB > 0),
       dispatch_cache_(params.dispatch_cache),
-      listgen_reuse_(params.listgen_reuse) {
+      listgen_lite_barrier_(params.listgen_lite_barrier),
+      listgen_reuse_(params.listgen_reuse),
+      ctx_buffer_ring_enabled_(params.ctx_buffer_ring),
+        ctx_buffer_ring_size_(
+          params.ctx_buffer_ring_size > 0
+            ? static_cast<size_t>(params.ctx_buffer_ring_size)
+            : size_t{8}) {
   TI_ERROR_IF(params.listgen_buffer_MB < 0,
               "vulkan_listgen_buffer_MB must be >= 0, got {}",
               params.listgen_buffer_MB);
@@ -623,8 +629,8 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
       ret_buffer{nullptr};
 
   if (ti_kernel->get_args_buffer_size()) {
-    if (auto pooled = try_take_pooled_buffer(ti_kernel->get_args_buffer_size(),
-                                             AllocUsage::Uniform)) {
+    if (auto pooled = acquire_ctx_buffer(ti_kernel->get_args_buffer_size(),
+                                         AllocUsage::Uniform)) {
       args_buffer = std::move(pooled);
     } else {
       auto [buf, res] = device_->allocate_memory_unique(
@@ -638,8 +644,8 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
   }
 
   if (ti_kernel->get_ret_buffer_size()) {
-    if (auto pooled = try_take_pooled_buffer(ti_kernel->get_ret_buffer_size(),
-                                             AllocUsage::Storage)) {
+    if (auto pooled = acquire_ctx_buffer(ti_kernel->get_ret_buffer_size(),
+                                         AllocUsage::Storage)) {
       ret_buffer = std::move(pooled);
     } else {
       auto [buf, res] = device_->allocate_memory_unique(
@@ -765,6 +771,9 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
   const auto &task_attribs = ti_kernel->ti_kernel_attribs().tasks_attribs;
 
   auto mark_storage_buffer_write = [&](const BufferBind &bind) {
+    if (!bind.may_write()) {
+      return;
+    }
     switch (bind.buffer.type) {
       case BufferType::Args:
       case BufferType::ArgPack:
@@ -779,6 +788,10 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
         return;
       case BufferType::NodeAllocatorPool:
         if (bind.chunk_count > 0u) {
+          if (bind.chunk_count > 1u) {
+            pending_dispatch_global_barrier_ = true;
+            return;
+          }
           if (auto *chunks = ti_kernel->get_chunk_array(bind.buffer)) {
             for (const auto &chunk : *chunks) {
               add_pending_dispatch_barrier(chunk);
@@ -813,6 +826,14 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     if (sparse_list_task_is_current(attribs)) {
       TI_TRACE("Skipping current Vulkan sparse list kernel {}", attribs.name);
       continue;
+    }
+    if (task_uses_listgen_buffer(attribs)) {
+      // VS-1.3 hardening: any dispatched task that binds the shared listgen
+      // buffer (writer listgen or reader struct_for) makes a later grow/replace
+      // require synchronization. This is deliberately more conservative than
+      // tracking only OffloadedTaskType::listgen and protects future AOT / sparse
+      // reader paths from replacing an in-flight listgen allocation.
+      listgen_buffer_used_ = true;
     }
     insert_pending_dispatch_barriers();
     auto vp = ti_kernel->get_pipeline(i);
@@ -888,7 +909,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
               ti_kernel->get_buffer_bind(bind.buffer)->get_ptr(0),
               /*size=*/sizeof(uint32_t),
               /*data=*/0);
-          if (dispatch_cache_) {
+          if (dispatch_cache_ || listgen_lite_barrier_) {
             current_cmdlist_->buffer_barrier(
                 ti_kernel->get_buffer_bind(bind.buffer)->get_ptr(0),
                 sizeof(uint32_t));
@@ -917,9 +938,6 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
 
     TI_ERROR_IF(status != RhiResult::success, "Dispatch error : RhiResult({})",
                 status);
-    if (attribs.task_type == OffloadedTaskType::listgen) {
-      listgen_buffer_used_ = true;
-    }
     mark_sparse_list_task_launched(attribs);
     if (attribs.may_mutate_sparse_topology) {
       invalidate_sparse_list_cache(attribs.sparse_mutation_snode_id);
@@ -933,7 +951,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
 
   // Keep context buffers used in this dispatch
   if (ti_kernel->get_args_buffer_size()) {
-    if (buffer_pool_enabled_) {
+    if (ctx_buffer_pool_enabled()) {
       pending_pool_.push_back({std::move(args_buffer),
                                ti_kernel->get_args_buffer_size(),
                                AllocUsage::Uniform});
@@ -942,7 +960,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     }
   }
   if (ti_kernel->get_ret_buffer_size()) {
-    if (buffer_pool_enabled_) {
+    if (ctx_buffer_pool_enabled()) {
       pending_pool_.push_back({std::move(ret_buffer),
                                ti_kernel->get_ret_buffer_size(),
                                AllocUsage::Storage});
@@ -960,7 +978,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
       ctx_buffers_.clear();
       // R2.a: device_to_host internally syncs (wait_idle / submit_synced),
       // so all pool buffers are safe to recycle here.
-      if (buffer_pool_enabled_) {
+      if (ctx_buffer_pool_enabled()) {
         recycle_pools_to_free();
       }
     }
@@ -1026,7 +1044,7 @@ void GfxRuntime::synchronize() {
   }
   ctx_buffers_.clear();
   // R2.a: after wait_idle, all submitted/pending pool buffers are GPU-safe.
-  if (buffer_pool_enabled_) {
+  if (ctx_buffer_pool_enabled()) {
     recycle_pools_to_free();
   }
   ndarrays_in_use_.clear();
@@ -1040,8 +1058,8 @@ StreamSemaphore GfxRuntime::flush() {
     sema = device_->get_compute_stream()->submit(current_cmdlist_.get());
     current_cmdlist_ = nullptr;
     ctx_buffers_.clear();
-    if (buffer_pool_enabled_) {
-      flush_pending_pool_to_submitted();
+    if (ctx_buffer_pool_enabled()) {
+      flush_pending_pool_to_submitted(sema);
     }
   } else {
     auto [cmdlist, res] =
@@ -1063,7 +1081,7 @@ Device *GfxRuntime::get_ti_device() const {
 std::unique_ptr<DeviceAllocationGuard> GfxRuntime::try_take_pooled_buffer(
     size_t size,
     AllocUsage usage) {
-  if (!buffer_pool_enabled_) {
+  if (!ctx_buffer_pool_enabled()) {
     return nullptr;
   }
   for (auto it = free_pool_.begin(); it != free_pool_.end(); ++it) {
@@ -1078,17 +1096,109 @@ std::unique_ptr<DeviceAllocationGuard> GfxRuntime::try_take_pooled_buffer(
   return nullptr;
 }
 
-void GfxRuntime::flush_pending_pool_to_submitted() {
+bool GfxRuntime::ctx_buffer_pool_enabled() const {
+  return buffer_pool_enabled_ || ctx_buffer_ring_enabled_;
+}
+
+size_t GfxRuntime::count_pooled_buffers(size_t size, AllocUsage usage) const {
+  auto count_in = [&](const std::vector<PooledBuffer> &pool) {
+    size_t count = 0;
+    for (const auto &entry : pool) {
+      if (entry.size == size && entry.usage == usage) {
+        ++count;
+      }
+    }
+    return count;
+  };
+  return count_in(pending_pool_) + count_in(submitted_pool_) +
+         count_in(free_pool_);
+}
+
+std::unique_ptr<DeviceAllocationGuard> GfxRuntime::acquire_ctx_buffer(
+    size_t size,
+    AllocUsage usage) {
+  if (!ctx_buffer_pool_enabled()) {
+    return nullptr;
+  }
+  recycle_completed_pools_to_free();
+  if (auto pooled = try_take_pooled_buffer(size, usage)) {
+    return pooled;
+  }
+  if (ctx_buffer_ring_enabled_ &&
+      count_pooled_buffers(size, usage) >= ctx_buffer_ring_size_) {
+    if (current_cmdlist_) {
+      flush();
+    }
+    recycle_completed_pools_to_free();
+    if (auto pooled = try_take_pooled_buffer(size, usage)) {
+      return pooled;
+    }
+    if (wait_for_oldest_submitted_buffer(size, usage)) {
+      recycle_completed_pools_to_free();
+    } else {
+      // Backend does not expose a submission completion token. Fall back to
+      // syncing only the compute stream; this is still narrower than the old
+      // device_->wait_idle(), which also synced graphics streams.
+      device_->get_compute_stream()->command_sync();
+      recycle_pools_to_free();
+    }
+    if (auto pooled = try_take_pooled_buffer(size, usage)) {
+      return pooled;
+    }
+  }
+  return nullptr;
+}
+
+void GfxRuntime::flush_pending_pool_to_submitted(StreamSemaphore completion) {
   for (auto &entry : pending_pool_) {
+    entry.completion = completion;
     submitted_pool_.push_back(std::move(entry));
   }
   pending_pool_.clear();
+}
+
+size_t GfxRuntime::recycle_completed_pools_to_free() {
+  if (submitted_pool_.empty()) {
+    return 0;
+  }
+  size_t recycled = 0;
+  std::vector<PooledBuffer> still_submitted;
+  still_submitted.reserve(submitted_pool_.size());
+  auto move_to_free = [this, &recycled](PooledBuffer &&entry) {
+    entry.completion = nullptr;
+    if (free_pool_.size() >= buffer_pool_capacity_) {
+      // Drop oldest free entry to bound memory; releases its DeviceAlloc.
+      free_pool_.erase(free_pool_.begin());
+    }
+    free_pool_.push_back(std::move(entry));
+    ++recycled;
+  };
+  for (auto &entry : submitted_pool_) {
+    if (entry.completion && entry.completion->is_ready()) {
+      move_to_free(std::move(entry));
+    } else {
+      still_submitted.push_back(std::move(entry));
+    }
+  }
+  submitted_pool_ = std::move(still_submitted);
+  return recycled;
+}
+
+bool GfxRuntime::wait_for_oldest_submitted_buffer(size_t size,
+                                                  AllocUsage usage) {
+  for (const auto &entry : submitted_pool_) {
+    if (entry.size == size && entry.usage == usage && entry.completion) {
+      return entry.completion->wait();
+    }
+  }
+  return false;
 }
 
 void GfxRuntime::recycle_pools_to_free() {
   // Caller must guarantee GPU has finished (wait_idle / submit_synced).
   auto move_to_free = [this](std::vector<PooledBuffer> &src) {
     for (auto &entry : src) {
+      entry.completion = nullptr;
       if (free_pool_.size() >= buffer_pool_capacity_) {
         // Drop oldest free entry to bound memory; releases its DeviceAlloc.
         free_pool_.erase(free_pool_.begin());
@@ -1116,6 +1226,16 @@ void GfxRuntime::clear_pending_dispatch_barriers() {
   pending_dispatch_global_barrier_ = false;
   pending_dispatch_barrier_buffers_.clear();
   pending_dispatch_barrier_buffer_ids_.clear();
+}
+
+bool GfxRuntime::task_uses_listgen_buffer(
+    const TaskAttributes &attribs) const {
+  for (const auto &bind : attribs.buffer_binds) {
+    if (bind.buffer.type == BufferType::ListGen) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void GfxRuntime::add_pending_dispatch_barrier(DeviceAllocation alloc) {

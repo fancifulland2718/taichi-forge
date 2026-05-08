@@ -9,6 +9,9 @@
 #include <future>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <mutex>
 
 #include "taichi/codegen/codegen_utils.h"
 #include "taichi/program/program.h"
@@ -46,6 +49,160 @@ using BufferBind = TaskAttributes::BufferBind;
 using BufferInfoHasher = TaskAttributes::BufferInfoHasher;
 
 using TextureBind = TaskAttributes::TextureBind;
+
+struct SpvStatsState {
+  std::mutex stats_mutex;
+  std::vector<SpvStats> last_stats;
+  std::mutex output_mutex;
+  bool output_warned{false};
+};
+
+SpvStatsState &spv_stats_state() {
+  // Intentionally leaked: VS-4 diagnostics are optional and process-lifetime
+  // state. Avoiding static destruction removes a shutdown-order race between
+  // Python module teardown and late codegen/stat-query calls on Windows DLLs.
+  static auto *state = new SpvStatsState;
+  return *state;
+}
+
+std::string json_escape(const std::string &src) {
+  std::string out;
+  out.reserve(src.size() + 8);
+  for (unsigned char c : src) {
+    switch (c) {
+      case '"':
+        out += "\\\"";
+        break;
+      case '\\':
+        out += "\\\\";
+        break;
+      case '\b':
+        out += "\\b";
+        break;
+      case '\f':
+        out += "\\f";
+        break;
+      case '\n':
+        out += "\\n";
+        break;
+      case '\r':
+        out += "\\r";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
+      default:
+        if (c < 0x20) {
+          out += fmt::format("\\u{:04x}", static_cast<int>(c));
+        } else {
+          out += static_cast<char>(c);
+        }
+        break;
+    }
+  }
+  return out;
+}
+
+std::string spv_stats_task_to_json(const SpvStats &s) {
+  return fmt::format(
+      "{{\"kernel\":\"{}\",\"task_id\":{},\"task_name\":\"{}\","
+      "\"type\":\"{}\",\"snode_id\":{},\"word_before\":{},"
+      "\"word_after\":{},\"opt_run\":{},\"opt_ok\":{},"
+      "\"duration_us\":{:.3f},\"is_listgen\":{},\"is_pointer\":{},"
+      "\"skipped_passes\":\"{}\"}}",
+      json_escape(s.kernel_name), s.task_id, json_escape(s.task_name),
+      json_escape(s.task_type), s.snode_id, s.before_words, s.after_words,
+      s.opt_run ? "true" : "false", s.opt_ok ? "true" : "false", s.opt_us,
+      s.listgen_related ? "true" : "false",
+      s.pointer_related ? "true" : "false", json_escape(s.skipped_passes));
+}
+
+std::string spv_stats_kernel_to_json(const std::string &kernel_name,
+                                     const std::vector<SpvStats> &stats) {
+  std::vector<std::string> tasks;
+  tasks.reserve(stats.size());
+  for (const auto &s : stats) {
+    tasks.push_back(spv_stats_task_to_json(s));
+  }
+  return fmt::format("{{\"kernel\":\"{}\",\"tasks\":[{}]}}",
+                     json_escape(kernel_name), fmt::join(tasks, ","));
+}
+
+void publish_last_spv_stats(const std::vector<SpvStats> &stats) {
+  auto &state = spv_stats_state();
+  std::lock_guard<std::mutex> guard(state.stats_mutex);
+  state.last_stats = stats;
+}
+
+bool spv_stats_filter_accepts(const std::string &filter,
+                              const SpvStats &stats) {
+  if (filter == "all") {
+    return true;
+  }
+  if (filter == "pointer") {
+    return stats.pointer_related;
+  }
+  if (filter == "listgen") {
+    return stats.listgen_related;
+  }
+  return stats.sparse_related;
+}
+
+void append_spv_stats_json_line(const std::string &kernel_name,
+                                const std::vector<SpvStats> &stats) {
+  const char *output_path = std::getenv("TI_VULKAN_SPV_STATS_OUTPUT");
+  if (output_path == nullptr || output_path[0] == '\0') {
+    return;
+  }
+
+  auto &state = spv_stats_state();
+  std::lock_guard<std::mutex> guard(state.output_mutex);
+  std::ofstream out(output_path, std::ios::out | std::ios::app);
+  if (!out) {
+    if (!state.output_warned) {
+      TI_WARN("Failed to open TI_VULKAN_SPV_STATS_OUTPUT='{}' for append",
+              output_path);
+      state.output_warned = true;
+    }
+    return;
+  }
+  out << spv_stats_kernel_to_json(kernel_name, stats) << '\n';
+  out.flush();
+  if (!out && !state.output_warned) {
+    TI_WARN("Failed to write TI_VULKAN_SPV_STATS_OUTPUT='{}'", output_path);
+    state.output_warned = true;
+  }
+}
+
+void log_spv_stats_to_stderr(const std::string &kernel_name,
+                             const std::vector<SpvStats> &stats) {
+  size_t total_before = 0;
+  size_t total_after = 0;
+  int optimizer_skipped = 0;
+  int optimizer_failed = 0;
+  int listgen_tasks = 0;
+  int pointer_tasks = 0;
+  for (const auto &s : stats) {
+    total_before += s.before_words;
+    total_after += s.after_words;
+    optimizer_skipped += s.opt_run ? 0 : 1;
+    optimizer_failed += s.opt_ok ? 0 : 1;
+    listgen_tasks += s.listgen_related ? 1 : 0;
+    pointer_tasks += s.pointer_related ? 1 : 0;
+    TI_INFO(
+        "[VS-4][SPV_STATS] kernel={} task={} type={} snode={} listgen={} "
+        "pointer={} opt_run={} opt_ok={} words={}=>{} opt_us={:.3f} "
+        "skipped_passes={}",
+        kernel_name, s.task_id, s.task_type, s.snode_id, s.listgen_related,
+        s.pointer_related, s.opt_run, s.opt_ok, s.before_words, s.after_words,
+        s.opt_us, s.skipped_passes);
+  }
+  TI_INFO(
+      "[VS-4][SPV_STATS] kernel={} summary tasks={} listgen_tasks={} "
+      "pointer_tasks={} opt_skipped={} opt_failed={} words={}=>{}",
+      kernel_name, stats.size(), listgen_tasks, pointer_tasks,
+      optimizer_skipped, optimizer_failed, total_before, total_after);
+}
 
 std::string buffer_instance_name(BufferInfo b) {
   // https://www.khronos.org/opengl/wiki/Interface_Block_(GLSL)#Syntax
@@ -249,6 +406,11 @@ class TaskCodegen : public IRVisitor {
     }
 
     auto mutation = detect_sparse_topology_mutation(stmt);
+    TI_ASSERT_INFO(
+        !mutation.may_mutate ||
+            mutation.snode_id != TaskAttributes::kSparseMutationNone,
+        "Sparse topology mutation detector must report a concrete SNode id "
+        "or kSparseMutationUnknown when may_mutate_sparse_topology=true");
     task_attribs_.may_mutate_sparse_topology = mutation.may_mutate;
     task_attribs_.sparse_mutation_snode_id = mutation.snode_id;
 
@@ -633,11 +795,26 @@ class TaskCodegen : public IRVisitor {
     return nullptr;
   }
 
+  void mark_buffer_access(BufferInfo buffer, uint32_t access) {
+    buffer_access_map_[buffer] |= access;
+  }
+
+  void mark_pointer_access(const Stmt *ptr, uint32_t access) {
+    auto it = ptr_to_buffers_.find(ptr);
+    if (it != ptr_to_buffers_.end()) {
+      mark_buffer_access(it->second, access);
+    }
+  }
+
   spirv::Value bitmasked_activation(ActivationOp op,
                                     spirv::Value parent_ptr,
                                     int root_id,
                                     const SNode *sn,
                                     spirv::Value input_index) {
+    mark_buffer_access(container_buffer_info(sn, root_id),
+                       op == ActivationOp::query
+                           ? BufferBind::kAccessRead
+                           : BufferBind::kAccessReadWrite);
     spirv::SType ptr_dt = parent_ptr.stype;
     const auto &snode_descs = compiled_structs_[root_id].snode_descriptors;
     const auto &desc = snode_descs.at(sn->id);
@@ -737,6 +914,16 @@ class TaskCodegen : public IRVisitor {
     // 是 pool/watermark/freelist/ambient 的唯一来源。
     const auto &contract =
         compiled_structs_[root_id].pointer_contracts.at(sn->id);
+
+    mark_buffer_access(container_buffer_info(sn, root_id),
+               do_activate ? BufferBind::kAccessReadWrite
+                     : BufferBind::kAccessRead);
+    if (contract.pool_buffer_binding_id >= 0) {
+      mark_buffer_access(BufferInfo(BufferType::NodeAllocatorPool,
+                    contract.pool_buffer_binding_id),
+               do_activate ? BufferBind::kAccessReadWrite
+                     : BufferBind::kAccessRead);
+    }
 
     auto u32_t = ir_->u32_type();
     // B-3.c-2（2026-05）：parent_byte_offset 寻址在 sn 的容器 buffer 里
@@ -1147,6 +1334,8 @@ class TaskCodegen : public IRVisitor {
                                  int root_id,
                                  const SNode *sn,
                                  spirv::Value index_u32) {
+    mark_buffer_access(container_buffer_info(sn, root_id),
+               BufferBind::kAccessRead);
     auto u32_t = ir_->u32_type();
     // B-3.c-2: parent's container buffer; OFF default = root.
     auto root_buffer = container_buffer_value(sn, root_id);
@@ -1168,6 +1357,13 @@ class TaskCodegen : public IRVisitor {
     // 路线 B B-1：见 pointer_lookup_or_activate 同名注释。
     const auto &contract =
         compiled_structs_[root_id].pointer_contracts.at(sn->id);
+    mark_buffer_access(container_buffer_info(sn, root_id),
+               BufferBind::kAccessReadWrite);
+    if (contract.pool_buffer_binding_id >= 0) {
+      mark_buffer_access(BufferInfo(BufferType::NodeAllocatorPool,
+                    contract.pool_buffer_binding_id),
+               BufferBind::kAccessReadWrite);
+    }
     auto u32_t = ir_->u32_type();
     // B-3.c-2: parent's container buffer; OFF default = root.
     auto root_buffer = container_buffer_value(sn, root_id);
@@ -1391,6 +1587,11 @@ class TaskCodegen : public IRVisitor {
       }
     } else if (stmt->snode->type == SNodeType::dynamic) {
 #if defined(TI_VULKAN_DYNAMIC)
+      mark_buffer_access(container_buffer_info(stmt->snode, root_id),
+             (stmt->op_type == SNodeOpType::length ||
+              stmt->op_type == SNodeOpType::is_active)
+                 ? BufferBind::kAccessRead
+                 : BufferBind::kAccessReadWrite);
       // G4: dynamic SNode on Vulkan via flat layout + length suffix.
       //   container = [data: cell_stride * N][length u32]
       // length is zero-initialized by root buffer memset. activate uses
@@ -1584,6 +1785,7 @@ class TaskCodegen : public IRVisitor {
 
   void visit(RandStmt *stmt) override {
     spirv::Value val;
+    mark_buffer_access(BufferType::GlobalTmps, BufferBind::kAccessReadWrite);
     spirv::Value global_tmp =
         get_buffer_value(BufferType::GlobalTmps, PrimitiveType::u32);
     if (stmt->element_type()->is_primitive(PrimitiveTypeID::i32)) {
@@ -1685,6 +1887,7 @@ class TaskCodegen : public IRVisitor {
     // is non-atomic read-modify-write of the single physical word.
     if (auto *pt = stmt->dest->ret_type->cast<PointerType>();
         pt && pt->is_bit_pointer()) {
+      mark_pointer_access(stmt->dest, BufferBind::kAccessWrite);
       emit_bit_pointer_store(stmt);
       return;
     }
@@ -1700,6 +1903,7 @@ class TaskCodegen : public IRVisitor {
     // optionally cast+scale for QuantFixed.
     if (auto *pt = stmt->src->ret_type->cast<PointerType>();
         pt && pt->is_bit_pointer()) {
+      mark_pointer_access(stmt->src, BufferBind::kAccessRead);
       emit_bit_pointer_load(stmt);
       return;
     }
@@ -1782,6 +1986,7 @@ class TaskCodegen : public IRVisitor {
   void visit(ReturnStmt *stmt) override {
     TI_ASSERT(ctx_attribs_->has_rets());
     // The `PrimitiveType::i32` in this function call is a placeholder.
+    mark_buffer_access(BufferType::Rets, BufferBind::kAccessWrite);
     auto buffer_value = get_buffer_value(BufferType::Rets, PrimitiveType::i32);
     // Function to store variable using indices provided by
     // `calc_indices_and_store`.
@@ -2678,9 +2883,11 @@ class TaskCodegen : public IRVisitor {
     // the QuantInt / QuantFixed `dest->element_type()`.
     if (auto *pt = stmt->dest->ret_type->as<PointerType>();
         pt && pt->is_bit_pointer()) {
+      mark_pointer_access(stmt->dest, BufferBind::kAccessReadWrite);
       emit_bit_pointer_atomic_add(stmt);
       return;
     }
+    mark_pointer_access(stmt->dest, BufferBind::kAccessReadWrite);
     const auto dt = stmt->dest->element_type().ptr_removed();
 
     spirv::Value data = ir_->query_value(stmt->val->raw_name());
@@ -4561,6 +4768,7 @@ class TaskCodegen : public IRVisitor {
   }
 
   spirv::Value load_buffer(const Stmt *ptr, DataType dt) {
+    mark_pointer_access(ptr, BufferBind::kAccessRead);
     spirv::Value ptr_val = ir_->query_value(ptr->raw_name());
 
     DataType ti_buffer_type = ir_->get_taichi_uint_type(dt);
@@ -4583,6 +4791,7 @@ class TaskCodegen : public IRVisitor {
   }
 
   void store_buffer(const Stmt *ptr, spirv::Value val) {
+    mark_pointer_access(ptr, BufferBind::kAccessWrite);
     spirv::Value ptr_val = ir_->query_value(ptr->raw_name());
 
     DataType ti_buffer_type = ir_->get_taichi_uint_type(val.stype.dt);
@@ -4893,6 +5102,10 @@ class TaskCodegen : public IRVisitor {
     std::vector<BufferBind> result;
     for (auto &[key, val] : buffer_binding_map_) {
       BufferBind bb{key.first, int(val)};
+      if (auto access = buffer_access_map_.find(key.first);
+          access != buffer_access_map_.end()) {
+        bb.access = access->second;
+      }
       // C-2.5 (2026-05): mark chunked NodeAllocatorPool bindings so the
       // runtime emits rw_buffer_array(N) instead of rw_buffer(1). The
       // allocator's chunks() vector is the source of truth at dispatch
@@ -4980,6 +5193,8 @@ class TaskCodegen : public IRVisitor {
                      uint32_t,
                      BufferInfoTypeTupleHasher>
       buffer_binding_map_;
+    std::unordered_map<BufferInfo, uint32_t, BufferInfoHasher>
+      buffer_access_map_;
   std::vector<TextureBind> texture_binds_;
   std::vector<spirv::Value> shared_array_binds_;
   spirv::Value kernel_function_;
@@ -5056,6 +5271,18 @@ static void spriv_message_consumer(spv_message_level_t level,
     TI_TRACE("{}\n[{}:{}:{}] {}", source, position.index, position.line,
              position.column, message);
   }
+}
+
+std::vector<SpvStats> get_last_spv_stats() {
+  auto &state = spv_stats_state();
+  std::lock_guard<std::mutex> guard(state.stats_mutex);
+  return state.last_stats;
+}
+
+void clear_last_spv_stats() {
+  auto &state = spv_stats_state();
+  std::lock_guard<std::mutex> guard(state.stats_mutex);
+  state.last_stats.clear();
 }
 
 KernelCodegen::KernelCodegen(const Params &params)
@@ -5181,6 +5408,16 @@ bool snode_chain_contains_pointer(const SNode *snode) {
   return false;
 }
 
+bool snode_chain_contains_sparse(const SNode *snode) {
+  for (auto *sn = snode; sn != nullptr; sn = sn->parent) {
+    if (sn->type == SNodeType::pointer || sn->type == SNodeType::bitmasked ||
+        sn->type == SNodeType::dynamic || sn->type == SNodeType::hash) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool has_node_allocator_pool_bind(const TaskAttributes &attribs) {
   for (const auto &bind : attribs.buffer_binds) {
     if (bind.buffer.type == TaskAttributes::BufferType::NodeAllocatorPool) {
@@ -5295,19 +5532,8 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
   struct TaskOut {
     std::vector<uint32_t> spv;
     TaskAttributes attribs;
-    struct SpvStats {
-      bool enabled{false};
-      std::string task_type;
-      int snode_id{-1};
-      bool listgen_related{false};
-      bool pointer_related{false};
-      bool opt_run{false};
-      bool opt_ok{true};
-      size_t before_words{0};
-      size_t after_words{0};
-      double opt_us{0.0};
-      std::string skipped_passes;
-    } spv_stats;
+    bool has_spv_stats{false};
+    SpvStats spv_stats;
     std::unordered_map<std::vector<int>,
                        irpass::ExternalPtrAccess,
                        hashing::Hasher<std::vector<int>>>
@@ -5363,24 +5589,28 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
              task_res.spirv_code.size(), optimized_spv.size());
 
     if (params_.vulkan_spv_stats) {
-      outs[i].spv_stats.enabled = true;
-      outs[i].spv_stats.task_type = offloaded_task_type_name(tp.task_ir->task_type);
-      outs[i].spv_stats.snode_id = tp.task_ir->snode ? tp.task_ir->snode->id : -1;
-      outs[i].spv_stats.listgen_related =
+    outs[i].has_spv_stats = true;
+    auto &stats = outs[i].spv_stats;
+    stats.kernel_name = params_.ti_kernel_name;
+    stats.task_id = i;
+    stats.task_name = tp.ti_kernel_name;
+    stats.task_type = offloaded_task_type_name(tp.task_ir->task_type);
+    stats.snode_id = tp.task_ir->snode ? tp.task_ir->snode->id : -1;
+    stats.listgen_related =
           tp.task_ir->task_type == OffloadedTaskType::listgen ||
           task_res.task_attribs.sparse_list_op ==
               TaskAttributes::kSparseListOpListgen;
-      outs[i].spv_stats.pointer_related =
+    stats.pointer_related =
           snode_chain_contains_pointer(tp.task_ir->snode) ||
           has_node_allocator_pool_bind(task_res.task_attribs);
-      outs[i].spv_stats.opt_run = opt_run;
-      outs[i].spv_stats.opt_ok = opt_ok;
-      outs[i].spv_stats.before_words = task_res.spirv_code.size();
-      outs[i].spv_stats.after_words = optimized_spv.size();
-      outs[i].spv_stats.opt_us = opt_us;
-      outs[i].spv_stats.skipped_passes = skipped_passes_summary(
-          params_.spv_opt_level, params_.skip_loop_unroll,
-          params_.disabled_passes);
+    stats.sparse_related =
+      stats.listgen_related || stats.pointer_related ||
+      snode_chain_contains_sparse(tp.task_ir->snode);
+    stats.opt_run = opt_run;
+    stats.opt_ok = opt_ok;
+    stats.before_words = task_res.spirv_code.size();
+    stats.after_words = optimized_spv.size();
+    stats.opt_us = opt_us;
     }
 
     outs[i].spv = std::move(optimized_spv);
@@ -5423,36 +5653,31 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
   }
 
   if (params_.vulkan_spv_stats) {
-    size_t total_before = 0;
-    size_t total_after = 0;
-    int optimizer_skipped = 0;
-    int optimizer_failed = 0;
-    int listgen_tasks = 0;
-    int pointer_tasks = 0;
+    last_run_stats_.clear();
+    const int capacity = std::max(0, params_.vulkan_spv_stats_capacity);
+    last_run_stats_.reserve(std::min(n, capacity));
     for (int i = 0; i < n; ++i) {
-      const auto &s = outs[i].spv_stats;
-      if (!s.enabled) {
+      if (!outs[i].has_spv_stats) {
         continue;
       }
-      total_before += s.before_words;
-      total_after += s.after_words;
-      optimizer_skipped += s.opt_run ? 0 : 1;
-      optimizer_failed += s.opt_ok ? 0 : 1;
-      listgen_tasks += s.listgen_related ? 1 : 0;
-      pointer_tasks += s.pointer_related ? 1 : 0;
-      TI_INFO(
-          "[VS-4][SPV_STATS] kernel={} task={} type={} snode={} listgen={} "
-          "pointer={} opt_run={} opt_ok={} words={}=>{} opt_us={:.3f} "
-          "skipped_passes={}",
-          params_.ti_kernel_name, i, s.task_type, s.snode_id,
-          s.listgen_related, s.pointer_related, s.opt_run, s.opt_ok,
-          s.before_words, s.after_words, s.opt_us, s.skipped_passes);
+      const auto &s = outs[i].spv_stats;
+      if (!spv_stats_filter_accepts(params_.vulkan_spv_stats_filter, s)) {
+        continue;
+      }
+      if (static_cast<int>(last_run_stats_.size()) >= capacity) {
+        continue;
+      }
+      SpvStats retained = s;
+      retained.skipped_passes = skipped_passes_summary(
+          params_.spv_opt_level, params_.skip_loop_unroll,
+          params_.disabled_passes);
+      last_run_stats_.push_back(std::move(retained));
     }
-    TI_INFO(
-        "[VS-4][SPV_STATS] kernel={} summary tasks={} listgen_tasks={} "
-        "pointer_tasks={} opt_skipped={} opt_failed={} words={}=>{}",
-        params_.ti_kernel_name, n, listgen_tasks, pointer_tasks,
-        optimizer_skipped, optimizer_failed, total_before, total_after);
+    publish_last_spv_stats(last_run_stats_);
+    append_spv_stats_json_line(params_.ti_kernel_name, last_run_stats_);
+    if (params_.vulkan_spv_stats_to_stderr) {
+      log_spv_stats_to_stderr(params_.ti_kernel_name, last_run_stats_);
+    }
   }
 
   // Aggregate results sequentially in task order.

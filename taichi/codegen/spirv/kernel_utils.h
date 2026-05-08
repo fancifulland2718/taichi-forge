@@ -88,6 +88,10 @@ struct TaskAttributes {
   };
 
   struct BufferBind {
+    static constexpr uint32_t kAccessRead = 1u << 0;
+    static constexpr uint32_t kAccessWrite = 1u << 1;
+    static constexpr uint32_t kAccessReadWrite = kAccessRead | kAccessWrite;
+
     BufferInfo buffer;
     int binding{0};
     // C-2.5 (2026-05): >0 marks this binding as a chunked descriptor array
@@ -99,10 +103,18 @@ struct TaskAttributes {
     // so this number is just a signal; the actual buffers come from the
     // allocator.
     uint32_t chunk_count{0};
+    // VS-2.3/G-3.1 (2026-05): conservative access metadata for deferred
+    // dispatch barriers. Unknown/uninstrumented paths must leave this as
+    // read-write; only proven read-only bindings may clear kAccessWrite.
+    uint32_t access{kAccessReadWrite};
+
+    bool may_write() const {
+      return (access & kAccessWrite) != 0;
+    }
 
     std::string debug_string() const;
 
-    TI_IO_DEF(buffer, binding, chunk_count);
+    TI_IO_DEF(buffer, binding, chunk_count, access);
   };
 
   struct TextureBind {
@@ -149,6 +161,11 @@ struct TaskAttributes {
   int sparse_list_op{kSparseListOpNone};
   int sparse_list_snode_id{-1};
   int sparse_list_parent_snode_id{-1};
+  // If may_mutate_sparse_topology is true, sparse_mutation_snode_id must be
+  // either a concrete SNode id or kSparseMutationUnknown. kSparseMutationNone
+  // is reserved for tasks proven not to mutate sparse topology. Keeping this
+  // invariant lets GfxRuntime choose precise dirtying vs. global invalidation
+  // without accidentally reusing a stale sparse list.
   bool may_mutate_sparse_topology{false};
   int sparse_mutation_snode_id{kSparseMutationNone};
 

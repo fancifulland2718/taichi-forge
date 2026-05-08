@@ -50,8 +50,8 @@ std::string TaskAttributes::debug_string() const {
 }
 
 std::string TaskAttributes::BufferBind::debug_string() const {
-  return fmt::format("<type={} binding={}>",
-                     TaskAttributes::buffers_name(buffer), binding);
+  return fmt::format("<type={} binding={} access={}>",
+                     TaskAttributes::buffers_name(buffer), binding, access);
 }
 
 KernelContextAttributes::KernelContextAttributes(

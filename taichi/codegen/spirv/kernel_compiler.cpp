@@ -76,6 +76,10 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
       compile_config.spirv_listgen_subgroup_ballot;
   params.vulkan_listgen_reuse = compile_config.vulkan_listgen_reuse;
   params.vulkan_spv_stats = compile_config.vulkan_spv_stats;
+  params.vulkan_spv_stats_filter = compile_config.vulkan_spv_stats_filter;
+  params.vulkan_spv_stats_capacity = compile_config.vulkan_spv_stats_capacity;
+  params.vulkan_spv_stats_to_stderr =
+      compile_config.vulkan_spv_stats_to_stderr;
   spirv::KernelCodegen codegen(params);
   spirv::CompiledKernelData::InternalData internal_data;
   codegen.run(internal_data.metadata.kernel_attribs,

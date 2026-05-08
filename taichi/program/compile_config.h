@@ -344,6 +344,16 @@ struct CompileConfig {
   // global memory barriers with deferred shader-buffer barriers. Runtime-only;
   // emitted SPIR-V and offline cache keys are unchanged.
   bool vulkan_dispatch_cache{false};
+  // Descriptor-set cache size/LRU only take effect when vulkan_dispatch_cache
+  // is true. LRU eviction drops cache references only; in-flight command
+  // buffers keep descriptor sets alive through vkapi::DeviceObjVkCommandBuffer
+  // refs, so no fence wait is required for descriptor-cache eviction itself.
+  int vulkan_dispatch_cache_size{1024};
+  bool vulkan_descriptor_cache_lru{true};
+  // Optional VS-2 subpath: shrink listgen count-slot barrier to 4 bytes while
+  // keeping legacy global dispatch barriers. Default OFF until broader matrix
+  // data proves stable runtime benefit.
+  bool vulkan_listgen_lite_barrier{false};
   // VS-3 (2026-05): Vulkan listgen host-side reuse. When true,
   // SPIR-V task metadata records sparse list SNode ids and topology mutation
   // hints, and GfxRuntime may skip a listgen dispatch if the shared listgen
@@ -359,6 +369,9 @@ struct CompileConfig {
   // of the offline cache key. Default OFF to avoid log noise and compile-time
   // measurement perturbation.
   bool vulkan_spv_stats{false};
+  std::string vulkan_spv_stats_filter{"sparse"};
+  int vulkan_spv_stats_capacity{4096};
+  bool vulkan_spv_stats_to_stderr{false};
   bool advanced_optimization;
   bool constant_folding;
   bool use_llvm;
@@ -480,6 +493,15 @@ struct CompileConfig {
   // recycled across `synchronize()` boundaries; capacity bounded.
   bool vulkan_launch_buffer_pool{false};
   int vulkan_launch_buffer_pool_capacity{64};
+  // G-1 (2026-05): GFX ctx args/ret buffer ring. Default OFF. ON keeps a
+  // bounded number of in-flight ctx buffers per size/usage class and only
+  // reuses them after a submit/wait boundary, avoiding in-flight descriptor
+  // mutation while reducing handle churn for Vulkan descriptor cache tests.
+  // If a size/usage class reaches gfx_ctx_buffer_ring_size, GfxRuntime flushes
+  // and waits before taking a slot, preferring correctness/stability over a
+  // risky overwrite. Larger values trade a small amount of VRAM for fewer waits.
+  bool gfx_ctx_buffer_ring{false};
+  int gfx_ctx_buffer_ring_size{8};
 
   size_t cuda_stack_limit{0};
 

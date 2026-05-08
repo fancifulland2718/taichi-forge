@@ -24,6 +24,7 @@
 #include "taichi/python/export.h"
 #include "taichi/math/svd.h"
 #include "taichi/system/timeline.h"
+#include "taichi/codegen/spirv/spv_stats.h"
 #include "taichi/python/snode_registry.h"
 #include "taichi/program/sparse_matrix.h"
 #include "taichi/program/sparse_solver.h"
@@ -272,10 +273,21 @@ void export_lang(py::module &m) {
                      &CompileConfig::vulkan_listgen_buffer_MB)
       .def_readwrite("vulkan_dispatch_cache",
                      &CompileConfig::vulkan_dispatch_cache)
+      .def_readwrite("vulkan_dispatch_cache_size",
+             &CompileConfig::vulkan_dispatch_cache_size)
+      .def_readwrite("vulkan_descriptor_cache_lru",
+             &CompileConfig::vulkan_descriptor_cache_lru)
+      .def_readwrite("vulkan_listgen_lite_barrier",
+             &CompileConfig::vulkan_listgen_lite_barrier)
       .def_readwrite("vulkan_listgen_reuse",
-             &CompileConfig::vulkan_listgen_reuse)
-            .def_readwrite("vulkan_spv_stats",
-            &CompileConfig::vulkan_spv_stats)
+            &CompileConfig::vulkan_listgen_reuse)
+      .def_readwrite("vulkan_spv_stats", &CompileConfig::vulkan_spv_stats)
+      .def_readwrite("vulkan_spv_stats_filter",
+            &CompileConfig::vulkan_spv_stats_filter)
+      .def_readwrite("vulkan_spv_stats_capacity",
+            &CompileConfig::vulkan_spv_stats_capacity)
+      .def_readwrite("vulkan_spv_stats_to_stderr",
+            &CompileConfig::vulkan_spv_stats_to_stderr)
       .def_readwrite("kernel_profiler", &CompileConfig::kernel_profiler)
       .def_readwrite("timeline", &CompileConfig::timeline)
       .def_readwrite("default_fp", &CompileConfig::default_fp)
@@ -344,6 +356,10 @@ void export_lang(py::module &m) {
                      &CompileConfig::vulkan_launch_buffer_pool)
       .def_readwrite("vulkan_launch_buffer_pool_capacity",
                      &CompileConfig::vulkan_launch_buffer_pool_capacity)
+      .def_readwrite("gfx_ctx_buffer_ring",
+            &CompileConfig::gfx_ctx_buffer_ring)
+      .def_readwrite("gfx_ctx_buffer_ring_size",
+            &CompileConfig::gfx_ctx_buffer_ring_size)
       .def_readwrite("cuda_stack_limit", &CompileConfig::cuda_stack_limit)
       .def_readwrite("external_optimization_level",
                      &CompileConfig::external_optimization_level);
@@ -355,6 +371,28 @@ void export_lang(py::module &m) {
       "default_compile_config",
       [&]() -> CompileConfig & { return default_compile_config; },
       py::return_value_policy::reference);
+
+  m.def("get_last_vulkan_spv_stats", []() {
+    py::list ret;
+    for (const auto &s : spirv::get_last_spv_stats()) {
+      py::dict item;
+      item["kernel"] = s.kernel_name;
+      item["task_id"] = s.task_id;
+      item["task_name"] = s.task_name;
+      item["type"] = s.task_type;
+      item["snode_id"] = s.snode_id;
+      item["word_before"] = py::int_(s.before_words);
+      item["word_after"] = py::int_(s.after_words);
+      item["opt_run"] = s.opt_run;
+      item["opt_ok"] = s.opt_ok;
+      item["duration_us"] = s.opt_us;
+      item["is_listgen"] = s.listgen_related;
+      item["is_pointer"] = s.pointer_related;
+      item["skipped_passes"] = s.skipped_passes;
+      ret.append(item);
+    }
+    return ret;
+  });
 
   m.def("get_full_simplify_stats", []() {
     uint64_t r = 0, s = 0;

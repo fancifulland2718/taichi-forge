@@ -127,8 +127,13 @@ class TI_DLL_EXPORT GfxRuntime {
     int listgen_buffer_MB{0};
     // VS-2: opt-in descriptor cache plus deferred shader-buffer barriers.
     bool dispatch_cache{false};
+    bool listgen_lite_barrier{false};
     // VS-3: opt-in host-side current-list skip for Vulkan listgen tasks.
     bool listgen_reuse{false};
+    // G-1: opt-in ctx args/ret buffer ring with conservative fence-safe
+    // recycling. Default OFF preserves legacy allocation behavior.
+    bool ctx_buffer_ring{false};
+    int ctx_buffer_ring_size{8};
   };
 
   explicit GfxRuntime(const Params &params);
@@ -203,6 +208,7 @@ class TI_DLL_EXPORT GfxRuntime {
   void insert_pending_dispatch_barriers();
   void add_pending_dispatch_barrier(DeviceAllocation alloc);
   void clear_pending_dispatch_barriers();
+  bool task_uses_listgen_buffer(const TaskAttributes &attribs) const;
   int64 get_sparse_list_version(int snode_id) const;
   bool sparse_list_task_is_current(const TaskAttributes &attribs) const;
   void mark_sparse_list_task_launched(const TaskAttributes &attribs);
@@ -235,6 +241,7 @@ class TI_DLL_EXPORT GfxRuntime {
   size_t listgen_capacity_entries_{0};
   bool listgen_buffer_used_{false};
   bool dispatch_cache_{false};
+  bool listgen_lite_barrier_{false};
   bool listgen_reuse_{false};
   struct SparseListState {
     int64 dirty_epoch{0};
@@ -256,16 +263,21 @@ class TI_DLL_EXPORT GfxRuntime {
 
   // R2.a: Vulkan launch args/ret buffer pool. Three-stage to be GPU-safe:
   //   pending_pool_   : in-flight on current_cmdlist_ (recording)
-  //   submitted_pool_ : submitted to stream, GPU may still be using
-  //   free_pool_      : safe to reuse (only filled after wait_idle)
+  //   submitted_pool_ : submitted to stream, GPU may still be using; entries
+  //                     carry an optional completion token when backend exposes
+  //                     one (Vulkan submit fence)
+  //   free_pool_      : safe to reuse (filled after token completion or sync)
   // Each entry is keyed by (size, usage). Pool cap drops oldest free entries.
   struct PooledBuffer {
     std::unique_ptr<DeviceAllocationGuard> guard;
     size_t size{0};
     AllocUsage usage{AllocUsage::None};
+    StreamSemaphore completion;
   };
   bool buffer_pool_enabled_{false};
   size_t buffer_pool_capacity_{64};
+  bool ctx_buffer_ring_enabled_{false};
+  size_t ctx_buffer_ring_size_{8};
   std::vector<PooledBuffer> pending_pool_;
   std::vector<PooledBuffer> submitted_pool_;
   std::vector<PooledBuffer> free_pool_;
@@ -277,8 +289,18 @@ class TI_DLL_EXPORT GfxRuntime {
   std::unique_ptr<DeviceAllocationGuard> try_take_pooled_buffer(
       size_t size,
       AllocUsage usage);
-  // Move pending_pool_ -> submitted_pool_ (called on flush).
-  void flush_pending_pool_to_submitted();
+  std::unique_ptr<DeviceAllocationGuard> acquire_ctx_buffer(size_t size,
+                                                            AllocUsage usage);
+  size_t count_pooled_buffers(size_t size, AllocUsage usage) const;
+  bool ctx_buffer_pool_enabled() const;
+  // Move pending_pool_ -> submitted_pool_ (called on flush), tagging all
+  // entries with the submission completion token returned by Stream::submit().
+  void flush_pending_pool_to_submitted(StreamSemaphore completion);
+  // Move already completed submitted entries to free_pool_ without blocking.
+  size_t recycle_completed_pools_to_free();
+  // Wait only for the oldest submitted buffer of the requested size/usage if
+  // the backend exposes a completion token. Returns false if unsupported.
+  bool wait_for_oldest_submitted_buffer(size_t size, AllocUsage usage);
   // Move submitted_pool_ + pending_pool_ -> free_pool_ (called after wait_idle).
   void recycle_pools_to_free();
 

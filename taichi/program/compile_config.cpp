@@ -31,6 +31,9 @@ CompileConfig::CompileConfig() {
   vulkan_listgen_reuse = true;
   // VS-4: default OFF; opt-in diagnostics via ti.init(vulkan_spv_stats=True).
   vulkan_spv_stats = false;
+  vulkan_spv_stats_filter = "sparse";
+  vulkan_spv_stats_capacity = 4096;
+  vulkan_spv_stats_to_stderr = false;
   advanced_optimization = true;
   constant_folding = true;
   max_vector_width = 8;

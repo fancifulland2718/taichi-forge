@@ -138,6 +138,8 @@ void VulkanProgramImpl::materialize_runtime(KernelProfilerBase *profiler,
   embedded_device_ = std::make_unique<VulkanDeviceCreator>(evd_params);
   if (config->vulkan_dispatch_cache) {
     embedded_device_->device()->set_descriptor_set_cache_enabled(true);
+    embedded_device_->device()->set_descriptor_set_cache_options(
+        config->vulkan_dispatch_cache_size, config->vulkan_descriptor_cache_lru);
   }
 
   gfx::GfxRuntime::Params params;
@@ -148,7 +150,16 @@ void VulkanProgramImpl::materialize_runtime(KernelProfilerBase *profiler,
   params.listgen_dynamic_size = config->vulkan_listgen_dynamic_size;
   params.listgen_buffer_MB = config->vulkan_listgen_buffer_MB;
   params.dispatch_cache = config->vulkan_dispatch_cache;
+  params.listgen_lite_barrier = config->vulkan_listgen_lite_barrier;
   params.listgen_reuse = config->vulkan_listgen_reuse;
+  // VS-2.3/G-1.1: descriptor cache benefits from stable args/ret buffer
+  // handles. With precise fence-token recycling, enabling the ctx ring as a
+  // dispatch-cache implementation detail avoids the old wait_idle() stall and
+  // fixes multi-task orthogonal regressions. The public gfx_ctx_buffer_ring
+  // flag still allows using the ring without dispatch cache.
+  params.ctx_buffer_ring = config->gfx_ctx_buffer_ring ||
+                           config->vulkan_dispatch_cache;
+  params.ctx_buffer_ring_size = config->gfx_ctx_buffer_ring_size;
   runtime_ = std::make_unique<gfx::GfxRuntime>(std::move(params));
   snode_tree_mgr_ = std::make_unique<gfx::SNodeTreeManager>(runtime_.get());
 }

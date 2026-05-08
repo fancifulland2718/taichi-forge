@@ -569,8 +569,23 @@ enum class AllocUsage : int {
 
 MAKE_ENUM_FLAGS(AllocUsage)
 
-class RHI_DLL_EXPORT
-StreamSemaphoreObject{public : virtual ~StreamSemaphoreObject(){}};
+class RHI_DLL_EXPORT StreamSemaphoreObject {
+ public:
+  virtual ~StreamSemaphoreObject() {
+  }
+
+  // Optional completion token support. Backends that can expose a submission
+  // fence override these; others return false so callers can fall back to their
+  // legacy stream/device sync path. This keeps Stream's vtable unchanged while
+  // allowing higher layers to avoid over-conservative wait_idle() when possible.
+  virtual bool is_ready() const {
+    return false;
+  }
+
+  virtual bool wait() const {
+    return false;
+  }
+};
 
 using StreamSemaphore = std::shared_ptr<StreamSemaphoreObject>;
 

@@ -556,13 +556,18 @@ struct DescPool {
 
 class VulkanStreamSemaphoreObject : public StreamSemaphoreObject {
  public:
-  explicit VulkanStreamSemaphoreObject(vkapi::IVkSemaphore sema)
-      : vkapi_ref(sema) {
+  explicit VulkanStreamSemaphoreObject(vkapi::IVkSemaphore sema,
+                                       vkapi::IVkFence fence = nullptr)
+      : vkapi_ref(sema), fence_ref(fence) {
   }
   ~VulkanStreamSemaphoreObject() override {
   }
 
+  bool is_ready() const override;
+  bool wait() const override;
+
   vkapi::IVkSemaphore vkapi_ref{nullptr};
+  vkapi::IVkFence fence_ref{nullptr};
 };
 
 class VulkanStream : public Stream {
@@ -587,6 +592,8 @@ class VulkanStream : public Stream {
     vkapi::IVkFence fence;
     vkapi::IVkCommandBuffer buf;
   };
+
+  void retire_completed_cmdbuffers();
 
   VulkanDevice &device_;
   VkQueue queue_;
@@ -758,6 +765,21 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
     descriptor_set_cache_enabled_ = enabled;
     if (!enabled) {
       desc_set_cache_.clear();
+      desc_set_cache_lru_.clear();
+    }
+  }
+
+  void set_descriptor_set_cache_options(int capacity, bool lru) {
+    desc_set_cache_capacity_ = capacity > 0 ? static_cast<size_t>(capacity)
+                                            : size_t{1024};
+    descriptor_set_cache_lru_ = lru;
+    while (desc_set_cache_.size() > desc_set_cache_capacity_) {
+      if (desc_set_cache_lru_.empty()) {
+        desc_set_cache_.clear();
+        break;
+      }
+      desc_set_cache_.erase(desc_set_cache_lru_.front());
+      desc_set_cache_lru_.pop_front();
     }
   }
 
@@ -765,10 +787,18 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
     return descriptor_set_cache_enabled_;
   }
 
-  vkapi::IVkDescriptorSet find_cached_desc_set(
-      const VulkanResourceSet &set) const;
+  vkapi::IVkDescriptorSet find_cached_desc_set(const VulkanResourceSet &set);
   void cache_desc_set(const VulkanResourceSet &set,
                       vkapi::IVkDescriptorSet desc_set);
+  size_t descriptor_set_cache_hits() const {
+    return desc_set_cache_hits_;
+  }
+  size_t descriptor_set_cache_misses() const {
+    return desc_set_cache_misses_;
+  }
+  size_t descriptor_set_cache_evictions() const {
+    return desc_set_cache_evictions_;
+  }
 
   const VkPhysicalDeviceProperties &get_vk_physical_device_props() const {
     return vk_device_properties_;
@@ -862,6 +892,18 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
                 VulkanResourceSet::DescSetHasher,
                 VulkanResourceSet::SetCmp>
       desc_set_cache_;
+  // LRU eviction removes only the cache's shared_ptr. Submitted command buffers
+  // keep every bound IVkDescriptorSet in DeviceObjVkCommandBuffer::refs until
+  // VulkanStream::command_sync() retires them, and descriptor sets are owned by
+  // the descriptor pool for the device lifetime. Therefore cache eviction does
+  // not require a fence wait; ctx buffer reuse is handled separately in
+  // GfxRuntime's pooled/ring buffer lifecycle.
+  std::list<VulkanResourceSet> desc_set_cache_lru_;
+  size_t desc_set_cache_capacity_{1024};
+  bool descriptor_set_cache_lru_{true};
+  size_t desc_set_cache_hits_{0};
+  size_t desc_set_cache_misses_{0};
+  size_t desc_set_cache_evictions_{0};
   vkapi::IVkDescriptorPool desc_pool_{nullptr};
   bool descriptor_set_cache_enabled_{false};
 
