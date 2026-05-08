@@ -1252,6 +1252,7 @@ def test_matrix_arithmatics():
     debug=True,
     check_out_of_bound=True,
     gdb_trigger=False,
+    real_matrix_scalarize=False,
 )
 def test_matrix_oob():
     @ti.kernel

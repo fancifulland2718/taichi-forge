@@ -61,7 +61,6 @@ __pycache__
 !python/taichi/examples/algorithm/circle-packing/*.png
 *.egg-info
 .tlang_cache
-/taichi/common/version.h
 /taichi/common/commit_hash.h
 /python/test_env
 /CHANGELOG.md
@@ -100,4 +99,15 @@ tests/p4
 /.llvm20
 /.llvm20_build.log
 
+*.ps1
+*.cmd
+.github/instructions/
 _archive/
+opt_doc/
+build_llvm20_test/
+/build/
+.llvm20_old/
+_build_imgui.log
+python/taichi_forge/_lib/runtime/
+python/taichi_forge/_lib/c_api/
+python/taichi_forge/_lib/core/
