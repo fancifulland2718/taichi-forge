@@ -99,3 +99,5 @@ tests/p4
 
 /.llvm20
 /.llvm20_build.log
+
+_archive/
