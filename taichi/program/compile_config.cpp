@@ -29,6 +29,11 @@ CompileConfig::CompileConfig() {
   vulkan_dispatch_cache = false;
   // VS-3: default ON after the 3-run VS-1/VS-2/VS-3 Vulkan matrix.
   vulkan_listgen_reuse = true;
+  // G-4: adaptive downgrade is opt-in until the cross-backend matrix proves
+  // stable positive results. Keep defaults behavior-compatible with current
+  // CS-3 / VS-3.
+  cuda_listgen_reuse_adaptive = false;
+  vulkan_listgen_reuse_adaptive = false;
   // VS-4: default OFF; opt-in diagnostics via ti.init(vulkan_spv_stats=True).
   vulkan_spv_stats = false;
   vulkan_spv_stats_filter = "sparse";

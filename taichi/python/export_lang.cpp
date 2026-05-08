@@ -207,6 +207,8 @@ void export_lang(py::module &m) {
                      &CompileConfig::cuda_pointer_fast_reset)
       .def_readwrite("cuda_listgen_reuse",
             &CompileConfig::cuda_listgen_reuse)
+      .def_readwrite("cuda_listgen_reuse_adaptive",
+             &CompileConfig::cuda_listgen_reuse_adaptive)
       .def_readwrite("bitmasked_clear_data_on_deactivate",
                      &CompileConfig::bitmasked_clear_data_on_deactivate)
       .def_readwrite("print_ir", &CompileConfig::print_ir)
@@ -281,6 +283,8 @@ void export_lang(py::module &m) {
              &CompileConfig::vulkan_listgen_lite_barrier)
       .def_readwrite("vulkan_listgen_reuse",
             &CompileConfig::vulkan_listgen_reuse)
+      .def_readwrite("vulkan_listgen_reuse_adaptive",
+             &CompileConfig::vulkan_listgen_reuse_adaptive)
       .def_readwrite("vulkan_spv_stats", &CompileConfig::vulkan_spv_stats)
       .def_readwrite("vulkan_spv_stats_filter",
             &CompileConfig::vulkan_spv_stats_filter)
@@ -360,6 +364,10 @@ void export_lang(py::module &m) {
             &CompileConfig::gfx_ctx_buffer_ring)
       .def_readwrite("gfx_ctx_buffer_ring_size",
             &CompileConfig::gfx_ctx_buffer_ring_size)
+      .def_readwrite("gfx_cmdlist_lazy_submit",
+                     &CompileConfig::gfx_cmdlist_lazy_submit)
+      .def_readwrite("gfx_cmdlist_max_dispatches",
+                     &CompileConfig::gfx_cmdlist_max_dispatches)
       .def_readwrite("cuda_stack_limit", &CompileConfig::cuda_stack_limit)
       .def_readwrite("external_optimization_level",
                      &CompileConfig::external_optimization_level);

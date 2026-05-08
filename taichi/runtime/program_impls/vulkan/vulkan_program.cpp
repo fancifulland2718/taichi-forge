@@ -152,6 +152,7 @@ void VulkanProgramImpl::materialize_runtime(KernelProfilerBase *profiler,
   params.dispatch_cache = config->vulkan_dispatch_cache;
   params.listgen_lite_barrier = config->vulkan_listgen_lite_barrier;
   params.listgen_reuse = config->vulkan_listgen_reuse;
+  params.listgen_reuse_adaptive = config->vulkan_listgen_reuse_adaptive;
   // VS-2.3/G-1.1: descriptor cache benefits from stable args/ret buffer
   // handles. With precise fence-token recycling, enabling the ctx ring as a
   // dispatch-cache implementation detail avoids the old wait_idle() stall and
@@ -160,6 +161,9 @@ void VulkanProgramImpl::materialize_runtime(KernelProfilerBase *profiler,
   params.ctx_buffer_ring = config->gfx_ctx_buffer_ring ||
                            config->vulkan_dispatch_cache;
   params.ctx_buffer_ring_size = config->gfx_ctx_buffer_ring_size;
+  params.cmdlist_lazy_submit = config->gfx_cmdlist_lazy_submit;
+  params.cmdlist_max_dispatches = config->gfx_cmdlist_max_dispatches;
+  params.debug = config->debug;
   runtime_ = std::make_unique<gfx::GfxRuntime>(std::move(params));
   snode_tree_mgr_ = std::make_unique<gfx::SNodeTreeManager>(runtime_.get());
 }

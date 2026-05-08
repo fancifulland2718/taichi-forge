@@ -7,6 +7,12 @@ from taichi_forge._lib import core as _ti_core
 from tests import test_utils
 
 
+def test_g4_listgen_reuse_adaptive_defaults_off():
+    cfg = _ti_core.CompileConfig()
+    assert cfg.cuda_listgen_reuse_adaptive is False
+    assert cfg.vulkan_listgen_reuse_adaptive is False
+
+
 @test_utils.test(
     arch=ti.vulkan,
     vulkan_sparse_experimental=True,
@@ -74,6 +80,32 @@ def test_vulkan_dispatch_cache_sparse_struct_for_smoke():
     fill()
     copy_active()
     assert sum_y() == sum(i * 2 for i in range(n) if i % 5 == 1)
+
+
+@test_utils.test(
+    arch=ti.vulkan,
+    gfx_cmdlist_lazy_submit=True,
+    gfx_cmdlist_max_dispatches=8,
+    offline_cache=False,
+)
+def test_gfx_cmdlist_lazy_submit_short_pipeline_smoke():
+    x = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def set_x():
+        x[None] = 3
+
+    @ti.kernel
+    def add_x():
+        x[None] += 4
+
+    @ti.kernel
+    def read_x() -> ti.i32:
+        return x[None]
+
+    set_x()
+    add_x()
+    assert read_x() == 7
 
 
 @test_utils.test(
@@ -161,6 +193,43 @@ def test_vulkan_listgen_reuse_parent_deactivate_invalidates_child():
     assert count_active() == block * 2
     deactivate_first_parent_block()
     assert count_active() == block
+
+
+@test_utils.test(
+    arch=ti.vulkan,
+    vulkan_sparse_experimental=True,
+    vulkan_listgen_reuse=True,
+    vulkan_listgen_reuse_adaptive=True,
+    offline_cache=False,
+)
+def test_vulkan_listgen_reuse_adaptive_topology_churn_smoke():
+    n = 512
+    x = ti.field(ti.i32)
+    ti.root.bitmasked(ti.i, n).place(x)
+
+    @ti.kernel
+    def clear_active():
+        for i in x:
+            ti.deactivate(x.parent(), i)
+
+    @ti.kernel
+    def fill_pattern(offset: ti.i32):
+        for i in range(n):
+            if (i + offset) % 17 == 0:
+                x[i] = i + 1
+
+    @ti.kernel
+    def sum_x() -> ti.i64:
+        acc = ti.cast(0, ti.i64)
+        for i in x:
+            acc += x[i]
+        return acc
+
+    for step in range(72):
+        clear_active()
+        fill_pattern(step)
+        expected = sum(i + 1 for i in range(n) if (i + step) % 17 == 0)
+        assert sum_x() == expected
 
 
 @test_utils.test(

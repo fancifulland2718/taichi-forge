@@ -212,6 +212,14 @@ struct CompileConfig {
   // pointer-rebuild sparse workloads. Users can set false to recover legacy
   // listgen behavior if a workload is sensitive to launch-tail variance.
   bool cuda_listgen_reuse{true};
+  // G-4 (2026-05): host-side adaptive downgrade for CUDA listgen reuse.
+  // When true and cuda_listgen_reuse is enabled, the CUDA kernel launcher
+  // tracks per-SNode listgen skip hit-rate over a small sliding window. If a
+  // topology-changing workload almost never reuses a list, host-side listgen
+  // launch elision is temporarily disabled for that SNode and re-enabled once
+  // the hit-rate recovers. Default false preserves the current CS-3 behavior.
+  // Runtime-only: emitted LLVM and offline cache keys are unchanged.
+  bool cuda_listgen_reuse_adaptive{false};
   // G11-A (2026-05): bitmasked SNode 在 deactivate 时是否同时把 cell 的 data
   // slot 清零。默认 true != vanilla 1.7.4 / taichi-dev 行为（仅翻 mask 位，
   // 不动 data；下次 activate 看到的是上次写入的旧值）。设为 true 后，
@@ -362,6 +370,13 @@ struct CompileConfig {
   // attributes. Default true after the VS-1/VS-2/VS-3 matrix showed no
   // correctness, VRAM, mean/median/p95 regression for VS-3 alone.
   bool vulkan_listgen_reuse{true};
+  // G-4 (2026-05): host-side adaptive downgrade for Vulkan listgen reuse.
+  // When true and vulkan_listgen_reuse is enabled, GfxRuntime tracks per-SNode
+  // listgen skip hit-rate and temporarily disables host-side listgen skipping
+  // for topology-changing workloads that almost never hit the reuse path.
+  // Default false preserves current VS-3 behavior. Runtime-only: SPIR-V output
+  // and offline cache keys are unchanged.
+  bool vulkan_listgen_reuse_adaptive{false};
   // VS-4 (2026-05): opt-in Vulkan SPIR-V optimizer diagnostics. When true,
   // KernelCodegen logs per-offload optimizer stats (task type, sparse/listgen
   // classification, optimizer run/ok, before/after SPIR-V words, skipped
@@ -502,6 +517,16 @@ struct CompileConfig {
   // risky overwrite. Larger values trade a small amount of VRAM for fewer waits.
   bool gfx_ctx_buffer_ring{false};
   int gfx_ctx_buffer_ring_size{8};
+  // G-2 (2026-05): GFX command-list lazy submit. Default OFF preserves the
+  // legacy timeout-based submit policy. When ON, GfxRuntime delays the 2 ms
+  // timeout submit until the current command list has recorded at least
+  // gfx_cmdlist_max_dispatches dispatches. This is a batching target rather
+  // than a hard submit cap: sync/readback/explicit flush still submit
+  // immediately, and reaching the target only re-enables the legacy timeout
+  // check. Set <=0 to disable the batching target while keeping old timeout
+  // semantics for diagnostics.
+  bool gfx_cmdlist_lazy_submit{false};
+  int gfx_cmdlist_max_dispatches{8};
 
   size_t cuda_stack_limit{0};
 

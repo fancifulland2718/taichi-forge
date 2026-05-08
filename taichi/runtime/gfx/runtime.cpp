@@ -351,11 +351,18 @@ GfxRuntime::GfxRuntime(const Params &params)
       dispatch_cache_(params.dispatch_cache),
       listgen_lite_barrier_(params.listgen_lite_barrier),
       listgen_reuse_(params.listgen_reuse),
+      listgen_reuse_adaptive_(params.listgen_reuse_adaptive),
       ctx_buffer_ring_enabled_(params.ctx_buffer_ring),
-        ctx_buffer_ring_size_(
+      ctx_buffer_ring_size_(
           params.ctx_buffer_ring_size > 0
-            ? static_cast<size_t>(params.ctx_buffer_ring_size)
-            : size_t{8}) {
+              ? static_cast<size_t>(params.ctx_buffer_ring_size)
+              : size_t{8}),
+      cmdlist_lazy_submit_enabled_(params.cmdlist_lazy_submit),
+      cmdlist_lazy_submit_min_dispatches_(
+          params.cmdlist_max_dispatches > 0
+              ? static_cast<size_t>(params.cmdlist_max_dispatches)
+              : size_t{0}),
+      debug_mode_(params.debug) {
   TI_ERROR_IF(params.listgen_buffer_MB < 0,
               "vulkan_listgen_buffer_MB must be >= 0, got {}",
               params.listgen_buffer_MB);
@@ -458,7 +465,7 @@ int64 GfxRuntime::get_sparse_list_version(int snode_id) const {
 }
 
 bool GfxRuntime::sparse_list_task_is_current(
-    const TaskAttributes &attribs) const {
+    const TaskAttributes &attribs) {
   if (!listgen_reuse_ ||
       attribs.sparse_list_op != TaskAttributes::kSparseListOpListgen ||
       attribs.sparse_list_snode_id < 0 ||
@@ -469,13 +476,52 @@ bool GfxRuntime::sparse_list_task_is_current(
 
   auto it = sparse_list_states_.find(attribs.sparse_list_snode_id);
   if (it == sparse_list_states_.end()) {
+    if (listgen_reuse_adaptive_) {
+      auto &state = sparse_list_states_[attribs.sparse_list_snode_id];
+      record_sparse_list_reuse_sample(state, /*would_skip=*/false);
+    }
     return false;
   }
-  const auto &state = it->second;
-  return state.clean_epoch == state.dirty_epoch &&
-      state.global_dirty_seen == sparse_list_global_dirty_epoch_ &&
-         state.clean_parent_version ==
-             get_sparse_list_version(attribs.sparse_list_parent_snode_id);
+  auto &state = it->second;
+  const bool would_skip = state.clean_epoch == state.dirty_epoch &&
+                 state.global_dirty_seen ==
+                   sparse_list_global_dirty_epoch_ &&
+                 state.clean_parent_version ==
+                   get_sparse_list_version(
+                     attribs.sparse_list_parent_snode_id);
+  record_sparse_list_reuse_sample(state, would_skip);
+  return would_skip && !state.adaptive_disabled;
+}
+
+void GfxRuntime::record_sparse_list_reuse_sample(SparseListState &state,
+                                                 bool would_skip) const {
+  if (!listgen_reuse_adaptive_) {
+    return;
+  }
+  constexpr int kWindow = 64;
+  constexpr int kDisablePercent = 10;
+  constexpr int kEnablePercent = 15;
+  const int hit = would_skip ? 1 : 0;
+  if (state.adaptive_window_size < kWindow) {
+    state.adaptive_window_size++;
+  } else {
+    state.adaptive_hit_count -=
+        int((state.adaptive_window_bits >> (kWindow - 1)) & 1u);
+  }
+  state.adaptive_window_bits = (state.adaptive_window_bits << 1) |
+                               static_cast<std::uint64_t>(hit);
+  state.adaptive_hit_count += hit;
+
+  if (state.adaptive_window_size < kWindow) {
+    return;
+  }
+  if (!state.adaptive_disabled &&
+      state.adaptive_hit_count * 100 < kDisablePercent * kWindow) {
+    state.adaptive_disabled = true;
+  } else if (state.adaptive_disabled &&
+             state.adaptive_hit_count * 100 >= kEnablePercent * kWindow) {
+    state.adaptive_disabled = false;
+  }
 }
 
 void GfxRuntime::mark_sparse_list_task_launched(
@@ -954,6 +1000,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
 
     TI_ERROR_IF(status != RhiResult::success, "Dispatch error : RhiResult({})",
                 status);
+    ++current_cmdlist_dispatch_count_;
     mark_sparse_list_task_launched(attribs);
     if (attribs.may_mutate_sparse_topology) {
       invalidate_sparse_list_cache(attribs.sparse_mutation_snode_id);
@@ -991,6 +1038,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     if (ctx_blitter->device_to_host(current_cmdlist_.get(), any_arrays,
                                     ext_array_size)) {
       current_cmdlist_ = nullptr;
+      current_cmdlist_dispatch_count_ = 0;
       ctx_buffers_.clear();
       // R2.a: device_to_host internally syncs (wait_idle / submit_synced),
       // so all pool buffers are safe to recycle here.
@@ -1073,6 +1121,7 @@ StreamSemaphore GfxRuntime::flush() {
     insert_pending_dispatch_barriers();
     sema = device_->get_compute_stream()->submit(current_cmdlist_.get());
     current_cmdlist_ = nullptr;
+    current_cmdlist_dispatch_count_ = 0;
     ctx_buffers_.clear();
     if (ctx_buffer_pool_enabled()) {
       flush_pending_pool_to_submitted(sema);
@@ -1084,6 +1133,7 @@ StreamSemaphore GfxRuntime::flush() {
     cmdlist->memory_barrier();
     sema = device_->get_compute_stream()->submit(cmdlist.get());
   }
+  current_cmdlist_dispatch_count_ = 0;
   return sema;
 }
 
@@ -1231,6 +1281,7 @@ void GfxRuntime::ensure_current_cmdlist() {
   // Create new command list if current one is nullptr
   if (!current_cmdlist_) {
     current_cmdlist_pending_since_ = high_res_clock::now();
+    current_cmdlist_dispatch_count_ = 0;
     auto [cmdlist, res] =
         device_->get_compute_stream()->new_command_list_unique();
     TI_ASSERT(res == RhiResult::success);
@@ -1290,6 +1341,16 @@ void GfxRuntime::submit_current_cmdlist_if_timeout() {
   // and if the accumulated cmdlist has been pending for some time
   // launch the cmdlist to start processing.
   if (current_cmdlist_) {
+    if (cmdlist_lazy_submit_enabled_ && debug_mode_) {
+      flush();
+      return;
+    }
+    if (cmdlist_lazy_submit_enabled_ &&
+        cmdlist_lazy_submit_min_dispatches_ > 0 &&
+        current_cmdlist_dispatch_count_ <
+            cmdlist_lazy_submit_min_dispatches_) {
+      return;
+    }
     constexpr uint64_t max_pending_time = 2000;  // 2000us = 2ms
     auto duration = high_res_clock::now() - current_cmdlist_pending_since_;
     if (std::chrono::duration_cast<std::chrono::microseconds>(duration)

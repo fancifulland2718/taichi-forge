@@ -26,6 +26,9 @@ void Dx11ProgramImpl::materialize_runtime(KernelProfilerBase *profiler,
 
   gfx::GfxRuntime::Params params;
   params.device = device_.get();
+  params.cmdlist_lazy_submit = config->gfx_cmdlist_lazy_submit;
+  params.cmdlist_max_dispatches = config->gfx_cmdlist_max_dispatches;
+  params.debug = config->debug;
   runtime_ = std::make_unique<gfx::GfxRuntime>(std::move(params));
   snode_tree_mgr_ = std::make_unique<gfx::SNodeTreeManager>(runtime_.get());
 }

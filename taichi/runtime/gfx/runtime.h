@@ -1,6 +1,7 @@
 #pragma once
 #include "taichi/util/lang_util.h"
 
+#include <cstdint>
 #include <vector>
 #include <chrono>
 #include <memory>
@@ -133,10 +134,17 @@ class TI_DLL_EXPORT GfxRuntime {
     bool listgen_lite_barrier{false};
     // VS-3: opt-in host-side current-list skip for Vulkan listgen tasks.
     bool listgen_reuse{false};
+    // G-4: opt-in per-SNode adaptive downgrade for listgen reuse.
+    bool listgen_reuse_adaptive{false};
     // G-1: opt-in ctx args/ret buffer ring with conservative fence-safe
     // recycling. Default OFF preserves legacy allocation behavior.
     bool ctx_buffer_ring{false};
     int ctx_buffer_ring_size{8};
+    // G-2: opt-in command-list lazy submit. Default OFF preserves legacy
+    // timeout behavior; debug mode can force launch-boundary submits when ON.
+    bool cmdlist_lazy_submit{false};
+    int cmdlist_max_dispatches{8};
+    bool debug{false};
   };
 
   explicit GfxRuntime(const Params &params);
@@ -213,7 +221,10 @@ class TI_DLL_EXPORT GfxRuntime {
   void clear_pending_dispatch_barriers();
   bool task_uses_listgen_buffer(const TaskAttributes &attribs) const;
   int64 get_sparse_list_version(int snode_id) const;
-  bool sparse_list_task_is_current(const TaskAttributes &attribs) const;
+  struct SparseListState;
+  void record_sparse_list_reuse_sample(SparseListState &state,
+                                       bool would_skip) const;
+  bool sparse_list_task_is_current(const TaskAttributes &attribs);
   void mark_sparse_list_task_launched(const TaskAttributes &attribs);
   void invalidate_sparse_list_cache(int sparse_mutation_snode_id);
   void clear_sparse_list_cache_resident();
@@ -253,7 +264,12 @@ class TI_DLL_EXPORT GfxRuntime {
     int64 version{0};
     int64 clean_parent_version{-1};
     int parent_snode_id{-1};
+    std::uint64_t adaptive_window_bits{0};
+    int adaptive_window_size{0};
+    int adaptive_hit_count{0};
+    bool adaptive_disabled{false};
   };
+  bool listgen_reuse_adaptive_{false};
   std::unordered_map<int, SparseListState> sparse_list_states_;
   std::unordered_map<int, std::unordered_set<int>> child_lists_by_parent_;
   int64 sparse_list_global_dirty_epoch_{0};
@@ -309,6 +325,10 @@ class TI_DLL_EXPORT GfxRuntime {
 
   std::unique_ptr<CommandList> current_cmdlist_{nullptr};
   high_res_clock::time_point current_cmdlist_pending_since_;
+  size_t current_cmdlist_dispatch_count_{0};
+  bool cmdlist_lazy_submit_enabled_{false};
+  size_t cmdlist_lazy_submit_min_dispatches_{8};
+  bool debug_mode_{false};
 
   std::vector<std::unique_ptr<CompiledTaichiKernel>> ti_kernels_;
 

@@ -20,8 +20,7 @@ int64 KernelLauncher::get_sparse_list_version(int snode_id) const {
   return it->second.version;
 }
 
-bool KernelLauncher::sparse_list_task_is_current(
-    const OffloadedTask &task) const {
+bool KernelLauncher::sparse_list_task_is_current(const OffloadedTask &task) {
   if (task.sparse_list_op == OffloadedTask::kSparseListOpNone ||
       task.sparse_list_snode_id < 0 ||
       task.sparse_list_parent_snode_id < 0) {
@@ -30,12 +29,50 @@ bool KernelLauncher::sparse_list_task_is_current(
 
   auto it = sparse_list_states_.find(task.sparse_list_snode_id);
   if (it == sparse_list_states_.end()) {
+    if (listgen_reuse_adaptive_) {
+      auto &state = sparse_list_states_[task.sparse_list_snode_id];
+      record_sparse_list_reuse_sample(state, /*would_skip=*/false);
+    }
     return false;
   }
-  const auto &state = it->second;
-  return state.clean_epoch == state.dirty_epoch &&
-         state.clean_parent_version ==
-             get_sparse_list_version(task.sparse_list_parent_snode_id);
+  auto &state = it->second;
+  const bool would_skip = state.clean_epoch == state.dirty_epoch &&
+                 state.clean_parent_version ==
+                   get_sparse_list_version(
+                     task.sparse_list_parent_snode_id);
+  record_sparse_list_reuse_sample(state, would_skip);
+  return would_skip && !state.adaptive_disabled;
+}
+
+void KernelLauncher::record_sparse_list_reuse_sample(SparseListState &state,
+                                                     bool would_skip) const {
+  if (!listgen_reuse_adaptive_) {
+    return;
+  }
+  constexpr int kWindow = 64;
+  constexpr int kDisablePercent = 10;
+  constexpr int kEnablePercent = 15;
+  const int hit = would_skip ? 1 : 0;
+  if (state.adaptive_window_size < kWindow) {
+    state.adaptive_window_size++;
+  } else {
+    state.adaptive_hit_count -=
+        int((state.adaptive_window_bits >> (kWindow - 1)) & 1u);
+  }
+  state.adaptive_window_bits = (state.adaptive_window_bits << 1) |
+                               static_cast<std::uint64_t>(hit);
+  state.adaptive_hit_count += hit;
+
+  if (state.adaptive_window_size < kWindow) {
+    return;
+  }
+  if (!state.adaptive_disabled &&
+      state.adaptive_hit_count * 100 < kDisablePercent * kWindow) {
+    state.adaptive_disabled = true;
+  } else if (state.adaptive_disabled &&
+             state.adaptive_hit_count * 100 >= kEnablePercent * kWindow) {
+    state.adaptive_disabled = false;
+  }
 }
 
 void KernelLauncher::mark_sparse_list_task_launched(
@@ -69,6 +106,8 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   TI_ASSERT(handle.get_launch_id() < contexts_.size());
   auto launcher_ctx = contexts_[handle.get_launch_id()];
   auto *executor = get_runtime_executor();
+  listgen_reuse_adaptive_ =
+      executor->get_config().cuda_listgen_reuse_adaptive;
   auto *cuda_module = launcher_ctx.jit_module;
   const auto &parameters = launcher_ctx.parameters;
   const auto &offloaded_tasks = launcher_ctx.offloaded_tasks;
