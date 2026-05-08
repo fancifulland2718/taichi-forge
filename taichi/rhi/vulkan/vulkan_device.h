@@ -772,6 +772,12 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   void set_descriptor_set_cache_options(int capacity, bool lru) {
     desc_set_cache_capacity_ = capacity > 0 ? static_cast<size_t>(capacity)
                                             : size_t{1024};
+    if (descriptor_set_cache_lru_ != lru) {
+      // Existing cache entries hold iterators into the current LRU list.
+      // Rebuild lazily by dropping the CPU-side cache when the policy changes.
+      desc_set_cache_.clear();
+      desc_set_cache_lru_.clear();
+    }
     descriptor_set_cache_lru_ = lru;
     while (desc_set_cache_.size() > desc_set_cache_capacity_) {
       if (desc_set_cache_lru_.empty()) {
@@ -790,6 +796,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   vkapi::IVkDescriptorSet find_cached_desc_set(const VulkanResourceSet &set);
   void cache_desc_set(const VulkanResourceSet &set,
                       vkapi::IVkDescriptorSet desc_set);
+  bool should_touch_desc_set_cache_lru() const;
   size_t descriptor_set_cache_hits() const {
     return desc_set_cache_hits_;
   }
@@ -887,8 +894,15 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
                 VulkanResourceSet::SetLayoutHasher,
                 VulkanResourceSet::SetLayoutCmp>
       desc_set_layouts_;
+
+  struct CachedDescriptorSet {
+    vkapi::IVkDescriptorSet set{nullptr};
+    std::list<VulkanResourceSet>::iterator lru_it;
+    bool has_lru_entry{false};
+  };
+
   unordered_map<VulkanResourceSet,
-                vkapi::IVkDescriptorSet,
+                CachedDescriptorSet,
                 VulkanResourceSet::DescSetHasher,
                 VulkanResourceSet::SetCmp>
       desc_set_cache_;

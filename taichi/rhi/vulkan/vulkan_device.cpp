@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -2549,17 +2550,18 @@ vkapi::IVkDescriptorSet VulkanDevice::find_cached_desc_set(
     return nullptr;
   }
   ++desc_set_cache_hits_;
-  if (descriptor_set_cache_lru_) {
-    for (auto lit = desc_set_cache_lru_.begin();
-         lit != desc_set_cache_lru_.end(); ++lit) {
-      if (VulkanResourceSet::SetCmp()(*lit, set)) {
-        desc_set_cache_lru_.erase(lit);
-        break;
-      }
+  if (should_touch_desc_set_cache_lru()) {
+    auto &entry = it->second;
+    if (entry.has_lru_entry) {
+      desc_set_cache_lru_.splice(desc_set_cache_lru_.end(),
+                                 desc_set_cache_lru_, entry.lru_it);
+    } else {
+      desc_set_cache_lru_.push_back(it->first);
+      entry.lru_it = std::prev(desc_set_cache_lru_.end());
+      entry.has_lru_entry = true;
     }
-    desc_set_cache_lru_.push_back(set);
   }
-  return it->second;
+  return it->second.set;
 }
 
 void VulkanDevice::cache_desc_set(const VulkanResourceSet &set,
@@ -2567,16 +2569,19 @@ void VulkanDevice::cache_desc_set(const VulkanResourceSet &set,
   if (!descriptor_set_cache_enabled_ || !desc_set) {
     return;
   }
-  if (desc_set_cache_.find(set) != desc_set_cache_.end()) {
-    if (descriptor_set_cache_lru_) {
-      for (auto lit = desc_set_cache_lru_.begin();
-           lit != desc_set_cache_lru_.end(); ++lit) {
-        if (VulkanResourceSet::SetCmp()(*lit, set)) {
-          desc_set_cache_lru_.erase(lit);
-          break;
-        }
+  auto existing = desc_set_cache_.find(set);
+  if (existing != desc_set_cache_.end()) {
+    existing->second.set = desc_set;
+    if (should_touch_desc_set_cache_lru()) {
+      auto &entry = existing->second;
+      if (entry.has_lru_entry) {
+        desc_set_cache_lru_.splice(desc_set_cache_lru_.end(),
+                                   desc_set_cache_lru_, entry.lru_it);
+      } else {
+        desc_set_cache_lru_.push_back(existing->first);
+        entry.lru_it = std::prev(desc_set_cache_lru_.end());
+        entry.has_lru_entry = true;
       }
-      desc_set_cache_lru_.push_back(set);
     }
     return;
   }
@@ -2601,10 +2606,22 @@ void VulkanDevice::cache_desc_set(const VulkanResourceSet &set,
       desc_set_cache_lru_.clear();
     }
   }
-  desc_set_cache_.emplace(set, desc_set);
+  auto [inserted, _] = desc_set_cache_.emplace(set, CachedDescriptorSet{});
+  inserted->second.set = desc_set;
   if (descriptor_set_cache_lru_) {
-    desc_set_cache_lru_.push_back(set);
+    desc_set_cache_lru_.push_back(inserted->first);
+    inserted->second.lru_it = std::prev(desc_set_cache_lru_.end());
+    inserted->second.has_lru_entry = true;
   }
+}
+
+bool VulkanDevice::should_touch_desc_set_cache_lru() const {
+  if (!descriptor_set_cache_lru_) {
+    return false;
+  }
+  const size_t touch_threshold =
+      std::max<size_t>(size_t{1}, desc_set_cache_capacity_ * 3u / 4u);
+  return desc_set_cache_.size() >= touch_threshold;
 }
 
 RhiReturn<vkapi::IVkDescriptorSet> VulkanDevice::alloc_desc_set(

@@ -5567,10 +5567,11 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
     std::vector<uint32_t> optimized_spv(task_res.spirv_code);
     bool opt_run = false;
     bool opt_ok = true;
-    auto opt_begin = std::chrono::steady_clock::now();
+    double opt_us = 0.0;
 
     if (params_.spv_opt_level > 0) {
       opt_run = true;
+      auto opt_begin = std::chrono::steady_clock::now();
       spvtools::Optimizer *opt = nullptr;
       spvtools::SpirvTools *tools = nullptr;
       get_thread_local_opt(target_env_, params_.spv_opt_level,
@@ -5578,39 +5579,40 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
                            params_.disabled_passes, &opt, &tools);
       opt_ok = opt->Run(optimized_spv.data(), optimized_spv.size(),
                         &optimized_spv, spirv_opt_options_);
+      if (params_.vulkan_spv_stats) {
+        opt_us = std::chrono::duration<double, std::micro>(
+                     std::chrono::steady_clock::now() - opt_begin)
+                     .count();
+      }
       TI_WARN_IF(!opt_ok, "SPIRV optimization failed");
     }
-    const double opt_us =
-        std::chrono::duration<double, std::micro>(
-            std::chrono::steady_clock::now() - opt_begin)
-            .count();
 
     TI_TRACE("SPIRV-Tools-opt: binary size, before={}, after={}",
              task_res.spirv_code.size(), optimized_spv.size());
 
     if (params_.vulkan_spv_stats) {
-    outs[i].has_spv_stats = true;
-    auto &stats = outs[i].spv_stats;
-    stats.kernel_name = params_.ti_kernel_name;
-    stats.task_id = i;
-    stats.task_name = tp.ti_kernel_name;
-    stats.task_type = offloaded_task_type_name(tp.task_ir->task_type);
-    stats.snode_id = tp.task_ir->snode ? tp.task_ir->snode->id : -1;
-    stats.listgen_related =
+      outs[i].has_spv_stats = true;
+      auto &stats = outs[i].spv_stats;
+      stats.kernel_name = params_.ti_kernel_name;
+      stats.task_id = i;
+      stats.task_name = tp.ti_kernel_name;
+      stats.task_type = offloaded_task_type_name(tp.task_ir->task_type);
+      stats.snode_id = tp.task_ir->snode ? tp.task_ir->snode->id : -1;
+      stats.listgen_related =
           tp.task_ir->task_type == OffloadedTaskType::listgen ||
           task_res.task_attribs.sparse_list_op ==
               TaskAttributes::kSparseListOpListgen;
-    stats.pointer_related =
+      stats.pointer_related =
           snode_chain_contains_pointer(tp.task_ir->snode) ||
           has_node_allocator_pool_bind(task_res.task_attribs);
-    stats.sparse_related =
-      stats.listgen_related || stats.pointer_related ||
-      snode_chain_contains_sparse(tp.task_ir->snode);
-    stats.opt_run = opt_run;
-    stats.opt_ok = opt_ok;
-    stats.before_words = task_res.spirv_code.size();
-    stats.after_words = optimized_spv.size();
-    stats.opt_us = opt_us;
+      stats.sparse_related =
+          stats.listgen_related || stats.pointer_related ||
+          snode_chain_contains_sparse(tp.task_ir->snode);
+      stats.opt_run = opt_run;
+      stats.opt_ok = opt_ok;
+      stats.before_words = task_res.spirv_code.size();
+      stats.after_words = optimized_spv.size();
+      stats.opt_us = opt_us;
     }
 
     outs[i].spv = std::move(optimized_spv);
@@ -5656,6 +5658,9 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
     last_run_stats_.clear();
     const int capacity = std::max(0, params_.vulkan_spv_stats_capacity);
     last_run_stats_.reserve(std::min(n, capacity));
+    const std::string skipped_passes =
+        skipped_passes_summary(params_.spv_opt_level, params_.skip_loop_unroll,
+                               params_.disabled_passes);
     for (int i = 0; i < n; ++i) {
       if (!outs[i].has_spv_stats) {
         continue;
@@ -5668,9 +5673,7 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
         continue;
       }
       SpvStats retained = s;
-      retained.skipped_passes = skipped_passes_summary(
-          params_.spv_opt_level, params_.skip_loop_unroll,
-          params_.disabled_passes);
+      retained.skipped_passes = skipped_passes;
       last_run_stats_.push_back(std::move(retained));
     }
     publish_last_spv_stats(last_run_stats_);
