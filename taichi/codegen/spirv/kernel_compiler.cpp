@@ -66,6 +66,11 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   params.skip_loop_unroll = compile_config.spirv_skip_loop_unroll;
   // B2: user-facing fine-grained pass disable list. Empty by default.
   params.disabled_passes = compile_config.spirv_disabled_passes;
+  // G-6: opt-in task-level optimizer skip for listgen / clear-list / small
+  // SPIR-V tasks. Default false preserves the global pass chain.
+  params.spirv_adaptive_opt = compile_config.spirv_adaptive_opt;
+  params.spirv_adaptive_opt_threshold =
+      compile_config.spirv_adaptive_opt_threshold;
   // V8.b: anti-double-pool — when the surrounding compile_kernels outer
   // pool is active, suppress this inner per-task fan-out.
   params.compile_dag_scheduler = compile_config.compile_dag_scheduler;

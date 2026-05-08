@@ -5399,6 +5399,21 @@ std::string skipped_passes_summary(int spv_opt_level,
   return fmt::format("[{}]", fmt::join(skipped, ","));
 }
 
+std::string task_skipped_passes_summary(
+    int requested_spv_opt_level,
+    int effective_spv_opt_level,
+    bool adaptive_quick,
+    bool skip_loop_unroll,
+    const std::vector<std::string> &passes) {
+  auto summary = skipped_passes_summary(effective_spv_opt_level,
+                                        skip_loop_unroll, passes);
+  if (!adaptive_quick) {
+    return summary;
+  }
+  return fmt::format("adaptive_quick({}->{}, {})", requested_spv_opt_level,
+                     effective_spv_opt_level, summary);
+}
+
 bool snode_chain_contains_pointer(const SNode *snode) {
   for (auto *sn = snode; sn != nullptr; sn = sn->parent) {
     if (sn->type == SNodeType::pointer) {
@@ -5425,6 +5440,17 @@ bool has_node_allocator_pool_bind(const TaskAttributes &attribs) {
     }
   }
   return false;
+}
+
+bool should_use_adaptive_quick_opt(const OffloadedStmt *stmt,
+                                   std::size_t spirv_words,
+                                   int threshold_words) {
+  if (stmt->task_type == OffloadedTaskType::listgen ||
+      is_clear_list_task(stmt)) {
+    return true;
+  }
+  return threshold_words > 0 &&
+         spirv_words <= static_cast<std::size_t>(threshold_words);
 }
 
 void get_thread_local_opt(spv_target_env target_env,
@@ -5565,16 +5591,24 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
     auto task_res = cgen.run();
 
     std::vector<uint32_t> optimized_spv(task_res.spirv_code);
+    int task_spv_opt_level = params_.spv_opt_level;
+    bool adaptive_quick = false;
+    if (params_.spirv_adaptive_opt && task_spv_opt_level > 1 &&
+        should_use_adaptive_quick_opt(tp.task_ir, task_res.spirv_code.size(),
+                                      params_.spirv_adaptive_opt_threshold)) {
+      task_spv_opt_level = 0;
+      adaptive_quick = true;
+    }
     bool opt_run = false;
     bool opt_ok = true;
     double opt_us = 0.0;
 
-    if (params_.spv_opt_level > 0) {
+    if (task_spv_opt_level > 0) {
       opt_run = true;
       auto opt_begin = std::chrono::steady_clock::now();
       spvtools::Optimizer *opt = nullptr;
       spvtools::SpirvTools *tools = nullptr;
-      get_thread_local_opt(target_env_, params_.spv_opt_level,
+      get_thread_local_opt(target_env_, task_spv_opt_level,
                            params_.skip_loop_unroll,
                            params_.disabled_passes, &opt, &tools);
       opt_ok = opt->Run(optimized_spv.data(), optimized_spv.size(),
@@ -5613,6 +5647,9 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
       stats.before_words = task_res.spirv_code.size();
       stats.after_words = optimized_spv.size();
       stats.opt_us = opt_us;
+      stats.skipped_passes = task_skipped_passes_summary(
+          params_.spv_opt_level, task_spv_opt_level, adaptive_quick,
+          params_.skip_loop_unroll, params_.disabled_passes);
     }
 
     outs[i].spv = std::move(optimized_spv);
@@ -5658,9 +5695,6 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
     last_run_stats_.clear();
     const int capacity = std::max(0, params_.vulkan_spv_stats_capacity);
     last_run_stats_.reserve(std::min(n, capacity));
-    const std::string skipped_passes =
-        skipped_passes_summary(params_.spv_opt_level, params_.skip_loop_unroll,
-                               params_.disabled_passes);
     for (int i = 0; i < n; ++i) {
       if (!outs[i].has_spv_stats) {
         continue;
@@ -5673,7 +5707,11 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
         continue;
       }
       SpvStats retained = s;
-      retained.skipped_passes = skipped_passes;
+      if (retained.skipped_passes.empty()) {
+        retained.skipped_passes = skipped_passes_summary(
+            params_.spv_opt_level, params_.skip_loop_unroll,
+            params_.disabled_passes);
+      }
       last_run_stats_.push_back(std::move(retained));
     }
     publish_last_spv_stats(last_run_stats_);

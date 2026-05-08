@@ -34,6 +34,10 @@ CompileConfig::CompileConfig() {
   // CS-3 / VS-3.
   cuda_listgen_reuse_adaptive = false;
   vulkan_listgen_reuse_adaptive = false;
+  // G-6: SPIR-V adaptive optimizer is opt-in; default keeps the existing
+  // global pass chain byte-identical.
+  spirv_adaptive_opt = false;
+  spirv_adaptive_opt_threshold = 64;
   // VS-4: default OFF; opt-in diagnostics via ti.init(vulkan_spv_stats=True).
   vulkan_spv_stats = false;
   vulkan_spv_stats_filter = "sparse";

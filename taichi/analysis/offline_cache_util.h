@@ -62,7 +62,10 @@ class Kernel;
 //       conservative read/write access metadata for deferred dispatch barrier
 //       coalescing. Old cached Vulkan kernels lack access bits, so force a
 //       miss and recompile before runtime consumes this metadata.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 7;
+//   8 - G-6 (2026-05). SPIR-V adaptive optimizer config was added to the
+//       offline-cache key because it changes the per-task optimizer pass chain
+//       and therefore emitted SPIR-V bytes.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 8;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key(const CompileConfig &config,

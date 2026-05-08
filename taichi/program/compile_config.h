@@ -118,6 +118,16 @@ struct CompileConfig {
   // segregated in the offline cache (added to the cache key in
   // taichi/analysis/offline_cache_util.cpp).
   std::vector<std::string> spirv_disabled_passes;
+  // G-6 (2026-05): opt-in task-level SPIR-V optimizer quick chain. When true,
+  // listgen / clear-list / very small SPIR-V tasks skip spvtools Optimizer::Run
+  // (effective optimizer level 0) instead of using the global level-3 chain.
+  // Default false keeps emitted SPIR-V byte-identical to the
+  // current global pass chain. Threshold is measured in pre-optimization
+  // SPIR-V words; <=0 disables size-based quick mode but still quickens
+  // listgen / clear-list tasks. Affects emitted SPIR-V and is part of the
+  // offline cache key.
+  bool spirv_adaptive_opt{false};
+  int spirv_adaptive_opt_threshold{64};
   // V7 (2026-04-26): anti double-pool oversubscription in the batched
   // Program::compile_kernels path. The outer ParallelExecutor already
   // saturates `num_compile_threads` worker threads with kernel-level tasks;

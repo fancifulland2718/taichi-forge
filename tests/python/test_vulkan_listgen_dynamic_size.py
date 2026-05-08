@@ -11,6 +11,8 @@ def test_g4_listgen_reuse_adaptive_defaults_off():
     cfg = _ti_core.CompileConfig()
     assert cfg.cuda_listgen_reuse_adaptive is False
     assert cfg.vulkan_listgen_reuse_adaptive is False
+    assert cfg.spirv_adaptive_opt is False
+    assert cfg.spirv_adaptive_opt_threshold == 64
 
 
 @test_utils.test(
@@ -324,6 +326,43 @@ def test_vulkan_spv_stats_structured_output(tmp_path, capfd, monkeypatch):
         ]
     finally:
         ti.reset()
+
+
+@test_utils.test(
+    arch=ti.vulkan,
+    vulkan_sparse_experimental=True,
+    vulkan_spv_stats=True,
+    vulkan_spv_stats_filter="all",
+    spirv_adaptive_opt=True,
+    spirv_adaptive_opt_threshold=100000,
+    offline_cache=False,
+)
+def test_vulkan_spirv_adaptive_opt_stats_smoke():
+    n = 512
+    x = ti.field(ti.i32)
+    ti.root.bitmasked(ti.i, n).place(x)
+
+    @ti.kernel
+    def fill():
+        for i in range(n):
+            if i % 19 == 7:
+                x[i] = i + 5
+
+    @ti.kernel
+    def sum_x() -> ti.i64:
+        acc = ti.cast(0, ti.i64)
+        for i in x:
+            acc += x[i]
+        return acc
+
+    fill()
+    assert sum_x() == sum(i + 5 for i in range(n) if i % 19 == 7)
+
+    stats = ti.lang.runtime_ops.get_last_spv_stats()
+    assert stats
+    adaptive = [item for item in stats if "adaptive_quick" in item["skipped_passes"]]
+    assert adaptive
+    assert any(item["is_listgen"] for item in adaptive)
 
 
 @test_utils.test(

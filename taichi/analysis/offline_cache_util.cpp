@@ -107,6 +107,10 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
     std::sort(sorted_disabled.begin(), sorted_disabled.end());
     serializer(sorted_disabled);
   }
+  // G-6 (2026-05): task-level SPIR-V adaptive optimizer changes emitted
+  // SPIR-V per task, so ON/OFF and threshold changes must not share cache.
+  serializer(config.spirv_adaptive_opt);
+  serializer(config.spirv_adaptive_opt_threshold);
   // B-2.b (2026-05): the 4 vulkan_pointer_* runtime fields drive both
   // root-buffer layout and pointer-SNode SPIR-V codegen. They MUST be
   // part of the cache key, otherwise toggling vulkan_pointer_ambient_zone

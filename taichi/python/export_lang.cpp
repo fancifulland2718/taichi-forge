@@ -183,6 +183,10 @@ void export_lang(py::module &m) {
                      &CompileConfig::vulkan_quant_experimental)
       .def_readwrite("spirv_disabled_passes",
                      &CompileConfig::spirv_disabled_passes)
+      .def_readwrite("spirv_adaptive_opt",
+            &CompileConfig::spirv_adaptive_opt)
+      .def_readwrite("spirv_adaptive_opt_threshold",
+            &CompileConfig::spirv_adaptive_opt_threshold)
       .def_readwrite("compile_dag_scheduler",
                      &CompileConfig::compile_dag_scheduler)
       .def_readwrite("vulkan_pointer_freelist",

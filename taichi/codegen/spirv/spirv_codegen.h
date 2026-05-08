@@ -53,6 +53,12 @@ class KernelCodegen {
     // Optimizer instances. Empty list = full pass chain at the chosen
     // spv_opt_level (legacy behaviour, byte-identical SPIR-V).
     std::vector<std::string> disabled_passes;
+    // G-6 (2026-05): task-level optimizer skip. When enabled, selected listgen
+    // / clear-list / small SPIR-V tasks use optimizer level 0 while other tasks
+    // keep spv_opt_level. This only changes SPIR-V output when the user
+    // explicitly opts in.
+    bool spirv_adaptive_opt{false};
+    int spirv_adaptive_opt_threshold{64};
     // V8.b (2026-04-26): when true, the run() per-task fan-out checks
     // Program::in_compile_kernels_worker() and falls back to serial when
     // already inside an outer compile_kernels worker. Mirrors V7's LLVM
