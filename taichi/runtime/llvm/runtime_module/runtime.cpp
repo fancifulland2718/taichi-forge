@@ -1163,6 +1163,34 @@ void runtime_NodeAllocator_set_dedicated_pool(LLVMRuntime *runtime,
   runtime->node_allocators[snode_id]->set_dedicated_pool(ptr, size);
 }
 
+// CUDA auto-sized per-SNode pools are allocated per materialized sparse
+// SNodeTree. `runtime_memory_chunk` is rebound to the next tree's global
+// region when another sparse tree is materialized, so element lists from the
+// current tree must not keep allocating future chunks from that mutable global
+// runtime pointer. Snapshot the remaining global region into a stable chunk and
+// route this tree's element-list chunk allocations there.
+void runtime_element_lists_set_backing_pool(LLVMRuntime *runtime,
+                                            int root_id,
+                                            int num_snodes) {
+  if (runtime->runtime_memory_chunk.preallocated_size == 0) {
+    return;
+  }
+
+  auto backing = runtime->create<PreallocatedMemoryChunk>();
+  *backing = runtime->runtime_memory_chunk;
+  for (int i = root_id; i < root_id + num_snodes; i++) {
+    if (runtime->element_lists[i] != nullptr) {
+      runtime->element_lists[i]->backing_chunk = backing;
+    }
+  }
+
+  // Prevent accidental fallback allocations from overlapping with the
+  // tree-owned element-list region. The host will rebind runtime_memory_chunk
+  // before materializing the next CUDA sparse tree.
+  runtime->runtime_memory_chunk.preallocated_head =
+      runtime->runtime_memory_chunk.preallocated_tail;
+}
+
 void mutex_lock_i32(Ptr mutex) {
   while (atomic_exchange_i32((i32 *)mutex, 1) == 1)
     ;

@@ -653,7 +653,15 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
             global_region / 1048576.0, total_buffer / 1048576.0,
             snode_entries.size());
 
-        // Allocate one contiguous device buffer.
+        // Allocate one contiguous device buffer for this sparse SNodeTree.
+        // Multiple independent sparse trees can coexist in one CUDA Program;
+        // keep older tree pools alive because existing NodeManagers,
+        // element-list chunks, and deterministic pointer slots still point
+        // into them after runtime_memory_chunk is rebound for the new tree.
+        if (preallocated_runtime_memory_allocs_ != nullptr) {
+          per_snode_pool_allocs_.push_back(
+            std::move(preallocated_runtime_memory_allocs_));
+        }
         void *buf = preallocate_memory(
             total_buffer, preallocated_runtime_memory_allocs_);
         // Initialize runtime_memory_chunk to cover only the global region.
@@ -862,6 +870,16 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
                                      snode_id, node_size);
     }
   }
+
+  if (config_.arch == Arch::cuda && use_device_memory_pool() &&
+      config_.cuda_sparse_per_snode_pool &&
+      config_.cuda_sparse_pool_auto_size &&
+      config_.device_memory_fraction == 0 &&
+      config_.cuda_sparse_pool_size_GB == 0 && !all_dense) {
+    runtime_jit->call<void *, int, int>(
+        "runtime_element_lists_set_backing_pool", llvm_runtime_, root_id,
+        (int)snode_metas.size());
+  }
 }
 
 LlvmDevice *LlvmRuntimeExecutor::llvm_device() {
@@ -947,8 +965,8 @@ void LlvmRuntimeExecutor::finalize() {
   if (config_.arch == Arch::cuda || config_.arch == Arch::amdgpu) {
     preallocated_runtime_objects_allocs_.reset();
     preallocated_runtime_memory_allocs_.reset();
-    // Phase 1: per-SNode pool allocs share the same underlying buffer
-    // as preallocated_runtime_memory_allocs_; just clear the vector.
+    // Phase 1: extra CUDA sparse-tree pools retained so multiple independent
+    // sparse SNodeTrees can coexist safely.
     per_snode_pool_allocs_.clear();
 
     // Reset runtime memory
