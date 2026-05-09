@@ -1135,6 +1135,10 @@ Device *GfxRuntime::get_ti_device() const {
   return device_;
 }
 
+PipelineCache *GfxRuntime::get_backend_cache() const {
+  return backend_cache_.get();
+}
+
 // G-1: Try to take a buffer from free_pool_ matching (size, usage).
 // Returns nullptr if pool disabled or no match. Performs O(N) scan; pool
 // capacity is bounded (default 64) so this is acceptable.

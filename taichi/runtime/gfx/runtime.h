@@ -175,6 +175,8 @@ class TI_DLL_EXPORT GfxRuntime {
 
   Device *get_ti_device() const;
 
+  PipelineCache *get_backend_cache() const;
+
   void add_root_buffer(size_t root_buffer_size);
 
   void update_listgen_buffer_for_snode_tree(

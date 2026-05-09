@@ -1,4 +1,5 @@
 import pathlib
+import weakref
 
 import numpy
 from taichi_forge._kernels import (
@@ -17,6 +18,14 @@ from .scene import SceneV2
 from .constants import PRESS, RELEASE
 from .imgui import Gui
 from .utils import check_ggui_availability
+
+
+_active_windows = weakref.WeakSet()
+
+
+def _destroy_all_windows():
+    for window in tuple(_active_windows):
+        window.destroy()
 
 
 class Window:
@@ -45,6 +54,7 @@ class Window:
             package_path,
             ti_arch,
         )
+        _active_windows.add(self)
 
     @property
     def running(self):
@@ -196,4 +206,9 @@ class Window:
 
     def destroy(self):
         """Destroy this window. The window will be unavailable then."""
-        return self.window.destroy()
+        if self.window is None:
+            return None
+        window = self.window
+        self.window = None
+        _active_windows.discard(self)
+        return window.destroy()

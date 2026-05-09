@@ -53,6 +53,9 @@ void Window::show() {
   }
   present_frame();
   WindowBase::show();
+  if (!is_running()) {
+    return;
+  }
   prepare_for_next_frame();
 }
 
@@ -129,6 +132,9 @@ void Window::present_frame() {
 }
 
 Window::~Window() {
+  if (renderer_) {
+    renderer_->app_context().device().wait_idle();
+  }
   gui_.reset();
   renderer_.reset();
 }

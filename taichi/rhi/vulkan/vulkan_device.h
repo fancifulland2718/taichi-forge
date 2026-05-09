@@ -417,6 +417,7 @@ class VulkanPipeline : public Pipeline {
   std::vector<VkShaderModule> shader_modules_;
   vkapi::IVkPipeline pipeline_{VK_NULL_HANDLE};
   vkapi::IVkPipelineLayout pipeline_layout_{VK_NULL_HANDLE};
+  vkapi::IVkPipelineCache cache_{nullptr};
 };
 
 class VulkanCommandList : public CommandList {
@@ -649,6 +650,8 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
                             const PipelineSourceDesc &src,
                             std::string name,
                             PipelineCache *cache) noexcept final;
+
+  void set_default_pipeline_cache(PipelineCache *cache) noexcept;
 
   RhiResult allocate_memory(const AllocParams &params,
                             DeviceAllocation *out_devalloc) override;
@@ -924,6 +927,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   vkapi::IVkDescriptorPool desc_pool_{nullptr};
   bool descriptor_set_cache_enabled_{false};
   vkapi::IVkSampler default_sampler_{nullptr};
+  PipelineCache *default_pipeline_cache_{nullptr};
 
   // Internal implementaion functions
   inline static AllocationInternal &get_alloc_internal(

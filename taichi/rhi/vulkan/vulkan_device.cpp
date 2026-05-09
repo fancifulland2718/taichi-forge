@@ -174,7 +174,8 @@ size_t VulkanPipelineCache::size() const noexcept {
 VulkanPipeline::VulkanPipeline(const Params &params)
     : ti_device_(*params.device),
       device_(params.device->vk_device()),
-      name_(params.name) {
+      name_(params.name),
+      cache_(params.cache) {
   create_descriptor_set_layout(params);
   create_shader_stages(params);
   create_pipeline_layout();
@@ -193,7 +194,8 @@ VulkanPipeline::VulkanPipeline(
     const std::vector<VertexInputAttribute> &vertex_attrs)
     : ti_device_(*params.device),
       device_(params.device->vk_device()),
-      name_(params.name) {
+      name_(params.name),
+      cache_(params.cache) {
   this->graphics_pipeline_template_ =
       std::make_unique<GraphicsPipelineTemplate>();
 
@@ -234,7 +236,7 @@ vkapi::IVkPipeline VulkanPipeline::graphics_pipeline(
 
   vkapi::IVkPipeline pipeline = vkapi::create_graphics_pipeline(
       device_, &graphics_pipeline_template_->pipeline_info, renderpass,
-      pipeline_layout_);
+      pipeline_layout_, cache_);
 
   graphics_pipeline_[renderpass] = pipeline;
 
@@ -265,7 +267,7 @@ vkapi::IVkPipeline VulkanPipeline::graphics_pipeline_dynamic(
 
   vkapi::IVkPipeline pipeline = vkapi::create_graphics_pipeline_dynamic(
       device_, &graphics_pipeline_template_->pipeline_info, &rendering_info,
-      pipeline_layout_);
+      pipeline_layout_, cache_);
 
   graphics_pipeline_dynamic_[renderpass_desc] = pipeline;
 
@@ -1731,6 +1733,10 @@ RhiResult VulkanDevice::create_pipeline(Pipeline **out_pipeline,
   return RhiResult::success;
 }
 
+void VulkanDevice::set_default_pipeline_cache(PipelineCache *cache) noexcept {
+  default_pipeline_cache_ = cache;
+}
+
 RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
                                         DeviceAllocation *out_devalloc) {
   AllocationInternal &alloc = allocations_.acquire();
@@ -2165,6 +2171,10 @@ std::unique_ptr<Pipeline> VulkanDevice::create_raster_pipeline(
   params.code = {};
   params.device = this;
   params.name = name;
+  params.cache = default_pipeline_cache_
+                     ? static_cast<VulkanPipelineCache *>(
+                           default_pipeline_cache_)->vk_pipeline_cache()
+                     : nullptr;
 
   for (auto &src_desc : src) {
     SpirvCodeView &code = params.code.emplace_back();

@@ -2,6 +2,7 @@ import atexit
 import json
 import numbers
 import os
+import sys
 from types import FunctionType, MethodType
 from typing import Any, Iterable, Sequence
 
@@ -566,6 +567,9 @@ def reset():
     global pytaichi
     old_kernels = pytaichi.kernels
     _dump_func_expansion_stats(pytaichi)
+    window_module = sys.modules.get("taichi_forge.ui.window")
+    if window_module is not None:
+        window_module._destroy_all_windows()
     pytaichi.clear()
     pytaichi = PyTaichi(old_kernels)
     for k in old_kernels:

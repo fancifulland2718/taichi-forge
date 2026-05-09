@@ -217,11 +217,6 @@ void Gui::draw(taichi::lang::CommandList *cmd_list) {
 }
 
 void Gui::cleanup_render_resources() {
-  vkDestroyDescriptorPool(
-      static_cast<taichi::lang::vulkan::VulkanDevice &>(app_context_->device())
-          .vk_device(),
-      descriptor_pool_, nullptr);
-
   if (initialized()) {
     ImGui_ImplVulkan_Shutdown();
   }
@@ -229,6 +224,7 @@ void Gui::cleanup_render_resources() {
 }
 
 Gui::~Gui() {
+  cleanup_render_resources();
   if (app_context_->config.show_window) {
 #ifdef ANDROID
     ImGui_ImplAndroid_Shutdown();
@@ -236,7 +232,13 @@ Gui::~Gui() {
     ImGui_ImplGlfw_Shutdown();
 #endif
   }
-  cleanup_render_resources();
+  if (descriptor_pool_ != VK_NULL_HANDLE) {
+    vkDestroyDescriptorPool(
+        static_cast<taichi::lang::vulkan::VulkanDevice &>(app_context_->device())
+            .vk_device(),
+        descriptor_pool_, nullptr);
+    descriptor_pool_ = VK_NULL_HANDLE;
+  }
   ImGui::DestroyContext(imgui_context_);
 }
 

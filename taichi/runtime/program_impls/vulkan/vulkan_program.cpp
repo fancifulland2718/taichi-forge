@@ -162,6 +162,8 @@ void VulkanProgramImpl::materialize_runtime(KernelProfilerBase *profiler,
   params.cmdlist_max_dispatches = config->gfx_cmdlist_max_dispatches;
   params.debug = config->debug;
   runtime_ = std::make_unique<gfx::GfxRuntime>(std::move(params));
+  embedded_device_->device()->set_default_pipeline_cache(
+      runtime_->get_backend_cache());
   snode_tree_mgr_ = std::make_unique<gfx::SNodeTreeManager>(runtime_.get());
 }
 
