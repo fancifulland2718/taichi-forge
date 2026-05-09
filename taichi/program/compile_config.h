@@ -33,24 +33,6 @@ struct CompileConfig {
   //              a few more redundant stmts.
   // Included in the offline-cache key.
   std::string compile_tier{"balanced"};
-  // P-Compile-1 phase 1: short-circuit consecutive full_simplify /
-  // type_check calls in compile_to_offloads.cpp when no IR-mutating pass
-  // has run since the previous one. Default false → behavior is bit-
-  // identical to the pre-P-Compile-1 pipeline (including the existing
-  // P2.a `dirty_since_simplify_i` short-circuit, which is unconditional
-  // and orthogonal). When true and TI_DEBUG is set, a verifier sandwich
-  // re-runs the skipped pass and asserts it returns no-modification.
-  // Included in the offline-cache key.
-  bool use_fused_passes{false};
-  // P-Compile-1 phase 2-B: when use_fused_passes is true, every skip
-  // decision in compile_to_offloads.cpp is double-checked by re-running
-  // the would-be-skipped full_simplify and verifying it returns false
-  // (no IR change). On mismatch the pipeline emits an English warning
-  // and falls back to using the freshly-run (modified) IR, so a stale
-  // dirty-tracking decision can never produce a less-optimized kernel.
-  // Default false (zero overhead). Not part of the offline-cache key
-  // because it is a runtime safety knob, not a codegen toggle.
-  bool fused_pass_verify{false};
   // V2 (2026-04-26): when true, the SPIR-V backend's KernelCodegen::run
   // dispatches per-task TaskCodegen + spvtools::Optimizer::Run on parallel
   // worker threads (cap = num_compile_threads). Each worker fetches its own
@@ -368,9 +350,9 @@ struct CompileConfig {
   // refs, so no fence wait is required for descriptor-cache eviction itself.
   int vulkan_dispatch_cache_size{1024};
   bool vulkan_descriptor_cache_lru{true};
-  // Optional VS-2 subpath: shrink listgen count-slot barrier to 4 bytes while
-  // keeping legacy global dispatch barriers. Default OFF until broader matrix
-  // data proves stable runtime benefit.
+  // Deprecated no-op compatibility field. The standalone listgen-only barrier
+  // subpath was redundant with vulkan_dispatch_cache; dispatch_cache still uses
+  // the narrow count-slot barrier internally, while this field is ignored.
   bool vulkan_listgen_lite_barrier{false};
   // VS-3 (2026-05): Vulkan listgen host-side reuse. When true,
   // SPIR-V task metadata records sparse list SNode ids and topology mutation
@@ -513,9 +495,9 @@ struct CompileConfig {
   int num_compile_threads{4};
   std::string vk_api_version;
 
-  // R2.a: Vulkan launch args/ret buffer pool. Default OFF (vanilla behavior).
-  // Only effective on gfx backends (vulkan/opengl/metal/dx). Buffers are
-  // recycled across `synchronize()` boundaries; capacity bounded.
+  // Deprecated no-op compatibility fields. The old standalone Vulkan launch
+  // args/ret buffer pool had near-zero measured ROI and is superseded by the
+  // fence-safe gfx_ctx_buffer_ring path used by dispatch_cache.
   bool vulkan_launch_buffer_pool{false};
   int vulkan_launch_buffer_pool_capacity{64};
   // G-1 (2026-05): GFX ctx args/ret buffer ring. Default OFF. ON keeps a

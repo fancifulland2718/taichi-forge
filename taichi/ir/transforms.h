@@ -40,24 +40,18 @@ namespace irpass {
 //               removed, replaced, or mutated).
 //
 // This contract is depended on by:
-//   * driver-level dirty tracking in compile_to_offloads.cpp
-//     (`pipeline_dirty`, P-Compile-1 phase 1) — used to skip downstream
-//     `full_simplify` calls when the pipeline is provably clean;
-//   * the `g_full_simplify_run` / `g_full_simplify_skipped` /
-//     `g_fs_entries` / `g_fs_noop` / `g_fs_iters` profiling counters
+//   * the `g_fs_entries` / `g_fs_noop` / `g_fs_iters` profiling counters
 //     (P-Compile-1 phase 2-A, exposed via pybind as
-//     `_ti_core.get_full_simplify_stats` / `_ti_core.get_fs_inner_stats`);
+//     `_ti_core.get_fs_inner_stats`);
 //   * the outer-loop convergence check in `simplify.cpp::full_simplify`
-//     (`if (!modified) break;`);
-//   * the future debug verifier sandwich (`CompileConfig::fused_pass_verify`,
-//     planned for phase 2-B onward).
+//     (`if (!modified) break;`).
 //
 // **Any future short-circuit / early-exit path inside these passes MUST
 // preserve the contract**: the returned bool must be bit-identical to what
 // the full path would return. A pass that early-exits with `return false`
 // while skipping work that would have set the bool to `true` is a
-// correctness bug — it lies to driver-level dirty tracking, breaks
-// profiling, and lets downstream passes operate on stale IR. Reordering
+// correctness bug — it breaks profiling and the outer full_simplify
+// convergence signal. Reordering
 // sub-passes inside a multi-pass driver (such as full_simplify) is only
 // safe if convergence is preserved AND the final returned bool still
 // reflects "did anything change".
@@ -86,10 +80,8 @@ bool unreachable_code_elimination(IRNode *root);
 bool loop_invariant_code_motion(IRNode *root, const CompileConfig &config);
 bool cache_loop_invariant_global_vars(IRNode *root,
                                       const CompileConfig &config);
-// Returns true iff any inner pass actually mutated the IR. Callers may use
-// this together with `CompileConfig::use_fused_passes` to short-circuit
-// subsequent full_simplify / type_check calls when no IR-mutating pass has
-// run since (P-Compile-1 phase 1).
+// Returns true iff any inner pass actually mutated the IR. Callers use this
+// as the outer-loop convergence/profiling signal.
 bool full_simplify(IRNode *root,
                    const CompileConfig &config,
                    const FullSimplifyPass::Args &args);
@@ -120,9 +112,8 @@ bool handle_external_ptr_boundary(IRNode *root, const CompileConfig &config);
 // P-Compile-1 phase 2-B / RP-1 (2026-04-28): the following passes return
 // `true` iff the IR was actually mutated in a way that may produce new
 // simplify candidates (alg_simp / whole_kernel_cse / LICM / cfg_optimization
-// /  die). When a pass is a no-op on the current IR, returning `false`
-// lets the driver-level `pipeline_dirty` flag stay clean and skip a
-// downstream full_simplify call site (gated by `use_fused_passes`).
+// / die). This remains useful for local conditional work such as type_check
+// and for profiling even though the old fused-pass skip driver is retired.
 bool make_thread_local(IRNode *root, const CompileConfig &config);
 std::unique_ptr<ScratchPads> initialize_scratch_pad(OffloadedStmt *root);
 bool make_block_local(IRNode *root,
@@ -193,8 +184,8 @@ bool replace_statements(IRNode *root,
                         std::function<bool(Stmt *)> filter,
                         std::function<Stmt *(Stmt *)> finder);
 // Returns true iff at least one struct-for was demoted to a range-for
-// (RP-1, 2026-04-28). Callers may use this to keep `pipeline_dirty` clean
-// when no demotion happened.
+// (RP-1, 2026-04-28). Callers may use this to avoid follow-up work when no
+// demotion happened.
 bool demote_dense_struct_fors(IRNode *root);
 void demote_no_access_mesh_fors(IRNode *root);
 bool demote_atomics(IRNode *root, const CompileConfig &config);
@@ -262,21 +253,12 @@ void compile_taichi_functions(IRNode *ir,
                               const CompileConfig &compile_config,
                               Function::IRStage target_stage);
 
-// P-Compile-1 phase 2-A profiling — counts how many `full_simplify` calls in
-// `offload_to_executable` actually ran versus were short-circuited by the
-// `pipeline_dirty` tracker. Counters are process-global and updated only by
-// the driver in compile_to_offloads.cpp. Use `reset_full_simplify_stats()`
-// before a benchmark, and `get_full_simplify_stats(run, skipped)` after.
-void get_full_simplify_stats(uint64_t *run, uint64_t *skipped);
-void reset_full_simplify_stats();
-
 // P-Compile-1 phase 2-A inner profiling — counts `full_simplify()` entries at
 // the function level (across ALL call sites in the codebase) and how many
 // returned `any_modified == false` (i.e. the IR was already at the simplify
 // fixed point on entry). Also tracks total outer-loop iterations consumed.
-// Used to drive the Phase 2-B go/no-go decision: if `noop_returns / entries`
-// is low, the dirty-tracker driver-level skip already captures the easy
-// wins and deeper internal pass fusion is the only remaining lever.
+// Used to drive pass-fusion go/no-go decisions: if `noop_returns / entries`
+// is low, deeper internal pass fusion is unlikely to pay for its risk.
 void get_fs_inner_stats(uint64_t *entries,
                         uint64_t *noop_returns,
                         uint64_t *total_iterations);

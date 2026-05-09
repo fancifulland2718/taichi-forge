@@ -341,15 +341,9 @@ ShaderResourceSet *CompiledTaichiKernel::get_cached_resource_set(int i) {
 GfxRuntime::GfxRuntime(const Params &params)
     : device_(params.device),
       profiler_(params.profiler),
-      buffer_pool_enabled_(params.enable_buffer_pool),
-      buffer_pool_capacity_(
-          params.buffer_pool_capacity > 0
-              ? static_cast<size_t>(params.buffer_pool_capacity)
-              : size_t{64}),
       listgen_dynamic_size_(params.listgen_dynamic_size),
       listgen_explicit_size_(params.listgen_buffer_MB > 0),
       dispatch_cache_(params.dispatch_cache),
-      listgen_lite_barrier_(params.listgen_lite_barrier),
       listgen_reuse_(params.listgen_reuse),
       listgen_reuse_adaptive_(params.listgen_reuse_adaptive),
       ctx_buffer_ring_enabled_(params.ctx_buffer_ring),
@@ -971,7 +965,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
               ti_kernel->get_buffer_bind(bind.buffer)->get_ptr(0),
               /*size=*/sizeof(uint32_t),
               /*data=*/0);
-          if (dispatch_cache_ || listgen_lite_barrier_) {
+          if (dispatch_cache_) {
             current_cmdlist_->buffer_barrier(
                 ti_kernel->get_buffer_bind(bind.buffer)->get_ptr(0),
                 sizeof(uint32_t));
@@ -1141,7 +1135,7 @@ Device *GfxRuntime::get_ti_device() const {
   return device_;
 }
 
-// R2.a: Try to take a buffer from free_pool_ matching (size, usage).
+// G-1: Try to take a buffer from free_pool_ matching (size, usage).
 // Returns nullptr if pool disabled or no match. Performs O(N) scan; pool
 // capacity is bounded (default 64) so this is acceptable.
 std::unique_ptr<DeviceAllocationGuard> GfxRuntime::try_take_pooled_buffer(
@@ -1154,16 +1148,14 @@ std::unique_ptr<DeviceAllocationGuard> GfxRuntime::try_take_pooled_buffer(
     if (it->size == size && it->usage == usage) {
       auto guard = std::move(it->guard);
       free_pool_.erase(it);
-      ++buffer_pool_hits_;
       return guard;
     }
   }
-  ++buffer_pool_misses_;
   return nullptr;
 }
 
 bool GfxRuntime::ctx_buffer_pool_enabled() const {
-  return buffer_pool_enabled_ || ctx_buffer_ring_enabled_;
+  return ctx_buffer_ring_enabled_;
 }
 
 size_t GfxRuntime::count_pooled_buffers(size_t size, AllocUsage usage) const {

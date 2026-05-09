@@ -36,11 +36,9 @@ class Kernel;
 // History:
 //   1 - initial schema (2026-04, baseline before P-Compile-2-A landed).
 //       Hash-equivalent to no schema versioning at all.
-//   2 - P-Compile-1 phase 1 (2026-04). Adds CompileConfig::use_fused_passes
-//       to the serialized key. With v>=2, a "tcs:N" schema tag is mixed
-//       into the hasher, so all v1 caches naturally miss once. New cache
-//       artifacts capture the use_fused_passes setting alongside other
-//       config bits.
+//   2 - P-Compile-1 phase 1 (2026-04). First schema bump after the P-Compile-1
+//       driver experiments. With v>=2, a "tcs:N" schema tag is mixed into the
+//       hasher, so all v1 caches naturally miss once.
 //   3 - CS-3.B/C (2026-05). LLVMRuntime listgen-reuse state changed from a
 //       scalar dirty epoch to per-SNode arrays and list-version dependencies.
 //       Old CUDA LLVM kernels embed LLVMRuntime field offsets, so reusing old
@@ -65,7 +63,13 @@ class Kernel;
 //   8 - G-6 (2026-05). SPIR-V adaptive optimizer config was added to the
 //       offline-cache key because it changes the per-task optimizer pass chain
 //       and therefore emitted SPIR-V bytes.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 8;
+//   9 - Flag cleanup (2026-05). Transient schema where use_fused_passes was
+//       removed from the cache key after the driver skip path became no-op.
+//  10 - Fused-pass removal (2026-05). Physically removes use_fused_passes /
+//       fused_pass_verify and their driver skip counters. Users should clear
+//       old taichi-forge caches when switching to this schema; schema tagging
+//       also prevents old .tic artifacts from being reused silently.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 10;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key(const CompileConfig &config,

@@ -145,12 +145,9 @@ void VulkanProgramImpl::materialize_runtime(KernelProfilerBase *profiler,
   gfx::GfxRuntime::Params params;
   params.device = embedded_device_->device();
   params.profiler = profiler;
-  params.enable_buffer_pool = config->vulkan_launch_buffer_pool;
-  params.buffer_pool_capacity = config->vulkan_launch_buffer_pool_capacity;
   params.listgen_dynamic_size = config->vulkan_listgen_dynamic_size;
   params.listgen_buffer_MB = config->vulkan_listgen_buffer_MB;
   params.dispatch_cache = config->vulkan_dispatch_cache;
-  params.listgen_lite_barrier = config->vulkan_listgen_lite_barrier;
   params.listgen_reuse = config->vulkan_listgen_reuse;
   params.listgen_reuse_adaptive = config->vulkan_listgen_reuse_adaptive;
   // VS-2.3/G-1.1: descriptor cache benefits from stable args/ret buffer

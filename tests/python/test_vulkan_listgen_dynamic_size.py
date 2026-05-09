@@ -50,7 +50,6 @@ def test_vulkan_listgen_dynamic_size_smoke():
     vulkan_dispatch_cache=True,
     vulkan_dispatch_cache_size=1,
     vulkan_descriptor_cache_lru=True,
-    vulkan_listgen_lite_barrier=True,
     gfx_ctx_buffer_ring=True,
     gfx_ctx_buffer_ring_size=1,
     offline_cache=False,

@@ -123,15 +123,11 @@ class TI_DLL_EXPORT GfxRuntime {
   struct Params {
     Device *device{nullptr};
     KernelProfilerBase *profiler{nullptr};
-    // R2.a: Vulkan launch args/ret buffer pool.
-    bool enable_buffer_pool{false};
-    int buffer_pool_capacity{64};
     // VS-1: Vulkan listgen scratch sizing. Defaults keep legacy 32 MiB.
     bool listgen_dynamic_size{false};
     int listgen_buffer_MB{0};
     // VS-2: opt-in descriptor cache plus deferred shader-buffer barriers.
     bool dispatch_cache{false};
-    bool listgen_lite_barrier{false};
     // VS-3: opt-in host-side current-list skip for Vulkan listgen tasks.
     bool listgen_reuse{false};
     // G-4: opt-in per-SNode adaptive downgrade for listgen reuse.
@@ -255,7 +251,6 @@ class TI_DLL_EXPORT GfxRuntime {
   size_t listgen_capacity_entries_{0};
   bool listgen_buffer_used_{false};
   bool dispatch_cache_{false};
-  bool listgen_lite_barrier_{false};
   bool listgen_reuse_{false};
   struct SparseListState {
     int64 dirty_epoch{0};
@@ -280,7 +275,7 @@ class TI_DLL_EXPORT GfxRuntime {
 
   std::vector<std::unique_ptr<DeviceAllocationGuard>> ctx_buffers_;
 
-  // R2.a: Vulkan launch args/ret buffer pool. Three-stage to be GPU-safe:
+  // G-1: ctx args/ret buffer ring. Three-stage to be GPU-safe:
   //   pending_pool_   : in-flight on current_cmdlist_ (recording)
   //   submitted_pool_ : submitted to stream, GPU may still be using; entries
   //                     carry an optional completion token when backend exposes
@@ -293,15 +288,12 @@ class TI_DLL_EXPORT GfxRuntime {
     AllocUsage usage{AllocUsage::None};
     StreamSemaphore completion;
   };
-  bool buffer_pool_enabled_{false};
   size_t buffer_pool_capacity_{64};
   bool ctx_buffer_ring_enabled_{false};
   size_t ctx_buffer_ring_size_{8};
   std::vector<PooledBuffer> pending_pool_;
   std::vector<PooledBuffer> submitted_pool_;
   std::vector<PooledBuffer> free_pool_;
-  size_t buffer_pool_hits_{0};
-  size_t buffer_pool_misses_{0};
 
   // Try to take a buffer from free_pool_ matching (size, usage). Returns
   // nullptr if pool disabled or no match.
