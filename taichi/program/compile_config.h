@@ -334,7 +334,7 @@ struct CompileConfig {
   // [count, idx...] listgen buffer from the materialized SNodeTree/listgen
   // task upper bound instead of preallocating 32 MiB for small sparse trees.
   // This is runtime-only; emitted SPIR-V is unchanged.
-  bool vulkan_listgen_dynamic_size{false};
+  bool vulkan_listgen_dynamic_size{true};
   // Explicit Vulkan listgen buffer size in MiB. 0 means no override. When set,
   // this is a hard cap: launch-time capacity checks report an error instead
   // of silently writing past the [count, idx...] buffer.
