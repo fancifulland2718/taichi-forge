@@ -226,6 +226,17 @@ class TI_DLL_EXPORT GfxRuntime {
   void mark_sparse_list_task_launched(const TaskAttributes &attribs);
   void invalidate_sparse_list_cache(int sparse_mutation_snode_id);
   void clear_sparse_list_cache_resident();
+  void register_hash_overflow_checks(
+      int root_id,
+      const CompiledSNodeStructs &compiled_structs);
+  void check_hash_overflow_counters();
+  void synchronize_impl(bool check_hash_overflow);
+
+  struct HashOverflowWatch {
+    int root_id{-1};
+    int snode_id{-1};
+    size_t byte_offset{0};
+  };
 
   Device *device_{nullptr};
   KernelProfilerBase *profiler_;
@@ -271,6 +282,8 @@ class TI_DLL_EXPORT GfxRuntime {
   std::unordered_map<int, std::unordered_set<int>> child_lists_by_parent_;
   int64 sparse_list_global_dirty_epoch_{0};
   int resident_sparse_list_snode_id_{-1};
+  std::vector<HashOverflowWatch> hash_overflow_watches_;
+  bool hash_overflow_error_reported_{false};
   bool pending_dispatch_global_barrier_{false};
   std::vector<DeviceAllocation> pending_dispatch_barrier_buffers_;
   std::unordered_set<DeviceAllocationId> pending_dispatch_barrier_buffer_ids_;

@@ -1,4 +1,5 @@
 #include "taichi/codegen/spirv/snode_struct_compiler.h"
+#include "taichi/ir/snode_hash_utils.h"
 #include "taichi/ir/type_factory.h"
 
 #include <algorithm>
@@ -449,6 +450,26 @@ class StructCompiler {
         // happens via the device allocator's clear_all() (Phase 2c hook).
         sn_desc.container_stride =
             sn_desc.snode->num_cells_per_container * 4;
+      } else if (sn->type == SNodeType::hash) {
+        TI_ERROR_IF(sn->parent == nullptr ||
+                        sn->parent->type != SNodeType::root,
+                    "Hash SNode is only supported as a direct child of root "
+                    "on Vulkan/SPIR-V.");
+        TI_ERROR_IF(cell_stride == 0 || cell_stride % 4 != 0,
+                    "Hash SNode on Vulkan requires a positive 4-byte aligned "
+                    "payload cell size, got {} bytes.",
+                    cell_stride);
+        const auto layout =
+            compute_hash_snode_flat_layout(*sn, cell_stride,
+                                           /*include_ambient_payload=*/true);
+        sn_desc.hash_table_capacity = layout.table_capacity;
+        sn_desc.hash_state_offset = layout.state_offset;
+        sn_desc.hash_key_offset = layout.key_offset;
+        sn_desc.hash_payload_offset = layout.payload_offset;
+        sn_desc.hash_active_count_offset = layout.active_count_offset;
+        sn_desc.hash_overflow_count_offset = layout.overflow_count_offset;
+        sn_desc.hash_ambient_offset = layout.ambient_offset;
+        sn_desc.container_stride = layout.container_stride;
       } else if (sn->type == SNodeType::dynamic) {
 #if defined(TI_VULKAN_DYNAMIC)
         // G4: append a u32 length counter at the end of each dynamic

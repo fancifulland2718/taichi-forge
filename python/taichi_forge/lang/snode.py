@@ -1,3 +1,4 @@
+import math
 import numbers
 import warnings
 
@@ -6,6 +7,101 @@ from taichi_forge.lang import expr, impl, matrix
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.field import BitpackedFields, Field
 from taichi_forge.lang.util import get_traceback
+
+
+def _hash_logical_elements(axes, dimensions):
+    try:
+        axis_count = len(axes)
+    except TypeError:
+        axis_count = 1
+        axes = [axes]
+    if isinstance(dimensions, numbers.Number):
+        dimensions = [dimensions] * axis_count
+    dimensions = list(dimensions)
+    if len(dimensions) != axis_count:
+        raise TaichiRuntimeError(
+            f"axes and dimensions must have the same size, got {axis_count} "
+            f"and {len(dimensions)}."
+        )
+
+    logical_elements = 1
+    for dim in dimensions:
+        if not isinstance(dim, numbers.Integral) or dim <= 0:
+            raise TaichiRuntimeError(
+                f"Every hash SNode dimension must be a positive integer, got {dim!r}."
+            )
+        logical_elements *= int(dim)
+    if logical_elements > 2**31 - 1:
+        raise TaichiRuntimeError(
+            "Hash SNode currently uses 32-bit flattened keys; "
+            f"got logical shape product {logical_elements} > 2**31-1."
+        )
+    return axes, dimensions, logical_elements
+
+
+def _select_hash_snode_capacity(
+    *,
+    logical_elements,
+    max_active=None,
+    expected_active=None,
+    capacity=None,
+    hash_load_factor=None,
+    default_load_factor=0.5,
+):
+    active_hints = [v is not None for v in (max_active, expected_active)]
+    if (sum(active_hints) + (capacity is not None)) != 1:
+        raise TaichiRuntimeError(
+            "Specify exactly one of expected_active, max_active, or capacity "
+            "for a hash SNode."
+        )
+
+    if capacity is not None:
+        if not isinstance(capacity, numbers.Integral) or capacity <= 0:
+            raise TaichiRuntimeError(
+                f"capacity must be a positive integer, got {capacity!r}."
+            )
+        raw_capacity = int(capacity)
+        active_hint = None
+        effective_load_factor = None
+    else:
+        active_hint = expected_active if expected_active is not None else max_active
+        hint_name = "expected_active" if expected_active is not None else "max_active"
+        if not isinstance(active_hint, numbers.Integral) or active_hint <= 0:
+            raise TaichiRuntimeError(
+                f"{hint_name} must be a positive integer, got {active_hint!r}."
+            )
+        if hash_load_factor is None:
+            hash_load_factor = default_load_factor
+        if not isinstance(hash_load_factor, numbers.Real):
+            raise TaichiRuntimeError(
+                f"hash_load_factor must be numeric, got {hash_load_factor!r}."
+            )
+        effective_load_factor = float(hash_load_factor)
+        if not (0 < effective_load_factor <= 1):
+            raise TaichiRuntimeError(
+                f"hash_load_factor must be in (0, 1], got {hash_load_factor!r}."
+            )
+        raw_capacity = int(math.ceil(int(active_hint) / effective_load_factor))
+
+    table_capacity = 1 << (raw_capacity - 1).bit_length()
+    if table_capacity > 2**31 - 1:
+        raise TaichiRuntimeError(
+            "Hash SNode table capacity must fit in 32-bit signed range, "
+            f"got {table_capacity}."
+        )
+    if capacity is not None and table_capacity != raw_capacity:
+        warnings.warn(
+            f"Hash SNode capacity {raw_capacity} is rounded up to "
+            f"{table_capacity} for power-of-two probing.",
+            stacklevel=3,
+        )
+    if active_hint is not None and int(active_hint) > logical_elements:
+        warnings.warn(
+            f"active hint {int(active_hint)} exceeds the logical domain "
+            f"size {logical_elements}; this is valid but wastes hash slots.",
+            stacklevel=3,
+        )
+    return table_capacity, effective_load_factor
 
 
 class SNode:
@@ -86,14 +182,67 @@ class SNode:
             )
         return SNode(self.ptr.pointer_with_hint(axes, dimensions, int(vk_max_active), dbg))
 
-    @staticmethod
-    def _hash(axes, dimensions):
-        # original code is #def hash(self,axes, dimensions) without #@staticmethod   before fix pylint R0201
-        """Not supported."""
-        raise RuntimeError("hash not yet supported")
-        # if isinstance(dimensions, int):
-        #     dimensions = [dimensions] * len(axes)
-        # return SNode(self.ptr.hash(axes, dimensions))
+    def hash(
+        self,
+        axes,
+        dimensions,
+        *,
+        max_active=None,
+        expected_active=None,
+        capacity=None,
+        hash_load_factor=None,
+    ):
+        """Adds an experimental hash SNode as a child component of `self`.
+
+        Args:
+            axes (List[Axis]): Axes to activate.
+            dimensions (Union[List[int], int]): Shape of each axis.
+            max_active (Optional[int]): Compatibility alias for
+                ``expected_active``. Prefer ``expected_active`` in new code.
+            expected_active (Optional[int]): Expected upper bound or
+                high-watermark estimate of active hash entries known before
+                SNodeTree materialization. The table capacity is derived from
+                this and ``hash_load_factor``.
+            capacity (Optional[int]): Explicit hash table slot count. Rounded
+                up to a power of two for open-addressing performance.
+            hash_load_factor (float): Target maximum load factor used with
+                ``expected_active`` / ``max_active``. Defaults to
+                ``ti.cfg.hash_snode_default_load_factor``.
+
+        Returns:
+            The added :class:`~taichi_forge.lang.SNode` instance.
+        """
+        cfg = impl.current_cfg()
+        if not getattr(cfg, "hash_snode_experimental", False):
+            raise TaichiRuntimeError(
+                "Hash SNode is experimental. Enable it with "
+                "ti.init(hash_snode_experimental=True)."
+            )
+        if cfg.arch not in (_ti_core.x64, _ti_core.arm64, _ti_core.cuda, _ti_core.vulkan):
+            raise TaichiRuntimeError(
+                "Hash SNode is currently implemented only on CPU, CUDA, and Vulkan backends."
+            )
+        if not _ti_core.is_extension_supported(cfg.arch, _ti_core.Extension.sparse):
+            raise TaichiRuntimeError("Hash SNode is not supported on this backend.")
+
+        axes, dimensions, logical_elements = _hash_logical_elements(axes, dimensions)
+        table_capacity, _ = _select_hash_snode_capacity(
+            logical_elements=logical_elements,
+            max_active=max_active,
+            expected_active=expected_active,
+            capacity=capacity,
+            hash_load_factor=hash_load_factor,
+            default_load_factor=getattr(cfg, "hash_snode_default_load_factor", 0.5),
+        )
+
+        return SNode(
+            self.ptr.hash_with_capacity(
+                axes, dimensions, int(table_capacity), _ti_core.DebugInfo(get_traceback())
+            )
+        )
+
+    def _hash(self, axes, dimensions, **kwargs):
+        return self.hash(axes, dimensions, **kwargs)
 
     def dynamic(self, axis, dimension, chunk_size=None):
         """Adds a dynamic SNode as a child component of `self`.
@@ -346,7 +495,7 @@ class SNode:
         ch = self._get_children()
         for c in ch:
             c.deactivate_all()
-        if self.ptr.type == SNodeType.pointer or self.ptr.type == SNodeType.bitmasked:
+        if self.ptr.type in (SNodeType.pointer, SNodeType.hash, SNodeType.bitmasked):
             from taichi_forge._kernels import snode_deactivate  # pylint: disable=C0415
 
             snode_deactivate(self)

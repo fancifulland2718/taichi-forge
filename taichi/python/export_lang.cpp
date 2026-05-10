@@ -176,6 +176,10 @@ void export_lang(py::module &m) {
                      &CompileConfig::vulkan_sparse_experimental)
       .def_readwrite("vulkan_quant_experimental",
                      &CompileConfig::vulkan_quant_experimental)
+      .def_readwrite("hash_snode_experimental",
+                     &CompileConfig::hash_snode_experimental)
+      .def_readwrite("hash_snode_default_load_factor",
+                     &CompileConfig::hash_snode_default_load_factor)
       .def_readwrite("spirv_disabled_passes",
                      &CompileConfig::spirv_disabled_passes)
       .def_readwrite("spirv_adaptive_opt",
@@ -681,6 +685,16 @@ void export_lang(py::module &m) {
                                const std::vector<int> &,
                                const DebugInfo &))(&SNode::hash),
            py::return_value_policy::reference)
+      .def(
+          "hash_with_capacity",
+          [](SNode &self, const std::vector<Axis> &axes,
+             const std::vector<int> &sizes, int64_t table_capacity,
+             const DebugInfo &dbg_info) -> SNode & {
+            SNode &child = self.hash(axes, sizes, dbg_info);
+            child.vk_max_active_hint = table_capacity;
+            return child;
+          },
+          py::return_value_policy::reference)
       .def("dynamic", &SNode::dynamic, py::return_value_policy::reference)
       .def("bitmasked",
            (SNode & (SNode::*)(const std::vector<Axis> &,

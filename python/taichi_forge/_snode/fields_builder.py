@@ -87,9 +87,30 @@ class FieldsBuilder:
         self.empty = False
         return self.root.pointer(indices, dimensions, vk_max_active=vk_max_active)
 
-    def _hash(self, indices, dimensions):
+    def hash(
+        self,
+        indices: Union[Sequence[_Axis], _Axis],
+        dimensions: Union[Sequence[int], int],
+        *,
+        max_active: Optional[int] = None,
+        expected_active: Optional[int] = None,
+        capacity: Optional[int] = None,
+        hash_load_factor: Optional[float] = None,
+    ):
         """Same as :func:`taichi_forge.lang.snode.SNode.hash`"""
-        raise NotImplementedError()
+        self._check_not_finalized()
+        self.empty = False
+        return self.root.hash(
+            indices,
+            dimensions,
+            max_active=max_active,
+            expected_active=expected_active,
+            capacity=capacity,
+            hash_load_factor=hash_load_factor,
+        )
+
+    def _hash(self, indices, dimensions, **kwargs):
+        return self.hash(indices, dimensions, **kwargs)
 
     def dynamic(
         self,

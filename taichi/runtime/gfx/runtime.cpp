@@ -244,6 +244,7 @@ bool snode_can_use_spirv_listgen(const SNode *snode) {
   return snode->type == SNodeType::dense ||
          snode->type == SNodeType::bitmasked ||
          snode->type == SNodeType::pointer ||
+         snode->type == SNodeType::hash ||
          snode->type == SNodeType::dynamic;
 }
 
@@ -252,7 +253,19 @@ size_t estimate_listgen_entries(const CompiledSNodeStructs &compiled_structs) {
   for (const auto &[sid, desc] : compiled_structs.snode_descriptors) {
     (void)sid;
     if (snode_can_use_spirv_listgen(desc.snode)) {
-      result = std::max(result, desc.total_num_cells_from_root);
+      size_t entries = desc.total_num_cells_from_root;
+      size_t suffix = 1;
+      for (auto *sn = desc.snode; sn != nullptr && sn->type != SNodeType::root;
+           sn = sn->parent) {
+        const auto it = compiled_structs.snode_descriptors.find(sn->id);
+        if (it != compiled_structs.snode_descriptors.end() &&
+            sn->type == SNodeType::hash && it->second.hash_table_capacity > 0) {
+          entries = it->second.hash_table_capacity * suffix;
+          break;
+        }
+        suffix *= static_cast<size_t>(sn->num_cells_per_container);
+      }
+      result = std::max(result, entries);
     }
   }
   return result;
@@ -391,7 +404,7 @@ GfxRuntime::GfxRuntime(const Params &params)
 }
 
 GfxRuntime::~GfxRuntime() {
-  synchronize();
+  synchronize_impl(/*check_hash_overflow=*/false);
 
   // Write pipeline cache back to disk.
   if (backend_cache_) {
@@ -591,6 +604,83 @@ void GfxRuntime::clear_sparse_list_cache_resident() {
   child_lists_by_parent_.clear();
   sparse_list_global_dirty_epoch_ = 0;
   resident_sparse_list_snode_id_ = -1;
+}
+
+void GfxRuntime::register_hash_overflow_checks(
+    int root_id,
+    const CompiledSNodeStructs &compiled_structs) {
+  for (const auto &[sid, desc] : compiled_structs.snode_descriptors) {
+    if (desc.snode == nullptr || desc.snode->type != SNodeType::hash ||
+        desc.hash_table_capacity == 0) {
+      continue;
+    }
+    size_t base_offset = 0;
+    for (const SNode *sn = desc.snode;
+         sn != nullptr && sn->type != SNodeType::root; sn = sn->parent) {
+      const auto it = compiled_structs.snode_descriptors.find(sn->id);
+      TI_ASSERT_INFO(it != compiled_structs.snode_descriptors.end(),
+                     "Hash SNode {} is missing from compiled descriptors",
+                     sn->id);
+      base_offset += it->second.mem_offset_in_parent_cell;
+    }
+    hash_overflow_watches_.push_back(
+        {root_id, sid, base_offset + desc.hash_overflow_count_offset});
+  }
+}
+
+void GfxRuntime::check_hash_overflow_counters() {
+  if (hash_overflow_error_reported_ || hash_overflow_watches_.empty()) {
+    return;
+  }
+
+  std::vector<DevicePtr> ptrs;
+  std::vector<uint32_t> values;
+  std::vector<void *> host_ptrs;
+  std::vector<size_t> sizes;
+  std::vector<HashOverflowWatch> live_watches;
+  ptrs.reserve(hash_overflow_watches_.size());
+  values.resize(hash_overflow_watches_.size());
+  host_ptrs.reserve(hash_overflow_watches_.size());
+  sizes.reserve(hash_overflow_watches_.size());
+  live_watches.reserve(hash_overflow_watches_.size());
+
+  for (const auto &watch : hash_overflow_watches_) {
+    if (watch.root_id < 0 ||
+        watch.root_id >= static_cast<int>(root_buffers_.size()) ||
+        !root_buffers_[watch.root_id]) {
+      continue;
+    }
+    ptrs.push_back(root_buffers_[watch.root_id]->get_ptr(watch.byte_offset));
+    host_ptrs.push_back(&values[ptrs.size() - 1]);
+    sizes.push_back(sizeof(uint32_t));
+    live_watches.push_back(watch);
+  }
+  if (ptrs.empty()) {
+    return;
+  }
+
+  auto status = device_->readback_data(ptrs.data(), host_ptrs.data(),
+                                       sizes.data(), int(ptrs.size()));
+  TI_ERROR_IF(status != RhiResult::success,
+              "Failed to read Hash SNode overflow counters.");
+
+  int first_overflow = -1;
+  for (int i = 0; i < static_cast<int>(live_watches.size()); ++i) {
+    if (values[i] != 0) {
+      first_overflow = i;
+      break;
+    }
+  }
+  if (first_overflow < 0) {
+    return;
+  }
+
+  const auto &watch = live_watches[first_overflow];
+  hash_overflow_error_reported_ = true;
+  TI_ERROR(
+      "Hash SNode table overflow on root {} SNode {}. Increase "
+      "capacity=... or expected_active=... before materialization.",
+      watch.root_id, watch.snode_id);
 }
 
 GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
@@ -1090,6 +1180,10 @@ void GfxRuntime::transition_image(DeviceAllocation image, ImageLayout layout) {
 }
 
 void GfxRuntime::synchronize() {
+  synchronize_impl(/*check_hash_overflow=*/true);
+}
+
+void GfxRuntime::synchronize_impl(bool check_hash_overflow) {
   flush();
   device_->wait_idle();
   // Profiler support
@@ -1106,6 +1200,12 @@ void GfxRuntime::synchronize() {
     recycle_pools_to_free();
   }
   ndarrays_in_use_.clear();
+  // Hash SNodes use a static table. Since there is no device-side grow path,
+  // overflow must become a host-visible error at the sync boundary instead of
+  // silently returning ambient-zero cells.
+  if (check_hash_overflow) {
+    check_hash_overflow_counters();
+  }
   fflush(stdout);
 }
 

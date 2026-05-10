@@ -87,6 +87,18 @@ struct CompileConfig {
   // hash. Production quant_array workloads should remain on cpu / cuda
   // until the Vulkan codegen completes.
   bool vulkan_quant_experimental{false};
+  // HSN-1 (2026-05): opt-in gate for the revived hash SNode path. CPU/CUDA use
+  // a static open-addressing table sized before JIT by the frontend-provided
+  // capacity/max_active hint. Vulkan must reject it until its descriptor and
+  // device listgen contracts are implemented. Not part of the offline-cache
+  // key: the flag only allows building a hash SNode; the resulting tree,
+  // including the exact capacity hint, is already in the SNode hash.
+  bool hash_snode_experimental{false};
+  // H4.1 (2026-05): default load factor used by hash SNode's frontend
+  // capacity selector when the user passes max_active/expected_active but no
+  // per-node hash_load_factor. This is intentionally resolved before SNodeTree
+  // materialization so the backend still sees a fixed table capacity.
+  double hash_snode_default_load_factor{0.5};
   // B2 (2026-04-26): user-facing fine-grained SPIR-V optimizer pass
   // disable list. Each entry is a pass name (case-sensitive) matching one
   // of the spvtools::Create*Pass identifiers used in

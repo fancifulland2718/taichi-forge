@@ -4,6 +4,7 @@
 #include "llvm/IR/IRBuilder.h"
 
 #include "taichi/ir/ir.h"
+#include "taichi/ir/snode_hash_utils.h"
 #include "taichi/struct/struct.h"
 #include "taichi/util/file_sequence_writer.h"
 
@@ -106,6 +107,17 @@ void StructCompilerLLVM::generate_types(SNode &snode) {
                                     snode.max_num_elements());
     body_type = llvm::ArrayType::get(llvm::PointerType::get(*ctx, 0),
                                      snode.max_num_elements());
+  } else if (type == SNodeType::hash) {
+    TI_ERROR_IF(!(arch_is_cpu(arch_) || arch_ == Arch::cuda),
+                "Hash SNode is currently implemented only on CPU and CUDA "
+                "backends.");
+    auto capacity = get_hash_snode_capacity(snode);
+    auto i32_type = llvm::Type::getInt32Ty(*ctx);
+    auto state_type = llvm::ArrayType::get(i32_type, capacity);
+    auto key_type = llvm::ArrayType::get(i32_type, capacity);
+    aux_type = llvm::StructType::get(*ctx, {state_type, key_type, i32_type,
+                                            i32_type});
+    body_type = llvm::ArrayType::get(ch_type, capacity);
   } else if (type == SNodeType::dynamic) {
     // mutex and n (number of elements)
     aux_type =
@@ -167,6 +179,17 @@ void StructCompilerLLVM::generate_refine_coordinates(SNode *snode) {
   auto inp_coords = args[0];
   auto outp_coords = args[1];
   auto l = args[2];
+
+  if (snode->type == SNodeType::hash) {
+    for (int i = 0; i < taichi_max_num_indices; i++) {
+      auto in = call(&builder, "PhysicalCoordinates_get_val", inp_coords,
+                     tlctx_->get_constant(i));
+      call(&builder, "PhysicalCoordinates_set_val", outp_coords,
+           tlctx_->get_constant(i), in);
+    }
+    builder.CreateRetVoid();
+    return;
+  }
 
   for (int i = 0; i < taichi_max_num_indices; i++) {
     auto addition = tlctx_->get_constant(0);

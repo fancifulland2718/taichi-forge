@@ -850,11 +850,21 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
   // Allocate ambient elements after per-SNode dedicated pools are installed.
   // Otherwise the first data_list chunk of a large pointer/dynamic SNode is
   // charged to the smaller global region and can OOM during field creation
-  // before the dedicated pool has a chance to take over.
+  // before the dedicated pool has a chance to take over. Hash SNodes do not
+  // use NodeAllocator, so they get one directly allocated zero cell.
   for (size_t i = 0; i < snode_metas.size(); i++) {
-    if (is_gc_able(snode_metas[i].type)) {
+    if (is_gc_able(snode_metas[i].type) ||
+        snode_metas[i].type == SNodeType::hash) {
       const auto snode_id = snode_metas[i].id;
       auto element_size = snode_metas[i].cell_size_bytes;
+      if (snode_metas[i].type == SNodeType::hash) {
+        TI_TRACE("Allocating ambient element for hash snode {} (node size {})",
+                 snode_id, element_size);
+        runtime_jit->call<void *, int, std::size_t>(
+            "runtime_allocate_ambient_direct", llvm_runtime_, snode_id,
+            element_size);
+        continue;
+      }
       if (snode_metas[i].type == SNodeType::pointer) {
         element_size = std::max(element_size, (std::size_t)sizeof(int32));
       }

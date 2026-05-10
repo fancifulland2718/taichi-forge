@@ -205,18 +205,29 @@ class Offloader {
       // element_listgen_root/nonroot runtime helpers actually build a per-
       // level runtime element list that struct_for body code reads from.
       //
-      // Tightened conditions (forge 2026-05-04): the skip is only correct
-      // when SPIR-V listgen codegen actually supports the full-scan over
-      // the path, which is restricted to {dense, bitmasked, pointer,
-      // dynamic} (see spirv_codegen.cpp::generate_listgen_kernel
-      // `TI_ERROR_IF`). For any other node type (hash, quant_array, ...)
-      // the SPIR-V backend already errors out anyway, but in case of
-      // future relaxation we conservatively fall back to per-level emit
-      // when the path has any unsupported type. We also require path size
-      // >= 2 (otherwise start_i==1 == old behaviour, no-op).
+      // Tightened conditions (forge 2026-05-04): the intermediate-list skip
+      // is only correct when SPIR-V listgen codegen supports a full scan over
+      // the path: {dense, bitmasked, pointer, dynamic}. Hash is handled by a
+      // separate fused struct_for path below, so it skips all clear/listgen
+      // tasks instead of using the shared listgen buffer. Other unsupported
+      // node types conservatively keep the legacy per-level emit.
       int start_i = 1;
+      bool spirv_hash_fused_struct_for = false;
+      if (arch_uses_spirv(arch) && path.size() >= 2 &&
+          path[1]->type == SNodeType::hash) {
+        spirv_hash_fused_struct_for = true;
+        for (size_t i = 2; i < path.size(); ++i) {
+          if (path[i]->type != SNodeType::dense) {
+            spirv_hash_fused_struct_for = false;
+            break;
+          }
+        }
+      }
+      if (spirv_hash_fused_struct_for) {
+        start_i = (int)path.size();
+      }
       if (config.spirv_skip_intermediate_listgen && arch_uses_spirv(arch) &&
-          (int)path.size() >= 2) {
+          !spirv_hash_fused_struct_for && (int)path.size() >= 2) {
         bool path_listgen_supported = true;
         for (size_t i = 1; i < path.size(); ++i) {
           auto t = path[i]->type;

@@ -334,7 +334,9 @@ void Program::compile_kernels(
 void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,
                             LaunchContextBuilder &ctx) {
   program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data, ctx);
-  if (compile_config().debug && arch_uses_llvm(compiled_kernel_data.arch())) {
+  const bool check_runtime_error =
+      compile_config().debug || compile_config().hash_snode_experimental;
+  if (check_runtime_error && arch_uses_llvm(compiled_kernel_data.arch())) {
     program_impl_->check_runtime_error(result_buffer);
   }
 }
@@ -484,7 +486,8 @@ void Program::finalize() {
   TI_TRACE("Program finalizing...");
 
   synchronize();
-  if (arch_uses_llvm(compile_config().arch)) {
+  if (arch_uses_llvm(compile_config().arch) ||
+      compile_config().arch == Arch::vulkan) {
     program_impl_->finalize();
   }
 

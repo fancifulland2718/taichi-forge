@@ -7,6 +7,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Linker/Linker.h"
 #include "taichi/analysis/offline_cache_util.h"
+#include "taichi/ir/snode_hash_utils.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/runtime/llvm/llvm_offline_cache.h"
@@ -338,6 +339,46 @@ std::unique_ptr<RuntimeObject> TaskCodeGenLLVM::emit_struct_meta_object(
     meta = std::make_unique<RuntimeObject>("DenseMeta", this, builder.get());
     emit_struct_meta_base("Dense", meta->ptr, snode);
     meta->call("set_morton_dim", tlctx->get_constant((int)snode->_morton));
+  } else if (snode->type == SNodeType::hash) {
+    TI_ERROR_IF(compile_config.arch != Arch::x64 &&
+                    compile_config.arch != Arch::arm64 &&
+                    compile_config.arch != Arch::cuda,
+                "Hash SNode is currently implemented only on CPU and CUDA "
+                "backends.");
+    meta = std::make_unique<RuntimeObject>("HashMeta", this, builder.get());
+    emit_struct_meta_base("Hash", meta->ptr, snode);
+    auto capacity = get_hash_snode_capacity(*snode);
+    meta->set("table_capacity", tlctx->get_constant(capacity));
+
+    auto *node_type = llvm::cast<llvm::StructType>(
+        StructCompilerLLVM::get_llvm_node_type(module.get(), snode));
+    auto *aux_type = llvm::cast<llvm::StructType>(
+        StructCompilerLLVM::get_llvm_aux_type(module.get(), snode));
+    auto aux_offset = tlctx->get_struct_element_offset(node_type, 0);
+    auto payload_offset = tlctx->get_struct_element_offset(node_type, 1);
+    meta->set("state_offset",
+              tlctx->get_constant((uint64)aux_offset +
+                                  tlctx->get_struct_element_offset(
+                                      aux_type, kHashAuxStateIndex)));
+    meta->set("key_offset",
+              tlctx->get_constant((uint64)aux_offset +
+                                  tlctx->get_struct_element_offset(
+                                      aux_type, kHashAuxKeyIndex)));
+    meta->set("active_count_offset",
+              tlctx->get_constant((uint64)aux_offset +
+                                  tlctx->get_struct_element_offset(
+                                      aux_type, kHashAuxActiveCountIndex)));
+    meta->set("overflow_count_offset",
+              tlctx->get_constant((uint64)aux_offset +
+                                  tlctx->get_struct_element_offset(
+                                      aux_type, kHashAuxOverflowCountIndex)));
+    meta->set("payload_offset", tlctx->get_constant((uint64)payload_offset));
+    for (int i = 0; i < taichi_max_num_indices; i++) {
+      meta->set("extract_shape", tlctx->get_constant(i),
+                tlctx->get_constant(snode->extractors[i].shape));
+      meta->set("extract_acc_shape", tlctx->get_constant(i),
+                tlctx->get_constant(snode->extractors[i].acc_shape));
+    }
   } else if (snode->type == SNodeType::pointer) {
     meta = std::make_unique<RuntimeObject>("PointerMeta", this, builder.get());
     emit_struct_meta_base("Pointer", meta->ptr, snode);
@@ -402,6 +443,10 @@ void TaskCodeGenLLVM::emit_struct_meta_base(const std::string &name,
   } else if (snode->type == SNodeType::pointer) {
     auto element_ty = StructCompilerLLVM::get_llvm_node_type(
         module.get(), snode->ch[0].get());
+    element_size = tlctx->get_type_size(element_ty);
+  } else if (snode->type == SNodeType::hash) {
+    auto element_ty =
+        StructCompilerLLVM::get_llvm_element_type(module.get(), snode);
     element_size = tlctx->get_type_size(element_ty);
   } else {
     auto element_ty =
@@ -1277,7 +1322,12 @@ void TaskCodeGenLLVM::emit_list_gen(OffloadedStmt *listgen) {
   if (snode_parent->type == SNodeType::root) {
     // Since there's only one container to expand, we need a special kernel for
     // more parallelism.
-    call("element_listgen_root", get_runtime(), meta_parent, meta_child);
+    if (snode_child->type == SNodeType::hash) {
+      call("element_listgen_root_hash", get_runtime(), meta_parent,
+           meta_child);
+    } else {
+      call("element_listgen_root", get_runtime(), meta_parent, meta_child);
+    }
   } else {
     call("element_listgen_nonroot", get_runtime(), meta_parent, meta_child);
   }
@@ -1970,6 +2020,7 @@ void TaskCodeGenLLVM::visit(SNodeLookupStmt *stmt) {
         builder->CreateGEP(parent_ty, parent, llvm_val[stmt->input_index]);
   } else if (snode->type == SNodeType::dense ||
              snode->type == SNodeType::pointer ||
+             snode->type == SNodeType::hash ||
              snode->type == SNodeType::dynamic ||
              snode->type == SNodeType::bitmasked) {
     if (stmt->activate) {
@@ -2451,7 +2502,8 @@ void TaskCodeGenLLVM::create_offload_struct_for(OffloadedStmt *stmt) {
                                       builder.get(), new_coordinates);
 
     if (leaf_block->type == SNodeType::bitmasked ||
-        leaf_block->type == SNodeType::pointer) {
+        leaf_block->type == SNodeType::pointer ||
+        leaf_block->type == SNodeType::hash) {
       // test whether the current voxel is active or not
       auto is_active = call(leaf_block, element.get("element"), "is_active",
                             {builder->CreateLoad(loop_index_ty, loop_index)});
@@ -2491,8 +2543,11 @@ void TaskCodeGenLLVM::create_offload_struct_for(OffloadedStmt *stmt) {
     }
   }
 
-  int list_element_size = std::min(leaf_block->max_num_elements(),
-                                   (int64)taichi_listgen_max_element_size);
+  int list_element_size =
+      leaf_block->type == SNodeType::hash
+          ? 1
+          : std::min(leaf_block->max_num_elements(),
+                     (int64)taichi_listgen_max_element_size);
   int num_splits = std::max(1, list_element_size / stmt->block_dim +
                                    (list_element_size % stmt->block_dim != 0));
 

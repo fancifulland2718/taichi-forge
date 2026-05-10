@@ -50,6 +50,26 @@ struct SNodeDescriptor {
   // when dynamic is enabled, else 0 (legacy flat layout).
   size_t dynamic_length_offset_in_container = 0;
 
+  // Hash SNode layout (root child only, static open-addressing table):
+  //   [state u32 * capacity][key i32 * capacity]
+  //   [payload cell_stride * capacity][active_count u32][overflow_count u32]
+  //   [ambient payload cell]
+  //
+  // hash_table_capacity is the rounded power-of-two table size passed from
+  // Python through vk_max_active_hint. The logical domain size remains in the
+  // SNode extractors; listgen scans hash_table_capacity buckets but emits
+  // logical keys.
+  // H4.0 keeps overflow as a counter/signal only. Future overflow handling
+  // should be driven by JIT-before-materialization capacity selection or
+  // host-side rebuild, not by a hard-coded overflow stash in this layout.
+  size_t hash_table_capacity = 0;
+  size_t hash_state_offset = 0;
+  size_t hash_key_offset = 0;
+  size_t hash_payload_offset = 0;
+  size_t hash_active_count_offset = 0;
+  size_t hash_overflow_count_offset = 0;
+  size_t hash_ambient_offset = 0;
+
   SNode *get_child(int ch_i) const {
     return snode->ch[ch_i].get();
   }

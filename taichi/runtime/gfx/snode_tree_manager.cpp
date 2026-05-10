@@ -18,11 +18,12 @@ void SNodeTreeManager::materialize_snode_tree(
   CompiledSNodeStructs compiled_structs = compile_snode_structs(*root, policy);
   runtime_->update_listgen_buffer_for_snode_tree(compiled_structs);
   runtime_->add_root_buffer(compiled_structs.root_size);
+  const int root_id = static_cast<int>(runtime_->root_buffers_.size()) - 1;
+  runtime_->register_hash_overflow_checks(root_id, compiled_structs);
 #if defined(TI_WITH_VULKAN_POINTER)
   // 路线 B B-1（2026-04-30）：用 contracts 在该 root_buffer 上构造 BumpOnly
   // allocator，与 codegen 端 contract 字节等价。当前 root_buffer 已由
   // add_root_buffer() memset(0)，allocator::clear_all() 暂未被调用。
-  const int root_id = static_cast<int>(runtime_->root_buffers_.size()) - 1;
   std::unordered_map<int, std::unique_ptr<DeviceNodeAllocator>>
       allocators_for_tree;
   if (!compiled_structs.pointer_contracts.empty()) {

@@ -1151,6 +1151,15 @@ void runtime_allocate_ambient(LLVMRuntime *runtime,
   runtime->ambient_elements[snode_id] = ambient;
 }
 
+void runtime_allocate_ambient_direct(LLVMRuntime *runtime,
+                                     int snode_id,
+                                     std::size_t node_size) {
+  auto ambient = runtime->allocate_aligned(runtime->runtime_memory_chunk,
+                                          node_size, 8, true /*request*/);
+  std::memset(ambient, 0, node_size);
+  runtime->ambient_elements[snode_id] = ambient;
+}
+
 // Phase 1 (2026-05): assign a dedicated bump region (carved from the global
 // pool buffer) to an already-initialized NodeManager. ptr+size define the
 // PreallocatedMemoryChunk sub-range. All 3 ListManagers (free/recycled/data)
@@ -1824,6 +1833,7 @@ i32 linear_thread_idx(RuntimeContext *context) {
 
 #include "node_dense.h"
 #include "node_dynamic.h"
+#include "node_hash.h"
 #include "node_pointer.h"
 #include "node_root.h"
 #include "node_bitmasked.h"

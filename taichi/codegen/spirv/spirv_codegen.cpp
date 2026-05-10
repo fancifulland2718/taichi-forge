@@ -866,6 +866,506 @@ class TaskCodegen : public IRVisitor {
     }
   }
 
+  spirv::Value hash_mix_u32(spirv::Value x) {
+    auto u32_t = ir_->u32_type();
+    x = ir_->make_value(spv::OpBitwiseXor, u32_t, x,
+                        ir_->make_value(spv::OpShiftRightLogical, u32_t, x,
+                                        ir_->uint_immediate_number(u32_t, 16)));
+    x = ir_->mul(x, ir_->uint_immediate_number(u32_t, 0x7feb352du));
+    x = ir_->make_value(spv::OpBitwiseXor, u32_t, x,
+                        ir_->make_value(spv::OpShiftRightLogical, u32_t, x,
+                                        ir_->uint_immediate_number(u32_t, 15)));
+    x = ir_->mul(x, ir_->uint_immediate_number(u32_t, 0x846ca68bu));
+    x = ir_->make_value(spv::OpBitwiseXor, u32_t, x,
+                        ir_->make_value(spv::OpShiftRightLogical, u32_t, x,
+                                        ir_->uint_immediate_number(u32_t, 16)));
+    return x;
+  }
+
+  spirv::Value hash_u32_ptr(spirv::Value buffer,
+                            spirv::Value base_byte_offset,
+                            size_t member_offset,
+                            spirv::Value index_u32) {
+    auto u32_t = ir_->u32_type();
+    auto byte_offset = ir_->add(
+        base_byte_offset,
+        ir_->uint_immediate_number(u32_t, static_cast<uint32_t>(member_offset)));
+    auto elem_byte_offset = ir_->make_value(
+        spv::OpShiftLeftLogical, u32_t, index_u32,
+        ir_->uint_immediate_number(u32_t, 2));
+    byte_offset = ir_->add(byte_offset, elem_byte_offset);
+    auto word_idx = ir_->make_value(spv::OpShiftRightLogical, u32_t,
+                                    byte_offset,
+                                    ir_->uint_immediate_number(u32_t, 2));
+    return ir_->struct_array_access(u32_t, buffer, word_idx);
+  }
+
+  spirv::Value hash_state_ptr(spirv::Value buffer,
+                              spirv::Value base_byte_offset,
+                              const SNodeDescriptor &desc,
+                              spirv::Value bucket_u32) {
+    return hash_u32_ptr(buffer, base_byte_offset, desc.hash_state_offset,
+                        bucket_u32);
+  }
+
+  spirv::Value hash_key_ptr(spirv::Value buffer,
+                            spirv::Value base_byte_offset,
+                            const SNodeDescriptor &desc,
+                            spirv::Value bucket_u32) {
+    return hash_u32_ptr(buffer, base_byte_offset, desc.hash_key_offset,
+                        bucket_u32);
+  }
+
+  spirv::Value hash_counter_ptr(spirv::Value buffer,
+                                spirv::Value base_byte_offset,
+                                size_t member_offset) {
+    auto u32_t = ir_->u32_type();
+    auto byte_offset = ir_->add(
+        base_byte_offset,
+        ir_->uint_immediate_number(u32_t, static_cast<uint32_t>(member_offset)));
+    auto word_idx = ir_->make_value(spv::OpShiftRightLogical, u32_t,
+                                    byte_offset,
+                                    ir_->uint_immediate_number(u32_t, 2));
+    return ir_->struct_array_access(u32_t, buffer, word_idx);
+  }
+
+  spirv::Value hash_payload_byte_offset(spirv::Value base_byte_offset,
+                                        const SNodeDescriptor &desc,
+                                        spirv::Value bucket_u32) {
+    auto u32_t = ir_->u32_type();
+    auto payload_base = ir_->add(
+        base_byte_offset,
+        ir_->uint_immediate_number(
+            u32_t, static_cast<uint32_t>(desc.hash_payload_offset)));
+    auto stride = ir_->uint_immediate_number(
+        u32_t, static_cast<uint32_t>(desc.cell_stride));
+    return ir_->add(payload_base, ir_->mul(bucket_u32, stride));
+  }
+
+  void hash_zero_payload(spirv::Value buffer,
+                         spirv::Value payload_byte_offset,
+                         const SNodeDescriptor &desc) {
+    TI_ASSERT_INFO(desc.cell_stride % 4 == 0,
+                   "Vulkan hash payload clear requires 4-byte cell stride");
+    auto u32_t = ir_->u32_type();
+    auto zero = ir_->uint_immediate_number(u32_t, 0);
+    const uint32_t num_words = static_cast<uint32_t>(desc.cell_stride / 4);
+    for (uint32_t w = 0; w < num_words; ++w) {
+      auto word_byte = ir_->add(payload_byte_offset,
+                                ir_->uint_immediate_number(u32_t, w * 4u));
+      auto word_idx = ir_->make_value(spv::OpShiftRightLogical, u32_t,
+                                      word_byte,
+                                      ir_->uint_immediate_number(u32_t, 2));
+      auto word_ptr = ir_->struct_array_access(u32_t, buffer, word_idx);
+      ir_->store_variable(word_ptr, zero);
+    }
+  }
+
+  void hash_device_memory_barrier() {
+    ir_->make_inst(
+        spv::OpMemoryBarrier, ir_->const_i32_one_,
+        ir_->uint_immediate_number(
+            ir_->u32_type(), spv::MemorySemanticsAcquireReleaseMask |
+                                 spv::MemorySemanticsUniformMemoryMask));
+  }
+
+  spirv::Value hash_load_stable_state(spirv::Value state_ptr) {
+    auto u32_t = ir_->u32_type();
+    return ir_->make_value(spv::OpAtomicLoad, u32_t, state_ptr,
+                           /*scope=*/ir_->const_i32_one_,
+                           /*semantics=*/ir_->const_i32_zero_);
+  }
+
+  void hash_publish_bucket(spirv::Value buffer,
+                           spirv::Value base_byte_offset,
+                           const SNodeDescriptor &desc,
+                           spirv::Value bucket_u32,
+                           spirv::Value key_u32) {
+    auto u32_t = ir_->u32_type();
+    auto key_ptr = hash_key_ptr(buffer, base_byte_offset, desc, bucket_u32);
+    ir_->store_variable(key_ptr, key_u32);
+    auto payload = hash_payload_byte_offset(base_byte_offset, desc, bucket_u32);
+    hash_zero_payload(buffer, payload, desc);
+    hash_device_memory_barrier();
+    auto state_ptr = hash_state_ptr(buffer, base_byte_offset, desc, bucket_u32);
+    ir_->make_inst(spv::OpAtomicStore, state_ptr,
+                   /*scope=*/ir_->const_i32_one_,
+                   /*semantics=*/ir_->const_i32_zero_,
+                   ir_->uint_immediate_number(u32_t, 2));
+    auto count_ptr =
+        hash_counter_ptr(buffer, base_byte_offset, desc.hash_active_count_offset);
+    (void)ir_->make_value(spv::OpAtomicIAdd, u32_t, count_ptr,
+                          /*scope=*/ir_->const_i32_one_,
+                          /*semantics=*/ir_->const_i32_zero_,
+                          ir_->uint_immediate_number(u32_t, 1));
+  }
+
+  spirv::Value hash_find_bucket(spirv::Value base_byte_offset,
+                                int root_id,
+                                const SNode *sn,
+                                spirv::Value key_u32) {
+    const auto &desc =
+        compiled_structs_[root_id].snode_descriptors.at(sn->id);
+    auto buffer = container_buffer_value(sn, root_id);
+    auto u32_t = ir_->u32_type();
+    auto cap = ir_->uint_immediate_number(
+        u32_t, static_cast<uint32_t>(desc.hash_table_capacity));
+    auto mask = ir_->uint_immediate_number(
+        u32_t, static_cast<uint32_t>(desc.hash_table_capacity - 1));
+    auto start =
+        ir_->make_value(spv::OpBitwiseAnd, u32_t, hash_mix_u32(key_u32), mask);
+
+    auto result_var = ir_->alloca_variable(u32_t);
+    auto step_var = ir_->alloca_variable(u32_t);
+    ir_->store_variable(result_var, cap);
+    ir_->store_variable(step_var, ir_->uint_immediate_number(u32_t, 0));
+
+    spirv::Label head = ir_->new_label();
+    spirv::Label body = ir_->new_label();
+    spirv::Label cont = ir_->new_label();
+    spirv::Label merge = ir_->new_label();
+    ir_->make_inst(spv::OpBranch, head);
+
+    ir_->start_label(head);
+    auto step = ir_->load_variable(step_var, u32_t);
+    auto result = ir_->load_variable(result_var, u32_t);
+    auto in_range =
+        ir_->make_value(spv::OpULessThan, ir_->bool_type(), step, cap);
+    auto not_found =
+        ir_->make_value(spv::OpIEqual, ir_->bool_type(), result, cap);
+    auto keep_going =
+        ir_->make_value(spv::OpLogicalAnd, ir_->bool_type(), in_range,
+                        not_found);
+    ir_->make_inst(spv::OpLoopMerge, merge, cont, spv::LoopControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, keep_going, body, merge);
+
+    ir_->start_label(body);
+    auto bucket = ir_->make_value(spv::OpBitwiseAnd, u32_t,
+                                  ir_->add(start, step), mask);
+    auto state_ptr = hash_state_ptr(buffer, base_byte_offset, desc, bucket);
+    auto state = hash_load_stable_state(state_ptr);
+    auto empty = ir_->make_value(
+        spv::OpIEqual, ir_->bool_type(), state,
+        ir_->uint_immediate_number(u32_t, 0));
+    auto occupied = ir_->make_value(
+        spv::OpIEqual, ir_->bool_type(), state,
+        ir_->uint_immediate_number(u32_t, 2));
+
+    spirv::Label absent_lbl = ir_->new_label();
+    spirv::Label non_empty_lbl = ir_->new_label();
+    spirv::Label after_state = ir_->new_label();
+    ir_->make_inst(spv::OpSelectionMerge, after_state,
+                   spv::SelectionControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, empty, absent_lbl,
+                   non_empty_lbl);
+
+    ir_->start_label(absent_lbl);
+    ir_->store_variable(step_var, cap);
+    ir_->make_inst(spv::OpBranch, after_state);
+
+    ir_->start_label(non_empty_lbl);
+    spirv::Label occ_lbl = ir_->new_label();
+    spirv::Label after_occ = ir_->new_label();
+    ir_->make_inst(spv::OpSelectionMerge, after_occ,
+                   spv::SelectionControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, occupied, occ_lbl, after_occ);
+
+    ir_->start_label(occ_lbl);
+    hash_device_memory_barrier();
+    auto key_ptr = hash_key_ptr(buffer, base_byte_offset, desc, bucket);
+    auto stored_key = ir_->load_variable(key_ptr, u32_t);
+    auto key_eq =
+        ir_->make_value(spv::OpIEqual, ir_->bool_type(), stored_key, key_u32);
+    spirv::Label found_lbl = ir_->new_label();
+    spirv::Label after_key = ir_->new_label();
+    ir_->make_inst(spv::OpSelectionMerge, after_key,
+                   spv::SelectionControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, key_eq, found_lbl, after_key);
+    ir_->start_label(found_lbl);
+    ir_->store_variable(result_var, bucket);
+    ir_->store_variable(step_var, cap);
+    ir_->make_inst(spv::OpBranch, after_key);
+    ir_->start_label(after_key);
+    ir_->make_inst(spv::OpBranch, after_occ);
+
+    ir_->start_label(after_occ);
+    ir_->make_inst(spv::OpBranch, after_state);
+
+    ir_->start_label(after_state);
+    ir_->make_inst(spv::OpBranch, cont);
+
+    ir_->start_label(cont);
+    auto next_step =
+        ir_->add(ir_->load_variable(step_var, u32_t),
+                 ir_->uint_immediate_number(u32_t, 1));
+    ir_->store_variable(step_var, next_step);
+    ir_->make_inst(spv::OpBranch, head);
+
+    ir_->start_label(merge);
+    return ir_->load_variable(result_var, u32_t);
+  }
+
+  spirv::Value hash_find_or_insert_bucket(spirv::Value base_byte_offset,
+                                          int root_id,
+                                          const SNode *sn,
+                                          spirv::Value key_u32) {
+    const auto &desc =
+        compiled_structs_[root_id].snode_descriptors.at(sn->id);
+    auto buffer = container_buffer_value(sn, root_id);
+    auto u32_t = ir_->u32_type();
+    auto cap = ir_->uint_immediate_number(
+        u32_t, static_cast<uint32_t>(desc.hash_table_capacity));
+    auto mask = ir_->uint_immediate_number(
+        u32_t, static_cast<uint32_t>(desc.hash_table_capacity - 1));
+
+    auto result_var = ir_->alloca_variable(u32_t);
+    auto existing = hash_find_bucket(base_byte_offset, root_id, sn, key_u32);
+    ir_->store_variable(result_var, existing);
+    auto need_insert =
+        ir_->make_value(spv::OpIEqual, ir_->bool_type(), existing, cap);
+
+    spirv::Label insert_lbl = ir_->new_label();
+    spirv::Label merge_lbl = ir_->new_label();
+    ir_->make_inst(spv::OpSelectionMerge, merge_lbl,
+                   spv::SelectionControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, need_insert, insert_lbl,
+                   merge_lbl);
+
+    ir_->start_label(insert_lbl);
+    auto start =
+        ir_->make_value(spv::OpBitwiseAnd, u32_t, hash_mix_u32(key_u32), mask);
+    auto step_var = ir_->alloca_variable(u32_t);
+    ir_->store_variable(step_var, ir_->uint_immediate_number(u32_t, 0));
+
+    spirv::Label head = ir_->new_label();
+    spirv::Label body = ir_->new_label();
+    spirv::Label cont = ir_->new_label();
+    spirv::Label loop_merge = ir_->new_label();
+    ir_->make_inst(spv::OpBranch, head);
+
+    ir_->start_label(head);
+    auto step = ir_->load_variable(step_var, u32_t);
+    auto result = ir_->load_variable(result_var, u32_t);
+    auto in_range =
+        ir_->make_value(spv::OpULessThan, ir_->bool_type(), step, cap);
+    auto not_done =
+        ir_->make_value(spv::OpIEqual, ir_->bool_type(), result, cap);
+    auto keep_going =
+        ir_->make_value(spv::OpLogicalAnd, ir_->bool_type(), in_range,
+                        not_done);
+    ir_->make_inst(spv::OpLoopMerge, loop_merge, cont,
+                   spv::LoopControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, keep_going, body, loop_merge);
+
+    ir_->start_label(body);
+    auto bucket = ir_->make_value(spv::OpBitwiseAnd, u32_t,
+                                  ir_->add(start, step), mask);
+    auto state_ptr = hash_state_ptr(buffer, base_byte_offset, desc, bucket);
+    auto state = hash_load_stable_state(state_ptr);
+    auto empty = ir_->make_value(
+        spv::OpIEqual, ir_->bool_type(), state,
+        ir_->uint_immediate_number(u32_t, 0));
+    auto tombstone = ir_->make_value(
+        spv::OpIEqual, ir_->bool_type(), state,
+        ir_->uint_immediate_number(u32_t, 3));
+    auto candidate = ir_->make_value(spv::OpLogicalOr, ir_->bool_type(), empty,
+                                     tombstone);
+
+    spirv::Label candidate_lbl = ir_->new_label();
+    spirv::Label after_candidate = ir_->new_label();
+    ir_->make_inst(spv::OpSelectionMerge, after_candidate,
+                   spv::SelectionControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, candidate, candidate_lbl,
+                   after_candidate);
+
+    ir_->start_label(candidate_lbl);
+    auto expected = ir_->make_value(
+        spv::OpSelect, u32_t, tombstone,
+        ir_->uint_immediate_number(u32_t, 3),
+        ir_->uint_immediate_number(u32_t, 0));
+    auto cas_old = ir_->make_value(
+        spv::OpAtomicCompareExchange, u32_t, state_ptr,
+        /*scope=*/ir_->const_i32_one_,
+        /*semantics_eq=*/ir_->const_i32_zero_,
+        /*semantics_uneq=*/ir_->const_i32_zero_,
+        ir_->uint_immediate_number(u32_t, 1), expected);
+    auto won =
+        ir_->make_value(spv::OpIEqual, ir_->bool_type(), cas_old, expected);
+    spirv::Label won_lbl = ir_->new_label();
+    spirv::Label lost_lbl = ir_->new_label();
+    spirv::Label after_claim = ir_->new_label();
+    ir_->make_inst(spv::OpSelectionMerge, after_claim,
+                   spv::SelectionControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, won, won_lbl, lost_lbl);
+
+    ir_->start_label(won_lbl);
+    hash_publish_bucket(buffer, base_byte_offset, desc, bucket, key_u32);
+    ir_->store_variable(result_var, bucket);
+    ir_->make_inst(spv::OpBranch, after_claim);
+
+    ir_->start_label(lost_lbl);
+    auto retry = hash_find_bucket(base_byte_offset, root_id, sn, key_u32);
+    auto retry_found =
+        ir_->make_value(spv::OpINotEqual, ir_->bool_type(), retry, cap);
+    spirv::Label retry_found_lbl = ir_->new_label();
+    spirv::Label after_retry = ir_->new_label();
+    ir_->make_inst(spv::OpSelectionMerge, after_retry,
+                   spv::SelectionControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, retry_found, retry_found_lbl,
+                   after_retry);
+    ir_->start_label(retry_found_lbl);
+    ir_->store_variable(result_var, retry);
+    ir_->make_inst(spv::OpBranch, after_retry);
+    ir_->start_label(after_retry);
+    ir_->make_inst(spv::OpBranch, after_claim);
+
+    ir_->start_label(after_claim);
+    ir_->make_inst(spv::OpBranch, after_candidate);
+    ir_->start_label(after_candidate);
+    ir_->make_inst(spv::OpBranch, cont);
+
+    ir_->start_label(cont);
+    auto next_step =
+        ir_->add(ir_->load_variable(step_var, u32_t),
+                 ir_->uint_immediate_number(u32_t, 1));
+    ir_->store_variable(step_var, next_step);
+    ir_->make_inst(spv::OpBranch, head);
+
+    ir_->start_label(loop_merge);
+    auto final_result = ir_->load_variable(result_var, u32_t);
+    auto overflow =
+        ir_->make_value(spv::OpIEqual, ir_->bool_type(), final_result, cap);
+    spirv::Label overflow_lbl = ir_->new_label();
+    spirv::Label after_overflow = ir_->new_label();
+    ir_->make_inst(spv::OpSelectionMerge, after_overflow,
+                   spv::SelectionControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, overflow, overflow_lbl,
+                   after_overflow);
+    ir_->start_label(overflow_lbl);
+    auto overflow_ptr = hash_counter_ptr(buffer, base_byte_offset,
+                                         desc.hash_overflow_count_offset);
+    (void)ir_->make_value(spv::OpAtomicIAdd, u32_t, overflow_ptr,
+                          /*scope=*/ir_->const_i32_one_,
+                          /*semantics=*/ir_->const_i32_zero_,
+                          ir_->uint_immediate_number(u32_t, 1));
+    ir_->make_inst(spv::OpBranch, after_overflow);
+    ir_->start_label(after_overflow);
+    ir_->make_inst(spv::OpBranch, merge_lbl);
+
+    ir_->start_label(merge_lbl);
+    return ir_->load_variable(result_var, u32_t);
+  }
+
+  spirv::Value hash_lookup_or_activate(spirv::Value parent_byte_offset,
+                                       int root_id,
+                                       const SNode *sn,
+                                       spirv::Value index_u32,
+                                       bool do_activate) {
+    mark_buffer_access(container_buffer_info(sn, root_id),
+                       do_activate ? BufferBind::kAccessReadWrite
+                                   : BufferBind::kAccessRead);
+    const auto &desc =
+        compiled_structs_[root_id].snode_descriptors.at(sn->id);
+    auto u32_t = ir_->u32_type();
+    auto key_u32 = ir_->cast(u32_t, index_u32);
+    auto cap = ir_->uint_immediate_number(
+        u32_t, static_cast<uint32_t>(desc.hash_table_capacity));
+    auto bucket = do_activate
+                      ? hash_find_or_insert_bucket(parent_byte_offset, root_id,
+                                                   sn, key_u32)
+                      : hash_find_bucket(parent_byte_offset, root_id, sn,
+                                         key_u32);
+    auto found = ir_->make_value(spv::OpULessThan, ir_->bool_type(), bucket,
+                                 cap);
+    auto safe_bucket = ir_->make_value(
+        spv::OpSelect, u32_t, found, bucket, ir_->uint_immediate_number(u32_t, 0));
+    auto payload =
+        hash_payload_byte_offset(parent_byte_offset, desc, safe_bucket);
+    auto ambient = ir_->add(
+        parent_byte_offset,
+        ir_->uint_immediate_number(
+            u32_t, static_cast<uint32_t>(desc.hash_ambient_offset)));
+    payload = ir_->make_value(spv::OpSelect, u32_t, found, payload, ambient);
+    return payload;
+  }
+
+  spirv::Value hash_is_active(spirv::Value parent_byte_offset,
+                              int root_id,
+                              const SNode *sn,
+                              spirv::Value index_u32) {
+    mark_buffer_access(container_buffer_info(sn, root_id),
+                       BufferBind::kAccessRead);
+    const auto &desc =
+        compiled_structs_[root_id].snode_descriptors.at(sn->id);
+    auto u32_t = ir_->u32_type();
+    auto key_u32 = ir_->cast(u32_t, index_u32);
+    auto bucket = hash_find_bucket(parent_byte_offset, root_id, sn, key_u32);
+    auto cap = ir_->uint_immediate_number(
+        u32_t, static_cast<uint32_t>(desc.hash_table_capacity));
+    return ir_->make_value(spv::OpULessThan, ir_->bool_type(), bucket, cap);
+  }
+
+  void hash_deactivate(spirv::Value parent_byte_offset,
+                       int root_id,
+                       const SNode *sn,
+                       spirv::Value index_u32) {
+    mark_buffer_access(container_buffer_info(sn, root_id),
+                       BufferBind::kAccessReadWrite);
+    const auto &desc =
+        compiled_structs_[root_id].snode_descriptors.at(sn->id);
+    auto buffer = container_buffer_value(sn, root_id);
+    auto u32_t = ir_->u32_type();
+    auto key_u32 = ir_->cast(u32_t, index_u32);
+    auto cap = ir_->uint_immediate_number(
+        u32_t, static_cast<uint32_t>(desc.hash_table_capacity));
+    auto bucket = hash_find_bucket(parent_byte_offset, root_id, sn, key_u32);
+    auto found = ir_->make_value(spv::OpULessThan, ir_->bool_type(), bucket,
+                                 cap);
+
+    spirv::Label found_lbl = ir_->new_label();
+    spirv::Label after_found = ir_->new_label();
+    ir_->make_inst(spv::OpSelectionMerge, after_found,
+                   spv::SelectionControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, found, found_lbl, after_found);
+
+    ir_->start_label(found_lbl);
+    auto state_ptr = hash_state_ptr(buffer, parent_byte_offset, desc, bucket);
+    auto cas_old = ir_->make_value(
+        spv::OpAtomicCompareExchange, u32_t, state_ptr,
+        /*scope=*/ir_->const_i32_one_,
+        /*semantics_eq=*/ir_->const_i32_zero_,
+        /*semantics_uneq=*/ir_->const_i32_zero_,
+        ir_->uint_immediate_number(u32_t, 1),
+        ir_->uint_immediate_number(u32_t, 2));
+    auto won = ir_->make_value(
+        spv::OpIEqual, ir_->bool_type(), cas_old,
+        ir_->uint_immediate_number(u32_t, 2));
+
+    spirv::Label won_lbl = ir_->new_label();
+    spirv::Label after_won = ir_->new_label();
+    ir_->make_inst(spv::OpSelectionMerge, after_won,
+                   spv::SelectionControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, won, won_lbl, after_won);
+    ir_->start_label(won_lbl);
+    auto payload = hash_payload_byte_offset(parent_byte_offset, desc, bucket);
+    hash_zero_payload(buffer, payload, desc);
+    ir_->make_inst(spv::OpAtomicStore, state_ptr,
+                   /*scope=*/ir_->const_i32_one_,
+                   /*semantics=*/ir_->const_i32_zero_,
+                   ir_->uint_immediate_number(u32_t, 3));
+    auto count_ptr =
+        hash_counter_ptr(buffer, parent_byte_offset, desc.hash_active_count_offset);
+    (void)ir_->make_value(spv::OpAtomicIAdd, u32_t, count_ptr,
+                          /*scope=*/ir_->const_i32_one_,
+                          /*semantics=*/ir_->const_i32_zero_,
+                          ir_->uint_immediate_number(u32_t, 0xffffffffu));
+    ir_->make_inst(spv::OpBranch, after_won);
+    ir_->start_label(after_won);
+    ir_->make_inst(spv::OpBranch, after_found);
+
+    ir_->start_label(after_found);
+  }
+
   // ----------------------------------------------------------------------
   // Phase 2b: pointer SNode helpers (vulkan_sparse_experimental).
   //
@@ -1585,6 +2085,25 @@ class TaskCodegen : public IRVisitor {
       } else {
         TI_NOT_IMPLEMENTED;
       }
+    } else if (stmt->snode->type == SNodeType::hash) {
+      spirv::Value input_index_val = ir_->query_value(stmt->val->raw_name());
+
+      if (stmt->op_type == SNodeOpType::is_active) {
+        auto is_active =
+            hash_is_active(parent_val, root_id, stmt->snode, input_index_val);
+        is_active =
+            ir_->cast(ir_->get_primitive_type(stmt->ret_type), is_active);
+        is_active = ir_->make_value(spv::OpSNegate, is_active.stype, is_active);
+        ir_->register_value(stmt->raw_name(), is_active);
+      } else if (stmt->op_type == SNodeOpType::deactivate) {
+        hash_deactivate(parent_val, root_id, stmt->snode, input_index_val);
+      } else if (stmt->op_type == SNodeOpType::activate) {
+        (void)hash_lookup_or_activate(parent_val, root_id, stmt->snode,
+                                      input_index_val,
+                                      /*do_activate=*/true);
+      } else {
+        TI_NOT_IMPLEMENTED;
+      }
     } else if (stmt->snode->type == SNodeType::dynamic) {
 #if defined(TI_VULKAN_DYNAMIC)
       mark_buffer_access(container_buffer_info(stmt->snode, root_id),
@@ -1706,6 +2225,10 @@ class TaskCodegen : public IRVisitor {
         // Pointer activation is folded into the lookup below: when activate
         // is requested we run pointer_lookup_or_activate(do_activate=true)
         // which both allocates (if needed) and produces the cell address.
+      } else if (sn->type == SNodeType::hash) {
+        // Hash activation is folded into the lookup below for the same reason:
+        // the probe either finds the existing bucket or claims one and returns
+        // the payload address.
       } else {
         TI_NOT_IMPLEMENTED;
       }
@@ -1729,6 +2252,11 @@ class TaskCodegen : public IRVisitor {
       if (chunk_idx_val.id != 0) {
         ptr_to_chunk_idx_[stmt] = chunk_idx_val;
       }
+    } else if (sn->type == SNodeType::hash) {
+      spirv::Value input_index_val =
+          ir_->query_value(stmt->input_index->raw_name());
+      val = hash_lookup_or_activate(parent_val, root_id, sn, input_index_val,
+                                    /*do_activate=*/stmt->activate);
     } else if (sn->type == SNodeType::quant_array) {
       // G9.2 (2026-04-30): all user cells in a quant_array share ONE
       // physical word inside the parent cell, so the byte address does
@@ -3494,6 +4022,110 @@ class TaskCodegen : public IRVisitor {
     task_attribs_.advisory_total_num_threads = 65536;
     task_attribs_.advisory_num_threads_per_group = 128;
 
+    std::vector<SNode *> path;
+    if (stmt->snode != nullptr) {
+      for (auto *sn = stmt->snode; sn != nullptr &&
+                                   sn->type != SNodeType::root;
+           sn = sn->parent) {
+        path.push_back(sn);
+      }
+      std::reverse(path.begin(), path.end());
+    }
+
+    bool hash_root_dense_path =
+        !path.empty() && path[0]->type == SNodeType::hash;
+    for (size_t k = 1; k < path.size(); ++k) {
+      hash_root_dense_path =
+          hash_root_dense_path && path[k]->type == SNodeType::dense;
+    }
+
+    if (hash_root_dense_path) {
+      const int root_id = snode_to_root_.at(stmt->snode->id);
+      const auto &snode_descs = compiled_structs_[root_id].snode_descriptors;
+      const auto &hash_desc = snode_descs.at(path[0]->id);
+      size_t suffix_cells = 1;
+      for (size_t k = 1; k < path.size(); ++k) {
+        suffix_cells *= path[k]->num_cells_per_container;
+      }
+      const size_t total_cells =
+          hash_desc.hash_table_capacity * suffix_cells;
+      task_attribs_.advisory_total_num_threads = (int)total_cells;
+      task_attribs_.advisory_num_threads_per_group =
+          std::min<int>(128, (int)total_cells);
+      if (task_attribs_.advisory_num_threads_per_group == 0) {
+        task_attribs_.advisory_num_threads_per_group = 1;
+      }
+
+      ir_->start_function(kernel_function_);
+      auto u32_t = ir_->u32_type();
+      auto root_buffer = get_buffer_value(BufferInfo(BufferType::Root, root_id),
+                                          PrimitiveType::u32);
+      auto gid = ir_->cast(u32_t, ir_->get_global_invocation_id(0));
+      auto num_cells_const = ir_->uint_immediate_number(u32_t, total_cells);
+
+      spirv::Label in_bounds = ir_->new_label();
+      spirv::Label after_bounds = ir_->new_label();
+      auto in_bounds_cond = ir_->make_value(spv::OpULessThan, ir_->bool_type(),
+                                            gid, num_cells_const);
+      ir_->make_inst(spv::OpSelectionMerge, after_bounds,
+                     spv::SelectionControlMaskNone);
+      ir_->make_inst(spv::OpBranchConditional, in_bounds_cond, in_bounds,
+                     after_bounds);
+      ir_->start_label(in_bounds);
+
+      spirv::Value bucket = gid;
+      spirv::Value inner = ir_->uint_immediate_number(u32_t, 0);
+      if (suffix_cells > 1) {
+        bucket = ir_->make_value(
+            spv::OpUDiv, u32_t, gid,
+            ir_->uint_immediate_number(u32_t, suffix_cells));
+        inner = ir_->make_value(
+            spv::OpUMod, u32_t, gid,
+            ir_->uint_immediate_number(u32_t, suffix_cells));
+      }
+
+      auto hash_base = ir_->uint_immediate_number(
+          u32_t, (uint32_t)hash_desc.mem_offset_in_parent_cell);
+      auto state_ptr = hash_state_ptr(root_buffer, hash_base, hash_desc,
+                                      bucket);
+      auto state = hash_load_stable_state(state_ptr);
+      auto active_cond = ir_->make_value(
+          spv::OpIEqual, ir_->bool_type(), state,
+          ir_->uint_immediate_number(u32_t, 2));
+
+      spirv::Label active_label = ir_->new_label();
+      spirv::Label after_active = ir_->new_label();
+      ir_->make_inst(spv::OpSelectionMerge, after_active,
+                     spv::SelectionControlMaskNone);
+      ir_->make_inst(spv::OpBranchConditional, active_cond, active_label,
+                     after_active);
+      ir_->start_label(active_label);
+
+      auto key_ptr = hash_key_ptr(root_buffer, hash_base, hash_desc, bucket);
+      auto flat_global = ir_->load_variable(key_ptr, u32_t);
+      if (suffix_cells > 1) {
+        flat_global = ir_->add(
+            ir_->mul(flat_global,
+                     ir_->uint_immediate_number(u32_t, suffix_cells)),
+            inner);
+      }
+
+      ir_->register_value("ii", flat_global);
+      stmt->body->accept(this);
+
+      ir_->make_inst(spv::OpBranch, after_active);
+      ir_->start_label(after_active);
+      ir_->make_inst(spv::OpBranch, after_bounds);
+      ir_->start_label(after_bounds);
+
+      ir_->make_inst(spv::OpReturn);
+      ir_->make_inst(spv::OpFunctionEnd);
+
+      task_attribs_.buffer_binds = get_buffer_binds();
+      task_attribs_.texture_binds = get_texture_binds();
+      return;
+    }
+
     // The computation for a single work is wrapped inside a function, so that
     // we can do grid-strided loop.
     ir_->start_function(kernel_function_);
@@ -3594,11 +4226,12 @@ class TaskCodegen : public IRVisitor {
     TI_ASSERT(!path.empty());
 
     // Phase 1d/2c handles dense + bitmasked + pointer nodes. G4 adds
-    // dynamic. Reject everything else (hash / quant_array) early.
+    // dynamic. Hash scans physical buckets but emits logical flat keys.
     for (auto *sn : path) {
       bool ok = sn->type == SNodeType::dense ||
                 sn->type == SNodeType::bitmasked ||
-                sn->type == SNodeType::pointer;
+                sn->type == SNodeType::pointer ||
+                sn->type == SNodeType::hash;
 #if defined(TI_VULKAN_DYNAMIC)
       ok = ok || (sn->type == SNodeType::dynamic);
 #endif
@@ -3625,11 +4258,120 @@ class TaskCodegen : public IRVisitor {
     // its chain, and the runtime zero-fills listgen_buffer before each
     // dispatch (taichi/runtime/gfx/runtime.cpp), so prior listgens in the
     // same chain are simply overwritten.
+    const int n = (int)path.size();
+
+    // Hash is root-only in the frontend contract. For the common and currently
+    // supported Vulkan shape root.hash(...).dense(...).place(...), scan the
+    // physical hash buckets directly and emit logical flat indices. This keeps
+    // the generated shader small and avoids threading hash through the generic
+    // dense/bitmasked address walker.
+    bool hash_root_dense_path = path[0]->type == SNodeType::hash;
+    for (int k = 1; k < n; ++k) {
+      hash_root_dense_path =
+          hash_root_dense_path && path[k]->type == SNodeType::dense;
+    }
+    if (hash_root_dense_path) {
+      const auto &hash_desc = snode_descs.at(path[0]->id);
+      size_t suffix_cells = 1;
+      for (int k = 1; k < n; ++k) {
+        suffix_cells *= path[k]->num_cells_per_container;
+      }
+      const size_t total_cells =
+          hash_desc.hash_table_capacity * suffix_cells;
+      task_attribs_.advisory_total_num_threads = (int)total_cells;
+      task_attribs_.advisory_num_threads_per_group =
+          std::min<int>(128, (int)total_cells);
+      if (task_attribs_.advisory_num_threads_per_group == 0) {
+        task_attribs_.advisory_num_threads_per_group = 1;
+      }
+
+      auto u32_t = ir_->u32_type();
+      auto root_buffer = get_buffer_value(BufferInfo(BufferType::Root, root_id),
+                                          PrimitiveType::u32);
+      auto gid = ir_->cast(u32_t, ir_->get_global_invocation_id(0));
+      auto num_cells_const = ir_->uint_immediate_number(u32_t, total_cells);
+
+      spirv::Label in_bounds = ir_->new_label();
+      spirv::Label after_bounds = ir_->new_label();
+      auto in_bounds_cond = ir_->make_value(spv::OpULessThan, ir_->bool_type(),
+                                            gid, num_cells_const);
+      ir_->make_inst(spv::OpSelectionMerge, after_bounds,
+                     spv::SelectionControlMaskNone);
+      ir_->make_inst(spv::OpBranchConditional, in_bounds_cond, in_bounds,
+                     after_bounds);
+      ir_->start_label(in_bounds);
+
+      spirv::Value bucket = gid;
+      spirv::Value inner = ir_->uint_immediate_number(u32_t, 0);
+      if (suffix_cells > 1) {
+        bucket = ir_->make_value(
+            spv::OpUDiv, u32_t, gid,
+            ir_->uint_immediate_number(u32_t, suffix_cells));
+        inner = ir_->make_value(
+            spv::OpUMod, u32_t, gid,
+            ir_->uint_immediate_number(u32_t, suffix_cells));
+      }
+
+      auto hash_base = ir_->uint_immediate_number(
+          u32_t,
+          (uint32_t)hash_desc.mem_offset_in_parent_cell);
+      auto state_ptr = hash_state_ptr(root_buffer, hash_base, hash_desc,
+                                      bucket);
+      auto state = ir_->load_variable(state_ptr, u32_t);
+      auto active_cond = ir_->make_value(
+          spv::OpIEqual, ir_->bool_type(), state,
+          ir_->uint_immediate_number(u32_t, 2));
+
+      spirv::Label active_label = ir_->new_label();
+      spirv::Label after_active = ir_->new_label();
+      ir_->make_inst(spv::OpSelectionMerge, after_active,
+                     spv::SelectionControlMaskNone);
+      ir_->make_inst(spv::OpBranchConditional, active_cond, active_label,
+                     after_active);
+      ir_->start_label(active_label);
+
+      auto key_ptr = hash_key_ptr(root_buffer, hash_base, hash_desc, bucket);
+      auto flat_global = ir_->load_variable(key_ptr, u32_t);
+      if (suffix_cells > 1) {
+        flat_global = ir_->add(
+            ir_->mul(flat_global,
+                     ir_->uint_immediate_number(u32_t, suffix_cells)),
+            inner);
+      }
+      auto count_ptr = ir_->struct_array_access(u32_t, listgen_buffer,
+                                                ir_->const_i32_zero_);
+      auto slot = ir_->make_value(spv::OpAtomicIAdd, u32_t, count_ptr,
+                                  /*scope=*/ir_->const_i32_one_,
+                                  /*semantics=*/ir_->const_i32_zero_,
+                                  ir_->uint_immediate_number(u32_t, 1));
+      auto idx_in_buffer =
+          ir_->add(slot, ir_->uint_immediate_number(u32_t, 1));
+      auto idx_ptr =
+          ir_->struct_array_access(u32_t, listgen_buffer, idx_in_buffer);
+      ir_->store_variable(idx_ptr, flat_global);
+      ir_->make_inst(spv::OpBranch, after_active);
+      ir_->start_label(after_active);
+      ir_->make_inst(spv::OpBranch, after_bounds);
+      ir_->start_label(after_bounds);
+
+      ir_->make_inst(spv::OpReturn);
+      ir_->make_inst(spv::OpFunctionEnd);
+
+      task_attribs_.buffer_binds = get_buffer_binds();
+      task_attribs_.texture_binds = get_texture_binds();
+      return;
+    }
 
     // ----- Full scan over path -----
-    const int n = (int)path.size();
     size_t total_cells = 1;
-    for (auto *sn : path) total_cells *= sn->num_cells_per_container;
+    auto scan_extent = [&](SNode *sn) -> size_t {
+      const auto &desc = snode_descs.at(sn->id);
+      if (sn->type == SNodeType::hash) {
+        return desc.hash_table_capacity;
+      }
+      return sn->num_cells_per_container;
+    };
+    for (auto *sn : path) total_cells *= scan_extent(sn);
 
     task_attribs_.advisory_total_num_threads = (int)total_cells;
     task_attribs_.advisory_num_threads_per_group =
@@ -3684,7 +4426,7 @@ class TaskCodegen : public IRVisitor {
     // with acc[n-1] = 1 and acc[k] = acc[k+1] * shape[k+1] (row-major).
     std::vector<size_t> shape(n), acc(n);
     for (int k = 0; k < n; ++k) {
-      shape[k] = path[k]->num_cells_per_container;
+      shape[k] = scan_extent(path[k]);
     }
     acc[n - 1] = 1;
     for (int k = n - 2; k >= 0; --k) acc[k] = acc[k + 1] * shape[k + 1];
@@ -3707,6 +4449,7 @@ class TaskCodegen : public IRVisitor {
                           ir_->uint_immediate_number(u32_t, shape[k]));
       i_path[k] = v;
     }
+    std::vector<spirv::Value> coord_path = i_path;
 
     // Walk path computing the running container address and ANDing every
     // bitmasked ancestor's active bit.
@@ -3733,7 +4476,23 @@ class TaskCodegen : public IRVisitor {
       // level addr advance.
       spirv::Value pointer_effective_slot;  // (slot == 0) ? 0 : slot - 1
       bool path_k_is_pointer = (path[k]->type == SNodeType::pointer);
-      if (path_k_is_pointer) {
+      bool path_k_is_hash = (path[k]->type == SNodeType::hash);
+      if (path_k_is_hash) {
+        auto state_ptr =
+            hash_state_ptr(level_buffers[(size_t)k], addr, desc_k, i_path[k]);
+        auto state = ir_->load_variable(state_ptr, u32_t);
+        auto occupied = ir_->make_value(
+            spv::OpIEqual, ir_->bool_type(), state,
+            ir_->uint_immediate_number(u32_t, 2));
+        auto bit = ir_->make_value(
+            spv::OpSelect, u32_t, occupied,
+            ir_->uint_immediate_number(u32_t, 1),
+            ir_->uint_immediate_number(u32_t, 0));
+        active = ir_->make_value(spv::OpBitwiseAnd, u32_t, active, bit);
+        auto key_ptr =
+            hash_key_ptr(level_buffers[(size_t)k], addr, desc_k, i_path[k]);
+        coord_path[k] = ir_->load_variable(key_ptr, u32_t);
+      } else if (path_k_is_pointer) {
         // slot_byte_addr = addr + 4 * i_path[k]
         auto slot_byte_off = ir_->make_value(
             spv::OpShiftLeftLogical, u32_t, i_path[k],
@@ -3837,6 +4596,15 @@ class TaskCodegen : public IRVisitor {
                              .mem_offset_in_parent_cell));
           continue;
         }
+        if (path_k_is_hash) {
+          addr = hash_payload_byte_offset(addr, desc_k, i_path[k]);
+          addr = ir_->add(
+              addr,
+              ir_->uint_immediate_number(
+                  u32_t, (uint32_t)snode_descs.at(path[k + 1]->id)
+                             .mem_offset_in_parent_cell));
+          continue;
+        }
         auto step = ir_->mul(i_path[k], cell_stride_v);
         addr = ir_->add(addr, step);
         addr = ir_->add(
@@ -3873,7 +4641,7 @@ class TaskCodegen : public IRVisitor {
           if (!path[k]->extractors[a].active) continue;
           int local_acc = path[k]->extractors[a].acc_shape;
           int local_shape = path[k]->extractors[a].shape;
-          spirv::Value local = i_path[k];
+          spirv::Value local = coord_path[k];
           if (local_acc > 1) {
             local = ir_->make_value(
                 spv::OpUDiv, u32_t, local,
