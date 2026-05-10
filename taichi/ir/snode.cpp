@@ -49,10 +49,9 @@ SNode &SNode::create_node(std::vector<Axis> axes,
             axes.size(), sizes.size()));
   }
 
-  if (type == SNodeType::hash && depth != 0) {
+  if (type == SNodeType::hash && is_bit_level) {
     ErrorEmitter(TaichiRuntimeError(), &dbg_info,
-                 "hashed node must be child of root due to initialization "
-                 "memset limitation.");
+                 "hashed node cannot be created under bit-level parents.");
   }
 
   auto &new_node = insert_children(type);

@@ -372,6 +372,34 @@ std::unique_ptr<RuntimeObject> TaskCodeGenLLVM::emit_struct_meta_object(
               tlctx->get_constant((uint64)aux_offset +
                                   tlctx->get_struct_element_offset(
                                       aux_type, kHashAuxOverflowCountIndex)));
+    const uint64 no_offset = static_cast<uint64>(kHashSNodeNoOffset);
+    if (compile_config.hash_snode_active_list) {
+      meta->set("active_slots_offset",
+                tlctx->get_constant((uint64)aux_offset +
+                                    tlctx->get_struct_element_offset(
+                                        aux_type, kHashAuxActiveSlotsIndex)));
+      meta->set(
+          "active_slots_count_offset",
+          tlctx->get_constant((uint64)aux_offset +
+                              tlctx->get_struct_element_offset(
+                                  aux_type, kHashAuxActiveSlotsCountIndex)));
+    } else {
+      meta->set("active_slots_offset", tlctx->get_constant(no_offset));
+      meta->set("active_slots_count_offset", tlctx->get_constant(no_offset));
+    }
+    if (compile_config.hash_snode_diagnostics ||
+        compile_config.hash_snode_active_list) {
+      const int tombstone_index =
+          compile_config.hash_snode_active_list
+              ? kHashAuxTombstoneCountIndexWithActiveList
+              : kHashAuxTombstoneCountIndexNoActiveList;
+      meta->set("tombstone_count_offset",
+                tlctx->get_constant((uint64)aux_offset +
+                                    tlctx->get_struct_element_offset(
+                                        aux_type, tombstone_index)));
+    } else {
+      meta->set("tombstone_count_offset", tlctx->get_constant(no_offset));
+    }
     meta->set("payload_offset", tlctx->get_constant((uint64)payload_offset));
     for (int i = 0; i < taichi_max_num_indices; i++) {
       meta->set("extract_shape", tlctx->get_constant(i),
@@ -1329,7 +1357,12 @@ void TaskCodeGenLLVM::emit_list_gen(OffloadedStmt *listgen) {
       call("element_listgen_root", get_runtime(), meta_parent, meta_child);
     }
   } else {
-    call("element_listgen_nonroot", get_runtime(), meta_parent, meta_child);
+    if (snode_child->type == SNodeType::hash) {
+      call("element_listgen_nonroot_hash", get_runtime(), meta_parent,
+           meta_child);
+    } else {
+      call("element_listgen_nonroot", get_runtime(), meta_parent, meta_child);
+    }
   }
 }
 
@@ -2501,9 +2534,10 @@ void TaskCodeGenLLVM::create_offload_struct_for(OffloadedStmt *stmt) {
     auto coord_object = RuntimeObject(kLLVMPhysicalCoordinatesName, this,
                                       builder.get(), new_coordinates);
 
+    // Hash listgen emits singleton ranges for occupied keys only, so an
+    // additional hash is_active probe here is redundant on the struct_for path.
     if (leaf_block->type == SNodeType::bitmasked ||
-        leaf_block->type == SNodeType::pointer ||
-        leaf_block->type == SNodeType::hash) {
+        leaf_block->type == SNodeType::pointer) {
       // test whether the current voxel is active or not
       auto is_active = call(leaf_block, element.get("element"), "is_active",
                             {builder->CreateLoad(loop_index_ty, loop_index)});

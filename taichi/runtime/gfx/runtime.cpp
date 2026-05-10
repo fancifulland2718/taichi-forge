@@ -227,6 +227,7 @@ class HostDeviceContextBlitter {
 }  // namespace
 
 constexpr size_t kGtmpBufferSize = 1024 * 1024;
+constexpr size_t kHashOverflowBufferSize = 5 * sizeof(uint32_t);
 constexpr size_t kListGenBufferSize = 32 << 20;
 constexpr size_t kListGenMinBufferSize = sizeof(uint32_t);
 constexpr size_t kListGenAutoSlackEntries = 1024;
@@ -278,6 +279,7 @@ CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
     : ti_kernel_attribs_(*ti_params.ti_kernel_attribs),
       device_(ti_params.device) {
   input_buffers_[BufferType::GlobalTmps] = ti_params.global_tmps_buffer;
+  input_buffers_[BufferType::HashOverflow] = ti_params.hash_overflow_buffer;
   input_buffers_[BufferType::ListGen] = ti_params.listgen_buffer;
 
   // Compiled_structs can be empty if loading a kernel from an AOT module as
@@ -611,7 +613,9 @@ void GfxRuntime::register_hash_overflow_checks(
     const CompiledSNodeStructs &compiled_structs) {
   for (const auto &[sid, desc] : compiled_structs.snode_descriptors) {
     if (desc.snode == nullptr || desc.snode->type != SNodeType::hash ||
-        desc.hash_table_capacity == 0) {
+        desc.hash_table_capacity == 0 ||
+        desc.snode->parent == nullptr ||
+        desc.snode->parent->type != SNodeType::root) {
       continue;
     }
     size_t base_offset = 0;
@@ -623,13 +627,18 @@ void GfxRuntime::register_hash_overflow_checks(
                      sn->id);
       base_offset += it->second.mem_offset_in_parent_cell;
     }
+    const size_t no_offset = static_cast<size_t>(-1);
     hash_overflow_watches_.push_back(
-        {root_id, sid, base_offset + desc.hash_overflow_count_offset});
+        {root_id, sid, base_offset + desc.hash_overflow_count_offset,
+         base_offset + desc.hash_active_count_offset,
+         desc.hash_tombstone_count_offset == no_offset
+             ? no_offset
+             : base_offset + desc.hash_tombstone_count_offset});
   }
 }
 
 void GfxRuntime::check_hash_overflow_counters() {
-  if (hash_overflow_error_reported_ || hash_overflow_watches_.empty()) {
+  if (hash_overflow_error_reported_) {
     return;
   }
 
@@ -650,37 +659,90 @@ void GfxRuntime::check_hash_overflow_counters() {
         !root_buffers_[watch.root_id]) {
       continue;
     }
-    ptrs.push_back(root_buffers_[watch.root_id]->get_ptr(watch.byte_offset));
+    ptrs.push_back(
+        root_buffers_[watch.root_id]->get_ptr(watch.overflow_byte_offset));
     host_ptrs.push_back(&values[ptrs.size() - 1]);
     sizes.push_back(sizeof(uint32_t));
     live_watches.push_back(watch);
   }
-  if (ptrs.empty()) {
-    return;
-  }
-
-  auto status = device_->readback_data(ptrs.data(), host_ptrs.data(),
-                                       sizes.data(), int(ptrs.size()));
-  TI_ERROR_IF(status != RhiResult::success,
-              "Failed to read Hash SNode overflow counters.");
-
   int first_overflow = -1;
-  for (int i = 0; i < static_cast<int>(live_watches.size()); ++i) {
-    if (values[i] != 0) {
-      first_overflow = i;
-      break;
+  if (!ptrs.empty()) {
+    auto status = device_->readback_data(ptrs.data(), host_ptrs.data(),
+                                         sizes.data(), int(ptrs.size()));
+    TI_ERROR_IF(status != RhiResult::success,
+                "Failed to read Hash SNode overflow counters.");
+
+    for (int i = 0; i < static_cast<int>(live_watches.size()); ++i) {
+      if (values[i] != 0) {
+        first_overflow = i;
+        break;
+      }
     }
   }
-  if (first_overflow < 0) {
-    return;
+
+  if (first_overflow >= 0) {
+    const auto &watch = live_watches[first_overflow];
+    uint32_t active_count = 0;
+    uint32_t tombstone_count = 0;
+    if (watch.root_id >= 0 &&
+        watch.root_id < static_cast<int>(root_buffers_.size()) &&
+        root_buffers_[watch.root_id]) {
+      std::vector<DevicePtr> diag_ptrs;
+      std::vector<void *> diag_host_ptrs;
+      std::vector<size_t> diag_sizes;
+      diag_ptrs.push_back(
+          root_buffers_[watch.root_id]->get_ptr(watch.active_byte_offset));
+      diag_host_ptrs.push_back(&active_count);
+      diag_sizes.push_back(sizeof(uint32_t));
+      if (watch.tombstone_byte_offset != static_cast<size_t>(-1)) {
+        diag_ptrs.push_back(
+            root_buffers_[watch.root_id]->get_ptr(watch.tombstone_byte_offset));
+        diag_host_ptrs.push_back(&tombstone_count);
+        diag_sizes.push_back(sizeof(uint32_t));
+      }
+      auto diag_status = device_->readback_data(
+          diag_ptrs.data(), diag_host_ptrs.data(), diag_sizes.data(),
+          int(diag_ptrs.size()));
+      if (diag_status != RhiResult::success) {
+        active_count = 0;
+        tombstone_count = 0;
+      }
+    }
+    hash_overflow_error_reported_ = true;
+    TI_ERROR(
+        "Hash SNode table overflow on root {} SNode {}. Increase "
+        "capacity=... or expected_active=... before materialization, or "
+        "rebuild the SNode tree after high churn. active_count={}, "
+        "tombstone_count={}.",
+        watch.root_id, watch.snode_id, active_count, tombstone_count);
   }
 
-  const auto &watch = live_watches[first_overflow];
+  if (!hash_overflow_buffer_) {
+    return;
+  }
+  std::array<uint32_t, 5> aggregate{};
+  std::array<void *, 1> aggregate_host_ptrs{aggregate.data()};
+  std::array<DevicePtr, 1> aggregate_ptrs{
+      hash_overflow_buffer_->get_ptr(0)};
+  std::array<size_t, 1> aggregate_sizes{aggregate.size() * sizeof(uint32_t)};
+  auto aggregate_status = device_->readback_data(
+      aggregate_ptrs.data(), aggregate_host_ptrs.data(),
+      aggregate_sizes.data(), int(aggregate_ptrs.size()));
+  TI_ERROR_IF(aggregate_status != RhiResult::success,
+              "Failed to read non-root Hash SNode overflow diagnostics.");
+  if (aggregate[0] == 0) {
+    return;
+  }
+  uint32_t active_count = 0;
+  uint32_t tombstone_count = 0;
+  active_count = aggregate[3];
+  tombstone_count = aggregate[4];
   hash_overflow_error_reported_ = true;
   TI_ERROR(
       "Hash SNode table overflow on root {} SNode {}. Increase "
-      "capacity=... or expected_active=... before materialization.",
-      watch.root_id, watch.snode_id);
+      "capacity=... or expected_active=... before materialization, or rebuild "
+      "the SNode tree after high churn. active_count={}, tombstone_count={}.",
+      aggregate[1], aggregate[2], active_count, tombstone_count);
 }
 
 GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
@@ -694,6 +756,7 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
     params.root_buffers.push_back(root_buffers_[root].get());
   }
   params.global_tmps_buffer = global_tmps_buffer_.get();
+  params.hash_overflow_buffer = hash_overflow_buffer_.get();
   params.listgen_buffer = listgen_buffer_.get();
 #if defined(TI_WITH_VULKAN_POINTER)
   // B-3.b (2026-05): 枚举所有独立 pool buffer。allocator->independent_pool_alloc()
@@ -1572,6 +1635,15 @@ void GfxRuntime::init_nonroot_buffers() {
     TI_ASSERT_INFO(res == RhiResult::success, "gtmp allocation failed");
     global_tmps_buffer_ = std::move(buf);
   }
+  {
+    auto [buf, res] = device_->allocate_memory_unique(
+        {kHashOverflowBufferSize,
+         /*host_write=*/false, /*host_read=*/true,
+         /*export_sharing=*/false, AllocUsage::Storage});
+    TI_ASSERT_INFO(res == RhiResult::success,
+                   "hash overflow diagnostics allocation failed");
+    hash_overflow_buffer_ = std::move(buf);
+  }
 
   if (listgen_initial_buffer_size_ > 0) {
     ensure_listgen_buffer_bytes(listgen_initial_buffer_size_, "initialization");
@@ -1585,6 +1657,8 @@ void GfxRuntime::init_nonroot_buffers() {
 
   cmdlist->buffer_fill(global_tmps_buffer_->get_ptr(0), kBufferSizeEntireSize,
                        /*data=*/0);
+  cmdlist->buffer_fill(hash_overflow_buffer_->get_ptr(0),
+                       kBufferSizeEntireSize, /*data=*/0);
   stream->submit_synced(cmdlist.get());
 }
 

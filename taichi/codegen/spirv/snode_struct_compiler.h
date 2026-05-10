@@ -50,7 +50,7 @@ struct SNodeDescriptor {
   // when dynamic is enabled, else 0 (legacy flat layout).
   size_t dynamic_length_offset_in_container = 0;
 
-  // Hash SNode layout (root child only, static open-addressing table):
+  // Hash SNode layout (static open-addressing table in each parent cell):
   //   [state u32 * capacity][key i32 * capacity]
   //   [payload cell_stride * capacity][active_count u32][overflow_count u32]
   //   [ambient payload cell]
@@ -69,6 +69,9 @@ struct SNodeDescriptor {
   size_t hash_active_count_offset = 0;
   size_t hash_overflow_count_offset = 0;
   size_t hash_ambient_offset = 0;
+  size_t hash_active_slots_offset = 0;
+  size_t hash_active_slots_count_offset = 0;
+  size_t hash_tombstone_count_offset = 0;
 
   SNode *get_child(int ch_i) const {
     return snode->ch[ch_i].get();
@@ -128,6 +131,10 @@ struct PointerLayoutPolicy {
   // C-9（2026-05）：pointer alloc 协议切换为 deterministic slot mapping。
   // 详见 §14。layout 端额外 gating capacity >= worst_capacity && bump。
   bool deterministic_slot{true};
+  // H4.6/H4.7 (2026-05): hash SNode optional diagnostics layout. These are
+  // default-off so current SPIR-V root-buffer layouts stay byte-equivalent.
+  bool hash_active_list{false};
+  bool hash_diagnostics{false};
 };
 
 CompiledSNodeStructs compile_snode_structs(

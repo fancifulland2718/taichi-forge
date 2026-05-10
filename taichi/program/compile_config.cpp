@@ -97,6 +97,8 @@ CompileConfig::CompileConfig() {
   // Users who want a safety net can still set this explicitly.
   cuda_sparse_pool_size_floor_MiB = 0;
   hash_snode_default_load_factor = 0.5;
+  hash_snode_active_list = false;
+  hash_snode_diagnostics = false;
 }
 
 void CompileConfig::fit() {

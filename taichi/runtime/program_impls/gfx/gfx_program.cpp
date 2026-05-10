@@ -45,6 +45,8 @@ void GfxProgramImpl::compile_snode_tree_types(SNodeTree *tree) {
   policy.allocator_kind = config->vulkan_pointer_allocator_kind;
   policy.max_chunks = config->vulkan_pointer_max_chunks;
   policy.deterministic_slot = config->vulkan_pointer_deterministic_slot;
+  policy.hash_active_list = config->hash_snode_active_list;
+  policy.hash_diagnostics = config->hash_snode_diagnostics;
   coerce_pointer_policy_for_chunked(policy);
   if (runtime_) {
     snode_tree_mgr_->materialize_snode_tree(tree, policy);
@@ -66,6 +68,8 @@ void GfxProgramImpl::materialize_snode_tree(SNodeTree *tree,
   policy.allocator_kind = config->vulkan_pointer_allocator_kind;
   policy.max_chunks = config->vulkan_pointer_max_chunks;
   policy.deterministic_slot = config->vulkan_pointer_deterministic_slot;
+  policy.hash_active_list = config->hash_snode_active_list;
+  policy.hash_diagnostics = config->hash_snode_diagnostics;
   coerce_pointer_policy_for_chunked(policy);
   snode_tree_mgr_->materialize_snode_tree(tree, policy);
 }

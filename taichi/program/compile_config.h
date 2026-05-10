@@ -99,6 +99,15 @@ struct CompileConfig {
   // per-node hash_load_factor. This is intentionally resolved before SNodeTree
   // materialization so the backend still sees a fixed table capacity.
   double hash_snode_default_load_factor{0.5};
+  // H4.6 (2026-05): opt-in active bucket list for hash SNode listgen. Default
+  // OFF keeps the existing capacity scan and layout. When ON, backends may
+  // use an active bucket list only while tombstone diagnostics prove the list
+  // is not stale.
+  bool hash_snode_active_list{false};
+  // H4.7 (2026-05): opt-in hash SNode diagnostics counters. Default OFF
+  // keeps the minimal table layout. H4.6 active-list implicitly needs the
+  // tombstone counter for correctness fallback.
+  bool hash_snode_diagnostics{false};
   // B2 (2026-04-26): user-facing fine-grained SPIR-V optimizer pass
   // disable list. Each entry is a pass name (case-sensitive) matching one
   // of the spvtools::Create*Pass identifiers used in

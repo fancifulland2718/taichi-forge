@@ -31,6 +31,9 @@ std::string TaskAttributes::buffers_name(BufferInfo b) {
     return std::string("NodeAllocatorPool: ") +
            fmt::format("{}", fmt::join(b.root_id, "_"));
   }
+  if (b.type == BufferType::HashOverflow) {
+    return "HashOverflow";
+  }
   TI_ERROR("unrecognized buffer type");
 }
 

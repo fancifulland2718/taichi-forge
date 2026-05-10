@@ -9,6 +9,14 @@ from taichi_forge.lang.field import BitpackedFields, Field
 from taichi_forge.lang.util import get_traceback
 
 
+def _raise_hash_child_unsupported(child_kind):
+    raise TaichiRuntimeError(
+        "Hash SNode currently supports pointer(), dense(), bitmasked(), "
+        "dynamic(), and place() descendants; "
+        f"cannot add {child_kind} under a hash SNode."
+    )
+
+
 def _hash_logical_elements(axes, dimensions):
     try:
         axis_count = len(axes)
@@ -224,6 +232,15 @@ class SNode:
             )
         if not _ti_core.is_extension_supported(cfg.arch, _ti_core.Extension.sparse):
             raise TaichiRuntimeError("Hash SNode is not supported on this backend.")
+        if self.ptr.type in (
+            _ti_core.SNodeType.quant_array,
+            _ti_core.SNodeType.bit_struct,
+        ):
+            raise TaichiRuntimeError(
+                "Hash SNode cannot be created under quant_array or bit_struct "
+                "parents. Supported parents are root, dense, pointer, "
+                "bitmasked, dynamic, and hash."
+            )
 
         axes, dimensions, logical_elements = _hash_logical_elements(axes, dimensions)
         table_capacity, _ = _select_hash_snode_capacity(

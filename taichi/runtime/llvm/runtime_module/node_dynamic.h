@@ -13,6 +13,15 @@ struct DynamicMeta : public StructMeta {
 
 STRUCT_FIELD(DynamicMeta, chunk_size);
 
+inline Ptr Dynamic_allocate_zeroed_chunk(DynamicMeta *meta) {
+  auto rt = meta->context->runtime;
+  auto alloc = rt->node_allocators[meta->snode_id];
+  auto chunk = alloc->allocate();
+  std::memset(chunk, 0, sizeof(Ptr) + meta->chunk_size * meta->element_size);
+  grid_memfence();
+  return chunk;
+}
+
 void Dynamic_activate(Ptr meta_, Ptr node_, int i) {
   auto meta = (DynamicMeta *)(meta_);
   auto node = (DynamicNode *)(node_);
@@ -29,9 +38,7 @@ void Dynamic_activate(Ptr meta_, Ptr node_, int i) {
     if (*p_chunk_ptr == nullptr) {
       locked_task(Ptr(&node->lock), [&] {
         if (*p_chunk_ptr == nullptr) {
-          auto rt = meta->context->runtime;
-          auto alloc = rt->node_allocators[meta->snode_id];
-          *p_chunk_ptr = alloc->allocate();
+          *p_chunk_ptr = Dynamic_allocate_zeroed_chunk(meta);
         }
       });
     }
@@ -75,9 +82,7 @@ Ptr Dynamic_allocate(Ptr meta_, Ptr node_, i32 *len) {
     if (*p_chunk_ptr == nullptr) {
       locked_task(Ptr(&node->lock), [&] {
         if (*p_chunk_ptr == nullptr) {
-          auto rt = meta->context->runtime;
-          auto alloc = rt->node_allocators[meta->snode_id];
-          *p_chunk_ptr = alloc->allocate();
+          *p_chunk_ptr = Dynamic_allocate_zeroed_chunk(meta);
         }
       });
     }

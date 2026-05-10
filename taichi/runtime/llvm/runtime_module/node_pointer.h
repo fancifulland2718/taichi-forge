@@ -7,6 +7,16 @@ struct PointerMeta : public StructMeta {
 
 STRUCT_FIELD(PointerMeta, deterministic_slot);
 
+constexpr u64 pointer_slot_busy = ~0ULL;
+
+inline bool Pointer_compare_exchange_u64(volatile u64 *dest,
+                                         u64 expected,
+                                         u64 desired) {
+  return __atomic_compare_exchange(
+      dest, &expected, &desired, true, std::memory_order::memory_order_seq_cst,
+      std::memory_order::memory_order_seq_cst);
+}
+
 i32 Pointer_get_num_elements(Ptr meta, Ptr node) {
   return ((StructMeta *)meta)->max_num_elements;
 }
@@ -64,9 +74,15 @@ void Pointer_activate(Ptr meta_, Ptr node, int i) {
         (Ptr)((uint64_t)nm->dedicated_chunk.preallocated_tail - det_bytes);
     Ptr pool_cell =
         (Ptr)((uint64_t)pool_base + (uint64_t)i * meta->element_size);
-    auto old = atomic_exchange_u64((u64 *)data_ptr, (u64)pool_cell);
-    if (old == 0) {
+    if (Pointer_compare_exchange_u64((volatile u64 *)data_ptr, 0,
+                                     pointer_slot_busy)) {
+      std::memset(pool_cell, 0, meta->element_size);
+      grid_memfence();
+      atomic_exchange_u64((u64 *)data_ptr, (u64)pool_cell);
       mark_element_lists_dirty_if_reuse(meta);
+    } else {
+      while (*(volatile u64 *)data_ptr == pointer_slot_busy) {
+      }
     }
     return;
   }
@@ -83,6 +99,8 @@ void Pointer_activate(Ptr meta_, Ptr node, int i) {
             auto rt = meta->context->runtime;
             auto alloc = rt->node_allocators[meta->snode_id];
             auto allocated = (u64)alloc->allocate();
+            std::memset((Ptr)allocated, 0, meta->element_size);
+            grid_memfence();
             // TODO: Not sure if we really need atomic_exchange here,
             // just to be safe.
             atomic_exchange_u64((u64 *)data_ptr, allocated);

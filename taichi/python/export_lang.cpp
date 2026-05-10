@@ -180,6 +180,10 @@ void export_lang(py::module &m) {
                      &CompileConfig::hash_snode_experimental)
       .def_readwrite("hash_snode_default_load_factor",
                      &CompileConfig::hash_snode_default_load_factor)
+      .def_readwrite("hash_snode_active_list",
+                     &CompileConfig::hash_snode_active_list)
+      .def_readwrite("hash_snode_diagnostics",
+                     &CompileConfig::hash_snode_diagnostics)
       .def_readwrite("spirv_disabled_passes",
                      &CompileConfig::spirv_disabled_passes)
       .def_readwrite("spirv_adaptive_opt",

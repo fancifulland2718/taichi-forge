@@ -40,6 +40,10 @@ struct TaskAttributes {
     // the value sits at the END of the enum to preserve offline-cache hash
     // stability for existing kernels (which serialize BufferType as int).
     NodeAllocatorPool,
+    // H4.11: small runtime diagnostics buffer for hash SNode overflow in
+    // parent-instance layouts where no single host-static root-buffer offset
+    // can represent all tables.
+    HashOverflow,
   };
 
   struct BufferInfo {

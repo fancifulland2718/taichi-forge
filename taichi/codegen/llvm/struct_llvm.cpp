@@ -115,8 +115,16 @@ void StructCompilerLLVM::generate_types(SNode &snode) {
     auto i32_type = llvm::Type::getInt32Ty(*ctx);
     auto state_type = llvm::ArrayType::get(i32_type, capacity);
     auto key_type = llvm::ArrayType::get(i32_type, capacity);
-    aux_type = llvm::StructType::get(*ctx, {state_type, key_type, i32_type,
-                                            i32_type});
+    std::vector<llvm::Type *> aux_fields = {state_type, key_type, i32_type,
+                                            i32_type};
+    if (config_.hash_snode_active_list) {
+      aux_fields.push_back(llvm::ArrayType::get(i32_type, capacity));
+      aux_fields.push_back(i32_type);
+    }
+    if (config_.hash_snode_diagnostics || config_.hash_snode_active_list) {
+      aux_fields.push_back(i32_type);
+    }
+    aux_type = llvm::StructType::get(*ctx, aux_fields);
     body_type = llvm::ArrayType::get(ch_type, capacity);
   } else if (type == SNodeType::dynamic) {
     // mutex and n (number of elements)

@@ -13,6 +13,10 @@ constexpr int kHashAuxStateIndex = 0;
 constexpr int kHashAuxKeyIndex = 1;
 constexpr int kHashAuxActiveCountIndex = 2;
 constexpr int kHashAuxOverflowCountIndex = 3;
+constexpr int kHashAuxActiveSlotsIndex = 4;
+constexpr int kHashAuxActiveSlotsCountIndex = 5;
+constexpr int kHashAuxTombstoneCountIndexWithActiveList = 6;
+constexpr int kHashAuxTombstoneCountIndexNoActiveList = 4;
 constexpr std::size_t kHashSNodeNoOffset =
     std::numeric_limits<std::size_t>::max();
 
@@ -51,7 +55,9 @@ inline int64 get_hash_snode_capacity(const SNode &snode) {
 inline HashSNodeFlatLayout compute_hash_snode_flat_layout(
     const SNode &snode,
     std::size_t payload_stride,
-    bool include_ambient_payload) {
+    bool include_ambient_payload,
+    bool include_active_slots = false,
+    bool include_tombstone_count = false) {
   TI_ERROR_IF(payload_stride == 0 || payload_stride % 4 != 0,
               "Hash SNode requires a positive 4-byte aligned payload cell "
               "size, got {} bytes.",
@@ -71,15 +77,28 @@ inline HashSNodeFlatLayout compute_hash_snode_flat_layout(
                static_cast<std::size_t>(4));
   layout.overflow_count_offset = layout.active_count_offset + 4;
 
+  std::size_t cursor = layout.overflow_count_offset + 4;
+  if (include_active_slots) {
+    layout.active_slots_offset =
+        align_up(cursor, static_cast<std::size_t>(4));
+    cursor = layout.active_slots_offset + layout.table_capacity * 4;
+    layout.active_slots_count_offset =
+        align_up(cursor, static_cast<std::size_t>(4));
+    cursor = layout.active_slots_count_offset + 4;
+  }
+  if (include_tombstone_count) {
+    layout.tombstone_count_offset =
+        align_up(cursor, static_cast<std::size_t>(4));
+    cursor = layout.tombstone_count_offset + 4;
+  }
+
   if (include_ambient_payload) {
-    layout.ambient_offset =
-        align_up(layout.overflow_count_offset + 4, static_cast<std::size_t>(4));
+    layout.ambient_offset = align_up(cursor, static_cast<std::size_t>(4));
     layout.container_stride =
         align_up(layout.ambient_offset + payload_stride,
                  static_cast<std::size_t>(4));
   } else {
-    layout.container_stride =
-        align_up(layout.overflow_count_offset + 4, static_cast<std::size_t>(4));
+    layout.container_stride = align_up(cursor, static_cast<std::size_t>(4));
   }
   return layout;
 }

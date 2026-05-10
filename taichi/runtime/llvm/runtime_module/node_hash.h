@@ -7,6 +7,9 @@ struct HashMeta : public StructMeta {
   std::size_t payload_offset;
   std::size_t active_count_offset;
   std::size_t overflow_count_offset;
+  std::size_t active_slots_offset;
+  std::size_t active_slots_count_offset;
+  std::size_t tombstone_count_offset;
   i32 extract_shape[taichi_max_num_indices];
   i32 extract_acc_shape[taichi_max_num_indices];
 };
@@ -17,9 +20,13 @@ STRUCT_FIELD(HashMeta, key_offset);
 STRUCT_FIELD(HashMeta, payload_offset);
 STRUCT_FIELD(HashMeta, active_count_offset);
 STRUCT_FIELD(HashMeta, overflow_count_offset);
+STRUCT_FIELD(HashMeta, active_slots_offset);
+STRUCT_FIELD(HashMeta, active_slots_count_offset);
+STRUCT_FIELD(HashMeta, tombstone_count_offset);
 STRUCT_FIELD_ARRAY(HashMeta, extract_shape);
 STRUCT_FIELD_ARRAY(HashMeta, extract_acc_shape);
 
+constexpr std::size_t hash_no_offset = (std::size_t)-1;
 constexpr i32 hash_state_empty = 0;
 constexpr i32 hash_state_busy = 1;
 constexpr i32 hash_state_occupied = 2;
@@ -43,6 +50,27 @@ inline i32 *Hash_active_count(HashMeta *meta, Ptr node) {
 
 inline i32 *Hash_overflow_count(HashMeta *meta, Ptr node) {
   return (i32 *)(node + meta->overflow_count_offset);
+}
+
+inline bool Hash_has_active_slots(HashMeta *meta) {
+  return meta->active_slots_offset != hash_no_offset &&
+         meta->active_slots_count_offset != hash_no_offset;
+}
+
+inline bool Hash_has_tombstone_count(HashMeta *meta) {
+  return meta->tombstone_count_offset != hash_no_offset;
+}
+
+inline i32 *Hash_active_slots(HashMeta *meta, Ptr node) {
+  return (i32 *)(node + meta->active_slots_offset);
+}
+
+inline i32 *Hash_active_slots_count(HashMeta *meta, Ptr node) {
+  return (i32 *)(node + meta->active_slots_count_offset);
+}
+
+inline i32 *Hash_tombstone_count(HashMeta *meta, Ptr node) {
+  return (i32 *)(node + meta->tombstone_count_offset);
 }
 
 inline u32 Hash_mix_u32(u32 x) {
@@ -91,13 +119,26 @@ inline i32 Hash_find_bucket(HashMeta *meta, Ptr node, i32 key) {
   return -1;
 }
 
-inline void Hash_publish_bucket(HashMeta *meta, Ptr node, i64 bucket, i32 key) {
+inline void Hash_publish_bucket(HashMeta *meta,
+                                Ptr node,
+                                i64 bucket,
+                                i32 key,
+                                bool reused_tombstone) {
   auto states = Hash_states(meta, node);
   auto keys = Hash_keys(meta, node);
   keys[bucket] = key;
   std::memset(Hash_payload(meta, node, bucket), 0, meta->element_size);
   atomic_exchange_i32(&states[bucket], hash_state_occupied);
   atomic_add_i32(Hash_active_count(meta, node), 1);
+  if (Hash_has_active_slots(meta) && !reused_tombstone) {
+    auto slot = atomic_add_i32(Hash_active_slots_count(meta, node), 1);
+    if (slot >= 0 && slot < meta->table_capacity) {
+      Hash_active_slots(meta, node)[slot] = (i32)bucket;
+    }
+  }
+  if (reused_tombstone && Hash_has_tombstone_count(meta)) {
+    atomic_add_i32(Hash_tombstone_count(meta, node), -1);
+  }
   mark_element_lists_dirty_if_reuse(meta);
 }
 
@@ -131,7 +172,8 @@ inline i32 Hash_find_or_insert_bucket(HashMeta *meta, Ptr node, i32 key) {
           first_tombstone >= 0 ? hash_state_tombstone : hash_state_empty;
       if (Hash_compare_exchange_i32(&states[target], expected,
                                     hash_state_busy)) {
-        Hash_publish_bucket(meta, node, target, key);
+        Hash_publish_bucket(meta, node, target, key,
+                            first_tombstone >= 0);
         return (i32)target;
       }
       first_tombstone = -1;
@@ -141,7 +183,8 @@ inline i32 Hash_find_or_insert_bucket(HashMeta *meta, Ptr node, i32 key) {
   if (first_tombstone >= 0 &&
       Hash_compare_exchange_i32(&states[first_tombstone],
                                 hash_state_tombstone, hash_state_busy)) {
-    Hash_publish_bucket(meta, node, first_tombstone, key);
+    Hash_publish_bucket(meta, node, first_tombstone, key,
+                        /*reused_tombstone=*/true);
     return (i32)first_tombstone;
   }
   atomic_add_i32(Hash_overflow_count(meta, node), 1);
@@ -173,6 +216,9 @@ void Hash_deactivate(Ptr meta_, Ptr node, int i) {
     std::memset(Hash_payload(meta, node, bucket), 0, meta->element_size);
     atomic_exchange_i32(&states[bucket], hash_state_tombstone);
     atomic_add_i32(Hash_active_count(meta, node), -1);
+    if (Hash_has_tombstone_count(meta)) {
+      atomic_add_i32(Hash_tombstone_count(meta, node), 1);
+    }
     mark_element_lists_dirty_if_reuse(meta);
   }
 }
@@ -191,7 +237,7 @@ Ptr Hash_lookup_element(Ptr meta_, Ptr node, int i) {
   return Hash_payload(meta, node, bucket);
 }
 
-inline void Hash_decode_key(HashMeta *meta,
+inline void Hash_refine_key(HashMeta *meta,
                             i32 key,
                             PhysicalCoordinates *coord) {
   for (int i = 0; i < taichi_max_num_indices; i++) {
@@ -201,7 +247,7 @@ inline void Hash_decode_key(HashMeta *meta,
     if (shape > 1) {
       value = (key % (acc_shape * shape)) / acc_shape;
     }
-    coord->val[i] = value;
+    coord->val[i] = coord->val[i] * shape + value;
   }
 }
 
@@ -231,9 +277,22 @@ void element_listgen_root_hash(LLVMRuntime *runtime,
   ch_element = child_from_parent_element((Ptr)ch_element);
   auto states = Hash_states(child, ch_element);
   auto keys = Hash_keys(child, ch_element);
+  auto scan_count = child->table_capacity;
+  bool use_active_slots = false;
+  if (Hash_has_active_slots(child) && Hash_has_tombstone_count(child)) {
+    auto active_slot_count = Hash_load_i32(Hash_active_slots_count(child, ch_element));
+    auto active_count = Hash_load_i32(Hash_active_count(child, ch_element));
+    auto tombstone_count = Hash_load_i32(Hash_tombstone_count(child, ch_element));
+    if (active_slot_count >= 0 && active_slot_count <= child->table_capacity &&
+        active_slot_count == active_count && tombstone_count == 0) {
+      scan_count = active_slot_count;
+      use_active_slots = true;
+    }
+  }
 
-  for (i64 bucket = b_start; bucket < child->table_capacity;
-       bucket += b_step) {
+  for (i64 scan_i = b_start; scan_i < scan_count; scan_i += b_step) {
+    i64 bucket = use_active_slots ? Hash_active_slots(child, ch_element)[scan_i]
+                                  : scan_i;
     if (Hash_load_i32(&states[bucket]) != hash_state_occupied) {
       continue;
     }
@@ -242,8 +301,91 @@ void element_listgen_root_hash(LLVMRuntime *runtime,
     elem.element = ch_element;
     elem.loop_bounds[0] = key;
     elem.loop_bounds[1] = key + 1;
-    Hash_decode_key(child, key, &elem.pcoord);
+    elem.pcoord = element.pcoord;
+    Hash_refine_key(child, key, &elem.pcoord);
     child_list->append(&elem);
+  }
+  if (child->listgen_reuse) {
+    mark_element_list_current(runtime, parent, child_);
+  }
+}
+
+void element_listgen_nonroot_hash(LLVMRuntime *runtime,
+                                  StructMeta *parent,
+                                  StructMeta *child_) {
+  if (child_->listgen_reuse &&
+      element_list_is_current(runtime, parent, child_)) {
+    return;
+  }
+  auto child = (HashMeta *)child_;
+  auto parent_list = runtime->element_lists[parent->snode_id];
+  int num_parent_elements = parent_list->size();
+  auto child_list = runtime->element_lists[child->snode_id];
+  auto parent_refine_coordinates = parent->refine_coordinates;
+  auto parent_is_active = parent->is_active;
+  auto parent_lookup_element = parent->lookup_element;
+  auto child_from_parent_element = child->from_parent_element;
+
+#if ARCH_cuda || ARCH_amdgpu
+  int i_start = block_idx();
+  int i_step = grid_dim();
+  int j_start = thread_idx();
+  int j_step = block_dim();
+#else
+  int i_start = 0;
+  int i_step = 1;
+  int j_start = 0;
+  int j_step = 1;
+#endif
+
+  for (int i = i_start; i < num_parent_elements; i += i_step) {
+    auto element = parent_list->get<Element>(i);
+    int j_lower = element.loop_bounds[0] + j_start;
+    int j_higher = element.loop_bounds[1];
+    for (int j = j_lower; j < j_higher; j += j_step) {
+      PhysicalCoordinates refined_coord;
+      parent_refine_coordinates(&element.pcoord, &refined_coord, j);
+      if (!parent_is_active((Ptr)parent, element.element, j)) {
+        continue;
+      }
+
+      auto ch_element = parent_lookup_element((Ptr)parent, element.element, j);
+      ch_element = child_from_parent_element((Ptr)ch_element);
+      auto states = Hash_states(child, ch_element);
+      auto keys = Hash_keys(child, ch_element);
+      auto scan_count = child->table_capacity;
+      bool use_active_slots = false;
+      if (Hash_has_active_slots(child) && Hash_has_tombstone_count(child)) {
+        auto active_slot_count =
+            Hash_load_i32(Hash_active_slots_count(child, ch_element));
+        auto active_count = Hash_load_i32(Hash_active_count(child, ch_element));
+        auto tombstone_count =
+            Hash_load_i32(Hash_tombstone_count(child, ch_element));
+        if (active_slot_count >= 0 &&
+            active_slot_count <= child->table_capacity &&
+            active_slot_count == active_count && tombstone_count == 0) {
+          scan_count = active_slot_count;
+          use_active_slots = true;
+        }
+      }
+
+      for (i64 scan_i = 0; scan_i < scan_count; scan_i++) {
+        i64 bucket = use_active_slots
+                         ? Hash_active_slots(child, ch_element)[scan_i]
+                         : scan_i;
+        if (Hash_load_i32(&states[bucket]) != hash_state_occupied) {
+          continue;
+        }
+        auto key = keys[bucket];
+        Element elem;
+        elem.element = ch_element;
+        elem.loop_bounds[0] = key;
+        elem.loop_bounds[1] = key + 1;
+        elem.pcoord = refined_coord;
+        Hash_refine_key(child, key, &elem.pcoord);
+        child_list->append(&elem);
+      }
+    }
   }
   if (child->listgen_reuse) {
     mark_element_list_current(runtime, parent, child_);

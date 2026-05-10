@@ -49,6 +49,7 @@ class CompiledTaichiKernel {
     Device *device{nullptr};
     std::vector<DeviceAllocation *> root_buffers;
     DeviceAllocation *global_tmps_buffer{nullptr};
+    DeviceAllocation *hash_overflow_buffer{nullptr};
     DeviceAllocation *listgen_buffer{nullptr};
 #if defined(TI_WITH_VULKAN_POINTER)
     // B-3.b (2026-05): 路线 B 阶段开启 vulkan_pointer_independent_pool 后，
@@ -235,7 +236,9 @@ class TI_DLL_EXPORT GfxRuntime {
   struct HashOverflowWatch {
     int root_id{-1};
     int snode_id{-1};
-    size_t byte_offset{0};
+    size_t overflow_byte_offset{0};
+    size_t active_byte_offset{0};
+    size_t tombstone_byte_offset{static_cast<size_t>(-1)};
   };
 
   Device *device_{nullptr};
@@ -256,6 +259,7 @@ class TI_DLL_EXPORT GfxRuntime {
       node_allocators_;
 #endif
   std::unique_ptr<DeviceAllocationGuard> global_tmps_buffer_;
+  std::unique_ptr<DeviceAllocationGuard> hash_overflow_buffer_;
   std::unique_ptr<DeviceAllocationGuard> listgen_buffer_;
   bool listgen_dynamic_size_{false};
   bool listgen_explicit_size_{false};
