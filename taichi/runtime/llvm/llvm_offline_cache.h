@@ -77,6 +77,7 @@ struct LlvmOfflineCache {
       // Vulkan reads the live SNode field directly; here we serialize so
       // the LLVM offline cache reload path keeps Phase 0.5 sizing.
       int64_t vk_max_active_hint{-1};
+      int64_t hash_expected_active_hint{-1};
       int64_t num_cells_per_container{1};
 
       TI_IO_DEF(id,
@@ -84,6 +85,7 @@ struct LlvmOfflineCache {
                 cell_size_bytes,
                 chunk_size,
                 vk_max_active_hint,
+                hash_expected_active_hint,
                 num_cells_per_container);
     };
 

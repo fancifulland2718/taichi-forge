@@ -96,9 +96,11 @@ CompileConfig::CompileConfig() {
   // provides exact worst-case sizing, making a defensive floor unnecessary.
   // Users who want a safety net can still set this explicitly.
   cuda_sparse_pool_size_floor_MiB = 0;
+  hash_snode_experimental = true;
   hash_snode_default_load_factor = 0.5;
   hash_snode_active_list = false;
   hash_snode_diagnostics = false;
+  hash_snode_compact_child_pool = false;
 }
 
 void CompileConfig::fit() {

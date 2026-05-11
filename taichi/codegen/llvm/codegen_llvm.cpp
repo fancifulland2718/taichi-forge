@@ -354,8 +354,16 @@ std::unique_ptr<RuntimeObject> TaskCodeGenLLVM::emit_struct_meta_object(
         StructCompilerLLVM::get_llvm_node_type(module.get(), snode));
     auto *aux_type = llvm::cast<llvm::StructType>(
         StructCompilerLLVM::get_llvm_aux_type(module.get(), snode));
+    auto *body_type = StructCompilerLLVM::get_llvm_body_type(module.get(), snode);
     auto aux_offset = tlctx->get_struct_element_offset(node_type, 0);
-    auto payload_offset = tlctx->get_struct_element_offset(node_type, 1);
+    auto body_offset = tlctx->get_struct_element_offset(node_type, 1);
+    auto payload_offset = body_offset;
+    const bool compact_child_pool = hash_snode_uses_compact_child_pool(
+        *snode, compile_config.hash_snode_compact_child_pool);
+    if (compact_child_pool) {
+      auto *body_struct = llvm::cast<llvm::StructType>(body_type);
+      payload_offset += tlctx->get_struct_element_offset(body_struct, 0);
+    }
     meta->set("state_offset",
               tlctx->get_constant((uint64)aux_offset +
                                   tlctx->get_struct_element_offset(
@@ -399,6 +407,34 @@ std::unique_ptr<RuntimeObject> TaskCodeGenLLVM::emit_struct_meta_object(
                                         aux_type, tombstone_index)));
     } else {
       meta->set("tombstone_count_offset", tlctx->get_constant(no_offset));
+    }
+    if (compact_child_pool) {
+      auto *body_struct = llvm::cast<llvm::StructType>(body_type);
+      meta->set("compact_child_pool_next_offset",
+                tlctx->get_constant((uint64)body_offset +
+                                    tlctx->get_struct_element_offset(
+                                        body_struct, 1)));
+      meta->set("compact_child_pool_overflow_offset",
+                tlctx->get_constant((uint64)body_offset +
+                                    tlctx->get_struct_element_offset(
+                                        body_struct, 2)));
+      meta->set("compact_child_pool_offset",
+                tlctx->get_constant((uint64)body_offset +
+                                    tlctx->get_struct_element_offset(
+                                        body_struct, 3)));
+      meta->set("compact_child_pool_capacity",
+                tlctx->get_constant(
+                    (int64)get_hash_snode_expected_active(*snode)));
+      meta->set("compact_child_pool_stride",
+                tlctx->get_constant((int64)snode->cell_size_bytes));
+    } else {
+      meta->set("compact_child_pool_offset", tlctx->get_constant(no_offset));
+      meta->set("compact_child_pool_next_offset",
+                tlctx->get_constant(no_offset));
+      meta->set("compact_child_pool_overflow_offset",
+                tlctx->get_constant(no_offset));
+      meta->set("compact_child_pool_capacity", tlctx->get_constant((int64)0));
+      meta->set("compact_child_pool_stride", tlctx->get_constant((int64)0));
     }
     meta->set("diagnostics_enabled",
               tlctx->get_constant((uint1)compile_config.hash_snode_diagnostics));

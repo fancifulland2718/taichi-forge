@@ -87,13 +87,15 @@ struct CompileConfig {
   // hash. Production quant_array workloads should remain on cpu / cuda
   // until the Vulkan codegen completes.
   bool vulkan_quant_experimental{false};
-  // HSN-1 (2026-05): opt-in gate for the revived hash SNode path. CPU/CUDA use
-  // a static open-addressing table sized before JIT by the frontend-provided
-  // capacity/max_active hint. Vulkan must reject it until its descriptor and
-  // device listgen contracts are implemented. Not part of the offline-cache
-  // key: the flag only allows building a hash SNode; the resulting tree,
-  // including the exact capacity hint, is already in the SNode hash.
-  bool hash_snode_experimental{false};
+  // HSN-1/HSN-default (2026-05): default-on gate for the revived hash SNode
+  // path. CPU/CUDA/Vulkan use a static open-addressing table sized before JIT
+  // by the frontend-provided capacity/expected_active hint. Users can still
+  // pass ti.init(hash_snode_experimental=False) to disable the public
+  // SNode.hash() API while investigating regressions or reproducing vanilla
+  // 1.7.4 disabled-hash behaviour. Not part of the offline-cache key: this
+  // flag only allows building a hash SNode; the resulting tree, including the
+  // exact capacity hint, is already in the SNode hash.
+  bool hash_snode_experimental{true};
   // H4.1 (2026-05): default load factor used by hash SNode's frontend
   // capacity selector when the user passes max_active/expected_active but no
   // per-node hash_load_factor. This is intentionally resolved before SNodeTree
@@ -108,6 +110,10 @@ struct CompileConfig {
   // keeps the minimal table layout. H4.6 active-list implicitly needs the
   // tombstone counter for correctness fallback.
   bool hash_snode_diagnostics{false};
+  // G7.4 (2026-05): opt-in compact child pool for `hash -> hash` / nested
+  // hash. Default OFF keeps the inline child-container payload layout.
+  // This changes generated SNode layout and must stay in the offline cache key.
+  bool hash_snode_compact_child_pool{false};
   // B2 (2026-04-26): user-facing fine-grained SPIR-V optimizer pass
   // disable list. Each entry is a pass name (case-sensitive) matching one
   // of the spvtools::Create*Pass identifiers used in

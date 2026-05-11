@@ -363,6 +363,7 @@ class TI_DLL_EXPORT Program {
   float64 total_compilation_time_{0.0};
   static std::atomic<int> num_instances_;
   bool finalized_{false};
+  int hash_snode_tree_count_{0};
 
   // TODO: Move ndarrays_, argpacks_ and textures_ to be managed by runtime
   std::unordered_map<void *, std::unique_ptr<Ndarray>> ndarrays_;

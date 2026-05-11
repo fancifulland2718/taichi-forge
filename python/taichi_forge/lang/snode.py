@@ -9,12 +9,7 @@ from taichi_forge.lang.field import BitpackedFields, Field
 from taichi_forge.lang.util import get_traceback
 
 
-def _raise_hash_child_unsupported(child_kind):
-    raise TaichiRuntimeError(
-        "Hash SNode currently supports pointer(), dense(), bitmasked(), "
-        "dynamic(), and place() descendants; "
-        f"cannot add {child_kind} under a hash SNode."
-    )
+_hash_snode_warning_emitted = False
 
 
 def _hash_logical_elements(axes, dimensions):
@@ -109,7 +104,7 @@ def _select_hash_snode_capacity(
             f"size {logical_elements}; this is valid but wastes hash slots.",
             stacklevel=3,
         )
-    return table_capacity, effective_load_factor
+    return table_capacity, effective_load_factor, active_hint
 
 
 class SNode:
@@ -220,11 +215,12 @@ class SNode:
         Returns:
             The added :class:`~taichi_forge.lang.SNode` instance.
         """
+        global _hash_snode_warning_emitted
         cfg = impl.current_cfg()
         if not getattr(cfg, "hash_snode_experimental", False):
             raise TaichiRuntimeError(
-                "Hash SNode is experimental. Enable it with "
-                "ti.init(hash_snode_experimental=True)."
+                "Hash SNode has been disabled by "
+                "ti.init(hash_snode_experimental=False)."
             )
         if cfg.arch not in (_ti_core.x64, _ti_core.arm64, _ti_core.cuda, _ti_core.vulkan):
             raise TaichiRuntimeError(
@@ -241,9 +237,19 @@ class SNode:
                 "parents. Supported parents are root, dense, pointer, "
                 "bitmasked, dynamic, and hash."
             )
+        if not _hash_snode_warning_emitted:
+            _hash_snode_warning_emitted = True
+            warnings.warn(
+                "Hash SNode is experimental and enabled by default in "
+                "Taichi Forge. Its API is fixed-capacity: pass exactly one "
+                "of expected_active, max_active, or capacity, and expect "
+                "overflow diagnostics instead of runtime growth. Pass "
+                "ti.init(hash_snode_experimental=False) to disable it.",
+                stacklevel=2,
+            )
 
         axes, dimensions, logical_elements = _hash_logical_elements(axes, dimensions)
-        table_capacity, _ = _select_hash_snode_capacity(
+        table_capacity, _, active_hint = _select_hash_snode_capacity(
             logical_elements=logical_elements,
             max_active=max_active,
             expected_active=expected_active,
@@ -252,11 +258,14 @@ class SNode:
             default_load_factor=getattr(cfg, "hash_snode_default_load_factor", 0.5),
         )
 
-        return SNode(
-            self.ptr.hash_with_capacity(
-                axes, dimensions, int(table_capacity), _ti_core.DebugInfo(get_traceback())
+        dbg = _ti_core.DebugInfo(get_traceback())
+        if active_hint is not None:
+            return SNode(
+                self.ptr.hash_with_capacity_and_active_hint(
+                    axes, dimensions, int(table_capacity), int(active_hint), dbg
+                )
             )
-        )
+        return SNode(self.ptr.hash_with_capacity(axes, dimensions, int(table_capacity), dbg))
 
     def _hash(self, axes, dimensions, **kwargs):
         return self.hash(axes, dimensions, **kwargs)

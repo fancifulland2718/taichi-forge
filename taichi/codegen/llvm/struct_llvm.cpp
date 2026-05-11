@@ -125,7 +125,16 @@ void StructCompilerLLVM::generate_types(SNode &snode) {
       aux_fields.push_back(i32_type);
     }
     aux_type = llvm::StructType::get(*ctx, aux_fields);
-    body_type = llvm::ArrayType::get(ch_type, capacity);
+    if (hash_snode_uses_compact_child_pool(
+            snode, config_.hash_snode_compact_child_pool)) {
+      auto pool_capacity =
+          static_cast<uint64_t>(get_hash_snode_expected_active(snode));
+      body_type = llvm::StructType::get(
+          *ctx, {llvm::ArrayType::get(i32_type, capacity), i32_type, i32_type,
+                 llvm::ArrayType::get(ch_type, pool_capacity)});
+    } else {
+      body_type = llvm::ArrayType::get(ch_type, capacity);
+    }
   } else if (type == SNodeType::dynamic) {
     // mutex and n (number of elements)
     aux_type =

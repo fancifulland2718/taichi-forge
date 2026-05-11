@@ -51,6 +51,23 @@
 namespace taichi::lang {
 std::atomic<int> Program::num_instances_;
 
+namespace {
+bool snode_tree_contains_hash(const SNode *snode) {
+  if (snode == nullptr) {
+    return false;
+  }
+  if (snode->type == SNodeType::hash) {
+    return true;
+  }
+  for (const auto &child : snode->ch) {
+    if (snode_tree_contains_hash(child.get())) {
+      return true;
+    }
+  }
+  return false;
+}
+}  // namespace
+
 Program::Program(Arch desired_arch) : snode_rw_accessors_bank_(this) {
   TI_TRACE("Program initializing...");
 
@@ -335,7 +352,7 @@ void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,
                             LaunchContextBuilder &ctx) {
   program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data, ctx);
   const bool check_runtime_error =
-      compile_config().debug || compile_config().hash_snode_experimental;
+      compile_config().debug || hash_snode_tree_count_ > 0;
   if (check_runtime_error && arch_uses_llvm(compiled_kernel_data.arch())) {
     program_impl_->check_runtime_error(result_buffer);
   }
@@ -373,11 +390,15 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
   // place-SNode's address gets reused by another SNode. We have to remove all
   // cached kernels upon SNodeTree destruction.
   SNode *root = snode_tree->root();
+  const bool contains_hash = snode_tree_contains_hash(root);
 
   // Traverse SNodeTree to remove all cached RWAccessor kernels
   remove_rw_accessor_cache(root, &snode_rw_accessors_bank_);
 
   program_impl_->destroy_snode_tree(snode_tree);
+  if (contains_hash) {
+    --hash_snode_tree_count_;
+  }
   free_snode_tree_ids_.push(snode_tree->id());
 }
 
@@ -386,10 +407,14 @@ SNodeTree *Program::add_snode_tree(std::unique_ptr<SNode> root,
   const int id = allocate_snode_tree_id();
   auto tree = std::make_unique<SNodeTree>(id, std::move(root));
   tree->root()->set_snode_tree_id(id);
+  const bool contains_hash = snode_tree_contains_hash(tree->root());
   if (compile_only) {
     program_impl_->compile_snode_tree_types(tree.get());
   } else {
     program_impl_->materialize_snode_tree(tree.get(), result_buffer);
+  }
+  if (contains_hash) {
+    ++hash_snode_tree_count_;
   }
   if (id < snode_trees_.size()) {
     snode_trees_[id] = std::move(tree);

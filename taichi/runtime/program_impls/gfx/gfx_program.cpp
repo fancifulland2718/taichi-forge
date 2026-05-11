@@ -47,6 +47,7 @@ void GfxProgramImpl::compile_snode_tree_types(SNodeTree *tree) {
   policy.deterministic_slot = config->vulkan_pointer_deterministic_slot;
   policy.hash_active_list = config->hash_snode_active_list;
   policy.hash_diagnostics = config->hash_snode_diagnostics;
+  policy.hash_compact_child_pool = config->hash_snode_compact_child_pool;
   coerce_pointer_policy_for_chunked(policy);
   if (runtime_) {
     snode_tree_mgr_->materialize_snode_tree(tree, policy);
@@ -70,6 +71,7 @@ void GfxProgramImpl::materialize_snode_tree(SNodeTree *tree,
   policy.deterministic_slot = config->vulkan_pointer_deterministic_slot;
   policy.hash_active_list = config->hash_snode_active_list;
   policy.hash_diagnostics = config->hash_snode_diagnostics;
+  policy.hash_compact_child_pool = config->hash_snode_compact_child_pool;
   coerce_pointer_policy_for_chunked(policy);
   snode_tree_mgr_->materialize_snode_tree(tree, policy);
 }

@@ -10,6 +10,11 @@ struct HashMeta : public StructMeta {
   std::size_t active_slots_offset;
   std::size_t active_slots_count_offset;
   std::size_t tombstone_count_offset;
+  std::size_t compact_child_pool_offset;
+  std::size_t compact_child_pool_next_offset;
+  std::size_t compact_child_pool_overflow_offset;
+  i64 compact_child_pool_capacity;
+  i64 compact_child_pool_stride;
   u1 diagnostics_enabled;
   i32 extract_shape[taichi_max_num_indices];
   i32 extract_acc_shape[taichi_max_num_indices];
@@ -24,6 +29,11 @@ STRUCT_FIELD(HashMeta, overflow_count_offset);
 STRUCT_FIELD(HashMeta, active_slots_offset);
 STRUCT_FIELD(HashMeta, active_slots_count_offset);
 STRUCT_FIELD(HashMeta, tombstone_count_offset);
+STRUCT_FIELD(HashMeta, compact_child_pool_offset);
+STRUCT_FIELD(HashMeta, compact_child_pool_next_offset);
+STRUCT_FIELD(HashMeta, compact_child_pool_overflow_offset);
+STRUCT_FIELD(HashMeta, compact_child_pool_capacity);
+STRUCT_FIELD(HashMeta, compact_child_pool_stride);
 STRUCT_FIELD(HashMeta, diagnostics_enabled);
 STRUCT_FIELD_ARRAY(HashMeta, extract_shape);
 STRUCT_FIELD_ARRAY(HashMeta, extract_acc_shape);
@@ -44,6 +54,34 @@ inline i32 *Hash_keys(HashMeta *meta, Ptr node) {
 
 inline Ptr Hash_payload(HashMeta *meta, Ptr node, i64 bucket) {
   return node + meta->payload_offset + meta->element_size * bucket;
+}
+
+inline bool Hash_has_compact_child_pool(HashMeta *meta) {
+  return meta->compact_child_pool_offset != hash_no_offset &&
+         meta->compact_child_pool_next_offset != hash_no_offset &&
+         meta->compact_child_pool_capacity > 0 &&
+         meta->compact_child_pool_stride > 0;
+}
+
+inline i32 *Hash_compact_child_slot(HashMeta *meta, Ptr node, i32 bucket) {
+  return (i32 *)(node + meta->payload_offset + sizeof(i32) * bucket);
+}
+
+inline i32 *Hash_compact_child_pool_next(HashMeta *meta, Ptr node) {
+  return (i32 *)(node + meta->compact_child_pool_next_offset);
+}
+
+inline i32 *Hash_compact_child_pool_overflow(HashMeta *meta, Ptr node) {
+  return (i32 *)(node + meta->compact_child_pool_overflow_offset);
+}
+
+inline Ptr Hash_compact_child_pool_element(HashMeta *meta, Ptr node, i32 slot) {
+  return node + meta->compact_child_pool_offset +
+         meta->compact_child_pool_stride * slot;
+}
+
+inline i32 Hash_capacity_i32(HashMeta *meta) {
+  return (i32)meta->table_capacity;
 }
 
 inline i32 *Hash_active_count(HashMeta *meta, Ptr node) {
@@ -74,6 +112,15 @@ inline i32 *Hash_active_slots_count(HashMeta *meta, Ptr node) {
 inline i32 *Hash_tombstone_count(HashMeta *meta, Ptr node) {
   return (i32 *)(node + meta->tombstone_count_offset);
 }
+
+inline void Hash_clear_bucket_payload(HashMeta *meta, Ptr node, i32 bucket) {
+  if (Hash_has_compact_child_pool(meta)) {
+    *Hash_compact_child_slot(meta, node, bucket) = 0;
+  } else {
+    std::memset(Hash_payload(meta, node, bucket), 0, meta->element_size);
+  }
+}
+
 
 inline void Hash_record_probe(HashMeta *meta, bool insert, i32 probes) {
   if (!meta->diagnostics_enabled) {
@@ -116,13 +163,54 @@ inline bool Hash_compare_exchange_i32(volatile i32 *ptr,
       std::memory_order::memory_order_seq_cst);
 }
 
+inline Ptr Hash_resolve_payload(HashMeta *meta,
+                                Ptr node,
+                                i32 bucket,
+                                bool activate_child) {
+  if (!Hash_has_compact_child_pool(meta)) {
+    return Hash_payload(meta, node, bucket);
+  }
+  auto slot_ptr = Hash_compact_child_slot(meta, node, bucket);
+  i32 slot_plus_one = Hash_load_i32(slot_ptr);
+  while (slot_plus_one == -1) {
+    slot_plus_one = Hash_load_i32(slot_ptr);
+  }
+  if (slot_plus_one == 0 && activate_child) {
+    if (Hash_compare_exchange_i32(slot_ptr, 0, -1)) {
+      auto slot = atomic_add_i32(Hash_compact_child_pool_next(meta, node), 1);
+      if (slot < 0 || slot >= meta->compact_child_pool_capacity) {
+        atomic_add_i32(Hash_compact_child_pool_overflow(meta, node), 1);
+        atomic_add_i32(Hash_overflow_count(meta, node), 1);
+        atomic_exchange_i32(slot_ptr, 0);
+        taichi_assert_runtime(meta->context->runtime, false,
+                              "Hash SNode compact child pool overflow.");
+        return meta->context->runtime->ambient_elements[meta->snode_id];
+      }
+      auto child = Hash_compact_child_pool_element(meta, node, slot);
+      std::memset(child, 0, meta->compact_child_pool_stride);
+      grid_memfence();
+      atomic_exchange_i32(slot_ptr, slot + 1);
+      return child;
+    }
+    slot_plus_one = Hash_load_i32(slot_ptr);
+    while (slot_plus_one == -1) {
+      slot_plus_one = Hash_load_i32(slot_ptr);
+    }
+  }
+  if (slot_plus_one == 0) {
+    return meta->context->runtime->ambient_elements[meta->snode_id];
+  }
+  return Hash_compact_child_pool_element(meta, node, slot_plus_one - 1);
+}
+
 inline i32 Hash_find_bucket(HashMeta *meta, Ptr node, i32 key) {
   auto states = Hash_states(meta, node);
   auto keys = Hash_keys(meta, node);
-  auto mask = (u32)(meta->table_capacity - 1);
+  auto capacity = Hash_capacity_i32(meta);
+  auto mask = (u32)(capacity - 1);
   auto start = Hash_mix_u32((u32)key) & mask;
-  for (i64 step = 0; step < meta->table_capacity; step++) {
-    auto bucket = (i64)((start + (u32)step) & mask);
+  for (i32 step = 0; step < capacity; step++) {
+    auto bucket = (i32)((start + (u32)step) & mask);
     i32 state = Hash_load_i32(&states[bucket]);
     while (state == hash_state_busy) {
       state = Hash_load_i32(&states[bucket]);
@@ -136,25 +224,25 @@ inline i32 Hash_find_bucket(HashMeta *meta, Ptr node, i32 key) {
       return (i32)bucket;
     }
   }
-  Hash_record_probe(meta, /*insert=*/false, (i32)meta->table_capacity);
+  Hash_record_probe(meta, /*insert=*/false, capacity);
   return -1;
 }
 
 inline void Hash_publish_bucket(HashMeta *meta,
                                 Ptr node,
-                                i64 bucket,
+                                i32 bucket,
                                 i32 key,
                                 bool reused_tombstone) {
   auto states = Hash_states(meta, node);
   auto keys = Hash_keys(meta, node);
   keys[bucket] = key;
-  std::memset(Hash_payload(meta, node, bucket), 0, meta->element_size);
+  Hash_clear_bucket_payload(meta, node, bucket);
   grid_memfence();
   atomic_exchange_i32(&states[bucket], hash_state_occupied);
   atomic_add_i32(Hash_active_count(meta, node), 1);
   if (Hash_has_active_slots(meta) && !reused_tombstone) {
     auto slot = atomic_add_i32(Hash_active_slots_count(meta, node), 1);
-    if (slot >= 0 && slot < meta->table_capacity) {
+    if (slot >= 0 && slot < Hash_capacity_i32(meta)) {
       Hash_active_slots(meta, node)[slot] = (i32)bucket;
     }
   }
@@ -167,11 +255,12 @@ inline void Hash_publish_bucket(HashMeta *meta,
 inline i32 Hash_find_or_insert_bucket(HashMeta *meta, Ptr node, i32 key) {
   auto states = Hash_states(meta, node);
   auto keys = Hash_keys(meta, node);
-  auto mask = (u32)(meta->table_capacity - 1);
+  auto capacity = Hash_capacity_i32(meta);
+  auto mask = (u32)(capacity - 1);
   auto start = Hash_mix_u32((u32)key) & mask;
-  i64 first_tombstone = -1;
-  for (i64 step = 0; step < meta->table_capacity; step++) {
-    auto bucket = (i64)((start + (u32)step) & mask);
+  i32 first_tombstone = -1;
+  for (i32 step = 0; step < capacity; step++) {
+    auto bucket = (i32)((start + (u32)step) & mask);
     i32 state = Hash_load_i32(&states[bucket]);
     while (state == hash_state_busy) {
       state = Hash_load_i32(&states[bucket]);
@@ -209,11 +298,11 @@ inline i32 Hash_find_or_insert_bucket(HashMeta *meta, Ptr node, i32 key) {
                                 hash_state_tombstone, hash_state_busy)) {
     Hash_publish_bucket(meta, node, first_tombstone, key,
                         /*reused_tombstone=*/true);
-    Hash_record_probe(meta, /*insert=*/true, (i32)meta->table_capacity);
+    Hash_record_probe(meta, /*insert=*/true, capacity);
     return (i32)first_tombstone;
   }
   atomic_add_i32(Hash_overflow_count(meta, node), 1);
-  Hash_record_probe(meta, /*insert=*/true, (i32)meta->table_capacity);
+  Hash_record_probe(meta, /*insert=*/true, capacity);
   return -1;
 }
 
@@ -239,7 +328,7 @@ void Hash_deactivate(Ptr meta_, Ptr node, int i) {
   auto states = Hash_states(meta, node);
   if (Hash_compare_exchange_i32(&states[bucket], hash_state_occupied,
                                 hash_state_busy)) {
-    std::memset(Hash_payload(meta, node, bucket), 0, meta->element_size);
+    Hash_clear_bucket_payload(meta, node, bucket);
     grid_memfence();
     atomic_exchange_i32(&states[bucket], hash_state_tombstone);
     atomic_add_i32(Hash_active_count(meta, node), -1);
@@ -261,7 +350,7 @@ Ptr Hash_lookup_element(Ptr meta_, Ptr node, int i) {
   if (bucket < 0) {
     return meta->context->runtime->ambient_elements[meta->snode_id];
   }
-  return Hash_payload(meta, node, bucket);
+  return Hash_resolve_payload(meta, node, bucket, /*activate_child=*/false);
 }
 
 Ptr Hash_lookup_or_activate_element(Ptr meta_, Ptr node, int i) {
@@ -272,7 +361,7 @@ Ptr Hash_lookup_or_activate_element(Ptr meta_, Ptr node, int i) {
                           "Hash SNode table overflow.");
     return meta->context->runtime->ambient_elements[meta->snode_id];
   }
-  return Hash_payload(meta, node, bucket);
+  return Hash_resolve_payload(meta, node, bucket, /*activate_child=*/true);
 }
 
 inline void Hash_refine_key(HashMeta *meta,
@@ -331,21 +420,22 @@ void element_listgen_root_hash(LLVMRuntime *runtime,
   ch_element = child_from_parent_element((Ptr)ch_element);
   auto states = Hash_states(child, ch_element);
   auto keys = Hash_keys(child, ch_element);
-  auto scan_count = child->table_capacity;
+  const i32 child_capacity = Hash_capacity_i32(child);
+  i32 scan_count = child_capacity;
   bool use_active_slots = false;
   if (Hash_has_active_slots(child) && Hash_has_tombstone_count(child)) {
     auto active_slot_count = Hash_load_i32(Hash_active_slots_count(child, ch_element));
     auto active_count = Hash_load_i32(Hash_active_count(child, ch_element));
     auto tombstone_count = Hash_load_i32(Hash_tombstone_count(child, ch_element));
-    if (active_slot_count >= 0 && active_slot_count <= child->table_capacity &&
+    if (active_slot_count >= 0 && active_slot_count <= child_capacity &&
         active_slot_count == active_count && tombstone_count == 0) {
       scan_count = active_slot_count;
       use_active_slots = true;
     }
   }
 
-  for (i64 scan_i = b_start; scan_i < scan_count; scan_i += b_step) {
-    i64 bucket = use_active_slots ? Hash_active_slots(child, ch_element)[scan_i]
+  for (i32 scan_i = b_start; scan_i < scan_count; scan_i += b_step) {
+    i32 bucket = use_active_slots ? Hash_active_slots(child, ch_element)[scan_i]
                                   : scan_i;
     if (Hash_load_i32(&states[bucket]) != hash_state_occupied) {
       continue;
@@ -402,7 +492,8 @@ void element_listgen_nonroot_hash(LLVMRuntime *runtime,
       ch_element = child_from_parent_element((Ptr)ch_element);
       auto states = Hash_states(child, ch_element);
       auto keys = Hash_keys(child, ch_element);
-      auto scan_count = child->table_capacity;
+      const i32 child_capacity = Hash_capacity_i32(child);
+      i32 scan_count = child_capacity;
       bool use_active_slots = false;
       if (Hash_has_active_slots(child) && Hash_has_tombstone_count(child)) {
         auto active_slot_count =
@@ -411,15 +502,15 @@ void element_listgen_nonroot_hash(LLVMRuntime *runtime,
         auto tombstone_count =
             Hash_load_i32(Hash_tombstone_count(child, ch_element));
         if (active_slot_count >= 0 &&
-            active_slot_count <= child->table_capacity &&
+            active_slot_count <= child_capacity &&
             active_slot_count == active_count && tombstone_count == 0) {
           scan_count = active_slot_count;
           use_active_slots = true;
         }
       }
 
-      for (i64 scan_i = 0; scan_i < scan_count; scan_i++) {
-        i64 bucket = use_active_slots
+      for (i32 scan_i = 0; scan_i < scan_count; scan_i++) {
+        i32 bucket = use_active_slots
                          ? Hash_active_slots(child, ch_element)[scan_i]
                          : scan_i;
         if (Hash_load_i32(&states[bucket]) != hash_state_occupied) {
@@ -466,7 +557,8 @@ void element_listgen_nonroot_hash_parent_hash(LLVMRuntime *runtime,
     ch_element = child_from_parent_element((Ptr)ch_element);
     auto states = Hash_states(child, ch_element);
     auto keys = Hash_keys(child, ch_element);
-    auto scan_count = child->table_capacity;
+    const i32 child_capacity = Hash_capacity_i32(child);
+    i32 scan_count = child_capacity;
     bool use_active_slots = false;
     if (Hash_has_active_slots(child) && Hash_has_tombstone_count(child)) {
       auto active_slot_count =
@@ -475,15 +567,15 @@ void element_listgen_nonroot_hash_parent_hash(LLVMRuntime *runtime,
       auto tombstone_count =
           Hash_load_i32(Hash_tombstone_count(child, ch_element));
       if (active_slot_count >= 0 &&
-          active_slot_count <= child->table_capacity &&
+          active_slot_count <= child_capacity &&
           active_slot_count == active_count && tombstone_count == 0) {
         scan_count = active_slot_count;
         use_active_slots = true;
       }
     }
 
-    for (i64 scan_i = 0; scan_i < scan_count; scan_i++) {
-      i64 bucket = use_active_slots
+    for (i32 scan_i = 0; scan_i < scan_count; scan_i++) {
+      i32 bucket = use_active_slots
                        ? Hash_active_slots(child, ch_element)[scan_i]
                        : scan_i;
       if (Hash_load_i32(&states[bucket]) != hash_state_occupied) {

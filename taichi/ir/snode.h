@@ -100,6 +100,11 @@ class SNode {
   // 仅 SNodeType::pointer 读；其他类型忽略。仅 vulkan/gfx 路径生效，
   // LLVM 后端忽略（自有 chunk-list 按需分配）。
   int64 vk_max_active_hint{-1};
+  // G7.4 (2026-05): original expected/max active hint for hash SNodes,
+  // preserved separately from the rounded table capacity. Compact child-pool
+  // experiments use it to size parent-active pools without guessing the load
+  // factor. -1 means unavailable or explicit-capacity mode.
+  int64 hash_expected_active_hint{-1};
   int chunk_size{0};
   std::size_t cell_size_bytes{0};
   std::size_t offset_bytes_in_parent_cell{0};

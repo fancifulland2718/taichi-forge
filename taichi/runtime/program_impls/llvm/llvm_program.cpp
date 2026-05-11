@@ -115,6 +115,8 @@ void LlvmProgramImpl::cache_field(int snode_tree_id,
     snode_cache_data.cell_size_bytes = snodes[i]->cell_size_bytes;
     snode_cache_data.chunk_size = snodes[i]->chunk_size;
     snode_cache_data.vk_max_active_hint = snodes[i]->vk_max_active_hint;
+    snode_cache_data.hash_expected_active_hint =
+        snodes[i]->hash_expected_active_hint;
     snode_cache_data.num_cells_per_container =
         snodes[i]->num_cells_per_container;
 

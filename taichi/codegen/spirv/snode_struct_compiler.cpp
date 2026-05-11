@@ -457,9 +457,11 @@ class StructCompiler {
                     cell_stride);
         const bool include_tombstone =
             policy_.hash_diagnostics || policy_.hash_active_list;
+        const bool compact_child_pool = hash_snode_uses_compact_child_pool(
+            *sn, policy_.hash_compact_child_pool);
         const auto layout = compute_hash_snode_flat_layout(
             *sn, cell_stride, /*include_ambient_payload=*/true,
-            policy_.hash_active_list, include_tombstone);
+            policy_.hash_active_list, include_tombstone, compact_child_pool);
         sn_desc.hash_table_capacity = layout.table_capacity;
         sn_desc.hash_state_offset = layout.state_offset;
         sn_desc.hash_key_offset = layout.key_offset;
@@ -471,6 +473,16 @@ class StructCompiler {
         sn_desc.hash_active_slots_count_offset =
             layout.active_slots_count_offset;
         sn_desc.hash_tombstone_count_offset = layout.tombstone_count_offset;
+        sn_desc.hash_compact_child_pool_offset =
+            layout.compact_child_pool_offset;
+        sn_desc.hash_compact_child_pool_next_offset =
+            layout.compact_child_pool_next_offset;
+        sn_desc.hash_compact_child_pool_overflow_offset =
+            layout.compact_child_pool_overflow_offset;
+        sn_desc.hash_compact_child_pool_capacity =
+            layout.compact_child_pool_capacity;
+        sn_desc.hash_compact_child_pool_stride =
+            layout.compact_child_pool_stride;
         sn_desc.container_stride = layout.container_stride;
       } else if (sn->type == SNodeType::dynamic) {
 #if defined(TI_VULKAN_DYNAMIC)

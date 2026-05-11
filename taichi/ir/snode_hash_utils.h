@@ -19,6 +19,8 @@ constexpr int kHashAuxTombstoneCountIndexWithActiveList = 6;
 constexpr int kHashAuxTombstoneCountIndexNoActiveList = 4;
 constexpr std::size_t kHashSNodeNoOffset =
     std::numeric_limits<std::size_t>::max();
+constexpr int32 kHashCompactSlotEmpty = 0;
+constexpr int32 kHashCompactSlotBusy = -1;
 
 struct HashSNodeFlatLayout {
   std::size_t table_capacity{0};
@@ -36,6 +38,11 @@ struct HashSNodeFlatLayout {
   std::size_t active_slots_count_offset{kHashSNodeNoOffset};
   std::size_t tombstone_count_offset{kHashSNodeNoOffset};
   std::size_t probe_stats_offset{kHashSNodeNoOffset};
+  std::size_t compact_child_pool_capacity{0};
+  std::size_t compact_child_pool_offset{kHashSNodeNoOffset};
+  std::size_t compact_child_pool_next_offset{kHashSNodeNoOffset};
+  std::size_t compact_child_pool_overflow_offset{kHashSNodeNoOffset};
+  std::size_t compact_child_pool_stride{0};
 };
 
 inline int64 get_hash_snode_capacity(const SNode &snode) {
@@ -52,12 +59,28 @@ inline int64 get_hash_snode_capacity(const SNode &snode) {
   return capacity;
 }
 
+inline int64 get_hash_snode_expected_active(const SNode &snode) {
+  if (snode.hash_expected_active_hint > 0) {
+    return snode.hash_expected_active_hint;
+  }
+  return get_hash_snode_capacity(snode);
+}
+
+inline bool hash_snode_uses_compact_child_pool(const SNode &snode,
+                                               bool enabled) {
+  return enabled && snode.type == SNodeType::hash && snode.ch.size() == 1 &&
+         !snode.ch[0]->is_bit_level &&
+         snode.ch[0]->type == SNodeType::hash &&
+         get_hash_snode_expected_active(snode) < get_hash_snode_capacity(snode);
+}
+
 inline HashSNodeFlatLayout compute_hash_snode_flat_layout(
     const SNode &snode,
     std::size_t payload_stride,
     bool include_ambient_payload,
     bool include_active_slots = false,
-    bool include_tombstone_count = false) {
+    bool include_tombstone_count = false,
+    bool include_compact_child_pool = false) {
   TI_ERROR_IF(payload_stride == 0 || payload_stride % 4 != 0,
               "Hash SNode requires a positive 4-byte aligned payload cell "
               "size, got {} bytes.",
@@ -69,11 +92,15 @@ inline HashSNodeFlatLayout compute_hash_snode_flat_layout(
   layout.state_offset = 0;
   layout.key_offset = align_up(layout.state_offset + layout.table_capacity * 4,
                                static_cast<std::size_t>(4));
+  const std::size_t payload_unit_stride =
+      include_compact_child_pool ? static_cast<std::size_t>(4)
+                                 : payload_stride;
   layout.payload_offset =
       align_up(layout.key_offset + layout.table_capacity * 4,
                static_cast<std::size_t>(4));
   layout.active_count_offset =
-      align_up(layout.payload_offset + payload_stride * layout.table_capacity,
+      align_up(layout.payload_offset +
+                   payload_unit_stride * layout.table_capacity,
                static_cast<std::size_t>(4));
   layout.overflow_count_offset = layout.active_count_offset + 4;
 
@@ -90,6 +117,24 @@ inline HashSNodeFlatLayout compute_hash_snode_flat_layout(
     layout.tombstone_count_offset =
         align_up(cursor, static_cast<std::size_t>(4));
     cursor = layout.tombstone_count_offset + 4;
+  }
+  if (include_compact_child_pool) {
+    layout.compact_child_pool_capacity =
+        static_cast<std::size_t>(get_hash_snode_expected_active(snode));
+    TI_ERROR_IF(layout.compact_child_pool_capacity == 0,
+                "Hash compact child pool capacity must be positive.");
+    layout.compact_child_pool_next_offset =
+        align_up(cursor, static_cast<std::size_t>(4));
+    cursor = layout.compact_child_pool_next_offset + 4;
+    layout.compact_child_pool_overflow_offset =
+        align_up(cursor, static_cast<std::size_t>(4));
+    cursor = layout.compact_child_pool_overflow_offset + 4;
+    layout.compact_child_pool_offset =
+        align_up(cursor, static_cast<std::size_t>(4));
+    layout.compact_child_pool_stride = payload_stride;
+    cursor = layout.compact_child_pool_offset +
+             layout.compact_child_pool_stride *
+                 layout.compact_child_pool_capacity;
   }
 
   if (include_ambient_payload) {

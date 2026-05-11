@@ -72,6 +72,11 @@ struct SNodeDescriptor {
   size_t hash_active_slots_offset = 0;
   size_t hash_active_slots_count_offset = 0;
   size_t hash_tombstone_count_offset = 0;
+  size_t hash_compact_child_pool_offset = 0;
+  size_t hash_compact_child_pool_next_offset = 0;
+  size_t hash_compact_child_pool_overflow_offset = 0;
+  size_t hash_compact_child_pool_capacity = 0;
+  size_t hash_compact_child_pool_stride = 0;
 
   SNode *get_child(int ch_i) const {
     return snode->ch[ch_i].get();
@@ -135,6 +140,7 @@ struct PointerLayoutPolicy {
   // default-off so current SPIR-V root-buffer layouts stay byte-equivalent.
   bool hash_active_list{false};
   bool hash_diagnostics{false};
+  bool hash_compact_child_pool{false};
 };
 
 CompiledSNodeStructs compile_snode_structs(

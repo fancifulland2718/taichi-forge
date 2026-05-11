@@ -184,6 +184,8 @@ void export_lang(py::module &m) {
                      &CompileConfig::hash_snode_active_list)
       .def_readwrite("hash_snode_diagnostics",
                      &CompileConfig::hash_snode_diagnostics)
+      .def_readwrite("hash_snode_compact_child_pool",
+                     &CompileConfig::hash_snode_compact_child_pool)
       .def_readwrite("spirv_disabled_passes",
                      &CompileConfig::spirv_disabled_passes)
       .def_readwrite("spirv_adaptive_opt",
@@ -714,6 +716,17 @@ void export_lang(py::module &m) {
              const DebugInfo &dbg_info) -> SNode & {
             SNode &child = self.hash(axes, sizes, dbg_info);
             child.vk_max_active_hint = table_capacity;
+            return child;
+          },
+          py::return_value_policy::reference)
+      .def(
+          "hash_with_capacity_and_active_hint",
+          [](SNode &self, const std::vector<Axis> &axes,
+             const std::vector<int> &sizes, int64_t table_capacity,
+             int64_t expected_active, const DebugInfo &dbg_info) -> SNode & {
+            SNode &child = self.hash(axes, sizes, dbg_info);
+            child.vk_max_active_hint = table_capacity;
+            child.hash_expected_active_hint = expected_active;
             return child;
           },
           py::return_value_policy::reference)
