@@ -31,19 +31,19 @@ def test_hash_snode_capacity_selector():
         logical_elements=1024,
         expected_active=17,
         default_load_factor=0.5,
-    ) == (64, 0.5)
+    ) == (64, 0.5, 17)
     assert _select_hash_snode_capacity(
         logical_elements=1024,
         max_active=17,
         hash_load_factor=0.75,
         default_load_factor=0.5,
-    ) == (32, 0.75)
+    ) == (32, 0.75, 17)
     with pytest.warns(UserWarning):
         assert _select_hash_snode_capacity(
             logical_elements=1024,
             capacity=17,
             default_load_factor=0.5,
-        ) == (32, None)
+        ) == (32, None, None)
 
     with pytest.raises(TaichiRuntimeError):
         _select_hash_snode_capacity(
@@ -54,20 +54,23 @@ def test_hash_snode_capacity_selector():
         )
 
 
-@test_utils.test(arch=ti.cpu, require=ti.extension.sparse)
-def test_hash_snode_requires_gate():
+@test_utils.test(
+    arch=ti.cpu,
+    require=ti.extension.sparse,
+    hash_snode_experimental=False,
+)
+def test_hash_snode_can_be_disabled_by_flag():
     x = ti.field(ti.i32)
-    with pytest.raises(TaichiRuntimeError):
+    with pytest.raises(TaichiRuntimeError, match="disabled"):
         ti.root.hash(ti.i, 16, max_active=4).place(x)
 
 
 @test_utils.test(
     arch=ti.cpu,
     require=ti.extension.sparse,
-    hash_snode_experimental=True,
     offline_cache=False,
 )
-def test_hash_snode_diagnostic_errors_for_unsupported_topologies():
+def test_hash_snode_hash_dense_smoke_with_default_enabled():
     x = ti.field(ti.i32)
     h = ti.root.hash(ti.i, 16, capacity=8)
 
@@ -594,7 +597,7 @@ def _run_hash_snode_pointer_child():
     assert value_sum[None] == 302 + 72
 
 
-def _run_hash_snode_nested_hash():
+def _run_hash_snode_nested_hash(compact_child_pool=False):
     x = ti.field(ti.i32)
     count = ti.field(ti.i32, shape=())
     coord_sum = ti.field(ti.i32, shape=())
@@ -602,7 +605,10 @@ def _run_hash_snode_nested_hash():
     active_outer = ti.field(ti.i32, shape=())
     active_inner = ti.field(ti.i32, shape=())
 
-    outer = ti.root.hash(ti.i, 64, capacity=16)
+    if compact_child_pool:
+        outer = ti.root.hash(ti.i, 64, expected_active=4, hash_load_factor=0.5)
+    else:
+        outer = ti.root.hash(ti.i, 64, capacity=16)
     inner = outer.hash(ti.j, 64, capacity=8)
     inner.place(x)
 
@@ -666,6 +672,27 @@ def _run_hash_snode_nested_hash():
         == 3 * 10 + 4 + 7 * 10 + 5 + 11 * 10 + 0 + 11 * 10 + 6
     )
     assert value_sum[None] == 304 + 75 + 110
+
+
+def _run_hash_snode_nested_hash_compact_child_pool_overflow():
+    x = ti.field(ti.i32)
+
+    outer = ti.root.hash(ti.i, 64, expected_active=2, hash_load_factor=0.5)
+    inner = outer.hash(ti.j, 64, capacity=4)
+    inner.place(x)
+
+    @ti.kernel
+    def write_too_many_parent_keys():
+        x[3, 1] = 31
+        x[7, 1] = 71
+        x[11, 1] = 111
+
+    with pytest.raises(
+        Exception,
+        match="Hash SNode compact child pool overflow|Hash SNode table overflow",
+    ):
+        write_too_many_parent_keys()
+        ti.sync()
 
 
 def _run_hash_snode_hash_under_pointer():
@@ -1160,6 +1187,28 @@ def test_hash_snode_cpu_nested_hash():
     arch=ti.cpu,
     require=ti.extension.sparse,
     hash_snode_experimental=True,
+    hash_snode_compact_child_pool=True,
+    offline_cache=False,
+)
+def test_hash_snode_cpu_nested_hash_compact_child_pool():
+    _run_hash_snode_nested_hash(compact_child_pool=True)
+
+
+@test_utils.test(
+    arch=ti.cpu,
+    require=ti.extension.sparse,
+    hash_snode_experimental=True,
+    hash_snode_compact_child_pool=True,
+    offline_cache=False,
+)
+def test_hash_snode_cpu_nested_hash_compact_child_pool_overflow():
+    _run_hash_snode_nested_hash_compact_child_pool_overflow()
+
+
+@test_utils.test(
+    arch=ti.cpu,
+    require=ti.extension.sparse,
+    hash_snode_experimental=True,
     offline_cache=False,
 )
 def test_hash_snode_cpu_hash_under_pointer():
@@ -1468,6 +1517,42 @@ def test_hash_snode_cuda_pointer_child():
     cuda_sparse_pool_auto_size=True,
 )
 def test_hash_snode_cuda_nested_hash():
+    _run_hash_snode_nested_hash()
+
+
+@test_utils.test(
+    arch=ti.cuda,
+    require=ti.extension.sparse,
+    hash_snode_experimental=True,
+    hash_snode_compact_child_pool=True,
+    offline_cache=False,
+    cuda_sparse_pool_auto_size=True,
+)
+def test_hash_snode_cuda_nested_hash_compact_child_pool():
+    _run_hash_snode_nested_hash(compact_child_pool=True)
+
+
+@test_utils.test(
+    arch=ti.cuda,
+    require=ti.extension.sparse,
+    hash_snode_experimental=True,
+    hash_snode_compact_child_pool=True,
+    offline_cache=False,
+    cuda_sparse_pool_auto_size=True,
+)
+def test_hash_snode_cuda_nested_hash_compact_child_pool_overflow():
+    _run_hash_snode_nested_hash_compact_child_pool_overflow()
+
+
+@test_utils.test(
+    arch=ti.cuda,
+    require=ti.extension.sparse,
+    hash_snode_experimental=True,
+    hash_snode_active_list=True,
+    offline_cache=False,
+    cuda_sparse_pool_auto_size=True,
+)
+def test_hash_snode_cuda_nested_hash_active_list():
     _run_hash_snode_nested_hash()
 
 
@@ -1812,6 +1897,30 @@ def test_hash_snode_vulkan_pointer_child():
 )
 def test_hash_snode_vulkan_nested_hash():
     _run_hash_snode_nested_hash()
+
+
+@test_utils.test(
+    arch=ti.vulkan,
+    hash_snode_experimental=True,
+    hash_snode_compact_child_pool=True,
+    vulkan_sparse_experimental=True,
+    offline_cache=False,
+    vulkan_listgen_dynamic_size=True,
+)
+def test_hash_snode_vulkan_nested_hash_compact_child_pool():
+    _run_hash_snode_nested_hash(compact_child_pool=True)
+
+
+@test_utils.test(
+    arch=ti.vulkan,
+    hash_snode_experimental=True,
+    hash_snode_compact_child_pool=True,
+    vulkan_sparse_experimental=True,
+    offline_cache=False,
+    vulkan_listgen_dynamic_size=True,
+)
+def test_hash_snode_vulkan_nested_hash_compact_child_pool_overflow():
+    _run_hash_snode_nested_hash_compact_child_pool_overflow()
 
 
 @test_utils.test(

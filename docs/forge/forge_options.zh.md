@@ -1,6 +1,6 @@
 # Taichi Forge — 编译 / 运行时 / 架构 / 现代化选项一览
 
-> 适用于 **Taichi Forge 0.3.7**。本文列出的所有选项均为**可选启用**；默认值与 vanilla taichi 1.7.4 字节等价。
+> 适用于 **Taichi Forge 0.3.13**。除非特别说明，本文列出的选项均为**可选启用**；未显式启用的功能尽量保留 upstream Taichi 1.7.4 行为。
 >
 > English: [forge_options.en.md](forge_options.en.md)
 
@@ -91,6 +91,18 @@
 | `spirv_listgen_subgroup_ballot` | `False` | 仅 Vulkan/SPIR-V。在 listgen kernel 内将逐线程 `OpAtomicIAdd` 聚合为每活跃 subgroup 一次 ballot 原子操作，降低 dense-active sparse struct-for 的原子争用。需设备支持 subgroup ballot（标准 SPIR-V 能力，Vulkan adapter 上报），否则该 flag 无效。 |
 | `listgen_static_grid_dim` | `False` | 仅 CUDA / AMDGPU。sparse-listgen kernel 使用静态上限推出的 `grid_dim`（= 被列 SNode 严格祖先的 `num_cells_per_container` 乘积，不含 root），并以硬件饱和值封顶。消除浅稀疏树上的空闲 block。Vulkan 已通过 task attribs 计算等价量，该 flag 在 SPIR-V 后端为空操作。正确性由 `element_listgen_nonroot` 现有 grid-stride 循环保证。 |
 
+### 2.8 Hash SNode
+
+`hash` SNode 是实验功能，在 Taichi Forge 0.3.13 中默认开启。它可在 CPU、CUDA、Vulkan 上使用，第一次调用 `SNode.hash()` 会提示实验功能警告；如果需要复现 vanilla 兼容的拒绝行为，或隔离回归，可以传入 `hash_snode_experimental=False` 关闭。API 与迁移说明见 [hash_snode.zh.md](hash_snode.zh.md)。
+
+| 参数 | 允许值 / 默认值 | 用途 | 风险与建议 |
+|---|---|---|---|
+| `hash_snode_experimental` | bool，默认 `True`；可设为 `False` | 启用 CPU / CUDA / Vulkan 上的 `SNode.hash()`。第一次使用会提示实验功能警告。 | 正常 Forge 使用保持 `True`。只在隔离回归、复现 vanilla 兼容拒绝行为、或避免生产代码误用时设为 `False`。环境变量别名：`TI_HASH_SNODE_EXPERIMENTAL=0/1`。 |
+| `hash_snode_default_load_factor` | `(0, 1]` 内浮点数，默认 `0.5` | 使用 `SNode.hash(..., expected_active=N)` 或 `max_active=N` 且没有传 per-node `hash_load_factor` 时的默认负载因子。 | 较低值会保留更多内存并通常缩短 probe；较高值节省内存但增加碰撞、probe 成本和 overflow 风险。环境变量别名：`TI_HASH_SNODE_DEFAULT_LOAD_FACTOR`。 |
+| `hash_snode_active_list` | bool，默认 `False` | 实验性 active bucket list，用于 hash 遍历优化。 | 会改变生成布局/代码，对 churn-heavy workload 可能退步。只建议在 focused benchmark 证明收益后启用。环境变量别名：`TI_HASH_SNODE_ACTIVE_LIST=0/1`。 |
+| `hash_snode_diagnostics` | bool，默认 `False` | 启用额外运行时计数器，用于调试 probe / tombstone 行为。 | 诊断模式，不是生产性能默认项；会增加计数器流量和少量内存/运行时开销。环境变量别名：`TI_HASH_SNODE_DIAGNOSTICS=0/1`。 |
+| `hash_snode_compact_child_pool` | bool，默认 `False` | `hash -> hash` / nested hash 的实验性内存模式。当 parent active count 远小于 parent capacity 时，可减少 child-container 预留内存。 | 会增加 parent bucket 到 child slot 的解析，可能以延迟换内存。只在 nested hash 内存占用主导且 benchmark 支持时启用。环境变量别名：`TI_HASH_SNODE_COMPACT_CHILD_POOL=0/1`。 |
+
 ---
 
 ## 3. 环境变量
@@ -120,14 +132,15 @@ PyPI 发布的 wheel 三项均为 ON。
 
 ## 5. SNode 覆盖度扩展
 
-| SNode 类型 | vanilla 1.7.4 Vulkan | Taichi Forge 0.3.0 Vulkan |
+| SNode 类型 | vanilla 1.7.4 Vulkan | Taichi Forge 0.3.13 Vulkan |
 |---|---|---|
 | `dense` | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ |
 | `pointer` | ❌ | ✅ |
 | `dynamic` | ❌ | ✅ |
+| `hash` | ❌ | ⚠️ 实验功能，默认开启，首次使用警告 |
 
-完整用法与语义见 [sparse_snode_on_vulkan.zh.md](sparse_snode_on_vulkan.zh.md)。
+Vulkan 稀疏 SNode 用法与语义见 [sparse_snode_on_vulkan.zh.md](sparse_snode_on_vulkan.zh.md)。Hash SNode API 见 [hash_snode.zh.md](hash_snode.zh.md)。
 
 ---
 
@@ -135,7 +148,7 @@ PyPI 发布的 wheel 三项均为 ON。
 
 Forge 同步至现代工具链；下表对比 vanilla 1.7.4。
 
-| 组件 | vanilla 1.7.4 | Forge 0.3.0 |
+| 组件 | vanilla 1.7.4 | Forge 0.3.13 |
 |---|---|---|
 | LLVM | 15 | **20.1.7** |
 | Python | 3.7 – 3.12 | **3.10 – 3.14** |
@@ -173,3 +186,4 @@ Vulkan ImGui 后端已迁移到新的 `ImGui_ImplVulkan_InitInfo` 布局（`Rend
 ## 9. 另见
 
 - Sparse SNode on Vulkan 使用指南：[sparse_snode_on_vulkan.zh.md](sparse_snode_on_vulkan.zh.md)
+- Hash SNode 使用指南：[hash_snode.zh.md](hash_snode.zh.md)

@@ -1,6 +1,6 @@
 # Sparse SNode on Vulkan — 使用指南
 
-> 适用于 **Taichi Forge 0.3.0**。vanilla Taichi 1.7.4 的 Vulkan/SPIRV 后端**只支持 `dense` + `root`**；Taichi Forge 在 Vulkan 上额外支持 `pointer` / `bitmasked` / `dynamic` SNode，并保证 cpu / cuda / vulkan 三后端数值等价。
+> 适用于 **Taichi Forge 0.3.13**。vanilla Taichi 1.7.4 的 Vulkan/SPIRV 后端**只支持 `dense` + `root`**；Taichi Forge 在 Vulkan 上额外支持 `pointer` / `bitmasked` / `dynamic` / 实验性 `hash` SNode，并保证 cpu / cuda / vulkan 三后端数值等价。
 >
 > English: [sparse_snode_on_vulkan.en.md](sparse_snode_on_vulkan.en.md)
 
@@ -8,13 +8,13 @@
 
 ## 1. 速览
 
-| 数据结构 | vanilla 1.7.4 Vulkan | Taichi Forge 0.3.0 Vulkan | LLVM (cpu/cuda) |
+| 数据结构 | vanilla 1.7.4 Vulkan | Taichi Forge 0.3.13 Vulkan | LLVM (cpu/cuda) |
 |---|---|---|---|
 | `dense` | ✅ | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ | ✅ |
 | `pointer` | ❌ | ✅ | ✅ |
 | `dynamic` | ❌ | ✅ | ✅ |
-| `hash` | ❌ | ❌（详见 §6） | ❌（前端默认禁用） |
+| `hash` | ❌ | ⚠️ 实验功能，默认开启，首次使用警告（详见 §6） | ⚠️ 实验功能，默认开启，首次使用警告 |
 | `quant_array` / `bit_struct` | ❌ | ⚠️ 实验性（详见 §7） | ✅ |
 
 支持的 op：`activate` / `deactivate` / `is_active` / `length` / `append` / `ti.deactivate` / struct-for (`for I in field:`) / `ti.ndrange` 上的稀疏 listgen。
@@ -23,7 +23,7 @@
 
 ## 2. 启用方式
 
-无需任何额外开关——只要 `ti.init(arch=ti.vulkan)`，上表中的 SNode 即可使用。
+`pointer`、`bitmasked`、`dynamic`、`hash` 不需要额外开关——只要 `ti.init(arch=ti.vulkan)` 即可使用。`hash` 仍是实验路径，第一次使用会发出警告；如需禁用，传入 `hash_snode_experimental=False`。`quant_array` / `bit_struct` 仍是独立实验路径，需要显式开启。
 
 ```python
 import taichi as ti
@@ -170,7 +170,7 @@ Vulkan 上的 `dynamic` 使用 **flat-array + length 后缀** 协议：
 
 ### 3.5 不支持
 
-- `hash` SNode：详见 §6。
+- `quant_array` / `bit_struct` 之下创建 `hash`：详见 §6。
 - `quant_array` / `bit_struct`：详见 §7。
 - 跨多个 SNode tree 的 cross-tree pointer：与 LLVM 同步限制。
 - `ti.deactivate` 在 ambient（root 直挂的 dense）上：与 vanilla 同——dense 不支持 deactivate。
@@ -237,7 +237,8 @@ python tests\p4\vulkan_pointer_smoke.py
 |---|---|---|
 | 写入静默丢失，`ti.length()` 显示 < 实际激活次数 | 超出编译期 capacity（§3.1 / §3.3） | 增大 SNode 维度 N，或减少同帧并发 activate。 |
 | `TI_VULKAN_POOL_FRACTION=0.5` 后部分 cell 写入丢失 | 缩减后 capacity 不够（§3.2） | 调高 fraction，或恢复默认 1.0。 |
-| `RuntimeError: hash not yet supported` | 你在用 `ti.root.hash(...)` | hash 在 vanilla 与本 fork 均默认禁用，见 §6。 |
+| `Hash SNode is experimental` 警告 | 第一次使用默认开启的实验性 `hash` API | 这是预期提示。阅读 §6 / [hash_snode.zh.md](hash_snode.zh.md)；如需禁用，传入 `ti.init(hash_snode_experimental=False)`。 |
+| `ti.sync()` 附近报告 hash overflow | distinct hash key 超出固定 table 容量 | 增大 `expected_active` / `capacity`，或降低 `hash_load_factor`。 |
 | Vulkan 上首次启动很慢，第二次秒开 | offline cache 首次编译 | 正常行为；第二次起命中 cache。 |
 | `~/.cache/taichi/` 中 `ticache.tcb` 损坏 → 启动 | fallback 重编译路径已内建 | Forge 0.2.4+ 自动处理 `kVersionNotMatched` / `kCorrupted`，不抛异常。 |
 | `hang` / `device lost` 在 race 测试 | warp lockstep（§3.4） | 提供 GPU 型号 + driver 版本到 issue。 |
@@ -246,32 +247,23 @@ python tests\p4\vulkan_pointer_smoke.py
 
 ## 6. 关于 `hash` SNode
 
-`hash` SNode 在 **vanilla taichi 1.7.4 与本 fork 中均默认禁用**——`ti.root.hash(...)` 抛 `RuntimeError("hash not yet supported")`，已是上游历史状态（自 2021 年起）。
+`hash` SNode 可在 Vulkan 上作为**实验性固定容量稀疏 SNode**使用。它默认开启，第一次使用会提示警告：
 
-### 6.1 实时物理仿真 / 实时渲染必要性判定
+```python
+ti.init(arch=ti.vulkan)
 
-在判定是否为 Vulkan 后端实现 `hash` SNode 之前，我们对主流实时 GPU 负载做了一轮全面的需求扫描。结论：**不存在一个在表组会被堆的实时物理 / 渲染 pipeline 依赖它**，因此不计划进一步投入。
+x = ti.field(ti.f32)
+ti.root.hash(ti.ij, (4096, 4096), expected_active=8192).place(x)
+```
 
-| 负载类型 | 典型稀疏模式 | Forge 中的地道替代方案 |
-|---|---|---|
-| 刚体 broadphase（PBD / Bullet 类空间哈希） | 世界 AABB 有界 → 固定桤位数哈希表 | `dense` 桤位 + atomic counter，用户在 `floor(x / cell_size)` 上跱 `hash21` |
-| MPM / MLS-MPM / SPH / PBF | 仿真域有界，稀疏激活 | `pointer.bitmasked.dense`（上游 MPM-128 / MLS-MPM 法定模式） |
-| FEM / 体積网格 | 自适应但有界 | `pointer.dense` 树 |
-| 布料 / 毛发 / Eulerian 流体 | 稠密或低稀疏 | `dense` / `bitmasked.dense` |
-| OpenVDB 式 SDF / 体素 cone tracing | brick 的 B+ 树 | `pointer.pointer.dense`（Forge 已在 Vulkan 上支持） |
-| Instant-NGP / NeRF 哈希网格编码 | 定长哈希表 + 显式冲突处理 | 大小 `T`（常为 `2^14`–`2^19`）的 `dense` + 用户级坐标哈希 |
-| 体积全局光照 探重 | 稠密网格 | `dense` |
+它和 `pointer` / `dynamic` 的关键差异：
 
-为什么 `hash` SNode **不是**合适选择：
+- `SNode.hash()` 必须在 `expected_active`、`max_active`、`capacity` 中恰好传一个。
+- table 容量在 JIT 前固定；没有 device-side grow 或 rehash。
+- overflow 会报错，而不是静默丢写。
+- struct-for 会访问所有活跃元素，但遍历顺序不是公开合同。
 
-- 以上负载**坐标空间都是有界的**（仿真域或屏幕视锥），`hash` 的“无界坐标”优势未被使用。
-- Vulkan 没有 device-side 动态分配器；忠实实现 `hash` SNode 只能 (a) 静态预留最坏情况桶数组——与“用户级 hash + dense”在功能上等价，或 (b) chunk 重哈希——与本 fork 已明确划出的非目标范围重叠。
-- GPU 上哈希插入的竞态 (linear-probe + CAS + warp lockstep) 与 `pointer` race-to-activate 部分重叠，不能纯增得。
-
-### 6.2 当前推荐替代
-
-1. `ti.root.pointer(ti.ij, N).dense(ti.ij, M).place(...)` + `TI_VULKAN_POOL_FRACTION=0.05`（§3.2）：覆盖 95% 真实稀疏场景；
-2. 用户级哈希函数（参考 `python/taichi_forge/examples/algorithm/poisson_disk_sampling.py` 中的 `hash21`）+ `dense` 桶，适用于 instant-NGP 类编码器与刚体 broadphase。
+完整 API、支持拓扑、调参开关和迁移说明见：[hash_snode.zh.md](hash_snode.zh.md)。
 
 ---
 

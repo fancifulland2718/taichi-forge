@@ -40,6 +40,9 @@ TOPOLOGY_LAYOUTS = (
     "dynamic_bitmasked",
 )
 LAYOUTS = ROOT_LAYOUTS + TOPOLOGY_LAYOUTS
+CASE_LOCAL_ACTIVE_LIST_LAYOUTS = {
+    "nested_hash_active_list": "nested_hash",
+}
 EXTERNAL_BASELINE_CASES = (
     "warp_hash_cpu",
     "warp_hash_cuda",
@@ -181,6 +184,20 @@ def collect_taichi_kernel_profile() -> dict:
         "total_time_ms": total_time_ms,
         "kernels": kernels,
     }
+
+
+def isolation_stage_median(item: dict, stage: str) -> float | None:
+    isolation = item.get("topology_isolation", {})
+    if not isinstance(isolation, dict):
+        return None
+    stage_payload = isolation.get(stage, {})
+    if not isinstance(stage_payload, dict):
+        return None
+    stats = stage_payload.get("stats", {})
+    if not isinstance(stats, dict):
+        return None
+    value = stats.get("median_ms")
+    return float(value) if isinstance(value, (int, float)) else None
 
 
 def reset_hash_runtime_probe_stats() -> None:
@@ -330,9 +347,19 @@ def hash_layout_model(
     reserved_instances: int = 1,
     active_instances: int | None = None,
     instance_basis: str = "single_container",
+    compact_child_pool_capacity: int = 0,
+    compact_child_pool_stride: int = 0,
 ) -> dict[str, int | str | bool]:
     include_tombstone = diagnostics or active_list
     payload_stride = align4(max(4, int(payload_stride)))
+    compact_child_pool_capacity = max(0, int(compact_child_pool_capacity))
+    compact_child_pool_enabled = compact_child_pool_capacity > 0
+    bucket_payload_stride = 4 if compact_child_pool_enabled else payload_stride
+    compact_child_pool_stride = (
+        align4(max(4, int(compact_child_pool_stride or payload_stride)))
+        if compact_child_pool_enabled
+        else 0
+    )
     state_bytes = capacity * 4
     key_bytes = capacity * 4
     active_count_bytes = 4
@@ -340,6 +367,20 @@ def hash_layout_model(
     active_slots_bytes = capacity * 4 if active_list else 0
     active_slots_count_bytes = 4 if active_list else 0
     tombstone_count_bytes = 4 if include_tombstone else 0
+    compact_child_pool_metadata_bytes = 8 if compact_child_pool_enabled else 0
+    compact_child_pool_bytes = (
+        compact_child_pool_capacity * compact_child_pool_stride
+        if compact_child_pool_enabled
+        else 0
+    )
+    compact_child_pool_net_savings_bytes = (
+        capacity * payload_stride
+        - (capacity * bucket_payload_stride)
+        - compact_child_pool_metadata_bytes
+        - compact_child_pool_bytes
+        if compact_child_pool_enabled
+        else 0
+    )
     hash_table_bytes = (
         state_bytes
         + key_bytes
@@ -351,12 +392,15 @@ def hash_layout_model(
     )
 
     payload_offset = align4(state_bytes + key_bytes)
-    active_count_offset = align4(payload_offset + capacity * payload_stride)
+    active_count_offset = align4(payload_offset + capacity * bucket_payload_stride)
     cursor = active_count_offset + active_count_bytes + overflow_count_bytes
     if active_list:
         cursor = align4(cursor) + active_slots_bytes + active_slots_count_bytes
     if include_tombstone:
         cursor = align4(cursor) + tombstone_count_bytes
+    if compact_child_pool_enabled:
+        cursor = align4(cursor) + compact_child_pool_metadata_bytes
+        cursor = align4(cursor) + compact_child_pool_bytes
     ambient_payload_bytes = payload_stride
     container_bytes = align4(cursor) + ambient_payload_bytes
 
@@ -371,6 +415,12 @@ def hash_layout_model(
         "reserved_instances": max(0, int(reserved_instances)),
         "active_instances": max(0, int(active_instances)),
         "instance_basis": instance_basis,
+        "compact_child_pool_enabled": compact_child_pool_enabled,
+        "compact_child_pool_capacity": compact_child_pool_capacity,
+        "compact_child_pool_stride_bytes": compact_child_pool_stride,
+        "compact_child_pool_metadata_bytes": compact_child_pool_metadata_bytes,
+        "compact_child_pool_bytes": compact_child_pool_bytes,
+        "compact_child_pool_net_savings_bytes": compact_child_pool_net_savings_bytes,
         "state_bytes": state_bytes,
         "key_bytes": key_bytes,
         "counter_bytes": active_count_bytes
@@ -379,7 +429,7 @@ def hash_layout_model(
         + tombstone_count_bytes,
         "active_slots_bytes": active_slots_bytes,
         "hash_table_bytes": hash_table_bytes,
-        "hash_payload_reserved_bytes": capacity * payload_stride,
+        "hash_payload_reserved_bytes": capacity * bucket_payload_stride,
         "ambient_payload_bytes": ambient_payload_bytes,
         "hash_container_bytes": container_bytes,
     }
@@ -463,13 +513,37 @@ def hash_memory_model(
     payload_reserved = 0
     container_reserved = 0
     table_active = 0
+    table_active_parent = 0
+    payload_active_parent = 0
+    container_active_parent = 0
+    compact_child_pool_reserved = 0
+    compact_child_pool_net_savings = 0
     for node in hash_nodes:
         reserved_instances = int(node["reserved_instances"])
         active_instances = int(node["active_instances"])
+        active_parent_instances = (
+            active_instances
+            if node.get("instance_basis") == "outer_hash_capacity"
+            else reserved_instances
+        )
         table_reserved += int(node["hash_table_bytes"]) * reserved_instances
         payload_reserved += int(node["hash_payload_reserved_bytes"]) * reserved_instances
         container_reserved += int(node["hash_container_bytes"]) * reserved_instances
         table_active += int(node["hash_table_bytes"]) * active_instances
+        table_active_parent += int(node["hash_table_bytes"]) * active_parent_instances
+        payload_active_parent += (
+            int(node["hash_payload_reserved_bytes"]) * active_parent_instances
+        )
+        container_active_parent += (
+            int(node["hash_container_bytes"]) * active_parent_instances
+        )
+        compact_child_pool_reserved += (
+            int(node.get("compact_child_pool_bytes", 0))
+            + int(node.get("compact_child_pool_metadata_bytes", 0))
+        ) * reserved_instances
+        compact_child_pool_net_savings += int(
+            node.get("compact_child_pool_net_savings_bytes", 0)
+        ) * reserved_instances
     reference_aux_reserved = 0
     reference_payload_reserved = 0
     reference_container_reserved = 0
@@ -490,6 +564,13 @@ def hash_memory_model(
             "hash_payload_bytes_reserved_model": payload_reserved,
             "hash_container_bytes_reserved_model": container_reserved,
             "hash_table_bytes_active_model": table_active,
+            "hash_table_bytes_active_parent_model": table_active_parent,
+            "hash_payload_bytes_active_parent_model": payload_active_parent,
+            "hash_container_bytes_active_parent_model": container_active_parent,
+            "hash_active_parent_savings_bytes": container_reserved
+            - container_active_parent,
+            "hash_compact_child_pool_reserved_model": compact_child_pool_reserved,
+            "hash_compact_child_pool_net_savings_model": compact_child_pool_net_savings,
             "reference_aux_bytes_reserved_model": reference_aux_reserved,
             "reference_payload_bytes_reserved_model": reference_payload_reserved,
             "reference_container_bytes_reserved_model": reference_container_reserved,
@@ -499,6 +580,10 @@ def hash_memory_model(
             + reference_payload_reserved,
             "snode_container_bytes_reserved_model": container_reserved
             + reference_container_reserved,
+            "snode_container_bytes_active_parent_model": container_active_parent
+            + reference_container_reserved,
+            "snode_active_parent_savings_bytes": container_reserved
+            - container_active_parent,
         },
     }
 
@@ -1167,7 +1252,9 @@ def run_taichi_topology_case_initialized(
     hash_diagnostics: bool,
     outer_hash_load_factor: float | None,
     inner_hash_load_factor: float | None,
+    hash_compact_child_pool: bool,
     kernel_profiler: bool,
+    topology_isolation: bool,
 ) -> dict:
     if inner_active > inner_domain:
         raise RuntimeError("inner-active must be <= inner-domain")
@@ -1234,6 +1321,15 @@ def run_taichi_topology_case_initialized(
         return (i * 17 + 3) % inner_domain
 
     @ti.func
+    def bench_inner_key_for_layout(i):
+        ret = 0
+        if ti.static(dynamic_child):
+            ret = i
+        else:
+            ret = bench_inner_key(i)
+        return ret
+
+    @ti.func
     def bench_value_2d(outer_key, inner_key):
         return (outer_key * 31 + inner_key * 17) % 97 + 1
 
@@ -1271,6 +1367,34 @@ def run_taichi_topology_case_initialized(
             if value != 0:
                 count[None] += 1
                 coord_sum[None] += i * inner_domain + j
+                value_sum[None] += value
+
+    @ti.kernel
+    def struct_count_only():
+        for i, j in x:
+            count[None] += 1
+
+    @ti.kernel
+    def direct_lookup_reduce():
+        for p in range(active):
+            outer_key = bench_outer_key(p)
+            for q in range(inner_active):
+                inner_key = bench_inner_key_for_layout(q)
+                value = x[outer_key, inner_key]
+                if value != 0:
+                    count[None] += 1
+                    coord_sum[None] += outer_key * inner_domain + inner_key
+                    value_sum[None] += value
+
+    @ti.kernel
+    def range_body_reduce():
+        for p in range(active):
+            outer_key = bench_outer_key(p)
+            for q in range(inner_active):
+                inner_key = bench_inner_key_for_layout(q)
+                value = bench_value_2d(outer_key, inner_key)
+                count[None] += 1
+                coord_sum[None] += outer_key * inner_domain + inner_key
                 value_sum[None] += value
 
     t0 = time.perf_counter()
@@ -1339,6 +1463,76 @@ def run_taichi_topology_case_initialized(
         "value_sum": int(value_sum[None]),
     }
 
+    def run_topology_isolation_stage(name: str, kernel, count_only: bool) -> dict:
+        for _ in range(warmup):
+            clear_acc()
+            kernel()
+        ti.sync()
+        if hash_diagnostics and "hash" in layout:
+            reset_hash_runtime_probe_stats()
+        if kernel_profiler:
+            clear_taichi_kernel_profile(ti)
+        samples = []
+        for _ in range(steps):
+            t0 = time.perf_counter()
+            for _ in range(batch):
+                clear_acc()
+                kernel()
+            ti.sync()
+            samples.append((time.perf_counter() - t0) * 1000.0 / batch)
+        probe_stats = {}
+        if hash_diagnostics and "hash" in layout:
+            probe_stats = collect_hash_runtime_probe_stats()
+        profile = {}
+        if kernel_profiler:
+            profile = collect_taichi_kernel_profile()
+        clear_acc()
+        kernel()
+        ti.sync()
+        stage_result = {
+            "count": int(count[None]),
+            "coord_sum": int(coord_sum[None]),
+            "value_sum": int(value_sum[None]),
+        }
+        if count_only:
+            stage_ok = stage_result["count"] == exp["count"]
+        else:
+            stage_ok = stage_result == exp
+        payload = {
+            "schema_version": 1,
+            "name": name,
+            "ok": stage_ok,
+            "result": stage_result,
+            "stats": stats_ms(samples),
+        }
+        if probe_stats:
+            payload["runtime_probe_telemetry"] = probe_stats
+        if profile:
+            payload["kernel_profile"] = profile
+        return payload
+
+    topology_isolation_result = {}
+    if topology_isolation:
+        topology_isolation_result = {
+            "schema_version": 1,
+            "struct_reduce_full": {
+                "schema_version": 1,
+                "name": "struct_reduce_full",
+                "ok": final_result == exp,
+                "result": final_result,
+                "stats": stats_ms(reduce_samples),
+            },
+            "struct_count_only": run_topology_isolation_stage(
+                "struct_count_only", struct_count_only, True
+            ),
+            "direct_lookup_reduce": run_topology_isolation_stage(
+                "direct_lookup_reduce", direct_lookup_reduce, False
+            ),
+            "range_body_reduce": run_topology_isolation_stage(
+                "range_body_reduce", range_body_reduce, False
+            ),
+        }
+
     outer_hash_capacity = estimate_hash_capacity(active, outer_hash_load_factor or 0.5)
     inner_hash_capacity = estimate_hash_capacity(inner_active, inner_hash_load_factor or 0.5)
     hash_nodes = []
@@ -1385,6 +1579,10 @@ def run_taichi_topology_case_initialized(
                 reserved_instances=1,
                 active_instances=1,
                 instance_basis="root_container",
+                compact_child_pool_capacity=outer_active_instances
+                if hash_compact_child_pool and layout == "nested_hash"
+                else 0,
+                compact_child_pool_stride=outer_payload_stride,
             )
         )
         probe_telemetry["outer_hash"] = hash_probe_telemetry(
@@ -1414,8 +1612,11 @@ def run_taichi_topology_case_initialized(
             inner_keys, inner_hash_capacity
         )
 
+    result_case = f"{arch_name}_{layout}"
+    if hash_compact_child_pool and layout == "nested_hash":
+        result_case += "_compact_child_pool"
     result_payload = {
-        "case": f"{arch_name}_{layout}",
+        "case": result_case,
         "schema_version": 3,
         "arch": arch_name,
         "layout": layout,
@@ -1439,11 +1640,16 @@ def run_taichi_topology_case_initialized(
             "domain": domain,
             "inner_active": inner_active,
             "inner_domain": inner_domain,
+            "hash_active_list": hash_active_list,
             "kernel_profiler": kernel_profiler,
+            "topology_isolation": topology_isolation,
             "outer_hash_load_factor": outer_hash_load_factor,
             "inner_hash_load_factor": inner_hash_load_factor,
+            "hash_compact_child_pool": hash_compact_child_pool,
         },
     }
+    if topology_isolation_result:
+        result_payload["topology_isolation"] = topology_isolation_result
     if kernel_profile:
         result_payload["kernel_profile"] = kernel_profile
     if hash_nodes or reference_nodes:
@@ -1492,7 +1698,9 @@ def run_taichi_case(
     hash_diagnostics: bool,
     outer_hash_load_factor: float | None,
     inner_hash_load_factor: float | None,
+    hash_compact_child_pool: bool,
     kernel_profiler: bool,
+    topology_isolation: bool,
 ) -> dict:
     import taichi_forge as ti
 
@@ -1505,6 +1713,7 @@ def run_taichi_case(
         "hash_snode_experimental": True,
         "hash_snode_active_list": hash_active_list,
         "hash_snode_diagnostics": hash_diagnostics,
+        "hash_snode_compact_child_pool": hash_compact_child_pool,
         "kernel_profiler": kernel_profiler,
     }
     if arch_name == "vulkan":
@@ -1544,7 +1753,9 @@ def run_taichi_case(
             hash_diagnostics,
             outer_hash_load_factor,
             inner_hash_load_factor,
+            hash_compact_child_pool,
             kernel_profiler,
+            topology_isolation,
         )
 
     x = ti.field(ti.i32)
@@ -1758,9 +1969,11 @@ def run_taichi_case(
             "domain": domain,
             "inner_active": inner_active,
             "inner_domain": inner_domain,
+            "hash_active_list": hash_active_list,
             "kernel_profiler": kernel_profiler,
             "outer_hash_load_factor": outer_hash_load_factor,
             "inner_hash_load_factor": inner_hash_load_factor,
+            "hash_compact_child_pool": hash_compact_child_pool,
         },
     }
     if kernel_profile:
@@ -1798,8 +2011,8 @@ def run_taichi_case(
 def print_table(results: list[dict]) -> None:
     print(
         "\ncase,ok,compile_s,write_median_ms,reduce_median_ms,"
-        "proc_mb,gpu_ded_mb,hash_table_kb,snode_container_kb,probe_max,"
-        "runtime_probe_max"
+        "proc_mb,gpu_ded_mb,hash_table_kb,snode_container_kb,"
+        "compact_pool_kb,compact_savings_kb,probe_max,runtime_probe_max"
     )
     for item in results:
         mem = item.get("memory", {})
@@ -1817,6 +2030,14 @@ def print_table(results: list[dict]) -> None:
             float(totals.get("snode_container_bytes_reserved_model", -1024.0))
             / 1024.0
         )
+        compact_pool_kb = (
+            float(totals.get("hash_compact_child_pool_reserved_model", 0.0))
+            / 1024.0
+        )
+        compact_savings_kb = (
+            float(totals.get("hash_compact_child_pool_net_savings_model", 0.0))
+            / 1024.0
+        )
         probe_max = -1
         for diagnostics_key in ("hash_diagnostics", "reference_diagnostics"):
             diagnostics = item.get(diagnostics_key, {})
@@ -1831,7 +2052,8 @@ def print_table(results: list[dict]) -> None:
         print(
             "{case},{ok},{compile:.6f},{write:.6f},{reduce:.6f},"
             "{proc:.3f},{gpu:.3f},{hash_table_kb:.3f},"
-            "{snode_container_kb:.3f},{probe_max},{runtime_probe_max}".format(
+            "{snode_container_kb:.3f},{compact_pool_kb:.3f},"
+            "{compact_savings_kb:.3f},{probe_max},{runtime_probe_max}".format(
                 case=item.get("case"),
                 ok=item.get("ok"),
                 compile=item.get("compile_first_s", -1.0),
@@ -1841,10 +2063,82 @@ def print_table(results: list[dict]) -> None:
                 gpu=gpu,
                 hash_table_kb=hash_table_kb,
                 snode_container_kb=snode_container_kb,
+                compact_pool_kb=compact_pool_kb,
+                compact_savings_kb=compact_savings_kb,
                 probe_max=probe_max,
                 runtime_probe_max=runtime_probe_max,
             )
         )
+
+
+def print_kernel_profile_table(results: list[dict]) -> None:
+    if not any(isinstance(item.get("kernel_profile"), dict) for item in results):
+        return
+    print(
+        "\nprofile_case,stage,total_ms,record_count,top_kernel,top_kernel_ms,"
+        "listgen_ms,listgen_share_pct"
+    )
+    for item in results:
+        for stage in ("write", "reduce"):
+            stage_profile = kernel_profile_stage(item, stage)
+            if stage_profile is None:
+                continue
+            total_ms = float(stage_profile.get("total_time_ms", 0.0))
+            top = kernel_profile_top_kernel(stage_profile) or {}
+            top_name = str(top.get("name", ""))
+            top_ms = float(top.get("total_ms", 0.0))
+            listgen_ms = kernel_profile_listgen_total_ms(stage_profile)
+            share = listgen_ms / total_ms * 100.0 if total_ms > 0.0 else 0.0
+            print(
+                "{case},{stage},{total:.6f},{records},{top},{top_ms:.6f},"
+                "{listgen:.6f},{share:.2f}".format(
+                    case=item.get("case"),
+                    stage=stage,
+                    total=total_ms,
+                    records=stage_profile.get("record_count", 0),
+                    top=top_name,
+                    top_ms=top_ms,
+                    listgen=listgen_ms,
+                    share=share,
+                )
+            )
+
+
+def print_topology_isolation_table(results: list[dict]) -> None:
+    if not any(isinstance(item.get("topology_isolation"), dict) for item in results):
+        return
+    print("\nisolation_case,stage,ok,median_ms,range_pct")
+    for item in results:
+        isolation = item.get("topology_isolation", {})
+        if not isinstance(isolation, dict):
+            continue
+        for stage in (
+            "struct_reduce_full",
+            "struct_count_only",
+            "direct_lookup_reduce",
+            "range_body_reduce",
+        ):
+            payload = isolation.get(stage, {})
+            if not isinstance(payload, dict):
+                continue
+            stats = payload.get("stats", {})
+            if not isinstance(stats, dict):
+                continue
+            print(
+                "{case},{stage},{ok},{median:.6f},{range_pct:.2f}".format(
+                    case=item.get("case"),
+                    stage=stage,
+                    ok=payload.get("ok"),
+                    median=float(stats.get("median_ms", 0.0)),
+                    range_pct=relative_range_pct(
+                        [
+                            float(stats[key])
+                            for key in ("min_ms", "median_ms", "max_ms")
+                            if isinstance(stats.get(key), (int, float))
+                        ]
+                    ),
+                )
+            )
 
 
 def median_or_none(values: list[float]) -> float | None:
@@ -1860,12 +2154,82 @@ def relative_range_pct(values: list[float]) -> float:
     return (max(values) - min(values)) / med * 100.0
 
 
+def trimmed_relative_range_pct(values: list[float]) -> float:
+    if len(values) < 5:
+        return relative_range_pct(values)
+    trimmed = sorted(values)[1:-1]
+    return relative_range_pct(trimmed)
+
+
 def ratio_or_none(value: float | None, baseline: float | None) -> float | None:
     if not isinstance(value, (int, float)):
         return None
     if not isinstance(baseline, (int, float)) or baseline == 0:
         return None
     return float(value) / float(baseline)
+
+
+def numeric_or_none(value) -> float | None:
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def memory_delta_mb(item: dict, field: str) -> float | None:
+    memory = item.get("memory", {})
+    if not isinstance(memory, dict):
+        return None
+    after_init = memory.get("after_init", {})
+    after_bench = memory.get("after_bench", {})
+    if not isinstance(after_init, dict) or not isinstance(after_bench, dict):
+        return None
+    start = numeric_or_none(after_init.get(field))
+    end = numeric_or_none(after_bench.get(field))
+    if start is None or end is None or start < 0.0 or end < 0.0:
+        return None
+    return end - start
+
+
+def kernel_profile_stage(item: dict, stage: str) -> dict | None:
+    profile = item.get("kernel_profile", {})
+    if not isinstance(profile, dict):
+        return None
+    stage_profile = profile.get(stage)
+    if not isinstance(stage_profile, dict):
+        return None
+    if not stage_profile.get("available", False):
+        return None
+    return stage_profile
+
+
+def kernel_profile_kernels(stage_profile: dict | None) -> list[dict]:
+    if not isinstance(stage_profile, dict):
+        return []
+    kernels = stage_profile.get("kernels", [])
+    return [kernel for kernel in kernels if isinstance(kernel, dict)]
+
+
+def kernel_profile_listgen_total_ms(stage_profile: dict | None) -> float:
+    total = 0.0
+    for kernel in kernel_profile_kernels(stage_profile):
+        name = str(kernel.get("name", "")).lower()
+        if "listgen" in name or "list_gen" in name:
+            total += float(kernel.get("total_ms", 0.0))
+    return total
+
+
+def kernel_profile_top_kernel(stage_profile: dict | None) -> dict | None:
+    kernels = kernel_profile_kernels(stage_profile)
+    if not kernels:
+        return None
+    return max(kernels, key=lambda item: float(item.get("total_ms", 0.0)))
+
+
+def aggregate_profile_kernel_totals(items: list[dict], stage: str) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for item in items:
+        for kernel in kernel_profile_kernels(kernel_profile_stage(item, stage)):
+            name = str(kernel.get("name", ""))
+            totals[name] = totals.get(name, 0.0) + float(kernel.get("total_ms", 0.0))
+    return totals
 
 
 def internal_reference_case_for_summary(item: dict) -> str | None:
@@ -1903,6 +2267,13 @@ def external_baseline_case_for_summary(item: dict) -> str | None:
             return f"cuda_{layout}"
         return f"external_{arch}_hash_like_unavailable"
     return None
+
+
+def active_list_baseline_case_for_summary(item: dict) -> str | None:
+    case = item.get("case")
+    if not isinstance(case, str) or not case.endswith("_active_list"):
+        return None
+    return case[: -len("_active_list")]
 
 
 def attach_baseline_ratios(summary: list[dict]) -> None:
@@ -1969,6 +2340,25 @@ def attach_baseline_ratios(summary: list[dict]) -> None:
                 if isinstance(external.get("external_storage_bytes"), (int, float))
                 else external.get("snode_container_reserved_model_bytes"),
             )
+        active_list_case = active_list_baseline_case_for_summary(item)
+        if active_list_case is None:
+            continue
+        active_list_baseline = by_case.get(active_list_case)
+        item["active_list_baseline_case"] = active_list_case
+        item["active_list_baseline_missing"] = active_list_baseline is None
+        if active_list_baseline is not None:
+            item["write_vs_active_list_baseline"] = ratio_or_none(
+                item.get("write_median_ms"),
+                active_list_baseline.get("write_median_ms"),
+            )
+            item["reduce_vs_active_list_baseline"] = ratio_or_none(
+                item.get("reduce_median_ms"),
+                active_list_baseline.get("reduce_median_ms"),
+            )
+            item["memory_model_vs_active_list_baseline"] = ratio_or_none(
+                item.get("snode_container_reserved_model_bytes"),
+                active_list_baseline.get("snode_container_reserved_model_bytes"),
+            )
 
 
 def summarize_results(results: list[dict]) -> list[dict]:
@@ -1996,9 +2386,16 @@ def summarize_results(results: list[dict]) -> list[dict]:
         process_values = []
         gpu_values = []
         nvidia_values = []
+        process_delta_values = []
+        gpu_delta_values = []
+        nvidia_delta_values = []
         hash_table_reserved_values = []
         hash_payload_reserved_values = []
         hash_container_reserved_values = []
+        hash_container_active_parent_values = []
+        hash_active_parent_savings_values = []
+        hash_compact_child_pool_reserved_values = []
+        hash_compact_child_pool_net_savings_values = []
         reference_aux_reserved_values = []
         reference_payload_reserved_values = []
         reference_container_reserved_values = []
@@ -2010,6 +2407,18 @@ def summarize_results(results: list[dict]) -> list[dict]:
         runtime_probe_max_values = []
         runtime_insert_mean_values = []
         runtime_lookup_mean_values = []
+        profile_write_total_values = []
+        profile_reduce_total_values = []
+        profile_write_record_values = []
+        profile_reduce_record_values = []
+        profile_write_listgen_values = []
+        profile_reduce_listgen_values = []
+        profile_write_listgen_share_values = []
+        profile_reduce_listgen_share_values = []
+        isolation_struct_full_values = []
+        isolation_struct_count_values = []
+        isolation_direct_lookup_values = []
+        isolation_range_body_values = []
         for item in items:
             memory = item.get("memory", {})
             if "after_bench" in memory:
@@ -2020,6 +2429,14 @@ def summarize_results(results: list[dict]) -> list[dict]:
                 gpu_values.append(float(memory["gpu_dedicated_mb"]))
             if isinstance(memory.get("nvidia_smi_compute_mb"), (int, float)):
                 nvidia_values.append(float(memory["nvidia_smi_compute_mb"]))
+            for field, values in (
+                ("process_private_mb", process_delta_values),
+                ("gpu_dedicated_mb", gpu_delta_values),
+                ("nvidia_smi_compute_mb", nvidia_delta_values),
+            ):
+                delta = memory_delta_mb(item, field)
+                if delta is not None:
+                    values.append(delta)
             snode_memory = item.get("snode_memory_model", {})
             totals = snode_memory.get("totals", {})
             if isinstance(
@@ -2039,6 +2456,32 @@ def summarize_results(results: list[dict]) -> list[dict]:
             ):
                 hash_container_reserved_values.append(
                     float(totals["hash_container_bytes_reserved_model"])
+                )
+            if isinstance(
+                totals.get("hash_container_bytes_active_parent_model"), (int, float)
+            ):
+                hash_container_active_parent_values.append(
+                    float(totals["hash_container_bytes_active_parent_model"])
+                )
+            if isinstance(
+                totals.get("hash_active_parent_savings_bytes"), (int, float)
+            ):
+                hash_active_parent_savings_values.append(
+                    float(totals["hash_active_parent_savings_bytes"])
+                )
+            if isinstance(
+                totals.get("hash_compact_child_pool_reserved_model"),
+                (int, float),
+            ):
+                hash_compact_child_pool_reserved_values.append(
+                    float(totals["hash_compact_child_pool_reserved_model"])
+                )
+            if isinstance(
+                totals.get("hash_compact_child_pool_net_savings_model"),
+                (int, float),
+            ):
+                hash_compact_child_pool_net_savings_values.append(
+                    float(totals["hash_compact_child_pool_net_savings_model"])
                 )
             if isinstance(
                 totals.get("reference_aux_bytes_reserved_model"), (int, float)
@@ -2108,6 +2551,61 @@ def summarize_results(results: list[dict]) -> list[dict]:
                             runtime_lookup_mean_values.append(
                                 float(value["lookup_probe_mean"])
                             )
+            for stage, total_values, record_values, listgen_values, share_values in (
+                (
+                    "write",
+                    profile_write_total_values,
+                    profile_write_record_values,
+                    profile_write_listgen_values,
+                    profile_write_listgen_share_values,
+                ),
+                (
+                    "reduce",
+                    profile_reduce_total_values,
+                    profile_reduce_record_values,
+                    profile_reduce_listgen_values,
+                    profile_reduce_listgen_share_values,
+                ),
+            ):
+                stage_profile = kernel_profile_stage(item, stage)
+                if stage_profile is None:
+                    continue
+                total_ms = numeric_or_none(stage_profile.get("total_time_ms"))
+                record_count = numeric_or_none(stage_profile.get("record_count"))
+                if total_ms is not None:
+                    total_values.append(total_ms)
+                    listgen_total = kernel_profile_listgen_total_ms(stage_profile)
+                    listgen_values.append(listgen_total)
+                    if total_ms > 0:
+                        share_values.append(listgen_total / total_ms)
+                if record_count is not None:
+                    record_values.append(record_count)
+            for stage, values in (
+                ("struct_reduce_full", isolation_struct_full_values),
+                ("struct_count_only", isolation_struct_count_values),
+                ("direct_lookup_reduce", isolation_direct_lookup_values),
+                ("range_body_reduce", isolation_range_body_values),
+            ):
+                median = isolation_stage_median(item, stage)
+                if median is not None:
+                    values.append(median)
+        write_kernel_totals = aggregate_profile_kernel_totals(items, "write")
+        reduce_kernel_totals = aggregate_profile_kernel_totals(items, "reduce")
+        write_top_kernel = (
+            max(write_kernel_totals, key=write_kernel_totals.get)
+            if write_kernel_totals
+            else None
+        )
+        reduce_top_kernel = (
+            max(reduce_kernel_totals, key=reduce_kernel_totals.get)
+            if reduce_kernel_totals
+            else None
+        )
+        isolation_struct_full_median = median_or_none(isolation_struct_full_values)
+        isolation_struct_count_median = median_or_none(isolation_struct_count_values)
+        isolation_direct_lookup_median = median_or_none(isolation_direct_lookup_values)
+        isolation_range_body_median = median_or_none(isolation_range_body_values)
+        reduce_median = median_or_none(reduce_values)
         summary.append(
             {
                 "case": case,
@@ -2125,12 +2623,29 @@ def summarize_results(results: list[dict]) -> list[dict]:
                 "compile_first_range_pct": relative_range_pct(compile_values),
                 "write_median_ms": median_or_none(write_values),
                 "write_range_pct": relative_range_pct(write_values),
-                "reduce_median_ms": median_or_none(reduce_values),
+                "write_trimmed_range_pct": trimmed_relative_range_pct(write_values),
+                "reduce_median_ms": reduce_median,
                 "reduce_range_pct": relative_range_pct(reduce_values),
+                "reduce_trimmed_range_pct": trimmed_relative_range_pct(
+                    reduce_values
+                ),
                 "process_private_max_mb": max(process_values) if process_values else None,
                 "gpu_dedicated_max_mb": max(gpu_values) if gpu_values else None,
                 "nvidia_smi_compute_max_mb": max(nvidia_values)
                 if nvidia_values
+                else None,
+                "process_private_delta_init_to_bench_max_mb": max(
+                    process_delta_values
+                )
+                if process_delta_values
+                else None,
+                "gpu_dedicated_delta_init_to_bench_max_mb": max(gpu_delta_values)
+                if gpu_delta_values
+                else None,
+                "nvidia_smi_compute_delta_init_to_bench_max_mb": max(
+                    nvidia_delta_values
+                )
+                if nvidia_delta_values
                 else None,
                 "hash_table_reserved_model_bytes": median_or_none(
                     hash_table_reserved_values
@@ -2140,6 +2655,22 @@ def summarize_results(results: list[dict]) -> list[dict]:
                 ),
                 "hash_container_reserved_model_bytes": median_or_none(
                     hash_container_reserved_values
+                ),
+                "hash_container_active_parent_model_bytes": median_or_none(
+                    hash_container_active_parent_values
+                ),
+                "hash_active_parent_savings_bytes": median_or_none(
+                    hash_active_parent_savings_values
+                ),
+                "hash_compact_child_pool_reserved_model_bytes": median_or_none(
+                    hash_compact_child_pool_reserved_values
+                ),
+                "hash_compact_child_pool_net_savings_model_bytes": median_or_none(
+                    hash_compact_child_pool_net_savings_values
+                ),
+                "hash_active_parent_container_ratio": ratio_or_none(
+                    median_or_none(hash_container_active_parent_values),
+                    median_or_none(hash_container_reserved_values),
                 ),
                 "reference_aux_reserved_model_bytes": median_or_none(
                     reference_aux_reserved_values
@@ -2172,6 +2703,55 @@ def summarize_results(results: list[dict]) -> list[dict]:
                 "runtime_lookup_probe_mean_max": max(runtime_lookup_mean_values)
                 if runtime_lookup_mean_values
                 else None,
+                "kernel_profile_write_total_ms_median": median_or_none(
+                    profile_write_total_values
+                ),
+                "kernel_profile_reduce_total_ms_median": median_or_none(
+                    profile_reduce_total_values
+                ),
+                "kernel_profile_write_record_count_median": median_or_none(
+                    profile_write_record_values
+                ),
+                "kernel_profile_reduce_record_count_median": median_or_none(
+                    profile_reduce_record_values
+                ),
+                "kernel_profile_write_listgen_total_ms_median": median_or_none(
+                    profile_write_listgen_values
+                ),
+                "kernel_profile_reduce_listgen_total_ms_median": median_or_none(
+                    profile_reduce_listgen_values
+                ),
+                "kernel_profile_write_listgen_share_median": median_or_none(
+                    profile_write_listgen_share_values
+                ),
+                "kernel_profile_reduce_listgen_share_median": median_or_none(
+                    profile_reduce_listgen_share_values
+                ),
+                "kernel_profile_write_top_kernel": write_top_kernel,
+                "kernel_profile_write_top_kernel_total_ms_sum": write_kernel_totals.get(
+                    write_top_kernel, None
+                )
+                if write_top_kernel
+                else None,
+                "kernel_profile_reduce_top_kernel": reduce_top_kernel,
+                "kernel_profile_reduce_top_kernel_total_ms_sum": reduce_kernel_totals.get(
+                    reduce_top_kernel, None
+                )
+                if reduce_top_kernel
+                else None,
+                "topology_isolation_struct_reduce_full_median_ms": isolation_struct_full_median,
+                "topology_isolation_struct_count_only_median_ms": isolation_struct_count_median,
+                "topology_isolation_direct_lookup_reduce_median_ms": isolation_direct_lookup_median,
+                "topology_isolation_range_body_reduce_median_ms": isolation_range_body_median,
+                "topology_isolation_struct_count_vs_reduce": ratio_or_none(
+                    isolation_struct_count_median, reduce_median
+                ),
+                "topology_isolation_direct_lookup_vs_reduce": ratio_or_none(
+                    isolation_direct_lookup_median, reduce_median
+                ),
+                "topology_isolation_range_body_vs_reduce": ratio_or_none(
+                    isolation_range_body_median, reduce_median
+                ),
             }
         )
     attach_baseline_ratios(summary)
@@ -2205,6 +2785,22 @@ def cases_for_suite(suite: str, include_external_baselines: bool = False) -> lis
             )
         cases.extend(f"{arch}:{layout}" for arch in ARCHES for layout in TOPOLOGY_LAYOUTS)
     return cases
+
+
+def resolve_taichi_case(
+    case: str, hash_active_list: bool
+) -> tuple[str, str, bool, str | None, str | None]:
+    arch, layout = case.split(":", 1)
+    if layout in CASE_LOCAL_ACTIVE_LIST_LAYOUTS:
+        canonical_layout = CASE_LOCAL_ACTIVE_LIST_LAYOUTS[layout]
+        return (
+            arch,
+            canonical_layout,
+            True,
+            f"{arch}_{layout}",
+            f"case_forced_{layout}",
+        )
+    return arch, layout, hash_active_list, None, None
 
 
 def child_main(args: argparse.Namespace) -> int:
@@ -2310,7 +2906,13 @@ def child_main(args: argparse.Namespace) -> int:
                 args.batch,
             )
         else:
-            arch, layout = args.case.split(":", 1)
+            (
+                arch,
+                layout,
+                effective_hash_active_list,
+                result_case,
+                active_list_mode,
+            ) = resolve_taichi_case(args.case, args.hash_active_list)
             result = run_taichi_case(
                 arch,
                 layout,
@@ -2321,12 +2923,19 @@ def child_main(args: argparse.Namespace) -> int:
                 args.steps,
                 args.warmup,
                 args.batch,
-                args.hash_active_list,
+                effective_hash_active_list,
                 args.hash_diagnostics,
                 args.outer_hash_load_factor,
                 args.inner_hash_load_factor,
+                args.hash_compact_child_pool,
                 args.kernel_profiler,
+                args.topology_isolation,
             )
+            if result_case is not None:
+                result["case"] = result_case
+                result.setdefault("benchmark_config", {})[
+                    "hash_active_list_mode"
+                ] = active_list_mode
         print("HASH_SNODE_BENCH_RESULT " + json.dumps(result, sort_keys=True))
         return 0 if result.get("ok") else 2
     except BaseException as exc:
@@ -2373,8 +2982,12 @@ def parent_main(args: argparse.Namespace) -> int:
                 cmd.append("--hash-active-list")
             if args.hash_diagnostics:
                 cmd.append("--hash-diagnostics")
+            if args.hash_compact_child_pool:
+                cmd.append("--hash-compact-child-pool")
             if args.kernel_profiler:
                 cmd.append("--kernel-profiler")
+            if args.topology_isolation:
+                cmd.append("--topology-isolation")
             if args.outer_hash_load_factor is not None:
                 cmd.extend(
                     ["--outer-hash-load-factor", str(args.outer_hash_load_factor)]
@@ -2427,6 +3040,8 @@ def parent_main(args: argparse.Namespace) -> int:
         print(f"[hash-bench] wrote {output_path}", file=sys.stderr, flush=True)
         print(f"[hash-bench] wrote {summary_path}", file=sys.stderr, flush=True)
     print_table(results)
+    print_kernel_profile_table(results)
+    print_topology_isolation_table(results)
     return 0 if all(r.get("ok") for r in results if "error" not in r) else 1
 
 
@@ -2473,7 +3088,17 @@ def main() -> int:
     )
     parser.add_argument("--hash-active-list", action="store_true")
     parser.add_argument("--hash-diagnostics", action="store_true")
+    parser.add_argument("--hash-compact-child-pool", action="store_true")
     parser.add_argument("--kernel-profiler", action="store_true")
+    parser.add_argument(
+        "--topology-isolation",
+        action="store_true",
+        help=(
+            "For topology Taichi cases, run extra reduce-isolation kernels "
+            "to compare struct-for iteration, direct SNode lookup, and pure "
+            "range-body cost."
+        ),
+    )
     parser.add_argument("--outer-hash-load-factor", type=float, default=None)
     parser.add_argument("--inner-hash-load-factor", type=float, default=None)
     parser.add_argument(

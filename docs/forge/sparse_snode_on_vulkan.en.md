@@ -1,6 +1,6 @@
 # Sparse SNode on Vulkan — User Guide
 
-> Applies to **Taichi Forge 0.3.0**. Vanilla Taichi 1.7.4's Vulkan/SPIRV backend supports only `dense` + `root`. Taichi Forge additionally supports `pointer`, `bitmasked`, and `dynamic` SNodes on Vulkan, with three-backend (cpu / cuda / vulkan) numerical equivalence.
+> Applies to **Taichi Forge 0.3.13**. Vanilla Taichi 1.7.4's Vulkan/SPIRV backend supports only `dense` + `root`. Taichi Forge additionally supports `pointer`, `bitmasked`, `dynamic`, and experimental `hash` SNodes on Vulkan, with three-backend (cpu / cuda / vulkan) numerical equivalence.
 >
 > 中文版：[sparse_snode_on_vulkan.zh.md](sparse_snode_on_vulkan.zh.md)
 
@@ -8,13 +8,13 @@
 
 ## 1. Overview
 
-| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.3.0 Vulkan | LLVM (cpu/cuda) |
+| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.3.13 Vulkan | LLVM (cpu/cuda) |
 |---|---|---|---|
 | `dense` | ✅ | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ | ✅ |
 | `pointer` | ❌ | ✅ | ✅ |
 | `dynamic` | ❌ | ✅ | ✅ |
-| `hash` | ❌ | ❌ (see §6) | ❌ (default-disabled in upstream) |
+| `hash` | ❌ | ⚠️ experimental, default ON with first-use warning (see §6) | ⚠️ experimental, default ON with first-use warning |
 | `quant_array` / `bit_struct` | ❌ | ⚠️ experimental (see §7) | ✅ |
 
 Supported ops on Vulkan: `activate`, `deactivate`, `is_active`, `length`, `append`, `ti.deactivate`, struct-for (`for I in field:`), and `ti.ndrange`-based sparse listgen.
@@ -23,7 +23,7 @@ Supported ops on Vulkan: `activate`, `deactivate`, `is_active`, `length`, `appen
 
 ## 2. Enabling
 
-No extra switch is required — `ti.init(arch=ti.vulkan)` is enough; all SNode types in the table above are immediately available.
+No extra switch is required for `pointer`, `bitmasked`, `dynamic`, or `hash` — `ti.init(arch=ti.vulkan)` is enough. `hash` remains experimental and warns on first use; pass `hash_snode_experimental=False` to disable it. `quant_array` / `bit_struct` remains a separate experimental path and requires its own explicit gate.
 
 ```python
 import taichi as ti
@@ -170,7 +170,7 @@ Any "spin until winner finishes the slot" protocol (race-to-activate on `pointer
 
 ### 3.5 Not supported
 
-- `hash` SNode — see §6.
+- `hash` under `quant_array` / `bit_struct` — see §6.
 - `quant_array` / `bit_struct` — see §7.
 - Cross-tree `pointer` (multiple SNode trees referencing each other) — same as LLVM.
 - `ti.deactivate` on a `dense` directly under `root` — same as LLVM (`dense` does not support deactivate).
@@ -237,7 +237,8 @@ python tests\p4\vulkan_pointer_smoke.py
 |---|---|---|
 | Writes silently lost; `ti.length()` < expected | Beyond static capacity (§3.1 / §3.3) | Increase `N`, or reduce per-frame concurrent activates. |
 | Some writes lost after setting `TI_VULKAN_POOL_FRACTION=0.5` | Shrunk capacity insufficient (§3.2) | Raise the fraction, or unset to restore `1.0`. |
-| `RuntimeError: hash not yet supported` | Using `ti.root.hash(...)` | Disabled in vanilla and the fork — see §6. |
+| `Hash SNode is experimental` warning | First use of the default-enabled experimental `hash` API | Expected. Review §6 / [hash_snode.en.md](hash_snode.en.md), or pass `ti.init(hash_snode_experimental=False)` to disable `hash`. |
+| Hash overflow error at `ti.sync()` | More distinct hash keys than the fixed table can hold | Increase `expected_active` / `capacity`, or lower `hash_load_factor`. |
 | Vulkan first launch slow, second launch fast | Offline cache cold compile | Expected; subsequent runs hit the cache. |
 | `~/.cache/taichi/` `ticache.tcb` corrupted on next launch | Built-in fallback recompile | Forge 0.3.0+ handles `kVersionNotMatched` / `kCorrupted` automatically; no exception. |
 | Hang / device lost in race tests | Warp-lockstep (§3.4) | Open an issue with GPU model + driver version. |
@@ -246,32 +247,23 @@ python tests\p4\vulkan_pointer_smoke.py
 
 ## 6. About `hash` SNode
 
-`hash` is **default-disabled in both vanilla taichi 1.7.4 and this fork** — `ti.root.hash(...)` raises `RuntimeError("hash not yet supported")`, an upstream condition since at least 2021.
+`hash` SNode is available on Vulkan as an **experimental fixed-capacity sparse SNode**. It is enabled by default and warns on first use:
 
-### 6.1 Real-time physics & rendering verdict
+```python
+ti.init(arch=ti.vulkan)
 
-We surveyed the canonical real-time GPU workloads to decide whether shipping `hash` SNode on Vulkan would unlock anything new. Conclusion: **no real-time physics or rendering pipeline depends on it**, so further investment is not planned.
+x = ti.field(ti.f32)
+ti.root.hash(ti.ij, (4096, 4096), expected_active=8192).place(x)
+```
 
-| Workload | Typical sparse pattern | Idiomatic Forge replacement |
-|---|---|---|
-| Rigid-body broadphase (PBD / Bullet-style spatial hash) | Bounded world AABB → fixed-size hash bucket array | `dense` bucket + atomic counter, with a user `hash21` over `floor(x / cell_size)` |
-| MPM / MLS-MPM / SPH / PBF | Bounded simulation grid, sparse activation | `pointer.bitmasked.dense` (the upstream MPM-128 / MLS-MPM pattern) |
-| FEM / volumetric meshes | Adaptive but bounded | `pointer.dense` tree |
-| Cloth / hair / Eulerian fluid | Dense or low-sparsity | `dense` / `bitmasked.dense` |
-| OpenVDB-style SDF / voxel cone tracing | B+-tree of bricks | `pointer.pointer.dense` (Forge supports it on Vulkan) |
-| Instant-NGP / NeRF hash-grid encoding | Fixed-size hash table with explicit collision | `dense` of size `T` (commonly `2^14`–`2^19`) + user-level coordinate hash |
-| Volumetric GI radiance probes | Dense grid | `dense` |
+Important differences from `pointer` / `dynamic`:
 
-Why `hash` SNode is **not** the right tool for these:
+- You must pass exactly one of `expected_active`, `max_active`, or `capacity` to `SNode.hash()`.
+- The table capacity is fixed before JIT; there is no device-side grow or rehash.
+- Overflow is reported instead of silently dropping writes.
+- Struct-for visits all active elements, but iteration order is not a contract.
 
-- All of them have a **bounded coordinate space** (the simulation domain or screen-space frustum), so the unbounded-coordinate property of `hash` is unused.
-- Vulkan has no device-side dynamic allocator; a faithful `hash` SNode would have to choose between (a) statically reserving the worst-case bucket array — functionally identical to a user-level hash on `dense`, or (b) chunked re-hashing — a feature category this fork has explicitly de-scoped.
-- Race conditions on GPU hash insertion are non-trivial (linear-probe + CAS + warp lockstep) and overlap with the `pointer` race-to-activate work that already lives in `pointer` SNode.
-
-### 6.2 Recommended substitutes
-
-1. `ti.root.pointer(ti.ij, N).dense(ti.ij, M).place(...)` plus `TI_VULKAN_POOL_FRACTION=0.05` (§3.2). Covers ~95 % of real sparse scenarios.
-2. A user-level hash function (`hash21` / `hash22`-style noise hashes) plus `dense` buckets. Idiomatic for instant-NGP-style encoders and rigid-body broadphase.
+Full API, supported topologies, tuning knobs, and migration notes: [hash_snode.en.md](hash_snode.en.md).
 
 ---
 

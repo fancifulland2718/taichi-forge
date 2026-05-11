@@ -1,6 +1,6 @@
 # Taichi Forge — Compile, Runtime, Architecture & Modernization Options
 
-> Applies to **Taichi Forge 0.3.7**. Every option listed here is **opt-in**; defaults preserve bit-identical behaviour vs. upstream Taichi 1.7.4.
+> Applies to **Taichi Forge 0.3.13**. Every option listed here is **opt-in** unless explicitly noted; defaults preserve upstream Taichi 1.7.4 behaviour wherever a feature is not intentionally enabled by Forge.
 >
 > 中文版：[forge_options.zh.md](forge_options.zh.md)
 
@@ -91,6 +91,18 @@ Both flags default OFF and are bit-identical to the legacy path when off. Enabli
 | `spirv_listgen_subgroup_ballot` | `False` | Vulkan/SPIR-V only. Aggregates per-thread `OpAtomicIAdd` into one subgroup-ballot atomic per active subgroup inside the listgen kernel. Reduces atomic contention on dense-active sparse struct-for. Requires the device to support subgroup ballot (the Vulkan adapter advertises this in standard SPIR-V capabilities); otherwise the flag has no effect. |
 | `listgen_static_grid_dim` | `False` | CUDA / AMDGPU only. Launches sparse-listgen kernels with a `grid_dim` derived from the static upper bound on parent-element count (= product of `num_cells_per_container` of strict ancestors of the listed SNode, root excluded), capped by the hardware-saturating value. Eliminates idle blocks on shallow sparse trees. The Vulkan backend already computes the equivalent quantity via task attribs, so this flag is a no-op there. Correctness is preserved by the existing grid-stride loop in `element_listgen_nonroot`. |
 
+### 2.8 Hash SNode
+
+`hash` SNode is experimental and default ON in Taichi Forge 0.3.13. It is available on CPU, CUDA, and Vulkan, emits an experimental-feature warning on first `SNode.hash()` use, and can be disabled with `hash_snode_experimental=False`. See [hash_snode.en.md](hash_snode.en.md) for the API and migration notes.
+
+| Kwarg | Values / default | Purpose | Risk / guidance |
+|---|---|---|---|
+| `hash_snode_experimental` | Bool, default `True`; set `False` to disable. | Enables `SNode.hash()` on CPU / CUDA / Vulkan. First use warns because the API is still experimental. | Keep `True` for normal Forge usage. Set `False` only to isolate regressions, reproduce vanilla-compatible rejection, or prevent accidental production use. Env alias: `TI_HASH_SNODE_EXPERIMENTAL=0/1`. |
+| `hash_snode_default_load_factor` | Float in `(0, 1]`, default `0.5`. | Default load factor used when `SNode.hash(..., expected_active=N)` or `max_active=N` is supplied without a per-node `hash_load_factor`. | Lower values reserve more memory and usually shorten probes; higher values save memory but increase collision cost and overflow risk. Env alias: `TI_HASH_SNODE_DEFAULT_LOAD_FACTOR`. |
+| `hash_snode_active_list` | Bool, default `False`. | Experimental active-bucket list for hash traversal. | Changes generated layout/code and may regress churn-heavy workloads. Enable only after focused benchmarks show a win. Env alias: `TI_HASH_SNODE_ACTIVE_LIST=0/1`. |
+| `hash_snode_diagnostics` | Bool, default `False`. | Extra runtime counters for probe/tombstone debugging. | Diagnostic-only; can add memory/counter traffic and should stay off for production performance. Env alias: `TI_HASH_SNODE_DIAGNOSTICS=0/1`. |
+| `hash_snode_compact_child_pool` | Bool, default `False`. | Experimental memory mode for `hash -> hash` / nested hash. Reduces reserved child-container memory when parent active count is much smaller than parent capacity. | Adds a parent-bucket to child-slot lookup, so it can trade latency for memory. Enable only when nested hash memory dominates and benchmark data supports it. Env alias: `TI_HASH_SNODE_COMPACT_CHILD_POOL=0/1`. |
+
 ---
 
 ## 3. Environment variables
@@ -120,14 +132,15 @@ The wheel published to PyPI builds with all three flags ON.
 
 ## 5. SNode coverage extensions
 
-| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.3.0 Vulkan |
+| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.3.13 Vulkan |
 |---|---|---|
 | `dense` | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ |
 | `pointer` | ❌ | ✅ |
 | `dynamic` | ❌ | ✅ |
+| `hash` | ❌ | ⚠️ experimental, default ON with first-use warning |
 
-Full usage and semantics: [sparse_snode_on_vulkan.en.md](sparse_snode_on_vulkan.en.md).
+Full Vulkan sparse usage and semantics: [sparse_snode_on_vulkan.en.md](sparse_snode_on_vulkan.en.md). Hash SNode API: [hash_snode.en.md](hash_snode.en.md).
 
 ---
 
@@ -135,7 +148,7 @@ Full usage and semantics: [sparse_snode_on_vulkan.en.md](sparse_snode_on_vulkan.
 
 Forge ships against modern toolchains; the table below summarises the versions vs. vanilla 1.7.4.
 
-| Component | vanilla 1.7.4 | Forge 0.3.0 |
+| Component | vanilla 1.7.4 | Forge 0.3.13 |
 |---|---|---|
 | LLVM | 15 | **20.1.7** |
 | Python | 3.7 – 3.12 | **3.10 – 3.14** |
@@ -173,3 +186,4 @@ These are not user-tunable; they ship enabled by default. Listed for visibility 
 ## 9. See also
 
 - Sparse SNode on Vulkan user guide: [sparse_snode_on_vulkan.en.md](sparse_snode_on_vulkan.en.md)
+- Hash SNode user guide: [hash_snode.en.md](hash_snode.en.md)

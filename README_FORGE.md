@@ -39,16 +39,16 @@ Taichi Forge is the rolling result of those maintenance upgrades, along with com
 
 Vanilla Taichi 1.7.4's Vulkan/SPIRV backend supports **only** `dense` + `root`. Every other SNode type — `pointer`, `bitmasked`, `dynamic`, `hash` — falls back to a `TI_NOT_IMPLEMENTED` on Vulkan, blocking macOS-via-MoltenVK, Linux-AMD-without-ROCm, and mobile / embedded users from running sparse data structures at all.
 
-**Taichi Forge 0.3.0 ships `pointer` / `bitmasked` / `dynamic` on Vulkan** with end-to-end three-backend (cpu / cuda / vulkan) numerical equivalence. This is the fork's headline functional differentiator and is fully validated under the regression matrix in [tests/p4/](tests/p4/) (`vulkan_pointer_*.py`, `vulkan_bitmasked_*.py`, `vulkan_dynamic_basic.py`, `g2_pool_fraction.py`, `g4_probe.py`, `g8_cache_compat.py`).
+**Taichi Forge 0.3.13 ships `pointer` / `bitmasked` / `dynamic` on Vulkan plus experimental `hash` SNode on CPU / CUDA / Vulkan** with end-to-end numerical equivalence coverage for the supported paths. This is the fork's headline functional differentiator and is validated under the sparse regression matrix in [tests/p4/](tests/p4/) and [tests/python/test_hash_snode_cpu.py](tests/python/test_hash_snode_cpu.py).
 
-| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.3.0 Vulkan |
+| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.3.13 Vulkan |
 |---|---|---|
 | `dense` | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ |
 | `pointer` | ❌ | ✅ |
 | `dynamic` | ❌ | ✅ |
 | `quant_array` / `bit_struct` | ❌ | ⚠️ experimental (read + write + concurrent `ti.atomic_add` via CAS-loop; opt-in via `vulkan_quant_experimental=True`) |
-| `hash` | ❌ | ❌ (default-disabled in upstream Python frontend; see feasibility note below) |
+| `hash` | ❌ | ⚠️ experimental, default ON with first-use warning |
 
 Highlights:
 
@@ -56,14 +56,17 @@ Highlights:
 - **Static capacity by design** — Vulkan has no device-side dynamic allocator, so each `pointer` / `dynamic` SNode reserves its worst-case cell pool in the root buffer at compile time. Out-of-capacity activates degrade silently rather than crashing (a `cap_v` guard verified by `vulkan_pointer_race.py`).
 - **Memory knob `TI_VULKAN_POOL_FRACTION`** — opt-in env var (∈ (0, 1], default 1.0) shrinks the pointer pool to `max(num_cells_per_container, round(total × fraction))`. Combine with the `G1.b` deactivate-freelist (always on) to handle steady-state working sets far below the worst case. Verified at `0.25` against three-backend equivalence.
 - **`dynamic` uses a flat-array + length-suffix protocol** on Vulkan instead of LLVM's chunk-list (no shader-side `malloc` exists). `ti.append` / `ti.length` / `ti.deactivate` preserve full LLVM semantics; total capacity is the static `N`.
+- **Experimental fixed-capacity `hash` SNode** — default ON with a first-use warning, available on CPU / CUDA / Vulkan. Users must provide `expected_active`, `max_active`, or `capacity`; overflow is diagnosed instead of silently dropped. Use `ti.init(hash_snode_experimental=False)` to disable it.
 - **Offline cache cross-version safety** — corrupt or version-mismatched `ticache.tcb` automatically triggers fallback recompile, never crashes (verified end-to-end by `g8_cache_compat.py`).
 - **Experimental `quant_array` / `bit_struct` on Vulkan** — opt-in via `ti.init(arch=ti.vulkan, vulkan_quant_experimental=True)` or env var `TI_VULKAN_QUANT=1`. With the gate ON, `QuantInt` / `QuantFixed` member reads, writes, and concurrent multi-thread `ti.atomic_add` (via SPIR-V `OpAtomicCompareExchange` spin RMW) are byte-equivalent to the LLVM backends, including multi-field `BitpackedFields` packing (verified by `tests/p4/g9_quant_baseline.py` MPM-style 11/11/10 packing, `tests/p4/g9_quant_array_baseline.py`, and the same-word race baseline `tests/p4/g9_quant_atomic_race.py`). Default OFF preserves vanilla 1.7.4 behaviour exactly. `QuantFloat` shared-exponent and the non-add atomic ops (`atomic_min/max/and/or/xor`, identical restriction to LLVM) are **explicitly out of scope** and raise a clear `TI_NOT_IMPLEMENTED` rather than miscompiling.
 
 📖 **Full usage guide and limitations** (bilingual): [docs/forge/sparse_snode_on_vulkan.en.md](docs/forge/sparse_snode_on_vulkan.en.md) / [docs/forge/sparse_snode_on_vulkan.zh.md](docs/forge/sparse_snode_on_vulkan.zh.md) — covers static-capacity semantics, the `TI_VULKAN_POOL_FRACTION` knob, dynamic-protocol differences, troubleshooting, and the verification matrix.
 
+📖 **Hash SNode guide**: [docs/forge/hash_snode.en.md](docs/forge/hash_snode.en.md) / [docs/forge/hash_snode.zh.md](docs/forge/hash_snode.zh.md) — covers the default-enabled experimental API, supported topologies, fixed-capacity overflow semantics, flags, risks, and migration from vanilla's disabled hash path.
+
 📖 **All fork-only knobs** (compile / runtime / architecture / modernization options): [docs/forge/forge_options.en.md](docs/forge/forge_options.en.md) / [docs/forge/forge_options.zh.md](docs/forge/forge_options.zh.md).
 
-> `hash` SNode remains permanently deferred (no real-time physics or rendering pipeline depends on it; see the user guide §6.1 for the survey). `quant_array` / `bit_struct` ship **experimental scaffolding** on Vulkan in 0.3.0 — frontend gate is opt-in via `vulkan_quant_experimental=True`; codegen is incremental. See user guide §7.
+> `hash`, `quant_array`, and `bit_struct` are experimental paths. `hash` is default ON with a first-use warning and can be disabled via `ti.init(hash_snode_experimental=False)`; Vulkan `quant_array` / `bit_struct` remain default OFF behind `vulkan_quant_experimental=True`.
 
 ### Quick example (Vulkan-on-anything)
 
@@ -119,7 +122,7 @@ Patches and reports welcome.
 
 ## New APIs and settings (fork-only)
 
-All additions are strictly opt-in; default values preserve bit-identical behaviour vs. upstream 1.7.4.
+Most additions are opt-in; exceptions are called out explicitly. `hash` SNode is experimental but default ON in Forge 0.3.13, with a first-use warning and an explicit `hash_snode_experimental=False` opt-out.
 
 ### New functions
 
@@ -153,9 +156,14 @@ All additions are strictly opt-in; default values preserve bit-identical behavio
 | `cuda_sparse_pool_auto_size` | **`True`** | CUDA-only. When `True`, the sparse pool is auto-sized from the SNode tree geometry (capped by `device_memory_GB`). Heuristic now includes per-SNode `num_cells_per_container` as a physical upper bound, eliminating over-provisioning. Set `False` to restore vanilla 1.7.4 sizing. |
 | `cuda_sparse_pool_per_snode` | **`True`** | CUDA-only. Carves per-SNode data regions from a single GPU buffer, isolating each gc-able SNode's allocation from the global metadata pool. Dramatically reduces peak VRAM for sparse workloads. Set `False` for legacy flat-pool behaviour. |
 | `cuda_sparse_pool_size_floor_MiB` | **`0`** (disabled) | CUDA-only. Optional safety floor for the auto-sized pool. Default `0` relies on the auto-hint mechanism; raise if your workload sees unexpected OOM. |
-| `max_active_hint` (SNode parameter) | — | Per-SNode hint for the expected peak activation count. Pass to `ti.root.pointer(...)` or `ti.root.dynamic(...)` as `max_active_hint=N`. When set, overrides the automatic `num_cells_per_container` bound for tighter pool sizing. |
+| `vk_max_active` (SNode parameter) | — | Vulkan-oriented per-SNode pointer pool capacity hint. Pass to `ti.root.pointer(..., vk_max_active=N)`. On Vulkan, it overrides the worst-case pointer pool reservation; CPU ignores it and CUDA consumes it only where its sparse-pool auto-sizing path can use the hint. |
 | `spirv_listgen_subgroup_ballot` | `False` | Vulkan/SPIR-V only. Aggregates the per-thread `OpAtomicIAdd` into one subgroup-ballot atomic per active subgroup in the listgen kernel. Reduces atomic contention on dense-active sparse struct-for. Output SPIR-V differs and is keyed into the offline cache hash. |
 | `listgen_static_grid_dim` | `False` | CUDA / AMDGPU only. Launches sparse-listgen kernels with a grid_dim derived from the static upper bound on parent-element count, eliminating idle blocks on shallow sparse trees. Vulkan already computes the equivalent quantity, so this flag is a no-op for SPIR-V. |
+| `hash_snode_experimental` | `True` | Enables experimental fixed-capacity `SNode.hash()` on CPU / CUDA / Vulkan. Default ON emits a first-use warning; set `False` to disable and reproduce vanilla-compatible rejection. |
+| `hash_snode_default_load_factor` | `0.5` | Default load factor used when `SNode.hash(..., expected_active=N)` or `max_active=N` is supplied without `hash_load_factor`. |
+| `hash_snode_active_list` | `False` | Experimental active-bucket list for hash traversal. Keep OFF unless a focused benchmark shows a win. |
+| `hash_snode_diagnostics` | `False` | Extra counters for debugging hash probe and tombstone behavior. |
+| `hash_snode_compact_child_pool` | `False` | Experimental memory mode for `hash -> hash` / nested hash. Reduces reserved child-container memory when the active parent count is far below capacity. |
 
 ### Compatibility note
 
@@ -242,10 +250,10 @@ Taichi Forge uses its own SemVer track starting at **0.1.2**. Fork release numbe
 **Phase 1 per-SNode pool + auto-hint + dynamic chunk sizing lands as default ON.**
 
 - **`cuda_sparse_pool_per_snode`** (new, default `True`) — carves per-SNode data regions from a single GPU buffer, isolating each gc-able SNode's allocation. Eliminates the legacy flat-pool over-provisioning for sparse workloads with multiple SNode types.
-- **Auto-hint from `num_cells_per_container`** — the pool sizing heuristic now uses each SNode's physical cell capacity as the default activation upper bound, eliminating the need for manual `max_active_hint` tuning in most cases.
+- **Auto-hint from `num_cells_per_container`** — the pool sizing heuristic now uses each SNode's physical cell capacity as the default activation upper bound, eliminating the need for manual pointer-capacity tuning in most cases.
 - **Dynamic `chunk_elements`** — per-SNode chunk size is tightened to ∼2× `num_cells_per_container` instead of a fixed 8192-slot default. For the MPM benchmark (495 pointer cells), this reduces pool VRAM from 404 MiB → **87 MiB**.
 - **`cuda_sparse_pool_size_floor_MiB`** default lowered from 128 → **0** (disabled). The auto-hint mechanism now provides precise worst-case sizing, making a defensive floor unnecessary.
-- **`max_active_hint` SNode parameter** — users can pass `ti.root.pointer(..., max_active_hint=N)` to override the automatic bound with a tighter estimate.
+- **`vk_max_active` SNode parameter** — users can pass `ti.root.pointer(..., vk_max_active=N)` to override the Vulkan pointer-pool bound with a tighter estimate.
 - **Host-side pool watermark query** — `ti.tools.get_sparse_pool_usage()` returns per-SNode pool occupancy for profile-driven tuning.
 
 **VRAM improvement** (MPM 88×33×69, 44K particles, CUDA sparse):
@@ -293,7 +301,7 @@ First release with **sparse SNode on Vulkan** as a public feature. Inherits the 
 - `dynamic` SNode uses a **flat-array + length-suffix protocol** on Vulkan (length atomic-stored at `cell_stride * N` offset of each container) — full LLVM `ti.append` / `ti.length` / `ti.deactivate` semantics preserved, no chunk-list.
 - Offline cache cross-version safety: corrupt or version-mismatched `ticache.tcb` triggers fallback recompile, never crashes (validated by `g8_cache_compat.py` three-phase test).
 - Build-time guards: `TI_VULKAN_POINTER` / `TI_VULKAN_DYNAMIC` / `TI_VULKAN_POINTER_POOL_FRACTION` CMake flags (all default ON) allow byte-for-byte revert to vanilla 1.7.4 behaviour for regression bisecting.
-- `hash` SNode remains unimplemented on every backend in this fork — vanilla taichi 1.7.4 itself default-disables `ti.root.hash(...)` in the Python frontend, and no real-world demo currently depends on it. See the user guide §6 for substitutes (`pointer` + `TI_VULKAN_POOL_FRACTION`, or user-level hash + `dense` buckets).
+- `hash` SNode is available as an experimental fixed-capacity feature on CPU / CUDA / Vulkan by default, with a first-use warning and an explicit opt-out via `ti.init(hash_snode_experimental=False)`. It intentionally does not preserve the old disabled vanilla call shape: users must pass `expected_active`, `max_active`, or `capacity`, and overflow is diagnosed. See [docs/forge/hash_snode.en.md](docs/forge/hash_snode.en.md).
 - Full user guide (limitations, env vars, troubleshooting, verification matrix): [docs/forge/sparse_snode_on_vulkan.en.md](docs/forge/sparse_snode_on_vulkan.en.md) / [docs/forge/sparse_snode_on_vulkan.zh.md](docs/forge/sparse_snode_on_vulkan.zh.md).
 
 **Compile-time performance**
