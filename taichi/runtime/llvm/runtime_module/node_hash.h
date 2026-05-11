@@ -241,14 +241,30 @@ inline void Hash_refine_key(HashMeta *meta,
                             i32 key,
                             PhysicalCoordinates *coord) {
   for (int i = 0; i < taichi_max_num_indices; i++) {
-    i32 value = 0;
     auto shape = meta->extract_shape[i];
+    if (shape == 1) {
+      continue;
+    }
+    i32 value = 0;
     auto acc_shape = meta->extract_acc_shape[i];
     if (shape > 1) {
       value = (key % (acc_shape * shape)) / acc_shape;
     }
     coord->val[i] = coord->val[i] * shape + value;
   }
+}
+
+inline void Hash_append_list_element(HashMeta *child,
+                                     Ptr child_container,
+                                     i32 key,
+                                     const PhysicalCoordinates &parent_coord,
+                                     ListManager *child_list) {
+  auto elem = (Element *)child_list->allocate();
+  elem->element = child_container;
+  elem->loop_bounds[0] = key;
+  elem->loop_bounds[1] = key + 1;
+  elem->pcoord = parent_coord;
+  Hash_refine_key(child, key, &elem->pcoord);
 }
 
 void element_listgen_root_hash(LLVMRuntime *runtime,
@@ -297,13 +313,8 @@ void element_listgen_root_hash(LLVMRuntime *runtime,
       continue;
     }
     auto key = keys[bucket];
-    Element elem;
-    elem.element = ch_element;
-    elem.loop_bounds[0] = key;
-    elem.loop_bounds[1] = key + 1;
-    elem.pcoord = element.pcoord;
-    Hash_refine_key(child, key, &elem.pcoord);
-    child_list->append(&elem);
+    Hash_append_list_element(child, ch_element, key, element.pcoord,
+                             child_list);
   }
   if (child->listgen_reuse) {
     mark_element_list_current(runtime, parent, child_);
@@ -377,14 +388,72 @@ void element_listgen_nonroot_hash(LLVMRuntime *runtime,
           continue;
         }
         auto key = keys[bucket];
-        Element elem;
-        elem.element = ch_element;
-        elem.loop_bounds[0] = key;
-        elem.loop_bounds[1] = key + 1;
-        elem.pcoord = refined_coord;
-        Hash_refine_key(child, key, &elem.pcoord);
-        child_list->append(&elem);
+        Hash_append_list_element(child, ch_element, key, refined_coord,
+                                 child_list);
       }
+    }
+  }
+  if (child->listgen_reuse) {
+    mark_element_list_current(runtime, parent, child_);
+  }
+}
+
+void element_listgen_nonroot_hash_parent_hash(LLVMRuntime *runtime,
+                                              StructMeta *parent,
+                                              StructMeta *child_) {
+  if (child_->listgen_reuse &&
+      element_list_is_current(runtime, parent, child_)) {
+    return;
+  }
+  auto child = (HashMeta *)child_;
+  auto parent_list = runtime->element_lists[parent->snode_id];
+  int num_parent_elements = parent_list->size();
+  auto child_list = runtime->element_lists[child->snode_id];
+  auto parent_lookup_element = parent->lookup_element;
+  auto child_from_parent_element = child->from_parent_element;
+
+#if ARCH_cuda || ARCH_amdgpu
+  int i_start = block_dim() * block_idx() + thread_idx();
+  int i_step = grid_dim() * block_dim();
+#else
+  int i_start = 0;
+  int i_step = 1;
+#endif
+
+  for (int i = i_start; i < num_parent_elements; i += i_step) {
+    auto element = parent_list->get<Element>(i);
+    // Parent hash listgen emits singleton ranges for occupied keys.
+    int j = element.loop_bounds[0];
+    auto ch_element = parent_lookup_element((Ptr)parent, element.element, j);
+    ch_element = child_from_parent_element((Ptr)ch_element);
+    auto states = Hash_states(child, ch_element);
+    auto keys = Hash_keys(child, ch_element);
+    auto scan_count = child->table_capacity;
+    bool use_active_slots = false;
+    if (Hash_has_active_slots(child) && Hash_has_tombstone_count(child)) {
+      auto active_slot_count =
+          Hash_load_i32(Hash_active_slots_count(child, ch_element));
+      auto active_count = Hash_load_i32(Hash_active_count(child, ch_element));
+      auto tombstone_count =
+          Hash_load_i32(Hash_tombstone_count(child, ch_element));
+      if (active_slot_count >= 0 &&
+          active_slot_count <= child->table_capacity &&
+          active_slot_count == active_count && tombstone_count == 0) {
+        scan_count = active_slot_count;
+        use_active_slots = true;
+      }
+    }
+
+    for (i64 scan_i = 0; scan_i < scan_count; scan_i++) {
+      i64 bucket = use_active_slots
+                       ? Hash_active_slots(child, ch_element)[scan_i]
+                       : scan_i;
+      if (Hash_load_i32(&states[bucket]) != hash_state_occupied) {
+        continue;
+      }
+      auto key = keys[bucket];
+      Hash_append_list_element(child, ch_element, key, element.pcoord,
+                               child_list);
     }
   }
   if (child->listgen_reuse) {

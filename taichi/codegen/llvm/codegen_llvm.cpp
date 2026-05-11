@@ -1358,8 +1358,13 @@ void TaskCodeGenLLVM::emit_list_gen(OffloadedStmt *listgen) {
     }
   } else {
     if (snode_child->type == SNodeType::hash) {
-      call("element_listgen_nonroot_hash", get_runtime(), meta_parent,
-           meta_child);
+      if (snode_parent->type == SNodeType::hash) {
+        call("element_listgen_nonroot_hash_parent_hash", get_runtime(),
+             meta_parent, meta_child);
+      } else {
+        call("element_listgen_nonroot_hash", get_runtime(), meta_parent,
+             meta_child);
+      }
     } else {
       call("element_listgen_nonroot", get_runtime(), meta_parent, meta_child);
     }

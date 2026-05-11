@@ -1566,6 +1566,7 @@ struct cpu_block_task_helper_context {
   ListManager *list;
   int element_size;
   int element_split;
+  int element_batch_size;
   std::size_t tls_buffer_size;
 };
 
@@ -1578,6 +1579,24 @@ struct cpu_block_task_helper_context {
 
 void cpu_struct_for_block_helper(void *ctx_, int thread_id, int i) {
   auto ctx = (cpu_block_task_helper_context *)(ctx_);
+  if (ctx->element_batch_size > 1) {
+    int element_begin = i * ctx->element_batch_size;
+    int element_end = std::min(element_begin + ctx->element_batch_size,
+                               ctx->list->size());
+    alignas(8) char tls_buffer[ctx->tls_buffer_size];
+    RuntimeContext this_thread_context = *ctx->context;
+    this_thread_context.cpu_thread_id = thread_id;
+    for (int element_id = element_begin; element_id < element_end;
+         element_id++) {
+      auto &e = ctx->list->get<Element>(element_id);
+      int lower = e.loop_bounds[0];
+      int upper = e.loop_bounds[1];
+      if (lower < upper) {
+        (*ctx->task)(&this_thread_context, tls_buffer, &e, lower, upper);
+      }
+    }
+    return;
+  }
   int element_id = i / ctx->element_split;
   int part_size = ctx->element_size / ctx->element_split;
   int part_id = i % ctx->element_split;
@@ -1633,9 +1652,20 @@ void parallel_struct_for(RuntimeContext *context,
   ctx.element_size = element_size;
   ctx.element_split = element_split;
   ctx.tls_buffer_size = tls_buffer_size;
+  ctx.element_batch_size = 1;
+  int task_count = list_tail * element_split;
+  if (element_size == 1 && element_split == 1) {
+    const int effective_num_threads = std::max(1, num_threads);
+    constexpr int kSingletonElementBatchSize = 32;
+    if (list_tail > effective_num_threads * kSingletonElementBatchSize) {
+      ctx.element_batch_size = kSingletonElementBatchSize;
+      task_count =
+          (list_tail + ctx.element_batch_size - 1) / ctx.element_batch_size;
+    }
+  }
   auto runtime = context->runtime;
-  runtime->parallel_for(runtime->thread_pool, list_tail * element_split,
-                        num_threads, &ctx, cpu_struct_for_block_helper);
+  runtime->parallel_for(runtime->thread_pool, task_count, num_threads, &ctx,
+                        cpu_struct_for_block_helper);
 #endif
 }
 

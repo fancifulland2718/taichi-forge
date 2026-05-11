@@ -124,6 +124,65 @@ def stats_ms(samples: list[float]) -> dict[str, float]:
     }
 
 
+def clear_taichi_kernel_profile(ti) -> None:
+    try:
+        ti.profiler.clear_kernel_profiler_info()
+    except Exception:
+        pass
+
+
+def collect_taichi_kernel_profile() -> dict:
+    try:
+        from taichi_forge.lang import impl
+
+        prog = impl.get_runtime().prog
+        prog.sync_kernel_profiler()
+        prog.update_kernel_profiler()
+        records = prog.get_kernel_profiler_records()
+    except Exception as exc:
+        return {
+            "schema_version": 1,
+            "available": False,
+            "error": repr(exc),
+        }
+
+    by_name: dict[str, dict[str, float | int | str]] = {}
+    total_time_ms = 0.0
+    for record in records:
+        name = str(record.name)
+        kernel_time_ms = float(record.kernel_time)
+        total_time_ms += kernel_time_ms
+        item = by_name.get(name)
+        if item is None:
+            item = {
+                "name": name,
+                "count": 0,
+                "total_ms": 0.0,
+                "min_ms": kernel_time_ms,
+                "max_ms": kernel_time_ms,
+            }
+            by_name[name] = item
+        item["count"] = int(item["count"]) + 1
+        item["total_ms"] = float(item["total_ms"]) + kernel_time_ms
+        item["min_ms"] = min(float(item["min_ms"]), kernel_time_ms)
+        item["max_ms"] = max(float(item["max_ms"]), kernel_time_ms)
+
+    kernels = []
+    for item in by_name.values():
+        count = int(item["count"])
+        total = float(item["total_ms"])
+        item["avg_ms"] = total / count if count else 0.0
+        kernels.append(item)
+    kernels.sort(key=lambda item: float(item["total_ms"]), reverse=True)
+    return {
+        "schema_version": 1,
+        "available": True,
+        "record_count": len(records),
+        "total_time_ms": total_time_ms,
+        "kernels": kernels,
+    }
+
+
 def next_power_of_two(n: int) -> int:
     return 1 << (n - 1).bit_length()
 
@@ -392,8 +451,9 @@ def hash_case_diagnostics(
     domain: int,
     active_list: bool = False,
     diagnostics: bool = False,
+    hash_load_factor: float | None = None,
 ) -> dict[str, float | int | bool | str]:
-    load_factor = 0.5
+    load_factor = hash_load_factor or 0.5
     capacity = estimate_hash_capacity(expected_active, load_factor)
     tombstone_count = 0
     overflow_count = 0
@@ -1047,6 +1107,9 @@ def run_taichi_topology_case_initialized(
     mem_after_init: dict[str, float],
     hash_active_list: bool,
     hash_diagnostics: bool,
+    outer_hash_load_factor: float | None,
+    inner_hash_load_factor: float | None,
+    kernel_profiler: bool,
 ) -> dict:
     if inner_active > inner_domain:
         raise RuntimeError("inner-active must be <= inner-domain")
@@ -1072,7 +1135,12 @@ def run_taichi_topology_case_initialized(
     value_sum = ti.field(acc_dtype, shape=())
 
     if layout.startswith("hash_") or layout == "nested_hash":
-        outer = ti.root.hash(ti.i, domain, expected_active=active)
+        outer = ti.root.hash(
+            ti.i,
+            domain,
+            expected_active=active,
+            hash_load_factor=outer_hash_load_factor,
+        )
     elif layout.startswith("pointer_"):
         outer = ti.root.pointer(ti.i, domain)
     elif layout.startswith("dynamic_"):
@@ -1089,7 +1157,12 @@ def run_taichi_topology_case_initialized(
     elif layout in ("hash_pointer", "pointer_pointer"):
         leaf = outer.pointer(ti.j, inner_domain)
     elif layout in ("nested_hash", "pointer_hash", "dynamic_hash"):
-        leaf = outer.hash(ti.j, inner_domain, expected_active=inner_active)
+        leaf = outer.hash(
+            ti.j,
+            inner_domain,
+            expected_active=inner_active,
+            hash_load_factor=inner_hash_load_factor,
+        )
     else:
         raise RuntimeError(f"unknown topology layout {layout}")
     leaf.place(x)
@@ -1160,6 +1233,8 @@ def run_taichi_topology_case_initialized(
     for _ in range(warmup):
         write()
     ti.sync()
+    if kernel_profiler:
+        clear_taichi_kernel_profile(ti)
     write_samples = []
     for _ in range(steps):
         t0 = time.perf_counter()
@@ -1167,11 +1242,16 @@ def run_taichi_topology_case_initialized(
             write()
         ti.sync()
         write_samples.append((time.perf_counter() - t0) * 1000.0 / batch)
+    kernel_profile = {}
+    if kernel_profiler:
+        kernel_profile["write"] = collect_taichi_kernel_profile()
 
     for _ in range(warmup):
         clear_acc()
         reduce()
     ti.sync()
+    if kernel_profiler:
+        clear_taichi_kernel_profile(ti)
     reduce_samples = []
     for _ in range(steps):
         t0 = time.perf_counter()
@@ -1180,6 +1260,8 @@ def run_taichi_topology_case_initialized(
             reduce()
         ti.sync()
         reduce_samples.append((time.perf_counter() - t0) * 1000.0 / batch)
+    if kernel_profiler:
+        kernel_profile["reduce"] = collect_taichi_kernel_profile()
 
     clear_acc()
     reduce()
@@ -1190,8 +1272,8 @@ def run_taichi_topology_case_initialized(
         "value_sum": int(value_sum[None]),
     }
 
-    outer_hash_capacity = estimate_hash_capacity(active)
-    inner_hash_capacity = estimate_hash_capacity(inner_active)
+    outer_hash_capacity = estimate_hash_capacity(active, outer_hash_load_factor or 0.5)
+    inner_hash_capacity = estimate_hash_capacity(inner_active, inner_hash_load_factor or 0.5)
     hash_nodes = []
     reference_nodes = []
     probe_telemetry = {}
@@ -1285,7 +1367,18 @@ def run_taichi_topology_case_initialized(
             "after_bench": sample_memory(),
         },
         "memory_counter_fields": list(MEMORY_COUNTER_FIELDS),
+        "benchmark_config": {
+            "active": active,
+            "domain": domain,
+            "inner_active": inner_active,
+            "inner_domain": inner_domain,
+            "kernel_profiler": kernel_profiler,
+            "outer_hash_load_factor": outer_hash_load_factor,
+            "inner_hash_load_factor": inner_hash_load_factor,
+        },
     }
+    if kernel_profile:
+        result_payload["kernel_profile"] = kernel_profile
     if hash_nodes or reference_nodes:
         result_payload["snode_memory_model"] = hash_memory_model(
             hash_nodes, reference_nodes
@@ -1326,6 +1419,9 @@ def run_taichi_case(
     batch: int,
     hash_active_list: bool,
     hash_diagnostics: bool,
+    outer_hash_load_factor: float | None,
+    inner_hash_load_factor: float | None,
+    kernel_profiler: bool,
 ) -> dict:
     import taichi_forge as ti
 
@@ -1338,6 +1434,7 @@ def run_taichi_case(
         "hash_snode_experimental": True,
         "hash_snode_active_list": hash_active_list,
         "hash_snode_diagnostics": hash_diagnostics,
+        "kernel_profiler": kernel_profiler,
     }
     if arch_name == "vulkan":
         init_kwargs.update(
@@ -1374,6 +1471,9 @@ def run_taichi_case(
             mem_after_init,
             hash_active_list,
             hash_diagnostics,
+            outer_hash_load_factor,
+            inner_hash_load_factor,
+            kernel_profiler,
         )
 
     x = ti.field(ti.i32)
@@ -1385,7 +1485,12 @@ def run_taichi_case(
     reference_root = None
     reference_leaf = None
     if layout == "hash":
-        hash_node = ti.root.hash(ti.i, domain, expected_active=active)
+        hash_node = ti.root.hash(
+            ti.i,
+            domain,
+            expected_active=active,
+            hash_load_factor=outer_hash_load_factor,
+        )
         hash_node.place(x)
     elif layout == "pointer_bitmasked":
         block = 64
@@ -1461,6 +1566,8 @@ def run_taichi_case(
     for _ in range(warmup):
         write()
     ti.sync()
+    if kernel_profiler:
+        clear_taichi_kernel_profile(ti)
     write_samples = []
     for _ in range(steps):
         t0 = time.perf_counter()
@@ -1468,11 +1575,16 @@ def run_taichi_case(
             write()
         ti.sync()
         write_samples.append((time.perf_counter() - t0) * 1000.0 / batch)
+    kernel_profile = {}
+    if kernel_profiler:
+        kernel_profile["write"] = collect_taichi_kernel_profile()
 
     for _ in range(warmup):
         clear_acc()
         reduce()
     ti.sync()
+    if kernel_profiler:
+        clear_taichi_kernel_profile(ti)
     reduce_samples = []
     for _ in range(steps):
         t0 = time.perf_counter()
@@ -1481,6 +1593,8 @@ def run_taichi_case(
             reduce()
         ti.sync()
         reduce_samples.append((time.perf_counter() - t0) * 1000.0 / batch)
+    if kernel_profiler:
+        kernel_profile["reduce"] = collect_taichi_kernel_profile()
 
     clear_acc()
     reduce()
@@ -1495,7 +1609,7 @@ def run_taichi_case(
     reference_nodes = []
     probe_telemetry = {}
     if hash_node is not None:
-        capacity = estimate_hash_capacity(active)
+        capacity = estimate_hash_capacity(active, outer_hash_load_factor or 0.5)
         payload_stride = int(hash_node._cell_size_bytes)
         hash_nodes.append(
             hash_layout_model(
@@ -1559,7 +1673,18 @@ def run_taichi_case(
             "after_bench": sample_memory(),
         },
         "memory_counter_fields": list(MEMORY_COUNTER_FIELDS),
+        "benchmark_config": {
+            "active": active,
+            "domain": domain,
+            "inner_active": inner_active,
+            "inner_domain": inner_domain,
+            "kernel_profiler": kernel_profiler,
+            "outer_hash_load_factor": outer_hash_load_factor,
+            "inner_hash_load_factor": inner_hash_load_factor,
+        },
     }
+    if kernel_profile:
+        result_payload["kernel_profile"] = kernel_profile
     if layout == "hash":
         result_payload["hash_diagnostics"] = hash_case_diagnostics(
             final_result["count"],
@@ -1567,6 +1692,7 @@ def run_taichi_case(
             domain,
             hash_active_list,
             hash_diagnostics,
+            outer_hash_load_factor,
         )
         result_payload["hash_diagnostics"]["probe_telemetry"] = probe_telemetry
     else:
@@ -2079,6 +2205,9 @@ def child_main(args: argparse.Namespace) -> int:
                 args.batch,
                 args.hash_active_list,
                 args.hash_diagnostics,
+                args.outer_hash_load_factor,
+                args.inner_hash_load_factor,
+                args.kernel_profiler,
             )
         print("HASH_SNODE_BENCH_RESULT " + json.dumps(result, sort_keys=True))
         return 0 if result.get("ok") else 2
@@ -2126,6 +2255,16 @@ def parent_main(args: argparse.Namespace) -> int:
                 cmd.append("--hash-active-list")
             if args.hash_diagnostics:
                 cmd.append("--hash-diagnostics")
+            if args.kernel_profiler:
+                cmd.append("--kernel-profiler")
+            if args.outer_hash_load_factor is not None:
+                cmd.extend(
+                    ["--outer-hash-load-factor", str(args.outer_hash_load_factor)]
+                )
+            if args.inner_hash_load_factor is not None:
+                cmd.extend(
+                    ["--inner-hash-load-factor", str(args.inner_hash_load_factor)]
+                )
             print(
                 f"[hash-bench] running {case} repeat={repeat_index}",
                 file=sys.stderr,
@@ -2216,6 +2355,9 @@ def main() -> int:
     )
     parser.add_argument("--hash-active-list", action="store_true")
     parser.add_argument("--hash-diagnostics", action="store_true")
+    parser.add_argument("--kernel-profiler", action="store_true")
+    parser.add_argument("--outer-hash-load-factor", type=float, default=None)
+    parser.add_argument("--inner-hash-load-factor", type=float, default=None)
     parser.add_argument(
         "--output",
         default="",
