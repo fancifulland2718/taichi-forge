@@ -183,6 +183,64 @@ def collect_taichi_kernel_profile() -> dict:
     }
 
 
+def reset_hash_runtime_probe_stats() -> None:
+    try:
+        from taichi_forge.lang import impl
+
+        impl.get_runtime().prog.reset_hash_snode_probe_stats()
+    except Exception:
+        pass
+
+
+def collect_hash_runtime_probe_stats() -> dict:
+    try:
+        from taichi_forge.lang import impl
+
+        stats = dict(impl.get_runtime().prog.get_hash_snode_probe_stats())
+    except Exception as exc:
+        return {
+            "schema_version": 1,
+            "source": "llvm_runtime_global",
+            "available": False,
+            "error": repr(exc),
+        }
+    if not stats:
+        return {
+            "schema_version": 1,
+            "source": "llvm_runtime_global",
+            "available": False,
+            "error": "backend does not expose hash probe stats",
+        }
+    return {
+        "schema_version": 1,
+        "source": "llvm_runtime_global",
+        "available": True,
+        "insert_count": int(stats.get("insert_count", 0)),
+        "insert_probe_total": int(stats.get("insert_total", 0)),
+        "insert_probe_max": int(stats.get("insert_max", 0)),
+        "insert_probe_mean": float(stats.get("insert_mean", 0.0)),
+        "lookup_count": int(stats.get("lookup_count", 0)),
+        "lookup_probe_total": int(stats.get("lookup_total", 0)),
+        "lookup_probe_max": int(stats.get("lookup_max", 0)),
+        "lookup_probe_mean": float(stats.get("lookup_mean", 0.0)),
+    }
+
+
+def runtime_probe_max_from_diagnostics(diagnostics: dict) -> int:
+    max_probe = -1
+    runtime_probe = diagnostics.get("runtime_probe_telemetry", {})
+    if not isinstance(runtime_probe, dict):
+        return max_probe
+    for phase in runtime_probe.values():
+        if not isinstance(phase, dict):
+            continue
+        for key in ("insert_probe_max", "lookup_probe_max"):
+            value = phase.get(key)
+            if isinstance(value, (int, float)):
+                max_probe = max(max_probe, int(value))
+    return max_probe
+
+
 def next_power_of_two(n: int) -> int:
     return 1 << (n - 1).bit_length()
 
@@ -1233,6 +1291,9 @@ def run_taichi_topology_case_initialized(
     for _ in range(warmup):
         write()
     ti.sync()
+    runtime_probe_telemetry = {}
+    if hash_diagnostics and "hash" in layout:
+        reset_hash_runtime_probe_stats()
     if kernel_profiler:
         clear_taichi_kernel_profile(ti)
     write_samples = []
@@ -1242,6 +1303,8 @@ def run_taichi_topology_case_initialized(
             write()
         ti.sync()
         write_samples.append((time.perf_counter() - t0) * 1000.0 / batch)
+    if hash_diagnostics and "hash" in layout:
+        runtime_probe_telemetry["write"] = collect_hash_runtime_probe_stats()
     kernel_profile = {}
     if kernel_profiler:
         kernel_profile["write"] = collect_taichi_kernel_profile()
@@ -1250,6 +1313,8 @@ def run_taichi_topology_case_initialized(
         clear_acc()
         reduce()
     ti.sync()
+    if hash_diagnostics and "hash" in layout:
+        reset_hash_runtime_probe_stats()
     if kernel_profiler:
         clear_taichi_kernel_profile(ti)
     reduce_samples = []
@@ -1260,6 +1325,8 @@ def run_taichi_topology_case_initialized(
             reduce()
         ti.sync()
         reduce_samples.append((time.perf_counter() - t0) * 1000.0 / batch)
+    if hash_diagnostics and "hash" in layout:
+        runtime_probe_telemetry["reduce"] = collect_hash_runtime_probe_stats()
     if kernel_profiler:
         kernel_profile["reduce"] = collect_taichi_kernel_profile()
 
@@ -1395,6 +1462,10 @@ def run_taichi_topology_case_initialized(
             "dynamic_child": dynamic_child,
             "probe_telemetry": probe_telemetry,
         }
+        if runtime_probe_telemetry:
+            result_payload["hash_diagnostics"][
+                "runtime_probe_telemetry"
+            ] = runtime_probe_telemetry
     else:
         result_payload["reference_diagnostics"] = {
             "schema_version": 1,
@@ -1566,6 +1637,9 @@ def run_taichi_case(
     for _ in range(warmup):
         write()
     ti.sync()
+    runtime_probe_telemetry = {}
+    if hash_diagnostics and layout == "hash":
+        reset_hash_runtime_probe_stats()
     if kernel_profiler:
         clear_taichi_kernel_profile(ti)
     write_samples = []
@@ -1575,6 +1649,8 @@ def run_taichi_case(
             write()
         ti.sync()
         write_samples.append((time.perf_counter() - t0) * 1000.0 / batch)
+    if hash_diagnostics and layout == "hash":
+        runtime_probe_telemetry["write"] = collect_hash_runtime_probe_stats()
     kernel_profile = {}
     if kernel_profiler:
         kernel_profile["write"] = collect_taichi_kernel_profile()
@@ -1583,6 +1659,8 @@ def run_taichi_case(
         clear_acc()
         reduce()
     ti.sync()
+    if hash_diagnostics and layout == "hash":
+        reset_hash_runtime_probe_stats()
     if kernel_profiler:
         clear_taichi_kernel_profile(ti)
     reduce_samples = []
@@ -1593,6 +1671,8 @@ def run_taichi_case(
             reduce()
         ti.sync()
         reduce_samples.append((time.perf_counter() - t0) * 1000.0 / batch)
+    if hash_diagnostics and layout == "hash":
+        runtime_probe_telemetry["reduce"] = collect_hash_runtime_probe_stats()
     if kernel_profiler:
         kernel_profile["reduce"] = collect_taichi_kernel_profile()
 
@@ -1695,6 +1775,10 @@ def run_taichi_case(
             outer_hash_load_factor,
         )
         result_payload["hash_diagnostics"]["probe_telemetry"] = probe_telemetry
+        if runtime_probe_telemetry:
+            result_payload["hash_diagnostics"][
+                "runtime_probe_telemetry"
+            ] = runtime_probe_telemetry
     else:
         result_payload["reference_diagnostics"] = {
             "schema_version": 1,
@@ -1714,7 +1798,8 @@ def run_taichi_case(
 def print_table(results: list[dict]) -> None:
     print(
         "\ncase,ok,compile_s,write_median_ms,reduce_median_ms,"
-        "proc_mb,gpu_ded_mb,hash_table_kb,snode_container_kb,probe_max"
+        "proc_mb,gpu_ded_mb,hash_table_kb,snode_container_kb,probe_max,"
+        "runtime_probe_max"
     )
     for item in results:
         mem = item.get("memory", {})
@@ -1734,17 +1819,19 @@ def print_table(results: list[dict]) -> None:
         )
         probe_max = -1
         for diagnostics_key in ("hash_diagnostics", "reference_diagnostics"):
-            for value in (
-                item.get(diagnostics_key, {}).get("probe_telemetry", {}).values()
-            ):
+            diagnostics = item.get(diagnostics_key, {})
+            for value in diagnostics.get("probe_telemetry", {}).values():
                 if isinstance(value, dict):
                     probe_max = max(
                         probe_max, int(value.get("insert_probe_max", -1))
                     )
+        runtime_probe_max = runtime_probe_max_from_diagnostics(
+            item.get("hash_diagnostics", {})
+        )
         print(
             "{case},{ok},{compile:.6f},{write:.6f},{reduce:.6f},"
             "{proc:.3f},{gpu:.3f},{hash_table_kb:.3f},"
-            "{snode_container_kb:.3f},{probe_max}".format(
+            "{snode_container_kb:.3f},{probe_max},{runtime_probe_max}".format(
                 case=item.get("case"),
                 ok=item.get("ok"),
                 compile=item.get("compile_first_s", -1.0),
@@ -1755,6 +1842,7 @@ def print_table(results: list[dict]) -> None:
                 hash_table_kb=hash_table_kb,
                 snode_container_kb=snode_container_kb,
                 probe_max=probe_max,
+                runtime_probe_max=runtime_probe_max,
             )
         )
 
@@ -1919,6 +2007,9 @@ def summarize_results(results: list[dict]) -> list[dict]:
         snode_container_reserved_values = []
         external_storage_values = []
         probe_max_values = []
+        runtime_probe_max_values = []
+        runtime_insert_mean_values = []
+        runtime_lookup_mean_values = []
         for item in items:
             memory = item.get("memory", {})
             if "after_bench" in memory:
@@ -1999,6 +2090,24 @@ def summarize_results(results: list[dict]) -> list[dict]:
                             probe_max_values.append(
                                 float(value["insert_probe_max"])
                             )
+                runtime_probe = diagnostics.get("runtime_probe_telemetry", {})
+                if isinstance(runtime_probe, dict):
+                    for value in runtime_probe.values():
+                        if not isinstance(value, dict):
+                            continue
+                        for max_key in ("insert_probe_max", "lookup_probe_max"):
+                            if isinstance(value.get(max_key), (int, float)):
+                                runtime_probe_max_values.append(
+                                    float(value[max_key])
+                                )
+                        if isinstance(value.get("insert_probe_mean"), (int, float)):
+                            runtime_insert_mean_values.append(
+                                float(value["insert_probe_mean"])
+                            )
+                        if isinstance(value.get("lookup_probe_mean"), (int, float)):
+                            runtime_lookup_mean_values.append(
+                                float(value["lookup_probe_mean"])
+                            )
         summary.append(
             {
                 "case": case,
@@ -2053,6 +2162,15 @@ def summarize_results(results: list[dict]) -> list[dict]:
                 "external_storage_bytes": median_or_none(external_storage_values),
                 "probe_insert_max": max(probe_max_values)
                 if probe_max_values
+                else None,
+                "runtime_probe_max": max(runtime_probe_max_values)
+                if runtime_probe_max_values
+                else None,
+                "runtime_insert_probe_mean_max": max(runtime_insert_mean_values)
+                if runtime_insert_mean_values
+                else None,
+                "runtime_lookup_probe_mean_max": max(runtime_lookup_mean_values)
+                if runtime_lookup_mean_values
                 else None,
             }
         )

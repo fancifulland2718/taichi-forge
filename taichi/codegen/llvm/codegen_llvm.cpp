@@ -400,6 +400,8 @@ std::unique_ptr<RuntimeObject> TaskCodeGenLLVM::emit_struct_meta_object(
     } else {
       meta->set("tombstone_count_offset", tlctx->get_constant(no_offset));
     }
+    meta->set("diagnostics_enabled",
+              tlctx->get_constant((uint1)compile_config.hash_snode_diagnostics));
     meta->set("payload_offset", tlctx->get_constant((uint64)payload_offset));
     for (int i = 0; i < taichi_max_num_indices; i++) {
       meta->set("extract_shape", tlctx->get_constant(i),
@@ -2061,12 +2063,18 @@ void TaskCodeGenLLVM::visit(SNodeLookupStmt *stmt) {
              snode->type == SNodeType::hash ||
              snode->type == SNodeType::dynamic ||
              snode->type == SNodeType::bitmasked) {
-    if (stmt->activate) {
-      call(snode, llvm_val[stmt->input_snode], "activate",
-           {llvm_val[stmt->input_index]});
+    if (stmt->activate && snode->type == SNodeType::hash) {
+      llvm_val[stmt] =
+          call(snode, llvm_val[stmt->input_snode],
+               "lookup_or_activate_element", {llvm_val[stmt->input_index]});
+    } else {
+      if (stmt->activate) {
+        call(snode, llvm_val[stmt->input_snode], "activate",
+             {llvm_val[stmt->input_index]});
+      }
+      llvm_val[stmt] = call(snode, llvm_val[stmt->input_snode],
+                            "lookup_element", {llvm_val[stmt->input_index]});
     }
-    llvm_val[stmt] = call(snode, llvm_val[stmt->input_snode], "lookup_element",
-                          {llvm_val[stmt->input_index]});
   } else if (snode->type == SNodeType::bit_struct) {
     llvm_val[stmt] = parent;
   } else if (snode->type == SNodeType::quant_array) {

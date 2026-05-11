@@ -140,6 +140,8 @@ class LlvmRuntimeExecutor {
   void destroy_snode_tree(SNodeTree *snode_tree);
   std::size_t get_snode_num_dynamically_allocated(SNode *snode,
                                                   uint64 *result_buffer);
+  void reset_hash_snode_probe_stats(uint64 *result_buffer);
+  std::vector<int64> get_hash_snode_probe_stats(uint64 *result_buffer);
 
   void init_runtime_jit_module(std::unique_ptr<llvm::Module> module);
 

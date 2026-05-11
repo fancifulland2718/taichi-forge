@@ -58,6 +58,13 @@ class ProgramImpl {
       SNode *snode,
       uint64 *result_buffer) = 0;
 
+  virtual void reset_hash_snode_probe_stats(uint64 *result_buffer) {
+  }
+
+  virtual std::vector<int64> get_hash_snode_probe_stats(uint64 *result_buffer) {
+    return {};
+  }
+
   /**
    * Perform a backend synchronization.
    */

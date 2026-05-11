@@ -520,6 +520,14 @@ std::size_t Program::get_snode_num_dynamically_allocated(SNode *snode) {
                                                             result_buffer);
 }
 
+void Program::reset_hash_snode_probe_stats() {
+  program_impl_->reset_hash_snode_probe_stats(result_buffer);
+}
+
+std::vector<int64> Program::get_hash_snode_probe_stats() {
+  return program_impl_->get_hash_snode_probe_stats(result_buffer);
+}
+
 Ndarray *Program::create_ndarray(const DataType type,
                                  const std::vector<int> &shape,
                                  ExternalArrayLayout layout,

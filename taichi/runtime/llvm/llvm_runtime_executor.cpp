@@ -269,6 +269,30 @@ std::size_t LlvmRuntimeExecutor::get_snode_num_dynamically_allocated(
                                            result_buffer, data_list);
 }
 
+void LlvmRuntimeExecutor::reset_hash_snode_probe_stats(uint64 *result_buffer) {
+  TI_ASSERT(arch_uses_llvm(config_.arch));
+  auto *runtime_jit_module = get_runtime_jit_module();
+  runtime_jit_module->call<void *>("runtime_hash_probe_stats_reset",
+                                   llvm_runtime_);
+  synchronize();
+}
+
+std::vector<int64> LlvmRuntimeExecutor::get_hash_snode_probe_stats(
+    uint64 *result_buffer) {
+  TI_ASSERT(arch_uses_llvm(config_.arch));
+  constexpr int kNumHashProbeStats = 6;
+  std::vector<int64> stats;
+  stats.reserve(kNumHashProbeStats);
+  auto *runtime_jit_module = get_runtime_jit_module();
+  for (int i = 0; i < kNumHashProbeStats; i++) {
+    runtime_jit_module->call<void *, int>("runtime_hash_probe_stats_get",
+                                          llvm_runtime_, i);
+    stats.push_back((int64)fetch_result<int32>(
+        taichi_result_buffer_runtime_query_id, result_buffer));
+  }
+  return stats;
+}
+
 void LlvmRuntimeExecutor::check_runtime_error(uint64 *result_buffer) {
   synchronize();
   auto *runtime_jit_module = get_runtime_jit_module();

@@ -10,6 +10,7 @@ struct HashMeta : public StructMeta {
   std::size_t active_slots_offset;
   std::size_t active_slots_count_offset;
   std::size_t tombstone_count_offset;
+  u1 diagnostics_enabled;
   i32 extract_shape[taichi_max_num_indices];
   i32 extract_acc_shape[taichi_max_num_indices];
 };
@@ -23,6 +24,7 @@ STRUCT_FIELD(HashMeta, overflow_count_offset);
 STRUCT_FIELD(HashMeta, active_slots_offset);
 STRUCT_FIELD(HashMeta, active_slots_count_offset);
 STRUCT_FIELD(HashMeta, tombstone_count_offset);
+STRUCT_FIELD(HashMeta, diagnostics_enabled);
 STRUCT_FIELD_ARRAY(HashMeta, extract_shape);
 STRUCT_FIELD_ARRAY(HashMeta, extract_acc_shape);
 
@@ -73,6 +75,22 @@ inline i32 *Hash_tombstone_count(HashMeta *meta, Ptr node) {
   return (i32 *)(node + meta->tombstone_count_offset);
 }
 
+inline void Hash_record_probe(HashMeta *meta, bool insert, i32 probes) {
+  if (!meta->diagnostics_enabled) {
+    return;
+  }
+  auto runtime = meta->context->runtime;
+  if (insert) {
+    atomic_add_i32(&runtime->hash_insert_probe_count, 1);
+    atomic_add_i32(&runtime->hash_insert_probe_total, probes);
+    atomic_max_i32(&runtime->hash_insert_probe_max, probes);
+  } else {
+    atomic_add_i32(&runtime->hash_lookup_probe_count, 1);
+    atomic_add_i32(&runtime->hash_lookup_probe_total, probes);
+    atomic_max_i32(&runtime->hash_lookup_probe_max, probes);
+  }
+}
+
 inline u32 Hash_mix_u32(u32 x) {
   x ^= x >> 16;
   x *= 0x7feb352dU;
@@ -110,12 +128,15 @@ inline i32 Hash_find_bucket(HashMeta *meta, Ptr node, i32 key) {
       state = Hash_load_i32(&states[bucket]);
     }
     if (state == hash_state_empty) {
+      Hash_record_probe(meta, /*insert=*/false, (i32)(step + 1));
       return -1;
     }
     if (state == hash_state_occupied && keys[bucket] == key) {
+      Hash_record_probe(meta, /*insert=*/false, (i32)(step + 1));
       return (i32)bucket;
     }
   }
+  Hash_record_probe(meta, /*insert=*/false, (i32)meta->table_capacity);
   return -1;
 }
 
@@ -128,6 +149,7 @@ inline void Hash_publish_bucket(HashMeta *meta,
   auto keys = Hash_keys(meta, node);
   keys[bucket] = key;
   std::memset(Hash_payload(meta, node, bucket), 0, meta->element_size);
+  grid_memfence();
   atomic_exchange_i32(&states[bucket], hash_state_occupied);
   atomic_add_i32(Hash_active_count(meta, node), 1);
   if (Hash_has_active_slots(meta) && !reused_tombstone) {
@@ -156,6 +178,7 @@ inline i32 Hash_find_or_insert_bucket(HashMeta *meta, Ptr node, i32 key) {
     }
     if (state == hash_state_occupied) {
       if (keys[bucket] == key) {
+        Hash_record_probe(meta, /*insert=*/true, (i32)(step + 1));
         return (i32)bucket;
       }
       continue;
@@ -174,6 +197,7 @@ inline i32 Hash_find_or_insert_bucket(HashMeta *meta, Ptr node, i32 key) {
                                     hash_state_busy)) {
         Hash_publish_bucket(meta, node, target, key,
                             first_tombstone >= 0);
+        Hash_record_probe(meta, /*insert=*/true, (i32)(step + 1));
         return (i32)target;
       }
       first_tombstone = -1;
@@ -185,9 +209,11 @@ inline i32 Hash_find_or_insert_bucket(HashMeta *meta, Ptr node, i32 key) {
                                 hash_state_tombstone, hash_state_busy)) {
     Hash_publish_bucket(meta, node, first_tombstone, key,
                         /*reused_tombstone=*/true);
+    Hash_record_probe(meta, /*insert=*/true, (i32)meta->table_capacity);
     return (i32)first_tombstone;
   }
   atomic_add_i32(Hash_overflow_count(meta, node), 1);
+  Hash_record_probe(meta, /*insert=*/true, (i32)meta->table_capacity);
   return -1;
 }
 
@@ -214,6 +240,7 @@ void Hash_deactivate(Ptr meta_, Ptr node, int i) {
   if (Hash_compare_exchange_i32(&states[bucket], hash_state_occupied,
                                 hash_state_busy)) {
     std::memset(Hash_payload(meta, node, bucket), 0, meta->element_size);
+    grid_memfence();
     atomic_exchange_i32(&states[bucket], hash_state_tombstone);
     atomic_add_i32(Hash_active_count(meta, node), -1);
     if (Hash_has_tombstone_count(meta)) {
@@ -232,6 +259,17 @@ Ptr Hash_lookup_element(Ptr meta_, Ptr node, int i) {
   auto meta = (HashMeta *)meta_;
   auto bucket = Hash_find_bucket(meta, node, i);
   if (bucket < 0) {
+    return meta->context->runtime->ambient_elements[meta->snode_id];
+  }
+  return Hash_payload(meta, node, bucket);
+}
+
+Ptr Hash_lookup_or_activate_element(Ptr meta_, Ptr node, int i) {
+  auto meta = (HashMeta *)meta_;
+  auto bucket = Hash_find_or_insert_bucket(meta, node, i);
+  if (bucket < 0) {
+    taichi_assert_runtime(meta->context->runtime, false,
+                          "Hash SNode table overflow.");
     return meta->context->runtime->ambient_elements[meta->snode_id];
   }
   return Hash_payload(meta, node, bucket);

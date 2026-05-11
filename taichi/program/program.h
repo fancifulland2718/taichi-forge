@@ -190,6 +190,10 @@ class TI_DLL_EXPORT Program {
   // Returns zero if the SNode is statically allocated
   std::size_t get_snode_num_dynamically_allocated(SNode *snode);
 
+  void reset_hash_snode_probe_stats();
+
+  std::vector<int64> get_hash_snode_probe_stats();
+
   inline SNodeFieldMap *get_snode_to_fields() {
     return &snode_to_fields_;
   }

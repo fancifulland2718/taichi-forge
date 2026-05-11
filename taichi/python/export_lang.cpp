@@ -549,6 +549,24 @@ void export_lang(py::module &m) {
       .def("get_total_compilation_time", &Program::get_total_compilation_time)
       .def("get_snode_num_dynamically_allocated",
            &Program::get_snode_num_dynamically_allocated)
+      .def("reset_hash_snode_probe_stats",
+           &Program::reset_hash_snode_probe_stats)
+      .def("get_hash_snode_probe_stats",
+           [](Program *program) {
+             auto raw = program->get_hash_snode_probe_stats();
+             py::dict ret;
+             ret["insert_count"] = raw.size() > 0 ? raw[0] : 0;
+             ret["insert_total"] = raw.size() > 1 ? raw[1] : 0;
+             ret["insert_max"] = raw.size() > 2 ? raw[2] : 0;
+             ret["lookup_count"] = raw.size() > 3 ? raw[3] : 0;
+             ret["lookup_total"] = raw.size() > 4 ? raw[4] : 0;
+             ret["lookup_max"] = raw.size() > 5 ? raw[5] : 0;
+             ret["insert_mean"] =
+                 raw.size() > 1 && raw[0] > 0 ? double(raw[1]) / raw[0] : 0.0;
+             ret["lookup_mean"] =
+                 raw.size() > 4 && raw[3] > 0 ? double(raw[4]) / raw[3] : 0.0;
+             return ret;
+           })
       .def("synchronize", &Program::synchronize)
       .def("materialize_runtime", &Program::materialize_runtime)
       .def("make_aot_module_builder", &Program::make_aot_module_builder)

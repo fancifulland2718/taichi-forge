@@ -792,6 +792,80 @@ def _run_hash_snode_hash_under_dynamic():
     assert value_sum[None] == 302
 
 
+def _run_hash_snode_runtime_probe_stats():
+    from taichi_forge.lang import impl
+
+    capacity = 8
+    keys = _collision_keys(capacity, 4)
+    x = ti.field(ti.i32)
+    total = ti.field(ti.i32, shape=())
+
+    h = ti.root.hash(ti.i, 4096, capacity=capacity)
+    h.place(x)
+
+    @ti.kernel
+    def write_colliding_keys():
+        for p in ti.static(range(4)):
+            x[keys[p]] = p + 1
+
+    @ti.kernel
+    def read_colliding_keys():
+        total[None] = 0
+        for p in ti.static(range(4)):
+            total[None] += x[keys[p]]
+
+    write_colliding_keys()
+    ti.sync()
+    prog = impl.get_runtime().prog
+
+    prog.reset_hash_snode_probe_stats()
+    write_colliding_keys()
+    ti.sync()
+    insert_stats = dict(prog.get_hash_snode_probe_stats())
+    assert insert_stats["insert_count"] >= 4
+    assert insert_stats["insert_total"] >= insert_stats["insert_count"]
+    assert insert_stats["insert_max"] >= 2
+    assert insert_stats["lookup_count"] == 0
+    assert insert_stats["lookup_total"] == 0
+    assert insert_stats["lookup_max"] == 0
+
+    prog.reset_hash_snode_probe_stats()
+    read_colliding_keys()
+    ti.sync()
+    lookup_stats = dict(prog.get_hash_snode_probe_stats())
+    assert total[None] == 1 + 2 + 3 + 4
+    assert lookup_stats["lookup_count"] >= 4
+    assert lookup_stats["lookup_total"] >= lookup_stats["lookup_count"]
+    assert lookup_stats["lookup_max"] >= 2
+
+
+def _run_hash_snode_runtime_probe_stats_default_off():
+    from taichi_forge.lang import impl
+
+    capacity = 8
+    keys = _collision_keys(capacity, 4)
+    x = ti.field(ti.i32)
+
+    ti.root.hash(ti.i, 4096, capacity=capacity).place(x)
+
+    @ti.kernel
+    def write_colliding_keys():
+        for p in ti.static(range(4)):
+            x[keys[p]] = p + 1
+
+    prog = impl.get_runtime().prog
+    prog.reset_hash_snode_probe_stats()
+    write_colliding_keys()
+    ti.sync()
+    stats = dict(prog.get_hash_snode_probe_stats())
+    assert stats["insert_count"] == 0
+    assert stats["insert_total"] == 0
+    assert stats["insert_max"] == 0
+    assert stats["lookup_count"] == 0
+    assert stats["lookup_total"] == 0
+    assert stats["lookup_max"] == 0
+
+
 @test_utils.test(
     arch=ti.cpu,
     require=ti.extension.sparse,
@@ -1103,6 +1177,27 @@ def test_hash_snode_cpu_hash_under_dynamic():
 
 
 @test_utils.test(
+    arch=ti.cpu,
+    require=ti.extension.sparse,
+    hash_snode_experimental=True,
+    hash_snode_diagnostics=True,
+    offline_cache=False,
+)
+def test_hash_snode_cpu_runtime_probe_stats():
+    _run_hash_snode_runtime_probe_stats()
+
+
+@test_utils.test(
+    arch=ti.cpu,
+    require=ti.extension.sparse,
+    hash_snode_experimental=True,
+    offline_cache=False,
+)
+def test_hash_snode_cpu_runtime_probe_stats_default_off():
+    _run_hash_snode_runtime_probe_stats_default_off()
+
+
+@test_utils.test(
     arch=ti.cuda,
     require=ti.extension.sparse,
     hash_snode_experimental=True,
@@ -1396,6 +1491,18 @@ def test_hash_snode_cuda_hash_under_pointer():
 )
 def test_hash_snode_cuda_hash_under_dynamic():
     _run_hash_snode_hash_under_dynamic()
+
+
+@test_utils.test(
+    arch=ti.cuda,
+    require=ti.extension.sparse,
+    hash_snode_experimental=True,
+    hash_snode_diagnostics=True,
+    offline_cache=False,
+    cuda_sparse_pool_auto_size=True,
+)
+def test_hash_snode_cuda_runtime_probe_stats():
+    _run_hash_snode_runtime_probe_stats()
 
 
 @test_utils.test(

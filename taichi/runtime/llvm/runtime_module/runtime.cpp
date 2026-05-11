@@ -612,6 +612,13 @@ struct LLVMRuntime {
 
   i64 total_requested_memory;
 
+  i32 hash_insert_probe_count;
+  i32 hash_insert_probe_total;
+  i32 hash_insert_probe_max;
+  i32 hash_lookup_probe_count;
+  i32 hash_lookup_probe_total;
+  i32 hash_lookup_probe_max;
+
   template <typename T>
   void set_result(std::size_t i, T t) {
     static_assert(sizeof(T) <= sizeof(uint64));
@@ -796,6 +803,33 @@ RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_version);
 RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_clean_epoch);
 RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_clean_parent_version);
 RUNTIME_STRUCT_FIELD(LLVMRuntime, total_requested_memory);
+
+void runtime_hash_probe_stats_reset(LLVMRuntime *runtime) {
+  runtime->hash_insert_probe_count = 0;
+  runtime->hash_insert_probe_total = 0;
+  runtime->hash_insert_probe_max = 0;
+  runtime->hash_lookup_probe_count = 0;
+  runtime->hash_lookup_probe_total = 0;
+  runtime->hash_lookup_probe_max = 0;
+}
+
+void runtime_hash_probe_stats_get(LLVMRuntime *runtime, int index) {
+  i32 value = 0;
+  if (index == 0) {
+    value = runtime->hash_insert_probe_count;
+  } else if (index == 1) {
+    value = runtime->hash_insert_probe_total;
+  } else if (index == 2) {
+    value = runtime->hash_insert_probe_max;
+  } else if (index == 3) {
+    value = runtime->hash_lookup_probe_count;
+  } else if (index == 4) {
+    value = runtime->hash_lookup_probe_total;
+  } else if (index == 5) {
+    value = runtime->hash_lookup_probe_max;
+  }
+  runtime->set_result(taichi_result_buffer_runtime_query_id, value);
+}
 
 RUNTIME_STRUCT_FIELD(NodeManager, free_list);
 RUNTIME_STRUCT_FIELD(NodeManager, recycled_list);
@@ -1036,6 +1070,7 @@ void runtime_initialize(
   runtime->memory_pool = memory_pool;
 
   runtime->total_requested_memory = 0;
+  runtime_hash_probe_stats_reset(runtime);
 
   runtime->temporaries = (Ptr)runtime->allocate_aligned(
       runtime->runtime_objects_chunk, taichi_global_tmp_buffer_size,

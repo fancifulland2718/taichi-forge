@@ -181,6 +181,15 @@ class LlvmProgramImpl : public ProgramImpl {
                                                               result_buffer);
   }
 
+  void reset_hash_snode_probe_stats(uint64 *result_buffer) override {
+    runtime_exec_->reset_hash_snode_probe_stats(result_buffer);
+  }
+
+  std::vector<int64> get_hash_snode_probe_stats(
+      uint64 *result_buffer) override {
+    return runtime_exec_->get_hash_snode_probe_stats(result_buffer);
+  }
+
   void check_runtime_error(uint64 *result_buffer) override {
     runtime_exec_->check_runtime_error(result_buffer);
   }
