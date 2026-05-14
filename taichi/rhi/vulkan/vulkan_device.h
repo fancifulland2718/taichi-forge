@@ -531,6 +531,8 @@ class VulkanSurface : public Surface {
  private:
   void create_swap_chain();
   void destroy_swap_chain();
+  void create_offscreen_images();
+  void destroy_offscreen_images();
 
   SurfaceConfig config_;
 

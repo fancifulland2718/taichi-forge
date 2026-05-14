@@ -2830,17 +2830,28 @@ VulkanSurface::VulkanSurface(VulkanDevice *device, const SurfaceConfig &config)
 
     image_available_ = vkapi::create_semaphore(device->vk_device(), 0);
   } else {
-    ImageParams params = {ImageDimension::d2D,
-                          BufferFormat::rgba8,
-                          ImageLayout::present_src,
-                          config.width,
-                          config.height,
-                          1,
-                          false};
-    // screenshot_image_ = device->create_image(params);
-    swapchain_images_.push_back(device->create_image(params));
-    swapchain_images_.push_back(device->create_image(params));
+    create_offscreen_images();
   }
+}
+
+void VulkanSurface::create_offscreen_images() {
+  ImageParams params = {ImageDimension::d2D,
+                        BufferFormat::rgba8,
+                        ImageLayout::present_src,
+                        width_,
+                        height_,
+                        1,
+                        false};
+  image_format_ = BufferFormat::rgba8;
+  swapchain_images_.push_back(device_->create_image(params));
+  swapchain_images_.push_back(device_->create_image(params));
+}
+
+void VulkanSurface::destroy_offscreen_images() {
+  for (auto &img : swapchain_images_) {
+    device_->destroy_image(img);
+  }
+  swapchain_images_.clear();
 }
 
 void VulkanSurface::create_swap_chain() {
@@ -2980,12 +2991,16 @@ void VulkanSurface::create_swap_chain() {
 }
 
 void VulkanSurface::destroy_swap_chain() {
+  if (swapchain_ == VK_NULL_HANDLE) {
+    return;
+  }
   for (auto &alloc : swapchain_images_) {
     std::get<1>(device_->get_vk_image(alloc)) = nullptr;
     device_->destroy_image(alloc);
   }
   swapchain_images_.clear();
   vkDestroySwapchainKHR(device_->vk_device(), swapchain_, nullptr);
+  swapchain_ = VK_NULL_HANDLE;
 }
 
 int VulkanSurface::get_image_count() {
@@ -2997,18 +3012,23 @@ VulkanSurface::~VulkanSurface() {
     destroy_swap_chain();
     image_available_ = nullptr;
   } else {
-    for (auto &img : swapchain_images_) {
-      device_->destroy_image(img);
-    }
-    swapchain_images_.clear();
+    destroy_offscreen_images();
   }
 }
 
 void VulkanSurface::resize(uint32_t width, uint32_t height) {
-  destroy_swap_chain();
+  if (config_.native_surface_handle) {
+    destroy_swap_chain();
+  } else {
+    destroy_offscreen_images();
+  }
   this->width_ = width;
   this->height_ = height;
-  create_swap_chain();
+  if (config_.native_surface_handle) {
+    create_swap_chain();
+  } else {
+    create_offscreen_images();
+  }
 }
 
 std::pair<uint32_t, uint32_t> VulkanSurface::get_size() {
@@ -3040,6 +3060,14 @@ BufferFormat VulkanSurface::image_format() {
 
 void VulkanSurface::present_image(
     const std::vector<StreamSemaphore> &wait_semaphores) {
+  if (!config_.native_surface_handle) {
+    return;
+  }
+  if (swapchain_ == VK_NULL_HANDLE) {
+    RHI_LOG_ERROR("Cannot present image without a valid Vulkan swapchain");
+    return;
+  }
+
   std::vector<VkSemaphore> vk_wait_semaphores;
 
   // Already transitioned to `present_src` at the end of the render pass.
@@ -3048,6 +3076,9 @@ void VulkanSurface::present_image(
   //                          ImageLayout::present_src);
 
   for (const StreamSemaphore &sema_ : wait_semaphores) {
+    if (!sema_) {
+      continue;
+    }
     auto sema = std::static_pointer_cast<VulkanStreamSemaphoreObject>(sema_);
     vk_wait_semaphores.push_back(sema->vkapi_ref->semaphore);
   }

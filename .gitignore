@@ -111,3 +111,4 @@ _build_imgui.log
 python/taichi_forge/_lib/runtime/
 python/taichi_forge/_lib/c_api/
 python/taichi_forge/_lib/core/
+issues/

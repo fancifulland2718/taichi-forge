@@ -1,10 +1,16 @@
+import os
 import platform
+import pathlib
+import subprocess
+import sys
+import textwrap
 
 import numpy as np
 import pytest
 from taichi_forge._lib import core as _ti_core
 
 import taichi_forge as ti
+from taichi_forge.lang.misc import is_arch_supported
 from tests import test_utils
 from tests.test_utils import verify_image
 
@@ -501,6 +507,84 @@ def test_set_image():
 
     verify_image(window.get_image_buffer_as_numpy(), "test_set_image")
     window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.vulkan])
+def test_hidden_window_show_after_set_image():
+    window = ti.ui.Window("test", (64, 64), show_window=False)
+    canvas = window.get_canvas()
+
+    img = ti.Vector.field(4, ti.f32, (64, 64))
+
+    @ti.kernel
+    def init_img():
+        for i, j in img:
+            img[i, j] = ti.Vector([i, j, 0, 64], dt=ti.f32) / 64
+
+    init_img()
+    canvas.set_image(img)
+    window.show()
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+def test_hidden_window_show_after_set_image_process_exit(tmp_path):
+    if not is_arch_supported(ti.vulkan):
+        pytest.skip("Vulkan is not supported")
+
+    script = tmp_path / "hidden_window_show_repro.py"
+    script.write_text(
+        textwrap.dedent(
+            """
+            import taichi_forge as ti
+
+            ti.init(
+                arch=ti.vulkan,
+                offline_cache=False,
+                vulkan_sparse_experimental=False,
+            )
+
+            img = ti.Vector.field(4, ti.f32, shape=(64, 64))
+
+            @ti.kernel
+            def init_img():
+                for i, j in img:
+                    img[i, j] = ti.Vector([i, j, 0, 64], dt=ti.f32) / 64
+
+            init_img()
+            window = ti.ui.Window("test", (64, 64), show_window=False)
+            canvas = window.get_canvas()
+            canvas.set_image(img)
+            window.show()
+            ti.sync()
+            print("hidden window show completed", flush=True)
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    repo_python = pathlib.Path(__file__).parents[2] / "python"
+    env = os.environ.copy()
+    env["TI_SKIP_VERSION_CHECK"] = "ON"
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(repo_python), env.get("PYTHONPATH", "")]
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-u", str(script)],
+        cwd=str(pathlib.Path(__file__).parents[2]),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, (
+        f"subprocess failed with {result.returncode}\n"
+        f"stdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
 
 
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")

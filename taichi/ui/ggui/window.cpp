@@ -51,6 +51,10 @@ void Window::show() {
   if (!drawn_frame_) {
     draw_frame();
   }
+  if (!config_.show_window) {
+    prepare_for_next_frame();
+    return;
+  }
   present_frame();
   WindowBase::show();
   if (!is_running()) {
