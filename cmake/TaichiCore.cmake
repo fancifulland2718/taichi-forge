@@ -176,6 +176,82 @@ add_subdirectory(taichi/rhi)
 set(CORE_LIBRARY_NAME taichi_core)
 add_library(${CORE_LIBRARY_NAME} OBJECT ${TAICHI_CORE_SOURCE})
 
+if (TI_WITH_VULKAN)
+    find_program(TI_GLSLC_EXECUTABLE
+        NAMES glslc glslc.exe
+        HINTS
+            "$ENV{VULKAN_SDK}/Bin"
+            "$ENV{VK_SDK_PATH}/Bin"
+            "$ENV{VK_LAYER_PATH}"
+    )
+    if (NOT TI_GLSLC_EXECUTABLE)
+        message(FATAL_ERROR "TI_WITH_VULKAN=ON requires glslc to generate Vulkan sort SPIR-V headers.")
+    endif()
+
+    set(TI_VULKAN_SORT_SHADER_SOURCE_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/taichi/program/vulkan_sort_shaders")
+    set(TI_VULKAN_SORT_GENERATED_INCLUDE_DIR
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/vulkan_sort")
+    set(TI_VULKAN_SORT_GENERATED_SHADER_DIR
+        "${TI_VULKAN_SORT_GENERATED_INCLUDE_DIR}/taichi/program/vulkan_sort_shaders")
+    set(TI_VULKAN_SORT_GENERATED_SPV_HEADERS)
+
+    macro(ti_vulkan_sort_shader source output)
+        set(output_path "${TI_VULKAN_SORT_GENERATED_SHADER_DIR}/${output}")
+        add_custom_command(
+            OUTPUT "${output_path}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "${TI_VULKAN_SORT_GENERATED_SHADER_DIR}"
+            COMMAND "${TI_GLSLC_EXECUTABLE}"
+                    --target-env=vulkan1.1
+                    ${ARGN}
+                    -mfmt=c
+                    "${TI_VULKAN_SORT_SHADER_SOURCE_DIR}/${source}"
+                    -o "${output_path}"
+            DEPENDS "${TI_VULKAN_SORT_SHADER_SOURCE_DIR}/${source}"
+            VERBATIM
+        )
+        list(APPEND TI_VULKAN_SORT_GENERATED_SPV_HEADERS "${output_path}")
+    endmacro()
+
+    ti_vulkan_sort_shader(init_i32.comp init_i32.comp.spv.h)
+    ti_vulkan_sort_shader(copy_i32.comp copy_i32.comp.spv.h)
+    ti_vulkan_sort_shader(prefix_block.comp prefix_block.comp.spv.h)
+    ti_vulkan_sort_shader(prefix_chunks.comp prefix_chunks.comp.spv.h)
+    ti_vulkan_sort_shader(prefix_single_chunk.comp prefix_single_chunk.comp.spv.h)
+    ti_vulkan_sort_shader(radix8_spine.comp radix8_spine.comp.spv.h)
+
+    foreach(shift 0 4 8 12 16 20 24 28)
+        ti_vulkan_sort_shader(rank_hist.comp
+            "rank_hist_shift${shift}.comp.spv.h" "-DSHIFT=${shift}")
+        ti_vulkan_sort_shader(rank_hist_subgroup.comp
+            "rank_hist_subgroup_shift${shift}.comp.spv.h" "-DSHIFT=${shift}")
+        ti_vulkan_sort_shader(scatter_keys.comp
+            "scatter_keys_shift${shift}.comp.spv.h" "-DSHIFT=${shift}")
+        ti_vulkan_sort_shader(scatter_keys_inline_chunks.comp
+            "scatter_keys_inline_chunks_shift${shift}.comp.spv.h" "-DSHIFT=${shift}")
+        ti_vulkan_sort_shader(scatter_pairs.comp
+            "scatter_pairs_shift${shift}.comp.spv.h" "-DSHIFT=${shift}")
+        ti_vulkan_sort_shader(scatter_pairs_inline_chunks.comp
+            "scatter_pairs_inline_chunks_shift${shift}.comp.spv.h" "-DSHIFT=${shift}")
+    endforeach()
+
+    foreach(shift 0 8 16 24)
+        ti_vulkan_sort_shader(radix8_upsweep.comp
+            "radix8_upsweep_shift${shift}.comp.spv.h" "-DSHIFT=${shift}")
+        ti_vulkan_sort_shader(radix8_downsweep_keys.comp
+            "radix8_downsweep_keys_shift${shift}.comp.spv.h" "-DSHIFT=${shift}")
+        ti_vulkan_sort_shader(radix8_downsweep_pairs.comp
+            "radix8_downsweep_pairs_shift${shift}.comp.spv.h" "-DSHIFT=${shift}")
+    endforeach()
+
+    add_custom_target(vulkan_sort_spv_headers
+        DEPENDS ${TI_VULKAN_SORT_GENERATED_SPV_HEADERS})
+    add_dependencies(${CORE_LIBRARY_NAME} vulkan_sort_spv_headers)
+    target_include_directories(${CORE_LIBRARY_NAME} BEFORE PRIVATE
+        "${TI_VULKAN_SORT_GENERATED_INCLUDE_DIR}")
+endif()
+
 target_include_directories(${CORE_LIBRARY_NAME} PRIVATE ${CMAKE_SOURCE_DIR})
 target_include_directories(${CORE_LIBRARY_NAME} PRIVATE external/include)
 target_include_directories(${CORE_LIBRARY_NAME} PRIVATE external/SPIRV-Tools/include)

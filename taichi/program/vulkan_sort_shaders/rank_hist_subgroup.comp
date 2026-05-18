@@ -1,0 +1,70 @@
+#version 450
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+
+#ifndef SHIFT
+#define SHIFT 0
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer KeysIn {
+  uint data[];
+} keys_in;
+
+layout(set = 0, binding = 1, std430) writeonly buffer Ranks {
+  uint data[];
+} ranks;
+
+layout(set = 0, binding = 2, std430) writeonly buffer Histogram {
+  uint data[];
+} hist;
+
+shared uint subgroup_counts[64 * 16];
+
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint subgroup_id = gl_SubgroupID;
+  uint block = gl_WorkGroupID.x;
+  uint gid = gl_GlobalInvocationID.x;
+  uint n = keys_in.data.length();
+
+  for (uint i = lid; i < 64u * 16u; i += 256u) {
+    subgroup_counts[i] = 0u;
+  }
+  barrier();
+
+  bool valid = gid < n;
+  uint key = valid ? keys_in.data[gid] : 0u;
+  uint digit = (key >> SHIFT) & 15u;
+  uint rank_in_subgroup = 0u;
+
+  for (uint bin = 0u; bin < 16u; ++bin) {
+    uvec4 mask = subgroupBallot(valid && digit == bin);
+    uint count = subgroupBallotBitCount(mask);
+    if (bin == digit) {
+      rank_in_subgroup = subgroupBallotExclusiveBitCount(mask);
+    }
+    if (subgroupElect()) {
+      subgroup_counts[subgroup_id * 16u + bin] = count;
+    }
+  }
+  barrier();
+
+  if (valid) {
+    uint rank = rank_in_subgroup;
+    for (uint sg = 0u; sg < subgroup_id; ++sg) {
+      rank += subgroup_counts[sg * 16u + digit];
+    }
+    ranks.data[gid] = rank;
+  }
+
+  if (lid < 16u) {
+    uint count = 0u;
+    for (uint sg = 0u; sg < gl_NumSubgroups; ++sg) {
+      count += subgroup_counts[sg * 16u + lid];
+    }
+    hist.data[block * 16u + lid] = count;
+  }
+}

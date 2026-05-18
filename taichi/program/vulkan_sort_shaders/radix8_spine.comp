@@ -1,0 +1,79 @@
+#version 450
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) buffer GlobalHistogram {
+  uint data[];
+} global_hist;
+
+layout(set = 0, binding = 1, std430) buffer PartitionHistogram {
+  uint data[];
+} partition_hist;
+
+shared uint reduction;
+shared uint intermediate[128];
+
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint subgroup_id = gl_SubgroupID;
+  uint subgroup_count = gl_NumSubgroups;
+  uint digit = gl_WorkGroupID.x;
+  uint partition_count = partition_hist.data.length() / 256u;
+
+  if (lid == 0u) {
+    reduction = 0u;
+  }
+  barrier();
+
+  for (uint base = 0u; base < partition_count; base += 256u) {
+    uint part = base + lid;
+    uint value = part < partition_count
+                     ? partition_hist.data[part * 256u + digit]
+                     : 0u;
+    uint excl = subgroupExclusiveAdd(value) + reduction;
+    uint sum = subgroupAdd(value);
+
+    if (subgroupElect()) {
+      intermediate[subgroup_id] = sum;
+    }
+    barrier();
+
+    if (lid < subgroup_count) {
+      uint v = intermediate[lid];
+      uint subgroup_excl = subgroupExclusiveAdd(v);
+      uint subgroup_sum = subgroupAdd(v);
+      intermediate[lid] = subgroup_excl;
+      if (lid == 0u) {
+        reduction += subgroup_sum;
+      }
+    }
+    barrier();
+
+    if (part < partition_count) {
+      partition_hist.data[part * 256u + digit] =
+          excl + intermediate[subgroup_id];
+    }
+    barrier();
+  }
+
+  if (digit == 0u && lid < 256u) {
+    uint value = global_hist.data[lid];
+    uint excl = subgroupExclusiveAdd(value);
+    uint sum = subgroupAdd(value);
+
+    if (subgroupElect()) {
+      intermediate[subgroup_id] = sum;
+    }
+    barrier();
+
+    if (lid < subgroup_count) {
+      intermediate[lid] = subgroupExclusiveAdd(intermediate[lid]);
+    }
+    barrier();
+
+    global_hist.data[lid] = excl + intermediate[subgroup_id];
+  }
+}

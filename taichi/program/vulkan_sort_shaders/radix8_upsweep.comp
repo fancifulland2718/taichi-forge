@@ -1,0 +1,46 @@
+#version 450
+
+#ifndef SHIFT
+#define SHIFT 0
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer KeysIn {
+  uint data[];
+} keys_in;
+
+layout(set = 0, binding = 1, std430) buffer GlobalHistogram {
+  uint data[];
+} global_hist;
+
+layout(set = 0, binding = 2, std430) buffer PartitionHistogram {
+  uint data[];
+} partition_hist;
+
+shared uint local_hist[256];
+
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint part = gl_WorkGroupID.x;
+  uint partition_start = part * 2048u;
+  uint n = keys_in.data.length();
+
+  if (partition_start >= n) {
+    return;
+  }
+
+  local_hist[lid] = 0u;
+  barrier();
+
+  for (uint i = 0u; i < 8u; ++i) {
+    uint idx = partition_start + i * 256u + lid;
+    uint key = idx < n ? keys_in.data[idx] : 0xffffffffu;
+    uint digit = (key >> SHIFT) & 255u;
+    atomicAdd(local_hist[digit], 1u);
+  }
+  barrier();
+
+  partition_hist.data[part * 256u + lid] = local_hist[lid];
+  atomicAdd(global_hist.data[lid], local_hist[lid]);
+}

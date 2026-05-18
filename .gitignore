@@ -115,6 +115,8 @@ issues/
 benchmarks/results/
 external_refs/
 
-# Generated/obsolete Vulkan sort scratch files kept out of commits.
+# Generated Vulkan sort shader headers are produced by CMake.
+/taichi/program/vulkan_sort_shaders/*.comp.spv.h
+
+# Obsolete Vulkan sort scratch source kept out of commits.
 /taichi/program/vulkan_sort_shaders/prefix_offsets.comp
-/taichi/program/vulkan_sort_shaders/prefix_offsets.comp.spv.h

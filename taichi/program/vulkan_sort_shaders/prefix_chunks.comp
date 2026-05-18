@@ -1,0 +1,30 @@
+#version 450
+
+layout(local_size_x = 16) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer ChunkSums {
+  uint data[];
+} chunk_sums;
+
+layout(set = 0, binding = 1, std430) writeonly buffer ChunkOffsets {
+  uint data[];
+} chunk_offsets;
+
+void main() {
+  uint bin = gl_LocalInvocationID.x;
+  uint chunks = chunk_sums.data.length() / 16u;
+
+  uint base = 0u;
+  for (uint b = 0u; b < bin; ++b) {
+    for (uint chunk = 0u; chunk < chunks; ++chunk) {
+      base += chunk_sums.data[chunk * 16u + b];
+    }
+  }
+
+  uint running = base;
+  for (uint chunk = 0u; chunk < chunks; ++chunk) {
+    uint idx = chunk * 16u + bin;
+    chunk_offsets.data[idx] = running;
+    running += chunk_sums.data[idx];
+  }
+}

@@ -1,0 +1,50 @@
+#version 450
+
+#ifndef SHIFT
+#define SHIFT 0
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer KeysIn {
+  uint data[];
+} keys_in;
+
+layout(set = 0, binding = 1, std430) writeonly buffer KeysOut {
+  uint data[];
+} keys_out;
+
+layout(set = 0, binding = 2, std430) readonly buffer Ranks {
+  uint data[];
+} ranks;
+
+layout(set = 0, binding = 3, std430) readonly buffer Offsets {
+  uint data[];
+} offsets;
+
+layout(set = 0, binding = 4, std430) readonly buffer ValuesIn {
+  int data[];
+} values_in;
+
+layout(set = 0, binding = 5, std430) writeonly buffer ValuesOut {
+  int data[];
+} values_out;
+
+layout(set = 0, binding = 6, std430) readonly buffer ChunkOffsets {
+  uint data[];
+} chunk_offsets;
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= keys_in.data.length()) {
+    return;
+  }
+  uint key = keys_in.data[i];
+  uint digit = (key >> SHIFT) & 15u;
+  uint block = i / 256u;
+  uint chunk = block / 256u;
+  uint pos = chunk_offsets.data[chunk * 16u + digit] +
+             offsets.data[block * 16u + digit] + ranks.data[i];
+  keys_out.data[pos] = key;
+  values_out.data[pos] = values_in.data[i];
+}

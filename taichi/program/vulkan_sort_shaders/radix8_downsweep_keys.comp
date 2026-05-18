@@ -1,0 +1,169 @@
+#version 450
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+#ifndef SHIFT
+#define SHIFT 0
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer KeysIn {
+  uint data[];
+} keys_in;
+
+layout(set = 0, binding = 1, std430) writeonly buffer KeysOut {
+  uint data[];
+} keys_out;
+
+layout(set = 0, binding = 2, std430) readonly buffer GlobalHistogram {
+  uint data[];
+} global_hist;
+
+layout(set = 0, binding = 3, std430) readonly buffer PartitionHistogram {
+  uint data[];
+} partition_hist;
+
+shared uint local_hist[2048];
+shared uint local_hist_sum[256];
+
+uint ballot_count(uvec4 value) {
+  return bitCount(value.x) + bitCount(value.y) + bitCount(value.z) +
+         bitCount(value.w);
+}
+
+uvec4 same_digit_mask(uint digit) {
+  uvec4 mask = subgroupBallot(true);
+  for (uint bit = 0u; bit < 8u; ++bit) {
+    uvec4 bit_mask = subgroupBallot(((digit >> bit) & 1u) != 0u);
+    if (((digit >> bit) & 1u) != 0u) {
+      mask &= bit_mask;
+    } else {
+      mask &= ~bit_mask;
+    }
+  }
+  return mask;
+}
+
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint lane = gl_SubgroupInvocationID;
+  uint subgroup_id = gl_SubgroupID;
+  uint subgroup_size = gl_SubgroupSize;
+  uint subgroup_count = gl_NumSubgroups;
+  uint part = gl_WorkGroupID.x;
+  uint partition_start = part * 2048u;
+  uint n = keys_in.data.length();
+
+  if (partition_start >= n) {
+    return;
+  }
+
+  if (lid < 256u) {
+    for (uint i = 0u; i < subgroup_count; ++i) {
+      local_hist[subgroup_count * lid + i] = 0u;
+    }
+  }
+  barrier();
+
+  uint local_keys[8];
+  uint local_digits[8];
+  uint local_offsets[8];
+  uint wave_counts[8];
+
+  for (uint i = 0u; i < 8u; ++i) {
+    uint key_index =
+        partition_start + (8u * subgroup_size) * subgroup_id + i * subgroup_size + lane;
+    uint key = key_index < n ? keys_in.data[key_index] : 0xffffffffu;
+    uint digit = (key >> SHIFT) & 255u;
+    local_keys[i] = key;
+    local_digits[i] = digit;
+
+    uvec4 mask = same_digit_mask(digit);
+    uint wave_offset = subgroupBallotExclusiveBitCount(mask);
+    uint radix_count = ballot_count(mask);
+    if (wave_offset == 0u) {
+      atomicAdd(local_hist[subgroup_count * digit + subgroup_id], radix_count);
+      wave_counts[i] = radix_count;
+    } else {
+      wave_counts[i] = 0u;
+    }
+    local_offsets[i] = wave_offset;
+  }
+  barrier();
+
+  for (uint i = lid; i < 256u * subgroup_count; i += 256u) {
+    uint value = local_hist[i];
+    uint excl = subgroupExclusiveAdd(value);
+    uint sum = subgroupAdd(value);
+    local_hist[i] = excl;
+    if (subgroupElect()) {
+      local_hist_sum[i / subgroup_size] = sum;
+    }
+  }
+  barrier();
+
+  uint intermediate0 = (256u * subgroup_count + subgroup_size - 1u) / subgroup_size;
+  if (lid < intermediate0) {
+    uint value = local_hist_sum[lid];
+    uint excl = subgroupExclusiveAdd(value);
+    uint sum = subgroupAdd(value);
+    local_hist_sum[lid] = excl;
+    if (subgroupElect()) {
+      local_hist_sum[intermediate0 + lid / subgroup_size] = sum;
+    }
+  }
+  barrier();
+
+  uint intermediate1 =
+      max((intermediate0 + subgroup_size - 1u) / subgroup_size, 1u);
+  if (lid < intermediate1) {
+    local_hist_sum[intermediate0 + lid] =
+        subgroupExclusiveAdd(local_hist_sum[intermediate0 + lid]);
+  }
+  barrier();
+
+  if (lid < intermediate0) {
+    local_hist_sum[lid] += local_hist_sum[intermediate0 + lid / subgroup_size];
+  }
+  barrier();
+
+  for (uint i = lid; i < 256u * subgroup_count; i += 256u) {
+    local_hist[i] += local_hist_sum[i / subgroup_size];
+  }
+  barrier();
+
+  for (uint i = 0u; i < 8u; ++i) {
+    uint digit = local_digits[i];
+    local_offsets[i] += local_hist[subgroup_count * digit + subgroup_id];
+    barrier();
+    if (wave_counts[i] > 0u) {
+      atomicAdd(local_hist[subgroup_count * digit + subgroup_id], wave_counts[i]);
+    }
+    barrier();
+  }
+
+  if (lid < 256u) {
+    uint previous = lid == 0u ? 0u : local_hist[subgroup_count * lid - 1u];
+    local_hist_sum[lid] =
+        global_hist.data[lid] + partition_hist.data[part * 256u + lid] -
+        previous;
+  }
+  barrier();
+
+  for (uint i = 0u; i < 8u; ++i) {
+    local_hist[local_offsets[i]] = local_keys[i];
+  }
+  barrier();
+
+  for (uint i = lid; i < 2048u; i += 256u) {
+    uint key = local_hist[i];
+    uint digit = (key >> SHIFT) & 255u;
+    uint dst = local_hist_sum[digit] + i;
+    if (dst < n) {
+      keys_out.data[dst] = key;
+    }
+  }
+}

@@ -1,0 +1,53 @@
+#version 450
+
+#ifndef SHIFT
+#define SHIFT 0
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer KeysIn {
+  uint data[];
+} keys_in;
+
+layout(set = 0, binding = 1, std430) writeonly buffer Ranks {
+  uint data[];
+} ranks;
+
+layout(set = 0, binding = 2, std430) buffer Histogram {
+  uint data[];
+} hist;
+
+shared uint local_counts[16];
+
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint block = gl_WorkGroupID.x;
+  uint gid = gl_GlobalInvocationID.x;
+  uint n = keys_in.data.length();
+
+  if (lid < 16u) {
+    local_counts[lid] = 0u;
+  }
+  barrier();
+
+  if (gid < n) {
+    uint key = keys_in.data[gid];
+    uint digit = (key >> SHIFT) & 15u;
+    uint block_start = block * 256u;
+    uint rank = 0u;
+    for (uint j = 0u; j < lid; ++j) {
+      uint idx = block_start + j;
+      if (idx < n && (((keys_in.data[idx] >> SHIFT) & 15u) == digit)) {
+        rank += 1u;
+      }
+    }
+    ranks.data[gid] = rank;
+    atomicAdd(local_counts[digit], 1u);
+  }
+
+  barrier();
+  if (lid < 16u) {
+    hist.data[block * 16u + lid] = local_counts[lid];
+  }
+}

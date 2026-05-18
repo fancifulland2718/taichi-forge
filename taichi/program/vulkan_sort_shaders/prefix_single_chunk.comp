@@ -1,0 +1,49 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Histogram {
+  uint data[];
+} hist;
+
+layout(set = 0, binding = 1, std430) writeonly buffer Offsets {
+  uint data[];
+} offsets;
+
+layout(set = 0, binding = 2, std430) writeonly buffer ChunkOffsets {
+  uint data[];
+} chunk_offsets;
+
+shared uint scan[256];
+
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint bin = gl_WorkGroupID.y;
+  uint block = lid;
+  uint blocks = hist.data.length() / 16u;
+
+  uint value = block < blocks ? hist.data[block * 16u + bin] : 0u;
+  scan[lid] = value;
+  barrier();
+
+  for (uint step = 1u; step < 256u; step <<= 1u) {
+    uint addend = lid >= step ? scan[lid - step] : 0u;
+    barrier();
+    scan[lid] += addend;
+    barrier();
+  }
+
+  uint base = 0u;
+  for (uint b = 0u; b < bin; ++b) {
+    for (uint prev_block = 0u; prev_block < blocks; ++prev_block) {
+      base += hist.data[prev_block * 16u + b];
+    }
+  }
+
+  if (block < blocks) {
+    offsets.data[block * 16u + bin] = base + scan[lid] - value;
+  }
+  if (lid == 0u) {
+    chunk_offsets.data[bin] = 0u;
+  }
+}

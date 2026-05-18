@@ -9,6 +9,8 @@
 #include <sstream>
 #include <unordered_map>
 
+#if defined(TI_WITH_VULKAN)
+
 namespace taichi::lang {
 namespace {
 
@@ -1535,3 +1537,36 @@ std::string Program::vulkan_radix_sort_cpu_profile_report() const {
 }
 
 }  // namespace taichi::lang
+
+#else
+
+namespace taichi::lang {
+
+bool Program::vulkan_radix_sort_available() const {
+  return false;
+}
+
+std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
+                                                   Ndarray *values,
+                                                   int key_type) {
+  TI_ERROR("Vulkan native radix sort requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+void Program::vulkan_radix_sort_clear_workspace() {
+}
+
+std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
+  return 0;
+}
+
+void Program::vulkan_radix_sort_cpu_profile_clear() {
+}
+
+std::string Program::vulkan_radix_sort_cpu_profile_report() const {
+  return "{}";
+}
+
+}  // namespace taichi::lang
+
+#endif
