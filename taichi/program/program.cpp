@@ -17,6 +17,11 @@
 #include "taichi/rhi/common/host_memory_pool.h"
 #include "taichi/program/parallel_executor.h"
 
+#ifdef TI_WITH_CUDA
+#include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/rhi/cuda/cuda_sort.h"
+#endif
+
 #ifdef TI_WITH_LLVM
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/codegen/llvm/struct_llvm.h"
@@ -511,6 +516,9 @@ void Program::finalize() {
   TI_TRACE("Program finalizing...");
 
   synchronize();
+  if (compile_config().arch == Arch::vulkan) {
+    vulkan_radix_sort_clear_workspace();
+  }
   if (arch_uses_llvm(compile_config().arch) ||
       compile_config().arch == Arch::vulkan) {
     program_impl_->finalize();
@@ -660,6 +668,101 @@ void Program::fill_ndarray_fast_u32(Ndarray *ndarray, uint32_t val) {
       ndarray->ndarray_alloc_,
       ndarray->get_nelement() * ndarray->get_element_size() / sizeof(uint32_t),
       val);
+}
+
+bool Program::cuda_cub_radix_sort_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::cub_radix_sort_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_cub_radix_sort_ndarray(Ndarray *keys,
+                                                 Ndarray *values,
+                                                 int key_type,
+                                                 int mode,
+                                                 int nan_policy) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB sort is only available on the CUDA backend.");
+  TI_ERROR_IF(!keys, "CUDA CUB sort received null keys ndarray.");
+  TI_ERROR_IF(keys->shape.size() != 1,
+              "CUDA CUB sort currently expects a 1D ndarray.");
+  const bool has_values = values != nullptr;
+  if (has_values) {
+    TI_ERROR_IF(values->shape.size() != 1,
+                "CUDA CUB sort values must be a 1D ndarray.");
+    TI_ERROR_IF(values->get_nelement() != keys->get_nelement(),
+                "CUDA CUB sort keys and values must have the same length.");
+    TI_ERROR_IF(values->get_element_size() != sizeof(int32_t),
+                "CUDA CUB sort currently expects i32 payload values.");
+  }
+#ifdef TI_WITH_CUDA
+  std::size_t expected_key_size = 0;
+  TI_ERROR_IF(mode < 0 || mode > 1,
+              "CUDA CUB sort received an unsupported sort mode.");
+  TI_ERROR_IF(nan_policy < 0 || nan_policy > 1,
+              "CUDA CUB sort received an unsupported NaN policy.");
+  const auto cub_key_type = static_cast<cuda::CubSortKeyType>(key_type);
+  const auto cub_mode = static_cast<cuda::CubSortMode>(mode);
+  const auto cub_nan_policy =
+      static_cast<cuda::CubSortNanPolicy>(nan_policy);
+  switch (cub_key_type) {
+    case cuda::CubSortKeyType::u32:
+    case cuda::CubSortKeyType::i32:
+    case cuda::CubSortKeyType::f32:
+      expected_key_size = 4;
+      break;
+    case cuda::CubSortKeyType::u64:
+    case cuda::CubSortKeyType::i64:
+    case cuda::CubSortKeyType::f64:
+      expected_key_size = 8;
+      break;
+  }
+  TI_ERROR_IF(expected_key_size == 0,
+              "CUDA CUB sort received an unsupported key type.");
+  TI_ERROR_IF(keys->get_element_size() != expected_key_size,
+              "CUDA CUB sort key dtype does not match the requested key type.");
+  if (cub_mode == cuda::CubSortMode::split32) {
+    TI_ERROR_IF(cub_key_type != cuda::CubSortKeyType::u64 &&
+                    cub_key_type != cuda::CubSortKeyType::i64 &&
+                    cub_key_type != cuda::CubSortKeyType::f64,
+                "CUDA CUB split32 sort supports only u64/i64/f64 keys.");
+  }
+#endif
+  auto key_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys));
+  auto value_ptr = has_values
+                       ? reinterpret_cast<void *>(
+                             get_ndarray_data_ptr_as_int(values))
+                       : nullptr;
+#ifdef TI_WITH_CUDA
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_radix_sort(
+      key_ptr, value_ptr, static_cast<int>(keys->get_nelement()),
+      cub_key_type, cub_mode, cub_nan_policy, has_values, stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB sort requires building Taichi with TI_WITH_CUDA=ON and "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+void Program::cuda_cub_radix_sort_clear_workspace() {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    cuda::cub_radix_sort_clear_cache(this);
+  }
+#endif
+}
+
+std::size_t Program::cuda_cub_radix_sort_workspace_bytes() const {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    return cuda::cub_radix_sort_cached_bytes(const_cast<Program *>(this));
+  }
+#endif
+  return 0;
 }
 
 std::pair<const ArgPackType *, size_t>

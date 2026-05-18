@@ -8,11 +8,11 @@ from taichi_forge.lang.field import ScalarField
 from taichi_forge.lang.impl import grouped, static, static_assert
 from taichi_forge.lang.kernel_impl import func, kernel
 from taichi_forge.lang.misc import loop_config
-from taichi_forge.lang.simt import block, warp
+from taichi_forge.lang.simt import block, subgroup, warp
 from taichi_forge.lang.snode import deactivate
 from taichi_forge.types import ndarray_type, texture_type, vector
 from taichi_forge.types.annotations import template
-from taichi_forge.types.primitive_types import f16, f32, f64, i32, u8
+from taichi_forge.types.primitive_types import f16, f32, f64, i32, u8, u32
 
 from taichi_forge.math import vec3
 
@@ -343,6 +343,245 @@ def sort_stage(
                         temp = values[a + values_offset]
                         values[a + values_offset] = values[b + values_offset]
                         values[b + values_offset] = temp
+
+
+@kernel
+def sort_init_key_buffer_u32(keys: template(), key_buffer: template(), N: int, signed: int):
+    keys_offset = static(keys.snode.ptr.offset if len(keys.snode.ptr.offset) != 0 else 0)
+    for i in range(N):
+        key = ops.cast(keys[i + keys_offset], u32)
+        if signed != 0:
+            key = ops.bit_cast(keys[i + keys_offset], u32) ^ (ops.cast(1, u32) << 31)
+        key_buffer[i] = key
+
+
+@kernel
+def sort_init_value_buffer(values: template(), value_buffer: template(), N: int):
+    values_offset = static(values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0)
+    for i in range(N):
+        value_buffer[i] = values[i + values_offset]
+
+
+@kernel
+def sort_radix_count_zero_bits_u32(keys: template(), zero_prefix: template(), N: int, bit: int):
+    for i in range(N):
+        zero_prefix[i] = 1 - ops.cast((keys[i] >> bit) & 1, i32)
+
+
+@kernel
+def sort_radix_store_zero_count(zero_prefix: template(), zero_count: template(), N: int):
+    zero_count[None] = zero_prefix[N - 1]
+
+
+@kernel
+def sort_radix_scatter_u32(
+    keys_in: template(),
+    keys_out: template(),
+    zero_prefix: template(),
+    values_in: template(),
+    values_out: template(),
+    use_values: int,
+    N: int,
+    bit: int,
+    zero_count: template(),
+):
+    for i in range(N):
+        key = keys_in[i]
+        is_one = ops.cast((key >> bit) & 1, i32)
+        zero_before_or_at = zero_prefix[i]
+        pos = zero_before_or_at - 1
+        if is_one != 0:
+            pos = zero_count[None] + i - zero_before_or_at
+        keys_out[pos] = key
+        if use_values != 0:
+            values_out[pos] = values_in[i]
+
+
+@kernel
+def sort_copy_key_buffer_to_field_u32(
+    key_buffer: template(), keys: template(), N: int, signed: int
+):
+    keys_offset = static(keys.snode.ptr.offset if len(keys.snode.ptr.offset) != 0 else 0)
+    for i in range(N):
+        key = key_buffer[i]
+        if signed != 0:
+            keys[i + keys_offset] = ops.bit_cast(key ^ (ops.cast(1, u32) << 31), i32)
+        else:
+            keys[i + keys_offset] = key
+
+
+@kernel
+def sort_copy_value_buffer_to_field(value_buffer: template(), values: template(), N: int):
+    values_offset = static(values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0)
+    for i in range(N):
+        values[i + values_offset] = value_buffer[i]
+
+
+@kernel
+def sort_init_key_buffer_u32_ndarray(
+    keys: ndarray_type.ndarray(ndim=1),
+    key_buffer: ndarray_type.ndarray(dtype=u32, ndim=1),
+    N: i32,
+    signed: i32,
+):
+    for i in range(N):
+        key = ops.cast(keys[i], u32)
+        if signed != 0:
+            key = ops.bit_cast(keys[i], u32) ^ (ops.cast(1, u32) << 31)
+        key_buffer[i] = key
+
+
+@kernel
+def sort_init_value_buffer_i32_ndarray(
+    values: ndarray_type.ndarray(dtype=i32, ndim=1),
+    value_buffer: ndarray_type.ndarray(dtype=i32, ndim=1),
+    N: i32,
+):
+    for i in range(N):
+        value_buffer[i] = values[i]
+
+
+@kernel
+def sort_radix_count_zero_bits_u32_ndarray(
+    keys: ndarray_type.ndarray(dtype=u32, ndim=1),
+    scan_arr: ndarray_type.ndarray(dtype=i32, ndim=1),
+    N: i32,
+    bit: i32,
+):
+    for i in range(N):
+        scan_arr[i] = 1 - ops.cast((keys[i] >> bit) & 1, i32)
+
+
+@kernel
+def sort_radix_store_zero_count_ndarray(
+    scan_arr: ndarray_type.ndarray(dtype=i32, ndim=1),
+    zero_count: ndarray_type.ndarray(dtype=i32, ndim=1),
+    N: i32,
+):
+    zero_count[0] = scan_arr[N - 1]
+
+
+@kernel
+def sort_radix_scatter_u32_i32_ndarray(
+    keys_in: ndarray_type.ndarray(dtype=u32, ndim=1),
+    keys_out: ndarray_type.ndarray(dtype=u32, ndim=1),
+    scan_arr: ndarray_type.ndarray(dtype=i32, ndim=1),
+    values_in: ndarray_type.ndarray(dtype=i32, ndim=1),
+    values_out: ndarray_type.ndarray(dtype=i32, ndim=1),
+    use_values: i32,
+    N: i32,
+    bit: i32,
+    zero_count: ndarray_type.ndarray(dtype=i32, ndim=1),
+):
+    for i in range(N):
+        key = keys_in[i]
+        is_one = ops.cast((key >> bit) & 1, i32)
+        zero_before_or_at = scan_arr[i]
+        pos = zero_before_or_at - 1
+        if is_one != 0:
+            pos = zero_count[0] + i - zero_before_or_at
+        keys_out[pos] = key
+        if use_values != 0:
+            values_out[pos] = values_in[i]
+
+
+@kernel
+def sort_radix_scatter_keys_u32_ndarray(
+    keys_in: ndarray_type.ndarray(dtype=u32, ndim=1),
+    keys_out: ndarray_type.ndarray(dtype=u32, ndim=1),
+    scan_arr: ndarray_type.ndarray(dtype=i32, ndim=1),
+    N: i32,
+    bit: i32,
+    zero_count: ndarray_type.ndarray(dtype=i32, ndim=1),
+):
+    for i in range(N):
+        key = keys_in[i]
+        is_one = ops.cast((key >> bit) & 1, i32)
+        zero_before_or_at = scan_arr[i]
+        pos = zero_before_or_at - 1
+        if is_one != 0:
+            pos = zero_count[0] + i - zero_before_or_at
+        keys_out[pos] = key
+
+
+@kernel
+def sort_copy_key_buffer_to_ndarray_u32(
+    key_buffer: ndarray_type.ndarray(dtype=u32, ndim=1),
+    keys: ndarray_type.ndarray(ndim=1),
+    N: i32,
+    signed: i32,
+):
+    for i in range(N):
+        key = key_buffer[i]
+        if signed != 0:
+            keys[i] = ops.bit_cast(key ^ (ops.cast(1, u32) << 31), i32)
+        else:
+            keys[i] = key
+
+
+@kernel
+def sort_copy_value_buffer_to_i32_ndarray(
+    value_buffer: ndarray_type.ndarray(dtype=i32, ndim=1),
+    values: ndarray_type.ndarray(dtype=i32, ndim=1),
+    N: i32,
+):
+    for i in range(N):
+        values[i] = value_buffer[i]
+
+
+@kernel
+def scan_add_inclusive_ndarray(
+    arr_in: ndarray_type.ndarray(dtype=i32, ndim=1),
+    in_beg: i32,
+    in_end: i32,
+    single_block: i32,
+):
+    WARP_SZ = 32
+    BLOCK_SZ = 64
+    loop_config(block_dim=64)
+    for i in range(in_beg, in_end):
+        val = arr_in[i]
+
+        thread_id = i % BLOCK_SZ
+        block_id = int((i - in_beg) // BLOCK_SZ)
+        lane_id = thread_id % WARP_SZ
+        warp_id = thread_id // WARP_SZ
+
+        pad_shared = block.SharedArray((65,), i32)
+
+        val = subgroup.inclusive_add(val)
+        block.sync()
+
+        if thread_id % WARP_SZ == WARP_SZ - 1:
+            pad_shared[warp_id] = val
+        block.sync()
+
+        if warp_id == 0 and lane_id == 0:
+            for k in range(1, BLOCK_SZ / WARP_SZ):
+                pad_shared[k] += pad_shared[k - 1]
+        block.sync()
+
+        warp_sum = 0
+        if warp_id > 0:
+            warp_sum = pad_shared[warp_id - 1]
+        val += warp_sum
+        arr_in[i] = val
+
+        if single_block == 0 and (thread_id == BLOCK_SZ - 1):
+            arr_in[in_end + block_id] = val
+
+
+@kernel
+def uniform_add_ndarray(
+    arr_in: ndarray_type.ndarray(dtype=i32, ndim=1),
+    in_beg: i32,
+    in_end: i32,
+):
+    BLOCK_SZ = 64
+    loop_config(block_dim=64)
+    for i in range(in_beg + BLOCK_SZ, in_end):
+        block_id = int((i - in_beg) // BLOCK_SZ)
+        arr_in[i] += arr_in[in_end + block_id - 1]
 
 
 # Parallel Prefix Sum (Scan)

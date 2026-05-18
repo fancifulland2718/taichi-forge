@@ -2,8 +2,20 @@
 
 #if defined(TI_WITH_CUDA_TOOLKIT)
 
+#include <cublas_v2.h>
 #include <cuda.h>
+#include <cusolverSp.h>
 #include <cusparse.h>
+
+// CUDA 13 removed some legacy cuSOLVER low-level preview declarations that
+// Taichi still keeps in the dynamic-loader signature list. Keep them opaque so
+// toolkit builds do not depend on those removed preview headers.
+struct csrcholInfoHost;
+typedef struct csrcholInfoHost *csrcholInfoHost_t;
+struct csrcholInfo;
+typedef struct csrcholInfo *csrcholInfo_t;
+struct csrluInfoHost;
+typedef struct csrluInfoHost *csrluInfoHost_t;
 
 #else
 

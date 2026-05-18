@@ -64,7 +64,7 @@ wheel.py-api = ""
 
 [tool.scikit-build.cmake.define]
 TI_VERSION_MAJOR = "0"
-TI_VERSION_MINOR = "1"
+TI_VERSION_MINOR = "4"
 TI_VERSION_PATCH = "0"
 
 [tool.scikit-build.metadata.version]

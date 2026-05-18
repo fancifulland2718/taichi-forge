@@ -12,14 +12,14 @@
 pip install taichi-forge
 ```
 
-The **import name is unchanged** — existing code continues to work as-is:
+The PyPI package currently exposes the Python import name `taichi_forge`:
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.cuda)
 ```
 
-Every public API from upstream Taichi 1.7.4 that we still ship behaves the same way.
+Upstream-compatible APIs that this fork still ships preserve their Taichi 1.7.4 semantics under the `taichi_forge` import. Code that must import vanilla `taichi` unchanged should use the upstream package or an explicit compatibility shim.
 
 ---
 
@@ -64,6 +64,8 @@ Highlights:
 
 📖 **Hash SNode guide**: [docs/forge/hash_snode.en.md](docs/forge/hash_snode.en.md) / [docs/forge/hash_snode.zh.md](docs/forge/hash_snode.zh.md) — covers the default-enabled experimental API, supported topologies, fixed-capacity overflow semantics, flags, risks, and migration from vanilla's disabled hash path.
 
+📖 **Parallel sort API**: [docs/forge/sort_api.en.md](docs/forge/sort_api.en.md) / [docs/forge/sort_api.zh.md](docs/forge/sort_api.zh.md) — documents the Forge-only `ti.algorithms.sort()` dispatcher, CUDA CUB and Vulkan radix8 backend selection, and how it differs from vanilla Taichi's `ti.algorithms.parallel_sort()`.
+
 📖 **All fork-only knobs** (compile / runtime / architecture / modernization options): [docs/forge/forge_options.en.md](docs/forge/forge_options.en.md) / [docs/forge/forge_options.zh.md](docs/forge/forge_options.zh.md).
 
 > `hash`, `quant_array`, and `bit_struct` are experimental paths. `hash` is default ON with a first-use warning and can be disabled via `ti.init(hash_snode_experimental=False)`; Vulkan `quant_array` / `bit_struct` remain default OFF behind `vulkan_quant_experimental=True`.
@@ -71,7 +73,7 @@ Highlights:
 ### Quick example (Vulkan-on-anything)
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.vulkan)              # works on macOS via MoltenVK, Linux-AMD without ROCm, etc.
 
 x = ti.field(ti.f32)
@@ -131,6 +133,7 @@ Most additions are opt-in; exceptions are called out explicitly. `hash` SNode is
 | `ti.compile_kernels(kernels)` | Pre-compile a list of kernels on a background thread pool before the hot loop. Accepts decorated kernels or `(kernel, args_tuple)` pairs. Returns the number of kernels submitted. |
 | `ti cache warmup script.py` | CLI command — runs `script.py` once with the offline cache forced on, warming up kernel artifacts for subsequent cold starts. |
 | `ti.compile_profile()` | Context manager — on exit, prints a per-pass timing report and optionally writes a CSV / Chrome trace. |
+| `ti.algorithms.sort(keys, values=None, ...)` | Forge-only stable sort dispatcher. `auto` uses CUDA CUB DeviceRadixSort on CUDA when available, Vulkan native radix8 for supported 32-bit ndarrays, and host stable fallback otherwise. Vanilla-compatible `ti.algorithms.parallel_sort(keys, values=None)` remains available. |
 | `@ti.kernel(opt_level=...)` | Per-kernel LLVM optimization level override (`"fast"` / `"balanced"` / `"full"` or 0–3). Cache key is isolated per override. |
 
 ### `ti.init(...)` / `CompileConfig` knobs
@@ -175,7 +178,7 @@ Most additions are opt-in; exceptions are called out explicitly. `hash` SNode is
 ## Quick start
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.cuda, compile_tier="fast")
 
@@ -195,7 +198,7 @@ add(a, b, c)
 ### Pre-compiling a batch of kernels (fork-only)
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.cuda)
 
 @ti.kernel

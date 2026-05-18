@@ -307,6 +307,32 @@ class TI_DLL_EXPORT Program {
 
   void fill_ndarray_fast_u32(Ndarray *ndarray, uint32_t val);
 
+  bool cuda_cub_radix_sort_available() const;
+
+  std::size_t cuda_cub_radix_sort_ndarray(Ndarray *keys,
+                                          Ndarray *values,
+                                          int key_type,
+                                          int mode,
+                                          int nan_policy);
+
+  void cuda_cub_radix_sort_clear_workspace();
+
+  std::size_t cuda_cub_radix_sort_workspace_bytes() const;
+
+  bool vulkan_radix_sort_available() const;
+
+  std::size_t vulkan_radix_sort_u32_ndarray(Ndarray *keys,
+                                            Ndarray *values,
+                                            int key_type);
+
+  void vulkan_radix_sort_clear_workspace();
+
+  std::size_t vulkan_radix_sort_workspace_bytes() const;
+
+  void vulkan_radix_sort_cpu_profile_clear();
+
+  std::string vulkan_radix_sort_cpu_profile_report() const;
+
   Identifier get_next_global_id(const std::string &name = "") {
     return Identifier(global_id_counter_++, name);
   }

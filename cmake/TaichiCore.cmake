@@ -3,6 +3,13 @@ option(TI_WITH_LLVM "Build with LLVM backends" ON)              # wheel-tag: llv
 option(TI_WITH_METAL "Build with the Metal backend" ON)         # wheel-tag: mtl
 option(TI_WITH_CUDA "Build with the CUDA backend" ON)           # wheel-tag: cu
 option(TI_WITH_CUDA_TOOLKIT "Build with the CUDA toolkit" OFF)  # wheel-tag: cutk
+if (WIN32)
+    option(TI_CUDA_CUB_SORT_DYNAMIC_CUDART
+        "Link CUDA CUB sort against dynamic cudart with delay-load" ON)
+else()
+    option(TI_CUDA_CUB_SORT_DYNAMIC_CUDART
+        "Link CUDA CUB sort against dynamic cudart" OFF)
+endif()
 option(TI_WITH_AMDGPU "Build with the AMDGPU backend" OFF)      # wheel-tag: amd
 option(TI_WITH_OPENGL "Build with the OpenGL backend" ON)       # wheel-tag: gl
 option(TI_WITH_VULKAN "Build with the Vulkan backend" OFF)      # wheel-tag: vk
@@ -65,6 +72,7 @@ if (APPLE)
         set(TI_WITH_CUDA OFF)
         message(WARNING "CUDA backend not supported on OS X. Setting TI_WITH_CUDA to OFF.")
     endif()
+    set(TI_WITH_CUDA_TOOLKIT OFF)
     if (TI_WITH_OPENGL)
         set(TI_WITH_OPENGL OFF)
         message(WARNING "OpenGL backend not supported on OS X. Setting TI_WITH_OPENGL to OFF.")
@@ -100,6 +108,10 @@ if(NOT TI_WITH_LLVM)
     set(TI_WITH_CUDA OFF)
     set(TI_WITH_CUDA_TOOLKIT OFF)
     set(TI_WITH_DX12 OFF)
+endif()
+
+if(NOT TI_WITH_CUDA)
+    set(TI_WITH_CUDA_TOOLKIT OFF)
 endif()
 
 file(GLOB TAICHI_CORE_SOURCE
@@ -307,8 +319,19 @@ if (TI_WITH_CUDA AND TI_WITH_CUDA_TOOLKIT)
     find_package(CUDAToolkit REQUIRED)
     message(STATUS "Found CUDAToolkit ${CUDAToolkit_VERSION}")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DTI_WITH_CUDA_TOOLKIT")
+    include_directories(${CUDAToolkit_INCLUDE_DIRS})
     target_include_directories(${CORE_LIBRARY_NAME} PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
-    target_link_libraries(${CORE_LIBRARY_NAME} PUBLIC CUDA::cupti)
+    get_filename_component(TI_CUDA_TOOLKIT_ROOT
+        "${CUDAToolkit_INCLUDE_DIRS}/.." ABSOLUTE)
+    find_library(TI_CUDA_CUPTI_LIBRARY
+        NAMES cupti
+        PATHS "${TI_CUDA_TOOLKIT_ROOT}/extras/CUPTI/lib64"
+        NO_DEFAULT_PATH)
+    if (TI_CUDA_CUPTI_LIBRARY)
+        target_link_libraries(${CORE_LIBRARY_NAME} PUBLIC ${TI_CUDA_CUPTI_LIBRARY})
+    else()
+        target_link_libraries(${CORE_LIBRARY_NAME} PUBLIC CUDA::cupti)
+    endif()
 endif()
 
 # SPIR-V codegen is always there, regardless of Vulkan

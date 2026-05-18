@@ -251,7 +251,7 @@ user_api[ti.ad] = [
     "grad_replaced",
     "no_grad",
 ]
-user_api[ti.algorithms] = ["PrefixSumExecutor", "parallel_sort"]
+user_api[ti.algorithms] = ["PrefixSumExecutor", "SortWorkspace", "parallel_sort", "sort", "sort_by_key"]
 user_api[ti.Field] = [
     "copy_from",
     "dtype",

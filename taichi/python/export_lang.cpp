@@ -651,6 +651,50 @@ void export_lang(py::module &m) {
            [](Program *program, Ndarray *ndarray, uint32_t val) {
              program->fill_ndarray_fast_u32(ndarray, val);
            })
+      .def("cuda_cub_radix_sort_available",
+           &Program::cuda_cub_radix_sort_available)
+      .def("cuda_cub_radix_sort_clear_workspace",
+           &Program::cuda_cub_radix_sort_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_radix_sort_workspace_bytes",
+           &Program::cuda_cub_radix_sort_workspace_bytes)
+      .def("cuda_cub_radix_sort_ndarray",
+           &Program::cuda_cub_radix_sort_ndarray, py::arg("keys"),
+           py::arg("values"), py::arg("key_type"), py::arg("mode"),
+           py::arg("nan_policy"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_radix_sort_keys_ndarray",
+           [](Program *program, Ndarray *keys, int key_type, int mode,
+              int nan_policy) {
+             return program->cuda_cub_radix_sort_ndarray(keys, nullptr,
+                                                         key_type, mode,
+                                                         nan_policy);
+           },
+           py::arg("keys"), py::arg("key_type"), py::arg("mode"),
+           py::arg("nan_policy"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_radix_sort_available",
+           &Program::vulkan_radix_sort_available)
+      .def("vulkan_radix_sort_clear_workspace",
+           &Program::vulkan_radix_sort_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_radix_sort_workspace_bytes",
+           &Program::vulkan_radix_sort_workspace_bytes)
+      .def("vulkan_radix_sort_cpu_profile_clear",
+           &Program::vulkan_radix_sort_cpu_profile_clear)
+      .def("vulkan_radix_sort_cpu_profile_report",
+           &Program::vulkan_radix_sort_cpu_profile_report)
+      .def("vulkan_radix_sort_u32_ndarray",
+           &Program::vulkan_radix_sort_u32_ndarray, py::arg("keys"),
+           py::arg("values"), py::arg("key_type"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_radix_sort_u32_keys_ndarray",
+           [](Program *program, Ndarray *keys, int key_type) {
+             return program->vulkan_radix_sort_u32_ndarray(keys, nullptr,
+                                                           key_type);
+           },
+           py::arg("keys"), py::arg("key_type"),
+           py::call_guard<py::gil_scoped_release>())
       .def("get_graphics_device",
            [](Program *program) { return program->get_graphics_device(); })
       .def("compile_kernel", &Program::compile_kernel,
