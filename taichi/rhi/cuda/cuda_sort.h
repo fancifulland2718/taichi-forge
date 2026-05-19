@@ -51,6 +51,11 @@ enum class CudaTransformValueType : int {
   f32 = 1,
 };
 
+enum class CudaIndexedCopyOp : int {
+  gather = 0,
+  scatter = 1,
+};
+
 bool driver_transform_available();
 
 std::size_t driver_transform_affine(void *src,
@@ -59,6 +64,15 @@ std::size_t driver_transform_affine(void *src,
                                     CudaTransformValueType value_type,
                                     double scale,
                                     double bias);
+
+bool driver_indexed_copy_available();
+
+std::size_t driver_indexed_copy(void *src,
+                                void *indices,
+                                void *dst,
+                                int num_items,
+                                int index_bound,
+                                CudaIndexedCopyOp op);
 
 bool cub_radix_sort_available();
 

@@ -681,6 +681,15 @@ void export_lang(py::module &m) {
            &Program::cuda_device_transform_affine_ndarray, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("scale"),
            py::arg("bias"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_indexed_copy_available",
+           &Program::cuda_device_indexed_copy_available)
+      .def("cuda_device_gather_ndarray", &Program::cuda_device_gather_ndarray,
+           py::arg("src"), py::arg("indices"), py::arg("dst"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_scatter_ndarray",
+           &Program::cuda_device_scatter_ndarray, py::arg("src"),
+           py::arg("indices"), py::arg("dst"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_radix_sort_available",
            &Program::cuda_cub_radix_sort_available)
       .def("cuda_cub_radix_sort_clear_workspace",
@@ -771,6 +780,15 @@ void export_lang(py::module &m) {
            &Program::cpu_transform_affine_ndarray, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("scale"),
            py::arg("bias"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_indexed_copy_available", &Program::cpu_indexed_copy_available)
+      .def("cpu_indexed_copy_workspace_bytes",
+           &Program::cpu_indexed_copy_workspace_bytes)
+      .def("cpu_gather_ndarray", &Program::cpu_gather_ndarray,
+           py::arg("src"), py::arg("indices"), py::arg("dst"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_scatter_ndarray", &Program::cpu_scatter_ndarray,
+           py::arg("src"), py::arg("indices"), py::arg("dst"),
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_radix_sort_available",
            &Program::vulkan_radix_sort_available)
       .def("vulkan_radix_sort_clear_workspace",
@@ -832,6 +850,19 @@ void export_lang(py::module &m) {
            &Program::vulkan_transform_affine_ndarray, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("scale"),
            py::arg("bias"), py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_indexed_copy_available",
+           &Program::vulkan_indexed_copy_available)
+      .def("vulkan_indexed_copy_clear_workspace",
+           &Program::vulkan_indexed_copy_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_indexed_copy_workspace_bytes",
+           &Program::vulkan_indexed_copy_workspace_bytes)
+      .def("vulkan_gather_ndarray", &Program::vulkan_gather_ndarray,
+           py::arg("src"), py::arg("indices"), py::arg("dst"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_scatter_ndarray", &Program::vulkan_scatter_ndarray,
+           py::arg("src"), py::arg("indices"), py::arg("dst"),
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_radix_sort_u32_ndarray",
            &Program::vulkan_radix_sort_u32_ndarray, py::arg("keys"),
            py::arg("values"), py::arg("key_type"),

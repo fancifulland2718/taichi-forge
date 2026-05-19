@@ -7,6 +7,10 @@ from taichi_forge._kernels import (
     compact_scatter_field_from_prefix_ndarray,
     compact_scatter_field,
     compact_single_item_field,
+    gather_f32_field,
+    gather_f32_ndarray,
+    gather_i32_field,
+    gather_i32_ndarray,
     histogram_i32_field_direct,
     histogram_i32_field_private_count,
     histogram_i32_field_private_reduce,
@@ -35,6 +39,10 @@ from taichi_forge._kernels import (
     sort_radix_scatter_u32_i32_ndarray,
     sort_radix_store_zero_count,
     sort_radix_store_zero_count_ndarray,
+    scatter_f32_field,
+    scatter_f32_ndarray,
+    scatter_i32_field,
+    scatter_i32_ndarray,
     transform_affine_f32_field,
     transform_affine_f32_ndarray,
     transform_affine_i32_field,
@@ -74,6 +82,14 @@ _SUPPORTED_REDUCE_METHODS = {
 }
 _SUPPORTED_REDUCE_OPS = {"sum": 0, "min": 1, "max": 2}
 _SUPPORTED_TRANSFORM_METHODS = {
+    "auto",
+    "cuda_device",
+    "vulkan_native",
+    "cpu_native",
+    "kernel",
+    "field_kernel",
+}
+_SUPPORTED_INDEXED_COPY_METHODS = {
     "auto",
     "cuda_device",
     "vulkan_native",
@@ -440,6 +456,38 @@ class TransformWorkspace:
             prog = impl.get_runtime().prog
             if hasattr(prog, "vulkan_transform_clear_workspace"):
                 prog.vulkan_transform_clear_workspace()
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._vulkan_native_active = False
+
+
+class IndexedCopyWorkspace:
+    """Workspace metadata for experimental indexed gather/scatter.
+
+    Current native paths are zero-workspace. The class exists to keep the
+    public experimental primitive contract aligned with sort/scan/transform and
+    to leave room for future cached staging or validation buffers.
+    """
+
+    def __init__(self, max_items=None):
+        self.max_items = max_items
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._vulkan_native_active = False
+
+    def check_shape(self, n):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} indexed-copy items, exceeding max_items={self.max_items}."
+            )
+
+    def clear(self):
+        if self._vulkan_native_active:
+            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            if hasattr(prog, "vulkan_indexed_copy_clear_workspace"):
+                prog.vulkan_indexed_copy_clear_workspace()
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
@@ -1868,6 +1916,217 @@ def experimental_transform(
     raise RuntimeError("experimental_transform() could not find an available backend.")
 
 
+def _check_indexed_copy_request(src, indices, dst, method, workspace, op_name):
+    if method not in _SUPPORTED_INDEXED_COPY_METHODS:
+        raise NotImplementedError(f"{op_name} method '{method}' is not implemented.")
+    if not (_is_1d(src) and _is_1d(indices) and _is_1d(dst)):
+        raise ValueError(f"{op_name} expects 1D source, indices, and destination.")
+    if indices.dtype != i32:
+        raise TypeError(f"{op_name} currently expects ti.i32 indices.")
+    if src.dtype != dst.dtype:
+        raise TypeError(f"{op_name} source and destination dtype must match.")
+    if src.dtype not in (i32, f32):
+        raise TypeError(f"{op_name} currently supports ti.i32 and ti.f32 values.")
+    if isinstance(src, Ndarray) or isinstance(indices, Ndarray) or isinstance(dst, Ndarray):
+        if not (
+            isinstance(src, Ndarray)
+            and isinstance(indices, Ndarray)
+            and isinstance(dst, Ndarray)
+        ):
+            raise TypeError(
+                f"{op_name} ndarray mode requires source, indices, and "
+                "destination all to be ti.ndarray."
+            )
+    if workspace is not None and not isinstance(workspace, IndexedCopyWorkspace):
+        raise TypeError("workspace must be an IndexedCopyWorkspace instance or None.")
+
+
+def _indexed_copy_item_count(src, indices, dst, scatter):
+    if scatter:
+        if src.shape[0] != indices.shape[0]:
+            raise ValueError(
+                "experimental_scatter() expects source and indices sizes to match."
+            )
+    else:
+        if indices.shape[0] != dst.shape[0]:
+            raise ValueError(
+                "experimental_gather() expects indices and destination sizes to match."
+            )
+    return indices.shape[0]
+
+
+def _try_cuda_device_indexed_copy(src, indices, dst, scatter):
+    if current_cfg().arch != cuda:
+        return False
+    if not (
+        isinstance(src, Ndarray)
+        and isinstance(indices, Ndarray)
+        and isinstance(dst, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cuda_device_indexed_copy_available"):
+        return False
+    if not prog.cuda_device_indexed_copy_available():
+        return False
+    if scatter:
+        prog.cuda_device_scatter_ndarray(src.arr, indices.arr, dst.arr)
+    else:
+        prog.cuda_device_gather_ndarray(src.arr, indices.arr, dst.arr)
+    return True
+
+
+def _try_vulkan_indexed_copy(src, indices, dst, scatter, workspace):
+    if current_cfg().arch != vulkan:
+        return False
+    if not (
+        isinstance(src, Ndarray)
+        and isinstance(indices, Ndarray)
+        and isinstance(dst, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "vulkan_indexed_copy_available"):
+        return False
+    if not prog.vulkan_indexed_copy_available():
+        return False
+    temp_bytes = (
+        prog.vulkan_scatter_ndarray(src.arr, indices.arr, dst.arr)
+        if scatter
+        else prog.vulkan_gather_ndarray(src.arr, indices.arr, dst.arr)
+    )
+    if workspace is not None:
+        workspace._vulkan_native_active = True
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+    return True
+
+
+def _try_cpu_indexed_copy(src, indices, dst, scatter):
+    if current_cfg().arch not in [x64, arm64]:
+        return False
+    if not (
+        isinstance(src, Ndarray)
+        and isinstance(indices, Ndarray)
+        and isinstance(dst, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cpu_indexed_copy_available"):
+        return False
+    if not prog.cpu_indexed_copy_available():
+        return False
+    if scatter:
+        prog.cpu_scatter_ndarray(src.arr, indices.arr, dst.arr)
+    else:
+        prog.cpu_gather_ndarray(src.arr, indices.arr, dst.arr)
+    return True
+
+
+def _indexed_copy_kernel(src, indices, dst, scatter):
+    n = indices.shape[0]
+    if isinstance(src, Ndarray):
+        if scatter:
+            if src.dtype == i32:
+                scatter_i32_ndarray(src, indices, dst, n)
+            else:
+                scatter_f32_ndarray(src, indices, dst, n)
+        else:
+            if src.dtype == i32:
+                gather_i32_ndarray(src, indices, dst, n)
+            else:
+                gather_f32_ndarray(src, indices, dst, n)
+    else:
+        if scatter:
+            if src.dtype == i32:
+                scatter_i32_field(src, indices, dst, n)
+            else:
+                scatter_f32_field(src, indices, dst, n)
+        else:
+            if src.dtype == i32:
+                gather_i32_field(src, indices, dst, n)
+            else:
+                gather_f32_field(src, indices, dst, n)
+    sync()
+
+
+def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter):
+    op_name = "experimental_scatter()" if scatter else "experimental_gather()"
+    _check_indexed_copy_request(src, indices, dst, method, workspace, op_name)
+    n = _indexed_copy_item_count(src, indices, dst, scatter)
+    if workspace is None:
+        workspace = IndexedCopyWorkspace(max_items=n)
+    workspace.check_shape(n)
+    if n == 0:
+        return workspace
+    if method in ("auto", "cuda_device") and _try_cuda_device_indexed_copy(
+        src, indices, dst, scatter
+    ):
+        return workspace
+    if method == "cuda_device":
+        raise RuntimeError(
+            f"{op_name} method='cuda_device' requires CUDA ndarray inputs and "
+            "available CUDA driver indexed-copy support."
+        )
+    if method in ("auto", "vulkan_native") and _try_vulkan_indexed_copy(
+        src, indices, dst, scatter, workspace
+    ):
+        return workspace
+    if method == "vulkan_native":
+        raise RuntimeError(
+            f"{op_name} method='vulkan_native' requires Vulkan ndarray inputs "
+            "and available native indexed-copy shaders."
+        )
+    if method in ("auto", "cpu_native") and _try_cpu_indexed_copy(
+        src, indices, dst, scatter
+    ):
+        return workspace
+    if method == "cpu_native":
+        raise RuntimeError(
+            f"{op_name} method='cpu_native' requires CPU ndarray inputs and "
+            "available native indexed-copy support."
+        )
+    if method in ("kernel", "field_kernel", "auto"):
+        _indexed_copy_kernel(src, indices, dst, scatter)
+        return workspace
+    raise RuntimeError(f"{op_name} could not find an available backend.")
+
+
+def experimental_gather(src, indices, dst, *, method="auto", workspace=None):
+    """Apply ``dst[i] = src[indices[i]]`` for 1D arrays.
+
+    Indices must be valid. Native ndarray paths are provided for CUDA, Vulkan,
+    and CPU. Field/SNode inputs use Forge kernels.
+    """
+
+    return _experimental_indexed_copy(
+        src, indices, dst, method=method, workspace=workspace, scatter=False
+    )
+
+
+def experimental_scatter(src, indices, dst, *, method="auto", workspace=None):
+    """Apply ``dst[indices[i]] = src[i]`` for 1D arrays.
+
+    Indices must be valid and unique for deterministic native scatter. Duplicate
+    write conflict handling belongs to future scatter-add / segmented-reduction
+    primitives.
+    """
+
+    return _experimental_indexed_copy(
+        src, indices, dst, method=method, workspace=workspace, scatter=True
+    )
+
+
 def parallel_sort(keys, values=None):
     """Compatibility wrapper for the legacy public sorting API."""
 
@@ -2030,8 +2289,11 @@ __all__ = [
     "ReduceWorkspace",
     "HistogramWorkspace",
     "TransformWorkspace",
+    "IndexedCopyWorkspace",
     "experimental_compact",
     "experimental_reduce",
     "experimental_histogram",
     "experimental_transform",
+    "experimental_gather",
+    "experimental_scatter",
 ]

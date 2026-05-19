@@ -265,6 +265,12 @@ static const uint32_t kTransformI32AffineSpv[] =
 static const uint32_t kTransformF32AffineSpv[] =
 #include "taichi/program/vulkan_sort_shaders/transform_f32_affine.comp.spv.h"
     ;
+static const uint32_t kGatherU32ByI32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/gather_u32_by_i32.comp.spv.h"
+    ;
+static const uint32_t kScatterU32ByI32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/scatter_u32_by_i32.comp.spv.h"
+    ;
 
 static const uint32_t kRankHistShift0Spv[] =
 #include "taichi/program/vulkan_sort_shaders/rank_hist_shift0.comp.spv.h"
@@ -1421,6 +1427,39 @@ struct VulkanTransformCache {
   }
 };
 
+struct VulkanIndexedCopyCache {
+  Device *device{nullptr};
+  std::unique_ptr<Pipeline> gather_u32_by_i32;
+  std::unique_ptr<Pipeline> scatter_u32_by_i32;
+  std::unique_ptr<ShaderResourceSet> gather_bindings;
+  std::unique_ptr<ShaderResourceSet> scatter_bindings;
+
+  void ensure_pipelines(Device *dev) {
+    if (device == dev && gather_u32_by_i32) {
+      return;
+    }
+    if (device && device != dev) {
+      gather_u32_by_i32.reset();
+      scatter_u32_by_i32.reset();
+      gather_bindings.reset();
+      scatter_bindings.reset();
+    }
+    device = dev;
+    gather_u32_by_i32 =
+        create_pipeline(dev, kGatherU32ByI32Spv, "vulkan_gather_u32_by_i32");
+    scatter_u32_by_i32 = create_pipeline(dev, kScatterU32ByI32Spv,
+                                         "vulkan_scatter_u32_by_i32");
+  }
+
+  ShaderResourceSet *cached_resource_set(bool scatter) {
+    auto &bindings = scatter ? scatter_bindings : gather_bindings;
+    if (!bindings) {
+      bindings.reset(device->create_resource_set());
+    }
+    return bindings.get();
+  }
+};
+
 std::mutex g_vulkan_sort_mutex;
 std::unordered_map<void *, std::unique_ptr<VulkanRadixSortCache>>
     g_vulkan_sort_caches;
@@ -1439,6 +1478,9 @@ std::unordered_map<void *, std::unique_ptr<VulkanReduceCache>>
 std::mutex g_vulkan_transform_mutex;
 std::unordered_map<void *, std::unique_ptr<VulkanTransformCache>>
     g_vulkan_transform_caches;
+std::mutex g_vulkan_indexed_copy_mutex;
+std::unordered_map<void *, std::unique_ptr<VulkanIndexedCopyCache>>
+    g_vulkan_indexed_copy_caches;
 
 VulkanRadixSortCache &get_cache(void *owner, Device *device) {
   std::lock_guard<std::mutex> guard(g_vulkan_sort_mutex);
@@ -1495,6 +1537,16 @@ VulkanTransformCache &get_transform_cache(void *owner, Device *device) {
   auto &cache = g_vulkan_transform_caches[owner];
   if (!cache) {
     cache = std::make_unique<VulkanTransformCache>();
+  }
+  cache->ensure_pipelines(device);
+  return *cache;
+}
+
+VulkanIndexedCopyCache &get_indexed_copy_cache(void *owner, Device *device) {
+  std::lock_guard<std::mutex> guard(g_vulkan_indexed_copy_mutex);
+  auto &cache = g_vulkan_indexed_copy_caches[owner];
+  if (!cache) {
+    cache = std::make_unique<VulkanIndexedCopyCache>();
   }
   cache->ensure_pipelines(device);
   return *cache;
@@ -1858,6 +1910,10 @@ bool Program::vulkan_reduce_available() const {
 }
 
 bool Program::vulkan_transform_available() const {
+  return compile_config().arch == Arch::vulkan;
+}
+
+bool Program::vulkan_indexed_copy_available() const {
   return compile_config().arch == Arch::vulkan;
 }
 
@@ -2328,6 +2384,118 @@ std::size_t Program::vulkan_transform_affine_ndarray(Ndarray *src,
       },
       {});
   return cache.cached_bytes;
+}
+
+std::size_t Program::vulkan_gather_ndarray(Ndarray *src,
+                                           Ndarray *indices,
+                                           Ndarray *dst) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native gather is only available on Vulkan.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "Vulkan native gather received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "Vulkan native gather currently expects 1D ndarrays.");
+  TI_ERROR_IF(indices->get_nelement() != dst->get_nelement(),
+              "Vulkan native gather expects indices and destination sizes to "
+              "match.");
+  TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
+              "Vulkan native gather source and destination dtypes differ.");
+  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t) ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "Vulkan native gather currently expects 32-bit values and i32 "
+              "indices.");
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native gather currently supports at most UINT32_MAX "
+              "items.");
+  const size_t n = indices->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native gather requires a compute device.");
+  auto &cache = get_indexed_copy_cache(this, device);
+  ShaderResourceSet *bindings = cache.cached_resource_set(false);
+  Pipeline *pipeline = cache.gather_u32_by_i32.get();
+  const size_t value_bytes = n * sizeof(uint32_t);
+  const size_t src_bytes = src->get_nelement() * sizeof(uint32_t);
+  const uint32_t groups =
+      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
+  const DeviceAllocation src_alloc = src->ndarray_alloc_;
+  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
+  const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
+  const bool profiler_scopes = profiler != nullptr;
+  enqueue_compute_op_lambda(
+      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, src_bytes,
+       value_bytes, groups,
+       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        bindings->rw_buffer(0, src_alloc.get_ptr(0), src_bytes);
+        bindings->rw_buffer(1, indices_alloc.get_ptr(0), value_bytes);
+        bindings->rw_buffer(2, dst_alloc.get_ptr(0), value_bytes);
+        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
+                          profiler_scopes ? "vulkan_gather_u32_by_i32"
+                                          : nullptr);
+        cmdlist->buffer_barrier(dst_alloc);
+      },
+      {});
+  return 0;
+}
+
+std::size_t Program::vulkan_scatter_ndarray(Ndarray *src,
+                                            Ndarray *indices,
+                                            Ndarray *dst) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native scatter is only available on Vulkan.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "Vulkan native scatter received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "Vulkan native scatter currently expects 1D ndarrays.");
+  TI_ERROR_IF(src->get_nelement() != indices->get_nelement(),
+              "Vulkan native scatter expects source and indices sizes to "
+              "match.");
+  TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
+              "Vulkan native scatter source and destination dtypes differ.");
+  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t) ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "Vulkan native scatter currently expects 32-bit values and i32 "
+              "indices.");
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native scatter currently supports at most UINT32_MAX "
+              "items.");
+  const size_t n = indices->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native scatter requires a compute device.");
+  auto &cache = get_indexed_copy_cache(this, device);
+  ShaderResourceSet *bindings = cache.cached_resource_set(true);
+  Pipeline *pipeline = cache.scatter_u32_by_i32.get();
+  const size_t value_bytes = n * sizeof(uint32_t);
+  const size_t dst_bytes = dst->get_nelement() * sizeof(uint32_t);
+  const uint32_t groups =
+      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
+  const DeviceAllocation src_alloc = src->ndarray_alloc_;
+  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
+  const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
+  const bool profiler_scopes = profiler != nullptr;
+  enqueue_compute_op_lambda(
+      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, value_bytes,
+       dst_bytes, groups,
+       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        bindings->rw_buffer(0, src_alloc.get_ptr(0), value_bytes);
+        bindings->rw_buffer(1, indices_alloc.get_ptr(0), value_bytes);
+        bindings->rw_buffer(2, dst_alloc.get_ptr(0), dst_bytes);
+        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
+                          profiler_scopes ? "vulkan_scatter_u32_by_i32"
+                                          : nullptr);
+        cmdlist->buffer_barrier(dst_alloc);
+      },
+      {});
+  return 0;
 }
 
 std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
@@ -2889,6 +3057,14 @@ void Program::vulkan_transform_clear_workspace() {
   }
 }
 
+void Program::vulkan_indexed_copy_clear_workspace() {
+  std::lock_guard<std::mutex> guard(g_vulkan_indexed_copy_mutex);
+  auto it = g_vulkan_indexed_copy_caches.find(this);
+  if (it != g_vulkan_indexed_copy_caches.end()) {
+    g_vulkan_indexed_copy_caches.erase(it);
+  }
+}
+
 std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
   std::lock_guard<std::mutex> guard(g_vulkan_sort_mutex);
   auto it = g_vulkan_sort_caches.find(const_cast<Program *>(this));
@@ -2943,6 +3119,10 @@ std::size_t Program::vulkan_transform_workspace_bytes() const {
   return it->second->cached_bytes;
 }
 
+std::size_t Program::vulkan_indexed_copy_workspace_bytes() const {
+  return 0;
+}
+
 void Program::vulkan_radix_sort_cpu_profile_clear() {
   g_vulkan_sort_cpu_profile.clear();
 }
@@ -2978,6 +3158,10 @@ bool Program::vulkan_reduce_available() const {
 }
 
 bool Program::vulkan_transform_available() const {
+  return false;
+}
+
+bool Program::vulkan_indexed_copy_available() const {
   return false;
 }
 
@@ -3024,6 +3208,20 @@ std::size_t Program::vulkan_transform_affine_ndarray(Ndarray *src,
   return 0;
 }
 
+std::size_t Program::vulkan_gather_ndarray(Ndarray *src,
+                                           Ndarray *indices,
+                                           Ndarray *dst) {
+  TI_ERROR("Vulkan native gather requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_scatter_ndarray(Ndarray *src,
+                                            Ndarray *indices,
+                                            Ndarray *dst) {
+  TI_ERROR("Vulkan native scatter requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 void Program::vulkan_radix_sort_clear_workspace() {
 }
 
@@ -3040,6 +3238,9 @@ void Program::vulkan_reduce_clear_workspace() {
 }
 
 void Program::vulkan_transform_clear_workspace() {
+}
+
+void Program::vulkan_indexed_copy_clear_workspace() {
 }
 
 std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
@@ -3063,6 +3264,10 @@ std::size_t Program::vulkan_reduce_workspace_bytes() const {
 }
 
 std::size_t Program::vulkan_transform_workspace_bytes() const {
+  return 0;
+}
+
+std::size_t Program::vulkan_indexed_copy_workspace_bytes() const {
   return 0;
 }
 

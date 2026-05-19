@@ -262,6 +262,103 @@ void *transform_module{nullptr};
 void *transform_i32_func{nullptr};
 void *transform_f32_func{nullptr};
 
+const char kCudaIndexedCopyPtx[] = R"ptx(
+.version 6.0
+.target sm_50
+.address_size 64
+
+.visible .entry gather_u32_by_i32(
+    .param .u64 src_param,
+    .param .u64 indices_param,
+    .param .u64 dst_param,
+    .param .u32 n_param,
+    .param .u32 bound_param
+)
+{
+    .reg .pred %p<2>;
+    .reg .b32 %r<9>;
+    .reg .b64 %rd<10>;
+
+    ld.param.u64 %rd1, [src_param];
+    ld.param.u64 %rd2, [indices_param];
+    ld.param.u64 %rd3, [dst_param];
+    ld.param.u32 %r1, [n_param];
+    ld.param.u32 %r8, [bound_param];
+
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.u32 %r5, %r2, %r3, %r4;
+    setp.ge.u32 %p1, %r5, %r1;
+    @%p1 bra DONE_GATHER;
+
+    mul.wide.u32 %rd4, %r5, 4;
+    add.u64 %rd5, %rd2, %rd4;
+    ld.global.u32 %r6, [%rd5];
+    setp.ge.u32 %p1, %r6, %r8;
+    @%p1 bra INVALID_GATHER;
+    mul.wide.u32 %rd6, %r6, 4;
+    add.u64 %rd7, %rd1, %rd6;
+    ld.global.u32 %r7, [%rd7];
+    add.u64 %rd8, %rd3, %rd4;
+    st.global.u32 [%rd8], %r7;
+    bra DONE_GATHER;
+
+INVALID_GATHER:
+    add.u64 %rd8, %rd3, %rd4;
+    mov.u32 %r7, 0;
+    st.global.u32 [%rd8], %r7;
+
+DONE_GATHER:
+    ret;
+}
+
+.visible .entry scatter_u32_by_i32(
+    .param .u64 src_param,
+    .param .u64 indices_param,
+    .param .u64 dst_param,
+    .param .u32 n_param,
+    .param .u32 bound_param
+)
+{
+    .reg .pred %p<2>;
+    .reg .b32 %r<9>;
+    .reg .b64 %rd<10>;
+
+    ld.param.u64 %rd1, [src_param];
+    ld.param.u64 %rd2, [indices_param];
+    ld.param.u64 %rd3, [dst_param];
+    ld.param.u32 %r1, [n_param];
+    ld.param.u32 %r8, [bound_param];
+
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.u32 %r5, %r2, %r3, %r4;
+    setp.ge.u32 %p1, %r5, %r1;
+    @%p1 bra DONE_SCATTER;
+
+    mul.wide.u32 %rd4, %r5, 4;
+    add.u64 %rd5, %rd1, %rd4;
+    ld.global.u32 %r6, [%rd5];
+    add.u64 %rd6, %rd2, %rd4;
+    ld.global.u32 %r7, [%rd6];
+    setp.ge.u32 %p1, %r7, %r8;
+    @%p1 bra DONE_SCATTER;
+    mul.wide.u32 %rd7, %r7, 4;
+    add.u64 %rd8, %rd3, %rd7;
+    st.global.u32 [%rd8], %r6;
+
+DONE_SCATTER:
+    ret;
+}
+)ptx";
+
+std::once_flag indexed_copy_module_once;
+void *indexed_copy_module{nullptr};
+void *gather_u32_func{nullptr};
+void *scatter_u32_func{nullptr};
+
 void load_transform_module_once() {
   auto &ctx = CUDAContext::get_instance();
   auto context_guard = ctx.get_guard();
@@ -283,6 +380,30 @@ void *cuda_transform_function(CudaTransformValueType value_type) {
       return transform_f32_func;
   }
   TI_ERROR("Unsupported CUDA transform value type.");
+  return nullptr;
+}
+
+void load_indexed_copy_module_once() {
+  auto &ctx = CUDAContext::get_instance();
+  auto context_guard = ctx.get_guard();
+  auto &driver = CUDADriver::get_instance();
+  driver.module_load_data_ex(&indexed_copy_module, kCudaIndexedCopyPtx, 0,
+                             nullptr, nullptr);
+  driver.module_get_function(&gather_u32_func, indexed_copy_module,
+                             "gather_u32_by_i32");
+  driver.module_get_function(&scatter_u32_func, indexed_copy_module,
+                             "scatter_u32_by_i32");
+}
+
+void *cuda_indexed_copy_function(CudaIndexedCopyOp op) {
+  std::call_once(indexed_copy_module_once, load_indexed_copy_module_once);
+  switch (op) {
+    case CudaIndexedCopyOp::gather:
+      return gather_u32_func;
+    case CudaIndexedCopyOp::scatter:
+      return scatter_u32_func;
+  }
+  TI_ERROR("Unsupported CUDA indexed copy op.");
   return nullptr;
 }
 
@@ -332,6 +453,46 @@ std::size_t driver_transform_affine(void *src,
     args.push_back(&bias_f32);
   }
   CUDAContext::get_instance().launch(func, "cuda_transform_affine", args, {},
+                                     grid_dim, kBlockDim, 0);
+  return 0;
+}
+
+bool driver_indexed_copy_available() {
+  return CUDADriver::get_instance_without_context().detected();
+}
+
+std::size_t driver_indexed_copy(void *src,
+                                void *indices,
+                                void *dst,
+                                int num_items,
+                                int index_bound,
+                                CudaIndexedCopyOp op) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA driver indexed copy expects non-negative num_items.");
+  TI_ERROR_IF(index_bound < 0,
+              "CUDA driver indexed copy expects non-negative index_bound.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "CUDA driver indexed copy received a null pointer.");
+  if (num_items == 0) {
+    return 0;
+  }
+  constexpr unsigned kBlockDim = 256;
+  const unsigned grid_dim =
+      static_cast<unsigned>((num_items + kBlockDim - 1) / kBlockDim);
+  void *func = cuda_indexed_copy_function(op);
+  void *src_arg = src;
+  void *indices_arg = indices;
+  void *dst_arg = dst;
+  uint32_t n_arg = static_cast<uint32_t>(num_items);
+  uint32_t bound_arg = static_cast<uint32_t>(index_bound);
+  std::vector<void *> args;
+  args.reserve(5);
+  args.push_back(&src_arg);
+  args.push_back(&indices_arg);
+  args.push_back(&dst_arg);
+  args.push_back(&n_arg);
+  args.push_back(&bound_arg);
+  CUDAContext::get_instance().launch(func, "cuda_indexed_copy", args, {},
                                      grid_dim, kBlockDim, 0);
   return 0;
 }

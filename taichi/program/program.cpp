@@ -122,6 +122,16 @@ struct CpuTransformF32TaskContext {
   int num_threads{1};
 };
 
+struct CpuIndexedCopyTaskContext {
+  const uint32_t *src{nullptr};
+  const int32_t *indices{nullptr};
+  uint32_t *dst{nullptr};
+  std::size_t n{0};
+  std::size_t index_bound{0};
+  bool scatter{false};
+  int num_threads{1};
+};
+
 taichi::ThreadPool &get_cpu_primitive_thread_pool(int max_threads) {
   static std::mutex mutex;
   static std::unique_ptr<taichi::ThreadPool> pool;
@@ -255,6 +265,34 @@ void cpu_transform_f32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
       static_cast<std::size_t>(ctx->num_threads);
   for (std::size_t i = begin; i < end; ++i) {
     ctx->dst[i] = ctx->src[i] * ctx->scale + ctx->bias;
+  }
+}
+
+void cpu_indexed_copy_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuIndexedCopyTaskContext *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  if (ctx->scatter) {
+    for (std::size_t i = begin; i < end; ++i) {
+      const auto index = static_cast<std::size_t>(ctx->indices[i]);
+      if (index < ctx->index_bound) {
+        ctx->dst[index] = ctx->src[i];
+      }
+    }
+  } else {
+    for (std::size_t i = begin; i < end; ++i) {
+      const auto index = static_cast<std::size_t>(ctx->indices[i]);
+      if (index < ctx->index_bound) {
+        ctx->dst[i] = ctx->src[index];
+      } else {
+        ctx->dst[i] = 0;
+      }
+    }
   }
 }
 
@@ -729,6 +767,7 @@ void Program::finalize() {
     vulkan_histogram_clear_workspace();
     vulkan_reduce_clear_workspace();
     vulkan_transform_clear_workspace();
+    vulkan_indexed_copy_clear_workspace();
   }
   textures_.clear();
   argpacks_.clear();
@@ -1109,6 +1148,94 @@ std::size_t Program::cuda_device_transform_affine_ndarray(Ndarray *src,
       static_cast<cuda::CudaTransformValueType>(value_type), scale, bias);
 #else
   TI_ERROR("CUDA device transform requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+bool Program::cuda_device_indexed_copy_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::driver_indexed_copy_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_device_gather_ndarray(Ndarray *src,
+                                                Ndarray *indices,
+                                                Ndarray *dst) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA device gather is only available on CUDA.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "CUDA device gather received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "CUDA device gather currently expects 1D ndarrays.");
+  TI_ERROR_IF(indices->get_nelement() != dst->get_nelement(),
+              "CUDA device gather expects indices and destination sizes to "
+              "match.");
+  TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
+              "CUDA device gather source and destination dtypes differ.");
+  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t) ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "CUDA device gather currently expects 32-bit values and i32 "
+              "indices.");
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device gather currently supports at most INT_MAX items.");
+  TI_ERROR_IF(src->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device gather currently supports source sizes up to "
+              "INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  auto *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
+  auto *indices_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
+  auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
+  return cuda::driver_indexed_copy(
+      src_ptr, indices_ptr, dst_ptr, static_cast<int>(indices->get_nelement()),
+      static_cast<int>(src->get_nelement()),
+      cuda::CudaIndexedCopyOp::gather);
+#else
+  TI_ERROR("CUDA device gather requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_scatter_ndarray(Ndarray *src,
+                                                 Ndarray *indices,
+                                                 Ndarray *dst) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA device scatter is only available on CUDA.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "CUDA device scatter received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "CUDA device scatter currently expects 1D ndarrays.");
+  TI_ERROR_IF(src->get_nelement() != indices->get_nelement(),
+              "CUDA device scatter expects source and indices sizes to match.");
+  TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
+              "CUDA device scatter source and destination dtypes differ.");
+  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t) ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "CUDA device scatter currently expects 32-bit values and i32 "
+              "indices.");
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device scatter currently supports at most INT_MAX items.");
+  TI_ERROR_IF(dst->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device scatter currently supports destination sizes up to "
+              "INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  auto *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
+  auto *indices_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
+  auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
+  return cuda::driver_indexed_copy(
+      src_ptr, indices_ptr, dst_ptr, static_cast<int>(indices->get_nelement()),
+      static_cast<int>(dst->get_nelement()),
+      cuda::CudaIndexedCopyOp::scatter);
+#else
+  TI_ERROR("CUDA device scatter requires TI_WITH_CUDA=ON.");
 #endif
 }
 
@@ -1838,6 +1965,135 @@ std::size_t Program::cpu_transform_affine_ndarray(Ndarray *src,
 }
 
 std::size_t Program::cpu_transform_workspace_bytes() const {
+  return 0;
+}
+
+bool Program::cpu_indexed_copy_available() const {
+  return arch_is_cpu(compile_config().arch);
+}
+
+std::size_t Program::cpu_gather_ndarray(Ndarray *src,
+                                        Ndarray *indices,
+                                        Ndarray *dst) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native gather is only available on CPU backends.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "CPU native gather received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "CPU native gather currently expects 1D ndarrays.");
+  TI_ERROR_IF(indices->get_nelement() != dst->get_nelement(),
+              "CPU native gather expects indices and destination sizes to "
+              "match.");
+  TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
+              "CPU native gather source and destination dtypes differ.");
+  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t) ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "CPU native gather currently expects 32-bit values and i32 "
+              "indices.");
+  const std::size_t n = indices->get_nelement();
+  const std::size_t src_items = src->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  auto *src_ptr =
+      reinterpret_cast<const uint32_t *>(get_ndarray_data_ptr_as_int(src));
+  auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
+  auto *dst_ptr =
+      reinterpret_cast<uint32_t *>(get_ndarray_data_ptr_as_int(dst));
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native gather received a null data pointer.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  if (n >= 65536 && target_threads > 1) {
+    CpuIndexedCopyTaskContext ctx;
+    ctx.src = src_ptr;
+    ctx.indices = indices_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.index_bound = src_items;
+    ctx.scatter = false;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx, cpu_indexed_copy_task);
+    return 0;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto index = static_cast<std::size_t>(indices_ptr[i]);
+    if (index < src_items) {
+      dst_ptr[i] = src_ptr[index];
+    } else {
+      dst_ptr[i] = 0;
+    }
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_scatter_ndarray(Ndarray *src,
+                                         Ndarray *indices,
+                                         Ndarray *dst) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native scatter is only available on CPU backends.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "CPU native scatter received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "CPU native scatter currently expects 1D ndarrays.");
+  TI_ERROR_IF(src->get_nelement() != indices->get_nelement(),
+              "CPU native scatter expects source and indices sizes to match.");
+  TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
+              "CPU native scatter source and destination dtypes differ.");
+  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t) ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "CPU native scatter currently expects 32-bit values and i32 "
+              "indices.");
+  const std::size_t n = indices->get_nelement();
+  const std::size_t dst_items = dst->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  auto *src_ptr =
+      reinterpret_cast<const uint32_t *>(get_ndarray_data_ptr_as_int(src));
+  auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
+  auto *dst_ptr =
+      reinterpret_cast<uint32_t *>(get_ndarray_data_ptr_as_int(dst));
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native scatter received a null data pointer.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  if (n >= 65536 && target_threads > 1) {
+    CpuIndexedCopyTaskContext ctx;
+    ctx.src = src_ptr;
+    ctx.indices = indices_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.index_bound = dst_items;
+    ctx.scatter = true;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx, cpu_indexed_copy_task);
+    return 0;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto index = static_cast<std::size_t>(indices_ptr[i]);
+    if (index < dst_items) {
+      dst_ptr[index] = src_ptr[i];
+    }
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_indexed_copy_workspace_bytes() const {
   return 0;
 }
 

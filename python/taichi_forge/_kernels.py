@@ -205,6 +205,118 @@ def transform_affine_f32_field(
 
 
 @kernel
+def gather_i32_ndarray(
+    src: ndarray_type.ndarray(dtype=i32, ndim=1),
+    indices: ndarray_type.ndarray(dtype=i32, ndim=1),
+    dst: ndarray_type.ndarray(dtype=i32, ndim=1),
+    n: i32,
+):
+    for i in range(n):
+        index = indices[i]
+        if index >= 0 and index < src.shape[0]:
+            dst[i] = src[index]
+        else:
+            dst[i] = 0
+
+
+@kernel
+def gather_f32_ndarray(
+    src: ndarray_type.ndarray(dtype=f32, ndim=1),
+    indices: ndarray_type.ndarray(dtype=i32, ndim=1),
+    dst: ndarray_type.ndarray(dtype=f32, ndim=1),
+    n: i32,
+):
+    for i in range(n):
+        index = indices[i]
+        if index >= 0 and index < src.shape[0]:
+            dst[i] = src[index]
+        else:
+            dst[i] = 0.0
+
+
+@kernel
+def scatter_i32_ndarray(
+    src: ndarray_type.ndarray(dtype=i32, ndim=1),
+    indices: ndarray_type.ndarray(dtype=i32, ndim=1),
+    dst: ndarray_type.ndarray(dtype=i32, ndim=1),
+    n: i32,
+):
+    for i in range(n):
+        index = indices[i]
+        if index >= 0 and index < dst.shape[0]:
+            dst[index] = src[i]
+
+
+@kernel
+def scatter_f32_ndarray(
+    src: ndarray_type.ndarray(dtype=f32, ndim=1),
+    indices: ndarray_type.ndarray(dtype=i32, ndim=1),
+    dst: ndarray_type.ndarray(dtype=f32, ndim=1),
+    n: i32,
+):
+    for i in range(n):
+        index = indices[i]
+        if index >= 0 and index < dst.shape[0]:
+            dst[index] = src[i]
+
+
+@kernel
+def gather_i32_field(src: template(), indices: template(), dst: template(), n: i32):
+    src_offset = static(src.snode.ptr.offset if len(src.snode.ptr.offset) != 0 else [0])
+    indices_offset = static(
+        indices.snode.ptr.offset if len(indices.snode.ptr.offset) != 0 else [0]
+    )
+    dst_offset = static(dst.snode.ptr.offset if len(dst.snode.ptr.offset) != 0 else [0])
+    for i in range(n):
+        index = indices[i + indices_offset[0]]
+        if index >= 0 and index < src.shape[0]:
+            dst[i + dst_offset[0]] = src[index + src_offset[0]]
+        else:
+            dst[i + dst_offset[0]] = 0
+
+
+@kernel
+def gather_f32_field(src: template(), indices: template(), dst: template(), n: i32):
+    src_offset = static(src.snode.ptr.offset if len(src.snode.ptr.offset) != 0 else [0])
+    indices_offset = static(
+        indices.snode.ptr.offset if len(indices.snode.ptr.offset) != 0 else [0]
+    )
+    dst_offset = static(dst.snode.ptr.offset if len(dst.snode.ptr.offset) != 0 else [0])
+    for i in range(n):
+        index = indices[i + indices_offset[0]]
+        if index >= 0 and index < src.shape[0]:
+            dst[i + dst_offset[0]] = src[index + src_offset[0]]
+        else:
+            dst[i + dst_offset[0]] = 0.0
+
+
+@kernel
+def scatter_i32_field(src: template(), indices: template(), dst: template(), n: i32):
+    src_offset = static(src.snode.ptr.offset if len(src.snode.ptr.offset) != 0 else [0])
+    indices_offset = static(
+        indices.snode.ptr.offset if len(indices.snode.ptr.offset) != 0 else [0]
+    )
+    dst_offset = static(dst.snode.ptr.offset if len(dst.snode.ptr.offset) != 0 else [0])
+    for i in range(n):
+        index = indices[i + indices_offset[0]]
+        if index >= 0 and index < dst.shape[0]:
+            dst[index + dst_offset[0]] = src[i + src_offset[0]]
+
+
+@kernel
+def scatter_f32_field(src: template(), indices: template(), dst: template(), n: i32):
+    src_offset = static(src.snode.ptr.offset if len(src.snode.ptr.offset) != 0 else [0])
+    indices_offset = static(
+        indices.snode.ptr.offset if len(indices.snode.ptr.offset) != 0 else [0]
+    )
+    dst_offset = static(dst.snode.ptr.offset if len(dst.snode.ptr.offset) != 0 else [0])
+    for i in range(n):
+        index = indices[i + indices_offset[0]]
+        if index >= 0 and index < dst.shape[0]:
+            dst[index + dst_offset[0]] = src[i + src_offset[0]]
+
+
+@kernel
 def ext_arr_to_ndarray(arr: ndarray_type.ndarray(), ndarray: ndarray_type.ndarray()):
     for I in grouped(ndarray):
         ndarray[I] = arr[I]

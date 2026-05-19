@@ -324,6 +324,16 @@ class TI_DLL_EXPORT Program {
                                                    double scale,
                                                    double bias);
 
+  bool cuda_device_indexed_copy_available() const;
+
+  std::size_t cuda_device_gather_ndarray(Ndarray *src,
+                                         Ndarray *indices,
+                                         Ndarray *dst);
+
+  std::size_t cuda_device_scatter_ndarray(Ndarray *src,
+                                          Ndarray *indices,
+                                          Ndarray *dst);
+
   bool cuda_cub_radix_sort_available() const;
 
   std::size_t cuda_cub_radix_sort_ndarray(Ndarray *keys,
@@ -414,6 +424,14 @@ class TI_DLL_EXPORT Program {
 
   std::size_t cpu_transform_workspace_bytes() const;
 
+  bool cpu_indexed_copy_available() const;
+
+  std::size_t cpu_gather_ndarray(Ndarray *src, Ndarray *indices, Ndarray *dst);
+
+  std::size_t cpu_scatter_ndarray(Ndarray *src, Ndarray *indices, Ndarray *dst);
+
+  std::size_t cpu_indexed_copy_workspace_bytes() const;
+
   bool vulkan_radix_sort_available() const;
 
   std::size_t vulkan_radix_sort_u32_ndarray(Ndarray *keys,
@@ -476,6 +494,20 @@ class TI_DLL_EXPORT Program {
   void vulkan_transform_clear_workspace();
 
   std::size_t vulkan_transform_workspace_bytes() const;
+
+  bool vulkan_indexed_copy_available() const;
+
+  std::size_t vulkan_gather_ndarray(Ndarray *src,
+                                    Ndarray *indices,
+                                    Ndarray *dst);
+
+  std::size_t vulkan_scatter_ndarray(Ndarray *src,
+                                     Ndarray *indices,
+                                     Ndarray *dst);
+
+  void vulkan_indexed_copy_clear_workspace();
+
+  std::size_t vulkan_indexed_copy_workspace_bytes() const;
 
   Identifier get_next_global_id(const std::string &name = "") {
     return Identifier(global_id_counter_++, name);
