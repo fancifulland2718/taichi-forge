@@ -86,8 +86,15 @@ class Ndarray:
         Args:
             val (Union[int, float]): Value to fill.
         """
-        if impl.current_cfg().arch != _ti_core.Arch.cuda and impl.current_cfg().arch != _ti_core.Arch.x64:
+        fast_fill_archs = (
+            _ti_core.Arch.cuda,
+            _ti_core.Arch.vulkan,
+            _ti_core.Arch.x64,
+        )
+        if impl.current_cfg().arch not in fast_fill_archs:
             self._fill_by_kernel(val)
+        elif self._can_fast_zero_fill(val):
+            impl.get_runtime().prog.fill_uint(self.arr, 0)
         elif _ti_core.is_tensor(self.element_type):
             self._fill_by_kernel(val)
         elif self.dtype == primitive_types.f32:
@@ -100,6 +107,47 @@ class Ndarray:
             self._fill_by_kernel(val)
 
     @python_scope
+    def _can_fast_zero_fill(self, val):
+        try:
+            is_scalar = np.isscalar(val)
+        except TypeError:
+            return False
+        if not is_scalar:
+            return False
+        if not isinstance(val, (bool, int, float, np.integer, np.floating)):
+            return False
+        try:
+            if val != 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+        if isinstance(val, (float, np.floating)) and np.signbit(val):
+            return False
+        return (self._get_nelement() * self._get_element_size()) % 4 == 0
+
+    @python_scope
+    def _can_fast_host_copy(self, arr, is_from_host=False):
+        arch = impl.current_cfg().arch
+        fast_host_copy_archs = (
+            _ti_core.Arch.cuda,
+            _ti_core.Arch.vulkan,
+            _ti_core.Arch.x64,
+        )
+        if arch not in fast_host_copy_archs:
+            return False
+        if not isinstance(arr, np.ndarray) or not arr.flags.c_contiguous:
+            return False
+        if self.layout != Layout.AOS:
+            return False
+        if is_from_host and arch == _ti_core.Arch.vulkan and arr.nbytes > (64 << 10):
+            return False
+        return (
+            arr.dtype == np.dtype(to_numpy_type(self.dtype))
+            and tuple(self.arr.total_shape()) == tuple(arr.shape)
+            and arr.nbytes == self._get_nelement() * self._get_element_size()
+        )
+
+    @python_scope
     def _ndarray_to_numpy(self):
         """Converts ndarray to a numpy array.
 
@@ -107,6 +155,11 @@ class Ndarray:
             numpy.ndarray: The result numpy array.
         """
         arr = np.zeros(shape=self.arr.total_shape(), dtype=to_numpy_type(self.dtype))
+        if self._can_fast_host_copy(arr):
+            impl.get_runtime().sync()
+            impl.get_runtime().prog.copy_ndarray_to_host(self.arr, arr)
+            return arr
+
         from taichi_forge._kernels import ndarray_to_ext_arr  # pylint: disable=C0415
 
         ndarray_to_ext_arr(self, arr)
@@ -121,6 +174,11 @@ class Ndarray:
             numpy.ndarray: The result numpy array.
         """
         arr = np.zeros(shape=self.arr.total_shape(), dtype=to_numpy_type(self.dtype))
+        if self._can_fast_host_copy(arr):
+            impl.get_runtime().sync()
+            impl.get_runtime().prog.copy_ndarray_to_host(self.arr, arr)
+            return arr
+
         from taichi_forge._kernels import ndarray_matrix_to_ext_arr  # pylint: disable=C0415
 
         layout_is_aos = 1
@@ -141,6 +199,10 @@ class Ndarray:
             raise ValueError(f"Mismatch shape: {tuple(self.arr.shape)} expected, but {tuple(arr.shape)} provided")
         if not arr.flags.c_contiguous:
             arr = np.ascontiguousarray(arr)
+        if self._can_fast_host_copy(arr, is_from_host=True):
+            impl.get_runtime().sync()
+            impl.get_runtime().prog.copy_ndarray_from_host(self.arr, arr)
+            return
 
         from taichi_forge._kernels import ext_arr_to_ndarray  # pylint: disable=C0415
 
@@ -162,6 +224,10 @@ class Ndarray:
             )
         if not arr.flags.c_contiguous:
             arr = np.ascontiguousarray(arr)
+        if self._can_fast_host_copy(arr, is_from_host=True):
+            impl.get_runtime().sync()
+            impl.get_runtime().prog.copy_ndarray_from_host(self.arr, arr)
+            return
 
         from taichi_forge._kernels import ext_arr_to_ndarray_matrix  # pylint: disable=C0415
 
@@ -198,10 +264,36 @@ class Ndarray:
         """
         assert isinstance(other, Ndarray)
         assert tuple(self.arr.shape) == tuple(other.arr.shape)
+        if self._can_fast_copy_from(other):
+            impl.get_runtime().prog.copy_ndarray(self.arr, other.arr)
+            impl.get_runtime().sync()
+            return
+
         from taichi_forge._kernels import ndarray_to_ndarray  # pylint: disable=C0415
 
         ndarray_to_ndarray(self, other)
         impl.get_runtime().sync()
+
+    @python_scope
+    def _can_fast_copy_from(self, other):
+        arch = impl.current_cfg().arch
+        fast_copy_archs = (
+            _ti_core.Arch.cuda,
+            _ti_core.Arch.vulkan,
+            _ti_core.Arch.x64,
+        )
+        if arch not in fast_copy_archs:
+            return False
+        byte_size = self._get_nelement() * self._get_element_size()
+        if arch == _ti_core.Arch.x64 and byte_size >= (1 << 20):
+            return False
+        return (
+            self.dtype == other.dtype
+            and self.element_shape == other.element_shape
+            and self.layout == other.layout
+            and tuple(self.arr.total_shape()) == tuple(other.arr.total_shape())
+            and self._get_element_size() == other._get_element_size()
+        )
 
     def _set_grad(self, grad):
         """Sets the gradient ndarray.

@@ -227,6 +227,67 @@ def test_ndarray_copy_from_ndarray():
     assert x[4][1, 0] == 6
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_ndarray_native_copy_from():
+    n = 17
+
+    src = ti.ndarray(ti.f64, shape=n)
+    dst = ti.ndarray(ti.f64, shape=n)
+    src_np = np.arange(n, dtype=np.float64) * 1.5
+    src.from_numpy(src_np)
+    dst.fill(0)
+    dst.copy_from(src)
+    assert (dst.to_numpy() == src_np).all()
+
+    src_vec = ti.Vector.ndarray(3, ti.f32, shape=n)
+    dst_vec = ti.Vector.ndarray(3, ti.f32, shape=n)
+    src_vec_np = np.arange(n * 3, dtype=np.float32).reshape(n, 3)
+    src_vec.from_numpy(src_vec_np)
+    dst_vec.fill(0)
+    dst_vec.copy_from(src_vec)
+    assert (dst_vec.to_numpy() == src_vec_np).all()
+
+    src_mat = ti.Matrix.ndarray(2, 2, ti.i32, shape=n)
+    dst_mat = ti.Matrix.ndarray(2, 2, ti.i32, shape=n)
+    src_mat_np = np.arange(n * 4, dtype=np.int32).reshape(n, 2, 2)
+    src_mat.from_numpy(src_mat_np)
+    dst_mat.fill(0)
+    dst_mat.copy_from(src_mat)
+    assert (dst_mat.to_numpy() == src_mat_np).all()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_ndarray_copy_from_dtype_cast_fallback():
+    n = 8
+    src = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(ti.f32, shape=n)
+    src_np = np.arange(n, dtype=np.int32) - 3
+    src.from_numpy(src_np)
+    dst.fill(0)
+    dst.copy_from(src)
+    assert (dst.to_numpy() == src_np.astype(np.float32)).all()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_ndarray_native_host_staging():
+    n = 19
+
+    scalar = ti.ndarray(ti.i64, shape=n)
+    scalar_np = np.arange(n, dtype=np.int64) * 3 - 11
+    scalar.from_numpy(scalar_np)
+    np.testing.assert_array_equal(scalar.to_numpy(), scalar_np)
+
+    vector = ti.Vector.ndarray(3, ti.f32, shape=n)
+    vector_np = (np.arange(n * 3, dtype=np.float32).reshape(n, 3) - 7.0) * 0.25
+    vector.from_numpy(vector_np)
+    np.testing.assert_array_equal(vector.to_numpy(), vector_np)
+
+    matrix = ti.Matrix.ndarray(2, 2, ti.i32, shape=n)
+    matrix_np = np.arange(n * 4, dtype=np.int32).reshape(n, 2, 2) - 5
+    matrix.from_numpy(matrix_np)
+    np.testing.assert_array_equal(matrix.to_numpy(), matrix_np)
+
+
 @test_utils.test(arch=supported_archs_taichi_ndarray)
 def test_ndarray_deepcopy():
     n = 16
@@ -309,6 +370,37 @@ def test_ndarray_fill():
     c.fill(1.5)
     cnp.fill(1.5)
     assert (c.to_numpy() == cnp).all()
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_ndarray_scalar_fill_vulkan_reset_with_live_ndarray():
+    n = 4096
+    arr = ti.ndarray(ti.i32, shape=n)
+    arr.fill(7)
+    assert (arr.to_numpy() == np.full((n,), 7, dtype=np.int32)).all()
+    arr.fill(-3)
+    assert (arr.to_numpy() == np.full((n,), -3, dtype=np.int32)).all()
+    ti.reset()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_ndarray_native_zero_fill():
+    n = 17
+
+    scalar = ti.ndarray(ti.f64, shape=n)
+    scalar.fill(3.5)
+    scalar.fill(0.0)
+    assert (scalar.to_numpy() == np.zeros((n,), dtype=np.float64)).all()
+
+    vec = ti.Vector.ndarray(3, ti.f32, shape=n)
+    vec.fill(2.0)
+    vec.fill(0)
+    assert (vec.to_numpy() == np.zeros((n, 3), dtype=np.float32)).all()
+
+    mat = ti.Matrix.ndarray(2, 2, ti.i32, shape=n)
+    mat.fill(5)
+    mat.fill(0)
+    assert (mat.to_numpy() == np.zeros((n, 2, 2), dtype=np.int32)).all()
 
 
 @test_utils.test(arch=supported_archs_taichi_ndarray)

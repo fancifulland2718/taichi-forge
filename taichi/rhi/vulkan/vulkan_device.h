@@ -671,6 +671,18 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   void unmap(DevicePtr ptr) final;
   void unmap(DeviceAllocation alloc) final;
 
+  RhiResult upload_data(DevicePtr *device_ptr,
+                        const void **data,
+                        size_t *size,
+                        int num_alloc = 1) noexcept final;
+
+  RhiResult readback_data(
+      DevicePtr *device_ptr,
+      void **data,
+      size_t *size,
+      int num_alloc = 1,
+      const std::vector<StreamSemaphore> &wait_sema = {}) noexcept final;
+
   // Strictly intra device copy
   void memcpy_internal(DevicePtr dst, DevicePtr src, uint64_t size) override;
 

@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <optional>
 #include <atomic>
@@ -306,6 +307,14 @@ class TI_DLL_EXPORT Program {
   intptr_t get_ndarray_data_ptr_as_int(const Ndarray *ndarray);
 
   void fill_ndarray_fast_u32(Ndarray *ndarray, uint32_t val);
+
+  void copy_ndarray_fast(Ndarray *dst, Ndarray *src);
+
+  void copy_ndarray_from_host(Ndarray *dst,
+                              const void *src,
+                              std::size_t bytes);
+
+  void copy_ndarray_to_host(Ndarray *src, void *dst, std::size_t bytes);
 
   bool cuda_cub_radix_sort_available() const;
 

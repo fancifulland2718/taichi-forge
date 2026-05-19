@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -1947,6 +1948,101 @@ void VulkanDevice::unmap(DeviceAllocation alloc) {
   }
 
   alloc_int.mapped = nullptr;
+}
+
+RhiResult VulkanDevice::upload_data(DevicePtr *device_ptr,
+                                    const void **data,
+                                    size_t *size,
+                                    int num_alloc) noexcept {
+  if (!device_ptr || !data || !size || num_alloc < 0) {
+    return RhiResult::invalid_usage;
+  }
+  if (num_alloc == 0) {
+    return RhiResult::success;
+  }
+
+  std::vector<DeviceAllocationUnique> stagings;
+  stagings.reserve(num_alloc);
+  for (int i = 0; i < num_alloc; i++) {
+    if (device_ptr[i].device != this || !data[i]) {
+      return RhiResult::invalid_usage;
+    }
+    auto [staging, res] = allocate_memory_unique(
+        {size[i], /*host_write=*/true, /*host_read=*/false,
+         /*export_sharing=*/false, AllocUsage::Upload});
+    if (res != RhiResult::success) {
+      return res;
+    }
+
+    void *mapped{nullptr};
+    res = map(*staging, &mapped);
+    if (res != RhiResult::success) {
+      return res;
+    }
+    std::memcpy(mapped, data[i], size[i]);
+    unmap(*staging);
+    stagings.push_back(std::move(staging));
+  }
+
+  Stream *stream = get_compute_stream();
+  auto [cmdlist, res] = stream->new_command_list_unique();
+  if (res != RhiResult::success) {
+    return res;
+  }
+  for (int i = 0; i < num_alloc; i++) {
+    cmdlist->buffer_copy(device_ptr[i], stagings[i]->get_ptr(0), size[i]);
+  }
+  stream->submit_synced(cmdlist.get());
+  return RhiResult::success;
+}
+
+RhiResult VulkanDevice::readback_data(
+    DevicePtr *device_ptr,
+    void **data,
+    size_t *size,
+    int num_alloc,
+    const std::vector<StreamSemaphore> &wait_sema) noexcept {
+  if (!device_ptr || !data || !size || num_alloc < 0) {
+    return RhiResult::invalid_usage;
+  }
+  if (num_alloc == 0) {
+    return RhiResult::success;
+  }
+
+  Stream *stream = get_compute_stream();
+  auto [cmdlist, res] = stream->new_command_list_unique();
+  if (res != RhiResult::success) {
+    return res;
+  }
+
+  std::vector<DeviceAllocationUnique> stagings;
+  stagings.reserve(num_alloc);
+  for (int i = 0; i < num_alloc; i++) {
+    if (device_ptr[i].device != this || !data[i]) {
+      return RhiResult::invalid_usage;
+    }
+    auto [staging, alloc_res] = allocate_memory_unique(
+        {size[i], /*host_write=*/false, /*host_read=*/true,
+         /*export_sharing=*/false, AllocUsage::None});
+    if (alloc_res != RhiResult::success) {
+      return alloc_res;
+    }
+
+    cmdlist->buffer_copy(staging->get_ptr(0), device_ptr[i], size[i]);
+    stagings.push_back(std::move(staging));
+  }
+  stream->submit_synced(cmdlist.get(), wait_sema);
+
+  for (int i = 0; i < num_alloc; i++) {
+    void *mapped{nullptr};
+    res = map(*stagings[i], &mapped);
+    if (res != RhiResult::success) {
+      return res;
+    }
+    std::memcpy(data[i], mapped, size[i]);
+    unmap(*stagings[i]);
+  }
+  return RhiResult::success;
 }
 
 void VulkanDevice::memcpy_internal(DevicePtr dst,

@@ -1,5 +1,6 @@
 // Bindings for the python frontend
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include "taichi/ir/snode.h"
@@ -650,6 +651,29 @@ void export_lang(py::module &m) {
       .def("fill_uint",
            [](Program *program, Ndarray *ndarray, uint32_t val) {
              program->fill_ndarray_fast_u32(ndarray, val);
+           })
+      .def("copy_ndarray",
+           [](Program *program, Ndarray *dst, Ndarray *src) {
+             program->copy_ndarray_fast(dst, src);
+           },
+           py::call_guard<py::gil_scoped_release>())
+      .def("copy_ndarray_from_host",
+           [](Program *program, Ndarray *dst, py::buffer src) {
+             py::buffer_info info = src.request();
+             const auto bytes = static_cast<std::size_t>(info.size) *
+                                static_cast<std::size_t>(info.itemsize);
+             py::gil_scoped_release release;
+             program->copy_ndarray_from_host(dst, info.ptr, bytes);
+           })
+      .def("copy_ndarray_to_host",
+           [](Program *program, Ndarray *src, py::buffer dst) {
+             py::buffer_info info = dst.request();
+             TI_ERROR_IF(info.readonly,
+                         "copy_ndarray_to_host received a read-only buffer.");
+             const auto bytes = static_cast<std::size_t>(info.size) *
+                                static_cast<std::size_t>(info.itemsize);
+             py::gil_scoped_release release;
+             program->copy_ndarray_to_host(src, info.ptr, bytes);
            })
       .def("cuda_cub_radix_sort_available",
            &Program::cuda_cub_radix_sort_available)

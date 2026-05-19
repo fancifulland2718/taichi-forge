@@ -20,6 +20,7 @@
 
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/rhi/cuda/cuda_sort.h"
 #endif
 
@@ -87,6 +88,20 @@ struct CpuReduceF32TaskContext {
   std::size_t n{0};
   int num_threads{1};
   int op{0};
+};
+
+struct CpuFillU32TaskContext {
+  uint32_t *data{nullptr};
+  std::size_t words{0};
+  uint32_t value{0};
+  int num_threads{1};
+};
+
+struct CpuCopyTaskContext {
+  uint8_t *dst{nullptr};
+  const uint8_t *src{nullptr};
+  std::size_t bytes{0};
+  int num_threads{1};
 };
 
 taichi::ThreadPool &get_cpu_primitive_thread_pool(int max_threads) {
@@ -171,6 +186,30 @@ void cpu_reduce_f32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
     acc = cpu_reduce_f32_combine(acc, ctx->values[i], ctx->op);
   }
   ctx->partial[tid] = acc;
+}
+
+void cpu_fill_u32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuFillU32TaskContext *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->words * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->words * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  std::fill(ctx->data + begin, ctx->data + end, ctx->value);
+}
+
+void cpu_copy_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuCopyTaskContext *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->bytes * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->bytes * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  std::memcpy(ctx->dst + begin, ctx->src + begin, end - begin);
 }
 
 void store_i32_wrapped_from_i64(int32_t *output, int64_t value) {
@@ -790,12 +829,199 @@ intptr_t Program::get_ndarray_data_ptr_as_int(const Ndarray *ndarray) {
 }
 
 void Program::fill_ndarray_fast_u32(Ndarray *ndarray, uint32_t val) {
-  // This is a temporary solution to bypass device api.
-  // Should be moved to CommandList once available in CUDA.
+  TI_ERROR_IF(!ndarray, "fill_ndarray_fast_u32 received a null ndarray.");
+  const std::size_t bytes =
+      ndarray->get_nelement() * ndarray->get_element_size();
+  if (bytes == 0) {
+    return;
+  }
+  if (compile_config().arch == Arch::vulkan) {
+    const DeviceAllocation alloc = ndarray->ndarray_alloc_;
+    enqueue_compute_op_lambda(
+        [alloc, bytes, val](Device * /*device*/, CommandList *cmdlist) {
+          cmdlist->buffer_fill(alloc.get_ptr(0), bytes, val);
+          cmdlist->buffer_barrier(alloc);
+        },
+        {});
+    return;
+  }
+  if (compile_config().arch == Arch::cuda && val == 0 &&
+      bytes % sizeof(uint32_t) != 0) {
+#ifdef TI_WITH_CUDA
+    auto *raw_ptr =
+        program_impl_->get_device_alloc_info_ptr(ndarray->ndarray_alloc_);
+    TI_ERROR_IF(!raw_ptr, "CUDA ndarray fill received a null data pointer.");
+    CUDADriver::get_instance().memset(reinterpret_cast<void *>(raw_ptr), 0,
+                                      bytes);
+    return;
+#else
+    TI_NOT_IMPLEMENTED;
+#endif
+  }
+  if (arch_is_cpu(compile_config().arch)) {
+    auto *raw_ptr =
+        program_impl_->get_device_alloc_info_ptr(ndarray->ndarray_alloc_);
+    TI_ERROR_IF(!raw_ptr, "CPU ndarray fill received a null data pointer.");
+    if (val == 0) {
+      std::memset(raw_ptr, 0, bytes);
+      return;
+    }
+    const std::size_t words = bytes / sizeof(uint32_t);
+    auto *ptr = reinterpret_cast<uint32_t *>(raw_ptr);
+    TI_ERROR_IF(!ptr, "CPU ndarray fill received a null data pointer.");
+    const int max_threads =
+        std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+    const int chunk_items = 32768;
+    const int target_threads = static_cast<int>(
+        std::min<std::size_t>((words + chunk_items - 1) / chunk_items,
+                              static_cast<std::size_t>(max_threads)));
+    if (words >= 65536 && target_threads > 1) {
+      CpuFillU32TaskContext ctx;
+      ctx.data = ptr;
+      ctx.words = words;
+      ctx.value = val;
+      ctx.num_threads = target_threads;
+      auto &pool = get_cpu_primitive_thread_pool(max_threads);
+      pool.run(target_threads, target_threads, &ctx, cpu_fill_u32_task);
+      return;
+    }
+    std::fill(ptr, ptr + words, val);
+    return;
+  }
+  // This is a temporary solution to bypass device api on LLVM backends.
   program_impl_->fill_ndarray(
-      ndarray->ndarray_alloc_,
-      ndarray->get_nelement() * ndarray->get_element_size() / sizeof(uint32_t),
-      val);
+      ndarray->ndarray_alloc_, bytes / sizeof(uint32_t), val);
+}
+
+void Program::copy_ndarray_fast(Ndarray *dst, Ndarray *src) {
+  TI_ERROR_IF(!dst || !src, "copy_ndarray_fast received a null ndarray.");
+  const std::size_t dst_bytes = dst->get_nelement() * dst->get_element_size();
+  const std::size_t src_bytes = src->get_nelement() * src->get_element_size();
+  TI_ERROR_IF(dst_bytes != src_bytes,
+              "copy_ndarray_fast requires source and destination to have the "
+              "same byte size.");
+  if (dst_bytes == 0 || dst == src) {
+    return;
+  }
+
+  if (compile_config().arch == Arch::vulkan) {
+    const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
+    const DeviceAllocation src_alloc = src->ndarray_alloc_;
+    enqueue_compute_op_lambda(
+        [dst_alloc, src_alloc, dst_bytes](Device * /*device*/,
+                                          CommandList *cmdlist) {
+          cmdlist->buffer_copy(dst_alloc.get_ptr(0), src_alloc.get_ptr(0),
+                               dst_bytes);
+          cmdlist->buffer_barrier(dst_alloc);
+        },
+        {});
+    return;
+  }
+
+  if (arch_is_cpu(compile_config().arch)) {
+    auto *dst_ptr = reinterpret_cast<uint8_t *>(
+        program_impl_->get_device_alloc_info_ptr(dst->ndarray_alloc_));
+    auto *src_ptr = reinterpret_cast<const uint8_t *>(
+        program_impl_->get_device_alloc_info_ptr(src->ndarray_alloc_));
+    TI_ERROR_IF(!dst_ptr || !src_ptr,
+                "CPU ndarray copy received a null data pointer.");
+    const int max_threads =
+        std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+    const std::size_t chunk_bytes =
+        dst_bytes <= (4 << 20) ? (1 << 20) : (256 << 10);
+    const int target_threads = static_cast<int>(
+        std::min<std::size_t>((dst_bytes + chunk_bytes - 1) / chunk_bytes,
+                              static_cast<std::size_t>(max_threads)));
+    if (dst_bytes >= (1 << 20) && target_threads > 1) {
+      CpuCopyTaskContext ctx;
+      ctx.dst = dst_ptr;
+      ctx.src = src_ptr;
+      ctx.bytes = dst_bytes;
+      ctx.num_threads = target_threads;
+      auto &pool = get_cpu_primitive_thread_pool(max_threads);
+      pool.run(target_threads, target_threads, &ctx, cpu_copy_task);
+      return;
+    }
+    std::memcpy(dst_ptr, src_ptr, dst_bytes);
+    return;
+  }
+
+  if (compile_config().arch == Arch::cuda ||
+      compile_config().arch == Arch::amdgpu) {
+    Device::memcpy_direct(dst->ndarray_alloc_.get_ptr(0),
+                          src->ndarray_alloc_.get_ptr(0), dst_bytes);
+    return;
+  }
+
+  Stream *stream = program_impl_->get_compute_device()->get_compute_stream();
+  auto [cmdlist, res] = stream->new_command_list_unique();
+  TI_ASSERT(res == RhiResult::success);
+  cmdlist->buffer_copy(dst->ndarray_alloc_.get_ptr(0),
+                       src->ndarray_alloc_.get_ptr(0), dst_bytes);
+  stream->submit_synced(cmdlist.get());
+}
+
+void Program::copy_ndarray_from_host(Ndarray *dst,
+                                     const void *src,
+                                     std::size_t bytes) {
+  TI_ERROR_IF(!dst || !src,
+              "copy_ndarray_from_host received a null pointer.");
+  const std::size_t expected_bytes =
+      dst->get_nelement() * dst->get_element_size();
+  TI_ERROR_IF(bytes != expected_bytes,
+              "copy_ndarray_from_host expected {} bytes, but received {}.",
+              expected_bytes, bytes);
+  if (bytes == 0) {
+    return;
+  }
+
+  if (arch_is_cpu(compile_config().arch)) {
+    auto *dst_ptr = reinterpret_cast<uint8_t *>(
+        program_impl_->get_device_alloc_info_ptr(dst->ndarray_alloc_));
+    TI_ERROR_IF(!dst_ptr,
+                "CPU ndarray host upload received a null data pointer.");
+    std::memcpy(dst_ptr, src, bytes);
+    return;
+  }
+
+  auto *device = program_impl_->get_compute_device();
+  DevicePtr dst_ptr = dst->ndarray_alloc_.get_ptr(0);
+  const void *src_ptr = src;
+  std::size_t size = bytes;
+  const RhiResult res = device->upload_data(&dst_ptr, &src_ptr, &size, 1);
+  TI_ERROR_IF(res != RhiResult::success,
+              "copy_ndarray_from_host failed: {}", res);
+}
+
+void Program::copy_ndarray_to_host(Ndarray *src,
+                                   void *dst,
+                                   std::size_t bytes) {
+  TI_ERROR_IF(!src || !dst, "copy_ndarray_to_host received a null pointer.");
+  const std::size_t expected_bytes =
+      src->get_nelement() * src->get_element_size();
+  TI_ERROR_IF(bytes != expected_bytes,
+              "copy_ndarray_to_host expected {} bytes, but received {}.",
+              expected_bytes, bytes);
+  if (bytes == 0) {
+    return;
+  }
+
+  if (arch_is_cpu(compile_config().arch)) {
+    auto *src_ptr = reinterpret_cast<const uint8_t *>(
+        program_impl_->get_device_alloc_info_ptr(src->ndarray_alloc_));
+    TI_ERROR_IF(!src_ptr,
+                "CPU ndarray host readback received a null data pointer.");
+    std::memcpy(dst, src_ptr, bytes);
+    return;
+  }
+
+  auto *device = program_impl_->get_compute_device();
+  DevicePtr src_ptr = src->ndarray_alloc_.get_ptr(0);
+  void *dst_ptr = dst;
+  std::size_t size = bytes;
+  const RhiResult res = device->readback_data(&src_ptr, &dst_ptr, &size, 1);
+  TI_ERROR_IF(res != RhiResult::success,
+              "copy_ndarray_to_host failed: {}", res);
 }
 
 bool Program::cuda_cub_radix_sort_available() const {
