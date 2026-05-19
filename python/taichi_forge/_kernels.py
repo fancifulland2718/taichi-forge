@@ -153,6 +153,58 @@ def ndarray_to_ndarray(ndarray: ndarray_type.ndarray(), other: ndarray_type.ndar
 
 
 @kernel
+def transform_affine_i32_ndarray(
+    src: ndarray_type.ndarray(dtype=i32, ndim=1),
+    dst: ndarray_type.ndarray(dtype=i32, ndim=1),
+    scale: i32,
+    bias: i32,
+    n: i32,
+):
+    for i in range(n):
+        dst[i] = src[i] * scale + bias
+
+
+@kernel
+def transform_affine_f32_ndarray(
+    src: ndarray_type.ndarray(dtype=f32, ndim=1),
+    dst: ndarray_type.ndarray(dtype=f32, ndim=1),
+    scale: f32,
+    bias: f32,
+    n: i32,
+):
+    for i in range(n):
+        dst[i] = src[i] * scale + bias
+
+
+@kernel
+def transform_affine_i32_field(
+    src: template(),
+    dst: template(),
+    scale: i32,
+    bias: i32,
+    n: i32,
+):
+    src_offset = static(src.snode.ptr.offset if len(src.snode.ptr.offset) != 0 else [0])
+    dst_offset = static(dst.snode.ptr.offset if len(dst.snode.ptr.offset) != 0 else [0])
+    for i in range(n):
+        dst[i + dst_offset[0]] = src[i + src_offset[0]] * scale + bias
+
+
+@kernel
+def transform_affine_f32_field(
+    src: template(),
+    dst: template(),
+    scale: f32,
+    bias: f32,
+    n: i32,
+):
+    src_offset = static(src.snode.ptr.offset if len(src.snode.ptr.offset) != 0 else [0])
+    dst_offset = static(dst.snode.ptr.offset if len(dst.snode.ptr.offset) != 0 else [0])
+    for i in range(n):
+        dst[i + dst_offset[0]] = src[i + src_offset[0]] * scale + bias
+
+
+@kernel
 def ext_arr_to_ndarray(arr: ndarray_type.ndarray(), ndarray: ndarray_type.ndarray()):
     for I in grouped(ndarray):
         ndarray[I] = arr[I]

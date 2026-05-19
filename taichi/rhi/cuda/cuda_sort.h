@@ -46,6 +46,20 @@ enum class CubReduceOp : int {
   max = 2,
 };
 
+enum class CudaTransformValueType : int {
+  i32 = 0,
+  f32 = 1,
+};
+
+bool driver_transform_available();
+
+std::size_t driver_transform_affine(void *src,
+                                    void *dst,
+                                    int num_items,
+                                    CudaTransformValueType value_type,
+                                    double scale,
+                                    double bias);
+
 bool cub_radix_sort_available();
 
 std::size_t cub_radix_sort(void *keys,

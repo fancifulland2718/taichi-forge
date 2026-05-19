@@ -104,6 +104,24 @@ struct CpuCopyTaskContext {
   int num_threads{1};
 };
 
+struct CpuTransformI32TaskContext {
+  const uint32_t *src{nullptr};
+  uint32_t *dst{nullptr};
+  std::size_t n{0};
+  uint32_t scale{0};
+  uint32_t bias{0};
+  int num_threads{1};
+};
+
+struct CpuTransformF32TaskContext {
+  const float *src{nullptr};
+  float *dst{nullptr};
+  std::size_t n{0};
+  float scale{0.0f};
+  float bias{0.0f};
+  int num_threads{1};
+};
+
 taichi::ThreadPool &get_cpu_primitive_thread_pool(int max_threads) {
   static std::mutex mutex;
   static std::unique_ptr<taichi::ThreadPool> pool;
@@ -210,6 +228,34 @@ void cpu_copy_task(void *raw_ctx, int /*thread_id*/, int task_id) {
       ctx->bytes * static_cast<std::size_t>(tid + 1) /
       static_cast<std::size_t>(ctx->num_threads);
   std::memcpy(ctx->dst + begin, ctx->src + begin, end - begin);
+}
+
+void cpu_transform_i32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuTransformI32TaskContext *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    ctx->dst[i] = ctx->src[i] * ctx->scale + ctx->bias;
+  }
+}
+
+void cpu_transform_f32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuTransformF32TaskContext *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    ctx->dst[i] = ctx->src[i] * ctx->scale + ctx->bias;
+  }
 }
 
 void store_i32_wrapped_from_i64(int32_t *output, int64_t value) {
@@ -682,6 +728,7 @@ void Program::finalize() {
     vulkan_compact_clear_workspace();
     vulkan_histogram_clear_workspace();
     vulkan_reduce_clear_workspace();
+    vulkan_transform_clear_workspace();
   }
   textures_.clear();
   argpacks_.clear();
@@ -1022,6 +1069,47 @@ void Program::copy_ndarray_to_host(Ndarray *src,
   const RhiResult res = device->readback_data(&src_ptr, &dst_ptr, &size, 1);
   TI_ERROR_IF(res != RhiResult::success,
               "copy_ndarray_to_host failed: {}", res);
+}
+
+bool Program::cuda_device_transform_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::driver_transform_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_device_transform_affine_ndarray(Ndarray *src,
+                                                          Ndarray *dst,
+                                                          int value_type,
+                                                          double scale,
+                                                          double bias) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA device transform is only available on CUDA.");
+  TI_ERROR_IF(!src || !dst, "CUDA device transform received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1,
+              "CUDA device transform currently expects 1D ndarrays.");
+  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
+              "CUDA device transform source and destination sizes differ.");
+  TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
+              "CUDA device transform source and destination dtypes differ.");
+  TI_ERROR_IF(value_type < 0 || value_type > 1,
+              "CUDA device transform received an unsupported value type.");
+  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t),
+              "CUDA device transform currently expects 32-bit values.");
+  TI_ERROR_IF(src->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device transform currently supports at most INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  auto *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
+  auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
+  return cuda::driver_transform_affine(
+      src_ptr, dst_ptr, static_cast<int>(src->get_nelement()),
+      static_cast<cuda::CudaTransformValueType>(value_type), scale, bias);
+#else
+  TI_ERROR("CUDA device transform requires TI_WITH_CUDA=ON.");
+#endif
 }
 
 bool Program::cuda_cub_radix_sort_available() const {
@@ -1657,6 +1745,99 @@ std::size_t Program::cpu_reduce_ndarray(Ndarray *values,
 }
 
 std::size_t Program::cpu_reduce_workspace_bytes() const {
+  return 0;
+}
+
+bool Program::cpu_transform_available() const {
+  return arch_is_cpu(compile_config().arch);
+}
+
+std::size_t Program::cpu_transform_affine_ndarray(Ndarray *src,
+                                                  Ndarray *dst,
+                                                  int value_type,
+                                                  double scale,
+                                                  double bias) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native transform is only available on CPU backends.");
+  TI_ERROR_IF(!src || !dst, "CPU native transform received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1,
+              "CPU native transform currently expects 1D ndarrays.");
+  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
+              "CPU native transform source and destination sizes differ.");
+  TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
+              "CPU native transform source and destination dtypes differ.");
+  TI_ERROR_IF(value_type < 0 || value_type > 1,
+              "CPU native transform received an unsupported value type.");
+  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t),
+              "CPU native transform currently expects 32-bit values.");
+
+  const std::size_t n = src->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = n >= 65536 && target_threads > 1;
+
+  if (value_type == 0) {
+    auto *src_ptr = reinterpret_cast<const uint32_t *>(
+        get_ndarray_data_ptr_as_int(src));
+    auto *dst_ptr =
+        reinterpret_cast<uint32_t *>(get_ndarray_data_ptr_as_int(dst));
+    TI_ERROR_IF(!src_ptr || !dst_ptr,
+                "CPU native transform received a null data pointer.");
+    const uint32_t scale_u32 = static_cast<uint32_t>(
+        static_cast<int32_t>(scale));
+    const uint32_t bias_u32 =
+        static_cast<uint32_t>(static_cast<int32_t>(bias));
+    if (use_parallel) {
+      CpuTransformI32TaskContext ctx;
+      ctx.src = src_ptr;
+      ctx.dst = dst_ptr;
+      ctx.n = n;
+      ctx.scale = scale_u32;
+      ctx.bias = bias_u32;
+      ctx.num_threads = target_threads;
+      auto &pool = get_cpu_primitive_thread_pool(max_threads);
+      pool.run(target_threads, target_threads, &ctx, cpu_transform_i32_task);
+      return 0;
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+      dst_ptr[i] = src_ptr[i] * scale_u32 + bias_u32;
+    }
+    return 0;
+  }
+
+  auto *src_ptr =
+      reinterpret_cast<const float *>(get_ndarray_data_ptr_as_int(src));
+  auto *dst_ptr = reinterpret_cast<float *>(get_ndarray_data_ptr_as_int(dst));
+  TI_ERROR_IF(!src_ptr || !dst_ptr,
+              "CPU native transform received a null data pointer.");
+  const float scale_f32 = static_cast<float>(scale);
+  const float bias_f32 = static_cast<float>(bias);
+  if (use_parallel) {
+    CpuTransformF32TaskContext ctx;
+    ctx.src = src_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.scale = scale_f32;
+    ctx.bias = bias_f32;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx, cpu_transform_f32_task);
+    return 0;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    dst_ptr[i] = src_ptr[i] * scale_f32 + bias_f32;
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_transform_workspace_bytes() const {
   return 0;
 }
 

@@ -675,6 +675,12 @@ void export_lang(py::module &m) {
              py::gil_scoped_release release;
              program->copy_ndarray_to_host(src, info.ptr, bytes);
            })
+      .def("cuda_device_transform_available",
+           &Program::cuda_device_transform_available)
+      .def("cuda_device_transform_affine_ndarray",
+           &Program::cuda_device_transform_affine_ndarray, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("scale"),
+           py::arg("bias"), py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_radix_sort_available",
            &Program::cuda_cub_radix_sort_available)
       .def("cuda_cub_radix_sort_clear_workspace",
@@ -758,6 +764,13 @@ void export_lang(py::module &m) {
       .def("cpu_reduce_ndarray", &Program::cpu_reduce_ndarray,
            py::arg("values"), py::arg("output"), py::arg("value_type"),
            py::arg("op"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_transform_available", &Program::cpu_transform_available)
+      .def("cpu_transform_workspace_bytes",
+           &Program::cpu_transform_workspace_bytes)
+      .def("cpu_transform_affine_ndarray",
+           &Program::cpu_transform_affine_ndarray, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("scale"),
+           py::arg("bias"), py::call_guard<py::gil_scoped_release>())
       .def("vulkan_radix_sort_available",
            &Program::vulkan_radix_sort_available)
       .def("vulkan_radix_sort_clear_workspace",
@@ -809,6 +822,16 @@ void export_lang(py::module &m) {
            &Program::vulkan_reduce_i32_ndarray, py::arg("values"),
            py::arg("output"), py::arg("op"),
            py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_transform_available", &Program::vulkan_transform_available)
+      .def("vulkan_transform_clear_workspace",
+           &Program::vulkan_transform_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_transform_workspace_bytes",
+           &Program::vulkan_transform_workspace_bytes)
+      .def("vulkan_transform_affine_ndarray",
+           &Program::vulkan_transform_affine_ndarray, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("scale"),
+           py::arg("bias"), py::call_guard<py::gil_scoped_release>())
       .def("vulkan_radix_sort_u32_ndarray",
            &Program::vulkan_radix_sort_u32_ndarray, py::arg("keys"),
            py::arg("values"), py::arg("key_type"),

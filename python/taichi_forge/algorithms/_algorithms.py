@@ -35,6 +35,10 @@ from taichi_forge._kernels import (
     sort_radix_scatter_u32_i32_ndarray,
     sort_radix_store_zero_count,
     sort_radix_store_zero_count_ndarray,
+    transform_affine_f32_field,
+    transform_affine_f32_ndarray,
+    transform_affine_i32_field,
+    transform_affine_i32_ndarray,
     uniform_add,
     uniform_add_cuda,
     uniform_add_ndarray,
@@ -69,6 +73,14 @@ _SUPPORTED_REDUCE_METHODS = {
     "field_atomic",
 }
 _SUPPORTED_REDUCE_OPS = {"sum": 0, "min": 1, "max": 2}
+_SUPPORTED_TRANSFORM_METHODS = {
+    "auto",
+    "cuda_device",
+    "vulkan_native",
+    "cpu_native",
+    "kernel",
+    "field_kernel",
+}
 _REDUCE_FIELD_PRIVATE_MIN_N = 65536
 _REDUCE_FIELD_PRIVATE_CHUNK_SIZE = 2048
 _HISTOGRAM_FIELD_PRIVATE_MIN_N = 65536
@@ -400,6 +412,37 @@ class HistogramWorkspace:
                 self.workspace_bytes_peak, self.workspace_bytes_current
             )
         return self._field_buffers[key]
+
+
+class TransformWorkspace:
+    """Workspace metadata for experimental affine transforms.
+
+    CUDA driver and CPU native paths are zero-workspace. Vulkan native uses one
+    cached 8-byte params buffer; field/SNode fallback stays in Forge kernels.
+    """
+
+    def __init__(self, max_items=None):
+        self.max_items = max_items
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._vulkan_native_active = False
+
+    def check_shape(self, n):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} transform items, exceeding max_items={self.max_items}."
+            )
+
+    def clear(self):
+        if self._vulkan_native_active:
+            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            if hasattr(prog, "vulkan_transform_clear_workspace"):
+                prog.vulkan_transform_clear_workspace()
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._vulkan_native_active = False
 
 
 def _dtype_nbytes(dtype):
@@ -1641,6 +1684,190 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
     _histogram_field_atomic(values, bins, workspace, method)
 
 
+def _transform_value_type(dtype):
+    if dtype == i32:
+        return 0
+    if dtype == f32:
+        return 1
+    raise TypeError("experimental_transform() currently supports ti.i32 and ti.f32.")
+
+
+def _as_i32_transform_arg(name, value):
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"experimental_transform() i32 {name} must be integral.") from exc
+    if result != value:
+        raise TypeError(f"experimental_transform() i32 {name} must be integral.")
+    if result < -(1 << 31) or result > (1 << 31) - 1:
+        raise ValueError(f"experimental_transform() i32 {name} is out of range.")
+    return result
+
+
+def _normalize_transform_args(dtype, scale, bias):
+    if dtype == i32:
+        return (
+            _as_i32_transform_arg("scale", scale),
+            _as_i32_transform_arg("bias", bias),
+        )
+    if dtype == f32:
+        return float(scale), float(bias)
+    raise TypeError("experimental_transform() currently supports ti.i32 and ti.f32.")
+
+
+def _check_transform_request(src, dst, method, workspace):
+    if method not in _SUPPORTED_TRANSFORM_METHODS:
+        raise NotImplementedError(f"transform method '{method}' is not implemented.")
+    if not (_is_1d(src) and _is_1d(dst)):
+        raise ValueError("experimental_transform() expects 1D source and destination.")
+    if src.shape[0] != dst.shape[0]:
+        raise ValueError("experimental_transform() source and destination sizes differ.")
+    if src.dtype != dst.dtype:
+        raise TypeError("experimental_transform() source and destination dtype must match.")
+    if src.dtype not in (i32, f32):
+        raise TypeError("experimental_transform() currently supports ti.i32 and ti.f32.")
+    if isinstance(src, Ndarray) or isinstance(dst, Ndarray):
+        if not (isinstance(src, Ndarray) and isinstance(dst, Ndarray)):
+            raise TypeError(
+                "experimental_transform() ndarray mode requires source and "
+                "destination both to be ti.ndarray."
+            )
+    if workspace is not None and not isinstance(workspace, TransformWorkspace):
+        raise TypeError("workspace must be a TransformWorkspace instance or None.")
+
+
+def _try_cuda_device_transform(src, dst, value_type, scale, bias):
+    if current_cfg().arch != cuda:
+        return False
+    if not (isinstance(src, Ndarray) and isinstance(dst, Ndarray)):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cuda_device_transform_available"):
+        return False
+    if not prog.cuda_device_transform_available():
+        return False
+    prog.cuda_device_transform_affine_ndarray(src.arr, dst.arr, value_type, scale, bias)
+    return True
+
+
+def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
+    if current_cfg().arch != vulkan:
+        return False
+    if not (isinstance(src, Ndarray) and isinstance(dst, Ndarray)):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "vulkan_transform_available"):
+        return False
+    if not prog.vulkan_transform_available():
+        return False
+    temp_bytes = prog.vulkan_transform_affine_ndarray(
+        src.arr, dst.arr, value_type, scale, bias
+    )
+    if workspace is not None:
+        workspace._vulkan_native_active = True
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+    return True
+
+
+def _try_cpu_transform(src, dst, value_type, scale, bias):
+    if current_cfg().arch not in [x64, arm64]:
+        return False
+    if not (isinstance(src, Ndarray) and isinstance(dst, Ndarray)):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cpu_transform_available"):
+        return False
+    if not prog.cpu_transform_available():
+        return False
+    prog.cpu_transform_affine_ndarray(src.arr, dst.arr, value_type, scale, bias)
+    return True
+
+
+def _transform_kernel(src, dst, scale, bias):
+    n = src.shape[0]
+    if isinstance(src, Ndarray):
+        if src.dtype == i32:
+            transform_affine_i32_ndarray(src, dst, scale, bias, n)
+        else:
+            transform_affine_f32_ndarray(src, dst, scale, bias, n)
+    else:
+        if src.dtype == i32:
+            transform_affine_i32_field(src, dst, scale, bias, n)
+        else:
+            transform_affine_f32_field(src, dst, scale, bias, n)
+    sync()
+
+
+def experimental_transform(
+    src,
+    dst,
+    *,
+    scale=1,
+    bias=0,
+    method="auto",
+    workspace=None,
+):
+    """Apply ``dst[i] = src[i] * scale + bias`` to a 1D array.
+
+    This is an experimental primitive. Contiguous ndarray inputs route to
+    backend native implementations when available: CUDA uses driver-level
+    device API/PTX, Vulkan uses compute shaders, and CPU uses a host native
+    loop. Field/SNode fallback stays in Forge kernels to preserve layout and
+    offset semantics.
+    """
+
+    _check_transform_request(src, dst, method, workspace)
+    if workspace is None:
+        workspace = TransformWorkspace(max_items=src.shape[0])
+    workspace.check_shape(src.shape[0])
+    scale, bias = _normalize_transform_args(src.dtype, scale, bias)
+    value_type = _transform_value_type(src.dtype)
+    if src.shape[0] == 0:
+        return workspace
+    if method in ("auto", "cuda_device") and _try_cuda_device_transform(
+        src, dst, value_type, scale, bias
+    ):
+        return workspace
+    if method == "cuda_device":
+        raise RuntimeError(
+            "method='cuda_device' requires CUDA ndarray inputs and available "
+            "CUDA driver transform support."
+        )
+    if method in ("auto", "vulkan_native") and _try_vulkan_transform(
+        src, dst, value_type, scale, bias, workspace
+    ):
+        return workspace
+    if method == "vulkan_native":
+        raise RuntimeError(
+            "method='vulkan_native' requires Vulkan ndarray inputs and available "
+            "native transform shaders."
+        )
+    if method in ("auto", "cpu_native") and _try_cpu_transform(
+        src, dst, value_type, scale, bias
+    ):
+        return workspace
+    if method == "cpu_native":
+        raise RuntimeError(
+            "method='cpu_native' requires CPU ndarray inputs and available native "
+            "transform."
+        )
+    if method in ("kernel", "field_kernel", "auto"):
+        _transform_kernel(src, dst, scale, bias)
+        return workspace
+    raise RuntimeError("experimental_transform() could not find an available backend.")
+
+
 def parallel_sort(keys, values=None):
     """Compatibility wrapper for the legacy public sorting API."""
 
@@ -1802,7 +2029,9 @@ __all__ = [
     "CompactWorkspace",
     "ReduceWorkspace",
     "HistogramWorkspace",
+    "TransformWorkspace",
     "experimental_compact",
     "experimental_reduce",
     "experimental_histogram",
+    "experimental_transform",
 ]

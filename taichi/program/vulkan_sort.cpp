@@ -3,7 +3,9 @@
 #include "taichi/util/environ_config.h"
 
 #include <array>
+#include <cstring>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -256,6 +258,12 @@ static const uint32_t kReduceI32MinSingleSpv[] =
     ;
 static const uint32_t kReduceI32MaxSingleSpv[] =
 #include "taichi/program/vulkan_sort_shaders/reduce_i32_max_single.comp.spv.h"
+    ;
+static const uint32_t kTransformI32AffineSpv[] =
+#include "taichi/program/vulkan_sort_shaders/transform_i32_affine.comp.spv.h"
+    ;
+static const uint32_t kTransformF32AffineSpv[] =
+#include "taichi/program/vulkan_sort_shaders/transform_f32_affine.comp.spv.h"
     ;
 
 static const uint32_t kRankHistShift0Spv[] =
@@ -1346,6 +1354,73 @@ struct VulkanReduceCache {
   }
 };
 
+struct VulkanTransformCache {
+  Device *device{nullptr};
+  size_t cached_bytes{0};
+  DeviceAllocation params{kDeviceNullAllocation};
+  std::unique_ptr<Pipeline> transform_i32_affine;
+  std::unique_ptr<Pipeline> transform_f32_affine;
+  std::unique_ptr<ShaderResourceSet> affine_bindings;
+
+  void clear_allocs() {
+    if (device && params != kDeviceNullAllocation) {
+      device->dealloc_memory(params);
+    }
+    params = kDeviceNullAllocation;
+    affine_bindings.reset();
+    cached_bytes = 0;
+  }
+
+  ~VulkanTransformCache() {
+    clear_allocs();
+  }
+
+  void ensure_pipelines(Device *dev) {
+    if (device == dev && transform_i32_affine) {
+      ensure_params();
+      return;
+    }
+    if (device && device != dev) {
+      clear_allocs();
+      transform_i32_affine.reset();
+      transform_f32_affine.reset();
+      affine_bindings.reset();
+    }
+    device = dev;
+    transform_i32_affine = create_pipeline(
+        dev, kTransformI32AffineSpv, "vulkan_transform_i32_affine");
+    transform_f32_affine = create_pipeline(
+        dev, kTransformF32AffineSpv, "vulkan_transform_f32_affine");
+    ensure_params();
+  }
+
+  DeviceAllocation alloc_storage(size_t bytes) {
+    DeviceAllocation alloc{kDeviceNullAllocation};
+    Device::AllocParams alloc_params;
+    alloc_params.size = bytes;
+    alloc_params.usage = AllocUsage::Storage;
+    RhiResult res = device->allocate_memory(alloc_params, &alloc);
+    TI_ERROR_IF(res != RhiResult::success,
+                "Failed to allocate Vulkan transform workspace: RhiResult({})",
+                res);
+    return alloc;
+  }
+
+  void ensure_params() {
+    if (params == kDeviceNullAllocation) {
+      params = alloc_storage(2 * sizeof(uint32_t));
+    }
+    cached_bytes = 2 * sizeof(uint32_t);
+  }
+
+  ShaderResourceSet *cached_affine_resource_set() {
+    if (!affine_bindings) {
+      affine_bindings.reset(device->create_resource_set());
+    }
+    return affine_bindings.get();
+  }
+};
+
 std::mutex g_vulkan_sort_mutex;
 std::unordered_map<void *, std::unique_ptr<VulkanRadixSortCache>>
     g_vulkan_sort_caches;
@@ -1361,6 +1436,9 @@ std::unordered_map<void *, std::unique_ptr<VulkanHistogramCache>>
 std::mutex g_vulkan_reduce_mutex;
 std::unordered_map<void *, std::unique_ptr<VulkanReduceCache>>
     g_vulkan_reduce_caches;
+std::mutex g_vulkan_transform_mutex;
+std::unordered_map<void *, std::unique_ptr<VulkanTransformCache>>
+    g_vulkan_transform_caches;
 
 VulkanRadixSortCache &get_cache(void *owner, Device *device) {
   std::lock_guard<std::mutex> guard(g_vulkan_sort_mutex);
@@ -1407,6 +1485,16 @@ VulkanReduceCache &get_reduce_cache(void *owner, Device *device) {
   auto &cache = g_vulkan_reduce_caches[owner];
   if (!cache) {
     cache = std::make_unique<VulkanReduceCache>();
+  }
+  cache->ensure_pipelines(device);
+  return *cache;
+}
+
+VulkanTransformCache &get_transform_cache(void *owner, Device *device) {
+  std::lock_guard<std::mutex> guard(g_vulkan_transform_mutex);
+  auto &cache = g_vulkan_transform_caches[owner];
+  if (!cache) {
+    cache = std::make_unique<VulkanTransformCache>();
   }
   cache->ensure_pipelines(device);
   return *cache;
@@ -1766,6 +1854,10 @@ bool Program::vulkan_histogram_available() const {
 }
 
 bool Program::vulkan_reduce_available() const {
+  return compile_config().arch == Arch::vulkan;
+}
+
+bool Program::vulkan_transform_available() const {
   return compile_config().arch == Arch::vulkan;
 }
 
@@ -2154,6 +2246,85 @@ std::size_t Program::vulkan_reduce_i32_ndarray(Ndarray *values,
                             scope_name("vulkan_reduce_i32_final"));
           cmdlist->buffer_barrier(output_alloc);
         }
+      },
+      {});
+  return cache.cached_bytes;
+}
+
+std::size_t Program::vulkan_transform_affine_ndarray(Ndarray *src,
+                                                     Ndarray *dst,
+                                                     int value_type,
+                                                     double scale,
+                                                     double bias) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native transform is only available on Vulkan.");
+  TI_ERROR_IF(!src || !dst, "Vulkan native transform received null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1,
+              "Vulkan native transform expects 1D ndarrays.");
+  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
+              "Vulkan native transform source and destination sizes differ.");
+  TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
+              "Vulkan native transform source and destination dtypes differ.");
+  TI_ERROR_IF(value_type < 0 || value_type > 1,
+              "Vulkan native transform received an unsupported value type.");
+  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t),
+              "Vulkan native transform currently expects 32-bit values.");
+  TI_ERROR_IF(src->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native transform currently supports at most UINT32_MAX "
+              "items.");
+
+  const size_t n = src->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native transform requires a compute device.");
+  auto &cache = get_transform_cache(this, device);
+
+  uint32_t scale_bits = 0;
+  uint32_t bias_bits = 0;
+  if (value_type == 0) {
+    scale_bits = static_cast<uint32_t>(static_cast<int32_t>(scale));
+    bias_bits = static_cast<uint32_t>(static_cast<int32_t>(bias));
+  } else {
+    float scale_f32 = static_cast<float>(scale);
+    float bias_f32 = static_cast<float>(bias);
+    std::memcpy(&scale_bits, &scale_f32, sizeof(scale_bits));
+    std::memcpy(&bias_bits, &bias_f32, sizeof(bias_bits));
+  }
+
+  DeviceAllocation src_alloc = src->ndarray_alloc_;
+  DeviceAllocation dst_alloc = dst->ndarray_alloc_;
+  DeviceAllocation params_alloc = cache.params;
+  const bool bind_static_params = !cache.affine_bindings;
+  ShaderResourceSet *bindings = cache.cached_affine_resource_set();
+  Pipeline *pipeline = value_type == 0 ? cache.transform_i32_affine.get()
+                                       : cache.transform_f32_affine.get();
+  const size_t bytes = n * sizeof(uint32_t);
+  const size_t params_bytes = 2 * sizeof(uint32_t);
+  const uint32_t groups =
+      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
+  const bool profiler_scopes = profiler != nullptr;
+
+  enqueue_compute_op_lambda(
+      [src_alloc, dst_alloc, params_alloc, bindings, bind_static_params,
+       pipeline, bytes, params_bytes, scale_bits, bias_bits, groups,
+       profiler_scopes](Device *op_device, CommandList *cmdlist) {
+        cmdlist->buffer_fill(params_alloc.get_ptr(0), sizeof(uint32_t),
+                             scale_bits);
+        cmdlist->buffer_fill(params_alloc.get_ptr(sizeof(uint32_t)),
+                             sizeof(uint32_t), bias_bits);
+        cmdlist->buffer_barrier(params_alloc);
+        bindings->rw_buffer(0, src_alloc.get_ptr(0), bytes);
+        bindings->rw_buffer(1, dst_alloc.get_ptr(0), bytes);
+        if (bind_static_params) {
+          bindings->rw_buffer(2, params_alloc.get_ptr(0), params_bytes);
+        }
+        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
+                          profiler_scopes ? "vulkan_transform_affine"
+                                          : nullptr);
+        cmdlist->buffer_barrier(dst_alloc);
       },
       {});
   return cache.cached_bytes;
@@ -2699,6 +2870,25 @@ void Program::vulkan_reduce_clear_workspace() {
   }
 }
 
+void Program::vulkan_transform_clear_workspace() {
+  bool sync_before_clear = false;
+  {
+    std::lock_guard<std::mutex> guard(g_vulkan_transform_mutex);
+    auto it = g_vulkan_transform_caches.find(this);
+    sync_before_clear =
+        it != g_vulkan_transform_caches.end() &&
+        it->second->params != kDeviceNullAllocation;
+  }
+  if (sync_before_clear) {
+    synchronize();
+  }
+  std::lock_guard<std::mutex> guard(g_vulkan_transform_mutex);
+  auto it = g_vulkan_transform_caches.find(this);
+  if (it != g_vulkan_transform_caches.end()) {
+    g_vulkan_transform_caches.erase(it);
+  }
+}
+
 std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
   std::lock_guard<std::mutex> guard(g_vulkan_sort_mutex);
   auto it = g_vulkan_sort_caches.find(const_cast<Program *>(this));
@@ -2744,6 +2934,15 @@ std::size_t Program::vulkan_reduce_workspace_bytes() const {
   return it->second->cached_bytes;
 }
 
+std::size_t Program::vulkan_transform_workspace_bytes() const {
+  std::lock_guard<std::mutex> guard(g_vulkan_transform_mutex);
+  auto it = g_vulkan_transform_caches.find(const_cast<Program *>(this));
+  if (it == g_vulkan_transform_caches.end()) {
+    return 0;
+  }
+  return it->second->cached_bytes;
+}
+
 void Program::vulkan_radix_sort_cpu_profile_clear() {
   g_vulkan_sort_cpu_profile.clear();
 }
@@ -2775,6 +2974,10 @@ bool Program::vulkan_histogram_available() const {
 }
 
 bool Program::vulkan_reduce_available() const {
+  return false;
+}
+
+bool Program::vulkan_transform_available() const {
   return false;
 }
 
@@ -2812,6 +3015,15 @@ std::size_t Program::vulkan_reduce_i32_ndarray(Ndarray *values,
   return 0;
 }
 
+std::size_t Program::vulkan_transform_affine_ndarray(Ndarray *src,
+                                                     Ndarray *dst,
+                                                     int value_type,
+                                                     double scale,
+                                                     double bias) {
+  TI_ERROR("Vulkan native transform requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 void Program::vulkan_radix_sort_clear_workspace() {
 }
 
@@ -2825,6 +3037,9 @@ void Program::vulkan_histogram_clear_workspace() {
 }
 
 void Program::vulkan_reduce_clear_workspace() {
+}
+
+void Program::vulkan_transform_clear_workspace() {
 }
 
 std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
@@ -2844,6 +3059,10 @@ std::size_t Program::vulkan_histogram_workspace_bytes() const {
 }
 
 std::size_t Program::vulkan_reduce_workspace_bytes() const {
+  return 0;
+}
+
+std::size_t Program::vulkan_transform_workspace_bytes() const {
   return 0;
 }
 

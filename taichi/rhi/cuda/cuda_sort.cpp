@@ -2,6 +2,8 @@
 
 #include "taichi/common/core.h"
 #include "taichi/common/dynamic_loader.h"
+#include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/rhi/cuda/cuda_driver.h"
 
 #include <cstdlib>
 #include <memory>
@@ -174,7 +176,165 @@ const std::string &cudart_error() {
 
 #endif
 
+const char kCudaTransformPtx[] = R"ptx(
+.version 6.0
+.target sm_50
+.address_size 64
+
+.visible .entry transform_i32_affine(
+    .param .u64 src_param,
+    .param .u64 dst_param,
+    .param .u32 n_param,
+    .param .u32 scale_param,
+    .param .u32 bias_param
+)
+{
+    .reg .pred %p<2>;
+    .reg .b32 %r<10>;
+    .reg .b64 %rd<8>;
+
+    ld.param.u64 %rd1, [src_param];
+    ld.param.u64 %rd2, [dst_param];
+    ld.param.u32 %r1, [n_param];
+    ld.param.u32 %r2, [scale_param];
+    ld.param.u32 %r3, [bias_param];
+
+    mov.u32 %r4, %ctaid.x;
+    mov.u32 %r5, %ntid.x;
+    mov.u32 %r6, %tid.x;
+    mad.lo.u32 %r7, %r4, %r5, %r6;
+    setp.ge.u32 %p1, %r7, %r1;
+    @%p1 bra DONE_I32;
+
+    mul.wide.u32 %rd3, %r7, 4;
+    add.u64 %rd4, %rd1, %rd3;
+    add.u64 %rd5, %rd2, %rd3;
+    ld.global.u32 %r8, [%rd4];
+    mul.lo.u32 %r9, %r8, %r2;
+    add.u32 %r9, %r9, %r3;
+    st.global.u32 [%rd5], %r9;
+
+DONE_I32:
+    ret;
+}
+
+.visible .entry transform_f32_affine(
+    .param .u64 src_param,
+    .param .u64 dst_param,
+    .param .u32 n_param,
+    .param .f32 scale_param,
+    .param .f32 bias_param
+)
+{
+    .reg .pred %p<2>;
+    .reg .b32 %r<6>;
+    .reg .b64 %rd<8>;
+    .reg .f32 %f<5>;
+
+    ld.param.u64 %rd1, [src_param];
+    ld.param.u64 %rd2, [dst_param];
+    ld.param.u32 %r1, [n_param];
+    ld.param.f32 %f1, [scale_param];
+    ld.param.f32 %f2, [bias_param];
+
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.u32 %r5, %r2, %r3, %r4;
+    setp.ge.u32 %p1, %r5, %r1;
+    @%p1 bra DONE_F32;
+
+    mul.wide.u32 %rd3, %r5, 4;
+    add.u64 %rd4, %rd1, %rd3;
+    add.u64 %rd5, %rd2, %rd3;
+    ld.global.f32 %f3, [%rd4];
+    mul.rn.f32 %f4, %f3, %f1;
+    add.rn.f32 %f4, %f4, %f2;
+    st.global.f32 [%rd5], %f4;
+
+DONE_F32:
+    ret;
+}
+)ptx";
+
+std::once_flag transform_module_once;
+void *transform_module{nullptr};
+void *transform_i32_func{nullptr};
+void *transform_f32_func{nullptr};
+
+void load_transform_module_once() {
+  auto &ctx = CUDAContext::get_instance();
+  auto context_guard = ctx.get_guard();
+  auto &driver = CUDADriver::get_instance();
+  driver.module_load_data_ex(&transform_module, kCudaTransformPtx, 0, nullptr,
+                             nullptr);
+  driver.module_get_function(&transform_i32_func, transform_module,
+                             "transform_i32_affine");
+  driver.module_get_function(&transform_f32_func, transform_module,
+                             "transform_f32_affine");
+}
+
+void *cuda_transform_function(CudaTransformValueType value_type) {
+  std::call_once(transform_module_once, load_transform_module_once);
+  switch (value_type) {
+    case CudaTransformValueType::i32:
+      return transform_i32_func;
+    case CudaTransformValueType::f32:
+      return transform_f32_func;
+  }
+  TI_ERROR("Unsupported CUDA transform value type.");
+  return nullptr;
+}
+
 }  // namespace
+
+bool driver_transform_available() {
+  return CUDADriver::get_instance_without_context().detected();
+}
+
+std::size_t driver_transform_affine(void *src,
+                                    void *dst,
+                                    int num_items,
+                                    CudaTransformValueType value_type,
+                                    double scale,
+                                    double bias) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA driver transform expects non-negative num_items.");
+  TI_ERROR_IF(!src || !dst, "CUDA driver transform received a null pointer.");
+  if (num_items == 0) {
+    return 0;
+  }
+  constexpr unsigned kBlockDim = 256;
+  const unsigned grid_dim =
+      static_cast<unsigned>((num_items + kBlockDim - 1) / kBlockDim);
+  void *func = cuda_transform_function(value_type);
+  void *src_arg = src;
+  void *dst_arg = dst;
+  uint32_t n_arg = static_cast<uint32_t>(num_items);
+  std::vector<void *> args;
+  args.reserve(5);
+  args.push_back(&src_arg);
+  args.push_back(&dst_arg);
+  args.push_back(&n_arg);
+  int32_t scale_i32 = 0;
+  int32_t bias_i32 = 0;
+  float scale_f32 = 0.0f;
+  float bias_f32 = 0.0f;
+  if (value_type == CudaTransformValueType::i32) {
+    scale_i32 = static_cast<int32_t>(scale);
+    bias_i32 = static_cast<int32_t>(bias);
+    args.push_back(&scale_i32);
+    args.push_back(&bias_i32);
+  } else {
+    scale_f32 = static_cast<float>(scale);
+    bias_f32 = static_cast<float>(bias);
+    args.push_back(&scale_f32);
+    args.push_back(&bias_f32);
+  }
+  CUDAContext::get_instance().launch(func, "cuda_transform_affine", args, {},
+                                     grid_dim, kBlockDim, 0);
+  return 0;
+}
 
 bool cub_radix_sort_available() {
 #if defined(TI_WITH_CUDA_TOOLKIT)

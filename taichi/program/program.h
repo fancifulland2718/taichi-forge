@@ -316,6 +316,14 @@ class TI_DLL_EXPORT Program {
 
   void copy_ndarray_to_host(Ndarray *src, void *dst, std::size_t bytes);
 
+  bool cuda_device_transform_available() const;
+
+  std::size_t cuda_device_transform_affine_ndarray(Ndarray *src,
+                                                   Ndarray *dst,
+                                                   int value_type,
+                                                   double scale,
+                                                   double bias);
+
   bool cuda_cub_radix_sort_available() const;
 
   std::size_t cuda_cub_radix_sort_ndarray(Ndarray *keys,
@@ -396,6 +404,16 @@ class TI_DLL_EXPORT Program {
 
   std::size_t cpu_reduce_workspace_bytes() const;
 
+  bool cpu_transform_available() const;
+
+  std::size_t cpu_transform_affine_ndarray(Ndarray *src,
+                                           Ndarray *dst,
+                                           int value_type,
+                                           double scale,
+                                           double bias);
+
+  std::size_t cpu_transform_workspace_bytes() const;
+
   bool vulkan_radix_sort_available() const;
 
   std::size_t vulkan_radix_sort_u32_ndarray(Ndarray *keys,
@@ -446,6 +464,18 @@ class TI_DLL_EXPORT Program {
   void vulkan_reduce_clear_workspace();
 
   std::size_t vulkan_reduce_workspace_bytes() const;
+
+  bool vulkan_transform_available() const;
+
+  std::size_t vulkan_transform_affine_ndarray(Ndarray *src,
+                                              Ndarray *dst,
+                                              int value_type,
+                                              double scale,
+                                              double bias);
+
+  void vulkan_transform_clear_workspace();
+
+  std::size_t vulkan_transform_workspace_bytes() const;
 
   Identifier get_next_global_id(const std::string &name = "") {
     return Identifier(global_id_counter_++, name);
