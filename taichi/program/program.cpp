@@ -518,7 +518,11 @@ void Program::finalize() {
   synchronize();
   if (compile_config().arch == Arch::vulkan) {
     vulkan_radix_sort_clear_workspace();
+    vulkan_scan_clear_workspace();
   }
+  textures_.clear();
+  argpacks_.clear();
+  ndarrays_.clear();
   if (arch_uses_llvm(compile_config().arch) ||
       compile_config().arch == Arch::vulkan) {
     program_impl_->finalize();
@@ -762,6 +766,95 @@ std::size_t Program::cuda_cub_radix_sort_workspace_bytes() const {
     return cuda::cub_radix_sort_cached_bytes(const_cast<Program *>(this));
   }
 #endif
+  return 0;
+}
+
+bool Program::cuda_cub_scan_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::cub_inclusive_scan_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_cub_inclusive_scan_ndarray(Ndarray *data,
+                                                     int value_type) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB scan is only available on the CUDA backend.");
+  TI_ERROR_IF(!data, "CUDA CUB scan received a null ndarray.");
+  TI_ERROR_IF(data->shape.size() != 1,
+              "CUDA CUB scan currently expects a 1D ndarray.");
+#ifdef TI_WITH_CUDA
+  const auto cub_value_type = static_cast<cuda::CubScanValueType>(value_type);
+  std::size_t expected_value_size = 0;
+  switch (cub_value_type) {
+    case cuda::CubScanValueType::i32:
+      expected_value_size = sizeof(int32_t);
+      break;
+  }
+  TI_ERROR_IF(expected_value_size == 0,
+              "CUDA CUB scan received an unsupported value type.");
+  TI_ERROR_IF(data->get_element_size() != expected_value_size,
+              "CUDA CUB scan dtype does not match the requested value type.");
+  auto data_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(data));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_inclusive_scan(
+      data_ptr, static_cast<int>(data->get_nelement()), cub_value_type, stream,
+      this);
+#else
+  TI_ERROR(
+      "CUDA CUB scan requires building Taichi with TI_WITH_CUDA=ON and "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+void Program::cuda_cub_scan_clear_workspace() {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    cuda::cub_inclusive_scan_clear_cache(this);
+  }
+#endif
+}
+
+std::size_t Program::cuda_cub_scan_workspace_bytes() const {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    return cuda::cub_inclusive_scan_cached_bytes(const_cast<Program *>(this));
+  }
+#endif
+  return 0;
+}
+
+bool Program::cpu_scan_available() const {
+  return arch_is_cpu(compile_config().arch);
+}
+
+std::size_t Program::cpu_inclusive_scan_ndarray(Ndarray *data,
+                                                int value_type) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native scan is only available on CPU backends.");
+  TI_ERROR_IF(!data, "CPU native scan received a null ndarray.");
+  TI_ERROR_IF(data->shape.size() != 1,
+              "CPU native scan currently expects a 1D ndarray.");
+  TI_ERROR_IF(value_type != 0,
+              "CPU native scan currently supports only i32 values.");
+  TI_ERROR_IF(data->get_element_size() != sizeof(int32_t),
+              "CPU native scan currently expects i32 data.");
+
+  uint32_t *ptr =
+      reinterpret_cast<uint32_t *>(get_ndarray_data_ptr_as_int(data));
+  TI_ERROR_IF(!ptr, "CPU native scan received a null data pointer.");
+  uint32_t prefix = 0;
+  const std::size_t n = data->get_nelement();
+  for (std::size_t i = 0; i < n; ++i) {
+    prefix += ptr[i];
+    ptr[i] = prefix;
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_scan_workspace_bytes() const {
   return 0;
 }
 

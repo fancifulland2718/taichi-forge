@@ -3,6 +3,7 @@ import json
 import numbers
 import os
 import sys
+import weakref
 from types import FunctionType, MethodType
 from typing import Any, Iterable, Sequence
 
@@ -376,6 +377,21 @@ class PyTaichi:
         self._ti_func_expansion_profile: bool = bool(
             int(os.environ.get("TI_FUNC_EXPANSION_PROFILE", "0"))
         )
+        self._runtime_object_refs = []
+
+    def register_runtime_object(self, obj):
+        self._runtime_object_refs.append(weakref.ref(obj))
+
+    def invalidate_runtime_objects(self):
+        refs = self._runtime_object_refs
+        self._runtime_object_refs = []
+        for ref in refs:
+            obj = ref()
+            if obj is None:
+                continue
+            invalidate = getattr(obj, "_invalidate_runtime", None)
+            if invalidate is not None:
+                invalidate()
 
     def initialize_fields_builder(self, builder):
         self.unfinalized_fields_builder[builder] = get_traceback(2)
@@ -542,6 +558,7 @@ class PyTaichi:
             self._signal_handler_registry = _ti_core.HackedSignalRegister()
 
     def clear(self):
+        self.invalidate_runtime_objects()
         if self.prog:
             self.prog.finalize()
             self.prog = None

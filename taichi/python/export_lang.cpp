@@ -673,6 +673,21 @@ void export_lang(py::module &m) {
            py::arg("keys"), py::arg("key_type"), py::arg("mode"),
            py::arg("nan_policy"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_scan_available", &Program::cuda_cub_scan_available)
+      .def("cuda_cub_scan_clear_workspace",
+           &Program::cuda_cub_scan_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_scan_workspace_bytes",
+           &Program::cuda_cub_scan_workspace_bytes)
+      .def("cuda_cub_inclusive_scan_ndarray",
+           &Program::cuda_cub_inclusive_scan_ndarray, py::arg("data"),
+           py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_scan_available", &Program::cpu_scan_available)
+      .def("cpu_scan_workspace_bytes", &Program::cpu_scan_workspace_bytes)
+      .def("cpu_inclusive_scan_ndarray",
+           &Program::cpu_inclusive_scan_ndarray, py::arg("data"),
+           py::arg("value_type"), py::call_guard<py::gil_scoped_release>())
       .def("vulkan_radix_sort_available",
            &Program::vulkan_radix_sort_available)
       .def("vulkan_radix_sort_clear_workspace",
@@ -684,6 +699,16 @@ void export_lang(py::module &m) {
            &Program::vulkan_radix_sort_cpu_profile_clear)
       .def("vulkan_radix_sort_cpu_profile_report",
            &Program::vulkan_radix_sort_cpu_profile_report)
+      .def("vulkan_scan_available", &Program::vulkan_scan_available)
+      .def("vulkan_scan_clear_workspace",
+           &Program::vulkan_scan_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_scan_workspace_bytes",
+           &Program::vulkan_scan_workspace_bytes)
+      .def("vulkan_inclusive_scan_ndarray",
+           &Program::vulkan_inclusive_scan_ndarray, py::arg("data"),
+           py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_radix_sort_u32_ndarray",
            &Program::vulkan_radix_sort_u32_ndarray, py::arg("keys"),
            py::arg("values"), py::arg("key_type"),

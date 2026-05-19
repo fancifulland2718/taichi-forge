@@ -103,10 +103,17 @@ class Texture:
     """
 
     def __init__(self, fmt, arr_shape):
-        self.tex = impl.get_runtime().prog.create_texture(fmt, arr_shape)
+        runtime = impl.get_runtime()
+        self._runtime_prog = runtime.prog
+        self.tex = self._runtime_prog.create_texture(fmt, arr_shape)
         self.fmt = fmt
         self.num_dims = len(arr_shape)
         self.shape = arr_shape
+        runtime.register_runtime_object(self)
+
+    def _invalidate_runtime(self):
+        self.tex = None
+        self._runtime_prog = None
 
     def from_ndarray(self, ndarray):
         """Loads an ndarray to texture.

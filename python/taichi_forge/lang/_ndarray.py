@@ -25,6 +25,25 @@ class Ndarray:
         self.arr = None
         self.layout = Layout.AOS
         self.grad = None
+        self._runtime_prog = None
+
+    def _register_runtime_object(self):
+        runtime = impl.get_runtime()
+        self._runtime_prog = runtime.prog
+        runtime.register_runtime_object(self)
+
+    def _invalidate_runtime(self):
+        self.host_accessor = None
+        self.arr = None
+        self._runtime_prog = None
+        self.grad = None
+
+    def _delete_runtime_ndarray(self):
+        prog = self._runtime_prog
+        arr = self.arr
+        self._invalidate_runtime()
+        if prog is not None and arr is not None:
+            prog.delete_ndarray(arr)
 
     def get_type(self):
         return NdarrayTypeMetadata(self.element_type, self.shape, self.grad is not None)
@@ -240,12 +259,16 @@ class ScalarNdarray(Ndarray):
         self.arr = impl.get_runtime().prog.create_ndarray(
             self.dtype, arr_shape, layout=Layout.NULL, zero_fill=True, dbg_info=_ti_core.DebugInfo(get_traceback())
         )
+        self._register_runtime_object()
         self.shape = tuple(self.arr.shape)
         self.element_type = dtype
 
     def __del__(self):
-        if impl is not None and impl.get_runtime() is not None and impl.get_runtime().prog is not None:
-            impl.get_runtime().prog.delete_ndarray(self.arr)
+        if impl is not None:
+            try:
+                self._delete_runtime_ndarray()
+            except Exception:
+                pass
 
     @property
     def element_shape(self):

@@ -8,6 +8,7 @@
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
+#include <vector>
 
 #if defined(TI_WITH_VULKAN)
 
@@ -190,6 +191,18 @@ static const uint32_t kPrefixChunksSpv[] =
     ;
 static const uint32_t kPrefixSingleChunkSpv[] =
 #include "taichi/program/vulkan_sort_shaders/prefix_single_chunk.comp.spv.h"
+    ;
+static const uint32_t kScanI32BlockSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i32_block.comp.spv.h"
+    ;
+static const uint32_t kScanI32BlockSubgroupSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i32_block_subgroup.comp.spv.h"
+    ;
+static const uint32_t kScanI32AddSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i32_add.comp.spv.h"
+    ;
+static const uint32_t kScanI32SmallSubgroupSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i32_small_subgroup.comp.spv.h"
     ;
 
 static const uint32_t kRankHistShift0Spv[] =
@@ -890,15 +903,137 @@ struct VulkanRadixSortCache {
   }
 };
 
+struct VulkanScanCache {
+  Device *device{nullptr};
+  size_t capacity{0};
+  size_t cached_bytes{0};
+  DeviceAllocation workspace{kDeviceNullAllocation};
+  DeviceAllocation dummy_sums{kDeviceNullAllocation};
+  std::unique_ptr<Pipeline> scan_i32_block;
+  std::unique_ptr<Pipeline> scan_i32_block_subgroup;
+  std::unique_ptr<Pipeline> scan_i32_add;
+  std::unique_ptr<Pipeline> scan_i32_small_subgroup;
+  bool subgroup_scan_enabled{false};
+
+  void clear_allocs() {
+    if (device && workspace != kDeviceNullAllocation) {
+      device->dealloc_memory(workspace);
+    }
+    if (device && dummy_sums != kDeviceNullAllocation) {
+      device->dealloc_memory(dummy_sums);
+    }
+    workspace = kDeviceNullAllocation;
+    dummy_sums = kDeviceNullAllocation;
+    capacity = 0;
+    cached_bytes = 0;
+  }
+
+  ~VulkanScanCache() {
+    clear_allocs();
+  }
+
+  void ensure_pipelines(Device *dev) {
+    if (device == dev && scan_i32_block) {
+      return;
+    }
+    if (device && device != dev) {
+      clear_allocs();
+      scan_i32_block.reset();
+      scan_i32_block_subgroup.reset();
+      scan_i32_add.reset();
+      scan_i32_small_subgroup.reset();
+    }
+    device = dev;
+    const bool subgroup_arithmetic_supported =
+        dev->get_caps().get(DeviceCapability::spirv_has_subgroup_arithmetic) !=
+        0;
+    const bool subgroup_scan_allowed =
+        get_environ_config("TI_VULKAN_SCAN_ENABLE_SUBGROUP", 1) != 0;
+    subgroup_scan_enabled =
+        subgroup_arithmetic_supported && subgroup_scan_allowed;
+    scan_i32_block =
+        create_pipeline(dev, kScanI32BlockSpv, "vulkan_scan_i32_block");
+    if (subgroup_scan_enabled) {
+      scan_i32_block_subgroup = create_pipeline(
+          dev, kScanI32BlockSubgroupSpv, "vulkan_scan_i32_block_subgroup");
+      scan_i32_small_subgroup = create_pipeline(
+          dev, kScanI32SmallSubgroupSpv, "vulkan_scan_i32_small_subgroup");
+    }
+    scan_i32_add = create_pipeline(dev, kScanI32AddSpv, "vulkan_scan_i32_add");
+  }
+
+  DeviceAllocation alloc_storage(size_t bytes) {
+    DeviceAllocation alloc{kDeviceNullAllocation};
+    Device::AllocParams params;
+    params.size = bytes;
+    params.usage = AllocUsage::Storage;
+    RhiResult res = device->allocate_memory(params, &alloc);
+    TI_ERROR_IF(res != RhiResult::success,
+                "Failed to allocate Vulkan scan workspace: RhiResult({})",
+                res);
+    return alloc;
+  }
+
+  bool needs_workspace_realloc(size_t bytes) const {
+    return capacity < bytes;
+  }
+
+  bool has_workspace_allocs() const {
+    return workspace != kDeviceNullAllocation ||
+           dummy_sums != kDeviceNullAllocation;
+  }
+
+  void clear_workspace_alloc() {
+    if (device && workspace != kDeviceNullAllocation) {
+      device->dealloc_memory(workspace);
+    }
+    workspace = kDeviceNullAllocation;
+    capacity = 0;
+    cached_bytes = dummy_sums != kDeviceNullAllocation ? sizeof(int32_t) : 0;
+  }
+
+  void ensure_dummy_sums() {
+    if (dummy_sums == kDeviceNullAllocation) {
+      dummy_sums = alloc_storage(sizeof(int32_t));
+    }
+    cached_bytes = capacity +
+                   (dummy_sums != kDeviceNullAllocation ? sizeof(int32_t) : 0);
+  }
+
+  void ensure_workspace(size_t bytes) {
+    ensure_dummy_sums();
+    if (bytes == 0 || !needs_workspace_realloc(bytes)) {
+      return;
+    }
+    clear_workspace_alloc();
+    workspace = alloc_storage(bytes);
+    capacity = bytes;
+    cached_bytes = bytes + sizeof(int32_t);
+  }
+};
+
 std::mutex g_vulkan_sort_mutex;
 std::unordered_map<void *, std::unique_ptr<VulkanRadixSortCache>>
     g_vulkan_sort_caches;
+std::mutex g_vulkan_scan_mutex;
+std::unordered_map<void *, std::unique_ptr<VulkanScanCache>>
+    g_vulkan_scan_caches;
 
 VulkanRadixSortCache &get_cache(void *owner, Device *device) {
   std::lock_guard<std::mutex> guard(g_vulkan_sort_mutex);
   auto &cache = g_vulkan_sort_caches[owner];
   if (!cache) {
     cache = std::make_unique<VulkanRadixSortCache>();
+  }
+  cache->ensure_pipelines(device);
+  return *cache;
+}
+
+VulkanScanCache &get_scan_cache(void *owner, Device *device) {
+  std::lock_guard<std::mutex> guard(g_vulkan_scan_mutex);
+  auto &cache = g_vulkan_scan_caches[owner];
+  if (!cache) {
+    cache = std::make_unique<VulkanScanCache>();
   }
   cache->ensure_pipelines(device);
   return *cache;
@@ -1045,10 +1180,187 @@ void dispatch_unary(CommandList *cmdlist,
                     scope_name, profile);
 }
 
+std::vector<size_t> scan_level_lengths(size_t n) {
+  std::vector<size_t> levels;
+  while (n > 0) {
+    levels.push_back(n);
+    if (n <= kBlockSize) {
+      break;
+    }
+    n = (n + kBlockSize - 1) / kBlockSize;
+  }
+  return levels;
+}
+
+size_t scan_workspace_bytes(const std::vector<size_t> &levels) {
+  size_t items = 0;
+  for (size_t i = 1; i < levels.size(); ++i) {
+    items += levels[i];
+  }
+  return items * sizeof(int32_t);
+}
+
+DevicePtr scan_level_ptr(DeviceAllocation data_alloc,
+                         DeviceAllocation workspace,
+                         const std::vector<size_t> &workspace_offsets,
+                         size_t level) {
+  if (level == 0) {
+    return data_alloc.get_ptr(0);
+  }
+  return workspace.get_ptr(workspace_offsets[level - 1] * sizeof(int32_t));
+}
+
 }  // namespace
 
 bool Program::vulkan_radix_sort_available() const {
   return compile_config().arch == Arch::vulkan;
+}
+
+bool Program::vulkan_scan_available() const {
+  return compile_config().arch == Arch::vulkan;
+}
+
+std::size_t Program::vulkan_inclusive_scan_ndarray(Ndarray *data,
+                                                   int value_type) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native scan is only available on Vulkan.");
+  TI_ERROR_IF(!data, "Vulkan native scan received null ndarray.");
+  TI_ERROR_IF(data->shape.size() != 1,
+              "Vulkan native scan expects a 1D ndarray.");
+  TI_ERROR_IF(value_type != 0,
+              "Vulkan native scan currently supports only i32 values.");
+  TI_ERROR_IF(data->get_element_size() != sizeof(int32_t),
+              "Vulkan native scan currently expects i32 data.");
+
+  const size_t n = data->get_nelement();
+  if (n <= 1) {
+    return 0;
+  }
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native scan requires a compute device.");
+  auto &cache = get_scan_cache(this, device);
+  const int small_subgroup_threshold =
+      get_environ_config("TI_VULKAN_SCAN_SMALL_SUBGROUP_MAX_N", 4096);
+  const bool use_small_subgroup =
+      cache.subgroup_scan_enabled && cache.scan_i32_small_subgroup &&
+      small_subgroup_threshold > 0 &&
+      n <= static_cast<size_t>(small_subgroup_threshold);
+  DeviceAllocation data_alloc = data->ndarray_alloc_;
+  const bool profiler_scopes = profiler != nullptr;
+  if (use_small_subgroup) {
+    Pipeline *scan_small = cache.scan_i32_small_subgroup.get();
+    program_impl_->enqueue_compute_op_lambda(
+        [data_alloc, scan_small, profiler_scopes](Device *op_device,
+                                                  CommandList *cmdlist) {
+          auto bindings = op_device->create_resource_set_unique();
+          bindings->rw_buffer(0, data_alloc);
+          dispatch_pipeline(cmdlist, scan_small, bindings.get(), 1, 1, 1,
+                            profiler_scopes ? "vulkan_scan_i32_small_subgroup"
+                                            : nullptr);
+          cmdlist->buffer_barrier(data_alloc);
+        },
+        {});
+    return 0;
+  }
+
+  const std::vector<size_t> levels = scan_level_lengths(n);
+  const size_t workspace_bytes = scan_workspace_bytes(levels);
+  if (cache.has_workspace_allocs() &&
+      cache.needs_workspace_realloc(workspace_bytes)) {
+    synchronize();
+  }
+  cache.ensure_workspace(workspace_bytes);
+
+  std::vector<size_t> workspace_offsets;
+  workspace_offsets.reserve(levels.size() > 0 ? levels.size() - 1 : 0);
+  size_t offset = 0;
+  for (size_t i = 1; i < levels.size(); ++i) {
+    workspace_offsets.push_back(offset);
+    offset += levels[i];
+  }
+
+  DeviceAllocation workspace_alloc = cache.workspace;
+  DeviceAllocation dummy_sums_alloc = cache.dummy_sums;
+  const int subgroup_block_min_n_config =
+      get_environ_config("TI_VULKAN_SCAN_SUBGROUP_BLOCK_MIN_N", 1048576);
+  const size_t subgroup_block_min_n =
+      subgroup_block_min_n_config <= 0
+          ? 0
+          : static_cast<size_t>(subgroup_block_min_n_config);
+  const bool use_subgroup_block = cache.subgroup_scan_enabled &&
+                                  cache.scan_i32_block_subgroup &&
+                                  n >= subgroup_block_min_n;
+  Pipeline *scan_block = use_subgroup_block ? cache.scan_i32_block_subgroup.get()
+                                            : cache.scan_i32_block.get();
+  const char *scan_block_scope = use_subgroup_block
+                                     ? "vulkan_scan_i32_block_subgroup"
+                                     : "vulkan_scan_i32_block";
+  Pipeline *scan_add = cache.scan_i32_add.get();
+  program_impl_->enqueue_compute_op_lambda(
+      [data_alloc, workspace_alloc, dummy_sums_alloc, levels, workspace_offsets,
+       scan_block, scan_block_scope, scan_add,
+       profiler_scopes](Device *op_device, CommandList *cmdlist) {
+        auto scope_name = [profiler_scopes](const char *name) {
+          return profiler_scopes ? name : nullptr;
+        };
+        auto barrier_level = [data_alloc, workspace_alloc](
+                                 CommandList *cmdlist, size_t level) {
+          if (level == 0) {
+            cmdlist->buffer_barrier(data_alloc);
+          } else {
+            cmdlist->buffer_barrier(workspace_alloc);
+          }
+        };
+        for (size_t level = 0; level < levels.size(); ++level) {
+          DevicePtr level_ptr =
+              scan_level_ptr(data_alloc, workspace_alloc, workspace_offsets,
+                             level);
+          const size_t level_bytes = levels[level] * sizeof(int32_t);
+          DevicePtr sums_ptr = dummy_sums_alloc.get_ptr(0);
+          size_t sums_bytes = sizeof(int32_t);
+          if (level + 1 < levels.size()) {
+            sums_ptr = scan_level_ptr(data_alloc, workspace_alloc,
+                                      workspace_offsets, level + 1);
+            sums_bytes = levels[level + 1] * sizeof(int32_t);
+          }
+          auto bindings = op_device->create_resource_set_unique();
+          bindings->rw_buffer(0, level_ptr, level_bytes);
+          bindings->rw_buffer(1, sums_ptr, sums_bytes);
+          const uint32_t groups =
+              static_cast<uint32_t>((levels[level] + kBlockSize - 1) /
+                                    kBlockSize);
+          dispatch_pipeline(cmdlist, scan_block, bindings.get(), groups, 1, 1,
+                            scope_name(scan_block_scope));
+          barrier_level(cmdlist, level);
+          if (level + 1 < levels.size()) {
+            cmdlist->buffer_barrier(workspace_alloc);
+          }
+        }
+        if (levels.size() > 1) {
+          for (size_t level = levels.size() - 1; level-- > 0;) {
+            DevicePtr level_ptr =
+                scan_level_ptr(data_alloc, workspace_alloc, workspace_offsets,
+                               level);
+            DevicePtr offsets_ptr =
+                scan_level_ptr(data_alloc, workspace_alloc, workspace_offsets,
+                               level + 1);
+            const size_t level_bytes = levels[level] * sizeof(int32_t);
+            const size_t offsets_bytes = levels[level + 1] * sizeof(int32_t);
+            auto bindings = op_device->create_resource_set_unique();
+            bindings->rw_buffer(0, level_ptr, level_bytes);
+            bindings->rw_buffer(1, offsets_ptr, offsets_bytes);
+            const uint32_t groups =
+                static_cast<uint32_t>((levels[level] + kBlockSize - 1) /
+                                      kBlockSize);
+            dispatch_pipeline(cmdlist, scan_add, bindings.get(), groups, 1, 1,
+                              scope_name("vulkan_scan_i32_add"));
+            barrier_level(cmdlist, level);
+          }
+        }
+      },
+      {});
+  return workspace_bytes;
 }
 
 std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
@@ -1519,10 +1831,37 @@ void Program::vulkan_radix_sort_clear_workspace() {
   }
 }
 
+void Program::vulkan_scan_clear_workspace() {
+  bool sync_before_clear = false;
+  {
+    std::lock_guard<std::mutex> guard(g_vulkan_scan_mutex);
+    auto it = g_vulkan_scan_caches.find(this);
+    sync_before_clear =
+        it != g_vulkan_scan_caches.end() && it->second->has_workspace_allocs();
+  }
+  if (sync_before_clear) {
+    synchronize();
+  }
+  std::lock_guard<std::mutex> guard(g_vulkan_scan_mutex);
+  auto it = g_vulkan_scan_caches.find(this);
+  if (it != g_vulkan_scan_caches.end()) {
+    g_vulkan_scan_caches.erase(it);
+  }
+}
+
 std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
   std::lock_guard<std::mutex> guard(g_vulkan_sort_mutex);
   auto it = g_vulkan_sort_caches.find(const_cast<Program *>(this));
   if (it == g_vulkan_sort_caches.end()) {
+    return 0;
+  }
+  return it->second->cached_bytes;
+}
+
+std::size_t Program::vulkan_scan_workspace_bytes() const {
+  std::lock_guard<std::mutex> guard(g_vulkan_scan_mutex);
+  auto it = g_vulkan_scan_caches.find(const_cast<Program *>(this));
+  if (it == g_vulkan_scan_caches.end()) {
     return 0;
   }
   return it->second->cached_bytes;
@@ -1546,6 +1885,10 @@ bool Program::vulkan_radix_sort_available() const {
   return false;
 }
 
+bool Program::vulkan_scan_available() const {
+  return false;
+}
+
 std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                                                    Ndarray *values,
                                                    int key_type) {
@@ -1553,10 +1896,23 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
   return 0;
 }
 
+std::size_t Program::vulkan_inclusive_scan_ndarray(Ndarray *data,
+                                                   int value_type) {
+  TI_ERROR("Vulkan native scan requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 void Program::vulkan_radix_sort_clear_workspace() {
 }
 
+void Program::vulkan_scan_clear_workspace() {
+}
+
 std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
+  return 0;
+}
+
+std::size_t Program::vulkan_scan_workspace_bytes() const {
   return 0;
 }
 

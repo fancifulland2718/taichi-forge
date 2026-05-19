@@ -3,6 +3,7 @@ import numpy as np
 from taichi_forge._kernels import (
     blit_from_field_to_field,
     scan_add_inclusive,
+    scan_add_inclusive_cuda,
     scan_add_inclusive_ndarray,
     sort_stage,
     sort_copy_key_buffer_to_field_u32,
@@ -21,13 +22,14 @@ from taichi_forge._kernels import (
     sort_radix_store_zero_count,
     sort_radix_store_zero_count_ndarray,
     uniform_add,
+    uniform_add_cuda,
     uniform_add_ndarray,
     warp_shfl_up_i32,
 )
 from taichi_forge.lang.impl import current_cfg, field, ndarray as ti_ndarray
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.kernel_impl import data_oriented
-from taichi_forge.lang.misc import cuda, vulkan
+from taichi_forge.lang.misc import arm64, cuda, vulkan, x64
 from taichi_forge.lang.runtime_ops import sync
 from taichi_forge.lang.simt import subgroup
 from taichi_forge.types.primitive_types import f32, f64, i32, i64, u32, u64
@@ -264,9 +266,9 @@ def _host_stable_sort(keys, values=None, descending=False, nan_policy="last"):
     order = np.argsort(keys_np, kind="stable")
     if descending:
         order = order[::-1]
-    keys.from_numpy(keys_np[order])
     values_np = values.to_numpy()
-    values.from_numpy(values_np[order])
+    keys.from_numpy(np.ascontiguousarray(keys_np[order]))
+    values.from_numpy(np.ascontiguousarray(values_np[order]))
     sync()
 
 
@@ -780,7 +782,8 @@ class PrefixSumExecutor:
     def __init__(self, length):
         self.sorting_length = length
 
-        BLOCK_SZ = 64
+        BLOCK_SZ = 256 if current_cfg().arch == cuda and length >= 65536 else 64
+        self.block_sz = BLOCK_SZ
         GRID_SZ = int((length + BLOCK_SZ - 1) / BLOCK_SZ)
 
         # Buffer position and length
@@ -796,7 +799,64 @@ class PrefixSumExecutor:
             start_pos += BLOCK_SZ * ele_num
             self.ele_nums_pos.append(start_pos)
 
-        self.large_arr = field(i32, shape=start_pos)
+        self.workspace_length = start_pos
+        self.large_arr = None
+
+    def _ensure_large_arr(self):
+        if self.large_arr is None:
+            self.large_arr = field(i32, shape=self.workspace_length)
+        return self.large_arr
+
+    def _try_cuda_cub_scan(self, input_arr):
+        if current_cfg().arch != cuda:
+            return False
+        if not isinstance(input_arr, Ndarray):
+            return False
+        if input_arr.dtype != i32:
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "cuda_cub_scan_available"):
+            return False
+        if not prog.cuda_cub_scan_available():
+            return False
+        prog.cuda_cub_inclusive_scan_ndarray(input_arr.arr, 0)
+        return True
+
+    def _try_vulkan_native_scan(self, input_arr):
+        if current_cfg().arch != vulkan:
+            return False
+        if not isinstance(input_arr, Ndarray):
+            return False
+        if input_arr.dtype != i32:
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "vulkan_scan_available"):
+            return False
+        if not prog.vulkan_scan_available():
+            return False
+        prog.vulkan_inclusive_scan_ndarray(input_arr.arr, 0)
+        return True
+
+    def _try_cpu_native_scan(self, input_arr):
+        if current_cfg().arch not in [x64, arm64]:
+            return False
+        if not isinstance(input_arr, Ndarray):
+            return False
+        if input_arr.dtype != i32:
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "cpu_scan_available"):
+            return False
+        if not prog.cpu_scan_available():
+            return False
+        prog.cpu_inclusive_scan_ndarray(input_arr.arr, 0)
+        return True
 
     def run(self, input_arr):
         length = self.sorting_length
@@ -805,39 +865,64 @@ class PrefixSumExecutor:
 
         if input_arr.dtype != i32:
             raise RuntimeError("Only ti.i32 type is supported for prefix sum.")
+        if self._try_cuda_cub_scan(input_arr):
+            return
+        if self._try_vulkan_native_scan(input_arr):
+            return
+        if self._try_cpu_native_scan(input_arr):
+            return
+        if isinstance(input_arr, Ndarray):
+            raise RuntimeError(
+                "PrefixSumExecutor ndarray input is currently supported only "
+                "by native CPU/CUDA/Vulkan scan fast paths. Ensure the backend "
+                "runtime primitive is available, or use a field input."
+            )
 
         if current_cfg().arch == cuda:
             inclusive_add = warp_shfl_up_i32
+            use_cuda_large_scan = self.block_sz == 256
+            scan_kernel = scan_add_inclusive_cuda if use_cuda_large_scan else scan_add_inclusive
+            uniform_kernel = uniform_add_cuda if use_cuda_large_scan else uniform_add
         elif current_cfg().arch == vulkan:
             inclusive_add = subgroup.inclusive_add
+            use_cuda_large_scan = False
+            scan_kernel = scan_add_inclusive
+            uniform_kernel = uniform_add
         else:
             raise RuntimeError(f"{str(current_cfg().arch)} is not supported for prefix sum.")
 
-        blit_from_field_to_field(self.large_arr, input_arr, 0, length)
+        large_arr = self._ensure_large_arr()
+        blit_from_field_to_field(large_arr, input_arr, 0, length)
 
         # Kogge-Stone construction
         for i in range(len(ele_nums) - 1):
             if i == len(ele_nums) - 2:
-                scan_add_inclusive(
-                    self.large_arr,
-                    ele_nums_pos[i],
-                    ele_nums_pos[i + 1],
-                    True,
-                    inclusive_add,
-                )
+                if use_cuda_large_scan:
+                    scan_kernel(large_arr, ele_nums_pos[i], ele_nums_pos[i + 1], True)
+                else:
+                    scan_kernel(
+                        large_arr,
+                        ele_nums_pos[i],
+                        ele_nums_pos[i + 1],
+                        True,
+                        inclusive_add,
+                    )
             else:
-                scan_add_inclusive(
-                    self.large_arr,
-                    ele_nums_pos[i],
-                    ele_nums_pos[i + 1],
-                    False,
-                    inclusive_add,
-                )
+                if use_cuda_large_scan:
+                    scan_kernel(large_arr, ele_nums_pos[i], ele_nums_pos[i + 1], False)
+                else:
+                    scan_kernel(
+                        large_arr,
+                        ele_nums_pos[i],
+                        ele_nums_pos[i + 1],
+                        False,
+                        inclusive_add,
+                    )
 
         for i in range(len(ele_nums) - 3, -1, -1):
-            uniform_add(self.large_arr, ele_nums_pos[i], ele_nums_pos[i + 1])
+            uniform_kernel(large_arr, ele_nums_pos[i], ele_nums_pos[i + 1])
 
-        blit_from_field_to_field(input_arr, self.large_arr, 0, length)
+        blit_from_field_to_field(input_arr, large_arr, 0, length)
 
 
 __all__ = ["parallel_sort", "sort", "sort_by_key", "SortWorkspace", "PrefixSumExecutor"]

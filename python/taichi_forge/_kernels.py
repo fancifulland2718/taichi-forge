@@ -663,9 +663,55 @@ def scan_add_inclusive(
 
 
 @kernel
+def scan_add_inclusive_cuda(arr_in: template(), in_beg: i32, in_end: i32, single_block: template()):
+    WARP_SZ = 32
+    BLOCK_SZ = 256
+    loop_config(block_dim=256)
+    for i in range(in_beg, in_end):
+        val = arr_in[i]
+
+        thread_id = i % BLOCK_SZ
+        block_id = int((i - in_beg) // BLOCK_SZ)
+        lane_id = thread_id % WARP_SZ
+        warp_id = thread_id // WARP_SZ
+
+        pad_shared = block.SharedArray((65,), i32)
+
+        val = warp_shfl_up_i32(val)
+        block.sync()
+
+        if thread_id % WARP_SZ == WARP_SZ - 1:
+            pad_shared[warp_id] = val
+        block.sync()
+
+        if warp_id == 0 and lane_id == 0:
+            for k in range(1, BLOCK_SZ / WARP_SZ):
+                pad_shared[k] += pad_shared[k - 1]
+        block.sync()
+
+        warp_sum = 0
+        if warp_id > 0:
+            warp_sum = pad_shared[warp_id - 1]
+        val += warp_sum
+        arr_in[i] = val
+
+        if not single_block and (thread_id == BLOCK_SZ - 1):
+            arr_in[in_end + block_id] = val
+
+
+@kernel
 def uniform_add(arr_in: template(), in_beg: i32, in_end: i32):
     BLOCK_SZ = 64
     loop_config(block_dim=64)
+    for i in range(in_beg + BLOCK_SZ, in_end):
+        block_id = int((i - in_beg) // BLOCK_SZ)
+        arr_in[i] += arr_in[in_end + block_id - 1]
+
+
+@kernel
+def uniform_add_cuda(arr_in: template(), in_beg: i32, in_end: i32):
+    BLOCK_SZ = 256
+    loop_config(block_dim=256)
     for i in range(in_beg + BLOCK_SZ, in_end):
         block_id = int((i - in_beg) // BLOCK_SZ)
         arr_in[i] += arr_in[in_end + block_id - 1]

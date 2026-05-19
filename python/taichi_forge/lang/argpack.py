@@ -69,13 +69,27 @@ class ArgPack:
             self.__entries[k] = v if in_python_scope() else impl.expr_init(v)
         self._register_members()
         self.__dtype = dtype
-        self.__argpack = impl.get_runtime().prog.create_argpack(self.__dtype)
+        runtime = impl.get_runtime()
+        self.__runtime_prog = runtime.prog
+        self.__argpack = self.__runtime_prog.create_argpack(self.__dtype)
+        runtime.register_runtime_object(self)
         for i, (k, v) in enumerate(self.__entries.items()):
             self._write_to_device(self.__annotations[k], type(v), v, self._calc_element_true_index(i))
 
     def __del__(self):
-        if impl is not None and impl.get_runtime() is not None and impl.get_runtime().prog is not None:
-            impl.get_runtime().prog.delete_argpack(self.__argpack)
+        if impl is not None:
+            try:
+                prog = getattr(self, "_ArgPack__runtime_prog", None)
+                argpack = getattr(self, "_ArgPack__argpack", None)
+                self._invalidate_runtime()
+                if prog is not None and argpack is not None:
+                    prog.delete_argpack(argpack)
+            except Exception:
+                pass
+
+    def _invalidate_runtime(self):
+        self.__argpack = None
+        self.__runtime_prog = None
 
     @property
     def keys(self):
@@ -277,7 +291,10 @@ class _IntermediateArgPack(ArgPack):
         self._ArgPack__annotations = annotations
         self._register_members()
         self._ArgPack__dtype = dtype
-        self._ArgPack__argpack = impl.get_runtime().prog.create_argpack(dtype)
+        runtime = impl.get_runtime()
+        self._ArgPack__runtime_prog = runtime.prog
+        self._ArgPack__argpack = self._ArgPack__runtime_prog.create_argpack(dtype)
+        runtime.register_runtime_object(self)
 
     def __del__(self):
         pass

@@ -1,0 +1,39 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) buffer Data {
+  int data[];
+} data_buf;
+
+layout(set = 0, binding = 1, std430) buffer BlockSums {
+  int data[];
+} block_sums;
+
+shared int scan[256];
+
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint block = gl_WorkGroupID.x;
+  uint idx = block * 256u + lid;
+  uint n = data_buf.data.length();
+  uint blocks = (n + 255u) / 256u;
+
+  int value = idx < n ? data_buf.data[idx] : 0;
+  scan[lid] = value;
+  barrier();
+
+  for (uint step = 1u; step < 256u; step <<= 1u) {
+    int addend = lid >= step ? scan[lid - step] : 0;
+    barrier();
+    scan[lid] += addend;
+    barrier();
+  }
+
+  if (idx < n) {
+    data_buf.data[idx] = scan[lid];
+  }
+  if (blocks > 1u && (lid == 255u || idx + 1u == n)) {
+    block_sums.data[block] = scan[lid];
+  }
+}

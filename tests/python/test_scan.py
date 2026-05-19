@@ -1,5 +1,8 @@
+import gc
+
 import pytest
 import taichi_forge as ti
+from taichi_forge.lang import impl
 from tests import test_utils
 
 
@@ -59,3 +62,104 @@ def test_scan_with_offset(dtype, N, offset):
     for i in range(N):
         cur_sum += arr_aux[i + offset]
         assert arr[i + offset] == cur_sum
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_scan_ndarray_cuda_cub():
+    N = 4096
+    arr = ti.ndarray(ti.i32, shape=N)
+
+    if not impl.get_runtime().prog.cuda_cub_scan_available():
+        pytest.skip("CUDA CUB scan is unavailable in this build/runtime.")
+
+    @ti.kernel
+    def fill(data: ti.types.ndarray(ti.i32, ndim=1)):
+        for i in range(N):
+            data[i] = i % 7 - 3
+
+    fill(arr)
+
+    executor = ti.algorithms.PrefixSumExecutor(N)
+    executor.run(arr)
+
+    host = arr.to_numpy()
+    cur_sum = 0
+    for i in range(N):
+        cur_sum += i % 7 - 3
+        assert host[i] == cur_sum
+    assert impl.get_runtime().prog.cuda_cub_scan_workspace_bytes() > 0
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_scan_ndarray_cpu_native():
+    N = 4096
+    arr = ti.ndarray(ti.i32, shape=N)
+
+    if not impl.get_runtime().prog.cpu_scan_available():
+        pytest.skip("CPU native scan is unavailable in this build/runtime.")
+
+    @ti.kernel
+    def fill(data: ti.types.ndarray(ti.i32, ndim=1)):
+        for i in range(N):
+            data[i] = i % 7 - 3
+
+    fill(arr)
+
+    executor = ti.algorithms.PrefixSumExecutor(N)
+    executor.run(arr)
+
+    host = arr.to_numpy()
+    cur_sum = 0
+    for i in range(N):
+        cur_sum += i % 7 - 3
+        assert host[i] == cur_sum
+    assert impl.get_runtime().prog.cpu_scan_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.vulkan])
+def test_scan_ndarray_vulkan_native():
+    N = 8192
+    arr = ti.ndarray(ti.i32, shape=N)
+
+    if not impl.get_runtime().prog.vulkan_scan_available():
+        pytest.skip("Vulkan native scan is unavailable in this build/runtime.")
+
+    @ti.kernel
+    def fill(data: ti.types.ndarray(ti.i32, ndim=1)):
+        for i in range(N):
+            data[i] = i % 9 - 4
+
+    fill(arr)
+
+    executor = ti.algorithms.PrefixSumExecutor(N)
+    executor.run(arr)
+
+    host = arr.to_numpy()
+    cur_sum = 0
+    for i in range(N):
+        cur_sum += i % 9 - 4
+        assert host[i] == cur_sum
+    assert impl.get_runtime().prog.vulkan_scan_workspace_bytes() > 0
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=[ti.vulkan])
+def test_scan_ndarray_vulkan_reset_with_live_ndarray():
+    N = 4096
+    arr = ti.ndarray(ti.i32, shape=N)
+
+    if not impl.get_runtime().prog.vulkan_scan_available():
+        pytest.skip("Vulkan native scan is unavailable in this build/runtime.")
+
+    @ti.kernel
+    def fill(data: ti.types.ndarray(ti.i32, ndim=1)):
+        for i in range(N):
+            data[i] = i % 9 - 4
+
+    fill(arr)
+    ti.algorithms.PrefixSumExecutor(N).run(arr)
+    assert arr.to_numpy()[N - 1] == sum(i % 9 - 4 for i in range(N))
+
+    ti.reset()
+    del arr
+    gc.collect()

@@ -1679,6 +1679,7 @@ class MatrixNdarray(Ndarray):
             zero_fill=True,
             dbg_info=ti_python_core.DebugInfo(get_traceback()),
         )
+        self._register_runtime_object()
 
     @property
     def element_shape(self):
@@ -1793,6 +1794,7 @@ class VectorNdarray(Ndarray):
             zero_fill=True,
             dbg_info=ti_python_core.DebugInfo(get_traceback()),
         )
+        self._register_runtime_object()
 
     @property
     def element_shape(self):

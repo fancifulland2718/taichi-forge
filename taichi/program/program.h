@@ -319,6 +319,20 @@ class TI_DLL_EXPORT Program {
 
   std::size_t cuda_cub_radix_sort_workspace_bytes() const;
 
+  bool cuda_cub_scan_available() const;
+
+  std::size_t cuda_cub_inclusive_scan_ndarray(Ndarray *data, int value_type);
+
+  void cuda_cub_scan_clear_workspace();
+
+  std::size_t cuda_cub_scan_workspace_bytes() const;
+
+  bool cpu_scan_available() const;
+
+  std::size_t cpu_inclusive_scan_ndarray(Ndarray *data, int value_type);
+
+  std::size_t cpu_scan_workspace_bytes() const;
+
   bool vulkan_radix_sort_available() const;
 
   std::size_t vulkan_radix_sort_u32_ndarray(Ndarray *keys,
@@ -332,6 +346,14 @@ class TI_DLL_EXPORT Program {
   void vulkan_radix_sort_cpu_profile_clear();
 
   std::string vulkan_radix_sort_cpu_profile_report() const;
+
+  bool vulkan_scan_available() const;
+
+  std::size_t vulkan_inclusive_scan_ndarray(Ndarray *data, int value_type);
+
+  void vulkan_scan_clear_workspace();
+
+  std::size_t vulkan_scan_workspace_bytes() const;
 
   Identifier get_next_global_id(const std::string &name = "") {
     return Identifier(global_id_counter_++, name);

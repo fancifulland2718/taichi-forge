@@ -23,6 +23,13 @@ std::size_t cub_radix_sort_impl(void *keys,
                                 void *owner);
 void cub_radix_sort_clear_cache_impl(void *owner);
 std::size_t cub_radix_sort_cached_bytes_impl(void *owner);
+std::size_t cub_inclusive_scan_impl(void *data,
+                                    int num_items,
+                                    CubScanValueType value_type,
+                                    void *stream,
+                                    void *owner);
+void cub_inclusive_scan_clear_cache_impl(void *owner);
+std::size_t cub_inclusive_scan_cached_bytes_impl(void *owner);
 #endif
 
 namespace {
@@ -181,6 +188,46 @@ void cub_radix_sort_clear_cache(void *owner) {
 std::size_t cub_radix_sort_cached_bytes(void *owner) {
 #if defined(TI_WITH_CUDA_TOOLKIT)
   return cub_radix_sort_cached_bytes_impl(owner);
+#else
+  return 0;
+#endif
+}
+
+bool cub_inclusive_scan_available() {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return ensure_cudart_for_cub_sort();
+#else
+  return false;
+#endif
+}
+
+std::size_t cub_inclusive_scan(void *data,
+                               int num_items,
+                               CubScanValueType value_type,
+                               void *stream,
+                               void *owner) {
+  TI_ERROR_IF(num_items < 0, "CUB scan expects non-negative num_items");
+  if (num_items <= 1) {
+    return 0;
+  }
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_inclusive_scan_impl(data, num_items, value_type, stream, owner);
+#else
+  TI_ERROR(
+      "CUDA CUB scan requires building Taichi with TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+void cub_inclusive_scan_clear_cache(void *owner) {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  cub_inclusive_scan_clear_cache_impl(owner);
+#endif
+}
+
+std::size_t cub_inclusive_scan_cached_bytes(void *owner) {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return cub_inclusive_scan_cached_bytes_impl(owner);
 #else
   return 0;
 #endif

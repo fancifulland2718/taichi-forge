@@ -245,8 +245,12 @@ class SparseMatrixBuilder:
         self.num_rows = num_rows
         self.num_cols = num_cols if num_cols else num_rows
         self.dtype = dtype
+        self._runtime_prog = None
+        self.ptr = None
         if num_rows is not None:
-            taichi_arch = get_runtime().prog.config().arch
+            runtime = get_runtime()
+            self._runtime_prog = runtime.prog
+            taichi_arch = self._runtime_prog.config().arch
             if taichi_arch in [
                 _ti_core.Arch.x64,
                 _ti_core.Arch.arm64,
@@ -259,7 +263,8 @@ class SparseMatrixBuilder:
                     dtype,
                     storage_format,
                 )
-                self.ptr.create_ndarray(get_runtime().prog)
+                self.ptr.create_ndarray(self._runtime_prog)
+                runtime.register_runtime_object(self)
             else:
                 raise TaichiRuntimeError("SparseMatrix only supports CPU and CUDA for now.")
 
@@ -293,8 +298,18 @@ class SparseMatrixBuilder:
         raise TaichiRuntimeError("Sparse matrix only supports CPU and CUDA backends.")
 
     def __del__(self):
-        if get_runtime() is not None and get_runtime().prog is not None:
-            self.ptr.delete_ndarray(get_runtime().prog)
+        try:
+            prog = self._runtime_prog
+            ptr = self.ptr
+            self._invalidate_runtime()
+            if prog is not None and ptr is not None:
+                ptr.delete_ndarray(prog)
+        except Exception:
+            pass
+
+    def _invalidate_runtime(self):
+        self.ptr = None
+        self._runtime_prog = None
 
 
 __all__ = ["SparseMatrix", "SparseMatrixBuilder"]
