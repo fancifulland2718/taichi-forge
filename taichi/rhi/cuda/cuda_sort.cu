@@ -170,6 +170,29 @@ struct CubHistogramCache {
   }
 };
 
+struct CubReduceCache {
+  void *temp_storage{nullptr};
+  std::size_t temp_storage_bytes{0};
+  int device_id{-1};
+
+  ~CubReduceCache() {
+    release_noexcept();
+  }
+
+  void release_noexcept() {
+    if (temp_storage) {
+      cudaFree(temp_storage);
+    }
+    temp_storage = nullptr;
+    temp_storage_bytes = 0;
+    device_id = -1;
+  }
+
+  std::size_t allocated_bytes() const {
+    return temp_storage_bytes;
+  }
+};
+
 std::mutex &get_cache_mutex() {
   static std::mutex mutex;
   return mutex;
@@ -194,6 +217,12 @@ get_select_caches() {
 std::unordered_map<void *, std::unique_ptr<CubHistogramCache>> &
 get_histogram_caches() {
   static std::unordered_map<void *, std::unique_ptr<CubHistogramCache>> caches;
+  return caches;
+}
+
+std::unordered_map<void *, std::unique_ptr<CubReduceCache>> &
+get_reduce_caches() {
+  static std::unordered_map<void *, std::unique_ptr<CubReduceCache>> caches;
   return caches;
 }
 
@@ -249,6 +278,19 @@ CubHistogramCache &get_histogram_cache(void *owner) {
   return *it->second;
 }
 
+CubReduceCache &get_reduce_cache(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  auto &caches = get_reduce_caches();
+  auto it = caches.find(owner);
+  if (it == caches.end()) {
+    it = caches.emplace(owner, std::make_unique<CubReduceCache>()).first;
+  }
+  return *it->second;
+}
+
 void check_cuda(cudaError_t err, const char *expr, const char *file, int line) {
   if (err == cudaSuccess) {
     return;
@@ -294,6 +336,17 @@ void ensure_device_cache(CubSelectCache &cache) {
 }
 
 void ensure_device_cache(CubHistogramCache &cache) {
+  int device_id = 0;
+  TI_CUDA_SORT_CHECK(cudaGetDevice(&device_id));
+  if (cache.device_id == -1) {
+    cache.device_id = device_id;
+  } else if (cache.device_id != device_id) {
+    cache.release_noexcept();
+    cache.device_id = device_id;
+  }
+}
+
+void ensure_device_cache(CubReduceCache &cache) {
   int device_id = 0;
   TI_CUDA_SORT_CHECK(cudaGetDevice(&device_id));
   if (cache.device_id == -1) {
@@ -1190,6 +1243,151 @@ std::size_t cub_histogram_cached_bytes_impl(void *owner) {
   }
   std::lock_guard<std::mutex> lock(get_cache_mutex());
   auto &caches = get_histogram_caches();
+  auto it = caches.find(owner);
+  if (it == caches.end()) {
+    return 0;
+  }
+  return it->second->allocated_bytes();
+}
+
+template <typename T>
+std::size_t reduce_typed(CubReduceCache &cache,
+                         void *values,
+                         void *output,
+                         int num_items,
+                         CubReduceOp op,
+                         void *stream_ptr) {
+  if (!values || !output) {
+    throw std::runtime_error("CUB reduce received a null pointer");
+  }
+  const T *values_in = static_cast<const T *>(values);
+  T *output_out = static_cast<T *>(output);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  ensure_device_cache(cache);
+
+  std::size_t temp_storage_bytes = 0;
+  auto query = [&]() {
+    switch (op) {
+      case CubReduceOp::sum:
+        if (use_stream) {
+          TI_CUDA_SORT_CHECK(cub::DeviceReduce::Sum(
+              nullptr, temp_storage_bytes, values_in, output_out, num_items,
+              stream));
+        } else {
+          TI_CUDA_SORT_CHECK(cub::DeviceReduce::Sum(
+              nullptr, temp_storage_bytes, values_in, output_out, num_items));
+        }
+        break;
+      case CubReduceOp::min:
+        if (use_stream) {
+          TI_CUDA_SORT_CHECK(cub::DeviceReduce::Min(
+              nullptr, temp_storage_bytes, values_in, output_out, num_items,
+              stream));
+        } else {
+          TI_CUDA_SORT_CHECK(cub::DeviceReduce::Min(
+              nullptr, temp_storage_bytes, values_in, output_out, num_items));
+        }
+        break;
+      case CubReduceOp::max:
+        if (use_stream) {
+          TI_CUDA_SORT_CHECK(cub::DeviceReduce::Max(
+              nullptr, temp_storage_bytes, values_in, output_out, num_items,
+              stream));
+        } else {
+          TI_CUDA_SORT_CHECK(cub::DeviceReduce::Max(
+              nullptr, temp_storage_bytes, values_in, output_out, num_items));
+        }
+        break;
+    }
+  };
+  query();
+  ensure_buffer(&cache.temp_storage, &cache.temp_storage_bytes,
+                temp_storage_bytes);
+
+  switch (op) {
+    case CubReduceOp::sum:
+      if (use_stream) {
+        TI_CUDA_SORT_CHECK(cub::DeviceReduce::Sum(
+            cache.temp_storage, temp_storage_bytes, values_in, output_out,
+            num_items, stream));
+      } else {
+        TI_CUDA_SORT_CHECK(cub::DeviceReduce::Sum(
+            cache.temp_storage, temp_storage_bytes, values_in, output_out,
+            num_items));
+      }
+      break;
+    case CubReduceOp::min:
+      if (use_stream) {
+        TI_CUDA_SORT_CHECK(cub::DeviceReduce::Min(
+            cache.temp_storage, temp_storage_bytes, values_in, output_out,
+            num_items, stream));
+      } else {
+        TI_CUDA_SORT_CHECK(cub::DeviceReduce::Min(
+            cache.temp_storage, temp_storage_bytes, values_in, output_out,
+            num_items));
+      }
+      break;
+    case CubReduceOp::max:
+      if (use_stream) {
+        TI_CUDA_SORT_CHECK(cub::DeviceReduce::Max(
+            cache.temp_storage, temp_storage_bytes, values_in, output_out,
+            num_items, stream));
+      } else {
+        TI_CUDA_SORT_CHECK(cub::DeviceReduce::Max(
+            cache.temp_storage, temp_storage_bytes, values_in, output_out,
+            num_items));
+      }
+      break;
+  }
+
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t cub_reduce_impl(void *values,
+                            void *output,
+                            int num_items,
+                            CubReduceValueType value_type,
+                            CubReduceOp op,
+                            void *stream,
+                            void *owner) {
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  CubReduceCache &cache = get_reduce_cache(owner);
+  switch (value_type) {
+    case CubReduceValueType::i32:
+      return reduce_typed<int32_t>(cache, values, output, num_items, op,
+                                   stream);
+    case CubReduceValueType::f32:
+      return reduce_typed<float>(cache, values, output, num_items, op, stream);
+  }
+  throw std::runtime_error("Unsupported CUB reduce value type");
+}
+
+void cub_reduce_clear_cache_impl(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  auto &caches = get_reduce_caches();
+  auto it = caches.find(owner);
+  if (it != caches.end()) {
+    caches.erase(it);
+  }
+}
+
+std::size_t cub_reduce_cached_bytes_impl(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  auto &caches = get_reduce_caches();
   auto it = caches.find(owner);
   if (it == caches.end()) {
     return 0;

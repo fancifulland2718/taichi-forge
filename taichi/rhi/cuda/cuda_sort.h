@@ -35,6 +35,17 @@ enum class CubHistogramValueType : int {
   i32 = 0,
 };
 
+enum class CubReduceValueType : int {
+  i32 = 0,
+  f32 = 1,
+};
+
+enum class CubReduceOp : int {
+  sum = 0,
+  min = 1,
+  max = 2,
+};
+
 bool cub_radix_sort_available();
 
 std::size_t cub_radix_sort(void *keys,
@@ -91,5 +102,19 @@ std::size_t cub_histogram_even(void *values,
 void cub_histogram_clear_cache(void *owner);
 
 std::size_t cub_histogram_cached_bytes(void *owner);
+
+bool cub_reduce_available();
+
+std::size_t cub_reduce(void *values,
+                       void *output,
+                       int num_items,
+                       CubReduceValueType value_type,
+                       CubReduceOp op,
+                       void *stream,
+                       void *owner);
+
+void cub_reduce_clear_cache(void *owner);
+
+std::size_t cub_reduce_cached_bytes(void *owner);
 
 }  // namespace taichi::lang::cuda

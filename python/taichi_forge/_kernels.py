@@ -733,6 +733,34 @@ def compact_flags_to_prefix_field(flags: template(), prefix: template(), N: i32)
 
 
 @kernel
+def compact_flags_to_prefix_ndarray_from_field(
+    flags: template(),
+    prefix: ndarray_type.ndarray(dtype=i32, ndim=1),
+    N: i32,
+):
+    flags_offset = static(flags.snode.ptr.offset if len(flags.snode.ptr.offset) != 0 else 0)
+    for i in range(N):
+        prefix[i] = 1 if flags[i + flags_offset] != 0 else 0
+
+
+@kernel
+def compact_single_item_field(
+    values: template(),
+    flags: template(),
+    output: template(),
+    count: template(),
+    N: i32,
+):
+    values_offset = static(values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0)
+    flags_offset = static(flags.snode.ptr.offset if len(flags.snode.ptr.offset) != 0 else 0)
+    output_offset = static(output.snode.ptr.offset if len(output.snode.ptr.offset) != 0 else 0)
+    count[None] = 0
+    if N == 1 and flags[flags_offset] != 0:
+        output[output_offset] = values[values_offset]
+        count[None] = 1
+
+
+@kernel
 def compact_scatter_field(
     values: template(),
     flags: template(),
@@ -751,6 +779,147 @@ def compact_scatter_field(
     for i in range(N):
         if flags[i + flags_offset] != 0:
             output[prefix[i] - 1 + output_offset] = values[i + values_offset]
+
+
+@kernel
+def compact_scatter_field_from_prefix_ndarray(
+    values: template(),
+    flags: template(),
+    prefix: ndarray_type.ndarray(dtype=i32, ndim=1),
+    output: template(),
+    count: template(),
+    N: i32,
+):
+    values_offset = static(values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0)
+    flags_offset = static(flags.snode.ptr.offset if len(flags.snode.ptr.offset) != 0 else 0)
+    output_offset = static(output.snode.ptr.offset if len(output.snode.ptr.offset) != 0 else 0)
+    if N > 0:
+        count[None] = prefix[N - 1]
+    else:
+        count[None] = 0
+    for i in range(N):
+        if flags[i + flags_offset] != 0:
+            output[prefix[i] - 1 + output_offset] = values[i + values_offset]
+
+
+@kernel
+def reduce_i32_field(values: template(), output: template(), N: i32, op: i32):
+    values_offset = static(values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0)
+    if op == 0:
+        output[None] = 0
+        for i in range(N):
+            ops.atomic_add(output[None], values[i + values_offset])
+    elif op == 1:
+        output[None] = 2147483647
+        for i in range(N):
+            ops.atomic_min(output[None], values[i + values_offset])
+    else:
+        output[None] = -2147483648
+        for i in range(N):
+            ops.atomic_max(output[None], values[i + values_offset])
+
+
+@kernel
+def reduce_f32_field(values: template(), output: template(), N: i32, op: i32):
+    values_offset = static(values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0)
+    if op == 0:
+        output[None] = 0.0
+        for i in range(N):
+            ops.atomic_add(output[None], values[i + values_offset])
+    elif op == 1:
+        output[None] = 3.4028234663852886e38
+        for i in range(N):
+            ops.atomic_min(output[None], values[i + values_offset])
+    else:
+        output[None] = -3.4028234663852886e38
+        for i in range(N):
+            ops.atomic_max(output[None], values[i + values_offset])
+
+
+@kernel
+def reduce_i32_field_private_count(
+    values: template(),
+    partial: template(),
+    N: i32,
+    chunk_size: i32,
+    num_chunks: i32,
+    op: i32,
+):
+    values_offset = static(values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0)
+    for chunk in range(num_chunks):
+        if op == 0:
+            partial[chunk] = 0
+        elif op == 1:
+            partial[chunk] = 2147483647
+        else:
+            partial[chunk] = -2147483648
+    for i in range(N):
+        chunk = i // chunk_size
+        if op == 0:
+            ops.atomic_add(partial[chunk], values[i + values_offset])
+        elif op == 1:
+            ops.atomic_min(partial[chunk], values[i + values_offset])
+        else:
+            ops.atomic_max(partial[chunk], values[i + values_offset])
+
+
+@kernel
+def reduce_i32_field_private_reduce(partial: template(), output: template(), num_chunks: i32, op: i32):
+    if op == 0:
+        output[None] = 0
+        for chunk in range(num_chunks):
+            ops.atomic_add(output[None], partial[chunk])
+    elif op == 1:
+        output[None] = 2147483647
+        for chunk in range(num_chunks):
+            ops.atomic_min(output[None], partial[chunk])
+    else:
+        output[None] = -2147483648
+        for chunk in range(num_chunks):
+            ops.atomic_max(output[None], partial[chunk])
+
+
+@kernel
+def reduce_f32_field_private_count(
+    values: template(),
+    partial: template(),
+    N: i32,
+    chunk_size: i32,
+    num_chunks: i32,
+    op: i32,
+):
+    values_offset = static(values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0)
+    for chunk in range(num_chunks):
+        if op == 0:
+            partial[chunk] = 0.0
+        elif op == 1:
+            partial[chunk] = 3.4028234663852886e38
+        else:
+            partial[chunk] = -3.4028234663852886e38
+    for i in range(N):
+        chunk = i // chunk_size
+        if op == 0:
+            ops.atomic_add(partial[chunk], values[i + values_offset])
+        elif op == 1:
+            ops.atomic_min(partial[chunk], values[i + values_offset])
+        else:
+            ops.atomic_max(partial[chunk], values[i + values_offset])
+
+
+@kernel
+def reduce_f32_field_private_reduce(partial: template(), output: template(), num_chunks: i32, op: i32):
+    if op == 0:
+        output[None] = 0.0
+        for chunk in range(num_chunks):
+            ops.atomic_add(output[None], partial[chunk])
+    elif op == 1:
+        output[None] = 3.4028234663852886e38
+        for chunk in range(num_chunks):
+            ops.atomic_min(output[None], partial[chunk])
+    else:
+        output[None] = -3.4028234663852886e38
+        for chunk in range(num_chunks):
+            ops.atomic_max(output[None], partial[chunk])
 
 
 @kernel

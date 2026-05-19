@@ -346,6 +346,17 @@ class TI_DLL_EXPORT Program {
 
   std::size_t cuda_cub_histogram_workspace_bytes() const;
 
+  bool cuda_cub_reduce_available() const;
+
+  std::size_t cuda_cub_reduce_ndarray(Ndarray *values,
+                                      Ndarray *output,
+                                      int value_type,
+                                      int op);
+
+  void cuda_cub_reduce_clear_workspace();
+
+  std::size_t cuda_cub_reduce_workspace_bytes() const;
+
   bool cpu_scan_available() const;
 
   std::size_t cpu_inclusive_scan_ndarray(Ndarray *data, int value_type);
@@ -366,6 +377,15 @@ class TI_DLL_EXPORT Program {
   std::size_t cpu_histogram_i32_ndarray(Ndarray *values, Ndarray *bins);
 
   std::size_t cpu_histogram_workspace_bytes() const;
+
+  bool cpu_reduce_available() const;
+
+  std::size_t cpu_reduce_ndarray(Ndarray *values,
+                                 Ndarray *output,
+                                 int value_type,
+                                 int op);
+
+  std::size_t cpu_reduce_workspace_bytes() const;
 
   bool vulkan_radix_sort_available() const;
 
@@ -407,6 +427,16 @@ class TI_DLL_EXPORT Program {
   void vulkan_histogram_clear_workspace();
 
   std::size_t vulkan_histogram_workspace_bytes() const;
+
+  bool vulkan_reduce_available() const;
+
+  std::size_t vulkan_reduce_i32_ndarray(Ndarray *values,
+                                        Ndarray *output,
+                                        int op);
+
+  void vulkan_reduce_clear_workspace();
+
+  std::size_t vulkan_reduce_workspace_bytes() const;
 
   Identifier get_next_global_id(const std::string &name = "") {
     return Identifier(global_id_counter_++, name);

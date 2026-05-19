@@ -38,6 +38,99 @@ def test_experimental_compact_field_scan():
 
 
 @test_utils.test(arch=[ti.cuda])
+def test_experimental_compact_cuda_field_scan_uses_cub_prefix():
+    n = 4096
+    values = ti.field(ti.i32, shape=n)
+    flags = ti.field(ti.i32, shape=n)
+    output = ti.field(ti.i32, shape=n)
+    count = ti.field(ti.i32, shape=())
+
+    if not impl.get_runtime().prog.cuda_cub_scan_available():
+        pytest.skip("CUDA CUB scan is unavailable in this build/runtime.")
+
+    @ti.kernel
+    def fill():
+        for i in range(n):
+            values[i] = i - 5
+            flags[i] = 1 if i % 4 == 0 else 0
+            output[i] = -1
+        count[None] = -1
+
+    fill()
+    workspace = ti.algorithms.CompactWorkspace(max_items=n)
+    ti.algorithms.experimental_compact(
+        values, flags, output, count, method="field_scan", workspace=workspace
+    )
+
+    expected = (np.arange(n, dtype=np.int32) - 5)[np.arange(n) % 4 == 0]
+    assert count[None] == expected.shape[0]
+    assert np.array_equal(output.to_numpy()[: expected.shape[0]], expected)
+    assert workspace.workspace_bytes_peak >= n * 4
+    assert impl.get_runtime().prog.cuda_cub_scan_workspace_bytes() > 0
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_compact_field_scan_single_item():
+    values = ti.field(ti.i32, shape=1)
+    flags = ti.field(ti.i32, shape=1)
+    output = ti.field(ti.i32, shape=1)
+    count = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def fill(flag: ti.i32):
+        values[0] = 37
+        flags[0] = flag
+        output[0] = -1
+        count[None] = -1
+
+    workspace = ti.algorithms.CompactWorkspace(max_items=1)
+    fill(0)
+    ti.algorithms.experimental_compact(
+        values, flags, output, count, method="field_scan", workspace=workspace
+    )
+    assert count[None] == 0
+
+    fill(1)
+    ti.algorithms.experimental_compact(
+        values, flags, output, count, method="field_scan", workspace=workspace
+    )
+    assert count[None] == 1
+    assert output[0] == 37
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_compact_field_scan_empty_and_full_selection():
+    n = 257
+    values = ti.field(ti.i32, shape=n)
+    flags = ti.field(ti.i32, shape=n)
+    output = ti.field(ti.i32, shape=n)
+    count = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def fill(mode: ti.i32):
+        for i in range(n):
+            values[i] = i * 9 - 41
+            flags[i] = 1 if mode == 1 else 0
+            output[i] = -1
+        count[None] = -1
+
+    workspace = ti.algorithms.CompactWorkspace(max_items=n)
+    fill(0)
+    ti.algorithms.experimental_compact(
+        values, flags, output, count, method="field_scan", workspace=workspace
+    )
+    assert count[None] == 0
+
+    fill(1)
+    ti.algorithms.experimental_compact(
+        values, flags, output, count, method="field_scan", workspace=workspace
+    )
+    expected = np.arange(n, dtype=np.int32) * 9 - 41
+    assert count[None] == n
+    assert np.array_equal(output.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cuda])
 def test_experimental_compact_cuda_cub_ndarray():
     n = 4096
     values = ti.ndarray(ti.i32, shape=n)

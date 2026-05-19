@@ -231,6 +231,21 @@ if (TI_WITH_VULKAN)
     ti_vulkan_sort_shader(histogram_i32_count_private_shared.comp histogram_i32_count_private_shared.comp.spv.h)
     ti_vulkan_sort_shader(histogram_i32_reduce_private.comp histogram_i32_reduce_private.comp.spv.h)
     ti_vulkan_sort_shader(histogram_i32_single_shared.comp histogram_i32_single_shared.comp.spv.h)
+    foreach(op_kind 0 1 2)
+        if(op_kind EQUAL 0)
+            set(op_name "sum")
+        elseif(op_kind EQUAL 1)
+            set(op_name "min")
+        else()
+            set(op_name "max")
+        endif()
+        ti_vulkan_sort_shader(reduce_i32_private.comp
+            "reduce_i32_${op_name}_private.comp.spv.h" "-DOP_KIND=${op_kind}")
+        ti_vulkan_sort_shader(reduce_i32_final.comp
+            "reduce_i32_${op_name}_final.comp.spv.h" "-DOP_KIND=${op_kind}")
+        ti_vulkan_sort_shader(reduce_i32_single.comp
+            "reduce_i32_${op_name}_single.comp.spv.h" "-DOP_KIND=${op_kind}")
+    endforeach()
     ti_vulkan_sort_shader(radix8_spine.comp radix8_spine.comp.spv.h)
 
     foreach(shift 0 4 8 12 16 20 24 28)

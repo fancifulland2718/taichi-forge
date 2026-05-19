@@ -1,0 +1,61 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) buffer Values {
+  int data[];
+} values_buf;
+
+layout(set = 0, binding = 1, std430) buffer Output {
+  int data[];
+} output_buf;
+
+shared int local_reduce[256];
+
+#ifndef OP_KIND
+#define OP_KIND 0
+#endif
+
+int reduce_identity() {
+#if OP_KIND == 0
+  return 0;
+#elif OP_KIND == 1
+  return 2147483647;
+#else
+  return (-2147483647 - 1);
+#endif
+}
+
+int reduce_combine(int a, int b) {
+#if OP_KIND == 0
+  return a + b;
+#elif OP_KIND == 1
+  return min(a, b);
+#else
+  return max(a, b);
+#endif
+}
+
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint n = values_buf.data.length();
+
+  int acc = reduce_identity();
+  for (uint idx = lid; idx < n; idx += 256u) {
+    acc = reduce_combine(acc, values_buf.data[idx]);
+  }
+  local_reduce[lid] = acc;
+  barrier();
+
+  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+    if (lid < stride) {
+      local_reduce[lid] = reduce_combine(local_reduce[lid],
+                                         local_reduce[lid + stride]);
+    }
+    barrier();
+  }
+
+  if (lid == 0u) {
+    output_buf.data[0] = local_reduce[0];
+  }
+}

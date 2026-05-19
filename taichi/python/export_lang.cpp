@@ -703,6 +703,15 @@ void export_lang(py::module &m) {
       .def("cuda_cub_histogram_i32_ndarray",
            &Program::cuda_cub_histogram_i32_ndarray, py::arg("values"),
            py::arg("bins"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_reduce_available", &Program::cuda_cub_reduce_available)
+      .def("cuda_cub_reduce_clear_workspace",
+           &Program::cuda_cub_reduce_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_reduce_workspace_bytes",
+           &Program::cuda_cub_reduce_workspace_bytes)
+      .def("cuda_cub_reduce_ndarray", &Program::cuda_cub_reduce_ndarray,
+           py::arg("values"), py::arg("output"), py::arg("value_type"),
+           py::arg("op"), py::call_guard<py::gil_scoped_release>())
       .def("cpu_scan_available", &Program::cpu_scan_available)
       .def("cpu_scan_workspace_bytes", &Program::cpu_scan_workspace_bytes)
       .def("cpu_inclusive_scan_ndarray",
@@ -720,6 +729,11 @@ void export_lang(py::module &m) {
       .def("cpu_histogram_i32_ndarray",
            &Program::cpu_histogram_i32_ndarray, py::arg("values"),
            py::arg("bins"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_reduce_available", &Program::cpu_reduce_available)
+      .def("cpu_reduce_workspace_bytes", &Program::cpu_reduce_workspace_bytes)
+      .def("cpu_reduce_ndarray", &Program::cpu_reduce_ndarray,
+           py::arg("values"), py::arg("output"), py::arg("value_type"),
+           py::arg("op"), py::call_guard<py::gil_scoped_release>())
       .def("vulkan_radix_sort_available",
            &Program::vulkan_radix_sort_available)
       .def("vulkan_radix_sort_clear_workspace",
@@ -761,6 +775,16 @@ void export_lang(py::module &m) {
       .def("vulkan_histogram_i32_ndarray",
            &Program::vulkan_histogram_i32_ndarray, py::arg("values"),
            py::arg("bins"), py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_reduce_available", &Program::vulkan_reduce_available)
+      .def("vulkan_reduce_clear_workspace",
+           &Program::vulkan_reduce_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_reduce_workspace_bytes",
+           &Program::vulkan_reduce_workspace_bytes)
+      .def("vulkan_reduce_i32_ndarray",
+           &Program::vulkan_reduce_i32_ndarray, py::arg("values"),
+           py::arg("output"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_radix_sort_u32_ndarray",
            &Program::vulkan_radix_sort_u32_ndarray, py::arg("keys"),
            py::arg("values"), py::arg("key_type"),

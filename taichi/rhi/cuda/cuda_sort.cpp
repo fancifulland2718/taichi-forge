@@ -49,6 +49,15 @@ std::size_t cub_histogram_even_impl(void *values,
                                     void *owner);
 void cub_histogram_clear_cache_impl(void *owner);
 std::size_t cub_histogram_cached_bytes_impl(void *owner);
+std::size_t cub_reduce_impl(void *values,
+                            void *output,
+                            int num_items,
+                            CubReduceValueType value_type,
+                            CubReduceOp op,
+                            void *stream,
+                            void *owner);
+void cub_reduce_clear_cache_impl(void *owner);
+std::size_t cub_reduce_cached_bytes_impl(void *owner);
 #endif
 
 namespace {
@@ -334,6 +343,47 @@ void cub_histogram_clear_cache(void *owner) {
 std::size_t cub_histogram_cached_bytes(void *owner) {
 #if defined(TI_WITH_CUDA_TOOLKIT)
   return cub_histogram_cached_bytes_impl(owner);
+#else
+  return 0;
+#endif
+}
+
+bool cub_reduce_available() {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return ensure_cudart_for_cub_sort();
+#else
+  return false;
+#endif
+}
+
+std::size_t cub_reduce(void *values,
+                       void *output,
+                       int num_items,
+                       CubReduceValueType value_type,
+                       CubReduceOp op,
+                       void *stream,
+                       void *owner) {
+  TI_ERROR_IF(num_items <= 0, "CUB reduce expects positive num_items");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_reduce_impl(values, output, num_items, value_type, op, stream,
+                         owner);
+#else
+  TI_ERROR(
+      "CUDA CUB reduce requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+void cub_reduce_clear_cache(void *owner) {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  cub_reduce_clear_cache_impl(owner);
+#endif
+}
+
+std::size_t cub_reduce_cached_bytes(void *owner) {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return cub_reduce_cached_bytes_impl(owner);
 #else
   return 0;
 #endif

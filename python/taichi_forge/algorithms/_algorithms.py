@@ -3,10 +3,19 @@ import numpy as np
 from taichi_forge._kernels import (
     blit_from_field_to_field,
     compact_flags_to_prefix_field,
+    compact_flags_to_prefix_ndarray_from_field,
+    compact_scatter_field_from_prefix_ndarray,
     compact_scatter_field,
+    compact_single_item_field,
     histogram_i32_field_direct,
     histogram_i32_field_private_count,
     histogram_i32_field_private_reduce,
+    reduce_f32_field,
+    reduce_f32_field_private_count,
+    reduce_f32_field_private_reduce,
+    reduce_i32_field,
+    reduce_i32_field_private_count,
+    reduce_i32_field_private_reduce,
     scan_add_inclusive,
     scan_add_inclusive_cuda,
     scan_add_inclusive_ndarray,
@@ -52,6 +61,16 @@ _SUPPORTED_SORT_METHODS = {
 }
 _SUPPORTED_SORT_PRECISIONS = {"exact"}
 _SUPPORTED_NAN_POLICIES = {"last", "bitwise"}
+_SUPPORTED_REDUCE_METHODS = {
+    "auto",
+    "cuda_cub",
+    "vulkan_native",
+    "cpu_native",
+    "field_atomic",
+}
+_SUPPORTED_REDUCE_OPS = {"sum": 0, "min": 1, "max": 2}
+_REDUCE_FIELD_PRIVATE_MIN_N = 65536
+_REDUCE_FIELD_PRIVATE_CHUNK_SIZE = 2048
 _HISTOGRAM_FIELD_PRIVATE_MIN_N = 65536
 _HISTOGRAM_FIELD_PRIVATE_MAX_BINS = 512
 _HISTOGRAM_FIELD_PRIVATE_CHUNK_SIZE = 2048
@@ -185,7 +204,9 @@ class CompactWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._field_buffers = {}
+        self._cuda_field_buffers = {}
         self._cuda_cub_active = False
+        self._cuda_cub_scan_active = False
         self._vulkan_native_active = False
 
     def clear(self):
@@ -195,6 +216,12 @@ class CompactWorkspace:
             prog = impl.get_runtime().prog
             if hasattr(prog, "cuda_cub_select_clear_workspace"):
                 prog.cuda_cub_select_clear_workspace()
+        if self._cuda_cub_scan_active:
+            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            if hasattr(prog, "cuda_cub_scan_clear_workspace"):
+                prog.cuda_cub_scan_clear_workspace()
         if self._vulkan_native_active:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -204,7 +231,9 @@ class CompactWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._field_buffers.clear()
+        self._cuda_field_buffers.clear()
         self._cuda_cub_active = False
+        self._cuda_cub_scan_active = False
         self._vulkan_native_active = False
 
     def _get_field_buffers(self, n):
@@ -220,6 +249,85 @@ class CompactWorkspace:
             }
             self._field_buffers[key] = buffers
             bytes_used = scanner.workspace_length * 4
+            self.workspace_bytes_current += bytes_used
+            self.workspace_bytes_peak = max(
+                self.workspace_bytes_peak, self.workspace_bytes_current
+            )
+        return self._field_buffers[key]
+
+    def _get_cuda_field_buffers(self, n):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} compact items, exceeding max_items={self.max_items}."
+            )
+        key = n
+        if key not in self._cuda_field_buffers:
+            buffers = {
+                "prefix": ti_ndarray(i32, shape=n),
+                "scanner": PrefixSumExecutor(n),
+                "prefix_bytes": n * 4,
+            }
+            self._cuda_field_buffers[key] = buffers
+            self.workspace_bytes_current += buffers["prefix_bytes"]
+            self.workspace_bytes_peak = max(
+                self.workspace_bytes_peak, self.workspace_bytes_current
+            )
+        return self._cuda_field_buffers[key]
+
+
+class ReduceWorkspace:
+    """Workspace for experimental reductions.
+
+    CUDA ndarray fast path uses CUB DeviceReduce. Field/SNode fallback stays in
+    Forge kernels to preserve layout and offset semantics.
+    """
+
+    def __init__(self, max_items=None):
+        self.max_items = max_items
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._field_buffers = {}
+        self._cuda_cub_active = False
+        self._vulkan_native_active = False
+
+    def clear(self):
+        if self._cuda_cub_active:
+            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            if hasattr(prog, "cuda_cub_reduce_clear_workspace"):
+                prog.cuda_cub_reduce_clear_workspace()
+        if self._vulkan_native_active:
+            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            if hasattr(prog, "vulkan_reduce_clear_workspace"):
+                prog.vulkan_reduce_clear_workspace()
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._field_buffers.clear()
+        self._cuda_cub_active = False
+        self._vulkan_native_active = False
+
+    def check_shape(self, n):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} reduce items, exceeding max_items={self.max_items}."
+            )
+
+    def _get_field_private_buffers(self, n, dtype):
+        self.check_shape(n)
+        chunk_size = _REDUCE_FIELD_PRIVATE_CHUNK_SIZE
+        num_chunks = (n + chunk_size - 1) // chunk_size
+        key = (num_chunks, str(dtype))
+        if key not in self._field_buffers:
+            partial = field(dtype, shape=num_chunks)
+            self._field_buffers[key] = {
+                "partial": partial,
+                "chunk_size": chunk_size,
+                "num_chunks": num_chunks,
+            }
+            bytes_used = num_chunks * _dtype_nbytes(dtype)
             self.workspace_bytes_current += bytes_used
             self.workspace_bytes_peak = max(
                 self.workspace_bytes_peak, self.workspace_bytes_current
@@ -1035,6 +1143,39 @@ def _try_cpu_native_compact(values, flags, output, count, workspace):
     return True
 
 
+def _cuda_cub_scan_available():
+    if current_cfg().arch != cuda:
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    return (
+        hasattr(prog, "cuda_cub_scan_available")
+        and prog.cuda_cub_scan_available()
+    )
+
+
+def _compact_field_cuda_scan(values, flags, output, count, workspace, n):
+    buffers = workspace._get_cuda_field_buffers(n)
+    prefix = buffers["prefix"]
+    scanner = buffers["scanner"]
+    compact_flags_to_prefix_ndarray_from_field(flags, prefix, n)
+    scanner.run(prefix)
+    compact_scatter_field_from_prefix_ndarray(values, flags, prefix, output, count, n)
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if hasattr(prog, "cuda_cub_scan_workspace_bytes"):
+        workspace._cuda_cub_scan_active = True
+        scan_bytes = int(prog.cuda_cub_scan_workspace_bytes())
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak,
+            workspace.workspace_bytes_current + scan_bytes,
+        )
+    sync()
+    return workspace
+
+
 def _compact_field_scan(values, flags, output, count, workspace):
     if isinstance(values, Ndarray) or isinstance(flags, Ndarray) or isinstance(output, Ndarray):
         raise NotImplementedError(
@@ -1043,6 +1184,12 @@ def _compact_field_scan(values, flags, output, count, workspace):
     n = values.shape[0]
     if workspace is None:
         workspace = CompactWorkspace(max_items=n)
+    if n <= 1:
+        compact_single_item_field(values, flags, output, count, n)
+        sync()
+        return workspace
+    if _cuda_cub_scan_available():
+        return _compact_field_cuda_scan(values, flags, output, count, workspace, n)
     buffers = workspace._get_field_buffers(n)
     scanner = buffers["scanner"]
     prefix = scanner._ensure_large_arr()
@@ -1102,6 +1249,209 @@ def experimental_compact(
             "compact."
         )
     _compact_field_scan(values, flags, output, count, workspace)
+
+
+def _check_reduce_request(values, output, op, method, workspace):
+    if method not in _SUPPORTED_REDUCE_METHODS:
+        raise NotImplementedError(f"reduce method '{method}' is not implemented.")
+    if op not in _SUPPORTED_REDUCE_OPS:
+        raise ValueError(f"reduce op must be one of {sorted(_SUPPORTED_REDUCE_OPS)}.")
+    if not _is_1d(values):
+        raise ValueError("experimental_reduce() expects 1D values.")
+    if values.shape[0] <= 0:
+        raise ValueError("experimental_reduce() expects at least one input item.")
+    if values.dtype not in (i32, f32):
+        raise TypeError("experimental_reduce() currently supports ti.i32 and ti.f32.")
+    if output.dtype != values.dtype:
+        raise TypeError("experimental_reduce() values and output dtype must match.")
+    if isinstance(values, Ndarray) or isinstance(output, Ndarray):
+        if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
+            raise TypeError(
+                "experimental_reduce() ndarray mode requires both values and output "
+                "to be ti.ndarray."
+            )
+        if not _is_1d(output) or output.shape[0] < 1:
+            raise ValueError("experimental_reduce() ndarray output must be shape >= 1.")
+    else:
+        if not hasattr(output, "shape") or output.shape != ():
+            raise TypeError(
+                "experimental_reduce() field mode requires a scalar ti.field output."
+            )
+    if workspace is not None and not isinstance(workspace, ReduceWorkspace):
+        raise TypeError("workspace must be a ReduceWorkspace instance or None.")
+
+
+def _reduce_value_type(dtype):
+    if dtype == i32:
+        return 0
+    if dtype == f32:
+        return 1
+    raise TypeError("unsupported reduce dtype")
+
+
+def _try_cuda_cub_reduce(values, output, op, workspace):
+    if current_cfg().arch != cuda:
+        return False
+    if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cuda_cub_reduce_available"):
+        return False
+    if not prog.cuda_cub_reduce_available():
+        return False
+    temp_bytes = prog.cuda_cub_reduce_ndarray(
+        values.arr, output.arr, _reduce_value_type(values.dtype), _SUPPORTED_REDUCE_OPS[op]
+    )
+    if workspace is not None:
+        workspace._cuda_cub_active = True
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+    return True
+
+
+def _try_vulkan_reduce(values, output, op, workspace):
+    if current_cfg().arch != vulkan:
+        return False
+    if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
+        return False
+    if values.dtype != i32:
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "vulkan_reduce_available"):
+        return False
+    if not prog.vulkan_reduce_available():
+        return False
+    temp_bytes = prog.vulkan_reduce_i32_ndarray(
+        values.arr, output.arr, _SUPPORTED_REDUCE_OPS[op]
+    )
+    if workspace is not None:
+        workspace._vulkan_native_active = True
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+    return True
+
+
+def _try_cpu_reduce(values, output, op, workspace):
+    if current_cfg().arch not in [x64, arm64]:
+        return False
+    if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cpu_reduce_available"):
+        return False
+    if not prog.cpu_reduce_available():
+        return False
+    temp_bytes = prog.cpu_reduce_ndarray(
+        values.arr, output.arr, _reduce_value_type(values.dtype), _SUPPORTED_REDUCE_OPS[op]
+    )
+    if workspace is not None:
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+    return True
+
+
+def _reduce_field_atomic(values, output, op, workspace):
+    op_id = _SUPPORTED_REDUCE_OPS[op]
+    if values.shape[0] >= _REDUCE_FIELD_PRIVATE_MIN_N:
+        buffers = workspace._get_field_private_buffers(values.shape[0], values.dtype)
+        partial = buffers["partial"]
+        if values.dtype == i32:
+            reduce_i32_field_private_count(
+                values,
+                partial,
+                values.shape[0],
+                buffers["chunk_size"],
+                buffers["num_chunks"],
+                op_id,
+            )
+            reduce_i32_field_private_reduce(
+                partial, output, buffers["num_chunks"], op_id
+            )
+        else:
+            reduce_f32_field_private_count(
+                values,
+                partial,
+                values.shape[0],
+                buffers["chunk_size"],
+                buffers["num_chunks"],
+                op_id,
+            )
+            reduce_f32_field_private_reduce(
+                partial, output, buffers["num_chunks"], op_id
+            )
+        sync()
+        return
+    if values.dtype == i32:
+        reduce_i32_field(values, output, values.shape[0], op_id)
+    else:
+        reduce_f32_field(values, output, values.shape[0], op_id)
+    sync()
+
+
+def experimental_reduce(values, output, *, op="sum", method="auto", workspace=None):
+    """Reduce a 1D array into a scalar output.
+
+    This experimental primitive currently supports ``sum``, ``min``, and
+    ``max`` for i32/f32 values. CUDA ndarray input uses CUB DeviceReduce when
+    available. Vulkan i32 ndarray input uses native compute shaders. CPU
+    ndarray input uses a host native path. Field/SNode fallback stays in Forge
+    kernels.
+    """
+
+    _check_reduce_request(values, output, op, method, workspace)
+    if workspace is None:
+        workspace = ReduceWorkspace(max_items=values.shape[0])
+    workspace.check_shape(values.shape[0])
+    if method in ("auto", "cuda_cub") and _try_cuda_cub_reduce(
+        values, output, op, workspace
+    ):
+        return
+    if method == "cuda_cub":
+        raise RuntimeError(
+            "method='cuda_cub' requires CUDA ndarray inputs and available CUB DeviceReduce."
+        )
+    if method in ("auto", "vulkan_native") and _try_vulkan_reduce(
+        values, output, op, workspace
+    ):
+        return
+    if method == "vulkan_native":
+        raise RuntimeError(
+            "method='vulkan_native' requires Vulkan i32 ndarray inputs and "
+            "available native reduce shaders."
+        )
+    if method in ("auto", "cpu_native") and _try_cpu_reduce(
+        values, output, op, workspace
+    ):
+        return
+    if method == "cpu_native":
+        raise RuntimeError(
+            "method='cpu_native' requires CPU ndarray inputs and available native reduce."
+        )
+    if isinstance(values, Ndarray):
+        raise RuntimeError(
+            "experimental_reduce() ndarray input is currently supported only "
+            "by native CPU/CUDA/Vulkan reduce fast paths. Use a field input "
+            "or an available native backend."
+        )
+    _reduce_field_atomic(values, output, op, workspace)
 
 
 _SUPPORTED_HISTOGRAM_METHODS = {
@@ -1450,7 +1800,9 @@ __all__ = [
     "SortWorkspace",
     "PrefixSumExecutor",
     "CompactWorkspace",
+    "ReduceWorkspace",
     "HistogramWorkspace",
     "experimental_compact",
+    "experimental_reduce",
     "experimental_histogram",
 ]

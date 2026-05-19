@@ -23,6 +23,7 @@ constexpr uint32_t kInlineChunkPrefixMaxChunks = 4;
 constexpr uint32_t kRadix8Bins = 256;
 constexpr uint32_t kRadix8PartitionSize = 2048;
 constexpr uint32_t kHistogramPrivateChunkSize = 2048;
+constexpr uint32_t kReducePrivateChunkSize = 2048;
 
 struct VulkanSortCpuProfileSample {
   uint64_t sort_calls{0};
@@ -228,6 +229,33 @@ static const uint32_t kHistogramI32ReducePrivateSpv[] =
     ;
 static const uint32_t kHistogramI32SingleSharedSpv[] =
 #include "taichi/program/vulkan_sort_shaders/histogram_i32_single_shared.comp.spv.h"
+    ;
+static const uint32_t kReduceI32SumPrivateSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i32_sum_private.comp.spv.h"
+    ;
+static const uint32_t kReduceI32MinPrivateSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i32_min_private.comp.spv.h"
+    ;
+static const uint32_t kReduceI32MaxPrivateSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i32_max_private.comp.spv.h"
+    ;
+static const uint32_t kReduceI32SumFinalSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i32_sum_final.comp.spv.h"
+    ;
+static const uint32_t kReduceI32MinFinalSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i32_min_final.comp.spv.h"
+    ;
+static const uint32_t kReduceI32MaxFinalSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i32_max_final.comp.spv.h"
+    ;
+static const uint32_t kReduceI32SumSingleSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i32_sum_single.comp.spv.h"
+    ;
+static const uint32_t kReduceI32MinSingleSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i32_min_single.comp.spv.h"
+    ;
+static const uint32_t kReduceI32MaxSingleSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i32_max_single.comp.spv.h"
     ;
 
 static const uint32_t kRankHistShift0Spv[] =
@@ -1222,6 +1250,102 @@ struct VulkanHistogramCache {
   }
 };
 
+struct VulkanReduceCache {
+  Device *device{nullptr};
+  size_t partial_capacity{0};
+  size_t cached_bytes{0};
+  DeviceAllocation partial{kDeviceNullAllocation};
+  std::array<std::unique_ptr<Pipeline>, 3> reduce_i32_private;
+  std::array<std::unique_ptr<Pipeline>, 3> reduce_i32_final;
+  std::array<std::unique_ptr<Pipeline>, 3> reduce_i32_single;
+
+  void clear_allocs() {
+    if (device && partial != kDeviceNullAllocation) {
+      device->dealloc_memory(partial);
+    }
+    partial = kDeviceNullAllocation;
+    partial_capacity = 0;
+    cached_bytes = 0;
+  }
+
+  ~VulkanReduceCache() {
+    clear_allocs();
+  }
+
+  void ensure_pipelines(Device *dev) {
+    if (device == dev && reduce_i32_private[0]) {
+      return;
+    }
+    if (device && device != dev) {
+      clear_allocs();
+      for (int i = 0; i < 3; ++i) {
+        reduce_i32_private[i].reset();
+        reduce_i32_final[i].reset();
+        reduce_i32_single[i].reset();
+      }
+    }
+    device = dev;
+    reduce_i32_private[0] = create_pipeline(
+        dev, kReduceI32SumPrivateSpv, "vulkan_reduce_i32_sum_private");
+    reduce_i32_private[1] = create_pipeline(
+        dev, kReduceI32MinPrivateSpv, "vulkan_reduce_i32_min_private");
+    reduce_i32_private[2] = create_pipeline(
+        dev, kReduceI32MaxPrivateSpv, "vulkan_reduce_i32_max_private");
+    reduce_i32_final[0] = create_pipeline(
+        dev, kReduceI32SumFinalSpv, "vulkan_reduce_i32_sum_final");
+    reduce_i32_final[1] = create_pipeline(
+        dev, kReduceI32MinFinalSpv, "vulkan_reduce_i32_min_final");
+    reduce_i32_final[2] = create_pipeline(
+        dev, kReduceI32MaxFinalSpv, "vulkan_reduce_i32_max_final");
+    reduce_i32_single[0] = create_pipeline(
+        dev, kReduceI32SumSingleSpv, "vulkan_reduce_i32_sum_single");
+    reduce_i32_single[1] = create_pipeline(
+        dev, kReduceI32MinSingleSpv, "vulkan_reduce_i32_min_single");
+    reduce_i32_single[2] = create_pipeline(
+        dev, kReduceI32MaxSingleSpv, "vulkan_reduce_i32_max_single");
+  }
+
+  DeviceAllocation alloc_storage(size_t bytes) {
+    DeviceAllocation alloc{kDeviceNullAllocation};
+    Device::AllocParams params;
+    params.size = bytes;
+    params.usage = AllocUsage::Storage;
+    RhiResult res = device->allocate_memory(params, &alloc);
+    TI_ERROR_IF(res != RhiResult::success,
+                "Failed to allocate Vulkan reduce workspace: RhiResult({})",
+                res);
+    return alloc;
+  }
+
+  bool needs_partial_realloc(size_t bytes) const {
+    return partial_capacity < bytes;
+  }
+
+  bool has_workspace_allocs() const {
+    return partial != kDeviceNullAllocation;
+  }
+
+  void clear_partial_alloc() {
+    if (device && partial != kDeviceNullAllocation) {
+      device->dealloc_memory(partial);
+    }
+    partial = kDeviceNullAllocation;
+    partial_capacity = 0;
+    cached_bytes = 0;
+  }
+
+  void ensure_partial(size_t bytes) {
+    if (bytes == 0 || !needs_partial_realloc(bytes)) {
+      cached_bytes = partial_capacity;
+      return;
+    }
+    clear_partial_alloc();
+    partial = alloc_storage(bytes);
+    partial_capacity = bytes;
+    cached_bytes = partial_capacity;
+  }
+};
+
 std::mutex g_vulkan_sort_mutex;
 std::unordered_map<void *, std::unique_ptr<VulkanRadixSortCache>>
     g_vulkan_sort_caches;
@@ -1234,6 +1358,9 @@ std::unordered_map<void *, std::unique_ptr<VulkanCompactCache>>
 std::mutex g_vulkan_histogram_mutex;
 std::unordered_map<void *, std::unique_ptr<VulkanHistogramCache>>
     g_vulkan_histogram_caches;
+std::mutex g_vulkan_reduce_mutex;
+std::unordered_map<void *, std::unique_ptr<VulkanReduceCache>>
+    g_vulkan_reduce_caches;
 
 VulkanRadixSortCache &get_cache(void *owner, Device *device) {
   std::lock_guard<std::mutex> guard(g_vulkan_sort_mutex);
@@ -1270,6 +1397,16 @@ VulkanHistogramCache &get_histogram_cache(void *owner, Device *device) {
   auto &cache = g_vulkan_histogram_caches[owner];
   if (!cache) {
     cache = std::make_unique<VulkanHistogramCache>();
+  }
+  cache->ensure_pipelines(device);
+  return *cache;
+}
+
+VulkanReduceCache &get_reduce_cache(void *owner, Device *device) {
+  std::lock_guard<std::mutex> guard(g_vulkan_reduce_mutex);
+  auto &cache = g_vulkan_reduce_caches[owner];
+  if (!cache) {
+    cache = std::make_unique<VulkanReduceCache>();
   }
   cache->ensure_pipelines(device);
   return *cache;
@@ -1628,6 +1765,10 @@ bool Program::vulkan_histogram_available() const {
   return compile_config().arch == Arch::vulkan;
 }
 
+bool Program::vulkan_reduce_available() const {
+  return compile_config().arch == Arch::vulkan;
+}
+
 std::size_t Program::vulkan_inclusive_scan_ndarray(Ndarray *data,
                                                    int value_type) {
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
@@ -1921,6 +2062,97 @@ std::size_t Program::vulkan_histogram_i32_ndarray(Ndarray *values,
                             value_groups, 1, 1,
                             scope_name("vulkan_histogram_i32_count_direct"));
           cmdlist->buffer_barrier(bins_alloc);
+        }
+      },
+      {});
+  return cache.cached_bytes;
+}
+
+std::size_t Program::vulkan_reduce_i32_ndarray(Ndarray *values,
+                                               Ndarray *output,
+                                               int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native reduce is only available on Vulkan.");
+  TI_ERROR_IF(!values || !output,
+              "Vulkan native reduce received null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "Vulkan native reduce expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "Vulkan native reduce expects at least one input item.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "Vulkan native reduce output must contain at least one item.");
+  TI_ERROR_IF(values->get_element_size() != sizeof(int32_t) ||
+                  output->get_element_size() != sizeof(int32_t),
+              "Vulkan native reduce currently expects i32 values and output.");
+  TI_ERROR_IF(op < 0 || op > 2,
+              "Vulkan native reduce supports only sum/min/max operations.");
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native reduce requires a compute device.");
+  auto &cache = get_reduce_cache(this, device);
+
+  const size_t n = values->get_nelement();
+  const size_t value_bytes = n * sizeof(int32_t);
+  const size_t output_bytes = sizeof(int32_t);
+  const int single_shared_max_n_config =
+      get_environ_config("TI_VULKAN_REDUCE_SINGLE_SHARED_MAX_N", 4096);
+  const bool use_single_shared =
+      single_shared_max_n_config > 0 &&
+      n <= static_cast<size_t>(single_shared_max_n_config);
+
+  size_t num_chunks = 0;
+  size_t partial_bytes = 0;
+  if (!use_single_shared) {
+    num_chunks = (n + kReducePrivateChunkSize - 1) / kReducePrivateChunkSize;
+    partial_bytes = num_chunks * sizeof(int32_t);
+    if (cache.has_workspace_allocs() &&
+        cache.needs_partial_realloc(partial_bytes)) {
+      synchronize();
+    }
+    cache.ensure_partial(partial_bytes);
+  }
+
+  DeviceAllocation values_alloc = values->ndarray_alloc_;
+  DeviceAllocation output_alloc = output->ndarray_alloc_;
+  DeviceAllocation partial_alloc = cache.partial;
+  Pipeline *private_pipeline = cache.reduce_i32_private[op].get();
+  Pipeline *final_pipeline = cache.reduce_i32_final[op].get();
+  Pipeline *single_pipeline = cache.reduce_i32_single[op].get();
+  const bool profiler_scopes = profiler != nullptr;
+
+  enqueue_compute_op_lambda(
+      [values_alloc, output_alloc, partial_alloc, value_bytes, output_bytes,
+       partial_bytes, private_pipeline, final_pipeline, single_pipeline,
+       num_chunks, use_single_shared,
+       profiler_scopes](Device *op_device, CommandList *cmdlist) {
+        auto scope_name = [profiler_scopes](const char *name) {
+          return profiler_scopes ? name : nullptr;
+        };
+        if (use_single_shared) {
+          auto bindings = op_device->create_resource_set_unique();
+          bindings->rw_buffer(0, values_alloc.get_ptr(0), value_bytes);
+          bindings->rw_buffer(1, output_alloc.get_ptr(0), output_bytes);
+          dispatch_pipeline(cmdlist, single_pipeline, bindings.get(), 1, 1, 1,
+                            scope_name("vulkan_reduce_i32_single"));
+          cmdlist->buffer_barrier(output_alloc);
+          return;
+        }
+        {
+          auto bindings = op_device->create_resource_set_unique();
+          bindings->rw_buffer(0, values_alloc.get_ptr(0), value_bytes);
+          bindings->rw_buffer(1, partial_alloc.get_ptr(0), partial_bytes);
+          dispatch_pipeline(cmdlist, private_pipeline, bindings.get(),
+                            static_cast<uint32_t>(num_chunks), 1, 1,
+                            scope_name("vulkan_reduce_i32_private"));
+          cmdlist->buffer_barrier(partial_alloc);
+        }
+        {
+          auto bindings = op_device->create_resource_set_unique();
+          bindings->rw_buffer(0, partial_alloc.get_ptr(0), partial_bytes);
+          bindings->rw_buffer(1, output_alloc.get_ptr(0), output_bytes);
+          dispatch_pipeline(cmdlist, final_pipeline, bindings.get(), 1, 1, 1,
+                            scope_name("vulkan_reduce_i32_final"));
+          cmdlist->buffer_barrier(output_alloc);
         }
       },
       {});
@@ -2449,6 +2681,24 @@ void Program::vulkan_histogram_clear_workspace() {
   }
 }
 
+void Program::vulkan_reduce_clear_workspace() {
+  bool sync_before_clear = false;
+  {
+    std::lock_guard<std::mutex> guard(g_vulkan_reduce_mutex);
+    auto it = g_vulkan_reduce_caches.find(this);
+    sync_before_clear = it != g_vulkan_reduce_caches.end() &&
+                        it->second->has_workspace_allocs();
+  }
+  if (sync_before_clear) {
+    synchronize();
+  }
+  std::lock_guard<std::mutex> guard(g_vulkan_reduce_mutex);
+  auto it = g_vulkan_reduce_caches.find(this);
+  if (it != g_vulkan_reduce_caches.end()) {
+    g_vulkan_reduce_caches.erase(it);
+  }
+}
+
 std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
   std::lock_guard<std::mutex> guard(g_vulkan_sort_mutex);
   auto it = g_vulkan_sort_caches.find(const_cast<Program *>(this));
@@ -2485,6 +2735,15 @@ std::size_t Program::vulkan_histogram_workspace_bytes() const {
   return it->second->cached_bytes;
 }
 
+std::size_t Program::vulkan_reduce_workspace_bytes() const {
+  std::lock_guard<std::mutex> guard(g_vulkan_reduce_mutex);
+  auto it = g_vulkan_reduce_caches.find(const_cast<Program *>(this));
+  if (it == g_vulkan_reduce_caches.end()) {
+    return 0;
+  }
+  return it->second->cached_bytes;
+}
+
 void Program::vulkan_radix_sort_cpu_profile_clear() {
   g_vulkan_sort_cpu_profile.clear();
 }
@@ -2515,6 +2774,10 @@ bool Program::vulkan_histogram_available() const {
   return false;
 }
 
+bool Program::vulkan_reduce_available() const {
+  return false;
+}
+
 std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                                                    Ndarray *values,
                                                    int key_type) {
@@ -2542,6 +2805,13 @@ std::size_t Program::vulkan_histogram_i32_ndarray(Ndarray *values,
   return 0;
 }
 
+std::size_t Program::vulkan_reduce_i32_ndarray(Ndarray *values,
+                                               Ndarray *output,
+                                               int op) {
+  TI_ERROR("Vulkan native reduce requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 void Program::vulkan_radix_sort_clear_workspace() {
 }
 
@@ -2552,6 +2822,9 @@ void Program::vulkan_compact_clear_workspace() {
 }
 
 void Program::vulkan_histogram_clear_workspace() {
+}
+
+void Program::vulkan_reduce_clear_workspace() {
 }
 
 std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
@@ -2567,6 +2840,10 @@ std::size_t Program::vulkan_compact_workspace_bytes() const {
 }
 
 std::size_t Program::vulkan_histogram_workspace_bytes() const {
+  return 0;
+}
+
+std::size_t Program::vulkan_reduce_workspace_bytes() const {
   return 0;
 }
 

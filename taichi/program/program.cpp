@@ -55,6 +55,7 @@
 #endif  // defined(_M_X64) || defined(__x86_64)
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -72,7 +73,23 @@ struct CpuHistogramTaskContext {
   int num_threads{1};
 };
 
-taichi::ThreadPool &get_cpu_histogram_thread_pool(int max_threads) {
+struct CpuReduceI32TaskContext {
+  const int32_t *values{nullptr};
+  int64_t *partial{nullptr};
+  std::size_t n{0};
+  int num_threads{1};
+  int op{0};
+};
+
+struct CpuReduceF32TaskContext {
+  const float *values{nullptr};
+  float *partial{nullptr};
+  std::size_t n{0};
+  int num_threads{1};
+  int op{0};
+};
+
+taichi::ThreadPool &get_cpu_primitive_thread_pool(int max_threads) {
   static std::mutex mutex;
   static std::unique_ptr<taichi::ThreadPool> pool;
   static int pool_threads = 0;
@@ -82,6 +99,83 @@ taichi::ThreadPool &get_cpu_histogram_thread_pool(int max_threads) {
     pool_threads = max_threads;
   }
   return *pool;
+}
+
+int64_t cpu_reduce_i32_identity(int op) {
+  if (op == 1) {
+    return std::numeric_limits<int32_t>::max();
+  }
+  if (op == 2) {
+    return std::numeric_limits<int32_t>::min();
+  }
+  return 0;
+}
+
+int64_t cpu_reduce_i32_combine(int64_t a, int64_t b, int op) {
+  if (op == 1) {
+    return std::min<int64_t>(a, b);
+  }
+  if (op == 2) {
+    return std::max<int64_t>(a, b);
+  }
+  return a + b;
+}
+
+float cpu_reduce_f32_identity(int op) {
+  if (op == 1) {
+    return std::numeric_limits<float>::infinity();
+  }
+  if (op == 2) {
+    return -std::numeric_limits<float>::infinity();
+  }
+  return 0.0f;
+}
+
+float cpu_reduce_f32_combine(float a, float b, int op) {
+  if (op == 1) {
+    return std::min(a, b);
+  }
+  if (op == 2) {
+    return std::max(a, b);
+  }
+  return a + b;
+}
+
+void cpu_reduce_i32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuReduceI32TaskContext *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  int64_t acc = cpu_reduce_i32_identity(ctx->op);
+  for (std::size_t i = begin; i < end; ++i) {
+    acc = cpu_reduce_i32_combine(acc, ctx->values[i], ctx->op);
+  }
+  ctx->partial[tid] = acc;
+}
+
+void cpu_reduce_f32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuReduceF32TaskContext *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  float acc = cpu_reduce_f32_identity(ctx->op);
+  for (std::size_t i = begin; i < end; ++i) {
+    acc = cpu_reduce_f32_combine(acc, ctx->values[i], ctx->op);
+  }
+  ctx->partial[tid] = acc;
+}
+
+void store_i32_wrapped_from_i64(int32_t *output, int64_t value) {
+  uint32_t wrapped = static_cast<uint32_t>(value);
+  std::memcpy(output, &wrapped, sizeof(wrapped));
 }
 
 bool snode_tree_contains_hash(const SNode *snode) {
@@ -548,6 +642,7 @@ void Program::finalize() {
     vulkan_scan_clear_workspace();
     vulkan_compact_clear_workspace();
     vulkan_histogram_clear_workspace();
+    vulkan_reduce_clear_workspace();
   }
   textures_.clear();
   argpacks_.clear();
@@ -974,6 +1069,70 @@ std::size_t Program::cuda_cub_histogram_workspace_bytes() const {
   return 0;
 }
 
+bool Program::cuda_cub_reduce_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda && cuda::cub_reduce_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_cub_reduce_ndarray(Ndarray *values,
+                                             Ndarray *output,
+                                             int value_type,
+                                             int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB reduce is only available on CUDA.");
+  TI_ERROR_IF(!values || !output,
+              "CUDA CUB reduce received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "CUDA CUB reduce currently expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "CUDA CUB reduce expects at least one input item.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "CUDA CUB reduce output ndarray must have at least one item.");
+  TI_ERROR_IF(values->get_element_size() != output->get_element_size(),
+              "CUDA CUB reduce expects matching input/output element sizes.");
+  TI_ERROR_IF(values->get_element_size() != sizeof(int32_t),
+              "CUDA CUB reduce currently expects 32-bit values.");
+  TI_ERROR_IF(value_type < 0 || value_type > 1,
+              "CUDA CUB reduce received an unsupported value type.");
+  TI_ERROR_IF(op < 0 || op > 2,
+              "CUDA CUB reduce received an unsupported op.");
+#ifdef TI_WITH_CUDA
+  auto values_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
+  auto output_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_reduce(values_ptr, output_ptr,
+                          static_cast<int>(values->get_nelement()),
+                          static_cast<cuda::CubReduceValueType>(value_type),
+                          static_cast<cuda::CubReduceOp>(op), stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB reduce requires building Taichi with TI_WITH_CUDA=ON and "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+void Program::cuda_cub_reduce_clear_workspace() {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    cuda::cub_reduce_clear_cache(this);
+  }
+#endif
+}
+
+std::size_t Program::cuda_cub_reduce_workspace_bytes() const {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    return cuda::cub_reduce_cached_bytes(const_cast<Program *>(this));
+  }
+#endif
+  return 0;
+}
+
 bool Program::cpu_scan_available() const {
   return arch_is_cpu(compile_config().arch);
 }
@@ -1115,7 +1274,7 @@ std::size_t Program::cpu_histogram_i32_ndarray(Ndarray *values,
     ctx.n = n;
     ctx.num_bins = num_bins;
     ctx.num_threads = num_threads;
-    auto &pool = get_cpu_histogram_thread_pool(max_threads);
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
     pool.run(num_threads, num_threads, &ctx,
              [](void *raw_ctx, int /*thread_id*/, int task_id) {
                auto *ctx = static_cast<CpuHistogramTaskContext *>(raw_ctx);
@@ -1157,6 +1316,121 @@ std::size_t Program::cpu_histogram_i32_ndarray(Ndarray *values,
 }
 
 std::size_t Program::cpu_histogram_workspace_bytes() const {
+  return 0;
+}
+
+bool Program::cpu_reduce_available() const {
+  return arch_is_cpu(compile_config().arch);
+}
+
+std::size_t Program::cpu_reduce_ndarray(Ndarray *values,
+                                        Ndarray *output,
+                                        int value_type,
+                                        int op) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native reduce is only available on CPU backends.");
+  TI_ERROR_IF(!values || !output,
+              "CPU native reduce received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "CPU native reduce expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "CPU native reduce expects at least one input item.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "CPU native reduce output must contain at least one item.");
+  TI_ERROR_IF(values->get_element_size() != output->get_element_size(),
+              "CPU native reduce expects matching input/output element sizes.");
+  TI_ERROR_IF(values->get_element_size() != sizeof(int32_t),
+              "CPU native reduce currently expects 32-bit values.");
+  TI_ERROR_IF(value_type < 0 || value_type > 1,
+              "CPU native reduce received an unsupported value type.");
+  TI_ERROR_IF(op < 0 || op > 2,
+              "CPU native reduce received an unsupported op.");
+
+  const std::size_t n = values->get_nelement();
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = n >= 65536 && target_threads > 1;
+
+  if (value_type == 0) {
+    auto *values_ptr =
+        reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(values));
+    auto *output_ptr =
+        reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(output));
+    TI_ERROR_IF(!values_ptr || !output_ptr,
+                "CPU native reduce received a null data pointer.");
+
+    int64_t result = cpu_reduce_i32_identity(op);
+    if (use_parallel) {
+      const int num_threads = target_threads;
+      std::vector<int64_t> partial(num_threads);
+      CpuReduceI32TaskContext ctx;
+      ctx.values = values_ptr;
+      ctx.partial = partial.data();
+      ctx.n = n;
+      ctx.num_threads = num_threads;
+      ctx.op = op;
+      auto &pool = get_cpu_primitive_thread_pool(max_threads);
+      pool.run(num_threads, num_threads, &ctx, cpu_reduce_i32_task);
+      for (int tid = 0; tid < num_threads; ++tid) {
+        result = cpu_reduce_i32_combine(result, partial[tid], op);
+      }
+      if (op == 0) {
+        store_i32_wrapped_from_i64(output_ptr, result);
+      } else {
+        output_ptr[0] = static_cast<int32_t>(result);
+      }
+      return partial.size() * sizeof(int64_t);
+    }
+
+    for (std::size_t i = 0; i < n; ++i) {
+      result = cpu_reduce_i32_combine(result, values_ptr[i], op);
+    }
+    if (op == 0) {
+      store_i32_wrapped_from_i64(output_ptr, result);
+    } else {
+      output_ptr[0] = static_cast<int32_t>(result);
+    }
+    return 0;
+  }
+
+  auto *values_ptr =
+      reinterpret_cast<float *>(get_ndarray_data_ptr_as_int(values));
+  auto *output_ptr =
+      reinterpret_cast<float *>(get_ndarray_data_ptr_as_int(output));
+  TI_ERROR_IF(!values_ptr || !output_ptr,
+              "CPU native reduce received a null data pointer.");
+
+  float result = cpu_reduce_f32_identity(op);
+  if (use_parallel) {
+    const int num_threads = target_threads;
+    std::vector<float> partial(num_threads);
+    CpuReduceF32TaskContext ctx;
+    ctx.values = values_ptr;
+    ctx.partial = partial.data();
+    ctx.n = n;
+    ctx.num_threads = num_threads;
+    ctx.op = op;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(num_threads, num_threads, &ctx, cpu_reduce_f32_task);
+    for (int tid = 0; tid < num_threads; ++tid) {
+      result = cpu_reduce_f32_combine(result, partial[tid], op);
+    }
+    output_ptr[0] = result;
+    return partial.size() * sizeof(float);
+  }
+
+  for (std::size_t i = 0; i < n; ++i) {
+    result = cpu_reduce_f32_combine(result, values_ptr[i], op);
+  }
+  output_ptr[0] = result;
+  return 0;
+}
+
+std::size_t Program::cpu_reduce_workspace_bytes() const {
   return 0;
 }
 
