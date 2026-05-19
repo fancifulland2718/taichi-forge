@@ -60,6 +60,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <vector>
 
 namespace taichi::lang {
@@ -84,6 +85,142 @@ void update_cpu_grouped_reduce_workspace_peak(std::size_t bytes) {
          !cpu_grouped_reduce_workspace_bytes_peak.compare_exchange_weak(
              current, bytes, std::memory_order_relaxed)) {
   }
+}
+
+uint32_t cpu_sortable_f32_key(float value, int nan_policy) {
+  uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  constexpr uint32_t kSign = 0x80000000u;
+  constexpr uint32_t kAbsMask = 0x7fffffffu;
+  constexpr uint32_t kInfBits = 0x7f800000u;
+  if (nan_policy == 0 && (bits & kAbsMask) > kInfBits) {
+    return 0xffffffffu;
+  }
+  if (nan_policy == 0 && (bits & kAbsMask) == 0) {
+    return kSign;
+  }
+  return (bits & kSign) ? ~bits : (bits ^ kSign);
+}
+
+uint64_t cpu_sortable_f64_key(double value, int nan_policy) {
+  uint64_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  constexpr uint64_t kSign = 0x8000000000000000ull;
+  constexpr uint64_t kAbsMask = 0x7fffffffffffffffull;
+  constexpr uint64_t kInfBits = 0x7ff0000000000000ull;
+  if (nan_policy == 0 && (bits & kAbsMask) > kInfBits) {
+    return 0xffffffffffffffffull;
+  }
+  if (nan_policy == 0 && (bits & kAbsMask) == 0) {
+    return kSign;
+  }
+  return (bits & kSign) ? ~bits : (bits ^ kSign);
+}
+
+template <typename KeyT>
+bool cpu_sort_key_before(KeyT lhs,
+                         KeyT rhs,
+                         bool descending,
+                         int /*nan_policy*/) {
+  if (lhs == rhs) {
+    return false;
+  }
+  return descending ? lhs > rhs : lhs < rhs;
+}
+
+template <>
+bool cpu_sort_key_before<float>(float lhs,
+                                float rhs,
+                                bool descending,
+                                int nan_policy) {
+  uint32_t lhs_bits = 0;
+  uint32_t rhs_bits = 0;
+  std::memcpy(&lhs_bits, &lhs, sizeof(lhs_bits));
+  std::memcpy(&rhs_bits, &rhs, sizeof(rhs_bits));
+  constexpr uint32_t kAbsMask = 0x7fffffffu;
+  constexpr uint32_t kInfBits = 0x7f800000u;
+  const bool lhs_nan = (lhs_bits & kAbsMask) > kInfBits;
+  const bool rhs_nan = (rhs_bits & kAbsMask) > kInfBits;
+  if (nan_policy == 0 && (lhs_nan || rhs_nan)) {
+    return !lhs_nan && rhs_nan;
+  }
+  if (nan_policy == 0 && (lhs_bits & kAbsMask) == 0 &&
+      (rhs_bits & kAbsMask) == 0) {
+    return false;
+  }
+  const uint32_t lhs_key = cpu_sortable_f32_key(lhs, nan_policy);
+  const uint32_t rhs_key = cpu_sortable_f32_key(rhs, nan_policy);
+  if (lhs_key == rhs_key) {
+    return false;
+  }
+  return descending ? lhs_key > rhs_key : lhs_key < rhs_key;
+}
+
+template <>
+bool cpu_sort_key_before<double>(double lhs,
+                                 double rhs,
+                                 bool descending,
+                                 int nan_policy) {
+  uint64_t lhs_bits = 0;
+  uint64_t rhs_bits = 0;
+  std::memcpy(&lhs_bits, &lhs, sizeof(lhs_bits));
+  std::memcpy(&rhs_bits, &rhs, sizeof(rhs_bits));
+  constexpr uint64_t kAbsMask = 0x7fffffffffffffffull;
+  constexpr uint64_t kInfBits = 0x7ff0000000000000ull;
+  const bool lhs_nan = (lhs_bits & kAbsMask) > kInfBits;
+  const bool rhs_nan = (rhs_bits & kAbsMask) > kInfBits;
+  if (nan_policy == 0 && (lhs_nan || rhs_nan)) {
+    return !lhs_nan && rhs_nan;
+  }
+  if (nan_policy == 0 && (lhs_bits & kAbsMask) == 0 &&
+      (rhs_bits & kAbsMask) == 0) {
+    return false;
+  }
+  const uint64_t lhs_key = cpu_sortable_f64_key(lhs, nan_policy);
+  const uint64_t rhs_key = cpu_sortable_f64_key(rhs, nan_policy);
+  if (lhs_key == rhs_key) {
+    return false;
+  }
+  return descending ? lhs_key > rhs_key : lhs_key < rhs_key;
+}
+
+template <typename KeyT>
+std::size_t cpu_stable_sort_impl(KeyT *keys,
+                                 int32_t *values,
+                                 std::size_t n,
+                                 bool descending,
+                                 int nan_policy) {
+  if (n <= 1) {
+    return 0;
+  }
+  if (values) {
+    struct Item {
+      KeyT key;
+      int32_t value;
+    };
+    std::vector<Item> items(n);
+    for (std::size_t i = 0; i < n; ++i) {
+      items[i] = {keys[i], values[i]};
+    }
+    std::stable_sort(items.begin(), items.end(), [&](const Item &lhs,
+                                                     const Item &rhs) {
+      return cpu_sort_key_before<KeyT>(
+          lhs.key, rhs.key, descending, nan_policy);
+    });
+    for (std::size_t i = 0; i < n; ++i) {
+      keys[i] = items[i].key;
+      values[i] = items[i].value;
+    }
+    return items.size() * sizeof(Item);
+  }
+
+  std::vector<KeyT> sorted_keys(keys, keys + n);
+  std::stable_sort(sorted_keys.begin(), sorted_keys.end(), [&](KeyT lhs,
+                                                               KeyT rhs) {
+    return cpu_sort_key_before<KeyT>(lhs, rhs, descending, nan_policy);
+  });
+  std::memcpy(keys, sorted_keys.data(), n * sizeof(KeyT));
+  return sorted_keys.size() * sizeof(KeyT);
 }
 
 struct CpuHistogramTaskContext {
@@ -1794,6 +1931,84 @@ std::size_t Program::cuda_cub_radix_sort_workspace_bytes() const {
   }
 #endif
   return 0;
+}
+
+bool Program::cpu_stable_sort_available() const {
+  return arch_is_cpu(compile_config().arch);
+}
+
+std::size_t Program::cpu_stable_sort_ndarray(Ndarray *keys,
+                                             Ndarray *values,
+                                             int key_type,
+                                             bool descending,
+                                             int nan_policy) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native sort is only available on CPU backends.");
+  TI_ERROR_IF(!keys, "CPU native sort received null keys ndarray.");
+  TI_ERROR_IF(keys->shape.size() != 1,
+              "CPU native sort currently expects a 1D ndarray.");
+  TI_ERROR_IF(nan_policy < 0 || nan_policy > 1,
+              "CPU native sort received an unsupported NaN policy.");
+  const bool has_values = values != nullptr;
+  if (has_values) {
+    TI_ERROR_IF(values->shape.size() != 1,
+                "CPU native sort values must be a 1D ndarray.");
+    TI_ERROR_IF(values->get_nelement() != keys->get_nelement(),
+                "CPU native sort keys and values must have the same length.");
+    TI_ERROR_IF(values->get_element_size() != sizeof(int32_t),
+                "CPU native sort currently expects i32 payload values.");
+  }
+
+  const std::size_t n = keys->get_nelement();
+  int32_t *value_ptr =
+      has_values
+          ? reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(values))
+          : nullptr;
+  auto key_ptr = get_ndarray_data_ptr_as_int(keys);
+  TI_ERROR_IF(!key_ptr, "CPU native sort received a null key pointer.");
+  TI_ERROR_IF(has_values && !value_ptr,
+              "CPU native sort received a null value pointer.");
+
+  switch (key_type) {
+    case 0:
+      TI_ERROR_IF(keys->get_element_size() != sizeof(uint32_t),
+                  "CPU native sort key dtype does not match ti.u32.");
+      return cpu_stable_sort_impl(
+          reinterpret_cast<uint32_t *>(key_ptr), value_ptr, n, descending,
+          nan_policy);
+    case 1:
+      TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t),
+                  "CPU native sort key dtype does not match ti.i32.");
+      return cpu_stable_sort_impl(
+          reinterpret_cast<int32_t *>(key_ptr), value_ptr, n, descending,
+          nan_policy);
+    case 2:
+      TI_ERROR_IF(keys->get_element_size() != sizeof(float),
+                  "CPU native sort key dtype does not match ti.f32.");
+      return cpu_stable_sort_impl(
+          reinterpret_cast<float *>(key_ptr), value_ptr, n, descending,
+          nan_policy);
+    case 3:
+      TI_ERROR_IF(keys->get_element_size() != sizeof(uint64_t),
+                  "CPU native sort key dtype does not match ti.u64.");
+      return cpu_stable_sort_impl(
+          reinterpret_cast<uint64_t *>(key_ptr), value_ptr, n, descending,
+          nan_policy);
+    case 4:
+      TI_ERROR_IF(keys->get_element_size() != sizeof(int64_t),
+                  "CPU native sort key dtype does not match ti.i64.");
+      return cpu_stable_sort_impl(
+          reinterpret_cast<int64_t *>(key_ptr), value_ptr, n, descending,
+          nan_policy);
+    case 5:
+      TI_ERROR_IF(keys->get_element_size() != sizeof(double),
+                  "CPU native sort key dtype does not match ti.f64.");
+      return cpu_stable_sort_impl(
+          reinterpret_cast<double *>(key_ptr), value_ptr, n, descending,
+          nan_policy);
+    default:
+      TI_ERROR("CPU native sort received an unsupported key type.");
+  }
 }
 
 bool Program::cuda_cub_scan_available() const {

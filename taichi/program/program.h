@@ -376,6 +376,14 @@ class TI_DLL_EXPORT Program {
 
   std::size_t cuda_cub_radix_sort_workspace_bytes() const;
 
+  bool cpu_stable_sort_available() const;
+
+  std::size_t cpu_stable_sort_ndarray(Ndarray *keys,
+                                      Ndarray *values,
+                                      int key_type,
+                                      bool descending,
+                                      int nan_policy);
+
   bool cuda_cub_scan_available() const;
 
   std::size_t cuda_cub_inclusive_scan_ndarray(Ndarray *data, int value_type);

@@ -76,6 +76,7 @@ from taichi_forge.types.primitive_types import f32, f64, i32, i64, u32, u64
 _CUDA_CUB_SORT_METHODS = {"cuda_cub_native", "cuda_cub_split32", "cuda_cub_u32"}
 _SUPPORTED_SORT_METHODS = {
     "auto",
+    "cpu_native",
     "host_stable",
     "legacy",
     "radix_u32",
@@ -771,10 +772,13 @@ def _check_sort_request(
             raise ValueError("sort() keys and values must have the same length.")
     if stable is not True:
         raise NotImplementedError("Only stable sort is currently implemented.")
-    if descending:
-        raise NotImplementedError("descending=True is not implemented yet.")
     if method not in _SUPPORTED_SORT_METHODS:
         raise NotImplementedError(f"sort method '{method}' is not implemented yet.")
+    if descending and method not in ("auto", "cpu_native", "host_stable"):
+        raise NotImplementedError(
+            "descending=True is currently supported only by method='auto', "
+            "method='cpu_native', and method='host_stable'."
+        )
     if precision not in _SUPPORTED_SORT_PRECISIONS:
         raise NotImplementedError(f"sort precision '{precision}' is not implemented yet.")
     if nan_policy not in _SUPPORTED_NAN_POLICIES:
@@ -785,21 +789,50 @@ def _check_sort_request(
         raise TypeError("workspace must be a SortWorkspace instance or None.")
 
 
+def _stable_sort_order(keys_np, descending=False, nan_policy="last"):
+    order = np.argsort(keys_np, kind="stable")
+    if not descending or order.shape[0] <= 1:
+        return order
+
+    sorted_keys = keys_np[order]
+    if np.issubdtype(sorted_keys.dtype, np.floating) and nan_policy == "last":
+        nan_mask = np.isnan(sorted_keys)
+        nan_order = order[nan_mask]
+        order = order[~nan_mask]
+        sorted_keys = keys_np[order]
+    else:
+        nan_order = np.empty(0, dtype=order.dtype)
+
+    groups = []
+    start = 0
+    while start < order.shape[0]:
+        end = start + 1
+        while end < order.shape[0] and sorted_keys[end] == sorted_keys[start]:
+            end += 1
+        groups.append(order[start:end])
+        start = end
+
+    if groups:
+        descending_order = np.concatenate(groups[::-1])
+    else:
+        descending_order = order
+    if nan_order.shape[0] > 0:
+        descending_order = np.concatenate((descending_order, nan_order))
+    return descending_order
+
+
 def _host_stable_sort(keys, values=None, descending=False, nan_policy="last"):
     if nan_policy == "bitwise":
         raise NotImplementedError("nan_policy='bitwise' needs a device sortable-key path.")
     keys_np = keys.to_numpy()
+    order = _stable_sort_order(
+        keys_np, descending=descending, nan_policy=nan_policy
+    )
     if values is None:
-        sorted_keys = np.sort(keys_np, kind="stable")
-        if descending:
-            sorted_keys = sorted_keys[::-1]
-        keys.from_numpy(np.ascontiguousarray(sorted_keys))
+        keys.from_numpy(np.ascontiguousarray(keys_np[order]))
         sync()
         return
 
-    order = np.argsort(keys_np, kind="stable")
-    if descending:
-        order = order[::-1]
     values_np = values.to_numpy()
     keys.from_numpy(np.ascontiguousarray(keys_np[order]))
     values.from_numpy(np.ascontiguousarray(values_np[order]))
@@ -1107,6 +1140,53 @@ def _vulkan_native_radix_sort_u32(keys, values=None, workspace=None):
         )
 
 
+def _cpu_native_stable_sort(keys, values=None, workspace=None, descending=False, nan_policy="last"):
+    arch = current_cfg().arch
+    if arch not in (x64, arm64):
+        raise RuntimeError("method='cpu_native' is supported only on CPU backends.")
+    if not isinstance(keys, Ndarray):
+        raise NotImplementedError(
+            "method='cpu_native' currently supports only 1D ti.ndarray keys."
+        )
+    if values is not None and not isinstance(values, Ndarray):
+        raise NotImplementedError(
+            "method='cpu_native' currently supports only ti.ndarray payloads."
+        )
+    if keys.dtype not in (u32, i32, f32, u64, i64, f64):
+        raise TypeError(
+            "method='cpu_native' currently supports ti.u32, ti.i32, ti.f32, "
+            "ti.u64, ti.i64, and ti.f64 keys."
+        )
+    if values is not None and values.dtype != i32:
+        raise TypeError("method='cpu_native' currently supports only ti.i32 values.")
+    if keys.shape[0] <= 1:
+        return
+
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not prog.cpu_stable_sort_available():
+        raise RuntimeError("method='cpu_native' requires CPU sort support.")
+    key_type = {u32: 0, i32: 1, f32: 2, u64: 3, i64: 4, f64: 5}[keys.dtype]
+    nan_policy_id = {"last": 0, "bitwise": 1}[nan_policy]
+    temp_bytes = (
+        prog.cpu_stable_sort_ndarray(
+            keys.arr, values.arr, key_type, descending, nan_policy_id
+        )
+        if values is not None
+        else prog.cpu_stable_sort_keys_ndarray(
+            keys.arr, key_type, descending, nan_policy_id
+        )
+    )
+    if workspace is not None:
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+
+
 def _cuda_cub_sort_native(
     keys,
     values=None,
@@ -1171,8 +1251,12 @@ def _cuda_cub_sort_native(
         )
 
 
-def _auto_sort(keys, values=None, workspace=None, nan_policy="last"):
+def _auto_sort(keys, values=None, workspace=None, nan_policy="last", descending=False):
     arch = current_cfg().arch
+    if descending:
+        _host_stable_sort(keys, values, descending=True, nan_policy=nan_policy)
+        return
+
     if (
         arch == cuda
         and isinstance(keys, Ndarray)
@@ -1226,16 +1310,31 @@ def sort(
     DeviceRadixSort path on CUDA when available, the native Vulkan radix8 path
     for supported 32-bit ndarray keys on Vulkan, and otherwise falls back to a
     host stable sort. Use ``method="legacy"`` for the original odd-even merge
-    implementation. ``cuda_cub_split32`` is an explicit opt-in method only.
+    implementation. ``cuda_cub_split32`` and ``cpu_native`` are explicit opt-in
+    methods only.
     """
 
     _check_sort_request(
         keys, values, stable, descending, method, precision, workspace, nan_policy
     )
     if method == "auto":
-        _auto_sort(keys, values, workspace=workspace, nan_policy=nan_policy)
+        _auto_sort(
+            keys,
+            values,
+            workspace=workspace,
+            nan_policy=nan_policy,
+            descending=descending,
+        )
     elif method == "host_stable":
         _host_stable_sort(keys, values, descending=descending, nan_policy=nan_policy)
+    elif method == "cpu_native":
+        _cpu_native_stable_sort(
+            keys,
+            values,
+            workspace=workspace,
+            descending=descending,
+            nan_policy=nan_policy,
+        )
     elif method == "legacy":
         _parallel_sort_legacy(keys, values)
     elif method in ("radix_u32", "vulkan_radix_u32"):
