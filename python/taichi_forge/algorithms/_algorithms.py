@@ -18,6 +18,8 @@ from taichi_forge._kernels import (
     gather_f32_ndarray,
     gather_i32_field,
     gather_i32_ndarray,
+    grouped_reduce_sum_i32_field,
+    grouped_reduce_sum_i32_ndarray,
     histogram_i32_field_direct,
     histogram_i32_field_private_count,
     histogram_i32_field_private_reduce,
@@ -124,6 +126,18 @@ _SUPPORTED_BUCKET_BUILDER_METHODS = {
     "kernel",
     "field_kernel",
 }
+_SUPPORTED_GROUPED_REDUCE_METHODS = {
+    "auto",
+    "cuda_device",
+    "cuda_segmented",
+    "vulkan_native",
+    "vulkan_segmented",
+    "segmented",
+    "cpu_native",
+    "kernel",
+    "field_kernel",
+}
+_SUPPORTED_GROUPED_REDUCE_OPS = {"sum": 0}
 _REDUCE_FIELD_PRIVATE_MIN_N = 65536
 _REDUCE_FIELD_PRIVATE_CHUNK_SIZE = 2048
 _HISTOGRAM_FIELD_PRIVATE_MIN_N = 65536
@@ -618,6 +632,70 @@ class BucketBuilderWorkspace:
             self._scanner_cache[length] = scanner
             self._reserve_bytes(scanner.workspace_length * 4)
         return self._scanner_cache[length]
+
+
+class GroupedReduceWorkspace:
+    """Workspace for experimental grouped reductions.
+
+    Native paths build fixed-bin bucket ranges and then reduce each bucket.
+    The Python-owned ndarrays keep the external API call free of repeated
+    allocation once the workspace is reused.
+    """
+
+    def __init__(self, max_items=None, max_groups=None):
+        self.max_items = max_items
+        self.max_groups = max_groups
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._offsets_ndarray = None
+        self._scratch_ndarray = None
+        self._cursor_ndarray = None
+        self._vulkan_native_active = False
+
+    def check_shape(self, n, num_groups):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} grouped-reduce items, exceeding max_items={self.max_items}."
+            )
+        if self.max_groups is not None and num_groups > self.max_groups:
+            raise ValueError(
+                f"Requested {num_groups} grouped-reduce groups, exceeding max_groups={self.max_groups}."
+            )
+
+    def clear(self):
+        if self._vulkan_native_active:
+            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            if hasattr(prog, "vulkan_grouped_reduce_clear_workspace"):
+                prog.vulkan_grouped_reduce_clear_workspace()
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._offsets_ndarray = None
+        self._scratch_ndarray = None
+        self._cursor_ndarray = None
+        self._vulkan_native_active = False
+
+    def _reserve_bytes(self, bytes_used):
+        self.workspace_bytes_current += bytes_used
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak, self.workspace_bytes_current
+        )
+
+    def _get_native_buffers(self, n, num_groups):
+        if (
+            self._offsets_ndarray is None
+            or self._offsets_ndarray.shape[0] < num_groups + 1
+        ):
+            self._offsets_ndarray = ti_ndarray(i32, shape=num_groups + 1)
+            self._reserve_bytes((num_groups + 1) * 4)
+        if self._scratch_ndarray is None or self._scratch_ndarray.shape[0] < n:
+            self._scratch_ndarray = ti_ndarray(i32, shape=n)
+            self._reserve_bytes(n * 4)
+        if self._cursor_ndarray is None or self._cursor_ndarray.shape[0] < num_groups:
+            self._cursor_ndarray = ti_ndarray(i32, shape=num_groups)
+            self._reserve_bytes(num_groups * 4)
+        return self._offsets_ndarray, self._scratch_ndarray, self._cursor_ndarray
 
 
 def _dtype_nbytes(dtype):
@@ -2616,6 +2694,249 @@ def experimental_bucket_builder(
     raise RuntimeError("experimental_bucket_builder() could not find an available backend.")
 
 
+def _check_grouped_reduce_request(keys, values, output, op, method, workspace):
+    if method not in _SUPPORTED_GROUPED_REDUCE_METHODS:
+        raise NotImplementedError(f"grouped reduce method '{method}' is not implemented.")
+    if op not in _SUPPORTED_GROUPED_REDUCE_OPS:
+        raise ValueError(
+            f"grouped reduce op must be one of {sorted(_SUPPORTED_GROUPED_REDUCE_OPS)}."
+        )
+    if not (_is_1d(keys) and _is_1d(values) and _is_1d(output)):
+        raise ValueError("experimental_grouped_reduce() expects 1D keys, values, and output.")
+    if keys.dtype != i32:
+        raise TypeError("experimental_grouped_reduce() currently expects ti.i32 keys.")
+    if values.dtype != i32 or output.dtype != i32:
+        raise TypeError(
+            "experimental_grouped_reduce() currently expects ti.i32 values and output."
+        )
+    if keys.shape[0] != values.shape[0]:
+        raise ValueError("experimental_grouped_reduce() keys and values sizes must match.")
+    if output.shape[0] <= 0:
+        raise ValueError("experimental_grouped_reduce() output must contain at least one group.")
+    if isinstance(keys, Ndarray) or isinstance(values, Ndarray) or isinstance(output, Ndarray):
+        if not (
+            isinstance(keys, Ndarray)
+            and isinstance(values, Ndarray)
+            and isinstance(output, Ndarray)
+        ):
+            raise TypeError(
+                "experimental_grouped_reduce() ndarray mode requires keys, values, "
+                "and output all to be ti.ndarray."
+            )
+    if workspace is not None and not isinstance(workspace, GroupedReduceWorkspace):
+        raise TypeError("workspace must be a GroupedReduceWorkspace instance or None.")
+
+
+def _try_cuda_device_grouped_reduce(
+    keys, values, output, workspace, num_groups, op, *, segmented=False
+):
+    if current_cfg().arch != cuda:
+        return False
+    if not (
+        isinstance(keys, Ndarray)
+        and isinstance(values, Ndarray)
+        and isinstance(output, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cuda_device_grouped_reduce_available"):
+        return False
+    if not prog.cuda_device_grouped_reduce_available():
+        return False
+    if not segmented and hasattr(prog, "cuda_device_grouped_reduce_i32_atomic_ndarray"):
+        temp_bytes = prog.cuda_device_grouped_reduce_i32_atomic_ndarray(
+            keys.arr,
+            values.arr,
+            output.arr,
+            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak,
+            workspace.workspace_bytes_current + temp_bytes,
+        )
+        return True
+    if not hasattr(prog, "cuda_device_grouped_reduce_i32_ndarray"):
+        return False
+    offsets, scratch, cursor = workspace._get_native_buffers(keys.shape[0], num_groups)
+    temp_bytes = prog.cuda_device_grouped_reduce_i32_ndarray(
+        keys.arr,
+        values.arr,
+        output.arr,
+        offsets.arr,
+        scratch.arr,
+        cursor.arr,
+        _SUPPORTED_GROUPED_REDUCE_OPS[op],
+    )
+    workspace.workspace_bytes_peak = max(
+        workspace.workspace_bytes_peak,
+        workspace.workspace_bytes_current + temp_bytes,
+    )
+    return True
+
+
+def _try_vulkan_grouped_reduce(
+    keys, values, output, workspace, num_groups, op, *, segmented=False
+):
+    if current_cfg().arch != vulkan:
+        return False
+    if not (
+        isinstance(keys, Ndarray)
+        and isinstance(values, Ndarray)
+        and isinstance(output, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "vulkan_grouped_reduce_available"):
+        return False
+    if not prog.vulkan_grouped_reduce_available():
+        return False
+    if not segmented and hasattr(prog, "vulkan_grouped_reduce_i32_atomic_ndarray"):
+        temp_bytes = prog.vulkan_grouped_reduce_i32_atomic_ndarray(
+            keys.arr,
+            values.arr,
+            output.arr,
+            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+        )
+        workspace._vulkan_native_active = True
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak,
+            workspace.workspace_bytes_current + temp_bytes,
+        )
+        return True
+    if not hasattr(prog, "vulkan_grouped_reduce_i32_ndarray"):
+        return False
+    offsets, scratch, cursor = workspace._get_native_buffers(keys.shape[0], num_groups)
+    temp_bytes = prog.vulkan_grouped_reduce_i32_ndarray(
+        keys.arr,
+        values.arr,
+        output.arr,
+        offsets.arr,
+        scratch.arr,
+        cursor.arr,
+        _SUPPORTED_GROUPED_REDUCE_OPS[op],
+    )
+    workspace._vulkan_native_active = True
+    workspace.workspace_bytes_peak = max(
+        workspace.workspace_bytes_peak,
+        workspace.workspace_bytes_current + temp_bytes,
+    )
+    return True
+
+
+def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
+    if current_cfg().arch not in [x64, arm64]:
+        return False
+    if not (
+        isinstance(keys, Ndarray)
+        and isinstance(values, Ndarray)
+        and isinstance(output, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cpu_grouped_reduce_available"):
+        return False
+    if not prog.cpu_grouped_reduce_available():
+        return False
+    temp_bytes = prog.cpu_grouped_reduce_i32_ndarray(
+        keys.arr, values.arr, output.arr, _SUPPORTED_GROUPED_REDUCE_OPS[op]
+    )
+    workspace.workspace_bytes_peak = max(
+        workspace.workspace_bytes_peak,
+        workspace.workspace_bytes_current + temp_bytes,
+    )
+    return True
+
+
+def _grouped_reduce_kernel(keys, values, output):
+    n = keys.shape[0]
+    num_groups = output.shape[0]
+    if isinstance(keys, Ndarray):
+        grouped_reduce_sum_i32_ndarray(keys, values, output, n, num_groups)
+    else:
+        grouped_reduce_sum_i32_field(keys, values, output, n, num_groups)
+    sync()
+
+
+def experimental_grouped_reduce(
+    keys, values, output, *, op="sum", method="auto", workspace=None
+):
+    """Reduce values into fixed groups selected by ``keys``.
+
+    Current scope is i32 sum. Invalid negative or out-of-range keys are ignored;
+    empty groups produce zero. The default native ndarray paths use direct
+    atomic accumulation to avoid distribution-dependent bucket overhead. The
+    explicit ``method="segmented"`` routes through bucket ranges plus a
+    per-group reduction, while field/SNode fallback stays in Forge kernels.
+    """
+
+    _check_grouped_reduce_request(keys, values, output, op, method, workspace)
+    n = keys.shape[0]
+    num_groups = output.shape[0]
+    if workspace is None:
+        workspace = GroupedReduceWorkspace(max_items=n, max_groups=num_groups)
+    workspace.check_shape(n, num_groups)
+    if method in ("auto", "cuda_device") and _try_cuda_device_grouped_reduce(
+        keys, values, output, workspace, num_groups, op, segmented=False
+    ):
+        return workspace
+    if method in ("segmented", "cuda_segmented") and _try_cuda_device_grouped_reduce(
+        keys, values, output, workspace, num_groups, op, segmented=True
+    ):
+        return workspace
+    if method == "cuda_segmented":
+        raise RuntimeError(
+            "experimental_grouped_reduce() method='cuda_segmented' requires CUDA "
+            "ndarray inputs and CUDA toolkit segmented grouped-reduce support."
+        )
+    if method == "cuda_device":
+        raise RuntimeError(
+            "experimental_grouped_reduce() method='cuda_device' requires CUDA "
+            "ndarray inputs and CUDA toolkit grouped-reduce support."
+        )
+    if method in ("auto", "vulkan_native") and _try_vulkan_grouped_reduce(
+        keys, values, output, workspace, num_groups, op, segmented=False
+    ):
+        return workspace
+    if method in ("segmented", "vulkan_segmented") and _try_vulkan_grouped_reduce(
+        keys, values, output, workspace, num_groups, op, segmented=True
+    ):
+        return workspace
+    if method == "vulkan_segmented":
+        raise RuntimeError(
+            "experimental_grouped_reduce() method='vulkan_segmented' requires Vulkan "
+            "ndarray inputs and available native segmented grouped-reduce shaders."
+        )
+    if method == "vulkan_native":
+        raise RuntimeError(
+            "experimental_grouped_reduce() method='vulkan_native' requires Vulkan "
+            "ndarray inputs and available native grouped-reduce shaders."
+        )
+    if method == "segmented":
+        raise RuntimeError(
+            "experimental_grouped_reduce() method='segmented' requires CUDA or "
+            "Vulkan ndarray native segmented grouped-reduce support."
+        )
+    if method in ("auto", "cpu_native") and _try_cpu_grouped_reduce(
+        keys, values, output, workspace, op
+    ):
+        return workspace
+    if method == "cpu_native":
+        raise RuntimeError(
+            "experimental_grouped_reduce() method='cpu_native' requires CPU ndarray "
+            "inputs and available native grouped-reduce support."
+        )
+    if method in ("kernel", "field_kernel", "auto"):
+        _grouped_reduce_kernel(keys, values, output)
+        return workspace
+    raise RuntimeError("experimental_grouped_reduce() could not find an available backend.")
+
+
 def parallel_sort(keys, values=None):
     """Compatibility wrapper for the legacy public sorting API."""
 
@@ -2781,6 +3102,7 @@ __all__ = [
     "IndexedCopyWorkspace",
     "ScatterAddWorkspace",
     "BucketBuilderWorkspace",
+    "GroupedReduceWorkspace",
     "experimental_compact",
     "experimental_reduce",
     "experimental_histogram",
@@ -2789,4 +3111,5 @@ __all__ = [
     "experimental_scatter",
     "experimental_scatter_add",
     "experimental_bucket_builder",
+    "experimental_grouped_reduce",
 ]

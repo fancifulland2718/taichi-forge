@@ -176,4 +176,30 @@ void cub_bucket_builder_clear_cache(void *owner);
 
 std::size_t cub_bucket_builder_cached_bytes(void *owner);
 
+bool cub_grouped_reduce_available();
+
+std::size_t cub_grouped_reduce_i32_atomic(void *keys,
+                                          void *values,
+                                          void *output,
+                                          int num_items,
+                                          int num_groups,
+                                          int op,
+                                          void *stream);
+
+std::size_t cub_grouped_reduce_i32(void *keys,
+                                   void *values,
+                                   void *output,
+                                   void *offsets,
+                                   void *scratch,
+                                   void *cursor,
+                                   int num_items,
+                                   int num_groups,
+                                   int op,
+                                   void *stream,
+                                   void *owner);
+
+void cub_grouped_reduce_clear_cache(void *owner);
+
+std::size_t cub_grouped_reduce_cached_bytes(void *owner);
+
 }  // namespace taichi::lang::cuda

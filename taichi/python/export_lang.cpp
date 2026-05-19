@@ -702,6 +702,17 @@ void export_lang(py::module &m) {
             &Program::cuda_device_bucket_builder_i32_ndarray, py::arg("keys"),
             py::arg("values"), py::arg("offsets"), py::arg("output"),
             py::arg("cursor"), py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_grouped_reduce_available",
+            &Program::cuda_device_grouped_reduce_available)
+       .def("cuda_device_grouped_reduce_i32_atomic_ndarray",
+            &Program::cuda_device_grouped_reduce_i32_atomic_ndarray,
+            py::arg("keys"), py::arg("values"), py::arg("output"),
+            py::arg("op"), py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_grouped_reduce_i32_ndarray",
+            &Program::cuda_device_grouped_reduce_i32_ndarray, py::arg("keys"),
+            py::arg("values"), py::arg("output"), py::arg("offsets"),
+            py::arg("scratch"), py::arg("cursor"), py::arg("op"),
+            py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_radix_sort_available",
            &Program::cuda_cub_radix_sort_available)
       .def("cuda_cub_radix_sort_clear_workspace",
@@ -815,6 +826,14 @@ void export_lang(py::module &m) {
             &Program::cpu_bucket_builder_i32_ndarray, py::arg("keys"),
             py::arg("values"), py::arg("offsets"), py::arg("output"),
             py::call_guard<py::gil_scoped_release>())
+       .def("cpu_grouped_reduce_available",
+            &Program::cpu_grouped_reduce_available)
+       .def("cpu_grouped_reduce_workspace_bytes",
+            &Program::cpu_grouped_reduce_workspace_bytes)
+       .def("cpu_grouped_reduce_i32_ndarray",
+            &Program::cpu_grouped_reduce_i32_ndarray, py::arg("keys"),
+            py::arg("values"), py::arg("output"), py::arg("op"),
+            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_radix_sort_available",
            &Program::vulkan_radix_sort_available)
       .def("vulkan_radix_sort_clear_workspace",
@@ -911,6 +930,22 @@ void export_lang(py::module &m) {
             &Program::vulkan_bucket_builder_i32_ndarray, py::arg("keys"),
             py::arg("values"), py::arg("offsets"), py::arg("output"),
             py::arg("cursor"), py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_grouped_reduce_available",
+            &Program::vulkan_grouped_reduce_available)
+       .def("vulkan_grouped_reduce_clear_workspace",
+            &Program::vulkan_grouped_reduce_clear_workspace,
+            py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_grouped_reduce_workspace_bytes",
+            &Program::vulkan_grouped_reduce_workspace_bytes)
+       .def("vulkan_grouped_reduce_i32_atomic_ndarray",
+            &Program::vulkan_grouped_reduce_i32_atomic_ndarray,
+            py::arg("keys"), py::arg("values"), py::arg("output"),
+            py::arg("op"), py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_grouped_reduce_i32_ndarray",
+            &Program::vulkan_grouped_reduce_i32_ndarray, py::arg("keys"),
+            py::arg("values"), py::arg("output"), py::arg("offsets"),
+            py::arg("scratch"), py::arg("cursor"), py::arg("op"),
+            py::call_guard<py::gil_scoped_release>())
        .def("vulkan_radix_sort_u32_ndarray",
            &Program::vulkan_radix_sort_u32_ndarray, py::arg("keys"),
            py::arg("values"), py::arg("key_type"),

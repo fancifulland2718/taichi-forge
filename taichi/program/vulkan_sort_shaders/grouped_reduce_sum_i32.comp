@@ -1,0 +1,40 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Offsets {
+  int offsets[];
+};
+
+layout(set = 0, binding = 1) readonly buffer Values {
+  int values[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer Output {
+  int output_values[];
+};
+
+shared int partial[256];
+
+void main() {
+  uint group = gl_WorkGroupID.x;
+  uint lid = gl_LocalInvocationID.x;
+  int begin = offsets[group];
+  int end = offsets[group + 1];
+  int acc = 0;
+  for (int i = begin + int(lid); i < end; i += 256) {
+    acc += values[i];
+  }
+  partial[lid] = acc;
+  barrier();
+
+  for (uint stride = 128; stride > 0; stride >>= 1) {
+    if (lid < stride) {
+      partial[lid] += partial[lid + stride];
+    }
+    barrier();
+  }
+  if (lid == 0) {
+    output_values[group] = partial[0];
+  }
+}

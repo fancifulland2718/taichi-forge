@@ -78,6 +78,26 @@ std::size_t cub_bucket_builder_i32_impl(void *keys,
                                         void *owner);
 void cub_bucket_builder_clear_cache_impl(void *owner);
 std::size_t cub_bucket_builder_cached_bytes_impl(void *owner);
+std::size_t cub_grouped_reduce_i32_impl(void *keys,
+                                        void *values,
+                                        void *output,
+                                        void *offsets,
+                                        void *scratch,
+                                        void *cursor,
+                                        int num_items,
+                                        int num_groups,
+                                        int op,
+                                        void *stream,
+                                        void *owner);
+std::size_t cub_grouped_reduce_i32_atomic_impl(void *keys,
+                                               void *values,
+                                               void *output,
+                                               int num_items,
+                                               int num_groups,
+                                               int op,
+                                               void *stream);
+void cub_grouped_reduce_clear_cache_impl(void *owner);
+std::size_t cub_grouped_reduce_cached_bytes_impl(void *owner);
 #endif
 
 namespace {
@@ -798,6 +818,79 @@ void cub_bucket_builder_clear_cache(void *owner) {
 std::size_t cub_bucket_builder_cached_bytes(void *owner) {
 #if defined(TI_WITH_CUDA_TOOLKIT)
   return cub_bucket_builder_cached_bytes_impl(owner);
+#else
+  return 0;
+#endif
+}
+
+bool cub_grouped_reduce_available() {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return ensure_cudart_for_cub_sort();
+#else
+  return false;
+#endif
+}
+
+std::size_t cub_grouped_reduce_i32_atomic(void *keys,
+                                          void *values,
+                                          void *output,
+                                          int num_items,
+                                          int num_groups,
+                                          int op,
+                                          void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA grouped reduce expects non-negative num_items.");
+  TI_ERROR_IF(num_groups <= 0,
+              "CUDA grouped reduce expects positive num_groups.");
+  TI_ERROR_IF(op != 0, "CUDA grouped reduce currently supports only sum.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_grouped_reduce_i32_atomic_impl(keys, values, output, num_items,
+                                            num_groups, op, stream);
+#else
+  TI_ERROR(
+      "CUDA grouped reduce requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t cub_grouped_reduce_i32(void *keys,
+                                   void *values,
+                                   void *output,
+                                   void *offsets,
+                                   void *scratch,
+                                   void *cursor,
+                                   int num_items,
+                                   int num_groups,
+                                   int op,
+                                   void *stream,
+                                   void *owner) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA grouped reduce expects non-negative num_items.");
+  TI_ERROR_IF(num_groups <= 0,
+              "CUDA grouped reduce expects positive num_groups.");
+  TI_ERROR_IF(op != 0, "CUDA grouped reduce currently supports only sum.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_grouped_reduce_i32_impl(keys, values, output, offsets, scratch,
+                                     cursor, num_items, num_groups, op, stream,
+                                     owner);
+#else
+  TI_ERROR(
+      "CUDA grouped reduce requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+void cub_grouped_reduce_clear_cache(void *owner) {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  cub_grouped_reduce_clear_cache_impl(owner);
+#endif
+}
+
+std::size_t cub_grouped_reduce_cached_bytes(void *owner) {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return cub_grouped_reduce_cached_bytes_impl(owner);
 #else
   return 0;
 #endif

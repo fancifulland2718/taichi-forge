@@ -216,6 +216,29 @@ struct CubBucketBuilderCache {
   }
 };
 
+struct CubGroupedReduceCache {
+  void *temp_storage{nullptr};
+  std::size_t temp_storage_bytes{0};
+  int device_id{-1};
+
+  ~CubGroupedReduceCache() {
+    release_noexcept();
+  }
+
+  void release_noexcept() {
+    if (temp_storage) {
+      cudaFree(temp_storage);
+    }
+    temp_storage = nullptr;
+    temp_storage_bytes = 0;
+    device_id = -1;
+  }
+
+  std::size_t allocated_bytes() const {
+    return temp_storage_bytes;
+  }
+};
+
 std::mutex &get_cache_mutex() {
   static std::mutex mutex;
   return mutex;
@@ -252,6 +275,13 @@ get_reduce_caches() {
 std::unordered_map<void *, std::unique_ptr<CubBucketBuilderCache>> &
 get_bucket_builder_caches() {
   static std::unordered_map<void *, std::unique_ptr<CubBucketBuilderCache>>
+      caches;
+  return caches;
+}
+
+std::unordered_map<void *, std::unique_ptr<CubGroupedReduceCache>> &
+get_grouped_reduce_caches() {
+  static std::unordered_map<void *, std::unique_ptr<CubGroupedReduceCache>>
       caches;
   return caches;
 }
@@ -334,6 +364,19 @@ CubBucketBuilderCache &get_bucket_builder_cache(void *owner) {
   return *it->second;
 }
 
+CubGroupedReduceCache &get_grouped_reduce_cache(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  auto &caches = get_grouped_reduce_caches();
+  auto it = caches.find(owner);
+  if (it == caches.end()) {
+    it = caches.emplace(owner, std::make_unique<CubGroupedReduceCache>()).first;
+  }
+  return *it->second;
+}
+
 void check_cuda(cudaError_t err, const char *expr, const char *file, int line) {
   if (err == cudaSuccess) {
     return;
@@ -411,6 +454,17 @@ void ensure_device_cache(CubBucketBuilderCache &cache) {
   }
 }
 
+void ensure_device_cache(CubGroupedReduceCache &cache) {
+  int device_id = 0;
+  TI_CUDA_SORT_CHECK(cudaGetDevice(&device_id));
+  if (cache.device_id == -1) {
+    cache.device_id = device_id;
+  } else if (cache.device_id != device_id) {
+    cache.release_noexcept();
+    cache.device_id = device_id;
+  }
+}
+
 void ensure_buffer(void **ptr, std::size_t *capacity, std::size_t required) {
   if (required <= *capacity) {
     return;
@@ -478,6 +532,21 @@ __global__ void scatter_add_i32_by_i32_kernel(const int32_t *src,
   int index = indices[i];
   if (index >= 0 && index < index_bound) {
     atomicAdd(dst + index, src[i]);
+  }
+}
+
+__global__ void grouped_reduce_atomic_sum_i32_kernel(const int32_t *keys,
+                                                     const int32_t *values,
+                                                     int32_t *output,
+                                                     int num_items,
+                                                     int num_groups) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  int key = keys[i];
+  if (key >= 0 && key < num_groups) {
+    atomicAdd(output + key, values[i]);
   }
 }
 
@@ -1659,6 +1728,136 @@ std::size_t cub_bucket_builder_cached_bytes_impl(void *owner) {
   }
   std::lock_guard<std::mutex> lock(get_cache_mutex());
   auto &caches = get_bucket_builder_caches();
+  auto it = caches.find(owner);
+  if (it == caches.end()) {
+    return 0;
+  }
+  return it->second->allocated_bytes();
+}
+
+std::size_t cub_grouped_reduce_i32_impl(void *keys,
+                                        void *values,
+                                        void *output,
+                                        void *offsets,
+                                        void *scratch,
+                                        void *cursor,
+                                        int num_items,
+                                        int num_groups,
+                                        int op,
+                                        void *stream_ptr,
+                                        void *owner) {
+  if (!keys || !values || !output || !offsets || !scratch || !cursor) {
+    throw std::runtime_error("CUDA grouped reduce received a null pointer");
+  }
+  if (op != 0) {
+    throw std::runtime_error("CUDA grouped reduce currently supports only sum");
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  std::size_t bucket_bytes = cub_bucket_builder_i32_impl(
+      keys, values, offsets, scratch, cursor, num_items, num_groups, stream,
+      owner);
+
+  auto *offsets_in = static_cast<int32_t *>(offsets);
+  auto *scratch_values = static_cast<int32_t *>(scratch);
+  auto *output_out = static_cast<int32_t *>(output);
+  const std::size_t output_bytes =
+      static_cast<std::size_t>(num_groups) * sizeof(int32_t);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaMemsetAsync(output_out, 0, output_bytes, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaMemset(output_out, 0, output_bytes));
+  }
+
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  CubGroupedReduceCache &cache = get_grouped_reduce_cache(owner);
+  ensure_device_cache(cache);
+  std::size_t temp_storage_bytes = 0;
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceSegmentedReduce::Sum(
+        nullptr, temp_storage_bytes, scratch_values, output_out, num_groups,
+        offsets_in, offsets_in + 1, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceSegmentedReduce::Sum(
+        nullptr, temp_storage_bytes, scratch_values, output_out, num_groups,
+        offsets_in, offsets_in + 1));
+  }
+  ensure_buffer(&cache.temp_storage, &cache.temp_storage_bytes,
+                temp_storage_bytes);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceSegmentedReduce::Sum(
+        cache.temp_storage, temp_storage_bytes, scratch_values, output_out,
+        num_groups, offsets_in, offsets_in + 1, stream));
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceSegmentedReduce::Sum(
+        cache.temp_storage, temp_storage_bytes, scratch_values, output_out,
+        num_groups, offsets_in, offsets_in + 1));
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return bucket_bytes + cache.allocated_bytes();
+}
+
+std::size_t cub_grouped_reduce_i32_atomic_impl(void *keys,
+                                               void *values,
+                                               void *output,
+                                               int num_items,
+                                               int num_groups,
+                                               int op,
+                                               void *stream_ptr) {
+  if (!keys || !values || !output) {
+    throw std::runtime_error("CUDA grouped reduce received a null pointer");
+  }
+  if (op != 0) {
+    throw std::runtime_error("CUDA grouped reduce currently supports only sum");
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  auto *keys_in = static_cast<const int32_t *>(keys);
+  auto *values_in = static_cast<const int32_t *>(values);
+  auto *output_out = static_cast<int32_t *>(output);
+  const std::size_t output_bytes =
+      static_cast<std::size_t>(num_groups) * sizeof(int32_t);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaMemsetAsync(output_out, 0, output_bytes, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaMemset(output_out, 0, output_bytes));
+  }
+  if (num_items > 0) {
+    constexpr int kBlockDim = 256;
+    const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+    grouped_reduce_atomic_sum_i32_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+        keys_in, values_in, output_out, num_items, num_groups);
+    TI_CUDA_SORT_CHECK(cudaGetLastError());
+  }
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return 0;
+}
+
+void cub_grouped_reduce_clear_cache_impl(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  auto &caches = get_grouped_reduce_caches();
+  auto it = caches.find(owner);
+  if (it != caches.end()) {
+    caches.erase(it);
+  }
+}
+
+std::size_t cub_grouped_reduce_cached_bytes_impl(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  auto &caches = get_grouped_reduce_caches();
   auto it = caches.find(owner);
   if (it == caches.end()) {
     return 0;

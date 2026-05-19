@@ -295,6 +295,15 @@ static const uint32_t kBucketScatterI32Spv[] =
 static const uint32_t kBucketScatterPrivateSharedI32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/bucket_scatter_private_shared_i32.comp.spv.h"
     ;
+static const uint32_t kGroupedReduceZeroI32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_i32.comp.spv.h"
+    ;
+static const uint32_t kGroupedReduceAtomicSumI32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/grouped_reduce_atomic_sum_i32.comp.spv.h"
+    ;
+static const uint32_t kGroupedReduceSumI32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/grouped_reduce_sum_i32.comp.spv.h"
+    ;
 
 static const uint32_t kRankHistShift0Spv[] =
 #include "taichi/program/vulkan_sort_shaders/rank_hist_shift0.comp.spv.h"
@@ -1509,6 +1518,9 @@ struct VulkanBucketBuilderCache {
   std::unique_ptr<Pipeline> prefix_chunks_i32;
   std::unique_ptr<Pipeline> scatter_i32;
   std::unique_ptr<Pipeline> scatter_private_shared_i32;
+  std::unique_ptr<Pipeline> grouped_reduce_zero_i32;
+  std::unique_ptr<Pipeline> grouped_reduce_atomic_sum_i32;
+  std::unique_ptr<Pipeline> grouped_reduce_sum_i32;
   std::unique_ptr<ShaderResourceSet> clear_bindings;
   std::unique_ptr<ShaderResourceSet> count_bindings;
   std::unique_ptr<ShaderResourceSet> count_private_bindings;
@@ -1516,6 +1528,9 @@ struct VulkanBucketBuilderCache {
   std::unique_ptr<ShaderResourceSet> prefix_chunks_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_private_bindings;
+  std::unique_ptr<ShaderResourceSet> grouped_reduce_zero_bindings;
+  std::unique_ptr<ShaderResourceSet> grouped_reduce_atomic_bindings;
+  std::unique_ptr<ShaderResourceSet> grouped_reduce_bindings;
 
   void clear_allocs() {
     if (device && partial != kDeviceNullAllocation) {
@@ -1543,6 +1558,9 @@ struct VulkanBucketBuilderCache {
       prefix_chunks_i32.reset();
       scatter_i32.reset();
       scatter_private_shared_i32.reset();
+      grouped_reduce_zero_i32.reset();
+      grouped_reduce_atomic_sum_i32.reset();
+      grouped_reduce_sum_i32.reset();
       clear_bindings.reset();
       count_bindings.reset();
       count_private_bindings.reset();
@@ -1550,6 +1568,9 @@ struct VulkanBucketBuilderCache {
       prefix_chunks_bindings.reset();
       scatter_bindings.reset();
       scatter_private_bindings.reset();
+      grouped_reduce_zero_bindings.reset();
+      grouped_reduce_atomic_bindings.reset();
+      grouped_reduce_bindings.reset();
     }
     device = dev;
     clear_i32 =
@@ -1568,6 +1589,13 @@ struct VulkanBucketBuilderCache {
     scatter_private_shared_i32 = create_pipeline(
         dev, kBucketScatterPrivateSharedI32Spv,
         "vulkan_bucket_scatter_private_shared_i32");
+    grouped_reduce_zero_i32 = create_pipeline(
+        dev, kGroupedReduceZeroI32Spv, "vulkan_grouped_reduce_zero_i32");
+    grouped_reduce_atomic_sum_i32 =
+        create_pipeline(dev, kGroupedReduceAtomicSumI32Spv,
+                        "vulkan_grouped_reduce_atomic_sum_i32");
+    grouped_reduce_sum_i32 = create_pipeline(
+        dev, kGroupedReduceSumI32Spv, "vulkan_grouped_reduce_sum_i32");
   }
 
   ShaderResourceSet *resource_set(std::unique_ptr<ShaderResourceSet> &bindings) {
@@ -2082,6 +2110,84 @@ bool Program::vulkan_scatter_add_available() const {
 
 bool Program::vulkan_bucket_builder_available() const {
   return compile_config().arch == Arch::vulkan;
+}
+
+bool Program::vulkan_grouped_reduce_available() const {
+  return compile_config().arch == Arch::vulkan;
+}
+
+std::size_t Program::vulkan_grouped_reduce_i32_atomic_ndarray(Ndarray *keys,
+                                                              Ndarray *values,
+                                                              Ndarray *output,
+                                                              int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native grouped reduce is only available on Vulkan.");
+  TI_ERROR_IF(!keys || !values || !output,
+              "Vulkan native grouped reduce received a null ndarray.");
+  TI_ERROR_IF(keys->shape.size() != 1 || values->shape.size() != 1 ||
+                  output->shape.size() != 1,
+              "Vulkan native grouped reduce expects 1D ndarrays.");
+  TI_ERROR_IF(keys->get_nelement() != values->get_nelement(),
+              "Vulkan native grouped reduce keys and values sizes differ.");
+  TI_ERROR_IF(output->get_nelement() == 0,
+              "Vulkan native grouped reduce output must contain at least one group.");
+  TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
+                  values->get_element_size() != sizeof(int32_t) ||
+                  output->get_element_size() != sizeof(int32_t),
+              "Vulkan native grouped reduce currently expects i32 arrays.");
+  TI_ERROR_IF(op != 0, "Vulkan native grouped reduce currently supports only sum.");
+  const size_t n = keys->get_nelement();
+  const size_t num_groups = output->get_nelement();
+  TI_ERROR_IF(n > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ||
+                  num_groups >
+                      static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native grouped reduce input is too large for u32 dispatch.");
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native grouped reduce requires a compute device.");
+  auto &cache = get_bucket_builder_cache(this, device);
+  const DeviceAllocation keys_alloc = keys->ndarray_alloc_;
+  const DeviceAllocation values_alloc = values->ndarray_alloc_;
+  const DeviceAllocation output_alloc = output->ndarray_alloc_;
+  const size_t input_bytes = n * sizeof(int32_t);
+  const size_t output_bytes = num_groups * sizeof(int32_t);
+  Pipeline *zero_pipeline = cache.grouped_reduce_zero_i32.get();
+  Pipeline *atomic_pipeline = cache.grouped_reduce_atomic_sum_i32.get();
+  ShaderResourceSet *zero_bindings =
+      cache.resource_set(cache.grouped_reduce_zero_bindings);
+  ShaderResourceSet *atomic_bindings =
+      cache.resource_set(cache.grouped_reduce_atomic_bindings);
+  const uint32_t zero_groups =
+      static_cast<uint32_t>((num_groups + kBlockSize - 1) / kBlockSize);
+  const uint32_t reduce_groups =
+      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
+  const bool profiler_scopes = profiler != nullptr;
+  enqueue_compute_op_lambda(
+      [keys_alloc, values_alloc, output_alloc, input_bytes, output_bytes,
+       zero_pipeline, atomic_pipeline, zero_bindings, atomic_bindings,
+       zero_groups, reduce_groups,
+       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        zero_bindings->rw_buffer(0, output_alloc.get_ptr(0), output_bytes);
+        dispatch_pipeline(cmdlist, zero_pipeline, zero_bindings, zero_groups, 1,
+                          1,
+                          profiler_scopes ? "vulkan_grouped_reduce_zero_i32"
+                                          : nullptr);
+        cmdlist->buffer_barrier(output_alloc);
+        if (reduce_groups == 0) {
+          return;
+        }
+        atomic_bindings->rw_buffer(0, keys_alloc.get_ptr(0), input_bytes);
+        atomic_bindings->rw_buffer(1, values_alloc.get_ptr(0), input_bytes);
+        atomic_bindings->rw_buffer(2, output_alloc.get_ptr(0), output_bytes);
+        dispatch_pipeline(cmdlist, atomic_pipeline, atomic_bindings,
+                          reduce_groups, 1, 1,
+                          profiler_scopes
+                              ? "vulkan_grouped_reduce_atomic_sum_i32"
+                              : nullptr);
+        cmdlist->buffer_barrier(output_alloc);
+      },
+      {});
+  return 0;
 }
 
 std::size_t Program::vulkan_inclusive_scan_ndarray(Ndarray *data,
@@ -2934,6 +3040,77 @@ std::size_t Program::vulkan_bucket_builder_i32_ndarray(Ndarray *keys,
   return use_private ? cache.cached_bytes : 0;
 }
 
+std::size_t Program::vulkan_grouped_reduce_i32_ndarray(Ndarray *keys,
+                                                       Ndarray *values,
+                                                       Ndarray *output,
+                                                       Ndarray *offsets,
+                                                       Ndarray *scratch,
+                                                       Ndarray *cursor,
+                                                       int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native grouped reduce is only available on Vulkan.");
+  TI_ERROR_IF(!keys || !values || !output || !offsets || !scratch || !cursor,
+              "Vulkan native grouped reduce received a null ndarray.");
+  TI_ERROR_IF(keys->shape.size() != 1 || values->shape.size() != 1 ||
+                  output->shape.size() != 1 || offsets->shape.size() != 1 ||
+                  scratch->shape.size() != 1 || cursor->shape.size() != 1,
+              "Vulkan native grouped reduce expects 1D ndarrays.");
+  TI_ERROR_IF(keys->get_nelement() != values->get_nelement(),
+              "Vulkan native grouped reduce keys and values sizes differ.");
+  TI_ERROR_IF(output->get_nelement() == 0,
+              "Vulkan native grouped reduce output must contain at least one group.");
+  const size_t n = keys->get_nelement();
+  const size_t num_groups = output->get_nelement();
+  TI_ERROR_IF(offsets->get_nelement() < num_groups + 1,
+              "Vulkan native grouped reduce offsets must contain num_groups + 1 items.");
+  TI_ERROR_IF(scratch->get_nelement() < n,
+              "Vulkan native grouped reduce scratch is smaller than input values.");
+  TI_ERROR_IF(cursor->get_nelement() < num_groups,
+              "Vulkan native grouped reduce cursor is smaller than num_groups.");
+  TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
+                  values->get_element_size() != sizeof(int32_t) ||
+                  output->get_element_size() != sizeof(int32_t) ||
+                  offsets->get_element_size() != sizeof(int32_t) ||
+                  scratch->get_element_size() != sizeof(int32_t) ||
+                  cursor->get_element_size() != sizeof(int32_t),
+              "Vulkan native grouped reduce currently expects i32 arrays.");
+  TI_ERROR_IF(op != 0, "Vulkan native grouped reduce currently supports only sum.");
+  TI_ERROR_IF(n > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ||
+                  num_groups >
+                      static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native grouped reduce input is too large for u32 dispatch.");
+
+  std::size_t bucket_workspace =
+      vulkan_bucket_builder_i32_ndarray(keys, values, offsets, scratch, cursor);
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native grouped reduce requires a compute device.");
+  auto &cache = get_bucket_builder_cache(this, device);
+  const DeviceAllocation offsets_alloc = offsets->ndarray_alloc_;
+  const DeviceAllocation scratch_alloc = scratch->ndarray_alloc_;
+  const DeviceAllocation output_alloc = output->ndarray_alloc_;
+  const size_t offset_bytes = (num_groups + 1) * sizeof(int32_t);
+  const size_t scratch_bytes = n * sizeof(int32_t);
+  const size_t output_bytes = num_groups * sizeof(int32_t);
+  Pipeline *pipeline = cache.grouped_reduce_sum_i32.get();
+  ShaderResourceSet *bindings = cache.resource_set(cache.grouped_reduce_bindings);
+  const uint32_t groups = static_cast<uint32_t>(num_groups);
+  const bool profiler_scopes = profiler != nullptr;
+  enqueue_compute_op_lambda(
+      [offsets_alloc, scratch_alloc, output_alloc, offset_bytes, scratch_bytes,
+       output_bytes, pipeline, bindings, groups,
+       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        bindings->rw_buffer(0, offsets_alloc.get_ptr(0), offset_bytes);
+        bindings->rw_buffer(1, scratch_alloc.get_ptr(0), scratch_bytes);
+        bindings->rw_buffer(2, output_alloc.get_ptr(0), output_bytes);
+        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
+                          profiler_scopes ? "vulkan_grouped_reduce_sum_i32"
+                                          : nullptr);
+        cmdlist->buffer_barrier(output_alloc);
+      },
+      {});
+  return bucket_workspace;
+}
+
 std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                                                    Ndarray *values,
                                                    int key_type) {
@@ -3524,6 +3701,10 @@ void Program::vulkan_bucket_builder_clear_workspace() {
   }
 }
 
+void Program::vulkan_grouped_reduce_clear_workspace() {
+  vulkan_bucket_builder_clear_workspace();
+}
+
 std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
   std::lock_guard<std::mutex> guard(g_vulkan_sort_mutex);
   auto it = g_vulkan_sort_caches.find(const_cast<Program *>(this));
@@ -3595,6 +3776,10 @@ std::size_t Program::vulkan_bucket_builder_workspace_bytes() const {
   return it->second->cached_bytes;
 }
 
+std::size_t Program::vulkan_grouped_reduce_workspace_bytes() const {
+  return vulkan_bucket_builder_workspace_bytes();
+}
+
 void Program::vulkan_radix_sort_cpu_profile_clear() {
   g_vulkan_sort_cpu_profile.clear();
 }
@@ -3642,6 +3827,10 @@ bool Program::vulkan_scatter_add_available() const {
 }
 
 bool Program::vulkan_bucket_builder_available() const {
+  return false;
+}
+
+bool Program::vulkan_grouped_reduce_available() const {
   return false;
 }
 
@@ -3719,6 +3908,25 @@ std::size_t Program::vulkan_bucket_builder_i32_ndarray(Ndarray *keys,
   return 0;
 }
 
+std::size_t Program::vulkan_grouped_reduce_i32_atomic_ndarray(Ndarray *keys,
+                                                              Ndarray *values,
+                                                              Ndarray *output,
+                                                              int op) {
+  TI_ERROR("Vulkan native grouped reduce requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_grouped_reduce_i32_ndarray(Ndarray *keys,
+                                                       Ndarray *values,
+                                                       Ndarray *output,
+                                                       Ndarray *offsets,
+                                                       Ndarray *scratch,
+                                                       Ndarray *cursor,
+                                                       int op) {
+  TI_ERROR("Vulkan native grouped reduce requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 void Program::vulkan_radix_sort_clear_workspace() {
 }
 
@@ -3744,6 +3952,9 @@ void Program::vulkan_scatter_add_clear_workspace() {
 }
 
 void Program::vulkan_bucket_builder_clear_workspace() {
+}
+
+void Program::vulkan_grouped_reduce_clear_workspace() {
 }
 
 std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
@@ -3779,6 +3990,10 @@ std::size_t Program::vulkan_scatter_add_workspace_bytes() const {
 }
 
 std::size_t Program::vulkan_bucket_builder_workspace_bytes() const {
+  return 0;
+}
+
+std::size_t Program::vulkan_grouped_reduce_workspace_bytes() const {
   return 0;
 }
 

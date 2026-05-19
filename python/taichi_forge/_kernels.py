@@ -329,6 +329,22 @@ def bucket_scatter_i32_ndarray(
 
 
 @kernel
+def grouped_reduce_sum_i32_ndarray(
+    keys: ndarray_type.ndarray(dtype=i32, ndim=1),
+    values: ndarray_type.ndarray(dtype=i32, ndim=1),
+    output: ndarray_type.ndarray(dtype=i32, ndim=1),
+    n: i32,
+    num_groups: i32,
+):
+    for i in range(num_groups):
+        output[i] = 0
+    for i in range(n):
+        key = keys[i]
+        if key >= 0 and key < num_groups:
+            ops.atomic_add(output[key], values[i])
+
+
+@kernel
 def gather_i32_field(src: template(), indices: template(), dst: template(), n: i32):
     src_offset = static(src.snode.ptr.offset if len(src.snode.ptr.offset) != 0 else [0])
     indices_offset = static(
@@ -470,6 +486,31 @@ def bucket_scatter_i32_field(
             out_idx = ops.atomic_add(cursor[key], 1)
             if out_idx >= 0 and out_idx < output.shape[0]:
                 output[out_idx + output_offset[0]] = values[i + values_offset[0]]
+
+
+@kernel
+def grouped_reduce_sum_i32_field(
+    keys: template(),
+    values: template(),
+    output: template(),
+    n: i32,
+    num_groups: i32,
+):
+    keys_offset = static(keys.snode.ptr.offset if len(keys.snode.ptr.offset) != 0 else [0])
+    values_offset = static(
+        values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else [0]
+    )
+    output_offset = static(
+        output.snode.ptr.offset if len(output.snode.ptr.offset) != 0 else [0]
+    )
+    for i in range(num_groups):
+        output[i + output_offset[0]] = 0
+    for i in range(n):
+        key = keys[i + keys_offset[0]]
+        if key >= 0 and key < num_groups:
+            ops.atomic_add(
+                output[key + output_offset[0]], values[i + values_offset[0]]
+            )
 
 
 @kernel

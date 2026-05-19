@@ -1,0 +1,28 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Keys {
+  int data[];
+} keys_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer Values {
+  int data[];
+} values_buf;
+
+layout(set = 0, binding = 2, std430) buffer Output {
+  int data[];
+} output_buf;
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= keys_buf.data.length()) {
+    return;
+  }
+  int key = keys_buf.data[i];
+  uint group = uint(key);
+  if (key < 0 || group >= output_buf.data.length()) {
+    return;
+  }
+  atomicAdd(output_buf.data[group], values_buf.data[i]);
+}

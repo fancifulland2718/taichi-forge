@@ -67,11 +67,21 @@ std::atomic<int> Program::num_instances_;
 
 namespace {
 std::atomic<std::size_t> cpu_scatter_add_workspace_bytes_peak{0};
+std::atomic<std::size_t> cpu_grouped_reduce_workspace_bytes_peak{0};
 
 void update_cpu_scatter_add_workspace_peak(std::size_t bytes) {
   auto current = cpu_scatter_add_workspace_bytes_peak.load(std::memory_order_relaxed);
   while (current < bytes &&
          !cpu_scatter_add_workspace_bytes_peak.compare_exchange_weak(
+             current, bytes, std::memory_order_relaxed)) {
+  }
+}
+
+void update_cpu_grouped_reduce_workspace_peak(std::size_t bytes) {
+  auto current =
+      cpu_grouped_reduce_workspace_bytes_peak.load(std::memory_order_relaxed);
+  while (current < bytes &&
+         !cpu_grouped_reduce_workspace_bytes_peak.compare_exchange_weak(
              current, bytes, std::memory_order_relaxed)) {
   }
 }
@@ -177,6 +187,16 @@ struct CpuBucketScatterTaskContext {
   int32_t *output{nullptr};
   std::size_t n{0};
   std::size_t num_bins{0};
+  int num_threads{1};
+};
+
+struct CpuGroupedReduceI32TaskContext {
+  const int32_t *keys{nullptr};
+  const int32_t *values{nullptr};
+  int32_t *partial{nullptr};
+  int32_t *output{nullptr};
+  std::size_t n{0};
+  std::size_t num_groups{0};
   int num_threads{1};
 };
 
@@ -461,6 +481,48 @@ void cpu_bucket_scatter_task(void *raw_ctx, int /*thread_id*/, int task_id) {
         ctx->output[pos] = ctx->values[i];
       }
     }
+  }
+}
+
+void cpu_grouped_reduce_i32_count_task(void *raw_ctx,
+                                       int /*thread_id*/,
+                                       int task_id) {
+  auto *ctx = static_cast<CpuGroupedReduceI32TaskContext *>(raw_ctx);
+  const int tid = task_id;
+  int32_t *local =
+      ctx->partial + ctx->num_groups * static_cast<std::size_t>(tid);
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    int32_t key = ctx->keys[i];
+    if (key >= 0 && static_cast<std::size_t>(key) < ctx->num_groups) {
+      local[key] += ctx->values[i];
+    }
+  }
+}
+
+void cpu_grouped_reduce_i32_merge_task(void *raw_ctx,
+                                       int /*thread_id*/,
+                                       int task_id) {
+  auto *ctx = static_cast<CpuGroupedReduceI32TaskContext *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->num_groups * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->num_groups * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t group = begin; group < end; ++group) {
+    int32_t value = 0;
+    for (int t = 0; t < ctx->num_threads; ++t) {
+      value += ctx->partial[ctx->num_groups * static_cast<std::size_t>(t) +
+                            group];
+    }
+    ctx->output[group] = value;
   }
 }
 
@@ -941,6 +1003,7 @@ void Program::finalize() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
     cuda::cub_bucket_builder_clear_cache(this);
+    cuda::cub_grouped_reduce_clear_cache(this);
   }
 #endif
   textures_.clear();
@@ -1526,6 +1589,114 @@ std::size_t Program::cuda_device_bucket_builder_i32_ndarray(Ndarray *keys,
 #else
   TI_ERROR(
       "CUDA bucket builder requires building Taichi with TI_WITH_CUDA=ON and "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+bool Program::cuda_device_grouped_reduce_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::cub_grouped_reduce_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_device_grouped_reduce_i32_atomic_ndarray(
+    Ndarray *keys,
+    Ndarray *values,
+    Ndarray *output,
+    int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA grouped reduce is only available on CUDA.");
+  TI_ERROR_IF(!keys || !values || !output,
+              "CUDA grouped reduce received a null ndarray.");
+  TI_ERROR_IF(keys->shape.size() != 1 || values->shape.size() != 1 ||
+                  output->shape.size() != 1,
+              "CUDA grouped reduce expects 1D ndarrays.");
+  TI_ERROR_IF(keys->get_nelement() != values->get_nelement(),
+              "CUDA grouped reduce keys and values sizes differ.");
+  TI_ERROR_IF(output->get_nelement() == 0,
+              "CUDA grouped reduce output must contain at least one group.");
+  const std::size_t num_groups = output->get_nelement();
+  TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
+                  values->get_element_size() != sizeof(int32_t) ||
+                  output->get_element_size() != sizeof(int32_t),
+              "CUDA grouped reduce currently expects i32 arrays.");
+  TI_ERROR_IF(op != 0, "CUDA grouped reduce currently supports only sum.");
+  TI_ERROR_IF(keys->get_nelement() >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  num_groups >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA grouped reduce input is too large for int launch parameters.");
+#ifdef TI_WITH_CUDA
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_grouped_reduce_i32_atomic(
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
+      static_cast<int>(keys->get_nelement()), static_cast<int>(num_groups), op,
+      stream);
+#else
+  TI_ERROR(
+      "CUDA grouped reduce requires building Taichi with TI_WITH_CUDA=ON and "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_grouped_reduce_i32_ndarray(Ndarray *keys,
+                                                            Ndarray *values,
+                                                            Ndarray *output,
+                                                            Ndarray *offsets,
+                                                            Ndarray *scratch,
+                                                            Ndarray *cursor,
+                                                            int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA grouped reduce is only available on CUDA.");
+  TI_ERROR_IF(!keys || !values || !output || !offsets || !scratch || !cursor,
+              "CUDA grouped reduce received a null ndarray.");
+  TI_ERROR_IF(keys->shape.size() != 1 || values->shape.size() != 1 ||
+                  output->shape.size() != 1 || offsets->shape.size() != 1 ||
+                  scratch->shape.size() != 1 || cursor->shape.size() != 1,
+              "CUDA grouped reduce expects 1D ndarrays.");
+  TI_ERROR_IF(keys->get_nelement() != values->get_nelement(),
+              "CUDA grouped reduce keys and values sizes differ.");
+  TI_ERROR_IF(output->get_nelement() == 0,
+              "CUDA grouped reduce output must contain at least one group.");
+  const std::size_t num_groups = output->get_nelement();
+  TI_ERROR_IF(offsets->get_nelement() < num_groups + 1,
+              "CUDA grouped reduce offsets must contain num_groups + 1 items.");
+  TI_ERROR_IF(scratch->get_nelement() < values->get_nelement(),
+              "CUDA grouped reduce scratch is smaller than input values.");
+  TI_ERROR_IF(cursor->get_nelement() < num_groups,
+              "CUDA grouped reduce cursor is smaller than num_groups.");
+  TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
+                  values->get_element_size() != sizeof(int32_t) ||
+                  output->get_element_size() != sizeof(int32_t) ||
+                  offsets->get_element_size() != sizeof(int32_t) ||
+                  scratch->get_element_size() != sizeof(int32_t) ||
+                  cursor->get_element_size() != sizeof(int32_t),
+              "CUDA grouped reduce currently expects i32 arrays.");
+  TI_ERROR_IF(op != 0, "CUDA grouped reduce currently supports only sum.");
+  TI_ERROR_IF(keys->get_nelement() >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  num_groups >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA grouped reduce input is too large for int launch parameters.");
+#ifdef TI_WITH_CUDA
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_grouped_reduce_i32(
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(offsets)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(scratch)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(cursor)),
+      static_cast<int>(keys->get_nelement()), static_cast<int>(num_groups), op,
+      stream, this);
+#else
+  TI_ERROR(
+      "CUDA grouped reduce requires building Taichi with TI_WITH_CUDA=ON and "
       "TI_WITH_CUDA_TOOLKIT=ON.");
 #endif
 }
@@ -2630,6 +2801,83 @@ std::size_t Program::cpu_bucket_builder_i32_ndarray(Ndarray *keys,
 
 std::size_t Program::cpu_bucket_builder_workspace_bytes() const {
   return 0;
+}
+
+bool Program::cpu_grouped_reduce_available() const {
+  return arch_is_cpu(compile_config().arch);
+}
+
+std::size_t Program::cpu_grouped_reduce_i32_ndarray(Ndarray *keys,
+                                                    Ndarray *values,
+                                                    Ndarray *output,
+                                                    int op) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native grouped reduce is only available on CPU backends.");
+  TI_ERROR_IF(!keys || !values || !output,
+              "CPU native grouped reduce received a null ndarray.");
+  TI_ERROR_IF(keys->shape.size() != 1 || values->shape.size() != 1 ||
+                  output->shape.size() != 1,
+              "CPU native grouped reduce expects 1D ndarrays.");
+  TI_ERROR_IF(keys->get_nelement() != values->get_nelement(),
+              "CPU native grouped reduce keys and values sizes differ.");
+  TI_ERROR_IF(output->get_nelement() == 0,
+              "CPU native grouped reduce output must contain at least one group.");
+  TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
+                  values->get_element_size() != sizeof(int32_t) ||
+                  output->get_element_size() != sizeof(int32_t),
+              "CPU native grouped reduce currently expects i32 arrays.");
+  TI_ERROR_IF(op != 0, "CPU native grouped reduce currently supports only sum.");
+  const std::size_t n = keys->get_nelement();
+  const std::size_t num_groups = output->get_nelement();
+  auto *keys_ptr =
+      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(keys));
+  auto *values_ptr =
+      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(values));
+  auto *output_ptr = reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(output));
+  TI_ERROR_IF(!keys_ptr || !values_ptr || !output_ptr,
+              "CPU native grouped reduce received a null data pointer.");
+  std::fill(output_ptr, output_ptr + num_groups, 0);
+  if (n == 0) {
+    return 0;
+  }
+
+  const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
+  const int target_threads =
+      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
+  const std::size_t workspace_bytes =
+      static_cast<std::size_t>(target_threads) * num_groups * sizeof(int32_t);
+  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
+    std::vector<int32_t> partial(
+        static_cast<std::size_t>(target_threads) * num_groups, 0);
+    CpuGroupedReduceI32TaskContext ctx;
+    ctx.keys = keys_ptr;
+    ctx.values = values_ptr;
+    ctx.partial = partial.data();
+    ctx.output = output_ptr;
+    ctx.n = n;
+    ctx.num_groups = num_groups;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_grouped_reduce_i32_count_task);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_grouped_reduce_i32_merge_task);
+    update_cpu_grouped_reduce_workspace_peak(workspace_bytes);
+    return workspace_bytes;
+  }
+
+  for (std::size_t i = 0; i < n; ++i) {
+    int32_t key = keys_ptr[i];
+    if (key >= 0 && static_cast<std::size_t>(key) < num_groups) {
+      output_ptr[key] += values_ptr[i];
+    }
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_grouped_reduce_workspace_bytes() const {
+  return cpu_grouped_reduce_workspace_bytes_peak.load(std::memory_order_relaxed);
 }
 
 std::pair<const ArgPackType *, size_t>
