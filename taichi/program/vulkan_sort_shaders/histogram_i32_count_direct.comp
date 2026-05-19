@@ -1,0 +1,24 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) buffer Values {
+  int data[];
+} values_buf;
+
+layout(set = 0, binding = 1, std430) buffer Bins {
+  int data[];
+} bins_buf;
+
+void main() {
+  uint idx = gl_GlobalInvocationID.x;
+  uint n = values_buf.data.length();
+  uint num_bins = bins_buf.data.length();
+  if (idx >= n) {
+    return;
+  }
+  int bin = values_buf.data[idx];
+  if (bin >= 0 && uint(bin) < num_bins) {
+    atomicAdd(bins_buf.data[uint(bin)], 1);
+  }
+}

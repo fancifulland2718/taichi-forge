@@ -22,6 +22,7 @@ constexpr uint32_t kSingleChunkPrefixMaxBlocks = 32;
 constexpr uint32_t kInlineChunkPrefixMaxChunks = 4;
 constexpr uint32_t kRadix8Bins = 256;
 constexpr uint32_t kRadix8PartitionSize = 2048;
+constexpr uint32_t kHistogramPrivateChunkSize = 2048;
 
 struct VulkanSortCpuProfileSample {
   uint64_t sort_calls{0};
@@ -209,6 +210,24 @@ static const uint32_t kCompactI32FlagsSpv[] =
     ;
 static const uint32_t kCompactI32ScatterSpv[] =
 #include "taichi/program/vulkan_sort_shaders/compact_i32_scatter.comp.spv.h"
+    ;
+static const uint32_t kHistogramI32ClearSpv[] =
+#include "taichi/program/vulkan_sort_shaders/histogram_i32_clear.comp.spv.h"
+    ;
+static const uint32_t kHistogramI32CountDirectSpv[] =
+#include "taichi/program/vulkan_sort_shaders/histogram_i32_count_direct.comp.spv.h"
+    ;
+static const uint32_t kHistogramI32CountPrivateSpv[] =
+#include "taichi/program/vulkan_sort_shaders/histogram_i32_count_private.comp.spv.h"
+    ;
+static const uint32_t kHistogramI32CountPrivateSharedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/histogram_i32_count_private_shared.comp.spv.h"
+    ;
+static const uint32_t kHistogramI32ReducePrivateSpv[] =
+#include "taichi/program/vulkan_sort_shaders/histogram_i32_reduce_private.comp.spv.h"
+    ;
+static const uint32_t kHistogramI32SingleSharedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/histogram_i32_single_shared.comp.spv.h"
     ;
 
 static const uint32_t kRankHistShift0Spv[] =
@@ -1104,6 +1123,105 @@ struct VulkanCompactCache {
   }
 };
 
+struct VulkanHistogramCache {
+  Device *device{nullptr};
+  size_t partial_capacity{0};
+  size_t cached_bytes{0};
+  DeviceAllocation partial{kDeviceNullAllocation};
+  std::unique_ptr<Pipeline> histogram_i32_clear;
+  std::unique_ptr<Pipeline> histogram_i32_count_direct;
+  std::unique_ptr<Pipeline> histogram_i32_count_private;
+  std::unique_ptr<Pipeline> histogram_i32_count_private_shared;
+  std::unique_ptr<Pipeline> histogram_i32_reduce_private;
+  std::unique_ptr<Pipeline> histogram_i32_single_shared;
+
+  void clear_allocs() {
+    if (device && partial != kDeviceNullAllocation) {
+      device->dealloc_memory(partial);
+    }
+    partial = kDeviceNullAllocation;
+    partial_capacity = 0;
+    cached_bytes = 0;
+  }
+
+  ~VulkanHistogramCache() {
+    clear_allocs();
+  }
+
+  void ensure_pipelines(Device *dev) {
+    if (device == dev && histogram_i32_clear) {
+      return;
+    }
+    if (device && device != dev) {
+      clear_allocs();
+      histogram_i32_clear.reset();
+      histogram_i32_count_direct.reset();
+      histogram_i32_count_private.reset();
+      histogram_i32_count_private_shared.reset();
+      histogram_i32_reduce_private.reset();
+      histogram_i32_single_shared.reset();
+    }
+    device = dev;
+    histogram_i32_clear = create_pipeline(
+        dev, kHistogramI32ClearSpv, "vulkan_histogram_i32_clear");
+    histogram_i32_count_direct = create_pipeline(
+        dev, kHistogramI32CountDirectSpv,
+        "vulkan_histogram_i32_count_direct");
+    histogram_i32_count_private = create_pipeline(
+        dev, kHistogramI32CountPrivateSpv,
+        "vulkan_histogram_i32_count_private");
+    histogram_i32_count_private_shared = create_pipeline(
+        dev, kHistogramI32CountPrivateSharedSpv,
+        "vulkan_histogram_i32_count_private_shared");
+    histogram_i32_reduce_private = create_pipeline(
+        dev, kHistogramI32ReducePrivateSpv,
+        "vulkan_histogram_i32_reduce_private");
+    histogram_i32_single_shared = create_pipeline(
+        dev, kHistogramI32SingleSharedSpv,
+        "vulkan_histogram_i32_single_shared");
+  }
+
+  DeviceAllocation alloc_storage(size_t bytes) {
+    DeviceAllocation alloc{kDeviceNullAllocation};
+    Device::AllocParams params;
+    params.size = bytes;
+    params.usage = AllocUsage::Storage;
+    RhiResult res = device->allocate_memory(params, &alloc);
+    TI_ERROR_IF(res != RhiResult::success,
+                "Failed to allocate Vulkan histogram workspace: RhiResult({})",
+                res);
+    return alloc;
+  }
+
+  bool needs_partial_realloc(size_t bytes) const {
+    return partial_capacity < bytes;
+  }
+
+  bool has_workspace_allocs() const {
+    return partial != kDeviceNullAllocation;
+  }
+
+  void clear_partial_alloc() {
+    if (device && partial != kDeviceNullAllocation) {
+      device->dealloc_memory(partial);
+    }
+    partial = kDeviceNullAllocation;
+    partial_capacity = 0;
+    cached_bytes = 0;
+  }
+
+  void ensure_partial(size_t bytes) {
+    if (bytes == 0 || !needs_partial_realloc(bytes)) {
+      cached_bytes = partial_capacity;
+      return;
+    }
+    clear_partial_alloc();
+    partial = alloc_storage(bytes);
+    partial_capacity = bytes;
+    cached_bytes = partial_capacity;
+  }
+};
+
 std::mutex g_vulkan_sort_mutex;
 std::unordered_map<void *, std::unique_ptr<VulkanRadixSortCache>>
     g_vulkan_sort_caches;
@@ -1113,6 +1231,9 @@ std::unordered_map<void *, std::unique_ptr<VulkanScanCache>>
 std::mutex g_vulkan_compact_mutex;
 std::unordered_map<void *, std::unique_ptr<VulkanCompactCache>>
     g_vulkan_compact_caches;
+std::mutex g_vulkan_histogram_mutex;
+std::unordered_map<void *, std::unique_ptr<VulkanHistogramCache>>
+    g_vulkan_histogram_caches;
 
 VulkanRadixSortCache &get_cache(void *owner, Device *device) {
   std::lock_guard<std::mutex> guard(g_vulkan_sort_mutex);
@@ -1139,6 +1260,16 @@ VulkanCompactCache &get_compact_cache(void *owner, Device *device) {
   auto &cache = g_vulkan_compact_caches[owner];
   if (!cache) {
     cache = std::make_unique<VulkanCompactCache>();
+  }
+  cache->ensure_pipelines(device);
+  return *cache;
+}
+
+VulkanHistogramCache &get_histogram_cache(void *owner, Device *device) {
+  std::lock_guard<std::mutex> guard(g_vulkan_histogram_mutex);
+  auto &cache = g_vulkan_histogram_caches[owner];
+  if (!cache) {
+    cache = std::make_unique<VulkanHistogramCache>();
   }
   cache->ensure_pipelines(device);
   return *cache;
@@ -1493,6 +1624,10 @@ bool Program::vulkan_compact_available() const {
   return compile_config().arch == Arch::vulkan;
 }
 
+bool Program::vulkan_histogram_available() const {
+  return compile_config().arch == Arch::vulkan;
+}
+
 std::size_t Program::vulkan_inclusive_scan_ndarray(Ndarray *data,
                                                    int value_type) {
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
@@ -1644,6 +1779,149 @@ std::size_t Program::vulkan_compact_i32_ndarray(Ndarray *values,
                                           : nullptr);
         cmdlist->buffer_barrier(output_alloc);
         cmdlist->buffer_barrier(count_alloc);
+      },
+      {});
+  return cache.cached_bytes;
+}
+
+std::size_t Program::vulkan_histogram_i32_ndarray(Ndarray *values,
+                                                  Ndarray *bins) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native histogram is only available on Vulkan.");
+  TI_ERROR_IF(!values || !bins,
+              "Vulkan native histogram received null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || bins->shape.size() != 1,
+              "Vulkan native histogram expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_element_size() != sizeof(int32_t) ||
+                  bins->get_element_size() != sizeof(int32_t),
+              "Vulkan native histogram currently expects i32 values and bins.");
+  TI_ERROR_IF(bins->get_nelement() == 0,
+              "Vulkan native histogram expects at least one bin.");
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native histogram requires a compute device.");
+  auto &cache = get_histogram_cache(this, device);
+
+  const size_t n = values->get_nelement();
+  const size_t num_bins = bins->get_nelement();
+  const size_t value_bytes = n * sizeof(int32_t);
+  const size_t bin_bytes = num_bins * sizeof(int32_t);
+  const int private_min_n_config =
+      get_environ_config("TI_VULKAN_HISTOGRAM_PRIVATE_MIN_N", 65536);
+  const int private_max_bins_config =
+      get_environ_config("TI_VULKAN_HISTOGRAM_PRIVATE_MAX_BINS", 512);
+  const int single_shared_max_n_config =
+      get_environ_config("TI_VULKAN_HISTOGRAM_SINGLE_SHARED_MAX_N", 4096);
+  const bool shared_bins_supported = num_bins <= 512;
+  const bool use_single_shared =
+      n > 0 && shared_bins_supported && single_shared_max_n_config > 0 &&
+      n <= static_cast<size_t>(single_shared_max_n_config);
+  const bool use_private =
+      n > 0 && !use_single_shared && shared_bins_supported &&
+      (private_min_n_config <= 0 ||
+       n >= static_cast<size_t>(private_min_n_config)) &&
+      (private_max_bins_config <= 0 ||
+       num_bins <= static_cast<size_t>(private_max_bins_config));
+
+  size_t num_chunks = 0;
+  size_t partial_bytes = 0;
+  if (use_private) {
+    num_chunks = (n + kHistogramPrivateChunkSize - 1) /
+                 kHistogramPrivateChunkSize;
+    partial_bytes = num_chunks * num_bins * sizeof(int32_t);
+    if (cache.has_workspace_allocs() &&
+        cache.needs_partial_realloc(partial_bytes)) {
+      synchronize();
+    }
+    cache.ensure_partial(partial_bytes);
+  }
+
+  DeviceAllocation values_alloc = values->ndarray_alloc_;
+  DeviceAllocation bins_alloc = bins->ndarray_alloc_;
+  DeviceAllocation partial_alloc = cache.partial;
+  Pipeline *clear_pipeline = cache.histogram_i32_clear.get();
+  Pipeline *count_direct_pipeline = cache.histogram_i32_count_direct.get();
+  Pipeline *count_private_pipeline = cache.histogram_i32_count_private.get();
+  Pipeline *count_private_shared_pipeline =
+      cache.histogram_i32_count_private_shared.get();
+  Pipeline *reduce_private_pipeline = cache.histogram_i32_reduce_private.get();
+  Pipeline *single_shared_pipeline = cache.histogram_i32_single_shared.get();
+  const bool profiler_scopes = profiler != nullptr;
+  const uint32_t bin_groups = static_cast<uint32_t>(
+      (num_bins + kBlockSize - 1) / kBlockSize);
+  const uint32_t value_groups = static_cast<uint32_t>(
+      (n + kBlockSize - 1) / kBlockSize);
+
+  enqueue_compute_op_lambda(
+      [values_alloc, bins_alloc, partial_alloc, value_bytes, bin_bytes,
+       partial_bytes, clear_pipeline, count_direct_pipeline,
+       count_private_pipeline, count_private_shared_pipeline,
+       reduce_private_pipeline, single_shared_pipeline, value_groups,
+       bin_groups, num_chunks, use_private, use_single_shared, profiler_scopes](
+          Device *op_device, CommandList *cmdlist) {
+        auto scope_name = [profiler_scopes](const char *name) {
+          return profiler_scopes ? name : nullptr;
+        };
+        if (use_single_shared) {
+          auto bindings = op_device->create_resource_set_unique();
+          bindings->rw_buffer(0, values_alloc.get_ptr(0), value_bytes);
+          bindings->rw_buffer(1, bins_alloc.get_ptr(0), bin_bytes);
+          dispatch_pipeline(cmdlist, single_shared_pipeline, bindings.get(), 1,
+                            1, 1,
+                            scope_name("vulkan_histogram_i32_single_shared"));
+          cmdlist->buffer_barrier(bins_alloc);
+          return;
+        }
+        if (use_private) {
+          {
+            auto bindings = op_device->create_resource_set_unique();
+            bindings->rw_buffer(0, values_alloc.get_ptr(0), value_bytes);
+            bindings->rw_buffer(1, bins_alloc.get_ptr(0), bin_bytes);
+            bindings->rw_buffer(2, partial_alloc.get_ptr(0), partial_bytes);
+            Pipeline *count_pipeline = count_private_shared_pipeline
+                                           ? count_private_shared_pipeline
+                                           : count_private_pipeline;
+            const char *count_scope =
+                count_private_shared_pipeline
+                    ? "vulkan_histogram_i32_count_private_shared"
+                    : "vulkan_histogram_i32_count_private";
+            uint32_t count_groups =
+                count_private_shared_pipeline
+                    ? static_cast<uint32_t>(num_chunks)
+                    : value_groups;
+            dispatch_pipeline(cmdlist, count_pipeline, bindings.get(),
+                              count_groups, 1, 1, scope_name(count_scope));
+            cmdlist->buffer_barrier(partial_alloc);
+          }
+          {
+            auto bindings = op_device->create_resource_set_unique();
+            bindings->rw_buffer(0, partial_alloc.get_ptr(0), partial_bytes);
+            bindings->rw_buffer(1, bins_alloc.get_ptr(0), bin_bytes);
+            dispatch_pipeline(cmdlist, reduce_private_pipeline, bindings.get(),
+                              bin_groups, 1, 1,
+                              scope_name(
+                                  "vulkan_histogram_i32_reduce_private"));
+            cmdlist->buffer_barrier(bins_alloc);
+          }
+          return;
+        }
+        {
+          auto bindings = op_device->create_resource_set_unique();
+          bindings->rw_buffer(0, bins_alloc.get_ptr(0), bin_bytes);
+          dispatch_pipeline(cmdlist, clear_pipeline, bindings.get(), bin_groups,
+                            1, 1,
+                            scope_name("vulkan_histogram_i32_clear_bins"));
+          cmdlist->buffer_barrier(bins_alloc);
+        }
+        if (value_groups > 0) {
+          auto bindings = op_device->create_resource_set_unique();
+          bindings->rw_buffer(0, values_alloc.get_ptr(0), value_bytes);
+          bindings->rw_buffer(1, bins_alloc.get_ptr(0), bin_bytes);
+          dispatch_pipeline(cmdlist, count_direct_pipeline, bindings.get(),
+                            value_groups, 1, 1,
+                            scope_name("vulkan_histogram_i32_count_direct"));
+          cmdlist->buffer_barrier(bins_alloc);
+        }
       },
       {});
   return cache.cached_bytes;
@@ -2153,6 +2431,24 @@ void Program::vulkan_compact_clear_workspace() {
   }
 }
 
+void Program::vulkan_histogram_clear_workspace() {
+  bool sync_before_clear = false;
+  {
+    std::lock_guard<std::mutex> guard(g_vulkan_histogram_mutex);
+    auto it = g_vulkan_histogram_caches.find(this);
+    sync_before_clear = it != g_vulkan_histogram_caches.end() &&
+                        it->second->has_workspace_allocs();
+  }
+  if (sync_before_clear) {
+    synchronize();
+  }
+  std::lock_guard<std::mutex> guard(g_vulkan_histogram_mutex);
+  auto it = g_vulkan_histogram_caches.find(this);
+  if (it != g_vulkan_histogram_caches.end()) {
+    g_vulkan_histogram_caches.erase(it);
+  }
+}
+
 std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
   std::lock_guard<std::mutex> guard(g_vulkan_sort_mutex);
   auto it = g_vulkan_sort_caches.find(const_cast<Program *>(this));
@@ -2175,6 +2471,15 @@ std::size_t Program::vulkan_compact_workspace_bytes() const {
   std::lock_guard<std::mutex> guard(g_vulkan_compact_mutex);
   auto it = g_vulkan_compact_caches.find(const_cast<Program *>(this));
   if (it == g_vulkan_compact_caches.end()) {
+    return 0;
+  }
+  return it->second->cached_bytes;
+}
+
+std::size_t Program::vulkan_histogram_workspace_bytes() const {
+  std::lock_guard<std::mutex> guard(g_vulkan_histogram_mutex);
+  auto it = g_vulkan_histogram_caches.find(const_cast<Program *>(this));
+  if (it == g_vulkan_histogram_caches.end()) {
     return 0;
   }
   return it->second->cached_bytes;
@@ -2206,6 +2511,10 @@ bool Program::vulkan_compact_available() const {
   return false;
 }
 
+bool Program::vulkan_histogram_available() const {
+  return false;
+}
+
 std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                                                    Ndarray *values,
                                                    int key_type) {
@@ -2227,6 +2536,12 @@ std::size_t Program::vulkan_compact_i32_ndarray(Ndarray *values,
   return 0;
 }
 
+std::size_t Program::vulkan_histogram_i32_ndarray(Ndarray *values,
+                                                  Ndarray *bins) {
+  TI_ERROR("Vulkan native histogram requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 void Program::vulkan_radix_sort_clear_workspace() {
 }
 
@@ -2234,6 +2549,9 @@ void Program::vulkan_scan_clear_workspace() {
 }
 
 void Program::vulkan_compact_clear_workspace() {
+}
+
+void Program::vulkan_histogram_clear_workspace() {
 }
 
 std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
@@ -2245,6 +2563,10 @@ std::size_t Program::vulkan_scan_workspace_bytes() const {
 }
 
 std::size_t Program::vulkan_compact_workspace_bytes() const {
+  return 0;
+}
+
+std::size_t Program::vulkan_histogram_workspace_bytes() const {
   return 0;
 }
 

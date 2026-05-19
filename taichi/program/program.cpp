@@ -10,6 +10,7 @@
 #include "taichi/runtime/program_impls/metal/metal_program.h"
 #include "taichi/platform/cuda/detect_cuda.h"
 #include "taichi/system/timeline.h"
+#include "taichi/system/threading.h"
 #include "taichi/ir/snode.h"
 #include "taichi/ir/frontend_ir.h"
 #include "taichi/program/snode_expr_utils.h"
@@ -53,12 +54,36 @@
 #include <xmmintrin.h>
 #endif  // defined(_M_X64) || defined(__x86_64)
 
+#include <algorithm>
 #include <limits>
+#include <memory>
+#include <mutex>
+#include <vector>
 
 namespace taichi::lang {
 std::atomic<int> Program::num_instances_;
 
 namespace {
+struct CpuHistogramTaskContext {
+  const int32_t *values{nullptr};
+  int32_t *partial{nullptr};
+  std::size_t n{0};
+  std::size_t num_bins{0};
+  int num_threads{1};
+};
+
+taichi::ThreadPool &get_cpu_histogram_thread_pool(int max_threads) {
+  static std::mutex mutex;
+  static std::unique_ptr<taichi::ThreadPool> pool;
+  static int pool_threads = 0;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!pool || pool_threads < max_threads) {
+    pool = std::make_unique<taichi::ThreadPool>(max_threads);
+    pool_threads = max_threads;
+  }
+  return *pool;
+}
+
 bool snode_tree_contains_hash(const SNode *snode) {
   if (snode == nullptr) {
     return false;
@@ -522,6 +547,7 @@ void Program::finalize() {
     vulkan_radix_sort_clear_workspace();
     vulkan_scan_clear_workspace();
     vulkan_compact_clear_workspace();
+    vulkan_histogram_clear_workspace();
   }
   textures_.clear();
   argpacks_.clear();
@@ -894,6 +920,60 @@ std::size_t Program::cuda_cub_select_workspace_bytes() const {
   return 0;
 }
 
+bool Program::cuda_cub_histogram_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda && cuda::cub_histogram_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_cub_histogram_i32_ndarray(Ndarray *values,
+                                                    Ndarray *bins) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB histogram is only available on CUDA.");
+  TI_ERROR_IF(!values || !bins,
+              "CUDA CUB histogram received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || bins->shape.size() != 1,
+              "CUDA CUB histogram currently expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_element_size() != sizeof(int32_t) ||
+                  bins->get_element_size() != sizeof(int32_t),
+              "CUDA CUB histogram currently expects i32 values and bins.");
+  TI_ERROR_IF(bins->get_nelement() == 0,
+              "CUDA CUB histogram expects at least one bin.");
+#ifdef TI_WITH_CUDA
+  auto values_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
+  auto bins_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(bins));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_histogram_even(
+      values_ptr, bins_ptr, static_cast<int>(values->get_nelement()),
+      static_cast<int>(bins->get_nelement()), cuda::CubHistogramValueType::i32,
+      stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB histogram requires building Taichi with TI_WITH_CUDA=ON and "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+void Program::cuda_cub_histogram_clear_workspace() {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    cuda::cub_histogram_clear_cache(this);
+  }
+#endif
+}
+
+std::size_t Program::cuda_cub_histogram_workspace_bytes() const {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    return cuda::cub_histogram_cached_bytes(const_cast<Program *>(this));
+  }
+#endif
+  return 0;
+}
+
 bool Program::cpu_scan_available() const {
   return arch_is_cpu(compile_config().arch);
 }
@@ -980,6 +1060,103 @@ std::size_t Program::cpu_compact_i32_ndarray(Ndarray *values,
 }
 
 std::size_t Program::cpu_compact_workspace_bytes() const {
+  return 0;
+}
+
+bool Program::cpu_histogram_available() const {
+  return arch_is_cpu(compile_config().arch);
+}
+
+std::size_t Program::cpu_histogram_i32_ndarray(Ndarray *values,
+                                               Ndarray *bins) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native histogram is only available on CPU backends.");
+  TI_ERROR_IF(!values || !bins,
+              "CPU native histogram received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || bins->shape.size() != 1,
+              "CPU native histogram expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_element_size() != sizeof(int32_t) ||
+                  bins->get_element_size() != sizeof(int32_t),
+              "CPU native histogram currently expects i32 values and bins.");
+  TI_ERROR_IF(bins->get_nelement() == 0,
+              "CPU native histogram expects at least one bin.");
+  TI_ERROR_IF(values->get_nelement() >
+                  static_cast<std::size_t>(
+                      std::numeric_limits<int32_t>::max()),
+              "CPU native histogram input is too large for i32 bin counts.");
+
+  auto *values_ptr =
+      reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(values));
+  auto *bins_ptr = reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(bins));
+  TI_ERROR_IF(!values_ptr || !bins_ptr,
+              "CPU native histogram received a null data pointer.");
+
+  const std::size_t n = values->get_nelement();
+  const std::size_t num_bins = bins->get_nelement();
+  for (std::size_t i = 0; i < num_bins; ++i) {
+    bins_ptr[i] = 0;
+  }
+
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = n >= 65536 && num_bins <= 4096 &&
+                            target_threads > 1;
+  if (use_parallel) {
+    const int num_threads = target_threads;
+    std::vector<int32_t> partial(
+        static_cast<std::size_t>(num_threads) * num_bins, 0);
+    CpuHistogramTaskContext ctx;
+    ctx.values = values_ptr;
+    ctx.partial = partial.data();
+    ctx.n = n;
+    ctx.num_bins = num_bins;
+    ctx.num_threads = num_threads;
+    auto &pool = get_cpu_histogram_thread_pool(max_threads);
+    pool.run(num_threads, num_threads, &ctx,
+             [](void *raw_ctx, int /*thread_id*/, int task_id) {
+               auto *ctx = static_cast<CpuHistogramTaskContext *>(raw_ctx);
+               const int tid = task_id;
+               const std::size_t begin =
+                   ctx->n * static_cast<std::size_t>(tid) /
+                   static_cast<std::size_t>(ctx->num_threads);
+               const std::size_t end =
+                   ctx->n * static_cast<std::size_t>(tid + 1) /
+                   static_cast<std::size_t>(ctx->num_threads);
+               int32_t *local =
+                   ctx->partial +
+                   static_cast<std::size_t>(tid) * ctx->num_bins;
+               for (std::size_t i = begin; i < end; ++i) {
+                 int32_t bin = ctx->values[i];
+                 if (bin >= 0 &&
+                     static_cast<std::size_t>(bin) < ctx->num_bins) {
+                   local[bin] += 1;
+                 }
+               }
+             });
+    for (std::size_t bin = 0; bin < num_bins; ++bin) {
+      int32_t total = 0;
+      for (int tid = 0; tid < num_threads; ++tid) {
+        total += partial[static_cast<std::size_t>(tid) * num_bins + bin];
+      }
+      bins_ptr[bin] = total;
+    }
+    return partial.size() * sizeof(int32_t);
+  }
+
+  for (std::size_t i = 0; i < n; ++i) {
+    int32_t bin = values_ptr[i];
+    if (bin >= 0 && static_cast<std::size_t>(bin) < num_bins) {
+      bins_ptr[bin] += 1;
+    }
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_histogram_workspace_bytes() const {
   return 0;
 }
 

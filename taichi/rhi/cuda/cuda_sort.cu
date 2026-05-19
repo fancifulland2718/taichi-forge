@@ -147,6 +147,29 @@ struct CubSelectCache {
   }
 };
 
+struct CubHistogramCache {
+  void *temp_storage{nullptr};
+  std::size_t temp_storage_bytes{0};
+  int device_id{-1};
+
+  ~CubHistogramCache() {
+    release_noexcept();
+  }
+
+  void release_noexcept() {
+    if (temp_storage) {
+      cudaFree(temp_storage);
+    }
+    temp_storage = nullptr;
+    temp_storage_bytes = 0;
+    device_id = -1;
+  }
+
+  std::size_t allocated_bytes() const {
+    return temp_storage_bytes;
+  }
+};
+
 std::mutex &get_cache_mutex() {
   static std::mutex mutex;
   return mutex;
@@ -165,6 +188,12 @@ std::unordered_map<void *, std::unique_ptr<CubScanCache>> &get_scan_caches() {
 std::unordered_map<void *, std::unique_ptr<CubSelectCache>> &
 get_select_caches() {
   static std::unordered_map<void *, std::unique_ptr<CubSelectCache>> caches;
+  return caches;
+}
+
+std::unordered_map<void *, std::unique_ptr<CubHistogramCache>> &
+get_histogram_caches() {
+  static std::unordered_map<void *, std::unique_ptr<CubHistogramCache>> caches;
   return caches;
 }
 
@@ -207,6 +236,19 @@ CubSelectCache &get_select_cache(void *owner) {
   return *it->second;
 }
 
+CubHistogramCache &get_histogram_cache(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  auto &caches = get_histogram_caches();
+  auto it = caches.find(owner);
+  if (it == caches.end()) {
+    it = caches.emplace(owner, std::make_unique<CubHistogramCache>()).first;
+  }
+  return *it->second;
+}
+
 void check_cuda(cudaError_t err, const char *expr, const char *file, int line) {
   if (err == cudaSuccess) {
     return;
@@ -241,6 +283,17 @@ void ensure_device_cache(CubScanCache &cache) {
 }
 
 void ensure_device_cache(CubSelectCache &cache) {
+  int device_id = 0;
+  TI_CUDA_SORT_CHECK(cudaGetDevice(&device_id));
+  if (cache.device_id == -1) {
+    cache.device_id = device_id;
+  } else if (cache.device_id != device_id) {
+    cache.release_noexcept();
+    cache.device_id = device_id;
+  }
+}
+
+void ensure_device_cache(CubHistogramCache &cache) {
   int device_id = 0;
   TI_CUDA_SORT_CHECK(cudaGetDevice(&device_id));
   if (cache.device_id == -1) {
@@ -1038,6 +1091,105 @@ std::size_t cub_select_cached_bytes_impl(void *owner) {
   }
   std::lock_guard<std::mutex> lock(get_cache_mutex());
   auto &caches = get_select_caches();
+  auto it = caches.find(owner);
+  if (it == caches.end()) {
+    return 0;
+  }
+  return it->second->allocated_bytes();
+}
+
+template <typename T>
+std::size_t histogram_even_typed(CubHistogramCache &cache,
+                                 void *values,
+                                 void *bins,
+                                 int num_items,
+                                 int num_bins,
+                                 void *stream_ptr) {
+  if (!values || !bins) {
+    throw std::runtime_error("CUB histogram received a null pointer");
+  }
+  const T *samples_in = static_cast<const T *>(values);
+  int32_t *hist_out = static_cast<int32_t *>(bins);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  ensure_device_cache(cache);
+
+  if (num_items == 0) {
+    if (use_stream) {
+      TI_CUDA_SORT_CHECK(
+          cudaMemsetAsync(hist_out, 0, sizeof(int32_t) * num_bins, stream));
+      TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+    } else {
+      TI_CUDA_SORT_CHECK(cudaMemset(hist_out, 0, sizeof(int32_t) * num_bins));
+      TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+    }
+    return cache.allocated_bytes();
+  }
+
+  std::size_t temp_storage_bytes = 0;
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceHistogram::HistogramEven(
+        nullptr, temp_storage_bytes, samples_in, hist_out, num_bins + 1,
+        static_cast<T>(0), static_cast<T>(num_bins), num_items, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceHistogram::HistogramEven(
+        nullptr, temp_storage_bytes, samples_in, hist_out, num_bins + 1,
+        static_cast<T>(0), static_cast<T>(num_bins), num_items));
+  }
+  ensure_buffer(&cache.temp_storage, &cache.temp_storage_bytes,
+                temp_storage_bytes);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceHistogram::HistogramEven(
+        cache.temp_storage, temp_storage_bytes, samples_in, hist_out,
+        num_bins + 1, static_cast<T>(0), static_cast<T>(num_bins), num_items,
+        stream));
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceHistogram::HistogramEven(
+        cache.temp_storage, temp_storage_bytes, samples_in, hist_out,
+        num_bins + 1, static_cast<T>(0), static_cast<T>(num_bins), num_items));
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t cub_histogram_even_impl(void *values,
+                                    void *bins,
+                                    int num_items,
+                                    int num_bins,
+                                    CubHistogramValueType value_type,
+                                    void *stream,
+                                    void *owner) {
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  CubHistogramCache &cache = get_histogram_cache(owner);
+  switch (value_type) {
+    case CubHistogramValueType::i32:
+      return histogram_even_typed<int32_t>(cache, values, bins, num_items,
+                                           num_bins, stream);
+  }
+  throw std::runtime_error("Unsupported CUB histogram value type");
+}
+
+void cub_histogram_clear_cache_impl(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  auto &caches = get_histogram_caches();
+  auto it = caches.find(owner);
+  if (it != caches.end()) {
+    caches.erase(it);
+  }
+}
+
+std::size_t cub_histogram_cached_bytes_impl(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  auto &caches = get_histogram_caches();
   auto it = caches.find(owner);
   if (it == caches.end()) {
     return 0;

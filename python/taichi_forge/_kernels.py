@@ -751,3 +751,49 @@ def compact_scatter_field(
     for i in range(N):
         if flags[i + flags_offset] != 0:
             output[prefix[i] - 1 + output_offset] = values[i + values_offset]
+
+
+@kernel
+def histogram_i32_field_direct(values: template(), bins: template(), N: i32, num_bins: i32):
+    values_offset = static(values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0)
+    bins_offset = static(bins.snode.ptr.offset if len(bins.snode.ptr.offset) != 0 else 0)
+    for i in range(num_bins):
+        bins[i + bins_offset] = 0
+    for i in range(N):
+        bin_id = values[i + values_offset]
+        if 0 <= bin_id < num_bins:
+            ops.atomic_add(bins[bin_id + bins_offset], 1)
+
+
+@kernel
+def histogram_i32_field_private_count(
+    values: template(),
+    partial: template(),
+    N: i32,
+    num_bins: i32,
+    chunk_size: i32,
+    num_chunks: i32,
+):
+    values_offset = static(values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0)
+    for i in range(num_chunks * num_bins):
+        partial[i] = 0
+    for i in range(N):
+        bin_id = values[i + values_offset]
+        if 0 <= bin_id < num_bins:
+            chunk_id = i // chunk_size
+            ops.atomic_add(partial[chunk_id * num_bins + bin_id], 1)
+
+
+@kernel
+def histogram_i32_field_private_reduce(
+    partial: template(),
+    bins: template(),
+    num_bins: i32,
+    num_chunks: i32,
+):
+    bins_offset = static(bins.snode.ptr.offset if len(bins.snode.ptr.offset) != 0 else 0)
+    for bin_id in range(num_bins):
+        total = 0
+        for chunk_id in range(num_chunks):
+            total += partial[chunk_id * num_bins + bin_id]
+        bins[bin_id + bins_offset] = total

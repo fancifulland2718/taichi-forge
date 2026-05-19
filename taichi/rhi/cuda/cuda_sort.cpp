@@ -40,6 +40,15 @@ std::size_t cub_select_flagged_impl(void *values,
                                     void *owner);
 void cub_select_clear_cache_impl(void *owner);
 std::size_t cub_select_cached_bytes_impl(void *owner);
+std::size_t cub_histogram_even_impl(void *values,
+                                    void *bins,
+                                    int num_items,
+                                    int num_bins,
+                                    CubHistogramValueType value_type,
+                                    void *stream,
+                                    void *owner);
+void cub_histogram_clear_cache_impl(void *owner);
+std::size_t cub_histogram_cached_bytes_impl(void *owner);
 #endif
 
 namespace {
@@ -283,6 +292,48 @@ void cub_select_clear_cache(void *owner) {
 std::size_t cub_select_cached_bytes(void *owner) {
 #if defined(TI_WITH_CUDA_TOOLKIT)
   return cub_select_cached_bytes_impl(owner);
+#else
+  return 0;
+#endif
+}
+
+bool cub_histogram_available() {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return ensure_cudart_for_cub_sort();
+#else
+  return false;
+#endif
+}
+
+std::size_t cub_histogram_even(void *values,
+                               void *bins,
+                               int num_items,
+                               int num_bins,
+                               CubHistogramValueType value_type,
+                               void *stream,
+                               void *owner) {
+  TI_ERROR_IF(num_items < 0, "CUB histogram expects non-negative num_items");
+  TI_ERROR_IF(num_bins <= 0, "CUB histogram expects positive num_bins");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_histogram_even_impl(values, bins, num_items, num_bins, value_type,
+                                 stream, owner);
+#else
+  TI_ERROR(
+      "CUDA CUB histogram requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+void cub_histogram_clear_cache(void *owner) {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  cub_histogram_clear_cache_impl(owner);
+#endif
+}
+
+std::size_t cub_histogram_cached_bytes(void *owner) {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return cub_histogram_cached_bytes_impl(owner);
 #else
   return 0;
 #endif

@@ -4,6 +4,9 @@ from taichi_forge._kernels import (
     blit_from_field_to_field,
     compact_flags_to_prefix_field,
     compact_scatter_field,
+    histogram_i32_field_direct,
+    histogram_i32_field_private_count,
+    histogram_i32_field_private_reduce,
     scan_add_inclusive,
     scan_add_inclusive_cuda,
     scan_add_inclusive_ndarray,
@@ -49,6 +52,9 @@ _SUPPORTED_SORT_METHODS = {
 }
 _SUPPORTED_SORT_PRECISIONS = {"exact"}
 _SUPPORTED_NAN_POLICIES = {"last", "bitwise"}
+_HISTOGRAM_FIELD_PRIVATE_MIN_N = 65536
+_HISTOGRAM_FIELD_PRIVATE_MAX_BINS = 512
+_HISTOGRAM_FIELD_PRIVATE_CHUNK_SIZE = 2048
 
 
 class SortWorkspace:
@@ -214,6 +220,73 @@ class CompactWorkspace:
             }
             self._field_buffers[key] = buffers
             bytes_used = scanner.workspace_length * 4
+            self.workspace_bytes_current += bytes_used
+            self.workspace_bytes_peak = max(
+                self.workspace_bytes_peak, self.workspace_bytes_current
+            )
+        return self._field_buffers[key]
+
+
+class HistogramWorkspace:
+    """Workspace for experimental fixed-bin histogram.
+
+    CUDA ndarray fast path uses CUB DeviceHistogram. Vulkan ndarray fast path
+    uses native compute shaders. Field fallback uses Forge kernels, selecting a
+    zero-workspace direct path for small inputs and a chunk-private path for
+    larger fixed-bin histograms.
+    """
+
+    def __init__(self, max_items=None, max_bins=None):
+        self.max_items = max_items
+        self.max_bins = max_bins
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._field_buffers = {}
+        self._cuda_cub_active = False
+        self._vulkan_native_active = False
+
+    def clear(self):
+        if self._cuda_cub_active:
+            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            if hasattr(prog, "cuda_cub_histogram_clear_workspace"):
+                prog.cuda_cub_histogram_clear_workspace()
+        if self._vulkan_native_active:
+            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            if hasattr(prog, "vulkan_histogram_clear_workspace"):
+                prog.vulkan_histogram_clear_workspace()
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._field_buffers.clear()
+        self._cuda_cub_active = False
+        self._vulkan_native_active = False
+
+    def check_shape(self, n, num_bins):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} histogram items, exceeding max_items={self.max_items}."
+            )
+        if self.max_bins is not None and num_bins > self.max_bins:
+            raise ValueError(
+                f"Requested {num_bins} histogram bins, exceeding max_bins={self.max_bins}."
+            )
+
+    def _get_field_private_buffers(self, n, num_bins):
+        self.check_shape(n, num_bins)
+        chunk_size = _HISTOGRAM_FIELD_PRIVATE_CHUNK_SIZE
+        num_chunks = (n + chunk_size - 1) // chunk_size
+        key = (num_chunks, num_bins)
+        if key not in self._field_buffers:
+            partial = field(i32, shape=num_chunks * num_bins)
+            self._field_buffers[key] = {
+                "partial": partial,
+                "chunk_size": chunk_size,
+                "num_chunks": num_chunks,
+            }
+            bytes_used = num_chunks * num_bins * 4
             self.workspace_bytes_current += bytes_used
             self.workspace_bytes_peak = max(
                 self.workspace_bytes_peak, self.workspace_bytes_current
@@ -1031,6 +1104,193 @@ def experimental_compact(
     _compact_field_scan(values, flags, output, count, workspace)
 
 
+_SUPPORTED_HISTOGRAM_METHODS = {
+    "auto",
+    "cuda_cub",
+    "vulkan_native",
+    "cpu_native",
+    "field_atomic",
+    "field_direct",
+    "field_private",
+}
+
+
+def _check_histogram_request(values, bins, method, workspace):
+    if method not in _SUPPORTED_HISTOGRAM_METHODS:
+        raise NotImplementedError(f"histogram method '{method}' is not implemented.")
+    if not (_is_1d(values) and _is_1d(bins)):
+        raise ValueError("experimental_histogram() expects 1D values and bins.")
+    if values.dtype != i32 or bins.dtype != i32:
+        raise TypeError("experimental_histogram() currently expects ti.i32 values and bins.")
+    if bins.shape[0] <= 0:
+        raise ValueError("experimental_histogram() expects at least one bin.")
+    if isinstance(values, Ndarray) or isinstance(bins, Ndarray):
+        if not (isinstance(values, Ndarray) and isinstance(bins, Ndarray)):
+            raise TypeError(
+                "experimental_histogram() ndarray mode requires both values and bins "
+                "to be ti.ndarray."
+            )
+    if workspace is not None and not isinstance(workspace, HistogramWorkspace):
+        raise TypeError("workspace must be a HistogramWorkspace instance or None.")
+
+
+def _try_cuda_cub_histogram(values, bins, workspace):
+    if current_cfg().arch != cuda:
+        return False
+    if not (isinstance(values, Ndarray) and isinstance(bins, Ndarray)):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cuda_cub_histogram_available"):
+        return False
+    if not prog.cuda_cub_histogram_available():
+        return False
+    temp_bytes = prog.cuda_cub_histogram_i32_ndarray(values.arr, bins.arr)
+    if workspace is not None:
+        workspace._cuda_cub_active = True
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+    return True
+
+
+def _try_vulkan_histogram(values, bins, workspace):
+    if current_cfg().arch != vulkan:
+        return False
+    if not (isinstance(values, Ndarray) and isinstance(bins, Ndarray)):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "vulkan_histogram_available"):
+        return False
+    if not prog.vulkan_histogram_available():
+        return False
+    temp_bytes = prog.vulkan_histogram_i32_ndarray(values.arr, bins.arr)
+    if workspace is not None:
+        workspace._vulkan_native_active = True
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+    return True
+
+
+def _try_cpu_native_histogram(values, bins, workspace):
+    if current_cfg().arch not in [x64, arm64]:
+        return False
+    if not (isinstance(values, Ndarray) and isinstance(bins, Ndarray)):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cpu_histogram_available"):
+        return False
+    if not prog.cpu_histogram_available():
+        return False
+    temp_bytes = prog.cpu_histogram_i32_ndarray(values.arr, bins.arr)
+    if workspace is not None:
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+    return True
+
+
+def _histogram_should_use_private(n, num_bins):
+    return (
+        n >= _HISTOGRAM_FIELD_PRIVATE_MIN_N
+        and num_bins <= _HISTOGRAM_FIELD_PRIVATE_MAX_BINS
+    )
+
+
+def _histogram_field_direct(values, bins, n, num_bins):
+    histogram_i32_field_direct(values, bins, n, num_bins)
+    sync()
+
+
+def _histogram_field_private(values, bins, workspace, n, num_bins):
+    buffers = workspace._get_field_private_buffers(n, num_bins)
+    histogram_i32_field_private_count(
+        values,
+        buffers["partial"],
+        n,
+        num_bins,
+        buffers["chunk_size"],
+        buffers["num_chunks"],
+    )
+    histogram_i32_field_private_reduce(
+        buffers["partial"], bins, num_bins, buffers["num_chunks"]
+    )
+    sync()
+
+
+def _histogram_field_atomic(values, bins, workspace, method):
+    if isinstance(values, Ndarray) or isinstance(bins, Ndarray):
+        raise NotImplementedError(
+            f"method='{method}' supports only ti.field values and bins."
+        )
+    n = values.shape[0]
+    num_bins = bins.shape[0]
+    if workspace is not None:
+        workspace.check_shape(n, num_bins)
+    if method == "field_private" or (
+        method in ("auto", "field_atomic")
+        and _histogram_should_use_private(n, num_bins)
+    ):
+        _histogram_field_private(values, bins, workspace, n, num_bins)
+    else:
+        _histogram_field_direct(values, bins, n, num_bins)
+    return workspace
+
+
+def experimental_histogram(values, bins, *, method="auto", workspace=None):
+    """Count i32 bin ids in ``values`` into i32 ``bins``.
+
+    ``values[i]`` is interpreted as a bin id. Values outside
+    ``[0, bins.shape[0])`` are ignored by the field fallback. The CUDA CUB path
+    is intended for inputs in that same range.
+    """
+
+    _check_histogram_request(values, bins, method, workspace)
+    if workspace is None:
+        workspace = HistogramWorkspace(max_items=values.shape[0], max_bins=bins.shape[0])
+    workspace.check_shape(values.shape[0], bins.shape[0])
+    if method in ("auto", "cuda_cub") and _try_cuda_cub_histogram(
+        values, bins, workspace
+    ):
+        return
+    if method == "cuda_cub":
+        raise RuntimeError(
+            "method='cuda_cub' requires CUDA ndarray inputs and available CUB DeviceHistogram."
+        )
+    if method in ("auto", "vulkan_native") and _try_vulkan_histogram(
+        values, bins, workspace
+    ):
+        return
+    if method == "vulkan_native":
+        raise RuntimeError(
+            "method='vulkan_native' requires Vulkan ndarray inputs and available native histogram."
+        )
+    if method in ("auto", "cpu_native") and _try_cpu_native_histogram(
+        values, bins, workspace
+    ):
+        return
+    if method == "cpu_native":
+        raise RuntimeError(
+            "method='cpu_native' requires CPU ndarray inputs and available native histogram."
+        )
+    _histogram_field_atomic(values, bins, workspace, method)
+
+
 def parallel_sort(keys, values=None):
     """Compatibility wrapper for the legacy public sorting API."""
 
@@ -1190,5 +1450,7 @@ __all__ = [
     "SortWorkspace",
     "PrefixSumExecutor",
     "CompactWorkspace",
+    "HistogramWorkspace",
     "experimental_compact",
+    "experimental_histogram",
 ]

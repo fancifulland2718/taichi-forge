@@ -1,0 +1,36 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) buffer Values {
+  int data[];
+} values_buf;
+
+layout(set = 0, binding = 1, std430) buffer Bins {
+  int data[];
+} bins_buf;
+
+shared int local_hist[512];
+
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint n = values_buf.data.length();
+  uint num_bins = bins_buf.data.length();
+
+  for (uint bin = lid; bin < num_bins; bin += 256u) {
+    local_hist[bin] = 0;
+  }
+  barrier();
+
+  for (uint idx = lid; idx < n; idx += 256u) {
+    int bin = values_buf.data[idx];
+    if (bin >= 0 && uint(bin) < num_bins) {
+      atomicAdd(local_hist[uint(bin)], 1);
+    }
+  }
+  barrier();
+
+  for (uint bin = lid; bin < num_bins; bin += 256u) {
+    bins_buf.data[bin] = local_hist[bin];
+  }
+}
