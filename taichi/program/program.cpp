@@ -53,6 +53,8 @@
 #include <xmmintrin.h>
 #endif  // defined(_M_X64) || defined(__x86_64)
 
+#include <limits>
+
 namespace taichi::lang {
 std::atomic<int> Program::num_instances_;
 
@@ -519,6 +521,7 @@ void Program::finalize() {
   if (compile_config().arch == Arch::vulkan) {
     vulkan_radix_sort_clear_workspace();
     vulkan_scan_clear_workspace();
+    vulkan_compact_clear_workspace();
   }
   textures_.clear();
   argpacks_.clear();
@@ -826,6 +829,71 @@ std::size_t Program::cuda_cub_scan_workspace_bytes() const {
   return 0;
 }
 
+bool Program::cuda_cub_select_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda && cuda::cub_select_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_cub_select_i32_ndarray(Ndarray *values,
+                                                 Ndarray *flags,
+                                                 Ndarray *output,
+                                                 Ndarray *count) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB select is only available on the CUDA backend.");
+  TI_ERROR_IF(!values || !flags || !output || !count,
+              "CUDA CUB select received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || flags->shape.size() != 1 ||
+                  output->shape.size() != 1 || count->shape.size() != 1,
+              "CUDA CUB select currently expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() != flags->get_nelement() ||
+                  values->get_nelement() > output->get_nelement(),
+              "CUDA CUB select expects values/flags to have the same length "
+              "and output to have at least that many elements.");
+  TI_ERROR_IF(count->get_nelement() < 1,
+              "CUDA CUB select count ndarray must have at least one element.");
+  TI_ERROR_IF(values->get_element_size() != sizeof(int32_t) ||
+                  flags->get_element_size() != sizeof(int32_t) ||
+                  output->get_element_size() != sizeof(int32_t) ||
+                  count->get_element_size() != sizeof(int32_t),
+              "CUDA CUB select currently supports only i32 values, flags, "
+              "output, and count.");
+#ifdef TI_WITH_CUDA
+  auto values_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
+  auto flags_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(flags));
+  auto output_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
+  auto count_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(count));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_select_flagged(
+      values_ptr, flags_ptr, output_ptr, count_ptr,
+      static_cast<int>(values->get_nelement()), cuda::CubSelectValueType::i32,
+      stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB select requires building Taichi with TI_WITH_CUDA=ON and "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+void Program::cuda_cub_select_clear_workspace() {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    cuda::cub_select_clear_cache(this);
+  }
+#endif
+}
+
+std::size_t Program::cuda_cub_select_workspace_bytes() const {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    return cuda::cub_select_cached_bytes(const_cast<Program *>(this));
+  }
+#endif
+  return 0;
+}
+
 bool Program::cpu_scan_available() const {
   return arch_is_cpu(compile_config().arch);
 }
@@ -855,6 +923,63 @@ std::size_t Program::cpu_inclusive_scan_ndarray(Ndarray *data,
 }
 
 std::size_t Program::cpu_scan_workspace_bytes() const {
+  return 0;
+}
+
+bool Program::cpu_compact_available() const {
+  return arch_is_cpu(compile_config().arch);
+}
+
+std::size_t Program::cpu_compact_i32_ndarray(Ndarray *values,
+                                             Ndarray *flags,
+                                             Ndarray *output,
+                                             Ndarray *count) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native compact is only available on CPU backends.");
+  TI_ERROR_IF(!values || !flags || !output || !count,
+              "CPU native compact received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || flags->shape.size() != 1 ||
+                  output->shape.size() != 1 || count->shape.size() != 1,
+              "CPU native compact expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() != flags->get_nelement(),
+              "CPU native compact values and flags must have the same length.");
+  TI_ERROR_IF(output->get_nelement() < values->get_nelement(),
+              "CPU native compact output must have at least input length.");
+  TI_ERROR_IF(count->get_nelement() < 1,
+              "CPU native compact count must contain at least one item.");
+  TI_ERROR_IF(values->get_element_size() != sizeof(int32_t) ||
+                  flags->get_element_size() != sizeof(int32_t) ||
+                  output->get_element_size() != sizeof(int32_t) ||
+                  count->get_element_size() != sizeof(int32_t),
+              "CPU native compact currently expects i32 values, flags, "
+              "output, and count.");
+
+  auto *values_ptr =
+      reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(values));
+  auto *flags_ptr =
+      reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(flags));
+  auto *output_ptr =
+      reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(output));
+  auto *count_ptr =
+      reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(count));
+  TI_ERROR_IF(!values_ptr || !flags_ptr || !output_ptr || !count_ptr,
+              "CPU native compact received a null data pointer.");
+
+  std::size_t written = 0;
+  const std::size_t n = values->get_nelement();
+  for (std::size_t i = 0; i < n; ++i) {
+    if (flags_ptr[i] != 0) {
+      output_ptr[written++] = values_ptr[i];
+    }
+  }
+  TI_ERROR_IF(written > static_cast<std::size_t>(
+                            std::numeric_limits<int32_t>::max()),
+              "CPU native compact output count exceeds i32 range.");
+  count_ptr[0] = static_cast<int32_t>(written);
+  return 0;
+}
+
+std::size_t Program::cpu_compact_workspace_bytes() const {
   return 0;
 }
 

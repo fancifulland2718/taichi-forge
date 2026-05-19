@@ -327,11 +327,31 @@ class TI_DLL_EXPORT Program {
 
   std::size_t cuda_cub_scan_workspace_bytes() const;
 
+  bool cuda_cub_select_available() const;
+
+  std::size_t cuda_cub_select_i32_ndarray(Ndarray *values,
+                                          Ndarray *flags,
+                                          Ndarray *output,
+                                          Ndarray *count);
+
+  void cuda_cub_select_clear_workspace();
+
+  std::size_t cuda_cub_select_workspace_bytes() const;
+
   bool cpu_scan_available() const;
 
   std::size_t cpu_inclusive_scan_ndarray(Ndarray *data, int value_type);
 
   std::size_t cpu_scan_workspace_bytes() const;
+
+  bool cpu_compact_available() const;
+
+  std::size_t cpu_compact_i32_ndarray(Ndarray *values,
+                                      Ndarray *flags,
+                                      Ndarray *output,
+                                      Ndarray *count);
+
+  std::size_t cpu_compact_workspace_bytes() const;
 
   bool vulkan_radix_sort_available() const;
 
@@ -354,6 +374,17 @@ class TI_DLL_EXPORT Program {
   void vulkan_scan_clear_workspace();
 
   std::size_t vulkan_scan_workspace_bytes() const;
+
+  bool vulkan_compact_available() const;
+
+  std::size_t vulkan_compact_i32_ndarray(Ndarray *values,
+                                         Ndarray *flags,
+                                         Ndarray *output,
+                                         Ndarray *count);
+
+  void vulkan_compact_clear_workspace();
+
+  std::size_t vulkan_compact_workspace_bytes() const;
 
   Identifier get_next_global_id(const std::string &name = "") {
     return Identifier(global_id_counter_++, name);

@@ -223,6 +223,8 @@ if (TI_WITH_VULKAN)
     ti_vulkan_sort_shader(scan_i32_block_subgroup.comp scan_i32_block_subgroup.comp.spv.h)
     ti_vulkan_sort_shader(scan_i32_add.comp scan_i32_add.comp.spv.h)
     ti_vulkan_sort_shader(scan_i32_small_subgroup.comp scan_i32_small_subgroup.comp.spv.h)
+    ti_vulkan_sort_shader(compact_i32_flags.comp compact_i32_flags.comp.spv.h)
+    ti_vulkan_sort_shader(compact_i32_scatter.comp compact_i32_scatter.comp.spv.h)
     ti_vulkan_sort_shader(radix8_spine.comp radix8_spine.comp.spv.h)
 
     foreach(shift 0 4 8 12 16 20 24 28)

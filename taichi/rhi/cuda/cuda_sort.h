@@ -27,6 +27,10 @@ enum class CubScanValueType : int {
   i32 = 0,
 };
 
+enum class CubSelectValueType : int {
+  i32 = 0,
+};
+
 bool cub_radix_sort_available();
 
 std::size_t cub_radix_sort(void *keys,
@@ -54,5 +58,20 @@ std::size_t cub_inclusive_scan(void *data,
 void cub_inclusive_scan_clear_cache(void *owner);
 
 std::size_t cub_inclusive_scan_cached_bytes(void *owner);
+
+bool cub_select_available();
+
+std::size_t cub_select_flagged(void *values,
+                               void *flags,
+                               void *output,
+                               void *count,
+                               int num_items,
+                               CubSelectValueType value_type,
+                               void *stream,
+                               void *owner);
+
+void cub_select_clear_cache(void *owner);
+
+std::size_t cub_select_cached_bytes(void *owner);
 
 }  // namespace taichi::lang::cuda

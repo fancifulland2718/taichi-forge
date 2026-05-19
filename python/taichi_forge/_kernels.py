@@ -723,3 +723,31 @@ def blit_from_field_to_field(dst: template(), src: template(), offset: i32, size
     src_offset = static(src.snode.ptr.offset if len(src.snode.ptr.offset) != 0 else 0)
     for i in range(size):
         dst[i + dst_offset + offset] = src[i + src_offset]
+
+
+@kernel
+def compact_flags_to_prefix_field(flags: template(), prefix: template(), N: i32):
+    flags_offset = static(flags.snode.ptr.offset if len(flags.snode.ptr.offset) != 0 else 0)
+    for i in range(N):
+        prefix[i] = 1 if flags[i + flags_offset] != 0 else 0
+
+
+@kernel
+def compact_scatter_field(
+    values: template(),
+    flags: template(),
+    prefix: template(),
+    output: template(),
+    count: template(),
+    N: i32,
+):
+    values_offset = static(values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0)
+    flags_offset = static(flags.snode.ptr.offset if len(flags.snode.ptr.offset) != 0 else 0)
+    output_offset = static(output.snode.ptr.offset if len(output.snode.ptr.offset) != 0 else 0)
+    if N > 0:
+        count[None] = prefix[N - 1]
+    else:
+        count[None] = 0
+    for i in range(N):
+        if flags[i + flags_offset] != 0:
+            output[prefix[i] - 1 + output_offset] = values[i + values_offset]

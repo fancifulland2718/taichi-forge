@@ -2,6 +2,8 @@ import numpy as np
 
 from taichi_forge._kernels import (
     blit_from_field_to_field,
+    compact_flags_to_prefix_field,
+    compact_scatter_field,
     scan_add_inclusive,
     scan_add_inclusive_cuda,
     scan_add_inclusive_ndarray,
@@ -162,6 +164,61 @@ class SortWorkspace:
                 self.workspace_bytes_peak, self.workspace_bytes_current
             )
         return self._vulkan_graph_u32_buffers[key]
+
+
+class CompactWorkspace:
+    """Workspace for experimental stable flag compaction.
+
+    The field path keeps a Forge-kernel prefix buffer plus a PrefixSumExecutor.
+    CUDA ndarray fast path uses CUB DeviceSelect and reports the cached CUB temp
+    storage through Program.
+    """
+
+    def __init__(self, max_items=None):
+        self.max_items = max_items
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._field_buffers = {}
+        self._cuda_cub_active = False
+        self._vulkan_native_active = False
+
+    def clear(self):
+        if self._cuda_cub_active:
+            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            if hasattr(prog, "cuda_cub_select_clear_workspace"):
+                prog.cuda_cub_select_clear_workspace()
+        if self._vulkan_native_active:
+            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            if hasattr(prog, "vulkan_compact_clear_workspace"):
+                prog.vulkan_compact_clear_workspace()
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._field_buffers.clear()
+        self._cuda_cub_active = False
+        self._vulkan_native_active = False
+
+    def _get_field_buffers(self, n):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} compact items, exceeding max_items={self.max_items}."
+            )
+        key = n
+        if key not in self._field_buffers:
+            scanner = PrefixSumExecutor(n)
+            buffers = {
+                "scanner": scanner,
+            }
+            self._field_buffers[key] = buffers
+            bytes_used = scanner.workspace_length * 4
+            self.workspace_bytes_current += bytes_used
+            self.workspace_bytes_peak = max(
+                self.workspace_bytes_peak, self.workspace_bytes_current
+            )
+        return self._field_buffers[key]
 
 
 def _dtype_nbytes(dtype):
@@ -762,6 +819,218 @@ def sort_by_key(
     )
 
 
+_SUPPORTED_COMPACT_METHODS = {
+    "auto",
+    "cpu_native",
+    "cuda_cub",
+    "field_scan",
+    "vulkan_native",
+}
+
+
+def _is_1d(obj):
+    return hasattr(obj, "shape") and len(obj.shape) == 1
+
+
+def _check_compact_request(values, flags, output, count, method, workspace):
+    if method not in _SUPPORTED_COMPACT_METHODS:
+        raise NotImplementedError(f"compact method '{method}' is not implemented.")
+    if not (_is_1d(values) and _is_1d(flags) and _is_1d(output)):
+        raise ValueError("experimental_compact() expects 1D values, flags, and output.")
+    if values.shape[0] != flags.shape[0]:
+        raise ValueError("experimental_compact() values and flags must have the same length.")
+    if output.shape[0] < values.shape[0]:
+        raise ValueError("experimental_compact() output must have at least input length.")
+    for name, arr in (("values", values), ("flags", flags), ("output", output)):
+        if arr.dtype != i32:
+            raise TypeError(
+                f"experimental_compact() currently supports only ti.i32 {name}."
+            )
+    if count.dtype != i32:
+        raise TypeError("experimental_compact() currently expects ti.i32 count.")
+    if isinstance(values, Ndarray) or isinstance(flags, Ndarray) or isinstance(output, Ndarray):
+        if not (
+            isinstance(values, Ndarray)
+            and isinstance(flags, Ndarray)
+            and isinstance(output, Ndarray)
+            and isinstance(count, Ndarray)
+        ):
+            raise TypeError(
+                "experimental_compact() ndarray mode requires values, flags, "
+                "output, and count all to be ti.ndarray."
+            )
+        if not _is_1d(count) or count.shape[0] < 1:
+            raise ValueError("experimental_compact() ndarray count must be shape >= 1.")
+    else:
+        if isinstance(count, Ndarray) or not hasattr(count, "shape") or count.shape != ():
+            raise TypeError(
+                "experimental_compact() field mode requires a scalar ti.field count."
+            )
+    if workspace is not None and not isinstance(workspace, CompactWorkspace):
+        raise TypeError("workspace must be a CompactWorkspace instance or None.")
+
+
+def _try_cuda_cub_compact(values, flags, output, count, workspace):
+    if current_cfg().arch != cuda:
+        return False
+    if not (
+        isinstance(values, Ndarray)
+        and isinstance(flags, Ndarray)
+        and isinstance(output, Ndarray)
+        and isinstance(count, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cuda_cub_select_available"):
+        return False
+    if not prog.cuda_cub_select_available():
+        return False
+    temp_bytes = prog.cuda_cub_select_i32_ndarray(
+        values.arr, flags.arr, output.arr, count.arr
+    )
+    if workspace is not None:
+        workspace._cuda_cub_active = True
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+    return True
+
+
+def _try_vulkan_native_compact(values, flags, output, count, workspace):
+    if current_cfg().arch != vulkan:
+        return False
+    if not (
+        isinstance(values, Ndarray)
+        and isinstance(flags, Ndarray)
+        and isinstance(output, Ndarray)
+        and isinstance(count, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "vulkan_compact_available"):
+        return False
+    if not prog.vulkan_compact_available():
+        return False
+    temp_bytes = prog.vulkan_compact_i32_ndarray(
+        values.arr, flags.arr, output.arr, count.arr
+    )
+    if workspace is not None:
+        workspace._vulkan_native_active = True
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+    return True
+
+
+def _try_cpu_native_compact(values, flags, output, count, workspace):
+    if current_cfg().arch not in [x64, arm64]:
+        return False
+    if not (
+        isinstance(values, Ndarray)
+        and isinstance(flags, Ndarray)
+        and isinstance(output, Ndarray)
+        and isinstance(count, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cpu_compact_available"):
+        return False
+    if not prog.cpu_compact_available():
+        return False
+    temp_bytes = prog.cpu_compact_i32_ndarray(
+        values.arr, flags.arr, output.arr, count.arr
+    )
+    if workspace is not None:
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+    return True
+
+
+def _compact_field_scan(values, flags, output, count, workspace):
+    if isinstance(values, Ndarray) or isinstance(flags, Ndarray) or isinstance(output, Ndarray):
+        raise NotImplementedError(
+            "method='field_scan' supports only ti.field values/flags/output."
+        )
+    n = values.shape[0]
+    if workspace is None:
+        workspace = CompactWorkspace(max_items=n)
+    buffers = workspace._get_field_buffers(n)
+    scanner = buffers["scanner"]
+    prefix = scanner._ensure_large_arr()
+    compact_flags_to_prefix_field(flags, prefix, n)
+    scanner._run_field_workspace(prefix)
+    compact_scatter_field(values, flags, prefix, output, count, n)
+    sync()
+    return workspace
+
+
+def experimental_compact(
+    values,
+    flags,
+    output,
+    count,
+    *,
+    method="auto",
+    workspace=None,
+):
+    """Stable compact values where ``flags[i] != 0``.
+
+    This is an experimental Forge primitive. ``count`` remains on device:
+    ndarray mode expects a one-element ndarray, while field mode expects a
+    scalar field. The initial implementation supports i32 payloads and i32
+    flags/count.
+    """
+
+    _check_compact_request(values, flags, output, count, method, workspace)
+    if values.shape[0] == 0:
+        return
+    if workspace is None:
+        workspace = CompactWorkspace(max_items=values.shape[0])
+    if method in ("auto", "cuda_cub") and _try_cuda_cub_compact(
+        values, flags, output, count, workspace
+    ):
+        return
+    if method == "cuda_cub":
+        raise RuntimeError(
+            "method='cuda_cub' requires CUDA ndarray inputs and available CUB DeviceSelect."
+        )
+    if method in ("auto", "vulkan_native") and _try_vulkan_native_compact(
+        values, flags, output, count, workspace
+    ):
+        return
+    if method == "vulkan_native":
+        raise RuntimeError(
+            "method='vulkan_native' requires Vulkan ndarray inputs and available "
+            "native compact."
+        )
+    if method in ("auto", "cpu_native") and _try_cpu_native_compact(
+        values, flags, output, count, workspace
+    ):
+        return
+    if method == "cpu_native":
+        raise RuntimeError(
+            "method='cpu_native' requires CPU ndarray inputs and available native "
+            "compact."
+        )
+    _compact_field_scan(values, flags, output, count, workspace)
+
+
 def parallel_sort(keys, values=None):
     """Compatibility wrapper for the legacy public sorting API."""
 
@@ -858,10 +1127,40 @@ class PrefixSumExecutor:
         prog.cpu_inclusive_scan_ndarray(input_arr.arr, 0)
         return True
 
-    def run(self, input_arr):
-        length = self.sorting_length
+    def _run_field_workspace(self, large_arr):
         ele_nums = self.ele_nums
         ele_nums_pos = self.ele_nums_pos
+        if current_cfg().arch == cuda:
+            inclusive_add = warp_shfl_up_i32
+            use_cuda_large_scan = self.block_sz == 256
+            scan_kernel = scan_add_inclusive_cuda if use_cuda_large_scan else scan_add_inclusive
+            uniform_kernel = uniform_add_cuda if use_cuda_large_scan else uniform_add
+        elif current_cfg().arch == vulkan:
+            inclusive_add = subgroup.inclusive_add
+            use_cuda_large_scan = False
+            scan_kernel = scan_add_inclusive
+            uniform_kernel = uniform_add
+        else:
+            raise RuntimeError(f"{str(current_cfg().arch)} is not supported for prefix sum.")
+
+        for i in range(len(ele_nums) - 1):
+            single_block = i == len(ele_nums) - 2
+            if use_cuda_large_scan:
+                scan_kernel(large_arr, ele_nums_pos[i], ele_nums_pos[i + 1], single_block)
+            else:
+                scan_kernel(
+                    large_arr,
+                    ele_nums_pos[i],
+                    ele_nums_pos[i + 1],
+                    single_block,
+                    inclusive_add,
+                )
+
+        for i in range(len(ele_nums) - 3, -1, -1):
+            uniform_kernel(large_arr, ele_nums_pos[i], ele_nums_pos[i + 1])
+
+    def run(self, input_arr):
+        length = self.sorting_length
 
         if input_arr.dtype != i32:
             raise RuntimeError("Only ti.i32 type is supported for prefix sum.")
@@ -878,51 +1177,18 @@ class PrefixSumExecutor:
                 "runtime primitive is available, or use a field input."
             )
 
-        if current_cfg().arch == cuda:
-            inclusive_add = warp_shfl_up_i32
-            use_cuda_large_scan = self.block_sz == 256
-            scan_kernel = scan_add_inclusive_cuda if use_cuda_large_scan else scan_add_inclusive
-            uniform_kernel = uniform_add_cuda if use_cuda_large_scan else uniform_add
-        elif current_cfg().arch == vulkan:
-            inclusive_add = subgroup.inclusive_add
-            use_cuda_large_scan = False
-            scan_kernel = scan_add_inclusive
-            uniform_kernel = uniform_add
-        else:
-            raise RuntimeError(f"{str(current_cfg().arch)} is not supported for prefix sum.")
-
         large_arr = self._ensure_large_arr()
         blit_from_field_to_field(large_arr, input_arr, 0, length)
-
-        # Kogge-Stone construction
-        for i in range(len(ele_nums) - 1):
-            if i == len(ele_nums) - 2:
-                if use_cuda_large_scan:
-                    scan_kernel(large_arr, ele_nums_pos[i], ele_nums_pos[i + 1], True)
-                else:
-                    scan_kernel(
-                        large_arr,
-                        ele_nums_pos[i],
-                        ele_nums_pos[i + 1],
-                        True,
-                        inclusive_add,
-                    )
-            else:
-                if use_cuda_large_scan:
-                    scan_kernel(large_arr, ele_nums_pos[i], ele_nums_pos[i + 1], False)
-                else:
-                    scan_kernel(
-                        large_arr,
-                        ele_nums_pos[i],
-                        ele_nums_pos[i + 1],
-                        False,
-                        inclusive_add,
-                    )
-
-        for i in range(len(ele_nums) - 3, -1, -1):
-            uniform_kernel(large_arr, ele_nums_pos[i], ele_nums_pos[i + 1])
-
+        self._run_field_workspace(large_arr)
         blit_from_field_to_field(input_arr, large_arr, 0, length)
 
 
-__all__ = ["parallel_sort", "sort", "sort_by_key", "SortWorkspace", "PrefixSumExecutor"]
+__all__ = [
+    "parallel_sort",
+    "sort",
+    "sort_by_key",
+    "SortWorkspace",
+    "PrefixSumExecutor",
+    "CompactWorkspace",
+    "experimental_compact",
+]

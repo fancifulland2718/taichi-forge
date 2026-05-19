@@ -124,6 +124,29 @@ struct CubScanCache {
   }
 };
 
+struct CubSelectCache {
+  void *temp_storage{nullptr};
+  std::size_t temp_storage_bytes{0};
+  int device_id{-1};
+
+  ~CubSelectCache() {
+    release_noexcept();
+  }
+
+  void release_noexcept() {
+    if (temp_storage) {
+      cudaFree(temp_storage);
+    }
+    temp_storage = nullptr;
+    temp_storage_bytes = 0;
+    device_id = -1;
+  }
+
+  std::size_t allocated_bytes() const {
+    return temp_storage_bytes;
+  }
+};
+
 std::mutex &get_cache_mutex() {
   static std::mutex mutex;
   return mutex;
@@ -136,6 +159,12 @@ std::unordered_map<void *, std::unique_ptr<CubSortCache>> &get_caches() {
 
 std::unordered_map<void *, std::unique_ptr<CubScanCache>> &get_scan_caches() {
   static std::unordered_map<void *, std::unique_ptr<CubScanCache>> caches;
+  return caches;
+}
+
+std::unordered_map<void *, std::unique_ptr<CubSelectCache>> &
+get_select_caches() {
+  static std::unordered_map<void *, std::unique_ptr<CubSelectCache>> caches;
   return caches;
 }
 
@@ -165,6 +194,19 @@ CubScanCache &get_scan_cache(void *owner) {
   return *it->second;
 }
 
+CubSelectCache &get_select_cache(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  auto &caches = get_select_caches();
+  auto it = caches.find(owner);
+  if (it == caches.end()) {
+    it = caches.emplace(owner, std::make_unique<CubSelectCache>()).first;
+  }
+  return *it->second;
+}
+
 void check_cuda(cudaError_t err, const char *expr, const char *file, int line) {
   if (err == cudaSuccess) {
     return;
@@ -188,6 +230,17 @@ void ensure_device_cache(CubSortCache &cache) {
 }
 
 void ensure_device_cache(CubScanCache &cache) {
+  int device_id = 0;
+  TI_CUDA_SORT_CHECK(cudaGetDevice(&device_id));
+  if (cache.device_id == -1) {
+    cache.device_id = device_id;
+  } else if (cache.device_id != device_id) {
+    cache.release_noexcept();
+    cache.device_id = device_id;
+  }
+}
+
+void ensure_device_cache(CubSelectCache &cache) {
   int device_id = 0;
   TI_CUDA_SORT_CHECK(cudaGetDevice(&device_id));
   if (cache.device_id == -1) {
@@ -895,6 +948,96 @@ std::size_t cub_inclusive_scan_cached_bytes_impl(void *owner) {
   }
   std::lock_guard<std::mutex> lock(get_cache_mutex());
   auto &caches = get_scan_caches();
+  auto it = caches.find(owner);
+  if (it == caches.end()) {
+    return 0;
+  }
+  return it->second->allocated_bytes();
+}
+
+template <typename T>
+std::size_t select_flagged_typed(CubSelectCache &cache,
+                                 void *values,
+                                 void *flags,
+                                 void *output,
+                                 void *count,
+                                 int num_items,
+                                 void *stream_ptr) {
+  if (!values || !flags || !output || !count) {
+    throw std::runtime_error("CUB select received a null pointer");
+  }
+  const T *values_in = static_cast<const T *>(values);
+  const int32_t *flags_in = static_cast<const int32_t *>(flags);
+  T *values_out = static_cast<T *>(output);
+  int *count_out = static_cast<int *>(count);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  ensure_device_cache(cache);
+
+  std::size_t temp_storage_bytes = 0;
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceSelect::Flagged(
+        nullptr, temp_storage_bytes, values_in, flags_in, values_out, count_out,
+        num_items, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceSelect::Flagged(
+        nullptr, temp_storage_bytes, values_in, flags_in, values_out, count_out,
+        num_items));
+  }
+  ensure_buffer(&cache.temp_storage, &cache.temp_storage_bytes,
+                temp_storage_bytes);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceSelect::Flagged(
+        cache.temp_storage, temp_storage_bytes, values_in, flags_in, values_out,
+        count_out, num_items, stream));
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceSelect::Flagged(
+        cache.temp_storage, temp_storage_bytes, values_in, flags_in, values_out,
+        count_out, num_items));
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t cub_select_flagged_impl(void *values,
+                                    void *flags,
+                                    void *output,
+                                    void *count,
+                                    int num_items,
+                                    CubSelectValueType value_type,
+                                    void *stream,
+                                    void *owner) {
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  CubSelectCache &cache = get_select_cache(owner);
+  switch (value_type) {
+    case CubSelectValueType::i32:
+      return select_flagged_typed<int32_t>(cache, values, flags, output, count,
+                                           num_items, stream);
+  }
+  throw std::runtime_error("Unsupported CUB select value type");
+}
+
+void cub_select_clear_cache_impl(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  auto &caches = get_select_caches();
+  auto it = caches.find(owner);
+  if (it != caches.end()) {
+    caches.erase(it);
+  }
+}
+
+std::size_t cub_select_cached_bytes_impl(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  auto &caches = get_select_caches();
   auto it = caches.find(owner);
   if (it == caches.end()) {
     return 0;
