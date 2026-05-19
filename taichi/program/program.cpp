@@ -66,6 +66,16 @@ namespace taichi::lang {
 std::atomic<int> Program::num_instances_;
 
 namespace {
+std::atomic<std::size_t> cpu_scatter_add_workspace_bytes_peak{0};
+
+void update_cpu_scatter_add_workspace_peak(std::size_t bytes) {
+  auto current = cpu_scatter_add_workspace_bytes_peak.load(std::memory_order_relaxed);
+  while (current < bytes &&
+         !cpu_scatter_add_workspace_bytes_peak.compare_exchange_weak(
+             current, bytes, std::memory_order_relaxed)) {
+  }
+}
+
 struct CpuHistogramTaskContext {
   const int32_t *values{nullptr};
   int32_t *partial{nullptr};
@@ -129,6 +139,44 @@ struct CpuIndexedCopyTaskContext {
   std::size_t n{0};
   std::size_t index_bound{0};
   bool scatter{false};
+  int num_threads{1};
+};
+
+struct CpuScatterAddI32TaskContext {
+  const int32_t *src{nullptr};
+  const int32_t *indices{nullptr};
+  int32_t *partial{nullptr};
+  int32_t *dst{nullptr};
+  std::size_t n{0};
+  std::size_t dst_items{0};
+  int num_threads{1};
+};
+
+struct CpuScatterAddF32TaskContext {
+  const float *src{nullptr};
+  const int32_t *indices{nullptr};
+  float *partial{nullptr};
+  float *dst{nullptr};
+  std::size_t n{0};
+  std::size_t dst_items{0};
+  int num_threads{1};
+};
+
+struct CpuBucketCountTaskContext {
+  const int32_t *keys{nullptr};
+  int32_t *partial{nullptr};
+  std::size_t n{0};
+  std::size_t num_bins{0};
+  int num_threads{1};
+};
+
+struct CpuBucketScatterTaskContext {
+  const int32_t *keys{nullptr};
+  const int32_t *values{nullptr};
+  int32_t *thread_offsets{nullptr};
+  int32_t *output{nullptr};
+  std::size_t n{0};
+  std::size_t num_bins{0};
   int num_threads{1};
 };
 
@@ -291,6 +339,126 @@ void cpu_indexed_copy_task(void *raw_ctx, int /*thread_id*/, int task_id) {
         ctx->dst[i] = ctx->src[index];
       } else {
         ctx->dst[i] = 0;
+      }
+    }
+  }
+}
+
+void cpu_scatter_add_i32_count_task(void *raw_ctx,
+                                    int /*thread_id*/,
+                                    int task_id) {
+  auto *ctx = static_cast<CpuScatterAddI32TaskContext *>(raw_ctx);
+  const int tid = task_id;
+  int32_t *local = ctx->partial + ctx->dst_items * static_cast<std::size_t>(tid);
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    const auto index = static_cast<std::size_t>(ctx->indices[i]);
+    if (index < ctx->dst_items) {
+      local[index] += ctx->src[i];
+    }
+  }
+}
+
+void cpu_scatter_add_i32_merge_task(void *raw_ctx,
+                                    int /*thread_id*/,
+                                    int task_id) {
+  auto *ctx = static_cast<CpuScatterAddI32TaskContext *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->dst_items * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->dst_items * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    int32_t value = 0;
+    for (int t = 0; t < ctx->num_threads; ++t) {
+      value += ctx->partial[ctx->dst_items * static_cast<std::size_t>(t) + i];
+    }
+    ctx->dst[i] += value;
+  }
+}
+
+void cpu_scatter_add_f32_count_task(void *raw_ctx,
+                                    int /*thread_id*/,
+                                    int task_id) {
+  auto *ctx = static_cast<CpuScatterAddF32TaskContext *>(raw_ctx);
+  const int tid = task_id;
+  float *local = ctx->partial + ctx->dst_items * static_cast<std::size_t>(tid);
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    const auto index = static_cast<std::size_t>(ctx->indices[i]);
+    if (index < ctx->dst_items) {
+      local[index] += ctx->src[i];
+    }
+  }
+}
+
+void cpu_scatter_add_f32_merge_task(void *raw_ctx,
+                                    int /*thread_id*/,
+                                    int task_id) {
+  auto *ctx = static_cast<CpuScatterAddF32TaskContext *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->dst_items * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->dst_items * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    float value = 0.0f;
+    for (int t = 0; t < ctx->num_threads; ++t) {
+      value += ctx->partial[ctx->dst_items * static_cast<std::size_t>(t) + i];
+    }
+    ctx->dst[i] += value;
+  }
+}
+
+void cpu_bucket_count_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuBucketCountTaskContext *>(raw_ctx);
+  const int tid = task_id;
+  int32_t *local = ctx->partial + ctx->num_bins * static_cast<std::size_t>(tid);
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    int32_t key = ctx->keys[i];
+    if (key >= 0 && static_cast<std::size_t>(key) < ctx->num_bins) {
+      local[key] += 1;
+    }
+  }
+}
+
+void cpu_bucket_scatter_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuBucketScatterTaskContext *>(raw_ctx);
+  const int tid = task_id;
+  int32_t *local =
+      ctx->thread_offsets + ctx->num_bins * static_cast<std::size_t>(tid);
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    int32_t key = ctx->keys[i];
+    if (key >= 0 && static_cast<std::size_t>(key) < ctx->num_bins) {
+      int32_t pos = local[key]++;
+      if (pos >= 0 && static_cast<std::size_t>(pos) < ctx->n) {
+        ctx->output[pos] = ctx->values[i];
       }
     }
   }
@@ -768,7 +936,13 @@ void Program::finalize() {
     vulkan_reduce_clear_workspace();
     vulkan_transform_clear_workspace();
     vulkan_indexed_copy_clear_workspace();
+    vulkan_bucket_builder_clear_workspace();
   }
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    cuda::cub_bucket_builder_clear_cache(this);
+  }
+#endif
   textures_.clear();
   argpacks_.clear();
   ndarrays_.clear();
@@ -1236,6 +1410,123 @@ std::size_t Program::cuda_device_scatter_ndarray(Ndarray *src,
       cuda::CudaIndexedCopyOp::scatter);
 #else
   TI_ERROR("CUDA device scatter requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+bool Program::cuda_device_scatter_add_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::cub_scatter_add_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_device_scatter_add_ndarray(Ndarray *src,
+                                                     Ndarray *indices,
+                                                     Ndarray *dst,
+                                                     int value_type) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA toolkit scatter-add is only available on CUDA.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "CUDA toolkit scatter-add received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "CUDA toolkit scatter-add currently expects 1D ndarrays.");
+  TI_ERROR_IF(src->get_nelement() != indices->get_nelement(),
+              "CUDA toolkit scatter-add expects source and indices sizes to "
+              "match.");
+  TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
+              "CUDA toolkit scatter-add source and destination dtypes differ.");
+  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t) ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "CUDA toolkit scatter-add currently expects 32-bit values and "
+              "i32 indices.");
+  TI_ERROR_IF(value_type < 0 || value_type > 1,
+              "CUDA toolkit scatter-add received an unsupported value type.");
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA toolkit scatter-add currently supports at most INT_MAX "
+              "source items.");
+  TI_ERROR_IF(dst->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA toolkit scatter-add currently supports destination sizes "
+              "up to INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  auto *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
+  auto *indices_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
+  auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_scatter_add(
+      src_ptr, indices_ptr, dst_ptr, static_cast<int>(indices->get_nelement()),
+      static_cast<int>(dst->get_nelement()),
+      value_type == 0 ? cuda::CudaScatterAddValueType::i32
+                      : cuda::CudaScatterAddValueType::f32,
+      stream);
+#else
+  TI_ERROR(
+      "CUDA scatter-add requires building Taichi with TI_WITH_CUDA=ON and "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+bool Program::cuda_device_bucket_builder_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::cub_bucket_builder_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_device_bucket_builder_i32_ndarray(Ndarray *keys,
+                                                            Ndarray *values,
+                                                            Ndarray *offsets,
+                                                            Ndarray *output,
+                                                            Ndarray *cursor) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA toolkit bucket builder is only available on CUDA.");
+  TI_ERROR_IF(!keys || !values || !offsets || !output || !cursor,
+              "CUDA toolkit bucket builder received a null ndarray.");
+  TI_ERROR_IF(keys->shape.size() != 1 || values->shape.size() != 1 ||
+                  offsets->shape.size() != 1 || output->shape.size() != 1 ||
+                  cursor->shape.size() != 1,
+              "CUDA toolkit bucket builder expects 1D ndarrays.");
+  TI_ERROR_IF(keys->get_nelement() != values->get_nelement(),
+              "CUDA toolkit bucket builder keys and values sizes differ.");
+  TI_ERROR_IF(offsets->get_nelement() < 2,
+              "CUDA toolkit bucket builder offsets must contain num_bins + 1 items.");
+  const std::size_t num_bins = offsets->get_nelement() - 1;
+  TI_ERROR_IF(cursor->get_nelement() < num_bins,
+              "CUDA toolkit bucket builder cursor is smaller than num_bins.");
+  TI_ERROR_IF(output->get_nelement() < values->get_nelement(),
+              "CUDA toolkit bucket builder output is smaller than input values.");
+  TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
+                  values->get_element_size() != sizeof(int32_t) ||
+                  offsets->get_element_size() != sizeof(int32_t) ||
+                  output->get_element_size() != sizeof(int32_t) ||
+                  cursor->get_element_size() != sizeof(int32_t),
+              "CUDA toolkit bucket builder currently expects i32 arrays.");
+  TI_ERROR_IF(keys->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()) ||
+                  num_bins > static_cast<std::size_t>(
+                                 std::numeric_limits<uint32_t>::max()),
+              "CUDA bucket builder input is too large for u32 launch parameters.");
+#ifdef TI_WITH_CUDA
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_bucket_builder_i32(
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(offsets)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(cursor)),
+      static_cast<int>(keys->get_nelement()), static_cast<int>(num_bins),
+      stream, this);
+#else
+  TI_ERROR(
+      "CUDA bucket builder requires building Taichi with TI_WITH_CUDA=ON and "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
 #endif
 }
 
@@ -2094,6 +2385,250 @@ std::size_t Program::cpu_scatter_ndarray(Ndarray *src,
 }
 
 std::size_t Program::cpu_indexed_copy_workspace_bytes() const {
+  return 0;
+}
+
+bool Program::cpu_scatter_add_available() const {
+  return arch_is_cpu(compile_config().arch);
+}
+
+std::size_t Program::cpu_scatter_add_ndarray(Ndarray *src,
+                                             Ndarray *indices,
+                                             Ndarray *dst,
+                                             int value_type) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native scatter-add is only available on CPU backends.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "CPU native scatter-add received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "CPU native scatter-add currently expects 1D ndarrays.");
+  TI_ERROR_IF(src->get_nelement() != indices->get_nelement(),
+              "CPU native scatter-add expects source and indices sizes to "
+              "match.");
+  TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
+              "CPU native scatter-add source and destination dtypes differ.");
+  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t) ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "CPU native scatter-add currently expects 32-bit values and "
+              "i32 indices.");
+  TI_ERROR_IF(value_type < 0 || value_type > 1,
+              "CPU native scatter-add received an unsupported value type.");
+  const std::size_t n = indices->get_nelement();
+  const std::size_t dst_items = dst->get_nelement();
+  if (n == 0 || dst_items == 0) {
+    return 0;
+  }
+  auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
+  TI_ERROR_IF(!indices_ptr,
+              "CPU native scatter-add received a null index pointer.");
+  const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
+  const int target_threads =
+      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
+  if (value_type == 0) {
+    auto *src_ptr =
+        reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(src));
+    auto *dst_ptr = reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(dst));
+    TI_ERROR_IF(!src_ptr || !dst_ptr,
+                "CPU native scatter-add received a null i32 data pointer.");
+    const std::size_t workspace_bytes =
+        static_cast<std::size_t>(target_threads) * dst_items * sizeof(int32_t);
+    if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
+      std::vector<int32_t> partial(
+          static_cast<std::size_t>(target_threads) * dst_items, 0);
+      CpuScatterAddI32TaskContext ctx;
+      ctx.src = src_ptr;
+      ctx.indices = indices_ptr;
+      ctx.partial = partial.data();
+      ctx.dst = dst_ptr;
+      ctx.n = n;
+      ctx.dst_items = dst_items;
+      ctx.num_threads = target_threads;
+      auto &pool = get_cpu_primitive_thread_pool(max_threads);
+      pool.run(target_threads, target_threads, &ctx,
+               cpu_scatter_add_i32_count_task);
+      pool.run(target_threads, target_threads, &ctx,
+               cpu_scatter_add_i32_merge_task);
+      update_cpu_scatter_add_workspace_peak(workspace_bytes);
+      return workspace_bytes;
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+      const auto index = static_cast<std::size_t>(indices_ptr[i]);
+      if (index < dst_items) {
+        dst_ptr[index] += src_ptr[i];
+      }
+    }
+  } else {
+    auto *src_ptr =
+        reinterpret_cast<const float *>(get_ndarray_data_ptr_as_int(src));
+    auto *dst_ptr = reinterpret_cast<float *>(get_ndarray_data_ptr_as_int(dst));
+    TI_ERROR_IF(!src_ptr || !dst_ptr,
+                "CPU native scatter-add received a null f32 data pointer.");
+    const std::size_t workspace_bytes =
+        static_cast<std::size_t>(target_threads) * dst_items * sizeof(float);
+    if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
+      std::vector<float> partial(
+          static_cast<std::size_t>(target_threads) * dst_items, 0.0f);
+      CpuScatterAddF32TaskContext ctx;
+      ctx.src = src_ptr;
+      ctx.indices = indices_ptr;
+      ctx.partial = partial.data();
+      ctx.dst = dst_ptr;
+      ctx.n = n;
+      ctx.dst_items = dst_items;
+      ctx.num_threads = target_threads;
+      auto &pool = get_cpu_primitive_thread_pool(max_threads);
+      pool.run(target_threads, target_threads, &ctx,
+               cpu_scatter_add_f32_count_task);
+      pool.run(target_threads, target_threads, &ctx,
+               cpu_scatter_add_f32_merge_task);
+      update_cpu_scatter_add_workspace_peak(workspace_bytes);
+      return workspace_bytes;
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+      const auto index = static_cast<std::size_t>(indices_ptr[i]);
+      if (index < dst_items) {
+        dst_ptr[index] += src_ptr[i];
+      }
+    }
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_scatter_add_workspace_bytes() const {
+  return cpu_scatter_add_workspace_bytes_peak.load(std::memory_order_relaxed);
+}
+
+bool Program::cpu_bucket_builder_available() const {
+  return arch_is_cpu(compile_config().arch);
+}
+
+std::size_t Program::cpu_bucket_builder_i32_ndarray(Ndarray *keys,
+                                                    Ndarray *values,
+                                                    Ndarray *offsets,
+                                                    Ndarray *output) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native bucket builder is only available on CPU backends.");
+  TI_ERROR_IF(!keys || !values || !offsets || !output,
+              "CPU native bucket builder received a null ndarray.");
+  TI_ERROR_IF(keys->shape.size() != 1 || values->shape.size() != 1 ||
+                  offsets->shape.size() != 1 || output->shape.size() != 1,
+              "CPU native bucket builder expects 1D ndarrays.");
+  TI_ERROR_IF(keys->get_nelement() != values->get_nelement(),
+              "CPU native bucket builder keys and values sizes differ.");
+  TI_ERROR_IF(offsets->get_nelement() < 2,
+              "CPU native bucket builder offsets must contain num_bins + 1 items.");
+  const std::size_t n = keys->get_nelement();
+  const std::size_t num_bins = offsets->get_nelement() - 1;
+  TI_ERROR_IF(output->get_nelement() < n,
+              "CPU native bucket builder output is smaller than input values.");
+  TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
+                  values->get_element_size() != sizeof(int32_t) ||
+                  offsets->get_element_size() != sizeof(int32_t) ||
+                  output->get_element_size() != sizeof(int32_t),
+              "CPU native bucket builder currently expects i32 arrays.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int32_t>::max()),
+              "CPU native bucket builder input count exceeds i32 range.");
+
+  auto *keys_ptr =
+      reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(keys));
+  auto *values_ptr =
+      reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(values));
+  auto *offsets_ptr =
+      reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(offsets));
+  auto *output_ptr =
+      reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(output));
+  TI_ERROR_IF(!keys_ptr || !values_ptr || !offsets_ptr || !output_ptr,
+              "CPU native bucket builder received a null data pointer.");
+
+  std::fill(offsets_ptr, offsets_ptr + num_bins + 1, 0);
+  if (n == 0) {
+    return 0;
+  }
+
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
+  const std::size_t parallel_workspace =
+      static_cast<std::size_t>(target_threads) * num_bins * sizeof(int32_t) *
+      2;
+  const bool use_parallel =
+      n >= 65536 && target_threads > 1 && parallel_workspace <= kMaxWorkspaceBytes;
+
+  if (use_parallel) {
+    std::vector<int32_t> partial(
+        static_cast<std::size_t>(target_threads) * num_bins, 0);
+    CpuBucketCountTaskContext count_ctx;
+    count_ctx.keys = keys_ptr;
+    count_ctx.partial = partial.data();
+    count_ctx.n = n;
+    count_ctx.num_bins = num_bins;
+    count_ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &count_ctx, cpu_bucket_count_task);
+
+    std::vector<int32_t> thread_offsets(
+        static_cast<std::size_t>(target_threads) * num_bins, 0);
+    int64_t running = 0;
+    offsets_ptr[0] = 0;
+    for (std::size_t bin = 0; bin < num_bins; ++bin) {
+      int64_t pos = running;
+      for (int tid = 0; tid < target_threads; ++tid) {
+        const std::size_t idx =
+            static_cast<std::size_t>(tid) * num_bins + bin;
+        thread_offsets[idx] = static_cast<int32_t>(pos);
+        pos += partial[idx];
+      }
+      running = pos;
+      TI_ERROR_IF(running > std::numeric_limits<int32_t>::max(),
+                  "CPU native bucket builder valid item count exceeds i32 range.");
+      offsets_ptr[bin + 1] = static_cast<int32_t>(running);
+    }
+
+    CpuBucketScatterTaskContext scatter_ctx;
+    scatter_ctx.keys = keys_ptr;
+    scatter_ctx.values = values_ptr;
+    scatter_ctx.thread_offsets = thread_offsets.data();
+    scatter_ctx.output = output_ptr;
+    scatter_ctx.n = n;
+    scatter_ctx.num_bins = num_bins;
+    scatter_ctx.num_threads = target_threads;
+    pool.run(target_threads, target_threads, &scatter_ctx,
+             cpu_bucket_scatter_task);
+    return parallel_workspace;
+  }
+
+  for (std::size_t i = 0; i < n; ++i) {
+    int32_t key = keys_ptr[i];
+    if (key >= 0 && static_cast<std::size_t>(key) < num_bins) {
+      offsets_ptr[static_cast<std::size_t>(key) + 1] += 1;
+    }
+  }
+  int64_t running = 0;
+  for (std::size_t bin = 0; bin <= num_bins; ++bin) {
+    running += offsets_ptr[bin];
+    TI_ERROR_IF(running > std::numeric_limits<int32_t>::max(),
+                "CPU native bucket builder valid item count exceeds i32 range.");
+    offsets_ptr[bin] = static_cast<int32_t>(running);
+  }
+  std::vector<int32_t> cursor(offsets_ptr, offsets_ptr + num_bins);
+  for (std::size_t i = 0; i < n; ++i) {
+    int32_t key = keys_ptr[i];
+    if (key >= 0 && static_cast<std::size_t>(key) < num_bins) {
+      int32_t pos = cursor[key]++;
+      output_ptr[pos] = values_ptr[i];
+    }
+  }
+  return cursor.size() * sizeof(int32_t);
+}
+
+std::size_t Program::cpu_bucket_builder_workspace_bytes() const {
   return 0;
 }
 

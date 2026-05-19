@@ -1,0 +1,31 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) buffer Partial {
+  int data[];
+} partial_buf;
+
+layout(set = 0, binding = 1, std430) buffer Offsets {
+  int data[];
+} offsets_buf;
+
+void main() {
+  uint bin = gl_GlobalInvocationID.x;
+  uint num_bins = offsets_buf.data.length() - 1u;
+  if (bin >= num_bins) {
+    return;
+  }
+  uint chunks = partial_buf.data.length() / num_bins;
+  int running = 0;
+  for (uint chunk = 0u; chunk < chunks; ++chunk) {
+    uint idx = chunk * num_bins + bin;
+    int count = partial_buf.data[idx];
+    partial_buf.data[idx] = running;
+    running += count;
+  }
+  if (bin == 0u) {
+    offsets_buf.data[0] = 0;
+  }
+  offsets_buf.data[bin + 1u] = running;
+}

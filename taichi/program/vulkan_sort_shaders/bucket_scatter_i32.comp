@@ -1,0 +1,34 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Keys {
+  int data[];
+} keys_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer Values {
+  int data[];
+} values_buf;
+
+layout(set = 0, binding = 2, std430) buffer Cursor {
+  int data[];
+} cursor_buf;
+
+layout(set = 0, binding = 3, std430) buffer Output {
+  int data[];
+} output_buf;
+
+void main() {
+  uint idx = gl_GlobalInvocationID.x;
+  if (idx >= keys_buf.data.length()) {
+    return;
+  }
+  int key = keys_buf.data[idx];
+  if (key < 0 || uint(key) >= cursor_buf.data.length()) {
+    return;
+  }
+  uint out_idx = uint(atomicAdd(cursor_buf.data[uint(key)], 1));
+  if (out_idx < output_buf.data.length()) {
+    output_buf.data[out_idx] = values_buf.data[idx];
+  }
+}

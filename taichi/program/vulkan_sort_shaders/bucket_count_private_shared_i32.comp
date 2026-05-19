@@ -1,0 +1,43 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Keys {
+  int data[];
+} keys_buf;
+
+layout(set = 0, binding = 1, std430) buffer Partial {
+  int data[];
+} partial_buf;
+
+shared int local_hist[4096];
+
+void main() {
+  const uint chunk_size = 2048u;
+  uint lid = gl_LocalInvocationID.x;
+  uint chunk = gl_WorkGroupID.x;
+  uint chunks = gl_NumWorkGroups.x;
+  uint n = keys_buf.data.length();
+  uint num_bins = partial_buf.data.length() / chunks;
+
+  for (uint bin = lid; bin < num_bins; bin += 256u) {
+    local_hist[bin] = 0;
+  }
+  barrier();
+
+  uint base = chunk * chunk_size;
+  for (uint offset = lid; offset < chunk_size; offset += 256u) {
+    uint idx = base + offset;
+    if (idx < n) {
+      int key = keys_buf.data[idx];
+      if (key >= 0 && uint(key) < num_bins) {
+        atomicAdd(local_hist[uint(key)], 1);
+      }
+    }
+  }
+  barrier();
+
+  for (uint bin = lid; bin < num_bins; bin += 256u) {
+    partial_buf.data[chunk * num_bins + bin] = local_hist[bin];
+  }
+}

@@ -56,6 +56,11 @@ enum class CudaIndexedCopyOp : int {
   scatter = 1,
 };
 
+enum class CudaScatterAddValueType : int {
+  i32 = 0,
+  f32 = 1,
+};
+
 bool driver_transform_available();
 
 std::size_t driver_transform_affine(void *src,
@@ -144,5 +149,31 @@ std::size_t cub_reduce(void *values,
 void cub_reduce_clear_cache(void *owner);
 
 std::size_t cub_reduce_cached_bytes(void *owner);
+
+bool cub_scatter_add_available();
+
+std::size_t cub_scatter_add(void *src,
+                            void *indices,
+                            void *dst,
+                            int num_items,
+                            int index_bound,
+                            CudaScatterAddValueType value_type,
+                            void *stream);
+
+bool cub_bucket_builder_available();
+
+std::size_t cub_bucket_builder_i32(void *keys,
+                                   void *values,
+                                   void *offsets,
+                                   void *output,
+                                   void *cursor,
+                                   int num_items,
+                                   int num_bins,
+                                   void *stream,
+                                   void *owner);
+
+void cub_bucket_builder_clear_cache(void *owner);
+
+std::size_t cub_bucket_builder_cached_bytes(void *owner);
 
 }  // namespace taichi::lang::cuda

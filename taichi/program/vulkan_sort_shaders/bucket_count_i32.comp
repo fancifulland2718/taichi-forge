@@ -1,0 +1,23 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Keys {
+  int data[];
+} keys_buf;
+
+layout(set = 0, binding = 1, std430) buffer Offsets {
+  int data[];
+} offsets_buf;
+
+void main() {
+  uint idx = gl_GlobalInvocationID.x;
+  if (idx >= keys_buf.data.length()) {
+    return;
+  }
+  int key = keys_buf.data[idx];
+  uint num_bins = offsets_buf.data.length() - 1u;
+  if (key >= 0 && uint(key) < num_bins) {
+    atomicAdd(offsets_buf.data[uint(key) + 1u], 1);
+  }
+}

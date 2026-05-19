@@ -193,6 +193,29 @@ struct CubReduceCache {
   }
 };
 
+struct CubBucketBuilderCache {
+  void *temp_storage{nullptr};
+  std::size_t temp_storage_bytes{0};
+  int device_id{-1};
+
+  ~CubBucketBuilderCache() {
+    release_noexcept();
+  }
+
+  void release_noexcept() {
+    if (temp_storage) {
+      cudaFree(temp_storage);
+    }
+    temp_storage = nullptr;
+    temp_storage_bytes = 0;
+    device_id = -1;
+  }
+
+  std::size_t allocated_bytes() const {
+    return temp_storage_bytes;
+  }
+};
+
 std::mutex &get_cache_mutex() {
   static std::mutex mutex;
   return mutex;
@@ -223,6 +246,13 @@ get_histogram_caches() {
 std::unordered_map<void *, std::unique_ptr<CubReduceCache>> &
 get_reduce_caches() {
   static std::unordered_map<void *, std::unique_ptr<CubReduceCache>> caches;
+  return caches;
+}
+
+std::unordered_map<void *, std::unique_ptr<CubBucketBuilderCache>> &
+get_bucket_builder_caches() {
+  static std::unordered_map<void *, std::unique_ptr<CubBucketBuilderCache>>
+      caches;
   return caches;
 }
 
@@ -287,6 +317,19 @@ CubReduceCache &get_reduce_cache(void *owner) {
   auto it = caches.find(owner);
   if (it == caches.end()) {
     it = caches.emplace(owner, std::make_unique<CubReduceCache>()).first;
+  }
+  return *it->second;
+}
+
+CubBucketBuilderCache &get_bucket_builder_cache(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  auto &caches = get_bucket_builder_caches();
+  auto it = caches.find(owner);
+  if (it == caches.end()) {
+    it = caches.emplace(owner, std::make_unique<CubBucketBuilderCache>()).first;
   }
   return *it->second;
 }
@@ -357,6 +400,17 @@ void ensure_device_cache(CubReduceCache &cache) {
   }
 }
 
+void ensure_device_cache(CubBucketBuilderCache &cache) {
+  int device_id = 0;
+  TI_CUDA_SORT_CHECK(cudaGetDevice(&device_id));
+  if (cache.device_id == -1) {
+    cache.device_id = device_id;
+  } else if (cache.device_id != device_id) {
+    cache.release_noexcept();
+    cache.device_id = device_id;
+  }
+}
+
 void ensure_buffer(void **ptr, std::size_t *capacity, std::size_t required) {
   if (required <= *capacity) {
     return;
@@ -376,6 +430,70 @@ T *ensure_typed_buffer(void **ptr,
                        std::size_t count) {
   ensure_buffer(ptr, capacity, sizeof(T) * count);
   return static_cast<T *>(*ptr);
+}
+
+__global__ void bucket_count_i32_kernel(const int32_t *keys,
+                                        int32_t *offsets,
+                                        int num_items,
+                                        int num_bins) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  int key = keys[i];
+  if (key >= 0 && key < num_bins) {
+    atomicAdd(offsets + key + 1, 1);
+  }
+}
+
+__global__ void bucket_scatter_i32_kernel(const int32_t *keys,
+                                          const int32_t *values,
+                                          int32_t *cursor,
+                                          int32_t *output,
+                                          int num_items,
+                                          int num_bins) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  int key = keys[i];
+  if (key < 0 || key >= num_bins) {
+    return;
+  }
+  int out_idx = atomicAdd(cursor + key, 1);
+  if (out_idx >= 0 && out_idx < num_items) {
+    output[out_idx] = values[i];
+  }
+}
+
+__global__ void scatter_add_i32_by_i32_kernel(const int32_t *src,
+                                              const int32_t *indices,
+                                              int32_t *dst,
+                                              int num_items,
+                                              int index_bound) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  int index = indices[i];
+  if (index >= 0 && index < index_bound) {
+    atomicAdd(dst + index, src[i]);
+  }
+}
+
+__global__ void scatter_add_f32_by_i32_kernel(const float *src,
+                                              const int32_t *indices,
+                                              float *dst,
+                                              int num_items,
+                                              int index_bound) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  int index = indices[i];
+  if (index >= 0 && index < index_bound) {
+    atomicAdd(dst + index, src[i]);
+  }
 }
 
 __device__ uint32_t sortable_f32_key(float value, int nan_policy) {
@@ -1388,6 +1506,159 @@ std::size_t cub_reduce_cached_bytes_impl(void *owner) {
   }
   std::lock_guard<std::mutex> lock(get_cache_mutex());
   auto &caches = get_reduce_caches();
+  auto it = caches.find(owner);
+  if (it == caches.end()) {
+    return 0;
+  }
+  return it->second->allocated_bytes();
+}
+
+std::size_t cub_scatter_add_impl(void *src,
+                                 void *indices,
+                                 void *dst,
+                                 int num_items,
+                                 int index_bound,
+                                 CudaScatterAddValueType value_type,
+                                 void *stream_ptr) {
+  if (!src || !indices || !dst) {
+    throw std::runtime_error("CUDA scatter-add received a null pointer");
+  }
+  if (num_items == 0 || index_bound == 0) {
+    return 0;
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  constexpr int kBlockDim = 256;
+  const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+  const int32_t *indices_in = static_cast<const int32_t *>(indices);
+  switch (value_type) {
+    case CudaScatterAddValueType::i32:
+      scatter_add_i32_by_i32_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+          static_cast<const int32_t *>(src), indices_in,
+          static_cast<int32_t *>(dst), num_items, index_bound);
+      break;
+    case CudaScatterAddValueType::f32:
+      scatter_add_f32_by_i32_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+          static_cast<const float *>(src), indices_in, static_cast<float *>(dst),
+          num_items, index_bound);
+      break;
+    default:
+      throw std::runtime_error("Unsupported CUDA scatter-add value type");
+  }
+  TI_CUDA_SORT_CHECK(cudaGetLastError());
+  if (stream) {
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return 0;
+}
+
+std::size_t cub_bucket_builder_i32_impl(void *keys,
+                                        void *values,
+                                        void *offsets,
+                                        void *output,
+                                        void *cursor,
+                                        int num_items,
+                                        int num_bins,
+                                        void *stream_ptr,
+                                        void *owner) {
+  if (!keys || !values || !offsets || !output || !cursor) {
+    throw std::runtime_error("CUDA bucket builder received a null pointer");
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  CubBucketBuilderCache &cache = get_bucket_builder_cache(owner);
+  ensure_device_cache(cache);
+
+  const int32_t *keys_in = static_cast<const int32_t *>(keys);
+  const int32_t *values_in = static_cast<const int32_t *>(values);
+  int32_t *offsets_in_out = static_cast<int32_t *>(offsets);
+  int32_t *output_out = static_cast<int32_t *>(output);
+  int32_t *cursor_in_out = static_cast<int32_t *>(cursor);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+
+  const std::size_t offsets_bytes =
+      static_cast<std::size_t>(num_bins + 1) * sizeof(int32_t);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaMemsetAsync(offsets_in_out, 0, offsets_bytes, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaMemset(offsets_in_out, 0, offsets_bytes));
+  }
+
+  constexpr int kBlockDim = 256;
+  if (num_items > 0) {
+    const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+    bucket_count_i32_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+        keys_in, offsets_in_out, num_items, num_bins);
+    TI_CUDA_SORT_CHECK(cudaGetLastError());
+  }
+
+  std::size_t temp_storage_bytes = 0;
+  const int scan_items = num_bins + 1;
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        nullptr, temp_storage_bytes, offsets_in_out, offsets_in_out, scan_items,
+        stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        nullptr, temp_storage_bytes, offsets_in_out, offsets_in_out,
+        scan_items));
+  }
+  ensure_buffer(&cache.temp_storage, &cache.temp_storage_bytes,
+                temp_storage_bytes);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        cache.temp_storage, temp_storage_bytes, offsets_in_out, offsets_in_out,
+        scan_items, stream));
+    TI_CUDA_SORT_CHECK(cudaMemcpyAsync(cursor_in_out, offsets_in_out,
+                                       static_cast<std::size_t>(num_bins) *
+                                           sizeof(int32_t),
+                                       cudaMemcpyDeviceToDevice, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        cache.temp_storage, temp_storage_bytes, offsets_in_out, offsets_in_out,
+        scan_items));
+    TI_CUDA_SORT_CHECK(cudaMemcpy(cursor_in_out, offsets_in_out,
+                                  static_cast<std::size_t>(num_bins) *
+                                      sizeof(int32_t),
+                                  cudaMemcpyDeviceToDevice));
+  }
+
+  if (num_items > 0) {
+    const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+    bucket_scatter_i32_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+        keys_in, values_in, cursor_in_out, output_out, num_items, num_bins);
+    TI_CUDA_SORT_CHECK(cudaGetLastError());
+  }
+
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return cache.allocated_bytes();
+}
+
+void cub_bucket_builder_clear_cache_impl(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  auto &caches = get_bucket_builder_caches();
+  auto it = caches.find(owner);
+  if (it != caches.end()) {
+    caches.erase(it);
+  }
+}
+
+std::size_t cub_bucket_builder_cached_bytes_impl(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  auto &caches = get_bucket_builder_caches();
   auto it = caches.find(owner);
   if (it == caches.end()) {
     return 0;

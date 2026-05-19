@@ -686,10 +686,22 @@ void export_lang(py::module &m) {
       .def("cuda_device_gather_ndarray", &Program::cuda_device_gather_ndarray,
            py::arg("src"), py::arg("indices"), py::arg("dst"),
            py::call_guard<py::gil_scoped_release>())
-      .def("cuda_device_scatter_ndarray",
-           &Program::cuda_device_scatter_ndarray, py::arg("src"),
-           py::arg("indices"), py::arg("dst"),
-           py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_scatter_ndarray",
+            &Program::cuda_device_scatter_ndarray, py::arg("src"),
+            py::arg("indices"), py::arg("dst"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_scatter_add_available",
+            &Program::cuda_device_scatter_add_available)
+       .def("cuda_device_scatter_add_ndarray",
+            &Program::cuda_device_scatter_add_ndarray, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_bucket_builder_available",
+            &Program::cuda_device_bucket_builder_available)
+       .def("cuda_device_bucket_builder_i32_ndarray",
+            &Program::cuda_device_bucket_builder_i32_ndarray, py::arg("keys"),
+            py::arg("values"), py::arg("offsets"), py::arg("output"),
+            py::arg("cursor"), py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_radix_sort_available",
            &Program::cuda_cub_radix_sort_available)
       .def("cuda_cub_radix_sort_clear_workspace",
@@ -786,9 +798,23 @@ void export_lang(py::module &m) {
       .def("cpu_gather_ndarray", &Program::cpu_gather_ndarray,
            py::arg("src"), py::arg("indices"), py::arg("dst"),
            py::call_guard<py::gil_scoped_release>())
-      .def("cpu_scatter_ndarray", &Program::cpu_scatter_ndarray,
-           py::arg("src"), py::arg("indices"), py::arg("dst"),
-           py::call_guard<py::gil_scoped_release>())
+       .def("cpu_scatter_ndarray", &Program::cpu_scatter_ndarray,
+            py::arg("src"), py::arg("indices"), py::arg("dst"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cpu_scatter_add_available", &Program::cpu_scatter_add_available)
+       .def("cpu_scatter_add_workspace_bytes",
+            &Program::cpu_scatter_add_workspace_bytes)
+       .def("cpu_scatter_add_ndarray", &Program::cpu_scatter_add_ndarray,
+            py::arg("src"), py::arg("indices"), py::arg("dst"),
+            py::arg("value_type"), py::call_guard<py::gil_scoped_release>())
+       .def("cpu_bucket_builder_available",
+            &Program::cpu_bucket_builder_available)
+       .def("cpu_bucket_builder_workspace_bytes",
+            &Program::cpu_bucket_builder_workspace_bytes)
+       .def("cpu_bucket_builder_i32_ndarray",
+            &Program::cpu_bucket_builder_i32_ndarray, py::arg("keys"),
+            py::arg("values"), py::arg("offsets"), py::arg("output"),
+            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_radix_sort_available",
            &Program::vulkan_radix_sort_available)
       .def("vulkan_radix_sort_clear_workspace",
@@ -860,10 +886,32 @@ void export_lang(py::module &m) {
       .def("vulkan_gather_ndarray", &Program::vulkan_gather_ndarray,
            py::arg("src"), py::arg("indices"), py::arg("dst"),
            py::call_guard<py::gil_scoped_release>())
-      .def("vulkan_scatter_ndarray", &Program::vulkan_scatter_ndarray,
-           py::arg("src"), py::arg("indices"), py::arg("dst"),
-           py::call_guard<py::gil_scoped_release>())
-      .def("vulkan_radix_sort_u32_ndarray",
+       .def("vulkan_scatter_ndarray", &Program::vulkan_scatter_ndarray,
+            py::arg("src"), py::arg("indices"), py::arg("dst"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_scatter_add_available",
+            &Program::vulkan_scatter_add_available)
+       .def("vulkan_scatter_add_clear_workspace",
+            &Program::vulkan_scatter_add_clear_workspace,
+            py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_scatter_add_workspace_bytes",
+            &Program::vulkan_scatter_add_workspace_bytes)
+       .def("vulkan_scatter_add_ndarray",
+            &Program::vulkan_scatter_add_ndarray, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_bucket_builder_available",
+            &Program::vulkan_bucket_builder_available)
+       .def("vulkan_bucket_builder_clear_workspace",
+            &Program::vulkan_bucket_builder_clear_workspace,
+            py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_bucket_builder_workspace_bytes",
+            &Program::vulkan_bucket_builder_workspace_bytes)
+       .def("vulkan_bucket_builder_i32_ndarray",
+            &Program::vulkan_bucket_builder_i32_ndarray, py::arg("keys"),
+            py::arg("values"), py::arg("offsets"), py::arg("output"),
+            py::arg("cursor"), py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_radix_sort_u32_ndarray",
            &Program::vulkan_radix_sort_u32_ndarray, py::arg("keys"),
            py::arg("values"), py::arg("key_type"),
            py::call_guard<py::gil_scoped_release>())

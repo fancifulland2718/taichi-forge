@@ -1,0 +1,21 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) buffer Offsets {
+  int data[];
+} offsets_buf;
+
+layout(set = 0, binding = 1, std430) buffer Cursor {
+  int data[];
+} cursor_buf;
+
+void main() {
+  uint idx = gl_GlobalInvocationID.x;
+  if (idx < offsets_buf.data.length()) {
+    offsets_buf.data[idx] = 0;
+  }
+  if (idx < cursor_buf.data.length()) {
+    cursor_buf.data[idx] = 0;
+  }
+}

@@ -334,6 +334,21 @@ class TI_DLL_EXPORT Program {
                                           Ndarray *indices,
                                           Ndarray *dst);
 
+  bool cuda_device_scatter_add_available() const;
+
+  std::size_t cuda_device_scatter_add_ndarray(Ndarray *src,
+                                              Ndarray *indices,
+                                              Ndarray *dst,
+                                              int value_type);
+
+  bool cuda_device_bucket_builder_available() const;
+
+  std::size_t cuda_device_bucket_builder_i32_ndarray(Ndarray *keys,
+                                                     Ndarray *values,
+                                                     Ndarray *offsets,
+                                                     Ndarray *output,
+                                                     Ndarray *cursor);
+
   bool cuda_cub_radix_sort_available() const;
 
   std::size_t cuda_cub_radix_sort_ndarray(Ndarray *keys,
@@ -432,6 +447,24 @@ class TI_DLL_EXPORT Program {
 
   std::size_t cpu_indexed_copy_workspace_bytes() const;
 
+  bool cpu_scatter_add_available() const;
+
+  std::size_t cpu_scatter_add_ndarray(Ndarray *src,
+                                      Ndarray *indices,
+                                      Ndarray *dst,
+                                      int value_type);
+
+  std::size_t cpu_scatter_add_workspace_bytes() const;
+
+  bool cpu_bucket_builder_available() const;
+
+  std::size_t cpu_bucket_builder_i32_ndarray(Ndarray *keys,
+                                             Ndarray *values,
+                                             Ndarray *offsets,
+                                             Ndarray *output);
+
+  std::size_t cpu_bucket_builder_workspace_bytes() const;
+
   bool vulkan_radix_sort_available() const;
 
   std::size_t vulkan_radix_sort_u32_ndarray(Ndarray *keys,
@@ -508,6 +541,29 @@ class TI_DLL_EXPORT Program {
   void vulkan_indexed_copy_clear_workspace();
 
   std::size_t vulkan_indexed_copy_workspace_bytes() const;
+
+  bool vulkan_scatter_add_available() const;
+
+  std::size_t vulkan_scatter_add_ndarray(Ndarray *src,
+                                         Ndarray *indices,
+                                         Ndarray *dst,
+                                         int value_type);
+
+  void vulkan_scatter_add_clear_workspace();
+
+  std::size_t vulkan_scatter_add_workspace_bytes() const;
+
+  bool vulkan_bucket_builder_available() const;
+
+  std::size_t vulkan_bucket_builder_i32_ndarray(Ndarray *keys,
+                                                Ndarray *values,
+                                                Ndarray *offsets,
+                                                Ndarray *output,
+                                                Ndarray *cursor);
+
+  void vulkan_bucket_builder_clear_workspace();
+
+  std::size_t vulkan_bucket_builder_workspace_bytes() const;
 
   Identifier get_next_global_id(const std::string &name = "") {
     return Identifier(global_id_counter_++, name);

@@ -261,6 +261,74 @@ def scatter_f32_ndarray(
 
 
 @kernel
+def scatter_add_i32_ndarray(
+    src: ndarray_type.ndarray(dtype=i32, ndim=1),
+    indices: ndarray_type.ndarray(dtype=i32, ndim=1),
+    dst: ndarray_type.ndarray(dtype=i32, ndim=1),
+    n: i32,
+):
+    for i in range(n):
+        index = indices[i]
+        if index >= 0 and index < dst.shape[0]:
+            ops.atomic_add(dst[index], src[i])
+
+
+@kernel
+def scatter_add_f32_ndarray(
+    src: ndarray_type.ndarray(dtype=f32, ndim=1),
+    indices: ndarray_type.ndarray(dtype=i32, ndim=1),
+    dst: ndarray_type.ndarray(dtype=f32, ndim=1),
+    n: i32,
+):
+    for i in range(n):
+        index = indices[i]
+        if index >= 0 and index < dst.shape[0]:
+            ops.atomic_add(dst[index], src[i])
+
+
+@kernel
+def bucket_count_i32_ndarray(
+    keys: ndarray_type.ndarray(dtype=i32, ndim=1),
+    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
+    n: i32,
+    num_bins: i32,
+):
+    for i in range(num_bins + 1):
+        offsets[i] = 0
+    for i in range(n):
+        key = keys[i]
+        if key >= 0 and key < num_bins:
+            ops.atomic_add(offsets[key + 1], 1)
+
+
+@kernel
+def bucket_copy_offsets_to_cursor_ndarray(
+    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
+    cursor: ndarray_type.ndarray(dtype=i32, ndim=1),
+    num_bins: i32,
+):
+    for i in range(num_bins):
+        cursor[i] = offsets[i]
+
+
+@kernel
+def bucket_scatter_i32_ndarray(
+    keys: ndarray_type.ndarray(dtype=i32, ndim=1),
+    values: ndarray_type.ndarray(dtype=i32, ndim=1),
+    cursor: ndarray_type.ndarray(dtype=i32, ndim=1),
+    output: ndarray_type.ndarray(dtype=i32, ndim=1),
+    n: i32,
+    num_bins: i32,
+):
+    for i in range(n):
+        key = keys[i]
+        if key >= 0 and key < num_bins:
+            out_idx = ops.atomic_add(cursor[key], 1)
+            if out_idx >= 0 and out_idx < output.shape[0]:
+                output[out_idx] = values[i]
+
+
+@kernel
 def gather_i32_field(src: template(), indices: template(), dst: template(), n: i32):
     src_offset = static(src.snode.ptr.offset if len(src.snode.ptr.offset) != 0 else [0])
     indices_offset = static(
@@ -314,6 +382,94 @@ def scatter_f32_field(src: template(), indices: template(), dst: template(), n: 
         index = indices[i + indices_offset[0]]
         if index >= 0 and index < dst.shape[0]:
             dst[index + dst_offset[0]] = src[i + src_offset[0]]
+
+
+@kernel
+def scatter_add_i32_field(src: template(), indices: template(), dst: template(), n: i32):
+    src_offset = static(src.snode.ptr.offset if len(src.snode.ptr.offset) != 0 else [0])
+    indices_offset = static(
+        indices.snode.ptr.offset if len(indices.snode.ptr.offset) != 0 else [0]
+    )
+    dst_offset = static(dst.snode.ptr.offset if len(dst.snode.ptr.offset) != 0 else [0])
+    for i in range(n):
+        index = indices[i + indices_offset[0]]
+        if index >= 0 and index < dst.shape[0]:
+            ops.atomic_add(dst[index + dst_offset[0]], src[i + src_offset[0]])
+
+
+@kernel
+def scatter_add_f32_field(src: template(), indices: template(), dst: template(), n: i32):
+    src_offset = static(src.snode.ptr.offset if len(src.snode.ptr.offset) != 0 else [0])
+    indices_offset = static(
+        indices.snode.ptr.offset if len(indices.snode.ptr.offset) != 0 else [0]
+    )
+    dst_offset = static(dst.snode.ptr.offset if len(dst.snode.ptr.offset) != 0 else [0])
+    for i in range(n):
+        index = indices[i + indices_offset[0]]
+        if index >= 0 and index < dst.shape[0]:
+            ops.atomic_add(dst[index + dst_offset[0]], src[i + src_offset[0]])
+
+
+@kernel
+def bucket_count_i32_field(keys: template(), offsets: template(), n: i32, num_bins: i32):
+    keys_offset = static(keys.snode.ptr.offset if len(keys.snode.ptr.offset) != 0 else [0])
+    offsets_offset = static(
+        offsets.snode.ptr.offset if len(offsets.snode.ptr.offset) != 0 else [0]
+    )
+    for i in range(num_bins + 1):
+        offsets[i + offsets_offset[0]] = 0
+    for i in range(n):
+        key = keys[i + keys_offset[0]]
+        if key >= 0 and key < num_bins:
+            ops.atomic_add(offsets[key + 1 + offsets_offset[0]], 1)
+
+
+@kernel
+def bucket_prefix_offsets_i32_field_serial(offsets: template(), num_bins: i32):
+    offsets_offset = static(
+        offsets.snode.ptr.offset if len(offsets.snode.ptr.offset) != 0 else [0]
+    )
+    running = 0
+    i = 0
+    while i <= num_bins:
+        running += offsets[i + offsets_offset[0]]
+        offsets[i + offsets_offset[0]] = running
+        i += 1
+
+
+@kernel
+def bucket_copy_offsets_to_cursor_field(
+    offsets: template(), cursor: template(), num_bins: i32
+):
+    offsets_offset = static(
+        offsets.snode.ptr.offset if len(offsets.snode.ptr.offset) != 0 else [0]
+    )
+    for i in range(num_bins):
+        cursor[i] = offsets[i + offsets_offset[0]]
+
+
+@kernel
+def bucket_scatter_i32_field(
+    keys: template(),
+    values: template(),
+    cursor: template(),
+    output: template(),
+    n: i32,
+    num_bins: i32,
+):
+    keys_offset = static(keys.snode.ptr.offset if len(keys.snode.ptr.offset) != 0 else [0])
+    values_offset = static(
+        values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else [0]
+    )
+    output_offset = static(
+        output.snode.ptr.offset if len(output.snode.ptr.offset) != 0 else [0]
+    )
+    for i in range(n):
+        key = keys[i + keys_offset[0]]
+        if key >= 0 and key < num_bins:
+            out_idx = ops.atomic_add(cursor[key], 1)
+            if out_idx >= 0 and out_idx < output.shape[0]:
+                output[out_idx + output_offset[0]] = values[i + values_offset[0]]
 
 
 @kernel

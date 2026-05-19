@@ -1,0 +1,58 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Keys {
+  int data[];
+} keys_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer Values {
+  int data[];
+} values_buf;
+
+layout(set = 0, binding = 2, std430) readonly buffer Partial {
+  int data[];
+} partial_buf;
+
+layout(set = 0, binding = 3, std430) readonly buffer Offsets {
+  int data[];
+} offsets_buf;
+
+layout(set = 0, binding = 4, std430) buffer Output {
+  int data[];
+} output_buf;
+
+shared int local_cursor[4096];
+
+void main() {
+  const uint chunk_size = 2048u;
+  uint lid = gl_LocalInvocationID.x;
+  uint chunk = gl_WorkGroupID.x;
+  uint chunks = gl_NumWorkGroups.x;
+  uint n = keys_buf.data.length();
+  uint num_bins = offsets_buf.data.length() - 1u;
+
+  for (uint bin = lid; bin < num_bins; bin += 256u) {
+    local_cursor[bin] = 0;
+  }
+  barrier();
+
+  uint base = chunk * chunk_size;
+  for (uint offset = lid; offset < chunk_size; offset += 256u) {
+    uint idx = base + offset;
+    if (idx < n) {
+      int key = keys_buf.data[idx];
+      if (key >= 0 && uint(key) < num_bins) {
+        uint bin = uint(key);
+        uint local_rank = uint(atomicAdd(local_cursor[bin], 1));
+        uint chunk_base =
+            uint(partial_buf.data[chunk * num_bins + bin]);
+        uint bucket_base = uint(offsets_buf.data[bin]);
+        uint out_idx = bucket_base + chunk_base + local_rank;
+        if (out_idx < output_buf.data.length()) {
+          output_buf.data[out_idx] = values_buf.data[idx];
+        }
+      }
+    }
+  }
+}

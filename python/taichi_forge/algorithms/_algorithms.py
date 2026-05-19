@@ -2,6 +2,13 @@ import numpy as np
 
 from taichi_forge._kernels import (
     blit_from_field_to_field,
+    bucket_copy_offsets_to_cursor_field,
+    bucket_copy_offsets_to_cursor_ndarray,
+    bucket_count_i32_field,
+    bucket_count_i32_ndarray,
+    bucket_prefix_offsets_i32_field_serial,
+    bucket_scatter_i32_field,
+    bucket_scatter_i32_ndarray,
     compact_flags_to_prefix_field,
     compact_flags_to_prefix_ndarray_from_field,
     compact_scatter_field_from_prefix_ndarray,
@@ -41,6 +48,10 @@ from taichi_forge._kernels import (
     sort_radix_store_zero_count_ndarray,
     scatter_f32_field,
     scatter_f32_ndarray,
+    scatter_add_f32_field,
+    scatter_add_f32_ndarray,
+    scatter_add_i32_field,
+    scatter_add_i32_ndarray,
     scatter_i32_field,
     scatter_i32_ndarray,
     transform_affine_f32_field,
@@ -90,6 +101,22 @@ _SUPPORTED_TRANSFORM_METHODS = {
     "field_kernel",
 }
 _SUPPORTED_INDEXED_COPY_METHODS = {
+    "auto",
+    "cuda_device",
+    "vulkan_native",
+    "cpu_native",
+    "kernel",
+    "field_kernel",
+}
+_SUPPORTED_SCATTER_ADD_METHODS = {
+    "auto",
+    "cuda_device",
+    "vulkan_native",
+    "cpu_native",
+    "kernel",
+    "field_kernel",
+}
+_SUPPORTED_BUCKET_BUILDER_METHODS = {
     "auto",
     "cuda_device",
     "vulkan_native",
@@ -491,6 +518,106 @@ class IndexedCopyWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
+
+
+class ScatterAddWorkspace:
+    """Workspace metadata for experimental indexed scatter-add.
+
+    Native paths currently use no extra device workspace. The object mirrors the
+    other experimental primitive workspaces so future segmented or bucketed
+    implementations can report temporary storage without changing the API.
+    """
+
+    def __init__(self, max_items=None):
+        self.max_items = max_items
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._vulkan_native_active = False
+
+    def check_shape(self, n):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} scatter-add items, exceeding max_items={self.max_items}."
+            )
+
+    def clear(self):
+        if self._vulkan_native_active:
+            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            if hasattr(prog, "vulkan_scatter_add_clear_workspace"):
+                prog.vulkan_scatter_add_clear_workspace()
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._vulkan_native_active = False
+
+
+class BucketBuilderWorkspace:
+    """Workspace for experimental fixed-bin bucket range construction.
+
+    Native CUDA/Vulkan paths use one cached i32 cursor buffer of length
+    ``num_bins``. Field/SNode fallback uses a field cursor plus the existing
+    prefix-sum executor over ``offsets``.
+    """
+
+    def __init__(self, max_items=None, max_bins=None):
+        self.max_items = max_items
+        self.max_bins = max_bins
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._cursor_ndarray = None
+        self._cursor_field = None
+        self._scanner_cache = {}
+        self._vulkan_native_active = False
+
+    def check_shape(self, n, num_bins):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} bucket items, exceeding max_items={self.max_items}."
+            )
+        if self.max_bins is not None and num_bins > self.max_bins:
+            raise ValueError(
+                f"Requested {num_bins} buckets, exceeding max_bins={self.max_bins}."
+            )
+
+    def clear(self):
+        if self._vulkan_native_active:
+            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            if hasattr(prog, "vulkan_bucket_builder_clear_workspace"):
+                prog.vulkan_bucket_builder_clear_workspace()
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._cursor_ndarray = None
+        self._cursor_field = None
+        self._scanner_cache.clear()
+        self._vulkan_native_active = False
+
+    def _reserve_bytes(self, bytes_used):
+        self.workspace_bytes_current += bytes_used
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak, self.workspace_bytes_current
+        )
+
+    def _get_cursor_ndarray(self, num_bins):
+        if self._cursor_ndarray is None or self._cursor_ndarray.shape[0] < num_bins:
+            self._cursor_ndarray = ti_ndarray(i32, shape=num_bins)
+            self._reserve_bytes(num_bins * 4)
+        return self._cursor_ndarray
+
+    def _get_cursor_field(self, num_bins):
+        if self._cursor_field is None or self._cursor_field.shape[0] < num_bins:
+            self._cursor_field = field(i32, shape=num_bins)
+            self._reserve_bytes(num_bins * 4)
+        return self._cursor_field
+
+    def _get_scanner(self, length):
+        if length not in self._scanner_cache:
+            scanner = PrefixSumExecutor(length)
+            self._scanner_cache[length] = scanner
+            self._reserve_bytes(scanner.workspace_length * 4)
+        return self._scanner_cache[length]
 
 
 def _dtype_nbytes(dtype):
@@ -2127,6 +2254,368 @@ def experimental_scatter(src, indices, dst, *, method="auto", workspace=None):
     )
 
 
+def _check_scatter_add_request(src, indices, dst, method, workspace):
+    op_name = "experimental_scatter_add()"
+    if method not in _SUPPORTED_SCATTER_ADD_METHODS:
+        raise NotImplementedError(f"{op_name} method '{method}' is not implemented.")
+    if not (_is_1d(src) and _is_1d(indices) and _is_1d(dst)):
+        raise ValueError(f"{op_name} expects 1D source, indices, and destination.")
+    if indices.dtype != i32:
+        raise TypeError(f"{op_name} currently expects ti.i32 indices.")
+    if src.dtype != dst.dtype:
+        raise TypeError(f"{op_name} source and destination dtype must match.")
+    if src.dtype not in (i32, f32):
+        raise TypeError(f"{op_name} currently supports ti.i32 and ti.f32 values.")
+    if src.shape[0] != indices.shape[0]:
+        raise ValueError(f"{op_name} expects source and indices sizes to match.")
+    if isinstance(src, Ndarray) or isinstance(indices, Ndarray) or isinstance(dst, Ndarray):
+        if not (
+            isinstance(src, Ndarray)
+            and isinstance(indices, Ndarray)
+            and isinstance(dst, Ndarray)
+        ):
+            raise TypeError(
+                f"{op_name} ndarray mode requires source, indices, and "
+                "destination all to be ti.ndarray."
+            )
+    if workspace is not None and not isinstance(workspace, ScatterAddWorkspace):
+        raise TypeError("workspace must be a ScatterAddWorkspace instance or None.")
+
+
+def _scatter_add_value_type(dtype):
+    return 0 if dtype == i32 else 1
+
+
+def _try_cuda_device_scatter_add(src, indices, dst):
+    if current_cfg().arch != cuda:
+        return False
+    if not (
+        isinstance(src, Ndarray)
+        and isinstance(indices, Ndarray)
+        and isinstance(dst, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cuda_device_scatter_add_available"):
+        return False
+    if not prog.cuda_device_scatter_add_available():
+        return False
+    prog.cuda_device_scatter_add_ndarray(
+        src.arr, indices.arr, dst.arr, _scatter_add_value_type(src.dtype)
+    )
+    return True
+
+
+def _try_vulkan_scatter_add(src, indices, dst, workspace):
+    if current_cfg().arch != vulkan:
+        return False
+    if src.dtype != i32:
+        return False
+    if not (
+        isinstance(src, Ndarray)
+        and isinstance(indices, Ndarray)
+        and isinstance(dst, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "vulkan_scatter_add_available"):
+        return False
+    if not prog.vulkan_scatter_add_available():
+        return False
+    temp_bytes = prog.vulkan_scatter_add_ndarray(
+        src.arr, indices.arr, dst.arr, _scatter_add_value_type(src.dtype)
+    )
+    if workspace is not None:
+        workspace._vulkan_native_active = True
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+    return True
+
+
+def _try_cpu_scatter_add(src, indices, dst):
+    if current_cfg().arch not in [x64, arm64]:
+        return False
+    if not (
+        isinstance(src, Ndarray)
+        and isinstance(indices, Ndarray)
+        and isinstance(dst, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cpu_scatter_add_available"):
+        return False
+    if not prog.cpu_scatter_add_available():
+        return False
+    prog.cpu_scatter_add_ndarray(
+        src.arr, indices.arr, dst.arr, _scatter_add_value_type(src.dtype)
+    )
+    return True
+
+
+def _scatter_add_kernel(src, indices, dst):
+    n = indices.shape[0]
+    if isinstance(src, Ndarray):
+        if src.dtype == i32:
+            scatter_add_i32_ndarray(src, indices, dst, n)
+        else:
+            scatter_add_f32_ndarray(src, indices, dst, n)
+    else:
+        if src.dtype == i32:
+            scatter_add_i32_field(src, indices, dst, n)
+        else:
+            scatter_add_f32_field(src, indices, dst, n)
+    sync()
+
+
+def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None):
+    """Apply ``dst[indices[i]] += src[i]`` for 1D arrays.
+
+    Invalid indices are ignored. Duplicate target indices are accumulated using
+    backend atomics; floating-point accumulation order is backend-dependent.
+    """
+
+    _check_scatter_add_request(src, indices, dst, method, workspace)
+    n = indices.shape[0]
+    if workspace is None:
+        workspace = ScatterAddWorkspace(max_items=n)
+    workspace.check_shape(n)
+    if n == 0:
+        return workspace
+    if method in ("auto", "cuda_device") and _try_cuda_device_scatter_add(
+        src, indices, dst
+    ):
+        return workspace
+    if method == "cuda_device":
+        raise RuntimeError(
+            "experimental_scatter_add() method='cuda_device' requires CUDA "
+            "ndarray inputs and CUDA toolkit scatter-add support."
+        )
+    if method in ("auto", "vulkan_native") and _try_vulkan_scatter_add(
+        src, indices, dst, workspace
+    ):
+        return workspace
+    if method == "vulkan_native":
+        raise RuntimeError(
+            "experimental_scatter_add() method='vulkan_native' currently "
+            "requires Vulkan ndarray inputs, i32 values, and available native "
+            "scatter-add shaders. f32 uses the Forge kernel path on Vulkan to "
+            "avoid unsafe high-contention CAS."
+        )
+    if method in ("auto", "cpu_native") and _try_cpu_scatter_add(src, indices, dst):
+        return workspace
+    if method == "cpu_native":
+        raise RuntimeError(
+            "experimental_scatter_add() method='cpu_native' requires CPU ndarray "
+            "inputs and available native scatter-add support."
+        )
+    if method in ("kernel", "field_kernel", "auto"):
+        _scatter_add_kernel(src, indices, dst)
+        return workspace
+    raise RuntimeError("experimental_scatter_add() could not find an available backend.")
+
+
+def _check_bucket_builder_request(keys, values, offsets, output, method, workspace):
+    if method not in _SUPPORTED_BUCKET_BUILDER_METHODS:
+        raise NotImplementedError(
+            f"bucket builder method '{method}' is not implemented."
+        )
+    if not (_is_1d(keys) and _is_1d(values) and _is_1d(offsets) and _is_1d(output)):
+        raise ValueError(
+            "experimental_bucket_builder() expects 1D keys, values, offsets, and output."
+        )
+    if keys.dtype != i32 or values.dtype != i32 or offsets.dtype != i32 or output.dtype != i32:
+        raise TypeError(
+            "experimental_bucket_builder() currently expects ti.i32 keys, values, offsets, and output."
+        )
+    if keys.shape[0] != values.shape[0]:
+        raise ValueError("experimental_bucket_builder() keys and values sizes must match.")
+    if offsets.shape[0] < 2:
+        raise ValueError("experimental_bucket_builder() offsets must have at least 2 items.")
+    if output.shape[0] < values.shape[0]:
+        raise ValueError(
+            "experimental_bucket_builder() output must have at least values length."
+        )
+    if isinstance(keys, Ndarray) or isinstance(values, Ndarray) or isinstance(offsets, Ndarray) or isinstance(output, Ndarray):
+        if not (
+            isinstance(keys, Ndarray)
+            and isinstance(values, Ndarray)
+            and isinstance(offsets, Ndarray)
+            and isinstance(output, Ndarray)
+        ):
+            raise TypeError(
+                "experimental_bucket_builder() ndarray mode requires all inputs "
+                "and outputs to be ti.ndarray."
+            )
+    if workspace is not None and not isinstance(workspace, BucketBuilderWorkspace):
+        raise TypeError("workspace must be a BucketBuilderWorkspace instance or None.")
+
+
+def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, num_bins):
+    if current_cfg().arch != cuda:
+        return False
+    if not (
+        isinstance(keys, Ndarray)
+        and isinstance(values, Ndarray)
+        and isinstance(offsets, Ndarray)
+        and isinstance(output, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cuda_device_bucket_builder_available"):
+        return False
+    if not prog.cuda_device_bucket_builder_available():
+        return False
+    cursor = workspace._get_cursor_ndarray(num_bins)
+    temp_bytes = prog.cuda_device_bucket_builder_i32_ndarray(
+        keys.arr, values.arr, offsets.arr, output.arr, cursor.arr
+    )
+    workspace.workspace_bytes_peak = max(
+        workspace.workspace_bytes_peak,
+        workspace.workspace_bytes_current + temp_bytes,
+    )
+    return True
+
+
+def _try_vulkan_bucket_builder(keys, values, offsets, output, workspace, num_bins):
+    if current_cfg().arch != vulkan:
+        return False
+    if not (
+        isinstance(keys, Ndarray)
+        and isinstance(values, Ndarray)
+        and isinstance(offsets, Ndarray)
+        and isinstance(output, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "vulkan_bucket_builder_available"):
+        return False
+    if not prog.vulkan_bucket_builder_available():
+        return False
+    cursor = workspace._get_cursor_ndarray(num_bins)
+    temp_bytes = prog.vulkan_bucket_builder_i32_ndarray(
+        keys.arr, values.arr, offsets.arr, output.arr, cursor.arr
+    )
+    workspace._vulkan_native_active = True
+    workspace.workspace_bytes_peak = max(
+        workspace.workspace_bytes_peak,
+        workspace.workspace_bytes_current + temp_bytes,
+    )
+    return True
+
+
+def _try_cpu_bucket_builder(keys, values, offsets, output, workspace):
+    if current_cfg().arch not in [x64, arm64]:
+        return False
+    if not (
+        isinstance(keys, Ndarray)
+        and isinstance(values, Ndarray)
+        and isinstance(offsets, Ndarray)
+        and isinstance(output, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cpu_bucket_builder_available"):
+        return False
+    if not prog.cpu_bucket_builder_available():
+        return False
+    temp_bytes = prog.cpu_bucket_builder_i32_ndarray(
+        keys.arr, values.arr, offsets.arr, output.arr
+    )
+    workspace.workspace_bytes_peak = max(
+        workspace.workspace_bytes_peak,
+        workspace.workspace_bytes_current + temp_bytes,
+    )
+    return True
+
+
+def _bucket_builder_kernel(keys, values, offsets, output, workspace, num_bins):
+    n = keys.shape[0]
+    if isinstance(keys, Ndarray):
+        cursor = workspace._get_cursor_ndarray(num_bins)
+        bucket_count_i32_ndarray(keys, offsets, n, num_bins)
+        PrefixSumExecutor(num_bins + 1).run(offsets)
+        bucket_copy_offsets_to_cursor_ndarray(offsets, cursor, num_bins)
+        bucket_scatter_i32_ndarray(keys, values, cursor, output, n, num_bins)
+    else:
+        cursor = workspace._get_cursor_field(num_bins)
+        bucket_count_i32_field(keys, offsets, n, num_bins)
+        if current_cfg().arch in [x64, arm64]:
+            bucket_prefix_offsets_i32_field_serial(offsets, num_bins)
+        else:
+            scanner = workspace._get_scanner(num_bins + 1)
+            scanner.run(offsets)
+        bucket_copy_offsets_to_cursor_field(offsets, cursor, num_bins)
+        bucket_scatter_i32_field(keys, values, cursor, output, n, num_bins)
+    sync()
+
+
+def experimental_bucket_builder(
+    keys, values, offsets, output, *, method="auto", workspace=None
+):
+    """Build fixed-bin bucket ranges and compacted values.
+
+    ``keys[i]`` is interpreted as a bucket id. Valid ids are in
+    ``[0, offsets.shape[0] - 1)``. Invalid keys are ignored. On return,
+    ``offsets`` has length ``num_bins + 1`` and stores exclusive bucket
+    ranges; ``output[offsets[b]:offsets[b + 1]]`` contains values for bucket
+    ``b`` in an unspecified order.
+    """
+
+    _check_bucket_builder_request(keys, values, offsets, output, method, workspace)
+    n = keys.shape[0]
+    num_bins = offsets.shape[0] - 1
+    if workspace is None:
+        workspace = BucketBuilderWorkspace(max_items=n, max_bins=num_bins)
+    workspace.check_shape(n, num_bins)
+    if method in ("auto", "cuda_device") and _try_cuda_device_bucket_builder(
+        keys, values, offsets, output, workspace, num_bins
+    ):
+        return workspace
+    if method == "cuda_device":
+        raise RuntimeError(
+            "experimental_bucket_builder() method='cuda_device' requires CUDA "
+            "ndarray inputs and CUDA toolkit bucket-builder support."
+        )
+    if method in ("auto", "vulkan_native") and _try_vulkan_bucket_builder(
+        keys, values, offsets, output, workspace, num_bins
+    ):
+        return workspace
+    if method == "vulkan_native":
+        raise RuntimeError(
+            "experimental_bucket_builder() method='vulkan_native' requires Vulkan "
+            "ndarray inputs and available native bucket-builder shaders."
+        )
+    if method in ("auto", "cpu_native") and _try_cpu_bucket_builder(
+        keys, values, offsets, output, workspace
+    ):
+        return workspace
+    if method == "cpu_native":
+        raise RuntimeError(
+            "experimental_bucket_builder() method='cpu_native' requires CPU ndarray "
+            "inputs and available native bucket-builder support."
+        )
+    if method in ("kernel", "field_kernel", "auto"):
+        _bucket_builder_kernel(keys, values, offsets, output, workspace, num_bins)
+        return workspace
+    raise RuntimeError("experimental_bucket_builder() could not find an available backend.")
+
+
 def parallel_sort(keys, values=None):
     """Compatibility wrapper for the legacy public sorting API."""
 
@@ -2290,10 +2779,14 @@ __all__ = [
     "HistogramWorkspace",
     "TransformWorkspace",
     "IndexedCopyWorkspace",
+    "ScatterAddWorkspace",
+    "BucketBuilderWorkspace",
     "experimental_compact",
     "experimental_reduce",
     "experimental_histogram",
     "experimental_transform",
     "experimental_gather",
     "experimental_scatter",
+    "experimental_scatter_add",
+    "experimental_bucket_builder",
 ]

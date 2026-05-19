@@ -60,6 +60,24 @@ std::size_t cub_reduce_impl(void *values,
                             void *owner);
 void cub_reduce_clear_cache_impl(void *owner);
 std::size_t cub_reduce_cached_bytes_impl(void *owner);
+std::size_t cub_scatter_add_impl(void *src,
+                                 void *indices,
+                                 void *dst,
+                                 int num_items,
+                                 int index_bound,
+                                 CudaScatterAddValueType value_type,
+                                 void *stream);
+std::size_t cub_bucket_builder_i32_impl(void *keys,
+                                        void *values,
+                                        void *offsets,
+                                        void *output,
+                                        void *cursor,
+                                        int num_items,
+                                        int num_bins,
+                                        void *stream,
+                                        void *owner);
+void cub_bucket_builder_clear_cache_impl(void *owner);
+std::size_t cub_bucket_builder_cached_bytes_impl(void *owner);
 #endif
 
 namespace {
@@ -705,6 +723,81 @@ void cub_reduce_clear_cache(void *owner) {
 std::size_t cub_reduce_cached_bytes(void *owner) {
 #if defined(TI_WITH_CUDA_TOOLKIT)
   return cub_reduce_cached_bytes_impl(owner);
+#else
+  return 0;
+#endif
+}
+
+bool cub_scatter_add_available() {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return ensure_cudart_for_cub_sort();
+#else
+  return false;
+#endif
+}
+
+std::size_t cub_scatter_add(void *src,
+                            void *indices,
+                            void *dst,
+                            int num_items,
+                            int index_bound,
+                            CudaScatterAddValueType value_type,
+                            void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA toolkit scatter-add expects non-negative num_items.");
+  TI_ERROR_IF(index_bound < 0,
+              "CUDA toolkit scatter-add expects non-negative index_bound.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_scatter_add_impl(src, indices, dst, num_items, index_bound,
+                              value_type, stream);
+#else
+  TI_ERROR(
+      "CUDA scatter-add requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+bool cub_bucket_builder_available() {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return ensure_cudart_for_cub_sort();
+#else
+  return false;
+#endif
+}
+
+std::size_t cub_bucket_builder_i32(void *keys,
+                                   void *values,
+                                   void *offsets,
+                                   void *output,
+                                   void *cursor,
+                                   int num_items,
+                                   int num_bins,
+                                   void *stream,
+                                   void *owner) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA bucket builder expects non-negative num_items.");
+  TI_ERROR_IF(num_bins <= 0, "CUDA bucket builder expects positive num_bins.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_bucket_builder_i32_impl(keys, values, offsets, output, cursor,
+                                     num_items, num_bins, stream, owner);
+#else
+  TI_ERROR(
+      "CUDA bucket builder requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+void cub_bucket_builder_clear_cache(void *owner) {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  cub_bucket_builder_clear_cache_impl(owner);
+#endif
+}
+
+std::size_t cub_bucket_builder_cached_bytes(void *owner) {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return cub_bucket_builder_cached_bytes_impl(owner);
 #else
   return 0;
 #endif

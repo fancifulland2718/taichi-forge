@@ -271,6 +271,30 @@ static const uint32_t kGatherU32ByI32Spv[] =
 static const uint32_t kScatterU32ByI32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/scatter_u32_by_i32.comp.spv.h"
     ;
+static const uint32_t kScatterAddI32ByI32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/scatter_add_i32_by_i32.comp.spv.h"
+    ;
+static const uint32_t kBucketClearI32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/bucket_clear_i32.comp.spv.h"
+    ;
+static const uint32_t kBucketCountI32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/bucket_count_i32.comp.spv.h"
+    ;
+static const uint32_t kBucketCountPrivateSharedI32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/bucket_count_private_shared_i32.comp.spv.h"
+    ;
+static const uint32_t kBucketPrefixI32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/bucket_prefix_i32.comp.spv.h"
+    ;
+static const uint32_t kBucketPrefixChunksI32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/bucket_prefix_chunks_i32.comp.spv.h"
+    ;
+static const uint32_t kBucketScatterI32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/bucket_scatter_i32.comp.spv.h"
+    ;
+static const uint32_t kBucketScatterPrivateSharedI32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/bucket_scatter_private_shared_i32.comp.spv.h"
+    ;
 
 static const uint32_t kRankHistShift0Spv[] =
 #include "taichi/program/vulkan_sort_shaders/rank_hist_shift0.comp.spv.h"
@@ -1431,8 +1455,10 @@ struct VulkanIndexedCopyCache {
   Device *device{nullptr};
   std::unique_ptr<Pipeline> gather_u32_by_i32;
   std::unique_ptr<Pipeline> scatter_u32_by_i32;
+  std::unique_ptr<Pipeline> scatter_add_i32_by_i32;
   std::unique_ptr<ShaderResourceSet> gather_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_bindings;
+  std::unique_ptr<ShaderResourceSet> scatter_add_i32_bindings;
 
   void ensure_pipelines(Device *dev) {
     if (device == dev && gather_u32_by_i32) {
@@ -1441,14 +1467,18 @@ struct VulkanIndexedCopyCache {
     if (device && device != dev) {
       gather_u32_by_i32.reset();
       scatter_u32_by_i32.reset();
+      scatter_add_i32_by_i32.reset();
       gather_bindings.reset();
       scatter_bindings.reset();
+      scatter_add_i32_bindings.reset();
     }
     device = dev;
     gather_u32_by_i32 =
         create_pipeline(dev, kGatherU32ByI32Spv, "vulkan_gather_u32_by_i32");
     scatter_u32_by_i32 = create_pipeline(dev, kScatterU32ByI32Spv,
                                          "vulkan_scatter_u32_by_i32");
+    scatter_add_i32_by_i32 = create_pipeline(
+        dev, kScatterAddI32ByI32Spv, "vulkan_scatter_add_i32_by_i32");
   }
 
   ShaderResourceSet *cached_resource_set(bool scatter) {
@@ -1457,6 +1487,121 @@ struct VulkanIndexedCopyCache {
       bindings.reset(device->create_resource_set());
     }
     return bindings.get();
+  }
+
+  ShaderResourceSet *cached_scatter_add_resource_set() {
+    if (!scatter_add_i32_bindings) {
+      scatter_add_i32_bindings.reset(device->create_resource_set());
+    }
+    return scatter_add_i32_bindings.get();
+  }
+};
+
+struct VulkanBucketBuilderCache {
+  Device *device{nullptr};
+  size_t partial_capacity{0};
+  size_t cached_bytes{0};
+  DeviceAllocation partial{kDeviceNullAllocation};
+  std::unique_ptr<Pipeline> clear_i32;
+  std::unique_ptr<Pipeline> count_i32;
+  std::unique_ptr<Pipeline> count_private_shared_i32;
+  std::unique_ptr<Pipeline> prefix_i32;
+  std::unique_ptr<Pipeline> prefix_chunks_i32;
+  std::unique_ptr<Pipeline> scatter_i32;
+  std::unique_ptr<Pipeline> scatter_private_shared_i32;
+  std::unique_ptr<ShaderResourceSet> clear_bindings;
+  std::unique_ptr<ShaderResourceSet> count_bindings;
+  std::unique_ptr<ShaderResourceSet> count_private_bindings;
+  std::unique_ptr<ShaderResourceSet> prefix_bindings;
+  std::unique_ptr<ShaderResourceSet> prefix_chunks_bindings;
+  std::unique_ptr<ShaderResourceSet> scatter_bindings;
+  std::unique_ptr<ShaderResourceSet> scatter_private_bindings;
+
+  void clear_allocs() {
+    if (device && partial != kDeviceNullAllocation) {
+      device->dealloc_memory(partial);
+    }
+    partial = kDeviceNullAllocation;
+    partial_capacity = 0;
+    cached_bytes = 0;
+  }
+
+  ~VulkanBucketBuilderCache() {
+    clear_allocs();
+  }
+
+  void ensure_pipelines(Device *dev) {
+    if (device == dev && clear_i32) {
+      return;
+    }
+    if (device && device != dev) {
+      clear_allocs();
+      clear_i32.reset();
+      count_i32.reset();
+      count_private_shared_i32.reset();
+      prefix_i32.reset();
+      prefix_chunks_i32.reset();
+      scatter_i32.reset();
+      scatter_private_shared_i32.reset();
+      clear_bindings.reset();
+      count_bindings.reset();
+      count_private_bindings.reset();
+      prefix_bindings.reset();
+      prefix_chunks_bindings.reset();
+      scatter_bindings.reset();
+      scatter_private_bindings.reset();
+    }
+    device = dev;
+    clear_i32 =
+        create_pipeline(dev, kBucketClearI32Spv, "vulkan_bucket_clear_i32");
+    count_i32 =
+        create_pipeline(dev, kBucketCountI32Spv, "vulkan_bucket_count_i32");
+    count_private_shared_i32 = create_pipeline(
+        dev, kBucketCountPrivateSharedI32Spv,
+        "vulkan_bucket_count_private_shared_i32");
+    prefix_i32 =
+        create_pipeline(dev, kBucketPrefixI32Spv, "vulkan_bucket_prefix_i32");
+    prefix_chunks_i32 = create_pipeline(
+        dev, kBucketPrefixChunksI32Spv, "vulkan_bucket_prefix_chunks_i32");
+    scatter_i32 =
+        create_pipeline(dev, kBucketScatterI32Spv, "vulkan_bucket_scatter_i32");
+    scatter_private_shared_i32 = create_pipeline(
+        dev, kBucketScatterPrivateSharedI32Spv,
+        "vulkan_bucket_scatter_private_shared_i32");
+  }
+
+  ShaderResourceSet *resource_set(std::unique_ptr<ShaderResourceSet> &bindings) {
+    if (!bindings) {
+      bindings.reset(device->create_resource_set());
+    }
+    return bindings.get();
+  }
+
+  DeviceAllocation alloc_storage(size_t bytes) {
+    DeviceAllocation alloc{kDeviceNullAllocation};
+    Device::AllocParams params;
+    params.size = bytes;
+    params.usage = AllocUsage::Storage;
+    RhiResult res = device->allocate_memory(params, &alloc);
+    TI_ERROR_IF(res != RhiResult::success,
+                "Failed to allocate Vulkan bucket builder workspace: "
+                "RhiResult({})",
+                res);
+    return alloc;
+  }
+
+  bool needs_workspace_realloc(size_t bytes) const {
+    return partial_capacity < bytes;
+  }
+
+  void ensure_workspace(size_t bytes) {
+    if (bytes == 0 || !needs_workspace_realloc(bytes)) {
+      return;
+    }
+    clear_allocs();
+    partial = alloc_storage(bytes);
+    partial_capacity = bytes;
+    cached_bytes = bytes;
   }
 };
 
@@ -1481,6 +1626,9 @@ std::unordered_map<void *, std::unique_ptr<VulkanTransformCache>>
 std::mutex g_vulkan_indexed_copy_mutex;
 std::unordered_map<void *, std::unique_ptr<VulkanIndexedCopyCache>>
     g_vulkan_indexed_copy_caches;
+std::mutex g_vulkan_bucket_builder_mutex;
+std::unordered_map<void *, std::unique_ptr<VulkanBucketBuilderCache>>
+    g_vulkan_bucket_builder_caches;
 
 VulkanRadixSortCache &get_cache(void *owner, Device *device) {
   std::lock_guard<std::mutex> guard(g_vulkan_sort_mutex);
@@ -1547,6 +1695,17 @@ VulkanIndexedCopyCache &get_indexed_copy_cache(void *owner, Device *device) {
   auto &cache = g_vulkan_indexed_copy_caches[owner];
   if (!cache) {
     cache = std::make_unique<VulkanIndexedCopyCache>();
+  }
+  cache->ensure_pipelines(device);
+  return *cache;
+}
+
+VulkanBucketBuilderCache &get_bucket_builder_cache(void *owner,
+                                                   Device *device) {
+  std::lock_guard<std::mutex> guard(g_vulkan_bucket_builder_mutex);
+  auto &cache = g_vulkan_bucket_builder_caches[owner];
+  if (!cache) {
+    cache = std::make_unique<VulkanBucketBuilderCache>();
   }
   cache->ensure_pipelines(device);
   return *cache;
@@ -1914,6 +2073,14 @@ bool Program::vulkan_transform_available() const {
 }
 
 bool Program::vulkan_indexed_copy_available() const {
+  return compile_config().arch == Arch::vulkan;
+}
+
+bool Program::vulkan_scatter_add_available() const {
+  return compile_config().arch == Arch::vulkan;
+}
+
+bool Program::vulkan_bucket_builder_available() const {
   return compile_config().arch == Arch::vulkan;
 }
 
@@ -2498,6 +2665,275 @@ std::size_t Program::vulkan_scatter_ndarray(Ndarray *src,
   return 0;
 }
 
+std::size_t Program::vulkan_scatter_add_ndarray(Ndarray *src,
+                                                Ndarray *indices,
+                                                Ndarray *dst,
+                                                int value_type) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native scatter-add is only available on Vulkan.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "Vulkan native scatter-add received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "Vulkan native scatter-add currently expects 1D ndarrays.");
+  TI_ERROR_IF(src->get_nelement() != indices->get_nelement(),
+              "Vulkan native scatter-add expects source and indices sizes to "
+              "match.");
+  TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
+              "Vulkan native scatter-add source and destination dtypes differ.");
+  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t) ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "Vulkan native scatter-add currently expects 32-bit values and "
+              "i32 indices.");
+  TI_ERROR_IF(value_type != 0,
+              "Vulkan native scatter-add currently supports i32 values. f32 "
+              "uses the Forge kernel path to avoid unsafe CAS contention.");
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native scatter-add currently supports at most UINT32_MAX "
+              "source items.");
+  const size_t n = indices->get_nelement();
+  if (n == 0 || dst->get_nelement() == 0) {
+    return 0;
+  }
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native scatter-add requires a compute device.");
+  auto &cache = get_indexed_copy_cache(this, device);
+  ShaderResourceSet *bindings = cache.cached_scatter_add_resource_set();
+  Pipeline *pipeline = cache.scatter_add_i32_by_i32.get();
+  const size_t value_bytes = n * sizeof(uint32_t);
+  const size_t dst_bytes = dst->get_nelement() * sizeof(uint32_t);
+  const uint32_t groups =
+      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
+  const DeviceAllocation src_alloc = src->ndarray_alloc_;
+  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
+  const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
+  const bool profiler_scopes = profiler != nullptr;
+  enqueue_compute_op_lambda(
+      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, value_bytes,
+       dst_bytes, groups,
+       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        bindings->rw_buffer(0, src_alloc.get_ptr(0), value_bytes);
+        bindings->rw_buffer(1, indices_alloc.get_ptr(0), value_bytes);
+        bindings->rw_buffer(2, dst_alloc.get_ptr(0), dst_bytes);
+        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
+                          profiler_scopes ? "vulkan_scatter_add_i32_by_i32"
+                                          : nullptr);
+        cmdlist->buffer_barrier(dst_alloc);
+      },
+      {});
+  return 0;
+}
+
+std::size_t Program::vulkan_bucket_builder_i32_ndarray(Ndarray *keys,
+                                                       Ndarray *values,
+                                                       Ndarray *offsets,
+                                                       Ndarray *output,
+                                                       Ndarray *cursor) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native bucket builder is only available on Vulkan.");
+  TI_ERROR_IF(!keys || !values || !offsets || !output || !cursor,
+              "Vulkan native bucket builder received a null ndarray.");
+  TI_ERROR_IF(keys->shape.size() != 1 || values->shape.size() != 1 ||
+                  offsets->shape.size() != 1 || output->shape.size() != 1 ||
+                  cursor->shape.size() != 1,
+              "Vulkan native bucket builder expects 1D ndarrays.");
+  TI_ERROR_IF(keys->get_nelement() != values->get_nelement(),
+              "Vulkan native bucket builder keys and values sizes differ.");
+  TI_ERROR_IF(offsets->get_nelement() < 2,
+              "Vulkan native bucket builder offsets must contain num_bins + 1 items.");
+  const size_t n = keys->get_nelement();
+  const size_t num_bins = offsets->get_nelement() - 1;
+  TI_ERROR_IF(cursor->get_nelement() < num_bins,
+              "Vulkan native bucket builder cursor is smaller than num_bins.");
+  TI_ERROR_IF(output->get_nelement() < n,
+              "Vulkan native bucket builder output is smaller than input values.");
+  TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
+                  values->get_element_size() != sizeof(int32_t) ||
+                  offsets->get_element_size() != sizeof(int32_t) ||
+                  output->get_element_size() != sizeof(int32_t) ||
+                  cursor->get_element_size() != sizeof(int32_t),
+              "Vulkan native bucket builder currently expects i32 arrays.");
+  TI_ERROR_IF(n > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ||
+                  num_bins >
+                      static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native bucket builder input is too large for u32 dispatch.");
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native bucket builder requires a compute device.");
+  auto &cache = get_bucket_builder_cache(this, device);
+  const DeviceAllocation keys_alloc = keys->ndarray_alloc_;
+  const DeviceAllocation values_alloc = values->ndarray_alloc_;
+  const DeviceAllocation offsets_alloc = offsets->ndarray_alloc_;
+  const DeviceAllocation output_alloc = output->ndarray_alloc_;
+  const DeviceAllocation cursor_alloc = cursor->ndarray_alloc_;
+  const size_t item_bytes = n * sizeof(int32_t);
+  const size_t offset_bytes = (num_bins + 1) * sizeof(int32_t);
+  const size_t cursor_bytes = num_bins * sizeof(int32_t);
+  const uint32_t item_groups =
+      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
+  const uint32_t offset_groups = static_cast<uint32_t>(
+      (num_bins + 1 + kBlockSize - 1) / kBlockSize);
+  constexpr size_t kPrivateChunkSize = 2048;
+  const size_t private_chunks =
+      n == 0 ? 0 : (n + kPrivateChunkSize - 1) / kPrivateChunkSize;
+  const size_t private_partial_bytes =
+      private_chunks * num_bins * sizeof(int32_t);
+  const int private_enabled =
+      get_environ_config("TI_VULKAN_BUCKET_BUILDER_PRIVATE", 1);
+  const int private_min_n_config =
+      get_environ_config("TI_VULKAN_BUCKET_BUILDER_PRIVATE_MIN_N", 65536);
+  const size_t private_min_n =
+      private_min_n_config <= 0 ? 0 : static_cast<size_t>(private_min_n_config);
+  const int private_max_bins_config =
+      get_environ_config("TI_VULKAN_BUCKET_BUILDER_PRIVATE_MAX_BINS", 1024);
+  const size_t private_max_bins =
+      private_max_bins_config <= 0 ? 0
+                                   : static_cast<size_t>(private_max_bins_config);
+  const int private_max_bytes_config = get_environ_config(
+      "TI_VULKAN_BUCKET_BUILDER_PRIVATE_MAX_BYTES", 4 * 1024 * 1024);
+  const size_t private_max_bytes =
+      private_max_bytes_config <= 0
+          ? 0
+          : static_cast<size_t>(private_max_bytes_config);
+  const bool use_private =
+      private_enabled != 0 && n >= private_min_n && n > 0 &&
+      num_bins <= private_max_bins && num_bins <= 4096 &&
+      private_partial_bytes > 0 && private_partial_bytes <= private_max_bytes;
+  if (use_private && cache.needs_workspace_realloc(private_partial_bytes) &&
+      cache.partial != kDeviceNullAllocation) {
+    synchronize();
+  }
+  if (use_private) {
+    cache.ensure_workspace(private_partial_bytes);
+  }
+  Pipeline *clear_pipeline = cache.clear_i32.get();
+  Pipeline *count_pipeline = cache.count_i32.get();
+  Pipeline *count_private_pipeline = cache.count_private_shared_i32.get();
+  Pipeline *prefix_pipeline = cache.prefix_i32.get();
+  Pipeline *prefix_chunks_pipeline = cache.prefix_chunks_i32.get();
+  Pipeline *scatter_pipeline = cache.scatter_i32.get();
+  Pipeline *scatter_private_pipeline = cache.scatter_private_shared_i32.get();
+  ShaderResourceSet *clear_bindings = cache.resource_set(cache.clear_bindings);
+  ShaderResourceSet *count_bindings = cache.resource_set(cache.count_bindings);
+  ShaderResourceSet *count_private_bindings =
+      cache.resource_set(cache.count_private_bindings);
+  ShaderResourceSet *prefix_bindings = cache.resource_set(cache.prefix_bindings);
+  ShaderResourceSet *prefix_chunks_bindings =
+      cache.resource_set(cache.prefix_chunks_bindings);
+  ShaderResourceSet *scatter_bindings =
+      cache.resource_set(cache.scatter_bindings);
+  ShaderResourceSet *scatter_private_bindings =
+      cache.resource_set(cache.scatter_private_bindings);
+  const DeviceAllocation partial_alloc = cache.partial;
+  const uint32_t private_groups = static_cast<uint32_t>(private_chunks);
+  const uint32_t prefix_chunk_groups =
+      static_cast<uint32_t>((num_bins + kBlockSize - 1) / kBlockSize);
+  const bool profiler_scopes = profiler != nullptr;
+  enqueue_compute_op_lambda(
+      [keys_alloc, values_alloc, offsets_alloc, output_alloc, cursor_alloc,
+       partial_alloc, item_bytes, offset_bytes, cursor_bytes,
+       private_partial_bytes, item_groups, offset_groups, use_private,
+       private_groups, prefix_chunk_groups, clear_pipeline, count_pipeline,
+       count_private_pipeline, prefix_pipeline, prefix_chunks_pipeline,
+       scatter_pipeline, scatter_private_pipeline, clear_bindings,
+       count_bindings, count_private_bindings, prefix_bindings,
+       prefix_chunks_bindings, scatter_bindings, scatter_private_bindings,
+       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        if (use_private) {
+          count_private_bindings->rw_buffer(0, keys_alloc.get_ptr(0),
+                                            item_bytes);
+          count_private_bindings->rw_buffer(1, partial_alloc.get_ptr(0),
+                                            private_partial_bytes);
+          dispatch_pipeline(
+              cmdlist, count_private_pipeline, count_private_bindings,
+              private_groups, 1, 1,
+              profiler_scopes ? "vulkan_bucket_count_private_shared_i32"
+                              : nullptr);
+          cmdlist->buffer_barrier(partial_alloc);
+
+          prefix_chunks_bindings->rw_buffer(0, partial_alloc.get_ptr(0),
+                                            private_partial_bytes);
+          prefix_chunks_bindings->rw_buffer(1, offsets_alloc.get_ptr(0),
+                                            offset_bytes);
+          dispatch_pipeline(cmdlist, prefix_chunks_pipeline,
+                            prefix_chunks_bindings, prefix_chunk_groups, 1, 1,
+                            profiler_scopes
+                                ? "vulkan_bucket_prefix_chunks_i32"
+                                : nullptr);
+          cmdlist->buffer_barrier(partial_alloc);
+          cmdlist->buffer_barrier(offsets_alloc);
+
+          prefix_bindings->rw_buffer(0, offsets_alloc.get_ptr(0), offset_bytes);
+          prefix_bindings->rw_buffer(1, cursor_alloc.get_ptr(0), cursor_bytes);
+          dispatch_pipeline(cmdlist, prefix_pipeline, prefix_bindings, 1, 1, 1,
+                            profiler_scopes ? "vulkan_bucket_prefix_i32"
+                                            : nullptr);
+          cmdlist->buffer_barrier(offsets_alloc);
+          cmdlist->buffer_barrier(cursor_alloc);
+
+          scatter_private_bindings->rw_buffer(0, keys_alloc.get_ptr(0),
+                                              item_bytes);
+          scatter_private_bindings->rw_buffer(1, values_alloc.get_ptr(0),
+                                              item_bytes);
+          scatter_private_bindings->rw_buffer(2, partial_alloc.get_ptr(0),
+                                              private_partial_bytes);
+          scatter_private_bindings->rw_buffer(3, offsets_alloc.get_ptr(0),
+                                              offset_bytes);
+          scatter_private_bindings->rw_buffer(4, output_alloc.get_ptr(0),
+                                              item_bytes);
+          dispatch_pipeline(
+              cmdlist, scatter_private_pipeline, scatter_private_bindings,
+              private_groups, 1, 1,
+              profiler_scopes ? "vulkan_bucket_scatter_private_shared_i32"
+                              : nullptr);
+          cmdlist->buffer_barrier(output_alloc);
+          return;
+        }
+
+        clear_bindings->rw_buffer(0, offsets_alloc.get_ptr(0), offset_bytes);
+        clear_bindings->rw_buffer(1, cursor_alloc.get_ptr(0), cursor_bytes);
+        dispatch_pipeline(cmdlist, clear_pipeline, clear_bindings,
+                          offset_groups, 1, 1,
+                          profiler_scopes ? "vulkan_bucket_clear_i32"
+                                          : nullptr);
+        cmdlist->buffer_barrier(offsets_alloc);
+        cmdlist->buffer_barrier(cursor_alloc);
+
+        if (item_groups > 0) {
+          count_bindings->rw_buffer(0, keys_alloc.get_ptr(0), item_bytes);
+          count_bindings->rw_buffer(1, offsets_alloc.get_ptr(0), offset_bytes);
+          dispatch_pipeline(cmdlist, count_pipeline, count_bindings,
+                            item_groups, 1, 1,
+                            profiler_scopes ? "vulkan_bucket_count_i32"
+                                            : nullptr);
+          cmdlist->buffer_barrier(offsets_alloc);
+        }
+
+        prefix_bindings->rw_buffer(0, offsets_alloc.get_ptr(0), offset_bytes);
+        prefix_bindings->rw_buffer(1, cursor_alloc.get_ptr(0), cursor_bytes);
+        dispatch_pipeline(cmdlist, prefix_pipeline, prefix_bindings, 1, 1, 1,
+                          profiler_scopes ? "vulkan_bucket_prefix_i32"
+                                          : nullptr);
+        cmdlist->buffer_barrier(offsets_alloc);
+        cmdlist->buffer_barrier(cursor_alloc);
+
+        if (item_groups > 0) {
+          scatter_bindings->rw_buffer(0, keys_alloc.get_ptr(0), item_bytes);
+          scatter_bindings->rw_buffer(1, values_alloc.get_ptr(0), item_bytes);
+          scatter_bindings->rw_buffer(2, cursor_alloc.get_ptr(0), cursor_bytes);
+          scatter_bindings->rw_buffer(3, output_alloc.get_ptr(0), item_bytes);
+          dispatch_pipeline(cmdlist, scatter_pipeline, scatter_bindings,
+                            item_groups, 1, 1,
+                            profiler_scopes ? "vulkan_bucket_scatter_i32"
+                                            : nullptr);
+          cmdlist->buffer_barrier(output_alloc);
+        }
+      },
+      {});
+  return use_private ? cache.cached_bytes : 0;
+}
+
 std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                                                    Ndarray *values,
                                                    int key_type) {
@@ -3065,6 +3501,29 @@ void Program::vulkan_indexed_copy_clear_workspace() {
   }
 }
 
+void Program::vulkan_scatter_add_clear_workspace() {
+  vulkan_indexed_copy_clear_workspace();
+}
+
+void Program::vulkan_bucket_builder_clear_workspace() {
+  bool sync_before_clear = false;
+  {
+    std::lock_guard<std::mutex> guard(g_vulkan_bucket_builder_mutex);
+    auto it = g_vulkan_bucket_builder_caches.find(this);
+    sync_before_clear =
+        it != g_vulkan_bucket_builder_caches.end() &&
+        it->second->partial != kDeviceNullAllocation;
+  }
+  if (sync_before_clear) {
+    synchronize();
+  }
+  std::lock_guard<std::mutex> guard(g_vulkan_bucket_builder_mutex);
+  auto it = g_vulkan_bucket_builder_caches.find(this);
+  if (it != g_vulkan_bucket_builder_caches.end()) {
+    g_vulkan_bucket_builder_caches.erase(it);
+  }
+}
+
 std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
   std::lock_guard<std::mutex> guard(g_vulkan_sort_mutex);
   auto it = g_vulkan_sort_caches.find(const_cast<Program *>(this));
@@ -3123,6 +3582,19 @@ std::size_t Program::vulkan_indexed_copy_workspace_bytes() const {
   return 0;
 }
 
+std::size_t Program::vulkan_scatter_add_workspace_bytes() const {
+  return 0;
+}
+
+std::size_t Program::vulkan_bucket_builder_workspace_bytes() const {
+  std::lock_guard<std::mutex> guard(g_vulkan_bucket_builder_mutex);
+  auto it = g_vulkan_bucket_builder_caches.find(const_cast<Program *>(this));
+  if (it == g_vulkan_bucket_builder_caches.end()) {
+    return 0;
+  }
+  return it->second->cached_bytes;
+}
+
 void Program::vulkan_radix_sort_cpu_profile_clear() {
   g_vulkan_sort_cpu_profile.clear();
 }
@@ -3162,6 +3634,14 @@ bool Program::vulkan_transform_available() const {
 }
 
 bool Program::vulkan_indexed_copy_available() const {
+  return false;
+}
+
+bool Program::vulkan_scatter_add_available() const {
+  return false;
+}
+
+bool Program::vulkan_bucket_builder_available() const {
   return false;
 }
 
@@ -3222,6 +3702,23 @@ std::size_t Program::vulkan_scatter_ndarray(Ndarray *src,
   return 0;
 }
 
+std::size_t Program::vulkan_scatter_add_ndarray(Ndarray *src,
+                                                Ndarray *indices,
+                                                Ndarray *dst,
+                                                int value_type) {
+  TI_ERROR("Vulkan native scatter-add requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_bucket_builder_i32_ndarray(Ndarray *keys,
+                                                       Ndarray *values,
+                                                       Ndarray *offsets,
+                                                       Ndarray *output,
+                                                       Ndarray *cursor) {
+  TI_ERROR("Vulkan native bucket builder requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 void Program::vulkan_radix_sort_clear_workspace() {
 }
 
@@ -3241,6 +3738,12 @@ void Program::vulkan_transform_clear_workspace() {
 }
 
 void Program::vulkan_indexed_copy_clear_workspace() {
+}
+
+void Program::vulkan_scatter_add_clear_workspace() {
+}
+
+void Program::vulkan_bucket_builder_clear_workspace() {
 }
 
 std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
@@ -3268,6 +3771,14 @@ std::size_t Program::vulkan_transform_workspace_bytes() const {
 }
 
 std::size_t Program::vulkan_indexed_copy_workspace_bytes() const {
+  return 0;
+}
+
+std::size_t Program::vulkan_scatter_add_workspace_bytes() const {
+  return 0;
+}
+
+std::size_t Program::vulkan_bucket_builder_workspace_bytes() const {
   return 0;
 }
 
