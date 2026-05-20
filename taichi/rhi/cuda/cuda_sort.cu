@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -126,7 +127,9 @@ struct CubScanCache {
 
 struct CubSelectCache {
   void *temp_storage{nullptr};
+  void *prefix{nullptr};
   std::size_t temp_storage_bytes{0};
+  std::size_t prefix_bytes{0};
   int device_id{-1};
 
   ~CubSelectCache() {
@@ -137,13 +140,18 @@ struct CubSelectCache {
     if (temp_storage) {
       cudaFree(temp_storage);
     }
+    if (prefix) {
+      cudaFree(prefix);
+    }
     temp_storage = nullptr;
+    prefix = nullptr;
     temp_storage_bytes = 0;
+    prefix_bytes = 0;
     device_id = -1;
   }
 
   std::size_t allocated_bytes() const {
-    return temp_storage_bytes;
+    return temp_storage_bytes + prefix_bytes;
   }
 };
 
@@ -521,6 +529,66 @@ __global__ void bucket_scatter_kernel(const int32_t *keys,
   }
 }
 
+__global__ void bucket_scatter_words_kernel(const int32_t *keys,
+                                            const uint32_t *values,
+                                            int32_t *cursor,
+                                            uint32_t *output,
+                                            int num_items,
+                                            int num_bins,
+                                            int item_words) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  int key = keys[i];
+  if (key < 0 || key >= num_bins) {
+    return;
+  }
+  int out_idx = atomicAdd(cursor + key, 1);
+  if (out_idx < 0 || out_idx >= num_items) {
+    return;
+  }
+  const int src_base = i * item_words;
+  const int dst_base = out_idx * item_words;
+  for (int lane = 0; lane < item_words; ++lane) {
+    output[dst_base + lane] = values[src_base + lane];
+  }
+}
+
+__global__ void select_flags_to_prefix_kernel(const int32_t *flags,
+                                              int32_t *prefix,
+                                              int num_items) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < num_items) {
+    prefix[i] = flags[i] != 0 ? 1 : 0;
+  }
+}
+
+__global__ void select_scatter_words_kernel(const uint32_t *values,
+                                            const int32_t *flags,
+                                            const int32_t *prefix,
+                                            uint32_t *output,
+                                            int32_t *count,
+                                            int num_items,
+                                            int item_words,
+                                            int total_words) {
+  int word = blockIdx.x * blockDim.x + threadIdx.x;
+  if (word >= total_words) {
+    return;
+  }
+  const int item = word / item_words;
+  if (word == total_words - 1) {
+    count[0] = prefix[num_items - 1];
+  }
+  if (flags[item] == 0) {
+    return;
+  }
+  const int out_item = prefix[item] - 1;
+  if (out_item >= 0 && out_item < num_items) {
+    output[out_item * item_words + (word - item * item_words)] = values[word];
+  }
+}
+
 template <typename T>
 __device__ void scatter_atomic_add(T *addr, T value) {
   atomicAdd(addr, value);
@@ -753,6 +821,32 @@ __global__ void init_sortable_f32_kernel(const float *keys,
 }
 
 template <typename KeyT>
+__device__ uint32_t sortable_u32_key(KeyT value);
+
+template <>
+__device__ uint32_t sortable_u32_key<uint32_t>(uint32_t value) {
+  return value;
+}
+
+template <>
+__device__ uint32_t sortable_u32_key<int32_t>(int32_t value) {
+  return static_cast<uint32_t>(value) ^ 0x80000000u;
+}
+
+template <typename KeyT>
+__global__ void init_sortable32_kernel(const KeyT *keys,
+                                       uint32_t *sort_keys,
+                                       uint32_t *indices,
+                                       int num_items) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  sort_keys[i] = sortable_u32_key<KeyT>(keys[i]);
+  indices[i] = static_cast<uint32_t>(i);
+}
+
+template <typename KeyT>
 __global__ void init_sortable64_kernel(const KeyT *keys,
                                        uint64_t *sort_keys,
                                        uint32_t *indices,
@@ -813,8 +907,43 @@ __global__ void scatter_by_index_kernel(const KeyT *keys,
   }
 }
 
+template <typename KeyT>
+__global__ void scatter_raw_values_by_index_kernel(const KeyT *keys,
+                                                   const uint32_t *values,
+                                                   const uint32_t *indices,
+                                                   KeyT *keys_out,
+                                                   uint32_t *values_out,
+                                                   int num_items,
+                                                   int item_words,
+                                                   int total_words) {
+  const int word = blockIdx.x * blockDim.x + threadIdx.x;
+  if (word >= total_words) {
+    return;
+  }
+  const int item = word / item_words;
+  const int lane = word - item * item_words;
+  const uint32_t src = indices[item];
+  if (lane == 0) {
+    keys_out[item] = keys[src];
+  }
+  values_out[word] = values[src * item_words + lane];
+}
+
 void check_last_cuda_error(const char *) {
   TI_CUDA_SORT_CHECK(cudaGetLastError());
+}
+
+template <typename KeyT>
+void launch_init_sortable32(const KeyT *keys,
+                            uint32_t *sort_keys,
+                            uint32_t *indices,
+                            int num_items,
+                            cudaStream_t stream) {
+  constexpr int kBlockSize = 256;
+  const int grid = (num_items + kBlockSize - 1) / kBlockSize;
+  init_sortable32_kernel<KeyT><<<grid, kBlockSize, 0, stream>>>(
+      keys, sort_keys, indices, num_items);
+  check_last_cuda_error("init_sortable32_kernel");
 }
 
 void launch_init_sortable_f32(const float *keys,
@@ -885,6 +1014,24 @@ void launch_scatter_by_index(const KeyT *keys,
   scatter_by_index_kernel<KeyT, ValueT><<<grid, kBlockSize, 0, stream>>>(
       keys, values, indices, keys_out, values_out, num_items, has_values);
   check_last_cuda_error("scatter_by_index_kernel");
+}
+
+template <typename KeyT>
+void launch_scatter_raw_values_by_index(const KeyT *keys,
+                                        const uint32_t *values,
+                                        const uint32_t *indices,
+                                        KeyT *keys_out,
+                                        uint32_t *values_out,
+                                        int num_items,
+                                        int item_words,
+                                        cudaStream_t stream) {
+  constexpr int kBlockSize = 256;
+  const int total_words = num_items * item_words;
+  const int grid = (total_words + kBlockSize - 1) / kBlockSize;
+  scatter_raw_values_by_index_kernel<KeyT><<<grid, kBlockSize, 0, stream>>>(
+      keys, values, indices, keys_out, values_out, num_items, item_words,
+      total_words);
+  check_last_cuda_error("scatter_raw_values_by_index_kernel");
 }
 
 template <typename KeyT, typename ValueT>
@@ -1211,6 +1358,277 @@ std::size_t sort_split32(CubSortCache &cache,
   return cache.allocated_bytes();
 }
 
+template <typename KeyT>
+std::size_t sort_raw32_index(CubSortCache &cache,
+                             void *keys,
+                             void *values,
+                             int num_items,
+                             int item_words,
+                             void *stream_ptr) {
+  KeyT *keys_in = static_cast<KeyT *>(keys);
+  auto *values_in = static_cast<uint32_t *>(values);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  ensure_device_cache(cache);
+
+  auto *key_a = ensure_typed_buffer<uint32_t>(&cache.key32_a,
+                                              &cache.key32_a_bytes, num_items);
+  auto *key_b = ensure_typed_buffer<uint32_t>(&cache.key32_b,
+                                              &cache.key32_b_bytes, num_items);
+  auto *index_a = ensure_typed_buffer<uint32_t>(
+      &cache.index_a, &cache.index_a_bytes, num_items);
+  auto *index_b = ensure_typed_buffer<uint32_t>(
+      &cache.index_b, &cache.index_b_bytes, num_items);
+  auto *keys_out = ensure_typed_buffer<KeyT>(&cache.keys_out,
+                                             &cache.keys_out_bytes, num_items);
+  auto *values_out = ensure_typed_buffer<uint32_t>(
+      &cache.values_out, &cache.values_out_bytes,
+      static_cast<std::size_t>(num_items) * item_words);
+
+  launch_init_sortable32(keys_in, key_a, index_a, num_items, stream);
+  cub_sort_pairs(cache, key_a, key_b, index_a, index_b, num_items, stream);
+  launch_scatter_raw_values_by_index(keys_in, values_in, index_b, keys_out,
+                                     values_out, num_items, item_words,
+                                     stream);
+  const std::size_t key_bytes =
+      static_cast<std::size_t>(num_items) * sizeof(KeyT);
+  const std::size_t value_bytes =
+      static_cast<std::size_t>(num_items) * item_words * sizeof(uint32_t);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaMemcpyAsync(keys_in, keys_out, key_bytes,
+                                       cudaMemcpyDeviceToDevice, stream));
+    TI_CUDA_SORT_CHECK(cudaMemcpyAsync(values_in, values_out, value_bytes,
+                                       cudaMemcpyDeviceToDevice, stream));
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaMemcpy(keys_in, keys_out, key_bytes,
+                                  cudaMemcpyDeviceToDevice));
+    TI_CUDA_SORT_CHECK(cudaMemcpy(values_in, values_out, value_bytes,
+                                  cudaMemcpyDeviceToDevice));
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return cache.allocated_bytes();
+}
+
+template <typename KeyT>
+std::size_t sort_raw64_index(CubSortCache &cache,
+                             void *keys,
+                             void *values,
+                             int num_items,
+                             int item_words,
+                             CubSortNanPolicy nan_policy,
+                             void *stream_ptr) {
+  KeyT *keys_in = static_cast<KeyT *>(keys);
+  auto *values_in = static_cast<uint32_t *>(values);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  ensure_device_cache(cache);
+
+  auto *key_a = ensure_typed_buffer<uint64_t>(&cache.key64_a,
+                                              &cache.key64_a_bytes, num_items);
+  auto *key_b = ensure_typed_buffer<uint64_t>(&cache.key64_b,
+                                              &cache.key64_b_bytes, num_items);
+  auto *index_a = ensure_typed_buffer<uint32_t>(
+      &cache.index_a, &cache.index_a_bytes, num_items);
+  auto *index_b = ensure_typed_buffer<uint32_t>(
+      &cache.index_b, &cache.index_b_bytes, num_items);
+  auto *keys_out = ensure_typed_buffer<KeyT>(&cache.keys_out,
+                                             &cache.keys_out_bytes, num_items);
+  auto *values_out = ensure_typed_buffer<uint32_t>(
+      &cache.values_out, &cache.values_out_bytes,
+      static_cast<std::size_t>(num_items) * item_words);
+
+  launch_init_sortable64(keys_in, key_a, index_a, num_items,
+                         static_cast<int>(nan_policy), stream);
+  cub_sort_pairs(cache, key_a, key_b, index_a, index_b, num_items, stream);
+  launch_scatter_raw_values_by_index(keys_in, values_in, index_b, keys_out,
+                                     values_out, num_items, item_words,
+                                     stream);
+  const std::size_t key_bytes =
+      static_cast<std::size_t>(num_items) * sizeof(KeyT);
+  const std::size_t value_bytes =
+      static_cast<std::size_t>(num_items) * item_words * sizeof(uint32_t);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaMemcpyAsync(keys_in, keys_out, key_bytes,
+                                       cudaMemcpyDeviceToDevice, stream));
+    TI_CUDA_SORT_CHECK(cudaMemcpyAsync(values_in, values_out, value_bytes,
+                                       cudaMemcpyDeviceToDevice, stream));
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaMemcpy(keys_in, keys_out, key_bytes,
+                                  cudaMemcpyDeviceToDevice));
+    TI_CUDA_SORT_CHECK(cudaMemcpy(values_in, values_out, value_bytes,
+                                  cudaMemcpyDeviceToDevice));
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t sort_f32_raw_index(CubSortCache &cache,
+                               void *keys,
+                               void *values,
+                               int num_items,
+                               int item_words,
+                               CubSortNanPolicy nan_policy,
+                               void *stream_ptr) {
+  float *keys_in = static_cast<float *>(keys);
+  auto *values_in = static_cast<uint32_t *>(values);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  ensure_device_cache(cache);
+
+  auto *key_a = ensure_typed_buffer<uint32_t>(&cache.key32_a,
+                                              &cache.key32_a_bytes, num_items);
+  auto *key_b = ensure_typed_buffer<uint32_t>(&cache.key32_b,
+                                              &cache.key32_b_bytes, num_items);
+  auto *index_a = ensure_typed_buffer<uint32_t>(
+      &cache.index_a, &cache.index_a_bytes, num_items);
+  auto *index_b = ensure_typed_buffer<uint32_t>(
+      &cache.index_b, &cache.index_b_bytes, num_items);
+  auto *keys_out = ensure_typed_buffer<float>(&cache.keys_out,
+                                              &cache.keys_out_bytes, num_items);
+  auto *values_out = ensure_typed_buffer<uint32_t>(
+      &cache.values_out, &cache.values_out_bytes,
+      static_cast<std::size_t>(num_items) * item_words);
+
+  launch_init_sortable_f32(keys_in, key_a, index_a, num_items,
+                           static_cast<int>(nan_policy), stream);
+  cub_sort_pairs(cache, key_a, key_b, index_a, index_b, num_items, stream);
+  launch_scatter_raw_values_by_index(keys_in, values_in, index_b, keys_out,
+                                     values_out, num_items, item_words,
+                                     stream);
+  const std::size_t key_bytes =
+      static_cast<std::size_t>(num_items) * sizeof(float);
+  const std::size_t value_bytes =
+      static_cast<std::size_t>(num_items) * item_words * sizeof(uint32_t);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaMemcpyAsync(keys_in, keys_out, key_bytes,
+                                       cudaMemcpyDeviceToDevice, stream));
+    TI_CUDA_SORT_CHECK(cudaMemcpyAsync(values_in, values_out, value_bytes,
+                                       cudaMemcpyDeviceToDevice, stream));
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaMemcpy(keys_in, keys_out, key_bytes,
+                                  cudaMemcpyDeviceToDevice));
+    TI_CUDA_SORT_CHECK(cudaMemcpy(values_in, values_out, value_bytes,
+                                  cudaMemcpyDeviceToDevice));
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return cache.allocated_bytes();
+}
+
+template <typename KeyT>
+std::size_t sort_split32_raw(CubSortCache &cache,
+                             void *keys,
+                             void *values,
+                             int num_items,
+                             int item_words,
+                             CubSortNanPolicy nan_policy,
+                             void *stream_ptr) {
+  KeyT *keys_in = static_cast<KeyT *>(keys);
+  auto *values_in = static_cast<uint32_t *>(values);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  ensure_device_cache(cache);
+
+  auto *low_keys = ensure_typed_buffer<uint32_t>(
+      &cache.key32_a, &cache.key32_a_bytes, num_items);
+  auto *tmp_keys = ensure_typed_buffer<uint32_t>(
+      &cache.key32_b, &cache.key32_b_bytes, num_items);
+  auto *high_keys = ensure_typed_buffer<uint32_t>(
+      &cache.high32, &cache.high32_bytes, num_items);
+  auto *index_a = ensure_typed_buffer<uint32_t>(
+      &cache.index_a, &cache.index_a_bytes, num_items);
+  auto *index_b = ensure_typed_buffer<uint32_t>(
+      &cache.index_b, &cache.index_b_bytes, num_items);
+  auto *keys_out = ensure_typed_buffer<KeyT>(&cache.keys_out,
+                                             &cache.keys_out_bytes, num_items);
+  auto *values_out = ensure_typed_buffer<uint32_t>(
+      &cache.values_out, &cache.values_out_bytes,
+      static_cast<std::size_t>(num_items) * item_words);
+
+  launch_init_split32(keys_in, low_keys, high_keys, index_a, num_items,
+                      static_cast<int>(nan_policy), stream);
+  cub_sort_pairs(cache, low_keys, tmp_keys, index_a, index_b, num_items,
+                 stream);
+  launch_gather_u32_by_index(high_keys, index_b, low_keys, num_items, stream);
+  cub_sort_pairs(cache, low_keys, tmp_keys, index_b, index_a, num_items,
+                 stream);
+  launch_scatter_raw_values_by_index(keys_in, values_in, index_a, keys_out,
+                                     values_out, num_items, item_words,
+                                     stream);
+  const std::size_t key_bytes =
+      static_cast<std::size_t>(num_items) * sizeof(KeyT);
+  const std::size_t value_bytes =
+      static_cast<std::size_t>(num_items) * item_words * sizeof(uint32_t);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaMemcpyAsync(keys_in, keys_out, key_bytes,
+                                       cudaMemcpyDeviceToDevice, stream));
+    TI_CUDA_SORT_CHECK(cudaMemcpyAsync(values_in, values_out, value_bytes,
+                                       cudaMemcpyDeviceToDevice, stream));
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaMemcpy(keys_in, keys_out, key_bytes,
+                                  cudaMemcpyDeviceToDevice));
+    TI_CUDA_SORT_CHECK(cudaMemcpy(values_in, values_out, value_bytes,
+                                  cudaMemcpyDeviceToDevice));
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t cub_radix_sort_raw_value_impl(CubSortCache &cache,
+                                          void *keys,
+                                          void *values,
+                                          int num_items,
+                                          CubSortKeyType key_type,
+                                          CubSortMode mode,
+                                          CubSortNanPolicy nan_policy,
+                                          int value_words,
+                                          void *stream) {
+  if (value_words <= 0) {
+    throw std::runtime_error("CUDA CUB sort expects positive raw value words");
+  }
+  if (mode == CubSortMode::split32) {
+    switch (key_type) {
+      case CubSortKeyType::u64:
+        return sort_split32_raw<uint64_t>(
+            cache, keys, values, num_items, value_words, nan_policy, stream);
+      case CubSortKeyType::i64:
+        return sort_split32_raw<int64_t>(
+            cache, keys, values, num_items, value_words, nan_policy, stream);
+      case CubSortKeyType::f64:
+        return sort_split32_raw<double>(
+            cache, keys, values, num_items, value_words, nan_policy, stream);
+      default:
+        throw std::runtime_error(
+            "CUDA CUB split32 sort supports only u64/i64/f64 keys");
+    }
+  }
+
+  switch (key_type) {
+    case CubSortKeyType::u32:
+      return sort_raw32_index<uint32_t>(
+          cache, keys, values, num_items, value_words, stream);
+    case CubSortKeyType::i32:
+      return sort_raw32_index<int32_t>(
+          cache, keys, values, num_items, value_words, stream);
+    case CubSortKeyType::f32:
+      return sort_f32_raw_index(cache, keys, values, num_items, value_words,
+                                nan_policy, stream);
+    case CubSortKeyType::u64:
+      return sort_raw64_index<uint64_t>(
+          cache, keys, values, num_items, value_words, nan_policy, stream);
+    case CubSortKeyType::i64:
+      return sort_raw64_index<int64_t>(
+          cache, keys, values, num_items, value_words, nan_policy, stream);
+    case CubSortKeyType::f64:
+      return sort_raw64_index<double>(
+          cache, keys, values, num_items, value_words, nan_policy, stream);
+  }
+  throw std::runtime_error("Unsupported CUB sort key type");
+}
+
 template <typename ValueT>
 std::size_t cub_radix_sort_value_impl(CubSortCache &cache,
                                       void *keys,
@@ -1271,6 +1689,7 @@ std::size_t cub_radix_sort_impl(void *keys,
                                 CubSortMode mode,
                                 CubSortNanPolicy nan_policy,
                                 bool has_values,
+                                int value_words,
                                 void *stream,
                                 void *owner) {
   if (!keys) {
@@ -1285,6 +1704,27 @@ std::size_t cub_radix_sort_impl(void *keys,
     return cub_radix_sort_value_impl<int32_t>(
         cache, keys, values, num_items, key_type, mode, nan_policy, has_values,
         stream);
+  }
+  int expected_value_words = 0;
+  switch (value_type) {
+    case CubSortValueType::i32:
+    case CubSortValueType::f32:
+    case CubSortValueType::u32:
+      expected_value_words = 1;
+      break;
+    case CubSortValueType::u64:
+    case CubSortValueType::i64:
+    case CubSortValueType::f64:
+      expected_value_words = 2;
+      break;
+  }
+  if (expected_value_words == 0) {
+    throw std::runtime_error("Unsupported CUB sort value type");
+  }
+  if (value_words != expected_value_words) {
+    return cub_radix_sort_raw_value_impl(cache, keys, values, num_items,
+                                         key_type, mode, nan_policy,
+                                         value_words, stream);
   }
   switch (value_type) {
     case CubSortValueType::i32:
@@ -1431,6 +1871,8 @@ std::size_t cub_inclusive_scan_cached_bytes_impl(void *owner) {
   return it->second->allocated_bytes();
 }
 
+int scalar_words(CubSelectValueType value_type);
+
 template <typename T>
 std::size_t select_flagged_typed(CubSelectCache &cache,
                                  void *values,
@@ -1476,16 +1918,86 @@ std::size_t select_flagged_typed(CubSelectCache &cache,
   return cache.allocated_bytes();
 }
 
+std::size_t select_flagged_words(CubSelectCache &cache,
+                                 void *values,
+                                 void *flags,
+                                 void *output,
+                                 void *count,
+                                 int num_items,
+                                 int item_words,
+                                 void *stream_ptr) {
+  if (!values || !flags || !output || !count) {
+    throw std::runtime_error("CUB select received a null pointer");
+  }
+  if (item_words <= 0) {
+    throw std::runtime_error("CUB select expects positive item_words");
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  ensure_device_cache(cache);
+  const int total_words = num_items * item_words;
+  constexpr int kBlockDim = 256;
+  const int item_grid = (num_items + kBlockDim - 1) / kBlockDim;
+  const int word_grid = (total_words + kBlockDim - 1) / kBlockDim;
+  ensure_buffer(&cache.prefix, &cache.prefix_bytes,
+                static_cast<std::size_t>(num_items) * sizeof(int32_t));
+  auto *prefix = static_cast<int32_t *>(cache.prefix);
+  auto *flags_in = static_cast<const int32_t *>(flags);
+  select_flags_to_prefix_kernel<<<item_grid, kBlockDim, 0, stream>>>(
+      flags_in, prefix, num_items);
+  TI_CUDA_SORT_CHECK(cudaGetLastError());
+
+  std::size_t temp_storage_bytes = 0;
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        nullptr, temp_storage_bytes, prefix, prefix, num_items, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        nullptr, temp_storage_bytes, prefix, prefix, num_items));
+  }
+  ensure_buffer(&cache.temp_storage, &cache.temp_storage_bytes,
+                temp_storage_bytes);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        cache.temp_storage, temp_storage_bytes, prefix, prefix, num_items,
+        stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        cache.temp_storage, temp_storage_bytes, prefix, prefix, num_items));
+  }
+
+  select_scatter_words_kernel<<<word_grid, kBlockDim, 0, stream>>>(
+      static_cast<const uint32_t *>(values), flags_in, prefix,
+      static_cast<uint32_t *>(output), static_cast<int32_t *>(count), num_items,
+      item_words, total_words);
+  TI_CUDA_SORT_CHECK(cudaGetLastError());
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return cache.allocated_bytes();
+}
+
 std::size_t cub_select_flagged_impl(void *values,
                                     void *flags,
                                     void *output,
                                     void *count,
                                     int num_items,
                                     CubSelectValueType value_type,
+                                    int item_words,
                                     void *stream,
                                     void *owner) {
   std::lock_guard<std::mutex> lock(get_cache_mutex());
   CubSelectCache &cache = get_select_cache(owner);
+  const int expected_words = scalar_words(value_type);
+  if (expected_words == 0) {
+    throw std::runtime_error("Unsupported CUB select value type");
+  }
+  if (item_words != expected_words) {
+    return select_flagged_words(cache, values, flags, output, count, num_items,
+                                item_words, stream);
+  }
   switch (value_type) {
     case CubSelectValueType::i32:
       return select_flagged_typed<int32_t>(cache, values, flags, output, count,
@@ -1879,7 +2391,7 @@ std::size_t cub_scatter_add_impl(void *src,
   if (!src || !indices || !dst) {
     throw std::runtime_error("CUDA scatter-add received a null pointer");
   }
-  if (num_items == 0 || index_bound == 0) {
+  if (num_items == 0) {
     return 0;
   }
   cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
@@ -1943,8 +2455,11 @@ std::size_t cub_indexed_copy_impl(void *src,
   if (num_items == 0 || index_bound == 0) {
     return 0;
   }
-  if (item_words != 1 && item_words != 2) {
-    throw std::runtime_error("CUDA indexed-copy expects one or two words");
+  if (item_words <= 0) {
+    throw std::runtime_error("CUDA indexed-copy expects at least one word");
+  }
+  if (num_items > std::numeric_limits<int>::max() / item_words) {
+    throw std::runtime_error("CUDA indexed-copy word count exceeds INT_MAX");
   }
   cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   constexpr int kBlockDim = 256;
@@ -2043,6 +2558,34 @@ void launch_bucket_scatter(const int32_t *keys_in,
       static_cast<T *>(output), num_items, num_bins);
 }
 
+int scalar_words(CudaBucketBuilderValueType value_type) {
+  switch (value_type) {
+    case CudaBucketBuilderValueType::i32:
+    case CudaBucketBuilderValueType::f32:
+    case CudaBucketBuilderValueType::u32:
+      return 1;
+    case CudaBucketBuilderValueType::u64:
+    case CudaBucketBuilderValueType::i64:
+    case CudaBucketBuilderValueType::f64:
+      return 2;
+  }
+  return 0;
+}
+
+int scalar_words(CubSelectValueType value_type) {
+  switch (value_type) {
+    case CubSelectValueType::i32:
+    case CubSelectValueType::f32:
+    case CubSelectValueType::u32:
+      return 1;
+    case CubSelectValueType::u64:
+    case CubSelectValueType::i64:
+    case CubSelectValueType::f64:
+      return 2;
+  }
+  return 0;
+}
+
 std::size_t cub_bucket_builder_impl(void *keys,
                                     void *values,
                                     void *offsets,
@@ -2051,10 +2594,14 @@ std::size_t cub_bucket_builder_impl(void *keys,
                                     int num_items,
                                     int num_bins,
                                     CudaBucketBuilderValueType value_type,
+                                    int item_words,
                                     void *stream_ptr,
                                     void *owner) {
   if (!keys || !values || !offsets || !output || !cursor) {
     throw std::runtime_error("CUDA bucket builder received a null pointer");
+  }
+  if (item_words <= 0) {
+    throw std::runtime_error("CUDA bucket builder expects positive item_words");
   }
   std::lock_guard<std::mutex> lock(get_cache_mutex());
   CubBucketBuilderCache &cache = get_bucket_builder_cache(owner);
@@ -2115,40 +2662,50 @@ std::size_t cub_bucket_builder_impl(void *keys,
 
   if (num_items > 0) {
     const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
-    switch (value_type) {
-      case CudaBucketBuilderValueType::i32:
-        launch_bucket_scatter<int32_t>(keys_in, values, cursor_in_out, output,
-                                       num_items, num_bins, grid_dim,
-                                       kBlockDim, stream);
-        break;
-      case CudaBucketBuilderValueType::f32:
-        launch_bucket_scatter<float>(keys_in, values, cursor_in_out, output,
-                                     num_items, num_bins, grid_dim, kBlockDim,
-                                     stream);
-        break;
-      case CudaBucketBuilderValueType::u32:
-        launch_bucket_scatter<uint32_t>(keys_in, values, cursor_in_out, output,
+    const int expected_words = scalar_words(value_type);
+    if (expected_words == 0) {
+      throw std::runtime_error(
+          "CUDA bucket builder received an unsupported value type");
+    }
+    if (item_words == expected_words) {
+      switch (value_type) {
+        case CudaBucketBuilderValueType::i32:
+          launch_bucket_scatter<int32_t>(keys_in, values, cursor_in_out, output,
+                                         num_items, num_bins, grid_dim,
+                                         kBlockDim, stream);
+          break;
+        case CudaBucketBuilderValueType::f32:
+          launch_bucket_scatter<float>(keys_in, values, cursor_in_out, output,
+                                       num_items, num_bins, grid_dim, kBlockDim,
+                                       stream);
+          break;
+        case CudaBucketBuilderValueType::u32:
+          launch_bucket_scatter<uint32_t>(
+              keys_in, values, cursor_in_out, output, num_items, num_bins,
+              grid_dim, kBlockDim, stream);
+          break;
+        case CudaBucketBuilderValueType::u64:
+          launch_bucket_scatter<uint64_t>(
+              keys_in, values, cursor_in_out, output, num_items, num_bins,
+              grid_dim, kBlockDim, stream);
+          break;
+        case CudaBucketBuilderValueType::i64:
+          launch_bucket_scatter<int64_t>(keys_in, values, cursor_in_out, output,
+                                         num_items, num_bins, grid_dim,
+                                         kBlockDim, stream);
+          break;
+        case CudaBucketBuilderValueType::f64:
+          launch_bucket_scatter<double>(keys_in, values, cursor_in_out, output,
                                         num_items, num_bins, grid_dim,
                                         kBlockDim, stream);
-        break;
-      case CudaBucketBuilderValueType::u64:
-        launch_bucket_scatter<uint64_t>(keys_in, values, cursor_in_out, output,
-                                        num_items, num_bins, grid_dim,
-                                        kBlockDim, stream);
-        break;
-      case CudaBucketBuilderValueType::i64:
-        launch_bucket_scatter<int64_t>(keys_in, values, cursor_in_out, output,
-                                       num_items, num_bins, grid_dim,
-                                       kBlockDim, stream);
-        break;
-      case CudaBucketBuilderValueType::f64:
-        launch_bucket_scatter<double>(keys_in, values, cursor_in_out, output,
-                                      num_items, num_bins, grid_dim,
-                                      kBlockDim, stream);
-        break;
-      default:
-        throw std::runtime_error(
-            "CUDA bucket builder received an unsupported value type");
+          break;
+        default:
+          break;
+      }
+    } else {
+      bucket_scatter_words_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+          keys_in, static_cast<const uint32_t *>(values), cursor_in_out,
+          static_cast<uint32_t *>(output), num_items, num_bins, item_words);
     }
     TI_CUDA_SORT_CHECK(cudaGetLastError());
   }
@@ -2172,8 +2729,8 @@ std::size_t cub_bucket_builder_i32_impl(void *keys,
                                         void *owner) {
   return cub_bucket_builder_impl(keys, values, offsets, output, cursor,
                                  num_items, num_bins,
-                                 CudaBucketBuilderValueType::i32, stream_ptr,
-                                 owner);
+                                 CudaBucketBuilderValueType::i32, 1,
+                                 stream_ptr, owner);
 }
 
 void cub_bucket_builder_clear_cache_impl(void *owner) {
@@ -2267,6 +2824,8 @@ std::size_t cub_grouped_reduce_impl(void *keys,
       keys, values, offsets, scratch, cursor, num_items, num_groups,
       static_cast<CudaBucketBuilderValueType>(
           static_cast<int>(value_type)),
+      scalar_words(static_cast<CudaBucketBuilderValueType>(
+          static_cast<int>(value_type))),
       stream, owner);
 
   auto *offsets_in = static_cast<int32_t *>(offsets);

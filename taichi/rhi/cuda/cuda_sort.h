@@ -165,6 +165,7 @@ std::size_t cub_radix_sort(void *keys,
                            CubSortMode mode,
                            CubSortNanPolicy nan_policy,
                            bool has_values,
+                           int value_words,
                            void *stream,
                            void *owner);
 
@@ -192,6 +193,7 @@ std::size_t cub_select_flagged(void *values,
                                void *count,
                                int num_items,
                                CubSelectValueType value_type,
+                               int item_words,
                                void *stream,
                                void *owner);
 
@@ -258,6 +260,7 @@ std::size_t cub_bucket_builder(void *keys,
                                int num_items,
                                int num_bins,
                                CudaBucketBuilderValueType value_type,
+                               int item_words,
                                void *stream,
                                void *owner);
 

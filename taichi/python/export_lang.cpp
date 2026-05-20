@@ -685,6 +685,9 @@ void export_lang(py::module &m) {
            py::arg("bias"), py::call_guard<py::gil_scoped_release>())
       .def("cuda_device_indexed_copy_available",
            &Program::cuda_device_indexed_copy_available)
+      .def("cuda_device_indexed_copy_payload_available",
+           &Program::cuda_device_indexed_copy_payload_available,
+           py::arg("item_bytes"))
       .def("cuda_device_gather_ndarray", &Program::cuda_device_gather_ndarray,
            py::arg("src"), py::arg("indices"), py::arg("dst"),
            py::call_guard<py::gil_scoped_release>())

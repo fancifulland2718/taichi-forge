@@ -1477,6 +1477,23 @@ def _is_1d(obj):
     return hasattr(obj, "shape") and len(obj.shape) == 1
 
 
+def _check_ndarray_payload_compatible(src, dst, op_name):
+    if src.element_shape != dst.element_shape:
+        raise TypeError(
+            f"{op_name} source and destination element_shape must match."
+        )
+    if src.layout != dst.layout:
+        raise TypeError(f"{op_name} source and destination layout must match.")
+    if src._get_element_size() != dst._get_element_size():
+        raise TypeError(
+            f"{op_name} source and destination element byte size must match."
+        )
+    if src._get_element_size() % 4 != 0:
+        raise TypeError(
+            f"{op_name} native ndarray payloads must be 4-byte aligned."
+        )
+
+
 def _check_compact_request(values, flags, output, count, method, workspace):
     if method not in _SUPPORTED_COMPACT_METHODS:
         raise NotImplementedError(f"compact method '{method}' is not implemented.")
@@ -1510,6 +1527,9 @@ def _check_compact_request(values, flags, output, count, method, workspace):
             )
         if not _is_1d(count) or count.shape[0] < 1:
             raise ValueError("experimental_compact() ndarray count must be shape >= 1.")
+        _check_ndarray_payload_compatible(
+            values, output, "experimental_compact()"
+        )
     else:
         if values.dtype != i32:
             raise TypeError(
@@ -2477,6 +2497,7 @@ def _check_indexed_copy_request(src, indices, dst, method, workspace, op_name):
                 f"{op_name} ndarray mode requires source, indices, and "
                 "destination all to be ti.ndarray."
             )
+        _check_ndarray_payload_compatible(src, dst, op_name)
     if workspace is not None and not isinstance(workspace, IndexedCopyWorkspace):
         raise TypeError("workspace must be an IndexedCopyWorkspace instance or None.")
 
@@ -2511,6 +2532,9 @@ def _try_cuda_device_indexed_copy(src, indices, dst, scatter):
         return False
     if not prog.cuda_device_indexed_copy_available():
         return False
+    if hasattr(prog, "cuda_device_indexed_copy_payload_available"):
+        if not prog.cuda_device_indexed_copy_payload_available(src._get_element_size()):
+            return False
     if scatter:
         prog.cuda_device_scatter_ndarray(src.arr, indices.arr, dst.arr)
     else:
@@ -2918,6 +2942,9 @@ def _check_bucket_builder_request(keys, values, offsets, output, method, workspa
                 "experimental_bucket_builder() ndarray mode requires all inputs "
                 "and outputs to be ti.ndarray."
             )
+        _check_ndarray_payload_compatible(
+            values, output, "experimental_bucket_builder()"
+        )
     if workspace is not None and not isinstance(workspace, BucketBuilderWorkspace):
         raise TypeError("workspace must be a BucketBuilderWorkspace instance or None.")
 

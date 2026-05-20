@@ -64,7 +64,13 @@ void main() {
   }
   indices_out.data[i] = i;
 
-#if KEY_KIND == 2
+#if KEY_KIND == 0
+  low_out.data[i] = keys_in.data[i];
+  high_out.data[i] = 0u;
+#elif KEY_KIND == 1
+  low_out.data[i] = keys_in.data[i] ^ 0x80000000u;
+  high_out.data[i] = 0u;
+#elif KEY_KIND == 2
   uint bits = keys_in.data[i];
   low_out.data[i] = sortable_f32(bits);
   high_out.data[i] = 0u;

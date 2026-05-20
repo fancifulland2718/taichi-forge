@@ -58,6 +58,27 @@ def _assert_bucket_matches(keys, values, offsets, output, expected_offsets):
         _assert_values_equal(np.sort(actual), np.sort(expected))
 
 
+def _sort_rows(values):
+    flat = values.reshape(values.shape[0], -1)
+    if flat.shape[0] == 0:
+        return flat
+    order = np.lexsort(tuple(flat[:, col] for col in range(flat.shape[1] - 1, -1, -1)))
+    return flat[order]
+
+
+def _assert_bucket_rows_match(keys, values, offsets, output, expected_offsets):
+    assert np.array_equal(offsets, expected_offsets)
+    num_bins = expected_offsets.shape[0] - 1
+    for bucket in range(num_bins):
+        begin = expected_offsets[bucket]
+        end = expected_offsets[bucket + 1]
+        expected = values[keys == bucket]
+        actual = output[begin:end]
+        np.testing.assert_allclose(
+            _sort_rows(actual), _sort_rows(expected), rtol=1e-6, atol=1e-6
+        )
+
+
 def _run_ndarray_bucket_builder(dtype, np_dtype, method):
     n = 4096
     num_bins = 257
@@ -82,6 +103,43 @@ def _run_ndarray_bucket_builder(dtype, np_dtype, method):
     assert workspace.workspace_bytes_peak >= 0
 
 
+def _run_vector_ndarray_bucket_builder(method):
+    n = 2048
+    num_bins = 193
+    keys_np = ((np.arange(n, dtype=np.int32) * 17 + 5) % num_bins).astype(np.int32)
+    if n >= 8:
+        keys_np[1] = -1
+        keys_np[5] = num_bins + 11
+    values_np = (
+        ((np.arange(n * 3, dtype=np.float32).reshape(n, 3) % 101) - 37)
+        * np.float32(0.25)
+    )
+    counts = np.bincount(
+        keys_np[(keys_np >= 0) & (keys_np < num_bins)], minlength=num_bins
+    )
+    expected_offsets = np.zeros(num_bins + 1, dtype=np.int32)
+    expected_offsets[1:] = np.cumsum(counts, dtype=np.int64).astype(np.int32)
+
+    keys = ti.ndarray(ti.i32, shape=n)
+    values = ti.Vector.ndarray(3, ti.f32, shape=n)
+    offsets = ti.ndarray(ti.i32, shape=num_bins + 1)
+    output = ti.Vector.ndarray(3, ti.f32, shape=n)
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+    offsets.fill(-1)
+    output.fill(0)
+    workspace = ti.algorithms.BucketBuilderWorkspace(
+        max_items=n, max_bins=num_bins
+    )
+    ti.algorithms.experimental_bucket_builder(
+        keys, values, offsets, output, method=method, workspace=workspace
+    )
+    _assert_bucket_rows_match(
+        keys_np, values_np, offsets.to_numpy(), output.to_numpy(), expected_offsets
+    )
+    return workspace
+
+
 @test_utils.test(arch=[ti.cuda])
 def test_experimental_bucket_builder_cuda_device_ndarray():
     prog = impl.get_runtime().prog
@@ -95,6 +153,17 @@ def test_experimental_bucket_builder_cuda_device_ndarray():
         _run_ndarray_bucket_builder(dtype, np_dtype, "cuda_device")
 
 
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_bucket_builder_cuda_device_ndarray_vector_payload():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cuda_device_bucket_builder_available")
+        and prog.cuda_device_bucket_builder_available()
+    ):
+        pytest.skip("CUDA driver bucket builder is unavailable in this runtime.")
+    _run_vector_ndarray_bucket_builder("cuda_device")
+
+
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_bucket_builder_vulkan_native_ndarray():
     prog = impl.get_runtime().prog
@@ -106,6 +175,17 @@ def test_experimental_bucket_builder_vulkan_native_ndarray():
     _run_ndarray_bucket_builder(ti.i32, np.int32, "auto")
     for dtype, np_dtype in _BUCKET_DTYPES:
         _run_ndarray_bucket_builder(dtype, np_dtype, "vulkan_native")
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_bucket_builder_vulkan_native_ndarray_vector_payload():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_bucket_builder_available")
+        and prog.vulkan_bucket_builder_available()
+    ):
+        pytest.skip("Vulkan native bucket builder is unavailable in this runtime.")
+    _run_vector_ndarray_bucket_builder("vulkan_native")
 
 
 @pytest.mark.run_in_serial
@@ -138,6 +218,11 @@ def test_experimental_bucket_builder_cpu_native_ndarray():
     _run_ndarray_bucket_builder(ti.i32, np.int32, "auto")
     for dtype, np_dtype in _BUCKET_DTYPES:
         _run_ndarray_bucket_builder(dtype, np_dtype, "cpu_native")
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_bucket_builder_cpu_native_ndarray_vector_payload():
+    _run_vector_ndarray_bucket_builder("cpu_native")
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])

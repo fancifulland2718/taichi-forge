@@ -263,6 +263,39 @@ std::size_t cpu_stable_sort_value_dispatch(KeyT *keys,
   }
 }
 
+template <typename KeyT>
+std::size_t cpu_stable_sort_raw_values(KeyT *keys,
+                                       void *values,
+                                       std::size_t n,
+                                       std::size_t item_bytes,
+                                       bool descending,
+                                       int nan_policy) {
+  if (n <= 1) {
+    return 0;
+  }
+  auto *value_bytes = static_cast<uint8_t *>(values);
+  std::vector<std::size_t> order(n);
+  std::iota(order.begin(), order.end(), 0);
+  std::stable_sort(order.begin(), order.end(), [&](std::size_t lhs,
+                                                   std::size_t rhs) {
+    return cpu_sort_key_before<KeyT>(
+        keys[lhs], keys[rhs], descending, nan_policy);
+  });
+
+  std::vector<KeyT> sorted_keys(n);
+  std::vector<uint8_t> sorted_values(n * item_bytes);
+  for (std::size_t i = 0; i < n; ++i) {
+    const std::size_t src = order[i];
+    sorted_keys[i] = keys[src];
+    std::memcpy(sorted_values.data() + i * item_bytes,
+                value_bytes + src * item_bytes, item_bytes);
+  }
+  std::memcpy(keys, sorted_keys.data(), n * sizeof(KeyT));
+  std::memcpy(value_bytes, sorted_values.data(), sorted_values.size());
+  return order.size() * sizeof(std::size_t) + sorted_keys.size() * sizeof(KeyT) +
+         sorted_values.size();
+}
+
 template <typename ValueT, typename CounterT>
 struct CpuHistogramTaskContext {
   const ValueT *values{nullptr};
@@ -343,6 +376,17 @@ struct CpuBucketScatterTaskContext {
   T *output{nullptr};
   std::size_t n{0};
   std::size_t num_bins{0};
+  int num_threads{1};
+};
+
+struct CpuBucketScatterRawTaskContext {
+  const int32_t *keys{nullptr};
+  const uint8_t *values{nullptr};
+  int32_t *thread_offsets{nullptr};
+  uint8_t *output{nullptr};
+  std::size_t n{0};
+  std::size_t num_bins{0};
+  std::size_t item_bytes{0};
   int num_threads{1};
 };
 
@@ -649,6 +693,32 @@ void cpu_bucket_scatter_task(void *raw_ctx, int /*thread_id*/, int task_id) {
   }
 }
 
+void cpu_bucket_scatter_raw_task(void *raw_ctx,
+                                 int /*thread_id*/,
+                                 int task_id) {
+  auto *ctx = static_cast<CpuBucketScatterRawTaskContext *>(raw_ctx);
+  const int tid = task_id;
+  int32_t *local =
+      ctx->thread_offsets + ctx->num_bins * static_cast<std::size_t>(tid);
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    int32_t key = ctx->keys[i];
+    if (key >= 0 && static_cast<std::size_t>(key) < ctx->num_bins) {
+      int32_t pos = local[key]++;
+      if (pos >= 0 && static_cast<std::size_t>(pos) < ctx->n) {
+        std::memcpy(ctx->output + static_cast<std::size_t>(pos) *
+                                      ctx->item_bytes,
+                    ctx->values + i * ctx->item_bytes, ctx->item_bytes);
+      }
+    }
+  }
+}
+
 template <typename T>
 std::size_t cpu_bucket_builder_typed(const int32_t *keys_ptr,
                                      const T *values_ptr,
@@ -737,6 +807,103 @@ std::size_t cpu_bucket_builder_typed(const int32_t *keys_ptr,
     if (key >= 0 && static_cast<std::size_t>(key) < num_bins) {
       int32_t pos = cursor[key]++;
       output_ptr[pos] = values_ptr[i];
+    }
+  }
+  return cursor.size() * sizeof(int32_t);
+}
+
+std::size_t cpu_bucket_builder_raw(const int32_t *keys_ptr,
+                                   const uint8_t *values_ptr,
+                                   int32_t *offsets_ptr,
+                                   uint8_t *output_ptr,
+                                   std::size_t n,
+                                   std::size_t num_bins,
+                                   std::size_t item_bytes,
+                                   int max_threads) {
+  TI_ERROR_IF(!keys_ptr || !values_ptr || !offsets_ptr || !output_ptr,
+              "CPU native bucket builder received a null data pointer.");
+  TI_ERROR_IF(item_bytes == 0,
+              "CPU native bucket builder received empty payload items.");
+  std::fill(offsets_ptr, offsets_ptr + num_bins + 1, 0);
+  if (n == 0) {
+    return 0;
+  }
+
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
+  const std::size_t parallel_workspace =
+      static_cast<std::size_t>(target_threads) * num_bins * sizeof(int32_t) *
+      2;
+  const bool use_parallel =
+      n >= 65536 && target_threads > 1 && parallel_workspace <= kMaxWorkspaceBytes;
+
+  if (use_parallel) {
+    std::vector<int32_t> partial(
+        static_cast<std::size_t>(target_threads) * num_bins, 0);
+    CpuBucketCountTaskContext count_ctx;
+    count_ctx.keys = keys_ptr;
+    count_ctx.partial = partial.data();
+    count_ctx.n = n;
+    count_ctx.num_bins = num_bins;
+    count_ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &count_ctx, cpu_bucket_count_task);
+
+    std::vector<int32_t> thread_offsets(
+        static_cast<std::size_t>(target_threads) * num_bins, 0);
+    int64_t running = 0;
+    offsets_ptr[0] = 0;
+    for (std::size_t bin = 0; bin < num_bins; ++bin) {
+      int64_t pos = running;
+      for (int tid = 0; tid < target_threads; ++tid) {
+        const std::size_t idx =
+            static_cast<std::size_t>(tid) * num_bins + bin;
+        thread_offsets[idx] = static_cast<int32_t>(pos);
+        pos += partial[idx];
+      }
+      running = pos;
+      TI_ERROR_IF(running > std::numeric_limits<int32_t>::max(),
+                  "CPU native bucket builder valid item count exceeds i32 range.");
+      offsets_ptr[bin + 1] = static_cast<int32_t>(running);
+    }
+
+    CpuBucketScatterRawTaskContext scatter_ctx;
+    scatter_ctx.keys = keys_ptr;
+    scatter_ctx.values = values_ptr;
+    scatter_ctx.thread_offsets = thread_offsets.data();
+    scatter_ctx.output = output_ptr;
+    scatter_ctx.n = n;
+    scatter_ctx.num_bins = num_bins;
+    scatter_ctx.item_bytes = item_bytes;
+    scatter_ctx.num_threads = target_threads;
+    pool.run(target_threads, target_threads, &scatter_ctx,
+             cpu_bucket_scatter_raw_task);
+    return parallel_workspace;
+  }
+
+  for (std::size_t i = 0; i < n; ++i) {
+    int32_t key = keys_ptr[i];
+    if (key >= 0 && static_cast<std::size_t>(key) < num_bins) {
+      offsets_ptr[static_cast<std::size_t>(key) + 1] += 1;
+    }
+  }
+  int64_t running = 0;
+  for (std::size_t bin = 0; bin <= num_bins; ++bin) {
+    running += offsets_ptr[bin];
+    TI_ERROR_IF(running > std::numeric_limits<int32_t>::max(),
+                "CPU native bucket builder valid item count exceeds i32 range.");
+    offsets_ptr[bin] = static_cast<int32_t>(running);
+  }
+  std::vector<int32_t> cursor(offsets_ptr, offsets_ptr + num_bins);
+  for (std::size_t i = 0; i < n; ++i) {
+    int32_t key = keys_ptr[i];
+    if (key >= 0 && static_cast<std::size_t>(key) < num_bins) {
+      int32_t pos = cursor[key]++;
+      std::memcpy(output_ptr + static_cast<std::size_t>(pos) * item_bytes,
+                  values_ptr + i * item_bytes, item_bytes);
     }
   }
   return cursor.size() * sizeof(int32_t);
@@ -1876,6 +2043,23 @@ bool Program::cuda_device_indexed_copy_available() const {
 #endif
 }
 
+bool Program::cuda_device_indexed_copy_payload_available(
+    std::size_t item_bytes) const {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch != Arch::cuda || item_bytes == 0 ||
+      item_bytes % sizeof(uint32_t) != 0) {
+    return false;
+  }
+  if (cuda::cub_indexed_copy_available()) {
+    return true;
+  }
+  return item_bytes == sizeof(uint32_t) &&
+         cuda::driver_indexed_copy_available();
+#else
+  return false;
+#endif
+}
+
 std::size_t Program::cuda_device_gather_ndarray(Ndarray *src,
                                                 Ndarray *indices,
                                                 Ndarray *dst) {
@@ -1892,11 +2076,10 @@ std::size_t Program::cuda_device_gather_ndarray(Ndarray *src,
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
               "CUDA device gather source and destination dtypes differ.");
   const std::size_t item_bytes = src->get_element_size();
-  TI_ERROR_IF((item_bytes != sizeof(uint32_t) &&
-               item_bytes != sizeof(uint64_t)) ||
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(uint32_t) != 0 ||
                   indices->get_element_size() != sizeof(int32_t),
-              "CUDA device gather currently expects 4- or 8-byte scalar values "
-              "and i32 indices.");
+              "CUDA device gather currently expects 4-byte aligned values and "
+              "i32 indices.");
   TI_ERROR_IF(indices->get_nelement() >
                   static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA device gather currently supports at most INT_MAX items.");
@@ -1923,7 +2106,7 @@ std::size_t Program::cuda_device_gather_ndarray(Ndarray *src,
         cuda::CudaIndexedCopyOp::gather, stream);
   }
   TI_ERROR_IF(item_words != 1,
-              "CUDA device gather for 8-byte values requires "
+              "CUDA device gather for multi-word values requires "
               "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
   return cuda::driver_indexed_copy(src_ptr, indices_ptr, dst_ptr,
                                    static_cast<int>(indices->get_nelement()),
@@ -1949,11 +2132,10 @@ std::size_t Program::cuda_device_scatter_ndarray(Ndarray *src,
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
               "CUDA device scatter source and destination dtypes differ.");
   const std::size_t item_bytes = src->get_element_size();
-  TI_ERROR_IF((item_bytes != sizeof(uint32_t) &&
-               item_bytes != sizeof(uint64_t)) ||
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(uint32_t) != 0 ||
                   indices->get_element_size() != sizeof(int32_t),
-              "CUDA device scatter currently expects 4- or 8-byte scalar values "
-              "and i32 indices.");
+              "CUDA device scatter currently expects 4-byte aligned values and "
+              "i32 indices.");
   TI_ERROR_IF(indices->get_nelement() >
                   static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA device scatter currently supports at most INT_MAX items.");
@@ -1980,7 +2162,7 @@ std::size_t Program::cuda_device_scatter_ndarray(Ndarray *src,
         cuda::CudaIndexedCopyOp::scatter, stream);
   }
   TI_ERROR_IF(item_words != 1,
-              "CUDA device scatter for 8-byte values requires "
+              "CUDA device scatter for multi-word values requires "
               "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
   return cuda::driver_indexed_copy(src_ptr, indices_ptr, dst_ptr,
                                    static_cast<int>(indices->get_nelement()),
@@ -2092,18 +2274,25 @@ std::size_t Program::cuda_device_bucket_builder_ndarray(Ndarray *keys,
   const std::size_t expected_size = primitive_value_type_size(value_type);
   TI_ERROR_IF(expected_size == 0,
               "CUDA toolkit bucket builder received an unsupported value type.");
+  const std::size_t item_bytes = values->get_element_size();
   TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
                   offsets->get_element_size() != sizeof(int32_t) ||
-                  values->get_element_size() != expected_size ||
-                  output->get_element_size() != expected_size ||
+                  item_bytes == 0 ||
+                  item_bytes % sizeof(uint32_t) != 0 ||
+                  output->get_element_size() != item_bytes ||
                   cursor->get_element_size() != sizeof(int32_t),
               "CUDA toolkit bucket builder dtype does not match value type or "
-              "keys/offsets/cursor are not i32.");
+              "keys/offsets/cursor are not i32, or payload is not 4-byte aligned.");
   TI_ERROR_IF(keys->get_nelement() >
                   static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()) ||
                   num_bins > static_cast<std::size_t>(
                                  std::numeric_limits<uint32_t>::max()),
               "CUDA bucket builder input is too large for u32 launch parameters.");
+  const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
+  TI_ERROR_IF(keys->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                           item_words),
+              "CUDA bucket builder word count exceeds INT_MAX.");
 #ifdef TI_WITH_CUDA
   void *stream = CUDAContext::get_instance().get_stream();
   return cuda::cub_bucket_builder(
@@ -2114,7 +2303,7 @@ std::size_t Program::cuda_device_bucket_builder_ndarray(Ndarray *keys,
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(cursor)),
       static_cast<int>(keys->get_nelement()), static_cast<int>(num_bins),
       static_cast<cuda::CudaBucketBuilderValueType>(value_type),
-      stream, this);
+      item_words, stream, this);
 #else
   TI_ERROR(
       "CUDA bucket builder requires building Taichi with TI_WITH_CUDA=ON and "
@@ -2293,6 +2482,8 @@ std::size_t Program::cuda_cub_radix_sort_ndarray(Ndarray *keys,
               "CUDA CUB sort received an unsupported NaN policy.");
   TI_ERROR_IF(has_values && expected_value_size == 0,
               "CUDA CUB sort received an unsupported value type.");
+  const std::size_t actual_value_size =
+      has_values ? values->get_element_size() : expected_value_size;
   const auto cub_key_type = static_cast<cuda::CubSortKeyType>(key_type);
   const auto cub_value_type = static_cast<cuda::CubSortValueType>(value_type);
   const auto cub_mode = static_cast<cuda::CubSortMode>(mode);
@@ -2315,9 +2506,9 @@ std::size_t Program::cuda_cub_radix_sort_ndarray(Ndarray *keys,
   TI_ERROR_IF(keys->get_element_size() != expected_key_size,
               "CUDA CUB sort key dtype does not match the requested key type.");
   TI_ERROR_IF(has_values &&
-                  values->get_element_size() != expected_value_size,
-              "CUDA CUB sort value dtype does not match the requested value "
-              "type.");
+                  (actual_value_size == 0 ||
+                   actual_value_size % sizeof(uint32_t) != 0),
+              "CUDA CUB sort value payload must be 4-byte aligned.");
   if (cub_mode == cuda::CubSortMode::split32) {
     TI_ERROR_IF(cub_key_type != cuda::CubSortKeyType::u64 &&
                     cub_key_type != cuda::CubSortKeyType::i64 &&
@@ -2335,6 +2526,7 @@ std::size_t Program::cuda_cub_radix_sort_ndarray(Ndarray *keys,
   return cuda::cub_radix_sort(
       key_ptr, value_ptr, static_cast<int>(keys->get_nelement()),
       cub_key_type, cub_value_type, cub_mode, cub_nan_policy, has_values,
+      has_values ? static_cast<int>(actual_value_size / sizeof(uint32_t)) : 0,
       stream, this);
 #else
   TI_ERROR(
@@ -2386,9 +2578,9 @@ std::size_t Program::cpu_stable_sort_ndarray(Ndarray *keys,
     const std::size_t expected_value_size = primitive_value_type_size(value_type);
     TI_ERROR_IF(expected_value_size == 0,
                 "CPU native sort received an unsupported value type.");
-    TI_ERROR_IF(values->get_element_size() != expected_value_size,
-                "CPU native sort value dtype does not match the requested "
-                "value type.");
+    TI_ERROR_IF(values->get_element_size() == 0 ||
+                    values->get_element_size() % sizeof(uint32_t) != 0,
+                "CPU native sort value payload must be 4-byte aligned.");
   }
 
   const std::size_t n = keys->get_nelement();
@@ -2400,41 +2592,77 @@ std::size_t Program::cpu_stable_sort_ndarray(Ndarray *keys,
   TI_ERROR_IF(!key_ptr, "CPU native sort received a null key pointer.");
   TI_ERROR_IF(has_values && !value_ptr,
               "CPU native sort received a null value pointer.");
+  const std::size_t expected_value_size =
+      has_values ? primitive_value_type_size(value_type) : 0;
+  const std::size_t value_item_bytes =
+      has_values ? values->get_element_size() : 0;
+  const bool raw_value_payload =
+      has_values && value_item_bytes != expected_value_size;
 
   switch (key_type) {
     case 0:
       TI_ERROR_IF(keys->get_element_size() != sizeof(uint32_t),
                   "CPU native sort key dtype does not match ti.u32.");
+      if (raw_value_payload) {
+        return cpu_stable_sort_raw_values(reinterpret_cast<uint32_t *>(key_ptr),
+                                          value_ptr, n, value_item_bytes,
+                                          descending, nan_policy);
+      }
       return cpu_stable_sort_value_dispatch(
           reinterpret_cast<uint32_t *>(key_ptr), value_ptr, n, value_type,
           descending, nan_policy);
     case 1:
       TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t),
                   "CPU native sort key dtype does not match ti.i32.");
+      if (raw_value_payload) {
+        return cpu_stable_sort_raw_values(reinterpret_cast<int32_t *>(key_ptr),
+                                          value_ptr, n, value_item_bytes,
+                                          descending, nan_policy);
+      }
       return cpu_stable_sort_value_dispatch(
           reinterpret_cast<int32_t *>(key_ptr), value_ptr, n, value_type,
           descending, nan_policy);
     case 2:
       TI_ERROR_IF(keys->get_element_size() != sizeof(float),
                   "CPU native sort key dtype does not match ti.f32.");
+      if (raw_value_payload) {
+        return cpu_stable_sort_raw_values(reinterpret_cast<float *>(key_ptr),
+                                          value_ptr, n, value_item_bytes,
+                                          descending, nan_policy);
+      }
       return cpu_stable_sort_value_dispatch(
           reinterpret_cast<float *>(key_ptr), value_ptr, n, value_type,
           descending, nan_policy);
     case 3:
       TI_ERROR_IF(keys->get_element_size() != sizeof(uint64_t),
                   "CPU native sort key dtype does not match ti.u64.");
+      if (raw_value_payload) {
+        return cpu_stable_sort_raw_values(reinterpret_cast<uint64_t *>(key_ptr),
+                                          value_ptr, n, value_item_bytes,
+                                          descending, nan_policy);
+      }
       return cpu_stable_sort_value_dispatch(
           reinterpret_cast<uint64_t *>(key_ptr), value_ptr, n, value_type,
           descending, nan_policy);
     case 4:
       TI_ERROR_IF(keys->get_element_size() != sizeof(int64_t),
                   "CPU native sort key dtype does not match ti.i64.");
+      if (raw_value_payload) {
+        return cpu_stable_sort_raw_values(reinterpret_cast<int64_t *>(key_ptr),
+                                          value_ptr, n, value_item_bytes,
+                                          descending, nan_policy);
+      }
       return cpu_stable_sort_value_dispatch(
           reinterpret_cast<int64_t *>(key_ptr), value_ptr, n, value_type,
           descending, nan_policy);
     case 5:
       TI_ERROR_IF(keys->get_element_size() != sizeof(double),
                   "CPU native sort key dtype does not match ti.f64.");
+      if (raw_value_payload) {
+        return cpu_stable_sort_raw_values(reinterpret_cast<double *>(key_ptr),
+                                          value_ptr, n, value_item_bytes,
+                                          descending, nan_policy);
+      }
       return cpu_stable_sort_value_dispatch(
           reinterpret_cast<double *>(key_ptr), value_ptr, n, value_type,
           descending, nan_policy);
@@ -2541,29 +2769,38 @@ std::size_t Program::cuda_cub_select_ndarray(Ndarray *values,
               "and output to have at least that many elements.");
   TI_ERROR_IF(count->get_nelement() < 1,
               "CUDA CUB select count ndarray must have at least one element.");
-  std::size_t value_bytes = 0;
+  std::size_t expected_value_bytes = 0;
   switch (value_type) {
     case 0:
     case 1:
     case 2:
-      value_bytes = sizeof(uint32_t);
+      expected_value_bytes = sizeof(uint32_t);
       break;
     case 3:
     case 4:
     case 5:
-      value_bytes = sizeof(uint64_t);
+      expected_value_bytes = sizeof(uint64_t);
       break;
     default:
       TI_ERROR("CUDA CUB select received an unsupported value type.");
   }
-  TI_ERROR_IF(values->get_element_size() != value_bytes ||
-                  output->get_element_size() != value_bytes ||
+  TI_ERROR_IF(expected_value_bytes == 0,
+              "CUDA CUB select received an unsupported value type.");
+  const std::size_t item_bytes = values->get_element_size();
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(uint32_t) != 0 ||
+                  output->get_element_size() != item_bytes ||
                   flags->get_element_size() != sizeof(int32_t) ||
                   count->get_element_size() != sizeof(int32_t),
-              "CUDA CUB select received mismatched value/flag/count dtypes.");
+              "CUDA CUB select received mismatched value/flag/count dtypes or "
+              "a non-4-byte-aligned payload.");
   TI_ERROR_IF(values->get_nelement() >
                   static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA CUB select currently supports at most INT_MAX items.");
+  const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
+  TI_ERROR_IF(values->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                           item_words),
+              "CUDA CUB select word count exceeds INT_MAX.");
 #ifdef TI_WITH_CUDA
   auto values_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
   auto flags_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(flags));
@@ -2573,7 +2810,8 @@ std::size_t Program::cuda_cub_select_ndarray(Ndarray *values,
   return cuda::cub_select_flagged(
       values_ptr, flags_ptr, output_ptr, count_ptr,
       static_cast<int>(values->get_nelement()),
-      static_cast<cuda::CubSelectValueType>(value_type), stream, this);
+      static_cast<cuda::CubSelectValueType>(value_type), item_words, stream,
+      this);
 #else
   TI_ERROR(
       "CUDA CUB select requires building Taichi with TI_WITH_CUDA=ON and "
@@ -2828,12 +3066,13 @@ std::size_t Program::cpu_compact_ndarray(Ndarray *values,
                 : 0;
   TI_ERROR_IF(value_bytes == 0,
               "CPU native compact received an unsupported value type.");
-  TI_ERROR_IF(values->get_element_size() != value_bytes ||
-                  output->get_element_size() != value_bytes ||
+  const std::size_t item_bytes = values->get_element_size();
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(uint32_t) != 0 ||
+                  output->get_element_size() != item_bytes ||
                   flags->get_element_size() != sizeof(int32_t) ||
                   count->get_element_size() != sizeof(int32_t),
-              "CPU native compact received mismatched value/flag/count "
-              "dtypes.");
+              "CPU native compact received mismatched value/flag/count dtypes "
+              "or a non-4-byte-aligned payload.");
 
   auto *values_ptr =
       reinterpret_cast<const uint8_t *>(get_ndarray_data_ptr_as_int(values));
@@ -2850,8 +3089,8 @@ std::size_t Program::cpu_compact_ndarray(Ndarray *values,
   const std::size_t n = values->get_nelement();
   for (std::size_t i = 0; i < n; ++i) {
     if (flags_ptr[i] != 0) {
-      std::memcpy(output_ptr + written * value_bytes,
-                  values_ptr + i * value_bytes, value_bytes);
+      std::memcpy(output_ptr + written * item_bytes,
+                  values_ptr + i * item_bytes, item_bytes);
       written++;
     }
   }
@@ -3142,11 +3381,10 @@ std::size_t Program::cpu_gather_ndarray(Ndarray *src,
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
               "CPU native gather source and destination dtypes differ.");
   const std::size_t item_bytes = src->get_element_size();
-  TI_ERROR_IF((item_bytes != sizeof(uint32_t) &&
-               item_bytes != sizeof(uint64_t)) ||
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(uint32_t) != 0 ||
                   indices->get_element_size() != sizeof(int32_t),
-              "CPU native gather currently expects 4- or 8-byte scalar values "
-              "and i32 indices.");
+              "CPU native gather currently expects 4-byte aligned values and "
+              "i32 indices.");
   const std::size_t n = indices->get_nelement();
   const std::size_t src_items = src->get_nelement();
   if (n == 0) {
@@ -3206,11 +3444,10 @@ std::size_t Program::cpu_scatter_ndarray(Ndarray *src,
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
               "CPU native scatter source and destination dtypes differ.");
   const std::size_t item_bytes = src->get_element_size();
-  TI_ERROR_IF((item_bytes != sizeof(uint32_t) &&
-               item_bytes != sizeof(uint64_t)) ||
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(uint32_t) != 0 ||
                   indices->get_element_size() != sizeof(int32_t),
-              "CPU native scatter currently expects 4- or 8-byte scalar values "
-              "and i32 indices.");
+              "CPU native scatter currently expects 4-byte aligned values and "
+              "i32 indices.");
   const std::size_t n = indices->get_nelement();
   const std::size_t dst_items = dst->get_nelement();
   if (n == 0) {
@@ -3375,12 +3612,14 @@ std::size_t Program::cpu_bucket_builder_ndarray(Ndarray *keys,
   const std::size_t expected_size = primitive_value_type_size(value_type);
   TI_ERROR_IF(expected_size == 0,
               "CPU native bucket builder received an unsupported value type.");
+  const std::size_t item_bytes = values->get_element_size();
   TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
                   offsets->get_element_size() != sizeof(int32_t) ||
-                  values->get_element_size() != expected_size ||
-                  output->get_element_size() != expected_size,
-              "CPU native bucket builder dtype does not match value type or "
-              "keys/offsets are not i32.");
+                  item_bytes == 0 ||
+                  item_bytes % sizeof(uint32_t) != 0 ||
+                  output->get_element_size() != item_bytes,
+              "CPU native bucket builder dtype does not match value type, "
+              "keys/offsets are not i32, or payload is not 4-byte aligned.");
   TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int32_t>::max()),
               "CPU native bucket builder input count exceeds i32 range.");
 
@@ -3393,6 +3632,14 @@ std::size_t Program::cpu_bucket_builder_ndarray(Ndarray *keys,
 
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  if (item_bytes != expected_size) {
+    return cpu_bucket_builder_raw(
+        keys_ptr,
+        reinterpret_cast<const uint8_t *>(get_ndarray_data_ptr_as_int(values)),
+        offsets_ptr,
+        reinterpret_cast<uint8_t *>(get_ndarray_data_ptr_as_int(output)), n,
+        num_bins, item_bytes, max_threads);
+  }
   switch (value_type) {
     case 0:
       return cpu_bucket_builder_typed(

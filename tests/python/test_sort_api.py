@@ -87,6 +87,25 @@ def _run_sort_payload_dtype_case(method, value_dtype, np_dtype):
     assert np.array_equal(values.to_numpy(), values_np[order])
 
 
+def _run_sort_vector_payload_case(method):
+    keys_np = np.array([3, -1, 3, 0, -7, 2, -1, 3], dtype=np.int32)
+    values_np = (
+        ((np.arange(keys_np.shape[0] * 3, dtype=np.float32).reshape(-1, 3) % 47)
+         - 21)
+        * np.float32(0.5)
+    )
+    order = np.argsort(keys_np, kind="stable")
+    keys = ti.ndarray(ti.i32, shape=keys_np.shape[0])
+    values = ti.Vector.ndarray(3, ti.f32, shape=keys_np.shape[0])
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+
+    ti.algorithms.sort(keys, values, method=method)
+
+    assert keys.to_numpy().tolist() == keys_np[order].tolist()
+    np.testing.assert_allclose(values.to_numpy(), values_np[order], rtol=1e-6, atol=1e-6)
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_sort_entrypoint_auto_uses_host_stable_fallback():
     keys = ti.field(ti.i32, 8)
@@ -236,6 +255,11 @@ def test_sort_cpu_native_payload_dtypes(value_dtype, np_dtype):
 
 
 @test_utils.test(arch=[ti.cpu])
+def test_sort_cpu_native_vector_payload():
+    _run_sort_vector_payload_case("cpu_native")
+
+
+@test_utils.test(arch=[ti.cpu])
 def test_sort_auto_keys_only():
     keys = ti.field(ti.i32, 8)
 
@@ -291,6 +315,16 @@ def test_sort_cuda_cub_payload_dtypes(value_dtype, np_dtype):
         pytest.skip("CUDA CUB radix sort is not available.")
 
     _run_sort_payload_dtype_case("cuda_cub_native", value_dtype, np_dtype)
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_sort_cuda_cub_vector_payload():
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    if not impl.get_runtime().prog.cuda_cub_radix_sort_available():
+        pytest.skip("CUDA CUB radix sort is not available.")
+
+    _run_sort_vector_payload_case("cuda_cub_native")
 
 
 @test_utils.test(arch=[ti.vulkan])
@@ -363,6 +397,16 @@ def test_sort_vulkan_native_payload_dtypes(value_dtype, np_dtype):
         pytest.skip("Vulkan native radix sort is not available.")
 
     _run_sort_payload_dtype_case("vulkan_native_radix_u32", value_dtype, np_dtype)
+
+
+@test_utils.test(arch=[ti.vulkan])
+def test_sort_vulkan_native_vector_payload():
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    if not impl.get_runtime().prog.vulkan_radix_sort_available():
+        pytest.skip("Vulkan native radix sort is not available.")
+
+    _run_sort_vector_payload_case("vulkan_native_radix_u32")
 
 
 @pytest.mark.parametrize("dtype", [ti.i64, ti.u64, ti.f64])

@@ -6,6 +6,7 @@
 #include "taichi/rhi/cuda/cuda_driver.h"
 
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -22,6 +23,7 @@ std::size_t cub_radix_sort_impl(void *keys,
                                 CubSortMode mode,
                                 CubSortNanPolicy nan_policy,
                                 bool has_values,
+                                int value_words,
                                 void *stream,
                                 void *owner);
 void cub_radix_sort_clear_cache_impl(void *owner);
@@ -39,6 +41,7 @@ std::size_t cub_select_flagged_impl(void *values,
                                     void *count,
                                     int num_items,
                                     CubSelectValueType value_type,
+                                    int item_words,
                                     void *stream,
                                     void *owner);
 void cub_select_clear_cache_impl(void *owner);
@@ -101,6 +104,7 @@ std::size_t cub_bucket_builder_impl(void *keys,
                                     int num_items,
                                     int num_bins,
                                     CudaBucketBuilderValueType value_type,
+                                    int item_words,
                                     void *stream,
                                     void *owner);
 void cub_bucket_builder_clear_cache_impl(void *owner);
@@ -634,9 +638,11 @@ std::size_t cub_indexed_copy(void *src,
               "CUDA toolkit indexed-copy expects non-negative num_items.");
   TI_ERROR_IF(index_bound < 0,
               "CUDA toolkit indexed-copy expects non-negative index_bound.");
-  TI_ERROR_IF(item_words != 1 && item_words != 2,
-              "CUDA toolkit indexed-copy expects one or two 32-bit words per "
+  TI_ERROR_IF(item_words <= 0,
+              "CUDA toolkit indexed-copy expects at least one 32-bit word per "
               "item.");
+  TI_ERROR_IF(num_items > std::numeric_limits<int>::max() / item_words,
+              "CUDA toolkit indexed-copy word count exceeds INT_MAX.");
 #if defined(TI_WITH_CUDA_TOOLKIT)
   TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
   return cub_indexed_copy_impl(src, indices, dst, num_items, index_bound,
@@ -664,16 +670,23 @@ std::size_t cub_radix_sort(void *keys,
                            CubSortMode mode,
                            CubSortNanPolicy nan_policy,
                            bool has_values,
+                           int value_words,
                            void *stream,
                            void *owner) {
   TI_ERROR_IF(num_items < 0, "CUB sort expects non-negative num_items");
+  TI_ERROR_IF(has_values && value_words <= 0,
+              "CUB sort expects positive value_words when values are present");
+  TI_ERROR_IF(has_values && num_items > 0 &&
+                  num_items > std::numeric_limits<int>::max() / value_words,
+              "CUB sort value word count exceeds INT_MAX");
   if (num_items <= 1) {
     return 0;
   }
 #if defined(TI_WITH_CUDA_TOOLKIT)
   TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
   return cub_radix_sort_impl(keys, values, num_items, key_type, value_type, mode,
-                             nan_policy, has_values, stream, owner);
+                             nan_policy, has_values, value_words, stream,
+                             owner);
 #else
   TI_ERROR(
       "CUDA CUB sort requires building Taichi with TI_WITH_CUDA_TOOLKIT=ON.");
@@ -748,16 +761,21 @@ std::size_t cub_select_flagged(void *values,
                                void *count,
                                int num_items,
                                CubSelectValueType value_type,
+                               int item_words,
                                void *stream,
                                void *owner) {
   TI_ERROR_IF(num_items < 0, "CUB select expects non-negative num_items");
+  TI_ERROR_IF(item_words <= 0, "CUB select expects positive item_words");
+  TI_ERROR_IF(num_items > 0 &&
+                  num_items > std::numeric_limits<int>::max() / item_words,
+              "CUB select word count exceeds INT_MAX");
   if (num_items <= 0) {
     return 0;
   }
 #if defined(TI_WITH_CUDA_TOOLKIT)
   TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
   return cub_select_flagged_impl(values, flags, output, count, num_items,
-                                 value_type, stream, owner);
+                                 value_type, item_words, stream, owner);
 #else
   TI_ERROR(
       "CUDA CUB select requires building Taichi with "
@@ -932,16 +950,22 @@ std::size_t cub_bucket_builder(void *keys,
                                int num_items,
                                int num_bins,
                                CudaBucketBuilderValueType value_type,
+                               int item_words,
                                void *stream,
                                void *owner) {
   TI_ERROR_IF(num_items < 0,
               "CUDA bucket builder expects non-negative num_items.");
   TI_ERROR_IF(num_bins <= 0, "CUDA bucket builder expects positive num_bins.");
+  TI_ERROR_IF(item_words <= 0,
+              "CUDA bucket builder expects positive item_words.");
+  TI_ERROR_IF(num_items > 0 &&
+                  num_items > std::numeric_limits<int>::max() / item_words,
+              "CUDA bucket builder word count exceeds INT_MAX.");
 #if defined(TI_WITH_CUDA_TOOLKIT)
   TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
   return cub_bucket_builder_impl(keys, values, offsets, output, cursor,
-                                 num_items, num_bins, value_type, stream,
-                                 owner);
+                                 num_items, num_bins, value_type, item_words,
+                                 stream, owner);
 #else
   TI_ERROR(
       "CUDA bucket builder requires building Taichi with "

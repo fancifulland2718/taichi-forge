@@ -63,6 +63,37 @@ def _run_ndarray_compact(dtype, np_dtype, method):
     return workspace
 
 
+def _run_vector_ndarray_compact(method):
+    n = 2048
+    values = ti.Vector.ndarray(3, ti.f32, shape=n)
+    flags = ti.ndarray(ti.i32, shape=n)
+    output = ti.Vector.ndarray(3, ti.f32, shape=n)
+    count = ti.ndarray(ti.i32, shape=1)
+    values_np = (
+        ((np.arange(n * 3, dtype=np.float32).reshape(n, 3) % 97) - 48)
+        * np.float32(0.125)
+    )
+    flags_np = (
+        ((np.arange(n) % 4 == 0) | (np.arange(n) % 19 == 0)).astype(np.int32)
+    )
+    values.from_numpy(values_np)
+    flags.from_numpy(flags_np)
+    output.fill(0)
+    count.from_numpy(np.array([-1], dtype=np.int32))
+
+    workspace = ti.algorithms.CompactWorkspace(max_items=n)
+    ti.algorithms.experimental_compact(
+        values, flags, output, count, method=method, workspace=workspace
+    )
+
+    expected = values_np[flags_np != 0]
+    assert count.to_numpy()[0] == expected.shape[0]
+    np.testing.assert_allclose(
+        output.to_numpy()[: expected.shape[0]], expected, rtol=1e-6, atol=1e-6
+    )
+    return workspace
+
+
 @test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_compact_field_scan():
     n = 2048
@@ -196,6 +227,15 @@ def test_experimental_compact_cuda_cub_ndarray_supported_dtypes():
         assert workspace.workspace_bytes_peak > 0
 
 
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_compact_cuda_cub_ndarray_vector_payload():
+    if not impl.get_runtime().prog.cuda_cub_select_available():
+        pytest.skip("CUDA CUB select is unavailable in this build/runtime.")
+
+    workspace = _run_vector_ndarray_compact("cuda_cub")
+    assert workspace.workspace_bytes_peak > 0
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_experimental_compact_cpu_native_ndarray_supported_dtypes():
     if not impl.get_runtime().prog.cpu_compact_available():
@@ -207,6 +247,12 @@ def test_experimental_compact_cpu_native_ndarray_supported_dtypes():
     assert impl.get_runtime().prog.cpu_compact_workspace_bytes() == 0
 
 
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_compact_cpu_native_ndarray_vector_payload():
+    workspace = _run_vector_ndarray_compact("cpu_native")
+    assert workspace.workspace_bytes_peak == 0
+
+
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_compact_vulkan_native_ndarray_supported_dtypes():
     if not impl.get_runtime().prog.vulkan_compact_available():
@@ -216,6 +262,15 @@ def test_experimental_compact_vulkan_native_ndarray_supported_dtypes():
         workspace = _run_ndarray_compact(dtype, np_dtype, "auto")
         assert workspace.workspace_bytes_peak > 0
     assert impl.get_runtime().prog.vulkan_compact_workspace_bytes() > 0
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_compact_vulkan_native_ndarray_vector_payload():
+    if not impl.get_runtime().prog.vulkan_compact_available():
+        pytest.skip("Vulkan native compact is unavailable in this build/runtime.")
+
+    workspace = _run_vector_ndarray_compact("vulkan_native")
+    assert workspace.workspace_bytes_peak > 0
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

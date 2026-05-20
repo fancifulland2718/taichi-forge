@@ -328,6 +328,8 @@ class TI_DLL_EXPORT Program {
 
   bool cuda_device_indexed_copy_available() const;
 
+  bool cuda_device_indexed_copy_payload_available(std::size_t item_bytes) const;
+
   std::size_t cuda_device_gather_ndarray(Ndarray *src,
                                          Ndarray *indices,
                                          Ndarray *dst);

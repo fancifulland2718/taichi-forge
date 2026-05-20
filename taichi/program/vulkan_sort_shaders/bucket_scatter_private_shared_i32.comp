@@ -6,7 +6,9 @@ layout(local_size_x = 256) in;
 #define VALUE_KIND 0
 #endif
 
-#if VALUE_KIND == 6
+#if VALUE_KIND == 7
+#define VALUE_T uint
+#elif VALUE_KIND == 6
 #define VALUE_T uvec2
 #elif VALUE_KIND == 2
 #define VALUE_T uint
@@ -44,6 +46,7 @@ void main() {
   uint chunk = gl_WorkGroupID.x;
   uint chunks = gl_NumWorkGroups.x;
   uint n = keys_buf.data.length();
+  uint item_words = n == 0u ? 0u : values_buf.data.length() / n;
   uint num_bins = offsets_buf.data.length() - 1u;
 
   for (uint bin = lid; bin < num_bins; bin += 256u) {
@@ -63,9 +66,22 @@ void main() {
             uint(partial_buf.data[chunk * num_bins + bin]);
         uint bucket_base = uint(offsets_buf.data[bin]);
         uint out_idx = bucket_base + chunk_base + local_rank;
+#if VALUE_KIND == 7
+        uint dst_base = out_idx * item_words;
+        uint src_base = idx * item_words;
+        if (item_words > 0u &&
+            dst_base + item_words <= output_buf.data.length() &&
+            src_base + item_words <= values_buf.data.length()) {
+          for (uint lane = 0u; lane < item_words; ++lane) {
+            output_buf.data[dst_base + lane] =
+                values_buf.data[src_base + lane];
+          }
+        }
+#else
         if (out_idx < output_buf.data.length()) {
           output_buf.data[out_idx] = values_buf.data[idx];
         }
+#endif
       }
     }
   }

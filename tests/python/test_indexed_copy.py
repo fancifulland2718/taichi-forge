@@ -66,6 +66,61 @@ def _run_ndarray_indexed_copy(dtype, np_dtype, method, scatter):
     return workspace
 
 
+def _run_vector_ndarray_indexed_copy(method, scatter):
+    n = 2048
+    src = ti.Vector.ndarray(3, ti.f32, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    dst = ti.Vector.ndarray(3, ti.f32, shape=n)
+    data = (
+        ((np.arange(n * 3, dtype=np.float32).reshape(n, 3) % 67) - 33)
+        * np.float32(0.25)
+    ).astype(np.float32)
+    index_data = _reverse_indices(n)
+    src.from_numpy(data)
+    indices.from_numpy(index_data)
+    dst.fill(0)
+    workspace = ti.algorithms.IndexedCopyWorkspace(max_items=n)
+
+    if scatter:
+        ti.algorithms.experimental_scatter(
+            src, indices, dst, method=method, workspace=workspace
+        )
+    else:
+        ti.algorithms.experimental_gather(
+            src, indices, dst, method=method, workspace=workspace
+        )
+
+    np.testing.assert_allclose(dst.to_numpy(), data[index_data], rtol=1e-6, atol=1e-6)
+    assert workspace.workspace_bytes_peak == 0
+    return workspace
+
+
+def _run_matrix_ndarray_indexed_copy(method, scatter):
+    n = 1024
+    src = ti.Matrix.ndarray(2, 2, ti.i32, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    dst = ti.Matrix.ndarray(2, 2, ti.i32, shape=n)
+    data = (np.arange(n * 4, dtype=np.int32).reshape(n, 2, 2) % 97) - 48
+    index_data = _reverse_indices(n)
+    src.from_numpy(data)
+    indices.from_numpy(index_data)
+    dst.fill(0)
+    workspace = ti.algorithms.IndexedCopyWorkspace(max_items=n)
+
+    if scatter:
+        ti.algorithms.experimental_scatter(
+            src, indices, dst, method=method, workspace=workspace
+        )
+    else:
+        ti.algorithms.experimental_gather(
+            src, indices, dst, method=method, workspace=workspace
+        )
+
+    assert np.array_equal(dst.to_numpy(), data[index_data])
+    assert workspace.workspace_bytes_peak == 0
+    return workspace
+
+
 def _run_invalid_index_ndarray(method, scatter):
     src = ti.ndarray(ti.i32, shape=4)
     indices = ti.ndarray(ti.i32, shape=4)
@@ -107,6 +162,22 @@ def test_experimental_gather_scatter_cuda_device_ndarray_supported_dtypes():
 
 
 @test_utils.test(arch=[ti.cuda])
+def test_experimental_gather_scatter_cuda_device_ndarray_vector_payloads():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cuda_device_indexed_copy_payload_available")
+        and prog.cuda_device_indexed_copy_payload_available(12)
+        and prog.cuda_device_indexed_copy_payload_available(16)
+    ):
+        pytest.skip("CUDA indexed-copy wide payload support is unavailable.")
+
+    _run_vector_ndarray_indexed_copy("cuda_device", scatter=False)
+    _run_vector_ndarray_indexed_copy("cuda_device", scatter=True)
+    _run_matrix_ndarray_indexed_copy("cuda_device", scatter=False)
+    _run_matrix_ndarray_indexed_copy("cuda_device", scatter=True)
+
+
+@test_utils.test(arch=[ti.cuda])
 def test_experimental_indexed_copy_cuda_device_invalid_indices_are_ignored():
     prog = impl.get_runtime().prog
     if not (
@@ -135,6 +206,22 @@ def test_experimental_gather_scatter_vulkan_native_ndarray_supported_dtypes():
         )
         assert gather_ws.workspace_bytes_peak == 0
         assert scatter_ws.workspace_bytes_peak == 0
+    assert prog.vulkan_indexed_copy_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_gather_scatter_vulkan_native_ndarray_vector_payloads():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_indexed_copy_available")
+        and prog.vulkan_indexed_copy_available()
+    ):
+        pytest.skip("Vulkan native indexed-copy is unavailable in this runtime.")
+
+    _run_vector_ndarray_indexed_copy("vulkan_native", scatter=False)
+    _run_vector_ndarray_indexed_copy("vulkan_native", scatter=True)
+    _run_matrix_ndarray_indexed_copy("vulkan_native", scatter=False)
+    _run_matrix_ndarray_indexed_copy("vulkan_native", scatter=True)
     assert prog.vulkan_indexed_copy_workspace_bytes() == 0
 
 
@@ -187,9 +274,29 @@ def test_experimental_gather_scatter_cpu_native_ndarray_supported_dtypes():
 
 
 @test_utils.test(arch=[ti.cpu])
+def test_experimental_gather_scatter_cpu_native_ndarray_vector_payloads():
+    _run_vector_ndarray_indexed_copy("cpu_native", scatter=False)
+    _run_vector_ndarray_indexed_copy("cpu_native", scatter=True)
+    _run_matrix_ndarray_indexed_copy("cpu_native", scatter=False)
+    _run_matrix_ndarray_indexed_copy("cpu_native", scatter=True)
+    assert impl.get_runtime().prog.cpu_indexed_copy_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.cpu])
 def test_experimental_indexed_copy_cpu_native_invalid_indices_are_ignored():
     _run_invalid_index_ndarray("cpu_native", scatter=False)
     _run_invalid_index_ndarray("cpu_native", scatter=True)
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_indexed_copy_ndarray_rejects_mismatched_element_shape():
+    n = 8
+    src = ti.Vector.ndarray(3, ti.f32, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    dst = ti.Vector.ndarray(2, ti.f32, shape=n)
+
+    with pytest.raises(TypeError, match="element_shape"):
+        ti.algorithms.experimental_gather(src, indices, dst, method="cpu_native")
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])

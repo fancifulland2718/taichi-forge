@@ -188,6 +188,12 @@ static const uint32_t kInitI32Spv[] =
 static const uint32_t kCopyI32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/copy_i32.comp.spv.h"
     ;
+static const uint32_t kSortInitU32IndexSpv[] =
+#include "taichi/program/vulkan_sort_shaders/sort_init_u32_index.comp.spv.h"
+    ;
+static const uint32_t kSortInitI32IndexSpv[] =
+#include "taichi/program/vulkan_sort_shaders/sort_init_i32_index.comp.spv.h"
+    ;
 static const uint32_t kSortInitF32IndexSpv[] =
 #include "taichi/program/vulkan_sort_shaders/sort_init_f32_index.comp.spv.h"
     ;
@@ -551,6 +557,9 @@ static const uint32_t kBucketScatterU32Spv[] =
 static const uint32_t kBucketScatterRaw64Spv[] =
 #include "taichi/program/vulkan_sort_shaders/bucket_scatter_raw64.comp.spv.h"
     ;
+static const uint32_t kBucketScatterRawWordsSpv[] =
+#include "taichi/program/vulkan_sort_shaders/bucket_scatter_raw_words.comp.spv.h"
+    ;
 static const uint32_t kBucketScatterPrivateSharedI32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/bucket_scatter_private_shared_i32.comp.spv.h"
     ;
@@ -562,6 +571,9 @@ static const uint32_t kBucketScatterPrivateSharedU32Spv[] =
     ;
 static const uint32_t kBucketScatterPrivateSharedRaw64Spv[] =
 #include "taichi/program/vulkan_sort_shaders/bucket_scatter_private_shared_raw64.comp.spv.h"
+    ;
+static const uint32_t kBucketScatterPrivateSharedRawWordsSpv[] =
+#include "taichi/program/vulkan_sort_shaders/bucket_scatter_private_shared_raw_words.comp.spv.h"
     ;
 static const uint32_t kGroupedReduceZeroI32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_i32.comp.spv.h"
@@ -915,6 +927,8 @@ struct VulkanRadixSortCache {
 
   std::unique_ptr<Pipeline> init_i32;
   std::unique_ptr<Pipeline> copy_i32;
+  std::unique_ptr<Pipeline> sort_init_u32_index;
+  std::unique_ptr<Pipeline> sort_init_i32_index;
   std::unique_ptr<Pipeline> sort_init_f32_index;
   std::unique_ptr<Pipeline> sort_init_u64_index;
   std::unique_ptr<Pipeline> sort_init_i64_index;
@@ -991,6 +1005,8 @@ struct VulkanRadixSortCache {
       clear_allocs();
       init_i32.reset();
       copy_i32.reset();
+      sort_init_u32_index.reset();
+      sort_init_i32_index.reset();
       sort_init_f32_index.reset();
       sort_init_u64_index.reset();
       sort_init_i64_index.reset();
@@ -1064,6 +1080,10 @@ struct VulkanRadixSortCache {
     radix8_enabled = radix8_requested && radix8_supported;
     init_i32 = create_pipeline(dev, kInitI32Spv, "vulkan_sort_init_i32");
     copy_i32 = create_pipeline(dev, kCopyI32Spv, "vulkan_sort_copy_i32");
+    sort_init_u32_index = create_pipeline(
+        dev, kSortInitU32IndexSpv, "vulkan_sort_init_u32_index");
+    sort_init_i32_index = create_pipeline(
+        dev, kSortInitI32IndexSpv, "vulkan_sort_init_i32_index");
     sort_init_f32_index = create_pipeline(
         dev, kSortInitF32IndexSpv, "vulkan_sort_init_f32_index");
     sort_init_u64_index = create_pipeline(
@@ -2547,10 +2567,12 @@ struct VulkanBucketBuilderCache {
   std::unique_ptr<Pipeline> scatter_f32;
   std::unique_ptr<Pipeline> scatter_u32;
   std::unique_ptr<Pipeline> scatter_raw64;
+  std::unique_ptr<Pipeline> scatter_raw_words;
   std::unique_ptr<Pipeline> scatter_private_shared_i32;
   std::unique_ptr<Pipeline> scatter_private_shared_f32;
   std::unique_ptr<Pipeline> scatter_private_shared_u32;
   std::unique_ptr<Pipeline> scatter_private_shared_raw64;
+  std::unique_ptr<Pipeline> scatter_private_shared_raw_words;
   std::unique_ptr<Pipeline> grouped_reduce_zero_i32;
   std::unique_ptr<Pipeline> grouped_reduce_zero_f32;
   std::unique_ptr<Pipeline> grouped_reduce_zero_u32;
@@ -2578,10 +2600,12 @@ struct VulkanBucketBuilderCache {
   std::unique_ptr<ShaderResourceSet> scatter_f32_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_u32_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_raw64_bindings;
+  std::unique_ptr<ShaderResourceSet> scatter_raw_words_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_private_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_private_f32_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_private_u32_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_private_raw64_bindings;
+  std::unique_ptr<ShaderResourceSet> scatter_private_raw_words_bindings;
   std::unique_ptr<ShaderResourceSet> grouped_reduce_zero_bindings;
   std::unique_ptr<ShaderResourceSet> grouped_reduce_zero_f32_bindings;
   std::unique_ptr<ShaderResourceSet> grouped_reduce_zero_u32_bindings;
@@ -2629,10 +2653,12 @@ struct VulkanBucketBuilderCache {
       scatter_f32.reset();
       scatter_u32.reset();
       scatter_raw64.reset();
+      scatter_raw_words.reset();
       scatter_private_shared_i32.reset();
       scatter_private_shared_f32.reset();
       scatter_private_shared_u32.reset();
       scatter_private_shared_raw64.reset();
+      scatter_private_shared_raw_words.reset();
       grouped_reduce_zero_i32.reset();
       grouped_reduce_zero_f32.reset();
       grouped_reduce_zero_u32.reset();
@@ -2660,10 +2686,12 @@ struct VulkanBucketBuilderCache {
       scatter_f32_bindings.reset();
       scatter_u32_bindings.reset();
       scatter_raw64_bindings.reset();
+      scatter_raw_words_bindings.reset();
       scatter_private_bindings.reset();
       scatter_private_f32_bindings.reset();
       scatter_private_u32_bindings.reset();
       scatter_private_raw64_bindings.reset();
+      scatter_private_raw_words_bindings.reset();
       grouped_reduce_zero_bindings.reset();
       grouped_reduce_zero_f32_bindings.reset();
       grouped_reduce_zero_u32_bindings.reset();
@@ -2703,6 +2731,8 @@ struct VulkanBucketBuilderCache {
         create_pipeline(dev, kBucketScatterU32Spv, "vulkan_bucket_scatter_u32");
     scatter_raw64 = create_pipeline(dev, kBucketScatterRaw64Spv,
                                     "vulkan_bucket_scatter_raw64");
+    scatter_raw_words = create_pipeline(dev, kBucketScatterRawWordsSpv,
+                                        "vulkan_bucket_scatter_raw_words");
     scatter_private_shared_i32 = create_pipeline(
         dev, kBucketScatterPrivateSharedI32Spv,
         "vulkan_bucket_scatter_private_shared_i32");
@@ -2715,6 +2745,9 @@ struct VulkanBucketBuilderCache {
     scatter_private_shared_raw64 = create_pipeline(
         dev, kBucketScatterPrivateSharedRaw64Spv,
         "vulkan_bucket_scatter_private_shared_raw64");
+    scatter_private_shared_raw_words = create_pipeline(
+        dev, kBucketScatterPrivateSharedRawWordsSpv,
+        "vulkan_bucket_scatter_private_shared_raw_words");
     grouped_reduce_zero_i32 = create_pipeline(
         dev, kGroupedReduceZeroI32Spv, "vulkan_grouped_reduce_zero_i32");
     if (dev->get_caps().get(DeviceCapability::spirv_has_atomic_float_add) !=
@@ -2819,6 +2852,9 @@ struct VulkanBucketBuilderCache {
   }
 
   Pipeline *bucket_scatter_pipeline(int value_type) const {
+    if (value_type == 7) {
+      return scatter_raw_words.get();
+    }
     if (value_type == 1) {
       return scatter_f32.get();
     }
@@ -2832,6 +2868,9 @@ struct VulkanBucketBuilderCache {
   }
 
   Pipeline *bucket_scatter_private_pipeline(int value_type) const {
+    if (value_type == 7) {
+      return scatter_private_shared_raw_words.get();
+    }
     if (value_type == 1) {
       return scatter_private_shared_f32.get();
     }
@@ -2845,6 +2884,9 @@ struct VulkanBucketBuilderCache {
   }
 
   ShaderResourceSet *bucket_scatter_resource_set(int value_type) {
+    if (value_type == 7) {
+      return resource_set(scatter_raw_words_bindings);
+    }
     if (value_type == 1) {
       return resource_set(scatter_f32_bindings);
     }
@@ -2858,6 +2900,9 @@ struct VulkanBucketBuilderCache {
   }
 
   ShaderResourceSet *bucket_scatter_private_resource_set(int value_type) {
+    if (value_type == 7) {
+      return resource_set(scatter_private_raw_words_bindings);
+    }
     if (value_type == 1) {
       return resource_set(scatter_private_f32_bindings);
     }
@@ -2871,6 +2916,9 @@ struct VulkanBucketBuilderCache {
   }
 
   const char *bucket_scatter_scope(int value_type) const {
+    if (value_type == 7) {
+      return "vulkan_bucket_scatter_raw_words";
+    }
     if (value_type == 1) {
       return "vulkan_bucket_scatter_f32";
     }
@@ -2884,6 +2932,9 @@ struct VulkanBucketBuilderCache {
   }
 
   const char *bucket_scatter_private_scope(int value_type) const {
+    if (value_type == 7) {
+      return "vulkan_bucket_scatter_private_shared_raw_words";
+    }
     if (value_type == 1) {
       return "vulkan_bucket_scatter_private_shared_f32";
     }
@@ -3882,26 +3933,27 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
               "Vulkan native compact output must have at least input length.");
   TI_ERROR_IF(count->get_nelement() < 1,
               "Vulkan native compact count must contain at least one item.");
-  const size_t value_bytes =
+  const size_t expected_value_bytes =
       (value_type == 0 || value_type == 1 || value_type == 2)
           ? sizeof(uint32_t)
           : (value_type == 3 || value_type == 4 || value_type == 5)
                 ? sizeof(uint64_t)
                 : 0;
-  TI_ERROR_IF(value_bytes == 0,
+  TI_ERROR_IF(expected_value_bytes == 0,
               "Vulkan native compact received an unsupported value type.");
-  TI_ERROR_IF(values->get_element_size() != value_bytes ||
-                  output->get_element_size() != value_bytes ||
+  const size_t item_bytes = values->get_element_size();
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(uint32_t) != 0 ||
+                  output->get_element_size() != item_bytes ||
                   flags->get_element_size() != sizeof(int32_t) ||
                   count->get_element_size() != sizeof(int32_t),
               "Vulkan native compact received mismatched value/flag/count "
-              "dtypes.");
+              "dtypes or a non-4-byte-aligned payload.");
 
   const size_t n = values->get_nelement();
   if (n == 0) {
     return 0;
   }
-  const size_t item_words = value_bytes / sizeof(uint32_t);
+  const size_t item_words = item_bytes / sizeof(uint32_t);
   const size_t word_count = n * item_words;
   TI_ERROR_IF(word_count >
                   static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
@@ -3916,7 +3968,7 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
     synchronize();
   }
   cache.ensure_prefix(prefix_bytes);
-  const size_t value_total_bytes = n * value_bytes;
+  const size_t value_total_bytes = n * item_bytes;
 
   DeviceAllocation values_alloc = values->ndarray_alloc_;
   DeviceAllocation flags_alloc = flags->ndarray_alloc_;
@@ -4426,11 +4478,10 @@ std::size_t Program::vulkan_gather_ndarray(Ndarray *src,
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
               "Vulkan native gather source and destination dtypes differ.");
   const size_t item_bytes = src->get_element_size();
-  TI_ERROR_IF((item_bytes != sizeof(uint32_t) &&
-               item_bytes != sizeof(uint64_t)) ||
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(uint32_t) != 0 ||
                   indices->get_element_size() != sizeof(int32_t),
-              "Vulkan native gather currently expects 4- or 8-byte scalar "
-              "values and i32 indices.");
+              "Vulkan native gather currently expects 4-byte aligned values "
+              "and i32 indices.");
   TI_ERROR_IF(indices->get_nelement() >
                   static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()),
               "Vulkan native gather currently supports at most UINT32_MAX "
@@ -4490,11 +4541,10 @@ std::size_t Program::vulkan_scatter_ndarray(Ndarray *src,
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
               "Vulkan native scatter source and destination dtypes differ.");
   const size_t item_bytes = src->get_element_size();
-  TI_ERROR_IF((item_bytes != sizeof(uint32_t) &&
-               item_bytes != sizeof(uint64_t)) ||
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(uint32_t) != 0 ||
                   indices->get_element_size() != sizeof(int32_t),
-              "Vulkan native scatter currently expects 4- or 8-byte scalar "
-              "values and i32 indices.");
+              "Vulkan native scatter currently expects 4-byte aligned values "
+              "and i32 indices.");
   TI_ERROR_IF(indices->get_nelement() >
                   static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()),
               "Vulkan native scatter currently supports at most UINT32_MAX "
@@ -4658,15 +4708,17 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
               "Vulkan native bucket builder received an unsupported value type.");
   const bool value_is_64bit =
       value_type == 3 || value_type == 4 || value_type == 5;
-  const size_t value_size =
+  const size_t expected_value_size =
       value_is_64bit ? sizeof(uint64_t) : sizeof(uint32_t);
+  const size_t item_bytes = values->get_element_size();
   TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
                   offsets->get_element_size() != sizeof(int32_t) ||
-                  values->get_element_size() != value_size ||
-                  output->get_element_size() != value_size ||
+                  item_bytes == 0 ||
+                  item_bytes % sizeof(uint32_t) != 0 ||
+                  output->get_element_size() != item_bytes ||
                   cursor->get_element_size() != sizeof(int32_t),
               "Vulkan native bucket builder dtype does not match value type or "
-              "keys/offsets/cursor are not i32.");
+              "keys/offsets/cursor are not i32, or payload is not 4-byte aligned.");
   TI_ERROR_IF(n > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ||
                   num_bins >
                       static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
@@ -4681,7 +4733,7 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
   const DeviceAllocation output_alloc = output->ndarray_alloc_;
   const DeviceAllocation cursor_alloc = cursor->ndarray_alloc_;
   const size_t key_bytes = n * sizeof(int32_t);
-  const size_t value_bytes = n * value_size;
+  const size_t value_bytes = n * item_bytes;
   const size_t offset_bytes = (num_bins + 1) * sizeof(int32_t);
   const size_t cursor_bytes = num_bins * sizeof(int32_t);
   const uint32_t item_groups =
@@ -4726,9 +4778,11 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
   Pipeline *count_private_pipeline = cache.count_private_shared_i32.get();
   Pipeline *prefix_pipeline = cache.prefix_i32.get();
   Pipeline *prefix_chunks_pipeline = cache.prefix_chunks_i32.get();
-  Pipeline *scatter_pipeline = cache.bucket_scatter_pipeline(value_type);
+  const int scatter_value_type =
+      item_bytes == expected_value_size ? value_type : 7;
+  Pipeline *scatter_pipeline = cache.bucket_scatter_pipeline(scatter_value_type);
   Pipeline *scatter_private_pipeline =
-      cache.bucket_scatter_private_pipeline(value_type);
+      cache.bucket_scatter_private_pipeline(scatter_value_type);
   ShaderResourceSet *clear_bindings = cache.resource_set(cache.clear_bindings);
   ShaderResourceSet *count_bindings = cache.resource_set(cache.count_bindings);
   ShaderResourceSet *count_private_bindings =
@@ -4737,12 +4791,12 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
   ShaderResourceSet *prefix_chunks_bindings =
       cache.resource_set(cache.prefix_chunks_bindings);
   ShaderResourceSet *scatter_bindings =
-      cache.bucket_scatter_resource_set(value_type);
+      cache.bucket_scatter_resource_set(scatter_value_type);
   ShaderResourceSet *scatter_private_bindings =
-      cache.bucket_scatter_private_resource_set(value_type);
-  const char *scatter_scope = cache.bucket_scatter_scope(value_type);
+      cache.bucket_scatter_private_resource_set(scatter_value_type);
+  const char *scatter_scope = cache.bucket_scatter_scope(scatter_value_type);
   const char *scatter_private_scope =
-      cache.bucket_scatter_private_scope(value_type);
+      cache.bucket_scatter_private_scope(scatter_value_type);
   const DeviceAllocation partial_alloc = cache.partial;
   const uint32_t private_groups = static_cast<uint32_t>(private_chunks);
   const uint32_t prefix_chunk_groups =
@@ -4968,19 +5022,20 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
               "Vulkan native radix sort key dtype does not match the "
               "requested key type.");
   const bool use_values = values != nullptr;
-  const size_t value_size = use_values ? vulkan_scan_value_type_size(value_type)
-                                       : sizeof(uint32_t);
+  const size_t expected_value_size =
+      use_values ? vulkan_scan_value_type_size(value_type) : sizeof(uint32_t);
+  size_t value_size = expected_value_size;
   if (use_values) {
     TI_ERROR_IF(values->shape.size() != 1,
                 "Vulkan native radix sort values must be a 1D ndarray.");
     TI_ERROR_IF(values->get_nelement() != keys->get_nelement(),
                 "Vulkan native radix sort keys and values must have the same "
                 "length.");
-    TI_ERROR_IF(value_size == 0,
+    TI_ERROR_IF(expected_value_size == 0,
                 "Vulkan native radix sort received an unsupported value type.");
-    TI_ERROR_IF(values->get_element_size() != value_size,
-                "Vulkan native radix sort value dtype does not match the "
-                "requested value type.");
+    value_size = values->get_element_size();
+    TI_ERROR_IF(value_size == 0 || value_size % sizeof(uint32_t) != 0,
+                "Vulkan native radix sort value payload must be 4-byte aligned.");
   }
 
   const size_t n = keys->get_nelement();
@@ -5003,7 +5058,9 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
     front->get_cache_us += profile_time_us() - start;
   }
   const bool use_radix8 = cache.radix8_enabled;
-  const bool use_index_sort = key_type >= 2;
+  const bool raw_value_payload =
+      use_values && value_size != expected_value_size;
+  const bool use_index_sort = key_type >= 2 || raw_value_payload;
   const bool workspace_use_values = use_values || use_index_sort;
   const size_t workspace_value_size =
       use_index_sort ? std::max(sizeof(uint32_t), value_size) : value_size;
@@ -5304,11 +5361,17 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
         if (use_index_sort) {
           const double radix_start = profile ? profile_time_us() : 0.0;
           Pipeline *init_pipeline =
-              float32_keys ? cache.sort_init_f32_index.get()
-                           : (key_type == 3 ? cache.sort_init_u64_index.get()
-                                            : key_type == 4
-                                                  ? cache.sort_init_i64_index.get()
-                                                  : cache.sort_init_f64_index.get());
+              key_type == 0
+                  ? cache.sort_init_u32_index.get()
+                  : key_type == 1
+                        ? cache.sort_init_i32_index.get()
+                        : float32_keys
+                              ? cache.sort_init_f32_index.get()
+                              : (key_type == 3
+                                     ? cache.sort_init_u64_index.get()
+                                     : key_type == 4
+                                           ? cache.sort_init_i64_index.get()
+                                           : cache.sort_init_f64_index.get());
           {
             auto bindings = op_device->create_resource_set_unique();
             profiled_rw_buffer(bindings.get(), 0, key_alloc.get_ptr(0),
