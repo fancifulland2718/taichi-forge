@@ -114,6 +114,7 @@ python/taichi_forge/_lib/core/
 issues/
 benchmarks/results/
 external_refs/
+temp_outputs/
 
 # Generated Vulkan sort shader headers are produced by CMake.
 /taichi/program/vulkan_sort_shaders/*.comp.spv.h

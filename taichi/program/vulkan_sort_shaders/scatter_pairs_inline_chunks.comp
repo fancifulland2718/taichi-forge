@@ -4,6 +4,16 @@
 #define SHIFT 0
 #endif
 
+#ifndef VALUE_KIND
+#define VALUE_KIND 0
+#endif
+
+#if VALUE_KIND == 6
+#define VALUE_T uvec2
+#else
+#define VALUE_T int
+#endif
+
 layout(local_size_x = 256) in;
 
 layout(set = 0, binding = 0, std430) readonly buffer KeysIn {
@@ -23,11 +33,11 @@ layout(set = 0, binding = 3, std430) readonly buffer Offsets {
 } offsets;
 
 layout(set = 0, binding = 4, std430) readonly buffer ValuesIn {
-  int data[];
+  VALUE_T data[];
 } values_in;
 
 layout(set = 0, binding = 5, std430) writeonly buffer ValuesOut {
-  int data[];
+  VALUE_T data[];
 } values_out;
 
 layout(set = 0, binding = 6, std430) readonly buffer ChunkSums {

@@ -7,6 +7,62 @@ from taichi_forge.lang import impl
 from tests import test_utils
 
 
+_COMPACT_DTYPES = [
+    (ti.u32, np.uint32),
+    (ti.i32, np.int32),
+    (ti.f32, np.float32),
+    (ti.u64, np.uint64),
+    (ti.i64, np.int64),
+    (ti.f64, np.float64),
+]
+
+
+def _compact_values(n, np_dtype):
+    if np.issubdtype(np_dtype, np.floating):
+        return (
+            ((np.arange(n, dtype=np.float64) % 97) - 48) * np.float64(0.125)
+        ).astype(np_dtype)
+    if np.issubdtype(np_dtype, np.unsignedinteger):
+        return ((np.arange(n, dtype=np.uint64) * 11 + 5) % 4294967291).astype(
+            np_dtype
+        )
+    return (np.arange(n, dtype=np.int64) * 7 - 13).astype(np_dtype)
+
+
+def _assert_compact_matches(actual, expected):
+    if np.issubdtype(expected.dtype, np.floating):
+        np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
+    else:
+        assert np.array_equal(actual, expected)
+
+
+def _run_ndarray_compact(dtype, np_dtype, method):
+    n = 4096
+    values = ti.ndarray(dtype, shape=n)
+    flags = ti.ndarray(ti.i32, shape=n)
+    output = ti.ndarray(dtype, shape=n)
+    count = ti.ndarray(ti.i32, shape=1)
+
+    values_np = _compact_values(n, np_dtype)
+    flags_np = (
+        ((np.arange(n) % 3 == 0) | (np.arange(n) % 17 == 0)).astype(np.int32)
+    )
+    values.from_numpy(values_np)
+    flags.from_numpy(flags_np)
+    output.fill(0)
+    count.from_numpy(np.array([-1], dtype=np.int32))
+
+    workspace = ti.algorithms.CompactWorkspace(max_items=n)
+    ti.algorithms.experimental_compact(
+        values, flags, output, count, method=method, workspace=workspace
+    )
+
+    expected = values_np[flags_np != 0]
+    assert count.to_numpy()[0] == expected.shape[0]
+    _assert_compact_matches(output.to_numpy()[: expected.shape[0]], expected)
+    return workspace
+
+
 @test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_compact_field_scan():
     n = 2048
@@ -131,83 +187,39 @@ def test_experimental_compact_field_scan_empty_and_full_selection():
 
 
 @test_utils.test(arch=[ti.cuda])
-def test_experimental_compact_cuda_cub_ndarray():
-    n = 4096
-    values = ti.ndarray(ti.i32, shape=n)
-    flags = ti.ndarray(ti.i32, shape=n)
-    output = ti.ndarray(ti.i32, shape=n)
-    count = ti.ndarray(ti.i32, shape=1)
-
+def test_experimental_compact_cuda_cub_ndarray_supported_dtypes():
     if not impl.get_runtime().prog.cuda_cub_select_available():
         pytest.skip("CUDA CUB select is unavailable in this build/runtime.")
 
-    @ti.kernel
-    def fill(
-        values_arr: ti.types.ndarray(ti.i32, ndim=1),
-        flags_arr: ti.types.ndarray(ti.i32, ndim=1),
-        output_arr: ti.types.ndarray(ti.i32, ndim=1),
-        count_arr: ti.types.ndarray(ti.i32, ndim=1),
-    ):
-        for i in range(n):
-            values_arr[i] = i * 2 + 11
-            flags_arr[i] = 1 if i % 3 == 0 else 0
-            output_arr[i] = -1
-        count_arr[0] = -1
-
-    fill(values, flags, output, count)
-    workspace = ti.algorithms.CompactWorkspace(max_items=n)
-    ti.algorithms.experimental_compact(
-        values, flags, output, count, method="auto", workspace=workspace
-    )
-
-    values_np = np.arange(n, dtype=np.int32) * 2 + 11
-    expected = values_np[np.arange(n) % 3 == 0]
-    assert count.to_numpy()[0] == expected.shape[0]
-    assert np.array_equal(output.to_numpy()[: expected.shape[0]], expected)
-    assert workspace.workspace_bytes_peak > 0
+    for dtype, np_dtype in _COMPACT_DTYPES:
+        workspace = _run_ndarray_compact(dtype, np_dtype, "auto")
+        assert workspace.workspace_bytes_peak > 0
 
 
 @test_utils.test(arch=[ti.cpu])
-def test_experimental_compact_cpu_native_ndarray():
-    n = 4096
-    values = ti.ndarray(ti.i32, shape=n)
-    flags = ti.ndarray(ti.i32, shape=n)
-    output = ti.ndarray(ti.i32, shape=n)
-    count = ti.ndarray(ti.i32, shape=1)
-
+def test_experimental_compact_cpu_native_ndarray_supported_dtypes():
     if not impl.get_runtime().prog.cpu_compact_available():
         pytest.skip("CPU native compact is unavailable in this build/runtime.")
 
-    @ti.kernel
-    def fill(
-        values_arr: ti.types.ndarray(ti.i32, ndim=1),
-        flags_arr: ti.types.ndarray(ti.i32, ndim=1),
-        output_arr: ti.types.ndarray(ti.i32, ndim=1),
-        count_arr: ti.types.ndarray(ti.i32, ndim=1),
-    ):
-        for i in range(n):
-            values_arr[i] = i * 7 - 13
-            flags_arr[i] = 1 if i % 6 == 0 or i % 17 == 0 else 0
-            output_arr[i] = -1
-        count_arr[0] = -1
-
-    fill(values, flags, output, count)
-    workspace = ti.algorithms.CompactWorkspace(max_items=n)
-    ti.algorithms.experimental_compact(
-        values, flags, output, count, method="auto", workspace=workspace
-    )
-
-    values_np = np.arange(n, dtype=np.int32) * 7 - 13
-    flags_np = ((np.arange(n) % 6 == 0) | (np.arange(n) % 17 == 0))
-    expected = values_np[flags_np]
-    assert count.to_numpy()[0] == expected.shape[0]
-    assert np.array_equal(output.to_numpy()[: expected.shape[0]], expected)
-    assert workspace.workspace_bytes_peak == 0
+    for dtype, np_dtype in _COMPACT_DTYPES:
+        workspace = _run_ndarray_compact(dtype, np_dtype, "auto")
+        assert workspace.workspace_bytes_peak == 0
     assert impl.get_runtime().prog.cpu_compact_workspace_bytes() == 0
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
-def test_experimental_compact_vulkan_native_ndarray():
+def test_experimental_compact_vulkan_native_ndarray_supported_dtypes():
+    if not impl.get_runtime().prog.vulkan_compact_available():
+        pytest.skip("Vulkan native compact is unavailable in this build/runtime.")
+
+    for dtype, np_dtype in _COMPACT_DTYPES:
+        workspace = _run_ndarray_compact(dtype, np_dtype, "auto")
+        assert workspace.workspace_bytes_peak > 0
+    assert impl.get_runtime().prog.vulkan_compact_workspace_bytes() > 0
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_compact_vulkan_native_empty_and_full_i32():
     n = 4096
     values = ti.ndarray(ti.i32, shape=n)
     flags = ti.ndarray(ti.i32, shape=n)

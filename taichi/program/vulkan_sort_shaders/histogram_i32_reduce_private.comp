@@ -2,12 +2,23 @@
 
 layout(local_size_x = 256) in;
 
+#ifndef BIN_KIND
+#define BIN_KIND 0
+#endif
+
+#if BIN_KIND == 4
+#extension GL_ARB_gpu_shader_int64 : require
+#define BIN_T int64_t
+#else
+#define BIN_T int
+#endif
+
 layout(set = 0, binding = 0, std430) buffer Partial {
-  int data[];
+  BIN_T data[];
 } partial_buf;
 
 layout(set = 0, binding = 1, std430) buffer Bins {
-  int data[];
+  BIN_T data[];
 } bins_buf;
 
 void main() {
@@ -17,7 +28,7 @@ void main() {
     return;
   }
   uint num_chunks = partial_buf.data.length() / num_bins;
-  int total = 0;
+  BIN_T total = BIN_T(0);
   for (uint chunk = 0u; chunk < num_chunks; ++chunk) {
     total += partial_buf.data[chunk * num_bins + bin];
   }

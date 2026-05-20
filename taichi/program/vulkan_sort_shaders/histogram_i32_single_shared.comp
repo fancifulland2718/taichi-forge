@@ -2,8 +2,18 @@
 
 layout(local_size_x = 256) in;
 
+#ifndef VALUE_KIND
+#define VALUE_KIND 0
+#endif
+
+#if VALUE_KIND == 2
+#define VALUE_T uint
+#else
+#define VALUE_T int
+#endif
+
 layout(set = 0, binding = 0, std430) buffer Values {
-  int data[];
+  VALUE_T data[];
 } values_buf;
 
 layout(set = 0, binding = 1, std430) buffer Bins {
@@ -23,10 +33,17 @@ void main() {
   barrier();
 
   for (uint idx = lid; idx < n; idx += 256u) {
-    int bin = values_buf.data[idx];
+#if VALUE_KIND == 2
+    uint bin = values_buf.data[idx];
+    if (bin < num_bins) {
+      atomicAdd(local_hist[bin], 1);
+    }
+#else
+    VALUE_T bin = values_buf.data[idx];
     if (bin >= 0 && uint(bin) < num_bins) {
       atomicAdd(local_hist[uint(bin)], 1);
     }
+#endif
   }
   barrier();
 

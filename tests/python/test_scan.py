@@ -1,9 +1,43 @@
 import gc
 
+import numpy as np
 import pytest
 import taichi_forge as ti
 from taichi_forge.lang import impl
 from tests import test_utils
+
+_SCAN_DTYPES = [
+    (ti.i32, np.int32),
+    (ti.u32, np.uint32),
+    (ti.f32, np.float32),
+    (ti.u64, np.uint64),
+    (ti.i64, np.int64),
+    (ti.f64, np.float64),
+]
+_VULKAN_SCAN_DTYPES = _SCAN_DTYPES
+_SCAN_VALUE_TYPE = {
+    ti.i32: 0,
+    ti.f32: 1,
+    ti.u32: 2,
+    ti.u64: 3,
+    ti.i64: 4,
+    ti.f64: 5,
+}
+
+
+def _scan_values(n, np_dtype):
+    if np.issubdtype(np_dtype, np.unsignedinteger):
+        return (np.arange(n, dtype=np.uint64) % 7).astype(np_dtype)
+    if np.issubdtype(np_dtype, np.floating):
+        return ((np.arange(n, dtype=np.float64) % 7) - 3).astype(np_dtype)
+    return (np.arange(n, dtype=np.int64) % 7 - 3).astype(np_dtype)
+
+
+def _assert_scan_equal(actual, expected):
+    if np.issubdtype(expected.dtype, np.floating):
+        np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
+    else:
+        np.testing.assert_array_equal(actual, expected)
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -67,79 +101,78 @@ def test_scan_with_offset(dtype, N, offset):
 @test_utils.test(arch=[ti.cuda])
 def test_scan_ndarray_cuda_cub():
     N = 4096
-    arr = ti.ndarray(ti.i32, shape=N)
 
     if not impl.get_runtime().prog.cuda_cub_scan_available():
         pytest.skip("CUDA CUB scan is unavailable in this build/runtime.")
 
-    @ti.kernel
-    def fill(data: ti.types.ndarray(ti.i32, ndim=1)):
-        for i in range(N):
-            data[i] = i % 7 - 3
-
-    fill(arr)
-
-    executor = ti.algorithms.PrefixSumExecutor(N)
-    executor.run(arr)
-
-    host = arr.to_numpy()
-    cur_sum = 0
-    for i in range(N):
-        cur_sum += i % 7 - 3
-        assert host[i] == cur_sum
+    for dtype, np_dtype in _SCAN_DTYPES:
+        arr = ti.ndarray(dtype, shape=N)
+        data = _scan_values(N, np_dtype)
+        arr.from_numpy(data)
+        ti.algorithms.PrefixSumExecutor(N).run(arr)
+        expected = np.cumsum(data, dtype=np_dtype).astype(np_dtype)
+        _assert_scan_equal(arr.to_numpy(), expected)
     assert impl.get_runtime().prog.cuda_cub_scan_workspace_bytes() > 0
 
 
 @test_utils.test(arch=[ti.cpu])
 def test_scan_ndarray_cpu_native():
     N = 4096
-    arr = ti.ndarray(ti.i32, shape=N)
 
     if not impl.get_runtime().prog.cpu_scan_available():
         pytest.skip("CPU native scan is unavailable in this build/runtime.")
 
-    @ti.kernel
-    def fill(data: ti.types.ndarray(ti.i32, ndim=1)):
-        for i in range(N):
-            data[i] = i % 7 - 3
-
-    fill(arr)
-
-    executor = ti.algorithms.PrefixSumExecutor(N)
-    executor.run(arr)
-
-    host = arr.to_numpy()
-    cur_sum = 0
-    for i in range(N):
-        cur_sum += i % 7 - 3
-        assert host[i] == cur_sum
+    for dtype, np_dtype in _SCAN_DTYPES:
+        arr = ti.ndarray(dtype, shape=N)
+        data = _scan_values(N, np_dtype)
+        arr.from_numpy(data)
+        ti.algorithms.PrefixSumExecutor(N).run(arr)
+        expected = np.cumsum(data, dtype=np_dtype).astype(np_dtype)
+        _assert_scan_equal(arr.to_numpy(), expected)
     assert impl.get_runtime().prog.cpu_scan_workspace_bytes() == 0
 
 
 @test_utils.test(arch=[ti.vulkan])
 def test_scan_ndarray_vulkan_native():
     N = 8192
-    arr = ti.ndarray(ti.i32, shape=N)
 
     if not impl.get_runtime().prog.vulkan_scan_available():
         pytest.skip("Vulkan native scan is unavailable in this build/runtime.")
 
-    @ti.kernel
-    def fill(data: ti.types.ndarray(ti.i32, ndim=1)):
-        for i in range(N):
-            data[i] = i % 9 - 4
-
-    fill(arr)
-
-    executor = ti.algorithms.PrefixSumExecutor(N)
-    executor.run(arr)
-
-    host = arr.to_numpy()
-    cur_sum = 0
-    for i in range(N):
-        cur_sum += i % 9 - 4
-        assert host[i] == cur_sum
+    prog = impl.get_runtime().prog
+    for dtype, np_dtype in _VULKAN_SCAN_DTYPES:
+        value_type = _SCAN_VALUE_TYPE[dtype]
+        if hasattr(prog, "vulkan_scan_value_type_available") and not (
+            prog.vulkan_scan_value_type_available(value_type)
+        ):
+            continue
+        arr = ti.ndarray(dtype, shape=N)
+        data = _scan_values(N, np_dtype)
+        arr.from_numpy(data)
+        ti.algorithms.PrefixSumExecutor(N).run(arr)
+        expected = np.cumsum(data, dtype=np_dtype).astype(np_dtype)
+        _assert_scan_equal(arr.to_numpy(), expected)
     assert impl.get_runtime().prog.vulkan_scan_workspace_bytes() > 0
+
+
+@test_utils.test(arch=[ti.vulkan])
+def test_scan_ndarray_vulkan_native_respects_f64_capability_gate():
+    N = 128
+    arr = ti.ndarray(ti.f64, shape=N)
+    arr.from_numpy(_scan_values(N, np.float64))
+
+    if not impl.get_runtime().prog.vulkan_scan_available():
+        pytest.skip("Vulkan native scan is unavailable in this build/runtime.")
+    if impl.get_runtime().prog.vulkan_scan_value_type_available(5):
+        ti.algorithms.PrefixSumExecutor(N).run(arr)
+        expected = np.cumsum(_scan_values(N, np.float64), dtype=np.float64)
+        _assert_scan_equal(arr.to_numpy(), expected)
+        return
+    if hasattr(impl.get_runtime().prog, "vulkan_scan_value_type_available"):
+        assert not impl.get_runtime().prog.vulkan_scan_value_type_available(5)
+
+    with pytest.raises(RuntimeError, match="native CPU/CUDA/Vulkan scan fast paths"):
+        ti.algorithms.PrefixSumExecutor(N).run(arr)
 
 
 @pytest.mark.run_in_serial

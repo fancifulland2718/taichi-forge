@@ -4,6 +4,88 @@ import numpy as np
 import taichi_forge as ti
 from tests import test_utils
 
+_SORT_VALUE_DTYPE_CASES = [
+    (ti.i32, np.int32),
+    (ti.u32, np.uint32),
+    (ti.f32, np.float32),
+    (ti.u64, np.uint64),
+    (ti.i64, np.int64),
+    (ti.f64, np.float64),
+]
+
+_SORT_KEY_DTYPE_CASES = [
+    (ti.i32, np.int32),
+    (ti.u32, np.uint32),
+    (ti.f32, np.float32),
+    (ti.i64, np.int64),
+    (ti.u64, np.uint64),
+    (ti.f64, np.float64),
+]
+
+
+def _sort_payload_values(np_dtype):
+    if np.issubdtype(np_dtype, np.unsignedinteger):
+        return np.array([10, 40, 20, 30, 60, 50], dtype=np_dtype)
+    if np.issubdtype(np_dtype, np.floating):
+        return np.array([1.5, -4.0, 2.25, 3.0, 6.5, -5.5], dtype=np_dtype)
+    return np.array([10, -40, 20, 30, -60, 50], dtype=np_dtype)
+
+
+def _sort_key_values(np_dtype):
+    if np_dtype == np.uint32:
+        return np.array([5, 1, 5, 0, 2, 1, 9, 2], dtype=np_dtype)
+    if np_dtype == np.int32:
+        return np.array([4, -2, 4, 0, -7, 3, -2, 1], dtype=np_dtype)
+    if np_dtype == np.float32:
+        return np.array([3.5, np.nan, -0.0, 1.0, 3.5, 0.0, -2.0, np.nan], dtype=np_dtype)
+    if np_dtype == np.uint64:
+        return np.array(
+            [2**40 + 3, 7, 2**32 + 1, 0, 2**40 + 3, 2**32, 7, 5],
+            dtype=np_dtype,
+        )
+    if np_dtype == np.int64:
+        return np.array([2**40, -2**40, 7, -1, 0, 7, -2**40, 2], dtype=np_dtype)
+    return np.array([3.5, np.nan, -0.0, 1.0, 3.5, 0.0, -2.0, np.nan], dtype=np_dtype)
+
+
+def _expected_sort_order(keys_np):
+    if keys_np.dtype == np.float32:
+        bits = keys_np.view(np.uint32)
+        sign = np.uint32(0x80000000)
+        abs_mask = np.uint32(0x7FFFFFFF)
+        sortable = np.where((bits & sign) != 0, ~bits, bits ^ sign).astype(np.uint32)
+        sortable = np.where((bits & abs_mask) > np.uint32(0x7F800000), np.uint32(0xFFFFFFFF), sortable)
+        sortable = np.where((bits & abs_mask) == 0, sign, sortable)
+        return np.argsort(sortable, kind="stable")
+    if keys_np.dtype == np.float64:
+        bits = keys_np.view(np.uint64)
+        sign = np.uint64(0x8000000000000000)
+        abs_mask = np.uint64(0x7FFFFFFFFFFFFFFF)
+        sortable = np.where((bits & sign) != 0, ~bits, bits ^ sign).astype(np.uint64)
+        sortable = np.where(
+            (bits & abs_mask) > np.uint64(0x7FF0000000000000),
+            np.uint64(0xFFFFFFFFFFFFFFFF),
+            sortable,
+        )
+        sortable = np.where((bits & abs_mask) == 0, sign, sortable)
+        return np.argsort(sortable, kind="stable")
+    return np.argsort(keys_np, kind="stable")
+
+
+def _run_sort_payload_dtype_case(method, value_dtype, np_dtype):
+    keys_np = np.array([3, -1, 3, 0, -7, 2], dtype=np.int32)
+    values_np = _sort_payload_values(np_dtype)
+    order = np.argsort(keys_np, kind="stable")
+    keys = ti.ndarray(ti.i32, shape=keys_np.shape[0])
+    values = ti.ndarray(value_dtype, shape=keys_np.shape[0])
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+
+    ti.algorithms.sort(keys, values, method=method)
+
+    assert keys.to_numpy().tolist() == keys_np[order].tolist()
+    assert np.array_equal(values.to_numpy(), values_np[order])
+
 
 @test_utils.test(arch=[ti.cpu])
 def test_sort_entrypoint_auto_uses_host_stable_fallback():
@@ -147,6 +229,12 @@ def test_sort_cpu_native_ndarray_descending():
     assert values.to_numpy().tolist() == [1, 4, 0, 2, 5, 3]
 
 
+@pytest.mark.parametrize("value_dtype,np_dtype", _SORT_VALUE_DTYPE_CASES)
+@test_utils.test(arch=[ti.cpu])
+def test_sort_cpu_native_payload_dtypes(value_dtype, np_dtype):
+    _run_sort_payload_dtype_case("cpu_native", value_dtype, np_dtype)
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_sort_auto_keys_only():
     keys = ti.field(ti.i32, 8)
@@ -194,6 +282,17 @@ def test_sort_cuda_cub_wide_exact_methods(method):
     assert values.to_numpy().tolist() == [2, 5, 3, 0, 4, 1]
 
 
+@pytest.mark.parametrize("value_dtype,np_dtype", _SORT_VALUE_DTYPE_CASES)
+@test_utils.test(arch=[ti.cuda])
+def test_sort_cuda_cub_payload_dtypes(value_dtype, np_dtype):
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    if not impl.get_runtime().prog.cuda_cub_radix_sort_available():
+        pytest.skip("CUDA CUB radix sort is not available.")
+
+    _run_sort_payload_dtype_case("cuda_cub_native", value_dtype, np_dtype)
+
+
 @test_utils.test(arch=[ti.vulkan])
 def test_sort_vulkan_native_radix_i32_ndarray():
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -212,6 +311,58 @@ def test_sort_vulkan_native_radix_i32_ndarray():
 
     assert keys.to_numpy().tolist() == [-7, -2, -2, 0, 1, 3, 4, 4]
     assert values.to_numpy().tolist() == [4, 1, 6, 3, 7, 5, 0, 2]
+
+
+@pytest.mark.parametrize("key_dtype,np_dtype", _SORT_KEY_DTYPE_CASES)
+@test_utils.test(arch=[ti.vulkan])
+def test_sort_vulkan_native_key_dtypes(key_dtype, np_dtype):
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    if not impl.get_runtime().prog.vulkan_radix_sort_available():
+        pytest.skip("Vulkan native radix sort is not available.")
+
+    keys_np = _sort_key_values(np_dtype)
+    values_np = np.arange(keys_np.shape[0], dtype=np.int64) * 10 - 3
+    order = _expected_sort_order(keys_np)
+    keys = ti.ndarray(key_dtype, shape=keys_np.shape[0])
+    values = ti.ndarray(ti.i64, shape=keys_np.shape[0])
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+
+    ti.algorithms.sort(keys, values, method="vulkan_native_radix_u32")
+
+    actual_keys = keys.to_numpy()
+    if np.issubdtype(np_dtype, np.floating):
+        bit_dtype = np.uint32 if np_dtype == np.float32 else np.uint64
+        assert np.array_equal(
+            actual_keys.view(bit_dtype),
+            keys_np[order].view(bit_dtype),
+        )
+    else:
+        assert np.array_equal(actual_keys, keys_np[order])
+    assert np.array_equal(values.to_numpy(), values_np[order])
+
+
+@test_utils.test(arch=[ti.vulkan])
+def test_sort_vulkan_native_float_rejects_bitwise_nan_policy():
+    keys = ti.ndarray(ti.f32, shape=4)
+    keys.from_numpy(np.array([1.0, np.nan, -2.0, 0.0], dtype=np.float32))
+
+    with pytest.raises(NotImplementedError):
+        ti.algorithms.sort(
+            keys, method="vulkan_native_radix_u32", nan_policy="bitwise"
+        )
+
+
+@pytest.mark.parametrize("value_dtype,np_dtype", _SORT_VALUE_DTYPE_CASES)
+@test_utils.test(arch=[ti.vulkan])
+def test_sort_vulkan_native_payload_dtypes(value_dtype, np_dtype):
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    if not impl.get_runtime().prog.vulkan_radix_sort_available():
+        pytest.skip("Vulkan native radix sort is not available.")
+
+    _run_sort_payload_dtype_case("vulkan_native_radix_u32", value_dtype, np_dtype)
 
 
 @pytest.mark.parametrize("dtype", [ti.i64, ti.u64, ti.f64])

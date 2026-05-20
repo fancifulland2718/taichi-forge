@@ -15,15 +15,23 @@ layout(set = 0, binding = 2, std430) writeonly buffer Dst {
 } dst_buf;
 
 void main() {
-  uint i = gl_GlobalInvocationID.x;
-  if (i >= indices_buf.data.length()) {
+  uint word_i = gl_GlobalInvocationID.x;
+  uint dst_words = dst_buf.data.length();
+  if (word_i >= dst_words) {
     return;
   }
-  int index = indices_buf.data[i];
-  uint src_index = uint(index);
-  if (index < 0 || src_index >= src_buf.data.length()) {
-    dst_buf.data[i] = 0u;
+  uint item_count = indices_buf.data.length();
+  if (item_count == 0u) {
     return;
   }
-  dst_buf.data[i] = src_buf.data[src_index];
+  uint item_words = dst_words / item_count;
+  uint item = word_i / item_words;
+  uint lane = word_i - item * item_words;
+  int index = indices_buf.data[item];
+  uint src_items = src_buf.data.length() / item_words;
+  if (index < 0 || uint(index) >= src_items) {
+    dst_buf.data[word_i] = 0u;
+    return;
+  }
+  dst_buf.data[word_i] = src_buf.data[uint(index) * item_words + lane];
 }

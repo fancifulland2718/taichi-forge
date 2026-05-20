@@ -2,16 +2,37 @@
 
 layout(local_size_x = 256) in;
 
+#ifndef VALUE_KIND
+#define VALUE_KIND 0
+#endif
+
+#ifndef BIN_KIND
+#define BIN_KIND 0
+#endif
+
+#if BIN_KIND == 4
+#extension GL_ARB_gpu_shader_int64 : require
+#define BIN_T int64_t
+#else
+#define BIN_T int
+#endif
+
+#if VALUE_KIND == 2
+#define VALUE_T uint
+#else
+#define VALUE_T int
+#endif
+
 layout(set = 0, binding = 0, std430) buffer Values {
-  int data[];
+  VALUE_T data[];
 } values_buf;
 
 layout(set = 0, binding = 1, std430) buffer Bins {
-  int data[];
+  BIN_T data[];
 } bins_buf;
 
 layout(set = 0, binding = 2, std430) buffer Partial {
-  int data[];
+  BIN_T data[];
 } partial_buf;
 
 shared int local_hist[512];
@@ -32,15 +53,22 @@ void main() {
   for (uint offset = lid; offset < chunk_size; offset += 256u) {
     uint idx = base + offset;
     if (idx < n) {
-      int bin = values_buf.data[idx];
+#if VALUE_KIND == 2
+      uint bin = values_buf.data[idx];
+      if (bin < num_bins) {
+        atomicAdd(local_hist[bin], 1);
+      }
+#else
+      VALUE_T bin = values_buf.data[idx];
       if (bin >= 0 && uint(bin) < num_bins) {
         atomicAdd(local_hist[uint(bin)], 1);
       }
+#endif
     }
   }
   barrier();
 
   for (uint bin = lid; bin < num_bins; bin += 256u) {
-    partial_buf.data[chunk * num_bins + bin] = local_hist[bin];
+    partial_buf.data[chunk * num_bins + bin] = BIN_T(local_hist[bin]);
   }
 }

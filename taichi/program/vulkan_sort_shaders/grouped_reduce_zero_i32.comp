@@ -1,9 +1,33 @@
 #version 450
 
+#ifndef VALUE_KIND
+#define VALUE_KIND 0
+#endif
+
+#if VALUE_KIND == 3 || VALUE_KIND == 4
+#extension GL_ARB_gpu_shader_int64 : require
+#elif VALUE_KIND == 5
+#extension GL_ARB_gpu_shader_fp64 : require
+#endif
+
+#if VALUE_KIND == 1
+#define VALUE_T float
+#elif VALUE_KIND == 2
+#define VALUE_T uint
+#elif VALUE_KIND == 3
+#define VALUE_T uint64_t
+#elif VALUE_KIND == 4
+#define VALUE_T int64_t
+#elif VALUE_KIND == 5
+#define VALUE_T double
+#else
+#define VALUE_T int
+#endif
+
 layout(local_size_x = 256) in;
 
 layout(set = 0, binding = 0, std430) buffer Output {
-  int data[];
+  VALUE_T data[];
 } output_buf;
 
 void main() {
@@ -11,5 +35,5 @@ void main() {
   if (i >= output_buf.data.length()) {
     return;
   }
-  output_buf.data[i] = 0;
+  output_buf.data[i] = VALUE_T(0);
 }

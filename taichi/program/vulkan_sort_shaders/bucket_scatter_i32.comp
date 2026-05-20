@@ -2,12 +2,26 @@
 
 layout(local_size_x = 256) in;
 
+#ifndef VALUE_KIND
+#define VALUE_KIND 0
+#endif
+
+#if VALUE_KIND == 6
+#define VALUE_T uvec2
+#elif VALUE_KIND == 2
+#define VALUE_T uint
+#elif VALUE_KIND == 1
+#define VALUE_T float
+#else
+#define VALUE_T int
+#endif
+
 layout(set = 0, binding = 0, std430) readonly buffer Keys {
   int data[];
 } keys_buf;
 
 layout(set = 0, binding = 1, std430) readonly buffer Values {
-  int data[];
+  VALUE_T data[];
 } values_buf;
 
 layout(set = 0, binding = 2, std430) buffer Cursor {
@@ -15,7 +29,7 @@ layout(set = 0, binding = 2, std430) buffer Cursor {
 } cursor_buf;
 
 layout(set = 0, binding = 3, std430) buffer Output {
-  int data[];
+  VALUE_T data[];
 } output_buf;
 
 void main() {

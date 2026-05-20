@@ -2,15 +2,40 @@
 
 layout(local_size_x = 256) in;
 
+#ifndef VALUE_KIND
+#define VALUE_KIND 0
+#endif
+
+#if VALUE_KIND == 3 || VALUE_KIND == 4
+#extension GL_ARB_gpu_shader_int64 : require
+#elif VALUE_KIND == 5
+#extension GL_ARB_gpu_shader_fp64 : require
+#endif
+
+#if VALUE_KIND == 1
+#define VALUE_T float
+#elif VALUE_KIND == 2
+#define VALUE_T uint
+#elif VALUE_KIND == 3
+#define VALUE_T uint64_t
+#elif VALUE_KIND == 4
+#define VALUE_T int64_t
+#elif VALUE_KIND == 5
+#define VALUE_T double
+#else
+#define VALUE_T int
+#endif
+#define ZERO_VALUE VALUE_T(0)
+
 layout(set = 0, binding = 0, std430) buffer Data {
-  int data[];
+  VALUE_T data[];
 } data_buf;
 
 layout(set = 0, binding = 1, std430) buffer BlockSums {
-  int data[];
+  VALUE_T data[];
 } block_sums;
 
-shared int scan[256];
+shared VALUE_T scan[256];
 
 void main() {
   uint lid = gl_LocalInvocationID.x;
@@ -19,12 +44,12 @@ void main() {
   uint n = data_buf.data.length();
   uint blocks = (n + 255u) / 256u;
 
-  int value = idx < n ? data_buf.data[idx] : 0;
+  VALUE_T value = idx < n ? data_buf.data[idx] : ZERO_VALUE;
   scan[lid] = value;
   barrier();
 
   for (uint step = 1u; step < 256u; step <<= 1u) {
-    int addend = lid >= step ? scan[lid - step] : 0;
+    VALUE_T addend = lid >= step ? scan[lid - step] : ZERO_VALUE;
     barrier();
     scan[lid] += addend;
     barrier();

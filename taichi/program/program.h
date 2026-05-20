@@ -318,6 +318,8 @@ class TI_DLL_EXPORT Program {
 
   bool cuda_device_transform_available() const;
 
+  bool cuda_toolkit_transform_available() const;
+
   std::size_t cuda_device_transform_affine_ndarray(Ndarray *src,
                                                    Ndarray *dst,
                                                    int value_type,
@@ -349,7 +351,20 @@ class TI_DLL_EXPORT Program {
                                                      Ndarray *output,
                                                      Ndarray *cursor);
 
+  std::size_t cuda_device_bucket_builder_ndarray(Ndarray *keys,
+                                                 Ndarray *values,
+                                                 Ndarray *offsets,
+                                                 Ndarray *output,
+                                                 Ndarray *cursor,
+                                                 int value_type);
+
   bool cuda_device_grouped_reduce_available() const;
+
+  std::size_t cuda_device_grouped_reduce_atomic_ndarray(Ndarray *keys,
+                                                        Ndarray *values,
+                                                        Ndarray *output,
+                                                        int value_type,
+                                                        int op);
 
   std::size_t cuda_device_grouped_reduce_i32_atomic_ndarray(Ndarray *keys,
                                                             Ndarray *values,
@@ -364,11 +379,21 @@ class TI_DLL_EXPORT Program {
                                                      Ndarray *cursor,
                                                      int op);
 
+  std::size_t cuda_device_grouped_reduce_ndarray(Ndarray *keys,
+                                                 Ndarray *values,
+                                                 Ndarray *output,
+                                                 Ndarray *offsets,
+                                                 Ndarray *scratch,
+                                                 Ndarray *cursor,
+                                                 int value_type,
+                                                 int op);
+
   bool cuda_cub_radix_sort_available() const;
 
   std::size_t cuda_cub_radix_sort_ndarray(Ndarray *keys,
                                           Ndarray *values,
                                           int key_type,
+                                          int value_type,
                                           int mode,
                                           int nan_policy);
 
@@ -381,6 +406,7 @@ class TI_DLL_EXPORT Program {
   std::size_t cpu_stable_sort_ndarray(Ndarray *keys,
                                       Ndarray *values,
                                       int key_type,
+                                      int value_type,
                                       bool descending,
                                       int nan_policy);
 
@@ -394,6 +420,12 @@ class TI_DLL_EXPORT Program {
 
   bool cuda_cub_select_available() const;
 
+  std::size_t cuda_cub_select_ndarray(Ndarray *values,
+                                      Ndarray *flags,
+                                      Ndarray *output,
+                                      Ndarray *count,
+                                      int value_type);
+
   std::size_t cuda_cub_select_i32_ndarray(Ndarray *values,
                                           Ndarray *flags,
                                           Ndarray *output,
@@ -404,6 +436,11 @@ class TI_DLL_EXPORT Program {
   std::size_t cuda_cub_select_workspace_bytes() const;
 
   bool cuda_cub_histogram_available() const;
+
+  std::size_t cuda_cub_histogram_ndarray(Ndarray *values,
+                                         Ndarray *bins,
+                                         int value_type,
+                                         int bin_type);
 
   std::size_t cuda_cub_histogram_i32_ndarray(Ndarray *values, Ndarray *bins);
 
@@ -430,6 +467,12 @@ class TI_DLL_EXPORT Program {
 
   bool cpu_compact_available() const;
 
+  std::size_t cpu_compact_ndarray(Ndarray *values,
+                                  Ndarray *flags,
+                                  Ndarray *output,
+                                  Ndarray *count,
+                                  int value_type);
+
   std::size_t cpu_compact_i32_ndarray(Ndarray *values,
                                       Ndarray *flags,
                                       Ndarray *output,
@@ -438,6 +481,11 @@ class TI_DLL_EXPORT Program {
   std::size_t cpu_compact_workspace_bytes() const;
 
   bool cpu_histogram_available() const;
+
+  std::size_t cpu_histogram_ndarray(Ndarray *values,
+                                    Ndarray *bins,
+                                    int value_type,
+                                    int bin_type);
 
   std::size_t cpu_histogram_i32_ndarray(Ndarray *values, Ndarray *bins);
 
@@ -486,9 +534,21 @@ class TI_DLL_EXPORT Program {
                                              Ndarray *offsets,
                                              Ndarray *output);
 
+  std::size_t cpu_bucket_builder_ndarray(Ndarray *keys,
+                                         Ndarray *values,
+                                         Ndarray *offsets,
+                                         Ndarray *output,
+                                         int value_type);
+
   std::size_t cpu_bucket_builder_workspace_bytes() const;
 
   bool cpu_grouped_reduce_available() const;
+
+  std::size_t cpu_grouped_reduce_ndarray(Ndarray *keys,
+                                         Ndarray *values,
+                                         Ndarray *output,
+                                         int value_type,
+                                         int op);
 
   std::size_t cpu_grouped_reduce_i32_ndarray(Ndarray *keys,
                                              Ndarray *values,
@@ -501,7 +561,8 @@ class TI_DLL_EXPORT Program {
 
   std::size_t vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                                             Ndarray *values,
-                                            int key_type);
+                                            int key_type,
+                                            int value_type);
 
   void vulkan_radix_sort_clear_workspace();
 
@@ -513,6 +574,8 @@ class TI_DLL_EXPORT Program {
 
   bool vulkan_scan_available() const;
 
+  bool vulkan_scan_value_type_available(int value_type) const;
+
   std::size_t vulkan_inclusive_scan_ndarray(Ndarray *data, int value_type);
 
   void vulkan_scan_clear_workspace();
@@ -520,6 +583,12 @@ class TI_DLL_EXPORT Program {
   std::size_t vulkan_scan_workspace_bytes() const;
 
   bool vulkan_compact_available() const;
+
+  std::size_t vulkan_compact_ndarray(Ndarray *values,
+                                     Ndarray *flags,
+                                     Ndarray *output,
+                                     Ndarray *count,
+                                     int value_type);
 
   std::size_t vulkan_compact_i32_ndarray(Ndarray *values,
                                          Ndarray *flags,
@@ -532,6 +601,14 @@ class TI_DLL_EXPORT Program {
 
   bool vulkan_histogram_available() const;
 
+  bool vulkan_histogram_value_type_available(int value_type,
+                                             int bin_type) const;
+
+  std::size_t vulkan_histogram_ndarray(Ndarray *values,
+                                       Ndarray *bins,
+                                       int value_type,
+                                       int bin_type);
+
   std::size_t vulkan_histogram_i32_ndarray(Ndarray *values, Ndarray *bins);
 
   void vulkan_histogram_clear_workspace();
@@ -539,6 +616,13 @@ class TI_DLL_EXPORT Program {
   std::size_t vulkan_histogram_workspace_bytes() const;
 
   bool vulkan_reduce_available() const;
+
+  bool vulkan_reduce_value_type_available(int value_type) const;
+
+  std::size_t vulkan_reduce_ndarray(Ndarray *values,
+                                    Ndarray *output,
+                                    int value_type,
+                                    int op);
 
   std::size_t vulkan_reduce_i32_ndarray(Ndarray *values,
                                         Ndarray *output,
@@ -549,6 +633,8 @@ class TI_DLL_EXPORT Program {
   std::size_t vulkan_reduce_workspace_bytes() const;
 
   bool vulkan_transform_available() const;
+
+  bool vulkan_transform_value_type_available(int value_type) const;
 
   std::size_t vulkan_transform_affine_ndarray(Ndarray *src,
                                               Ndarray *dst,
@@ -576,6 +662,8 @@ class TI_DLL_EXPORT Program {
 
   bool vulkan_scatter_add_available() const;
 
+  bool vulkan_scatter_add_value_type_available(int value_type) const;
+
   std::size_t vulkan_scatter_add_ndarray(Ndarray *src,
                                          Ndarray *indices,
                                          Ndarray *dst,
@@ -587,17 +675,37 @@ class TI_DLL_EXPORT Program {
 
   bool vulkan_bucket_builder_available() const;
 
+  bool vulkan_bucket_builder_value_type_available(int value_type) const;
+
   std::size_t vulkan_bucket_builder_i32_ndarray(Ndarray *keys,
                                                 Ndarray *values,
                                                 Ndarray *offsets,
                                                 Ndarray *output,
                                                 Ndarray *cursor);
 
+  std::size_t vulkan_bucket_builder_ndarray(Ndarray *keys,
+                                            Ndarray *values,
+                                            Ndarray *offsets,
+                                            Ndarray *output,
+                                            Ndarray *cursor,
+                                            int value_type);
+
   void vulkan_bucket_builder_clear_workspace();
 
   std::size_t vulkan_bucket_builder_workspace_bytes() const;
 
   bool vulkan_grouped_reduce_available() const;
+
+  bool vulkan_grouped_reduce_value_type_available(int value_type) const;
+
+  bool vulkan_grouped_reduce_atomic_value_type_available(
+      int value_type) const;
+
+  std::size_t vulkan_grouped_reduce_atomic_ndarray(Ndarray *keys,
+                                                   Ndarray *values,
+                                                   Ndarray *output,
+                                                   int value_type,
+                                                   int op);
 
   std::size_t vulkan_grouped_reduce_i32_atomic_ndarray(Ndarray *keys,
                                                        Ndarray *values,
@@ -611,6 +719,15 @@ class TI_DLL_EXPORT Program {
                                                 Ndarray *scratch,
                                                 Ndarray *cursor,
                                                 int op);
+
+  std::size_t vulkan_grouped_reduce_ndarray(Ndarray *keys,
+                                            Ndarray *values,
+                                            Ndarray *output,
+                                            Ndarray *offsets,
+                                            Ndarray *scratch,
+                                            Ndarray *cursor,
+                                            int value_type,
+                                            int op);
 
   void vulkan_grouped_reduce_clear_workspace();
 

@@ -7,6 +7,38 @@ from taichi_forge.lang import impl
 from tests import test_utils
 
 
+_TRANSFORM_DTYPES = (ti.u32, ti.i32, ti.f32, ti.u64, ti.i64, ti.f64)
+
+
+def _transform_case(dtype, n):
+    if dtype == ti.u32:
+        data = (np.arange(n, dtype=np.uint32) % np.uint32(113)).astype(np.uint32)
+        return data, 3, 7, (data * np.uint32(3) + np.uint32(7)).astype(np.uint32)
+    if dtype == ti.i32:
+        data = (np.arange(n, dtype=np.int32) % 97 - 48).astype(np.int32)
+        return data, -2, 9, (data * np.int32(-2) + np.int32(9)).astype(np.int32)
+    if dtype == ti.f32:
+        data = (np.arange(n, dtype=np.float32) % 37 - 18) * np.float32(0.5)
+        return data, 0.5, 3.25, data * np.float32(0.5) + np.float32(3.25)
+    if dtype == ti.u64:
+        data = (np.arange(n, dtype=np.uint64) % np.uint64(257)).astype(np.uint64)
+        return data, 5, 11, (data * np.uint64(5) + np.uint64(11)).astype(np.uint64)
+    if dtype == ti.i64:
+        data = (np.arange(n, dtype=np.int64) % 211 - 105).astype(np.int64)
+        return data, -3, 17, (data * np.int64(-3) + np.int64(17)).astype(np.int64)
+    if dtype == ti.f64:
+        data = (np.arange(n, dtype=np.float64) % 43 - 21) * np.float64(0.125)
+        return data, -1.75, 0.5, data * np.float64(-1.75) + np.float64(0.5)
+    raise AssertionError(dtype)
+
+
+def _assert_transform_equal(dtype, actual, expected):
+    if dtype in (ti.f32, ti.f64):
+        np.testing.assert_allclose(actual, expected, rtol=1e-6)
+    else:
+        assert np.array_equal(actual, expected)
+
+
 @test_utils.test(arch=[ti.cuda])
 def test_experimental_transform_cuda_device_ndarray_i32():
     n = 4096
@@ -52,6 +84,35 @@ def test_experimental_transform_cuda_device_ndarray_f32():
     np.testing.assert_allclose(dst.to_numpy(), data * 1.5 - 0.25, rtol=1e-6)
 
 
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_transform_cuda_device_ndarray_extended_dtypes():
+    n = 4096
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cuda_device_transform_available")
+        and prog.cuda_device_transform_available()
+    ):
+        pytest.skip("CUDA device transform is unavailable in this runtime.")
+
+    for dtype in _TRANSFORM_DTYPES:
+        if dtype in (ti.u64, ti.i64, ti.f64) and not (
+            hasattr(prog, "cuda_toolkit_transform_available")
+            and prog.cuda_toolkit_transform_available()
+        ):
+            continue
+        data, scale, bias, expected = _transform_case(dtype, n)
+        src = ti.ndarray(dtype, shape=n)
+        dst = ti.ndarray(dtype, shape=n)
+        src.from_numpy(data)
+        dst.fill(0)
+        workspace = ti.algorithms.TransformWorkspace(max_items=n)
+        ti.algorithms.experimental_transform(
+            src, dst, scale=scale, bias=bias, method="cuda_device", workspace=workspace
+        )
+        _assert_transform_equal(dtype, dst.to_numpy(), expected)
+        assert workspace.workspace_bytes_peak == 0
+
+
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_transform_vulkan_native_ndarray_i32_f32():
     n = 4096
@@ -90,6 +151,44 @@ def test_experimental_transform_vulkan_native_ndarray_i32_f32():
     )
     expected_reuse = (data_i * np.int32(3) + np.int32(-4)).astype(np.int32)
     assert np.array_equal(dst_i.to_numpy(), expected_reuse)
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_transform_vulkan_native_ndarray_extended_dtypes():
+    n = 4096
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_transform_available")
+        and prog.vulkan_transform_available()
+    ):
+        pytest.skip("Vulkan native transform is unavailable in this runtime.")
+
+    for dtype, value_type in (
+        (ti.u32, 2),
+        (ti.i64, 4),
+        (ti.u64, 3),
+        (ti.f64, 5),
+    ):
+        if hasattr(prog, "vulkan_transform_value_type_available") and not (
+            prog.vulkan_transform_value_type_available(value_type)
+        ):
+            continue
+        data, scale, bias, expected = _transform_case(dtype, n)
+        src = ti.ndarray(dtype, shape=n)
+        dst = ti.ndarray(dtype, shape=n)
+        src.from_numpy(data)
+        dst.fill(0)
+        workspace = ti.algorithms.TransformWorkspace(max_items=n)
+        ti.algorithms.experimental_transform(
+            src,
+            dst,
+            scale=scale,
+            bias=bias,
+            method="vulkan_native",
+            workspace=workspace,
+        )
+        _assert_transform_equal(dtype, dst.to_numpy(), expected)
+        assert workspace.workspace_bytes_peak >= 8
 
 
 @pytest.mark.run_in_serial
@@ -137,6 +236,23 @@ def test_experimental_transform_cpu_native_ndarray_i32_f32():
         src_f, dst_f, scale=-2.0, bias=0.75, method="cpu_native"
     )
     np.testing.assert_allclose(dst_f.to_numpy(), data_f * -2.0 + 0.75, rtol=1e-6)
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_transform_cpu_native_ndarray_extended_dtypes():
+    n = 131072
+    for dtype in _TRANSFORM_DTYPES:
+        data, scale, bias, expected = _transform_case(dtype, n)
+        src = ti.ndarray(dtype, shape=n)
+        dst = ti.ndarray(dtype, shape=n)
+        src.from_numpy(data)
+        dst.fill(0)
+        workspace = ti.algorithms.TransformWorkspace(max_items=n)
+        ti.algorithms.experimental_transform(
+            src, dst, scale=scale, bias=bias, method="cpu_native", workspace=workspace
+        )
+        _assert_transform_equal(dtype, dst.to_numpy(), expected)
+        assert workspace.workspace_bytes_peak == 0
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

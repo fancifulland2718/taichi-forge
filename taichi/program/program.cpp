@@ -61,6 +61,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <type_traits>
 #include <vector>
 
 namespace taichi::lang {
@@ -184,9 +185,9 @@ bool cpu_sort_key_before<double>(double lhs,
   return descending ? lhs_key > rhs_key : lhs_key < rhs_key;
 }
 
-template <typename KeyT>
+template <typename KeyT, typename ValueT>
 std::size_t cpu_stable_sort_impl(KeyT *keys,
-                                 int32_t *values,
+                                 ValueT *values,
                                  std::size_t n,
                                  bool descending,
                                  int nan_policy) {
@@ -196,7 +197,7 @@ std::size_t cpu_stable_sort_impl(KeyT *keys,
   if (values) {
     struct Item {
       KeyT key;
-      int32_t value;
+      ValueT value;
     };
     std::vector<Item> items(n);
     for (std::size_t i = 0; i < n; ++i) {
@@ -223,25 +224,58 @@ std::size_t cpu_stable_sort_impl(KeyT *keys,
   return sorted_keys.size() * sizeof(KeyT);
 }
 
+template <typename KeyT>
+std::size_t cpu_stable_sort_value_dispatch(KeyT *keys,
+                                           void *values,
+                                           std::size_t n,
+                                           int value_type,
+                                           bool descending,
+                                           int nan_policy) {
+  if (!values) {
+    return cpu_stable_sort_impl<KeyT, int32_t>(
+        keys, nullptr, n, descending, nan_policy);
+  }
+  switch (value_type) {
+    case 0:
+      return cpu_stable_sort_impl<KeyT, int32_t>(
+          keys, reinterpret_cast<int32_t *>(values), n, descending,
+          nan_policy);
+    case 1:
+      return cpu_stable_sort_impl<KeyT, float>(
+          keys, reinterpret_cast<float *>(values), n, descending, nan_policy);
+    case 2:
+      return cpu_stable_sort_impl<KeyT, uint32_t>(
+          keys, reinterpret_cast<uint32_t *>(values), n, descending,
+          nan_policy);
+    case 3:
+      return cpu_stable_sort_impl<KeyT, uint64_t>(
+          keys, reinterpret_cast<uint64_t *>(values), n, descending,
+          nan_policy);
+    case 4:
+      return cpu_stable_sort_impl<KeyT, int64_t>(
+          keys, reinterpret_cast<int64_t *>(values), n, descending,
+          nan_policy);
+    case 5:
+      return cpu_stable_sort_impl<KeyT, double>(
+          keys, reinterpret_cast<double *>(values), n, descending, nan_policy);
+    default:
+      TI_ERROR("CPU native sort received an unsupported value type.");
+  }
+}
+
+template <typename ValueT, typename CounterT>
 struct CpuHistogramTaskContext {
-  const int32_t *values{nullptr};
-  int32_t *partial{nullptr};
+  const ValueT *values{nullptr};
+  CounterT *partial{nullptr};
   std::size_t n{0};
   std::size_t num_bins{0};
   int num_threads{1};
 };
 
-struct CpuReduceI32TaskContext {
-  const int32_t *values{nullptr};
-  int64_t *partial{nullptr};
-  std::size_t n{0};
-  int num_threads{1};
-  int op{0};
-};
-
-struct CpuReduceF32TaskContext {
-  const float *values{nullptr};
-  float *partial{nullptr};
+template <typename T>
+struct CpuReduceTaskContext {
+  const T *values{nullptr};
+  T *partial{nullptr};
   std::size_t n{0};
   int num_threads{1};
   int op{0};
@@ -261,49 +295,33 @@ struct CpuCopyTaskContext {
   int num_threads{1};
 };
 
-struct CpuTransformI32TaskContext {
-  const uint32_t *src{nullptr};
-  uint32_t *dst{nullptr};
+template <typename T>
+struct CpuTransformTaskContext {
+  const T *src{nullptr};
+  T *dst{nullptr};
   std::size_t n{0};
-  uint32_t scale{0};
-  uint32_t bias{0};
-  int num_threads{1};
-};
-
-struct CpuTransformF32TaskContext {
-  const float *src{nullptr};
-  float *dst{nullptr};
-  std::size_t n{0};
-  float scale{0.0f};
-  float bias{0.0f};
+  T scale{};
+  T bias{};
   int num_threads{1};
 };
 
 struct CpuIndexedCopyTaskContext {
-  const uint32_t *src{nullptr};
+  const uint8_t *src{nullptr};
   const int32_t *indices{nullptr};
-  uint32_t *dst{nullptr};
+  uint8_t *dst{nullptr};
   std::size_t n{0};
   std::size_t index_bound{0};
+  std::size_t item_bytes{0};
   bool scatter{false};
   int num_threads{1};
 };
 
-struct CpuScatterAddI32TaskContext {
-  const int32_t *src{nullptr};
+template <typename T>
+struct CpuScatterAddTaskContext {
+  const T *src{nullptr};
   const int32_t *indices{nullptr};
-  int32_t *partial{nullptr};
-  int32_t *dst{nullptr};
-  std::size_t n{0};
-  std::size_t dst_items{0};
-  int num_threads{1};
-};
-
-struct CpuScatterAddF32TaskContext {
-  const float *src{nullptr};
-  const int32_t *indices{nullptr};
-  float *partial{nullptr};
-  float *dst{nullptr};
+  T *partial{nullptr};
+  T *dst{nullptr};
   std::size_t n{0};
   std::size_t dst_items{0};
   int num_threads{1};
@@ -317,21 +335,23 @@ struct CpuBucketCountTaskContext {
   int num_threads{1};
 };
 
+template <typename T>
 struct CpuBucketScatterTaskContext {
   const int32_t *keys{nullptr};
-  const int32_t *values{nullptr};
+  const T *values{nullptr};
   int32_t *thread_offsets{nullptr};
-  int32_t *output{nullptr};
+  T *output{nullptr};
   std::size_t n{0};
   std::size_t num_bins{0};
   int num_threads{1};
 };
 
-struct CpuGroupedReduceI32TaskContext {
+template <typename T>
+struct CpuGroupedReduceTaskContext {
   const int32_t *keys{nullptr};
-  const int32_t *values{nullptr};
-  int32_t *partial{nullptr};
-  int32_t *output{nullptr};
+  const T *values{nullptr};
+  T *partial{nullptr};
+  T *output{nullptr};
   std::size_t n{0};
   std::size_t num_groups{0};
   int num_threads{1};
@@ -349,64 +369,51 @@ taichi::ThreadPool &get_cpu_primitive_thread_pool(int max_threads) {
   return *pool;
 }
 
-int64_t cpu_reduce_i32_identity(int op) {
+template <typename T>
+T cpu_reduce_identity(int op) {
   if (op == 1) {
-    return std::numeric_limits<int32_t>::max();
+    if constexpr (std::is_floating_point_v<T>) {
+      return std::numeric_limits<T>::infinity();
+    } else {
+      return std::numeric_limits<T>::max();
+    }
   }
   if (op == 2) {
-    return std::numeric_limits<int32_t>::min();
+    if constexpr (std::is_floating_point_v<T>) {
+      return -std::numeric_limits<T>::infinity();
+    } else {
+      return std::numeric_limits<T>::lowest();
+    }
   }
-  return 0;
+  return T{0};
 }
 
-int64_t cpu_reduce_i32_combine(int64_t a, int64_t b, int op) {
-  if (op == 1) {
-    return std::min<int64_t>(a, b);
-  }
-  if (op == 2) {
-    return std::max<int64_t>(a, b);
-  }
-  return a + b;
-}
-
-float cpu_reduce_f32_identity(int op) {
-  if (op == 1) {
-    return std::numeric_limits<float>::infinity();
-  }
-  if (op == 2) {
-    return -std::numeric_limits<float>::infinity();
-  }
-  return 0.0f;
-}
-
-float cpu_reduce_f32_combine(float a, float b, int op) {
+template <typename T>
+T cpu_reduce_combine(T a, T b, int op) {
   if (op == 1) {
     return std::min(a, b);
   }
   if (op == 2) {
     return std::max(a, b);
   }
-  return a + b;
-}
-
-void cpu_reduce_i32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuReduceI32TaskContext *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  int64_t acc = cpu_reduce_i32_identity(ctx->op);
-  for (std::size_t i = begin; i < end; ++i) {
-    acc = cpu_reduce_i32_combine(acc, ctx->values[i], ctx->op);
+  if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
+    using U = std::make_unsigned_t<T>;
+    U ua = 0;
+    U ub = 0;
+    std::memcpy(&ua, &a, sizeof(T));
+    std::memcpy(&ub, &b, sizeof(T));
+    U sum = ua + ub;
+    T result{};
+    std::memcpy(&result, &sum, sizeof(T));
+    return result;
+  } else {
+    return a + b;
   }
-  ctx->partial[tid] = acc;
 }
 
-void cpu_reduce_f32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuReduceF32TaskContext *>(raw_ctx);
+template <typename T>
+void cpu_reduce_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuReduceTaskContext<T> *>(raw_ctx);
   const int tid = task_id;
   const std::size_t begin =
       ctx->n * static_cast<std::size_t>(tid) /
@@ -414,9 +421,9 @@ void cpu_reduce_f32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
   const std::size_t end =
       ctx->n * static_cast<std::size_t>(tid + 1) /
       static_cast<std::size_t>(ctx->num_threads);
-  float acc = cpu_reduce_f32_identity(ctx->op);
+  T acc = cpu_reduce_identity<T>(ctx->op);
   for (std::size_t i = begin; i < end; ++i) {
-    acc = cpu_reduce_f32_combine(acc, ctx->values[i], ctx->op);
+    acc = cpu_reduce_combine(acc, ctx->values[i], ctx->op);
   }
   ctx->partial[tid] = acc;
 }
@@ -445,8 +452,9 @@ void cpu_copy_task(void *raw_ctx, int /*thread_id*/, int task_id) {
   std::memcpy(ctx->dst + begin, ctx->src + begin, end - begin);
 }
 
-void cpu_transform_i32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuTransformI32TaskContext *>(raw_ctx);
+template <typename T>
+void cpu_transform_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuTransformTaskContext<T> *>(raw_ctx);
   const int tid = task_id;
   const std::size_t begin =
       ctx->n * static_cast<std::size_t>(tid) /
@@ -459,17 +467,29 @@ void cpu_transform_i32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
   }
 }
 
-void cpu_transform_f32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuTransformF32TaskContext *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t i = begin; i < end; ++i) {
-    ctx->dst[i] = ctx->src[i] * ctx->scale + ctx->bias;
+template <typename T>
+void cpu_transform_run_typed(const T *src_ptr,
+                             T *dst_ptr,
+                             std::size_t n,
+                             T scale,
+                             T bias,
+                             bool use_parallel,
+                             int target_threads,
+                             int max_threads) {
+  if (use_parallel) {
+    CpuTransformTaskContext<T> ctx;
+    ctx.src = src_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.scale = scale;
+    ctx.bias = bias;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx, cpu_transform_task<T>);
+    return;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    dst_ptr[i] = src_ptr[i] * scale + bias;
   }
 }
 
@@ -486,27 +506,30 @@ void cpu_indexed_copy_task(void *raw_ctx, int /*thread_id*/, int task_id) {
     for (std::size_t i = begin; i < end; ++i) {
       const auto index = static_cast<std::size_t>(ctx->indices[i]);
       if (index < ctx->index_bound) {
-        ctx->dst[index] = ctx->src[i];
+        std::memcpy(ctx->dst + index * ctx->item_bytes,
+                    ctx->src + i * ctx->item_bytes, ctx->item_bytes);
       }
     }
   } else {
     for (std::size_t i = begin; i < end; ++i) {
       const auto index = static_cast<std::size_t>(ctx->indices[i]);
       if (index < ctx->index_bound) {
-        ctx->dst[i] = ctx->src[index];
+        std::memcpy(ctx->dst + i * ctx->item_bytes,
+                    ctx->src + index * ctx->item_bytes, ctx->item_bytes);
       } else {
-        ctx->dst[i] = 0;
+        std::memset(ctx->dst + i * ctx->item_bytes, 0, ctx->item_bytes);
       }
     }
   }
 }
 
-void cpu_scatter_add_i32_count_task(void *raw_ctx,
-                                    int /*thread_id*/,
-                                    int task_id) {
-  auto *ctx = static_cast<CpuScatterAddI32TaskContext *>(raw_ctx);
+template <typename T>
+void cpu_scatter_add_count_task(void *raw_ctx,
+                                int /*thread_id*/,
+                                int task_id) {
+  auto *ctx = static_cast<CpuScatterAddTaskContext<T> *>(raw_ctx);
   const int tid = task_id;
-  int32_t *local = ctx->partial + ctx->dst_items * static_cast<std::size_t>(tid);
+  T *local = ctx->partial + ctx->dst_items * static_cast<std::size_t>(tid);
   const std::size_t begin =
       ctx->n * static_cast<std::size_t>(tid) /
       static_cast<std::size_t>(ctx->num_threads);
@@ -516,15 +539,16 @@ void cpu_scatter_add_i32_count_task(void *raw_ctx,
   for (std::size_t i = begin; i < end; ++i) {
     const auto index = static_cast<std::size_t>(ctx->indices[i]);
     if (index < ctx->dst_items) {
-      local[index] += ctx->src[i];
+      local[index] = cpu_reduce_combine(local[index], ctx->src[i], 0);
     }
   }
 }
 
-void cpu_scatter_add_i32_merge_task(void *raw_ctx,
-                                    int /*thread_id*/,
-                                    int task_id) {
-  auto *ctx = static_cast<CpuScatterAddI32TaskContext *>(raw_ctx);
+template <typename T>
+void cpu_scatter_add_merge_task(void *raw_ctx,
+                                int /*thread_id*/,
+                                int task_id) {
+  auto *ctx = static_cast<CpuScatterAddTaskContext<T> *>(raw_ctx);
   const int tid = task_id;
   const std::size_t begin =
       ctx->dst_items * static_cast<std::size_t>(tid) /
@@ -533,52 +557,55 @@ void cpu_scatter_add_i32_merge_task(void *raw_ctx,
       ctx->dst_items * static_cast<std::size_t>(tid + 1) /
       static_cast<std::size_t>(ctx->num_threads);
   for (std::size_t i = begin; i < end; ++i) {
-    int32_t value = 0;
+    T value{};
     for (int t = 0; t < ctx->num_threads; ++t) {
-      value += ctx->partial[ctx->dst_items * static_cast<std::size_t>(t) + i];
+      value = cpu_reduce_combine(
+          value,
+          ctx->partial[ctx->dst_items * static_cast<std::size_t>(t) + i], 0);
     }
-    ctx->dst[i] += value;
+    ctx->dst[i] = cpu_reduce_combine(ctx->dst[i], value, 0);
   }
 }
 
-void cpu_scatter_add_f32_count_task(void *raw_ctx,
-                                    int /*thread_id*/,
-                                    int task_id) {
-  auto *ctx = static_cast<CpuScatterAddF32TaskContext *>(raw_ctx);
-  const int tid = task_id;
-  float *local = ctx->partial + ctx->dst_items * static_cast<std::size_t>(tid);
-  const std::size_t begin =
-      ctx->n * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->n * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t i = begin; i < end; ++i) {
-    const auto index = static_cast<std::size_t>(ctx->indices[i]);
-    if (index < ctx->dst_items) {
-      local[index] += ctx->src[i];
+template <typename T>
+std::size_t cpu_scatter_add_typed(const T *src_ptr,
+                                  const int32_t *indices_ptr,
+                                  T *dst_ptr,
+                                  std::size_t n,
+                                  std::size_t dst_items,
+                                  int max_threads,
+                                  int target_threads) {
+  TI_ERROR_IF(!src_ptr || !dst_ptr,
+              "CPU native scatter-add received a null data pointer.");
+  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
+  const std::size_t workspace_bytes =
+      static_cast<std::size_t>(target_threads) * dst_items * sizeof(T);
+  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
+    std::vector<T> partial(static_cast<std::size_t>(target_threads) * dst_items,
+                           T{});
+    CpuScatterAddTaskContext<T> ctx;
+    ctx.src = src_ptr;
+    ctx.indices = indices_ptr;
+    ctx.partial = partial.data();
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.dst_items = dst_items;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_scatter_add_count_task<T>);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_scatter_add_merge_task<T>);
+    update_cpu_scatter_add_workspace_peak(workspace_bytes);
+    return workspace_bytes;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto index = static_cast<std::size_t>(indices_ptr[i]);
+    if (index < dst_items) {
+      dst_ptr[index] = cpu_reduce_combine(dst_ptr[index], src_ptr[i], 0);
     }
   }
-}
-
-void cpu_scatter_add_f32_merge_task(void *raw_ctx,
-                                    int /*thread_id*/,
-                                    int task_id) {
-  auto *ctx = static_cast<CpuScatterAddF32TaskContext *>(raw_ctx);
-  const int tid = task_id;
-  const std::size_t begin =
-      ctx->dst_items * static_cast<std::size_t>(tid) /
-      static_cast<std::size_t>(ctx->num_threads);
-  const std::size_t end =
-      ctx->dst_items * static_cast<std::size_t>(tid + 1) /
-      static_cast<std::size_t>(ctx->num_threads);
-  for (std::size_t i = begin; i < end; ++i) {
-    float value = 0.0f;
-    for (int t = 0; t < ctx->num_threads; ++t) {
-      value += ctx->partial[ctx->dst_items * static_cast<std::size_t>(t) + i];
-    }
-    ctx->dst[i] += value;
-  }
+  return 0;
 }
 
 void cpu_bucket_count_task(void *raw_ctx, int /*thread_id*/, int task_id) {
@@ -599,8 +626,9 @@ void cpu_bucket_count_task(void *raw_ctx, int /*thread_id*/, int task_id) {
   }
 }
 
+template <typename T>
 void cpu_bucket_scatter_task(void *raw_ctx, int /*thread_id*/, int task_id) {
-  auto *ctx = static_cast<CpuBucketScatterTaskContext *>(raw_ctx);
+  auto *ctx = static_cast<CpuBucketScatterTaskContext<T> *>(raw_ctx);
   const int tid = task_id;
   int32_t *local =
       ctx->thread_offsets + ctx->num_bins * static_cast<std::size_t>(tid);
@@ -621,12 +649,106 @@ void cpu_bucket_scatter_task(void *raw_ctx, int /*thread_id*/, int task_id) {
   }
 }
 
-void cpu_grouped_reduce_i32_count_task(void *raw_ctx,
-                                       int /*thread_id*/,
-                                       int task_id) {
-  auto *ctx = static_cast<CpuGroupedReduceI32TaskContext *>(raw_ctx);
+template <typename T>
+std::size_t cpu_bucket_builder_typed(const int32_t *keys_ptr,
+                                     const T *values_ptr,
+                                     int32_t *offsets_ptr,
+                                     T *output_ptr,
+                                     std::size_t n,
+                                     std::size_t num_bins,
+                                     int max_threads) {
+  TI_ERROR_IF(!keys_ptr || !values_ptr || !offsets_ptr || !output_ptr,
+              "CPU native bucket builder received a null data pointer.");
+  std::fill(offsets_ptr, offsets_ptr + num_bins + 1, 0);
+  if (n == 0) {
+    return 0;
+  }
+
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
+  const std::size_t parallel_workspace =
+      static_cast<std::size_t>(target_threads) * num_bins * sizeof(int32_t) *
+      2;
+  const bool use_parallel =
+      n >= 65536 && target_threads > 1 && parallel_workspace <= kMaxWorkspaceBytes;
+
+  if (use_parallel) {
+    std::vector<int32_t> partial(
+        static_cast<std::size_t>(target_threads) * num_bins, 0);
+    CpuBucketCountTaskContext count_ctx;
+    count_ctx.keys = keys_ptr;
+    count_ctx.partial = partial.data();
+    count_ctx.n = n;
+    count_ctx.num_bins = num_bins;
+    count_ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &count_ctx, cpu_bucket_count_task);
+
+    std::vector<int32_t> thread_offsets(
+        static_cast<std::size_t>(target_threads) * num_bins, 0);
+    int64_t running = 0;
+    offsets_ptr[0] = 0;
+    for (std::size_t bin = 0; bin < num_bins; ++bin) {
+      int64_t pos = running;
+      for (int tid = 0; tid < target_threads; ++tid) {
+        const std::size_t idx =
+            static_cast<std::size_t>(tid) * num_bins + bin;
+        thread_offsets[idx] = static_cast<int32_t>(pos);
+        pos += partial[idx];
+      }
+      running = pos;
+      TI_ERROR_IF(running > std::numeric_limits<int32_t>::max(),
+                  "CPU native bucket builder valid item count exceeds i32 range.");
+      offsets_ptr[bin + 1] = static_cast<int32_t>(running);
+    }
+
+    CpuBucketScatterTaskContext<T> scatter_ctx;
+    scatter_ctx.keys = keys_ptr;
+    scatter_ctx.values = values_ptr;
+    scatter_ctx.thread_offsets = thread_offsets.data();
+    scatter_ctx.output = output_ptr;
+    scatter_ctx.n = n;
+    scatter_ctx.num_bins = num_bins;
+    scatter_ctx.num_threads = target_threads;
+    pool.run(target_threads, target_threads, &scatter_ctx,
+             cpu_bucket_scatter_task<T>);
+    return parallel_workspace;
+  }
+
+  for (std::size_t i = 0; i < n; ++i) {
+    int32_t key = keys_ptr[i];
+    if (key >= 0 && static_cast<std::size_t>(key) < num_bins) {
+      offsets_ptr[static_cast<std::size_t>(key) + 1] += 1;
+    }
+  }
+  int64_t running = 0;
+  for (std::size_t bin = 0; bin <= num_bins; ++bin) {
+    running += offsets_ptr[bin];
+    TI_ERROR_IF(running > std::numeric_limits<int32_t>::max(),
+                "CPU native bucket builder valid item count exceeds i32 range.");
+    offsets_ptr[bin] = static_cast<int32_t>(running);
+  }
+  std::vector<int32_t> cursor(offsets_ptr, offsets_ptr + num_bins);
+  for (std::size_t i = 0; i < n; ++i) {
+    int32_t key = keys_ptr[i];
+    if (key >= 0 && static_cast<std::size_t>(key) < num_bins) {
+      int32_t pos = cursor[key]++;
+      output_ptr[pos] = values_ptr[i];
+    }
+  }
+  return cursor.size() * sizeof(int32_t);
+}
+
+template <typename T>
+void cpu_grouped_reduce_count_task(void *raw_ctx,
+                                   int /*thread_id*/,
+                                   int task_id) {
+  auto *ctx = static_cast<CpuGroupedReduceTaskContext<T> *>(raw_ctx);
   const int tid = task_id;
-  int32_t *local =
+  T *local =
       ctx->partial + ctx->num_groups * static_cast<std::size_t>(tid);
   const std::size_t begin =
       ctx->n * static_cast<std::size_t>(tid) /
@@ -637,15 +759,16 @@ void cpu_grouped_reduce_i32_count_task(void *raw_ctx,
   for (std::size_t i = begin; i < end; ++i) {
     int32_t key = ctx->keys[i];
     if (key >= 0 && static_cast<std::size_t>(key) < ctx->num_groups) {
-      local[key] += ctx->values[i];
+      local[key] = cpu_reduce_combine(local[key], ctx->values[i], 0);
     }
   }
 }
 
-void cpu_grouped_reduce_i32_merge_task(void *raw_ctx,
-                                       int /*thread_id*/,
-                                       int task_id) {
-  auto *ctx = static_cast<CpuGroupedReduceI32TaskContext *>(raw_ctx);
+template <typename T>
+void cpu_grouped_reduce_merge_task(void *raw_ctx,
+                                   int /*thread_id*/,
+                                   int task_id) {
+  auto *ctx = static_cast<CpuGroupedReduceTaskContext<T> *>(raw_ctx);
   const int tid = task_id;
   const std::size_t begin =
       ctx->num_groups * static_cast<std::size_t>(tid) /
@@ -654,18 +777,192 @@ void cpu_grouped_reduce_i32_merge_task(void *raw_ctx,
       ctx->num_groups * static_cast<std::size_t>(tid + 1) /
       static_cast<std::size_t>(ctx->num_threads);
   for (std::size_t group = begin; group < end; ++group) {
-    int32_t value = 0;
+    T value{};
     for (int t = 0; t < ctx->num_threads; ++t) {
-      value += ctx->partial[ctx->num_groups * static_cast<std::size_t>(t) +
-                            group];
+      value = cpu_reduce_combine(
+          value,
+          ctx->partial[ctx->num_groups * static_cast<std::size_t>(t) + group],
+          0);
     }
     ctx->output[group] = value;
   }
 }
 
-void store_i32_wrapped_from_i64(int32_t *output, int64_t value) {
-  uint32_t wrapped = static_cast<uint32_t>(value);
-  std::memcpy(output, &wrapped, sizeof(wrapped));
+template <typename T>
+std::size_t cpu_grouped_reduce_typed(const int32_t *keys_ptr,
+                                     const T *values_ptr,
+                                     T *output_ptr,
+                                     std::size_t n,
+                                     std::size_t num_groups,
+                                     int max_threads,
+                                     int target_threads) {
+  TI_ERROR_IF(!keys_ptr || !values_ptr || !output_ptr,
+              "CPU native grouped reduce received a null data pointer.");
+  std::fill(output_ptr, output_ptr + num_groups, T{});
+  if (n == 0) {
+    return 0;
+  }
+  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
+  const std::size_t workspace_bytes =
+      static_cast<std::size_t>(target_threads) * num_groups * sizeof(T);
+  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
+    std::vector<T> partial(static_cast<std::size_t>(target_threads) *
+                               num_groups,
+                           T{});
+    CpuGroupedReduceTaskContext<T> ctx;
+    ctx.keys = keys_ptr;
+    ctx.values = values_ptr;
+    ctx.partial = partial.data();
+    ctx.output = output_ptr;
+    ctx.n = n;
+    ctx.num_groups = num_groups;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_grouped_reduce_count_task<T>);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_grouped_reduce_merge_task<T>);
+    update_cpu_grouped_reduce_workspace_peak(workspace_bytes);
+    return workspace_bytes;
+  }
+
+  for (std::size_t i = 0; i < n; ++i) {
+    int32_t key = keys_ptr[i];
+    if (key >= 0 && static_cast<std::size_t>(key) < num_groups) {
+      output_ptr[key] = cpu_reduce_combine(output_ptr[key], values_ptr[i], 0);
+    }
+  }
+  return 0;
+}
+
+std::size_t primitive_value_type_size(int value_type) {
+  if (value_type >= 0 && value_type <= 2) {
+    return sizeof(uint32_t);
+  }
+  if (value_type >= 3 && value_type <= 5) {
+    return sizeof(uint64_t);
+  }
+  return 0;
+}
+
+std::size_t histogram_bin_type_size(int bin_type) {
+  if (bin_type == 0) {
+    return sizeof(int32_t);
+  }
+  if (bin_type == 4) {
+    return sizeof(int64_t);
+  }
+  return 0;
+}
+
+template <typename ValueT>
+bool cpu_histogram_valid_bin(ValueT bin, std::size_t num_bins) {
+  if constexpr (std::is_unsigned_v<ValueT>) {
+    return static_cast<std::size_t>(bin) < num_bins;
+  } else {
+    return bin >= 0 && static_cast<std::size_t>(bin) < num_bins;
+  }
+}
+
+template <typename ValueT, typename CounterT>
+void cpu_histogram_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuHistogramTaskContext<ValueT, CounterT> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  CounterT *local =
+      ctx->partial + static_cast<std::size_t>(tid) * ctx->num_bins;
+  for (std::size_t i = begin; i < end; ++i) {
+    ValueT bin = ctx->values[i];
+    if (cpu_histogram_valid_bin(bin, ctx->num_bins)) {
+      local[static_cast<std::size_t>(bin)] += 1;
+    }
+  }
+}
+
+template <typename ValueT, typename CounterT>
+std::size_t cpu_histogram_typed(const ValueT *values_ptr,
+                                CounterT *bins_ptr,
+                                std::size_t n,
+                                std::size_t num_bins,
+                                int max_threads,
+                                int target_threads,
+                                bool use_parallel) {
+  TI_ERROR_IF(!values_ptr || !bins_ptr,
+              "CPU native histogram received a null data pointer.");
+  std::fill(bins_ptr, bins_ptr + num_bins, CounterT{});
+
+  if (use_parallel) {
+    const int num_threads = target_threads;
+    std::vector<CounterT> partial(
+        static_cast<std::size_t>(num_threads) * num_bins, CounterT{});
+    CpuHistogramTaskContext<ValueT, CounterT> ctx;
+    ctx.values = values_ptr;
+    ctx.partial = partial.data();
+    ctx.n = n;
+    ctx.num_bins = num_bins;
+    ctx.num_threads = num_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(num_threads, num_threads, &ctx,
+             cpu_histogram_task<ValueT, CounterT>);
+    for (std::size_t bin = 0; bin < num_bins; ++bin) {
+      CounterT total{};
+      for (int tid = 0; tid < num_threads; ++tid) {
+        total += partial[static_cast<std::size_t>(tid) * num_bins + bin];
+      }
+      bins_ptr[bin] = total;
+    }
+    return partial.size() * sizeof(CounterT);
+  }
+
+  for (std::size_t i = 0; i < n; ++i) {
+    ValueT bin = values_ptr[i];
+    if (cpu_histogram_valid_bin(bin, num_bins)) {
+      bins_ptr[static_cast<std::size_t>(bin)] += 1;
+    }
+  }
+  return 0;
+}
+
+template <typename T>
+std::size_t cpu_reduce_typed(T *values_ptr,
+                             T *output_ptr,
+                             int op,
+                             std::size_t n,
+                             int max_threads,
+                             int target_threads,
+                             bool use_parallel) {
+  TI_ERROR_IF(!values_ptr || !output_ptr,
+              "CPU native reduce received a null data pointer.");
+
+  T result = cpu_reduce_identity<T>(op);
+  if (use_parallel) {
+    const int num_threads = target_threads;
+    std::vector<T> partial(num_threads);
+    CpuReduceTaskContext<T> ctx;
+    ctx.values = values_ptr;
+    ctx.partial = partial.data();
+    ctx.n = n;
+    ctx.num_threads = num_threads;
+    ctx.op = op;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(num_threads, num_threads, &ctx, cpu_reduce_task<T>);
+    for (int tid = 0; tid < num_threads; ++tid) {
+      result = cpu_reduce_combine(result, partial[tid], op);
+    }
+    output_ptr[0] = result;
+    return partial.size() * sizeof(T);
+  }
+
+  for (std::size_t i = 0; i < n; ++i) {
+    result = cpu_reduce_combine(result, values_ptr[i], op);
+  }
+  output_ptr[0] = result;
+  return 0;
 }
 
 bool snode_tree_contains_hash(const SNode *snode) {
@@ -1487,7 +1784,17 @@ void Program::copy_ndarray_to_host(Ndarray *src,
 bool Program::cuda_device_transform_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&
-         cuda::driver_transform_available();
+         (cuda::driver_transform_available() ||
+          cuda::cub_transform_available());
+#else
+  return false;
+#endif
+}
+
+bool Program::cuda_toolkit_transform_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::cub_transform_available();
 #else
   return false;
 #endif
@@ -1507,19 +1814,53 @@ std::size_t Program::cuda_device_transform_affine_ndarray(Ndarray *src,
               "CUDA device transform source and destination sizes differ.");
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
               "CUDA device transform source and destination dtypes differ.");
-  TI_ERROR_IF(value_type < 0 || value_type > 1,
+  TI_ERROR_IF(value_type < 0 || value_type > 5,
               "CUDA device transform received an unsupported value type.");
-  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t),
-              "CUDA device transform currently expects 32-bit values.");
+  const auto cuda_value_type =
+      static_cast<cuda::CudaTransformValueType>(value_type);
+  std::size_t expected_size = 0;
+  switch (cuda_value_type) {
+    case cuda::CudaTransformValueType::i32:
+    case cuda::CudaTransformValueType::f32:
+    case cuda::CudaTransformValueType::u32:
+      expected_size = sizeof(uint32_t);
+      break;
+    case cuda::CudaTransformValueType::u64:
+    case cuda::CudaTransformValueType::i64:
+    case cuda::CudaTransformValueType::f64:
+      expected_size = sizeof(uint64_t);
+      break;
+  }
+  TI_ERROR_IF(src->get_element_size() != expected_size,
+              "CUDA device transform dtype does not match value type.");
   TI_ERROR_IF(src->get_nelement() >
                   static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA device transform currently supports at most INT_MAX items.");
 #ifdef TI_WITH_CUDA
   auto *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
   auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
-  return cuda::driver_transform_affine(
-      src_ptr, dst_ptr, static_cast<int>(src->get_nelement()),
-      static_cast<cuda::CudaTransformValueType>(value_type), scale, bias);
+  if (cuda_value_type == cuda::CudaTransformValueType::i32 ||
+      cuda_value_type == cuda::CudaTransformValueType::u32 ||
+      cuda_value_type == cuda::CudaTransformValueType::f32) {
+    TI_ERROR_IF(!cuda::driver_transform_available(),
+                "32-bit CUDA device transform requires CUDA driver API "
+                "support.");
+    return cuda::driver_transform_affine(
+        src_ptr, dst_ptr, static_cast<int>(src->get_nelement()),
+        cuda_value_type, scale, bias);
+  }
+  if (cuda::cub_transform_available()) {
+    void *stream = CUDAContext::get_instance().get_stream();
+    return cuda::cub_transform_affine(
+        src_ptr, dst_ptr, static_cast<int>(src->get_nelement()),
+        cuda_value_type, scale, bias, stream);
+  }
+  TI_ERROR_IF(cuda_value_type == cuda::CudaTransformValueType::u64 ||
+                  cuda_value_type == cuda::CudaTransformValueType::i64 ||
+                  cuda_value_type == cuda::CudaTransformValueType::f64,
+              "64-bit CUDA device transform requires TI_WITH_CUDA_TOOLKIT=ON "
+              "and a discoverable CUDA runtime.");
+  return 0;
 #else
   TI_ERROR("CUDA device transform requires TI_WITH_CUDA=ON.");
 #endif
@@ -1528,7 +1869,8 @@ std::size_t Program::cuda_device_transform_affine_ndarray(Ndarray *src,
 bool Program::cuda_device_indexed_copy_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&
-         cuda::driver_indexed_copy_available();
+         (cuda::cub_indexed_copy_available() ||
+          cuda::driver_indexed_copy_available());
 #else
   return false;
 #endif
@@ -1549,10 +1891,12 @@ std::size_t Program::cuda_device_gather_ndarray(Ndarray *src,
               "match.");
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
               "CUDA device gather source and destination dtypes differ.");
-  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t) ||
+  const std::size_t item_bytes = src->get_element_size();
+  TI_ERROR_IF((item_bytes != sizeof(uint32_t) &&
+               item_bytes != sizeof(uint64_t)) ||
                   indices->get_element_size() != sizeof(int32_t),
-              "CUDA device gather currently expects 32-bit values and i32 "
-              "indices.");
+              "CUDA device gather currently expects 4- or 8-byte scalar values "
+              "and i32 indices.");
   TI_ERROR_IF(indices->get_nelement() >
                   static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA device gather currently supports at most INT_MAX items.");
@@ -1565,10 +1909,26 @@ std::size_t Program::cuda_device_gather_ndarray(Ndarray *src,
   auto *indices_ptr =
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
   auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
-  return cuda::driver_indexed_copy(
-      src_ptr, indices_ptr, dst_ptr, static_cast<int>(indices->get_nelement()),
-      static_cast<int>(src->get_nelement()),
-      cuda::CudaIndexedCopyOp::gather);
+  const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                           item_words),
+              "CUDA device gather word count exceeds INT_MAX.");
+  if (cuda::cub_indexed_copy_available()) {
+    void *stream = CUDAContext::get_instance().get_stream();
+    return cuda::cub_indexed_copy(
+        src_ptr, indices_ptr, dst_ptr,
+        static_cast<int>(indices->get_nelement()),
+        static_cast<int>(src->get_nelement()), item_words,
+        cuda::CudaIndexedCopyOp::gather, stream);
+  }
+  TI_ERROR_IF(item_words != 1,
+              "CUDA device gather for 8-byte values requires "
+              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+  return cuda::driver_indexed_copy(src_ptr, indices_ptr, dst_ptr,
+                                   static_cast<int>(indices->get_nelement()),
+                                   static_cast<int>(src->get_nelement()),
+                                   cuda::CudaIndexedCopyOp::gather);
 #else
   TI_ERROR("CUDA device gather requires TI_WITH_CUDA=ON.");
 #endif
@@ -1588,10 +1948,12 @@ std::size_t Program::cuda_device_scatter_ndarray(Ndarray *src,
               "CUDA device scatter expects source and indices sizes to match.");
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
               "CUDA device scatter source and destination dtypes differ.");
-  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t) ||
+  const std::size_t item_bytes = src->get_element_size();
+  TI_ERROR_IF((item_bytes != sizeof(uint32_t) &&
+               item_bytes != sizeof(uint64_t)) ||
                   indices->get_element_size() != sizeof(int32_t),
-              "CUDA device scatter currently expects 32-bit values and i32 "
-              "indices.");
+              "CUDA device scatter currently expects 4- or 8-byte scalar values "
+              "and i32 indices.");
   TI_ERROR_IF(indices->get_nelement() >
                   static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA device scatter currently supports at most INT_MAX items.");
@@ -1604,10 +1966,26 @@ std::size_t Program::cuda_device_scatter_ndarray(Ndarray *src,
   auto *indices_ptr =
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
   auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
-  return cuda::driver_indexed_copy(
-      src_ptr, indices_ptr, dst_ptr, static_cast<int>(indices->get_nelement()),
-      static_cast<int>(dst->get_nelement()),
-      cuda::CudaIndexedCopyOp::scatter);
+  const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                           item_words),
+              "CUDA device scatter word count exceeds INT_MAX.");
+  if (cuda::cub_indexed_copy_available()) {
+    void *stream = CUDAContext::get_instance().get_stream();
+    return cuda::cub_indexed_copy(
+        src_ptr, indices_ptr, dst_ptr,
+        static_cast<int>(indices->get_nelement()),
+        static_cast<int>(dst->get_nelement()), item_words,
+        cuda::CudaIndexedCopyOp::scatter, stream);
+  }
+  TI_ERROR_IF(item_words != 1,
+              "CUDA device scatter for 8-byte values requires "
+              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+  return cuda::driver_indexed_copy(src_ptr, indices_ptr, dst_ptr,
+                                   static_cast<int>(indices->get_nelement()),
+                                   static_cast<int>(dst->get_nelement()),
+                                   cuda::CudaIndexedCopyOp::scatter);
 #else
   TI_ERROR("CUDA device scatter requires TI_WITH_CUDA=ON.");
 #endif
@@ -1638,12 +2016,13 @@ std::size_t Program::cuda_device_scatter_add_ndarray(Ndarray *src,
               "match.");
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
               "CUDA toolkit scatter-add source and destination dtypes differ.");
-  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t) ||
-                  indices->get_element_size() != sizeof(int32_t),
-              "CUDA toolkit scatter-add currently expects 32-bit values and "
-              "i32 indices.");
-  TI_ERROR_IF(value_type < 0 || value_type > 1,
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_size == 0,
               "CUDA toolkit scatter-add received an unsupported value type.");
+  TI_ERROR_IF(src->get_element_size() != expected_size ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "CUDA toolkit scatter-add dtype does not match value type or "
+              "indices are not i32.");
   TI_ERROR_IF(indices->get_nelement() >
                   static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA toolkit scatter-add currently supports at most INT_MAX "
@@ -1661,9 +2040,7 @@ std::size_t Program::cuda_device_scatter_add_ndarray(Ndarray *src,
   return cuda::cub_scatter_add(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(indices->get_nelement()),
       static_cast<int>(dst->get_nelement()),
-      value_type == 0 ? cuda::CudaScatterAddValueType::i32
-                      : cuda::CudaScatterAddValueType::f32,
-      stream);
+      static_cast<cuda::CudaScatterAddValueType>(value_type), stream);
 #else
   TI_ERROR(
       "CUDA scatter-add requires building Taichi with TI_WITH_CUDA=ON and "
@@ -1685,6 +2062,16 @@ std::size_t Program::cuda_device_bucket_builder_i32_ndarray(Ndarray *keys,
                                                             Ndarray *offsets,
                                                             Ndarray *output,
                                                             Ndarray *cursor) {
+  return cuda_device_bucket_builder_ndarray(keys, values, offsets, output,
+                                            cursor, 0);
+}
+
+std::size_t Program::cuda_device_bucket_builder_ndarray(Ndarray *keys,
+                                                        Ndarray *values,
+                                                        Ndarray *offsets,
+                                                        Ndarray *output,
+                                                        Ndarray *cursor,
+                                                        int value_type) {
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA toolkit bucket builder is only available on CUDA.");
   TI_ERROR_IF(!keys || !values || !offsets || !output || !cursor,
@@ -1702,12 +2089,16 @@ std::size_t Program::cuda_device_bucket_builder_i32_ndarray(Ndarray *keys,
               "CUDA toolkit bucket builder cursor is smaller than num_bins.");
   TI_ERROR_IF(output->get_nelement() < values->get_nelement(),
               "CUDA toolkit bucket builder output is smaller than input values.");
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_size == 0,
+              "CUDA toolkit bucket builder received an unsupported value type.");
   TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
-                  values->get_element_size() != sizeof(int32_t) ||
                   offsets->get_element_size() != sizeof(int32_t) ||
-                  output->get_element_size() != sizeof(int32_t) ||
+                  values->get_element_size() != expected_size ||
+                  output->get_element_size() != expected_size ||
                   cursor->get_element_size() != sizeof(int32_t),
-              "CUDA toolkit bucket builder currently expects i32 arrays.");
+              "CUDA toolkit bucket builder dtype does not match value type or "
+              "keys/offsets/cursor are not i32.");
   TI_ERROR_IF(keys->get_nelement() >
                   static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()) ||
                   num_bins > static_cast<std::size_t>(
@@ -1715,13 +2106,14 @@ std::size_t Program::cuda_device_bucket_builder_i32_ndarray(Ndarray *keys,
               "CUDA bucket builder input is too large for u32 launch parameters.");
 #ifdef TI_WITH_CUDA
   void *stream = CUDAContext::get_instance().get_stream();
-  return cuda::cub_bucket_builder_i32(
+  return cuda::cub_bucket_builder(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(offsets)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(cursor)),
       static_cast<int>(keys->get_nelement()), static_cast<int>(num_bins),
+      static_cast<cuda::CudaBucketBuilderValueType>(value_type),
       stream, this);
 #else
   TI_ERROR(
@@ -1744,6 +2136,14 @@ std::size_t Program::cuda_device_grouped_reduce_i32_atomic_ndarray(
     Ndarray *values,
     Ndarray *output,
     int op) {
+  return cuda_device_grouped_reduce_atomic_ndarray(keys, values, output, 0, op);
+}
+
+std::size_t Program::cuda_device_grouped_reduce_atomic_ndarray(Ndarray *keys,
+                                                               Ndarray *values,
+                                                               Ndarray *output,
+                                                               int value_type,
+                                                               int op) {
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA grouped reduce is only available on CUDA.");
   TI_ERROR_IF(!keys || !values || !output,
@@ -1756,10 +2156,13 @@ std::size_t Program::cuda_device_grouped_reduce_i32_atomic_ndarray(
   TI_ERROR_IF(output->get_nelement() == 0,
               "CUDA grouped reduce output must contain at least one group.");
   const std::size_t num_groups = output->get_nelement();
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_size == 0,
+              "CUDA grouped reduce received an unsupported value type.");
   TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
-                  values->get_element_size() != sizeof(int32_t) ||
-                  output->get_element_size() != sizeof(int32_t),
-              "CUDA grouped reduce currently expects i32 arrays.");
+                  values->get_element_size() != expected_size ||
+                  output->get_element_size() != expected_size,
+              "CUDA grouped reduce value type or i32 key size mismatch.");
   TI_ERROR_IF(op != 0, "CUDA grouped reduce currently supports only sum.");
   TI_ERROR_IF(keys->get_nelement() >
                       static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
@@ -1768,12 +2171,12 @@ std::size_t Program::cuda_device_grouped_reduce_i32_atomic_ndarray(
               "CUDA grouped reduce input is too large for int launch parameters.");
 #ifdef TI_WITH_CUDA
   void *stream = CUDAContext::get_instance().get_stream();
-  return cuda::cub_grouped_reduce_i32_atomic(
+  return cuda::cub_grouped_reduce_atomic(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
-      static_cast<int>(keys->get_nelement()), static_cast<int>(num_groups), op,
-      stream);
+      static_cast<int>(keys->get_nelement()), static_cast<int>(num_groups),
+      static_cast<cuda::CudaGroupedReduceValueType>(value_type), op, stream);
 #else
   TI_ERROR(
       "CUDA grouped reduce requires building Taichi with TI_WITH_CUDA=ON and "
@@ -1788,6 +2191,18 @@ std::size_t Program::cuda_device_grouped_reduce_i32_ndarray(Ndarray *keys,
                                                             Ndarray *scratch,
                                                             Ndarray *cursor,
                                                             int op) {
+  return cuda_device_grouped_reduce_ndarray(keys, values, output, offsets,
+                                            scratch, cursor, 0, op);
+}
+
+std::size_t Program::cuda_device_grouped_reduce_ndarray(Ndarray *keys,
+                                                        Ndarray *values,
+                                                        Ndarray *output,
+                                                        Ndarray *offsets,
+                                                        Ndarray *scratch,
+                                                        Ndarray *cursor,
+                                                        int value_type,
+                                                        int op) {
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA grouped reduce is only available on CUDA.");
   TI_ERROR_IF(!keys || !values || !output || !offsets || !scratch || !cursor,
@@ -1807,13 +2222,16 @@ std::size_t Program::cuda_device_grouped_reduce_i32_ndarray(Ndarray *keys,
               "CUDA grouped reduce scratch is smaller than input values.");
   TI_ERROR_IF(cursor->get_nelement() < num_groups,
               "CUDA grouped reduce cursor is smaller than num_groups.");
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_size == 0,
+              "CUDA grouped reduce received an unsupported value type.");
   TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
-                  values->get_element_size() != sizeof(int32_t) ||
-                  output->get_element_size() != sizeof(int32_t) ||
+                  values->get_element_size() != expected_size ||
+                  output->get_element_size() != expected_size ||
                   offsets->get_element_size() != sizeof(int32_t) ||
-                  scratch->get_element_size() != sizeof(int32_t) ||
+                  scratch->get_element_size() != expected_size ||
                   cursor->get_element_size() != sizeof(int32_t),
-              "CUDA grouped reduce currently expects i32 arrays.");
+              "CUDA grouped reduce value type or i32 metadata size mismatch.");
   TI_ERROR_IF(op != 0, "CUDA grouped reduce currently supports only sum.");
   TI_ERROR_IF(keys->get_nelement() >
                       static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
@@ -1822,14 +2240,15 @@ std::size_t Program::cuda_device_grouped_reduce_i32_ndarray(Ndarray *keys,
               "CUDA grouped reduce input is too large for int launch parameters.");
 #ifdef TI_WITH_CUDA
   void *stream = CUDAContext::get_instance().get_stream();
-  return cuda::cub_grouped_reduce_i32(
+  return cuda::cub_grouped_reduce(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(offsets)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(scratch)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(cursor)),
-      static_cast<int>(keys->get_nelement()), static_cast<int>(num_groups), op,
+      static_cast<int>(keys->get_nelement()), static_cast<int>(num_groups),
+      static_cast<cuda::CudaGroupedReduceValueType>(value_type), op,
       stream, this);
 #else
   TI_ERROR(
@@ -1850,6 +2269,7 @@ bool Program::cuda_cub_radix_sort_available() const {
 std::size_t Program::cuda_cub_radix_sort_ndarray(Ndarray *keys,
                                                  Ndarray *values,
                                                  int key_type,
+                                                 int value_type,
                                                  int mode,
                                                  int nan_policy) {
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
@@ -1863,16 +2283,18 @@ std::size_t Program::cuda_cub_radix_sort_ndarray(Ndarray *keys,
                 "CUDA CUB sort values must be a 1D ndarray.");
     TI_ERROR_IF(values->get_nelement() != keys->get_nelement(),
                 "CUDA CUB sort keys and values must have the same length.");
-    TI_ERROR_IF(values->get_element_size() != sizeof(int32_t),
-                "CUDA CUB sort currently expects i32 payload values.");
   }
 #ifdef TI_WITH_CUDA
   std::size_t expected_key_size = 0;
+  const std::size_t expected_value_size = primitive_value_type_size(value_type);
   TI_ERROR_IF(mode < 0 || mode > 1,
               "CUDA CUB sort received an unsupported sort mode.");
   TI_ERROR_IF(nan_policy < 0 || nan_policy > 1,
               "CUDA CUB sort received an unsupported NaN policy.");
+  TI_ERROR_IF(has_values && expected_value_size == 0,
+              "CUDA CUB sort received an unsupported value type.");
   const auto cub_key_type = static_cast<cuda::CubSortKeyType>(key_type);
+  const auto cub_value_type = static_cast<cuda::CubSortValueType>(value_type);
   const auto cub_mode = static_cast<cuda::CubSortMode>(mode);
   const auto cub_nan_policy =
       static_cast<cuda::CubSortNanPolicy>(nan_policy);
@@ -1892,6 +2314,10 @@ std::size_t Program::cuda_cub_radix_sort_ndarray(Ndarray *keys,
               "CUDA CUB sort received an unsupported key type.");
   TI_ERROR_IF(keys->get_element_size() != expected_key_size,
               "CUDA CUB sort key dtype does not match the requested key type.");
+  TI_ERROR_IF(has_values &&
+                  values->get_element_size() != expected_value_size,
+              "CUDA CUB sort value dtype does not match the requested value "
+              "type.");
   if (cub_mode == cuda::CubSortMode::split32) {
     TI_ERROR_IF(cub_key_type != cuda::CubSortKeyType::u64 &&
                     cub_key_type != cuda::CubSortKeyType::i64 &&
@@ -1908,7 +2334,8 @@ std::size_t Program::cuda_cub_radix_sort_ndarray(Ndarray *keys,
   void *stream = CUDAContext::get_instance().get_stream();
   return cuda::cub_radix_sort(
       key_ptr, value_ptr, static_cast<int>(keys->get_nelement()),
-      cub_key_type, cub_mode, cub_nan_policy, has_values, stream, this);
+      cub_key_type, cub_value_type, cub_mode, cub_nan_policy, has_values,
+      stream, this);
 #else
   TI_ERROR(
       "CUDA CUB sort requires building Taichi with TI_WITH_CUDA=ON and "
@@ -1940,6 +2367,7 @@ bool Program::cpu_stable_sort_available() const {
 std::size_t Program::cpu_stable_sort_ndarray(Ndarray *keys,
                                              Ndarray *values,
                                              int key_type,
+                                             int value_type,
                                              bool descending,
                                              int nan_policy) {
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
@@ -1955,15 +2383,19 @@ std::size_t Program::cpu_stable_sort_ndarray(Ndarray *keys,
                 "CPU native sort values must be a 1D ndarray.");
     TI_ERROR_IF(values->get_nelement() != keys->get_nelement(),
                 "CPU native sort keys and values must have the same length.");
-    TI_ERROR_IF(values->get_element_size() != sizeof(int32_t),
-                "CPU native sort currently expects i32 payload values.");
+    const std::size_t expected_value_size = primitive_value_type_size(value_type);
+    TI_ERROR_IF(expected_value_size == 0,
+                "CPU native sort received an unsupported value type.");
+    TI_ERROR_IF(values->get_element_size() != expected_value_size,
+                "CPU native sort value dtype does not match the requested "
+                "value type.");
   }
 
   const std::size_t n = keys->get_nelement();
-  int32_t *value_ptr =
-      has_values
-          ? reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(values))
-          : nullptr;
+  void *value_ptr = has_values
+                        ? reinterpret_cast<void *>(
+                              get_ndarray_data_ptr_as_int(values))
+                        : nullptr;
   auto key_ptr = get_ndarray_data_ptr_as_int(keys);
   TI_ERROR_IF(!key_ptr, "CPU native sort received a null key pointer.");
   TI_ERROR_IF(has_values && !value_ptr,
@@ -1973,39 +2405,39 @@ std::size_t Program::cpu_stable_sort_ndarray(Ndarray *keys,
     case 0:
       TI_ERROR_IF(keys->get_element_size() != sizeof(uint32_t),
                   "CPU native sort key dtype does not match ti.u32.");
-      return cpu_stable_sort_impl(
-          reinterpret_cast<uint32_t *>(key_ptr), value_ptr, n, descending,
-          nan_policy);
+      return cpu_stable_sort_value_dispatch(
+          reinterpret_cast<uint32_t *>(key_ptr), value_ptr, n, value_type,
+          descending, nan_policy);
     case 1:
       TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t),
                   "CPU native sort key dtype does not match ti.i32.");
-      return cpu_stable_sort_impl(
-          reinterpret_cast<int32_t *>(key_ptr), value_ptr, n, descending,
-          nan_policy);
+      return cpu_stable_sort_value_dispatch(
+          reinterpret_cast<int32_t *>(key_ptr), value_ptr, n, value_type,
+          descending, nan_policy);
     case 2:
       TI_ERROR_IF(keys->get_element_size() != sizeof(float),
                   "CPU native sort key dtype does not match ti.f32.");
-      return cpu_stable_sort_impl(
-          reinterpret_cast<float *>(key_ptr), value_ptr, n, descending,
-          nan_policy);
+      return cpu_stable_sort_value_dispatch(
+          reinterpret_cast<float *>(key_ptr), value_ptr, n, value_type,
+          descending, nan_policy);
     case 3:
       TI_ERROR_IF(keys->get_element_size() != sizeof(uint64_t),
                   "CPU native sort key dtype does not match ti.u64.");
-      return cpu_stable_sort_impl(
-          reinterpret_cast<uint64_t *>(key_ptr), value_ptr, n, descending,
-          nan_policy);
+      return cpu_stable_sort_value_dispatch(
+          reinterpret_cast<uint64_t *>(key_ptr), value_ptr, n, value_type,
+          descending, nan_policy);
     case 4:
       TI_ERROR_IF(keys->get_element_size() != sizeof(int64_t),
                   "CPU native sort key dtype does not match ti.i64.");
-      return cpu_stable_sort_impl(
-          reinterpret_cast<int64_t *>(key_ptr), value_ptr, n, descending,
-          nan_policy);
+      return cpu_stable_sort_value_dispatch(
+          reinterpret_cast<int64_t *>(key_ptr), value_ptr, n, value_type,
+          descending, nan_policy);
     case 5:
       TI_ERROR_IF(keys->get_element_size() != sizeof(double),
                   "CPU native sort key dtype does not match ti.f64.");
-      return cpu_stable_sort_impl(
-          reinterpret_cast<double *>(key_ptr), value_ptr, n, descending,
-          nan_policy);
+      return cpu_stable_sort_value_dispatch(
+          reinterpret_cast<double *>(key_ptr), value_ptr, n, value_type,
+          descending, nan_policy);
     default:
       TI_ERROR("CPU native sort received an unsupported key type.");
   }
@@ -2033,6 +2465,21 @@ std::size_t Program::cuda_cub_inclusive_scan_ndarray(Ndarray *data,
   switch (cub_value_type) {
     case cuda::CubScanValueType::i32:
       expected_value_size = sizeof(int32_t);
+      break;
+    case cuda::CubScanValueType::f32:
+      expected_value_size = sizeof(float);
+      break;
+    case cuda::CubScanValueType::u32:
+      expected_value_size = sizeof(uint32_t);
+      break;
+    case cuda::CubScanValueType::u64:
+      expected_value_size = sizeof(uint64_t);
+      break;
+    case cuda::CubScanValueType::i64:
+      expected_value_size = sizeof(int64_t);
+      break;
+    case cuda::CubScanValueType::f64:
+      expected_value_size = sizeof(double);
       break;
   }
   TI_ERROR_IF(expected_value_size == 0,
@@ -2076,10 +2523,11 @@ bool Program::cuda_cub_select_available() const {
 #endif
 }
 
-std::size_t Program::cuda_cub_select_i32_ndarray(Ndarray *values,
-                                                 Ndarray *flags,
-                                                 Ndarray *output,
-                                                 Ndarray *count) {
+std::size_t Program::cuda_cub_select_ndarray(Ndarray *values,
+                                             Ndarray *flags,
+                                             Ndarray *output,
+                                             Ndarray *count,
+                                             int value_type) {
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB select is only available on the CUDA backend.");
   TI_ERROR_IF(!values || !flags || !output || !count,
@@ -2093,12 +2541,29 @@ std::size_t Program::cuda_cub_select_i32_ndarray(Ndarray *values,
               "and output to have at least that many elements.");
   TI_ERROR_IF(count->get_nelement() < 1,
               "CUDA CUB select count ndarray must have at least one element.");
-  TI_ERROR_IF(values->get_element_size() != sizeof(int32_t) ||
+  std::size_t value_bytes = 0;
+  switch (value_type) {
+    case 0:
+    case 1:
+    case 2:
+      value_bytes = sizeof(uint32_t);
+      break;
+    case 3:
+    case 4:
+    case 5:
+      value_bytes = sizeof(uint64_t);
+      break;
+    default:
+      TI_ERROR("CUDA CUB select received an unsupported value type.");
+  }
+  TI_ERROR_IF(values->get_element_size() != value_bytes ||
+                  output->get_element_size() != value_bytes ||
                   flags->get_element_size() != sizeof(int32_t) ||
-                  output->get_element_size() != sizeof(int32_t) ||
                   count->get_element_size() != sizeof(int32_t),
-              "CUDA CUB select currently supports only i32 values, flags, "
-              "output, and count.");
+              "CUDA CUB select received mismatched value/flag/count dtypes.");
+  TI_ERROR_IF(values->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB select currently supports at most INT_MAX items.");
 #ifdef TI_WITH_CUDA
   auto values_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
   auto flags_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(flags));
@@ -2107,13 +2572,20 @@ std::size_t Program::cuda_cub_select_i32_ndarray(Ndarray *values,
   void *stream = CUDAContext::get_instance().get_stream();
   return cuda::cub_select_flagged(
       values_ptr, flags_ptr, output_ptr, count_ptr,
-      static_cast<int>(values->get_nelement()), cuda::CubSelectValueType::i32,
-      stream, this);
+      static_cast<int>(values->get_nelement()),
+      static_cast<cuda::CubSelectValueType>(value_type), stream, this);
 #else
   TI_ERROR(
       "CUDA CUB select requires building Taichi with TI_WITH_CUDA=ON and "
       "TI_WITH_CUDA_TOOLKIT=ON.");
 #endif
+}
+
+std::size_t Program::cuda_cub_select_i32_ndarray(Ndarray *values,
+                                                 Ndarray *flags,
+                                                 Ndarray *output,
+                                                 Ndarray *count) {
+  return cuda_cub_select_ndarray(values, flags, output, count, 0);
 }
 
 void Program::cuda_cub_select_clear_workspace() {
@@ -2143,15 +2615,29 @@ bool Program::cuda_cub_histogram_available() const {
 
 std::size_t Program::cuda_cub_histogram_i32_ndarray(Ndarray *values,
                                                     Ndarray *bins) {
+  return cuda_cub_histogram_ndarray(values, bins, 0, 0);
+}
+
+std::size_t Program::cuda_cub_histogram_ndarray(Ndarray *values,
+                                                Ndarray *bins,
+                                                int value_type,
+                                                int bin_type) {
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB histogram is only available on CUDA.");
   TI_ERROR_IF(!values || !bins,
               "CUDA CUB histogram received a null ndarray.");
   TI_ERROR_IF(values->shape.size() != 1 || bins->shape.size() != 1,
               "CUDA CUB histogram currently expects 1D ndarrays.");
-  TI_ERROR_IF(values->get_element_size() != sizeof(int32_t) ||
-                  bins->get_element_size() != sizeof(int32_t),
-              "CUDA CUB histogram currently expects i32 values and bins.");
+  TI_ERROR_IF(value_type != 0 && value_type != 2,
+              "CUDA CUB histogram currently supports only i32/u32 bin ids.");
+  const std::size_t value_size = value_type == 2 ? sizeof(uint32_t)
+                                                 : sizeof(int32_t);
+  const std::size_t bin_size = histogram_bin_type_size(bin_type);
+  TI_ERROR_IF(bin_size == 0,
+              "CUDA CUB histogram currently supports only i32/i64 bins.");
+  TI_ERROR_IF(values->get_element_size() != value_size ||
+                  bins->get_element_size() != bin_size,
+              "CUDA CUB histogram received mismatched value/bin dtypes.");
   TI_ERROR_IF(bins->get_nelement() == 0,
               "CUDA CUB histogram expects at least one bin.");
 #ifdef TI_WITH_CUDA
@@ -2161,7 +2647,9 @@ std::size_t Program::cuda_cub_histogram_i32_ndarray(Ndarray *values,
   void *stream = CUDAContext::get_instance().get_stream();
   return cuda::cub_histogram_even(
       values_ptr, bins_ptr, static_cast<int>(values->get_nelement()),
-      static_cast<int>(bins->get_nelement()), cuda::CubHistogramValueType::i32,
+      static_cast<int>(bins->get_nelement()),
+      static_cast<cuda::CubHistogramValueType>(value_type),
+      static_cast<cuda::CubHistogramBinType>(bin_type),
       stream, this);
 #else
   TI_ERROR(
@@ -2211,10 +2699,11 @@ std::size_t Program::cuda_cub_reduce_ndarray(Ndarray *values,
               "CUDA CUB reduce output ndarray must have at least one item.");
   TI_ERROR_IF(values->get_element_size() != output->get_element_size(),
               "CUDA CUB reduce expects matching input/output element sizes.");
-  TI_ERROR_IF(values->get_element_size() != sizeof(int32_t),
-              "CUDA CUB reduce currently expects 32-bit values.");
-  TI_ERROR_IF(value_type < 0 || value_type > 1,
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_size == 0,
               "CUDA CUB reduce received an unsupported value type.");
+  TI_ERROR_IF(values->get_element_size() != expected_size,
+              "CUDA CUB reduce dtype does not match value type.");
   TI_ERROR_IF(op < 0 || op > 2,
               "CUDA CUB reduce received an unsupported op.");
 #ifdef TI_WITH_CUDA
@@ -2262,19 +2751,45 @@ std::size_t Program::cpu_inclusive_scan_ndarray(Ndarray *data,
   TI_ERROR_IF(!data, "CPU native scan received a null ndarray.");
   TI_ERROR_IF(data->shape.size() != 1,
               "CPU native scan currently expects a 1D ndarray.");
-  TI_ERROR_IF(value_type != 0,
-              "CPU native scan currently supports only i32 values.");
-  TI_ERROR_IF(data->get_element_size() != sizeof(int32_t),
-              "CPU native scan currently expects i32 data.");
-
-  uint32_t *ptr =
-      reinterpret_cast<uint32_t *>(get_ndarray_data_ptr_as_int(data));
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_size == 0,
+              "CPU native scan received an unsupported value type.");
+  TI_ERROR_IF(data->get_element_size() != expected_size,
+              "CPU native scan dtype does not match the requested value type.");
+  auto ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(data));
   TI_ERROR_IF(!ptr, "CPU native scan received a null data pointer.");
-  uint32_t prefix = 0;
   const std::size_t n = data->get_nelement();
-  for (std::size_t i = 0; i < n; ++i) {
-    prefix += ptr[i];
-    ptr[i] = prefix;
+
+  auto scan_typed = [n](auto *typed_ptr) {
+    using T = std::remove_pointer_t<decltype(typed_ptr)>;
+    T prefix{};
+    for (std::size_t i = 0; i < n; ++i) {
+      prefix += typed_ptr[i];
+      typed_ptr[i] = prefix;
+    }
+  };
+
+  switch (value_type) {
+    case 0:
+      scan_typed(reinterpret_cast<int32_t *>(ptr));
+      break;
+    case 1:
+      scan_typed(reinterpret_cast<float *>(ptr));
+      break;
+    case 2:
+      scan_typed(reinterpret_cast<uint32_t *>(ptr));
+      break;
+    case 3:
+      scan_typed(reinterpret_cast<uint64_t *>(ptr));
+      break;
+    case 4:
+      scan_typed(reinterpret_cast<int64_t *>(ptr));
+      break;
+    case 5:
+      scan_typed(reinterpret_cast<double *>(ptr));
+      break;
+    default:
+      TI_ERROR("CPU native scan received an unsupported value type.");
   }
   return 0;
 }
@@ -2287,10 +2802,11 @@ bool Program::cpu_compact_available() const {
   return arch_is_cpu(compile_config().arch);
 }
 
-std::size_t Program::cpu_compact_i32_ndarray(Ndarray *values,
-                                             Ndarray *flags,
-                                             Ndarray *output,
-                                             Ndarray *count) {
+std::size_t Program::cpu_compact_ndarray(Ndarray *values,
+                                         Ndarray *flags,
+                                         Ndarray *output,
+                                         Ndarray *count,
+                                         int value_type) {
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native compact is only available on CPU backends.");
   TI_ERROR_IF(!values || !flags || !output || !count,
@@ -2304,19 +2820,27 @@ std::size_t Program::cpu_compact_i32_ndarray(Ndarray *values,
               "CPU native compact output must have at least input length.");
   TI_ERROR_IF(count->get_nelement() < 1,
               "CPU native compact count must contain at least one item.");
-  TI_ERROR_IF(values->get_element_size() != sizeof(int32_t) ||
+  const std::size_t value_bytes =
+      (value_type == 0 || value_type == 1 || value_type == 2)
+          ? sizeof(uint32_t)
+          : (value_type == 3 || value_type == 4 || value_type == 5)
+                ? sizeof(uint64_t)
+                : 0;
+  TI_ERROR_IF(value_bytes == 0,
+              "CPU native compact received an unsupported value type.");
+  TI_ERROR_IF(values->get_element_size() != value_bytes ||
+                  output->get_element_size() != value_bytes ||
                   flags->get_element_size() != sizeof(int32_t) ||
-                  output->get_element_size() != sizeof(int32_t) ||
                   count->get_element_size() != sizeof(int32_t),
-              "CPU native compact currently expects i32 values, flags, "
-              "output, and count.");
+              "CPU native compact received mismatched value/flag/count "
+              "dtypes.");
 
   auto *values_ptr =
-      reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(values));
+      reinterpret_cast<const uint8_t *>(get_ndarray_data_ptr_as_int(values));
   auto *flags_ptr =
       reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(flags));
   auto *output_ptr =
-      reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(output));
+      reinterpret_cast<uint8_t *>(get_ndarray_data_ptr_as_int(output));
   auto *count_ptr =
       reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(count));
   TI_ERROR_IF(!values_ptr || !flags_ptr || !output_ptr || !count_ptr,
@@ -2326,7 +2850,9 @@ std::size_t Program::cpu_compact_i32_ndarray(Ndarray *values,
   const std::size_t n = values->get_nelement();
   for (std::size_t i = 0; i < n; ++i) {
     if (flags_ptr[i] != 0) {
-      output_ptr[written++] = values_ptr[i];
+      std::memcpy(output_ptr + written * value_bytes,
+                  values_ptr + i * value_bytes, value_bytes);
+      written++;
     }
   }
   TI_ERROR_IF(written > static_cast<std::size_t>(
@@ -2334,6 +2860,13 @@ std::size_t Program::cpu_compact_i32_ndarray(Ndarray *values,
               "CPU native compact output count exceeds i32 range.");
   count_ptr[0] = static_cast<int32_t>(written);
   return 0;
+}
+
+std::size_t Program::cpu_compact_i32_ndarray(Ndarray *values,
+                                             Ndarray *flags,
+                                             Ndarray *output,
+                                             Ndarray *count) {
+  return cpu_compact_ndarray(values, flags, output, count, 0);
 }
 
 std::size_t Program::cpu_compact_workspace_bytes() const {
@@ -2346,34 +2879,46 @@ bool Program::cpu_histogram_available() const {
 
 std::size_t Program::cpu_histogram_i32_ndarray(Ndarray *values,
                                                Ndarray *bins) {
+  return cpu_histogram_ndarray(values, bins, 0, 0);
+}
+
+std::size_t Program::cpu_histogram_ndarray(Ndarray *values,
+                                           Ndarray *bins,
+                                           int value_type,
+                                           int bin_type) {
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native histogram is only available on CPU backends.");
   TI_ERROR_IF(!values || !bins,
               "CPU native histogram received a null ndarray.");
   TI_ERROR_IF(values->shape.size() != 1 || bins->shape.size() != 1,
               "CPU native histogram expects 1D ndarrays.");
-  TI_ERROR_IF(values->get_element_size() != sizeof(int32_t) ||
-                  bins->get_element_size() != sizeof(int32_t),
-              "CPU native histogram currently expects i32 values and bins.");
+  TI_ERROR_IF(value_type != 0 && value_type != 2,
+              "CPU native histogram currently supports only i32/u32 bin ids.");
+  const std::size_t value_size = value_type == 2 ? sizeof(uint32_t)
+                                                 : sizeof(int32_t);
+  const std::size_t bin_size = histogram_bin_type_size(bin_type);
+  TI_ERROR_IF(bin_size == 0,
+              "CPU native histogram currently supports only i32/i64 bins.");
+  TI_ERROR_IF(values->get_element_size() != value_size ||
+                  bins->get_element_size() != bin_size,
+              "CPU native histogram received mismatched value/bin dtypes.");
   TI_ERROR_IF(bins->get_nelement() == 0,
               "CPU native histogram expects at least one bin.");
-  TI_ERROR_IF(values->get_nelement() >
-                  static_cast<std::size_t>(
-                      std::numeric_limits<int32_t>::max()),
-              "CPU native histogram input is too large for i32 bin counts.");
+  if (bin_type == 0) {
+    TI_ERROR_IF(values->get_nelement() >
+                    static_cast<std::size_t>(
+                        std::numeric_limits<int32_t>::max()),
+                "CPU native histogram input is too large for i32 bin counts.");
+  }
 
   auto *values_ptr =
-      reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(values));
-  auto *bins_ptr = reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(bins));
+      reinterpret_cast<const void *>(get_ndarray_data_ptr_as_int(values));
+  auto *bins_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(bins));
   TI_ERROR_IF(!values_ptr || !bins_ptr,
               "CPU native histogram received a null data pointer.");
 
   const std::size_t n = values->get_nelement();
   const std::size_t num_bins = bins->get_nelement();
-  for (std::size_t i = 0; i < num_bins; ++i) {
-    bins_ptr[i] = 0;
-  }
-
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   const int chunk_items = 32768;
@@ -2382,55 +2927,24 @@ std::size_t Program::cpu_histogram_i32_ndarray(Ndarray *values,
                             static_cast<std::size_t>(max_threads)));
   const bool use_parallel = n >= 65536 && num_bins <= 4096 &&
                             target_threads > 1;
-  if (use_parallel) {
-    const int num_threads = target_threads;
-    std::vector<int32_t> partial(
-        static_cast<std::size_t>(num_threads) * num_bins, 0);
-    CpuHistogramTaskContext ctx;
-    ctx.values = values_ptr;
-    ctx.partial = partial.data();
-    ctx.n = n;
-    ctx.num_bins = num_bins;
-    ctx.num_threads = num_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(num_threads, num_threads, &ctx,
-             [](void *raw_ctx, int /*thread_id*/, int task_id) {
-               auto *ctx = static_cast<CpuHistogramTaskContext *>(raw_ctx);
-               const int tid = task_id;
-               const std::size_t begin =
-                   ctx->n * static_cast<std::size_t>(tid) /
-                   static_cast<std::size_t>(ctx->num_threads);
-               const std::size_t end =
-                   ctx->n * static_cast<std::size_t>(tid + 1) /
-                   static_cast<std::size_t>(ctx->num_threads);
-               int32_t *local =
-                   ctx->partial +
-                   static_cast<std::size_t>(tid) * ctx->num_bins;
-               for (std::size_t i = begin; i < end; ++i) {
-                 int32_t bin = ctx->values[i];
-                 if (bin >= 0 &&
-                     static_cast<std::size_t>(bin) < ctx->num_bins) {
-                   local[bin] += 1;
-                 }
-               }
-             });
-    for (std::size_t bin = 0; bin < num_bins; ++bin) {
-      int32_t total = 0;
-      for (int tid = 0; tid < num_threads; ++tid) {
-        total += partial[static_cast<std::size_t>(tid) * num_bins + bin];
-      }
-      bins_ptr[bin] = total;
-    }
-    return partial.size() * sizeof(int32_t);
+  if (value_type == 2 && bin_type == 4) {
+    return cpu_histogram_typed(static_cast<const uint32_t *>(values_ptr),
+                               static_cast<int64_t *>(bins_ptr), n, num_bins,
+                               max_threads, target_threads, use_parallel);
   }
-
-  for (std::size_t i = 0; i < n; ++i) {
-    int32_t bin = values_ptr[i];
-    if (bin >= 0 && static_cast<std::size_t>(bin) < num_bins) {
-      bins_ptr[bin] += 1;
-    }
+  if (value_type == 2) {
+    return cpu_histogram_typed(static_cast<const uint32_t *>(values_ptr),
+                               static_cast<int32_t *>(bins_ptr), n, num_bins,
+                               max_threads, target_threads, use_parallel);
   }
-  return 0;
+  if (bin_type == 4) {
+    return cpu_histogram_typed(static_cast<const int32_t *>(values_ptr),
+                               static_cast<int64_t *>(bins_ptr), n, num_bins,
+                               max_threads, target_threads, use_parallel);
+  }
+  return cpu_histogram_typed(static_cast<const int32_t *>(values_ptr),
+                             static_cast<int32_t *>(bins_ptr), n, num_bins,
+                             max_threads, target_threads, use_parallel);
 }
 
 std::size_t Program::cpu_histogram_workspace_bytes() const {
@@ -2457,10 +2971,11 @@ std::size_t Program::cpu_reduce_ndarray(Ndarray *values,
               "CPU native reduce output must contain at least one item.");
   TI_ERROR_IF(values->get_element_size() != output->get_element_size(),
               "CPU native reduce expects matching input/output element sizes.");
-  TI_ERROR_IF(values->get_element_size() != sizeof(int32_t),
-              "CPU native reduce currently expects 32-bit values.");
-  TI_ERROR_IF(value_type < 0 || value_type > 1,
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_size == 0,
               "CPU native reduce received an unsupported value type.");
+  TI_ERROR_IF(values->get_element_size() != expected_size,
+              "CPU native reduce dtype does not match value type.");
   TI_ERROR_IF(op < 0 || op > 2,
               "CPU native reduce received an unsupported op.");
 
@@ -2473,78 +2988,39 @@ std::size_t Program::cpu_reduce_ndarray(Ndarray *values,
                             static_cast<std::size_t>(max_threads)));
   const bool use_parallel = n >= 65536 && target_threads > 1;
 
-  if (value_type == 0) {
-    auto *values_ptr =
-        reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(values));
-    auto *output_ptr =
-        reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(output));
-    TI_ERROR_IF(!values_ptr || !output_ptr,
-                "CPU native reduce received a null data pointer.");
-
-    int64_t result = cpu_reduce_i32_identity(op);
-    if (use_parallel) {
-      const int num_threads = target_threads;
-      std::vector<int64_t> partial(num_threads);
-      CpuReduceI32TaskContext ctx;
-      ctx.values = values_ptr;
-      ctx.partial = partial.data();
-      ctx.n = n;
-      ctx.num_threads = num_threads;
-      ctx.op = op;
-      auto &pool = get_cpu_primitive_thread_pool(max_threads);
-      pool.run(num_threads, num_threads, &ctx, cpu_reduce_i32_task);
-      for (int tid = 0; tid < num_threads; ++tid) {
-        result = cpu_reduce_i32_combine(result, partial[tid], op);
-      }
-      if (op == 0) {
-        store_i32_wrapped_from_i64(output_ptr, result);
-      } else {
-        output_ptr[0] = static_cast<int32_t>(result);
-      }
-      return partial.size() * sizeof(int64_t);
-    }
-
-    for (std::size_t i = 0; i < n; ++i) {
-      result = cpu_reduce_i32_combine(result, values_ptr[i], op);
-    }
-    if (op == 0) {
-      store_i32_wrapped_from_i64(output_ptr, result);
-    } else {
-      output_ptr[0] = static_cast<int32_t>(result);
-    }
-    return 0;
+  switch (value_type) {
+    case 0:
+      return cpu_reduce_typed(
+          reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(values)),
+          reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(output)), op,
+          n, max_threads, target_threads, use_parallel);
+    case 1:
+      return cpu_reduce_typed(
+          reinterpret_cast<float *>(get_ndarray_data_ptr_as_int(values)),
+          reinterpret_cast<float *>(get_ndarray_data_ptr_as_int(output)), op, n,
+          max_threads, target_threads, use_parallel);
+    case 2:
+      return cpu_reduce_typed(
+          reinterpret_cast<uint32_t *>(get_ndarray_data_ptr_as_int(values)),
+          reinterpret_cast<uint32_t *>(get_ndarray_data_ptr_as_int(output)), op,
+          n, max_threads, target_threads, use_parallel);
+    case 3:
+      return cpu_reduce_typed(
+          reinterpret_cast<uint64_t *>(get_ndarray_data_ptr_as_int(values)),
+          reinterpret_cast<uint64_t *>(get_ndarray_data_ptr_as_int(output)), op,
+          n, max_threads, target_threads, use_parallel);
+    case 4:
+      return cpu_reduce_typed(
+          reinterpret_cast<int64_t *>(get_ndarray_data_ptr_as_int(values)),
+          reinterpret_cast<int64_t *>(get_ndarray_data_ptr_as_int(output)), op,
+          n, max_threads, target_threads, use_parallel);
+    case 5:
+      return cpu_reduce_typed(
+          reinterpret_cast<double *>(get_ndarray_data_ptr_as_int(values)),
+          reinterpret_cast<double *>(get_ndarray_data_ptr_as_int(output)), op,
+          n, max_threads, target_threads, use_parallel);
   }
-
-  auto *values_ptr =
-      reinterpret_cast<float *>(get_ndarray_data_ptr_as_int(values));
-  auto *output_ptr =
-      reinterpret_cast<float *>(get_ndarray_data_ptr_as_int(output));
-  TI_ERROR_IF(!values_ptr || !output_ptr,
-              "CPU native reduce received a null data pointer.");
-
-  float result = cpu_reduce_f32_identity(op);
-  if (use_parallel) {
-    const int num_threads = target_threads;
-    std::vector<float> partial(num_threads);
-    CpuReduceF32TaskContext ctx;
-    ctx.values = values_ptr;
-    ctx.partial = partial.data();
-    ctx.n = n;
-    ctx.num_threads = num_threads;
-    ctx.op = op;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(num_threads, num_threads, &ctx, cpu_reduce_f32_task);
-    for (int tid = 0; tid < num_threads; ++tid) {
-      result = cpu_reduce_f32_combine(result, partial[tid], op);
-    }
-    output_ptr[0] = result;
-    return partial.size() * sizeof(float);
-  }
-
-  for (std::size_t i = 0; i < n; ++i) {
-    result = cpu_reduce_f32_combine(result, values_ptr[i], op);
-  }
-  output_ptr[0] = result;
+  TI_NOT_IMPLEMENTED;
   return 0;
 }
 
@@ -2570,10 +3046,12 @@ std::size_t Program::cpu_transform_affine_ndarray(Ndarray *src,
               "CPU native transform source and destination sizes differ.");
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
               "CPU native transform source and destination dtypes differ.");
-  TI_ERROR_IF(value_type < 0 || value_type > 1,
+  TI_ERROR_IF(value_type < 0 || value_type > 5,
               "CPU native transform received an unsupported value type.");
-  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t),
-              "CPU native transform currently expects 32-bit values.");
+  const bool is_64bit = value_type == 3 || value_type == 4 || value_type == 5;
+  TI_ERROR_IF(src->get_element_size() !=
+                  (is_64bit ? sizeof(uint64_t) : sizeof(uint32_t)),
+              "CPU native transform dtype does not match value type.");
 
   const std::size_t n = src->get_nelement();
   if (n == 0) {
@@ -2587,56 +3065,55 @@ std::size_t Program::cpu_transform_affine_ndarray(Ndarray *src,
                             static_cast<std::size_t>(max_threads)));
   const bool use_parallel = n >= 65536 && target_threads > 1;
 
-  if (value_type == 0) {
-    auto *src_ptr = reinterpret_cast<const uint32_t *>(
-        get_ndarray_data_ptr_as_int(src));
-    auto *dst_ptr =
-        reinterpret_cast<uint32_t *>(get_ndarray_data_ptr_as_int(dst));
-    TI_ERROR_IF(!src_ptr || !dst_ptr,
-                "CPU native transform received a null data pointer.");
-    const uint32_t scale_u32 = static_cast<uint32_t>(
-        static_cast<int32_t>(scale));
-    const uint32_t bias_u32 =
-        static_cast<uint32_t>(static_cast<int32_t>(bias));
-    if (use_parallel) {
-      CpuTransformI32TaskContext ctx;
-      ctx.src = src_ptr;
-      ctx.dst = dst_ptr;
-      ctx.n = n;
-      ctx.scale = scale_u32;
-      ctx.bias = bias_u32;
-      ctx.num_threads = target_threads;
-      auto &pool = get_cpu_primitive_thread_pool(max_threads);
-      pool.run(target_threads, target_threads, &ctx, cpu_transform_i32_task);
-      return 0;
-    }
-    for (std::size_t i = 0; i < n; ++i) {
-      dst_ptr[i] = src_ptr[i] * scale_u32 + bias_u32;
-    }
-    return 0;
-  }
-
-  auto *src_ptr =
-      reinterpret_cast<const float *>(get_ndarray_data_ptr_as_int(src));
-  auto *dst_ptr = reinterpret_cast<float *>(get_ndarray_data_ptr_as_int(dst));
-  TI_ERROR_IF(!src_ptr || !dst_ptr,
+  const auto src_addr = get_ndarray_data_ptr_as_int(src);
+  const auto dst_addr = get_ndarray_data_ptr_as_int(dst);
+  TI_ERROR_IF(!src_addr || !dst_addr,
               "CPU native transform received a null data pointer.");
-  const float scale_f32 = static_cast<float>(scale);
-  const float bias_f32 = static_cast<float>(bias);
-  if (use_parallel) {
-    CpuTransformF32TaskContext ctx;
-    ctx.src = src_ptr;
-    ctx.dst = dst_ptr;
-    ctx.n = n;
-    ctx.scale = scale_f32;
-    ctx.bias = bias_f32;
-    ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx, cpu_transform_f32_task);
-    return 0;
-  }
-  for (std::size_t i = 0; i < n; ++i) {
-    dst_ptr[i] = src_ptr[i] * scale_f32 + bias_f32;
+  switch (value_type) {
+    case 0:
+      cpu_transform_run_typed<uint32_t>(
+          reinterpret_cast<const uint32_t *>(src_addr),
+          reinterpret_cast<uint32_t *>(dst_addr), n,
+          static_cast<uint32_t>(static_cast<int32_t>(scale)),
+          static_cast<uint32_t>(static_cast<int32_t>(bias)), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 2:
+      cpu_transform_run_typed<uint32_t>(
+          reinterpret_cast<const uint32_t *>(src_addr),
+          reinterpret_cast<uint32_t *>(dst_addr), n,
+          static_cast<uint32_t>(scale), static_cast<uint32_t>(bias),
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 1:
+      cpu_transform_run_typed<float>(
+          reinterpret_cast<const float *>(src_addr),
+          reinterpret_cast<float *>(dst_addr), n, static_cast<float>(scale),
+          static_cast<float>(bias), use_parallel, target_threads, max_threads);
+      return 0;
+    case 3:
+      cpu_transform_run_typed<uint64_t>(
+          reinterpret_cast<const uint64_t *>(src_addr),
+          reinterpret_cast<uint64_t *>(dst_addr), n,
+          static_cast<uint64_t>(scale), static_cast<uint64_t>(bias),
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 4:
+      cpu_transform_run_typed<uint64_t>(
+          reinterpret_cast<const uint64_t *>(src_addr),
+          reinterpret_cast<uint64_t *>(dst_addr), n,
+          static_cast<uint64_t>(static_cast<int64_t>(scale)),
+          static_cast<uint64_t>(static_cast<int64_t>(bias)), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 5:
+      cpu_transform_run_typed<double>(
+          reinterpret_cast<const double *>(src_addr),
+          reinterpret_cast<double *>(dst_addr), n, scale, bias, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    default:
+      TI_ERROR("CPU native transform received an unsupported value type.");
   }
   return 0;
 }
@@ -2664,21 +3141,22 @@ std::size_t Program::cpu_gather_ndarray(Ndarray *src,
               "match.");
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
               "CPU native gather source and destination dtypes differ.");
-  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t) ||
+  const std::size_t item_bytes = src->get_element_size();
+  TI_ERROR_IF((item_bytes != sizeof(uint32_t) &&
+               item_bytes != sizeof(uint64_t)) ||
                   indices->get_element_size() != sizeof(int32_t),
-              "CPU native gather currently expects 32-bit values and i32 "
-              "indices.");
+              "CPU native gather currently expects 4- or 8-byte scalar values "
+              "and i32 indices.");
   const std::size_t n = indices->get_nelement();
   const std::size_t src_items = src->get_nelement();
   if (n == 0) {
     return 0;
   }
   auto *src_ptr =
-      reinterpret_cast<const uint32_t *>(get_ndarray_data_ptr_as_int(src));
+      reinterpret_cast<const uint8_t *>(get_ndarray_data_ptr_as_int(src));
   auto *indices_ptr =
       reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
-  auto *dst_ptr =
-      reinterpret_cast<uint32_t *>(get_ndarray_data_ptr_as_int(dst));
+  auto *dst_ptr = reinterpret_cast<uint8_t *>(get_ndarray_data_ptr_as_int(dst));
   TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
               "CPU native gather received a null data pointer.");
   const int max_threads =
@@ -2694,6 +3172,7 @@ std::size_t Program::cpu_gather_ndarray(Ndarray *src,
     ctx.dst = dst_ptr;
     ctx.n = n;
     ctx.index_bound = src_items;
+    ctx.item_bytes = item_bytes;
     ctx.scatter = false;
     ctx.num_threads = target_threads;
     auto &pool = get_cpu_primitive_thread_pool(max_threads);
@@ -2703,9 +3182,10 @@ std::size_t Program::cpu_gather_ndarray(Ndarray *src,
   for (std::size_t i = 0; i < n; ++i) {
     const auto index = static_cast<std::size_t>(indices_ptr[i]);
     if (index < src_items) {
-      dst_ptr[i] = src_ptr[index];
+      std::memcpy(dst_ptr + i * item_bytes, src_ptr + index * item_bytes,
+                  item_bytes);
     } else {
-      dst_ptr[i] = 0;
+      std::memset(dst_ptr + i * item_bytes, 0, item_bytes);
     }
   }
   return 0;
@@ -2725,21 +3205,22 @@ std::size_t Program::cpu_scatter_ndarray(Ndarray *src,
               "CPU native scatter expects source and indices sizes to match.");
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
               "CPU native scatter source and destination dtypes differ.");
-  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t) ||
+  const std::size_t item_bytes = src->get_element_size();
+  TI_ERROR_IF((item_bytes != sizeof(uint32_t) &&
+               item_bytes != sizeof(uint64_t)) ||
                   indices->get_element_size() != sizeof(int32_t),
-              "CPU native scatter currently expects 32-bit values and i32 "
-              "indices.");
+              "CPU native scatter currently expects 4- or 8-byte scalar values "
+              "and i32 indices.");
   const std::size_t n = indices->get_nelement();
   const std::size_t dst_items = dst->get_nelement();
   if (n == 0) {
     return 0;
   }
   auto *src_ptr =
-      reinterpret_cast<const uint32_t *>(get_ndarray_data_ptr_as_int(src));
+      reinterpret_cast<const uint8_t *>(get_ndarray_data_ptr_as_int(src));
   auto *indices_ptr =
       reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
-  auto *dst_ptr =
-      reinterpret_cast<uint32_t *>(get_ndarray_data_ptr_as_int(dst));
+  auto *dst_ptr = reinterpret_cast<uint8_t *>(get_ndarray_data_ptr_as_int(dst));
   TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
               "CPU native scatter received a null data pointer.");
   const int max_threads =
@@ -2755,6 +3236,7 @@ std::size_t Program::cpu_scatter_ndarray(Ndarray *src,
     ctx.dst = dst_ptr;
     ctx.n = n;
     ctx.index_bound = dst_items;
+    ctx.item_bytes = item_bytes;
     ctx.scatter = true;
     ctx.num_threads = target_threads;
     auto &pool = get_cpu_primitive_thread_pool(max_threads);
@@ -2764,7 +3246,8 @@ std::size_t Program::cpu_scatter_ndarray(Ndarray *src,
   for (std::size_t i = 0; i < n; ++i) {
     const auto index = static_cast<std::size_t>(indices_ptr[i]);
     if (index < dst_items) {
-      dst_ptr[index] = src_ptr[i];
+      std::memcpy(dst_ptr + index * item_bytes, src_ptr + i * item_bytes,
+                  item_bytes);
     }
   }
   return 0;
@@ -2794,12 +3277,12 @@ std::size_t Program::cpu_scatter_add_ndarray(Ndarray *src,
               "match.");
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
               "CPU native scatter-add source and destination dtypes differ.");
-  TI_ERROR_IF(src->get_element_size() != sizeof(uint32_t) ||
-                  indices->get_element_size() != sizeof(int32_t),
-              "CPU native scatter-add currently expects 32-bit values and "
-              "i32 indices.");
-  TI_ERROR_IF(value_type < 0 || value_type > 1,
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_size == 0,
               "CPU native scatter-add received an unsupported value type.");
+  TI_ERROR_IF(src->get_element_size() != expected_size ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "CPU native scatter-add value type or i32 index size mismatch.");
   const std::size_t n = indices->get_nelement();
   const std::size_t dst_items = dst->get_nelement();
   if (n == 0 || dst_items == 0) {
@@ -2812,73 +3295,44 @@ std::size_t Program::cpu_scatter_add_ndarray(Ndarray *src,
   const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
   const int target_threads =
       std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
-  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
-  if (value_type == 0) {
-    auto *src_ptr =
-        reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(src));
-    auto *dst_ptr = reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(dst));
-    TI_ERROR_IF(!src_ptr || !dst_ptr,
-                "CPU native scatter-add received a null i32 data pointer.");
-    const std::size_t workspace_bytes =
-        static_cast<std::size_t>(target_threads) * dst_items * sizeof(int32_t);
-    if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
-      std::vector<int32_t> partial(
-          static_cast<std::size_t>(target_threads) * dst_items, 0);
-      CpuScatterAddI32TaskContext ctx;
-      ctx.src = src_ptr;
-      ctx.indices = indices_ptr;
-      ctx.partial = partial.data();
-      ctx.dst = dst_ptr;
-      ctx.n = n;
-      ctx.dst_items = dst_items;
-      ctx.num_threads = target_threads;
-      auto &pool = get_cpu_primitive_thread_pool(max_threads);
-      pool.run(target_threads, target_threads, &ctx,
-               cpu_scatter_add_i32_count_task);
-      pool.run(target_threads, target_threads, &ctx,
-               cpu_scatter_add_i32_merge_task);
-      update_cpu_scatter_add_workspace_peak(workspace_bytes);
-      return workspace_bytes;
-    }
-    for (std::size_t i = 0; i < n; ++i) {
-      const auto index = static_cast<std::size_t>(indices_ptr[i]);
-      if (index < dst_items) {
-        dst_ptr[index] += src_ptr[i];
-      }
-    }
-  } else {
-    auto *src_ptr =
-        reinterpret_cast<const float *>(get_ndarray_data_ptr_as_int(src));
-    auto *dst_ptr = reinterpret_cast<float *>(get_ndarray_data_ptr_as_int(dst));
-    TI_ERROR_IF(!src_ptr || !dst_ptr,
-                "CPU native scatter-add received a null f32 data pointer.");
-    const std::size_t workspace_bytes =
-        static_cast<std::size_t>(target_threads) * dst_items * sizeof(float);
-    if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
-      std::vector<float> partial(
-          static_cast<std::size_t>(target_threads) * dst_items, 0.0f);
-      CpuScatterAddF32TaskContext ctx;
-      ctx.src = src_ptr;
-      ctx.indices = indices_ptr;
-      ctx.partial = partial.data();
-      ctx.dst = dst_ptr;
-      ctx.n = n;
-      ctx.dst_items = dst_items;
-      ctx.num_threads = target_threads;
-      auto &pool = get_cpu_primitive_thread_pool(max_threads);
-      pool.run(target_threads, target_threads, &ctx,
-               cpu_scatter_add_f32_count_task);
-      pool.run(target_threads, target_threads, &ctx,
-               cpu_scatter_add_f32_merge_task);
-      update_cpu_scatter_add_workspace_peak(workspace_bytes);
-      return workspace_bytes;
-    }
-    for (std::size_t i = 0; i < n; ++i) {
-      const auto index = static_cast<std::size_t>(indices_ptr[i]);
-      if (index < dst_items) {
-        dst_ptr[index] += src_ptr[i];
-      }
-    }
+  switch (value_type) {
+    case 0:
+      return cpu_scatter_add_typed(
+          reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(src)),
+          indices_ptr,
+          reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(dst)), n,
+          dst_items, max_threads, target_threads);
+    case 1:
+      return cpu_scatter_add_typed(
+          reinterpret_cast<const float *>(get_ndarray_data_ptr_as_int(src)),
+          indices_ptr, reinterpret_cast<float *>(get_ndarray_data_ptr_as_int(dst)),
+          n, dst_items, max_threads, target_threads);
+    case 2:
+      return cpu_scatter_add_typed(
+          reinterpret_cast<const uint32_t *>(get_ndarray_data_ptr_as_int(src)),
+          indices_ptr,
+          reinterpret_cast<uint32_t *>(get_ndarray_data_ptr_as_int(dst)), n,
+          dst_items, max_threads, target_threads);
+    case 3:
+      return cpu_scatter_add_typed(
+          reinterpret_cast<const uint64_t *>(get_ndarray_data_ptr_as_int(src)),
+          indices_ptr,
+          reinterpret_cast<uint64_t *>(get_ndarray_data_ptr_as_int(dst)), n,
+          dst_items, max_threads, target_threads);
+    case 4:
+      return cpu_scatter_add_typed(
+          reinterpret_cast<const int64_t *>(get_ndarray_data_ptr_as_int(src)),
+          indices_ptr,
+          reinterpret_cast<int64_t *>(get_ndarray_data_ptr_as_int(dst)), n,
+          dst_items, max_threads, target_threads);
+    case 5:
+      return cpu_scatter_add_typed(
+          reinterpret_cast<const double *>(get_ndarray_data_ptr_as_int(src)),
+          indices_ptr,
+          reinterpret_cast<double *>(get_ndarray_data_ptr_as_int(dst)), n,
+          dst_items, max_threads, target_threads);
+    default:
+      TI_ERROR("CPU native scatter-add received an unsupported value type.");
   }
   return 0;
 }
@@ -2895,6 +3349,14 @@ std::size_t Program::cpu_bucket_builder_i32_ndarray(Ndarray *keys,
                                                     Ndarray *values,
                                                     Ndarray *offsets,
                                                     Ndarray *output) {
+  return cpu_bucket_builder_ndarray(keys, values, offsets, output, 0);
+}
+
+std::size_t Program::cpu_bucket_builder_ndarray(Ndarray *keys,
+                                                Ndarray *values,
+                                                Ndarray *offsets,
+                                                Ndarray *output,
+                                                int value_type) {
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native bucket builder is only available on CPU backends.");
   TI_ERROR_IF(!keys || !values || !offsets || !output,
@@ -2910,108 +3372,74 @@ std::size_t Program::cpu_bucket_builder_i32_ndarray(Ndarray *keys,
   const std::size_t num_bins = offsets->get_nelement() - 1;
   TI_ERROR_IF(output->get_nelement() < n,
               "CPU native bucket builder output is smaller than input values.");
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_size == 0,
+              "CPU native bucket builder received an unsupported value type.");
   TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
-                  values->get_element_size() != sizeof(int32_t) ||
                   offsets->get_element_size() != sizeof(int32_t) ||
-                  output->get_element_size() != sizeof(int32_t),
-              "CPU native bucket builder currently expects i32 arrays.");
+                  values->get_element_size() != expected_size ||
+                  output->get_element_size() != expected_size,
+              "CPU native bucket builder dtype does not match value type or "
+              "keys/offsets are not i32.");
   TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int32_t>::max()),
               "CPU native bucket builder input count exceeds i32 range.");
 
   auto *keys_ptr =
       reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(keys));
-  auto *values_ptr =
-      reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(values));
   auto *offsets_ptr =
       reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(offsets));
-  auto *output_ptr =
-      reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(output));
-  TI_ERROR_IF(!keys_ptr || !values_ptr || !offsets_ptr || !output_ptr,
+  TI_ERROR_IF(!keys_ptr || !offsets_ptr,
               "CPU native bucket builder received a null data pointer.");
-
-  std::fill(offsets_ptr, offsets_ptr + num_bins + 1, 0);
-  if (n == 0) {
-    return 0;
-  }
 
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
-                            static_cast<std::size_t>(max_threads)));
-  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
-  const std::size_t parallel_workspace =
-      static_cast<std::size_t>(target_threads) * num_bins * sizeof(int32_t) *
-      2;
-  const bool use_parallel =
-      n >= 65536 && target_threads > 1 && parallel_workspace <= kMaxWorkspaceBytes;
-
-  if (use_parallel) {
-    std::vector<int32_t> partial(
-        static_cast<std::size_t>(target_threads) * num_bins, 0);
-    CpuBucketCountTaskContext count_ctx;
-    count_ctx.keys = keys_ptr;
-    count_ctx.partial = partial.data();
-    count_ctx.n = n;
-    count_ctx.num_bins = num_bins;
-    count_ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &count_ctx, cpu_bucket_count_task);
-
-    std::vector<int32_t> thread_offsets(
-        static_cast<std::size_t>(target_threads) * num_bins, 0);
-    int64_t running = 0;
-    offsets_ptr[0] = 0;
-    for (std::size_t bin = 0; bin < num_bins; ++bin) {
-      int64_t pos = running;
-      for (int tid = 0; tid < target_threads; ++tid) {
-        const std::size_t idx =
-            static_cast<std::size_t>(tid) * num_bins + bin;
-        thread_offsets[idx] = static_cast<int32_t>(pos);
-        pos += partial[idx];
-      }
-      running = pos;
-      TI_ERROR_IF(running > std::numeric_limits<int32_t>::max(),
-                  "CPU native bucket builder valid item count exceeds i32 range.");
-      offsets_ptr[bin + 1] = static_cast<int32_t>(running);
-    }
-
-    CpuBucketScatterTaskContext scatter_ctx;
-    scatter_ctx.keys = keys_ptr;
-    scatter_ctx.values = values_ptr;
-    scatter_ctx.thread_offsets = thread_offsets.data();
-    scatter_ctx.output = output_ptr;
-    scatter_ctx.n = n;
-    scatter_ctx.num_bins = num_bins;
-    scatter_ctx.num_threads = target_threads;
-    pool.run(target_threads, target_threads, &scatter_ctx,
-             cpu_bucket_scatter_task);
-    return parallel_workspace;
+  switch (value_type) {
+    case 0:
+      return cpu_bucket_builder_typed(
+          keys_ptr,
+          reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(values)),
+          offsets_ptr,
+          reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_bins, max_threads);
+    case 1:
+      return cpu_bucket_builder_typed(
+          keys_ptr,
+          reinterpret_cast<const float *>(get_ndarray_data_ptr_as_int(values)),
+          offsets_ptr,
+          reinterpret_cast<float *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_bins, max_threads);
+    case 2:
+      return cpu_bucket_builder_typed(
+          keys_ptr,
+          reinterpret_cast<const uint32_t *>(get_ndarray_data_ptr_as_int(values)),
+          offsets_ptr,
+          reinterpret_cast<uint32_t *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_bins, max_threads);
+    case 3:
+      return cpu_bucket_builder_typed(
+          keys_ptr,
+          reinterpret_cast<const uint64_t *>(get_ndarray_data_ptr_as_int(values)),
+          offsets_ptr,
+          reinterpret_cast<uint64_t *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_bins, max_threads);
+    case 4:
+      return cpu_bucket_builder_typed(
+          keys_ptr,
+          reinterpret_cast<const int64_t *>(get_ndarray_data_ptr_as_int(values)),
+          offsets_ptr,
+          reinterpret_cast<int64_t *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_bins, max_threads);
+    case 5:
+      return cpu_bucket_builder_typed(
+          keys_ptr,
+          reinterpret_cast<const double *>(get_ndarray_data_ptr_as_int(values)),
+          offsets_ptr,
+          reinterpret_cast<double *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_bins, max_threads);
+    default:
+      TI_ERROR("CPU native bucket builder received an unsupported value type.");
   }
-
-  for (std::size_t i = 0; i < n; ++i) {
-    int32_t key = keys_ptr[i];
-    if (key >= 0 && static_cast<std::size_t>(key) < num_bins) {
-      offsets_ptr[static_cast<std::size_t>(key) + 1] += 1;
-    }
-  }
-  int64_t running = 0;
-  for (std::size_t bin = 0; bin <= num_bins; ++bin) {
-    running += offsets_ptr[bin];
-    TI_ERROR_IF(running > std::numeric_limits<int32_t>::max(),
-                "CPU native bucket builder valid item count exceeds i32 range.");
-    offsets_ptr[bin] = static_cast<int32_t>(running);
-  }
-  std::vector<int32_t> cursor(offsets_ptr, offsets_ptr + num_bins);
-  for (std::size_t i = 0; i < n; ++i) {
-    int32_t key = keys_ptr[i];
-    if (key >= 0 && static_cast<std::size_t>(key) < num_bins) {
-      int32_t pos = cursor[key]++;
-      output_ptr[pos] = values_ptr[i];
-    }
-  }
-  return cursor.size() * sizeof(int32_t);
+  return 0;
 }
 
 std::size_t Program::cpu_bucket_builder_workspace_bytes() const {
@@ -3026,6 +3454,14 @@ std::size_t Program::cpu_grouped_reduce_i32_ndarray(Ndarray *keys,
                                                     Ndarray *values,
                                                     Ndarray *output,
                                                     int op) {
+  return cpu_grouped_reduce_ndarray(keys, values, output, 0, op);
+}
+
+std::size_t Program::cpu_grouped_reduce_ndarray(Ndarray *keys,
+                                                Ndarray *values,
+                                                Ndarray *output,
+                                                int value_type,
+                                                int op) {
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native grouped reduce is only available on CPU backends.");
   TI_ERROR_IF(!keys || !values || !output,
@@ -3037,56 +3473,60 @@ std::size_t Program::cpu_grouped_reduce_i32_ndarray(Ndarray *keys,
               "CPU native grouped reduce keys and values sizes differ.");
   TI_ERROR_IF(output->get_nelement() == 0,
               "CPU native grouped reduce output must contain at least one group.");
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_size == 0,
+              "CPU native grouped reduce received an unsupported value type.");
   TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
-                  values->get_element_size() != sizeof(int32_t) ||
-                  output->get_element_size() != sizeof(int32_t),
-              "CPU native grouped reduce currently expects i32 arrays.");
+                  values->get_element_size() != expected_size ||
+                  output->get_element_size() != expected_size,
+              "CPU native grouped reduce value type or i32 key size mismatch.");
   TI_ERROR_IF(op != 0, "CPU native grouped reduce currently supports only sum.");
   const std::size_t n = keys->get_nelement();
   const std::size_t num_groups = output->get_nelement();
   auto *keys_ptr =
       reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(keys));
-  auto *values_ptr =
-      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(values));
-  auto *output_ptr = reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(output));
-  TI_ERROR_IF(!keys_ptr || !values_ptr || !output_ptr,
-              "CPU native grouped reduce received a null data pointer.");
-  std::fill(output_ptr, output_ptr + num_groups, 0);
-  if (n == 0) {
-    return 0;
-  }
-
   const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
   const int target_threads =
       std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
-  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
-  const std::size_t workspace_bytes =
-      static_cast<std::size_t>(target_threads) * num_groups * sizeof(int32_t);
-  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
-    std::vector<int32_t> partial(
-        static_cast<std::size_t>(target_threads) * num_groups, 0);
-    CpuGroupedReduceI32TaskContext ctx;
-    ctx.keys = keys_ptr;
-    ctx.values = values_ptr;
-    ctx.partial = partial.data();
-    ctx.output = output_ptr;
-    ctx.n = n;
-    ctx.num_groups = num_groups;
-    ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
-             cpu_grouped_reduce_i32_count_task);
-    pool.run(target_threads, target_threads, &ctx,
-             cpu_grouped_reduce_i32_merge_task);
-    update_cpu_grouped_reduce_workspace_peak(workspace_bytes);
-    return workspace_bytes;
-  }
-
-  for (std::size_t i = 0; i < n; ++i) {
-    int32_t key = keys_ptr[i];
-    if (key >= 0 && static_cast<std::size_t>(key) < num_groups) {
-      output_ptr[key] += values_ptr[i];
-    }
+  switch (value_type) {
+    case 0:
+      return cpu_grouped_reduce_typed(
+          keys_ptr,
+          reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(values)),
+          reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_groups, max_threads, target_threads);
+    case 1:
+      return cpu_grouped_reduce_typed(
+          keys_ptr,
+          reinterpret_cast<const float *>(get_ndarray_data_ptr_as_int(values)),
+          reinterpret_cast<float *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_groups, max_threads, target_threads);
+    case 2:
+      return cpu_grouped_reduce_typed(
+          keys_ptr,
+          reinterpret_cast<const uint32_t *>(get_ndarray_data_ptr_as_int(values)),
+          reinterpret_cast<uint32_t *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_groups, max_threads, target_threads);
+    case 3:
+      return cpu_grouped_reduce_typed(
+          keys_ptr,
+          reinterpret_cast<const uint64_t *>(get_ndarray_data_ptr_as_int(values)),
+          reinterpret_cast<uint64_t *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_groups, max_threads, target_threads);
+    case 4:
+      return cpu_grouped_reduce_typed(
+          keys_ptr,
+          reinterpret_cast<const int64_t *>(get_ndarray_data_ptr_as_int(values)),
+          reinterpret_cast<int64_t *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_groups, max_threads, target_threads);
+    case 5:
+      return cpu_grouped_reduce_typed(
+          keys_ptr,
+          reinterpret_cast<const double *>(get_ndarray_data_ptr_as_int(values)),
+          reinterpret_cast<double *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_groups, max_threads, target_threads);
+    default:
+      TI_ERROR("CPU native grouped reduce received an unsupported value type.");
   }
   return 0;
 }

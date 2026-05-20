@@ -18,6 +18,7 @@ std::size_t cub_radix_sort_impl(void *keys,
                                 void *values,
                                 int num_items,
                                 CubSortKeyType key_type,
+                                CubSortValueType value_type,
                                 CubSortMode mode,
                                 CubSortNanPolicy nan_policy,
                                 bool has_values,
@@ -47,6 +48,7 @@ std::size_t cub_histogram_even_impl(void *values,
                                     int num_items,
                                     int num_bins,
                                     CubHistogramValueType value_type,
+                                    CubHistogramBinType bin_type,
                                     void *stream,
                                     void *owner);
 void cub_histogram_clear_cache_impl(void *owner);
@@ -67,6 +69,21 @@ std::size_t cub_scatter_add_impl(void *src,
                                  int index_bound,
                                  CudaScatterAddValueType value_type,
                                  void *stream);
+std::size_t cub_indexed_copy_impl(void *src,
+                                  void *indices,
+                                  void *dst,
+                                  int num_items,
+                                  int index_bound,
+                                  int item_words,
+                                  CudaIndexedCopyOp op,
+                                  void *stream);
+std::size_t cub_transform_affine_impl(void *src,
+                                      void *dst,
+                                      int num_items,
+                                      CudaTransformValueType value_type,
+                                      double scale,
+                                      double bias,
+                                      void *stream);
 std::size_t cub_bucket_builder_i32_impl(void *keys,
                                         void *values,
                                         void *offsets,
@@ -76,6 +93,16 @@ std::size_t cub_bucket_builder_i32_impl(void *keys,
                                         int num_bins,
                                         void *stream,
                                         void *owner);
+std::size_t cub_bucket_builder_impl(void *keys,
+                                    void *values,
+                                    void *offsets,
+                                    void *output,
+                                    void *cursor,
+                                    int num_items,
+                                    int num_bins,
+                                    CudaBucketBuilderValueType value_type,
+                                    void *stream,
+                                    void *owner);
 void cub_bucket_builder_clear_cache_impl(void *owner);
 std::size_t cub_bucket_builder_cached_bytes_impl(void *owner);
 std::size_t cub_grouped_reduce_i32_impl(void *keys,
@@ -89,13 +116,27 @@ std::size_t cub_grouped_reduce_i32_impl(void *keys,
                                         int op,
                                         void *stream,
                                         void *owner);
-std::size_t cub_grouped_reduce_i32_atomic_impl(void *keys,
-                                               void *values,
-                                               void *output,
-                                               int num_items,
-                                               int num_groups,
-                                               int op,
-                                               void *stream);
+std::size_t cub_grouped_reduce_impl(void *keys,
+                                    void *values,
+                                    void *output,
+                                    void *offsets,
+                                    void *scratch,
+                                    void *cursor,
+                                    int num_items,
+                                    int num_groups,
+                                    CudaGroupedReduceValueType value_type,
+                                    int op,
+                                    void *stream,
+                                    void *owner);
+std::size_t cub_grouped_reduce_atomic_impl(
+    void *keys,
+    void *values,
+    void *output,
+    int num_items,
+    int num_groups,
+    CudaGroupedReduceValueType value_type,
+    int op,
+    void *stream);
 void cub_grouped_reduce_clear_cache_impl(void *owner);
 std::size_t cub_grouped_reduce_cached_bytes_impl(void *owner);
 #endif
@@ -413,9 +454,14 @@ void *cuda_transform_function(CudaTransformValueType value_type) {
   std::call_once(transform_module_once, load_transform_module_once);
   switch (value_type) {
     case CudaTransformValueType::i32:
+    case CudaTransformValueType::u32:
       return transform_i32_func;
     case CudaTransformValueType::f32:
       return transform_f32_func;
+    case CudaTransformValueType::u64:
+    case CudaTransformValueType::i64:
+    case CudaTransformValueType::f64:
+      TI_ERROR("64-bit CUDA transform requires CUDA toolkit runtime support.");
   }
   TI_ERROR("Unsupported CUDA transform value type.");
   return nullptr;
@@ -475,15 +521,20 @@ std::size_t driver_transform_affine(void *src,
   args.push_back(&src_arg);
   args.push_back(&dst_arg);
   args.push_back(&n_arg);
-  int32_t scale_i32 = 0;
-  int32_t bias_i32 = 0;
+  uint32_t scale_u32 = 0;
+  uint32_t bias_u32 = 0;
   float scale_f32 = 0.0f;
   float bias_f32 = 0.0f;
   if (value_type == CudaTransformValueType::i32) {
-    scale_i32 = static_cast<int32_t>(scale);
-    bias_i32 = static_cast<int32_t>(bias);
-    args.push_back(&scale_i32);
-    args.push_back(&bias_i32);
+    scale_u32 = static_cast<uint32_t>(static_cast<int32_t>(scale));
+    bias_u32 = static_cast<uint32_t>(static_cast<int32_t>(bias));
+    args.push_back(&scale_u32);
+    args.push_back(&bias_u32);
+  } else if (value_type == CudaTransformValueType::u32) {
+    scale_u32 = static_cast<uint32_t>(scale);
+    bias_u32 = static_cast<uint32_t>(bias);
+    args.push_back(&scale_u32);
+    args.push_back(&bias_u32);
   } else {
     scale_f32 = static_cast<float>(scale);
     bias_f32 = static_cast<float>(bias);
@@ -493,6 +544,34 @@ std::size_t driver_transform_affine(void *src,
   CUDAContext::get_instance().launch(func, "cuda_transform_affine", args, {},
                                      grid_dim, kBlockDim, 0);
   return 0;
+}
+
+bool cub_transform_available() {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return ensure_cudart_for_cub_sort();
+#else
+  return false;
+#endif
+}
+
+std::size_t cub_transform_affine(void *src,
+                                 void *dst,
+                                 int num_items,
+                                 CudaTransformValueType value_type,
+                                 double scale,
+                                 double bias,
+                                 void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA toolkit transform expects non-negative num_items.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_transform_affine_impl(src, dst, num_items, value_type, scale, bias,
+                                   stream);
+#else
+  TI_ERROR(
+      "CUDA transform requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
 }
 
 bool driver_indexed_copy_available() {
@@ -535,6 +614,40 @@ std::size_t driver_indexed_copy(void *src,
   return 0;
 }
 
+bool cub_indexed_copy_available() {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return ensure_cudart_for_cub_sort();
+#else
+  return false;
+#endif
+}
+
+std::size_t cub_indexed_copy(void *src,
+                             void *indices,
+                             void *dst,
+                             int num_items,
+                             int index_bound,
+                             int item_words,
+                             CudaIndexedCopyOp op,
+                             void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA toolkit indexed-copy expects non-negative num_items.");
+  TI_ERROR_IF(index_bound < 0,
+              "CUDA toolkit indexed-copy expects non-negative index_bound.");
+  TI_ERROR_IF(item_words != 1 && item_words != 2,
+              "CUDA toolkit indexed-copy expects one or two 32-bit words per "
+              "item.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_indexed_copy_impl(src, indices, dst, num_items, index_bound,
+                               item_words, op, stream);
+#else
+  TI_ERROR(
+      "CUDA indexed-copy requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 bool cub_radix_sort_available() {
 #if defined(TI_WITH_CUDA_TOOLKIT)
   return ensure_cudart_for_cub_sort();
@@ -547,6 +660,7 @@ std::size_t cub_radix_sort(void *keys,
                            void *values,
                            int num_items,
                            CubSortKeyType key_type,
+                           CubSortValueType value_type,
                            CubSortMode mode,
                            CubSortNanPolicy nan_policy,
                            bool has_values,
@@ -558,7 +672,7 @@ std::size_t cub_radix_sort(void *keys,
   }
 #if defined(TI_WITH_CUDA_TOOLKIT)
   TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
-  return cub_radix_sort_impl(keys, values, num_items, key_type, mode,
+  return cub_radix_sort_impl(keys, values, num_items, key_type, value_type, mode,
                              nan_policy, has_values, stream, owner);
 #else
   TI_ERROR(
@@ -678,6 +792,7 @@ std::size_t cub_histogram_even(void *values,
                                int num_items,
                                int num_bins,
                                CubHistogramValueType value_type,
+                               CubHistogramBinType bin_type,
                                void *stream,
                                void *owner) {
   TI_ERROR_IF(num_items < 0, "CUB histogram expects non-negative num_items");
@@ -685,7 +800,7 @@ std::size_t cub_histogram_even(void *values,
 #if defined(TI_WITH_CUDA_TOOLKIT)
   TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
   return cub_histogram_even_impl(values, bins, num_items, num_bins, value_type,
-                                 stream, owner);
+                                 bin_type, stream, owner);
 #else
   TI_ERROR(
       "CUDA CUB histogram requires building Taichi with "
@@ -809,6 +924,31 @@ std::size_t cub_bucket_builder_i32(void *keys,
 #endif
 }
 
+std::size_t cub_bucket_builder(void *keys,
+                               void *values,
+                               void *offsets,
+                               void *output,
+                               void *cursor,
+                               int num_items,
+                               int num_bins,
+                               CudaBucketBuilderValueType value_type,
+                               void *stream,
+                               void *owner) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA bucket builder expects non-negative num_items.");
+  TI_ERROR_IF(num_bins <= 0, "CUDA bucket builder expects positive num_bins.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_bucket_builder_impl(keys, values, offsets, output, cursor,
+                                 num_items, num_bins, value_type, stream,
+                                 owner);
+#else
+  TI_ERROR(
+      "CUDA bucket builder requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 void cub_bucket_builder_clear_cache(void *owner) {
 #if defined(TI_WITH_CUDA_TOOLKIT)
   cub_bucket_builder_clear_cache_impl(owner);
@@ -838,6 +978,18 @@ std::size_t cub_grouped_reduce_i32_atomic(void *keys,
                                           int num_groups,
                                           int op,
                                           void *stream) {
+  return cub_grouped_reduce_atomic(keys, values, output, num_items, num_groups,
+                                   CudaGroupedReduceValueType::i32, op, stream);
+}
+
+std::size_t cub_grouped_reduce_atomic(void *keys,
+                                      void *values,
+                                      void *output,
+                                      int num_items,
+                                      int num_groups,
+                                      CudaGroupedReduceValueType value_type,
+                                      int op,
+                                      void *stream) {
   TI_ERROR_IF(num_items < 0,
               "CUDA grouped reduce expects non-negative num_items.");
   TI_ERROR_IF(num_groups <= 0,
@@ -845,8 +997,8 @@ std::size_t cub_grouped_reduce_i32_atomic(void *keys,
   TI_ERROR_IF(op != 0, "CUDA grouped reduce currently supports only sum.");
 #if defined(TI_WITH_CUDA_TOOLKIT)
   TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
-  return cub_grouped_reduce_i32_atomic_impl(keys, values, output, num_items,
-                                            num_groups, op, stream);
+  return cub_grouped_reduce_atomic_impl(keys, values, output, num_items,
+                                        num_groups, value_type, op, stream);
 #else
   TI_ERROR(
       "CUDA grouped reduce requires building Taichi with "
@@ -875,6 +1027,35 @@ std::size_t cub_grouped_reduce_i32(void *keys,
   return cub_grouped_reduce_i32_impl(keys, values, output, offsets, scratch,
                                      cursor, num_items, num_groups, op, stream,
                                      owner);
+#else
+  TI_ERROR(
+      "CUDA grouped reduce requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t cub_grouped_reduce(void *keys,
+                               void *values,
+                               void *output,
+                               void *offsets,
+                               void *scratch,
+                               void *cursor,
+                               int num_items,
+                               int num_groups,
+                               CudaGroupedReduceValueType value_type,
+                               int op,
+                               void *stream,
+                               void *owner) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA grouped reduce expects non-negative num_items.");
+  TI_ERROR_IF(num_groups <= 0,
+              "CUDA grouped reduce expects positive num_groups.");
+  TI_ERROR_IF(op != 0, "CUDA grouped reduce currently supports only sum.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_grouped_reduce_impl(keys, values, output, offsets, scratch,
+                                 cursor, num_items, num_groups, value_type, op,
+                                 stream, owner);
 #else
   TI_ERROR(
       "CUDA grouped reduce requires building Taichi with "

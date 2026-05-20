@@ -500,12 +500,13 @@ __global__ void bucket_count_i32_kernel(const int32_t *keys,
   }
 }
 
-__global__ void bucket_scatter_i32_kernel(const int32_t *keys,
-                                          const int32_t *values,
-                                          int32_t *cursor,
-                                          int32_t *output,
-                                          int num_items,
-                                          int num_bins) {
+template <typename T>
+__global__ void bucket_scatter_kernel(const int32_t *keys,
+                                      const T *values,
+                                      int32_t *cursor,
+                                      T *output,
+                                      int num_items,
+                                      int num_bins) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= num_items) {
     return;
@@ -520,49 +521,175 @@ __global__ void bucket_scatter_i32_kernel(const int32_t *keys,
   }
 }
 
-__global__ void scatter_add_i32_by_i32_kernel(const int32_t *src,
-                                              const int32_t *indices,
-                                              int32_t *dst,
-                                              int num_items,
-                                              int index_bound) {
+template <typename T>
+__device__ void scatter_atomic_add(T *addr, T value) {
+  atomicAdd(addr, value);
+}
+
+template <>
+__device__ void scatter_atomic_add<uint64_t>(uint64_t *addr, uint64_t value) {
+  atomicAdd(reinterpret_cast<unsigned long long *>(addr),
+            static_cast<unsigned long long>(value));
+}
+
+template <>
+__device__ void scatter_atomic_add<int64_t>(int64_t *addr, int64_t value) {
+  atomicAdd(reinterpret_cast<unsigned long long *>(addr),
+            static_cast<unsigned long long>(value));
+}
+
+template <>
+__device__ void scatter_atomic_add<double>(double *addr, double value) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 600
+  atomicAdd(addr, value);
+#else
+  auto *addr_as_ull = reinterpret_cast<unsigned long long *>(addr);
+  unsigned long long old = *addr_as_ull;
+  unsigned long long assumed = 0;
+  do {
+    assumed = old;
+    const double updated = value + __longlong_as_double(assumed);
+    old = atomicCAS(addr_as_ull, assumed, __double_as_longlong(updated));
+  } while (assumed != old);
+#endif
+}
+
+template <typename T>
+__global__ void scatter_add_by_i32_kernel(const T *src,
+                                          const int32_t *indices,
+                                          T *dst,
+                                          int num_items,
+                                          int index_bound) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= num_items) {
     return;
   }
   int index = indices[i];
   if (index >= 0 && index < index_bound) {
-    atomicAdd(dst + index, src[i]);
+    scatter_atomic_add(dst + index, src[i]);
   }
 }
 
-__global__ void grouped_reduce_atomic_sum_i32_kernel(const int32_t *keys,
-                                                     const int32_t *values,
-                                                     int32_t *output,
-                                                     int num_items,
-                                                     int num_groups) {
+template <typename T>
+__global__ void grouped_reduce_atomic_sum_kernel(const int32_t *keys,
+                                                 const T *values,
+                                                 T *output,
+                                                 int num_items,
+                                                 int num_groups) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= num_items) {
     return;
   }
   int key = keys[i];
   if (key >= 0 && key < num_groups) {
-    atomicAdd(output + key, values[i]);
+    scatter_atomic_add(output + key, values[i]);
   }
 }
 
-__global__ void scatter_add_f32_by_i32_kernel(const float *src,
-                                              const int32_t *indices,
-                                              float *dst,
-                                              int num_items,
-                                              int index_bound) {
+template <typename T>
+__device__ bool histogram_bin_in_range(T bin, int num_bins);
+
+template <>
+__device__ bool histogram_bin_in_range<int32_t>(int32_t bin, int num_bins) {
+  return bin >= 0 && bin < num_bins;
+}
+
+template <>
+__device__ bool histogram_bin_in_range<uint32_t>(uint32_t bin, int num_bins) {
+  return bin < static_cast<uint32_t>(num_bins);
+}
+
+template <typename T>
+__global__ void histogram_i64_direct_kernel(const T *samples,
+                                            int64_t *hist,
+                                            int num_items,
+                                            int num_bins) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= num_items) {
     return;
   }
-  int index = indices[i];
-  if (index >= 0 && index < index_bound) {
-    atomicAdd(dst + index, src[i]);
+  T bin = samples[i];
+  if (histogram_bin_in_range(bin, num_bins)) {
+    atomicAdd(reinterpret_cast<unsigned long long *>(hist +
+                                                     static_cast<int>(bin)),
+              1ull);
   }
+}
+
+__global__ void indexed_copy_words_by_i32_kernel(const uint32_t *src,
+                                                 const int32_t *indices,
+                                                 uint32_t *dst,
+                                                 int num_items,
+                                                 int index_bound,
+                                                 int item_words,
+                                                 int op) {
+  int word_i = blockIdx.x * blockDim.x + threadIdx.x;
+  int total_words = num_items * item_words;
+  if (word_i >= total_words) {
+    return;
+  }
+  int item = word_i / item_words;
+  int lane = word_i - item * item_words;
+  int index = indices[item];
+  if (op == static_cast<int>(CudaIndexedCopyOp::gather)) {
+    if (index >= 0 && index < index_bound) {
+      dst[word_i] = src[index * item_words + lane];
+    } else {
+      dst[word_i] = 0u;
+    }
+  } else {
+    if (index >= 0 && index < index_bound) {
+      dst[index * item_words + lane] = src[word_i];
+    }
+  }
+}
+
+__global__ void transform_u32_affine_kernel(const uint32_t *src,
+                                            uint32_t *dst,
+                                            int num_items,
+                                            uint32_t scale,
+                                            uint32_t bias) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  dst[i] = src[i] * scale + bias;
+}
+
+__global__ void transform_f32_affine_kernel(const float *src,
+                                            float *dst,
+                                            int num_items,
+                                            float scale,
+                                            float bias) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  dst[i] = src[i] * scale + bias;
+}
+
+__global__ void transform_u64_affine_kernel(const uint64_t *src,
+                                            uint64_t *dst,
+                                            int num_items,
+                                            uint64_t scale,
+                                            uint64_t bias) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  dst[i] = src[i] * scale + bias;
+}
+
+__global__ void transform_f64_affine_kernel(const double *src,
+                                            double *dst,
+                                            int num_items,
+                                            double scale,
+                                            double bias) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  dst[i] = src[i] * scale + bias;
 }
 
 __device__ uint32_t sortable_f32_key(float value, int nan_policy) {
@@ -667,12 +794,12 @@ __global__ void gather_u32_by_index_kernel(const uint32_t *src,
   dst[i] = src[indices[i]];
 }
 
-template <typename KeyT>
+template <typename KeyT, typename ValueT>
 __global__ void scatter_by_index_kernel(const KeyT *keys,
-                                        const int32_t *values,
+                                        const ValueT *values,
                                         const uint32_t *indices,
                                         KeyT *keys_out,
-                                        int32_t *values_out,
+                                        ValueT *values_out,
                                         int num_items,
                                         bool has_values) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -744,18 +871,18 @@ void launch_gather_u32_by_index(const uint32_t *src,
   check_last_cuda_error("gather_u32_by_index_kernel");
 }
 
-template <typename KeyT>
+template <typename KeyT, typename ValueT>
 void launch_scatter_by_index(const KeyT *keys,
-                             const int32_t *values,
+                             const ValueT *values,
                              const uint32_t *indices,
                              KeyT *keys_out,
-                             int32_t *values_out,
+                             ValueT *values_out,
                              int num_items,
                              bool has_values,
                              cudaStream_t stream) {
   constexpr int kBlockSize = 256;
   const int grid = (num_items + kBlockSize - 1) / kBlockSize;
-  scatter_by_index_kernel<KeyT><<<grid, kBlockSize, 0, stream>>>(
+  scatter_by_index_kernel<KeyT, ValueT><<<grid, kBlockSize, 0, stream>>>(
       keys, values, indices, keys_out, values_out, num_items, has_values);
   check_last_cuda_error("scatter_by_index_kernel");
 }
@@ -792,7 +919,7 @@ void cub_sort_pairs(CubSortCache &cache,
   }
 }
 
-template <typename KeyT>
+template <typename KeyT, typename ValueT>
 std::size_t sort_typed(CubSortCache &cache,
                        void *keys,
                        void *values,
@@ -800,7 +927,7 @@ std::size_t sort_typed(CubSortCache &cache,
                        bool has_values,
                        void *stream_ptr) {
   KeyT *keys_in = static_cast<KeyT *>(keys);
-  int32_t *values_in = static_cast<int32_t *>(values);
+  ValueT *values_in = static_cast<ValueT *>(values);
   cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   const bool use_stream = stream != nullptr;
   ensure_device_cache(cache);
@@ -808,11 +935,11 @@ std::size_t sort_typed(CubSortCache &cache,
   ensure_buffer(&cache.keys_out, &cache.keys_out_bytes,
                 sizeof(KeyT) * num_items);
   KeyT *keys_out = static_cast<KeyT *>(cache.keys_out);
-  int32_t *values_out = nullptr;
+  ValueT *values_out = nullptr;
   if (has_values) {
     ensure_buffer(&cache.values_out, &cache.values_out_bytes,
-                  sizeof(int32_t) * num_items);
-    values_out = static_cast<int32_t *>(cache.values_out);
+                  sizeof(ValueT) * num_items);
+    values_out = static_cast<ValueT *>(cache.values_out);
   } else if (cache.values_out) {
     TI_CUDA_SORT_CHECK(cudaFree(cache.values_out));
     cache.values_out = nullptr;
@@ -851,14 +978,14 @@ std::size_t sort_typed(CubSortCache &cache,
           cache.temp_storage, temp_storage_bytes, keys_in, keys_out, values_in,
           values_out, num_items, kBeginBit, kEndBit, stream));
       TI_CUDA_SORT_CHECK(cudaMemcpyAsync(values_in, values_out,
-                                         sizeof(int32_t) * num_items,
+                                         sizeof(ValueT) * num_items,
                                          cudaMemcpyDeviceToDevice, stream));
     } else {
       TI_CUDA_SORT_CHECK(cub::DeviceRadixSort::SortPairs(
           cache.temp_storage, temp_storage_bytes, keys_in, keys_out, values_in,
           values_out, num_items));
       TI_CUDA_SORT_CHECK(cudaMemcpy(values_in, values_out,
-                                    sizeof(int32_t) * num_items,
+                                    sizeof(ValueT) * num_items,
                                     cudaMemcpyDeviceToDevice));
     }
   } else {
@@ -886,6 +1013,7 @@ std::size_t sort_typed(CubSortCache &cache,
   return cache.allocated_bytes();
 }
 
+template <typename ValueT>
 std::size_t sort_f32_transformed(CubSortCache &cache,
                                  void *keys,
                                  void *values,
@@ -894,7 +1022,7 @@ std::size_t sort_f32_transformed(CubSortCache &cache,
                                  CubSortNanPolicy nan_policy,
                                  void *stream_ptr) {
   float *keys_in = static_cast<float *>(keys);
-  int32_t *values_in = static_cast<int32_t *>(values);
+  ValueT *values_in = static_cast<ValueT *>(values);
   cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   const bool use_stream = stream != nullptr;
   ensure_device_cache(cache);
@@ -909,9 +1037,9 @@ std::size_t sort_f32_transformed(CubSortCache &cache,
       &cache.index_b, &cache.index_b_bytes, num_items);
   auto *keys_out = ensure_typed_buffer<float>(&cache.keys_out,
                                               &cache.keys_out_bytes, num_items);
-  int32_t *values_out = nullptr;
+  ValueT *values_out = nullptr;
   if (has_values) {
-    values_out = ensure_typed_buffer<int32_t>(
+    values_out = ensure_typed_buffer<ValueT>(
         &cache.values_out, &cache.values_out_bytes, num_items);
   } else if (cache.values_out) {
     TI_CUDA_SORT_CHECK(cudaFree(cache.values_out));
@@ -922,7 +1050,7 @@ std::size_t sort_f32_transformed(CubSortCache &cache,
   launch_init_sortable_f32(keys_in, key_a, index_a, num_items,
                            static_cast<int>(nan_policy), stream);
   cub_sort_pairs(cache, key_a, key_b, index_a, index_b, num_items, stream);
-  launch_scatter_by_index(keys_in, values_in, index_b, keys_out, values_out,
+  launch_scatter_by_index<float, ValueT>(keys_in, values_in, index_b, keys_out, values_out,
                           num_items, has_values, stream);
 
   if (use_stream) {
@@ -931,7 +1059,7 @@ std::size_t sort_f32_transformed(CubSortCache &cache,
                                        cudaMemcpyDeviceToDevice, stream));
     if (has_values) {
       TI_CUDA_SORT_CHECK(cudaMemcpyAsync(values_in, values_out,
-                                         sizeof(int32_t) * num_items,
+                                         sizeof(ValueT) * num_items,
                                          cudaMemcpyDeviceToDevice, stream));
     }
     TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
@@ -940,7 +1068,7 @@ std::size_t sort_f32_transformed(CubSortCache &cache,
                                   cudaMemcpyDeviceToDevice));
     if (has_values) {
       TI_CUDA_SORT_CHECK(cudaMemcpy(values_in, values_out,
-                                    sizeof(int32_t) * num_items,
+                                    sizeof(ValueT) * num_items,
                                     cudaMemcpyDeviceToDevice));
     }
     TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
@@ -949,7 +1077,7 @@ std::size_t sort_f32_transformed(CubSortCache &cache,
   return cache.allocated_bytes();
 }
 
-template <typename KeyT>
+template <typename KeyT, typename ValueT>
 std::size_t sort_u64_transformed(CubSortCache &cache,
                                  void *keys,
                                  void *values,
@@ -958,7 +1086,7 @@ std::size_t sort_u64_transformed(CubSortCache &cache,
                                  CubSortNanPolicy nan_policy,
                                  void *stream_ptr) {
   KeyT *keys_in = static_cast<KeyT *>(keys);
-  int32_t *values_in = static_cast<int32_t *>(values);
+  ValueT *values_in = static_cast<ValueT *>(values);
   cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   const bool use_stream = stream != nullptr;
   ensure_device_cache(cache);
@@ -973,9 +1101,9 @@ std::size_t sort_u64_transformed(CubSortCache &cache,
       &cache.index_b, &cache.index_b_bytes, num_items);
   auto *keys_out = ensure_typed_buffer<KeyT>(&cache.keys_out,
                                              &cache.keys_out_bytes, num_items);
-  int32_t *values_out = nullptr;
+  ValueT *values_out = nullptr;
   if (has_values) {
-    values_out = ensure_typed_buffer<int32_t>(
+    values_out = ensure_typed_buffer<ValueT>(
         &cache.values_out, &cache.values_out_bytes, num_items);
   } else if (cache.values_out) {
     TI_CUDA_SORT_CHECK(cudaFree(cache.values_out));
@@ -986,7 +1114,7 @@ std::size_t sort_u64_transformed(CubSortCache &cache,
   launch_init_sortable64(keys_in, key_a, index_a, num_items,
                          static_cast<int>(nan_policy), stream);
   cub_sort_pairs(cache, key_a, key_b, index_a, index_b, num_items, stream);
-  launch_scatter_by_index(keys_in, values_in, index_b, keys_out, values_out,
+  launch_scatter_by_index<KeyT, ValueT>(keys_in, values_in, index_b, keys_out, values_out,
                           num_items, has_values, stream);
 
   if (use_stream) {
@@ -995,7 +1123,7 @@ std::size_t sort_u64_transformed(CubSortCache &cache,
                                        cudaMemcpyDeviceToDevice, stream));
     if (has_values) {
       TI_CUDA_SORT_CHECK(cudaMemcpyAsync(values_in, values_out,
-                                         sizeof(int32_t) * num_items,
+                                         sizeof(ValueT) * num_items,
                                          cudaMemcpyDeviceToDevice, stream));
     }
     TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
@@ -1004,7 +1132,7 @@ std::size_t sort_u64_transformed(CubSortCache &cache,
                                   cudaMemcpyDeviceToDevice));
     if (has_values) {
       TI_CUDA_SORT_CHECK(cudaMemcpy(values_in, values_out,
-                                    sizeof(int32_t) * num_items,
+                                    sizeof(ValueT) * num_items,
                                     cudaMemcpyDeviceToDevice));
     }
     TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
@@ -1013,7 +1141,7 @@ std::size_t sort_u64_transformed(CubSortCache &cache,
   return cache.allocated_bytes();
 }
 
-template <typename KeyT>
+template <typename KeyT, typename ValueT>
 std::size_t sort_split32(CubSortCache &cache,
                          void *keys,
                          void *values,
@@ -1022,7 +1150,7 @@ std::size_t sort_split32(CubSortCache &cache,
                          CubSortNanPolicy nan_policy,
                          void *stream_ptr) {
   KeyT *keys_in = static_cast<KeyT *>(keys);
-  int32_t *values_in = static_cast<int32_t *>(values);
+  ValueT *values_in = static_cast<ValueT *>(values);
   cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   const bool use_stream = stream != nullptr;
   ensure_device_cache(cache);
@@ -1039,9 +1167,9 @@ std::size_t sort_split32(CubSortCache &cache,
       &cache.index_b, &cache.index_b_bytes, num_items);
   auto *keys_out = ensure_typed_buffer<KeyT>(&cache.keys_out,
                                              &cache.keys_out_bytes, num_items);
-  int32_t *values_out = nullptr;
+  ValueT *values_out = nullptr;
   if (has_values) {
-    values_out = ensure_typed_buffer<int32_t>(
+    values_out = ensure_typed_buffer<ValueT>(
         &cache.values_out, &cache.values_out_bytes, num_items);
   } else if (cache.values_out) {
     TI_CUDA_SORT_CHECK(cudaFree(cache.values_out));
@@ -1056,7 +1184,7 @@ std::size_t sort_split32(CubSortCache &cache,
   launch_gather_u32_by_index(high_keys, index_b, low_keys, num_items, stream);
   cub_sort_pairs(cache, low_keys, tmp_keys, index_b, index_a, num_items,
                  stream);
-  launch_scatter_by_index(keys_in, values_in, index_a, keys_out, values_out,
+  launch_scatter_by_index<KeyT, ValueT>(keys_in, values_in, index_a, keys_out, values_out,
                           num_items, has_values, stream);
 
   if (use_stream) {
@@ -1065,7 +1193,7 @@ std::size_t sort_split32(CubSortCache &cache,
                                        cudaMemcpyDeviceToDevice, stream));
     if (has_values) {
       TI_CUDA_SORT_CHECK(cudaMemcpyAsync(values_in, values_out,
-                                         sizeof(int32_t) * num_items,
+                                         sizeof(ValueT) * num_items,
                                          cudaMemcpyDeviceToDevice, stream));
     }
     TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
@@ -1074,7 +1202,7 @@ std::size_t sort_split32(CubSortCache &cache,
                                   cudaMemcpyDeviceToDevice));
     if (has_values) {
       TI_CUDA_SORT_CHECK(cudaMemcpy(values_in, values_out,
-                                    sizeof(int32_t) * num_items,
+                                    sizeof(ValueT) * num_items,
                                     cudaMemcpyDeviceToDevice));
     }
     TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
@@ -1083,12 +1211,63 @@ std::size_t sort_split32(CubSortCache &cache,
   return cache.allocated_bytes();
 }
 
+template <typename ValueT>
+std::size_t cub_radix_sort_value_impl(CubSortCache &cache,
+                                      void *keys,
+                                      void *values,
+                                      int num_items,
+                                      CubSortKeyType key_type,
+                                      CubSortMode mode,
+                                      CubSortNanPolicy nan_policy,
+                                      bool has_values,
+                                      void *stream) {
+  if (mode == CubSortMode::split32) {
+    switch (key_type) {
+      case CubSortKeyType::u64:
+        return sort_split32<uint64_t, ValueT>(
+            cache, keys, values, num_items, has_values, nan_policy, stream);
+      case CubSortKeyType::i64:
+        return sort_split32<int64_t, ValueT>(
+            cache, keys, values, num_items, has_values, nan_policy, stream);
+      case CubSortKeyType::f64:
+        return sort_split32<double, ValueT>(
+            cache, keys, values, num_items, has_values, nan_policy, stream);
+      default:
+        throw std::runtime_error(
+            "CUDA CUB split32 sort supports only u64/i64/f64 keys");
+    }
+  }
+
+  switch (key_type) {
+    case CubSortKeyType::u32:
+      return sort_typed<uint32_t, ValueT>(cache, keys, values, num_items,
+                                          has_values, stream);
+    case CubSortKeyType::i32:
+      return sort_typed<int32_t, ValueT>(cache, keys, values, num_items,
+                                         has_values, stream);
+    case CubSortKeyType::f32:
+      return sort_f32_transformed<ValueT>(cache, keys, values, num_items,
+                                          has_values, nan_policy, stream);
+    case CubSortKeyType::u64:
+      return sort_typed<uint64_t, ValueT>(cache, keys, values, num_items,
+                                          has_values, stream);
+    case CubSortKeyType::i64:
+      return sort_typed<int64_t, ValueT>(cache, keys, values, num_items,
+                                         has_values, stream);
+    case CubSortKeyType::f64:
+      return sort_u64_transformed<double, ValueT>(
+          cache, keys, values, num_items, has_values, nan_policy, stream);
+  }
+  throw std::runtime_error("Unsupported CUB sort key type");
+}
+
 }  // namespace
 
 std::size_t cub_radix_sort_impl(void *keys,
                                 void *values,
                                 int num_items,
                                 CubSortKeyType key_type,
+                                CubSortValueType value_type,
                                 CubSortMode mode,
                                 CubSortNanPolicy nan_policy,
                                 bool has_values,
@@ -1102,44 +1281,38 @@ std::size_t cub_radix_sort_impl(void *keys,
   }
   std::lock_guard<std::mutex> lock(get_cache_mutex());
   CubSortCache &cache = get_cache(owner);
-  if (mode == CubSortMode::split32) {
-    switch (key_type) {
-      case CubSortKeyType::u64:
-        return sort_split32<uint64_t>(cache, keys, values, num_items,
-                                      has_values, nan_policy, stream);
-      case CubSortKeyType::i64:
-        return sort_split32<int64_t>(cache, keys, values, num_items, has_values,
-                                     nan_policy, stream);
-      case CubSortKeyType::f64:
-        return sort_split32<double>(cache, keys, values, num_items, has_values,
-                                    nan_policy, stream);
-      default:
-        throw std::runtime_error(
-            "CUDA CUB split32 sort supports only u64/i64/f64 keys");
-    }
+  if (!has_values) {
+    return cub_radix_sort_value_impl<int32_t>(
+        cache, keys, values, num_items, key_type, mode, nan_policy, has_values,
+        stream);
   }
-
-  switch (key_type) {
-    case CubSortKeyType::u32:
-      return sort_typed<uint32_t>(cache, keys, values, num_items, has_values,
-                                  stream);
-    case CubSortKeyType::i32:
-      return sort_typed<int32_t>(cache, keys, values, num_items, has_values,
-                                 stream);
-    case CubSortKeyType::f32:
-      return sort_f32_transformed(cache, keys, values, num_items, has_values,
-                                  nan_policy, stream);
-    case CubSortKeyType::u64:
-      return sort_typed<uint64_t>(cache, keys, values, num_items, has_values,
-                                  stream);
-    case CubSortKeyType::i64:
-      return sort_typed<int64_t>(cache, keys, values, num_items, has_values,
-                                 stream);
-    case CubSortKeyType::f64:
-      return sort_u64_transformed<double>(cache, keys, values, num_items,
-                                          has_values, nan_policy, stream);
+  switch (value_type) {
+    case CubSortValueType::i32:
+      return cub_radix_sort_value_impl<int32_t>(
+          cache, keys, values, num_items, key_type, mode, nan_policy,
+          has_values, stream);
+    case CubSortValueType::f32:
+      return cub_radix_sort_value_impl<float>(
+          cache, keys, values, num_items, key_type, mode, nan_policy,
+          has_values, stream);
+    case CubSortValueType::u32:
+      return cub_radix_sort_value_impl<uint32_t>(
+          cache, keys, values, num_items, key_type, mode, nan_policy,
+          has_values, stream);
+    case CubSortValueType::u64:
+      return cub_radix_sort_value_impl<uint64_t>(
+          cache, keys, values, num_items, key_type, mode, nan_policy,
+          has_values, stream);
+    case CubSortValueType::i64:
+      return cub_radix_sort_value_impl<int64_t>(
+          cache, keys, values, num_items, key_type, mode, nan_policy,
+          has_values, stream);
+    case CubSortValueType::f64:
+      return cub_radix_sort_value_impl<double>(
+          cache, keys, values, num_items, key_type, mode, nan_policy,
+          has_values, stream);
   }
-  throw std::runtime_error("Unsupported CUB sort key type");
+  throw std::runtime_error("Unsupported CUB sort value type");
 }
 
 void cub_radix_sort_clear_cache_impl(void *owner) {
@@ -1217,6 +1390,16 @@ std::size_t cub_inclusive_scan_impl(void *data,
   switch (value_type) {
     case CubScanValueType::i32:
       return inclusive_scan_typed<int32_t>(cache, data, num_items, stream);
+    case CubScanValueType::f32:
+      return inclusive_scan_typed<float>(cache, data, num_items, stream);
+    case CubScanValueType::u32:
+      return inclusive_scan_typed<uint32_t>(cache, data, num_items, stream);
+    case CubScanValueType::u64:
+      return inclusive_scan_typed<uint64_t>(cache, data, num_items, stream);
+    case CubScanValueType::i64:
+      return inclusive_scan_typed<int64_t>(cache, data, num_items, stream);
+    case CubScanValueType::f64:
+      return inclusive_scan_typed<double>(cache, data, num_items, stream);
   }
   throw std::runtime_error("Unsupported CUB scan value type");
 }
@@ -1307,6 +1490,21 @@ std::size_t cub_select_flagged_impl(void *values,
     case CubSelectValueType::i32:
       return select_flagged_typed<int32_t>(cache, values, flags, output, count,
                                            num_items, stream);
+    case CubSelectValueType::f32:
+      return select_flagged_typed<float>(cache, values, flags, output, count,
+                                         num_items, stream);
+    case CubSelectValueType::u32:
+      return select_flagged_typed<uint32_t>(cache, values, flags, output, count,
+                                            num_items, stream);
+    case CubSelectValueType::u64:
+      return select_flagged_typed<uint64_t>(cache, values, flags, output, count,
+                                            num_items, stream);
+    case CubSelectValueType::i64:
+      return select_flagged_typed<int64_t>(cache, values, flags, output, count,
+                                           num_items, stream);
+    case CubSelectValueType::f64:
+      return select_flagged_typed<double>(cache, values, flags, output, count,
+                                          num_items, stream);
   }
   throw std::runtime_error("Unsupported CUB select value type");
 }
@@ -1338,7 +1536,7 @@ std::size_t cub_select_cached_bytes_impl(void *owner) {
   return it->second->allocated_bytes();
 }
 
-template <typename T>
+template <typename T, typename CounterT>
 std::size_t histogram_even_typed(CubHistogramCache &cache,
                                  void *values,
                                  void *bins,
@@ -1349,18 +1547,18 @@ std::size_t histogram_even_typed(CubHistogramCache &cache,
     throw std::runtime_error("CUB histogram received a null pointer");
   }
   const T *samples_in = static_cast<const T *>(values);
-  int32_t *hist_out = static_cast<int32_t *>(bins);
+  CounterT *hist_out = static_cast<CounterT *>(bins);
   cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   const bool use_stream = stream != nullptr;
   ensure_device_cache(cache);
+  const std::size_t bin_bytes = sizeof(CounterT) * num_bins;
 
   if (num_items == 0) {
     if (use_stream) {
-      TI_CUDA_SORT_CHECK(
-          cudaMemsetAsync(hist_out, 0, sizeof(int32_t) * num_bins, stream));
+      TI_CUDA_SORT_CHECK(cudaMemsetAsync(hist_out, 0, bin_bytes, stream));
       TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
     } else {
-      TI_CUDA_SORT_CHECK(cudaMemset(hist_out, 0, sizeof(int32_t) * num_bins));
+      TI_CUDA_SORT_CHECK(cudaMemset(hist_out, 0, bin_bytes));
       TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
     }
     return cache.allocated_bytes();
@@ -1393,21 +1591,98 @@ std::size_t histogram_even_typed(CubHistogramCache &cache,
   return cache.allocated_bytes();
 }
 
+template <typename CounterT>
+std::size_t histogram_even_sample_dispatch(CubHistogramCache &cache,
+                                           void *values,
+                                           void *bins,
+                                           int num_items,
+                                           int num_bins,
+                                           CubHistogramValueType value_type,
+                                           void *stream) {
+  switch (value_type) {
+    case CubHistogramValueType::i32:
+      return histogram_even_typed<int32_t, CounterT>(
+          cache, values, bins, num_items, num_bins, stream);
+    case CubHistogramValueType::u32:
+      return histogram_even_typed<uint32_t, CounterT>(
+          cache, values, bins, num_items, num_bins, stream);
+  }
+  throw std::runtime_error("Unsupported CUB histogram value type");
+}
+
+template <typename T>
+std::size_t histogram_i64_direct_typed(CubHistogramCache &cache,
+                                       void *values,
+                                       void *bins,
+                                       int num_items,
+                                       int num_bins,
+                                       void *stream_ptr) {
+  if (!values || !bins) {
+    throw std::runtime_error("CUDA histogram received a null pointer");
+  }
+  const T *samples_in = static_cast<const T *>(values);
+  int64_t *hist_out = static_cast<int64_t *>(bins);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  ensure_device_cache(cache);
+  const std::size_t bin_bytes = sizeof(int64_t) * num_bins;
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaMemsetAsync(hist_out, 0, bin_bytes, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaMemset(hist_out, 0, bin_bytes));
+  }
+  if (num_items > 0) {
+    constexpr int kBlockDim = 256;
+    const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+    histogram_i64_direct_kernel<T><<<grid_dim, kBlockDim, 0, stream>>>(
+        samples_in, hist_out, num_items, num_bins);
+    TI_CUDA_SORT_CHECK(cudaGetLastError());
+  }
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t histogram_i64_sample_dispatch(CubHistogramCache &cache,
+                                          void *values,
+                                          void *bins,
+                                          int num_items,
+                                          int num_bins,
+                                          CubHistogramValueType value_type,
+                                          void *stream) {
+  switch (value_type) {
+    case CubHistogramValueType::i32:
+      return histogram_i64_direct_typed<int32_t>(
+          cache, values, bins, num_items, num_bins, stream);
+    case CubHistogramValueType::u32:
+      return histogram_i64_direct_typed<uint32_t>(
+          cache, values, bins, num_items, num_bins, stream);
+  }
+  throw std::runtime_error("Unsupported CUDA histogram value type");
+}
+
 std::size_t cub_histogram_even_impl(void *values,
                                     void *bins,
                                     int num_items,
                                     int num_bins,
                                     CubHistogramValueType value_type,
+                                    CubHistogramBinType bin_type,
                                     void *stream,
                                     void *owner) {
   std::lock_guard<std::mutex> lock(get_cache_mutex());
   CubHistogramCache &cache = get_histogram_cache(owner);
-  switch (value_type) {
-    case CubHistogramValueType::i32:
-      return histogram_even_typed<int32_t>(cache, values, bins, num_items,
-                                           num_bins, stream);
+  switch (bin_type) {
+    case CubHistogramBinType::i32:
+      return histogram_even_sample_dispatch<int32_t>(
+          cache, values, bins, num_items, num_bins, value_type, stream);
+    case CubHistogramBinType::i64:
+      return histogram_i64_sample_dispatch(
+          cache, values, bins, num_items, num_bins, value_type, stream);
   }
-  throw std::runtime_error("Unsupported CUB histogram value type");
+  throw std::runtime_error("Unsupported CUB histogram bin type");
 }
 
 void cub_histogram_clear_cache_impl(void *owner) {
@@ -1551,6 +1826,18 @@ std::size_t cub_reduce_impl(void *values,
                                    stream);
     case CubReduceValueType::f32:
       return reduce_typed<float>(cache, values, output, num_items, op, stream);
+    case CubReduceValueType::u32:
+      return reduce_typed<uint32_t>(cache, values, output, num_items, op,
+                                    stream);
+    case CubReduceValueType::u64:
+      return reduce_typed<uint64_t>(cache, values, output, num_items, op,
+                                    stream);
+    case CubReduceValueType::i64:
+      return reduce_typed<int64_t>(cache, values, output, num_items, op,
+                                   stream);
+    case CubReduceValueType::f64:
+      return reduce_typed<double>(cache, values, output, num_items, op,
+                                  stream);
   }
   throw std::runtime_error("Unsupported CUB reduce value type");
 }
@@ -1601,14 +1888,34 @@ std::size_t cub_scatter_add_impl(void *src,
   const int32_t *indices_in = static_cast<const int32_t *>(indices);
   switch (value_type) {
     case CudaScatterAddValueType::i32:
-      scatter_add_i32_by_i32_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+      scatter_add_by_i32_kernel<int32_t><<<grid_dim, kBlockDim, 0, stream>>>(
           static_cast<const int32_t *>(src), indices_in,
           static_cast<int32_t *>(dst), num_items, index_bound);
       break;
     case CudaScatterAddValueType::f32:
-      scatter_add_f32_by_i32_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+      scatter_add_by_i32_kernel<float><<<grid_dim, kBlockDim, 0, stream>>>(
           static_cast<const float *>(src), indices_in, static_cast<float *>(dst),
           num_items, index_bound);
+      break;
+    case CudaScatterAddValueType::u32:
+      scatter_add_by_i32_kernel<uint32_t><<<grid_dim, kBlockDim, 0, stream>>>(
+          static_cast<const uint32_t *>(src), indices_in,
+          static_cast<uint32_t *>(dst), num_items, index_bound);
+      break;
+    case CudaScatterAddValueType::u64:
+      scatter_add_by_i32_kernel<uint64_t><<<grid_dim, kBlockDim, 0, stream>>>(
+          static_cast<const uint64_t *>(src), indices_in,
+          static_cast<uint64_t *>(dst), num_items, index_bound);
+      break;
+    case CudaScatterAddValueType::i64:
+      scatter_add_by_i32_kernel<int64_t><<<grid_dim, kBlockDim, 0, stream>>>(
+          static_cast<const int64_t *>(src), indices_in,
+          static_cast<int64_t *>(dst), num_items, index_bound);
+      break;
+    case CudaScatterAddValueType::f64:
+      scatter_add_by_i32_kernel<double><<<grid_dim, kBlockDim, 0, stream>>>(
+          static_cast<const double *>(src), indices_in,
+          static_cast<double *>(dst), num_items, index_bound);
       break;
     default:
       throw std::runtime_error("Unsupported CUDA scatter-add value type");
@@ -1622,15 +1929,130 @@ std::size_t cub_scatter_add_impl(void *src,
   return 0;
 }
 
-std::size_t cub_bucket_builder_i32_impl(void *keys,
-                                        void *values,
-                                        void *offsets,
-                                        void *output,
-                                        void *cursor,
-                                        int num_items,
-                                        int num_bins,
-                                        void *stream_ptr,
-                                        void *owner) {
+std::size_t cub_indexed_copy_impl(void *src,
+                                  void *indices,
+                                  void *dst,
+                                  int num_items,
+                                  int index_bound,
+                                  int item_words,
+                                  CudaIndexedCopyOp op,
+                                  void *stream_ptr) {
+  if (!src || !indices || !dst) {
+    throw std::runtime_error("CUDA indexed-copy received a null pointer");
+  }
+  if (num_items == 0 || index_bound == 0) {
+    return 0;
+  }
+  if (item_words != 1 && item_words != 2) {
+    throw std::runtime_error("CUDA indexed-copy expects one or two words");
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  constexpr int kBlockDim = 256;
+  const int total_words = num_items * item_words;
+  const int grid_dim = (total_words + kBlockDim - 1) / kBlockDim;
+  indexed_copy_words_by_i32_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+      static_cast<const uint32_t *>(src), static_cast<const int32_t *>(indices),
+      static_cast<uint32_t *>(dst), num_items, index_bound, item_words,
+      static_cast<int>(op));
+  TI_CUDA_SORT_CHECK(cudaGetLastError());
+  if (stream) {
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return 0;
+}
+
+std::size_t cub_transform_affine_impl(void *src,
+                                      void *dst,
+                                      int num_items,
+                                      CudaTransformValueType value_type,
+                                      double scale,
+                                      double bias,
+                                      void *stream_ptr) {
+  if (!src || !dst) {
+    throw std::runtime_error("CUDA transform received a null pointer");
+  }
+  if (num_items == 0) {
+    return 0;
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  constexpr int kBlockDim = 256;
+  const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+  switch (value_type) {
+    case CudaTransformValueType::i32:
+      transform_u32_affine_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+          static_cast<const uint32_t *>(src), static_cast<uint32_t *>(dst),
+          num_items,
+          static_cast<uint32_t>(static_cast<int32_t>(scale)),
+          static_cast<uint32_t>(static_cast<int32_t>(bias)));
+      break;
+    case CudaTransformValueType::u32:
+      transform_u32_affine_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+          static_cast<const uint32_t *>(src), static_cast<uint32_t *>(dst),
+          num_items, static_cast<uint32_t>(scale),
+          static_cast<uint32_t>(bias));
+      break;
+    case CudaTransformValueType::f32:
+      transform_f32_affine_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+          static_cast<const float *>(src), static_cast<float *>(dst), num_items,
+          static_cast<float>(scale), static_cast<float>(bias));
+      break;
+    case CudaTransformValueType::u64:
+      transform_u64_affine_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+          static_cast<const uint64_t *>(src), static_cast<uint64_t *>(dst),
+          num_items, static_cast<uint64_t>(scale),
+          static_cast<uint64_t>(bias));
+      break;
+    case CudaTransformValueType::i64:
+      transform_u64_affine_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+          static_cast<const uint64_t *>(src), static_cast<uint64_t *>(dst),
+          num_items,
+          static_cast<uint64_t>(static_cast<int64_t>(scale)),
+          static_cast<uint64_t>(static_cast<int64_t>(bias)));
+      break;
+    case CudaTransformValueType::f64:
+      transform_f64_affine_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
+          static_cast<const double *>(src), static_cast<double *>(dst),
+          num_items, scale, bias);
+      break;
+    default:
+      throw std::runtime_error("Unsupported CUDA transform value type");
+  }
+  TI_CUDA_SORT_CHECK(cudaGetLastError());
+  if (stream) {
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return 0;
+}
+
+template <typename T>
+void launch_bucket_scatter(const int32_t *keys_in,
+                           const void *values,
+                           int32_t *cursor_in_out,
+                           void *output,
+                           int num_items,
+                           int num_bins,
+                           int grid_dim,
+                           int block_dim,
+                           cudaStream_t stream) {
+  bucket_scatter_kernel<T><<<grid_dim, block_dim, 0, stream>>>(
+      keys_in, static_cast<const T *>(values), cursor_in_out,
+      static_cast<T *>(output), num_items, num_bins);
+}
+
+std::size_t cub_bucket_builder_impl(void *keys,
+                                    void *values,
+                                    void *offsets,
+                                    void *output,
+                                    void *cursor,
+                                    int num_items,
+                                    int num_bins,
+                                    CudaBucketBuilderValueType value_type,
+                                    void *stream_ptr,
+                                    void *owner) {
   if (!keys || !values || !offsets || !output || !cursor) {
     throw std::runtime_error("CUDA bucket builder received a null pointer");
   }
@@ -1639,9 +2061,7 @@ std::size_t cub_bucket_builder_i32_impl(void *keys,
   ensure_device_cache(cache);
 
   const int32_t *keys_in = static_cast<const int32_t *>(keys);
-  const int32_t *values_in = static_cast<const int32_t *>(values);
   int32_t *offsets_in_out = static_cast<int32_t *>(offsets);
-  int32_t *output_out = static_cast<int32_t *>(output);
   int32_t *cursor_in_out = static_cast<int32_t *>(cursor);
   cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   const bool use_stream = stream != nullptr;
@@ -1695,8 +2115,41 @@ std::size_t cub_bucket_builder_i32_impl(void *keys,
 
   if (num_items > 0) {
     const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
-    bucket_scatter_i32_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
-        keys_in, values_in, cursor_in_out, output_out, num_items, num_bins);
+    switch (value_type) {
+      case CudaBucketBuilderValueType::i32:
+        launch_bucket_scatter<int32_t>(keys_in, values, cursor_in_out, output,
+                                       num_items, num_bins, grid_dim,
+                                       kBlockDim, stream);
+        break;
+      case CudaBucketBuilderValueType::f32:
+        launch_bucket_scatter<float>(keys_in, values, cursor_in_out, output,
+                                     num_items, num_bins, grid_dim, kBlockDim,
+                                     stream);
+        break;
+      case CudaBucketBuilderValueType::u32:
+        launch_bucket_scatter<uint32_t>(keys_in, values, cursor_in_out, output,
+                                        num_items, num_bins, grid_dim,
+                                        kBlockDim, stream);
+        break;
+      case CudaBucketBuilderValueType::u64:
+        launch_bucket_scatter<uint64_t>(keys_in, values, cursor_in_out, output,
+                                        num_items, num_bins, grid_dim,
+                                        kBlockDim, stream);
+        break;
+      case CudaBucketBuilderValueType::i64:
+        launch_bucket_scatter<int64_t>(keys_in, values, cursor_in_out, output,
+                                       num_items, num_bins, grid_dim,
+                                       kBlockDim, stream);
+        break;
+      case CudaBucketBuilderValueType::f64:
+        launch_bucket_scatter<double>(keys_in, values, cursor_in_out, output,
+                                      num_items, num_bins, grid_dim,
+                                      kBlockDim, stream);
+        break;
+      default:
+        throw std::runtime_error(
+            "CUDA bucket builder received an unsupported value type");
+    }
     TI_CUDA_SORT_CHECK(cudaGetLastError());
   }
 
@@ -1706,6 +2159,21 @@ std::size_t cub_bucket_builder_i32_impl(void *keys,
     TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
   }
   return cache.allocated_bytes();
+}
+
+std::size_t cub_bucket_builder_i32_impl(void *keys,
+                                        void *values,
+                                        void *offsets,
+                                        void *output,
+                                        void *cursor,
+                                        int num_items,
+                                        int num_bins,
+                                        void *stream_ptr,
+                                        void *owner) {
+  return cub_bucket_builder_impl(keys, values, offsets, output, cursor,
+                                 num_items, num_bins,
+                                 CudaBucketBuilderValueType::i32, stream_ptr,
+                                 owner);
 }
 
 void cub_bucket_builder_clear_cache_impl(void *owner) {
@@ -1735,43 +2203,22 @@ std::size_t cub_bucket_builder_cached_bytes_impl(void *owner) {
   return it->second->allocated_bytes();
 }
 
-std::size_t cub_grouped_reduce_i32_impl(void *keys,
-                                        void *values,
-                                        void *output,
-                                        void *offsets,
-                                        void *scratch,
-                                        void *cursor,
-                                        int num_items,
+template <typename T>
+void grouped_reduce_segmented_sum_typed(T *scratch_values,
+                                        T *output_out,
+                                        int32_t *offsets_in,
                                         int num_groups,
-                                        int op,
-                                        void *stream_ptr,
-                                        void *owner) {
-  if (!keys || !values || !output || !offsets || !scratch || !cursor) {
-    throw std::runtime_error("CUDA grouped reduce received a null pointer");
-  }
-  if (op != 0) {
-    throw std::runtime_error("CUDA grouped reduce currently supports only sum");
-  }
-  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+                                        cudaStream_t stream,
+                                        CubGroupedReduceCache &cache) {
   const bool use_stream = stream != nullptr;
-  std::size_t bucket_bytes = cub_bucket_builder_i32_impl(
-      keys, values, offsets, scratch, cursor, num_items, num_groups, stream,
-      owner);
-
-  auto *offsets_in = static_cast<int32_t *>(offsets);
-  auto *scratch_values = static_cast<int32_t *>(scratch);
-  auto *output_out = static_cast<int32_t *>(output);
   const std::size_t output_bytes =
-      static_cast<std::size_t>(num_groups) * sizeof(int32_t);
+      static_cast<std::size_t>(num_groups) * sizeof(T);
   if (use_stream) {
     TI_CUDA_SORT_CHECK(cudaMemsetAsync(output_out, 0, output_bytes, stream));
   } else {
     TI_CUDA_SORT_CHECK(cudaMemset(output_out, 0, output_bytes));
   }
 
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubGroupedReduceCache &cache = get_grouped_reduce_cache(owner);
-  ensure_device_cache(cache);
   std::size_t temp_storage_bytes = 0;
   if (use_stream) {
     TI_CUDA_SORT_CHECK(cub::DeviceSegmentedReduce::Sum(
@@ -1795,16 +2242,124 @@ std::size_t cub_grouped_reduce_i32_impl(void *keys,
         num_groups, offsets_in, offsets_in + 1));
     TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
   }
+}
+
+std::size_t cub_grouped_reduce_impl(void *keys,
+                                    void *values,
+                                    void *output,
+                                    void *offsets,
+                                    void *scratch,
+                                    void *cursor,
+                                    int num_items,
+                                    int num_groups,
+                                    CudaGroupedReduceValueType value_type,
+                                    int op,
+                                    void *stream_ptr,
+                                    void *owner) {
+  if (!keys || !values || !output || !offsets || !scratch || !cursor) {
+    throw std::runtime_error("CUDA grouped reduce received a null pointer");
+  }
+  if (op != 0) {
+    throw std::runtime_error("CUDA grouped reduce currently supports only sum");
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  std::size_t bucket_bytes = cub_bucket_builder_impl(
+      keys, values, offsets, scratch, cursor, num_items, num_groups,
+      static_cast<CudaBucketBuilderValueType>(
+          static_cast<int>(value_type)),
+      stream, owner);
+
+  auto *offsets_in = static_cast<int32_t *>(offsets);
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  CubGroupedReduceCache &cache = get_grouped_reduce_cache(owner);
+  ensure_device_cache(cache);
+  switch (value_type) {
+    case CudaGroupedReduceValueType::i32:
+      grouped_reduce_segmented_sum_typed(
+          static_cast<int32_t *>(scratch), static_cast<int32_t *>(output),
+          offsets_in, num_groups, stream, cache);
+      break;
+    case CudaGroupedReduceValueType::f32:
+      grouped_reduce_segmented_sum_typed(static_cast<float *>(scratch),
+                                         static_cast<float *>(output),
+                                         offsets_in, num_groups, stream, cache);
+      break;
+    case CudaGroupedReduceValueType::u32:
+      grouped_reduce_segmented_sum_typed(
+          static_cast<uint32_t *>(scratch), static_cast<uint32_t *>(output),
+          offsets_in, num_groups, stream, cache);
+      break;
+    case CudaGroupedReduceValueType::u64:
+      grouped_reduce_segmented_sum_typed(
+          static_cast<uint64_t *>(scratch), static_cast<uint64_t *>(output),
+          offsets_in, num_groups, stream, cache);
+      break;
+    case CudaGroupedReduceValueType::i64:
+      grouped_reduce_segmented_sum_typed(
+          static_cast<int64_t *>(scratch), static_cast<int64_t *>(output),
+          offsets_in, num_groups, stream, cache);
+      break;
+    case CudaGroupedReduceValueType::f64:
+      grouped_reduce_segmented_sum_typed(static_cast<double *>(scratch),
+                                         static_cast<double *>(output),
+                                         offsets_in, num_groups, stream, cache);
+      break;
+    default:
+      throw std::runtime_error(
+          "CUDA grouped reduce received an unsupported value type");
+  }
   return bucket_bytes + cache.allocated_bytes();
 }
 
-std::size_t cub_grouped_reduce_i32_atomic_impl(void *keys,
-                                               void *values,
-                                               void *output,
-                                               int num_items,
-                                               int num_groups,
-                                               int op,
-                                               void *stream_ptr) {
+std::size_t cub_grouped_reduce_i32_impl(void *keys,
+                                        void *values,
+                                        void *output,
+                                        void *offsets,
+                                        void *scratch,
+                                        void *cursor,
+                                        int num_items,
+                                        int num_groups,
+                                        int op,
+                                        void *stream_ptr,
+                                        void *owner) {
+  return cub_grouped_reduce_impl(keys, values, output, offsets, scratch, cursor,
+                                 num_items, num_groups,
+                                 CudaGroupedReduceValueType::i32, op,
+                                 stream_ptr, owner);
+}
+
+template <typename T>
+void grouped_reduce_atomic_sum_launch(const int32_t *keys_in,
+                                      const T *values_in,
+                                      T *output_out,
+                                      int num_items,
+                                      int num_groups,
+                                      cudaStream_t stream) {
+  const std::size_t output_bytes =
+      static_cast<std::size_t>(num_groups) * sizeof(T);
+  if (stream) {
+    TI_CUDA_SORT_CHECK(cudaMemsetAsync(output_out, 0, output_bytes, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaMemset(output_out, 0, output_bytes));
+  }
+  if (num_items > 0) {
+    constexpr int kBlockDim = 256;
+    const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+    grouped_reduce_atomic_sum_kernel<T><<<grid_dim, kBlockDim, 0, stream>>>(
+        keys_in, values_in, output_out, num_items, num_groups);
+    TI_CUDA_SORT_CHECK(cudaGetLastError());
+  }
+}
+
+std::size_t cub_grouped_reduce_atomic_impl(
+    void *keys,
+    void *values,
+    void *output,
+    int num_items,
+    int num_groups,
+    CudaGroupedReduceValueType value_type,
+    int op,
+    void *stream_ptr) {
   if (!keys || !values || !output) {
     throw std::runtime_error("CUDA grouped reduce received a null pointer");
   }
@@ -1814,21 +2369,39 @@ std::size_t cub_grouped_reduce_i32_atomic_impl(void *keys,
   cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   const bool use_stream = stream != nullptr;
   auto *keys_in = static_cast<const int32_t *>(keys);
-  auto *values_in = static_cast<const int32_t *>(values);
-  auto *output_out = static_cast<int32_t *>(output);
-  const std::size_t output_bytes =
-      static_cast<std::size_t>(num_groups) * sizeof(int32_t);
-  if (use_stream) {
-    TI_CUDA_SORT_CHECK(cudaMemsetAsync(output_out, 0, output_bytes, stream));
-  } else {
-    TI_CUDA_SORT_CHECK(cudaMemset(output_out, 0, output_bytes));
-  }
-  if (num_items > 0) {
-    constexpr int kBlockDim = 256;
-    const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
-    grouped_reduce_atomic_sum_i32_kernel<<<grid_dim, kBlockDim, 0, stream>>>(
-        keys_in, values_in, output_out, num_items, num_groups);
-    TI_CUDA_SORT_CHECK(cudaGetLastError());
+  switch (value_type) {
+    case CudaGroupedReduceValueType::i32:
+      grouped_reduce_atomic_sum_launch(
+          keys_in, static_cast<const int32_t *>(values),
+          static_cast<int32_t *>(output), num_items, num_groups, stream);
+      break;
+    case CudaGroupedReduceValueType::f32:
+      grouped_reduce_atomic_sum_launch(
+          keys_in, static_cast<const float *>(values),
+          static_cast<float *>(output), num_items, num_groups, stream);
+      break;
+    case CudaGroupedReduceValueType::u32:
+      grouped_reduce_atomic_sum_launch(
+          keys_in, static_cast<const uint32_t *>(values),
+          static_cast<uint32_t *>(output), num_items, num_groups, stream);
+      break;
+    case CudaGroupedReduceValueType::u64:
+      grouped_reduce_atomic_sum_launch(
+          keys_in, static_cast<const uint64_t *>(values),
+          static_cast<uint64_t *>(output), num_items, num_groups, stream);
+      break;
+    case CudaGroupedReduceValueType::i64:
+      grouped_reduce_atomic_sum_launch(
+          keys_in, static_cast<const int64_t *>(values),
+          static_cast<int64_t *>(output), num_items, num_groups, stream);
+      break;
+    case CudaGroupedReduceValueType::f64:
+      grouped_reduce_atomic_sum_launch(
+          keys_in, static_cast<const double *>(values),
+          static_cast<double *>(output), num_items, num_groups, stream);
+      break;
+    default:
+      throw std::runtime_error("Unsupported CUDA grouped reduce value type");
   }
   if (use_stream) {
     TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));

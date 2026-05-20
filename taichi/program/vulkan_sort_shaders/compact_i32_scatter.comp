@@ -3,7 +3,7 @@
 layout(local_size_x = 256) in;
 
 layout(set = 0, binding = 0, std430) buffer Values {
-  int data[];
+  uint data[];
 } values_buf;
 
 layout(set = 0, binding = 1, std430) buffer Flags {
@@ -15,7 +15,7 @@ layout(set = 0, binding = 2, std430) buffer Prefix {
 } prefix_buf;
 
 layout(set = 0, binding = 3, std430) buffer Output {
-  int data[];
+  uint data[];
 } output_buf;
 
 layout(set = 0, binding = 4, std430) buffer Count {
@@ -23,16 +23,20 @@ layout(set = 0, binding = 4, std430) buffer Count {
 } count_buf;
 
 void main() {
-  uint idx = gl_GlobalInvocationID.x;
-  uint n = values_buf.data.length();
-  if (idx == 0u) {
+  uint word_idx = gl_GlobalInvocationID.x;
+  uint n = flags_buf.data.length();
+  uint value_words = values_buf.data.length();
+  if (word_idx == 0u) {
     count_buf.data[0] = n > 0u ? prefix_buf.data[n - 1u] : 0;
   }
-  if (idx >= n) {
+  if (n == 0u || word_idx >= value_words) {
     return;
   }
-  if (flags_buf.data[idx] != 0) {
-    uint out_idx = uint(prefix_buf.data[idx] - 1);
-    output_buf.data[out_idx] = values_buf.data[idx];
+  uint item_words = value_words / n;
+  uint item = word_idx / item_words;
+  uint lane = word_idx - item * item_words;
+  if (flags_buf.data[item] != 0) {
+    uint out_idx = uint(prefix_buf.data[item] - 1);
+    output_buf.data[out_idx * item_words + lane] = values_buf.data[word_idx];
   }
 }

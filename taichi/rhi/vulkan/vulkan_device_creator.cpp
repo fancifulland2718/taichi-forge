@@ -691,6 +691,9 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT shader_atomic_float_2_feature{};
   shader_atomic_float_2_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_2_FEATURES_EXT;
+  VkPhysicalDeviceShaderAtomicInt64Features shader_atomic_int64_feature{};
+  shader_atomic_int64_feature.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES;
   VkPhysicalDeviceFloat16Int8FeaturesKHR shader_f16_i8_feature{};
   shader_f16_i8_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT16_INT8_FEATURES_KHR;
@@ -778,6 +781,20 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       }
       *pNextEnd = &shader_atomic_float_2_feature;
       pNextEnd = &shader_atomic_float_2_feature.pNext;
+    }
+
+    // Atomic int64
+    if (CHECK_EXTENSION(VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME)) {
+      features2.pNext = &shader_atomic_int64_feature;
+      vkGetPhysicalDeviceFeatures2KHR(physical_device_, &features2);
+      if (device_supported_features.shaderInt64 &&
+          shader_atomic_int64_feature.shaderBufferInt64Atomics) {
+        caps.set(DeviceCapability::spirv_has_atomic_int64, true);
+        shader_atomic_int64_feature.shaderBufferInt64Atomics = true;
+        shader_atomic_int64_feature.shaderSharedInt64Atomics = false;
+        *pNextEnd = &shader_atomic_int64_feature;
+        pNextEnd = &shader_atomic_int64_feature.pNext;
+      }
     }
 
     // F16 / I8

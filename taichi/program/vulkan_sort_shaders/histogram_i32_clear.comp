@@ -2,13 +2,24 @@
 
 layout(local_size_x = 256) in;
 
+#ifndef BIN_KIND
+#define BIN_KIND 0
+#endif
+
+#if BIN_KIND == 4
+#extension GL_ARB_gpu_shader_int64 : require
+#define BIN_T int64_t
+#else
+#define BIN_T int
+#endif
+
 layout(set = 0, binding = 0, std430) buffer Data {
-  int data[];
+  BIN_T data[];
 } data_buf;
 
 void main() {
   uint idx = gl_GlobalInvocationID.x;
   if (idx < data_buf.data.length()) {
-    data_buf.data[idx] = 0;
+    data_buf.data[idx] = BIN_T(0);
   }
 }

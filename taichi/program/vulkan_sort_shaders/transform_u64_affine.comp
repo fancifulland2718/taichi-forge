@@ -1,0 +1,46 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Src {
+  uint data[];
+} src_buf;
+
+layout(set = 0, binding = 1, std430) writeonly buffer Dst {
+  uint data[];
+} dst_buf;
+
+layout(set = 0, binding = 2, std430) readonly buffer Params {
+  uint scale_lo;
+  uint scale_hi;
+  uint bias_lo;
+  uint bias_hi;
+} params;
+
+uvec2 add64(uvec2 a, uvec2 b) {
+  uint lo = a.x + b.x;
+  uint carry = lo < a.x ? 1u : 0u;
+  return uvec2(lo, a.y + b.y + carry);
+}
+
+uvec2 mul64(uvec2 a, uvec2 b) {
+  uint lo = 0u;
+  uint hi = 0u;
+  umulExtended(a.x, b.x, hi, lo);
+  hi += a.x * b.y + a.y * b.x;
+  return uvec2(lo, hi);
+}
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  uint base = i * 2u;
+  if (base + 1u >= src_buf.data.length()) {
+    return;
+  }
+  uvec2 value = uvec2(src_buf.data[base], src_buf.data[base + 1u]);
+  uvec2 scale = uvec2(params.scale_lo, params.scale_hi);
+  uvec2 bias = uvec2(params.bias_lo, params.bias_hi);
+  uvec2 out_value = add64(mul64(value, scale), bias);
+  dst_buf.data[base] = out_value.x;
+  dst_buf.data[base + 1u] = out_value.y;
+}

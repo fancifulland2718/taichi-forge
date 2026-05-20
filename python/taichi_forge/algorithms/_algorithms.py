@@ -87,6 +87,10 @@ _SUPPORTED_SORT_METHODS = {
 }
 _SUPPORTED_SORT_PRECISIONS = {"exact"}
 _SUPPORTED_NAN_POLICIES = {"last", "bitwise"}
+_SORT_KEY_DTYPES = (u32, i32, f32, u64, i64, f64)
+_SORT_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
+_SORT_KEY_TYPE = {u32: 0, i32: 1, f32: 2, u64: 3, i64: 4, f64: 5}
+_SORT_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _SUPPORTED_REDUCE_METHODS = {
     "auto",
     "cuda_cub",
@@ -95,6 +99,9 @@ _SUPPORTED_REDUCE_METHODS = {
     "field_atomic",
 }
 _SUPPORTED_REDUCE_OPS = {"sum": 0, "min": 1, "max": 2}
+_REDUCE_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
+_REDUCE_FIELD_DTYPES = (i32, f32)
+_REDUCE_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _SUPPORTED_TRANSFORM_METHODS = {
     "auto",
     "cuda_device",
@@ -111,6 +118,8 @@ _SUPPORTED_INDEXED_COPY_METHODS = {
     "kernel",
     "field_kernel",
 }
+_INDEXED_COPY_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
+_INDEXED_COPY_KERNEL_DTYPES = (i32, f32)
 _SUPPORTED_SCATTER_ADD_METHODS = {
     "auto",
     "cuda_device",
@@ -119,6 +128,9 @@ _SUPPORTED_SCATTER_ADD_METHODS = {
     "kernel",
     "field_kernel",
 }
+_SCATTER_ADD_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
+_SCATTER_ADD_FIELD_DTYPES = (i32, f32)
+_SCATTER_ADD_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _SUPPORTED_BUCKET_BUILDER_METHODS = {
     "auto",
     "cuda_device",
@@ -127,6 +139,9 @@ _SUPPORTED_BUCKET_BUILDER_METHODS = {
     "kernel",
     "field_kernel",
 }
+_BUCKET_BUILDER_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
+_BUCKET_BUILDER_FIELD_DTYPES = (i32,)
+_BUCKET_BUILDER_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _SUPPORTED_GROUPED_REDUCE_METHODS = {
     "auto",
     "cuda_device",
@@ -139,6 +154,15 @@ _SUPPORTED_GROUPED_REDUCE_METHODS = {
     "field_kernel",
 }
 _SUPPORTED_GROUPED_REDUCE_OPS = {"sum": 0}
+_GROUPED_REDUCE_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
+_GROUPED_REDUCE_FIELD_DTYPES = (i32,)
+_GROUPED_REDUCE_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
+_SCAN_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
+_SCAN_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
+_HISTOGRAM_VALUE_DTYPES = (i32, u32)
+_HISTOGRAM_VALUE_TYPE = {i32: 0, u32: 2}
+_HISTOGRAM_BIN_DTYPES = (i32, i64)
+_HISTOGRAM_BIN_TYPE = {i32: 0, i64: 4}
 _REDUCE_FIELD_PRIVATE_MIN_N = 65536
 _REDUCE_FIELD_PRIVATE_CHUNK_SIZE = 2048
 _HISTOGRAM_FIELD_PRIVATE_MIN_N = 65536
@@ -698,6 +722,25 @@ class GroupedReduceWorkspace:
             self._reserve_bytes(num_groups * 4)
         return self._offsets_ndarray, self._scratch_ndarray, self._cursor_ndarray
 
+    def _get_native_buffers_typed(self, n, num_groups, value_dtype):
+        if (
+            self._offsets_ndarray is None
+            or self._offsets_ndarray.shape[0] < num_groups + 1
+        ):
+            self._offsets_ndarray = ti_ndarray(i32, shape=num_groups + 1)
+            self._reserve_bytes((num_groups + 1) * 4)
+        if (
+            self._scratch_ndarray is None
+            or self._scratch_ndarray.dtype != value_dtype
+            or self._scratch_ndarray.shape[0] < n
+        ):
+            self._scratch_ndarray = ti_ndarray(value_dtype, shape=n)
+            self._reserve_bytes(n * _dtype_nbytes(value_dtype))
+        if self._cursor_ndarray is None or self._cursor_ndarray.shape[0] < num_groups:
+            self._cursor_ndarray = ti_ndarray(i32, shape=num_groups)
+            self._reserve_bytes(num_groups * 4)
+        return self._offsets_ndarray, self._scratch_ndarray, self._cursor_ndarray
+
 
 def _dtype_nbytes(dtype):
     text = str(dtype)
@@ -1094,7 +1137,9 @@ def _vulkan_graph_radix_sort_u32(keys, values=None, workspace=None):
     executor.run(keys, values)
 
 
-def _vulkan_native_radix_sort_u32(keys, values=None, workspace=None):
+def _vulkan_native_radix_sort_u32(
+    keys, values=None, workspace=None, nan_policy="last"
+):
     arch = current_cfg().arch
     if arch != vulkan:
         raise RuntimeError("method='vulkan_native_radix_u32' is supported only on Vulkan.")
@@ -1102,9 +1147,15 @@ def _vulkan_native_radix_sort_u32(keys, values=None, workspace=None):
         raise NotImplementedError(
             "method='vulkan_native_radix_u32' currently supports only ti.ndarray keys."
         )
-    if keys.dtype not in (i32, u32):
+    if keys.dtype not in _SORT_KEY_DTYPES:
         raise TypeError(
-            "method='vulkan_native_radix_u32' currently supports only ti.i32 and ti.u32 keys."
+            "method='vulkan_native_radix_u32' currently supports ti.u32, "
+            "ti.i32, ti.f32, ti.u64, ti.i64, and ti.f64 keys."
+        )
+    if nan_policy != "last" and keys.dtype in (f32, f64):
+        raise NotImplementedError(
+            "method='vulkan_native_radix_u32' currently supports floating-point "
+            "keys only with nan_policy='last'."
         )
     use_values = values is not None
     if use_values:
@@ -1112,9 +1163,10 @@ def _vulkan_native_radix_sort_u32(keys, values=None, workspace=None):
             raise NotImplementedError(
                 "method='vulkan_native_radix_u32' currently supports only ti.ndarray values."
             )
-        if values.dtype != i32:
+        if values.dtype not in _SORT_VALUE_DTYPES:
             raise TypeError(
-                "method='vulkan_native_radix_u32' currently supports only ti.i32 values."
+                "method='vulkan_native_radix_u32' currently supports ti.u32, "
+                "ti.i32, ti.f32, ti.u64, ti.i64, and ti.f64 values."
             )
     if keys.shape[0] <= 1:
         return
@@ -1124,9 +1176,12 @@ def _vulkan_native_radix_sort_u32(keys, values=None, workspace=None):
     prog = impl.get_runtime().prog
     if not prog.vulkan_radix_sort_available():
         raise RuntimeError("method='vulkan_native_radix_u32' requires Vulkan sort support.")
-    key_type = {u32: 0, i32: 1}[keys.dtype]
+    key_type = _SORT_KEY_TYPE[keys.dtype]
+    value_type = _SORT_VALUE_TYPE[values.dtype] if values is not None else 0
     temp_bytes = (
-        prog.vulkan_radix_sort_u32_ndarray(keys.arr, values.arr, key_type)
+        prog.vulkan_radix_sort_u32_ndarray(
+            keys.arr, values.arr, key_type, value_type
+        )
         if values is not None
         else prog.vulkan_radix_sort_u32_keys_ndarray(keys.arr, key_type)
     )
@@ -1152,13 +1207,16 @@ def _cpu_native_stable_sort(keys, values=None, workspace=None, descending=False,
         raise NotImplementedError(
             "method='cpu_native' currently supports only ti.ndarray payloads."
         )
-    if keys.dtype not in (u32, i32, f32, u64, i64, f64):
+    if keys.dtype not in _SORT_KEY_DTYPES:
         raise TypeError(
             "method='cpu_native' currently supports ti.u32, ti.i32, ti.f32, "
             "ti.u64, ti.i64, and ti.f64 keys."
         )
-    if values is not None and values.dtype != i32:
-        raise TypeError("method='cpu_native' currently supports only ti.i32 values.")
+    if values is not None and values.dtype not in _SORT_VALUE_DTYPES:
+        raise TypeError(
+            "method='cpu_native' currently supports ti.u32, ti.i32, ti.f32, "
+            "ti.u64, ti.i64, and ti.f64 values."
+        )
     if keys.shape[0] <= 1:
         return
 
@@ -1167,11 +1225,12 @@ def _cpu_native_stable_sort(keys, values=None, workspace=None, descending=False,
     prog = impl.get_runtime().prog
     if not prog.cpu_stable_sort_available():
         raise RuntimeError("method='cpu_native' requires CPU sort support.")
-    key_type = {u32: 0, i32: 1, f32: 2, u64: 3, i64: 4, f64: 5}[keys.dtype]
+    key_type = _SORT_KEY_TYPE[keys.dtype]
+    value_type = _SORT_VALUE_TYPE[values.dtype] if values is not None else 0
     nan_policy_id = {"last": 0, "bitwise": 1}[nan_policy]
     temp_bytes = (
         prog.cpu_stable_sort_ndarray(
-            keys.arr, values.arr, key_type, descending, nan_policy_id
+            keys.arr, values.arr, key_type, value_type, descending, nan_policy_id
         )
         if values is not None
         else prog.cpu_stable_sort_keys_ndarray(
@@ -1205,13 +1264,16 @@ def _cuda_cub_sort_native(
         raise NotImplementedError(
             f"method='{method}' currently supports only ti.ndarray payloads."
         )
-    if keys.dtype not in (u32, i32, f32, u64, i64, f64):
+    if keys.dtype not in _SORT_KEY_DTYPES:
         raise TypeError(
             f"method='{method}' currently supports ti.u32, ti.i32, ti.f32, "
             "ti.u64, ti.i64, and ti.f64 keys."
         )
-    if values is not None and values.dtype != i32:
-        raise TypeError(f"method='{method}' currently supports only ti.i32 values.")
+    if values is not None and values.dtype not in _SORT_VALUE_DTYPES:
+        raise TypeError(
+            f"method='{method}' currently supports ti.u32, ti.i32, ti.f32, "
+            "ti.u64, ti.i64, and ti.f64 values."
+        )
     if method == "cuda_cub_split32" and keys.dtype not in (u64, i64, f64):
         raise TypeError(
             "method='cuda_cub_split32' supports only ti.u64, ti.i64, and ti.f64 keys."
@@ -1229,12 +1291,13 @@ def _cuda_cub_sort_native(
             f"method='{method}' requires CUDA CUB sort support and a "
             "discoverable CUDA runtime library."
         )
-    key_type = {u32: 0, i32: 1, f32: 2, u64: 3, i64: 4, f64: 5}[keys.dtype]
+    key_type = _SORT_KEY_TYPE[keys.dtype]
+    value_type = _SORT_VALUE_TYPE[values.dtype] if values is not None else 0
     mode = 1 if method == "cuda_cub_split32" else 0
     nan_policy_id = {"last": 0, "bitwise": 1}[nan_policy]
     temp_bytes = (
         prog.cuda_cub_radix_sort_ndarray(
-            keys.arr, values.arr, key_type, mode, nan_policy_id
+            keys.arr, values.arr, key_type, value_type, mode, nan_policy_id
         )
         if values is not None
         else prog.cuda_cub_radix_sort_keys_ndarray(
@@ -1261,8 +1324,8 @@ def _auto_sort(keys, values=None, workspace=None, nan_policy="last", descending=
         arch == cuda
         and isinstance(keys, Ndarray)
         and (values is None or isinstance(values, Ndarray))
-        and keys.dtype in (u32, i32, f32, u64, i64, f64)
-        and (values is None or values.dtype == i32)
+        and keys.dtype in _SORT_KEY_DTYPES
+        and (values is None or values.dtype in _SORT_VALUE_DTYPES)
     ):
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -1280,14 +1343,16 @@ def _auto_sort(keys, values=None, workspace=None, nan_policy="last", descending=
         arch == vulkan
         and isinstance(keys, Ndarray)
         and (values is None or isinstance(values, Ndarray))
-        and keys.dtype in (u32, i32)
-        and (values is None or values.dtype == i32)
+        and keys.dtype in _SORT_KEY_DTYPES
+        and (values is None or values.dtype in _SORT_VALUE_DTYPES)
         and nan_policy == "last"
     ):
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         if impl.get_runtime().prog.vulkan_radix_sort_available():
-            _vulkan_native_radix_sort_u32(keys, values, workspace=workspace)
+            _vulkan_native_radix_sort_u32(
+                keys, values, workspace=workspace, nan_policy=nan_policy
+            )
             return
 
     _host_stable_sort(keys, values, nan_policy=nan_policy)
@@ -1308,7 +1373,7 @@ def sort(
 
     This is a Taichi Forge extension. `auto` selects the native CUDA CUB
     DeviceRadixSort path on CUDA when available, the native Vulkan radix8 path
-    for supported 32-bit ndarray keys on Vulkan, and otherwise falls back to a
+    for supported ndarray key dtypes on Vulkan, and otherwise falls back to a
     host stable sort. Use ``method="legacy"`` for the original odd-even merge
     implementation. ``cuda_cub_split32`` and ``cpu_native`` are explicit opt-in
     methods only.
@@ -1342,7 +1407,9 @@ def sort(
     elif method == "vulkan_graph_radix_u32":
         _vulkan_graph_radix_sort_u32(keys, values, workspace=workspace)
     elif method == "vulkan_native_radix_u32":
-        _vulkan_native_radix_sort_u32(keys, values, workspace=workspace)
+        _vulkan_native_radix_sort_u32(
+            keys, values, workspace=workspace, nan_policy=nan_policy
+        )
     elif method in _CUDA_CUB_SORT_METHODS:
         _cuda_cub_sort_native(
             keys, values, workspace=workspace, method=method, nan_policy=nan_policy
@@ -1402,6 +1469,8 @@ _SUPPORTED_COMPACT_METHODS = {
     "field_scan",
     "vulkan_native",
 }
+_COMPACT_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
+_COMPACT_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 
 
 def _is_1d(obj):
@@ -1417,11 +1486,15 @@ def _check_compact_request(values, flags, output, count, method, workspace):
         raise ValueError("experimental_compact() values and flags must have the same length.")
     if output.shape[0] < values.shape[0]:
         raise ValueError("experimental_compact() output must have at least input length.")
-    for name, arr in (("values", values), ("flags", flags), ("output", output)):
-        if arr.dtype != i32:
-            raise TypeError(
-                f"experimental_compact() currently supports only ti.i32 {name}."
-            )
+    if values.dtype != output.dtype:
+        raise TypeError("experimental_compact() values and output dtype must match.")
+    if values.dtype not in _COMPACT_VALUE_DTYPES:
+        raise TypeError(
+            "experimental_compact() currently supports ti.u32, ti.i32, ti.f32, "
+            "ti.u64, ti.i64, and ti.f64 values."
+        )
+    if flags.dtype != i32:
+        raise TypeError("experimental_compact() currently expects ti.i32 flags.")
     if count.dtype != i32:
         raise TypeError("experimental_compact() currently expects ti.i32 count.")
     if isinstance(values, Ndarray) or isinstance(flags, Ndarray) or isinstance(output, Ndarray):
@@ -1438,6 +1511,11 @@ def _check_compact_request(values, flags, output, count, method, workspace):
         if not _is_1d(count) or count.shape[0] < 1:
             raise ValueError("experimental_compact() ndarray count must be shape >= 1.")
     else:
+        if values.dtype != i32:
+            raise TypeError(
+                "experimental_compact() field_scan fallback currently supports "
+                "only ti.i32 values."
+            )
         if isinstance(count, Ndarray) or not hasattr(count, "shape") or count.shape != ():
             raise TypeError(
                 "experimental_compact() field mode requires a scalar ti.field count."
@@ -1463,8 +1541,10 @@ def _try_cuda_cub_compact(values, flags, output, count, workspace):
         return False
     if not prog.cuda_cub_select_available():
         return False
-    temp_bytes = prog.cuda_cub_select_i32_ndarray(
-        values.arr, flags.arr, output.arr, count.arr
+    if not hasattr(prog, "cuda_cub_select_ndarray"):
+        return False
+    temp_bytes = prog.cuda_cub_select_ndarray(
+        values.arr, flags.arr, output.arr, count.arr, _COMPACT_VALUE_TYPE[values.dtype]
     )
     if workspace is not None:
         workspace._cuda_cub_active = True
@@ -1494,8 +1574,10 @@ def _try_vulkan_native_compact(values, flags, output, count, workspace):
         return False
     if not prog.vulkan_compact_available():
         return False
-    temp_bytes = prog.vulkan_compact_i32_ndarray(
-        values.arr, flags.arr, output.arr, count.arr
+    if not hasattr(prog, "vulkan_compact_ndarray"):
+        return False
+    temp_bytes = prog.vulkan_compact_ndarray(
+        values.arr, flags.arr, output.arr, count.arr, _COMPACT_VALUE_TYPE[values.dtype]
     )
     if workspace is not None:
         workspace._vulkan_native_active = True
@@ -1525,8 +1607,10 @@ def _try_cpu_native_compact(values, flags, output, count, workspace):
         return False
     if not prog.cpu_compact_available():
         return False
-    temp_bytes = prog.cpu_compact_i32_ndarray(
-        values.arr, flags.arr, output.arr, count.arr
+    if not hasattr(prog, "cpu_compact_ndarray"):
+        return False
+    temp_bytes = prog.cpu_compact_ndarray(
+        values.arr, flags.arr, output.arr, count.arr, _COMPACT_VALUE_TYPE[values.dtype]
     )
     if workspace is not None:
         workspace.workspace_bytes_current = max(
@@ -1608,8 +1692,8 @@ def experimental_compact(
 
     This is an experimental Forge primitive. ``count`` remains on device:
     ndarray mode expects a one-element ndarray, while field mode expects a
-    scalar field. The initial implementation supports i32 payloads and i32
-    flags/count.
+    scalar field. Native ndarray mode supports 4- and 8-byte scalar payloads;
+    field fallback currently supports i32 payloads. Flags/count are i32.
     """
 
     _check_compact_request(values, flags, output, count, method, workspace)
@@ -1655,8 +1739,17 @@ def _check_reduce_request(values, output, op, method, workspace):
         raise ValueError("experimental_reduce() expects 1D values.")
     if values.shape[0] <= 0:
         raise ValueError("experimental_reduce() expects at least one input item.")
-    if values.dtype not in (i32, f32):
-        raise TypeError("experimental_reduce() currently supports ti.i32 and ti.f32.")
+    if isinstance(values, Ndarray) or isinstance(output, Ndarray):
+        supported_dtypes = _REDUCE_VALUE_DTYPES
+    else:
+        supported_dtypes = _REDUCE_FIELD_DTYPES
+    if values.dtype not in supported_dtypes:
+        if isinstance(values, Ndarray) or isinstance(output, Ndarray):
+            raise TypeError(
+                "experimental_reduce() ndarray mode currently supports ti.u32, "
+                "ti.i32, ti.f32, ti.u64, ti.i64, and ti.f64."
+            )
+        raise TypeError("experimental_reduce() field mode currently supports ti.i32 and ti.f32.")
     if output.dtype != values.dtype:
         raise TypeError("experimental_reduce() values and output dtype must match.")
     if isinstance(values, Ndarray) or isinstance(output, Ndarray):
@@ -1677,10 +1770,8 @@ def _check_reduce_request(values, output, op, method, workspace):
 
 
 def _reduce_value_type(dtype):
-    if dtype == i32:
-        return 0
-    if dtype == f32:
-        return 1
+    if dtype in _REDUCE_VALUE_TYPE:
+        return _REDUCE_VALUE_TYPE[dtype]
     raise TypeError("unsupported reduce dtype")
 
 
@@ -1715,8 +1806,6 @@ def _try_vulkan_reduce(values, output, op, workspace):
         return False
     if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
         return False
-    if values.dtype != i32:
-        return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
@@ -1724,9 +1813,20 @@ def _try_vulkan_reduce(values, output, op, workspace):
         return False
     if not prog.vulkan_reduce_available():
         return False
-    temp_bytes = prog.vulkan_reduce_i32_ndarray(
-        values.arr, output.arr, _SUPPORTED_REDUCE_OPS[op]
-    )
+    value_type = _reduce_value_type(values.dtype)
+    if hasattr(prog, "vulkan_reduce_value_type_available"):
+        if not prog.vulkan_reduce_value_type_available(value_type):
+            return False
+    elif values.dtype != i32:
+        return False
+    if hasattr(prog, "vulkan_reduce_ndarray"):
+        temp_bytes = prog.vulkan_reduce_ndarray(
+            values.arr, output.arr, value_type, _SUPPORTED_REDUCE_OPS[op]
+        )
+    else:
+        temp_bytes = prog.vulkan_reduce_i32_ndarray(
+            values.arr, output.arr, _SUPPORTED_REDUCE_OPS[op]
+        )
     if workspace is not None:
         workspace._vulkan_native_active = True
         workspace.workspace_bytes_current = max(
@@ -1805,10 +1905,11 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
     """Reduce a 1D array into a scalar output.
 
     This experimental primitive currently supports ``sum``, ``min``, and
-    ``max`` for i32/f32 values. CUDA ndarray input uses CUB DeviceReduce when
-    available. Vulkan i32 ndarray input uses native compute shaders. CPU
-    ndarray input uses a host native path. Field/SNode fallback stays in Forge
-    kernels.
+    ``max`` for u32/i32/f32/u64/i64/f64 ndarray values. CUDA ndarray input
+    uses CUB DeviceReduce when available. Vulkan ndarray input uses native
+    compute shaders for supported device types. CPU ndarray input uses a host
+    native path. Field/SNode fallback stays in Forge kernels and currently
+    supports i32/f32.
     """
 
     _check_reduce_request(values, output, op, method, workspace)
@@ -1829,7 +1930,7 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
         return
     if method == "vulkan_native":
         raise RuntimeError(
-            "method='vulkan_native' requires Vulkan i32 ndarray inputs and "
+            "method='vulkan_native' requires Vulkan ndarray inputs and "
             "available native reduce shaders."
         )
     if method in ("auto", "cpu_native") and _try_cpu_reduce(
@@ -1865,11 +1966,24 @@ def _check_histogram_request(values, bins, method, workspace):
         raise NotImplementedError(f"histogram method '{method}' is not implemented.")
     if not (_is_1d(values) and _is_1d(bins)):
         raise ValueError("experimental_histogram() expects 1D values and bins.")
-    if values.dtype != i32 or bins.dtype != i32:
-        raise TypeError("experimental_histogram() currently expects ti.i32 values and bins.")
+    ndarray_mode = isinstance(values, Ndarray) or isinstance(bins, Ndarray)
+    if ndarray_mode:
+        if (
+            values.dtype not in _HISTOGRAM_VALUE_DTYPES
+            or bins.dtype not in _HISTOGRAM_BIN_DTYPES
+        ):
+            raise TypeError(
+                "experimental_histogram() ndarray mode expects ti.i32/ti.u32 "
+                "values and ti.i32/ti.i64 bins."
+            )
+    elif values.dtype != i32 or bins.dtype != i32:
+        raise TypeError(
+            "experimental_histogram() field mode currently expects ti.i32 "
+            "values and bins."
+        )
     if bins.shape[0] <= 0:
         raise ValueError("experimental_histogram() expects at least one bin.")
-    if isinstance(values, Ndarray) or isinstance(bins, Ndarray):
+    if ndarray_mode:
         if not (isinstance(values, Ndarray) and isinstance(bins, Ndarray)):
             raise TypeError(
                 "experimental_histogram() ndarray mode requires both values and bins "
@@ -1877,6 +1991,18 @@ def _check_histogram_request(values, bins, method, workspace):
             )
     if workspace is not None and not isinstance(workspace, HistogramWorkspace):
         raise TypeError("workspace must be a HistogramWorkspace instance or None.")
+
+
+def _histogram_value_type(dtype):
+    if dtype in _HISTOGRAM_VALUE_TYPE:
+        return _HISTOGRAM_VALUE_TYPE[dtype]
+    raise TypeError("unsupported histogram value dtype")
+
+
+def _histogram_bin_type(dtype):
+    if dtype in _HISTOGRAM_BIN_TYPE:
+        return _HISTOGRAM_BIN_TYPE[dtype]
+    raise TypeError("unsupported histogram bin dtype")
 
 
 def _try_cuda_cub_histogram(values, bins, workspace):
@@ -1891,7 +2017,16 @@ def _try_cuda_cub_histogram(values, bins, workspace):
         return False
     if not prog.cuda_cub_histogram_available():
         return False
-    temp_bytes = prog.cuda_cub_histogram_i32_ndarray(values.arr, bins.arr)
+    value_type = _histogram_value_type(values.dtype)
+    bin_type = _histogram_bin_type(bins.dtype)
+    if hasattr(prog, "cuda_cub_histogram_ndarray"):
+        temp_bytes = prog.cuda_cub_histogram_ndarray(
+            values.arr, bins.arr, value_type, bin_type
+        )
+    elif value_type == 0 and bin_type == 0:
+        temp_bytes = prog.cuda_cub_histogram_i32_ndarray(values.arr, bins.arr)
+    else:
+        return False
     if workspace is not None:
         workspace._cuda_cub_active = True
         workspace.workspace_bytes_current = max(
@@ -1915,7 +2050,21 @@ def _try_vulkan_histogram(values, bins, workspace):
         return False
     if not prog.vulkan_histogram_available():
         return False
-    temp_bytes = prog.vulkan_histogram_i32_ndarray(values.arr, bins.arr)
+    value_type = _histogram_value_type(values.dtype)
+    bin_type = _histogram_bin_type(bins.dtype)
+    if hasattr(prog, "vulkan_histogram_value_type_available"):
+        if not prog.vulkan_histogram_value_type_available(value_type, bin_type):
+            return False
+    elif value_type != 0 or bin_type != 0:
+        return False
+    if hasattr(prog, "vulkan_histogram_ndarray"):
+        temp_bytes = prog.vulkan_histogram_ndarray(
+            values.arr, bins.arr, value_type, bin_type
+        )
+    elif value_type == 0 and bin_type == 0:
+        temp_bytes = prog.vulkan_histogram_i32_ndarray(values.arr, bins.arr)
+    else:
+        return False
     if workspace is not None:
         workspace._vulkan_native_active = True
         workspace.workspace_bytes_current = max(
@@ -1939,7 +2088,16 @@ def _try_cpu_native_histogram(values, bins, workspace):
         return False
     if not prog.cpu_histogram_available():
         return False
-    temp_bytes = prog.cpu_histogram_i32_ndarray(values.arr, bins.arr)
+    value_type = _histogram_value_type(values.dtype)
+    bin_type = _histogram_bin_type(bins.dtype)
+    if hasattr(prog, "cpu_histogram_ndarray"):
+        temp_bytes = prog.cpu_histogram_ndarray(
+            values.arr, bins.arr, value_type, bin_type
+        )
+    elif value_type == 0 and bin_type == 0:
+        temp_bytes = prog.cpu_histogram_i32_ndarray(values.arr, bins.arr)
+    else:
+        return False
     if workspace is not None:
         workspace.workspace_bytes_current = max(
             workspace.workspace_bytes_current, temp_bytes
@@ -1998,11 +2156,13 @@ def _histogram_field_atomic(values, bins, workspace, method):
 
 
 def experimental_histogram(values, bins, *, method="auto", workspace=None):
-    """Count i32 bin ids in ``values`` into i32 ``bins``.
+    """Count bin ids in ``values`` into integer ``bins``.
 
-    ``values[i]`` is interpreted as a bin id. Values outside
-    ``[0, bins.shape[0])`` are ignored by the field fallback. The CUDA CUB path
-    is intended for inputs in that same range.
+    ``values[i]`` is interpreted as a bin id. Native ndarray paths support
+    i32/u32 values and i32/i64 bins. Vulkan native supports i64 bins when the
+    device exposes shader int64 and buffer int64 atomics. Values outside
+    ``[0, bins.shape[0])`` are ignored. Field fallback currently supports i32
+    values and bins.
     """
 
     _check_histogram_request(values, bins, method, workspace)
@@ -2033,6 +2193,14 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
         raise RuntimeError(
             "method='cpu_native' requires CPU ndarray inputs and available native histogram."
         )
+    if isinstance(values, Ndarray) or isinstance(bins, Ndarray):
+        if method in ("field_atomic", "field_direct", "field_private"):
+            _histogram_field_atomic(values, bins, workspace, method)
+            return
+        raise RuntimeError(
+            "experimental_histogram() could not find an available ndarray "
+            "backend for the requested value/bin dtypes."
+        )
     _histogram_field_atomic(values, bins, workspace, method)
 
 
@@ -2041,30 +2209,73 @@ def _transform_value_type(dtype):
         return 0
     if dtype == f32:
         return 1
-    raise TypeError("experimental_transform() currently supports ti.i32 and ti.f32.")
+    if dtype == u32:
+        return 2
+    if dtype == u64:
+        return 3
+    if dtype == i64:
+        return 4
+    if dtype == f64:
+        return 5
+    raise TypeError(
+        "experimental_transform() currently supports ti.u32, ti.i32, ti.f32, "
+        "ti.u64, ti.i64, and ti.f64 ndarray values."
+    )
 
 
-def _as_i32_transform_arg(name, value):
+def _as_integral_transform_arg(name, value, *, bits, signed):
     try:
         result = int(value)
     except (TypeError, ValueError) as exc:
-        raise TypeError(f"experimental_transform() i32 {name} must be integral.") from exc
+        raise TypeError(
+            f"experimental_transform() integer {name} must be integral."
+        ) from exc
     if result != value:
-        raise TypeError(f"experimental_transform() i32 {name} must be integral.")
-    if result < -(1 << 31) or result > (1 << 31) - 1:
-        raise ValueError(f"experimental_transform() i32 {name} is out of range.")
+        raise TypeError(f"experimental_transform() integer {name} must be integral.")
+    lo = -(1 << (bits - 1)) if signed else 0
+    hi = (1 << (bits - 1)) - 1 if signed else (1 << bits) - 1
+    if result < lo or result > hi:
+        raise ValueError(
+            f"experimental_transform() integer {name} is out of range for "
+            f"{'i' if signed else 'u'}{bits}."
+        )
+    if bits == 64 and abs(result) > (1 << 53) - 1:
+        raise ValueError(
+            "experimental_transform() 64-bit integer scale/bias must be exactly "
+            "representable by the current native binding."
+        )
     return result
 
 
 def _normalize_transform_args(dtype, scale, bias):
     if dtype == i32:
         return (
-            _as_i32_transform_arg("scale", scale),
-            _as_i32_transform_arg("bias", bias),
+            _as_integral_transform_arg("scale", scale, bits=32, signed=True),
+            _as_integral_transform_arg("bias", bias, bits=32, signed=True),
+        )
+    if dtype == u32:
+        return (
+            _as_integral_transform_arg("scale", scale, bits=32, signed=False),
+            _as_integral_transform_arg("bias", bias, bits=32, signed=False),
+        )
+    if dtype == i64:
+        return (
+            _as_integral_transform_arg("scale", scale, bits=64, signed=True),
+            _as_integral_transform_arg("bias", bias, bits=64, signed=True),
+        )
+    if dtype == u64:
+        return (
+            _as_integral_transform_arg("scale", scale, bits=64, signed=False),
+            _as_integral_transform_arg("bias", bias, bits=64, signed=False),
         )
     if dtype == f32:
         return float(scale), float(bias)
-    raise TypeError("experimental_transform() currently supports ti.i32 and ti.f32.")
+    if dtype == f64:
+        return float(scale), float(bias)
+    raise TypeError(
+        "experimental_transform() currently supports ti.u32, ti.i32, ti.f32, "
+        "ti.u64, ti.i64, and ti.f64 ndarray values."
+    )
 
 
 def _check_transform_request(src, dst, method, workspace):
@@ -2076,14 +2287,22 @@ def _check_transform_request(src, dst, method, workspace):
         raise ValueError("experimental_transform() source and destination sizes differ.")
     if src.dtype != dst.dtype:
         raise TypeError("experimental_transform() source and destination dtype must match.")
-    if src.dtype not in (i32, f32):
-        raise TypeError("experimental_transform() currently supports ti.i32 and ti.f32.")
     if isinstance(src, Ndarray) or isinstance(dst, Ndarray):
         if not (isinstance(src, Ndarray) and isinstance(dst, Ndarray)):
             raise TypeError(
                 "experimental_transform() ndarray mode requires source and "
                 "destination both to be ti.ndarray."
             )
+        if src.dtype not in (u32, i32, f32, u64, i64, f64):
+            raise TypeError(
+                "experimental_transform() ndarray mode currently supports "
+                "ti.u32, ti.i32, ti.f32, ti.u64, ti.i64, and ti.f64."
+            )
+    elif src.dtype not in (i32, f32):
+        raise TypeError(
+            "experimental_transform() field mode currently supports ti.i32 and "
+            "ti.f32. Use ndarray native mode for wider scalar values."
+        )
     if workspace is not None and not isinstance(workspace, TransformWorkspace):
         raise TypeError("workspace must be a TransformWorkspace instance or None.")
 
@@ -2100,6 +2319,11 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias):
         return False
     if not prog.cuda_device_transform_available():
         return False
+    if value_type in (3, 4, 5) and not (
+        hasattr(prog, "cuda_toolkit_transform_available")
+        and prog.cuda_toolkit_transform_available()
+    ):
+        return False
     prog.cuda_device_transform_affine_ndarray(src.arr, dst.arr, value_type, scale, bias)
     return True
 
@@ -2115,6 +2339,10 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
     if not hasattr(prog, "vulkan_transform_available"):
         return False
     if not prog.vulkan_transform_available():
+        return False
+    if hasattr(prog, "vulkan_transform_value_type_available") and not (
+        prog.vulkan_transform_value_type_available(value_type)
+    ):
         return False
     temp_bytes = prog.vulkan_transform_affine_ndarray(
         src.arr, dst.arr, value_type, scale, bias
@@ -2151,8 +2379,13 @@ def _transform_kernel(src, dst, scale, bias):
     if isinstance(src, Ndarray):
         if src.dtype == i32:
             transform_affine_i32_ndarray(src, dst, scale, bias, n)
-        else:
+        elif src.dtype == f32:
             transform_affine_f32_ndarray(src, dst, scale, bias, n)
+        else:
+            raise RuntimeError(
+                "experimental_transform() ndarray dtype requires an available "
+                "native backend."
+            )
     else:
         if src.dtype == i32:
             transform_affine_i32_field(src, dst, scale, bias, n)
@@ -2229,8 +2462,11 @@ def _check_indexed_copy_request(src, indices, dst, method, workspace, op_name):
         raise TypeError(f"{op_name} currently expects ti.i32 indices.")
     if src.dtype != dst.dtype:
         raise TypeError(f"{op_name} source and destination dtype must match.")
-    if src.dtype not in (i32, f32):
-        raise TypeError(f"{op_name} currently supports ti.i32 and ti.f32 values.")
+    if src.dtype not in _INDEXED_COPY_VALUE_DTYPES:
+        raise TypeError(
+            f"{op_name} currently supports ti.u32, ti.i32, ti.f32, "
+            "ti.u64, ti.i64, and ti.f64 values."
+        )
     if isinstance(src, Ndarray) or isinstance(indices, Ndarray) or isinstance(dst, Ndarray):
         if not (
             isinstance(src, Ndarray)
@@ -2338,6 +2574,12 @@ def _try_cpu_indexed_copy(src, indices, dst, scatter):
 
 
 def _indexed_copy_kernel(src, indices, dst, scatter):
+    if src.dtype not in _INDEXED_COPY_KERNEL_DTYPES:
+        raise RuntimeError(
+            "Forge kernel indexed-copy fallback currently supports only ti.i32 "
+            "and ti.f32 values. Wider scalar values require an ndarray native "
+            "backend."
+        )
     n = indices.shape[0]
     if isinstance(src, Ndarray):
         if scatter:
@@ -2441,8 +2683,17 @@ def _check_scatter_add_request(src, indices, dst, method, workspace):
         raise TypeError(f"{op_name} currently expects ti.i32 indices.")
     if src.dtype != dst.dtype:
         raise TypeError(f"{op_name} source and destination dtype must match.")
-    if src.dtype not in (i32, f32):
-        raise TypeError(f"{op_name} currently supports ti.i32 and ti.f32 values.")
+    if isinstance(src, Ndarray) or isinstance(indices, Ndarray) or isinstance(dst, Ndarray):
+        supported_dtypes = _SCATTER_ADD_VALUE_DTYPES
+    else:
+        supported_dtypes = _SCATTER_ADD_FIELD_DTYPES
+    if src.dtype not in supported_dtypes:
+        if isinstance(src, Ndarray) or isinstance(indices, Ndarray) or isinstance(dst, Ndarray):
+            raise TypeError(
+                f"{op_name} ndarray mode currently supports ti.u32, ti.i32, "
+                "ti.f32, ti.u64, ti.i64, and ti.f64 values."
+            )
+        raise TypeError(f"{op_name} field mode currently supports ti.i32 and ti.f32 values.")
     if src.shape[0] != indices.shape[0]:
         raise ValueError(f"{op_name} expects source and indices sizes to match.")
     if isinstance(src, Ndarray) or isinstance(indices, Ndarray) or isinstance(dst, Ndarray):
@@ -2460,7 +2711,9 @@ def _check_scatter_add_request(src, indices, dst, method, workspace):
 
 
 def _scatter_add_value_type(dtype):
-    return 0 if dtype == i32 else 1
+    if dtype in _SCATTER_ADD_VALUE_TYPE:
+        return _SCATTER_ADD_VALUE_TYPE[dtype]
+    raise TypeError("unsupported scatter_add dtype")
 
 
 def _try_cuda_device_scatter_add(src, indices, dst):
@@ -2488,8 +2741,6 @@ def _try_cuda_device_scatter_add(src, indices, dst):
 def _try_vulkan_scatter_add(src, indices, dst, workspace):
     if current_cfg().arch != vulkan:
         return False
-    if src.dtype != i32:
-        return False
     if not (
         isinstance(src, Ndarray)
         and isinstance(indices, Ndarray)
@@ -2503,8 +2754,14 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
         return False
     if not prog.vulkan_scatter_add_available():
         return False
+    value_type = _scatter_add_value_type(src.dtype)
+    if hasattr(prog, "vulkan_scatter_add_value_type_available"):
+        if not prog.vulkan_scatter_add_value_type_available(value_type):
+            return False
+    elif src.dtype != i32:
+        return False
     temp_bytes = prog.vulkan_scatter_add_ndarray(
-        src.arr, indices.arr, dst.arr, _scatter_add_value_type(src.dtype)
+        src.arr, indices.arr, dst.arr, value_type
     )
     if workspace is not None:
         workspace._vulkan_native_active = True
@@ -2544,8 +2801,13 @@ def _scatter_add_kernel(src, indices, dst):
     if isinstance(src, Ndarray):
         if src.dtype == i32:
             scatter_add_i32_ndarray(src, indices, dst, n)
-        else:
+        elif src.dtype == f32:
             scatter_add_f32_ndarray(src, indices, dst, n)
+        else:
+            raise RuntimeError(
+                "experimental_scatter_add() kernel fallback currently supports "
+                "only i32/f32 ndarray values."
+            )
     else:
         if src.dtype == i32:
             scatter_add_i32_field(src, indices, dst, n)
@@ -2584,9 +2846,8 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
     if method == "vulkan_native":
         raise RuntimeError(
             "experimental_scatter_add() method='vulkan_native' currently "
-            "requires Vulkan ndarray inputs, i32 values, and available native "
-            "scatter-add shaders. f32 uses the Forge kernel path on Vulkan to "
-            "avoid unsafe high-contention CAS."
+            "requires Vulkan ndarray inputs and an available native "
+            "scatter-add shader for the value dtype."
         )
     if method in ("auto", "cpu_native") and _try_cpu_scatter_add(src, indices, dst):
         return workspace
@@ -2610,9 +2871,33 @@ def _check_bucket_builder_request(keys, values, offsets, output, method, workspa
         raise ValueError(
             "experimental_bucket_builder() expects 1D keys, values, offsets, and output."
         )
-    if keys.dtype != i32 or values.dtype != i32 or offsets.dtype != i32 or output.dtype != i32:
+    if keys.dtype != i32 or offsets.dtype != i32:
         raise TypeError(
-            "experimental_bucket_builder() currently expects ti.i32 keys, values, offsets, and output."
+            "experimental_bucket_builder() currently expects ti.i32 keys and offsets."
+        )
+    if values.dtype != output.dtype:
+        raise TypeError(
+            "experimental_bucket_builder() values and output dtype must match."
+        )
+    ndarray_mode = (
+        isinstance(keys, Ndarray)
+        or isinstance(values, Ndarray)
+        or isinstance(offsets, Ndarray)
+        or isinstance(output, Ndarray)
+    )
+    supported_dtypes = (
+        _BUCKET_BUILDER_VALUE_DTYPES
+        if ndarray_mode
+        else _BUCKET_BUILDER_FIELD_DTYPES
+    )
+    if values.dtype not in supported_dtypes:
+        if ndarray_mode:
+            raise TypeError(
+                "experimental_bucket_builder() ndarray mode currently supports "
+                "ti.u32, ti.i32, ti.f32, ti.u64, ti.i64, and ti.f64 values."
+            )
+        raise TypeError(
+            "experimental_bucket_builder() field mode currently supports ti.i32 values."
         )
     if keys.shape[0] != values.shape[0]:
         raise ValueError("experimental_bucket_builder() keys and values sizes must match.")
@@ -2637,6 +2922,12 @@ def _check_bucket_builder_request(keys, values, offsets, output, method, workspa
         raise TypeError("workspace must be a BucketBuilderWorkspace instance or None.")
 
 
+def _bucket_builder_value_type(dtype):
+    if dtype in _BUCKET_BUILDER_VALUE_TYPE:
+        return _BUCKET_BUILDER_VALUE_TYPE[dtype]
+    raise TypeError("unsupported experimental_bucket_builder() value dtype.")
+
+
 def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, num_bins):
     if current_cfg().arch != cuda:
         return False
@@ -2655,9 +2946,17 @@ def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, nu
     if not prog.cuda_device_bucket_builder_available():
         return False
     cursor = workspace._get_cursor_ndarray(num_bins)
-    temp_bytes = prog.cuda_device_bucket_builder_i32_ndarray(
-        keys.arr, values.arr, offsets.arr, output.arr, cursor.arr
-    )
+    value_type = _bucket_builder_value_type(values.dtype)
+    if hasattr(prog, "cuda_device_bucket_builder_ndarray"):
+        temp_bytes = prog.cuda_device_bucket_builder_ndarray(
+            keys.arr, values.arr, offsets.arr, output.arr, cursor.arr, value_type
+        )
+    elif value_type == 0:
+        temp_bytes = prog.cuda_device_bucket_builder_i32_ndarray(
+            keys.arr, values.arr, offsets.arr, output.arr, cursor.arr
+        )
+    else:
+        return False
     workspace.workspace_bytes_peak = max(
         workspace.workspace_bytes_peak,
         workspace.workspace_bytes_current + temp_bytes,
@@ -2682,10 +2981,21 @@ def _try_vulkan_bucket_builder(keys, values, offsets, output, workspace, num_bin
         return False
     if not prog.vulkan_bucket_builder_available():
         return False
+    value_type = _bucket_builder_value_type(values.dtype)
+    if hasattr(prog, "vulkan_bucket_builder_value_type_available"):
+        if not prog.vulkan_bucket_builder_value_type_available(value_type):
+            return False
+    elif value_type != 0:
+        return False
     cursor = workspace._get_cursor_ndarray(num_bins)
-    temp_bytes = prog.vulkan_bucket_builder_i32_ndarray(
-        keys.arr, values.arr, offsets.arr, output.arr, cursor.arr
-    )
+    if hasattr(prog, "vulkan_bucket_builder_ndarray"):
+        temp_bytes = prog.vulkan_bucket_builder_ndarray(
+            keys.arr, values.arr, offsets.arr, output.arr, cursor.arr, value_type
+        )
+    else:
+        temp_bytes = prog.vulkan_bucket_builder_i32_ndarray(
+            keys.arr, values.arr, offsets.arr, output.arr, cursor.arr
+        )
     workspace._vulkan_native_active = True
     workspace.workspace_bytes_peak = max(
         workspace.workspace_bytes_peak,
@@ -2711,9 +3021,17 @@ def _try_cpu_bucket_builder(keys, values, offsets, output, workspace):
         return False
     if not prog.cpu_bucket_builder_available():
         return False
-    temp_bytes = prog.cpu_bucket_builder_i32_ndarray(
-        keys.arr, values.arr, offsets.arr, output.arr
-    )
+    value_type = _bucket_builder_value_type(values.dtype)
+    if hasattr(prog, "cpu_bucket_builder_ndarray"):
+        temp_bytes = prog.cpu_bucket_builder_ndarray(
+            keys.arr, values.arr, offsets.arr, output.arr, value_type
+        )
+    elif value_type == 0:
+        temp_bytes = prog.cpu_bucket_builder_i32_ndarray(
+            keys.arr, values.arr, offsets.arr, output.arr
+        )
+    else:
+        return False
     workspace.workspace_bytes_peak = max(
         workspace.workspace_bytes_peak,
         workspace.workspace_bytes_current + temp_bytes,
@@ -2724,6 +3042,11 @@ def _try_cpu_bucket_builder(keys, values, offsets, output, workspace):
 def _bucket_builder_kernel(keys, values, offsets, output, workspace, num_bins):
     n = keys.shape[0]
     if isinstance(keys, Ndarray):
+        if values.dtype != i32:
+            raise RuntimeError(
+                "experimental_bucket_builder() kernel fallback currently supports "
+                "only ti.i32 ndarray values; select a native backend for wider values."
+            )
         cursor = workspace._get_cursor_ndarray(num_bins)
         bucket_count_i32_ndarray(keys, offsets, n, num_bins)
         PrefixSumExecutor(num_bins + 1).run(offsets)
@@ -2804,15 +3127,26 @@ def _check_grouped_reduce_request(keys, values, output, op, method, workspace):
         raise ValueError("experimental_grouped_reduce() expects 1D keys, values, and output.")
     if keys.dtype != i32:
         raise TypeError("experimental_grouped_reduce() currently expects ti.i32 keys.")
-    if values.dtype != i32 or output.dtype != i32:
-        raise TypeError(
-            "experimental_grouped_reduce() currently expects ti.i32 values and output."
-        )
+    if values.dtype != output.dtype:
+        raise TypeError("experimental_grouped_reduce() values and output dtype must match.")
+    ndarray_mode = (
+        isinstance(keys, Ndarray) or isinstance(values, Ndarray) or isinstance(output, Ndarray)
+    )
+    supported_dtypes = (
+        _GROUPED_REDUCE_VALUE_DTYPES if ndarray_mode else _GROUPED_REDUCE_FIELD_DTYPES
+    )
+    if values.dtype not in supported_dtypes:
+        if ndarray_mode:
+            raise TypeError(
+                "experimental_grouped_reduce() ndarray mode currently supports "
+                "ti.u32, ti.i32, ti.f32, ti.u64, ti.i64, and ti.f64 values."
+            )
+        raise TypeError("experimental_grouped_reduce() field mode currently supports ti.i32 values.")
     if keys.shape[0] != values.shape[0]:
         raise ValueError("experimental_grouped_reduce() keys and values sizes must match.")
     if output.shape[0] <= 0:
         raise ValueError("experimental_grouped_reduce() output must contain at least one group.")
-    if isinstance(keys, Ndarray) or isinstance(values, Ndarray) or isinstance(output, Ndarray):
+    if ndarray_mode:
         if not (
             isinstance(keys, Ndarray)
             and isinstance(values, Ndarray)
@@ -2824,6 +3158,12 @@ def _check_grouped_reduce_request(keys, values, output, op, method, workspace):
             )
     if workspace is not None and not isinstance(workspace, GroupedReduceWorkspace):
         raise TypeError("workspace must be a GroupedReduceWorkspace instance or None.")
+
+
+def _grouped_reduce_value_type(dtype):
+    if dtype in _GROUPED_REDUCE_VALUE_TYPE:
+        return _GROUPED_REDUCE_VALUE_TYPE[dtype]
+    raise TypeError("unsupported grouped_reduce dtype")
 
 
 def _try_cuda_device_grouped_reduce(
@@ -2844,11 +3184,39 @@ def _try_cuda_device_grouped_reduce(
         return False
     if not prog.cuda_device_grouped_reduce_available():
         return False
-    if not segmented and hasattr(prog, "cuda_device_grouped_reduce_i32_atomic_ndarray"):
+    value_type = _grouped_reduce_value_type(values.dtype)
+    if not segmented and hasattr(prog, "cuda_device_grouped_reduce_atomic_ndarray"):
+        temp_bytes = prog.cuda_device_grouped_reduce_atomic_ndarray(
+            keys.arr, values.arr, output.arr, value_type, _SUPPORTED_GROUPED_REDUCE_OPS[op]
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak,
+            workspace.workspace_bytes_current + temp_bytes,
+        )
+        return True
+    if not segmented and value_type == 0 and hasattr(
+        prog, "cuda_device_grouped_reduce_i32_atomic_ndarray"
+    ):
         temp_bytes = prog.cuda_device_grouped_reduce_i32_atomic_ndarray(
+            keys.arr, values.arr, output.arr, _SUPPORTED_GROUPED_REDUCE_OPS[op]
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak,
+            workspace.workspace_bytes_current + temp_bytes,
+        )
+        return True
+    if segmented and hasattr(prog, "cuda_device_grouped_reduce_ndarray"):
+        offsets, scratch, cursor = workspace._get_native_buffers_typed(
+            keys.shape[0], num_groups, values.dtype
+        )
+        temp_bytes = prog.cuda_device_grouped_reduce_ndarray(
             keys.arr,
             values.arr,
             output.arr,
+            offsets.arr,
+            scratch.arr,
+            cursor.arr,
+            value_type,
             _SUPPORTED_GROUPED_REDUCE_OPS[op],
         )
         workspace.workspace_bytes_peak = max(
@@ -2856,6 +3224,8 @@ def _try_cuda_device_grouped_reduce(
             workspace.workspace_bytes_current + temp_bytes,
         )
         return True
+    if segmented and value_type != 0:
+        return False
     if not hasattr(prog, "cuda_device_grouped_reduce_i32_ndarray"):
         return False
     offsets, scratch, cursor = workspace._get_native_buffers(keys.shape[0], num_groups)
@@ -2893,11 +3263,53 @@ def _try_vulkan_grouped_reduce(
         return False
     if not prog.vulkan_grouped_reduce_available():
         return False
-    if not segmented and hasattr(prog, "vulkan_grouped_reduce_i32_atomic_ndarray"):
+    value_type = _grouped_reduce_value_type(values.dtype)
+    if not segmented and hasattr(
+        prog, "vulkan_grouped_reduce_atomic_value_type_available"
+    ):
+        if not prog.vulkan_grouped_reduce_atomic_value_type_available(value_type):
+            return False
+    elif not segmented and value_type not in (0, 2):
+        return False
+    if segmented and hasattr(prog, "vulkan_grouped_reduce_value_type_available"):
+        if not prog.vulkan_grouped_reduce_value_type_available(value_type):
+            return False
+    elif segmented and values.dtype != i32:
+        return False
+    if not segmented and hasattr(prog, "vulkan_grouped_reduce_atomic_ndarray"):
+        temp_bytes = prog.vulkan_grouped_reduce_atomic_ndarray(
+            keys.arr, values.arr, output.arr, value_type, _SUPPORTED_GROUPED_REDUCE_OPS[op]
+        )
+        workspace._vulkan_native_active = True
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak,
+            workspace.workspace_bytes_current + temp_bytes,
+        )
+        return True
+    if not segmented and value_type == 0 and hasattr(
+        prog, "vulkan_grouped_reduce_i32_atomic_ndarray"
+    ):
         temp_bytes = prog.vulkan_grouped_reduce_i32_atomic_ndarray(
+            keys.arr, values.arr, output.arr, _SUPPORTED_GROUPED_REDUCE_OPS[op]
+        )
+        workspace._vulkan_native_active = True
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak,
+            workspace.workspace_bytes_current + temp_bytes,
+        )
+        return True
+    if segmented and hasattr(prog, "vulkan_grouped_reduce_ndarray"):
+        offsets, scratch, cursor = workspace._get_native_buffers_typed(
+            keys.shape[0], num_groups, values.dtype
+        )
+        temp_bytes = prog.vulkan_grouped_reduce_ndarray(
             keys.arr,
             values.arr,
             output.arr,
+            offsets.arr,
+            scratch.arr,
+            cursor.arr,
+            value_type,
             _SUPPORTED_GROUPED_REDUCE_OPS[op],
         )
         workspace._vulkan_native_active = True
@@ -2906,6 +3318,8 @@ def _try_vulkan_grouped_reduce(
             workspace.workspace_bytes_current + temp_bytes,
         )
         return True
+    if segmented and value_type != 0:
+        return False
     if not hasattr(prog, "vulkan_grouped_reduce_i32_ndarray"):
         return False
     offsets, scratch, cursor = workspace._get_native_buffers(keys.shape[0], num_groups)
@@ -2942,9 +3356,17 @@ def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
         return False
     if not prog.cpu_grouped_reduce_available():
         return False
-    temp_bytes = prog.cpu_grouped_reduce_i32_ndarray(
-        keys.arr, values.arr, output.arr, _SUPPORTED_GROUPED_REDUCE_OPS[op]
-    )
+    value_type = _grouped_reduce_value_type(values.dtype)
+    if hasattr(prog, "cpu_grouped_reduce_ndarray"):
+        temp_bytes = prog.cpu_grouped_reduce_ndarray(
+            keys.arr, values.arr, output.arr, value_type, _SUPPORTED_GROUPED_REDUCE_OPS[op]
+        )
+    else:
+        if value_type != 0:
+            return False
+        temp_bytes = prog.cpu_grouped_reduce_i32_ndarray(
+            keys.arr, values.arr, output.arr, _SUPPORTED_GROUPED_REDUCE_OPS[op]
+        )
     workspace.workspace_bytes_peak = max(
         workspace.workspace_bytes_peak,
         workspace.workspace_bytes_current + temp_bytes,
@@ -2967,11 +3389,14 @@ def experimental_grouped_reduce(
 ):
     """Reduce values into fixed groups selected by ``keys``.
 
-    Current scope is i32 sum. Invalid negative or out-of-range keys are ignored;
-    empty groups produce zero. The default native ndarray paths use direct
-    atomic accumulation to avoid distribution-dependent bucket overhead. The
-    explicit ``method="segmented"`` routes through bucket ranges plus a
-    per-group reduction, while field/SNode fallback stays in Forge kernels.
+    Invalid negative or out-of-range keys are ignored; empty groups produce
+    zero. Native ndarray paths support the standard scalar dtype set on CPU and
+    CUDA. Vulkan native atomics support i32/u32, f32/f64 when the device exposes
+    matching shader buffer float atomic add capabilities, and u64/i64 when the
+    device exposes shader buffer int64 atomics; the explicit
+    ``method="segmented"`` reuses the native bucket-builder payload path for the
+    standard scalar dtype set behind shader capability gates. Field/SNode
+    fallback stays in Forge kernels.
     """
 
     _check_grouped_reduce_request(keys, values, output, op, method, workspace)
@@ -3081,12 +3506,17 @@ class PrefixSumExecutor:
             self.large_arr = field(i32, shape=self.workspace_length)
         return self.large_arr
 
+    def _scan_value_type(self, dtype):
+        if dtype in _SCAN_VALUE_TYPE:
+            return _SCAN_VALUE_TYPE[dtype]
+        raise RuntimeError("unsupported PrefixSumExecutor ndarray dtype.")
+
     def _try_cuda_cub_scan(self, input_arr):
         if current_cfg().arch != cuda:
             return False
         if not isinstance(input_arr, Ndarray):
             return False
-        if input_arr.dtype != i32:
+        if input_arr.dtype not in _SCAN_VALUE_DTYPES:
             return False
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -3095,7 +3525,9 @@ class PrefixSumExecutor:
             return False
         if not prog.cuda_cub_scan_available():
             return False
-        prog.cuda_cub_inclusive_scan_ndarray(input_arr.arr, 0)
+        prog.cuda_cub_inclusive_scan_ndarray(
+            input_arr.arr, self._scan_value_type(input_arr.dtype)
+        )
         return True
 
     def _try_vulkan_native_scan(self, input_arr):
@@ -3103,7 +3535,7 @@ class PrefixSumExecutor:
             return False
         if not isinstance(input_arr, Ndarray):
             return False
-        if input_arr.dtype != i32:
+        if input_arr.dtype not in _SCAN_VALUE_DTYPES:
             return False
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -3112,7 +3544,13 @@ class PrefixSumExecutor:
             return False
         if not prog.vulkan_scan_available():
             return False
-        prog.vulkan_inclusive_scan_ndarray(input_arr.arr, 0)
+        value_type = self._scan_value_type(input_arr.dtype)
+        if hasattr(prog, "vulkan_scan_value_type_available"):
+            if not prog.vulkan_scan_value_type_available(value_type):
+                return False
+        elif input_arr.dtype != i32:
+            return False
+        prog.vulkan_inclusive_scan_ndarray(input_arr.arr, value_type)
         return True
 
     def _try_cpu_native_scan(self, input_arr):
@@ -3120,7 +3558,7 @@ class PrefixSumExecutor:
             return False
         if not isinstance(input_arr, Ndarray):
             return False
-        if input_arr.dtype != i32:
+        if input_arr.dtype not in _SCAN_VALUE_DTYPES:
             return False
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -3129,7 +3567,9 @@ class PrefixSumExecutor:
             return False
         if not prog.cpu_scan_available():
             return False
-        prog.cpu_inclusive_scan_ndarray(input_arr.arr, 0)
+        prog.cpu_inclusive_scan_ndarray(
+            input_arr.arr, self._scan_value_type(input_arr.dtype)
+        )
         return True
 
     def _run_field_workspace(self, large_arr):
@@ -3167,8 +3607,16 @@ class PrefixSumExecutor:
     def run(self, input_arr):
         length = self.sorting_length
 
-        if input_arr.dtype != i32:
-            raise RuntimeError("Only ti.i32 type is supported for prefix sum.")
+        if isinstance(input_arr, Ndarray):
+            if input_arr.dtype not in _SCAN_VALUE_DTYPES:
+                raise RuntimeError(
+                    "PrefixSumExecutor ndarray input supports only "
+                    "ti.i32/ti.u32/ti.f32/ti.i64/ti.u64/ti.f64."
+                )
+        elif input_arr.dtype != i32:
+            raise RuntimeError(
+                "PrefixSumExecutor field input currently supports only ti.i32."
+            )
         if self._try_cuda_cub_scan(input_arr):
             return
         if self._try_vulkan_native_scan(input_arr):

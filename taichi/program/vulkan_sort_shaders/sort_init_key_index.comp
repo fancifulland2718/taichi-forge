@@ -1,0 +1,83 @@
+#version 450
+
+#ifndef KEY_KIND
+#define KEY_KIND 2
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer KeysIn {
+  uint data[];
+} keys_in;
+
+layout(set = 0, binding = 1, std430) writeonly buffer SortKeysLow {
+  uint data[];
+} low_out;
+
+layout(set = 0, binding = 2, std430) writeonly buffer SortKeysHigh {
+  uint data[];
+} high_out;
+
+layout(set = 0, binding = 3, std430) writeonly buffer Indices {
+  uint data[];
+} indices_out;
+
+uint sortable_f32(uint bits) {
+  const uint sign = 0x80000000u;
+  uint abs_bits = bits & 0x7fffffffu;
+  if (abs_bits > 0x7f800000u) {
+    return 0xffffffffu;
+  }
+  if (abs_bits == 0u) {
+    return sign;
+  }
+  return (bits & sign) != 0u ? ~bits : (bits ^ sign);
+}
+
+uvec2 sortable_u64(uvec2 bits) {
+#if KEY_KIND == 3
+  return bits;
+#elif KEY_KIND == 4
+  return uvec2(bits.x, bits.y ^ 0x80000000u);
+#elif KEY_KIND == 5
+  const uint sign = 0x80000000u;
+  uint abs_hi = bits.y & 0x7fffffffu;
+  bool is_nan = abs_hi > 0x7ff00000u ||
+                (abs_hi == 0x7ff00000u && bits.x != 0u);
+  if (is_nan) {
+    return uvec2(0xffffffffu, 0xffffffffu);
+  }
+  if (abs_hi == 0u && bits.x == 0u) {
+    return uvec2(0u, sign);
+  }
+  return (bits.y & sign) != 0u ? uvec2(~bits.x, ~bits.y)
+                               : uvec2(bits.x, bits.y ^ sign);
+#else
+  return bits;
+#endif
+}
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= indices_out.data.length()) {
+    return;
+  }
+  indices_out.data[i] = i;
+
+#if KEY_KIND == 2
+  uint bits = keys_in.data[i];
+  low_out.data[i] = sortable_f32(bits);
+  high_out.data[i] = 0u;
+#else
+  uint base = i * 2u;
+  if (base + 1u >= keys_in.data.length()) {
+    low_out.data[i] = 0u;
+    high_out.data[i] = 0u;
+    return;
+  }
+  uvec2 sortable = sortable_u64(uvec2(keys_in.data[base],
+                                      keys_in.data[base + 1u]));
+  low_out.data[i] = sortable.x;
+  high_out.data[i] = sortable.y;
+#endif
+}

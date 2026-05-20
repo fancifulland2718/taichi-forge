@@ -3,39 +3,56 @@
 
 layout(local_size_x = 256) in;
 
+#ifndef VALUE_KIND
+#define VALUE_KIND 0
+#endif
+
+#if VALUE_KIND == 1
+#define VALUE_T float
+#define ZERO_VALUE 0.0
+#elif VALUE_KIND == 2
+#define VALUE_T uint
+#define ZERO_VALUE 0u
+#else
+#define VALUE_T int
+#define ZERO_VALUE 0
+#endif
+
 layout(set = 0, binding = 0, std430) buffer Data {
-  int data[];
+  VALUE_T data[];
 } data_buf;
 
-shared int scratch[256];
-shared int carry;
+shared VALUE_T scratch[256];
+shared VALUE_T carry;
 
 void main() {
   uint lid = gl_LocalInvocationID.x;
   uint n = data_buf.data.length();
 
   if (lid == 0u) {
-    carry = 0;
+    carry = ZERO_VALUE;
   }
   barrier();
 
   for (uint base = 0u; base < n; base += 256u) {
     uint idx = base + lid;
-    int value = idx < n ? data_buf.data[idx] : 0;
+    VALUE_T value = idx < n ? data_buf.data[idx] : ZERO_VALUE;
 
     if (gl_NumSubgroups <= gl_SubgroupSize) {
       uint subgroup = gl_SubgroupID;
       uint lane = gl_SubgroupInvocationID;
-      int inclusive = subgroupInclusiveAdd(value);
-      int total = subgroupAdd(value);
+      VALUE_T inclusive = subgroupInclusiveAdd(value);
+      VALUE_T total = subgroupAdd(value);
       if (subgroupElect()) {
         scratch[subgroup] = total;
       }
       barrier();
 
       if (subgroup == 0u) {
-        int subgroup_sum = lane < gl_NumSubgroups ? scratch[lane] : 0;
-        int subgroup_prefix = subgroupInclusiveAdd(subgroup_sum) - subgroup_sum;
+        VALUE_T subgroup_sum =
+            lane < gl_NumSubgroups ? scratch[lane] : ZERO_VALUE;
+        VALUE_T subgroup_prefix =
+            subgroupInclusiveAdd(subgroup_sum) - subgroup_sum;
         if (lane < gl_NumSubgroups) {
           scratch[lane] = subgroup_prefix;
         }
@@ -46,7 +63,7 @@ void main() {
       scratch[lid] = value;
       barrier();
       for (uint step = 1u; step < 256u; step <<= 1u) {
-        int addend = lid >= step ? scratch[lid - step] : 0;
+        VALUE_T addend = lid >= step ? scratch[lid - step] : ZERO_VALUE;
         barrier();
         scratch[lid] += addend;
         barrier();

@@ -7,7 +7,7 @@ layout(set = 0, binding = 0, std430) readonly buffer Src {
 } src_buf;
 
 layout(set = 0, binding = 1, std430) readonly buffer Indices {
-  int data[];
+  uint data[];
 } indices_buf;
 
 layout(set = 0, binding = 2, std430) writeonly buffer Dst {
@@ -16,21 +16,22 @@ layout(set = 0, binding = 2, std430) writeonly buffer Dst {
 
 void main() {
   uint word_i = gl_GlobalInvocationID.x;
-  uint src_words = src_buf.data.length();
-  if (word_i >= src_words) {
+  uint dst_words = dst_buf.data.length();
+  if (word_i >= dst_words) {
     return;
   }
   uint item_count = indices_buf.data.length();
   if (item_count == 0u) {
     return;
   }
-  uint item_words = src_words / item_count;
+  uint item_words = dst_words / item_count;
   uint item = word_i / item_words;
   uint lane = word_i - item * item_words;
-  int index = indices_buf.data[item];
-  uint dst_items = dst_buf.data.length() / item_words;
-  if (index < 0 || uint(index) >= dst_items) {
+  uint index = indices_buf.data[item];
+  uint src_items = src_buf.data.length() / item_words;
+  if (index >= src_items) {
+    dst_buf.data[word_i] = 0u;
     return;
   }
-  dst_buf.data[uint(index) * item_words + lane] = src_buf.data[word_i];
+  dst_buf.data[word_i] = src_buf.data[index * item_words + lane];
 }

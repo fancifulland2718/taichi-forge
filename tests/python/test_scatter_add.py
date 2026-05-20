@@ -13,6 +13,9 @@ def _scatter_add_input(n, buckets, np_dtype):
     if np.issubdtype(np_dtype, np.floating):
         values = np.full(n, np.float32(0.5), dtype=np_dtype)
         base = np.full(buckets, np.float32(1.25), dtype=np_dtype)
+    elif np.issubdtype(np_dtype, np.unsignedinteger):
+        values = (np.arange(n, dtype=np.uint64) % 5).astype(np_dtype)
+        base = np.full(buckets, np.uint64(3), dtype=np_dtype)
     else:
         values = (np.arange(n, dtype=np.int32) % 5 - 2).astype(np_dtype)
         base = np.full(buckets, np.int32(3), dtype=np_dtype)
@@ -47,7 +50,7 @@ def _run_ndarray_scatter_add(dtype, np_dtype, method):
 
 
 @test_utils.test(arch=[ti.cuda])
-def test_experimental_scatter_add_cuda_device_ndarray_i32_f32():
+def test_experimental_scatter_add_cuda_device_ndarray_wide_dtypes():
     prog = impl.get_runtime().prog
     if not (
         hasattr(prog, "cuda_device_scatter_add_available")
@@ -55,12 +58,19 @@ def test_experimental_scatter_add_cuda_device_ndarray_i32_f32():
     ):
         pytest.skip("CUDA toolkit scatter-add is unavailable in this runtime.")
 
-    _run_ndarray_scatter_add(ti.i32, np.int32, "auto")
-    _run_ndarray_scatter_add(ti.f32, np.float32, "cuda_device")
+    for dtype, np_dtype, method in [
+        (ti.i32, np.int32, "auto"),
+        (ti.f32, np.float32, "cuda_device"),
+        (ti.u32, np.uint32, "cuda_device"),
+        (ti.u64, np.uint64, "cuda_device"),
+        (ti.i64, np.int64, "cuda_device"),
+        (ti.f64, np.float64, "cuda_device"),
+    ]:
+        _run_ndarray_scatter_add(dtype, np_dtype, method)
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
-def test_experimental_scatter_add_vulkan_native_ndarray_i32_and_f32_fallback():
+def test_experimental_scatter_add_vulkan_native_ndarray_i32_u32_and_f32_atomic():
     prog = impl.get_runtime().prog
     if not (
         hasattr(prog, "vulkan_scatter_add_available")
@@ -69,9 +79,34 @@ def test_experimental_scatter_add_vulkan_native_ndarray_i32_and_f32_fallback():
         pytest.skip("Vulkan native scatter-add is unavailable in this runtime.")
 
     _run_ndarray_scatter_add(ti.i32, np.int32, "auto")
+    if hasattr(prog, "vulkan_scatter_add_value_type_available"):
+        assert prog.vulkan_scatter_add_value_type_available(2)
+    _run_ndarray_scatter_add(ti.u32, np.uint32, "vulkan_native")
     _run_ndarray_scatter_add(ti.f32, np.float32, "auto")
-    with pytest.raises(RuntimeError, match="i32 values"):
-        _run_ndarray_scatter_add(ti.f32, np.float32, "vulkan_native")
+    f32_native = (
+        hasattr(prog, "vulkan_scatter_add_value_type_available")
+        and prog.vulkan_scatter_add_value_type_available(1)
+    )
+    if f32_native:
+        for _ in range(3):
+            _run_ndarray_scatter_add(ti.f32, np.float32, "vulkan_native")
+    else:
+        with pytest.raises(RuntimeError, match="value dtype"):
+            _run_ndarray_scatter_add(ti.f32, np.float32, "vulkan_native")
+    for value_type, dtype, np_dtype in [
+        (3, ti.u64, np.uint64),
+        (4, ti.i64, np.int64),
+        (5, ti.f64, np.float64),
+    ]:
+        if (
+            hasattr(prog, "vulkan_scatter_add_value_type_available")
+            and prog.vulkan_scatter_add_value_type_available(value_type)
+        ):
+            for _ in range(3):
+                _run_ndarray_scatter_add(dtype, np_dtype, "vulkan_native")
+        else:
+            with pytest.raises(RuntimeError, match="value dtype"):
+                _run_ndarray_scatter_add(dtype, np_dtype, "vulkan_native")
 
 
 @pytest.mark.run_in_serial
@@ -103,9 +138,16 @@ def test_experimental_scatter_add_vulkan_reset_with_live_ndarray():
 
 
 @test_utils.test(arch=[ti.cpu])
-def test_experimental_scatter_add_cpu_native_ndarray_i32_f32():
-    _run_ndarray_scatter_add(ti.i32, np.int32, "auto")
-    _run_ndarray_scatter_add(ti.f32, np.float32, "cpu_native")
+def test_experimental_scatter_add_cpu_native_ndarray_wide_dtypes():
+    for dtype, np_dtype, method in [
+        (ti.i32, np.int32, "auto"),
+        (ti.f32, np.float32, "cpu_native"),
+        (ti.u32, np.uint32, "cpu_native"),
+        (ti.u64, np.uint64, "cpu_native"),
+        (ti.i64, np.int64, "cpu_native"),
+        (ti.f64, np.float64, "cpu_native"),
+    ]:
+        _run_ndarray_scatter_add(dtype, np_dtype, method)
     assert impl.get_runtime().prog.cpu_scatter_add_workspace_bytes() == 0
 
 
@@ -141,3 +183,53 @@ def test_experimental_scatter_add_invalid_indices_are_ignored():
     dst.from_numpy(np.full(4, 5, dtype=np.int32))
     ti.algorithms.experimental_scatter_add(src, indices, dst, method="auto")
     assert np.array_equal(dst.to_numpy(), np.array([15, 5, 45, 5], dtype=np.int32))
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_scatter_add_vulkan_native_i64_invalid_indices():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_scatter_add_value_type_available")
+        and prog.vulkan_scatter_add_value_type_available(3)
+        and prog.vulkan_scatter_add_value_type_available(4)
+    ):
+        pytest.skip("Vulkan native i64/u64 scatter-add atomics are unavailable.")
+
+    for dtype, np_dtype in [(ti.u64, np.uint64), (ti.i64, np.int64)]:
+        src = ti.ndarray(dtype, shape=4)
+        indices = ti.ndarray(ti.i32, shape=4)
+        dst = ti.ndarray(dtype, shape=4)
+        src.from_numpy(np.array([10, 20, 30, 40], dtype=np_dtype))
+        indices.from_numpy(np.array([0, -1, 99, 2], dtype=np.int32))
+        dst.from_numpy(np.full(4, 5, dtype=np_dtype))
+        ti.algorithms.experimental_scatter_add(
+            src, indices, dst, method="vulkan_native"
+        )
+        assert np.array_equal(
+            dst.to_numpy(), np.array([15, 5, 45, 5], dtype=np_dtype)
+        )
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_scatter_add_vulkan_native_f64_invalid_and_special_values():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_scatter_add_value_type_available")
+        and prog.vulkan_scatter_add_value_type_available(5)
+    ):
+        pytest.skip("Vulkan native f64 scatter-add atomics are unavailable.")
+
+    src = ti.ndarray(ti.f64, shape=6)
+    indices = ti.ndarray(ti.i32, shape=6)
+    dst = ti.ndarray(ti.f64, shape=4)
+    src.from_numpy(
+        np.array([np.nan, np.inf, 1.25, 2.75, -np.inf, 99.0], dtype=np.float64)
+    )
+    indices.from_numpy(np.array([0, 1, 2, 2, 3, -1], dtype=np.int32))
+    dst.from_numpy(np.zeros(4, dtype=np.float64))
+    ti.algorithms.experimental_scatter_add(src, indices, dst, method="vulkan_native")
+    out = dst.to_numpy()
+    assert np.isnan(out[0])
+    assert np.isposinf(out[1])
+    assert np.isclose(out[2], 4.0)
+    assert np.isneginf(out[3])

@@ -677,6 +677,8 @@ void export_lang(py::module &m) {
            })
       .def("cuda_device_transform_available",
            &Program::cuda_device_transform_available)
+      .def("cuda_toolkit_transform_available",
+           &Program::cuda_toolkit_transform_available)
       .def("cuda_device_transform_affine_ndarray",
            &Program::cuda_device_transform_affine_ndarray, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("scale"),
@@ -702,8 +704,18 @@ void export_lang(py::module &m) {
             &Program::cuda_device_bucket_builder_i32_ndarray, py::arg("keys"),
             py::arg("values"), py::arg("offsets"), py::arg("output"),
             py::arg("cursor"), py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_bucket_builder_ndarray",
+            &Program::cuda_device_bucket_builder_ndarray, py::arg("keys"),
+            py::arg("values"), py::arg("offsets"), py::arg("output"),
+            py::arg("cursor"), py::arg("value_type"),
+            py::call_guard<py::gil_scoped_release>())
        .def("cuda_device_grouped_reduce_available",
             &Program::cuda_device_grouped_reduce_available)
+       .def("cuda_device_grouped_reduce_atomic_ndarray",
+            &Program::cuda_device_grouped_reduce_atomic_ndarray,
+            py::arg("keys"), py::arg("values"), py::arg("output"),
+            py::arg("value_type"), py::arg("op"),
+            py::call_guard<py::gil_scoped_release>())
        .def("cuda_device_grouped_reduce_i32_atomic_ndarray",
             &Program::cuda_device_grouped_reduce_i32_atomic_ndarray,
             py::arg("keys"), py::arg("values"), py::arg("output"),
@@ -713,6 +725,11 @@ void export_lang(py::module &m) {
             py::arg("values"), py::arg("output"), py::arg("offsets"),
             py::arg("scratch"), py::arg("cursor"), py::arg("op"),
             py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_grouped_reduce_ndarray",
+            &Program::cuda_device_grouped_reduce_ndarray, py::arg("keys"),
+            py::arg("values"), py::arg("output"), py::arg("offsets"),
+            py::arg("scratch"), py::arg("cursor"), py::arg("value_type"),
+            py::arg("op"), py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_radix_sort_available",
            &Program::cuda_cub_radix_sort_available)
       .def("cuda_cub_radix_sort_clear_workspace",
@@ -722,14 +739,14 @@ void export_lang(py::module &m) {
            &Program::cuda_cub_radix_sort_workspace_bytes)
       .def("cuda_cub_radix_sort_ndarray",
            &Program::cuda_cub_radix_sort_ndarray, py::arg("keys"),
-           py::arg("values"), py::arg("key_type"), py::arg("mode"),
-           py::arg("nan_policy"),
+           py::arg("values"), py::arg("key_type"), py::arg("value_type"),
+           py::arg("mode"), py::arg("nan_policy"),
            py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_radix_sort_keys_ndarray",
            [](Program *program, Ndarray *keys, int key_type, int mode,
               int nan_policy) {
              return program->cuda_cub_radix_sort_ndarray(keys, nullptr,
-                                                         key_type, mode,
+                                                         key_type, 0, mode,
                                                          nan_policy);
            },
            py::arg("keys"), py::arg("key_type"), py::arg("mode"),
@@ -738,13 +755,14 @@ void export_lang(py::module &m) {
       .def("cpu_stable_sort_available", &Program::cpu_stable_sort_available)
       .def("cpu_stable_sort_ndarray", &Program::cpu_stable_sort_ndarray,
            py::arg("keys"), py::arg("values"), py::arg("key_type"),
-           py::arg("descending"), py::arg("nan_policy"),
+           py::arg("value_type"), py::arg("descending"),
+           py::arg("nan_policy"),
            py::call_guard<py::gil_scoped_release>())
       .def("cpu_stable_sort_keys_ndarray",
            [](Program *program, Ndarray *keys, int key_type, bool descending,
               int nan_policy) {
              return program->cpu_stable_sort_ndarray(
-                 keys, nullptr, key_type, descending, nan_policy);
+                 keys, nullptr, key_type, 0, descending, nan_policy);
            },
            py::arg("keys"), py::arg("key_type"), py::arg("descending"),
            py::arg("nan_policy"), py::call_guard<py::gil_scoped_release>())
@@ -764,6 +782,10 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_select_workspace_bytes",
            &Program::cuda_cub_select_workspace_bytes)
+      .def("cuda_cub_select_ndarray", &Program::cuda_cub_select_ndarray,
+           py::arg("values"), py::arg("flags"), py::arg("output"),
+           py::arg("count"), py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_select_i32_ndarray",
            &Program::cuda_cub_select_i32_ndarray, py::arg("values"),
            py::arg("flags"), py::arg("output"), py::arg("count"),
@@ -775,6 +797,10 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_histogram_workspace_bytes",
            &Program::cuda_cub_histogram_workspace_bytes)
+      .def("cuda_cub_histogram_ndarray",
+           &Program::cuda_cub_histogram_ndarray, py::arg("values"),
+           py::arg("bins"), py::arg("value_type"), py::arg("bin_type") = 0,
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_histogram_i32_ndarray",
            &Program::cuda_cub_histogram_i32_ndarray, py::arg("values"),
            py::arg("bins"), py::call_guard<py::gil_scoped_release>())
@@ -794,6 +820,10 @@ void export_lang(py::module &m) {
            py::arg("value_type"), py::call_guard<py::gil_scoped_release>())
       .def("cpu_compact_available", &Program::cpu_compact_available)
       .def("cpu_compact_workspace_bytes", &Program::cpu_compact_workspace_bytes)
+      .def("cpu_compact_ndarray", &Program::cpu_compact_ndarray,
+           py::arg("values"), py::arg("flags"), py::arg("output"),
+           py::arg("count"), py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_compact_i32_ndarray",
            &Program::cpu_compact_i32_ndarray, py::arg("values"),
            py::arg("flags"), py::arg("output"), py::arg("count"),
@@ -801,6 +831,10 @@ void export_lang(py::module &m) {
       .def("cpu_histogram_available", &Program::cpu_histogram_available)
       .def("cpu_histogram_workspace_bytes",
            &Program::cpu_histogram_workspace_bytes)
+      .def("cpu_histogram_ndarray", &Program::cpu_histogram_ndarray,
+           py::arg("values"), py::arg("bins"), py::arg("value_type"),
+           py::arg("bin_type") = 0,
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_histogram_i32_ndarray",
            &Program::cpu_histogram_i32_ndarray, py::arg("values"),
            py::arg("bins"), py::call_guard<py::gil_scoped_release>())
@@ -839,8 +873,16 @@ void export_lang(py::module &m) {
             &Program::cpu_bucket_builder_i32_ndarray, py::arg("keys"),
             py::arg("values"), py::arg("offsets"), py::arg("output"),
             py::call_guard<py::gil_scoped_release>())
+       .def("cpu_bucket_builder_ndarray",
+            &Program::cpu_bucket_builder_ndarray, py::arg("keys"),
+            py::arg("values"), py::arg("offsets"), py::arg("output"),
+            py::arg("value_type"), py::call_guard<py::gil_scoped_release>())
        .def("cpu_grouped_reduce_available",
             &Program::cpu_grouped_reduce_available)
+       .def("cpu_grouped_reduce_ndarray", &Program::cpu_grouped_reduce_ndarray,
+            py::arg("keys"), py::arg("values"), py::arg("output"),
+            py::arg("value_type"), py::arg("op"),
+            py::call_guard<py::gil_scoped_release>())
        .def("cpu_grouped_reduce_workspace_bytes",
             &Program::cpu_grouped_reduce_workspace_bytes)
        .def("cpu_grouped_reduce_i32_ndarray",
@@ -859,6 +901,8 @@ void export_lang(py::module &m) {
       .def("vulkan_radix_sort_cpu_profile_report",
            &Program::vulkan_radix_sort_cpu_profile_report)
       .def("vulkan_scan_available", &Program::vulkan_scan_available)
+      .def("vulkan_scan_value_type_available",
+           &Program::vulkan_scan_value_type_available, py::arg("value_type"))
       .def("vulkan_scan_clear_workspace",
            &Program::vulkan_scan_clear_workspace,
            py::call_guard<py::gil_scoped_release>())
@@ -874,6 +918,10 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_compact_workspace_bytes",
            &Program::vulkan_compact_workspace_bytes)
+      .def("vulkan_compact_ndarray", &Program::vulkan_compact_ndarray,
+           py::arg("values"), py::arg("flags"), py::arg("output"),
+           py::arg("count"), py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_compact_i32_ndarray",
            &Program::vulkan_compact_i32_ndarray, py::arg("values"),
            py::arg("flags"), py::arg("output"), py::arg("count"),
@@ -885,6 +933,13 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_histogram_workspace_bytes",
            &Program::vulkan_histogram_workspace_bytes)
+      .def("vulkan_histogram_value_type_available",
+           &Program::vulkan_histogram_value_type_available,
+           py::arg("value_type"), py::arg("bin_type") = 0)
+      .def("vulkan_histogram_ndarray", &Program::vulkan_histogram_ndarray,
+           py::arg("values"), py::arg("bins"), py::arg("value_type"),
+           py::arg("bin_type") = 0,
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_histogram_i32_ndarray",
            &Program::vulkan_histogram_i32_ndarray, py::arg("values"),
            py::arg("bins"), py::call_guard<py::gil_scoped_release>())
@@ -894,11 +949,20 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_reduce_workspace_bytes",
            &Program::vulkan_reduce_workspace_bytes)
+      .def("vulkan_reduce_value_type_available",
+           &Program::vulkan_reduce_value_type_available,
+           py::arg("value_type"))
+      .def("vulkan_reduce_ndarray", &Program::vulkan_reduce_ndarray,
+           py::arg("values"), py::arg("output"), py::arg("value_type"),
+           py::arg("op"), py::call_guard<py::gil_scoped_release>())
       .def("vulkan_reduce_i32_ndarray",
            &Program::vulkan_reduce_i32_ndarray, py::arg("values"),
            py::arg("output"), py::arg("op"),
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_transform_available", &Program::vulkan_transform_available)
+      .def("vulkan_transform_value_type_available",
+           &Program::vulkan_transform_value_type_available,
+           py::arg("value_type"))
       .def("vulkan_transform_clear_workspace",
            &Program::vulkan_transform_clear_workspace,
            py::call_guard<py::gil_scoped_release>())
@@ -923,6 +987,9 @@ void export_lang(py::module &m) {
             py::call_guard<py::gil_scoped_release>())
        .def("vulkan_scatter_add_available",
             &Program::vulkan_scatter_add_available)
+       .def("vulkan_scatter_add_value_type_available",
+            &Program::vulkan_scatter_add_value_type_available,
+            py::arg("value_type"))
        .def("vulkan_scatter_add_clear_workspace",
             &Program::vulkan_scatter_add_clear_workspace,
             py::call_guard<py::gil_scoped_release>())
@@ -939,12 +1006,30 @@ void export_lang(py::module &m) {
             py::call_guard<py::gil_scoped_release>())
        .def("vulkan_bucket_builder_workspace_bytes",
             &Program::vulkan_bucket_builder_workspace_bytes)
+       .def("vulkan_bucket_builder_value_type_available",
+            &Program::vulkan_bucket_builder_value_type_available,
+            py::arg("value_type"))
        .def("vulkan_bucket_builder_i32_ndarray",
             &Program::vulkan_bucket_builder_i32_ndarray, py::arg("keys"),
             py::arg("values"), py::arg("offsets"), py::arg("output"),
             py::arg("cursor"), py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_bucket_builder_ndarray",
+            &Program::vulkan_bucket_builder_ndarray, py::arg("keys"),
+            py::arg("values"), py::arg("offsets"), py::arg("output"),
+            py::arg("cursor"), py::arg("value_type"),
+            py::call_guard<py::gil_scoped_release>())
        .def("vulkan_grouped_reduce_available",
             &Program::vulkan_grouped_reduce_available)
+       .def("vulkan_grouped_reduce_value_type_available",
+            &Program::vulkan_grouped_reduce_value_type_available,
+            py::arg("value_type"))
+       .def("vulkan_grouped_reduce_atomic_value_type_available",
+            &Program::vulkan_grouped_reduce_atomic_value_type_available,
+            py::arg("value_type"))
+       .def("vulkan_grouped_reduce_atomic_ndarray",
+            &Program::vulkan_grouped_reduce_atomic_ndarray, py::arg("keys"),
+            py::arg("values"), py::arg("output"), py::arg("value_type"),
+            py::arg("op"), py::call_guard<py::gil_scoped_release>())
        .def("vulkan_grouped_reduce_clear_workspace",
             &Program::vulkan_grouped_reduce_clear_workspace,
             py::call_guard<py::gil_scoped_release>())
@@ -959,14 +1044,19 @@ void export_lang(py::module &m) {
             py::arg("values"), py::arg("output"), py::arg("offsets"),
             py::arg("scratch"), py::arg("cursor"), py::arg("op"),
             py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_grouped_reduce_ndarray",
+            &Program::vulkan_grouped_reduce_ndarray, py::arg("keys"),
+            py::arg("values"), py::arg("output"), py::arg("offsets"),
+            py::arg("scratch"), py::arg("cursor"), py::arg("value_type"),
+            py::arg("op"), py::call_guard<py::gil_scoped_release>())
        .def("vulkan_radix_sort_u32_ndarray",
            &Program::vulkan_radix_sort_u32_ndarray, py::arg("keys"),
-           py::arg("values"), py::arg("key_type"),
+           py::arg("values"), py::arg("key_type"), py::arg("value_type"),
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_radix_sort_u32_keys_ndarray",
            [](Program *program, Ndarray *keys, int key_type) {
              return program->vulkan_radix_sort_u32_ndarray(keys, nullptr,
-                                                           key_type);
+                                                           key_type, 0);
            },
            py::arg("keys"), py::arg("key_type"),
            py::call_guard<py::gil_scoped_release>())

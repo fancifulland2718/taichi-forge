@@ -23,21 +23,50 @@ enum class CubSortNanPolicy : int {
   bitwise = 1,
 };
 
+enum class CubSortValueType : int {
+  i32 = 0,
+  f32 = 1,
+  u32 = 2,
+  u64 = 3,
+  i64 = 4,
+  f64 = 5,
+};
+
 enum class CubScanValueType : int {
   i32 = 0,
+  f32 = 1,
+  u32 = 2,
+  u64 = 3,
+  i64 = 4,
+  f64 = 5,
 };
 
 enum class CubSelectValueType : int {
   i32 = 0,
+  f32 = 1,
+  u32 = 2,
+  u64 = 3,
+  i64 = 4,
+  f64 = 5,
 };
 
 enum class CubHistogramValueType : int {
   i32 = 0,
+  u32 = 2,
+};
+
+enum class CubHistogramBinType : int {
+  i32 = 0,
+  i64 = 4,
 };
 
 enum class CubReduceValueType : int {
   i32 = 0,
   f32 = 1,
+  u32 = 2,
+  u64 = 3,
+  i64 = 4,
+  f64 = 5,
 };
 
 enum class CubReduceOp : int {
@@ -49,6 +78,10 @@ enum class CubReduceOp : int {
 enum class CudaTransformValueType : int {
   i32 = 0,
   f32 = 1,
+  u32 = 2,
+  u64 = 3,
+  i64 = 4,
+  f64 = 5,
 };
 
 enum class CudaIndexedCopyOp : int {
@@ -59,6 +92,28 @@ enum class CudaIndexedCopyOp : int {
 enum class CudaScatterAddValueType : int {
   i32 = 0,
   f32 = 1,
+  u32 = 2,
+  u64 = 3,
+  i64 = 4,
+  f64 = 5,
+};
+
+enum class CudaGroupedReduceValueType : int {
+  i32 = 0,
+  f32 = 1,
+  u32 = 2,
+  u64 = 3,
+  i64 = 4,
+  f64 = 5,
+};
+
+enum class CudaBucketBuilderValueType : int {
+  i32 = 0,
+  f32 = 1,
+  u32 = 2,
+  u64 = 3,
+  i64 = 4,
+  f64 = 5,
 };
 
 bool driver_transform_available();
@@ -70,6 +125,16 @@ std::size_t driver_transform_affine(void *src,
                                     double scale,
                                     double bias);
 
+bool cub_transform_available();
+
+std::size_t cub_transform_affine(void *src,
+                                 void *dst,
+                                 int num_items,
+                                 CudaTransformValueType value_type,
+                                 double scale,
+                                 double bias,
+                                 void *stream);
+
 bool driver_indexed_copy_available();
 
 std::size_t driver_indexed_copy(void *src,
@@ -79,12 +144,24 @@ std::size_t driver_indexed_copy(void *src,
                                 int index_bound,
                                 CudaIndexedCopyOp op);
 
+bool cub_indexed_copy_available();
+
+std::size_t cub_indexed_copy(void *src,
+                             void *indices,
+                             void *dst,
+                             int num_items,
+                             int index_bound,
+                             int item_words,
+                             CudaIndexedCopyOp op,
+                             void *stream);
+
 bool cub_radix_sort_available();
 
 std::size_t cub_radix_sort(void *keys,
                            void *values,
                            int num_items,
                            CubSortKeyType key_type,
+                           CubSortValueType value_type,
                            CubSortMode mode,
                            CubSortNanPolicy nan_policy,
                            bool has_values,
@@ -129,6 +206,7 @@ std::size_t cub_histogram_even(void *values,
                                int num_items,
                                int num_bins,
                                CubHistogramValueType value_type,
+                               CubHistogramBinType bin_type,
                                void *stream,
                                void *owner);
 
@@ -172,11 +250,31 @@ std::size_t cub_bucket_builder_i32(void *keys,
                                    void *stream,
                                    void *owner);
 
+std::size_t cub_bucket_builder(void *keys,
+                               void *values,
+                               void *offsets,
+                               void *output,
+                               void *cursor,
+                               int num_items,
+                               int num_bins,
+                               CudaBucketBuilderValueType value_type,
+                               void *stream,
+                               void *owner);
+
 void cub_bucket_builder_clear_cache(void *owner);
 
 std::size_t cub_bucket_builder_cached_bytes(void *owner);
 
 bool cub_grouped_reduce_available();
+
+std::size_t cub_grouped_reduce_atomic(void *keys,
+                                      void *values,
+                                      void *output,
+                                      int num_items,
+                                      int num_groups,
+                                      CudaGroupedReduceValueType value_type,
+                                      int op,
+                                      void *stream);
 
 std::size_t cub_grouped_reduce_i32_atomic(void *keys,
                                           void *values,
@@ -197,6 +295,19 @@ std::size_t cub_grouped_reduce_i32(void *keys,
                                    int op,
                                    void *stream,
                                    void *owner);
+
+std::size_t cub_grouped_reduce(void *keys,
+                               void *values,
+                               void *output,
+                               void *offsets,
+                               void *scratch,
+                               void *cursor,
+                               int num_items,
+                               int num_groups,
+                               CudaGroupedReduceValueType value_type,
+                               int op,
+                               void *stream,
+                               void *owner);
 
 void cub_grouped_reduce_clear_cache(void *owner);
 
