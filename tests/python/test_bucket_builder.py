@@ -140,6 +140,25 @@ def _run_vector_ndarray_bucket_builder(method):
     return workspace
 
 
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_bucket_builder_rejects_struct_tensor_member_views():
+    n = 8
+    num_bins = 3
+    payload = ti.types.struct(vec=ti.types.vector(2, ti.i32), tag=ti.i32)
+    keys = ti.ndarray(ti.i32, shape=n)
+    values = ti.ndarray(payload, shape=n)
+    offsets = ti.ndarray(ti.i32, shape=num_bins + 1)
+    output = ti.ndarray(payload, shape=n)
+    with pytest.raises(NotImplementedError, match="whole vector/matrix"):
+        ti.algorithms.experimental_bucket_builder(
+            keys,
+            values.field("vec"),
+            offsets,
+            output.field("vec"),
+            method="cpu_native",
+        )
+
+
 @test_utils.test(arch=[ti.cuda])
 def test_experimental_bucket_builder_cuda_device_ndarray():
     prog = impl.get_runtime().prog

@@ -15,9 +15,10 @@ class AnyArray:
         layout (Layout): Memory layout.
     """
 
-    def __init__(self, ptr):
+    def __init__(self, ptr, element_type_hint=None):
         assert ptr.is_external_tensor_expr()
         self.ptr = ptr
+        self.element_type_hint = element_type_hint
         self.ptr.type_check(impl.get_runtime().prog.config())
 
     def element_shape(self):

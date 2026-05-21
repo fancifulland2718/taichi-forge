@@ -39,11 +39,15 @@ bool UnaryOpStmt::same_operation(UnaryOpStmt *o) const {
 ExternalPtrStmt::ExternalPtrStmt(Stmt *base_ptr,
                                  const std::vector<Stmt *> &indices,
                                  bool is_grad,
-                                 BoundaryMode boundary)
+                                 BoundaryMode boundary,
+                                 std::size_t byte_offset,
+                                 std::size_t byte_stride)
     : base_ptr(base_ptr),
       indices(indices),
       is_grad(is_grad),
-      boundary(boundary) {
+      boundary(boundary),
+      byte_offset(byte_offset),
+      byte_stride(byte_stride) {
   ndim = indices.size();
   TI_ASSERT(base_ptr != nullptr);
   TI_ASSERT(base_ptr->is<ArgLoadStmt>());
@@ -52,13 +56,33 @@ ExternalPtrStmt::ExternalPtrStmt(Stmt *base_ptr,
 
 ExternalPtrStmt::ExternalPtrStmt(Stmt *base_ptr,
                                  const std::vector<Stmt *> &indices,
+                                 bool is_grad,
+                                 BoundaryMode boundary)
+    : ExternalPtrStmt(base_ptr, indices, is_grad, boundary, 0, 0) {
+}
+
+ExternalPtrStmt::ExternalPtrStmt(Stmt *base_ptr,
+                                 const std::vector<Stmt *> &indices,
+                                 int ndim,
+                                 const std::vector<int> &element_shape,
+                                 bool is_grad,
+                                 BoundaryMode boundary,
+                                 std::size_t byte_offset,
+                                 std::size_t byte_stride)
+    : ExternalPtrStmt(base_ptr, indices, is_grad, boundary, byte_offset,
+                      byte_stride) {
+  this->element_shape = element_shape;
+  this->ndim = ndim;
+}
+
+ExternalPtrStmt::ExternalPtrStmt(Stmt *base_ptr,
+                                 const std::vector<Stmt *> &indices,
                                  int ndim,
                                  const std::vector<int> &element_shape,
                                  bool is_grad,
                                  BoundaryMode boundary)
-    : ExternalPtrStmt(base_ptr, indices, is_grad, boundary) {
-  this->element_shape = element_shape;
-  this->ndim = ndim;
+    : ExternalPtrStmt(base_ptr, indices, ndim, element_shape, is_grad,
+                      boundary, 0, 0) {
 }
 
 GlobalPtrStmt::GlobalPtrStmt(SNode *snode,

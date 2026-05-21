@@ -385,11 +385,20 @@ class ExternalPtrStmt : public Stmt {
 
   bool is_grad = false;
   BoundaryMode boundary{BoundaryMode::kUnsafe};
+  std::size_t byte_offset{0};
+  std::size_t byte_stride{0};
 
   ExternalPtrStmt(Stmt *base_ptr,
                   const std::vector<Stmt *> &indices,
                   bool is_grad = false,
                   BoundaryMode boundary = BoundaryMode::kUnsafe);
+
+  ExternalPtrStmt(Stmt *base_ptr,
+                  const std::vector<Stmt *> &indices,
+                  bool is_grad,
+                  BoundaryMode boundary,
+                  std::size_t byte_offset,
+                  std::size_t byte_stride);
 
   ExternalPtrStmt(Stmt *base_ptr,
                   const std::vector<Stmt *> &indices,
@@ -398,11 +407,21 @@ class ExternalPtrStmt : public Stmt {
                   bool is_grad = false,
                   BoundaryMode boundary = BoundaryMode::kUnsafe);
 
+  ExternalPtrStmt(Stmt *base_ptr,
+                  const std::vector<Stmt *> &indices,
+                  int ndim,
+                  const std::vector<int> &element_shape,
+                  bool is_grad,
+                  BoundaryMode boundary,
+                  std::size_t byte_offset,
+                  std::size_t byte_stride);
+
   bool has_global_side_effect() const override {
     return false;
   }
 
-  TI_STMT_DEF_FIELDS(ret_type, base_ptr, indices, is_grad);
+  TI_STMT_DEF_FIELDS(ret_type, base_ptr, indices, is_grad, byte_offset,
+                     byte_stride);
   TI_DEFINE_ACCEPT_AND_CLONE
 };
 
@@ -1185,14 +1204,16 @@ class GetElementStmt : public Stmt {
  public:
   Stmt *src;
   std::vector<int> index;
+  bool is_ptr{false};
   GetElementStmt(Stmt *src,
                  const std::vector<int> &index,
-                 const DebugInfo &dbg_info = DebugInfo())
-      : Stmt(dbg_info), src(src), index(index) {
+                 const DebugInfo &dbg_info = DebugInfo(),
+                 bool is_ptr = false)
+      : Stmt(dbg_info), src(src), index(index), is_ptr(is_ptr) {
     TI_STMT_REG_FIELDS;
   }
 
-  TI_STMT_DEF_FIELDS(ret_type, src, index);
+  TI_STMT_DEF_FIELDS(ret_type, src, index, is_ptr);
   TI_DEFINE_ACCEPT_AND_CLONE
 };
 

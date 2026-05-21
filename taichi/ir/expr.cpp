@@ -31,6 +31,9 @@ DataType Expr::get_rvalue_type() const {
   if (auto index_expr = cast<IndexExpression>()) {
     return index_expr->ret_type.ptr_removed();
   }
+  if (auto get_element_expr = cast<GetElementExpression>()) {
+    return get_element_expr->ret_type.ptr_removed();
+  }
   if (auto unary = cast<UnaryOpExpression>()) {
     if (unary->type == UnaryOpType::frexp) {
       return unary->ret_type.ptr_removed();

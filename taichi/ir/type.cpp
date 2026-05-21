@@ -158,6 +158,25 @@ std::string StructType::to_string() const {
   return s;
 }
 
+namespace {
+bool contains_pointer_type(const Type *type) {
+  if (type->is<PointerType>()) {
+    return true;
+  }
+  if (auto *tensor_type = type->cast<TensorType>()) {
+    return contains_pointer_type(tensor_type->get_element_type());
+  }
+  if (auto *struct_type = type->cast<StructType>()) {
+    for (const auto &element : struct_type->elements()) {
+      if (contains_pointer_type(element.type)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+}  // namespace
+
 size_t StructType::get_element_offset(const std::vector<int> &indices) const {
   const Type *type_now = this;
   size_t offset = 0;
@@ -167,8 +186,31 @@ size_t StructType::get_element_offset(const std::vector<int> &indices) const {
       offset += tensor_type->get_element_offset(ind);
       type_now = tensor_type->get_element_type();
     } else {
-      offset += type_now->as<StructType>()->elements_[ind].offset;
-      type_now = type_now->as<StructType>()->elements_[ind].type;
+      auto *struct_type = type_now->as<StructType>();
+      const auto &elements = struct_type->elements_;
+      TI_ASSERT(ind < (int)elements.size());
+      bool has_explicit_offsets = false;
+      bool has_pointer_elements = false;
+      for (const auto &element : elements) {
+        has_explicit_offsets |= element.offset != 0;
+        has_pointer_elements |= contains_pointer_type(element.type);
+      }
+      if (has_explicit_offsets || has_pointer_elements) {
+        offset += elements[ind].offset;
+      } else {
+        size_t implicit_offset = 0;
+        for (int i = 0; i <= ind; ++i) {
+          implicit_offset =
+              align_up(implicit_offset,
+                       (size_t)data_type_alignment(elements[i].type));
+          if (i == ind) {
+            break;
+          }
+          implicit_offset += data_type_size(elements[i].type);
+        }
+        offset += implicit_offset;
+      }
+      type_now = elements[ind].type;
     }
   }
   return offset;

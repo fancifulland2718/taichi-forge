@@ -18,6 +18,8 @@ layout(set = 0, binding = 2, std430) readonly buffer Params {
   uint n;
   uint src_offset_words;
   uint src_stride_words;
+  uint dst_offset_words;
+  uint dst_stride_words;
 } params;
 
 void main() {
@@ -26,5 +28,6 @@ void main() {
     return;
   }
   uint value = src_buf.data[params.src_offset_words + i * params.src_stride_words];
-  dst_buf.data[i] = value * params.scale + params.bias;
+  dst_buf.data[params.dst_offset_words + i * params.dst_stride_words] =
+      value * params.scale + params.bias;
 }

@@ -552,6 +552,52 @@ class TaichiCallableTemplateMapper:
             # support mip-mapping.
             return arg.num_dims, arg.fmt, 0
         if isinstance(anno, ndarray_type.NdarrayType):
+            if isinstance(arg, taichi_forge.lang._ndarray.StructNdarrayTensorMemberView):
+                anno.check_matched(arg.get_type(), arg_name)
+                needs_grad = False if anno.needs_grad is None else anno.needs_grad
+                if needs_grad:
+                    raise TaichiRuntimeTypeError(
+                        f"StructNdarray tensor member view argument {arg_name} does not support gradients"
+                    )
+                return (
+                    arg.scalar_dtype,
+                    len(arg.shape),
+                    needs_grad,
+                    anno.boundary,
+                    "struct_tensor_member",
+                    arg.offset,
+                    arg.stride,
+                    arg.dtype,
+                )
+            if isinstance(arg, taichi_forge.lang._ndarray.StructNdarrayScalarMemberView):
+                anno.check_matched(arg.get_type(), arg_name)
+                needs_grad = False if anno.needs_grad is None else anno.needs_grad
+                if needs_grad:
+                    raise TaichiRuntimeTypeError(
+                        f"StructNdarray member view argument {arg_name} does not support gradients"
+                    )
+                return (
+                    arg.element_type,
+                    len(arg.shape),
+                    needs_grad,
+                    anno.boundary,
+                    "struct_member",
+                    arg.offset,
+                    arg.stride,
+                )
+            if isinstance(arg, taichi_forge.lang._ndarray.StructNdarray):
+                anno.check_matched(arg.get_type(), arg_name)
+                needs_grad = False if anno.needs_grad is None else anno.needs_grad
+                if needs_grad:
+                    raise TaichiRuntimeTypeError(f"StructNdarray argument {arg_name} does not support gradients")
+                return (
+                    arg.element_type,
+                    len(arg.shape),
+                    needs_grad,
+                    anno.boundary,
+                    "struct_ndarray",
+                    arg.struct_type,
+                )
             if isinstance(arg, taichi_forge.lang._ndarray.Ndarray):
                 anno.check_matched(arg.get_type(), arg_name)
                 needs_grad = (arg.grad is not None) if anno.needs_grad is None else anno.needs_grad
@@ -1016,6 +1062,9 @@ class Kernel:
             # Pass only the base pointer of the ti.types.sparse_matrix_builder() argument
             launch_ctx.set_arg_uint(indices, v._get_ndarray_addr())
 
+        def set_arg_struct_member_ndarray(indices, v):
+            launch_ctx.set_arg_ndarray(indices, v.base.arr)
+
         set_later_list = []
 
         def recursive_set_args(needed, provided, v, indices):
@@ -1056,6 +1105,22 @@ class Kernel:
                     set_later_list.append((set_arg_sparse_matrix_builder, (v,)))
                     return 0
                 set_arg_sparse_matrix_builder(indices, v)
+                return 1
+            if isinstance(needed, ndarray_type.NdarrayType) and isinstance(
+                v, taichi_forge.lang._ndarray.StructNdarrayTensorMemberView
+            ):
+                if in_argpack:
+                    set_later_list.append((set_arg_struct_member_ndarray, (v,)))
+                    return 0
+                set_arg_struct_member_ndarray(indices, v)
+                return 1
+            if isinstance(needed, ndarray_type.NdarrayType) and isinstance(
+                v, taichi_forge.lang._ndarray.StructNdarrayScalarMemberView
+            ):
+                if in_argpack:
+                    set_later_list.append((set_arg_struct_member_ndarray, (v,)))
+                    return 0
+                set_arg_struct_member_ndarray(indices, v)
                 return 1
             if isinstance(needed, ndarray_type.NdarrayType) and isinstance(v, taichi_forge.lang._ndarray.Ndarray):
                 if in_argpack:

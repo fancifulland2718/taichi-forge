@@ -582,13 +582,61 @@ class StructNdarrayScalarMemberView:
         self.base.from_numpy(struct_arr)
 
     def get_type(self):
-        raise TaichiRuntimeError(
-            "StructNdarray scalar member views cannot be passed to ti.kernel yet; "
-            "copy the member to a numeric ndarray or use a primitive that explicitly supports member views."
-        )
+        return NdarrayTypeMetadata(self.element_type, self.shape, False)
 
     def __repr__(self):
         return f"<ti.StructNdarrayScalarMemberView {self.name}: {self.dtype}>"
+
+
+class StructNdarrayTensorMemberView:
+    """A vector/matrix member view of a StructNdarray.
+
+    The view exposes a full Taichi tensor element while preserving the parent
+    AOS byte stride. It is intended for kernel arguments and host bulk IO;
+    scalar-lane primitive calls should still use component=....
+    """
+
+    def __init__(self, base, name, dtype, offset, path=None):
+        self.base = base
+        self.path = tuple(path) if path is not None else (name,)
+        self.component = None
+        self.name = name
+        self.dtype = dtype
+        self.scalar_dtype = cook_dtype(dtype.dtype)
+        self.element_type = dtype.tensor_type
+        self.shape = base.shape
+        self.offset = int(offset)
+        self.stride = _ti_core.data_type_size(base.dtype)
+        self.element_size = _ti_core.data_type_size(self.element_type)
+
+    @property
+    def element_shape(self):
+        return tuple(self.dtype.get_shape())
+
+    @python_scope
+    def to_numpy(self):
+        return np.ascontiguousarray(_extract_struct_numpy_member(self.base.to_numpy(), self.path))
+
+    @python_scope
+    def from_numpy(self, arr):
+        if not isinstance(arr, np.ndarray):
+            raise TypeError(f"{np.ndarray} expected, but {type(arr)} provided")
+        expected_shape = self.shape + self.element_shape
+        if tuple(arr.shape) != expected_shape:
+            raise ValueError(f"Mismatch shape: {expected_shape} expected, but {tuple(arr.shape)} provided")
+        expected_dtype = np.dtype(to_numpy_type(self.dtype.dtype))
+        if arr.dtype != expected_dtype:
+            raise TypeError(f"Mismatch dtype: {expected_dtype} expected, but {arr.dtype} provided")
+        struct_arr = self.base.to_numpy()
+        member = _extract_struct_numpy_member(struct_arr, self.path)
+        member[...] = np.ascontiguousarray(arr)
+        self.base.from_numpy(struct_arr)
+
+    def get_type(self):
+        return NdarrayTypeMetadata(self.element_type, self.shape, False)
+
+    def __repr__(self):
+        return f"<ti.StructNdarrayTensorMemberView {self.name}: {self.dtype}>"
 
 
 class StructNdarray(Ndarray):
@@ -655,10 +703,12 @@ class StructNdarray(Ndarray):
             return StructNdarrayScalarMemberView(
                 self, component_name, member_dtype.dtype, offset + component_offset, path=path, component=component
             )
+        if _is_matrix_type(member_dtype):
+            return StructNdarrayTensorMemberView(self, member_name, member_dtype, offset, path=path)
         if member_dtype not in primitive_types.all_types:
             raise TypeError(
-                "StructNdarray.field() currently supports primitive scalar member leaves; "
-                f"pass component=... for vector/matrix members. Member '{member_name}' has type {member_dtype}."
+                "StructNdarray.field() currently supports primitive scalar leaves and vector/matrix members. "
+                f"Member '{member_name}' has type {member_dtype}."
             )
         return StructNdarrayScalarMemberView(self, member_name, member_dtype, offset, path=path)
 
@@ -834,4 +884,10 @@ class NdarrayHostAccess:
         self.setter = setter
 
 
-__all__ = ["Ndarray", "ScalarNdarray", "StructNdarray", "StructNdarrayScalarMemberView"]
+__all__ = [
+    "Ndarray",
+    "ScalarNdarray",
+    "StructNdarray",
+    "StructNdarrayScalarMemberView",
+    "StructNdarrayTensorMemberView",
+]

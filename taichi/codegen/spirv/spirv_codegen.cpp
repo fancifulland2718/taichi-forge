@@ -3164,6 +3164,63 @@ class TaskCodegen : public IRVisitor {
 
   void visit(GetElementStmt *stmt) override {
     spirv::Value val = ir_->query_value(stmt->src->raw_name());
+    const auto *src_struct_type =
+        stmt->src->ret_type.ptr_removed()->as<::taichi::lang::StructType>();
+    const size_t byte_offset = src_struct_type->get_element_offset(stmt->index);
+    if (stmt->ret_type->is<PointerType>()) {
+      if (!is_integral(val.stype.dt)) {
+        const auto val_type =
+            ir_->get_primitive_type(stmt->ret_type.ptr_removed());
+        const auto val_type_ptr =
+            ir_->get_pointer_type(val_type, val.stype.storage_class);
+        val = ir_->make_access_chain(val_type_ptr, val, stmt->index);
+        ir_->register_value(stmt->raw_name(), val);
+        return;
+      }
+      if (byte_offset != 0) {
+        if (val.stype.dt == PrimitiveType::u64) {
+          val = ir_->add(val, ir_->uint_immediate_number(ir_->u64_type(),
+                                                        byte_offset));
+        } else {
+          val = ir_->add(
+              val, ir_->int_immediate_number(val.stype,
+                                             static_cast<int>(byte_offset)));
+        }
+      }
+      if (auto it = ptr_to_buffers_.find(stmt->src);
+          it != ptr_to_buffers_.end()) {
+        ptr_to_buffers_[stmt] = it->second;
+      }
+      if (auto it = ptr_to_chunk_idx_.find(stmt->src);
+          it != ptr_to_chunk_idx_.end()) {
+        ptr_to_chunk_idx_[stmt] = it->second;
+      }
+      return;
+    }
+    if (is_integral(val.stype.dt)) {
+      if (byte_offset != 0) {
+        if (val.stype.dt == PrimitiveType::u64) {
+          val = ir_->add(val, ir_->uint_immediate_number(ir_->u64_type(),
+                                                        byte_offset));
+        } else {
+          val = ir_->add(
+              val, ir_->int_immediate_number(val.stype,
+                                             static_cast<int>(byte_offset)));
+        }
+      }
+      ir_->register_value(stmt->raw_name(), val);
+      if (auto it = ptr_to_buffers_.find(stmt->src);
+          it != ptr_to_buffers_.end()) {
+        ptr_to_buffers_[stmt] = it->second;
+      }
+      if (auto it = ptr_to_chunk_idx_.find(stmt->src);
+          it != ptr_to_chunk_idx_.end()) {
+        ptr_to_chunk_idx_[stmt] = it->second;
+      }
+      val = load_buffer(stmt, stmt->ret_type, val);
+      ir_->register_value(stmt->raw_name(), val);
+      return;
+    }
     const auto val_type = ir_->get_primitive_type(stmt->element_type());
     const auto val_type_ptr =
         ir_->get_pointer_type(val_type, spv::StorageClassUniform);
@@ -3298,11 +3355,31 @@ class TaskCodegen : public IRVisitor {
         linear_offset = ir_->mul(linear_offset, size_var);
         linear_offset = ir_->add(linear_offset, indices);
       }
-      linear_offset = ir_->make_value(
-          spv::OpShiftLeftLogical, ir_->i32_type(), linear_offset,
-          ir_->int_immediate_number(ir_->i32_type(),
-                                    log2int(ir_->get_primitive_type_size(
-                                        stmt->ret_type.ptr_removed()))));
+      if (stmt->byte_stride != 0) {
+        linear_offset = ir_->mul(
+            linear_offset,
+            ir_->int_immediate_number(ir_->i32_type(),
+                                      static_cast<int>(stmt->byte_stride)));
+        if (stmt->byte_offset != 0) {
+          linear_offset = ir_->add(
+              linear_offset,
+              ir_->int_immediate_number(ir_->i32_type(),
+                                        static_cast<int>(stmt->byte_offset)));
+        }
+      } else {
+        const size_t element_bytes = data_type_size(stmt->ret_type.ptr_removed());
+        if ((element_bytes & (element_bytes - 1)) == 0) {
+          linear_offset = ir_->make_value(
+              spv::OpShiftLeftLogical, ir_->i32_type(), linear_offset,
+              ir_->int_immediate_number(ir_->i32_type(),
+                                        log2int(element_bytes)));
+        } else {
+          linear_offset = ir_->mul(
+              linear_offset,
+              ir_->int_immediate_number(ir_->i32_type(),
+                                        static_cast<int>(element_bytes)));
+        }
+      }
       if (caps_->get(DeviceCapability::spirv_has_no_integer_wrap_decoration)) {
         ir_->decorate(spv::OpDecorate, linear_offset,
                       spv::DecorationNoSignedWrap);
@@ -6247,9 +6324,7 @@ class TaskCodegen : public IRVisitor {
     }
   }
 
-  spirv::Value at_buffer(const Stmt *ptr, DataType dt) {
-    spirv::Value ptr_val = ir_->query_value(ptr->raw_name());
-
+  spirv::Value at_buffer(const Stmt *ptr, DataType dt, spirv::Value ptr_val) {
     if (ptr_val.stype.dt == PrimitiveType::u64) {
       spirv::Value paddr_ptr = ir_->make_value(
           spv::OpConvertUToPtr,
@@ -6283,6 +6358,31 @@ class TaskCodegen : public IRVisitor {
     spirv::Value ret =
         ir_->struct_array_access(ir_->get_primitive_type(dt), buffer, idx_val);
     return ret;
+  }
+
+  spirv::Value at_buffer(const Stmt *ptr, DataType dt) {
+    return at_buffer(ptr, dt, ir_->query_value(ptr->raw_name()));
+  }
+
+  spirv::Value load_buffer(const Stmt *ptr, DataType dt, spirv::Value ptr_val) {
+    mark_pointer_access(ptr, BufferBind::kAccessRead);
+    DataType ti_buffer_type = ir_->get_taichi_uint_type(dt);
+
+    if (ptr_val.stype.dt == PrimitiveType::u64) {
+      ti_buffer_type = dt;
+    } else if (dt->is_primitive(PrimitiveTypeID::u1)) {
+      ti_buffer_type = PrimitiveType::i32;
+    }
+
+    auto buf_ptr = at_buffer(ptr, ti_buffer_type, ptr_val);
+    auto val_bits =
+        ir_->load_variable(buf_ptr, ir_->get_primitive_type(ti_buffer_type));
+    if (dt->is_primitive(PrimitiveTypeID::u1))
+      return ir_->cast(ir_->bool_type(), val_bits);
+    return ti_buffer_type == dt
+               ? val_bits
+               : ir_->make_value(spv::OpBitcast, ir_->get_primitive_type(dt),
+                                 val_bits);
   }
 
   spirv::Value load_buffer(const Stmt *ptr, DataType dt) {

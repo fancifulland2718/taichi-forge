@@ -43,6 +43,16 @@ def _vulkan_histogram_dtype_available(value_dtype, bin_dtype):
     )
 
 
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_histogram_rejects_struct_tensor_member_views():
+    n = 8
+    payload = ti.types.struct(vec=ti.types.vector(2, ti.i32), tag=ti.i32)
+    values = ti.ndarray(payload, shape=n)
+    bins = ti.ndarray(ti.i32, shape=4)
+    with pytest.raises(NotImplementedError, match="scalar quantities"):
+        ti.algorithms.experimental_histogram(values.field("vec"), bins)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_histogram_field_atomic():
     n = 4096

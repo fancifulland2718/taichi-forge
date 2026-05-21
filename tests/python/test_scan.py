@@ -57,6 +57,32 @@ def _run_struct_member_scan_case(n, dtype, np_dtype):
     np.testing.assert_array_equal(result["tag"], host["tag"])
 
 
+def _run_struct_tensor_member_scan_case(n):
+    payload = ti.types.struct(
+        vec=ti.types.vector(2, ti.i32),
+        mat=ti.types.matrix(2, 2, ti.i32),
+        tag=ti.i32,
+    )
+    arr = ti.ndarray(payload, shape=n)
+    host = np.zeros((n,), dtype=arr.numpy_dtype)
+    host["vec"] = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 7) - 3
+    host["mat"] = (np.arange(n * 4, dtype=np.int32).reshape(n, 2, 2) % 5) - 2
+    host["tag"] = np.arange(n, dtype=np.int32) * 5 + 7
+    arr.from_numpy(host)
+
+    ti.algorithms.PrefixSumExecutor(n).run(arr.field("vec"))
+    ti.algorithms.PrefixSumExecutor(n).run(arr.field("mat"))
+
+    result = arr.to_numpy()
+    np.testing.assert_array_equal(
+        result["vec"], np.cumsum(host["vec"], axis=0, dtype=np.int64).astype(np.int32)
+    )
+    np.testing.assert_array_equal(
+        result["mat"], np.cumsum(host["mat"], axis=0, dtype=np.int64).astype(np.int32)
+    )
+    np.testing.assert_array_equal(result["tag"], host["tag"])
+
+
 @test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_scan():
     def test_scan_for_dtype(dtype, N):
@@ -144,6 +170,17 @@ def test_scan_cuda_cub_struct_member_view():
     assert impl.get_runtime().prog.cuda_cub_scan_workspace_bytes() > 0
 
 
+@test_utils.test(arch=[ti.cuda])
+def test_scan_cuda_cub_struct_tensor_member_view():
+    N = 4096
+
+    if not impl.get_runtime().prog.cuda_cub_scan_available():
+        pytest.skip("CUDA CUB scan is unavailable in this build/runtime.")
+
+    _run_struct_tensor_member_scan_case(N)
+    assert impl.get_runtime().prog.cuda_cub_scan_workspace_bytes() > 0
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_scan_ndarray_cpu_native():
     N = 4096
@@ -170,6 +207,17 @@ def test_scan_cpu_native_struct_member_view():
 
     for dtype, np_dtype in _SCAN_DTYPES:
         _run_struct_member_scan_case(N, dtype, np_dtype)
+    assert impl.get_runtime().prog.cpu_scan_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_scan_cpu_native_struct_tensor_member_view():
+    N = 4096
+
+    if not impl.get_runtime().prog.cpu_scan_available():
+        pytest.skip("CPU native scan is unavailable in this build/runtime.")
+
+    _run_struct_tensor_member_scan_case(N)
     assert impl.get_runtime().prog.cpu_scan_workspace_bytes() == 0
 
 
@@ -214,6 +262,17 @@ def test_scan_vulkan_native_struct_member_view():
         _run_struct_member_scan_case(N, dtype, np_dtype)
         tested += 1
     assert tested >= 3
+    assert impl.get_runtime().prog.vulkan_scan_workspace_bytes() > 0
+
+
+@test_utils.test(arch=[ti.vulkan])
+def test_scan_vulkan_native_struct_tensor_member_view():
+    N = 8192
+
+    if not impl.get_runtime().prog.vulkan_scan_available():
+        pytest.skip("Vulkan native scan is unavailable in this runtime.")
+
+    _run_struct_tensor_member_scan_case(N)
     assert impl.get_runtime().prog.vulkan_scan_workspace_bytes() > 0
 
 

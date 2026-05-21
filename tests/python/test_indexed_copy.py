@@ -121,6 +121,51 @@ def _run_matrix_ndarray_indexed_copy(method, scatter):
     return workspace
 
 
+def _run_struct_tensor_member_indexed_copy(method, scatter):
+    n = 2048
+    payload = ti.types.struct(
+        vec=ti.types.vector(2, ti.i32),
+        mat=ti.types.matrix(2, 2, ti.i32),
+        tag=ti.i32,
+    )
+    src = ti.ndarray(payload, shape=n)
+    dst = ti.ndarray(payload, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    index_data = _reverse_indices(n)
+    host = np.zeros((n,), dtype=src.numpy_dtype)
+    dst_host = np.zeros((n,), dtype=dst.numpy_dtype)
+    host["vec"] = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 97) - 48
+    host["mat"] = (np.arange(n * 4, dtype=np.int32).reshape(n, 2, 2) % 101) - 50
+    host["tag"] = np.arange(n, dtype=np.int32) * 3 + 1
+    dst_host["tag"] = np.arange(n, dtype=np.int32) * 7 + 5
+    src.from_numpy(host)
+    dst.from_numpy(dst_host)
+    indices.from_numpy(index_data)
+    workspace = ti.algorithms.IndexedCopyWorkspace(max_items=n)
+
+    if scatter:
+        ti.algorithms.experimental_scatter(
+            src.field("vec"), indices, dst.field("vec"), method=method, workspace=workspace
+        )
+        ti.algorithms.experimental_scatter(
+            src.field("mat"), indices, dst.field("mat"), method=method, workspace=workspace
+        )
+    else:
+        ti.algorithms.experimental_gather(
+            src.field("vec"), indices, dst.field("vec"), method=method, workspace=workspace
+        )
+        ti.algorithms.experimental_gather(
+            src.field("mat"), indices, dst.field("mat"), method=method, workspace=workspace
+        )
+
+    result = dst.to_numpy()
+    assert np.array_equal(result["vec"], host["vec"][index_data])
+    assert np.array_equal(result["mat"], host["mat"][index_data])
+    assert np.array_equal(result["tag"], dst_host["tag"])
+    assert np.array_equal(src.to_numpy()["tag"], host["tag"])
+    return workspace
+
+
 def _run_invalid_index_ndarray(method, scatter):
     src = ti.ndarray(ti.i32, shape=4)
     indices = ti.ndarray(ti.i32, shape=4)
@@ -178,6 +223,21 @@ def test_experimental_gather_scatter_cuda_device_ndarray_vector_payloads():
 
 
 @test_utils.test(arch=[ti.cuda])
+def test_experimental_gather_scatter_cuda_device_struct_tensor_member_views():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cuda_device_indexed_copy_payload_available")
+        and prog.cuda_device_indexed_copy_payload_available(4)
+    ):
+        pytest.skip("CUDA indexed-copy strided support is unavailable.")
+
+    gather_ws = _run_struct_tensor_member_indexed_copy("cuda_device", scatter=False)
+    scatter_ws = _run_struct_tensor_member_indexed_copy("cuda_device", scatter=True)
+    assert gather_ws.workspace_bytes_peak == 0
+    assert scatter_ws.workspace_bytes_peak == 0
+
+
+@test_utils.test(arch=[ti.cuda])
 def test_experimental_indexed_copy_cuda_device_invalid_indices_are_ignored():
     prog = impl.get_runtime().prog
     if not (
@@ -223,6 +283,21 @@ def test_experimental_gather_scatter_vulkan_native_ndarray_vector_payloads():
     _run_matrix_ndarray_indexed_copy("vulkan_native", scatter=False)
     _run_matrix_ndarray_indexed_copy("vulkan_native", scatter=True)
     assert prog.vulkan_indexed_copy_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_gather_scatter_vulkan_native_struct_tensor_member_views():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_indexed_copy_available")
+        and prog.vulkan_indexed_copy_available()
+    ):
+        pytest.skip("Vulkan native indexed-copy is unavailable in this runtime.")
+
+    gather_ws = _run_struct_tensor_member_indexed_copy("vulkan_native", scatter=False)
+    scatter_ws = _run_struct_tensor_member_indexed_copy("vulkan_native", scatter=True)
+    assert gather_ws.workspace_bytes_peak >= 28
+    assert scatter_ws.workspace_bytes_peak >= 28
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -279,6 +354,15 @@ def test_experimental_gather_scatter_cpu_native_ndarray_vector_payloads():
     _run_vector_ndarray_indexed_copy("cpu_native", scatter=True)
     _run_matrix_ndarray_indexed_copy("cpu_native", scatter=False)
     _run_matrix_ndarray_indexed_copy("cpu_native", scatter=True)
+    assert impl.get_runtime().prog.cpu_indexed_copy_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_gather_scatter_cpu_native_struct_tensor_member_views():
+    gather_ws = _run_struct_tensor_member_indexed_copy("cpu_native", scatter=False)
+    scatter_ws = _run_struct_tensor_member_indexed_copy("cpu_native", scatter=True)
+    assert gather_ws.workspace_bytes_peak == 0
+    assert scatter_ws.workspace_bytes_peak == 0
     assert impl.get_runtime().prog.cpu_indexed_copy_workspace_bytes() == 0
 
 

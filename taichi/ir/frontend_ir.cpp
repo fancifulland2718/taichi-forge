@@ -704,10 +704,15 @@ Stmt *make_ndarray_access(Expression::FlattenContext *ctx,
   auto element_dim = -expr->dt.get_shape().size();
   auto external_ptr_stmt = std::make_unique<ExternalPtrStmt>(
       var_stmt, index_stmts, indices.size(), expr->dt.get_shape(),
-      expr->is_grad, expr->boundary);
+      expr->is_grad, expr->boundary, expr->byte_offset, expr->byte_stride);
   if (expr->ndim - element_dim == indices.size()) {
     // Indexing into an scalar element
-    external_ptr_stmt->ret_type = expr->dt.ptr_removed().get_element_type();
+    auto element_type = expr->dt.ptr_removed();
+    if (element_type->is<StructType>()) {
+      external_ptr_stmt->ret_type = element_type;
+    } else {
+      external_ptr_stmt->ret_type = expr->dt.ptr_removed().get_element_type();
+    }
   } else {
     // Indexing outer dimensions
     external_ptr_stmt->ret_type = expr->dt.ptr_removed();
@@ -849,6 +854,9 @@ bool IndexExpression::is_global() const {
     // as global.
     return var.cast<IndexExpression>()->is_global();
   }
+  if (var.is<GetElementExpression>()) {
+    return var.cast<GetElementExpression>()->is_global();
+  }
 
   // Only Ndarray and Field comes outside from a kernel
   return is_field() || is_matrix_field() || is_ndarray();
@@ -912,7 +920,13 @@ void IndexExpression::type_check(const CompileConfig *) {
 
     if (index_dim == total_dim) {
       // Access all the way to a single element
-      ret_type = var.cast<ExternalTensorExpression>()->dt.get_element_type();
+      auto element_type =
+          var.cast<ExternalTensorExpression>()->dt.ptr_removed();
+      if (element_type->is<StructType>()) {
+        ret_type = element_type;
+      } else {
+        ret_type = var.cast<ExternalTensorExpression>()->dt.get_element_type();
+      }
     } else {
       // Access to a Tensor
       ret_type = var.cast<ExternalTensorExpression>()->dt;
@@ -1343,8 +1357,28 @@ void GetElementExpression::type_check(const CompileConfig *config) {
 }
 
 void GetElementExpression::flatten(FlattenContext *ctx) {
-  ctx->push_back<GetElementStmt>(flatten_rvalue(src, ctx), index, dbg_info);
+  const bool src_is_lvalue = src->is_lvalue();
+  auto src_stmt =
+      src_is_lvalue ? flatten_lvalue(src, ctx) : flatten_rvalue(src, ctx);
+  ctx->push_back<GetElementStmt>(src_stmt, index, dbg_info, src_is_lvalue);
   stmt = ctx->back_stmt();
+  stmt->ret_type =
+      src_is_lvalue
+          ? TypeFactory::get_instance().get_pointer_type(ret_type.ptr_removed())
+          : ret_type;
+}
+
+bool GetElementExpression::is_global() const {
+  if (src.is<IndexExpression>()) {
+    return src.cast<IndexExpression>()->is_global();
+  }
+  if (src.is<GetElementExpression>()) {
+    return src.cast<GetElementExpression>()->is_global();
+  }
+  if (src.is<ArgLoadExpression>() && src.cast<ArgLoadExpression>()->is_ptr) {
+    return true;
+  }
+  return false;
 }
 // Mesh related.
 
@@ -1969,6 +2003,13 @@ Stmt *flatten_rvalue(Expr ptr, Expression::FlattenContext *ctx) {
       return flatten_local_load(ptr_stmt, ctx);
     } else {
       return flatten_global_load(ptr_stmt, ctx);
+    }
+  } else if (ptr.is<GetElementExpression>()) {
+    auto ge = ptr.cast<GetElementExpression>();
+    if (ge->is_global()) {
+      return flatten_global_load(ptr_stmt, ctx);
+    } else if (ptr_stmt->ret_type->is<PointerType>()) {
+      return flatten_local_load(ptr_stmt, ctx);
     }
   } else if (ptr.is<ArgLoadExpression>() &&
              ptr.cast<ArgLoadExpression>()->is_ptr) {

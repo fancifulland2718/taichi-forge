@@ -18,6 +18,8 @@ layout(set = 0, binding = 2, std430) readonly buffer Params {
   uint n;
   uint src_offset_words;
   uint src_stride_words;
+  uint dst_offset_words;
+  uint dst_stride_words;
 } params;
 
 uvec2 add64(uvec2 a, uvec2 b) {
@@ -40,7 +42,7 @@ void main() {
     return;
   }
   uint src_base = params.src_offset_words + i * params.src_stride_words;
-  uint dst_base = i * 2u;
+  uint dst_base = params.dst_offset_words + i * params.dst_stride_words;
   uvec2 value = uvec2(src_buf.data[src_base], src_buf.data[src_base + 1u]);
   uvec2 scale = uvec2(params.scale_lo, params.scale_hi);
   uvec2 bias = uvec2(params.bias_lo, params.bias_hi);

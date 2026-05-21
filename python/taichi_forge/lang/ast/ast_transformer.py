@@ -661,15 +661,34 @@ class ASTTransformer(Builder):
                     ),
                 )
             if isinstance(annotation, ndarray_type.NdarrayType):
+                byte_offset = 0
+                byte_stride = 0
+                logical_element_type = None
+                if len(arg_features) >= 7 and arg_features[4] == "struct_member":
+                    byte_offset = arg_features[5]
+                    byte_stride = arg_features[6]
+                elif len(arg_features) >= 8 and arg_features[4] == "struct_tensor_member":
+                    logical_element_type = (
+                        "struct_tensor_member",
+                        arg_features[5],
+                        arg_features[6],
+                        arg_features[7],
+                    )
+                elif len(arg_features) >= 6 and arg_features[4] == "struct_ndarray":
+                    logical_element_type = arg_features[5]
+                ndarray_args = (
+                    to_taichi_type(arg_features[0]),
+                    arg_features[1],
+                    full_name,
+                    arg_features[2],
+                    arg_features[3],
+                    byte_offset,
+                    byte_stride,
+                    logical_element_type,
+                )
                 return False, (
                     kernel_arguments.decl_ndarray_arg,
-                    (
-                        to_taichi_type(arg_features[0]),
-                        arg_features[1],
-                        full_name,
-                        arg_features[2],
-                        arg_features[3],
-                    ),
+                    ndarray_args,
                 )
             if isinstance(annotation, texture_type.TextureType):
                 return False, (kernel_arguments.decl_texture_arg, (arg_features[0], full_name))

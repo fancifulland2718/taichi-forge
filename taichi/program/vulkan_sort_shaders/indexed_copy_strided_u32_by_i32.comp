@@ -1,0 +1,57 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Src {
+  uint data[];
+} src_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer Indices {
+  int data[];
+} indices_buf;
+
+layout(set = 0, binding = 2, std430) writeonly buffer Dst {
+  uint data[];
+} dst_buf;
+
+layout(set = 0, binding = 3, std430) readonly buffer IndexedCopyParams {
+  uint num_items;
+  uint index_bound;
+  uint item_words;
+  uint src_offset_words;
+  uint src_stride_words;
+  uint dst_offset_words;
+  uint dst_stride_words;
+} params_buf;
+
+void main() {
+  uint word_i = gl_GlobalInvocationID.x;
+  uint total_words = params_buf.num_items * params_buf.item_words;
+  if (word_i >= total_words) {
+    return;
+  }
+  uint item = word_i / params_buf.item_words;
+  uint lane = word_i - item * params_buf.item_words;
+  int index = indices_buf.data[item];
+
+#ifdef SCATTER_OP
+  if (index < 0 || uint(index) >= params_buf.index_bound) {
+    return;
+  }
+  uint src_word =
+      params_buf.src_offset_words + item * params_buf.src_stride_words + lane;
+  uint dst_word = params_buf.dst_offset_words +
+                  uint(index) * params_buf.dst_stride_words + lane;
+  dst_buf.data[dst_word] = src_buf.data[src_word];
+#else
+  uint dst_word =
+      params_buf.dst_offset_words + item * params_buf.dst_stride_words + lane;
+  if (index < 0 || uint(index) >= params_buf.index_bound) {
+    dst_buf.data[dst_word] = 0u;
+    return;
+  }
+  uint src_word = params_buf.src_offset_words +
+                  uint(index) * params_buf.src_stride_words + lane;
+  dst_buf.data[dst_word] = src_buf.data[src_word];
+#endif
+}

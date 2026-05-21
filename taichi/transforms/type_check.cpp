@@ -431,6 +431,10 @@ class TypeCheck : public IRVisitor {
     stmt->ret_type =
         stmt->src->ret_type.ptr_removed()->as<StructType>()->get_element_type(
             stmt->index);
+    if (stmt->is_ptr) {
+      stmt->ret_type = TypeFactory::get_instance().get_pointer_type(
+          stmt->ret_type.ptr_removed());
+    }
   }
 
   void visit(ArgLoadStmt *stmt) override {

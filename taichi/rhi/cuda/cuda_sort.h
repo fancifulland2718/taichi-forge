@@ -145,6 +145,19 @@ std::size_t cub_transform_affine_strided(void *src,
                                          double bias,
                                          void *stream);
 
+std::size_t cub_transform_affine_strided_to_strided(
+    void *src,
+    void *dst,
+    int num_items,
+    CudaTransformValueType value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    double scale,
+    double bias,
+    void *stream);
+
 bool driver_indexed_copy_available();
 
 std::size_t driver_indexed_copy(void *src,
@@ -164,6 +177,19 @@ std::size_t cub_indexed_copy(void *src,
                              int item_words,
                              CudaIndexedCopyOp op,
                              void *stream);
+
+std::size_t cub_indexed_copy_strided(void *src,
+                                     void *indices,
+                                     void *dst,
+                                     int num_items,
+                                     int index_bound,
+                                     int item_words,
+                                     std::size_t src_offset_words,
+                                     std::size_t src_stride_words,
+                                     std::size_t dst_offset_words,
+                                     std::size_t dst_stride_words,
+                                     CudaIndexedCopyOp op,
+                                     void *stream);
 
 bool cub_radix_sort_available();
 
@@ -389,6 +415,26 @@ std::size_t cub_grouped_reduce(void *keys,
                                int op,
                                void *stream,
                                void *owner);
+
+std::size_t cub_grouped_reduce_strided_io(
+    void *keys,
+    void *values,
+    void *output,
+    void *offsets,
+    void *scratch,
+    void *cursor,
+    int num_items,
+    int num_groups,
+    CudaGroupedReduceValueType value_type,
+    std::size_t keys_offset,
+    std::size_t keys_stride,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    int op,
+    void *stream,
+    void *owner);
 
 void cub_grouped_reduce_clear_cache(void *owner);
 

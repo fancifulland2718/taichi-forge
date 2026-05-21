@@ -665,6 +665,12 @@ static const uint32_t kGatherU32ByI32Spv[] =
 static const uint32_t kScatterU32ByI32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/scatter_u32_by_i32.comp.spv.h"
     ;
+static const uint32_t kGatherStridedU32ByI32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/gather_strided_u32_by_i32.comp.spv.h"
+    ;
+static const uint32_t kScatterStridedU32ByI32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/scatter_strided_u32_by_i32.comp.spv.h"
+    ;
 static const uint32_t kScatterAddI32ByI32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/scatter_add_i32_by_i32.comp.spv.h"
     ;
@@ -2799,9 +2805,9 @@ struct VulkanTransformCache {
 
   void ensure_params() {
     if (params == kDeviceNullAllocation) {
-      params = alloc_storage(7 * sizeof(uint32_t));
+      params = alloc_storage(9 * sizeof(uint32_t));
     }
-    cached_bytes = 7 * sizeof(uint32_t);
+    cached_bytes = 9 * sizeof(uint32_t);
   }
 
   ShaderResourceSet *cached_affine_resource_set() {
@@ -2815,9 +2821,12 @@ struct VulkanTransformCache {
 struct VulkanIndexedCopyCache {
   Device *device{nullptr};
   size_t cached_bytes{0};
+  DeviceAllocation indexed_copy_params{kDeviceNullAllocation};
   DeviceAllocation scatter_add_params{kDeviceNullAllocation};
   std::unique_ptr<Pipeline> gather_u32_by_i32;
   std::unique_ptr<Pipeline> scatter_u32_by_i32;
+  std::unique_ptr<Pipeline> gather_strided_u32_by_i32;
+  std::unique_ptr<Pipeline> scatter_strided_u32_by_i32;
   std::unique_ptr<Pipeline> scatter_add_i32_by_i32;
   std::unique_ptr<Pipeline> scatter_add_f32_by_i32;
   std::unique_ptr<Pipeline> scatter_add_u32_by_i32;
@@ -2827,6 +2836,8 @@ struct VulkanIndexedCopyCache {
   std::array<std::unique_ptr<Pipeline>, 6> scatter_add_strided;
   std::unique_ptr<ShaderResourceSet> gather_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_bindings;
+  std::unique_ptr<ShaderResourceSet> gather_strided_bindings;
+  std::unique_ptr<ShaderResourceSet> scatter_strided_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_add_i32_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_add_f32_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_add_u32_bindings;
@@ -2836,9 +2847,13 @@ struct VulkanIndexedCopyCache {
   std::array<std::unique_ptr<ShaderResourceSet>, 6> scatter_add_strided_bindings;
 
   void clear_allocs() {
+    if (device && indexed_copy_params != kDeviceNullAllocation) {
+      device->dealloc_memory(indexed_copy_params);
+    }
     if (device && scatter_add_params != kDeviceNullAllocation) {
       device->dealloc_memory(scatter_add_params);
     }
+    indexed_copy_params = kDeviceNullAllocation;
     scatter_add_params = kDeviceNullAllocation;
     cached_bytes = 0;
   }
@@ -2855,6 +2870,8 @@ struct VulkanIndexedCopyCache {
       clear_allocs();
       gather_u32_by_i32.reset();
       scatter_u32_by_i32.reset();
+      gather_strided_u32_by_i32.reset();
+      scatter_strided_u32_by_i32.reset();
       scatter_add_i32_by_i32.reset();
       scatter_add_f32_by_i32.reset();
       scatter_add_u32_by_i32.reset();
@@ -2866,6 +2883,8 @@ struct VulkanIndexedCopyCache {
       }
       gather_bindings.reset();
       scatter_bindings.reset();
+      gather_strided_bindings.reset();
+      scatter_strided_bindings.reset();
       scatter_add_i32_bindings.reset();
       scatter_add_f32_bindings.reset();
       scatter_add_u32_bindings.reset();
@@ -2881,6 +2900,12 @@ struct VulkanIndexedCopyCache {
         create_pipeline(dev, kGatherU32ByI32Spv, "vulkan_gather_u32_by_i32");
     scatter_u32_by_i32 = create_pipeline(dev, kScatterU32ByI32Spv,
                                          "vulkan_scatter_u32_by_i32");
+    gather_strided_u32_by_i32 =
+        create_pipeline(dev, kGatherStridedU32ByI32Spv,
+                        "vulkan_gather_strided_u32_by_i32");
+    scatter_strided_u32_by_i32 =
+        create_pipeline(dev, kScatterStridedU32ByI32Spv,
+                        "vulkan_scatter_strided_u32_by_i32");
     scatter_add_i32_by_i32 = create_pipeline(
         dev, kScatterAddI32ByI32Spv, "vulkan_scatter_add_i32_by_i32");
     if (dev->get_caps().get(DeviceCapability::spirv_has_atomic_float_add) !=
@@ -2929,6 +2954,14 @@ struct VulkanIndexedCopyCache {
     cached_bytes = std::max(cached_bytes, 6 * sizeof(uint32_t));
   }
 
+  void ensure_indexed_copy_params() {
+    constexpr size_t params_bytes = 7 * sizeof(uint32_t);
+    if (indexed_copy_params == kDeviceNullAllocation) {
+      indexed_copy_params = alloc_storage(params_bytes);
+    }
+    cached_bytes = std::max(cached_bytes, params_bytes);
+  }
+
   void ensure_scatter_add_strided_pipeline(int value_type) {
     if (scatter_add_strided[value_type]) {
       return;
@@ -2969,6 +3002,14 @@ struct VulkanIndexedCopyCache {
 
   ShaderResourceSet *cached_resource_set(bool scatter) {
     auto &bindings = scatter ? scatter_bindings : gather_bindings;
+    if (!bindings) {
+      bindings.reset(device->create_resource_set());
+    }
+    return bindings.get();
+  }
+
+  ShaderResourceSet *cached_strided_resource_set(bool scatter) {
+    auto &bindings = scatter ? scatter_strided_bindings : gather_strided_bindings;
     if (!bindings) {
       bindings.reset(device->create_resource_set());
     }
@@ -4400,8 +4441,6 @@ void check_vulkan_transform_member_request(Ndarray *src,
                                            std::size_t stride) {
   TI_ERROR_IF(!src || !dst,
               "Vulkan native strided transform received a null ndarray.");
-  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1,
-              "Vulkan native strided transform expects 1D ndarrays.");
   TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
               "Vulkan native strided transform source and destination sizes "
               "differ.");
@@ -4432,6 +4471,124 @@ void check_vulkan_transform_member_request(Ndarray *src,
   TI_ERROR_IF(offset % sizeof(uint32_t) != 0 || stride % sizeof(uint32_t) != 0,
               "Vulkan native strided transform source offset/stride must be "
               "uint32-word aligned.");
+}
+
+void check_vulkan_transform_strided_range(const char *role,
+                                          Ndarray *arr,
+                                          size_t logical_items,
+                                          size_t value_size,
+                                          size_t offset,
+                                          size_t stride) {
+  TI_ERROR_IF(stride < value_size,
+              "Vulkan native strided transform {} stride is smaller than "
+              "value size.",
+              role);
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "Vulkan native strided transform {} offset/stride must align "
+              "to value size.",
+              role);
+  TI_ERROR_IF(offset % sizeof(uint32_t) != 0 ||
+                  stride % sizeof(uint32_t) != 0,
+              "Vulkan native strided transform {} offset/stride must be "
+              "uint32-word aligned.",
+              role);
+  if (logical_items == 0) {
+    return;
+  }
+  const size_t buffer_bytes = arr->get_nelement() * arr->get_element_size();
+  TI_ERROR_IF(buffer_bytes < value_size,
+              "Vulkan native strided transform {} buffer is smaller than "
+              "value size.",
+              role);
+  TI_ERROR_IF(offset > buffer_bytes - value_size,
+              "Vulkan native strided transform {} offset is out of bounds.",
+              role);
+  const size_t last = offset + (logical_items - 1) * stride + value_size;
+  TI_ERROR_IF(last > buffer_bytes,
+              "Vulkan native strided transform {} range is out of bounds.",
+              role);
+}
+
+void check_vulkan_transform_strided_request(Ndarray *src,
+                                            Ndarray *dst,
+                                            int value_type,
+                                            size_t src_offset,
+                                            size_t src_stride,
+                                            size_t dst_offset,
+                                            size_t dst_stride) {
+  TI_ERROR_IF(!src || !dst,
+              "Vulkan native strided transform received a null ndarray.");
+  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
+              "Vulkan native strided transform source and destination sizes "
+              "differ.");
+  const size_t value_size = vulkan_transform_value_size(value_type);
+  check_vulkan_transform_strided_range("source", src, src->get_nelement(),
+                                       value_size, src_offset, src_stride);
+  check_vulkan_transform_strided_range("destination", dst, dst->get_nelement(),
+                                       value_size, dst_offset, dst_stride);
+}
+
+void check_vulkan_indexed_copy_strided_request(Ndarray *src,
+                                               Ndarray *indices,
+                                               Ndarray *dst,
+                                               std::size_t item_bytes,
+                                               std::size_t src_offset,
+                                               std::size_t src_stride,
+                                               std::size_t dst_offset,
+                                               std::size_t dst_stride,
+                                               bool scatter) {
+  TI_ERROR_IF(!src || !indices || !dst,
+              "Vulkan native strided indexed-copy received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "Vulkan native strided indexed-copy expects 1D ndarrays.");
+  TI_ERROR_IF(indices->get_element_size() != sizeof(int32_t),
+              "Vulkan native strided indexed-copy expects i32 indices.");
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(uint32_t) != 0,
+              "Vulkan native strided indexed-copy item size must be a "
+              "positive uint32-word multiple.");
+  if (scatter) {
+    TI_ERROR_IF(src->get_nelement() != indices->get_nelement(),
+                "Vulkan native strided scatter expects source and indices "
+                "sizes to match.");
+  } else {
+    TI_ERROR_IF(indices->get_nelement() != dst->get_nelement(),
+                "Vulkan native strided gather expects indices and destination "
+                "sizes to match.");
+  }
+  auto check_range = [&](const char *role, Ndarray *arr,
+                         std::size_t logical_items, std::size_t offset,
+                         std::size_t stride) {
+    TI_ERROR_IF(stride < item_bytes,
+                "Vulkan native strided indexed-copy {} stride is smaller "
+                "than item size.",
+                role);
+    TI_ERROR_IF(offset % sizeof(uint32_t) != 0 ||
+                    stride % sizeof(uint32_t) != 0,
+                "Vulkan native strided indexed-copy {} offset/stride must "
+                "be uint32-word aligned.",
+                role);
+    if (logical_items == 0) {
+      return;
+    }
+    const std::size_t bytes = arr->get_nelement() * arr->get_element_size();
+    TI_ERROR_IF(bytes < item_bytes,
+                "Vulkan native strided indexed-copy {} buffer is smaller "
+                "than item size.",
+                role);
+    TI_ERROR_IF(offset > bytes - item_bytes,
+                "Vulkan native strided indexed-copy {} offset is out of "
+                "bounds.",
+                role);
+    const std::size_t last = offset + (logical_items - 1) * stride + item_bytes;
+    TI_ERROR_IF(last > bytes,
+                "Vulkan native strided indexed-copy {} range is out of "
+                "bounds.",
+                role);
+  };
+  check_range("source", src, src->get_nelement(), src_offset, src_stride);
+  check_range("destination", dst, dst->get_nelement(), dst_offset,
+              dst_stride);
 }
 
 void check_vulkan_reduce_member_request(Ndarray *values,
@@ -4475,6 +4632,62 @@ void check_vulkan_reduce_member_request(Ndarray *values,
   TI_ERROR_IF(offset % sizeof(uint32_t) != 0 || stride % sizeof(uint32_t) != 0,
               "Vulkan native strided reduce source offset/stride must be "
               "uint32-word aligned.");
+}
+
+void check_vulkan_reduce_strided_request(Ndarray *values,
+                                         Ndarray *output,
+                                         int value_type,
+                                         std::size_t values_offset,
+                                         std::size_t values_stride,
+                                         std::size_t output_offset,
+                                         std::size_t output_stride,
+                                         int op) {
+  TI_ERROR_IF(!values || !output,
+              "Vulkan native strided reduce received null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "Vulkan native strided reduce expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "Vulkan native strided reduce expects at least one input item.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "Vulkan native strided reduce output must contain at least one "
+              "item.");
+  const std::size_t value_size = vulkan_transform_value_size(value_type);
+  TI_ERROR_IF(op < 0 || op > 2,
+              "Vulkan native strided reduce supports only sum/min/max "
+              "operations.");
+  auto check_range = [&](const char *role, Ndarray *arr,
+                         std::size_t logical_items, std::size_t offset,
+                         std::size_t stride) {
+    TI_ERROR_IF(stride < value_size,
+                "Vulkan native strided reduce {} stride is smaller than "
+                "value size.",
+                role);
+    TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+                "Vulkan native strided reduce {} offset/stride must align "
+                "to value size.",
+                role);
+    const std::size_t bytes = arr->get_nelement() * arr->get_element_size();
+    TI_ERROR_IF(bytes < value_size,
+                "Vulkan native strided reduce {} buffer is smaller than "
+                "value size.",
+                role);
+    TI_ERROR_IF(offset > bytes - value_size,
+                "Vulkan native strided reduce {} offset is out of bounds.",
+                role);
+    const std::size_t last =
+        offset + (logical_items - 1) * stride + value_size;
+    TI_ERROR_IF(last > bytes,
+                "Vulkan native strided reduce {} range is out of bounds.",
+                role);
+    TI_ERROR_IF(offset % sizeof(uint32_t) != 0 ||
+                    stride % sizeof(uint32_t) != 0,
+                "Vulkan native strided reduce {} offset/stride must be "
+                "uint32-word aligned.",
+                role);
+  };
+  check_range("source", values, values->get_nelement(), values_offset,
+              values_stride);
+  check_range("destination", output, 1, output_offset, output_stride);
 }
 
 void check_vulkan_scan_member_request(Ndarray *data,
@@ -4726,7 +4939,10 @@ std::size_t vulkan_reduce_ndarray_impl(Program *program,
                                        int op,
                                        std::size_t offset,
                                        std::size_t stride,
-                                       bool member_source) {
+                                       std::size_t output_offset,
+                                       std::size_t output_stride,
+                                       bool member_source,
+                                       bool member_destination) {
   TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
               "Vulkan native reduce is only available on Vulkan.");
   TI_ERROR_IF(!values || !output,
@@ -4742,7 +4958,11 @@ std::size_t vulkan_reduce_ndarray_impl(Program *program,
   TI_ERROR_IF(!program->vulkan_reduce_value_type_available(value_type),
               "Vulkan native reduce dtype is not supported by this device.");
   const size_t element_size = vulkan_transform_value_size(value_type);
-  if (member_source) {
+  if (member_source || member_destination) {
+    check_vulkan_reduce_strided_request(values, output, value_type, offset,
+                                        stride, output_offset, output_stride,
+                                        op);
+  } else if (member_source) {
     check_vulkan_reduce_member_request(values, output, value_type, offset,
                                        stride, op);
   } else {
@@ -4751,6 +4971,8 @@ std::size_t vulkan_reduce_ndarray_impl(Program *program,
                 "Vulkan native reduce dtype does not match value type.");
     offset = 0;
     stride = element_size;
+    output_offset = 0;
+    output_stride = element_size;
   }
   TI_ERROR_IF(op < 0 || op > 2,
               "Vulkan native reduce supports only sum/min/max operations.");
@@ -4808,8 +5030,8 @@ std::size_t vulkan_reduce_ndarray_impl(Program *program,
       [values_alloc, output_alloc, partial_alloc, params_alloc, value_bytes,
        output_bytes, partial_bytes, private_pipeline, final_pipeline,
        single_pipeline, num_chunks, use_single_shared, member_source,
-       param_words, profiler_scopes, params_bytes](Device *op_device,
-                                                   CommandList *cmdlist) {
+       output_offset, param_words, profiler_scopes,
+       params_bytes](Device *op_device, CommandList *cmdlist) {
         auto scope_name = [profiler_scopes](const char *name) {
           return profiler_scopes ? name : nullptr;
         };
@@ -4827,7 +5049,8 @@ std::size_t vulkan_reduce_ndarray_impl(Program *program,
         if (use_single_shared) {
           auto bindings = op_device->create_resource_set_unique();
           bindings->rw_buffer(0, values_alloc.get_ptr(0), value_bytes);
-          bindings->rw_buffer(1, output_alloc.get_ptr(0), output_bytes);
+          bindings->rw_buffer(1, output_alloc.get_ptr(output_offset),
+                              output_bytes);
           bind_params(bindings.get());
           dispatch_pipeline(cmdlist, single_pipeline, bindings.get(), 1, 1, 1,
                             scope_name(member_source
@@ -4851,7 +5074,8 @@ std::size_t vulkan_reduce_ndarray_impl(Program *program,
         {
           auto bindings = op_device->create_resource_set_unique();
           bindings->rw_buffer(0, partial_alloc.get_ptr(0), partial_bytes);
-          bindings->rw_buffer(1, output_alloc.get_ptr(0), output_bytes);
+          bindings->rw_buffer(1, output_alloc.get_ptr(output_offset),
+                              output_bytes);
           dispatch_pipeline(cmdlist, final_pipeline, bindings.get(), 1, 1, 1,
                             scope_name("vulkan_reduce_final"));
           cmdlist->buffer_barrier(output_alloc);
@@ -4865,29 +5089,37 @@ std::size_t vulkan_transform_affine_ndarray_impl(Program *program,
                                                  Ndarray *src,
                                                  Ndarray *dst,
                                                  int value_type,
-                                                 std::size_t offset,
-                                                 std::size_t stride,
+                                                 std::size_t src_offset,
+                                                 std::size_t src_stride,
+                                                 std::size_t dst_offset,
+                                                 std::size_t dst_stride,
                                                  double scale,
                                                  double bias,
-                                                 bool member_source) {
+                                                 bool member_source,
+                                                 bool member_destination) {
   TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
               "Vulkan native transform is only available on Vulkan.");
   TI_ERROR_IF(!src || !dst, "Vulkan native transform received null ndarray.");
-  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1,
-              "Vulkan native transform expects 1D ndarrays.");
   TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
               "Vulkan native transform source and destination sizes differ.");
   const std::size_t value_size = vulkan_transform_value_size(value_type);
-  if (member_source) {
-    check_vulkan_transform_member_request(src, dst, value_type, offset, stride);
-  } else {
-    TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
+  if (!member_source) {
+    TI_ERROR_IF(!member_destination &&
+                    src->get_element_size() != dst->get_element_size(),
                 "Vulkan native transform source and destination dtypes "
                 "differ.");
     TI_ERROR_IF(src->get_element_size() != value_size,
                 "Vulkan native transform dtype does not match value type.");
-    offset = 0;
-    stride = value_size;
+    src_offset = 0;
+    src_stride = value_size;
+  }
+  if (!member_destination) {
+    dst_offset = 0;
+    dst_stride = value_size;
+  }
+  if (member_source || member_destination) {
+    check_vulkan_transform_strided_request(src, dst, value_type, src_offset,
+                                           src_stride, dst_offset, dst_stride);
   }
   TI_ERROR_IF(!program->vulkan_transform_value_type_available(value_type),
               "Vulkan native transform value type is not supported by this "
@@ -4905,7 +5137,7 @@ std::size_t vulkan_transform_affine_ndarray_impl(Program *program,
   TI_ERROR_IF(!device, "Vulkan native transform requires a compute device.");
   auto &cache = get_transform_cache(program, device);
 
-  std::array<uint32_t, 7> param_words{0, 0, 0, 0, 0, 0, 0};
+  std::array<uint32_t, 9> param_words{0, 0, 0, 0, 0, 0, 0, 0, 0};
   if (value_type == 0) {
     param_words[0] = static_cast<uint32_t>(static_cast<int32_t>(scale));
     param_words[1] = static_cast<uint32_t>(static_cast<int32_t>(bias));
@@ -4936,8 +5168,10 @@ std::size_t vulkan_transform_affine_ndarray_impl(Program *program,
     param_words[3] = static_cast<uint32_t>(bias_u64 >> 32);
   }
   param_words[4] = static_cast<uint32_t>(n);
-  param_words[5] = static_cast<uint32_t>(offset / sizeof(uint32_t));
-  param_words[6] = static_cast<uint32_t>(stride / sizeof(uint32_t));
+  param_words[5] = static_cast<uint32_t>(src_offset / sizeof(uint32_t));
+  param_words[6] = static_cast<uint32_t>(src_stride / sizeof(uint32_t));
+  param_words[7] = static_cast<uint32_t>(dst_offset / sizeof(uint32_t));
+  param_words[8] = static_cast<uint32_t>(dst_stride / sizeof(uint32_t));
 
   DeviceAllocation src_alloc = src->ndarray_alloc_;
   DeviceAllocation dst_alloc = dst->ndarray_alloc_;
@@ -4949,7 +5183,8 @@ std::size_t vulkan_transform_affine_ndarray_impl(Program *program,
   Pipeline *pipeline = cache.pipeline_for(device, value_type, has_float64);
   const size_t src_bytes = member_source ? n * src->get_element_size()
                                          : n * value_size;
-  const size_t dst_bytes = n * value_size;
+  const size_t dst_bytes = member_destination ? n * dst->get_element_size()
+                                              : n * value_size;
   const size_t params_bytes = param_words.size() * sizeof(uint32_t);
   const uint32_t groups =
       static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
@@ -5742,8 +5977,9 @@ std::size_t Program::vulkan_reduce_ndarray(Ndarray *values,
                                            int value_type,
                                            int op) {
   return vulkan_reduce_ndarray_impl(this, values, output, value_type, op, 0,
+                                    vulkan_transform_value_size(value_type), 0,
                                     vulkan_transform_value_size(value_type),
-                                    false);
+                                    false, false);
 }
 
 std::size_t Program::vulkan_reduce_member_ndarray(Ndarray *values,
@@ -5753,13 +5989,29 @@ std::size_t Program::vulkan_reduce_member_ndarray(Ndarray *values,
                                                   std::size_t stride,
                                                   int op) {
   return vulkan_reduce_ndarray_impl(this, values, output, value_type, op,
-                                    offset, stride, true);
+                                    offset, stride, 0,
+                                    vulkan_transform_value_size(value_type),
+                                    true, false);
 }
 
 std::size_t Program::vulkan_reduce_i32_ndarray(Ndarray *values,
                                                Ndarray *output,
                                                int op) {
   return vulkan_reduce_ndarray(values, output, 0, op);
+}
+
+std::size_t Program::vulkan_reduce_strided_ndarray(
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    int op) {
+  return vulkan_reduce_ndarray_impl(this, values, output, value_type, op,
+                                    values_offset, values_stride,
+                                    output_offset, output_stride, true, true);
 }
 
 std::size_t Program::vulkan_transform_affine_ndarray(Ndarray *src,
@@ -5769,7 +6021,7 @@ std::size_t Program::vulkan_transform_affine_ndarray(Ndarray *src,
                                                      double bias) {
   return vulkan_transform_affine_ndarray_impl(
       this, src, dst, value_type, 0, vulkan_transform_value_size(value_type),
-      scale, bias, false);
+      0, vulkan_transform_value_size(value_type), scale, bias, false, false);
 }
 
 std::size_t Program::vulkan_transform_affine_member_ndarray(
@@ -5781,7 +6033,23 @@ std::size_t Program::vulkan_transform_affine_member_ndarray(
     double scale,
     double bias) {
   return vulkan_transform_affine_ndarray_impl(
-      this, src, dst, value_type, offset, stride, scale, bias, true);
+      this, src, dst, value_type, offset, stride, 0,
+      vulkan_transform_value_size(value_type), scale, bias, true, false);
+}
+
+std::size_t Program::vulkan_transform_affine_strided_ndarray(
+    Ndarray *src,
+    Ndarray *dst,
+    int value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    double scale,
+    double bias) {
+  return vulkan_transform_affine_ndarray_impl(
+      this, src, dst, value_type, src_offset, src_stride, dst_offset,
+      dst_stride, scale, bias, true, true);
 }
 
 std::size_t Program::vulkan_gather_ndarray(Ndarray *src,
@@ -5847,6 +6115,92 @@ std::size_t Program::vulkan_gather_ndarray(Ndarray *src,
   return 0;
 }
 
+std::size_t Program::vulkan_gather_strided_ndarray(
+    Ndarray *src,
+    Ndarray *indices,
+    Ndarray *dst,
+    std::size_t item_bytes,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native strided gather is only available on Vulkan.");
+  check_vulkan_indexed_copy_strided_request(
+      src, indices, dst, item_bytes, src_offset, src_stride, dst_offset,
+      dst_stride, false);
+  const size_t n = indices->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  const size_t item_words = item_bytes / sizeof(uint32_t);
+  const size_t word_count = n * item_words;
+  TI_ERROR_IF(word_count >
+                  static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native strided gather word count exceeds UINT32_MAX.");
+  TI_ERROR_IF(src->get_nelement() >
+                  static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native strided gather source size exceeds UINT32_MAX.");
+  auto check_word_param = [](const char *name, size_t value) {
+    TI_ERROR_IF(value / sizeof(uint32_t) >
+                    static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+                "Vulkan native strided gather {} exceeds UINT32_MAX words.",
+                name);
+  };
+  check_word_param("source offset", src_offset);
+  check_word_param("source stride", src_stride);
+  check_word_param("destination offset", dst_offset);
+  check_word_param("destination stride", dst_stride);
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native strided gather requires a compute device.");
+  auto &cache = get_indexed_copy_cache(this, device);
+  cache.ensure_indexed_copy_params();
+  ShaderResourceSet *bindings = cache.cached_strided_resource_set(false);
+  Pipeline *pipeline = cache.gather_strided_u32_by_i32.get();
+  const size_t indices_bytes = n * sizeof(int32_t);
+  const size_t src_bytes = src->get_nelement() * src->get_element_size();
+  const size_t dst_bytes = dst->get_nelement() * dst->get_element_size();
+  const uint32_t groups =
+      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
+  const DeviceAllocation src_alloc = src->ndarray_alloc_;
+  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
+  const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
+  const DeviceAllocation params_alloc = cache.indexed_copy_params;
+  const bool profiler_scopes = profiler != nullptr;
+  std::array<uint32_t, 7> params{
+      static_cast<uint32_t>(n),
+      static_cast<uint32_t>(src->get_nelement()),
+      static_cast<uint32_t>(item_words),
+      static_cast<uint32_t>(src_offset / sizeof(uint32_t)),
+      static_cast<uint32_t>(src_stride / sizeof(uint32_t)),
+      static_cast<uint32_t>(dst_offset / sizeof(uint32_t)),
+      static_cast<uint32_t>(dst_stride / sizeof(uint32_t)),
+  };
+  enqueue_compute_op_lambda(
+      [src_alloc, indices_alloc, dst_alloc, params_alloc, pipeline, bindings,
+       src_bytes, indices_bytes, dst_bytes, groups, params,
+       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        for (uint32_t i = 0; i < params.size(); ++i) {
+          cmdlist->buffer_fill(params_alloc.get_ptr(i * sizeof(uint32_t)),
+                               sizeof(uint32_t), params[i]);
+        }
+        cmdlist->buffer_barrier(params_alloc);
+        bindings->rw_buffer(0, src_alloc.get_ptr(0), src_bytes);
+        bindings->rw_buffer(1, indices_alloc.get_ptr(0), indices_bytes);
+        bindings->rw_buffer(2, dst_alloc.get_ptr(0), dst_bytes);
+        bindings->rw_buffer(3, params_alloc.get_ptr(0),
+                            params.size() * sizeof(uint32_t));
+        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
+                          profiler_scopes
+                              ? "vulkan_gather_strided_u32_by_i32"
+                              : nullptr);
+        cmdlist->buffer_barrier(dst_alloc);
+      },
+      {});
+  return cache.cached_bytes;
+}
+
 std::size_t Program::vulkan_scatter_ndarray(Ndarray *src,
                                             Ndarray *indices,
                                             Ndarray *dst) {
@@ -5908,6 +6262,94 @@ std::size_t Program::vulkan_scatter_ndarray(Ndarray *src,
       },
       {});
   return 0;
+}
+
+std::size_t Program::vulkan_scatter_strided_ndarray(
+    Ndarray *src,
+    Ndarray *indices,
+    Ndarray *dst,
+    std::size_t item_bytes,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native strided scatter is only available on Vulkan.");
+  check_vulkan_indexed_copy_strided_request(
+      src, indices, dst, item_bytes, src_offset, src_stride, dst_offset,
+      dst_stride, true);
+  const size_t n = indices->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  const size_t item_words = item_bytes / sizeof(uint32_t);
+  const size_t word_count = n * item_words;
+  TI_ERROR_IF(word_count >
+                  static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native strided scatter word count exceeds UINT32_MAX.");
+  TI_ERROR_IF(dst->get_nelement() >
+                  static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native strided scatter destination size exceeds "
+              "UINT32_MAX.");
+  auto check_word_param = [](const char *name, size_t value) {
+    TI_ERROR_IF(value / sizeof(uint32_t) >
+                    static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+                "Vulkan native strided scatter {} exceeds UINT32_MAX words.",
+                name);
+  };
+  check_word_param("source offset", src_offset);
+  check_word_param("source stride", src_stride);
+  check_word_param("destination offset", dst_offset);
+  check_word_param("destination stride", dst_stride);
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan native strided scatter requires a compute device.");
+  auto &cache = get_indexed_copy_cache(this, device);
+  cache.ensure_indexed_copy_params();
+  ShaderResourceSet *bindings = cache.cached_strided_resource_set(true);
+  Pipeline *pipeline = cache.scatter_strided_u32_by_i32.get();
+  const size_t indices_bytes = n * sizeof(int32_t);
+  const size_t src_bytes = src->get_nelement() * src->get_element_size();
+  const size_t dst_bytes = dst->get_nelement() * dst->get_element_size();
+  const uint32_t groups =
+      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
+  const DeviceAllocation src_alloc = src->ndarray_alloc_;
+  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
+  const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
+  const DeviceAllocation params_alloc = cache.indexed_copy_params;
+  const bool profiler_scopes = profiler != nullptr;
+  std::array<uint32_t, 7> params{
+      static_cast<uint32_t>(n),
+      static_cast<uint32_t>(dst->get_nelement()),
+      static_cast<uint32_t>(item_words),
+      static_cast<uint32_t>(src_offset / sizeof(uint32_t)),
+      static_cast<uint32_t>(src_stride / sizeof(uint32_t)),
+      static_cast<uint32_t>(dst_offset / sizeof(uint32_t)),
+      static_cast<uint32_t>(dst_stride / sizeof(uint32_t)),
+  };
+  enqueue_compute_op_lambda(
+      [src_alloc, indices_alloc, dst_alloc, params_alloc, pipeline, bindings,
+       src_bytes, indices_bytes, dst_bytes, groups, params,
+       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        for (uint32_t i = 0; i < params.size(); ++i) {
+          cmdlist->buffer_fill(params_alloc.get_ptr(i * sizeof(uint32_t)),
+                               sizeof(uint32_t), params[i]);
+        }
+        cmdlist->buffer_barrier(params_alloc);
+        bindings->rw_buffer(0, src_alloc.get_ptr(0), src_bytes);
+        bindings->rw_buffer(1, indices_alloc.get_ptr(0), indices_bytes);
+        bindings->rw_buffer(2, dst_alloc.get_ptr(0), dst_bytes);
+        bindings->rw_buffer(3, params_alloc.get_ptr(0),
+                            params.size() * sizeof(uint32_t));
+        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
+                          profiler_scopes
+                              ? "vulkan_scatter_strided_u32_by_i32"
+                              : nullptr);
+        cmdlist->buffer_barrier(dst_alloc);
+      },
+      {});
+  return cache.cached_bytes;
 }
 
 std::size_t Program::vulkan_scatter_add_ndarray(Ndarray *src,
@@ -7588,6 +8030,19 @@ std::size_t Program::vulkan_reduce_member_ndarray(Ndarray *values,
   return 0;
 }
 
+std::size_t Program::vulkan_reduce_strided_ndarray(
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    int op) {
+  TI_ERROR("Vulkan native strided reduce requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 std::size_t Program::vulkan_reduce_i32_ndarray(Ndarray *values,
                                                Ndarray *output,
                                                int op) {
@@ -7615,6 +8070,20 @@ std::size_t Program::vulkan_transform_affine_member_ndarray(Ndarray *src,
   return 0;
 }
 
+std::size_t Program::vulkan_transform_affine_strided_ndarray(
+    Ndarray *src,
+    Ndarray *dst,
+    int value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    double scale,
+    double bias) {
+  TI_ERROR("Vulkan native strided transform requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 std::size_t Program::vulkan_gather_ndarray(Ndarray *src,
                                            Ndarray *indices,
                                            Ndarray *dst) {
@@ -7622,10 +8091,36 @@ std::size_t Program::vulkan_gather_ndarray(Ndarray *src,
   return 0;
 }
 
+std::size_t Program::vulkan_gather_strided_ndarray(
+    Ndarray *src,
+    Ndarray *indices,
+    Ndarray *dst,
+    std::size_t item_bytes,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  TI_ERROR("Vulkan native strided gather requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 std::size_t Program::vulkan_scatter_ndarray(Ndarray *src,
                                             Ndarray *indices,
                                             Ndarray *dst) {
   TI_ERROR("Vulkan native scatter requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_scatter_strided_ndarray(
+    Ndarray *src,
+    Ndarray *indices,
+    Ndarray *dst,
+    std::size_t item_bytes,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  TI_ERROR("Vulkan native strided scatter requires TI_WITH_VULKAN=ON.");
   return 0;
 }
 

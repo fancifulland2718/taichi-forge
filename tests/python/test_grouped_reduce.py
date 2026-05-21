@@ -140,6 +140,63 @@ def _run_struct_nested_component_grouped_reduce(method):
     np.testing.assert_array_equal(result["tag"], output_host["tag"])
 
 
+def _run_struct_tensor_member_grouped_reduce(method):
+    n = 2048
+    groups = 127
+    key_payload = ti.types.struct(key=ti.i32, key_tag=ti.i32)
+    value_payload = ti.types.struct(
+        vec=ti.types.vector(2, ti.i32),
+        mat=ti.types.matrix(2, 2, ti.i32),
+        tag=ti.i32,
+    )
+    keys = ti.ndarray(key_payload, shape=n)
+    values = ti.ndarray(value_payload, shape=n)
+    output = ti.ndarray(value_payload, shape=groups)
+
+    keys_np = (np.arange(n, dtype=np.int32) * 37 + 11) % groups
+    vec_np = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 17) - 8
+    mat_np = (np.arange(n * 4, dtype=np.int32).reshape(n, 2, 2) % 13) - 6
+    expected_vec = np.zeros((groups, 2), dtype=np.int32)
+    expected_mat = np.zeros((groups, 2, 2), dtype=np.int32)
+    np.add.at(expected_vec, keys_np, vec_np)
+    np.add.at(expected_mat, keys_np, mat_np)
+
+    keys_host = np.zeros((n,), dtype=keys.numpy_dtype)
+    keys_host["key"] = keys_np
+    keys_host["key_tag"] = np.arange(n, dtype=np.int32) * 7 + 3
+    values_host = np.zeros((n,), dtype=values.numpy_dtype)
+    values_host["vec"] = vec_np
+    values_host["mat"] = mat_np
+    values_host["tag"] = np.arange(n, dtype=np.int32) * 5 - 11
+    output_host = np.zeros((groups,), dtype=output.numpy_dtype)
+    output_host["vec"] = -999
+    output_host["mat"] = -777
+    output_host["tag"] = np.arange(groups, dtype=np.int32) * 13 + 9
+    keys.from_numpy(keys_host)
+    values.from_numpy(values_host)
+    output.from_numpy(output_host)
+
+    ti.algorithms.experimental_grouped_reduce(
+        keys.field("key"),
+        values.field("vec"),
+        output.field("vec"),
+        method=method,
+    )
+    ti.algorithms.experimental_grouped_reduce(
+        keys.field("key"),
+        values.field("mat"),
+        output.field("mat"),
+        method=method,
+    )
+
+    result = output.to_numpy()
+    np.testing.assert_array_equal(result["vec"], expected_vec)
+    np.testing.assert_array_equal(result["mat"], expected_mat)
+    np.testing.assert_array_equal(keys.to_numpy()["key_tag"], keys_host["key_tag"])
+    np.testing.assert_array_equal(values.to_numpy()["tag"], values_host["tag"])
+    np.testing.assert_array_equal(result["tag"], output_host["tag"])
+
+
 @test_utils.test(arch=[ti.cuda])
 def test_experimental_grouped_reduce_cuda_device_ndarray_wide_dtypes():
     prog = impl.get_runtime().prog
@@ -153,8 +210,12 @@ def test_experimental_grouped_reduce_cuda_device_ndarray_wide_dtypes():
         _run_ndarray_grouped_reduce(dtype, np_dtype, "cuda_device")
         _run_struct_member_grouped_reduce(dtype, np_dtype, "cuda_device")
         _run_ndarray_grouped_reduce(dtype, np_dtype, "cuda_segmented")
+        _run_struct_member_grouped_reduce(dtype, np_dtype, "cuda_segmented")
     _run_ndarray_grouped_reduce(ti.i32, np.int32, "auto")
     _run_struct_nested_component_grouped_reduce("cuda_device")
+    _run_struct_nested_component_grouped_reduce("cuda_segmented")
+    _run_struct_tensor_member_grouped_reduce("cuda_device")
+    _run_struct_tensor_member_grouped_reduce("cuda_segmented")
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -170,6 +231,7 @@ def test_experimental_grouped_reduce_vulkan_native_ndarray_types():
     _run_ndarray_grouped_reduce(ti.i32, np.int32, "vulkan_native")
     _run_struct_member_grouped_reduce(ti.i32, np.int32, "vulkan_native")
     _run_struct_nested_component_grouped_reduce("vulkan_native")
+    _run_struct_tensor_member_grouped_reduce("vulkan_native")
     _run_ndarray_grouped_reduce(ti.u32, np.uint32, "vulkan_native")
     _run_struct_member_grouped_reduce(ti.u32, np.uint32, "vulkan_native")
     for dtype, np_dtype in _GROUPED_DTYPES:
@@ -244,6 +306,9 @@ def test_experimental_grouped_reduce_cpu_native_ndarray_wide_dtypes():
         _run_struct_member_grouped_reduce(dtype, np_dtype, "cpu_native")
     _run_ndarray_grouped_reduce(ti.i32, np.int32, "auto")
     _run_struct_nested_component_grouped_reduce("cpu_native")
+    _run_struct_nested_component_grouped_reduce("segmented")
+    _run_struct_tensor_member_grouped_reduce("cpu_native")
+    _run_struct_tensor_member_grouped_reduce("segmented")
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])

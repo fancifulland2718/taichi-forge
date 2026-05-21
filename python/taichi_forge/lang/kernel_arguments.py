@@ -124,9 +124,28 @@ def decl_sparse_matrix(dtype, name):
     )
 
 
-def decl_ndarray_arg(element_type, ndim, name, needs_grad, boundary):
+def decl_ndarray_arg(
+    element_type,
+    ndim,
+    name,
+    needs_grad,
+    boundary,
+    byte_offset=0,
+    byte_stride=0,
+    logical_element_type=None,
+):
     arg_id = impl.get_runtime().compiling_callable.insert_ndarray_param(element_type, ndim, name, needs_grad)
-    return AnyArray(_ti_core.make_external_tensor_expr(element_type, ndim, arg_id, needs_grad, 0, boundary))
+    if byte_stride:
+        return AnyArray(
+            _ti_core.make_external_tensor_strided_expr(
+                element_type, ndim, arg_id, needs_grad, 0, boundary, byte_offset, byte_stride
+            ),
+            logical_element_type,
+        )
+    return AnyArray(
+        _ti_core.make_external_tensor_expr(element_type, ndim, arg_id, needs_grad, 0, boundary),
+        logical_element_type,
+    )
 
 
 def decl_texture_arg(num_dimensions, name):

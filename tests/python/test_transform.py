@@ -40,14 +40,24 @@ def _assert_transform_equal(dtype, actual, expected):
         assert np.array_equal(actual, expected)
 
 
-def _run_struct_member_transform_case(dtype, n, method, workspace=None):
+def _case_shape(shape):
+    if isinstance(shape, int):
+        return (shape,), shape
+    shape = tuple(shape)
+    return shape, int(np.prod(shape, dtype=np.int64))
+
+
+def _run_struct_member_transform_case(dtype, shape, method, workspace=None):
+    shape, n = _case_shape(shape)
     payload = ti.types.struct(value=dtype, tag=ti.i32)
-    src = ti.ndarray(payload, shape=n)
-    dst = ti.ndarray(dtype, shape=n)
+    src = ti.ndarray(payload, shape=shape)
+    dst = ti.ndarray(dtype, shape=shape)
     data, scale, bias, expected = _transform_case(dtype, n)
-    host = np.zeros((n,), dtype=src.numpy_dtype)
+    data = data.reshape(shape)
+    expected = expected.reshape(shape)
+    host = np.zeros(shape, dtype=src.numpy_dtype)
     host["value"] = data
-    host["tag"] = np.arange(n, dtype=np.int32) * 3 + 1
+    host["tag"] = np.arange(n, dtype=np.int32).reshape(shape) * 3 + 1
     src.from_numpy(host)
     dst.fill(0)
     ti.algorithms.experimental_transform(
@@ -62,6 +72,54 @@ def _run_struct_member_transform_case(dtype, n, method, workspace=None):
     # The strided transform must not touch unrelated struct fields.
     roundtrip = src.to_numpy()
     assert np.array_equal(roundtrip["tag"], host["tag"])
+
+
+def _run_struct_tensor_member_transform_case(dtype, shape, method, workspace=None):
+    shape, n = _case_shape(shape)
+    payload = ti.types.struct(
+        vec=ti.types.vector(2, dtype),
+        mat=ti.types.matrix(2, 2, dtype),
+        tag=ti.i32,
+    )
+    src = ti.ndarray(payload, shape=shape)
+    dst = ti.ndarray(payload, shape=shape)
+    vec_data, scale, bias, _ = _transform_case(dtype, n * 2)
+    mat_data, _, _, _ = _transform_case(dtype, n * 4)
+    vec_data = vec_data.reshape(shape + (2,))
+    mat_data = mat_data.reshape(shape + (2, 2))
+    host = np.zeros(shape, dtype=src.numpy_dtype)
+    dst_host = np.zeros(shape, dtype=dst.numpy_dtype)
+    host["vec"] = vec_data
+    host["mat"] = mat_data
+    host["tag"] = np.arange(n, dtype=np.int32).reshape(shape) * 3 + 1
+    dst_host["tag"] = np.arange(n, dtype=np.int32).reshape(shape) * 11 + 5
+    src.from_numpy(host)
+    dst.from_numpy(dst_host)
+
+    ti.algorithms.experimental_transform(
+        src.field("vec"),
+        dst.field("vec"),
+        scale=scale,
+        bias=bias,
+        method=method,
+        workspace=workspace,
+    )
+    ti.algorithms.experimental_transform(
+        src.field("mat"),
+        dst.field("mat"),
+        scale=scale,
+        bias=bias,
+        method=method,
+        workspace=workspace,
+    )
+
+    result = dst.to_numpy()
+    expected_vec = (vec_data * scale + bias).astype(vec_data.dtype)
+    expected_mat = (mat_data * scale + bias).astype(mat_data.dtype)
+    _assert_transform_equal(dtype, result["vec"], expected_vec)
+    _assert_transform_equal(dtype, result["mat"], expected_mat)
+    assert np.array_equal(result["tag"], dst_host["tag"])
+    assert np.array_equal(src.to_numpy()["tag"], host["tag"])
 
 
 @test_utils.test(arch=[ti.cuda])
@@ -154,6 +212,56 @@ def test_experimental_transform_cuda_device_struct_member_view():
             dtype, n, method="cuda_device", workspace=workspace
         )
         assert workspace.workspace_bytes_peak == 0
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_transform_cuda_device_struct_tensor_member_view():
+    n = 4096
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cuda_toolkit_transform_available")
+        and prog.cuda_toolkit_transform_available()
+    ):
+        pytest.skip("CUDA toolkit transform is unavailable in this runtime.")
+
+    for dtype in (ti.i32, ti.f32):
+        workspace = ti.algorithms.TransformWorkspace(max_items=n)
+        _run_struct_tensor_member_transform_case(
+            dtype, n, method="cuda_device", workspace=workspace
+        )
+        assert workspace.workspace_bytes_peak == 0
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_transform_cuda_device_nd_shape():
+    shape = (32, 17)
+    n = int(np.prod(shape, dtype=np.int64))
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cuda_device_transform_available")
+        and prog.cuda_device_transform_available()
+    ):
+        pytest.skip("CUDA driver transform is unavailable in this runtime.")
+
+    data, scale, bias, expected = _transform_case(ti.i32, n)
+    src = ti.ndarray(ti.i32, shape=shape)
+    dst = ti.ndarray(ti.i32, shape=shape)
+    src.from_numpy(data.reshape(shape))
+    dst.fill(0)
+    workspace = ti.algorithms.TransformWorkspace(max_items=n)
+    ti.algorithms.experimental_transform(
+        src, dst, scale=scale, bias=bias, method="cuda_device", workspace=workspace
+    )
+    assert np.array_equal(dst.to_numpy(), expected.reshape(shape))
+    assert workspace.workspace_bytes_peak == 0
+
+    if (
+        hasattr(prog, "cuda_toolkit_transform_available")
+        and prog.cuda_toolkit_transform_available()
+    ):
+        _run_struct_tensor_member_transform_case(
+            ti.i32, shape, method="cuda_device", workspace=workspace
+        )
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -263,6 +371,56 @@ def test_experimental_transform_vulkan_native_struct_member_view():
         assert workspace.workspace_bytes_peak >= 28
 
 
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_transform_vulkan_native_struct_tensor_member_view():
+    n = 4096
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_transform_available")
+        and prog.vulkan_transform_available()
+    ):
+        pytest.skip("Vulkan native transform is unavailable in this runtime.")
+
+    for dtype, value_type in ((ti.i32, 0), (ti.f32, 1)):
+        if hasattr(prog, "vulkan_transform_value_type_available") and not (
+            prog.vulkan_transform_value_type_available(value_type)
+        ):
+            continue
+        workspace = ti.algorithms.TransformWorkspace(max_items=n)
+        _run_struct_tensor_member_transform_case(
+            dtype, n, method="vulkan_native", workspace=workspace
+        )
+        assert workspace.workspace_bytes_peak >= 28
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_transform_vulkan_native_nd_shape():
+    shape = (32, 17)
+    n = int(np.prod(shape, dtype=np.int64))
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_transform_available")
+        and prog.vulkan_transform_available()
+    ):
+        pytest.skip("Vulkan native transform is unavailable in this runtime.")
+
+    data, scale, bias, expected = _transform_case(ti.i32, n)
+    src = ti.ndarray(ti.i32, shape=shape)
+    dst = ti.ndarray(ti.i32, shape=shape)
+    src.from_numpy(data.reshape(shape))
+    dst.fill(0)
+    workspace = ti.algorithms.TransformWorkspace(max_items=n)
+    ti.algorithms.experimental_transform(
+        src, dst, scale=scale, bias=bias, method="vulkan_native", workspace=workspace
+    )
+    assert np.array_equal(dst.to_numpy(), expected.reshape(shape))
+    assert workspace.workspace_bytes_peak >= 8
+
+    _run_struct_tensor_member_transform_case(
+        ti.i32, shape, method="vulkan_native", workspace=workspace
+    )
+
+
 @pytest.mark.run_in_serial
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_transform_vulkan_native_reset_with_live_ndarray():
@@ -336,6 +494,39 @@ def test_experimental_transform_cpu_native_struct_member_view():
             dtype, n, method="cpu_native", workspace=workspace
         )
         assert workspace.workspace_bytes_peak == 0
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_transform_cpu_native_struct_tensor_member_view():
+    n = 131072
+    for dtype in (ti.i32, ti.f32):
+        workspace = ti.algorithms.TransformWorkspace(max_items=n)
+        _run_struct_tensor_member_transform_case(
+            dtype, n, method="cpu_native", workspace=workspace
+        )
+        assert workspace.workspace_bytes_peak == 0
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_transform_cpu_native_nd_shape():
+    shape = (32, 17)
+    n = int(np.prod(shape, dtype=np.int64))
+    data, scale, bias, expected = _transform_case(ti.f32, n)
+    src = ti.ndarray(ti.f32, shape=shape)
+    dst = ti.ndarray(ti.f32, shape=shape)
+    src.from_numpy(data.reshape(shape))
+    dst.fill(0)
+    workspace = ti.algorithms.TransformWorkspace(max_items=n)
+    ti.algorithms.experimental_transform(
+        src, dst, scale=scale, bias=bias, method="cpu_native", workspace=workspace
+    )
+    np.testing.assert_allclose(dst.to_numpy(), expected.reshape(shape), rtol=1e-6)
+    assert workspace.workspace_bytes_peak == 0
+
+    _run_struct_tensor_member_transform_case(
+        ti.f32, shape, method="cpu_native", workspace=workspace
+    )
+    assert workspace.workspace_bytes_peak == 0
 
 
 @test_utils.test(arch=get_host_arch_list())

@@ -674,6 +674,10 @@ class IRPrinter : public IRVisitor {
       s += ")";
     }
     s += fmt::format(" layout={} is_grad={}", "AOS", stmt->is_grad);
+    if (stmt->byte_offset != 0 || stmt->byte_stride != 0) {
+      s += fmt::format(" byte_offset={} byte_stride={}", stmt->byte_offset,
+                       stmt->byte_stride);
+    }
 
     print(fmt::format("{}{} = external_ptr {}", stmt->type_hint(), stmt->name(),
                       s));

@@ -688,6 +688,12 @@ void export_lang(py::module &m) {
            py::arg("src"), py::arg("dst"), py::arg("value_type"),
            py::arg("offset"), py::arg("stride"), py::arg("scale"),
            py::arg("bias"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_transform_affine_strided_ndarray",
+           &Program::cuda_device_transform_affine_strided_ndarray,
+           py::arg("src"), py::arg("dst"), py::arg("value_type"),
+           py::arg("src_offset"), py::arg("src_stride"),
+           py::arg("dst_offset"), py::arg("dst_stride"), py::arg("scale"),
+           py::arg("bias"), py::call_guard<py::gil_scoped_release>())
       .def("cuda_device_indexed_copy_available",
            &Program::cuda_device_indexed_copy_available)
       .def("cuda_device_indexed_copy_payload_available",
@@ -696,9 +702,21 @@ void export_lang(py::module &m) {
       .def("cuda_device_gather_ndarray", &Program::cuda_device_gather_ndarray,
            py::arg("src"), py::arg("indices"), py::arg("dst"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_gather_strided_ndarray",
+           &Program::cuda_device_gather_strided_ndarray, py::arg("src"),
+           py::arg("indices"), py::arg("dst"), py::arg("item_bytes"),
+           py::arg("src_offset"), py::arg("src_stride"),
+           py::arg("dst_offset"), py::arg("dst_stride"),
+           py::call_guard<py::gil_scoped_release>())
        .def("cuda_device_scatter_ndarray",
             &Program::cuda_device_scatter_ndarray, py::arg("src"),
             py::arg("indices"), py::arg("dst"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_scatter_strided_ndarray",
+            &Program::cuda_device_scatter_strided_ndarray, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("item_bytes"),
+            py::arg("src_offset"), py::arg("src_stride"),
+            py::arg("dst_offset"), py::arg("dst_stride"),
             py::call_guard<py::gil_scoped_release>())
        .def("cuda_device_scatter_add_available",
             &Program::cuda_device_scatter_add_available)
@@ -769,6 +787,15 @@ void export_lang(py::module &m) {
             py::arg("values"), py::arg("output"), py::arg("offsets"),
             py::arg("scratch"), py::arg("cursor"), py::arg("value_type"),
             py::arg("op"), py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_grouped_reduce_segmented_strided_keys_ndarray",
+            &Program::cuda_device_grouped_reduce_segmented_strided_keys_ndarray,
+            py::arg("keys"), py::arg("values"), py::arg("output"),
+            py::arg("offsets"), py::arg("scratch"), py::arg("cursor"),
+            py::arg("value_type"), py::arg("keys_offset"),
+            py::arg("keys_stride"), py::arg("values_offset"),
+            py::arg("values_stride"), py::arg("output_offset"),
+            py::arg("output_stride"), py::arg("op"),
+            py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_radix_sort_available",
            &Program::cuda_cub_radix_sort_available)
       .def("cuda_cub_radix_sort_clear_workspace",
@@ -861,6 +888,12 @@ void export_lang(py::module &m) {
            py::arg("output"), py::arg("value_type"), py::arg("offset"),
            py::arg("stride"), py::arg("op"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_reduce_strided_ndarray",
+           &Program::cuda_cub_reduce_strided_ndarray, py::arg("values"),
+           py::arg("output"), py::arg("value_type"),
+           py::arg("values_offset"), py::arg("values_stride"),
+           py::arg("output_offset"), py::arg("output_stride"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_scan_available", &Program::cpu_scan_available)
       .def("cpu_scan_workspace_bytes", &Program::cpu_scan_workspace_bytes)
       .def("cpu_inclusive_scan_ndarray",
@@ -900,6 +933,11 @@ void export_lang(py::module &m) {
            py::arg("output"), py::arg("value_type"), py::arg("offset"),
            py::arg("stride"), py::arg("op"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cpu_reduce_strided_ndarray", &Program::cpu_reduce_strided_ndarray,
+           py::arg("values"), py::arg("output"), py::arg("value_type"),
+           py::arg("values_offset"), py::arg("values_stride"),
+           py::arg("output_offset"), py::arg("output_stride"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_transform_available", &Program::cpu_transform_available)
       .def("cpu_transform_workspace_bytes",
            &Program::cpu_transform_workspace_bytes)
@@ -912,14 +950,32 @@ void export_lang(py::module &m) {
            py::arg("dst"), py::arg("value_type"), py::arg("offset"),
            py::arg("stride"), py::arg("scale"), py::arg("bias"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cpu_transform_affine_strided_ndarray",
+           &Program::cpu_transform_affine_strided_ndarray, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("src_offset"),
+           py::arg("src_stride"), py::arg("dst_offset"),
+           py::arg("dst_stride"), py::arg("scale"), py::arg("bias"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_indexed_copy_available", &Program::cpu_indexed_copy_available)
       .def("cpu_indexed_copy_workspace_bytes",
            &Program::cpu_indexed_copy_workspace_bytes)
       .def("cpu_gather_ndarray", &Program::cpu_gather_ndarray,
            py::arg("src"), py::arg("indices"), py::arg("dst"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cpu_gather_strided_ndarray",
+           &Program::cpu_gather_strided_ndarray, py::arg("src"),
+           py::arg("indices"), py::arg("dst"), py::arg("item_bytes"),
+           py::arg("src_offset"), py::arg("src_stride"),
+           py::arg("dst_offset"), py::arg("dst_stride"),
+           py::call_guard<py::gil_scoped_release>())
        .def("cpu_scatter_ndarray", &Program::cpu_scatter_ndarray,
             py::arg("src"), py::arg("indices"), py::arg("dst"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cpu_scatter_strided_ndarray",
+            &Program::cpu_scatter_strided_ndarray, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("item_bytes"),
+            py::arg("src_offset"), py::arg("src_stride"),
+            py::arg("dst_offset"), py::arg("dst_stride"),
             py::call_guard<py::gil_scoped_release>())
        .def("cpu_scatter_add_available", &Program::cpu_scatter_add_available)
        .def("cpu_scatter_add_workspace_bytes",
@@ -1055,6 +1111,12 @@ void export_lang(py::module &m) {
            py::arg("output"), py::arg("value_type"), py::arg("offset"),
            py::arg("stride"), py::arg("op"),
            py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_reduce_strided_ndarray",
+           &Program::vulkan_reduce_strided_ndarray, py::arg("values"),
+           py::arg("output"), py::arg("value_type"),
+           py::arg("values_offset"), py::arg("values_stride"),
+           py::arg("output_offset"), py::arg("output_stride"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_reduce_i32_ndarray",
            &Program::vulkan_reduce_i32_ndarray, py::arg("values"),
            py::arg("output"), py::arg("op"),
@@ -1077,6 +1139,12 @@ void export_lang(py::module &m) {
            py::arg("dst"), py::arg("value_type"), py::arg("offset"),
            py::arg("stride"), py::arg("scale"), py::arg("bias"),
            py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_transform_affine_strided_ndarray",
+           &Program::vulkan_transform_affine_strided_ndarray, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("src_offset"),
+           py::arg("src_stride"), py::arg("dst_offset"),
+           py::arg("dst_stride"), py::arg("scale"), py::arg("bias"),
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_indexed_copy_available",
            &Program::vulkan_indexed_copy_available)
       .def("vulkan_indexed_copy_clear_workspace",
@@ -1087,8 +1155,20 @@ void export_lang(py::module &m) {
       .def("vulkan_gather_ndarray", &Program::vulkan_gather_ndarray,
            py::arg("src"), py::arg("indices"), py::arg("dst"),
            py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_gather_strided_ndarray",
+           &Program::vulkan_gather_strided_ndarray, py::arg("src"),
+           py::arg("indices"), py::arg("dst"), py::arg("item_bytes"),
+           py::arg("src_offset"), py::arg("src_stride"),
+           py::arg("dst_offset"), py::arg("dst_stride"),
+           py::call_guard<py::gil_scoped_release>())
        .def("vulkan_scatter_ndarray", &Program::vulkan_scatter_ndarray,
             py::arg("src"), py::arg("indices"), py::arg("dst"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_scatter_strided_ndarray",
+            &Program::vulkan_scatter_strided_ndarray, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("item_bytes"),
+            py::arg("src_offset"), py::arg("src_stride"),
+            py::arg("dst_offset"), py::arg("dst_stride"),
             py::call_guard<py::gil_scoped_release>())
        .def("vulkan_scatter_add_available",
             &Program::vulkan_scatter_add_available)
@@ -1803,6 +1883,21 @@ void export_lang(py::module &m) {
   m.def("make_external_tensor_expr",
         Expr::make<ExternalTensorExpression, const DataType &, int,
                    const std::vector<int> &, bool, int, const BoundaryMode &>);
+  m.def("make_external_tensor_strided_expr",
+        Expr::make<ExternalTensorExpression, const DataType &, int,
+                   const std::vector<int> &, bool, int, const BoundaryMode &,
+                   std::size_t, std::size_t>);
+  m.def("make_external_tensor_member_expr",
+        [](const Expr &expr, const DataType &dt, std::size_t byte_offset,
+           std::size_t byte_stride) {
+          TI_ASSERT(expr.is<ExternalTensorExpression>());
+          auto external_tensor_expr = expr.cast<ExternalTensorExpression>();
+          return Expr::make<ExternalTensorExpression>(
+              dt, external_tensor_expr->ndim, external_tensor_expr->arg_id,
+              external_tensor_expr->needs_grad,
+              external_tensor_expr->arg_depth, external_tensor_expr->boundary,
+              byte_offset, byte_stride);
+        });
 
   m.def("make_external_tensor_grad_expr",
         Expr::make<ExternalTensorExpression, Expr *>);
@@ -1855,6 +1950,10 @@ void export_lang(py::module &m) {
 
   m.def("data_type_size", data_type_size);
   m.def("data_type_alignment", data_type_alignment);
+  m.def("data_type_element_offset",
+        [](DataType dt, const std::vector<int> &indices) {
+          return dt.ptr_removed()->as<StructType>()->get_element_offset(indices);
+        });
   m.def("is_quant", is_quant);
   m.def("is_integral", is_integral);
   m.def("is_signed", is_signed);

@@ -106,6 +106,45 @@ def _run_sort_vector_payload_case(method):
     np.testing.assert_allclose(values.to_numpy(), values_np[order], rtol=1e-6, atol=1e-6)
 
 
+def _run_sort_struct_tensor_member_host_case(method):
+    keys_np = np.array([3, -1, 3, 0, -7, 2, -1, 3], dtype=np.int32)
+    order = np.argsort(keys_np, kind="stable")
+    payload = ti.types.struct(
+        vec=ti.types.vector(2, ti.i32),
+        mat=ti.types.matrix(2, 2, ti.i32),
+        tag=ti.i32,
+    )
+    keys = ti.ndarray(ti.i32, shape=keys_np.shape[0])
+    values = ti.ndarray(payload, shape=keys_np.shape[0])
+    values_np = np.zeros((keys_np.shape[0],), dtype=values.numpy_dtype)
+    values_np["vec"] = (
+        np.arange(keys_np.shape[0] * 2, dtype=np.int32).reshape(-1, 2) % 37
+    ) - 18
+    values_np["mat"] = (
+        np.arange(keys_np.shape[0] * 4, dtype=np.int32).reshape(-1, 2, 2) % 41
+    ) - 20
+    values_np["tag"] = np.arange(keys_np.shape[0], dtype=np.int32) * 5 + 1
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+
+    ti.algorithms.sort(keys, values.field("vec"), method=method)
+
+    result = values.to_numpy()
+    assert keys.to_numpy().tolist() == keys_np[order].tolist()
+    assert np.array_equal(result["vec"], values_np["vec"][order])
+    assert np.array_equal(result["mat"], values_np["mat"])
+    assert np.array_equal(result["tag"], values_np["tag"])
+
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+    ti.algorithms.sort(keys, values.field("mat"), method=method)
+    result = values.to_numpy()
+    assert keys.to_numpy().tolist() == keys_np[order].tolist()
+    assert np.array_equal(result["vec"], values_np["vec"])
+    assert np.array_equal(result["mat"], values_np["mat"][order])
+    assert np.array_equal(result["tag"], values_np["tag"])
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_sort_entrypoint_auto_uses_host_stable_fallback():
     keys = ti.field(ti.i32, 8)
@@ -122,6 +161,23 @@ def test_sort_entrypoint_auto_uses_host_stable_fallback():
 
     assert keys.to_numpy().tolist() == [1, 2, 3, 4, 5, 6, 7, 8]
     assert values.to_numpy().tolist() == [7, 6, 5, 4, 3, 2, 1, 0]
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_sort_struct_tensor_member_values_host_stable():
+    _run_sort_struct_tensor_member_host_case("host_stable")
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_sort_struct_tensor_member_values_reject_native_methods():
+    keys = ti.ndarray(ti.i32, shape=4)
+    payload = ti.types.struct(vec=ti.types.vector(2, ti.i32), tag=ti.i32)
+    values = ti.ndarray(payload, shape=4)
+    keys.from_numpy(np.array([3, 1, 2, 0], dtype=np.int32))
+    values.fill(0)
+
+    with pytest.raises(NotImplementedError, match="reusable permutation"):
+        ti.algorithms.sort(keys, values.field("vec"), method="cpu_native")
 
 
 @test_utils.test(arch=[ti.cpu])

@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
-from taichi_forge.lang.exception import TaichiIndexError, TaichiRuntimeError, TaichiTypeError
+from taichi_forge.lang.exception import TaichiIndexError, TaichiRuntimeError, TaichiSyntaxError, TaichiTypeError
 from taichi_forge.lang.misc import get_host_arch_list
 from taichi_forge.lang.util import has_pytorch
 from taichi_forge.math import vec3, ivec3
@@ -297,6 +297,7 @@ def test_struct_ndarray_scalar_member_view_roundtrip():
 
     depth = arr.field("depth")
     idx = arr.field("idx")
+    color = arr.field("color")
     color_y = arr.field("color", component=1)
     assert depth.base is arr
     assert depth.name == "depth"
@@ -307,10 +308,15 @@ def test_struct_ndarray_scalar_member_view_roundtrip():
     assert depth.element_size == 4
     assert depth.element_shape == ()
     assert idx.offset == 16
+    assert color.name == "color"
+    assert color.element_shape == (3,)
+    assert color.offset == 4
+    assert color.stride == 20
     assert color_y.name == "color[1]"
     assert color_y.offset == 8
     np.testing.assert_array_equal(depth.to_numpy(), src["depth"])
     np.testing.assert_array_equal(idx.to_numpy(), src["idx"])
+    np.testing.assert_array_equal(color.to_numpy(), src["color"])
     np.testing.assert_array_equal(color_y.to_numpy(), src["color"][:, 1])
 
     updated_depth = np.arange(9, dtype=np.float32) * -1.25
@@ -322,6 +328,11 @@ def test_struct_ndarray_scalar_member_view_roundtrip():
     updated_color_y = np.arange(9, dtype=np.float32) * 2.5
     color_y.from_numpy(updated_color_y)
     expected["color"][:, 1] = updated_color_y
+    np.testing.assert_array_equal(arr.to_numpy(), expected)
+
+    updated_color = (np.arange(27, dtype=np.float32).reshape(9, 3) - 6.0) * 0.25
+    color.from_numpy(updated_color)
+    expected["color"] = updated_color
     np.testing.assert_array_equal(arr.to_numpy(), expected)
 
 
@@ -336,9 +347,7 @@ def test_struct_ndarray_scalar_member_view_rejections():
         arr.field(1)
     with pytest.raises(KeyError, match="no member"):
         arr.field("missing")
-    with pytest.raises(TypeError, match="primitive scalar member leaves"):
-        arr.field("color")
-    with pytest.raises(TypeError, match="primitive scalar member leaves"):
+    with pytest.raises(TypeError, match="primitive scalar leaves"):
         arr.field("payload")
     with pytest.raises(TypeError, match="component=.*vector/matrix"):
         arr.field("depth", component=0)
@@ -348,8 +357,9 @@ def test_struct_ndarray_scalar_member_view_rejections():
         depth.from_numpy(np.zeros((5,), dtype=np.float32))
     with pytest.raises(TypeError, match="Mismatch dtype"):
         depth.from_numpy(np.zeros((4,), dtype=np.float64))
-    with pytest.raises(TaichiRuntimeError, match="cannot be passed to ti.kernel yet"):
-        depth.get_type()
+    ty = depth.get_type()
+    assert ty.element_type == ti.f32
+    assert ty.shape == (4,)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -395,6 +405,168 @@ def test_struct_ndarray_nested_member_views_and_host_helpers():
     arr.debug_setitem(2, item)
     expected["payload"]["a"][2] = 123
     np.testing.assert_array_equal(arr.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_struct_ndarray_scalar_member_view_kernel_argument_read_write():
+    payload = ti.types.struct(a=ti.i32, b=ti.types.vector(2, ti.f32))
+    pixel = ti.types.struct(depth=ti.f32, payload=payload)
+    arr = ti.ndarray(pixel, shape=32)
+    src = np.zeros((32,), dtype=arr.numpy_dtype)
+    src["depth"] = np.arange(32, dtype=np.float32) + 1.0
+    src["payload"]["a"] = np.arange(32, dtype=np.int32) * 2
+    src["payload"]["b"] = np.arange(64, dtype=np.float32).reshape(32, 2)
+    arr.from_numpy(src)
+
+    @ti.kernel
+    def update(
+        depth: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        nested_a: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        b1: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for i in range(depth.shape[0]):
+            depth[i] = depth[i] * 2.0
+            nested_a[i] = nested_a[i] + 7
+            b1[i] = b1[i] - 3.5
+
+    update(
+        arr.field("depth"),
+        arr.field("payload.a"),
+        arr.field(("payload", "b"), component=1),
+    )
+
+    expected = src.copy()
+    expected["depth"] *= 2.0
+    expected["payload"]["a"] += 7
+    expected["payload"]["b"][:, 1] -= 3.5
+    np.testing.assert_array_equal(arr.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_struct_ndarray_kernel_field_access_read_only():
+    payload = ti.types.struct(a=ti.i32, b=ti.types.vector(2, ti.f32))
+    pixel = ti.types.struct(depth=ti.f32, payload=payload, basis=ti.types.matrix(2, 2, ti.f32), tag=ti.i32)
+    arr = ti.ndarray(pixel, shape=32)
+    out = ti.ndarray(ti.f32, shape=1)
+    out_i = ti.ndarray(ti.i32, shape=1)
+    components = ti.ndarray(ti.f32, shape=4)
+    src = np.zeros((32,), dtype=arr.numpy_dtype)
+    src["depth"] = np.arange(32, dtype=np.float32) + 1.0
+    src["payload"]["a"] = np.arange(32, dtype=np.int32) * 3 - 5
+    src["payload"]["b"] = np.arange(64, dtype=np.float32).reshape(32, 2)
+    src["basis"] = np.arange(128, dtype=np.float32).reshape(32, 2, 2)
+    src["tag"] = np.arange(32, dtype=np.int32) + 100
+    arr.from_numpy(src)
+    out.fill(0)
+    out_i.fill(0)
+    components.fill(0)
+
+    @ti.kernel
+    def read_typed(p: ti.types.ndarray(dtype=pixel, ndim=1), result: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        result[0] = p[5].depth
+
+    @ti.kernel
+    def read_untyped(p: ti.types.ndarray(), result: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        result[0] += p[7].depth
+
+    @ti.kernel
+    def write_scalar_leaves(p: ti.types.ndarray(dtype=pixel, ndim=1)):
+        p[0].depth = p[0].depth + 1.0
+        p[1].payload.a = p[1].payload.a + 8
+
+    @ti.kernel
+    def write_tensor_members(p: ti.types.ndarray(dtype=pixel, ndim=1)):
+        p[10].payload.b = ti.Vector([-1.5, 2.5])
+        p[11].basis = ti.Matrix([[3.0, 4.0], [5.0, 6.0]])
+        p[12].payload = ti.Struct(a=77, b=ti.Vector([7.0, 8.0]))
+        p[13].payload.b += ti.Vector([1.25, -2.25])
+        p[14].basis[0, 1] = p[14].basis[0, 1] + 9.0
+
+    @ti.kernel
+    def update_tensor_member_views(
+        vec: ti.types.ndarray(dtype=ti.types.vector(2, ti.f32), ndim=1),
+        mat: ti.types.ndarray(dtype=ti.types.matrix(2, 2, ti.f32), ndim=1),
+        result: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        v = vec[15]
+        m = mat[16]
+        result[0] += v.dot(v) + m.trace()
+        vec[17] = ti.Vector([11.0, 12.0])
+        mat[18] = ti.Matrix([[13.0, 14.0], [15.0, 16.0]])
+        vec[19][1] = vec[19][1] + 5.0
+        mat[20][1, 0] = mat[20][1, 0] - 7.0
+
+    @ti.kernel
+    def read_nested_tensor_members(
+        p: ti.types.ndarray(dtype=pixel, ndim=1),
+        result_f: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        result_i: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        result_components: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        v = p[4].payload.b
+        result_f[0] += v[0] * 2.0 + v[1] + p[6].basis[1, 0] - p[6].basis[0, 1]
+        result_i[0] = p[3].payload.a + p[3].tag
+        result_components[0] = v[0]
+        result_components[1] = v[1]
+        result_components[2] = p[6].basis[1, 0]
+        result_components[3] = p[6].basis[0, 1]
+
+    @ti.kernel
+    def read_nested_tensor_numeric_ops(p: ti.types.ndarray(dtype=pixel, ndim=1), result: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        v = p[2].payload.b
+        m = p[8].basis
+        mv = m @ v
+        result[0] += v.dot(v) + mv[0] - mv[1] + m.trace()
+
+    read_typed(arr, out)
+    read_untyped(arr, out)
+    read_nested_tensor_members(arr, out, out_i, components)
+    read_nested_tensor_numeric_ops(arr, out)
+    write_scalar_leaves(arr)
+    write_tensor_members(arr)
+    update_tensor_member_views(arr.field("payload.b"), arr.field("basis"), out)
+
+    expected = src.copy()
+    expected["depth"][0] += 1.0
+    expected["payload"]["a"][1] += 8
+    expected["payload"]["b"][10] = np.array([-1.5, 2.5], dtype=np.float32)
+    expected["basis"][11] = np.array([[3.0, 4.0], [5.0, 6.0]], dtype=np.float32)
+    expected["payload"]["a"][12] = 77
+    expected["payload"]["b"][12] = np.array([7.0, 8.0], dtype=np.float32)
+    expected["payload"]["b"][13] += np.array([1.25, -2.25], dtype=np.float32)
+    expected["basis"][14, 0, 1] += 9.0
+    expected["payload"]["b"][17] = np.array([11.0, 12.0], dtype=np.float32)
+    expected["basis"][18] = np.array([[13.0, 14.0], [15.0, 16.0]], dtype=np.float32)
+    expected["payload"]["b"][19, 1] += 5.0
+    expected["basis"][20, 1, 0] -= 7.0
+    np.testing.assert_array_equal(arr.to_numpy(), expected)
+    expected_out = (
+        src["depth"][5]
+        + src["depth"][7]
+        + src["payload"]["b"][4, 0] * 2.0
+        + src["payload"]["b"][4, 1]
+        + src["basis"][6, 1, 0]
+        - src["basis"][6, 0, 1]
+        + np.dot(src["payload"]["b"][2], src["payload"]["b"][2])
+        + (src["basis"][8] @ src["payload"]["b"][2])[0]
+        - (src["basis"][8] @ src["payload"]["b"][2])[1]
+        + np.trace(src["basis"][8])
+        + np.dot(src["payload"]["b"][15], src["payload"]["b"][15])
+        + np.trace(src["basis"][16])
+    )
+    np.testing.assert_allclose(
+        components.to_numpy(),
+        np.array(
+            [
+                src["payload"]["b"][4, 0],
+                src["payload"]["b"][4, 1],
+                src["basis"][6, 1, 0],
+                src["basis"][6, 0, 1],
+            ]
+        ),
+    )
+    np.testing.assert_allclose(out.to_numpy()[0], expected_out)
+    np.testing.assert_array_equal(out_i.to_numpy()[0], src["payload"]["a"][3] + src["tag"][3])
 
 
 @test_utils.test(arch=supported_archs_taichi_ndarray)

@@ -189,6 +189,146 @@ def validate_subscript_index(value, index):
         raise TaichiSyntaxError("Negative indices are not supported in Taichi kernels.")
 
 
+def _make_struct_ndarray_member_scalar_expr(value, indices_expr_group, root_struct_type, dtype, path, dbg_info):
+    byte_offset = _ti_core.data_type_element_offset(root_struct_type.dtype, path)
+    byte_stride = _ti_core.data_type_size(root_struct_type.dtype)
+    member_ptr = _ti_core.make_external_tensor_member_expr(value.ptr, cook_dtype(dtype), byte_offset, byte_stride)
+    return Expr(
+        get_runtime()
+        .compiling_callable.ast_builder()
+        .expr_subscript(member_ptr, indices_expr_group, dbg_info)
+    )
+
+
+def _make_strided_tensor_member_scalar_expr(value, indices_expr_group, dtype, byte_offset, byte_stride, dbg_info):
+    member_ptr = _ti_core.make_external_tensor_member_expr(value.ptr, cook_dtype(dtype), byte_offset, byte_stride)
+    return Expr(
+        get_runtime()
+        .compiling_callable.ast_builder()
+        .expr_subscript(member_ptr, indices_expr_group, dbg_info)
+    )
+
+
+def _subscript_tensor_expr(expr, *indices):
+    return Expr(
+        get_runtime()
+        .compiling_callable.ast_builder()
+        .expr_subscript(
+            expr.ptr,
+            make_expr_group(*indices),
+            _ti_core.DebugInfo(get_runtime().get_current_src_info()),
+        )
+    )
+
+
+def _struct_tensor_assignment_entry(value, ndim, i, j=None):
+    if isinstance(value, Expr) and value.is_tensor():
+        if ndim == 1:
+            return _subscript_tensor_expr(value, i)
+        return _subscript_tensor_expr(value, i, j)
+    if isinstance(value, (list, tuple, np.ndarray)):
+        value = Matrix(value)
+    if isinstance(value, Matrix):
+        return value[i] if ndim == 1 else value[i, j]
+    raise TaichiTypeError(
+        "StructNdarray vector/matrix member assignment expects a Taichi "
+        "Vector/Matrix, tensor Expr, or array-like value."
+    )
+
+
+class _StructNdarrayTensorMember(Matrix):
+    def _update_entries(self, other, update_entry):
+        if self.ndim == 1:
+            for i in range(self.n):
+                update_entry(self[i], _struct_tensor_assignment_entry(other, self.ndim, i))
+            return self
+
+        for i in range(self.n):
+            for j in range(self.m):
+                update_entry(self[i, j], _struct_tensor_assignment_entry(other, self.ndim, i, j))
+        return self
+
+    def _assign(self, other):
+        return self._update_entries(other, lambda lhs, rhs: lhs._assign(rhs))
+
+    def _atomic_add(self, other):
+        return self._update_entries(other, lambda lhs, rhs: lhs._atomic_add(rhs))
+
+    def _atomic_sub(self, other):
+        return self._update_entries(other, lambda lhs, rhs: lhs._atomic_sub(rhs))
+
+
+def _make_struct_ndarray_tensor_member(value, indices_expr_group, root_struct_type, dtype, path, dbg_info):
+    entries = []
+    if dtype.ndim == 1:
+        for i in range(dtype.n):
+            entries.append(
+                _make_struct_ndarray_member_scalar_expr(
+                    value, indices_expr_group, root_struct_type, dtype.dtype, path + (i,), dbg_info
+                )
+            )
+        return _StructNdarrayTensorMember(entries)
+
+    for i in range(dtype.n):
+        for j in range(dtype.m):
+            entries.append(
+                _make_struct_ndarray_member_scalar_expr(
+                    value, indices_expr_group, root_struct_type, dtype.dtype, path + (i * dtype.m + j,), dbg_info
+                )
+            )
+    rows = [[entries[i * dtype.m + j] for j in range(dtype.m)] for i in range(dtype.n)]
+    return _StructNdarrayTensorMember(rows)
+
+
+def _make_struct_ndarray_tensor_member_arg(value, indices_expr_group, dtype, byte_offset, byte_stride, dbg_info):
+    entries = []
+    scalar_size = _ti_core.data_type_size(cook_dtype(dtype.dtype))
+    if dtype.ndim == 1:
+        for i in range(dtype.n):
+            entries.append(
+                _make_strided_tensor_member_scalar_expr(
+                    value, indices_expr_group, dtype.dtype, byte_offset + i * scalar_size, byte_stride, dbg_info
+                )
+            )
+        return _StructNdarrayTensorMember(entries)
+
+    for i in range(dtype.n):
+        for j in range(dtype.m):
+            flat_index = i * dtype.m + j
+            entries.append(
+                _make_strided_tensor_member_scalar_expr(
+                    value,
+                    indices_expr_group,
+                    dtype.dtype,
+                    byte_offset + flat_index * scalar_size,
+                    byte_stride,
+                    dbg_info,
+                )
+            )
+    rows = [[entries[i * dtype.m + j] for j in range(dtype.m)] for i in range(dtype.n)]
+    return _StructNdarrayTensorMember(rows)
+
+
+def _make_struct_ndarray_element_proxy(value, indices_expr_group, root_struct_type, current_struct_type, dbg_info, path=()):
+    entries = {}
+    for index, (name, dtype) in enumerate(current_struct_type.members.items()):
+        member_path = path + (index,)
+        if isinstance(dtype, StructType):
+            entries[name] = _make_struct_ndarray_element_proxy(
+                value, indices_expr_group, root_struct_type, dtype, dbg_info, member_path
+            )
+        elif isinstance(dtype, MatrixType):
+            entries[name] = _make_struct_ndarray_tensor_member(
+                value, indices_expr_group, root_struct_type, dtype, member_path, dbg_info
+            )
+        else:
+            entries[name] = _make_struct_ndarray_member_scalar_expr(
+                value, indices_expr_group, root_struct_type, dtype, member_path, dbg_info
+            )
+    entries["__struct_methods"] = current_struct_type.methods
+    return _IntermediateStruct(entries)
+
+
 @taichi_scope
 def subscript(ast_builder, value, *_indices, skip_reordered=False):
     dbg_info = _ti_core.DebugInfo(get_runtime().get_current_src_info())
@@ -272,7 +412,21 @@ def subscript(ast_builder, value, *_indices, skip_reordered=False):
             return _IntermediateStruct(entries)
         return Expr(ast_builder.expr_subscript(_var, indices_expr_group, dbg_info))
     if isinstance(value, AnyArray):
-        return Expr(ast_builder.expr_subscript(value.ptr, indices_expr_group, dbg_info))
+        if isinstance(value.element_type_hint, StructType):
+            return _make_struct_ndarray_element_proxy(
+                value, indices_expr_group, value.element_type_hint, value.element_type_hint, dbg_info
+            )
+        if (
+            isinstance(value.element_type_hint, tuple)
+            and len(value.element_type_hint) == 4
+            and value.element_type_hint[0] == "struct_tensor_member"
+        ):
+            _, byte_offset, byte_stride, tensor_type = value.element_type_hint
+            return _make_struct_ndarray_tensor_member_arg(
+                value, indices_expr_group, tensor_type, byte_offset, byte_stride, dbg_info
+            )
+        element = Expr(ast_builder.expr_subscript(value.ptr, indices_expr_group, dbg_info))
+        return element
     assert isinstance(value, Expr)
     # Index into TensorType
     # value: IndexExpression with ret_type = TensorType

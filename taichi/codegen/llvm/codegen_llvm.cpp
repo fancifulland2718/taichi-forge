@@ -2252,6 +2252,9 @@ void TaskCodeGenLLVM::visit(ExternalPtrStmt *stmt) {
     do pointer arithmetics to manually calculate the offset.
   */
   if (operand_dtype->is<TensorType>()) {
+    TI_ERROR_IF(stmt->byte_stride != 0,
+                "Strided external tensor access currently supports scalar "
+                "member views only.");
     // Access PtrOffset via: base_ptr + offset * sizeof(element)
 
     auto address_offset = builder->CreateSExt(
@@ -2279,10 +2282,28 @@ void TaskCodeGenLLVM::visit(ExternalPtrStmt *stmt) {
 
   } else {
     auto base_ty = tlctx->get_data_type(dt);
-    auto base =
-        builder->CreateBitCast(ptr_val, llvm::PointerType::get(base_ty, 0));
-
-    llvm_val[stmt] = builder->CreateGEP(base_ty, base, linear_index);
+    if (stmt->byte_stride != 0) {
+      auto i8_ty = llvm::Type::getInt8Ty(*llvm_context);
+      auto base = builder->CreateBitCast(
+          ptr_val, llvm::PointerType::get(i8_ty, 0));
+      auto address_offset = builder->CreateSExt(
+          linear_index, llvm::Type::getInt64Ty(*llvm_context));
+      address_offset = builder->CreateMul(
+          address_offset,
+          tlctx->get_constant(get_data_type<int64>(), stmt->byte_stride));
+      if (stmt->byte_offset != 0) {
+        address_offset = builder->CreateAdd(
+            address_offset,
+            tlctx->get_constant(get_data_type<int64>(), stmt->byte_offset));
+      }
+      auto ret_i8_ptr = builder->CreateGEP(i8_ty, base, address_offset);
+      llvm_val[stmt] = builder->CreateBitCast(
+          ret_i8_ptr, llvm::PointerType::get(base_ty, 0));
+    } else {
+      auto base =
+          builder->CreateBitCast(ptr_val, llvm::PointerType::get(base_ty, 0));
+      llvm_val[stmt] = builder->CreateGEP(base_ty, base, linear_index);
+    }
   }
 }
 
@@ -3175,6 +3196,10 @@ void TaskCodeGenLLVM::visit(GetElementStmt *stmt) {
     index.push_back(tlctx->get_constant(i));
   }
   auto *gep = builder->CreateGEP(struct_type, llvm_val[stmt->src], index);
+  if (stmt->ret_type->is<PointerType>()) {
+    llvm_val[stmt] = gep;
+    return;
+  }
   auto *val = builder->CreateLoad(tlctx->get_data_type(stmt->ret_type), gep);
   llvm_val[stmt] = val;
 }

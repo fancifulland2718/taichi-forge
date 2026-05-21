@@ -136,6 +136,14 @@ AliasResult alias_analysis(Stmt *var1, Stmt *var2) {
     } else if (ptr1->is_grad != ptr2->is_grad) {
       return AliasResult::different;
     }
+    // Struct ndarray member views reuse the same external tensor base pointer
+    // but carry a byte address transform. Treating only base/index equality as
+    // identity lets CSE merge distinct fields such as vec[0] and vec[1].
+    if (ptr1->byte_offset != ptr2->byte_offset ||
+        ptr1->byte_stride != ptr2->byte_stride ||
+        ptr1->boundary != ptr2->boundary) {
+      return AliasResult::uncertain;
+    }
     TI_ASSERT(ptr1->indices.size() == ptr2->indices.size());
     bool uncertain = false;
     for (int i = 0; i < (int)ptr1->indices.size(); i++) {

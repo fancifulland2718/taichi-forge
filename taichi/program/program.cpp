@@ -361,6 +361,20 @@ struct CpuStridedTransformTaskContext {
   int num_threads{1};
 };
 
+template <typename T>
+struct CpuStridedToStridedTransformTaskContext {
+  const uint8_t *src{nullptr};
+  uint8_t *dst{nullptr};
+  std::size_t n{0};
+  std::size_t src_offset{0};
+  std::size_t src_stride{0};
+  std::size_t dst_offset{0};
+  std::size_t dst_stride{0};
+  T scale{};
+  T bias{};
+  int num_threads{1};
+};
+
 struct CpuIndexedCopyTaskContext {
   const uint8_t *src{nullptr};
   const int32_t *indices{nullptr};
@@ -368,6 +382,21 @@ struct CpuIndexedCopyTaskContext {
   std::size_t n{0};
   std::size_t index_bound{0};
   std::size_t item_bytes{0};
+  bool scatter{false};
+  int num_threads{1};
+};
+
+struct CpuStridedIndexedCopyTaskContext {
+  const uint8_t *src{nullptr};
+  const int32_t *indices{nullptr};
+  uint8_t *dst{nullptr};
+  std::size_t n{0};
+  std::size_t index_bound{0};
+  std::size_t item_bytes{0};
+  std::size_t src_offset{0};
+  std::size_t src_stride{0};
+  std::size_t dst_offset{0};
+  std::size_t dst_stride{0};
   bool scatter{false};
   int num_threads{1};
 };
@@ -633,6 +662,28 @@ void cpu_strided_transform_task(void *raw_ctx,
 }
 
 template <typename T>
+void cpu_strided_to_strided_transform_task(void *raw_ctx,
+                                           int /*thread_id*/,
+                                           int task_id) {
+  auto *ctx =
+      static_cast<CpuStridedToStridedTransformTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    const auto *value = reinterpret_cast<const T *>(
+        ctx->src + ctx->src_offset + i * ctx->src_stride);
+    auto *out = reinterpret_cast<T *>(
+        ctx->dst + ctx->dst_offset + i * ctx->dst_stride);
+    *out = (*value) * ctx->scale + ctx->bias;
+  }
+}
+
+template <typename T>
 void cpu_transform_run_typed(const T *src_ptr,
                              T *dst_ptr,
                              std::size_t n,
@@ -691,6 +742,45 @@ void cpu_transform_run_strided_typed(const uint8_t *src_ptr,
   }
 }
 
+template <typename T>
+void cpu_transform_run_strided_to_strided_typed(const uint8_t *src_ptr,
+                                                uint8_t *dst_ptr,
+                                                std::size_t n,
+                                                std::size_t src_offset,
+                                                std::size_t src_stride,
+                                                std::size_t dst_offset,
+                                                std::size_t dst_stride,
+                                                T scale,
+                                                T bias,
+                                                bool use_parallel,
+                                                int target_threads,
+                                                int max_threads) {
+  if (use_parallel) {
+    CpuStridedToStridedTransformTaskContext<T> ctx;
+    ctx.src = src_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.src_offset = src_offset;
+    ctx.src_stride = src_stride;
+    ctx.dst_offset = dst_offset;
+    ctx.dst_stride = dst_stride;
+    ctx.scale = scale;
+    ctx.bias = bias;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_to_strided_transform_task<T>);
+    return;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto *value =
+        reinterpret_cast<const T *>(src_ptr + src_offset + i * src_stride);
+    auto *out =
+        reinterpret_cast<T *>(dst_ptr + dst_offset + i * dst_stride);
+    *out = (*value) * scale + bias;
+  }
+}
+
 std::size_t transform_value_size(int value_type) {
   TI_ERROR_IF(value_type < 0 || value_type > 5,
               "transform received an unsupported value type.");
@@ -707,8 +797,6 @@ void check_transform_member_request(const char *backend,
                                     std::size_t stride) {
   TI_ERROR_IF(!src || !dst, "{} strided transform received a null ndarray.",
               backend);
-  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1,
-              "{} strided transform expects 1D ndarrays.", backend);
   TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
               "{} strided transform source and destination sizes differ.",
               backend);
@@ -739,6 +827,122 @@ void check_transform_member_request(const char *backend,
               "{} strided transform source range is out of bounds.", backend);
 }
 
+void check_transform_strided_range(const char *backend,
+                                   const char *role,
+                                   Ndarray *arr,
+                                   std::size_t logical_items,
+                                   std::size_t value_size,
+                                   std::size_t offset,
+                                   std::size_t stride) {
+  TI_ERROR_IF(stride < value_size,
+              "{} strided transform {} stride is smaller than value size.",
+              backend, role);
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "{} strided transform {} offset/stride must align to value "
+              "size.",
+              backend, role);
+  if (logical_items == 0) {
+    return;
+  }
+  const std::size_t bytes = arr->get_nelement() * arr->get_element_size();
+  TI_ERROR_IF(bytes < value_size,
+              "{} strided transform {} buffer is smaller than value size.",
+              backend, role);
+  TI_ERROR_IF(offset > bytes - value_size,
+              "{} strided transform {} offset is out of bounds.", backend,
+              role);
+  const std::size_t last = offset + (logical_items - 1) * stride + value_size;
+  TI_ERROR_IF(last > bytes,
+              "{} strided transform {} range is out of bounds.", backend,
+              role);
+}
+
+void check_transform_strided_request(const char *backend,
+                                     Ndarray *src,
+                                     Ndarray *dst,
+                                     int value_type,
+                                     std::size_t src_offset,
+                                     std::size_t src_stride,
+                                     std::size_t dst_offset,
+                                     std::size_t dst_stride) {
+  TI_ERROR_IF(!src || !dst, "{} strided transform received a null ndarray.",
+              backend);
+  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
+              "{} strided transform source and destination sizes differ.",
+              backend);
+  const std::size_t value_size = transform_value_size(value_type);
+  const std::size_t n = src->get_nelement();
+  check_transform_strided_range(backend, "source", src, n, value_size,
+                                src_offset, src_stride);
+  check_transform_strided_range(backend, "destination", dst, n, value_size,
+                                dst_offset, dst_stride);
+}
+
+void check_indexed_copy_strided_request(const char *backend,
+                                        Ndarray *src,
+                                        Ndarray *indices,
+                                        Ndarray *dst,
+                                        std::size_t item_bytes,
+                                        std::size_t src_offset,
+                                        std::size_t src_stride,
+                                        std::size_t dst_offset,
+                                        std::size_t dst_stride,
+                                        bool scatter) {
+  TI_ERROR_IF(!src || !indices || !dst,
+              "{} strided indexed-copy received a null ndarray.", backend);
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "{} strided indexed-copy expects 1D ndarrays.", backend);
+  TI_ERROR_IF(indices->get_element_size() != sizeof(int32_t),
+              "{} strided indexed-copy expects i32 indices.", backend);
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(uint32_t) != 0,
+              "{} strided indexed-copy item size must be a positive "
+              "uint32-word multiple.",
+              backend);
+  if (scatter) {
+    TI_ERROR_IF(src->get_nelement() != indices->get_nelement(),
+                "{} strided scatter expects source and indices sizes to "
+                "match.",
+                backend);
+  } else {
+    TI_ERROR_IF(indices->get_nelement() != dst->get_nelement(),
+                "{} strided gather expects indices and destination sizes to "
+                "match.",
+                backend);
+  }
+  auto check_range = [&](const char *role, Ndarray *arr,
+                         std::size_t logical_items, std::size_t offset,
+                         std::size_t stride) {
+    TI_ERROR_IF(stride < item_bytes,
+                "{} strided indexed-copy {} stride is smaller than item "
+                "size.",
+                backend, role);
+    TI_ERROR_IF(offset % sizeof(uint32_t) != 0 ||
+                    stride % sizeof(uint32_t) != 0,
+                "{} strided indexed-copy {} offset/stride must be "
+                "uint32-word aligned.",
+                backend, role);
+    if (logical_items == 0) {
+      return;
+    }
+    const std::size_t bytes = arr->get_nelement() * arr->get_element_size();
+    TI_ERROR_IF(bytes < item_bytes,
+                "{} strided indexed-copy {} buffer is smaller than item "
+                "size.",
+                backend, role);
+    TI_ERROR_IF(offset > bytes - item_bytes,
+                "{} strided indexed-copy {} offset is out of bounds.",
+                backend, role);
+    const std::size_t last = offset + (logical_items - 1) * stride + item_bytes;
+    TI_ERROR_IF(last > bytes,
+                "{} strided indexed-copy {} range is out of bounds.",
+                backend, role);
+  };
+  check_range("source", src, src->get_nelement(), src_offset, src_stride);
+  check_range("destination", dst, dst->get_nelement(), dst_offset,
+              dst_stride);
+}
+
 void cpu_indexed_copy_task(void *raw_ctx, int /*thread_id*/, int task_id) {
   auto *ctx = static_cast<CpuIndexedCopyTaskContext *>(raw_ctx);
   const int tid = task_id;
@@ -764,6 +968,41 @@ void cpu_indexed_copy_task(void *raw_ctx, int /*thread_id*/, int task_id) {
                     ctx->src + index * ctx->item_bytes, ctx->item_bytes);
       } else {
         std::memset(ctx->dst + i * ctx->item_bytes, 0, ctx->item_bytes);
+      }
+    }
+  }
+}
+
+void cpu_strided_indexed_copy_task(void *raw_ctx,
+                                   int /*thread_id*/,
+                                   int task_id) {
+  auto *ctx = static_cast<CpuStridedIndexedCopyTaskContext *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  if (ctx->scatter) {
+    for (std::size_t i = begin; i < end; ++i) {
+      const auto index = static_cast<std::size_t>(ctx->indices[i]);
+      if (index < ctx->index_bound) {
+        std::memcpy(ctx->dst + ctx->dst_offset + index * ctx->dst_stride,
+                    ctx->src + ctx->src_offset + i * ctx->src_stride,
+                    ctx->item_bytes);
+      }
+    }
+  } else {
+    for (std::size_t i = begin; i < end; ++i) {
+      const auto index = static_cast<std::size_t>(ctx->indices[i]);
+      if (index < ctx->index_bound) {
+        std::memcpy(ctx->dst + ctx->dst_offset + i * ctx->dst_stride,
+                    ctx->src + ctx->src_offset + index * ctx->src_stride,
+                    ctx->item_bytes);
+      } else {
+        std::memset(ctx->dst + ctx->dst_offset + i * ctx->dst_stride, 0,
+                    ctx->item_bytes);
       }
     }
   }
@@ -1674,6 +1913,59 @@ void check_reduce_member_request(const char *backend,
   const std::size_t last = offset + (n - 1) * stride + value_size;
   TI_ERROR_IF(last > src_bytes,
               "{} strided reduce source range is out of bounds.", backend);
+}
+
+void check_reduce_strided_request(const char *backend,
+                                  Ndarray *values,
+                                  Ndarray *output,
+                                  int value_type,
+                                  std::size_t values_offset,
+                                  std::size_t values_stride,
+                                  std::size_t output_offset,
+                                  std::size_t output_stride,
+                                  int op) {
+  TI_ERROR_IF(!values || !output,
+              "{} strided reduce received a null ndarray.", backend);
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "{} strided reduce expects 1D ndarrays.", backend);
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "{} strided reduce expects at least one input item.", backend);
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "{} strided reduce output must contain at least one item.",
+              backend);
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "{} strided reduce received an unsupported value type.",
+              backend);
+  TI_ERROR_IF(op < 0 || op > 2,
+              "{} strided reduce supports only sum/min/max operations.",
+              backend);
+  auto check_range = [&](const char *role, Ndarray *arr,
+                         std::size_t logical_items, std::size_t offset,
+                         std::size_t stride) {
+    TI_ERROR_IF(stride < value_size,
+                "{} strided reduce {} stride is smaller than value size.",
+                backend, role);
+    TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+                "{} strided reduce {} offset/stride must align to value "
+                "size.",
+                backend, role);
+    const std::size_t bytes = arr->get_nelement() * arr->get_element_size();
+    TI_ERROR_IF(bytes < value_size,
+                "{} strided reduce {} buffer is smaller than value size.",
+                backend, role);
+    TI_ERROR_IF(offset > bytes - value_size,
+                "{} strided reduce {} offset is out of bounds.", backend,
+                role);
+    const std::size_t last =
+        offset + (logical_items - 1) * stride + value_size;
+    TI_ERROR_IF(last > bytes,
+                "{} strided reduce {} range is out of bounds.", backend,
+                role);
+  };
+  check_range("source", values, values->get_nelement(), values_offset,
+              values_stride);
+  check_range("destination", output, 1, output_offset, output_stride);
 }
 
 void check_scan_member_request(const char *backend,
@@ -2954,8 +3246,6 @@ std::size_t Program::cuda_device_transform_affine_ndarray(Ndarray *src,
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA device transform is only available on CUDA.");
   TI_ERROR_IF(!src || !dst, "CUDA device transform received a null ndarray.");
-  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1,
-              "CUDA device transform currently expects 1D ndarrays.");
   TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
               "CUDA device transform source and destination sizes differ.");
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
@@ -3038,6 +3328,40 @@ std::size_t Program::cuda_device_transform_affine_member_ndarray(
       src_ptr, dst_ptr, static_cast<int>(src->get_nelement()),
       static_cast<cuda::CudaTransformValueType>(value_type), offset, stride,
       scale, bias, stream);
+#else
+  TI_ERROR("CUDA strided transform requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_transform_affine_strided_ndarray(
+    Ndarray *src,
+    Ndarray *dst,
+    int value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    double scale,
+    double bias) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA strided transform is only available on CUDA.");
+  check_transform_strided_request("CUDA", src, dst, value_type, src_offset,
+                                  src_stride, dst_offset, dst_stride);
+  TI_ERROR_IF(src->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA strided transform currently supports at most INT_MAX "
+              "items.");
+#ifdef TI_WITH_CUDA
+  TI_ERROR_IF(!cuda::cub_transform_available(),
+              "CUDA strided transform requires TI_WITH_CUDA_TOOLKIT=ON and a "
+              "discoverable CUDA runtime.");
+  auto *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
+  auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_transform_affine_strided_to_strided(
+      src_ptr, dst_ptr, static_cast<int>(src->get_nelement()),
+      static_cast<cuda::CudaTransformValueType>(value_type), src_offset,
+      src_stride, dst_offset, dst_stride, scale, bias, stream);
 #else
   TI_ERROR("CUDA strided transform requires TI_WITH_CUDA=ON.");
 #endif
@@ -3127,6 +3451,53 @@ std::size_t Program::cuda_device_gather_ndarray(Ndarray *src,
 #endif
 }
 
+std::size_t Program::cuda_device_gather_strided_ndarray(
+    Ndarray *src,
+    Ndarray *indices,
+    Ndarray *dst,
+    std::size_t item_bytes,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA device strided gather is only available on CUDA.");
+  check_indexed_copy_strided_request("CUDA", src, indices, dst, item_bytes,
+                                     src_offset, src_stride, dst_offset,
+                                     dst_stride, false);
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device strided gather currently supports at most INT_MAX "
+              "items.");
+  TI_ERROR_IF(src->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device strided gather currently supports source sizes up "
+              "to INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
+              "CUDA strided gather requires TI_WITH_CUDA_TOOLKIT=ON and a "
+              "discoverable CUDA runtime.");
+  auto *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
+  auto *indices_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
+  auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
+  const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                           item_words),
+              "CUDA device strided gather word count exceeds INT_MAX.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_indexed_copy_strided(
+      src_ptr, indices_ptr, dst_ptr, static_cast<int>(indices->get_nelement()),
+      static_cast<int>(src->get_nelement()), item_words,
+      src_offset / sizeof(uint32_t), src_stride / sizeof(uint32_t),
+      dst_offset / sizeof(uint32_t), dst_stride / sizeof(uint32_t),
+      cuda::CudaIndexedCopyOp::gather, stream);
+#else
+  TI_ERROR("CUDA device strided gather requires TI_WITH_CUDA=ON.");
+#endif
+}
+
 std::size_t Program::cuda_device_scatter_ndarray(Ndarray *src,
                                                  Ndarray *indices,
                                                  Ndarray *dst) {
@@ -3180,6 +3551,53 @@ std::size_t Program::cuda_device_scatter_ndarray(Ndarray *src,
                                    cuda::CudaIndexedCopyOp::scatter);
 #else
   TI_ERROR("CUDA device scatter requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_scatter_strided_ndarray(
+    Ndarray *src,
+    Ndarray *indices,
+    Ndarray *dst,
+    std::size_t item_bytes,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA device strided scatter is only available on CUDA.");
+  check_indexed_copy_strided_request("CUDA", src, indices, dst, item_bytes,
+                                     src_offset, src_stride, dst_offset,
+                                     dst_stride, true);
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device strided scatter currently supports at most INT_MAX "
+              "items.");
+  TI_ERROR_IF(dst->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device strided scatter currently supports destination "
+              "sizes up to INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
+              "CUDA strided scatter requires TI_WITH_CUDA_TOOLKIT=ON and a "
+              "discoverable CUDA runtime.");
+  auto *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
+  auto *indices_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
+  auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
+  const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                           item_words),
+              "CUDA device strided scatter word count exceeds INT_MAX.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_indexed_copy_strided(
+      src_ptr, indices_ptr, dst_ptr, static_cast<int>(indices->get_nelement()),
+      static_cast<int>(dst->get_nelement()), item_words,
+      src_offset / sizeof(uint32_t), src_stride / sizeof(uint32_t),
+      dst_offset / sizeof(uint32_t), dst_stride / sizeof(uint32_t),
+      cuda::CudaIndexedCopyOp::scatter, stream);
+#else
+  TI_ERROR("CUDA device strided scatter requires TI_WITH_CUDA=ON.");
 #endif
 }
 
@@ -3619,6 +4037,75 @@ std::size_t Program::cuda_device_grouped_reduce_ndarray(Ndarray *keys,
   TI_ERROR(
       "CUDA grouped reduce requires building Taichi with TI_WITH_CUDA=ON and "
       "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_grouped_reduce_segmented_strided_keys_ndarray(
+    Ndarray *keys,
+    Ndarray *values,
+    Ndarray *output,
+    Ndarray *offsets,
+    Ndarray *scratch,
+    Ndarray *cursor,
+    int value_type,
+    std::size_t keys_offset,
+    std::size_t keys_stride,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA strided segmented grouped reduce is only available on "
+              "CUDA.");
+  TI_ERROR_IF(!offsets || !scratch || !cursor,
+              "CUDA strided segmented grouped reduce received a null "
+              "workspace ndarray.");
+  check_grouped_reduce_strided_keys_request(
+      "CUDA", keys, values, output, value_type, keys_offset, keys_stride,
+      values_offset, values_stride, output_offset, output_stride, op);
+  const std::size_t n = keys->get_nelement();
+  const std::size_t num_groups = output->get_nelement();
+  TI_ERROR_IF(offsets->shape.size() != 1 || scratch->shape.size() != 1 ||
+                  cursor->shape.size() != 1,
+              "CUDA strided segmented grouped reduce workspace expects 1D "
+              "ndarrays.");
+  TI_ERROR_IF(offsets->get_nelement() < num_groups + 1,
+              "CUDA strided segmented grouped reduce offsets must contain "
+              "num_groups + 1 items.");
+  TI_ERROR_IF(scratch->get_nelement() < n,
+              "CUDA strided segmented grouped reduce scratch is smaller than "
+              "input values.");
+  TI_ERROR_IF(cursor->get_nelement() < num_groups,
+              "CUDA strided segmented grouped reduce cursor is smaller than "
+              "num_groups.");
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(offsets->get_element_size() != sizeof(int32_t) ||
+                  scratch->get_element_size() != expected_size ||
+                  cursor->get_element_size() != sizeof(int32_t),
+              "CUDA strided segmented grouped reduce workspace dtype mismatch.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  num_groups >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA strided segmented grouped reduce input is too large for "
+              "int launch parameters.");
+#ifdef TI_WITH_CUDA
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_grouped_reduce_strided_io(
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(offsets)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(scratch)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(cursor)),
+      static_cast<int>(n), static_cast<int>(num_groups),
+      static_cast<cuda::CudaGroupedReduceValueType>(value_type), keys_offset,
+      keys_stride, values_offset, values_stride, output_offset, output_stride,
+      op, stream, this);
+#else
+  TI_ERROR(
+      "CUDA strided segmented grouped reduce requires building Taichi with "
+      "TI_WITH_CUDA=ON and TI_WITH_CUDA_TOOLKIT=ON.");
 #endif
 }
 
@@ -4197,6 +4684,41 @@ std::size_t Program::cuda_cub_reduce_member_ndarray(Ndarray *values,
 #endif
 }
 
+std::size_t Program::cuda_cub_reduce_strided_ndarray(
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB strided reduce is only available on CUDA.");
+  check_reduce_strided_request("CUDA CUB", values, output, value_type,
+                               values_offset, values_stride, output_offset,
+                               output_stride, op);
+  TI_ERROR_IF(values->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB strided reduce currently supports at most INT_MAX "
+              "items.");
+#ifdef TI_WITH_CUDA
+  auto values_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
+  auto output_ptr = reinterpret_cast<void *>(
+      get_ndarray_data_ptr_as_int(output) + output_offset);
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_reduce_strided(
+      values_ptr, output_ptr, static_cast<int>(values->get_nelement()),
+      static_cast<cuda::CubReduceValueType>(value_type), values_offset,
+      values_stride, static_cast<cuda::CubReduceOp>(op), stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB strided reduce requires building Taichi with TI_WITH_CUDA=ON "
+      "and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 void Program::cuda_cub_reduce_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
@@ -4583,6 +5105,71 @@ std::size_t Program::cpu_reduce_member_ndarray(Ndarray *values,
   return 0;
 }
 
+std::size_t Program::cpu_reduce_strided_ndarray(Ndarray *values,
+                                                Ndarray *output,
+                                                int value_type,
+                                                std::size_t values_offset,
+                                                std::size_t values_stride,
+                                                std::size_t output_offset,
+                                                std::size_t output_stride,
+                                                int op) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native strided reduce is only available on CPU backends.");
+  check_reduce_strided_request("CPU native", values, output, value_type,
+                               values_offset, values_stride, output_offset,
+                               output_stride, op);
+
+  const std::size_t n = values->get_nelement();
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = n >= 65536 && target_threads > 1;
+
+  const auto values_addr = get_ndarray_data_ptr_as_int(values);
+  const auto output_addr = get_ndarray_data_ptr_as_int(output);
+  TI_ERROR_IF(!values_addr || !output_addr,
+              "CPU native strided reduce received a null data pointer.");
+  const auto *values_ptr = reinterpret_cast<const uint8_t *>(values_addr);
+  auto *output_ptr = reinterpret_cast<uint8_t *>(output_addr + output_offset);
+  switch (value_type) {
+    case 0:
+      return cpu_reduce_strided_typed<int32_t>(
+          values_ptr, reinterpret_cast<int32_t *>(output_ptr), op, n,
+          values_offset, values_stride, max_threads, target_threads,
+          use_parallel);
+    case 1:
+      return cpu_reduce_strided_typed<float>(
+          values_ptr, reinterpret_cast<float *>(output_ptr), op, n,
+          values_offset, values_stride, max_threads, target_threads,
+          use_parallel);
+    case 2:
+      return cpu_reduce_strided_typed<uint32_t>(
+          values_ptr, reinterpret_cast<uint32_t *>(output_ptr), op, n,
+          values_offset, values_stride, max_threads, target_threads,
+          use_parallel);
+    case 3:
+      return cpu_reduce_strided_typed<uint64_t>(
+          values_ptr, reinterpret_cast<uint64_t *>(output_ptr), op, n,
+          values_offset, values_stride, max_threads, target_threads,
+          use_parallel);
+    case 4:
+      return cpu_reduce_strided_typed<int64_t>(
+          values_ptr, reinterpret_cast<int64_t *>(output_ptr), op, n,
+          values_offset, values_stride, max_threads, target_threads,
+          use_parallel);
+    case 5:
+      return cpu_reduce_strided_typed<double>(
+          values_ptr, reinterpret_cast<double *>(output_ptr), op, n,
+          values_offset, values_stride, max_threads, target_threads,
+          use_parallel);
+  }
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
 std::size_t Program::cpu_reduce_workspace_bytes() const {
   return 0;
 }
@@ -4599,8 +5186,6 @@ std::size_t Program::cpu_transform_affine_ndarray(Ndarray *src,
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native transform is only available on CPU backends.");
   TI_ERROR_IF(!src || !dst, "CPU native transform received a null ndarray.");
-  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1,
-              "CPU native transform currently expects 1D ndarrays.");
   TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
               "CPU native transform source and destination sizes differ.");
   TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
@@ -4751,6 +5336,85 @@ std::size_t Program::cpu_transform_affine_member_ndarray(Ndarray *src,
   return 0;
 }
 
+std::size_t Program::cpu_transform_affine_strided_ndarray(
+    Ndarray *src,
+    Ndarray *dst,
+    int value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    double scale,
+    double bias) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native strided transform is only available on CPU "
+              "backends.");
+  check_transform_strided_request("CPU native", src, dst, value_type,
+                                  src_offset, src_stride, dst_offset,
+                                  dst_stride);
+  const std::size_t n = src->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = n >= 65536 && target_threads > 1;
+
+  const auto src_addr = get_ndarray_data_ptr_as_int(src);
+  const auto dst_addr = get_ndarray_data_ptr_as_int(dst);
+  TI_ERROR_IF(!src_addr || !dst_addr,
+              "CPU native strided transform received a null data pointer.");
+  const auto *src_bytes = reinterpret_cast<const uint8_t *>(src_addr);
+  auto *dst_bytes = reinterpret_cast<uint8_t *>(dst_addr);
+  switch (value_type) {
+    case 0:
+      cpu_transform_run_strided_to_strided_typed<uint32_t>(
+          src_bytes, dst_bytes, n, src_offset, src_stride, dst_offset,
+          dst_stride, static_cast<uint32_t>(static_cast<int32_t>(scale)),
+          static_cast<uint32_t>(static_cast<int32_t>(bias)), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 2:
+      cpu_transform_run_strided_to_strided_typed<uint32_t>(
+          src_bytes, dst_bytes, n, src_offset, src_stride, dst_offset,
+          dst_stride, static_cast<uint32_t>(scale), static_cast<uint32_t>(bias),
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 1:
+      cpu_transform_run_strided_to_strided_typed<float>(
+          src_bytes, dst_bytes, n, src_offset, src_stride, dst_offset,
+          dst_stride, static_cast<float>(scale), static_cast<float>(bias),
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 3:
+      cpu_transform_run_strided_to_strided_typed<uint64_t>(
+          src_bytes, dst_bytes, n, src_offset, src_stride, dst_offset,
+          dst_stride, static_cast<uint64_t>(scale), static_cast<uint64_t>(bias),
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 4:
+      cpu_transform_run_strided_to_strided_typed<uint64_t>(
+          src_bytes, dst_bytes, n, src_offset, src_stride, dst_offset,
+          dst_stride, static_cast<uint64_t>(static_cast<int64_t>(scale)),
+          static_cast<uint64_t>(static_cast<int64_t>(bias)), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 5:
+      cpu_transform_run_strided_to_strided_typed<double>(
+          src_bytes, dst_bytes, n, src_offset, src_stride, dst_offset,
+          dst_stride, scale, bias, use_parallel, target_threads, max_threads);
+      return 0;
+    default:
+      TI_ERROR("CPU native strided transform received an unsupported value "
+               "type.");
+  }
+  return 0;
+}
+
 std::size_t Program::cpu_transform_workspace_bytes() const {
   return 0;
 }
@@ -4823,6 +5487,68 @@ std::size_t Program::cpu_gather_ndarray(Ndarray *src,
   return 0;
 }
 
+std::size_t Program::cpu_gather_strided_ndarray(Ndarray *src,
+                                                Ndarray *indices,
+                                                Ndarray *dst,
+                                                std::size_t item_bytes,
+                                                std::size_t src_offset,
+                                                std::size_t src_stride,
+                                                std::size_t dst_offset,
+                                                std::size_t dst_stride) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native strided gather is only available on CPU backends.");
+  check_indexed_copy_strided_request("CPU native", src, indices, dst,
+                                     item_bytes, src_offset, src_stride,
+                                     dst_offset, dst_stride, false);
+  const std::size_t n = indices->get_nelement();
+  const std::size_t src_items = src->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  auto *src_ptr =
+      reinterpret_cast<const uint8_t *>(get_ndarray_data_ptr_as_int(src));
+  auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
+  auto *dst_ptr = reinterpret_cast<uint8_t *>(get_ndarray_data_ptr_as_int(dst));
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native strided gather received a null data pointer.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  if (n >= 65536 && target_threads > 1) {
+    CpuStridedIndexedCopyTaskContext ctx;
+    ctx.src = src_ptr;
+    ctx.indices = indices_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.index_bound = src_items;
+    ctx.item_bytes = item_bytes;
+    ctx.src_offset = src_offset;
+    ctx.src_stride = src_stride;
+    ctx.dst_offset = dst_offset;
+    ctx.dst_stride = dst_stride;
+    ctx.scatter = false;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_indexed_copy_task);
+    return 0;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto index = static_cast<std::size_t>(indices_ptr[i]);
+    if (index < src_items) {
+      std::memcpy(dst_ptr + dst_offset + i * dst_stride,
+                  src_ptr + src_offset + index * src_stride, item_bytes);
+    } else {
+      std::memset(dst_ptr + dst_offset + i * dst_stride, 0, item_bytes);
+    }
+  }
+  return 0;
+}
+
 std::size_t Program::cpu_scatter_ndarray(Ndarray *src,
                                          Ndarray *indices,
                                          Ndarray *dst) {
@@ -4879,6 +5605,66 @@ std::size_t Program::cpu_scatter_ndarray(Ndarray *src,
     if (index < dst_items) {
       std::memcpy(dst_ptr + index * item_bytes, src_ptr + i * item_bytes,
                   item_bytes);
+    }
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_scatter_strided_ndarray(Ndarray *src,
+                                                 Ndarray *indices,
+                                                 Ndarray *dst,
+                                                 std::size_t item_bytes,
+                                                 std::size_t src_offset,
+                                                 std::size_t src_stride,
+                                                 std::size_t dst_offset,
+                                                 std::size_t dst_stride) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native strided scatter is only available on CPU backends.");
+  check_indexed_copy_strided_request("CPU native", src, indices, dst,
+                                     item_bytes, src_offset, src_stride,
+                                     dst_offset, dst_stride, true);
+  const std::size_t n = indices->get_nelement();
+  const std::size_t dst_items = dst->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  auto *src_ptr =
+      reinterpret_cast<const uint8_t *>(get_ndarray_data_ptr_as_int(src));
+  auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
+  auto *dst_ptr = reinterpret_cast<uint8_t *>(get_ndarray_data_ptr_as_int(dst));
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native strided scatter received a null data pointer.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  if (n >= 65536 && target_threads > 1) {
+    CpuStridedIndexedCopyTaskContext ctx;
+    ctx.src = src_ptr;
+    ctx.indices = indices_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.index_bound = dst_items;
+    ctx.item_bytes = item_bytes;
+    ctx.src_offset = src_offset;
+    ctx.src_stride = src_stride;
+    ctx.dst_offset = dst_offset;
+    ctx.dst_stride = dst_stride;
+    ctx.scatter = true;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_indexed_copy_task);
+    return 0;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto index = static_cast<std::size_t>(indices_ptr[i]);
+    if (index < dst_items) {
+      std::memcpy(dst_ptr + dst_offset + index * dst_stride,
+                  src_ptr + src_offset + i * src_stride, item_bytes);
     }
   }
   return 0;

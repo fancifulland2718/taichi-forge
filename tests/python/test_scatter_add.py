@@ -76,6 +76,54 @@ def _run_struct_member_scatter_add(dtype, np_dtype, method):
     np.testing.assert_array_equal(src.to_numpy()["tag"], host["tag"])
 
 
+def _run_struct_tensor_member_scatter_add(method):
+    n = 2048
+    buckets = 127
+    payload = ti.types.struct(
+        vec=ti.types.vector(2, ti.i32),
+        mat=ti.types.matrix(2, 2, ti.i32),
+        tag=ti.i32,
+    )
+    src = ti.ndarray(payload, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(payload, shape=buckets)
+    indices_np = (np.arange(n, dtype=np.int32) * 37 + 11) % buckets
+    vec_np = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 17) - 8
+    mat_np = (np.arange(n * 4, dtype=np.int32).reshape(n, 2, 2) % 13) - 6
+    base_vec = (np.arange(buckets * 2, dtype=np.int32).reshape(buckets, 2) % 5) - 2
+    base_mat = (
+        (np.arange(buckets * 4, dtype=np.int32).reshape(buckets, 2, 2) % 7) - 3
+    )
+    host = np.zeros((n,), dtype=src.numpy_dtype)
+    host["vec"] = vec_np
+    host["mat"] = mat_np
+    host["tag"] = np.arange(n, dtype=np.int32) * 7 + 3
+    dst_host = np.zeros((buckets,), dtype=dst.numpy_dtype)
+    dst_host["vec"] = base_vec
+    dst_host["mat"] = base_mat
+    dst_host["tag"] = np.arange(buckets, dtype=np.int32) * 11 - 5
+    expected_vec = base_vec.copy()
+    expected_mat = base_mat.copy()
+    np.add.at(expected_vec, indices_np, vec_np)
+    np.add.at(expected_mat, indices_np, mat_np)
+
+    src.from_numpy(host)
+    indices.from_numpy(indices_np)
+    dst.from_numpy(dst_host)
+    ti.algorithms.experimental_scatter_add(
+        src.field("vec"), indices, dst.field("vec"), method=method
+    )
+    ti.algorithms.experimental_scatter_add(
+        src.field("mat"), indices, dst.field("mat"), method=method
+    )
+
+    result = dst.to_numpy()
+    np.testing.assert_array_equal(result["vec"], expected_vec)
+    np.testing.assert_array_equal(result["mat"], expected_mat)
+    np.testing.assert_array_equal(result["tag"], dst_host["tag"])
+    np.testing.assert_array_equal(src.to_numpy()["tag"], host["tag"])
+
+
 @test_utils.test(arch=[ti.cuda])
 def test_experimental_scatter_add_cuda_device_ndarray_wide_dtypes():
     prog = impl.get_runtime().prog
@@ -95,6 +143,7 @@ def test_experimental_scatter_add_cuda_device_ndarray_wide_dtypes():
     ]:
         _run_ndarray_scatter_add(dtype, np_dtype, method)
         _run_struct_member_scatter_add(dtype, np_dtype, "cuda_device")
+    _run_struct_tensor_member_scatter_add("cuda_device")
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -108,6 +157,7 @@ def test_experimental_scatter_add_vulkan_native_ndarray_i32_u32_and_f32_atomic()
 
     _run_ndarray_scatter_add(ti.i32, np.int32, "auto")
     _run_struct_member_scatter_add(ti.i32, np.int32, "vulkan_native")
+    _run_struct_tensor_member_scatter_add("vulkan_native")
     if hasattr(prog, "vulkan_scatter_add_value_type_available"):
         assert prog.vulkan_scatter_add_value_type_available(2)
     _run_ndarray_scatter_add(ti.u32, np.uint32, "vulkan_native")
@@ -185,6 +235,7 @@ def test_experimental_scatter_add_cpu_native_ndarray_wide_dtypes():
     ]:
         _run_ndarray_scatter_add(dtype, np_dtype, method)
         _run_struct_member_scatter_add(dtype, np_dtype, "cpu_native")
+    _run_struct_tensor_member_scatter_add("cpu_native")
     assert impl.get_runtime().prog.cpu_scatter_add_workspace_bytes() == 0
 
 

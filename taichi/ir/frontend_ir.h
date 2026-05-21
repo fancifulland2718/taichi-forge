@@ -532,20 +532,25 @@ class ExternalTensorExpression : public Expression {
   bool is_grad{false};
   int arg_depth{0};
   BoundaryMode boundary{BoundaryMode::kUnsafe};
+  std::size_t byte_offset{0};
+  std::size_t byte_stride{0};
 
   ExternalTensorExpression(const DataType &dt,
                            int ndim,
                            const std::vector<int> &arg_id,
                            bool needs_grad = false,
                            int arg_depth = false,
-                           BoundaryMode boundary = BoundaryMode::kUnsafe) {
-    init(dt, ndim, arg_id, needs_grad, arg_depth, boundary);
+                           BoundaryMode boundary = BoundaryMode::kUnsafe,
+                           std::size_t byte_offset = 0,
+                           std::size_t byte_stride = 0) {
+    init(dt, ndim, arg_id, needs_grad, arg_depth, boundary, byte_offset,
+         byte_stride);
   }
 
   explicit ExternalTensorExpression(Expr *expr) : is_grad(true) {
     auto ptr = expr->cast<ExternalTensorExpression>();
     init(ptr->dt, ptr->ndim, ptr->arg_id, ptr->needs_grad, ptr->arg_depth,
-         ptr->boundary);
+         ptr->boundary, ptr->byte_offset, ptr->byte_stride);
   }
 
   void flatten(FlattenContext *ctx) override;
@@ -572,13 +577,17 @@ class ExternalTensorExpression : public Expression {
             const std::vector<int> &arg_id,
             bool needs_grad,
             int arg_depth,
-            BoundaryMode boundary) {
+            BoundaryMode boundary,
+            std::size_t byte_offset,
+            std::size_t byte_stride) {
     this->dt = dt;
     this->ndim = ndim;
     this->arg_id = arg_id;
     this->needs_grad = needs_grad;
     this->arg_depth = arg_depth;
     this->boundary = boundary;
+    this->byte_offset = byte_offset;
+    this->byte_stride = byte_stride;
   }
 };
 
@@ -920,6 +929,8 @@ class GetElementExpression : public Expression {
   }
 
   void flatten(FlattenContext *ctx) override;
+
+  bool is_global() const;
 
   TI_DEFINE_ACCEPT_FOR_EXPRESSION
 };
