@@ -19,14 +19,23 @@ layout(set = 0, binding = 2, std430) readonly buffer Params {
   uint src_stride_words;
   uint dst_offset_words;
   uint dst_stride_words;
+  uint lane_count;
 } params;
 
 void main() {
-  uint i = gl_GlobalInvocationID.x;
-  if (i >= params.n) {
+  uint scalar_i = gl_GlobalInvocationID.x;
+  uint total = params.n * params.lane_count;
+  if (scalar_i >= total) {
     return;
   }
-  uint src_index = (params.src_offset_words + i * params.src_stride_words) / 2u;
-  uint dst_index = (params.dst_offset_words + i * params.dst_stride_words) / 2u;
+  uint item = scalar_i / params.lane_count;
+  uint lane = scalar_i - item * params.lane_count;
+  uint lane_words = lane * 2u;
+  uint src_index =
+      (params.src_offset_words + item * params.src_stride_words + lane_words) /
+      2u;
+  uint dst_index =
+      (params.dst_offset_words + item * params.dst_stride_words + lane_words) /
+      2u;
   dst_buf.data[dst_index] = src_buf.data[src_index] * params.scale + params.bias;
 }

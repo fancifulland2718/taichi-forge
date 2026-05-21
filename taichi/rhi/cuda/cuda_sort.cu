@@ -1035,6 +1035,34 @@ __global__ void transform_strided_to_strided_affine_kernel(
   *out = (*value) * scale + bias;
 }
 
+template <typename T>
+__global__ void transform_packed_strided_affine_kernel(const uint8_t *src,
+                                                       uint8_t *dst,
+                                                       int num_items,
+                                                       int lane_count,
+                                                       std::size_t src_offset,
+                                                       std::size_t src_stride,
+                                                       std::size_t dst_offset,
+                                                       std::size_t dst_stride,
+                                                       T scale,
+                                                       T bias) {
+  const int scalar_i = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total = num_items * lane_count;
+  if (scalar_i >= total) {
+    return;
+  }
+  const int item = scalar_i / lane_count;
+  const int lane = scalar_i - item * lane_count;
+  const std::size_t lane_offset = static_cast<std::size_t>(lane) * sizeof(T);
+  const auto *value = reinterpret_cast<const T *>(
+      src + src_offset + static_cast<std::size_t>(item) * src_stride +
+      lane_offset);
+  auto *out = reinterpret_cast<T *>(
+      dst + dst_offset + static_cast<std::size_t>(item) * dst_stride +
+      lane_offset);
+  *out = (*value) * scale + bias;
+}
+
 __device__ uint32_t sortable_f32_key(float value, int nan_policy) {
   const uint32_t bits = __float_as_uint(value);
   constexpr uint32_t kSign = 0x80000000u;
@@ -3394,6 +3422,94 @@ std::size_t cub_transform_affine_strided_to_strided_impl(
       break;
     default:
       throw std::runtime_error("Unsupported CUDA strided transform value type");
+  }
+  TI_CUDA_SORT_CHECK(cudaGetLastError());
+  if (stream) {
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return 0;
+}
+
+std::size_t cub_transform_affine_packed_strided_impl(
+    void *src,
+    void *dst,
+    int num_items,
+    int lane_count,
+    CudaTransformValueType value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    double scale,
+    double bias,
+    void *stream_ptr) {
+  if (!src || !dst) {
+    throw std::runtime_error(
+        "CUDA packed strided transform received a null pointer");
+  }
+  if (num_items == 0) {
+    return 0;
+  }
+  if (lane_count <= 0 ||
+      num_items > std::numeric_limits<int>::max() / lane_count) {
+    throw std::runtime_error(
+        "CUDA packed strided transform scalar count exceeds INT_MAX");
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  constexpr int kBlockDim = 256;
+  const int total = num_items * lane_count;
+  const int grid_dim = (total + kBlockDim - 1) / kBlockDim;
+  const auto *src_bytes = static_cast<const uint8_t *>(src);
+  auto *dst_bytes = static_cast<uint8_t *>(dst);
+  switch (value_type) {
+    case CudaTransformValueType::i32:
+      transform_packed_strided_affine_kernel<uint32_t>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
+              src_bytes, dst_bytes, num_items, lane_count, src_offset,
+              src_stride, dst_offset, dst_stride,
+              static_cast<uint32_t>(static_cast<int32_t>(scale)),
+              static_cast<uint32_t>(static_cast<int32_t>(bias)));
+      break;
+    case CudaTransformValueType::u32:
+      transform_packed_strided_affine_kernel<uint32_t>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
+              src_bytes, dst_bytes, num_items, lane_count, src_offset,
+              src_stride, dst_offset, dst_stride, static_cast<uint32_t>(scale),
+              static_cast<uint32_t>(bias));
+      break;
+    case CudaTransformValueType::f32:
+      transform_packed_strided_affine_kernel<float>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
+              src_bytes, dst_bytes, num_items, lane_count, src_offset,
+              src_stride, dst_offset, dst_stride, static_cast<float>(scale),
+              static_cast<float>(bias));
+      break;
+    case CudaTransformValueType::u64:
+      transform_packed_strided_affine_kernel<uint64_t>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
+              src_bytes, dst_bytes, num_items, lane_count, src_offset,
+              src_stride, dst_offset, dst_stride, static_cast<uint64_t>(scale),
+              static_cast<uint64_t>(bias));
+      break;
+    case CudaTransformValueType::i64:
+      transform_packed_strided_affine_kernel<uint64_t>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
+              src_bytes, dst_bytes, num_items, lane_count, src_offset,
+              src_stride, dst_offset, dst_stride,
+              static_cast<uint64_t>(static_cast<int64_t>(scale)),
+              static_cast<uint64_t>(static_cast<int64_t>(bias)));
+      break;
+    case CudaTransformValueType::f64:
+      transform_packed_strided_affine_kernel<double>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
+              src_bytes, dst_bytes, num_items, lane_count, src_offset,
+              src_stride, dst_offset, dst_stride, scale, bias);
+      break;
+    default:
+      throw std::runtime_error(
+          "Unsupported CUDA packed strided transform value type");
   }
   TI_CUDA_SORT_CHECK(cudaGetLastError());
   if (stream) {

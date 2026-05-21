@@ -140,23 +140,82 @@ def _run_vector_ndarray_bucket_builder(method):
     return workspace
 
 
-@test_utils.test(arch=[ti.cpu])
-def test_experimental_bucket_builder_rejects_struct_tensor_member_views():
-    n = 8
-    num_bins = 3
+def _run_struct_tensor_member_bucket_builder(method):
+    n = 256
+    num_bins = 17
     payload = ti.types.struct(vec=ti.types.vector(2, ti.i32), tag=ti.i32)
     keys = ti.ndarray(ti.i32, shape=n)
     values = ti.ndarray(payload, shape=n)
     offsets = ti.ndarray(ti.i32, shape=num_bins + 1)
     output = ti.ndarray(payload, shape=n)
-    with pytest.raises(NotImplementedError, match="whole vector/matrix"):
-        ti.algorithms.experimental_bucket_builder(
-            keys,
-            values.field("vec"),
-            offsets,
-            output.field("vec"),
-            method="cpu_native",
-        )
+    keys_np = ((np.arange(n, dtype=np.int32) * 7 + 3) % num_bins).astype(np.int32)
+    keys_np[1] = -1
+    keys_np[5] = num_bins + 9
+    values_np = np.zeros((n,), dtype=values.numpy_dtype)
+    output_np = np.zeros((n,), dtype=output.numpy_dtype)
+    values_np["vec"] = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 101) - 50
+    values_np["tag"] = np.arange(n, dtype=np.int32) * 5 + 1
+    output_np["tag"] = np.arange(n, dtype=np.int32) * 11 + 7
+    counts = np.bincount(
+        keys_np[(keys_np >= 0) & (keys_np < num_bins)], minlength=num_bins
+    )
+    expected_offsets = np.zeros(num_bins + 1, dtype=np.int32)
+    expected_offsets[1:] = np.cumsum(counts, dtype=np.int64).astype(np.int32)
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+    offsets.fill(-1)
+    output.from_numpy(output_np)
+    workspace = ti.algorithms.BucketBuilderWorkspace(max_items=n, max_bins=num_bins)
+
+    ti.algorithms.experimental_bucket_builder(
+        keys,
+        values.field("vec"),
+        offsets,
+        output.field("vec"),
+        method=method,
+        workspace=workspace,
+    )
+
+    result = output.to_numpy()
+    _assert_bucket_rows_match(
+        keys_np,
+        values_np["vec"],
+        offsets.to_numpy(),
+        result["vec"],
+        expected_offsets,
+    )
+    assert np.array_equal(result["tag"], output_np["tag"])
+    return workspace
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_bucket_builder_cpu_native_struct_tensor_member_views():
+    workspace = _run_struct_tensor_member_bucket_builder("cpu_native")
+    assert workspace.workspace_bytes_peak >= 256 * 2 * 4
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_bucket_builder_cuda_device_struct_tensor_member_views():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cuda_device_bucket_builder_available")
+        and prog.cuda_device_bucket_builder_available()
+        and hasattr(prog, "cuda_device_indexed_copy_available")
+        and prog.cuda_device_indexed_copy_available()
+    ):
+        pytest.skip("CUDA bucket builder or strided indexed copy is unavailable.")
+    _run_struct_tensor_member_bucket_builder("cuda_device")
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_bucket_builder_vulkan_native_struct_tensor_member_views():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_bucket_builder_available")
+        and prog.vulkan_bucket_builder_available()
+    ):
+        pytest.skip("Vulkan native bucket builder is unavailable.")
+    _run_struct_tensor_member_bucket_builder("vulkan_native")
 
 
 @test_utils.test(arch=[ti.cuda])

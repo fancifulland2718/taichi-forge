@@ -342,6 +342,17 @@ class TI_DLL_EXPORT Program {
       std::size_t dst_stride,
       double scale,
       double bias);
+  std::size_t cuda_device_transform_affine_packed_strided_ndarray(
+      Ndarray *src,
+      Ndarray *dst,
+      int value_type,
+      int lane_count,
+      std::size_t src_offset,
+      std::size_t src_stride,
+      std::size_t dst_offset,
+      std::size_t dst_stride,
+      double scale,
+      double bias);
 
   bool cuda_device_indexed_copy_available() const;
 
@@ -668,6 +679,17 @@ class TI_DLL_EXPORT Program {
                                                    std::size_t dst_stride,
                                                    double scale,
                                                    double bias);
+  std::size_t cpu_transform_affine_packed_strided_ndarray(
+      Ndarray *src,
+      Ndarray *dst,
+      int value_type,
+      int lane_count,
+      std::size_t src_offset,
+      std::size_t src_stride,
+      std::size_t dst_offset,
+      std::size_t dst_stride,
+      double scale,
+      double bias);
 
   std::size_t cpu_transform_workspace_bytes() const;
 
@@ -899,6 +921,17 @@ class TI_DLL_EXPORT Program {
       Ndarray *src,
       Ndarray *dst,
       int value_type,
+      std::size_t src_offset,
+      std::size_t src_stride,
+      std::size_t dst_offset,
+      std::size_t dst_stride,
+      double scale,
+      double bias);
+  std::size_t vulkan_transform_affine_packed_strided_ndarray(
+      Ndarray *src,
+      Ndarray *dst,
+      int value_type,
+      int lane_count,
       std::size_t src_offset,
       std::size_t src_stride,
       std::size_t dst_offset,

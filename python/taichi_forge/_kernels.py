@@ -1087,6 +1087,12 @@ def blit_from_field_to_field(dst: template(), src: template(), offset: i32, size
 
 
 @kernel
+def fill_i32_arange_ndarray(out: ndarray_type.ndarray(dtype=i32, ndim=1), N: i32):
+    for i in range(N):
+        out[i] = i
+
+
+@kernel
 def compact_flags_to_prefix_field(flags: template(), prefix: template(), N: i32):
     flags_offset = static(flags.snode.ptr.offset if len(flags.snode.ptr.offset) != 0 else 0)
     for i in range(N):

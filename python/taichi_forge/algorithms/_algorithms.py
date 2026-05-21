@@ -14,6 +14,7 @@ from taichi_forge._kernels import (
     compact_scatter_field_from_prefix_ndarray,
     compact_scatter_field,
     compact_single_item_field,
+    fill_i32_arange_ndarray,
     gather_f32_field,
     gather_f32_ndarray,
     gather_i32_field,
@@ -192,6 +193,32 @@ def _struct_tensor_member_components(view):
         yield view.base.field(view.path, component=component)
 
 
+def _packed_tensor_member_payload(view):
+    if not _is_struct_tensor_member_view(view):
+        return None
+    components = list(_struct_tensor_member_components(view))
+    if not components:
+        return None
+    first_arr, first_offset, first_stride = _scalar_ndarray_payload(components[0])
+    scalar_dtype = components[0].dtype
+    scalar_bytes = _dtype_nbytes(scalar_dtype)
+    if scalar_bytes <= 0:
+        return None
+    for i, component in enumerate(components):
+        arr, offset, stride = _scalar_ndarray_payload(component)
+        if (
+            arr is not first_arr
+            or component.dtype != scalar_dtype
+            or stride != first_stride
+            or offset != first_offset + i * scalar_bytes
+        ):
+            return None
+    item_bytes = scalar_bytes * len(components)
+    if item_bytes % 4 != 0:
+        return None
+    return first_arr, first_offset, first_stride, item_bytes
+
+
 def _check_matching_struct_tensor_member_views(op_name, src, dst):
     if not (_is_struct_tensor_member_view(src) and _is_struct_tensor_member_view(dst)):
         raise TypeError(
@@ -235,6 +262,22 @@ def _check_no_struct_numeric_payload(op_name, *arrays):
             _reject_struct_numeric_primitive(op_name)
 
 
+def _native_copy_method_for_current_arch(method):
+    arch = current_cfg().arch
+    if arch == cuda:
+        return "cuda_device"
+    if arch == vulkan:
+        return "vulkan_native"
+    if arch in (x64, arm64):
+        return "cpu_native"
+    if method == "auto":
+        return "auto"
+    raise RuntimeError(
+        "StructNdarray tensor member staging requires a CPU, CUDA, or Vulkan "
+        "native ndarray backend."
+    )
+
+
 class SortWorkspace:
     """Workspace handle for future backend sort implementations.
 
@@ -252,6 +295,8 @@ class SortWorkspace:
         self._radix_u32_buffers = {}
         self._vulkan_graph_u32_buffers = {}
         self._vulkan_graph_u32_execs = {}
+        self._order_buffers = {}
+        self._scalar_temp_buffers = {}
         self._cuda_cub_active = False
         self._vulkan_native_active = False
 
@@ -278,6 +323,8 @@ class SortWorkspace:
         self._radix_u32_buffers.clear()
         self._vulkan_graph_u32_buffers.clear()
         self._vulkan_graph_u32_execs.clear()
+        self._order_buffers.clear()
+        self._scalar_temp_buffers.clear()
         self._cuda_cub_active = False
         self._vulkan_native_active = False
 
@@ -349,6 +396,36 @@ class SortWorkspace:
             )
         return self._vulkan_graph_u32_buffers[key]
 
+    def _get_order_buffer(self, n):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} sort items, exceeding max_items={self.max_items}."
+            )
+        key = int(n)
+        if key not in self._order_buffers:
+            self._order_buffers[key] = ti_ndarray(i32, shape=n)
+            bytes_used = n * 4
+            self.workspace_bytes_current += bytes_used
+            self.workspace_bytes_peak = max(
+                self.workspace_bytes_peak, self.workspace_bytes_current
+            )
+        return self._order_buffers[key]
+
+    def _get_scalar_temp_buffer(self, dtype, n):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} sort items, exceeding max_items={self.max_items}."
+            )
+        key = (str(dtype), int(n))
+        if key not in self._scalar_temp_buffers:
+            self._scalar_temp_buffers[key] = ti_ndarray(dtype, shape=n)
+            bytes_used = n * _dtype_nbytes(dtype)
+            self.workspace_bytes_current += bytes_used
+            self.workspace_bytes_peak = max(
+                self.workspace_bytes_peak, self.workspace_bytes_current
+            )
+        return self._scalar_temp_buffers[key]
+
 
 class CompactWorkspace:
     """Workspace for experimental stable flag compaction.
@@ -364,6 +441,8 @@ class CompactWorkspace:
         self.workspace_bytes_peak = 0
         self._field_buffers = {}
         self._cuda_field_buffers = {}
+        self._order_buffers = None
+        self._scalar_temp_buffers = {}
         self._cuda_cub_active = False
         self._cuda_cub_scan_active = False
         self._vulkan_native_active = False
@@ -391,6 +470,8 @@ class CompactWorkspace:
         self.workspace_bytes_peak = 0
         self._field_buffers.clear()
         self._cuda_field_buffers.clear()
+        self._order_buffers = None
+        self._scalar_temp_buffers.clear()
         self._cuda_cub_active = False
         self._cuda_cub_scan_active = False
         self._vulkan_native_active = False
@@ -432,6 +513,38 @@ class CompactWorkspace:
                 self.workspace_bytes_peak, self.workspace_bytes_current
             )
         return self._cuda_field_buffers[key]
+
+    def _get_order_buffers(self, n):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} compact items, exceeding max_items={self.max_items}."
+            )
+        if self._order_buffers is None or self._order_buffers["in"].shape[0] < n:
+            self._order_buffers = {
+                "in": ti_ndarray(i32, shape=n),
+                "out": ti_ndarray(i32, shape=n),
+            }
+            bytes_used = 2 * n * 4
+            self.workspace_bytes_current += bytes_used
+            self.workspace_bytes_peak = max(
+                self.workspace_bytes_peak, self.workspace_bytes_current
+            )
+        return self._order_buffers["in"], self._order_buffers["out"]
+
+    def _get_scalar_temp_buffer(self, dtype, n):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} compact items, exceeding max_items={self.max_items}."
+            )
+        key = (str(dtype), int(n))
+        if key not in self._scalar_temp_buffers:
+            self._scalar_temp_buffers[key] = ti_ndarray(dtype, shape=n)
+            bytes_used = n * _dtype_nbytes(dtype)
+            self.workspace_bytes_current += bytes_used
+            self.workspace_bytes_peak = max(
+                self.workspace_bytes_peak, self.workspace_bytes_current
+            )
+        return self._scalar_temp_buffers[key]
 
 
 class ReduceWorkspace:
@@ -672,6 +785,7 @@ class BucketBuilderWorkspace:
         self._cursor_ndarray = None
         self._cursor_field = None
         self._scanner_cache = {}
+        self._order_buffers = None
         self._vulkan_native_active = False
 
     def check_shape(self, n, num_bins):
@@ -696,6 +810,7 @@ class BucketBuilderWorkspace:
         self._cursor_ndarray = None
         self._cursor_field = None
         self._scanner_cache.clear()
+        self._order_buffers = None
         self._vulkan_native_active = False
 
     def _reserve_bytes(self, bytes_used):
@@ -722,6 +837,19 @@ class BucketBuilderWorkspace:
             self._scanner_cache[length] = scanner
             self._reserve_bytes(scanner.workspace_length * 4)
         return self._scanner_cache[length]
+
+    def _get_order_buffers(self, n):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} bucket items, exceeding max_items={self.max_items}."
+            )
+        if self._order_buffers is None or self._order_buffers["in"].shape[0] < n:
+            self._order_buffers = {
+                "in": ti_ndarray(i32, shape=n),
+                "out": ti_ndarray(i32, shape=n),
+            }
+            self._reserve_bytes(2 * n * 4)
+        return self._order_buffers["in"], self._order_buffers["out"]
 
 
 class GroupedReduceWorkspace:
@@ -882,16 +1010,14 @@ def _check_sort_request(
             raise ValueError("sort() values must be a 1D Taichi field or ndarray.")
         if values.shape[0] != keys.shape[0]:
             raise ValueError("sort() keys and values must have the same length.")
-        if _is_struct_tensor_member_view(values) and method not in (
-            "auto",
-            "host_stable",
-        ):
-            raise NotImplementedError(
-                "sort() whole vector/matrix StructNdarray member values "
-                "currently require method='host_stable' or method='auto' "
-                "host fallback. Native backends need a reusable permutation "
-                "primitive to avoid sorting each tensor lane independently."
-            )
+        if _is_struct_tensor_member_view(values):
+            member_dtype = values.scalar_dtype
+            if member_dtype not in _SORT_VALUE_DTYPES:
+                raise TypeError(
+                    "sort() whole vector/matrix StructNdarray member values "
+                    "currently support ti.u32, ti.i32, ti.f32, ti.u64, "
+                    "ti.i64, and ti.f64 lanes."
+                )
     if stable is not True:
         raise NotImplementedError("Only stable sort is currently implemented.")
     if method not in _SUPPORTED_SORT_METHODS:
@@ -1410,10 +1536,83 @@ def _cuda_cub_sort_native(
         )
 
 
+def _member_sort_backend_method(method):
+    arch = current_cfg().arch
+    if method == "cpu_native" or (method == "auto" and arch in (x64, arm64)):
+        return "cpu_native", "cpu_native"
+    if method in _CUDA_CUB_SORT_METHODS or (method == "auto" and arch == cuda):
+        return "cuda_cub_native" if method == "auto" else method, "cuda_device"
+    if method in ("vulkan_native_radix_u32", "vulkan_radix_u32") or (
+        method == "auto" and arch == vulkan
+    ):
+        return "vulkan_native_radix_u32", "vulkan_native"
+    raise RuntimeError(
+        "sort() whole tensor member native path is available only on CPU, CUDA, "
+        "or Vulkan native ndarray backends."
+    )
+
+
+def _native_sort_tensor_member_values(
+    keys,
+    values,
+    *,
+    method,
+    workspace,
+    descending,
+    nan_policy,
+):
+    if descending and method not in ("auto", "cpu_native"):
+        raise NotImplementedError(
+            "sort() descending whole tensor member values are currently "
+            "supported only by method='cpu_native' or method='auto' on CPU."
+        )
+    if workspace is None:
+        workspace = SortWorkspace(max_items=keys.shape[0])
+    n = keys.shape[0]
+    if n <= 1:
+        return workspace
+
+    sort_method, copy_method = _member_sort_backend_method(method)
+    order = workspace._get_order_buffer(n)
+    fill_i32_arange_ndarray(order, n)
+    sort(
+        keys,
+        order,
+        stable=True,
+        descending=descending,
+        method=sort_method,
+        workspace=workspace,
+        nan_policy=nan_policy,
+    )
+
+    for component in _struct_tensor_member_components(values):
+        temp = workspace._get_scalar_temp_buffer(component.dtype, n)
+        experimental_gather(component, order, temp, method=copy_method)
+        experimental_transform(
+            temp,
+            component,
+            scale=1,
+            bias=0,
+            method=copy_method,
+        )
+    return workspace
+
+
 def _auto_sort(keys, values=None, workspace=None, nan_policy="last", descending=False):
     arch = current_cfg().arch
     if descending:
         _host_stable_sort(keys, values, descending=True, nan_policy=nan_policy)
+        return
+
+    if _is_struct_tensor_member_view(values):
+        _native_sort_tensor_member_values(
+            keys,
+            values,
+            method="auto",
+            workspace=workspace,
+            descending=descending,
+            nan_policy=nan_policy,
+        )
         return
 
     if (
@@ -1488,6 +1687,15 @@ def sort(
         )
     elif method == "host_stable":
         _host_stable_sort(keys, values, descending=descending, nan_policy=nan_policy)
+    elif _is_struct_tensor_member_view(values):
+        _native_sort_tensor_member_values(
+            keys,
+            values,
+            method=method,
+            workspace=workspace,
+            descending=descending,
+            nan_policy=nan_policy,
+        )
     elif method == "cpu_native":
         _cpu_native_stable_sort(
             keys,
@@ -1855,6 +2063,66 @@ def experimental_compact(
     and StructNdarray raw payloads; field fallback currently supports i32
     payloads. Flags/count are i32.
     """
+
+    if _is_struct_tensor_member_view(values) or _is_struct_tensor_member_view(output):
+        _check_matching_struct_tensor_member_views("experimental_compact()", values, output)
+        if not (isinstance(flags, Ndarray) and isinstance(count, Ndarray)):
+            raise TypeError(
+                "experimental_compact() whole tensor member views require "
+                "ti.ndarray flags and count."
+            )
+        if flags.dtype != i32 or count.dtype != i32:
+            raise TypeError(
+                "experimental_compact() whole tensor member views require "
+                "ti.i32 flags and count."
+            )
+        n = values.shape[0]
+        if flags.shape[0] != n or output.shape[0] < n:
+            raise ValueError(
+                "experimental_compact() values, flags, and output sizes are "
+                "incompatible."
+            )
+        if workspace is None:
+            workspace = CompactWorkspace(max_items=n)
+        copy_method = _native_copy_method_for_current_arch(method)
+        order_in, order_out = workspace._get_order_buffers(n)
+        fill_i32_arange_ndarray(order_in, n)
+        order_out.fill(0)
+        experimental_compact(
+            order_in,
+            flags,
+            order_out,
+            count,
+            method=method,
+            workspace=workspace,
+        )
+        for value_component, output_component in zip(
+            _struct_tensor_member_components(values),
+            _struct_tensor_member_components(output),
+        ):
+            if current_cfg().arch == cuda:
+                temp_out = workspace._get_scalar_temp_buffer(value_component.dtype, n)
+                experimental_gather(
+                    value_component,
+                    order_out,
+                    temp_out,
+                    method=copy_method,
+                )
+                experimental_transform(
+                    temp_out,
+                    output_component,
+                    scale=1,
+                    bias=0,
+                    method=copy_method,
+                )
+            else:
+                experimental_gather(
+                    value_component,
+                    order_out,
+                    output_component,
+                    method=copy_method,
+                )
+        return
 
     _check_compact_request(values, flags, output, count, method, workspace)
     if values.shape[0] == 0:
@@ -2790,6 +3058,101 @@ def _try_cpu_transform(src, dst, value_type, scale, bias):
     return True
 
 
+def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bias, workspace):
+    src_payload = _packed_tensor_member_payload(src)
+    dst_payload = _packed_tensor_member_payload(dst)
+    if src_payload is None or dst_payload is None:
+        return False
+    src_arr, src_offset, src_stride, src_item_bytes = src_payload
+    dst_arr, dst_offset, dst_stride, dst_item_bytes = dst_payload
+    if src_item_bytes != dst_item_bytes:
+        return False
+    scalar_bytes = _dtype_nbytes(src.scalar_dtype)
+    if scalar_bytes <= 0:
+        return False
+    lane_count = src_item_bytes // scalar_bytes
+    if lane_count <= 1:
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if method in ("auto", "cuda_device") and current_cfg().arch == cuda:
+        if (
+            hasattr(prog, "cuda_toolkit_transform_available")
+            and prog.cuda_toolkit_transform_available()
+            and hasattr(prog, "cuda_device_transform_affine_packed_strided_ndarray")
+        ):
+            prog.cuda_device_transform_affine_packed_strided_ndarray(
+                src_arr,
+                dst_arr,
+                value_type,
+                lane_count,
+                src_offset,
+                src_stride,
+                dst_offset,
+                dst_stride,
+                scale,
+                bias,
+            )
+            return True
+        if method == "cuda_device":
+            return False
+    if method in ("auto", "vulkan_native") and current_cfg().arch == vulkan:
+        if (
+            hasattr(prog, "vulkan_transform_available")
+            and prog.vulkan_transform_available()
+            and (
+                not hasattr(prog, "vulkan_transform_value_type_available")
+                or prog.vulkan_transform_value_type_available(value_type)
+            )
+            and hasattr(prog, "vulkan_transform_affine_packed_strided_ndarray")
+        ):
+            temp_bytes = prog.vulkan_transform_affine_packed_strided_ndarray(
+                src_arr,
+                dst_arr,
+                value_type,
+                lane_count,
+                src_offset,
+                src_stride,
+                dst_offset,
+                dst_stride,
+                scale,
+                bias,
+            )
+            if workspace is not None:
+                workspace._vulkan_native_active = True
+                workspace.workspace_bytes_current = max(
+                    workspace.workspace_bytes_current, temp_bytes
+                )
+                workspace.workspace_bytes_peak = max(
+                    workspace.workspace_bytes_peak,
+                    workspace.workspace_bytes_current,
+                )
+            return True
+        if method == "vulkan_native":
+            return False
+    if method in ("auto", "cpu_native") and current_cfg().arch in [x64, arm64]:
+        if (
+            hasattr(prog, "cpu_transform_available")
+            and prog.cpu_transform_available()
+            and hasattr(prog, "cpu_transform_affine_packed_strided_ndarray")
+        ):
+            prog.cpu_transform_affine_packed_strided_ndarray(
+                src_arr,
+                dst_arr,
+                value_type,
+                lane_count,
+                src_offset,
+                src_stride,
+                dst_offset,
+                dst_stride,
+                scale,
+                bias,
+            )
+            return True
+    return False
+
+
 def _transform_kernel(src, dst, scale, bias):
     if _is_struct_scalar_member_view(src):
         raise RuntimeError(
@@ -2849,6 +3212,20 @@ def experimental_transform(
         if workspace is None:
             workspace = TransformWorkspace(max_items=n)
         workspace.check_shape(n)
+        normalized_scale, normalized_bias = _normalize_transform_args(
+            src.scalar_dtype, scale, bias
+        )
+        value_type = _transform_value_type(src.scalar_dtype)
+        if _try_native_tensor_member_transform(
+            src,
+            dst,
+            method,
+            value_type,
+            normalized_scale,
+            normalized_bias,
+            workspace,
+        ):
+            return workspace
         for src_component, dst_component in zip(
             _struct_tensor_member_components(src),
             _struct_tensor_member_components(dst),
@@ -3115,6 +3492,77 @@ def _try_cpu_indexed_copy(src, indices, dst, scatter):
     return True
 
 
+def _try_native_tensor_member_indexed_copy(src, indices, dst, method, workspace, scatter):
+    src_payload = _packed_tensor_member_payload(src)
+    dst_payload = _packed_tensor_member_payload(dst)
+    if src_payload is None or dst_payload is None:
+        return False
+    src_arr, src_offset, src_stride, src_item_bytes = src_payload
+    dst_arr, dst_offset, dst_stride, dst_item_bytes = dst_payload
+    if src_item_bytes != dst_item_bytes:
+        return False
+    arch = current_cfg().arch
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if arch == cuda and method in ("auto", "cuda_device"):
+        if not (
+            hasattr(prog, "cuda_device_indexed_copy_payload_available")
+            and prog.cuda_device_indexed_copy_payload_available(src_item_bytes)
+        ):
+            return False
+        method_name = (
+            "cuda_device_scatter_strided_ndarray"
+            if scatter
+            else "cuda_device_gather_strided_ndarray"
+        )
+    elif arch == vulkan and method in ("auto", "vulkan_native"):
+        if not (
+            hasattr(prog, "vulkan_indexed_copy_available")
+            and prog.vulkan_indexed_copy_available()
+        ):
+            return False
+        method_name = (
+            "vulkan_scatter_strided_ndarray"
+            if scatter
+            else "vulkan_gather_strided_ndarray"
+        )
+    elif arch in (x64, arm64) and method in ("auto", "cpu_native"):
+        if not (
+            hasattr(prog, "cpu_indexed_copy_available")
+            and prog.cpu_indexed_copy_available()
+        ):
+            return False
+        method_name = (
+            "cpu_scatter_strided_ndarray"
+            if scatter
+            else "cpu_gather_strided_ndarray"
+        )
+    else:
+        return False
+    if not hasattr(prog, method_name):
+        return False
+    temp_bytes = getattr(prog, method_name)(
+        src_arr,
+        indices.arr,
+        dst_arr,
+        src_item_bytes,
+        src_offset,
+        src_stride,
+        dst_offset,
+        dst_stride,
+    )
+    if workspace is not None and arch == vulkan:
+        workspace._vulkan_native_active = True
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+    return True
+
+
 def _indexed_copy_kernel(src, indices, dst, scatter):
     if src.dtype not in _INDEXED_COPY_KERNEL_DTYPES:
         raise RuntimeError(
@@ -3159,6 +3607,10 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
             workspace = IndexedCopyWorkspace(max_items=n)
         workspace.check_shape(n)
         if n == 0:
+            return workspace
+        if _try_native_tensor_member_indexed_copy(
+            src, indices, dst, method, workspace, scatter
+        ):
             return workspace
         for src_component, dst_component in zip(
             _struct_tensor_member_components(src),
@@ -3759,6 +4211,55 @@ def experimental_bucket_builder(
     ``b`` in an unspecified order. Native ndarray mode treats StructNdarray
     values as opaque raw payloads.
     """
+
+    if _is_struct_tensor_member_view(values) or _is_struct_tensor_member_view(output):
+        _check_matching_struct_tensor_member_views(
+            "experimental_bucket_builder()", values, output
+        )
+        if not (
+            isinstance(keys, Ndarray)
+            and isinstance(offsets, Ndarray)
+            and keys.dtype == i32
+            and offsets.dtype == i32
+        ):
+            raise TypeError(
+                "experimental_bucket_builder() whole tensor member views "
+                "require ti.ndarray i32 keys and offsets."
+            )
+        n = keys.shape[0]
+        num_bins = offsets.shape[0] - 1
+        if values.shape[0] != n or output.shape[0] < n or num_bins <= 0:
+            raise ValueError(
+                "experimental_bucket_builder() keys, values, offsets, and "
+                "output sizes are incompatible."
+            )
+        if workspace is None:
+            workspace = BucketBuilderWorkspace(max_items=n, max_bins=num_bins)
+        workspace.check_shape(n, num_bins)
+        copy_method = _native_copy_method_for_current_arch(method)
+        order_in, order_out = workspace._get_order_buffers(n)
+        fill_i32_arange_ndarray(order_in, n)
+        order_out.fill(0)
+        offsets.fill(0)
+        experimental_bucket_builder(
+            keys,
+            order_in,
+            offsets,
+            order_out,
+            method=method,
+            workspace=workspace,
+        )
+        for value_component, output_component in zip(
+            _struct_tensor_member_components(values),
+            _struct_tensor_member_components(output),
+        ):
+            experimental_gather(
+                value_component,
+                order_out,
+                output_component,
+                method=copy_method,
+            )
+        return workspace
 
     _check_bucket_builder_request(keys, values, offsets, output, method, workspace)
     n = keys.shape[0]

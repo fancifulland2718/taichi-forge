@@ -2805,9 +2805,9 @@ struct VulkanTransformCache {
 
   void ensure_params() {
     if (params == kDeviceNullAllocation) {
-      params = alloc_storage(9 * sizeof(uint32_t));
+      params = alloc_storage(10 * sizeof(uint32_t));
     }
-    cached_bytes = 9 * sizeof(uint32_t);
+    cached_bytes = 10 * sizeof(uint32_t);
   }
 
   ShaderResourceSet *cached_affine_resource_set() {
@@ -4528,6 +4528,73 @@ void check_vulkan_transform_strided_request(Ndarray *src,
                                        value_size, dst_offset, dst_stride);
 }
 
+void check_vulkan_transform_packed_strided_range(const char *role,
+                                                 Ndarray *arr,
+                                                 size_t logical_items,
+                                                 size_t value_size,
+                                                 int lane_count,
+                                                 size_t offset,
+                                                 size_t stride) {
+  TI_ERROR_IF(lane_count <= 0,
+              "Vulkan native packed strided transform lane count must be "
+              "positive.");
+  const size_t payload_bytes = static_cast<size_t>(lane_count) * value_size;
+  TI_ERROR_IF(stride < payload_bytes,
+              "Vulkan native packed strided transform {} stride is smaller "
+              "than payload.",
+              role);
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "Vulkan native packed strided transform {} offset/stride must "
+              "align to value size.",
+              role);
+  TI_ERROR_IF(offset % sizeof(uint32_t) != 0 ||
+                  stride % sizeof(uint32_t) != 0,
+              "Vulkan native packed strided transform {} offset/stride must "
+              "be uint32-word aligned.",
+              role);
+  if (logical_items == 0) {
+    return;
+  }
+  const size_t buffer_bytes = arr->get_nelement() * arr->get_element_size();
+  TI_ERROR_IF(buffer_bytes < payload_bytes,
+              "Vulkan native packed strided transform {} buffer is smaller "
+              "than payload.",
+              role);
+  TI_ERROR_IF(offset > buffer_bytes - payload_bytes,
+              "Vulkan native packed strided transform {} offset is out of "
+              "bounds.",
+              role);
+  const size_t last =
+      offset + (logical_items - 1) * stride + payload_bytes;
+  TI_ERROR_IF(last > buffer_bytes,
+              "Vulkan native packed strided transform {} range is out of "
+              "bounds.",
+              role);
+}
+
+void check_vulkan_transform_packed_strided_request(Ndarray *src,
+                                                   Ndarray *dst,
+                                                   int value_type,
+                                                   int lane_count,
+                                                   size_t src_offset,
+                                                   size_t src_stride,
+                                                   size_t dst_offset,
+                                                   size_t dst_stride) {
+  TI_ERROR_IF(!src || !dst,
+              "Vulkan native packed strided transform received a null "
+              "ndarray.");
+  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
+              "Vulkan native packed strided transform source and destination "
+              "sizes differ.");
+  const size_t value_size = vulkan_transform_value_size(value_type);
+  check_vulkan_transform_packed_strided_range(
+      "source", src, src->get_nelement(), value_size, lane_count, src_offset,
+      src_stride);
+  check_vulkan_transform_packed_strided_range(
+      "destination", dst, dst->get_nelement(), value_size, lane_count,
+      dst_offset, dst_stride);
+}
+
 void check_vulkan_indexed_copy_strided_request(Ndarray *src,
                                                Ndarray *indices,
                                                Ndarray *dst,
@@ -5089,6 +5156,7 @@ std::size_t vulkan_transform_affine_ndarray_impl(Program *program,
                                                  Ndarray *src,
                                                  Ndarray *dst,
                                                  int value_type,
+                                                 int lane_count,
                                                  std::size_t src_offset,
                                                  std::size_t src_stride,
                                                  std::size_t dst_offset,
@@ -5118,8 +5186,15 @@ std::size_t vulkan_transform_affine_ndarray_impl(Program *program,
     dst_stride = value_size;
   }
   if (member_source || member_destination) {
-    check_vulkan_transform_strided_request(src, dst, value_type, src_offset,
-                                           src_stride, dst_offset, dst_stride);
+    if (lane_count == 1) {
+      check_vulkan_transform_strided_request(src, dst, value_type, src_offset,
+                                             src_stride, dst_offset,
+                                             dst_stride);
+    } else {
+      check_vulkan_transform_packed_strided_request(
+          src, dst, value_type, lane_count, src_offset, src_stride, dst_offset,
+          dst_stride);
+    }
   }
   TI_ERROR_IF(!program->vulkan_transform_value_type_available(value_type),
               "Vulkan native transform value type is not supported by this "
@@ -5130,6 +5205,10 @@ std::size_t vulkan_transform_affine_ndarray_impl(Program *program,
               "items.");
 
   const size_t n = src->get_nelement();
+  const size_t scalar_count = n * static_cast<size_t>(lane_count);
+  TI_ERROR_IF(scalar_count >
+                  static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native transform scalar item count exceeds UINT32_MAX.");
   if (n == 0) {
     return 0;
   }
@@ -5137,7 +5216,7 @@ std::size_t vulkan_transform_affine_ndarray_impl(Program *program,
   TI_ERROR_IF(!device, "Vulkan native transform requires a compute device.");
   auto &cache = get_transform_cache(program, device);
 
-  std::array<uint32_t, 9> param_words{0, 0, 0, 0, 0, 0, 0, 0, 0};
+  std::array<uint32_t, 10> param_words{0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
   if (value_type == 0) {
     param_words[0] = static_cast<uint32_t>(static_cast<int32_t>(scale));
     param_words[1] = static_cast<uint32_t>(static_cast<int32_t>(bias));
@@ -5172,6 +5251,7 @@ std::size_t vulkan_transform_affine_ndarray_impl(Program *program,
   param_words[6] = static_cast<uint32_t>(src_stride / sizeof(uint32_t));
   param_words[7] = static_cast<uint32_t>(dst_offset / sizeof(uint32_t));
   param_words[8] = static_cast<uint32_t>(dst_stride / sizeof(uint32_t));
+  param_words[9] = static_cast<uint32_t>(lane_count);
 
   DeviceAllocation src_alloc = src->ndarray_alloc_;
   DeviceAllocation dst_alloc = dst->ndarray_alloc_;
@@ -5187,7 +5267,7 @@ std::size_t vulkan_transform_affine_ndarray_impl(Program *program,
                                               : n * value_size;
   const size_t params_bytes = param_words.size() * sizeof(uint32_t);
   const uint32_t groups =
-      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
+      static_cast<uint32_t>((scalar_count + kBlockSize - 1) / kBlockSize);
   const bool profiler_scopes = program->profiler != nullptr;
 
   program->enqueue_compute_op_lambda(
@@ -6020,8 +6100,9 @@ std::size_t Program::vulkan_transform_affine_ndarray(Ndarray *src,
                                                      double scale,
                                                      double bias) {
   return vulkan_transform_affine_ndarray_impl(
-      this, src, dst, value_type, 0, vulkan_transform_value_size(value_type),
-      0, vulkan_transform_value_size(value_type), scale, bias, false, false);
+      this, src, dst, value_type, 1, 0,
+      vulkan_transform_value_size(value_type), 0,
+      vulkan_transform_value_size(value_type), scale, bias, false, false);
 }
 
 std::size_t Program::vulkan_transform_affine_member_ndarray(
@@ -6033,7 +6114,7 @@ std::size_t Program::vulkan_transform_affine_member_ndarray(
     double scale,
     double bias) {
   return vulkan_transform_affine_ndarray_impl(
-      this, src, dst, value_type, offset, stride, 0,
+      this, src, dst, value_type, 1, offset, stride, 0,
       vulkan_transform_value_size(value_type), scale, bias, true, false);
 }
 
@@ -6048,8 +6129,24 @@ std::size_t Program::vulkan_transform_affine_strided_ndarray(
     double scale,
     double bias) {
   return vulkan_transform_affine_ndarray_impl(
-      this, src, dst, value_type, src_offset, src_stride, dst_offset,
+      this, src, dst, value_type, 1, src_offset, src_stride, dst_offset,
       dst_stride, scale, bias, true, true);
+}
+
+std::size_t Program::vulkan_transform_affine_packed_strided_ndarray(
+    Ndarray *src,
+    Ndarray *dst,
+    int value_type,
+    int lane_count,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    double scale,
+    double bias) {
+  return vulkan_transform_affine_ndarray_impl(
+      this, src, dst, value_type, lane_count, src_offset, src_stride,
+      dst_offset, dst_stride, scale, bias, true, true);
 }
 
 std::size_t Program::vulkan_gather_ndarray(Ndarray *src,
@@ -8081,6 +8178,21 @@ std::size_t Program::vulkan_transform_affine_strided_ndarray(
     double scale,
     double bias) {
   TI_ERROR("Vulkan native strided transform requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_transform_affine_packed_strided_ndarray(
+    Ndarray *src,
+    Ndarray *dst,
+    int value_type,
+    int lane_count,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    double scale,
+    double bias) {
+  TI_ERROR("Vulkan native packed strided transform requires TI_WITH_VULKAN=ON.");
   return 0;
 }
 

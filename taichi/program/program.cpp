@@ -375,6 +375,21 @@ struct CpuStridedToStridedTransformTaskContext {
   int num_threads{1};
 };
 
+template <typename T>
+struct CpuPackedStridedToStridedTransformTaskContext {
+  const uint8_t *src{nullptr};
+  uint8_t *dst{nullptr};
+  std::size_t n{0};
+  int lane_count{1};
+  std::size_t src_offset{0};
+  std::size_t src_stride{0};
+  std::size_t dst_offset{0};
+  std::size_t dst_stride{0};
+  T scale{};
+  T bias{};
+  int num_threads{1};
+};
+
 struct CpuIndexedCopyTaskContext {
   const uint8_t *src{nullptr};
   const int32_t *indices{nullptr};
@@ -684,6 +699,35 @@ void cpu_strided_to_strided_transform_task(void *raw_ctx,
 }
 
 template <typename T>
+void cpu_packed_strided_to_strided_transform_task(void *raw_ctx,
+                                                  int /*thread_id*/,
+                                                  int task_id) {
+  auto *ctx =
+      static_cast<CpuPackedStridedToStridedTransformTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t total =
+      ctx->n * static_cast<std::size_t>(ctx->lane_count);
+  const std::size_t begin =
+      total * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      total * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t scalar_i = begin; scalar_i < end; ++scalar_i) {
+    const std::size_t item =
+        scalar_i / static_cast<std::size_t>(ctx->lane_count);
+    const std::size_t lane =
+        scalar_i - item * static_cast<std::size_t>(ctx->lane_count);
+    const std::size_t lane_offset = lane * sizeof(T);
+    const auto *value = reinterpret_cast<const T *>(
+        ctx->src + ctx->src_offset + item * ctx->src_stride + lane_offset);
+    auto *out = reinterpret_cast<T *>(
+        ctx->dst + ctx->dst_offset + item * ctx->dst_stride + lane_offset);
+    *out = (*value) * ctx->scale + ctx->bias;
+  }
+}
+
+template <typename T>
 void cpu_transform_run_typed(const T *src_ptr,
                              T *dst_ptr,
                              std::size_t n,
@@ -777,6 +821,54 @@ void cpu_transform_run_strided_to_strided_typed(const uint8_t *src_ptr,
         reinterpret_cast<const T *>(src_ptr + src_offset + i * src_stride);
     auto *out =
         reinterpret_cast<T *>(dst_ptr + dst_offset + i * dst_stride);
+    *out = (*value) * scale + bias;
+  }
+}
+
+template <typename T>
+void cpu_transform_run_packed_strided_to_strided_typed(
+    const uint8_t *src_ptr,
+    uint8_t *dst_ptr,
+    std::size_t n,
+    int lane_count,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    T scale,
+    T bias,
+    bool use_parallel,
+    int target_threads,
+    int max_threads) {
+  if (use_parallel) {
+    CpuPackedStridedToStridedTransformTaskContext<T> ctx;
+    ctx.src = src_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.lane_count = lane_count;
+    ctx.src_offset = src_offset;
+    ctx.src_stride = src_stride;
+    ctx.dst_offset = dst_offset;
+    ctx.dst_stride = dst_stride;
+    ctx.scale = scale;
+    ctx.bias = bias;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_packed_strided_to_strided_transform_task<T>);
+    return;
+  }
+  const std::size_t total = n * static_cast<std::size_t>(lane_count);
+  for (std::size_t scalar_i = 0; scalar_i < total; ++scalar_i) {
+    const std::size_t item =
+        scalar_i / static_cast<std::size_t>(lane_count);
+    const std::size_t lane =
+        scalar_i - item * static_cast<std::size_t>(lane_count);
+    const std::size_t lane_offset = lane * sizeof(T);
+    const auto *value = reinterpret_cast<const T *>(
+        src_ptr + src_offset + item * src_stride + lane_offset);
+    auto *out = reinterpret_cast<T *>(
+        dst_ptr + dst_offset + item * dst_stride + lane_offset);
     *out = (*value) * scale + bias;
   }
 }
@@ -876,6 +968,68 @@ void check_transform_strided_request(const char *backend,
                                 src_offset, src_stride);
   check_transform_strided_range(backend, "destination", dst, n, value_size,
                                 dst_offset, dst_stride);
+}
+
+void check_transform_packed_strided_range(const char *backend,
+                                          const char *role,
+                                          Ndarray *arr,
+                                          std::size_t logical_items,
+                                          std::size_t value_size,
+                                          int lane_count,
+                                          std::size_t offset,
+                                          std::size_t stride) {
+  TI_ERROR_IF(lane_count <= 0,
+              "{} packed strided transform lane count must be positive.",
+              backend);
+  const std::size_t payload_bytes =
+      static_cast<std::size_t>(lane_count) * value_size;
+  TI_ERROR_IF(stride < payload_bytes,
+              "{} packed strided transform {} stride is smaller than payload.",
+              backend, role);
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "{} packed strided transform {} offset/stride must align to "
+              "value size.",
+              backend, role);
+  if (logical_items == 0) {
+    return;
+  }
+  const std::size_t bytes = arr->get_nelement() * arr->get_element_size();
+  TI_ERROR_IF(bytes < payload_bytes,
+              "{} packed strided transform {} buffer is smaller than payload.",
+              backend, role);
+  TI_ERROR_IF(offset > bytes - payload_bytes,
+              "{} packed strided transform {} offset is out of bounds.",
+              backend, role);
+  const std::size_t last =
+      offset + (logical_items - 1) * stride + payload_bytes;
+  TI_ERROR_IF(last > bytes,
+              "{} packed strided transform {} range is out of bounds.",
+              backend, role);
+}
+
+void check_transform_packed_strided_request(const char *backend,
+                                            Ndarray *src,
+                                            Ndarray *dst,
+                                            int value_type,
+                                            int lane_count,
+                                            std::size_t src_offset,
+                                            std::size_t src_stride,
+                                            std::size_t dst_offset,
+                                            std::size_t dst_stride) {
+  TI_ERROR_IF(!src || !dst,
+              "{} packed strided transform received a null ndarray.", backend);
+  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
+              "{} packed strided transform source and destination sizes "
+              "differ.",
+              backend);
+  const std::size_t value_size = transform_value_size(value_type);
+  const std::size_t n = src->get_nelement();
+  check_transform_packed_strided_range(
+      backend, "source", src, n, value_size, lane_count, src_offset,
+      src_stride);
+  check_transform_packed_strided_range(
+      backend, "destination", dst, n, value_size, lane_count, dst_offset,
+      dst_stride);
 }
 
 void check_indexed_copy_strided_request(const char *backend,
@@ -3367,6 +3521,42 @@ std::size_t Program::cuda_device_transform_affine_strided_ndarray(
 #endif
 }
 
+std::size_t Program::cuda_device_transform_affine_packed_strided_ndarray(
+    Ndarray *src,
+    Ndarray *dst,
+    int value_type,
+    int lane_count,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    double scale,
+    double bias) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA packed strided transform is only available on CUDA.");
+  check_transform_packed_strided_request("CUDA", src, dst, value_type,
+                                         lane_count, src_offset, src_stride,
+                                         dst_offset, dst_stride);
+  TI_ERROR_IF(src->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA packed strided transform currently supports at most "
+              "INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  TI_ERROR_IF(!cuda::cub_transform_available(),
+              "CUDA packed strided transform requires TI_WITH_CUDA_TOOLKIT=ON "
+              "and a discoverable CUDA runtime.");
+  auto *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
+  auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_transform_affine_packed_strided(
+      src_ptr, dst_ptr, static_cast<int>(src->get_nelement()), lane_count,
+      static_cast<cuda::CudaTransformValueType>(value_type), src_offset,
+      src_stride, dst_offset, dst_stride, scale, bias, stream);
+#else
+  TI_ERROR("CUDA packed strided transform requires TI_WITH_CUDA=ON.");
+#endif
+}
+
 bool Program::cuda_device_indexed_copy_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&
@@ -5411,6 +5601,94 @@ std::size_t Program::cpu_transform_affine_strided_ndarray(
     default:
       TI_ERROR("CPU native strided transform received an unsupported value "
                "type.");
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_transform_affine_packed_strided_ndarray(
+    Ndarray *src,
+    Ndarray *dst,
+    int value_type,
+    int lane_count,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    double scale,
+    double bias) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native packed strided transform is only available on CPU "
+              "backends.");
+  check_transform_packed_strided_request("CPU native", src, dst, value_type,
+                                         lane_count, src_offset, src_stride,
+                                         dst_offset, dst_stride);
+  const std::size_t n = src->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  const std::size_t total =
+      n * static_cast<std::size_t>(std::max(1, lane_count));
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((total + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = total >= 65536 && target_threads > 1;
+
+  const auto src_addr = get_ndarray_data_ptr_as_int(src);
+  const auto dst_addr = get_ndarray_data_ptr_as_int(dst);
+  TI_ERROR_IF(!src_addr || !dst_addr,
+              "CPU native packed strided transform received a null data "
+              "pointer.");
+  const auto *src_bytes = reinterpret_cast<const uint8_t *>(src_addr);
+  auto *dst_bytes = reinterpret_cast<uint8_t *>(dst_addr);
+  switch (value_type) {
+    case 0:
+      cpu_transform_run_packed_strided_to_strided_typed<uint32_t>(
+          src_bytes, dst_bytes, n, lane_count, src_offset, src_stride,
+          dst_offset, dst_stride,
+          static_cast<uint32_t>(static_cast<int32_t>(scale)),
+          static_cast<uint32_t>(static_cast<int32_t>(bias)), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 2:
+      cpu_transform_run_packed_strided_to_strided_typed<uint32_t>(
+          src_bytes, dst_bytes, n, lane_count, src_offset, src_stride,
+          dst_offset, dst_stride, static_cast<uint32_t>(scale),
+          static_cast<uint32_t>(bias), use_parallel, target_threads,
+          max_threads);
+      return 0;
+    case 1:
+      cpu_transform_run_packed_strided_to_strided_typed<float>(
+          src_bytes, dst_bytes, n, lane_count, src_offset, src_stride,
+          dst_offset, dst_stride, static_cast<float>(scale),
+          static_cast<float>(bias), use_parallel, target_threads, max_threads);
+      return 0;
+    case 3:
+      cpu_transform_run_packed_strided_to_strided_typed<uint64_t>(
+          src_bytes, dst_bytes, n, lane_count, src_offset, src_stride,
+          dst_offset, dst_stride, static_cast<uint64_t>(scale),
+          static_cast<uint64_t>(bias), use_parallel, target_threads,
+          max_threads);
+      return 0;
+    case 4:
+      cpu_transform_run_packed_strided_to_strided_typed<uint64_t>(
+          src_bytes, dst_bytes, n, lane_count, src_offset, src_stride,
+          dst_offset, dst_stride,
+          static_cast<uint64_t>(static_cast<int64_t>(scale)),
+          static_cast<uint64_t>(static_cast<int64_t>(bias)), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 5:
+      cpu_transform_run_packed_strided_to_strided_typed<double>(
+          src_bytes, dst_bytes, n, lane_count, src_offset, src_stride,
+          dst_offset, dst_stride, scale, bias, use_parallel, target_threads,
+          max_threads);
+      return 0;
+    default:
+      TI_ERROR("CPU native packed strided transform received an unsupported "
+               "value type.");
   }
   return 0;
 }

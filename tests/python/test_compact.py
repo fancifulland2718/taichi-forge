@@ -94,18 +94,73 @@ def _run_vector_ndarray_compact(method):
     return workspace
 
 
-@test_utils.test(arch=[ti.cpu])
-def test_experimental_compact_rejects_struct_tensor_member_views():
-    n = 8
+def _run_struct_tensor_member_compact(method):
+    n = 256
     payload = ti.types.struct(vec=ti.types.vector(2, ti.i32), tag=ti.i32)
     values = ti.ndarray(payload, shape=n)
     flags = ti.ndarray(ti.i32, shape=n)
     output = ti.ndarray(payload, shape=n)
     count = ti.ndarray(ti.i32, shape=1)
-    with pytest.raises(NotImplementedError, match="whole vector/matrix"):
-        ti.algorithms.experimental_compact(
-            values.field("vec"), flags, output.field("vec"), count, method="cpu_native"
-        )
+    values_np = np.zeros((n,), dtype=values.numpy_dtype)
+    output_np = np.zeros((n,), dtype=output.numpy_dtype)
+    values_np["vec"] = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 97) - 48
+    values_np["tag"] = np.arange(n, dtype=np.int32) * 5 + 1
+    output_np["tag"] = np.arange(n, dtype=np.int32) * 11 + 7
+    flags_np = ((np.arange(n) % 3 == 0) | (np.arange(n) % 19 == 0)).astype(np.int32)
+    values.from_numpy(values_np)
+    output.from_numpy(output_np)
+    flags.from_numpy(flags_np)
+    count.from_numpy(np.array([-1], dtype=np.int32))
+    workspace = ti.algorithms.CompactWorkspace(max_items=n)
+
+    ti.algorithms.experimental_compact(
+        values.field("vec"),
+        flags,
+        output.field("vec"),
+        count,
+        method=method,
+        workspace=workspace,
+    )
+
+    selected = flags_np != 0
+    selected_count = int(np.count_nonzero(selected))
+    result = output.to_numpy()
+    assert count.to_numpy()[0] == selected_count
+    assert np.array_equal(result["vec"][:selected_count], values_np["vec"][selected])
+    assert np.array_equal(result["tag"], output_np["tag"])
+    return workspace
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_compact_cpu_native_struct_tensor_member_views():
+    workspace = _run_struct_tensor_member_compact("cpu_native")
+    assert workspace.workspace_bytes_peak >= 256 * 2 * 4
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_compact_cuda_cub_struct_tensor_member_views():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cuda_cub_select_available")
+        and prog.cuda_cub_select_available()
+        and hasattr(prog, "cuda_device_indexed_copy_available")
+        and prog.cuda_device_indexed_copy_available()
+        and hasattr(prog, "cuda_toolkit_transform_available")
+        and prog.cuda_toolkit_transform_available()
+    ):
+        pytest.skip("CUDA CUB compact, indexed copy, or strided transform is unavailable.")
+    _run_struct_tensor_member_compact("cuda_cub")
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_compact_vulkan_native_struct_tensor_member_views():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_compact_available")
+        and prog.vulkan_compact_available()
+    ):
+        pytest.skip("Vulkan native compact is unavailable.")
+    _run_struct_tensor_member_compact("vulkan_native")
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

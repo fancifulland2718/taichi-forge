@@ -694,6 +694,13 @@ void export_lang(py::module &m) {
            py::arg("src_offset"), py::arg("src_stride"),
            py::arg("dst_offset"), py::arg("dst_stride"), py::arg("scale"),
            py::arg("bias"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_transform_affine_packed_strided_ndarray",
+           &Program::cuda_device_transform_affine_packed_strided_ndarray,
+           py::arg("src"), py::arg("dst"), py::arg("value_type"),
+           py::arg("lane_count"), py::arg("src_offset"),
+           py::arg("src_stride"), py::arg("dst_offset"),
+           py::arg("dst_stride"), py::arg("scale"), py::arg("bias"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_device_indexed_copy_available",
            &Program::cuda_device_indexed_copy_available)
       .def("cuda_device_indexed_copy_payload_available",
@@ -956,6 +963,13 @@ void export_lang(py::module &m) {
            py::arg("src_stride"), py::arg("dst_offset"),
            py::arg("dst_stride"), py::arg("scale"), py::arg("bias"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cpu_transform_affine_packed_strided_ndarray",
+           &Program::cpu_transform_affine_packed_strided_ndarray,
+           py::arg("src"), py::arg("dst"), py::arg("value_type"),
+           py::arg("lane_count"), py::arg("src_offset"),
+           py::arg("src_stride"), py::arg("dst_offset"),
+           py::arg("dst_stride"), py::arg("scale"), py::arg("bias"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_indexed_copy_available", &Program::cpu_indexed_copy_available)
       .def("cpu_indexed_copy_workspace_bytes",
            &Program::cpu_indexed_copy_workspace_bytes)
@@ -1142,6 +1156,13 @@ void export_lang(py::module &m) {
       .def("vulkan_transform_affine_strided_ndarray",
            &Program::vulkan_transform_affine_strided_ndarray, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("src_offset"),
+           py::arg("src_stride"), py::arg("dst_offset"),
+           py::arg("dst_stride"), py::arg("scale"), py::arg("bias"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_transform_affine_packed_strided_ndarray",
+           &Program::vulkan_transform_affine_packed_strided_ndarray,
+           py::arg("src"), py::arg("dst"), py::arg("value_type"),
+           py::arg("lane_count"), py::arg("src_offset"),
            py::arg("src_stride"), py::arg("dst_offset"),
            py::arg("dst_stride"), py::arg("scale"), py::arg("bias"),
            py::call_guard<py::gil_scoped_release>())

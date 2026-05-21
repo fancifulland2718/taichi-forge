@@ -2,6 +2,7 @@ import pytest
 import numpy as np
 
 import taichi_forge as ti
+from taichi_forge.lang import impl
 from tests import test_utils
 
 _SORT_VALUE_DTYPE_CASES = [
@@ -169,15 +170,37 @@ def test_sort_struct_tensor_member_values_host_stable():
 
 
 @test_utils.test(arch=[ti.cpu])
-def test_sort_struct_tensor_member_values_reject_native_methods():
-    keys = ti.ndarray(ti.i32, shape=4)
-    payload = ti.types.struct(vec=ti.types.vector(2, ti.i32), tag=ti.i32)
-    values = ti.ndarray(payload, shape=4)
-    keys.from_numpy(np.array([3, 1, 2, 0], dtype=np.int32))
-    values.fill(0)
+def test_sort_struct_tensor_member_values_cpu_native():
+    _run_sort_struct_tensor_member_host_case("cpu_native")
 
-    with pytest.raises(NotImplementedError, match="reusable permutation"):
-        ti.algorithms.sort(keys, values.field("vec"), method="cpu_native")
+
+@test_utils.test(arch=[ti.cuda])
+def test_sort_struct_tensor_member_values_cuda_native():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cuda_cub_radix_sort_available")
+        and prog.cuda_cub_radix_sort_available()
+    ):
+        pytest.skip("CUDA CUB radix sort is unavailable in this runtime.")
+    if not (
+        hasattr(prog, "cuda_toolkit_transform_available")
+        and prog.cuda_toolkit_transform_available()
+    ):
+        pytest.skip("CUDA toolkit strided member copy path is unavailable.")
+
+    _run_sort_struct_tensor_member_host_case("cuda_cub_native")
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_sort_struct_tensor_member_values_vulkan_native():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_radix_sort_available")
+        and prog.vulkan_radix_sort_available()
+    ):
+        pytest.skip("Vulkan native radix sort is unavailable in this runtime.")
+
+    _run_sort_struct_tensor_member_host_case("vulkan_native_radix_u32")
 
 
 @test_utils.test(arch=[ti.cpu])

@@ -158,6 +158,20 @@ std::size_t cub_transform_affine_strided_to_strided(
     double bias,
     void *stream);
 
+std::size_t cub_transform_affine_packed_strided(
+    void *src,
+    void *dst,
+    int num_items,
+    int lane_count,
+    CudaTransformValueType value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    double scale,
+    double bias,
+    void *stream);
+
 bool driver_indexed_copy_available();
 
 std::size_t driver_indexed_copy(void *src,
