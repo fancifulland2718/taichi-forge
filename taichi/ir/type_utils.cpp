@@ -1,5 +1,7 @@
 #include "taichi/ir/type_utils.h"
 
+#include <algorithm>
+
 namespace taichi::lang {
 
 std::string data_type_name(DataType t) {
@@ -27,6 +29,42 @@ std::vector<int> data_type_shape(DataType t) {
   return {};
 }
 
+int data_type_alignment(DataType t) {
+  t.set_is_pointer(false);
+  if (t->is_primitive(PrimitiveTypeID::f16)) {
+    return 2;
+  }
+  if (t->is_primitive(PrimitiveTypeID::gen)) {
+    return 1;
+  }
+  if (t->is_primitive(PrimitiveTypeID::unknown)) {
+    return -1;
+  }
+  if (t->is<TensorType>()) {
+    auto tensor_type = t->cast<TensorType>();
+    TI_ASSERT(tensor_type->get_element_type());
+    return data_type_alignment(tensor_type->get_element_type());
+  }
+  if (t->is<StructType>()) {
+    const auto &elements = t->as<StructType>()->elements();
+    int alignment = 1;
+    for (const auto &element : elements) {
+      TI_ERROR_IF(element.type->is<PointerType>(),
+                  "data_type_alignment for StructType with pointer element "
+                  "{} requires backend-specific layout.",
+                  element.name);
+      int element_alignment = data_type_alignment(element.type);
+      TI_ASSERT_INFO(element_alignment > 0,
+                     "Invalid alignment for struct element {}: {}",
+                     element.name, element.type->to_string());
+      alignment = std::max(alignment, element_alignment);
+    }
+    return alignment;
+  }
+
+  return data_type_size(t);
+}
+
 int data_type_size(DataType t) {
   // TODO:
   //  1. Ensure in the old code, pointer attributes of t are correct (by
@@ -46,6 +84,38 @@ int data_type_size(DataType t) {
     TI_ASSERT(tensor_type->get_element_type());
     return tensor_type->get_num_elements() *
            data_type_size(tensor_type->get_element_type());
+  }
+  if (t->is<StructType>()) {
+    auto struct_type = t->as<StructType>();
+    const auto &elements = struct_type->elements();
+    if (elements.empty()) {
+      return 0;
+    }
+
+    bool has_explicit_offsets = false;
+    for (const auto &element : elements) {
+      has_explicit_offsets |= element.offset != 0;
+    }
+
+    size_t bytes = 0;
+    for (const auto &element : elements) {
+      TI_ERROR_IF(element.type->is<PointerType>(),
+                  "data_type_size for StructType with pointer element {} "
+                  "requires backend-specific layout.",
+                  element.name);
+      int element_alignment = data_type_alignment(element.type);
+      int element_size = data_type_size(element.type);
+      TI_ASSERT_INFO(element_alignment > 0 && element_size >= 0,
+                     "Invalid layout for struct element {}: {}", element.name,
+                     element.type->to_string());
+      if (has_explicit_offsets) {
+        bytes = std::max(bytes, element.offset + (size_t)element_size);
+      } else {
+        bytes = align_up(bytes, (size_t)element_alignment);
+        bytes += element_size;
+      }
+    }
+    return (int)align_up(bytes, (size_t)data_type_alignment(t));
   }
 
 #define REGISTER_DATA_TYPE(i, j) \

@@ -314,6 +314,17 @@ struct CpuReduceTaskContext {
   int op{0};
 };
 
+template <typename T>
+struct CpuStridedReduceTaskContext {
+  const uint8_t *values{nullptr};
+  T *partial{nullptr};
+  std::size_t n{0};
+  std::size_t offset{0};
+  std::size_t stride{0};
+  int num_threads{1};
+  int op{0};
+};
+
 struct CpuFillU32TaskContext {
   uint32_t *data{nullptr};
   std::size_t words{0};
@@ -338,6 +349,18 @@ struct CpuTransformTaskContext {
   int num_threads{1};
 };
 
+template <typename T>
+struct CpuStridedTransformTaskContext {
+  const uint8_t *src{nullptr};
+  T *dst{nullptr};
+  std::size_t n{0};
+  std::size_t offset{0};
+  std::size_t stride{0};
+  T scale{};
+  T bias{};
+  int num_threads{1};
+};
+
 struct CpuIndexedCopyTaskContext {
   const uint8_t *src{nullptr};
   const int32_t *indices{nullptr};
@@ -357,6 +380,34 @@ struct CpuScatterAddTaskContext {
   T *dst{nullptr};
   std::size_t n{0};
   std::size_t dst_items{0};
+  int num_threads{1};
+};
+
+template <typename T>
+struct CpuStridedScatterAddTaskContext {
+  const uint8_t *src{nullptr};
+  const int32_t *indices{nullptr};
+  T *partial{nullptr};
+  T *dst{nullptr};
+  std::size_t n{0};
+  std::size_t dst_items{0};
+  std::size_t offset{0};
+  std::size_t stride{0};
+  int num_threads{1};
+};
+
+template <typename T>
+struct CpuStridedScatterAddIoTaskContext {
+  const uint8_t *src{nullptr};
+  const int32_t *indices{nullptr};
+  T *partial{nullptr};
+  uint8_t *dst{nullptr};
+  std::size_t n{0};
+  std::size_t dst_items{0};
+  std::size_t src_offset{0};
+  std::size_t src_stride{0};
+  std::size_t dst_offset{0};
+  std::size_t dst_stride{0};
   int num_threads{1};
 };
 
@@ -398,6 +449,36 @@ struct CpuGroupedReduceTaskContext {
   T *output{nullptr};
   std::size_t n{0};
   std::size_t num_groups{0};
+  int num_threads{1};
+};
+
+template <typename T>
+struct CpuStridedGroupedReduceTaskContext {
+  const int32_t *keys{nullptr};
+  const uint8_t *values{nullptr};
+  T *partial{nullptr};
+  T *output{nullptr};
+  std::size_t n{0};
+  std::size_t num_groups{0};
+  std::size_t offset{0};
+  std::size_t stride{0};
+  int num_threads{1};
+};
+
+template <typename T>
+struct CpuStridedGroupedReduceIoTaskContext {
+  const uint8_t *keys{nullptr};
+  const uint8_t *values{nullptr};
+  T *partial{nullptr};
+  uint8_t *output{nullptr};
+  std::size_t n{0};
+  std::size_t num_groups{0};
+  std::size_t keys_offset{0};
+  std::size_t keys_stride{sizeof(int32_t)};
+  std::size_t values_offset{0};
+  std::size_t values_stride{0};
+  std::size_t output_offset{0};
+  std::size_t output_stride{0};
   int num_threads{1};
 };
 
@@ -472,6 +553,27 @@ void cpu_reduce_task(void *raw_ctx, int /*thread_id*/, int task_id) {
   ctx->partial[tid] = acc;
 }
 
+template <typename T>
+void cpu_strided_reduce_task(void *raw_ctx,
+                             int /*thread_id*/,
+                             int task_id) {
+  auto *ctx = static_cast<CpuStridedReduceTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  T acc = cpu_reduce_identity<T>(ctx->op);
+  for (std::size_t i = begin; i < end; ++i) {
+    const auto *value = reinterpret_cast<const T *>(
+        ctx->values + ctx->offset + i * ctx->stride);
+    acc = cpu_reduce_combine(acc, *value, ctx->op);
+  }
+  ctx->partial[tid] = acc;
+}
+
 void cpu_fill_u32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
   auto *ctx = static_cast<CpuFillU32TaskContext *>(raw_ctx);
   const int tid = task_id;
@@ -512,6 +614,25 @@ void cpu_transform_task(void *raw_ctx, int /*thread_id*/, int task_id) {
 }
 
 template <typename T>
+void cpu_strided_transform_task(void *raw_ctx,
+                                int /*thread_id*/,
+                                int task_id) {
+  auto *ctx = static_cast<CpuStridedTransformTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    const auto *value = reinterpret_cast<const T *>(
+        ctx->src + ctx->offset + i * ctx->stride);
+    ctx->dst[i] = (*value) * ctx->scale + ctx->bias;
+  }
+}
+
+template <typename T>
 void cpu_transform_run_typed(const T *src_ptr,
                              T *dst_ptr,
                              std::size_t n,
@@ -535,6 +656,87 @@ void cpu_transform_run_typed(const T *src_ptr,
   for (std::size_t i = 0; i < n; ++i) {
     dst_ptr[i] = src_ptr[i] * scale + bias;
   }
+}
+
+template <typename T>
+void cpu_transform_run_strided_typed(const uint8_t *src_ptr,
+                                     T *dst_ptr,
+                                     std::size_t n,
+                                     std::size_t offset,
+                                     std::size_t stride,
+                                     T scale,
+                                     T bias,
+                                     bool use_parallel,
+                                     int target_threads,
+                                     int max_threads) {
+  if (use_parallel) {
+    CpuStridedTransformTaskContext<T> ctx;
+    ctx.src = src_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.offset = offset;
+    ctx.stride = stride;
+    ctx.scale = scale;
+    ctx.bias = bias;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_transform_task<T>);
+    return;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto *value =
+        reinterpret_cast<const T *>(src_ptr + offset + i * stride);
+    dst_ptr[i] = (*value) * scale + bias;
+  }
+}
+
+std::size_t transform_value_size(int value_type) {
+  TI_ERROR_IF(value_type < 0 || value_type > 5,
+              "transform received an unsupported value type.");
+  return (value_type == 3 || value_type == 4 || value_type == 5)
+             ? sizeof(uint64_t)
+             : sizeof(uint32_t);
+}
+
+void check_transform_member_request(const char *backend,
+                                    Ndarray *src,
+                                    Ndarray *dst,
+                                    int value_type,
+                                    std::size_t offset,
+                                    std::size_t stride) {
+  TI_ERROR_IF(!src || !dst, "{} strided transform received a null ndarray.",
+              backend);
+  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1,
+              "{} strided transform expects 1D ndarrays.", backend);
+  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
+              "{} strided transform source and destination sizes differ.",
+              backend);
+  const std::size_t value_size = transform_value_size(value_type);
+  TI_ERROR_IF(dst->get_element_size() != value_size,
+              "{} strided transform destination dtype does not match value "
+              "type.",
+              backend);
+  TI_ERROR_IF(stride < value_size,
+              "{} strided transform source stride is smaller than value size.",
+              backend);
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "{} strided transform source offset/stride must align to value "
+              "size.",
+              backend);
+  const std::size_t n = src->get_nelement();
+  if (n == 0) {
+    return;
+  }
+  const std::size_t src_bytes = n * src->get_element_size();
+  TI_ERROR_IF(src_bytes < value_size,
+              "{} strided transform source buffer is smaller than value size.",
+              backend);
+  TI_ERROR_IF(offset > src_bytes - value_size,
+              "{} strided transform source offset is out of bounds.", backend);
+  const std::size_t last = offset + (n - 1) * stride + value_size;
+  TI_ERROR_IF(last > src_bytes,
+              "{} strided transform source range is out of bounds.", backend);
 }
 
 void cpu_indexed_copy_task(void *raw_ctx, int /*thread_id*/, int task_id) {
@@ -612,6 +814,100 @@ void cpu_scatter_add_merge_task(void *raw_ctx,
 }
 
 template <typename T>
+void cpu_strided_scatter_add_count_task(void *raw_ctx,
+                                        int /*thread_id*/,
+                                        int task_id) {
+  auto *ctx = static_cast<CpuStridedScatterAddTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  T *local = ctx->partial + ctx->dst_items * static_cast<std::size_t>(tid);
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    const auto index = static_cast<std::size_t>(ctx->indices[i]);
+    if (index < ctx->dst_items) {
+      const auto *value =
+          reinterpret_cast<const T *>(ctx->src + ctx->offset + i * ctx->stride);
+      local[index] = cpu_reduce_combine(local[index], *value, 0);
+    }
+  }
+}
+
+template <typename T>
+void cpu_strided_scatter_add_merge_task(void *raw_ctx,
+                                        int /*thread_id*/,
+                                        int task_id) {
+  auto *ctx = static_cast<CpuStridedScatterAddTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->dst_items * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->dst_items * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    T value{};
+    for (int t = 0; t < ctx->num_threads; ++t) {
+      value = cpu_reduce_combine(
+          value,
+          ctx->partial[ctx->dst_items * static_cast<std::size_t>(t) + i], 0);
+    }
+    ctx->dst[i] = cpu_reduce_combine(ctx->dst[i], value, 0);
+  }
+}
+
+template <typename T>
+void cpu_strided_scatter_add_io_count_task(void *raw_ctx,
+                                           int /*thread_id*/,
+                                           int task_id) {
+  auto *ctx = static_cast<CpuStridedScatterAddIoTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  T *local = ctx->partial + ctx->dst_items * static_cast<std::size_t>(tid);
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    const auto index = static_cast<std::size_t>(ctx->indices[i]);
+    if (index < ctx->dst_items) {
+      const auto *value = reinterpret_cast<const T *>(
+          ctx->src + ctx->src_offset + i * ctx->src_stride);
+      local[index] = cpu_reduce_combine(local[index], *value, 0);
+    }
+  }
+}
+
+template <typename T>
+void cpu_strided_scatter_add_io_merge_task(void *raw_ctx,
+                                           int /*thread_id*/,
+                                           int task_id) {
+  auto *ctx = static_cast<CpuStridedScatterAddIoTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->dst_items * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->dst_items * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    T value{};
+    for (int t = 0; t < ctx->num_threads; ++t) {
+      value = cpu_reduce_combine(
+          value,
+          ctx->partial[ctx->dst_items * static_cast<std::size_t>(t) + i], 0);
+    }
+    auto *dst_value =
+        reinterpret_cast<T *>(ctx->dst + ctx->dst_offset + i * ctx->dst_stride);
+    *dst_value = cpu_reduce_combine(*dst_value, value, 0);
+  }
+}
+
+template <typename T>
 std::size_t cpu_scatter_add_typed(const T *src_ptr,
                                   const int32_t *indices_ptr,
                                   T *dst_ptr,
@@ -647,6 +943,107 @@ std::size_t cpu_scatter_add_typed(const T *src_ptr,
     const auto index = static_cast<std::size_t>(indices_ptr[i]);
     if (index < dst_items) {
       dst_ptr[index] = cpu_reduce_combine(dst_ptr[index], src_ptr[i], 0);
+    }
+  }
+  return 0;
+}
+
+template <typename T>
+std::size_t cpu_scatter_add_strided_typed(const uint8_t *src_ptr,
+                                          std::size_t offset,
+                                          std::size_t stride,
+                                          const int32_t *indices_ptr,
+                                          T *dst_ptr,
+                                          std::size_t n,
+                                          std::size_t dst_items,
+                                          int max_threads,
+                                          int target_threads) {
+  TI_ERROR_IF(!src_ptr || !dst_ptr,
+              "CPU native strided scatter-add received a null data pointer.");
+  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
+  const std::size_t workspace_bytes =
+      static_cast<std::size_t>(target_threads) * dst_items * sizeof(T);
+  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
+    std::vector<T> partial(static_cast<std::size_t>(target_threads) * dst_items,
+                           T{});
+    CpuStridedScatterAddTaskContext<T> ctx;
+    ctx.src = src_ptr;
+    ctx.indices = indices_ptr;
+    ctx.partial = partial.data();
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.dst_items = dst_items;
+    ctx.offset = offset;
+    ctx.stride = stride;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_scatter_add_count_task<T>);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_scatter_add_merge_task<T>);
+    update_cpu_scatter_add_workspace_peak(workspace_bytes);
+    return workspace_bytes;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto index = static_cast<std::size_t>(indices_ptr[i]);
+    if (index < dst_items) {
+      const auto *value =
+          reinterpret_cast<const T *>(src_ptr + offset + i * stride);
+      dst_ptr[index] = cpu_reduce_combine(dst_ptr[index], *value, 0);
+    }
+  }
+  return 0;
+}
+
+template <typename T>
+std::size_t cpu_scatter_add_strided_io_typed(const uint8_t *src_ptr,
+                                             std::size_t src_offset,
+                                             std::size_t src_stride,
+                                             const int32_t *indices_ptr,
+                                             uint8_t *dst_ptr,
+                                             std::size_t dst_offset,
+                                             std::size_t dst_stride,
+                                             std::size_t n,
+                                             std::size_t dst_items,
+                                             int max_threads,
+                                             int target_threads) {
+  TI_ERROR_IF(!src_ptr || !dst_ptr,
+              "CPU native strided scatter-add received a null data pointer.");
+  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
+  const std::size_t workspace_bytes =
+      static_cast<std::size_t>(target_threads) * dst_items * sizeof(T);
+  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
+    std::vector<T> partial(static_cast<std::size_t>(target_threads) *
+                               dst_items,
+                           T{});
+    CpuStridedScatterAddIoTaskContext<T> ctx;
+    ctx.src = src_ptr;
+    ctx.indices = indices_ptr;
+    ctx.partial = partial.data();
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.dst_items = dst_items;
+    ctx.src_offset = src_offset;
+    ctx.src_stride = src_stride;
+    ctx.dst_offset = dst_offset;
+    ctx.dst_stride = dst_stride;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_scatter_add_io_count_task<T>);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_scatter_add_io_merge_task<T>);
+    update_cpu_scatter_add_workspace_peak(workspace_bytes);
+    return workspace_bytes;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto index = static_cast<std::size_t>(indices_ptr[i]);
+    if (index < dst_items) {
+      const auto *value =
+          reinterpret_cast<const T *>(src_ptr + src_offset + i * src_stride);
+      auto *dst_value = reinterpret_cast<T *>(dst_ptr + dst_offset +
+                                              index * dst_stride);
+      *dst_value = cpu_reduce_combine(*dst_value, *value, 0);
     }
   }
   return 0;
@@ -956,6 +1353,106 @@ void cpu_grouped_reduce_merge_task(void *raw_ctx,
 }
 
 template <typename T>
+void cpu_strided_grouped_reduce_count_task(void *raw_ctx,
+                                           int /*thread_id*/,
+                                           int task_id) {
+  auto *ctx = static_cast<CpuStridedGroupedReduceTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  T *local =
+      ctx->partial + ctx->num_groups * static_cast<std::size_t>(tid);
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    int32_t key = ctx->keys[i];
+    if (key >= 0 && static_cast<std::size_t>(key) < ctx->num_groups) {
+      const auto *value =
+          reinterpret_cast<const T *>(ctx->values + ctx->offset +
+                                      i * ctx->stride);
+      local[key] = cpu_reduce_combine(local[key], *value, 0);
+    }
+  }
+}
+
+template <typename T>
+void cpu_strided_grouped_reduce_merge_task(void *raw_ctx,
+                                           int /*thread_id*/,
+                                           int task_id) {
+  auto *ctx = static_cast<CpuStridedGroupedReduceTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->num_groups * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->num_groups * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t group = begin; group < end; ++group) {
+    T value{};
+    for (int t = 0; t < ctx->num_threads; ++t) {
+      value = cpu_reduce_combine(
+          value,
+          ctx->partial[ctx->num_groups * static_cast<std::size_t>(t) + group],
+          0);
+    }
+    ctx->output[group] = value;
+  }
+}
+
+template <typename T>
+void cpu_strided_grouped_reduce_io_count_task(void *raw_ctx,
+                                              int /*thread_id*/,
+                                              int task_id) {
+  auto *ctx = static_cast<CpuStridedGroupedReduceIoTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  T *local =
+      ctx->partial + ctx->num_groups * static_cast<std::size_t>(tid);
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    const int32_t key = *reinterpret_cast<const int32_t *>(
+        ctx->keys + ctx->keys_offset + i * ctx->keys_stride);
+    if (key >= 0 && static_cast<std::size_t>(key) < ctx->num_groups) {
+      const auto *value = reinterpret_cast<const T *>(
+          ctx->values + ctx->values_offset + i * ctx->values_stride);
+      local[key] = cpu_reduce_combine(local[key], *value, 0);
+    }
+  }
+}
+
+template <typename T>
+void cpu_strided_grouped_reduce_io_merge_task(void *raw_ctx,
+                                              int /*thread_id*/,
+                                              int task_id) {
+  auto *ctx = static_cast<CpuStridedGroupedReduceIoTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->num_groups * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->num_groups * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t group = begin; group < end; ++group) {
+    T value{};
+    for (int t = 0; t < ctx->num_threads; ++t) {
+      value = cpu_reduce_combine(
+          value,
+          ctx->partial[ctx->num_groups * static_cast<std::size_t>(t) + group],
+          0);
+    }
+    auto *out_value = reinterpret_cast<T *>(
+        ctx->output + ctx->output_offset + group * ctx->output_stride);
+    *out_value = value;
+  }
+}
+
+template <typename T>
 std::size_t cpu_grouped_reduce_typed(const int32_t *keys_ptr,
                                      const T *values_ptr,
                                      T *output_ptr,
@@ -1002,6 +1499,128 @@ std::size_t cpu_grouped_reduce_typed(const int32_t *keys_ptr,
   return 0;
 }
 
+template <typename T>
+std::size_t cpu_grouped_reduce_strided_typed(const int32_t *keys_ptr,
+                                             const uint8_t *values_ptr,
+                                             std::size_t offset,
+                                             std::size_t stride,
+                                             T *output_ptr,
+                                             std::size_t n,
+                                             std::size_t num_groups,
+                                             int max_threads,
+                                             int target_threads) {
+  TI_ERROR_IF(!keys_ptr || !values_ptr || !output_ptr,
+              "CPU native strided grouped reduce received a null data pointer.");
+  std::fill(output_ptr, output_ptr + num_groups, T{});
+  if (n == 0) {
+    return 0;
+  }
+  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
+  const std::size_t workspace_bytes =
+      static_cast<std::size_t>(target_threads) * num_groups * sizeof(T);
+  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
+    std::vector<T> partial(static_cast<std::size_t>(target_threads) *
+                               num_groups,
+                           T{});
+    CpuStridedGroupedReduceTaskContext<T> ctx;
+    ctx.keys = keys_ptr;
+    ctx.values = values_ptr;
+    ctx.partial = partial.data();
+    ctx.output = output_ptr;
+    ctx.n = n;
+    ctx.num_groups = num_groups;
+    ctx.offset = offset;
+    ctx.stride = stride;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_grouped_reduce_count_task<T>);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_grouped_reduce_merge_task<T>);
+    update_cpu_grouped_reduce_workspace_peak(workspace_bytes);
+    return workspace_bytes;
+  }
+
+  for (std::size_t i = 0; i < n; ++i) {
+    int32_t key = keys_ptr[i];
+    if (key >= 0 && static_cast<std::size_t>(key) < num_groups) {
+      const auto *value =
+          reinterpret_cast<const T *>(values_ptr + offset + i * stride);
+      output_ptr[key] = cpu_reduce_combine(output_ptr[key], *value, 0);
+    }
+  }
+  return 0;
+}
+
+template <typename T>
+std::size_t cpu_grouped_reduce_strided_io_typed(const uint8_t *keys_ptr,
+                                                std::size_t keys_offset,
+                                                std::size_t keys_stride,
+                                                const uint8_t *values_ptr,
+                                                std::size_t values_offset,
+                                                std::size_t values_stride,
+                                                uint8_t *output_ptr,
+                                                std::size_t output_offset,
+                                                std::size_t output_stride,
+                                                std::size_t n,
+                                                std::size_t num_groups,
+                                                int max_threads,
+                                                int target_threads) {
+  TI_ERROR_IF(!keys_ptr || !values_ptr || !output_ptr,
+              "CPU native strided grouped reduce received a null data pointer.");
+  for (std::size_t group = 0; group < num_groups; ++group) {
+    auto *out_value = reinterpret_cast<T *>(
+        output_ptr + output_offset + group * output_stride);
+    *out_value = T{};
+  }
+  if (n == 0) {
+    return 0;
+  }
+  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
+  const std::size_t workspace_bytes =
+      static_cast<std::size_t>(target_threads) * num_groups * sizeof(T);
+  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
+    std::vector<T> partial(static_cast<std::size_t>(target_threads) *
+                               num_groups,
+                           T{});
+    CpuStridedGroupedReduceIoTaskContext<T> ctx;
+    ctx.keys = keys_ptr;
+    ctx.values = values_ptr;
+    ctx.partial = partial.data();
+    ctx.output = output_ptr;
+    ctx.n = n;
+    ctx.num_groups = num_groups;
+    ctx.keys_offset = keys_offset;
+    ctx.keys_stride = keys_stride;
+    ctx.values_offset = values_offset;
+    ctx.values_stride = values_stride;
+    ctx.output_offset = output_offset;
+    ctx.output_stride = output_stride;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_grouped_reduce_io_count_task<T>);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_grouped_reduce_io_merge_task<T>);
+    update_cpu_grouped_reduce_workspace_peak(workspace_bytes);
+    return workspace_bytes;
+  }
+
+  for (std::size_t i = 0; i < n; ++i) {
+    const int32_t key = *reinterpret_cast<const int32_t *>(
+        keys_ptr + keys_offset + i * keys_stride);
+    if (key >= 0 && static_cast<std::size_t>(key) < num_groups) {
+      const auto *value = reinterpret_cast<const T *>(
+          values_ptr + values_offset + i * values_stride);
+      auto *out_value = reinterpret_cast<T *>(
+          output_ptr + output_offset + static_cast<std::size_t>(key) *
+                                         output_stride);
+      *out_value = cpu_reduce_combine(*out_value, *value, 0);
+    }
+  }
+  return 0;
+}
+
 std::size_t primitive_value_type_size(int value_type) {
   if (value_type >= 0 && value_type <= 2) {
     return sizeof(uint32_t);
@@ -1010,6 +1629,308 @@ std::size_t primitive_value_type_size(int value_type) {
     return sizeof(uint64_t);
   }
   return 0;
+}
+
+void check_reduce_member_request(const char *backend,
+                                 Ndarray *values,
+                                 Ndarray *output,
+                                 int value_type,
+                                 std::size_t offset,
+                                 std::size_t stride,
+                                 int op) {
+  TI_ERROR_IF(!values || !output,
+              "{} strided reduce received a null ndarray.", backend);
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "{} strided reduce expects 1D ndarrays.", backend);
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "{} strided reduce expects at least one input item.", backend);
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "{} strided reduce output must contain at least one item.",
+              backend);
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "{} strided reduce received an unsupported value type.",
+              backend);
+  TI_ERROR_IF(output->get_element_size() != value_size,
+              "{} strided reduce output dtype does not match value type.",
+              backend);
+  TI_ERROR_IF(op < 0 || op > 2,
+              "{} strided reduce supports only sum/min/max operations.",
+              backend);
+  TI_ERROR_IF(stride < value_size,
+              "{} strided reduce source stride is smaller than value size.",
+              backend);
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "{} strided reduce source offset/stride must align to value "
+              "size.",
+              backend);
+  const std::size_t n = values->get_nelement();
+  const std::size_t src_bytes = n * values->get_element_size();
+  TI_ERROR_IF(src_bytes < value_size,
+              "{} strided reduce source buffer is smaller than value size.",
+              backend);
+  TI_ERROR_IF(offset > src_bytes - value_size,
+              "{} strided reduce source offset is out of bounds.", backend);
+  const std::size_t last = offset + (n - 1) * stride + value_size;
+  TI_ERROR_IF(last > src_bytes,
+              "{} strided reduce source range is out of bounds.", backend);
+}
+
+void check_scan_member_request(const char *backend,
+                               Ndarray *data,
+                               int value_type,
+                               std::size_t offset,
+                               std::size_t stride) {
+  TI_ERROR_IF(!data, "{} strided scan received a null ndarray.", backend);
+  TI_ERROR_IF(data->shape.size() != 1, "{} strided scan expects a 1D ndarray.",
+              backend);
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "{} strided scan received an unsupported value type.", backend);
+  TI_ERROR_IF(stride < value_size,
+              "{} strided scan source stride is smaller than value size.",
+              backend);
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "{} strided scan source offset/stride must align to value size.",
+              backend);
+  const std::size_t n = data->get_nelement();
+  if (n == 0) {
+    return;
+  }
+  const std::size_t src_bytes = n * data->get_element_size();
+  TI_ERROR_IF(src_bytes < value_size,
+              "{} strided scan source buffer is smaller than value size.",
+              backend);
+  TI_ERROR_IF(offset > src_bytes - value_size,
+              "{} strided scan source offset is out of bounds.", backend);
+  const std::size_t last = offset + (n - 1) * stride + value_size;
+  TI_ERROR_IF(last > src_bytes,
+              "{} strided scan source range is out of bounds.", backend);
+}
+
+void check_scatter_add_member_request(const char *backend,
+                                      Ndarray *src,
+                                      Ndarray *indices,
+                                      Ndarray *dst,
+                                      int value_type,
+                                      std::size_t offset,
+                                      std::size_t stride) {
+  TI_ERROR_IF(!src || !indices || !dst,
+              "{} strided scatter-add received a null ndarray.", backend);
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "{} strided scatter-add expects 1D ndarrays.", backend);
+  TI_ERROR_IF(src->get_nelement() != indices->get_nelement(),
+              "{} strided scatter-add source and indices sizes differ.",
+              backend);
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "{} strided scatter-add received an unsupported value type.",
+              backend);
+  TI_ERROR_IF(dst->get_element_size() != value_size ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "{} strided scatter-add destination dtype or i32 index size "
+              "mismatch.",
+              backend);
+  TI_ERROR_IF(stride < value_size,
+              "{} strided scatter-add source stride is smaller than value "
+              "size.",
+              backend);
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "{} strided scatter-add source offset/stride must align to "
+              "value size.",
+              backend);
+  const std::size_t n = src->get_nelement();
+  if (n == 0) {
+    return;
+  }
+  const std::size_t src_bytes = n * src->get_element_size();
+  TI_ERROR_IF(src_bytes < value_size,
+              "{} strided scatter-add source buffer is smaller than value "
+              "size.",
+              backend);
+  TI_ERROR_IF(offset > src_bytes - value_size,
+              "{} strided scatter-add source offset is out of bounds.",
+              backend);
+  const std::size_t last = offset + (n - 1) * stride + value_size;
+  TI_ERROR_IF(last > src_bytes,
+              "{} strided scatter-add source range is out of bounds.",
+              backend);
+}
+
+void check_grouped_reduce_member_request(const char *backend,
+                                         Ndarray *keys,
+                                         Ndarray *values,
+                                         Ndarray *output,
+                                         int value_type,
+                                         std::size_t offset,
+                                         std::size_t stride,
+                                         int op) {
+  TI_ERROR_IF(!keys || !values || !output,
+              "{} strided grouped reduce received a null ndarray.", backend);
+  TI_ERROR_IF(keys->shape.size() != 1 || values->shape.size() != 1 ||
+                  output->shape.size() != 1,
+              "{} strided grouped reduce expects 1D ndarrays.", backend);
+  TI_ERROR_IF(keys->get_nelement() != values->get_nelement(),
+              "{} strided grouped reduce keys and values sizes differ.",
+              backend);
+  TI_ERROR_IF(output->get_nelement() == 0,
+              "{} strided grouped reduce output must contain at least one "
+              "group.",
+              backend);
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "{} strided grouped reduce received an unsupported value type.",
+              backend);
+  TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
+                  output->get_element_size() != value_size,
+              "{} strided grouped reduce output dtype or i32 key size "
+              "mismatch.",
+              backend);
+  TI_ERROR_IF(op != 0,
+              "{} strided grouped reduce currently supports only sum.",
+              backend);
+  TI_ERROR_IF(stride < value_size,
+              "{} strided grouped reduce source stride is smaller than value "
+              "size.",
+              backend);
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "{} strided grouped reduce source offset/stride must align to "
+              "value size.",
+              backend);
+  const std::size_t n = values->get_nelement();
+  if (n == 0) {
+    return;
+  }
+  const std::size_t values_bytes = n * values->get_element_size();
+  TI_ERROR_IF(values_bytes < value_size,
+              "{} strided grouped reduce source buffer is smaller than value "
+              "size.",
+              backend);
+  TI_ERROR_IF(offset > values_bytes - value_size,
+              "{} strided grouped reduce source offset is out of bounds.",
+              backend);
+  const std::size_t last = offset + (n - 1) * stride + value_size;
+  TI_ERROR_IF(last > values_bytes,
+              "{} strided grouped reduce source range is out of bounds.",
+              backend);
+}
+
+void check_strided_range(const char *backend,
+                         const char *role,
+                         Ndarray *arr,
+                         std::size_t logical_items,
+                         std::size_t value_size,
+                         std::size_t offset,
+                         std::size_t stride) {
+  TI_ERROR_IF(stride < value_size,
+              "{} strided {} stride is smaller than value size.", backend,
+              role);
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "{} strided {} offset/stride must align to value size.", backend,
+              role);
+  if (logical_items == 0) {
+    return;
+  }
+  const std::size_t bytes = arr->get_nelement() * arr->get_element_size();
+  TI_ERROR_IF(bytes < value_size,
+              "{} strided {} buffer is smaller than value size.", backend,
+              role);
+  TI_ERROR_IF(offset > bytes - value_size,
+              "{} strided {} offset is out of bounds.", backend, role);
+  const std::size_t last = offset + (logical_items - 1) * stride + value_size;
+  TI_ERROR_IF(last > bytes, "{} strided {} range is out of bounds.", backend,
+              role);
+}
+
+void check_scatter_add_strided_request(const char *backend,
+                                       Ndarray *src,
+                                       Ndarray *indices,
+                                       Ndarray *dst,
+                                       int value_type,
+                                       std::size_t src_offset,
+                                       std::size_t src_stride,
+                                       std::size_t dst_offset,
+                                       std::size_t dst_stride) {
+  TI_ERROR_IF(!src || !indices || !dst,
+              "{} strided scatter-add received a null ndarray.", backend);
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "{} strided scatter-add expects 1D ndarrays.", backend);
+  TI_ERROR_IF(src->get_nelement() != indices->get_nelement(),
+              "{} strided scatter-add source and indices sizes differ.",
+              backend);
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "{} strided scatter-add received an unsupported value type.",
+              backend);
+  TI_ERROR_IF(indices->get_element_size() != sizeof(int32_t),
+              "{} strided scatter-add expects i32 indices.", backend);
+  const std::size_t n = src->get_nelement();
+  const std::size_t dst_items = dst->get_nelement();
+  check_strided_range(backend, "scatter-add source", src, n, value_size,
+                      src_offset, src_stride);
+  check_strided_range(backend, "scatter-add destination", dst, dst_items,
+                      value_size, dst_offset, dst_stride);
+}
+
+void check_grouped_reduce_strided_keys_request(const char *backend,
+                                               Ndarray *keys,
+                                               Ndarray *values,
+                                               Ndarray *output,
+                                               int value_type,
+                                               std::size_t keys_offset,
+                                               std::size_t keys_stride,
+                                               std::size_t values_offset,
+                                               std::size_t values_stride,
+                                               std::size_t output_offset,
+                                               std::size_t output_stride,
+                                               int op) {
+  TI_ERROR_IF(!keys || !values || !output,
+              "{} strided grouped reduce received a null ndarray.", backend);
+  TI_ERROR_IF(keys->shape.size() != 1 || values->shape.size() != 1 ||
+                  output->shape.size() != 1,
+              "{} strided grouped reduce expects 1D ndarrays.", backend);
+  TI_ERROR_IF(keys->get_nelement() != values->get_nelement(),
+              "{} strided grouped reduce keys and values sizes differ.",
+              backend);
+  TI_ERROR_IF(output->get_nelement() == 0,
+              "{} strided grouped reduce output must contain at least one "
+              "group.",
+              backend);
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "{} strided grouped reduce received an unsupported value type.",
+              backend);
+  TI_ERROR_IF(op != 0,
+              "{} strided grouped reduce currently supports only sum.",
+              backend);
+  check_strided_range(backend, "grouped reduce keys", keys,
+                      keys->get_nelement(), sizeof(int32_t), keys_offset,
+                      keys_stride);
+  check_strided_range(backend, "grouped reduce source", values,
+                      values->get_nelement(), value_size, values_offset,
+                      values_stride);
+  check_strided_range(backend, "grouped reduce output", output,
+                      output->get_nelement(), value_size, output_offset,
+                      output_stride);
+}
+
+void check_grouped_reduce_strided_request(const char *backend,
+                                          Ndarray *keys,
+                                          Ndarray *values,
+                                          Ndarray *output,
+                                          int value_type,
+                                          std::size_t values_offset,
+                                          std::size_t values_stride,
+                                          std::size_t output_offset,
+                                          std::size_t output_stride,
+                                          int op) {
+  TI_ERROR_IF(keys && keys->get_element_size() != sizeof(int32_t),
+              "{} strided grouped reduce expects i32 keys.", backend);
+  check_grouped_reduce_strided_keys_request(
+      backend, keys, values, output, value_type, 0, sizeof(int32_t),
+      values_offset, values_stride, output_offset, output_stride, op);
 }
 
 std::size_t histogram_bin_type_size(int bin_type) {
@@ -1129,6 +2050,64 @@ std::size_t cpu_reduce_typed(T *values_ptr,
     result = cpu_reduce_combine(result, values_ptr[i], op);
   }
   output_ptr[0] = result;
+  return 0;
+}
+
+template <typename T>
+std::size_t cpu_reduce_strided_typed(const uint8_t *values_ptr,
+                                     T *output_ptr,
+                                     int op,
+                                     std::size_t n,
+                                     std::size_t offset,
+                                     std::size_t stride,
+                                     int max_threads,
+                                     int target_threads,
+                                     bool use_parallel) {
+  TI_ERROR_IF(!values_ptr || !output_ptr,
+              "CPU native strided reduce received a null data pointer.");
+
+  T result = cpu_reduce_identity<T>(op);
+  if (use_parallel) {
+    const int num_threads = target_threads;
+    std::vector<T> partial(num_threads);
+    CpuStridedReduceTaskContext<T> ctx;
+    ctx.values = values_ptr;
+    ctx.partial = partial.data();
+    ctx.n = n;
+    ctx.offset = offset;
+    ctx.stride = stride;
+    ctx.num_threads = num_threads;
+    ctx.op = op;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(num_threads, num_threads, &ctx, cpu_strided_reduce_task<T>);
+    for (int tid = 0; tid < num_threads; ++tid) {
+      result = cpu_reduce_combine(result, partial[tid], op);
+    }
+    output_ptr[0] = result;
+    return partial.size() * sizeof(T);
+  }
+
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto *value =
+        reinterpret_cast<const T *>(values_ptr + offset + i * stride);
+    result = cpu_reduce_combine(result, *value, op);
+  }
+  output_ptr[0] = result;
+  return 0;
+}
+
+template <typename T>
+std::size_t cpu_scan_strided_typed(uint8_t *data_ptr,
+                                   std::size_t n,
+                                   std::size_t offset,
+                                   std::size_t stride) {
+  TI_ERROR_IF(!data_ptr, "CPU native strided scan received a null data pointer.");
+  T prefix{};
+  for (std::size_t i = 0; i < n; ++i) {
+    auto *value = reinterpret_cast<T *>(data_ptr + offset + i * stride);
+    prefix += *value;
+    *value = prefix;
+  }
   return 0;
 }
 
@@ -2033,6 +3012,37 @@ std::size_t Program::cuda_device_transform_affine_ndarray(Ndarray *src,
 #endif
 }
 
+std::size_t Program::cuda_device_transform_affine_member_ndarray(
+    Ndarray *src,
+    Ndarray *dst,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride,
+    double scale,
+    double bias) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA strided transform is only available on CUDA.");
+  check_transform_member_request("CUDA", src, dst, value_type, offset, stride);
+  TI_ERROR_IF(src->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA strided transform currently supports at most INT_MAX "
+              "items.");
+#ifdef TI_WITH_CUDA
+  TI_ERROR_IF(!cuda::cub_transform_available(),
+              "CUDA strided transform requires TI_WITH_CUDA_TOOLKIT=ON and a "
+              "discoverable CUDA runtime.");
+  auto *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
+  auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_transform_affine_strided(
+      src_ptr, dst_ptr, static_cast<int>(src->get_nelement()),
+      static_cast<cuda::CudaTransformValueType>(value_type), offset, stride,
+      scale, bias, stream);
+#else
+  TI_ERROR("CUDA strided transform requires TI_WITH_CUDA=ON.");
+#endif
+}
+
 bool Program::cuda_device_indexed_copy_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&
@@ -2230,6 +3240,81 @@ std::size_t Program::cuda_device_scatter_add_ndarray(Ndarray *src,
 #endif
 }
 
+std::size_t Program::cuda_device_scatter_add_member_ndarray(
+    Ndarray *src,
+    Ndarray *indices,
+    Ndarray *dst,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA toolkit strided scatter-add is only available on CUDA.");
+  check_scatter_add_member_request("CUDA toolkit", src, indices, dst,
+                                   value_type, offset, stride);
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA toolkit strided scatter-add currently supports at most "
+              "INT_MAX source items.");
+  TI_ERROR_IF(dst->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA toolkit strided scatter-add currently supports "
+              "destination sizes up to INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_scatter_add_strided(
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
+      static_cast<int>(indices->get_nelement()),
+      static_cast<int>(dst->get_nelement()),
+      static_cast<cuda::CudaScatterAddValueType>(value_type), offset, stride,
+      stream);
+#else
+  TI_ERROR(
+      "CUDA strided scatter-add requires building Taichi with TI_WITH_CUDA=ON "
+      "and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_scatter_add_strided_ndarray(
+    Ndarray *src,
+    Ndarray *indices,
+    Ndarray *dst,
+    int value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA toolkit strided scatter-add is only available on CUDA.");
+  check_scatter_add_strided_request("CUDA toolkit", src, indices, dst,
+                                    value_type, src_offset, src_stride,
+                                    dst_offset, dst_stride);
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA toolkit strided scatter-add currently supports at most "
+              "INT_MAX source items.");
+  TI_ERROR_IF(dst->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA toolkit strided scatter-add currently supports "
+              "destination sizes up to INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_scatter_add_strided_io(
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
+      static_cast<int>(indices->get_nelement()),
+      static_cast<int>(dst->get_nelement()),
+      static_cast<cuda::CudaScatterAddValueType>(value_type), src_offset,
+      src_stride, dst_offset, dst_stride, stream);
+#else
+  TI_ERROR(
+      "CUDA strided scatter-add requires building Taichi with TI_WITH_CUDA=ON "
+      "and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 bool Program::cuda_device_bucket_builder_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&
@@ -2370,6 +3455,97 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_ndarray(Ndarray *keys,
   TI_ERROR(
       "CUDA grouped reduce requires building Taichi with TI_WITH_CUDA=ON and "
       "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_grouped_reduce_atomic_member_ndarray(
+    Ndarray *keys,
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride,
+    int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA strided grouped reduce is only available on CUDA.");
+  check_grouped_reduce_member_request("CUDA", keys, values, output, value_type,
+                                      offset, stride, op);
+  const std::size_t num_groups = output->get_nelement();
+  TI_ERROR_IF(keys->get_nelement() >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  num_groups >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA strided grouped reduce input is too large for int launch "
+              "parameters.");
+#ifdef TI_WITH_CUDA
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_grouped_reduce_atomic_strided(
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
+      static_cast<int>(keys->get_nelement()), static_cast<int>(num_groups),
+      static_cast<cuda::CudaGroupedReduceValueType>(value_type), offset,
+      stride, op, stream);
+#else
+  TI_ERROR(
+      "CUDA strided grouped reduce requires building Taichi with "
+      "TI_WITH_CUDA=ON and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_grouped_reduce_atomic_strided_ndarray(
+    Ndarray *keys,
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    int op) {
+  return cuda_device_grouped_reduce_atomic_strided_keys_ndarray(
+      keys, values, output, value_type, 0, sizeof(int32_t), values_offset,
+      values_stride, output_offset, output_stride, op);
+}
+
+std::size_t Program::cuda_device_grouped_reduce_atomic_strided_keys_ndarray(
+    Ndarray *keys,
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t keys_offset,
+    std::size_t keys_stride,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA strided grouped reduce is only available on CUDA.");
+  check_grouped_reduce_strided_keys_request(
+      "CUDA", keys, values, output, value_type, keys_offset, keys_stride,
+      values_offset, values_stride, output_offset, output_stride, op);
+  const std::size_t num_groups = output->get_nelement();
+  TI_ERROR_IF(keys->get_nelement() >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  num_groups >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA strided grouped reduce input is too large for int launch "
+              "parameters.");
+#ifdef TI_WITH_CUDA
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_grouped_reduce_atomic_strided_io(
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
+      static_cast<int>(keys->get_nelement()), static_cast<int>(num_groups),
+      static_cast<cuda::CudaGroupedReduceValueType>(value_type), keys_offset,
+      keys_stride, values_offset, values_stride, output_offset, output_stride,
+      op, stream);
+#else
+  TI_ERROR(
+      "CUDA strided grouped reduce requires building Taichi with "
+      "TI_WITH_CUDA=ON and TI_WITH_CUDA_TOOLKIT=ON.");
 #endif
 }
 
@@ -2726,6 +3902,35 @@ std::size_t Program::cuda_cub_inclusive_scan_ndarray(Ndarray *data,
 #endif
 }
 
+std::size_t Program::cuda_cub_inclusive_scan_member_ndarray(
+    Ndarray *data,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB strided scan is only available on the CUDA backend.");
+  check_scan_member_request("CUDA CUB", data, value_type, offset, stride);
+  TI_ERROR_IF(data->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB strided scan currently supports at most INT_MAX "
+              "items.");
+  if (data->get_nelement() <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  auto data_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(data));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_inclusive_scan_strided(
+      data_ptr, static_cast<int>(data->get_nelement()),
+      static_cast<cuda::CubScanValueType>(value_type), offset, stride, stream,
+      this);
+#else
+  TI_ERROR(
+      "CUDA CUB strided scan requires building Taichi with TI_WITH_CUDA=ON "
+      "and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 void Program::cuda_cub_scan_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
@@ -2961,6 +4166,37 @@ std::size_t Program::cuda_cub_reduce_ndarray(Ndarray *values,
 #endif
 }
 
+std::size_t Program::cuda_cub_reduce_member_ndarray(Ndarray *values,
+                                                    Ndarray *output,
+                                                    int value_type,
+                                                    std::size_t offset,
+                                                    std::size_t stride,
+                                                    int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB strided reduce is only available on CUDA.");
+  check_reduce_member_request("CUDA CUB", values, output, value_type, offset,
+                              stride, op);
+  TI_ERROR_IF(values->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB strided reduce currently supports at most INT_MAX "
+              "items.");
+#ifdef TI_WITH_CUDA
+  auto values_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
+  auto output_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_reduce_strided(
+      values_ptr, output_ptr, static_cast<int>(values->get_nelement()),
+      static_cast<cuda::CubReduceValueType>(value_type), offset, stride,
+      static_cast<cuda::CubReduceOp>(op), stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB strided reduce requires building Taichi with TI_WITH_CUDA=ON "
+      "and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 void Program::cuda_cub_reduce_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
@@ -3030,6 +4266,35 @@ std::size_t Program::cpu_inclusive_scan_ndarray(Ndarray *data,
       TI_ERROR("CPU native scan received an unsupported value type.");
   }
   return 0;
+}
+
+std::size_t Program::cpu_inclusive_scan_member_ndarray(Ndarray *data,
+                                                       int value_type,
+                                                       std::size_t offset,
+                                                       std::size_t stride) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native strided scan is only available on CPU backends.");
+  check_scan_member_request("CPU native", data, value_type, offset, stride);
+  auto ptr = reinterpret_cast<uint8_t *>(get_ndarray_data_ptr_as_int(data));
+  TI_ERROR_IF(!ptr, "CPU native strided scan received a null data pointer.");
+  const std::size_t n = data->get_nelement();
+
+  switch (value_type) {
+    case 0:
+      return cpu_scan_strided_typed<int32_t>(ptr, n, offset, stride);
+    case 1:
+      return cpu_scan_strided_typed<float>(ptr, n, offset, stride);
+    case 2:
+      return cpu_scan_strided_typed<uint32_t>(ptr, n, offset, stride);
+    case 3:
+      return cpu_scan_strided_typed<uint64_t>(ptr, n, offset, stride);
+    case 4:
+      return cpu_scan_strided_typed<int64_t>(ptr, n, offset, stride);
+    case 5:
+      return cpu_scan_strided_typed<double>(ptr, n, offset, stride);
+    default:
+      TI_ERROR("CPU native strided scan received an unsupported value type.");
+  }
 }
 
 std::size_t Program::cpu_scan_workspace_bytes() const {
@@ -3263,6 +4528,61 @@ std::size_t Program::cpu_reduce_ndarray(Ndarray *values,
   return 0;
 }
 
+std::size_t Program::cpu_reduce_member_ndarray(Ndarray *values,
+                                               Ndarray *output,
+                                               int value_type,
+                                               std::size_t offset,
+                                               std::size_t stride,
+                                               int op) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native strided reduce is only available on CPU backends.");
+  check_reduce_member_request("CPU native", values, output, value_type, offset,
+                              stride, op);
+
+  const std::size_t n = values->get_nelement();
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = n >= 65536 && target_threads > 1;
+
+  const auto values_addr = get_ndarray_data_ptr_as_int(values);
+  const auto output_addr = get_ndarray_data_ptr_as_int(output);
+  TI_ERROR_IF(!values_addr || !output_addr,
+              "CPU native strided reduce received a null data pointer.");
+  const auto *values_ptr = reinterpret_cast<const uint8_t *>(values_addr);
+  switch (value_type) {
+    case 0:
+      return cpu_reduce_strided_typed<int32_t>(
+          values_ptr, reinterpret_cast<int32_t *>(output_addr), op, n, offset,
+          stride, max_threads, target_threads, use_parallel);
+    case 1:
+      return cpu_reduce_strided_typed<float>(
+          values_ptr, reinterpret_cast<float *>(output_addr), op, n, offset,
+          stride, max_threads, target_threads, use_parallel);
+    case 2:
+      return cpu_reduce_strided_typed<uint32_t>(
+          values_ptr, reinterpret_cast<uint32_t *>(output_addr), op, n, offset,
+          stride, max_threads, target_threads, use_parallel);
+    case 3:
+      return cpu_reduce_strided_typed<uint64_t>(
+          values_ptr, reinterpret_cast<uint64_t *>(output_addr), op, n, offset,
+          stride, max_threads, target_threads, use_parallel);
+    case 4:
+      return cpu_reduce_strided_typed<int64_t>(
+          values_ptr, reinterpret_cast<int64_t *>(output_addr), op, n, offset,
+          stride, max_threads, target_threads, use_parallel);
+    case 5:
+      return cpu_reduce_strided_typed<double>(
+          values_ptr, reinterpret_cast<double *>(output_addr), op, n, offset,
+          stride, max_threads, target_threads, use_parallel);
+  }
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
 std::size_t Program::cpu_reduce_workspace_bytes() const {
   return 0;
 }
@@ -3353,6 +4673,80 @@ std::size_t Program::cpu_transform_affine_ndarray(Ndarray *src,
       return 0;
     default:
       TI_ERROR("CPU native transform received an unsupported value type.");
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_transform_affine_member_ndarray(Ndarray *src,
+                                                         Ndarray *dst,
+                                                         int value_type,
+                                                         std::size_t offset,
+                                                         std::size_t stride,
+                                                         double scale,
+                                                         double bias) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native strided transform is only available on CPU "
+              "backends.");
+  check_transform_member_request("CPU native", src, dst, value_type, offset,
+                                 stride);
+  const std::size_t n = src->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = n >= 65536 && target_threads > 1;
+
+  const auto src_addr = get_ndarray_data_ptr_as_int(src);
+  const auto dst_addr = get_ndarray_data_ptr_as_int(dst);
+  TI_ERROR_IF(!src_addr || !dst_addr,
+              "CPU native strided transform received a null data pointer.");
+  const auto *src_bytes = reinterpret_cast<const uint8_t *>(src_addr);
+  switch (value_type) {
+    case 0:
+      cpu_transform_run_strided_typed<uint32_t>(
+          src_bytes, reinterpret_cast<uint32_t *>(dst_addr), n, offset, stride,
+          static_cast<uint32_t>(static_cast<int32_t>(scale)),
+          static_cast<uint32_t>(static_cast<int32_t>(bias)), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 2:
+      cpu_transform_run_strided_typed<uint32_t>(
+          src_bytes, reinterpret_cast<uint32_t *>(dst_addr), n, offset, stride,
+          static_cast<uint32_t>(scale), static_cast<uint32_t>(bias),
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 1:
+      cpu_transform_run_strided_typed<float>(
+          src_bytes, reinterpret_cast<float *>(dst_addr), n, offset, stride,
+          static_cast<float>(scale), static_cast<float>(bias), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 3:
+      cpu_transform_run_strided_typed<uint64_t>(
+          src_bytes, reinterpret_cast<uint64_t *>(dst_addr), n, offset, stride,
+          static_cast<uint64_t>(scale), static_cast<uint64_t>(bias),
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 4:
+      cpu_transform_run_strided_typed<uint64_t>(
+          src_bytes, reinterpret_cast<uint64_t *>(dst_addr), n, offset, stride,
+          static_cast<uint64_t>(static_cast<int64_t>(scale)),
+          static_cast<uint64_t>(static_cast<int64_t>(bias)), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 5:
+      cpu_transform_run_strided_typed<double>(
+          src_bytes, reinterpret_cast<double *>(dst_addr), n, offset, stride,
+          scale, bias, use_parallel, target_threads, max_threads);
+      return 0;
+    default:
+      TI_ERROR("CPU native strided transform received an unsupported value "
+               "type.");
   }
   return 0;
 }
@@ -3574,6 +4968,131 @@ std::size_t Program::cpu_scatter_add_ndarray(Ndarray *src,
   return 0;
 }
 
+std::size_t Program::cpu_scatter_add_member_ndarray(Ndarray *src,
+                                                    Ndarray *indices,
+                                                    Ndarray *dst,
+                                                    int value_type,
+                                                    std::size_t offset,
+                                                    std::size_t stride) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native strided scatter-add is only available on CPU "
+              "backends.");
+  check_scatter_add_member_request("CPU native", src, indices, dst, value_type,
+                                   offset, stride);
+  const std::size_t n = indices->get_nelement();
+  const std::size_t dst_items = dst->get_nelement();
+  if (n == 0 || dst_items == 0) {
+    return 0;
+  }
+  auto *src_ptr =
+      reinterpret_cast<const uint8_t *>(get_ndarray_data_ptr_as_int(src));
+  auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
+  TI_ERROR_IF(!src_ptr || !indices_ptr,
+              "CPU native strided scatter-add received a null data pointer.");
+  const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
+  const int target_threads =
+      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  switch (value_type) {
+    case 0:
+      return cpu_scatter_add_strided_typed<int32_t>(
+          src_ptr, offset, stride, indices_ptr,
+          reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(dst)), n,
+          dst_items, max_threads, target_threads);
+    case 1:
+      return cpu_scatter_add_strided_typed<float>(
+          src_ptr, offset, stride, indices_ptr,
+          reinterpret_cast<float *>(get_ndarray_data_ptr_as_int(dst)), n,
+          dst_items, max_threads, target_threads);
+    case 2:
+      return cpu_scatter_add_strided_typed<uint32_t>(
+          src_ptr, offset, stride, indices_ptr,
+          reinterpret_cast<uint32_t *>(get_ndarray_data_ptr_as_int(dst)), n,
+          dst_items, max_threads, target_threads);
+    case 3:
+      return cpu_scatter_add_strided_typed<uint64_t>(
+          src_ptr, offset, stride, indices_ptr,
+          reinterpret_cast<uint64_t *>(get_ndarray_data_ptr_as_int(dst)), n,
+          dst_items, max_threads, target_threads);
+    case 4:
+      return cpu_scatter_add_strided_typed<int64_t>(
+          src_ptr, offset, stride, indices_ptr,
+          reinterpret_cast<int64_t *>(get_ndarray_data_ptr_as_int(dst)), n,
+          dst_items, max_threads, target_threads);
+    case 5:
+      return cpu_scatter_add_strided_typed<double>(
+          src_ptr, offset, stride, indices_ptr,
+          reinterpret_cast<double *>(get_ndarray_data_ptr_as_int(dst)), n,
+          dst_items, max_threads, target_threads);
+    default:
+      TI_ERROR(
+          "CPU native strided scatter-add received an unsupported value type.");
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_scatter_add_strided_ndarray(
+    Ndarray *src,
+    Ndarray *indices,
+    Ndarray *dst,
+    int value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native strided scatter-add is only available on CPU "
+              "backends.");
+  check_scatter_add_strided_request("CPU native", src, indices, dst,
+                                    value_type, src_offset, src_stride,
+                                    dst_offset, dst_stride);
+  const std::size_t n = indices->get_nelement();
+  const std::size_t dst_items = dst->get_nelement();
+  if (n == 0 || dst_items == 0) {
+    return 0;
+  }
+  auto *src_ptr =
+      reinterpret_cast<const uint8_t *>(get_ndarray_data_ptr_as_int(src));
+  auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
+  auto *dst_ptr = reinterpret_cast<uint8_t *>(get_ndarray_data_ptr_as_int(dst));
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native strided scatter-add received a null data pointer.");
+  const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
+  const int target_threads =
+      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  switch (value_type) {
+    case 0:
+      return cpu_scatter_add_strided_io_typed<int32_t>(
+          src_ptr, src_offset, src_stride, indices_ptr, dst_ptr, dst_offset,
+          dst_stride, n, dst_items, max_threads, target_threads);
+    case 1:
+      return cpu_scatter_add_strided_io_typed<float>(
+          src_ptr, src_offset, src_stride, indices_ptr, dst_ptr, dst_offset,
+          dst_stride, n, dst_items, max_threads, target_threads);
+    case 2:
+      return cpu_scatter_add_strided_io_typed<uint32_t>(
+          src_ptr, src_offset, src_stride, indices_ptr, dst_ptr, dst_offset,
+          dst_stride, n, dst_items, max_threads, target_threads);
+    case 3:
+      return cpu_scatter_add_strided_io_typed<uint64_t>(
+          src_ptr, src_offset, src_stride, indices_ptr, dst_ptr, dst_offset,
+          dst_stride, n, dst_items, max_threads, target_threads);
+    case 4:
+      return cpu_scatter_add_strided_io_typed<int64_t>(
+          src_ptr, src_offset, src_stride, indices_ptr, dst_ptr, dst_offset,
+          dst_stride, n, dst_items, max_threads, target_threads);
+    case 5:
+      return cpu_scatter_add_strided_io_typed<double>(
+          src_ptr, src_offset, src_stride, indices_ptr, dst_ptr, dst_offset,
+          dst_stride, n, dst_items, max_threads, target_threads);
+    default:
+      TI_ERROR(
+          "CPU native strided scatter-add received an unsupported value type.");
+  }
+  return 0;
+}
+
 std::size_t Program::cpu_scatter_add_workspace_bytes() const {
   return cpu_scatter_add_workspace_bytes_peak.load(std::memory_order_relaxed);
 }
@@ -3774,6 +5293,152 @@ std::size_t Program::cpu_grouped_reduce_ndarray(Ndarray *keys,
           num_groups, max_threads, target_threads);
     default:
       TI_ERROR("CPU native grouped reduce received an unsupported value type.");
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_grouped_reduce_member_ndarray(Ndarray *keys,
+                                                       Ndarray *values,
+                                                       Ndarray *output,
+                                                       int value_type,
+                                                       std::size_t offset,
+                                                       std::size_t stride,
+                                                       int op) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native strided grouped reduce is only available on CPU "
+              "backends.");
+  check_grouped_reduce_member_request("CPU native", keys, values, output,
+                                      value_type, offset, stride, op);
+  const std::size_t n = keys->get_nelement();
+  const std::size_t num_groups = output->get_nelement();
+  auto *keys_ptr =
+      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(keys));
+  auto *values_ptr =
+      reinterpret_cast<const uint8_t *>(get_ndarray_data_ptr_as_int(values));
+  TI_ERROR_IF(!keys_ptr || !values_ptr,
+              "CPU native strided grouped reduce received a null data pointer.");
+  const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
+  const int target_threads =
+      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  switch (value_type) {
+    case 0:
+      return cpu_grouped_reduce_strided_typed<int32_t>(
+          keys_ptr, values_ptr, offset, stride,
+          reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_groups, max_threads, target_threads);
+    case 1:
+      return cpu_grouped_reduce_strided_typed<float>(
+          keys_ptr, values_ptr, offset, stride,
+          reinterpret_cast<float *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_groups, max_threads, target_threads);
+    case 2:
+      return cpu_grouped_reduce_strided_typed<uint32_t>(
+          keys_ptr, values_ptr, offset, stride,
+          reinterpret_cast<uint32_t *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_groups, max_threads, target_threads);
+    case 3:
+      return cpu_grouped_reduce_strided_typed<uint64_t>(
+          keys_ptr, values_ptr, offset, stride,
+          reinterpret_cast<uint64_t *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_groups, max_threads, target_threads);
+    case 4:
+      return cpu_grouped_reduce_strided_typed<int64_t>(
+          keys_ptr, values_ptr, offset, stride,
+          reinterpret_cast<int64_t *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_groups, max_threads, target_threads);
+    case 5:
+      return cpu_grouped_reduce_strided_typed<double>(
+          keys_ptr, values_ptr, offset, stride,
+          reinterpret_cast<double *>(get_ndarray_data_ptr_as_int(output)), n,
+          num_groups, max_threads, target_threads);
+    default:
+      TI_ERROR("CPU native strided grouped reduce received an unsupported "
+               "value type.");
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_grouped_reduce_strided_ndarray(
+    Ndarray *keys,
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    int op) {
+  return cpu_grouped_reduce_strided_keys_ndarray(
+      keys, values, output, value_type, 0, sizeof(int32_t), values_offset,
+      values_stride, output_offset, output_stride, op);
+}
+
+std::size_t Program::cpu_grouped_reduce_strided_keys_ndarray(
+    Ndarray *keys,
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t keys_offset,
+    std::size_t keys_stride,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    int op) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native strided grouped reduce is only available on CPU "
+              "backends.");
+  check_grouped_reduce_strided_keys_request(
+      "CPU native", keys, values, output, value_type, keys_offset, keys_stride,
+      values_offset, values_stride, output_offset, output_stride, op);
+  const std::size_t n = keys->get_nelement();
+  const std::size_t num_groups = output->get_nelement();
+  auto *keys_ptr =
+      reinterpret_cast<const uint8_t *>(get_ndarray_data_ptr_as_int(keys));
+  auto *values_ptr =
+      reinterpret_cast<const uint8_t *>(get_ndarray_data_ptr_as_int(values));
+  auto *output_ptr =
+      reinterpret_cast<uint8_t *>(get_ndarray_data_ptr_as_int(output));
+  TI_ERROR_IF(!keys_ptr || !values_ptr || !output_ptr,
+              "CPU native strided grouped reduce received a null data pointer.");
+  const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
+  const int target_threads =
+      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  switch (value_type) {
+    case 0:
+      return cpu_grouped_reduce_strided_io_typed<int32_t>(
+          keys_ptr, keys_offset, keys_stride, values_ptr, values_offset,
+          values_stride, output_ptr, output_offset, output_stride, n,
+          num_groups, max_threads, target_threads);
+    case 1:
+      return cpu_grouped_reduce_strided_io_typed<float>(
+          keys_ptr, keys_offset, keys_stride, values_ptr, values_offset,
+          values_stride, output_ptr, output_offset, output_stride, n,
+          num_groups, max_threads, target_threads);
+    case 2:
+      return cpu_grouped_reduce_strided_io_typed<uint32_t>(
+          keys_ptr, keys_offset, keys_stride, values_ptr, values_offset,
+          values_stride, output_ptr, output_offset, output_stride, n,
+          num_groups, max_threads, target_threads);
+    case 3:
+      return cpu_grouped_reduce_strided_io_typed<uint64_t>(
+          keys_ptr, keys_offset, keys_stride, values_ptr, values_offset,
+          values_stride, output_ptr, output_offset, output_stride, n,
+          num_groups, max_threads, target_threads);
+    case 4:
+      return cpu_grouped_reduce_strided_io_typed<int64_t>(
+          keys_ptr, keys_offset, keys_stride, values_ptr, values_offset,
+          values_stride, output_ptr, output_offset, output_stride, n,
+          num_groups, max_threads, target_threads);
+    case 5:
+      return cpu_grouped_reduce_strided_io_typed<double>(
+          keys_ptr, keys_offset, keys_stride, values_ptr, values_offset,
+          values_stride, output_ptr, output_offset, output_stride, n,
+          num_groups, max_threads, target_threads);
+    default:
+      TI_ERROR(
+          "CPU native strided grouped reduce received an unsupported value "
+          "type.");
   }
   return 0;
 }

@@ -36,6 +36,14 @@ layout(set = 0, binding = 1, std430) buffer Partial {
   VALUE_T data[];
 } partial_buf;
 
+#ifdef STRIDED_SOURCE
+layout(set = 0, binding = 2, std430) readonly buffer ReduceParams {
+  uint n;
+  uint src_offset_words;
+  uint src_stride_words;
+} params_buf;
+#endif
+
 shared VALUE_T local_reduce[256];
 
 #ifndef OP_KIND
@@ -84,18 +92,40 @@ VALUE_T reduce_combine(VALUE_T a, VALUE_T b) {
 #endif
 }
 
+uint value_count() {
+#ifdef STRIDED_SOURCE
+  return params_buf.n;
+#else
+  return values_buf.data.length();
+#endif
+}
+
+VALUE_T load_value(uint logical_index) {
+#ifdef STRIDED_SOURCE
+  uint word_index =
+      params_buf.src_offset_words + logical_index * params_buf.src_stride_words;
+#if VALUE_KIND == 3 || VALUE_KIND == 4 || VALUE_KIND == 5
+  return values_buf.data[word_index / 2u];
+#else
+  return values_buf.data[word_index];
+#endif
+#else
+  return values_buf.data[logical_index];
+#endif
+}
+
 void main() {
   const uint chunk_size = 2048u;
   uint lid = gl_LocalInvocationID.x;
   uint chunk = gl_WorkGroupID.x;
-  uint n = values_buf.data.length();
+  uint n = value_count();
   uint base = chunk * chunk_size;
 
   VALUE_T acc = reduce_identity();
   for (uint offset = lid; offset < chunk_size; offset += 256u) {
     uint idx = base + offset;
     if (idx < n) {
-      acc = reduce_combine(acc, values_buf.data[idx]);
+      acc = reduce_combine(acc, load_value(idx));
     }
   }
   local_reduce[lid] = acc;

@@ -22,12 +22,48 @@ layout(set = 0, binding = 0, std430) buffer Data {
   VALUE_T data[];
 } data_buf;
 
+#ifdef STRIDED_SOURCE
+layout(set = 0, binding = 1, std430) readonly buffer ScanParams {
+  uint n;
+  uint data_offset_words;
+  uint data_stride_words;
+} params_buf;
+#endif
+
 shared VALUE_T scratch[256];
 shared VALUE_T carry;
 
+uint value_count() {
+#ifdef STRIDED_SOURCE
+  return params_buf.n;
+#else
+  return data_buf.data.length();
+#endif
+}
+
+VALUE_T load_value(uint logical_index) {
+#ifdef STRIDED_SOURCE
+  uint word_index =
+      params_buf.data_offset_words + logical_index * params_buf.data_stride_words;
+  return data_buf.data[word_index];
+#else
+  return data_buf.data[logical_index];
+#endif
+}
+
+void store_value(uint logical_index, VALUE_T value) {
+#ifdef STRIDED_SOURCE
+  uint word_index =
+      params_buf.data_offset_words + logical_index * params_buf.data_stride_words;
+  data_buf.data[word_index] = value;
+#else
+  data_buf.data[logical_index] = value;
+#endif
+}
+
 void main() {
   uint lid = gl_LocalInvocationID.x;
-  uint n = data_buf.data.length();
+  uint n = value_count();
 
   if (lid == 0u) {
     carry = ZERO_VALUE;
@@ -36,7 +72,7 @@ void main() {
 
   for (uint base = 0u; base < n; base += 256u) {
     uint idx = base + lid;
-    VALUE_T value = idx < n ? data_buf.data[idx] : ZERO_VALUE;
+    VALUE_T value = idx < n ? load_value(idx) : ZERO_VALUE;
 
     if (gl_NumSubgroups <= gl_SubgroupSize) {
       uint subgroup = gl_SubgroupID;
@@ -73,7 +109,7 @@ void main() {
 
     value += carry;
     if (idx < n) {
-      data_buf.data[idx] = value;
+      store_value(idx, value);
     }
     barrier();
     if (lid == 255u) {

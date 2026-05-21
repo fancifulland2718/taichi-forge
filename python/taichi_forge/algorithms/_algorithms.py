@@ -66,7 +66,11 @@ from taichi_forge._kernels import (
     warp_shfl_up_i32,
 )
 from taichi_forge.lang.impl import current_cfg, field, ndarray as ti_ndarray
-from taichi_forge.lang._ndarray import Ndarray
+from taichi_forge.lang._ndarray import (
+    Ndarray,
+    StructNdarray,
+    StructNdarrayScalarMemberView,
+)
 from taichi_forge.lang.kernel_impl import data_oriented
 from taichi_forge.lang.misc import arm64, cuda, vulkan, x64
 from taichi_forge.lang.runtime_ops import sync
@@ -168,6 +172,44 @@ _REDUCE_FIELD_PRIVATE_CHUNK_SIZE = 2048
 _HISTOGRAM_FIELD_PRIVATE_MIN_N = 65536
 _HISTOGRAM_FIELD_PRIVATE_MAX_BINS = 512
 _HISTOGRAM_FIELD_PRIVATE_CHUNK_SIZE = 2048
+
+
+def _is_opaque_raw_payload(arr):
+    return isinstance(arr, StructNdarray)
+
+
+def _is_struct_scalar_member_view(arr):
+    return isinstance(arr, StructNdarrayScalarMemberView)
+
+
+def _supports_opaque_raw_payload(arr, supported_dtypes):
+    return _is_opaque_raw_payload(arr) or arr.dtype in supported_dtypes
+
+
+def _raw_payload_value_type(arr, value_type_map, op_name):
+    if _is_opaque_raw_payload(arr):
+        # Native backends receive the real element byte size separately. Use
+        # i32 as a valid scalar tag so 4-byte structs keep the scalar fast path
+        # and wider structs fall through to raw-word copy paths.
+        return 0
+    if arr.dtype in value_type_map:
+        return value_type_map[arr.dtype]
+    raise TypeError(f"unsupported {op_name} value dtype.")
+
+
+def _reject_struct_numeric_primitive(op_name):
+    raise TypeError(
+        f"{op_name} does not support StructNdarray directly. Structured "
+        "elements are opaque raw payloads here; use a scalar ndarray/member "
+        "view or copy a scalar member into a numeric ndarray before calling "
+        "numeric primitives."
+    )
+
+
+def _check_no_struct_numeric_payload(op_name, *arrays):
+    for arr in arrays:
+        if _is_opaque_raw_payload(arr):
+            _reject_struct_numeric_primitive(op_name)
 
 
 class SortWorkspace:
@@ -808,6 +850,10 @@ def _check_sort_request(
 ):
     if not hasattr(keys, "shape") or len(keys.shape) != 1:
         raise ValueError("sort() currently expects a 1D Taichi field or ndarray.")
+    if _is_opaque_raw_payload(keys):
+        raise TypeError(
+            "sort() keys must be scalar values; StructNdarray is supported only as a payload."
+        )
     if values is not None:
         if not hasattr(values, "shape") or len(values.shape) != 1:
             raise ValueError("sort() values must be a 1D Taichi field or ndarray.")
@@ -883,6 +929,11 @@ def _host_stable_sort(keys, values=None, descending=False, nan_policy="last"):
 
 
 def _host_stable_sort_by_key_parts(key_parts, values=None):
+    for part in key_parts:
+        if _is_opaque_raw_payload(part):
+            raise TypeError(
+                "sort_by_key() key parts must be scalar values; StructNdarray is supported only as a payload."
+            )
     key_arrays = [part.to_numpy() for part in key_parts]
     if len(key_arrays) == 1:
         order = np.argsort(key_arrays[0], kind="stable")
@@ -893,7 +944,7 @@ def _host_stable_sort_by_key_parts(key_parts, values=None):
         part.from_numpy(part_np[order])
     if values is not None:
         values_np = values.to_numpy()
-        values.from_numpy(values_np[order])
+        values.from_numpy(np.ascontiguousarray(values_np[order]))
     sync()
 
 
@@ -1163,10 +1214,10 @@ def _vulkan_native_radix_sort_u32(
             raise NotImplementedError(
                 "method='vulkan_native_radix_u32' currently supports only ti.ndarray values."
             )
-        if values.dtype not in _SORT_VALUE_DTYPES:
+        if not _supports_opaque_raw_payload(values, _SORT_VALUE_DTYPES):
             raise TypeError(
                 "method='vulkan_native_radix_u32' currently supports ti.u32, "
-                "ti.i32, ti.f32, ti.u64, ti.i64, and ti.f64 values."
+                "ti.i32, ti.f32, ti.u64, ti.i64, ti.f64, and StructNdarray values."
             )
     if keys.shape[0] <= 1:
         return
@@ -1177,7 +1228,11 @@ def _vulkan_native_radix_sort_u32(
     if not prog.vulkan_radix_sort_available():
         raise RuntimeError("method='vulkan_native_radix_u32' requires Vulkan sort support.")
     key_type = _SORT_KEY_TYPE[keys.dtype]
-    value_type = _SORT_VALUE_TYPE[values.dtype] if values is not None else 0
+    value_type = (
+        _raw_payload_value_type(values, _SORT_VALUE_TYPE, "sort()")
+        if values is not None
+        else 0
+    )
     temp_bytes = (
         prog.vulkan_radix_sort_u32_ndarray(
             keys.arr, values.arr, key_type, value_type
@@ -1212,10 +1267,10 @@ def _cpu_native_stable_sort(keys, values=None, workspace=None, descending=False,
             "method='cpu_native' currently supports ti.u32, ti.i32, ti.f32, "
             "ti.u64, ti.i64, and ti.f64 keys."
         )
-    if values is not None and values.dtype not in _SORT_VALUE_DTYPES:
+    if values is not None and not _supports_opaque_raw_payload(values, _SORT_VALUE_DTYPES):
         raise TypeError(
             "method='cpu_native' currently supports ti.u32, ti.i32, ti.f32, "
-            "ti.u64, ti.i64, and ti.f64 values."
+            "ti.u64, ti.i64, ti.f64, and StructNdarray values."
         )
     if keys.shape[0] <= 1:
         return
@@ -1226,7 +1281,11 @@ def _cpu_native_stable_sort(keys, values=None, workspace=None, descending=False,
     if not prog.cpu_stable_sort_available():
         raise RuntimeError("method='cpu_native' requires CPU sort support.")
     key_type = _SORT_KEY_TYPE[keys.dtype]
-    value_type = _SORT_VALUE_TYPE[values.dtype] if values is not None else 0
+    value_type = (
+        _raw_payload_value_type(values, _SORT_VALUE_TYPE, "sort()")
+        if values is not None
+        else 0
+    )
     nan_policy_id = {"last": 0, "bitwise": 1}[nan_policy]
     temp_bytes = (
         prog.cpu_stable_sort_ndarray(
@@ -1269,10 +1328,10 @@ def _cuda_cub_sort_native(
             f"method='{method}' currently supports ti.u32, ti.i32, ti.f32, "
             "ti.u64, ti.i64, and ti.f64 keys."
         )
-    if values is not None and values.dtype not in _SORT_VALUE_DTYPES:
+    if values is not None and not _supports_opaque_raw_payload(values, _SORT_VALUE_DTYPES):
         raise TypeError(
             f"method='{method}' currently supports ti.u32, ti.i32, ti.f32, "
-            "ti.u64, ti.i64, and ti.f64 values."
+            "ti.u64, ti.i64, ti.f64, and StructNdarray values."
         )
     if method == "cuda_cub_split32" and keys.dtype not in (u64, i64, f64):
         raise TypeError(
@@ -1292,7 +1351,11 @@ def _cuda_cub_sort_native(
             "discoverable CUDA runtime library."
         )
     key_type = _SORT_KEY_TYPE[keys.dtype]
-    value_type = _SORT_VALUE_TYPE[values.dtype] if values is not None else 0
+    value_type = (
+        _raw_payload_value_type(values, _SORT_VALUE_TYPE, "sort()")
+        if values is not None
+        else 0
+    )
     mode = 1 if method == "cuda_cub_split32" else 0
     nan_policy_id = {"last": 0, "bitwise": 1}[nan_policy]
     temp_bytes = (
@@ -1325,7 +1388,7 @@ def _auto_sort(keys, values=None, workspace=None, nan_policy="last", descending=
         and isinstance(keys, Ndarray)
         and (values is None or isinstance(values, Ndarray))
         and keys.dtype in _SORT_KEY_DTYPES
-        and (values is None or values.dtype in _SORT_VALUE_DTYPES)
+        and (values is None or _supports_opaque_raw_payload(values, _SORT_VALUE_DTYPES))
     ):
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -1344,7 +1407,7 @@ def _auto_sort(keys, values=None, workspace=None, nan_policy="last", descending=
         and isinstance(keys, Ndarray)
         and (values is None or isinstance(values, Ndarray))
         and keys.dtype in _SORT_KEY_DTYPES
-        and (values is None or values.dtype in _SORT_VALUE_DTYPES)
+        and (values is None or _supports_opaque_raw_payload(values, _SORT_VALUE_DTYPES))
         and nan_policy == "last"
     ):
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -1401,8 +1464,12 @@ def sort(
             nan_policy=nan_policy,
         )
     elif method == "legacy":
+        if _is_opaque_raw_payload(values):
+            raise TypeError("method='legacy' does not support StructNdarray payloads.")
         _parallel_sort_legacy(keys, values)
     elif method in ("radix_u32", "vulkan_radix_u32"):
+        if _is_opaque_raw_payload(values):
+            raise TypeError(f"method='{method}' does not support StructNdarray payloads.")
         _radix_sort_u32(keys, values, workspace=workspace)
     elif method == "vulkan_graph_radix_u32":
         _vulkan_graph_radix_sort_u32(keys, values, workspace=workspace)
@@ -1445,7 +1512,11 @@ def sort_by_key(
     _check_sort_request(parts[0], values, stable, False, method, "exact", workspace, "last")
     for part in parts[1:]:
         if not hasattr(part, "shape") or len(part.shape) != 1:
-            raise ValueError("sort_by_key() key parts must be 1D Taichi fields.")
+            raise ValueError("sort_by_key() key parts must be 1D Taichi fields or ndarrays.")
+        if _is_opaque_raw_payload(part):
+            raise TypeError(
+                "sort_by_key() key parts must be scalar values; StructNdarray is supported only as a payload."
+            )
         if part.shape[0] != parts[0].shape[0]:
             raise ValueError("sort_by_key() key parts must have the same length.")
     if len(parts) > 1 and method == "legacy":
@@ -1505,11 +1576,6 @@ def _check_compact_request(values, flags, output, count, method, workspace):
         raise ValueError("experimental_compact() output must have at least input length.")
     if values.dtype != output.dtype:
         raise TypeError("experimental_compact() values and output dtype must match.")
-    if values.dtype not in _COMPACT_VALUE_DTYPES:
-        raise TypeError(
-            "experimental_compact() currently supports ti.u32, ti.i32, ti.f32, "
-            "ti.u64, ti.i64, and ti.f64 values."
-        )
     if flags.dtype != i32:
         raise TypeError("experimental_compact() currently expects ti.i32 flags.")
     if count.dtype != i32:
@@ -1527,6 +1593,11 @@ def _check_compact_request(values, flags, output, count, method, workspace):
             )
         if not _is_1d(count) or count.shape[0] < 1:
             raise ValueError("experimental_compact() ndarray count must be shape >= 1.")
+        if not _supports_opaque_raw_payload(values, _COMPACT_VALUE_DTYPES):
+            raise TypeError(
+                "experimental_compact() ndarray mode currently supports ti.u32, "
+                "ti.i32, ti.f32, ti.u64, ti.i64, ti.f64, and StructNdarray values."
+            )
         _check_ndarray_payload_compatible(
             values, output, "experimental_compact()"
         )
@@ -1564,7 +1635,11 @@ def _try_cuda_cub_compact(values, flags, output, count, workspace):
     if not hasattr(prog, "cuda_cub_select_ndarray"):
         return False
     temp_bytes = prog.cuda_cub_select_ndarray(
-        values.arr, flags.arr, output.arr, count.arr, _COMPACT_VALUE_TYPE[values.dtype]
+        values.arr,
+        flags.arr,
+        output.arr,
+        count.arr,
+        _raw_payload_value_type(values, _COMPACT_VALUE_TYPE, "experimental_compact()"),
     )
     if workspace is not None:
         workspace._cuda_cub_active = True
@@ -1597,7 +1672,11 @@ def _try_vulkan_native_compact(values, flags, output, count, workspace):
     if not hasattr(prog, "vulkan_compact_ndarray"):
         return False
     temp_bytes = prog.vulkan_compact_ndarray(
-        values.arr, flags.arr, output.arr, count.arr, _COMPACT_VALUE_TYPE[values.dtype]
+        values.arr,
+        flags.arr,
+        output.arr,
+        count.arr,
+        _raw_payload_value_type(values, _COMPACT_VALUE_TYPE, "experimental_compact()"),
     )
     if workspace is not None:
         workspace._vulkan_native_active = True
@@ -1630,7 +1709,11 @@ def _try_cpu_native_compact(values, flags, output, count, workspace):
     if not hasattr(prog, "cpu_compact_ndarray"):
         return False
     temp_bytes = prog.cpu_compact_ndarray(
-        values.arr, flags.arr, output.arr, count.arr, _COMPACT_VALUE_TYPE[values.dtype]
+        values.arr,
+        flags.arr,
+        output.arr,
+        count.arr,
+        _raw_payload_value_type(values, _COMPACT_VALUE_TYPE, "experimental_compact()"),
     )
     if workspace is not None:
         workspace.workspace_bytes_current = max(
@@ -1712,8 +1795,9 @@ def experimental_compact(
 
     This is an experimental Forge primitive. ``count`` remains on device:
     ndarray mode expects a one-element ndarray, while field mode expects a
-    scalar field. Native ndarray mode supports 4- and 8-byte scalar payloads;
-    field fallback currently supports i32 payloads. Flags/count are i32.
+    scalar field. Native ndarray mode supports 4-byte-aligned scalar, tensor,
+    and StructNdarray raw payloads; field fallback currently supports i32
+    payloads. Flags/count are i32.
     """
 
     _check_compact_request(values, flags, output, count, method, workspace)
@@ -1759,12 +1843,14 @@ def _check_reduce_request(values, output, op, method, workspace):
         raise ValueError("experimental_reduce() expects 1D values.")
     if values.shape[0] <= 0:
         raise ValueError("experimental_reduce() expects at least one input item.")
-    if isinstance(values, Ndarray) or isinstance(output, Ndarray):
+    _check_no_struct_numeric_payload("experimental_reduce()", values, output)
+    values_is_view = _is_struct_scalar_member_view(values)
+    if isinstance(values, Ndarray) or isinstance(output, Ndarray) or values_is_view:
         supported_dtypes = _REDUCE_VALUE_DTYPES
     else:
         supported_dtypes = _REDUCE_FIELD_DTYPES
     if values.dtype not in supported_dtypes:
-        if isinstance(values, Ndarray) or isinstance(output, Ndarray):
+        if isinstance(values, Ndarray) or isinstance(output, Ndarray) or values_is_view:
             raise TypeError(
                 "experimental_reduce() ndarray mode currently supports ti.u32, "
                 "ti.i32, ti.f32, ti.u64, ti.i64, and ti.f64."
@@ -1772,11 +1858,16 @@ def _check_reduce_request(values, output, op, method, workspace):
         raise TypeError("experimental_reduce() field mode currently supports ti.i32 and ti.f32.")
     if output.dtype != values.dtype:
         raise TypeError("experimental_reduce() values and output dtype must match.")
-    if isinstance(values, Ndarray) or isinstance(output, Ndarray):
-        if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
+    if isinstance(values, Ndarray) or isinstance(output, Ndarray) or values_is_view:
+        if not (
+            (isinstance(values, Ndarray) or values_is_view)
+            and isinstance(output, Ndarray)
+            and not _is_opaque_raw_payload(output)
+        ):
             raise TypeError(
-                "experimental_reduce() ndarray mode requires both values and output "
-                "to be ti.ndarray."
+                "experimental_reduce() ndarray mode requires ti.ndarray or "
+                "StructNdarray scalar member view values and a scalar "
+                "ti.ndarray output."
             )
         if not _is_1d(output) or output.shape[0] < 1:
             raise ValueError("experimental_reduce() ndarray output must be shape >= 1.")
@@ -1798,6 +1889,35 @@ def _reduce_value_type(dtype):
 def _try_cuda_cub_reduce(values, output, op, workspace):
     if current_cfg().arch != cuda:
         return False
+    if _is_struct_scalar_member_view(values):
+        if not isinstance(output, Ndarray):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "cuda_cub_reduce_available"):
+            return False
+        if not prog.cuda_cub_reduce_available():
+            return False
+        if not hasattr(prog, "cuda_cub_reduce_member_ndarray"):
+            return False
+        temp_bytes = prog.cuda_cub_reduce_member_ndarray(
+            values.base.arr,
+            output.arr,
+            _reduce_value_type(values.dtype),
+            values.offset,
+            values.stride,
+            _SUPPORTED_REDUCE_OPS[op],
+        )
+        if workspace is not None:
+            workspace._cuda_cub_active = True
+            workspace.workspace_bytes_current = max(
+                workspace.workspace_bytes_current, temp_bytes
+            )
+            workspace.workspace_bytes_peak = max(
+                workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+            )
+        return True
     if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -1824,6 +1944,39 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
 def _try_vulkan_reduce(values, output, op, workspace):
     if current_cfg().arch != vulkan:
         return False
+    if _is_struct_scalar_member_view(values):
+        if not isinstance(output, Ndarray):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "vulkan_reduce_available"):
+            return False
+        if not prog.vulkan_reduce_available():
+            return False
+        value_type = _reduce_value_type(values.dtype)
+        if hasattr(prog, "vulkan_reduce_value_type_available"):
+            if not prog.vulkan_reduce_value_type_available(value_type):
+                return False
+        if not hasattr(prog, "vulkan_reduce_member_ndarray"):
+            return False
+        temp_bytes = prog.vulkan_reduce_member_ndarray(
+            values.base.arr,
+            output.arr,
+            value_type,
+            values.offset,
+            values.stride,
+            _SUPPORTED_REDUCE_OPS[op],
+        )
+        if workspace is not None:
+            workspace._vulkan_native_active = True
+            workspace.workspace_bytes_current = max(
+                workspace.workspace_bytes_current, temp_bytes
+            )
+            workspace.workspace_bytes_peak = max(
+                workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+            )
+        return True
     if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -1861,6 +2014,34 @@ def _try_vulkan_reduce(values, output, op, workspace):
 def _try_cpu_reduce(values, output, op, workspace):
     if current_cfg().arch not in [x64, arm64]:
         return False
+    if _is_struct_scalar_member_view(values):
+        if not isinstance(output, Ndarray):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "cpu_reduce_available"):
+            return False
+        if not prog.cpu_reduce_available():
+            return False
+        if not hasattr(prog, "cpu_reduce_member_ndarray"):
+            return False
+        temp_bytes = prog.cpu_reduce_member_ndarray(
+            values.base.arr,
+            output.arr,
+            _reduce_value_type(values.dtype),
+            values.offset,
+            values.stride,
+            _SUPPORTED_REDUCE_OPS[op],
+        )
+        if workspace is not None:
+            workspace.workspace_bytes_current = max(
+                workspace.workspace_bytes_current, temp_bytes
+            )
+            workspace.workspace_bytes_peak = max(
+                workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+            )
+        return True
     if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -1961,7 +2142,7 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
         raise RuntimeError(
             "method='cpu_native' requires CPU ndarray inputs and available native reduce."
         )
-    if isinstance(values, Ndarray):
+    if isinstance(values, Ndarray) or _is_struct_scalar_member_view(values):
         raise RuntimeError(
             "experimental_reduce() ndarray input is currently supported only "
             "by native CPU/CUDA/Vulkan reduce fast paths. Use a field input "
@@ -1986,6 +2167,7 @@ def _check_histogram_request(values, bins, method, workspace):
         raise NotImplementedError(f"histogram method '{method}' is not implemented.")
     if not (_is_1d(values) and _is_1d(bins)):
         raise ValueError("experimental_histogram() expects 1D values and bins.")
+    _check_no_struct_numeric_payload("experimental_histogram()", values, bins)
     ndarray_mode = isinstance(values, Ndarray) or isinstance(bins, Ndarray)
     if ndarray_mode:
         if (
@@ -2305,13 +2487,20 @@ def _check_transform_request(src, dst, method, workspace):
         raise ValueError("experimental_transform() expects 1D source and destination.")
     if src.shape[0] != dst.shape[0]:
         raise ValueError("experimental_transform() source and destination sizes differ.")
+    _check_no_struct_numeric_payload("experimental_transform()", src, dst)
     if src.dtype != dst.dtype:
         raise TypeError("experimental_transform() source and destination dtype must match.")
-    if isinstance(src, Ndarray) or isinstance(dst, Ndarray):
-        if not (isinstance(src, Ndarray) and isinstance(dst, Ndarray)):
+    src_is_view = _is_struct_scalar_member_view(src)
+    if isinstance(src, Ndarray) or isinstance(dst, Ndarray) or src_is_view:
+        if not (
+            (isinstance(src, Ndarray) or src_is_view)
+            and isinstance(dst, Ndarray)
+            and not _is_opaque_raw_payload(dst)
+        ):
             raise TypeError(
-                "experimental_transform() ndarray mode requires source and "
-                "destination both to be ti.ndarray."
+                "experimental_transform() ndarray mode requires a ti.ndarray "
+                "or StructNdarray scalar member view source and a scalar "
+                "ti.ndarray destination."
             )
         if src.dtype not in (u32, i32, f32, u64, i64, f64):
             raise TypeError(
@@ -2330,6 +2519,22 @@ def _check_transform_request(src, dst, method, workspace):
 def _try_cuda_device_transform(src, dst, value_type, scale, bias):
     if current_cfg().arch != cuda:
         return False
+    if _is_struct_scalar_member_view(src):
+        if not isinstance(dst, Ndarray):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "cuda_toolkit_transform_available"):
+            return False
+        if not prog.cuda_toolkit_transform_available():
+            return False
+        if not hasattr(prog, "cuda_device_transform_affine_member_ndarray"):
+            return False
+        prog.cuda_device_transform_affine_member_ndarray(
+            src.base.arr, dst.arr, value_type, src.offset, src.stride, scale, bias
+        )
+        return True
     if not (isinstance(src, Ndarray) and isinstance(dst, Ndarray)):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -2351,6 +2556,34 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias):
 def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
     if current_cfg().arch != vulkan:
         return False
+    if _is_struct_scalar_member_view(src):
+        if not isinstance(dst, Ndarray):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "vulkan_transform_available"):
+            return False
+        if not prog.vulkan_transform_available():
+            return False
+        if hasattr(prog, "vulkan_transform_value_type_available") and not (
+            prog.vulkan_transform_value_type_available(value_type)
+        ):
+            return False
+        if not hasattr(prog, "vulkan_transform_affine_member_ndarray"):
+            return False
+        temp_bytes = prog.vulkan_transform_affine_member_ndarray(
+            src.base.arr, dst.arr, value_type, src.offset, src.stride, scale, bias
+        )
+        if workspace is not None:
+            workspace._vulkan_native_active = True
+            workspace.workspace_bytes_current = max(
+                workspace.workspace_bytes_current, temp_bytes
+            )
+            workspace.workspace_bytes_peak = max(
+                workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+            )
+        return True
     if not (isinstance(src, Ndarray) and isinstance(dst, Ndarray)):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -2381,6 +2614,22 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
 def _try_cpu_transform(src, dst, value_type, scale, bias):
     if current_cfg().arch not in [x64, arm64]:
         return False
+    if _is_struct_scalar_member_view(src):
+        if not isinstance(dst, Ndarray):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "cpu_transform_available"):
+            return False
+        if not prog.cpu_transform_available():
+            return False
+        if not hasattr(prog, "cpu_transform_affine_member_ndarray"):
+            return False
+        prog.cpu_transform_affine_member_ndarray(
+            src.base.arr, dst.arr, value_type, src.offset, src.stride, scale, bias
+        )
+        return True
     if not (isinstance(src, Ndarray) and isinstance(dst, Ndarray)):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -2395,6 +2644,11 @@ def _try_cpu_transform(src, dst, value_type, scale, bias):
 
 
 def _transform_kernel(src, dst, scale, bias):
+    if _is_struct_scalar_member_view(src):
+        raise RuntimeError(
+            "experimental_transform() StructNdarray scalar member views require "
+            "a native strided-view backend."
+        )
     n = src.shape[0]
     if isinstance(src, Ndarray):
         if src.dtype == i32:
@@ -2482,11 +2736,6 @@ def _check_indexed_copy_request(src, indices, dst, method, workspace, op_name):
         raise TypeError(f"{op_name} currently expects ti.i32 indices.")
     if src.dtype != dst.dtype:
         raise TypeError(f"{op_name} source and destination dtype must match.")
-    if src.dtype not in _INDEXED_COPY_VALUE_DTYPES:
-        raise TypeError(
-            f"{op_name} currently supports ti.u32, ti.i32, ti.f32, "
-            "ti.u64, ti.i64, and ti.f64 values."
-        )
     if isinstance(src, Ndarray) or isinstance(indices, Ndarray) or isinstance(dst, Ndarray):
         if not (
             isinstance(src, Ndarray)
@@ -2497,7 +2746,17 @@ def _check_indexed_copy_request(src, indices, dst, method, workspace, op_name):
                 f"{op_name} ndarray mode requires source, indices, and "
                 "destination all to be ti.ndarray."
             )
+        if not _supports_opaque_raw_payload(src, _INDEXED_COPY_VALUE_DTYPES):
+            raise TypeError(
+                f"{op_name} ndarray mode currently supports ti.u32, ti.i32, "
+                "ti.f32, ti.u64, ti.i64, ti.f64, and StructNdarray values."
+            )
         _check_ndarray_payload_compatible(src, dst, op_name)
+    elif src.dtype not in _INDEXED_COPY_VALUE_DTYPES:
+        raise TypeError(
+            f"{op_name} currently supports ti.u32, ti.i32, ti.f32, "
+            "ti.u64, ti.i64, and ti.f64 values."
+        )
     if workspace is not None and not isinstance(workspace, IndexedCopyWorkspace):
         raise TypeError("workspace must be an IndexedCopyWorkspace instance or None.")
 
@@ -2703,16 +2962,31 @@ def _check_scatter_add_request(src, indices, dst, method, workspace):
         raise NotImplementedError(f"{op_name} method '{method}' is not implemented.")
     if not (_is_1d(src) and _is_1d(indices) and _is_1d(dst)):
         raise ValueError(f"{op_name} expects 1D source, indices, and destination.")
+    src_is_member = _is_struct_scalar_member_view(src)
+    dst_is_member = _is_struct_scalar_member_view(dst)
     if indices.dtype != i32:
         raise TypeError(f"{op_name} currently expects ti.i32 indices.")
+    _check_no_struct_numeric_payload(op_name, src, dst)
     if src.dtype != dst.dtype:
         raise TypeError(f"{op_name} source and destination dtype must match.")
-    if isinstance(src, Ndarray) or isinstance(indices, Ndarray) or isinstance(dst, Ndarray):
+    if (
+        isinstance(src, Ndarray)
+        or src_is_member
+        or isinstance(indices, Ndarray)
+        or isinstance(dst, Ndarray)
+        or dst_is_member
+    ):
         supported_dtypes = _SCATTER_ADD_VALUE_DTYPES
     else:
         supported_dtypes = _SCATTER_ADD_FIELD_DTYPES
     if src.dtype not in supported_dtypes:
-        if isinstance(src, Ndarray) or isinstance(indices, Ndarray) or isinstance(dst, Ndarray):
+        if (
+            isinstance(src, Ndarray)
+            or src_is_member
+            or isinstance(indices, Ndarray)
+            or isinstance(dst, Ndarray)
+            or dst_is_member
+        ):
             raise TypeError(
                 f"{op_name} ndarray mode currently supports ti.u32, ti.i32, "
                 "ti.f32, ti.u64, ti.i64, and ti.f64 values."
@@ -2720,15 +2994,22 @@ def _check_scatter_add_request(src, indices, dst, method, workspace):
         raise TypeError(f"{op_name} field mode currently supports ti.i32 and ti.f32 values.")
     if src.shape[0] != indices.shape[0]:
         raise ValueError(f"{op_name} expects source and indices sizes to match.")
-    if isinstance(src, Ndarray) or isinstance(indices, Ndarray) or isinstance(dst, Ndarray):
+    if (
+        isinstance(src, Ndarray)
+        or src_is_member
+        or isinstance(indices, Ndarray)
+        or isinstance(dst, Ndarray)
+        or dst_is_member
+    ):
         if not (
-            isinstance(src, Ndarray)
+            (isinstance(src, Ndarray) or src_is_member)
             and isinstance(indices, Ndarray)
-            and isinstance(dst, Ndarray)
+            and (isinstance(dst, Ndarray) or dst_is_member)
         ):
             raise TypeError(
                 f"{op_name} ndarray mode requires source, indices, and "
-                "destination all to be ti.ndarray."
+                "destination all to be ti.ndarray, except that source and "
+                "destination may be StructNdarray scalar member views."
             )
     if workspace is not None and not isinstance(workspace, ScatterAddWorkspace):
         raise TypeError("workspace must be a ScatterAddWorkspace instance or None.")
@@ -2740,13 +3021,21 @@ def _scatter_add_value_type(dtype):
     raise TypeError("unsupported scatter_add dtype")
 
 
+def _scalar_ndarray_payload(arr):
+    if _is_struct_scalar_member_view(arr):
+        return arr.base.arr, arr.offset, arr.stride
+    return arr.arr, 0, arr._get_element_size()
+
+
 def _try_cuda_device_scatter_add(src, indices, dst):
     if current_cfg().arch != cuda:
         return False
+    src_is_member = _is_struct_scalar_member_view(src)
+    dst_is_member = _is_struct_scalar_member_view(dst)
     if not (
-        isinstance(src, Ndarray)
+        (isinstance(src, Ndarray) or src_is_member)
         and isinstance(indices, Ndarray)
-        and isinstance(dst, Ndarray)
+        and (isinstance(dst, Ndarray) or dst_is_member)
     ):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -2756,19 +3045,36 @@ def _try_cuda_device_scatter_add(src, indices, dst):
         return False
     if not prog.cuda_device_scatter_add_available():
         return False
-    prog.cuda_device_scatter_add_ndarray(
-        src.arr, indices.arr, dst.arr, _scatter_add_value_type(src.dtype)
-    )
+    value_type = _scatter_add_value_type(src.dtype)
+    if src_is_member or dst_is_member:
+        if not hasattr(prog, "cuda_device_scatter_add_strided_ndarray"):
+            return False
+        src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
+        dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
+        prog.cuda_device_scatter_add_strided_ndarray(
+            src_arr,
+            indices.arr,
+            dst_arr,
+            value_type,
+            src_offset,
+            src_stride,
+            dst_offset,
+            dst_stride,
+        )
+    else:
+        prog.cuda_device_scatter_add_ndarray(src.arr, indices.arr, dst.arr, value_type)
     return True
 
 
 def _try_vulkan_scatter_add(src, indices, dst, workspace):
     if current_cfg().arch != vulkan:
         return False
+    src_is_member = _is_struct_scalar_member_view(src)
+    dst_is_member = _is_struct_scalar_member_view(dst)
     if not (
-        isinstance(src, Ndarray)
+        (isinstance(src, Ndarray) or src_is_member)
         and isinstance(indices, Ndarray)
-        and isinstance(dst, Ndarray)
+        and (isinstance(dst, Ndarray) or dst_is_member)
     ):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -2784,9 +3090,25 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
             return False
     elif src.dtype != i32:
         return False
-    temp_bytes = prog.vulkan_scatter_add_ndarray(
-        src.arr, indices.arr, dst.arr, value_type
-    )
+    if src_is_member or dst_is_member:
+        if not hasattr(prog, "vulkan_scatter_add_strided_ndarray"):
+            return False
+        src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
+        dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
+        temp_bytes = prog.vulkan_scatter_add_strided_ndarray(
+            src_arr,
+            indices.arr,
+            dst_arr,
+            value_type,
+            src_offset,
+            src_stride,
+            dst_offset,
+            dst_stride,
+        )
+    else:
+        temp_bytes = prog.vulkan_scatter_add_ndarray(
+            src.arr, indices.arr, dst.arr, value_type
+        )
     if workspace is not None:
         workspace._vulkan_native_active = True
         workspace.workspace_bytes_current = max(
@@ -2801,10 +3123,12 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
 def _try_cpu_scatter_add(src, indices, dst):
     if current_cfg().arch not in [x64, arm64]:
         return False
+    src_is_member = _is_struct_scalar_member_view(src)
+    dst_is_member = _is_struct_scalar_member_view(dst)
     if not (
-        isinstance(src, Ndarray)
+        (isinstance(src, Ndarray) or src_is_member)
         and isinstance(indices, Ndarray)
-        and isinstance(dst, Ndarray)
+        and (isinstance(dst, Ndarray) or dst_is_member)
     ):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -2814,9 +3138,24 @@ def _try_cpu_scatter_add(src, indices, dst):
         return False
     if not prog.cpu_scatter_add_available():
         return False
-    prog.cpu_scatter_add_ndarray(
-        src.arr, indices.arr, dst.arr, _scatter_add_value_type(src.dtype)
-    )
+    value_type = _scatter_add_value_type(src.dtype)
+    if src_is_member or dst_is_member:
+        if not hasattr(prog, "cpu_scatter_add_strided_ndarray"):
+            return False
+        src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
+        dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
+        prog.cpu_scatter_add_strided_ndarray(
+            src_arr,
+            indices.arr,
+            dst_arr,
+            value_type,
+            src_offset,
+            src_stride,
+            dst_offset,
+            dst_stride,
+        )
+    else:
+        prog.cpu_scatter_add_ndarray(src.arr, indices.arr, dst.arr, value_type)
     return True
 
 
@@ -2880,6 +3219,12 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
             "experimental_scatter_add() method='cpu_native' requires CPU ndarray "
             "inputs and available native scatter-add support."
         )
+    if _is_struct_scalar_member_view(src) or _is_struct_scalar_member_view(dst):
+        raise RuntimeError(
+            "experimental_scatter_add() StructNdarray member views require an "
+            "available native ndarray backend; field/kernel fallback cannot "
+            "consume strided member views."
+        )
     if method in ("kernel", "field_kernel", "auto"):
         _scatter_add_kernel(src, indices, dst)
         return workspace
@@ -2909,17 +3254,14 @@ def _check_bucket_builder_request(keys, values, offsets, output, method, workspa
         or isinstance(offsets, Ndarray)
         or isinstance(output, Ndarray)
     )
-    supported_dtypes = (
-        _BUCKET_BUILDER_VALUE_DTYPES
-        if ndarray_mode
-        else _BUCKET_BUILDER_FIELD_DTYPES
-    )
-    if values.dtype not in supported_dtypes:
-        if ndarray_mode:
-            raise TypeError(
-                "experimental_bucket_builder() ndarray mode currently supports "
-                "ti.u32, ti.i32, ti.f32, ti.u64, ti.i64, and ti.f64 values."
-            )
+    if ndarray_mode and not _supports_opaque_raw_payload(
+        values, _BUCKET_BUILDER_VALUE_DTYPES
+    ):
+        raise TypeError(
+            "experimental_bucket_builder() ndarray mode currently supports "
+            "ti.u32, ti.i32, ti.f32, ti.u64, ti.i64, ti.f64, and StructNdarray values."
+        )
+    elif not ndarray_mode and values.dtype not in _BUCKET_BUILDER_FIELD_DTYPES:
         raise TypeError(
             "experimental_bucket_builder() field mode currently supports ti.i32 values."
         )
@@ -2949,10 +3291,10 @@ def _check_bucket_builder_request(keys, values, offsets, output, method, workspa
         raise TypeError("workspace must be a BucketBuilderWorkspace instance or None.")
 
 
-def _bucket_builder_value_type(dtype):
-    if dtype in _BUCKET_BUILDER_VALUE_TYPE:
-        return _BUCKET_BUILDER_VALUE_TYPE[dtype]
-    raise TypeError("unsupported experimental_bucket_builder() value dtype.")
+def _bucket_builder_value_type(values):
+    return _raw_payload_value_type(
+        values, _BUCKET_BUILDER_VALUE_TYPE, "experimental_bucket_builder()"
+    )
 
 
 def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, num_bins):
@@ -2973,7 +3315,7 @@ def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, nu
     if not prog.cuda_device_bucket_builder_available():
         return False
     cursor = workspace._get_cursor_ndarray(num_bins)
-    value_type = _bucket_builder_value_type(values.dtype)
+    value_type = _bucket_builder_value_type(values)
     if hasattr(prog, "cuda_device_bucket_builder_ndarray"):
         temp_bytes = prog.cuda_device_bucket_builder_ndarray(
             keys.arr, values.arr, offsets.arr, output.arr, cursor.arr, value_type
@@ -3008,7 +3350,7 @@ def _try_vulkan_bucket_builder(keys, values, offsets, output, workspace, num_bin
         return False
     if not prog.vulkan_bucket_builder_available():
         return False
-    value_type = _bucket_builder_value_type(values.dtype)
+    value_type = _bucket_builder_value_type(values)
     if hasattr(prog, "vulkan_bucket_builder_value_type_available"):
         if not prog.vulkan_bucket_builder_value_type_available(value_type):
             return False
@@ -3048,7 +3390,7 @@ def _try_cpu_bucket_builder(keys, values, offsets, output, workspace):
         return False
     if not prog.cpu_bucket_builder_available():
         return False
-    value_type = _bucket_builder_value_type(values.dtype)
+    value_type = _bucket_builder_value_type(values)
     if hasattr(prog, "cpu_bucket_builder_ndarray"):
         temp_bytes = prog.cpu_bucket_builder_ndarray(
             keys.arr, values.arr, offsets.arr, output.arr, value_type
@@ -3101,7 +3443,8 @@ def experimental_bucket_builder(
     ``[0, offsets.shape[0] - 1)``. Invalid keys are ignored. On return,
     ``offsets`` has length ``num_bins + 1`` and stores exclusive bucket
     ranges; ``output[offsets[b]:offsets[b + 1]]`` contains values for bucket
-    ``b`` in an unspecified order.
+    ``b`` in an unspecified order. Native ndarray mode treats StructNdarray
+    values as opaque raw payloads.
     """
 
     _check_bucket_builder_request(keys, values, offsets, output, method, workspace)
@@ -3152,12 +3495,23 @@ def _check_grouped_reduce_request(keys, values, output, op, method, workspace):
         )
     if not (_is_1d(keys) and _is_1d(values) and _is_1d(output)):
         raise ValueError("experimental_grouped_reduce() expects 1D keys, values, and output.")
+    keys_is_member = _is_struct_scalar_member_view(keys)
+    values_is_member = _is_struct_scalar_member_view(values)
+    output_is_member = _is_struct_scalar_member_view(output)
+    _check_no_struct_numeric_payload(
+        "experimental_grouped_reduce()", keys, values, output
+    )
     if keys.dtype != i32:
         raise TypeError("experimental_grouped_reduce() currently expects ti.i32 keys.")
     if values.dtype != output.dtype:
         raise TypeError("experimental_grouped_reduce() values and output dtype must match.")
     ndarray_mode = (
-        isinstance(keys, Ndarray) or isinstance(values, Ndarray) or isinstance(output, Ndarray)
+        isinstance(keys, Ndarray)
+        or keys_is_member
+        or isinstance(values, Ndarray)
+        or values_is_member
+        or isinstance(output, Ndarray)
+        or output_is_member
     )
     supported_dtypes = (
         _GROUPED_REDUCE_VALUE_DTYPES if ndarray_mode else _GROUPED_REDUCE_FIELD_DTYPES
@@ -3175,13 +3529,14 @@ def _check_grouped_reduce_request(keys, values, output, op, method, workspace):
         raise ValueError("experimental_grouped_reduce() output must contain at least one group.")
     if ndarray_mode:
         if not (
-            isinstance(keys, Ndarray)
-            and isinstance(values, Ndarray)
-            and isinstance(output, Ndarray)
+            (isinstance(keys, Ndarray) or keys_is_member)
+            and (isinstance(values, Ndarray) or values_is_member)
+            and (isinstance(output, Ndarray) or output_is_member)
         ):
             raise TypeError(
                 "experimental_grouped_reduce() ndarray mode requires keys, values, "
-                "and output all to be ti.ndarray."
+                "and output all to be ti.ndarray, except that scalar keys, "
+                "values, and output may be StructNdarray scalar member views."
             )
     if workspace is not None and not isinstance(workspace, GroupedReduceWorkspace):
         raise TypeError("workspace must be a GroupedReduceWorkspace instance or None.")
@@ -3198,10 +3553,15 @@ def _try_cuda_device_grouped_reduce(
 ):
     if current_cfg().arch != cuda:
         return False
+    keys_is_member = _is_struct_scalar_member_view(keys)
+    values_is_member = _is_struct_scalar_member_view(values)
+    output_is_member = _is_struct_scalar_member_view(output)
+    if (keys_is_member or values_is_member or output_is_member) and segmented:
+        return False
     if not (
-        isinstance(keys, Ndarray)
-        and isinstance(values, Ndarray)
-        and isinstance(output, Ndarray)
+        (isinstance(keys, Ndarray) or keys_is_member)
+        and (isinstance(values, Ndarray) or values_is_member)
+        and (isinstance(output, Ndarray) or output_is_member)
     ):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -3212,6 +3572,32 @@ def _try_cuda_device_grouped_reduce(
     if not prog.cuda_device_grouped_reduce_available():
         return False
     value_type = _grouped_reduce_value_type(values.dtype)
+    if (keys_is_member or values_is_member or output_is_member) and hasattr(
+        prog, "cuda_device_grouped_reduce_atomic_strided_keys_ndarray"
+    ):
+        keys_arr, keys_offset, keys_stride = _scalar_ndarray_payload(keys)
+        values_arr, values_offset, values_stride = _scalar_ndarray_payload(values)
+        output_arr, output_offset, output_stride = _scalar_ndarray_payload(output)
+        temp_bytes = prog.cuda_device_grouped_reduce_atomic_strided_keys_ndarray(
+            keys_arr,
+            values_arr,
+            output_arr,
+            value_type,
+            keys_offset,
+            keys_stride,
+            values_offset,
+            values_stride,
+            output_offset,
+            output_stride,
+            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak,
+            workspace.workspace_bytes_current + temp_bytes,
+        )
+        return True
+    if keys_is_member or values_is_member or output_is_member:
+        return False
     if not segmented and hasattr(prog, "cuda_device_grouped_reduce_atomic_ndarray"):
         temp_bytes = prog.cuda_device_grouped_reduce_atomic_ndarray(
             keys.arr, values.arr, output.arr, value_type, _SUPPORTED_GROUPED_REDUCE_OPS[op]
@@ -3277,10 +3663,15 @@ def _try_vulkan_grouped_reduce(
 ):
     if current_cfg().arch != vulkan:
         return False
+    keys_is_member = _is_struct_scalar_member_view(keys)
+    values_is_member = _is_struct_scalar_member_view(values)
+    output_is_member = _is_struct_scalar_member_view(output)
+    if (keys_is_member or values_is_member or output_is_member) and segmented:
+        return False
     if not (
-        isinstance(keys, Ndarray)
-        and isinstance(values, Ndarray)
-        and isinstance(output, Ndarray)
+        (isinstance(keys, Ndarray) or keys_is_member)
+        and (isinstance(values, Ndarray) or values_is_member)
+        and (isinstance(output, Ndarray) or output_is_member)
     ):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -3302,6 +3693,35 @@ def _try_vulkan_grouped_reduce(
         if not prog.vulkan_grouped_reduce_value_type_available(value_type):
             return False
     elif segmented and values.dtype != i32:
+        return False
+    if (
+        (keys_is_member or values_is_member or output_is_member)
+        and not segmented
+        and hasattr(prog, "vulkan_grouped_reduce_atomic_strided_keys_ndarray")
+    ):
+        keys_arr, keys_offset, keys_stride = _scalar_ndarray_payload(keys)
+        values_arr, values_offset, values_stride = _scalar_ndarray_payload(values)
+        output_arr, output_offset, output_stride = _scalar_ndarray_payload(output)
+        temp_bytes = prog.vulkan_grouped_reduce_atomic_strided_keys_ndarray(
+            keys_arr,
+            values_arr,
+            output_arr,
+            value_type,
+            keys_offset,
+            keys_stride,
+            values_offset,
+            values_stride,
+            output_offset,
+            output_stride,
+            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+        )
+        workspace._vulkan_native_active = True
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak,
+            workspace.workspace_bytes_current + temp_bytes,
+        )
+        return True
+    if keys_is_member or values_is_member or output_is_member:
         return False
     if not segmented and hasattr(prog, "vulkan_grouped_reduce_atomic_ndarray"):
         temp_bytes = prog.vulkan_grouped_reduce_atomic_ndarray(
@@ -3370,10 +3790,13 @@ def _try_vulkan_grouped_reduce(
 def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
     if current_cfg().arch not in [x64, arm64]:
         return False
+    keys_is_member = _is_struct_scalar_member_view(keys)
+    values_is_member = _is_struct_scalar_member_view(values)
+    output_is_member = _is_struct_scalar_member_view(output)
     if not (
-        isinstance(keys, Ndarray)
-        and isinstance(values, Ndarray)
-        and isinstance(output, Ndarray)
+        (isinstance(keys, Ndarray) or keys_is_member)
+        and (isinstance(values, Ndarray) or values_is_member)
+        and (isinstance(output, Ndarray) or output_is_member)
     ):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -3384,7 +3807,28 @@ def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
     if not prog.cpu_grouped_reduce_available():
         return False
     value_type = _grouped_reduce_value_type(values.dtype)
-    if hasattr(prog, "cpu_grouped_reduce_ndarray"):
+    if (keys_is_member or values_is_member or output_is_member) and hasattr(
+        prog, "cpu_grouped_reduce_strided_keys_ndarray"
+    ):
+        keys_arr, keys_offset, keys_stride = _scalar_ndarray_payload(keys)
+        values_arr, values_offset, values_stride = _scalar_ndarray_payload(values)
+        output_arr, output_offset, output_stride = _scalar_ndarray_payload(output)
+        temp_bytes = prog.cpu_grouped_reduce_strided_keys_ndarray(
+            keys_arr,
+            values_arr,
+            output_arr,
+            value_type,
+            keys_offset,
+            keys_stride,
+            values_offset,
+            values_stride,
+            output_offset,
+            output_stride,
+            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+        )
+    elif keys_is_member or values_is_member or output_is_member:
+        return False
+    elif hasattr(prog, "cpu_grouped_reduce_ndarray"):
         temp_bytes = prog.cpu_grouped_reduce_ndarray(
             keys.arr, values.arr, output.arr, value_type, _SUPPORTED_GROUPED_REDUCE_OPS[op]
         )
@@ -3482,6 +3926,16 @@ def experimental_grouped_reduce(
             "experimental_grouped_reduce() method='cpu_native' requires CPU ndarray "
             "inputs and available native grouped-reduce support."
         )
+    if (
+        _is_struct_scalar_member_view(keys)
+        or _is_struct_scalar_member_view(values)
+        or _is_struct_scalar_member_view(output)
+    ):
+        raise RuntimeError(
+            "experimental_grouped_reduce() StructNdarray member views require "
+            "an available native ndarray backend; field/kernel fallback cannot "
+            "consume strided member views."
+        )
     if method in ("kernel", "field_kernel", "auto"):
         _grouped_reduce_kernel(keys, values, output)
         return workspace
@@ -3541,9 +3995,7 @@ class PrefixSumExecutor:
     def _try_cuda_cub_scan(self, input_arr):
         if current_cfg().arch != cuda:
             return False
-        if not isinstance(input_arr, Ndarray):
-            return False
-        if input_arr.dtype not in _SCAN_VALUE_DTYPES:
+        if not (isinstance(input_arr, Ndarray) or _is_struct_scalar_member_view(input_arr)):
             return False
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -3552,17 +4004,21 @@ class PrefixSumExecutor:
             return False
         if not prog.cuda_cub_scan_available():
             return False
-        prog.cuda_cub_inclusive_scan_ndarray(
-            input_arr.arr, self._scan_value_type(input_arr.dtype)
-        )
+        value_type = self._scan_value_type(input_arr.dtype)
+        if _is_struct_scalar_member_view(input_arr):
+            if not hasattr(prog, "cuda_cub_inclusive_scan_member_ndarray"):
+                return False
+            prog.cuda_cub_inclusive_scan_member_ndarray(
+                input_arr.base.arr, value_type, input_arr.offset, input_arr.stride
+            )
+        else:
+            prog.cuda_cub_inclusive_scan_ndarray(input_arr.arr, value_type)
         return True
 
     def _try_vulkan_native_scan(self, input_arr):
         if current_cfg().arch != vulkan:
             return False
-        if not isinstance(input_arr, Ndarray):
-            return False
-        if input_arr.dtype not in _SCAN_VALUE_DTYPES:
+        if not (isinstance(input_arr, Ndarray) or _is_struct_scalar_member_view(input_arr)):
             return False
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -3577,15 +4033,20 @@ class PrefixSumExecutor:
                 return False
         elif input_arr.dtype != i32:
             return False
-        prog.vulkan_inclusive_scan_ndarray(input_arr.arr, value_type)
+        if _is_struct_scalar_member_view(input_arr):
+            if not hasattr(prog, "vulkan_inclusive_scan_member_ndarray"):
+                return False
+            prog.vulkan_inclusive_scan_member_ndarray(
+                input_arr.base.arr, value_type, input_arr.offset, input_arr.stride
+            )
+        else:
+            prog.vulkan_inclusive_scan_ndarray(input_arr.arr, value_type)
         return True
 
     def _try_cpu_native_scan(self, input_arr):
         if current_cfg().arch not in [x64, arm64]:
             return False
-        if not isinstance(input_arr, Ndarray):
-            return False
-        if input_arr.dtype not in _SCAN_VALUE_DTYPES:
+        if not (isinstance(input_arr, Ndarray) or _is_struct_scalar_member_view(input_arr)):
             return False
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -3594,9 +4055,15 @@ class PrefixSumExecutor:
             return False
         if not prog.cpu_scan_available():
             return False
-        prog.cpu_inclusive_scan_ndarray(
-            input_arr.arr, self._scan_value_type(input_arr.dtype)
-        )
+        value_type = self._scan_value_type(input_arr.dtype)
+        if _is_struct_scalar_member_view(input_arr):
+            if not hasattr(prog, "cpu_inclusive_scan_member_ndarray"):
+                return False
+            prog.cpu_inclusive_scan_member_ndarray(
+                input_arr.base.arr, value_type, input_arr.offset, input_arr.stride
+            )
+        else:
+            prog.cpu_inclusive_scan_ndarray(input_arr.arr, value_type)
         return True
 
     def _run_field_workspace(self, large_arr):
@@ -3635,6 +4102,14 @@ class PrefixSumExecutor:
         length = self.sorting_length
 
         if isinstance(input_arr, Ndarray):
+            if _is_opaque_raw_payload(input_arr):
+                _reject_struct_numeric_primitive("PrefixSumExecutor.run()")
+            if input_arr.dtype not in _SCAN_VALUE_DTYPES:
+                raise RuntimeError(
+                    "PrefixSumExecutor ndarray input supports only "
+                    "ti.i32/ti.u32/ti.f32/ti.i64/ti.u64/ti.f64."
+                )
+        elif _is_struct_scalar_member_view(input_arr):
             if input_arr.dtype not in _SCAN_VALUE_DTYPES:
                 raise RuntimeError(
                     "PrefixSumExecutor ndarray input supports only "
@@ -3650,7 +4125,7 @@ class PrefixSumExecutor:
             return
         if self._try_cpu_native_scan(input_arr):
             return
-        if isinstance(input_arr, Ndarray):
+        if isinstance(input_arr, Ndarray) or _is_struct_scalar_member_view(input_arr):
             raise RuntimeError(
                 "PrefixSumExecutor ndarray input is currently supported only "
                 "by native CPU/CUDA/Vulkan scan fast paths. Ensure the backend "

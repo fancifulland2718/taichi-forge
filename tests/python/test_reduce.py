@@ -52,6 +52,24 @@ def _run_ndarray_reduce_case(n, dtype, np_dtype, method, workspace):
         _assert_reduce_output(output.to_numpy()[0], _expected(values_np, op), np_dtype)
 
 
+def _run_struct_member_reduce_case(n, dtype, np_dtype, method, workspace):
+    payload = ti.types.struct(value=dtype, tag=ti.i32)
+    values = ti.ndarray(payload, shape=n)
+    output = ti.ndarray(dtype, shape=1)
+    values_np = _values_np(n, np_dtype)
+    host = np.zeros((n,), dtype=values.numpy_dtype)
+    host["value"] = values_np
+    host["tag"] = np.arange(n, dtype=np.int32) * 3 + 1
+    values.from_numpy(host)
+    for op in ("sum", "min", "max"):
+        output.from_numpy(np.array([0], dtype=np_dtype))
+        ti.algorithms.experimental_reduce(
+            values.field("value"), output, op=op, method=method, workspace=workspace
+        )
+        _assert_reduce_output(output.to_numpy()[0], _expected(values_np, op), np_dtype)
+    assert np.array_equal(values.to_numpy()["tag"], host["tag"])
+
+
 @test_utils.test(arch=[ti.cuda])
 def test_experimental_reduce_cuda_cub_ndarray_dtypes():
     n = 4096
@@ -62,6 +80,19 @@ def test_experimental_reduce_cuda_cub_ndarray_dtypes():
     workspace = ti.algorithms.ReduceWorkspace(max_items=n)
     for dtype, np_dtype, _value_type in _REDUCE_DTYPE_CASES:
         _run_ndarray_reduce_case(n, dtype, np_dtype, "cuda_cub", workspace)
+    assert workspace.workspace_bytes_peak > 0
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_reduce_cuda_cub_struct_member_view():
+    n = 4096
+    prog = impl.get_runtime().prog
+    if not prog.cuda_cub_reduce_available():
+        pytest.skip("CUDA CUB reduce is unavailable in this build/runtime.")
+
+    workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+    for dtype, np_dtype, _value_type in _REDUCE_DTYPE_CASES:
+        _run_struct_member_reduce_case(n, dtype, np_dtype, "cuda_cub", workspace)
     assert workspace.workspace_bytes_peak > 0
 
 
@@ -81,6 +112,27 @@ def test_experimental_reduce_vulkan_native_ndarray_dtypes():
         elif dtype != ti.i32:
             continue
         _run_ndarray_reduce_case(n, dtype, np_dtype, "vulkan_native", workspace)
+        tested += 1
+    assert tested >= 3
+    assert workspace.workspace_bytes_peak > 0
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_reduce_vulkan_native_struct_member_view():
+    n = 8192
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "vulkan_reduce_available") or not prog.vulkan_reduce_available():
+        pytest.skip("Vulkan native reduce is unavailable in this build/runtime.")
+
+    workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+    tested = 0
+    for dtype, np_dtype, value_type in _REDUCE_DTYPE_CASES:
+        if hasattr(prog, "vulkan_reduce_value_type_available"):
+            if not prog.vulkan_reduce_value_type_available(value_type):
+                continue
+        elif dtype != ti.i32:
+            continue
+        _run_struct_member_reduce_case(n, dtype, np_dtype, "vulkan_native", workspace)
         tested += 1
     assert tested >= 3
     assert workspace.workspace_bytes_peak > 0
@@ -116,6 +168,35 @@ def test_experimental_reduce_cpu_native_ndarray_dtypes():
         _run_ndarray_reduce_case(n, dtype, np_dtype, "cpu_native", workspace)
     assert workspace.workspace_bytes_peak > 0
     assert impl.get_runtime().prog.cpu_reduce_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_reduce_cpu_native_struct_member_view():
+    n = 131072
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cpu_reduce_available") or not prog.cpu_reduce_available():
+        pytest.skip("CPU native reduce is unavailable in this build/runtime.")
+
+    workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+    for dtype, np_dtype, _value_type in _REDUCE_DTYPE_CASES:
+        _run_struct_member_reduce_case(n, dtype, np_dtype, "cpu_native", workspace)
+    assert workspace.workspace_bytes_peak > 0
+    assert impl.get_runtime().prog.cpu_reduce_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_reduce_struct_member_view_rejections():
+    payload = ti.types.struct(value=ti.f32, tag=ti.i32)
+    values = ti.ndarray(payload, shape=8)
+    scalar_output = ti.ndarray(ti.f32, shape=1)
+    struct_output = ti.ndarray(payload, shape=1)
+
+    with pytest.raises(TypeError, match="does not support StructNdarray"):
+        ti.algorithms.experimental_reduce(values, scalar_output, method="cpu_native")
+    with pytest.raises(TypeError, match="does not support StructNdarray"):
+        ti.algorithms.experimental_reduce(
+            values.field("value"), struct_output, method="cpu_native"
+        )
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

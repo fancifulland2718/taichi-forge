@@ -683,6 +683,11 @@ void export_lang(py::module &m) {
            &Program::cuda_device_transform_affine_ndarray, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("scale"),
            py::arg("bias"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_transform_affine_member_ndarray",
+           &Program::cuda_device_transform_affine_member_ndarray,
+           py::arg("src"), py::arg("dst"), py::arg("value_type"),
+           py::arg("offset"), py::arg("stride"), py::arg("scale"),
+           py::arg("bias"), py::call_guard<py::gil_scoped_release>())
       .def("cuda_device_indexed_copy_available",
            &Program::cuda_device_indexed_copy_available)
       .def("cuda_device_indexed_copy_payload_available",
@@ -701,6 +706,17 @@ void export_lang(py::module &m) {
             &Program::cuda_device_scatter_add_ndarray, py::arg("src"),
             py::arg("indices"), py::arg("dst"), py::arg("value_type"),
             py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_scatter_add_member_ndarray",
+            &Program::cuda_device_scatter_add_member_ndarray, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("offset"), py::arg("stride"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_scatter_add_strided_ndarray",
+            &Program::cuda_device_scatter_add_strided_ndarray, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("src_offset"), py::arg("src_stride"),
+            py::arg("dst_offset"), py::arg("dst_stride"),
+            py::call_guard<py::gil_scoped_release>())
        .def("cuda_device_bucket_builder_available",
             &Program::cuda_device_bucket_builder_available)
        .def("cuda_device_bucket_builder_i32_ndarray",
@@ -718,6 +734,26 @@ void export_lang(py::module &m) {
             &Program::cuda_device_grouped_reduce_atomic_ndarray,
             py::arg("keys"), py::arg("values"), py::arg("output"),
             py::arg("value_type"), py::arg("op"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_grouped_reduce_atomic_member_ndarray",
+            &Program::cuda_device_grouped_reduce_atomic_member_ndarray,
+            py::arg("keys"), py::arg("values"), py::arg("output"),
+            py::arg("value_type"), py::arg("offset"), py::arg("stride"),
+            py::arg("op"), py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_grouped_reduce_atomic_strided_ndarray",
+            &Program::cuda_device_grouped_reduce_atomic_strided_ndarray,
+            py::arg("keys"), py::arg("values"), py::arg("output"),
+            py::arg("value_type"), py::arg("values_offset"),
+            py::arg("values_stride"), py::arg("output_offset"),
+            py::arg("output_stride"), py::arg("op"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_grouped_reduce_atomic_strided_keys_ndarray",
+            &Program::cuda_device_grouped_reduce_atomic_strided_keys_ndarray,
+            py::arg("keys"), py::arg("values"), py::arg("output"),
+            py::arg("value_type"), py::arg("keys_offset"),
+            py::arg("keys_stride"), py::arg("values_offset"),
+            py::arg("values_stride"), py::arg("output_offset"),
+            py::arg("output_stride"), py::arg("op"),
             py::call_guard<py::gil_scoped_release>())
        .def("cuda_device_grouped_reduce_i32_atomic_ndarray",
             &Program::cuda_device_grouped_reduce_i32_atomic_ndarray,
@@ -779,6 +815,10 @@ void export_lang(py::module &m) {
            &Program::cuda_cub_inclusive_scan_ndarray, py::arg("data"),
            py::arg("value_type"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_inclusive_scan_member_ndarray",
+           &Program::cuda_cub_inclusive_scan_member_ndarray, py::arg("data"),
+           py::arg("value_type"), py::arg("offset"), py::arg("stride"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_select_available", &Program::cuda_cub_select_available)
       .def("cuda_cub_select_clear_workspace",
            &Program::cuda_cub_select_clear_workspace,
@@ -816,11 +856,20 @@ void export_lang(py::module &m) {
       .def("cuda_cub_reduce_ndarray", &Program::cuda_cub_reduce_ndarray,
            py::arg("values"), py::arg("output"), py::arg("value_type"),
            py::arg("op"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_reduce_member_ndarray",
+           &Program::cuda_cub_reduce_member_ndarray, py::arg("values"),
+           py::arg("output"), py::arg("value_type"), py::arg("offset"),
+           py::arg("stride"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_scan_available", &Program::cpu_scan_available)
       .def("cpu_scan_workspace_bytes", &Program::cpu_scan_workspace_bytes)
       .def("cpu_inclusive_scan_ndarray",
            &Program::cpu_inclusive_scan_ndarray, py::arg("data"),
            py::arg("value_type"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_inclusive_scan_member_ndarray",
+           &Program::cpu_inclusive_scan_member_ndarray, py::arg("data"),
+           py::arg("value_type"), py::arg("offset"), py::arg("stride"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_compact_available", &Program::cpu_compact_available)
       .def("cpu_compact_workspace_bytes", &Program::cpu_compact_workspace_bytes)
       .def("cpu_compact_ndarray", &Program::cpu_compact_ndarray,
@@ -846,6 +895,11 @@ void export_lang(py::module &m) {
       .def("cpu_reduce_ndarray", &Program::cpu_reduce_ndarray,
            py::arg("values"), py::arg("output"), py::arg("value_type"),
            py::arg("op"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_reduce_member_ndarray",
+           &Program::cpu_reduce_member_ndarray, py::arg("values"),
+           py::arg("output"), py::arg("value_type"), py::arg("offset"),
+           py::arg("stride"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_transform_available", &Program::cpu_transform_available)
       .def("cpu_transform_workspace_bytes",
            &Program::cpu_transform_workspace_bytes)
@@ -853,6 +907,11 @@ void export_lang(py::module &m) {
            &Program::cpu_transform_affine_ndarray, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("scale"),
            py::arg("bias"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_transform_affine_member_ndarray",
+           &Program::cpu_transform_affine_member_ndarray, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("offset"),
+           py::arg("stride"), py::arg("scale"), py::arg("bias"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_indexed_copy_available", &Program::cpu_indexed_copy_available)
       .def("cpu_indexed_copy_workspace_bytes",
            &Program::cpu_indexed_copy_workspace_bytes)
@@ -868,6 +927,17 @@ void export_lang(py::module &m) {
        .def("cpu_scatter_add_ndarray", &Program::cpu_scatter_add_ndarray,
             py::arg("src"), py::arg("indices"), py::arg("dst"),
             py::arg("value_type"), py::call_guard<py::gil_scoped_release>())
+       .def("cpu_scatter_add_member_ndarray",
+            &Program::cpu_scatter_add_member_ndarray, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("offset"), py::arg("stride"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cpu_scatter_add_strided_ndarray",
+            &Program::cpu_scatter_add_strided_ndarray, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("src_offset"), py::arg("src_stride"),
+            py::arg("dst_offset"), py::arg("dst_stride"),
+            py::call_guard<py::gil_scoped_release>())
        .def("cpu_bucket_builder_available",
             &Program::cpu_bucket_builder_available)
        .def("cpu_bucket_builder_workspace_bytes",
@@ -886,6 +956,24 @@ void export_lang(py::module &m) {
             py::arg("keys"), py::arg("values"), py::arg("output"),
             py::arg("value_type"), py::arg("op"),
             py::call_guard<py::gil_scoped_release>())
+       .def("cpu_grouped_reduce_member_ndarray",
+            &Program::cpu_grouped_reduce_member_ndarray, py::arg("keys"),
+            py::arg("values"), py::arg("output"), py::arg("value_type"),
+            py::arg("offset"), py::arg("stride"), py::arg("op"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cpu_grouped_reduce_strided_ndarray",
+            &Program::cpu_grouped_reduce_strided_ndarray, py::arg("keys"),
+            py::arg("values"), py::arg("output"), py::arg("value_type"),
+            py::arg("values_offset"), py::arg("values_stride"),
+            py::arg("output_offset"), py::arg("output_stride"),
+            py::arg("op"), py::call_guard<py::gil_scoped_release>())
+       .def("cpu_grouped_reduce_strided_keys_ndarray",
+            &Program::cpu_grouped_reduce_strided_keys_ndarray, py::arg("keys"),
+            py::arg("values"), py::arg("output"), py::arg("value_type"),
+            py::arg("keys_offset"), py::arg("keys_stride"),
+            py::arg("values_offset"), py::arg("values_stride"),
+            py::arg("output_offset"), py::arg("output_stride"),
+            py::arg("op"), py::call_guard<py::gil_scoped_release>())
        .def("cpu_grouped_reduce_workspace_bytes",
             &Program::cpu_grouped_reduce_workspace_bytes)
        .def("cpu_grouped_reduce_i32_ndarray",
@@ -914,6 +1002,10 @@ void export_lang(py::module &m) {
       .def("vulkan_inclusive_scan_ndarray",
            &Program::vulkan_inclusive_scan_ndarray, py::arg("data"),
            py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_inclusive_scan_member_ndarray",
+           &Program::vulkan_inclusive_scan_member_ndarray, py::arg("data"),
+           py::arg("value_type"), py::arg("offset"), py::arg("stride"),
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_compact_available", &Program::vulkan_compact_available)
       .def("vulkan_compact_clear_workspace",
@@ -958,6 +1050,11 @@ void export_lang(py::module &m) {
       .def("vulkan_reduce_ndarray", &Program::vulkan_reduce_ndarray,
            py::arg("values"), py::arg("output"), py::arg("value_type"),
            py::arg("op"), py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_reduce_member_ndarray",
+           &Program::vulkan_reduce_member_ndarray, py::arg("values"),
+           py::arg("output"), py::arg("value_type"), py::arg("offset"),
+           py::arg("stride"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_reduce_i32_ndarray",
            &Program::vulkan_reduce_i32_ndarray, py::arg("values"),
            py::arg("output"), py::arg("op"),
@@ -975,6 +1072,11 @@ void export_lang(py::module &m) {
            &Program::vulkan_transform_affine_ndarray, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("scale"),
            py::arg("bias"), py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_transform_affine_member_ndarray",
+           &Program::vulkan_transform_affine_member_ndarray, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("offset"),
+           py::arg("stride"), py::arg("scale"), py::arg("bias"),
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_indexed_copy_available",
            &Program::vulkan_indexed_copy_available)
       .def("vulkan_indexed_copy_clear_workspace",
@@ -1001,6 +1103,17 @@ void export_lang(py::module &m) {
        .def("vulkan_scatter_add_ndarray",
             &Program::vulkan_scatter_add_ndarray, py::arg("src"),
             py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_scatter_add_member_ndarray",
+            &Program::vulkan_scatter_add_member_ndarray, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("offset"), py::arg("stride"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_scatter_add_strided_ndarray",
+            &Program::vulkan_scatter_add_strided_ndarray, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("src_offset"), py::arg("src_stride"),
+            py::arg("dst_offset"), py::arg("dst_stride"),
             py::call_guard<py::gil_scoped_release>())
        .def("vulkan_bucket_builder_available",
             &Program::vulkan_bucket_builder_available)
@@ -1033,6 +1146,26 @@ void export_lang(py::module &m) {
             &Program::vulkan_grouped_reduce_atomic_ndarray, py::arg("keys"),
             py::arg("values"), py::arg("output"), py::arg("value_type"),
             py::arg("op"), py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_grouped_reduce_atomic_member_ndarray",
+            &Program::vulkan_grouped_reduce_atomic_member_ndarray,
+            py::arg("keys"), py::arg("values"), py::arg("output"),
+            py::arg("value_type"), py::arg("offset"), py::arg("stride"),
+            py::arg("op"), py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_grouped_reduce_atomic_strided_ndarray",
+            &Program::vulkan_grouped_reduce_atomic_strided_ndarray,
+            py::arg("keys"), py::arg("values"), py::arg("output"),
+            py::arg("value_type"), py::arg("values_offset"),
+            py::arg("values_stride"), py::arg("output_offset"),
+            py::arg("output_stride"), py::arg("op"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_grouped_reduce_atomic_strided_keys_ndarray",
+            &Program::vulkan_grouped_reduce_atomic_strided_keys_ndarray,
+            py::arg("keys"), py::arg("values"), py::arg("output"),
+            py::arg("value_type"), py::arg("keys_offset"),
+            py::arg("keys_stride"), py::arg("values_offset"),
+            py::arg("values_stride"), py::arg("output_offset"),
+            py::arg("output_stride"), py::arg("op"),
+            py::call_guard<py::gil_scoped_release>())
        .def("vulkan_grouped_reduce_clear_workspace",
             &Program::vulkan_grouped_reduce_clear_workspace,
             py::call_guard<py::gil_scoped_release>())
@@ -1721,6 +1854,7 @@ void export_lang(py::module &m) {
 #undef PER_TYPE
 
   m.def("data_type_size", data_type_size);
+  m.def("data_type_alignment", data_type_alignment);
   m.def("is_quant", is_quant);
   m.def("is_integral", is_integral);
   m.def("is_signed", is_signed);

@@ -221,17 +221,29 @@ static const uint32_t kPrefixSingleChunkSpv[] =
 static const uint32_t kScanI32BlockSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_i32_block.comp.spv.h"
     ;
+static const uint32_t kScanI32BlockStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i32_block_strided.comp.spv.h"
+    ;
 static const uint32_t kScanI32BlockSubgroupSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_i32_block_subgroup.comp.spv.h"
     ;
 static const uint32_t kScanI32AddSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_i32_add.comp.spv.h"
     ;
+static const uint32_t kScanI32AddStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i32_add_strided.comp.spv.h"
+    ;
 static const uint32_t kScanI32SmallSubgroupSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_i32_small_subgroup.comp.spv.h"
     ;
+static const uint32_t kScanI32SmallSubgroupStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i32_small_subgroup_strided.comp.spv.h"
+    ;
 static const uint32_t kScanF32BlockSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_f32_block.comp.spv.h"
+    ;
+static const uint32_t kScanF32BlockStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_f32_block_strided.comp.spv.h"
     ;
 static const uint32_t kScanF32BlockSubgroupSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_f32_block_subgroup.comp.spv.h"
@@ -239,11 +251,20 @@ static const uint32_t kScanF32BlockSubgroupSpv[] =
 static const uint32_t kScanF32AddSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_f32_add.comp.spv.h"
     ;
+static const uint32_t kScanF32AddStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_f32_add_strided.comp.spv.h"
+    ;
 static const uint32_t kScanF32SmallSubgroupSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_f32_small_subgroup.comp.spv.h"
     ;
+static const uint32_t kScanF32SmallSubgroupStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_f32_small_subgroup_strided.comp.spv.h"
+    ;
 static const uint32_t kScanU32BlockSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_u32_block.comp.spv.h"
+    ;
+static const uint32_t kScanU32BlockStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_u32_block_strided.comp.spv.h"
     ;
 static const uint32_t kScanU32BlockSubgroupSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_u32_block_subgroup.comp.spv.h"
@@ -251,26 +272,50 @@ static const uint32_t kScanU32BlockSubgroupSpv[] =
 static const uint32_t kScanU32AddSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_u32_add.comp.spv.h"
     ;
+static const uint32_t kScanU32AddStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_u32_add_strided.comp.spv.h"
+    ;
 static const uint32_t kScanU32SmallSubgroupSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_u32_small_subgroup.comp.spv.h"
+    ;
+static const uint32_t kScanU32SmallSubgroupStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_u32_small_subgroup_strided.comp.spv.h"
     ;
 static const uint32_t kScanU64BlockSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_u64_block.comp.spv.h"
     ;
+static const uint32_t kScanU64BlockStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_u64_block_strided.comp.spv.h"
+    ;
 static const uint32_t kScanU64AddSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_u64_add.comp.spv.h"
+    ;
+static const uint32_t kScanU64AddStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_u64_add_strided.comp.spv.h"
     ;
 static const uint32_t kScanI64BlockSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_i64_block.comp.spv.h"
     ;
+static const uint32_t kScanI64BlockStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i64_block_strided.comp.spv.h"
+    ;
 static const uint32_t kScanI64AddSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_i64_add.comp.spv.h"
+    ;
+static const uint32_t kScanI64AddStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i64_add_strided.comp.spv.h"
     ;
 static const uint32_t kScanF64BlockSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_f64_block.comp.spv.h"
     ;
+static const uint32_t kScanF64BlockStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_f64_block_strided.comp.spv.h"
+    ;
 static const uint32_t kScanF64AddSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_f64_add.comp.spv.h"
+    ;
+static const uint32_t kScanF64AddStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_f64_add_strided.comp.spv.h"
     ;
 static const uint32_t kCompactI32FlagsSpv[] =
 #include "taichi/program/vulkan_sort_shaders/compact_i32_flags.comp.spv.h"
@@ -494,6 +539,114 @@ static const uint32_t kReduceF64MinSingleSpv[] =
 static const uint32_t kReduceF64MaxSingleSpv[] =
 #include "taichi/program/vulkan_sort_shaders/reduce_f64_max_single.comp.spv.h"
     ;
+static const uint32_t kReduceI32SumPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i32_sum_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceI32MinPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i32_min_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceI32MaxPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i32_max_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceI32SumSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i32_sum_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceI32MinSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i32_min_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceI32MaxSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i32_max_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceF32SumPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_f32_sum_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceF32MinPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_f32_min_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceF32MaxPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_f32_max_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceF32SumSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_f32_sum_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceF32MinSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_f32_min_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceF32MaxSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_f32_max_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceU32SumPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_u32_sum_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceU32MinPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_u32_min_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceU32MaxPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_u32_max_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceU32SumSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_u32_sum_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceU32MinSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_u32_min_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceU32MaxSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_u32_max_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceU64SumPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_u64_sum_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceU64MinPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_u64_min_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceU64MaxPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_u64_max_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceU64SumSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_u64_sum_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceU64MinSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_u64_min_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceU64MaxSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_u64_max_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceI64SumPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i64_sum_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceI64MinPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i64_min_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceI64MaxPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i64_max_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceI64SumSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i64_sum_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceI64MinSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i64_min_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceI64MaxSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_i64_max_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceF64SumPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_f64_sum_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceF64MinPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_f64_min_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceF64MaxPrivateStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_f64_max_private_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceF64SumSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_f64_sum_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceF64MinSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_f64_min_single_strided.comp.spv.h"
+    ;
+static const uint32_t kReduceF64MaxSingleStridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/reduce_f64_max_single_strided.comp.spv.h"
+    ;
 static const uint32_t kTransformI32AffineSpv[] =
 #include "taichi/program/vulkan_sort_shaders/transform_i32_affine.comp.spv.h"
     ;
@@ -529,6 +682,24 @@ static const uint32_t kScatterAddI64ByI32Spv[] =
     ;
 static const uint32_t kScatterAddF64ByI32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/scatter_add_f64_by_i32.comp.spv.h"
+    ;
+static const uint32_t kScatterAddI32ByI32StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scatter_add_i32_by_i32_strided.comp.spv.h"
+    ;
+static const uint32_t kScatterAddF32ByI32StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scatter_add_f32_by_i32_strided.comp.spv.h"
+    ;
+static const uint32_t kScatterAddU32ByI32StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scatter_add_u32_by_i32_strided.comp.spv.h"
+    ;
+static const uint32_t kScatterAddU64ByI32StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scatter_add_u64_by_i32_strided.comp.spv.h"
+    ;
+static const uint32_t kScatterAddI64ByI32StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scatter_add_i64_by_i32_strided.comp.spv.h"
+    ;
+static const uint32_t kScatterAddF64ByI32StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scatter_add_f64_by_i32_strided.comp.spv.h"
     ;
 static const uint32_t kBucketClearI32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/bucket_clear_i32.comp.spv.h"
@@ -593,6 +764,24 @@ static const uint32_t kGroupedReduceZeroI64Spv[] =
 static const uint32_t kGroupedReduceZeroF64Spv[] =
 #include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_f64.comp.spv.h"
     ;
+static const uint32_t kGroupedReduceZeroI32StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_i32_strided.comp.spv.h"
+    ;
+static const uint32_t kGroupedReduceZeroF32StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_f32_strided.comp.spv.h"
+    ;
+static const uint32_t kGroupedReduceZeroU32StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_u32_strided.comp.spv.h"
+    ;
+static const uint32_t kGroupedReduceZeroU64StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_u64_strided.comp.spv.h"
+    ;
+static const uint32_t kGroupedReduceZeroI64StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_i64_strided.comp.spv.h"
+    ;
+static const uint32_t kGroupedReduceZeroF64StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/grouped_reduce_zero_f64_strided.comp.spv.h"
+    ;
 static const uint32_t kGroupedReduceAtomicSumI32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/grouped_reduce_atomic_sum_i32.comp.spv.h"
     ;
@@ -610,6 +799,24 @@ static const uint32_t kGroupedReduceAtomicSumI64Spv[] =
     ;
 static const uint32_t kGroupedReduceAtomicSumF64Spv[] =
 #include "taichi/program/vulkan_sort_shaders/grouped_reduce_atomic_sum_f64.comp.spv.h"
+    ;
+static const uint32_t kGroupedReduceAtomicSumI32StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/grouped_reduce_atomic_sum_i32_strided.comp.spv.h"
+    ;
+static const uint32_t kGroupedReduceAtomicSumF32StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/grouped_reduce_atomic_sum_f32_strided.comp.spv.h"
+    ;
+static const uint32_t kGroupedReduceAtomicSumU32StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/grouped_reduce_atomic_sum_u32_strided.comp.spv.h"
+    ;
+static const uint32_t kGroupedReduceAtomicSumU64StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/grouped_reduce_atomic_sum_u64_strided.comp.spv.h"
+    ;
+static const uint32_t kGroupedReduceAtomicSumI64StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/grouped_reduce_atomic_sum_i64_strided.comp.spv.h"
+    ;
+static const uint32_t kGroupedReduceAtomicSumF64StridedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/grouped_reduce_atomic_sum_f64_strided.comp.spv.h"
     ;
 static const uint32_t kGroupedReduceSumI32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/grouped_reduce_sum_i32.comp.spv.h"
@@ -897,6 +1104,45 @@ std::unique_ptr<Pipeline> create_pipeline(Device *device,
                                           const uint32_t (&spv)[N],
                                           const std::string &name) {
   return create_pipeline_from_spv(device, spv, sizeof(spv), name);
+}
+
+struct VulkanScanStridedSpvSet {
+  const uint32_t *block_spv;
+  size_t block_bytes;
+  const uint32_t *add_spv;
+  size_t add_bytes;
+  const uint32_t *small_spv;
+  size_t small_bytes;
+  const char *dtype_name;
+};
+
+const VulkanScanStridedSpvSet &vulkan_scan_strided_spv_set(int value_type) {
+  static const VulkanScanStridedSpvSet sets[] = {
+      {kScanI32BlockStridedSpv, sizeof(kScanI32BlockStridedSpv),
+       kScanI32AddStridedSpv, sizeof(kScanI32AddStridedSpv),
+       kScanI32SmallSubgroupStridedSpv,
+       sizeof(kScanI32SmallSubgroupStridedSpv), "i32"},
+      {kScanF32BlockStridedSpv, sizeof(kScanF32BlockStridedSpv),
+       kScanF32AddStridedSpv, sizeof(kScanF32AddStridedSpv),
+       kScanF32SmallSubgroupStridedSpv,
+       sizeof(kScanF32SmallSubgroupStridedSpv), "f32"},
+      {kScanU32BlockStridedSpv, sizeof(kScanU32BlockStridedSpv),
+       kScanU32AddStridedSpv, sizeof(kScanU32AddStridedSpv),
+       kScanU32SmallSubgroupStridedSpv,
+       sizeof(kScanU32SmallSubgroupStridedSpv), "u32"},
+      {kScanU64BlockStridedSpv, sizeof(kScanU64BlockStridedSpv),
+       kScanU64AddStridedSpv, sizeof(kScanU64AddStridedSpv), nullptr, 0,
+       "u64"},
+      {kScanI64BlockStridedSpv, sizeof(kScanI64BlockStridedSpv),
+       kScanI64AddStridedSpv, sizeof(kScanI64AddStridedSpv), nullptr, 0,
+       "i64"},
+      {kScanF64BlockStridedSpv, sizeof(kScanF64BlockStridedSpv),
+       kScanF64AddStridedSpv, sizeof(kScanF64AddStridedSpv), nullptr, 0,
+       "f64"},
+  };
+  TI_ERROR_IF(value_type < 0 || value_type >= 6,
+              "Unsupported Vulkan strided scan value type.");
+  return sets[value_type];
 }
 
 struct VulkanRadixSortCache {
@@ -1561,7 +1807,9 @@ struct VulkanScanCache {
   size_t cached_bytes{0};
   DeviceAllocation workspace{kDeviceNullAllocation};
   DeviceAllocation dummy_sums{kDeviceNullAllocation};
+  DeviceAllocation params{kDeviceNullAllocation};
   size_t dummy_sums_capacity{0};
+  size_t params_capacity{0};
   std::unique_ptr<Pipeline> scan_i32_block;
   std::unique_ptr<Pipeline> scan_i32_block_subgroup;
   std::unique_ptr<Pipeline> scan_i32_add;
@@ -1580,6 +1828,9 @@ struct VulkanScanCache {
   std::unique_ptr<Pipeline> scan_i64_add;
   std::unique_ptr<Pipeline> scan_f64_block;
   std::unique_ptr<Pipeline> scan_f64_add;
+  std::array<std::unique_ptr<Pipeline>, 6> scan_block_strided;
+  std::array<std::unique_ptr<Pipeline>, 6> scan_add_strided;
+  std::array<std::unique_ptr<Pipeline>, 3> scan_small_strided;
   bool subgroup_scan_enabled{false};
 
   void clear_allocs() {
@@ -1589,9 +1840,14 @@ struct VulkanScanCache {
     if (device && dummy_sums != kDeviceNullAllocation) {
       device->dealloc_memory(dummy_sums);
     }
+    if (device && params != kDeviceNullAllocation) {
+      device->dealloc_memory(params);
+    }
     workspace = kDeviceNullAllocation;
     dummy_sums = kDeviceNullAllocation;
+    params = kDeviceNullAllocation;
     dummy_sums_capacity = 0;
+    params_capacity = 0;
     capacity = 0;
     cached_bytes = 0;
   }
@@ -1624,6 +1880,15 @@ struct VulkanScanCache {
       scan_i64_add.reset();
       scan_f64_block.reset();
       scan_f64_add.reset();
+      for (auto &pipeline : scan_block_strided) {
+        pipeline.reset();
+      }
+      for (auto &pipeline : scan_add_strided) {
+        pipeline.reset();
+      }
+      for (auto &pipeline : scan_small_strided) {
+        pipeline.reset();
+      }
     }
     device = dev;
     const bool subgroup_arithmetic_supported =
@@ -1682,6 +1947,29 @@ struct VulkanScanCache {
     }
   }
 
+  void ensure_strided_pipelines(Device *dev, int value_type) {
+    ensure_pipelines(dev);
+    TI_ERROR_IF(value_type < 0 || value_type >= 6,
+                "Unsupported Vulkan strided scan value type.");
+    if (scan_block_strided[value_type]) {
+      return;
+    }
+    const auto &spv = vulkan_scan_strided_spv_set(value_type);
+    scan_block_strided[value_type] = create_pipeline_from_spv(
+        dev, spv.block_spv, spv.block_bytes,
+        fmt::format("vulkan_scan_{}_block_strided", spv.dtype_name));
+    scan_add_strided[value_type] = create_pipeline_from_spv(
+        dev, spv.add_spv, spv.add_bytes,
+        fmt::format("vulkan_scan_{}_add_strided", spv.dtype_name));
+    if (value_type < 3 && spv.small_spv && subgroup_scan_enabled) {
+      scan_small_strided[value_type] = create_pipeline_from_spv(
+          dev, spv.small_spv, spv.small_bytes,
+          fmt::format("vulkan_scan_{}_small_subgroup_strided",
+                      spv.dtype_name));
+    }
+    ensure_params();
+  }
+
   Pipeline *scan_small_pipeline(int value_type) const {
     switch (value_type) {
       case 0:
@@ -1731,6 +2019,27 @@ struct VulkanScanCache {
       default:
         return nullptr;
     }
+  }
+
+  Pipeline *scan_block_strided_pipeline(int value_type) const {
+    if (value_type < 0 || value_type >= 6) {
+      return nullptr;
+    }
+    return scan_block_strided[value_type].get();
+  }
+
+  Pipeline *scan_add_strided_pipeline(int value_type) const {
+    if (value_type < 0 || value_type >= 6) {
+      return nullptr;
+    }
+    return scan_add_strided[value_type].get();
+  }
+
+  Pipeline *scan_small_strided_pipeline(int value_type) const {
+    if (value_type < 0 || value_type >= 3) {
+      return nullptr;
+    }
+    return scan_small_strided[value_type].get();
   }
 
   const char *scan_small_scope(int value_type) const {
@@ -1811,13 +2120,17 @@ struct VulkanScanCache {
            dummy_sums != kDeviceNullAllocation;
   }
 
+  size_t allocated_bytes() const {
+    return capacity + dummy_sums_capacity + params_capacity;
+  }
+
   void clear_workspace_alloc() {
     if (device && workspace != kDeviceNullAllocation) {
       device->dealloc_memory(workspace);
     }
     workspace = kDeviceNullAllocation;
     capacity = 0;
-    cached_bytes = dummy_sums != kDeviceNullAllocation ? dummy_sums_capacity : 0;
+    cached_bytes = allocated_bytes();
   }
 
   void ensure_dummy_sums() {
@@ -1825,9 +2138,16 @@ struct VulkanScanCache {
       dummy_sums_capacity = sizeof(uint64_t);
       dummy_sums = alloc_storage(dummy_sums_capacity);
     }
-    cached_bytes = capacity + (dummy_sums != kDeviceNullAllocation
-                                   ? dummy_sums_capacity
-                                   : 0);
+    cached_bytes = allocated_bytes();
+  }
+
+  void ensure_params() {
+    constexpr size_t kParamsBytes = 3 * sizeof(uint32_t);
+    if (params == kDeviceNullAllocation) {
+      params = alloc_storage(kParamsBytes);
+      params_capacity = kParamsBytes;
+    }
+    cached_bytes = allocated_bytes();
   }
 
   void ensure_workspace(size_t bytes) {
@@ -1838,7 +2158,7 @@ struct VulkanScanCache {
     clear_workspace_alloc();
     workspace = alloc_storage(bytes);
     capacity = bytes;
-    cached_bytes = bytes + dummy_sums_capacity;
+    cached_bytes = allocated_bytes();
   }
 };
 
@@ -2182,22 +2502,31 @@ struct VulkanHistogramCache {
 struct VulkanReduceSpvSet {
   const uint32_t *private_spv{nullptr};
   size_t private_bytes{0};
+  const uint32_t *private_strided_spv{nullptr};
+  size_t private_strided_bytes{0};
   const uint32_t *final_spv{nullptr};
   size_t final_bytes{0};
   const uint32_t *single_spv{nullptr};
   size_t single_bytes{0};
+  const uint32_t *single_strided_spv{nullptr};
+  size_t single_strided_bytes{0};
   const char *dtype_name{nullptr};
   const char *op_name{nullptr};
 };
 
-#define TI_REDUCE_SPV_SET(TYPE_CAPS, TYPE_NAME, OP_CAPS, OP_NAME)         \
-  VulkanReduceSpvSet {                                                    \
-    kReduce##TYPE_CAPS##OP_CAPS##PrivateSpv,                              \
-        sizeof(kReduce##TYPE_CAPS##OP_CAPS##PrivateSpv),                  \
-        kReduce##TYPE_CAPS##OP_CAPS##FinalSpv,                            \
-        sizeof(kReduce##TYPE_CAPS##OP_CAPS##FinalSpv),                    \
-        kReduce##TYPE_CAPS##OP_CAPS##SingleSpv,                           \
-        sizeof(kReduce##TYPE_CAPS##OP_CAPS##SingleSpv), TYPE_NAME, OP_NAME \
+#define TI_REDUCE_SPV_SET(TYPE_CAPS, TYPE_NAME, OP_CAPS, OP_NAME)       \
+  VulkanReduceSpvSet {                                                  \
+    kReduce##TYPE_CAPS##OP_CAPS##PrivateSpv,                            \
+        sizeof(kReduce##TYPE_CAPS##OP_CAPS##PrivateSpv),                \
+        kReduce##TYPE_CAPS##OP_CAPS##PrivateStridedSpv,                 \
+        sizeof(kReduce##TYPE_CAPS##OP_CAPS##PrivateStridedSpv),         \
+        kReduce##TYPE_CAPS##OP_CAPS##FinalSpv,                          \
+        sizeof(kReduce##TYPE_CAPS##OP_CAPS##FinalSpv),                  \
+        kReduce##TYPE_CAPS##OP_CAPS##SingleSpv,                         \
+        sizeof(kReduce##TYPE_CAPS##OP_CAPS##SingleSpv),                 \
+        kReduce##TYPE_CAPS##OP_CAPS##SingleStridedSpv,                  \
+        sizeof(kReduce##TYPE_CAPS##OP_CAPS##SingleStridedSpv),          \
+        TYPE_NAME, OP_NAME                                               \
   }
 
 const VulkanReduceSpvSet &vulkan_reduce_spv_set(int value_type, int op) {
@@ -2228,14 +2557,18 @@ const VulkanReduceSpvSet &vulkan_reduce_spv_set(int value_type, int op) {
 
 struct VulkanReducePipelineSet {
   std::array<std::unique_ptr<Pipeline>, 3> private_pipelines;
+  std::array<std::unique_ptr<Pipeline>, 3> private_strided_pipelines;
   std::array<std::unique_ptr<Pipeline>, 3> final_pipelines;
   std::array<std::unique_ptr<Pipeline>, 3> single_pipelines;
+  std::array<std::unique_ptr<Pipeline>, 3> single_strided_pipelines;
 
   void reset() {
     for (int i = 0; i < 3; ++i) {
       private_pipelines[i].reset();
+      private_strided_pipelines[i].reset();
       final_pipelines[i].reset();
       single_pipelines[i].reset();
+      single_strided_pipelines[i].reset();
     }
   }
 };
@@ -2243,16 +2576,23 @@ struct VulkanReducePipelineSet {
 struct VulkanReduceCache {
   Device *device{nullptr};
   size_t partial_capacity{0};
+  size_t params_capacity{0};
   size_t cached_bytes{0};
   DeviceAllocation partial{kDeviceNullAllocation};
+  DeviceAllocation params{kDeviceNullAllocation};
   std::array<VulkanReducePipelineSet, 6> reduce_pipelines;
 
   void clear_allocs() {
     if (device && partial != kDeviceNullAllocation) {
       device->dealloc_memory(partial);
     }
+    if (device && params != kDeviceNullAllocation) {
+      device->dealloc_memory(params);
+    }
     partial = kDeviceNullAllocation;
+    params = kDeviceNullAllocation;
     partial_capacity = 0;
+    params_capacity = 0;
     cached_bytes = 0;
   }
 
@@ -2300,6 +2640,25 @@ struct VulkanReduceCache {
     }
   }
 
+  void ensure_strided_pipeline_set(Device *dev, int value_type) {
+    ensure_pipeline_set(dev, value_type);
+    auto &pipelines = pipeline_set(value_type);
+    if (pipelines.private_strided_pipelines[0]) {
+      return;
+    }
+    for (int op = 0; op < 3; ++op) {
+      const auto &spv = vulkan_reduce_spv_set(value_type, op);
+      pipelines.private_strided_pipelines[op] = create_pipeline_from_spv(
+          dev, spv.private_strided_spv, spv.private_strided_bytes,
+          fmt::format("vulkan_reduce_{}_{}_private_strided", spv.dtype_name,
+                      spv.op_name));
+      pipelines.single_strided_pipelines[op] = create_pipeline_from_spv(
+          dev, spv.single_strided_spv, spv.single_strided_bytes,
+          fmt::format("vulkan_reduce_{}_{}_single_strided", spv.dtype_name,
+                      spv.op_name));
+    }
+  }
+
   DeviceAllocation alloc_storage(size_t bytes) {
     DeviceAllocation alloc{kDeviceNullAllocation};
     Device::AllocParams params;
@@ -2317,7 +2676,11 @@ struct VulkanReduceCache {
   }
 
   bool has_workspace_allocs() const {
-    return partial != kDeviceNullAllocation;
+    return partial != kDeviceNullAllocation || params != kDeviceNullAllocation;
+  }
+
+  size_t allocated_bytes() const {
+    return partial_capacity + params_capacity;
   }
 
   void clear_partial_alloc() {
@@ -2326,18 +2689,27 @@ struct VulkanReduceCache {
     }
     partial = kDeviceNullAllocation;
     partial_capacity = 0;
-    cached_bytes = 0;
+    cached_bytes = allocated_bytes();
   }
 
   void ensure_partial(size_t bytes) {
     if (bytes == 0 || !needs_partial_realloc(bytes)) {
-      cached_bytes = partial_capacity;
+      cached_bytes = allocated_bytes();
       return;
     }
     clear_partial_alloc();
     partial = alloc_storage(bytes);
     partial_capacity = bytes;
-    cached_bytes = partial_capacity;
+    cached_bytes = allocated_bytes();
+  }
+
+  void ensure_params() {
+    constexpr size_t kParamsBytes = 3 * sizeof(uint32_t);
+    if (params == kDeviceNullAllocation) {
+      params = alloc_storage(kParamsBytes);
+      params_capacity = kParamsBytes;
+    }
+    cached_bytes = allocated_bytes();
   }
 };
 
@@ -2427,9 +2799,9 @@ struct VulkanTransformCache {
 
   void ensure_params() {
     if (params == kDeviceNullAllocation) {
-      params = alloc_storage(4 * sizeof(uint32_t));
+      params = alloc_storage(7 * sizeof(uint32_t));
     }
-    cached_bytes = 4 * sizeof(uint32_t);
+    cached_bytes = 7 * sizeof(uint32_t);
   }
 
   ShaderResourceSet *cached_affine_resource_set() {
@@ -2442,6 +2814,8 @@ struct VulkanTransformCache {
 
 struct VulkanIndexedCopyCache {
   Device *device{nullptr};
+  size_t cached_bytes{0};
+  DeviceAllocation scatter_add_params{kDeviceNullAllocation};
   std::unique_ptr<Pipeline> gather_u32_by_i32;
   std::unique_ptr<Pipeline> scatter_u32_by_i32;
   std::unique_ptr<Pipeline> scatter_add_i32_by_i32;
@@ -2450,6 +2824,7 @@ struct VulkanIndexedCopyCache {
   std::unique_ptr<Pipeline> scatter_add_u64_by_i32;
   std::unique_ptr<Pipeline> scatter_add_i64_by_i32;
   std::unique_ptr<Pipeline> scatter_add_f64_by_i32;
+  std::array<std::unique_ptr<Pipeline>, 6> scatter_add_strided;
   std::unique_ptr<ShaderResourceSet> gather_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_add_i32_bindings;
@@ -2458,12 +2833,26 @@ struct VulkanIndexedCopyCache {
   std::unique_ptr<ShaderResourceSet> scatter_add_u64_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_add_i64_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_add_f64_bindings;
+  std::array<std::unique_ptr<ShaderResourceSet>, 6> scatter_add_strided_bindings;
+
+  void clear_allocs() {
+    if (device && scatter_add_params != kDeviceNullAllocation) {
+      device->dealloc_memory(scatter_add_params);
+    }
+    scatter_add_params = kDeviceNullAllocation;
+    cached_bytes = 0;
+  }
+
+  ~VulkanIndexedCopyCache() {
+    clear_allocs();
+  }
 
   void ensure_pipelines(Device *dev) {
     if (device == dev && gather_u32_by_i32) {
       return;
     }
     if (device && device != dev) {
+      clear_allocs();
       gather_u32_by_i32.reset();
       scatter_u32_by_i32.reset();
       scatter_add_i32_by_i32.reset();
@@ -2472,6 +2861,9 @@ struct VulkanIndexedCopyCache {
       scatter_add_u64_by_i32.reset();
       scatter_add_i64_by_i32.reset();
       scatter_add_f64_by_i32.reset();
+      for (auto &pipeline : scatter_add_strided) {
+        pipeline.reset();
+      }
       gather_bindings.reset();
       scatter_bindings.reset();
       scatter_add_i32_bindings.reset();
@@ -2480,6 +2872,9 @@ struct VulkanIndexedCopyCache {
       scatter_add_u64_bindings.reset();
       scatter_add_i64_bindings.reset();
       scatter_add_f64_bindings.reset();
+      for (auto &bindings : scatter_add_strided_bindings) {
+        bindings.reset();
+      }
     }
     device = dev;
     gather_u32_by_i32 =
@@ -2514,6 +2909,64 @@ struct VulkanIndexedCopyCache {
     }
   }
 
+  DeviceAllocation alloc_storage(size_t bytes) {
+    DeviceAllocation alloc{kDeviceNullAllocation};
+    Device::AllocParams alloc_params;
+    alloc_params.size = bytes;
+    alloc_params.usage = AllocUsage::Storage;
+    RhiResult res = device->allocate_memory(alloc_params, &alloc);
+    TI_ERROR_IF(res != RhiResult::success,
+                "Failed to allocate Vulkan indexed-copy workspace: "
+                "RhiResult({})",
+                res);
+    return alloc;
+  }
+
+  void ensure_scatter_add_params() {
+    if (scatter_add_params == kDeviceNullAllocation) {
+      scatter_add_params = alloc_storage(6 * sizeof(uint32_t));
+    }
+    cached_bytes = std::max(cached_bytes, 6 * sizeof(uint32_t));
+  }
+
+  void ensure_scatter_add_strided_pipeline(int value_type) {
+    if (scatter_add_strided[value_type]) {
+      return;
+    }
+    switch (value_type) {
+      case 1:
+        scatter_add_strided[value_type] = create_pipeline(
+            device, kScatterAddF32ByI32StridedSpv,
+            "vulkan_scatter_add_f32_by_i32_strided");
+        return;
+      case 2:
+        scatter_add_strided[value_type] = create_pipeline(
+            device, kScatterAddU32ByI32StridedSpv,
+            "vulkan_scatter_add_u32_by_i32_strided");
+        return;
+      case 3:
+        scatter_add_strided[value_type] = create_pipeline(
+            device, kScatterAddU64ByI32StridedSpv,
+            "vulkan_scatter_add_u64_by_i32_strided");
+        return;
+      case 4:
+        scatter_add_strided[value_type] = create_pipeline(
+            device, kScatterAddI64ByI32StridedSpv,
+            "vulkan_scatter_add_i64_by_i32_strided");
+        return;
+      case 5:
+        scatter_add_strided[value_type] = create_pipeline(
+            device, kScatterAddF64ByI32StridedSpv,
+            "vulkan_scatter_add_f64_by_i32_strided");
+        return;
+      default:
+        scatter_add_strided[value_type] = create_pipeline(
+            device, kScatterAddI32ByI32StridedSpv,
+            "vulkan_scatter_add_i32_by_i32_strided");
+        return;
+    }
+  }
+
   ShaderResourceSet *cached_resource_set(bool scatter) {
     auto &bindings = scatter ? scatter_bindings : gather_bindings;
     if (!bindings) {
@@ -2529,6 +2982,14 @@ struct VulkanIndexedCopyCache {
                      : value_type == 4 ? scatter_add_i64_bindings
                      : value_type == 5 ? scatter_add_f64_bindings
                                        : scatter_add_i32_bindings;
+    if (!bindings) {
+      bindings.reset(device->create_resource_set());
+    }
+    return bindings.get();
+  }
+
+  ShaderResourceSet *cached_scatter_add_strided_resource_set(int value_type) {
+    auto &bindings = scatter_add_strided_bindings[value_type];
     if (!bindings) {
       bindings.reset(device->create_resource_set());
     }
@@ -2551,6 +3012,10 @@ struct VulkanIndexedCopyCache {
     return value_type == 2 ? scatter_add_u32_by_i32.get()
                            : scatter_add_i32_by_i32.get();
   }
+
+  Pipeline *scatter_add_strided_pipeline(int value_type) const {
+    return scatter_add_strided[value_type].get();
+  }
 };
 
 struct VulkanBucketBuilderCache {
@@ -2558,6 +3023,7 @@ struct VulkanBucketBuilderCache {
   size_t partial_capacity{0};
   size_t cached_bytes{0};
   DeviceAllocation partial{kDeviceNullAllocation};
+  DeviceAllocation grouped_reduce_params{kDeviceNullAllocation};
   std::unique_ptr<Pipeline> clear_i32;
   std::unique_ptr<Pipeline> count_i32;
   std::unique_ptr<Pipeline> count_private_shared_i32;
@@ -2579,12 +3045,14 @@ struct VulkanBucketBuilderCache {
   std::unique_ptr<Pipeline> grouped_reduce_zero_u64;
   std::unique_ptr<Pipeline> grouped_reduce_zero_i64;
   std::unique_ptr<Pipeline> grouped_reduce_zero_f64;
+  std::array<std::unique_ptr<Pipeline>, 6> grouped_reduce_zero_strided;
   std::unique_ptr<Pipeline> grouped_reduce_atomic_sum_i32;
   std::unique_ptr<Pipeline> grouped_reduce_atomic_sum_f32;
   std::unique_ptr<Pipeline> grouped_reduce_atomic_sum_u32;
   std::unique_ptr<Pipeline> grouped_reduce_atomic_sum_u64;
   std::unique_ptr<Pipeline> grouped_reduce_atomic_sum_i64;
   std::unique_ptr<Pipeline> grouped_reduce_atomic_sum_f64;
+  std::array<std::unique_ptr<Pipeline>, 6> grouped_reduce_atomic_sum_strided;
   std::unique_ptr<Pipeline> grouped_reduce_sum_i32;
   std::unique_ptr<Pipeline> grouped_reduce_sum_f32;
   std::unique_ptr<Pipeline> grouped_reduce_sum_u32;
@@ -2612,12 +3080,16 @@ struct VulkanBucketBuilderCache {
   std::unique_ptr<ShaderResourceSet> grouped_reduce_zero_u64_bindings;
   std::unique_ptr<ShaderResourceSet> grouped_reduce_zero_i64_bindings;
   std::unique_ptr<ShaderResourceSet> grouped_reduce_zero_f64_bindings;
+  std::array<std::unique_ptr<ShaderResourceSet>, 6>
+      grouped_reduce_zero_strided_bindings;
   std::unique_ptr<ShaderResourceSet> grouped_reduce_atomic_bindings;
   std::unique_ptr<ShaderResourceSet> grouped_reduce_atomic_f32_bindings;
   std::unique_ptr<ShaderResourceSet> grouped_reduce_atomic_u32_bindings;
   std::unique_ptr<ShaderResourceSet> grouped_reduce_atomic_u64_bindings;
   std::unique_ptr<ShaderResourceSet> grouped_reduce_atomic_i64_bindings;
   std::unique_ptr<ShaderResourceSet> grouped_reduce_atomic_f64_bindings;
+  std::array<std::unique_ptr<ShaderResourceSet>, 6>
+      grouped_reduce_atomic_strided_bindings;
   std::unique_ptr<ShaderResourceSet> grouped_reduce_bindings;
   std::unique_ptr<ShaderResourceSet> grouped_reduce_f32_bindings;
   std::unique_ptr<ShaderResourceSet> grouped_reduce_u32_bindings;
@@ -2629,7 +3101,11 @@ struct VulkanBucketBuilderCache {
     if (device && partial != kDeviceNullAllocation) {
       device->dealloc_memory(partial);
     }
+    if (device && grouped_reduce_params != kDeviceNullAllocation) {
+      device->dealloc_memory(grouped_reduce_params);
+    }
     partial = kDeviceNullAllocation;
+    grouped_reduce_params = kDeviceNullAllocation;
     partial_capacity = 0;
     cached_bytes = 0;
   }
@@ -2665,12 +3141,18 @@ struct VulkanBucketBuilderCache {
       grouped_reduce_zero_u64.reset();
       grouped_reduce_zero_i64.reset();
       grouped_reduce_zero_f64.reset();
+      for (auto &pipeline : grouped_reduce_zero_strided) {
+        pipeline.reset();
+      }
       grouped_reduce_atomic_sum_i32.reset();
       grouped_reduce_atomic_sum_f32.reset();
       grouped_reduce_atomic_sum_u32.reset();
       grouped_reduce_atomic_sum_u64.reset();
       grouped_reduce_atomic_sum_i64.reset();
       grouped_reduce_atomic_sum_f64.reset();
+      for (auto &pipeline : grouped_reduce_atomic_sum_strided) {
+        pipeline.reset();
+      }
       grouped_reduce_sum_i32.reset();
       grouped_reduce_sum_f32.reset();
       grouped_reduce_sum_u32.reset();
@@ -2698,12 +3180,18 @@ struct VulkanBucketBuilderCache {
       grouped_reduce_zero_u64_bindings.reset();
       grouped_reduce_zero_i64_bindings.reset();
       grouped_reduce_zero_f64_bindings.reset();
+      for (auto &bindings : grouped_reduce_zero_strided_bindings) {
+        bindings.reset();
+      }
       grouped_reduce_atomic_bindings.reset();
       grouped_reduce_atomic_f32_bindings.reset();
       grouped_reduce_atomic_u32_bindings.reset();
       grouped_reduce_atomic_u64_bindings.reset();
       grouped_reduce_atomic_i64_bindings.reset();
       grouped_reduce_atomic_f64_bindings.reset();
+      for (auto &bindings : grouped_reduce_atomic_strided_bindings) {
+        bindings.reset();
+      }
       grouped_reduce_bindings.reset();
       grouped_reduce_f32_bindings.reset();
       grouped_reduce_u32_bindings.reset();
@@ -2834,6 +3322,48 @@ struct VulkanBucketBuilderCache {
                            : grouped_reduce_zero_i32.get();
   }
 
+  void ensure_grouped_reduce_zero_strided_pipeline(int value_type) {
+    if (grouped_reduce_zero_strided[value_type]) {
+      return;
+    }
+    switch (value_type) {
+      case 1:
+        grouped_reduce_zero_strided[value_type] = create_pipeline(
+            device, kGroupedReduceZeroF32StridedSpv,
+            "vulkan_grouped_reduce_zero_f32_strided");
+        return;
+      case 2:
+        grouped_reduce_zero_strided[value_type] = create_pipeline(
+            device, kGroupedReduceZeroU32StridedSpv,
+            "vulkan_grouped_reduce_zero_u32_strided");
+        return;
+      case 3:
+        grouped_reduce_zero_strided[value_type] = create_pipeline(
+            device, kGroupedReduceZeroU64StridedSpv,
+            "vulkan_grouped_reduce_zero_u64_strided");
+        return;
+      case 4:
+        grouped_reduce_zero_strided[value_type] = create_pipeline(
+            device, kGroupedReduceZeroI64StridedSpv,
+            "vulkan_grouped_reduce_zero_i64_strided");
+        return;
+      case 5:
+        grouped_reduce_zero_strided[value_type] = create_pipeline(
+            device, kGroupedReduceZeroF64StridedSpv,
+            "vulkan_grouped_reduce_zero_f64_strided");
+        return;
+      default:
+        grouped_reduce_zero_strided[value_type] = create_pipeline(
+            device, kGroupedReduceZeroI32StridedSpv,
+            "vulkan_grouped_reduce_zero_i32_strided");
+        return;
+    }
+  }
+
+  Pipeline *grouped_reduce_zero_strided_pipeline(int value_type) const {
+    return grouped_reduce_zero_strided[value_type].get();
+  }
+
   Pipeline *grouped_reduce_atomic_pipeline(int value_type) const {
     if (value_type == 1) {
       return grouped_reduce_atomic_sum_f32.get();
@@ -2849,6 +3379,48 @@ struct VulkanBucketBuilderCache {
     }
     return value_type == 2 ? grouped_reduce_atomic_sum_u32.get()
                            : grouped_reduce_atomic_sum_i32.get();
+  }
+
+  void ensure_grouped_reduce_atomic_strided_pipeline(int value_type) {
+    if (grouped_reduce_atomic_sum_strided[value_type]) {
+      return;
+    }
+    switch (value_type) {
+      case 1:
+        grouped_reduce_atomic_sum_strided[value_type] = create_pipeline(
+            device, kGroupedReduceAtomicSumF32StridedSpv,
+            "vulkan_grouped_reduce_atomic_sum_f32_strided");
+        return;
+      case 2:
+        grouped_reduce_atomic_sum_strided[value_type] = create_pipeline(
+            device, kGroupedReduceAtomicSumU32StridedSpv,
+            "vulkan_grouped_reduce_atomic_sum_u32_strided");
+        return;
+      case 3:
+        grouped_reduce_atomic_sum_strided[value_type] = create_pipeline(
+            device, kGroupedReduceAtomicSumU64StridedSpv,
+            "vulkan_grouped_reduce_atomic_sum_u64_strided");
+        return;
+      case 4:
+        grouped_reduce_atomic_sum_strided[value_type] = create_pipeline(
+            device, kGroupedReduceAtomicSumI64StridedSpv,
+            "vulkan_grouped_reduce_atomic_sum_i64_strided");
+        return;
+      case 5:
+        grouped_reduce_atomic_sum_strided[value_type] = create_pipeline(
+            device, kGroupedReduceAtomicSumF64StridedSpv,
+            "vulkan_grouped_reduce_atomic_sum_f64_strided");
+        return;
+      default:
+        grouped_reduce_atomic_sum_strided[value_type] = create_pipeline(
+            device, kGroupedReduceAtomicSumI32StridedSpv,
+            "vulkan_grouped_reduce_atomic_sum_i32_strided");
+        return;
+    }
+  }
+
+  Pipeline *grouped_reduce_atomic_strided_pipeline(int value_type) const {
+    return grouped_reduce_atomic_sum_strided[value_type].get();
   }
 
   Pipeline *bucket_scatter_pipeline(int value_type) const {
@@ -2981,6 +3553,14 @@ struct VulkanBucketBuilderCache {
                                         : grouped_reduce_zero_bindings);
   }
 
+  ShaderResourceSet *grouped_reduce_zero_strided_resource_set(int value_type) {
+    auto &bindings = grouped_reduce_zero_strided_bindings[value_type];
+    if (!bindings) {
+      bindings.reset(device->create_resource_set());
+    }
+    return bindings.get();
+  }
+
   ShaderResourceSet *grouped_reduce_atomic_resource_set(int value_type) {
     if (value_type == 1) {
       return resource_set(grouped_reduce_atomic_f32_bindings);
@@ -2996,6 +3576,15 @@ struct VulkanBucketBuilderCache {
     }
     return resource_set(value_type == 2 ? grouped_reduce_atomic_u32_bindings
                                         : grouped_reduce_atomic_bindings);
+  }
+
+  ShaderResourceSet *grouped_reduce_atomic_strided_resource_set(
+      int value_type) {
+    auto &bindings = grouped_reduce_atomic_strided_bindings[value_type];
+    if (!bindings) {
+      bindings.reset(device->create_resource_set());
+    }
+    return bindings.get();
   }
 
   ShaderResourceSet *grouped_reduce_sum_resource_set(int value_type) {
@@ -3052,6 +3641,13 @@ struct VulkanBucketBuilderCache {
     return alloc;
   }
 
+  void ensure_grouped_reduce_params() {
+    if (grouped_reduce_params == kDeviceNullAllocation) {
+      grouped_reduce_params = alloc_storage(8 * sizeof(uint32_t));
+    }
+    cached_bytes = partial_capacity + 8 * sizeof(uint32_t);
+  }
+
   bool needs_workspace_realloc(size_t bytes) const {
     return partial_capacity < bytes;
   }
@@ -3063,7 +3659,10 @@ struct VulkanBucketBuilderCache {
     clear_allocs();
     partial = alloc_storage(bytes);
     partial_capacity = bytes;
-    cached_bytes = bytes;
+    cached_bytes =
+        bytes + (grouped_reduce_params != kDeviceNullAllocation
+                     ? 8 * sizeof(uint32_t)
+                     : 0);
   }
 };
 
@@ -3151,6 +3750,23 @@ VulkanReduceCache &get_reduce_cache(void *owner,
     cache = std::make_unique<VulkanReduceCache>();
   }
   cache->ensure_pipeline_set(device, value_type);
+  return *cache;
+}
+
+VulkanReduceCache &get_reduce_cache(void *owner,
+                                    Device *device,
+                                    int value_type,
+                                    bool strided_source) {
+  std::lock_guard<std::mutex> guard(g_vulkan_reduce_mutex);
+  auto &cache = g_vulkan_reduce_caches[owner];
+  if (!cache) {
+    cache = std::make_unique<VulkanReduceCache>();
+  }
+  if (strided_source) {
+    cache->ensure_strided_pipeline_set(device, value_type);
+  } else {
+    cache->ensure_pipeline_set(device, value_type);
+  }
   return *cache;
 }
 
@@ -3398,43 +4014,70 @@ struct VulkanScanDispatchPlan {
   size_t data_bytes{0};
   DeviceAllocation workspace_alloc{kDeviceNullAllocation};
   DeviceAllocation dummy_sums_alloc{kDeviceNullAllocation};
+  DeviceAllocation params_alloc{kDeviceNullAllocation};
   std::vector<size_t> levels;
   std::vector<size_t> workspace_offsets;
   Pipeline *scan_small{nullptr};
   Pipeline *scan_block{nullptr};
   Pipeline *scan_add{nullptr};
+  Pipeline *scan_block_strided{nullptr};
+  Pipeline *scan_add_strided{nullptr};
   const char *scan_small_scope{nullptr};
   const char *scan_block_scope{nullptr};
   const char *scan_add_scope{nullptr};
+  const char *scan_block_strided_scope{nullptr};
+  const char *scan_add_strided_scope{nullptr};
+  bool member_source{false};
+  size_t offset{0};
+  size_t stride{0};
+  size_t params_bytes{0};
 };
 
 VulkanScanDispatchPlan prepare_vulkan_scan(Program *program,
                                            VulkanScanCache &cache,
                                            DeviceAllocation data_alloc,
                                            size_t n,
-                                           int value_type) {
+                                           int value_type,
+                                           bool member_source = false,
+                                           size_t offset = 0,
+                                           size_t stride = 0) {
   VulkanScanDispatchPlan plan;
   plan.data_alloc = data_alloc;
   plan.n = n;
   plan.value_type = value_type;
   plan.item_size = vulkan_scan_value_type_size(value_type);
+  plan.member_source = member_source;
+  plan.offset = offset;
+  plan.stride = stride;
   TI_ERROR_IF(plan.item_size == 0,
               "Vulkan native scan received an unsupported value type.");
   if (n <= 1) {
     return plan;
+  }
+  if (member_source) {
+    cache.ensure_strided_pipelines(cache.device, value_type);
+    cache.ensure_params();
+    plan.params_alloc = cache.params;
+    plan.params_bytes = 3 * sizeof(uint32_t);
   }
 
   const int small_subgroup_threshold =
       get_environ_config("TI_VULKAN_SCAN_SMALL_SUBGROUP_MAX_N", 4096);
   const bool use_32bit_value = plan.item_size == sizeof(uint32_t);
   plan.use_small_subgroup = use_32bit_value && cache.subgroup_scan_enabled &&
-                            cache.scan_i32_small_subgroup &&
+                            (member_source
+                                 ? cache.scan_small_strided_pipeline(value_type)
+                                 : cache.scan_small_pipeline(value_type)) &&
                             small_subgroup_threshold > 0 &&
                             n <= static_cast<size_t>(small_subgroup_threshold);
   if (plan.use_small_subgroup) {
-    plan.scan_small = cache.scan_small_pipeline(value_type);
-    plan.scan_small_scope = cache.scan_small_scope(value_type);
-    plan.data_bytes = n * plan.item_size;
+    plan.scan_small =
+        member_source ? cache.scan_small_strided_pipeline(value_type)
+                      : cache.scan_small_pipeline(value_type);
+    plan.scan_small_scope =
+        member_source ? "vulkan_scan_small_subgroup_strided"
+                      : cache.scan_small_scope(value_type);
+    plan.data_bytes = member_source ? n * stride : n * plan.item_size;
     TI_ERROR_IF(!plan.scan_small,
                 "Vulkan native scan could not find a small-scan pipeline.");
     return plan;
@@ -3450,10 +4093,10 @@ VulkanScanDispatchPlan prepare_vulkan_scan(Program *program,
 
   plan.workspace_offsets.reserve(plan.levels.size() > 0 ? plan.levels.size() - 1
                                                         : 0);
-  size_t offset = 0;
+  size_t workspace_offset = 0;
   for (size_t i = 1; i < plan.levels.size(); ++i) {
-    plan.workspace_offsets.push_back(offset);
-    offset += plan.levels[i];
+    plan.workspace_offsets.push_back(workspace_offset);
+    workspace_offset += plan.levels[i];
   }
 
   plan.workspace_alloc = cache.workspace;
@@ -3465,6 +4108,7 @@ VulkanScanDispatchPlan prepare_vulkan_scan(Program *program,
           ? 0
           : static_cast<size_t>(subgroup_block_min_n_config);
   const bool use_subgroup_block = cache.subgroup_scan_enabled &&
+                                  !member_source &&
                                   cache.scan_block_pipeline(value_type, true) &&
                                   n >= subgroup_block_min_n;
   plan.scan_block = cache.scan_block_pipeline(value_type, use_subgroup_block);
@@ -3472,7 +4116,15 @@ VulkanScanDispatchPlan prepare_vulkan_scan(Program *program,
       cache.scan_block_scope(value_type, use_subgroup_block);
   plan.scan_add = cache.scan_add_pipeline(value_type);
   plan.scan_add_scope = cache.scan_add_scope(value_type);
-  TI_ERROR_IF(!plan.scan_block || !plan.scan_add,
+  if (member_source) {
+    plan.scan_block_strided = cache.scan_block_strided_pipeline(value_type);
+    plan.scan_add_strided = cache.scan_add_strided_pipeline(value_type);
+    plan.scan_block_strided_scope = "vulkan_scan_block_strided";
+    plan.scan_add_strided_scope = "vulkan_scan_add_strided";
+  }
+  TI_ERROR_IF(!plan.scan_block || !plan.scan_add ||
+                  (member_source &&
+                   (!plan.scan_block_strided || !plan.scan_add_strided)),
               "Vulkan native scan could not find a scan pipeline.");
   return plan;
 }
@@ -3491,9 +4143,27 @@ void record_vulkan_scan(Device *op_device,
   if (plan.n <= 1) {
     return;
   }
+  auto bind_params = [&plan, cmdlist](ShaderResourceSet *bindings) {
+    if (!plan.member_source) {
+      return;
+    }
+    const std::array<uint32_t, 3> param_words{
+        static_cast<uint32_t>(plan.n),
+        static_cast<uint32_t>(plan.offset / sizeof(uint32_t)),
+        static_cast<uint32_t>(plan.stride / sizeof(uint32_t)),
+    };
+    for (uint32_t i = 0; i < param_words.size(); ++i) {
+      cmdlist->buffer_fill(plan.params_alloc.get_ptr(i * sizeof(uint32_t)),
+                           sizeof(uint32_t), param_words[i]);
+    }
+    cmdlist->buffer_barrier(plan.params_alloc);
+    bindings->rw_buffer(plan.use_small_subgroup ? 1 : 2,
+                        plan.params_alloc.get_ptr(0), plan.params_bytes);
+  };
   if (plan.use_small_subgroup) {
     auto bindings = op_device->create_resource_set_unique();
     bindings->rw_buffer(0, plan.data_alloc.get_ptr(0), plan.data_bytes);
+    bind_params(bindings.get());
     dispatch_pipeline(cmdlist, plan.scan_small, bindings.get(), 1, 1, 1,
                       profiler_scopes ? plan.scan_small_scope : nullptr);
     cmdlist->buffer_barrier(plan.data_alloc);
@@ -3514,7 +4184,10 @@ void record_vulkan_scan(Device *op_device,
     DevicePtr level_ptr =
         scan_level_ptr(plan.data_alloc, plan.workspace_alloc,
                        plan.workspace_offsets, level, plan.item_size);
-    const size_t level_bytes = plan.levels[level] * plan.item_size;
+    const bool strided_level = plan.member_source && level == 0;
+    const size_t level_bytes =
+        strided_level ? plan.n * plan.stride
+                      : plan.levels[level] * plan.item_size;
     DevicePtr sums_ptr = plan.dummy_sums_alloc.get_ptr(0);
     size_t sums_bytes = plan.item_size;
     if (level + 1 < plan.levels.size()) {
@@ -3526,10 +4199,17 @@ void record_vulkan_scan(Device *op_device,
     auto bindings = op_device->create_resource_set_unique();
     bindings->rw_buffer(0, level_ptr, level_bytes);
     bindings->rw_buffer(1, sums_ptr, sums_bytes);
+    if (strided_level) {
+      bind_params(bindings.get());
+    }
     const uint32_t groups = static_cast<uint32_t>(
         (plan.levels[level] + kBlockSize - 1) / kBlockSize);
-    dispatch_pipeline(cmdlist, plan.scan_block, bindings.get(), groups, 1, 1,
-                      scope_name(plan.scan_block_scope));
+    Pipeline *pipeline =
+        strided_level ? plan.scan_block_strided : plan.scan_block;
+    const char *scope =
+        strided_level ? plan.scan_block_strided_scope : plan.scan_block_scope;
+    dispatch_pipeline(cmdlist, pipeline, bindings.get(), groups, 1, 1,
+                      scope_name(scope));
     barrier_level(cmdlist, level);
     if (level + 1 < plan.levels.size()) {
       cmdlist->buffer_barrier(plan.workspace_alloc);
@@ -3543,15 +4223,25 @@ void record_vulkan_scan(Device *op_device,
       DevicePtr offsets_ptr =
           scan_level_ptr(plan.data_alloc, plan.workspace_alloc,
                          plan.workspace_offsets, level + 1, plan.item_size);
-      const size_t level_bytes = plan.levels[level] * plan.item_size;
+      const bool strided_level = plan.member_source && level == 0;
+      const size_t level_bytes =
+          strided_level ? plan.n * plan.stride
+                        : plan.levels[level] * plan.item_size;
       const size_t offsets_bytes = plan.levels[level + 1] * plan.item_size;
       auto bindings = op_device->create_resource_set_unique();
       bindings->rw_buffer(0, level_ptr, level_bytes);
       bindings->rw_buffer(1, offsets_ptr, offsets_bytes);
+      if (strided_level) {
+        bind_params(bindings.get());
+      }
       const uint32_t groups = static_cast<uint32_t>(
           (plan.levels[level] + kBlockSize - 1) / kBlockSize);
-      dispatch_pipeline(cmdlist, plan.scan_add, bindings.get(), groups, 1, 1,
-                        scope_name(plan.scan_add_scope));
+      Pipeline *pipeline =
+          strided_level ? plan.scan_add_strided : plan.scan_add;
+      const char *scope =
+          strided_level ? plan.scan_add_strided_scope : plan.scan_add_scope;
+      dispatch_pipeline(cmdlist, pipeline, bindings.get(), groups, 1, 1,
+                        scope_name(scope));
       barrier_level(cmdlist, level);
     }
   }
@@ -3569,8 +4259,12 @@ size_t enqueue_vulkan_scan(Program *program,
                            DeviceAllocation data_alloc,
                            size_t n,
                            int value_type,
-                           bool profiler_scopes) {
-  auto plan = prepare_vulkan_scan(program, cache, data_alloc, n, value_type);
+                           bool profiler_scopes,
+                           bool member_source = false,
+                           size_t offset = 0,
+                           size_t stride = 0) {
+  auto plan = prepare_vulkan_scan(program, cache, data_alloc, n, value_type,
+                                  member_source, offset, stride);
   if (plan.n <= 1) {
     return 0;
   }
@@ -3688,6 +4382,603 @@ bool Program::vulkan_transform_value_type_available(int value_type) const {
   }
   return false;
 }
+
+namespace {
+
+std::size_t vulkan_transform_value_size(int value_type) {
+  TI_ERROR_IF(value_type < 0 || value_type > 5,
+              "Vulkan native transform received an unsupported value type.");
+  return (value_type == 3 || value_type == 4 || value_type == 5)
+             ? sizeof(uint64_t)
+             : sizeof(uint32_t);
+}
+
+void check_vulkan_transform_member_request(Ndarray *src,
+                                           Ndarray *dst,
+                                           int value_type,
+                                           std::size_t offset,
+                                           std::size_t stride) {
+  TI_ERROR_IF(!src || !dst,
+              "Vulkan native strided transform received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1,
+              "Vulkan native strided transform expects 1D ndarrays.");
+  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
+              "Vulkan native strided transform source and destination sizes "
+              "differ.");
+  const std::size_t value_size = vulkan_transform_value_size(value_type);
+  TI_ERROR_IF(dst->get_element_size() != value_size,
+              "Vulkan native strided transform destination dtype does not "
+              "match value type.");
+  TI_ERROR_IF(stride < value_size,
+              "Vulkan native strided transform source stride is smaller than "
+              "value size.");
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "Vulkan native strided transform source offset/stride must "
+              "align to value size.");
+  const std::size_t n = src->get_nelement();
+  if (n == 0) {
+    return;
+  }
+  const std::size_t src_bytes = n * src->get_element_size();
+  TI_ERROR_IF(src_bytes < value_size,
+              "Vulkan native strided transform source buffer is smaller than "
+              "value size.");
+  TI_ERROR_IF(offset > src_bytes - value_size,
+              "Vulkan native strided transform source offset is out of "
+              "bounds.");
+  const std::size_t last = offset + (n - 1) * stride + value_size;
+  TI_ERROR_IF(last > src_bytes,
+              "Vulkan native strided transform source range is out of bounds.");
+  TI_ERROR_IF(offset % sizeof(uint32_t) != 0 || stride % sizeof(uint32_t) != 0,
+              "Vulkan native strided transform source offset/stride must be "
+              "uint32-word aligned.");
+}
+
+void check_vulkan_reduce_member_request(Ndarray *values,
+                                        Ndarray *output,
+                                        int value_type,
+                                        std::size_t offset,
+                                        std::size_t stride,
+                                        int op) {
+  TI_ERROR_IF(!values || !output,
+              "Vulkan native strided reduce received null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "Vulkan native strided reduce expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "Vulkan native strided reduce expects at least one input item.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "Vulkan native strided reduce output must contain at least one "
+              "item.");
+  const std::size_t value_size = vulkan_transform_value_size(value_type);
+  TI_ERROR_IF(output->get_element_size() != value_size,
+              "Vulkan native strided reduce output dtype does not match value "
+              "type.");
+  TI_ERROR_IF(op < 0 || op > 2,
+              "Vulkan native strided reduce supports only sum/min/max "
+              "operations.");
+  TI_ERROR_IF(stride < value_size,
+              "Vulkan native strided reduce source stride is smaller than "
+              "value size.");
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "Vulkan native strided reduce source offset/stride must align "
+              "to value size.");
+  const std::size_t n = values->get_nelement();
+  const std::size_t src_bytes = n * values->get_element_size();
+  TI_ERROR_IF(src_bytes < value_size,
+              "Vulkan native strided reduce source buffer is smaller than "
+              "value size.");
+  TI_ERROR_IF(offset > src_bytes - value_size,
+              "Vulkan native strided reduce source offset is out of bounds.");
+  const std::size_t last = offset + (n - 1) * stride + value_size;
+  TI_ERROR_IF(last > src_bytes,
+              "Vulkan native strided reduce source range is out of bounds.");
+  TI_ERROR_IF(offset % sizeof(uint32_t) != 0 || stride % sizeof(uint32_t) != 0,
+              "Vulkan native strided reduce source offset/stride must be "
+              "uint32-word aligned.");
+}
+
+void check_vulkan_scan_member_request(Ndarray *data,
+                                      int value_type,
+                                      std::size_t offset,
+                                      std::size_t stride) {
+  TI_ERROR_IF(!data, "Vulkan native strided scan received null ndarray.");
+  TI_ERROR_IF(data->shape.size() != 1,
+              "Vulkan native strided scan expects a 1D ndarray.");
+  const std::size_t value_size = vulkan_scan_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Vulkan native strided scan received an unsupported value type.");
+  TI_ERROR_IF(stride < value_size,
+              "Vulkan native strided scan source stride is smaller than value "
+              "size.");
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "Vulkan native strided scan source offset/stride must align to "
+              "value size.");
+  const std::size_t n = data->get_nelement();
+  if (n == 0) {
+    return;
+  }
+  const std::size_t src_bytes = n * data->get_element_size();
+  TI_ERROR_IF(src_bytes < value_size,
+              "Vulkan native strided scan source buffer is smaller than "
+              "value size.");
+  TI_ERROR_IF(offset > src_bytes - value_size,
+              "Vulkan native strided scan source offset is out of bounds.");
+  const std::size_t last = offset + (n - 1) * stride + value_size;
+  TI_ERROR_IF(last > src_bytes,
+              "Vulkan native strided scan source range is out of bounds.");
+  TI_ERROR_IF(offset % sizeof(uint32_t) != 0 || stride % sizeof(uint32_t) != 0,
+              "Vulkan native strided scan source offset/stride must be "
+              "uint32-word aligned.");
+}
+
+void check_vulkan_scatter_add_member_request(Ndarray *src,
+                                             Ndarray *indices,
+                                             Ndarray *dst,
+                                             int value_type,
+                                             std::size_t offset,
+                                             std::size_t stride) {
+  TI_ERROR_IF(!src || !indices || !dst,
+              "Vulkan native strided scatter-add received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "Vulkan native strided scatter-add expects 1D ndarrays.");
+  TI_ERROR_IF(src->get_nelement() != indices->get_nelement(),
+              "Vulkan native strided scatter-add source and indices sizes "
+              "differ.");
+  const std::size_t value_size = vulkan_scan_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Vulkan native strided scatter-add received an unsupported "
+              "value type.");
+  TI_ERROR_IF(dst->get_element_size() != value_size ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "Vulkan native strided scatter-add destination dtype or i32 "
+              "index size mismatch.");
+  TI_ERROR_IF(stride < value_size,
+              "Vulkan native strided scatter-add source stride is smaller "
+              "than value size.");
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "Vulkan native strided scatter-add source offset/stride must "
+              "align to value size.");
+  const std::size_t n = src->get_nelement();
+  if (n == 0) {
+    return;
+  }
+  const std::size_t src_bytes = n * src->get_element_size();
+  TI_ERROR_IF(src_bytes < value_size,
+              "Vulkan native strided scatter-add source buffer is smaller "
+              "than value size.");
+  TI_ERROR_IF(offset > src_bytes - value_size,
+              "Vulkan native strided scatter-add source offset is out of "
+              "bounds.");
+  const std::size_t last = offset + (n - 1) * stride + value_size;
+  TI_ERROR_IF(last > src_bytes,
+              "Vulkan native strided scatter-add source range is out of "
+              "bounds.");
+  TI_ERROR_IF(offset % sizeof(uint32_t) != 0 || stride % sizeof(uint32_t) != 0,
+              "Vulkan native strided scatter-add source offset/stride must be "
+              "uint32-word aligned.");
+}
+
+void check_vulkan_grouped_reduce_member_request(Ndarray *keys,
+                                                Ndarray *values,
+                                                Ndarray *output,
+                                                int value_type,
+                                                std::size_t offset,
+                                                std::size_t stride,
+                                                int op) {
+  TI_ERROR_IF(!keys || !values || !output,
+              "Vulkan native strided grouped reduce received a null ndarray.");
+  TI_ERROR_IF(keys->shape.size() != 1 || values->shape.size() != 1 ||
+                  output->shape.size() != 1,
+              "Vulkan native strided grouped reduce expects 1D ndarrays.");
+  TI_ERROR_IF(keys->get_nelement() != values->get_nelement(),
+              "Vulkan native strided grouped reduce keys and values sizes "
+              "differ.");
+  TI_ERROR_IF(output->get_nelement() == 0,
+              "Vulkan native strided grouped reduce output must contain at "
+              "least one group.");
+  const std::size_t value_size = vulkan_scan_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Vulkan native strided grouped reduce received an unsupported "
+              "value type.");
+  TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
+                  output->get_element_size() != value_size,
+              "Vulkan native strided grouped reduce output dtype or i32 key "
+              "size mismatch.");
+  TI_ERROR_IF(op != 0,
+              "Vulkan native strided grouped reduce currently supports only "
+              "sum.");
+  TI_ERROR_IF(stride < value_size,
+              "Vulkan native strided grouped reduce source stride is smaller "
+              "than value size.");
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "Vulkan native strided grouped reduce source offset/stride must "
+              "align to value size.");
+  const std::size_t n = values->get_nelement();
+  if (n == 0) {
+    return;
+  }
+  const std::size_t values_bytes = n * values->get_element_size();
+  TI_ERROR_IF(values_bytes < value_size,
+              "Vulkan native strided grouped reduce source buffer is smaller "
+              "than value size.");
+  TI_ERROR_IF(offset > values_bytes - value_size,
+              "Vulkan native strided grouped reduce source offset is out of "
+              "bounds.");
+  const std::size_t last = offset + (n - 1) * stride + value_size;
+  TI_ERROR_IF(last > values_bytes,
+              "Vulkan native strided grouped reduce source range is out of "
+              "bounds.");
+  TI_ERROR_IF(offset % sizeof(uint32_t) != 0 || stride % sizeof(uint32_t) != 0,
+              "Vulkan native strided grouped reduce source offset/stride must "
+              "be uint32-word aligned.");
+}
+
+void check_vulkan_strided_range(const char *op_name,
+                                const char *arg_name,
+                                Ndarray *arr,
+                                size_t logical_items,
+                                size_t value_size,
+                                size_t offset,
+                                size_t stride) {
+  TI_ERROR_IF(stride < value_size,
+              "{} {} stride is smaller than value size.", op_name, arg_name);
+  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
+              "{} {} offset/stride must align to value size.", op_name,
+              arg_name);
+  TI_ERROR_IF(offset % sizeof(uint32_t) != 0 ||
+                  stride % sizeof(uint32_t) != 0,
+              "{} {} offset/stride must be uint32-word aligned.", op_name,
+              arg_name);
+  if (logical_items == 0) {
+    return;
+  }
+  const size_t buffer_bytes = logical_items * arr->get_element_size();
+  TI_ERROR_IF(buffer_bytes < value_size,
+              "{} {} buffer is smaller than value size.", op_name, arg_name);
+  TI_ERROR_IF(offset > buffer_bytes - value_size,
+              "{} {} offset is out of bounds.", op_name, arg_name);
+  const size_t last = offset + (logical_items - 1) * stride + value_size;
+  TI_ERROR_IF(last > buffer_bytes, "{} {} range is out of bounds.", op_name,
+              arg_name);
+}
+
+void check_vulkan_scatter_add_strided_request(Ndarray *src,
+                                              Ndarray *indices,
+                                              Ndarray *dst,
+                                              int value_type,
+                                              size_t src_offset,
+                                              size_t src_stride,
+                                              size_t dst_offset,
+                                              size_t dst_stride) {
+  const char *op_name = "Vulkan native strided scatter-add";
+  TI_ERROR_IF(!src || !indices || !dst, "{} received a null ndarray.",
+              op_name);
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "{} expects 1D ndarrays.", op_name);
+  TI_ERROR_IF(src->get_nelement() != indices->get_nelement(),
+              "{} source and indices sizes differ.", op_name);
+  const size_t value_size = vulkan_scan_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0, "{} received an unsupported value type.",
+              op_name);
+  TI_ERROR_IF(indices->get_element_size() != sizeof(int32_t),
+              "{} expects i32 indices.", op_name);
+  check_vulkan_strided_range(op_name, "source", src, src->get_nelement(),
+                             value_size, src_offset, src_stride);
+  check_vulkan_strided_range(op_name, "destination", dst, dst->get_nelement(),
+                             value_size, dst_offset, dst_stride);
+}
+
+void check_vulkan_grouped_reduce_strided_keys_request(Ndarray *keys,
+                                                      Ndarray *values,
+                                                      Ndarray *output,
+                                                      int value_type,
+                                                      size_t keys_offset,
+                                                      size_t keys_stride,
+                                                      size_t values_offset,
+                                                      size_t values_stride,
+                                                      size_t output_offset,
+                                                      size_t output_stride,
+                                                      int op) {
+  const char *op_name = "Vulkan native strided grouped reduce";
+  TI_ERROR_IF(!keys || !values || !output, "{} received a null ndarray.",
+              op_name);
+  TI_ERROR_IF(keys->shape.size() != 1 || values->shape.size() != 1 ||
+                  output->shape.size() != 1,
+              "{} expects 1D ndarrays.", op_name);
+  TI_ERROR_IF(keys->get_nelement() != values->get_nelement(),
+              "{} keys and values sizes differ.", op_name);
+  TI_ERROR_IF(output->get_nelement() == 0,
+              "{} output must contain at least one group.", op_name);
+  const size_t value_size = vulkan_scan_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0, "{} received an unsupported value type.",
+              op_name);
+  TI_ERROR_IF(op != 0, "{} currently supports only sum.", op_name);
+  check_vulkan_strided_range(op_name, "keys", keys, keys->get_nelement(),
+                             sizeof(int32_t), keys_offset, keys_stride);
+  check_vulkan_strided_range(op_name, "values", values, values->get_nelement(),
+                             value_size, values_offset, values_stride);
+  check_vulkan_strided_range(op_name, "output", output, output->get_nelement(),
+                             value_size, output_offset, output_stride);
+}
+
+void check_vulkan_grouped_reduce_strided_request(Ndarray *keys,
+                                                 Ndarray *values,
+                                                 Ndarray *output,
+                                                 int value_type,
+                                                 size_t values_offset,
+                                                 size_t values_stride,
+                                                 size_t output_offset,
+                                                 size_t output_stride,
+                                                 int op) {
+  TI_ERROR_IF(keys && keys->get_element_size() != sizeof(int32_t),
+              "Vulkan native strided grouped reduce expects i32 keys.");
+  check_vulkan_grouped_reduce_strided_keys_request(
+      keys, values, output, value_type, 0, sizeof(int32_t), values_offset,
+      values_stride, output_offset, output_stride, op);
+}
+
+std::size_t vulkan_reduce_ndarray_impl(Program *program,
+                                       Ndarray *values,
+                                       Ndarray *output,
+                                       int value_type,
+                                       int op,
+                                       std::size_t offset,
+                                       std::size_t stride,
+                                       bool member_source) {
+  TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
+              "Vulkan native reduce is only available on Vulkan.");
+  TI_ERROR_IF(!values || !output,
+              "Vulkan native reduce received null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "Vulkan native reduce expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "Vulkan native reduce expects at least one input item.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "Vulkan native reduce output must contain at least one item.");
+  TI_ERROR_IF(value_type < 0 || value_type > 5,
+              "Vulkan native reduce received an unsupported value type.");
+  TI_ERROR_IF(!program->vulkan_reduce_value_type_available(value_type),
+              "Vulkan native reduce dtype is not supported by this device.");
+  const size_t element_size = vulkan_transform_value_size(value_type);
+  if (member_source) {
+    check_vulkan_reduce_member_request(values, output, value_type, offset,
+                                       stride, op);
+  } else {
+    TI_ERROR_IF(values->get_element_size() != element_size ||
+                    output->get_element_size() != element_size,
+                "Vulkan native reduce dtype does not match value type.");
+    offset = 0;
+    stride = element_size;
+  }
+  TI_ERROR_IF(op < 0 || op > 2,
+              "Vulkan native reduce supports only sum/min/max operations.");
+
+  Device *device = program->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native reduce requires a compute device.");
+  auto &cache = get_reduce_cache(program, device, value_type, member_source);
+
+  const size_t n = values->get_nelement();
+  const size_t value_bytes = member_source ? n * values->get_element_size()
+                                           : n * element_size;
+  const size_t output_bytes = element_size;
+  const int single_shared_max_n_config =
+      get_environ_config("TI_VULKAN_REDUCE_SINGLE_SHARED_MAX_N", 4096);
+  const bool use_single_shared =
+      single_shared_max_n_config > 0 &&
+      n <= static_cast<size_t>(single_shared_max_n_config);
+
+  size_t num_chunks = 0;
+  size_t partial_bytes = 0;
+  if (!use_single_shared) {
+    num_chunks = (n + kReducePrivateChunkSize - 1) / kReducePrivateChunkSize;
+    partial_bytes = num_chunks * element_size;
+    if (cache.has_workspace_allocs() &&
+        cache.needs_partial_realloc(partial_bytes)) {
+      program->synchronize();
+    }
+    cache.ensure_partial(partial_bytes);
+  }
+  if (member_source) {
+    cache.ensure_params();
+  }
+
+  DeviceAllocation values_alloc = values->ndarray_alloc_;
+  DeviceAllocation output_alloc = output->ndarray_alloc_;
+  DeviceAllocation partial_alloc = cache.partial;
+  DeviceAllocation params_alloc = cache.params;
+  auto &pipeline_set = cache.pipeline_set(value_type);
+  Pipeline *private_pipeline =
+      member_source ? pipeline_set.private_strided_pipelines[op].get()
+                    : pipeline_set.private_pipelines[op].get();
+  Pipeline *final_pipeline = pipeline_set.final_pipelines[op].get();
+  Pipeline *single_pipeline =
+      member_source ? pipeline_set.single_strided_pipelines[op].get()
+                    : pipeline_set.single_pipelines[op].get();
+  const bool profiler_scopes = program->profiler != nullptr;
+  std::array<uint32_t, 3> param_words{
+      static_cast<uint32_t>(n),
+      static_cast<uint32_t>(offset / sizeof(uint32_t)),
+      static_cast<uint32_t>(stride / sizeof(uint32_t)),
+  };
+  constexpr size_t params_bytes = 3 * sizeof(uint32_t);
+
+  program->enqueue_compute_op_lambda(
+      [values_alloc, output_alloc, partial_alloc, params_alloc, value_bytes,
+       output_bytes, partial_bytes, private_pipeline, final_pipeline,
+       single_pipeline, num_chunks, use_single_shared, member_source,
+       param_words, profiler_scopes, params_bytes](Device *op_device,
+                                                   CommandList *cmdlist) {
+        auto scope_name = [profiler_scopes](const char *name) {
+          return profiler_scopes ? name : nullptr;
+        };
+        auto bind_params = [&](ShaderResourceSet *bindings) {
+          if (!member_source) {
+            return;
+          }
+          for (uint32_t i = 0; i < param_words.size(); ++i) {
+            cmdlist->buffer_fill(params_alloc.get_ptr(i * sizeof(uint32_t)),
+                                 sizeof(uint32_t), param_words[i]);
+          }
+          cmdlist->buffer_barrier(params_alloc);
+          bindings->rw_buffer(2, params_alloc.get_ptr(0), params_bytes);
+        };
+        if (use_single_shared) {
+          auto bindings = op_device->create_resource_set_unique();
+          bindings->rw_buffer(0, values_alloc.get_ptr(0), value_bytes);
+          bindings->rw_buffer(1, output_alloc.get_ptr(0), output_bytes);
+          bind_params(bindings.get());
+          dispatch_pipeline(cmdlist, single_pipeline, bindings.get(), 1, 1, 1,
+                            scope_name(member_source
+                                           ? "vulkan_reduce_single_strided"
+                                           : "vulkan_reduce_single"));
+          cmdlist->buffer_barrier(output_alloc);
+          return;
+        }
+        {
+          auto bindings = op_device->create_resource_set_unique();
+          bindings->rw_buffer(0, values_alloc.get_ptr(0), value_bytes);
+          bindings->rw_buffer(1, partial_alloc.get_ptr(0), partial_bytes);
+          bind_params(bindings.get());
+          dispatch_pipeline(cmdlist, private_pipeline, bindings.get(),
+                            static_cast<uint32_t>(num_chunks), 1, 1,
+                            scope_name(member_source
+                                           ? "vulkan_reduce_private_strided"
+                                           : "vulkan_reduce_private"));
+          cmdlist->buffer_barrier(partial_alloc);
+        }
+        {
+          auto bindings = op_device->create_resource_set_unique();
+          bindings->rw_buffer(0, partial_alloc.get_ptr(0), partial_bytes);
+          bindings->rw_buffer(1, output_alloc.get_ptr(0), output_bytes);
+          dispatch_pipeline(cmdlist, final_pipeline, bindings.get(), 1, 1, 1,
+                            scope_name("vulkan_reduce_final"));
+          cmdlist->buffer_barrier(output_alloc);
+        }
+      },
+      {});
+  return cache.cached_bytes;
+}
+
+std::size_t vulkan_transform_affine_ndarray_impl(Program *program,
+                                                 Ndarray *src,
+                                                 Ndarray *dst,
+                                                 int value_type,
+                                                 std::size_t offset,
+                                                 std::size_t stride,
+                                                 double scale,
+                                                 double bias,
+                                                 bool member_source) {
+  TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
+              "Vulkan native transform is only available on Vulkan.");
+  TI_ERROR_IF(!src || !dst, "Vulkan native transform received null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1,
+              "Vulkan native transform expects 1D ndarrays.");
+  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
+              "Vulkan native transform source and destination sizes differ.");
+  const std::size_t value_size = vulkan_transform_value_size(value_type);
+  if (member_source) {
+    check_vulkan_transform_member_request(src, dst, value_type, offset, stride);
+  } else {
+    TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
+                "Vulkan native transform source and destination dtypes "
+                "differ.");
+    TI_ERROR_IF(src->get_element_size() != value_size,
+                "Vulkan native transform dtype does not match value type.");
+    offset = 0;
+    stride = value_size;
+  }
+  TI_ERROR_IF(!program->vulkan_transform_value_type_available(value_type),
+              "Vulkan native transform value type is not supported by this "
+              "device.");
+  TI_ERROR_IF(src->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native transform currently supports at most UINT32_MAX "
+              "items.");
+
+  const size_t n = src->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  Device *device = program->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native transform requires a compute device.");
+  auto &cache = get_transform_cache(program, device);
+
+  std::array<uint32_t, 7> param_words{0, 0, 0, 0, 0, 0, 0};
+  if (value_type == 0) {
+    param_words[0] = static_cast<uint32_t>(static_cast<int32_t>(scale));
+    param_words[1] = static_cast<uint32_t>(static_cast<int32_t>(bias));
+  } else if (value_type == 2) {
+    param_words[0] = static_cast<uint32_t>(scale);
+    param_words[1] = static_cast<uint32_t>(bias);
+  } else if (value_type == 1) {
+    float scale_f32 = static_cast<float>(scale);
+    float bias_f32 = static_cast<float>(bias);
+    std::memcpy(&param_words[0], &scale_f32, sizeof(param_words[0]));
+    std::memcpy(&param_words[1], &bias_f32, sizeof(param_words[1]));
+  } else {
+    uint64_t scale_u64 = 0;
+    uint64_t bias_u64 = 0;
+    if (value_type == 4) {
+      scale_u64 = static_cast<uint64_t>(static_cast<int64_t>(scale));
+      bias_u64 = static_cast<uint64_t>(static_cast<int64_t>(bias));
+    } else if (value_type == 5) {
+      std::memcpy(&scale_u64, &scale, sizeof(scale_u64));
+      std::memcpy(&bias_u64, &bias, sizeof(bias_u64));
+    } else {
+      scale_u64 = static_cast<uint64_t>(scale);
+      bias_u64 = static_cast<uint64_t>(bias);
+    }
+    param_words[0] = static_cast<uint32_t>(scale_u64);
+    param_words[1] = static_cast<uint32_t>(scale_u64 >> 32);
+    param_words[2] = static_cast<uint32_t>(bias_u64);
+    param_words[3] = static_cast<uint32_t>(bias_u64 >> 32);
+  }
+  param_words[4] = static_cast<uint32_t>(n);
+  param_words[5] = static_cast<uint32_t>(offset / sizeof(uint32_t));
+  param_words[6] = static_cast<uint32_t>(stride / sizeof(uint32_t));
+
+  DeviceAllocation src_alloc = src->ndarray_alloc_;
+  DeviceAllocation dst_alloc = dst->ndarray_alloc_;
+  DeviceAllocation params_alloc = cache.params;
+  const bool bind_static_params = !cache.affine_bindings;
+  ShaderResourceSet *bindings = cache.cached_affine_resource_set();
+  const bool has_float64 =
+      program->get_device_caps().get(DeviceCapability::spirv_has_float64) != 0;
+  Pipeline *pipeline = cache.pipeline_for(device, value_type, has_float64);
+  const size_t src_bytes = member_source ? n * src->get_element_size()
+                                         : n * value_size;
+  const size_t dst_bytes = n * value_size;
+  const size_t params_bytes = param_words.size() * sizeof(uint32_t);
+  const uint32_t groups =
+      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
+  const bool profiler_scopes = program->profiler != nullptr;
+
+  program->enqueue_compute_op_lambda(
+      [src_alloc, dst_alloc, params_alloc, bindings, bind_static_params,
+       pipeline, src_bytes, dst_bytes, params_bytes, param_words, groups,
+       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        for (uint32_t i = 0; i < param_words.size(); ++i) {
+          cmdlist->buffer_fill(params_alloc.get_ptr(i * sizeof(uint32_t)),
+                               sizeof(uint32_t), param_words[i]);
+        }
+        cmdlist->buffer_barrier(params_alloc);
+        bindings->rw_buffer(0, src_alloc.get_ptr(0), src_bytes);
+        bindings->rw_buffer(1, dst_alloc.get_ptr(0), dst_bytes);
+        if (bind_static_params) {
+          bindings->rw_buffer(2, params_alloc.get_ptr(0), params_bytes);
+        }
+        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
+                          profiler_scopes ? "vulkan_transform_affine"
+                                          : nullptr);
+        cmdlist->buffer_barrier(dst_alloc);
+      },
+      {});
+  return cache.cached_bytes;
+}
+
+}  // namespace
 
 bool Program::vulkan_indexed_copy_available() const {
   return compile_config().arch == Arch::vulkan;
@@ -3889,6 +5180,179 @@ std::size_t Program::vulkan_grouped_reduce_atomic_ndarray(Ndarray *keys,
   return 0;
 }
 
+std::size_t Program::vulkan_grouped_reduce_atomic_member_ndarray(
+    Ndarray *keys,
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride,
+    int op) {
+  return vulkan_grouped_reduce_atomic_strided_ndarray(
+      keys, values, output, value_type, offset, stride, 0,
+      vulkan_scan_value_type_size(value_type), op);
+}
+
+std::size_t Program::vulkan_grouped_reduce_atomic_strided_ndarray(
+    Ndarray *keys,
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    int op) {
+  return vulkan_grouped_reduce_atomic_strided_keys_ndarray(
+      keys, values, output, value_type, 0, sizeof(int32_t), values_offset,
+      values_stride, output_offset, output_stride, op);
+}
+
+std::size_t Program::vulkan_grouped_reduce_atomic_strided_keys_ndarray(
+    Ndarray *keys,
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t keys_offset,
+    std::size_t keys_stride,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native strided grouped reduce is only available on "
+              "Vulkan.");
+  check_vulkan_grouped_reduce_strided_keys_request(
+      keys, values, output, value_type, keys_offset, keys_stride,
+      values_offset, values_stride, output_offset, output_stride, op);
+  TI_ERROR_IF(!vulkan_grouped_reduce_atomic_value_type_available(value_type),
+              "Vulkan native strided grouped reduce does not support the "
+              "requested value type.");
+  const size_t value_size = vulkan_scan_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Unsupported Vulkan strided grouped reduce value type.");
+  const size_t n = keys->get_nelement();
+  const size_t num_groups = output->get_nelement();
+  TI_ERROR_IF(n > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ||
+                  num_groups >
+                      static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native strided grouped reduce input is too large for "
+              "u32 dispatch.");
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(device == nullptr,
+              "Vulkan native strided grouped reduce requires a compute "
+              "device.");
+  auto &cache = get_bucket_builder_cache(this, device);
+  cache.ensure_grouped_reduce_params();
+  cache.ensure_grouped_reduce_zero_strided_pipeline(value_type);
+  cache.ensure_grouped_reduce_atomic_strided_pipeline(value_type);
+  const DeviceAllocation keys_alloc = keys->ndarray_alloc_;
+  const DeviceAllocation values_alloc = values->ndarray_alloc_;
+  const DeviceAllocation output_alloc = output->ndarray_alloc_;
+  const DeviceAllocation params_alloc = cache.grouped_reduce_params;
+  const size_t keys_bytes = n * keys->get_element_size();
+  const size_t values_bytes = n * values->get_element_size();
+  const size_t output_bytes = num_groups * output->get_element_size();
+  const std::array<uint32_t, 3> zero_param_words{
+      static_cast<uint32_t>(num_groups),
+      static_cast<uint32_t>(output_offset / value_size),
+      static_cast<uint32_t>(output_stride / value_size),
+  };
+  const std::array<uint32_t, 8> reduce_param_words{
+      static_cast<uint32_t>(n),
+      static_cast<uint32_t>(keys_offset / sizeof(int32_t)),
+      static_cast<uint32_t>(keys_stride / sizeof(int32_t)),
+      static_cast<uint32_t>(values_offset / value_size),
+      static_cast<uint32_t>(values_stride / value_size),
+      static_cast<uint32_t>(num_groups),
+      static_cast<uint32_t>(output_offset / value_size),
+      static_cast<uint32_t>(output_stride / value_size),
+  };
+  const size_t zero_params_bytes = zero_param_words.size() * sizeof(uint32_t);
+  const size_t reduce_params_bytes =
+      reduce_param_words.size() * sizeof(uint32_t);
+  Pipeline *zero_pipeline = cache.grouped_reduce_zero_strided_pipeline(value_type);
+  Pipeline *atomic_pipeline =
+      cache.grouped_reduce_atomic_strided_pipeline(value_type);
+  TI_ERROR_IF(!zero_pipeline || !atomic_pipeline,
+              "Vulkan native strided grouped reduce could not find a pipeline "
+              "for the requested value type.");
+  ShaderResourceSet *zero_bindings =
+      cache.grouped_reduce_zero_strided_resource_set(value_type);
+  ShaderResourceSet *atomic_bindings =
+      cache.grouped_reduce_atomic_strided_resource_set(value_type);
+  const uint32_t zero_groups =
+      static_cast<uint32_t>((num_groups + kBlockSize - 1) / kBlockSize);
+  const uint32_t reduce_groups =
+      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
+  const bool profiler_scopes = profiler != nullptr;
+  enqueue_compute_op_lambda(
+      [keys_alloc, values_alloc, output_alloc, params_alloc, keys_bytes,
+       values_bytes, output_bytes, zero_params_bytes, reduce_params_bytes,
+       zero_param_words, reduce_param_words, zero_pipeline, atomic_pipeline,
+       zero_bindings, atomic_bindings, zero_groups,
+       reduce_groups, value_type, profiler_scopes](Device * /*op_device*/,
+                                                   CommandList *cmdlist) {
+        for (uint32_t i = 0; i < zero_param_words.size(); ++i) {
+          cmdlist->buffer_fill(params_alloc.get_ptr(i * sizeof(uint32_t)),
+                               sizeof(uint32_t), zero_param_words[i]);
+        }
+        cmdlist->buffer_barrier(params_alloc);
+        zero_bindings->rw_buffer(0, output_alloc.get_ptr(0), output_bytes);
+        zero_bindings->rw_buffer(1, params_alloc.get_ptr(0),
+                                 zero_params_bytes);
+        dispatch_pipeline(cmdlist, zero_pipeline, zero_bindings, zero_groups, 1,
+                          1,
+                          profiler_scopes
+                              ? (value_type == 1
+                                     ? "vulkan_grouped_reduce_zero_f32_strided"
+                                     : value_type == 2
+                                     ? "vulkan_grouped_reduce_zero_u32_strided"
+                                     : value_type == 3
+                                     ? "vulkan_grouped_reduce_zero_u64_strided"
+                                     : value_type == 4
+                                     ? "vulkan_grouped_reduce_zero_i64_strided"
+                                     : value_type == 5
+                                     ? "vulkan_grouped_reduce_zero_f64_strided"
+                                     : "vulkan_grouped_reduce_zero_i32_strided")
+                              : nullptr);
+        cmdlist->buffer_barrier(output_alloc);
+        if (reduce_groups == 0) {
+          return;
+        }
+        for (uint32_t i = 0; i < reduce_param_words.size(); ++i) {
+          cmdlist->buffer_fill(params_alloc.get_ptr(i * sizeof(uint32_t)),
+                               sizeof(uint32_t), reduce_param_words[i]);
+        }
+        cmdlist->buffer_barrier(params_alloc);
+        atomic_bindings->rw_buffer(0, keys_alloc.get_ptr(0), keys_bytes);
+        atomic_bindings->rw_buffer(1, values_alloc.get_ptr(0), values_bytes);
+        atomic_bindings->rw_buffer(2, output_alloc.get_ptr(0), output_bytes);
+        atomic_bindings->rw_buffer(3, params_alloc.get_ptr(0),
+                                   reduce_params_bytes);
+        dispatch_pipeline(
+            cmdlist, atomic_pipeline, atomic_bindings, reduce_groups, 1, 1,
+            profiler_scopes
+                ? (value_type == 1
+                       ? "vulkan_grouped_reduce_atomic_sum_f32_strided"
+                       : value_type == 2
+                       ? "vulkan_grouped_reduce_atomic_sum_u32_strided"
+                       : value_type == 3
+                       ? "vulkan_grouped_reduce_atomic_sum_u64_strided"
+                       : value_type == 4
+                       ? "vulkan_grouped_reduce_atomic_sum_i64_strided"
+                       : value_type == 5
+                       ? "vulkan_grouped_reduce_atomic_sum_f64_strided"
+                       : "vulkan_grouped_reduce_atomic_sum_i32_strided")
+                : nullptr);
+        cmdlist->buffer_barrier(output_alloc);
+      },
+      {});
+  return cache.cached_bytes;
+}
+
 std::size_t Program::vulkan_inclusive_scan_ndarray(Ndarray *data,
                                                    int value_type) {
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
@@ -3912,6 +5376,29 @@ std::size_t Program::vulkan_inclusive_scan_ndarray(Ndarray *data,
   auto &cache = get_scan_cache(this, device);
   return enqueue_vulkan_scan(this, cache, data->ndarray_alloc_, n, value_type,
                              profiler != nullptr);
+}
+
+std::size_t Program::vulkan_inclusive_scan_member_ndarray(
+    Ndarray *data,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native strided scan is only available on Vulkan.");
+  check_vulkan_scan_member_request(data, value_type, offset, stride);
+  TI_ERROR_IF(!vulkan_scan_value_type_available(value_type),
+              "Vulkan native strided scan received an unsupported value type.");
+
+  const size_t n = data->get_nelement();
+  if (n <= 1) {
+    return 0;
+  }
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native strided scan requires a compute device.");
+  auto &cache = get_scan_cache(this, device);
+  return enqueue_vulkan_scan(this, cache, data->ndarray_alloc_, n, value_type,
+                             profiler != nullptr, true, offset, stride);
 }
 
 std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
@@ -4254,99 +5741,19 @@ std::size_t Program::vulkan_reduce_ndarray(Ndarray *values,
                                            Ndarray *output,
                                            int value_type,
                                            int op) {
-  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
-              "Vulkan native reduce is only available on Vulkan.");
-  TI_ERROR_IF(!values || !output,
-              "Vulkan native reduce received null ndarray.");
-  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
-              "Vulkan native reduce expects 1D ndarrays.");
-  TI_ERROR_IF(values->get_nelement() == 0,
-              "Vulkan native reduce expects at least one input item.");
-  TI_ERROR_IF(output->get_nelement() < 1,
-              "Vulkan native reduce output must contain at least one item.");
-  TI_ERROR_IF(value_type < 0 || value_type > 5,
-              "Vulkan native reduce received an unsupported value type.");
-  TI_ERROR_IF(!vulkan_reduce_value_type_available(value_type),
-              "Vulkan native reduce dtype is not supported by this device.");
-  const bool is_64bit = value_type == 3 || value_type == 4 || value_type == 5;
-  const size_t element_size = is_64bit ? sizeof(uint64_t) : sizeof(uint32_t);
-  TI_ERROR_IF(values->get_element_size() != element_size ||
-                  output->get_element_size() != element_size,
-              "Vulkan native reduce dtype does not match value type.");
-  TI_ERROR_IF(op < 0 || op > 2,
-              "Vulkan native reduce supports only sum/min/max operations.");
+  return vulkan_reduce_ndarray_impl(this, values, output, value_type, op, 0,
+                                    vulkan_transform_value_size(value_type),
+                                    false);
+}
 
-  Device *device = program_impl_->get_compute_device();
-  TI_ERROR_IF(!device, "Vulkan native reduce requires a compute device.");
-  auto &cache = get_reduce_cache(this, device, value_type);
-
-  const size_t n = values->get_nelement();
-  const size_t value_bytes = n * element_size;
-  const size_t output_bytes = element_size;
-  const int single_shared_max_n_config =
-      get_environ_config("TI_VULKAN_REDUCE_SINGLE_SHARED_MAX_N", 4096);
-  const bool use_single_shared =
-      single_shared_max_n_config > 0 &&
-      n <= static_cast<size_t>(single_shared_max_n_config);
-
-  size_t num_chunks = 0;
-  size_t partial_bytes = 0;
-  if (!use_single_shared) {
-    num_chunks = (n + kReducePrivateChunkSize - 1) / kReducePrivateChunkSize;
-    partial_bytes = num_chunks * element_size;
-    if (cache.has_workspace_allocs() &&
-        cache.needs_partial_realloc(partial_bytes)) {
-      synchronize();
-    }
-    cache.ensure_partial(partial_bytes);
-  }
-
-  DeviceAllocation values_alloc = values->ndarray_alloc_;
-  DeviceAllocation output_alloc = output->ndarray_alloc_;
-  DeviceAllocation partial_alloc = cache.partial;
-  auto &pipeline_set = cache.pipeline_set(value_type);
-  Pipeline *private_pipeline = pipeline_set.private_pipelines[op].get();
-  Pipeline *final_pipeline = pipeline_set.final_pipelines[op].get();
-  Pipeline *single_pipeline = pipeline_set.single_pipelines[op].get();
-  const bool profiler_scopes = profiler != nullptr;
-
-  enqueue_compute_op_lambda(
-      [values_alloc, output_alloc, partial_alloc, value_bytes, output_bytes,
-       partial_bytes, private_pipeline, final_pipeline, single_pipeline,
-       num_chunks, use_single_shared,
-       profiler_scopes](Device *op_device, CommandList *cmdlist) {
-        auto scope_name = [profiler_scopes](const char *name) {
-          return profiler_scopes ? name : nullptr;
-        };
-        if (use_single_shared) {
-          auto bindings = op_device->create_resource_set_unique();
-          bindings->rw_buffer(0, values_alloc.get_ptr(0), value_bytes);
-          bindings->rw_buffer(1, output_alloc.get_ptr(0), output_bytes);
-          dispatch_pipeline(cmdlist, single_pipeline, bindings.get(), 1, 1, 1,
-                            scope_name("vulkan_reduce_single"));
-          cmdlist->buffer_barrier(output_alloc);
-          return;
-        }
-        {
-          auto bindings = op_device->create_resource_set_unique();
-          bindings->rw_buffer(0, values_alloc.get_ptr(0), value_bytes);
-          bindings->rw_buffer(1, partial_alloc.get_ptr(0), partial_bytes);
-          dispatch_pipeline(cmdlist, private_pipeline, bindings.get(),
-                            static_cast<uint32_t>(num_chunks), 1, 1,
-                            scope_name("vulkan_reduce_private"));
-          cmdlist->buffer_barrier(partial_alloc);
-        }
-        {
-          auto bindings = op_device->create_resource_set_unique();
-          bindings->rw_buffer(0, partial_alloc.get_ptr(0), partial_bytes);
-          bindings->rw_buffer(1, output_alloc.get_ptr(0), output_bytes);
-          dispatch_pipeline(cmdlist, final_pipeline, bindings.get(), 1, 1, 1,
-                            scope_name("vulkan_reduce_final"));
-          cmdlist->buffer_barrier(output_alloc);
-        }
-      },
-      {});
-  return cache.cached_bytes;
+std::size_t Program::vulkan_reduce_member_ndarray(Ndarray *values,
+                                                  Ndarray *output,
+                                                  int value_type,
+                                                  std::size_t offset,
+                                                  std::size_t stride,
+                                                  int op) {
+  return vulkan_reduce_ndarray_impl(this, values, output, value_type, op,
+                                    offset, stride, true);
 }
 
 std::size_t Program::vulkan_reduce_i32_ndarray(Ndarray *values,
@@ -4360,106 +5767,21 @@ std::size_t Program::vulkan_transform_affine_ndarray(Ndarray *src,
                                                      int value_type,
                                                      double scale,
                                                      double bias) {
-  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
-              "Vulkan native transform is only available on Vulkan.");
-  TI_ERROR_IF(!src || !dst, "Vulkan native transform received null ndarray.");
-  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1,
-              "Vulkan native transform expects 1D ndarrays.");
-  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
-              "Vulkan native transform source and destination sizes differ.");
-  TI_ERROR_IF(src->get_element_size() != dst->get_element_size(),
-              "Vulkan native transform source and destination dtypes differ.");
-  TI_ERROR_IF(value_type < 0 || value_type > 5,
-              "Vulkan native transform received an unsupported value type.");
-  const bool is_64bit = value_type == 3 || value_type == 4 || value_type == 5;
-  TI_ERROR_IF(src->get_element_size() !=
-                  (is_64bit ? sizeof(uint64_t) : sizeof(uint32_t)),
-              "Vulkan native transform dtype does not match value type.");
-  TI_ERROR_IF(!vulkan_transform_value_type_available(value_type),
-              "Vulkan native transform value type is not supported by this "
-              "device.");
-  TI_ERROR_IF(src->get_nelement() >
-                  static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()),
-              "Vulkan native transform currently supports at most UINT32_MAX "
-              "items.");
+  return vulkan_transform_affine_ndarray_impl(
+      this, src, dst, value_type, 0, vulkan_transform_value_size(value_type),
+      scale, bias, false);
+}
 
-  const size_t n = src->get_nelement();
-  if (n == 0) {
-    return 0;
-  }
-  Device *device = program_impl_->get_compute_device();
-  TI_ERROR_IF(!device, "Vulkan native transform requires a compute device.");
-  auto &cache = get_transform_cache(this, device);
-
-  std::array<uint32_t, 4> param_words{0, 0, 0, 0};
-  uint32_t param_word_count = 2;
-  if (value_type == 0) {
-    param_words[0] = static_cast<uint32_t>(static_cast<int32_t>(scale));
-    param_words[1] = static_cast<uint32_t>(static_cast<int32_t>(bias));
-  } else if (value_type == 2) {
-    param_words[0] = static_cast<uint32_t>(scale);
-    param_words[1] = static_cast<uint32_t>(bias);
-  } else if (value_type == 1) {
-    float scale_f32 = static_cast<float>(scale);
-    float bias_f32 = static_cast<float>(bias);
-    std::memcpy(&param_words[0], &scale_f32, sizeof(param_words[0]));
-    std::memcpy(&param_words[1], &bias_f32, sizeof(param_words[1]));
-  } else {
-    uint64_t scale_u64 = 0;
-    uint64_t bias_u64 = 0;
-    if (value_type == 4) {
-      scale_u64 = static_cast<uint64_t>(static_cast<int64_t>(scale));
-      bias_u64 = static_cast<uint64_t>(static_cast<int64_t>(bias));
-    } else if (value_type == 5) {
-      std::memcpy(&scale_u64, &scale, sizeof(scale_u64));
-      std::memcpy(&bias_u64, &bias, sizeof(bias_u64));
-    } else {
-      scale_u64 = static_cast<uint64_t>(scale);
-      bias_u64 = static_cast<uint64_t>(bias);
-    }
-    param_words[0] = static_cast<uint32_t>(scale_u64);
-    param_words[1] = static_cast<uint32_t>(scale_u64 >> 32);
-    param_words[2] = static_cast<uint32_t>(bias_u64);
-    param_words[3] = static_cast<uint32_t>(bias_u64 >> 32);
-    param_word_count = 4;
-  }
-
-  DeviceAllocation src_alloc = src->ndarray_alloc_;
-  DeviceAllocation dst_alloc = dst->ndarray_alloc_;
-  DeviceAllocation params_alloc = cache.params;
-  const bool bind_static_params = !cache.affine_bindings;
-  ShaderResourceSet *bindings = cache.cached_affine_resource_set();
-  const bool has_float64 =
-      get_device_caps().get(DeviceCapability::spirv_has_float64) != 0;
-  Pipeline *pipeline = cache.pipeline_for(device, value_type, has_float64);
-  const size_t bytes =
-      n * (is_64bit ? sizeof(uint64_t) : sizeof(uint32_t));
-  const size_t params_bytes = 4 * sizeof(uint32_t);
-  const uint32_t groups =
-      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
-  const bool profiler_scopes = profiler != nullptr;
-
-  enqueue_compute_op_lambda(
-      [src_alloc, dst_alloc, params_alloc, bindings, bind_static_params,
-       pipeline, bytes, params_bytes, param_words, param_word_count, groups,
-       profiler_scopes](Device *op_device, CommandList *cmdlist) {
-        for (uint32_t i = 0; i < param_word_count; ++i) {
-          cmdlist->buffer_fill(params_alloc.get_ptr(i * sizeof(uint32_t)),
-                               sizeof(uint32_t), param_words[i]);
-        }
-        cmdlist->buffer_barrier(params_alloc);
-        bindings->rw_buffer(0, src_alloc.get_ptr(0), bytes);
-        bindings->rw_buffer(1, dst_alloc.get_ptr(0), bytes);
-        if (bind_static_params) {
-          bindings->rw_buffer(2, params_alloc.get_ptr(0), params_bytes);
-        }
-        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
-                          profiler_scopes ? "vulkan_transform_affine"
-                                          : nullptr);
-        cmdlist->buffer_barrier(dst_alloc);
-      },
-      {});
-  return cache.cached_bytes;
+std::size_t Program::vulkan_transform_affine_member_ndarray(
+    Ndarray *src,
+    Ndarray *dst,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride,
+    double scale,
+    double bias) {
+  return vulkan_transform_affine_ndarray_impl(
+      this, src, dst, value_type, offset, stride, scale, bias, true);
 }
 
 std::size_t Program::vulkan_gather_ndarray(Ndarray *src,
@@ -4664,6 +5986,111 @@ std::size_t Program::vulkan_scatter_add_ndarray(Ndarray *src,
       },
       {});
   return 0;
+}
+
+std::size_t Program::vulkan_scatter_add_member_ndarray(
+    Ndarray *src,
+    Ndarray *indices,
+    Ndarray *dst,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride) {
+  return vulkan_scatter_add_strided_ndarray(
+      src, indices, dst, value_type, offset, stride, 0,
+      vulkan_scan_value_type_size(value_type));
+}
+
+std::size_t Program::vulkan_scatter_add_strided_ndarray(
+    Ndarray *src,
+    Ndarray *indices,
+    Ndarray *dst,
+    int value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native strided scatter-add is only available on Vulkan.");
+  check_vulkan_scatter_add_strided_request(
+      src, indices, dst, value_type, src_offset, src_stride, dst_offset,
+      dst_stride);
+  TI_ERROR_IF(!vulkan_scatter_add_value_type_available(value_type),
+              "Vulkan native strided scatter-add does not support the "
+              "requested value type.");
+  const size_t value_size = vulkan_scan_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Unsupported Vulkan strided scatter-add value type.");
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native strided scatter-add currently supports at most "
+              "UINT32_MAX source items.");
+  const size_t n = indices->get_nelement();
+  if (n == 0 || dst->get_nelement() == 0) {
+    return 0;
+  }
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan native strided scatter-add requires a compute device.");
+  auto &cache = get_indexed_copy_cache(this, device);
+  cache.ensure_scatter_add_params();
+  cache.ensure_scatter_add_strided_pipeline(value_type);
+  ShaderResourceSet *bindings =
+      cache.cached_scatter_add_strided_resource_set(value_type);
+  Pipeline *pipeline = cache.scatter_add_strided_pipeline(value_type);
+  TI_ERROR_IF(!pipeline,
+              "Vulkan native strided scatter-add could not find a pipeline "
+              "for the requested value type.");
+  const std::array<uint32_t, 6> param_words{
+      static_cast<uint32_t>(n),
+      static_cast<uint32_t>(src_offset / value_size),
+      static_cast<uint32_t>(src_stride / value_size),
+      static_cast<uint32_t>(dst->get_nelement()),
+      static_cast<uint32_t>(dst_offset / value_size),
+      static_cast<uint32_t>(dst_stride / value_size),
+  };
+  const size_t src_bytes = src->get_nelement() * src->get_element_size();
+  const size_t indices_bytes = n * sizeof(int32_t);
+  const size_t dst_bytes = dst->get_nelement() * dst->get_element_size();
+  const size_t params_bytes = param_words.size() * sizeof(uint32_t);
+  const uint32_t groups =
+      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
+  const DeviceAllocation src_alloc = src->ndarray_alloc_;
+  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
+  const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
+  const DeviceAllocation params_alloc = cache.scatter_add_params;
+  const bool profiler_scopes = profiler != nullptr;
+  enqueue_compute_op_lambda(
+      [src_alloc, indices_alloc, dst_alloc, params_alloc, pipeline, bindings,
+       src_bytes, indices_bytes, dst_bytes, params_bytes, param_words, groups,
+       value_type, profiler_scopes](Device * /*op_device*/,
+                                    CommandList *cmdlist) {
+        for (uint32_t i = 0; i < param_words.size(); ++i) {
+          cmdlist->buffer_fill(params_alloc.get_ptr(i * sizeof(uint32_t)),
+                               sizeof(uint32_t), param_words[i]);
+        }
+        cmdlist->buffer_barrier(params_alloc);
+        bindings->rw_buffer(0, src_alloc.get_ptr(0), src_bytes);
+        bindings->rw_buffer(1, indices_alloc.get_ptr(0), indices_bytes);
+        bindings->rw_buffer(2, dst_alloc.get_ptr(0), dst_bytes);
+        bindings->rw_buffer(3, params_alloc.get_ptr(0), params_bytes);
+        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
+                          profiler_scopes
+                              ? (value_type == 1
+                                     ? "vulkan_scatter_add_f32_by_i32_strided"
+                                     : value_type == 2
+                                     ? "vulkan_scatter_add_u32_by_i32_strided"
+                                     : value_type == 3
+                                     ? "vulkan_scatter_add_u64_by_i32_strided"
+                                     : value_type == 4
+                                     ? "vulkan_scatter_add_i64_by_i32_strided"
+                                     : value_type == 5
+                                     ? "vulkan_scatter_add_f64_by_i32_strided"
+                                     : "vulkan_scatter_add_i32_by_i32_strided")
+                              : nullptr);
+        cmdlist->buffer_barrier(dst_alloc);
+      },
+      {});
+  return cache.cached_bytes;
 }
 
 bool Program::vulkan_bucket_builder_value_type_available(int value_type) const {
@@ -5875,6 +7302,17 @@ void Program::vulkan_transform_clear_workspace() {
 }
 
 void Program::vulkan_indexed_copy_clear_workspace() {
+  bool sync_before_clear = false;
+  {
+    std::lock_guard<std::mutex> guard(g_vulkan_indexed_copy_mutex);
+    auto it = g_vulkan_indexed_copy_caches.find(this);
+    sync_before_clear =
+        it != g_vulkan_indexed_copy_caches.end() &&
+        it->second->scatter_add_params != kDeviceNullAllocation;
+  }
+  if (sync_before_clear) {
+    synchronize();
+  }
   std::lock_guard<std::mutex> guard(g_vulkan_indexed_copy_mutex);
   auto it = g_vulkan_indexed_copy_caches.find(this);
   if (it != g_vulkan_indexed_copy_caches.end()) {
@@ -5893,7 +7331,8 @@ void Program::vulkan_bucket_builder_clear_workspace() {
     auto it = g_vulkan_bucket_builder_caches.find(this);
     sync_before_clear =
         it != g_vulkan_bucket_builder_caches.end() &&
-        it->second->partial != kDeviceNullAllocation;
+        (it->second->partial != kDeviceNullAllocation ||
+         it->second->grouped_reduce_params != kDeviceNullAllocation);
   }
   if (sync_before_clear) {
     synchronize();
@@ -5964,11 +7403,16 @@ std::size_t Program::vulkan_transform_workspace_bytes() const {
 }
 
 std::size_t Program::vulkan_indexed_copy_workspace_bytes() const {
-  return 0;
+  std::lock_guard<std::mutex> guard(g_vulkan_indexed_copy_mutex);
+  auto it = g_vulkan_indexed_copy_caches.find(const_cast<Program *>(this));
+  if (it == g_vulkan_indexed_copy_caches.end()) {
+    return 0;
+  }
+  return it->second->cached_bytes;
 }
 
 std::size_t Program::vulkan_scatter_add_workspace_bytes() const {
-  return 0;
+  return vulkan_indexed_copy_workspace_bytes();
 }
 
 std::size_t Program::vulkan_bucket_builder_workspace_bytes() const {
@@ -6086,6 +7530,15 @@ std::size_t Program::vulkan_inclusive_scan_ndarray(Ndarray *data,
   return 0;
 }
 
+std::size_t Program::vulkan_inclusive_scan_member_ndarray(
+    Ndarray *data,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride) {
+  TI_ERROR("Vulkan native strided scan requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
                                             Ndarray *flags,
                                             Ndarray *output,
@@ -6125,6 +7578,16 @@ std::size_t Program::vulkan_reduce_ndarray(Ndarray *values,
   return 0;
 }
 
+std::size_t Program::vulkan_reduce_member_ndarray(Ndarray *values,
+                                                  Ndarray *output,
+                                                  int value_type,
+                                                  std::size_t offset,
+                                                  std::size_t stride,
+                                                  int op) {
+  TI_ERROR("Vulkan native strided reduce requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 std::size_t Program::vulkan_reduce_i32_ndarray(Ndarray *values,
                                                Ndarray *output,
                                                int op) {
@@ -6138,6 +7601,17 @@ std::size_t Program::vulkan_transform_affine_ndarray(Ndarray *src,
                                                      double scale,
                                                      double bias) {
   TI_ERROR("Vulkan native transform requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_transform_affine_member_ndarray(Ndarray *src,
+                                                            Ndarray *dst,
+                                                            int value_type,
+                                                            std::size_t offset,
+                                                            std::size_t stride,
+                                                            double scale,
+                                                            double bias) {
+  TI_ERROR("Vulkan native strided transform requires TI_WITH_VULKAN=ON.");
   return 0;
 }
 
@@ -6160,6 +7634,29 @@ std::size_t Program::vulkan_scatter_add_ndarray(Ndarray *src,
                                                 Ndarray *dst,
                                                 int value_type) {
   TI_ERROR("Vulkan native scatter-add requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_scatter_add_member_ndarray(Ndarray *src,
+                                                       Ndarray *indices,
+                                                       Ndarray *dst,
+                                                       int value_type,
+                                                       std::size_t offset,
+                                                       std::size_t stride) {
+  TI_ERROR("Vulkan native strided scatter-add requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_scatter_add_strided_ndarray(
+    Ndarray *src,
+    Ndarray *indices,
+    Ndarray *dst,
+    int value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  TI_ERROR("Vulkan native strided scatter-add requires TI_WITH_VULKAN=ON.");
   return 0;
 }
 
@@ -6196,6 +7693,48 @@ std::size_t Program::vulkan_grouped_reduce_atomic_ndarray(Ndarray *keys,
                                                           int value_type,
                                                           int op) {
   TI_ERROR("Vulkan native grouped reduce requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_grouped_reduce_atomic_member_ndarray(
+    Ndarray *keys,
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride,
+    int op) {
+  TI_ERROR("Vulkan native strided grouped reduce requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_grouped_reduce_atomic_strided_ndarray(
+    Ndarray *keys,
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    int op) {
+  TI_ERROR("Vulkan native strided grouped reduce requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_grouped_reduce_atomic_strided_keys_ndarray(
+    Ndarray *keys,
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t keys_offset,
+    std::size_t keys_stride,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    int op) {
+  TI_ERROR("Vulkan native strided grouped reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
 

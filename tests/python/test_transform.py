@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import taichi_forge as ti
 from taichi_forge.lang import impl
+from taichi_forge.lang.misc import get_host_arch_list
 from tests import test_utils
 
 
@@ -37,6 +38,30 @@ def _assert_transform_equal(dtype, actual, expected):
         np.testing.assert_allclose(actual, expected, rtol=1e-6)
     else:
         assert np.array_equal(actual, expected)
+
+
+def _run_struct_member_transform_case(dtype, n, method, workspace=None):
+    payload = ti.types.struct(value=dtype, tag=ti.i32)
+    src = ti.ndarray(payload, shape=n)
+    dst = ti.ndarray(dtype, shape=n)
+    data, scale, bias, expected = _transform_case(dtype, n)
+    host = np.zeros((n,), dtype=src.numpy_dtype)
+    host["value"] = data
+    host["tag"] = np.arange(n, dtype=np.int32) * 3 + 1
+    src.from_numpy(host)
+    dst.fill(0)
+    ti.algorithms.experimental_transform(
+        src.field("value"),
+        dst,
+        scale=scale,
+        bias=bias,
+        method=method,
+        workspace=workspace,
+    )
+    _assert_transform_equal(dtype, dst.to_numpy(), expected)
+    # The strided transform must not touch unrelated struct fields.
+    roundtrip = src.to_numpy()
+    assert np.array_equal(roundtrip["tag"], host["tag"])
 
 
 @test_utils.test(arch=[ti.cuda])
@@ -110,6 +135,24 @@ def test_experimental_transform_cuda_device_ndarray_extended_dtypes():
             src, dst, scale=scale, bias=bias, method="cuda_device", workspace=workspace
         )
         _assert_transform_equal(dtype, dst.to_numpy(), expected)
+        assert workspace.workspace_bytes_peak == 0
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_transform_cuda_device_struct_member_view():
+    n = 4096
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cuda_toolkit_transform_available")
+        and prog.cuda_toolkit_transform_available()
+    ):
+        pytest.skip("CUDA toolkit transform is unavailable in this runtime.")
+
+    for dtype in _TRANSFORM_DTYPES:
+        workspace = ti.algorithms.TransformWorkspace(max_items=n)
+        _run_struct_member_transform_case(
+            dtype, n, method="cuda_device", workspace=workspace
+        )
         assert workspace.workspace_bytes_peak == 0
 
 
@@ -191,6 +234,35 @@ def test_experimental_transform_vulkan_native_ndarray_extended_dtypes():
         assert workspace.workspace_bytes_peak >= 8
 
 
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_transform_vulkan_native_struct_member_view():
+    n = 4096
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_transform_available")
+        and prog.vulkan_transform_available()
+    ):
+        pytest.skip("Vulkan native transform is unavailable in this runtime.")
+
+    for dtype, value_type in (
+        (ti.i32, 0),
+        (ti.u32, 2),
+        (ti.f32, 1),
+        (ti.i64, 4),
+        (ti.u64, 3),
+        (ti.f64, 5),
+    ):
+        if hasattr(prog, "vulkan_transform_value_type_available") and not (
+            prog.vulkan_transform_value_type_available(value_type)
+        ):
+            continue
+        workspace = ti.algorithms.TransformWorkspace(max_items=n)
+        _run_struct_member_transform_case(
+            dtype, n, method="vulkan_native", workspace=workspace
+        )
+        assert workspace.workspace_bytes_peak >= 28
+
+
 @pytest.mark.run_in_serial
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_transform_vulkan_native_reset_with_live_ndarray():
@@ -253,6 +325,35 @@ def test_experimental_transform_cpu_native_ndarray_extended_dtypes():
         )
         _assert_transform_equal(dtype, dst.to_numpy(), expected)
         assert workspace.workspace_bytes_peak == 0
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_transform_cpu_native_struct_member_view():
+    n = 131072
+    for dtype in _TRANSFORM_DTYPES:
+        workspace = ti.algorithms.TransformWorkspace(max_items=n)
+        _run_struct_member_transform_case(
+            dtype, n, method="cpu_native", workspace=workspace
+        )
+        assert workspace.workspace_bytes_peak == 0
+
+
+@test_utils.test(arch=get_host_arch_list())
+def test_experimental_transform_struct_member_view_rejections():
+    payload = ti.types.struct(value=ti.f32, tag=ti.i32)
+    src = ti.ndarray(payload, shape=8)
+    view = src.field("value")
+    scalar_dst = ti.ndarray(ti.f32, shape=8)
+    struct_dst = ti.ndarray(payload, shape=8)
+
+    with pytest.raises(TypeError, match="does not support StructNdarray"):
+        ti.algorithms.experimental_transform(src, scalar_dst, method="auto")
+    with pytest.raises(TypeError, match="does not support StructNdarray"):
+        ti.algorithms.experimental_transform(view, struct_dst, method="auto")
+    with pytest.raises(RuntimeError, match="member views require"):
+        ti.algorithms.experimental_transform(
+            view, scalar_dst, method="field_kernel"
+        )
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

@@ -14,12 +14,16 @@ layout(set = 0, binding = 1, std430) writeonly buffer Dst {
 layout(set = 0, binding = 2, std430) readonly buffer Params {
   double scale;
   double bias;
+  uint n;
+  uint src_offset_words;
+  uint src_stride_words;
 } params;
 
 void main() {
   uint i = gl_GlobalInvocationID.x;
-  if (i >= src_buf.data.length()) {
+  if (i >= params.n) {
     return;
   }
-  dst_buf.data[i] = src_buf.data[i] * params.scale + params.bias;
+  uint src_index = (params.src_offset_words + i * params.src_stride_words) / 2u;
+  dst_buf.data[i] = src_buf.data[src_index] * params.scale + params.bias;
 }

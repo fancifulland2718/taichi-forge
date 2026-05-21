@@ -2,6 +2,7 @@ import copy
 
 import numpy as np
 import pytest
+from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiIndexError, TaichiRuntimeError, TaichiTypeError
 from taichi_forge.lang.misc import get_host_arch_list
@@ -185,6 +186,215 @@ def test_ndarray_compound_element():
     assert c.shape == (n, n + 1)
     assert c.element_type.element_type() == ti.f32
     assert c.element_type.shape() == [3, 4]
+
+
+def test_struct_dtype_size_and_alignment_metadata():
+    pixel = ti.types.struct(depth=ti.f32, color=ti.types.vector(3, ti.f32), idx=ti.i32)
+    assert _ti_core.data_type_alignment(pixel.dtype) == 4
+    assert _ti_core.data_type_size(pixel.dtype) == 20
+
+    inner = ti.types.struct(a=ti.i8, b=ti.i32)
+    outer = ti.types.struct(tag=ti.i8, payload=inner, weight=ti.f64)
+    assert _ti_core.data_type_alignment(inner.dtype) == 4
+    assert _ti_core.data_type_size(inner.dtype) == 8
+    assert _ti_core.data_type_alignment(outer.dtype) == 8
+    assert _ti_core.data_type_size(outer.dtype) == 24
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_struct_ndarray_numpy_roundtrip_and_copy():
+    pixel = ti.types.struct(depth=ti.f32, color=ti.types.vector(3, ti.f32), idx=ti.i32)
+    arr = ti.ndarray(pixel, shape=17)
+    dst = ti.ndarray(pixel, shape=17)
+
+    np_dtype = np.dtype(
+        {
+            "names": ["depth", "color", "idx"],
+            "formats": [np.float32, (np.float32, (3,)), np.int32],
+            "offsets": [0, 4, 16],
+            "itemsize": 20,
+        }
+    )
+    src = np.zeros((17,), dtype=np_dtype)
+    src["depth"] = np.arange(17, dtype=np.float32) * 1.25
+    src["color"] = np.arange(51, dtype=np.float32).reshape(17, 3)
+    src["idx"] = np.arange(17, dtype=np.int32) * 3 - 5
+
+    assert arr.numpy_dtype == np_dtype
+    assert arr.element_shape == ()
+    initial = arr.to_numpy()
+    assert (initial["depth"] == 0).all()
+    assert (initial["color"] == 0).all()
+    assert (initial["idx"] == 0).all()
+    arr.from_numpy(src)
+    np.testing.assert_array_equal(arr.to_numpy(), src)
+
+    dst.copy_from(arr)
+    np.testing.assert_array_equal(dst.to_numpy(), src)
+
+
+@test_utils.test(arch=get_host_arch_list())
+def test_struct_ndarray_rejects_unsupported_python_access_and_dtype():
+    pixel = ti.types.struct(depth=ti.f32, idx=ti.i32)
+    arr = ti.ndarray(pixel, shape=4)
+    bad_dtype = np.dtype([("depth", np.float32), ("idx", np.int64)])
+
+    with pytest.raises(TypeError, match="Mismatch dtype"):
+        arr.from_numpy(np.zeros((4,), dtype=bad_dtype))
+    with pytest.raises(TaichiRuntimeError, match="Python item access is not supported yet"):
+        _ = arr[0]
+    with pytest.raises(TaichiRuntimeError, match="Python item assignment is not supported yet"):
+        arr[0] = {"depth": 1.0, "idx": 1}
+    ty = arr.get_type()
+    assert ty.element_type is pixel
+    assert ty.shape == (4,)
+    assert not ty.needs_grad
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_struct_ndarray_kernel_argument_binding():
+    pixel = ti.types.struct(depth=ti.f32, idx=ti.i32)
+    arr = ti.ndarray(pixel, shape=8)
+    out = ti.ndarray(ti.i32, shape=1)
+
+    @ti.kernel
+    def accept_typed(a: ti.types.ndarray(dtype=pixel, ndim=1), result: ti.types.ndarray(ti.i32, ndim=1)):
+        result[0] = 7
+
+    @ti.kernel
+    def accept_untyped(a: ti.types.ndarray(), result: ti.types.ndarray(ti.i32, ndim=1)):
+        result[0] += 5
+
+    accept_typed(arr, out)
+    accept_untyped(arr, out)
+    assert out.to_numpy()[0] == 12
+
+
+@test_utils.test(arch=get_host_arch_list())
+def test_struct_ndarray_kernel_argument_dtype_mismatch():
+    pixel = ti.types.struct(depth=ti.f32, idx=ti.i32)
+    other = ti.types.struct(depth=ti.f64, idx=ti.i32)
+    arr = ti.ndarray(pixel, shape=4)
+    out = ti.ndarray(ti.i32, shape=1)
+
+    @ti.kernel
+    def accept_other(a: ti.types.ndarray(dtype=other, ndim=1), result: ti.types.ndarray(ti.i32, ndim=1)):
+        result[0] = 1
+
+    with pytest.raises(ValueError, match="required element type"):
+        accept_other(arr, out)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_struct_ndarray_scalar_member_view_roundtrip():
+    pixel = ti.types.struct(depth=ti.f32, color=ti.types.vector(3, ti.f32), idx=ti.i32)
+    arr = ti.ndarray(pixel, shape=9)
+    src = np.zeros((9,), dtype=arr.numpy_dtype)
+    src["depth"] = np.arange(9, dtype=np.float32) + 0.5
+    src["color"] = np.arange(27, dtype=np.float32).reshape(9, 3)
+    src["idx"] = np.arange(9, dtype=np.int32) * 2 - 3
+    arr.from_numpy(src)
+
+    depth = arr.field("depth")
+    idx = arr.field("idx")
+    color_y = arr.field("color", component=1)
+    assert depth.base is arr
+    assert depth.name == "depth"
+    assert depth.dtype == ti.f32
+    assert depth.shape == (9,)
+    assert depth.offset == 0
+    assert depth.stride == 20
+    assert depth.element_size == 4
+    assert depth.element_shape == ()
+    assert idx.offset == 16
+    assert color_y.name == "color[1]"
+    assert color_y.offset == 8
+    np.testing.assert_array_equal(depth.to_numpy(), src["depth"])
+    np.testing.assert_array_equal(idx.to_numpy(), src["idx"])
+    np.testing.assert_array_equal(color_y.to_numpy(), src["color"][:, 1])
+
+    updated_depth = np.arange(9, dtype=np.float32) * -1.25
+    depth.from_numpy(updated_depth)
+    expected = src.copy()
+    expected["depth"] = updated_depth
+    np.testing.assert_array_equal(arr.to_numpy(), expected)
+
+    updated_color_y = np.arange(9, dtype=np.float32) * 2.5
+    color_y.from_numpy(updated_color_y)
+    expected["color"][:, 1] = updated_color_y
+    np.testing.assert_array_equal(arr.to_numpy(), expected)
+
+
+@test_utils.test(arch=get_host_arch_list())
+def test_struct_ndarray_scalar_member_view_rejections():
+    inner = ti.types.struct(a=ti.i32)
+    pixel = ti.types.struct(depth=ti.f32, color=ti.types.vector(3, ti.f32), payload=inner)
+    arr = ti.ndarray(pixel, shape=4)
+    depth = arr.field("depth")
+
+    with pytest.raises(TypeError, match="expects a string"):
+        arr.field(1)
+    with pytest.raises(KeyError, match="no member"):
+        arr.field("missing")
+    with pytest.raises(TypeError, match="primitive scalar member leaves"):
+        arr.field("color")
+    with pytest.raises(TypeError, match="primitive scalar member leaves"):
+        arr.field("payload")
+    with pytest.raises(TypeError, match="component=.*vector/matrix"):
+        arr.field("depth", component=0)
+    with pytest.raises(IndexError, match="out of bounds"):
+        arr.field("color", component=3)
+    with pytest.raises(ValueError, match="Mismatch shape"):
+        depth.from_numpy(np.zeros((5,), dtype=np.float32))
+    with pytest.raises(TypeError, match="Mismatch dtype"):
+        depth.from_numpy(np.zeros((4,), dtype=np.float64))
+    with pytest.raises(TaichiRuntimeError, match="cannot be passed to ti.kernel yet"):
+        depth.get_type()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_struct_ndarray_nested_member_views_and_host_helpers():
+    payload = ti.types.struct(a=ti.i32, b=ti.types.vector(2, ti.f32))
+    pixel = ti.types.struct(depth=ti.f32, payload=payload)
+    arr = ti.ndarray(pixel, shape=6)
+    src = np.zeros((6,), dtype=arr.numpy_dtype)
+    src["depth"] = np.arange(6, dtype=np.float32) + 0.25
+    src["payload"]["a"] = np.arange(6, dtype=np.int32) * 3 - 2
+    src["payload"]["b"] = np.arange(12, dtype=np.float32).reshape(6, 2)
+    arr.from_numpy(src)
+
+    nested_a = arr.field("payload.a")
+    nested_b1 = arr.field(("payload", "b"), component=1)
+    np.testing.assert_array_equal(nested_a.to_numpy(), src["payload"]["a"])
+    np.testing.assert_array_equal(nested_b1.to_numpy(), src["payload"]["b"][:, 1])
+
+    updated_a = np.arange(6, dtype=np.int32) * -5
+    updated_b1 = np.arange(6, dtype=np.float32) + 11.0
+    nested_a.from_numpy(updated_a)
+    nested_b1.from_numpy(updated_b1)
+    expected = src.copy()
+    expected["payload"]["a"] = updated_a
+    expected["payload"]["b"][:, 1] = updated_b1
+    np.testing.assert_array_equal(arr.to_numpy(), expected)
+
+    fields = arr.to_numpy_fields("depth", "payload.a", ("payload", "b"))
+    np.testing.assert_array_equal(fields["depth"], expected["depth"])
+    np.testing.assert_array_equal(fields["payload.a"], expected["payload"]["a"])
+    np.testing.assert_array_equal(fields["payload.b"], expected["payload"]["b"])
+
+    depth = np.arange(6, dtype=np.float32) * -0.5
+    payload_b = (np.arange(12, dtype=np.float32).reshape(6, 2) + 33.0).astype(np.float32)
+    arr.from_numpy_fields({"depth": depth, ("payload", "b"): payload_b})
+    expected["depth"] = depth
+    expected["payload"]["b"] = payload_b
+    np.testing.assert_array_equal(arr.to_numpy(), expected)
+
+    item = arr.debug_getitem(2)
+    assert item["payload"]["a"] == expected["payload"]["a"][2]
+    item["payload"]["a"] = np.int32(123)
+    arr.debug_setitem(2, item)
+    expected["payload"]["a"][2] = 123
+    np.testing.assert_array_equal(arr.to_numpy(), expected)
 
 
 @test_utils.test(arch=supported_archs_taichi_ndarray)

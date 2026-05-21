@@ -325,6 +325,13 @@ class TI_DLL_EXPORT Program {
                                                    int value_type,
                                                    double scale,
                                                    double bias);
+  std::size_t cuda_device_transform_affine_member_ndarray(Ndarray *src,
+                                                          Ndarray *dst,
+                                                          int value_type,
+                                                          std::size_t offset,
+                                                          std::size_t stride,
+                                                          double scale,
+                                                          double bias);
 
   bool cuda_device_indexed_copy_available() const;
 
@@ -344,6 +351,23 @@ class TI_DLL_EXPORT Program {
                                               Ndarray *indices,
                                               Ndarray *dst,
                                               int value_type);
+
+  std::size_t cuda_device_scatter_add_member_ndarray(Ndarray *src,
+                                                     Ndarray *indices,
+                                                     Ndarray *dst,
+                                                     int value_type,
+                                                     std::size_t offset,
+                                                     std::size_t stride);
+
+  std::size_t cuda_device_scatter_add_strided_ndarray(
+      Ndarray *src,
+      Ndarray *indices,
+      Ndarray *dst,
+      int value_type,
+      std::size_t src_offset,
+      std::size_t src_stride,
+      std::size_t dst_offset,
+      std::size_t dst_stride);
 
   bool cuda_device_bucket_builder_available() const;
 
@@ -367,6 +391,39 @@ class TI_DLL_EXPORT Program {
                                                         Ndarray *output,
                                                         int value_type,
                                                         int op);
+
+  std::size_t cuda_device_grouped_reduce_atomic_member_ndarray(
+      Ndarray *keys,
+      Ndarray *values,
+      Ndarray *output,
+      int value_type,
+      std::size_t offset,
+      std::size_t stride,
+      int op);
+
+  std::size_t cuda_device_grouped_reduce_atomic_strided_ndarray(
+      Ndarray *keys,
+      Ndarray *values,
+      Ndarray *output,
+      int value_type,
+      std::size_t values_offset,
+      std::size_t values_stride,
+      std::size_t output_offset,
+      std::size_t output_stride,
+      int op);
+
+  std::size_t cuda_device_grouped_reduce_atomic_strided_keys_ndarray(
+      Ndarray *keys,
+      Ndarray *values,
+      Ndarray *output,
+      int value_type,
+      std::size_t keys_offset,
+      std::size_t keys_stride,
+      std::size_t values_offset,
+      std::size_t values_stride,
+      std::size_t output_offset,
+      std::size_t output_stride,
+      int op);
 
   std::size_t cuda_device_grouped_reduce_i32_atomic_ndarray(Ndarray *keys,
                                                             Ndarray *values,
@@ -416,6 +473,11 @@ class TI_DLL_EXPORT Program {
 
   std::size_t cuda_cub_inclusive_scan_ndarray(Ndarray *data, int value_type);
 
+  std::size_t cuda_cub_inclusive_scan_member_ndarray(Ndarray *data,
+                                                     int value_type,
+                                                     std::size_t offset,
+                                                     std::size_t stride);
+
   void cuda_cub_scan_clear_workspace();
 
   std::size_t cuda_cub_scan_workspace_bytes() const;
@@ -453,9 +515,16 @@ class TI_DLL_EXPORT Program {
   bool cuda_cub_reduce_available() const;
 
   std::size_t cuda_cub_reduce_ndarray(Ndarray *values,
-                                      Ndarray *output,
-                                      int value_type,
-                                      int op);
+                                       Ndarray *output,
+                                       int value_type,
+                                       int op);
+
+  std::size_t cuda_cub_reduce_member_ndarray(Ndarray *values,
+                                             Ndarray *output,
+                                             int value_type,
+                                             std::size_t offset,
+                                             std::size_t stride,
+                                             int op);
 
   void cuda_cub_reduce_clear_workspace();
 
@@ -464,6 +533,11 @@ class TI_DLL_EXPORT Program {
   bool cpu_scan_available() const;
 
   std::size_t cpu_inclusive_scan_ndarray(Ndarray *data, int value_type);
+
+  std::size_t cpu_inclusive_scan_member_ndarray(Ndarray *data,
+                                                int value_type,
+                                                std::size_t offset,
+                                                std::size_t stride);
 
   std::size_t cpu_scan_workspace_bytes() const;
 
@@ -500,6 +574,13 @@ class TI_DLL_EXPORT Program {
                                  int value_type,
                                  int op);
 
+  std::size_t cpu_reduce_member_ndarray(Ndarray *values,
+                                        Ndarray *output,
+                                        int value_type,
+                                        std::size_t offset,
+                                        std::size_t stride,
+                                        int op);
+
   std::size_t cpu_reduce_workspace_bytes() const;
 
   bool cpu_transform_available() const;
@@ -509,6 +590,13 @@ class TI_DLL_EXPORT Program {
                                            int value_type,
                                            double scale,
                                            double bias);
+  std::size_t cpu_transform_affine_member_ndarray(Ndarray *src,
+                                                  Ndarray *dst,
+                                                  int value_type,
+                                                  std::size_t offset,
+                                                  std::size_t stride,
+                                                  double scale,
+                                                  double bias);
 
   std::size_t cpu_transform_workspace_bytes() const;
 
@@ -526,6 +614,22 @@ class TI_DLL_EXPORT Program {
                                       Ndarray *indices,
                                       Ndarray *dst,
                                       int value_type);
+
+  std::size_t cpu_scatter_add_member_ndarray(Ndarray *src,
+                                             Ndarray *indices,
+                                             Ndarray *dst,
+                                             int value_type,
+                                             std::size_t offset,
+                                             std::size_t stride);
+
+  std::size_t cpu_scatter_add_strided_ndarray(Ndarray *src,
+                                              Ndarray *indices,
+                                              Ndarray *dst,
+                                              int value_type,
+                                              std::size_t src_offset,
+                                              std::size_t src_stride,
+                                              std::size_t dst_offset,
+                                              std::size_t dst_stride);
 
   std::size_t cpu_scatter_add_workspace_bytes() const;
 
@@ -551,6 +655,37 @@ class TI_DLL_EXPORT Program {
                                          Ndarray *output,
                                          int value_type,
                                          int op);
+
+  std::size_t cpu_grouped_reduce_member_ndarray(Ndarray *keys,
+                                                Ndarray *values,
+                                                Ndarray *output,
+                                                int value_type,
+                                                std::size_t offset,
+                                                std::size_t stride,
+                                                int op);
+
+  std::size_t cpu_grouped_reduce_strided_ndarray(Ndarray *keys,
+                                                 Ndarray *values,
+                                                 Ndarray *output,
+                                                 int value_type,
+                                                 std::size_t values_offset,
+                                                 std::size_t values_stride,
+                                                 std::size_t output_offset,
+                                                 std::size_t output_stride,
+                                                 int op);
+
+  std::size_t cpu_grouped_reduce_strided_keys_ndarray(
+      Ndarray *keys,
+      Ndarray *values,
+      Ndarray *output,
+      int value_type,
+      std::size_t keys_offset,
+      std::size_t keys_stride,
+      std::size_t values_offset,
+      std::size_t values_stride,
+      std::size_t output_offset,
+      std::size_t output_stride,
+      int op);
 
   std::size_t cpu_grouped_reduce_i32_ndarray(Ndarray *keys,
                                              Ndarray *values,
@@ -579,6 +714,11 @@ class TI_DLL_EXPORT Program {
   bool vulkan_scan_value_type_available(int value_type) const;
 
   std::size_t vulkan_inclusive_scan_ndarray(Ndarray *data, int value_type);
+
+  std::size_t vulkan_inclusive_scan_member_ndarray(Ndarray *data,
+                                                   int value_type,
+                                                   std::size_t offset,
+                                                   std::size_t stride);
 
   void vulkan_scan_clear_workspace();
 
@@ -626,6 +766,13 @@ class TI_DLL_EXPORT Program {
                                     int value_type,
                                     int op);
 
+  std::size_t vulkan_reduce_member_ndarray(Ndarray *values,
+                                           Ndarray *output,
+                                           int value_type,
+                                           std::size_t offset,
+                                           std::size_t stride,
+                                           int op);
+
   std::size_t vulkan_reduce_i32_ndarray(Ndarray *values,
                                         Ndarray *output,
                                         int op);
@@ -643,6 +790,13 @@ class TI_DLL_EXPORT Program {
                                               int value_type,
                                               double scale,
                                               double bias);
+  std::size_t vulkan_transform_affine_member_ndarray(Ndarray *src,
+                                                     Ndarray *dst,
+                                                     int value_type,
+                                                     std::size_t offset,
+                                                     std::size_t stride,
+                                                     double scale,
+                                                     double bias);
 
   void vulkan_transform_clear_workspace();
 
@@ -670,6 +824,22 @@ class TI_DLL_EXPORT Program {
                                          Ndarray *indices,
                                          Ndarray *dst,
                                          int value_type);
+
+  std::size_t vulkan_scatter_add_member_ndarray(Ndarray *src,
+                                                Ndarray *indices,
+                                                Ndarray *dst,
+                                                int value_type,
+                                                std::size_t offset,
+                                                std::size_t stride);
+
+  std::size_t vulkan_scatter_add_strided_ndarray(Ndarray *src,
+                                                 Ndarray *indices,
+                                                 Ndarray *dst,
+                                                 int value_type,
+                                                 std::size_t src_offset,
+                                                 std::size_t src_stride,
+                                                 std::size_t dst_offset,
+                                                 std::size_t dst_stride);
 
   void vulkan_scatter_add_clear_workspace();
 
@@ -708,6 +878,39 @@ class TI_DLL_EXPORT Program {
                                                    Ndarray *output,
                                                    int value_type,
                                                    int op);
+
+  std::size_t vulkan_grouped_reduce_atomic_member_ndarray(
+      Ndarray *keys,
+      Ndarray *values,
+      Ndarray *output,
+      int value_type,
+      std::size_t offset,
+      std::size_t stride,
+      int op);
+
+  std::size_t vulkan_grouped_reduce_atomic_strided_ndarray(
+      Ndarray *keys,
+      Ndarray *values,
+      Ndarray *output,
+      int value_type,
+      std::size_t values_offset,
+      std::size_t values_stride,
+      std::size_t output_offset,
+      std::size_t output_stride,
+      int op);
+
+  std::size_t vulkan_grouped_reduce_atomic_strided_keys_ndarray(
+      Ndarray *keys,
+      Ndarray *values,
+      Ndarray *output,
+      int value_type,
+      std::size_t keys_offset,
+      std::size_t keys_stride,
+      std::size_t values_offset,
+      std::size_t values_stride,
+      std::size_t output_offset,
+      std::size_t output_stride,
+      int op);
 
   std::size_t vulkan_grouped_reduce_i32_atomic_ndarray(Ndarray *keys,
                                                        Ndarray *values,

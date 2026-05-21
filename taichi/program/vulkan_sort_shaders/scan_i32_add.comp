@@ -34,15 +34,59 @@ layout(set = 0, binding = 1, std430) readonly buffer BlockOffsets {
   VALUE_T data[];
 } block_offsets;
 
+#ifdef STRIDED_SOURCE
+layout(set = 0, binding = 2, std430) readonly buffer ScanParams {
+  uint n;
+  uint data_offset_words;
+  uint data_stride_words;
+} params_buf;
+#endif
+
+uint value_count() {
+#ifdef STRIDED_SOURCE
+  return params_buf.n;
+#else
+  return data_buf.data.length();
+#endif
+}
+
+VALUE_T load_value(uint logical_index) {
+#ifdef STRIDED_SOURCE
+  uint word_index =
+      params_buf.data_offset_words + logical_index * params_buf.data_stride_words;
+#if VALUE_KIND == 3 || VALUE_KIND == 4 || VALUE_KIND == 5
+  return data_buf.data[word_index / 2u];
+#else
+  return data_buf.data[word_index];
+#endif
+#else
+  return data_buf.data[logical_index];
+#endif
+}
+
+void store_value(uint logical_index, VALUE_T value) {
+#ifdef STRIDED_SOURCE
+  uint word_index =
+      params_buf.data_offset_words + logical_index * params_buf.data_stride_words;
+#if VALUE_KIND == 3 || VALUE_KIND == 4 || VALUE_KIND == 5
+  data_buf.data[word_index / 2u] = value;
+#else
+  data_buf.data[word_index] = value;
+#endif
+#else
+  data_buf.data[logical_index] = value;
+#endif
+}
+
 void main() {
   uint idx = gl_GlobalInvocationID.x;
-  uint n = data_buf.data.length();
+  uint n = value_count();
   if (idx >= n) {
     return;
   }
 
   uint block = idx / 256u;
   if (block > 0u) {
-    data_buf.data[idx] += block_offsets.data[block - 1u];
+    store_value(idx, load_value(idx) + block_offsets.data[block - 1u]);
   }
 }

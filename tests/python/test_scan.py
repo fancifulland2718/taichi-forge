@@ -40,6 +40,23 @@ def _assert_scan_equal(actual, expected):
         np.testing.assert_array_equal(actual, expected)
 
 
+def _run_struct_member_scan_case(n, dtype, np_dtype):
+    payload = ti.types.struct(value=dtype, tag=ti.i32)
+    arr = ti.ndarray(payload, shape=n)
+    data = _scan_values(n, np_dtype)
+    host = np.zeros((n,), dtype=arr.numpy_dtype)
+    host["value"] = data
+    host["tag"] = np.arange(n, dtype=np.int32) * 5 + 7
+    arr.from_numpy(host)
+
+    ti.algorithms.PrefixSumExecutor(n).run(arr.field("value"))
+
+    result = arr.to_numpy()
+    expected = np.cumsum(data, dtype=np_dtype).astype(np_dtype)
+    _assert_scan_equal(result["value"], expected)
+    np.testing.assert_array_equal(result["tag"], host["tag"])
+
+
 @test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_scan():
     def test_scan_for_dtype(dtype, N):
@@ -115,6 +132,18 @@ def test_scan_ndarray_cuda_cub():
     assert impl.get_runtime().prog.cuda_cub_scan_workspace_bytes() > 0
 
 
+@test_utils.test(arch=[ti.cuda])
+def test_scan_cuda_cub_struct_member_view():
+    N = 4096
+
+    if not impl.get_runtime().prog.cuda_cub_scan_available():
+        pytest.skip("CUDA CUB scan is unavailable in this build/runtime.")
+
+    for dtype, np_dtype in _SCAN_DTYPES:
+        _run_struct_member_scan_case(N, dtype, np_dtype)
+    assert impl.get_runtime().prog.cuda_cub_scan_workspace_bytes() > 0
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_scan_ndarray_cpu_native():
     N = 4096
@@ -129,6 +158,18 @@ def test_scan_ndarray_cpu_native():
         ti.algorithms.PrefixSumExecutor(N).run(arr)
         expected = np.cumsum(data, dtype=np_dtype).astype(np_dtype)
         _assert_scan_equal(arr.to_numpy(), expected)
+    assert impl.get_runtime().prog.cpu_scan_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_scan_cpu_native_struct_member_view():
+    N = 4096
+
+    if not impl.get_runtime().prog.cpu_scan_available():
+        pytest.skip("CPU native scan is unavailable in this build/runtime.")
+
+    for dtype, np_dtype in _SCAN_DTYPES:
+        _run_struct_member_scan_case(N, dtype, np_dtype)
     assert impl.get_runtime().prog.cpu_scan_workspace_bytes() == 0
 
 
@@ -156,6 +197,27 @@ def test_scan_ndarray_vulkan_native():
 
 
 @test_utils.test(arch=[ti.vulkan])
+def test_scan_vulkan_native_struct_member_view():
+    N = 8192
+
+    if not impl.get_runtime().prog.vulkan_scan_available():
+        pytest.skip("Vulkan native scan is unavailable in this build/runtime.")
+
+    prog = impl.get_runtime().prog
+    tested = 0
+    for dtype, np_dtype in _VULKAN_SCAN_DTYPES:
+        value_type = _SCAN_VALUE_TYPE[dtype]
+        if hasattr(prog, "vulkan_scan_value_type_available") and not (
+            prog.vulkan_scan_value_type_available(value_type)
+        ):
+            continue
+        _run_struct_member_scan_case(N, dtype, np_dtype)
+        tested += 1
+    assert tested >= 3
+    assert impl.get_runtime().prog.vulkan_scan_workspace_bytes() > 0
+
+
+@test_utils.test(arch=[ti.vulkan])
 def test_scan_ndarray_vulkan_native_respects_f64_capability_gate():
     N = 128
     arr = ti.ndarray(ti.f64, shape=N)
@@ -173,6 +235,15 @@ def test_scan_ndarray_vulkan_native_respects_f64_capability_gate():
 
     with pytest.raises(RuntimeError, match="native CPU/CUDA/Vulkan scan fast paths"):
         ti.algorithms.PrefixSumExecutor(N).run(arr)
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_scan_struct_member_view_rejections():
+    payload = ti.types.struct(value=ti.f32, tag=ti.i32)
+    arr = ti.ndarray(payload, shape=8)
+
+    with pytest.raises(TypeError, match="does not support StructNdarray"):
+        ti.algorithms.PrefixSumExecutor(8).run(arr)
 
 
 @pytest.mark.run_in_serial

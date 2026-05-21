@@ -75,11 +75,18 @@ KernelContextAttributes::KernelContextAttributes(
     aa.indices = k;
     if (ka.is_array && ka.get_dtype()->is<StructType>()) {
       auto struct_type = ka.get_dtype()->as<StructType>();
-      aa.dtype = DataType(struct_type->get_element_type(
-                              {TypeFactory::DATA_PTR_POS_IN_NDARRAY}))
-                     .ptr_removed()
-                     ->as<PrimitiveType>()
-                     ->type;
+      auto data_ptr_type =
+          DataType(struct_type->get_element_type(
+                       {TypeFactory::DATA_PTR_POS_IN_NDARRAY}))
+              .ptr_removed();
+      if (data_ptr_type->is<PrimitiveType>()) {
+        aa.dtype = data_ptr_type->as<PrimitiveType>()->type;
+      } else {
+        // StructNdarray can be passed through the ndarray ABI as an opaque
+        // payload. Field access is lowered separately and must not rely on the
+        // primitive dtype metadata used by scalar/vector ndarrays.
+        aa.dtype = PrimitiveTypeID::unknown;
+      }
     } else if (!ka.is_array && ka.get_dtype()->is<StructType>()) {
       // TODO: support struct arg and vector/matrix arg
     } else {

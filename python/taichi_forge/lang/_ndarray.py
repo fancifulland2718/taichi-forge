@@ -2,11 +2,146 @@ import numpy as np
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
 from taichi_forge.lang.enums import Layout
-from taichi_forge.lang.exception import TaichiIndexError
+from taichi_forge.lang.exception import TaichiIndexError, TaichiRuntimeError
 from taichi_forge.lang.util import cook_dtype, get_traceback, python_scope, to_numpy_type
 from taichi_forge.types import primitive_types
 from taichi_forge.types.ndarray_type import NdarrayTypeMetadata
 from taichi_forge.types.utils import is_real, is_signed
+
+
+def _align_up(value, alignment):
+    return (value + alignment - 1) // alignment * alignment
+
+
+def _is_matrix_type(dtype):
+    return hasattr(dtype, "tensor_type") and hasattr(dtype, "get_shape") and hasattr(dtype, "dtype")
+
+
+def _is_struct_type(dtype):
+    return hasattr(dtype, "members") and hasattr(dtype, "dtype")
+
+
+def _struct_member_numpy_layout(dtype):
+    if dtype in primitive_types.all_types:
+        cooked_dtype = cook_dtype(dtype)
+        np_dtype = np.dtype(to_numpy_type(cooked_dtype))
+        return np_dtype, _ti_core.data_type_alignment(cooked_dtype), _ti_core.data_type_size(cooked_dtype)
+    if _is_matrix_type(dtype):
+        base_np_dtype = np.dtype(to_numpy_type(dtype.dtype))
+        shape = tuple(dtype.get_shape())
+        return (
+            np.dtype((base_np_dtype, shape)),
+            _ti_core.data_type_alignment(dtype.tensor_type),
+            _ti_core.data_type_size(dtype.tensor_type),
+        )
+    if _is_struct_type(dtype):
+        return (
+            _struct_numpy_dtype(dtype),
+            _ti_core.data_type_alignment(dtype.dtype),
+            _ti_core.data_type_size(dtype.dtype),
+        )
+    raise TaichiRuntimeError(f"{dtype} is not supported in StructNdarray")
+
+
+def _struct_numpy_dtype(struct_type):
+    names = []
+    formats = []
+    offsets = []
+    offset = 0
+    for name, dtype in struct_type.members.items():
+        np_dtype, alignment, size = _struct_member_numpy_layout(dtype)
+        offset = _align_up(offset, alignment)
+        names.append(name)
+        formats.append(np_dtype)
+        offsets.append(offset)
+        offset += size
+    itemsize = _align_up(offset, _ti_core.data_type_alignment(struct_type.dtype))
+    return np.dtype({"names": names, "formats": formats, "offsets": offsets, "itemsize": itemsize})
+
+
+def _normalize_struct_member_path(name):
+    if isinstance(name, str):
+        if len(name) == 0:
+            raise ValueError("StructNdarray.field() expects a non-empty member path")
+        return tuple(name.split("."))
+    if isinstance(name, (tuple, list)):
+        if len(name) == 0:
+            raise ValueError("StructNdarray.field() expects a non-empty member path")
+        for part in name:
+            if not isinstance(part, str) or len(part) == 0:
+                raise TypeError("StructNdarray.field() expects a string member path or a tuple/list of strings")
+        return tuple(name)
+    raise TypeError(f"StructNdarray.field() expects a string member path or a tuple/list of strings, got {type(name)}")
+
+
+def _format_struct_member_path(path):
+    return ".".join(path)
+
+
+def _normalize_component_index(component):
+    if component is None:
+        return None
+    if isinstance(component, (int, np.integer)):
+        return (int(component),)
+    if isinstance(component, (tuple, list)):
+        if len(component) == 0:
+            raise ValueError("StructNdarray.field(component=...) expects a non-empty component index")
+        result = []
+        for item in component:
+            if not isinstance(item, (int, np.integer)):
+                raise TypeError("StructNdarray.field(component=...) expects integer component indices")
+            result.append(int(item))
+        return tuple(result)
+    raise TypeError("StructNdarray.field(component=...) expects an int or a tuple/list of ints")
+
+
+def _extract_struct_numpy_member(struct_arr, path):
+    current = struct_arr
+    for part in path:
+        current = current[part]
+    return current
+
+
+def _resolve_struct_member_path(struct_type, numpy_dtype, path):
+    current_type = struct_type
+    current_np_dtype = numpy_dtype
+    offset = 0
+    resolved = []
+    for part in path:
+        resolved.append(part)
+        if not _is_struct_type(current_type):
+            raise TypeError(
+                f"StructNdarray member path '{_format_struct_member_path(tuple(resolved))}' "
+                f"continues through non-struct member type {current_type}."
+            )
+        if part not in current_type.members:
+            raise KeyError(f"StructNdarray has no member '{_format_struct_member_path(tuple(resolved))}'.")
+        field_info = current_np_dtype.fields[part]
+        offset += field_info[1]
+        current_np_dtype = field_info[0]
+        current_type = current_type.members[part]
+    return current_type, current_np_dtype, offset
+
+
+def _resolve_matrix_component_offset(member_dtype, member_np_dtype, component):
+    if not _is_matrix_type(member_dtype):
+        raise TypeError("StructNdarray.field(component=...) is only valid for vector/matrix members.")
+    subdtype = member_np_dtype.subdtype
+    if subdtype is None:
+        raise TypeError(f"StructNdarray member type {member_dtype} does not expose component storage.")
+    scalar_np_dtype, shape = subdtype
+    if len(component) != len(shape):
+        raise ValueError(
+            f"StructNdarray.field(component=...) expects {len(shape)} indices for member shape {shape}, "
+            f"got {len(component)}."
+        )
+    for index, extent in zip(component, shape):
+        if index < 0 or index >= extent:
+            raise IndexError(
+                f"StructNdarray.field(component=...) index {index} is out of bounds for member shape {shape}."
+            )
+    flat_index = np.ravel_multi_index(component, shape, order="C")
+    return int(flat_index * scalar_np_dtype.itemsize)
 
 
 class Ndarray:
@@ -398,6 +533,253 @@ class ScalarNdarray(Ndarray):
         return "<ti.ndarray>"
 
 
+class StructNdarrayScalarMemberView:
+    """A primitive scalar member view of a StructNdarray.
+
+    The view is strided inside the parent AOS payload. It is intentionally not
+    a normal Ndarray because existing native primitives assume contiguous
+    element storage.
+    """
+
+    def __init__(self, base, name, dtype, offset, path=None, component=None):
+        self.base = base
+        self.path = tuple(path) if path is not None else (name,)
+        self.component = _normalize_component_index(component)
+        self.name = name
+        self.dtype = cook_dtype(dtype)
+        self.element_type = self.dtype
+        self.shape = base.shape
+        self.offset = int(offset)
+        self.stride = _ti_core.data_type_size(base.dtype)
+        self.element_size = _ti_core.data_type_size(self.dtype)
+
+    @property
+    def element_shape(self):
+        return ()
+
+    @python_scope
+    def to_numpy(self):
+        member = _extract_struct_numpy_member(self.base.to_numpy(), self.path)
+        if self.component is not None:
+            member = member[(...,) + self.component]
+        return np.ascontiguousarray(member)
+
+    @python_scope
+    def from_numpy(self, arr):
+        if not isinstance(arr, np.ndarray):
+            raise TypeError(f"{np.ndarray} expected, but {type(arr)} provided")
+        if tuple(arr.shape) != self.shape:
+            raise ValueError(f"Mismatch shape: {self.shape} expected, but {tuple(arr.shape)} provided")
+        expected_dtype = np.dtype(to_numpy_type(self.dtype))
+        if arr.dtype != expected_dtype:
+            raise TypeError(f"Mismatch dtype: {expected_dtype} expected, but {arr.dtype} provided")
+        struct_arr = self.base.to_numpy()
+        member = _extract_struct_numpy_member(struct_arr, self.path)
+        if self.component is not None:
+            member[(...,) + self.component] = np.ascontiguousarray(arr)
+        else:
+            member[...] = np.ascontiguousarray(arr)
+        self.base.from_numpy(struct_arr)
+
+    def get_type(self):
+        raise TaichiRuntimeError(
+            "StructNdarray scalar member views cannot be passed to ti.kernel yet; "
+            "copy the member to a numeric ndarray or use a primitive that explicitly supports member views."
+        )
+
+    def __repr__(self):
+        return f"<ti.StructNdarrayScalarMemberView {self.name}: {self.dtype}>"
+
+
+class StructNdarray(Ndarray):
+    """Taichi ndarray with structured AOS elements.
+
+    This is intentionally limited to raw host/device copies for now. Kernel
+    field access and field-wise arithmetic primitives are enabled separately.
+    """
+
+    def __init__(self, struct_type, arr_shape):
+        super().__init__()
+        self.struct_type = struct_type
+        self.dtype = struct_type.dtype
+        self.layout = Layout.AOS
+        self.numpy_dtype = _struct_numpy_dtype(struct_type)
+        nelement = int(np.prod(arr_shape, dtype=np.int64))
+        byte_size = nelement * _ti_core.data_type_size(self.dtype)
+        zero_fill_on_create = byte_size % 4 == 0
+        self.arr = impl.get_runtime().prog.create_ndarray(
+            self.dtype,
+            arr_shape,
+            layout=Layout.AOS,
+            zero_fill=zero_fill_on_create,
+            dbg_info=_ti_core.DebugInfo(get_traceback()),
+        )
+        self._register_runtime_object()
+        self.shape = tuple(self.arr.shape)
+        self.element_type = self.dtype
+        self._device_write_pending = zero_fill_on_create and impl.current_cfg().arch == _ti_core.Arch.cuda
+        if not zero_fill_on_create:
+            self.fill(0)
+
+    def __del__(self):
+        if impl is not None:
+            try:
+                self._delete_runtime_ndarray()
+            except Exception:
+                pass
+
+    @property
+    def element_shape(self):
+        return ()
+
+    def get_type(self):
+        return NdarrayTypeMetadata(self.struct_type, self.shape, False)
+
+    @python_scope
+    def __setitem__(self, key, value):
+        raise TaichiRuntimeError("StructNdarray Python item assignment is not supported yet; use from_numpy().")
+
+    @python_scope
+    def __getitem__(self, key):
+        raise TaichiRuntimeError("StructNdarray Python item access is not supported yet; use to_numpy().")
+
+    @python_scope
+    def field(self, name, component=None):
+        path = _normalize_struct_member_path(name)
+        component = _normalize_component_index(component)
+        member_dtype, member_np_dtype, offset = _resolve_struct_member_path(self.struct_type, self.numpy_dtype, path)
+        member_name = _format_struct_member_path(path)
+        if component is not None:
+            component_offset = _resolve_matrix_component_offset(member_dtype, member_np_dtype, component)
+            component_name = f"{member_name}[{','.join(str(i) for i in component)}]"
+            return StructNdarrayScalarMemberView(
+                self, component_name, member_dtype.dtype, offset + component_offset, path=path, component=component
+            )
+        if member_dtype not in primitive_types.all_types:
+            raise TypeError(
+                "StructNdarray.field() currently supports primitive scalar member leaves; "
+                f"pass component=... for vector/matrix members. Member '{member_name}' has type {member_dtype}."
+            )
+        return StructNdarrayScalarMemberView(self, member_name, member_dtype, offset, path=path)
+
+    def _sync_pending_device_write(self):
+        if self._device_write_pending:
+            impl.get_runtime().sync()
+            self._device_write_pending = False
+
+    @python_scope
+    def fill(self, val):
+        try:
+            is_zero = np.isscalar(val) and val == 0
+        except (TypeError, ValueError):
+            is_zero = False
+        if not is_zero:
+            raise TaichiRuntimeError("StructNdarray only supports zero fill for now.")
+        byte_size = self._get_nelement() * self._get_element_size()
+        if byte_size % 4 == 0:
+            impl.get_runtime().prog.fill_uint(self.arr, 0)
+            self._device_write_pending = impl.current_cfg().arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)
+            return
+        zeros = np.zeros(self.shape, dtype=self.numpy_dtype)
+        self._sync_pending_device_write()
+        impl.get_runtime().prog.copy_ndarray_from_host(self.arr, zeros)
+
+    @python_scope
+    def to_numpy(self):
+        arr = np.empty(shape=self.shape, dtype=self.numpy_dtype)
+        self._sync_pending_device_write()
+        impl.get_runtime().sync()
+        impl.get_runtime().prog.copy_ndarray_to_host(self.arr, arr)
+        return arr
+
+    @python_scope
+    def from_numpy(self, arr):
+        if not isinstance(arr, np.ndarray):
+            raise TypeError(f"{np.ndarray} expected, but {type(arr)} provided")
+        if tuple(arr.shape) != self.shape:
+            raise ValueError(f"Mismatch shape: {self.shape} expected, but {tuple(arr.shape)} provided")
+        if arr.dtype != self.numpy_dtype:
+            raise TypeError(f"Mismatch dtype: {self.numpy_dtype} expected, but {arr.dtype} provided")
+        if not arr.flags.c_contiguous:
+            arr = np.ascontiguousarray(arr)
+        self._sync_pending_device_write()
+        impl.get_runtime().prog.copy_ndarray_from_host(self.arr, arr)
+
+    @python_scope
+    def to_numpy_fields(self, *names):
+        struct_arr = self.to_numpy()
+        if len(names) == 0:
+            names = tuple(self.struct_type.members.keys())
+        result = {}
+        for name in names:
+            path = _normalize_struct_member_path(name)
+            _resolve_struct_member_path(self.struct_type, self.numpy_dtype, path)
+            result[_format_struct_member_path(path)] = np.ascontiguousarray(_extract_struct_numpy_member(struct_arr, path))
+        return result
+
+    @python_scope
+    def from_numpy_fields(self, fields=None, **kwargs):
+        updates = {}
+        if fields is not None:
+            if not isinstance(fields, dict):
+                raise TypeError("StructNdarray.from_numpy_fields() expects a dict or keyword fields")
+            updates.update(fields)
+        updates.update(kwargs)
+        if len(updates) == 0:
+            return
+        struct_arr = self.to_numpy()
+        for name, value in updates.items():
+            path = _normalize_struct_member_path(name)
+            _resolve_struct_member_path(self.struct_type, self.numpy_dtype, path)
+            target = _extract_struct_numpy_member(struct_arr, path)
+            value = np.asarray(value)
+            if tuple(value.shape) != tuple(target.shape):
+                raise ValueError(
+                    f"Mismatch shape for member '{_format_struct_member_path(path)}': "
+                    f"{tuple(target.shape)} expected, but {tuple(value.shape)} provided"
+                )
+            if value.dtype != target.dtype:
+                raise TypeError(
+                    f"Mismatch dtype for member '{_format_struct_member_path(path)}': "
+                    f"{target.dtype} expected, but {value.dtype} provided"
+                )
+            target[...] = np.ascontiguousarray(value)
+        self.from_numpy(struct_arr)
+
+    @python_scope
+    def debug_getitem(self, key):
+        return self.to_numpy()[key]
+
+    @python_scope
+    def debug_setitem(self, key, value):
+        struct_arr = self.to_numpy()
+        struct_arr[key] = value
+        self.from_numpy(struct_arr)
+
+    @python_scope
+    def copy_from(self, other):
+        if not isinstance(other, StructNdarray):
+            raise TaichiRuntimeError("StructNdarray can only copy from another StructNdarray.")
+        if self.dtype != other.dtype or self.shape != other.shape or self.numpy_dtype != other.numpy_dtype:
+            raise TaichiRuntimeError("StructNdarray copy_from requires matching dtype and shape.")
+        self._sync_pending_device_write()
+        other._sync_pending_device_write()
+        impl.get_runtime().prog.copy_ndarray(self.arr, other.arr)
+        impl.get_runtime().sync()
+        self._device_write_pending = False
+
+    def __deepcopy__(self, memo=None):
+        ret_arr = StructNdarray(self.struct_type, self.shape)
+        ret_arr.copy_from(self)
+        return ret_arr
+
+    def _fill_by_kernel(self, val):
+        raise TaichiRuntimeError("StructNdarray kernel fill is not supported yet.")
+
+    def __repr__(self):
+        return "<ti.StructNdarray>"
+
+
 class NdarrayHostAccessor:
     def __init__(self, ndarray):
         dtype = ndarray.element_data_type()
@@ -452,4 +834,4 @@ class NdarrayHostAccess:
         self.setter = setter
 
 
-__all__ = ["Ndarray", "ScalarNdarray"]
+__all__ = ["Ndarray", "ScalarNdarray", "StructNdarray", "StructNdarrayScalarMemberView"]

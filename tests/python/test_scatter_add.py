@@ -49,6 +49,33 @@ def _run_ndarray_scatter_add(dtype, np_dtype, method):
     assert workspace.workspace_bytes_peak == 0
 
 
+def _run_struct_member_scatter_add(dtype, np_dtype, method):
+    n = 2048
+    buckets = 127
+    payload = ti.types.struct(value=dtype, tag=ti.i32)
+    src = ti.ndarray(payload, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(payload, shape=buckets)
+    values_np, indices_np, base_np, expected = _scatter_add_input(n, buckets, np_dtype)
+    host = np.zeros((n,), dtype=src.numpy_dtype)
+    host["value"] = values_np
+    host["tag"] = np.arange(n, dtype=np.int32) * 7 + 3
+    dst_host = np.zeros((buckets,), dtype=dst.numpy_dtype)
+    dst_host["value"] = base_np
+    dst_host["tag"] = np.arange(buckets, dtype=np.int32) * 11 - 5
+    src.from_numpy(host)
+    indices.from_numpy(indices_np)
+    dst.from_numpy(dst_host)
+    workspace = ti.algorithms.ScatterAddWorkspace(max_items=n)
+    ti.algorithms.experimental_scatter_add(
+        src.field("value"), indices, dst.field("value"), method=method, workspace=workspace
+    )
+    result = dst.to_numpy()
+    _assert_matches(result["value"], expected)
+    np.testing.assert_array_equal(result["tag"], dst_host["tag"])
+    np.testing.assert_array_equal(src.to_numpy()["tag"], host["tag"])
+
+
 @test_utils.test(arch=[ti.cuda])
 def test_experimental_scatter_add_cuda_device_ndarray_wide_dtypes():
     prog = impl.get_runtime().prog
@@ -67,6 +94,7 @@ def test_experimental_scatter_add_cuda_device_ndarray_wide_dtypes():
         (ti.f64, np.float64, "cuda_device"),
     ]:
         _run_ndarray_scatter_add(dtype, np_dtype, method)
+        _run_struct_member_scatter_add(dtype, np_dtype, "cuda_device")
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -79,9 +107,11 @@ def test_experimental_scatter_add_vulkan_native_ndarray_i32_u32_and_f32_atomic()
         pytest.skip("Vulkan native scatter-add is unavailable in this runtime.")
 
     _run_ndarray_scatter_add(ti.i32, np.int32, "auto")
+    _run_struct_member_scatter_add(ti.i32, np.int32, "vulkan_native")
     if hasattr(prog, "vulkan_scatter_add_value_type_available"):
         assert prog.vulkan_scatter_add_value_type_available(2)
     _run_ndarray_scatter_add(ti.u32, np.uint32, "vulkan_native")
+    _run_struct_member_scatter_add(ti.u32, np.uint32, "vulkan_native")
     _run_ndarray_scatter_add(ti.f32, np.float32, "auto")
     f32_native = (
         hasattr(prog, "vulkan_scatter_add_value_type_available")
@@ -90,9 +120,12 @@ def test_experimental_scatter_add_vulkan_native_ndarray_i32_u32_and_f32_atomic()
     if f32_native:
         for _ in range(3):
             _run_ndarray_scatter_add(ti.f32, np.float32, "vulkan_native")
+            _run_struct_member_scatter_add(ti.f32, np.float32, "vulkan_native")
     else:
         with pytest.raises(RuntimeError, match="value dtype"):
             _run_ndarray_scatter_add(ti.f32, np.float32, "vulkan_native")
+        with pytest.raises(RuntimeError, match="scatter-add"):
+            _run_struct_member_scatter_add(ti.f32, np.float32, "vulkan_native")
     for value_type, dtype, np_dtype in [
         (3, ti.u64, np.uint64),
         (4, ti.i64, np.int64),
@@ -104,9 +137,12 @@ def test_experimental_scatter_add_vulkan_native_ndarray_i32_u32_and_f32_atomic()
         ):
             for _ in range(3):
                 _run_ndarray_scatter_add(dtype, np_dtype, "vulkan_native")
+                _run_struct_member_scatter_add(dtype, np_dtype, "vulkan_native")
         else:
             with pytest.raises(RuntimeError, match="value dtype"):
                 _run_ndarray_scatter_add(dtype, np_dtype, "vulkan_native")
+            with pytest.raises(RuntimeError, match="scatter-add"):
+                _run_struct_member_scatter_add(dtype, np_dtype, "vulkan_native")
 
 
 @pytest.mark.run_in_serial
@@ -148,6 +184,7 @@ def test_experimental_scatter_add_cpu_native_ndarray_wide_dtypes():
         (ti.f64, np.float64, "cpu_native"),
     ]:
         _run_ndarray_scatter_add(dtype, np_dtype, method)
+        _run_struct_member_scatter_add(dtype, np_dtype, "cpu_native")
     assert impl.get_runtime().prog.cpu_scatter_add_workspace_bytes() == 0
 
 

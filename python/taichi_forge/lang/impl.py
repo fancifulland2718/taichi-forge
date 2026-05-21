@@ -10,7 +10,7 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 from taichi_forge._lib import core as _ti_core
 from taichi_forge._snode.fields_builder import FieldsBuilder
-from taichi_forge.lang._ndarray import ScalarNdarray
+from taichi_forge.lang._ndarray import ScalarNdarray, StructNdarray
 from taichi_forge.lang._ndrange import GroupedNDRange, _Ndrange
 from taichi_forge.lang._texture import RWTextureAccessor
 from taichi_forge.lang.any_array import AnyArray
@@ -44,7 +44,7 @@ from taichi_forge.lang.mesh import (
 )
 from taichi_forge.lang.simt.block import SharedArray
 from taichi_forge.lang.snode import SNode
-from taichi_forge.lang.struct import Struct, StructField, _IntermediateStruct
+from taichi_forge.lang.struct import Struct, StructField, StructType, _IntermediateStruct
 from taichi_forge.lang.util import (
     cook_dtype,
     get_traceback,
@@ -971,6 +971,11 @@ def ndarray(dtype, shape, needs_grad=False):
             x = VectorNdarray(dtype.n, dtype.dtype, shape)
         else:
             x = MatrixNdarray(dtype.n, dtype.m, dtype.dtype, shape)
+        dt = dtype.dtype
+    elif isinstance(dtype, StructType):
+        if needs_grad:
+            raise TaichiRuntimeError("Struct ndarray does not support `needs_grad=True` yet.")
+        x = StructNdarray(dtype, shape)
         dt = dtype.dtype
     else:
         raise TaichiRuntimeError(f"{dtype} is not supported as ndarray element type")

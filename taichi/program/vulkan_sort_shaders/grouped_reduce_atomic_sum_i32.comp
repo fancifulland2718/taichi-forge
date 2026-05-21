@@ -39,15 +39,68 @@ layout(set = 0, binding = 2, std430) buffer Output {
   VALUE_T data[];
 } output_buf;
 
+#ifdef STRIDED_SOURCE
+layout(set = 0, binding = 3, std430) readonly buffer Params {
+  uint n;
+  uint keys_offset_items;
+  uint keys_stride_items;
+  uint values_offset_items;
+  uint values_stride_items;
+  uint output_count;
+  uint output_offset_items;
+  uint output_stride_items;
+} params_buf;
+
+uint value_count() {
+  return params_buf.n;
+}
+
+VALUE_T load_value(uint i) {
+  return values_buf.data[params_buf.values_offset_items + i * params_buf.values_stride_items];
+}
+
+int load_key(uint i) {
+  return keys_buf.data[params_buf.keys_offset_items + i * params_buf.keys_stride_items];
+}
+
+uint group_count() {
+  return params_buf.output_count;
+}
+
+uint output_index(uint group) {
+  return params_buf.output_offset_items + group * params_buf.output_stride_items;
+}
+#else
+uint value_count() {
+  return uint(keys_buf.data.length());
+}
+
+VALUE_T load_value(uint i) {
+  return values_buf.data[i];
+}
+
+int load_key(uint i) {
+  return keys_buf.data[i];
+}
+
+uint group_count() {
+  return uint(output_buf.data.length());
+}
+
+uint output_index(uint group) {
+  return group;
+}
+#endif
+
 void main() {
   uint i = gl_GlobalInvocationID.x;
-  if (i >= keys_buf.data.length()) {
+  if (i >= value_count()) {
     return;
   }
-  int key = keys_buf.data[i];
+  int key = load_key(i);
   uint group = uint(key);
-  if (key < 0 || group >= output_buf.data.length()) {
+  if (key < 0 || group >= group_count()) {
     return;
   }
-  atomicAdd(output_buf.data[group], values_buf.data[i]);
+  atomicAdd(output_buf.data[output_index(group)], load_value(i));
 }

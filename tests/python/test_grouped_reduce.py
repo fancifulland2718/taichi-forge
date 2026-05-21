@@ -64,6 +64,82 @@ def _run_ndarray_grouped_reduce(dtype, np_dtype, method):
     assert workspace.workspace_bytes_peak >= 0
 
 
+def _run_struct_member_grouped_reduce(dtype, np_dtype, method):
+    n = 2048
+    groups = 127
+    key_payload = ti.types.struct(key=ti.i32, key_tag=ti.i32)
+    payload = ti.types.struct(value=dtype, tag=ti.i32)
+    keys = ti.ndarray(key_payload, shape=n)
+    values = ti.ndarray(payload, shape=n)
+    output = ti.ndarray(payload, shape=groups)
+    keys_np, values_np, expected = _grouped_reduce_input(n, groups, np_dtype)
+    keys_host = np.zeros((n,), dtype=keys.numpy_dtype)
+    keys_host["key"] = keys_np
+    keys_host["key_tag"] = np.arange(n, dtype=np.int32) * 7 + 3
+    host = np.zeros((n,), dtype=values.numpy_dtype)
+    host["value"] = values_np
+    host["tag"] = np.arange(n, dtype=np.int32) * 5 - 11
+    output_host = np.zeros((groups,), dtype=output.numpy_dtype)
+    output_host["value"] = np_dtype(3)
+    output_host["tag"] = np.arange(groups, dtype=np.int32) * 13 + 9
+    keys.from_numpy(keys_host)
+    values.from_numpy(host)
+    output.from_numpy(output_host)
+    workspace = ti.algorithms.GroupedReduceWorkspace(max_items=n, max_groups=groups)
+    ti.algorithms.experimental_grouped_reduce(
+        keys.field("key"),
+        values.field("value"),
+        output.field("value"),
+        method=method,
+        workspace=workspace,
+    )
+    result = output.to_numpy()
+    _assert_matches(result["value"], expected)
+    np.testing.assert_array_equal(keys.to_numpy()["key_tag"], keys_host["key_tag"])
+    np.testing.assert_array_equal(result["tag"], output_host["tag"])
+    np.testing.assert_array_equal(values.to_numpy()["tag"], host["tag"])
+
+
+def _run_struct_nested_component_grouped_reduce(method):
+    n = 1024
+    groups = 67
+    key_payload = ti.types.struct(meta=ti.types.struct(key=ti.i32, tag=ti.i32))
+    value_payload = ti.types.struct(vec=ti.types.vector(2, ti.i32), tag=ti.i32)
+    output_payload = ti.types.struct(total=ti.i32, tag=ti.i32)
+    keys = ti.ndarray(key_payload, shape=n)
+    values = ti.ndarray(value_payload, shape=n)
+    output = ti.ndarray(output_payload, shape=groups)
+
+    keys_np, values_np, expected = _grouped_reduce_input(n, groups, np.int32)
+    keys_host = np.zeros((n,), dtype=keys.numpy_dtype)
+    keys_host["meta"]["key"] = keys_np
+    keys_host["meta"]["tag"] = np.arange(n, dtype=np.int32) * 11
+    values_host = np.zeros((n,), dtype=values.numpy_dtype)
+    values_host["vec"][:, 0] = values_np * 3
+    values_host["vec"][:, 1] = values_np
+    values_host["tag"] = np.arange(n, dtype=np.int32) * 5 + 9
+    output_host = np.zeros((groups,), dtype=output.numpy_dtype)
+    output_host["total"] = -123
+    output_host["tag"] = np.arange(groups, dtype=np.int32) * 7
+    keys.from_numpy(keys_host)
+    values.from_numpy(values_host)
+    output.from_numpy(output_host)
+
+    ti.algorithms.experimental_grouped_reduce(
+        keys.field("meta.key"),
+        values.field("vec", component=1),
+        output.field("total"),
+        method=method,
+    )
+
+    result = output.to_numpy()
+    np.testing.assert_array_equal(result["total"], expected)
+    np.testing.assert_array_equal(keys.to_numpy()["meta"]["tag"], keys_host["meta"]["tag"])
+    np.testing.assert_array_equal(values.to_numpy()["vec"][:, 0], values_host["vec"][:, 0])
+    np.testing.assert_array_equal(values.to_numpy()["tag"], values_host["tag"])
+    np.testing.assert_array_equal(result["tag"], output_host["tag"])
+
+
 @test_utils.test(arch=[ti.cuda])
 def test_experimental_grouped_reduce_cuda_device_ndarray_wide_dtypes():
     prog = impl.get_runtime().prog
@@ -75,8 +151,10 @@ def test_experimental_grouped_reduce_cuda_device_ndarray_wide_dtypes():
 
     for dtype, np_dtype in _GROUPED_DTYPES:
         _run_ndarray_grouped_reduce(dtype, np_dtype, "cuda_device")
+        _run_struct_member_grouped_reduce(dtype, np_dtype, "cuda_device")
         _run_ndarray_grouped_reduce(dtype, np_dtype, "cuda_segmented")
     _run_ndarray_grouped_reduce(ti.i32, np.int32, "auto")
+    _run_struct_nested_component_grouped_reduce("cuda_device")
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -90,7 +168,10 @@ def test_experimental_grouped_reduce_vulkan_native_ndarray_types():
 
     _run_ndarray_grouped_reduce(ti.i32, np.int32, "auto")
     _run_ndarray_grouped_reduce(ti.i32, np.int32, "vulkan_native")
+    _run_struct_member_grouped_reduce(ti.i32, np.int32, "vulkan_native")
+    _run_struct_nested_component_grouped_reduce("vulkan_native")
     _run_ndarray_grouped_reduce(ti.u32, np.uint32, "vulkan_native")
+    _run_struct_member_grouped_reduce(ti.u32, np.uint32, "vulkan_native")
     for dtype, np_dtype in _GROUPED_DTYPES:
         value_type = _GROUPED_VALUE_TYPE[dtype]
         if hasattr(prog, "vulkan_grouped_reduce_value_type_available") and not (
@@ -105,9 +186,12 @@ def test_experimental_grouped_reduce_vulkan_native_ndarray_types():
     if f32_atomic_native:
         for _ in range(3):
             _run_ndarray_grouped_reduce(ti.f32, np.float32, "vulkan_native")
+            _run_struct_member_grouped_reduce(ti.f32, np.float32, "vulkan_native")
     else:
         with pytest.raises(RuntimeError, match="native grouped-reduce shaders"):
             _run_ndarray_grouped_reduce(ti.f32, np.float32, "vulkan_native")
+        with pytest.raises(RuntimeError, match="native grouped-reduce shaders"):
+            _run_struct_member_grouped_reduce(ti.f32, np.float32, "vulkan_native")
     for value_type, dtype, np_dtype in [
         (3, ti.u64, np.uint64),
         (4, ti.i64, np.int64),
@@ -119,9 +203,12 @@ def test_experimental_grouped_reduce_vulkan_native_ndarray_types():
         ):
             for _ in range(3):
                 _run_ndarray_grouped_reduce(dtype, np_dtype, "vulkan_native")
+                _run_struct_member_grouped_reduce(dtype, np_dtype, "vulkan_native")
         else:
             with pytest.raises(RuntimeError, match="native grouped-reduce shaders"):
                 _run_ndarray_grouped_reduce(dtype, np_dtype, "vulkan_native")
+            with pytest.raises(RuntimeError, match="native grouped-reduce shaders"):
+                _run_struct_member_grouped_reduce(dtype, np_dtype, "vulkan_native")
 
 
 @pytest.mark.run_in_serial
@@ -154,7 +241,9 @@ def test_experimental_grouped_reduce_vulkan_reset_with_live_ndarray():
 def test_experimental_grouped_reduce_cpu_native_ndarray_wide_dtypes():
     for dtype, np_dtype in _GROUPED_DTYPES:
         _run_ndarray_grouped_reduce(dtype, np_dtype, "cpu_native")
+        _run_struct_member_grouped_reduce(dtype, np_dtype, "cpu_native")
     _run_ndarray_grouped_reduce(ti.i32, np.int32, "auto")
+    _run_struct_nested_component_grouped_reduce("cpu_native")
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])

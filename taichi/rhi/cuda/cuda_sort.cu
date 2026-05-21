@@ -1,8 +1,10 @@
 #include "taichi/rhi/cuda/cuda_sort.h"
 
 #include <cub/cub.cuh>
+#include <cuda/iterator>
 #include <cuda_runtime.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -639,6 +641,67 @@ __global__ void scatter_add_by_i32_kernel(const T *src,
 }
 
 template <typename T>
+__device__ T load_strided_value(const uint8_t *base,
+                                int i,
+                                std::size_t offset,
+                                std::size_t stride) {
+  const auto *ptr =
+      reinterpret_cast<const T *>(base + offset + static_cast<std::size_t>(i) *
+                                                    stride);
+  return *ptr;
+}
+
+template <typename T>
+__device__ T *strided_value_ptr(uint8_t *base,
+                                int i,
+                                std::size_t offset,
+                                std::size_t stride) {
+  return reinterpret_cast<T *>(base + offset + static_cast<std::size_t>(i) *
+                                                   stride);
+}
+
+template <typename T>
+__global__ void scatter_add_by_i32_strided_kernel(const uint8_t *src,
+                                                  const int32_t *indices,
+                                                  T *dst,
+                                                  int num_items,
+                                                  int index_bound,
+                                                  std::size_t offset,
+                                                  std::size_t stride) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  int index = indices[i];
+  if (index >= 0 && index < index_bound) {
+    scatter_atomic_add(dst + index,
+                       load_strided_value<T>(src, i, offset, stride));
+  }
+}
+
+template <typename T>
+__global__ void scatter_add_by_i32_strided_io_kernel(
+    const uint8_t *src,
+    const int32_t *indices,
+    uint8_t *dst,
+    int num_items,
+    int index_bound,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  int index = indices[i];
+  if (index >= 0 && index < index_bound) {
+    scatter_atomic_add(strided_value_ptr<T>(dst, index, dst_offset, dst_stride),
+                       load_strided_value<T>(src, i, src_offset, src_stride));
+  }
+}
+
+template <typename T>
 __global__ void grouped_reduce_atomic_sum_kernel(const int32_t *keys,
                                                  const T *values,
                                                  T *output,
@@ -651,6 +714,63 @@ __global__ void grouped_reduce_atomic_sum_kernel(const int32_t *keys,
   int key = keys[i];
   if (key >= 0 && key < num_groups) {
     scatter_atomic_add(output + key, values[i]);
+  }
+}
+
+template <typename T>
+__global__ void grouped_reduce_atomic_sum_strided_kernel(
+    const int32_t *keys,
+    const uint8_t *values,
+    T *output,
+    int num_items,
+    int num_groups,
+    std::size_t offset,
+    std::size_t stride) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  int key = keys[i];
+  if (key >= 0 && key < num_groups) {
+    scatter_atomic_add(output + key,
+                       load_strided_value<T>(values, i, offset, stride));
+  }
+}
+
+template <typename T>
+__global__ void zero_strided_kernel(uint8_t *output,
+                                    int num_items,
+                                    std::size_t offset,
+                                    std::size_t stride) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  *strided_value_ptr<T>(output, i, offset, stride) = T{};
+}
+
+template <typename T>
+__global__ void grouped_reduce_atomic_sum_strided_io_kernel(
+    const uint8_t *keys,
+    const uint8_t *values,
+    uint8_t *output,
+    int num_items,
+    int num_groups,
+    std::size_t keys_offset,
+    std::size_t keys_stride,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  int key = load_strided_value<int32_t>(keys, i, keys_offset, keys_stride);
+  if (key >= 0 && key < num_groups) {
+    scatter_atomic_add(
+        strided_value_ptr<T>(output, key, output_offset, output_stride),
+        load_strided_value<T>(values, i, values_offset, values_stride));
   }
 }
 
@@ -758,6 +878,24 @@ __global__ void transform_f64_affine_kernel(const double *src,
     return;
   }
   dst[i] = src[i] * scale + bias;
+}
+
+template <typename T>
+__global__ void transform_strided_affine_kernel(const uint8_t *src,
+                                                T *dst,
+                                                int num_items,
+                                                std::size_t offset,
+                                                std::size_t stride,
+                                                T scale,
+                                                T bias) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  const auto *value =
+      reinterpret_cast<const T *>(src + offset + static_cast<std::size_t>(i) *
+                                                   stride);
+  dst[i] = (*value) * scale + bias;
 }
 
 __device__ uint32_t sortable_f32_key(float value, int nan_policy) {
@@ -1817,6 +1955,48 @@ std::size_t inclusive_scan_typed(CubScanCache &cache,
   return cache.allocated_bytes();
 }
 
+template <typename T>
+std::size_t inclusive_scan_strided_typed(CubScanCache &cache,
+                                         void *data,
+                                         int num_items,
+                                         std::size_t offset,
+                                         std::size_t stride,
+                                         void *stream_ptr) {
+  auto *data_in_out =
+      reinterpret_cast<T *>(static_cast<uint8_t *>(data) + offset);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  ensure_device_cache(cache);
+  const auto stride_items = static_cast<std::ptrdiff_t>(stride / sizeof(T));
+  auto strided_in_out =
+      ::cuda::make_strided_iterator(data_in_out, stride_items);
+
+  std::size_t temp_storage_bytes = 0;
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        nullptr, temp_storage_bytes, strided_in_out, strided_in_out, num_items,
+        stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        nullptr, temp_storage_bytes, strided_in_out, strided_in_out,
+        num_items));
+  }
+  ensure_buffer(&cache.temp_storage, &cache.temp_storage_bytes,
+                temp_storage_bytes);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        cache.temp_storage, temp_storage_bytes, strided_in_out, strided_in_out,
+        num_items, stream));
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        cache.temp_storage, temp_storage_bytes, strided_in_out, strided_in_out,
+        num_items));
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return cache.allocated_bytes();
+}
+
 std::size_t cub_inclusive_scan_impl(void *data,
                                     int num_items,
                                     CubScanValueType value_type,
@@ -1842,6 +2022,41 @@ std::size_t cub_inclusive_scan_impl(void *data,
       return inclusive_scan_typed<double>(cache, data, num_items, stream);
   }
   throw std::runtime_error("Unsupported CUB scan value type");
+}
+
+std::size_t cub_inclusive_scan_strided_impl(void *data,
+                                            int num_items,
+                                            CubScanValueType value_type,
+                                            std::size_t offset,
+                                            std::size_t stride,
+                                            void *stream,
+                                            void *owner) {
+  if (!data) {
+    throw std::runtime_error("CUB strided scan received a null data pointer");
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  CubScanCache &cache = get_scan_cache(owner);
+  switch (value_type) {
+    case CubScanValueType::i32:
+      return inclusive_scan_strided_typed<int32_t>(
+          cache, data, num_items, offset, stride, stream);
+    case CubScanValueType::f32:
+      return inclusive_scan_strided_typed<float>(
+          cache, data, num_items, offset, stride, stream);
+    case CubScanValueType::u32:
+      return inclusive_scan_strided_typed<uint32_t>(
+          cache, data, num_items, offset, stride, stream);
+    case CubScanValueType::u64:
+      return inclusive_scan_strided_typed<uint64_t>(
+          cache, data, num_items, offset, stride, stream);
+    case CubScanValueType::i64:
+      return inclusive_scan_strided_typed<int64_t>(
+          cache, data, num_items, offset, stride, stream);
+    case CubScanValueType::f64:
+      return inclusive_scan_strided_typed<double>(
+          cache, data, num_items, offset, stride, stream);
+  }
+  throw std::runtime_error("Unsupported CUB strided scan value type");
 }
 
 void cub_inclusive_scan_clear_cache_impl(void *owner) {
@@ -2323,6 +2538,124 @@ std::size_t reduce_typed(CubReduceCache &cache,
   return cache.allocated_bytes();
 }
 
+template <typename T>
+struct StridedLoadOp {
+  const uint8_t *base{nullptr};
+  std::size_t offset{0};
+  std::size_t stride{0};
+
+  __host__ __device__ T operator()(const int &i) const {
+    const auto *value = reinterpret_cast<const T *>(
+        base + offset + static_cast<std::size_t>(i) * stride);
+    return *value;
+  }
+};
+
+template <typename T>
+std::size_t reduce_strided_typed(CubReduceCache &cache,
+                                 void *values,
+                                 void *output,
+                                 int num_items,
+                                 std::size_t offset,
+                                 std::size_t stride,
+                                 CubReduceOp op,
+                                 void *stream_ptr) {
+  if (!values || !output) {
+    throw std::runtime_error("CUB strided reduce received a null pointer");
+  }
+  const auto *values_in = static_cast<const uint8_t *>(values);
+  T *output_out = static_cast<T *>(output);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  ensure_device_cache(cache);
+
+  StridedLoadOp<T> load_op{values_in, offset, stride};
+  auto counting = ::cuda::make_counting_iterator(0);
+  auto strided_in = ::cuda::make_transform_iterator(counting, load_op);
+
+  std::size_t temp_storage_bytes = 0;
+  auto query = [&]() {
+    switch (op) {
+      case CubReduceOp::sum:
+        if (use_stream) {
+          TI_CUDA_SORT_CHECK(cub::DeviceReduce::Sum(
+              nullptr, temp_storage_bytes, strided_in, output_out, num_items,
+              stream));
+        } else {
+          TI_CUDA_SORT_CHECK(cub::DeviceReduce::Sum(
+              nullptr, temp_storage_bytes, strided_in, output_out, num_items));
+        }
+        break;
+      case CubReduceOp::min:
+        if (use_stream) {
+          TI_CUDA_SORT_CHECK(cub::DeviceReduce::Min(
+              nullptr, temp_storage_bytes, strided_in, output_out, num_items,
+              stream));
+        } else {
+          TI_CUDA_SORT_CHECK(cub::DeviceReduce::Min(
+              nullptr, temp_storage_bytes, strided_in, output_out, num_items));
+        }
+        break;
+      case CubReduceOp::max:
+        if (use_stream) {
+          TI_CUDA_SORT_CHECK(cub::DeviceReduce::Max(
+              nullptr, temp_storage_bytes, strided_in, output_out, num_items,
+              stream));
+        } else {
+          TI_CUDA_SORT_CHECK(cub::DeviceReduce::Max(
+              nullptr, temp_storage_bytes, strided_in, output_out, num_items));
+        }
+        break;
+    }
+  };
+  query();
+  ensure_buffer(&cache.temp_storage, &cache.temp_storage_bytes,
+                temp_storage_bytes);
+
+  switch (op) {
+    case CubReduceOp::sum:
+      if (use_stream) {
+        TI_CUDA_SORT_CHECK(cub::DeviceReduce::Sum(
+            cache.temp_storage, temp_storage_bytes, strided_in, output_out,
+            num_items, stream));
+      } else {
+        TI_CUDA_SORT_CHECK(cub::DeviceReduce::Sum(
+            cache.temp_storage, temp_storage_bytes, strided_in, output_out,
+            num_items));
+      }
+      break;
+    case CubReduceOp::min:
+      if (use_stream) {
+        TI_CUDA_SORT_CHECK(cub::DeviceReduce::Min(
+            cache.temp_storage, temp_storage_bytes, strided_in, output_out,
+            num_items, stream));
+      } else {
+        TI_CUDA_SORT_CHECK(cub::DeviceReduce::Min(
+            cache.temp_storage, temp_storage_bytes, strided_in, output_out,
+            num_items));
+      }
+      break;
+    case CubReduceOp::max:
+      if (use_stream) {
+        TI_CUDA_SORT_CHECK(cub::DeviceReduce::Max(
+            cache.temp_storage, temp_storage_bytes, strided_in, output_out,
+            num_items, stream));
+      } else {
+        TI_CUDA_SORT_CHECK(cub::DeviceReduce::Max(
+            cache.temp_storage, temp_storage_bytes, strided_in, output_out,
+            num_items));
+      }
+      break;
+  }
+
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return cache.allocated_bytes();
+}
+
 std::size_t cub_reduce_impl(void *values,
                             void *output,
                             int num_items,
@@ -2352,6 +2685,40 @@ std::size_t cub_reduce_impl(void *values,
                                   stream);
   }
   throw std::runtime_error("Unsupported CUB reduce value type");
+}
+
+std::size_t cub_reduce_strided_impl(void *values,
+                                    void *output,
+                                    int num_items,
+                                    CubReduceValueType value_type,
+                                    std::size_t offset,
+                                    std::size_t stride,
+                                    CubReduceOp op,
+                                    void *stream,
+                                    void *owner) {
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  CubReduceCache &cache = get_reduce_cache(owner);
+  switch (value_type) {
+    case CubReduceValueType::i32:
+      return reduce_strided_typed<int32_t>(
+          cache, values, output, num_items, offset, stride, op, stream);
+    case CubReduceValueType::f32:
+      return reduce_strided_typed<float>(
+          cache, values, output, num_items, offset, stride, op, stream);
+    case CubReduceValueType::u32:
+      return reduce_strided_typed<uint32_t>(
+          cache, values, output, num_items, offset, stride, op, stream);
+    case CubReduceValueType::u64:
+      return reduce_strided_typed<uint64_t>(
+          cache, values, output, num_items, offset, stride, op, stream);
+    case CubReduceValueType::i64:
+      return reduce_strided_typed<int64_t>(
+          cache, values, output, num_items, offset, stride, op, stream);
+    case CubReduceValueType::f64:
+      return reduce_strided_typed<double>(
+          cache, values, output, num_items, offset, stride, op, stream);
+  }
+  throw std::runtime_error("Unsupported CUB strided reduce value type");
 }
 
 void cub_reduce_clear_cache_impl(void *owner) {
@@ -2431,6 +2798,169 @@ std::size_t cub_scatter_add_impl(void *src,
       break;
     default:
       throw std::runtime_error("Unsupported CUDA scatter-add value type");
+  }
+  TI_CUDA_SORT_CHECK(cudaGetLastError());
+  if (stream) {
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return 0;
+}
+
+template <typename T>
+void scatter_add_strided_launch(const uint8_t *src,
+                                const int32_t *indices,
+                                T *dst,
+                                int num_items,
+                                int index_bound,
+                                std::size_t offset,
+                                std::size_t stride,
+                                cudaStream_t stream) {
+  constexpr int kBlockDim = 256;
+  const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+  scatter_add_by_i32_strided_kernel<T><<<grid_dim, kBlockDim, 0, stream>>>(
+      src, indices, dst, num_items, index_bound, offset, stride);
+}
+
+std::size_t cub_scatter_add_strided_impl(void *src,
+                                         void *indices,
+                                         void *dst,
+                                         int num_items,
+                                         int index_bound,
+                                         CudaScatterAddValueType value_type,
+                                         std::size_t offset,
+                                         std::size_t stride,
+                                         void *stream_ptr) {
+  if (!src || !indices || !dst) {
+    throw std::runtime_error(
+        "CUDA strided scatter-add received a null pointer");
+  }
+  if (num_items == 0) {
+    return 0;
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const auto *src_in = static_cast<const uint8_t *>(src);
+  const auto *indices_in = static_cast<const int32_t *>(indices);
+  switch (value_type) {
+    case CudaScatterAddValueType::i32:
+      scatter_add_strided_launch(src_in, indices_in,
+                                 static_cast<int32_t *>(dst), num_items,
+                                 index_bound, offset, stride, stream);
+      break;
+    case CudaScatterAddValueType::f32:
+      scatter_add_strided_launch(src_in, indices_in, static_cast<float *>(dst),
+                                 num_items, index_bound, offset, stride,
+                                 stream);
+      break;
+    case CudaScatterAddValueType::u32:
+      scatter_add_strided_launch(src_in, indices_in,
+                                 static_cast<uint32_t *>(dst), num_items,
+                                 index_bound, offset, stride, stream);
+      break;
+    case CudaScatterAddValueType::u64:
+      scatter_add_strided_launch(src_in, indices_in,
+                                 static_cast<uint64_t *>(dst), num_items,
+                                 index_bound, offset, stride, stream);
+      break;
+    case CudaScatterAddValueType::i64:
+      scatter_add_strided_launch(src_in, indices_in,
+                                 static_cast<int64_t *>(dst), num_items,
+                                 index_bound, offset, stride, stream);
+      break;
+    case CudaScatterAddValueType::f64:
+      scatter_add_strided_launch(src_in, indices_in, static_cast<double *>(dst),
+                                 num_items, index_bound, offset, stride,
+                                 stream);
+      break;
+    default:
+      throw std::runtime_error(
+          "Unsupported CUDA strided scatter-add value type");
+  }
+  TI_CUDA_SORT_CHECK(cudaGetLastError());
+  if (stream) {
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return 0;
+}
+
+template <typename T>
+void scatter_add_strided_io_launch(const uint8_t *src,
+                                   const int32_t *indices,
+                                   uint8_t *dst,
+                                   int num_items,
+                                   int index_bound,
+                                   std::size_t src_offset,
+                                   std::size_t src_stride,
+                                   std::size_t dst_offset,
+                                   std::size_t dst_stride,
+                                   cudaStream_t stream) {
+  constexpr int kBlockDim = 256;
+  const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+  scatter_add_by_i32_strided_io_kernel<T>
+      <<<grid_dim, kBlockDim, 0, stream>>>(
+          src, indices, dst, num_items, index_bound, src_offset, src_stride,
+          dst_offset, dst_stride);
+}
+
+std::size_t cub_scatter_add_strided_io_impl(void *src,
+                                            void *indices,
+                                            void *dst,
+                                            int num_items,
+                                            int index_bound,
+                                            CudaScatterAddValueType value_type,
+                                            std::size_t src_offset,
+                                            std::size_t src_stride,
+                                            std::size_t dst_offset,
+                                            std::size_t dst_stride,
+                                            void *stream_ptr) {
+  if (!src || !indices || !dst) {
+    throw std::runtime_error(
+        "CUDA strided scatter-add received a null pointer");
+  }
+  if (num_items == 0) {
+    return 0;
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const auto *src_in = static_cast<const uint8_t *>(src);
+  const auto *indices_in = static_cast<const int32_t *>(indices);
+  auto *dst_out = static_cast<uint8_t *>(dst);
+  switch (value_type) {
+    case CudaScatterAddValueType::i32:
+      scatter_add_strided_io_launch<int32_t>(
+          src_in, indices_in, dst_out, num_items, index_bound, src_offset,
+          src_stride, dst_offset, dst_stride, stream);
+      break;
+    case CudaScatterAddValueType::f32:
+      scatter_add_strided_io_launch<float>(
+          src_in, indices_in, dst_out, num_items, index_bound, src_offset,
+          src_stride, dst_offset, dst_stride, stream);
+      break;
+    case CudaScatterAddValueType::u32:
+      scatter_add_strided_io_launch<uint32_t>(
+          src_in, indices_in, dst_out, num_items, index_bound, src_offset,
+          src_stride, dst_offset, dst_stride, stream);
+      break;
+    case CudaScatterAddValueType::u64:
+      scatter_add_strided_io_launch<uint64_t>(
+          src_in, indices_in, dst_out, num_items, index_bound, src_offset,
+          src_stride, dst_offset, dst_stride, stream);
+      break;
+    case CudaScatterAddValueType::i64:
+      scatter_add_strided_io_launch<int64_t>(
+          src_in, indices_in, dst_out, num_items, index_bound, src_offset,
+          src_stride, dst_offset, dst_stride, stream);
+      break;
+    case CudaScatterAddValueType::f64:
+      scatter_add_strided_io_launch<double>(
+          src_in, indices_in, dst_out, num_items, index_bound, src_offset,
+          src_stride, dst_offset, dst_stride, stream);
+      break;
+    default:
+      throw std::runtime_error(
+          "Unsupported CUDA strided scatter-add value type");
   }
   TI_CUDA_SORT_CHECK(cudaGetLastError());
   if (stream) {
@@ -2533,6 +3063,76 @@ std::size_t cub_transform_affine_impl(void *src,
       break;
     default:
       throw std::runtime_error("Unsupported CUDA transform value type");
+  }
+  TI_CUDA_SORT_CHECK(cudaGetLastError());
+  if (stream) {
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return 0;
+}
+
+std::size_t cub_transform_affine_strided_impl(void *src,
+                                              void *dst,
+                                              int num_items,
+                                              CudaTransformValueType value_type,
+                                              std::size_t offset,
+                                              std::size_t stride,
+                                              double scale,
+                                              double bias,
+                                              void *stream_ptr) {
+  if (!src || !dst) {
+    throw std::runtime_error("CUDA strided transform received a null pointer");
+  }
+  if (num_items == 0) {
+    return 0;
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  constexpr int kBlockDim = 256;
+  const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+  const auto *src_bytes = static_cast<const uint8_t *>(src);
+  switch (value_type) {
+    case CudaTransformValueType::i32:
+      transform_strided_affine_kernel<uint32_t>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
+              src_bytes, static_cast<uint32_t *>(dst), num_items, offset,
+              stride, static_cast<uint32_t>(static_cast<int32_t>(scale)),
+              static_cast<uint32_t>(static_cast<int32_t>(bias)));
+      break;
+    case CudaTransformValueType::u32:
+      transform_strided_affine_kernel<uint32_t>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
+              src_bytes, static_cast<uint32_t *>(dst), num_items, offset,
+              stride, static_cast<uint32_t>(scale), static_cast<uint32_t>(bias));
+      break;
+    case CudaTransformValueType::f32:
+      transform_strided_affine_kernel<float>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
+              src_bytes, static_cast<float *>(dst), num_items, offset, stride,
+              static_cast<float>(scale), static_cast<float>(bias));
+      break;
+    case CudaTransformValueType::u64:
+      transform_strided_affine_kernel<uint64_t>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
+              src_bytes, static_cast<uint64_t *>(dst), num_items, offset,
+              stride, static_cast<uint64_t>(scale), static_cast<uint64_t>(bias));
+      break;
+    case CudaTransformValueType::i64:
+      transform_strided_affine_kernel<uint64_t>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
+              src_bytes, static_cast<uint64_t *>(dst), num_items, offset,
+              stride, static_cast<uint64_t>(static_cast<int64_t>(scale)),
+              static_cast<uint64_t>(static_cast<int64_t>(bias)));
+      break;
+    case CudaTransformValueType::f64:
+      transform_strided_affine_kernel<double>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
+              src_bytes, static_cast<double *>(dst), num_items, offset, stride,
+              scale, bias);
+      break;
+    default:
+      throw std::runtime_error("Unsupported CUDA strided transform value type");
   }
   TI_CUDA_SORT_CHECK(cudaGetLastError());
   if (stream) {
@@ -2910,6 +3510,75 @@ void grouped_reduce_atomic_sum_launch(const int32_t *keys_in,
   }
 }
 
+template <typename T>
+void grouped_reduce_atomic_sum_strided_launch(const int32_t *keys_in,
+                                              const uint8_t *values_in,
+                                              T *output_out,
+                                              int num_items,
+                                              int num_groups,
+                                              std::size_t offset,
+                                              std::size_t stride,
+                                              cudaStream_t stream) {
+  const std::size_t output_bytes =
+      static_cast<std::size_t>(num_groups) * sizeof(T);
+  if (stream) {
+    TI_CUDA_SORT_CHECK(cudaMemsetAsync(output_out, 0, output_bytes, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaMemset(output_out, 0, output_bytes));
+  }
+  if (num_items > 0) {
+    constexpr int kBlockDim = 256;
+    const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+    grouped_reduce_atomic_sum_strided_kernel<T>
+        <<<grid_dim, kBlockDim, 0, stream>>>(
+            keys_in, values_in, output_out, num_items, num_groups, offset,
+            stride);
+    TI_CUDA_SORT_CHECK(cudaGetLastError());
+  }
+}
+
+template <typename T>
+void grouped_reduce_atomic_sum_strided_io_launch(const uint8_t *keys_in,
+                                                 const uint8_t *values_in,
+                                                 uint8_t *output_out,
+                                                 int num_items,
+                                                 int num_groups,
+                                                 std::size_t keys_offset,
+                                                 std::size_t keys_stride,
+                                                 std::size_t values_offset,
+                                                 std::size_t values_stride,
+                                                 std::size_t output_offset,
+                                                 std::size_t output_stride,
+                                                 cudaStream_t stream) {
+  constexpr int kBlockDim = 256;
+  if (num_groups > 0) {
+    if (output_offset == 0 && output_stride == sizeof(T)) {
+      const std::size_t output_bytes =
+          static_cast<std::size_t>(num_groups) * sizeof(T);
+      if (stream) {
+        TI_CUDA_SORT_CHECK(
+            cudaMemsetAsync(output_out, 0, output_bytes, stream));
+      } else {
+        TI_CUDA_SORT_CHECK(cudaMemset(output_out, 0, output_bytes));
+      }
+    } else {
+      const int zero_grid = (num_groups + kBlockDim - 1) / kBlockDim;
+      zero_strided_kernel<T><<<zero_grid, kBlockDim, 0, stream>>>(
+          output_out, num_groups, output_offset, output_stride);
+      TI_CUDA_SORT_CHECK(cudaGetLastError());
+    }
+  }
+  if (num_items > 0) {
+    const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+    grouped_reduce_atomic_sum_strided_io_kernel<T>
+        <<<grid_dim, kBlockDim, 0, stream>>>(
+            keys_in, values_in, output_out, num_items, num_groups,
+            keys_offset, keys_stride, values_offset, values_stride,
+            output_offset, output_stride);
+    TI_CUDA_SORT_CHECK(cudaGetLastError());
+  }
+}
+
 std::size_t cub_grouped_reduce_atomic_impl(
     void *keys,
     void *values,
@@ -2961,6 +3630,149 @@ std::size_t cub_grouped_reduce_atomic_impl(
       break;
     default:
       throw std::runtime_error("Unsupported CUDA grouped reduce value type");
+  }
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return 0;
+}
+
+std::size_t cub_grouped_reduce_atomic_strided_impl(
+    void *keys,
+    void *values,
+    void *output,
+    int num_items,
+    int num_groups,
+    CudaGroupedReduceValueType value_type,
+    std::size_t offset,
+    std::size_t stride,
+    int op,
+    void *stream_ptr) {
+  if (!keys || !values || !output) {
+    throw std::runtime_error(
+        "CUDA strided grouped reduce received a null pointer");
+  }
+  if (op != 0) {
+    throw std::runtime_error(
+        "CUDA strided grouped reduce currently supports only sum");
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  auto *keys_in = static_cast<const int32_t *>(keys);
+  auto *values_in = static_cast<const uint8_t *>(values);
+  switch (value_type) {
+    case CudaGroupedReduceValueType::i32:
+      grouped_reduce_atomic_sum_strided_launch(
+          keys_in, values_in, static_cast<int32_t *>(output), num_items,
+          num_groups, offset, stride, stream);
+      break;
+    case CudaGroupedReduceValueType::f32:
+      grouped_reduce_atomic_sum_strided_launch(
+          keys_in, values_in, static_cast<float *>(output), num_items,
+          num_groups, offset, stride, stream);
+      break;
+    case CudaGroupedReduceValueType::u32:
+      grouped_reduce_atomic_sum_strided_launch(
+          keys_in, values_in, static_cast<uint32_t *>(output), num_items,
+          num_groups, offset, stride, stream);
+      break;
+    case CudaGroupedReduceValueType::u64:
+      grouped_reduce_atomic_sum_strided_launch(
+          keys_in, values_in, static_cast<uint64_t *>(output), num_items,
+          num_groups, offset, stride, stream);
+      break;
+    case CudaGroupedReduceValueType::i64:
+      grouped_reduce_atomic_sum_strided_launch(
+          keys_in, values_in, static_cast<int64_t *>(output), num_items,
+          num_groups, offset, stride, stream);
+      break;
+    case CudaGroupedReduceValueType::f64:
+      grouped_reduce_atomic_sum_strided_launch(
+          keys_in, values_in, static_cast<double *>(output), num_items,
+          num_groups, offset, stride, stream);
+      break;
+    default:
+      throw std::runtime_error(
+          "Unsupported CUDA strided grouped reduce value type");
+  }
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cudaDeviceSynchronize());
+  }
+  return 0;
+}
+
+std::size_t cub_grouped_reduce_atomic_strided_io_impl(
+    void *keys,
+    void *values,
+    void *output,
+    int num_items,
+    int num_groups,
+    CudaGroupedReduceValueType value_type,
+    std::size_t keys_offset,
+    std::size_t keys_stride,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    int op,
+    void *stream_ptr) {
+  if (!keys || !values || !output) {
+    throw std::runtime_error(
+        "CUDA strided grouped reduce received a null pointer");
+  }
+  if (op != 0) {
+    throw std::runtime_error(
+        "CUDA strided grouped reduce currently supports only sum");
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  auto *keys_in = static_cast<const uint8_t *>(keys);
+  auto *values_in = static_cast<const uint8_t *>(values);
+  auto *output_out = static_cast<uint8_t *>(output);
+  switch (value_type) {
+    case CudaGroupedReduceValueType::i32:
+      grouped_reduce_atomic_sum_strided_io_launch<int32_t>(
+          keys_in, values_in, output_out, num_items, num_groups, keys_offset,
+          keys_stride, values_offset, values_stride, output_offset,
+          output_stride, stream);
+      break;
+    case CudaGroupedReduceValueType::f32:
+      grouped_reduce_atomic_sum_strided_io_launch<float>(
+          keys_in, values_in, output_out, num_items, num_groups, keys_offset,
+          keys_stride, values_offset, values_stride, output_offset,
+          output_stride, stream);
+      break;
+    case CudaGroupedReduceValueType::u32:
+      grouped_reduce_atomic_sum_strided_io_launch<uint32_t>(
+          keys_in, values_in, output_out, num_items, num_groups, keys_offset,
+          keys_stride, values_offset, values_stride, output_offset,
+          output_stride, stream);
+      break;
+    case CudaGroupedReduceValueType::u64:
+      grouped_reduce_atomic_sum_strided_io_launch<uint64_t>(
+          keys_in, values_in, output_out, num_items, num_groups, keys_offset,
+          keys_stride, values_offset, values_stride, output_offset,
+          output_stride, stream);
+      break;
+    case CudaGroupedReduceValueType::i64:
+      grouped_reduce_atomic_sum_strided_io_launch<int64_t>(
+          keys_in, values_in, output_out, num_items, num_groups, keys_offset,
+          keys_stride, values_offset, values_stride, output_offset,
+          output_stride, stream);
+      break;
+    case CudaGroupedReduceValueType::f64:
+      grouped_reduce_atomic_sum_strided_io_launch<double>(
+          keys_in, values_in, output_out, num_items, num_groups, keys_offset,
+          keys_stride, values_offset, values_stride, output_offset,
+          output_stride, stream);
+      break;
+    default:
+      throw std::runtime_error(
+          "Unsupported CUDA strided grouped reduce value type");
   }
   if (use_stream) {
     TI_CUDA_SORT_CHECK(cudaStreamSynchronize(stream));

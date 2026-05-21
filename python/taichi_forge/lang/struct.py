@@ -795,6 +795,14 @@ class StructType(CompoundType):
     def field(self, **kwargs):
         return Struct.field(self.members, self.methods, **kwargs)
 
+    def check_matched(self, other):
+        if isinstance(other, StructType):
+            return self.dtype == other.dtype
+        return self.dtype == other
+
+    def to_string(self):
+        return str(self)
+
     def __str__(self):
         """Python scope struct type print support."""
         item_str = ", ".join([str(k) + "=" + str(v) for k, v in self.members.items()])

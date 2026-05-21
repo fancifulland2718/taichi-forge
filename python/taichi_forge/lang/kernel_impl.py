@@ -618,15 +618,30 @@ class TaichiCallableTemplateMapper:
             extracted.append(self.extract_arg(arg, kernel_arg.annotation, kernel_arg.name))
         return tuple(extracted)
 
+    @staticmethod
+    def _make_cache_key(value):
+        if isinstance(value, tuple):
+            return tuple(TaichiCallableTemplateMapper._make_cache_key(item) for item in value)
+        if isinstance(value, list):
+            return tuple(TaichiCallableTemplateMapper._make_cache_key(item) for item in value)
+        if isinstance(value, _ti_core.DataType):
+            try:
+                hash(value)
+                return value
+            except RuntimeError:
+                return ("DataType", value.to_string())
+        return value
+
     def lookup(self, args):
         if len(args) != self.num_args:
             raise TypeError(f"{self.num_args} argument(s) needed but {len(args)} provided.")
 
-        key = self.extract(args)
+        arg_features = self.extract(args)
+        key = self._make_cache_key(arg_features)
         if key not in self.mapping:
             count = len(self.mapping)
             self.mapping[key] = count
-        return self.mapping[key], key
+        return self.mapping[key], arg_features
 
 
 def _get_global_vars(_func):
