@@ -155,6 +155,7 @@ Stable follow-up:
   kernel arguments on CPU/CUDA/Vulkan. Internally the argument keeps the tensor
   logical type, but the backend lowering expands component accesses into
   scalar strided external tensor pointers.
+
 - whole vector/matrix member views are accepted by the numeric and
   order/copy primitives that have scalar strided member-view read/write support:
   `PrefixSumExecutor.run()`, `experimental_transform()`,
@@ -167,6 +168,43 @@ Stable follow-up:
 - `experimental_histogram()` still does not accept whole vector/matrix member
   views. Use `component=...` explicitly for histogram until vector-valued
   histogram semantics are defined.
+
+## Container and primitive support matrix
+
+This section is the boundary checklist before field/SNode optimization work.
+It separates dense native primitive support from DSL state and sparse topology
+support, so later field/SNode changes do not accidentally broaden
+`StructNdarray` semantics.
+
+| Primitive family | `ndarray` | `StructNdarray` raw payload | Scalar member view | Whole vector/matrix member view | `field` | `SNode` |
+|---|---|---|---|---|---|---|
+| `sort()` keys | yes | no | yes as keys | no as keys | legacy/fallback only | layout owner only |
+| `sort()` values | yes | yes | yes | yes, lane order shared | legacy/fallback only | layout owner only |
+| `experimental_compact()` | yes | yes | yes | yes, lane order shared | selected fallback/native helpers | layout owner only |
+| `experimental_gather()` / `experimental_scatter()` | yes | yes | yes | yes, packed when AOS lanes are contiguous | selected fallback helpers | layout owner only |
+| `experimental_bucket_builder()` values | yes | yes | yes | yes, lane order shared | selected fallback/native helpers | layout owner only |
+| `PrefixSumExecutor.run()` / scan | yes | no | yes | yes, component-wise | selected fallback/native helpers | layout owner only |
+| `experimental_reduce()` | yes | no | yes | yes, component-wise into output element 0 | selected fallback/native helpers | layout owner only |
+| `experimental_transform()` | yes | no | yes | yes, packed when possible | selected fallback/native helpers | layout owner only |
+| `experimental_scatter_add()` | yes | no | yes | yes, component-wise atomics where supported | selected fallback/native helpers | layout owner only |
+| `experimental_grouped_reduce()` | yes | no | yes | yes, component-wise where backend atomics/reduction support exists | selected fallback/native helpers | layout owner only |
+| `experimental_histogram()` | yes for integer values | no | yes for scalar integer members | no, vector histogram semantics remain closed | selected fallback/native helpers | layout owner only |
+
+Notes:
+
+- `StructNdarray` raw payload support means the backend moves the whole AOS
+  record as opaque bytes and does not interpret members.
+- Scalar and whole tensor member views share the parent allocation and lower to
+  `base + offset + i * stride`; they must not stage full-size temporary arrays
+  as part of normal execution.
+- `field` entries in this table mean compatibility paths or selected dense
+  helper/native paths. They do not imply that `field` is an `ndarray` ABI.
+- `SNode` is the layout, sparse topology, activation, allocator, and traversal
+  layer. It is not a general numeric array primitive input.
+- Index/order primitives remain 1D unless a future public API explicitly
+  defines flattening or axis semantics.
+- Whole vector/matrix histogram remains unsupported until a concrete vector
+  histogram contract is needed.
 
 The Vulkan invalid-memory-access issue was fixed by carrying member byte
 offsets through external tensor lowering and by making external pointer alias
@@ -277,14 +315,11 @@ Implementation:
   share the same bucket-local permutation, then gathers/writes each lane.
   Invalid keys remain ignored; the internal order-output tail is cleared so
   member-lane gather does not depend on stale device memory.
-- Performance follow-up: CPU and Vulkan compact member output now gather
-  directly into the strided destination member view. CUDA compact keeps the
-  previous contiguous-temp plus strided-transform writeback because direct
-  strided gather was slower in repeat sampling. Bucket-builder uses direct
-  gather on CPU/CUDA/Vulkan because it reduces both dispatch and workspace in
-  the measured path. Packed whole tensor member gather/scatter now use one
-  multi-word indexed-copy dispatch when lanes are contiguous in AOS, which also
-  benefits bucket-builder and the CPU/Vulkan compact direct-gather paths.
+- Performance follow-up: compact and bucket-builder member output now gather
+  directly into the strided destination member view on CPU/CUDA/Vulkan.
+  Packed whole tensor member gather/scatter use one multi-word indexed-copy
+  dispatch when lanes are contiguous in AOS, which removes the older CUDA
+  compact scalar-temp writeback path without increasing workspace.
 - `experimental_transform(values.field("vec"), output.field("vec"), ...)`
   now routes contiguous whole vector/matrix member lanes through a packed
   strided transform fast path on CPU/CUDA/Vulkan. This preserves the same
@@ -332,6 +367,16 @@ Validation:
   `tests/python/test_transform.py`: 20 passed. Consolidated primitive subset
   remains 145 passed after adding CPU/CUDA/Vulkan packed transform bindings and
   native Vulkan shader lane-count dispatch.
+- Internal order/apply helper follow-up:
+  `tests/python/test_sort_api.py tests/python/test_compact.py
+  tests/python/test_bucket_builder.py tests/python/test_indexed_copy.py`: 100
+  passed. The consolidated primitive subset remains 145 passed after routing
+  sort/compact/bucket tensor-member order application through the shared helper.
+- CUDA compact direct-output follow-up:
+  `tests/python/test_compact.py tests/python/test_bucket_builder.py
+  tests/python/test_indexed_copy.py`: 52 passed. Consolidated primitive subset
+  remains 145 passed after enabling packed direct gather for CUDA compact
+  whole tensor member output.
 - Consolidated primitive subset after closing sort/compact/bucket tensor-member
   gaps:
   `tests/python/test_transform.py tests/python/test_reduce.py
@@ -436,19 +481,29 @@ i32), tag: i32}`; only `vec` participates and `tag` remains untouched.
 
 | Backend | n | sort vec ms | sort workspace | compact vec ms | compact workspace | bucket vec ms | bucket workspace |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| CPU | 2048 | 0.6057 | 24576 | 0.2807 | 16384 | 0.3417 | 16896 |
-| CPU | 262144 | 16.2656 | 3145728 | 1.2139 | 2097152 | 1.4439 | 2113600 |
-| CUDA | 2048 | 0.5021 | 24577 | 0.4228 | 24576 | 0.3630 | 17919 |
-| CUDA | 262144 | 0.4983 | 5271039 | 0.4836 | 3145728 | 0.4186 | 2099203 |
-| Vulkan | 2048 | 0.8742 | 43008 | 0.6976 | 16384 | 0.8019 | 16896 |
-| Vulkan | 262144 | 0.7586 | 5374976 | 0.6803 | 2097152 | 0.6837 | 2229764 |
+| CPU | 2048 | 0.5605 | 24576 | 0.2863 | 16384 | 0.3453 | 16896 |
+| CPU | 262144 | 17.2515 | 3145728 | 1.0157 | 2097152 | 1.3710 | 2113600 |
+| CUDA | 2048 | 0.4113 | 24577 | 0.2964 | 16384 | 0.3343 | 17919 |
+| CUDA | 262144 | 0.5484 | 5271039 | 0.2943 | 2097152 | 0.4357 | 2099203 |
+| Vulkan | 2048 | 1.0140 | 43008 | 0.6963 | 16384 | 0.7444 | 16896 |
+| Vulkan | 262144 | 0.7677 | 5374976 | 0.6447 | 2097152 | 0.7209 | 2229764 |
 
 The compact/bucket follow-up reduced workspace by one scalar lane buffer where
 direct gather was kept. For `vector(2, i32)` at `n=262144`, CPU/Vulkan compact
 workspace drops from `3145728` to `2097152` bytes; bucket workspace drops from
 `3162176` to `2113600` on CPU, from `3147779` to `2099203` on CUDA, and from
-`3278340` to `2229764` on Vulkan. CUDA compact intentionally keeps the older
-workspace because its direct strided gather variant was slower.
+`3278340` to `2229764` on Vulkan. After packed whole tensor gather landed,
+CUDA compact also moved from the scalar-temp path to direct output gather,
+dropping `n=262144` workspace from `3145728` to `2097152` bytes in the
+measured path.
+
+The internal order/apply helper centralizes the order-once pattern used by
+sort/compact/bucket. Direct-output paths call whole tensor member gather, so
+contiguous AOS lanes use the packed indexed-copy backend. In-place sort still
+uses scalar temporary lanes because direct self-gather can overwrite values
+needed by later indices; replacing that safely would require a cycle/visited
+algorithm or full payload staging, which is intentionally left out of this
+low-complexity phase.
 
 ## Next-phase backlog excluding Field/SNode
 
@@ -461,11 +516,12 @@ layout, lifetime, and SNode-access semantics.
 P0. Reusable permutation/order primitive
 
 - Current state: `sort()`, `experimental_compact()`, and
-  `experimental_bucket_builder()` now use an internal order-once +
-  apply-by-gather pattern for whole vector/matrix member values.
-- Remaining piece: centralize this internal pattern as a reusable private helper
-  or public experimental primitive once more users need it, instead of keeping
-  separate local order handling in each algorithm.
+  `experimental_bucket_builder()` now use a shared private
+  `_apply_order_to_tensor_member_values(...)` helper for whole vector/matrix
+  member values.
+- Remaining piece: keep the helper private until another primitive needs
+  coupled permutation. A public experimental primitive should wait for a
+  concrete caller and stable semantics.
 - Backend direction: keep CUDA on CUB/device/toolkit primitives, Vulkan on the
   current native radix/bucket/compact shaders plus native gather/transform, and
   CPU on native order buffers. A later fused backend can remove one gather or
@@ -477,13 +533,14 @@ P1. Fused strided compact and bucket-builder member-output support
 
 - Current state: compact and bucket-builder support whole vector/matrix
   member-only output through order-once + lane gather/writeback. This preserves
-  unrelated destination fields and avoids per-lane independent ordering. CPU
-  and Vulkan compact, plus CPU/CUDA/Vulkan bucket-builder, already skip the
-  scalar temporary and gather directly into the destination member view where
-  measured useful.
-- Remaining piece: add fused backend kernels that scatter selected/bucketed
-  member lanes directly into strided destination offsets, avoiding the scalar
-  temporary buffer and one writeback dispatch per lane in the remaining cases.
+  unrelated destination fields and avoids per-lane independent ordering.
+  CPU/CUDA/Vulkan compact and bucket-builder now skip scalar temporary
+  writeback for direct member output and use packed whole tensor gather where
+  the AOS lanes are contiguous.
+- Remaining piece: consider fused backend kernels that combine selected or
+  bucketed order construction with strided member writeback, removing the
+  separate order-output gather pass. This should be attempted only if profiling
+  shows the extra dispatch/order buffer is still material.
 - Backend direction: CUDA can use DeviceSelect/scan-generated positions plus a
   strided scatter kernel; Vulkan should mirror the native compact/bucket
   pipeline with source/destination offsets and strides in parameter buffers;
@@ -570,10 +627,12 @@ P3. Workspace telemetry and regression guardrails
 
 - Current state: primitive workspaces expose peak bytes, and
   `benchmarks/struct_ndarray_primitives.py` records API-window latency,
-  workspace peak, correctness, and backend availability for transform,
-  gather/scatter, sort, compact, and bucket on small/stress sizes.
-- Optimization: extend the harness to scan/reduce/scatter-add and
-  grouped-reduce, and optionally emit CSV for trend comparison.
+  workspace peak, correctness, and backend availability for transform, scan,
+  reduce, gather/scatter, scatter-add, grouped-reduce, sort, compact, and
+  bucket on small/stress sizes.
+- Remaining work: run the harness with a Python/runtime extension pair that
+  matches the checkout build, then store CPU/CUDA/Vulkan result artifacts for
+  trend comparison.
 - Acceptance: next changes can compare CPU/CUDA/Vulkan at the same public API
   window and catch hidden staging or workspace regressions.
 
@@ -588,12 +647,83 @@ P4. CPU native loop specialization
 
 ### Suggested execution order
 
-1. Centralize the internal order/apply pattern now used by
-   sort/compact/bucket if another primitive needs coupled permutation.
-2. Replace the remaining order-once + lane writeback sort/compact member paths
-   with fused strided scatter/writeback kernels where that reduces
-   dispatch/workspace without changing semantics.
-3. Evaluate ND shape expansion primitive by primitive; only open paths with
+1. Profile whether compact/bucket still benefit from fusing order construction
+   with strided member writeback; keep the current order-plus-packed-gather
+   path if the fixed cost is not material.
+2. Evaluate ND shape expansion primitive by primitive; only open paths with
    clear flattening or axis semantics.
-4. Keep histogram whole-tensor semantics closed until a concrete vector
+3. Keep histogram whole-tensor semantics closed until a concrete vector
    histogram contract is needed.
+
+## 2026-05-22 closeout validation
+
+Environment:
+
+- Python: `C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe`
+- Source path: `PYTHONPATH=D:\taichi\python`
+- Runtime extension:
+  `python/taichi_forge/_lib/core/taichi_python.cp310-win_amd64.pyd`
+- CUDA local validation build: `build_llvm20_test` rebuilt with
+  `CMAKE_CUDA_ARCHITECTURES=120` so the RTX 5090 path uses local SASS instead
+  of PTX JIT from CUDA toolkit 13.2 on a CUDA 13.1 driver.
+
+Pytest:
+
+- CPU/Vulkan:
+  `tests/python/test_struct_ndarray_payload_primitives.py
+  tests/python/test_transform.py tests/python/test_scan.py
+  tests/python/test_reduce.py tests/python/test_scatter_add.py
+  tests/python/test_grouped_reduce.py tests/python/test_indexed_copy.py
+  tests/python/test_sort_api.py tests/python/test_compact.py
+  tests/python/test_bucket_builder.py tests/python/test_histogram.py
+  -k "not cuda"`: 159 passed, 73 deselected.
+- CUDA, same test set with `-k "cuda"`: 73 passed, 159 deselected.
+- A single mixed CPU/CUDA/Vulkan pytest process previously aborted during
+  backend reset, so the closeout validation intentionally records split runs.
+
+Benchmark artifacts:
+
+- `benchmarks/results/struct_ndarray_closeout_20260522/cpu.json`
+- `benchmarks/results/struct_ndarray_closeout_20260522/cuda.json`
+- `benchmarks/results/struct_ndarray_closeout_20260522/vulkan.json`
+- `benchmarks/results/struct_ndarray_closeout_20260522/summary.json`
+- `benchmarks/results/struct_ndarray_closeout_20260522/summary.md`
+
+The benchmark window is the public primitive call plus `ti.sync()`, excluding
+input setup and correctness readback. Sizes are `2048` and `262144`, with
+`repeats=8`. All recorded rows have `ok=true`.
+
+Representative `n=262144` whole tensor member-view results:
+
+| Backend | Primitive | Median ms | Workspace peak bytes |
+|---|---|---:|---:|
+| CPU | transform | 0.3411 | 0 |
+| CPU | scan | 0.4907 | 0 |
+| CPU | reduce | 0.2576 | 32 |
+| CPU | gather | 0.3096 | 0 |
+| CPU | scatter | 0.5932 | 0 |
+| CPU | scatter-add | 0.8323 | 0 |
+| CPU | grouped-reduce | 0.9408 | 4112 |
+| CPU | sort | 16.1489 | 3145728 |
+| CPU | compact | 0.8927 | 2097152 |
+| CPU | bucket-builder | 1.1422 | 2113600 |
+| CUDA | transform | 0.0885 | 0 |
+| CUDA | scan | 0.0949 | 1023 |
+| CUDA | reduce | 0.1158 | 17407 |
+| CUDA | gather | 0.0832 | 0 |
+| CUDA | scatter | 0.0809 | 0 |
+| CUDA | scatter-add | 0.1292 | 0 |
+| CUDA | grouped-reduce | 0.1448 | 0 |
+| CUDA | sort | 0.4450 | 5278207 |
+| CUDA | compact | 0.2911 | 2097152 |
+| CUDA | bucket-builder | 0.3844 | 2099203 |
+| Vulkan | transform | 0.2743 | 40 |
+| Vulkan | scan | 0.3648 | 4132 |
+| Vulkan | reduce | 0.3116 | 524 |
+| Vulkan | gather | 0.2643 | 28 |
+| Vulkan | scatter | 0.2950 | 28 |
+| Vulkan | scatter-add | 0.3342 | 28 |
+| Vulkan | grouped-reduce | 0.3347 | 32 |
+| Vulkan | sort | 0.7025 | 5374976 |
+| Vulkan | compact | 0.5396 | 2097152 |
+| Vulkan | bucket-builder | 0.6052 | 2229764 |

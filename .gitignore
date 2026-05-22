@@ -101,6 +101,7 @@ tests/p4
 
 *.ps1
 *.cmd
+.agent/
 .github/instructions/
 _archive/
 opt_doc/

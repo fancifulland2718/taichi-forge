@@ -19,7 +19,11 @@ def _method_for(arch_name, primitive):
     if arch_name == "cpu":
         return "cpu_native"
     if arch_name == "cuda":
-        return "cuda_cub_native" if primitive == "sort" else "cuda_device"
+        if primitive == "sort":
+            return "cuda_cub_native"
+        if primitive in ("compact", "reduce"):
+            return "cuda_cub"
+        return "cuda_device"
     if arch_name == "vulkan":
         return "vulkan_native_radix_u32" if primitive == "sort" else "vulkan_native"
     raise ValueError(arch_name)
@@ -48,6 +52,20 @@ def _available(arch_name, primitive):
             )
         if primitive in ("gather", "scatter"):
             return hasattr(prog, "cpu_indexed_copy_available") and prog.cpu_indexed_copy_available()
+        if primitive == "scan":
+            return hasattr(prog, "cpu_scan_available") and prog.cpu_scan_available()
+        if primitive == "reduce":
+            return hasattr(prog, "cpu_reduce_available") and prog.cpu_reduce_available()
+        if primitive == "scatter_add":
+            return (
+                hasattr(prog, "cpu_scatter_add_available")
+                and prog.cpu_scatter_add_available()
+            )
+        if primitive == "grouped_reduce":
+            return (
+                hasattr(prog, "cpu_grouped_reduce_available")
+                and prog.cpu_grouped_reduce_available()
+            )
     if arch_name == "cuda":
         if primitive == "transform":
             return (
@@ -84,6 +102,23 @@ def _available(arch_name, primitive):
                 hasattr(prog, "cuda_device_indexed_copy_available")
                 and prog.cuda_device_indexed_copy_available()
             )
+        if primitive == "scan":
+            return hasattr(prog, "cuda_cub_scan_available") and prog.cuda_cub_scan_available()
+        if primitive == "reduce":
+            return (
+                hasattr(prog, "cuda_cub_reduce_available")
+                and prog.cuda_cub_reduce_available()
+            )
+        if primitive == "scatter_add":
+            return (
+                hasattr(prog, "cuda_device_scatter_add_available")
+                and prog.cuda_device_scatter_add_available()
+            )
+        if primitive == "grouped_reduce":
+            return (
+                hasattr(prog, "cuda_device_grouped_reduce_available")
+                and prog.cuda_device_grouped_reduce_available()
+            )
     if arch_name == "vulkan":
         if primitive == "transform":
             return (
@@ -118,7 +153,40 @@ def _available(arch_name, primitive):
                 hasattr(prog, "vulkan_indexed_copy_available")
                 and prog.vulkan_indexed_copy_available()
             )
+        if primitive == "scan":
+            return hasattr(prog, "vulkan_scan_available") and prog.vulkan_scan_available()
+        if primitive == "reduce":
+            return hasattr(prog, "vulkan_reduce_available") and prog.vulkan_reduce_available()
+        if primitive == "scatter_add":
+            return (
+                hasattr(prog, "vulkan_scatter_add_available")
+                and prog.vulkan_scatter_add_available()
+            )
+        if primitive == "grouped_reduce":
+            return (
+                hasattr(prog, "vulkan_grouped_reduce_available")
+                and prog.vulkan_grouped_reduce_available()
+            )
     return False
+
+
+def _runtime_workspace_peak(arch_name, primitive):
+    prog = impl.get_runtime().prog
+    candidates = []
+    if primitive == "scan":
+        candidates = [
+            f"{arch_name}_scan_workspace_bytes",
+            "cuda_cub_scan_workspace_bytes",
+        ]
+    elif primitive == "reduce":
+        candidates = [
+            f"{arch_name}_reduce_workspace_bytes",
+            "cuda_cub_reduce_workspace_bytes",
+        ]
+    for name in candidates:
+        if hasattr(prog, name):
+            return getattr(prog, name)()
+    return 0
 
 
 def _payload(n):
@@ -352,21 +420,215 @@ def run_indexed_copy(arch_name, n, repeats, scatter):
     return stats
 
 
+def run_scan(arch_name, n, repeats):
+    values, host = _payload(n)
+    executor = ti.algorithms.PrefixSumExecutor(n)
+
+    def body():
+        executor.run(values.field("vec"))
+
+    stats = _time_call(body, repeats)
+    check_values, _ = _payload(n)
+    ti.algorithms.PrefixSumExecutor(n).run(check_values.field("vec"))
+    result = check_values.to_numpy()
+    expected = np.cumsum(host["vec"], axis=0, dtype=np.int64).astype(np.int32)
+    stats.update(
+        {
+            "primitive": "scan_tensor_member_values",
+            "workspace_peak": _runtime_workspace_peak(arch_name, "scan"),
+            "ok": bool(
+                np.array_equal(result["vec"], expected)
+                and np.array_equal(result["tag"], host["tag"])
+            ),
+        }
+    )
+    return stats
+
+
+def run_reduce(arch_name, n, repeats):
+    values, host = _payload(n)
+    output = ti.ndarray(values.struct_type, shape=1)
+    out_host = np.zeros((1,), dtype=output.numpy_dtype)
+    out_host["tag"] = 12345
+    output.from_numpy(out_host)
+    workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+    method = _method_for(arch_name, "reduce")
+
+    def body():
+        ti.algorithms.experimental_reduce(
+            values.field("vec"),
+            output.field("vec"),
+            op="sum",
+            method=method,
+            workspace=workspace,
+        )
+
+    stats = _time_call(body, repeats)
+    check_output = ti.ndarray(values.struct_type, shape=1)
+    check_output.from_numpy(out_host)
+    ti.algorithms.experimental_reduce(
+        values.field("vec"),
+        check_output.field("vec"),
+        op="sum",
+        method=method,
+        workspace=workspace,
+    )
+    result = check_output.to_numpy()
+    expected = np.sum(host["vec"], axis=0, dtype=np.int64).astype(np.int32)
+    stats.update(
+        {
+            "primitive": "reduce_tensor_member_values",
+            "workspace_peak": max(
+                workspace.workspace_bytes_peak,
+                _runtime_workspace_peak(arch_name, "reduce"),
+            ),
+            "ok": bool(
+                np.array_equal(result["vec"][0], expected)
+                and result["tag"][0] == out_host["tag"][0]
+            ),
+        }
+    )
+    return stats
+
+
+def run_scatter_add(arch_name, n, repeats):
+    values, host = _payload(n)
+    buckets = max(8, min(257, n // 16))
+    indices_np = ((np.arange(n, dtype=np.int32) * 37 + 11) % buckets).astype(np.int32)
+    base_vec = (np.arange(buckets * 2, dtype=np.int32).reshape(buckets, 2) % 5) - 2
+    indices = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(values.struct_type, shape=buckets)
+    indices.from_numpy(indices_np)
+    dst_host = np.zeros((buckets,), dtype=dst.numpy_dtype)
+    dst_host["vec"] = base_vec
+    dst_host["tag"] = np.arange(buckets, dtype=np.int32) * 11 - 5
+    dst.from_numpy(dst_host)
+    workspace = ti.algorithms.ScatterAddWorkspace(max_items=n)
+    method = _method_for(arch_name, "scatter_add")
+
+    def body():
+        ti.algorithms.experimental_scatter_add(
+            values.field("vec"),
+            indices,
+            dst.field("vec"),
+            method=method,
+            workspace=workspace,
+        )
+
+    stats = _time_call(body, repeats)
+    check_dst = ti.ndarray(values.struct_type, shape=buckets)
+    check_dst.from_numpy(dst_host)
+    ti.algorithms.experimental_scatter_add(
+        values.field("vec"),
+        indices,
+        check_dst.field("vec"),
+        method=method,
+        workspace=workspace,
+    )
+    expected = base_vec.copy()
+    np.add.at(expected, indices_np, host["vec"])
+    result = check_dst.to_numpy()
+    stats.update(
+        {
+            "primitive": "scatter_add_tensor_member_values",
+            "workspace_peak": workspace.workspace_bytes_peak,
+            "ok": bool(
+                np.array_equal(result["vec"], expected)
+                and np.array_equal(result["tag"], dst_host["tag"])
+            ),
+        }
+    )
+    return stats
+
+
+def run_grouped_reduce(arch_name, n, repeats):
+    values, host = _payload(n)
+    groups = max(8, min(257, n // 16))
+    keys_np = ((np.arange(n, dtype=np.int32) * 37 + 11) % groups).astype(np.int32)
+    keys = ti.ndarray(ti.i32, shape=n)
+    output = ti.ndarray(values.struct_type, shape=groups)
+    keys.from_numpy(keys_np)
+    out_host = np.zeros((groups,), dtype=output.numpy_dtype)
+    out_host["vec"] = -999
+    out_host["tag"] = np.arange(groups, dtype=np.int32) * 13 + 9
+    output.from_numpy(out_host)
+    workspace = ti.algorithms.GroupedReduceWorkspace(max_items=n, max_groups=groups)
+    method = _method_for(arch_name, "grouped_reduce")
+
+    def body():
+        ti.algorithms.experimental_grouped_reduce(
+            keys,
+            values.field("vec"),
+            output.field("vec"),
+            method=method,
+            workspace=workspace,
+        )
+
+    stats = _time_call(body, repeats)
+    check_output = ti.ndarray(values.struct_type, shape=groups)
+    check_output.from_numpy(out_host)
+    ti.algorithms.experimental_grouped_reduce(
+        keys,
+        values.field("vec"),
+        check_output.field("vec"),
+        method=method,
+        workspace=workspace,
+    )
+    expected = np.zeros((groups, 2), dtype=np.int32)
+    np.add.at(expected, keys_np, host["vec"])
+    result = check_output.to_numpy()
+    stats.update(
+        {
+            "primitive": "grouped_reduce_tensor_member_values",
+            "workspace_peak": workspace.workspace_bytes_peak,
+            "ok": bool(
+                np.array_equal(result["vec"], expected)
+                and np.array_equal(result["tag"], out_host["tag"])
+            ),
+        }
+    )
+    return stats
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", choices=sorted(ARCHES), default="cpu")
     parser.add_argument("--sizes", default="2048,262144")
     parser.add_argument("--repeats", type=int, default=8)
+    parser.add_argument("--output", default=None)
     parser.add_argument(
         "--primitive",
-        choices=["transform", "sort", "compact", "bucket", "gather", "scatter", "all"],
+        choices=[
+            "transform",
+            "scan",
+            "reduce",
+            "sort",
+            "compact",
+            "bucket",
+            "gather",
+            "scatter",
+            "scatter_add",
+            "grouped_reduce",
+            "all",
+        ],
         default="all",
     )
     args = parser.parse_args()
 
     ti.init(arch=ARCHES[args.arch], offline_cache=False)
     primitives = (
-        ["transform", "gather", "scatter", "sort", "compact", "bucket"]
+        [
+            "transform",
+            "scan",
+            "reduce",
+            "gather",
+            "scatter",
+            "scatter_add",
+            "grouped_reduce",
+            "sort",
+            "compact",
+            "bucket",
+        ]
         if args.primitive == "all"
         else [args.primitive]
     )
@@ -386,6 +648,10 @@ def main():
                 continue
             if primitive == "transform":
                 stats = run_transform(args.arch, n, args.repeats)
+            elif primitive == "scan":
+                stats = run_scan(args.arch, n, args.repeats)
+            elif primitive == "reduce":
+                stats = run_reduce(args.arch, n, args.repeats)
             elif primitive == "sort":
                 stats = run_sort(args.arch, n, args.repeats)
             elif primitive == "compact":
@@ -394,11 +660,20 @@ def main():
                 stats = run_indexed_copy(args.arch, n, args.repeats, scatter=False)
             elif primitive == "scatter":
                 stats = run_indexed_copy(args.arch, n, args.repeats, scatter=True)
+            elif primitive == "scatter_add":
+                stats = run_scatter_add(args.arch, n, args.repeats)
+            elif primitive == "grouped_reduce":
+                stats = run_grouped_reduce(args.arch, n, args.repeats)
             else:
                 stats = run_bucket(args.arch, n, args.repeats)
             stats.update({"arch": args.arch, "n": n})
             results.append(stats)
-    print(json.dumps(results, indent=2, sort_keys=True))
+    payload = json.dumps(results, indent=2, sort_keys=True)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(payload)
+            f.write("\n")
+    print(payload)
 
 
 if __name__ == "__main__":

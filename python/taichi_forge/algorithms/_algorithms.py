@@ -1552,6 +1552,35 @@ def _member_sort_backend_method(method):
     )
 
 
+def _apply_order_to_tensor_member_values(
+    values,
+    order,
+    output,
+    *,
+    copy_method,
+    workspace,
+    use_temp,
+):
+    if not use_temp:
+        experimental_gather(values, order, output, method=copy_method)
+        return
+    if not hasattr(workspace, "_get_scalar_temp_buffer"):
+        raise RuntimeError("tensor member order apply requires scalar temp buffers.")
+    for value_component, output_component in zip(
+        _struct_tensor_member_components(values),
+        _struct_tensor_member_components(output),
+    ):
+        temp = workspace._get_scalar_temp_buffer(value_component.dtype, values.shape[0])
+        experimental_gather(value_component, order, temp, method=copy_method)
+        experimental_transform(
+            temp,
+            output_component,
+            scale=1,
+            bias=0,
+            method=copy_method,
+        )
+
+
 def _native_sort_tensor_member_values(
     keys,
     values,
@@ -1585,16 +1614,14 @@ def _native_sort_tensor_member_values(
         nan_policy=nan_policy,
     )
 
-    for component in _struct_tensor_member_components(values):
-        temp = workspace._get_scalar_temp_buffer(component.dtype, n)
-        experimental_gather(component, order, temp, method=copy_method)
-        experimental_transform(
-            temp,
-            component,
-            scale=1,
-            bias=0,
-            method=copy_method,
-        )
+    _apply_order_to_tensor_member_values(
+        values,
+        order,
+        values,
+        copy_method=copy_method,
+        workspace=workspace,
+        use_temp=True,
+    )
     return workspace
 
 
@@ -2096,32 +2123,14 @@ def experimental_compact(
             method=method,
             workspace=workspace,
         )
-        for value_component, output_component in zip(
-            _struct_tensor_member_components(values),
-            _struct_tensor_member_components(output),
-        ):
-            if current_cfg().arch == cuda:
-                temp_out = workspace._get_scalar_temp_buffer(value_component.dtype, n)
-                experimental_gather(
-                    value_component,
-                    order_out,
-                    temp_out,
-                    method=copy_method,
-                )
-                experimental_transform(
-                    temp_out,
-                    output_component,
-                    scale=1,
-                    bias=0,
-                    method=copy_method,
-                )
-            else:
-                experimental_gather(
-                    value_component,
-                    order_out,
-                    output_component,
-                    method=copy_method,
-                )
+        _apply_order_to_tensor_member_values(
+            values,
+            order_out,
+            output,
+            copy_method=copy_method,
+            workspace=workspace,
+            use_temp=False,
+        )
         return
 
     _check_compact_request(values, flags, output, count, method, workspace)
@@ -3304,8 +3313,6 @@ def _check_indexed_copy_request(src, indices, dst, method, workspace, op_name):
             (isinstance(src, Ndarray) or src_is_member)
             and isinstance(indices, Ndarray)
             and (isinstance(dst, Ndarray) or dst_is_member)
-            and not _is_opaque_raw_payload(src)
-            and not _is_opaque_raw_payload(dst)
         ):
             raise TypeError(
                 f"{op_name} ndarray mode requires source, indices, and "
@@ -4249,16 +4256,14 @@ def experimental_bucket_builder(
             method=method,
             workspace=workspace,
         )
-        for value_component, output_component in zip(
-            _struct_tensor_member_components(values),
-            _struct_tensor_member_components(output),
-        ):
-            experimental_gather(
-                value_component,
-                order_out,
-                output_component,
-                method=copy_method,
-            )
+        _apply_order_to_tensor_member_values(
+            values,
+            order_out,
+            output,
+            copy_method=copy_method,
+            workspace=workspace,
+            use_temp=False,
+        )
         return workspace
 
     _check_bucket_builder_request(keys, values, offsets, output, method, workspace)
