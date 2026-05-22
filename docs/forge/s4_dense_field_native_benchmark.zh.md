@@ -1,6 +1,6 @@
 ﻿# S4 Dense Field Native 路径性能对比
 
-日期：2026-05-22
+日期：2026-05-22；更新：2026-05-23
 
 本文记录 `taichi-forge 0.4.0` 在 dense 1D scalar field 上的 native
 `scan`、`reduce(sum)`、`transform_affine(dst = src * 3 + 7)` 实测结果，并与
@@ -34,19 +34,23 @@
   `benchmarks/results/s4_dense_field_native_cuda_runtime_repeat30_20260522/summary.csv`
 - Vulkan repeat30 稳定复测：
   `benchmarks/results/s4_dense_field_native_vulkan_runtime_repeat30_20260522/summary.csv`
+- NativePrimitivePlan 清理与 StructNdarray tensor member 复测：
+  `benchmarks/results/s4_native_plan_replay_clean_struct_tensor_20260523/summary.csv`
+- dense field 清理后对 vanilla 1.8.0 复测：
+  `benchmarks/results/s4_dense_field_native_clean_plan_20260523/summary.csv`
 
 ## 本轮 S4 更新
 
 本轮继续保持 field/SNode API 不变，优化发生在 descriptor、workspace replay 和
 backend native path 内部：
 
-- `ReduceWorkspace` 的 dense-field replay 从 Vulkan 专用 plan 泛化为
-  CPU/CUDA/Vulkan 通用 plan。重复调用同一组 dense field 时，直接 replay 到已经
-  确认可用的 native C++ entrypoint，跳过 `_primitive_view()`、materialize 和后端
-  capability 探测。
-- `TransformWorkspace` 同样增加 CPU/CUDA/Vulkan 通用 dense-field replay。
-- `PrefixSumExecutor` 增加 executor-local dense native scan plan。重复扫描同一
-  dense field 时跳过 Python view/proof 分发。
+- `ReduceWorkspace` 的 replay 从 dense field 专用逻辑收敛到
+  `_NativePrimitivePlan`。重复调用同一组 field/ndarray/StructNdarray scalar
+  member 时，直接 replay 到已经确认可用的 native C++ entrypoint。
+- `TransformWorkspace` 同样使用 `_NativePrimitivePlan`；StructNdarray whole
+  vector/matrix member transform replay 到 packed strided native call。
+- `PrefixSumExecutor` 使用 executor-local native scan plan。重复扫描同一 native
+  dense 对象时跳过 Python view/proof 分发。
 - CPU dense field native path 增加 contiguous fast path：当 field cell stride
   等于元素大小时，scan/reduce/transform 直接使用 contiguous typed loop。
 - CPU reduce 的 `op=sum` 增加 typed range-sum helper，避免每个元素走通用
@@ -131,7 +135,9 @@ Vulkan 使用 repeat30 复测。
 ## NativePrimitivePlan 替换后验证
 
 本轮将原 dense-field 专用 replay plan 泛化为 `_NativePrimitivePlan`，并让
-`field`、普通 `ndarray`、`StructNdarray` scalar member 共同使用该层。验证结果：
+`field`、普通 `ndarray`、`StructNdarray` scalar member 共同使用该层；
+`StructNdarray` whole vector/matrix member transform 也已接入同一层，replay
+到 packed strided native call。验证结果：
 
 - 新增可复跑脚本：
   `benchmarks/s4_native_plan_replay_bench.py`。
@@ -168,6 +174,33 @@ Vulkan 使用 repeat30 复测。
   CUDA 约 792-794 MB，Vulkan 约 57-89 MB；该指标不应直接解释为单个 primitive 的
   额外显存。
 
+2026-05-23 清理复测：
+
+- 已移除 `_NativeDenseFieldPlan`、`_dense_*_plan`、`_vulkan_dense_*_plan`
+  兼容层，dense field 分支直接记录 `_NativePrimitivePlan`。
+- `StructNdarray` whole vector/matrix member transform 已接入同一 plan 层，
+  replay 到 packed strided native call。
+- 结果目录：
+  `benchmarks/results/s4_native_plan_replay_clean_struct_tensor_20260523/summary.csv`。
+- 72 个组合中，whole tensor member 的 scan/reduce 因当前没有单次 packed
+  primitive 明确 skip；其余所有非 skip 组合均 `ok=True` 且 `plan_reused=True`。
+- 当前代码中可由 `_NativePrimitivePlan` 替换的旧 replay 包装均已替换：
+  reduce/transform workspace 和 scan executor 只保留 `_native_*_plan` 记录源；
+  旧 dense-field 兼容字段不再作为可读写状态存在。
+- S4.5 追加替换 `IndexedCopyWorkspace`：`experimental_gather()` /
+  `experimental_scatter()` 的 plain ndarray、`StructNdarray` scalar member 和
+  whole vector/matrix member direct native indexed-copy 调用已记录为
+  `_native_indexed_copy_plan`。StructNdarray member 不再回退到旧的 component
+  loop 或 field/kernel fallback；缺少 packed/strided native backend 时直接报错。
+
+新增代表性结果：
+
+| backend/storage/op | first 1024 ms | warm 1024 ms | first 1M ms | warm 1M ms | workspace |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| CPU StructTensor transform | 0.267 | 0.0244 | 1.820 | 0.400 | 0 B |
+| CUDA StructTensor transform | 9.206 | 0.0549 | 9.849 | 0.0344 | 0 B |
+| Vulkan StructTensor transform | 19.670 | 0.1961 | 22.159 | 0.1807 | 40 B |
+
 field 与 vanilla 1.8.0 复测结果：
 
 - 结果目录：
@@ -180,6 +213,18 @@ field 与 vanilla 1.8.0 复测结果：
 - Vulkan reduce/transform first-call 仍优于 vanilla；warm runtime 在小数组或
   部分 1M reduce 场景仍受 native submission 固定成本影响，尚未保证所有规模都
   优于 vanilla。
+
+清理后 dense field 复测结果：
+
+- 结果目录：
+  `benchmarks/results/s4_dense_field_native_clean_plan_20260523/summary.csv`。
+- CPU reduce/transform first-call 仍比 vanilla 快 28-104 倍；warm runtime
+  仍为 1.04-5.10 倍速度。
+- CUDA scan/reduce/transform first-call 仍比 vanilla 快 4.7-36 倍；warm runtime
+  仍为 1.14-23.19 倍速度。
+- Vulkan scan first-call 与 warm runtime 仍优于 vanilla；Vulkan reduce/transform
+  first-call 仍优于 vanilla；warm runtime 仍是后续 command/submission
+  摊销优化目标。
 
 ## 剩余问题
 
@@ -201,15 +246,22 @@ field 与 vanilla 1.8.0 复测结果：
   - replay 回归：CPU/CUDA/Vulkan scan/reduce/transform 共 9 passed。
   - dtype/native 回归：CPU/CUDA/Vulkan dense field scan/reduce/transform 共 9 passed。
   - CPU sum fast path focused 回归：4 passed。
-- `_NativePrimitivePlan` 替换后新增 focused replay 回归：9 passed。
+- `_NativePrimitivePlan` 统一替换并移除旧 dense plan 兼容层后，focused replay
+  回归：10 passed。
+- StructNdarray indexed gather/scatter plan 化后，`tests/python/test_indexed_copy.py`
+  文件级回归：20 passed。
 - CPU native 子集回归：reduce 7 passed、transform 9 passed、scan 8 passed。
-- CUDA/Vulkan 代表性回归：18 passed。
+- CUDA/Vulkan 代表性回归：20 passed。
 - 本地 wheel 已重新生成：
   `dist/taichi_forge-0.4.0-cp310-cp310-win_amd64.whl`。
 - 3.10 wheel smoke 通过：安装到
-  `build_llvm20_test/wheel_smoke_s4_native_plan_unified_20260522` 后
+  `build_llvm20_test/wheel_smoke_s4_clean_struct_plan_20260523` 后
   `import taichi_forge as ti; ti.init(arch=ti.cpu)` 成功。当前机器用户给定的
   miniforge 3.10 路径不可执行，本轮使用
   `C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe`
   完成等价版本检查和 smoke。
+- S4.5 indexed-copy plan 更新后已重新生成同一 wheel，并安装到
+  `build_llvm20_test/wheel_smoke_s4_indexed_plan_20260523` 做
+  `import taichi_forge as ti; ti.init(arch=ti.cpu)` smoke，通过。offline cache
+  lock warning 不影响导入和 CPU 初始化。
 - 当前修改未触达 runtime bitcode，因此无需同步 `runtime_cuda.bc` 或 `runtime_x64.bc`。

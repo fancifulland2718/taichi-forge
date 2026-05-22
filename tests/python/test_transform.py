@@ -275,8 +275,8 @@ def test_experimental_transform_cuda_device_dense_field_workspace_replay():
             src, dst, scale=3, bias=-2, method="cuda_device", workspace=workspace
         )
         np.testing.assert_array_equal(dst.to_numpy(), data * 3 - 2)
-    assert workspace._dense_transform_plan is not None
-    assert workspace._dense_transform_plan["backend"] == "cuda_device"
+    assert workspace._native_transform_plan is not None
+    assert workspace._native_transform_plan["backend"] == "cuda_device"
 
 
 @test_utils.test(arch=[ti.cuda])
@@ -468,7 +468,8 @@ def test_experimental_transform_vulkan_native_dense_field_workspace_replay():
             workspace=workspace,
         )
         assert np.array_equal(dst.to_numpy(), data * np.int32(3) + np.int32(7))
-    assert workspace._vulkan_dense_transform_plan is not None
+    assert workspace._native_transform_plan is not None
+    assert workspace._native_transform_plan["backend"] == "vulkan_native"
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -646,9 +647,8 @@ def test_experimental_transform_cpu_native_dense_field_workspace_replay():
             src, dst, scale=3, bias=-2, method="cpu_native", workspace=workspace
         )
         np.testing.assert_array_equal(dst.to_numpy(), data * 3 - 2)
-    assert workspace._dense_transform_plan is not None
-    assert workspace._dense_transform_plan["backend"] == "cpu_native"
-    assert workspace._vulkan_dense_transform_plan is None
+    assert workspace._native_transform_plan is not None
+    assert workspace._native_transform_plan["backend"] == "cpu_native"
 
 
 @test_utils.test(arch=[ti.cpu])
@@ -755,6 +755,57 @@ def test_experimental_transform_cpu_native_struct_tensor_member_view():
             dtype, n, method="cpu_native", workspace=workspace
         )
         assert workspace.workspace_bytes_peak == 0
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_transform_cpu_native_struct_tensor_member_workspace_replay():
+    n = 128
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cpu_transform_available")
+        and prog.cpu_transform_available()
+        and hasattr(prog, "cpu_transform_affine_packed_strided_ndarray")
+    ):
+        pytest.skip("CPU packed tensor member transform is unavailable.")
+
+    payload = ti.types.struct(vec=ti.types.vector(2, ti.i32), tag=ti.i32)
+    src = ti.ndarray(payload, shape=n)
+    dst = ti.ndarray(payload, shape=n)
+    src_view = src.field("vec")
+    dst_view = dst.field("vec")
+    workspace = ti.algorithms.TransformWorkspace(max_items=n)
+    first_plan = None
+    for base in (0, 17):
+        values = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) + base).astype(
+            np.int32
+        )
+        src_host = np.zeros((n,), dtype=src.numpy_dtype)
+        dst_host = np.zeros((n,), dtype=dst.numpy_dtype)
+        src_host["vec"] = values
+        src_host["tag"] = np.arange(n, dtype=np.int32) * 3 + 1
+        dst_host["tag"] = np.arange(n, dtype=np.int32) * 11 - 3
+        src.from_numpy(src_host)
+        dst.from_numpy(dst_host)
+        ti.algorithms.experimental_transform(
+            src_view,
+            dst_view,
+            scale=3,
+            bias=7,
+            method="cpu_native",
+            workspace=workspace,
+        )
+        result = dst.to_numpy()
+        np.testing.assert_array_equal(result["vec"], values * 3 + 7)
+        np.testing.assert_array_equal(result["tag"], dst_host["tag"])
+        if first_plan is None:
+            first_plan = workspace._native_transform_plan
+        else:
+            assert workspace._native_transform_plan is first_plan
+    assert workspace._native_transform_plan["backend"] == "cpu_native"
+    assert (
+        workspace._native_transform_plan["method_name"]
+        == "cpu_transform_affine_packed_strided_ndarray"
+    )
 
 
 @test_utils.test(arch=[ti.cpu])

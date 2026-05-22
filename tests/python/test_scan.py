@@ -270,8 +270,8 @@ def test_scan_dense_field_cpu_native_executor_replay():
         executor.run(arr)
         expected = np.cumsum(data, dtype=np.int32).astype(np.int32)
         _assert_scan_equal(arr.to_numpy(), expected)
-    assert executor._dense_native_scan_plan is not None
-    assert executor._dense_native_scan_plan["backend"] == "cpu_native"
+    assert executor._native_scan_plan is not None
+    assert executor._native_scan_plan["backend"] == "cpu_native"
 
 
 @test_utils.test(arch=[ti.cuda])
@@ -306,8 +306,8 @@ def test_scan_dense_field_cuda_cub_executor_replay():
         executor.run(arr)
         expected = np.cumsum(data, dtype=np.int32).astype(np.int32)
         _assert_scan_equal(arr.to_numpy(), expected)
-    assert executor._dense_native_scan_plan is not None
-    assert executor._dense_native_scan_plan["backend"] == "cuda_cub"
+    assert executor._native_scan_plan is not None
+    assert executor._native_scan_plan["backend"] == "cuda_cub"
 
 
 @test_utils.test(arch=[ti.cpu])

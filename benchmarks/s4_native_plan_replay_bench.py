@@ -88,7 +88,16 @@ def _available(ti, arch_name: str, op_name: str, storage: str) -> tuple[bool, st
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
+    if storage == "struct_tensor_member" and op_name != "transform":
+        return False, "tensor-member replay plan is transform-only"
     if arch_name == "cpu":
+        if storage == "struct_tensor_member":
+            name = "cpu_transform_affine_packed_strided_ndarray"
+            return (
+                hasattr(prog, "cpu_transform_available")
+                and prog.cpu_transform_available()
+                and hasattr(prog, name)
+            ), name
         names = {
             "scan": "cpu_scan_available",
             "reduce": "cpu_reduce_available",
@@ -101,11 +110,16 @@ def _available(ti, arch_name: str, op_name: str, storage: str) -> tuple[bool, st
             name = "cuda_cub_scan_available"
         elif op_name == "reduce":
             name = "cuda_cub_reduce_available"
-        elif storage == "struct_member":
+        elif storage in ("struct_member", "struct_tensor_member"):
             name = "cuda_toolkit_transform_available"
         else:
             name = "cuda_device_transform_available"
-        return hasattr(prog, name) and getattr(prog, name)(), name
+        ok = hasattr(prog, name) and getattr(prog, name)()
+        if storage == "struct_tensor_member":
+            packed = "cuda_device_transform_affine_packed_strided_ndarray"
+            ok = ok and hasattr(prog, packed)
+            name = packed
+        return ok, name
     if arch_name == "vulkan":
         names = {
             "scan": "vulkan_scan_available",
@@ -122,6 +136,10 @@ def _available(ti, arch_name: str, op_name: str, storage: str) -> tuple[bool, st
         }[op_name]
         if hasattr(prog, value_gate) and not getattr(prog, value_gate)(0):
             return False, value_gate
+        if storage == "struct_tensor_member":
+            packed = "vulkan_transform_affine_packed_strided_ndarray"
+            if not hasattr(prog, packed):
+                return False, packed
         return True, name
     return False, arch_name
 
@@ -165,6 +183,17 @@ def _make_storage(ti, storage: str, n: int):
         host["tag"] = np.arange(n, dtype=np.int32) * 5 + 7
         base.from_numpy(host)
         return base.field("value"), base, host, data
+    if storage == "struct_tensor_member":
+        payload = ti.types.struct(vec=ti.types.vector(2, ti.i32), tag=ti.i32)
+        base = ti.ndarray(payload, shape=n)
+        data = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 17 - 8).astype(
+            np.int32
+        )
+        host = np.zeros((n,), dtype=base.numpy_dtype)
+        host["vec"] = data
+        host["tag"] = np.arange(n, dtype=np.int32) * 5 + 7
+        base.from_numpy(host)
+        return base.field("vec"), base, host, data
     raise ValueError(storage)
 
 
@@ -248,13 +277,20 @@ def _make_body(ti, arch_name: str, op_name: str, storage: str, n: int):
             dst = ti.field(ti.i32, shape=n)
         elif storage == "ndarray":
             dst = ti.ndarray(ti.i32, shape=n)
-        else:
+        elif storage == "struct_member":
             payload = ti.types.struct(value=ti.i32, tag=ti.i32)
             dst_owner = ti.ndarray(payload, shape=n)
             dst_host = np.zeros((n,), dtype=dst_owner.numpy_dtype)
             dst_host["tag"] = np.arange(n, dtype=np.int32) * 11 - 3
             dst_owner.from_numpy(dst_host)
             dst = dst_owner.field("value")
+        else:
+            payload = ti.types.struct(vec=ti.types.vector(2, ti.i32), tag=ti.i32)
+            dst_owner = ti.ndarray(payload, shape=n)
+            dst_host = np.zeros((n,), dtype=dst_owner.numpy_dtype)
+            dst_host["tag"] = np.arange(n, dtype=np.int32) * 11 - 3
+            dst_owner.from_numpy(dst_host)
+            dst = dst_owner.field("vec")
 
         def body():
             ti.algorithms.experimental_transform(
@@ -270,13 +306,20 @@ def _make_body(ti, arch_name: str, op_name: str, storage: str, n: int):
                 actual = dst.to_numpy()
             elif storage == "ndarray":
                 actual = dst.to_numpy()
-            else:
+            elif storage == "struct_member":
                 result = dst_owner.to_numpy()
                 if not np.array_equal(
                     result["tag"], np.arange(n, dtype=np.int32) * 11 - 3
                 ):
                     return False
                 actual = result["value"]
+            else:
+                result = dst_owner.to_numpy()
+                if not np.array_equal(
+                    result["tag"], np.arange(n, dtype=np.int32) * 11 - 3
+                ):
+                    return False
+                actual = result["vec"]
             return bool(np.array_equal(actual, expected))
 
         return body, plan, verify, lambda: int(workspace.workspace_bytes_peak)
@@ -522,7 +565,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--child", action="store_true")
     parser.add_argument("--arch", choices=["cpu", "cuda", "vulkan"])
     parser.add_argument(
-        "--storage", choices=["field", "ndarray", "struct_member"]
+        "--storage",
+        choices=["field", "ndarray", "struct_member", "struct_tensor_member"],
     )
     parser.add_argument("--op", choices=["scan", "reduce", "transform"])
     parser.add_argument("--n", type=int)
@@ -536,7 +580,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--arches", nargs="+", default=["cpu", "cuda", "vulkan"])
     parser.add_argument(
-        "--storages", nargs="+", default=["field", "ndarray", "struct_member"]
+        "--storages",
+        nargs="+",
+        default=["field", "ndarray", "struct_member", "struct_tensor_member"],
     )
     parser.add_argument("--ops", nargs="+", default=["scan", "reduce", "transform"])
     parser.add_argument("--sizes", nargs="+", type=int, default=[1024, 1048576])

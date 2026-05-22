@@ -166,6 +166,43 @@ def _run_struct_tensor_member_indexed_copy(method, scatter):
     return workspace
 
 
+def _make_struct_scalar_indexed_copy_case(n=256):
+    payload = ti.types.struct(val=ti.i32, tag=ti.i32)
+    src = ti.ndarray(payload, shape=n)
+    dst = ti.ndarray(payload, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    index_data = _reverse_indices(n)
+    host = np.zeros((n,), dtype=src.numpy_dtype)
+    dst_host = np.zeros((n,), dtype=dst.numpy_dtype)
+    host["val"] = (np.arange(n, dtype=np.int32) * 5 + 3) % 127 - 63
+    host["tag"] = np.arange(n, dtype=np.int32) * 11 + 7
+    dst_host["tag"] = np.arange(n, dtype=np.int32) * 13 + 9
+    src.from_numpy(host)
+    dst.from_numpy(dst_host)
+    indices.from_numpy(index_data)
+    return src, dst, indices, index_data, host, dst_host
+
+
+def _make_struct_tensor_indexed_copy_case(n=256):
+    payload = ti.types.struct(
+        vec=ti.types.vector(2, ti.i32),
+        tag=ti.i32,
+    )
+    src = ti.ndarray(payload, shape=n)
+    dst = ti.ndarray(payload, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    index_data = _reverse_indices(n)
+    host = np.zeros((n,), dtype=src.numpy_dtype)
+    dst_host = np.zeros((n,), dtype=dst.numpy_dtype)
+    host["vec"] = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 97) - 48
+    host["tag"] = np.arange(n, dtype=np.int32) * 17 + 3
+    dst_host["tag"] = np.arange(n, dtype=np.int32) * 19 + 5
+    src.from_numpy(host)
+    dst.from_numpy(dst_host)
+    indices.from_numpy(index_data)
+    return src, dst, indices, index_data, host, dst_host
+
+
 def _run_invalid_index_ndarray(method, scatter):
     src = ti.ndarray(ti.i32, shape=4)
     indices = ti.ndarray(ti.i32, shape=4)
@@ -186,6 +223,64 @@ def _run_invalid_index_ndarray(method, scatter):
         ti.algorithms.experimental_gather(src, indices, dst, method=method)
         expected = np.array([40, 0, 0, 10], dtype=np.int32)
     assert np.array_equal(dst.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cpu)
+def test_experimental_gather_cpu_native_struct_scalar_member_workspace_replay():
+    src, dst, indices, index_data, host, dst_host = _make_struct_scalar_indexed_copy_case()
+    src_val = src.field("val")
+    dst_val = dst.field("val")
+    workspace = ti.algorithms.IndexedCopyWorkspace(max_items=src.shape[0])
+
+    ti.algorithms.experimental_gather(
+        src_val, indices, dst_val, method="cpu_native", workspace=workspace
+    )
+    first_plan = workspace._native_indexed_copy_plan
+    assert first_plan is not None
+    assert first_plan["backend"] == "cpu_native"
+    assert first_plan["method_name"] == "cpu_gather_strided_ndarray"
+
+    host["val"] = host["val"] * np.int32(-2) + np.int32(5)
+    dst_host["val"] = np.full(src.shape[0], -1000, dtype=np.int32)
+    src.from_numpy(host)
+    dst.from_numpy(dst_host)
+    ti.algorithms.experimental_gather(
+        src_val, indices, dst_val, method="cpu_native", workspace=workspace
+    )
+
+    assert workspace._native_indexed_copy_plan is first_plan
+    result = dst.to_numpy()
+    assert np.array_equal(result["val"], host["val"][index_data])
+    assert np.array_equal(result["tag"], dst_host["tag"])
+
+
+@test_utils.test(arch=ti.cpu)
+def test_experimental_scatter_cpu_native_struct_tensor_member_workspace_replay():
+    src, dst, indices, index_data, host, dst_host = _make_struct_tensor_indexed_copy_case()
+    src_vec = src.field("vec")
+    dst_vec = dst.field("vec")
+    workspace = ti.algorithms.IndexedCopyWorkspace(max_items=src.shape[0])
+
+    ti.algorithms.experimental_scatter(
+        src_vec, indices, dst_vec, method="cpu_native", workspace=workspace
+    )
+    first_plan = workspace._native_indexed_copy_plan
+    assert first_plan is not None
+    assert first_plan["backend"] == "cpu_native"
+    assert first_plan["method_name"] == "cpu_scatter_strided_ndarray"
+
+    host["vec"] = host["vec"] * np.int32(3) - np.int32(4)
+    dst_host["vec"] = np.full((src.shape[0], 2), -1000, dtype=np.int32)
+    src.from_numpy(host)
+    dst.from_numpy(dst_host)
+    ti.algorithms.experimental_scatter(
+        src_vec, indices, dst_vec, method="cpu_native", workspace=workspace
+    )
+
+    assert workspace._native_indexed_copy_plan is first_plan
+    result = dst.to_numpy()
+    assert np.array_equal(result["vec"], host["vec"][index_data])
+    assert np.array_equal(result["tag"], dst_host["tag"])
 
 
 @test_utils.test(arch=[ti.cuda])

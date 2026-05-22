@@ -415,10 +415,11 @@ S0 进入 S1 的条件：
 - 已将上述 replay 逻辑收敛到内部 `_NativePrimitivePlan`。该对象只保存
   backend、method name、Python 对象 identity、semantic key 和 C++ native call
   arguments；它不生成 Taichi IR、不改变 offline cache key、不新增 C++ ABI，也不
-  暴露为 public API。当前作用是让 scan/reduce/transform 共享同一套 replay 规则，
-  便于后续 S5 primitive 复用。
-- 旧的 `_dense_*_plan` 内部字段保留为兼容别名，实际记录源统一为
-  `_native_reduce_plan`、`_native_transform_plan` 和 `_native_scan_plan`。
+  暴露为 public API。当前作用是让 scan/reduce/transform 以及 direct indexed
+  gather/scatter 共享同一套 replay 规则，便于后续 S5 primitive 复用。
+- 旧的 `_dense_*_plan`、`_vulkan_dense_*_plan` 和 `_NativeDenseFieldPlan`
+  兼容别名已移除；实际记录源统一为 `_native_reduce_plan`、
+  `_native_transform_plan` 和 `_native_scan_plan`。
 - CPU dense field native path 增加 contiguous fast path。stride 等于元素大小时，
   scan/reduce/transform 直接使用 contiguous typed loop；其他 dense/strided 布局
   继续保留原 strided 语义。
@@ -469,12 +470,11 @@ S0 进入 S1 的条件：
   command submission 固定成本限制。
 - 新增 dense-field workspace/executor replay 回归测试，覆盖 CPU/CUDA/Vulkan 的
   scan/reduce/transform 连续调用时输入数据变化后的正确性。
-- `_NativePrimitivePlan` 抽出后 replay focused 回归继续通过：9 passed。该抽象为
-  Python-only，未触达 C++、runtime bitcode、pybind、CompileConfig 或 offline
-  cache metadata；因此不会引入新的编译成本。
-- `_NativePrimitivePlan` 替换 `ndarray` 与 `StructNdarray` scalar member 重复
-  replay 逻辑后，CPU focused replay 回归通过：9 passed，覆盖 dense field、
-  ndarray、StructNdarray member 的 reduce/transform/scan 二次调用复用。
+- `_NativePrimitivePlan` 统一替换 dense field、`ndarray` 与 `StructNdarray`
+  scalar member 的重复 replay 逻辑，并补充 `StructNdarray` whole
+  vector/matrix member transform replay 后，CPU focused replay 回归通过：
+  10 passed。该抽象为 Python-only，未触达 C++、runtime bitcode、pybind、
+  CompileConfig 或 offline cache metadata；因此不会引入新的编译成本。
 - CPU native 子集回归通过：reduce 7 passed、transform 9 passed、scan 8 passed。
 - CUDA/Vulkan 代表性回归通过：18 passed；同时将 Vulkan i32 ndarray transform
   workspace 断言更新为 0 B，匹配 push-constant 路径。
@@ -488,12 +488,38 @@ S0 进入 S1 的条件：
   CPU/CUDA first-call 和 warm runtime 仍整体优于 vanilla；Vulkan scan 仍优于
   vanilla；Vulkan reduce/transform first-call 优于 vanilla，但部分 warm runtime
   仍受 native submission 固定成本限制。
+- 旧 dense plan 兼容层移除并将 StructNdarray whole vector/matrix member transform
+  接入 `_NativePrimitivePlan` 后，新增复测写入
+  `benchmarks/results/s4_native_plan_replay_clean_struct_tensor_20260523/summary.csv`。
+  72 个组合中，whole tensor member 的 scan/reduce 因当前没有单次 packed
+  primitive 明确 skip；其余所有非 skip 组合均 `ok=True` 且 `plan_reused=True`。
+- 当前可被 `_NativePrimitivePlan` 替换的 replay 实现均已替换；剩余未接入项是
+  真实缺少对应单次 native primitive 的 whole tensor member scan/reduce，而不是
+  旧兼容包装残留。
+- S4.5 继续将 StructNdarray indexed copy/gather/scatter 接入
+  `_NativePrimitivePlan`：`IndexedCopyWorkspace` 新增 `_native_indexed_copy_plan`，
+  plain ndarray、StructNdarray scalar member 和 StructNdarray whole tensor member
+  的 direct native indexed-copy 调用均可 replay。旧的 whole tensor member
+  component fallback 和 scalar member field/kernel fallback 已移除；native
+  packed/strided backend 不可用时直接报错，避免静默回到多次 helper 调用。
+- indexed copy 文件级回归通过：`tests/python/test_indexed_copy.py` 20 passed。
+- dense field 对 vanilla 1.8.0 清理后复测写入
+  `benchmarks/results/s4_dense_field_native_clean_plan_20260523/summary.csv`。
+  CPU/CUDA first-call 与 warm runtime 仍优于 vanilla；Vulkan scan 仍优于 vanilla；
+  Vulkan reduce/transform first-call 仍优于 vanilla，warm runtime 仍保留此前的
+  submission 固定成本问题。
+- 本轮为 Python 调度层更新，未触达 C++、pybind、runtime bitcode、CompileConfig
+  或 ABI，因此未重新执行 `_run_build.cmd`。
 - 已重新打包本地 wheel：
   `dist/taichi_forge-0.4.0-cp310-cp310-win_amd64.whl`。
 - 3.10 wheel smoke 通过：安装到
-  `build_llvm20_test/wheel_smoke_s4_native_plan_unified_20260522` 后
-  `import taichi_forge as ti; ti.init(arch=ti.cpu)` 成功。当前机器用户给定的
-  miniforge 3.10 路径不可执行，因此本轮使用
+  `build_llvm20_test/wheel_smoke_s4_clean_struct_plan_20260523` 后
+  `import taichi_forge as ti; ti.init(arch=ti.cpu)` 成功。
+- S4.5 indexed-copy plan 更新后重新打包同一 wheel，并安装到
+  `build_llvm20_test/wheel_smoke_s4_indexed_plan_20260523` 后完成
+  `import taichi_forge as ti; ti.init(arch=ti.cpu)` smoke；offline cache lock
+  warning 不影响导入和 CPU 初始化。
+- 当前机器用户给定的 miniforge 3.10 路径不可执行，因此本轮使用
   `C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe`
   完成等价版本检查和 smoke。
 - repeat30 稳定复测结果写入

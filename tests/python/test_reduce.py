@@ -187,8 +187,8 @@ def test_experimental_reduce_cuda_cub_dense_field_workspace_replay():
             values, output, op="sum", method="cuda_cub", workspace=workspace
         )
         assert output[None] == np.sum(values_np, dtype=np.int32)
-    assert workspace._dense_reduce_plan is not None
-    assert workspace._dense_reduce_plan["backend"] == "cuda_cub"
+    assert workspace._native_reduce_plan is not None
+    assert workspace._native_reduce_plan["backend"] == "cuda_cub"
 
 
 @test_utils.test(arch=[ti.cuda])
@@ -269,7 +269,8 @@ def test_experimental_reduce_vulkan_native_dense_field_workspace_replay():
             values, output, op="sum", method="vulkan_native", workspace=workspace
         )
         assert output[None] == np.sum(values_np, dtype=np.int32)
-    assert workspace._vulkan_dense_reduce_plan is not None
+    assert workspace._native_reduce_plan is not None
+    assert workspace._native_reduce_plan["backend"] == "vulkan_native"
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -391,9 +392,8 @@ def test_experimental_reduce_cpu_native_dense_field_workspace_replay():
             values, output, op="sum", method="cpu_native", workspace=workspace
         )
         assert output[None] == np.sum(values_np, dtype=np.int32)
-    assert workspace._dense_reduce_plan is not None
-    assert workspace._dense_reduce_plan["backend"] == "cpu_native"
-    assert workspace._vulkan_dense_reduce_plan is None
+    assert workspace._native_reduce_plan is not None
+    assert workspace._native_reduce_plan["backend"] == "cpu_native"
 
 
 @test_utils.test(arch=[ti.cpu])

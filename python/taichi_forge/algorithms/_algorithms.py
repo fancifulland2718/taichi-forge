@@ -327,9 +327,6 @@ class _NativePrimitivePlan:
         return 0 if temp_bytes is None else temp_bytes
 
 
-_NativeDenseFieldPlan = _NativePrimitivePlan
-
-
 def _tuple_shape(value):
     if value is None:
         return ()
@@ -824,8 +821,6 @@ class ReduceWorkspace:
         self._cuda_cub_active = False
         self._vulkan_native_active = False
         self._native_reduce_plan = None
-        self._dense_reduce_plan = None
-        self._vulkan_dense_reduce_plan = None
 
     def clear(self):
         if self._cuda_cub_active:
@@ -846,8 +841,6 @@ class ReduceWorkspace:
         self._cuda_cub_active = False
         self._vulkan_native_active = False
         self._native_reduce_plan = None
-        self._dense_reduce_plan = None
-        self._vulkan_dense_reduce_plan = None
 
     def check_shape(self, n):
         if self.max_items is not None and n > self.max_items:
@@ -855,7 +848,7 @@ class ReduceWorkspace:
                 f"Requested {n} reduce items, exceeding max_items={self.max_items}."
             )
 
-    def _dense_reduce_backend_for_method(self, method):
+    def _native_reduce_backend_for_method(self, method):
         arch = current_cfg().arch
         if arch == cuda and method in ("auto", "cuda_cub"):
             return "cuda_cub"
@@ -865,7 +858,7 @@ class ReduceWorkspace:
             return "cpu_native"
         return None
 
-    def _mark_dense_reduce_backend_active(self, backend, temp_bytes):
+    def _mark_native_reduce_backend_active(self, backend, temp_bytes):
         temp_bytes = 0 if temp_bytes is None else temp_bytes
         if backend == "cuda_cub":
             self._cuda_cub_active = True
@@ -877,7 +870,7 @@ class ReduceWorkspace:
         )
 
     def _try_native_reduce_plan(self, values, output, op, method):
-        backend = self._dense_reduce_backend_for_method(method)
+        backend = self._native_reduce_backend_for_method(method)
         if backend is None:
             return False
         plan = self._native_reduce_plan
@@ -893,14 +886,8 @@ class ReduceWorkspace:
         temp_bytes = plan.invoke(prog)
         if temp_bytes is None:
             return False
-        self._mark_dense_reduce_backend_active(backend, temp_bytes)
+        self._mark_native_reduce_backend_active(backend, temp_bytes)
         return True
-
-    def _try_dense_reduce_plan(self, values, output, op, method):
-        return self._try_native_reduce_plan(values, output, op, method)
-
-    def _try_vulkan_dense_reduce_plan(self, values, output, op, method):
-        return self._try_native_reduce_plan(values, output, op, method)
 
     def _record_native_reduce_plan(
         self,
@@ -925,57 +912,6 @@ class ReduceWorkspace:
             n=n,
         )
         self._native_reduce_plan = plan
-        self._dense_reduce_plan = plan
-        self._vulkan_dense_reduce_plan = (
-            plan if backend == "vulkan_native" else None
-        )
-
-    def _record_dense_reduce_plan(
-        self,
-        backend,
-        method_name,
-        values,
-        output,
-        values_view,
-        output_view,
-        value_type,
-        op,
-        op_id,
-        prog,
-    ):
-        self._record_native_reduce_plan(
-            backend,
-            method_name,
-            values,
-            output,
-            value_type,
-            op,
-            (
-                values_view.snode,
-                output_view.snode,
-                value_type,
-                values_view.num_elements,
-                op_id,
-            ),
-            values_view.num_elements,
-            prog,
-        )
-
-    def _record_vulkan_dense_reduce_plan(
-        self, values, output, values_view, output_view, value_type, op, op_id, prog
-    ):
-        self._record_dense_reduce_plan(
-            "vulkan_native",
-            "vulkan_reduce_dense_field",
-            values,
-            output,
-            values_view,
-            output_view,
-            value_type,
-            op,
-            op_id,
-            prog,
-        )
 
     def _get_field_private_buffers(self, n, dtype):
         self.check_shape(n)
@@ -1077,8 +1013,6 @@ class TransformWorkspace:
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
         self._native_transform_plan = None
-        self._dense_transform_plan = None
-        self._vulkan_dense_transform_plan = None
 
     def check_shape(self, n):
         if self.max_items is not None and n > self.max_items:
@@ -1086,7 +1020,7 @@ class TransformWorkspace:
                 f"Requested {n} transform items, exceeding max_items={self.max_items}."
             )
 
-    def _dense_transform_backend_for_method(self, method):
+    def _native_transform_backend_for_method(self, method):
         arch = current_cfg().arch
         if arch == cuda and method in ("auto", "cuda_device"):
             return "cuda_device"
@@ -1096,7 +1030,7 @@ class TransformWorkspace:
             return "cpu_native"
         return None
 
-    def _mark_dense_transform_backend_active(self, backend, temp_bytes):
+    def _mark_native_transform_backend_active(self, backend, temp_bytes):
         temp_bytes = 0 if temp_bytes is None else temp_bytes
         if backend == "vulkan_native":
             self._vulkan_native_active = True
@@ -1106,7 +1040,7 @@ class TransformWorkspace:
         )
 
     def _try_native_transform_plan(self, src, dst, method, scale, bias):
-        backend = self._dense_transform_backend_for_method(method)
+        backend = self._native_transform_backend_for_method(method)
         if backend is None:
             return False
         plan = self._native_transform_plan
@@ -1122,14 +1056,8 @@ class TransformWorkspace:
         temp_bytes = plan.invoke(prog)
         if temp_bytes is None:
             return False
-        self._mark_dense_transform_backend_active(backend, temp_bytes)
+        self._mark_native_transform_backend_active(backend, temp_bytes)
         return True
-
-    def _try_dense_transform_plan(self, src, dst, method, scale, bias):
-        return self._try_native_transform_plan(src, dst, method, scale, bias)
-
-    def _try_vulkan_dense_transform_plan(self, src, dst, method, scale, bias):
-        return self._try_native_transform_plan(src, dst, method, scale, bias)
 
     def _record_native_transform_plan(
         self,
@@ -1155,59 +1083,6 @@ class TransformWorkspace:
             n=n,
         )
         self._native_transform_plan = plan
-        self._dense_transform_plan = plan
-        self._vulkan_dense_transform_plan = (
-            plan if backend == "vulkan_native" else None
-        )
-
-    def _record_dense_transform_plan(
-        self,
-        backend,
-        method_name,
-        src,
-        dst,
-        src_view,
-        dst_view,
-        value_type,
-        scale,
-        bias,
-        prog,
-    ):
-        self._record_native_transform_plan(
-            backend,
-            method_name,
-            src,
-            dst,
-            value_type,
-            scale,
-            bias,
-            (
-                src_view.snode,
-                dst_view.snode,
-                value_type,
-                src_view.num_elements,
-                scale,
-                bias,
-            ),
-            src_view.num_elements,
-            prog,
-        )
-
-    def _record_vulkan_dense_transform_plan(
-        self, src, dst, src_view, dst_view, value_type, scale, bias, prog
-    ):
-        self._record_dense_transform_plan(
-            "vulkan_native",
-            "vulkan_transform_affine_dense_field",
-            src,
-            dst,
-            src_view,
-            dst_view,
-            value_type,
-            scale,
-            bias,
-            prog,
-        )
 
     def clear(self):
         if self._vulkan_native_active:
@@ -1220,8 +1095,6 @@ class TransformWorkspace:
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
         self._native_transform_plan = None
-        self._dense_transform_plan = None
-        self._vulkan_dense_transform_plan = None
 
 
 class IndexedCopyWorkspace:
@@ -1237,12 +1110,77 @@ class IndexedCopyWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
+        self._native_indexed_copy_plan = None
 
     def check_shape(self, n):
         if self.max_items is not None and n > self.max_items:
             raise ValueError(
                 f"Requested {n} indexed-copy items, exceeding max_items={self.max_items}."
             )
+
+    def _native_indexed_copy_backend_for_method(self, method):
+        arch = current_cfg().arch
+        if arch == cuda and method in ("auto", "cuda_device"):
+            return "cuda_device"
+        if arch == vulkan and method in ("auto", "vulkan_native"):
+            return "vulkan_native"
+        if arch in [x64, arm64] and method in ("auto", "cpu_native"):
+            return "cpu_native"
+        return None
+
+    def _mark_native_indexed_copy_backend_active(self, backend, temp_bytes):
+        temp_bytes = 0 if temp_bytes is None else temp_bytes
+        if backend == "vulkan_native":
+            self._vulkan_native_active = True
+        self.workspace_bytes_current = max(self.workspace_bytes_current, temp_bytes)
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak, self.workspace_bytes_current
+        )
+
+    def _try_native_indexed_copy_plan(self, src, indices, dst, method, scatter):
+        backend = self._native_indexed_copy_backend_for_method(method)
+        if backend is None:
+            return False
+        plan = self._native_indexed_copy_plan
+        if plan is None:
+            return False
+        if not plan.matches_request(backend, (src, indices, dst), (bool(scatter),)):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not plan.matches_program(prog):
+            return False
+        temp_bytes = plan.invoke(prog)
+        if temp_bytes is None:
+            return False
+        self._mark_native_indexed_copy_backend_active(backend, temp_bytes)
+        return True
+
+    def _record_native_indexed_copy_plan(
+        self,
+        backend,
+        method_name,
+        src,
+        indices,
+        dst,
+        item_bytes,
+        scatter,
+        call_args,
+        n,
+        prog,
+    ):
+        plan = _NativePrimitivePlan(
+            backend=backend,
+            method_name=method_name,
+            objects=(src, indices, dst),
+            semantic_key=(bool(scatter),),
+            call_args=call_args,
+            prog=prog,
+            value_type=item_bytes,
+            n=n,
+        )
+        self._native_indexed_copy_plan = plan
 
     def clear(self):
         if self._vulkan_native_active:
@@ -1254,6 +1192,7 @@ class IndexedCopyWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
+        self._native_indexed_copy_plan = None
 
 
 class ScatterAddWorkspace:
@@ -2793,19 +2732,26 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
             _SUPPORTED_REDUCE_OPS[op],
         )
         if workspace is not None:
-            workspace._record_dense_reduce_plan(
+            value_type = _reduce_value_type(values_view.dtype)
+            op_id = _SUPPORTED_REDUCE_OPS[op]
+            workspace._record_native_reduce_plan(
                 "cuda_cub",
                 "cuda_cub_reduce_dense_field",
                 values,
                 output,
-                values_view,
-                output_view,
-                _reduce_value_type(values_view.dtype),
+                value_type,
                 op,
-                _SUPPORTED_REDUCE_OPS[op],
+                (
+                    values_view.snode,
+                    output_view.snode,
+                    value_type,
+                    values_view.num_elements,
+                    op_id,
+                ),
+                values_view.num_elements,
                 prog,
             )
-            workspace._mark_dense_reduce_backend_active("cuda_cub", temp_bytes)
+            workspace._mark_native_reduce_backend_active("cuda_cub", temp_bytes)
         return True
     values_is_member = _is_struct_scalar_member_view(values)
     output_is_member = _is_struct_scalar_member_view(output)
@@ -2857,7 +2803,7 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
                 values.shape[0],
                 prog,
             )
-            workspace._mark_dense_reduce_backend_active("cuda_cub", temp_bytes)
+            workspace._mark_native_reduce_backend_active("cuda_cub", temp_bytes)
         return True
     if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
         return False
@@ -2888,7 +2834,7 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
             values.shape[0],
             prog,
         )
-        workspace._mark_dense_reduce_backend_active("cuda_cub", temp_bytes)
+        workspace._mark_native_reduce_backend_active("cuda_cub", temp_bytes)
     return True
 
 
@@ -2925,17 +2871,25 @@ def _try_vulkan_reduce(values, output, op, workspace):
             _SUPPORTED_REDUCE_OPS[op],
         )
         if workspace is not None:
-            workspace._record_vulkan_dense_reduce_plan(
+            op_id = _SUPPORTED_REDUCE_OPS[op]
+            workspace._record_native_reduce_plan(
+                "vulkan_native",
+                "vulkan_reduce_dense_field",
                 values,
                 output,
-                values_view,
-                output_view,
                 value_type,
                 op,
-                _SUPPORTED_REDUCE_OPS[op],
+                (
+                    values_view.snode,
+                    output_view.snode,
+                    value_type,
+                    values_view.num_elements,
+                    op_id,
+                ),
+                values_view.num_elements,
                 prog,
             )
-            workspace._mark_dense_reduce_backend_active("vulkan_native", temp_bytes)
+            workspace._mark_native_reduce_backend_active("vulkan_native", temp_bytes)
         return True
     values_is_member = _is_struct_scalar_member_view(values)
     output_is_member = _is_struct_scalar_member_view(output)
@@ -2991,7 +2945,7 @@ def _try_vulkan_reduce(values, output, op, workspace):
                 values.shape[0],
                 prog,
             )
-            workspace._mark_dense_reduce_backend_active("vulkan_native", temp_bytes)
+            workspace._mark_native_reduce_backend_active("vulkan_native", temp_bytes)
         return True
     if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
         return False
@@ -3032,7 +2986,7 @@ def _try_vulkan_reduce(values, output, op, workspace):
             values.shape[0],
             prog,
         )
-        workspace._mark_dense_reduce_backend_active("vulkan_native", temp_bytes)
+        workspace._mark_native_reduce_backend_active("vulkan_native", temp_bytes)
     return True
 
 
@@ -3063,19 +3017,26 @@ def _try_cpu_reduce(values, output, op, workspace):
             _SUPPORTED_REDUCE_OPS[op],
         )
         if workspace is not None:
-            workspace._record_dense_reduce_plan(
+            value_type = _reduce_value_type(values_view.dtype)
+            op_id = _SUPPORTED_REDUCE_OPS[op]
+            workspace._record_native_reduce_plan(
                 "cpu_native",
                 "cpu_reduce_dense_field",
                 values,
                 output,
-                values_view,
-                output_view,
-                _reduce_value_type(values_view.dtype),
+                value_type,
                 op,
-                _SUPPORTED_REDUCE_OPS[op],
+                (
+                    values_view.snode,
+                    output_view.snode,
+                    value_type,
+                    values_view.num_elements,
+                    op_id,
+                ),
+                values_view.num_elements,
                 prog,
             )
-            workspace._mark_dense_reduce_backend_active("cpu_native", temp_bytes)
+            workspace._mark_native_reduce_backend_active("cpu_native", temp_bytes)
         return True
     values_is_member = _is_struct_scalar_member_view(values)
     output_is_member = _is_struct_scalar_member_view(output)
@@ -3127,7 +3088,7 @@ def _try_cpu_reduce(values, output, op, workspace):
                 values.shape[0],
                 prog,
             )
-            workspace._mark_dense_reduce_backend_active("cpu_native", temp_bytes)
+            workspace._mark_native_reduce_backend_active("cpu_native", temp_bytes)
         return True
     if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
         return False
@@ -3158,7 +3119,7 @@ def _try_cpu_reduce(values, output, op, workspace):
             values.shape[0],
             prog,
         )
-        workspace._mark_dense_reduce_backend_active("cpu_native", temp_bytes)
+        workspace._mark_native_reduce_backend_active("cpu_native", temp_bytes)
     return True
 
 
@@ -3708,19 +3669,26 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
             bias,
         )
         if workspace is not None:
-            workspace._record_dense_transform_plan(
+            workspace._record_native_transform_plan(
                 "cuda_device",
                 "cuda_device_transform_affine_dense_field",
                 src,
                 dst,
-                src_view,
-                dst_view,
                 value_type,
                 scale,
                 bias,
+                (
+                    src_view.snode,
+                    dst_view.snode,
+                    value_type,
+                    src_view.num_elements,
+                    scale,
+                    bias,
+                ),
+                src_view.num_elements,
                 prog,
             )
-            workspace._mark_dense_transform_backend_active("cuda_device", temp_bytes)
+            workspace._mark_native_transform_backend_active("cuda_device", temp_bytes)
         return True
     src_is_member = _is_struct_scalar_member_view(src)
     dst_is_member = _is_struct_scalar_member_view(dst)
@@ -3775,7 +3743,7 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
                 _shape_numel(src),
                 prog,
             )
-            workspace._mark_dense_transform_backend_active("cuda_device", temp_bytes)
+            workspace._mark_native_transform_backend_active("cuda_device", temp_bytes)
         return True
     if not hasattr(prog, "cuda_device_transform_available"):
         return False
@@ -3802,7 +3770,7 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
             _shape_numel(src),
             prog,
         )
-        workspace._mark_dense_transform_backend_active("cuda_device", temp_bytes)
+        workspace._mark_native_transform_backend_active("cuda_device", temp_bytes)
     return True
 
 
@@ -3840,10 +3808,26 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
             bias,
         )
         if workspace is not None:
-            workspace._record_vulkan_dense_transform_plan(
-                src, dst, src_view, dst_view, value_type, scale, bias, prog
+            workspace._record_native_transform_plan(
+                "vulkan_native",
+                "vulkan_transform_affine_dense_field",
+                src,
+                dst,
+                value_type,
+                scale,
+                bias,
+                (
+                    src_view.snode,
+                    dst_view.snode,
+                    value_type,
+                    src_view.num_elements,
+                    scale,
+                    bias,
+                ),
+                src_view.num_elements,
+                prog,
             )
-            workspace._mark_dense_transform_backend_active(
+            workspace._mark_native_transform_backend_active(
                 "vulkan_native", temp_bytes
             )
         return True
@@ -3912,7 +3896,7 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
             _shape_numel(src),
             prog,
         )
-        workspace._mark_dense_transform_backend_active("vulkan_native", temp_bytes)
+        workspace._mark_native_transform_backend_active("vulkan_native", temp_bytes)
     return True
 
 
@@ -3947,19 +3931,26 @@ def _try_cpu_transform(src, dst, value_type, scale, bias, workspace):
             bias,
         )
         if workspace is not None:
-            workspace._record_dense_transform_plan(
+            workspace._record_native_transform_plan(
                 "cpu_native",
                 "cpu_transform_affine_dense_field",
                 src,
                 dst,
-                src_view,
-                dst_view,
                 value_type,
                 scale,
                 bias,
+                (
+                    src_view.snode,
+                    dst_view.snode,
+                    value_type,
+                    src_view.num_elements,
+                    scale,
+                    bias,
+                ),
+                src_view.num_elements,
                 prog,
             )
-            workspace._mark_dense_transform_backend_active("cpu_native", temp_bytes)
+            workspace._mark_native_transform_backend_active("cpu_native", temp_bytes)
         return True
     src_is_member = _is_struct_scalar_member_view(src)
     dst_is_member = _is_struct_scalar_member_view(dst)
@@ -4014,7 +4005,7 @@ def _try_cpu_transform(src, dst, value_type, scale, bias, workspace):
                 _shape_numel(src),
                 prog,
             )
-            workspace._mark_dense_transform_backend_active("cpu_native", temp_bytes)
+            workspace._mark_native_transform_backend_active("cpu_native", temp_bytes)
         return True
     temp_bytes = prog.cpu_transform_affine_ndarray(src.arr, dst.arr, value_type, scale, bias)
     if workspace is not None:
@@ -4030,7 +4021,7 @@ def _try_cpu_transform(src, dst, value_type, scale, bias, workspace):
             _shape_numel(src),
             prog,
         )
-        workspace._mark_dense_transform_backend_active("cpu_native", temp_bytes)
+        workspace._mark_native_transform_backend_active("cpu_native", temp_bytes)
     return True
 
 
@@ -4058,7 +4049,7 @@ def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bia
             and prog.cuda_toolkit_transform_available()
             and hasattr(prog, "cuda_device_transform_affine_packed_strided_ndarray")
         ):
-            prog.cuda_device_transform_affine_packed_strided_ndarray(
+            call_args = (
                 src_arr,
                 dst_arr,
                 value_type,
@@ -4070,6 +4061,25 @@ def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bia
                 scale,
                 bias,
             )
+            temp_bytes = prog.cuda_device_transform_affine_packed_strided_ndarray(
+                *call_args
+            )
+            if workspace is not None:
+                workspace._record_native_transform_plan(
+                    "cuda_device",
+                    "cuda_device_transform_affine_packed_strided_ndarray",
+                    src,
+                    dst,
+                    value_type,
+                    scale,
+                    bias,
+                    call_args,
+                    _shape_numel(src),
+                    prog,
+                )
+                workspace._mark_native_transform_backend_active(
+                    "cuda_device", temp_bytes
+                )
             return True
         if method == "cuda_device":
             return False
@@ -4083,7 +4093,7 @@ def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bia
             )
             and hasattr(prog, "vulkan_transform_affine_packed_strided_ndarray")
         ):
-            temp_bytes = prog.vulkan_transform_affine_packed_strided_ndarray(
+            call_args = (
                 src_arr,
                 dst_arr,
                 value_type,
@@ -4095,14 +4105,24 @@ def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bia
                 scale,
                 bias,
             )
+            temp_bytes = prog.vulkan_transform_affine_packed_strided_ndarray(
+                *call_args
+            )
             if workspace is not None:
-                workspace._vulkan_native_active = True
-                workspace.workspace_bytes_current = max(
-                    workspace.workspace_bytes_current, temp_bytes
+                workspace._record_native_transform_plan(
+                    "vulkan_native",
+                    "vulkan_transform_affine_packed_strided_ndarray",
+                    src,
+                    dst,
+                    value_type,
+                    scale,
+                    bias,
+                    call_args,
+                    _shape_numel(src),
+                    prog,
                 )
-                workspace.workspace_bytes_peak = max(
-                    workspace.workspace_bytes_peak,
-                    workspace.workspace_bytes_current,
+                workspace._mark_native_transform_backend_active(
+                    "vulkan_native", temp_bytes
                 )
             return True
         if method == "vulkan_native":
@@ -4113,7 +4133,7 @@ def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bia
             and prog.cpu_transform_available()
             and hasattr(prog, "cpu_transform_affine_packed_strided_ndarray")
         ):
-            prog.cpu_transform_affine_packed_strided_ndarray(
+            call_args = (
                 src_arr,
                 dst_arr,
                 value_type,
@@ -4125,6 +4145,23 @@ def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bia
                 scale,
                 bias,
             )
+            temp_bytes = prog.cpu_transform_affine_packed_strided_ndarray(*call_args)
+            if workspace is not None:
+                workspace._record_native_transform_plan(
+                    "cpu_native",
+                    "cpu_transform_affine_packed_strided_ndarray",
+                    src,
+                    dst,
+                    value_type,
+                    scale,
+                    bias,
+                    call_args,
+                    _shape_numel(src),
+                    prog,
+                )
+                workspace._mark_native_transform_backend_active(
+                    "cpu_native", temp_bytes
+                )
             return True
     return False
 
@@ -4192,6 +4229,10 @@ def experimental_transform(
             src.scalar_dtype, scale, bias
         )
         value_type = _transform_value_type(src.scalar_dtype)
+        if workspace._try_native_transform_plan(
+            src, dst, method, normalized_scale, normalized_bias
+        ):
+            return workspace
         if _try_native_tensor_member_transform(
             src,
             dst,
@@ -4325,7 +4366,7 @@ def _indexed_copy_item_count(src, indices, dst, scatter):
     return indices.shape[0]
 
 
-def _try_cuda_device_indexed_copy(src, indices, dst, scatter):
+def _try_cuda_device_indexed_copy(src, indices, dst, scatter, workspace):
     if current_cfg().arch != cuda:
         return False
     src_is_member = _is_struct_scalar_member_view(src)
@@ -4353,24 +4394,60 @@ def _try_cuda_device_indexed_copy(src, indices, dst, scatter):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
-        getattr(prog, method_name)(
+        item_bytes = _dtype_nbytes(src.dtype)
+        call_args = (
             src_arr,
             indices.arr,
             dst_arr,
-            _dtype_nbytes(src.dtype),
+            item_bytes,
             src_offset,
             src_stride,
             dst_offset,
             dst_stride,
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
+        if workspace is not None:
+            workspace._record_native_indexed_copy_plan(
+                "cuda_device",
+                method_name,
+                src,
+                indices,
+                dst,
+                item_bytes,
+                scatter,
+                call_args,
+                indices.shape[0],
+                prog,
+            )
+            workspace._mark_native_indexed_copy_backend_active(
+                "cuda_device", temp_bytes
+            )
         return True
     if hasattr(prog, "cuda_device_indexed_copy_payload_available"):
         if not prog.cuda_device_indexed_copy_payload_available(src._get_element_size()):
             return False
+    method_name = (
+        "cuda_device_scatter_ndarray" if scatter else "cuda_device_gather_ndarray"
+    )
+    call_args = (src.arr, indices.arr, dst.arr)
     if scatter:
-        prog.cuda_device_scatter_ndarray(src.arr, indices.arr, dst.arr)
+        temp_bytes = prog.cuda_device_scatter_ndarray(*call_args)
     else:
-        prog.cuda_device_gather_ndarray(src.arr, indices.arr, dst.arr)
+        temp_bytes = prog.cuda_device_gather_ndarray(*call_args)
+    if workspace is not None:
+        workspace._record_native_indexed_copy_plan(
+            "cuda_device",
+            method_name,
+            src,
+            indices,
+            dst,
+            src._get_element_size(),
+            scatter,
+            call_args,
+            indices.shape[0],
+            prog,
+        )
+        workspace._mark_native_indexed_copy_backend_active("cuda_device", temp_bytes)
     return True
 
 
@@ -4402,34 +4479,50 @@ def _try_vulkan_indexed_copy(src, indices, dst, scatter, workspace):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
-        temp_bytes = getattr(prog, method_name)(
+        item_bytes = _dtype_nbytes(src.dtype)
+        call_args = (
             src_arr,
             indices.arr,
             dst_arr,
-            _dtype_nbytes(src.dtype),
+            item_bytes,
             src_offset,
             src_stride,
             dst_offset,
             dst_stride,
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
     else:
+        method_name = "vulkan_scatter_ndarray" if scatter else "vulkan_gather_ndarray"
+        call_args = (src.arr, indices.arr, dst.arr)
         temp_bytes = (
-            prog.vulkan_scatter_ndarray(src.arr, indices.arr, dst.arr)
+            prog.vulkan_scatter_ndarray(*call_args)
             if scatter
-            else prog.vulkan_gather_ndarray(src.arr, indices.arr, dst.arr)
+            else prog.vulkan_gather_ndarray(*call_args)
         )
     if workspace is not None:
-        workspace._vulkan_native_active = True
-        workspace.workspace_bytes_current = max(
-            workspace.workspace_bytes_current, temp_bytes
+        workspace._record_native_indexed_copy_plan(
+            "vulkan_native",
+            method_name,
+            src,
+            indices,
+            dst,
+            (
+                _dtype_nbytes(src.dtype)
+                if src_is_member or dst_is_member
+                else src._get_element_size()
+            ),
+            scatter,
+            call_args,
+            indices.shape[0],
+            prog,
         )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        workspace._mark_native_indexed_copy_backend_active(
+            "vulkan_native", temp_bytes
         )
     return True
 
 
-def _try_cpu_indexed_copy(src, indices, dst, scatter):
+def _try_cpu_indexed_copy(src, indices, dst, scatter, workspace):
     if current_cfg().arch not in [x64, arm64]:
         return False
     src_is_member = _is_struct_scalar_member_view(src)
@@ -4457,21 +4550,55 @@ def _try_cpu_indexed_copy(src, indices, dst, scatter):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
-        getattr(prog, method_name)(
+        item_bytes = _dtype_nbytes(src.dtype)
+        call_args = (
             src_arr,
             indices.arr,
             dst_arr,
-            _dtype_nbytes(src.dtype),
+            item_bytes,
             src_offset,
             src_stride,
             dst_offset,
             dst_stride,
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
+        if workspace is not None:
+            workspace._record_native_indexed_copy_plan(
+                "cpu_native",
+                method_name,
+                src,
+                indices,
+                dst,
+                item_bytes,
+                scatter,
+                call_args,
+                indices.shape[0],
+                prog,
+            )
+            workspace._mark_native_indexed_copy_backend_active(
+                "cpu_native", temp_bytes
+            )
         return True
+    method_name = "cpu_scatter_ndarray" if scatter else "cpu_gather_ndarray"
+    call_args = (src.arr, indices.arr, dst.arr)
     if scatter:
-        prog.cpu_scatter_ndarray(src.arr, indices.arr, dst.arr)
+        temp_bytes = prog.cpu_scatter_ndarray(*call_args)
     else:
-        prog.cpu_gather_ndarray(src.arr, indices.arr, dst.arr)
+        temp_bytes = prog.cpu_gather_ndarray(*call_args)
+    if workspace is not None:
+        workspace._record_native_indexed_copy_plan(
+            "cpu_native",
+            method_name,
+            src,
+            indices,
+            dst,
+            src._get_element_size(),
+            scatter,
+            call_args,
+            indices.shape[0],
+            prog,
+        )
+        workspace._mark_native_indexed_copy_backend_active("cpu_native", temp_bytes)
     return True
 
 
@@ -4489,6 +4616,7 @@ def _try_native_tensor_member_indexed_copy(src, indices, dst, method, workspace,
 
     prog = impl.get_runtime().prog
     if arch == cuda and method in ("auto", "cuda_device"):
+        backend = "cuda_device"
         if not (
             hasattr(prog, "cuda_device_indexed_copy_payload_available")
             and prog.cuda_device_indexed_copy_payload_available(src_item_bytes)
@@ -4500,6 +4628,7 @@ def _try_native_tensor_member_indexed_copy(src, indices, dst, method, workspace,
             else "cuda_device_gather_strided_ndarray"
         )
     elif arch == vulkan and method in ("auto", "vulkan_native"):
+        backend = "vulkan_native"
         if not (
             hasattr(prog, "vulkan_indexed_copy_available")
             and prog.vulkan_indexed_copy_available()
@@ -4511,6 +4640,7 @@ def _try_native_tensor_member_indexed_copy(src, indices, dst, method, workspace,
             else "vulkan_gather_strided_ndarray"
         )
     elif arch in (x64, arm64) and method in ("auto", "cpu_native"):
+        backend = "cpu_native"
         if not (
             hasattr(prog, "cpu_indexed_copy_available")
             and prog.cpu_indexed_copy_available()
@@ -4525,7 +4655,7 @@ def _try_native_tensor_member_indexed_copy(src, indices, dst, method, workspace,
         return False
     if not hasattr(prog, method_name):
         return False
-    temp_bytes = getattr(prog, method_name)(
+    call_args = (
         src_arr,
         indices.arr,
         dst_arr,
@@ -4535,14 +4665,21 @@ def _try_native_tensor_member_indexed_copy(src, indices, dst, method, workspace,
         dst_offset,
         dst_stride,
     )
-    if workspace is not None and arch == vulkan:
-        workspace._vulkan_native_active = True
-        workspace.workspace_bytes_current = max(
-            workspace.workspace_bytes_current, temp_bytes
+    temp_bytes = getattr(prog, method_name)(*call_args)
+    if workspace is not None:
+        workspace._record_native_indexed_copy_plan(
+            backend,
+            method_name,
+            src,
+            indices,
+            dst,
+            src_item_bytes,
+            scatter,
+            call_args,
+            indices.shape[0],
+            prog,
         )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
-        )
+        workspace._mark_native_indexed_copy_backend_active(backend, temp_bytes)
     return True
 
 
@@ -4591,22 +4728,26 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
         workspace.check_shape(n)
         if n == 0:
             return workspace
+        if workspace._try_native_indexed_copy_plan(
+            src, indices, dst, method, scatter
+        ):
+            return workspace
         if _try_native_tensor_member_indexed_copy(
             src, indices, dst, method, workspace, scatter
         ):
             return workspace
-        for src_component, dst_component in zip(
-            _struct_tensor_member_components(src),
-            _struct_tensor_member_components(dst),
-        ):
-            _experimental_indexed_copy(
-                src_component,
-                indices,
-                dst_component,
-                method=method,
-                workspace=workspace,
-                scatter=scatter,
-            )
+        raise RuntimeError(
+            f"{op_name} whole tensor member views require an available "
+            "packed strided CPU/CUDA/Vulkan native indexed-copy backend."
+        )
+
+    src_is_member = _is_struct_scalar_member_view(src)
+    dst_is_member = _is_struct_scalar_member_view(dst)
+    if (
+        workspace is not None
+        and isinstance(workspace, IndexedCopyWorkspace)
+        and workspace._try_native_indexed_copy_plan(src, indices, dst, method, scatter)
+    ):
         return workspace
 
     _check_indexed_copy_request(src, indices, dst, method, workspace, op_name)
@@ -4616,8 +4757,10 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
     workspace.check_shape(n)
     if n == 0:
         return workspace
+    if workspace._try_native_indexed_copy_plan(src, indices, dst, method, scatter):
+        return workspace
     if method in ("auto", "cuda_device") and _try_cuda_device_indexed_copy(
-        src, indices, dst, scatter
+        src, indices, dst, scatter, workspace
     ):
         return workspace
     if method == "cuda_device":
@@ -4635,13 +4778,18 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
             "and available native indexed-copy shaders."
         )
     if method in ("auto", "cpu_native") and _try_cpu_indexed_copy(
-        src, indices, dst, scatter
+        src, indices, dst, scatter, workspace
     ):
         return workspace
     if method == "cpu_native":
         raise RuntimeError(
             f"{op_name} method='cpu_native' requires CPU ndarray inputs and "
             "available native indexed-copy support."
+        )
+    if src_is_member or dst_is_member:
+        raise RuntimeError(
+            f"{op_name} StructNdarray scalar member views require an available "
+            "native strided indexed-copy backend."
         )
     if method in ("kernel", "field_kernel", "auto"):
         _indexed_copy_kernel(src, indices, dst, scatter)
@@ -5849,7 +5997,6 @@ class PrefixSumExecutor:
         self.workspace_length = start_pos
         self.large_arr = None
         self._native_scan_plan = None
-        self._dense_native_scan_plan = None
 
     def _ensure_large_arr(self):
         if self.large_arr is None:
@@ -5861,7 +6008,7 @@ class PrefixSumExecutor:
             return _SCAN_VALUE_TYPE[dtype]
         raise RuntimeError("unsupported PrefixSumExecutor ndarray dtype.")
 
-    def _dense_scan_backend_for_arch(self):
+    def _native_scan_backend_for_arch(self):
         arch = current_cfg().arch
         if arch == cuda:
             return "cuda_cub"
@@ -5872,7 +6019,7 @@ class PrefixSumExecutor:
         return None
 
     def _try_native_scan_plan(self, input_arr):
-        backend = self._dense_scan_backend_for_arch()
+        backend = self._native_scan_backend_for_arch()
         if backend is None:
             return False
         plan = self._native_scan_plan
@@ -5889,9 +6036,6 @@ class PrefixSumExecutor:
             return False
         return True
 
-    def _try_dense_native_scan_plan(self, input_arr):
-        return self._try_native_scan_plan(input_arr)
-
     def _record_native_scan_plan(
         self, backend, method_name, input_arr, view, call_args, prog
     ):
@@ -5907,18 +6051,6 @@ class PrefixSumExecutor:
             n=view.num_elements,
         )
         self._native_scan_plan = plan
-        self._dense_native_scan_plan = plan
-
-    def _record_dense_native_scan_plan(self, backend, method_name, input_arr, view, prog):
-        value_type = self._scan_value_type(view.dtype)
-        self._record_native_scan_plan(
-            backend,
-            method_name,
-            input_arr,
-            view,
-            (view.snode, value_type, view.num_elements),
-            prog,
-        )
 
     def _try_cuda_cub_scan(self, input_arr):
         if current_cfg().arch != cuda:
@@ -5942,11 +6074,12 @@ class PrefixSumExecutor:
             prog.cuda_cub_inclusive_scan_dense_field(
                 view.snode, value_type, view.num_elements
             )
-            self._record_dense_native_scan_plan(
+            self._record_native_scan_plan(
                 "cuda_cub",
                 "cuda_cub_inclusive_scan_dense_field",
                 input_arr,
                 view,
+                (view.snode, value_type, view.num_elements),
                 prog,
             )
         elif view.is_struct_scalar_member:
@@ -6002,11 +6135,12 @@ class PrefixSumExecutor:
             prog.vulkan_inclusive_scan_dense_field(
                 view.snode, value_type, view.num_elements
             )
-            self._record_dense_native_scan_plan(
+            self._record_native_scan_plan(
                 "vulkan_native",
                 "vulkan_inclusive_scan_dense_field",
                 input_arr,
                 view,
+                (view.snode, value_type, view.num_elements),
                 prog,
             )
         elif view.is_struct_scalar_member:
@@ -6057,11 +6191,12 @@ class PrefixSumExecutor:
             prog.cpu_inclusive_scan_dense_field(
                 view.snode, value_type, view.num_elements
             )
-            self._record_dense_native_scan_plan(
+            self._record_native_scan_plan(
                 "cpu_native",
                 "cpu_inclusive_scan_dense_field",
                 input_arr,
                 view,
+                (view.snode, value_type, view.num_elements),
                 prog,
             )
         elif view.is_struct_scalar_member:
