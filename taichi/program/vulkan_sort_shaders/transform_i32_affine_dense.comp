@@ -1,0 +1,25 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Src {
+  uint data[];
+} src_buf;
+
+layout(set = 0, binding = 1, std430) writeonly buffer Dst {
+  uint data[];
+} dst_buf;
+
+layout(push_constant) uniform Params {
+  uint scale;
+  uint bias;
+  uint n;
+} params;
+
+void main() {
+  uint idx = gl_GlobalInvocationID.x;
+  if (idx >= params.n) {
+    return;
+  }
+  dst_buf.data[idx] = src_buf.data[idx] * params.scale + params.bias;
+}

@@ -280,6 +280,8 @@ if (TI_WITH_VULKAN)
     ti_vulkan_sort_shader(histogram_i32_count_private.comp histogram_u32_i64_count_private.comp.spv.h "-DVALUE_KIND=2" "-DBIN_KIND=4")
     ti_vulkan_sort_shader(histogram_i32_count_private_shared.comp histogram_u32_i64_count_private_shared.comp.spv.h "-DVALUE_KIND=2" "-DBIN_KIND=4")
     ti_vulkan_sort_shader(transform_i32_affine.comp transform_i32_affine.comp.spv.h)
+    ti_vulkan_sort_shader(transform_i32_affine_dense.comp
+        transform_i32_affine_dense.comp.spv.h)
     ti_vulkan_sort_shader(transform_f32_affine.comp transform_f32_affine.comp.spv.h)
     ti_vulkan_sort_shader(transform_u64_affine.comp transform_u64_affine.comp.spv.h)
     ti_vulkan_sort_shader(transform_f64_affine.comp transform_f64_affine.comp.spv.h)
@@ -374,6 +376,8 @@ if (TI_WITH_VULKAN)
                 "-DOP_KIND=${op_kind}" "-DVALUE_KIND=${value_kind}" "-DSTRIDED_SOURCE=1")
         endforeach()
     endforeach()
+    ti_vulkan_sort_shader(reduce_i32_sum_atomic.comp
+        reduce_i32_sum_atomic.comp.spv.h)
     ti_vulkan_sort_shader(radix8_spine.comp radix8_spine.comp.spv.h)
 
     foreach(shift 0 4 8 12 16 20 24 28)

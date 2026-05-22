@@ -417,7 +417,13 @@ void VulkanPipeline::create_shader_stages(const Params &params) {
 }
 
 void VulkanPipeline::create_pipeline_layout() {
-  pipeline_layout_ = vkapi::create_pipeline_layout(device_, set_layouts_);
+  VkPushConstantRange push_constant_range{};
+  push_constant_range.stageFlags = VK_SHADER_STAGE_ALL;
+  push_constant_range.offset = 0;
+  push_constant_range.size = 128;
+  pipeline_layout_ =
+      vkapi::create_pipeline_layout(device_, set_layouts_, 1,
+                                    &push_constant_range);
 }
 
 void VulkanPipeline::create_compute_pipeline(const Params &params) {
@@ -1166,6 +1172,18 @@ void VulkanCommandList::buffer_fill(DevicePtr ptr,
 
   vkCmdFillBuffer(buffer_->buffer, buffer->buffer, ptr.offset, size, data);
   buffer_->refs.push_back(buffer);
+}
+
+void VulkanCommandList::push_constants(const void *data,
+                                       uint32_t size) noexcept {
+  if (!current_pipeline_ || !data || size == 0) {
+    return;
+  }
+  TI_ASSERT(size <= 128);
+  VkPipelineLayout pipeline_layout =
+      current_pipeline_->pipeline_layout()->layout;
+  vkCmdPushConstants(buffer_->buffer, pipeline_layout, VK_SHADER_STAGE_ALL, 0,
+                     size, data);
 }
 
 RhiResult VulkanCommandList::dispatch(uint32_t x,

@@ -52,6 +52,19 @@ def _run_ndarray_reduce_case(n, dtype, np_dtype, method, workspace):
         _assert_reduce_output(output.to_numpy()[0], _expected(values_np, op), np_dtype)
 
 
+def _run_dense_field_reduce_case(n, dtype, np_dtype, method, workspace):
+    values = ti.field(dtype, shape=n)
+    output = ti.field(dtype, shape=())
+    values_np = _values_np(n, np_dtype)
+    values.from_numpy(values_np)
+    for op in ("sum", "min", "max"):
+        output[None] = 0
+        ti.algorithms.experimental_reduce(
+            values, output, op=op, method=method, workspace=workspace
+        )
+        _assert_reduce_output(output[None], _expected(values_np, op), np_dtype)
+
+
 def _run_struct_member_reduce_case(n, dtype, np_dtype, method, workspace):
     payload = ti.types.struct(value=dtype, tag=ti.i32)
     values = ti.ndarray(payload, shape=n)
@@ -144,6 +157,41 @@ def test_experimental_reduce_cuda_cub_struct_member_view():
 
 
 @test_utils.test(arch=[ti.cuda])
+def test_experimental_reduce_cuda_cub_dense_field_dtypes():
+    n = 4096
+    prog = impl.get_runtime().prog
+    if not prog.cuda_cub_reduce_available():
+        pytest.skip("CUDA CUB reduce is unavailable in this build/runtime.")
+
+    workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+    for dtype, np_dtype, _value_type in _REDUCE_DTYPE_CASES:
+        _run_dense_field_reduce_case(n, dtype, np_dtype, "cuda_cub", workspace)
+    assert workspace.workspace_bytes_peak > 0
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_reduce_cuda_cub_dense_field_workspace_replay():
+    n = 128
+    prog = impl.get_runtime().prog
+    if not prog.cuda_cub_reduce_available():
+        pytest.skip("CUDA CUB reduce is unavailable in this build/runtime.")
+
+    values = ti.field(ti.i32, shape=n)
+    output = ti.field(ti.i32, shape=())
+    workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+    for base in (0, 17):
+        values_np = (np.arange(n, dtype=np.int32) + base).astype(np.int32)
+        values.from_numpy(values_np)
+        output[None] = 0
+        ti.algorithms.experimental_reduce(
+            values, output, op="sum", method="cuda_cub", workspace=workspace
+        )
+        assert output[None] == np.sum(values_np, dtype=np.int32)
+    assert workspace._dense_reduce_plan is not None
+    assert workspace._dense_reduce_plan["backend"] == "cuda_cub"
+
+
+@test_utils.test(arch=[ti.cuda])
 def test_experimental_reduce_cuda_cub_struct_tensor_member_view():
     n = 4096
     prog = impl.get_runtime().prog
@@ -180,6 +228,48 @@ def test_experimental_reduce_vulkan_native_ndarray_dtypes():
         tested += 1
     assert tested >= 3
     assert workspace.workspace_bytes_peak > 0
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_reduce_vulkan_native_dense_field_dtypes():
+    n = 8192
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "vulkan_reduce_available") or not prog.vulkan_reduce_available():
+        pytest.skip("Vulkan native reduce is unavailable in this build/runtime.")
+
+    workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+    tested = 0
+    for dtype, np_dtype, value_type in _REDUCE_DTYPE_CASES:
+        if hasattr(prog, "vulkan_reduce_value_type_available"):
+            if not prog.vulkan_reduce_value_type_available(value_type):
+                continue
+        elif dtype != ti.i32:
+            continue
+        _run_dense_field_reduce_case(n, dtype, np_dtype, "vulkan_native", workspace)
+        tested += 1
+    assert tested >= 3
+    assert workspace.workspace_bytes_peak > 0
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_reduce_vulkan_native_dense_field_workspace_replay():
+    n = 128
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "vulkan_reduce_available") or not prog.vulkan_reduce_available():
+        pytest.skip("Vulkan native reduce is unavailable in this build/runtime.")
+
+    values = ti.field(ti.i32, shape=n)
+    output = ti.field(ti.i32, shape=())
+    workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+    for base in (0, 17):
+        values_np = (np.arange(n, dtype=np.int32) + base).astype(np.int32)
+        values.from_numpy(values_np)
+        output[None] = 0
+        ti.algorithms.experimental_reduce(
+            values, output, op="sum", method="vulkan_native", workspace=workspace
+        )
+        assert output[None] == np.sum(values_np, dtype=np.int32)
+    assert workspace._vulkan_dense_reduce_plan is not None
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -257,6 +347,115 @@ def test_experimental_reduce_cpu_native_ndarray_dtypes():
         _run_ndarray_reduce_case(n, dtype, np_dtype, "cpu_native", workspace)
     assert workspace.workspace_bytes_peak > 0
     assert impl.get_runtime().prog.cpu_reduce_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_reduce_cpu_native_dense_field_i32_f32():
+    n = 4096
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cpu_reduce_available") or not prog.cpu_reduce_available():
+        pytest.skip("CPU native reduce is unavailable in this build/runtime.")
+
+    for dtype, np_dtype in [(ti.i32, np.int32), (ti.f32, np.float32)]:
+        values = ti.field(dtype, shape=n)
+        output = ti.field(dtype, shape=())
+        data = (np.arange(n, dtype=np_dtype) % 7).astype(np_dtype)
+        values.from_numpy(data)
+        workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+        ti.algorithms.experimental_reduce(
+            values, output, op="sum", method="cpu_native", workspace=workspace
+        )
+        if np.issubdtype(np_dtype, np.floating):
+            np.testing.assert_allclose(output[None], np.sum(data), rtol=1e-6, atol=1e-6)
+        else:
+            assert output[None] == np.sum(data)
+        assert workspace.workspace_bytes_peak == 0
+    assert impl.get_runtime().prog.cpu_reduce_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_reduce_cpu_native_dense_field_workspace_replay():
+    n = 128
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cpu_reduce_available") or not prog.cpu_reduce_available():
+        pytest.skip("CPU native reduce is unavailable in this build/runtime.")
+
+    values = ti.field(ti.i32, shape=n)
+    output = ti.field(ti.i32, shape=())
+    workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+    for base in (0, 17):
+        values_np = (np.arange(n, dtype=np.int32) + base).astype(np.int32)
+        values.from_numpy(values_np)
+        output[None] = 0
+        ti.algorithms.experimental_reduce(
+            values, output, op="sum", method="cpu_native", workspace=workspace
+        )
+        assert output[None] == np.sum(values_np, dtype=np.int32)
+    assert workspace._dense_reduce_plan is not None
+    assert workspace._dense_reduce_plan["backend"] == "cpu_native"
+    assert workspace._vulkan_dense_reduce_plan is None
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_reduce_cpu_native_ndarray_workspace_replay():
+    n = 128
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cpu_reduce_available") or not prog.cpu_reduce_available():
+        pytest.skip("CPU native reduce is unavailable in this build/runtime.")
+
+    values = ti.ndarray(ti.i32, shape=n)
+    output = ti.ndarray(ti.i32, shape=1)
+    workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+    first_plan = None
+    for base in (0, 17):
+        values_np = (np.arange(n, dtype=np.int32) + base).astype(np.int32)
+        values.from_numpy(values_np)
+        output.fill(0)
+        ti.algorithms.experimental_reduce(
+            values, output, op="sum", method="cpu_native", workspace=workspace
+        )
+        assert output.to_numpy()[0] == np.sum(values_np, dtype=np.int32)
+        if first_plan is None:
+            first_plan = workspace._native_reduce_plan
+        else:
+            assert workspace._native_reduce_plan is first_plan
+    assert workspace._native_reduce_plan["backend"] == "cpu_native"
+    assert workspace._native_reduce_plan["method_name"] == "cpu_reduce_ndarray"
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_reduce_cpu_native_struct_member_workspace_replay():
+    n = 128
+    prog = impl.get_runtime().prog
+    if not hasattr(prog, "cpu_reduce_available") or not prog.cpu_reduce_available():
+        pytest.skip("CPU native reduce is unavailable in this build/runtime.")
+
+    payload = ti.types.struct(value=ti.i32, tag=ti.i32)
+    values = ti.ndarray(payload, shape=n)
+    values_member = values.field("value")
+    output = ti.ndarray(ti.i32, shape=1)
+    workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+    first_plan = None
+    for base in (0, 17):
+        values_np = (np.arange(n, dtype=np.int32) + base).astype(np.int32)
+        host = np.zeros((n,), dtype=values.numpy_dtype)
+        host["value"] = values_np
+        host["tag"] = np.arange(n, dtype=np.int32) * 3 + 1
+        values.from_numpy(host)
+        output.fill(0)
+        ti.algorithms.experimental_reduce(
+            values_member, output, op="sum", method="cpu_native", workspace=workspace
+        )
+        assert output.to_numpy()[0] == np.sum(values_np, dtype=np.int32)
+        if first_plan is None:
+            first_plan = workspace._native_reduce_plan
+        else:
+            assert workspace._native_reduce_plan is first_plan
+    assert workspace._native_reduce_plan["backend"] == "cpu_native"
+    assert (
+        workspace._native_reduce_plan["method_name"]
+        == "cpu_reduce_strided_ndarray"
+    )
 
 
 @test_utils.test(arch=[ti.cpu])

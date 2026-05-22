@@ -1,0 +1,37 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Values {
+  int data[];
+} values_buf;
+
+layout(set = 0, binding = 1, std430) buffer Output {
+  int data[];
+} output_buf;
+
+shared int local_reduce[256];
+
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint n = values_buf.data.length();
+  uint global_stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+
+  int acc = 0;
+  for (uint idx = gl_GlobalInvocationID.x; idx < n; idx += global_stride) {
+    acc += values_buf.data[idx];
+  }
+  local_reduce[lid] = acc;
+  barrier();
+
+  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+    if (lid < stride) {
+      local_reduce[lid] += local_reduce[lid + stride];
+    }
+    barrier();
+  }
+
+  if (lid == 0u) {
+    atomicAdd(output_buf.data[0], local_reduce[0]);
+  }
+}

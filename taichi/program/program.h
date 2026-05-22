@@ -255,6 +255,10 @@ class TI_DLL_EXPORT Program {
     return program_impl_->get_snode_tree_device_ptr(tree_id);
   }
 
+  DevicePtr get_dense_field_device_ptr(SNode *snode);
+
+  std::size_t get_dense_field_stride(SNode *snode, std::size_t value_size);
+
   Device *get_compute_device() {
     return program_impl_->get_compute_device();
   }
@@ -353,6 +357,13 @@ class TI_DLL_EXPORT Program {
       std::size_t dst_stride,
       double scale,
       double bias);
+
+  std::size_t cuda_device_transform_affine_dense_field(SNode *src,
+                                                       SNode *dst,
+                                                       int value_type,
+                                                       std::size_t n,
+                                                       double scale,
+                                                       double bias);
 
   bool cuda_device_indexed_copy_available() const;
 
@@ -533,6 +544,10 @@ class TI_DLL_EXPORT Program {
                                                      std::size_t offset,
                                                      std::size_t stride);
 
+  std::size_t cuda_cub_inclusive_scan_dense_field(SNode *data,
+                                                  int value_type,
+                                                  std::size_t n);
+
   void cuda_cub_scan_clear_workspace();
 
   std::size_t cuda_cub_scan_workspace_bytes() const;
@@ -590,6 +605,12 @@ class TI_DLL_EXPORT Program {
                                               std::size_t output_stride,
                                               int op);
 
+  std::size_t cuda_cub_reduce_dense_field(SNode *values,
+                                          SNode *output,
+                                          int value_type,
+                                          std::size_t n,
+                                          int op);
+
   void cuda_cub_reduce_clear_workspace();
 
   std::size_t cuda_cub_reduce_workspace_bytes() const;
@@ -602,6 +623,10 @@ class TI_DLL_EXPORT Program {
                                                 int value_type,
                                                 std::size_t offset,
                                                 std::size_t stride);
+
+  std::size_t cpu_inclusive_scan_dense_field(SNode *data,
+                                             int value_type,
+                                             std::size_t n);
 
   std::size_t cpu_scan_workspace_bytes() const;
 
@@ -654,6 +679,12 @@ class TI_DLL_EXPORT Program {
                                          std::size_t output_stride,
                                          int op);
 
+  std::size_t cpu_reduce_dense_field(SNode *values,
+                                     SNode *output,
+                                     int value_type,
+                                     std::size_t n,
+                                     int op);
+
   std::size_t cpu_reduce_workspace_bytes() const;
 
   bool cpu_transform_available() const;
@@ -690,6 +721,13 @@ class TI_DLL_EXPORT Program {
       std::size_t dst_stride,
       double scale,
       double bias);
+
+  std::size_t cpu_transform_affine_dense_field(SNode *src,
+                                               SNode *dst,
+                                               int value_type,
+                                               std::size_t n,
+                                               double scale,
+                                               double bias);
 
   std::size_t cpu_transform_workspace_bytes() const;
 
@@ -831,6 +869,10 @@ class TI_DLL_EXPORT Program {
                                                    std::size_t offset,
                                                    std::size_t stride);
 
+  std::size_t vulkan_inclusive_scan_dense_field(SNode *data,
+                                                int value_type,
+                                                std::size_t n);
+
   void vulkan_scan_clear_workspace();
 
   std::size_t vulkan_scan_workspace_bytes() const;
@@ -893,6 +935,12 @@ class TI_DLL_EXPORT Program {
                                             std::size_t output_stride,
                                             int op);
 
+  std::size_t vulkan_reduce_dense_field(SNode *values,
+                                        SNode *output,
+                                        int value_type,
+                                        std::size_t n,
+                                        int op);
+
   std::size_t vulkan_reduce_i32_ndarray(Ndarray *values,
                                         Ndarray *output,
                                         int op);
@@ -938,6 +986,13 @@ class TI_DLL_EXPORT Program {
       std::size_t dst_stride,
       double scale,
       double bias);
+
+  std::size_t vulkan_transform_affine_dense_field(SNode *src,
+                                                  SNode *dst,
+                                                  int value_type,
+                                                  std::size_t n,
+                                                  double scale,
+                                                  double bias);
 
   void vulkan_transform_clear_workspace();
 

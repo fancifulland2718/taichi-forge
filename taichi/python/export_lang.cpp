@@ -701,6 +701,11 @@ void export_lang(py::module &m) {
            py::arg("src_stride"), py::arg("dst_offset"),
            py::arg("dst_stride"), py::arg("scale"), py::arg("bias"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_transform_affine_dense_field",
+           &Program::cuda_device_transform_affine_dense_field, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("n"),
+           py::arg("scale"), py::arg("bias"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_device_indexed_copy_available",
            &Program::cuda_device_indexed_copy_available)
       .def("cuda_device_indexed_copy_payload_available",
@@ -853,6 +858,10 @@ void export_lang(py::module &m) {
            &Program::cuda_cub_inclusive_scan_member_ndarray, py::arg("data"),
            py::arg("value_type"), py::arg("offset"), py::arg("stride"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_inclusive_scan_dense_field",
+           &Program::cuda_cub_inclusive_scan_dense_field, py::arg("data"),
+           py::arg("value_type"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_select_available", &Program::cuda_cub_select_available)
       .def("cuda_cub_select_clear_workspace",
            &Program::cuda_cub_select_clear_workspace,
@@ -901,6 +910,10 @@ void export_lang(py::module &m) {
            py::arg("values_offset"), py::arg("values_stride"),
            py::arg("output_offset"), py::arg("output_stride"), py::arg("op"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_reduce_dense_field", &Program::cuda_cub_reduce_dense_field,
+           py::arg("values"), py::arg("output"), py::arg("value_type"),
+           py::arg("n"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_scan_available", &Program::cpu_scan_available)
       .def("cpu_scan_workspace_bytes", &Program::cpu_scan_workspace_bytes)
       .def("cpu_inclusive_scan_ndarray",
@@ -909,6 +922,10 @@ void export_lang(py::module &m) {
       .def("cpu_inclusive_scan_member_ndarray",
            &Program::cpu_inclusive_scan_member_ndarray, py::arg("data"),
            py::arg("value_type"), py::arg("offset"), py::arg("stride"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_inclusive_scan_dense_field",
+           &Program::cpu_inclusive_scan_dense_field, py::arg("data"),
+           py::arg("value_type"), py::arg("n"),
            py::call_guard<py::gil_scoped_release>())
       .def("cpu_compact_available", &Program::cpu_compact_available)
       .def("cpu_compact_workspace_bytes", &Program::cpu_compact_workspace_bytes)
@@ -945,6 +962,10 @@ void export_lang(py::module &m) {
            py::arg("values_offset"), py::arg("values_stride"),
            py::arg("output_offset"), py::arg("output_stride"), py::arg("op"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cpu_reduce_dense_field", &Program::cpu_reduce_dense_field,
+           py::arg("values"), py::arg("output"), py::arg("value_type"),
+           py::arg("n"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_transform_available", &Program::cpu_transform_available)
       .def("cpu_transform_workspace_bytes",
            &Program::cpu_transform_workspace_bytes)
@@ -969,6 +990,11 @@ void export_lang(py::module &m) {
            py::arg("lane_count"), py::arg("src_offset"),
            py::arg("src_stride"), py::arg("dst_offset"),
            py::arg("dst_stride"), py::arg("scale"), py::arg("bias"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_transform_affine_dense_field",
+           &Program::cpu_transform_affine_dense_field, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("n"),
+           py::arg("scale"), py::arg("bias"),
            py::call_guard<py::gil_scoped_release>())
       .def("cpu_indexed_copy_available", &Program::cpu_indexed_copy_available)
       .def("cpu_indexed_copy_workspace_bytes",
@@ -1077,6 +1103,10 @@ void export_lang(py::module &m) {
            &Program::vulkan_inclusive_scan_member_ndarray, py::arg("data"),
            py::arg("value_type"), py::arg("offset"), py::arg("stride"),
            py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_inclusive_scan_dense_field",
+           &Program::vulkan_inclusive_scan_dense_field, py::arg("data"),
+           py::arg("value_type"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_compact_available", &Program::vulkan_compact_available)
       .def("vulkan_compact_clear_workspace",
            &Program::vulkan_compact_clear_workspace,
@@ -1131,6 +1161,10 @@ void export_lang(py::module &m) {
            py::arg("values_offset"), py::arg("values_stride"),
            py::arg("output_offset"), py::arg("output_stride"), py::arg("op"),
            py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_reduce_dense_field", &Program::vulkan_reduce_dense_field,
+           py::arg("values"), py::arg("output"), py::arg("value_type"),
+           py::arg("n"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_reduce_i32_ndarray",
            &Program::vulkan_reduce_i32_ndarray, py::arg("values"),
            py::arg("output"), py::arg("op"),
@@ -1165,6 +1199,11 @@ void export_lang(py::module &m) {
            py::arg("lane_count"), py::arg("src_offset"),
            py::arg("src_stride"), py::arg("dst_offset"),
            py::arg("dst_stride"), py::arg("scale"), py::arg("bias"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_transform_affine_dense_field",
+           &Program::vulkan_transform_affine_dense_field, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("n"),
+           py::arg("scale"), py::arg("bias"),
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_indexed_copy_available",
            &Program::vulkan_indexed_copy_available)

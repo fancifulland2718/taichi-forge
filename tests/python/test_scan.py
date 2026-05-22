@@ -25,6 +25,22 @@ _SCAN_VALUE_TYPE = {
 }
 
 
+@test_utils.test(arch=[ti.cpu])
+def test_dense_field_view_probe_accepts_only_root_dense_place():
+    from taichi_forge.algorithms import _algorithms  # pylint: disable=import-outside-toplevel
+
+    dense = ti.field(ti.i32, shape=8)
+    sparse = ti.field(ti.i32)
+    ti.root.pointer(ti.i, 4).dense(ti.i, 2).place(sparse)
+
+    dense_view = _algorithms._primitive_view(dense)
+    assert dense_view is not None
+    assert dense_view.is_dense_field
+    assert dense_view.shape == (8,)
+
+    assert _algorithms._primitive_view(sparse) is None
+
+
 def _scan_values(n, np_dtype):
     if np.issubdtype(np_dtype, np.unsignedinteger):
         return (np.arange(n, dtype=np.uint64) % 7).astype(np_dtype)
@@ -199,6 +215,102 @@ def test_scan_ndarray_cpu_native():
 
 
 @test_utils.test(arch=[ti.cpu])
+def test_scan_ndarray_cpu_native_executor_replay():
+    N = 128
+
+    if not impl.get_runtime().prog.cpu_scan_available():
+        pytest.skip("CPU native scan is unavailable in this build/runtime.")
+
+    arr = ti.ndarray(ti.i32, shape=N)
+    executor = ti.algorithms.PrefixSumExecutor(N)
+    first_plan = None
+    for base in (0, 17):
+        data = (_scan_values(N, np.int32) + base).astype(np.int32)
+        arr.from_numpy(data)
+        executor.run(arr)
+        expected = np.cumsum(data, dtype=np.int32).astype(np.int32)
+        _assert_scan_equal(arr.to_numpy(), expected)
+        if first_plan is None:
+            first_plan = executor._native_scan_plan
+        else:
+            assert executor._native_scan_plan is first_plan
+    assert executor._native_scan_plan["backend"] == "cpu_native"
+    assert executor._native_scan_plan["method_name"] == "cpu_inclusive_scan_ndarray"
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_scan_dense_field_cpu_native():
+    N = 4096
+
+    if not impl.get_runtime().prog.cpu_scan_available():
+        pytest.skip("CPU native scan is unavailable in this build/runtime.")
+
+    for dtype, np_dtype in _SCAN_DTYPES:
+        arr = ti.field(dtype, shape=N)
+        data = _scan_values(N, np_dtype)
+        arr.from_numpy(data)
+        ti.algorithms.PrefixSumExecutor(N).run(arr)
+        expected = np.cumsum(data, dtype=np_dtype).astype(np_dtype)
+        _assert_scan_equal(arr.to_numpy(), expected)
+    assert impl.get_runtime().prog.cpu_scan_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_scan_dense_field_cpu_native_executor_replay():
+    N = 128
+
+    if not impl.get_runtime().prog.cpu_scan_available():
+        pytest.skip("CPU native scan is unavailable in this build/runtime.")
+
+    arr = ti.field(ti.i32, shape=N)
+    executor = ti.algorithms.PrefixSumExecutor(N)
+    for base in (0, 17):
+        data = (_scan_values(N, np.int32) + base).astype(np.int32)
+        arr.from_numpy(data)
+        executor.run(arr)
+        expected = np.cumsum(data, dtype=np.int32).astype(np.int32)
+        _assert_scan_equal(arr.to_numpy(), expected)
+    assert executor._dense_native_scan_plan is not None
+    assert executor._dense_native_scan_plan["backend"] == "cpu_native"
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_scan_dense_field_cuda_cub():
+    N = 4096
+
+    if not impl.get_runtime().prog.cuda_cub_scan_available():
+        pytest.skip("CUDA CUB scan is unavailable in this build/runtime.")
+
+    for dtype, np_dtype in _SCAN_DTYPES:
+        arr = ti.field(dtype, shape=N)
+        data = _scan_values(N, np_dtype)
+        arr.from_numpy(data)
+        ti.algorithms.PrefixSumExecutor(N).run(arr)
+        expected = np.cumsum(data, dtype=np_dtype).astype(np_dtype)
+        _assert_scan_equal(arr.to_numpy(), expected)
+    assert impl.get_runtime().prog.cuda_cub_scan_workspace_bytes() > 0
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_scan_dense_field_cuda_cub_executor_replay():
+    N = 128
+
+    if not impl.get_runtime().prog.cuda_cub_scan_available():
+        pytest.skip("CUDA CUB scan is unavailable in this build/runtime.")
+
+    arr = ti.field(ti.i32, shape=N)
+    executor = ti.algorithms.PrefixSumExecutor(N)
+    for base in (0, 17):
+        data = (_scan_values(N, np.int32) + base).astype(np.int32)
+        arr.from_numpy(data)
+        executor.run(arr)
+        expected = np.cumsum(data, dtype=np.int32).astype(np.int32)
+        _assert_scan_equal(arr.to_numpy(), expected)
+    assert executor._dense_native_scan_plan is not None
+    assert executor._dense_native_scan_plan["backend"] == "cuda_cub"
+
+
+@test_utils.test(arch=[ti.cpu])
 def test_scan_cpu_native_struct_member_view():
     N = 4096
 
@@ -208,6 +320,40 @@ def test_scan_cpu_native_struct_member_view():
     for dtype, np_dtype in _SCAN_DTYPES:
         _run_struct_member_scan_case(N, dtype, np_dtype)
     assert impl.get_runtime().prog.cpu_scan_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_scan_cpu_native_struct_member_executor_replay():
+    N = 128
+
+    if not impl.get_runtime().prog.cpu_scan_available():
+        pytest.skip("CPU native scan is unavailable in this build/runtime.")
+
+    payload = ti.types.struct(value=ti.i32, tag=ti.i32)
+    arr = ti.ndarray(payload, shape=N)
+    member = arr.field("value")
+    executor = ti.algorithms.PrefixSumExecutor(N)
+    first_plan = None
+    for base in (0, 17):
+        data = (_scan_values(N, np.int32) + base).astype(np.int32)
+        host = np.zeros((N,), dtype=arr.numpy_dtype)
+        host["value"] = data
+        host["tag"] = np.arange(N, dtype=np.int32) * 5 + 7
+        arr.from_numpy(host)
+        executor.run(member)
+        result = arr.to_numpy()
+        expected = np.cumsum(data, dtype=np.int32).astype(np.int32)
+        _assert_scan_equal(result["value"], expected)
+        np.testing.assert_array_equal(result["tag"], host["tag"])
+        if first_plan is None:
+            first_plan = executor._native_scan_plan
+        else:
+            assert executor._native_scan_plan is first_plan
+    assert executor._native_scan_plan["backend"] == "cpu_native"
+    assert (
+        executor._native_scan_plan["method_name"]
+        == "cpu_inclusive_scan_member_ndarray"
+    )
 
 
 @test_utils.test(arch=[ti.cpu])
@@ -241,6 +387,32 @@ def test_scan_ndarray_vulkan_native():
         ti.algorithms.PrefixSumExecutor(N).run(arr)
         expected = np.cumsum(data, dtype=np_dtype).astype(np_dtype)
         _assert_scan_equal(arr.to_numpy(), expected)
+    assert impl.get_runtime().prog.vulkan_scan_workspace_bytes() > 0
+
+
+@test_utils.test(arch=[ti.vulkan])
+def test_scan_dense_field_vulkan_native():
+    N = 8192
+
+    if not impl.get_runtime().prog.vulkan_scan_available():
+        pytest.skip("Vulkan native scan is unavailable in this build/runtime.")
+
+    prog = impl.get_runtime().prog
+    tested = 0
+    for dtype, np_dtype in _VULKAN_SCAN_DTYPES:
+        value_type = _SCAN_VALUE_TYPE[dtype]
+        if hasattr(prog, "vulkan_scan_value_type_available") and not (
+            prog.vulkan_scan_value_type_available(value_type)
+        ):
+            continue
+        arr = ti.field(dtype, shape=N)
+        data = _scan_values(N, np_dtype)
+        arr.from_numpy(data)
+        ti.algorithms.PrefixSumExecutor(N).run(arr)
+        expected = np.cumsum(data, dtype=np_dtype).astype(np_dtype)
+        _assert_scan_equal(arr.to_numpy(), expected)
+        tested += 1
+    assert tested >= 3
     assert impl.get_runtime().prog.vulkan_scan_workspace_bytes() > 0
 
 

@@ -581,6 +581,59 @@ T cpu_reduce_combine(T a, T b, int op) {
 }
 
 template <typename T>
+T cpu_reduce_sum_contiguous_range(const T *values,
+                                  std::size_t begin,
+                                  std::size_t end) {
+  if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
+    using U = std::make_unsigned_t<T>;
+    const auto *unsigned_values = reinterpret_cast<const U *>(values);
+    U acc = 0;
+    for (std::size_t i = begin; i < end; ++i) {
+      acc += unsigned_values[i];
+    }
+    T result{};
+    std::memcpy(&result, &acc, sizeof(T));
+    return result;
+  } else {
+    T acc{};
+    for (std::size_t i = begin; i < end; ++i) {
+      acc += values[i];
+    }
+    return acc;
+  }
+}
+
+template <typename T>
+T cpu_reduce_sum_strided_range(const uint8_t *values,
+                               std::size_t offset,
+                               std::size_t stride,
+                               std::size_t begin,
+                               std::size_t end) {
+  if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
+    using U = std::make_unsigned_t<T>;
+    U acc = 0;
+    for (std::size_t i = begin; i < end; ++i) {
+      const auto *value =
+          reinterpret_cast<const T *>(values + offset + i * stride);
+      U bits = 0;
+      std::memcpy(&bits, value, sizeof(T));
+      acc += bits;
+    }
+    T result{};
+    std::memcpy(&result, &acc, sizeof(T));
+    return result;
+  } else {
+    T acc{};
+    for (std::size_t i = begin; i < end; ++i) {
+      const auto *value =
+          reinterpret_cast<const T *>(values + offset + i * stride);
+      acc += *value;
+    }
+    return acc;
+  }
+}
+
+template <typename T>
 void cpu_reduce_task(void *raw_ctx, int /*thread_id*/, int task_id) {
   auto *ctx = static_cast<CpuReduceTaskContext<T> *>(raw_ctx);
   const int tid = task_id;
@@ -590,6 +643,10 @@ void cpu_reduce_task(void *raw_ctx, int /*thread_id*/, int task_id) {
   const std::size_t end =
       ctx->n * static_cast<std::size_t>(tid + 1) /
       static_cast<std::size_t>(ctx->num_threads);
+  if (ctx->op == 0) {
+    ctx->partial[tid] = cpu_reduce_sum_contiguous_range(ctx->values, begin, end);
+    return;
+  }
   T acc = cpu_reduce_identity<T>(ctx->op);
   for (std::size_t i = begin; i < end; ++i) {
     acc = cpu_reduce_combine(acc, ctx->values[i], ctx->op);
@@ -609,6 +666,11 @@ void cpu_strided_reduce_task(void *raw_ctx,
   const std::size_t end =
       ctx->n * static_cast<std::size_t>(tid + 1) /
       static_cast<std::size_t>(ctx->num_threads);
+  if (ctx->op == 0) {
+    ctx->partial[tid] = cpu_reduce_sum_strided_range<T>(
+        ctx->values, ctx->offset, ctx->stride, begin, end);
+    return;
+  }
   T acc = cpu_reduce_identity<T>(ctx->op);
   for (std::size_t i = begin; i < end; ++i) {
     const auto *value = reinterpret_cast<const T *>(
@@ -2463,7 +2525,7 @@ std::size_t cpu_histogram_typed(const ValueT *values_ptr,
 }
 
 template <typename T>
-std::size_t cpu_reduce_typed(T *values_ptr,
+std::size_t cpu_reduce_typed(const T *values_ptr,
                              T *output_ptr,
                              int op,
                              std::size_t n,
@@ -2492,6 +2554,10 @@ std::size_t cpu_reduce_typed(T *values_ptr,
     return partial.size() * sizeof(T);
   }
 
+  if (op == 0) {
+    output_ptr[0] = cpu_reduce_sum_contiguous_range(values_ptr, 0, n);
+    return 0;
+  }
   for (std::size_t i = 0; i < n; ++i) {
     result = cpu_reduce_combine(result, values_ptr[i], op);
   }
@@ -2533,12 +2599,28 @@ std::size_t cpu_reduce_strided_typed(const uint8_t *values_ptr,
     return partial.size() * sizeof(T);
   }
 
+  if (op == 0) {
+    output_ptr[0] =
+        cpu_reduce_sum_strided_range<T>(values_ptr, offset, stride, 0, n);
+    return 0;
+  }
   for (std::size_t i = 0; i < n; ++i) {
     const auto *value =
         reinterpret_cast<const T *>(values_ptr + offset + i * stride);
     result = cpu_reduce_combine(result, *value, op);
   }
   output_ptr[0] = result;
+  return 0;
+}
+
+template <typename T>
+std::size_t cpu_scan_typed(T *data_ptr, std::size_t n) {
+  TI_ERROR_IF(!data_ptr, "CPU native scan received a null data pointer.");
+  T prefix{};
+  for (std::size_t i = 0; i < n; ++i) {
+    prefix += data_ptr[i];
+    data_ptr[i] = prefix;
+  }
   return 0;
 }
 
@@ -2557,6 +2639,45 @@ std::size_t cpu_scan_strided_typed(uint8_t *data_ptr,
   return 0;
 }
 
+std::size_t root_child_offset(SNode *root_child) {
+  TI_ERROR_IF(!root_child || !root_child->parent ||
+                  root_child->parent->type != SNodeType::root,
+              "Native dense field path expects a root child SNode.");
+  SNode *root = root_child->parent;
+  std::size_t offset = 0;
+  const int child_id = root->child_id(root_child);
+  for (int i = 0; i < child_id; ++i) {
+    SNode *child = root->ch[i].get();
+    offset += child->cell_size_bytes * child->num_cells_per_container;
+  }
+  return offset;
+}
+
+uint8_t *map_cpu_dense_field(Program *program,
+                             SNode *snode,
+                             int value_type,
+                             std::size_t n,
+                             const char *op_name,
+                             std::size_t *stride) {
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "{} received an unsupported dense field value type.", op_name);
+  DevicePtr ptr = program->get_dense_field_device_ptr(snode);
+  const std::size_t field_stride =
+      program->get_dense_field_stride(snode, value_size);
+  TI_ERROR_IF(field_stride < value_size,
+              "{} received an invalid dense field stride.", op_name);
+  if (stride) {
+    *stride = field_stride;
+  }
+  const std::size_t span = n == 0 ? value_size : (n - 1) * field_stride + value_size;
+  void *mapped = nullptr;
+  RhiResult res = ptr.device->map_range(ptr, span, &mapped);
+  TI_ERROR_IF(res != RhiResult::success || !mapped,
+              "{} failed to map CPU dense field storage.", op_name);
+  return reinterpret_cast<uint8_t *>(mapped);
+}
+
 bool snode_tree_contains_hash(const SNode *snode) {
   if (snode == nullptr) {
     return false;
@@ -2572,6 +2693,43 @@ bool snode_tree_contains_hash(const SNode *snode) {
   return false;
 }
 }  // namespace
+
+DevicePtr Program::get_dense_field_device_ptr(SNode *snode) {
+  TI_ERROR_IF(!snode, "Native dense field path received a null field.");
+  TI_ERROR_IF(snode->type != SNodeType::place,
+              "Native dense field path expects a place SNode.");
+  SNode *parent = snode->parent;
+  TI_ERROR_IF(!parent, "Native dense field path expects a placed field.");
+  SNode *root_child = nullptr;
+  std::size_t leaf_offset = 0;
+  if (parent->type == SNodeType::root) {
+    root_child = snode;
+  } else {
+    TI_ERROR_IF(parent->type != SNodeType::dense || !parent->parent ||
+                    parent->parent->type != SNodeType::root,
+                "Native dense field path currently supports only root.place "
+                "and root.dense.place layouts.");
+    root_child = parent;
+    leaf_offset = snode->offset_bytes_in_parent_cell;
+  }
+  const int tree_id = root_child->parent->get_snode_tree_id();
+  DevicePtr root_ptr = get_snode_tree_device_ptr(tree_id);
+  const std::size_t root_offset =
+      compile_config().arch == Arch::vulkan
+          ? get_field_in_tree_offset(tree_id, root_child)
+          : root_child_offset(root_child);
+  return root_ptr.get_ptr(root_offset + leaf_offset);
+}
+
+std::size_t Program::get_dense_field_stride(SNode *snode,
+                                            std::size_t value_size) {
+  TI_ERROR_IF(!snode || !snode->parent,
+              "Native dense field path received a null field.");
+  if (snode->parent->type == SNodeType::dense) {
+    return snode->parent->cell_size_bytes;
+  }
+  return value_size;
+}
 
 Program::Program(Arch desired_arch) : snode_rw_accessors_bank_(this) {
   TI_TRACE("Program initializing...");
@@ -3554,6 +3712,68 @@ std::size_t Program::cuda_device_transform_affine_packed_strided_ndarray(
       src_stride, dst_offset, dst_stride, scale, bias, stream);
 #else
   TI_ERROR("CUDA packed strided transform requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_transform_affine_dense_field(SNode *src,
+                                                              SNode *dst,
+                                                              int value_type,
+                                                              std::size_t n,
+                                                              double scale,
+                                                              double bias) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA dense field transform is only available on CUDA.");
+  TI_ERROR_IF(!src || !dst,
+              "CUDA dense field transform received a null field.");
+  TI_ERROR_IF(value_type < 0 || value_type > 5,
+              "CUDA dense field transform received an unsupported value type.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA dense field transform currently supports at most INT_MAX "
+              "items.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA dense field transform received an unsupported value type.");
+  const std::size_t src_stride = get_dense_field_stride(src, value_size);
+  const std::size_t dst_stride = get_dense_field_stride(dst, value_size);
+  TI_ERROR_IF(src_stride < value_size || dst_stride < value_size,
+              "CUDA dense field transform received an invalid field stride.");
+  if (n == 0) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *src_ptr =
+      raw_ptr(get_dense_field_device_ptr(src), "CUDA dense field transform");
+  void *dst_ptr =
+      raw_ptr(get_dense_field_device_ptr(dst), "CUDA dense field transform");
+  const auto cuda_value_type =
+      static_cast<cuda::CudaTransformValueType>(value_type);
+  if (src_stride == value_size && dst_stride == value_size &&
+      (cuda_value_type == cuda::CudaTransformValueType::i32 ||
+       cuda_value_type == cuda::CudaTransformValueType::u32 ||
+       cuda_value_type == cuda::CudaTransformValueType::f32)) {
+    if (cuda::driver_transform_available()) {
+      return cuda::driver_transform_affine(
+          src_ptr, dst_ptr, static_cast<int>(n), cuda_value_type, scale, bias);
+    }
+  }
+  TI_ERROR_IF(!cuda::cub_transform_available(),
+              "CUDA dense field strided transform requires "
+              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_transform_affine_strided_to_strided(
+      src_ptr, dst_ptr, static_cast<int>(n), cuda_value_type, 0, src_stride, 0,
+      dst_stride, scale, bias, stream);
+#else
+  TI_ERROR("CUDA dense field transform requires TI_WITH_CUDA=ON.");
 #endif
 }
 
@@ -4608,6 +4828,43 @@ std::size_t Program::cuda_cub_inclusive_scan_member_ndarray(
 #endif
 }
 
+std::size_t Program::cuda_cub_inclusive_scan_dense_field(SNode *data,
+                                                         int value_type,
+                                                         std::size_t n) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB dense field scan is only available on CUDA.");
+  TI_ERROR_IF(!data, "CUDA CUB dense field scan received a null field.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB dense field scan currently supports at most INT_MAX "
+              "items.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA CUB dense field scan received an unsupported value type.");
+  const std::size_t stride = get_dense_field_stride(data, value_size);
+  TI_ERROR_IF(stride < value_size,
+              "CUDA CUB dense field scan received an invalid field stride.");
+  if (n <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  DevicePtr device_ptr = get_dense_field_device_ptr(data);
+  DeviceAllocation alloc{device_ptr.device, device_ptr.alloc_id};
+  auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+  TI_ERROR_IF(!base,
+              "CUDA CUB dense field scan received a null data pointer.");
+  void *data_ptr =
+      static_cast<void *>(reinterpret_cast<uint8_t *>(base) + device_ptr.offset);
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_inclusive_scan_strided(
+      data_ptr, static_cast<int>(n),
+      static_cast<cuda::CubScanValueType>(value_type), 0, stride, stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB dense field scan requires building Taichi with "
+      "TI_WITH_CUDA=ON and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 void Program::cuda_cub_scan_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
@@ -4909,6 +5166,54 @@ std::size_t Program::cuda_cub_reduce_strided_ndarray(
 #endif
 }
 
+std::size_t Program::cuda_cub_reduce_dense_field(SNode *values,
+                                                 SNode *output,
+                                                 int value_type,
+                                                 std::size_t n,
+                                                 int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB dense field reduce is only available on CUDA.");
+  TI_ERROR_IF(!values || !output,
+              "CUDA CUB dense field reduce received a null field.");
+  TI_ERROR_IF(n == 0,
+              "CUDA CUB dense field reduce expects at least one input item.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB dense field reduce currently supports at most INT_MAX "
+              "items.");
+  TI_ERROR_IF(op < 0 || op > 2,
+              "CUDA CUB dense field reduce received an unsupported op.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA CUB dense field reduce received an unsupported value type.");
+  const std::size_t stride = get_dense_field_stride(values, value_size);
+  TI_ERROR_IF(stride < value_size,
+              "CUDA CUB dense field reduce received an invalid field stride.");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *values_ptr =
+      raw_ptr(get_dense_field_device_ptr(values), "CUDA CUB dense field reduce");
+  void *output_ptr =
+      raw_ptr(get_dense_field_device_ptr(output), "CUDA CUB dense field reduce");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_reduce_strided(
+      values_ptr, output_ptr, static_cast<int>(n),
+      static_cast<cuda::CubReduceValueType>(value_type), 0, stride,
+      static_cast<cuda::CubReduceOp>(op), stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB dense field reduce requires building Taichi with "
+      "TI_WITH_CUDA=ON and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 void Program::cuda_cub_reduce_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
@@ -5006,6 +5311,51 @@ std::size_t Program::cpu_inclusive_scan_member_ndarray(Ndarray *data,
       return cpu_scan_strided_typed<double>(ptr, n, offset, stride);
     default:
       TI_ERROR("CPU native strided scan received an unsupported value type.");
+  }
+}
+
+std::size_t Program::cpu_inclusive_scan_dense_field(SNode *data,
+                                                    int value_type,
+                                                    std::size_t n) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field scan is only available on CPU backends.");
+  TI_ERROR_IF(n == 0, "CPU native dense field scan expects at least one item.");
+  std::size_t stride = 0;
+  auto *ptr = map_cpu_dense_field(this, data, value_type, n,
+                                  "CPU native dense field scan", &stride);
+  switch (value_type) {
+    case 0:
+      if (stride == sizeof(int32_t)) {
+        return cpu_scan_typed(reinterpret_cast<int32_t *>(ptr), n);
+      }
+      return cpu_scan_strided_typed<int32_t>(ptr, n, 0, stride);
+    case 1:
+      if (stride == sizeof(float)) {
+        return cpu_scan_typed(reinterpret_cast<float *>(ptr), n);
+      }
+      return cpu_scan_strided_typed<float>(ptr, n, 0, stride);
+    case 2:
+      if (stride == sizeof(uint32_t)) {
+        return cpu_scan_typed(reinterpret_cast<uint32_t *>(ptr), n);
+      }
+      return cpu_scan_strided_typed<uint32_t>(ptr, n, 0, stride);
+    case 3:
+      if (stride == sizeof(uint64_t)) {
+        return cpu_scan_typed(reinterpret_cast<uint64_t *>(ptr), n);
+      }
+      return cpu_scan_strided_typed<uint64_t>(ptr, n, 0, stride);
+    case 4:
+      if (stride == sizeof(int64_t)) {
+        return cpu_scan_typed(reinterpret_cast<int64_t *>(ptr), n);
+      }
+      return cpu_scan_strided_typed<int64_t>(ptr, n, 0, stride);
+    case 5:
+      if (stride == sizeof(double)) {
+        return cpu_scan_typed(reinterpret_cast<double *>(ptr), n);
+      }
+      return cpu_scan_strided_typed<double>(ptr, n, 0, stride);
+    default:
+      TI_ERROR("CPU native dense field scan received an unsupported value type.");
   }
 }
 
@@ -5360,6 +5710,96 @@ std::size_t Program::cpu_reduce_strided_ndarray(Ndarray *values,
   return 0;
 }
 
+std::size_t Program::cpu_reduce_dense_field(SNode *values,
+                                            SNode *output,
+                                            int value_type,
+                                            std::size_t n,
+                                            int op) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field reduce is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(n == 0,
+              "CPU native dense field reduce expects at least one input item.");
+  TI_ERROR_IF(op < 0 || op > 2,
+              "CPU native dense field reduce received an unsupported op.");
+  std::size_t values_stride = 0;
+  const auto *values_ptr = map_cpu_dense_field(
+      this, values, value_type, n, "CPU native dense field reduce",
+      &values_stride);
+  auto *output_ptr = map_cpu_dense_field(
+      this, output, value_type, 1, "CPU native dense field reduce", nullptr);
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = n >= 65536 && target_threads > 1;
+  switch (value_type) {
+    case 0:
+      if (values_stride == sizeof(int32_t)) {
+        return cpu_reduce_typed(
+            reinterpret_cast<const int32_t *>(values_ptr),
+            reinterpret_cast<int32_t *>(output_ptr), op, n, max_threads,
+            target_threads, use_parallel);
+      }
+      return cpu_reduce_strided_typed<int32_t>(
+          values_ptr, reinterpret_cast<int32_t *>(output_ptr), op, n, 0,
+          values_stride, max_threads, target_threads, use_parallel);
+    case 1:
+      if (values_stride == sizeof(float)) {
+        return cpu_reduce_typed(reinterpret_cast<const float *>(values_ptr),
+                                reinterpret_cast<float *>(output_ptr), op, n,
+                                max_threads, target_threads, use_parallel);
+      }
+      return cpu_reduce_strided_typed<float>(
+          values_ptr, reinterpret_cast<float *>(output_ptr), op, n, 0,
+          values_stride, max_threads, target_threads, use_parallel);
+    case 2:
+      if (values_stride == sizeof(uint32_t)) {
+        return cpu_reduce_typed(
+            reinterpret_cast<const uint32_t *>(values_ptr),
+            reinterpret_cast<uint32_t *>(output_ptr), op, n, max_threads,
+            target_threads, use_parallel);
+      }
+      return cpu_reduce_strided_typed<uint32_t>(
+          values_ptr, reinterpret_cast<uint32_t *>(output_ptr), op, n, 0,
+          values_stride, max_threads, target_threads, use_parallel);
+    case 3:
+      if (values_stride == sizeof(uint64_t)) {
+        return cpu_reduce_typed(
+            reinterpret_cast<const uint64_t *>(values_ptr),
+            reinterpret_cast<uint64_t *>(output_ptr), op, n, max_threads,
+            target_threads, use_parallel);
+      }
+      return cpu_reduce_strided_typed<uint64_t>(
+          values_ptr, reinterpret_cast<uint64_t *>(output_ptr), op, n, 0,
+          values_stride, max_threads, target_threads, use_parallel);
+    case 4:
+      if (values_stride == sizeof(int64_t)) {
+        return cpu_reduce_typed(
+            reinterpret_cast<const int64_t *>(values_ptr),
+            reinterpret_cast<int64_t *>(output_ptr), op, n, max_threads,
+            target_threads, use_parallel);
+      }
+      return cpu_reduce_strided_typed<int64_t>(
+          values_ptr, reinterpret_cast<int64_t *>(output_ptr), op, n, 0,
+          values_stride, max_threads, target_threads, use_parallel);
+    case 5:
+      if (values_stride == sizeof(double)) {
+        return cpu_reduce_typed(reinterpret_cast<const double *>(values_ptr),
+                                reinterpret_cast<double *>(output_ptr), op, n,
+                                max_threads, target_threads, use_parallel);
+      }
+      return cpu_reduce_strided_typed<double>(
+          values_ptr, reinterpret_cast<double *>(output_ptr), op, n, 0,
+          values_stride, max_threads, target_threads, use_parallel);
+    default:
+      TI_ERROR(
+          "CPU native dense field reduce received an unsupported value type.");
+  }
+}
+
 std::size_t Program::cpu_reduce_workspace_bytes() const {
   return 0;
 }
@@ -5688,6 +6128,127 @@ std::size_t Program::cpu_transform_affine_packed_strided_ndarray(
       return 0;
     default:
       TI_ERROR("CPU native packed strided transform received an unsupported "
+               "value type.");
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_transform_affine_dense_field(SNode *src,
+                                                      SNode *dst,
+                                                      int value_type,
+                                                      std::size_t n,
+                                                      double scale,
+                                                      double bias) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field transform is only available on CPU "
+              "backends.");
+  if (n == 0) {
+    return 0;
+  }
+  std::size_t src_stride = 0;
+  std::size_t dst_stride = 0;
+  const auto *src_ptr = map_cpu_dense_field(
+      this, src, value_type, n, "CPU native dense field transform",
+      &src_stride);
+  auto *dst_ptr = map_cpu_dense_field(
+      this, dst, value_type, n, "CPU native dense field transform",
+      &dst_stride);
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = n >= 65536 && target_threads > 1;
+  switch (value_type) {
+    case 0:
+      if (src_stride == sizeof(uint32_t) && dst_stride == sizeof(uint32_t)) {
+        cpu_transform_run_typed<uint32_t>(
+            reinterpret_cast<const uint32_t *>(src_ptr),
+            reinterpret_cast<uint32_t *>(dst_ptr), n,
+            static_cast<uint32_t>(static_cast<int32_t>(scale)),
+            static_cast<uint32_t>(static_cast<int32_t>(bias)), use_parallel,
+            target_threads, max_threads);
+        return 0;
+      }
+      cpu_transform_run_strided_to_strided_typed<uint32_t>(
+          src_ptr, dst_ptr, n, 0, src_stride, 0, dst_stride,
+          static_cast<uint32_t>(static_cast<int32_t>(scale)),
+          static_cast<uint32_t>(static_cast<int32_t>(bias)), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 2:
+      if (src_stride == sizeof(uint32_t) && dst_stride == sizeof(uint32_t)) {
+        cpu_transform_run_typed<uint32_t>(
+            reinterpret_cast<const uint32_t *>(src_ptr),
+            reinterpret_cast<uint32_t *>(dst_ptr), n,
+            static_cast<uint32_t>(scale), static_cast<uint32_t>(bias),
+            use_parallel, target_threads, max_threads);
+        return 0;
+      }
+      cpu_transform_run_strided_to_strided_typed<uint32_t>(
+          src_ptr, dst_ptr, n, 0, src_stride, 0, dst_stride,
+          static_cast<uint32_t>(scale), static_cast<uint32_t>(bias),
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 1:
+      if (src_stride == sizeof(float) && dst_stride == sizeof(float)) {
+        cpu_transform_run_typed<float>(
+            reinterpret_cast<const float *>(src_ptr),
+            reinterpret_cast<float *>(dst_ptr), n, static_cast<float>(scale),
+            static_cast<float>(bias), use_parallel, target_threads,
+            max_threads);
+        return 0;
+      }
+      cpu_transform_run_strided_to_strided_typed<float>(
+          src_ptr, dst_ptr, n, 0, src_stride, 0, dst_stride,
+          static_cast<float>(scale), static_cast<float>(bias), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 3:
+      if (src_stride == sizeof(uint64_t) && dst_stride == sizeof(uint64_t)) {
+        cpu_transform_run_typed<uint64_t>(
+            reinterpret_cast<const uint64_t *>(src_ptr),
+            reinterpret_cast<uint64_t *>(dst_ptr), n,
+            static_cast<uint64_t>(scale), static_cast<uint64_t>(bias),
+            use_parallel, target_threads, max_threads);
+        return 0;
+      }
+      cpu_transform_run_strided_to_strided_typed<uint64_t>(
+          src_ptr, dst_ptr, n, 0, src_stride, 0, dst_stride,
+          static_cast<uint64_t>(scale), static_cast<uint64_t>(bias),
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 4:
+      if (src_stride == sizeof(uint64_t) && dst_stride == sizeof(uint64_t)) {
+        cpu_transform_run_typed<uint64_t>(
+            reinterpret_cast<const uint64_t *>(src_ptr),
+            reinterpret_cast<uint64_t *>(dst_ptr), n,
+            static_cast<uint64_t>(static_cast<int64_t>(scale)),
+            static_cast<uint64_t>(static_cast<int64_t>(bias)), use_parallel,
+            target_threads, max_threads);
+        return 0;
+      }
+      cpu_transform_run_strided_to_strided_typed<uint64_t>(
+          src_ptr, dst_ptr, n, 0, src_stride, 0, dst_stride,
+          static_cast<uint64_t>(static_cast<int64_t>(scale)),
+          static_cast<uint64_t>(static_cast<int64_t>(bias)), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 5:
+      if (src_stride == sizeof(double) && dst_stride == sizeof(double)) {
+        cpu_transform_run_typed<double>(
+            reinterpret_cast<const double *>(src_ptr),
+            reinterpret_cast<double *>(dst_ptr), n, scale, bias, use_parallel,
+            target_threads, max_threads);
+        return 0;
+      }
+      cpu_transform_run_strided_to_strided_typed<double>(
+          src_ptr, dst_ptr, n, 0, src_stride, 0, dst_stride, scale, bias,
+          use_parallel, target_threads, max_threads);
+      return 0;
+    default:
+      TI_ERROR("CPU native dense field transform received an unsupported "
                "value type.");
   }
   return 0;

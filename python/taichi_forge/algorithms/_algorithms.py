@@ -1,5 +1,6 @@
 import numpy as np
 
+from taichi_forge._lib import core as _ti_core
 from taichi_forge._kernels import (
     blit_from_field_to_field,
     bucket_copy_offsets_to_cursor_field,
@@ -186,6 +187,267 @@ def _is_struct_scalar_member_view(arr):
 
 def _is_struct_tensor_member_view(arr):
     return isinstance(arr, StructNdarrayTensorMemberView)
+
+
+class _PrimitiveView:
+    __slots__ = (
+        "storage",
+        "arr",
+        "dtype",
+        "shape",
+        "element_shape",
+        "payload_arr",
+        "offset",
+        "stride",
+        "snode",
+    )
+
+    def __init__(
+        self,
+        storage,
+        arr,
+        dtype,
+        shape,
+        element_shape=(),
+        payload_arr=None,
+        offset=0,
+        stride=0,
+        snode=None,
+    ):
+        self.storage = storage
+        self.arr = arr
+        self.dtype = dtype
+        self.shape = shape
+        self.element_shape = element_shape
+        self.payload_arr = payload_arr
+        self.offset = offset
+        self.stride = stride
+        self.snode = snode
+
+    @property
+    def is_plain_ndarray(self):
+        return self.storage == "ndarray"
+
+    @property
+    def is_struct_scalar_member(self):
+        return self.storage == "struct_scalar_member"
+
+    @property
+    def is_struct_tensor_member(self):
+        return self.storage == "struct_tensor_member"
+
+    @property
+    def is_dense_field(self):
+        return self.storage == "dense_field"
+
+    @property
+    def is_scalar_field(self):
+        return self.storage == "scalar_field"
+
+    @property
+    def is_native_numeric_dense(self):
+        return self.is_plain_ndarray or self.is_struct_scalar_member
+
+    @property
+    def num_elements(self):
+        if len(self.shape) == 0:
+            return 1
+        return int(np.prod(self.shape, dtype=np.int64))
+
+
+class _NativePrimitivePlan:
+    """Cached native call for a proven primitive view.
+
+    This is intentionally a Python-side plan only. It does not generate Taichi
+    IR, does not enter offline cache keys, and does not change the C++ ABI.
+    """
+
+    __slots__ = (
+        "backend",
+        "method_name",
+        "objects",
+        "semantic_key",
+        "call_args",
+        "prog_id",
+        "value_type",
+        "n",
+    )
+
+    def __init__(
+        self,
+        backend,
+        method_name,
+        objects,
+        semantic_key,
+        call_args,
+        prog,
+        value_type,
+        n,
+    ):
+        self.backend = backend
+        self.method_name = method_name
+        self.objects = tuple(objects)
+        self.semantic_key = tuple(semantic_key)
+        self.call_args = tuple(call_args)
+        self.prog_id = id(prog)
+        self.value_type = value_type
+        self.n = int(n)
+
+    def __getitem__(self, key):
+        # Keep internal tests and older debugging snippets readable without
+        # exposing this as a public mapping API.
+        if key == "backend":
+            return self.backend
+        if key == "method_name":
+            return self.method_name
+        if key == "prog_id":
+            return self.prog_id
+        if key == "value_type":
+            return self.value_type
+        if key == "n":
+            return self.n
+        raise KeyError(key)
+
+    def matches_request(self, backend, objects, semantic_key):
+        if self.backend != backend or self.semantic_key != tuple(semantic_key):
+            return False
+        objects = tuple(objects)
+        if len(self.objects) != len(objects):
+            return False
+        return all(cached is current for cached, current in zip(self.objects, objects))
+
+    def matches_program(self, prog):
+        return id(prog) == self.prog_id
+
+    def invoke(self, prog):
+        method = getattr(prog, self.method_name, None)
+        if method is None:
+            return None
+        temp_bytes = method(*self.call_args)
+        return 0 if temp_bytes is None else temp_bytes
+
+
+_NativeDenseFieldPlan = _NativePrimitivePlan
+
+
+def _tuple_shape(value):
+    if value is None:
+        return ()
+    if isinstance(value, tuple):
+        return value
+    if isinstance(value, list):
+        return tuple(value)
+    return (value,)
+
+
+def _dense_field_view(arr):
+    if not (
+        hasattr(arr, "_get_field_members")
+        and hasattr(arr, "_snode")
+        and hasattr(arr, "dtype")
+        and hasattr(arr, "shape")
+    ):
+        return None
+    members = arr._get_field_members()
+    if len(members) != 1:
+        return None
+    snode = arr._snode
+    if snode.ptr.type != _ti_core.SNodeType.place:
+        return None
+    shape = _tuple_shape(arr.shape)
+    from taichi_forge.lang import impl as ti_impl  # pylint: disable=import-outside-toplevel
+
+    if len(shape) == 0:
+        parent = snode.parent()
+        if parent is ti_impl.root:
+            return _PrimitiveView(
+                "scalar_field",
+                arr,
+                arr.dtype,
+                shape,
+                snode=snode.ptr,
+            )
+        if (
+            parent is None
+            or parent.ptr.type != _ti_core.SNodeType.dense
+            or snode.parent(2) is not ti_impl.root
+        ):
+            return None
+        return _PrimitiveView(
+            "scalar_field",
+            arr,
+            arr.dtype,
+            shape,
+            snode=snode.ptr,
+            offset=snode._offset_bytes_in_parent_cell,
+            stride=parent._cell_size_bytes,
+        )
+    if len(shape) != 1:
+        return None
+    parent = snode.parent()
+    if parent is None or parent.ptr.type != _ti_core.SNodeType.dense:
+        return None
+    if snode.parent(2) is not ti_impl.root:
+        return None
+    return _PrimitiveView(
+        "dense_field",
+        arr,
+        arr.dtype,
+        shape,
+        snode=snode.ptr,
+        offset=snode._offset_bytes_in_parent_cell,
+        stride=parent._cell_size_bytes,
+    )
+
+
+def _primitive_view(arr):
+    if _is_struct_scalar_member_view(arr):
+        return _PrimitiveView(
+            "struct_scalar_member",
+            arr,
+            arr.dtype,
+            _tuple_shape(arr.shape),
+            payload_arr=arr.base.arr,
+            offset=arr.offset,
+            stride=arr.stride,
+        )
+    if _is_struct_tensor_member_view(arr):
+        return _PrimitiveView(
+            "struct_tensor_member",
+            arr,
+            arr.scalar_dtype,
+            _tuple_shape(arr.shape),
+            _tuple_shape(arr.element_shape),
+            arr.base.arr,
+            arr.offset,
+            arr.stride,
+        )
+    if _is_opaque_raw_payload(arr):
+        return _PrimitiveView(
+            "struct_ndarray",
+            arr,
+            arr.dtype,
+            _tuple_shape(arr.shape),
+            _tuple_shape(getattr(arr, "element_shape", ())),
+            arr.arr,
+            0,
+            arr._get_element_size(),
+        )
+    if isinstance(arr, Ndarray):
+        return _PrimitiveView(
+            "ndarray",
+            arr,
+            arr.dtype,
+            _tuple_shape(arr.shape),
+            _tuple_shape(getattr(arr, "element_shape", ())),
+            arr.arr,
+            0,
+            arr._get_element_size(),
+        )
+    dense_field = _dense_field_view(arr)
+    if dense_field is not None:
+        return dense_field
+    return None
 
 
 def _struct_tensor_member_components(view):
@@ -561,6 +823,9 @@ class ReduceWorkspace:
         self._field_buffers = {}
         self._cuda_cub_active = False
         self._vulkan_native_active = False
+        self._native_reduce_plan = None
+        self._dense_reduce_plan = None
+        self._vulkan_dense_reduce_plan = None
 
     def clear(self):
         if self._cuda_cub_active:
@@ -580,12 +845,137 @@ class ReduceWorkspace:
         self._field_buffers.clear()
         self._cuda_cub_active = False
         self._vulkan_native_active = False
+        self._native_reduce_plan = None
+        self._dense_reduce_plan = None
+        self._vulkan_dense_reduce_plan = None
 
     def check_shape(self, n):
         if self.max_items is not None and n > self.max_items:
             raise ValueError(
                 f"Requested {n} reduce items, exceeding max_items={self.max_items}."
             )
+
+    def _dense_reduce_backend_for_method(self, method):
+        arch = current_cfg().arch
+        if arch == cuda and method in ("auto", "cuda_cub"):
+            return "cuda_cub"
+        if arch == vulkan and method in ("auto", "vulkan_native"):
+            return "vulkan_native"
+        if arch in [x64, arm64] and method in ("auto", "cpu_native"):
+            return "cpu_native"
+        return None
+
+    def _mark_dense_reduce_backend_active(self, backend, temp_bytes):
+        temp_bytes = 0 if temp_bytes is None else temp_bytes
+        if backend == "cuda_cub":
+            self._cuda_cub_active = True
+        elif backend == "vulkan_native":
+            self._vulkan_native_active = True
+        self.workspace_bytes_current = max(self.workspace_bytes_current, temp_bytes)
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak, self.workspace_bytes_current
+        )
+
+    def _try_native_reduce_plan(self, values, output, op, method):
+        backend = self._dense_reduce_backend_for_method(method)
+        if backend is None:
+            return False
+        plan = self._native_reduce_plan
+        if plan is None:
+            return False
+        if not plan.matches_request(backend, (values, output), (op,)):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not plan.matches_program(prog):
+            return False
+        temp_bytes = plan.invoke(prog)
+        if temp_bytes is None:
+            return False
+        self._mark_dense_reduce_backend_active(backend, temp_bytes)
+        return True
+
+    def _try_dense_reduce_plan(self, values, output, op, method):
+        return self._try_native_reduce_plan(values, output, op, method)
+
+    def _try_vulkan_dense_reduce_plan(self, values, output, op, method):
+        return self._try_native_reduce_plan(values, output, op, method)
+
+    def _record_native_reduce_plan(
+        self,
+        backend,
+        method_name,
+        values,
+        output,
+        value_type,
+        op,
+        call_args,
+        n,
+        prog,
+    ):
+        plan = _NativePrimitivePlan(
+            backend=backend,
+            method_name=method_name,
+            objects=(values, output),
+            semantic_key=(op,),
+            call_args=call_args,
+            prog=prog,
+            value_type=value_type,
+            n=n,
+        )
+        self._native_reduce_plan = plan
+        self._dense_reduce_plan = plan
+        self._vulkan_dense_reduce_plan = (
+            plan if backend == "vulkan_native" else None
+        )
+
+    def _record_dense_reduce_plan(
+        self,
+        backend,
+        method_name,
+        values,
+        output,
+        values_view,
+        output_view,
+        value_type,
+        op,
+        op_id,
+        prog,
+    ):
+        self._record_native_reduce_plan(
+            backend,
+            method_name,
+            values,
+            output,
+            value_type,
+            op,
+            (
+                values_view.snode,
+                output_view.snode,
+                value_type,
+                values_view.num_elements,
+                op_id,
+            ),
+            values_view.num_elements,
+            prog,
+        )
+
+    def _record_vulkan_dense_reduce_plan(
+        self, values, output, values_view, output_view, value_type, op, op_id, prog
+    ):
+        self._record_dense_reduce_plan(
+            "vulkan_native",
+            "vulkan_reduce_dense_field",
+            values,
+            output,
+            values_view,
+            output_view,
+            value_type,
+            op,
+            op_id,
+            prog,
+        )
 
     def _get_field_private_buffers(self, n, dtype):
         self.check_shape(n)
@@ -686,12 +1076,138 @@ class TransformWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
+        self._native_transform_plan = None
+        self._dense_transform_plan = None
+        self._vulkan_dense_transform_plan = None
 
     def check_shape(self, n):
         if self.max_items is not None and n > self.max_items:
             raise ValueError(
                 f"Requested {n} transform items, exceeding max_items={self.max_items}."
             )
+
+    def _dense_transform_backend_for_method(self, method):
+        arch = current_cfg().arch
+        if arch == cuda and method in ("auto", "cuda_device"):
+            return "cuda_device"
+        if arch == vulkan and method in ("auto", "vulkan_native"):
+            return "vulkan_native"
+        if arch in [x64, arm64] and method in ("auto", "cpu_native"):
+            return "cpu_native"
+        return None
+
+    def _mark_dense_transform_backend_active(self, backend, temp_bytes):
+        temp_bytes = 0 if temp_bytes is None else temp_bytes
+        if backend == "vulkan_native":
+            self._vulkan_native_active = True
+        self.workspace_bytes_current = max(self.workspace_bytes_current, temp_bytes)
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak, self.workspace_bytes_current
+        )
+
+    def _try_native_transform_plan(self, src, dst, method, scale, bias):
+        backend = self._dense_transform_backend_for_method(method)
+        if backend is None:
+            return False
+        plan = self._native_transform_plan
+        if plan is None:
+            return False
+        if not plan.matches_request(backend, (src, dst), (scale, bias)):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not plan.matches_program(prog):
+            return False
+        temp_bytes = plan.invoke(prog)
+        if temp_bytes is None:
+            return False
+        self._mark_dense_transform_backend_active(backend, temp_bytes)
+        return True
+
+    def _try_dense_transform_plan(self, src, dst, method, scale, bias):
+        return self._try_native_transform_plan(src, dst, method, scale, bias)
+
+    def _try_vulkan_dense_transform_plan(self, src, dst, method, scale, bias):
+        return self._try_native_transform_plan(src, dst, method, scale, bias)
+
+    def _record_native_transform_plan(
+        self,
+        backend,
+        method_name,
+        src,
+        dst,
+        value_type,
+        scale,
+        bias,
+        call_args,
+        n,
+        prog,
+    ):
+        plan = _NativePrimitivePlan(
+            backend=backend,
+            method_name=method_name,
+            objects=(src, dst),
+            semantic_key=(scale, bias),
+            call_args=call_args,
+            prog=prog,
+            value_type=value_type,
+            n=n,
+        )
+        self._native_transform_plan = plan
+        self._dense_transform_plan = plan
+        self._vulkan_dense_transform_plan = (
+            plan if backend == "vulkan_native" else None
+        )
+
+    def _record_dense_transform_plan(
+        self,
+        backend,
+        method_name,
+        src,
+        dst,
+        src_view,
+        dst_view,
+        value_type,
+        scale,
+        bias,
+        prog,
+    ):
+        self._record_native_transform_plan(
+            backend,
+            method_name,
+            src,
+            dst,
+            value_type,
+            scale,
+            bias,
+            (
+                src_view.snode,
+                dst_view.snode,
+                value_type,
+                src_view.num_elements,
+                scale,
+                bias,
+            ),
+            src_view.num_elements,
+            prog,
+        )
+
+    def _record_vulkan_dense_transform_plan(
+        self, src, dst, src_view, dst_view, value_type, scale, bias, prog
+    ):
+        self._record_dense_transform_plan(
+            "vulkan_native",
+            "vulkan_transform_affine_dense_field",
+            src,
+            dst,
+            src_view,
+            dst_view,
+            value_type,
+            scale,
+            bias,
+            prog,
+        )
 
     def clear(self):
         if self._vulkan_native_active:
@@ -703,6 +1219,9 @@ class TransformWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
+        self._native_transform_plan = None
+        self._dense_transform_plan = None
+        self._vulkan_dense_transform_plan = None
 
 
 class IndexedCopyWorkspace:
@@ -2179,11 +2698,21 @@ def _check_reduce_request(values, output, op, method, workspace):
     _check_no_struct_numeric_payload("experimental_reduce()", values, output)
     values_is_view = _is_struct_scalar_member_view(values)
     output_is_view = _is_struct_scalar_member_view(output)
+    values_view = _primitive_view(values)
+    output_view = _primitive_view(output)
+    dense_native_view = (
+        values_view is not None
+        and output_view is not None
+        and values_view.is_dense_field
+        and output_view.is_scalar_field
+        and method in ("auto", "cuda_cub", "vulkan_native", "cpu_native")
+    )
     if (
         isinstance(values, Ndarray)
         or isinstance(output, Ndarray)
         or values_is_view
         or output_is_view
+        or dense_native_view
     ):
         supported_dtypes = _REDUCE_VALUE_DTYPES
     else:
@@ -2194,6 +2723,7 @@ def _check_reduce_request(values, output, op, method, workspace):
             or isinstance(output, Ndarray)
             or values_is_view
             or output_is_view
+            or dense_native_view
         ):
             raise TypeError(
                 "experimental_reduce() ndarray mode currently supports ti.u32, "
@@ -2237,6 +2767,46 @@ def _reduce_value_type(dtype):
 def _try_cuda_cub_reduce(values, output, op, workspace):
     if current_cfg().arch != cuda:
         return False
+    values_view = _primitive_view(values)
+    output_view = _primitive_view(output)
+    if (
+        values_view is not None
+        and output_view is not None
+        and values_view.is_dense_field
+        and output_view.is_scalar_field
+    ):
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        impl.get_runtime().materialize()
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "cuda_cub_reduce_available"):
+            return False
+        if not prog.cuda_cub_reduce_available():
+            return False
+        if not hasattr(prog, "cuda_cub_reduce_dense_field"):
+            return False
+        temp_bytes = prog.cuda_cub_reduce_dense_field(
+            values_view.snode,
+            output_view.snode,
+            _reduce_value_type(values_view.dtype),
+            values_view.num_elements,
+            _SUPPORTED_REDUCE_OPS[op],
+        )
+        if workspace is not None:
+            workspace._record_dense_reduce_plan(
+                "cuda_cub",
+                "cuda_cub_reduce_dense_field",
+                values,
+                output,
+                values_view,
+                output_view,
+                _reduce_value_type(values_view.dtype),
+                op,
+                _SUPPORTED_REDUCE_OPS[op],
+                prog,
+            )
+            workspace._mark_dense_reduce_backend_active("cuda_cub", temp_bytes)
+        return True
     values_is_member = _is_struct_scalar_member_view(values)
     output_is_member = _is_struct_scalar_member_view(output)
     if values_is_member or output_is_member:
@@ -2267,13 +2837,27 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
             _SUPPORTED_REDUCE_OPS[op],
         )
         if workspace is not None:
-            workspace._cuda_cub_active = True
-            workspace.workspace_bytes_current = max(
-                workspace.workspace_bytes_current, temp_bytes
+            workspace._record_native_reduce_plan(
+                "cuda_cub",
+                "cuda_cub_reduce_strided_ndarray",
+                values,
+                output,
+                _reduce_value_type(values.dtype),
+                op,
+                (
+                    values_arr,
+                    output_arr,
+                    _reduce_value_type(values.dtype),
+                    values_offset,
+                    values_stride,
+                    output_offset,
+                    output_stride,
+                    _SUPPORTED_REDUCE_OPS[op],
+                ),
+                values.shape[0],
+                prog,
             )
-            workspace.workspace_bytes_peak = max(
-                workspace.workspace_bytes_peak, workspace.workspace_bytes_current
-            )
+            workspace._mark_dense_reduce_backend_active("cuda_cub", temp_bytes)
         return True
     if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
         return False
@@ -2288,19 +2872,71 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
         values.arr, output.arr, _reduce_value_type(values.dtype), _SUPPORTED_REDUCE_OPS[op]
     )
     if workspace is not None:
-        workspace._cuda_cub_active = True
-        workspace.workspace_bytes_current = max(
-            workspace.workspace_bytes_current, temp_bytes
+        workspace._record_native_reduce_plan(
+            "cuda_cub",
+            "cuda_cub_reduce_ndarray",
+            values,
+            output,
+            _reduce_value_type(values.dtype),
+            op,
+            (
+                values.arr,
+                output.arr,
+                _reduce_value_type(values.dtype),
+                _SUPPORTED_REDUCE_OPS[op],
+            ),
+            values.shape[0],
+            prog,
         )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
-        )
+        workspace._mark_dense_reduce_backend_active("cuda_cub", temp_bytes)
     return True
 
 
 def _try_vulkan_reduce(values, output, op, workspace):
     if current_cfg().arch != vulkan:
         return False
+    values_view = _primitive_view(values)
+    output_view = _primitive_view(output)
+    if (
+        values_view is not None
+        and output_view is not None
+        and values_view.is_dense_field
+        and output_view.is_scalar_field
+    ):
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        impl.get_runtime().materialize()
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "vulkan_reduce_available"):
+            return False
+        if not prog.vulkan_reduce_available():
+            return False
+        value_type = _reduce_value_type(values_view.dtype)
+        if hasattr(prog, "vulkan_reduce_value_type_available"):
+            if not prog.vulkan_reduce_value_type_available(value_type):
+                return False
+        if not hasattr(prog, "vulkan_reduce_dense_field"):
+            return False
+        temp_bytes = prog.vulkan_reduce_dense_field(
+            values_view.snode,
+            output_view.snode,
+            value_type,
+            values_view.num_elements,
+            _SUPPORTED_REDUCE_OPS[op],
+        )
+        if workspace is not None:
+            workspace._record_vulkan_dense_reduce_plan(
+                values,
+                output,
+                values_view,
+                output_view,
+                value_type,
+                op,
+                _SUPPORTED_REDUCE_OPS[op],
+                prog,
+            )
+            workspace._mark_dense_reduce_backend_active("vulkan_native", temp_bytes)
+        return True
     values_is_member = _is_struct_scalar_member_view(values)
     output_is_member = _is_struct_scalar_member_view(output)
     if values_is_member or output_is_member:
@@ -2335,13 +2971,27 @@ def _try_vulkan_reduce(values, output, op, workspace):
             _SUPPORTED_REDUCE_OPS[op],
         )
         if workspace is not None:
-            workspace._vulkan_native_active = True
-            workspace.workspace_bytes_current = max(
-                workspace.workspace_bytes_current, temp_bytes
+            workspace._record_native_reduce_plan(
+                "vulkan_native",
+                "vulkan_reduce_strided_ndarray",
+                values,
+                output,
+                value_type,
+                op,
+                (
+                    values_arr,
+                    output_arr,
+                    value_type,
+                    values_offset,
+                    values_stride,
+                    output_offset,
+                    output_stride,
+                    _SUPPORTED_REDUCE_OPS[op],
+                ),
+                values.shape[0],
+                prog,
             )
-            workspace.workspace_bytes_peak = max(
-                workspace.workspace_bytes_peak, workspace.workspace_bytes_current
-            )
+            workspace._mark_dense_reduce_backend_active("vulkan_native", temp_bytes)
         return True
     if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
         return False
@@ -2359,27 +3009,74 @@ def _try_vulkan_reduce(values, output, op, workspace):
     elif values.dtype != i32:
         return False
     if hasattr(prog, "vulkan_reduce_ndarray"):
+        method_name = "vulkan_reduce_ndarray"
+        call_args = (values.arr, output.arr, value_type, _SUPPORTED_REDUCE_OPS[op])
         temp_bytes = prog.vulkan_reduce_ndarray(
             values.arr, output.arr, value_type, _SUPPORTED_REDUCE_OPS[op]
         )
     else:
+        method_name = "vulkan_reduce_i32_ndarray"
+        call_args = (values.arr, output.arr, _SUPPORTED_REDUCE_OPS[op])
         temp_bytes = prog.vulkan_reduce_i32_ndarray(
             values.arr, output.arr, _SUPPORTED_REDUCE_OPS[op]
         )
     if workspace is not None:
-        workspace._vulkan_native_active = True
-        workspace.workspace_bytes_current = max(
-            workspace.workspace_bytes_current, temp_bytes
+        workspace._record_native_reduce_plan(
+            "vulkan_native",
+            method_name,
+            values,
+            output,
+            value_type,
+            op,
+            call_args,
+            values.shape[0],
+            prog,
         )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
-        )
+        workspace._mark_dense_reduce_backend_active("vulkan_native", temp_bytes)
     return True
 
 
 def _try_cpu_reduce(values, output, op, workspace):
     if current_cfg().arch not in [x64, arm64]:
         return False
+    values_view = _primitive_view(values)
+    output_view = _primitive_view(output)
+    if (
+        values_view is not None
+        and output_view is not None
+        and values_view.is_dense_field
+        and output_view.is_scalar_field
+    ):
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        impl.get_runtime().materialize()
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "cpu_reduce_dense_field"):
+            return False
+        if not (hasattr(prog, "cpu_reduce_available") and prog.cpu_reduce_available()):
+            return False
+        temp_bytes = prog.cpu_reduce_dense_field(
+            values_view.snode,
+            output_view.snode,
+            _reduce_value_type(values_view.dtype),
+            values_view.num_elements,
+            _SUPPORTED_REDUCE_OPS[op],
+        )
+        if workspace is not None:
+            workspace._record_dense_reduce_plan(
+                "cpu_native",
+                "cpu_reduce_dense_field",
+                values,
+                output,
+                values_view,
+                output_view,
+                _reduce_value_type(values_view.dtype),
+                op,
+                _SUPPORTED_REDUCE_OPS[op],
+                prog,
+            )
+            workspace._mark_dense_reduce_backend_active("cpu_native", temp_bytes)
+        return True
     values_is_member = _is_struct_scalar_member_view(values)
     output_is_member = _is_struct_scalar_member_view(output)
     if values_is_member or output_is_member:
@@ -2410,12 +3107,27 @@ def _try_cpu_reduce(values, output, op, workspace):
             _SUPPORTED_REDUCE_OPS[op],
         )
         if workspace is not None:
-            workspace.workspace_bytes_current = max(
-                workspace.workspace_bytes_current, temp_bytes
+            workspace._record_native_reduce_plan(
+                "cpu_native",
+                "cpu_reduce_strided_ndarray",
+                values,
+                output,
+                _reduce_value_type(values.dtype),
+                op,
+                (
+                    values_arr,
+                    output_arr,
+                    _reduce_value_type(values.dtype),
+                    values_offset,
+                    values_stride,
+                    output_offset,
+                    output_stride,
+                    _SUPPORTED_REDUCE_OPS[op],
+                ),
+                values.shape[0],
+                prog,
             )
-            workspace.workspace_bytes_peak = max(
-                workspace.workspace_bytes_peak, workspace.workspace_bytes_current
-            )
+            workspace._mark_dense_reduce_backend_active("cpu_native", temp_bytes)
         return True
     if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
         return False
@@ -2430,12 +3142,23 @@ def _try_cpu_reduce(values, output, op, workspace):
         values.arr, output.arr, _reduce_value_type(values.dtype), _SUPPORTED_REDUCE_OPS[op]
     )
     if workspace is not None:
-        workspace.workspace_bytes_current = max(
-            workspace.workspace_bytes_current, temp_bytes
+        workspace._record_native_reduce_plan(
+            "cpu_native",
+            "cpu_reduce_ndarray",
+            values,
+            output,
+            _reduce_value_type(values.dtype),
+            op,
+            (
+                values.arr,
+                output.arr,
+                _reduce_value_type(values.dtype),
+                _SUPPORTED_REDUCE_OPS[op],
+            ),
+            values.shape[0],
+            prog,
         )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
-        )
+        workspace._mark_dense_reduce_backend_active("cpu_native", temp_bytes)
     return True
 
 
@@ -2509,6 +3232,10 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
             )
         return workspace
 
+    if workspace is not None and isinstance(workspace, ReduceWorkspace):
+        if workspace._try_native_reduce_plan(values, output, op, method):
+            return workspace
+
     _check_reduce_request(values, output, op, method, workspace)
     if workspace is None:
         workspace = ReduceWorkspace(max_items=values.shape[0])
@@ -2536,13 +3263,19 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
         return
     if method == "cpu_native":
         raise RuntimeError(
-            "method='cpu_native' requires CPU ndarray inputs and available native reduce."
+            "method='cpu_native' requires CPU ndarray or dense field inputs "
+            "and available native reduce."
         )
     if isinstance(values, Ndarray) or _is_struct_scalar_member_view(values):
         raise RuntimeError(
             "experimental_reduce() ndarray input is currently supported only "
             "by native CPU/CUDA/Vulkan reduce fast paths. Use a field input "
             "or an available native backend."
+        )
+    if values.dtype not in _REDUCE_FIELD_DTYPES:
+        raise RuntimeError(
+            "experimental_reduce() dense field values with this dtype require "
+            "an available native CPU/CUDA/Vulkan reduce fast path."
         )
     _reduce_field_atomic(values, output, op, workspace)
 
@@ -2900,13 +3633,23 @@ def _check_transform_request(src, dst, method, workspace):
         raise TypeError("experimental_transform() source and destination dtype must match.")
     src_is_view = _is_struct_scalar_member_view(src)
     dst_is_view = _is_struct_scalar_member_view(dst)
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    dense_native_view = (
+        src_view is not None
+        and dst_view is not None
+        and src_view.is_dense_field
+        and dst_view.is_dense_field
+        and method in ("auto", "cuda_device", "vulkan_native", "cpu_native")
+    )
     if (
         isinstance(src, Ndarray)
         or src_is_view
         or isinstance(dst, Ndarray)
         or dst_is_view
+        or dense_native_view
     ):
-        if not (
+        if not dense_native_view and not (
             (isinstance(src, Ndarray) or src_is_view)
             and (isinstance(dst, Ndarray) or dst_is_view)
             and not _is_opaque_raw_payload(src)
@@ -2930,9 +3673,55 @@ def _check_transform_request(src, dst, method, workspace):
         raise TypeError("workspace must be a TransformWorkspace instance or None.")
 
 
-def _try_cuda_device_transform(src, dst, value_type, scale, bias):
+def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
     if current_cfg().arch != cuda:
         return False
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    if (
+        src_view is not None
+        and dst_view is not None
+        and src_view.is_dense_field
+        and dst_view.is_dense_field
+    ):
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        impl.get_runtime().materialize()
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "cuda_device_transform_available"):
+            return False
+        if not prog.cuda_device_transform_available():
+            return False
+        if not hasattr(prog, "cuda_device_transform_affine_dense_field"):
+            return False
+        if value_type in (3, 4, 5) and not (
+            hasattr(prog, "cuda_toolkit_transform_available")
+            and prog.cuda_toolkit_transform_available()
+        ):
+            return False
+        temp_bytes = prog.cuda_device_transform_affine_dense_field(
+            src_view.snode,
+            dst_view.snode,
+            value_type,
+            src_view.num_elements,
+            scale,
+            bias,
+        )
+        if workspace is not None:
+            workspace._record_dense_transform_plan(
+                "cuda_device",
+                "cuda_device_transform_affine_dense_field",
+                src,
+                dst,
+                src_view,
+                dst_view,
+                value_type,
+                scale,
+                bias,
+                prog,
+            )
+            workspace._mark_dense_transform_backend_active("cuda_device", temp_bytes)
+        return True
     src_is_member = _is_struct_scalar_member_view(src)
     dst_is_member = _is_struct_scalar_member_view(dst)
     if not (
@@ -2952,7 +3741,7 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
-        prog.cuda_device_transform_affine_strided_ndarray(
+        temp_bytes = prog.cuda_device_transform_affine_strided_ndarray(
             src_arr,
             dst_arr,
             value_type,
@@ -2963,6 +3752,30 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias):
             scale,
             bias,
         )
+        if workspace is not None:
+            workspace._record_native_transform_plan(
+                "cuda_device",
+                "cuda_device_transform_affine_strided_ndarray",
+                src,
+                dst,
+                value_type,
+                scale,
+                bias,
+                (
+                    src_arr,
+                    dst_arr,
+                    value_type,
+                    src_offset,
+                    src_stride,
+                    dst_offset,
+                    dst_stride,
+                    scale,
+                    bias,
+                ),
+                _shape_numel(src),
+                prog,
+            )
+            workspace._mark_dense_transform_backend_active("cuda_device", temp_bytes)
         return True
     if not hasattr(prog, "cuda_device_transform_available"):
         return False
@@ -2973,13 +3786,67 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias):
         and prog.cuda_toolkit_transform_available()
     ):
         return False
-    prog.cuda_device_transform_affine_ndarray(src.arr, dst.arr, value_type, scale, bias)
+    temp_bytes = prog.cuda_device_transform_affine_ndarray(
+        src.arr, dst.arr, value_type, scale, bias
+    )
+    if workspace is not None:
+        workspace._record_native_transform_plan(
+            "cuda_device",
+            "cuda_device_transform_affine_ndarray",
+            src,
+            dst,
+            value_type,
+            scale,
+            bias,
+            (src.arr, dst.arr, value_type, scale, bias),
+            _shape_numel(src),
+            prog,
+        )
+        workspace._mark_dense_transform_backend_active("cuda_device", temp_bytes)
     return True
 
 
 def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
     if current_cfg().arch != vulkan:
         return False
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    if (
+        src_view is not None
+        and dst_view is not None
+        and src_view.is_dense_field
+        and dst_view.is_dense_field
+    ):
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        impl.get_runtime().materialize()
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "vulkan_transform_available"):
+            return False
+        if not prog.vulkan_transform_available():
+            return False
+        if hasattr(prog, "vulkan_transform_value_type_available") and not (
+            prog.vulkan_transform_value_type_available(value_type)
+        ):
+            return False
+        if not hasattr(prog, "vulkan_transform_affine_dense_field"):
+            return False
+        temp_bytes = prog.vulkan_transform_affine_dense_field(
+            src_view.snode,
+            dst_view.snode,
+            value_type,
+            src_view.num_elements,
+            scale,
+            bias,
+        )
+        if workspace is not None:
+            workspace._record_vulkan_dense_transform_plan(
+                src, dst, src_view, dst_view, value_type, scale, bias, prog
+            )
+            workspace._mark_dense_transform_backend_active(
+                "vulkan_native", temp_bytes
+            )
+        return True
     src_is_member = _is_struct_scalar_member_view(src)
     dst_is_member = _is_struct_scalar_member_view(dst)
     if not (
@@ -3003,6 +3870,18 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
+        method_name = "vulkan_transform_affine_strided_ndarray"
+        call_args = (
+            src_arr,
+            dst_arr,
+            value_type,
+            src_offset,
+            src_stride,
+            dst_offset,
+            dst_stride,
+            scale,
+            bias,
+        )
         temp_bytes = prog.vulkan_transform_affine_strided_ndarray(
             src_arr,
             dst_arr,
@@ -3015,23 +3894,73 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
             bias,
         )
     else:
+        method_name = "vulkan_transform_affine_ndarray"
+        call_args = (src.arr, dst.arr, value_type, scale, bias)
         temp_bytes = prog.vulkan_transform_affine_ndarray(
             src.arr, dst.arr, value_type, scale, bias
         )
     if workspace is not None:
-        workspace._vulkan_native_active = True
-        workspace.workspace_bytes_current = max(
-            workspace.workspace_bytes_current, temp_bytes
+        workspace._record_native_transform_plan(
+            "vulkan_native",
+            method_name,
+            src,
+            dst,
+            value_type,
+            scale,
+            bias,
+            call_args,
+            _shape_numel(src),
+            prog,
         )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
-        )
+        workspace._mark_dense_transform_backend_active("vulkan_native", temp_bytes)
     return True
 
 
-def _try_cpu_transform(src, dst, value_type, scale, bias):
+def _try_cpu_transform(src, dst, value_type, scale, bias, workspace):
     if current_cfg().arch not in [x64, arm64]:
         return False
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    if (
+        src_view is not None
+        and dst_view is not None
+        and src_view.is_dense_field
+        and dst_view.is_dense_field
+    ):
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        impl.get_runtime().materialize()
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "cpu_transform_affine_dense_field"):
+            return False
+        if not (
+            hasattr(prog, "cpu_transform_available")
+            and prog.cpu_transform_available()
+        ):
+            return False
+        temp_bytes = prog.cpu_transform_affine_dense_field(
+            src_view.snode,
+            dst_view.snode,
+            value_type,
+            src_view.num_elements,
+            scale,
+            bias,
+        )
+        if workspace is not None:
+            workspace._record_dense_transform_plan(
+                "cpu_native",
+                "cpu_transform_affine_dense_field",
+                src,
+                dst,
+                src_view,
+                dst_view,
+                value_type,
+                scale,
+                bias,
+                prog,
+            )
+            workspace._mark_dense_transform_backend_active("cpu_native", temp_bytes)
+        return True
     src_is_member = _is_struct_scalar_member_view(src)
     dst_is_member = _is_struct_scalar_member_view(dst)
     if not (
@@ -3051,7 +3980,7 @@ def _try_cpu_transform(src, dst, value_type, scale, bias):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
-        prog.cpu_transform_affine_strided_ndarray(
+        temp_bytes = prog.cpu_transform_affine_strided_ndarray(
             src_arr,
             dst_arr,
             value_type,
@@ -3062,8 +3991,46 @@ def _try_cpu_transform(src, dst, value_type, scale, bias):
             scale,
             bias,
         )
+        if workspace is not None:
+            workspace._record_native_transform_plan(
+                "cpu_native",
+                "cpu_transform_affine_strided_ndarray",
+                src,
+                dst,
+                value_type,
+                scale,
+                bias,
+                (
+                    src_arr,
+                    dst_arr,
+                    value_type,
+                    src_offset,
+                    src_stride,
+                    dst_offset,
+                    dst_stride,
+                    scale,
+                    bias,
+                ),
+                _shape_numel(src),
+                prog,
+            )
+            workspace._mark_dense_transform_backend_active("cpu_native", temp_bytes)
         return True
-    prog.cpu_transform_affine_ndarray(src.arr, dst.arr, value_type, scale, bias)
+    temp_bytes = prog.cpu_transform_affine_ndarray(src.arr, dst.arr, value_type, scale, bias)
+    if workspace is not None:
+        workspace._record_native_transform_plan(
+            "cpu_native",
+            "cpu_transform_affine_ndarray",
+            src,
+            dst,
+            value_type,
+            scale,
+            bias,
+            (src.arr, dst.arr, value_type, scale, bias),
+            _shape_numel(src),
+            prog,
+        )
+        workspace._mark_dense_transform_backend_active("cpu_native", temp_bytes)
     return True
 
 
@@ -3249,6 +4216,10 @@ def experimental_transform(
             )
         return workspace
 
+    if workspace is not None and isinstance(workspace, TransformWorkspace):
+        if workspace._try_native_transform_plan(src, dst, method, scale, bias):
+            return workspace
+
     _check_transform_request(src, dst, method, workspace)
     n = _shape_numel(src)
     if workspace is None:
@@ -3259,7 +4230,7 @@ def experimental_transform(
     if n == 0:
         return workspace
     if method in ("auto", "cuda_device") and _try_cuda_device_transform(
-        src, dst, value_type, scale, bias
+        src, dst, value_type, scale, bias, workspace
     ):
         return workspace
     if method == "cuda_device":
@@ -3277,13 +4248,18 @@ def experimental_transform(
             "native transform shaders."
         )
     if method in ("auto", "cpu_native") and _try_cpu_transform(
-        src, dst, value_type, scale, bias
+        src, dst, value_type, scale, bias, workspace
     ):
         return workspace
     if method == "cpu_native":
         raise RuntimeError(
-            "method='cpu_native' requires CPU ndarray inputs and available native "
-            "transform."
+            "method='cpu_native' requires CPU ndarray or dense field inputs "
+            "and available native transform."
+        )
+    if src.dtype not in (i32, f32):
+        raise RuntimeError(
+            "experimental_transform() dense field values with this dtype "
+            "require an available native CPU/CUDA/Vulkan transform fast path."
         )
     if method in ("kernel", "field_kernel", "auto"):
         _transform_kernel(src, dst, scale, bias)
@@ -4872,6 +5848,8 @@ class PrefixSumExecutor:
 
         self.workspace_length = start_pos
         self.large_arr = None
+        self._native_scan_plan = None
+        self._dense_native_scan_plan = None
 
     def _ensure_large_arr(self):
         if self.large_arr is None:
@@ -4883,78 +5861,233 @@ class PrefixSumExecutor:
             return _SCAN_VALUE_TYPE[dtype]
         raise RuntimeError("unsupported PrefixSumExecutor ndarray dtype.")
 
-    def _try_cuda_cub_scan(self, input_arr):
-        if current_cfg().arch != cuda:
+    def _dense_scan_backend_for_arch(self):
+        arch = current_cfg().arch
+        if arch == cuda:
+            return "cuda_cub"
+        if arch == vulkan:
+            return "vulkan_native"
+        if arch in [x64, arm64]:
+            return "cpu_native"
+        return None
+
+    def _try_native_scan_plan(self, input_arr):
+        backend = self._dense_scan_backend_for_arch()
+        if backend is None:
             return False
-        if not (isinstance(input_arr, Ndarray) or _is_struct_scalar_member_view(input_arr)):
+        plan = self._native_scan_plan
+        if plan is None:
+            return False
+        if not plan.matches_request(backend, (input_arr,), (self.sorting_length,)):
             return False
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
+        prog = impl.get_runtime().prog
+        if not plan.matches_program(prog):
+            return False
+        if plan.invoke(prog) is None:
+            return False
+        return True
+
+    def _try_dense_native_scan_plan(self, input_arr):
+        return self._try_native_scan_plan(input_arr)
+
+    def _record_native_scan_plan(
+        self, backend, method_name, input_arr, view, call_args, prog
+    ):
+        value_type = self._scan_value_type(view.dtype)
+        plan = _NativePrimitivePlan(
+            backend=backend,
+            method_name=method_name,
+            objects=(input_arr,),
+            semantic_key=(self.sorting_length,),
+            call_args=call_args,
+            prog=prog,
+            value_type=value_type,
+            n=view.num_elements,
+        )
+        self._native_scan_plan = plan
+        self._dense_native_scan_plan = plan
+
+    def _record_dense_native_scan_plan(self, backend, method_name, input_arr, view, prog):
+        value_type = self._scan_value_type(view.dtype)
+        self._record_native_scan_plan(
+            backend,
+            method_name,
+            input_arr,
+            view,
+            (view.snode, value_type, view.num_elements),
+            prog,
+        )
+
+    def _try_cuda_cub_scan(self, input_arr):
+        if current_cfg().arch != cuda:
+            return False
+        view = _primitive_view(input_arr)
+        if view is None or not (view.is_native_numeric_dense or view.is_dense_field):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        if view.is_dense_field:
+            impl.get_runtime().materialize()
         prog = impl.get_runtime().prog
         if not hasattr(prog, "cuda_cub_scan_available"):
             return False
         if not prog.cuda_cub_scan_available():
             return False
-        value_type = self._scan_value_type(input_arr.dtype)
-        if _is_struct_scalar_member_view(input_arr):
+        value_type = self._scan_value_type(view.dtype)
+        if view.is_dense_field:
+            if not hasattr(prog, "cuda_cub_inclusive_scan_dense_field"):
+                return False
+            prog.cuda_cub_inclusive_scan_dense_field(
+                view.snode, value_type, view.num_elements
+            )
+            self._record_dense_native_scan_plan(
+                "cuda_cub",
+                "cuda_cub_inclusive_scan_dense_field",
+                input_arr,
+                view,
+                prog,
+            )
+        elif view.is_struct_scalar_member:
             if not hasattr(prog, "cuda_cub_inclusive_scan_member_ndarray"):
                 return False
             prog.cuda_cub_inclusive_scan_member_ndarray(
-                input_arr.base.arr, value_type, input_arr.offset, input_arr.stride
+                view.payload_arr, value_type, view.offset, view.stride
+            )
+            self._record_native_scan_plan(
+                "cuda_cub",
+                "cuda_cub_inclusive_scan_member_ndarray",
+                input_arr,
+                view,
+                (view.payload_arr, value_type, view.offset, view.stride),
+                prog,
             )
         else:
-            prog.cuda_cub_inclusive_scan_ndarray(input_arr.arr, value_type)
+            prog.cuda_cub_inclusive_scan_ndarray(view.payload_arr, value_type)
+            self._record_native_scan_plan(
+                "cuda_cub",
+                "cuda_cub_inclusive_scan_ndarray",
+                input_arr,
+                view,
+                (view.payload_arr, value_type),
+                prog,
+            )
         return True
 
     def _try_vulkan_native_scan(self, input_arr):
         if current_cfg().arch != vulkan:
             return False
-        if not (isinstance(input_arr, Ndarray) or _is_struct_scalar_member_view(input_arr)):
+        view = _primitive_view(input_arr)
+        if view is None or not (view.is_native_numeric_dense or view.is_dense_field):
             return False
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
+        if view.is_dense_field:
+            impl.get_runtime().materialize()
         prog = impl.get_runtime().prog
         if not hasattr(prog, "vulkan_scan_available"):
             return False
         if not prog.vulkan_scan_available():
             return False
-        value_type = self._scan_value_type(input_arr.dtype)
+        value_type = self._scan_value_type(view.dtype)
         if hasattr(prog, "vulkan_scan_value_type_available"):
             if not prog.vulkan_scan_value_type_available(value_type):
                 return False
-        elif input_arr.dtype != i32:
+        elif view.dtype != i32:
             return False
-        if _is_struct_scalar_member_view(input_arr):
+        if view.is_dense_field:
+            if not hasattr(prog, "vulkan_inclusive_scan_dense_field"):
+                return False
+            prog.vulkan_inclusive_scan_dense_field(
+                view.snode, value_type, view.num_elements
+            )
+            self._record_dense_native_scan_plan(
+                "vulkan_native",
+                "vulkan_inclusive_scan_dense_field",
+                input_arr,
+                view,
+                prog,
+            )
+        elif view.is_struct_scalar_member:
             if not hasattr(prog, "vulkan_inclusive_scan_member_ndarray"):
                 return False
             prog.vulkan_inclusive_scan_member_ndarray(
-                input_arr.base.arr, value_type, input_arr.offset, input_arr.stride
+                view.payload_arr, value_type, view.offset, view.stride
+            )
+            self._record_native_scan_plan(
+                "vulkan_native",
+                "vulkan_inclusive_scan_member_ndarray",
+                input_arr,
+                view,
+                (view.payload_arr, value_type, view.offset, view.stride),
+                prog,
             )
         else:
-            prog.vulkan_inclusive_scan_ndarray(input_arr.arr, value_type)
+            prog.vulkan_inclusive_scan_ndarray(view.payload_arr, value_type)
+            self._record_native_scan_plan(
+                "vulkan_native",
+                "vulkan_inclusive_scan_ndarray",
+                input_arr,
+                view,
+                (view.payload_arr, value_type),
+                prog,
+            )
         return True
 
     def _try_cpu_native_scan(self, input_arr):
         if current_cfg().arch not in [x64, arm64]:
             return False
-        if not (isinstance(input_arr, Ndarray) or _is_struct_scalar_member_view(input_arr)):
+        view = _primitive_view(input_arr)
+        if view is None or not (view.is_native_numeric_dense or view.is_dense_field):
             return False
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
+        if view.is_dense_field:
+            impl.get_runtime().materialize()
         prog = impl.get_runtime().prog
         if not hasattr(prog, "cpu_scan_available"):
             return False
         if not prog.cpu_scan_available():
             return False
-        value_type = self._scan_value_type(input_arr.dtype)
-        if _is_struct_scalar_member_view(input_arr):
+        value_type = self._scan_value_type(view.dtype)
+        if view.is_dense_field:
+            if not hasattr(prog, "cpu_inclusive_scan_dense_field"):
+                return False
+            prog.cpu_inclusive_scan_dense_field(
+                view.snode, value_type, view.num_elements
+            )
+            self._record_dense_native_scan_plan(
+                "cpu_native",
+                "cpu_inclusive_scan_dense_field",
+                input_arr,
+                view,
+                prog,
+            )
+        elif view.is_struct_scalar_member:
             if not hasattr(prog, "cpu_inclusive_scan_member_ndarray"):
                 return False
             prog.cpu_inclusive_scan_member_ndarray(
-                input_arr.base.arr, value_type, input_arr.offset, input_arr.stride
+                view.payload_arr, value_type, view.offset, view.stride
+            )
+            self._record_native_scan_plan(
+                "cpu_native",
+                "cpu_inclusive_scan_member_ndarray",
+                input_arr,
+                view,
+                (view.payload_arr, value_type, view.offset, view.stride),
+                prog,
             )
         else:
-            prog.cpu_inclusive_scan_ndarray(input_arr.arr, value_type)
+            prog.cpu_inclusive_scan_ndarray(view.payload_arr, value_type)
+            self._record_native_scan_plan(
+                "cpu_native",
+                "cpu_inclusive_scan_ndarray",
+                input_arr,
+                view,
+                (view.payload_arr, value_type),
+                prog,
+            )
         return True
 
     def _run_field_workspace(self, large_arr):
@@ -4990,10 +6123,14 @@ class PrefixSumExecutor:
             uniform_kernel(large_arr, ele_nums_pos[i], ele_nums_pos[i + 1])
 
     def run(self, input_arr):
-        length = self.sorting_length
+        if self._try_native_scan_plan(input_arr):
+            return
 
-        if _is_struct_tensor_member_view(input_arr):
-            if input_arr.scalar_dtype not in _SCAN_VALUE_DTYPES:
+        length = self.sorting_length
+        view = _primitive_view(input_arr)
+
+        if view is not None and view.is_struct_tensor_member:
+            if view.dtype not in _SCAN_VALUE_DTYPES:
                 raise RuntimeError(
                     "PrefixSumExecutor ndarray input supports only "
                     "ti.i32/ti.u32/ti.f32/ti.i64/ti.u64/ti.f64."
@@ -5002,16 +6139,13 @@ class PrefixSumExecutor:
                 self.run(component)
             return
 
-        if isinstance(input_arr, Ndarray):
-            if _is_opaque_raw_payload(input_arr):
+        if view is not None:
+            if view.storage == "struct_ndarray":
                 _reject_struct_numeric_primitive("PrefixSumExecutor.run()")
-            if input_arr.dtype not in _SCAN_VALUE_DTYPES:
-                raise RuntimeError(
-                    "PrefixSumExecutor ndarray input supports only "
-                    "ti.i32/ti.u32/ti.f32/ti.i64/ti.u64/ti.f64."
-                )
-        elif _is_struct_scalar_member_view(input_arr):
-            if input_arr.dtype not in _SCAN_VALUE_DTYPES:
+            if (
+                (view.is_native_numeric_dense or view.is_dense_field)
+                and view.dtype not in _SCAN_VALUE_DTYPES
+            ):
                 raise RuntimeError(
                     "PrefixSumExecutor ndarray input supports only "
                     "ti.i32/ti.u32/ti.f32/ti.i64/ti.u64/ti.f64."
@@ -5026,11 +6160,20 @@ class PrefixSumExecutor:
             return
         if self._try_cpu_native_scan(input_arr):
             return
-        if isinstance(input_arr, Ndarray) or _is_struct_scalar_member_view(input_arr):
+        if view is not None and view.is_dense_field:
+            if current_cfg().arch in (cuda, vulkan) and view.dtype == i32:
+                pass
+            else:
+                raise RuntimeError(
+                    "PrefixSumExecutor dense field input with this dtype "
+                    "requires an available native CPU/CUDA/Vulkan scan fast "
+                    "path."
+                )
+        elif view is not None and view.is_native_numeric_dense:
             raise RuntimeError(
-                "PrefixSumExecutor ndarray input is currently supported only "
-                "by native CPU/CUDA/Vulkan scan fast paths. Ensure the backend "
-                "runtime primitive is available, or use a field input."
+                "PrefixSumExecutor native input is currently supported only by "
+                "available CPU/CUDA/Vulkan scan fast paths. Ensure the backend "
+                "runtime primitive is available, or use an i32 field fallback."
             )
 
         large_arr = self._ensure_large_arr()
