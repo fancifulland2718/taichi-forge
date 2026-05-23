@@ -17,6 +17,9 @@ from taichi_forge.types.primitive_types import f16, f32, f64, i32, u8, u32
 from taichi_forge.math import vec3
 
 
+_field_compact_static_kernel_cache = {}
+
+
 # A set of helper (meta)functions
 @kernel
 def fill_field(field: template(), val: template()):
@@ -1186,6 +1189,32 @@ def compact_stable_serial_field(
         if flags[i + flags_offset] != 0:
             output[count[None] + output_offset] = values[i + values_offset]
             count[None] += 1
+
+
+def compact_stable_serial_field_static_n(values, flags, output, count, N):
+    N = int(N)
+    compact_kernel = _field_compact_static_kernel_cache.get(N)
+    if compact_kernel is None:
+
+        @kernel
+        def compact_kernel(
+            values: template(),
+            flags: template(),
+            output: template(),
+            count: template(),
+        ):
+            values_offset = static(values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0)
+            flags_offset = static(flags.snode.ptr.offset if len(flags.snode.ptr.offset) != 0 else 0)
+            output_offset = static(output.snode.ptr.offset if len(output.snode.ptr.offset) != 0 else 0)
+            count[None] = 0
+            loop_config(serialize=True)
+            for i in range(N):
+                if flags[i + flags_offset] != 0:
+                    output[count[None] + output_offset] = values[i + values_offset]
+                    count[None] += 1
+
+        _field_compact_static_kernel_cache[N] = compact_kernel
+    compact_kernel(values, flags, output, count)
 
 
 @kernel

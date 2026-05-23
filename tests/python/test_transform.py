@@ -92,6 +92,61 @@ def _run_dense_field_transform_case(dtype, shape, method, workspace=None):
     _assert_transform_equal(dtype, dst.to_numpy(), expected.reshape(shape))
 
 
+def _native_transform_method_for_current_arch():
+    arch = impl.current_cfg().arch
+    prog = impl.get_runtime().prog
+    if arch == ti.cpu:
+        if not (
+            hasattr(prog, "cpu_transform_available")
+            and prog.cpu_transform_available()
+        ):
+            pytest.skip("CPU native transform is unavailable.")
+        return "cpu_native", "cpu_transform_affine_dense_field"
+    if arch == ti.cuda:
+        if not (
+            hasattr(prog, "cuda_device_transform_available")
+            and prog.cuda_device_transform_available()
+        ):
+            pytest.skip("CUDA device transform is unavailable.")
+        return "cuda_device", "cuda_device_transform_affine_dense_field"
+    if arch == ti.vulkan:
+        if not (
+            hasattr(prog, "vulkan_transform_available")
+            and prog.vulkan_transform_available()
+        ):
+            pytest.skip("Vulkan native transform is unavailable.")
+        return "vulkan_native", "vulkan_transform_affine_dense_field"
+    pytest.skip("native transform is unavailable on this arch.")
+
+
+def _run_dense_matrix_field_transform_case():
+    n = 128
+    method, expected_method = _native_transform_method_for_current_arch()
+    src = ti.Vector.field(2, ti.i32, shape=n)
+    dst = ti.Vector.field(2, ti.i32, shape=n)
+    values = np.arange(n * 2, dtype=np.int32).reshape(n, 2) - 17
+    src.from_numpy(values)
+    dst.fill(0)
+    workspace = ti.algorithms.TransformWorkspace(max_items=n)
+
+    ti.algorithms.experimental_transform(
+        src, dst, scale=3, bias=5, method=method, workspace=workspace
+    )
+
+    np.testing.assert_array_equal(dst.to_numpy(), values * 3 + 5)
+    assert len(workspace._native_transform_plans) == 2
+    assert workspace._native_transform_plan["method_name"] == expected_method
+    assert workspace.workspace_bytes_peak >= 0
+    assert len(workspace._native_transform_plan_groups) == 1
+
+    dst.fill(0)
+    ti.algorithms.experimental_transform(
+        src, dst, scale=3, bias=5, method=method, workspace=workspace
+    )
+    np.testing.assert_array_equal(dst.to_numpy(), values * 3 + 5)
+    assert len(workspace._native_transform_plan_groups) == 1
+
+
 def _run_struct_tensor_member_transform_case(dtype, shape, method, workspace=None):
     shape, n = _case_shape(shape)
     payload = ti.types.struct(
@@ -811,6 +866,11 @@ def test_experimental_transform_cpu_native_struct_tensor_member_view():
             dtype, n, method="cpu_native", workspace=workspace
         )
         assert workspace.workspace_bytes_peak == 0
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_transform_native_dense_matrix_field_components():
+    _run_dense_matrix_field_transform_case()
 
 
 @test_utils.test(arch=[ti.cpu])

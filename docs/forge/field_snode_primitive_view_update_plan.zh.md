@@ -720,7 +720,14 @@ S0 进入 S1 的条件：
   - 做法：
     - CPU 曾试验 `Program::cpu_compact_dense_field()` 和并行 two-pass compact；
       实测 first-call 可降到约 1 ms，但 65536 warm median 从约 0.13 ms 回退到
-      约 0.38 ms，因此按工作流回退，不作为默认路径保留。
+      约 0.38 ms，因此按工作流回退，不作为默认路径保留。S6 closeout 又复测
+      了更小的 C++ serial candidate，first-call 约 0.5 ms，但 warm median
+      仍退到 0.26-0.29 ms，同样移除。
+    - CPU field compact 最终保留低风险 Python helper 改动：
+      `compact_stable_serial_field_static_n()` 按 `n` 缓存静态 serial helper。
+      该路径不新增 C++ ABI，不增加 workspace；相比原动态 `N` helper，65536
+      first-call/warm 有小幅改善，但仍慢于 vanilla CPU serial 基线。闭包绑定
+      具体 field 的 Taichi kernel 也已测试，warm 退到 1.8-1.9 ms，已放弃。
     - 新增 `Program::cuda_cub_select_dense_field()`：对 contiguous i32 dense field
       直接调用 CUB DeviceSelect，替代 `flags -> prefix -> scatter`。
     - 新增 `Program::vulkan_compact_dense_field()`：复用现有 Vulkan compact cache、
@@ -761,6 +768,14 @@ S0 进入 S1 的条件：
     - 相对本地 vanilla 1.8.0：CUDA 4096/65536 warm median 分别快 28.8%/49.4%，
       Vulkan 65536 快 19.6%，Vulkan 4096 慢约 4.2%；CPU 仍明显慢于 vanilla，
       继续列为 S6 CPU serial/codegen backlog。
+    - S6 closeout 复测写入
+      `benchmarks/results/s6_dense_field_compact_closeout_20260523/summary.csv`。
+      最新 CPU 4096/65536 first-call 为 38.0/33.9 ms，warm median 为
+      0.108/0.124 ms，较原 S6.4 65536 的 38.3/0.132 ms 有小幅改善。
+      CUDA 4096/65536 first-call 为 12.7/11.0 ms，warm median 为
+      0.291/0.384 ms；Vulkan first-call 为 109.9/118.0 ms，warm median 为
+      0.699/0.492 ms。CPU 仍慢于 vanilla，因此不再把 CPU compact 伪装成
+      S6 已完全解决项；后续需要从 CPU codegen/serial field lowering 层处理。
 - 当前机器用户给定的 miniforge 3.10 路径不可执行，因此本轮使用
   `C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe`
   完成等价版本检查和 smoke。
@@ -1024,6 +1039,108 @@ S0 进入 S1 的条件：
 - 不引入 full-size staging。
 - 不破坏其他 component 或相邻 field。
 - alias analysis 区分不同 component offset/stride。
+
+当前推进状态：
+
+- `ti.Vector.field` / `ti.Matrix.field` 的 whole field 输入已先接入
+  component routing：对每个 `get_scalar_field(...)` component 复用 S3/S4
+  已证明的 DenseFieldView native path。
+- 覆盖 primitive：
+  - `PrefixSumExecutor.run()`：whole vector/matrix field 按 lane 原地 scan；
+  - `experimental_transform()`：whole vector/matrix field source/destination
+    按 lane native transform；
+  - `experimental_reduce()`：1D whole vector/matrix field reduce 到
+    `shape=()` 的 whole vector/matrix field output；
+  - `experimental_gather()` / `experimental_scatter()`：按 lane 复用
+    dense-field indexed-copy native path；
+  - `experimental_scatter_add()`：按 lane 复用 dense-field scatter-add native
+    path。
+- 该子步是 Python routing-only：未新增 C++ ABI、runtime bitcode、pybind、
+  `CompileConfig` 字段或 offline cache key；不会增加新的 Taichi helper IR。
+- `ReduceWorkspace` 和 `PrefixSumExecutor` 增加多 native plan cache，避免
+  vector/matrix 多 component 场景下显式 workspace 只能缓存最后一个 lane。
+- `TransformWorkspace`、`ReduceWorkspace`、`IndexedCopyWorkspace`、
+  `ScatterAddWorkspace` 和 `PrefixSumExecutor` 增加 whole vector/matrix field
+  的 native component plan group：首次调用仍按 scalar component 建立 native
+  plan；同一 workspace/executor 后续调用直接 replay 这组 plan，跳过
+  `get_scalar_field()` 重建、递归校验和逐 lane plan 查找。该缓存仍是
+  Python-side routing metadata，不生成 Taichi IR，不改变 C++ ABI 或 offline
+  cache key。
+- component plan group 的 replay 实现进一步收敛为直接调用已记录的 native
+  method name 和 call arguments，不再在 group 内重复做逐 plan program-id
+  校验；group 自身仍检查当前 `Program`，不会跨 `ti.reset()` 误复用。该改动
+  不增加持久引用和额外存储，只减少热路径 Python 判定层级。复测目录：
+  `benchmarks/results/s7_dense_matrix_field_group_direct_20260523/`。
+- workspace 边界：CPU/CUDA component indexed/scatter-add 仍为 0 额外 workspace；
+  Vulkan indexed/scatter-add 可能报告 24-28B 固定 native 状态，未引入
+  full-size staging。
+- S7 matrix/vector field benchmark 已加入
+  `benchmarks/s4_native_plan_replay_bench.py --storages matrix_field`，覆盖
+  `first_call_ms`、warm runtime median、workspace peak 和 GPU dedicated memory
+  采样。结果目录：
+  `benchmarks/results/s7_dense_matrix_field_components_20260523/` 为首次
+  component routing 基线，
+  `benchmarks/results/s7_dense_matrix_field_plan_group_20260523/` 为 plan group
+  后结果。
+- plan group 后 warm runtime 相比首次 component routing 的改善范围：
+
+| backend | n=1024/65536 覆盖 primitive | warm runtime 改善 | matrix field 相对 scalar field | workspace peak |
+| --- | --- | ---: | ---: | ---: |
+| CPU | scan/reduce/transform/gather/scatter/scatter_add | 2.55x-12.57x | 0.24x-5.26x | 0B；reduce 64K 为 8B |
+| CUDA | scan/reduce/transform/gather/scatter/scatter_add | 3.90x-10.19x | 0.29x-5.58x | scan 1023B；reduce 1B/17407B；其余 0B |
+| Vulkan | scan/reduce/transform/gather/scatter/scatter_add | 2.25x-4.86x | 0.51x-2.14x | scan 36B/1044B；reduce 12B/140B；transform 40B；indexed 28B；scatter_add 24B |
+
+- GPU dedicated memory 采样是进程级峰值 delta，用于发现显著存储回退；本轮
+  CUDA 约 792-794MB、Vulkan 约 89MB，主要反映后端 runtime/device 初始化和
+  固定资源，不代表每个 primitive 的 full-size staging。workspace peak 未出现
+  与 `n` 成比例的新增 staging buffer。
+- 首次调用仍保留 backend native 固定成本：CUDA 多数约 10-14ms，Vulkan
+  scan 的 two-lane pipeline warmup 约 45ms；这不是 Taichi helper IR 编译，
+  后续若要继续压低，需要 packed lane native entrypoint 或 Vulkan command /
+  pipeline warmup 级优化。
+- 复核已有 packed-strided native 入口后，当前不把 DenseFieldView 强行接到
+  StructNdarray 的 packed ndarray entrypoint：这些入口接受 `Ndarray *`，
+  field 侧需要保留 SNode/root allocation/leaf offset/cell stride 语义。若后续
+  要继续降低 multi-lane dispatch 成本，应新增明确的 packed dense-field native
+  entrypoint，而不是绕过 descriptor 边界。
+- StructNdarray 与 S7 相关分析：
+  - whole tensor member `transform` 和 `gather/scatter` 已有 packed/strided native
+    path，本轮不再拆 lane，以免退化到多 dispatch；
+  - `scan`、`reduce` 和 `scatter_add` 仍是 component-split path，已复用同一套
+    component plan group，使 wrapper 重建或同 workspace/executor 后续调用可
+    replay native plan；
+  - benchmark 已放开 `struct_tensor_member` 的 scan/reduce 覆盖，结果目录：
+    `benchmarks/results/s7_struct_tensor_component_group_20260523/`。
+
+| storage | backend | primitive 覆盖 | warm median 范围 | first-call 范围 | workspace peak |
+| --- | --- | --- | ---: | ---: | ---: |
+| matrix_field | CPU | scan/reduce/transform/gather/scatter/scatter_add | 0.029-0.383 ms | 0.95-3.14 ms | 0B；reduce 64K 为 8B |
+| matrix_field | CUDA | scan/reduce/transform/gather/scatter/scatter_add | 0.064-0.139 ms | 9.98-12.94 ms | scan 1023B；reduce 1B/17407B；其余 0B |
+| matrix_field | Vulkan | scan/reduce/transform/gather/scatter/scatter_add | 0.248-0.370 ms | 12.97-39.51 ms | scan 36B/1044B；reduce 12B/140B；transform 40B；indexed 28B；scatter_add 24B |
+| struct_tensor_member | CPU | scan/reduce/transform/gather/scatter/scatter_add | 0.020-0.349 ms | 0.26-1.12 ms | 0B；reduce 64K 为 8B |
+| struct_tensor_member | CUDA | scan/reduce/transform/gather/scatter/scatter_add | 0.023-0.094 ms | 8.41-10.87 ms | scan 1023B；reduce 1B/17407B；其余 0B |
+| struct_tensor_member | Vulkan | scan/reduce/transform/gather/scatter/scatter_add | 0.166-0.319 ms | 12.23-47.31 ms | scan 36B/1044B；reduce 12B/140B；transform 40B；indexed 28B；scatter_add 24B |
+
+- 暂不处理 `experimental_grouped_reduce()` 的 whole field component native 化：
+  当前还没有 dense-field grouped-reduce native backend，强行拆分只会回到多个
+  field helper kernel，编译收益不足。compact/bucket/sort 的 whole field
+  order/apply 仍留给 P4。
+- 定向验证：
+  - `test_scan_native_dense_matrix_field_components`：CPU/CUDA/Vulkan 3 passed；
+  - `test_experimental_transform_native_dense_matrix_field_components`：
+    CPU/CUDA/Vulkan 3 passed；
+  - `test_experimental_reduce_native_dense_matrix_field_components`：
+    CPU/CUDA/Vulkan 3 passed；
+  - `test_experimental_gather_scatter_native_dense_matrix_field_components`：
+    CPU/CUDA/Vulkan 3 passed；
+  - `test_experimental_scatter_add_native_dense_matrix_field_components`：
+    CPU/CUDA/Vulkan 3 passed。
+  - 上述测试已扩展第二次调用 replay 断言，确认 plan group 建立后可复用。
+  - StructNdarray tensor member 相关回归：
+    `test_scan_*_struct_tensor_member_view`、`test_experimental_reduce_*_struct_tensor_member_view`
+    和 `test_experimental_scatter_add_*` 的 CPU/CUDA/Vulkan 目标组合通过。
+  - 组合跨文件运行仍可能触发当前仓库已知的混合后端状态污染；本轮按文件拆分
+    验证，只有 pytest cache 权限 warning。
 
 ### P4. Order/selection primitive 统一
 

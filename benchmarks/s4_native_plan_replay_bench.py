@@ -57,6 +57,12 @@ def _values(n: int) -> np.ndarray:
     return (np.arange(n, dtype=np.int32) % 17 - 8).astype(np.int32)
 
 
+def _matrix_values(n: int) -> np.ndarray:
+    return (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 17 - 8).astype(
+        np.int32
+    )
+
+
 def _indices(n: int) -> np.ndarray:
     return (n - 1 - np.arange(n, dtype=np.int32)).astype(np.int32)
 
@@ -101,8 +107,6 @@ def _available(ti, arch_name: str, op_name: str, storage: str) -> tuple[bool, st
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if storage == "struct_tensor_member" and op_name in ("scan", "reduce"):
-        return False, "tensor-member replay plan is not scalar scan/reduce"
     if arch_name == "cpu":
         if storage == "struct_tensor_member" and op_name == "transform":
             name = "cpu_transform_affine_packed_strided_ndarray"
@@ -213,6 +217,11 @@ def _make_storage(ti, storage: str, n: int):
         src = ti.field(ti.i32, shape=n)
         src.from_numpy(data)
         return src, src, None, data
+    if storage == "matrix_field":
+        data = _matrix_values(n)
+        src = ti.Vector.field(2, ti.i32, shape=n)
+        src.from_numpy(data)
+        return src, src, None, data
     if storage == "ndarray":
         src = ti.ndarray(ti.i32, shape=n)
         src.from_numpy(data)
@@ -228,9 +237,7 @@ def _make_storage(ti, storage: str, n: int):
     if storage == "struct_tensor_member":
         payload = ti.types.struct(vec=ti.types.vector(2, ti.i32), tag=ti.i32)
         base = ti.ndarray(payload, shape=n)
-        data = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 17 - 8).astype(
-            np.int32
-        )
+        data = _matrix_values(n)
         host = np.zeros((n,), dtype=base.numpy_dtype)
         host["vec"] = data
         host["tag"] = np.arange(n, dtype=np.int32) * 5 + 7
@@ -243,6 +250,10 @@ def _make_destination(ti, storage: str, n: int):
     if storage == "field":
         dst = ti.field(ti.i32, shape=n)
         dst.from_numpy(np.zeros(n, dtype=np.int32))
+        return dst, dst, None
+    if storage == "matrix_field":
+        dst = ti.Vector.field(2, ti.i32, shape=n)
+        dst.from_numpy(np.zeros((n, 2), dtype=np.int32))
         return dst, dst, None
     if storage == "ndarray":
         dst = ti.ndarray(ti.i32, shape=n)
@@ -266,7 +277,7 @@ def _make_destination(ti, storage: str, n: int):
 
 
 def _extract_storage_values(owner, storage: str, field_name: str):
-    if storage in ("field", "ndarray"):
+    if storage in ("field", "matrix_field", "ndarray"):
         return owner.to_numpy()
     return owner.to_numpy()[field_name]
 
@@ -291,19 +302,33 @@ def _make_body(ti, arch_name: str, op_name: str, storage: str, n: int):
             executor.run(src)
 
         def plan():
+            if storage in ("matrix_field", "struct_tensor_member"):
+                return tuple(executor._native_scan_plans.values())
             return executor._native_scan_plan
 
         def verify():
             if storage == "field":
                 actual = src_owner.to_numpy()
+            elif storage == "matrix_field":
+                actual = src_owner.to_numpy()
             elif storage == "ndarray":
                 actual = src_owner.to_numpy()
-            else:
+            elif storage == "struct_member":
                 result = src_owner.to_numpy()
                 if not np.array_equal(result["tag"], host["tag"]):
                     return False
                 actual = result["value"]
-            expected = np.cumsum(data, dtype=np.int64).astype(np.int32)
+            else:
+                result = src_owner.to_numpy()
+                if not np.array_equal(result["tag"], host["tag"]):
+                    return False
+                actual = result["vec"]
+            if storage == "matrix_field":
+                expected = np.cumsum(data, axis=0, dtype=np.int64).astype(np.int32)
+            elif storage == "struct_tensor_member":
+                expected = np.cumsum(data, axis=0, dtype=np.int64).astype(np.int32)
+            else:
+                expected = np.cumsum(data, dtype=np.int64).astype(np.int32)
             return bool(np.array_equal(actual, expected))
 
         return body, plan, verify, lambda: _runtime_workspace_peak(arch_name, op_name)
@@ -312,8 +337,18 @@ def _make_body(ti, arch_name: str, op_name: str, storage: str, n: int):
         workspace = ti.algorithms.ReduceWorkspace(max_items=n)
         if storage == "field":
             dst = ti.field(ti.i32, shape=())
+        elif storage == "matrix_field":
+            dst = ti.Vector.field(2, ti.i32, shape=())
+            dst.fill(0)
         elif storage == "ndarray":
             dst = ti.ndarray(ti.i32, shape=1)
+        elif storage == "struct_tensor_member":
+            payload = ti.types.struct(vec=ti.types.vector(2, ti.i32), tag=ti.i32)
+            dst_owner = ti.ndarray(payload, shape=1)
+            dst_host = np.zeros((1,), dtype=dst_owner.numpy_dtype)
+            dst_host["tag"] = 12345
+            dst_owner.from_numpy(dst_host)
+            dst = dst_owner.field("vec")
         else:
             payload = ti.types.struct(value=ti.i32, tag=ti.i32)
             dst_owner = ti.ndarray(payload, shape=1)
@@ -328,20 +363,32 @@ def _make_body(ti, arch_name: str, op_name: str, storage: str, n: int):
             )
 
         def plan():
+            if storage in ("matrix_field", "struct_tensor_member"):
+                return tuple(workspace._native_reduce_plans.values())
             return workspace._native_reduce_plan
 
         def verify():
-            expected = np.sum(data, dtype=np.int64).astype(np.int32)
+            if storage in ("matrix_field", "struct_tensor_member"):
+                expected = np.sum(data, axis=0, dtype=np.int64).astype(np.int32)
+            else:
+                expected = np.sum(data, dtype=np.int64).astype(np.int32)
             if storage == "field":
                 actual = np.int32(dst[None])
+            elif storage == "matrix_field":
+                actual = dst.to_numpy()
             elif storage == "ndarray":
                 actual = dst.to_numpy()[0]
-            else:
+            elif storage == "struct_member":
                 result = dst_owner.to_numpy()
                 if result["tag"][0] != 12345:
                     return False
                 actual = result["value"][0]
-            return bool(actual == expected)
+            else:
+                result = dst_owner.to_numpy()
+                if result["tag"][0] != 12345:
+                    return False
+                actual = result["vec"][0]
+            return bool(np.array_equal(actual, expected))
 
         def workspace_peak():
             return max(
@@ -355,6 +402,8 @@ def _make_body(ti, arch_name: str, op_name: str, storage: str, n: int):
         workspace = ti.algorithms.TransformWorkspace(max_items=n)
         if storage == "field":
             dst = ti.field(ti.i32, shape=n)
+        elif storage == "matrix_field":
+            dst = ti.Vector.field(2, ti.i32, shape=n)
         elif storage == "ndarray":
             dst = ti.ndarray(ti.i32, shape=n)
         elif storage == "struct_member":
@@ -378,11 +427,15 @@ def _make_body(ti, arch_name: str, op_name: str, storage: str, n: int):
             )
 
         def plan():
+            if storage == "matrix_field":
+                return tuple(workspace._native_transform_plans.values())
             return workspace._native_transform_plan
 
         def verify():
             expected = (data * np.int32(3) + np.int32(7)).astype(np.int32)
             if storage == "field":
+                actual = dst.to_numpy()
+            elif storage == "matrix_field":
                 actual = dst.to_numpy()
             elif storage == "ndarray":
                 actual = dst.to_numpy()
@@ -410,7 +463,11 @@ def _make_body(ti, arch_name: str, op_name: str, storage: str, n: int):
         indices = ti.ndarray(ti.i32, shape=n)
         indices.from_numpy(indices_np)
         dst, dst_owner, dst_host = _make_destination(ti, storage, n)
-        field_name = "vec" if storage == "struct_tensor_member" else "value"
+        field_name = (
+            "vec"
+            if storage in ("matrix_field", "struct_tensor_member")
+            else "value"
+        )
 
         def body():
             if op_name == "gather":
@@ -423,6 +480,8 @@ def _make_body(ti, arch_name: str, op_name: str, storage: str, n: int):
                 )
 
         def plan():
+            if storage == "matrix_field":
+                return tuple(workspace._native_indexed_copy_plans.values())
             return workspace._native_indexed_copy_plan
 
         def verify():
@@ -442,7 +501,11 @@ def _make_body(ti, arch_name: str, op_name: str, storage: str, n: int):
         indices = ti.ndarray(ti.i32, shape=n)
         indices.from_numpy(indices_np)
         dst, dst_owner, dst_host = _make_destination(ti, storage, buckets)
-        field_name = "vec" if storage == "struct_tensor_member" else "value"
+        field_name = (
+            "vec"
+            if storage in ("matrix_field", "struct_tensor_member")
+            else "value"
+        )
 
         def body():
             ti.algorithms.experimental_scatter_add(
@@ -732,7 +795,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--arch", choices=["cpu", "cuda", "vulkan"])
     parser.add_argument(
         "--storage",
-        choices=["field", "ndarray", "struct_member", "struct_tensor_member"],
+        choices=[
+            "field",
+            "matrix_field",
+            "ndarray",
+            "struct_member",
+            "struct_tensor_member",
+        ],
     )
     parser.add_argument(
         "--op",
@@ -751,7 +820,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--storages",
         nargs="+",
-        default=["field", "ndarray", "struct_member", "struct_tensor_member"],
+        default=[
+            "field",
+            "matrix_field",
+            "ndarray",
+            "struct_member",
+            "struct_tensor_member",
+        ],
     )
     parser.add_argument("--ops", nargs="+", default=["scan", "reduce", "transform"])
     parser.add_argument("--sizes", nargs="+", type=int, default=[1024, 1048576])

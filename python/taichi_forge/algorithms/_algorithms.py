@@ -14,7 +14,7 @@ from taichi_forge._kernels import (
     compact_flags_to_prefix_ndarray_from_field,
     compact_scatter_field_from_prefix_ndarray,
     compact_scatter_field,
-    compact_stable_serial_field,
+    compact_stable_serial_field_static_n,
     compact_single_item_field,
     fill_i32_arange_ndarray,
     gather_f32_field,
@@ -76,6 +76,7 @@ from taichi_forge.lang._ndarray import (
     StructNdarrayTensorMemberView,
 )
 from taichi_forge.lang.kernel_impl import data_oriented
+from taichi_forge.lang.matrix import MatrixField
 from taichi_forge.lang.misc import arm64, cuda, vulkan, x64
 from taichi_forge.lang.runtime_ops import sync
 from taichi_forge.lang.simt import subgroup
@@ -189,6 +190,10 @@ def _is_struct_scalar_member_view(arr):
 
 def _is_struct_tensor_member_view(arr):
     return isinstance(arr, StructNdarrayTensorMemberView)
+
+
+def _is_matrix_field(arr):
+    return isinstance(arr, MatrixField)
 
 
 class _PrimitiveView:
@@ -342,6 +347,62 @@ class _NativePrimitivePlan:
             return None
         temp_bytes = method(*self.call_args)
         return 0 if temp_bytes is None else temp_bytes
+
+
+class _NativePrimitivePlanGroup:
+    """Cached replay group for whole vector/matrix views split into scalars."""
+
+    __slots__ = (
+        "backend",
+        "objects",
+        "object_keys",
+        "semantic_key",
+        "plans",
+        "prog_id",
+    )
+
+    def __init__(self, backend, objects, semantic_key, plans, prog):
+        self.backend = backend
+        self.objects = tuple(objects)
+        self.object_keys = None
+        self.semantic_key = tuple(semantic_key)
+        self.plans = tuple(plans)
+        self.prog_id = id(prog)
+
+    def matches_request(self, backend, objects, semantic_key):
+        if self.backend != backend or self.semantic_key != tuple(semantic_key):
+            return False
+        objects = tuple(objects)
+        if len(self.objects) != len(objects):
+            return False
+        if all(cached is current for cached, current in zip(self.objects, objects)):
+            return True
+        object_keys = tuple(_primitive_plan_object_key(obj) for obj in objects)
+        return self._object_keys() == object_keys
+
+    def cache_key(self):
+        return (self.backend, self._object_keys(), self.semantic_key)
+
+    def _object_keys(self):
+        if self.object_keys is None:
+            self.object_keys = tuple(
+                _primitive_plan_object_key(obj) for obj in self.objects
+            )
+        return self.object_keys
+
+    def matches_program(self, prog):
+        return id(prog) == self.prog_id
+
+    def invoke(self, prog):
+        temp_bytes_peak = 0
+        for plan in self.plans:
+            method = getattr(prog, plan.method_name, None)
+            if method is None:
+                return None
+            temp_bytes = method(*plan.call_args)
+            temp_bytes = 0 if temp_bytes is None else temp_bytes
+            temp_bytes_peak = max(temp_bytes_peak, temp_bytes)
+        return temp_bytes_peak
 
 
 def _tuple_shape(value):
@@ -528,9 +589,46 @@ def _native_plan_cache_key(backend, objects, semantic_key):
     )
 
 
+def _component_group_semantic_key(*items):
+    return ("component_group", *items)
+
+
 def _struct_tensor_member_components(view):
     for component in np.ndindex(view.element_shape):
         yield view.base.field(view.path, component=component)
+
+
+def _matrix_field_element_shape(view):
+    if not _is_matrix_field(view):
+        return ()
+    if view.ndim == 1:
+        return (view.n,)
+    return (view.n, view.m)
+
+
+def _matrix_field_components(view):
+    if view.ndim == 1:
+        for i in range(view.n):
+            yield view.get_scalar_field(i)
+    else:
+        for i in range(view.n):
+            for j in range(view.m):
+                yield view.get_scalar_field(i, j)
+
+
+def _check_matching_matrix_fields(op_name, src, dst, *, require_same_shape=True):
+    if not (_is_matrix_field(src) and _is_matrix_field(dst)):
+        raise TypeError(
+            f"{op_name} whole vector/matrix field views must be used on both "
+            "source and destination."
+        )
+    if src.dtype != dst.dtype or _matrix_field_element_shape(src) != _matrix_field_element_shape(dst):
+        raise TypeError(
+            f"{op_name} whole vector/matrix field source and destination "
+            "dtype/element_shape must match."
+        )
+    if require_same_shape and _shape_tuple(src) != _shape_tuple(dst):
+        raise ValueError(f"{op_name} source and destination shapes differ.")
 
 
 def _packed_tensor_member_payload(view):
@@ -926,14 +1024,17 @@ class ReduceWorkspace:
     Forge kernels to preserve layout and offset semantics.
     """
 
-    def __init__(self, max_items=None):
+    def __init__(self, max_items=None, cache_native_plans=True):
         self.max_items = max_items
+        self._cache_native_plans = cache_native_plans
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._field_buffers = {}
         self._cuda_cub_active = False
         self._vulkan_native_active = False
         self._native_reduce_plan = None
+        self._native_reduce_plans = {}
+        self._native_reduce_plan_groups = {}
 
     def clear(self):
         if self._cuda_cub_active:
@@ -954,6 +1055,8 @@ class ReduceWorkspace:
         self._cuda_cub_active = False
         self._vulkan_native_active = False
         self._native_reduce_plan = None
+        self._native_reduce_plans.clear()
+        self._native_reduce_plan_groups.clear()
 
     def check_shape(self, n):
         if self.max_items is not None and n > self.max_items:
@@ -987,6 +1090,13 @@ class ReduceWorkspace:
         if backend is None:
             return False
         plan = self._native_reduce_plan
+        if plan is None or not plan.matches_request(backend, (values, output), (op,)):
+            key = _native_plan_cache_key(backend, (values, output), (op,))
+            plan = (
+                self._native_reduce_plans.get(key)
+                if self._cache_native_plans
+                else None
+            )
         if plan is None:
             return False
         if not plan.matches_request(backend, (values, output), (op,)):
@@ -999,6 +1109,30 @@ class ReduceWorkspace:
         temp_bytes = plan.invoke(prog)
         if temp_bytes is None:
             return False
+        self._mark_native_reduce_backend_active(backend, temp_bytes)
+        return True
+
+    def _try_native_reduce_plan_group(self, values, output, op, method):
+        backend = self._native_reduce_backend_for_method(method)
+        if backend is None:
+            return False
+        semantic_key = _component_group_semantic_key(op)
+        key = _native_plan_cache_key(backend, (values, output), semantic_key)
+        group = self._native_reduce_plan_groups.get(key)
+        if group is None:
+            return False
+        if not group.matches_request(backend, (values, output), semantic_key):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not group.matches_program(prog):
+            return False
+        temp_bytes = group.invoke(prog)
+        if temp_bytes is None:
+            return False
+        if group.plans:
+            self._native_reduce_plan = group.plans[-1]
         self._mark_native_reduce_backend_active(backend, temp_bytes)
         return True
 
@@ -1025,6 +1159,24 @@ class ReduceWorkspace:
             n=n,
         )
         self._native_reduce_plan = plan
+        if self._cache_native_plans:
+            self._native_reduce_plans[plan.cache_key()] = plan
+
+    def _record_native_reduce_plan_group(self, values, output, op, method, plans):
+        backend = self._native_reduce_backend_for_method(method)
+        if backend is None or not plans:
+            return
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        group = _NativePrimitivePlanGroup(
+            backend,
+            (values, output),
+            _component_group_semantic_key(op),
+            plans,
+            prog,
+        )
+        self._native_reduce_plan_groups[group.cache_key()] = group
 
     def _get_field_private_buffers(self, n, dtype):
         self.check_shape(n)
@@ -1194,6 +1346,7 @@ class TransformWorkspace:
         self._vulkan_native_active = False
         self._native_transform_plan = None
         self._native_transform_plans = {}
+        self._native_transform_plan_groups = {}
 
     def check_shape(self, n):
         if self.max_items is not None and n > self.max_items:
@@ -1251,6 +1404,30 @@ class TransformWorkspace:
         self._mark_native_transform_backend_active(backend, temp_bytes)
         return True
 
+    def _try_native_transform_plan_group(self, src, dst, method, scale, bias):
+        backend = self._native_transform_backend_for_method(method)
+        if backend is None:
+            return False
+        semantic_key = _component_group_semantic_key(scale, bias)
+        key = _native_plan_cache_key(backend, (src, dst), semantic_key)
+        group = self._native_transform_plan_groups.get(key)
+        if group is None:
+            return False
+        if not group.matches_request(backend, (src, dst), semantic_key):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not group.matches_program(prog):
+            return False
+        temp_bytes = group.invoke(prog)
+        if temp_bytes is None:
+            return False
+        if group.plans:
+            self._native_transform_plan = group.plans[-1]
+        self._mark_native_transform_backend_active(backend, temp_bytes)
+        return True
+
     def _record_native_transform_plan(
         self,
         backend,
@@ -1278,6 +1455,24 @@ class TransformWorkspace:
         if self._cache_native_plans:
             self._native_transform_plans[plan.cache_key()] = plan
 
+    def _record_native_transform_plan_group(
+        self, src, dst, method, scale, bias, plans
+    ):
+        backend = self._native_transform_backend_for_method(method)
+        if backend is None or not plans:
+            return
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        group = _NativePrimitivePlanGroup(
+            backend,
+            (src, dst),
+            _component_group_semantic_key(scale, bias),
+            plans,
+            prog,
+        )
+        self._native_transform_plan_groups[group.cache_key()] = group
+
     def clear(self):
         if self._vulkan_native_active:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -1290,6 +1485,7 @@ class TransformWorkspace:
         self._vulkan_native_active = False
         self._native_transform_plan = None
         self._native_transform_plans.clear()
+        self._native_transform_plan_groups.clear()
 
 
 class IndexedCopyWorkspace:
@@ -1308,6 +1504,7 @@ class IndexedCopyWorkspace:
         self._vulkan_native_active = False
         self._native_indexed_copy_plan = None
         self._native_indexed_copy_plans = {}
+        self._native_indexed_copy_plan_groups = {}
 
     def check_shape(self, n):
         if self.max_items is not None and n > self.max_items:
@@ -1364,6 +1561,32 @@ class IndexedCopyWorkspace:
         self._mark_native_indexed_copy_backend_active(backend, temp_bytes)
         return True
 
+    def _try_native_indexed_copy_plan_group(
+        self, src, indices, dst, method, scatter
+    ):
+        backend = self._native_indexed_copy_backend_for_method(method)
+        if backend is None:
+            return False
+        semantic_key = _component_group_semantic_key(bool(scatter))
+        key = _native_plan_cache_key(backend, (src, indices, dst), semantic_key)
+        group = self._native_indexed_copy_plan_groups.get(key)
+        if group is None:
+            return False
+        if not group.matches_request(backend, (src, indices, dst), semantic_key):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not group.matches_program(prog):
+            return False
+        temp_bytes = group.invoke(prog)
+        if temp_bytes is None:
+            return False
+        if group.plans:
+            self._native_indexed_copy_plan = group.plans[-1]
+        self._mark_native_indexed_copy_backend_active(backend, temp_bytes)
+        return True
+
     def _record_native_indexed_copy_plan(
         self,
         backend,
@@ -1391,6 +1614,24 @@ class IndexedCopyWorkspace:
         if self._cache_native_plans:
             self._native_indexed_copy_plans[plan.cache_key()] = plan
 
+    def _record_native_indexed_copy_plan_group(
+        self, src, indices, dst, method, scatter, plans
+    ):
+        backend = self._native_indexed_copy_backend_for_method(method)
+        if backend is None or not plans:
+            return
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        group = _NativePrimitivePlanGroup(
+            backend,
+            (src, indices, dst),
+            _component_group_semantic_key(bool(scatter)),
+            plans,
+            prog,
+        )
+        self._native_indexed_copy_plan_groups[group.cache_key()] = group
+
     def clear(self):
         if self._vulkan_native_active:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -1403,6 +1644,7 @@ class IndexedCopyWorkspace:
         self._vulkan_native_active = False
         self._native_indexed_copy_plan = None
         self._native_indexed_copy_plans.clear()
+        self._native_indexed_copy_plan_groups.clear()
 
 
 class ScatterAddWorkspace:
@@ -1419,6 +1661,7 @@ class ScatterAddWorkspace:
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
         self._native_scatter_add_plans = []
+        self._native_scatter_add_plan_groups = {}
 
     def check_shape(self, n):
         if self.max_items is not None and n > self.max_items:
@@ -1490,6 +1733,30 @@ class ScatterAddWorkspace:
             return True
         return False
 
+    def _try_native_scatter_add_plan_group(
+        self, src, indices, dst, method, value_type
+    ):
+        backend = self._native_scatter_add_backend_for_method(method)
+        if backend is None:
+            return False
+        semantic_key = _component_group_semantic_key(int(value_type))
+        key = _native_plan_cache_key(backend, (src, indices, dst), semantic_key)
+        group = self._native_scatter_add_plan_groups.get(key)
+        if group is None:
+            return False
+        if not group.matches_request(backend, (src, indices, dst), semantic_key):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not group.matches_program(prog):
+            return False
+        temp_bytes = group.invoke(prog)
+        if temp_bytes is None:
+            return False
+        self._mark_native_scatter_add_backend_active(backend, temp_bytes)
+        return True
+
     def _record_native_scatter_add_plan(
         self,
         backend,
@@ -1521,6 +1788,24 @@ class ScatterAddWorkspace:
                 return
         self._native_scatter_add_plans.append(plan)
 
+    def _record_native_scatter_add_plan_group(
+        self, src, indices, dst, method, value_type, plans
+    ):
+        backend = self._native_scatter_add_backend_for_method(method)
+        if backend is None or not plans:
+            return
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        group = _NativePrimitivePlanGroup(
+            backend,
+            (src, indices, dst),
+            _component_group_semantic_key(int(value_type)),
+            plans,
+            prog,
+        )
+        self._native_scatter_add_plan_groups[group.cache_key()] = group
+
     def clear(self):
         if self._vulkan_native_active:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -1532,6 +1817,7 @@ class ScatterAddWorkspace:
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
         self._native_scatter_add_plans.clear()
+        self._native_scatter_add_plan_groups.clear()
 
 
 class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
@@ -2983,7 +3269,7 @@ def _compact_field_scan(values, flags, output, count, workspace):
     ):
         return workspace
     if arch in (x64, arm64):
-        compact_stable_serial_field(values, flags, output, count, n)
+        compact_stable_serial_field_static_n(values, flags, output, count, n)
         sync()
         return workspace
     if _native_prefix_scan_available_for_current_arch():
@@ -3639,6 +3925,54 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
     supports i32/f32.
     """
 
+    if _is_matrix_field(values) or _is_matrix_field(output):
+        _check_matching_matrix_fields(
+            "experimental_reduce()", values, output, require_same_shape=False
+        )
+        if not _is_1d(values):
+            raise ValueError("experimental_reduce() expects 1D values.")
+        if values.shape[0] <= 0:
+            raise ValueError("experimental_reduce() expects at least one input item.")
+        if _shape_tuple(output) != ():
+            raise TypeError(
+                "experimental_reduce() whole vector/matrix field output must "
+                "have scalar field shape=()."
+            )
+        if workspace is None:
+            workspace = ReduceWorkspace(
+                max_items=values.shape[0], cache_native_plans=False
+            )
+        workspace.check_shape(values.shape[0])
+        if workspace._try_native_reduce_plan_group(values, output, op, method):
+            return workspace
+        backend = workspace._native_reduce_backend_for_method(method)
+        component_plans = []
+        component_pairs = tuple(
+            zip(_matrix_field_components(values), _matrix_field_components(output))
+        )
+        for values_component, output_component in component_pairs:
+            experimental_reduce(
+                values_component,
+                output_component,
+                op=op,
+                method=method,
+                workspace=workspace,
+            )
+            plan = workspace._native_reduce_plan
+            if (
+                backend is not None
+                and plan is not None
+                and plan.matches_request(
+                    backend, (values_component, output_component), (op,)
+                )
+            ):
+                component_plans.append(plan)
+        if len(component_plans) == len(component_pairs):
+            workspace._record_native_reduce_plan_group(
+                values, output, op, method, component_plans
+            )
+        return workspace
+
     if _is_struct_tensor_member_view(values) or _is_struct_tensor_member_view(output):
         _check_matching_struct_tensor_member_views("experimental_reduce()", values, output)
         if values.shape[0] <= 0:
@@ -3647,16 +3981,37 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
             raise ValueError("experimental_reduce() ndarray output must be shape >= 1.")
         if workspace is None:
             workspace = ReduceWorkspace(max_items=values.shape[0])
-        for values_component, output_component in zip(
-            _struct_tensor_member_components(values),
-            _struct_tensor_member_components(output),
-        ):
+        workspace.check_shape(values.shape[0])
+        if workspace._try_native_reduce_plan_group(values, output, op, method):
+            return workspace
+        backend = workspace._native_reduce_backend_for_method(method)
+        component_plans = []
+        component_pairs = tuple(
+            zip(
+                _struct_tensor_member_components(values),
+                _struct_tensor_member_components(output),
+            )
+        )
+        for values_component, output_component in component_pairs:
             experimental_reduce(
                 values_component,
                 output_component,
                 op=op,
                 method=method,
                 workspace=workspace,
+            )
+            plan = workspace._native_reduce_plan
+            if (
+                backend is not None
+                and plan is not None
+                and plan.matches_request(
+                    backend, (values_component, output_component), (op,)
+                )
+            ):
+                component_plans.append(plan)
+        if len(component_plans) == len(component_pairs):
+            workspace._record_native_reduce_plan_group(
+                values, output, op, method, component_plans
             )
         return workspace
 
@@ -4821,6 +5176,44 @@ def experimental_transform(
     offset semantics and remains 1D-only.
     """
 
+    if _is_matrix_field(src) or _is_matrix_field(dst):
+        _check_matching_matrix_fields("experimental_transform()", src, dst)
+        n = _shape_numel(src)
+        if workspace is None:
+            workspace = TransformWorkspace(max_items=n, cache_native_plans=False)
+        workspace.check_shape(n)
+        scale, bias = _normalize_transform_args(src.dtype, scale, bias)
+        if workspace._try_native_transform_plan_group(src, dst, method, scale, bias):
+            return workspace
+        backend = workspace._native_transform_backend_for_method(method)
+        component_plans = []
+        component_pairs = tuple(
+            zip(_matrix_field_components(src), _matrix_field_components(dst))
+        )
+        for src_component, dst_component in component_pairs:
+            experimental_transform(
+                src_component,
+                dst_component,
+                scale=scale,
+                bias=bias,
+                method=method,
+                workspace=workspace,
+            )
+            plan = workspace._native_transform_plan
+            if (
+                backend is not None
+                and plan is not None
+                and plan.matches_request(
+                    backend, (src_component, dst_component), (scale, bias)
+                )
+            ):
+                component_plans.append(plan)
+        if len(component_plans) == len(component_pairs):
+            workspace._record_native_transform_plan_group(
+                src, dst, method, scale, bias, component_plans
+            )
+        return workspace
+
     if _is_struct_tensor_member_view(src) or _is_struct_tensor_member_view(dst):
         _check_matching_struct_tensor_member_views("experimental_transform()", src, dst)
         if _shape_tuple(src) != _shape_tuple(dst):
@@ -4849,10 +5242,19 @@ def experimental_transform(
             workspace,
         ):
             return workspace
-        for src_component, dst_component in zip(
-            _struct_tensor_member_components(src),
-            _struct_tensor_member_components(dst),
+        if workspace._try_native_transform_plan_group(
+            src, dst, method, normalized_scale, normalized_bias
         ):
+            return workspace
+        backend = workspace._native_transform_backend_for_method(method)
+        component_plans = []
+        component_pairs = tuple(
+            zip(
+                _struct_tensor_member_components(src),
+                _struct_tensor_member_components(dst),
+            )
+        )
+        for src_component, dst_component in component_pairs:
             experimental_transform(
                 src_component,
                 dst_component,
@@ -4860,6 +5262,21 @@ def experimental_transform(
                 bias=bias,
                 method=method,
                 workspace=workspace,
+            )
+            plan = workspace._native_transform_plan
+            if (
+                backend is not None
+                and plan is not None
+                and plan.matches_request(
+                    backend,
+                    (src_component, dst_component),
+                    (normalized_scale, normalized_bias),
+                )
+            ):
+                component_plans.append(plan)
+        if len(component_plans) == len(component_pairs):
+            workspace._record_native_transform_plan_group(
+                src, dst, method, normalized_scale, normalized_bias, component_plans
             )
         return workspace
 
@@ -5423,6 +5840,51 @@ def _indexed_copy_kernel(src, indices, dst, scatter):
 
 def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter):
     op_name = "experimental_scatter()" if scatter else "experimental_gather()"
+    if _is_matrix_field(src) or _is_matrix_field(dst):
+        _check_matching_matrix_fields(op_name, src, dst, require_same_shape=False)
+        if not (_is_1d(src) and _is_1d(indices) and _is_1d(dst)):
+            raise ValueError(f"{op_name} expects 1D source, indices, and destination.")
+        n = _indexed_copy_item_count(src, indices, dst, scatter)
+        if workspace is None:
+            workspace = IndexedCopyWorkspace(max_items=n, cache_native_plans=False)
+        workspace.check_shape(n)
+        if n == 0:
+            return workspace
+        if workspace._try_native_indexed_copy_plan_group(
+            src, indices, dst, method, scatter
+        ):
+            return workspace
+        backend = workspace._native_indexed_copy_backend_for_method(method)
+        component_plans = []
+        component_pairs = tuple(
+            zip(_matrix_field_components(src), _matrix_field_components(dst))
+        )
+        for src_component, dst_component in component_pairs:
+            _experimental_indexed_copy(
+                src_component,
+                indices,
+                dst_component,
+                method=method,
+                workspace=workspace,
+                scatter=scatter,
+            )
+            plan = workspace._native_indexed_copy_plan
+            if (
+                backend is not None
+                and plan is not None
+                and plan.matches_request(
+                    backend,
+                    (src_component, indices, dst_component),
+                    (bool(scatter),),
+                )
+            ):
+                component_plans.append(plan)
+        if len(component_plans) == len(component_pairs):
+            workspace._record_native_indexed_copy_plan_group(
+                src, indices, dst, method, scatter, component_plans
+            )
+        return workspace
+
     if _is_struct_tensor_member_view(src) or _is_struct_tensor_member_view(dst):
         _check_matching_struct_tensor_member_views(op_name, src, dst)
         if not isinstance(indices, Ndarray):
@@ -5853,6 +6315,56 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
     backend atomics; floating-point accumulation order is backend-dependent.
     """
 
+    if _is_matrix_field(src) or _is_matrix_field(dst):
+        _check_matching_matrix_fields(
+            "experimental_scatter_add()", src, dst, require_same_shape=False
+        )
+        if not (_is_1d(src) and _is_1d(indices) and _is_1d(dst)):
+            raise ValueError(
+                "experimental_scatter_add() expects 1D source, indices, and "
+                "destination."
+            )
+        if src.shape[0] != indices.shape[0]:
+            raise ValueError(
+                "experimental_scatter_add() expects source and indices sizes to match."
+            )
+        n = indices.shape[0]
+        if workspace is None:
+            workspace = ScatterAddWorkspace(max_items=n)
+        workspace.check_shape(n)
+        if n == 0:
+            return workspace
+        value_type = _scatter_add_value_type(src.dtype)
+        if workspace._try_native_scatter_add_plan_group(
+            src, indices, dst, method, value_type
+        ):
+            return workspace
+        backend = workspace._native_scatter_add_backend_for_method(method)
+        component_plans = []
+        component_pairs = tuple(
+            zip(_matrix_field_components(src), _matrix_field_components(dst))
+        )
+        for src_component, dst_component in component_pairs:
+            experimental_scatter_add(
+                src_component,
+                indices,
+                dst_component,
+                method=method,
+                workspace=workspace,
+            )
+            if backend is not None and workspace._native_scatter_add_plans:
+                plan = workspace._native_scatter_add_plans[-1]
+                objects, semantic_key = workspace._native_scatter_add_request_signature(
+                    src_component, indices, dst_component, value_type
+                )
+                if plan.matches_request(backend, objects, semantic_key):
+                    component_plans.append(plan)
+        if len(component_plans) == len(component_pairs):
+            workspace._record_native_scatter_add_plan_group(
+                src, indices, dst, method, value_type, component_plans
+            )
+        return workspace
+
     if _is_struct_tensor_member_view(src) or _is_struct_tensor_member_view(dst):
         _check_matching_struct_tensor_member_views(
             "experimental_scatter_add()", src, dst
@@ -5863,16 +6375,40 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
             )
         if workspace is None:
             workspace = ScatterAddWorkspace(max_items=indices.shape[0])
-        for src_component, dst_component in zip(
-            _struct_tensor_member_components(src),
-            _struct_tensor_member_components(dst),
+        workspace.check_shape(indices.shape[0])
+        if indices.shape[0] == 0:
+            return workspace
+        value_type = _scatter_add_value_type(src.scalar_dtype)
+        if workspace._try_native_scatter_add_plan_group(
+            src, indices, dst, method, value_type
         ):
+            return workspace
+        backend = workspace._native_scatter_add_backend_for_method(method)
+        component_plans = []
+        component_pairs = tuple(
+            zip(
+                _struct_tensor_member_components(src),
+                _struct_tensor_member_components(dst),
+            )
+        )
+        for src_component, dst_component in component_pairs:
             experimental_scatter_add(
                 src_component,
                 indices,
                 dst_component,
                 method=method,
                 workspace=workspace,
+            )
+            if backend is not None and workspace._native_scatter_add_plans:
+                plan = workspace._native_scatter_add_plans[-1]
+                objects, semantic_key = workspace._native_scatter_add_request_signature(
+                    src_component, indices, dst_component, value_type
+                )
+                if plan.matches_request(backend, objects, semantic_key):
+                    component_plans.append(plan)
+        if len(component_plans) == len(component_pairs):
+            workspace._record_native_scatter_add_plan_group(
+                src, indices, dst, method, value_type, component_plans
             )
         return workspace
 
@@ -6798,6 +7334,8 @@ class PrefixSumExecutor:
         self.workspace_length = start_pos
         self.large_arr = None
         self._native_scan_plan = None
+        self._native_scan_plans = {}
+        self._native_scan_plan_groups = {}
 
     def _ensure_large_arr(self):
         if self.large_arr is None:
@@ -6824,6 +7362,11 @@ class PrefixSumExecutor:
         if backend is None:
             return False
         plan = self._native_scan_plan
+        if plan is None or not plan.matches_request(
+            backend, (input_arr,), (self.sorting_length,)
+        ):
+            key = _native_plan_cache_key(backend, (input_arr,), (self.sorting_length,))
+            plan = self._native_scan_plans.get(key)
         if plan is None:
             return False
         if not plan.matches_request(backend, (input_arr,), (self.sorting_length,)):
@@ -6835,6 +7378,28 @@ class PrefixSumExecutor:
             return False
         if plan.invoke(prog) is None:
             return False
+        return True
+
+    def _try_native_scan_plan_group(self, input_arr):
+        backend = self._native_scan_backend_for_arch()
+        if backend is None:
+            return False
+        semantic_key = _component_group_semantic_key(self.sorting_length)
+        key = _native_plan_cache_key(backend, (input_arr,), semantic_key)
+        group = self._native_scan_plan_groups.get(key)
+        if group is None:
+            return False
+        if not group.matches_request(backend, (input_arr,), semantic_key):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not group.matches_program(prog):
+            return False
+        if group.invoke(prog) is None:
+            return False
+        if group.plans:
+            self._native_scan_plan = group.plans[-1]
         return True
 
     def _record_native_scan_plan(
@@ -6852,6 +7417,23 @@ class PrefixSumExecutor:
             n=view.num_elements,
         )
         self._native_scan_plan = plan
+        self._native_scan_plans[plan.cache_key()] = plan
+
+    def _record_native_scan_plan_group(self, input_arr, plans):
+        backend = self._native_scan_backend_for_arch()
+        if backend is None or not plans:
+            return
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        group = _NativePrimitivePlanGroup(
+            backend,
+            (input_arr,),
+            _component_group_semantic_key(self.sorting_length),
+            plans,
+            prog,
+        )
+        self._native_scan_plan_groups[group.cache_key()] = group
 
     def _try_cuda_cub_scan(self, input_arr):
         if current_cfg().arch != cuda:
@@ -7059,10 +7641,37 @@ class PrefixSumExecutor:
             uniform_kernel(large_arr, ele_nums_pos[i], ele_nums_pos[i + 1])
 
     def run(self, input_arr):
+        length = self.sorting_length
+
+        if _is_matrix_field(input_arr):
+            if self._try_native_scan_plan_group(input_arr):
+                return
+            if input_arr.dtype not in _SCAN_VALUE_DTYPES:
+                raise RuntimeError(
+                    "PrefixSumExecutor vector/matrix field input supports "
+                    "only ti.i32/ti.u32/ti.f32/ti.i64/ti.u64/ti.f64."
+            )
+            backend = self._native_scan_backend_for_arch()
+            component_plans = []
+            components = tuple(_matrix_field_components(input_arr))
+            for component in components:
+                self.run(component)
+                plan = self._native_scan_plan
+                if (
+                    backend is not None
+                    and plan is not None
+                    and plan.matches_request(
+                        backend, (component,), (self.sorting_length,)
+                    )
+                ):
+                    component_plans.append(plan)
+            if len(component_plans) == len(components):
+                self._record_native_scan_plan_group(input_arr, component_plans)
+            return
+
         if self._try_native_scan_plan(input_arr):
             return
 
-        length = self.sorting_length
         view = _primitive_view(input_arr)
 
         if view is not None and view.is_struct_tensor_member:
@@ -7071,8 +7680,24 @@ class PrefixSumExecutor:
                     "PrefixSumExecutor ndarray input supports only "
                     "ti.i32/ti.u32/ti.f32/ti.i64/ti.u64/ti.f64."
                 )
-            for component in _struct_tensor_member_components(input_arr):
+            if self._try_native_scan_plan_group(input_arr):
+                return
+            backend = self._native_scan_backend_for_arch()
+            component_plans = []
+            components = tuple(_struct_tensor_member_components(input_arr))
+            for component in components:
                 self.run(component)
+                plan = self._native_scan_plan
+                if (
+                    backend is not None
+                    and plan is not None
+                    and plan.matches_request(
+                        backend, (component,), (self.sorting_length,)
+                    )
+                ):
+                    component_plans.append(plan)
+            if len(component_plans) == len(components):
+                self._record_native_scan_plan_group(input_arr, component_plans)
             return
 
         if view is not None:

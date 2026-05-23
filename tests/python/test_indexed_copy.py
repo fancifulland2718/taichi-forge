@@ -146,6 +146,86 @@ def _run_dense_field_indexed_copy(dtype, np_dtype, method, scatter):
     return workspace
 
 
+def _native_indexed_copy_method_for_current_arch(scatter):
+    arch = impl.current_cfg().arch
+    prog = impl.get_runtime().prog
+    if arch == ti.cpu:
+        method_name = "cpu_scatter_dense_field" if scatter else "cpu_gather_dense_field"
+        if not hasattr(prog, method_name):
+            pytest.skip("CPU dense field indexed-copy is unavailable.")
+        return "cpu_native", method_name
+    if arch == ti.cuda:
+        method_name = (
+            "cuda_device_scatter_dense_field"
+            if scatter
+            else "cuda_device_gather_dense_field"
+        )
+        if not (
+            hasattr(prog, method_name)
+            and hasattr(prog, "cuda_device_indexed_copy_payload_available")
+            and prog.cuda_device_indexed_copy_payload_available(4)
+        ):
+            pytest.skip("CUDA dense field indexed-copy is unavailable.")
+        return "cuda_device", method_name
+    if arch == ti.vulkan:
+        method_name = "vulkan_scatter_dense_field" if scatter else "vulkan_gather_dense_field"
+        if not (
+            hasattr(prog, method_name)
+            and hasattr(prog, "vulkan_indexed_copy_available")
+            and prog.vulkan_indexed_copy_available()
+        ):
+            pytest.skip("Vulkan dense field indexed-copy is unavailable.")
+        return "vulkan_native", method_name
+    pytest.skip("native indexed-copy is unavailable on this arch.")
+
+
+def _run_dense_matrix_field_indexed_copy(scatter):
+    method, method_name = _native_indexed_copy_method_for_current_arch(scatter)
+    n = 64
+    m = 17
+    src_shape = m if scatter else n
+    dst_shape = n if scatter else m
+    src = ti.Vector.field(2, ti.i32, shape=src_shape)
+    dst = ti.Vector.field(2, ti.i32, shape=dst_shape)
+    indices = ti.ndarray(ti.i32, shape=m)
+    data = (np.arange(src_shape * 2, dtype=np.int32).reshape(src_shape, 2) % 97) - 48
+    index_data = ((np.arange(m, dtype=np.int32) * 7 + 3) % n).astype(np.int32)
+    src.from_numpy(data)
+    indices.from_numpy(index_data)
+    dst.fill(0)
+    workspace = ti.algorithms.IndexedCopyWorkspace(max_items=m)
+
+    if scatter:
+        expected = np.zeros((dst_shape, 2), dtype=np.int32)
+        expected[index_data] = data
+        ti.algorithms.experimental_scatter(
+            src, indices, dst, method=method, workspace=workspace
+        )
+    else:
+        expected = data[index_data]
+        ti.algorithms.experimental_gather(
+            src, indices, dst, method=method, workspace=workspace
+        )
+
+    np.testing.assert_array_equal(dst.to_numpy(), expected)
+    assert len(workspace._native_indexed_copy_plans) == 2
+    assert workspace._native_indexed_copy_plan["method_name"] == method_name
+    assert workspace.workspace_bytes_peak <= 64
+    assert len(workspace._native_indexed_copy_plan_groups) == 1
+
+    dst.fill(0)
+    if scatter:
+        ti.algorithms.experimental_scatter(
+            src, indices, dst, method=method, workspace=workspace
+        )
+    else:
+        ti.algorithms.experimental_gather(
+            src, indices, dst, method=method, workspace=workspace
+        )
+    np.testing.assert_array_equal(dst.to_numpy(), expected)
+    assert len(workspace._native_indexed_copy_plan_groups) == 1
+
+
 def _run_dense_field_indexed_copy_replay(
     dtype, np_dtype, method, scatter, backend, method_name
 ):
@@ -695,6 +775,12 @@ def test_experimental_gather_scatter_cpu_native_dense_fields():
     assert gather_ws.workspace_bytes_peak == 0
     assert scatter_ws.workspace_bytes_peak == 0
     assert prog.cpu_indexed_copy_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_gather_scatter_native_dense_matrix_field_components():
+    _run_dense_matrix_field_indexed_copy(scatter=False)
+    _run_dense_matrix_field_indexed_copy(scatter=True)
 
 
 @test_utils.test(arch=[ti.cpu])

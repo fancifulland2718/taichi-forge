@@ -65,6 +65,61 @@ def _run_dense_field_reduce_case(n, dtype, np_dtype, method, workspace):
         _assert_reduce_output(output[None], _expected(values_np, op), np_dtype)
 
 
+def _native_reduce_method_for_current_arch():
+    arch = impl.current_cfg().arch
+    prog = impl.get_runtime().prog
+    if arch == ti.cpu:
+        if not (hasattr(prog, "cpu_reduce_available") and prog.cpu_reduce_available()):
+            pytest.skip("CPU native reduce is unavailable.")
+        return "cpu_native", "cpu_reduce_dense_field"
+    if arch == ti.cuda:
+        if not (
+            hasattr(prog, "cuda_cub_reduce_available")
+            and prog.cuda_cub_reduce_available()
+        ):
+            pytest.skip("CUDA CUB reduce is unavailable.")
+        return "cuda_cub", "cuda_cub_reduce_dense_field"
+    if arch == ti.vulkan:
+        if not (
+            hasattr(prog, "vulkan_reduce_available")
+            and prog.vulkan_reduce_available()
+        ):
+            pytest.skip("Vulkan native reduce is unavailable.")
+        return "vulkan_native", "vulkan_reduce_dense_field"
+    pytest.skip("native reduce is unavailable on this arch.")
+
+
+def _run_dense_matrix_field_reduce_case():
+    n = 128
+    method, expected_method = _native_reduce_method_for_current_arch()
+    values = ti.Vector.field(2, ti.i32, shape=n)
+    output = ti.Vector.field(2, ti.i32, shape=())
+    values_np = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 17) - 8
+    values.from_numpy(values_np)
+    output.fill(0)
+    workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+
+    ti.algorithms.experimental_reduce(
+        values, output, op="sum", method=method, workspace=workspace
+    )
+
+    np.testing.assert_array_equal(
+        output.to_numpy(), np.sum(values_np, axis=0, dtype=np.int32)
+    )
+    assert len(workspace._native_reduce_plans) == 2
+    assert workspace._native_reduce_plan["method_name"] == expected_method
+    assert len(workspace._native_reduce_plan_groups) == 1
+
+    output.fill(0)
+    ti.algorithms.experimental_reduce(
+        values, output, op="sum", method=method, workspace=workspace
+    )
+    np.testing.assert_array_equal(
+        output.to_numpy(), np.sum(values_np, axis=0, dtype=np.int32)
+    )
+    assert len(workspace._native_reduce_plan_groups) == 1
+
+
 def _run_struct_member_reduce_case(n, dtype, np_dtype, method, workspace):
     payload = ti.types.struct(value=dtype, tag=ti.i32)
     values = ti.ndarray(payload, shape=n)
@@ -127,6 +182,7 @@ def _run_struct_tensor_member_reduce_case(n, dtype, np_dtype, method, workspace)
         np.testing.assert_allclose(result["vec"][0], expected_vec, rtol=1e-5, atol=1e-6)
         np.testing.assert_allclose(result["mat"][0], expected_mat, rtol=1e-5, atol=1e-6)
         assert result["tag"][0] == out_host["tag"][0]
+    assert len(workspace._native_reduce_plan_groups) >= 6
     assert np.array_equal(values.to_numpy()["tag"], host["tag"])
 
 
@@ -207,6 +263,11 @@ def test_experimental_reduce_cuda_cub_struct_tensor_member_view():
             n, dtype, np_dtype, "cuda_cub", workspace
         )
     assert workspace.workspace_bytes_peak > 0
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_reduce_native_dense_matrix_field_components():
+    _run_dense_matrix_field_reduce_case()
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

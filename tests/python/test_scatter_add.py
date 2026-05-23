@@ -134,16 +134,19 @@ def _run_struct_tensor_member_scatter_add(method):
     np.testing.assert_array_equal(result["vec"], expected_vec)
     np.testing.assert_array_equal(result["mat"], base_mat)
     assert len(workspace._native_scatter_add_plans) == 2
+    assert len(workspace._native_scatter_add_plan_groups) == 1
     vec_plans = tuple(workspace._native_scatter_add_plans)
     dst.from_numpy(dst_host)
     ti.algorithms.experimental_scatter_add(
         src_vec, indices, dst_vec, method=method, workspace=workspace
     )
     assert tuple(workspace._native_scatter_add_plans) == vec_plans
+    assert len(workspace._native_scatter_add_plan_groups) == 1
     ti.algorithms.experimental_scatter_add(
         src_mat, indices, dst_mat, method=method, workspace=workspace
     )
     assert len(workspace._native_scatter_add_plans) == 6
+    assert len(workspace._native_scatter_add_plan_groups) == 2
 
     result = dst.to_numpy()
     np.testing.assert_array_equal(result["vec"], expected_vec)
@@ -178,6 +181,71 @@ def _run_dense_field_scatter_add(dtype, np_dtype, method):
     )
     assert workspace._native_scatter_add_plans[0] is plan
     _assert_matches(dst.to_numpy(), expected)
+
+
+def _native_scatter_add_method_for_current_arch():
+    arch = impl.current_cfg().arch
+    prog = impl.get_runtime().prog
+    if arch == ti.cpu:
+        if not (
+            hasattr(prog, "cpu_scatter_add_available")
+            and prog.cpu_scatter_add_available()
+            and hasattr(prog, "cpu_scatter_add_dense_field")
+        ):
+            pytest.skip("CPU dense field scatter-add is unavailable.")
+        return "cpu_native", "cpu_scatter_add_dense_field"
+    if arch == ti.cuda:
+        if not (
+            hasattr(prog, "cuda_device_scatter_add_available")
+            and prog.cuda_device_scatter_add_available()
+            and hasattr(prog, "cuda_device_scatter_add_dense_field")
+        ):
+            pytest.skip("CUDA dense field scatter-add is unavailable.")
+        return "cuda_device", "cuda_device_scatter_add_dense_field"
+    if arch == ti.vulkan:
+        if not (
+            hasattr(prog, "vulkan_scatter_add_available")
+            and prog.vulkan_scatter_add_available()
+            and hasattr(prog, "vulkan_scatter_add_dense_field")
+        ):
+            pytest.skip("Vulkan dense field scatter-add is unavailable.")
+        return "vulkan_native", "vulkan_scatter_add_dense_field"
+    pytest.skip("native scatter-add is unavailable on this arch.")
+
+
+def _run_dense_matrix_field_scatter_add():
+    method, method_name = _native_scatter_add_method_for_current_arch()
+    n = 64
+    buckets = 17
+    src = ti.Vector.field(2, ti.i32, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    dst = ti.Vector.field(2, ti.i32, shape=buckets)
+    values = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 11) - 5
+    index_data = ((np.arange(n, dtype=np.int32) * 7 + 3) % buckets).astype(np.int32)
+    base = (np.arange(buckets * 2, dtype=np.int32).reshape(buckets, 2) % 5) - 2
+    expected = base.copy()
+    np.add.at(expected, index_data, values)
+    src.from_numpy(values)
+    indices.from_numpy(index_data)
+    dst.from_numpy(base)
+    workspace = ti.algorithms.ScatterAddWorkspace(max_items=n)
+
+    ti.algorithms.experimental_scatter_add(
+        src, indices, dst, method=method, workspace=workspace
+    )
+
+    np.testing.assert_array_equal(dst.to_numpy(), expected)
+    assert len(workspace._native_scatter_add_plans) == 2
+    assert workspace._native_scatter_add_plans[-1]["method_name"] == method_name
+    assert workspace.workspace_bytes_peak <= 64
+    assert len(workspace._native_scatter_add_plan_groups) == 1
+
+    dst.from_numpy(base)
+    ti.algorithms.experimental_scatter_add(
+        src, indices, dst, method=method, workspace=workspace
+    )
+    np.testing.assert_array_equal(dst.to_numpy(), expected)
+    assert len(workspace._native_scatter_add_plan_groups) == 1
 
 
 @test_utils.test(arch=[ti.cuda])
@@ -308,6 +376,11 @@ def test_experimental_scatter_add_cpu_native_ndarray_wide_dtypes():
         _run_dense_field_scatter_add(dtype, np_dtype, "cpu_native")
     _run_struct_tensor_member_scatter_add("cpu_native")
     assert impl.get_runtime().prog.cpu_scatter_add_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_scatter_add_native_dense_matrix_field_components():
+    _run_dense_matrix_field_scatter_add()
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])

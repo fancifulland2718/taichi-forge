@@ -86,17 +86,73 @@ def _run_struct_tensor_member_scan_case(n):
     host["tag"] = np.arange(n, dtype=np.int32) * 5 + 7
     arr.from_numpy(host)
 
-    ti.algorithms.PrefixSumExecutor(n).run(arr.field("vec"))
-    ti.algorithms.PrefixSumExecutor(n).run(arr.field("mat"))
+    vec = arr.field("vec")
+    mat = arr.field("mat")
+    vec_executor = ti.algorithms.PrefixSumExecutor(n)
+    mat_executor = ti.algorithms.PrefixSumExecutor(n)
+    vec_executor.run(vec)
+    assert len(vec_executor._native_scan_plan_groups) == 1
+    vec_executor.run(vec)
+    assert len(vec_executor._native_scan_plan_groups) == 1
+    mat_executor.run(mat)
+    assert len(mat_executor._native_scan_plan_groups) == 1
 
     result = arr.to_numpy()
+    expected_vec_once = np.cumsum(host["vec"], axis=0, dtype=np.int64).astype(np.int32)
     np.testing.assert_array_equal(
-        result["vec"], np.cumsum(host["vec"], axis=0, dtype=np.int64).astype(np.int32)
+        result["vec"],
+        np.cumsum(expected_vec_once, axis=0, dtype=np.int64).astype(np.int32),
     )
     np.testing.assert_array_equal(
         result["mat"], np.cumsum(host["mat"], axis=0, dtype=np.int64).astype(np.int32)
     )
     np.testing.assert_array_equal(result["tag"], host["tag"])
+
+
+def _native_scan_method_for_current_arch():
+    arch = impl.current_cfg().arch
+    prog = impl.get_runtime().prog
+    if arch == ti.cpu:
+        if not (hasattr(prog, "cpu_scan_available") and prog.cpu_scan_available()):
+            pytest.skip("CPU native scan is unavailable.")
+        return "cpu_native", "cpu_inclusive_scan_dense_field"
+    if arch == ti.cuda:
+        if not (
+            hasattr(prog, "cuda_cub_scan_available")
+            and prog.cuda_cub_scan_available()
+        ):
+            pytest.skip("CUDA CUB scan is unavailable.")
+        return "cuda_cub", "cuda_cub_inclusive_scan_dense_field"
+    if arch == ti.vulkan:
+        if not (
+            hasattr(prog, "vulkan_scan_available")
+            and prog.vulkan_scan_available()
+        ):
+            pytest.skip("Vulkan native scan is unavailable.")
+        return "vulkan_native", "vulkan_inclusive_scan_dense_field"
+    pytest.skip("native scan is unavailable on this arch.")
+
+
+def _run_dense_matrix_field_scan_case():
+    n = 128
+    _backend, expected_method = _native_scan_method_for_current_arch()
+    arr = ti.Vector.field(2, ti.i32, shape=n)
+    values = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 7) - 3
+    arr.from_numpy(values)
+    executor = ti.algorithms.PrefixSumExecutor(n)
+
+    executor.run(arr)
+
+    expected = np.cumsum(values, axis=0, dtype=np.int32)
+    np.testing.assert_array_equal(arr.to_numpy(), expected)
+    assert len(executor._native_scan_plans) == 2
+    assert executor._native_scan_plan["method_name"] == expected_method
+    assert len(executor._native_scan_plan_groups) == 1
+
+    arr.from_numpy(values)
+    executor.run(arr)
+    np.testing.assert_array_equal(arr.to_numpy(), expected)
+    assert len(executor._native_scan_plan_groups) == 1
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -272,6 +328,11 @@ def test_scan_dense_field_cpu_native_executor_replay():
         _assert_scan_equal(arr.to_numpy(), expected)
     assert executor._native_scan_plan is not None
     assert executor._native_scan_plan["backend"] == "cpu_native"
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_scan_native_dense_matrix_field_components():
+    _run_dense_matrix_field_scan_case()
 
 
 @test_utils.test(arch=[ti.cuda])
