@@ -1,6 +1,7 @@
 // Bindings for the python frontend
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include "taichi/ir/snode.h"
@@ -773,6 +774,11 @@ void export_lang(py::module &m) {
             py::arg("values"), py::arg("offsets"), py::arg("output"),
             py::arg("cursor"), py::arg("value_type"),
             py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_bucket_builder_dense_field",
+            &Program::cuda_device_bucket_builder_dense_field, py::arg("keys"),
+            py::arg("values"), py::arg("offsets"), py::arg("output"),
+            py::arg("cursor"), py::arg("value_type"), py::arg("n"),
+            py::arg("num_bins"), py::call_guard<py::gil_scoped_release>())
        .def("cuda_device_grouped_reduce_available",
             &Program::cuda_device_grouped_reduce_available)
        .def("cuda_device_grouped_reduce_atomic_ndarray",
@@ -780,6 +786,11 @@ void export_lang(py::module &m) {
             py::arg("keys"), py::arg("values"), py::arg("output"),
             py::arg("value_type"), py::arg("op"),
             py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_grouped_reduce_atomic_dense_field",
+            &Program::cuda_device_grouped_reduce_atomic_dense_field,
+            py::arg("keys"), py::arg("values"), py::arg("output"),
+            py::arg("value_type"), py::arg("n"), py::arg("num_groups"),
+            py::arg("op"), py::call_guard<py::gil_scoped_release>())
        .def("cuda_device_grouped_reduce_atomic_member_ndarray",
             &Program::cuda_device_grouped_reduce_atomic_member_ndarray,
             py::arg("keys"), py::arg("values"), py::arg("output"),
@@ -954,9 +965,48 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("cpu_compact_available", &Program::cpu_compact_available)
       .def("cpu_compact_workspace_bytes", &Program::cpu_compact_workspace_bytes)
+      .def(
+          "copy_dense_field_from_host",
+          [](Program &program, SNode *dst, py::buffer src, int value_type,
+             std::size_t n) {
+            py::buffer_info info = src.request();
+            TI_ERROR_IF(info.ndim < 0 || info.itemsize < 0 || info.size < 0,
+                        "CPU dense field host copy received an invalid "
+                        "source buffer.");
+            const auto src_ptr =
+                reinterpret_cast<std::uintptr_t>(info.ptr);
+            const std::size_t src_bytes =
+                static_cast<std::size_t>(info.size) *
+                static_cast<std::size_t>(info.itemsize);
+            py::gil_scoped_release release;
+            program.copy_dense_field_from_host(dst, src_ptr, src_bytes,
+                                               value_type, n);
+          },
+          py::arg("dst"), py::arg("src"), py::arg("value_type"), py::arg("n"))
+      .def(
+          "copy_dense_field_to_host",
+          [](Program &program, SNode *src, py::buffer dst, int value_type,
+             std::size_t n) {
+            py::buffer_info info = dst.request();
+            TI_ERROR_IF(info.ndim < 0 || info.itemsize < 0 || info.size < 0,
+                        "CPU dense field host readback received an invalid "
+                        "destination buffer.");
+            const auto dst_ptr = reinterpret_cast<std::uintptr_t>(info.ptr);
+            const std::size_t dst_bytes =
+                static_cast<std::size_t>(info.size) *
+                static_cast<std::size_t>(info.itemsize);
+            py::gil_scoped_release release;
+            program.copy_dense_field_to_host(src, dst_ptr, dst_bytes,
+                                             value_type, n);
+          },
+          py::arg("src"), py::arg("dst"), py::arg("value_type"), py::arg("n"))
       .def("cpu_compact_ndarray", &Program::cpu_compact_ndarray,
            py::arg("values"), py::arg("flags"), py::arg("output"),
            py::arg("count"), py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_compact_dense_field", &Program::cpu_compact_dense_field,
+           py::arg("values"), py::arg("flags"), py::arg("output"),
+           py::arg("count"), py::arg("value_type"), py::arg("n"),
            py::call_guard<py::gil_scoped_release>())
       .def("cpu_compact_i32_ndarray",
            &Program::cpu_compact_i32_ndarray, py::arg("values"),
@@ -1088,11 +1138,21 @@ void export_lang(py::module &m) {
             &Program::cpu_bucket_builder_ndarray, py::arg("keys"),
             py::arg("values"), py::arg("offsets"), py::arg("output"),
             py::arg("value_type"), py::call_guard<py::gil_scoped_release>())
+       .def("cpu_bucket_builder_dense_field",
+            &Program::cpu_bucket_builder_dense_field, py::arg("keys"),
+            py::arg("values"), py::arg("offsets"), py::arg("output"),
+            py::arg("value_type"), py::arg("n"), py::arg("num_bins"),
+            py::call_guard<py::gil_scoped_release>())
        .def("cpu_grouped_reduce_available",
             &Program::cpu_grouped_reduce_available)
        .def("cpu_grouped_reduce_ndarray", &Program::cpu_grouped_reduce_ndarray,
             py::arg("keys"), py::arg("values"), py::arg("output"),
             py::arg("value_type"), py::arg("op"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cpu_grouped_reduce_dense_field",
+            &Program::cpu_grouped_reduce_dense_field, py::arg("keys"),
+            py::arg("values"), py::arg("output"), py::arg("value_type"),
+            py::arg("n"), py::arg("num_groups"), py::arg("op"),
             py::call_guard<py::gil_scoped_release>())
        .def("cpu_grouped_reduce_member_ndarray",
             &Program::cpu_grouped_reduce_member_ndarray, py::arg("keys"),
@@ -1339,6 +1399,11 @@ void export_lang(py::module &m) {
             py::arg("values"), py::arg("offsets"), py::arg("output"),
             py::arg("cursor"), py::arg("value_type"),
             py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_bucket_builder_dense_field",
+            &Program::vulkan_bucket_builder_dense_field, py::arg("keys"),
+            py::arg("values"), py::arg("offsets"), py::arg("output"),
+            py::arg("cursor"), py::arg("value_type"), py::arg("n"),
+            py::arg("num_bins"), py::call_guard<py::gil_scoped_release>())
        .def("vulkan_grouped_reduce_available",
             &Program::vulkan_grouped_reduce_available)
        .def("vulkan_grouped_reduce_value_type_available",
@@ -1350,6 +1415,11 @@ void export_lang(py::module &m) {
        .def("vulkan_grouped_reduce_atomic_ndarray",
             &Program::vulkan_grouped_reduce_atomic_ndarray, py::arg("keys"),
             py::arg("values"), py::arg("output"), py::arg("value_type"),
+            py::arg("op"), py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_grouped_reduce_atomic_dense_field",
+            &Program::vulkan_grouped_reduce_atomic_dense_field,
+            py::arg("keys"), py::arg("values"), py::arg("output"),
+            py::arg("value_type"), py::arg("n"), py::arg("num_groups"),
             py::arg("op"), py::call_guard<py::gil_scoped_release>())
        .def("vulkan_grouped_reduce_atomic_member_ndarray",
             &Program::vulkan_grouped_reduce_atomic_member_ndarray,

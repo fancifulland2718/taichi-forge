@@ -221,6 +221,52 @@ def test_experimental_compact_field_scan():
         assert workspace.workspace_bytes_peak >= n * 4
 
 
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_compact_cpu_dense_field_native_avoids_helper_policy():
+    n = 64
+    values = ti.field(ti.i32, shape=n)
+    flags = ti.field(ti.i32, shape=n)
+    output = ti.field(ti.i32, shape=n)
+    count = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def fill():
+        for i in range(n):
+            values[i] = i * 2 + 1
+            flags[i] = 1 if i % 3 == 0 else 0
+            output[i] = -1
+        count[None] = -1
+
+    fill()
+    ti.algorithms.clear_legacy_helper_fallback_counts()
+    ti.algorithms.set_legacy_helper_auto_fallback_enabled(False)
+    try:
+        ti.algorithms.experimental_compact(
+            values, flags, output, count, method="auto"
+        )
+        assert ti.algorithms.get_legacy_helper_fallback_counts() == {}
+
+        ti.algorithms.experimental_compact(
+            values, flags, output, count, method="field_scan"
+        )
+        assert ti.algorithms.get_legacy_helper_fallback_counts() == {}
+
+        ti.algorithms.set_legacy_helper_fallback_counting_enabled(True)
+        ti.algorithms.experimental_compact(
+            values, flags, output, count, method="field_scan"
+        )
+        counts = ti.algorithms.get_legacy_helper_fallback_counts(reset=True)
+        assert counts == {}
+    finally:
+        ti.algorithms.reset_legacy_helper_auto_fallback_policy()
+        ti.algorithms.set_legacy_helper_fallback_counting_enabled(False, clear=True)
+        ti.algorithms.clear_legacy_helper_fallback_counts()
+
+    expected = (np.arange(n, dtype=np.int32) * 2 + 1)[np.arange(n) % 3 == 0]
+    assert count[None] == expected.shape[0]
+    assert np.array_equal(output.to_numpy()[: expected.shape[0]], expected)
+
+
 @test_utils.test(arch=[ti.cuda])
 def test_experimental_compact_cuda_field_scan_uses_cub_native_workspace():
     n = 4096

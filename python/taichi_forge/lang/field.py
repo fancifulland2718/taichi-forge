@@ -12,6 +12,26 @@ from taichi_forge.lang.util import (
 )
 
 
+def _dense_host_copy_value_type(dtype):
+    from taichi_forge.types.primitive_types import (  # pylint: disable=C0415
+        f32,
+        f64,
+        i32,
+        i64,
+        u32,
+        u64,
+    )
+
+    return {
+        i32: 0,
+        f32: 1,
+        u32: 2,
+        u64: 3,
+        i64: 4,
+        f64: 5,
+    }.get(dtype)
+
+
 class Field:
     """Taichi field class.
 
@@ -302,6 +322,8 @@ class ScalarField(Field):
         import numpy as np  # pylint: disable=C0415
 
         arr = np.zeros(shape=self.shape, dtype=dtype)
+        if self._try_cpu_dense_to_numpy(arr):
+            return arr
         from taichi_forge._kernels import tensor_to_ext_arr  # pylint: disable=C0415
 
         tensor_to_ext_arr(self, arr)
@@ -313,6 +335,13 @@ class ScalarField(Field):
         """Converts this field to a `torch.tensor`."""
         import torch  # pylint: disable=C0415
 
+        import numpy as np  # pylint: disable=C0415
+
+        arr_np = np.empty(shape=self.shape, dtype=to_numpy_type(self.dtype))
+        if self._try_cpu_dense_to_numpy(arr_np):
+            return torch.as_tensor(
+                arr_np, dtype=to_pytorch_type(self.dtype), device=device
+            )
         # pylint: disable=E1101
         arr = torch.zeros(size=self.shape, dtype=to_pytorch_type(self.dtype), device=device)
         from taichi_forge._kernels import tensor_to_ext_arr  # pylint: disable=C0415
@@ -326,6 +355,11 @@ class ScalarField(Field):
         """Converts this field to a `paddle.Tensor`."""
         import paddle  # pylint: disable=C0415
 
+        import numpy as np  # pylint: disable=C0415
+
+        arr_np = np.empty(shape=self.shape, dtype=to_numpy_type(self.dtype))
+        if self._try_cpu_dense_to_numpy(arr_np):
+            return paddle.to_tensor(arr_np, place=place)
         # pylint: disable=E1101
         # paddle.empty() doesn't support argument `place``
         arr = paddle.to_tensor(paddle.zeros(self.shape, to_paddle_type(self.dtype)), place=place)
@@ -342,10 +376,72 @@ class ScalarField(Field):
         for i, _ in enumerate(self.shape):
             if self.shape[i] != arr.shape[i]:
                 raise ValueError(f"ti.field shape {self.shape} does not match" f" the numpy array shape {arr.shape}")
+        if self._try_cpu_dense_from_numpy(arr):
+            return
         from taichi_forge._kernels import ext_arr_to_tensor  # pylint: disable=C0415
 
         ext_arr_to_tensor(arr, self)
         taichi_forge.lang.runtime_ops.sync()
+
+    def _try_cpu_dense_from_numpy(self, arr):
+        if not hasattr(arr, "flags") or not arr.flags.c_contiguous:
+            return False
+        from taichi_forge.lang.misc import arm64, x64  # pylint: disable=C0415
+
+        if impl.current_cfg().arch not in (x64, arm64):
+            return False
+        value_type = _dense_host_copy_value_type(self.dtype)
+        if value_type is None:
+            return False
+        if arr.dtype != to_numpy_type(self.dtype):
+            return False
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "copy_dense_field_from_host"):
+            return False
+        impl.get_runtime().materialize()
+        try:
+            prog.copy_dense_field_from_host(
+                self.snode.ptr, arr, value_type, int(arr.size)
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            if (
+                "CPU native dense field host copy" not in message
+                and "Native dense field path" not in message
+            ):
+                raise
+            return False
+        return True
+
+    def _try_cpu_dense_to_numpy(self, arr):
+        if not hasattr(arr, "flags") or not arr.flags.c_contiguous:
+            return False
+        from taichi_forge.lang.misc import arm64, x64  # pylint: disable=C0415
+
+        if impl.current_cfg().arch not in (x64, arm64):
+            return False
+        value_type = _dense_host_copy_value_type(self.dtype)
+        if value_type is None:
+            return False
+        if arr.dtype != to_numpy_type(self.dtype):
+            return False
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "copy_dense_field_to_host"):
+            return False
+        impl.get_runtime().materialize()
+        try:
+            prog.copy_dense_field_to_host(
+                self.snode.ptr, arr, value_type, int(arr.size)
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            if (
+                "CPU native dense field host readback" not in message
+                and "Native dense field path" not in message
+            ):
+                raise
+            return False
+        return True
 
     @python_scope
     def from_numpy(self, arr):

@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 
 from taichi_forge._lib import core as _ti_core
@@ -178,6 +180,80 @@ _REDUCE_FIELD_PRIVATE_CHUNK_SIZE = 2048
 _HISTOGRAM_FIELD_PRIVATE_MIN_N = 65536
 _HISTOGRAM_FIELD_PRIVATE_MAX_BINS = 512
 _HISTOGRAM_FIELD_PRIVATE_CHUNK_SIZE = 2048
+_LEGACY_HELPER_AUTO_FALLBACK_ENV = "TAICHI_FORGE_LEGACY_HELPER_AUTO_FALLBACK"
+_legacy_helper_auto_fallback_enabled = None
+_legacy_helper_fallback_counting_enabled = False
+_legacy_helper_fallback_counts = {}
+
+
+def _env_legacy_helper_auto_fallback_enabled():
+    value = os.environ.get(_LEGACY_HELPER_AUTO_FALLBACK_ENV)
+    if value is None:
+        return True
+    normalized = value.strip().lower()
+    if normalized in ("0", "false", "off", "no", "native", "native_only", "strict"):
+        return False
+    if normalized in ("1", "true", "on", "yes", "legacy", "fallback"):
+        return True
+    return True
+
+
+def legacy_helper_auto_fallback_enabled():
+    global _legacy_helper_auto_fallback_enabled
+    if _legacy_helper_auto_fallback_enabled is not None:
+        return _legacy_helper_auto_fallback_enabled
+    _legacy_helper_auto_fallback_enabled = _env_legacy_helper_auto_fallback_enabled()
+    return _legacy_helper_auto_fallback_enabled
+
+
+def set_legacy_helper_auto_fallback_enabled(enabled):
+    global _legacy_helper_auto_fallback_enabled
+    _legacy_helper_auto_fallback_enabled = bool(enabled)
+
+
+def reset_legacy_helper_auto_fallback_policy():
+    global _legacy_helper_auto_fallback_enabled
+    _legacy_helper_auto_fallback_enabled = None
+
+
+def clear_legacy_helper_fallback_counts():
+    _legacy_helper_fallback_counts.clear()
+
+
+def legacy_helper_fallback_counting_enabled():
+    return _legacy_helper_fallback_counting_enabled
+
+
+def set_legacy_helper_fallback_counting_enabled(enabled, clear=False):
+    global _legacy_helper_fallback_counting_enabled
+    _legacy_helper_fallback_counting_enabled = bool(enabled)
+    if clear:
+        clear_legacy_helper_fallback_counts()
+
+
+def get_legacy_helper_fallback_counts(reset=False):
+    counts = dict(_legacy_helper_fallback_counts)
+    if reset:
+        clear_legacy_helper_fallback_counts()
+    return counts
+
+
+def _record_legacy_helper_fallback(op_name, method, explicit_method):
+    if method == "auto" and not legacy_helper_auto_fallback_enabled():
+        raise RuntimeError(
+            f"{op_name} method='auto' reached legacy Taichi-kernel fallback, "
+            "but auto fallback is disabled. Use an available native method, "
+            f"pass method='{explicit_method}' explicitly, or re-enable "
+            f"{_LEGACY_HELPER_AUTO_FALLBACK_ENV}."
+        )
+    if not _legacy_helper_fallback_counting_enabled:
+        return
+    key = (op_name, method)
+    _legacy_helper_fallback_counts[key] = _legacy_helper_fallback_counts.get(key, 0) + 1
+
+
+def _should_record_legacy_helper_fallback(method):
+    return method == "auto" or _legacy_helper_fallback_counting_enabled
 
 
 def _is_opaque_raw_payload(arr):
@@ -978,6 +1054,8 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
         self.workspace_bytes_peak = 0
         self._field_buffers = {}
         self._cuda_field_buffers = {}
+        self._cpu_dense_field_compact_plans = {}
+        self._cpu_field_scan_plans = {}
         self._init_order_apply_workspace("compact")
         self._cuda_cub_active = False
         self._cuda_cub_scan_active = False
@@ -1006,6 +1084,8 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
         self.workspace_bytes_peak = 0
         self._field_buffers.clear()
         self._cuda_field_buffers.clear()
+        self._cpu_dense_field_compact_plans.clear()
+        self._cpu_field_scan_plans.clear()
         self._clear_order_apply_workspace()
         self._cuda_cub_active = False
         self._cuda_cub_scan_active = False
@@ -1057,6 +1137,90 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
 
     def _get_scalar_temp_buffer(self, dtype, n):
         return self._get_order_apply_scalar_temp_buffer(dtype, n)
+
+    def _cpu_field_scan_plan_key(self, values, flags, output, count, n):
+        return (id(values), id(flags), id(output), id(count), int(n))
+
+    def _try_cpu_dense_field_compact_plan(self, values, flags, output, count, method):
+        if current_cfg().arch not in (x64, arm64):
+            return False
+        if method not in ("auto", "field_scan"):
+            return False
+        n = values.shape[0]
+        plan = self._cpu_dense_field_compact_plans.get(
+            self._cpu_field_scan_plan_key(values, flags, output, count, n)
+        )
+        if plan is None:
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if id(prog) != plan["program_id"]:
+            return False
+        temp_bytes = prog.cpu_compact_dense_field(
+            plan["values_snode"],
+            plan["flags_snode"],
+            plan["output_snode"],
+            plan["count_snode"],
+            plan["value_type"],
+            plan["n"],
+        )
+        self.workspace_bytes_current = max(self.workspace_bytes_current, temp_bytes)
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak, self.workspace_bytes_current
+        )
+        return True
+
+    def _record_cpu_dense_field_compact_plan(
+        self,
+        values,
+        flags,
+        output,
+        count,
+        n,
+        prog,
+        value_type,
+        values_snode,
+        flags_snode,
+        output_snode,
+        count_snode,
+    ):
+        if current_cfg().arch not in (x64, arm64):
+            return
+        key = self._cpu_field_scan_plan_key(values, flags, output, count, n)
+        self._cpu_dense_field_compact_plans[key] = {
+            "program_id": id(prog),
+            "value_type": value_type,
+            "n": int(n),
+            "values_snode": values_snode,
+            "flags_snode": flags_snode,
+            "output_snode": output_snode,
+            "count_snode": count_snode,
+        }
+
+    def _try_cpu_field_scan_plan(self, values, flags, output, count, method):
+        if current_cfg().arch not in (x64, arm64):
+            return False
+        if method not in ("auto", "field_scan"):
+            return False
+        n = values.shape[0]
+        plan = self._cpu_field_scan_plans.get(
+            self._cpu_field_scan_plan_key(values, flags, output, count, n)
+        )
+        if plan is None:
+            return False
+        if _should_record_legacy_helper_fallback(method):
+            _record_legacy_helper_fallback(
+                "experimental_compact()", method, "field_scan"
+            )
+        compact_stable_serial_field_static_n(values, flags, output, count, n)
+        return True
+
+    def _record_cpu_field_scan_plan(self, values, flags, output, count, n):
+        if current_cfg().arch not in (x64, arm64):
+            return
+        key = self._cpu_field_scan_plan_key(values, flags, output, count, n)
+        self._cpu_field_scan_plans[key] = True
 
 
 class ReduceWorkspace:
@@ -3138,6 +3302,42 @@ def _try_native_dense_field_compact(values, flags, output, count, workspace, n):
     impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
     value_type = _COMPACT_VALUE_TYPE[i32]
+    if arch in (x64, arm64):
+        if not (
+            hasattr(prog, "cpu_compact_available")
+            and prog.cpu_compact_available()
+            and hasattr(prog, "cpu_compact_dense_field")
+        ):
+            return False
+        temp_bytes = prog.cpu_compact_dense_field(
+            values_view.snode,
+            flags_view.snode,
+            output_view.snode,
+            count_view.snode,
+            value_type,
+            n,
+        )
+        if workspace is not None:
+            workspace.workspace_bytes_current = max(
+                workspace.workspace_bytes_current, temp_bytes
+            )
+            workspace.workspace_bytes_peak = max(
+                workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+            )
+            workspace._record_cpu_dense_field_compact_plan(
+                values,
+                flags,
+                output,
+                count,
+                n,
+                prog,
+                value_type,
+                values_view.snode,
+                flags_view.snode,
+                output_view.snode,
+                count_view.snode,
+            )
+        return True
     if arch == cuda:
         if not (
             values_view.stride == 4
@@ -3238,7 +3438,7 @@ def _compact_field_native_prefix_scan(values, flags, output, count, workspace, n
     return workspace
 
 
-def _compact_field_scan(values, flags, output, count, workspace):
+def _compact_field_scan(values, flags, output, count, workspace, method):
     if isinstance(values, Ndarray) or isinstance(flags, Ndarray) or isinstance(output, Ndarray):
         raise NotImplementedError(
             "method='field_scan' supports only ti.field values/flags/output."
@@ -3251,13 +3451,13 @@ def _compact_field_scan(values, flags, output, count, workspace):
         sync()
         return workspace
     arch = current_cfg().arch
-    if arch not in (x64, arm64) and _try_native_dense_field_compact(
+    if _try_native_dense_field_compact(
         values, flags, output, count, workspace, n
     ):
         return workspace
     if arch in (x64, arm64):
         compact_stable_serial_field_static_n(values, flags, output, count, n)
-        sync()
+        workspace._record_cpu_field_scan_plan(values, flags, output, count, n)
         return workspace
     if _native_prefix_scan_available_for_current_arch():
         return _compact_field_native_prefix_scan(
@@ -3331,6 +3531,14 @@ def experimental_compact(
         )
         return
 
+    if workspace is not None and isinstance(workspace, CompactWorkspace):
+        if workspace._try_cpu_dense_field_compact_plan(
+            values, flags, output, count, method
+        ):
+            return
+        if workspace._try_cpu_field_scan_plan(values, flags, output, count, method):
+            return
+
     _check_compact_request(values, flags, output, count, method, workspace)
     if values.shape[0] == 0:
         return
@@ -3362,7 +3570,15 @@ def experimental_compact(
             "method='cpu_native' requires CPU ndarray inputs and available native "
             "compact."
         )
-    _compact_field_scan(values, flags, output, count, workspace)
+    if method in ("auto", "field_scan") and _try_native_dense_field_compact(
+        values, flags, output, count, workspace, values.shape[0]
+    ):
+        return
+    if _should_record_legacy_helper_fallback(method):
+        _record_legacy_helper_fallback(
+            "experimental_compact()", method, "field_scan"
+        )
+    _compact_field_scan(values, flags, output, count, workspace, method)
 
 
 def _check_reduce_request(values, output, op, method, workspace):
@@ -4047,6 +4263,10 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
             "experimental_reduce() dense field values with this dtype require "
             "an available native CPU/CUDA/Vulkan reduce fast path."
         )
+    if _should_record_legacy_helper_fallback(method):
+        _record_legacy_helper_fallback(
+            "experimental_reduce()", method, "field_atomic"
+        )
     _reduce_field_atomic(values, output, op, workspace)
 
 
@@ -4441,11 +4661,19 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
         )
     if isinstance(values, Ndarray) or isinstance(bins, Ndarray):
         if method in ("field_atomic", "field_direct", "field_private"):
+            if _should_record_legacy_helper_fallback(method):
+                _record_legacy_helper_fallback(
+                    "experimental_histogram()", method, method
+                )
             _histogram_field_atomic(values, bins, workspace, method)
             return
         raise RuntimeError(
             "experimental_histogram() could not find an available ndarray "
             "backend for the requested value/bin dtypes."
+        )
+    if _should_record_legacy_helper_fallback(method):
+        _record_legacy_helper_fallback(
+            "experimental_histogram()", method, "field_atomic"
         )
     _histogram_field_atomic(values, bins, workspace, method)
 
@@ -4647,6 +4875,7 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
+    impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
     if src_is_member or dst_is_member:
         if not (
@@ -4909,6 +5138,7 @@ def _try_cpu_transform(src, dst, value_type, scale, bias, workspace):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
+    impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
     if not hasattr(prog, "cpu_transform_available"):
         return False
@@ -5313,6 +5543,10 @@ def experimental_transform(
             "require an available native CPU/CUDA/Vulkan transform fast path."
         )
     if method in ("kernel", "field_kernel", "auto"):
+        if _should_record_legacy_helper_fallback(method):
+            _record_legacy_helper_fallback(
+                "experimental_transform()", method, "field_kernel"
+            )
         _transform_kernel(src, dst, scale, bias)
         return workspace
     raise RuntimeError("experimental_transform() could not find an available backend.")
@@ -5488,6 +5722,7 @@ def _try_cuda_device_indexed_copy(src, indices, dst, scatter, workspace):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
+    impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
     if not hasattr(prog, "cuda_device_indexed_copy_available"):
         return False
@@ -5950,6 +6185,8 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
             "native strided indexed-copy backend."
         )
     if method in ("kernel", "field_kernel", "auto"):
+        if _should_record_legacy_helper_fallback(method):
+            _record_legacy_helper_fallback(op_name, method, "field_kernel")
         _indexed_copy_kernel(src, indices, dst, scatter)
         return workspace
     raise RuntimeError(f"{op_name} could not find an available backend.")
@@ -6441,6 +6678,10 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
             "consume strided member views."
         )
     if method in ("kernel", "field_kernel", "auto"):
+        if _should_record_legacy_helper_fallback(method):
+            _record_legacy_helper_fallback(
+                "experimental_scatter_add()", method, "field_kernel"
+            )
         _scatter_add_kernel(src, indices, dst)
         return workspace
     raise RuntimeError("experimental_scatter_add() could not find an available backend.")
@@ -6522,15 +6763,19 @@ def _bucket_builder_value_type(values):
 def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, num_bins):
     if current_cfg().arch != cuda:
         return False
-    if not (
+    views = tuple(_primitive_view(arr) for arr in (keys, values, offsets, output))
+    dense_field_mode = all(view is not None and view.is_dense_field for view in views)
+    ndarray_mode = (
         isinstance(keys, Ndarray)
         and isinstance(values, Ndarray)
         and isinstance(offsets, Ndarray)
         and isinstance(output, Ndarray)
-    ):
+    )
+    if not (dense_field_mode or ndarray_mode):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
+    impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
     if not hasattr(prog, "cuda_device_bucket_builder_available"):
         return False
@@ -6538,7 +6783,27 @@ def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, nu
         return False
     cursor = workspace._get_cursor_ndarray(num_bins)
     value_type = _bucket_builder_value_type(values)
-    if hasattr(prog, "cuda_device_bucket_builder_ndarray"):
+    if dense_field_mode:
+        value_size = _dtype_nbytes(values.dtype)
+        if not (
+            views[0].stride == 4
+            and views[1].stride == value_size
+            and views[2].stride == 4
+            and views[3].stride == value_size
+            and hasattr(prog, "cuda_device_bucket_builder_dense_field")
+        ):
+            return False
+        temp_bytes = prog.cuda_device_bucket_builder_dense_field(
+            views[0].snode,
+            views[1].snode,
+            views[2].snode,
+            views[3].snode,
+            cursor.arr,
+            value_type,
+            keys.shape[0],
+            num_bins,
+        )
+    elif hasattr(prog, "cuda_device_bucket_builder_ndarray"):
         temp_bytes = prog.cuda_device_bucket_builder_ndarray(
             keys.arr, values.arr, offsets.arr, output.arr, cursor.arr, value_type
         )
@@ -6558,15 +6823,19 @@ def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, nu
 def _try_vulkan_bucket_builder(keys, values, offsets, output, workspace, num_bins):
     if current_cfg().arch != vulkan:
         return False
-    if not (
+    views = tuple(_primitive_view(arr) for arr in (keys, values, offsets, output))
+    dense_field_mode = all(view is not None and view.is_dense_field for view in views)
+    ndarray_mode = (
         isinstance(keys, Ndarray)
         and isinstance(values, Ndarray)
         and isinstance(offsets, Ndarray)
         and isinstance(output, Ndarray)
-    ):
+    )
+    if not (dense_field_mode or ndarray_mode):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
+    impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
     if not hasattr(prog, "vulkan_bucket_builder_available"):
         return False
@@ -6579,7 +6848,27 @@ def _try_vulkan_bucket_builder(keys, values, offsets, output, workspace, num_bin
     elif value_type != 0:
         return False
     cursor = workspace._get_cursor_ndarray(num_bins)
-    if hasattr(prog, "vulkan_bucket_builder_ndarray"):
+    if dense_field_mode:
+        value_size = _dtype_nbytes(values.dtype)
+        if not (
+            views[0].stride == 4
+            and views[1].stride == value_size
+            and views[2].stride == 4
+            and views[3].stride == value_size
+            and hasattr(prog, "vulkan_bucket_builder_dense_field")
+        ):
+            return False
+        temp_bytes = prog.vulkan_bucket_builder_dense_field(
+            views[0].snode,
+            views[1].snode,
+            views[2].snode,
+            views[3].snode,
+            cursor.arr,
+            value_type,
+            keys.shape[0],
+            num_bins,
+        )
+    elif hasattr(prog, "vulkan_bucket_builder_ndarray"):
         temp_bytes = prog.vulkan_bucket_builder_ndarray(
             keys.arr, values.arr, offsets.arr, output.arr, cursor.arr, value_type
         )
@@ -6598,22 +6887,45 @@ def _try_vulkan_bucket_builder(keys, values, offsets, output, workspace, num_bin
 def _try_cpu_bucket_builder(keys, values, offsets, output, workspace):
     if current_cfg().arch not in [x64, arm64]:
         return False
-    if not (
+    views = tuple(_primitive_view(arr) for arr in (keys, values, offsets, output))
+    dense_field_mode = all(view is not None and view.is_dense_field for view in views)
+    ndarray_mode = (
         isinstance(keys, Ndarray)
         and isinstance(values, Ndarray)
         and isinstance(offsets, Ndarray)
         and isinstance(output, Ndarray)
-    ):
+    )
+    if not (dense_field_mode or ndarray_mode):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
+    impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
     if not hasattr(prog, "cpu_bucket_builder_available"):
         return False
     if not prog.cpu_bucket_builder_available():
         return False
     value_type = _bucket_builder_value_type(values)
-    if hasattr(prog, "cpu_bucket_builder_ndarray"):
+    if dense_field_mode:
+        value_size = _dtype_nbytes(values.dtype)
+        if not (
+            views[0].stride == 4
+            and views[1].stride == value_size
+            and views[2].stride == 4
+            and views[3].stride == value_size
+            and hasattr(prog, "cpu_bucket_builder_dense_field")
+        ):
+            return False
+        temp_bytes = prog.cpu_bucket_builder_dense_field(
+            views[0].snode,
+            views[1].snode,
+            views[2].snode,
+            views[3].snode,
+            value_type,
+            keys.shape[0],
+            offsets.shape[0] - 1,
+        )
+    elif hasattr(prog, "cpu_bucket_builder_ndarray"):
         temp_bytes = prog.cpu_bucket_builder_ndarray(
             keys.arr, values.arr, offsets.arr, output.arr, value_type
         )
@@ -6727,7 +7039,8 @@ def experimental_bucket_builder(
     if method == "cuda_device":
         raise RuntimeError(
             "experimental_bucket_builder() method='cuda_device' requires CUDA "
-            "ndarray inputs and CUDA toolkit bucket-builder support."
+            "ndarray or contiguous dense field inputs and CUDA toolkit "
+            "bucket-builder support."
         )
     if method in ("auto", "vulkan_native") and _try_vulkan_bucket_builder(
         keys, values, offsets, output, workspace, num_bins
@@ -6736,7 +7049,8 @@ def experimental_bucket_builder(
     if method == "vulkan_native":
         raise RuntimeError(
             "experimental_bucket_builder() method='vulkan_native' requires Vulkan "
-            "ndarray inputs and available native bucket-builder shaders."
+            "ndarray or contiguous dense field inputs and available native "
+            "bucket-builder shaders."
         )
     if method in ("auto", "cpu_native") and _try_cpu_bucket_builder(
         keys, values, offsets, output, workspace
@@ -6745,9 +7059,14 @@ def experimental_bucket_builder(
     if method == "cpu_native":
         raise RuntimeError(
             "experimental_bucket_builder() method='cpu_native' requires CPU ndarray "
-            "inputs and available native bucket-builder support."
+            "or contiguous dense field inputs and available native bucket-builder "
+            "support."
         )
     if method in ("kernel", "field_kernel", "auto"):
+        if _should_record_legacy_helper_fallback(method):
+            _record_legacy_helper_fallback(
+                "experimental_bucket_builder()", method, "field_kernel"
+            )
         _bucket_builder_kernel(keys, values, offsets, output, workspace, num_bins)
         return workspace
     raise RuntimeError("experimental_bucket_builder() could not find an available backend.")
@@ -6820,10 +7139,12 @@ def _try_cuda_device_grouped_reduce(
 ):
     if current_cfg().arch != cuda:
         return False
+    views = tuple(_primitive_view(arr) for arr in (keys, values, output))
+    dense_field_mode = all(view is not None and view.is_dense_field for view in views)
     keys_is_member = _is_struct_scalar_member_view(keys)
     values_is_member = _is_struct_scalar_member_view(values)
     output_is_member = _is_struct_scalar_member_view(output)
-    if not (
+    if not dense_field_mode and not (
         (isinstance(keys, Ndarray) or keys_is_member)
         and (isinstance(values, Ndarray) or values_is_member)
         and (isinstance(output, Ndarray) or output_is_member)
@@ -6831,12 +7152,38 @@ def _try_cuda_device_grouped_reduce(
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
+    impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
     if not hasattr(prog, "cuda_device_grouped_reduce_available"):
         return False
     if not prog.cuda_device_grouped_reduce_available():
         return False
     value_type = _grouped_reduce_value_type(values.dtype)
+    if dense_field_mode:
+        if segmented:
+            return False
+        value_size = _dtype_nbytes(values.dtype)
+        if not (
+            views[0].stride == 4
+            and views[1].stride == value_size
+            and views[2].stride == value_size
+            and hasattr(prog, "cuda_device_grouped_reduce_atomic_dense_field")
+        ):
+            return False
+        temp_bytes = prog.cuda_device_grouped_reduce_atomic_dense_field(
+            views[0].snode,
+            views[1].snode,
+            views[2].snode,
+            value_type,
+            keys.shape[0],
+            num_groups,
+            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak,
+            workspace.workspace_bytes_current + temp_bytes,
+        )
+        return True
     if (keys_is_member or values_is_member or output_is_member) and hasattr(
         prog, "cuda_device_grouped_reduce_atomic_strided_keys_ndarray"
     ):
@@ -6963,12 +7310,14 @@ def _try_vulkan_grouped_reduce(
 ):
     if current_cfg().arch != vulkan:
         return False
+    views = tuple(_primitive_view(arr) for arr in (keys, values, output))
+    dense_field_mode = all(view is not None and view.is_dense_field for view in views)
     keys_is_member = _is_struct_scalar_member_view(keys)
     values_is_member = _is_struct_scalar_member_view(values)
     output_is_member = _is_struct_scalar_member_view(output)
     if (keys_is_member or values_is_member or output_is_member) and segmented:
         return False
-    if not (
+    if not dense_field_mode and not (
         (isinstance(keys, Ndarray) or keys_is_member)
         and (isinstance(values, Ndarray) or values_is_member)
         and (isinstance(output, Ndarray) or output_is_member)
@@ -6976,6 +7325,7 @@ def _try_vulkan_grouped_reduce(
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
+    impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
     if not hasattr(prog, "vulkan_grouped_reduce_available"):
         return False
@@ -6994,6 +7344,32 @@ def _try_vulkan_grouped_reduce(
             return False
     elif segmented and values.dtype != i32:
         return False
+    if dense_field_mode:
+        if segmented:
+            return False
+        value_size = _dtype_nbytes(values.dtype)
+        if not (
+            views[0].stride == 4
+            and views[1].stride == value_size
+            and views[2].stride == value_size
+            and hasattr(prog, "vulkan_grouped_reduce_atomic_dense_field")
+        ):
+            return False
+        temp_bytes = prog.vulkan_grouped_reduce_atomic_dense_field(
+            views[0].snode,
+            views[1].snode,
+            views[2].snode,
+            value_type,
+            keys.shape[0],
+            num_groups,
+            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+        )
+        workspace._vulkan_native_active = True
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak,
+            workspace.workspace_bytes_current + temp_bytes,
+        )
+        return True
     if (
         (keys_is_member or values_is_member or output_is_member)
         and not segmented
@@ -7090,10 +7466,12 @@ def _try_vulkan_grouped_reduce(
 def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
     if current_cfg().arch not in [x64, arm64]:
         return False
+    views = tuple(_primitive_view(arr) for arr in (keys, values, output))
+    dense_field_mode = all(view is not None and view.is_dense_field for view in views)
     keys_is_member = _is_struct_scalar_member_view(keys)
     values_is_member = _is_struct_scalar_member_view(values)
     output_is_member = _is_struct_scalar_member_view(output)
-    if not (
+    if not dense_field_mode and not (
         (isinstance(keys, Ndarray) or keys_is_member)
         and (isinstance(values, Ndarray) or values_is_member)
         and (isinstance(output, Ndarray) or output_is_member)
@@ -7101,13 +7479,32 @@ def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
+    impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
     if not hasattr(prog, "cpu_grouped_reduce_available"):
         return False
     if not prog.cpu_grouped_reduce_available():
         return False
     value_type = _grouped_reduce_value_type(values.dtype)
-    if (keys_is_member or values_is_member or output_is_member) and hasattr(
+    if dense_field_mode:
+        value_size = _dtype_nbytes(values.dtype)
+        if not (
+            views[0].stride == 4
+            and views[1].stride == value_size
+            and views[2].stride == value_size
+            and hasattr(prog, "cpu_grouped_reduce_dense_field")
+        ):
+            return False
+        temp_bytes = prog.cpu_grouped_reduce_dense_field(
+            views[0].snode,
+            views[1].snode,
+            views[2].snode,
+            value_type,
+            keys.shape[0],
+            output.shape[0],
+            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+        )
+    elif (keys_is_member or values_is_member or output_is_member) and hasattr(
         prog, "cpu_grouped_reduce_strided_keys_ndarray"
     ):
         keys_arr, keys_offset, keys_stride = _scalar_ndarray_payload(keys)
@@ -7227,7 +7624,8 @@ def experimental_grouped_reduce(
     if method == "cuda_device":
         raise RuntimeError(
             "experimental_grouped_reduce() method='cuda_device' requires CUDA "
-            "ndarray inputs and CUDA toolkit grouped-reduce support."
+            "ndarray or contiguous dense field inputs and CUDA toolkit "
+            "grouped-reduce support."
         )
     if method in ("auto", "vulkan_native") and _try_vulkan_grouped_reduce(
         keys, values, output, workspace, num_groups, op, segmented=False
@@ -7245,7 +7643,8 @@ def experimental_grouped_reduce(
     if method == "vulkan_native":
         raise RuntimeError(
             "experimental_grouped_reduce() method='vulkan_native' requires Vulkan "
-            "ndarray inputs and available native grouped-reduce shaders."
+            "ndarray or contiguous dense field inputs and available native "
+            "grouped-reduce shaders."
         )
     if method in ("auto", "cpu_native") and _try_cpu_grouped_reduce(
         keys, values, output, workspace, op
@@ -7254,7 +7653,8 @@ def experimental_grouped_reduce(
     if method == "cpu_native":
         raise RuntimeError(
             "experimental_grouped_reduce() method='cpu_native' requires CPU ndarray "
-            "inputs and available native grouped-reduce support."
+            "or contiguous dense field inputs and available native grouped-reduce "
+            "support."
         )
     if method == "segmented" and _try_cpu_grouped_reduce(
         keys, values, output, workspace, op
@@ -7276,6 +7676,10 @@ def experimental_grouped_reduce(
             "consume strided member views."
         )
     if method in ("kernel", "field_kernel", "auto"):
+        if _should_record_legacy_helper_fallback(method):
+            _record_legacy_helper_fallback(
+                "experimental_grouped_reduce()", method, "field_kernel"
+            )
         _grouped_reduce_kernel(keys, values, output)
         return workspace
     raise RuntimeError("experimental_grouped_reduce() could not find an available backend.")
@@ -7710,6 +8114,9 @@ class PrefixSumExecutor:
                 "runtime primitive is available, or use an i32 field fallback."
             )
 
+        _record_legacy_helper_fallback(
+            "PrefixSumExecutor.run()", "auto", "i32 field fallback"
+        )
         large_arr = self._ensure_large_arr()
         blit_from_field_to_field(large_arr, input_arr, 0, length)
         self._run_field_workspace(large_arr)
@@ -7730,6 +8137,13 @@ __all__ = [
     "ScatterAddWorkspace",
     "BucketBuilderWorkspace",
     "GroupedReduceWorkspace",
+    "legacy_helper_auto_fallback_enabled",
+    "set_legacy_helper_auto_fallback_enabled",
+    "reset_legacy_helper_auto_fallback_policy",
+    "legacy_helper_fallback_counting_enabled",
+    "set_legacy_helper_fallback_counting_enabled",
+    "clear_legacy_helper_fallback_counts",
+    "get_legacy_helper_fallback_counts",
     "experimental_compact",
     "experimental_reduce",
     "experimental_histogram",

@@ -247,6 +247,41 @@ def _make_forge_body(ti, arch_name: str, op_name: str, n: int):
 
         return body, {"workspace": workspace, "aux_size": buckets}
 
+    if op_name == "bucket_builder":
+        buckets = _bucket_count(n)
+        keys = ti.field(ti.i32, shape=n)
+        offsets = ti.field(ti.i32, shape=buckets + 1)
+        output = ti.field(ti.i32, shape=n)
+        workspace = ti.algorithms.BucketBuilderWorkspace(
+            max_items=n, max_bins=buckets
+        )
+        method = _method_for(arch_name, op_name)
+        keys.from_numpy(_bucket_indices(n))
+
+        def body():
+            ti.algorithms.experimental_bucket_builder(
+                keys, src, offsets, output, method=method, workspace=workspace
+            )
+
+        return body, {"workspace": workspace, "aux_size": buckets}
+
+    if op_name == "grouped_reduce":
+        buckets = _bucket_count(n)
+        keys = ti.field(ti.i32, shape=n)
+        output = ti.field(ti.i32, shape=buckets)
+        workspace = ti.algorithms.GroupedReduceWorkspace(
+            max_items=n, max_groups=buckets
+        )
+        method = _method_for(arch_name, op_name)
+        keys.from_numpy(_bucket_indices(n))
+
+        def body():
+            ti.algorithms.experimental_grouped_reduce(
+                keys, src, output, method=method, workspace=workspace
+            )
+
+        return body, {"workspace": workspace, "aux_size": buckets}
+
     raise ValueError(op_name)
 
 
@@ -374,6 +409,70 @@ def _make_vanilla_body(ti, arch_name: str, op_name: str, n: int):
                     ti.atomic_add(bins[value], 1)
 
         return histogram_field, {"aux_size": buckets}
+
+    if op_name == "bucket_builder":
+        buckets = _bucket_count(n)
+        keys = ti.field(ti.i32, shape=n)
+        offsets = ti.field(ti.i32, shape=buckets + 1)
+        output = ti.field(ti.i32, shape=n)
+        cursor = ti.field(ti.i32, shape=buckets)
+        keys.from_numpy(_bucket_indices(n))
+
+        @ti.kernel
+        def bucket_count():
+            for i in range(buckets + 1):
+                offsets[i] = 0
+            for i in keys:
+                key = keys[i]
+                if 0 <= key < buckets:
+                    ti.atomic_add(offsets[key + 1], 1)
+
+        @ti.kernel
+        def bucket_prefix_serial():
+            ti.loop_config(serialize=True)
+            for i in range(buckets):
+                offsets[i + 1] += offsets[i]
+
+        @ti.kernel
+        def bucket_copy_cursor():
+            for i in range(buckets):
+                cursor[i] = offsets[i]
+
+        @ti.kernel
+        def bucket_scatter():
+            for i in keys:
+                key = keys[i]
+                if 0 <= key < buckets:
+                    pos = ti.atomic_add(cursor[key], 1)
+                    output[pos] = src[i]
+
+        def bucket_builder_field():
+            bucket_count()
+            bucket_prefix_serial()
+            bucket_copy_cursor()
+            bucket_scatter()
+
+        return bucket_builder_field, {
+            "aux_size": buckets,
+            "workspace_peak_bytes": buckets * 4,
+        }
+
+    if op_name == "grouped_reduce":
+        buckets = _bucket_count(n)
+        keys = ti.field(ti.i32, shape=n)
+        output = ti.field(ti.i32, shape=buckets)
+        keys.from_numpy(_bucket_indices(n))
+
+        @ti.kernel
+        def grouped_reduce_field():
+            for i in range(buckets):
+                output[i] = 0
+            for i in keys:
+                key = keys[i]
+                if 0 <= key < buckets:
+                    ti.atomic_add(output[key], src[i])
+
+        return grouped_reduce_field, {"aux_size": buckets}
 
     raise ValueError(op_name)
 
@@ -648,6 +747,8 @@ def main(argv: list[str] | None = None) -> int:
             "scatter_add",
             "compact",
             "histogram",
+            "bucket_builder",
+            "grouped_reduce",
         ],
     )
     parser.add_argument("--n", type=int)

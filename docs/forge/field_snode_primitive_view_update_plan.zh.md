@@ -1256,6 +1256,187 @@ bucket-builder 和后续 solver primitive。
 - helper 数量、compile_kernel calls、offline cache 文件数下降。
 - fallback 行为和错误信息仍清晰。
 
+### S10-DSL. native-first 策略门控
+
+目标：在暂时跳过 sparse SNode 和物理引擎级验证的前提下，先让 DSL 层可以
+显式暴露并关闭 `method="auto"` 下的 legacy helper fallback。这样后续物理
+引擎测试可以直接发现哪些 dense/StructNdarray 路径仍在生成 helper IR，而不
+需要依赖离线 cache 反查。
+
+现状：
+
+- dense field、StructNdarray 和 vector/matrix component 已经优先尝试
+  `_NativePrimitivePlan` / `_NativePrimitivePlanGroup`；
+- native backend 不可用时，部分 primitive 的 `auto` 仍会静默落到
+  `_kernels.py` helper，例如 field compact/reduce/histogram/transform/
+  indexed-copy/scatter-add/bucket/grouped-reduce 以及 PrefixSum field fallback；
+- 这些 fallback 必须保留给兼容性和显式 `field_kernel` / `field_scan`
+  调试，但不应在 S10 之后继续难以观测。
+
+本子步做法：
+
+- 新增 DSL 层 legacy helper fallback policy，默认保持兼容：允许 `auto`
+  fallback；
+- 提供 Python 侧开关和环境变量，使物理引擎测试可设置为 native-only
+  `auto`，一旦触发 legacy helper 即报错；
+- 记录每个 primitive 触发 legacy helper 的次数，便于定位剩余 helper IR；
+- 显式 legacy method（如 `field_kernel`、`kernel`、`field_scan`、
+  `field_atomic`）不受该 policy 限制。
+- 已实现：
+  - `set_legacy_helper_auto_fallback_enabled(False)` 可在当前进程关闭
+    `method="auto"` 的 legacy helper fallback；
+  - `TAICHI_FORGE_LEGACY_HELPER_AUTO_FALLBACK=0` 可在进程启动时关闭；
+  - `get_legacy_helper_fallback_counts()` /
+    `clear_legacy_helper_fallback_counts()` 用于收集和清零 helper 触发次数；
+  - fallback 计数默认关闭，只有显式启用
+    `set_legacy_helper_fallback_counting_enabled(True)` 时才写入 dict；
+  - 当前计数覆盖 compact、reduce、histogram、transform、gather/scatter、
+    scatter_add、bucket_builder、grouped_reduce 和 PrefixSum field fallback。
+  - policy helper 是纯 Python 分支，不创建 Taichi kernel，不会产生额外
+    compile_kernel；native path 不进入该 helper。
+  - 对 CPU dense field compact 下沉到 native C++：
+    `Program::cpu_compact_dense_field()` 直接映射 dense field storage，
+    使用 typed assignment 快路径，1M 级别启用稳定 two-pass 并行 compact；
+  - `CompactWorkspace` 增加 CPU dense native plan replay：首次验证后记录
+    轻量 `(id(values), id(flags), id(output), id(count), n)` key 与 SNode
+    指针，后续同 workspace 直接调用 C++ primitive，避免重复
+    routing/native probe；
+  - `ScalarField.from_numpy()` 对 CPU dense scalar field 增加
+    `Program::copy_dense_field_from_host()` setup 快路径，绕开
+    `ext_arr_to_tensor` helper kernel；unsupported layout/dtype 自动回退到
+    原 helper。
+  - `ScalarField.to_numpy()` 对 CPU dense scalar field 增加
+    `Program::copy_dense_field_to_host()` readback 快路径，绕开
+    `tensor_to_ext_arr` helper kernel；dtype 转换、非 CPU 后端或非 dense layout
+    仍自动回退到原 helper。
+
+验收：
+
+- 默认策略下现有 dense field / StructNdarray 行为不变；
+- policy 关闭时，dense field compact 的 `auto`/`field_scan` 走 native C++，
+  不再触发 helper；仍无 native 路径的 field bucket_builder 会给出明确错误；
+- 显式 `field_scan` 仍可运行并优先走 native dense field compact；
+- fallback 计数可清零、查询，并能记录显式 helper 调用。
+- 定向验证：
+  - `py_compile` 覆盖 `_algorithms.py` 与 `test_compact.py`；
+  - `test_experimental_compact_cpu_dense_field_native_avoids_helper_policy`
+    与 `test_experimental_compact_field_scan` 通过；
+  - `test_experimental_bucket_builder_legacy_helper_auto_fallback_policy`
+    覆盖仍保留 helper fallback 的 CPU field bucket_builder；
+  - `tests/python/test_indexed_copy.py::test_experimental_gather_scatter_field_kernel_i32_f32`
+    跨 CPU/CUDA/Vulkan 通过，覆盖此前 `field.from_numpy()` setup IMA
+    复现路径；
+  - reduce/histogram/transform/indexed-copy/scatter-add 显式 field fallback
+    组合通过：15 passed；
+  - bucket_builder/grouped_reduce 显式 field fallback 组合通过：6 passed。
+  - `tests/python/test_compact.py` 全量通过：23 passed。
+  - 最新 S10 dense/native 验证集通过：105 passed，覆盖 CPU dense
+    from_numpy/to_numpy、compact、IMA 复现、CPU policy、CUDA/Vulkan
+    transform/reduce/indexed-copy/scatter_add/bucket/grouped_reduce/histogram
+    native 用例。
+- benchmark：
+  - `benchmarks/results/s10_dsl_legacy_fallback_policy_20260523/` 覆盖 CPU
+    field compact 1024/65536；
+  - Forge `field_scan` first-call 38.97/35.78 ms，warm median 0.107/0.118 ms；
+  - vanilla 1.8.0 对应单 kernel compact first-call 27.03/31.39 ms，
+    warm median 0.026/0.039 ms；
+  - 结论：本子步没有解决 CPU compact fallback 的结构性 runtime 差距，
+    但提供 native-only auto policy 后，物理引擎验证可直接定位这类仍依赖
+    legacy helper IR 的路径。
+  - workspace replay 优化后复测写入
+    `benchmarks/results/s10_cpu_field_compact_light_replay_nocount_20260523/`：
+    Forge CPU field compact warm median 降至 0.038 ms / 0.052 ms；
+    vanilla 1.8.0 为 0.024 ms / 0.036 ms。
+  - `method="auto"` replay 小测：4096 items median 0.0376 ms，plan 数为 1，
+    默认 fallback counts 为空，说明默认计数未引入 dict 写入负载。
+  - 其他显式 fallback microbench 写入
+    `benchmarks/results/s10_dsl_helper_overhead_20260523/`。4096 items CPU
+    结果显示默认计数关闭时 counts 均为空；计数开启后每个 primitive 记录
+    warmup+repeat 的 14 次调用。默认关闭 / 计数开启 median：
+    reduce 0.1788 / 0.1886 ms，histogram 0.2989 / 0.3003 ms，
+    transform 0.2617 / 0.2662 ms，gather 0.2564 / 0.2574 ms，
+    scatter 0.2602 / 0.2625 ms，scatter_add 0.3112 / 0.3141 ms，
+    bucket 0.5763 / 0.5580 ms，grouped_reduce 0.2488 / 0.2690 ms。
+    结论：默认关闭计数后，policy helper 不产生额外 dict 运行时负载；
+    计数开启应作为诊断模式，不作为性能跑分默认设置。
+  - CPU native C++ compact 过程数据：
+    `benchmarks/results/s10_cpu_native_cpp_compact_20260523/` 表明仅下沉
+    到 C++ 后 first-call 已降至 0.43-1.67 ms，但 warm runtime 受 Python
+    routing 和逐元素 memcpy 影响，仍不可接受；
+    `benchmarks/results/s10_cpu_dense_native_plan_compact_20260523/`
+    增加 native plan replay 与 typed assignment 后，1024/4096/65536/1M
+    first-call 为 0.398/0.412/0.680/1.055 ms，warm median 为
+    0.016/0.016/0.047/0.549 ms；
+    `benchmarks/results/s10_cpu_dense_native_parallel_compact_20260523/`
+    加入 two-pass 并行后，first-call 为 0.453/0.395/0.436/1.285 ms，
+    warm median 为 0.014/0.016/0.046/0.314 ms；
+    `benchmarks/results/s10_cpu_dense_native_parallel_chunk131k_compact_20260523/`
+    调整并行粒度后，first-call 为 0.640/0.392/0.443/1.377 ms，
+    warm median 为 0.014/0.015/0.046/0.260 ms。该方案小规模和 first-call
+    明显优于 vanilla 1.8.0；1M warm runtime 仍慢于 vanilla 约 30%，但避免了
+    约 28-32 ms 的 helper 编译窗口。262k chunk 复测写入
+    `benchmarks/results/s10_cpu_dense_native_parallel_chunk262k_compact_20260523/`，
+    1M median 0.268 ms，差于 131k，因此保留 131k。
+  - `field.from_numpy()` setup IMA：已通过 CPU dense scalar native host-copy
+    避开 `ext_arr_to_tensor` 编译；此前失败的 indexed-copy 参数化用例现在
+    CPU/CUDA/Vulkan 同进程通过。后续仍保留按 primitive/backend 拆分验证，
+    用于减少 teardown 状态污染对诊断的干扰。
+  - `field.to_numpy()` CPU dense scalar readback benchmark 写入
+    `benchmarks/results/s10_cpu_dense_to_numpy_native_20260523/`。1024/4096/
+    65536/1M i32 first-call：Forge 为 0.362/0.165/0.206/1.241 ms，
+    vanilla 1.8.0 为 47.551/33.889/33.685/35.085 ms；warm median：
+    Forge 为 0.052/0.053/0.082/0.723 ms，vanilla 为
+    0.116/0.119/0.135/1.106 ms。结论：native readback 同时移除
+    `tensor_to_ext_arr` helper 编译窗口，并降低 warm host readback 成本。
+  - Vulkan transform dense-field 测试发现 workspace peak 对全局 native
+    cache 顺序敏感；已在测试开头清理 cache，并将 i32/u32 dense path 的
+    固定 8 B cache 上界显式化，避免把 cache 复用口径误判为内存回归。
+
+- S10-DSL 继续处理优化 3/4/5：
+  - dense field `bucket_builder` / `grouped_reduce` 已新增 CPU/CUDA/Vulkan
+    native entrypoint。CPU 直接映射 dense field storage 调用 native C++；CUDA
+    通过 device/CUB-style bucket 与 atomic grouped-reduce；Vulkan 通过 native
+    bucket/grouped-reduce shader，并保留显式 `field_kernel` 作为语义回退。
+  - Python `experimental_bucket_builder()` / `experimental_grouped_reduce()` 的
+    `auto`/显式 backend 路由已识别 contiguous dense scalar field，不再把 whole
+    dense field 固定落到 legacy helper；policy 关闭时，CPU dense field
+    bucket_builder 不再触发 fallback。
+  - Vulkan bucket/grouped-reduce cache 改成 lazy pipeline 创建：不再在第一次
+    grouped-reduce 时顺带创建 bucket、segmented grouped-reduce、宽 dtype 和
+    strided path 的全部 pipeline。代表性 65536 grouped-reduce first-call 从
+    约 284 ms 降至约 20 ms；bucket first-call 从约 305 ms 降至约 81 ms。
+  - CPU dense field compact 保持稳定顺序语义，1M 级别仍使用 two-pass 并行
+    compact；该路径的主要收益是避免 helper kernel 编译窗口，warm runtime
+    仍可能慢于 vanilla 单 kernel serial compact，后续若要继续压 warm runtime，
+    需要保持稳定顺序的单 pass/native prefix 方案，而不是改成非稳定 atomic
+    写回。
+  - CPU dense scalar/vector/matrix field host I/O 扩展：`ScalarField.to_torch()`、
+    `ScalarField.to_paddle()`、`MatrixField.to_numpy()`、`MatrixField.from_numpy()`、
+    `MatrixField.to_torch()`、`MatrixField.to_paddle()` 在 contiguous CPU dense
+    场景下复用 `copy_dense_field_to_host/from_host`，避免额外编译
+    `tensor_to_ext_arr` / `matrix_to_ext_arr` helper。
+  - benchmark 写入
+    `benchmarks/results/s10_field_native_lazy_20260523/summary.json` 和
+    `summary.csv`，覆盖 CPU/CUDA/Vulkan × compact/bucket_builder/grouped_reduce
+    × 4096/65536/1048576，对比本地 vanilla 1.8.0。
+  - 代表性 65536 结果：CPU bucket first 1.22 ms vs vanilla 150.57 ms、warm
+    0.454 ms vs 0.901 ms；CPU grouped first 0.502 ms vs 52.789 ms、warm
+    0.351 ms vs 0.348 ms；CUDA bucket first 10.40 ms vs 253.98 ms、warm
+    0.395 ms vs 0.291 ms；CUDA grouped first 10.07 ms vs 99.25 ms、warm
+    0.241 ms vs 0.064 ms；Vulkan bucket first 81.36 ms vs 75.22 ms、warm
+    0.745 ms vs 0.468 ms；Vulkan grouped first 20.20 ms vs 27.64 ms、warm
+    0.655 ms vs 0.213 ms。
+  - 解释：CPU/CUDA 的主要收益是 compile/first-call 大幅下降；Vulkan lazy
+    pipeline 已解决 native cache 的过度首编译，但 bucket/grouped-reduce warm
+    runtime 仍受多 dispatch/barrier 固定成本影响。该点应作为后续物理引擎验证
+    的默认策略输入：若真实 workload 更看重 warm runtime，可让 Vulkan
+    grouped/bucket 在默认策略中保持 opt-in native 或继续做 command replay /
+    fused clear+reduce 设计。
+  - 验证：`cmd /c _run_build.cmd` 通过；`tests/python/test_bucket_builder.py
+    tests/python/test_grouped_reduce.py` 通过：36 passed；`tests/python/test_compact.py`
+    加 field/matrix host I/O 定向测试通过：139 passed。仅有既有 pytest cache
+    权限警告和 `C:/taichi_cache/ticache.lock` 警告。
+
 ### P8. 物理引擎级验证
 
 目标：用真实 engine workload 决策默认策略，而不是只看 microbenchmark。

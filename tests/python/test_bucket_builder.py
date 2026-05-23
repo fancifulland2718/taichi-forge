@@ -332,6 +332,106 @@ def test_experimental_bucket_builder_field_kernel():
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_bucket_builder_dense_field_native():
+    n = 2048
+    num_bins = 129
+    keys_np, values_np, expected_offsets = _bucket_input(n, num_bins)
+    keys = ti.field(ti.i32, shape=n)
+    values = ti.field(ti.i32, shape=n)
+    offsets = ti.field(ti.i32, shape=num_bins + 1)
+    output = ti.field(ti.i32, shape=n)
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+    offsets.fill(0)
+    output.fill(0)
+    method = {
+        ti.cpu: "cpu_native",
+        ti.cuda: "cuda_device",
+        ti.vulkan: "vulkan_native",
+    }[impl.current_cfg().arch]
+    workspace = ti.algorithms.BucketBuilderWorkspace(
+        max_items=n, max_bins=num_bins
+    )
+    try:
+        ti.algorithms.experimental_bucket_builder(
+            keys, values, offsets, output, method=method, workspace=workspace
+        )
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+    _assert_bucket_matches(
+        keys_np, values_np, offsets.to_numpy(), output.to_numpy(), expected_offsets
+    )
+
+    offsets.fill(0)
+    output.fill(0)
+    ti.algorithms.clear_legacy_helper_fallback_counts()
+    ti.algorithms.set_legacy_helper_auto_fallback_enabled(False)
+    try:
+        ti.algorithms.experimental_bucket_builder(
+            keys, values, offsets, output, method="auto", workspace=workspace
+        )
+        assert ti.algorithms.get_legacy_helper_fallback_counts() == {}
+    finally:
+        ti.algorithms.reset_legacy_helper_auto_fallback_policy()
+        ti.algorithms.clear_legacy_helper_fallback_counts()
+    _assert_bucket_matches(
+        keys_np, values_np, offsets.to_numpy(), output.to_numpy(), expected_offsets
+    )
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_bucket_builder_legacy_helper_auto_fallback_policy():
+    n = 64
+    num_bins = 11
+    keys_np, values_np, expected_offsets = _bucket_input(n, num_bins)
+    keys = ti.field(ti.i32, shape=n)
+    values = ti.field(ti.i32, shape=n)
+    offsets = ti.field(ti.i32, shape=num_bins + 1)
+    output = ti.field(ti.i32, shape=n)
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+    offsets.fill(0)
+    output.fill(0)
+
+    ti.algorithms.clear_legacy_helper_fallback_counts()
+    ti.algorithms.set_legacy_helper_auto_fallback_enabled(False)
+    try:
+        ti.algorithms.experimental_bucket_builder(
+            keys, values, offsets, output, method="auto"
+        )
+        assert ti.algorithms.get_legacy_helper_fallback_counts() == {}
+        _assert_bucket_matches(
+            keys_np,
+            values_np,
+            offsets.to_numpy(),
+            output.to_numpy(),
+            expected_offsets,
+        )
+
+        offsets.fill(0)
+        output.fill(0)
+        ti.algorithms.experimental_bucket_builder(
+            keys, values, offsets, output, method="field_kernel"
+        )
+        assert ti.algorithms.get_legacy_helper_fallback_counts() == {}
+
+        ti.algorithms.set_legacy_helper_fallback_counting_enabled(True)
+        ti.algorithms.experimental_bucket_builder(
+            keys, values, offsets, output, method="field_kernel"
+        )
+        counts = ti.algorithms.get_legacy_helper_fallback_counts(reset=True)
+        assert counts[("experimental_bucket_builder()", "field_kernel")] == 1
+    finally:
+        ti.algorithms.reset_legacy_helper_auto_fallback_policy()
+        ti.algorithms.set_legacy_helper_fallback_counting_enabled(False, clear=True)
+        ti.algorithms.clear_legacy_helper_fallback_counts()
+
+    _assert_bucket_matches(
+        keys_np, values_np, offsets.to_numpy(), output.to_numpy(), expected_offsets
+    )
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_bucket_builder_invalid_indices_ignored():
     keys_np = np.array([0, -1, 1, 9, 0], dtype=np.int32)
     values_np = np.array([10, 20, 30, 40, 50], dtype=np.int32)

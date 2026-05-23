@@ -485,6 +485,27 @@ struct CpuBucketScatterRawTaskContext {
   int num_threads{1};
 };
 
+struct CpuCompactCountTaskContext {
+  const uint8_t *flags{nullptr};
+  std::size_t flags_stride{sizeof(int32_t)};
+  std::size_t *counts{nullptr};
+  std::size_t n{0};
+  int num_threads{1};
+};
+
+template <typename T>
+struct CpuCompactScatterTaskContext {
+  const uint8_t *values{nullptr};
+  std::size_t values_stride{sizeof(T)};
+  const uint8_t *flags{nullptr};
+  std::size_t flags_stride{sizeof(int32_t)};
+  uint8_t *output{nullptr};
+  std::size_t output_stride{sizeof(T)};
+  const std::size_t *offsets{nullptr};
+  std::size_t n{0};
+  int num_threads{1};
+};
+
 template <typename T>
 struct CpuGroupedReduceTaskContext {
   const int32_t *keys{nullptr};
@@ -702,6 +723,59 @@ void cpu_copy_task(void *raw_ctx, int /*thread_id*/, int task_id) {
       ctx->bytes * static_cast<std::size_t>(tid + 1) /
       static_cast<std::size_t>(ctx->num_threads);
   std::memcpy(ctx->dst + begin, ctx->src + begin, end - begin);
+}
+
+void cpu_compact_count_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuCompactCountTaskContext *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  std::size_t count = 0;
+  for (std::size_t i = begin; i < end; ++i) {
+    const int32_t flag =
+        *reinterpret_cast<const int32_t *>(ctx->flags + i * ctx->flags_stride);
+    count += flag != 0;
+  }
+  ctx->counts[tid] = count;
+}
+
+template <typename T>
+void cpu_compact_scatter_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuCompactScatterTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  std::size_t written = ctx->offsets[tid];
+  if (ctx->values_stride == sizeof(T) &&
+      ctx->flags_stride == sizeof(int32_t) &&
+      ctx->output_stride == sizeof(T)) {
+    const auto *values = reinterpret_cast<const T *>(ctx->values);
+    const auto *flags = reinterpret_cast<const int32_t *>(ctx->flags);
+    auto *output = reinterpret_cast<T *>(ctx->output);
+    for (std::size_t i = begin; i < end; ++i) {
+      if (flags[i] != 0) {
+        output[written++] = values[i];
+      }
+    }
+    return;
+  }
+  for (std::size_t i = begin; i < end; ++i) {
+    const int32_t flag =
+        *reinterpret_cast<const int32_t *>(ctx->flags + i * ctx->flags_stride);
+    if (flag != 0) {
+      *reinterpret_cast<T *>(ctx->output + written * ctx->output_stride) =
+          *reinterpret_cast<const T *>(ctx->values + i * ctx->values_stride);
+      written++;
+    }
+  }
 }
 
 template <typename T>
@@ -1706,7 +1780,7 @@ std::size_t cpu_bucket_builder_raw(const int32_t *keys_ptr,
     return 0;
   }
 
-  const int chunk_items = 32768;
+  const int chunk_items = 65536;
   const int target_threads = static_cast<int>(
       std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
                             static_cast<std::size_t>(max_threads)));
@@ -2109,6 +2183,82 @@ std::size_t primitive_value_type_size(int value_type) {
     return sizeof(uint64_t);
   }
   return 0;
+}
+
+template <typename T>
+std::size_t cpu_compact_dense_field_typed(const uint8_t *values_ptr,
+                                          std::size_t values_stride,
+                                          const uint8_t *flags_ptr,
+                                          std::size_t flags_stride,
+                                          uint8_t *output_ptr,
+                                          std::size_t output_stride,
+                                          std::size_t n,
+                                          int max_threads,
+                                          int target_threads,
+                                          bool use_parallel,
+                                          std::size_t *workspace_bytes) {
+  if (workspace_bytes) {
+    *workspace_bytes = 0;
+  }
+  if (use_parallel) {
+    std::vector<std::size_t> offsets(
+        static_cast<std::size_t>(target_threads) + 1, 0);
+    CpuCompactCountTaskContext count_ctx;
+    count_ctx.flags = flags_ptr;
+    count_ctx.flags_stride = flags_stride;
+    count_ctx.counts = offsets.data();
+    count_ctx.n = n;
+    count_ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &count_ctx, cpu_compact_count_task);
+    std::size_t running = 0;
+    for (int tid = 0; tid < target_threads; ++tid) {
+      const std::size_t count = offsets[tid];
+      offsets[tid] = running;
+      running += count;
+    }
+    offsets[target_threads] = running;
+    CpuCompactScatterTaskContext<T> scatter_ctx;
+    scatter_ctx.values = values_ptr;
+    scatter_ctx.values_stride = values_stride;
+    scatter_ctx.flags = flags_ptr;
+    scatter_ctx.flags_stride = flags_stride;
+    scatter_ctx.output = output_ptr;
+    scatter_ctx.output_stride = output_stride;
+    scatter_ctx.offsets = offsets.data();
+    scatter_ctx.n = n;
+    scatter_ctx.num_threads = target_threads;
+    pool.run(target_threads, target_threads, &scatter_ctx,
+             cpu_compact_scatter_task<T>);
+    if (workspace_bytes) {
+      *workspace_bytes = offsets.size() * sizeof(std::size_t);
+    }
+    return running;
+  }
+
+  std::size_t written = 0;
+  if (values_stride == sizeof(T) && flags_stride == sizeof(int32_t) &&
+      output_stride == sizeof(T)) {
+    const auto *values = reinterpret_cast<const T *>(values_ptr);
+    const auto *flags = reinterpret_cast<const int32_t *>(flags_ptr);
+    auto *output = reinterpret_cast<T *>(output_ptr);
+    for (std::size_t i = 0; i < n; ++i) {
+      if (flags[i] != 0) {
+        output[written++] = values[i];
+      }
+    }
+    return written;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const int32_t flag =
+        *reinterpret_cast<const int32_t *>(flags_ptr + i * flags_stride);
+    if (flag != 0) {
+      *reinterpret_cast<T *>(output_ptr + written * output_stride) =
+          *reinterpret_cast<const T *>(values_ptr + i * values_stride);
+      written++;
+    }
+  }
+  return written;
 }
 
 void check_indexed_copy_dense_field_request(Program *program,
@@ -4526,6 +4676,85 @@ std::size_t Program::cuda_device_bucket_builder_ndarray(Ndarray *keys,
 #endif
 }
 
+std::size_t Program::cuda_device_bucket_builder_dense_field(
+    SNode *keys,
+    SNode *values,
+    SNode *offsets,
+    SNode *output,
+    Ndarray *cursor,
+    int value_type,
+    std::size_t n,
+    std::size_t num_bins) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA toolkit dense field bucket builder is only available on "
+              "CUDA.");
+  TI_ERROR_IF(!keys || !values || !offsets || !output || !cursor,
+              "CUDA toolkit dense field bucket builder received a null input.");
+  TI_ERROR_IF(num_bins == 0,
+              "CUDA toolkit dense field bucket builder expects at least one "
+              "bucket.");
+  TI_ERROR_IF(cursor->shape.size() != 1 ||
+                  cursor->get_nelement() < num_bins ||
+                  cursor->get_element_size() != sizeof(int32_t),
+              "CUDA toolkit dense field bucket builder cursor must be a 1D "
+              "i32 ndarray with at least num_bins items.");
+  const std::size_t item_bytes = primitive_value_type_size(value_type);
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(uint32_t) != 0,
+              "CUDA toolkit dense field bucket builder received an unsupported "
+              "value type.");
+  const std::size_t keys_stride = get_dense_field_stride(keys, sizeof(int32_t));
+  const std::size_t values_stride = get_dense_field_stride(values, item_bytes);
+  const std::size_t offsets_stride =
+      get_dense_field_stride(offsets, sizeof(int32_t));
+  const std::size_t output_stride = get_dense_field_stride(output, item_bytes);
+  TI_ERROR_IF(keys_stride != sizeof(int32_t) ||
+                  values_stride != item_bytes ||
+                  offsets_stride != sizeof(int32_t) ||
+                  output_stride != item_bytes,
+              "CUDA toolkit dense field bucket builder requires contiguous "
+              "keys, values, offsets, and output fields.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  num_bins >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA dense field bucket builder input is too large for int "
+              "launch parameters.");
+  const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                           item_words),
+              "CUDA dense field bucket builder word count exceeds INT_MAX.");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *keys_ptr = raw_ptr(get_dense_field_device_ptr(keys),
+                           "CUDA toolkit dense field bucket builder");
+  void *values_ptr = raw_ptr(get_dense_field_device_ptr(values),
+                             "CUDA toolkit dense field bucket builder");
+  void *offsets_ptr = raw_ptr(get_dense_field_device_ptr(offsets),
+                              "CUDA toolkit dense field bucket builder");
+  void *output_ptr = raw_ptr(get_dense_field_device_ptr(output),
+                             "CUDA toolkit dense field bucket builder");
+  void *cursor_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(cursor));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_bucket_builder(
+      keys_ptr, values_ptr, offsets_ptr, output_ptr, cursor_ptr,
+      static_cast<int>(n), static_cast<int>(num_bins),
+      static_cast<cuda::CudaBucketBuilderValueType>(value_type), item_words,
+      stream, this);
+#else
+  TI_ERROR(
+      "CUDA dense field bucket builder requires building Taichi with "
+      "TI_WITH_CUDA=ON and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 bool Program::cuda_device_grouped_reduce_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&
@@ -4585,6 +4814,67 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_ndarray(Ndarray *keys,
   TI_ERROR(
       "CUDA grouped reduce requires building Taichi with TI_WITH_CUDA=ON and "
       "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_grouped_reduce_atomic_dense_field(
+    SNode *keys,
+    SNode *values,
+    SNode *output,
+    int value_type,
+    std::size_t n,
+    std::size_t num_groups,
+    int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA dense field grouped reduce is only available on CUDA.");
+  TI_ERROR_IF(!keys || !values || !output,
+              "CUDA dense field grouped reduce received a null field.");
+  TI_ERROR_IF(num_groups == 0,
+              "CUDA dense field grouped reduce output must contain at least "
+              "one group.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA dense field grouped reduce received an unsupported value "
+              "type.");
+  const std::size_t keys_stride = get_dense_field_stride(keys, sizeof(int32_t));
+  const std::size_t values_stride = get_dense_field_stride(values, value_size);
+  const std::size_t output_stride = get_dense_field_stride(output, value_size);
+  TI_ERROR_IF(keys_stride != sizeof(int32_t) ||
+                  values_stride != value_size ||
+                  output_stride != value_size,
+              "CUDA dense field grouped reduce requires contiguous keys, "
+              "values, and output fields.");
+  TI_ERROR_IF(op != 0, "CUDA dense field grouped reduce supports only sum.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  num_groups >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA dense field grouped reduce input is too large for int "
+              "launch parameters.");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *keys_ptr = raw_ptr(get_dense_field_device_ptr(keys),
+                           "CUDA dense field grouped reduce");
+  void *values_ptr = raw_ptr(get_dense_field_device_ptr(values),
+                             "CUDA dense field grouped reduce");
+  void *output_ptr = raw_ptr(get_dense_field_device_ptr(output),
+                             "CUDA dense field grouped reduce");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_grouped_reduce_atomic(
+      keys_ptr, values_ptr, output_ptr, static_cast<int>(n),
+      static_cast<int>(num_groups),
+      static_cast<cuda::CudaGroupedReduceValueType>(value_type), op, stream);
+#else
+  TI_ERROR(
+      "CUDA dense field grouped reduce requires building Taichi with "
+      "TI_WITH_CUDA=ON and TI_WITH_CUDA_TOOLKIT=ON.");
 #endif
 }
 
@@ -5784,6 +6074,77 @@ bool Program::cpu_compact_available() const {
   return arch_is_cpu(compile_config().arch);
 }
 
+void Program::copy_dense_field_from_host(SNode *dst,
+                                         std::uintptr_t src,
+                                         std::size_t src_bytes,
+                                         int value_type,
+                                         std::size_t n) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field host copy is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!dst || !src, "CPU native dense field host copy received a null "
+                            "field or source pointer.");
+  const std::size_t item_bytes = primitive_value_type_size(value_type);
+  TI_ERROR_IF(item_bytes == 0,
+              "CPU native dense field host copy received an unsupported value "
+              "type.");
+  TI_ERROR_IF(src_bytes != n * item_bytes,
+              "CPU native dense field host copy received mismatched source "
+              "size.");
+  if (n == 0) {
+    return;
+  }
+  std::size_t dst_stride = 0;
+  auto *dst_ptr = map_cpu_dense_field(this, dst, value_type, n,
+                                      "CPU native dense field host copy",
+                                      &dst_stride);
+  const auto *src_ptr = reinterpret_cast<const uint8_t *>(src);
+  if (dst_stride == item_bytes) {
+    std::memcpy(dst_ptr, src_ptr, src_bytes);
+    return;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    std::memcpy(dst_ptr + i * dst_stride, src_ptr + i * item_bytes, item_bytes);
+  }
+}
+
+void Program::copy_dense_field_to_host(SNode *src,
+                                       std::uintptr_t dst,
+                                       std::size_t dst_bytes,
+                                       int value_type,
+                                       std::size_t n) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field host readback is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!src || !dst,
+              "CPU native dense field host readback received a null field or "
+              "destination pointer.");
+  const std::size_t item_bytes = primitive_value_type_size(value_type);
+  TI_ERROR_IF(item_bytes == 0,
+              "CPU native dense field host readback received an unsupported "
+              "value type.");
+  TI_ERROR_IF(dst_bytes != n * item_bytes,
+              "CPU native dense field host readback received mismatched "
+              "destination size.");
+  if (n == 0) {
+    return;
+  }
+  std::size_t src_stride = 0;
+  const auto *src_ptr = map_cpu_dense_field(this, src, value_type, n,
+                                           "CPU native dense field host "
+                                           "readback",
+                                           &src_stride);
+  auto *dst_ptr = reinterpret_cast<uint8_t *>(dst);
+  if (src_stride == item_bytes) {
+    std::memcpy(dst_ptr, src_ptr, dst_bytes);
+    return;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    std::memcpy(dst_ptr + i * item_bytes, src_ptr + i * src_stride,
+                item_bytes);
+  }
+}
+
 std::size_t Program::cpu_compact_ndarray(Ndarray *values,
                                          Ndarray *flags,
                                          Ndarray *output,
@@ -5843,6 +6204,94 @@ std::size_t Program::cpu_compact_ndarray(Ndarray *values,
               "CPU native compact output count exceeds i32 range.");
   count_ptr[0] = static_cast<int32_t>(written);
   return 0;
+}
+
+std::size_t Program::cpu_compact_dense_field(SNode *values,
+                                             SNode *flags,
+                                             SNode *output,
+                                             SNode *count,
+                                             int value_type,
+                                             std::size_t n) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field compact is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!values || !flags || !output || !count,
+              "CPU native dense field compact received a null field.");
+  const std::size_t item_bytes = primitive_value_type_size(value_type);
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(uint32_t) != 0,
+              "CPU native dense field compact received an unsupported value "
+              "type.");
+  std::size_t values_stride = 0;
+  std::size_t flags_stride = 0;
+  std::size_t output_stride = 0;
+  std::size_t count_stride = 0;
+  const auto *values_ptr = map_cpu_dense_field(
+      this, values, value_type, n, "CPU native dense field compact values",
+      &values_stride);
+  const auto *flags_ptr = map_cpu_dense_field(
+      this, flags, 0, n, "CPU native dense field compact flags",
+      &flags_stride);
+  auto *output_ptr = map_cpu_dense_field(
+      this, output, value_type, n, "CPU native dense field compact output",
+      &output_stride);
+  auto *count_ptr = map_cpu_dense_field(
+      this, count, 0, 1, "CPU native dense field compact count", &count_stride);
+
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 131072;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = n >= 262144 && target_threads > 1;
+  std::size_t workspace_bytes = 0;
+  std::size_t written = 0;
+  switch (value_type) {
+    case 0:
+      written = cpu_compact_dense_field_typed<int32_t>(
+          values_ptr, values_stride, flags_ptr, flags_stride, output_ptr,
+          output_stride, n, max_threads, target_threads, use_parallel,
+          &workspace_bytes);
+      break;
+    case 1:
+      written = cpu_compact_dense_field_typed<float>(
+          values_ptr, values_stride, flags_ptr, flags_stride, output_ptr,
+          output_stride, n, max_threads, target_threads, use_parallel,
+          &workspace_bytes);
+      break;
+    case 2:
+      written = cpu_compact_dense_field_typed<uint32_t>(
+          values_ptr, values_stride, flags_ptr, flags_stride, output_ptr,
+          output_stride, n, max_threads, target_threads, use_parallel,
+          &workspace_bytes);
+      break;
+    case 3:
+      written = cpu_compact_dense_field_typed<uint64_t>(
+          values_ptr, values_stride, flags_ptr, flags_stride, output_ptr,
+          output_stride, n, max_threads, target_threads, use_parallel,
+          &workspace_bytes);
+      break;
+    case 4:
+      written = cpu_compact_dense_field_typed<int64_t>(
+          values_ptr, values_stride, flags_ptr, flags_stride, output_ptr,
+          output_stride, n, max_threads, target_threads, use_parallel,
+          &workspace_bytes);
+      break;
+    case 5:
+      written = cpu_compact_dense_field_typed<double>(
+          values_ptr, values_stride, flags_ptr, flags_stride, output_ptr,
+          output_stride, n, max_threads, target_threads, use_parallel,
+          &workspace_bytes);
+      break;
+    default:
+      TI_ERROR("CPU native dense field compact received an unsupported value "
+               "type.");
+  }
+  TI_ERROR_IF(written > static_cast<std::size_t>(
+                            std::numeric_limits<int32_t>::max()),
+              "CPU native dense field compact output count exceeds i32 range.");
+  *reinterpret_cast<int32_t *>(count_ptr) = static_cast<int32_t>(written);
+  return workspace_bytes;
 }
 
 std::size_t Program::cpu_compact_i32_ndarray(Ndarray *values,
@@ -7527,6 +7976,95 @@ std::size_t Program::cpu_bucket_builder_ndarray(Ndarray *keys,
   return 0;
 }
 
+std::size_t Program::cpu_bucket_builder_dense_field(SNode *keys,
+                                                    SNode *values,
+                                                    SNode *offsets,
+                                                    SNode *output,
+                                                    int value_type,
+                                                    std::size_t n,
+                                                    std::size_t num_bins) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field bucket builder is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!keys || !values || !offsets || !output,
+              "CPU native dense field bucket builder received a null field.");
+  TI_ERROR_IF(num_bins == 0,
+              "CPU native dense field bucket builder expects at least one "
+              "bucket.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int32_t>::max()),
+              "CPU native dense field bucket builder input count exceeds i32 "
+              "range.");
+  const std::size_t item_bytes = primitive_value_type_size(value_type);
+  TI_ERROR_IF(item_bytes == 0,
+              "CPU native dense field bucket builder received an unsupported "
+              "value type.");
+  std::size_t keys_stride = 0;
+  std::size_t values_stride = 0;
+  std::size_t offsets_stride = 0;
+  std::size_t output_stride = 0;
+  const auto *keys_ptr = map_cpu_dense_field(
+      this, keys, 0, n, "CPU native dense field bucket builder keys",
+      &keys_stride);
+  const auto *values_ptr = map_cpu_dense_field(
+      this, values, value_type, n,
+      "CPU native dense field bucket builder values", &values_stride);
+  auto *offsets_ptr = map_cpu_dense_field(
+      this, offsets, 0, num_bins + 1,
+      "CPU native dense field bucket builder offsets", &offsets_stride);
+  auto *output_ptr = map_cpu_dense_field(
+      this, output, value_type, n,
+      "CPU native dense field bucket builder output", &output_stride);
+  TI_ERROR_IF(keys_stride != sizeof(int32_t) || values_stride != item_bytes ||
+                  offsets_stride != sizeof(int32_t) ||
+                  output_stride != item_bytes,
+              "CPU native dense field bucket builder requires contiguous "
+              "keys, values, offsets, and output fields.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  switch (value_type) {
+    case 0:
+      return cpu_bucket_builder_typed(
+          reinterpret_cast<const int32_t *>(keys_ptr),
+          reinterpret_cast<const int32_t *>(values_ptr),
+          reinterpret_cast<int32_t *>(offsets_ptr),
+          reinterpret_cast<int32_t *>(output_ptr), n, num_bins, max_threads);
+    case 1:
+      return cpu_bucket_builder_typed(
+          reinterpret_cast<const int32_t *>(keys_ptr),
+          reinterpret_cast<const float *>(values_ptr),
+          reinterpret_cast<int32_t *>(offsets_ptr),
+          reinterpret_cast<float *>(output_ptr), n, num_bins, max_threads);
+    case 2:
+      return cpu_bucket_builder_typed(
+          reinterpret_cast<const int32_t *>(keys_ptr),
+          reinterpret_cast<const uint32_t *>(values_ptr),
+          reinterpret_cast<int32_t *>(offsets_ptr),
+          reinterpret_cast<uint32_t *>(output_ptr), n, num_bins, max_threads);
+    case 3:
+      return cpu_bucket_builder_typed(
+          reinterpret_cast<const int32_t *>(keys_ptr),
+          reinterpret_cast<const uint64_t *>(values_ptr),
+          reinterpret_cast<int32_t *>(offsets_ptr),
+          reinterpret_cast<uint64_t *>(output_ptr), n, num_bins, max_threads);
+    case 4:
+      return cpu_bucket_builder_typed(
+          reinterpret_cast<const int32_t *>(keys_ptr),
+          reinterpret_cast<const int64_t *>(values_ptr),
+          reinterpret_cast<int32_t *>(offsets_ptr),
+          reinterpret_cast<int64_t *>(output_ptr), n, num_bins, max_threads);
+    case 5:
+      return cpu_bucket_builder_typed(
+          reinterpret_cast<const int32_t *>(keys_ptr),
+          reinterpret_cast<const double *>(values_ptr),
+          reinterpret_cast<int32_t *>(offsets_ptr),
+          reinterpret_cast<double *>(output_ptr), n, num_bins, max_threads);
+    default:
+      TI_ERROR("CPU native dense field bucket builder received an unsupported "
+               "value type.");
+  }
+  return 0;
+}
+
 std::size_t Program::cpu_bucket_builder_workspace_bytes() const {
   return 0;
 }
@@ -7612,6 +8150,92 @@ std::size_t Program::cpu_grouped_reduce_ndarray(Ndarray *keys,
           num_groups, max_threads, target_threads);
     default:
       TI_ERROR("CPU native grouped reduce received an unsupported value type.");
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_grouped_reduce_dense_field(SNode *keys,
+                                                    SNode *values,
+                                                    SNode *output,
+                                                    int value_type,
+                                                    std::size_t n,
+                                                    std::size_t num_groups,
+                                                    int op) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field grouped reduce is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!keys || !values || !output,
+              "CPU native dense field grouped reduce received a null field.");
+  TI_ERROR_IF(num_groups == 0,
+              "CPU native dense field grouped reduce output must contain at "
+              "least one group.");
+  TI_ERROR_IF(op != 0,
+              "CPU native dense field grouped reduce currently supports only "
+              "sum.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CPU native dense field grouped reduce received an unsupported "
+              "value type.");
+  std::size_t keys_stride = 0;
+  std::size_t values_stride = 0;
+  std::size_t output_stride = 0;
+  const auto *keys_ptr = map_cpu_dense_field(
+      this, keys, 0, n, "CPU native dense field grouped reduce keys",
+      &keys_stride);
+  const auto *values_ptr = map_cpu_dense_field(
+      this, values, value_type, n,
+      "CPU native dense field grouped reduce values", &values_stride);
+  auto *output_ptr = map_cpu_dense_field(
+      this, output, value_type, num_groups,
+      "CPU native dense field grouped reduce output", &output_stride);
+  TI_ERROR_IF(keys_stride != sizeof(int32_t) || values_stride != value_size ||
+                  output_stride != value_size,
+              "CPU native dense field grouped reduce requires contiguous keys, "
+              "values, and output fields.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int target_threads =
+      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  switch (value_type) {
+    case 0:
+      return cpu_grouped_reduce_typed(
+          reinterpret_cast<const int32_t *>(keys_ptr),
+          reinterpret_cast<const int32_t *>(values_ptr),
+          reinterpret_cast<int32_t *>(output_ptr), n, num_groups, max_threads,
+          target_threads);
+    case 1:
+      return cpu_grouped_reduce_typed(
+          reinterpret_cast<const int32_t *>(keys_ptr),
+          reinterpret_cast<const float *>(values_ptr),
+          reinterpret_cast<float *>(output_ptr), n, num_groups, max_threads,
+          target_threads);
+    case 2:
+      return cpu_grouped_reduce_typed(
+          reinterpret_cast<const int32_t *>(keys_ptr),
+          reinterpret_cast<const uint32_t *>(values_ptr),
+          reinterpret_cast<uint32_t *>(output_ptr), n, num_groups, max_threads,
+          target_threads);
+    case 3:
+      return cpu_grouped_reduce_typed(
+          reinterpret_cast<const int32_t *>(keys_ptr),
+          reinterpret_cast<const uint64_t *>(values_ptr),
+          reinterpret_cast<uint64_t *>(output_ptr), n, num_groups, max_threads,
+          target_threads);
+    case 4:
+      return cpu_grouped_reduce_typed(
+          reinterpret_cast<const int32_t *>(keys_ptr),
+          reinterpret_cast<const int64_t *>(values_ptr),
+          reinterpret_cast<int64_t *>(output_ptr), n, num_groups, max_threads,
+          target_threads);
+    case 5:
+      return cpu_grouped_reduce_typed(
+          reinterpret_cast<const int32_t *>(keys_ptr),
+          reinterpret_cast<const double *>(values_ptr),
+          reinterpret_cast<double *>(output_ptr), n, num_groups, max_threads,
+          target_threads);
+    default:
+      TI_ERROR("CPU native dense field grouped reduce received an unsupported "
+               "value type.");
   }
   return 0;
 }

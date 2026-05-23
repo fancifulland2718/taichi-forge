@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <atomic>
@@ -455,6 +456,15 @@ class TI_DLL_EXPORT Program {
                                                  Ndarray *cursor,
                                                  int value_type);
 
+  std::size_t cuda_device_bucket_builder_dense_field(SNode *keys,
+                                                     SNode *values,
+                                                     SNode *offsets,
+                                                     SNode *output,
+                                                     Ndarray *cursor,
+                                                     int value_type,
+                                                     std::size_t n,
+                                                     std::size_t num_bins);
+
   bool cuda_device_grouped_reduce_available() const;
 
   std::size_t cuda_device_grouped_reduce_atomic_ndarray(Ndarray *keys,
@@ -462,6 +472,15 @@ class TI_DLL_EXPORT Program {
                                                         Ndarray *output,
                                                         int value_type,
                                                         int op);
+
+  std::size_t cuda_device_grouped_reduce_atomic_dense_field(
+      SNode *keys,
+      SNode *values,
+      SNode *output,
+      int value_type,
+      std::size_t n,
+      std::size_t num_groups,
+      int op);
 
   std::size_t cuda_device_grouped_reduce_atomic_member_ndarray(
       Ndarray *keys,
@@ -667,11 +686,30 @@ class TI_DLL_EXPORT Program {
 
   bool cpu_compact_available() const;
 
+  void copy_dense_field_from_host(SNode *dst,
+                                  std::uintptr_t src,
+                                  std::size_t src_bytes,
+                                  int value_type,
+                                  std::size_t n);
+
+  void copy_dense_field_to_host(SNode *src,
+                                std::uintptr_t dst,
+                                std::size_t dst_bytes,
+                                int value_type,
+                                std::size_t n);
+
   std::size_t cpu_compact_ndarray(Ndarray *values,
                                   Ndarray *flags,
                                   Ndarray *output,
                                   Ndarray *count,
                                   int value_type);
+
+  std::size_t cpu_compact_dense_field(SNode *values,
+                                      SNode *flags,
+                                      SNode *output,
+                                      SNode *count,
+                                      int value_type,
+                                      std::size_t n);
 
   std::size_t cpu_compact_i32_ndarray(Ndarray *values,
                                       Ndarray *flags,
@@ -858,6 +896,14 @@ class TI_DLL_EXPORT Program {
                                          Ndarray *output,
                                          int value_type);
 
+  std::size_t cpu_bucket_builder_dense_field(SNode *keys,
+                                             SNode *values,
+                                             SNode *offsets,
+                                             SNode *output,
+                                             int value_type,
+                                             std::size_t n,
+                                             std::size_t num_bins);
+
   std::size_t cpu_bucket_builder_workspace_bytes() const;
 
   bool cpu_grouped_reduce_available() const;
@@ -867,6 +913,14 @@ class TI_DLL_EXPORT Program {
                                          Ndarray *output,
                                          int value_type,
                                          int op);
+
+  std::size_t cpu_grouped_reduce_dense_field(SNode *keys,
+                                             SNode *values,
+                                             SNode *output,
+                                             int value_type,
+                                             std::size_t n,
+                                             std::size_t num_groups,
+                                             int op);
 
   std::size_t cpu_grouped_reduce_member_ndarray(Ndarray *keys,
                                                 Ndarray *values,
@@ -1174,6 +1228,15 @@ class TI_DLL_EXPORT Program {
                                             Ndarray *cursor,
                                             int value_type);
 
+  std::size_t vulkan_bucket_builder_dense_field(SNode *keys,
+                                                SNode *values,
+                                                SNode *offsets,
+                                                SNode *output,
+                                                Ndarray *cursor,
+                                                int value_type,
+                                                std::size_t n,
+                                                std::size_t num_bins);
+
   void vulkan_bucket_builder_clear_workspace();
 
   std::size_t vulkan_bucket_builder_workspace_bytes() const;
@@ -1190,6 +1253,14 @@ class TI_DLL_EXPORT Program {
                                                    Ndarray *output,
                                                    int value_type,
                                                    int op);
+
+  std::size_t vulkan_grouped_reduce_atomic_dense_field(SNode *keys,
+                                                       SNode *values,
+                                                       SNode *output,
+                                                       int value_type,
+                                                       std::size_t n,
+                                                       std::size_t num_groups,
+                                                       int op);
 
   std::size_t vulkan_grouped_reduce_atomic_member_ndarray(
       Ndarray *keys,

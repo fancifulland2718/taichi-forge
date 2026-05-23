@@ -327,6 +327,47 @@ def test_experimental_grouped_reduce_field_kernel_i32():
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_grouped_reduce_dense_field_native_i32():
+    n = 2048
+    groups = 129
+    keys = ti.field(ti.i32, shape=n)
+    values = ti.field(ti.i32, shape=n)
+    output = ti.field(ti.i32, shape=groups)
+    keys_np, values_np, expected = _grouped_reduce_input(n, groups, np.int32)
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+    output.fill(np.int32(-777))
+    method = {
+        ti.cpu: "cpu_native",
+        ti.cuda: "cuda_device",
+        ti.vulkan: "vulkan_native",
+    }[impl.current_cfg().arch]
+    workspace = ti.algorithms.GroupedReduceWorkspace(
+        max_items=n, max_groups=groups
+    )
+    try:
+        ti.algorithms.experimental_grouped_reduce(
+            keys, values, output, method=method, workspace=workspace
+        )
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+    assert np.array_equal(output.to_numpy(), expected)
+
+    output.fill(np.int32(-777))
+    ti.algorithms.clear_legacy_helper_fallback_counts()
+    ti.algorithms.set_legacy_helper_auto_fallback_enabled(False)
+    try:
+        ti.algorithms.experimental_grouped_reduce(
+            keys, values, output, method="auto", workspace=workspace
+        )
+        assert ti.algorithms.get_legacy_helper_fallback_counts() == {}
+    finally:
+        ti.algorithms.reset_legacy_helper_auto_fallback_policy()
+        ti.algorithms.clear_legacy_helper_fallback_counts()
+    assert np.array_equal(output.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_grouped_reduce_invalid_keys_are_ignored():
     keys = ti.ndarray(ti.i32, shape=5)
     values = ti.ndarray(ti.i32, shape=5)

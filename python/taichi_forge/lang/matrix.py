@@ -1267,11 +1267,43 @@ class MatrixField(Field):
         as_vector = self.m == 1 and not keep_dims
         shape_ext = (self.n,) if as_vector else (self.n, self.m)
         arr = np.zeros(self.shape + shape_ext, dtype=dtype)
+        if self._try_cpu_dense_to_numpy(arr, as_vector):
+            return arr
         from taichi_forge._kernels import matrix_to_ext_arr  # pylint: disable=C0415
 
         matrix_to_ext_arr(self, arr, as_vector)
         runtime_ops.sync()
         return arr
+
+    def _try_cpu_dense_to_numpy(self, arr, as_vector):
+        if len(self.shape) == 0 or arr.dtype != to_numpy_type(self.dtype):
+            return False
+        shape = tuple(self.shape)
+        for i in range(self.n):
+            js = (0,) if as_vector else range(self.m)
+            for j in js:
+                tmp = np.empty(shape, dtype=arr.dtype)
+                if not self.get_scalar_field(i, j)._try_cpu_dense_to_numpy(tmp):
+                    return False
+                if as_vector:
+                    arr[..., i] = tmp
+                else:
+                    arr[..., i, j] = tmp
+        return True
+
+    def _try_cpu_dense_from_numpy(self, arr, as_vector):
+        if len(self.shape) == 0 or arr.dtype != to_numpy_type(self.dtype):
+            return False
+        for i in range(self.n):
+            js = (0,) if as_vector else range(self.m)
+            for j in js:
+                component = arr[..., i] if as_vector else arr[..., i, j]
+                component = np.ascontiguousarray(component)
+                if not self.get_scalar_field(i, j)._try_cpu_dense_from_numpy(
+                    component
+                ):
+                    return False
+        return True
 
     def to_torch(self, device=None, keep_dims=False):
         """Converts the field instance to a PyTorch tensor.
@@ -1288,6 +1320,11 @@ class MatrixField(Field):
 
         as_vector = self.m == 1 and not keep_dims
         shape_ext = (self.n,) if as_vector else (self.n, self.m)
+        np_arr = np.empty(self.shape + shape_ext, dtype=to_numpy_type(self.dtype))
+        if self._try_cpu_dense_to_numpy(np_arr, as_vector):
+            return torch.as_tensor(
+                np_arr, dtype=to_pytorch_type(self.dtype), device=device
+            )
         # pylint: disable=E1101
         arr = torch.empty(self.shape + shape_ext, dtype=to_pytorch_type(self.dtype), device=device)
         from taichi_forge._kernels import matrix_to_ext_arr  # pylint: disable=C0415
@@ -1311,6 +1348,9 @@ class MatrixField(Field):
 
         as_vector = self.m == 1 and not keep_dims and self.ndim == 1
         shape_ext = (self.n,) if as_vector else (self.n, self.m)
+        np_arr = np.empty(self.shape + shape_ext, dtype=to_numpy_type(self.dtype))
+        if self._try_cpu_dense_to_numpy(np_arr, as_vector):
+            return paddle.to_tensor(np_arr, place=place)
         # pylint: disable=E1101
         # paddle.empty() doesn't support argument `place``
         arr = paddle.to_tensor(
@@ -1333,6 +1373,8 @@ class MatrixField(Field):
             assert len(arr.shape) == len(self.shape) + 2
         dim_ext = 1 if as_vector else 2
         assert len(arr.shape) == len(self.shape) + dim_ext
+        if self._try_cpu_dense_from_numpy(arr, as_vector):
+            return
         from taichi_forge._kernels import ext_arr_to_matrix  # pylint: disable=C0415
 
         ext_arr_to_matrix(arr, self, as_vector)

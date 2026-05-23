@@ -212,6 +212,7 @@ def _time_call(fn, repeats):
         samples.append((time.perf_counter() - start) * 1000.0)
     return {
         "first_call_ms": first_call_ms,
+        "mean_ms": statistics.fmean(samples),
         "median_ms": statistics.median(samples),
         "min_ms": min(samples),
         "max_ms": max(samples),

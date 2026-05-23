@@ -1474,131 +1474,136 @@ struct VulkanRadixSortCache {
         sizeof(kScatterPairsInlineChunksRaw64Shift20Spv),
         sizeof(kScatterPairsInlineChunksRaw64Shift24Spv),
         sizeof(kScatterPairsInlineChunksRaw64Shift28Spv)};
-    for (int pass = 0; pass < 8; ++pass) {
-      PipelineSourceDesc rank_desc{PipelineSourceType::spirv_binary,
-                                   rank_data[pass],
-                                   rank_sizes[pass],
-                                   PipelineStageType::compute};
-      auto [rank_pipeline, rank_res] = dev->create_pipeline_unique(
-          rank_desc, fmt::format("vulkan_sort_rank_hist_{}", pass));
-      TI_ERROR_IF(rank_res != RhiResult::success,
-                  "Failed to create Vulkan sort rank pipeline {}: "
-                  "RhiResult({})",
-                  pass, rank_res);
-      rank_hist[pass] = std::move(rank_pipeline);
-
-      if (subgroup_rank_enabled) {
-        PipelineSourceDesc rank_subgroup_desc{
-            PipelineSourceType::spirv_binary,
-            rank_subgroup_data[pass],
-            rank_subgroup_sizes[pass],
-            PipelineStageType::compute};
-        auto [rank_subgroup_pipeline, rank_subgroup_res] =
-            dev->create_pipeline_unique(
-                rank_subgroup_desc,
-                fmt::format("vulkan_sort_rank_hist_subgroup_{}", pass));
-        TI_ERROR_IF(rank_subgroup_res != RhiResult::success,
-                    "Failed to create Vulkan sort subgroup rank pipeline {}: "
+    if (!radix8_enabled) {
+      for (int pass = 0; pass < 8; ++pass) {
+        PipelineSourceDesc rank_desc{PipelineSourceType::spirv_binary,
+                                     rank_data[pass],
+                                     rank_sizes[pass],
+                                     PipelineStageType::compute};
+        auto [rank_pipeline, rank_res] = dev->create_pipeline_unique(
+            rank_desc, fmt::format("vulkan_sort_rank_hist_{}", pass));
+        TI_ERROR_IF(rank_res != RhiResult::success,
+                    "Failed to create Vulkan sort rank pipeline {}: "
                     "RhiResult({})",
-                    pass, rank_subgroup_res);
-        rank_hist_subgroup[pass] = std::move(rank_subgroup_pipeline);
+                    pass, rank_res);
+        rank_hist[pass] = std::move(rank_pipeline);
+
+        if (subgroup_rank_enabled) {
+          PipelineSourceDesc rank_subgroup_desc{
+              PipelineSourceType::spirv_binary,
+              rank_subgroup_data[pass],
+              rank_subgroup_sizes[pass],
+              PipelineStageType::compute};
+          auto [rank_subgroup_pipeline, rank_subgroup_res] =
+              dev->create_pipeline_unique(
+                  rank_subgroup_desc,
+                  fmt::format("vulkan_sort_rank_hist_subgroup_{}", pass));
+          TI_ERROR_IF(rank_subgroup_res != RhiResult::success,
+                      "Failed to create Vulkan sort subgroup rank pipeline {}: "
+                      "RhiResult({})",
+                      pass, rank_subgroup_res);
+          rank_hist_subgroup[pass] = std::move(rank_subgroup_pipeline);
+        }
+
+        PipelineSourceDesc scatter_key_desc{PipelineSourceType::spirv_binary,
+                                            scatter_key_data[pass],
+                                            scatter_key_sizes[pass],
+                                            PipelineStageType::compute};
+        auto [scatter_key_pipeline, scatter_key_res] =
+            dev->create_pipeline_unique(
+                scatter_key_desc,
+                fmt::format("vulkan_sort_scatter_keys_{}", pass));
+        TI_ERROR_IF(scatter_key_res != RhiResult::success,
+                    "Failed to create Vulkan sort key scatter pipeline {}: "
+                    "RhiResult({})",
+                    pass, scatter_key_res);
+        scatter_keys[pass] = std::move(scatter_key_pipeline);
+
+        PipelineSourceDesc scatter_key_inline_desc{
+            PipelineSourceType::spirv_binary,
+            scatter_key_inline_data[pass],
+            scatter_key_inline_sizes[pass],
+            PipelineStageType::compute};
+        auto [scatter_key_inline_pipeline, scatter_key_inline_res] =
+            dev->create_pipeline_unique(
+                scatter_key_inline_desc,
+                fmt::format("vulkan_sort_scatter_keys_inline_chunks_{}",
+                            pass));
+        TI_ERROR_IF(scatter_key_inline_res != RhiResult::success,
+                    "Failed to create Vulkan sort inline key scatter pipeline "
+                    "{}: RhiResult({})",
+                    pass, scatter_key_inline_res);
+        scatter_keys_inline_chunks[pass] =
+            std::move(scatter_key_inline_pipeline);
+
+        PipelineSourceDesc scatter_pair_desc{PipelineSourceType::spirv_binary,
+                                             scatter_pair_data[pass],
+                                             scatter_pair_sizes[pass],
+                                             PipelineStageType::compute};
+        auto [scatter_pair_pipeline, scatter_pair_res] =
+            dev->create_pipeline_unique(
+                scatter_pair_desc,
+                fmt::format("vulkan_sort_scatter_pairs_{}", pass));
+        TI_ERROR_IF(scatter_pair_res != RhiResult::success,
+                    "Failed to create Vulkan sort pair scatter pipeline {}: "
+                    "RhiResult({})",
+                    pass, scatter_pair_res);
+        scatter_pairs[pass] = std::move(scatter_pair_pipeline);
+
+        PipelineSourceDesc scatter_pair_raw64_desc{
+            PipelineSourceType::spirv_binary,
+            scatter_pair_raw64_data[pass],
+            scatter_pair_raw64_sizes[pass],
+            PipelineStageType::compute};
+        auto [scatter_pair_raw64_pipeline, scatter_pair_raw64_res] =
+            dev->create_pipeline_unique(
+                scatter_pair_raw64_desc,
+                fmt::format("vulkan_sort_scatter_pairs_raw64_{}", pass));
+        TI_ERROR_IF(scatter_pair_raw64_res != RhiResult::success,
+                    "Failed to create Vulkan sort raw64 pair scatter pipeline "
+                    "{}: RhiResult({})",
+                    pass, scatter_pair_raw64_res);
+        scatter_pairs_raw64[pass] = std::move(scatter_pair_raw64_pipeline);
+
+        PipelineSourceDesc scatter_pair_inline_desc{
+            PipelineSourceType::spirv_binary,
+            scatter_pair_inline_data[pass],
+            scatter_pair_inline_sizes[pass],
+            PipelineStageType::compute};
+        auto [scatter_pair_inline_pipeline, scatter_pair_inline_res] =
+            dev->create_pipeline_unique(
+                scatter_pair_inline_desc,
+                fmt::format("vulkan_sort_scatter_pairs_inline_chunks_{}",
+                            pass));
+        TI_ERROR_IF(scatter_pair_inline_res != RhiResult::success,
+                    "Failed to create Vulkan sort inline pair scatter pipeline "
+                    "{}: RhiResult({})",
+                    pass, scatter_pair_inline_res);
+        scatter_pairs_inline_chunks[pass] =
+            std::move(scatter_pair_inline_pipeline);
+
+        PipelineSourceDesc scatter_pair_inline_raw64_desc{
+            PipelineSourceType::spirv_binary,
+            scatter_pair_inline_raw64_data[pass],
+            scatter_pair_inline_raw64_sizes[pass],
+            PipelineStageType::compute};
+        auto [scatter_pair_inline_raw64_pipeline,
+              scatter_pair_inline_raw64_res] =
+            dev->create_pipeline_unique(
+                scatter_pair_inline_raw64_desc,
+                fmt::format("vulkan_sort_scatter_pairs_inline_chunks_raw64_{}",
+                            pass));
+        TI_ERROR_IF(
+            scatter_pair_inline_raw64_res != RhiResult::success,
+            "Failed to create Vulkan sort inline raw64 pair scatter pipeline "
+            "{}: RhiResult({})",
+            pass, scatter_pair_inline_raw64_res);
+        scatter_pairs_inline_chunks_raw64[pass] =
+            std::move(scatter_pair_inline_raw64_pipeline);
       }
-
-      PipelineSourceDesc scatter_key_desc{PipelineSourceType::spirv_binary,
-                                          scatter_key_data[pass],
-                                          scatter_key_sizes[pass],
-                                          PipelineStageType::compute};
-      auto [scatter_key_pipeline, scatter_key_res] =
-          dev->create_pipeline_unique(
-              scatter_key_desc,
-              fmt::format("vulkan_sort_scatter_keys_{}", pass));
-      TI_ERROR_IF(scatter_key_res != RhiResult::success,
-                  "Failed to create Vulkan sort key scatter pipeline {}: "
-                  "RhiResult({})",
-                  pass, scatter_key_res);
-      scatter_keys[pass] = std::move(scatter_key_pipeline);
-
-      PipelineSourceDesc scatter_key_inline_desc{
-          PipelineSourceType::spirv_binary,
-          scatter_key_inline_data[pass],
-          scatter_key_inline_sizes[pass],
-          PipelineStageType::compute};
-      auto [scatter_key_inline_pipeline, scatter_key_inline_res] =
-          dev->create_pipeline_unique(
-              scatter_key_inline_desc,
-              fmt::format("vulkan_sort_scatter_keys_inline_chunks_{}", pass));
-      TI_ERROR_IF(scatter_key_inline_res != RhiResult::success,
-                  "Failed to create Vulkan sort inline key scatter pipeline "
-                  "{}: RhiResult({})",
-                  pass, scatter_key_inline_res);
-      scatter_keys_inline_chunks[pass] = std::move(scatter_key_inline_pipeline);
-
-      PipelineSourceDesc scatter_pair_desc{PipelineSourceType::spirv_binary,
-                                           scatter_pair_data[pass],
-                                           scatter_pair_sizes[pass],
-                                           PipelineStageType::compute};
-      auto [scatter_pair_pipeline, scatter_pair_res] =
-          dev->create_pipeline_unique(
-              scatter_pair_desc,
-              fmt::format("vulkan_sort_scatter_pairs_{}", pass));
-      TI_ERROR_IF(scatter_pair_res != RhiResult::success,
-                  "Failed to create Vulkan sort pair scatter pipeline {}: "
-                  "RhiResult({})",
-                  pass, scatter_pair_res);
-      scatter_pairs[pass] = std::move(scatter_pair_pipeline);
-
-      PipelineSourceDesc scatter_pair_raw64_desc{
-          PipelineSourceType::spirv_binary,
-          scatter_pair_raw64_data[pass],
-          scatter_pair_raw64_sizes[pass],
-          PipelineStageType::compute};
-      auto [scatter_pair_raw64_pipeline, scatter_pair_raw64_res] =
-          dev->create_pipeline_unique(
-              scatter_pair_raw64_desc,
-              fmt::format("vulkan_sort_scatter_pairs_raw64_{}", pass));
-      TI_ERROR_IF(scatter_pair_raw64_res != RhiResult::success,
-                  "Failed to create Vulkan sort raw64 pair scatter pipeline "
-                  "{}: RhiResult({})",
-                  pass, scatter_pair_raw64_res);
-      scatter_pairs_raw64[pass] = std::move(scatter_pair_raw64_pipeline);
-
-      PipelineSourceDesc scatter_pair_inline_desc{
-          PipelineSourceType::spirv_binary,
-          scatter_pair_inline_data[pass],
-          scatter_pair_inline_sizes[pass],
-          PipelineStageType::compute};
-      auto [scatter_pair_inline_pipeline, scatter_pair_inline_res] =
-          dev->create_pipeline_unique(
-              scatter_pair_inline_desc,
-              fmt::format("vulkan_sort_scatter_pairs_inline_chunks_{}", pass));
-      TI_ERROR_IF(scatter_pair_inline_res != RhiResult::success,
-                  "Failed to create Vulkan sort inline pair scatter pipeline "
-                  "{}: RhiResult({})",
-                  pass, scatter_pair_inline_res);
-      scatter_pairs_inline_chunks[pass] =
-          std::move(scatter_pair_inline_pipeline);
-
-      PipelineSourceDesc scatter_pair_inline_raw64_desc{
-          PipelineSourceType::spirv_binary,
-          scatter_pair_inline_raw64_data[pass],
-          scatter_pair_inline_raw64_sizes[pass],
-          PipelineStageType::compute};
-      auto [scatter_pair_inline_raw64_pipeline,
-            scatter_pair_inline_raw64_res] =
-          dev->create_pipeline_unique(
-              scatter_pair_inline_raw64_desc,
-              fmt::format("vulkan_sort_scatter_pairs_inline_chunks_raw64_{}",
-                          pass));
-      TI_ERROR_IF(
-          scatter_pair_inline_raw64_res != RhiResult::success,
-          "Failed to create Vulkan sort inline raw64 pair scatter pipeline "
-          "{}: RhiResult({})",
-          pass, scatter_pair_inline_raw64_res);
-      scatter_pairs_inline_chunks_raw64[pass] =
-          std::move(scatter_pair_inline_raw64_pipeline);
     }
 
-    if (radix8_supported) {
+    if (radix8_enabled) {
       radix8_spine =
           create_pipeline(dev, kRadix8SpineSpv, "vulkan_sort_radix8_spine");
 
@@ -2330,7 +2335,8 @@ struct VulkanCompactCache {
 
   void ensure_pipelines(Device *dev) {
     if (device == dev && compact_i32_flags) {
-      scan.ensure_pipelines(dev);
+      scan.ensure_device(dev);
+      cached_bytes = prefix_capacity + scan.cached_bytes;
       return;
     }
     if (device && device != dev) {
@@ -2339,7 +2345,7 @@ struct VulkanCompactCache {
       compact_i32_scatter.reset();
     }
     device = dev;
-    scan.ensure_pipelines(dev);
+    scan.ensure_device(dev);
     compact_i32_flags =
         create_pipeline(dev, kCompactI32FlagsSpv, "vulkan_compact_i32_flags");
     compact_i32_scatter = create_pipeline(
@@ -3518,7 +3524,7 @@ struct VulkanBucketBuilderCache {
   }
 
   void ensure_pipelines(Device *dev) {
-    if (device == dev && clear_i32) {
+    if (device == dev) {
       return;
     }
     if (device && device != dev) {
@@ -3603,126 +3609,91 @@ struct VulkanBucketBuilderCache {
       grouped_reduce_f64_bindings.reset();
     }
     device = dev;
-    clear_i32 =
-        create_pipeline(dev, kBucketClearI32Spv, "vulkan_bucket_clear_i32");
-    count_i32 =
-        create_pipeline(dev, kBucketCountI32Spv, "vulkan_bucket_count_i32");
-    count_private_shared_i32 = create_pipeline(
-        dev, kBucketCountPrivateSharedI32Spv,
-        "vulkan_bucket_count_private_shared_i32");
-    prefix_i32 =
-        create_pipeline(dev, kBucketPrefixI32Spv, "vulkan_bucket_prefix_i32");
-    prefix_chunks_i32 = create_pipeline(
-        dev, kBucketPrefixChunksI32Spv, "vulkan_bucket_prefix_chunks_i32");
-    scatter_i32 =
-        create_pipeline(dev, kBucketScatterI32Spv, "vulkan_bucket_scatter_i32");
-    scatter_f32 =
-        create_pipeline(dev, kBucketScatterF32Spv, "vulkan_bucket_scatter_f32");
-    scatter_u32 =
-        create_pipeline(dev, kBucketScatterU32Spv, "vulkan_bucket_scatter_u32");
-    scatter_raw64 = create_pipeline(dev, kBucketScatterRaw64Spv,
-                                    "vulkan_bucket_scatter_raw64");
-    scatter_raw_words = create_pipeline(dev, kBucketScatterRawWordsSpv,
-                                        "vulkan_bucket_scatter_raw_words");
-    scatter_private_shared_i32 = create_pipeline(
-        dev, kBucketScatterPrivateSharedI32Spv,
-        "vulkan_bucket_scatter_private_shared_i32");
-    scatter_private_shared_f32 = create_pipeline(
-        dev, kBucketScatterPrivateSharedF32Spv,
-        "vulkan_bucket_scatter_private_shared_f32");
-    scatter_private_shared_u32 = create_pipeline(
-        dev, kBucketScatterPrivateSharedU32Spv,
-        "vulkan_bucket_scatter_private_shared_u32");
-    scatter_private_shared_raw64 = create_pipeline(
-        dev, kBucketScatterPrivateSharedRaw64Spv,
-        "vulkan_bucket_scatter_private_shared_raw64");
-    scatter_private_shared_raw_words = create_pipeline(
-        dev, kBucketScatterPrivateSharedRawWordsSpv,
-        "vulkan_bucket_scatter_private_shared_raw_words");
-    grouped_reduce_zero_i32 = create_pipeline(
-        dev, kGroupedReduceZeroI32Spv, "vulkan_grouped_reduce_zero_i32");
-    if (dev->get_caps().get(DeviceCapability::spirv_has_atomic_float_add) !=
-        0) {
-      grouped_reduce_zero_f32 = create_pipeline(
-          dev, kGroupedReduceZeroF32Spv, "vulkan_grouped_reduce_zero_f32");
-    }
-    grouped_reduce_zero_u32 = create_pipeline(
-        dev, kGroupedReduceZeroU32Spv, "vulkan_grouped_reduce_zero_u32");
-    grouped_reduce_atomic_sum_i32 =
-        create_pipeline(dev, kGroupedReduceAtomicSumI32Spv,
-                        "vulkan_grouped_reduce_atomic_sum_i32");
-    if (dev->get_caps().get(DeviceCapability::spirv_has_atomic_float_add) !=
-        0) {
-      grouped_reduce_atomic_sum_f32 =
-          create_pipeline(dev, kGroupedReduceAtomicSumF32Spv,
-                          "vulkan_grouped_reduce_atomic_sum_f32");
-    }
-    grouped_reduce_atomic_sum_u32 =
-        create_pipeline(dev, kGroupedReduceAtomicSumU32Spv,
-                        "vulkan_grouped_reduce_atomic_sum_u32");
-    const bool int64_atomic_supported =
-        dev->get_caps().get(DeviceCapability::spirv_has_int64) != 0 &&
-        dev->get_caps().get(DeviceCapability::spirv_has_atomic_int64) != 0;
-    if (int64_atomic_supported) {
-      grouped_reduce_zero_u64 = create_pipeline(
-          dev, kGroupedReduceZeroU64Spv, "vulkan_grouped_reduce_zero_u64");
-      grouped_reduce_zero_i64 = create_pipeline(
-          dev, kGroupedReduceZeroI64Spv, "vulkan_grouped_reduce_zero_i64");
-      grouped_reduce_atomic_sum_u64 =
-          create_pipeline(dev, kGroupedReduceAtomicSumU64Spv,
-                          "vulkan_grouped_reduce_atomic_sum_u64");
-      grouped_reduce_atomic_sum_i64 =
-          create_pipeline(dev, kGroupedReduceAtomicSumI64Spv,
-                          "vulkan_grouped_reduce_atomic_sum_i64");
-    }
-    const bool float64_atomic_supported =
-        dev->get_caps().get(DeviceCapability::spirv_has_float64) != 0 &&
-        dev->get_caps().get(DeviceCapability::spirv_has_atomic_float64_add) !=
-            0;
-    if (float64_atomic_supported) {
-      grouped_reduce_zero_f64 = create_pipeline(
-          dev, kGroupedReduceZeroF64Spv, "vulkan_grouped_reduce_zero_f64");
-      grouped_reduce_atomic_sum_f64 =
-          create_pipeline(dev, kGroupedReduceAtomicSumF64Spv,
-                          "vulkan_grouped_reduce_atomic_sum_f64");
-    }
-    grouped_reduce_sum_i32 = create_pipeline(
-        dev, kGroupedReduceSumI32Spv, "vulkan_grouped_reduce_sum_i32");
-    grouped_reduce_sum_f32 = create_pipeline(
-        dev, kGroupedReduceSumF32Spv, "vulkan_grouped_reduce_sum_f32");
-    grouped_reduce_sum_u32 = create_pipeline(
-        dev, kGroupedReduceSumU32Spv, "vulkan_grouped_reduce_sum_u32");
-    const bool int64_supported =
-        dev->get_caps().get(DeviceCapability::spirv_has_int64) != 0;
-    const bool float64_supported =
-        dev->get_caps().get(DeviceCapability::spirv_has_float64) != 0;
-    if (int64_supported) {
-      grouped_reduce_sum_u64 = create_pipeline(
-          dev, kGroupedReduceSumU64Spv, "vulkan_grouped_reduce_sum_u64");
-      grouped_reduce_sum_i64 = create_pipeline(
-          dev, kGroupedReduceSumI64Spv, "vulkan_grouped_reduce_sum_i64");
-    }
-    if (float64_supported) {
-      grouped_reduce_sum_f64 = create_pipeline(
-          dev, kGroupedReduceSumF64Spv, "vulkan_grouped_reduce_sum_f64");
-    }
   }
 
-  Pipeline *grouped_reduce_zero_pipeline(int value_type) const {
+  Pipeline *bucket_clear_i32_pipeline() {
+    if (!clear_i32) {
+      clear_i32 =
+          create_pipeline(device, kBucketClearI32Spv, "vulkan_bucket_clear_i32");
+    }
+    return clear_i32.get();
+  }
+
+  Pipeline *bucket_count_i32_pipeline() {
+    if (!count_i32) {
+      count_i32 =
+          create_pipeline(device, kBucketCountI32Spv, "vulkan_bucket_count_i32");
+    }
+    return count_i32.get();
+  }
+
+  Pipeline *bucket_count_private_shared_i32_pipeline() {
+    if (!count_private_shared_i32) {
+      count_private_shared_i32 = create_pipeline(
+          device, kBucketCountPrivateSharedI32Spv,
+          "vulkan_bucket_count_private_shared_i32");
+    }
+    return count_private_shared_i32.get();
+  }
+
+  Pipeline *bucket_prefix_i32_pipeline() {
+    if (!prefix_i32) {
+      prefix_i32 = create_pipeline(device, kBucketPrefixI32Spv,
+                                   "vulkan_bucket_prefix_i32");
+    }
+    return prefix_i32.get();
+  }
+
+  Pipeline *bucket_prefix_chunks_i32_pipeline() {
+    if (!prefix_chunks_i32) {
+      prefix_chunks_i32 = create_pipeline(
+          device, kBucketPrefixChunksI32Spv,
+          "vulkan_bucket_prefix_chunks_i32");
+    }
+    return prefix_chunks_i32.get();
+  }
+
+  Pipeline *grouped_reduce_zero_pipeline(int value_type) {
     if (value_type == 1) {
+      if (!grouped_reduce_zero_f32) {
+        grouped_reduce_zero_f32 = create_pipeline(
+            device, kGroupedReduceZeroF32Spv, "vulkan_grouped_reduce_zero_f32");
+      }
       return grouped_reduce_zero_f32.get();
     }
     if (value_type == 3) {
+      if (!grouped_reduce_zero_u64) {
+        grouped_reduce_zero_u64 = create_pipeline(
+            device, kGroupedReduceZeroU64Spv, "vulkan_grouped_reduce_zero_u64");
+      }
       return grouped_reduce_zero_u64.get();
     }
     if (value_type == 4) {
+      if (!grouped_reduce_zero_i64) {
+        grouped_reduce_zero_i64 = create_pipeline(
+            device, kGroupedReduceZeroI64Spv, "vulkan_grouped_reduce_zero_i64");
+      }
       return grouped_reduce_zero_i64.get();
     }
     if (value_type == 5) {
+      if (!grouped_reduce_zero_f64) {
+        grouped_reduce_zero_f64 = create_pipeline(
+            device, kGroupedReduceZeroF64Spv, "vulkan_grouped_reduce_zero_f64");
+      }
       return grouped_reduce_zero_f64.get();
     }
-    return value_type == 2 ? grouped_reduce_zero_u32.get()
-                           : grouped_reduce_zero_i32.get();
+    if (value_type == 2) {
+      if (!grouped_reduce_zero_u32) {
+        grouped_reduce_zero_u32 = create_pipeline(
+            device, kGroupedReduceZeroU32Spv, "vulkan_grouped_reduce_zero_u32");
+      }
+      return grouped_reduce_zero_u32.get();
+    }
+    if (!grouped_reduce_zero_i32) {
+      grouped_reduce_zero_i32 = create_pipeline(
+          device, kGroupedReduceZeroI32Spv, "vulkan_grouped_reduce_zero_i32");
+    }
+    return grouped_reduce_zero_i32.get();
   }
 
   void ensure_grouped_reduce_zero_strided_pipeline(int value_type) {
@@ -3767,21 +3738,53 @@ struct VulkanBucketBuilderCache {
     return grouped_reduce_zero_strided[value_type].get();
   }
 
-  Pipeline *grouped_reduce_atomic_pipeline(int value_type) const {
+  Pipeline *grouped_reduce_atomic_pipeline(int value_type) {
     if (value_type == 1) {
+      if (!grouped_reduce_atomic_sum_f32) {
+        grouped_reduce_atomic_sum_f32 = create_pipeline(
+            device, kGroupedReduceAtomicSumF32Spv,
+            "vulkan_grouped_reduce_atomic_sum_f32");
+      }
       return grouped_reduce_atomic_sum_f32.get();
     }
     if (value_type == 3) {
+      if (!grouped_reduce_atomic_sum_u64) {
+        grouped_reduce_atomic_sum_u64 = create_pipeline(
+            device, kGroupedReduceAtomicSumU64Spv,
+            "vulkan_grouped_reduce_atomic_sum_u64");
+      }
       return grouped_reduce_atomic_sum_u64.get();
     }
     if (value_type == 4) {
+      if (!grouped_reduce_atomic_sum_i64) {
+        grouped_reduce_atomic_sum_i64 = create_pipeline(
+            device, kGroupedReduceAtomicSumI64Spv,
+            "vulkan_grouped_reduce_atomic_sum_i64");
+      }
       return grouped_reduce_atomic_sum_i64.get();
     }
     if (value_type == 5) {
+      if (!grouped_reduce_atomic_sum_f64) {
+        grouped_reduce_atomic_sum_f64 = create_pipeline(
+            device, kGroupedReduceAtomicSumF64Spv,
+            "vulkan_grouped_reduce_atomic_sum_f64");
+      }
       return grouped_reduce_atomic_sum_f64.get();
     }
-    return value_type == 2 ? grouped_reduce_atomic_sum_u32.get()
-                           : grouped_reduce_atomic_sum_i32.get();
+    if (value_type == 2) {
+      if (!grouped_reduce_atomic_sum_u32) {
+        grouped_reduce_atomic_sum_u32 = create_pipeline(
+            device, kGroupedReduceAtomicSumU32Spv,
+            "vulkan_grouped_reduce_atomic_sum_u32");
+      }
+      return grouped_reduce_atomic_sum_u32.get();
+    }
+    if (!grouped_reduce_atomic_sum_i32) {
+      grouped_reduce_atomic_sum_i32 =
+          create_pipeline(device, kGroupedReduceAtomicSumI32Spv,
+                          "vulkan_grouped_reduce_atomic_sum_i32");
+    }
+    return grouped_reduce_atomic_sum_i32.get();
   }
 
   void ensure_grouped_reduce_atomic_strided_pipeline(int value_type) {
@@ -3826,34 +3829,80 @@ struct VulkanBucketBuilderCache {
     return grouped_reduce_atomic_sum_strided[value_type].get();
   }
 
-  Pipeline *bucket_scatter_pipeline(int value_type) const {
+  Pipeline *bucket_scatter_pipeline(int value_type) {
     if (value_type == 7) {
+      if (!scatter_raw_words) {
+        scatter_raw_words = create_pipeline(
+            device, kBucketScatterRawWordsSpv,
+            "vulkan_bucket_scatter_raw_words");
+      }
       return scatter_raw_words.get();
     }
     if (value_type == 1) {
+      if (!scatter_f32) {
+        scatter_f32 = create_pipeline(device, kBucketScatterF32Spv,
+                                      "vulkan_bucket_scatter_f32");
+      }
       return scatter_f32.get();
     }
     if (value_type == 2) {
+      if (!scatter_u32) {
+        scatter_u32 = create_pipeline(device, kBucketScatterU32Spv,
+                                      "vulkan_bucket_scatter_u32");
+      }
       return scatter_u32.get();
     }
     if (value_type == 3 || value_type == 4 || value_type == 5) {
+      if (!scatter_raw64) {
+        scatter_raw64 = create_pipeline(device, kBucketScatterRaw64Spv,
+                                        "vulkan_bucket_scatter_raw64");
+      }
       return scatter_raw64.get();
+    }
+    if (!scatter_i32) {
+      scatter_i32 = create_pipeline(device, kBucketScatterI32Spv,
+                                    "vulkan_bucket_scatter_i32");
     }
     return scatter_i32.get();
   }
 
-  Pipeline *bucket_scatter_private_pipeline(int value_type) const {
+  Pipeline *bucket_scatter_private_pipeline(int value_type) {
     if (value_type == 7) {
+      if (!scatter_private_shared_raw_words) {
+        scatter_private_shared_raw_words = create_pipeline(
+            device, kBucketScatterPrivateSharedRawWordsSpv,
+            "vulkan_bucket_scatter_private_shared_raw_words");
+      }
       return scatter_private_shared_raw_words.get();
     }
     if (value_type == 1) {
+      if (!scatter_private_shared_f32) {
+        scatter_private_shared_f32 = create_pipeline(
+            device, kBucketScatterPrivateSharedF32Spv,
+            "vulkan_bucket_scatter_private_shared_f32");
+      }
       return scatter_private_shared_f32.get();
     }
     if (value_type == 2) {
+      if (!scatter_private_shared_u32) {
+        scatter_private_shared_u32 = create_pipeline(
+            device, kBucketScatterPrivateSharedU32Spv,
+            "vulkan_bucket_scatter_private_shared_u32");
+      }
       return scatter_private_shared_u32.get();
     }
     if (value_type == 3 || value_type == 4 || value_type == 5) {
+      if (!scatter_private_shared_raw64) {
+        scatter_private_shared_raw64 = create_pipeline(
+            device, kBucketScatterPrivateSharedRaw64Spv,
+            "vulkan_bucket_scatter_private_shared_raw64");
+      }
       return scatter_private_shared_raw64.get();
+    }
+    if (!scatter_private_shared_i32) {
+      scatter_private_shared_i32 = create_pipeline(
+          device, kBucketScatterPrivateSharedI32Spv,
+          "vulkan_bucket_scatter_private_shared_i32");
     }
     return scatter_private_shared_i32.get();
   }
@@ -3922,19 +3971,43 @@ struct VulkanBucketBuilderCache {
     return "vulkan_bucket_scatter_private_shared_i32";
   }
 
-  Pipeline *grouped_reduce_sum_pipeline(int value_type) const {
+  Pipeline *grouped_reduce_sum_pipeline(int value_type) {
     switch (value_type) {
       case 1:
+        if (!grouped_reduce_sum_f32) {
+          grouped_reduce_sum_f32 = create_pipeline(
+              device, kGroupedReduceSumF32Spv, "vulkan_grouped_reduce_sum_f32");
+        }
         return grouped_reduce_sum_f32.get();
       case 2:
+        if (!grouped_reduce_sum_u32) {
+          grouped_reduce_sum_u32 = create_pipeline(
+              device, kGroupedReduceSumU32Spv, "vulkan_grouped_reduce_sum_u32");
+        }
         return grouped_reduce_sum_u32.get();
       case 3:
+        if (!grouped_reduce_sum_u64) {
+          grouped_reduce_sum_u64 = create_pipeline(
+              device, kGroupedReduceSumU64Spv, "vulkan_grouped_reduce_sum_u64");
+        }
         return grouped_reduce_sum_u64.get();
       case 4:
+        if (!grouped_reduce_sum_i64) {
+          grouped_reduce_sum_i64 = create_pipeline(
+              device, kGroupedReduceSumI64Spv, "vulkan_grouped_reduce_sum_i64");
+        }
         return grouped_reduce_sum_i64.get();
       case 5:
+        if (!grouped_reduce_sum_f64) {
+          grouped_reduce_sum_f64 = create_pipeline(
+              device, kGroupedReduceSumF64Spv, "vulkan_grouped_reduce_sum_f64");
+        }
         return grouped_reduce_sum_f64.get();
       default:
+        if (!grouped_reduce_sum_i32) {
+          grouped_reduce_sum_i32 = create_pipeline(
+              device, kGroupedReduceSumI32Spv, "vulkan_grouped_reduce_sum_i32");
+        }
         return grouped_reduce_sum_i32.get();
     }
   }
@@ -6180,6 +6253,128 @@ std::size_t Program::vulkan_grouped_reduce_atomic_ndarray(Ndarray *keys,
   return 0;
 }
 
+std::size_t Program::vulkan_grouped_reduce_atomic_dense_field(
+    SNode *keys,
+    SNode *values,
+    SNode *output,
+    int value_type,
+    std::size_t n,
+    std::size_t num_groups,
+    int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native dense field grouped reduce is only available on "
+              "Vulkan.");
+  TI_ERROR_IF(!keys || !values || !output,
+              "Vulkan native dense field grouped reduce received a null field.");
+  TI_ERROR_IF(num_groups == 0,
+              "Vulkan native dense field grouped reduce output must contain at "
+              "least one group.");
+  TI_ERROR_IF(!vulkan_grouped_reduce_atomic_value_type_available(value_type),
+              "Vulkan native dense field grouped reduce does not support the "
+              "requested value type.");
+  const size_t value_size = vulkan_scan_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Vulkan native dense field grouped reduce received an "
+              "unsupported value type.");
+  DevicePtr keys_ptr = get_dense_field_device_ptr(keys);
+  DevicePtr values_ptr = get_dense_field_device_ptr(values);
+  DevicePtr output_ptr = get_dense_field_device_ptr(output);
+  const size_t keys_stride = get_dense_field_stride(keys, sizeof(int32_t));
+  const size_t values_stride = get_dense_field_stride(values, value_size);
+  const size_t output_stride = get_dense_field_stride(output, value_size);
+  TI_ERROR_IF(keys_stride != sizeof(int32_t) ||
+                  values_stride != value_size ||
+                  output_stride != value_size,
+              "Vulkan native dense field grouped reduce requires contiguous "
+              "keys, values, and output fields.");
+  TI_ERROR_IF(op != 0,
+              "Vulkan native dense field grouped reduce currently supports "
+              "only sum.");
+  TI_ERROR_IF(n > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ||
+                  num_groups >
+                      static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native dense field grouped reduce input is too large for "
+              "u32 dispatch.");
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(device == nullptr,
+              "Vulkan native dense field grouped reduce requires a compute "
+              "device.");
+  auto &cache = get_bucket_builder_cache(this, device);
+  const DeviceAllocation keys_alloc{keys_ptr.device, keys_ptr.alloc_id};
+  const DeviceAllocation values_alloc{values_ptr.device, values_ptr.alloc_id};
+  const DeviceAllocation output_alloc{output_ptr.device, output_ptr.alloc_id};
+  const size_t input_bytes = n * sizeof(int32_t);
+  const size_t values_bytes = n * value_size;
+  const size_t output_bytes = num_groups * value_size;
+  Pipeline *zero_pipeline = cache.grouped_reduce_zero_pipeline(value_type);
+  Pipeline *atomic_pipeline = cache.grouped_reduce_atomic_pipeline(value_type);
+  TI_ERROR_IF(!zero_pipeline || !atomic_pipeline,
+              "Vulkan native dense field grouped reduce could not find a "
+              "pipeline for the requested value type.");
+  ShaderResourceSet *zero_bindings =
+      cache.grouped_reduce_zero_resource_set(value_type);
+  ShaderResourceSet *atomic_bindings =
+      cache.grouped_reduce_atomic_resource_set(value_type);
+  const uint32_t zero_groups =
+      static_cast<uint32_t>((num_groups + kBlockSize - 1) / kBlockSize);
+  const uint32_t reduce_groups =
+      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
+  const bool profiler_scopes = profiler != nullptr;
+  enqueue_compute_op_lambda(
+      [keys_alloc, values_alloc, output_alloc, keys_ptr, values_ptr, output_ptr,
+       input_bytes, output_bytes, zero_pipeline, atomic_pipeline,
+       zero_bindings, atomic_bindings, zero_groups, reduce_groups, value_type,
+       values_bytes, profiler_scopes](Device * /*op_device*/,
+                                      CommandList *cmdlist) {
+        zero_bindings->rw_buffer(0, output_alloc.get_ptr(output_ptr.offset),
+                                 output_bytes);
+        dispatch_pipeline(cmdlist, zero_pipeline, zero_bindings, zero_groups, 1,
+                          1,
+                          profiler_scopes
+                              ? (value_type == 1
+                                     ? "vulkan_grouped_reduce_zero_f32"
+                                     : value_type == 2
+                                     ? "vulkan_grouped_reduce_zero_u32"
+                                     : value_type == 3
+                                     ? "vulkan_grouped_reduce_zero_u64"
+                                     : value_type == 4
+                                     ? "vulkan_grouped_reduce_zero_i64"
+                                     : value_type == 5
+                                     ? "vulkan_grouped_reduce_zero_f64"
+                                     : "vulkan_grouped_reduce_zero_i32")
+                              : nullptr);
+        cmdlist->buffer_barrier(output_alloc);
+        if (reduce_groups == 0) {
+          return;
+        }
+        atomic_bindings->rw_buffer(0, keys_alloc.get_ptr(keys_ptr.offset),
+                                   input_bytes);
+        atomic_bindings->rw_buffer(1, values_alloc.get_ptr(values_ptr.offset),
+                                   values_bytes);
+        atomic_bindings->rw_buffer(2, output_alloc.get_ptr(output_ptr.offset),
+                                   output_bytes);
+        dispatch_pipeline(cmdlist, atomic_pipeline, atomic_bindings,
+                          reduce_groups, 1, 1,
+                          profiler_scopes
+                              ? (value_type == 1
+                                     ? "vulkan_grouped_reduce_atomic_sum_f32"
+                                     : value_type == 2
+                                     ? "vulkan_grouped_reduce_atomic_sum_u32"
+                                     : value_type == 3
+                                     ? "vulkan_grouped_reduce_atomic_sum_u64"
+                                     : value_type == 4
+                                     ? "vulkan_grouped_reduce_atomic_sum_i64"
+                                     : value_type == 5
+                                     ? "vulkan_grouped_reduce_atomic_sum_f64"
+                                     : "vulkan_grouped_reduce_atomic_sum_i32")
+                              : nullptr);
+        cmdlist->buffer_barrier(output_alloc);
+      },
+      {});
+  return 0;
+}
+
 std::size_t Program::vulkan_grouped_reduce_atomic_member_ndarray(
     Ndarray *keys,
     Ndarray *values,
@@ -8307,30 +8502,45 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
   if (use_private) {
     cache.ensure_workspace(private_partial_bytes);
   }
-  Pipeline *clear_pipeline = cache.clear_i32.get();
-  Pipeline *count_pipeline = cache.count_i32.get();
-  Pipeline *count_private_pipeline = cache.count_private_shared_i32.get();
-  Pipeline *prefix_pipeline = cache.prefix_i32.get();
-  Pipeline *prefix_chunks_pipeline = cache.prefix_chunks_i32.get();
+  Pipeline *clear_pipeline = nullptr;
+  Pipeline *count_pipeline = nullptr;
+  Pipeline *count_private_pipeline = nullptr;
+  Pipeline *prefix_pipeline = cache.bucket_prefix_i32_pipeline();
+  Pipeline *prefix_chunks_pipeline = nullptr;
   const int scatter_value_type =
       item_bytes == expected_value_size ? value_type : 7;
-  Pipeline *scatter_pipeline = cache.bucket_scatter_pipeline(scatter_value_type);
-  Pipeline *scatter_private_pipeline =
-      cache.bucket_scatter_private_pipeline(scatter_value_type);
-  ShaderResourceSet *clear_bindings = cache.resource_set(cache.clear_bindings);
-  ShaderResourceSet *count_bindings = cache.resource_set(cache.count_bindings);
-  ShaderResourceSet *count_private_bindings =
-      cache.resource_set(cache.count_private_bindings);
+  Pipeline *scatter_pipeline = nullptr;
+  Pipeline *scatter_private_pipeline = nullptr;
+  ShaderResourceSet *clear_bindings = nullptr;
+  ShaderResourceSet *count_bindings = nullptr;
+  ShaderResourceSet *count_private_bindings = nullptr;
   ShaderResourceSet *prefix_bindings = cache.resource_set(cache.prefix_bindings);
-  ShaderResourceSet *prefix_chunks_bindings =
-      cache.resource_set(cache.prefix_chunks_bindings);
-  ShaderResourceSet *scatter_bindings =
-      cache.bucket_scatter_resource_set(scatter_value_type);
-  ShaderResourceSet *scatter_private_bindings =
-      cache.bucket_scatter_private_resource_set(scatter_value_type);
-  const char *scatter_scope = cache.bucket_scatter_scope(scatter_value_type);
-  const char *scatter_private_scope =
-      cache.bucket_scatter_private_scope(scatter_value_type);
+  ShaderResourceSet *prefix_chunks_bindings = nullptr;
+  ShaderResourceSet *scatter_bindings = nullptr;
+  ShaderResourceSet *scatter_private_bindings = nullptr;
+  const char *scatter_scope = nullptr;
+  const char *scatter_private_scope = nullptr;
+  if (use_private) {
+    count_private_pipeline = cache.bucket_count_private_shared_i32_pipeline();
+    prefix_chunks_pipeline = cache.bucket_prefix_chunks_i32_pipeline();
+    scatter_private_pipeline =
+        cache.bucket_scatter_private_pipeline(scatter_value_type);
+    count_private_bindings = cache.resource_set(cache.count_private_bindings);
+    prefix_chunks_bindings =
+        cache.resource_set(cache.prefix_chunks_bindings);
+    scatter_private_bindings =
+        cache.bucket_scatter_private_resource_set(scatter_value_type);
+    scatter_private_scope =
+        cache.bucket_scatter_private_scope(scatter_value_type);
+  } else {
+    clear_pipeline = cache.bucket_clear_i32_pipeline();
+    count_pipeline = cache.bucket_count_i32_pipeline();
+    scatter_pipeline = cache.bucket_scatter_pipeline(scatter_value_type);
+    clear_bindings = cache.resource_set(cache.clear_bindings);
+    count_bindings = cache.resource_set(cache.count_bindings);
+    scatter_bindings = cache.bucket_scatter_resource_set(scatter_value_type);
+    scatter_scope = cache.bucket_scatter_scope(scatter_value_type);
+  }
   const DeviceAllocation partial_alloc = cache.partial;
   const uint32_t private_groups = static_cast<uint32_t>(private_chunks);
   const uint32_t prefix_chunk_groups =
@@ -8429,6 +8639,262 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
           scatter_bindings->rw_buffer(1, values_alloc.get_ptr(0), value_bytes);
           scatter_bindings->rw_buffer(2, cursor_alloc.get_ptr(0), cursor_bytes);
           scatter_bindings->rw_buffer(3, output_alloc.get_ptr(0), value_bytes);
+          dispatch_pipeline(cmdlist, scatter_pipeline, scatter_bindings,
+                            item_groups, 1, 1,
+                            profiler_scopes ? scatter_scope : nullptr);
+          cmdlist->buffer_barrier(output_alloc);
+        }
+      },
+      {});
+  return use_private ? cache.cached_bytes : 0;
+}
+
+std::size_t Program::vulkan_bucket_builder_dense_field(SNode *keys,
+                                                       SNode *values,
+                                                       SNode *offsets,
+                                                       SNode *output,
+                                                       Ndarray *cursor,
+                                                       int value_type,
+                                                       std::size_t n,
+                                                       std::size_t num_bins) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native dense field bucket builder is only available on "
+              "Vulkan.");
+  TI_ERROR_IF(!keys || !values || !offsets || !output || !cursor,
+              "Vulkan native dense field bucket builder received a null input.");
+  TI_ERROR_IF(num_bins == 0,
+              "Vulkan native dense field bucket builder expects at least one "
+              "bucket.");
+  TI_ERROR_IF(cursor->shape.size() != 1 ||
+                  cursor->get_nelement() < num_bins ||
+                  cursor->get_element_size() != sizeof(int32_t),
+              "Vulkan native dense field bucket builder cursor must be a 1D "
+              "i32 ndarray with at least num_bins items.");
+  TI_ERROR_IF(!vulkan_bucket_builder_value_type_available(value_type),
+              "Vulkan native dense field bucket builder received an "
+              "unsupported value type.");
+  const size_t item_bytes = vulkan_scan_value_type_size(value_type);
+  TI_ERROR_IF(item_bytes == 0,
+              "Vulkan native dense field bucket builder received an "
+              "unsupported value type.");
+  DevicePtr keys_ptr = get_dense_field_device_ptr(keys);
+  DevicePtr values_ptr = get_dense_field_device_ptr(values);
+  DevicePtr offsets_ptr = get_dense_field_device_ptr(offsets);
+  DevicePtr output_ptr = get_dense_field_device_ptr(output);
+  const size_t keys_stride = get_dense_field_stride(keys, sizeof(int32_t));
+  const size_t values_stride = get_dense_field_stride(values, item_bytes);
+  const size_t offsets_stride =
+      get_dense_field_stride(offsets, sizeof(int32_t));
+  const size_t output_stride = get_dense_field_stride(output, item_bytes);
+  TI_ERROR_IF(keys_stride != sizeof(int32_t) || values_stride != item_bytes ||
+                  offsets_stride != sizeof(int32_t) ||
+                  output_stride != item_bytes,
+              "Vulkan native dense field bucket builder requires contiguous "
+              "keys, values, offsets, and output fields.");
+  TI_ERROR_IF(n > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ||
+                  num_bins >
+                      static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native dense field bucket builder input is too large for "
+              "u32 dispatch.");
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(device == nullptr,
+              "Vulkan native dense field bucket builder requires a compute "
+              "device.");
+  auto &cache = get_bucket_builder_cache(this, device);
+  const DeviceAllocation keys_alloc{keys_ptr.device, keys_ptr.alloc_id};
+  const DeviceAllocation values_alloc{values_ptr.device, values_ptr.alloc_id};
+  const DeviceAllocation offsets_alloc{offsets_ptr.device,
+                                       offsets_ptr.alloc_id};
+  const DeviceAllocation output_alloc{output_ptr.device, output_ptr.alloc_id};
+  const DeviceAllocation cursor_alloc = cursor->ndarray_alloc_;
+  const size_t key_bytes = n * sizeof(int32_t);
+  const size_t value_bytes = n * item_bytes;
+  const size_t offset_bytes = (num_bins + 1) * sizeof(int32_t);
+  const size_t cursor_bytes = num_bins * sizeof(int32_t);
+  const uint32_t item_groups =
+      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
+  const uint32_t offset_groups = static_cast<uint32_t>(
+      (num_bins + 1 + kBlockSize - 1) / kBlockSize);
+  constexpr size_t kPrivateChunkSize = 2048;
+  const size_t private_chunks =
+      n == 0 ? 0 : (n + kPrivateChunkSize - 1) / kPrivateChunkSize;
+  const size_t private_partial_bytes =
+      private_chunks * num_bins * sizeof(int32_t);
+  const int private_enabled =
+      get_environ_config("TI_VULKAN_BUCKET_BUILDER_PRIVATE", 1);
+  const int private_min_n_config =
+      get_environ_config("TI_VULKAN_BUCKET_BUILDER_PRIVATE_MIN_N", 65536);
+  const size_t private_min_n =
+      private_min_n_config <= 0 ? 0 : static_cast<size_t>(private_min_n_config);
+  const int private_max_bins_config =
+      get_environ_config("TI_VULKAN_BUCKET_BUILDER_PRIVATE_MAX_BINS", 1024);
+  const size_t private_max_bins =
+      private_max_bins_config <= 0 ? 0
+                                   : static_cast<size_t>(private_max_bins_config);
+  const int private_max_bytes_config = get_environ_config(
+      "TI_VULKAN_BUCKET_BUILDER_PRIVATE_MAX_BYTES", 4 * 1024 * 1024);
+  const size_t private_max_bytes =
+      private_max_bytes_config <= 0
+          ? 0
+          : static_cast<size_t>(private_max_bytes_config);
+  const bool use_private =
+      private_enabled != 0 && n >= private_min_n && n > 0 &&
+      num_bins <= private_max_bins && num_bins <= 4096 &&
+      private_partial_bytes > 0 && private_partial_bytes <= private_max_bytes;
+  if (use_private && cache.needs_workspace_realloc(private_partial_bytes) &&
+      cache.partial != kDeviceNullAllocation) {
+    synchronize();
+  }
+  if (use_private) {
+    cache.ensure_workspace(private_partial_bytes);
+  }
+  Pipeline *clear_pipeline = nullptr;
+  Pipeline *count_pipeline = nullptr;
+  Pipeline *count_private_pipeline = nullptr;
+  Pipeline *prefix_pipeline = cache.bucket_prefix_i32_pipeline();
+  Pipeline *prefix_chunks_pipeline = nullptr;
+  Pipeline *scatter_pipeline = nullptr;
+  Pipeline *scatter_private_pipeline = nullptr;
+  ShaderResourceSet *clear_bindings = nullptr;
+  ShaderResourceSet *count_bindings = nullptr;
+  ShaderResourceSet *count_private_bindings = nullptr;
+  ShaderResourceSet *prefix_bindings = cache.resource_set(cache.prefix_bindings);
+  ShaderResourceSet *prefix_chunks_bindings = nullptr;
+  ShaderResourceSet *scatter_bindings = nullptr;
+  ShaderResourceSet *scatter_private_bindings = nullptr;
+  const char *scatter_scope = nullptr;
+  const char *scatter_private_scope = nullptr;
+  if (use_private) {
+    count_private_pipeline = cache.bucket_count_private_shared_i32_pipeline();
+    prefix_chunks_pipeline = cache.bucket_prefix_chunks_i32_pipeline();
+    scatter_private_pipeline =
+        cache.bucket_scatter_private_pipeline(value_type);
+    count_private_bindings = cache.resource_set(cache.count_private_bindings);
+    prefix_chunks_bindings =
+        cache.resource_set(cache.prefix_chunks_bindings);
+    scatter_private_bindings =
+        cache.bucket_scatter_private_resource_set(value_type);
+    scatter_private_scope = cache.bucket_scatter_private_scope(value_type);
+  } else {
+    clear_pipeline = cache.bucket_clear_i32_pipeline();
+    count_pipeline = cache.bucket_count_i32_pipeline();
+    scatter_pipeline = cache.bucket_scatter_pipeline(value_type);
+    clear_bindings = cache.resource_set(cache.clear_bindings);
+    count_bindings = cache.resource_set(cache.count_bindings);
+    scatter_bindings = cache.bucket_scatter_resource_set(value_type);
+    scatter_scope = cache.bucket_scatter_scope(value_type);
+  }
+  const DeviceAllocation partial_alloc = cache.partial;
+  const uint32_t private_groups = static_cast<uint32_t>(private_chunks);
+  const uint32_t prefix_chunk_groups =
+      static_cast<uint32_t>((num_bins + kBlockSize - 1) / kBlockSize);
+  const bool profiler_scopes = profiler != nullptr;
+  enqueue_compute_op_lambda(
+      [keys_alloc, values_alloc, offsets_alloc, output_alloc, cursor_alloc,
+       partial_alloc, key_bytes, value_bytes, offset_bytes, cursor_bytes,
+       private_partial_bytes, item_groups, offset_groups, use_private,
+       private_groups, prefix_chunk_groups, clear_pipeline, count_pipeline,
+       count_private_pipeline, prefix_pipeline, prefix_chunks_pipeline,
+       scatter_pipeline, scatter_private_pipeline, clear_bindings,
+       count_bindings, count_private_bindings, prefix_bindings,
+       prefix_chunks_bindings, scatter_bindings, scatter_private_bindings,
+       scatter_scope, scatter_private_scope, keys_ptr, values_ptr, offsets_ptr,
+       output_ptr, profiler_scopes](Device * /*op_device*/,
+                                    CommandList *cmdlist) {
+        if (use_private) {
+          count_private_bindings->rw_buffer(0, keys_alloc.get_ptr(keys_ptr.offset),
+                                            key_bytes);
+          count_private_bindings->rw_buffer(1, partial_alloc.get_ptr(0),
+                                            private_partial_bytes);
+          dispatch_pipeline(
+              cmdlist, count_private_pipeline, count_private_bindings,
+              private_groups, 1, 1,
+              profiler_scopes ? "vulkan_bucket_count_private_shared_i32"
+                              : nullptr);
+          cmdlist->buffer_barrier(partial_alloc);
+
+          prefix_chunks_bindings->rw_buffer(0, partial_alloc.get_ptr(0),
+                                            private_partial_bytes);
+          prefix_chunks_bindings->rw_buffer(1, offsets_alloc.get_ptr(offsets_ptr.offset),
+                                            offset_bytes);
+          dispatch_pipeline(cmdlist, prefix_chunks_pipeline,
+                            prefix_chunks_bindings, prefix_chunk_groups, 1, 1,
+                            profiler_scopes
+                                ? "vulkan_bucket_prefix_chunks_i32"
+                                : nullptr);
+          cmdlist->buffer_barrier(partial_alloc);
+          cmdlist->buffer_barrier(offsets_alloc);
+
+          prefix_bindings->rw_buffer(0, offsets_alloc.get_ptr(offsets_ptr.offset),
+                                     offset_bytes);
+          prefix_bindings->rw_buffer(1, cursor_alloc.get_ptr(0), cursor_bytes);
+          dispatch_pipeline(cmdlist, prefix_pipeline, prefix_bindings, 1, 1, 1,
+                            profiler_scopes ? "vulkan_bucket_prefix_i32"
+                                            : nullptr);
+          cmdlist->buffer_barrier(offsets_alloc);
+          cmdlist->buffer_barrier(cursor_alloc);
+
+          scatter_private_bindings->rw_buffer(0, keys_alloc.get_ptr(keys_ptr.offset),
+                                              key_bytes);
+          scatter_private_bindings->rw_buffer(1,
+                                              values_alloc.get_ptr(values_ptr.offset),
+                                              value_bytes);
+          scatter_private_bindings->rw_buffer(2, partial_alloc.get_ptr(0),
+                                              private_partial_bytes);
+          scatter_private_bindings->rw_buffer(3,
+                                              offsets_alloc.get_ptr(offsets_ptr.offset),
+                                              offset_bytes);
+          scatter_private_bindings->rw_buffer(4,
+                                              output_alloc.get_ptr(output_ptr.offset),
+                                              value_bytes);
+          dispatch_pipeline(
+              cmdlist, scatter_private_pipeline, scatter_private_bindings,
+              private_groups, 1, 1,
+              profiler_scopes ? scatter_private_scope : nullptr);
+          cmdlist->buffer_barrier(output_alloc);
+          return;
+        }
+
+        clear_bindings->rw_buffer(0, offsets_alloc.get_ptr(offsets_ptr.offset),
+                                  offset_bytes);
+        clear_bindings->rw_buffer(1, cursor_alloc.get_ptr(0), cursor_bytes);
+        dispatch_pipeline(cmdlist, clear_pipeline, clear_bindings,
+                          offset_groups, 1, 1,
+                          profiler_scopes ? "vulkan_bucket_clear_i32"
+                                          : nullptr);
+        cmdlist->buffer_barrier(offsets_alloc);
+        cmdlist->buffer_barrier(cursor_alloc);
+
+        if (item_groups > 0) {
+          count_bindings->rw_buffer(0, keys_alloc.get_ptr(keys_ptr.offset),
+                                    key_bytes);
+          count_bindings->rw_buffer(1, offsets_alloc.get_ptr(offsets_ptr.offset),
+                                    offset_bytes);
+          dispatch_pipeline(cmdlist, count_pipeline, count_bindings,
+                            item_groups, 1, 1,
+                            profiler_scopes ? "vulkan_bucket_count_i32"
+                                            : nullptr);
+          cmdlist->buffer_barrier(offsets_alloc);
+        }
+
+        prefix_bindings->rw_buffer(0, offsets_alloc.get_ptr(offsets_ptr.offset),
+                                   offset_bytes);
+        prefix_bindings->rw_buffer(1, cursor_alloc.get_ptr(0), cursor_bytes);
+        dispatch_pipeline(cmdlist, prefix_pipeline, prefix_bindings, 1, 1, 1,
+                          profiler_scopes ? "vulkan_bucket_prefix_i32"
+                                          : nullptr);
+        cmdlist->buffer_barrier(offsets_alloc);
+        cmdlist->buffer_barrier(cursor_alloc);
+
+        if (item_groups > 0) {
+          scatter_bindings->rw_buffer(0, keys_alloc.get_ptr(keys_ptr.offset),
+                                      key_bytes);
+          scatter_bindings->rw_buffer(1, values_alloc.get_ptr(values_ptr.offset),
+                                      value_bytes);
+          scatter_bindings->rw_buffer(2, cursor_alloc.get_ptr(0), cursor_bytes);
+          scatter_bindings->rw_buffer(3, output_alloc.get_ptr(output_ptr.offset),
+                                      value_bytes);
           dispatch_pipeline(cmdlist, scatter_pipeline, scatter_bindings,
                             item_groups, 1, 1,
                             profiler_scopes ? scatter_scope : nullptr);
@@ -9930,6 +10396,18 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
   return 0;
 }
 
+std::size_t Program::vulkan_bucket_builder_dense_field(SNode *keys,
+                                                       SNode *values,
+                                                       SNode *offsets,
+                                                       SNode *output,
+                                                       Ndarray *cursor,
+                                                       int value_type,
+                                                       std::size_t n,
+                                                       std::size_t num_bins) {
+  TI_ERROR("Vulkan native dense field bucket builder requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 std::size_t Program::vulkan_grouped_reduce_i32_atomic_ndarray(Ndarray *keys,
                                                               Ndarray *values,
                                                               Ndarray *output,
@@ -9944,6 +10422,18 @@ std::size_t Program::vulkan_grouped_reduce_atomic_ndarray(Ndarray *keys,
                                                           int value_type,
                                                           int op) {
   TI_ERROR("Vulkan native grouped reduce requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_grouped_reduce_atomic_dense_field(
+    SNode *keys,
+    SNode *values,
+    SNode *output,
+    int value_type,
+    std::size_t n,
+    std::size_t num_groups,
+    int op) {
+  TI_ERROR("Vulkan native dense field grouped reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
 

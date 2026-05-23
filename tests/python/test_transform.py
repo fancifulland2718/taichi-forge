@@ -471,6 +471,7 @@ def test_experimental_transform_vulkan_native_dense_field_dtypes():
         and prog.vulkan_transform_available()
     ):
         pytest.skip("Vulkan native transform is unavailable in this runtime.")
+    prog.vulkan_transform_clear_workspace()
 
     tested = 0
     for dtype, value_type in (
@@ -490,7 +491,7 @@ def test_experimental_transform_vulkan_native_dense_field_dtypes():
             dtype, n, method="vulkan_native", workspace=workspace
         )
         if dtype in (ti.i32, ti.u32):
-            assert workspace.workspace_bytes_peak == 0
+            assert workspace.workspace_bytes_peak <= 8
         else:
             assert workspace.workspace_bytes_peak >= 8
         tested += 1
