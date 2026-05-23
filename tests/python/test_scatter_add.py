@@ -67,9 +67,21 @@ def _run_struct_member_scatter_add(dtype, np_dtype, method):
     indices.from_numpy(indices_np)
     dst.from_numpy(dst_host)
     workspace = ti.algorithms.ScatterAddWorkspace(max_items=n)
+    src_value = src.field("value")
+    dst_value = dst.field("value")
     ti.algorithms.experimental_scatter_add(
-        src.field("value"), indices, dst.field("value"), method=method, workspace=workspace
+        src_value, indices, dst_value, method=method, workspace=workspace
     )
+    result = dst.to_numpy()
+    _assert_matches(result["value"], expected)
+    np.testing.assert_array_equal(result["tag"], dst_host["tag"])
+    assert len(workspace._native_scatter_add_plans) == 1
+    plan = workspace._native_scatter_add_plans[0]
+    dst.from_numpy(dst_host)
+    ti.algorithms.experimental_scatter_add(
+        src_value, indices, dst_value, method=method, workspace=workspace
+    )
+    assert workspace._native_scatter_add_plans[0] is plan
     result = dst.to_numpy()
     _assert_matches(result["value"], expected)
     np.testing.assert_array_equal(result["tag"], dst_host["tag"])
@@ -110,18 +122,62 @@ def _run_struct_tensor_member_scatter_add(method):
     src.from_numpy(host)
     indices.from_numpy(indices_np)
     dst.from_numpy(dst_host)
+    workspace = ti.algorithms.ScatterAddWorkspace(max_items=n)
+    src_vec = src.field("vec")
+    dst_vec = dst.field("vec")
+    src_mat = src.field("mat")
+    dst_mat = dst.field("mat")
     ti.algorithms.experimental_scatter_add(
-        src.field("vec"), indices, dst.field("vec"), method=method
+        src_vec, indices, dst_vec, method=method, workspace=workspace
     )
+    result = dst.to_numpy()
+    np.testing.assert_array_equal(result["vec"], expected_vec)
+    np.testing.assert_array_equal(result["mat"], base_mat)
+    assert len(workspace._native_scatter_add_plans) == 2
+    vec_plans = tuple(workspace._native_scatter_add_plans)
+    dst.from_numpy(dst_host)
     ti.algorithms.experimental_scatter_add(
-        src.field("mat"), indices, dst.field("mat"), method=method
+        src_vec, indices, dst_vec, method=method, workspace=workspace
     )
+    assert tuple(workspace._native_scatter_add_plans) == vec_plans
+    ti.algorithms.experimental_scatter_add(
+        src_mat, indices, dst_mat, method=method, workspace=workspace
+    )
+    assert len(workspace._native_scatter_add_plans) == 6
 
     result = dst.to_numpy()
     np.testing.assert_array_equal(result["vec"], expected_vec)
     np.testing.assert_array_equal(result["mat"], expected_mat)
     np.testing.assert_array_equal(result["tag"], dst_host["tag"])
     np.testing.assert_array_equal(src.to_numpy()["tag"], host["tag"])
+
+
+def _run_dense_field_scatter_add(dtype, np_dtype, method):
+    n = 2048
+    buckets = 127
+    src = ti.field(dtype, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    dst = ti.field(dtype, shape=buckets)
+    values_np, indices_np, base_np, expected = _scatter_add_input(n, buckets, np_dtype)
+    src.from_numpy(values_np)
+    indices.from_numpy(indices_np)
+    dst.from_numpy(base_np)
+    workspace = ti.algorithms.ScatterAddWorkspace(max_items=n)
+    ti.algorithms.experimental_scatter_add(
+        src, indices, dst, method=method, workspace=workspace
+    )
+    _assert_matches(dst.to_numpy(), expected)
+    assert len(workspace._native_scatter_add_plans) == 1
+    plan = workspace._native_scatter_add_plans[0]
+    assert plan["backend"] in {"cpu_native", "cuda_device", "vulkan_native"}
+    assert "scatter_add_dense_field" in plan["method_name"]
+
+    dst.from_numpy(base_np)
+    ti.algorithms.experimental_scatter_add(
+        src, indices, dst, method=method, workspace=workspace
+    )
+    assert workspace._native_scatter_add_plans[0] is plan
+    _assert_matches(dst.to_numpy(), expected)
 
 
 @test_utils.test(arch=[ti.cuda])
@@ -143,6 +199,12 @@ def test_experimental_scatter_add_cuda_device_ndarray_wide_dtypes():
     ]:
         _run_ndarray_scatter_add(dtype, np_dtype, method)
         _run_struct_member_scatter_add(dtype, np_dtype, "cuda_device")
+    for dtype, np_dtype in [
+        (ti.i32, np.int32),
+        (ti.f32, np.float32),
+        (ti.u32, np.uint32),
+    ]:
+        _run_dense_field_scatter_add(dtype, np_dtype, "cuda_device")
     _run_struct_tensor_member_scatter_add("cuda_device")
 
 
@@ -157,11 +219,13 @@ def test_experimental_scatter_add_vulkan_native_ndarray_i32_u32_and_f32_atomic()
 
     _run_ndarray_scatter_add(ti.i32, np.int32, "auto")
     _run_struct_member_scatter_add(ti.i32, np.int32, "vulkan_native")
+    _run_dense_field_scatter_add(ti.i32, np.int32, "vulkan_native")
     _run_struct_tensor_member_scatter_add("vulkan_native")
     if hasattr(prog, "vulkan_scatter_add_value_type_available"):
         assert prog.vulkan_scatter_add_value_type_available(2)
     _run_ndarray_scatter_add(ti.u32, np.uint32, "vulkan_native")
     _run_struct_member_scatter_add(ti.u32, np.uint32, "vulkan_native")
+    _run_dense_field_scatter_add(ti.u32, np.uint32, "vulkan_native")
     _run_ndarray_scatter_add(ti.f32, np.float32, "auto")
     f32_native = (
         hasattr(prog, "vulkan_scatter_add_value_type_available")
@@ -171,6 +235,7 @@ def test_experimental_scatter_add_vulkan_native_ndarray_i32_u32_and_f32_atomic()
         for _ in range(3):
             _run_ndarray_scatter_add(ti.f32, np.float32, "vulkan_native")
             _run_struct_member_scatter_add(ti.f32, np.float32, "vulkan_native")
+            _run_dense_field_scatter_add(ti.f32, np.float32, "vulkan_native")
     else:
         with pytest.raises(RuntimeError, match="value dtype"):
             _run_ndarray_scatter_add(ti.f32, np.float32, "vulkan_native")
@@ -235,6 +300,12 @@ def test_experimental_scatter_add_cpu_native_ndarray_wide_dtypes():
     ]:
         _run_ndarray_scatter_add(dtype, np_dtype, method)
         _run_struct_member_scatter_add(dtype, np_dtype, "cpu_native")
+    for dtype, np_dtype in [
+        (ti.i32, np.int32),
+        (ti.f32, np.float32),
+        (ti.u32, np.uint32),
+    ]:
+        _run_dense_field_scatter_add(dtype, np_dtype, "cpu_native")
     _run_struct_tensor_member_scatter_add("cpu_native")
     assert impl.get_runtime().prog.cpu_scatter_add_workspace_bytes() == 0
 

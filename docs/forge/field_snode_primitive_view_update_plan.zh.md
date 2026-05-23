@@ -519,6 +519,52 @@ S0 进入 S1 的条件：
   `build_llvm20_test/wheel_smoke_s4_indexed_plan_20260523` 后完成
   `import taichi_forge as ti; ti.init(arch=ti.cpu)` smoke；offline cache lock
   warning 不影响导入和 CPU 初始化。
+- S5 已开始推进 dense field indexed-copy：
+  - `experimental_gather()` / `experimental_scatter()` 对 1D dense field +
+    `ti.ndarray` i32 indices 新增 CPU/CUDA/Vulkan native entrypoint。
+  - Python routing 通过 `_PrimitiveView` 证明 dense field，并复用
+    `_NativePrimitivePlan` 写入 `IndexedCopyWorkspace._native_indexed_copy_plan`。
+  - Vulkan indexed-copy cache 改为按实际 primitive 懒创建 pipeline，避免
+    首次调用同时创建 scatter-add/strided 等无关 pipeline。
+  - Vulkan 32-bit scatter 增加专用 native shader；gather 复测后保留通用
+    lazy pipeline，避免 1M 吞吐回退。
+  - CPU indexed-copy 共享内层改为 32-bit word copy，覆盖 ndarray、
+    StructNdarray member 与 dense field native path。
+  - 文件级回归 `tests/python/test_indexed_copy.py` 更新为 23 passed。
+  - 主结果写入
+    `benchmarks/results/s5_dense_field_indexed_wordcopy_20260523/summary.csv`；
+    Vulkan gather 1M 复测写入
+    `benchmarks/results/s5_dense_field_indexed_vulkan_gather_repeat_20260523/summary.csv`。
+  - first-call/compile 窗口 CPU/CUDA/Vulkan 均优于 vanilla 1.8.0；workspace
+    均为 0 B；Vulkan GPU dedicated delta 约 89 MB，低于 vanilla 约 121 MB。
+    CPU 1M warm runtime 仍慢于 vanilla field kernel，后续需要继续优化 CPU
+    大规模路径或增加 auto cost model。
+- S5 已补齐 dense field `scatter_add` / `histogram`，并同步
+  StructNdarray 相关路径：
+  - `experimental_scatter_add()` 对 1D dense field + `ti.ndarray` i32
+    indices 新增 CPU/CUDA/Vulkan native entrypoint，并通过
+    `ScatterAddWorkspace._native_scatter_add_plans` 记录 `_NativePrimitivePlan`。
+  - StructNdarray scalar member / tensor member 的 scatter-add component
+    调用改为稳定 request signature，重复构造 member view 时复用同一 plan；
+    tensor member 按 component 记录 plan，不再回到旧 helper fallback。
+  - `experimental_histogram()` 对 contiguous 1D dense field values/bins 新增
+    CPU/CUDA/Vulkan native entrypoint；Vulkan histogram cache 改为按实际路径
+    懒创建 pipeline，避免 i32/u32/i64 direct/private/shared pipeline 一次性全部创建。
+  - StructNdarray scalar member histogram 暂时显式拒绝并提示需要 native
+    strided histogram；这比旧路径静默回到 field/helper 更清晰，也避免重新引入
+    多 helper IR 膨胀。
+  - 本轮未加入自动选择策略：调用者指定 `cpu_native`、`cuda_cub`、
+    `cuda_device` 或 `vulkan_native` 时直接走对应 native path；后续 cost model
+    另行处理。
+  - 代表性结果写入
+    `benchmarks/results/s5_dense_field_scatter_add_histogram_lazy_vkhist_20260523/summary.csv`。
+    first-call/compile 窗口 CPU/CUDA/Vulkan 均优于 vanilla 1.8.0；CPU 1M
+    warm runtime 优于 vanilla；CUDA/Vulkan warm runtime 仍受 native API 固定
+    dispatch/sync 成本影响，后续需要专门优化 GPU 小 kernel replay 或更轻量的
+    device kernel。
+  - correctness 回归：
+    `tests/python/test_scatter_add.py tests/python/test_histogram.py` 22 passed
+    （关闭 offline cache；pytest cache 目录权限 warning 不影响结果）。
 - 当前机器用户给定的 miniforge 3.10 路径不可执行，因此本轮使用
   `C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe`
   完成等价版本检查和 smoke。

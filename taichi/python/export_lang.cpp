@@ -720,6 +720,11 @@ void export_lang(py::module &m) {
            py::arg("src_offset"), py::arg("src_stride"),
            py::arg("dst_offset"), py::arg("dst_stride"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_gather_dense_field",
+           &Program::cuda_device_gather_dense_field, py::arg("src"),
+           py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+           py::arg("src_n"), py::arg("dst_n"),
+           py::call_guard<py::gil_scoped_release>())
        .def("cuda_device_scatter_ndarray",
             &Program::cuda_device_scatter_ndarray, py::arg("src"),
             py::arg("indices"), py::arg("dst"),
@@ -729,6 +734,11 @@ void export_lang(py::module &m) {
             py::arg("indices"), py::arg("dst"), py::arg("item_bytes"),
             py::arg("src_offset"), py::arg("src_stride"),
             py::arg("dst_offset"), py::arg("dst_stride"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_scatter_dense_field",
+            &Program::cuda_device_scatter_dense_field, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("src_n"), py::arg("dst_n"),
             py::call_guard<py::gil_scoped_release>())
        .def("cuda_device_scatter_add_available",
             &Program::cuda_device_scatter_add_available)
@@ -746,6 +756,11 @@ void export_lang(py::module &m) {
             py::arg("indices"), py::arg("dst"), py::arg("value_type"),
             py::arg("src_offset"), py::arg("src_stride"),
             py::arg("dst_offset"), py::arg("dst_stride"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_scatter_add_dense_field",
+            &Program::cuda_device_scatter_add_dense_field, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("src_n"), py::arg("dst_n"),
             py::call_guard<py::gil_scoped_release>())
        .def("cuda_device_bucket_builder_available",
             &Program::cuda_device_bucket_builder_available)
@@ -890,6 +905,11 @@ void export_lang(py::module &m) {
       .def("cuda_cub_histogram_i32_ndarray",
            &Program::cuda_cub_histogram_i32_ndarray, py::arg("values"),
            py::arg("bins"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_histogram_dense_field",
+           &Program::cuda_cub_histogram_dense_field, py::arg("values"),
+           py::arg("bins"), py::arg("value_type"), py::arg("bin_type"),
+           py::arg("n"), py::arg("num_bins"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_reduce_available", &Program::cuda_cub_reduce_available)
       .def("cuda_cub_reduce_clear_workspace",
            &Program::cuda_cub_reduce_clear_workspace,
@@ -947,6 +967,10 @@ void export_lang(py::module &m) {
       .def("cpu_histogram_i32_ndarray",
            &Program::cpu_histogram_i32_ndarray, py::arg("values"),
            py::arg("bins"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_histogram_dense_field", &Program::cpu_histogram_dense_field,
+           py::arg("values"), py::arg("bins"), py::arg("value_type"),
+           py::arg("bin_type"), py::arg("n"), py::arg("num_bins"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_reduce_available", &Program::cpu_reduce_available)
       .def("cpu_reduce_workspace_bytes", &Program::cpu_reduce_workspace_bytes)
       .def("cpu_reduce_ndarray", &Program::cpu_reduce_ndarray,
@@ -1008,6 +1032,10 @@ void export_lang(py::module &m) {
            py::arg("src_offset"), py::arg("src_stride"),
            py::arg("dst_offset"), py::arg("dst_stride"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cpu_gather_dense_field", &Program::cpu_gather_dense_field,
+           py::arg("src"), py::arg("indices"), py::arg("dst"),
+           py::arg("value_type"), py::arg("src_n"), py::arg("dst_n"),
+           py::call_guard<py::gil_scoped_release>())
        .def("cpu_scatter_ndarray", &Program::cpu_scatter_ndarray,
             py::arg("src"), py::arg("indices"), py::arg("dst"),
             py::call_guard<py::gil_scoped_release>())
@@ -1016,6 +1044,10 @@ void export_lang(py::module &m) {
             py::arg("indices"), py::arg("dst"), py::arg("item_bytes"),
             py::arg("src_offset"), py::arg("src_stride"),
             py::arg("dst_offset"), py::arg("dst_stride"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cpu_scatter_dense_field", &Program::cpu_scatter_dense_field,
+            py::arg("src"), py::arg("indices"), py::arg("dst"),
+            py::arg("value_type"), py::arg("src_n"), py::arg("dst_n"),
             py::call_guard<py::gil_scoped_release>())
        .def("cpu_scatter_add_available", &Program::cpu_scatter_add_available)
        .def("cpu_scatter_add_workspace_bytes",
@@ -1033,6 +1065,11 @@ void export_lang(py::module &m) {
             py::arg("indices"), py::arg("dst"), py::arg("value_type"),
             py::arg("src_offset"), py::arg("src_stride"),
             py::arg("dst_offset"), py::arg("dst_stride"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cpu_scatter_add_dense_field",
+            &Program::cpu_scatter_add_dense_field, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("src_n"), py::arg("dst_n"),
             py::call_guard<py::gil_scoped_release>())
        .def("cpu_bucket_builder_available",
             &Program::cpu_bucket_builder_available)
@@ -1138,6 +1175,11 @@ void export_lang(py::module &m) {
       .def("vulkan_histogram_i32_ndarray",
            &Program::vulkan_histogram_i32_ndarray, py::arg("values"),
            py::arg("bins"), py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_histogram_dense_field",
+           &Program::vulkan_histogram_dense_field, py::arg("values"),
+           py::arg("bins"), py::arg("value_type"), py::arg("bin_type"),
+           py::arg("n"), py::arg("num_bins"),
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_reduce_available", &Program::vulkan_reduce_available)
       .def("vulkan_reduce_clear_workspace",
            &Program::vulkan_reduce_clear_workspace,
@@ -1221,6 +1263,10 @@ void export_lang(py::module &m) {
            py::arg("src_offset"), py::arg("src_stride"),
            py::arg("dst_offset"), py::arg("dst_stride"),
            py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_gather_dense_field", &Program::vulkan_gather_dense_field,
+           py::arg("src"), py::arg("indices"), py::arg("dst"),
+           py::arg("value_type"), py::arg("src_n"), py::arg("dst_n"),
+           py::call_guard<py::gil_scoped_release>())
        .def("vulkan_scatter_ndarray", &Program::vulkan_scatter_ndarray,
             py::arg("src"), py::arg("indices"), py::arg("dst"),
             py::call_guard<py::gil_scoped_release>())
@@ -1229,6 +1275,11 @@ void export_lang(py::module &m) {
             py::arg("indices"), py::arg("dst"), py::arg("item_bytes"),
             py::arg("src_offset"), py::arg("src_stride"),
             py::arg("dst_offset"), py::arg("dst_stride"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_scatter_dense_field",
+            &Program::vulkan_scatter_dense_field, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("src_n"), py::arg("dst_n"),
             py::call_guard<py::gil_scoped_release>())
        .def("vulkan_scatter_add_available",
             &Program::vulkan_scatter_add_available)
@@ -1254,6 +1305,11 @@ void export_lang(py::module &m) {
             py::arg("indices"), py::arg("dst"), py::arg("value_type"),
             py::arg("src_offset"), py::arg("src_stride"),
             py::arg("dst_offset"), py::arg("dst_stride"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_scatter_add_dense_field",
+            &Program::vulkan_scatter_add_dense_field, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("src_n"), py::arg("dst_n"),
             py::call_guard<py::gil_scoped_release>())
        .def("vulkan_bucket_builder_available",
             &Program::vulkan_bucket_builder_available)

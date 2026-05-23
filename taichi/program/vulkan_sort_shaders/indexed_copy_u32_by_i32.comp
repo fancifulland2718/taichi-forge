@@ -1,0 +1,36 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Src {
+  uint data[];
+} src_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer Indices {
+  int data[];
+} indices_buf;
+
+layout(set = 0, binding = 2, std430) writeonly buffer Dst {
+  uint data[];
+} dst_buf;
+
+void main() {
+  uint item = gl_GlobalInvocationID.x;
+  if (item >= indices_buf.data.length()) {
+    return;
+  }
+  int index = indices_buf.data[item];
+
+#ifdef SCATTER_OP
+  if (index < 0 || uint(index) >= dst_buf.data.length()) {
+    return;
+  }
+  dst_buf.data[uint(index)] = src_buf.data[item];
+#else
+  if (index < 0 || uint(index) >= src_buf.data.length()) {
+    dst_buf.data[item] = 0u;
+    return;
+  }
+  dst_buf.data[item] = src_buf.data[uint(index)];
+#endif
+}

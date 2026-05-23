@@ -77,7 +77,7 @@ def _method_for(arch_name: str, op_name: str) -> str:
     if arch_name == "cpu":
         return "cpu_native"
     if arch_name == "cuda":
-        return "cuda_cub" if op_name == "reduce" else "cuda_device"
+        return "cuda_cub" if op_name in ("reduce", "histogram") else "cuda_device"
     if arch_name == "vulkan":
         return "vulkan_native"
     raise ValueError(arch_name)
@@ -87,6 +87,30 @@ def _values(n: int):
     import numpy as np  # pylint: disable=import-outside-toplevel
 
     return (np.arange(n, dtype=np.int32) % 17 - 8).astype(np.int32)
+
+
+def _indices(n: int):
+    import numpy as np  # pylint: disable=import-outside-toplevel
+
+    return (n - 1 - np.arange(n, dtype=np.int32)).astype(np.int32)
+
+
+def _bucket_count(n: int) -> int:
+    return max(64, min(n, 4096))
+
+
+def _bucket_indices(n: int):
+    import numpy as np  # pylint: disable=import-outside-toplevel
+
+    buckets = _bucket_count(n)
+    return ((np.arange(n, dtype=np.int32) * 13 + 5) % buckets).astype(np.int32)
+
+
+def _histogram_values(n: int):
+    import numpy as np  # pylint: disable=import-outside-toplevel
+
+    buckets = _bucket_count(n)
+    return ((np.arange(n, dtype=np.int32) * 7 + 3) % buckets).astype(np.int32)
 
 
 def _sync(ti) -> None:
@@ -150,6 +174,58 @@ def _make_forge_body(ti, arch_name: str, op_name: str, n: int):
 
         return body, {"workspace": workspace}
 
+    if op_name in ("gather", "scatter"):
+        indices = ti.ndarray(ti.i32, shape=n)
+        dst = ti.field(ti.i32, shape=n)
+        workspace = ti.algorithms.IndexedCopyWorkspace(max_items=n)
+        method = _method_for(arch_name, op_name)
+        indices.from_numpy(_indices(n))
+
+        if op_name == "gather":
+
+            def body():
+                ti.algorithms.experimental_gather(
+                    src, indices, dst, method=method, workspace=workspace
+                )
+
+        else:
+
+            def body():
+                ti.algorithms.experimental_scatter(
+                    src, indices, dst, method=method, workspace=workspace
+                )
+
+        return body, {"workspace": workspace}
+
+    if op_name == "scatter_add":
+        indices = ti.ndarray(ti.i32, shape=n)
+        buckets = _bucket_count(n)
+        dst = ti.field(ti.i32, shape=buckets)
+        workspace = ti.algorithms.ScatterAddWorkspace(max_items=n)
+        method = _method_for(arch_name, op_name)
+        indices.from_numpy(_bucket_indices(n))
+
+        def body():
+            ti.algorithms.experimental_scatter_add(
+                src, indices, dst, method=method, workspace=workspace
+            )
+
+        return body, {"workspace": workspace, "aux_size": buckets}
+
+    if op_name == "histogram":
+        buckets = _bucket_count(n)
+        src.from_numpy(_histogram_values(n))
+        bins = ti.field(ti.i32, shape=buckets)
+        workspace = ti.algorithms.HistogramWorkspace(max_items=n, max_bins=buckets)
+        method = _method_for(arch_name, op_name)
+
+        def body():
+            ti.algorithms.experimental_histogram(
+                src, bins, method=method, workspace=workspace
+            )
+
+        return body, {"workspace": workspace, "aux_size": buckets}
+
     raise ValueError(op_name)
 
 
@@ -185,6 +261,58 @@ def _make_vanilla_body(ti, op_name: str, n: int):
                 dst[i] = src[i] * 3 + 7
 
         return transform_affine, {}
+
+    if op_name in ("gather", "scatter"):
+        indices = ti.field(ti.i32, shape=n)
+        dst = ti.field(ti.i32, shape=n)
+        indices.from_numpy(_indices(n))
+
+        if op_name == "gather":
+
+            @ti.kernel
+            def gather_field():
+                for i in indices:
+                    dst[i] = src[indices[i]]
+
+            return gather_field, {}
+
+        @ti.kernel
+        def scatter_field():
+            for i in indices:
+                dst[indices[i]] = src[i]
+
+        return scatter_field, {}
+
+    if op_name == "scatter_add":
+        buckets = _bucket_count(n)
+        indices = ti.field(ti.i32, shape=n)
+        dst = ti.field(ti.i32, shape=buckets)
+        indices.from_numpy(_bucket_indices(n))
+
+        @ti.kernel
+        def scatter_add_field():
+            for i in indices:
+                idx = indices[i]
+                if 0 <= idx < buckets:
+                    ti.atomic_add(dst[idx], src[i])
+
+        return scatter_add_field, {"aux_size": buckets}
+
+    if op_name == "histogram":
+        buckets = _bucket_count(n)
+        src.from_numpy(_histogram_values(n))
+        bins = ti.field(ti.i32, shape=buckets)
+
+        @ti.kernel
+        def histogram_field():
+            for i in range(buckets):
+                bins[i] = 0
+            for i in src:
+                value = src[i]
+                if 0 <= value < buckets:
+                    ti.atomic_add(bins[value], 1)
+
+        return histogram_field, {"aux_size": buckets}
 
     raise ValueError(op_name)
 
@@ -251,6 +379,7 @@ def run_child(args: argparse.Namespace) -> int:
         "op": args.op,
         "dtype": "i32",
         "n": args.n,
+        "aux_size": meta.get("aux_size"),
         "repeats": args.repeats,
         "warmups": args.warmups,
         "init_ms": init_ms,
@@ -404,6 +533,7 @@ def run_matrix(args: argparse.Namespace) -> int:
                 "op",
                 "dtype",
                 "n",
+                "aux_size",
                 "first_call_ms",
                 "runtime_median_ms",
                 "runtime_mean_ms",
@@ -423,6 +553,7 @@ def run_matrix(args: argparse.Namespace) -> int:
                     "op": row["op"],
                     "dtype": row["dtype"],
                     "n": row["n"],
+                    "aux_size": row.get("aux_size"),
                     "first_call_ms": row["first_call_ms"],
                     "runtime_median_ms": row["runtime"]["median_ms"],
                     "runtime_mean_ms": row["runtime"]["mean_ms"],
@@ -445,7 +576,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--child", action="store_true")
     parser.add_argument("--package", choices=["forge", "vanilla"])
     parser.add_argument("--arch", choices=["cpu", "cuda", "vulkan"])
-    parser.add_argument("--op", choices=["scan", "reduce", "transform"])
+    parser.add_argument(
+        "--op",
+        choices=[
+            "scan",
+            "reduce",
+            "transform",
+            "gather",
+            "scatter",
+            "scatter_add",
+            "histogram",
+        ],
+    )
     parser.add_argument("--n", type=int)
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--warmups", type=int, default=3)

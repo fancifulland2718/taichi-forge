@@ -43,6 +43,37 @@ def _vulkan_histogram_dtype_available(value_dtype, bin_dtype):
     )
 
 
+def _run_dense_field_histogram(value_dtype, value_np_dtype, bin_dtype, bin_np_dtype, method):
+    n = 4096
+    num_bins = 64
+    values = ti.field(value_dtype, shape=n)
+    bins = ti.field(bin_dtype, shape=num_bins)
+    workspace = ti.algorithms.HistogramWorkspace(max_items=n, max_bins=num_bins)
+    for mode in range(3):
+        values_np = _histogram_values(n, num_bins, value_np_dtype, mode)
+        values.from_numpy(values_np)
+        bins.from_numpy(np.full(num_bins, -1, dtype=bin_np_dtype))
+        ti.algorithms.experimental_histogram(
+            values, bins, method=method, workspace=workspace
+        )
+        assert np.array_equal(
+            bins.to_numpy(), _histogram_expected(values_np, num_bins, bin_np_dtype)
+        )
+    assert workspace._native_histogram_plan is not None
+    plan = workspace._native_histogram_plan
+    assert "histogram_dense_field" in plan["method_name"]
+    values_np = _histogram_values(n, num_bins, value_np_dtype, 0)
+    values.from_numpy(values_np)
+    bins.from_numpy(np.full(num_bins, -1, dtype=bin_np_dtype))
+    ti.algorithms.experimental_histogram(
+        values, bins, method=method, workspace=workspace
+    )
+    assert workspace._native_histogram_plan is plan
+    assert np.array_equal(
+        bins.to_numpy(), _histogram_expected(values_np, num_bins, bin_np_dtype)
+    )
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_experimental_histogram_rejects_struct_tensor_member_views():
     n = 8
@@ -51,6 +82,8 @@ def test_experimental_histogram_rejects_struct_tensor_member_views():
     bins = ti.ndarray(ti.i32, shape=4)
     with pytest.raises(NotImplementedError, match="scalar quantities"):
         ti.algorithms.experimental_histogram(values.field("vec"), bins)
+    with pytest.raises(NotImplementedError, match="native strided histogram"):
+        ti.algorithms.experimental_histogram(values.field("tag"), bins)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -118,6 +151,9 @@ def test_experimental_histogram_cuda_cub_ndarray():
                     bins.to_numpy(),
                     _histogram_expected(values_np, num_bins, bin_np_dtype),
                 )
+            _run_dense_field_histogram(
+                dtype, np_dtype, bin_dtype, bin_np_dtype, "cuda_cub"
+            )
     assert workspace.workspace_bytes_peak > 0
 
 
@@ -145,6 +181,9 @@ def test_experimental_histogram_cpu_native_ndarray():
                     bins.to_numpy(),
                     _histogram_expected(values_np, num_bins, bin_np_dtype),
                 )
+            _run_dense_field_histogram(
+                dtype, np_dtype, bin_dtype, bin_np_dtype, "cpu_native"
+            )
     assert workspace.workspace_bytes_peak == 0
     assert impl.get_runtime().prog.cpu_histogram_workspace_bytes() == 0
 
@@ -175,6 +214,9 @@ def test_experimental_histogram_vulkan_native_ndarray():
                     bins.to_numpy(),
                     _histogram_expected(values_np, num_bins, bin_np_dtype),
                 )
+            _run_dense_field_histogram(
+                dtype, np_dtype, bin_dtype, bin_np_dtype, "vulkan_native"
+            )
     assert impl.get_runtime().prog.vulkan_histogram_workspace_bytes() == 0
 
 

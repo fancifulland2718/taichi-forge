@@ -126,6 +126,7 @@ _SUPPORTED_INDEXED_COPY_METHODS = {
     "field_kernel",
 }
 _INDEXED_COPY_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
+_INDEXED_COPY_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _INDEXED_COPY_KERNEL_DTYPES = (i32, f32)
 _SUPPORTED_SCATTER_ADD_METHODS = {
     "auto",
@@ -950,6 +951,7 @@ class HistogramWorkspace:
         self._field_buffers = {}
         self._cuda_cub_active = False
         self._vulkan_native_active = False
+        self._native_histogram_plan = None
 
     def clear(self):
         if self._cuda_cub_active:
@@ -969,6 +971,7 @@ class HistogramWorkspace:
         self._field_buffers.clear()
         self._cuda_cub_active = False
         self._vulkan_native_active = False
+        self._native_histogram_plan = None
 
     def check_shape(self, n, num_bins):
         if self.max_items is not None and n > self.max_items:
@@ -998,6 +1001,70 @@ class HistogramWorkspace:
                 self.workspace_bytes_peak, self.workspace_bytes_current
             )
         return self._field_buffers[key]
+
+    def _native_histogram_backend_for_method(self, method):
+        arch = current_cfg().arch
+        if arch == cuda and method in ("auto", "cuda_cub"):
+            return "cuda_cub"
+        if arch == vulkan and method in ("auto", "vulkan_native"):
+            return "vulkan_native"
+        if arch in [x64, arm64] and method in ("auto", "cpu_native"):
+            return "cpu_native"
+        return None
+
+    def _mark_native_histogram_backend_active(self, backend, temp_bytes):
+        temp_bytes = 0 if temp_bytes is None else temp_bytes
+        if backend == "cuda_cub":
+            self._cuda_cub_active = True
+        if backend == "vulkan_native":
+            self._vulkan_native_active = True
+        self.workspace_bytes_current = max(self.workspace_bytes_current, temp_bytes)
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak, self.workspace_bytes_current
+        )
+
+    def _try_native_histogram_plan(self, values, bins, method, value_type, bin_type):
+        backend = self._native_histogram_backend_for_method(method)
+        if backend is None or self._native_histogram_plan is None:
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        semantic_key = (int(value_type), int(bin_type))
+        if not self._native_histogram_plan.matches_request(
+            backend, (values, bins), semantic_key
+        ):
+            return False
+        if not self._native_histogram_plan.matches_program(prog):
+            return False
+        temp_bytes = self._native_histogram_plan.invoke(prog)
+        if temp_bytes is None:
+            return False
+        self._mark_native_histogram_backend_active(backend, temp_bytes)
+        return True
+
+    def _record_native_histogram_plan(
+        self,
+        backend,
+        method_name,
+        values,
+        bins,
+        value_type,
+        bin_type,
+        call_args,
+        n,
+        prog,
+    ):
+        self._native_histogram_plan = _NativePrimitivePlan(
+            backend=backend,
+            method_name=method_name,
+            objects=(values, bins),
+            semantic_key=(int(value_type), int(bin_type)),
+            call_args=call_args,
+            prog=prog,
+            value_type=value_type,
+            n=n,
+        )
 
 
 class TransformWorkspace:
@@ -1208,12 +1275,108 @@ class ScatterAddWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
+        self._native_scatter_add_plans = []
 
     def check_shape(self, n):
         if self.max_items is not None and n > self.max_items:
             raise ValueError(
                 f"Requested {n} scatter-add items, exceeding max_items={self.max_items}."
             )
+
+    def _native_scatter_add_backend_for_method(self, method):
+        arch = current_cfg().arch
+        if arch == cuda and method in ("auto", "cuda_device"):
+            return "cuda_device"
+        if arch == vulkan and method in ("auto", "vulkan_native"):
+            return "vulkan_native"
+        if arch in [x64, arm64] and method in ("auto", "cpu_native"):
+            return "cpu_native"
+        return None
+
+    def _mark_native_scatter_add_backend_active(self, backend, temp_bytes):
+        temp_bytes = 0 if temp_bytes is None else temp_bytes
+        if backend == "vulkan_native":
+            self._vulkan_native_active = True
+        self.workspace_bytes_current = max(self.workspace_bytes_current, temp_bytes)
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak, self.workspace_bytes_current
+        )
+
+    def _native_scatter_add_request_signature(self, src, indices, dst, value_type):
+        src_view = _primitive_view(src)
+        dst_view = _primitive_view(dst)
+        if src_view is None or dst_view is None:
+            return (src, indices, dst), (int(value_type),)
+        if src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
+            src_obj = src_view.payload_arr if src_view.is_struct_scalar_member else src
+            dst_obj = dst_view.payload_arr if dst_view.is_struct_scalar_member else dst
+            return (
+                src_obj,
+                indices,
+                dst_obj,
+            ), (
+                int(value_type),
+                src_view.storage,
+                dst_view.storage,
+                int(src_view.offset),
+                int(src_view.stride),
+                int(dst_view.offset),
+                int(dst_view.stride),
+            )
+        return (src, indices, dst), (int(value_type),)
+
+    def _try_native_scatter_add_plan(self, src, indices, dst, method, value_type):
+        backend = self._native_scatter_add_backend_for_method(method)
+        if backend is None:
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        objects, semantic_key = self._native_scatter_add_request_signature(
+            src, indices, dst, value_type
+        )
+        for plan in self._native_scatter_add_plans:
+            if not plan.matches_request(backend, objects, semantic_key):
+                continue
+            if not plan.matches_program(prog):
+                continue
+            temp_bytes = plan.invoke(prog)
+            if temp_bytes is None:
+                return False
+            self._mark_native_scatter_add_backend_active(backend, temp_bytes)
+            return True
+        return False
+
+    def _record_native_scatter_add_plan(
+        self,
+        backend,
+        method_name,
+        src,
+        indices,
+        dst,
+        value_type,
+        call_args,
+        n,
+        prog,
+    ):
+        objects, semantic_key = self._native_scatter_add_request_signature(
+            src, indices, dst, value_type
+        )
+        plan = _NativePrimitivePlan(
+            backend=backend,
+            method_name=method_name,
+            objects=objects,
+            semantic_key=semantic_key,
+            call_args=call_args,
+            prog=prog,
+            value_type=value_type,
+            n=n,
+        )
+        for i, cached in enumerate(self._native_scatter_add_plans):
+            if cached.matches_request(backend, objects, semantic_key):
+                self._native_scatter_add_plans[i] = plan
+                return
+        self._native_scatter_add_plans.append(plan)
 
     def clear(self):
         if self._vulkan_native_active:
@@ -1225,6 +1388,7 @@ class ScatterAddWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
+        self._native_scatter_add_plans.clear()
 
 
 class BucketBuilderWorkspace:
@@ -3264,14 +3428,29 @@ def _check_histogram_request(values, bins, method, workspace):
     if not (_is_1d(values) and _is_1d(bins)):
         raise ValueError("experimental_histogram() expects 1D values and bins.")
     _check_no_struct_numeric_payload("experimental_histogram()", values, bins)
+    values_view = _primitive_view(values)
+    bins_view = _primitive_view(bins)
+    dense_field_native_mode = (
+        values_view is not None
+        and bins_view is not None
+        and values_view.is_dense_field
+        and bins_view.is_dense_field
+    )
     ndarray_mode = isinstance(values, Ndarray) or isinstance(bins, Ndarray)
-    if ndarray_mode:
+    struct_member_mode = _is_struct_scalar_member_view(values) or _is_struct_scalar_member_view(bins)
+    if struct_member_mode:
+        raise NotImplementedError(
+            "experimental_histogram() StructNdarray scalar member views need "
+            "a native strided histogram path; copy the member to a numeric "
+            "ndarray for now."
+        )
+    if ndarray_mode or dense_field_native_mode:
         if (
             values.dtype not in _HISTOGRAM_VALUE_DTYPES
             or bins.dtype not in _HISTOGRAM_BIN_DTYPES
         ):
             raise TypeError(
-                "experimental_histogram() ndarray mode expects ti.i32/ti.u32 "
+                "experimental_histogram() native mode expects ti.i32/ti.u32 "
                 "values and ti.i32/ti.i64 bins."
             )
     elif values.dtype != i32 or bins.dtype != i32:
@@ -3303,10 +3482,32 @@ def _histogram_bin_type(dtype):
     raise TypeError("unsupported histogram bin dtype")
 
 
+def _dense_histogram_fields_are_contiguous(values_view, bins_view):
+    return (
+        values_view is not None
+        and bins_view is not None
+        and values_view.is_dense_field
+        and bins_view.is_dense_field
+        and values_view.stride == _dtype_nbytes(values_view.dtype)
+        and bins_view.stride == _dtype_nbytes(bins_view.dtype)
+    )
+
+
 def _try_cuda_cub_histogram(values, bins, workspace):
     if current_cfg().arch != cuda:
         return False
-    if not (isinstance(values, Ndarray) and isinstance(bins, Ndarray)):
+    values_view = _primitive_view(values)
+    bins_view = _primitive_view(bins)
+    dense_field_mode = (
+        values_view is not None
+        and bins_view is not None
+        and values_view.is_dense_field
+        and bins_view.is_dense_field
+    )
+    if not (
+        (isinstance(values, Ndarray) and isinstance(bins, Ndarray))
+        or dense_field_mode
+    ):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -3317,21 +3518,47 @@ def _try_cuda_cub_histogram(values, bins, workspace):
         return False
     value_type = _histogram_value_type(values.dtype)
     bin_type = _histogram_bin_type(bins.dtype)
-    if hasattr(prog, "cuda_cub_histogram_ndarray"):
-        temp_bytes = prog.cuda_cub_histogram_ndarray(
-            values.arr, bins.arr, value_type, bin_type
+    if workspace is not None and workspace._try_native_histogram_plan(
+        values, bins, "cuda_cub", value_type, bin_type
+    ):
+        return True
+    if dense_field_mode:
+        if not _dense_histogram_fields_are_contiguous(values_view, bins_view):
+            return False
+        method_name = "cuda_cub_histogram_dense_field"
+        if not hasattr(prog, method_name):
+            return False
+        call_args = (
+            values_view.snode,
+            bins_view.snode,
+            value_type,
+            bin_type,
+            values_view.num_elements,
+            bins_view.num_elements,
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
+    elif hasattr(prog, "cuda_cub_histogram_ndarray"):
+        method_name = "cuda_cub_histogram_ndarray"
+        call_args = (values.arr, bins.arr, value_type, bin_type)
+        temp_bytes = getattr(prog, method_name)(*call_args)
     elif value_type == 0 and bin_type == 0:
-        temp_bytes = prog.cuda_cub_histogram_i32_ndarray(values.arr, bins.arr)
+        method_name = "cuda_cub_histogram_i32_ndarray"
+        call_args = (values.arr, bins.arr)
+        temp_bytes = getattr(prog, method_name)(*call_args)
     else:
         return False
     if workspace is not None:
-        workspace._cuda_cub_active = True
-        workspace.workspace_bytes_current = max(
-            workspace.workspace_bytes_current, temp_bytes
-        )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        workspace._mark_native_histogram_backend_active("cuda_cub", temp_bytes)
+        workspace._record_native_histogram_plan(
+            "cuda_cub",
+            method_name,
+            values,
+            bins,
+            value_type,
+            bin_type,
+            call_args,
+            values.shape[0],
+            prog,
         )
     return True
 
@@ -3339,7 +3566,18 @@ def _try_cuda_cub_histogram(values, bins, workspace):
 def _try_vulkan_histogram(values, bins, workspace):
     if current_cfg().arch != vulkan:
         return False
-    if not (isinstance(values, Ndarray) and isinstance(bins, Ndarray)):
+    values_view = _primitive_view(values)
+    bins_view = _primitive_view(bins)
+    dense_field_mode = (
+        values_view is not None
+        and bins_view is not None
+        and values_view.is_dense_field
+        and bins_view.is_dense_field
+    )
+    if not (
+        (isinstance(values, Ndarray) and isinstance(bins, Ndarray))
+        or dense_field_mode
+    ):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -3355,21 +3593,47 @@ def _try_vulkan_histogram(values, bins, workspace):
             return False
     elif value_type != 0 or bin_type != 0:
         return False
-    if hasattr(prog, "vulkan_histogram_ndarray"):
-        temp_bytes = prog.vulkan_histogram_ndarray(
-            values.arr, bins.arr, value_type, bin_type
+    if workspace is not None and workspace._try_native_histogram_plan(
+        values, bins, "vulkan_native", value_type, bin_type
+    ):
+        return True
+    if dense_field_mode:
+        if not _dense_histogram_fields_are_contiguous(values_view, bins_view):
+            return False
+        method_name = "vulkan_histogram_dense_field"
+        if not hasattr(prog, method_name):
+            return False
+        call_args = (
+            values_view.snode,
+            bins_view.snode,
+            value_type,
+            bin_type,
+            values_view.num_elements,
+            bins_view.num_elements,
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
+    elif hasattr(prog, "vulkan_histogram_ndarray"):
+        method_name = "vulkan_histogram_ndarray"
+        call_args = (values.arr, bins.arr, value_type, bin_type)
+        temp_bytes = getattr(prog, method_name)(*call_args)
     elif value_type == 0 and bin_type == 0:
-        temp_bytes = prog.vulkan_histogram_i32_ndarray(values.arr, bins.arr)
+        method_name = "vulkan_histogram_i32_ndarray"
+        call_args = (values.arr, bins.arr)
+        temp_bytes = getattr(prog, method_name)(*call_args)
     else:
         return False
     if workspace is not None:
-        workspace._vulkan_native_active = True
-        workspace.workspace_bytes_current = max(
-            workspace.workspace_bytes_current, temp_bytes
-        )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        workspace._mark_native_histogram_backend_active("vulkan_native", temp_bytes)
+        workspace._record_native_histogram_plan(
+            "vulkan_native",
+            method_name,
+            values,
+            bins,
+            value_type,
+            bin_type,
+            call_args,
+            values.shape[0],
+            prog,
         )
     return True
 
@@ -3377,7 +3641,18 @@ def _try_vulkan_histogram(values, bins, workspace):
 def _try_cpu_native_histogram(values, bins, workspace):
     if current_cfg().arch not in [x64, arm64]:
         return False
-    if not (isinstance(values, Ndarray) and isinstance(bins, Ndarray)):
+    values_view = _primitive_view(values)
+    bins_view = _primitive_view(bins)
+    dense_field_mode = (
+        values_view is not None
+        and bins_view is not None
+        and values_view.is_dense_field
+        and bins_view.is_dense_field
+    )
+    if not (
+        (isinstance(values, Ndarray) and isinstance(bins, Ndarray))
+        or dense_field_mode
+    ):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -3388,20 +3663,45 @@ def _try_cpu_native_histogram(values, bins, workspace):
         return False
     value_type = _histogram_value_type(values.dtype)
     bin_type = _histogram_bin_type(bins.dtype)
-    if hasattr(prog, "cpu_histogram_ndarray"):
-        temp_bytes = prog.cpu_histogram_ndarray(
-            values.arr, bins.arr, value_type, bin_type
+    if workspace is not None and workspace._try_native_histogram_plan(
+        values, bins, "cpu_native", value_type, bin_type
+    ):
+        return True
+    if dense_field_mode:
+        method_name = "cpu_histogram_dense_field"
+        if not hasattr(prog, method_name):
+            return False
+        call_args = (
+            values_view.snode,
+            bins_view.snode,
+            value_type,
+            bin_type,
+            values_view.num_elements,
+            bins_view.num_elements,
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
+    elif hasattr(prog, "cpu_histogram_ndarray"):
+        method_name = "cpu_histogram_ndarray"
+        call_args = (values.arr, bins.arr, value_type, bin_type)
+        temp_bytes = getattr(prog, method_name)(*call_args)
     elif value_type == 0 and bin_type == 0:
-        temp_bytes = prog.cpu_histogram_i32_ndarray(values.arr, bins.arr)
+        method_name = "cpu_histogram_i32_ndarray"
+        call_args = (values.arr, bins.arr)
+        temp_bytes = getattr(prog, method_name)(*call_args)
     else:
         return False
     if workspace is not None:
-        workspace.workspace_bytes_current = max(
-            workspace.workspace_bytes_current, temp_bytes
-        )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        workspace._mark_native_histogram_backend_active("cpu_native", temp_bytes)
+        workspace._record_native_histogram_plan(
+            "cpu_native",
+            method_name,
+            values,
+            bins,
+            value_type,
+            bin_type,
+            call_args,
+            values.shape[0],
+            prog,
         )
     return True
 
@@ -3473,7 +3773,8 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
         return
     if method == "cuda_cub":
         raise RuntimeError(
-            "method='cuda_cub' requires CUDA ndarray inputs and available CUB DeviceHistogram."
+            "method='cuda_cub' requires CUDA ndarray or contiguous dense field "
+            "inputs and available CUB DeviceHistogram."
         )
     if method in ("auto", "vulkan_native") and _try_vulkan_histogram(
         values, bins, workspace
@@ -3481,7 +3782,8 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
         return
     if method == "vulkan_native":
         raise RuntimeError(
-            "method='vulkan_native' requires Vulkan ndarray inputs and available native histogram."
+            "method='vulkan_native' requires Vulkan ndarray or contiguous dense "
+            "field inputs and available native histogram."
         )
     if method in ("auto", "cpu_native") and _try_cpu_native_histogram(
         values, bins, workspace
@@ -3489,7 +3791,8 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
         return
     if method == "cpu_native":
         raise RuntimeError(
-            "method='cpu_native' requires CPU ndarray inputs and available native histogram."
+            "method='cpu_native' requires CPU ndarray or dense field inputs and "
+            "available native histogram."
         )
     if isinstance(values, Ndarray) or isinstance(bins, Ndarray):
         if method in ("field_atomic", "field_direct", "field_private"):
@@ -4319,12 +4622,30 @@ def _check_indexed_copy_request(src, indices, dst, method, workspace, op_name):
         raise TypeError(f"{op_name} source and destination dtype must match.")
     src_is_member = _is_struct_scalar_member_view(src)
     dst_is_member = _is_struct_scalar_member_view(dst)
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    dense_field_mode = (
+        src_view is not None
+        and dst_view is not None
+        and src_view.is_dense_field
+        and dst_view.is_dense_field
+        and isinstance(indices, Ndarray)
+    )
+    if dense_field_mode:
+        if src.dtype not in _INDEXED_COPY_VALUE_DTYPES:
+            raise TypeError(
+                f"{op_name} dense field native mode currently supports "
+                "ti.u32, ti.i32, ti.f32, ti.u64, ti.i64, and ti.f64 values."
+            )
     if (
-        isinstance(src, Ndarray)
-        or isinstance(indices, Ndarray)
-        or isinstance(dst, Ndarray)
-        or src_is_member
-        or dst_is_member
+        not dense_field_mode
+        and (
+            isinstance(src, Ndarray)
+            or isinstance(indices, Ndarray)
+            or isinstance(dst, Ndarray)
+            or src_is_member
+            or dst_is_member
+        )
     ):
         if not (
             (isinstance(src, Ndarray) or src_is_member)
@@ -4364,6 +4685,87 @@ def _indexed_copy_item_count(src, indices, dst, scatter):
                 "experimental_gather() expects indices and destination sizes to match."
             )
     return indices.shape[0]
+
+
+def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, scatter):
+    if not isinstance(indices, Ndarray):
+        return False
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    if not (
+        src_view is not None
+        and dst_view is not None
+        and src_view.is_dense_field
+        and dst_view.is_dense_field
+    ):
+        return False
+    value_type = _INDEXED_COPY_VALUE_TYPE.get(src_view.dtype)
+    if value_type is None:
+        return False
+    arch = current_cfg().arch
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    impl.get_runtime().materialize()
+    prog = impl.get_runtime().prog
+    if arch == cuda and method in ("auto", "cuda_device"):
+        backend = "cuda_device"
+        item_bytes = _dtype_nbytes(src_view.dtype)
+        if not (
+            hasattr(prog, "cuda_device_indexed_copy_payload_available")
+            and prog.cuda_device_indexed_copy_payload_available(item_bytes)
+        ):
+            return False
+        method_name = (
+            "cuda_device_scatter_dense_field"
+            if scatter
+            else "cuda_device_gather_dense_field"
+        )
+    elif arch == vulkan and method in ("auto", "vulkan_native"):
+        backend = "vulkan_native"
+        if not (
+            hasattr(prog, "vulkan_indexed_copy_available")
+            and prog.vulkan_indexed_copy_available()
+        ):
+            return False
+        method_name = (
+            "vulkan_scatter_dense_field" if scatter else "vulkan_gather_dense_field"
+        )
+    elif arch in (x64, arm64) and method in ("auto", "cpu_native"):
+        backend = "cpu_native"
+        if not (
+            hasattr(prog, "cpu_indexed_copy_available")
+            and prog.cpu_indexed_copy_available()
+        ):
+            return False
+        method_name = "cpu_scatter_dense_field" if scatter else "cpu_gather_dense_field"
+    else:
+        return False
+    if not hasattr(prog, method_name):
+        return False
+    call_args = (
+        src_view.snode,
+        indices.arr,
+        dst_view.snode,
+        value_type,
+        src_view.num_elements,
+        dst_view.num_elements,
+    )
+    temp_bytes = getattr(prog, method_name)(*call_args)
+    if workspace is not None:
+        workspace._record_native_indexed_copy_plan(
+            backend,
+            method_name,
+            src,
+            indices,
+            dst,
+            _dtype_nbytes(src_view.dtype),
+            scatter,
+            call_args,
+            indices.shape[0],
+            prog,
+        )
+        workspace._mark_native_indexed_copy_backend_active(backend, temp_bytes)
+    return True
 
 
 def _try_cuda_device_indexed_copy(src, indices, dst, scatter, workspace):
@@ -4759,14 +5161,18 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
         return workspace
     if workspace._try_native_indexed_copy_plan(src, indices, dst, method, scatter):
         return workspace
+    if _try_native_dense_field_indexed_copy(
+        src, indices, dst, method, workspace, scatter
+    ):
+        return workspace
     if method in ("auto", "cuda_device") and _try_cuda_device_indexed_copy(
         src, indices, dst, scatter, workspace
     ):
         return workspace
     if method == "cuda_device":
         raise RuntimeError(
-            f"{op_name} method='cuda_device' requires CUDA ndarray inputs and "
-            "available CUDA driver indexed-copy support."
+            f"{op_name} method='cuda_device' requires CUDA ndarray or dense "
+            "field inputs and available CUDA indexed-copy support."
         )
     if method in ("auto", "vulkan_native") and _try_vulkan_indexed_copy(
         src, indices, dst, scatter, workspace
@@ -4774,8 +5180,8 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
         return workspace
     if method == "vulkan_native":
         raise RuntimeError(
-            f"{op_name} method='vulkan_native' requires Vulkan ndarray inputs "
-            "and available native indexed-copy shaders."
+            f"{op_name} method='vulkan_native' requires Vulkan ndarray or "
+            "dense field inputs and available native indexed-copy shaders."
         )
     if method in ("auto", "cpu_native") and _try_cpu_indexed_copy(
         src, indices, dst, scatter, workspace
@@ -4783,8 +5189,8 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
         return workspace
     if method == "cpu_native":
         raise RuntimeError(
-            f"{op_name} method='cpu_native' requires CPU ndarray inputs and "
-            "available native indexed-copy support."
+            f"{op_name} method='cpu_native' requires CPU ndarray or dense "
+            "field inputs and available native indexed-copy support."
         )
     if src_is_member or dst_is_member:
         raise RuntimeError(
@@ -4828,45 +5234,43 @@ def _check_scatter_add_request(src, indices, dst, method, workspace):
         raise NotImplementedError(f"{op_name} method '{method}' is not implemented.")
     if not (_is_1d(src) and _is_1d(indices) and _is_1d(dst)):
         raise ValueError(f"{op_name} expects 1D source, indices, and destination.")
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
     src_is_member = _is_struct_scalar_member_view(src)
     dst_is_member = _is_struct_scalar_member_view(dst)
+    dense_field_native_mode = (
+        src_view is not None
+        and dst_view is not None
+        and src_view.is_dense_field
+        and dst_view.is_dense_field
+        and isinstance(indices, Ndarray)
+    )
+    ndarray_mode = (
+        isinstance(src, Ndarray)
+        or src_is_member
+        or isinstance(indices, Ndarray)
+        or isinstance(dst, Ndarray)
+        or dst_is_member
+    )
     if indices.dtype != i32:
         raise TypeError(f"{op_name} currently expects ti.i32 indices.")
     _check_no_struct_numeric_payload(op_name, src, dst)
     if src.dtype != dst.dtype:
         raise TypeError(f"{op_name} source and destination dtype must match.")
-    if (
-        isinstance(src, Ndarray)
-        or src_is_member
-        or isinstance(indices, Ndarray)
-        or isinstance(dst, Ndarray)
-        or dst_is_member
-    ):
+    if dense_field_native_mode or ndarray_mode:
         supported_dtypes = _SCATTER_ADD_VALUE_DTYPES
     else:
         supported_dtypes = _SCATTER_ADD_FIELD_DTYPES
     if src.dtype not in supported_dtypes:
-        if (
-            isinstance(src, Ndarray)
-            or src_is_member
-            or isinstance(indices, Ndarray)
-            or isinstance(dst, Ndarray)
-            or dst_is_member
-        ):
+        if dense_field_native_mode or ndarray_mode:
             raise TypeError(
-                f"{op_name} ndarray mode currently supports ti.u32, ti.i32, "
+                f"{op_name} native mode currently supports ti.u32, ti.i32, "
                 "ti.f32, ti.u64, ti.i64, and ti.f64 values."
             )
         raise TypeError(f"{op_name} field mode currently supports ti.i32 and ti.f32 values.")
     if src.shape[0] != indices.shape[0]:
         raise ValueError(f"{op_name} expects source and indices sizes to match.")
-    if (
-        isinstance(src, Ndarray)
-        or src_is_member
-        or isinstance(indices, Ndarray)
-        or isinstance(dst, Ndarray)
-        or dst_is_member
-    ):
+    if ndarray_mode and not dense_field_native_mode:
         if not (
             (isinstance(src, Ndarray) or src_is_member)
             and isinstance(indices, Ndarray)
@@ -4877,6 +5281,8 @@ def _check_scatter_add_request(src, indices, dst, method, workspace):
                 "destination all to be ti.ndarray, except that source and "
                 "destination may be StructNdarray scalar member views."
             )
+    if dense_field_native_mode and src_view.dtype != dst_view.dtype:
+        raise TypeError(f"{op_name} dense field source and destination dtype must match.")
     if workspace is not None and not isinstance(workspace, ScatterAddWorkspace):
         raise TypeError("workspace must be a ScatterAddWorkspace instance or None.")
 
@@ -4893,16 +5299,12 @@ def _scalar_ndarray_payload(arr):
     return arr.arr, 0, arr._get_element_size()
 
 
-def _try_cuda_device_scatter_add(src, indices, dst):
+def _try_cuda_device_scatter_add(src, indices, dst, workspace):
     if current_cfg().arch != cuda:
         return False
-    src_is_member = _is_struct_scalar_member_view(src)
-    dst_is_member = _is_struct_scalar_member_view(dst)
-    if not (
-        (isinstance(src, Ndarray) or src_is_member)
-        and isinstance(indices, Ndarray)
-        and (isinstance(dst, Ndarray) or dst_is_member)
-    ):
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    if src_view is None or dst_view is None or not isinstance(indices, Ndarray):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -4911,13 +5313,33 @@ def _try_cuda_device_scatter_add(src, indices, dst):
         return False
     if not prog.cuda_device_scatter_add_available():
         return False
-    value_type = _scatter_add_value_type(src.dtype)
-    if src_is_member or dst_is_member:
+    value_type = _scatter_add_value_type(src_view.dtype)
+    if workspace is not None and workspace._try_native_scatter_add_plan(
+        src, indices, dst, "cuda_device", value_type
+    ):
+        return True
+    if src_view.is_dense_field or dst_view.is_dense_field:
+        if not (src_view.is_dense_field and dst_view.is_dense_field):
+            return False
+        method_name = "cuda_device_scatter_add_dense_field"
+        if not hasattr(prog, method_name):
+            return False
+        call_args = (
+            src_view.snode,
+            indices.arr,
+            dst_view.snode,
+            value_type,
+            src_view.num_elements,
+            dst_view.num_elements,
+        )
+        temp_bytes = getattr(prog, method_name)(*call_args)
+    elif src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
         if not hasattr(prog, "cuda_device_scatter_add_strided_ndarray"):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
-        prog.cuda_device_scatter_add_strided_ndarray(
+        method_name = "cuda_device_scatter_add_strided_ndarray"
+        call_args = (
             src_arr,
             indices.arr,
             dst_arr,
@@ -4927,21 +5349,35 @@ def _try_cuda_device_scatter_add(src, indices, dst):
             dst_offset,
             dst_stride,
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
+    elif src_view.is_plain_ndarray and dst_view.is_plain_ndarray:
+        method_name = "cuda_device_scatter_add_ndarray"
+        call_args = (src.arr, indices.arr, dst.arr, value_type)
+        temp_bytes = getattr(prog, method_name)(*call_args)
     else:
-        prog.cuda_device_scatter_add_ndarray(src.arr, indices.arr, dst.arr, value_type)
+        return False
+    if workspace is not None:
+        workspace._mark_native_scatter_add_backend_active("cuda_device", temp_bytes)
+        workspace._record_native_scatter_add_plan(
+            "cuda_device",
+            method_name,
+            src,
+            indices,
+            dst,
+            value_type,
+            call_args,
+            indices.shape[0],
+            prog,
+        )
     return True
 
 
 def _try_vulkan_scatter_add(src, indices, dst, workspace):
     if current_cfg().arch != vulkan:
         return False
-    src_is_member = _is_struct_scalar_member_view(src)
-    dst_is_member = _is_struct_scalar_member_view(dst)
-    if not (
-        (isinstance(src, Ndarray) or src_is_member)
-        and isinstance(indices, Ndarray)
-        and (isinstance(dst, Ndarray) or dst_is_member)
-    ):
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    if src_view is None or dst_view is None or not isinstance(indices, Ndarray):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -4950,18 +5386,38 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
         return False
     if not prog.vulkan_scatter_add_available():
         return False
-    value_type = _scatter_add_value_type(src.dtype)
+    value_type = _scatter_add_value_type(src_view.dtype)
     if hasattr(prog, "vulkan_scatter_add_value_type_available"):
         if not prog.vulkan_scatter_add_value_type_available(value_type):
             return False
-    elif src.dtype != i32:
+    elif src_view.dtype != i32:
         return False
-    if src_is_member or dst_is_member:
+    if workspace is not None and workspace._try_native_scatter_add_plan(
+        src, indices, dst, "vulkan_native", value_type
+    ):
+        return True
+    if src_view.is_dense_field or dst_view.is_dense_field:
+        if not (src_view.is_dense_field and dst_view.is_dense_field):
+            return False
+        method_name = "vulkan_scatter_add_dense_field"
+        if not hasattr(prog, method_name):
+            return False
+        call_args = (
+            src_view.snode,
+            indices.arr,
+            dst_view.snode,
+            value_type,
+            src_view.num_elements,
+            dst_view.num_elements,
+        )
+        temp_bytes = getattr(prog, method_name)(*call_args)
+    elif src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
         if not hasattr(prog, "vulkan_scatter_add_strided_ndarray"):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
-        temp_bytes = prog.vulkan_scatter_add_strided_ndarray(
+        method_name = "vulkan_scatter_add_strided_ndarray"
+        call_args = (
             src_arr,
             indices.arr,
             dst_arr,
@@ -4971,31 +5427,35 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
             dst_offset,
             dst_stride,
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
+    elif src_view.is_plain_ndarray and dst_view.is_plain_ndarray:
+        method_name = "vulkan_scatter_add_ndarray"
+        call_args = (src.arr, indices.arr, dst.arr, value_type)
+        temp_bytes = getattr(prog, method_name)(*call_args)
     else:
-        temp_bytes = prog.vulkan_scatter_add_ndarray(
-            src.arr, indices.arr, dst.arr, value_type
-        )
+        return False
     if workspace is not None:
-        workspace._vulkan_native_active = True
-        workspace.workspace_bytes_current = max(
-            workspace.workspace_bytes_current, temp_bytes
-        )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        workspace._mark_native_scatter_add_backend_active("vulkan_native", temp_bytes)
+        workspace._record_native_scatter_add_plan(
+            "vulkan_native",
+            method_name,
+            src,
+            indices,
+            dst,
+            value_type,
+            call_args,
+            indices.shape[0],
+            prog,
         )
     return True
 
 
-def _try_cpu_scatter_add(src, indices, dst):
+def _try_cpu_scatter_add(src, indices, dst, workspace):
     if current_cfg().arch not in [x64, arm64]:
         return False
-    src_is_member = _is_struct_scalar_member_view(src)
-    dst_is_member = _is_struct_scalar_member_view(dst)
-    if not (
-        (isinstance(src, Ndarray) or src_is_member)
-        and isinstance(indices, Ndarray)
-        and (isinstance(dst, Ndarray) or dst_is_member)
-    ):
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    if src_view is None or dst_view is None or not isinstance(indices, Ndarray):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -5004,13 +5464,33 @@ def _try_cpu_scatter_add(src, indices, dst):
         return False
     if not prog.cpu_scatter_add_available():
         return False
-    value_type = _scatter_add_value_type(src.dtype)
-    if src_is_member or dst_is_member:
+    value_type = _scatter_add_value_type(src_view.dtype)
+    if workspace is not None and workspace._try_native_scatter_add_plan(
+        src, indices, dst, "cpu_native", value_type
+    ):
+        return True
+    if src_view.is_dense_field or dst_view.is_dense_field:
+        if not (src_view.is_dense_field and dst_view.is_dense_field):
+            return False
+        method_name = "cpu_scatter_add_dense_field"
+        if not hasattr(prog, method_name):
+            return False
+        call_args = (
+            src_view.snode,
+            indices.arr,
+            dst_view.snode,
+            value_type,
+            src_view.num_elements,
+            dst_view.num_elements,
+        )
+        temp_bytes = getattr(prog, method_name)(*call_args)
+    elif src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
         if not hasattr(prog, "cpu_scatter_add_strided_ndarray"):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
-        prog.cpu_scatter_add_strided_ndarray(
+        method_name = "cpu_scatter_add_strided_ndarray"
+        call_args = (
             src_arr,
             indices.arr,
             dst_arr,
@@ -5020,8 +5500,26 @@ def _try_cpu_scatter_add(src, indices, dst):
             dst_offset,
             dst_stride,
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
+    elif src_view.is_plain_ndarray and dst_view.is_plain_ndarray:
+        method_name = "cpu_scatter_add_ndarray"
+        call_args = (src.arr, indices.arr, dst.arr, value_type)
+        temp_bytes = getattr(prog, method_name)(*call_args)
     else:
-        prog.cpu_scatter_add_ndarray(src.arr, indices.arr, dst.arr, value_type)
+        return False
+    if workspace is not None:
+        workspace._mark_native_scatter_add_backend_active("cpu_native", temp_bytes)
+        workspace._record_native_scatter_add_plan(
+            "cpu_native",
+            method_name,
+            src,
+            indices,
+            dst,
+            value_type,
+            call_args,
+            indices.shape[0],
+            prog,
+        )
     return True
 
 
@@ -5083,13 +5581,13 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
     if n == 0:
         return workspace
     if method in ("auto", "cuda_device") and _try_cuda_device_scatter_add(
-        src, indices, dst
+        src, indices, dst, workspace
     ):
         return workspace
     if method == "cuda_device":
         raise RuntimeError(
             "experimental_scatter_add() method='cuda_device' requires CUDA "
-            "ndarray inputs and CUDA toolkit scatter-add support."
+            "ndarray or dense field inputs and CUDA toolkit scatter-add support."
         )
     if method in ("auto", "vulkan_native") and _try_vulkan_scatter_add(
         src, indices, dst, workspace
@@ -5098,15 +5596,17 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
     if method == "vulkan_native":
         raise RuntimeError(
             "experimental_scatter_add() method='vulkan_native' currently "
-            "requires Vulkan ndarray inputs and an available native "
+            "requires Vulkan ndarray or dense field inputs and an available native "
             "scatter-add shader for the value dtype."
         )
-    if method in ("auto", "cpu_native") and _try_cpu_scatter_add(src, indices, dst):
+    if method in ("auto", "cpu_native") and _try_cpu_scatter_add(
+        src, indices, dst, workspace
+    ):
         return workspace
     if method == "cpu_native":
         raise RuntimeError(
             "experimental_scatter_add() method='cpu_native' requires CPU ndarray "
-            "inputs and available native scatter-add support."
+            "or dense field inputs and available native scatter-add support."
         )
     if _is_struct_scalar_member_view(src) or _is_struct_scalar_member_view(dst):
         raise RuntimeError(

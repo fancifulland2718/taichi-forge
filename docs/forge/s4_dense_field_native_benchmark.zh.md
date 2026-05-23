@@ -265,3 +265,112 @@ field 与 vanilla 1.8.0 复测结果：
   `import taichi_forge as ti; ti.init(arch=ti.cpu)` smoke，通过。offline cache
   lock warning 不影响导入和 CPU 初始化。
 - 当前修改未触达 runtime bitcode，因此无需同步 `runtime_cuda.bc` 或 `runtime_x64.bc`。
+
+## S5 dense field indexed-copy
+
+本轮将 `experimental_gather()` / `experimental_scatter()` 的 1D dense field
+路径接入 native primitive：
+
+- Python routing 使用 `_PrimitiveView` 识别 dense field，并将 CPU/CUDA/Vulkan
+  direct call 记录到 `IndexedCopyWorkspace._native_indexed_copy_plan`。
+- 新增 C++/pybind entrypoint：
+  - `cpu_gather_dense_field` / `cpu_scatter_dense_field`
+  - `cuda_device_gather_dense_field` / `cuda_device_scatter_dense_field`
+  - `vulkan_gather_dense_field` / `vulkan_scatter_dense_field`
+- Vulkan indexed-copy cache 改为按实际 primitive 懒创建 pipeline，避免首次
+  gather/scatter 同时创建 scatter-add 等无关 pipeline。
+- Vulkan 32-bit scatter 增加专用 shader：
+  `indexed_copy_u32_by_i32.comp` -> `scatter_dense_u32_by_i32.comp.spv.h`。
+  gather 复测显示专用 shader 对 1M 吞吐不稳定，因此保留通用懒创建 pipeline。
+- CPU indexed-copy 内层从逐元素 `std::memcpy` 改为 32-bit word copy，覆盖
+  ndarray、StructNdarray member 和 dense field 的共享 native path。
+
+最终代表性结果：
+
+- 主结果目录：
+  `benchmarks/results/s5_dense_field_indexed_wordcopy_20260523/summary.csv`。
+- Vulkan gather 1M 高 repeats 复测：
+  `benchmarks/results/s5_dense_field_indexed_vulkan_gather_repeat_20260523/summary.csv`。
+
+| backend/op/n | forge first ms | vanilla first ms | forge warm ms | vanilla warm ms | workspace | GPU delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| CPU gather 4K | 0.505 | 32.587 | 0.0258 | 0.0660 | 0 B | N/A |
+| CPU gather 1M | 1.764 | 45.560 | 0.3727 | 0.1822 | 0 B | N/A |
+| CPU scatter 4K | 0.456 | 32.226 | 0.0253 | 0.0673 | 0 B | N/A |
+| CPU scatter 1M | 1.683 | 34.048 | 0.3456 | 0.1557 | 0 B | N/A |
+| CUDA gather 4K | 9.274 | 49.836 | 0.0233 | 0.0446 | 0 B | 791.66 MB |
+| CUDA gather 1M | 8.646 | 48.902 | 0.0576 | 0.0509 | 0 B | 791.66 MB |
+| CUDA scatter 4K | 9.554 | 51.704 | 0.0224 | 0.0457 | 0 B | 791.66 MB |
+| CUDA scatter 1M | 9.714 | 46.941 | 0.0237 | 0.0863 | 0 B | 791.66 MB |
+| Vulkan gather 4K | 12.342 | 16.056 | 0.2225 | 0.2992 | 0 B | 89.21 MB |
+| Vulkan gather 1M repeat20 | 12.842 | 17.140 | 0.2130 | 0.3580 | 0 B | 89.15 MB |
+| Vulkan scatter 4K | 11.087 | 15.360 | 0.2059 | 0.3026 | 0 B | 89.21 MB |
+| Vulkan scatter 1M | 10.935 | 23.908 | 0.2011 | 0.4903 | 0 B | 89.15 MB |
+
+结论：
+
+- 编译/first-call：dense field gather/scatter 在 CPU/CUDA/Vulkan 上均显著少于
+  vanilla field kernel；Vulkan pipeline 懒创建将 first-call 从此前约 75-85 ms
+  降到约 11-13 ms。
+- 运行时：CUDA scatter、Vulkan gather/scatter 和小规模 CPU 均优于 vanilla；
+  CPU 1M warm runtime 仍慢于 vanilla field kernel，后续需要独立优化 CPU
+  大规模路径或建立 auto cost model。
+- 存储：workspace 均为 0 B；GPU dedicated delta 上 forge Vulkan 约 89 MB，
+  低于 vanilla Vulkan 约 121 MB。
+
+## S5 dense field scatter-add / histogram
+
+本轮继续完成 S5 中与 dense field 和 StructNdarray 对齐的两类聚合 primitive：
+
+- `experimental_scatter_add()`：
+  - dense field + ndarray i32 indices 接入 CPU/CUDA/Vulkan native entrypoint；
+  - StructNdarray scalar member 与 tensor member component 路径使用
+    `_NativePrimitivePlan`，重复调用复用 plan；
+  - 未加入自动选择策略，显式 native method 直接走对应后端。
+- `experimental_histogram()`：
+  - contiguous dense field values/bins 接入 CPU/CUDA/Vulkan native entrypoint；
+  - StructNdarray scalar member histogram 暂不走旧 fallback，显式提示需要
+    native strided histogram；
+  - Vulkan histogram pipeline 改为按实际路径懒创建，将 first-call 从旧实现的
+    约 186-191 ms 降到约 19-21 ms。
+
+代表性结果：
+
+- 结果目录：
+  `benchmarks/results/s5_dense_field_scatter_add_histogram_lazy_vkhist_20260523/summary.csv`。
+- 基准形态：`n = 4096 / 1048576`，输出 bin 数为 `min(n, 4096)`，
+  repeat 10，warmup 3，forge 0.4.0 对比本地 vanilla Taichi 1.8.0。
+
+| backend/op/n | forge first ms | vanilla first ms | forge warm ms | vanilla warm ms | workspace | GPU delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| CPU scatter_add 4K | 0.596 | 33.315 | 0.304 | 0.112 | 0 B | N/A |
+| CPU scatter_add 1M | 1.838 | 38.182 | 0.709 | 3.774 | 256 KiB | N/A |
+| CPU histogram 4K | 0.439 | 50.497 | 0.226 | 0.131 | 0 B | N/A |
+| CPU histogram 1M | 1.689 | 52.549 | 0.616 | 2.068 | 512 KiB | N/A |
+| CUDA scatter_add 4K | 9.902 | 51.988 | 0.365 | 0.081 | 0 B | 791.66 MB |
+| CUDA scatter_add 1M | 9.393 | 51.209 | 0.370 | 0.094 | 0 B | 791.66 MB |
+| CUDA histogram 4K | 9.481 | 82.858 | 0.276 | 0.053 | 16.5 KiB | 793.66 MB |
+| CUDA histogram 1M | 9.615 | 85.497 | 0.298 | 0.066 | 2.67 MiB | 795.66 MB |
+| Vulkan scatter_add 4K | 11.725 | 19.500 | 0.788 | 0.303 | 0 B | 89.21 MB |
+| Vulkan scatter_add 1M | 11.616 | 19.579 | 0.800 | 0.178 | 0 B | 89.15 MB |
+| Vulkan histogram 4K | 20.864 | 26.563 | 0.705 | 0.189 | 0 B | 89.15 MB |
+| Vulkan histogram 1M | 19.072 | 26.119 | 0.781 | 0.331 | 0 B | 89.15 MB |
+
+结论：
+
+- 编译/first-call：scatter_add 和 histogram 在 CPU/CUDA/Vulkan 上均优于
+  vanilla 1.8.0；Vulkan histogram 的 pipeline 懒创建已经消除最明显的
+  first-call 膨胀。
+- 运行时：CPU 大规模路径明显优于 vanilla；CPU 小规模、CUDA、Vulkan 的 warm
+  runtime 仍受 native 调用固定成本影响。这里没有加入自动选择策略，因此该结果
+  应作为后续 GPU command replay、轻量 CUDA kernel、Vulkan descriptor/command
+  复用优化的基线。
+- 存储：CPU/CUDA 聚合类 primitive 会使用小型 partial workspace；Vulkan 当前
+  dense field scatter_add/histogram workspace 为 0 B，GPU dedicated delta 仍低于
+  vanilla Vulkan 的约 121 MB。
+
+S5 correctness：
+
+- `tests/python/test_indexed_copy.py`：23 passed。
+- `tests/python/test_scatter_add.py tests/python/test_histogram.py`：22 passed
+  （关闭 offline cache；pytest cache 权限 warning 不影响结果）。

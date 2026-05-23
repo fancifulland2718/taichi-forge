@@ -57,6 +57,19 @@ def _values(n: int) -> np.ndarray:
     return (np.arange(n, dtype=np.int32) % 17 - 8).astype(np.int32)
 
 
+def _indices(n: int) -> np.ndarray:
+    return (n - 1 - np.arange(n, dtype=np.int32)).astype(np.int32)
+
+
+def _bucket_count(n: int) -> int:
+    return max(64, min(n, 4096))
+
+
+def _bucket_indices(n: int) -> np.ndarray:
+    buckets = _bucket_count(n)
+    return ((np.arange(n, dtype=np.int32) * 13 + 5) % buckets).astype(np.int32)
+
+
 def _arch_value(ti, arch_name: str):
     if arch_name == "cpu":
         return ti.cpu
@@ -88,10 +101,10 @@ def _available(ti, arch_name: str, op_name: str, storage: str) -> tuple[bool, st
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if storage == "struct_tensor_member" and op_name != "transform":
-        return False, "tensor-member replay plan is transform-only"
+    if storage == "struct_tensor_member" and op_name in ("scan", "reduce"):
+        return False, "tensor-member replay plan is not scalar scan/reduce"
     if arch_name == "cpu":
-        if storage == "struct_tensor_member":
+        if storage == "struct_tensor_member" and op_name == "transform":
             name = "cpu_transform_affine_packed_strided_ndarray"
             return (
                 hasattr(prog, "cpu_transform_available")
@@ -102,6 +115,9 @@ def _available(ti, arch_name: str, op_name: str, storage: str) -> tuple[bool, st
             "scan": "cpu_scan_available",
             "reduce": "cpu_reduce_available",
             "transform": "cpu_transform_available",
+            "gather": "cpu_indexed_copy_available",
+            "scatter": "cpu_indexed_copy_available",
+            "scatter_add": "cpu_scatter_add_available",
         }
         name = names[op_name]
         return hasattr(prog, name) and getattr(prog, name)(), name
@@ -110,6 +126,10 @@ def _available(ti, arch_name: str, op_name: str, storage: str) -> tuple[bool, st
             name = "cuda_cub_scan_available"
         elif op_name == "reduce":
             name = "cuda_cub_reduce_available"
+        elif op_name in ("gather", "scatter"):
+            name = "cuda_device_indexed_copy_available"
+        elif op_name == "scatter_add":
+            name = "cuda_device_scatter_add_available"
         elif storage in ("struct_member", "struct_tensor_member"):
             name = "cuda_toolkit_transform_available"
         else:
@@ -125,10 +145,20 @@ def _available(ti, arch_name: str, op_name: str, storage: str) -> tuple[bool, st
             "scan": "vulkan_scan_available",
             "reduce": "vulkan_reduce_available",
             "transform": "vulkan_transform_available",
+            "gather": "vulkan_indexed_copy_available",
+            "scatter": "vulkan_indexed_copy_available",
+            "scatter_add": "vulkan_scatter_add_available",
         }
         name = names[op_name]
         if not (hasattr(prog, name) and getattr(prog, name)()):
             return False, name
+        if op_name in ("gather", "scatter"):
+            return True, name
+        if op_name == "scatter_add":
+            value_gate = "vulkan_scatter_add_value_type_available"
+            if hasattr(prog, value_gate) and not getattr(prog, value_gate)(0):
+                return False, value_gate
+            return True, name
         value_gate = {
             "scan": "vulkan_scan_value_type_available",
             "reduce": "vulkan_reduce_value_type_available",
@@ -158,6 +188,18 @@ def _runtime_workspace_peak(arch_name: str, op_name: str) -> int:
         candidates = [
             f"{arch_name}_reduce_workspace_bytes",
             "cuda_cub_reduce_workspace_bytes",
+        ]
+    elif op_name in ("gather", "scatter"):
+        candidates = [
+            f"{arch_name}_indexed_copy_workspace_bytes",
+            "vulkan_indexed_copy_workspace_bytes",
+            "cpu_indexed_copy_workspace_bytes",
+        ]
+    elif op_name == "scatter_add":
+        candidates = [
+            f"{arch_name}_scatter_add_workspace_bytes",
+            "vulkan_scatter_add_workspace_bytes",
+            "cpu_scatter_add_workspace_bytes",
         ]
     for name in candidates:
         if hasattr(prog, name):
@@ -195,6 +237,44 @@ def _make_storage(ti, storage: str, n: int):
         base.from_numpy(host)
         return base.field("vec"), base, host, data
     raise ValueError(storage)
+
+
+def _make_destination(ti, storage: str, n: int):
+    if storage == "field":
+        dst = ti.field(ti.i32, shape=n)
+        dst.from_numpy(np.zeros(n, dtype=np.int32))
+        return dst, dst, None
+    if storage == "ndarray":
+        dst = ti.ndarray(ti.i32, shape=n)
+        dst.from_numpy(np.zeros(n, dtype=np.int32))
+        return dst, dst, None
+    if storage == "struct_member":
+        payload = ti.types.struct(value=ti.i32, tag=ti.i32)
+        owner = ti.ndarray(payload, shape=n)
+        host = np.zeros((n,), dtype=owner.numpy_dtype)
+        host["tag"] = np.arange(n, dtype=np.int32) * 11 - 3
+        owner.from_numpy(host)
+        return owner.field("value"), owner, host
+    if storage == "struct_tensor_member":
+        payload = ti.types.struct(vec=ti.types.vector(2, ti.i32), tag=ti.i32)
+        owner = ti.ndarray(payload, shape=n)
+        host = np.zeros((n,), dtype=owner.numpy_dtype)
+        host["tag"] = np.arange(n, dtype=np.int32) * 11 - 3
+        owner.from_numpy(host)
+        return owner.field("vec"), owner, host
+    raise ValueError(storage)
+
+
+def _extract_storage_values(owner, storage: str, field_name: str):
+    if storage in ("field", "ndarray"):
+        return owner.to_numpy()
+    return owner.to_numpy()[field_name]
+
+
+def _tags_unchanged(owner, host, storage: str) -> bool:
+    if storage not in ("struct_member", "struct_tensor_member"):
+        return True
+    return bool(np.array_equal(owner.to_numpy()["tag"], host["tag"]))
 
 
 def _make_body(ti, arch_name: str, op_name: str, storage: str, n: int):
@@ -324,7 +404,93 @@ def _make_body(ti, arch_name: str, op_name: str, storage: str, n: int):
 
         return body, plan, verify, lambda: int(workspace.workspace_bytes_peak)
 
+    if op_name in ("gather", "scatter"):
+        workspace = ti.algorithms.IndexedCopyWorkspace(max_items=n)
+        indices_np = _indices(n)
+        indices = ti.ndarray(ti.i32, shape=n)
+        indices.from_numpy(indices_np)
+        dst, dst_owner, dst_host = _make_destination(ti, storage, n)
+        field_name = "vec" if storage == "struct_tensor_member" else "value"
+
+        def body():
+            if op_name == "gather":
+                ti.algorithms.experimental_gather(
+                    src, indices, dst, method=method, workspace=workspace
+                )
+            else:
+                ti.algorithms.experimental_scatter(
+                    src, indices, dst, method=method, workspace=workspace
+                )
+
+        def plan():
+            return workspace._native_indexed_copy_plan
+
+        def verify():
+            expected = data[indices_np]
+            actual = _extract_storage_values(dst_owner, storage, field_name)
+            return bool(
+                np.array_equal(actual, expected)
+                and _tags_unchanged(dst_owner, dst_host, storage)
+            )
+
+        return body, plan, verify, lambda: int(workspace.workspace_bytes_peak)
+
+    if op_name == "scatter_add":
+        buckets = _bucket_count(n)
+        workspace = ti.algorithms.ScatterAddWorkspace(max_items=n)
+        indices_np = _bucket_indices(n)
+        indices = ti.ndarray(ti.i32, shape=n)
+        indices.from_numpy(indices_np)
+        dst, dst_owner, dst_host = _make_destination(ti, storage, buckets)
+        field_name = "vec" if storage == "struct_tensor_member" else "value"
+
+        def body():
+            ti.algorithms.experimental_scatter_add(
+                src, indices, dst, method=method, workspace=workspace
+            )
+
+        def plan():
+            return tuple(workspace._native_scatter_add_plans)
+
+        def verify():
+            expected_shape = (buckets, data.shape[1]) if data.ndim == 2 else (buckets,)
+            expected = np.zeros(expected_shape, dtype=np.int32)
+            np.add.at(expected, indices_np, data)
+            actual = _extract_storage_values(dst_owner, storage, field_name)
+            return bool(
+                np.array_equal(actual, expected)
+                and _tags_unchanged(dst_owner, dst_host, storage)
+            )
+
+        def workspace_peak():
+            return max(
+                int(workspace.workspace_bytes_peak),
+                _runtime_workspace_peak(arch_name, op_name),
+            )
+
+        return body, plan, verify, workspace_peak
+
     raise ValueError(op_name)
+
+
+def _plans_reused(first_plan, plan_after) -> bool:
+    if first_plan is None:
+        return False
+    if isinstance(first_plan, tuple):
+        return (
+            len(first_plan) > 0
+            and isinstance(plan_after, tuple)
+            and len(first_plan) == len(plan_after)
+            and all(before is after for before, after in zip(first_plan, plan_after))
+        )
+    return plan_after is first_plan
+
+
+def _plan_field(first_plan, key: str):
+    if isinstance(first_plan, tuple):
+        values = [plan[key] for plan in first_plan if plan is not None]
+        return ",".join(values) if values else None
+    return None if first_plan is None else first_plan[key]
 
 
 def run_child(args: argparse.Namespace) -> int:
@@ -397,9 +563,9 @@ def run_child(args: argparse.Namespace) -> int:
         "first_call_ms": first_ms,
         "runtime": _stats_ms(samples),
         "workspace_peak_bytes": int(workspace_peak()),
-        "plan_reused": first_plan is not None and plan_after is first_plan,
-        "plan_backend": None if first_plan is None else first_plan["backend"],
-        "plan_method": None if first_plan is None else first_plan["method_name"],
+        "plan_reused": _plans_reused(first_plan, plan_after),
+        "plan_backend": _plan_field(first_plan, "backend"),
+        "plan_method": _plan_field(first_plan, "method_name"),
         "ok": ok,
         "gpu_dedicated_mb": {
             "before_init": gpu_before_init,
@@ -568,7 +734,10 @@ def main(argv: list[str] | None = None) -> int:
         "--storage",
         choices=["field", "ndarray", "struct_member", "struct_tensor_member"],
     )
-    parser.add_argument("--op", choices=["scan", "reduce", "transform"])
+    parser.add_argument(
+        "--op",
+        choices=["scan", "reduce", "transform", "gather", "scatter", "scatter_add"],
+    )
     parser.add_argument("--n", type=int)
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--warmups", type=int, default=3)
