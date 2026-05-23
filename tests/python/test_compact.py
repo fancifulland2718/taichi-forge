@@ -94,8 +94,7 @@ def _run_vector_ndarray_compact(method):
     return workspace
 
 
-def _run_struct_tensor_member_compact(method):
-    n = 256
+def _run_struct_tensor_member_compact(method, n=256, workspace=None):
     payload = ti.types.struct(vec=ti.types.vector(2, ti.i32), tag=ti.i32)
     values = ti.ndarray(payload, shape=n)
     flags = ti.ndarray(ti.i32, shape=n)
@@ -111,7 +110,8 @@ def _run_struct_tensor_member_compact(method):
     output.from_numpy(output_np)
     flags.from_numpy(flags_np)
     count.from_numpy(np.array([-1], dtype=np.int32))
-    workspace = ti.algorithms.CompactWorkspace(max_items=n)
+    if workspace is None:
+        workspace = ti.algorithms.CompactWorkspace(max_items=n)
 
     ti.algorithms.experimental_compact(
         values.field("vec"),
@@ -135,6 +135,29 @@ def _run_struct_tensor_member_compact(method):
 def test_experimental_compact_cpu_native_struct_tensor_member_views():
     workspace = _run_struct_tensor_member_compact("cpu_native")
     assert workspace.workspace_bytes_peak >= 256 * 2 * 4
+    copy_workspace = workspace._order_apply_indexed_copy_workspace
+    assert copy_workspace is not None
+    assert copy_workspace._native_indexed_copy_plan is not None
+    assert (
+        copy_workspace._native_indexed_copy_plan["method_name"]
+        == "cpu_gather_strided_ndarray"
+    )
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_compact_struct_tensor_member_order_pair_exact_size_cache():
+    workspace = ti.algorithms.CompactWorkspace(max_items=64)
+    _run_struct_tensor_member_compact("cpu_native", n=64, workspace=workspace)
+    first_pair = workspace._order_apply_pair
+    assert first_pair["in"].shape[0] == 64
+
+    _run_struct_tensor_member_compact("cpu_native", n=32, workspace=workspace)
+    second_pair = workspace._order_apply_pair
+    assert second_pair is not first_pair
+    assert second_pair["in"].shape[0] == 32
+
+    _run_struct_tensor_member_compact("cpu_native", n=64, workspace=workspace)
+    assert workspace._order_apply_pair is first_pair
 
 
 @test_utils.test(arch=[ti.cuda])

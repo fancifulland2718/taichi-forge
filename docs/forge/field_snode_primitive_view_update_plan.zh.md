@@ -666,9 +666,9 @@ S0 进入 S1 的条件：
       Python 开销。
     - `_OrderApplyWorkspaceMixin` 统一持有内部 `IndexedCopyWorkspace`，compact
       和 bucket 的 out-of-place apply 可以复用 native indexed-copy plan。
-    - order pair 只在分配/扩容时初始化 identity order 和清零 output；后续
-      非递减规模重复调用不再重复填充。规模缩小时只清零 output，避免旧 tail
-      index 进入本次有效区间。
+    - order pair 按精确 `n` 缓存；identity order 和 output 初始化只在该尺寸
+      第一次分配时执行。后续同尺寸调用不再重复 fill/clear，小尺寸调用不会复用
+      过大 buffer，避免 `values.shape != flags.shape` 的隐性风险。
     - sort 的 in-place tensor-member apply 保持原轻量路径，不强行引入子
       workspace，避免小规模 sort 回退。
   - 风险边界：
@@ -678,29 +678,26 @@ S0 进入 S1 的条件：
     - field compact 标量路径仍保持 fused scatter，不为了抽象一致性引入 order
       buffer。
   - 实际验证：
-    - `python -m py_compile python/taichi_forge/algorithms/_algorithms.py
-      tests/python/test_indexed_copy.py tests/python/test_transform.py
-      benchmarks/struct_ndarray_primitives.py` 通过。
-    - workspace replay 定向用例通过：CPU native StructNdarray scalar/tensor
-      member 的 transform、gather、scatter 在每次调用重建 member view 时仍复用
-      同一个 native plan；Vulkan transform workspace accounting 用例通过。
-    - `tests/python/test_compact.py tests/python/test_bucket_builder.py
-      tests/python/test_sort.py` 按后端拆进程回归通过：x64 54 passed、CUDA
-      55 passed、Vulkan 57 passed；仅有 pytest cache 权限 warning。混合后端
-      单进程运行会在 legacy field-kernel bucket 的 x64 `from_numpy()` 处复现
-      LLVM `IMAGE_REL_AMD64_ADDR32NB` relocation 状态污染；x64 单独运行通过，
-      因此该问题不归因于本轮 order/apply native replay 改动。
-    - benchmark 写入
-      `benchmarks/results/s6_order_pair_cached_seq_20260523/summary.csv`，与
-      `benchmarks/results/s6_order_apply_workspace_20260523/summary.csv` 对比：
-      CPU compact 2048/65536 warm median 下降 68.9%/44.4%，bucket 下降
-      63.7%/35.4%；CUDA compact 下降 79.3%/77.9%，bucket 下降 78.7%/34.4%；
-      Vulkan compact 下降 46.2%/39.0%，bucket 下降 59.1%/40.8%。
-      sort 基本保持：CUDA 65536 提升 5.8%，Vulkan 两个规模约持平；CPU sort
-      2048/65536 本轮分别慢 11.5%/3.2%，属于仍需复测和微调的小规模固定开销。
-    - 最新 workspace peak 未超过 S6.1 预期量级：65536 compact 为 512 KiB，
-      bucket 约 516-545 KiB，sort 约 768 KiB-1.31 MiB；未新增额外 full-size
-      staging。
+    - 最新 `py_compile` 覆盖 `_algorithms.py`、`test_transform.py`、
+      `test_indexed_copy.py`、`test_compact.py`、`test_bucket_builder.py` 和
+      `benchmarks/struct_ndarray_primitives.py`，通过。
+    - CPU 定向用例通过：9 passed。覆盖 StructNdarray member wrapper 每次重建
+      仍复用 native plan、Transform/IndexedCopy 多 plan cache 回切、compact
+      order-pair 精确尺寸缓存、compact/bucket 内部 `IndexedCopyWorkspace` 复用。
+    - CUDA/Vulkan tensor-member 定向用例分别通过：4 passed / 4 passed。覆盖
+      transform、gather/scatter、compact、bucket 的共享 order/apply 路径。
+    - 最新 benchmark 写入
+      `benchmarks/results/s6_struct_ndarray_plan_cache_20260523/`，覆盖
+      CPU/CUDA/Vulkan × 2048/65536 × transform/scan/reduce/gather/scatter/
+      scatter_add/grouped_reduce/sort/compact/bucket；所有记录 `ok=true`，并
+      写出 `first_call_ms`、`median_ms`、`workspace_peak`。
+    - 代表性 warm median：CPU 65536 transform/gather/compact/bucket 为
+      0.2809/0.1681/0.2901/0.3896 ms；CUDA 为
+      0.0511/0.0488/0.1325/0.2263 ms；Vulkan 为
+      0.2693/0.1884/0.3163/0.3568 ms。
+    - workspace peak 未新增额外 full-size staging：65536 compact CPU/CUDA/Vulkan
+      均为 512 KiB 量级，bucket 为约 516/514/545 KiB，sort 为约
+      768 KiB/1.26 MiB/1.28 MiB。
     - benchmark 期间仍出现既有 `C:/taichi_cache/ticache/ticache.lock` stale
       warning；结果文件完整写出，但后续做正式横向报告时应先清理该 cache
       状态或隔离 cache 目录。

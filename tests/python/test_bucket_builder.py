@@ -192,6 +192,13 @@ def _run_struct_tensor_member_bucket_builder(method):
 def test_experimental_bucket_builder_cpu_native_struct_tensor_member_views():
     workspace = _run_struct_tensor_member_bucket_builder("cpu_native")
     assert workspace.workspace_bytes_peak >= 256 * 2 * 4
+    copy_workspace = workspace._order_apply_indexed_copy_workspace
+    assert copy_workspace is not None
+    assert copy_workspace._native_indexed_copy_plan is not None
+    assert (
+        copy_workspace._native_indexed_copy_plan["method_name"]
+        == "cpu_gather_strided_ndarray"
+    )
 
 
 @test_utils.test(arch=[ti.cuda])

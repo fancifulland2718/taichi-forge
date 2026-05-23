@@ -328,6 +328,46 @@ def test_experimental_gather_cpu_native_struct_scalar_member_workspace_replay():
 
 
 @test_utils.test(arch=ti.cpu)
+def test_experimental_indexed_copy_cpu_native_struct_member_multi_plan_cache():
+    src, dst, indices, index_data, host, dst_host = _make_struct_scalar_indexed_copy_case()
+    workspace = ti.algorithms.IndexedCopyWorkspace(max_items=src.shape[0])
+
+    ti.algorithms.experimental_gather(
+        src.field("val"),
+        indices,
+        dst.field("val"),
+        method="cpu_native",
+        workspace=workspace,
+    )
+    gather_plan = workspace._native_indexed_copy_plan
+
+    dst.from_numpy(dst_host)
+    ti.algorithms.experimental_scatter(
+        src.field("val"),
+        indices,
+        dst.field("val"),
+        method="cpu_native",
+        workspace=workspace,
+    )
+    scatter_plan = workspace._native_indexed_copy_plan
+    assert scatter_plan is not gather_plan
+    assert len(workspace._native_indexed_copy_plans) == 2
+
+    dst.from_numpy(dst_host)
+    ti.algorithms.experimental_gather(
+        src.field("val"),
+        indices,
+        dst.field("val"),
+        method="cpu_native",
+        workspace=workspace,
+    )
+    assert workspace._native_indexed_copy_plan is gather_plan
+    result = dst.to_numpy()
+    assert np.array_equal(result["val"], host["val"][index_data])
+    assert np.array_equal(result["tag"], dst_host["tag"])
+
+
+@test_utils.test(arch=ti.cpu)
 def test_experimental_scatter_cpu_native_struct_tensor_member_workspace_replay():
     src, dst, indices, index_data, host, dst_host = _make_struct_tensor_indexed_copy_case()
     src_vec = src.field("vec")

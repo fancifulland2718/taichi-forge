@@ -379,6 +379,14 @@ Validation:
   tests/python/test_indexed_copy.py`: 52 passed. Consolidated primitive subset
   remains 145 passed after enabling packed direct gather for CUDA compact
   whole tensor member output.
+- S6 plan-key/cache follow-up:
+  `test_transform.py`, `test_indexed_copy.py`, `test_compact.py`, and
+  `test_bucket_builder.py` targeted CPU/CUDA/Vulkan member-view cases passed.
+  This validates stable native plan keys across rebuilt member-view wrappers,
+  explicit multi-plan caches in `TransformWorkspace` and
+  `IndexedCopyWorkspace`, shared order/apply workspace reuse for
+  sort/compact/bucket, and internal `IndexedCopyWorkspace` reuse for
+  compact/bucket direct-output apply.
 - Consolidated primitive subset after closing sort/compact/bucket tensor-member
   gaps:
   `tests/python/test_transform.py tests/python/test_reduce.py
@@ -506,6 +514,44 @@ uses scalar temporary lanes because direct self-gather can overwrite values
 needed by later indices; replacing that safely would require a cycle/visited
 algorithm or full payload staging, which is intentionally left out of this
 low-complexity phase.
+
+S6 plan-cache/order follow-up sample:
+
+Input data was resident before timing. `first_call_ms` records the first public
+primitive call including native plan lookup/recording and the first backend
+submission. Warm timings are medians of five repeated calls. Payload is
+`struct{vec: vector(2, i32), tag: i32}`.
+
+| Backend | n | transform first/warm ms | gather first/warm ms | compact first/warm ms | bucket first/warm ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| CPU | 2048 | 1.1607 / 0.0746 | 0.1691 / 0.0450 | 0.5874 / 0.0852 | 0.6216 / 0.1048 |
+| CPU | 65536 | 0.8460 / 0.2809 | 0.3041 / 0.1681 | 1.0093 / 0.2901 | 1.1985 / 0.3896 |
+| CUDA | 2048 | 9.1703 / 0.0761 | 0.3337 / 0.0749 | 0.7638 / 0.0961 | 0.9282 / 0.1298 |
+| CUDA | 65536 | 0.1801 / 0.0511 | 0.1620 / 0.0488 | 0.8910 / 0.1325 | 1.1466 / 0.2263 |
+| Vulkan | 2048 | 18.2440 / 0.2618 | 9.1222 / 0.2506 | 84.8354 / 0.2985 | 1.5511 / 0.3066 |
+| Vulkan | 65536 | 0.3745 / 0.2693 | 0.4348 / 0.1884 | 1.9797 / 0.3163 | 1.3833 / 0.3568 |
+
+Artifacts are saved under
+`benchmarks/results/s6_struct_ndarray_plan_cache_20260523/`. All recorded
+entries have `ok=true` and include `first_call_ms`, `median_ms`, and
+`workspace_peak`.
+
+Implementation notes:
+
+- `_NativePrimitivePlan` compares StructNdarray member views by stable payload,
+  dtype, shape, offset, stride, and tensor lane shape, so rebuilding
+  `arr.field("x")` wrappers does not invalidate the native plan.
+- `TransformWorkspace` and `IndexedCopyWorkspace` keep a current hot plan plus
+  an explicit keyed plan map. A cache hit becomes the hot plan again, avoiding
+  linear search or stale single-plan behavior when one workspace alternates
+  between several native calls.
+- `SortWorkspace`, `CompactWorkspace`, and `BucketBuilderWorkspace` share the
+  order/apply scratch helpers. Order pairs are exact-size cached; identity fill
+  and output initialization run only when that exact pair is allocated, not on
+  every compact/bucket call.
+- Compact and bucket direct-output member apply call through an internal
+  `IndexedCopyWorkspace`, so packed whole tensor gather reuses the same native
+  plan/cache layer as public gather/scatter.
 
 ## Next-phase backlog excluding Field/SNode
 

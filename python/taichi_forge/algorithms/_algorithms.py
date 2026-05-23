@@ -622,6 +622,7 @@ class _OrderApplyWorkspaceMixin:
     def _init_order_apply_workspace(self, op_name):
         self._order_apply_op_name = op_name
         self._order_apply_buffers = {}
+        self._order_apply_pairs = {}
         self._order_apply_pair = None
         self._order_apply_scalar_temp_buffers = {}
         self._order_apply_indexed_copy_workspace = None
@@ -630,6 +631,7 @@ class _OrderApplyWorkspaceMixin:
         if self._order_apply_indexed_copy_workspace is not None:
             self._order_apply_indexed_copy_workspace.clear()
         self._order_apply_buffers.clear()
+        self._order_apply_pairs.clear()
         self._order_apply_pair = None
         self._order_apply_scalar_temp_buffers.clear()
         self._order_apply_indexed_copy_workspace = None
@@ -660,19 +662,19 @@ class _OrderApplyWorkspaceMixin:
 
     def _get_order_apply_pair(self, n):
         self._check_order_apply_items(n)
-        if (
-            self._order_apply_pair is None
-            or self._order_apply_pair["in"].shape[0] < n
-        ):
-            self._order_apply_pair = {
+        key = int(n)
+        pair = self._order_apply_pairs.get(key)
+        if pair is None:
+            pair = {
                 "in": ti_ndarray(i32, shape=n),
                 "out": ti_ndarray(i32, shape=n),
-                "last_n": n,
             }
-            fill_i32_arange_ndarray(self._order_apply_pair["in"], n)
-            self._order_apply_pair["out"].fill(0)
+            fill_i32_arange_ndarray(pair["in"], n)
+            pair["out"].fill(0)
+            self._order_apply_pairs[key] = pair
             self._reserve_order_apply_bytes(2 * n * 4)
-        return self._order_apply_pair["in"], self._order_apply_pair["out"]
+        self._order_apply_pair = pair
+        return pair["in"], pair["out"]
 
     def _get_order_apply_scalar_temp_buffer(self, dtype, n):
         self._check_order_apply_items(n)
@@ -1245,6 +1247,7 @@ class TransformWorkspace:
         temp_bytes = plan.invoke(prog)
         if temp_bytes is None:
             return False
+        self._native_transform_plan = plan
         self._mark_native_transform_backend_active(backend, temp_bytes)
         return True
 
@@ -1357,6 +1360,7 @@ class IndexedCopyWorkspace:
         temp_bytes = plan.invoke(prog)
         if temp_bytes is None:
             return False
+        self._native_indexed_copy_plan = plan
         self._mark_native_indexed_copy_backend_active(backend, temp_bytes)
         return True
 
@@ -2311,11 +2315,6 @@ def _prepare_identity_order(workspace, n):
 
 def _prepare_order_apply_pair(workspace, n):
     order_in, order_out = workspace._get_order_buffers(n)
-    pair = workspace._order_apply_pair
-    if pair is not None and n < pair["last_n"]:
-        order_out.fill(0)
-    if pair is not None:
-        pair["last_n"] = n
     return order_in, order_out
 
 

@@ -723,6 +723,58 @@ def test_experimental_transform_cpu_native_struct_member_workspace_replay():
 
 
 @test_utils.test(arch=[ti.cpu])
+def test_experimental_transform_cpu_native_struct_member_multi_plan_cache():
+    n = 128
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cpu_transform_available") and prog.cpu_transform_available()
+    ):
+        pytest.skip("CPU native transform is unavailable in this build/runtime.")
+
+    payload = ti.types.struct(value=ti.i32, tag=ti.i32)
+    src = ti.ndarray(payload, shape=n)
+    dst = ti.ndarray(ti.i32, shape=n)
+    host = np.zeros((n,), dtype=src.numpy_dtype)
+    host["value"] = np.arange(n, dtype=np.int32) * 2 - 9
+    host["tag"] = np.arange(n, dtype=np.int32) * 3 + 1
+    src.from_numpy(host)
+    workspace = ti.algorithms.TransformWorkspace(max_items=n)
+
+    ti.algorithms.experimental_transform(
+        src.field("value"),
+        dst,
+        scale=2,
+        bias=1,
+        method="cpu_native",
+        workspace=workspace,
+    )
+    first_plan = workspace._native_transform_plan
+
+    ti.algorithms.experimental_transform(
+        src.field("value"),
+        dst,
+        scale=5,
+        bias=-3,
+        method="cpu_native",
+        workspace=workspace,
+    )
+    second_plan = workspace._native_transform_plan
+    assert second_plan is not first_plan
+    assert len(workspace._native_transform_plans) == 2
+
+    ti.algorithms.experimental_transform(
+        src.field("value"),
+        dst,
+        scale=2,
+        bias=1,
+        method="cpu_native",
+        workspace=workspace,
+    )
+    assert workspace._native_transform_plan is first_plan
+    np.testing.assert_array_equal(dst.to_numpy(), host["value"] * 2 + 1)
+
+
+@test_utils.test(arch=[ti.cpu])
 def test_experimental_transform_cpu_native_ndarray_extended_dtypes():
     n = 131072
     for dtype in _TRANSFORM_DTYPES:
