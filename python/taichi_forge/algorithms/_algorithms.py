@@ -593,6 +593,48 @@ def _component_group_semantic_key(*items):
     return ("component_group", *items)
 
 
+def _try_native_component_plan_group(
+    plan_groups, backend, objects, semantic_items, on_success
+):
+    if backend is None:
+        return False
+    semantic_key = _component_group_semantic_key(*semantic_items)
+    key = _native_plan_cache_key(backend, objects, semantic_key)
+    group = plan_groups.get(key)
+    if group is None:
+        return False
+    if not group.matches_request(backend, objects, semantic_key):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not group.matches_program(prog):
+        return False
+    temp_bytes = group.invoke(prog)
+    if temp_bytes is None:
+        return False
+    on_success(group, temp_bytes)
+    return True
+
+
+def _record_native_component_plan_group(
+    plan_groups, backend, objects, semantic_items, plans
+):
+    if backend is None or not plans:
+        return
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    group = _NativePrimitivePlanGroup(
+        backend,
+        objects,
+        _component_group_semantic_key(*semantic_items),
+        plans,
+        prog,
+    )
+    plan_groups[group.cache_key()] = group
+
+
 def _struct_tensor_member_components(view):
     for component in np.ndindex(view.element_shape):
         yield view.base.field(view.path, component=component)
@@ -1114,27 +1156,20 @@ class ReduceWorkspace:
 
     def _try_native_reduce_plan_group(self, values, output, op, method):
         backend = self._native_reduce_backend_for_method(method)
-        if backend is None:
-            return False
-        semantic_key = _component_group_semantic_key(op)
-        key = _native_plan_cache_key(backend, (values, output), semantic_key)
-        group = self._native_reduce_plan_groups.get(key)
-        if group is None:
-            return False
-        if not group.matches_request(backend, (values, output), semantic_key):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+        return _try_native_component_plan_group(
+            self._native_reduce_plan_groups,
+            backend,
+            (values, output),
+            (op,),
+            lambda group, temp_bytes: self._activate_native_reduce_plan_group(
+                backend, group, temp_bytes
+            ),
+        )
 
-        prog = impl.get_runtime().prog
-        if not group.matches_program(prog):
-            return False
-        temp_bytes = group.invoke(prog)
-        if temp_bytes is None:
-            return False
+    def _activate_native_reduce_plan_group(self, backend, group, temp_bytes):
         if group.plans:
             self._native_reduce_plan = group.plans[-1]
         self._mark_native_reduce_backend_active(backend, temp_bytes)
-        return True
 
     def _record_native_reduce_plan(
         self,
@@ -1164,19 +1199,13 @@ class ReduceWorkspace:
 
     def _record_native_reduce_plan_group(self, values, output, op, method, plans):
         backend = self._native_reduce_backend_for_method(method)
-        if backend is None or not plans:
-            return
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        group = _NativePrimitivePlanGroup(
+        _record_native_component_plan_group(
+            self._native_reduce_plan_groups,
             backend,
             (values, output),
-            _component_group_semantic_key(op),
+            (op,),
             plans,
-            prog,
         )
-        self._native_reduce_plan_groups[group.cache_key()] = group
 
     def _get_field_private_buffers(self, n, dtype):
         self.check_shape(n)
@@ -1406,27 +1435,20 @@ class TransformWorkspace:
 
     def _try_native_transform_plan_group(self, src, dst, method, scale, bias):
         backend = self._native_transform_backend_for_method(method)
-        if backend is None:
-            return False
-        semantic_key = _component_group_semantic_key(scale, bias)
-        key = _native_plan_cache_key(backend, (src, dst), semantic_key)
-        group = self._native_transform_plan_groups.get(key)
-        if group is None:
-            return False
-        if not group.matches_request(backend, (src, dst), semantic_key):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+        return _try_native_component_plan_group(
+            self._native_transform_plan_groups,
+            backend,
+            (src, dst),
+            (scale, bias),
+            lambda group, temp_bytes: self._activate_native_transform_plan_group(
+                backend, group, temp_bytes
+            ),
+        )
 
-        prog = impl.get_runtime().prog
-        if not group.matches_program(prog):
-            return False
-        temp_bytes = group.invoke(prog)
-        if temp_bytes is None:
-            return False
+    def _activate_native_transform_plan_group(self, backend, group, temp_bytes):
         if group.plans:
             self._native_transform_plan = group.plans[-1]
         self._mark_native_transform_backend_active(backend, temp_bytes)
-        return True
 
     def _record_native_transform_plan(
         self,
@@ -1459,19 +1481,13 @@ class TransformWorkspace:
         self, src, dst, method, scale, bias, plans
     ):
         backend = self._native_transform_backend_for_method(method)
-        if backend is None or not plans:
-            return
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        group = _NativePrimitivePlanGroup(
+        _record_native_component_plan_group(
+            self._native_transform_plan_groups,
             backend,
             (src, dst),
-            _component_group_semantic_key(scale, bias),
+            (scale, bias),
             plans,
-            prog,
         )
-        self._native_transform_plan_groups[group.cache_key()] = group
 
     def clear(self):
         if self._vulkan_native_active:
@@ -1565,27 +1581,20 @@ class IndexedCopyWorkspace:
         self, src, indices, dst, method, scatter
     ):
         backend = self._native_indexed_copy_backend_for_method(method)
-        if backend is None:
-            return False
-        semantic_key = _component_group_semantic_key(bool(scatter))
-        key = _native_plan_cache_key(backend, (src, indices, dst), semantic_key)
-        group = self._native_indexed_copy_plan_groups.get(key)
-        if group is None:
-            return False
-        if not group.matches_request(backend, (src, indices, dst), semantic_key):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+        return _try_native_component_plan_group(
+            self._native_indexed_copy_plan_groups,
+            backend,
+            (src, indices, dst),
+            (bool(scatter),),
+            lambda group, temp_bytes: self._activate_native_indexed_copy_plan_group(
+                backend, group, temp_bytes
+            ),
+        )
 
-        prog = impl.get_runtime().prog
-        if not group.matches_program(prog):
-            return False
-        temp_bytes = group.invoke(prog)
-        if temp_bytes is None:
-            return False
+    def _activate_native_indexed_copy_plan_group(self, backend, group, temp_bytes):
         if group.plans:
             self._native_indexed_copy_plan = group.plans[-1]
         self._mark_native_indexed_copy_backend_active(backend, temp_bytes)
-        return True
 
     def _record_native_indexed_copy_plan(
         self,
@@ -1618,19 +1627,13 @@ class IndexedCopyWorkspace:
         self, src, indices, dst, method, scatter, plans
     ):
         backend = self._native_indexed_copy_backend_for_method(method)
-        if backend is None or not plans:
-            return
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        group = _NativePrimitivePlanGroup(
+        _record_native_component_plan_group(
+            self._native_indexed_copy_plan_groups,
             backend,
             (src, indices, dst),
-            _component_group_semantic_key(bool(scatter)),
+            (bool(scatter),),
             plans,
-            prog,
         )
-        self._native_indexed_copy_plan_groups[group.cache_key()] = group
 
     def clear(self):
         if self._vulkan_native_active:
@@ -1737,25 +1740,15 @@ class ScatterAddWorkspace:
         self, src, indices, dst, method, value_type
     ):
         backend = self._native_scatter_add_backend_for_method(method)
-        if backend is None:
-            return False
-        semantic_key = _component_group_semantic_key(int(value_type))
-        key = _native_plan_cache_key(backend, (src, indices, dst), semantic_key)
-        group = self._native_scatter_add_plan_groups.get(key)
-        if group is None:
-            return False
-        if not group.matches_request(backend, (src, indices, dst), semantic_key):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        if not group.matches_program(prog):
-            return False
-        temp_bytes = group.invoke(prog)
-        if temp_bytes is None:
-            return False
-        self._mark_native_scatter_add_backend_active(backend, temp_bytes)
-        return True
+        return _try_native_component_plan_group(
+            self._native_scatter_add_plan_groups,
+            backend,
+            (src, indices, dst),
+            (int(value_type),),
+            lambda _group, temp_bytes: self._mark_native_scatter_add_backend_active(
+                backend, temp_bytes
+            ),
+        )
 
     def _record_native_scatter_add_plan(
         self,
@@ -1792,19 +1785,13 @@ class ScatterAddWorkspace:
         self, src, indices, dst, method, value_type, plans
     ):
         backend = self._native_scatter_add_backend_for_method(method)
-        if backend is None or not plans:
-            return
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        group = _NativePrimitivePlanGroup(
+        _record_native_component_plan_group(
+            self._native_scatter_add_plan_groups,
             backend,
             (src, indices, dst),
-            _component_group_semantic_key(int(value_type)),
+            (int(value_type),),
             plans,
-            prog,
         )
-        self._native_scatter_add_plan_groups[group.cache_key()] = group
 
     def clear(self):
         if self._vulkan_native_active:
@@ -7382,25 +7369,17 @@ class PrefixSumExecutor:
 
     def _try_native_scan_plan_group(self, input_arr):
         backend = self._native_scan_backend_for_arch()
-        if backend is None:
-            return False
-        semantic_key = _component_group_semantic_key(self.sorting_length)
-        key = _native_plan_cache_key(backend, (input_arr,), semantic_key)
-        group = self._native_scan_plan_groups.get(key)
-        if group is None:
-            return False
-        if not group.matches_request(backend, (input_arr,), semantic_key):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+        return _try_native_component_plan_group(
+            self._native_scan_plan_groups,
+            backend,
+            (input_arr,),
+            (self.sorting_length,),
+            self._activate_native_scan_plan_group,
+        )
 
-        prog = impl.get_runtime().prog
-        if not group.matches_program(prog):
-            return False
-        if group.invoke(prog) is None:
-            return False
+    def _activate_native_scan_plan_group(self, group, _temp_bytes):
         if group.plans:
             self._native_scan_plan = group.plans[-1]
-        return True
 
     def _record_native_scan_plan(
         self, backend, method_name, input_arr, view, call_args, prog
@@ -7421,19 +7400,13 @@ class PrefixSumExecutor:
 
     def _record_native_scan_plan_group(self, input_arr, plans):
         backend = self._native_scan_backend_for_arch()
-        if backend is None or not plans:
-            return
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        group = _NativePrimitivePlanGroup(
+        _record_native_component_plan_group(
+            self._native_scan_plan_groups,
             backend,
             (input_arr,),
-            _component_group_semantic_key(self.sorting_length),
+            (self.sorting_length,),
             plans,
-            prog,
         )
-        self._native_scan_plan_groups[group.cache_key()] = group
 
     def _try_cuda_cub_scan(self, input_arr):
         if current_cfg().arch != cuda:

@@ -1109,17 +1109,20 @@ S0 进入 S1 的条件：
   - `scan`、`reduce` 和 `scatter_add` 仍是 component-split path，已复用同一套
     component plan group，使 wrapper 重建或同 workspace/executor 后续调用可
     replay native plan；
-  - benchmark 已放开 `struct_tensor_member` 的 scan/reduce 覆盖，结果目录：
-    `benchmarks/results/s7_struct_tensor_component_group_20260523/`。
+  - component plan group 的 try/record 逻辑已抽到统一 helper，matrix field 与
+    StructNdarray tensor member 共用 `_NativePrimitivePlanGroup` 的 cache key、
+    Program guard 与 temp workspace 统计语义；
+  - benchmark 已放开 `struct_tensor_member` 的 scan/reduce 覆盖；helper 抽取后复测
+    结果目录：`benchmarks/results/s7_struct_tensor_component_group_refactor_20260523/`。
 
 | storage | backend | primitive 覆盖 | warm median 范围 | first-call 范围 | workspace peak |
 | --- | --- | --- | ---: | ---: | ---: |
 | matrix_field | CPU | scan/reduce/transform/gather/scatter/scatter_add | 0.029-0.383 ms | 0.95-3.14 ms | 0B；reduce 64K 为 8B |
 | matrix_field | CUDA | scan/reduce/transform/gather/scatter/scatter_add | 0.064-0.139 ms | 9.98-12.94 ms | scan 1023B；reduce 1B/17407B；其余 0B |
 | matrix_field | Vulkan | scan/reduce/transform/gather/scatter/scatter_add | 0.248-0.370 ms | 12.97-39.51 ms | scan 36B/1044B；reduce 12B/140B；transform 40B；indexed 28B；scatter_add 24B |
-| struct_tensor_member | CPU | scan/reduce/transform/gather/scatter/scatter_add | 0.020-0.349 ms | 0.26-1.12 ms | 0B；reduce 64K 为 8B |
-| struct_tensor_member | CUDA | scan/reduce/transform/gather/scatter/scatter_add | 0.023-0.094 ms | 8.41-10.87 ms | scan 1023B；reduce 1B/17407B；其余 0B |
-| struct_tensor_member | Vulkan | scan/reduce/transform/gather/scatter/scatter_add | 0.166-0.319 ms | 12.23-47.31 ms | scan 36B/1044B；reduce 12B/140B；transform 40B；indexed 28B；scatter_add 24B |
+| struct_tensor_member | CPU | scan/reduce/transform/gather/scatter/scatter_add | 0.019-0.351 ms | 0.26-1.19 ms | 0B；reduce 64K 为 8B |
+| struct_tensor_member | CUDA | scan/reduce/transform/gather/scatter/scatter_add | 0.033-0.166 ms | 9.69-11.90 ms | scan 1023B；reduce 1B/17407B；其余 0B |
+| struct_tensor_member | Vulkan | scan/reduce/transform/gather/scatter/scatter_add | 0.202-0.444 ms | 12.86-48.19 ms | scan 36B/1044B；reduce 12B/140B；transform 40B；indexed 28B；scatter_add 24B |
 
 - 暂不处理 `experimental_grouped_reduce()` 的 whole field component native 化：
   当前还没有 dense-field grouped-reduce native backend，强行拆分只会回到多个
