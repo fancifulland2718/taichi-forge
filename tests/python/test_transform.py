@@ -693,7 +693,6 @@ def test_experimental_transform_cpu_native_struct_member_workspace_replay():
 
     payload = ti.types.struct(value=ti.i32, tag=ti.i32)
     src = ti.ndarray(payload, shape=n)
-    src_member = src.field("value")
     dst = ti.ndarray(ti.i32, shape=n)
     workspace = ti.algorithms.TransformWorkspace(max_items=n)
     first_plan = None
@@ -704,7 +703,12 @@ def test_experimental_transform_cpu_native_struct_member_workspace_replay():
         host["tag"] = np.arange(n, dtype=np.int32) * 3 + 1
         src.from_numpy(host)
         ti.algorithms.experimental_transform(
-            src_member, dst, scale=3, bias=-2, method="cpu_native", workspace=workspace
+            src.field("value"),
+            dst,
+            scale=3,
+            bias=-2,
+            method="cpu_native",
+            workspace=workspace,
         )
         np.testing.assert_array_equal(dst.to_numpy(), data * 3 - 2)
         if first_plan is None:
@@ -771,8 +775,6 @@ def test_experimental_transform_cpu_native_struct_tensor_member_workspace_replay
     payload = ti.types.struct(vec=ti.types.vector(2, ti.i32), tag=ti.i32)
     src = ti.ndarray(payload, shape=n)
     dst = ti.ndarray(payload, shape=n)
-    src_view = src.field("vec")
-    dst_view = dst.field("vec")
     workspace = ti.algorithms.TransformWorkspace(max_items=n)
     first_plan = None
     for base in (0, 17):
@@ -787,8 +789,8 @@ def test_experimental_transform_cpu_native_struct_tensor_member_workspace_replay
         src.from_numpy(src_host)
         dst.from_numpy(dst_host)
         ti.algorithms.experimental_transform(
-            src_view,
-            dst_view,
+            src.field("vec"),
+            dst.field("vec"),
             scale=3,
             bias=7,
             method="cpu_native",

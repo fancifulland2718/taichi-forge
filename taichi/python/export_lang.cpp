@@ -887,6 +887,11 @@ void export_lang(py::module &m) {
            py::arg("values"), py::arg("flags"), py::arg("output"),
            py::arg("count"), py::arg("value_type"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_select_dense_field",
+           &Program::cuda_cub_select_dense_field, py::arg("values"),
+           py::arg("flags"), py::arg("output"), py::arg("count"),
+           py::arg("value_type"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_select_i32_ndarray",
            &Program::cuda_cub_select_i32_ndarray, py::arg("values"),
            py::arg("flags"), py::arg("output"), py::arg("count"),
@@ -1153,6 +1158,10 @@ void export_lang(py::module &m) {
       .def("vulkan_compact_ndarray", &Program::vulkan_compact_ndarray,
            py::arg("values"), py::arg("flags"), py::arg("output"),
            py::arg("count"), py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_compact_dense_field", &Program::vulkan_compact_dense_field,
+           py::arg("values"), py::arg("flags"), py::arg("output"),
+           py::arg("count"), py::arg("value_type"), py::arg("n"),
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_compact_i32_ndarray",
            &Program::vulkan_compact_i32_ndarray, py::arg("values"),

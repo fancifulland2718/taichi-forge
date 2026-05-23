@@ -6591,6 +6591,174 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
   return cache.cached_bytes;
 }
 
+std::size_t Program::vulkan_compact_dense_field(SNode *values,
+                                                SNode *flags,
+                                                SNode *output,
+                                                SNode *count,
+                                                int value_type,
+                                                std::size_t n) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native dense field compact is only available on Vulkan.");
+  TI_ERROR_IF(!values || !flags || !output || !count,
+              "Vulkan native dense field compact received null field.");
+  const size_t expected_value_bytes =
+      (value_type == 0 || value_type == 1 || value_type == 2)
+          ? sizeof(uint32_t)
+          : (value_type == 3 || value_type == 4 || value_type == 5)
+                ? sizeof(uint64_t)
+                : 0;
+  TI_ERROR_IF(expected_value_bytes == 0,
+              "Vulkan native dense field compact received an unsupported "
+              "value type.");
+  const size_t item_bytes = expected_value_bytes;
+  TI_ERROR_IF(item_bytes % sizeof(uint32_t) != 0,
+              "Vulkan native dense field compact received a non-4-byte-"
+              "aligned payload.");
+  const size_t values_stride = get_dense_field_stride(values, item_bytes);
+  const size_t flags_stride = get_dense_field_stride(flags, sizeof(int32_t));
+  const size_t output_stride = get_dense_field_stride(output, item_bytes);
+  const size_t count_stride = get_dense_field_stride(count, sizeof(int32_t));
+  TI_ERROR_IF(values_stride != item_bytes || output_stride != item_bytes ||
+                  flags_stride != sizeof(int32_t) ||
+                  count_stride < sizeof(int32_t),
+              "Vulkan native dense field compact requires contiguous values, "
+              "flags, and output fields.");
+  if (n == 0) {
+    return 0;
+  }
+  const size_t item_words = item_bytes / sizeof(uint32_t);
+  const size_t word_count = n * item_words;
+  TI_ERROR_IF(word_count >
+                  static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native dense field compact word count exceeds "
+              "UINT32_MAX.");
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native dense field compact requires a compute device.");
+  auto &cache = get_compact_cache(this, device);
+  const size_t prefix_bytes = n * sizeof(int32_t);
+  if (cache.has_workspace_allocs() &&
+      cache.needs_prefix_realloc(prefix_bytes)) {
+    synchronize();
+  }
+  cache.ensure_prefix(prefix_bytes);
+  const size_t value_total_bytes = n * item_bytes;
+
+  DevicePtr values_ptr = get_dense_field_device_ptr(values);
+  DevicePtr flags_ptr = get_dense_field_device_ptr(flags);
+  DevicePtr output_ptr = get_dense_field_device_ptr(output);
+  DevicePtr count_ptr = get_dense_field_device_ptr(count);
+  DeviceAllocation values_alloc{values_ptr.device, values_ptr.alloc_id};
+  DeviceAllocation flags_alloc{flags_ptr.device, flags_ptr.alloc_id};
+  DeviceAllocation output_alloc{output_ptr.device, output_ptr.alloc_id};
+  DeviceAllocation count_alloc{count_ptr.device, count_ptr.alloc_id};
+  const size_t values_offset = values_ptr.offset;
+  const size_t flags_offset = flags_ptr.offset;
+  const size_t output_offset = output_ptr.offset;
+  const size_t count_offset = count_ptr.offset;
+  DeviceAllocation prefix_alloc = cache.prefix;
+  Pipeline *flags_pipeline = cache.compact_i32_flags.get();
+  Pipeline *scatter_pipeline = cache.compact_i32_scatter.get();
+  const bool profiler_scopes = profiler != nullptr;
+  const uint32_t flag_groups =
+      static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
+  const uint32_t word_groups =
+      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
+  const int compact_fuse_max_n_config =
+      get_environ_config("TI_VULKAN_COMPACT_FUSE_MAX_N", 4096);
+  const bool use_fused_recording =
+      compact_fuse_max_n_config > 0 &&
+      n <= static_cast<size_t>(compact_fuse_max_n_config);
+
+  if (use_fused_recording) {
+    auto scan_plan = prepare_vulkan_i32_scan(this, cache.scan, prefix_alloc, n);
+    cache.cached_bytes = cache.allocated_bytes();
+    enqueue_compute_op_lambda(
+        [flags_alloc, flags_offset, prefix_alloc, prefix_bytes, flags_pipeline,
+         flag_groups, values_alloc, values_offset, output_alloc, output_offset,
+         count_alloc, count_offset, scatter_pipeline, scan_plan,
+         value_total_bytes, word_groups, profiler_scopes](
+            Device *op_device, CommandList *cmdlist) {
+          {
+            auto bindings = op_device->create_resource_set_unique();
+            bindings->rw_buffer(0, flags_alloc.get_ptr(flags_offset),
+                                prefix_bytes);
+            bindings->rw_buffer(1, prefix_alloc.get_ptr(0), prefix_bytes);
+            dispatch_pipeline(cmdlist, flags_pipeline, bindings.get(),
+                              flag_groups, 1, 1,
+                              profiler_scopes ? "vulkan_compact_i32_flags"
+                                              : nullptr);
+            cmdlist->buffer_barrier(prefix_alloc);
+          }
+          record_vulkan_i32_scan(op_device, cmdlist, scan_plan,
+                                 profiler_scopes);
+          {
+            auto bindings = op_device->create_resource_set_unique();
+            bindings->rw_buffer(0, values_alloc.get_ptr(values_offset),
+                                value_total_bytes);
+            bindings->rw_buffer(1, flags_alloc.get_ptr(flags_offset),
+                                prefix_bytes);
+            bindings->rw_buffer(2, prefix_alloc.get_ptr(0), prefix_bytes);
+            bindings->rw_buffer(3, output_alloc.get_ptr(output_offset),
+                                value_total_bytes);
+            bindings->rw_buffer(4, count_alloc.get_ptr(count_offset),
+                                sizeof(int32_t));
+            dispatch_pipeline(cmdlist, scatter_pipeline, bindings.get(),
+                              word_groups, 1, 1,
+                              profiler_scopes ? "vulkan_compact_i32_scatter"
+                                              : nullptr);
+          }
+          cmdlist->buffer_barrier(output_alloc);
+          cmdlist->buffer_barrier(count_alloc);
+        },
+        {});
+    return cache.cached_bytes;
+  }
+
+  enqueue_compute_op_lambda(
+      [flags_alloc, flags_offset, prefix_alloc, prefix_bytes, flags_pipeline,
+       flag_groups, profiler_scopes](Device *op_device, CommandList *cmdlist) {
+        auto bindings = op_device->create_resource_set_unique();
+        bindings->rw_buffer(0, flags_alloc.get_ptr(flags_offset),
+                            prefix_bytes);
+        bindings->rw_buffer(1, prefix_alloc.get_ptr(0), prefix_bytes);
+        dispatch_pipeline(cmdlist, flags_pipeline, bindings.get(), flag_groups,
+                          1, 1,
+                          profiler_scopes ? "vulkan_compact_i32_flags"
+                                          : nullptr);
+        cmdlist->buffer_barrier(prefix_alloc);
+      },
+      {});
+
+  enqueue_vulkan_i32_scan(this, cache.scan, prefix_alloc, n, profiler_scopes);
+  cache.cached_bytes = cache.allocated_bytes();
+
+  enqueue_compute_op_lambda(
+      [values_alloc, values_offset, flags_alloc, flags_offset, prefix_alloc,
+       output_alloc, output_offset, count_alloc, count_offset, prefix_bytes,
+       value_total_bytes, scatter_pipeline, word_groups, profiler_scopes](
+          Device *op_device, CommandList *cmdlist) {
+        auto bindings = op_device->create_resource_set_unique();
+        bindings->rw_buffer(0, values_alloc.get_ptr(values_offset),
+                            value_total_bytes);
+        bindings->rw_buffer(1, flags_alloc.get_ptr(flags_offset),
+                            prefix_bytes);
+        bindings->rw_buffer(2, prefix_alloc.get_ptr(0), prefix_bytes);
+        bindings->rw_buffer(3, output_alloc.get_ptr(output_offset),
+                            value_total_bytes);
+        bindings->rw_buffer(4, count_alloc.get_ptr(count_offset),
+                            sizeof(int32_t));
+        dispatch_pipeline(cmdlist, scatter_pipeline, bindings.get(),
+                          word_groups, 1, 1,
+                          profiler_scopes ? "vulkan_compact_i32_scatter"
+                                          : nullptr);
+        cmdlist->buffer_barrier(output_alloc);
+        cmdlist->buffer_barrier(count_alloc);
+      },
+      {});
+  return cache.cached_bytes;
+}
+
 std::size_t Program::vulkan_compact_i32_ndarray(Ndarray *values,
                                                 Ndarray *flags,
                                                 Ndarray *output,
@@ -9491,6 +9659,16 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
                                             Ndarray *count,
                                             int value_type) {
   TI_ERROR("Vulkan native compact requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_compact_dense_field(SNode *values,
+                                                SNode *flags,
+                                                SNode *output,
+                                                SNode *count,
+                                                int value_type,
+                                                std::size_t n) {
+  TI_ERROR("Vulkan native dense field compact requires TI_WITH_VULKAN=ON.");
   return 0;
 }
 

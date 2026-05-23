@@ -1170,6 +1170,25 @@ def compact_scatter_field_from_prefix_ndarray(
 
 
 @kernel
+def compact_stable_serial_field(
+    values: template(),
+    flags: template(),
+    output: template(),
+    count: template(),
+    N: i32,
+):
+    values_offset = static(values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0)
+    flags_offset = static(flags.snode.ptr.offset if len(flags.snode.ptr.offset) != 0 else 0)
+    output_offset = static(output.snode.ptr.offset if len(output.snode.ptr.offset) != 0 else 0)
+    count[None] = 0
+    loop_config(serialize=True)
+    for i in range(N):
+        if flags[i + flags_offset] != 0:
+            output[count[None] + output_offset] = values[i + values_offset]
+            count[None] += 1
+
+
+@kernel
 def reduce_i32_field(values: template(), output: template(), N: i32, op: i32):
     values_offset = static(values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0)
     if op == 0:

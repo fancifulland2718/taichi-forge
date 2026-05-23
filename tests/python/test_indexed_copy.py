@@ -314,7 +314,11 @@ def test_experimental_gather_cpu_native_struct_scalar_member_workspace_replay():
     src.from_numpy(host)
     dst.from_numpy(dst_host)
     ti.algorithms.experimental_gather(
-        src_val, indices, dst_val, method="cpu_native", workspace=workspace
+        src.field("val"),
+        indices,
+        dst.field("val"),
+        method="cpu_native",
+        workspace=workspace,
     )
 
     assert workspace._native_indexed_copy_plan is first_plan
@@ -343,7 +347,11 @@ def test_experimental_scatter_cpu_native_struct_tensor_member_workspace_replay()
     src.from_numpy(host)
     dst.from_numpy(dst_host)
     ti.algorithms.experimental_scatter(
-        src_vec, indices, dst_vec, method="cpu_native", workspace=workspace
+        src.field("vec"),
+        indices,
+        dst.field("vec"),
+        method="cpu_native",
+        workspace=workspace,
     )
 
     assert workspace._native_indexed_copy_plan is first_plan

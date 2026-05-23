@@ -163,7 +163,7 @@ def test_experimental_compact_vulkan_native_struct_tensor_member_views():
     _run_struct_tensor_member_compact("vulkan_native")
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_compact_field_scan():
     n = 2048
     values = ti.field(ti.i32, shape=n)
@@ -190,19 +190,24 @@ def test_experimental_compact_field_scan():
     expected = values_np[flags_np]
     assert count[None] == expected.shape[0]
     assert np.array_equal(output.to_numpy()[: expected.shape[0]], expected)
-    assert workspace.workspace_bytes_peak >= n * 4
+    if impl.current_cfg().arch == ti.cpu:
+        assert workspace.workspace_bytes_peak == 0
+    elif impl.current_cfg().arch == ti.cuda:
+        assert workspace.workspace_bytes_peak > 0
+    else:
+        assert workspace.workspace_bytes_peak >= n * 4
 
 
 @test_utils.test(arch=[ti.cuda])
-def test_experimental_compact_cuda_field_scan_uses_cub_prefix():
+def test_experimental_compact_cuda_field_scan_uses_cub_native_workspace():
     n = 4096
     values = ti.field(ti.i32, shape=n)
     flags = ti.field(ti.i32, shape=n)
     output = ti.field(ti.i32, shape=n)
     count = ti.field(ti.i32, shape=())
 
-    if not impl.get_runtime().prog.cuda_cub_scan_available():
-        pytest.skip("CUDA CUB scan is unavailable in this build/runtime.")
+    if not impl.get_runtime().prog.cuda_cub_select_available():
+        pytest.skip("CUDA CUB select is unavailable in this build/runtime.")
 
     @ti.kernel
     def fill():
@@ -221,11 +226,11 @@ def test_experimental_compact_cuda_field_scan_uses_cub_prefix():
     expected = (np.arange(n, dtype=np.int32) - 5)[np.arange(n) % 4 == 0]
     assert count[None] == expected.shape[0]
     assert np.array_equal(output.to_numpy()[: expected.shape[0]], expected)
-    assert workspace.workspace_bytes_peak >= n * 4
-    assert impl.get_runtime().prog.cuda_cub_scan_workspace_bytes() > 0
+    assert workspace.workspace_bytes_peak > 0
+    assert impl.get_runtime().prog.cuda_cub_select_workspace_bytes() > 0
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_compact_field_scan_single_item():
     values = ti.field(ti.i32, shape=1)
     flags = ti.field(ti.i32, shape=1)
@@ -254,7 +259,7 @@ def test_experimental_compact_field_scan_single_item():
     assert output[0] == 37
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_compact_field_scan_empty_and_full_selection():
     n = 257
     values = ti.field(ti.i32, shape=n)

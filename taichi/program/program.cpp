@@ -5260,6 +5260,69 @@ std::size_t Program::cuda_cub_select_ndarray(Ndarray *values,
 #endif
 }
 
+std::size_t Program::cuda_cub_select_dense_field(SNode *values,
+                                                 SNode *flags,
+                                                 SNode *output,
+                                                 SNode *count,
+                                                 int value_type,
+                                                 std::size_t n) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB dense field select is only available on CUDA.");
+  TI_ERROR_IF(!values || !flags || !output || !count,
+              "CUDA CUB dense field select received a null field.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB dense field select currently supports at most INT_MAX "
+              "items.");
+  const std::size_t item_bytes = primitive_value_type_size(value_type);
+  TI_ERROR_IF(item_bytes == 0,
+              "CUDA CUB dense field select received an unsupported value type.");
+  TI_ERROR_IF(item_bytes % sizeof(uint32_t) != 0,
+              "CUDA CUB dense field select requires 4-byte-aligned payloads.");
+  const std::size_t values_stride = get_dense_field_stride(values, item_bytes);
+  const std::size_t flags_stride =
+      get_dense_field_stride(flags, sizeof(int32_t));
+  const std::size_t output_stride = get_dense_field_stride(output, item_bytes);
+  const std::size_t count_stride =
+      get_dense_field_stride(count, sizeof(int32_t));
+  TI_ERROR_IF(values_stride != item_bytes || output_stride != item_bytes ||
+                  flags_stride != sizeof(int32_t) ||
+                  count_stride < sizeof(int32_t),
+              "CUDA CUB dense field select requires contiguous values, flags, "
+              "and output fields.");
+  const std::size_t item_words = item_bytes / sizeof(uint32_t);
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                           item_words),
+              "CUDA CUB dense field select word count exceeds INT_MAX.");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *values_ptr = raw_ptr(get_dense_field_device_ptr(values),
+                             "CUDA CUB dense field select");
+  void *flags_ptr =
+      raw_ptr(get_dense_field_device_ptr(flags), "CUDA CUB dense field select");
+  void *output_ptr = raw_ptr(get_dense_field_device_ptr(output),
+                             "CUDA CUB dense field select");
+  void *count_ptr =
+      raw_ptr(get_dense_field_device_ptr(count), "CUDA CUB dense field select");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_select_flagged(
+      values_ptr, flags_ptr, output_ptr, count_ptr, static_cast<int>(n),
+      static_cast<cuda::CubSelectValueType>(value_type),
+      static_cast<int>(item_words), stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB dense field select requires building Taichi with "
+      "TI_WITH_CUDA=ON and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 std::size_t Program::cuda_cub_select_i32_ndarray(Ndarray *values,
                                                  Ndarray *flags,
                                                  Ndarray *output,

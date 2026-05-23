@@ -553,6 +553,11 @@ S0 进入 S1 的条件：
   - StructNdarray scalar member histogram 暂时显式拒绝并提示需要 native
     strided histogram；这比旧路径静默回到 field/helper 更清晰，也避免重新引入
     多 helper IR 膨胀。
+  - ROI 复核后，将 StructNdarray scalar member native strided histogram
+    暂缓到后续有明确 workload 需求时再做。该项需要 CPU/CUDA/Vulkan 都新增
+    `base + offset + stride` histogram entrypoint、workspace 统计和 capability
+    gating，覆盖面却只补齐较少见的 member histogram；当前建议让用户显式拷贝到
+    numeric ndarray 或改用 dense field/ndarray histogram。
   - 本轮未加入自动选择策略：调用者指定 `cpu_native`、`cuda_cub`、
     `cuda_device` 或 `vulkan_native` 时直接走对应 native path；后续 cost model
     另行处理。
@@ -562,9 +567,203 @@ S0 进入 S1 的条件：
     warm runtime 优于 vanilla；CUDA/Vulkan warm runtime 仍受 native API 固定
     dispatch/sync 成本影响，后续需要专门优化 GPU 小 kernel replay 或更轻量的
     device kernel。
+  - ROI 复核后，CUDA/Vulkan scatter-add/histogram warm-runtime 深挖不阻塞
+    S6。当前主目标是去 helper IR 和降低 first-call/compile，已经达成；warm
+    runtime 继续优化需要后端级 atomic/private histogram、dispatch 融合或
+    command replay 调整，风险和验证成本高，且对下一阶段 order/apply 的主线收益
+    边际较低。暂列为 GPU backend perf backlog，在 S6/S7 后结合真实 workload
+    再决定是否投入。
   - correctness 回归：
     `tests/python/test_scatter_add.py tests/python/test_histogram.py` 22 passed
     （关闭 offline cache；pytest cache 目录权限 warning 不影响结果）。
+- S6.1 进入 order/apply 收敛的第一步：
+  - 现状：`SortWorkspace`、`CompactWorkspace`、`BucketBuilderWorkspace` 各自维护
+    order buffer / order pair / scalar temp buffer；StructNdarray tensor member
+    sort、compact、bucket 也各自手写 identity order、order output 清零和 apply
+    order 调用。这会让后续 dense field order apply 和 compact/bucket/sort 的
+    native 化重复扩散。
+  - 本子步目标：先抽出内部 `_OrderApplyWorkspaceMixin`、
+    `_prepare_identity_order()`、`_prepare_order_apply_pair()` 和
+    `_apply_order_to_values()`，保留现有 public API 和后端 ABI 不变；sort、
+    compact、bucket 的 StructNdarray tensor member 路径统一使用同一套 order
+    apply helper。
+  - 风险边界：本子步只做 Python routing/workspace 收敛，不新增 native
+    CUDA/Vulkan shader，不改变 field compact/bucket 的 fallback 结果；in-place
+    order apply 仍只对 StructNdarray tensor member 开启，避免普通 ndarray/field
+    自覆盖语义变化。
+  - 验收：`py_compile`、compact/bucket/sort 相关 pytest 子集通过；workspace
+    peak 不因同一 workspace 重复调用而额外线性增长；代表性 CPU/CUDA/Vulkan
+    StructNdarray compact/bucket/sort benchmark 不出现明显回归。
+  - 实际验证：
+    - `python -m py_compile python/taichi_forge/algorithms/_algorithms.py`
+      通过。
+    - `tests/python/test_compact.py tests/python/test_bucket_builder.py
+      tests/python/test_sort.py` 通过：249 passed；仅有既有 Vulkan range cast
+      warning 和 pytest cache 权限 warning。
+    - benchmark 结果写入
+      `benchmarks/results/s6_order_apply_workspace_20260523/summary.csv`：
+      CPU/CUDA/Vulkan × sort/compact/bucket × 2048/65536 全部 `ok=True`。
+      代表性 65536 warm median：CPU sort 4.046 ms、compact 0.564 ms、
+      bucket 0.633 ms；CUDA sort 0.531 ms、compact 0.437 ms、bucket
+      0.367 ms；Vulkan sort 0.746 ms、compact 0.556 ms、bucket 0.562 ms。
+      workspace peak 保持 order/apply 预期范围：compact 512 KiB，bucket
+      约 516-545 KiB，sort 约 768 KiB-1.31 MiB，未出现额外 full-size staging。
+- S6.2 推进 dense field compact 的稳定路径收敛：
+  - 初始设想是把 field compact 拆成 `flags -> prefix -> order -> native gather`。
+    实测后放弃把该路径作为标量 dense field 的默认实现：当前 field compact 只
+    支持 i32 标量 payload，order + gather 会比原 fused scatter 多一次 order
+    kernel/一次 apply dispatch，workspace 也会额外增加一个 full-size i32 order
+    buffer。这里属于抽象一致性收益小、运行时和显存成本明确的低 ROI 路径。
+  - 最终实现：
+    - StructNdarray tensor/member-view compact 继续使用 S6.1 的 shared
+      order/apply helper，保持多 lane/component 共享 permutation 的收益。
+    - dense field 标量 compact 继续使用 fused scatter，不引入 order buffer。
+    - CPU field compact 使用单 kernel 串行稳定写回，避免 CPU PrefixSumExecutor
+      缺失/relocation 问题，workspace 为 0。
+    - CUDA/Vulkan field compact 保持 `flags -> native prefix scan -> fused
+      scatter`，优先降低 first-call/compile 和大规模 CUDA runtime。
+  - 踩坑记录：
+    - CPU 直接走 field -> ndarray prefix helper 时，在完整 compact 子集的一次
+      顺序中触发过 LLVM `IMAGE_REL_AMD64_ADDR32NB relocation requires an
+      ordered section layout`；改为 CPU 单 kernel 稳定路径后未复现。
+    - vanilla 1.8.0 的 CPU `PrefixSumExecutor` 不支持 x64 stable scan，因此
+      benchmark 中 vanilla CPU compact 使用串行稳定 fallback，只作为可运行的
+      语义等价基线。
+  - 实际验证：
+    - `python -m py_compile python/taichi_forge/algorithms/_algorithms.py
+      python/taichi_forge/_kernels.py tests/python/test_compact.py
+      benchmarks/s4_dense_field_native_bench.py` 通过。
+    - `tests/python/test_compact.py` 通过：21 passed；仅有 pytest cache 权限
+      warning。
+    - `tests/python/test_compact.py tests/python/test_bucket_builder.py
+      tests/python/test_sort.py` 最终回归通过：252 passed；仅有 pytest cache
+      权限 warning。
+    - stable field compact benchmark 写入
+      `benchmarks/results/s6_dense_field_compact_stable3_20260523/summary.csv`。
+      与本地 vanilla 1.8.0 稳定 compact 基线相比：
+      CPU 4096/65536 first-call 为 35.8/33.5 ms，vanilla 为 26.5/28.9 ms；
+      warm median 为 0.116/0.131 ms，vanilla 为 0.025/0.040 ms。CPU 后续需要
+      单 kernel 编译缓存或更轻量的 serial path 调优。
+      CUDA 4096/65536 first-call 为 168.7/168.8 ms，vanilla 为 529.9/478.2 ms；
+      warm median 为 0.564/0.338 ms，vanilla 为 0.416/1.338 ms。小规模 CUDA
+      受 CUB/native scan 固定成本影响，大规模收益明确。
+      Vulkan 4096/65536 first-call 为 66.8/65.3 ms，vanilla 为 156.1/151.5 ms；
+      warm median 为 0.986/0.926 ms，vanilla 为 0.708/0.803 ms。Vulkan
+      compile/first-call 达标，warm runtime 仍需后端 command replay 或 fused
+      native compact 继续优化。
+      workspace：CPU 0；CUDA 为 prefix + CUB temp（4096: 17407 B，
+      65536: 263167 B）；Vulkan 为 prefix（4096: 16384 B，65536: 262144 B）。
+- S6.3 继续降低 order/apply 的 first-call 和 warm 准备开销：
+  - 目标：当前 S6 的主瓶颈不是单个 native gather/transform 的吞吐，而是
+    StructNdarray member view 在应用层频繁重建时，workspace 只按 Python object
+    identity 复用计划，导致计划 replay 不稳定；同时 compact/bucket 每次都重新
+    初始化 identity order 和清零 order output，额外触发小 kernel/fill。
+  - 实现：
+    - `_NativePrimitivePlan` 增加稳定 object key，按 payload/SNode identity、
+      dtype、shape、element shape、offset、stride 识别等价 view；显式传入的
+      `TransformWorkspace` / `IndexedCopyWorkspace` 可缓存多个 native plan。
+    - 临时 workspace 默认关闭多计划缓存，避免一次性调用为了生成 key 付出额外
+      Python 开销。
+    - `_OrderApplyWorkspaceMixin` 统一持有内部 `IndexedCopyWorkspace`，compact
+      和 bucket 的 out-of-place apply 可以复用 native indexed-copy plan。
+    - order pair 只在分配/扩容时初始化 identity order 和清零 output；后续
+      非递减规模重复调用不再重复填充。规模缩小时只清零 output，避免旧 tail
+      index 进入本次有效区间。
+    - sort 的 in-place tensor-member apply 保持原轻量路径，不强行引入子
+      workspace，避免小规模 sort 回退。
+  - 风险边界：
+    - stable key 只用于内部 native plan replay，不改变 public API。
+    - key 中保留 offset/stride/element shape，防止不同 StructNdarray member
+      或 dense field 视图误复用。
+    - field compact 标量路径仍保持 fused scatter，不为了抽象一致性引入 order
+      buffer。
+  - 实际验证：
+    - `python -m py_compile python/taichi_forge/algorithms/_algorithms.py
+      tests/python/test_indexed_copy.py tests/python/test_transform.py
+      benchmarks/struct_ndarray_primitives.py` 通过。
+    - workspace replay 定向用例通过：CPU native StructNdarray scalar/tensor
+      member 的 transform、gather、scatter 在每次调用重建 member view 时仍复用
+      同一个 native plan；Vulkan transform workspace accounting 用例通过。
+    - `tests/python/test_compact.py tests/python/test_bucket_builder.py
+      tests/python/test_sort.py` 按后端拆进程回归通过：x64 54 passed、CUDA
+      55 passed、Vulkan 57 passed；仅有 pytest cache 权限 warning。混合后端
+      单进程运行会在 legacy field-kernel bucket 的 x64 `from_numpy()` 处复现
+      LLVM `IMAGE_REL_AMD64_ADDR32NB` relocation 状态污染；x64 单独运行通过，
+      因此该问题不归因于本轮 order/apply native replay 改动。
+    - benchmark 写入
+      `benchmarks/results/s6_order_pair_cached_seq_20260523/summary.csv`，与
+      `benchmarks/results/s6_order_apply_workspace_20260523/summary.csv` 对比：
+      CPU compact 2048/65536 warm median 下降 68.9%/44.4%，bucket 下降
+      63.7%/35.4%；CUDA compact 下降 79.3%/77.9%，bucket 下降 78.7%/34.4%；
+      Vulkan compact 下降 46.2%/39.0%，bucket 下降 59.1%/40.8%。
+      sort 基本保持：CUDA 65536 提升 5.8%，Vulkan 两个规模约持平；CPU sort
+      2048/65536 本轮分别慢 11.5%/3.2%，属于仍需复测和微调的小规模固定开销。
+    - 最新 workspace peak 未超过 S6.1 预期量级：65536 compact 为 512 KiB，
+      bucket 约 516-545 KiB，sort 约 768 KiB-1.31 MiB；未新增额外 full-size
+      staging。
+    - benchmark 期间仍出现既有 `C:/taichi_cache/ticache/ticache.lock` stale
+      warning；结果文件完整写出，但后续做正式横向报告时应先清理该 cache
+      状态或隔离 cache 目录。
+- S6.4 聚焦 field compact 的 native/cache-reuse 路径：
+  - 目标：本子步只处理 dense scalar field compact，不继续改 StructNdarray。
+    CUDA/Vulkan 优先改善 workspace/cache 命中后的 warm runtime，尤其避免每次
+    warm call 仍经过两个 Taichi helper kernel；CPU 继续评估 serial path，但
+    不接受 warm runtime 回退。
+  - 现状引用：
+    - Python field compact 入口在
+      `python/taichi_forge/algorithms/_algorithms.py::_compact_field_scan()`。
+    - CPU 当前走 `_kernels.py::compact_stable_serial_field`，仍要 JIT 一个 Taichi
+      helper kernel。
+    - CUDA/Vulkan 当前走 `_kernels.py::compact_flags_to_prefix_ndarray_from_field`
+      + native scan + `_kernels.py::compact_scatter_field_from_prefix_ndarray`，
+      warm 阶段仍有两个 helper kernel dispatch。
+    - C++ 已有 dense field raw allocation 工具：
+      `Program::get_dense_field_device_ptr()`、`Program::get_dense_field_stride()`，
+      scan/reduce/histogram 已经使用该路径。
+  - 做法：
+    - CPU 曾试验 `Program::cpu_compact_dense_field()` 和并行 two-pass compact；
+      实测 first-call 可降到约 1 ms，但 65536 warm median 从约 0.13 ms 回退到
+      约 0.38 ms，因此按工作流回退，不作为默认路径保留。
+    - 新增 `Program::cuda_cub_select_dense_field()`：对 contiguous i32 dense field
+      直接调用 CUB DeviceSelect，替代 `flags -> prefix -> scatter`。
+    - 新增 `Program::vulkan_compact_dense_field()`：复用现有 Vulkan compact cache、
+      prefix workspace 和 fused recording，小规模走单个记录闭包，大规模走
+      cached compact pipeline + scan pipeline + scatter pipeline。
+    - Python 侧仅在 CUDA/Vulkan 上先尝试 native dense field compact；若 field
+      stride/layout 不满足 contiguous native 条件，回退到 S6.2 的 helper 路径，
+      保持 field/SNode 兼容。CPU 继续使用 serial helper。
+  - 验收：
+    - `tests/python/test_compact.py` 中 field compact correctness 通过，并按
+      CPU/CUDA/Vulkan 分进程验证，规避当前混合后端 LLVM relocation 状态污染。
+    - `benchmarks/s4_dense_field_native_bench.py --op compact` 重新输出
+      CPU/CUDA/Vulkan × 4096/65536 的 forge/vanilla 对比；CUDA/Vulkan warm
+      median 应优于 S6.2，CPU 不得因试验路径产生默认回退。
+  - 风险：
+    - native compact 只对 contiguous i32 dense field 默认开启，非 contiguous
+      packed field 或复杂 SNode layout 保持 fallback。
+    - 涉及 C++/pybind，完成后必须走本仓验证构建入口，并确认 Python 加载的是
+      新构建产物。
+  - 实际验证：
+    - 构建：`cmd /c _run_build.cmd` 通过，并已同步
+      `taichi_python.cp310-win_amd64.pyd` 到 `python/taichi_forge/_lib/core/`
+      和 `python/taichi/_lib/core/`；3.10 环境确认新 pybind 中
+      `cuda_cub_select_dense_field=True`、`vulkan_compact_dense_field=True`，
+      `cpu_compact_dense_field=False`。
+    - correctness：
+      `tests/python/test_compact.py::test_experimental_compact_field_scan`
+      等 4 个 field compact 定向用例通过：10 passed；仅有 pytest cache 权限
+      warning。
+    - benchmark 写入
+      `benchmarks/results/s6_dense_field_compact_native_final_20260523/summary.csv`。
+      相对 S6.2：CUDA 4096/65536 first-call 下降 93.9%/94.6%，warm median 下降
+      47.6%/13.6%；Vulkan 4096/65536 warm median 下降 45.4%/37.0%，但
+      first-call 从约 66 ms 上升到 115/126 ms，这是 native compact pipeline
+      首次准备成本，需要后续 command replay/pipeline warmup 继续优化。
+      CPU 默认路径未切换，warm median 维持约 0.11/0.13 ms；本轮 CPU native
+      试验因 warm runtime 回退已移除。
+    - 相对本地 vanilla 1.8.0：CUDA 4096/65536 warm median 分别快 28.8%/49.4%，
+      Vulkan 65536 快 19.6%，Vulkan 4096 慢约 4.2%；CPU 仍明显慢于 vanilla，
+      继续列为 S6 CPU serial/codegen backlog。
 - 当前机器用户给定的 miniforge 3.10 路径不可执行，因此本轮使用
   `C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe`
   完成等价版本检查和 smoke。

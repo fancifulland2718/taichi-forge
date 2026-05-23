@@ -200,8 +200,10 @@ def _payload(n):
 
 
 def _time_call(fn, repeats):
+    start = time.perf_counter()
     fn()
     ti.sync()
+    first_call_ms = (time.perf_counter() - start) * 1000.0
     samples = []
     for _ in range(repeats):
         start = time.perf_counter()
@@ -209,6 +211,7 @@ def _time_call(fn, repeats):
         ti.sync()
         samples.append((time.perf_counter() - start) * 1000.0)
     return {
+        "first_call_ms": first_call_ms,
         "median_ms": statistics.median(samples),
         "min_ms": min(samples),
         "max_ms": max(samples),

@@ -581,6 +581,13 @@ class TI_DLL_EXPORT Program {
                                       Ndarray *count,
                                       int value_type);
 
+  std::size_t cuda_cub_select_dense_field(SNode *values,
+                                          SNode *flags,
+                                          SNode *output,
+                                          SNode *count,
+                                          int value_type,
+                                          std::size_t n);
+
   std::size_t cuda_cub_select_i32_ndarray(Ndarray *values,
                                           Ndarray *flags,
                                           Ndarray *output,
@@ -940,6 +947,13 @@ class TI_DLL_EXPORT Program {
                                      Ndarray *output,
                                      Ndarray *count,
                                      int value_type);
+
+  std::size_t vulkan_compact_dense_field(SNode *values,
+                                         SNode *flags,
+                                         SNode *output,
+                                         SNode *count,
+                                         int value_type,
+                                         std::size_t n);
 
   std::size_t vulkan_compact_i32_ndarray(Ndarray *values,
                                          Ndarray *flags,

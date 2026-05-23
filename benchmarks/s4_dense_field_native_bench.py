@@ -106,6 +106,13 @@ def _bucket_indices(n: int):
     return ((np.arange(n, dtype=np.int32) * 13 + 5) % buckets).astype(np.int32)
 
 
+def _compact_flags(n: int):
+    import numpy as np  # pylint: disable=import-outside-toplevel
+
+    values = np.arange(n, dtype=np.int32)
+    return ((values % 5 == 0) | (values % 7 == 0)).astype(np.int32)
+
+
 def _histogram_values(n: int):
     import numpy as np  # pylint: disable=import-outside-toplevel
 
@@ -212,6 +219,20 @@ def _make_forge_body(ti, arch_name: str, op_name: str, n: int):
 
         return body, {"workspace": workspace, "aux_size": buckets}
 
+    if op_name == "compact":
+        flags = ti.field(ti.i32, shape=n)
+        output = ti.field(ti.i32, shape=n)
+        count = ti.field(ti.i32, shape=())
+        workspace = ti.algorithms.CompactWorkspace(max_items=n)
+        flags.from_numpy(_compact_flags(n))
+
+        def body():
+            ti.algorithms.experimental_compact(
+                src, flags, output, count, method="field_scan", workspace=workspace
+            )
+
+        return body, {"workspace": workspace}
+
     if op_name == "histogram":
         buckets = _bucket_count(n)
         src.from_numpy(_histogram_values(n))
@@ -229,7 +250,7 @@ def _make_forge_body(ti, arch_name: str, op_name: str, n: int):
     raise ValueError(op_name)
 
 
-def _make_vanilla_body(ti, op_name: str, n: int):
+def _make_vanilla_body(ti, arch_name: str, op_name: str, n: int):
     src = ti.field(ti.i32, shape=n)
     src.from_numpy(_values(n))
 
@@ -298,6 +319,46 @@ def _make_vanilla_body(ti, op_name: str, n: int):
 
         return scatter_add_field, {"aux_size": buckets}
 
+    if op_name == "compact":
+        flags = ti.field(ti.i32, shape=n)
+        output = ti.field(ti.i32, shape=n)
+        count = ti.field(ti.i32, shape=())
+        flags.from_numpy(_compact_flags(n))
+
+        if arch_name == "cpu":
+            @ti.kernel
+            def compact_field():
+                count[None] = 0
+                ti.loop_config(serialize=True)
+                for i in range(n):
+                    if flags[i] != 0:
+                        output[count[None]] = src[i]
+                        count[None] += 1
+
+            return compact_field, {}
+
+        prefix = ti.field(ti.i32, shape=n)
+        scanner = ti.algorithms.PrefixSumExecutor(n)
+
+        @ti.kernel
+        def flags_to_prefix():
+            for i in src:
+                prefix[i] = 1 if flags[i] != 0 else 0
+
+        @ti.kernel
+        def compact_field():
+            count[None] = prefix[n - 1] if n > 0 else 0
+            for i in src:
+                if flags[i] != 0:
+                    output[prefix[i] - 1] = src[i]
+
+        def stable_compact_field():
+            flags_to_prefix()
+            scanner.run(prefix)
+            compact_field()
+
+        return stable_compact_field, {"workspace_peak_bytes": n * 4}
+
     if op_name == "histogram":
         buckets = _bucket_count(n)
         src.from_numpy(_histogram_values(n))
@@ -332,7 +393,7 @@ def run_child(args: argparse.Namespace) -> int:
     if args.package == "forge":
         body, meta = _make_forge_body(ti, args.arch, args.op, args.n)
     else:
-        body, meta = _make_vanilla_body(ti, args.op, args.n)
+        body, meta = _make_vanilla_body(ti, args.arch, args.op, args.n)
     _sync(ti)
     gpu_after_alloc = _powershell_gpu_process_dedicated_mb(pid) if sample_gpu else None
 
@@ -353,7 +414,7 @@ def run_child(args: argparse.Namespace) -> int:
         samples.append((time.perf_counter() - t0) * 1000.0)
     gpu_after_run = _powershell_gpu_process_dedicated_mb(pid) if sample_gpu else None
 
-    workspace_peak = 0
+    workspace_peak = int(meta.get("workspace_peak_bytes", 0) or 0)
     workspace = meta.get("workspace")
     if workspace is not None:
         workspace_peak = int(getattr(workspace, "workspace_bytes_peak", 0))
@@ -585,6 +646,7 @@ def main(argv: list[str] | None = None) -> int:
             "gather",
             "scatter",
             "scatter_add",
+            "compact",
             "histogram",
         ],
     )

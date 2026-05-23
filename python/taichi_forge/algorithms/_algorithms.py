@@ -14,6 +14,7 @@ from taichi_forge._kernels import (
     compact_flags_to_prefix_ndarray_from_field,
     compact_scatter_field_from_prefix_ndarray,
     compact_scatter_field,
+    compact_stable_serial_field,
     compact_single_item_field,
     fill_i32_arange_ndarray,
     gather_f32_field,
@@ -267,6 +268,7 @@ class _NativePrimitivePlan:
         "backend",
         "method_name",
         "objects",
+        "object_keys",
         "semantic_key",
         "call_args",
         "prog_id",
@@ -293,6 +295,7 @@ class _NativePrimitivePlan:
         self.prog_id = id(prog)
         self.value_type = value_type
         self.n = int(n)
+        self.object_keys = None
 
     def __getitem__(self, key):
         # Keep internal tests and older debugging snippets readable without
@@ -315,7 +318,20 @@ class _NativePrimitivePlan:
         objects = tuple(objects)
         if len(self.objects) != len(objects):
             return False
-        return all(cached is current for cached, current in zip(self.objects, objects))
+        if all(cached is current for cached, current in zip(self.objects, objects)):
+            return True
+        object_keys = tuple(_primitive_plan_object_key(obj) for obj in objects)
+        return self._object_keys() == object_keys
+
+    def cache_key(self):
+        return (self.backend, self._object_keys(), self.semantic_key)
+
+    def _object_keys(self):
+        if self.object_keys is None:
+            self.object_keys = tuple(
+                _primitive_plan_object_key(obj) for obj in self.objects
+            )
+        return self.object_keys
 
     def matches_program(self, prog):
         return id(prog) == self.prog_id
@@ -448,6 +464,70 @@ def _primitive_view(arr):
     return None
 
 
+def _primitive_plan_object_key(obj):
+    view = _primitive_view(obj)
+    if view is None:
+        return ("object", id(obj))
+    dtype_key = str(view.dtype)
+    shape_key = tuple(view.shape)
+    element_shape_key = tuple(view.element_shape)
+    if view.is_plain_ndarray:
+        return (
+            "ndarray",
+            id(view.payload_arr),
+            dtype_key,
+            shape_key,
+            element_shape_key,
+            view.stride,
+        )
+    if view.is_struct_scalar_member:
+        return (
+            "struct_scalar_member",
+            id(view.payload_arr),
+            dtype_key,
+            shape_key,
+            view.offset,
+            view.stride,
+        )
+    if view.is_struct_tensor_member:
+        return (
+            "struct_tensor_member",
+            id(view.payload_arr),
+            dtype_key,
+            shape_key,
+            element_shape_key,
+            view.offset,
+            view.stride,
+        )
+    if view.storage == "struct_ndarray":
+        return (
+            "struct_ndarray",
+            id(view.payload_arr),
+            dtype_key,
+            shape_key,
+            element_shape_key,
+            view.stride,
+        )
+    if view.is_dense_field or view.is_scalar_field:
+        return (
+            view.storage,
+            id(view.snode),
+            dtype_key,
+            shape_key,
+            view.offset,
+            view.stride,
+        )
+    return (view.storage, id(view.arr), dtype_key, shape_key)
+
+
+def _native_plan_cache_key(backend, objects, semantic_key):
+    return (
+        backend,
+        tuple(_primitive_plan_object_key(obj) for obj in objects),
+        tuple(semantic_key),
+    )
+
+
 def _struct_tensor_member_components(view):
     for component in np.ndindex(view.element_shape):
         yield view.base.field(view.path, component=component)
@@ -538,7 +618,88 @@ def _native_copy_method_for_current_arch(method):
     )
 
 
-class SortWorkspace:
+class _OrderApplyWorkspaceMixin:
+    def _init_order_apply_workspace(self, op_name):
+        self._order_apply_op_name = op_name
+        self._order_apply_buffers = {}
+        self._order_apply_pair = None
+        self._order_apply_scalar_temp_buffers = {}
+        self._order_apply_indexed_copy_workspace = None
+
+    def _clear_order_apply_workspace(self):
+        if self._order_apply_indexed_copy_workspace is not None:
+            self._order_apply_indexed_copy_workspace.clear()
+        self._order_apply_buffers.clear()
+        self._order_apply_pair = None
+        self._order_apply_scalar_temp_buffers.clear()
+        self._order_apply_indexed_copy_workspace = None
+
+    def _check_order_apply_items(self, n):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} {self._order_apply_op_name} items, "
+                f"exceeding max_items={self.max_items}."
+            )
+
+    def _reserve_order_apply_bytes(self, bytes_used):
+        if hasattr(self, "_reserve_bytes"):
+            self._reserve_bytes(bytes_used)
+            return
+        self.workspace_bytes_current += bytes_used
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak, self.workspace_bytes_current
+        )
+
+    def _get_order_apply_buffer(self, n):
+        self._check_order_apply_items(n)
+        key = int(n)
+        if key not in self._order_apply_buffers:
+            self._order_apply_buffers[key] = ti_ndarray(i32, shape=n)
+            self._reserve_order_apply_bytes(n * 4)
+        return self._order_apply_buffers[key]
+
+    def _get_order_apply_pair(self, n):
+        self._check_order_apply_items(n)
+        if (
+            self._order_apply_pair is None
+            or self._order_apply_pair["in"].shape[0] < n
+        ):
+            self._order_apply_pair = {
+                "in": ti_ndarray(i32, shape=n),
+                "out": ti_ndarray(i32, shape=n),
+                "last_n": n,
+            }
+            fill_i32_arange_ndarray(self._order_apply_pair["in"], n)
+            self._order_apply_pair["out"].fill(0)
+            self._reserve_order_apply_bytes(2 * n * 4)
+        return self._order_apply_pair["in"], self._order_apply_pair["out"]
+
+    def _get_order_apply_scalar_temp_buffer(self, dtype, n):
+        self._check_order_apply_items(n)
+        key = (str(dtype), int(n))
+        if key not in self._order_apply_scalar_temp_buffers:
+            self._order_apply_scalar_temp_buffers[key] = ti_ndarray(dtype, shape=n)
+            self._reserve_order_apply_bytes(n * _dtype_nbytes(dtype))
+        return self._order_apply_scalar_temp_buffers[key]
+
+    def _get_order_apply_indexed_copy_workspace(self, n):
+        self._check_order_apply_items(n)
+        if self._order_apply_indexed_copy_workspace is None:
+            self._order_apply_indexed_copy_workspace = IndexedCopyWorkspace(
+                max_items=self.max_items
+            )
+        return self._order_apply_indexed_copy_workspace
+
+    def _record_order_apply_child_workspace(self, child_workspace):
+        if child_workspace is None:
+            return
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak,
+            self.workspace_bytes_current + child_workspace.workspace_bytes_peak,
+        )
+
+
+class SortWorkspace(_OrderApplyWorkspaceMixin):
     """Workspace handle for future backend sort implementations.
 
     The current implementation is intentionally metadata-only. It gives the new
@@ -555,8 +716,7 @@ class SortWorkspace:
         self._radix_u32_buffers = {}
         self._vulkan_graph_u32_buffers = {}
         self._vulkan_graph_u32_execs = {}
-        self._order_buffers = {}
-        self._scalar_temp_buffers = {}
+        self._init_order_apply_workspace("sort")
         self._cuda_cub_active = False
         self._vulkan_native_active = False
 
@@ -583,8 +743,7 @@ class SortWorkspace:
         self._radix_u32_buffers.clear()
         self._vulkan_graph_u32_buffers.clear()
         self._vulkan_graph_u32_execs.clear()
-        self._order_buffers.clear()
-        self._scalar_temp_buffers.clear()
+        self._clear_order_apply_workspace()
         self._cuda_cub_active = False
         self._vulkan_native_active = False
 
@@ -657,37 +816,13 @@ class SortWorkspace:
         return self._vulkan_graph_u32_buffers[key]
 
     def _get_order_buffer(self, n):
-        if self.max_items is not None and n > self.max_items:
-            raise ValueError(
-                f"Requested {n} sort items, exceeding max_items={self.max_items}."
-            )
-        key = int(n)
-        if key not in self._order_buffers:
-            self._order_buffers[key] = ti_ndarray(i32, shape=n)
-            bytes_used = n * 4
-            self.workspace_bytes_current += bytes_used
-            self.workspace_bytes_peak = max(
-                self.workspace_bytes_peak, self.workspace_bytes_current
-            )
-        return self._order_buffers[key]
+        return self._get_order_apply_buffer(n)
 
     def _get_scalar_temp_buffer(self, dtype, n):
-        if self.max_items is not None and n > self.max_items:
-            raise ValueError(
-                f"Requested {n} sort items, exceeding max_items={self.max_items}."
-            )
-        key = (str(dtype), int(n))
-        if key not in self._scalar_temp_buffers:
-            self._scalar_temp_buffers[key] = ti_ndarray(dtype, shape=n)
-            bytes_used = n * _dtype_nbytes(dtype)
-            self.workspace_bytes_current += bytes_used
-            self.workspace_bytes_peak = max(
-                self.workspace_bytes_peak, self.workspace_bytes_current
-            )
-        return self._scalar_temp_buffers[key]
+        return self._get_order_apply_scalar_temp_buffer(dtype, n)
 
 
-class CompactWorkspace:
+class CompactWorkspace(_OrderApplyWorkspaceMixin):
     """Workspace for experimental stable flag compaction.
 
     The field path keeps a Forge-kernel prefix buffer plus a PrefixSumExecutor.
@@ -701,8 +836,7 @@ class CompactWorkspace:
         self.workspace_bytes_peak = 0
         self._field_buffers = {}
         self._cuda_field_buffers = {}
-        self._order_buffers = None
-        self._scalar_temp_buffers = {}
+        self._init_order_apply_workspace("compact")
         self._cuda_cub_active = False
         self._cuda_cub_scan_active = False
         self._vulkan_native_active = False
@@ -730,8 +864,7 @@ class CompactWorkspace:
         self.workspace_bytes_peak = 0
         self._field_buffers.clear()
         self._cuda_field_buffers.clear()
-        self._order_buffers = None
-        self._scalar_temp_buffers.clear()
+        self._clear_order_apply_workspace()
         self._cuda_cub_active = False
         self._cuda_cub_scan_active = False
         self._vulkan_native_active = False
@@ -774,37 +907,14 @@ class CompactWorkspace:
             )
         return self._cuda_field_buffers[key]
 
+    def _get_native_field_prefix_buffers(self, n):
+        return self._get_cuda_field_buffers(n)
+
     def _get_order_buffers(self, n):
-        if self.max_items is not None and n > self.max_items:
-            raise ValueError(
-                f"Requested {n} compact items, exceeding max_items={self.max_items}."
-            )
-        if self._order_buffers is None or self._order_buffers["in"].shape[0] < n:
-            self._order_buffers = {
-                "in": ti_ndarray(i32, shape=n),
-                "out": ti_ndarray(i32, shape=n),
-            }
-            bytes_used = 2 * n * 4
-            self.workspace_bytes_current += bytes_used
-            self.workspace_bytes_peak = max(
-                self.workspace_bytes_peak, self.workspace_bytes_current
-            )
-        return self._order_buffers["in"], self._order_buffers["out"]
+        return self._get_order_apply_pair(n)
 
     def _get_scalar_temp_buffer(self, dtype, n):
-        if self.max_items is not None and n > self.max_items:
-            raise ValueError(
-                f"Requested {n} compact items, exceeding max_items={self.max_items}."
-            )
-        key = (str(dtype), int(n))
-        if key not in self._scalar_temp_buffers:
-            self._scalar_temp_buffers[key] = ti_ndarray(dtype, shape=n)
-            bytes_used = n * _dtype_nbytes(dtype)
-            self.workspace_bytes_current += bytes_used
-            self.workspace_bytes_peak = max(
-                self.workspace_bytes_peak, self.workspace_bytes_current
-            )
-        return self._scalar_temp_buffers[key]
+        return self._get_order_apply_scalar_temp_buffer(dtype, n)
 
 
 class ReduceWorkspace:
@@ -1074,12 +1184,14 @@ class TransformWorkspace:
     cached 8-byte params buffer; field/SNode fallback stays in Forge kernels.
     """
 
-    def __init__(self, max_items=None):
+    def __init__(self, max_items=None, cache_native_plans=True):
         self.max_items = max_items
+        self._cache_native_plans = cache_native_plans
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
         self._native_transform_plan = None
+        self._native_transform_plans = {}
 
     def check_shape(self, n):
         if self.max_items is not None and n > self.max_items:
@@ -1101,6 +1213,7 @@ class TransformWorkspace:
         temp_bytes = 0 if temp_bytes is None else temp_bytes
         if backend == "vulkan_native":
             self._vulkan_native_active = True
+            temp_bytes = max(temp_bytes, 8)
         self.workspace_bytes_current = max(self.workspace_bytes_current, temp_bytes)
         self.workspace_bytes_peak = max(
             self.workspace_bytes_peak, self.workspace_bytes_current
@@ -1111,6 +1224,15 @@ class TransformWorkspace:
         if backend is None:
             return False
         plan = self._native_transform_plan
+        if plan is None or not plan.matches_request(
+            backend, (src, dst), (scale, bias)
+        ):
+            key = _native_plan_cache_key(backend, (src, dst), (scale, bias))
+            plan = (
+                self._native_transform_plans.get(key)
+                if self._cache_native_plans
+                else None
+            )
         if plan is None:
             return False
         if not plan.matches_request(backend, (src, dst), (scale, bias)):
@@ -1150,6 +1272,8 @@ class TransformWorkspace:
             n=n,
         )
         self._native_transform_plan = plan
+        if self._cache_native_plans:
+            self._native_transform_plans[plan.cache_key()] = plan
 
     def clear(self):
         if self._vulkan_native_active:
@@ -1162,6 +1286,7 @@ class TransformWorkspace:
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
         self._native_transform_plan = None
+        self._native_transform_plans.clear()
 
 
 class IndexedCopyWorkspace:
@@ -1172,12 +1297,14 @@ class IndexedCopyWorkspace:
     to leave room for future cached staging or validation buffers.
     """
 
-    def __init__(self, max_items=None):
+    def __init__(self, max_items=None, cache_native_plans=True):
         self.max_items = max_items
+        self._cache_native_plans = cache_native_plans
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
         self._native_indexed_copy_plan = None
+        self._native_indexed_copy_plans = {}
 
     def check_shape(self, n):
         if self.max_items is not None and n > self.max_items:
@@ -1209,6 +1336,15 @@ class IndexedCopyWorkspace:
         if backend is None:
             return False
         plan = self._native_indexed_copy_plan
+        if plan is None or not plan.matches_request(
+            backend, (src, indices, dst), (bool(scatter),)
+        ):
+            key = _native_plan_cache_key(backend, (src, indices, dst), (bool(scatter),))
+            plan = (
+                self._native_indexed_copy_plans.get(key)
+                if self._cache_native_plans
+                else None
+            )
         if plan is None:
             return False
         if not plan.matches_request(backend, (src, indices, dst), (bool(scatter),)):
@@ -1248,6 +1384,8 @@ class IndexedCopyWorkspace:
             n=n,
         )
         self._native_indexed_copy_plan = plan
+        if self._cache_native_plans:
+            self._native_indexed_copy_plans[plan.cache_key()] = plan
 
     def clear(self):
         if self._vulkan_native_active:
@@ -1260,6 +1398,7 @@ class IndexedCopyWorkspace:
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
         self._native_indexed_copy_plan = None
+        self._native_indexed_copy_plans.clear()
 
 
 class ScatterAddWorkspace:
@@ -1391,7 +1530,7 @@ class ScatterAddWorkspace:
         self._native_scatter_add_plans.clear()
 
 
-class BucketBuilderWorkspace:
+class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
     """Workspace for experimental fixed-bin bucket range construction.
 
     Native CUDA/Vulkan paths use one cached i32 cursor buffer of length
@@ -1407,7 +1546,7 @@ class BucketBuilderWorkspace:
         self._cursor_ndarray = None
         self._cursor_field = None
         self._scanner_cache = {}
-        self._order_buffers = None
+        self._init_order_apply_workspace("bucket")
         self._vulkan_native_active = False
 
     def check_shape(self, n, num_bins):
@@ -1432,7 +1571,7 @@ class BucketBuilderWorkspace:
         self._cursor_ndarray = None
         self._cursor_field = None
         self._scanner_cache.clear()
-        self._order_buffers = None
+        self._clear_order_apply_workspace()
         self._vulkan_native_active = False
 
     def _reserve_bytes(self, bytes_used):
@@ -1461,17 +1600,7 @@ class BucketBuilderWorkspace:
         return self._scanner_cache[length]
 
     def _get_order_buffers(self, n):
-        if self.max_items is not None and n > self.max_items:
-            raise ValueError(
-                f"Requested {n} bucket items, exceeding max_items={self.max_items}."
-            )
-        if self._order_buffers is None or self._order_buffers["in"].shape[0] < n:
-            self._order_buffers = {
-                "in": ti_ndarray(i32, shape=n),
-                "out": ti_ndarray(i32, shape=n),
-            }
-            self._reserve_bytes(2 * n * 4)
-        return self._order_buffers["in"], self._order_buffers["out"]
+        return self._get_order_apply_pair(n)
 
 
 class GroupedReduceWorkspace:
@@ -2174,6 +2303,22 @@ def _member_sort_backend_method(method):
     )
 
 
+def _prepare_identity_order(workspace, n):
+    order = workspace._get_order_buffer(n)
+    fill_i32_arange_ndarray(order, n)
+    return order
+
+
+def _prepare_order_apply_pair(workspace, n):
+    order_in, order_out = workspace._get_order_buffers(n)
+    pair = workspace._order_apply_pair
+    if pair is not None and n < pair["last_n"]:
+        order_out.fill(0)
+    if pair is not None:
+        pair["last_n"] = n
+    return order_in, order_out
+
+
 def _apply_order_to_tensor_member_values(
     values,
     order,
@@ -2184,7 +2329,20 @@ def _apply_order_to_tensor_member_values(
     use_temp,
 ):
     if not use_temp:
-        experimental_gather(values, order, output, method=copy_method)
+        copy_workspace = None
+        if hasattr(workspace, "_get_order_apply_indexed_copy_workspace"):
+            copy_workspace = workspace._get_order_apply_indexed_copy_workspace(
+                values.shape[0]
+            )
+        experimental_gather(
+            values,
+            order,
+            output,
+            method=copy_method,
+            workspace=copy_workspace,
+        )
+        if hasattr(workspace, "_record_order_apply_child_workspace"):
+            workspace._record_order_apply_child_workspace(copy_workspace)
         return
     if not hasattr(workspace, "_get_scalar_temp_buffer"):
         raise RuntimeError("tensor member order apply requires scalar temp buffers.")
@@ -2193,7 +2351,12 @@ def _apply_order_to_tensor_member_values(
         _struct_tensor_member_components(output),
     ):
         temp = workspace._get_scalar_temp_buffer(value_component.dtype, values.shape[0])
-        experimental_gather(value_component, order, temp, method=copy_method)
+        experimental_gather(
+            value_component,
+            order,
+            temp,
+            method=copy_method,
+        )
         experimental_transform(
             temp,
             output_component,
@@ -2201,6 +2364,46 @@ def _apply_order_to_tensor_member_values(
             bias=0,
             method=copy_method,
         )
+
+
+def _apply_order_to_values(
+    values,
+    order,
+    output,
+    *,
+    copy_method,
+    workspace,
+    use_temp,
+):
+    if _is_struct_tensor_member_view(values) or _is_struct_tensor_member_view(output):
+        _apply_order_to_tensor_member_values(
+            values,
+            order,
+            output,
+            copy_method=copy_method,
+            workspace=workspace,
+            use_temp=use_temp,
+        )
+        return
+    if use_temp:
+        raise RuntimeError(
+            "in-place order apply currently requires StructNdarray tensor "
+            "member views."
+        )
+    copy_workspace = None
+    if hasattr(workspace, "_get_order_apply_indexed_copy_workspace"):
+        copy_workspace = workspace._get_order_apply_indexed_copy_workspace(
+            values.shape[0]
+        )
+    experimental_gather(
+        values,
+        order,
+        output,
+        method=copy_method,
+        workspace=copy_workspace,
+    )
+    if hasattr(workspace, "_record_order_apply_child_workspace"):
+        workspace._record_order_apply_child_workspace(copy_workspace)
 
 
 def _native_sort_tensor_member_values(
@@ -2224,8 +2427,7 @@ def _native_sort_tensor_member_values(
         return workspace
 
     sort_method, copy_method = _member_sort_backend_method(method)
-    order = workspace._get_order_buffer(n)
-    fill_i32_arange_ndarray(order, n)
+    order = _prepare_identity_order(workspace, n)
     sort(
         keys,
         order,
@@ -2236,7 +2438,7 @@ def _native_sort_tensor_member_values(
         nan_policy=nan_policy,
     )
 
-    _apply_order_to_tensor_member_values(
+    _apply_order_to_values(
         values,
         order,
         values,
@@ -2638,35 +2840,128 @@ def _try_cpu_native_compact(values, flags, output, count, workspace):
     return True
 
 
-def _cuda_cub_scan_available():
-    if current_cfg().arch != cuda:
+def _try_native_dense_field_compact(values, flags, output, count, workspace, n):
+    values_view = _primitive_view(values)
+    flags_view = _primitive_view(flags)
+    output_view = _primitive_view(output)
+    count_view = _primitive_view(count)
+    if not (
+        values_view is not None
+        and flags_view is not None
+        and output_view is not None
+        and count_view is not None
+        and values_view.is_dense_field
+        and flags_view.is_dense_field
+        and output_view.is_dense_field
+        and count_view.is_scalar_field
+        and values_view.dtype == i32
+        and flags_view.dtype == i32
+        and output_view.dtype == i32
+        and count_view.dtype == i32
+    ):
         return False
+    arch = current_cfg().arch
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    impl.get_runtime().materialize()
+    prog = impl.get_runtime().prog
+    value_type = _COMPACT_VALUE_TYPE[i32]
+    if arch == cuda:
+        if not (
+            values_view.stride == 4
+            and flags_view.stride == 4
+            and output_view.stride == 4
+        ):
+            return False
+        if not (
+            hasattr(prog, "cuda_cub_select_available")
+            and prog.cuda_cub_select_available()
+            and hasattr(prog, "cuda_cub_select_dense_field")
+        ):
+            return False
+        temp_bytes = prog.cuda_cub_select_dense_field(
+            values_view.snode,
+            flags_view.snode,
+            output_view.snode,
+            count_view.snode,
+            value_type,
+            n,
+        )
+        if workspace is not None:
+            workspace._cuda_cub_active = True
+            workspace.workspace_bytes_current = max(
+                workspace.workspace_bytes_current, temp_bytes
+            )
+            workspace.workspace_bytes_peak = max(
+                workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+            )
+        return True
+    if arch == vulkan:
+        if not (
+            values_view.stride == 4
+            and flags_view.stride == 4
+            and output_view.stride == 4
+        ):
+            return False
+        if not (
+            hasattr(prog, "vulkan_compact_available")
+            and prog.vulkan_compact_available()
+            and hasattr(prog, "vulkan_compact_dense_field")
+        ):
+            return False
+        temp_bytes = prog.vulkan_compact_dense_field(
+            values_view.snode,
+            flags_view.snode,
+            output_view.snode,
+            count_view.snode,
+            value_type,
+            n,
+        )
+        if workspace is not None:
+            workspace._vulkan_native_active = True
+            workspace.workspace_bytes_current = max(
+                workspace.workspace_bytes_current, temp_bytes
+            )
+            workspace.workspace_bytes_peak = max(
+                workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+            )
+        return True
+    return False
+
+
+def _native_prefix_scan_available_for_current_arch():
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    return (
-        hasattr(prog, "cuda_cub_scan_available")
-        and prog.cuda_cub_scan_available()
-    )
+    arch = current_cfg().arch
+    if arch == cuda:
+        return (
+            hasattr(prog, "cuda_cub_scan_available")
+            and prog.cuda_cub_scan_available()
+        )
+    if arch == vulkan:
+        return hasattr(prog, "vulkan_scan_available") and prog.vulkan_scan_available()
+    return False
 
 
-def _compact_field_cuda_scan(values, flags, output, count, workspace, n):
-    buffers = workspace._get_cuda_field_buffers(n)
+def _compact_field_native_prefix_scan(values, flags, output, count, workspace, n):
+    buffers = workspace._get_native_field_prefix_buffers(n)
     prefix = buffers["prefix"]
-    scanner = buffers["scanner"]
     compact_flags_to_prefix_ndarray_from_field(flags, prefix, n)
+    scanner = buffers["scanner"]
     scanner.run(prefix)
     compact_scatter_field_from_prefix_ndarray(values, flags, prefix, output, count, n)
-    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+    if current_cfg().arch == cuda:
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
-    prog = impl.get_runtime().prog
-    if hasattr(prog, "cuda_cub_scan_workspace_bytes"):
-        workspace._cuda_cub_scan_active = True
-        scan_bytes = int(prog.cuda_cub_scan_workspace_bytes())
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak,
-            workspace.workspace_bytes_current + scan_bytes,
-        )
+        prog = impl.get_runtime().prog
+        if hasattr(prog, "cuda_cub_scan_workspace_bytes"):
+            workspace._cuda_cub_scan_active = True
+            scan_bytes = int(prog.cuda_cub_scan_workspace_bytes())
+            workspace.workspace_bytes_peak = max(
+                workspace.workspace_bytes_peak,
+                workspace.workspace_bytes_current + scan_bytes,
+            )
     sync()
     return workspace
 
@@ -2683,8 +2978,19 @@ def _compact_field_scan(values, flags, output, count, workspace):
         compact_single_item_field(values, flags, output, count, n)
         sync()
         return workspace
-    if _cuda_cub_scan_available():
-        return _compact_field_cuda_scan(values, flags, output, count, workspace, n)
+    arch = current_cfg().arch
+    if arch not in (x64, arm64) and _try_native_dense_field_compact(
+        values, flags, output, count, workspace, n
+    ):
+        return workspace
+    if arch in (x64, arm64):
+        compact_stable_serial_field(values, flags, output, count, n)
+        sync()
+        return workspace
+    if _native_prefix_scan_available_for_current_arch():
+        return _compact_field_native_prefix_scan(
+            values, flags, output, count, workspace, n
+        )
     buffers = workspace._get_field_buffers(n)
     scanner = buffers["scanner"]
     prefix = scanner._ensure_large_arr()
@@ -2734,9 +3040,7 @@ def experimental_compact(
         if workspace is None:
             workspace = CompactWorkspace(max_items=n)
         copy_method = _native_copy_method_for_current_arch(method)
-        order_in, order_out = workspace._get_order_buffers(n)
-        fill_i32_arange_ndarray(order_in, n)
-        order_out.fill(0)
+        order_in, order_out = _prepare_order_apply_pair(workspace, n)
         experimental_compact(
             order_in,
             flags,
@@ -2745,7 +3049,7 @@ def experimental_compact(
             method=method,
             workspace=workspace,
         )
-        _apply_order_to_tensor_member_values(
+        _apply_order_to_values(
             values,
             order_out,
             output,
@@ -4523,10 +4827,10 @@ def experimental_transform(
         if _shape_tuple(src) != _shape_tuple(dst):
             raise ValueError(
                 "experimental_transform() source and destination shapes differ."
-            )
+        )
         n = _shape_numel(src)
         if workspace is None:
-            workspace = TransformWorkspace(max_items=n)
+            workspace = TransformWorkspace(max_items=n, cache_native_plans=False)
         workspace.check_shape(n)
         normalized_scale, normalized_bias = _normalize_transform_args(
             src.scalar_dtype, scale, bias
@@ -4567,7 +4871,7 @@ def experimental_transform(
     _check_transform_request(src, dst, method, workspace)
     n = _shape_numel(src)
     if workspace is None:
-        workspace = TransformWorkspace(max_items=n)
+        workspace = TransformWorkspace(max_items=n, cache_native_plans=False)
     workspace.check_shape(n)
     scale, bias = _normalize_transform_args(src.dtype, scale, bias)
     value_type = _transform_value_type(src.dtype)
@@ -5126,7 +5430,7 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
             raise TypeError(f"{op_name} whole tensor member views require ti.ndarray indices.")
         n = _indexed_copy_item_count(src, indices, dst, scatter)
         if workspace is None:
-            workspace = IndexedCopyWorkspace(max_items=n)
+            workspace = IndexedCopyWorkspace(max_items=n, cache_native_plans=False)
         workspace.check_shape(n)
         if n == 0:
             return workspace
@@ -5155,7 +5459,7 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
     _check_indexed_copy_request(src, indices, dst, method, workspace, op_name)
     n = _indexed_copy_item_count(src, indices, dst, scatter)
     if workspace is None:
-        workspace = IndexedCopyWorkspace(max_items=n)
+        workspace = IndexedCopyWorkspace(max_items=n, cache_native_plans=False)
     workspace.check_shape(n)
     if n == 0:
         return workspace
@@ -5868,9 +6172,7 @@ def experimental_bucket_builder(
             workspace = BucketBuilderWorkspace(max_items=n, max_bins=num_bins)
         workspace.check_shape(n, num_bins)
         copy_method = _native_copy_method_for_current_arch(method)
-        order_in, order_out = workspace._get_order_buffers(n)
-        fill_i32_arange_ndarray(order_in, n)
-        order_out.fill(0)
+        order_in, order_out = _prepare_order_apply_pair(workspace, n)
         offsets.fill(0)
         experimental_bucket_builder(
             keys,
@@ -5880,7 +6182,7 @@ def experimental_bucket_builder(
             method=method,
             workspace=workspace,
         )
-        _apply_order_to_tensor_member_values(
+        _apply_order_to_values(
             values,
             order_out,
             output,
