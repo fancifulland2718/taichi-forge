@@ -134,6 +134,17 @@ def _histogram_values(n: int):
     return ((np.arange(n, dtype=np.int32) * 7 + 3) % buckets).astype(np.int32)
 
 
+def _make_forge_indices(ti, n: int, values, storage: str):
+    if storage == "ndarray":
+        indices = ti.ndarray(ti.i32, shape=n)
+    elif storage == "field":
+        indices = ti.field(ti.i32, shape=n)
+    else:
+        raise ValueError(storage)
+    indices.from_numpy(values)
+    return indices
+
+
 def _sync(ti) -> None:
     try:
         ti.sync()
@@ -154,7 +165,12 @@ def _init_runtime(ti, arch_name: str) -> None:
 
 
 def _make_forge_body(
-    ti, arch_name: str, op_name: str, n: int, method_override: str | None = None
+    ti,
+    arch_name: str,
+    op_name: str,
+    n: int,
+    method_override: str | None = None,
+    indices_storage: str = "ndarray",
 ):
     src = ti.field(ti.i32, shape=n)
     src.from_numpy(_values(n))
@@ -198,11 +214,10 @@ def _make_forge_body(
         return body, {"workspace": workspace}
 
     if op_name in ("gather", "scatter"):
-        indices = ti.ndarray(ti.i32, shape=n)
+        indices = _make_forge_indices(ti, n, _indices(n), indices_storage)
         dst = ti.field(ti.i32, shape=n)
         workspace = ti.algorithms.IndexedCopyWorkspace(max_items=n)
         method = method_override or _method_for(arch_name, op_name)
-        indices.from_numpy(_indices(n))
 
         if op_name == "gather":
 
@@ -221,12 +236,11 @@ def _make_forge_body(
         return body, {"workspace": workspace}
 
     if op_name == "scatter_add":
-        indices = ti.ndarray(ti.i32, shape=n)
         buckets = _bucket_count(n)
+        indices = _make_forge_indices(ti, n, _bucket_indices(n), indices_storage)
         dst = ti.field(ti.i32, shape=buckets)
         workspace = ti.algorithms.ScatterAddWorkspace(max_items=n)
         method = method_override or _method_for(arch_name, op_name)
-        indices.from_numpy(_bucket_indices(n))
 
         def body():
             ti.algorithms.experimental_scatter_add(
@@ -511,7 +525,12 @@ def run_child(args: argparse.Namespace) -> int:
 
     if args.package == "forge":
         body, meta = _make_forge_body(
-            ti, args.arch, args.op, args.n, args.method_override
+            ti,
+            args.arch,
+            args.op,
+            args.n,
+            args.method_override,
+            args.indices_storage,
         )
     else:
         body, meta = _make_vanilla_body(ti, args.arch, args.op, args.n)
@@ -560,6 +579,7 @@ def run_child(args: argparse.Namespace) -> int:
         "arch": args.arch,
         "op": args.op,
         "method_override": args.method_override,
+        "indices_storage": args.indices_storage,
         "bucket_override": args.bucket_override,
         "key_pattern": args.key_pattern,
         "dtype": "i32",
@@ -651,6 +671,8 @@ def run_matrix(args: argparse.Namespace) -> int:
                     ]
                     if args.method_override and package == "forge":
                         cmd.extend(["--method-override", args.method_override])
+                    if args.indices_storage != "ndarray" and package == "forge":
+                        cmd.extend(["--indices-storage", args.indices_storage])
                     if args.bucket_override is not None:
                         cmd.extend(["--bucket-override", str(args.bucket_override)])
                     if args.key_pattern != "default":
@@ -711,6 +733,7 @@ def run_matrix(args: argparse.Namespace) -> int:
 
     summary = {
         "method_override": args.method_override,
+        "indices_storage": args.indices_storage,
         "rows": rows,
         "failures": failures,
         "skips": skips,
@@ -728,6 +751,7 @@ def run_matrix(args: argparse.Namespace) -> int:
                 "arch",
                 "op",
                 "method_override",
+                "indices_storage",
                 "bucket_override",
                 "key_pattern",
                 "dtype",
@@ -751,6 +775,7 @@ def run_matrix(args: argparse.Namespace) -> int:
                     "arch": row["arch"],
                     "op": row["op"],
                     "method_override": row.get("method_override"),
+                    "indices_storage": row.get("indices_storage"),
                     "bucket_override": row.get("bucket_override"),
                     "key_pattern": row.get("key_pattern"),
                     "dtype": row["dtype"],
@@ -797,6 +822,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--method-override")
+    parser.add_argument("--indices-storage", choices=["ndarray", "field"], default="ndarray")
     parser.add_argument("--bucket-override", type=int)
     parser.add_argument(
         "--key-pattern", choices=["default", "hot", "single"], default="default"

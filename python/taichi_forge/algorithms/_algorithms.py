@@ -742,30 +742,6 @@ def _component_group_semantic_key(*items):
     return ("component_group", *items)
 
 
-def _try_native_component_plan_group(
-    plan_groups, backend, objects, semantic_items, on_success
-):
-    if backend is None:
-        return False
-    semantic_key = _component_group_semantic_key(*semantic_items)
-    key = _native_plan_cache_key(backend, objects, semantic_key)
-    group = plan_groups.get(key)
-    if group is None:
-        return False
-    if not group.matches_request(backend, objects, semantic_key):
-        return False
-    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-    prog = impl.get_runtime().prog
-    if not group.matches_program(prog):
-        return False
-    temp_bytes = group.invoke(prog)
-    if temp_bytes is None:
-        return False
-    on_success(group, temp_bytes)
-    return True
-
-
 def _try_hot_native_plan(plan, backend, objects, on_success, semantic_key=None):
     if backend is None or plan is None:
         return False
@@ -804,11 +780,130 @@ def _try_hot_native_plan_group(group, backend, objects, on_success, semantic_key
     return True
 
 
+def _native_plan_cache_lookup(plan_cache, backend, objects, semantic_key):
+    if plan_cache is None:
+        return None
+    if isinstance(plan_cache, dict):
+        key = _native_plan_cache_key(backend, objects, semantic_key)
+        return plan_cache.get(key)
+    for cached in plan_cache:
+        if cached.matches_request(backend, objects, semantic_key):
+            return cached
+    return None
+
+
+def _native_plan_cache_store(plan_cache, plan):
+    if plan_cache is None:
+        return
+    if isinstance(plan_cache, dict):
+        plan_cache[plan.cache_key()] = plan
+        return
+    for i, cached in enumerate(plan_cache):
+        if cached.matches_request(plan.backend, plan.objects, plan.semantic_key):
+            plan_cache[i] = plan
+            return
+    plan_cache.append(plan)
+
+
+def _try_native_plan_from_cache(
+    current_plan,
+    plan_cache,
+    backend,
+    objects,
+    on_success,
+    semantic_key,
+):
+    if backend is None:
+        return False
+    semantic_key = tuple(semantic_key)
+    if _try_hot_native_plan(
+        current_plan, backend, objects, on_success, semantic_key=semantic_key
+    ):
+        return True
+    plan = current_plan
+    if plan is None or not plan.matches_request(backend, objects, semantic_key):
+        plan = _native_plan_cache_lookup(plan_cache, backend, objects, semantic_key)
+    if plan is None or not plan.matches_request(backend, objects, semantic_key):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not plan.matches_program(prog):
+        return False
+    temp_bytes = plan.invoke(prog)
+    if temp_bytes is None:
+        return False
+    on_success(plan, temp_bytes)
+    return True
+
+
+def _record_native_primitive_plan(
+    plan_cache,
+    backend,
+    method_name,
+    objects,
+    semantic_key,
+    call_args,
+    prog,
+    value_type,
+    n,
+):
+    plan = _NativePrimitivePlan(
+        backend=backend,
+        method_name=method_name,
+        objects=objects,
+        semantic_key=semantic_key,
+        call_args=call_args,
+        prog=prog,
+        value_type=value_type,
+        n=n,
+    )
+    _native_plan_cache_store(plan_cache, plan)
+    return plan
+
+
+def _try_native_plan_group_from_cache(
+    current_group,
+    plan_groups,
+    backend,
+    objects,
+    semantic_key,
+    on_success,
+):
+    if backend is None:
+        return False
+    semantic_key = tuple(semantic_key)
+    if _try_hot_native_plan_group(
+        current_group,
+        backend,
+        objects,
+        on_success,
+        semantic_key=semantic_key,
+    ):
+        return True
+    group = current_group
+    if group is None or not group.matches_request(backend, objects, semantic_key):
+        key = _native_plan_cache_key(backend, objects, semantic_key)
+        group = plan_groups.get(key)
+    if group is None or not group.matches_request(backend, objects, semantic_key):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not group.matches_program(prog):
+        return False
+    temp_bytes = group.invoke(prog)
+    if temp_bytes is None:
+        return False
+    on_success(group, temp_bytes)
+    return True
+
+
 def _record_native_component_plan_group(
     plan_groups, backend, objects, semantic_items, plans
 ):
     if backend is None or not plans:
-        return
+        return None
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
@@ -820,6 +915,26 @@ def _record_native_component_plan_group(
         prog,
     )
     plan_groups[group.cache_key()] = group
+    return group
+
+
+def _try_native_component_plan_group(
+    plan_groups,
+    backend,
+    objects,
+    semantic_items,
+    on_success,
+    current_group=None,
+):
+    semantic_key = _component_group_semantic_key(*semantic_items)
+    return _try_native_plan_group_from_cache(
+        current_group,
+        plan_groups,
+        backend,
+        objects,
+        semantic_key,
+        on_success,
+    )
 
 
 def _struct_tensor_member_components(view):
@@ -1063,30 +1178,22 @@ class _OrderApplyWorkspaceMixin:
 
     def _try_order_apply_inplace_plan_group(self, values, order, output, copy_method):
         backend = self._order_apply_backend_for_method(copy_method)
-        if backend is None:
-            return False
         semantic_key = self._order_apply_inplace_semantic_key(values, copy_method)
-        objects = (values, order, output)
-        group = self._order_apply_inplace_plan_group
-        if group is None or not group.matches_request(backend, objects, semantic_key):
-            key = _native_plan_cache_key(backend, objects, semantic_key)
-            group = self._order_apply_inplace_plan_groups.get(key)
-        if group is None or not group.matches_request(backend, objects, semantic_key):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+        return _try_native_plan_group_from_cache(
+            self._order_apply_inplace_plan_group,
+            self._order_apply_inplace_plan_groups,
+            backend,
+            (values, order, output),
+            semantic_key,
+            self._activate_order_apply_inplace_plan_group,
+        )
 
-        prog = impl.get_runtime().prog
-        if not group.matches_program(prog):
-            return False
-        temp_bytes = group.invoke(prog)
-        if temp_bytes is None:
-            return False
+    def _activate_order_apply_inplace_plan_group(self, group, temp_bytes):
         self._order_apply_inplace_plan_group = group
         self.workspace_bytes_peak = max(
             self.workspace_bytes_peak,
             self.workspace_bytes_current + temp_bytes,
         )
-        return True
 
     def _record_order_apply_inplace_plan_group(
         self, values, order, output, copy_method, plans
@@ -1094,12 +1201,13 @@ class _OrderApplyWorkspaceMixin:
         backend = self._order_apply_backend_for_method(copy_method)
         if backend is None or not plans:
             return
+        semantic_key = self._order_apply_inplace_semantic_key(values, copy_method)
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         group = _NativePrimitivePlanGroup(
             backend,
             (values, order, output),
-            self._order_apply_inplace_semantic_key(values, copy_method),
+            semantic_key,
             plans,
             impl.get_runtime().prog,
         )
@@ -1430,6 +1538,7 @@ class ReduceWorkspace:
         self._vulkan_native_active = False
         self._native_reduce_plan = None
         self._native_reduce_plans = {}
+        self._native_reduce_plan_group = None
         self._native_reduce_plan_groups = {}
 
     def clear(self):
@@ -1452,6 +1561,7 @@ class ReduceWorkspace:
         self._vulkan_native_active = False
         self._native_reduce_plan = None
         self._native_reduce_plans.clear()
+        self._native_reduce_plan_group = None
         self._native_reduce_plan_groups.clear()
 
     def check_shape(self, n):
@@ -1483,41 +1593,17 @@ class ReduceWorkspace:
 
     def _try_native_reduce_plan(self, values, output, op, method):
         backend = self._native_reduce_backend_for_method(method)
-        if backend is None:
-            return False
-        if _try_hot_native_plan(
+        return _try_native_plan_from_cache(
             self._native_reduce_plan,
+            self._native_reduce_plans if self._cache_native_plans else None,
             backend,
             (values, output),
             lambda plan, temp_bytes: (
                 setattr(self, "_native_reduce_plan", plan),
                 self._mark_native_reduce_backend_active(backend, temp_bytes),
             ),
-            semantic_key=(op,),
-        ):
-            return True
-        plan = self._native_reduce_plan
-        if plan is None or not plan.matches_request(backend, (values, output), (op,)):
-            key = _native_plan_cache_key(backend, (values, output), (op,))
-            plan = (
-                self._native_reduce_plans.get(key)
-                if self._cache_native_plans
-                else None
-            )
-        if plan is None:
-            return False
-        if not plan.matches_request(backend, (values, output), (op,)):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        if not plan.matches_program(prog):
-            return False
-        temp_bytes = plan.invoke(prog)
-        if temp_bytes is None:
-            return False
-        self._mark_native_reduce_backend_active(backend, temp_bytes)
-        return True
+            (op,),
+        )
 
     def _try_native_reduce_plan_group(self, values, output, op, method):
         backend = self._native_reduce_backend_for_method(method)
@@ -1529,12 +1615,37 @@ class ReduceWorkspace:
             lambda group, temp_bytes: self._activate_native_reduce_plan_group(
                 backend, group, temp_bytes
             ),
+            current_group=self._native_reduce_plan_group,
         )
 
     def _activate_native_reduce_plan_group(self, backend, group, temp_bytes):
+        self._native_reduce_plan_group = group
         if group.plans:
             self._native_reduce_plan = group.plans[-1]
         self._mark_native_reduce_backend_active(backend, temp_bytes)
+
+    def _try_hot_reduce_replay(self, values, output, op, method):
+        backend = self._native_reduce_backend_for_method(method)
+        if _try_hot_native_plan(
+            self._native_reduce_plan,
+            backend,
+            (values, output),
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_reduce_plan", plan),
+                self._mark_native_reduce_backend_active(backend, temp_bytes),
+            ),
+            semantic_key=(op,),
+        ):
+            return True
+        return _try_hot_native_plan_group(
+            self._native_reduce_plan_group,
+            backend,
+            (values, output),
+            lambda group, temp_bytes: self._activate_native_reduce_plan_group(
+                backend, group, temp_bytes
+            ),
+            semantic_key=(op,),
+        )
 
     def _record_native_reduce_plan(
         self,
@@ -1548,23 +1659,23 @@ class ReduceWorkspace:
         n,
         prog,
     ):
-        plan = _NativePrimitivePlan(
-            backend=backend,
-            method_name=method_name,
-            objects=(values, output),
-            semantic_key=(op,),
-            call_args=call_args,
-            prog=prog,
-            value_type=value_type,
-            n=n,
+        cache = self._native_reduce_plans if self._cache_native_plans else None
+        plan = _record_native_primitive_plan(
+            cache,
+            backend,
+            method_name,
+            (values, output),
+            (op,),
+            call_args,
+            prog,
+            value_type,
+            n,
         )
         self._native_reduce_plan = plan
-        if self._cache_native_plans:
-            self._native_reduce_plans[plan.cache_key()] = plan
 
     def _record_native_reduce_plan_group(self, values, output, op, method, plans):
         backend = self._native_reduce_backend_for_method(method)
-        _record_native_component_plan_group(
+        self._native_reduce_plan_group = _record_native_component_plan_group(
             self._native_reduce_plan_groups,
             backend,
             (values, output),
@@ -1703,40 +1814,19 @@ class HistogramWorkspace:
 
     def _try_native_histogram_plan(self, values, bins, method, value_type, bin_type):
         backend = self._native_histogram_backend_for_method(method)
-        if backend is None:
-            return False
         semantic_key = (int(value_type), int(bin_type))
         objects = (values, bins)
-        if _try_hot_native_plan(
+        return _try_native_plan_from_cache(
             self._native_histogram_plan,
+            self._native_histogram_plans,
             backend,
             objects,
             lambda plan, temp_bytes: (
                 setattr(self, "_native_histogram_plan", plan),
                 self._mark_native_histogram_backend_active(backend, temp_bytes),
             ),
-            semantic_key=semantic_key,
-        ):
-            return True
-        plan = self._native_histogram_plan
-        if plan is None or not plan.matches_request(backend, objects, semantic_key):
-            key = _native_plan_cache_key(backend, objects, semantic_key)
-            plan = self._native_histogram_plans.get(key)
-        if plan is None:
-            return False
-        if not plan.matches_request(backend, objects, semantic_key):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        if not plan.matches_program(prog):
-            return False
-        temp_bytes = plan.invoke(prog)
-        if temp_bytes is None:
-            return False
-        self._native_histogram_plan = plan
-        self._mark_native_histogram_backend_active(backend, temp_bytes)
-        return True
+            semantic_key,
+        )
 
     def _try_hot_native_histogram_plan(self, values, bins, method):
         backend = self._native_histogram_backend_for_method(method)
@@ -1764,18 +1854,18 @@ class HistogramWorkspace:
         n,
         prog,
     ):
-        plan = _NativePrimitivePlan(
-            backend=backend,
-            method_name=method_name,
-            objects=(values, bins),
-            semantic_key=(int(value_type), int(bin_type)),
-            call_args=call_args,
-            prog=prog,
-            value_type=value_type,
-            n=n,
+        plan = _record_native_primitive_plan(
+            self._native_histogram_plans,
+            backend,
+            method_name,
+            (values, bins),
+            (int(value_type), int(bin_type)),
+            call_args,
+            prog,
+            value_type,
+            n,
         )
         self._native_histogram_plan = plan
-        self._native_histogram_plans[plan.cache_key()] = plan
 
     def _staged_histogram_semantic_key(
         self, method, value_type, bin_type, n, num_bins
@@ -1937,6 +2027,7 @@ class TransformWorkspace:
         self._vulkan_native_active = False
         self._native_transform_plan = None
         self._native_transform_plans = {}
+        self._native_transform_plan_group = None
         self._native_transform_plan_groups = {}
 
     def check_shape(self, n):
@@ -1967,44 +2058,17 @@ class TransformWorkspace:
 
     def _try_native_transform_plan(self, src, dst, method, scale, bias):
         backend = self._native_transform_backend_for_method(method)
-        if backend is None:
-            return False
-        if _try_hot_native_plan(
+        return _try_native_plan_from_cache(
             self._native_transform_plan,
+            self._native_transform_plans if self._cache_native_plans else None,
             backend,
             (src, dst),
             lambda plan, temp_bytes: (
                 setattr(self, "_native_transform_plan", plan),
                 self._mark_native_transform_backend_active(backend, temp_bytes),
             ),
-            semantic_key=(scale, bias),
-        ):
-            return True
-        plan = self._native_transform_plan
-        if plan is None or not plan.matches_request(
-            backend, (src, dst), (scale, bias)
-        ):
-            key = _native_plan_cache_key(backend, (src, dst), (scale, bias))
-            plan = (
-                self._native_transform_plans.get(key)
-                if self._cache_native_plans
-                else None
-            )
-        if plan is None:
-            return False
-        if not plan.matches_request(backend, (src, dst), (scale, bias)):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        if not plan.matches_program(prog):
-            return False
-        temp_bytes = plan.invoke(prog)
-        if temp_bytes is None:
-            return False
-        self._native_transform_plan = plan
-        self._mark_native_transform_backend_active(backend, temp_bytes)
-        return True
+            (scale, bias),
+        )
 
     def _try_native_transform_plan_group(self, src, dst, method, scale, bias):
         backend = self._native_transform_backend_for_method(method)
@@ -2016,12 +2080,38 @@ class TransformWorkspace:
             lambda group, temp_bytes: self._activate_native_transform_plan_group(
                 backend, group, temp_bytes
             ),
+            current_group=self._native_transform_plan_group,
         )
 
     def _activate_native_transform_plan_group(self, backend, group, temp_bytes):
+        self._native_transform_plan_group = group
         if group.plans:
             self._native_transform_plan = group.plans[-1]
         self._mark_native_transform_backend_active(backend, temp_bytes)
+
+    def _try_hot_transform_replay(self, src, dst, method, scale, bias):
+        backend = self._native_transform_backend_for_method(method)
+        semantic_key = (scale, bias)
+        if _try_hot_native_plan(
+            self._native_transform_plan,
+            backend,
+            (src, dst),
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_transform_plan", plan),
+                self._mark_native_transform_backend_active(backend, temp_bytes),
+            ),
+            semantic_key=semantic_key,
+        ):
+            return True
+        return _try_hot_native_plan_group(
+            self._native_transform_plan_group,
+            backend,
+            (src, dst),
+            lambda group, temp_bytes: self._activate_native_transform_plan_group(
+                backend, group, temp_bytes
+            ),
+            semantic_key=semantic_key,
+        )
 
     def _record_native_transform_plan(
         self,
@@ -2036,25 +2126,25 @@ class TransformWorkspace:
         n,
         prog,
     ):
-        plan = _NativePrimitivePlan(
-            backend=backend,
-            method_name=method_name,
-            objects=(src, dst),
-            semantic_key=(scale, bias),
-            call_args=call_args,
-            prog=prog,
-            value_type=value_type,
-            n=n,
+        cache = self._native_transform_plans if self._cache_native_plans else None
+        plan = _record_native_primitive_plan(
+            cache,
+            backend,
+            method_name,
+            (src, dst),
+            (scale, bias),
+            call_args,
+            prog,
+            value_type,
+            n,
         )
         self._native_transform_plan = plan
-        if self._cache_native_plans:
-            self._native_transform_plans[plan.cache_key()] = plan
 
     def _record_native_transform_plan_group(
         self, src, dst, method, scale, bias, plans
     ):
         backend = self._native_transform_backend_for_method(method)
-        _record_native_component_plan_group(
+        self._native_transform_plan_group = _record_native_component_plan_group(
             self._native_transform_plan_groups,
             backend,
             (src, dst),
@@ -2074,6 +2164,7 @@ class TransformWorkspace:
         self._vulkan_native_active = False
         self._native_transform_plan = None
         self._native_transform_plans.clear()
+        self._native_transform_plan_group = None
         self._native_transform_plan_groups.clear()
 
 
@@ -2093,6 +2184,7 @@ class IndexedCopyWorkspace:
         self._vulkan_native_active = False
         self._native_indexed_copy_plan = None
         self._native_indexed_copy_plans = {}
+        self._native_indexed_copy_plan_group = None
         self._native_indexed_copy_plan_groups = {}
 
     def check_shape(self, n):
@@ -2122,44 +2214,17 @@ class IndexedCopyWorkspace:
 
     def _try_native_indexed_copy_plan(self, src, indices, dst, method, scatter):
         backend = self._native_indexed_copy_backend_for_method(method)
-        if backend is None:
-            return False
-        if _try_hot_native_plan(
+        return _try_native_plan_from_cache(
             self._native_indexed_copy_plan,
+            self._native_indexed_copy_plans if self._cache_native_plans else None,
             backend,
             (src, indices, dst),
             lambda plan, temp_bytes: (
                 setattr(self, "_native_indexed_copy_plan", plan),
                 self._mark_native_indexed_copy_backend_active(backend, temp_bytes),
             ),
-            semantic_key=(bool(scatter),),
-        ):
-            return True
-        plan = self._native_indexed_copy_plan
-        if plan is None or not plan.matches_request(
-            backend, (src, indices, dst), (bool(scatter),)
-        ):
-            key = _native_plan_cache_key(backend, (src, indices, dst), (bool(scatter),))
-            plan = (
-                self._native_indexed_copy_plans.get(key)
-                if self._cache_native_plans
-                else None
-            )
-        if plan is None:
-            return False
-        if not plan.matches_request(backend, (src, indices, dst), (bool(scatter),)):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        if not plan.matches_program(prog):
-            return False
-        temp_bytes = plan.invoke(prog)
-        if temp_bytes is None:
-            return False
-        self._native_indexed_copy_plan = plan
-        self._mark_native_indexed_copy_backend_active(backend, temp_bytes)
-        return True
+            (bool(scatter),),
+        )
 
     def _try_native_indexed_copy_plan_group(
         self, src, indices, dst, method, scatter
@@ -2173,12 +2238,39 @@ class IndexedCopyWorkspace:
             lambda group, temp_bytes: self._activate_native_indexed_copy_plan_group(
                 backend, group, temp_bytes
             ),
+            current_group=self._native_indexed_copy_plan_group,
         )
 
     def _activate_native_indexed_copy_plan_group(self, backend, group, temp_bytes):
+        self._native_indexed_copy_plan_group = group
         if group.plans:
             self._native_indexed_copy_plan = group.plans[-1]
         self._mark_native_indexed_copy_backend_active(backend, temp_bytes)
+
+    def _try_hot_indexed_copy_replay(self, src, indices, dst, method, scatter):
+        backend = self._native_indexed_copy_backend_for_method(method)
+        semantic_key = (bool(scatter),)
+        objects = (src, indices, dst)
+        if _try_hot_native_plan(
+            self._native_indexed_copy_plan,
+            backend,
+            objects,
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_indexed_copy_plan", plan),
+                self._mark_native_indexed_copy_backend_active(backend, temp_bytes),
+            ),
+            semantic_key=semantic_key,
+        ):
+            return True
+        return _try_hot_native_plan_group(
+            self._native_indexed_copy_plan_group,
+            backend,
+            objects,
+            lambda group, temp_bytes: self._activate_native_indexed_copy_plan_group(
+                backend, group, temp_bytes
+            ),
+            semantic_key=semantic_key,
+        )
 
     def _record_native_indexed_copy_plan(
         self,
@@ -2193,25 +2285,25 @@ class IndexedCopyWorkspace:
         n,
         prog,
     ):
-        plan = _NativePrimitivePlan(
-            backend=backend,
-            method_name=method_name,
-            objects=(src, indices, dst),
-            semantic_key=(bool(scatter),),
-            call_args=call_args,
-            prog=prog,
-            value_type=item_bytes,
-            n=n,
+        cache = self._native_indexed_copy_plans if self._cache_native_plans else None
+        plan = _record_native_primitive_plan(
+            cache,
+            backend,
+            method_name,
+            (src, indices, dst),
+            (bool(scatter),),
+            call_args,
+            prog,
+            item_bytes,
+            n,
         )
         self._native_indexed_copy_plan = plan
-        if self._cache_native_plans:
-            self._native_indexed_copy_plans[plan.cache_key()] = plan
 
     def _record_native_indexed_copy_plan_group(
         self, src, indices, dst, method, scatter, plans
     ):
         backend = self._native_indexed_copy_backend_for_method(method)
-        _record_native_component_plan_group(
+        self._native_indexed_copy_plan_group = _record_native_component_plan_group(
             self._native_indexed_copy_plan_groups,
             backend,
             (src, indices, dst),
@@ -2231,6 +2323,7 @@ class IndexedCopyWorkspace:
         self._vulkan_native_active = False
         self._native_indexed_copy_plan = None
         self._native_indexed_copy_plans.clear()
+        self._native_indexed_copy_plan_group = None
         self._native_indexed_copy_plan_groups.clear()
 
 
@@ -2250,6 +2343,7 @@ class ScatterAddWorkspace:
         self._vulkan_native_active = False
         self._native_scatter_add_plan = None
         self._native_scatter_add_plans = []
+        self._native_scatter_add_plan_group = None
         self._native_scatter_add_plan_groups = {}
         self._native_add_merge_plan = None
         self._native_add_merge_plans = []
@@ -2359,44 +2453,20 @@ class ScatterAddWorkspace:
 
     def _try_native_scatter_add_plan(self, src, indices, dst, method, value_type):
         backend = self._native_scatter_add_backend_for_method(method)
-        if backend is None:
-            return False
-        if _try_hot_native_plan(
+        objects, semantic_key = self._native_scatter_add_request_signature(
+            src, indices, dst, value_type
+        )
+        return _try_native_plan_from_cache(
             self._native_scatter_add_plan,
+            self._native_scatter_add_plans,
             backend,
-            (src, indices, dst),
+            objects,
             lambda plan, temp_bytes: (
                 setattr(self, "_native_scatter_add_plan", plan),
                 self._mark_native_scatter_add_backend_active(backend, temp_bytes),
             ),
-            semantic_key=(int(value_type),),
-        ):
-            return True
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        objects, semantic_key = self._native_scatter_add_request_signature(
-            src, indices, dst, value_type
+            semantic_key,
         )
-        plan = self._native_scatter_add_plan
-        if plan is None or not plan.matches_request(backend, objects, semantic_key):
-            plan = None
-            for cached in self._native_scatter_add_plans:
-                if cached.matches_request(backend, objects, semantic_key):
-                    plan = cached
-                    break
-        if plan is None:
-            return False
-        if not plan.matches_request(backend, objects, semantic_key):
-            return False
-        if not plan.matches_program(prog):
-            return False
-        temp_bytes = plan.invoke(prog)
-        if temp_bytes is None:
-            return False
-        self._native_scatter_add_plan = plan
-        self._mark_native_scatter_add_backend_active(backend, temp_bytes)
-        return True
 
     def _try_native_scatter_add_plan_group(
         self, src, indices, dst, method, value_type
@@ -2407,9 +2477,11 @@ class ScatterAddWorkspace:
             backend,
             (src, indices, dst),
             (int(value_type),),
-            lambda _group, temp_bytes: self._mark_native_scatter_add_backend_active(
-                backend, temp_bytes
+            lambda group, temp_bytes: (
+                setattr(self, "_native_scatter_add_plan_group", group),
+                self._mark_native_scatter_add_backend_active(backend, temp_bytes),
             ),
+            current_group=self._native_scatter_add_plan_group,
         )
 
     def _record_native_scatter_add_plan(
@@ -2427,28 +2499,24 @@ class ScatterAddWorkspace:
         objects, semantic_key = self._native_scatter_add_request_signature(
             src, indices, dst, value_type
         )
-        plan = _NativePrimitivePlan(
-            backend=backend,
-            method_name=method_name,
-            objects=objects,
-            semantic_key=semantic_key,
-            call_args=call_args,
-            prog=prog,
-            value_type=value_type,
-            n=n,
+        plan = _record_native_primitive_plan(
+            self._native_scatter_add_plans,
+            backend,
+            method_name,
+            objects,
+            semantic_key,
+            call_args,
+            prog,
+            value_type,
+            n,
         )
         self._native_scatter_add_plan = plan
-        for i, cached in enumerate(self._native_scatter_add_plans):
-            if cached.matches_request(backend, objects, semantic_key):
-                self._native_scatter_add_plans[i] = plan
-                return
-        self._native_scatter_add_plans.append(plan)
 
     def _record_native_scatter_add_plan_group(
         self, src, indices, dst, method, value_type, plans
     ):
         backend = self._native_scatter_add_backend_for_method(method)
-        _record_native_component_plan_group(
+        self._native_scatter_add_plan_group = _record_native_component_plan_group(
             self._native_scatter_add_plan_groups,
             backend,
             (src, indices, dst),
@@ -2483,42 +2551,20 @@ class ScatterAddWorkspace:
 
     def _try_native_add_merge_plan(self, src, dst, method, value_type, n):
         backend = self._native_add_merge_backend_for_method(method)
-        if backend is None:
-            return False
-        if _try_hot_native_plan(
+        objects, semantic_key = self._native_add_merge_request_signature(
+            src, dst, value_type, n
+        )
+        return _try_native_plan_from_cache(
             self._native_add_merge_plan,
+            self._native_add_merge_plans,
             backend,
-            (src, dst),
+            objects,
             lambda plan, temp_bytes: (
                 setattr(self, "_native_add_merge_plan", plan),
                 self._mark_native_scatter_add_backend_active(backend, temp_bytes),
             ),
-            semantic_key=(int(value_type), int(n)),
-        ):
-            return True
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        objects, semantic_key = self._native_add_merge_request_signature(
-            src, dst, value_type, n
+            semantic_key,
         )
-        plan = self._native_add_merge_plan
-        if plan is None or not plan.matches_request(backend, objects, semantic_key):
-            plan = None
-            for cached in self._native_add_merge_plans:
-                if cached.matches_request(backend, objects, semantic_key):
-                    plan = cached
-                    break
-        if plan is None:
-            return False
-        if not plan.matches_program(prog):
-            return False
-        temp_bytes = plan.invoke(prog)
-        if temp_bytes is None:
-            return False
-        self._native_add_merge_plan = plan
-        self._mark_native_scatter_add_backend_active(backend, temp_bytes)
-        return True
 
     def _record_native_add_merge_plan(
         self, backend, method_name, src, dst, value_type, call_args, n, prog
@@ -2526,22 +2572,18 @@ class ScatterAddWorkspace:
         objects, semantic_key = self._native_add_merge_request_signature(
             src, dst, value_type, n
         )
-        plan = _NativePrimitivePlan(
-            backend=backend,
-            method_name=method_name,
-            objects=objects,
-            semantic_key=semantic_key,
-            call_args=call_args,
-            prog=prog,
-            value_type=value_type,
-            n=n,
+        plan = _record_native_primitive_plan(
+            self._native_add_merge_plans,
+            backend,
+            method_name,
+            objects,
+            semantic_key,
+            call_args,
+            prog,
+            value_type,
+            n,
         )
         self._native_add_merge_plan = plan
-        for i, cached in enumerate(self._native_add_merge_plans):
-            if cached.matches_request(backend, objects, semantic_key):
-                self._native_add_merge_plans[i] = plan
-                return plan
-        self._native_add_merge_plans.append(plan)
         return plan
 
     def _two_level_scatter_add_semantic_key(self, src, indices, dst, method, value_type):
@@ -2601,6 +2643,57 @@ class ScatterAddWorkspace:
         )
         self._two_level_scatter_add_plan_groups[group.cache_key()] = group
         self._two_level_scatter_add_plan_group = group
+
+    def _try_hot_scatter_add_replay(self, src, indices, dst, method):
+        objects = (src, indices, dst)
+        native_backend = self._native_scatter_add_backend_for_method(method)
+        if _try_hot_native_plan(
+            self._native_scatter_add_plan,
+            native_backend,
+            objects,
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_scatter_add_plan", plan),
+                self._mark_native_scatter_add_backend_active(
+                    native_backend, temp_bytes
+                ),
+            ),
+        ):
+            return True
+        if _try_hot_native_plan_group(
+            self._native_scatter_add_plan_group,
+            native_backend,
+            objects,
+            lambda group, temp_bytes: (
+                setattr(self, "_native_scatter_add_plan_group", group),
+                self._mark_native_scatter_add_backend_active(
+                    native_backend, temp_bytes
+                ),
+            ),
+        ):
+            return True
+
+        two_level_backend = self._native_two_level_scatter_add_backend_for_method(
+            method
+        )
+
+        def mark_two_level_group(group, temp_bytes):
+            self._two_level_scatter_add_plan_group = group
+            self._mark_native_scatter_add_backend_active(
+                two_level_backend, temp_bytes
+            )
+            self._record_two_level_child_workspace(
+                self._two_level_grouped_reduce_workspace
+            )
+            self._record_two_level_child_workspace(
+                self._two_level_transform_workspace
+            )
+
+        return _try_hot_native_plan_group(
+            self._two_level_scatter_add_plan_group,
+            two_level_backend,
+            objects,
+            mark_two_level_group,
+        )
 
     def _clear_two_level_plan_groups(self):
         self._two_level_scatter_add_plan_group = None
@@ -2688,6 +2781,7 @@ class ScatterAddWorkspace:
         self._vulkan_native_active = False
         self._native_scatter_add_plan = None
         self._native_scatter_add_plans.clear()
+        self._native_scatter_add_plan_group = None
         self._native_scatter_add_plan_groups.clear()
         self._clear_two_level_add_merge_plans()
         self._clear_two_level_plan_groups()
@@ -2790,41 +2884,47 @@ class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
         self, keys, values, offsets, output, value_type, n, num_bins
     ):
         backend = self._native_bucket_builder_backend_for_current_arch()
-        if backend is None:
-            return False
         objects, semantic_key = self._native_bucket_builder_request_signature(
             keys, values, offsets, output, value_type, n, num_bins
         )
-        if _try_hot_native_plan(
+        return _try_native_plan_from_cache(
             self._native_bucket_builder_plan,
+            self._native_bucket_builder_plans,
             backend,
             objects,
             lambda plan, temp_bytes: (
                 setattr(self, "_native_bucket_builder_plan", plan),
                 self._mark_native_bucket_builder_backend_active(backend, temp_bytes),
             ),
-            semantic_key=semantic_key,
-        ):
-            return True
-        plan = self._native_bucket_builder_plan
-        if plan is None or not plan.matches_request(backend, objects, semantic_key):
-            key = _native_plan_cache_key(backend, objects, semantic_key)
-            plan = self._native_bucket_builder_plans.get(key)
-        if plan is None:
-            return False
-        if not plan.matches_request(backend, objects, semantic_key):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+            semantic_key,
+        )
 
-        prog = impl.get_runtime().prog
-        if not plan.matches_program(prog):
+    def _try_hot_bucket_builder_replay(
+        self, keys, values, offsets, output, method
+    ):
+        aggregation_backend = _aggregation_backend_for_method(
+            method,
+            cuda_native=("cuda_device",),
+            cuda_two_level=("cuda_two_level",),
+            vulkan_native=("vulkan_native",),
+            vulkan_two_level=("vulkan_two_level",),
+            cpu_native=("cpu_native",),
+            cpu_two_level=("cpu_two_level",),
+        )
+        if aggregation_backend is None:
             return False
-        temp_bytes = plan.invoke(prog)
-        if temp_bytes is None:
-            return False
-        self._native_bucket_builder_plan = plan
-        self._mark_native_bucket_builder_backend_active(backend, temp_bytes)
-        return True
+        backend = self._native_bucket_builder_backend_for_current_arch()
+        return _try_hot_native_plan(
+            self._native_bucket_builder_plan,
+            backend,
+            (keys, values, offsets, output),
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_bucket_builder_plan", plan),
+                self._mark_native_bucket_builder_backend_active(
+                    backend, temp_bytes
+                ),
+            ),
+        )
 
     def _record_native_bucket_builder_plan(
         self,
@@ -2845,18 +2945,18 @@ class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
         objects, semantic_key = self._native_bucket_builder_request_signature(
             keys, values, offsets, output, value_type, n, num_bins
         )
-        plan = _NativePrimitivePlan(
-            backend=backend,
-            method_name=method_name,
-            objects=objects,
-            semantic_key=semantic_key,
-            call_args=call_args,
-            prog=prog,
-            value_type=value_type,
-            n=n,
+        plan = _record_native_primitive_plan(
+            self._native_bucket_builder_plans,
+            backend,
+            method_name,
+            objects,
+            semantic_key,
+            call_args,
+            prog,
+            value_type,
+            n,
         )
         self._native_bucket_builder_plan = plan
-        self._native_bucket_builder_plans[plan.cache_key()] = plan
 
     def _get_cursor_ndarray(self, num_bins):
         if self._cursor_ndarray is None or self._cursor_ndarray.shape[0] < num_bins:
@@ -2900,6 +3000,7 @@ class GroupedReduceWorkspace:
         self._cursor_ndarray = None
         self._native_grouped_reduce_plan = None
         self._native_grouped_reduce_plans = {}
+        self._native_grouped_reduce_plan_group = None
         self._native_grouped_reduce_plan_groups = {}
         self._staged_grouped_reduce_plan_group = None
         self._staged_grouped_reduce_plan_groups = {}
@@ -2945,6 +3046,7 @@ class GroupedReduceWorkspace:
     def _clear_native_grouped_reduce_plans(self):
         self._native_grouped_reduce_plan = None
         self._native_grouped_reduce_plans.clear()
+        self._native_grouped_reduce_plan_group = None
         self._native_grouped_reduce_plan_groups.clear()
         self._staged_grouped_reduce_plan_group = None
         self._staged_grouped_reduce_plan_groups.clear()
@@ -2997,41 +3099,20 @@ class GroupedReduceWorkspace:
     def _try_native_grouped_reduce_plan(
         self, backend, keys, values, output, value_type, op_id, n, num_groups
     ):
-        if backend is None:
-            return False
         objects, semantic_key = self._native_grouped_reduce_request_signature(
             keys, values, output, value_type, op_id, n, num_groups
         )
-        if _try_hot_native_plan(
+        return _try_native_plan_from_cache(
             self._native_grouped_reduce_plan,
+            self._native_grouped_reduce_plans,
             backend,
             objects,
             lambda plan, temp_bytes: (
                 setattr(self, "_native_grouped_reduce_plan", plan),
                 self._mark_native_grouped_reduce_backend_active(backend, temp_bytes),
             ),
-            semantic_key=semantic_key,
-        ):
-            return True
-        plan = self._native_grouped_reduce_plan
-        if plan is None or not plan.matches_request(backend, objects, semantic_key):
-            key = _native_plan_cache_key(backend, objects, semantic_key)
-            plan = self._native_grouped_reduce_plans.get(key)
-        if plan is None:
-            return False
-        if not plan.matches_request(backend, objects, semantic_key):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        if not plan.matches_program(prog):
-            return False
-        temp_bytes = plan.invoke(prog)
-        if temp_bytes is None:
-            return False
-        self._native_grouped_reduce_plan = plan
-        self._mark_native_grouped_reduce_backend_active(backend, temp_bytes)
-        return True
+            semantic_key,
+        )
 
     def _try_native_grouped_reduce_plan_group(
         self, keys, values, output, method, value_type, op_id
@@ -3042,9 +3123,53 @@ class GroupedReduceWorkspace:
             backend,
             (keys, values, output),
             (int(value_type), int(op_id), int(output.shape[0])),
-            lambda _group, temp_bytes: self._mark_native_grouped_reduce_backend_active(
-                backend, temp_bytes
+            lambda group, temp_bytes: self._activate_native_grouped_reduce_plan_group(
+                backend, group, temp_bytes
             ),
+            current_group=self._native_grouped_reduce_plan_group,
+        )
+
+    def _activate_native_grouped_reduce_plan_group(self, backend, group, temp_bytes):
+        self._native_grouped_reduce_plan_group = group
+        if group.plans:
+            self._native_grouped_reduce_plan = group.plans[-1]
+        self._mark_native_grouped_reduce_backend_active(backend, temp_bytes)
+
+    def _try_hot_grouped_reduce_replay(self, keys, values, output, method, op):
+        backend = self._native_grouped_reduce_backend_for_method(method)
+        if backend is None:
+            return False
+        try:
+            value_type = _grouped_reduce_value_type(
+                getattr(values, "dtype", getattr(values, "scalar_dtype", None))
+            )
+            op_id = _SUPPORTED_GROUPED_REDUCE_OPS[op]
+            n = keys.shape[0]
+            num_groups = output.shape[0]
+        except (AttributeError, KeyError, TypeError):
+            return False
+        objects = (keys, values, output)
+        if _try_hot_native_plan(
+            self._native_grouped_reduce_plan,
+            backend,
+            objects,
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_grouped_reduce_plan", plan),
+                self._mark_native_grouped_reduce_backend_active(
+                    backend, temp_bytes
+                ),
+            ),
+            semantic_key=(int(value_type), int(op_id), int(n), int(num_groups)),
+        ):
+            return True
+        return _try_hot_native_plan_group(
+            self._native_grouped_reduce_plan_group,
+            backend,
+            objects,
+            lambda group, temp_bytes: self._activate_native_grouped_reduce_plan_group(
+                backend, group, temp_bytes
+            ),
+            semantic_key=(int(value_type), int(op_id), int(num_groups)),
         )
 
     def _record_native_grouped_reduce_plan(
@@ -3064,24 +3189,24 @@ class GroupedReduceWorkspace:
         objects, semantic_key = self._native_grouped_reduce_request_signature(
             keys, values, output, value_type, op_id, n, num_groups
         )
-        plan = _NativePrimitivePlan(
-            backend=backend,
-            method_name=method_name,
-            objects=objects,
-            semantic_key=semantic_key,
-            call_args=call_args,
-            prog=prog,
-            value_type=value_type,
-            n=n,
+        plan = _record_native_primitive_plan(
+            self._native_grouped_reduce_plans,
+            backend,
+            method_name,
+            objects,
+            semantic_key,
+            call_args,
+            prog,
+            value_type,
+            n,
         )
-        self._native_grouped_reduce_plans[plan.cache_key()] = plan
         self._native_grouped_reduce_plan = plan
 
     def _record_native_grouped_reduce_plan_group(
         self, keys, values, output, method, value_type, op_id, plans
     ):
         backend = self._native_grouped_reduce_backend_for_method(method)
-        _record_native_component_plan_group(
+        self._native_grouped_reduce_plan_group = _record_native_component_plan_group(
             self._native_grouped_reduce_plan_groups,
             backend,
             (keys, values, output),
@@ -3261,6 +3386,14 @@ def _dtype_nbytes(dtype):
     if "8" in text:
         return 1
     return 4
+
+
+def _is_contiguous_dense_field_view(view):
+    return (
+        view is not None
+        and view.is_dense_field
+        and view.stride == _dtype_nbytes(view.dtype)
+    )
 
 
 def _scan_layout(length):
@@ -4590,7 +4723,6 @@ def _compact_field_native_prefix_scan(values, flags, output, count, workspace, n
                 workspace.workspace_bytes_peak,
                 workspace.workspace_bytes_current + scan_bytes,
             )
-    sync()
     return workspace
 
 
@@ -4604,7 +4736,6 @@ def _compact_field_scan(values, flags, output, count, workspace, method):
         workspace = CompactWorkspace(max_items=n)
     if n <= 1:
         compact_single_item_field(values, flags, output, count, n)
-        sync()
         return workspace
     arch = current_cfg().arch
     if _try_native_dense_field_compact(
@@ -4625,7 +4756,6 @@ def _compact_field_scan(values, flags, output, count, workspace, method):
     compact_flags_to_prefix_field(flags, prefix, n)
     scanner._run_field_workspace(prefix)
     compact_scatter_field(values, flags, prefix, output, count, n)
-    sync()
     return workspace
 
 
@@ -5264,13 +5394,11 @@ def _reduce_field_atomic(values, output, op, workspace):
             reduce_f32_field_private_reduce(
                 partial, output, buffers["num_chunks"], op_id
             )
-        sync()
         return
     if values.dtype == i32:
         reduce_i32_field(values, output, values.shape[0], op_id)
     else:
         reduce_f32_field(values, output, values.shape[0], op_id)
-    sync()
 
 
 def experimental_reduce(values, output, *, op="sum", method="auto", workspace=None):
@@ -5283,6 +5411,10 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
     native path. Field/SNode fallback stays in Forge kernels and currently
     supports i32/f32.
     """
+
+    if workspace is not None and isinstance(workspace, ReduceWorkspace):
+        if workspace._try_hot_reduce_replay(values, output, op, method):
+            return workspace
 
     if _is_matrix_field(values) or _is_matrix_field(output):
         _check_matching_matrix_fields(
@@ -5742,7 +5874,6 @@ def _histogram_should_use_private(n, num_bins):
 
 def _histogram_field_direct(values, bins, n, num_bins):
     histogram_i32_field_direct(values, bins, n, num_bins)
-    sync()
 
 
 def _histogram_field_private(values, bins, workspace, n, num_bins):
@@ -5758,7 +5889,6 @@ def _histogram_field_private(values, bins, workspace, n, num_bins):
     histogram_i32_field_private_reduce(
         buffers["partial"], bins, num_bins, buffers["num_chunks"]
     )
-    sync()
 
 
 def _histogram_field_atomic(values, bins, workspace, method):
@@ -6671,7 +6801,6 @@ def _transform_kernel(src, dst, scale, bias):
             transform_affine_i32_field(src, dst, scale, bias, n)
         else:
             transform_affine_f32_field(src, dst, scale, bias, n)
-    sync()
 
 
 def experimental_transform(
@@ -6691,6 +6820,10 @@ def experimental_transform(
     loop. Field/SNode fallback stays in Forge kernels to preserve layout and
     offset semantics and remains 1D-only.
     """
+
+    if workspace is not None and isinstance(workspace, TransformWorkspace):
+        if workspace._try_hot_transform_replay(src, dst, method, scale, bias):
+            return workspace
 
     if _is_matrix_field(src) or _is_matrix_field(dst):
         _check_matching_matrix_fields("experimental_transform()", src, dst)
@@ -6863,13 +6996,15 @@ def _check_indexed_copy_request(src, indices, dst, method, workspace, op_name):
     src_is_member = _is_struct_scalar_member_view(src)
     dst_is_member = _is_struct_scalar_member_view(dst)
     src_view = _primitive_view(src)
+    indices_view = _primitive_view(indices)
     dst_view = _primitive_view(dst)
     dense_field_mode = (
         src_view is not None
+        and indices_view is not None
         and dst_view is not None
         and src_view.is_dense_field
+        and (isinstance(indices, Ndarray) or indices_view.is_dense_field)
         and dst_view.is_dense_field
-        and isinstance(indices, Ndarray)
     )
     if dense_field_mode:
         if src.dtype not in _INDEXED_COPY_VALUE_DTYPES:
@@ -6928,19 +7063,30 @@ def _indexed_copy_item_count(src, indices, dst, scatter):
 
 
 def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, scatter):
-    if not isinstance(indices, Ndarray):
-        return False
     src_view = _primitive_view(src)
+    indices_view = _primitive_view(indices)
     dst_view = _primitive_view(dst)
     if not (
         src_view is not None
+        and indices_view is not None
         and dst_view is not None
         and src_view.is_dense_field
         and dst_view.is_dense_field
     ):
         return False
+    indices_is_ndarray = isinstance(indices, Ndarray)
+    indices_is_dense_field = _is_contiguous_dense_field_view(indices_view)
+    if not indices_is_ndarray and not indices_is_dense_field:
+        return False
+    if indices_view.dtype != i32:
+        return False
     value_type = _INDEXED_COPY_VALUE_TYPE.get(src_view.dtype)
     if value_type is None:
+        return False
+    if indices_is_dense_field and not (
+        _is_contiguous_dense_field_view(src_view)
+        and _is_contiguous_dense_field_view(dst_view)
+    ):
         return False
     arch = current_cfg().arch
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -6955,11 +7101,18 @@ def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, s
             and prog.cuda_device_indexed_copy_payload_available(item_bytes)
         ):
             return False
-        method_name = (
-            "cuda_device_scatter_dense_field"
-            if scatter
-            else "cuda_device_gather_dense_field"
-        )
+        if indices_is_dense_field:
+            method_name = (
+                "cuda_device_scatter_dense_field_indices_field"
+                if scatter
+                else "cuda_device_gather_dense_field_indices_field"
+            )
+        else:
+            method_name = (
+                "cuda_device_scatter_dense_field"
+                if scatter
+                else "cuda_device_gather_dense_field"
+            )
     elif arch == vulkan and method in ("auto", "vulkan_native"):
         backend = "vulkan_native"
         if not (
@@ -6967,9 +7120,16 @@ def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, s
             and prog.vulkan_indexed_copy_available()
         ):
             return False
-        method_name = (
-            "vulkan_scatter_dense_field" if scatter else "vulkan_gather_dense_field"
-        )
+        if indices_is_dense_field:
+            method_name = (
+                "vulkan_scatter_dense_field_indices_field"
+                if scatter
+                else "vulkan_gather_dense_field_indices_field"
+            )
+        else:
+            method_name = (
+                "vulkan_scatter_dense_field" if scatter else "vulkan_gather_dense_field"
+            )
     elif arch in (x64, arm64) and method in ("auto", "cpu_native"):
         backend = "cpu_native"
         if not (
@@ -6977,19 +7137,39 @@ def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, s
             and prog.cpu_indexed_copy_available()
         ):
             return False
-        method_name = "cpu_scatter_dense_field" if scatter else "cpu_gather_dense_field"
+        if indices_is_dense_field:
+            method_name = (
+                "cpu_scatter_dense_field_indices_field"
+                if scatter
+                else "cpu_gather_dense_field_indices_field"
+            )
+        else:
+            method_name = (
+                "cpu_scatter_dense_field" if scatter else "cpu_gather_dense_field"
+            )
     else:
         return False
     if not hasattr(prog, method_name):
         return False
-    call_args = (
-        src_view.snode,
-        indices.arr,
-        dst_view.snode,
-        value_type,
-        src_view.num_elements,
-        dst_view.num_elements,
-    )
+    if indices_is_dense_field:
+        call_args = (
+            src_view.snode,
+            indices_view.snode,
+            dst_view.snode,
+            value_type,
+            src_view.num_elements,
+            indices_view.num_elements,
+            dst_view.num_elements,
+        )
+    else:
+        call_args = (
+            src_view.snode,
+            indices.arr,
+            dst_view.snode,
+            value_type,
+            src_view.num_elements,
+            dst_view.num_elements,
+        )
     temp_bytes = getattr(prog, method_name)(*call_args)
     if workspace is not None:
         workspace._record_native_indexed_copy_plan(
@@ -7356,11 +7536,16 @@ def _indexed_copy_kernel(src, indices, dst, scatter):
                 gather_i32_field(src, indices, dst, n)
             else:
                 gather_f32_field(src, indices, dst, n)
-    sync()
 
 
 def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter):
     op_name = "experimental_scatter()" if scatter else "experimental_gather()"
+    if workspace is not None and isinstance(workspace, IndexedCopyWorkspace):
+        if workspace._try_hot_indexed_copy_replay(
+            src, indices, dst, method, scatter
+        ):
+            return workspace
+
     if _is_matrix_field(src) or _is_matrix_field(dst):
         _check_matching_matrix_fields(op_name, src, dst, require_same_shape=False)
         if not (_is_1d(src) and _is_1d(indices) and _is_1d(dst)):
@@ -7523,15 +7708,17 @@ def _check_scatter_add_request(src, indices, dst, method, workspace):
     if not (_is_1d(src) and _is_1d(indices) and _is_1d(dst)):
         raise ValueError(f"{op_name} expects 1D source, indices, and destination.")
     src_view = _primitive_view(src)
+    indices_view = _primitive_view(indices)
     dst_view = _primitive_view(dst)
     src_is_member = _is_struct_scalar_member_view(src)
     dst_is_member = _is_struct_scalar_member_view(dst)
     dense_field_native_mode = (
         src_view is not None
+        and indices_view is not None
         and dst_view is not None
         and src_view.is_dense_field
+        and (isinstance(indices, Ndarray) or indices_view.is_dense_field)
         and dst_view.is_dense_field
-        and isinstance(indices, Ndarray)
     )
     two_level_dense_dst_mode = (
         method in ("two_level", "cuda_two_level", "vulkan_two_level", "cpu_two_level")
@@ -7598,8 +7785,15 @@ def _try_cuda_device_scatter_add(src, indices, dst, workspace):
     if current_cfg().arch != cuda:
         return False
     src_view = _primitive_view(src)
+    indices_view = _primitive_view(indices)
     dst_view = _primitive_view(dst)
-    if src_view is None or dst_view is None or not isinstance(indices, Ndarray):
+    indices_is_ndarray = isinstance(indices, Ndarray)
+    indices_is_dense_field = _is_contiguous_dense_field_view(indices_view)
+    if src_view is None or dst_view is None:
+        return False
+    if not indices_is_ndarray and not indices_is_dense_field:
+        return False
+    if indices_view is None or indices_view.dtype != i32:
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -7616,19 +7810,41 @@ def _try_cuda_device_scatter_add(src, indices, dst, workspace):
     if src_view.is_dense_field or dst_view.is_dense_field:
         if not (src_view.is_dense_field and dst_view.is_dense_field):
             return False
-        method_name = "cuda_device_scatter_add_dense_field"
+        if indices_is_dense_field and not (
+            _is_contiguous_dense_field_view(src_view)
+            and _is_contiguous_dense_field_view(dst_view)
+        ):
+            return False
+        method_name = (
+            "cuda_device_scatter_add_dense_field_indices_field"
+            if indices_is_dense_field
+            else "cuda_device_scatter_add_dense_field"
+        )
         if not hasattr(prog, method_name):
             return False
-        call_args = (
-            src_view.snode,
-            indices.arr,
-            dst_view.snode,
-            value_type,
-            src_view.num_elements,
-            dst_view.num_elements,
-        )
+        if indices_is_dense_field:
+            call_args = (
+                src_view.snode,
+                indices_view.snode,
+                dst_view.snode,
+                value_type,
+                src_view.num_elements,
+                indices_view.num_elements,
+                dst_view.num_elements,
+            )
+        else:
+            call_args = (
+                src_view.snode,
+                indices.arr,
+                dst_view.snode,
+                value_type,
+                src_view.num_elements,
+                dst_view.num_elements,
+            )
         temp_bytes = getattr(prog, method_name)(*call_args)
     elif src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
+        if not indices_is_ndarray:
+            return False
         if not hasattr(prog, "cuda_device_scatter_add_strided_ndarray"):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
@@ -7646,6 +7862,8 @@ def _try_cuda_device_scatter_add(src, indices, dst, workspace):
         )
         temp_bytes = getattr(prog, method_name)(*call_args)
     elif src_view.is_plain_ndarray and dst_view.is_plain_ndarray:
+        if not indices_is_ndarray:
+            return False
         method_name = "cuda_device_scatter_add_ndarray"
         call_args = (src.arr, indices.arr, dst.arr, value_type)
         temp_bytes = getattr(prog, method_name)(*call_args)
@@ -7671,8 +7889,15 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
     if current_cfg().arch != vulkan:
         return False
     src_view = _primitive_view(src)
+    indices_view = _primitive_view(indices)
     dst_view = _primitive_view(dst)
-    if src_view is None or dst_view is None or not isinstance(indices, Ndarray):
+    indices_is_ndarray = isinstance(indices, Ndarray)
+    indices_is_dense_field = _is_contiguous_dense_field_view(indices_view)
+    if src_view is None or dst_view is None:
+        return False
+    if not indices_is_ndarray and not indices_is_dense_field:
+        return False
+    if indices_view is None or indices_view.dtype != i32:
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -7694,19 +7919,41 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
     if src_view.is_dense_field or dst_view.is_dense_field:
         if not (src_view.is_dense_field and dst_view.is_dense_field):
             return False
-        method_name = "vulkan_scatter_add_dense_field"
+        if indices_is_dense_field and not (
+            _is_contiguous_dense_field_view(src_view)
+            and _is_contiguous_dense_field_view(dst_view)
+        ):
+            return False
+        method_name = (
+            "vulkan_scatter_add_dense_field_indices_field"
+            if indices_is_dense_field
+            else "vulkan_scatter_add_dense_field"
+        )
         if not hasattr(prog, method_name):
             return False
-        call_args = (
-            src_view.snode,
-            indices.arr,
-            dst_view.snode,
-            value_type,
-            src_view.num_elements,
-            dst_view.num_elements,
-        )
+        if indices_is_dense_field:
+            call_args = (
+                src_view.snode,
+                indices_view.snode,
+                dst_view.snode,
+                value_type,
+                src_view.num_elements,
+                indices_view.num_elements,
+                dst_view.num_elements,
+            )
+        else:
+            call_args = (
+                src_view.snode,
+                indices.arr,
+                dst_view.snode,
+                value_type,
+                src_view.num_elements,
+                dst_view.num_elements,
+            )
         temp_bytes = getattr(prog, method_name)(*call_args)
     elif src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
+        if not indices_is_ndarray:
+            return False
         if not hasattr(prog, "vulkan_scatter_add_strided_ndarray"):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
@@ -7724,6 +7971,8 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
         )
         temp_bytes = getattr(prog, method_name)(*call_args)
     elif src_view.is_plain_ndarray and dst_view.is_plain_ndarray:
+        if not indices_is_ndarray:
+            return False
         method_name = "vulkan_scatter_add_ndarray"
         call_args = (src.arr, indices.arr, dst.arr, value_type)
         temp_bytes = getattr(prog, method_name)(*call_args)
@@ -7749,8 +7998,15 @@ def _try_cpu_scatter_add(src, indices, dst, workspace):
     if current_cfg().arch not in [x64, arm64]:
         return False
     src_view = _primitive_view(src)
+    indices_view = _primitive_view(indices)
     dst_view = _primitive_view(dst)
-    if src_view is None or dst_view is None or not isinstance(indices, Ndarray):
+    indices_is_ndarray = isinstance(indices, Ndarray)
+    indices_is_dense_field = _is_contiguous_dense_field_view(indices_view)
+    if src_view is None or dst_view is None:
+        return False
+    if not indices_is_ndarray and not indices_is_dense_field:
+        return False
+    if indices_view is None or indices_view.dtype != i32:
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -7767,19 +8023,36 @@ def _try_cpu_scatter_add(src, indices, dst, workspace):
     if src_view.is_dense_field or dst_view.is_dense_field:
         if not (src_view.is_dense_field and dst_view.is_dense_field):
             return False
-        method_name = "cpu_scatter_add_dense_field"
+        method_name = (
+            "cpu_scatter_add_dense_field_indices_field"
+            if indices_is_dense_field
+            else "cpu_scatter_add_dense_field"
+        )
         if not hasattr(prog, method_name):
             return False
-        call_args = (
-            src_view.snode,
-            indices.arr,
-            dst_view.snode,
-            value_type,
-            src_view.num_elements,
-            dst_view.num_elements,
-        )
+        if indices_is_dense_field:
+            call_args = (
+                src_view.snode,
+                indices_view.snode,
+                dst_view.snode,
+                value_type,
+                src_view.num_elements,
+                indices_view.num_elements,
+                dst_view.num_elements,
+            )
+        else:
+            call_args = (
+                src_view.snode,
+                indices.arr,
+                dst_view.snode,
+                value_type,
+                src_view.num_elements,
+                dst_view.num_elements,
+            )
         temp_bytes = getattr(prog, method_name)(*call_args)
     elif src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
+        if not indices_is_ndarray:
+            return False
         if not hasattr(prog, "cpu_scatter_add_strided_ndarray"):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
@@ -7797,6 +8070,8 @@ def _try_cpu_scatter_add(src, indices, dst, workspace):
         )
         temp_bytes = getattr(prog, method_name)(*call_args)
     elif src_view.is_plain_ndarray and dst_view.is_plain_ndarray:
+        if not indices_is_ndarray:
+            return False
         method_name = "cpu_scatter_add_ndarray"
         call_args = (src.arr, indices.arr, dst.arr, value_type)
         temp_bytes = getattr(prog, method_name)(*call_args)
@@ -8015,7 +8290,6 @@ def _scatter_add_kernel(src, indices, dst):
             scatter_add_i32_field(src, indices, dst, n)
         else:
             scatter_add_f32_field(src, indices, dst, n)
-    sync()
 
 
 def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None):
@@ -8024,6 +8298,10 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
     Invalid indices are ignored. Duplicate target indices are accumulated using
     backend atomics; floating-point accumulation order is backend-dependent.
     """
+
+    if workspace is not None and isinstance(workspace, ScatterAddWorkspace):
+        if workspace._try_hot_scatter_add_replay(src, indices, dst, method):
+            return workspace
 
     if _is_matrix_field(src) or _is_matrix_field(dst):
         _check_matching_matrix_fields(
@@ -8541,7 +8819,6 @@ def _bucket_builder_kernel(keys, values, offsets, output, workspace, num_bins):
             scanner.run(offsets)
         bucket_copy_offsets_to_cursor_field(offsets, cursor, num_bins)
         bucket_scatter_i32_field(keys, values, cursor, output, n, num_bins)
-    sync()
 
 
 def experimental_bucket_builder(
@@ -8603,6 +8880,10 @@ def experimental_bucket_builder(
         return workspace
 
     if workspace is not None and isinstance(workspace, BucketBuilderWorkspace):
+        if workspace._try_hot_bucket_builder_replay(
+            keys, values, offsets, output, method
+        ):
+            return workspace
         aggregation_backend = _aggregation_backend_for_method(
             method,
             cuda_native=("cuda_device",),
@@ -9303,7 +9584,6 @@ def _grouped_reduce_kernel(keys, values, output):
         grouped_reduce_sum_i32_ndarray(keys, values, output, n, num_groups)
     else:
         grouped_reduce_sum_i32_field(keys, values, output, n, num_groups)
-    sync()
 
 
 def experimental_grouped_reduce(
@@ -9397,6 +9677,10 @@ def experimental_grouped_reduce(
         return workspace
 
     if workspace is not None and isinstance(workspace, GroupedReduceWorkspace):
+        if workspace._try_hot_grouped_reduce_replay(
+            keys, values, output, method, op
+        ):
+            return workspace
         aggregation_backend = _aggregation_backend_for_method(
             method,
             cuda_native=("cuda_device",),
@@ -9566,6 +9850,7 @@ class PrefixSumExecutor:
         self.large_arr = None
         self._native_scan_plan = None
         self._native_scan_plans = {}
+        self._native_scan_plan_group = None
         self._native_scan_plan_groups = {}
 
     def _ensure_large_arr(self):
@@ -9590,34 +9875,14 @@ class PrefixSumExecutor:
 
     def _try_native_scan_plan(self, input_arr):
         backend = self._native_scan_backend_for_arch()
-        if backend is None:
-            return False
-        if _try_hot_native_plan(
+        return _try_native_plan_from_cache(
             self._native_scan_plan,
+            self._native_scan_plans,
             backend,
             (input_arr,),
             lambda plan, _temp_bytes: setattr(self, "_native_scan_plan", plan),
-            semantic_key=(self.sorting_length,),
-        ):
-            return True
-        plan = self._native_scan_plan
-        if plan is None or not plan.matches_request(
-            backend, (input_arr,), (self.sorting_length,)
-        ):
-            key = _native_plan_cache_key(backend, (input_arr,), (self.sorting_length,))
-            plan = self._native_scan_plans.get(key)
-        if plan is None:
-            return False
-        if not plan.matches_request(backend, (input_arr,), (self.sorting_length,)):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        if not plan.matches_program(prog):
-            return False
-        if plan.invoke(prog) is None:
-            return False
-        return True
+            (self.sorting_length,),
+        )
 
     def _try_native_scan_plan_group(self, input_arr):
         backend = self._native_scan_backend_for_arch()
@@ -9627,9 +9892,11 @@ class PrefixSumExecutor:
             (input_arr,),
             (self.sorting_length,),
             self._activate_native_scan_plan_group,
+            current_group=self._native_scan_plan_group,
         )
 
     def _activate_native_scan_plan_group(self, group, _temp_bytes):
+        self._native_scan_plan_group = group
         if group.plans:
             self._native_scan_plan = group.plans[-1]
 
@@ -9637,22 +9904,22 @@ class PrefixSumExecutor:
         self, backend, method_name, input_arr, view, call_args, prog
     ):
         value_type = self._scan_value_type(view.dtype)
-        plan = _NativePrimitivePlan(
-            backend=backend,
-            method_name=method_name,
-            objects=(input_arr,),
-            semantic_key=(self.sorting_length,),
-            call_args=call_args,
-            prog=prog,
-            value_type=value_type,
-            n=view.num_elements,
+        plan = _record_native_primitive_plan(
+            self._native_scan_plans,
+            backend,
+            method_name,
+            (input_arr,),
+            (self.sorting_length,),
+            call_args,
+            prog,
+            value_type,
+            view.num_elements,
         )
         self._native_scan_plan = plan
-        self._native_scan_plans[plan.cache_key()] = plan
 
     def _record_native_scan_plan_group(self, input_arr, plans):
         backend = self._native_scan_backend_for_arch()
-        _record_native_component_plan_group(
+        self._native_scan_plan_group = _record_native_component_plan_group(
             self._native_scan_plan_groups,
             backend,
             (input_arr,),

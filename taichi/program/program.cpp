@@ -2378,6 +2378,43 @@ std::size_t primitive_value_type_size(int value_type) {
   return 0;
 }
 
+#ifdef TI_WITH_CUDA
+bool cuda_driver_scatter_add_value_type(int value_type) {
+  return value_type == static_cast<int>(cuda::CudaScatterAddValueType::i32) ||
+         value_type == static_cast<int>(cuda::CudaScatterAddValueType::f32) ||
+         value_type == static_cast<int>(cuda::CudaScatterAddValueType::u32);
+}
+
+std::size_t cuda_scatter_add_contiguous(void *src,
+                                        void *indices,
+                                        void *dst,
+                                        std::size_t n,
+                                        std::size_t dst_n,
+                                        int value_type) {
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA scatter-add currently supports at most INT_MAX source "
+              "items.");
+  TI_ERROR_IF(dst_n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA scatter-add currently supports destination sizes up to "
+              "INT_MAX items.");
+  const auto typed_value_type =
+      static_cast<cuda::CudaScatterAddValueType>(value_type);
+  if (cuda_driver_scatter_add_value_type(value_type) &&
+      cuda::driver_scatter_add_available()) {
+    return cuda::driver_scatter_add(src, indices, dst, static_cast<int>(n),
+                                    static_cast<int>(dst_n),
+                                    typed_value_type);
+  }
+  TI_ERROR_IF(!cuda::cub_scatter_add_available(),
+              "CUDA scatter-add for this dtype/layout requires "
+              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_scatter_add(src, indices, dst, static_cast<int>(n),
+                               static_cast<int>(dst_n), typed_value_type,
+                               stream);
+}
+#endif
+
 template <typename T>
 std::size_t cpu_compact_dense_field_typed(const uint8_t *values_ptr,
                                           std::size_t values_stride,
@@ -2490,6 +2527,53 @@ void check_indexed_copy_dense_field_request(Program *program,
   const std::size_t dst_stride = program->get_dense_field_stride(dst, item_bytes);
   TI_ERROR_IF(src_stride < item_bytes || dst_stride < item_bytes,
               "{} dense field indexed-copy received an invalid field stride.",
+              backend);
+  TI_ERROR_IF(src_stride % sizeof(uint32_t) != 0 ||
+                  dst_stride % sizeof(uint32_t) != 0,
+              "{} dense field indexed-copy stride must be uint32-word aligned.",
+              backend);
+}
+
+void check_indexed_copy_dense_field_indices_field_request(Program *program,
+                                                          const char *backend,
+                                                          SNode *src,
+                                                          SNode *indices,
+                                                          SNode *dst,
+                                                          int value_type,
+                                                          std::size_t src_n,
+                                                          std::size_t indices_n,
+                                                          std::size_t dst_n,
+                                                          bool scatter) {
+  TI_ERROR_IF(!program || !src || !indices || !dst,
+              "{} dense field indexed-copy received a null argument.",
+              backend);
+  const std::size_t item_bytes = primitive_value_type_size(value_type);
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(uint32_t) != 0,
+              "{} dense field indexed-copy item size must be a positive "
+              "uint32-word multiple.",
+              backend);
+  if (scatter) {
+    TI_ERROR_IF(src_n != indices_n,
+                "{} dense field scatter expects source and indices sizes to "
+                "match.",
+                backend);
+  } else {
+    TI_ERROR_IF(indices_n != dst_n,
+                "{} dense field gather expects indices and destination sizes "
+                "to match.",
+                backend);
+  }
+  const std::size_t src_stride = program->get_dense_field_stride(src, item_bytes);
+  const std::size_t index_stride =
+      program->get_dense_field_stride(indices, sizeof(int32_t));
+  const std::size_t dst_stride = program->get_dense_field_stride(dst, item_bytes);
+  TI_ERROR_IF(src_stride < item_bytes || dst_stride < item_bytes ||
+                  index_stride < sizeof(int32_t),
+              "{} dense field indexed-copy received an invalid field stride.",
+              backend);
+  TI_ERROR_IF(index_stride != sizeof(int32_t),
+              "{} dense field indexed-copy currently requires contiguous i32 "
+              "indices when indices are stored in a field.",
               backend);
   TI_ERROR_IF(src_stride % sizeof(uint32_t) != 0 ||
                   dst_stride % sizeof(uint32_t) != 0,
@@ -4542,6 +4626,83 @@ std::size_t Program::cuda_device_gather_dense_field(SNode *src,
 #endif
 }
 
+std::size_t Program::cuda_device_gather_dense_field_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA device dense field gather is only available on CUDA.");
+  check_indexed_copy_dense_field_indices_field_request(
+      this, "CUDA", src, indices, dst, value_type, src_n, indices_n, dst_n,
+      false);
+  const std::size_t n = indices_n;
+  if (n == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device dense field gather currently supports at most "
+              "INT_MAX items.");
+  TI_ERROR_IF(src_n >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device dense field gather supports source sizes up to "
+              "INT_MAX items.");
+  const std::size_t item_bytes = primitive_value_type_size(value_type);
+  const std::size_t src_stride = get_dense_field_stride(src, item_bytes);
+  const std::size_t dst_stride = get_dense_field_stride(dst, item_bytes);
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *src_ptr =
+      raw_ptr(get_dense_field_device_ptr(src), "CUDA dense field gather");
+  void *indices_ptr =
+      raw_ptr(get_dense_field_device_ptr(indices), "CUDA dense field gather");
+  void *dst_ptr =
+      raw_ptr(get_dense_field_device_ptr(dst), "CUDA dense field gather");
+  const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                           item_words),
+              "CUDA device dense field gather word count exceeds INT_MAX.");
+  if (src_stride == item_bytes && dst_stride == item_bytes) {
+    if (cuda::cub_indexed_copy_available()) {
+      void *stream = CUDAContext::get_instance().get_stream();
+      return cuda::cub_indexed_copy(src_ptr, indices_ptr, dst_ptr,
+                                    static_cast<int>(n),
+                                    static_cast<int>(src_n), item_words,
+                                    cuda::CudaIndexedCopyOp::gather, stream);
+    }
+    TI_ERROR_IF(item_words != 1,
+                "CUDA device dense field gather for multi-word values "
+                "requires TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA "
+                "runtime.");
+    return cuda::driver_indexed_copy(src_ptr, indices_ptr, dst_ptr,
+                                     static_cast<int>(n),
+                                     static_cast<int>(src_n),
+                                     cuda::CudaIndexedCopyOp::gather);
+  }
+  TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
+              "CUDA device strided dense field gather requires "
+              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_indexed_copy_strided(
+      src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
+      static_cast<int>(src_n), item_words, 0, src_stride / sizeof(uint32_t), 0,
+      dst_stride / sizeof(uint32_t), cuda::CudaIndexedCopyOp::gather, stream);
+#else
+  TI_ERROR("CUDA device dense field gather requires TI_WITH_CUDA=ON.");
+#endif
+}
+
 std::size_t Program::cuda_device_scatter_ndarray(Ndarray *src,
                                                  Ndarray *indices,
                                                  Ndarray *dst) {
@@ -4719,10 +4880,88 @@ std::size_t Program::cuda_device_scatter_dense_field(SNode *src,
 #endif
 }
 
+std::size_t Program::cuda_device_scatter_dense_field_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA device dense field scatter is only available on CUDA.");
+  check_indexed_copy_dense_field_indices_field_request(
+      this, "CUDA", src, indices, dst, value_type, src_n, indices_n, dst_n,
+      true);
+  const std::size_t n = indices_n;
+  if (n == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device dense field scatter currently supports at most "
+              "INT_MAX items.");
+  TI_ERROR_IF(dst_n >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device dense field scatter supports destination sizes up "
+              "to INT_MAX items.");
+  const std::size_t item_bytes = primitive_value_type_size(value_type);
+  const std::size_t src_stride = get_dense_field_stride(src, item_bytes);
+  const std::size_t dst_stride = get_dense_field_stride(dst, item_bytes);
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *src_ptr =
+      raw_ptr(get_dense_field_device_ptr(src), "CUDA dense field scatter");
+  void *indices_ptr =
+      raw_ptr(get_dense_field_device_ptr(indices), "CUDA dense field scatter");
+  void *dst_ptr =
+      raw_ptr(get_dense_field_device_ptr(dst), "CUDA dense field scatter");
+  const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                           item_words),
+              "CUDA device dense field scatter word count exceeds INT_MAX.");
+  if (src_stride == item_bytes && dst_stride == item_bytes) {
+    if (cuda::cub_indexed_copy_available()) {
+      void *stream = CUDAContext::get_instance().get_stream();
+      return cuda::cub_indexed_copy(src_ptr, indices_ptr, dst_ptr,
+                                    static_cast<int>(n),
+                                    static_cast<int>(dst_n), item_words,
+                                    cuda::CudaIndexedCopyOp::scatter, stream);
+    }
+    TI_ERROR_IF(item_words != 1,
+                "CUDA device dense field scatter for multi-word values "
+                "requires TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA "
+                "runtime.");
+    return cuda::driver_indexed_copy(src_ptr, indices_ptr, dst_ptr,
+                                     static_cast<int>(n),
+                                     static_cast<int>(dst_n),
+                                     cuda::CudaIndexedCopyOp::scatter);
+  }
+  TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
+              "CUDA device strided dense field scatter requires "
+              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_indexed_copy_strided(
+      src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
+      static_cast<int>(dst_n), item_words, 0, src_stride / sizeof(uint32_t), 0,
+      dst_stride / sizeof(uint32_t), cuda::CudaIndexedCopyOp::scatter, stream);
+#else
+  TI_ERROR("CUDA device dense field scatter requires TI_WITH_CUDA=ON.");
+#endif
+}
+
 bool Program::cuda_device_scatter_add_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&
-         cuda::cub_scatter_add_available();
+         (cuda::driver_scatter_add_available() ||
+          cuda::cub_scatter_add_available());
 #else
   return false;
 #endif
@@ -4764,11 +5003,9 @@ std::size_t Program::cuda_device_scatter_add_ndarray(Ndarray *src,
   auto *indices_ptr =
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
   auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
-  void *stream = CUDAContext::get_instance().get_stream();
-  return cuda::cub_scatter_add(
-      src_ptr, indices_ptr, dst_ptr, static_cast<int>(indices->get_nelement()),
-      static_cast<int>(dst->get_nelement()),
-      static_cast<cuda::CudaScatterAddValueType>(value_type), stream);
+  return cuda_scatter_add_contiguous(src_ptr, indices_ptr, dst_ptr,
+                                     indices->get_nelement(),
+                                     dst->get_nelement(), value_type);
 #else
   TI_ERROR(
       "CUDA scatter-add requires building Taichi with TI_WITH_CUDA=ON and "
@@ -4892,13 +5129,78 @@ std::size_t Program::cuda_device_scatter_add_dense_field(SNode *src,
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
   void *dst_ptr = raw_ptr(get_dense_field_device_ptr(dst),
                           "CUDA toolkit dense field scatter-add");
-  void *stream = CUDAContext::get_instance().get_stream();
   if (src_stride == value_size && dst_stride == value_size) {
-    return cuda::cub_scatter_add(
-        src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
-        static_cast<int>(dst_n),
-        static_cast<cuda::CudaScatterAddValueType>(value_type), stream);
+    return cuda_scatter_add_contiguous(src_ptr, indices_ptr, dst_ptr, n, dst_n,
+                                       value_type);
   }
+  TI_ERROR_IF(!cuda::cub_scatter_add_available(),
+              "CUDA strided dense field scatter-add requires "
+              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_scatter_add_strided_io(
+      src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
+      static_cast<int>(dst_n),
+      static_cast<cuda::CudaScatterAddValueType>(value_type), 0, src_stride, 0,
+      dst_stride, stream);
+#else
+  TI_ERROR(
+      "CUDA dense field scatter-add requires building Taichi with "
+      "TI_WITH_CUDA=ON and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_scatter_add_dense_field_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA toolkit dense field scatter-add is only available on "
+              "CUDA.");
+  check_indexed_copy_dense_field_indices_field_request(
+      this, "CUDA toolkit", src, indices, dst, value_type, src_n, indices_n,
+      dst_n, true);
+  const std::size_t n = indices_n;
+  if (n == 0 || dst_n == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA toolkit dense field scatter-add currently supports at "
+              "most INT_MAX source items.");
+  TI_ERROR_IF(dst_n >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA toolkit dense field scatter-add currently supports "
+              "destination sizes up to INT_MAX items.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  const std::size_t src_stride = get_dense_field_stride(src, value_size);
+  const std::size_t dst_stride = get_dense_field_stride(dst, value_size);
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *src_ptr = raw_ptr(get_dense_field_device_ptr(src),
+                          "CUDA toolkit dense field scatter-add");
+  void *indices_ptr = raw_ptr(get_dense_field_device_ptr(indices),
+                              "CUDA toolkit dense field scatter-add");
+  void *dst_ptr = raw_ptr(get_dense_field_device_ptr(dst),
+                          "CUDA toolkit dense field scatter-add");
+  if (src_stride == value_size && dst_stride == value_size) {
+    return cuda_scatter_add_contiguous(src_ptr, indices_ptr, dst_ptr, n, dst_n,
+                                       value_type);
+  }
+  TI_ERROR_IF(!cuda::cub_scatter_add_available(),
+              "CUDA strided dense field scatter-add requires "
+              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
   return cuda::cub_scatter_add_strided_io(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
       static_cast<int>(dst_n),
@@ -8016,6 +8318,81 @@ std::size_t Program::cpu_gather_dense_field(SNode *src,
   return 0;
 }
 
+std::size_t Program::cpu_gather_dense_field_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field gather is only available on CPU "
+              "backends.");
+  check_indexed_copy_dense_field_indices_field_request(
+      this, "CPU native", src, indices, dst, value_type, src_n, indices_n,
+      dst_n, false);
+  const std::size_t n = indices_n;
+  if (n == 0) {
+    return 0;
+  }
+  const std::size_t item_bytes = primitive_value_type_size(value_type);
+  std::size_t src_stride = 0;
+  std::size_t indices_stride = 0;
+  std::size_t dst_stride = 0;
+  const auto *src_ptr = map_cpu_dense_field(
+      this, src, value_type, src_n, "CPU native dense field gather",
+      &src_stride);
+  const auto *indices_ptr_bytes = map_cpu_dense_field(
+      this, indices, 0, indices_n, "CPU native dense field gather",
+      &indices_stride);
+  auto *dst_ptr = map_cpu_dense_field(
+      this, dst, value_type, dst_n, "CPU native dense field gather",
+      &dst_stride);
+  TI_ERROR_IF(indices_stride != sizeof(int32_t),
+              "CPU native dense field gather requires contiguous i32 field "
+              "indices.");
+  const auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(indices_ptr_bytes);
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native dense field gather received a null data pointer.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  if (n >= 65536 && target_threads > 1) {
+    CpuStridedIndexedCopyTaskContext ctx;
+    ctx.src = src_ptr;
+    ctx.indices = indices_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.index_bound = src_n;
+    ctx.item_bytes = item_bytes;
+    ctx.src_offset = 0;
+    ctx.src_stride = src_stride;
+    ctx.dst_offset = 0;
+    ctx.dst_stride = dst_stride;
+    ctx.scatter = false;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_indexed_copy_task);
+    return 0;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto index = static_cast<std::size_t>(indices_ptr[i]);
+    if (index < src_n) {
+      std::memcpy(dst_ptr + i * dst_stride, src_ptr + index * src_stride,
+                  item_bytes);
+    } else {
+      std::memset(dst_ptr + i * dst_stride, 0, item_bytes);
+    }
+  }
+  return 0;
+}
+
 std::size_t Program::cpu_scatter_ndarray(Ndarray *src,
                                          Ndarray *indices,
                                          Ndarray *dst) {
@@ -8163,6 +8540,79 @@ std::size_t Program::cpu_scatter_dense_field(SNode *src,
       &dst_stride);
   auto *indices_ptr =
       reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native dense field scatter received a null data pointer.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  if (n >= 65536 && target_threads > 1) {
+    CpuStridedIndexedCopyTaskContext ctx;
+    ctx.src = src_ptr;
+    ctx.indices = indices_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.index_bound = dst_n;
+    ctx.item_bytes = item_bytes;
+    ctx.src_offset = 0;
+    ctx.src_stride = src_stride;
+    ctx.dst_offset = 0;
+    ctx.dst_stride = dst_stride;
+    ctx.scatter = true;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_indexed_copy_task);
+    return 0;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto index = static_cast<std::size_t>(indices_ptr[i]);
+    if (index < dst_n) {
+      std::memcpy(dst_ptr + index * dst_stride, src_ptr + i * src_stride,
+                  item_bytes);
+    }
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_scatter_dense_field_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field scatter is only available on CPU "
+              "backends.");
+  check_indexed_copy_dense_field_indices_field_request(
+      this, "CPU native", src, indices, dst, value_type, src_n, indices_n,
+      dst_n, true);
+  const std::size_t n = indices_n;
+  if (n == 0) {
+    return 0;
+  }
+  const std::size_t item_bytes = primitive_value_type_size(value_type);
+  std::size_t src_stride = 0;
+  std::size_t indices_stride = 0;
+  std::size_t dst_stride = 0;
+  const auto *src_ptr = map_cpu_dense_field(
+      this, src, value_type, src_n, "CPU native dense field scatter",
+      &src_stride);
+  const auto *indices_ptr_bytes = map_cpu_dense_field(
+      this, indices, 0, indices_n, "CPU native dense field scatter",
+      &indices_stride);
+  auto *dst_ptr = map_cpu_dense_field(
+      this, dst, value_type, dst_n, "CPU native dense field scatter",
+      &dst_stride);
+  TI_ERROR_IF(indices_stride != sizeof(int32_t),
+              "CPU native dense field scatter requires contiguous i32 field "
+              "indices.");
+  const auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(indices_ptr_bytes);
   TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
               "CPU native dense field scatter received a null data pointer.");
   const int max_threads =
@@ -8434,6 +8884,80 @@ std::size_t Program::cpu_scatter_add_dense_field(SNode *src,
       &dst_stride);
   auto *indices_ptr =
       reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native dense field scatter-add received a null data "
+              "pointer.");
+  const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
+  const int target_threads =
+      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  switch (value_type) {
+    case 0:
+      return cpu_scatter_add_strided_io_typed<int32_t>(
+          src_ptr, 0, src_stride, indices_ptr, dst_ptr, 0, dst_stride, n,
+          dst_n, max_threads, target_threads);
+    case 1:
+      return cpu_scatter_add_strided_io_typed<float>(
+          src_ptr, 0, src_stride, indices_ptr, dst_ptr, 0, dst_stride, n,
+          dst_n, max_threads, target_threads);
+    case 2:
+      return cpu_scatter_add_strided_io_typed<uint32_t>(
+          src_ptr, 0, src_stride, indices_ptr, dst_ptr, 0, dst_stride, n,
+          dst_n, max_threads, target_threads);
+    case 3:
+      return cpu_scatter_add_strided_io_typed<uint64_t>(
+          src_ptr, 0, src_stride, indices_ptr, dst_ptr, 0, dst_stride, n,
+          dst_n, max_threads, target_threads);
+    case 4:
+      return cpu_scatter_add_strided_io_typed<int64_t>(
+          src_ptr, 0, src_stride, indices_ptr, dst_ptr, 0, dst_stride, n,
+          dst_n, max_threads, target_threads);
+    case 5:
+      return cpu_scatter_add_strided_io_typed<double>(
+          src_ptr, 0, src_stride, indices_ptr, dst_ptr, 0, dst_stride, n,
+          dst_n, max_threads, target_threads);
+    default:
+      TI_ERROR(
+          "CPU native dense field scatter-add received an unsupported value "
+          "type.");
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_scatter_add_dense_field_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field scatter-add is only available on CPU "
+              "backends.");
+  check_indexed_copy_dense_field_indices_field_request(
+      this, "CPU native", src, indices, dst, value_type, src_n, indices_n,
+      dst_n, true);
+  const std::size_t n = indices_n;
+  if (n == 0 || dst_n == 0) {
+    return 0;
+  }
+  std::size_t src_stride = 0;
+  std::size_t indices_stride = 0;
+  std::size_t dst_stride = 0;
+  const auto *src_ptr = map_cpu_dense_field(
+      this, src, value_type, src_n, "CPU native dense field scatter-add",
+      &src_stride);
+  const auto *indices_ptr_bytes = map_cpu_dense_field(
+      this, indices, 0, indices_n, "CPU native dense field scatter-add",
+      &indices_stride);
+  auto *dst_ptr = map_cpu_dense_field(
+      this, dst, value_type, dst_n, "CPU native dense field scatter-add",
+      &dst_stride);
+  TI_ERROR_IF(indices_stride != sizeof(int32_t),
+              "CPU native dense field scatter-add requires contiguous i32 "
+              "field indices.");
+  const auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(indices_ptr_bytes);
   TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
               "CPU native dense field scatter-add received a null data "
               "pointer.");

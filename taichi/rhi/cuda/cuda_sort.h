@@ -199,6 +199,15 @@ std::size_t driver_indexed_copy(void *src,
                                 int index_bound,
                                 CudaIndexedCopyOp op);
 
+bool driver_scatter_add_available();
+
+std::size_t driver_scatter_add(void *src,
+                               void *indices,
+                               void *dst,
+                               int num_items,
+                               int index_bound,
+                               CudaScatterAddValueType value_type);
+
 bool cub_indexed_copy_available();
 
 std::size_t cub_indexed_copy(void *src,

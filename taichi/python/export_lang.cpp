@@ -741,6 +741,11 @@ void export_lang(py::module &m) {
            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
            py::arg("src_n"), py::arg("dst_n"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_gather_dense_field_indices_field",
+           &Program::cuda_device_gather_dense_field_indices_field,
+           py::arg("src"), py::arg("indices"), py::arg("dst"),
+           py::arg("value_type"), py::arg("src_n"), py::arg("indices_n"),
+           py::arg("dst_n"), py::call_guard<py::gil_scoped_release>())
        .def("cuda_device_scatter_ndarray",
             &Program::cuda_device_scatter_ndarray, py::arg("src"),
             py::arg("indices"), py::arg("dst"),
@@ -756,6 +761,11 @@ void export_lang(py::module &m) {
             py::arg("indices"), py::arg("dst"), py::arg("value_type"),
             py::arg("src_n"), py::arg("dst_n"),
             py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_scatter_dense_field_indices_field",
+            &Program::cuda_device_scatter_dense_field_indices_field,
+            py::arg("src"), py::arg("indices"), py::arg("dst"),
+            py::arg("value_type"), py::arg("src_n"), py::arg("indices_n"),
+            py::arg("dst_n"), py::call_guard<py::gil_scoped_release>())
        .def("cuda_device_scatter_add_available",
             &Program::cuda_device_scatter_add_available)
        .def("cuda_device_scatter_add_ndarray",
@@ -778,6 +788,11 @@ void export_lang(py::module &m) {
             py::arg("indices"), py::arg("dst"), py::arg("value_type"),
             py::arg("src_n"), py::arg("dst_n"),
             py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_scatter_add_dense_field_indices_field",
+            &Program::cuda_device_scatter_add_dense_field_indices_field,
+            py::arg("src"), py::arg("indices"), py::arg("dst"),
+            py::arg("value_type"), py::arg("src_n"), py::arg("indices_n"),
+            py::arg("dst_n"), py::call_guard<py::gil_scoped_release>())
        .def("cuda_device_bucket_builder_available",
             &Program::cuda_device_bucket_builder_available)
        .def("cuda_device_bucket_builder_i32_ndarray",
@@ -1122,6 +1137,11 @@ void export_lang(py::module &m) {
            py::arg("src"), py::arg("indices"), py::arg("dst"),
            py::arg("value_type"), py::arg("src_n"), py::arg("dst_n"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cpu_gather_dense_field_indices_field",
+           &Program::cpu_gather_dense_field_indices_field, py::arg("src"),
+           py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+           py::arg("src_n"), py::arg("indices_n"), py::arg("dst_n"),
+           py::call_guard<py::gil_scoped_release>())
        .def("cpu_scatter_ndarray", &Program::cpu_scatter_ndarray,
             py::arg("src"), py::arg("indices"), py::arg("dst"),
             py::call_guard<py::gil_scoped_release>())
@@ -1134,6 +1154,11 @@ void export_lang(py::module &m) {
        .def("cpu_scatter_dense_field", &Program::cpu_scatter_dense_field,
             py::arg("src"), py::arg("indices"), py::arg("dst"),
             py::arg("value_type"), py::arg("src_n"), py::arg("dst_n"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cpu_scatter_dense_field_indices_field",
+            &Program::cpu_scatter_dense_field_indices_field, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("src_n"), py::arg("indices_n"), py::arg("dst_n"),
             py::call_guard<py::gil_scoped_release>())
        .def("cpu_scatter_add_available", &Program::cpu_scatter_add_available)
        .def("cpu_scatter_add_workspace_bytes",
@@ -1157,6 +1182,11 @@ void export_lang(py::module &m) {
             py::arg("indices"), py::arg("dst"), py::arg("value_type"),
             py::arg("src_n"), py::arg("dst_n"),
             py::call_guard<py::gil_scoped_release>())
+       .def("cpu_scatter_add_dense_field_indices_field",
+            &Program::cpu_scatter_add_dense_field_indices_field,
+            py::arg("src"), py::arg("indices"), py::arg("dst"),
+            py::arg("value_type"), py::arg("src_n"), py::arg("indices_n"),
+            py::arg("dst_n"), py::call_guard<py::gil_scoped_release>())
        .def("cpu_bucket_builder_available",
             &Program::cpu_bucket_builder_available)
        .def("cpu_bucket_builder_workspace_bytes",
@@ -1388,6 +1418,11 @@ void export_lang(py::module &m) {
            py::arg("src"), py::arg("indices"), py::arg("dst"),
            py::arg("value_type"), py::arg("src_n"), py::arg("dst_n"),
            py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_gather_dense_field_indices_field",
+           &Program::vulkan_gather_dense_field_indices_field, py::arg("src"),
+           py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+           py::arg("src_n"), py::arg("indices_n"), py::arg("dst_n"),
+           py::call_guard<py::gil_scoped_release>())
        .def("vulkan_scatter_ndarray", &Program::vulkan_scatter_ndarray,
             py::arg("src"), py::arg("indices"), py::arg("dst"),
             py::call_guard<py::gil_scoped_release>())
@@ -1401,6 +1436,11 @@ void export_lang(py::module &m) {
             &Program::vulkan_scatter_dense_field, py::arg("src"),
             py::arg("indices"), py::arg("dst"), py::arg("value_type"),
             py::arg("src_n"), py::arg("dst_n"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_scatter_dense_field_indices_field",
+            &Program::vulkan_scatter_dense_field_indices_field, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("src_n"), py::arg("indices_n"), py::arg("dst_n"),
             py::call_guard<py::gil_scoped_release>())
        .def("vulkan_scatter_add_available",
             &Program::vulkan_scatter_add_available)
@@ -1432,6 +1472,11 @@ void export_lang(py::module &m) {
             py::arg("indices"), py::arg("dst"), py::arg("value_type"),
             py::arg("src_n"), py::arg("dst_n"),
             py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_scatter_add_dense_field_indices_field",
+            &Program::vulkan_scatter_add_dense_field_indices_field,
+            py::arg("src"), py::arg("indices"), py::arg("dst"),
+            py::arg("value_type"), py::arg("src_n"), py::arg("indices_n"),
+            py::arg("dst_n"), py::call_guard<py::gil_scoped_release>())
        .def("vulkan_bucket_builder_available",
             &Program::vulkan_bucket_builder_available)
        .def("vulkan_bucket_builder_clear_workspace",

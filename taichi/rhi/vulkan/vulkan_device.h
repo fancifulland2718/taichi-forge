@@ -7,6 +7,7 @@
 
 #include "vk_mem_alloc.h"
 
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <list>
@@ -740,6 +741,10 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
 
   size_t get_vkbuffer_size(const DeviceAllocation &alloc) const;
 
+  uint64_t allocation_generation(DeviceAllocation handle) const {
+    return get_alloc_internal(handle).generation;
+  }
+
   std::tuple<vkapi::IVkImage, vkapi::IVkImageView, VkFormat> get_vk_image(
       const DeviceAllocation &alloc) const;
 
@@ -887,6 +892,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
     void *mapped{nullptr};
     // Is the allocation external (imported) or not (VMA)
     bool external{false};
+    uint64_t generation{0};
   };
 
   // Images / Image views
@@ -902,6 +908,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   // **pointer stability** is important.
   rhi_impl::SyncedPtrStableObjectList<AllocationInternal> allocations_;
   rhi_impl::SyncedPtrStableObjectList<ImageAllocInternal> image_allocations_;
+  std::atomic<uint64_t> allocation_generation_counter_{1};
 
   // Renderpass
   unordered_map<VulkanRenderPassDesc,

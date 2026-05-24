@@ -1759,6 +1759,8 @@ void VulkanDevice::set_default_pipeline_cache(PipelineCache *cache) noexcept {
 RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
                                         DeviceAllocation *out_devalloc) {
   AllocationInternal &alloc = allocations_.acquire();
+  alloc.generation =
+      allocation_generation_counter_.fetch_add(1, std::memory_order_relaxed);
 
   RHI_ASSERT(params.size > 0);
 
@@ -2384,6 +2386,8 @@ DeviceAllocation VulkanDevice::import_vkbuffer(vkapi::IVkBuffer buffer,
                                                VkDeviceMemory memory,
                                                VkDeviceSize offset) {
   AllocationInternal &alloc_int = allocations_.acquire();
+  alloc_int.generation =
+      allocation_generation_counter_.fetch_add(1, std::memory_order_relaxed);
 
   alloc_int.external = true;
   alloc_int.buffer = buffer;

@@ -4,6 +4,7 @@
 #include <cuda/iterator>
 #include <cuda_runtime.h>
 
+#include <cstdlib>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -15,6 +16,16 @@
 
 namespace taichi::lang::cuda {
 namespace {
+
+bool cuda_env_flag_enabled(const char *name, bool default_value) {
+  const char *value = std::getenv(name);
+  if (!value) {
+    return default_value;
+  }
+  std::string text(value);
+  return text != "0" && text != "false" && text != "False" &&
+         text != "off" && text != "OFF";
+}
 
 struct CubSortCache {
   void *keys_out{nullptr};
@@ -717,8 +728,11 @@ __global__ void scatter_add_by_i32_strided_io_kernel(
 
 bool use_block_private_scatter_add(int num_items,
                                    int index_bound,
-                                   std::size_t value_size) {
-  if (num_items < 2048 || index_bound <= 0 || index_bound > 1024) {
+                                   std::size_t value_size,
+                                   bool enabled_by_default) {
+  if (!cuda_env_flag_enabled("TI_CUDA_SCATTER_ADD_BLOCK_PRIVATE",
+                             enabled_by_default) ||
+      num_items < 2048 || index_bound <= 0 || index_bound > 1024) {
     return false;
   }
   constexpr int kBlockDim = 256;
@@ -729,6 +743,109 @@ bool use_block_private_scatter_add(int num_items,
       static_cast<std::size_t>(grid_dim) * static_cast<std::size_t>(index_bound);
   return shared_bytes <= kMaxSharedBytes &&
          flush_ops <= static_cast<std::size_t>(num_items) * 2;
+}
+
+bool use_warp_aggregated_scatter_add(int num_items,
+                                     int index_bound,
+                                     bool enabled_by_default) {
+  if (!cuda_env_flag_enabled("TI_CUDA_SCATTER_ADD_WARP_AGGREGATE",
+                             enabled_by_default) ||
+      num_items < 2048 || index_bound <= 0 || index_bound > 1024) {
+    return false;
+  }
+  const int expected_items_per_index = num_items / index_bound;
+  return expected_items_per_index >= 4;
+}
+
+template <typename T>
+__device__ T scatter_value_add(T lhs, T rhs) {
+  return lhs + rhs;
+}
+
+template <>
+__device__ int32_t scatter_value_add<int32_t>(int32_t lhs, int32_t rhs) {
+  return static_cast<int32_t>(static_cast<uint32_t>(lhs) +
+                              static_cast<uint32_t>(rhs));
+}
+
+template <>
+__device__ int64_t scatter_value_add<int64_t>(int64_t lhs, int64_t rhs) {
+  return static_cast<int64_t>(static_cast<uint64_t>(lhs) +
+                              static_cast<uint64_t>(rhs));
+}
+
+template <typename T>
+__device__ void scatter_atomic_add_warp_aggregated(uint8_t *dst,
+                                                   int index,
+                                                   T value,
+                                                   unsigned valid_mask,
+                                                   std::size_t dst_offset,
+                                                   std::size_t dst_stride) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+  const unsigned peers = __match_any_sync(valid_mask, index);
+  const int leader = __ffs(static_cast<int>(peers)) - 1;
+  const int lane = threadIdx.x & 31;
+  T aggregate{};
+  unsigned remaining = peers;
+  while (remaining) {
+    const int source_lane = __ffs(static_cast<int>(remaining)) - 1;
+    const T peer_value = __shfl_sync(peers, value, source_lane);
+    if (lane == leader) {
+      aggregate = scatter_value_add(aggregate, peer_value);
+    }
+    remaining &= remaining - 1;
+  }
+  if (lane == leader) {
+    scatter_atomic_add(strided_value_ptr<T>(dst, index, dst_offset,
+                                            dst_stride),
+                       aggregate);
+  }
+#else
+  scatter_atomic_add(strided_value_ptr<T>(dst, index, dst_offset, dst_stride),
+                     value);
+#endif
+}
+
+template <typename T>
+__global__ void scatter_add_by_i32_warp_aggregated_strided_io_kernel(
+    const uint8_t *src,
+    const int32_t *indices,
+    uint8_t *dst,
+    int num_items,
+    int index_bound,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+  int index = -1;
+  T value{};
+  bool valid = false;
+  if (i < num_items) {
+    index = indices[i];
+    valid = index >= 0 && index < index_bound;
+    if (valid) {
+      value = load_strided_value<T>(src, i, src_offset, src_stride);
+    }
+  }
+  const unsigned active = __activemask();
+  const unsigned valid_mask = __ballot_sync(active, valid);
+  if (valid) {
+    scatter_atomic_add_warp_aggregated(dst, index, value, valid_mask,
+                                       dst_offset, dst_stride);
+  }
+#else
+  if (i < num_items) {
+    const int index = indices[i];
+    if (index >= 0 && index < index_bound) {
+      scatter_atomic_add(strided_value_ptr<T>(dst, index, dst_offset,
+                                              dst_stride),
+                         load_strided_value<T>(src, i, src_offset,
+                                               src_stride));
+    }
+  }
+#endif
 }
 
 template <typename T>
@@ -2938,13 +3055,20 @@ std::size_t cub_scatter_add_impl(void *src,
   switch (value_type) {
     case CudaScatterAddValueType::i32:
       if (use_block_private_scatter_add(num_items, index_bound,
-                                        sizeof(int32_t))) {
+                                        sizeof(int32_t), true)) {
         scatter_add_by_i32_block_private_strided_io_kernel<int32_t>
             <<<grid_dim, kBlockDim,
                static_cast<std::size_t>(index_bound) * sizeof(int32_t),
                stream>>>(static_cast<const uint8_t *>(src), indices_in,
                           static_cast<uint8_t *>(dst), num_items, index_bound,
                           0, sizeof(int32_t), 0, sizeof(int32_t));
+      } else if (use_warp_aggregated_scatter_add(num_items, index_bound,
+                                                 true)) {
+        scatter_add_by_i32_warp_aggregated_strided_io_kernel<int32_t>
+            <<<grid_dim, kBlockDim, 0, stream>>>(
+                static_cast<const uint8_t *>(src), indices_in,
+                static_cast<uint8_t *>(dst), num_items, index_bound, 0,
+                sizeof(int32_t), 0, sizeof(int32_t));
       } else {
         scatter_add_by_i32_kernel<int32_t><<<grid_dim, kBlockDim, 0, stream>>>(
             static_cast<const int32_t *>(src), indices_in,
@@ -2953,13 +3077,20 @@ std::size_t cub_scatter_add_impl(void *src,
       break;
     case CudaScatterAddValueType::f32:
       if (use_block_private_scatter_add(num_items, index_bound,
-                                        sizeof(float))) {
+                                        sizeof(float), true)) {
         scatter_add_by_i32_block_private_strided_io_kernel<float>
             <<<grid_dim, kBlockDim,
                static_cast<std::size_t>(index_bound) * sizeof(float),
                stream>>>(static_cast<const uint8_t *>(src), indices_in,
                           static_cast<uint8_t *>(dst), num_items, index_bound,
                           0, sizeof(float), 0, sizeof(float));
+      } else if (use_warp_aggregated_scatter_add(num_items, index_bound,
+                                                 true)) {
+        scatter_add_by_i32_warp_aggregated_strided_io_kernel<float>
+            <<<grid_dim, kBlockDim, 0, stream>>>(
+                static_cast<const uint8_t *>(src), indices_in,
+                static_cast<uint8_t *>(dst), num_items, index_bound, 0,
+                sizeof(float), 0, sizeof(float));
       } else {
         scatter_add_by_i32_kernel<float><<<grid_dim, kBlockDim, 0, stream>>>(
             static_cast<const float *>(src), indices_in,
@@ -2968,13 +3099,20 @@ std::size_t cub_scatter_add_impl(void *src,
       break;
     case CudaScatterAddValueType::u32:
       if (use_block_private_scatter_add(num_items, index_bound,
-                                        sizeof(uint32_t))) {
+                                        sizeof(uint32_t), true)) {
         scatter_add_by_i32_block_private_strided_io_kernel<uint32_t>
             <<<grid_dim, kBlockDim,
                static_cast<std::size_t>(index_bound) * sizeof(uint32_t),
                stream>>>(static_cast<const uint8_t *>(src), indices_in,
                           static_cast<uint8_t *>(dst), num_items, index_bound,
                           0, sizeof(uint32_t), 0, sizeof(uint32_t));
+      } else if (use_warp_aggregated_scatter_add(num_items, index_bound,
+                                                 true)) {
+        scatter_add_by_i32_warp_aggregated_strided_io_kernel<uint32_t>
+            <<<grid_dim, kBlockDim, 0, stream>>>(
+                static_cast<const uint8_t *>(src), indices_in,
+                static_cast<uint8_t *>(dst), num_items, index_bound, 0,
+                sizeof(uint32_t), 0, sizeof(uint32_t));
       } else {
         scatter_add_by_i32_kernel<uint32_t><<<grid_dim, kBlockDim, 0, stream>>>(
             static_cast<const uint32_t *>(src), indices_in,
@@ -2983,13 +3121,20 @@ std::size_t cub_scatter_add_impl(void *src,
       break;
     case CudaScatterAddValueType::u64:
       if (use_block_private_scatter_add(num_items, index_bound,
-                                        sizeof(uint64_t))) {
+                                        sizeof(uint64_t), true)) {
         scatter_add_by_i32_block_private_strided_io_kernel<uint64_t>
             <<<grid_dim, kBlockDim,
                static_cast<std::size_t>(index_bound) * sizeof(uint64_t),
                stream>>>(static_cast<const uint8_t *>(src), indices_in,
                           static_cast<uint8_t *>(dst), num_items, index_bound,
                           0, sizeof(uint64_t), 0, sizeof(uint64_t));
+      } else if (use_warp_aggregated_scatter_add(num_items, index_bound,
+                                                 true)) {
+        scatter_add_by_i32_warp_aggregated_strided_io_kernel<uint64_t>
+            <<<grid_dim, kBlockDim, 0, stream>>>(
+                static_cast<const uint8_t *>(src), indices_in,
+                static_cast<uint8_t *>(dst), num_items, index_bound, 0,
+                sizeof(uint64_t), 0, sizeof(uint64_t));
       } else {
         scatter_add_by_i32_kernel<uint64_t><<<grid_dim, kBlockDim, 0, stream>>>(
             static_cast<const uint64_t *>(src), indices_in,
@@ -2998,13 +3143,20 @@ std::size_t cub_scatter_add_impl(void *src,
       break;
     case CudaScatterAddValueType::i64:
       if (use_block_private_scatter_add(num_items, index_bound,
-                                        sizeof(int64_t))) {
+                                        sizeof(int64_t), true)) {
         scatter_add_by_i32_block_private_strided_io_kernel<int64_t>
             <<<grid_dim, kBlockDim,
                static_cast<std::size_t>(index_bound) * sizeof(int64_t),
                stream>>>(static_cast<const uint8_t *>(src), indices_in,
                           static_cast<uint8_t *>(dst), num_items, index_bound,
                           0, sizeof(int64_t), 0, sizeof(int64_t));
+      } else if (use_warp_aggregated_scatter_add(num_items, index_bound,
+                                                 true)) {
+        scatter_add_by_i32_warp_aggregated_strided_io_kernel<int64_t>
+            <<<grid_dim, kBlockDim, 0, stream>>>(
+                static_cast<const uint8_t *>(src), indices_in,
+                static_cast<uint8_t *>(dst), num_items, index_bound, 0,
+                sizeof(int64_t), 0, sizeof(int64_t));
       } else {
         scatter_add_by_i32_kernel<int64_t><<<grid_dim, kBlockDim, 0, stream>>>(
             static_cast<const int64_t *>(src), indices_in,
@@ -3013,13 +3165,20 @@ std::size_t cub_scatter_add_impl(void *src,
       break;
     case CudaScatterAddValueType::f64:
       if (use_block_private_scatter_add(num_items, index_bound,
-                                        sizeof(double))) {
+                                        sizeof(double), true)) {
         scatter_add_by_i32_block_private_strided_io_kernel<double>
             <<<grid_dim, kBlockDim,
                static_cast<std::size_t>(index_bound) * sizeof(double),
                stream>>>(static_cast<const uint8_t *>(src), indices_in,
                           static_cast<uint8_t *>(dst), num_items, index_bound,
                           0, sizeof(double), 0, sizeof(double));
+      } else if (use_warp_aggregated_scatter_add(num_items, index_bound,
+                                                 true)) {
+        scatter_add_by_i32_warp_aggregated_strided_io_kernel<double>
+            <<<grid_dim, kBlockDim, 0, stream>>>(
+                static_cast<const uint8_t *>(src), indices_in,
+                static_cast<uint8_t *>(dst), num_items, index_bound, 0,
+                sizeof(double), 0, sizeof(double));
       } else {
         scatter_add_by_i32_kernel<double><<<grid_dim, kBlockDim, 0, stream>>>(
             static_cast<const double *>(src), indices_in,
@@ -3044,10 +3203,18 @@ void scatter_add_strided_launch(const uint8_t *src,
                                 cudaStream_t stream) {
   constexpr int kBlockDim = 256;
   const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
-  if (use_block_private_scatter_add(num_items, index_bound, sizeof(T))) {
+  if (use_block_private_scatter_add(num_items, index_bound, sizeof(T),
+                                    true)) {
     scatter_add_by_i32_block_private_strided_io_kernel<T>
         <<<grid_dim, kBlockDim,
            static_cast<std::size_t>(index_bound) * sizeof(T), stream>>>(
+            src, indices, reinterpret_cast<uint8_t *>(dst), num_items,
+            index_bound, offset, stride, 0, sizeof(T));
+    return;
+  }
+  if (use_warp_aggregated_scatter_add(num_items, index_bound, true)) {
+    scatter_add_by_i32_warp_aggregated_strided_io_kernel<T>
+        <<<grid_dim, kBlockDim, 0, stream>>>(
             src, indices, reinterpret_cast<uint8_t *>(dst), num_items,
             index_bound, offset, stride, 0, sizeof(T));
     return;
@@ -3127,10 +3294,18 @@ void scatter_add_strided_io_launch(const uint8_t *src,
                                    cudaStream_t stream) {
   constexpr int kBlockDim = 256;
   const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
-  if (use_block_private_scatter_add(num_items, index_bound, sizeof(T))) {
+  if (use_block_private_scatter_add(num_items, index_bound, sizeof(T),
+                                    true)) {
     scatter_add_by_i32_block_private_strided_io_kernel<T>
         <<<grid_dim, kBlockDim,
            static_cast<std::size_t>(index_bound) * sizeof(T), stream>>>(
+            src, indices, dst, num_items, index_bound, src_offset, src_stride,
+            dst_offset, dst_stride);
+    return;
+  }
+  if (use_warp_aggregated_scatter_add(num_items, index_bound, true)) {
+    scatter_add_by_i32_warp_aggregated_strided_io_kernel<T>
+        <<<grid_dim, kBlockDim, 0, stream>>>(
             src, indices, dst, num_items, index_bound, src_offset, src_stride,
             dst_offset, dst_stride);
     return;
@@ -4293,10 +4468,17 @@ void grouped_reduce_atomic_sum_launch(const int32_t *keys_in,
   if (num_items > 0) {
     constexpr int kBlockDim = 256;
     const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
-    if (use_block_private_scatter_add(num_items, num_groups, sizeof(T))) {
+    if (use_block_private_scatter_add(num_items, num_groups, sizeof(T),
+                                      true)) {
       scatter_add_by_i32_block_private_strided_io_kernel<T>
           <<<grid_dim, kBlockDim,
              static_cast<std::size_t>(num_groups) * sizeof(T), stream>>>(
+              reinterpret_cast<const uint8_t *>(values_in), keys_in,
+              reinterpret_cast<uint8_t *>(output_out), num_items, num_groups,
+              0, sizeof(T), 0, sizeof(T));
+    } else if (use_warp_aggregated_scatter_add(num_items, num_groups, true)) {
+      scatter_add_by_i32_warp_aggregated_strided_io_kernel<T>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
               reinterpret_cast<const uint8_t *>(values_in), keys_in,
               reinterpret_cast<uint8_t *>(output_out), num_items, num_groups,
               0, sizeof(T), 0, sizeof(T));
@@ -4323,10 +4505,16 @@ void grouped_reduce_atomic_sum_strided_launch(const int32_t *keys_in,
   if (num_items > 0) {
     constexpr int kBlockDim = 256;
     const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
-    if (use_block_private_scatter_add(num_items, num_groups, sizeof(T))) {
+    if (use_block_private_scatter_add(num_items, num_groups, sizeof(T),
+                                      true)) {
       scatter_add_by_i32_block_private_strided_io_kernel<T>
           <<<grid_dim, kBlockDim,
              static_cast<std::size_t>(num_groups) * sizeof(T), stream>>>(
+              values_in, keys_in, reinterpret_cast<uint8_t *>(output_out),
+              num_items, num_groups, offset, stride, 0, sizeof(T));
+    } else if (use_warp_aggregated_scatter_add(num_items, num_groups, true)) {
+      scatter_add_by_i32_warp_aggregated_strided_io_kernel<T>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
               values_in, keys_in, reinterpret_cast<uint8_t *>(output_out),
               num_items, num_groups, offset, stride, 0, sizeof(T));
     } else {
@@ -4367,11 +4555,32 @@ void grouped_reduce_atomic_sum_strided_io_launch(const uint8_t *keys_in,
   }
   if (num_items > 0) {
     const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
-    grouped_reduce_atomic_sum_strided_io_kernel<T>
-        <<<grid_dim, kBlockDim, 0, stream>>>(
-            keys_in, values_in, output_out, num_items, num_groups,
-            keys_offset, keys_stride, values_offset, values_stride,
-            output_offset, output_stride);
+    const bool contiguous_keys = keys_stride == sizeof(int32_t) &&
+                                 keys_offset % sizeof(int32_t) == 0;
+    const int32_t *contiguous_keys_in =
+        contiguous_keys ? reinterpret_cast<const int32_t *>(keys_in + keys_offset)
+                        : nullptr;
+    if (contiguous_keys &&
+        use_block_private_scatter_add(num_items, num_groups, sizeof(T),
+                                      true)) {
+      scatter_add_by_i32_block_private_strided_io_kernel<T>
+          <<<grid_dim, kBlockDim,
+             static_cast<std::size_t>(num_groups) * sizeof(T), stream>>>(
+              values_in, contiguous_keys_in, output_out, num_items, num_groups,
+              values_offset, values_stride, output_offset, output_stride);
+    } else if (contiguous_keys &&
+               use_warp_aggregated_scatter_add(num_items, num_groups, true)) {
+      scatter_add_by_i32_warp_aggregated_strided_io_kernel<T>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
+              values_in, contiguous_keys_in, output_out, num_items, num_groups,
+              values_offset, values_stride, output_offset, output_stride);
+    } else {
+      grouped_reduce_atomic_sum_strided_io_kernel<T>
+          <<<grid_dim, kBlockDim, 0, stream>>>(
+              keys_in, values_in, output_out, num_items, num_groups,
+              keys_offset, keys_stride, values_offset, values_stride,
+              output_offset, output_stride);
+    }
     TI_CUDA_SORT_CHECK(cudaGetLastError());
   }
 }

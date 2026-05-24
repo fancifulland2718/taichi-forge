@@ -165,10 +165,9 @@ Stable follow-up:
   `experimental_compact()`, and `experimental_bucket_builder()`. These calls
   run component-wise over tensor lanes while preserving coupled order where the
   primitive reorders data.
-- `experimental_histogram()` does not accept StructNdarray member views in the
-  current native primitive path. Whole vector/matrix histogram semantics remain
-  undefined, and scalar member histogram needs a native strided histogram
-  backend before it can be enabled without reintroducing helper IR.
+- `experimental_histogram()` accepts scalar member values/bins through cached
+  native staging around the existing histogram backends. Whole vector/matrix
+  histogram semantics remain undefined and stay unsupported.
 
 ## Container and primitive support matrix
 
@@ -189,7 +188,7 @@ support, so later field/SNode changes do not accidentally broaden
 | `experimental_transform()` | yes | no | yes | yes, packed when possible | selected fallback/native helpers | layout owner only |
 | `experimental_scatter_add()` | yes | no | yes | yes, component-wise atomics where supported | selected fallback/native helpers | layout owner only |
 | `experimental_grouped_reduce()` | yes | no | yes | yes, component-wise where backend atomics/reduction support exists | selected fallback/native helpers | layout owner only |
-| `experimental_histogram()` | yes for integer values | no | deferred; copy to numeric ndarray for now | no, vector histogram semantics remain closed | selected fallback/native helpers | layout owner only |
+| `experimental_histogram()` | yes for integer values | no | yes, via cached native staging | no, vector histogram semantics remain closed | selected fallback/native helpers | layout owner only |
 
 Notes:
 
@@ -204,9 +203,9 @@ Notes:
   layer. It is not a general numeric array primitive input.
 - Index/order primitives remain 1D unless a future public API explicitly
   defines flattening or axis semantics.
-- StructNdarray member histogram remains deferred: scalar member views need a
-  native strided histogram backend, and whole vector/matrix histogram remains
-  unsupported until a concrete vector histogram contract is needed.
+- StructNdarray scalar member histogram is supported through cached native
+  staging. Whole vector/matrix histogram remains unsupported until a concrete
+  vector histogram contract is needed.
 
 The Vulkan invalid-memory-access issue was fixed by carrying member byte
 offsets through external tensor lowering and by making external pointer alias
@@ -374,9 +373,9 @@ Implementation:
   public API and scalar-lane fallback for unusual layouts, but removes
   per-lane dispatch for common `vector2/3/4` and dense matrix members without
   adding full-size workspace.
-- `experimental_histogram()` remains closed for StructNdarray member views.
-  Scalar member histogram is deferred until a native strided histogram backend
-  exists; whole vector/matrix histogram semantics are not yet defined.
+- `experimental_histogram()` supports scalar member values/bins through cached
+  native staging. Whole vector/matrix histogram semantics are not yet defined
+  and remain closed.
 
 Validation:
 

@@ -410,6 +410,14 @@ class TI_DLL_EXPORT Program {
                                              std::size_t src_n,
                                              std::size_t dst_n);
 
+  std::size_t cuda_device_gather_dense_field_indices_field(SNode *src,
+                                                           SNode *indices,
+                                                           SNode *dst,
+                                                           int value_type,
+                                                           std::size_t src_n,
+                                                           std::size_t indices_n,
+                                                           std::size_t dst_n);
+
   std::size_t cuda_device_scatter_ndarray(Ndarray *src,
                                           Ndarray *indices,
                                           Ndarray *dst);
@@ -429,6 +437,14 @@ class TI_DLL_EXPORT Program {
                                               int value_type,
                                               std::size_t src_n,
                                               std::size_t dst_n);
+
+  std::size_t cuda_device_scatter_dense_field_indices_field(SNode *src,
+                                                            SNode *indices,
+                                                            SNode *dst,
+                                                            int value_type,
+                                                            std::size_t src_n,
+                                                            std::size_t indices_n,
+                                                            std::size_t dst_n);
 
   bool cuda_device_scatter_add_available() const;
 
@@ -460,6 +476,15 @@ class TI_DLL_EXPORT Program {
                                                   int value_type,
                                                   std::size_t src_n,
                                                   std::size_t dst_n);
+
+  std::size_t cuda_device_scatter_add_dense_field_indices_field(
+      SNode *src,
+      SNode *indices,
+      SNode *dst,
+      int value_type,
+      std::size_t src_n,
+      std::size_t indices_n,
+      std::size_t dst_n);
 
   bool cuda_device_bucket_builder_available() const;
 
@@ -875,6 +900,14 @@ class TI_DLL_EXPORT Program {
                                      std::size_t src_n,
                                      std::size_t dst_n);
 
+  std::size_t cpu_gather_dense_field_indices_field(SNode *src,
+                                                   SNode *indices,
+                                                   SNode *dst,
+                                                   int value_type,
+                                                   std::size_t src_n,
+                                                   std::size_t indices_n,
+                                                   std::size_t dst_n);
+
   std::size_t cpu_scatter_ndarray(Ndarray *src, Ndarray *indices, Ndarray *dst);
 
   std::size_t cpu_scatter_strided_ndarray(Ndarray *src,
@@ -892,6 +925,14 @@ class TI_DLL_EXPORT Program {
                                       int value_type,
                                       std::size_t src_n,
                                       std::size_t dst_n);
+
+  std::size_t cpu_scatter_dense_field_indices_field(SNode *src,
+                                                    SNode *indices,
+                                                    SNode *dst,
+                                                    int value_type,
+                                                    std::size_t src_n,
+                                                    std::size_t indices_n,
+                                                    std::size_t dst_n);
 
   std::size_t cpu_indexed_copy_workspace_bytes() const;
 
@@ -924,6 +965,15 @@ class TI_DLL_EXPORT Program {
                                           int value_type,
                                           std::size_t src_n,
                                           std::size_t dst_n);
+
+  std::size_t cpu_scatter_add_dense_field_indices_field(
+      SNode *src,
+      SNode *indices,
+      SNode *dst,
+      int value_type,
+      std::size_t src_n,
+      std::size_t indices_n,
+      std::size_t dst_n);
 
   std::size_t cpu_scatter_add_workspace_bytes() const;
 
@@ -1220,6 +1270,14 @@ class TI_DLL_EXPORT Program {
                                         std::size_t src_n,
                                         std::size_t dst_n);
 
+  std::size_t vulkan_gather_dense_field_indices_field(SNode *src,
+                                                      SNode *indices,
+                                                      SNode *dst,
+                                                      int value_type,
+                                                      std::size_t src_n,
+                                                      std::size_t indices_n,
+                                                      std::size_t dst_n);
+
   std::size_t vulkan_scatter_ndarray(Ndarray *src,
                                      Ndarray *indices,
                                      Ndarray *dst);
@@ -1239,6 +1297,14 @@ class TI_DLL_EXPORT Program {
                                          int value_type,
                                          std::size_t src_n,
                                          std::size_t dst_n);
+
+  std::size_t vulkan_scatter_dense_field_indices_field(SNode *src,
+                                                       SNode *indices,
+                                                       SNode *dst,
+                                                       int value_type,
+                                                       std::size_t src_n,
+                                                       std::size_t indices_n,
+                                                       std::size_t dst_n);
 
   void vulkan_indexed_copy_clear_workspace();
 
@@ -1275,6 +1341,15 @@ class TI_DLL_EXPORT Program {
                                              int value_type,
                                              std::size_t src_n,
                                              std::size_t dst_n);
+
+  std::size_t vulkan_scatter_add_dense_field_indices_field(
+      SNode *src,
+      SNode *indices,
+      SNode *dst,
+      int value_type,
+      std::size_t src_n,
+      std::size_t indices_n,
+      std::size_t dst_n);
 
   void vulkan_scatter_add_clear_workspace();
 

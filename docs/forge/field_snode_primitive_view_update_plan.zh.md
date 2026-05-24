@@ -550,9 +550,10 @@ S0 进入 S1 的条件：
   - `experimental_histogram()` 对 contiguous 1D dense field values/bins 新增
     CPU/CUDA/Vulkan native entrypoint；Vulkan histogram cache 改为按实际路径
     懒创建 pipeline，避免 i32/u32/i64 direct/private/shared pipeline 一次性全部创建。
-  - StructNdarray scalar member histogram 暂时显式拒绝并提示需要 native
+  - S5 当时 StructNdarray scalar member histogram 暂时显式拒绝并提示需要 native
     strided histogram；这比旧路径静默回到 field/helper 更清晰，也避免重新引入
-    多 helper IR 膨胀。
+    多 helper IR 膨胀。该限制已在后续 S10 通过 cached native staging 放宽为
+    支持 scalar member values/bins，whole vector/matrix histogram 仍关闭。
   - ROI 复核后，将 StructNdarray scalar member native strided histogram
     暂缓到后续有明确 workload 需求时再做。该项需要 CPU/CUDA/Vulkan 都新增
     `base + offset + stride` histogram entrypoint、workspace 统计和 capability
@@ -1448,6 +1449,98 @@ bucket-builder 和后续 solver primitive。
     加 field/matrix host I/O 定向测试通过：139 passed。仅有既有 pytest cache
     权限警告和 `C:/taichi_cache/ticache.lock` 警告。
 
+- S10 hot-path 调用链收缩（2026-05-24）：
+  - CUDA `scatter_add` / grouped-reduce atomic sum 增加 same-key warp
+    aggregation kernel，并沿用 block-private shared aggregation。参考
+    NVIDIA warp-aggregated atomics 思路，但本机默认 dense-field
+    `scatter_add` 分布下 direct atomic 反而更慢，因此默认仍保留当前
+    block-private/warp 路由；新增
+    `TI_CUDA_SCATTER_ADD_BLOCK_PRIVATE` 和
+    `TI_CUDA_SCATTER_ADD_WARP_AGGREGATE` 作为诊断/回归开关，不作为
+    benchmark 默认策略。
+  - Vulkan native path 新增 `VulkanRwBufferReplay<N>`，按
+    `(DeviceAllocation, generation, offset, bytes)` 缓存稳定 storage
+    buffer binding；`generation` 在 buffer allocation/import 时递增，避免
+    allocation 槽位复用后跳过 rebind 造成 stale descriptor/IMA。设备切换、
+    workspace 释放或 cache clear 时重置。当前覆盖
+    transform、add-merge、gather/scatter、scatter_add 和 grouped-reduce
+    atomic/strided binding。该层只减少重复 descriptor 更新，不改变 shader
+    ABI、push constant/params buffer 布局或 SNode allocation 语义。
+  - dense-field 对比数据写入
+    `benchmarks/results/replay_warp_chain_20260524/summary.csv`，覆盖
+    CUDA/Vulkan × transform/gather/scatter/scatter_add/grouped_reduce ×
+    4096/65536，并与本机 vanilla 1.8.0 对比。代表性结论：
+    CUDA first-call 约 9.7-11.5 ms，vanilla 约 51-92 ms；Vulkan first-call
+    约 10.6-19.2 ms，vanilla 约 15.7-28.9 ms。
+  - warm runtime 仍保留的最差项：CUDA `scatter_add` 4096/65536 为
+    0.126/0.126 ms，vanilla 为 0.0437/0.0428 ms；Vulkan
+    `scatter_add` 4096/65536 为 0.285/0.301 ms，vanilla 为
+    0.120/0.131 ms；Vulkan `grouped_reduce` 65536 为 0.193 ms，vanilla
+    为 0.133 ms。该差距主要来自 atomic primitive 的 device kernel/command
+    固定成本和当前 shader 算法，而非 Python helper IR。
+  - dense-field workspace peak：CUDA 相关项为 0B；Vulkan transform 为
+    8B 固定 params，其余本轮项为 0B。GPU dedicated memory 仍是进程级
+    runtime/device 初始化采样，CUDA 约 792MB、Vulkan 约 89MB，不表示新增
+    full-size staging。
+  - StructNdarray 当前值写入
+    `benchmarks/results/replay_warp_chain_20260524/struct_cuda.json` 和
+    `struct_vulkan.json`。最慢 warm 项仍是 sort/compact/bucket/scan：
+    CUDA 65536 sort median 0.731 ms、workspace 1.32MB；Vulkan 4096 sort
+    first-call 578.7 ms、median 0.814 ms，65536 sort workspace 1.34MB。
+    这些应作为后续是否做算法级深优化的候选，而不是继续扩大通用 replay
+    抽象。
+  - 验证：`cmd /c _run_build.cmd` 通过；`tests/python/test_scatter_add.py`
+    18 passed；`tests/python/test_grouped_reduce.py` 17 passed；
+    `tests/python/test_vulkan_native_lifecycle.py` 1 passed。仅有既有
+    pytest cache 权限警告。
+
+- Native vs helper kernel 对照与下一步 ROI 判断（2026-05-24）：
+  - 对照 artifact：
+    `benchmarks/results/native_vs_helper_field_kernel_20260524/summary.csv`
+    和上一轮 native 数据
+    `benchmarks/results/replay_warp_chain_20260524/summary.csv`。
+  - 公平对照窗口的边界：当前 dense-field native indexed-copy /
+    scatter_add 要求 `indices` 为 `ti.ndarray`，而 legacy field helper
+    kernel 要求 field/template indices。因此 gather/scatter/scatter_add
+    的“native vs helper”不是同一数据形态；这正是物理引擎 field/SNode
+    场景的关键缺口。`field -> ndarray` 迁移能进入 native fast path，但
+    引入应用层数据搬运和生命周期管理；继续依赖 field helper 又会回到
+    JIT helper kernel 和 IR/cache 压力。
+  - 已能同形态对照的 transform/grouped-reduce 说明 native 路线本身是
+    正确方向：CUDA native warm 为 helper 的 6%-30%，first-call 约为
+    helper 的 9%-11%；Vulkan native warm 为 helper 的 25%-42%，first-call
+    约为 helper 的 44%-56%。helper fallback 在 `_algorithms.py` 多个
+    入口末尾显式 `sync()`，会把本应由外层 `ti.sync()` 或应用调度控制的
+    同步提前到每个 primitive 内部；这解释了 Forge helper 明显慢于
+    vanilla 单 kernel 的一部分固定开销。
+  - 与 vanilla 1.8.0 helper/JIT kernel 对比后，当前 runtime 弱项不再是
+    “是否 native”，而是 native 的调用链和算法选择是否足够接近 JIT kernel：
+    CUDA transform/gather/scatter native 已经优于 vanilla warm；CUDA
+    `scatter_add` 仍为 vanilla 的约 2-3 倍；Vulkan 多个单 kernel 等价
+    primitive 仍比 vanilla warm 慢约 1.1-2.4 倍。
+  - ROI 排序：
+    1. **补齐 dense-field indices native support**：为 indexed-copy、
+       scatter_add、bucket/grouped 类输入增加 dense field index/key
+       descriptor native overload，避免物理引擎为了进入 native path 复制
+       field indices 到 ndarray。这是覆盖面和架构收益最高的更新。
+    2. **移除 helper fallback 的过度同步**：保留外层/用户同步语义，helper
+       kernel 内部只 enqueue，不主动 `sync()`。这不会让 native 更快，但能
+       降低 fallback 固定成本，并更准确地对齐 Taichi JIT kernel 语义。
+       需要逐个验证返回后立即读回、workspace 复用和异常路径。
+    3. **Vulkan native enqueue 链条继续靠近 GfxRuntime JIT kernel**：
+       descriptor replay 已完成第一步；下一步重点是减少每次 lambda 中的
+       params buffer fill、barrier 和 resource-set touch，使单 shader
+       primitive 接近 vanilla kernel launch host path。暂不优先做具体
+       scatter_add shader 深挖。
+    4. **CUDA scatter_add 增加 low-contention single-kernel route**：
+       当前 block-private/warp 聚合适合热点冲突，但默认分布下 vanilla
+       单 atomic JIT kernel 更快。下一步应增加一个“有效 index、低冲突、
+       单 launch”的 native route，并保留 two-level/block-private 给高冲突
+       场景，而不是继续堆叠默认聚合逻辑。
+  - 结论：追齐两端 runtime 的主线不是回退 helper kernel，而是让 native
+    覆盖 field-index/key 形态，并把 native launch path 压缩到和 JIT
+    kernel 一样短；helper 只作为兼容 fallback，且应去掉内部过度同步。
+
 - Two-level aggregation primitive（2026-05-24 第一阶段）：
   - 边界：先在 DSL/internal plan 层统一 two-level 语义，不新增 C++ ABI、
     shader、runtime bitcode 或公开稳定 API。field/SNode sparse 结构继续跳过；
@@ -1677,6 +1770,162 @@ bucket-builder 和后续 solver primitive。
       Python 路径当前不存在，本轮使用实际验证环境
       `C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe`
       校验 staged wheel 内容可 `import taichi_forge` 并 `ti.init(arch=ti.cpu)`。
+    - 1/2/5 后续推进（2026-05-24）：
+      - 已将单 plan replay 逻辑抽成 `_try_native_plan_from_cache`、
+        `_record_native_primitive_plan` 和统一 cache lookup/store helper。
+        reduce、histogram、transform、indexed-copy、scatter-add/add-merge、
+        bucket-builder、grouped-reduce、scan 均复用同一条
+        exact-object hot plan -> stable object-key cache -> program-id check ->
+        native invoke 路径，避免每个 primitive 各维护一套重复逻辑。
+      - 已将 component plan group replay 抽成
+        `_try_native_plan_group_from_cache`，并为 reduce、transform、
+        indexed-copy、scatter-add、grouped-reduce、scan 增加当前 group
+        热缓存指针；同一 workspace/executor 上的 matrix field 或
+        StructNdarray tensor member 第二次调用可先走 exact-object group
+        replay，miss 后仍使用稳定 object-key cache。
+      - `SortWorkspace` / `CompactWorkspace` / `BucketBuilderWorkspace`
+        共享的 order/apply in-place group replay 也切到统一 group helper；
+        out-of-place apply 继续复用内部 `IndexedCopyWorkspace`，tensor member
+        in-place apply 继续复用内部 `IndexedCopyWorkspace` +
+        `TransformWorkspace`，未新增 helper kernel 或公开 API。
+      - 本轮没有推进 3/4（block-private/two-level 扩展和 Vulkan 4096-private
+        默认化），因为近期结果显示其 ROI 低于 plan replay 与 order/apply
+        完整化；相关后端代码保持既有策略。
+      - 正确性验证：
+        `py_compile` 通过；plan/cache/order-apply 定点测试 9 passed；
+        CPU 聚合子集 8 passed；CUDA 聚合子集 4 passed；Vulkan 聚合子集
+        4 passed。pytest 仅报告 `tests/.pytest_cache` 写入权限 warning。
+      - dense field 小矩阵基准写入
+        `benchmarks/results/primitive_plan_unified_20260524/summary.csv`。
+        4096/65536 两个规模下，Forge first-call 相比 vanilla 全部更快：
+        CPU 多数为 1.5%-4.2% 的 vanilla first-call，CUDA 为 1.7%-22.0%，
+        Vulkan 为 16.2%-87.1%。warm runtime 方面，CPU/CUDA 大多数算法
+        优于 vanilla；CPU 64K gather/scatter/compact 和 CUDA scatter_add
+        仍偏慢，Vulkan reduce/transform/gather/scatter_add/histogram/
+        grouped_reduce 仍主要受 backend command/resource 固定开销限制。
+        workspace peak 未出现新的大额分配：CPU native 多数为 0，
+        CUDA bucket/reduce 保持既有 runtime workspace，Vulkan transform
+        仍为 8B params buffer，compact/bucket 保持既有 order/scan workspace。
+      - StructNdarray/order-apply 4K 基准写入同一目录：
+        `struct_cpu_4096.json`、`struct_cuda_4096.json`、
+        `struct_vulkan_4096.json`。CPU/CUDA/Vulkan 所有条目 `ok=true`；
+        sort/compact/bucket tensor-member 路径继续复用共享 order/apply
+        workspace，workspace peak 保持 order pair + component apply 的预期范围。
+      - 已重新打包本地 wheel：
+        `dist/taichi_forge-0.4.0-cp310-cp310-win_amd64.whl`。wheel 解压到
+        `build_llvm20_test/wheel_smoke_primitive_plan_unified_20260524_c`
+        后在 Python 3.10.11 中完成 `import taichi_forge` 和
+        `ti.init(arch=ti.cpu)` 验证。
+
+### S10 暂缓项与架构审视（2026-05-24）
+
+当前决定暂缓继续推进运行时专项优化，先保留问题和后续判断依据，避免在缺少
+物理引擎 workload 的情况下为了 microbenchmark 继续扩大后端复杂度。
+
+暂缓项：
+
+1. **Vulkan command/resource replay**：预期对 warm runtime 固定开销有效，但会触达
+   descriptor lifetime、command buffer 复用、barrier 放置和 reset/IMA 安全。近期
+   Vulkan IMA 更容易暴露在 native 调用链，因此该项应在独立 lifecycle 压测和
+   资源所有权审计后再做，不在当前轮继续推进。
+2. **Vulkan reduce/histogram/grouped-reduce/scatter-add 深入 shader 调优**：
+   当前弱项主要是固定 submission/resource 成本，局部 shader 调优只能改善一部分
+   大规模吞吐，不能解决 4K/64K warm 调用底座。先等 command/resource replay 或
+   真实 workload 证明瓶颈后再选具体算法深挖。
+3. **CPU gather/scatter/compact 继续追齐 vanilla warm runtime**：当前 CPU first-call
+   和编译指标已优于 vanilla，warm 弱项集中在 indexed copy 和 compact 的小/中规模
+   循环、稳定写回与 Python public-entry 开销。可后续做更低层 C++ loop/threshold
+   调整，但不应再引入 Taichi helper kernel。
+4. **CUDA grouped-reduce 1M 和高碰撞 atomic 专项**：已有 block-private 分支，但默认
+   workload 不总是受益。后续若物理引擎确有高碰撞 group/reduce 热点，再按 key 分布
+   和 group 数量选择 warp/block aggregation 策略。
+5. **workspace/storage 压缩**：目前 runtime 优先级高于存储；bucket、histogram、
+   grouped-reduce 的 partial/order workspace 可以继续压缩或共享，但应在运行时主链路
+   稳定后处理，避免反复改 cache key 和 reset 语义。
+6. **SparseSNodeView / active-list native path**：本轮继续跳过 sparse 结构。dense
+   field 的 `base + offset + stride` 成功经验不能直接推广到 pointer/bitmasked/
+   dynamic/hash SNode；sparse 需要 active-list/listgen contract。
+
+当前架构判断：
+
+- **核心架构足够成立**：算法入口仍保持原 public API；内部已经收敛为
+  `_PrimitiveView` 证明存储语义，`_NativePrimitivePlan` /
+  `_NativePrimitivePlanGroup` 记录 native replay，`Program` 暴露 CPU/CUDA/Vulkan
+  entrypoint。该路径不会生成新的 Taichi IR，也不会进入 offline cache key。
+- **Python routing 文件仍偏大**：`_algorithms.py` 同时承担 public validation、
+  PrimitiveView、workspace、plan replay、fallback 和 backend dispatch。虽然 hot plan
+  replay 已经压短 warm 路径，但从维护性看，后续可以把 capability/method routing
+  和 workspace support matrix 拆成内部表驱动模块；该拆分不应改变 public API，也不应
+  增加 per-call 动态分派成本。
+- **重复 capability 检查是兼容性边界，不是主要性能瓶颈**：大量
+  `hasattr(prog, "...")` 和 `*_available()` 是为了兼容不同 pybind/build 后端组合。
+  在 hot plan 命中后，大多数完整检查已经被绕过。后续若继续清理，应先做内部
+  capability cache，而不是直接删除检查。
+- **legacy fallback 已经被观测化，但仍是兼容路径**：
+  `set_legacy_helper_auto_fallback_enabled()` 和 fallback count API 让 helper IR
+  触发可见；默认仍允许 `method="auto"` fallback，保证旧代码可运行。该 API 是新增的
+  调试/诊断入口，不改变现有算法函数签名和默认语义。
+- **Dense field proof 仍故意保守**：当前只对 1D scalar dense field、可证明
+  contiguous 的 field indices/key，以及 vector/matrix component 拆分路径开启 native。
+  proof 失败必须 fallback，不能为了覆盖率扩大 raw pointer 假设。
+
+遗留简化实现：
+
+- `sort(method="legacy")` 仍保留 odd-even merge 兼容实现，且多处 `sync()` 属于旧
+  helper/host fallback 语义；native radix/CPU sort 才是性能主路径。
+- `sort_by_key()` 多 key 仍主要依赖 host stable path，尚未接入完整 device multi-key
+  stable sort。
+- `experimental_compact()` 的 whole tensor member 通过 order/apply 间接实现，
+  strided compact backend 尚未直接支持。
+- `experimental_bucket_builder()` 的 whole tensor member 仍通过 order buffer +
+  apply values 实现；这保持语义清楚，但不是最少 dispatch 的实现。
+- `experimental_histogram()` 对 StructNdarray scalar member 依赖 staging/native
+  transform 组合；尚无真正 strided histogram backend。
+- `experimental_grouped_reduce()` 对 StructNdarray tensor member 通过 component
+  plan group 拆分；对 dense vector/matrix field grouped-reduce 仍未作为重点默认路径。
+- `PrefixSumExecutor` 的 field fallback 仍会使用 legacy i32 field workspace；native
+  dense/ndarray/member path 不受影响。
+
+不必要或可收敛的防御性编程候选：
+
+- hot-cache 尝试阶段的 `try/except (AttributeError, TypeError, ValueError)` 可在后续
+  稳定后收窄，否则可能把真正的内部 bug 伪装成 fallback miss。
+- 每个 primitive 自己写 public validation、backend method error message 和
+  capability probing，维护成本偏高；适合后续抽出只读 support matrix/route table。
+- 一些 `hasattr + available + hasattr(method)` 三段式检查在已统一 pybind 后可以由
+  capability cache 合并，但不能先于 wheel/多后端 ABI 稳定性验证删除。
+
+同步和检查策略现状：
+
+- CUDA native primitive 已尽量去掉内部强制同步，由 `ti.sync()`、readback 或同 stream
+  后续 work 保证完成；sort 和 host fallback 仍保留同步边界。
+- Vulkan native primitive 当前仍有较多 `synchronize()`、`buffer_barrier()` 和
+  descriptor/resource binding 保护。barrier 大多是跨 dispatch 数据依赖所需，但
+  command submission 和资源准备固定成本仍是 warm runtime 弱项。该项暂缓为
+  command/resource replay 专项，不在普通算法路由中继续堆补丁。
+- legacy helper fallback 中的 `sync()` 主要用于保持旧 helper/host 路径可观测完成；
+  native-first 路径不应继承这些同步。
+
+文档与现状需要修正的点：
+
+- 本轮已把下方支持矩阵从早期 P2/P3/P4 规划标记更新为当前状态；后续新增 primitive
+  或默认策略切换时，应继续使用“当前支持 / fallback / 暂缓”三态描述。
+- “建议启动顺序”仍是原始规划，可保留为历史，但不应被当成当前执行顺序；当前应进入
+  P8 物理引擎级验证或独立 Vulkan command/resource replay 设计。
+- benchmark 说明需要继续标注 exact artifact path、first-call/warm/storage 三类指标，
+  不再只写单个 runtime 结论。
+
+对外 API 影响：
+
+- 现有 `experimental_*` 函数签名和默认 `method="auto"` 语义保持兼容。
+- 新增 workspace/diagnostic API：
+  `set_legacy_helper_auto_fallback_enabled()`、
+  `reset_legacy_helper_auto_fallback_policy()`、
+  `set_legacy_helper_fallback_counting_enabled()`、
+  `get_legacy_helper_fallback_counts()` 等，用于检测 helper fallback。
+- 新增/扩展的显式 method 名称（如 `cpu_native`、`cuda_device`、`vulkan_native`、
+  `two_level`、`*_two_level`、`segmented`）仍属于 experimental algorithm API；
+  真实默认策略切换必须等待 P8 workload 验证。
 
 ### P8. 物理引擎级验证
 
@@ -1712,16 +1961,18 @@ bucket-builder 和后续 solver primitive。
 
 ## 支持矩阵
 
-规划期每个 primitive 必须维护以下矩阵：
+当前每个 primitive 必须维护以下矩阵。这里记录的是 2026-05-24 代码状态，
+不是早期 P2/P3/P4 规划标记。
 
-| Storage | scan | reduce | histogram | transform | gather/scatter | scatter_add | compact | bucket | sort |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| ndarray | native first | native first | native first | native first | native first | native first | native first | native first | native first |
-| StructNdarray raw payload | no numeric | no numeric | no numeric | payload-limited | copy/order | no numeric | supported | supported | supported |
-| StructNdarray scalar member | native strided | native strided | scalar only | native strided | native strided | native strided | selected | selected | selected |
-| DenseFieldView | P2 | P2 | P2/P3 | P2 | P2 | P2/P3 | P4 | P4 | P4 |
-| StridedFieldView/component | P3 | P3 | scalar only | P3 | P3 | P3 | P4 | P4 | P4 |
-| SparseSNodeView | P6 | P6 | P6 | limited | P6 | limited | P6 | P6 | later |
+| Storage | scan | reduce | histogram | transform | gather/scatter | scatter_add | compact | bucket | grouped_reduce | sort |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ndarray | native first | native first | native first | native first | native first | native first | native first | native first | native first | CUDA/Vulkan native first，CPU auto host stable / explicit native |
+| StructNdarray raw payload | no numeric | no numeric | no numeric | no numeric | opaque copy/order only | no numeric | opaque payload/order | opaque payload/order | no numeric | payload values supported by native/host paths where method supports payload |
+| StructNdarray scalar member | native strided | native strided | staged native scalar member | native strided | native strided | native strided / two-level opt-in | selected native/order path | selected native/order path | native strided / staged two-level | scalar values/keys selected |
+| StructNdarray tensor member | component group | component group | unsupported | packed/component group | packed/component group | component group / two-level opt-in | order/apply lanes | order/apply lanes | component group | order once + lane apply |
+| DenseFieldView scalar | native first | native first | native first | native first | native first，支持 ndarray 或 contiguous dense-field indices | native first，支持 ndarray 或 contiguous dense-field indices | native/fused compact | native first | native first | field sort 仍为 host/legacy 或显式旧 device helper，未 native-first |
+| Dense vector/matrix field component | component group | component group | scalar component only | component group | component group | component group | scalar compact only | scalar bucket only | not default | not default |
+| SparseSNodeView | skipped | skipped | skipped | limited fallback | skipped | limited fallback | skipped | skipped | skipped | later |
 
 ## 默认策略
 
