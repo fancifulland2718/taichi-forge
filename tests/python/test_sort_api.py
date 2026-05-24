@@ -107,7 +107,7 @@ def _run_sort_vector_payload_case(method):
     np.testing.assert_allclose(values.to_numpy(), values_np[order], rtol=1e-6, atol=1e-6)
 
 
-def _run_sort_struct_tensor_member_host_case(method):
+def _run_sort_struct_tensor_member_host_case(method, workspace=None):
     keys_np = np.array([3, -1, 3, 0, -7, 2, -1, 3], dtype=np.int32)
     order = np.argsort(keys_np, kind="stable")
     payload = ti.types.struct(
@@ -128,7 +128,7 @@ def _run_sort_struct_tensor_member_host_case(method):
     keys.from_numpy(keys_np)
     values.from_numpy(values_np)
 
-    ti.algorithms.sort(keys, values.field("vec"), method=method)
+    ti.algorithms.sort(keys, values.field("vec"), method=method, workspace=workspace)
 
     result = values.to_numpy()
     assert keys.to_numpy().tolist() == keys_np[order].tolist()
@@ -138,12 +138,13 @@ def _run_sort_struct_tensor_member_host_case(method):
 
     keys.from_numpy(keys_np)
     values.from_numpy(values_np)
-    ti.algorithms.sort(keys, values.field("mat"), method=method)
+    ti.algorithms.sort(keys, values.field("mat"), method=method, workspace=workspace)
     result = values.to_numpy()
     assert keys.to_numpy().tolist() == keys_np[order].tolist()
     assert np.array_equal(result["vec"], values_np["vec"])
     assert np.array_equal(result["mat"], values_np["mat"][order])
     assert np.array_equal(result["tag"], values_np["tag"])
+    return workspace
 
 
 @test_utils.test(arch=[ti.cpu])
@@ -172,6 +173,26 @@ def test_sort_struct_tensor_member_values_host_stable():
 @test_utils.test(arch=[ti.cpu])
 def test_sort_struct_tensor_member_values_cpu_native():
     _run_sort_struct_tensor_member_host_case("cpu_native")
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_sort_struct_tensor_member_values_reuses_order_apply_workspaces():
+    workspace = ti.algorithms.SortWorkspace(max_items=8)
+    _run_sort_struct_tensor_member_host_case("cpu_native", workspace=workspace)
+    first_group_count = len(workspace._order_apply_inplace_plan_groups)
+    _run_sort_struct_tensor_member_host_case("cpu_native", workspace=workspace)
+
+    copy_workspace = workspace._order_apply_indexed_copy_workspace
+    transform_workspace = workspace._order_apply_transform_workspace
+    assert copy_workspace is not None
+    assert transform_workspace is not None
+    assert copy_workspace._native_indexed_copy_plan is not None
+    assert transform_workspace._native_transform_plan is not None
+    assert workspace._order_apply_inplace_plan_group is not None
+    assert len(workspace._order_apply_inplace_plan_groups) >= first_group_count
+    assert len(workspace._order_apply_inplace_plan_groups) >= 2
+    assert len(copy_workspace._native_indexed_copy_plans) >= 2
+    assert len(transform_workspace._native_transform_plans) >= 2
 
 
 @test_utils.test(arch=[ti.cuda])

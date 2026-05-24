@@ -32,6 +32,23 @@ def _dense_host_copy_value_type(dtype):
     }.get(dtype)
 
 
+def _dense_fill_value_bits(dtype, val):
+    import numpy as np  # pylint: disable=C0415
+
+    np_dtype = to_numpy_type(dtype)
+    try:
+        scalar = np.array(val, dtype=np_dtype)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if scalar.ndim != 0:
+        return None
+    if scalar.dtype.itemsize == 4:
+        return int(scalar.view(np.uint32).item())
+    if scalar.dtype.itemsize == 8:
+        return int(scalar.view(np.uint64).item())
+    return None
+
+
 class Field:
     """Taichi field class.
 
@@ -302,6 +319,8 @@ class ScalarField(Field):
     def fill(self, val):
         """Fills this scalar field with a specified value."""
         if in_python_scope():
+            if self._try_cpu_dense_fill(val):
+                return
             from taichi_forge._kernels import fill_field  # pylint: disable=C0415
 
             fill_field(self, val)
@@ -437,6 +456,36 @@ class ScalarField(Field):
             message = str(exc)
             if (
                 "CPU native dense field host readback" not in message
+                and "Native dense field path" not in message
+            ):
+                raise
+            return False
+        return True
+
+    def _try_cpu_dense_fill(self, val):
+        from taichi_forge.lang.misc import arm64, x64  # pylint: disable=C0415
+
+        if impl.current_cfg().arch not in (x64, arm64):
+            return False
+        value_type = _dense_host_copy_value_type(self.dtype)
+        if value_type is None:
+            return False
+        value_bits = _dense_fill_value_bits(self.dtype, val)
+        if value_bits is None:
+            return False
+        prog = impl.get_runtime().prog
+        if not hasattr(prog, "fill_dense_field"):
+            return False
+        impl.get_runtime().materialize()
+        import numpy as np  # pylint: disable=C0415
+
+        n = int(np.prod(self.shape, dtype=np.int64))
+        try:
+            prog.fill_dense_field(self.snode.ptr, value_type, value_bits, n)
+        except RuntimeError as exc:
+            message = str(exc)
+            if (
+                "CPU native dense field fill" not in message
                 and "Native dense field path" not in message
             ):
                 raise

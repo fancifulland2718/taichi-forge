@@ -258,6 +258,52 @@ member-view calls:
 | Vulkan | `vulkan_native` | 2048 / 127 | 0.3437 | 32 |
 | Vulkan | `vulkan_native` | 262144 / 4096 | 0.3441 | 32 |
 
+2026-05-24 follow-up:
+
+- `experimental_grouped_reduce()` now exposes `method="two_level"` plus
+  backend-specific aliases `cuda_two_level`, `vulkan_two_level`, and
+  `cpu_two_level`.
+- The aliases do not add a new public stable API surface; they route the
+  experimental DSL method to the existing segmented/native partial aggregation
+  backend when that backend can preserve the requested layout.
+- `GroupedReduceWorkspace` now caches native scalar plans and whole
+  vector/matrix member-view plan groups. Rebuilding a StructNdarray member view
+  wrapper can still reuse the recorded native plan through the PrimitivePlan
+  object key.
+- CPU `two_level` maps to the existing native partial/merge grouped-reduce
+  implementation. CUDA `two_level` maps to the segmented CUB-style path,
+  including scalar StructNdarray member views. Vulkan `two_level` now covers
+  plain ndarray values plus StructNdarray scalar member views: member keys,
+  values, or outputs are staged through cached native transform scratch buffers
+  before/after the plain native segmented reduce. Whole vector/matrix member
+  views reuse the existing per-lane decomposition over this scalar path.
+- `experimental_bucket_builder()` also accepts `two_level`, `cuda_two_level`,
+  `vulkan_two_level`, and `cpu_two_level`. For StructNdarray tensor-member
+  values these aliases use the same native bucket-builder plus shared
+  order/apply workspace path as the backend-specific methods.
+- `experimental_histogram()` accepts the same aliases for scalar ndarray,
+  dense-field values, and StructNdarray scalar member values/bins. Member
+  histogram uses cached native transform staging around the existing native
+  histogram backends, preserving member tags and avoiding helper kernels.
+  Whole vector/matrix member histogram remains closed because vector histogram
+  semantics are not defined.
+- The three aggregation-style entrypoints now share an internal backend-family
+  router. This is a Python dispatch helper only: it does not add Taichi helper
+  kernels, does not allocate device workspace, and does not change
+  PrimitivePlan cache keys. The shared rule keeps the two-level method name as
+  a semantic contract while letting `auto` keep the measured backend default.
+- `experimental_scatter_add()` now exposes `two_level`, `cuda_two_level`,
+  `vulkan_two_level`, and `cpu_two_level`. The implementation preserves
+  `dst[indices[i]] += src[i]` by reducing into a cached scratch ndarray first,
+  then applying a native add-merge primitive into the original destination.
+  This is opt-in; `auto` keeps the measured native atomic/default route.
+- `ScatterAddWorkspace` now owns the reduce scratch, optional member-value
+  staging scratch, nested transform/grouped-reduce workspaces, native add-merge
+  plans, and a replay group for the whole two-level sequence. Vulkan member
+  source values are staged to plain ndarray values because the native segmented
+  grouped-reduce shader intentionally keeps its ABI contiguous; the add-merge
+  stage writes back to plain ndarray, scalar member view, or dense field.
+
 ### 2026-05-21 whole tensor member-view follow-up
 
 This follow-up closes the low-risk part of the whole vector/matrix member-view
@@ -387,6 +433,11 @@ Validation:
   `IndexedCopyWorkspace`, shared order/apply workspace reuse for
   sort/compact/bucket, and internal `IndexedCopyWorkspace` reuse for
   compact/bucket direct-output apply.
+- S10 order/apply completion follow-up:
+  `test_sort_api.py`, `test_compact.py`, and `test_bucket_builder.py` targeted
+  CPU/CUDA/Vulkan member-view cases passed. Sort in-place member apply now
+  records an internal gather+transform replay group, and compact/bucket order
+  pairs avoid dead output-order clears.
 - Consolidated primitive subset after closing sort/compact/bucket tensor-member
   gaps:
   `tests/python/test_transform.py tests/python/test_reduce.py
@@ -547,11 +598,14 @@ Implementation notes:
   between several native calls.
 - `SortWorkspace`, `CompactWorkspace`, and `BucketBuilderWorkspace` share the
   order/apply scratch helpers. Order pairs are exact-size cached; identity fill
-  and output initialization run only when that exact pair is allocated, not on
-  every compact/bucket call.
+  runs only when that exact pair is allocated, and the output order buffer is
+  not cleared because compact/bucket overwrite the valid range.
 - Compact and bucket direct-output member apply call through an internal
   `IndexedCopyWorkspace`, so packed whole tensor gather reuses the same native
   plan/cache layer as public gather/scatter.
+- Sort in-place member apply calls through an internal gather+transform replay
+  group after the first call, so repeated sorts reuse the same order/apply
+  native call sequence without creating Taichi IR or extra persistent buffers.
 
 ## Next-phase backlog excluding Field/SNode
 

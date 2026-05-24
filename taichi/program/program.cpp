@@ -507,6 +507,15 @@ struct CpuCompactScatterTaskContext {
 };
 
 template <typename T>
+struct CpuDenseFieldFillTaskContext {
+  uint8_t *data{nullptr};
+  std::size_t stride{sizeof(T)};
+  T value{};
+  std::size_t n{0};
+  int num_threads{1};
+};
+
+template <typename T>
 struct CpuGroupedReduceTaskContext {
   const int32_t *keys{nullptr};
   const T *values{nullptr};
@@ -557,6 +566,14 @@ taichi::ThreadPool &get_cpu_primitive_thread_pool(int max_threads) {
     pool_threads = max_threads;
   }
   return *pool;
+}
+
+bool cpu_use_parallel_simple_loop(std::size_t n, int target_threads) {
+  return n >= 262144 && target_threads > 1;
+}
+
+bool cpu_use_parallel_aggregation(std::size_t n, int target_threads) {
+  return n >= 262144 && target_threads >= 4;
 }
 
 template <typename T>
@@ -711,6 +728,28 @@ void cpu_fill_u32_task(void *raw_ctx, int /*thread_id*/, int task_id) {
       ctx->words * static_cast<std::size_t>(tid + 1) /
       static_cast<std::size_t>(ctx->num_threads);
   std::fill(ctx->data + begin, ctx->data + end, ctx->value);
+}
+
+template <typename T>
+void cpu_dense_field_fill_task(void *raw_ctx,
+                               int /*thread_id*/,
+                               int task_id) {
+  auto *ctx = static_cast<CpuDenseFieldFillTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  if (ctx->stride == sizeof(T)) {
+    auto *data = reinterpret_cast<T *>(ctx->data);
+    std::fill(data + begin, data + end, ctx->value);
+    return;
+  }
+  for (std::size_t i = begin; i < end; ++i) {
+    *reinterpret_cast<T *>(ctx->data + i * ctx->stride) = ctx->value;
+  }
 }
 
 void cpu_copy_task(void *raw_ctx, int /*thread_id*/, int task_id) {
@@ -1009,6 +1048,105 @@ void cpu_transform_run_packed_strided_to_strided_typed(
   }
 }
 
+template <typename T>
+void cpu_add_merge_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuTransformTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    ctx->dst[i] += ctx->src[i];
+  }
+}
+
+template <typename T>
+void cpu_strided_to_strided_add_merge_task(void *raw_ctx,
+                                           int /*thread_id*/,
+                                           int task_id) {
+  auto *ctx = static_cast<CpuStridedToStridedTransformTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    const auto *value =
+        reinterpret_cast<const T *>(ctx->src + ctx->src_offset +
+                                    i * ctx->src_stride);
+    auto *out =
+        reinterpret_cast<T *>(ctx->dst + ctx->dst_offset +
+                              i * ctx->dst_stride);
+    *out += *value;
+  }
+}
+
+template <typename T>
+void cpu_add_merge_run_typed(const T *src_ptr,
+                             T *dst_ptr,
+                             std::size_t n,
+                             bool use_parallel,
+                             int target_threads,
+                             int max_threads) {
+  if (use_parallel) {
+    CpuTransformTaskContext<T> ctx;
+    ctx.src = src_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.scale = T{};
+    ctx.bias = T{};
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx, cpu_add_merge_task<T>);
+    return;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    dst_ptr[i] += src_ptr[i];
+  }
+}
+
+template <typename T>
+void cpu_add_merge_run_strided_to_strided_typed(const uint8_t *src_ptr,
+                                                uint8_t *dst_ptr,
+                                                std::size_t n,
+                                                std::size_t src_offset,
+                                                std::size_t src_stride,
+                                                std::size_t dst_offset,
+                                                std::size_t dst_stride,
+                                                bool use_parallel,
+                                                int target_threads,
+                                                int max_threads) {
+  if (use_parallel) {
+    CpuStridedToStridedTransformTaskContext<T> ctx;
+    ctx.src = src_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.src_offset = src_offset;
+    ctx.src_stride = src_stride;
+    ctx.dst_offset = dst_offset;
+    ctx.dst_stride = dst_stride;
+    ctx.scale = T{};
+    ctx.bias = T{};
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_to_strided_add_merge_task<T>);
+    return;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto *value =
+        reinterpret_cast<const T *>(src_ptr + src_offset + i * src_stride);
+    auto *out =
+        reinterpret_cast<T *>(dst_ptr + dst_offset + i * dst_stride);
+    *out += *value;
+  }
+}
+
 std::size_t transform_value_size(int value_type) {
   TI_ERROR_IF(value_type < 0 || value_type > 5,
               "transform received an unsupported value type.");
@@ -1104,6 +1242,29 @@ void check_transform_strided_request(const char *backend,
                                 src_offset, src_stride);
   check_transform_strided_range(backend, "destination", dst, n, value_size,
                                 dst_offset, dst_stride);
+}
+
+void check_add_merge_strided_request(const char *backend,
+                                     Ndarray *src,
+                                     Ndarray *dst,
+                                     int value_type,
+                                     std::size_t src_offset,
+                                     std::size_t src_stride,
+                                     std::size_t dst_offset,
+                                     std::size_t dst_stride) {
+  TI_ERROR_IF(!src || !dst, "{} strided add-merge received a null ndarray.",
+              backend);
+  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1,
+              "{} strided add-merge expects 1D ndarrays.", backend);
+  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
+              "{} strided add-merge source and destination sizes differ.",
+              backend);
+  const std::size_t value_size = transform_value_size(value_type);
+  const std::size_t n = src->get_nelement();
+  check_transform_strided_range(backend, "add-merge source", src, n,
+                                value_size, src_offset, src_stride);
+  check_transform_strided_range(backend, "add-merge destination", dst, n,
+                                value_size, dst_offset, dst_stride);
 }
 
 void check_transform_packed_strided_range(const char *backend,
@@ -1238,6 +1399,22 @@ inline void cpu_copy_indexed_payload(uint8_t *dst,
                                      std::size_t item_bytes) {
   auto *dst_words = reinterpret_cast<uint32_t *>(dst);
   const auto *src_words = reinterpret_cast<const uint32_t *>(src);
+  if (item_bytes == sizeof(uint32_t)) {
+    dst_words[0] = src_words[0];
+    return;
+  }
+  if (item_bytes == sizeof(uint64_t)) {
+    dst_words[0] = src_words[0];
+    dst_words[1] = src_words[1];
+    return;
+  }
+  if (item_bytes == 4 * sizeof(uint32_t)) {
+    dst_words[0] = src_words[0];
+    dst_words[1] = src_words[1];
+    dst_words[2] = src_words[2];
+    dst_words[3] = src_words[3];
+    return;
+  }
   const std::size_t words = item_bytes / sizeof(uint32_t);
   for (std::size_t word = 0; word < words; ++word) {
     dst_words[word] = src_words[word];
@@ -1246,6 +1423,22 @@ inline void cpu_copy_indexed_payload(uint8_t *dst,
 
 inline void cpu_zero_indexed_payload(uint8_t *dst, std::size_t item_bytes) {
   auto *dst_words = reinterpret_cast<uint32_t *>(dst);
+  if (item_bytes == sizeof(uint32_t)) {
+    dst_words[0] = 0;
+    return;
+  }
+  if (item_bytes == sizeof(uint64_t)) {
+    dst_words[0] = 0;
+    dst_words[1] = 0;
+    return;
+  }
+  if (item_bytes == 4 * sizeof(uint32_t)) {
+    dst_words[0] = 0;
+    dst_words[1] = 0;
+    dst_words[2] = 0;
+    dst_words[3] = 0;
+    return;
+  }
   const std::size_t words = item_bytes / sizeof(uint32_t);
   for (std::size_t word = 0; word < words; ++word) {
     dst_words[word] = 0;
@@ -1693,8 +1886,8 @@ std::size_t cpu_bucket_builder_typed(const int32_t *keys_ptr,
   const std::size_t parallel_workspace =
       static_cast<std::size_t>(target_threads) * num_bins * sizeof(int32_t) *
       2;
-  const bool use_parallel =
-      n >= 65536 && target_threads > 1 && parallel_workspace <= kMaxWorkspaceBytes;
+  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads) &&
+                            parallel_workspace <= kMaxWorkspaceBytes;
 
   if (use_parallel) {
     std::vector<int32_t> partial(
@@ -1788,8 +1981,8 @@ std::size_t cpu_bucket_builder_raw(const int32_t *keys_ptr,
   const std::size_t parallel_workspace =
       static_cast<std::size_t>(target_threads) * num_bins * sizeof(int32_t) *
       2;
-  const bool use_parallel =
-      n >= 65536 && target_threads > 1 && parallel_workspace <= kMaxWorkspaceBytes;
+  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads) &&
+                            parallel_workspace <= kMaxWorkspaceBytes;
 
   if (use_parallel) {
     std::vector<int32_t> partial(
@@ -3419,14 +3612,7 @@ void Program::finalize() {
 
   synchronize();
   if (compile_config().arch == Arch::vulkan) {
-    vulkan_radix_sort_clear_workspace();
-    vulkan_scan_clear_workspace();
-    vulkan_compact_clear_workspace();
-    vulkan_histogram_clear_workspace();
-    vulkan_reduce_clear_workspace();
-    vulkan_transform_clear_workspace();
-    vulkan_indexed_copy_clear_workspace();
-    vulkan_bucket_builder_clear_workspace();
+    vulkan_clear_primitive_caches();
   }
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
@@ -4018,6 +4204,136 @@ std::size_t Program::cuda_device_transform_affine_dense_field(SNode *src,
       dst_stride, scale, bias, stream);
 #else
   TI_ERROR("CUDA dense field transform requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+bool Program::cuda_device_add_merge_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda && cuda::cub_add_merge_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_device_add_merge_ndarray(Ndarray *src,
+                                                   Ndarray *dst,
+                                                   int value_type) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA add-merge is only available on CUDA.");
+  TI_ERROR_IF(!src || !dst, "CUDA add-merge received a null ndarray.");
+  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
+              "CUDA add-merge source and destination sizes differ.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA add-merge received an unsupported value type.");
+  TI_ERROR_IF(src->get_element_size() != value_size ||
+                  dst->get_element_size() != value_size,
+              "CUDA add-merge dtype does not match value type.");
+  if (src->get_nelement() == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(src->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA add-merge currently supports at most INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  TI_ERROR_IF(!cuda::cub_add_merge_available(),
+              "CUDA add-merge requires TI_WITH_CUDA_TOOLKIT=ON and a "
+              "discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_add_merge(
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
+      static_cast<int>(src->get_nelement()),
+      static_cast<cuda::CudaTransformValueType>(value_type), stream);
+#else
+  TI_ERROR("CUDA add-merge requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_add_merge_strided_ndarray(
+    Ndarray *src,
+    Ndarray *dst,
+    int value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA strided add-merge is only available on CUDA.");
+  check_add_merge_strided_request("CUDA", src, dst, value_type, src_offset,
+                                  src_stride, dst_offset, dst_stride);
+  const std::size_t n = src->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA strided add-merge currently supports at most INT_MAX "
+              "items.");
+#ifdef TI_WITH_CUDA
+  TI_ERROR_IF(!cuda::cub_add_merge_available(),
+              "CUDA strided add-merge requires TI_WITH_CUDA_TOOLKIT=ON and a "
+              "discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_add_merge_strided(
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
+      static_cast<int>(n), static_cast<cuda::CudaTransformValueType>(value_type),
+      src_offset, src_stride, dst_offset, dst_stride, stream);
+#else
+  TI_ERROR("CUDA strided add-merge requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_add_merge_dense_field(Ndarray *src,
+                                                       SNode *dst,
+                                                       int value_type,
+                                                       std::size_t n) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA dense field add-merge is only available on CUDA.");
+  TI_ERROR_IF(!src || !dst, "CUDA dense field add-merge received a null input.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA dense field add-merge received an unsupported value type.");
+  TI_ERROR_IF(src->shape.size() != 1 || src->get_nelement() != n ||
+                  src->get_element_size() != value_size,
+              "CUDA dense field add-merge source shape or dtype mismatch.");
+  if (n == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA dense field add-merge currently supports at most INT_MAX "
+              "items.");
+  const std::size_t dst_stride = get_dense_field_stride(dst, value_size);
+  TI_ERROR_IF(dst_stride < value_size,
+              "CUDA dense field add-merge received an invalid field stride.");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
+  DevicePtr dst_ptr = get_dense_field_device_ptr(dst);
+  void *dst_raw = raw_ptr(dst_ptr, "CUDA dense field add-merge");
+  TI_ERROR_IF(!cuda::cub_add_merge_available(),
+              "CUDA dense field add-merge requires TI_WITH_CUDA_TOOLKIT=ON and "
+              "a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  if (dst_stride == value_size) {
+    return cuda::cub_add_merge(
+        src_ptr, dst_raw, static_cast<int>(n),
+        static_cast<cuda::CudaTransformValueType>(value_type), stream);
+  }
+  return cuda::cub_add_merge_strided(
+      src_ptr, dst_raw, static_cast<int>(n),
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, value_size, 0,
+      dst_stride, stream);
+#else
+  TI_ERROR("CUDA dense field add-merge requires TI_WITH_CUDA=ON.");
 #endif
 }
 
@@ -6074,6 +6390,90 @@ bool Program::cpu_compact_available() const {
   return arch_is_cpu(compile_config().arch);
 }
 
+template <typename T>
+void cpu_fill_dense_field_typed(uint8_t *dst_ptr,
+                                std::size_t dst_stride,
+                                std::size_t n,
+                                uint64_t value_bits,
+                                int max_threads) {
+  T value{};
+  std::memcpy(&value, &value_bits, sizeof(T));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  if (cpu_use_parallel_simple_loop(n, target_threads)) {
+    CpuDenseFieldFillTaskContext<T> ctx;
+    ctx.data = dst_ptr;
+    ctx.stride = dst_stride;
+    ctx.value = value;
+    ctx.n = n;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_dense_field_fill_task<T>);
+    return;
+  }
+  if (dst_stride == sizeof(T)) {
+    auto *data = reinterpret_cast<T *>(dst_ptr);
+    std::fill(data, data + n, value);
+    return;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    *reinterpret_cast<T *>(dst_ptr + i * dst_stride) = value;
+  }
+}
+
+void Program::fill_dense_field(SNode *dst,
+                               int value_type,
+                               uint64_t value_bits,
+                               std::size_t n) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field fill is only available on CPU backends.");
+  TI_ERROR_IF(!dst, "CPU native dense field fill received a null field.");
+  const std::size_t item_bytes = primitive_value_type_size(value_type);
+  TI_ERROR_IF(item_bytes == 0,
+              "CPU native dense field fill received an unsupported value "
+              "type.");
+  if (n == 0) {
+    return;
+  }
+  std::size_t dst_stride = 0;
+  auto *dst_ptr = map_cpu_dense_field(this, dst, value_type, n,
+                                      "CPU native dense field fill",
+                                      &dst_stride);
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  switch (value_type) {
+    case 0:
+      cpu_fill_dense_field_typed<int32_t>(dst_ptr, dst_stride, n, value_bits,
+                                          max_threads);
+      return;
+    case 1:
+      cpu_fill_dense_field_typed<float>(dst_ptr, dst_stride, n, value_bits,
+                                        max_threads);
+      return;
+    case 2:
+      cpu_fill_dense_field_typed<uint32_t>(dst_ptr, dst_stride, n, value_bits,
+                                           max_threads);
+      return;
+    case 3:
+      cpu_fill_dense_field_typed<uint64_t>(dst_ptr, dst_stride, n, value_bits,
+                                           max_threads);
+      return;
+    case 4:
+      cpu_fill_dense_field_typed<int64_t>(dst_ptr, dst_stride, n, value_bits,
+                                          max_threads);
+      return;
+    case 5:
+      cpu_fill_dense_field_typed<double>(dst_ptr, dst_stride, n, value_bits,
+                                         max_threads);
+      return;
+    default:
+      TI_ERROR("CPU native dense field fill received an unsupported value type.");
+  }
+}
+
 void Program::copy_dense_field_from_host(SNode *dst,
                                          std::uintptr_t src,
                                          std::size_t src_bytes,
@@ -6357,8 +6757,8 @@ std::size_t Program::cpu_histogram_ndarray(Ndarray *values,
   const int target_threads = static_cast<int>(
       std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
                             static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = n >= 65536 && num_bins <= 4096 &&
-                            target_threads > 1;
+  const bool use_parallel = num_bins <= 4096 &&
+                            cpu_use_parallel_aggregation(n, target_threads);
   if (value_type == 2 && bin_type == 4) {
     return cpu_histogram_typed(static_cast<const uint32_t *>(values_ptr),
                                static_cast<int64_t *>(bins_ptr), n, num_bins,
@@ -6423,7 +6823,8 @@ std::size_t Program::cpu_histogram_dense_field(SNode *values,
   const bool contiguous =
       value_stride == value_size && bin_stride == bin_size;
   const bool use_parallel =
-      contiguous && n >= 65536 && num_bins <= 4096 && target_threads > 1;
+      contiguous && num_bins <= 4096 &&
+      cpu_use_parallel_aggregation(n, target_threads);
   if (value_type == 2 && bin_type == 4) {
     if (contiguous) {
       return cpu_histogram_typed(reinterpret_cast<const uint32_t *>(values_ptr),
@@ -6503,7 +6904,7 @@ std::size_t Program::cpu_reduce_ndarray(Ndarray *values,
   const int target_threads = static_cast<int>(
       std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
                             static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = n >= 65536 && target_threads > 1;
+  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
 
   switch (value_type) {
     case 0:
@@ -6559,7 +6960,7 @@ std::size_t Program::cpu_reduce_member_ndarray(Ndarray *values,
   const int target_threads = static_cast<int>(
       std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
                             static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = n >= 65536 && target_threads > 1;
+  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
 
   const auto values_addr = get_ndarray_data_ptr_as_int(values);
   const auto output_addr = get_ndarray_data_ptr_as_int(output);
@@ -6617,7 +7018,7 @@ std::size_t Program::cpu_reduce_strided_ndarray(Ndarray *values,
   const int target_threads = static_cast<int>(
       std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
                             static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = n >= 65536 && target_threads > 1;
+  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
 
   const auto values_addr = get_ndarray_data_ptr_as_int(values);
   const auto output_addr = get_ndarray_data_ptr_as_int(output);
@@ -6685,7 +7086,7 @@ std::size_t Program::cpu_reduce_dense_field(SNode *values,
   const int target_threads = static_cast<int>(
       std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
                             static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = n >= 65536 && target_threads > 1;
+  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
   switch (value_type) {
     case 0:
       if (values_stride == sizeof(int32_t)) {
@@ -6788,7 +7189,7 @@ std::size_t Program::cpu_transform_affine_ndarray(Ndarray *src,
   const int target_threads = static_cast<int>(
       std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
                             static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = n >= 65536 && target_threads > 1;
+  const bool use_parallel = cpu_use_parallel_simple_loop(n, target_threads);
 
   const auto src_addr = get_ndarray_data_ptr_as_int(src);
   const auto dst_addr = get_ndarray_data_ptr_as_int(dst);
@@ -6865,7 +7266,7 @@ std::size_t Program::cpu_transform_affine_member_ndarray(Ndarray *src,
   const int target_threads = static_cast<int>(
       std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
                             static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = n >= 65536 && target_threads > 1;
+  const bool use_parallel = cpu_use_parallel_simple_loop(n, target_threads);
 
   const auto src_addr = get_ndarray_data_ptr_as_int(src);
   const auto dst_addr = get_ndarray_data_ptr_as_int(dst);
@@ -6943,7 +7344,7 @@ std::size_t Program::cpu_transform_affine_strided_ndarray(
   const int target_threads = static_cast<int>(
       std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
                             static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = n >= 65536 && target_threads > 1;
+  const bool use_parallel = cpu_use_parallel_simple_loop(n, target_threads);
 
   const auto src_addr = get_ndarray_data_ptr_as_int(src);
   const auto dst_addr = get_ndarray_data_ptr_as_int(dst);
@@ -7110,7 +7511,7 @@ std::size_t Program::cpu_transform_affine_dense_field(SNode *src,
   const int target_threads = static_cast<int>(
       std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
                             static_cast<std::size_t>(max_threads)));
-  const bool use_parallel = n >= 65536 && target_threads > 1;
+  const bool use_parallel = cpu_use_parallel_simple_loop(n, target_threads);
   switch (value_type) {
     case 0:
       if (src_stride == sizeof(uint32_t) && dst_stride == sizeof(uint32_t)) {
@@ -7206,6 +7607,217 @@ std::size_t Program::cpu_transform_affine_dense_field(SNode *src,
 }
 
 std::size_t Program::cpu_transform_workspace_bytes() const {
+  return 0;
+}
+
+bool Program::cpu_add_merge_available() const {
+  return arch_is_cpu(compile_config().arch);
+}
+
+std::size_t Program::cpu_add_merge_ndarray(Ndarray *src,
+                                           Ndarray *dst,
+                                           int value_type) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native add-merge is only available on CPU backends.");
+  TI_ERROR_IF(!src || !dst, "CPU add-merge received a null ndarray.");
+  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
+              "CPU add-merge source and destination sizes differ.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CPU add-merge received an unsupported value type.");
+  TI_ERROR_IF(src->get_element_size() != value_size ||
+                  dst->get_element_size() != value_size,
+              "CPU add-merge dtype does not match value type.");
+  const std::size_t n = src->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_simple_loop(n, target_threads);
+  const auto src_addr = get_ndarray_data_ptr_as_int(src);
+  const auto dst_addr = get_ndarray_data_ptr_as_int(dst);
+  TI_ERROR_IF(!src_addr || !dst_addr,
+              "CPU add-merge received a null data pointer.");
+  switch (value_type) {
+    case 0:
+      cpu_add_merge_run_typed(
+          reinterpret_cast<const int32_t *>(src_addr),
+          reinterpret_cast<int32_t *>(dst_addr), n, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 1:
+      cpu_add_merge_run_typed(reinterpret_cast<const float *>(src_addr),
+                              reinterpret_cast<float *>(dst_addr), n,
+                              use_parallel, target_threads, max_threads);
+      return 0;
+    case 2:
+      cpu_add_merge_run_typed(
+          reinterpret_cast<const uint32_t *>(src_addr),
+          reinterpret_cast<uint32_t *>(dst_addr), n, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 3:
+      cpu_add_merge_run_typed(
+          reinterpret_cast<const uint64_t *>(src_addr),
+          reinterpret_cast<uint64_t *>(dst_addr), n, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 4:
+      cpu_add_merge_run_typed(
+          reinterpret_cast<const int64_t *>(src_addr),
+          reinterpret_cast<int64_t *>(dst_addr), n, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 5:
+      cpu_add_merge_run_typed(reinterpret_cast<const double *>(src_addr),
+                              reinterpret_cast<double *>(dst_addr), n,
+                              use_parallel, target_threads, max_threads);
+      return 0;
+    default:
+      TI_ERROR("CPU add-merge received an unsupported value type.");
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_add_merge_strided_ndarray(Ndarray *src,
+                                                   Ndarray *dst,
+                                                   int value_type,
+                                                   std::size_t src_offset,
+                                                   std::size_t src_stride,
+                                                   std::size_t dst_offset,
+                                                   std::size_t dst_stride) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native strided add-merge is only available on CPU "
+              "backends.");
+  check_add_merge_strided_request("CPU native", src, dst, value_type,
+                                  src_offset, src_stride, dst_offset,
+                                  dst_stride);
+  const std::size_t n = src->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_simple_loop(n, target_threads);
+  const auto src_addr = get_ndarray_data_ptr_as_int(src);
+  const auto dst_addr = get_ndarray_data_ptr_as_int(dst);
+  TI_ERROR_IF(!src_addr || !dst_addr,
+              "CPU strided add-merge received a null data pointer.");
+  const auto *src_ptr = reinterpret_cast<const uint8_t *>(src_addr);
+  auto *dst_ptr = reinterpret_cast<uint8_t *>(dst_addr);
+  switch (value_type) {
+    case 0:
+      cpu_add_merge_run_strided_to_strided_typed<int32_t>(
+          src_ptr, dst_ptr, n, src_offset, src_stride, dst_offset, dst_stride,
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 1:
+      cpu_add_merge_run_strided_to_strided_typed<float>(
+          src_ptr, dst_ptr, n, src_offset, src_stride, dst_offset, dst_stride,
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 2:
+      cpu_add_merge_run_strided_to_strided_typed<uint32_t>(
+          src_ptr, dst_ptr, n, src_offset, src_stride, dst_offset, dst_stride,
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 3:
+      cpu_add_merge_run_strided_to_strided_typed<uint64_t>(
+          src_ptr, dst_ptr, n, src_offset, src_stride, dst_offset, dst_stride,
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 4:
+      cpu_add_merge_run_strided_to_strided_typed<int64_t>(
+          src_ptr, dst_ptr, n, src_offset, src_stride, dst_offset, dst_stride,
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 5:
+      cpu_add_merge_run_strided_to_strided_typed<double>(
+          src_ptr, dst_ptr, n, src_offset, src_stride, dst_offset, dst_stride,
+          use_parallel, target_threads, max_threads);
+      return 0;
+    default:
+      TI_ERROR("CPU strided add-merge received an unsupported value type.");
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_add_merge_dense_field(Ndarray *src,
+                                               SNode *dst,
+                                               int value_type,
+                                               std::size_t n) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field add-merge is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!src || !dst,
+              "CPU dense field add-merge received a null input.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CPU dense field add-merge received an unsupported value type.");
+  TI_ERROR_IF(src->shape.size() != 1 || src->get_nelement() != n ||
+                  src->get_element_size() != value_size,
+              "CPU dense field add-merge source shape or dtype mismatch.");
+  if (n == 0) {
+    return 0;
+  }
+  std::size_t dst_stride = 0;
+  auto *dst_ptr = map_cpu_dense_field(this, dst, value_type, n,
+                                      "CPU native dense field add-merge",
+                                      &dst_stride);
+  const auto src_addr = get_ndarray_data_ptr_as_int(src);
+  TI_ERROR_IF(!src_addr,
+              "CPU dense field add-merge received a null source pointer.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_simple_loop(n, target_threads);
+  const auto *src_ptr = reinterpret_cast<const uint8_t *>(src_addr);
+  switch (value_type) {
+    case 0:
+      cpu_add_merge_run_strided_to_strided_typed<int32_t>(
+          src_ptr, dst_ptr, n, 0, value_size, 0, dst_stride, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 1:
+      cpu_add_merge_run_strided_to_strided_typed<float>(
+          src_ptr, dst_ptr, n, 0, value_size, 0, dst_stride, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 2:
+      cpu_add_merge_run_strided_to_strided_typed<uint32_t>(
+          src_ptr, dst_ptr, n, 0, value_size, 0, dst_stride, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 3:
+      cpu_add_merge_run_strided_to_strided_typed<uint64_t>(
+          src_ptr, dst_ptr, n, 0, value_size, 0, dst_stride, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 4:
+      cpu_add_merge_run_strided_to_strided_typed<int64_t>(
+          src_ptr, dst_ptr, n, 0, value_size, 0, dst_stride, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 5:
+      cpu_add_merge_run_strided_to_strided_typed<double>(
+          src_ptr, dst_ptr, n, 0, value_size, 0, dst_stride, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    default:
+      TI_ERROR("CPU dense field add-merge received an unsupported value type.");
+  }
   return 0;
 }
 

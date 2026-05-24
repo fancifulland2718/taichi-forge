@@ -17,7 +17,13 @@ from taichi_forge.lang.exception import (
     TaichiSyntaxError,
     TaichiTypeError,
 )
-from taichi_forge.lang.field import Field, ScalarField, SNodeHostAccess
+from taichi_forge.lang.field import (
+    Field,
+    ScalarField,
+    SNodeHostAccess,
+    _dense_fill_value_bits,
+    _dense_host_copy_value_type,
+)
 from taichi_forge.lang.util import (
     cook_dtype,
     get_traceback,
@@ -1240,6 +1246,8 @@ class MatrixField(Field):
             if self.ndim != 1:
                 assert len(val[0]) == self.m
         if in_python_scope():
+            if self._try_cpu_dense_fill(val):
+                return
             from taichi_forge._kernels import field_fill_python_scope  # pylint: disable=C0415
 
             field_fill_python_scope(self, val)
@@ -1247,6 +1255,28 @@ class MatrixField(Field):
             from taichi_forge._funcs import field_fill_taichi_scope  # pylint: disable=C0415
 
             field_fill_taichi_scope(self, val)
+
+    def _try_cpu_dense_fill(self, val):
+        if len(self.shape) == 0:
+            return False
+        from taichi_forge.lang.misc import arm64, x64  # pylint: disable=C0415
+
+        if impl.current_cfg().arch not in (x64, arm64):
+            return False
+        if _dense_host_copy_value_type(self.dtype) is None:
+            return False
+        components = []
+        for i in range(self.n):
+            js = (0,) if self.ndim == 1 else range(self.m)
+            for j in js:
+                component_val = val[i] if self.ndim == 1 else val[i][j]
+                if _dense_fill_value_bits(self.dtype, component_val) is None:
+                    return False
+                components.append((self.get_scalar_field(i, j), component_val))
+        for scalar_field, component_val in components:
+            if not scalar_field._try_cpu_dense_fill(component_val):
+                return False
+        return True
 
     @python_scope
     def to_numpy(self, keep_dims=False, dtype=None):

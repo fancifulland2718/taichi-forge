@@ -21,7 +21,7 @@ def _method_for(arch_name, primitive):
     if arch_name == "cuda":
         if primitive == "sort":
             return "cuda_cub_native"
-        if primitive in ("compact", "reduce"):
+        if primitive in ("compact", "histogram", "reduce"):
             return "cuda_cub"
         return "cuda_device"
     if arch_name == "vulkan":
@@ -29,7 +29,7 @@ def _method_for(arch_name, primitive):
     raise ValueError(arch_name)
 
 
-def _available(arch_name, primitive):
+def _available(arch_name, primitive, method=None):
     prog = impl.get_runtime().prog
     if arch_name == "cpu":
         if primitive == "transform":
@@ -57,6 +57,13 @@ def _available(arch_name, primitive):
         if primitive == "reduce":
             return hasattr(prog, "cpu_reduce_available") and prog.cpu_reduce_available()
         if primitive == "scatter_add":
+            if method in ("two_level", "cpu_two_level"):
+                return (
+                    hasattr(prog, "cpu_grouped_reduce_available")
+                    and prog.cpu_grouped_reduce_available()
+                    and hasattr(prog, "cpu_add_merge_available")
+                    and prog.cpu_add_merge_available()
+                )
             return (
                 hasattr(prog, "cpu_scatter_add_available")
                 and prog.cpu_scatter_add_available()
@@ -65,6 +72,11 @@ def _available(arch_name, primitive):
             return (
                 hasattr(prog, "cpu_grouped_reduce_available")
                 and prog.cpu_grouped_reduce_available()
+            )
+        if primitive == "histogram":
+            return (
+                hasattr(prog, "cpu_histogram_available")
+                and prog.cpu_histogram_available()
             )
     if arch_name == "cuda":
         if primitive == "transform":
@@ -110,6 +122,13 @@ def _available(arch_name, primitive):
                 and prog.cuda_cub_reduce_available()
             )
         if primitive == "scatter_add":
+            if method in ("two_level", "cuda_two_level"):
+                return (
+                    hasattr(prog, "cuda_device_grouped_reduce_available")
+                    and prog.cuda_device_grouped_reduce_available()
+                    and hasattr(prog, "cuda_device_add_merge_available")
+                    and prog.cuda_device_add_merge_available()
+                )
             return (
                 hasattr(prog, "cuda_device_scatter_add_available")
                 and prog.cuda_device_scatter_add_available()
@@ -118,6 +137,11 @@ def _available(arch_name, primitive):
             return (
                 hasattr(prog, "cuda_device_grouped_reduce_available")
                 and prog.cuda_device_grouped_reduce_available()
+            )
+        if primitive == "histogram":
+            return (
+                hasattr(prog, "cuda_cub_histogram_available")
+                and prog.cuda_cub_histogram_available()
             )
     if arch_name == "vulkan":
         if primitive == "transform":
@@ -158,6 +182,15 @@ def _available(arch_name, primitive):
         if primitive == "reduce":
             return hasattr(prog, "vulkan_reduce_available") and prog.vulkan_reduce_available()
         if primitive == "scatter_add":
+            if method in ("two_level", "vulkan_two_level"):
+                return (
+                    hasattr(prog, "vulkan_grouped_reduce_available")
+                    and prog.vulkan_grouped_reduce_available()
+                    and hasattr(prog, "vulkan_add_merge_available")
+                    and prog.vulkan_add_merge_available()
+                    and hasattr(prog, "vulkan_transform_available")
+                    and prog.vulkan_transform_available()
+                )
             return (
                 hasattr(prog, "vulkan_scatter_add_available")
                 and prog.vulkan_scatter_add_available()
@@ -166,6 +199,13 @@ def _available(arch_name, primitive):
             return (
                 hasattr(prog, "vulkan_grouped_reduce_available")
                 and prog.vulkan_grouped_reduce_available()
+            )
+        if primitive == "histogram":
+            return (
+                hasattr(prog, "vulkan_histogram_available")
+                and prog.vulkan_histogram_available()
+                and hasattr(prog, "vulkan_transform_available")
+                and prog.vulkan_transform_available()
             )
     return False
 
@@ -327,7 +367,7 @@ def run_compact(arch_name, n, repeats):
     return stats
 
 
-def run_bucket(arch_name, n, repeats):
+def run_bucket(arch_name, n, repeats, method_override=None):
     values, host = _payload(n)
     num_bins = max(8, min(257, n // 16))
     keys_np = ((np.arange(n, dtype=np.int32) * 37 + 11) % num_bins).astype(np.int32)
@@ -344,7 +384,7 @@ def run_bucket(arch_name, n, repeats):
     offsets.fill(0)
     output.fill(0)
     workspace = ti.algorithms.BucketBuilderWorkspace(max_items=n, max_bins=num_bins)
-    method = _method_for(arch_name, "transform")
+    method = method_override or _method_for(arch_name, "transform")
 
     def body():
         ti.algorithms.experimental_bucket_builder(
@@ -495,7 +535,7 @@ def run_reduce(arch_name, n, repeats):
     return stats
 
 
-def run_scatter_add(arch_name, n, repeats):
+def run_scatter_add(arch_name, n, repeats, method_override=None):
     values, host = _payload(n)
     buckets = max(8, min(257, n // 16))
     indices_np = ((np.arange(n, dtype=np.int32) * 37 + 11) % buckets).astype(np.int32)
@@ -508,7 +548,7 @@ def run_scatter_add(arch_name, n, repeats):
     dst_host["tag"] = np.arange(buckets, dtype=np.int32) * 11 - 5
     dst.from_numpy(dst_host)
     workspace = ti.algorithms.ScatterAddWorkspace(max_items=n)
-    method = _method_for(arch_name, "scatter_add")
+    method = method_override or _method_for(arch_name, "scatter_add")
 
     def body():
         ti.algorithms.experimental_scatter_add(
@@ -545,7 +585,7 @@ def run_scatter_add(arch_name, n, repeats):
     return stats
 
 
-def run_grouped_reduce(arch_name, n, repeats):
+def run_grouped_reduce(arch_name, n, repeats, method_override=None):
     values, host = _payload(n)
     groups = max(8, min(257, n // 16))
     keys_np = ((np.arange(n, dtype=np.int32) * 37 + 11) % groups).astype(np.int32)
@@ -557,7 +597,7 @@ def run_grouped_reduce(arch_name, n, repeats):
     out_host["tag"] = np.arange(groups, dtype=np.int32) * 13 + 9
     output.from_numpy(out_host)
     workspace = ti.algorithms.GroupedReduceWorkspace(max_items=n, max_groups=groups)
-    method = _method_for(arch_name, "grouped_reduce")
+    method = method_override or _method_for(arch_name, "grouped_reduce")
 
     def body():
         ti.algorithms.experimental_grouped_reduce(
@@ -594,12 +634,66 @@ def run_grouped_reduce(arch_name, n, repeats):
     return stats
 
 
+def run_histogram(arch_name, n, repeats, method_override=None):
+    num_bins = max(8, min(257, n // 16))
+    payload = ti.types.struct(value=ti.i32, tag=ti.i32)
+    bin_payload = ti.types.struct(count=ti.i32, tag=ti.i32)
+    values = ti.ndarray(payload, shape=n)
+    bins = ti.ndarray(bin_payload, shape=num_bins)
+    values_np = ((np.arange(n, dtype=np.int32) * 37 + 11) % num_bins).astype(np.int32)
+    values_host = np.zeros((n,), dtype=values.numpy_dtype)
+    values_host["value"] = values_np
+    values_host["tag"] = np.arange(n, dtype=np.int32) * 5 + 1
+    bins_host = np.zeros((num_bins,), dtype=bins.numpy_dtype)
+    bins_host["count"] = -1
+    bins_host["tag"] = np.arange(num_bins, dtype=np.int32) * 13 + 9
+    values.from_numpy(values_host)
+    bins.from_numpy(bins_host)
+    workspace = ti.algorithms.HistogramWorkspace(max_items=n, max_bins=num_bins)
+    method = method_override or _method_for(arch_name, "histogram")
+
+    def body():
+        ti.algorithms.experimental_histogram(
+            values.field("value"),
+            bins.field("count"),
+            method=method,
+            workspace=workspace,
+        )
+
+    stats = _time_call(body, repeats)
+    check_bins = ti.ndarray(bin_payload, shape=num_bins)
+    check_bins.from_numpy(bins_host)
+    ti.algorithms.experimental_histogram(
+        values.field("value"),
+        check_bins.field("count"),
+        method=method,
+        workspace=workspace,
+    )
+    expected = np.bincount(values_np, minlength=num_bins).astype(np.int32)
+    result = check_bins.to_numpy()
+    stats.update(
+        {
+            "primitive": "histogram_scalar_member_values",
+            "workspace_peak": workspace.workspace_bytes_peak,
+            "ok": bool(
+                np.array_equal(result["count"], expected)
+                and np.array_equal(result["tag"], bins_host["tag"])
+            ),
+        }
+    )
+    return stats
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", choices=sorted(ARCHES), default="cpu")
     parser.add_argument("--sizes", default="2048,262144")
     parser.add_argument("--repeats", type=int, default=8)
     parser.add_argument("--output", default=None)
+    parser.add_argument("--bucket-method", default=None)
+    parser.add_argument("--grouped-reduce-method", default=None)
+    parser.add_argument("--histogram-method", default=None)
+    parser.add_argument("--scatter-add-method", default=None)
     parser.add_argument(
         "--primitive",
         choices=[
@@ -613,6 +707,7 @@ def main():
             "scatter",
             "scatter_add",
             "grouped_reduce",
+            "histogram",
             "all",
         ],
         default="all",
@@ -629,6 +724,7 @@ def main():
             "scatter",
             "scatter_add",
             "grouped_reduce",
+            "histogram",
             "sort",
             "compact",
             "bucket",
@@ -639,7 +735,16 @@ def main():
     results = []
     for n in [int(item) for item in args.sizes.split(",") if item]:
         for primitive in primitives:
-            if not _available(args.arch, primitive):
+            method_override = None
+            if primitive == "scatter_add":
+                method_override = args.scatter_add_method
+            elif primitive == "grouped_reduce":
+                method_override = args.grouped_reduce_method
+            elif primitive == "histogram":
+                method_override = args.histogram_method
+            elif primitive == "bucket":
+                method_override = args.bucket_method
+            if not _available(args.arch, primitive, method_override):
                 results.append(
                     {
                         "arch": args.arch,
@@ -665,11 +770,19 @@ def main():
             elif primitive == "scatter":
                 stats = run_indexed_copy(args.arch, n, args.repeats, scatter=True)
             elif primitive == "scatter_add":
-                stats = run_scatter_add(args.arch, n, args.repeats)
+                stats = run_scatter_add(
+                    args.arch, n, args.repeats, args.scatter_add_method
+                )
             elif primitive == "grouped_reduce":
-                stats = run_grouped_reduce(args.arch, n, args.repeats)
+                stats = run_grouped_reduce(
+                    args.arch, n, args.repeats, args.grouped_reduce_method
+                )
+            elif primitive == "histogram":
+                stats = run_histogram(
+                    args.arch, n, args.repeats, args.histogram_method
+                )
             else:
-                stats = run_bucket(args.arch, n, args.repeats)
+                stats = run_bucket(args.arch, n, args.repeats, args.bucket_method)
             stats.update({"arch": args.arch, "n": n})
             results.append(stats)
     payload = json.dumps(results, indent=2, sort_keys=True)

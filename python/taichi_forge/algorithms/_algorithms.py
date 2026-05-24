@@ -135,8 +135,12 @@ _INDEXED_COPY_KERNEL_DTYPES = (i32, f32)
 _SUPPORTED_SCATTER_ADD_METHODS = {
     "auto",
     "cuda_device",
+    "cuda_two_level",
     "vulkan_native",
+    "vulkan_two_level",
+    "two_level",
     "cpu_native",
+    "cpu_two_level",
     "kernel",
     "field_kernel",
 }
@@ -146,8 +150,12 @@ _SCATTER_ADD_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _SUPPORTED_BUCKET_BUILDER_METHODS = {
     "auto",
     "cuda_device",
+    "cuda_two_level",
     "vulkan_native",
+    "vulkan_two_level",
+    "two_level",
     "cpu_native",
+    "cpu_two_level",
     "kernel",
     "field_kernel",
 }
@@ -158,10 +166,14 @@ _SUPPORTED_GROUPED_REDUCE_METHODS = {
     "auto",
     "cuda_device",
     "cuda_segmented",
+    "cuda_two_level",
     "vulkan_native",
     "vulkan_segmented",
+    "vulkan_two_level",
     "segmented",
+    "two_level",
     "cpu_native",
+    "cpu_two_level",
     "kernel",
     "field_kernel",
 }
@@ -184,6 +196,44 @@ _LEGACY_HELPER_AUTO_FALLBACK_ENV = "TAICHI_FORGE_LEGACY_HELPER_AUTO_FALLBACK"
 _legacy_helper_auto_fallback_enabled = None
 _legacy_helper_fallback_counting_enabled = False
 _legacy_helper_fallback_counts = {}
+
+
+def _aggregation_backend_for_method(
+    method,
+    *,
+    cuda_native=(),
+    cuda_two_level=(),
+    vulkan_native=(),
+    vulkan_two_level=(),
+    cpu_native=(),
+    cpu_two_level=(),
+    generic_two_level=("two_level",),
+    allow_auto=True,
+):
+    """Map an aggregation strategy method to the current backend family.
+
+    This is a Python routing helper only. It does not lower IR or allocate
+    device work, so it keeps the DSL strategy layer separate from backend
+    implementation cost.
+    """
+
+    arch = current_cfg().arch
+    if arch == cuda:
+        if (allow_auto and method == "auto") or method in cuda_native:
+            return "cuda_native"
+        if method in generic_two_level or method in cuda_two_level:
+            return "cuda_two_level"
+    if arch == vulkan:
+        if (allow_auto and method == "auto") or method in vulkan_native:
+            return "vulkan_native"
+        if method in generic_two_level or method in vulkan_two_level:
+            return "vulkan_two_level"
+    if arch in [x64, arm64]:
+        if (allow_auto and method == "auto") or method in cpu_native:
+            return "cpu_native"
+        if method in generic_two_level or method in cpu_two_level:
+            return "cpu_two_level"
+    return None
 
 
 def _env_legacy_helper_auto_fallback_enabled():
@@ -842,15 +892,23 @@ class _OrderApplyWorkspaceMixin:
         self._order_apply_pair = None
         self._order_apply_scalar_temp_buffers = {}
         self._order_apply_indexed_copy_workspace = None
+        self._order_apply_transform_workspace = None
+        self._order_apply_inplace_plan_group = None
+        self._order_apply_inplace_plan_groups = {}
 
     def _clear_order_apply_workspace(self):
         if self._order_apply_indexed_copy_workspace is not None:
             self._order_apply_indexed_copy_workspace.clear()
+        if self._order_apply_transform_workspace is not None:
+            self._order_apply_transform_workspace.clear()
         self._order_apply_buffers.clear()
         self._order_apply_pairs.clear()
         self._order_apply_pair = None
         self._order_apply_scalar_temp_buffers.clear()
         self._order_apply_indexed_copy_workspace = None
+        self._order_apply_transform_workspace = None
+        self._order_apply_inplace_plan_group = None
+        self._order_apply_inplace_plan_groups.clear()
 
     def _check_order_apply_items(self, n):
         if self.max_items is not None and n > self.max_items:
@@ -886,7 +944,6 @@ class _OrderApplyWorkspaceMixin:
                 "out": ti_ndarray(i32, shape=n),
             }
             fill_i32_arange_ndarray(pair["in"], n)
-            pair["out"].fill(0)
             self._order_apply_pairs[key] = pair
             self._reserve_order_apply_bytes(2 * n * 4)
         self._order_apply_pair = pair
@@ -908,6 +965,14 @@ class _OrderApplyWorkspaceMixin:
             )
         return self._order_apply_indexed_copy_workspace
 
+    def _get_order_apply_transform_workspace(self, n):
+        self._check_order_apply_items(n)
+        if self._order_apply_transform_workspace is None:
+            self._order_apply_transform_workspace = TransformWorkspace(
+                max_items=self.max_items
+            )
+        return self._order_apply_transform_workspace
+
     def _record_order_apply_child_workspace(self, child_workspace):
         if child_workspace is None:
             return
@@ -915,6 +980,70 @@ class _OrderApplyWorkspaceMixin:
             self.workspace_bytes_peak,
             self.workspace_bytes_current + child_workspace.workspace_bytes_peak,
         )
+
+    def _order_apply_backend_for_method(self, method):
+        arch = current_cfg().arch
+        if arch == cuda and method in ("auto", "cuda_device"):
+            return "cuda_device"
+        if arch == vulkan and method in ("auto", "vulkan_native"):
+            return "vulkan_native"
+        if arch in [x64, arm64] and method in ("auto", "cpu_native"):
+            return "cpu_native"
+        return None
+
+    def _order_apply_inplace_semantic_key(self, values, copy_method):
+        return _component_group_semantic_key(
+            "inplace_order_apply",
+            copy_method,
+            int(values.shape[0]),
+            str(values.scalar_dtype),
+            values.element_shape,
+        )
+
+    def _try_order_apply_inplace_plan_group(self, values, order, output, copy_method):
+        backend = self._order_apply_backend_for_method(copy_method)
+        if backend is None:
+            return False
+        semantic_key = self._order_apply_inplace_semantic_key(values, copy_method)
+        objects = (values, order, output)
+        group = self._order_apply_inplace_plan_group
+        if group is None or not group.matches_request(backend, objects, semantic_key):
+            key = _native_plan_cache_key(backend, objects, semantic_key)
+            group = self._order_apply_inplace_plan_groups.get(key)
+        if group is None or not group.matches_request(backend, objects, semantic_key):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not group.matches_program(prog):
+            return False
+        temp_bytes = group.invoke(prog)
+        if temp_bytes is None:
+            return False
+        self._order_apply_inplace_plan_group = group
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak,
+            self.workspace_bytes_current + temp_bytes,
+        )
+        return True
+
+    def _record_order_apply_inplace_plan_group(
+        self, values, order, output, copy_method, plans
+    ):
+        backend = self._order_apply_backend_for_method(copy_method)
+        if backend is None or not plans:
+            return
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        group = _NativePrimitivePlanGroup(
+            backend,
+            (values, order, output),
+            self._order_apply_inplace_semantic_key(values, copy_method),
+            plans,
+            impl.get_runtime().prog,
+        )
+        self._order_apply_inplace_plan_group = group
+        self._order_apply_inplace_plan_groups[group.cache_key()] = group
 
 
 class SortWorkspace(_OrderApplyWorkspaceMixin):
@@ -1409,6 +1538,11 @@ class HistogramWorkspace:
         self._cuda_cub_active = False
         self._vulkan_native_active = False
         self._native_histogram_plan = None
+        self._native_histogram_plans = {}
+        self._staged_histogram_plan_group = None
+        self._staged_histogram_plan_groups = {}
+        self._staged_member_buffers = {}
+        self._staged_member_transform_workspace = None
 
     def clear(self):
         if self._cuda_cub_active:
@@ -1429,6 +1563,13 @@ class HistogramWorkspace:
         self._cuda_cub_active = False
         self._vulkan_native_active = False
         self._native_histogram_plan = None
+        self._native_histogram_plans.clear()
+        self._staged_histogram_plan_group = None
+        self._staged_histogram_plan_groups.clear()
+        self._staged_member_buffers.clear()
+        if self._staged_member_transform_workspace is not None:
+            self._staged_member_transform_workspace.clear()
+        self._staged_member_transform_workspace = None
 
     def check_shape(self, n, num_bins):
         if self.max_items is not None and n > self.max_items:
@@ -1460,12 +1601,20 @@ class HistogramWorkspace:
         return self._field_buffers[key]
 
     def _native_histogram_backend_for_method(self, method):
-        arch = current_cfg().arch
-        if arch == cuda and method in ("auto", "cuda_cub"):
+        backend = _aggregation_backend_for_method(
+            method,
+            cuda_native=("cuda_cub",),
+            cuda_two_level=("cuda_two_level",),
+            vulkan_native=("vulkan_native",),
+            vulkan_two_level=("vulkan_two_level",),
+            cpu_native=("cpu_native",),
+            cpu_two_level=("cpu_two_level",),
+        )
+        if backend in ("cuda_native", "cuda_two_level"):
             return "cuda_cub"
-        if arch == vulkan and method in ("auto", "vulkan_native"):
+        if backend in ("vulkan_native", "vulkan_two_level"):
             return "vulkan_native"
-        if arch in [x64, arm64] and method in ("auto", "cpu_native"):
+        if backend in ("cpu_native", "cpu_two_level"):
             return "cpu_native"
         return None
 
@@ -1482,21 +1631,27 @@ class HistogramWorkspace:
 
     def _try_native_histogram_plan(self, values, bins, method, value_type, bin_type):
         backend = self._native_histogram_backend_for_method(method)
-        if backend is None or self._native_histogram_plan is None:
+        if backend is None:
+            return False
+        semantic_key = (int(value_type), int(bin_type))
+        objects = (values, bins)
+        plan = self._native_histogram_plan
+        if plan is None or not plan.matches_request(backend, objects, semantic_key):
+            key = _native_plan_cache_key(backend, objects, semantic_key)
+            plan = self._native_histogram_plans.get(key)
+        if plan is None:
+            return False
+        if not plan.matches_request(backend, objects, semantic_key):
             return False
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         prog = impl.get_runtime().prog
-        semantic_key = (int(value_type), int(bin_type))
-        if not self._native_histogram_plan.matches_request(
-            backend, (values, bins), semantic_key
-        ):
+        if not plan.matches_program(prog):
             return False
-        if not self._native_histogram_plan.matches_program(prog):
-            return False
-        temp_bytes = self._native_histogram_plan.invoke(prog)
+        temp_bytes = plan.invoke(prog)
         if temp_bytes is None:
             return False
+        self._native_histogram_plan = plan
         self._mark_native_histogram_backend_active(backend, temp_bytes)
         return True
 
@@ -1512,7 +1667,7 @@ class HistogramWorkspace:
         n,
         prog,
     ):
-        self._native_histogram_plan = _NativePrimitivePlan(
+        plan = _NativePrimitivePlan(
             backend=backend,
             method_name=method_name,
             objects=(values, bins),
@@ -1522,6 +1677,106 @@ class HistogramWorkspace:
             value_type=value_type,
             n=n,
         )
+        self._native_histogram_plan = plan
+        self._native_histogram_plans[plan.cache_key()] = plan
+
+    def _staged_histogram_semantic_key(
+        self, method, value_type, bin_type, n, num_bins
+    ):
+        return _component_group_semantic_key(
+            "histogram_staged",
+            method,
+            int(value_type),
+            int(bin_type),
+            int(n),
+            int(num_bins),
+        )
+
+    def _try_staged_histogram_plan_group(
+        self, values, bins, method, value_type, bin_type, n, num_bins
+    ):
+        backend = self._native_histogram_backend_for_method(method)
+        if backend is None:
+            return False
+        semantic_key = self._staged_histogram_semantic_key(
+            method, value_type, bin_type, n, num_bins
+        )
+        objects = (values, bins)
+        group = self._staged_histogram_plan_group
+        if group is None or not group.matches_request(backend, objects, semantic_key):
+            key = _native_plan_cache_key(backend, objects, semantic_key)
+            group = self._staged_histogram_plan_groups.get(key)
+        if group is None or not group.matches_request(backend, objects, semantic_key):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not group.matches_program(prog):
+            return False
+        temp_bytes = group.invoke(prog)
+        if temp_bytes is None:
+            return False
+        self._staged_histogram_plan_group = group
+        if group.plans:
+            self._native_histogram_plan = group.plans[-1]
+        self._mark_native_histogram_backend_active(backend, temp_bytes)
+        self._record_staged_child_workspace(self._staged_member_transform_workspace)
+        return True
+
+    def _record_staged_histogram_plan_group(
+        self, values, bins, method, value_type, bin_type, n, num_bins, plans
+    ):
+        backend = self._native_histogram_backend_for_method(method)
+        if backend is None or len(plans) < 2:
+            return
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        semantic_key = self._staged_histogram_semantic_key(
+            method, value_type, bin_type, n, num_bins
+        )
+        group = _NativePrimitivePlanGroup(
+            backend, (values, bins), semantic_key, plans, prog
+        )
+        self._staged_histogram_plan_groups[group.cache_key()] = group
+        self._staged_histogram_plan_group = group
+
+    def _record_staged_child_workspace(self, child_workspace):
+        if child_workspace is None:
+            return
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak,
+            self.workspace_bytes_current + child_workspace.workspace_bytes_peak,
+        )
+
+    def _get_staged_member_transform_workspace(self):
+        if self._staged_member_transform_workspace is None:
+            self._staged_member_transform_workspace = TransformWorkspace()
+        return self._staged_member_transform_workspace
+
+    def _get_staged_member_buffer(self, role, dtype, n):
+        limit = self.max_bins if role == "bins" else self.max_items
+        if limit is not None and n > limit:
+            kind = "bins" if role == "bins" else "items"
+            raise ValueError(
+                f"Requested {n} histogram {kind}, exceeding max_{kind}={limit}."
+            )
+        key = (role, str(dtype), int(n))
+        buffer = self._staged_member_buffers.get(key)
+        if buffer is None:
+            buffer = ti_ndarray(dtype, shape=n)
+            self._staged_member_buffers[key] = buffer
+            self.workspace_bytes_current += n * _dtype_nbytes(dtype)
+            self.workspace_bytes_peak = max(
+                self.workspace_bytes_peak, self.workspace_bytes_current
+            )
+            self._native_histogram_plan = None
+            self._native_histogram_plans.clear()
+            self._staged_histogram_plan_group = None
+            self._staged_histogram_plan_groups.clear()
+            if self._staged_member_transform_workspace is not None:
+                self._staged_member_transform_workspace.clear()
+        return buffer
 
 
 class TransformWorkspace:
@@ -1822,33 +2077,92 @@ class ScatterAddWorkspace:
     implementations can report temporary storage without changing the API.
     """
 
-    def __init__(self, max_items=None):
+    def __init__(self, max_items=None, max_groups=None):
         self.max_items = max_items
+        self.max_groups = max_groups
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
+        self._native_scatter_add_plan = None
         self._native_scatter_add_plans = []
         self._native_scatter_add_plan_groups = {}
+        self._native_add_merge_plan = None
+        self._native_add_merge_plans = []
+        self._two_level_scatter_add_plan_group = None
+        self._two_level_scatter_add_plan_groups = {}
+        self._two_level_grouped_reduce_workspace = None
+        self._two_level_scratch_buffers = {}
+        self._two_level_values_buffers = {}
+        self._two_level_transform_workspace = None
 
-    def check_shape(self, n):
+    def check_shape(self, n, num_groups=None):
         if self.max_items is not None and n > self.max_items:
             raise ValueError(
                 f"Requested {n} scatter-add items, exceeding max_items={self.max_items}."
             )
+        if (
+            num_groups is not None
+            and self.max_groups is not None
+            and num_groups > self.max_groups
+        ):
+            raise ValueError(
+                f"Requested {num_groups} scatter-add groups, exceeding "
+                f"max_groups={self.max_groups}."
+            )
 
     def _native_scatter_add_backend_for_method(self, method):
-        arch = current_cfg().arch
-        if arch == cuda and method in ("auto", "cuda_device"):
+        backend = _aggregation_backend_for_method(
+            method,
+            cuda_native=("cuda_device",),
+            vulkan_native=("vulkan_native",),
+            cpu_native=("cpu_native",),
+            generic_two_level=(),
+        )
+        if backend == "cuda_native":
             return "cuda_device"
-        if arch == vulkan and method in ("auto", "vulkan_native"):
+        if backend == "vulkan_native":
             return "vulkan_native"
-        if arch in [x64, arm64] and method in ("auto", "cpu_native"):
+        if backend == "cpu_native":
             return "cpu_native"
+        return None
+
+    def _native_two_level_scatter_add_backend_for_method(self, method):
+        backend = _aggregation_backend_for_method(
+            method,
+            cuda_two_level=("cuda_two_level",),
+            vulkan_two_level=("vulkan_two_level",),
+            cpu_two_level=("cpu_two_level",),
+            generic_two_level=("two_level",),
+            allow_auto=False,
+        )
+        if backend == "cuda_two_level":
+            return "cuda_device_two_level_scatter_add"
+        if backend == "vulkan_two_level":
+            return "vulkan_native_two_level_scatter_add"
+        if backend == "cpu_two_level":
+            return "cpu_native_two_level_scatter_add"
+        return None
+
+    def _native_add_merge_backend_for_method(self, method):
+        backend = _aggregation_backend_for_method(
+            method,
+            cuda_two_level=("cuda_two_level",),
+            vulkan_two_level=("vulkan_two_level",),
+            cpu_two_level=("cpu_two_level",),
+            generic_two_level=("two_level",),
+            allow_auto=False,
+        )
+        if backend == "cuda_two_level":
+            return "cuda_device_add_merge"
+        if backend == "vulkan_two_level":
+            return "vulkan_native_add_merge"
+        if backend == "cpu_two_level":
+            return "cpu_native_add_merge"
         return None
 
     def _mark_native_scatter_add_backend_active(self, backend, temp_bytes):
         temp_bytes = 0 if temp_bytes is None else temp_bytes
-        if backend == "vulkan_native":
+        if backend and backend.startswith("vulkan_"):
             self._vulkan_native_active = True
         self.workspace_bytes_current = max(self.workspace_bytes_current, temp_bytes)
         self.workspace_bytes_peak = max(
@@ -1888,17 +2202,25 @@ class ScatterAddWorkspace:
         objects, semantic_key = self._native_scatter_add_request_signature(
             src, indices, dst, value_type
         )
-        for plan in self._native_scatter_add_plans:
-            if not plan.matches_request(backend, objects, semantic_key):
-                continue
-            if not plan.matches_program(prog):
-                continue
-            temp_bytes = plan.invoke(prog)
-            if temp_bytes is None:
-                return False
-            self._mark_native_scatter_add_backend_active(backend, temp_bytes)
-            return True
-        return False
+        plan = self._native_scatter_add_plan
+        if plan is None or not plan.matches_request(backend, objects, semantic_key):
+            plan = None
+            for cached in self._native_scatter_add_plans:
+                if cached.matches_request(backend, objects, semantic_key):
+                    plan = cached
+                    break
+        if plan is None:
+            return False
+        if not plan.matches_request(backend, objects, semantic_key):
+            return False
+        if not plan.matches_program(prog):
+            return False
+        temp_bytes = plan.invoke(prog)
+        if temp_bytes is None:
+            return False
+        self._native_scatter_add_plan = plan
+        self._mark_native_scatter_add_backend_active(backend, temp_bytes)
+        return True
 
     def _try_native_scatter_add_plan_group(
         self, src, indices, dst, method, value_type
@@ -1939,6 +2261,7 @@ class ScatterAddWorkspace:
             value_type=value_type,
             n=n,
         )
+        self._native_scatter_add_plan = plan
         for i, cached in enumerate(self._native_scatter_add_plans):
             if cached.matches_request(backend, objects, semantic_key):
                 self._native_scatter_add_plans[i] = plan
@@ -1957,6 +2280,209 @@ class ScatterAddWorkspace:
             plans,
         )
 
+    def _native_add_merge_request_signature(self, src, dst, value_type, n):
+        src_view = _primitive_view(src)
+        dst_view = _primitive_view(dst)
+        if src_view is None or dst_view is None:
+            return (src, dst), (int(value_type), int(n))
+        if src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
+            src_obj = src_view.payload_arr if src_view.is_struct_scalar_member else src
+            dst_obj = dst_view.payload_arr if dst_view.is_struct_scalar_member else dst
+            return (
+                src_obj,
+                dst_obj,
+            ), (
+                int(value_type),
+                int(n),
+                src_view.storage,
+                dst_view.storage,
+                int(src_view.offset),
+                int(src_view.stride),
+                int(dst_view.offset),
+                int(dst_view.stride),
+            )
+        if dst_view.is_dense_field:
+            return (src, dst), (int(value_type), int(n), "dense_field")
+        return (src, dst), (int(value_type), int(n))
+
+    def _try_native_add_merge_plan(self, src, dst, method, value_type, n):
+        backend = self._native_add_merge_backend_for_method(method)
+        if backend is None:
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        objects, semantic_key = self._native_add_merge_request_signature(
+            src, dst, value_type, n
+        )
+        plan = self._native_add_merge_plan
+        if plan is None or not plan.matches_request(backend, objects, semantic_key):
+            plan = None
+            for cached in self._native_add_merge_plans:
+                if cached.matches_request(backend, objects, semantic_key):
+                    plan = cached
+                    break
+        if plan is None:
+            return False
+        if not plan.matches_program(prog):
+            return False
+        temp_bytes = plan.invoke(prog)
+        if temp_bytes is None:
+            return False
+        self._native_add_merge_plan = plan
+        self._mark_native_scatter_add_backend_active(backend, temp_bytes)
+        return True
+
+    def _record_native_add_merge_plan(
+        self, backend, method_name, src, dst, value_type, call_args, n, prog
+    ):
+        objects, semantic_key = self._native_add_merge_request_signature(
+            src, dst, value_type, n
+        )
+        plan = _NativePrimitivePlan(
+            backend=backend,
+            method_name=method_name,
+            objects=objects,
+            semantic_key=semantic_key,
+            call_args=call_args,
+            prog=prog,
+            value_type=value_type,
+            n=n,
+        )
+        self._native_add_merge_plan = plan
+        for i, cached in enumerate(self._native_add_merge_plans):
+            if cached.matches_request(backend, objects, semantic_key):
+                self._native_add_merge_plans[i] = plan
+                return plan
+        self._native_add_merge_plans.append(plan)
+        return plan
+
+    def _two_level_scatter_add_semantic_key(self, src, indices, dst, method, value_type):
+        return _component_group_semantic_key(
+            "scatter_add_two_level",
+            method,
+            int(value_type),
+            int(indices.shape[0]),
+            int(dst.shape[0]),
+            str(getattr(src, "dtype", getattr(src, "scalar_dtype", ""))),
+        )
+
+    def _try_two_level_scatter_add_plan_group(self, src, indices, dst, method, value_type):
+        backend = self._native_two_level_scatter_add_backend_for_method(method)
+        if backend is None:
+            return False
+        semantic_key = self._two_level_scatter_add_semantic_key(
+            src, indices, dst, method, value_type
+        )
+        objects = (src, indices, dst)
+        group = self._two_level_scatter_add_plan_group
+        if group is None or not group.matches_request(backend, objects, semantic_key):
+            key = _native_plan_cache_key(backend, objects, semantic_key)
+            group = self._two_level_scatter_add_plan_groups.get(key)
+        if group is None or not group.matches_request(backend, objects, semantic_key):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not group.matches_program(prog):
+            return False
+        temp_bytes = group.invoke(prog)
+        if temp_bytes is None:
+            return False
+        self._two_level_scatter_add_plan_group = group
+        self._mark_native_scatter_add_backend_active(backend, temp_bytes)
+        self._record_two_level_child_workspace(
+            self._two_level_grouped_reduce_workspace
+        )
+        self._record_two_level_child_workspace(self._two_level_transform_workspace)
+        return True
+
+    def _record_two_level_scatter_add_plan_group(
+        self, src, indices, dst, method, value_type, plans
+    ):
+        backend = self._native_two_level_scatter_add_backend_for_method(method)
+        if backend is None or len(plans) < 2:
+            return
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        semantic_key = self._two_level_scatter_add_semantic_key(
+            src, indices, dst, method, value_type
+        )
+        group = _NativePrimitivePlanGroup(
+            backend, (src, indices, dst), semantic_key, plans, prog
+        )
+        self._two_level_scatter_add_plan_groups[group.cache_key()] = group
+        self._two_level_scatter_add_plan_group = group
+
+    def _clear_two_level_plan_groups(self):
+        self._two_level_scatter_add_plan_group = None
+        self._two_level_scatter_add_plan_groups.clear()
+
+    def _clear_two_level_add_merge_plans(self):
+        self._native_add_merge_plan = None
+        self._native_add_merge_plans.clear()
+
+    def _record_two_level_child_workspace(self, child_workspace):
+        if child_workspace is None:
+            return
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak,
+            self.workspace_bytes_current + child_workspace.workspace_bytes_peak,
+        )
+
+    def _get_two_level_grouped_reduce_workspace(self, n, num_groups):
+        if self._two_level_grouped_reduce_workspace is None:
+            self._two_level_grouped_reduce_workspace = GroupedReduceWorkspace(
+                max_items=self.max_items, max_groups=self.max_groups
+            )
+        self._two_level_grouped_reduce_workspace.check_shape(n, num_groups)
+        return self._two_level_grouped_reduce_workspace
+
+    def _get_two_level_transform_workspace(self, n):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} scatter-add items, exceeding max_items={self.max_items}."
+            )
+        if self._two_level_transform_workspace is None:
+            self._two_level_transform_workspace = TransformWorkspace(
+                max_items=self.max_items
+            )
+        return self._two_level_transform_workspace
+
+    def _get_two_level_scratch(self, num_groups, dtype):
+        key = (str(dtype), int(num_groups))
+        scratch = self._two_level_scratch_buffers.get(key)
+        if scratch is None:
+            scratch = ti_ndarray(dtype, shape=num_groups)
+            self._two_level_scratch_buffers[key] = scratch
+            self.workspace_bytes_current += num_groups * _dtype_nbytes(dtype)
+            self.workspace_bytes_peak = max(
+                self.workspace_bytes_peak, self.workspace_bytes_current
+            )
+            self._clear_two_level_plan_groups()
+            self._clear_two_level_add_merge_plans()
+        return scratch
+
+    def _get_two_level_values_scratch(self, n, dtype):
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} scatter-add items, exceeding max_items={self.max_items}."
+            )
+        key = (str(dtype), int(n))
+        scratch = self._two_level_values_buffers.get(key)
+        if scratch is None:
+            scratch = ti_ndarray(dtype, shape=n)
+            self._two_level_values_buffers[key] = scratch
+            self.workspace_bytes_current += n * _dtype_nbytes(dtype)
+            self.workspace_bytes_peak = max(
+                self.workspace_bytes_peak, self.workspace_bytes_current
+            )
+            self._clear_two_level_plan_groups()
+            if self._two_level_transform_workspace is not None:
+                self._two_level_transform_workspace.clear()
+        return scratch
+
     def clear(self):
         if self._vulkan_native_active:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -1964,11 +2490,24 @@ class ScatterAddWorkspace:
             prog = impl.get_runtime().prog
             if hasattr(prog, "vulkan_scatter_add_clear_workspace"):
                 prog.vulkan_scatter_add_clear_workspace()
+            if hasattr(prog, "vulkan_add_merge_clear_workspace"):
+                prog.vulkan_add_merge_clear_workspace()
+        if self._two_level_grouped_reduce_workspace is not None:
+            self._two_level_grouped_reduce_workspace.clear()
+        if self._two_level_transform_workspace is not None:
+            self._two_level_transform_workspace.clear()
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
+        self._native_scatter_add_plan = None
         self._native_scatter_add_plans.clear()
         self._native_scatter_add_plan_groups.clear()
+        self._clear_two_level_add_merge_plans()
+        self._clear_two_level_plan_groups()
+        self._two_level_grouped_reduce_workspace = None
+        self._two_level_scratch_buffers.clear()
+        self._two_level_values_buffers.clear()
+        self._two_level_transform_workspace = None
 
 
 class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
@@ -1988,6 +2527,8 @@ class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
         self._cursor_field = None
         self._scanner_cache = {}
         self._init_order_apply_workspace("bucket")
+        self._native_bucket_builder_plan = None
+        self._native_bucket_builder_plans = {}
         self._vulkan_native_active = False
 
     def check_shape(self, n, num_bins):
@@ -2013,6 +2554,7 @@ class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
         self._cursor_field = None
         self._scanner_cache.clear()
         self._clear_order_apply_workspace()
+        self._clear_native_bucket_builder_plans()
         self._vulkan_native_active = False
 
     def _reserve_bytes(self, bytes_used):
@@ -2021,10 +2563,108 @@ class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
             self.workspace_bytes_peak, self.workspace_bytes_current
         )
 
+    def _clear_native_bucket_builder_plans(self):
+        self._native_bucket_builder_plan = None
+        self._native_bucket_builder_plans.clear()
+
+    def _native_bucket_builder_backend_for_current_arch(self):
+        arch = current_cfg().arch
+        if arch == cuda:
+            return "cuda_device_bucket_builder"
+        if arch == vulkan:
+            return "vulkan_native_bucket_builder"
+        if arch in [x64, arm64]:
+            return "cpu_native_bucket_builder"
+        return None
+
+    def _mark_native_bucket_builder_backend_active(self, backend, temp_bytes):
+        if backend and backend.startswith("vulkan_"):
+            self._vulkan_native_active = True
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak,
+            self.workspace_bytes_current + temp_bytes,
+        )
+
+    def _native_bucket_builder_request_signature(
+        self, keys, values, offsets, output, value_type, n, num_bins
+    ):
+        return (
+            keys,
+            values,
+            offsets,
+            output,
+        ), (
+            int(value_type),
+            int(n),
+            int(num_bins),
+        )
+
+    def _try_native_bucket_builder_plan(
+        self, keys, values, offsets, output, value_type, n, num_bins
+    ):
+        backend = self._native_bucket_builder_backend_for_current_arch()
+        if backend is None:
+            return False
+        objects, semantic_key = self._native_bucket_builder_request_signature(
+            keys, values, offsets, output, value_type, n, num_bins
+        )
+        plan = self._native_bucket_builder_plan
+        if plan is None or not plan.matches_request(backend, objects, semantic_key):
+            key = _native_plan_cache_key(backend, objects, semantic_key)
+            plan = self._native_bucket_builder_plans.get(key)
+        if plan is None:
+            return False
+        if not plan.matches_request(backend, objects, semantic_key):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not plan.matches_program(prog):
+            return False
+        temp_bytes = plan.invoke(prog)
+        if temp_bytes is None:
+            return False
+        self._native_bucket_builder_plan = plan
+        self._mark_native_bucket_builder_backend_active(backend, temp_bytes)
+        return True
+
+    def _record_native_bucket_builder_plan(
+        self,
+        method_name,
+        keys,
+        values,
+        offsets,
+        output,
+        value_type,
+        call_args,
+        n,
+        num_bins,
+        prog,
+    ):
+        backend = self._native_bucket_builder_backend_for_current_arch()
+        if backend is None:
+            return
+        objects, semantic_key = self._native_bucket_builder_request_signature(
+            keys, values, offsets, output, value_type, n, num_bins
+        )
+        plan = _NativePrimitivePlan(
+            backend=backend,
+            method_name=method_name,
+            objects=objects,
+            semantic_key=semantic_key,
+            call_args=call_args,
+            prog=prog,
+            value_type=value_type,
+            n=n,
+        )
+        self._native_bucket_builder_plan = plan
+        self._native_bucket_builder_plans[plan.cache_key()] = plan
+
     def _get_cursor_ndarray(self, num_bins):
         if self._cursor_ndarray is None or self._cursor_ndarray.shape[0] < num_bins:
             self._cursor_ndarray = ti_ndarray(i32, shape=num_bins)
             self._reserve_bytes(num_bins * 4)
+            self._clear_native_bucket_builder_plans()
         return self._cursor_ndarray
 
     def _get_cursor_field(self, num_bins):
@@ -2060,6 +2700,13 @@ class GroupedReduceWorkspace:
         self._offsets_ndarray = None
         self._scratch_ndarray = None
         self._cursor_ndarray = None
+        self._native_grouped_reduce_plan = None
+        self._native_grouped_reduce_plans = {}
+        self._native_grouped_reduce_plan_groups = {}
+        self._staged_grouped_reduce_plan_group = None
+        self._staged_grouped_reduce_plan_groups = {}
+        self._staged_member_buffers = {}
+        self._staged_member_transform_workspace = None
         self._vulkan_native_active = False
 
     def check_shape(self, n, num_groups):
@@ -2084,6 +2731,11 @@ class GroupedReduceWorkspace:
         self._offsets_ndarray = None
         self._scratch_ndarray = None
         self._cursor_ndarray = None
+        self._staged_member_buffers.clear()
+        if self._staged_member_transform_workspace is not None:
+            self._staged_member_transform_workspace.clear()
+        self._staged_member_transform_workspace = None
+        self._clear_native_grouped_reduce_plans()
         self._vulkan_native_active = False
 
     def _reserve_bytes(self, bytes_used):
@@ -2092,26 +2744,267 @@ class GroupedReduceWorkspace:
             self.workspace_bytes_peak, self.workspace_bytes_current
         )
 
+    def _clear_native_grouped_reduce_plans(self):
+        self._native_grouped_reduce_plan = None
+        self._native_grouped_reduce_plans.clear()
+        self._native_grouped_reduce_plan_groups.clear()
+        self._staged_grouped_reduce_plan_group = None
+        self._staged_grouped_reduce_plan_groups.clear()
+
+    def _mark_native_grouped_reduce_backend_active(self, backend, temp_bytes):
+        if backend.startswith("vulkan_"):
+            self._vulkan_native_active = True
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak,
+            self.workspace_bytes_current + temp_bytes,
+        )
+
+    def _native_grouped_reduce_backend_for_method(self, method):
+        backend = _aggregation_backend_for_method(
+            method,
+            cuda_native=("cuda_device",),
+            cuda_two_level=("cuda_segmented", "cuda_two_level"),
+            vulkan_native=("vulkan_native",),
+            vulkan_two_level=("vulkan_segmented", "vulkan_two_level"),
+            cpu_native=("cpu_native",),
+            cpu_two_level=("cpu_two_level",),
+            generic_two_level=("segmented", "two_level"),
+        )
+        if backend == "cuda_native":
+            return "cuda_device_atomic"
+        if backend == "cuda_two_level":
+            return "cuda_device_two_level"
+        if backend == "vulkan_native":
+            return "vulkan_native_atomic"
+        if backend == "vulkan_two_level":
+            return "vulkan_native_two_level"
+        if backend in ("cpu_native", "cpu_two_level"):
+            return "cpu_native_two_level"
+        return None
+
+    def _native_grouped_reduce_request_signature(
+        self, keys, values, output, value_type, op_id, n, num_groups
+    ):
+        return (
+            keys,
+            values,
+            output,
+        ), (
+            int(value_type),
+            int(op_id),
+            int(n),
+            int(num_groups),
+        )
+
+    def _try_native_grouped_reduce_plan(
+        self, backend, keys, values, output, value_type, op_id, n, num_groups
+    ):
+        if backend is None:
+            return False
+        objects, semantic_key = self._native_grouped_reduce_request_signature(
+            keys, values, output, value_type, op_id, n, num_groups
+        )
+        plan = self._native_grouped_reduce_plan
+        if plan is None or not plan.matches_request(backend, objects, semantic_key):
+            key = _native_plan_cache_key(backend, objects, semantic_key)
+            plan = self._native_grouped_reduce_plans.get(key)
+        if plan is None:
+            return False
+        if not plan.matches_request(backend, objects, semantic_key):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not plan.matches_program(prog):
+            return False
+        temp_bytes = plan.invoke(prog)
+        if temp_bytes is None:
+            return False
+        self._native_grouped_reduce_plan = plan
+        self._mark_native_grouped_reduce_backend_active(backend, temp_bytes)
+        return True
+
+    def _try_native_grouped_reduce_plan_group(
+        self, keys, values, output, method, value_type, op_id
+    ):
+        backend = self._native_grouped_reduce_backend_for_method(method)
+        return _try_native_component_plan_group(
+            self._native_grouped_reduce_plan_groups,
+            backend,
+            (keys, values, output),
+            (int(value_type), int(op_id), int(output.shape[0])),
+            lambda _group, temp_bytes: self._mark_native_grouped_reduce_backend_active(
+                backend, temp_bytes
+            ),
+        )
+
+    def _record_native_grouped_reduce_plan(
+        self,
+        backend,
+        method_name,
+        keys,
+        values,
+        output,
+        value_type,
+        op_id,
+        call_args,
+        n,
+        num_groups,
+        prog,
+    ):
+        objects, semantic_key = self._native_grouped_reduce_request_signature(
+            keys, values, output, value_type, op_id, n, num_groups
+        )
+        plan = _NativePrimitivePlan(
+            backend=backend,
+            method_name=method_name,
+            objects=objects,
+            semantic_key=semantic_key,
+            call_args=call_args,
+            prog=prog,
+            value_type=value_type,
+            n=n,
+        )
+        self._native_grouped_reduce_plans[plan.cache_key()] = plan
+        self._native_grouped_reduce_plan = plan
+
+    def _record_native_grouped_reduce_plan_group(
+        self, keys, values, output, method, value_type, op_id, plans
+    ):
+        backend = self._native_grouped_reduce_backend_for_method(method)
+        _record_native_component_plan_group(
+            self._native_grouped_reduce_plan_groups,
+            backend,
+            (keys, values, output),
+            (int(value_type), int(op_id), int(output.shape[0])),
+            plans,
+        )
+
+    def _staged_grouped_reduce_semantic_key(
+        self, method, value_type, op_id, n, num_groups
+    ):
+        return _component_group_semantic_key(
+            "grouped_reduce_staged",
+            method,
+            int(value_type),
+            int(op_id),
+            int(n),
+            int(num_groups),
+        )
+
+    def _try_staged_grouped_reduce_plan_group(
+        self, keys, values, output, method, value_type, op_id, n, num_groups
+    ):
+        backend = self._native_grouped_reduce_backend_for_method(method)
+        if backend != "vulkan_native_two_level":
+            return False
+        semantic_key = self._staged_grouped_reduce_semantic_key(
+            method, value_type, op_id, n, num_groups
+        )
+        objects = (keys, values, output)
+        group = self._staged_grouped_reduce_plan_group
+        if group is None or not group.matches_request(backend, objects, semantic_key):
+            key = _native_plan_cache_key(backend, objects, semantic_key)
+            group = self._staged_grouped_reduce_plan_groups.get(key)
+        if group is None or not group.matches_request(backend, objects, semantic_key):
+            return False
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if not group.matches_program(prog):
+            return False
+        temp_bytes = group.invoke(prog)
+        if temp_bytes is None:
+            return False
+        self._staged_grouped_reduce_plan_group = group
+        if group.plans:
+            self._native_grouped_reduce_plan = group.plans[-1]
+        self._mark_native_grouped_reduce_backend_active(backend, temp_bytes)
+        self._record_staged_child_workspace(self._staged_member_transform_workspace)
+        return True
+
+    def _record_staged_grouped_reduce_plan_group(
+        self, keys, values, output, method, value_type, op_id, n, num_groups, plans
+    ):
+        backend = self._native_grouped_reduce_backend_for_method(method)
+        if backend != "vulkan_native_two_level" or len(plans) < 2:
+            return
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        semantic_key = self._staged_grouped_reduce_semantic_key(
+            method, value_type, op_id, n, num_groups
+        )
+        group = _NativePrimitivePlanGroup(
+            backend, (keys, values, output), semantic_key, plans, prog
+        )
+        self._staged_grouped_reduce_plan_groups[group.cache_key()] = group
+        self._staged_grouped_reduce_plan_group = group
+
+    def _record_staged_child_workspace(self, child_workspace):
+        if child_workspace is None:
+            return
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak,
+            self.workspace_bytes_current + child_workspace.workspace_bytes_peak,
+        )
+
+    def _get_staged_member_transform_workspace(self):
+        if self._staged_member_transform_workspace is None:
+            self._staged_member_transform_workspace = TransformWorkspace()
+        return self._staged_member_transform_workspace
+
+    def _get_staged_member_buffer(self, role, dtype, n):
+        if role == "output":
+            if self.max_groups is not None and n > self.max_groups:
+                raise ValueError(
+                    f"Requested {n} grouped-reduce groups, exceeding "
+                    f"max_groups={self.max_groups}."
+                )
+        elif self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} grouped-reduce items, exceeding "
+                f"max_items={self.max_items}."
+            )
+        key = (role, str(dtype), int(n))
+        buffer = self._staged_member_buffers.get(key)
+        if buffer is None:
+            buffer = ti_ndarray(dtype, shape=n)
+            self._staged_member_buffers[key] = buffer
+            self._reserve_bytes(n * _dtype_nbytes(dtype))
+            self._clear_native_grouped_reduce_plans()
+            if self._staged_member_transform_workspace is not None:
+                self._staged_member_transform_workspace.clear()
+        return buffer
+
     def _get_native_buffers(self, n, num_groups):
+        reallocate = False
         if (
             self._offsets_ndarray is None
             or self._offsets_ndarray.shape[0] < num_groups + 1
         ):
+            reallocate = True
             self._offsets_ndarray = ti_ndarray(i32, shape=num_groups + 1)
             self._reserve_bytes((num_groups + 1) * 4)
         if self._scratch_ndarray is None or self._scratch_ndarray.shape[0] < n:
+            reallocate = True
             self._scratch_ndarray = ti_ndarray(i32, shape=n)
             self._reserve_bytes(n * 4)
         if self._cursor_ndarray is None or self._cursor_ndarray.shape[0] < num_groups:
+            reallocate = True
             self._cursor_ndarray = ti_ndarray(i32, shape=num_groups)
             self._reserve_bytes(num_groups * 4)
+        if reallocate:
+            self._clear_native_grouped_reduce_plans()
         return self._offsets_ndarray, self._scratch_ndarray, self._cursor_ndarray
 
     def _get_native_buffers_typed(self, n, num_groups, value_dtype):
+        reallocate = False
         if (
             self._offsets_ndarray is None
             or self._offsets_ndarray.shape[0] < num_groups + 1
         ):
+            reallocate = True
             self._offsets_ndarray = ti_ndarray(i32, shape=num_groups + 1)
             self._reserve_bytes((num_groups + 1) * 4)
         if (
@@ -2119,11 +3012,15 @@ class GroupedReduceWorkspace:
             or self._scratch_ndarray.dtype != value_dtype
             or self._scratch_ndarray.shape[0] < n
         ):
+            reallocate = True
             self._scratch_ndarray = ti_ndarray(value_dtype, shape=n)
             self._reserve_bytes(n * _dtype_nbytes(value_dtype))
         if self._cursor_ndarray is None or self._cursor_ndarray.shape[0] < num_groups:
+            reallocate = True
             self._cursor_ndarray = ti_ndarray(i32, shape=num_groups)
             self._reserve_bytes(num_groups * 4)
+        if reallocate:
+            self._clear_native_grouped_reduce_plans()
         return self._offsets_ndarray, self._scratch_ndarray, self._cursor_ndarray
 
 
@@ -2782,6 +3679,22 @@ def _apply_order_to_tensor_member_values(
         return
     if not hasattr(workspace, "_get_scalar_temp_buffer"):
         raise RuntimeError("tensor member order apply requires scalar temp buffers.")
+    if hasattr(workspace, "_try_order_apply_inplace_plan_group"):
+        if workspace._try_order_apply_inplace_plan_group(
+            values, order, output, copy_method
+        ):
+            return
+    copy_workspace = None
+    transform_workspace = None
+    if hasattr(workspace, "_get_order_apply_indexed_copy_workspace"):
+        copy_workspace = workspace._get_order_apply_indexed_copy_workspace(
+            values.shape[0]
+        )
+    if hasattr(workspace, "_get_order_apply_transform_workspace"):
+        transform_workspace = workspace._get_order_apply_transform_workspace(
+            values.shape[0]
+        )
+    component_plans = []
     for value_component, output_component in zip(
         _struct_tensor_member_components(values),
         _struct_tensor_member_components(output),
@@ -2792,14 +3705,29 @@ def _apply_order_to_tensor_member_values(
             order,
             temp,
             method=copy_method,
+            workspace=copy_workspace,
         )
+        if copy_workspace is not None and copy_workspace._native_indexed_copy_plan:
+            component_plans.append(copy_workspace._native_indexed_copy_plan)
         experimental_transform(
             temp,
             output_component,
             scale=1,
             bias=0,
             method=copy_method,
+            workspace=transform_workspace,
         )
+        if transform_workspace is not None and transform_workspace._native_transform_plan:
+            component_plans.append(transform_workspace._native_transform_plan)
+    if hasattr(workspace, "_record_order_apply_child_workspace"):
+        workspace._record_order_apply_child_workspace(copy_workspace)
+        workspace._record_order_apply_child_workspace(transform_workspace)
+    if hasattr(workspace, "_record_order_apply_inplace_plan_group"):
+        expected_plans = 2 * int(np.prod(values.element_shape, dtype=np.int64))
+        if len(component_plans) == expected_plans:
+            workspace._record_order_apply_inplace_plan_group(
+                values, order, output, copy_method, component_plans
+            )
 
 
 def _apply_order_to_values(
@@ -4273,8 +5201,12 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
 _SUPPORTED_HISTOGRAM_METHODS = {
     "auto",
     "cuda_cub",
+    "cuda_two_level",
     "vulkan_native",
+    "vulkan_two_level",
+    "two_level",
     "cpu_native",
+    "cpu_two_level",
     "field_atomic",
     "field_direct",
     "field_private",
@@ -4301,14 +5233,12 @@ def _check_histogram_request(values, bins, method, workspace):
         and values_view.is_dense_field
         and bins_view.is_dense_field
     )
-    ndarray_mode = isinstance(values, Ndarray) or isinstance(bins, Ndarray)
     struct_member_mode = _is_struct_scalar_member_view(values) or _is_struct_scalar_member_view(bins)
-    if struct_member_mode:
-        raise NotImplementedError(
-            "experimental_histogram() StructNdarray scalar member views need "
-            "a native strided histogram path; copy the member to a numeric "
-            "ndarray for now."
-        )
+    ndarray_mode = (
+        isinstance(values, Ndarray)
+        or isinstance(bins, Ndarray)
+        or struct_member_mode
+    )
     if ndarray_mode or dense_field_native_mode:
         if (
             values.dtype not in _HISTOGRAM_VALUE_DTYPES
@@ -4327,10 +5257,14 @@ def _check_histogram_request(values, bins, method, workspace):
         raise ValueError("experimental_histogram() expects at least one bin.")
     if ndarray_mode:
         if not (isinstance(values, Ndarray) and isinstance(bins, Ndarray)):
-            raise TypeError(
-                "experimental_histogram() ndarray mode requires both values and bins "
-                "to be ti.ndarray."
-            )
+            if not (
+                (isinstance(values, Ndarray) or _is_struct_scalar_member_view(values))
+                and (isinstance(bins, Ndarray) or _is_struct_scalar_member_view(bins))
+            ):
+                raise TypeError(
+                    "experimental_histogram() ndarray mode requires values and "
+                    "bins to be ti.ndarray or StructNdarray scalar member views."
+                )
     if workspace is not None and not isinstance(workspace, HistogramWorkspace):
         raise TypeError("workspace must be a HistogramWorkspace instance or None.")
 
@@ -4384,7 +5318,7 @@ def _try_cuda_cub_histogram(values, bins, workspace):
     value_type = _histogram_value_type(values.dtype)
     bin_type = _histogram_bin_type(bins.dtype)
     if workspace is not None and workspace._try_native_histogram_plan(
-        values, bins, "cuda_cub", value_type, bin_type
+        values, bins, "cuda_two_level", value_type, bin_type
     ):
         return True
     if dense_field_mode:
@@ -4459,7 +5393,7 @@ def _try_vulkan_histogram(values, bins, workspace):
     elif value_type != 0 or bin_type != 0:
         return False
     if workspace is not None and workspace._try_native_histogram_plan(
-        values, bins, "vulkan_native", value_type, bin_type
+        values, bins, "vulkan_two_level", value_type, bin_type
     ):
         return True
     if dense_field_mode:
@@ -4529,7 +5463,7 @@ def _try_cpu_native_histogram(values, bins, workspace):
     value_type = _histogram_value_type(values.dtype)
     bin_type = _histogram_bin_type(bins.dtype)
     if workspace is not None and workspace._try_native_histogram_plan(
-        values, bins, "cpu_native", value_type, bin_type
+        values, bins, "cpu_two_level", value_type, bin_type
     ):
         return True
     if dense_field_mode:
@@ -4618,6 +5552,96 @@ def _histogram_field_atomic(values, bins, workspace, method):
     return workspace
 
 
+def _stage_histogram_member_view(arr, workspace, role, dtype, n, method, plans):
+    if not _is_struct_scalar_member_view(arr):
+        return arr
+    staged = workspace._get_staged_member_buffer(role, dtype, n)
+    transform_workspace = workspace._get_staged_member_transform_workspace()
+    experimental_transform(
+        arr,
+        staged,
+        scale=1,
+        bias=0,
+        method=_native_copy_method_for_current_arch(method),
+        workspace=transform_workspace,
+    )
+    plan = transform_workspace._native_transform_plan
+    workspace._record_staged_child_workspace(transform_workspace)
+    if plan is None:
+        return None
+    plans.append(plan)
+    return staged
+
+
+def _try_staged_histogram(values, bins, method, workspace, aggregation_backend):
+    if aggregation_backend not in (
+        "cuda_native",
+        "cuda_two_level",
+        "vulkan_native",
+        "vulkan_two_level",
+        "cpu_native",
+        "cpu_two_level",
+    ):
+        return False
+    if not (
+        _is_struct_scalar_member_view(values)
+        or _is_struct_scalar_member_view(bins)
+    ):
+        return False
+    value_type = _histogram_value_type(values.dtype)
+    bin_type = _histogram_bin_type(bins.dtype)
+    n = values.shape[0]
+    num_bins = bins.shape[0]
+    if workspace._try_staged_histogram_plan_group(
+        values, bins, method, value_type, bin_type, n, num_bins
+    ):
+        return True
+    plans = []
+    staged_values = _stage_histogram_member_view(
+        values, workspace, "values", values.dtype, n, method, plans
+    )
+    if staged_values is None:
+        return False
+    bins_is_member = _is_struct_scalar_member_view(bins)
+    staged_bins = bins
+    if bins_is_member:
+        staged_bins = workspace._get_staged_member_buffer(
+            "bins", bins.dtype, num_bins
+        )
+    if aggregation_backend in ("cuda_native", "cuda_two_level"):
+        ok = _try_cuda_cub_histogram(staged_values, staged_bins, workspace)
+    elif aggregation_backend in ("vulkan_native", "vulkan_two_level"):
+        ok = _try_vulkan_histogram(staged_values, staged_bins, workspace)
+    elif aggregation_backend in ("cpu_native", "cpu_two_level"):
+        ok = _try_cpu_native_histogram(staged_values, staged_bins, workspace)
+    else:
+        ok = False
+    if not ok:
+        return False
+    histogram_plan = workspace._native_histogram_plan
+    if histogram_plan is not None:
+        plans.append(histogram_plan)
+    if bins_is_member:
+        transform_workspace = workspace._get_staged_member_transform_workspace()
+        experimental_transform(
+            staged_bins,
+            bins,
+            scale=1,
+            bias=0,
+            method=_native_copy_method_for_current_arch(method),
+            workspace=transform_workspace,
+        )
+        bins_plan = transform_workspace._native_transform_plan
+        workspace._record_staged_child_workspace(transform_workspace)
+        if bins_plan is None:
+            return False
+        plans.append(bins_plan)
+    workspace._record_staged_histogram_plan_group(
+        values, bins, method, value_type, bin_type, n, num_bins, tuple(plans)
+    )
+    return True
+
+
 def experimental_histogram(values, bins, *, method="auto", workspace=None):
     """Count bin ids in ``values`` into integer ``bins``.
 
@@ -4632,31 +5656,42 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
     if workspace is None:
         workspace = HistogramWorkspace(max_items=values.shape[0], max_bins=bins.shape[0])
     workspace.check_shape(values.shape[0], bins.shape[0])
-    if method in ("auto", "cuda_cub") and _try_cuda_cub_histogram(
+    aggregation_backend = _aggregation_backend_for_method(
+        method,
+        cuda_native=("cuda_cub",),
+        cuda_two_level=("cuda_two_level",),
+        vulkan_native=("vulkan_native",),
+        vulkan_two_level=("vulkan_two_level",),
+        cpu_native=("cpu_native",),
+        cpu_two_level=("cpu_two_level",),
+    )
+    if _try_staged_histogram(values, bins, method, workspace, aggregation_backend):
+        return
+    if aggregation_backend in ("cuda_native", "cuda_two_level") and _try_cuda_cub_histogram(
         values, bins, workspace
     ):
         return
-    if method == "cuda_cub":
+    if method in ("cuda_cub", "cuda_two_level"):
         raise RuntimeError(
-            "method='cuda_cub' requires CUDA ndarray or contiguous dense field "
+            f"method='{method}' requires CUDA ndarray or contiguous dense field "
             "inputs and available CUB DeviceHistogram."
         )
-    if method in ("auto", "vulkan_native") and _try_vulkan_histogram(
+    if aggregation_backend in ("vulkan_native", "vulkan_two_level") and _try_vulkan_histogram(
         values, bins, workspace
     ):
         return
-    if method == "vulkan_native":
+    if method in ("vulkan_native", "vulkan_two_level"):
         raise RuntimeError(
-            "method='vulkan_native' requires Vulkan ndarray or contiguous dense "
+            f"method='{method}' requires Vulkan ndarray or contiguous dense "
             "field inputs and available native histogram."
         )
-    if method in ("auto", "cpu_native") and _try_cpu_native_histogram(
+    if aggregation_backend in ("cpu_native", "cpu_two_level") and _try_cpu_native_histogram(
         values, bins, workspace
     ):
         return
-    if method == "cpu_native":
+    if method in ("cpu_native", "cpu_two_level"):
         raise RuntimeError(
-            "method='cpu_native' requires CPU ndarray or dense field inputs and "
+            f"method='{method}' requires CPU ndarray or dense field inputs and "
             "available native histogram."
         )
     if isinstance(values, Ndarray) or isinstance(bins, Ndarray):
@@ -4671,6 +5706,13 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
             "experimental_histogram() could not find an available ndarray "
             "backend for the requested value/bin dtypes."
         )
+    if method == "two_level":
+        if _should_record_legacy_helper_fallback(method):
+            _record_legacy_helper_fallback(
+                "experimental_histogram()", method, "field_private"
+            )
+        _histogram_field_atomic(values, bins, workspace, "field_private")
+        return
     if _should_record_legacy_helper_fallback(method):
         _record_legacy_helper_fallback(
             "experimental_histogram()", method, "field_atomic"
@@ -6234,6 +7276,13 @@ def _check_scatter_add_request(src, indices, dst, method, workspace):
         and dst_view.is_dense_field
         and isinstance(indices, Ndarray)
     )
+    two_level_dense_dst_mode = (
+        method in ("two_level", "cuda_two_level", "vulkan_two_level", "cpu_two_level")
+        and dst_view is not None
+        and dst_view.is_dense_field
+        and isinstance(indices, Ndarray)
+        and (isinstance(src, Ndarray) or src_is_member)
+    )
     ndarray_mode = (
         isinstance(src, Ndarray)
         or src_is_member
@@ -6246,7 +7295,7 @@ def _check_scatter_add_request(src, indices, dst, method, workspace):
     _check_no_struct_numeric_payload(op_name, src, dst)
     if src.dtype != dst.dtype:
         raise TypeError(f"{op_name} source and destination dtype must match.")
-    if dense_field_native_mode or ndarray_mode:
+    if dense_field_native_mode or ndarray_mode or two_level_dense_dst_mode:
         supported_dtypes = _SCATTER_ADD_VALUE_DTYPES
     else:
         supported_dtypes = _SCATTER_ADD_FIELD_DTYPES
@@ -6259,7 +7308,7 @@ def _check_scatter_add_request(src, indices, dst, method, workspace):
         raise TypeError(f"{op_name} field mode currently supports ti.i32 and ti.f32 values.")
     if src.shape[0] != indices.shape[0]:
         raise ValueError(f"{op_name} expects source and indices sizes to match.")
-    if ndarray_mode and not dense_field_native_mode:
+    if ndarray_mode and not dense_field_native_mode and not two_level_dense_dst_mode:
         if not (
             (isinstance(src, Ndarray) or src_is_member)
             and isinstance(indices, Ndarray)
@@ -6512,6 +7561,186 @@ def _try_cpu_scatter_add(src, indices, dst, workspace):
     return True
 
 
+def _try_native_add_merge(src, dst, method, workspace, value_type, n):
+    backend = workspace._native_add_merge_backend_for_method(method)
+    if backend is None:
+        return False
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    if src_view is None or dst_view is None:
+        return False
+    if src_view.dtype != dst_view.dtype:
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if workspace._try_native_add_merge_plan(src, dst, method, value_type, n):
+        return True
+    if backend == "cuda_device_add_merge":
+        if not (
+            hasattr(prog, "cuda_device_add_merge_available")
+            and prog.cuda_device_add_merge_available()
+        ):
+            return False
+        prefix = "cuda_device"
+    elif backend == "vulkan_native_add_merge":
+        if not (
+            hasattr(prog, "vulkan_add_merge_available")
+            and prog.vulkan_add_merge_available()
+        ):
+            return False
+        if hasattr(prog, "vulkan_add_merge_value_type_available"):
+            if not prog.vulkan_add_merge_value_type_available(value_type):
+                return False
+        prefix = "vulkan"
+    elif backend == "cpu_native_add_merge":
+        if not (
+            hasattr(prog, "cpu_add_merge_available")
+            and prog.cpu_add_merge_available()
+        ):
+            return False
+        prefix = "cpu"
+    else:
+        return False
+
+    if dst_view.is_dense_field:
+        if not src_view.is_plain_ndarray:
+            return False
+        method_name = (
+            "cuda_device_add_merge_dense_field"
+            if prefix == "cuda_device"
+            else f"{prefix}_add_merge_dense_field"
+        )
+        if not hasattr(prog, method_name):
+            return False
+        call_args = (src.arr, dst_view.snode, value_type, n)
+    elif src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
+        method_name = (
+            "cuda_device_add_merge_strided_ndarray"
+            if prefix == "cuda_device"
+            else f"{prefix}_add_merge_strided_ndarray"
+        )
+        if not hasattr(prog, method_name):
+            return False
+        src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
+        dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
+        call_args = (
+            src_arr,
+            dst_arr,
+            value_type,
+            src_offset,
+            src_stride,
+            dst_offset,
+            dst_stride,
+        )
+    elif src_view.is_plain_ndarray and dst_view.is_plain_ndarray:
+        method_name = (
+            "cuda_device_add_merge_ndarray"
+            if prefix == "cuda_device"
+            else f"{prefix}_add_merge_ndarray"
+        )
+        if not hasattr(prog, method_name):
+            return False
+        call_args = (src.arr, dst.arr, value_type)
+    else:
+        return False
+    temp_bytes = getattr(prog, method_name)(*call_args)
+    workspace._mark_native_scatter_add_backend_active(backend, temp_bytes)
+    workspace._record_native_add_merge_plan(
+        backend, method_name, src, dst, value_type, call_args, n, prog
+    )
+    return True
+
+
+def _stage_two_level_scatter_add_values_if_needed(
+    src, method, workspace, src_view, value_type, n
+):
+    if not src_view.is_struct_scalar_member:
+        return src, ()
+    if current_cfg().arch != vulkan:
+        return src, ()
+    staged = workspace._get_two_level_values_scratch(n, src_view.dtype)
+    transform_workspace = workspace._get_two_level_transform_workspace(n)
+    experimental_transform(
+        src,
+        staged,
+        scale=1,
+        bias=0,
+        method=_native_copy_method_for_current_arch(method),
+        workspace=transform_workspace,
+    )
+    transform_plan = transform_workspace._native_transform_plan
+    workspace._record_two_level_child_workspace(transform_workspace)
+    if transform_plan is None:
+        return None, ()
+    if transform_plan.value_type != value_type:
+        return None, ()
+    return staged, (transform_plan,)
+
+
+def _try_two_level_scatter_add(src, indices, dst, method, workspace, value_type):
+    backend = workspace._native_two_level_scatter_add_backend_for_method(method)
+    if backend is None:
+        return False
+    if not isinstance(indices, Ndarray):
+        return False
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    if src_view is None or dst_view is None:
+        return False
+    if not (
+        src_view.is_plain_ndarray
+        or src_view.is_struct_scalar_member
+    ):
+        return False
+    if not (
+        dst_view.is_plain_ndarray
+        or dst_view.is_struct_scalar_member
+        or dst_view.is_dense_field
+    ):
+        return False
+    n = indices.shape[0]
+    num_groups = dst.shape[0]
+    if workspace._try_two_level_scatter_add_plan_group(
+        src, indices, dst, method, value_type
+    ):
+        return True
+    scratch = workspace._get_two_level_scratch(num_groups, src_view.dtype)
+    reduce_workspace = workspace._get_two_level_grouped_reduce_workspace(
+        n, num_groups
+    )
+    reduce_src, prefix_plans = _stage_two_level_scatter_add_values_if_needed(
+        src, method, workspace, src_view, value_type, n
+    )
+    if reduce_src is None:
+        return False
+    experimental_grouped_reduce(
+        indices,
+        reduce_src,
+        scratch,
+        op="sum",
+        method=method,
+        workspace=reduce_workspace,
+    )
+    workspace._record_two_level_child_workspace(reduce_workspace)
+    reduce_plan = reduce_workspace._native_grouped_reduce_plan
+    if not _try_native_add_merge(
+        scratch, dst, method, workspace, value_type, num_groups
+    ):
+        return False
+    add_plan = workspace._native_add_merge_plan
+    if reduce_plan is not None and add_plan is not None:
+        workspace._record_two_level_scatter_add_plan_group(
+            src,
+            indices,
+            dst,
+            method,
+            value_type,
+            (*prefix_plans, reduce_plan, add_plan),
+        )
+    return True
+
+
 def _scatter_add_kernel(src, indices, dst):
     n = indices.shape[0]
     if isinstance(src, Ndarray):
@@ -6554,8 +7783,8 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
             )
         n = indices.shape[0]
         if workspace is None:
-            workspace = ScatterAddWorkspace(max_items=n)
-        workspace.check_shape(n)
+            workspace = ScatterAddWorkspace(max_items=n, max_groups=dst.shape[0])
+        workspace.check_shape(n, dst.shape[0])
         if n == 0:
             return workspace
         value_type = _scatter_add_value_type(src.dtype)
@@ -6576,8 +7805,8 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
                 method=method,
                 workspace=workspace,
             )
-            if backend is not None and workspace._native_scatter_add_plans:
-                plan = workspace._native_scatter_add_plans[-1]
+            plan = workspace._native_scatter_add_plan
+            if backend is not None and plan is not None:
                 objects, semantic_key = workspace._native_scatter_add_request_signature(
                     src_component, indices, dst_component, value_type
                 )
@@ -6598,8 +7827,10 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
                 "experimental_scatter_add() expects source and indices sizes to match."
             )
         if workspace is None:
-            workspace = ScatterAddWorkspace(max_items=indices.shape[0])
-        workspace.check_shape(indices.shape[0])
+            workspace = ScatterAddWorkspace(
+                max_items=indices.shape[0], max_groups=dst.shape[0]
+            )
+        workspace.check_shape(indices.shape[0], dst.shape[0])
         if indices.shape[0] == 0:
             return workspace
         value_type = _scatter_add_value_type(src.scalar_dtype)
@@ -6623,8 +7854,8 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
                 method=method,
                 workspace=workspace,
             )
-            if backend is not None and workspace._native_scatter_add_plans:
-                plan = workspace._native_scatter_add_plans[-1]
+            plan = workspace._native_scatter_add_plan
+            if backend is not None and plan is not None:
                 objects, semantic_key = workspace._native_scatter_add_request_signature(
                     src_component, indices, dst_component, value_type
                 )
@@ -6639,10 +7870,18 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
     _check_scatter_add_request(src, indices, dst, method, workspace)
     n = indices.shape[0]
     if workspace is None:
-        workspace = ScatterAddWorkspace(max_items=n)
-    workspace.check_shape(n)
+        workspace = ScatterAddWorkspace(max_items=n, max_groups=dst.shape[0])
+    workspace.check_shape(n, dst.shape[0])
     if n == 0:
         return workspace
+    if _try_two_level_scatter_add(src, indices, dst, method, workspace, _scatter_add_value_type(src.dtype)):
+        return workspace
+    if method in ("two_level", "cuda_two_level", "vulkan_two_level", "cpu_two_level"):
+        raise RuntimeError(
+            f"experimental_scatter_add() method='{method}' requires ndarray or "
+            "StructNdarray scalar member values, ti.ndarray i32 indices, and a "
+            "native grouped-reduce plus add-merge backend for the current arch."
+        )
     if method in ("auto", "cuda_device") and _try_cuda_device_scatter_add(
         src, indices, dst, workspace
     ):
@@ -6783,6 +8022,11 @@ def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, nu
         return False
     cursor = workspace._get_cursor_ndarray(num_bins)
     value_type = _bucket_builder_value_type(values)
+    n = keys.shape[0]
+    if workspace._try_native_bucket_builder_plan(
+        keys, values, offsets, output, value_type, n, num_bins
+    ):
+        return True
     if dense_field_mode:
         value_size = _dtype_nbytes(values.dtype)
         if not (
@@ -6793,29 +8037,46 @@ def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, nu
             and hasattr(prog, "cuda_device_bucket_builder_dense_field")
         ):
             return False
-        temp_bytes = prog.cuda_device_bucket_builder_dense_field(
+        method_name = "cuda_device_bucket_builder_dense_field"
+        call_args = (
             views[0].snode,
             views[1].snode,
             views[2].snode,
             views[3].snode,
             cursor.arr,
             value_type,
-            keys.shape[0],
+            n,
             num_bins,
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
     elif hasattr(prog, "cuda_device_bucket_builder_ndarray"):
-        temp_bytes = prog.cuda_device_bucket_builder_ndarray(
+        method_name = "cuda_device_bucket_builder_ndarray"
+        call_args = (
             keys.arr, values.arr, offsets.arr, output.arr, cursor.arr, value_type
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
     elif value_type == 0:
-        temp_bytes = prog.cuda_device_bucket_builder_i32_ndarray(
+        method_name = "cuda_device_bucket_builder_i32_ndarray"
+        call_args = (
             keys.arr, values.arr, offsets.arr, output.arr, cursor.arr
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
     else:
         return False
-    workspace.workspace_bytes_peak = max(
-        workspace.workspace_bytes_peak,
-        workspace.workspace_bytes_current + temp_bytes,
+    workspace._mark_native_bucket_builder_backend_active(
+        "cuda_device_bucket_builder", temp_bytes
+    )
+    workspace._record_native_bucket_builder_plan(
+        method_name,
+        keys,
+        values,
+        offsets,
+        output,
+        value_type,
+        call_args,
+        n,
+        num_bins,
+        prog,
     )
     return True
 
@@ -6848,6 +8109,11 @@ def _try_vulkan_bucket_builder(keys, values, offsets, output, workspace, num_bin
     elif value_type != 0:
         return False
     cursor = workspace._get_cursor_ndarray(num_bins)
+    n = keys.shape[0]
+    if workspace._try_native_bucket_builder_plan(
+        keys, values, offsets, output, value_type, n, num_bins
+    ):
+        return True
     if dense_field_mode:
         value_size = _dtype_nbytes(values.dtype)
         if not (
@@ -6858,28 +8124,44 @@ def _try_vulkan_bucket_builder(keys, values, offsets, output, workspace, num_bin
             and hasattr(prog, "vulkan_bucket_builder_dense_field")
         ):
             return False
-        temp_bytes = prog.vulkan_bucket_builder_dense_field(
+        method_name = "vulkan_bucket_builder_dense_field"
+        call_args = (
             views[0].snode,
             views[1].snode,
             views[2].snode,
             views[3].snode,
             cursor.arr,
             value_type,
-            keys.shape[0],
+            n,
             num_bins,
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
     elif hasattr(prog, "vulkan_bucket_builder_ndarray"):
-        temp_bytes = prog.vulkan_bucket_builder_ndarray(
+        method_name = "vulkan_bucket_builder_ndarray"
+        call_args = (
             keys.arr, values.arr, offsets.arr, output.arr, cursor.arr, value_type
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
     else:
-        temp_bytes = prog.vulkan_bucket_builder_i32_ndarray(
+        method_name = "vulkan_bucket_builder_i32_ndarray"
+        call_args = (
             keys.arr, values.arr, offsets.arr, output.arr, cursor.arr
         )
-    workspace._vulkan_native_active = True
-    workspace.workspace_bytes_peak = max(
-        workspace.workspace_bytes_peak,
-        workspace.workspace_bytes_current + temp_bytes,
+        temp_bytes = getattr(prog, method_name)(*call_args)
+    workspace._mark_native_bucket_builder_backend_active(
+        "vulkan_native_bucket_builder", temp_bytes
+    )
+    workspace._record_native_bucket_builder_plan(
+        method_name,
+        keys,
+        values,
+        offsets,
+        output,
+        value_type,
+        call_args,
+        n,
+        num_bins,
+        prog,
     )
     return True
 
@@ -6906,6 +8188,12 @@ def _try_cpu_bucket_builder(keys, values, offsets, output, workspace):
     if not prog.cpu_bucket_builder_available():
         return False
     value_type = _bucket_builder_value_type(values)
+    n = keys.shape[0]
+    num_bins = offsets.shape[0] - 1
+    if workspace._try_native_bucket_builder_plan(
+        keys, values, offsets, output, value_type, n, num_bins
+    ):
+        return True
     if dense_field_mode:
         value_size = _dtype_nbytes(values.dtype)
         if not (
@@ -6916,28 +8204,45 @@ def _try_cpu_bucket_builder(keys, values, offsets, output, workspace):
             and hasattr(prog, "cpu_bucket_builder_dense_field")
         ):
             return False
-        temp_bytes = prog.cpu_bucket_builder_dense_field(
+        method_name = "cpu_bucket_builder_dense_field"
+        call_args = (
             views[0].snode,
             views[1].snode,
             views[2].snode,
             views[3].snode,
             value_type,
-            keys.shape[0],
-            offsets.shape[0] - 1,
+            n,
+            num_bins,
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
     elif hasattr(prog, "cpu_bucket_builder_ndarray"):
-        temp_bytes = prog.cpu_bucket_builder_ndarray(
+        method_name = "cpu_bucket_builder_ndarray"
+        call_args = (
             keys.arr, values.arr, offsets.arr, output.arr, value_type
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
     elif value_type == 0:
-        temp_bytes = prog.cpu_bucket_builder_i32_ndarray(
+        method_name = "cpu_bucket_builder_i32_ndarray"
+        call_args = (
             keys.arr, values.arr, offsets.arr, output.arr
         )
+        temp_bytes = getattr(prog, method_name)(*call_args)
     else:
         return False
-    workspace.workspace_bytes_peak = max(
-        workspace.workspace_bytes_peak,
-        workspace.workspace_bytes_current + temp_bytes,
+    workspace._mark_native_bucket_builder_backend_active(
+        "cpu_native_bucket_builder", temp_bytes
+    )
+    workspace._record_native_bucket_builder_plan(
+        method_name,
+        keys,
+        values,
+        offsets,
+        output,
+        value_type,
+        call_args,
+        n,
+        num_bins,
+        prog,
     )
     return True
 
@@ -7032,37 +8337,46 @@ def experimental_bucket_builder(
     if workspace is None:
         workspace = BucketBuilderWorkspace(max_items=n, max_bins=num_bins)
     workspace.check_shape(n, num_bins)
-    if method in ("auto", "cuda_device") and _try_cuda_device_bucket_builder(
+    aggregation_backend = _aggregation_backend_for_method(
+        method,
+        cuda_native=("cuda_device",),
+        cuda_two_level=("cuda_two_level",),
+        vulkan_native=("vulkan_native",),
+        vulkan_two_level=("vulkan_two_level",),
+        cpu_native=("cpu_native",),
+        cpu_two_level=("cpu_two_level",),
+    )
+    if aggregation_backend in ("cuda_native", "cuda_two_level") and _try_cuda_device_bucket_builder(
         keys, values, offsets, output, workspace, num_bins
     ):
         return workspace
-    if method == "cuda_device":
+    if method in ("cuda_device", "cuda_two_level"):
         raise RuntimeError(
-            "experimental_bucket_builder() method='cuda_device' requires CUDA "
+            f"experimental_bucket_builder() method='{method}' requires CUDA "
             "ndarray or contiguous dense field inputs and CUDA toolkit "
             "bucket-builder support."
         )
-    if method in ("auto", "vulkan_native") and _try_vulkan_bucket_builder(
+    if aggregation_backend in ("vulkan_native", "vulkan_two_level") and _try_vulkan_bucket_builder(
         keys, values, offsets, output, workspace, num_bins
     ):
         return workspace
-    if method == "vulkan_native":
+    if method in ("vulkan_native", "vulkan_two_level"):
         raise RuntimeError(
-            "experimental_bucket_builder() method='vulkan_native' requires Vulkan "
+            f"experimental_bucket_builder() method='{method}' requires Vulkan "
             "ndarray or contiguous dense field inputs and available native "
             "bucket-builder shaders."
         )
-    if method in ("auto", "cpu_native") and _try_cpu_bucket_builder(
+    if aggregation_backend in ("cpu_native", "cpu_two_level") and _try_cpu_bucket_builder(
         keys, values, offsets, output, workspace
     ):
         return workspace
-    if method == "cpu_native":
+    if method in ("cpu_native", "cpu_two_level"):
         raise RuntimeError(
-            "experimental_bucket_builder() method='cpu_native' requires CPU ndarray "
+            f"experimental_bucket_builder() method='{method}' requires CPU ndarray "
             "or contiguous dense field inputs and available native bucket-builder "
             "support."
         )
-    if method in ("kernel", "field_kernel", "auto"):
+    if method in ("kernel", "field_kernel", "auto", "two_level"):
         if _should_record_legacy_helper_fallback(method):
             _record_legacy_helper_fallback(
                 "experimental_bucket_builder()", method, "field_kernel"
@@ -7159,6 +8473,30 @@ def _try_cuda_device_grouped_reduce(
     if not prog.cuda_device_grouped_reduce_available():
         return False
     value_type = _grouped_reduce_value_type(values.dtype)
+    op_id = _SUPPORTED_GROUPED_REDUCE_OPS[op]
+    n = keys.shape[0]
+    backend = "cuda_device_two_level" if segmented else "cuda_device_atomic"
+    if workspace._try_native_grouped_reduce_plan(
+        backend, keys, values, output, value_type, op_id, n, num_groups
+    ):
+        return True
+
+    def finish(method_name, call_args, temp_bytes):
+        workspace._mark_native_grouped_reduce_backend_active(backend, temp_bytes)
+        workspace._record_native_grouped_reduce_plan(
+            backend,
+            method_name,
+            keys,
+            values,
+            output,
+            value_type,
+            op_id,
+            call_args,
+            n,
+            num_groups,
+            prog,
+        )
+        return True
     if dense_field_mode:
         if segmented:
             return False
@@ -7170,20 +8508,19 @@ def _try_cuda_device_grouped_reduce(
             and hasattr(prog, "cuda_device_grouped_reduce_atomic_dense_field")
         ):
             return False
-        temp_bytes = prog.cuda_device_grouped_reduce_atomic_dense_field(
+        call_args = (
             views[0].snode,
             views[1].snode,
             views[2].snode,
             value_type,
-            keys.shape[0],
+            n,
             num_groups,
-            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+            op_id,
         )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak,
-            workspace.workspace_bytes_current + temp_bytes,
+        temp_bytes = prog.cuda_device_grouped_reduce_atomic_dense_field(*call_args)
+        return finish(
+            "cuda_device_grouped_reduce_atomic_dense_field", call_args, temp_bytes
         )
-        return True
     if (keys_is_member or values_is_member or output_is_member) and hasattr(
         prog, "cuda_device_grouped_reduce_atomic_strided_keys_ndarray"
     ):
@@ -7199,33 +8536,34 @@ def _try_cuda_device_grouped_reduce(
             keys_arr, keys_offset, keys_stride = _scalar_ndarray_payload(keys)
             values_arr, values_offset, values_stride = _scalar_ndarray_payload(values)
             output_arr, output_offset, output_stride = _scalar_ndarray_payload(output)
-            temp_bytes = (
-                prog.cuda_device_grouped_reduce_segmented_strided_keys_ndarray(
-                    keys_arr,
-                    values_arr,
-                    output_arr,
-                    offsets.arr,
-                    scratch.arr,
-                    cursor.arr,
-                    value_type,
-                    keys_offset,
-                    keys_stride,
-                    values_offset,
-                    values_stride,
-                    output_offset,
-                    output_stride,
-                    _SUPPORTED_GROUPED_REDUCE_OPS[op],
-                )
+            call_args = (
+                keys_arr,
+                values_arr,
+                output_arr,
+                offsets.arr,
+                scratch.arr,
+                cursor.arr,
+                value_type,
+                keys_offset,
+                keys_stride,
+                values_offset,
+                values_stride,
+                output_offset,
+                output_stride,
+                op_id,
             )
-            workspace.workspace_bytes_peak = max(
-                workspace.workspace_bytes_peak,
-                workspace.workspace_bytes_current + temp_bytes,
+            temp_bytes = prog.cuda_device_grouped_reduce_segmented_strided_keys_ndarray(
+                *call_args
             )
-            return True
+            return finish(
+                "cuda_device_grouped_reduce_segmented_strided_keys_ndarray",
+                call_args,
+                temp_bytes,
+            )
         keys_arr, keys_offset, keys_stride = _scalar_ndarray_payload(keys)
         values_arr, values_offset, values_stride = _scalar_ndarray_payload(values)
         output_arr, output_offset, output_stride = _scalar_ndarray_payload(output)
-        temp_bytes = prog.cuda_device_grouped_reduce_atomic_strided_keys_ndarray(
+        call_args = (
             keys_arr,
             values_arr,
             output_arr,
@@ -7236,40 +8574,37 @@ def _try_cuda_device_grouped_reduce(
             values_stride,
             output_offset,
             output_stride,
-            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+            op_id,
         )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak,
-            workspace.workspace_bytes_current + temp_bytes,
+        temp_bytes = prog.cuda_device_grouped_reduce_atomic_strided_keys_ndarray(
+            *call_args
         )
-        return True
+        return finish(
+            "cuda_device_grouped_reduce_atomic_strided_keys_ndarray",
+            call_args,
+            temp_bytes,
+        )
     if keys_is_member or values_is_member or output_is_member:
         return False
     if not segmented and hasattr(prog, "cuda_device_grouped_reduce_atomic_ndarray"):
-        temp_bytes = prog.cuda_device_grouped_reduce_atomic_ndarray(
-            keys.arr, values.arr, output.arr, value_type, _SUPPORTED_GROUPED_REDUCE_OPS[op]
+        call_args = (keys.arr, values.arr, output.arr, value_type, op_id)
+        temp_bytes = prog.cuda_device_grouped_reduce_atomic_ndarray(*call_args)
+        return finish(
+            "cuda_device_grouped_reduce_atomic_ndarray", call_args, temp_bytes
         )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak,
-            workspace.workspace_bytes_current + temp_bytes,
-        )
-        return True
     if not segmented and value_type == 0 and hasattr(
         prog, "cuda_device_grouped_reduce_i32_atomic_ndarray"
     ):
-        temp_bytes = prog.cuda_device_grouped_reduce_i32_atomic_ndarray(
-            keys.arr, values.arr, output.arr, _SUPPORTED_GROUPED_REDUCE_OPS[op]
+        call_args = (keys.arr, values.arr, output.arr, op_id)
+        temp_bytes = prog.cuda_device_grouped_reduce_i32_atomic_ndarray(*call_args)
+        return finish(
+            "cuda_device_grouped_reduce_i32_atomic_ndarray", call_args, temp_bytes
         )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak,
-            workspace.workspace_bytes_current + temp_bytes,
-        )
-        return True
     if segmented and hasattr(prog, "cuda_device_grouped_reduce_ndarray"):
         offsets, scratch, cursor = workspace._get_native_buffers_typed(
-            keys.shape[0], num_groups, values.dtype
+            n, num_groups, values.dtype
         )
-        temp_bytes = prog.cuda_device_grouped_reduce_ndarray(
+        call_args = (
             keys.arr,
             values.arr,
             output.arr,
@@ -7277,32 +8612,26 @@ def _try_cuda_device_grouped_reduce(
             scratch.arr,
             cursor.arr,
             value_type,
-            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+            op_id,
         )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak,
-            workspace.workspace_bytes_current + temp_bytes,
-        )
-        return True
+        temp_bytes = prog.cuda_device_grouped_reduce_ndarray(*call_args)
+        return finish("cuda_device_grouped_reduce_ndarray", call_args, temp_bytes)
     if segmented and value_type != 0:
         return False
     if not hasattr(prog, "cuda_device_grouped_reduce_i32_ndarray"):
         return False
-    offsets, scratch, cursor = workspace._get_native_buffers(keys.shape[0], num_groups)
-    temp_bytes = prog.cuda_device_grouped_reduce_i32_ndarray(
+    offsets, scratch, cursor = workspace._get_native_buffers(n, num_groups)
+    call_args = (
         keys.arr,
         values.arr,
         output.arr,
         offsets.arr,
         scratch.arr,
         cursor.arr,
-        _SUPPORTED_GROUPED_REDUCE_OPS[op],
+        op_id,
     )
-    workspace.workspace_bytes_peak = max(
-        workspace.workspace_bytes_peak,
-        workspace.workspace_bytes_current + temp_bytes,
-    )
-    return True
+    temp_bytes = prog.cuda_device_grouped_reduce_i32_ndarray(*call_args)
+    return finish("cuda_device_grouped_reduce_i32_ndarray", call_args, temp_bytes)
 
 
 def _try_vulkan_grouped_reduce(
@@ -7344,6 +8673,31 @@ def _try_vulkan_grouped_reduce(
             return False
     elif segmented and values.dtype != i32:
         return False
+    op_id = _SUPPORTED_GROUPED_REDUCE_OPS[op]
+    n = keys.shape[0]
+    backend = "vulkan_native_two_level" if segmented else "vulkan_native_atomic"
+    if workspace._try_native_grouped_reduce_plan(
+        backend, keys, values, output, value_type, op_id, n, num_groups
+    ):
+        return True
+
+    def finish(method_name, call_args, temp_bytes):
+        workspace._mark_native_grouped_reduce_backend_active(backend, temp_bytes)
+        workspace._record_native_grouped_reduce_plan(
+            backend,
+            method_name,
+            keys,
+            values,
+            output,
+            value_type,
+            op_id,
+            call_args,
+            n,
+            num_groups,
+            prog,
+        )
+        return True
+
     if dense_field_mode:
         if segmented:
             return False
@@ -7355,21 +8709,19 @@ def _try_vulkan_grouped_reduce(
             and hasattr(prog, "vulkan_grouped_reduce_atomic_dense_field")
         ):
             return False
-        temp_bytes = prog.vulkan_grouped_reduce_atomic_dense_field(
+        call_args = (
             views[0].snode,
             views[1].snode,
             views[2].snode,
             value_type,
-            keys.shape[0],
+            n,
             num_groups,
-            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+            op_id,
         )
-        workspace._vulkan_native_active = True
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak,
-            workspace.workspace_bytes_current + temp_bytes,
+        temp_bytes = prog.vulkan_grouped_reduce_atomic_dense_field(*call_args)
+        return finish(
+            "vulkan_grouped_reduce_atomic_dense_field", call_args, temp_bytes
         )
-        return True
     if (
         (keys_is_member or values_is_member or output_is_member)
         and not segmented
@@ -7378,7 +8730,7 @@ def _try_vulkan_grouped_reduce(
         keys_arr, keys_offset, keys_stride = _scalar_ndarray_payload(keys)
         values_arr, values_offset, values_stride = _scalar_ndarray_payload(values)
         output_arr, output_offset, output_stride = _scalar_ndarray_payload(output)
-        temp_bytes = prog.vulkan_grouped_reduce_atomic_strided_keys_ndarray(
+        call_args = (
             keys_arr,
             values_arr,
             output_arr,
@@ -7389,43 +8741,37 @@ def _try_vulkan_grouped_reduce(
             values_stride,
             output_offset,
             output_stride,
-            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+            op_id,
         )
-        workspace._vulkan_native_active = True
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak,
-            workspace.workspace_bytes_current + temp_bytes,
+        temp_bytes = prog.vulkan_grouped_reduce_atomic_strided_keys_ndarray(
+            *call_args
         )
-        return True
+        return finish(
+            "vulkan_grouped_reduce_atomic_strided_keys_ndarray",
+            call_args,
+            temp_bytes,
+        )
     if keys_is_member or values_is_member or output_is_member:
         return False
     if not segmented and hasattr(prog, "vulkan_grouped_reduce_atomic_ndarray"):
-        temp_bytes = prog.vulkan_grouped_reduce_atomic_ndarray(
-            keys.arr, values.arr, output.arr, value_type, _SUPPORTED_GROUPED_REDUCE_OPS[op]
+        call_args = (keys.arr, values.arr, output.arr, value_type, op_id)
+        temp_bytes = prog.vulkan_grouped_reduce_atomic_ndarray(*call_args)
+        return finish(
+            "vulkan_grouped_reduce_atomic_ndarray", call_args, temp_bytes
         )
-        workspace._vulkan_native_active = True
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak,
-            workspace.workspace_bytes_current + temp_bytes,
-        )
-        return True
     if not segmented and value_type == 0 and hasattr(
         prog, "vulkan_grouped_reduce_i32_atomic_ndarray"
     ):
-        temp_bytes = prog.vulkan_grouped_reduce_i32_atomic_ndarray(
-            keys.arr, values.arr, output.arr, _SUPPORTED_GROUPED_REDUCE_OPS[op]
+        call_args = (keys.arr, values.arr, output.arr, op_id)
+        temp_bytes = prog.vulkan_grouped_reduce_i32_atomic_ndarray(*call_args)
+        return finish(
+            "vulkan_grouped_reduce_i32_atomic_ndarray", call_args, temp_bytes
         )
-        workspace._vulkan_native_active = True
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak,
-            workspace.workspace_bytes_current + temp_bytes,
-        )
-        return True
     if segmented and hasattr(prog, "vulkan_grouped_reduce_ndarray"):
         offsets, scratch, cursor = workspace._get_native_buffers_typed(
-            keys.shape[0], num_groups, values.dtype
+            n, num_groups, values.dtype
         )
-        temp_bytes = prog.vulkan_grouped_reduce_ndarray(
+        call_args = (
             keys.arr,
             values.arr,
             output.arr,
@@ -7433,32 +8779,113 @@ def _try_vulkan_grouped_reduce(
             scratch.arr,
             cursor.arr,
             value_type,
-            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+            op_id,
         )
-        workspace._vulkan_native_active = True
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak,
-            workspace.workspace_bytes_current + temp_bytes,
-        )
-        return True
+        temp_bytes = prog.vulkan_grouped_reduce_ndarray(*call_args)
+        return finish("vulkan_grouped_reduce_ndarray", call_args, temp_bytes)
     if segmented and value_type != 0:
         return False
     if not hasattr(prog, "vulkan_grouped_reduce_i32_ndarray"):
         return False
-    offsets, scratch, cursor = workspace._get_native_buffers(keys.shape[0], num_groups)
-    temp_bytes = prog.vulkan_grouped_reduce_i32_ndarray(
+    offsets, scratch, cursor = workspace._get_native_buffers(n, num_groups)
+    call_args = (
         keys.arr,
         values.arr,
         output.arr,
         offsets.arr,
         scratch.arr,
         cursor.arr,
-        _SUPPORTED_GROUPED_REDUCE_OPS[op],
+        op_id,
     )
-    workspace._vulkan_native_active = True
-    workspace.workspace_bytes_peak = max(
-        workspace.workspace_bytes_peak,
-        workspace.workspace_bytes_current + temp_bytes,
+    temp_bytes = prog.vulkan_grouped_reduce_i32_ndarray(*call_args)
+    return finish("vulkan_grouped_reduce_i32_ndarray", call_args, temp_bytes)
+
+
+def _stage_grouped_reduce_member_view(
+    arr, workspace, role, dtype, n, method, plans
+):
+    if not _is_struct_scalar_member_view(arr):
+        return arr
+    staged = workspace._get_staged_member_buffer(role, dtype, n)
+    transform_workspace = workspace._get_staged_member_transform_workspace()
+    experimental_transform(
+        arr,
+        staged,
+        scale=1,
+        bias=0,
+        method=_native_copy_method_for_current_arch(method),
+        workspace=transform_workspace,
+    )
+    plan = transform_workspace._native_transform_plan
+    workspace._record_staged_child_workspace(transform_workspace)
+    if plan is None:
+        return None
+    plans.append(plan)
+    return staged
+
+
+def _try_vulkan_grouped_reduce_staged(
+    keys, values, output, workspace, num_groups, op, method, value_type
+):
+    if current_cfg().arch != vulkan:
+        return False
+    if not (
+        _is_struct_scalar_member_view(keys)
+        or _is_struct_scalar_member_view(values)
+        or _is_struct_scalar_member_view(output)
+    ):
+        return False
+    op_id = _SUPPORTED_GROUPED_REDUCE_OPS[op]
+    n = keys.shape[0]
+    if workspace._try_staged_grouped_reduce_plan_group(
+        keys, values, output, method, value_type, op_id, n, num_groups
+    ):
+        return True
+    plans = []
+    staged_keys = _stage_grouped_reduce_member_view(
+        keys, workspace, "keys", i32, n, method, plans
+    )
+    staged_values = _stage_grouped_reduce_member_view(
+        values, workspace, "values", values.dtype, n, method, plans
+    )
+    if staged_keys is None or staged_values is None:
+        return False
+    staged_output = output
+    output_is_member = _is_struct_scalar_member_view(output)
+    if output_is_member:
+        staged_output = workspace._get_staged_member_buffer(
+            "output", output.dtype, num_groups
+        )
+    if not _try_vulkan_grouped_reduce(
+        staged_keys,
+        staged_values,
+        staged_output,
+        workspace,
+        num_groups,
+        op,
+        segmented=True,
+    ):
+        return False
+    reduce_plan = workspace._native_grouped_reduce_plan
+    if reduce_plan is not None:
+        plans.append(reduce_plan)
+    if output_is_member:
+        transform_workspace = workspace._get_staged_member_transform_workspace()
+        experimental_transform(
+            staged_output,
+            output,
+            scale=1,
+            bias=0,
+            method=_native_copy_method_for_current_arch(method),
+            workspace=transform_workspace,
+        )
+        output_plan = transform_workspace._native_transform_plan
+        workspace._record_staged_child_workspace(transform_workspace)
+        if output_plan is None:
+            return False
+        plans.append(output_plan)
+    workspace._record_staged_grouped_reduce_plan_group(
+        keys, values, output, method, value_type, op_id, n, num_groups, tuple(plans)
     )
     return True
 
@@ -7486,6 +8913,32 @@ def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
     if not prog.cpu_grouped_reduce_available():
         return False
     value_type = _grouped_reduce_value_type(values.dtype)
+    op_id = _SUPPORTED_GROUPED_REDUCE_OPS[op]
+    n = keys.shape[0]
+    num_groups = output.shape[0]
+    backend = "cpu_native_two_level"
+    if workspace._try_native_grouped_reduce_plan(
+        backend, keys, values, output, value_type, op_id, n, num_groups
+    ):
+        return True
+
+    def finish(method_name, call_args, temp_bytes):
+        workspace._mark_native_grouped_reduce_backend_active(backend, temp_bytes)
+        workspace._record_native_grouped_reduce_plan(
+            backend,
+            method_name,
+            keys,
+            values,
+            output,
+            value_type,
+            op_id,
+            call_args,
+            n,
+            num_groups,
+            prog,
+        )
+        return True
+
     if dense_field_mode:
         value_size = _dtype_nbytes(values.dtype)
         if not (
@@ -7495,22 +8948,24 @@ def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
             and hasattr(prog, "cpu_grouped_reduce_dense_field")
         ):
             return False
-        temp_bytes = prog.cpu_grouped_reduce_dense_field(
+        call_args = (
             views[0].snode,
             views[1].snode,
             views[2].snode,
             value_type,
-            keys.shape[0],
-            output.shape[0],
-            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+            n,
+            num_groups,
+            op_id,
         )
+        temp_bytes = prog.cpu_grouped_reduce_dense_field(*call_args)
+        return finish("cpu_grouped_reduce_dense_field", call_args, temp_bytes)
     elif (keys_is_member or values_is_member or output_is_member) and hasattr(
         prog, "cpu_grouped_reduce_strided_keys_ndarray"
     ):
         keys_arr, keys_offset, keys_stride = _scalar_ndarray_payload(keys)
         values_arr, values_offset, values_stride = _scalar_ndarray_payload(values)
         output_arr, output_offset, output_stride = _scalar_ndarray_payload(output)
-        temp_bytes = prog.cpu_grouped_reduce_strided_keys_ndarray(
+        call_args = (
             keys_arr,
             values_arr,
             output_arr,
@@ -7521,25 +8976,24 @@ def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
             values_stride,
             output_offset,
             output_stride,
-            _SUPPORTED_GROUPED_REDUCE_OPS[op],
+            op_id,
+        )
+        temp_bytes = prog.cpu_grouped_reduce_strided_keys_ndarray(*call_args)
+        return finish(
+            "cpu_grouped_reduce_strided_keys_ndarray", call_args, temp_bytes
         )
     elif keys_is_member or values_is_member or output_is_member:
         return False
     elif hasattr(prog, "cpu_grouped_reduce_ndarray"):
-        temp_bytes = prog.cpu_grouped_reduce_ndarray(
-            keys.arr, values.arr, output.arr, value_type, _SUPPORTED_GROUPED_REDUCE_OPS[op]
-        )
+        call_args = (keys.arr, values.arr, output.arr, value_type, op_id)
+        temp_bytes = prog.cpu_grouped_reduce_ndarray(*call_args)
+        return finish("cpu_grouped_reduce_ndarray", call_args, temp_bytes)
     else:
         if value_type != 0:
             return False
-        temp_bytes = prog.cpu_grouped_reduce_i32_ndarray(
-            keys.arr, values.arr, output.arr, _SUPPORTED_GROUPED_REDUCE_OPS[op]
-        )
-    workspace.workspace_bytes_peak = max(
-        workspace.workspace_bytes_peak,
-        workspace.workspace_bytes_current + temp_bytes,
-    )
-    return True
+        call_args = (keys.arr, values.arr, output.arr, op_id)
+        temp_bytes = prog.cpu_grouped_reduce_i32_ndarray(*call_args)
+        return finish("cpu_grouped_reduce_i32_ndarray", call_args, temp_bytes)
 
 
 def _grouped_reduce_kernel(keys, values, output):
@@ -7573,6 +9027,16 @@ def experimental_grouped_reduce(
             "arr.field(..., component=...) for vector/matrix key members."
         )
     if _is_struct_tensor_member_view(values) or _is_struct_tensor_member_view(output):
+        if method not in _SUPPORTED_GROUPED_REDUCE_METHODS:
+            raise NotImplementedError(
+                f"grouped reduce method '{method}' is not implemented."
+            )
+        if op not in _SUPPORTED_GROUPED_REDUCE_OPS:
+            raise ValueError(
+                f"grouped reduce op must be one of {sorted(_SUPPORTED_GROUPED_REDUCE_OPS)}."
+            )
+        if workspace is not None and not isinstance(workspace, GroupedReduceWorkspace):
+            raise TypeError("workspace must be a GroupedReduceWorkspace instance or None.")
         _check_matching_struct_tensor_member_views(
             "experimental_grouped_reduce()", values, output
         )
@@ -7588,10 +9052,23 @@ def experimental_grouped_reduce(
             workspace = GroupedReduceWorkspace(
                 max_items=keys.shape[0], max_groups=output.shape[0]
             )
-        for values_component, output_component in zip(
-            _struct_tensor_member_components(values),
-            _struct_tensor_member_components(output),
+        workspace.check_shape(keys.shape[0], output.shape[0])
+        value_type = _grouped_reduce_value_type(values.scalar_dtype)
+        op_id = _SUPPORTED_GROUPED_REDUCE_OPS[op]
+        if workspace._try_native_grouped_reduce_plan_group(
+            keys, values, output, method, value_type, op_id
         ):
+            return workspace
+        backend = workspace._native_grouped_reduce_backend_for_method(method)
+        component_plans = []
+        component_pairs = tuple(
+            zip(
+                _struct_tensor_member_components(values),
+                _struct_tensor_member_components(output),
+            )
+        )
+        for values_component, output_component in component_pairs:
+            workspace._native_grouped_reduce_plan = None
             experimental_grouped_reduce(
                 keys,
                 values_component,
@@ -7599,6 +9076,23 @@ def experimental_grouped_reduce(
                 op=op,
                 method=method,
                 workspace=workspace,
+            )
+            plan = workspace._native_grouped_reduce_plan
+            if backend is not None and plan is not None:
+                objects, semantic_key = workspace._native_grouped_reduce_request_signature(
+                    keys,
+                    values_component,
+                    output_component,
+                    value_type,
+                    op_id,
+                    keys.shape[0],
+                    output.shape[0],
+                )
+                if plan.matches_request(backend, objects, semantic_key):
+                    component_plans.append(plan)
+        if len(component_plans) == len(component_pairs):
+            workspace._record_native_grouped_reduce_plan_group(
+                keys, values, output, method, value_type, op_id, component_plans
             )
         return workspace
 
@@ -7608,18 +9102,28 @@ def experimental_grouped_reduce(
     if workspace is None:
         workspace = GroupedReduceWorkspace(max_items=n, max_groups=num_groups)
     workspace.check_shape(n, num_groups)
-    if method in ("auto", "cuda_device") and _try_cuda_device_grouped_reduce(
+    aggregation_backend = _aggregation_backend_for_method(
+        method,
+        cuda_native=("cuda_device",),
+        cuda_two_level=("cuda_segmented", "cuda_two_level"),
+        vulkan_native=("vulkan_native",),
+        vulkan_two_level=("vulkan_segmented", "vulkan_two_level"),
+        cpu_native=("cpu_native",),
+        cpu_two_level=("cpu_two_level",),
+        generic_two_level=("segmented", "two_level"),
+    )
+    if aggregation_backend == "cuda_native" and _try_cuda_device_grouped_reduce(
         keys, values, output, workspace, num_groups, op, segmented=False
     ):
         return workspace
-    if method in ("segmented", "cuda_segmented") and _try_cuda_device_grouped_reduce(
+    if aggregation_backend == "cuda_two_level" and _try_cuda_device_grouped_reduce(
         keys, values, output, workspace, num_groups, op, segmented=True
     ):
         return workspace
-    if method == "cuda_segmented":
+    if method in ("cuda_segmented", "cuda_two_level"):
         raise RuntimeError(
-            "experimental_grouped_reduce() method='cuda_segmented' requires CUDA "
-            "ndarray inputs and CUDA toolkit segmented grouped-reduce support."
+            f"experimental_grouped_reduce() method='{method}' requires CUDA "
+            "ndarray inputs and CUDA toolkit two-level grouped-reduce support."
         )
     if method == "cuda_device":
         raise RuntimeError(
@@ -7627,18 +9131,29 @@ def experimental_grouped_reduce(
             "ndarray or contiguous dense field inputs and CUDA toolkit "
             "grouped-reduce support."
         )
-    if method in ("auto", "vulkan_native") and _try_vulkan_grouped_reduce(
+    if aggregation_backend == "vulkan_native" and _try_vulkan_grouped_reduce(
         keys, values, output, workspace, num_groups, op, segmented=False
     ):
         return workspace
-    if method in ("segmented", "vulkan_segmented") and _try_vulkan_grouped_reduce(
+    if aggregation_backend == "vulkan_two_level" and _try_vulkan_grouped_reduce_staged(
+        keys,
+        values,
+        output,
+        workspace,
+        num_groups,
+        op,
+        method,
+        _grouped_reduce_value_type(values.dtype),
+    ):
+        return workspace
+    if aggregation_backend == "vulkan_two_level" and _try_vulkan_grouped_reduce(
         keys, values, output, workspace, num_groups, op, segmented=True
     ):
         return workspace
-    if method == "vulkan_segmented":
+    if method in ("vulkan_segmented", "vulkan_two_level"):
         raise RuntimeError(
-            "experimental_grouped_reduce() method='vulkan_segmented' requires Vulkan "
-            "ndarray inputs and available native segmented grouped-reduce shaders."
+            f"experimental_grouped_reduce() method='{method}' requires Vulkan "
+            "ndarray inputs and available native two-level grouped-reduce shaders."
         )
     if method == "vulkan_native":
         raise RuntimeError(
@@ -7646,23 +9161,19 @@ def experimental_grouped_reduce(
             "ndarray or contiguous dense field inputs and available native "
             "grouped-reduce shaders."
         )
-    if method in ("auto", "cpu_native") and _try_cpu_grouped_reduce(
+    if aggregation_backend in ("cpu_native", "cpu_two_level") and _try_cpu_grouped_reduce(
         keys, values, output, workspace, op
     ):
         return workspace
-    if method == "cpu_native":
+    if method in ("cpu_native", "cpu_two_level"):
         raise RuntimeError(
-            "experimental_grouped_reduce() method='cpu_native' requires CPU ndarray "
+            f"experimental_grouped_reduce() method='{method}' requires CPU ndarray "
             "or contiguous dense field inputs and available native grouped-reduce "
             "support."
         )
-    if method == "segmented" and _try_cpu_grouped_reduce(
-        keys, values, output, workspace, op
-    ):
-        return workspace
-    if method == "segmented":
+    if method in ("segmented", "two_level"):
         raise RuntimeError(
-            "experimental_grouped_reduce() method='segmented' requires CUDA, "
+            f"experimental_grouped_reduce() method='{method}' requires CUDA, "
             "Vulkan, or CPU ndarray native grouped-reduce support."
         )
     if (

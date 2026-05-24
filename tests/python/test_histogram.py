@@ -74,6 +74,39 @@ def _run_dense_field_histogram(value_dtype, value_np_dtype, bin_dtype, bin_np_dt
     )
 
 
+def _run_struct_member_histogram(value_dtype, value_np_dtype, bin_dtype, bin_np_dtype, method):
+    n = 4096
+    num_bins = 64
+    value_payload = ti.types.struct(value=value_dtype, tag=ti.i32)
+    bin_payload = ti.types.struct(count=bin_dtype, tag=ti.i32)
+    values = ti.ndarray(value_payload, shape=n)
+    bins = ti.ndarray(bin_payload, shape=num_bins)
+    workspace = ti.algorithms.HistogramWorkspace(max_items=n, max_bins=num_bins)
+    for mode in range(3):
+        values_np = _histogram_values(n, num_bins, value_np_dtype, mode)
+        values_host = np.zeros((n,), dtype=values.numpy_dtype)
+        values_host["value"] = values_np
+        values_host["tag"] = np.arange(n, dtype=np.int32) * 7 + 3
+        bins_host = np.zeros((num_bins,), dtype=bins.numpy_dtype)
+        bins_host["count"] = np.full(num_bins, -1, dtype=bin_np_dtype)
+        bins_host["tag"] = np.arange(num_bins, dtype=np.int32) * 11 - 5
+        values.from_numpy(values_host)
+        bins.from_numpy(bins_host)
+        ti.algorithms.experimental_histogram(
+            values.field("value"),
+            bins.field("count"),
+            method=method,
+            workspace=workspace,
+        )
+        result = bins.to_numpy()
+        assert np.array_equal(
+            result["count"], _histogram_expected(values_np, num_bins, bin_np_dtype)
+        )
+        np.testing.assert_array_equal(result["tag"], bins_host["tag"])
+        np.testing.assert_array_equal(values.to_numpy()["tag"], values_host["tag"])
+    assert len(workspace._staged_histogram_plan_groups) >= 1
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_experimental_histogram_rejects_struct_tensor_member_views():
     n = 8
@@ -82,8 +115,6 @@ def test_experimental_histogram_rejects_struct_tensor_member_views():
     bins = ti.ndarray(ti.i32, shape=4)
     with pytest.raises(NotImplementedError, match="scalar quantities"):
         ti.algorithms.experimental_histogram(values.field("vec"), bins)
-    with pytest.raises(NotImplementedError, match="native strided histogram"):
-        ti.algorithms.experimental_histogram(values.field("tag"), bins)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -151,10 +182,22 @@ def test_experimental_histogram_cuda_cub_ndarray():
                     bins.to_numpy(),
                     _histogram_expected(values_np, num_bins, bin_np_dtype),
                 )
+                bins.from_numpy(np.full(num_bins, -1, dtype=bin_np_dtype))
+                ti.algorithms.experimental_histogram(
+                    values, bins, method="two_level", workspace=workspace
+                )
+                assert np.array_equal(
+                    bins.to_numpy(),
+                    _histogram_expected(values_np, num_bins, bin_np_dtype),
+                )
             _run_dense_field_histogram(
-                dtype, np_dtype, bin_dtype, bin_np_dtype, "cuda_cub"
+                dtype, np_dtype, bin_dtype, bin_np_dtype, "cuda_two_level"
             )
-    assert workspace.workspace_bytes_peak > 0
+            _run_struct_member_histogram(
+                dtype, np_dtype, bin_dtype, bin_np_dtype, "cuda_two_level"
+            )
+    assert workspace._cuda_cub_active
+    assert workspace._native_histogram_plan is not None
 
 
 @test_utils.test(arch=[ti.cpu])
@@ -181,8 +224,19 @@ def test_experimental_histogram_cpu_native_ndarray():
                     bins.to_numpy(),
                     _histogram_expected(values_np, num_bins, bin_np_dtype),
                 )
+                bins.from_numpy(np.full(num_bins, -1, dtype=bin_np_dtype))
+                ti.algorithms.experimental_histogram(
+                    values, bins, method="two_level", workspace=workspace
+                )
+                assert np.array_equal(
+                    bins.to_numpy(),
+                    _histogram_expected(values_np, num_bins, bin_np_dtype),
+                )
             _run_dense_field_histogram(
-                dtype, np_dtype, bin_dtype, bin_np_dtype, "cpu_native"
+                dtype, np_dtype, bin_dtype, bin_np_dtype, "cpu_two_level"
+            )
+            _run_struct_member_histogram(
+                dtype, np_dtype, bin_dtype, bin_np_dtype, "cpu_two_level"
             )
     assert workspace.workspace_bytes_peak == 0
     assert impl.get_runtime().prog.cpu_histogram_workspace_bytes() == 0
@@ -214,8 +268,19 @@ def test_experimental_histogram_vulkan_native_ndarray():
                     bins.to_numpy(),
                     _histogram_expected(values_np, num_bins, bin_np_dtype),
                 )
+                bins.from_numpy(np.full(num_bins, -1, dtype=bin_np_dtype))
+                ti.algorithms.experimental_histogram(
+                    values, bins, method="two_level", workspace=workspace
+                )
+                assert np.array_equal(
+                    bins.to_numpy(),
+                    _histogram_expected(values_np, num_bins, bin_np_dtype),
+                )
             _run_dense_field_histogram(
-                dtype, np_dtype, bin_dtype, bin_np_dtype, "vulkan_native"
+                dtype, np_dtype, bin_dtype, bin_np_dtype, "vulkan_two_level"
+            )
+            _run_struct_member_histogram(
+                dtype, np_dtype, bin_dtype, bin_np_dtype, "vulkan_two_level"
             )
     assert impl.get_runtime().prog.vulkan_histogram_workspace_bytes() == 0
 

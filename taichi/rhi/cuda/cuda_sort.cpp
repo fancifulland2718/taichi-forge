@@ -169,6 +169,20 @@ std::size_t cub_transform_affine_packed_strided_impl(
     double scale,
     double bias,
     void *stream);
+std::size_t cub_add_merge_impl(void *src,
+                               void *dst,
+                               int num_items,
+                               CudaTransformValueType value_type,
+                               void *stream);
+std::size_t cub_add_merge_strided_impl(void *src,
+                                       void *dst,
+                                       int num_items,
+                                       CudaTransformValueType value_type,
+                                       std::size_t src_offset,
+                                       std::size_t src_stride,
+                                       std::size_t dst_offset,
+                                       std::size_t dst_stride,
+                                       void *stream);
 std::size_t cub_bucket_builder_i32_impl(void *keys,
                                         void *values,
                                         void *offsets,
@@ -778,6 +792,53 @@ std::size_t cub_transform_affine_packed_strided(
 #else
   TI_ERROR(
       "CUDA packed strided transform requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+bool cub_add_merge_available() {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return ensure_cudart_for_cub_sort();
+#else
+  return false;
+#endif
+}
+
+std::size_t cub_add_merge(void *src,
+                          void *dst,
+                          int num_items,
+                          CudaTransformValueType value_type,
+                          void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA toolkit add-merge expects non-negative num_items.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_add_merge_impl(src, dst, num_items, value_type, stream);
+#else
+  TI_ERROR(
+      "CUDA add-merge requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t cub_add_merge_strided(void *src,
+                                  void *dst,
+                                  int num_items,
+                                  CudaTransformValueType value_type,
+                                  std::size_t src_offset,
+                                  std::size_t src_stride,
+                                  std::size_t dst_offset,
+                                  std::size_t dst_stride,
+                                  void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA toolkit strided add-merge expects non-negative num_items.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_add_merge_strided_impl(src, dst, num_items, value_type, src_offset,
+                                    src_stride, dst_offset, dst_stride, stream);
+#else
+  TI_ERROR(
+      "CUDA strided add-merge requires building Taichi with "
       "TI_WITH_CUDA_TOOLKIT=ON.");
 #endif
 }

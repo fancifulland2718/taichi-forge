@@ -366,6 +366,26 @@ class TI_DLL_EXPORT Program {
                                                        double scale,
                                                        double bias);
 
+  bool cuda_device_add_merge_available() const;
+
+  std::size_t cuda_device_add_merge_ndarray(Ndarray *src,
+                                            Ndarray *dst,
+                                            int value_type);
+
+  std::size_t cuda_device_add_merge_strided_ndarray(
+      Ndarray *src,
+      Ndarray *dst,
+      int value_type,
+      std::size_t src_offset,
+      std::size_t src_stride,
+      std::size_t dst_offset,
+      std::size_t dst_stride);
+
+  std::size_t cuda_device_add_merge_dense_field(Ndarray *src,
+                                                SNode *dst,
+                                                int value_type,
+                                                std::size_t n);
+
   bool cuda_device_indexed_copy_available() const;
 
   bool cuda_device_indexed_copy_payload_available(std::size_t item_bytes) const;
@@ -686,6 +706,11 @@ class TI_DLL_EXPORT Program {
 
   bool cpu_compact_available() const;
 
+  void fill_dense_field(SNode *dst,
+                        int value_type,
+                        uint64_t value_bits,
+                        std::size_t n);
+
   void copy_dense_field_from_host(SNode *dst,
                                   std::uintptr_t src,
                                   std::size_t src_bytes,
@@ -810,6 +835,25 @@ class TI_DLL_EXPORT Program {
                                                double bias);
 
   std::size_t cpu_transform_workspace_bytes() const;
+
+  bool cpu_add_merge_available() const;
+
+  std::size_t cpu_add_merge_ndarray(Ndarray *src,
+                                    Ndarray *dst,
+                                    int value_type);
+
+  std::size_t cpu_add_merge_strided_ndarray(Ndarray *src,
+                                            Ndarray *dst,
+                                            int value_type,
+                                            std::size_t src_offset,
+                                            std::size_t src_stride,
+                                            std::size_t dst_offset,
+                                            std::size_t dst_stride);
+
+  std::size_t cpu_add_merge_dense_field(Ndarray *src,
+                                        SNode *dst,
+                                        int value_type,
+                                        std::size_t n);
 
   bool cpu_indexed_copy_available() const;
 
@@ -1129,6 +1173,31 @@ class TI_DLL_EXPORT Program {
 
   std::size_t vulkan_transform_workspace_bytes() const;
 
+  bool vulkan_add_merge_available() const;
+
+  bool vulkan_add_merge_value_type_available(int value_type) const;
+
+  std::size_t vulkan_add_merge_ndarray(Ndarray *src,
+                                       Ndarray *dst,
+                                       int value_type);
+
+  std::size_t vulkan_add_merge_strided_ndarray(Ndarray *src,
+                                               Ndarray *dst,
+                                               int value_type,
+                                               std::size_t src_offset,
+                                               std::size_t src_stride,
+                                               std::size_t dst_offset,
+                                               std::size_t dst_stride);
+
+  std::size_t vulkan_add_merge_dense_field(Ndarray *src,
+                                           SNode *dst,
+                                           int value_type,
+                                           std::size_t n);
+
+  void vulkan_add_merge_clear_workspace();
+
+  std::size_t vulkan_add_merge_workspace_bytes() const;
+
   bool vulkan_indexed_copy_available() const;
 
   std::size_t vulkan_gather_ndarray(Ndarray *src,
@@ -1320,6 +1389,8 @@ class TI_DLL_EXPORT Program {
   void vulkan_grouped_reduce_clear_workspace();
 
   std::size_t vulkan_grouped_reduce_workspace_bytes() const;
+
+  void vulkan_clear_primitive_caches();
 
   Identifier get_next_global_id(const std::string &name = "") {
     return Identifier(global_id_counter_++, name);

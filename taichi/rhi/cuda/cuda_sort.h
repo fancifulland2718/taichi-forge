@@ -172,6 +172,24 @@ std::size_t cub_transform_affine_packed_strided(
     double bias,
     void *stream);
 
+bool cub_add_merge_available();
+
+std::size_t cub_add_merge(void *src,
+                          void *dst,
+                          int num_items,
+                          CudaTransformValueType value_type,
+                          void *stream);
+
+std::size_t cub_add_merge_strided(void *src,
+                                  void *dst,
+                                  int num_items,
+                                  CudaTransformValueType value_type,
+                                  std::size_t src_offset,
+                                  std::size_t src_stride,
+                                  std::size_t dst_offset,
+                                  std::size_t dst_stride,
+                                  void *stream);
+
 bool driver_indexed_copy_available();
 
 std::size_t driver_indexed_copy(void *src,

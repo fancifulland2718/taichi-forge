@@ -666,11 +666,12 @@ S0 进入 S1 的条件：
       Python 开销。
     - `_OrderApplyWorkspaceMixin` 统一持有内部 `IndexedCopyWorkspace`，compact
       和 bucket 的 out-of-place apply 可以复用 native indexed-copy plan。
-    - order pair 按精确 `n` 缓存；identity order 和 output 初始化只在该尺寸
-      第一次分配时执行。后续同尺寸调用不再重复 fill/clear，小尺寸调用不会复用
-      过大 buffer，避免 `values.shape != flags.shape` 的隐性风险。
-    - sort 的 in-place tensor-member apply 保持原轻量路径，不强行引入子
-      workspace，避免小规模 sort 回退。
+    - order pair 按精确 `n` 缓存；identity order 只在该尺寸第一次分配时执行。
+      后续同尺寸调用不再重复 fill，小尺寸调用不会复用过大 buffer，避免
+      `values.shape != flags.shape` 的隐性风险。
+    - S10 后续补齐 sort 的 in-place tensor-member apply：首次调用记录内部
+      gather+transform replay group，warm call 直接复用 native 调用序列；compact
+      和 bucket 的 order output 不再做无语义清零。
   - 风险边界：
     - stable key 只用于内部 native plan replay，不改变 public API。
     - key 中保留 offset/stride/element shape，防止不同 StructNdarray member
@@ -1150,6 +1151,16 @@ S0 进入 S1 的条件：
 目标：sort、compact、bucket-builder、gather/scatter 使用统一 order/apply
 机制，避免每个 primitive 自己维护一套 field helper。
 
+S10 当前状态：
+
+- StructNdarray tensor-member 路径已经具备共享 order/apply 语义层：
+  compact/bucket out-of-place apply 复用内部 `IndexedCopyWorkspace`，sort
+  in-place apply 复用内部 gather+transform replay group。
+- order pair 为精确尺寸缓存；只有 identity input order 在分配时初始化，output
+  order buffer 不再清零。
+- dense field 标量 compact 仍保持 native/fused scatter 路径，不为了抽象一致性
+  引入 order buffer。
+
 内容：
 
 - 将已有 StructNdarray order-once 模式提升为内部 primitive。
@@ -1436,6 +1447,206 @@ bucket-builder 和后续 solver primitive。
     tests/python/test_grouped_reduce.py` 通过：36 passed；`tests/python/test_compact.py`
     加 field/matrix host I/O 定向测试通过：139 passed。仅有既有 pytest cache
     权限警告和 `C:/taichi_cache/ticache.lock` 警告。
+
+- Two-level aggregation primitive（2026-05-24 第一阶段）：
+  - 边界：先在 DSL/internal plan 层统一 two-level 语义，不新增 C++ ABI、
+    shader、runtime bitcode 或公开稳定 API。field/SNode sparse 结构继续跳过；
+    dense field 只复用已有 native grouped-reduce 能力，不改变 SNode 语义。
+  - `experimental_grouped_reduce()` 新增实验方法别名 `two_level`、
+    `cuda_two_level`、`vulkan_two_level`、`cpu_two_level`。CUDA 映射到已有
+    segmented/CUB-style grouped reduce；Vulkan 映射到已有 native segmented
+    grouped reduce；CPU 映射到 native partial/merge grouped reduce。
+  - `GroupedReduceWorkspace` 增加 native scalar plan cache 与 whole
+    StructNdarray tensor-member plan group replay。缓存 key 使用
+    PrimitivePlan object key，member view wrapper 重建后仍可复用同一 payload
+    和 offset/stride 对应的 native plan。
+  - workspace 内部 segmented buffers 扩容或 dtype 改变时会清空相关 plan，
+    避免 replay 旧 offsets/scratch/cursor 对象；这保持存储占用可解释，也避免
+    stale buffer 被计划闭包延长生命周期。
+  - 当前第一阶段主要降低 Python 层校验、wrapper 重建和 component-wise
+    dispatch 的固定开销；真正降低高冲突 atomic 成本的 per-block/workgroup
+    partial aggregation kernel 仍属于后续 C++/CUDA/Vulkan 深入阶段。
+
+- Two-level aggregation primitive（2026-05-24 覆盖扩展）：
+  - `experimental_histogram()` 和 `experimental_bucket_builder()` 也接受
+    backend-neutral `two_level` 以及 `cuda_two_level`、`vulkan_two_level`、
+    `cpu_two_level` 实验方法别名。
+  - histogram two-level 映射到已有 CUDA CUB、Vulkan native histogram、
+    CPU native histogram；field fallback 的 `two_level` 显式使用
+    `field_private`，避免小规模 direct path 与 two-level 策略混淆。Scalar
+    StructNdarray member values/bins 现在通过 cached native transform staging
+    接入这些后端，whole tensor member histogram 仍因语义不清保持关闭。
+  - bucket two-level 映射到已有 native count/prefix/scatter bucket builder；
+    StructNdarray tensor-member payload 继续复用 order/apply workspace。
+  - `HistogramWorkspace` 和 `BucketBuilderWorkspace` 均补充 native plan cache。
+    bucket cache 会在 cursor buffer 扩容时清空，避免 replay 旧 cursor。
+  - `histogram`、`bucket_builder`、`grouped_reduce` 的 public entrypoint 现在
+    共用同一个 aggregation backend family router。它只在 Python 层把
+    `auto`、backend-specific method 和 backend-neutral `two_level` 映射到
+    当前 arch 的 native/segmented family，不创建 Taichi kernel、不分配设备
+    workspace，也不改变 PrimitivePlan cache key。这样后续新增 aggregation
+    primitive 时先复用语义分发，再决定是否需要真正的 CPU/CUDA/Vulkan
+    backend kernel。
+  - 并行语义保持为通用 two-level aggregation：第一级在 block/workgroup/thread
+    私有或分段空间内降低冲突，第二级按 group/bin 做全局合并。当前
+    histogram/bucket/grouped-reduce 只把已有正确后端挂到这个策略名下；
+    若 measured runtime 显示 atomic/native 更适合某分布，`auto` 仍保持原默认。
+  - 验证使用 3.10 工作区环境 `PYTHONPATH=D:\taichi\python`，确认加载
+    `D:\taichi\python\taichi_forge` 的 `taichi_forge 0.4.0`；默认
+    `python` 当前会加载 Python 3.14 site-packages 的旧 0.1.0，不用于本轮
+    结论。
+  - 收口验证：`py_compile` 覆盖 `_algorithms.py`、相关三件套 tests 和
+    benchmark；`test_histogram.py`、`test_bucket_builder.py`、
+    `test_grouped_reduce.py` 合计 `47 passed`。
+  - router smoke benchmark 记录在
+    `benchmarks/results/s10_aggregation_router_20260524/summary.md`。2048 规模下
+    bucket `auto/two_level` 在 CPU/CUDA/Vulkan 上 workspace 相同；CUDA
+    grouped-reduce `two_level` 小规模仍慢于 atomic/default 且需要 workspace，
+    因此保持显式 opt-in。
+  - `scatter_add` 的 two-level alias 已在后续收口阶段补齐：它不是用
+    grouped-reduce 覆盖 `dst`，而是 reduce-to-scratch 后调用 native
+    add-merge，保持 `dst[indices[i]] += src[i]` 语义。
+
+- Scatter-add plan cache hygiene（2026-05-24）：
+  - `ScatterAddWorkspace` 接入同一 aggregation backend family router，但
+    现在额外接受 `two_level`、`cuda_two_level`、`vulkan_two_level`、
+    `cpu_two_level`。该路径先 grouped-reduce 到 workspace scratch，再用
+    native add-merge 写回原 destination，避免破坏已有 `dst` 的累加语义。
+  - 新增 CPU/CUDA/Vulkan add-merge native primitive。CPU 是 typed native
+    loop；CUDA 走 device/toolkit kernel；Vulkan 走 CMake 管理的 compute
+    shader 与 cached resource/pipeline。三者均支持 plain ndarray、
+    StructNdarray scalar member stride，以及 plain scratch 到 dense field 的
+    add-merge。
+  - Vulkan two-level scatter-add 的 StructNdarray member source 会先通过
+    native transform staged 到 plain ndarray，再调用已有 native segmented
+    grouped-reduce，最后 add-merge 到 plain/member/dense field destination。
+    这样避免为 strided segmented reduce 扩张 shader ABI，也避免 Taichi helper
+    kernel/IR 膨胀。
+  - `ScatterAddWorkspace` 记录 reduce scratch、member staging scratch、嵌套
+    transform/grouped-reduce workspace、add-merge plan 和 two-level replay
+    group；scratch 扩容或 dtype 改变时清空相关 plan，防止 stale buffer replay。
+  - 验证更新：`test_scatter_add.py` 18 passed；`test_histogram.py` 10 passed；
+    `test_bucket_builder.py` 20 passed；`test_grouped_reduce.py` 17 passed；
+    `test_sort_api.py` 49 passed。
+  - 性能/存储记录：
+    `benchmarks/results/s10_two_level_dtype_layout_20260524/summary.md`。默认
+    atomic/native 对本轮低冲突 synthetic scatter-add/grouped-reduce 仍更快；
+    two-level 保持显式 opt-in，作为高碰撞分布和物理引擎验证的可缓存策略。
+
+- Two-level aggregation primitive（2026-05-24 落地收口）：
+  - `experimental_grouped_reduce()` 的 Vulkan two-level member-view 缺口已补齐：
+    scalar member keys/values/output 通过 cached native transform staging 接入
+    plain native segmented reduce；whole tensor member views 继续按 scalar lane
+    复用同一路径。CPU/CUDA 仍使用已有 strided/member native reduce。
+  - `experimental_scatter_add()` 的 two-level 路径覆盖 ndarray、StructNdarray
+    scalar member view、whole tensor member lane decomposition，以及 ndarray
+    scratch 到 dense field destination 的 add-merge。`auto` 仍保持 atomic/native
+    默认，不因 microbenchmark 的特定冲突分布强行切换。
+  - 完整 dtype/layout 语义：本轮 two-level scatter-add 和 grouped-reduce 覆盖
+    `i32/f32/u32/u64/i64/f64`；histogram 覆盖 `i32/u32` values 与 `i32/i64`
+    bins；Vulkan 宽 dtype 受设备 shader capability gating 约束。StructNdarray
+    raw payload 仍只用于 payload/order 类 primitive，不进入 numeric aggregation。
+  - 收口验证环境为 Python 3.10.11 + `PYTHONPATH=D:\taichi\python` +
+    repo `taichi_forge 0.4.0` extension。`test_scatter_add.py` 18 passed；
+    `test_grouped_reduce.py` 17 passed；`test_histogram.py` 10 passed；
+    `test_bucket_builder.py` 20 passed；`test_sort_api.py` 49 passed。
+
+- S10 通用运行时弱项优化（2026-05-24 计划）：
+  - 现状引用：
+    `benchmarks/results/s10_current_all_dense_field_postfix_20260524/summary.json`
+    显示 CPU first-call/compile 对比 vanilla 1.8.0 的 27 个可比项均未回退；
+    当前 CPU 问题集中在 warm runtime，尤其是 4096/65536 规模的
+    scatter_add、histogram、grouped_reduce、gather/scatter、bucket_builder
+    和 compact。
+  - 做法：
+    1. 不新增 Taichi helper kernel，不改变 `PrimitivePlan` cache key，不增加
+       workspace；
+    2. CPU indexed-copy 的 payload copy/zero 增加常见 4B/8B/16B fast path，
+       减少小 scalar field/ndarray 的循环化字节拷贝成本；
+    3. CPU histogram/grouped-reduce/scatter-add 继续保留大规模 two-level
+       partial/merge 路径，但提高并行阈值，避免 64K 左右低收益规模过早分配
+       partial workspace 和触发两次 thread-pool dispatch；
+    4. CPU bucket-builder 只收紧 native 并行阈值，避免 64K 左右低收益规模
+       过早分配 partial/thread-offset workspace；稳定 order/apply 输出语义不变。
+    5. histogram、bucket_builder、grouped_reduce 的 workspace replay 先尝试
+       最近一次 `_NativePrimitivePlan`，未命中再计算 dict cache key，减少热路径
+       Python metadata 固定开销。
+  - 验收标准：
+    - focused tests 通过：`test_scatter_add.py`、`test_histogram.py`、
+      `test_grouped_reduce.py`、`test_indexed_copy.py` 的 CPU 相关路径；
+    - CPU first-call 不退步，workspace peak 不增加；
+    - CPU warm runtime 弱项至少在 4096/65536 规模收敛，1M 大规模不能明显
+      退化；
+    - 若阈值调整让大规模聚合回退，则按单 primitive 回退，不影响其他后端。
+  - 风险：
+    - 过高阈值可能削弱 1M 以上聚合吞吐；
+    - scalar payload fast path 若处理对齐假设过宽，可能影响 strided/member
+      view，因此只在既有 4-byte aligned contract 下使用固定宽度读写。
+  - 回退策略：
+    - 本轮均为 `program.cpp` 内部实现调整，无公开 API/ABI/cache key 变化；
+      失败时逐个恢复阈值或 fast path helper 即可。
+  - 执行记录（2026-05-24）：
+    - CPU 侧已完成：indexed-copy 4B/8B/16B payload fast path、reduce /
+      transform / histogram / bucket / grouped-reduce 并行阈值收紧，以及
+      histogram / bucket_builder / grouped_reduce 最近 plan replay fast path。
+      构建入口 `cmd /c _run_build.cmd` 通过并已部署 `.pyd`。
+    - CPU 基准写入
+      `benchmarks/results/s10_cpu_native_runtime_plan_replay_final_20260524/`。
+      相对本轮前数据，4096/65536 规模 reduce、transform、histogram、
+      bucket_builder、grouped_reduce 明显收敛；CPU first-call 仍显著优于
+      vanilla 1.8.0。剩余 warm 弱项主要是 gather/scatter 65K/1M、
+      scatter_add 4K/65K、compact 65K/1M，以及 histogram/grouped_reduce
+      小规模的固定成本。
+    - CUDA 侧完成 native runtime 异步提交：除 sort 的就地回写链路外，
+      CUB/native scan、reduce、select、transform、indexed-copy、
+      scatter_add、histogram、bucket_builder、grouped_reduce 不再在
+      primitive 内部强制 `cudaStreamSynchronize` / `cudaDeviceSynchronize`，
+      由 `ti.sync()`、readback 或同 stream 后续 work 保证完成语义。
+      CUDA 聚合基准写入
+      `benchmarks/results/s10_cuda_async_native_submit_20260524/` 和
+      `benchmarks/results/s10_cuda_direct_hist_async_submit_20260524/`。
+      gather/scatter/transform/reduce warm 固定成本显著下降；histogram i32
+      bin direct path 将 workspace 从 CUB temp 降为 0，但对 warm runtime
+      只小幅变化。
+    - Vulkan 侧本轮只做归因 probe，结果写入
+      `benchmarks/results/s10_vulkan_weak_runtime_probe_20260524/`。scatter_add
+      从 4096 到 1048576 仅从约 0.81 ms 增至约 1.02 ms，bucket/compact 也
+      呈接近固定底座，说明当前弱项主要是 descriptor/resource binding、
+      barrier 和 command submission 常数，而不是 two-level 聚合可直接解决的
+      规模项。Vulkan command/resource replay 仍列为后续高 ROI 后端专项。
+    - focused tests 拆分通过：`test_histogram.py` 10 passed、
+      `test_scatter_add.py` 18 passed、`test_grouped_reduce.py` 17 passed、
+      `test_bucket_builder.py` 20 passed、`test_indexed_copy.py` 27 passed。
+      五个文件混跑仍可能在 teardown/report 阶段触发既有 Windows 后端混跑
+      access violation；本轮拆分验证未复现功能失败。
+  - 执行记录（2026-05-24 IMA/atomic follow-up）：
+    - 修复 CPU dense scalar/matrix field `fill()` 的 helper-kernel IMA 触发点。
+      Python scope 下可证明的 CPU dense scalar field 和 matrix/vector field
+      component fill 直接调用 `Program::fill_dense_field()`，不再为常见
+      `dst.fill(0)` 生成 JIT helper kernel；非 CPU、非 dense 或不支持 dtype
+      仍回落到原 helper。
+    - CUDA scatter_add / grouped_reduce 的 atomic path 增加小桶数 block-private
+      shared aggregation 分支：当 `num_items >= 2048`、bucket/group 数不超过
+      1024 且 block flush 工作量受控时，先在 block 内聚合，再写全局
+      atomic。默认大桶数路径保持直接 global atomic，避免固定开销扩大。
+    - 正确性/稳定性验证通过：
+      `test_field.py::test_scalar_field_cpu_dense_native_fill` 6 passed，
+      `test_indexed_copy.py::test_experimental_gather_scatter_native_dense_matrix_field_components`
+      3 passed，`test_vulkan_native_lifecycle.py` 1 passed，五文件组合
+      `test_histogram.py test_scatter_add.py test_grouped_reduce.py
+      test_bucket_builder.py test_indexed_copy.py` 92 passed。
+    - 全矩阵基准写入
+      `benchmarks/results/atomic_ima_full_20260524/`，高碰撞 atomic 窄矩阵写入
+      `benchmarks/results/atomic_hot64_20260524/`。结果显示 first-call/compile
+      proxy 仍全面优于 vanilla 1.8.0；CUDA/Vulkan scatter_add、histogram、
+      grouped_reduce 的 warm runtime 仍主要受 native field 调用固定成本和
+      command/sync 窗口限制，block-private 分支不是决定性优化，后续应优先
+      做 atomic/order primitive 的 command/resource replay 或 fused submission。
+    - 已重新构建并生成本地 wheel：
+      `dist/taichi_forge-0.4.0-cp310-cp310-win_amd64.whl`。文档中旧 miniforge
+      Python 路径当前不存在，本轮使用实际验证环境
+      `C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe`
+      校验 staged wheel 内容可 `import taichi_forge` 并 `ti.init(arch=ti.cpu)`。
 
 ### P8. 物理引擎级验证
 

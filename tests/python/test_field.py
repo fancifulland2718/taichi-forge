@@ -147,6 +147,25 @@ def test_scalr_field_from_numpy_with_mismatch_shape(dtype, shape):
         x.from_numpy(arr)
 
 
+@pytest.mark.parametrize(
+    "dtype, np_dtype, value",
+    [
+        (ti.i32, np.int32, -7),
+        (ti.u32, np.uint32, 11),
+        (ti.i64, np.int64, -13),
+        (ti.u64, np.uint64, 17),
+        (ti.f32, np.float32, 2.5),
+        (ti.f64, np.float64, -3.25),
+    ],
+)
+@test_utils.test(arch=[ti.cpu])
+def test_scalar_field_cpu_dense_native_fill(dtype, np_dtype, value):
+    x = ti.field(dtype, shape=(4, 8))
+    x.fill(value)
+    expected = np.full((4, 8), value, dtype=np_dtype)
+    np.testing.assert_array_equal(x.to_numpy(), expected)
+
+
 @test_utils.test(arch=get_host_arch_list())
 def test_field_needs_grad():
     # Just make sure the usage doesn't crash, see #1545

@@ -13,6 +13,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT_PREFIX = "S4_DENSE_FIELD_BENCH "
+_BUCKET_OVERRIDE: int | None = None
+_KEY_PATTERN = "default"
 
 
 def _powershell_gpu_process_dedicated_mb(pid: int) -> float | None:
@@ -96,6 +98,8 @@ def _indices(n: int):
 
 
 def _bucket_count(n: int) -> int:
+    if _BUCKET_OVERRIDE is not None:
+        return max(1, min(n, _BUCKET_OVERRIDE))
     return max(64, min(n, 4096))
 
 
@@ -103,6 +107,11 @@ def _bucket_indices(n: int):
     import numpy as np  # pylint: disable=import-outside-toplevel
 
     buckets = _bucket_count(n)
+    if _KEY_PATTERN == "single":
+        return np.zeros(n, dtype=np.int32)
+    if _KEY_PATTERN == "hot":
+        hot_buckets = max(1, min(buckets, 64))
+        return (np.arange(n, dtype=np.int32) % hot_buckets).astype(np.int32)
     return ((np.arange(n, dtype=np.int32) * 13 + 5) % buckets).astype(np.int32)
 
 
@@ -117,6 +126,11 @@ def _histogram_values(n: int):
     import numpy as np  # pylint: disable=import-outside-toplevel
 
     buckets = _bucket_count(n)
+    if _KEY_PATTERN == "single":
+        return np.zeros(n, dtype=np.int32)
+    if _KEY_PATTERN == "hot":
+        hot_buckets = max(1, min(buckets, 64))
+        return (np.arange(n, dtype=np.int32) % hot_buckets).astype(np.int32)
     return ((np.arange(n, dtype=np.int32) * 7 + 3) % buckets).astype(np.int32)
 
 
@@ -139,7 +153,9 @@ def _init_runtime(ti, arch_name: str) -> None:
     ti.init(**kwargs)
 
 
-def _make_forge_body(ti, arch_name: str, op_name: str, n: int):
+def _make_forge_body(
+    ti, arch_name: str, op_name: str, n: int, method_override: str | None = None
+):
     src = ti.field(ti.i32, shape=n)
     src.from_numpy(_values(n))
 
@@ -155,7 +171,7 @@ def _make_forge_body(ti, arch_name: str, op_name: str, n: int):
     if op_name == "reduce":
         dst = ti.field(ti.i32, shape=())
         workspace = ti.algorithms.ReduceWorkspace(max_items=n)
-        method = _method_for(arch_name, op_name)
+        method = method_override or _method_for(arch_name, op_name)
 
         def body():
             ti.algorithms.experimental_reduce(
@@ -167,7 +183,7 @@ def _make_forge_body(ti, arch_name: str, op_name: str, n: int):
     if op_name == "transform":
         dst = ti.field(ti.i32, shape=n)
         workspace = ti.algorithms.TransformWorkspace(max_items=n)
-        method = _method_for(arch_name, op_name)
+        method = method_override or _method_for(arch_name, op_name)
 
         def body():
             ti.algorithms.experimental_transform(
@@ -185,7 +201,7 @@ def _make_forge_body(ti, arch_name: str, op_name: str, n: int):
         indices = ti.ndarray(ti.i32, shape=n)
         dst = ti.field(ti.i32, shape=n)
         workspace = ti.algorithms.IndexedCopyWorkspace(max_items=n)
-        method = _method_for(arch_name, op_name)
+        method = method_override or _method_for(arch_name, op_name)
         indices.from_numpy(_indices(n))
 
         if op_name == "gather":
@@ -209,7 +225,7 @@ def _make_forge_body(ti, arch_name: str, op_name: str, n: int):
         buckets = _bucket_count(n)
         dst = ti.field(ti.i32, shape=buckets)
         workspace = ti.algorithms.ScatterAddWorkspace(max_items=n)
-        method = _method_for(arch_name, op_name)
+        method = method_override or _method_for(arch_name, op_name)
         indices.from_numpy(_bucket_indices(n))
 
         def body():
@@ -238,7 +254,7 @@ def _make_forge_body(ti, arch_name: str, op_name: str, n: int):
         src.from_numpy(_histogram_values(n))
         bins = ti.field(ti.i32, shape=buckets)
         workspace = ti.algorithms.HistogramWorkspace(max_items=n, max_bins=buckets)
-        method = _method_for(arch_name, op_name)
+        method = method_override or _method_for(arch_name, op_name)
 
         def body():
             ti.algorithms.experimental_histogram(
@@ -255,7 +271,7 @@ def _make_forge_body(ti, arch_name: str, op_name: str, n: int):
         workspace = ti.algorithms.BucketBuilderWorkspace(
             max_items=n, max_bins=buckets
         )
-        method = _method_for(arch_name, op_name)
+        method = method_override or _method_for(arch_name, op_name)
         keys.from_numpy(_bucket_indices(n))
 
         def body():
@@ -272,7 +288,7 @@ def _make_forge_body(ti, arch_name: str, op_name: str, n: int):
         workspace = ti.algorithms.GroupedReduceWorkspace(
             max_items=n, max_groups=buckets
         )
-        method = _method_for(arch_name, op_name)
+        method = method_override or _method_for(arch_name, op_name)
         keys.from_numpy(_bucket_indices(n))
 
         def body():
@@ -478,6 +494,10 @@ def _make_vanilla_body(ti, arch_name: str, op_name: str, n: int):
 
 
 def run_child(args: argparse.Namespace) -> int:
+    global _BUCKET_OVERRIDE, _KEY_PATTERN  # pylint: disable=global-statement
+
+    _BUCKET_OVERRIDE = args.bucket_override
+    _KEY_PATTERN = args.key_pattern
     ti = _import_taichi(args.package)
     pid = os.getpid()
     sample_gpu = args.arch in ("cuda", "vulkan")
@@ -490,7 +510,9 @@ def run_child(args: argparse.Namespace) -> int:
     gpu_after_init = _powershell_gpu_process_dedicated_mb(pid) if sample_gpu else None
 
     if args.package == "forge":
-        body, meta = _make_forge_body(ti, args.arch, args.op, args.n)
+        body, meta = _make_forge_body(
+            ti, args.arch, args.op, args.n, args.method_override
+        )
     else:
         body, meta = _make_vanilla_body(ti, args.arch, args.op, args.n)
     _sync(ti)
@@ -537,6 +559,9 @@ def run_child(args: argparse.Namespace) -> int:
         "package_version": ".".join(str(x) for x in ti.__version__[:3]),
         "arch": args.arch,
         "op": args.op,
+        "method_override": args.method_override,
+        "bucket_override": args.bucket_override,
+        "key_pattern": args.key_pattern,
         "dtype": "i32",
         "n": args.n,
         "aux_size": meta.get("aux_size"),
@@ -624,6 +649,12 @@ def run_matrix(args: argparse.Namespace) -> int:
                         "--warmups",
                         str(args.warmups),
                     ]
+                    if args.method_override and package == "forge":
+                        cmd.extend(["--method-override", args.method_override])
+                    if args.bucket_override is not None:
+                        cmd.extend(["--bucket-override", str(args.bucket_override)])
+                    if args.key_pattern != "default":
+                        cmd.extend(["--key-pattern", args.key_pattern])
                     print("RUN " + " ".join(cmd), flush=True)
                     proc = subprocess.run(
                         cmd,
@@ -678,7 +709,12 @@ def run_matrix(args: argparse.Namespace) -> int:
                         flush=True,
                     )
 
-    summary = {"rows": rows, "failures": failures, "skips": skips}
+    summary = {
+        "method_override": args.method_override,
+        "rows": rows,
+        "failures": failures,
+        "skips": skips,
+    }
     (out_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8"
     )
@@ -691,6 +727,9 @@ def run_matrix(args: argparse.Namespace) -> int:
                 "package_version",
                 "arch",
                 "op",
+                "method_override",
+                "bucket_override",
+                "key_pattern",
                 "dtype",
                 "n",
                 "aux_size",
@@ -711,6 +750,9 @@ def run_matrix(args: argparse.Namespace) -> int:
                     "package_version": row["package_version"],
                     "arch": row["arch"],
                     "op": row["op"],
+                    "method_override": row.get("method_override"),
+                    "bucket_override": row.get("bucket_override"),
+                    "key_pattern": row.get("key_pattern"),
                     "dtype": row["dtype"],
                     "n": row["n"],
                     "aux_size": row.get("aux_size"),
@@ -754,6 +796,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--n", type=int)
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--warmups", type=int, default=3)
+    parser.add_argument("--method-override")
+    parser.add_argument("--bucket-override", type=int)
+    parser.add_argument(
+        "--key-pattern", choices=["default", "hot", "single"], default="default"
+    )
     parser.add_argument("--out-dir", default=str(ROOT / "benchmarks" / "results" / "s4_dense_field_native"))
     parser.add_argument("--forge-python", default=sys.executable)
     parser.add_argument("--vanilla-python", default=sys.executable)

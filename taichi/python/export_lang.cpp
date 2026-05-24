@@ -707,6 +707,21 @@ void export_lang(py::module &m) {
            py::arg("dst"), py::arg("value_type"), py::arg("n"),
            py::arg("scale"), py::arg("bias"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_add_merge_available",
+           &Program::cuda_device_add_merge_available)
+      .def("cuda_device_add_merge_ndarray",
+           &Program::cuda_device_add_merge_ndarray, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_add_merge_strided_ndarray",
+           &Program::cuda_device_add_merge_strided_ndarray, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("src_offset"),
+           py::arg("src_stride"), py::arg("dst_offset"),
+           py::arg("dst_stride"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_add_merge_dense_field",
+           &Program::cuda_device_add_merge_dense_field, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_device_indexed_copy_available",
            &Program::cuda_device_indexed_copy_available)
       .def("cuda_device_indexed_copy_payload_available",
@@ -965,6 +980,9 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("cpu_compact_available", &Program::cpu_compact_available)
       .def("cpu_compact_workspace_bytes", &Program::cpu_compact_workspace_bytes)
+      .def("fill_dense_field", &Program::fill_dense_field, py::arg("dst"),
+           py::arg("value_type"), py::arg("value_bits"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
       .def(
           "copy_dense_field_from_host",
           [](Program &program, SNode *dst, py::buffer src, int value_type,
@@ -1074,6 +1092,19 @@ void export_lang(py::module &m) {
            &Program::cpu_transform_affine_dense_field, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("n"),
            py::arg("scale"), py::arg("bias"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_add_merge_available", &Program::cpu_add_merge_available)
+      .def("cpu_add_merge_ndarray", &Program::cpu_add_merge_ndarray,
+           py::arg("src"), py::arg("dst"), py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_add_merge_strided_ndarray",
+           &Program::cpu_add_merge_strided_ndarray, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("src_offset"),
+           py::arg("src_stride"), py::arg("dst_offset"),
+           py::arg("dst_stride"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_add_merge_dense_field",
+           &Program::cpu_add_merge_dense_field, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("n"),
            py::call_guard<py::gil_scoped_release>())
       .def("cpu_indexed_copy_available", &Program::cpu_indexed_copy_available)
       .def("cpu_indexed_copy_workspace_bytes",
@@ -1315,6 +1346,27 @@ void export_lang(py::module &m) {
            &Program::vulkan_transform_affine_dense_field, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("n"),
            py::arg("scale"), py::arg("bias"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_add_merge_available", &Program::vulkan_add_merge_available)
+      .def("vulkan_add_merge_value_type_available",
+           &Program::vulkan_add_merge_value_type_available,
+           py::arg("value_type"))
+      .def("vulkan_add_merge_clear_workspace",
+           &Program::vulkan_add_merge_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_add_merge_workspace_bytes",
+           &Program::vulkan_add_merge_workspace_bytes)
+      .def("vulkan_add_merge_ndarray", &Program::vulkan_add_merge_ndarray,
+           py::arg("src"), py::arg("dst"), py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_add_merge_strided_ndarray",
+           &Program::vulkan_add_merge_strided_ndarray, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("src_offset"),
+           py::arg("src_stride"), py::arg("dst_offset"),
+           py::arg("dst_stride"), py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_add_merge_dense_field",
+           &Program::vulkan_add_merge_dense_field, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("n"),
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_indexed_copy_available",
            &Program::vulkan_indexed_copy_available)

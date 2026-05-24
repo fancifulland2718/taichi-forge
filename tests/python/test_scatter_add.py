@@ -49,6 +49,145 @@ def _run_ndarray_scatter_add(dtype, np_dtype, method):
     assert workspace.workspace_bytes_peak == 0
 
 
+def _two_level_method_for_current_arch(value_type=0):
+    arch = impl.current_cfg().arch
+    prog = impl.get_runtime().prog
+    if arch == ti.cpu:
+        if not (
+            hasattr(prog, "cpu_grouped_reduce_available")
+            and prog.cpu_grouped_reduce_available()
+            and hasattr(prog, "cpu_add_merge_available")
+            and prog.cpu_add_merge_available()
+        ):
+            pytest.skip("CPU two-level scatter-add backend is unavailable.")
+        return "cpu_two_level"
+    if arch == ti.cuda:
+        if not (
+            hasattr(prog, "cuda_device_grouped_reduce_available")
+            and prog.cuda_device_grouped_reduce_available()
+            and hasattr(prog, "cuda_device_add_merge_available")
+            and prog.cuda_device_add_merge_available()
+        ):
+            pytest.skip("CUDA two-level scatter-add backend is unavailable.")
+        return "cuda_two_level"
+    if arch == ti.vulkan:
+        if not (
+            hasattr(prog, "vulkan_grouped_reduce_available")
+            and prog.vulkan_grouped_reduce_available()
+            and hasattr(prog, "vulkan_add_merge_available")
+            and prog.vulkan_add_merge_available()
+        ):
+            pytest.skip("Vulkan two-level scatter-add backend is unavailable.")
+        if (
+            hasattr(prog, "vulkan_grouped_reduce_value_type_available")
+            and not prog.vulkan_grouped_reduce_value_type_available(value_type)
+        ):
+            pytest.skip("Vulkan grouped-reduce value type is unavailable.")
+        if (
+            hasattr(prog, "vulkan_add_merge_value_type_available")
+            and not prog.vulkan_add_merge_value_type_available(value_type)
+        ):
+            pytest.skip("Vulkan add-merge value type is unavailable.")
+        return "vulkan_two_level"
+    pytest.skip("two-level scatter-add backend is unavailable on this arch.")
+
+
+def _run_ndarray_scatter_add_two_level(dtype, np_dtype, method):
+    n = 1024
+    buckets = 73
+    src = ti.ndarray(dtype, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(dtype, shape=buckets)
+    values_np, indices_np, base_np, expected = _scatter_add_input(n, buckets, np_dtype)
+    indices_np[::17] = -1
+    indices_np[::29] = buckets + 5
+    expected = base_np.copy()
+    for value, index in zip(values_np, indices_np):
+        if 0 <= index < buckets:
+            expected[index] += value
+    src.from_numpy(values_np)
+    indices.from_numpy(indices_np)
+    dst.from_numpy(base_np)
+    workspace = ti.algorithms.ScatterAddWorkspace(max_items=n, max_groups=buckets)
+    ti.algorithms.experimental_scatter_add(
+        src, indices, dst, method=method, workspace=workspace
+    )
+    _assert_matches(dst.to_numpy(), expected)
+    assert len(workspace._two_level_scatter_add_plan_groups) == 1
+    assert len(workspace._native_add_merge_plans) == 1
+    group = workspace._two_level_scatter_add_plan_group
+    dst.from_numpy(base_np)
+    ti.algorithms.experimental_scatter_add(
+        src, indices, dst, method=method, workspace=workspace
+    )
+    assert workspace._two_level_scatter_add_plan_group is group
+    _assert_matches(dst.to_numpy(), expected)
+
+
+def _run_struct_member_scatter_add_two_level(dtype, np_dtype, method):
+    n = 1024
+    buckets = 73
+    payload = ti.types.struct(value=dtype, tag=ti.i32)
+    src = ti.ndarray(payload, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(payload, shape=buckets)
+    values_np, indices_np, base_np, expected = _scatter_add_input(n, buckets, np_dtype)
+    host = np.zeros((n,), dtype=src.numpy_dtype)
+    host["value"] = values_np
+    host["tag"] = np.arange(n, dtype=np.int32) * 7 + 3
+    dst_host = np.zeros((buckets,), dtype=dst.numpy_dtype)
+    dst_host["value"] = base_np
+    dst_host["tag"] = np.arange(buckets, dtype=np.int32) * 11 - 5
+    src.from_numpy(host)
+    indices.from_numpy(indices_np)
+    dst.from_numpy(dst_host)
+    workspace = ti.algorithms.ScatterAddWorkspace(max_items=n, max_groups=buckets)
+    ti.algorithms.experimental_scatter_add(
+        src.field("value"),
+        indices,
+        dst.field("value"),
+        method=method,
+        workspace=workspace,
+    )
+    result = dst.to_numpy()
+    _assert_matches(result["value"], expected)
+    np.testing.assert_array_equal(result["tag"], dst_host["tag"])
+    assert len(workspace._two_level_scatter_add_plan_groups) == 1
+    group = workspace._two_level_scatter_add_plan_group
+    dst.from_numpy(dst_host)
+    ti.algorithms.experimental_scatter_add(
+        src.field("value"),
+        indices,
+        dst.field("value"),
+        method=method,
+        workspace=workspace,
+    )
+    assert workspace._two_level_scatter_add_plan_group is group
+    result = dst.to_numpy()
+    _assert_matches(result["value"], expected)
+    np.testing.assert_array_equal(result["tag"], dst_host["tag"])
+
+
+def _run_ndarray_to_dense_field_scatter_add_two_level(dtype, np_dtype, method):
+    n = 512
+    buckets = 41
+    src = ti.ndarray(dtype, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    dst = ti.field(dtype, shape=buckets)
+    values_np, indices_np, base_np, expected = _scatter_add_input(n, buckets, np_dtype)
+    src.from_numpy(values_np)
+    indices.from_numpy(indices_np)
+    dst.from_numpy(base_np)
+    workspace = ti.algorithms.ScatterAddWorkspace(max_items=n, max_groups=buckets)
+    ti.algorithms.experimental_scatter_add(
+        src, indices, dst, method=method, workspace=workspace
+    )
+    _assert_matches(dst.to_numpy(), expected)
+    assert workspace._native_add_merge_plan["method_name"].endswith(
+        "add_merge_dense_field"
+    )
+
+
 def _run_struct_member_scatter_add(dtype, np_dtype, method):
     n = 2048
     buckets = 127
@@ -76,12 +215,14 @@ def _run_struct_member_scatter_add(dtype, np_dtype, method):
     _assert_matches(result["value"], expected)
     np.testing.assert_array_equal(result["tag"], dst_host["tag"])
     assert len(workspace._native_scatter_add_plans) == 1
-    plan = workspace._native_scatter_add_plans[0]
+    plan = workspace._native_scatter_add_plan
     dst.from_numpy(dst_host)
+    src_value = src.field("value")
+    dst_value = dst.field("value")
     ti.algorithms.experimental_scatter_add(
         src_value, indices, dst_value, method=method, workspace=workspace
     )
-    assert workspace._native_scatter_add_plans[0] is plan
+    assert workspace._native_scatter_add_plan is plan
     result = dst.to_numpy()
     _assert_matches(result["value"], expected)
     np.testing.assert_array_equal(result["tag"], dst_host["tag"])
@@ -135,12 +276,14 @@ def _run_struct_tensor_member_scatter_add(method):
     np.testing.assert_array_equal(result["mat"], base_mat)
     assert len(workspace._native_scatter_add_plans) == 2
     assert len(workspace._native_scatter_add_plan_groups) == 1
-    vec_plans = tuple(workspace._native_scatter_add_plans)
+    vec_plan_ids = {id(plan) for plan in workspace._native_scatter_add_plans}
     dst.from_numpy(dst_host)
+    src_vec = src.field("vec")
+    dst_vec = dst.field("vec")
     ti.algorithms.experimental_scatter_add(
         src_vec, indices, dst_vec, method=method, workspace=workspace
     )
-    assert tuple(workspace._native_scatter_add_plans) == vec_plans
+    assert {id(plan) for plan in workspace._native_scatter_add_plans} == vec_plan_ids
     assert len(workspace._native_scatter_add_plan_groups) == 1
     ti.algorithms.experimental_scatter_add(
         src_mat, indices, dst_mat, method=method, workspace=workspace
@@ -171,7 +314,7 @@ def _run_dense_field_scatter_add(dtype, np_dtype, method):
     )
     _assert_matches(dst.to_numpy(), expected)
     assert len(workspace._native_scatter_add_plans) == 1
-    plan = workspace._native_scatter_add_plans[0]
+    plan = workspace._native_scatter_add_plan
     assert plan["backend"] in {"cpu_native", "cuda_device", "vulkan_native"}
     assert "scatter_add_dense_field" in plan["method_name"]
 
@@ -179,7 +322,7 @@ def _run_dense_field_scatter_add(dtype, np_dtype, method):
     ti.algorithms.experimental_scatter_add(
         src, indices, dst, method=method, workspace=workspace
     )
-    assert workspace._native_scatter_add_plans[0] is plan
+    assert workspace._native_scatter_add_plan is plan
     _assert_matches(dst.to_numpy(), expected)
 
 
@@ -236,7 +379,10 @@ def _run_dense_matrix_field_scatter_add():
 
     np.testing.assert_array_equal(dst.to_numpy(), expected)
     assert len(workspace._native_scatter_add_plans) == 2
-    assert workspace._native_scatter_add_plans[-1]["method_name"] == method_name
+    assert any(
+        plan["method_name"] == method_name
+        for plan in workspace._native_scatter_add_plans
+    )
     assert workspace.workspace_bytes_peak <= 64
     assert len(workspace._native_scatter_add_plan_groups) == 1
 
@@ -376,6 +522,24 @@ def test_experimental_scatter_add_cpu_native_ndarray_wide_dtypes():
         _run_dense_field_scatter_add(dtype, np_dtype, "cpu_native")
     _run_struct_tensor_member_scatter_add("cpu_native")
     assert impl.get_runtime().prog.cpu_scatter_add_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_scatter_add_two_level_ndarray_struct_and_dense_dst():
+    cases = [
+        (0, ti.i32, np.int32),
+        (1, ti.f32, np.float32),
+        (2, ti.u32, np.uint32),
+        (3, ti.u64, np.uint64),
+        (4, ti.i64, np.int64),
+        (5, ti.f64, np.float64),
+    ]
+    for value_type, dtype, np_dtype in cases:
+        method = _two_level_method_for_current_arch(value_type)
+        _run_ndarray_scatter_add_two_level(dtype, np_dtype, method)
+        _run_struct_member_scatter_add_two_level(dtype, np_dtype, method)
+    method = _two_level_method_for_current_arch(0)
+    _run_ndarray_to_dense_field_scatter_add_two_level(ti.i32, np.int32, method)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

@@ -46,7 +46,7 @@ def _assert_matches(actual, expected):
         assert np.array_equal(actual, expected)
 
 
-def _run_ndarray_grouped_reduce(dtype, np_dtype, method):
+def _run_ndarray_grouped_reduce(dtype, np_dtype, method, workspace=None):
     n = 4096
     groups = 257
     keys = ti.ndarray(ti.i32, shape=n)
@@ -56,15 +56,17 @@ def _run_ndarray_grouped_reduce(dtype, np_dtype, method):
     keys.from_numpy(keys_np)
     values.from_numpy(values_np)
     output.fill(np_dtype(3))
-    workspace = ti.algorithms.GroupedReduceWorkspace(max_items=n, max_groups=groups)
+    if workspace is None:
+        workspace = ti.algorithms.GroupedReduceWorkspace(max_items=n, max_groups=groups)
     ti.algorithms.experimental_grouped_reduce(
         keys, values, output, method=method, workspace=workspace
     )
     _assert_matches(output.to_numpy(), expected)
     assert workspace.workspace_bytes_peak >= 0
+    return workspace
 
 
-def _run_struct_member_grouped_reduce(dtype, np_dtype, method):
+def _run_struct_member_grouped_reduce(dtype, np_dtype, method, workspace=None):
     n = 2048
     groups = 127
     key_payload = ti.types.struct(key=ti.i32, key_tag=ti.i32)
@@ -85,7 +87,8 @@ def _run_struct_member_grouped_reduce(dtype, np_dtype, method):
     keys.from_numpy(keys_host)
     values.from_numpy(host)
     output.from_numpy(output_host)
-    workspace = ti.algorithms.GroupedReduceWorkspace(max_items=n, max_groups=groups)
+    if workspace is None:
+        workspace = ti.algorithms.GroupedReduceWorkspace(max_items=n, max_groups=groups)
     ti.algorithms.experimental_grouped_reduce(
         keys.field("key"),
         values.field("value"),
@@ -98,6 +101,7 @@ def _run_struct_member_grouped_reduce(dtype, np_dtype, method):
     np.testing.assert_array_equal(keys.to_numpy()["key_tag"], keys_host["key_tag"])
     np.testing.assert_array_equal(result["tag"], output_host["tag"])
     np.testing.assert_array_equal(values.to_numpy()["tag"], host["tag"])
+    return workspace
 
 
 def _run_struct_nested_component_grouped_reduce(method):
@@ -140,7 +144,7 @@ def _run_struct_nested_component_grouped_reduce(method):
     np.testing.assert_array_equal(result["tag"], output_host["tag"])
 
 
-def _run_struct_tensor_member_grouped_reduce(method):
+def _run_struct_tensor_member_grouped_reduce(method, workspace=None, repeat=False):
     n = 2048
     groups = 127
     key_payload = ti.types.struct(key=ti.i32, key_tag=ti.i32)
@@ -176,18 +180,29 @@ def _run_struct_tensor_member_grouped_reduce(method):
     values.from_numpy(values_host)
     output.from_numpy(output_host)
 
-    ti.algorithms.experimental_grouped_reduce(
-        keys.field("key"),
-        values.field("vec"),
-        output.field("vec"),
-        method=method,
-    )
-    ti.algorithms.experimental_grouped_reduce(
-        keys.field("key"),
-        values.field("mat"),
-        output.field("mat"),
-        method=method,
-    )
+    if workspace is None:
+        workspace = ti.algorithms.GroupedReduceWorkspace(max_items=n, max_groups=groups)
+
+    def run_once():
+        ti.algorithms.experimental_grouped_reduce(
+            keys.field("key"),
+            values.field("vec"),
+            output.field("vec"),
+            method=method,
+            workspace=workspace,
+        )
+        ti.algorithms.experimental_grouped_reduce(
+            keys.field("key"),
+            values.field("mat"),
+            output.field("mat"),
+            method=method,
+            workspace=workspace,
+        )
+
+    run_once()
+    if repeat:
+        output.from_numpy(output_host)
+        run_once()
 
     result = output.to_numpy()
     np.testing.assert_array_equal(result["vec"], expected_vec)
@@ -195,6 +210,7 @@ def _run_struct_tensor_member_grouped_reduce(method):
     np.testing.assert_array_equal(keys.to_numpy()["key_tag"], keys_host["key_tag"])
     np.testing.assert_array_equal(values.to_numpy()["tag"], values_host["tag"])
     np.testing.assert_array_equal(result["tag"], output_host["tag"])
+    return workspace
 
 
 @test_utils.test(arch=[ti.cuda])
@@ -212,10 +228,13 @@ def test_experimental_grouped_reduce_cuda_device_ndarray_wide_dtypes():
         _run_ndarray_grouped_reduce(dtype, np_dtype, "cuda_segmented")
         _run_struct_member_grouped_reduce(dtype, np_dtype, "cuda_segmented")
     _run_ndarray_grouped_reduce(ti.i32, np.int32, "auto")
+    _run_ndarray_grouped_reduce(ti.i32, np.int32, "two_level")
+    _run_struct_member_grouped_reduce(ti.i32, np.int32, "cuda_two_level")
     _run_struct_nested_component_grouped_reduce("cuda_device")
     _run_struct_nested_component_grouped_reduce("cuda_segmented")
     _run_struct_tensor_member_grouped_reduce("cuda_device")
     _run_struct_tensor_member_grouped_reduce("cuda_segmented")
+    _run_struct_tensor_member_grouped_reduce("cuda_two_level")
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -229,9 +248,14 @@ def test_experimental_grouped_reduce_vulkan_native_ndarray_types():
 
     _run_ndarray_grouped_reduce(ti.i32, np.int32, "auto")
     _run_ndarray_grouped_reduce(ti.i32, np.int32, "vulkan_native")
+    _run_ndarray_grouped_reduce(ti.i32, np.int32, "two_level")
+    _run_ndarray_grouped_reduce(ti.i32, np.int32, "vulkan_two_level")
     _run_struct_member_grouped_reduce(ti.i32, np.int32, "vulkan_native")
+    _run_struct_member_grouped_reduce(ti.i32, np.int32, "vulkan_two_level")
     _run_struct_nested_component_grouped_reduce("vulkan_native")
+    _run_struct_nested_component_grouped_reduce("vulkan_two_level")
     _run_struct_tensor_member_grouped_reduce("vulkan_native")
+    _run_struct_tensor_member_grouped_reduce("vulkan_two_level")
     _run_ndarray_grouped_reduce(ti.u32, np.uint32, "vulkan_native")
     _run_struct_member_grouped_reduce(ti.u32, np.uint32, "vulkan_native")
     for dtype, np_dtype in _GROUPED_DTYPES:
@@ -241,6 +265,7 @@ def test_experimental_grouped_reduce_vulkan_native_ndarray_types():
         ):
             continue
         _run_ndarray_grouped_reduce(dtype, np_dtype, "vulkan_segmented")
+        _run_struct_member_grouped_reduce(dtype, np_dtype, "vulkan_two_level")
     f32_atomic_native = (
         hasattr(prog, "vulkan_grouped_reduce_atomic_value_type_available")
         and prog.vulkan_grouped_reduce_atomic_value_type_available(1)
@@ -305,10 +330,20 @@ def test_experimental_grouped_reduce_cpu_native_ndarray_wide_dtypes():
         _run_ndarray_grouped_reduce(dtype, np_dtype, "cpu_native")
         _run_struct_member_grouped_reduce(dtype, np_dtype, "cpu_native")
     _run_ndarray_grouped_reduce(ti.i32, np.int32, "auto")
+    _run_ndarray_grouped_reduce(ti.i32, np.int32, "two_level")
+    _run_struct_member_grouped_reduce(ti.i32, np.int32, "cpu_two_level")
     _run_struct_nested_component_grouped_reduce("cpu_native")
     _run_struct_nested_component_grouped_reduce("segmented")
     _run_struct_tensor_member_grouped_reduce("cpu_native")
     _run_struct_tensor_member_grouped_reduce("segmented")
+    _run_struct_tensor_member_grouped_reduce("two_level")
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_experimental_grouped_reduce_two_level_plan_reuse_cpu():
+    workspace = _run_struct_tensor_member_grouped_reduce("two_level", repeat=True)
+    assert len(workspace._native_grouped_reduce_plans) >= 2
+    assert len(workspace._native_grouped_reduce_plan_groups) >= 2
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])

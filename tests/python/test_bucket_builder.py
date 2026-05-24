@@ -234,8 +234,10 @@ def test_experimental_bucket_builder_cuda_device_ndarray():
     ):
         pytest.skip("CUDA driver bucket builder is unavailable in this runtime.")
     _run_ndarray_bucket_builder(ti.i32, np.int32, "auto")
+    _run_ndarray_bucket_builder(ti.i32, np.int32, "two_level")
     for dtype, np_dtype in _BUCKET_DTYPES:
         _run_ndarray_bucket_builder(dtype, np_dtype, "cuda_device")
+    _run_ndarray_bucket_builder(ti.i32, np.int32, "cuda_two_level")
 
 
 @test_utils.test(arch=[ti.cuda])
@@ -247,6 +249,7 @@ def test_experimental_bucket_builder_cuda_device_ndarray_vector_payload():
     ):
         pytest.skip("CUDA driver bucket builder is unavailable in this runtime.")
     _run_vector_ndarray_bucket_builder("cuda_device")
+    _run_vector_ndarray_bucket_builder("cuda_two_level")
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -258,8 +261,10 @@ def test_experimental_bucket_builder_vulkan_native_ndarray():
     ):
         pytest.skip("Vulkan native bucket builder is unavailable in this runtime.")
     _run_ndarray_bucket_builder(ti.i32, np.int32, "auto")
+    _run_ndarray_bucket_builder(ti.i32, np.int32, "two_level")
     for dtype, np_dtype in _BUCKET_DTYPES:
         _run_ndarray_bucket_builder(dtype, np_dtype, "vulkan_native")
+    _run_ndarray_bucket_builder(ti.i32, np.int32, "vulkan_two_level")
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -271,6 +276,7 @@ def test_experimental_bucket_builder_vulkan_native_ndarray_vector_payload():
     ):
         pytest.skip("Vulkan native bucket builder is unavailable in this runtime.")
     _run_vector_ndarray_bucket_builder("vulkan_native")
+    _run_vector_ndarray_bucket_builder("vulkan_two_level")
 
 
 @pytest.mark.run_in_serial
@@ -301,13 +307,16 @@ def test_experimental_bucket_builder_vulkan_reset_with_live_ndarray():
 @test_utils.test(arch=[ti.cpu])
 def test_experimental_bucket_builder_cpu_native_ndarray():
     _run_ndarray_bucket_builder(ti.i32, np.int32, "auto")
+    _run_ndarray_bucket_builder(ti.i32, np.int32, "two_level")
     for dtype, np_dtype in _BUCKET_DTYPES:
         _run_ndarray_bucket_builder(dtype, np_dtype, "cpu_native")
+    _run_ndarray_bucket_builder(ti.i32, np.int32, "cpu_two_level")
 
 
 @test_utils.test(arch=[ti.cpu])
 def test_experimental_bucket_builder_cpu_native_ndarray_vector_payload():
     _run_vector_ndarray_bucket_builder("cpu_native")
+    _run_vector_ndarray_bucket_builder("cpu_two_level")
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])
@@ -369,6 +378,12 @@ def test_experimental_bucket_builder_dense_field_native():
     try:
         ti.algorithms.experimental_bucket_builder(
             keys, values, offsets, output, method="auto", workspace=workspace
+        )
+        assert ti.algorithms.get_legacy_helper_fallback_counts() == {}
+        offsets.fill(0)
+        output.fill(0)
+        ti.algorithms.experimental_bucket_builder(
+            keys, values, offsets, output, method="two_level", workspace=workspace
         )
         assert ti.algorithms.get_legacy_helper_fallback_counts() == {}
     finally:
