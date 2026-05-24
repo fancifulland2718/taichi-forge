@@ -454,6 +454,21 @@ class _NativePrimitivePlan:
         object_keys = tuple(_primitive_plan_object_key(obj) for obj in objects)
         return self._object_keys() == object_keys
 
+    def matches_hot_request(self, backend, objects):
+        """Fast exact-object match for steady-state replay.
+
+        The full cache-key path below supports wrapper reconstruction and is
+        still used on misses. This path intentionally mirrors a warmed JIT
+        kernel launch: same objects, same prepared native plan, then launch.
+        """
+
+        if self.backend != backend:
+            return False
+        objects = tuple(objects)
+        return len(self.objects) == len(objects) and all(
+            cached is current for cached, current in zip(self.objects, objects)
+        )
+
     def cache_key(self):
         return (self.backend, self._object_keys(), self.semantic_key)
 
@@ -505,6 +520,14 @@ class _NativePrimitivePlanGroup:
             return True
         object_keys = tuple(_primitive_plan_object_key(obj) for obj in objects)
         return self._object_keys() == object_keys
+
+    def matches_hot_request(self, backend, objects):
+        if self.backend != backend:
+            return False
+        objects = tuple(objects)
+        return len(self.objects) == len(objects) and all(
+            cached is current for cached, current in zip(self.objects, objects)
+        )
 
     def cache_key(self):
         return (self.backend, self._object_keys(), self.semantic_key)
@@ -730,6 +753,44 @@ def _try_native_component_plan_group(
     if group is None:
         return False
     if not group.matches_request(backend, objects, semantic_key):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not group.matches_program(prog):
+        return False
+    temp_bytes = group.invoke(prog)
+    if temp_bytes is None:
+        return False
+    on_success(group, temp_bytes)
+    return True
+
+
+def _try_hot_native_plan(plan, backend, objects, on_success, semantic_key=None):
+    if backend is None or plan is None:
+        return False
+    if semantic_key is not None and plan.semantic_key != tuple(semantic_key):
+        return False
+    if not plan.matches_hot_request(backend, objects):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not plan.matches_program(prog):
+        return False
+    temp_bytes = plan.invoke(prog)
+    if temp_bytes is None:
+        return False
+    on_success(plan, temp_bytes)
+    return True
+
+
+def _try_hot_native_plan_group(group, backend, objects, on_success, semantic_key=None):
+    if backend is None or group is None:
+        return False
+    if semantic_key is not None and group.semantic_key != tuple(semantic_key):
+        return False
+    if not group.matches_hot_request(backend, objects):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -1424,6 +1485,17 @@ class ReduceWorkspace:
         backend = self._native_reduce_backend_for_method(method)
         if backend is None:
             return False
+        if _try_hot_native_plan(
+            self._native_reduce_plan,
+            backend,
+            (values, output),
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_reduce_plan", plan),
+                self._mark_native_reduce_backend_active(backend, temp_bytes),
+            ),
+            semantic_key=(op,),
+        ):
+            return True
         plan = self._native_reduce_plan
         if plan is None or not plan.matches_request(backend, (values, output), (op,)):
             key = _native_plan_cache_key(backend, (values, output), (op,))
@@ -1635,6 +1707,17 @@ class HistogramWorkspace:
             return False
         semantic_key = (int(value_type), int(bin_type))
         objects = (values, bins)
+        if _try_hot_native_plan(
+            self._native_histogram_plan,
+            backend,
+            objects,
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_histogram_plan", plan),
+                self._mark_native_histogram_backend_active(backend, temp_bytes),
+            ),
+            semantic_key=semantic_key,
+        ):
+            return True
         plan = self._native_histogram_plan
         if plan is None or not plan.matches_request(backend, objects, semantic_key):
             key = _native_plan_cache_key(backend, objects, semantic_key)
@@ -1654,6 +1737,20 @@ class HistogramWorkspace:
         self._native_histogram_plan = plan
         self._mark_native_histogram_backend_active(backend, temp_bytes)
         return True
+
+    def _try_hot_native_histogram_plan(self, values, bins, method):
+        backend = self._native_histogram_backend_for_method(method)
+        if backend is None:
+            return False
+        return _try_hot_native_plan(
+            self._native_histogram_plan,
+            backend,
+            (values, bins),
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_histogram_plan", plan),
+                self._mark_native_histogram_backend_active(backend, temp_bytes),
+            ),
+        )
 
     def _record_native_histogram_plan(
         self,
@@ -1703,6 +1800,25 @@ class HistogramWorkspace:
         )
         objects = (values, bins)
         group = self._staged_histogram_plan_group
+        if _try_hot_native_plan_group(
+            group,
+            backend,
+            objects,
+            lambda hot_group, temp_bytes: (
+                setattr(self, "_staged_histogram_plan_group", hot_group),
+                setattr(
+                    self,
+                    "_native_histogram_plan",
+                    hot_group.plans[-1] if hot_group.plans else None,
+                ),
+                self._mark_native_histogram_backend_active(backend, temp_bytes),
+                self._record_staged_child_workspace(
+                    self._staged_member_transform_workspace
+                ),
+            ),
+            semantic_key=semantic_key,
+        ):
+            return True
         if group is None or not group.matches_request(backend, objects, semantic_key):
             key = _native_plan_cache_key(backend, objects, semantic_key)
             group = self._staged_histogram_plan_groups.get(key)
@@ -1722,6 +1838,33 @@ class HistogramWorkspace:
         self._mark_native_histogram_backend_active(backend, temp_bytes)
         self._record_staged_child_workspace(self._staged_member_transform_workspace)
         return True
+
+    def _try_hot_staged_histogram_plan_group(self, values, bins, method):
+        backend = self._native_histogram_backend_for_method(method)
+        if backend is None:
+            return False
+        group = self._staged_histogram_plan_group
+        if group is None:
+            return False
+        if len(group.semantic_key) < 3 or group.semantic_key[2] != method:
+            return False
+        return _try_hot_native_plan_group(
+            group,
+            backend,
+            (values, bins),
+            lambda hot_group, temp_bytes: (
+                setattr(self, "_staged_histogram_plan_group", hot_group),
+                setattr(
+                    self,
+                    "_native_histogram_plan",
+                    hot_group.plans[-1] if hot_group.plans else None,
+                ),
+                self._mark_native_histogram_backend_active(backend, temp_bytes),
+                self._record_staged_child_workspace(
+                    self._staged_member_transform_workspace
+                ),
+            ),
+        )
 
     def _record_staged_histogram_plan_group(
         self, values, bins, method, value_type, bin_type, n, num_bins, plans
@@ -1826,6 +1969,17 @@ class TransformWorkspace:
         backend = self._native_transform_backend_for_method(method)
         if backend is None:
             return False
+        if _try_hot_native_plan(
+            self._native_transform_plan,
+            backend,
+            (src, dst),
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_transform_plan", plan),
+                self._mark_native_transform_backend_active(backend, temp_bytes),
+            ),
+            semantic_key=(scale, bias),
+        ):
+            return True
         plan = self._native_transform_plan
         if plan is None or not plan.matches_request(
             backend, (src, dst), (scale, bias)
@@ -1970,6 +2124,17 @@ class IndexedCopyWorkspace:
         backend = self._native_indexed_copy_backend_for_method(method)
         if backend is None:
             return False
+        if _try_hot_native_plan(
+            self._native_indexed_copy_plan,
+            backend,
+            (src, indices, dst),
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_indexed_copy_plan", plan),
+                self._mark_native_indexed_copy_backend_active(backend, temp_bytes),
+            ),
+            semantic_key=(bool(scatter),),
+        ):
+            return True
         plan = self._native_indexed_copy_plan
         if plan is None or not plan.matches_request(
             backend, (src, indices, dst), (bool(scatter),)
@@ -2196,6 +2361,17 @@ class ScatterAddWorkspace:
         backend = self._native_scatter_add_backend_for_method(method)
         if backend is None:
             return False
+        if _try_hot_native_plan(
+            self._native_scatter_add_plan,
+            backend,
+            (src, indices, dst),
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_scatter_add_plan", plan),
+                self._mark_native_scatter_add_backend_active(backend, temp_bytes),
+            ),
+            semantic_key=(int(value_type),),
+        ):
+            return True
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         prog = impl.get_runtime().prog
@@ -2309,6 +2485,17 @@ class ScatterAddWorkspace:
         backend = self._native_add_merge_backend_for_method(method)
         if backend is None:
             return False
+        if _try_hot_native_plan(
+            self._native_add_merge_plan,
+            backend,
+            (src, dst),
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_add_merge_plan", plan),
+                self._mark_native_scatter_add_backend_active(backend, temp_bytes),
+            ),
+            semantic_key=(int(value_type), int(n)),
+        ):
+            return True
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         prog = impl.get_runtime().prog
@@ -2608,6 +2795,17 @@ class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
         objects, semantic_key = self._native_bucket_builder_request_signature(
             keys, values, offsets, output, value_type, n, num_bins
         )
+        if _try_hot_native_plan(
+            self._native_bucket_builder_plan,
+            backend,
+            objects,
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_bucket_builder_plan", plan),
+                self._mark_native_bucket_builder_backend_active(backend, temp_bytes),
+            ),
+            semantic_key=semantic_key,
+        ):
+            return True
         plan = self._native_bucket_builder_plan
         if plan is None or not plan.matches_request(backend, objects, semantic_key):
             key = _native_plan_cache_key(backend, objects, semantic_key)
@@ -2804,6 +3002,17 @@ class GroupedReduceWorkspace:
         objects, semantic_key = self._native_grouped_reduce_request_signature(
             keys, values, output, value_type, op_id, n, num_groups
         )
+        if _try_hot_native_plan(
+            self._native_grouped_reduce_plan,
+            backend,
+            objects,
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_grouped_reduce_plan", plan),
+                self._mark_native_grouped_reduce_backend_active(backend, temp_bytes),
+            ),
+            semantic_key=semantic_key,
+        ):
+            return True
         plan = self._native_grouped_reduce_plan
         if plan is None or not plan.matches_request(backend, objects, semantic_key):
             key = _native_plan_cache_key(backend, objects, semantic_key)
@@ -2903,6 +3112,25 @@ class GroupedReduceWorkspace:
         )
         objects = (keys, values, output)
         group = self._staged_grouped_reduce_plan_group
+        if _try_hot_native_plan_group(
+            group,
+            backend,
+            objects,
+            lambda hot_group, temp_bytes: (
+                setattr(self, "_staged_grouped_reduce_plan_group", hot_group),
+                setattr(
+                    self,
+                    "_native_grouped_reduce_plan",
+                    hot_group.plans[-1] if hot_group.plans else None,
+                ),
+                self._mark_native_grouped_reduce_backend_active(backend, temp_bytes),
+                self._record_staged_child_workspace(
+                    self._staged_member_transform_workspace
+                ),
+            ),
+            semantic_key=semantic_key,
+        ):
+            return True
         if group is None or not group.matches_request(backend, objects, semantic_key):
             key = _native_plan_cache_key(backend, objects, semantic_key)
             group = self._staged_grouped_reduce_plan_groups.get(key)
@@ -5652,6 +5880,35 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
     values and bins.
     """
 
+    if workspace is not None and isinstance(workspace, HistogramWorkspace):
+        if workspace._try_hot_staged_histogram_plan_group(values, bins, method):
+            return
+        if workspace._try_hot_native_histogram_plan(values, bins, method):
+            return
+        try:
+            value_type = _raw_payload_value_type(
+                values, _HISTOGRAM_VALUE_TYPE, "experimental_histogram()"
+            )
+            bin_type = _raw_payload_value_type(
+                bins, _HISTOGRAM_BIN_TYPE, "experimental_histogram()"
+            )
+            if workspace._try_staged_histogram_plan_group(
+                values,
+                bins,
+                method,
+                value_type,
+                bin_type,
+                values.shape[0],
+                bins.shape[0],
+            ):
+                return
+            if workspace._try_native_histogram_plan(
+                values, bins, method, value_type, bin_type
+            ):
+                return
+        except (AttributeError, TypeError):
+            pass
+
     _check_histogram_request(values, bins, method, workspace)
     if workspace is None:
         workspace = HistogramWorkspace(max_items=values.shape[0], max_bins=bins.shape[0])
@@ -7867,6 +8124,20 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
             )
         return workspace
 
+    if workspace is not None and isinstance(workspace, ScatterAddWorkspace):
+        try:
+            value_type = _scatter_add_value_type(src.dtype)
+            if workspace._try_two_level_scatter_add_plan_group(
+                src, indices, dst, method, value_type
+            ):
+                return workspace
+            if workspace._try_native_scatter_add_plan(
+                src, indices, dst, method, value_type
+            ):
+                return workspace
+        except (AttributeError, TypeError):
+            pass
+
     _check_scatter_add_request(src, indices, dst, method, workspace)
     n = indices.shape[0]
     if workspace is None:
@@ -8330,6 +8601,35 @@ def experimental_bucket_builder(
             use_temp=False,
         )
         return workspace
+
+    if workspace is not None and isinstance(workspace, BucketBuilderWorkspace):
+        aggregation_backend = _aggregation_backend_for_method(
+            method,
+            cuda_native=("cuda_device",),
+            cuda_two_level=("cuda_two_level",),
+            vulkan_native=("vulkan_native",),
+            vulkan_two_level=("vulkan_two_level",),
+            cpu_native=("cpu_native",),
+            cpu_two_level=("cpu_two_level",),
+        )
+        if aggregation_backend in (
+            "cuda_native",
+            "cuda_two_level",
+            "vulkan_native",
+            "vulkan_two_level",
+            "cpu_native",
+            "cpu_two_level",
+        ):
+            try:
+                n = keys.shape[0]
+                num_bins = offsets.shape[0] - 1
+                value_type = _bucket_builder_value_type(values)
+                if workspace._try_native_bucket_builder_plan(
+                    keys, values, offsets, output, value_type, n, num_bins
+                ):
+                    return workspace
+            except (AttributeError, TypeError, ValueError):
+                pass
 
     _check_bucket_builder_request(keys, values, offsets, output, method, workspace)
     n = keys.shape[0]
@@ -9096,6 +9396,35 @@ def experimental_grouped_reduce(
             )
         return workspace
 
+    if workspace is not None and isinstance(workspace, GroupedReduceWorkspace):
+        aggregation_backend = _aggregation_backend_for_method(
+            method,
+            cuda_native=("cuda_device",),
+            cuda_two_level=("cuda_segmented", "cuda_two_level"),
+            vulkan_native=("vulkan_native",),
+            vulkan_two_level=("vulkan_segmented", "vulkan_two_level"),
+            cpu_native=("cpu_native",),
+            cpu_two_level=("cpu_two_level",),
+            generic_two_level=("segmented", "two_level"),
+        )
+        backend = workspace._native_grouped_reduce_backend_for_method(method)
+        if aggregation_backend is not None and backend is not None:
+            try:
+                value_type = _grouped_reduce_value_type(values.dtype)
+                op_id = _SUPPORTED_GROUPED_REDUCE_OPS[op]
+                n = keys.shape[0]
+                num_groups = output.shape[0]
+                if aggregation_backend == "vulkan_two_level" and workspace._try_staged_grouped_reduce_plan_group(
+                    keys, values, output, method, value_type, op_id, n, num_groups
+                ):
+                    return workspace
+                if workspace._try_native_grouped_reduce_plan(
+                    backend, keys, values, output, value_type, op_id, n, num_groups
+                ):
+                    return workspace
+            except (AttributeError, KeyError, TypeError, ValueError):
+                pass
+
     _check_grouped_reduce_request(keys, values, output, op, method, workspace)
     n = keys.shape[0]
     num_groups = output.shape[0]
@@ -9263,6 +9592,14 @@ class PrefixSumExecutor:
         backend = self._native_scan_backend_for_arch()
         if backend is None:
             return False
+        if _try_hot_native_plan(
+            self._native_scan_plan,
+            backend,
+            (input_arr,),
+            lambda plan, _temp_bytes: setattr(self, "_native_scan_plan", plan),
+            semantic_key=(self.sorting_length,),
+        ):
+            return True
         plan = self._native_scan_plan
         if plan is None or not plan.matches_request(
             backend, (input_arr,), (self.sorting_length,)

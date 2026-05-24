@@ -8283,8 +8283,8 @@ std::size_t Program::vulkan_histogram_ndarray(Ndarray *values,
       get_environ_config("TI_VULKAN_HISTOGRAM_PRIVATE_MAX_BINS", 512);
   const int single_shared_max_n_config =
       get_environ_config("TI_VULKAN_HISTOGRAM_SINGLE_SHARED_MAX_N", 4096);
-  const bool shared_bins_supported = bin_type == 0 && num_bins <= 512;
-  const bool private_shared_supported = num_bins <= 512;
+  const bool shared_bins_supported = bin_type == 0 && num_bins <= 4096;
+  const bool private_shared_supported = num_bins <= 4096;
   const bool use_single_shared =
       n > 0 && shared_bins_supported && single_shared_max_n_config > 0 &&
       n <= static_cast<size_t>(single_shared_max_n_config);
@@ -8477,8 +8477,8 @@ std::size_t Program::vulkan_histogram_dense_field(SNode *values,
       get_environ_config("TI_VULKAN_HISTOGRAM_PRIVATE_MAX_BINS", 512);
   const int single_shared_max_n_config =
       get_environ_config("TI_VULKAN_HISTOGRAM_SINGLE_SHARED_MAX_N", 4096);
-  const bool shared_bins_supported = bin_type == 0 && num_bins <= 512;
-  const bool private_shared_supported = num_bins <= 512;
+  const bool shared_bins_supported = bin_type == 0 && num_bins <= 4096;
+  const bool private_shared_supported = num_bins <= 4096;
   const bool use_single_shared =
       n > 0 && shared_bins_supported && single_shared_max_n_config > 0 &&
       n <= static_cast<size_t>(single_shared_max_n_config);

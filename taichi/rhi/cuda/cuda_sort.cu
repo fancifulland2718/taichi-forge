@@ -157,29 +157,6 @@ struct CubSelectCache {
   }
 };
 
-struct CubHistogramCache {
-  void *temp_storage{nullptr};
-  std::size_t temp_storage_bytes{0};
-  int device_id{-1};
-
-  ~CubHistogramCache() {
-    release_noexcept();
-  }
-
-  void release_noexcept() {
-    if (temp_storage) {
-      cudaFree(temp_storage);
-    }
-    temp_storage = nullptr;
-    temp_storage_bytes = 0;
-    device_id = -1;
-  }
-
-  std::size_t allocated_bytes() const {
-    return temp_storage_bytes;
-  }
-};
-
 struct CubReduceCache {
   void *temp_storage{nullptr};
   std::size_t temp_storage_bytes{0};
@@ -277,12 +254,6 @@ get_select_caches() {
   return caches;
 }
 
-std::unordered_map<void *, std::unique_ptr<CubHistogramCache>> &
-get_histogram_caches() {
-  static std::unordered_map<void *, std::unique_ptr<CubHistogramCache>> caches;
-  return caches;
-}
-
 std::unordered_map<void *, std::unique_ptr<CubReduceCache>> &
 get_reduce_caches() {
   static std::unordered_map<void *, std::unique_ptr<CubReduceCache>> caches;
@@ -338,19 +309,6 @@ CubSelectCache &get_select_cache(void *owner) {
   auto it = caches.find(owner);
   if (it == caches.end()) {
     it = caches.emplace(owner, std::make_unique<CubSelectCache>()).first;
-  }
-  return *it->second;
-}
-
-CubHistogramCache &get_histogram_cache(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  auto &caches = get_histogram_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    it = caches.emplace(owner, std::make_unique<CubHistogramCache>()).first;
   }
   return *it->second;
 }
@@ -428,17 +386,6 @@ void ensure_device_cache(CubScanCache &cache) {
 }
 
 void ensure_device_cache(CubSelectCache &cache) {
-  int device_id = 0;
-  TI_CUDA_SORT_CHECK(cudaGetDevice(&device_id));
-  if (cache.device_id == -1) {
-    cache.device_id = device_id;
-  } else if (cache.device_id != device_id) {
-    cache.release_noexcept();
-    cache.device_id = device_id;
-  }
-}
-
-void ensure_device_cache(CubHistogramCache &cache) {
   int device_id = 0;
   TI_CUDA_SORT_CHECK(cudaGetDevice(&device_id));
   if (cache.device_id == -1) {
@@ -930,6 +877,39 @@ __device__ bool histogram_bin_in_range<int32_t>(int32_t bin, int num_bins) {
 template <>
 __device__ bool histogram_bin_in_range<uint32_t>(uint32_t bin, int num_bins) {
   return bin < static_cast<uint32_t>(num_bins);
+}
+
+__device__ void histogram_shared_atomic_add(int32_t *bin) {
+  atomicAdd(bin, 1);
+}
+
+__device__ void histogram_shared_atomic_add(int64_t *bin) {
+  atomicAdd(reinterpret_cast<unsigned long long *>(bin), 1ull);
+}
+
+template <typename T, typename CounterT>
+__global__ void histogram_single_block_shared_kernel(const T *samples,
+                                                     CounterT *hist,
+                                                     int num_items,
+                                                     int num_bins) {
+  extern __shared__ unsigned char shared_storage[];
+  CounterT *local = reinterpret_cast<CounterT *>(shared_storage);
+  for (int bin = threadIdx.x; bin < num_bins; bin += blockDim.x) {
+    local[bin] = CounterT{};
+  }
+  __syncthreads();
+
+  for (int i = threadIdx.x; i < num_items; i += blockDim.x) {
+    T bin = samples[i];
+    if (histogram_bin_in_range(bin, num_bins)) {
+      histogram_shared_atomic_add(local + static_cast<int>(bin));
+    }
+  }
+  __syncthreads();
+
+  for (int bin = threadIdx.x; bin < num_bins; bin += blockDim.x) {
+    hist[bin] = local[bin];
+  }
 }
 
 template <typename T>
@@ -2510,75 +2490,8 @@ std::size_t cub_select_cached_bytes_impl(void *owner) {
   return it->second->allocated_bytes();
 }
 
-template <typename T, typename CounterT>
-std::size_t histogram_even_typed(CubHistogramCache &cache,
-                                 void *values,
-                                 void *bins,
-                                 int num_items,
-                                 int num_bins,
-                                 void *stream_ptr) {
-  if (!values || !bins) {
-    throw std::runtime_error("CUB histogram received a null pointer");
-  }
-  const T *samples_in = static_cast<const T *>(values);
-  CounterT *hist_out = static_cast<CounterT *>(bins);
-  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
-  const bool use_stream = stream != nullptr;
-  ensure_device_cache(cache);
-  const std::size_t bin_bytes = sizeof(CounterT) * num_bins;
-
-  if (num_items == 0) {
-    TI_CUDA_SORT_CHECK(cudaMemsetAsync(hist_out, 0, bin_bytes, stream));
-    return cache.allocated_bytes();
-  }
-
-  std::size_t temp_storage_bytes = 0;
-  if (use_stream) {
-    TI_CUDA_SORT_CHECK(cub::DeviceHistogram::HistogramEven(
-        nullptr, temp_storage_bytes, samples_in, hist_out, num_bins + 1,
-        static_cast<T>(0), static_cast<T>(num_bins), num_items, stream));
-  } else {
-    TI_CUDA_SORT_CHECK(cub::DeviceHistogram::HistogramEven(
-        nullptr, temp_storage_bytes, samples_in, hist_out, num_bins + 1,
-        static_cast<T>(0), static_cast<T>(num_bins), num_items));
-  }
-  ensure_buffer(&cache.temp_storage, &cache.temp_storage_bytes,
-                temp_storage_bytes);
-  if (use_stream) {
-    TI_CUDA_SORT_CHECK(cub::DeviceHistogram::HistogramEven(
-        cache.temp_storage, temp_storage_bytes, samples_in, hist_out,
-        num_bins + 1, static_cast<T>(0), static_cast<T>(num_bins), num_items,
-        stream));
-  } else {
-    TI_CUDA_SORT_CHECK(cub::DeviceHistogram::HistogramEven(
-        cache.temp_storage, temp_storage_bytes, samples_in, hist_out,
-        num_bins + 1, static_cast<T>(0), static_cast<T>(num_bins), num_items));
-  }
-  return cache.allocated_bytes();
-}
-
-template <typename CounterT>
-std::size_t histogram_even_sample_dispatch(CubHistogramCache &cache,
-                                           void *values,
-                                           void *bins,
-                                           int num_items,
-                                           int num_bins,
-                                           CubHistogramValueType value_type,
-                                           void *stream) {
-  switch (value_type) {
-    case CubHistogramValueType::i32:
-      return histogram_even_typed<int32_t, CounterT>(
-          cache, values, bins, num_items, num_bins, stream);
-    case CubHistogramValueType::u32:
-      return histogram_even_typed<uint32_t, CounterT>(
-          cache, values, bins, num_items, num_bins, stream);
-  }
-  throw std::runtime_error("Unsupported CUB histogram value type");
-}
-
 template <typename T>
-std::size_t histogram_i32_direct_typed(CubHistogramCache &cache,
-                                       void *values,
+std::size_t histogram_i32_direct_typed(void *values,
                                        void *bins,
                                        int num_items,
                                        int num_bins,
@@ -2589,21 +2502,28 @@ std::size_t histogram_i32_direct_typed(CubHistogramCache &cache,
   const T *samples_in = static_cast<const T *>(values);
   int32_t *hist_out = static_cast<int32_t *>(bins);
   cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
-  ensure_device_cache(cache);
   const std::size_t bin_bytes = sizeof(int32_t) * num_bins;
+  constexpr int kSingleBlockMaxBins = 4096;
+  constexpr int kSingleBlockMaxItems = 8192;
+  constexpr int kBlockDim = 256;
+  if (num_bins <= kSingleBlockMaxBins && num_items <= kSingleBlockMaxItems) {
+    histogram_single_block_shared_kernel<T, int32_t>
+        <<<1, kBlockDim, bin_bytes, stream>>>(
+            samples_in, hist_out, num_items, num_bins);
+    TI_CUDA_SORT_CHECK(cudaGetLastError());
+    return 0;
+  }
   TI_CUDA_SORT_CHECK(cudaMemsetAsync(hist_out, 0, bin_bytes, stream));
   if (num_items > 0) {
-    constexpr int kBlockDim = 256;
     const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
     histogram_i32_direct_kernel<T><<<grid_dim, kBlockDim, 0, stream>>>(
         samples_in, hist_out, num_items, num_bins);
     TI_CUDA_SORT_CHECK(cudaGetLastError());
   }
-  return cache.allocated_bytes();
+  return 0;
 }
 
-std::size_t histogram_i32_sample_dispatch(CubHistogramCache &cache,
-                                          void *values,
+std::size_t histogram_i32_sample_dispatch(void *values,
                                           void *bins,
                                           int num_items,
                                           int num_bins,
@@ -2612,17 +2532,16 @@ std::size_t histogram_i32_sample_dispatch(CubHistogramCache &cache,
   switch (value_type) {
     case CubHistogramValueType::i32:
       return histogram_i32_direct_typed<int32_t>(
-          cache, values, bins, num_items, num_bins, stream);
+          values, bins, num_items, num_bins, stream);
     case CubHistogramValueType::u32:
       return histogram_i32_direct_typed<uint32_t>(
-          cache, values, bins, num_items, num_bins, stream);
+          values, bins, num_items, num_bins, stream);
   }
   throw std::runtime_error("Unsupported CUDA histogram value type");
 }
 
 template <typename T>
-std::size_t histogram_i64_direct_typed(CubHistogramCache &cache,
-                                       void *values,
+std::size_t histogram_i64_direct_typed(void *values,
                                        void *bins,
                                        int num_items,
                                        int num_bins,
@@ -2633,21 +2552,28 @@ std::size_t histogram_i64_direct_typed(CubHistogramCache &cache,
   const T *samples_in = static_cast<const T *>(values);
   int64_t *hist_out = static_cast<int64_t *>(bins);
   cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
-  ensure_device_cache(cache);
   const std::size_t bin_bytes = sizeof(int64_t) * num_bins;
+  constexpr int kSingleBlockMaxBins = 4096;
+  constexpr int kSingleBlockMaxItems = 8192;
+  constexpr int kBlockDim = 256;
+  if (num_bins <= kSingleBlockMaxBins && num_items <= kSingleBlockMaxItems) {
+    histogram_single_block_shared_kernel<T, int64_t>
+        <<<1, kBlockDim, bin_bytes, stream>>>(
+            samples_in, hist_out, num_items, num_bins);
+    TI_CUDA_SORT_CHECK(cudaGetLastError());
+    return 0;
+  }
   TI_CUDA_SORT_CHECK(cudaMemsetAsync(hist_out, 0, bin_bytes, stream));
   if (num_items > 0) {
-    constexpr int kBlockDim = 256;
     const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
     histogram_i64_direct_kernel<T><<<grid_dim, kBlockDim, 0, stream>>>(
         samples_in, hist_out, num_items, num_bins);
     TI_CUDA_SORT_CHECK(cudaGetLastError());
   }
-  return cache.allocated_bytes();
+  return 0;
 }
 
-std::size_t histogram_i64_sample_dispatch(CubHistogramCache &cache,
-                                          void *values,
+std::size_t histogram_i64_sample_dispatch(void *values,
                                           void *bins,
                                           int num_items,
                                           int num_bins,
@@ -2656,10 +2582,10 @@ std::size_t histogram_i64_sample_dispatch(CubHistogramCache &cache,
   switch (value_type) {
     case CubHistogramValueType::i32:
       return histogram_i64_direct_typed<int32_t>(
-          cache, values, bins, num_items, num_bins, stream);
+          values, bins, num_items, num_bins, stream);
     case CubHistogramValueType::u32:
       return histogram_i64_direct_typed<uint32_t>(
-          cache, values, bins, num_items, num_bins, stream);
+          values, bins, num_items, num_bins, stream);
   }
   throw std::runtime_error("Unsupported CUDA histogram value type");
 }
@@ -2672,44 +2598,25 @@ std::size_t cub_histogram_even_impl(void *values,
                                     CubHistogramBinType bin_type,
                                     void *stream,
                                     void *owner) {
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubHistogramCache &cache = get_histogram_cache(owner);
+  (void)owner;
   switch (bin_type) {
     case CubHistogramBinType::i32:
       return histogram_i32_sample_dispatch(
-          cache, values, bins, num_items, num_bins, value_type, stream);
+          values, bins, num_items, num_bins, value_type, stream);
     case CubHistogramBinType::i64:
       return histogram_i64_sample_dispatch(
-          cache, values, bins, num_items, num_bins, value_type, stream);
+          values, bins, num_items, num_bins, value_type, stream);
   }
   throw std::runtime_error("Unsupported CUB histogram bin type");
 }
 
 void cub_histogram_clear_cache_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_histogram_caches();
-  auto it = caches.find(owner);
-  if (it != caches.end()) {
-    caches.erase(it);
-  }
+  (void)owner;
 }
 
 std::size_t cub_histogram_cached_bytes_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_histogram_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    return 0;
-  }
-  return it->second->allocated_bytes();
+  (void)owner;
+  return 0;
 }
 
 template <typename T>

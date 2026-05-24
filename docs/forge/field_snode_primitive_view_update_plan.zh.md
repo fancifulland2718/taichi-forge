@@ -1642,6 +1642,36 @@ bucket-builder 和后续 solver primitive。
       grouped_reduce 的 warm runtime 仍主要受 native field 调用固定成本和
       command/sync 窗口限制，block-private 分支不是决定性优化，后续应优先
       做 atomic/order primitive 的 command/resource replay 或 fused submission。
+    - PrimitivePlan warm-call replay 更新后，公开 API 路径更接近 JIT kernel
+      的“首次选择、后续短路径 launch”范式：同一 workspace、同一对象、同一语义
+      先尝试 exact-object hot plan，命中后跳过完整 request check / backend
+      routing / dict cache key 生成，miss 时仍回到稳定 object-key cache 和原有
+      fallback。本轮不改变 `method="auto"` 的 native 默认策略。CUDA/Vulkan
+      复测写入 `benchmarks/results/plan_fast_replay_cuda_vulkan_20260524/`。
+      相对 `atomic_ima_full_20260524` 的 Forge warm median，中位改善：
+      CUDA scatter_add 7.6x、grouped_reduce 3.9x、bucket_builder 3.0x、
+      histogram 1.7x；Vulkan scatter_add 4.3x、grouped_reduce 3.5x、
+      bucket_builder 2.1x、histogram 2.0x。相对 vanilla 1.8.0，CUDA
+      scatter_add / grouped_reduce / bucket_builder 已接近或优于 vanilla，
+      CUDA histogram 和 Vulkan histogram 仍慢，说明剩余瓶颈主要在后端
+      histogram/command/resource 路径，而不是 Python routing。
+    - hot replay follow-up 后，histogram 顶层入口新增 exact-object 直达
+      `_native_histogram_plan` / staged plan group 的短路径，命中时不再先做
+      dtype payload 解析和完整 request check。CUDA histogram 同时去掉 direct
+      path 的旧 CUB cache/mutex 壳，并为 `num_bins <= 4096`、
+      `num_items <= 8192` 增加 single-block shared aggregation，一次 launch
+      完成 clear/count/writeback；中大规模仍保留 direct path，避免单 block
+      串行化。CUDA/Vulkan histogram 复测写入
+      `benchmarks/results/hist_cuda_vulkan_short_final_20260524/`，全操作矩阵写入
+      `benchmarks/results/all_ops_hot_replay_followup_20260524/`。该矩阵中
+      CUDA histogram warm median 为 0.055/0.052/0.045 ms，对比 vanilla
+      0.061/0.117/0.072 ms；Vulkan histogram first-call 仍优于 vanilla，
+      warm median 为 0.183/0.211/0.334 ms，对比 vanilla
+      0.153/0.162/0.163 ms。Vulkan 4096-bin shared shader 上限已扩到
+      4096，以覆盖小规模 single/shared；private 默认上限仍保留 512。
+      试验表明把 private 默认上限提高到 4096 虽可改善 warm runtime，但会让
+      65536/1M first-call 变差并引入 0.5-8 MiB partial workspace，因此暂不
+      作为默认策略。
     - 已重新构建并生成本地 wheel：
       `dist/taichi_forge-0.4.0-cp310-cp310-win_amd64.whl`。文档中旧 miniforge
       Python 路径当前不存在，本轮使用实际验证环境
