@@ -104,7 +104,7 @@ tests/p4
 .agent/
 .github/instructions/
 _archive/
-opt_doc/
+opt_doc/*
 build_llvm20_test/
 /build/
 .llvm20_old/
