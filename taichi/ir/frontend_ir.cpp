@@ -1362,10 +1362,11 @@ void GetElementExpression::flatten(FlattenContext *ctx) {
       src_is_lvalue ? flatten_lvalue(src, ctx) : flatten_rvalue(src, ctx);
   ctx->push_back<GetElementStmt>(src_stmt, index, dbg_info, src_is_lvalue);
   stmt = ctx->back_stmt();
-  stmt->ret_type =
-      src_is_lvalue
-          ? TypeFactory::get_instance().get_pointer_type(ret_type.ptr_removed())
-          : ret_type;
+  stmt->ret_type = ret_type;
+  if (src_is_lvalue) {
+    stmt->ret_type =
+        TypeFactory::get_instance().get_pointer_type(ret_type.ptr_removed());
+  }
 }
 
 bool GetElementExpression::is_global() const {
