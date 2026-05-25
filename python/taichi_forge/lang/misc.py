@@ -8,6 +8,7 @@ from copy import deepcopy as _deepcopy
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
+from taichi_forge.lang._compile_profile import python_compile_profile_event
 from taichi_forge.lang.expr import Expr
 from taichi_forge.lang.impl import axes, get_runtime
 from taichi_forge.profiler.kernel_profiler import get_default_kernel_profiler
@@ -791,61 +792,85 @@ def get_host_arch_list():
     return [_ti_core.host_arch()]
 
 
+def _normalize_compile_kernel_task(item):
+    if isinstance(item, tuple):
+        if len(item) == 0:
+            raise TypeError("compile_kernels: empty kernel task")
+        if len(item) > 3:
+            raise TypeError("compile_kernels: task must be kernel, (kernel, args), or (kernel, args, kwargs)")
+        kernel_obj = item[0]
+        args = item[1] if len(item) >= 2 else ()
+        kwargs = item[2] if len(item) == 3 else {}
+    else:
+        kernel_obj = item
+        args = ()
+        kwargs = {}
+
+    if args is None:
+        args = ()
+    elif isinstance(args, tuple):
+        pass
+    elif isinstance(args, list):
+        args = tuple(args)
+    else:
+        args = (args,)
+    if kwargs is None:
+        kwargs = {}
+    if not isinstance(kwargs, dict):
+        raise TypeError("compile_kernels: kwargs must be a dict")
+
+    if hasattr(kernel_obj, "_kernel_owner") and hasattr(kernel_obj, "_primal"):
+        if not getattr(kernel_obj, "_is_staticmethod", False):
+            args = (kernel_obj._kernel_owner,) + tuple(args)
+        kernel_obj = kernel_obj._primal
+    elif hasattr(kernel_obj, "_primal") and not hasattr(kernel_obj, "ensure_compiled"):
+        kernel_obj = kernel_obj._primal
+    if not hasattr(kernel_obj, "ensure_compiled"):
+        raise TypeError(f"compile_kernels: expected a Taichi kernel, got {type(kernel_obj).__name__}")
+
+    if kwargs:
+        from taichi_forge.lang.kernel_impl import _process_args  # pylint: disable=import-outside-toplevel
+
+        args = tuple(_process_args(kernel_obj, tuple(args), kwargs))
+    else:
+        args = tuple(args)
+    return kernel_obj, args
+
+
 def compile_kernels(kernels):
-    """P5.b — Pre-compile a batch of kernels in parallel.
+    """Precompile a batch of kernels without launching them.
 
-    Parameters
-    ----------
-    kernels : iterable
-        Each element is either a decorated Taichi kernel (no template
-        specialization needed, i.e. can be called with no args) or a
-        ``(kernel, args_tuple)`` pair that describes the exact specialization
-        to compile.
+    Each task is either ``kernel``, ``(kernel, args)``, or
+    ``(kernel, args, kwargs)``. The Python frontend still materializes each
+    specialization on the calling thread because AST transformation mutates
+    frontend runtime state. The backend compile submission is batched through
+    ``Program.compile_kernels`` and can use backend worker threads when the
+    active C++ runtime supports them.
 
-    Notes
-    -----
-    * Compilation is dispatched to ``compile_config.num_compile_threads``
-      worker threads at the C++ layer. Supports CPU (LLVM), CUDA and Vulkan.
-    * Ordering of the input list is irrelevant; each kernel is compiled as an
-      independent unit.
-    * Do NOT destroy SNode trees / fields while this call is in progress.
-
-    Returns
-    -------
-    int
-        Number of kernels submitted to the compiler.
+    Returns the number of kernel specializations submitted.
     """
     from taichi_forge.lang import impl as _impl
 
-    # Materialize every C++ Kernel object on the main thread FIRST. This is
-    # essential: the Python-side AST transformation mutates lots of global
-    # state (template specialization table, frontend IR builder) and cannot
-    # be parallelized. Only the subsequent C++ compile_kernel step is
-    # thread-safe (guarded by the P5.a cache mutex).
     specs = []
     for item in kernels:
-        if isinstance(item, tuple):
-            k, args = item[0], tuple(item[1]) if len(item) > 1 else tuple()
-        else:
-            k, args = item, tuple()
-        # Unwrap the @ti.kernel decorator wrapper to the underlying Kernel.
-        if hasattr(k, "_primal") and not hasattr(k, "ensure_compiled"):
-            k = k._primal
-        if not hasattr(k, "ensure_compiled"):
-            raise TypeError(
-                f"compile_kernels: expected a Taichi kernel, got {type(k).__name__}"
-            )
-        key = k.ensure_compiled(*args)
-        kernel_cpp = k.compiled_kernels[key]
-        specs.append(kernel_cpp)
+        kernel_obj, args = _normalize_compile_kernel_task(item)
+        name = getattr(getattr(kernel_obj, "func", None), "__name__", type(kernel_obj).__name__)
+        with python_compile_profile_event(f"python.parallel_compile.materialize:{name}"):
+            key = kernel_obj.ensure_compiled(*args)
+            specs.append(kernel_obj.compiled_kernels[key])
 
     if not specs:
         return 0
 
     prog = _impl.get_runtime().prog
-    # Releases the GIL internally so worker threads can run concurrently.
-    prog.compile_kernels(prog.config(), specs)
+    with python_compile_profile_event("python.parallel_compile.submit"):
+        prog.compile_kernels(prog.config(), specs)
     return len(specs)
+
+
+def parallel_compile(kernels):
+    """Alias for :func:`compile_kernels` matching the D4 planning name."""
+    return compile_kernels(kernels)
 
 
 __all__ = [
@@ -889,4 +914,5 @@ __all__ = [
     "reset",
     "mesh_patch_idx",
     "compile_kernels",
+    "parallel_compile",
 ]

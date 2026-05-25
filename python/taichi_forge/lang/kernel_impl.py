@@ -2,6 +2,7 @@ import ast
 import functools
 import inspect
 import operator
+import os
 import re
 import sys
 import textwrap
@@ -17,6 +18,7 @@ from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl, ops, runtime_ops
 from taichi_forge.lang.any_array import AnyArray
 from taichi_forge.lang._wrap_inspect import getsourcefile, getsourcelines
+from taichi_forge.lang._compile_profile import python_compile_profile_event
 from taichi_forge.lang.argpack import ArgPackType, ArgPack
 from taichi_forge.lang.ast import (
     ASTTransformerContext,
@@ -50,6 +52,8 @@ from taichi_forge.types.compound_types import CompoundType
 from taichi_forge.types.utils import is_signed
 
 from taichi_forge import _logging
+
+_SOURCE_TEMPLATE_CACHE = os.environ.get("TI_SOURCE_TEMPLATE_CACHE", "1") != "0"
 
 
 def func(fn, is_real_function=False):
@@ -130,15 +134,34 @@ def _get_tree_and_ctx(
     ast_builder=None,
     is_real_function=False,
 ):
-    file = getsourcefile(self.func)
-    src, start_lineno = getsourcelines(self.func)
-    src = [textwrap.fill(line, tabsize=4, width=9999) for line in src]
-    tree = ast.parse(textwrap.dedent("\n".join(src)))
-
-    func_body = tree.body[0]
-    func_body.decorator_list = []
-
-    global_vars = _get_global_vars(self.func)
+    profile_prefix = f"python.frontend.{self.func.__name__}"
+    if _SOURCE_TEMPLATE_CACHE:
+        with python_compile_profile_event(f"{profile_prefix}.source"):
+            cache = getattr(self, "_source_template_cache", None)
+            if cache is None:
+                file = getsourcefile(self.func)
+                src, start_lineno = getsourcelines(self.func)
+                src = [textwrap.fill(line, tabsize=4, width=9999) for line in src]
+                source = textwrap.dedent("\n".join(src))
+                cache = (file, src, start_lineno, source)
+                self._source_template_cache = cache
+            file, src, start_lineno, source = cache
+        with python_compile_profile_event(f"{profile_prefix}.ast_parse"):
+            tree = ast.parse(source)
+        func_body = tree.body[0]
+        func_body.decorator_list = []
+    else:
+        with python_compile_profile_event(f"{profile_prefix}.source"):
+            file = getsourcefile(self.func)
+            src, start_lineno = getsourcelines(self.func)
+            src = [textwrap.fill(line, tabsize=4, width=9999) for line in src]
+            source = textwrap.dedent("\n".join(src))
+        with python_compile_profile_event(f"{profile_prefix}.ast_parse"):
+            tree = ast.parse(source)
+        func_body = tree.body[0]
+        func_body.decorator_list = []
+    with python_compile_profile_event(f"{profile_prefix}.global_vars"):
+        global_vars = _get_global_vars(self.func)
 
     if is_kernel or is_real_function:
         # inject template parameters into globals
@@ -146,19 +169,21 @@ def _get_tree_and_ctx(
             template_var_name = self.arguments[i].name
             global_vars[template_var_name] = args[i]
 
-    return tree, ASTTransformerContext(
-        excluded_parameters=excluded_parameters,
-        is_kernel=is_kernel,
-        func=self,
-        arg_features=arg_features,
-        global_vars=global_vars,
-        argument_data=args,
-        src=src,
-        start_lineno=start_lineno,
-        file=file,
-        ast_builder=ast_builder,
-        is_real_function=is_real_function,
-    )
+    with python_compile_profile_event(f"{profile_prefix}.context"):
+        ctx = ASTTransformerContext(
+            excluded_parameters=excluded_parameters,
+            is_kernel=is_kernel,
+            func=self,
+            arg_features=arg_features,
+            global_vars=global_vars,
+            argument_data=args,
+            src=src,
+            start_lineno=start_lineno,
+            file=file,
+            ast_builder=ast_builder,
+            is_real_function=is_real_function,
+        )
+    return tree, ctx
 
 
 def _process_args(self, args, kwargs):
@@ -336,26 +361,27 @@ class Func:
                 runtime._ti_func_expansion_profile
                 or impl.default_cfg().auto_real_function
             )
-            if measure:
-                t0 = time.perf_counter_ns()
-                ret = transform_tree(tree, ctx)
-                dt_ns = time.perf_counter_ns() - t0
-                stats = runtime._ti_func_expansion_stats.setdefault(
-                    self.func_id,
-                    {
-                        "name": self.func.__name__,
-                        "call_count": 0,
-                        "cumulative_ns": 0,
-                        "max_ns": 0,
-                        "promoted": False,
-                    },
-                )
-                stats["call_count"] += 1
-                stats["cumulative_ns"] += dt_ns
-                if dt_ns > stats["max_ns"]:
-                    stats["max_ns"] = dt_ns
-            else:
-                ret = transform_tree(tree, ctx)
+            with python_compile_profile_event(f"python.func.inline_transform:{self.func.__name__}"):
+                if measure:
+                    t0 = time.perf_counter_ns()
+                    ret = transform_tree(tree, ctx)
+                    dt_ns = time.perf_counter_ns() - t0
+                    stats = runtime._ti_func_expansion_stats.setdefault(
+                        self.func_id,
+                        {
+                            "name": self.func.__name__,
+                            "call_count": 0,
+                            "cumulative_ns": 0,
+                            "max_ns": 0,
+                            "promoted": False,
+                        },
+                    )
+                    stats["call_count"] += 1
+                    stats["cumulative_ns"] += dt_ns
+                    if dt_ns > stats["max_ns"]:
+                        stats["max_ns"] = dt_ns
+                else:
+                    ret = transform_tree(tree, ctx)
         finally:
             runtime.func_inline_depth -= 1
         if not self.is_real_function:
@@ -421,7 +447,8 @@ class Func:
             old_callable = impl.get_runtime().compiling_callable
             impl.get_runtime().compiling_callable = fn
             ctx.ast_builder = fn.ast_builder()
-            transform_tree(tree, ctx)
+            with python_compile_profile_event(f"python.func.real_transform:{self.func.__name__}"):
+                transform_tree(tree, ctx)
             impl.get_runtime().compiling_callable = old_callable
 
         self.taichi_functions[key.instance_id] = fn
@@ -703,7 +730,6 @@ def _get_global_vars(_func):
 
     return global_vars
 
-
 class Kernel:
     counter = 0
 
@@ -856,7 +882,8 @@ class Kernel:
             self.runtime.compiling_callable = kernel_cxx
             try:
                 ctx.ast_builder = kernel_cxx.ast_builder()
-                transform_tree(tree, ctx)
+                with python_compile_profile_event(f"python.kernel.ast_transform:{self.func.__name__}"):
+                    transform_tree(tree, ctx)
                 if not ctx.is_real_function:
                     if self.return_type and ctx.returned != ReturnStatus.ReturnedValue:
                         raise TaichiSyntaxError("Kernel has a return type but does not have a return statement")
@@ -1219,10 +1246,11 @@ class Kernel:
         raise TaichiRuntimeTypeError(f"Invalid return type on index={index}")
 
     def ensure_compiled(self, *args):
-        instance_id, arg_features = self.mapper.lookup(args)
-        key = (self.func, instance_id, self.autodiff_mode)
-        self.materialize(key=key, args=args, arg_features=arg_features)
-        return key
+        with python_compile_profile_event(f"python.kernel.ensure_compiled:{self.func.__name__}"):
+            instance_id, arg_features = self.mapper.lookup(args)
+            key = (self.func, instance_id, self.autodiff_mode)
+            self.materialize(key=key, args=args, arg_features=arg_features)
+            return key
 
     # For small kernels (< 3us), the performance can be pretty sensitive to overhead in __call__
     # Thus this part needs to be fast. (i.e. < 3us on a 4 GHz x64 CPU)
