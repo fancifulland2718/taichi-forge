@@ -598,6 +598,7 @@ class VulkanStream : public Stream {
   struct TrackedCmdbuf {
     vkapi::IVkFence fence;
     vkapi::IVkCommandBuffer buf;
+    std::vector<vkapi::IDeviceObj> submit_refs;
   };
 
   void retire_completed_cmdbuffers();

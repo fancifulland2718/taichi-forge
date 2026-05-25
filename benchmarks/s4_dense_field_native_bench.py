@@ -255,10 +255,11 @@ def _make_forge_body(
         count = ti.field(ti.i32, shape=())
         workspace = ti.algorithms.CompactWorkspace(max_items=n)
         flags.from_numpy(_compact_flags(n))
+        method = method_override or "auto"
 
         def body():
             ti.algorithms.experimental_compact(
-                src, flags, output, count, method="field_scan", workspace=workspace
+                src, flags, output, count, method=method, workspace=workspace
             )
 
         return body, {"workspace": workspace}
@@ -311,6 +312,17 @@ def _make_forge_body(
             )
 
         return body, {"workspace": workspace, "aux_size": buckets}
+
+    if op_name == "sort":
+        keys = ti.field(ti.i32, shape=n)
+        keys.from_numpy(_bucket_indices(n))
+        workspace = ti.algorithms.SortWorkspace(max_items=n)
+        method = method_override or "auto"
+
+        def body():
+            ti.algorithms.sort(keys, src, method=method, workspace=workspace)
+
+        return body, {"workspace": workspace}
 
     raise ValueError(op_name)
 
@@ -503,6 +515,18 @@ def _make_vanilla_body(ti, arch_name: str, op_name: str, n: int):
                     ti.atomic_add(output[key], src[i])
 
         return grouped_reduce_field, {"aux_size": buckets}
+
+    if op_name == "sort":
+        keys = ti.field(ti.i32, shape=n)
+        keys.from_numpy(_bucket_indices(n))
+        sort_fn = getattr(ti.algorithms, "sort", None)
+        if sort_fn is None:
+            sort_fn = ti.algorithms.parallel_sort
+
+        def body():
+            sort_fn(keys, src)
+
+        return body, {}
 
     raise ValueError(op_name)
 
@@ -816,6 +840,7 @@ def main(argv: list[str] | None = None) -> int:
             "histogram",
             "bucket_builder",
             "grouped_reduce",
+            "sort",
         ],
     )
     parser.add_argument("--n", type=int)

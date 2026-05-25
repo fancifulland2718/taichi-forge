@@ -1294,6 +1294,13 @@ StreamSemaphore GfxRuntime::flush() {
   return sema;
 }
 
+StreamSemaphore GfxRuntime::flush_if_pending() {
+  if (!current_cmdlist_) {
+    return nullptr;
+  }
+  return flush();
+}
+
 Device *GfxRuntime::get_ti_device() const {
   return device_;
 }

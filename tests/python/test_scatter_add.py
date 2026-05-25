@@ -1,4 +1,4 @@
-import gc
+﻿import gc
 
 import numpy as np
 import pytest
@@ -183,7 +183,7 @@ def _run_ndarray_to_dense_field_scatter_add_two_level(dtype, np_dtype, method):
         src, indices, dst, method=method, workspace=workspace
     )
     _assert_matches(dst.to_numpy(), expected)
-    assert workspace._native_add_merge_plan["method_name"].endswith(
+    assert workspace._native_add_merge_plan.method_name.endswith(
         "add_merge_dense_field"
     )
 
@@ -276,14 +276,18 @@ def _run_struct_tensor_member_scatter_add(method):
     np.testing.assert_array_equal(result["mat"], base_mat)
     assert len(workspace._native_scatter_add_plans) == 2
     assert len(workspace._native_scatter_add_plan_groups) == 1
-    vec_plan_ids = {id(plan) for plan in workspace._native_scatter_add_plans}
+    vec_plan_ids = {
+        id(plan) for plan in workspace._native_scatter_add_plans.values()
+    }
     dst.from_numpy(dst_host)
     src_vec = src.field("vec")
     dst_vec = dst.field("vec")
     ti.algorithms.experimental_scatter_add(
         src_vec, indices, dst_vec, method=method, workspace=workspace
     )
-    assert {id(plan) for plan in workspace._native_scatter_add_plans} == vec_plan_ids
+    assert {
+        id(plan) for plan in workspace._native_scatter_add_plans.values()
+    } == vec_plan_ids
     assert len(workspace._native_scatter_add_plan_groups) == 1
     ti.algorithms.experimental_scatter_add(
         src_mat, indices, dst_mat, method=method, workspace=workspace
@@ -315,8 +319,8 @@ def _run_dense_field_scatter_add(dtype, np_dtype, method):
     _assert_matches(dst.to_numpy(), expected)
     assert len(workspace._native_scatter_add_plans) == 1
     plan = workspace._native_scatter_add_plan
-    assert plan["backend"] in {"cpu_native", "cuda_device", "vulkan_native"}
-    assert "scatter_add_dense_field" in plan["method_name"]
+    assert plan.backend in {"cpu_native", "cuda_device", "vulkan_native"}
+    assert "scatter_add_dense_field" in plan.method_name
 
     dst.from_numpy(base_np)
     ti.algorithms.experimental_scatter_add(
@@ -380,8 +384,8 @@ def _run_dense_matrix_field_scatter_add():
     np.testing.assert_array_equal(dst.to_numpy(), expected)
     assert len(workspace._native_scatter_add_plans) == 2
     assert any(
-        plan["method_name"] == method_name
-        for plan in workspace._native_scatter_add_plans
+        plan.method_name == method_name
+        for plan in workspace._native_scatter_add_plans.values()
     )
     assert workspace.workspace_bytes_peak <= 64
     assert len(workspace._native_scatter_add_plan_groups) == 1

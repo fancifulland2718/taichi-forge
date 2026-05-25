@@ -1,4 +1,4 @@
-import gc
+﻿import gc
 
 import numpy as np
 import pytest
@@ -209,7 +209,7 @@ def _run_dense_matrix_field_indexed_copy(scatter):
 
     np.testing.assert_array_equal(dst.to_numpy(), expected)
     assert len(workspace._native_indexed_copy_plans) == 2
-    assert workspace._native_indexed_copy_plan["method_name"] == method_name
+    assert workspace._native_indexed_copy_plan.method_name == method_name
     assert workspace.workspace_bytes_peak <= 64
     assert len(workspace._native_indexed_copy_plan_groups) == 1
 
@@ -250,8 +250,8 @@ def _run_dense_field_indexed_copy_replay(
         )
     first_plan = workspace._native_indexed_copy_plan
     assert first_plan is not None
-    assert first_plan["backend"] == backend
-    assert first_plan["method_name"] == method_name
+    assert first_plan.backend == backend
+    assert first_plan.method_name == method_name
 
     data = (data * np_dtype(2) + np_dtype(3)).astype(np_dtype)
     src.from_numpy(data)
@@ -386,8 +386,8 @@ def test_experimental_gather_cpu_native_struct_scalar_member_workspace_replay():
     )
     first_plan = workspace._native_indexed_copy_plan
     assert first_plan is not None
-    assert first_plan["backend"] == "cpu_native"
-    assert first_plan["method_name"] == "cpu_gather_strided_ndarray"
+    assert first_plan.backend == "cpu_native"
+    assert first_plan.method_name == "cpu_gather_strided_ndarray"
 
     host["val"] = host["val"] * np.int32(-2) + np.int32(5)
     dst_host["val"] = np.full(src.shape[0], -1000, dtype=np.int32)
@@ -459,8 +459,8 @@ def test_experimental_scatter_cpu_native_struct_tensor_member_workspace_replay()
     )
     first_plan = workspace._native_indexed_copy_plan
     assert first_plan is not None
-    assert first_plan["backend"] == "cpu_native"
-    assert first_plan["method_name"] == "cpu_scatter_strided_ndarray"
+    assert first_plan.backend == "cpu_native"
+    assert first_plan.method_name == "cpu_scatter_strided_ndarray"
 
     host["vec"] = host["vec"] * np.int32(3) - np.int32(4)
     dst_host["vec"] = np.full((src.shape[0], 2), -1000, dtype=np.int32)

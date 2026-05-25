@@ -1,4 +1,4 @@
-import gc
+﻿import gc
 
 import numpy as np
 import pytest
@@ -146,7 +146,7 @@ def _run_dense_matrix_field_scan_case():
     expected = np.cumsum(values, axis=0, dtype=np.int32)
     np.testing.assert_array_equal(arr.to_numpy(), expected)
     assert len(executor._native_scan_plans) == 2
-    assert executor._native_scan_plan["method_name"] == expected_method
+    assert executor._native_scan_plan.method_name == expected_method
     assert len(executor._native_scan_plan_groups) == 1
 
     arr.from_numpy(values)
@@ -290,8 +290,8 @@ def test_scan_ndarray_cpu_native_executor_replay():
             first_plan = executor._native_scan_plan
         else:
             assert executor._native_scan_plan is first_plan
-    assert executor._native_scan_plan["backend"] == "cpu_native"
-    assert executor._native_scan_plan["method_name"] == "cpu_inclusive_scan_ndarray"
+    assert executor._native_scan_plan.backend == "cpu_native"
+    assert executor._native_scan_plan.method_name == "cpu_inclusive_scan_ndarray"
 
 
 @test_utils.test(arch=[ti.cpu])
@@ -327,7 +327,7 @@ def test_scan_dense_field_cpu_native_executor_replay():
         expected = np.cumsum(data, dtype=np.int32).astype(np.int32)
         _assert_scan_equal(arr.to_numpy(), expected)
     assert executor._native_scan_plan is not None
-    assert executor._native_scan_plan["backend"] == "cpu_native"
+    assert executor._native_scan_plan.backend == "cpu_native"
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -368,7 +368,7 @@ def test_scan_dense_field_cuda_cub_executor_replay():
         expected = np.cumsum(data, dtype=np.int32).astype(np.int32)
         _assert_scan_equal(arr.to_numpy(), expected)
     assert executor._native_scan_plan is not None
-    assert executor._native_scan_plan["backend"] == "cuda_cub"
+    assert executor._native_scan_plan.backend == "cuda_cub"
 
 
 @test_utils.test(arch=[ti.cpu])
@@ -410,9 +410,9 @@ def test_scan_cpu_native_struct_member_executor_replay():
             first_plan = executor._native_scan_plan
         else:
             assert executor._native_scan_plan is first_plan
-    assert executor._native_scan_plan["backend"] == "cpu_native"
+    assert executor._native_scan_plan.backend == "cpu_native"
     assert (
-        executor._native_scan_plan["method_name"]
+        executor._native_scan_plan.method_name
         == "cpu_inclusive_scan_member_ndarray"
     )
 

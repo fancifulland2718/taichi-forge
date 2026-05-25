@@ -86,7 +86,9 @@ def _arch_value(ti, arch_name: str):
     raise ValueError(arch_name)
 
 
-def _method_for(arch_name: str, op_name: str) -> str:
+def _method_for(arch_name: str, op_name: str, method_mode: str = "native") -> str:
+    if method_mode == "auto":
+        return "auto"
     if arch_name == "cpu":
         return "cpu_native"
     if arch_name == "cuda":
@@ -288,8 +290,10 @@ def _tags_unchanged(owner, host, storage: str) -> bool:
     return bool(np.array_equal(owner.to_numpy()["tag"], host["tag"]))
 
 
-def _make_body(ti, arch_name: str, op_name: str, storage: str, n: int):
-    method = _method_for(arch_name, op_name)
+def _make_body(
+    ti, arch_name: str, op_name: str, storage: str, n: int, method_mode: str
+):
+    method = _method_for(arch_name, op_name, method_mode)
     src, src_owner, host, data = _make_storage(ti, storage, n)
     workspace = None
     executor = None
@@ -513,7 +517,7 @@ def _make_body(ti, arch_name: str, op_name: str, storage: str, n: int):
             )
 
         def plan():
-            return tuple(workspace._native_scatter_add_plans)
+            return tuple(workspace._native_scatter_add_plans.values())
 
         def verify():
             expected_shape = (buckets, data.shape[1]) if data.ndim == 2 else (buckets,)
@@ -551,9 +555,13 @@ def _plans_reused(first_plan, plan_after) -> bool:
 
 def _plan_field(first_plan, key: str):
     if isinstance(first_plan, tuple):
-        values = [plan[key] for plan in first_plan if plan is not None]
+        values = [
+            value
+            for value in (getattr(plan, key, None) for plan in first_plan)
+            if value is not None
+        ]
         return ",".join(values) if values else None
-    return None if first_plan is None else first_plan[key]
+    return None if first_plan is None else getattr(first_plan, key, None)
 
 
 def run_child(args: argparse.Namespace) -> int:
@@ -579,7 +587,7 @@ def run_child(args: argparse.Namespace) -> int:
         return 0
 
     body, plan_getter, verify, workspace_peak = _make_body(
-        ti, args.arch, args.op, args.storage, args.n
+        ti, args.arch, args.op, args.storage, args.n, args.method_mode
     )
     _sync(ti)
     gpu_after_alloc = _gpu_process_dedicated_mb(pid) if sample_gpu else None
@@ -623,6 +631,7 @@ def run_child(args: argparse.Namespace) -> int:
         "op": args.op,
         "n": args.n,
         "package_version": ".".join(str(x) for x in ti.__version__[:3]),
+        "method_mode": args.method_mode,
         "first_call_ms": first_ms,
         "runtime": _stats_ms(samples),
         "workspace_peak_bytes": int(workspace_peak()),
@@ -679,6 +688,8 @@ def run_matrix(args: argparse.Namespace) -> int:
                         str(args.repeats),
                         "--warmups",
                         str(args.warmups),
+                        "--method-mode",
+                        args.method_mode,
                     ]
                     env = os.environ.copy()
                     env["PYTHONIOENCODING"] = "utf-8"
@@ -737,7 +748,7 @@ def run_matrix(args: argparse.Namespace) -> int:
                                 "stderr_tail": proc.stderr[-2000:],
                             }
                         )
-    summary = {"rows": rows, "failures": failures}
+    summary = {"method_mode": args.method_mode, "rows": rows, "failures": failures}
     (out_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8"
     )
@@ -750,6 +761,7 @@ def run_matrix(args: argparse.Namespace) -> int:
                 "op",
                 "n",
                 "first_call_ms",
+                "method_mode",
                 "runtime_median_ms",
                 "workspace_peak_bytes",
                 "plan_reused",
@@ -771,6 +783,7 @@ def run_matrix(args: argparse.Namespace) -> int:
                     "op": row["op"],
                     "n": row["n"],
                     "first_call_ms": row.get("first_call_ms"),
+                    "method_mode": row.get("method_mode"),
                     "runtime_median_ms": runtime.get("median_ms"),
                     "workspace_peak_bytes": row.get("workspace_peak_bytes"),
                     "plan_reused": row.get("plan_reused"),
@@ -810,6 +823,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--n", type=int)
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--warmups", type=int, default=3)
+    parser.add_argument("--method-mode", choices=["native", "auto"], default="native")
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--pythonpath", default=str(ROOT / "python"))
     parser.add_argument(

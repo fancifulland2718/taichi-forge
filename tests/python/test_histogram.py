@@ -1,4 +1,4 @@
-import gc
+﻿import gc
 
 import numpy as np
 import pytest
@@ -61,7 +61,7 @@ def _run_dense_field_histogram(value_dtype, value_np_dtype, bin_dtype, bin_np_dt
         )
     assert workspace._native_histogram_plan is not None
     plan = workspace._native_histogram_plan
-    assert "histogram_dense_field" in plan["method_name"]
+    assert "histogram_dense_field" in plan.method_name
     values_np = _histogram_values(n, num_bins, value_np_dtype, 0)
     values.from_numpy(values_np)
     bins.from_numpy(np.full(num_bins, -1, dtype=bin_np_dtype))
@@ -316,6 +316,48 @@ def test_experimental_histogram_vulkan_native_i64_bins_capability():
     assert np.array_equal(
         bins.to_numpy(), _histogram_expected(values_np, num_bins, np.int64)
     )
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_histogram_vulkan_native_resource_replay_ring_wrap(monkeypatch):
+    monkeypatch.setenv("TI_VULKAN_RESOURCE_REPLAY_RING_SIZE", "2")
+    monkeypatch.setenv("TI_VULKAN_RESOURCE_REPLAY_RING_MAX_SIZE", "2")
+    n = 8192
+    num_bins = 64
+    values = ti.ndarray(ti.i32, shape=n)
+    bins = ti.ndarray(ti.i32, shape=num_bins)
+
+    if not impl.get_runtime().prog.vulkan_histogram_available():
+        pytest.skip("Vulkan native histogram is unavailable in this build/runtime.")
+
+    workspace = ti.algorithms.HistogramWorkspace(max_items=n, max_bins=num_bins)
+    for step in range(6):
+        values_np = _histogram_values(n, num_bins, np.int32, step % 3)
+        values.from_numpy(values_np)
+        bins.from_numpy(np.full(num_bins, -1, dtype=np.int32))
+        ti.algorithms.experimental_histogram(
+            values, bins, method="vulkan_native", workspace=workspace
+        )
+        assert np.array_equal(
+            bins.to_numpy(), _histogram_expected(values_np, num_bins, np.int32)
+        )
+
+    alt_values = ti.ndarray(ti.i32, shape=n)
+    alt_bins = ti.ndarray(ti.i32, shape=num_bins)
+    for step in range(6):
+        active_values = values if step % 2 == 0 else alt_values
+        active_bins = bins if step % 2 == 0 else alt_bins
+        values_np = _histogram_values(n, num_bins, np.int32, (step + 1) % 3)
+        active_values.from_numpy(values_np)
+        active_bins.from_numpy(np.full(num_bins, -1, dtype=np.int32))
+        ti.algorithms.experimental_histogram(
+            active_values, active_bins, method="vulkan_native", workspace=workspace
+        )
+        assert np.array_equal(
+            active_bins.to_numpy(),
+            _histogram_expected(values_np, num_bins, np.int32),
+        )
 
 
 @pytest.mark.run_in_serial

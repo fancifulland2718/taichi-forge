@@ -11,6 +11,7 @@
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #if defined(TI_WITH_VULKAN)
@@ -35,6 +36,14 @@ size_t vulkan_resource_replay_ring_capacity(size_t requested = 1) {
   const size_t base =
       static_cast<size_t>(std::max(1, configured));
   return std::max(base, requested);
+}
+
+size_t vulkan_resource_replay_ring_max_capacity(size_t requested = 1) {
+  const int configured =
+      get_environ_config("TI_VULKAN_RESOURCE_REPLAY_RING_MAX_SIZE", 128);
+  const size_t cap =
+      static_cast<size_t>(std::max(1, configured));
+  return std::max(vulkan_resource_replay_ring_capacity(requested), cap);
 }
 
 struct VulkanResourceSetRing {
@@ -70,11 +79,26 @@ struct VulkanResourceSetRing {
            cursor + requested > effective_capacity;
   }
 
+  bool grow_to_avoid_reuse_wait(size_t requested) {
+    const size_t max_capacity =
+        vulkan_resource_replay_ring_max_capacity(requested);
+    if (capacity >= max_capacity) {
+      return false;
+    }
+    const size_t doubled_capacity =
+        capacity == 0 ? requested : std::max(capacity * 2, requested);
+    const size_t required_capacity =
+        std::max({vulkan_resource_replay_ring_capacity(requested),
+                  cursor + requested, doubled_capacity});
+    capacity = std::min(max_capacity, required_capacity);
+    return cursor + requested <= capacity;
+  }
+
   void rewind() {
     cursor = 0;
   }
 
-  ShaderResourceSet *next(Device *dev) {
+  std::pair<ShaderResourceSet *, size_t> next_slot(Device *dev) {
     ensure_device(dev);
     if (cursor >= capacity) {
       cursor = 0;
@@ -82,9 +106,14 @@ struct VulkanResourceSetRing {
     if (cursor == sets.size()) {
       sets.emplace_back(dev->create_resource_set());
     }
-    ShaderResourceSet *result = sets[cursor].get();
+    const size_t slot = cursor;
+    ShaderResourceSet *result = sets[slot].get();
     ++cursor;
-    return result;
+    return {result, slot};
+  }
+
+  ShaderResourceSet *next(Device *dev) {
+    return next_slot(dev).first;
   }
 
   void ensure_preallocated(Device *dev, size_t requested) {
@@ -131,6 +160,18 @@ struct VulkanRwBufferBindingKey {
   }
 };
 
+struct VulkanRwBufferBindingRequest {
+  DeviceAllocation alloc{kDeviceNullAllocation};
+  uint64_t offset{0};
+  size_t bytes{0};
+};
+
+VulkanRwBufferBindingRequest rw_buffer_request(DeviceAllocation alloc,
+                                               uint64_t offset,
+                                               size_t bytes) {
+  return {alloc, offset, bytes};
+}
+
 uint64_t vulkan_allocation_generation(DeviceAllocation alloc) {
   if (alloc == kDeviceNullAllocation) {
     return 0;
@@ -162,6 +203,234 @@ struct VulkanRwBufferReplay {
     resource_set->rw_buffer(binding, alloc.get_ptr(offset), bytes);
     cached.set(alloc, generation, offset, bytes);
   }
+
+  bool matches(uint32_t binding,
+               DeviceAllocation alloc,
+               uint64_t offset,
+               size_t bytes) const {
+    const auto &cached = bindings[binding];
+    if (!cached.valid) {
+      return false;
+    }
+    const uint64_t generation = vulkan_allocation_generation(alloc);
+    return cached.matches(alloc, generation, offset, bytes);
+  }
+};
+
+void prepare_resource_set_replay(Program *program,
+                                 Device *device,
+                                 VulkanResourceSetRing &ring,
+                                 size_t requested);
+
+template <size_t N>
+struct VulkanReplayResourceSet {
+  ShaderResourceSet *bindings{nullptr};
+  VulkanRwBufferReplay<N> *replay{nullptr};
+};
+
+bool vulkan_native_command_replay_enabled() {
+  return get_environ_config("TI_VULKAN_NATIVE_COMMAND_REPLAY", 1) != 0;
+}
+
+struct VulkanCommandReplayKey {
+  std::array<uint64_t, 128> words{};
+  uint32_t size{0};
+
+  void push(uint64_t word) {
+    TI_ASSERT_INFO(size < words.size(),
+                   "Vulkan native command replay key is too small.");
+    words[size++] = word;
+  }
+
+  void push_ptr(const void *ptr) {
+    push(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)));
+  }
+
+  bool operator==(const VulkanCommandReplayKey &other) const {
+    if (size != other.size) {
+      return false;
+    }
+    for (uint32_t i = 0; i < size; ++i) {
+      if (words[i] != other.words[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool operator!=(const VulkanCommandReplayKey &other) const {
+    return !(*this == other);
+  }
+};
+
+void push_vulkan_command_key_range(VulkanCommandReplayKey &key,
+                                   DeviceAllocation alloc,
+                                   uint64_t offset,
+                                   size_t bytes) {
+  key.push(alloc.alloc_id);
+  key.push(vulkan_allocation_generation(alloc));
+  key.push(offset);
+  key.push(static_cast<uint64_t>(bytes));
+}
+
+struct VulkanCommandReplayCache {
+  struct Entry {
+    VulkanCommandReplayKey key;
+    std::unique_ptr<CommandList> cmdlist;
+  };
+
+  Device *device{nullptr};
+  std::vector<Entry> entries;
+  size_t next_slot{0};
+
+  void reset() {
+    entries.clear();
+    device = nullptr;
+    next_slot = 0;
+  }
+
+  size_t capacity() const {
+    const int configured =
+        get_environ_config("TI_VULKAN_NATIVE_COMMAND_REPLAY_CACHE_SIZE", 16);
+    return static_cast<size_t>(std::max(1, configured));
+  }
+
+  template <typename RecordFn>
+  bool submit_or_record(Program *program,
+                        Device *dev,
+                        const VulkanCommandReplayKey &new_key,
+                        bool profiler_scopes,
+                        RecordFn &&record) {
+    if (!vulkan_native_command_replay_enabled() || profiler_scopes) {
+      return false;
+    }
+    if (device != dev) {
+      reset();
+      device = dev;
+    }
+
+    std::vector<StreamSemaphore> waits;
+    if (auto pending = program->flush_if_pending()) {
+      waits.push_back(std::move(pending));
+    }
+
+    Stream *stream = dev->get_compute_stream();
+    for (auto &entry : entries) {
+      if (entry.cmdlist && entry.key == new_key) {
+        stream->submit(entry.cmdlist.get(), waits);
+        return true;
+      }
+    }
+
+    auto [recorded_cmdlist, res] = stream->new_command_list_unique();
+    TI_ERROR_IF(res != RhiResult::success,
+                "Vulkan native command replay could not allocate a command "
+                "list: RhiResult({})",
+                res);
+    record(dev, recorded_cmdlist.get());
+    const size_t max_entries = capacity();
+    Entry *entry = nullptr;
+    if (entries.size() < max_entries) {
+      entries.push_back({});
+      entry = &entries.back();
+    } else {
+      entry = &entries[next_slot];
+      next_slot = (next_slot + 1) % max_entries;
+    }
+    entry->key = new_key;
+    entry->cmdlist = std::move(recorded_cmdlist);
+    stream->submit(entry->cmdlist.get(), waits);
+    return true;
+  }
+};
+
+template <size_t N>
+struct VulkanResourceSetReplayRing {
+  Device *device{nullptr};
+  VulkanResourceSetRing ring;
+  std::vector<VulkanRwBufferReplay<N>> replays;
+  bool hot_valid{false};
+  size_t hot_slot{0};
+
+  void reset() {
+    ring.reset();
+    replays.clear();
+    device = nullptr;
+    hot_valid = false;
+    hot_slot = 0;
+  }
+
+  void prepare(Program *program, Device *dev, size_t requested) {
+    if (requested == 0) {
+      return;
+    }
+    if (device != dev) {
+      replays.clear();
+      device = dev;
+      hot_valid = false;
+    }
+    ring.ensure_device(dev, requested);
+    if (ring.needs_reuse_wait(dev, requested) &&
+        !ring.grow_to_avoid_reuse_wait(requested)) {
+      program->synchronize();
+      ring.rewind();
+    }
+    if (replays.size() < ring.capacity) {
+      replays.resize(ring.capacity);
+    }
+  }
+
+  VulkanReplayResourceSet<N> next(Device *dev) {
+    auto [bindings, slot] = ring.next_slot(dev);
+    if (device != dev) {
+      replays.clear();
+      device = dev;
+      hot_valid = false;
+    }
+    if (replays.size() <= slot) {
+      replays.resize(slot + 1);
+    }
+    hot_valid = true;
+    hot_slot = slot;
+    return {bindings, &replays[slot]};
+  }
+
+  bool hot_matches(
+      const std::array<VulkanRwBufferBindingRequest, N> &requests) const {
+    if (!hot_valid || hot_slot >= ring.sets.size() ||
+        hot_slot >= replays.size()) {
+      return false;
+    }
+    const auto &replay = replays[hot_slot];
+    for (uint32_t i = 0; i < N; ++i) {
+      if (!replay.matches(i, requests[i].alloc, requests[i].offset,
+                          requests[i].bytes)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  VulkanReplayResourceSet<N> bind(
+      Program *program,
+      Device *dev,
+      const std::array<VulkanRwBufferBindingRequest, N> &requests) {
+    if (device != dev) {
+      replays.clear();
+      device = dev;
+      hot_valid = false;
+    }
+    if (hot_matches(requests)) {
+      return {ring.sets[hot_slot].get(), &replays[hot_slot]};
+    }
+    prepare(program, dev, 1);
+    auto resource = next(dev);
+    for (uint32_t i = 0; i < N; ++i) {
+      resource.replay->rw_buffer(resource.bindings, i, requests[i].alloc,
+                                 requests[i].offset, requests[i].bytes);
+    }
+    return resource;
+  }
 };
 
 void prepare_resource_set_replay(Program *program,
@@ -171,7 +440,9 @@ void prepare_resource_set_replay(Program *program,
   if (requested == 0) {
     return;
   }
-  if (ring.needs_reuse_wait(device, requested)) {
+  ring.ensure_device(device, requested);
+  if (ring.needs_reuse_wait(device, requested) &&
+      !ring.grow_to_avoid_reuse_wait(requested)) {
     program->synchronize();
     ring.rewind();
   }
@@ -1385,8 +1656,10 @@ struct VulkanRadixSortCache {
       radix8_downsweep_keys_bindings;
   std::array<std::unique_ptr<ShaderResourceSet>, 4>
       radix8_downsweep_pairs_bindings;
+  VulkanCommandReplayCache command_replay;
 
   void clear_allocs() {
+    clear_resource_sets();
     if (!device) {
       return;
     }
@@ -1410,6 +1683,7 @@ struct VulkanRadixSortCache {
   }
 
   void clear_resource_sets() {
+    command_replay.reset();
     radix8_spine_bindings.reset();
     for (auto &bindings : radix8_upsweep_bindings) {
       bindings.reset();
@@ -2578,8 +2852,10 @@ struct VulkanScanCache {
   VulkanResourceSetRing scan_block_strided_bindings_ring;
   VulkanResourceSetRing scan_add_bindings;
   VulkanResourceSetRing scan_add_strided_bindings_ring;
+  VulkanCommandReplayCache scan_command_replay;
 
   void reset_resource_sets() {
+    scan_command_replay.reset();
     scan_small_bindings.reset();
     scan_small_strided_bindings.reset();
     scan_block_bindings.reset();
@@ -2620,6 +2896,7 @@ struct VulkanScanCache {
   }
 
   void clear_allocs() {
+    reset_resource_sets();
     if (device && workspace != kDeviceNullAllocation) {
       device->dealloc_memory(workspace);
     }
@@ -3114,15 +3391,28 @@ struct VulkanCompactCache {
   VulkanScanCache scan;
   std::unique_ptr<Pipeline> compact_i32_flags;
   std::unique_ptr<Pipeline> compact_i32_scatter;
-  VulkanResourceSetRing flags_bindings;
-  VulkanResourceSetRing scatter_bindings;
+  VulkanResourceSetReplayRing<2> flags_bindings;
+  VulkanResourceSetReplayRing<5> scatter_bindings;
+  VulkanCommandReplayCache ndarray_fused_command_replay;
+  VulkanCommandReplayCache dense_field_fused_command_replay;
+  VulkanCommandReplayCache ndarray_flags_command_replay;
+  VulkanCommandReplayCache ndarray_scatter_command_replay;
+  VulkanCommandReplayCache dense_field_flags_command_replay;
+  VulkanCommandReplayCache dense_field_scatter_command_replay;
 
   void reset_resource_sets() {
     flags_bindings.reset();
     scatter_bindings.reset();
+    ndarray_fused_command_replay.reset();
+    dense_field_fused_command_replay.reset();
+    ndarray_flags_command_replay.reset();
+    ndarray_scatter_command_replay.reset();
+    dense_field_flags_command_replay.reset();
+    dense_field_scatter_command_replay.reset();
   }
 
   void clear_allocs() {
+    reset_resource_sets();
     if (device && prefix != kDeviceNullAllocation) {
       device->dealloc_memory(prefix);
     }
@@ -3168,22 +3458,6 @@ struct VulkanCompactCache {
     }
   }
 
-  void prepare_resource_sets(Program *program,
-                             size_t flags_count,
-                             size_t scatter_count) {
-    prepare_resource_set_replay(program, device, flags_bindings, flags_count);
-    prepare_resource_set_replay(program, device, scatter_bindings,
-                                scatter_count);
-  }
-
-  ShaderResourceSet *next_flags_resource_set() {
-    return flags_bindings.next(device);
-  }
-
-  ShaderResourceSet *next_scatter_resource_set() {
-    return scatter_bindings.next(device);
-  }
-
   DeviceAllocation alloc_storage(size_t bytes) {
     DeviceAllocation alloc{kDeviceNullAllocation};
     Device::AllocParams params;
@@ -3205,6 +3479,7 @@ struct VulkanCompactCache {
   }
 
   void clear_prefix_alloc() {
+    reset_resource_sets();
     if (device && prefix != kDeviceNullAllocation) {
       device->dealloc_memory(prefix);
     }
@@ -3226,6 +3501,42 @@ struct VulkanCompactCache {
 
   size_t allocated_bytes() const {
     return prefix_capacity + scan.cached_bytes;
+  }
+
+  VulkanReplayResourceSet<2> bind_flags_resource_set(
+      Program *program,
+      DeviceAllocation flags_alloc,
+      uint64_t flags_offset,
+      DeviceAllocation prefix_alloc,
+      size_t prefix_bytes) {
+    return flags_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 2>{
+            rw_buffer_request(flags_alloc, flags_offset, prefix_bytes),
+            rw_buffer_request(prefix_alloc, 0, prefix_bytes)});
+  }
+
+  VulkanReplayResourceSet<5> bind_scatter_resource_set(
+      Program *program,
+      DeviceAllocation values_alloc,
+      uint64_t values_offset,
+      size_t value_total_bytes,
+      DeviceAllocation flags_alloc,
+      uint64_t flags_offset,
+      size_t prefix_bytes,
+      DeviceAllocation prefix_alloc,
+      DeviceAllocation output_alloc,
+      uint64_t output_offset,
+      DeviceAllocation count_alloc,
+      uint64_t count_offset) {
+    return scatter_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 5>{
+            rw_buffer_request(values_alloc, values_offset, value_total_bytes),
+            rw_buffer_request(flags_alloc, flags_offset, prefix_bytes),
+            rw_buffer_request(prefix_alloc, 0, prefix_bytes),
+            rw_buffer_request(output_alloc, output_offset, value_total_bytes),
+            rw_buffer_request(count_alloc, count_offset, sizeof(int32_t))});
   }
 };
 
@@ -3252,6 +3563,25 @@ struct VulkanHistogramCache {
   std::unique_ptr<Pipeline> histogram_u32_i64_count_direct;
   std::unique_ptr<Pipeline> histogram_u32_i64_count_private;
   std::unique_ptr<Pipeline> histogram_u32_i64_count_private_shared;
+  VulkanResourceSetReplayRing<1> clear_bindings;
+  VulkanResourceSetReplayRing<2> count_direct_bindings;
+  VulkanResourceSetReplayRing<3> count_private_bindings;
+  VulkanResourceSetReplayRing<3> count_private_shared_bindings;
+  VulkanResourceSetReplayRing<2> reduce_private_bindings;
+  VulkanResourceSetReplayRing<2> single_shared_bindings;
+  VulkanCommandReplayCache ndarray_command_replay;
+  VulkanCommandReplayCache dense_field_command_replay;
+
+  void reset_resource_sets() {
+    clear_bindings.reset();
+    count_direct_bindings.reset();
+    count_private_bindings.reset();
+    count_private_shared_bindings.reset();
+    reduce_private_bindings.reset();
+    single_shared_bindings.reset();
+    ndarray_command_replay.reset();
+    dense_field_command_replay.reset();
+  }
 
   void reset_pipelines() {
     histogram_i32_clear.reset();
@@ -3272,9 +3602,11 @@ struct VulkanHistogramCache {
     histogram_u32_i64_count_direct.reset();
     histogram_u32_i64_count_private.reset();
     histogram_u32_i64_count_private_shared.reset();
+    reset_resource_sets();
   }
 
   void clear_allocs() {
+    reset_resource_sets();
     if (device && partial != kDeviceNullAllocation) {
       device->dealloc_memory(partial);
     }
@@ -3549,6 +3881,83 @@ struct VulkanHistogramCache {
     partial_capacity = bytes;
     cached_bytes = partial_capacity;
   }
+
+  VulkanReplayResourceSet<1> bind_clear_resource_set(Program *program,
+                                                     DeviceAllocation alloc,
+                                                     uint64_t offset,
+                                                     size_t bytes) {
+    return clear_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 1>{
+            rw_buffer_request(alloc, offset, bytes)});
+  }
+
+  VulkanReplayResourceSet<2> bind_count_direct_resource_set(
+      Program *program,
+      DeviceAllocation values_alloc,
+      uint64_t values_offset,
+      size_t value_bytes,
+      DeviceAllocation bins_alloc,
+      uint64_t bins_offset,
+      size_t bin_bytes) {
+    return count_direct_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 2>{
+            rw_buffer_request(values_alloc, values_offset, value_bytes),
+            rw_buffer_request(bins_alloc, bins_offset, bin_bytes)});
+  }
+
+  VulkanReplayResourceSet<3> bind_count_private_resource_set(
+      Program *program,
+      bool shared,
+      DeviceAllocation values_alloc,
+      uint64_t values_offset,
+      size_t value_bytes,
+      DeviceAllocation bins_alloc,
+      uint64_t bins_offset,
+      size_t bin_bytes,
+      DeviceAllocation partial_alloc,
+      uint64_t partial_offset,
+      size_t partial_bytes) {
+    auto &bindings =
+        shared ? count_private_shared_bindings : count_private_bindings;
+    return bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 3>{
+            rw_buffer_request(values_alloc, values_offset, value_bytes),
+            rw_buffer_request(bins_alloc, bins_offset, bin_bytes),
+            rw_buffer_request(partial_alloc, partial_offset, partial_bytes)});
+  }
+
+  VulkanReplayResourceSet<2> bind_reduce_private_resource_set(
+      Program *program,
+      DeviceAllocation partial_alloc,
+      uint64_t partial_offset,
+      size_t partial_bytes,
+      DeviceAllocation bins_alloc,
+      uint64_t bins_offset,
+      size_t bin_bytes) {
+    return reduce_private_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 2>{
+            rw_buffer_request(partial_alloc, partial_offset, partial_bytes),
+            rw_buffer_request(bins_alloc, bins_offset, bin_bytes)});
+  }
+
+  VulkanReplayResourceSet<2> bind_single_shared_resource_set(
+      Program *program,
+      DeviceAllocation values_alloc,
+      uint64_t values_offset,
+      size_t value_bytes,
+      DeviceAllocation bins_alloc,
+      uint64_t bins_offset,
+      size_t bin_bytes) {
+    return single_shared_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 2>{
+            rw_buffer_request(values_alloc, values_offset, value_bytes),
+            rw_buffer_request(bins_alloc, bins_offset, bin_bytes)});
+  }
 };
 
 struct VulkanReduceSpvSet {
@@ -3634,12 +4043,14 @@ struct VulkanReduceCache {
   DeviceAllocation params{kDeviceNullAllocation};
   std::array<VulkanReducePipelineSet, 6> reduce_pipelines;
   std::unique_ptr<Pipeline> reduce_i32_sum_atomic;
-  VulkanResourceSetRing reduce_i32_sum_atomic_bindings;
-  VulkanResourceSetRing reduce_single_bindings;
-  VulkanResourceSetRing reduce_single_strided_bindings;
-  VulkanResourceSetRing reduce_private_bindings;
-  VulkanResourceSetRing reduce_private_strided_bindings;
-  VulkanResourceSetRing reduce_final_bindings;
+  VulkanResourceSetReplayRing<2> reduce_i32_sum_atomic_bindings;
+  VulkanResourceSetReplayRing<2> reduce_single_bindings;
+  VulkanResourceSetReplayRing<3> reduce_single_strided_bindings;
+  VulkanResourceSetReplayRing<2> reduce_private_bindings;
+  VulkanResourceSetReplayRing<3> reduce_private_strided_bindings;
+  VulkanResourceSetReplayRing<2> reduce_final_bindings;
+  VulkanCommandReplayCache reduce_i32_sum_atomic_command_replay;
+  VulkanCommandReplayCache reduce_tree_command_replay;
 
   void reset_resource_sets() {
     reduce_i32_sum_atomic_bindings.reset();
@@ -3648,9 +4059,12 @@ struct VulkanReduceCache {
     reduce_private_bindings.reset();
     reduce_private_strided_bindings.reset();
     reduce_final_bindings.reset();
+    reduce_i32_sum_atomic_command_replay.reset();
+    reduce_tree_command_replay.reset();
   }
 
   void clear_allocs() {
+    reset_resource_sets();
     if (device && partial != kDeviceNullAllocation) {
       device->dealloc_memory(partial);
     }
@@ -3694,51 +4108,6 @@ struct VulkanReduceCache {
           dev, kReduceI32SumAtomicSpv, "vulkan_reduce_i32_sum_atomic");
     }
     return reduce_i32_sum_atomic.get();
-  }
-
-  void prepare_resource_sets(Program *program,
-                             size_t i32_sum_atomic_count,
-                             size_t single_count,
-                             size_t single_strided_count,
-                             size_t private_count,
-                             size_t private_strided_count,
-                             size_t final_count) {
-    prepare_resource_set_replay(program, device, reduce_i32_sum_atomic_bindings,
-                                i32_sum_atomic_count);
-    prepare_resource_set_replay(program, device, reduce_single_bindings,
-                                single_count);
-    prepare_resource_set_replay(program, device, reduce_single_strided_bindings,
-                                single_strided_count);
-    prepare_resource_set_replay(program, device, reduce_private_bindings,
-                                private_count);
-    prepare_resource_set_replay(program, device, reduce_private_strided_bindings,
-                                private_strided_count);
-    prepare_resource_set_replay(program, device, reduce_final_bindings,
-                                final_count);
-  }
-
-  ShaderResourceSet *next_i32_sum_atomic_resource_set() {
-    return reduce_i32_sum_atomic_bindings.next(device);
-  }
-
-  ShaderResourceSet *next_single_resource_set() {
-    return reduce_single_bindings.next(device);
-  }
-
-  ShaderResourceSet *next_single_strided_resource_set() {
-    return reduce_single_strided_bindings.next(device);
-  }
-
-  ShaderResourceSet *next_private_resource_set() {
-    return reduce_private_bindings.next(device);
-  }
-
-  ShaderResourceSet *next_private_strided_resource_set() {
-    return reduce_private_strided_bindings.next(device);
-  }
-
-  ShaderResourceSet *next_final_resource_set() {
-    return reduce_final_bindings.next(device);
   }
 
   VulkanReducePipelineSet &pipeline_set(int value_type) {
@@ -3884,6 +4253,99 @@ struct VulkanReduceCache {
     }
     cached_bytes = allocated_bytes();
   }
+
+  VulkanReplayResourceSet<2> bind_i32_sum_atomic_resource_set(
+      Program *program,
+      DeviceAllocation values_alloc,
+      uint64_t values_offset,
+      size_t value_bytes,
+      DeviceAllocation output_alloc,
+      uint64_t output_offset,
+      size_t output_bytes) {
+    return reduce_i32_sum_atomic_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 2>{
+            rw_buffer_request(values_alloc, values_offset, value_bytes),
+            rw_buffer_request(output_alloc, output_offset, output_bytes)});
+  }
+
+  VulkanReplayResourceSet<2> bind_single_resource_set(
+      Program *program,
+      DeviceAllocation values_alloc,
+      uint64_t values_offset,
+      size_t value_bytes,
+      DeviceAllocation output_alloc,
+      uint64_t output_offset,
+      size_t output_bytes) {
+    return reduce_single_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 2>{
+            rw_buffer_request(values_alloc, values_offset, value_bytes),
+            rw_buffer_request(output_alloc, output_offset, output_bytes)});
+  }
+
+  VulkanReplayResourceSet<3> bind_single_strided_resource_set(
+      Program *program,
+      DeviceAllocation values_alloc,
+      uint64_t values_offset,
+      size_t value_bytes,
+      DeviceAllocation output_alloc,
+      uint64_t output_offset,
+      size_t output_bytes,
+      DeviceAllocation params_alloc,
+      size_t params_bytes) {
+    return reduce_single_strided_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 3>{
+            rw_buffer_request(values_alloc, values_offset, value_bytes),
+            rw_buffer_request(output_alloc, output_offset, output_bytes),
+            rw_buffer_request(params_alloc, 0, params_bytes)});
+  }
+
+  VulkanReplayResourceSet<2> bind_private_resource_set(
+      Program *program,
+      DeviceAllocation values_alloc,
+      uint64_t values_offset,
+      size_t value_bytes,
+      DeviceAllocation partial_alloc,
+      size_t partial_bytes) {
+    return reduce_private_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 2>{
+            rw_buffer_request(values_alloc, values_offset, value_bytes),
+            rw_buffer_request(partial_alloc, 0, partial_bytes)});
+  }
+
+  VulkanReplayResourceSet<3> bind_private_strided_resource_set(
+      Program *program,
+      DeviceAllocation values_alloc,
+      uint64_t values_offset,
+      size_t value_bytes,
+      DeviceAllocation partial_alloc,
+      size_t partial_bytes,
+      DeviceAllocation params_alloc,
+      size_t params_bytes) {
+    return reduce_private_strided_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 3>{
+            rw_buffer_request(values_alloc, values_offset, value_bytes),
+            rw_buffer_request(partial_alloc, 0, partial_bytes),
+            rw_buffer_request(params_alloc, 0, params_bytes)});
+  }
+
+  VulkanReplayResourceSet<2> bind_final_resource_set(
+      Program *program,
+      DeviceAllocation partial_alloc,
+      size_t partial_bytes,
+      DeviceAllocation output_alloc,
+      uint64_t output_offset,
+      size_t output_bytes) {
+    return reduce_final_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 2>{
+            rw_buffer_request(partial_alloc, 0, partial_bytes),
+            rw_buffer_request(output_alloc, output_offset, output_bytes)});
+  }
 };
 
 struct VulkanTransformCache {
@@ -3901,8 +4363,12 @@ struct VulkanTransformCache {
   VulkanRwBufferReplay<3> affine_replay;
   std::array<uint32_t, 10> affine_param_words{};
   bool affine_param_words_valid{false};
+  VulkanCommandReplayCache dense_i32_affine_command_replay;
+  VulkanCommandReplayCache affine_command_replay;
 
   void clear_allocs() {
+    dense_i32_affine_command_replay.reset();
+    affine_command_replay.reset();
     if (device && params != kDeviceNullAllocation) {
       device->dealloc_memory(params);
     }
@@ -4024,8 +4490,10 @@ struct VulkanAddMergeCache {
   VulkanRwBufferReplay<3> binding_replay;
   std::array<uint32_t, 6> param_words{};
   bool param_words_valid{false};
+  VulkanCommandReplayCache command_replay;
 
   void clear_allocs() {
+    command_replay.reset();
     if (device && params != kDeviceNullAllocation) {
       device->dealloc_memory(params);
     }
@@ -4156,8 +4624,15 @@ struct VulkanIndexedCopyCache {
   VulkanRwBufferReplay<4> scatter_strided_replay;
   std::array<VulkanRwBufferReplay<3>, 6> scatter_add_replay;
   std::array<VulkanRwBufferReplay<4>, 6> scatter_add_strided_replay;
+  VulkanCommandReplayCache gather_command_replay;
+  VulkanCommandReplayCache scatter_command_replay;
+  VulkanCommandReplayCache gather_strided_command_replay;
+  VulkanCommandReplayCache scatter_strided_command_replay;
+  std::array<VulkanCommandReplayCache, 6> scatter_add_command_replay;
+  std::array<VulkanCommandReplayCache, 6> scatter_add_strided_command_replay;
 
   void clear_allocs() {
+    reset_binding_replay();
     if (device && indexed_copy_params != kDeviceNullAllocation) {
       device->dealloc_memory(indexed_copy_params);
     }
@@ -4166,7 +4641,6 @@ struct VulkanIndexedCopyCache {
     }
     indexed_copy_params = kDeviceNullAllocation;
     scatter_add_params = kDeviceNullAllocation;
-    reset_binding_replay();
     cached_bytes = 0;
   }
 
@@ -4179,10 +4653,20 @@ struct VulkanIndexedCopyCache {
     scatter_replay.reset();
     gather_strided_replay.reset();
     scatter_strided_replay.reset();
+    gather_command_replay.reset();
+    scatter_command_replay.reset();
+    gather_strided_command_replay.reset();
+    scatter_strided_command_replay.reset();
     for (auto &replay : scatter_add_replay) {
       replay.reset();
     }
     for (auto &replay : scatter_add_strided_replay) {
+      replay.reset();
+    }
+    for (auto &replay : scatter_add_command_replay) {
+      replay.reset();
+    }
+    for (auto &replay : scatter_add_strided_command_replay) {
       replay.reset();
     }
   }
@@ -4476,44 +4960,29 @@ struct VulkanBucketBuilderCache {
   std::unique_ptr<Pipeline> grouped_reduce_sum_u64;
   std::unique_ptr<Pipeline> grouped_reduce_sum_i64;
   std::unique_ptr<Pipeline> grouped_reduce_sum_f64;
-  std::unique_ptr<ShaderResourceSet> clear_bindings;
-  std::unique_ptr<ShaderResourceSet> count_bindings;
-  std::unique_ptr<ShaderResourceSet> count_private_bindings;
-  std::unique_ptr<ShaderResourceSet> prefix_bindings;
-  std::unique_ptr<ShaderResourceSet> prefix_chunks_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_zero_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_zero_f32_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_zero_u32_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_zero_u64_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_zero_i64_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_zero_f64_bindings;
-  std::array<std::unique_ptr<ShaderResourceSet>, 6>
-      grouped_reduce_zero_strided_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_atomic_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_atomic_f32_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_atomic_u32_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_atomic_u64_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_atomic_i64_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_atomic_f64_bindings;
-  std::array<std::unique_ptr<ShaderResourceSet>, 6>
-      grouped_reduce_atomic_strided_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_f32_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_u32_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_u64_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_i64_bindings;
-  std::unique_ptr<ShaderResourceSet> grouped_reduce_f64_bindings;
-  std::array<VulkanRwBufferReplay<1>, 6> grouped_reduce_zero_replay;
-  std::array<VulkanRwBufferReplay<3>, 6> grouped_reduce_atomic_replay;
-  std::array<VulkanRwBufferReplay<2>, 6> grouped_reduce_zero_strided_replay;
-  std::array<VulkanRwBufferReplay<4>, 6> grouped_reduce_atomic_strided_replay;
-  VulkanResourceSetRing bucket_clear_replay_bindings;
-  VulkanResourceSetRing bucket_count_replay_bindings;
-  VulkanResourceSetRing bucket_count_private_replay_bindings;
-  VulkanResourceSetRing bucket_prefix_replay_bindings;
-  VulkanResourceSetRing bucket_prefix_chunks_replay_bindings;
-  std::array<VulkanResourceSetRing, 8> bucket_scatter_replay_bindings;
-  std::array<VulkanResourceSetRing, 8> bucket_scatter_private_replay_bindings;
+  std::array<VulkanResourceSetReplayRing<1>, 6>
+      grouped_reduce_zero_ring_bindings;
+  std::array<VulkanResourceSetReplayRing<3>, 6>
+      grouped_reduce_atomic_ring_bindings;
+  std::array<VulkanResourceSetReplayRing<2>, 6>
+      grouped_reduce_zero_strided_ring_bindings;
+  std::array<VulkanResourceSetReplayRing<4>, 6>
+      grouped_reduce_atomic_strided_ring_bindings;
+  std::array<VulkanResourceSetReplayRing<3>, 6>
+      grouped_reduce_sum_ring_bindings;
+  VulkanResourceSetReplayRing<2> bucket_clear_replay_bindings;
+  VulkanResourceSetReplayRing<2> bucket_count_replay_bindings;
+  VulkanResourceSetReplayRing<2> bucket_count_private_replay_bindings;
+  VulkanResourceSetReplayRing<2> bucket_prefix_replay_bindings;
+  VulkanResourceSetReplayRing<2> bucket_prefix_chunks_replay_bindings;
+  std::array<VulkanResourceSetReplayRing<4>, 8> bucket_scatter_replay_bindings;
+  std::array<VulkanResourceSetReplayRing<5>, 8>
+      bucket_scatter_private_replay_bindings;
+  VulkanCommandReplayCache bucket_ndarray_command_replay;
+  VulkanCommandReplayCache bucket_dense_field_command_replay;
+  VulkanCommandReplayCache grouped_reduce_atomic_command_replay;
+  VulkanCommandReplayCache grouped_reduce_atomic_strided_command_replay;
+  VulkanCommandReplayCache grouped_reduce_sum_command_replay;
 
   void reset_bucket_resource_sets() {
     bucket_clear_replay_bindings.reset();
@@ -4527,24 +4996,34 @@ struct VulkanBucketBuilderCache {
     for (auto &ring : bucket_scatter_private_replay_bindings) {
       ring.reset();
     }
+    bucket_ndarray_command_replay.reset();
+    bucket_dense_field_command_replay.reset();
   }
 
   void reset_grouped_reduce_binding_replay() {
-    for (auto &replay : grouped_reduce_zero_replay) {
-      replay.reset();
+    for (auto &ring : grouped_reduce_zero_ring_bindings) {
+      ring.reset();
     }
-    for (auto &replay : grouped_reduce_atomic_replay) {
-      replay.reset();
+    for (auto &ring : grouped_reduce_atomic_ring_bindings) {
+      ring.reset();
     }
-    for (auto &replay : grouped_reduce_zero_strided_replay) {
-      replay.reset();
+    for (auto &ring : grouped_reduce_zero_strided_ring_bindings) {
+      ring.reset();
     }
-    for (auto &replay : grouped_reduce_atomic_strided_replay) {
-      replay.reset();
+    for (auto &ring : grouped_reduce_atomic_strided_ring_bindings) {
+      ring.reset();
     }
+    for (auto &ring : grouped_reduce_sum_ring_bindings) {
+      ring.reset();
+    }
+    grouped_reduce_atomic_command_replay.reset();
+    grouped_reduce_atomic_strided_command_replay.reset();
+    grouped_reduce_sum_command_replay.reset();
   }
 
   void clear_allocs() {
+    reset_bucket_resource_sets();
+    reset_grouped_reduce_binding_replay();
     if (device && partial != kDeviceNullAllocation) {
       device->dealloc_memory(partial);
     }
@@ -4554,7 +5033,6 @@ struct VulkanBucketBuilderCache {
     partial = kDeviceNullAllocation;
     grouped_reduce_params = kDeviceNullAllocation;
     partial_capacity = 0;
-    reset_grouped_reduce_binding_replay();
     cached_bytes = 0;
   }
 
@@ -4607,35 +5085,6 @@ struct VulkanBucketBuilderCache {
       grouped_reduce_sum_u64.reset();
       grouped_reduce_sum_i64.reset();
       grouped_reduce_sum_f64.reset();
-      clear_bindings.reset();
-      count_bindings.reset();
-      count_private_bindings.reset();
-      prefix_bindings.reset();
-      prefix_chunks_bindings.reset();
-      grouped_reduce_zero_bindings.reset();
-      grouped_reduce_zero_f32_bindings.reset();
-      grouped_reduce_zero_u32_bindings.reset();
-      grouped_reduce_zero_u64_bindings.reset();
-      grouped_reduce_zero_i64_bindings.reset();
-      grouped_reduce_zero_f64_bindings.reset();
-      for (auto &bindings : grouped_reduce_zero_strided_bindings) {
-        bindings.reset();
-      }
-      grouped_reduce_atomic_bindings.reset();
-      grouped_reduce_atomic_f32_bindings.reset();
-      grouped_reduce_atomic_u32_bindings.reset();
-      grouped_reduce_atomic_u64_bindings.reset();
-      grouped_reduce_atomic_i64_bindings.reset();
-      grouped_reduce_atomic_f64_bindings.reset();
-      for (auto &bindings : grouped_reduce_atomic_strided_bindings) {
-        bindings.reset();
-      }
-      grouped_reduce_bindings.reset();
-      grouped_reduce_f32_bindings.reset();
-      grouped_reduce_u32_bindings.reset();
-      grouped_reduce_u64_bindings.reset();
-      grouped_reduce_i64_bindings.reset();
-      grouped_reduce_f64_bindings.reset();
       reset_grouped_reduce_binding_replay();
       reset_bucket_resource_sets();
     }
@@ -4980,63 +5429,130 @@ struct VulkanBucketBuilderCache {
     return 0;
   }
 
-  void prepare_bucket_builder_resource_sets(Program *program,
-                                            bool use_private,
-                                            int scatter_value_type) {
-    prepare_resource_set_replay(program, device, bucket_prefix_replay_bindings,
-                                1);
-    if (use_private) {
-      prepare_resource_set_replay(program, device,
-                                  bucket_count_private_replay_bindings, 1);
-      prepare_resource_set_replay(program, device,
-                                  bucket_prefix_chunks_replay_bindings, 1);
-      prepare_resource_set_replay(
-          program, device,
-          bucket_scatter_private_replay_bindings[bucket_scatter_replay_index(
-              scatter_value_type)],
-          1);
-    } else {
-      prepare_resource_set_replay(program, device, bucket_clear_replay_bindings,
-                                  1);
-      prepare_resource_set_replay(program, device, bucket_count_replay_bindings,
-                                  1);
-      prepare_resource_set_replay(
-          program, device,
-          bucket_scatter_replay_bindings[bucket_scatter_replay_index(
-              scatter_value_type)],
-          1);
-    }
+  VulkanReplayResourceSet<2> bind_bucket_clear_resource_set(
+      Program *program,
+      DeviceAllocation offsets_alloc,
+      uint64_t offsets_offset,
+      size_t offset_bytes,
+      DeviceAllocation cursor_alloc,
+      uint64_t cursor_offset,
+      size_t cursor_bytes) {
+    return bucket_clear_replay_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 2>{
+            rw_buffer_request(offsets_alloc, offsets_offset, offset_bytes),
+            rw_buffer_request(cursor_alloc, cursor_offset, cursor_bytes)});
   }
 
-  ShaderResourceSet *next_bucket_clear_resource_set() {
-    return bucket_clear_replay_bindings.next(device);
+  VulkanReplayResourceSet<2> bind_bucket_count_resource_set(
+      Program *program,
+      DeviceAllocation keys_alloc,
+      uint64_t keys_offset,
+      size_t key_bytes,
+      DeviceAllocation offsets_alloc,
+      uint64_t offsets_offset,
+      size_t offset_bytes) {
+    return bucket_count_replay_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 2>{
+            rw_buffer_request(keys_alloc, keys_offset, key_bytes),
+            rw_buffer_request(offsets_alloc, offsets_offset, offset_bytes)});
   }
 
-  ShaderResourceSet *next_bucket_count_resource_set() {
-    return bucket_count_replay_bindings.next(device);
+  VulkanReplayResourceSet<2> bind_bucket_count_private_resource_set(
+      Program *program,
+      DeviceAllocation keys_alloc,
+      uint64_t keys_offset,
+      size_t key_bytes,
+      DeviceAllocation partial_alloc,
+      size_t private_partial_bytes) {
+    return bucket_count_private_replay_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 2>{
+            rw_buffer_request(keys_alloc, keys_offset, key_bytes),
+            rw_buffer_request(partial_alloc, 0, private_partial_bytes)});
   }
 
-  ShaderResourceSet *next_bucket_count_private_resource_set() {
-    return bucket_count_private_replay_bindings.next(device);
+  VulkanReplayResourceSet<2> bind_bucket_prefix_resource_set(
+      Program *program,
+      DeviceAllocation offsets_alloc,
+      uint64_t offsets_offset,
+      size_t offset_bytes,
+      DeviceAllocation cursor_alloc,
+      uint64_t cursor_offset,
+      size_t cursor_bytes) {
+    return bucket_prefix_replay_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 2>{
+            rw_buffer_request(offsets_alloc, offsets_offset, offset_bytes),
+            rw_buffer_request(cursor_alloc, cursor_offset, cursor_bytes)});
   }
 
-  ShaderResourceSet *next_bucket_prefix_resource_set() {
-    return bucket_prefix_replay_bindings.next(device);
+  VulkanReplayResourceSet<2> bind_bucket_prefix_chunks_resource_set(
+      Program *program,
+      DeviceAllocation partial_alloc,
+      size_t private_partial_bytes,
+      DeviceAllocation offsets_alloc,
+      uint64_t offsets_offset,
+      size_t offset_bytes) {
+    return bucket_prefix_chunks_replay_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 2>{
+            rw_buffer_request(partial_alloc, 0, private_partial_bytes),
+            rw_buffer_request(offsets_alloc, offsets_offset, offset_bytes)});
   }
 
-  ShaderResourceSet *next_bucket_prefix_chunks_resource_set() {
-    return bucket_prefix_chunks_replay_bindings.next(device);
+  VulkanReplayResourceSet<4> bind_bucket_scatter_resource_set(
+      Program *program,
+      int value_type,
+      DeviceAllocation keys_alloc,
+      uint64_t keys_offset,
+      size_t key_bytes,
+      DeviceAllocation values_alloc,
+      uint64_t values_offset,
+      size_t value_bytes,
+      DeviceAllocation cursor_alloc,
+      uint64_t cursor_offset,
+      size_t cursor_bytes,
+      DeviceAllocation output_alloc,
+      uint64_t output_offset) {
+    auto &bindings =
+        bucket_scatter_replay_bindings[bucket_scatter_replay_index(value_type)];
+    return bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 4>{
+            rw_buffer_request(keys_alloc, keys_offset, key_bytes),
+            rw_buffer_request(values_alloc, values_offset, value_bytes),
+            rw_buffer_request(cursor_alloc, cursor_offset, cursor_bytes),
+            rw_buffer_request(output_alloc, output_offset, value_bytes)});
   }
 
-  ShaderResourceSet *next_bucket_scatter_resource_set(int value_type) {
-    return bucket_scatter_replay_bindings[bucket_scatter_replay_index(value_type)]
-        .next(device);
-  }
-
-  ShaderResourceSet *next_bucket_scatter_private_resource_set(int value_type) {
-    return bucket_scatter_private_replay_bindings[bucket_scatter_replay_index(
-               value_type)]
-        .next(device);
+  VulkanReplayResourceSet<5> bind_bucket_scatter_private_resource_set(
+      Program *program,
+      int value_type,
+      DeviceAllocation keys_alloc,
+      uint64_t keys_offset,
+      size_t key_bytes,
+      DeviceAllocation values_alloc,
+      uint64_t values_offset,
+      size_t value_bytes,
+      DeviceAllocation partial_alloc,
+      size_t private_partial_bytes,
+      DeviceAllocation offsets_alloc,
+      uint64_t offsets_offset,
+      size_t offset_bytes,
+      DeviceAllocation output_alloc,
+      uint64_t output_offset) {
+    auto &bindings = bucket_scatter_private_replay_bindings
+        [bucket_scatter_replay_index(value_type)];
+    return bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 5>{
+            rw_buffer_request(keys_alloc, keys_offset, key_bytes),
+            rw_buffer_request(values_alloc, values_offset, value_bytes),
+            rw_buffer_request(partial_alloc, 0, private_partial_bytes),
+            rw_buffer_request(offsets_alloc, offsets_offset, offset_bytes),
+            rw_buffer_request(output_alloc, output_offset, value_bytes)});
   }
 
   Pipeline *grouped_reduce_sum_pipeline(int value_type) {
@@ -5080,74 +5596,6 @@ struct VulkanBucketBuilderCache {
     }
   }
 
-  ShaderResourceSet *grouped_reduce_zero_resource_set(int value_type) {
-    if (value_type == 1) {
-      return resource_set(grouped_reduce_zero_f32_bindings);
-    }
-    if (value_type == 3) {
-      return resource_set(grouped_reduce_zero_u64_bindings);
-    }
-    if (value_type == 4) {
-      return resource_set(grouped_reduce_zero_i64_bindings);
-    }
-    if (value_type == 5) {
-      return resource_set(grouped_reduce_zero_f64_bindings);
-    }
-    return resource_set(value_type == 2 ? grouped_reduce_zero_u32_bindings
-                                        : grouped_reduce_zero_bindings);
-  }
-
-  ShaderResourceSet *grouped_reduce_zero_strided_resource_set(int value_type) {
-    auto &bindings = grouped_reduce_zero_strided_bindings[value_type];
-    if (!bindings) {
-      bindings.reset(device->create_resource_set());
-    }
-    return bindings.get();
-  }
-
-  ShaderResourceSet *grouped_reduce_atomic_resource_set(int value_type) {
-    if (value_type == 1) {
-      return resource_set(grouped_reduce_atomic_f32_bindings);
-    }
-    if (value_type == 3) {
-      return resource_set(grouped_reduce_atomic_u64_bindings);
-    }
-    if (value_type == 4) {
-      return resource_set(grouped_reduce_atomic_i64_bindings);
-    }
-    if (value_type == 5) {
-      return resource_set(grouped_reduce_atomic_f64_bindings);
-    }
-    return resource_set(value_type == 2 ? grouped_reduce_atomic_u32_bindings
-                                        : grouped_reduce_atomic_bindings);
-  }
-
-  ShaderResourceSet *grouped_reduce_atomic_strided_resource_set(
-      int value_type) {
-    auto &bindings = grouped_reduce_atomic_strided_bindings[value_type];
-    if (!bindings) {
-      bindings.reset(device->create_resource_set());
-    }
-    return bindings.get();
-  }
-
-  ShaderResourceSet *grouped_reduce_sum_resource_set(int value_type) {
-    switch (value_type) {
-      case 1:
-        return resource_set(grouped_reduce_f32_bindings);
-      case 2:
-        return resource_set(grouped_reduce_u32_bindings);
-      case 3:
-        return resource_set(grouped_reduce_u64_bindings);
-      case 4:
-        return resource_set(grouped_reduce_i64_bindings);
-      case 5:
-        return resource_set(grouped_reduce_f64_bindings);
-      default:
-        return resource_set(grouped_reduce_bindings);
-    }
-  }
-
   const char *grouped_reduce_sum_scope(int value_type) const {
     switch (value_type) {
       case 1:
@@ -5165,11 +5613,87 @@ struct VulkanBucketBuilderCache {
     }
   }
 
-  ShaderResourceSet *resource_set(std::unique_ptr<ShaderResourceSet> &bindings) {
-    if (!bindings) {
-      bindings.reset(device->create_resource_set());
-    }
-    return bindings.get();
+  VulkanReplayResourceSet<1> bind_grouped_reduce_zero_resource_set(
+      Program *program,
+      int value_type,
+      DeviceAllocation output_alloc,
+      uint64_t output_offset,
+      size_t output_bytes) {
+    return grouped_reduce_zero_ring_bindings[value_type].bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 1>{
+            rw_buffer_request(output_alloc, output_offset, output_bytes)});
+  }
+
+  VulkanReplayResourceSet<3> bind_grouped_reduce_atomic_resource_set(
+      Program *program,
+      int value_type,
+      DeviceAllocation keys_alloc,
+      uint64_t keys_offset,
+      size_t input_bytes,
+      DeviceAllocation values_alloc,
+      uint64_t values_offset,
+      size_t values_bytes,
+      DeviceAllocation output_alloc,
+      uint64_t output_offset,
+      size_t output_bytes) {
+    return grouped_reduce_atomic_ring_bindings[value_type].bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 3>{
+            rw_buffer_request(keys_alloc, keys_offset, input_bytes),
+            rw_buffer_request(values_alloc, values_offset, values_bytes),
+            rw_buffer_request(output_alloc, output_offset, output_bytes)});
+  }
+
+  VulkanReplayResourceSet<2> bind_grouped_reduce_zero_strided_resource_set(
+      Program *program,
+      int value_type,
+      DeviceAllocation output_alloc,
+      size_t output_bytes,
+      DeviceAllocation params_alloc,
+      size_t params_bytes) {
+    return grouped_reduce_zero_strided_ring_bindings[value_type].bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 2>{
+            rw_buffer_request(output_alloc, 0, output_bytes),
+            rw_buffer_request(params_alloc, 0, params_bytes)});
+  }
+
+  VulkanReplayResourceSet<4> bind_grouped_reduce_atomic_strided_resource_set(
+      Program *program,
+      int value_type,
+      DeviceAllocation keys_alloc,
+      size_t keys_bytes,
+      DeviceAllocation values_alloc,
+      size_t values_bytes,
+      DeviceAllocation output_alloc,
+      size_t output_bytes,
+      DeviceAllocation params_alloc,
+      size_t params_bytes) {
+    return grouped_reduce_atomic_strided_ring_bindings[value_type].bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 4>{
+            rw_buffer_request(keys_alloc, 0, keys_bytes),
+            rw_buffer_request(values_alloc, 0, values_bytes),
+            rw_buffer_request(output_alloc, 0, output_bytes),
+            rw_buffer_request(params_alloc, 0, params_bytes)});
+  }
+
+  VulkanReplayResourceSet<3> bind_grouped_reduce_sum_resource_set(
+      Program *program,
+      int value_type,
+      DeviceAllocation offsets_alloc,
+      size_t offset_bytes,
+      DeviceAllocation scratch_alloc,
+      size_t scratch_bytes,
+      DeviceAllocation output_alloc,
+      size_t output_bytes) {
+    return grouped_reduce_sum_ring_bindings[value_type].bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 3>{
+            rw_buffer_request(offsets_alloc, 0, offset_bytes),
+            rw_buffer_request(scratch_alloc, 0, scratch_bytes),
+            rw_buffer_request(output_alloc, 0, output_bytes)});
   }
 
   DeviceAllocation alloc_storage(size_t bytes) {
@@ -5500,6 +6024,72 @@ void dispatch_pipeline_with_push_constants(CommandList *cmdlist,
               "Vulkan sort dispatch failed: RhiResult({})", dispatch_status);
 }
 
+VulkanCommandReplayKey make_vulkan_histogram_command_key(
+    bool dense_field,
+    int value_type,
+    int bin_type,
+    bool use_single_shared,
+    bool use_private,
+    bool use_private_shared,
+    DeviceAllocation values_alloc,
+    uint64_t values_offset,
+    size_t value_bytes,
+    DeviceAllocation bins_alloc,
+    uint64_t bins_offset,
+    size_t bin_bytes,
+    DeviceAllocation partial_alloc,
+    size_t partial_bytes,
+    uint32_t value_groups,
+    uint32_t bin_groups,
+    uint32_t partial_groups,
+    size_t num_chunks,
+    Pipeline *clear_pipeline,
+    Pipeline *count_direct_pipeline,
+    Pipeline *count_private_pipeline,
+    Pipeline *count_private_shared_pipeline,
+    Pipeline *reduce_private_pipeline,
+    Pipeline *single_shared_pipeline,
+    ShaderResourceSet *single_shared_bindings,
+    ShaderResourceSet *clear_bindings,
+    ShaderResourceSet *count_direct_bindings,
+    ShaderResourceSet *count_private_bindings,
+    ShaderResourceSet *reduce_private_bindings) {
+  VulkanCommandReplayKey key;
+  key.push(dense_field ? 1 : 0);
+  key.push(static_cast<uint64_t>(value_type));
+  key.push(static_cast<uint64_t>(bin_type));
+  key.push(use_single_shared ? 1 : 0);
+  key.push(use_private ? 1 : 0);
+  key.push(use_private_shared ? 1 : 0);
+  key.push(values_alloc.alloc_id);
+  key.push(vulkan_allocation_generation(values_alloc));
+  key.push(values_offset);
+  key.push(static_cast<uint64_t>(value_bytes));
+  key.push(bins_alloc.alloc_id);
+  key.push(vulkan_allocation_generation(bins_alloc));
+  key.push(bins_offset);
+  key.push(static_cast<uint64_t>(bin_bytes));
+  key.push(partial_alloc.alloc_id);
+  key.push(vulkan_allocation_generation(partial_alloc));
+  key.push(static_cast<uint64_t>(partial_bytes));
+  key.push(value_groups);
+  key.push(bin_groups);
+  key.push(partial_groups);
+  key.push(static_cast<uint64_t>(num_chunks));
+  key.push_ptr(clear_pipeline);
+  key.push_ptr(count_direct_pipeline);
+  key.push_ptr(count_private_pipeline);
+  key.push_ptr(count_private_shared_pipeline);
+  key.push_ptr(reduce_private_pipeline);
+  key.push_ptr(single_shared_pipeline);
+  key.push_ptr(single_shared_bindings);
+  key.push_ptr(clear_bindings);
+  key.push_ptr(count_direct_bindings);
+  key.push_ptr(count_private_bindings);
+  key.push_ptr(reduce_private_bindings);
+  return key;
+}
+
 template <typename Ptr>
 void profiled_rw_buffer(ShaderResourceSet *bindings,
                         uint32_t binding,
@@ -5691,6 +6281,65 @@ struct VulkanScanDispatchPlan {
   std::vector<ShaderResourceSet *> block_bindings;
   std::vector<ShaderResourceSet *> add_bindings;
 };
+
+VulkanCommandReplayKey make_vulkan_compact_fused_command_key(
+    bool dense_field,
+    int value_type,
+    DeviceAllocation values_alloc,
+    uint64_t values_offset,
+    size_t value_total_bytes,
+    DeviceAllocation flags_alloc,
+    uint64_t flags_offset,
+    DeviceAllocation output_alloc,
+    uint64_t output_offset,
+    DeviceAllocation count_alloc,
+    uint64_t count_offset,
+    DeviceAllocation prefix_alloc,
+    size_t prefix_bytes,
+    uint32_t flag_groups,
+    uint32_t word_groups,
+    Pipeline *flags_pipeline,
+    Pipeline *scatter_pipeline,
+    ShaderResourceSet *flags_resource_set,
+    ShaderResourceSet *scatter_resource_set,
+    const VulkanScanDispatchPlan &scan_plan) {
+  VulkanCommandReplayKey key;
+  key.push(dense_field ? 1 : 0);
+  key.push(static_cast<uint64_t>(value_type));
+  key.push(values_alloc.alloc_id);
+  key.push(vulkan_allocation_generation(values_alloc));
+  key.push(values_offset);
+  key.push(static_cast<uint64_t>(value_total_bytes));
+  key.push(flags_alloc.alloc_id);
+  key.push(vulkan_allocation_generation(flags_alloc));
+  key.push(flags_offset);
+  key.push(output_alloc.alloc_id);
+  key.push(vulkan_allocation_generation(output_alloc));
+  key.push(output_offset);
+  key.push(count_alloc.alloc_id);
+  key.push(vulkan_allocation_generation(count_alloc));
+  key.push(count_offset);
+  key.push(prefix_alloc.alloc_id);
+  key.push(vulkan_allocation_generation(prefix_alloc));
+  key.push(static_cast<uint64_t>(prefix_bytes));
+  key.push(flag_groups);
+  key.push(word_groups);
+  key.push_ptr(flags_pipeline);
+  key.push_ptr(scatter_pipeline);
+  key.push_ptr(flags_resource_set);
+  key.push_ptr(scatter_resource_set);
+  key.push(scan_plan.data_alloc.alloc_id);
+  key.push(vulkan_allocation_generation(scan_plan.data_alloc));
+  key.push(static_cast<uint64_t>(scan_plan.data_offset));
+  key.push(static_cast<uint64_t>(scan_plan.n));
+  key.push(static_cast<uint64_t>(scan_plan.workspace_bytes));
+  key.push(scan_plan.workspace_alloc.alloc_id);
+  key.push(vulkan_allocation_generation(scan_plan.workspace_alloc));
+  key.push_ptr(scan_plan.scan_block);
+  key.push_ptr(scan_plan.scan_add);
+  key.push_ptr(scan_plan.small_bindings);
+  return key;
+}
 
 VulkanScanDispatchPlan prepare_vulkan_scan(Program *program,
                                            VulkanScanCache &cache,
@@ -5979,11 +6628,45 @@ size_t enqueue_vulkan_scan(Program *program,
   if (plan.n <= 1) {
     return 0;
   }
-  program->enqueue_compute_op_lambda(
+  auto record_scan =
       [plan, profiler_scopes](Device *op_device, CommandList *cmdlist) {
         record_vulkan_scan(op_device, cmdlist, plan, profiler_scopes);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(60);
+  command_key.push(static_cast<uint64_t>(value_type));
+  command_key.push(member_source ? 1 : 0);
+  command_key.push(data_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(data_alloc));
+  command_key.push(static_cast<uint64_t>(data_offset));
+  command_key.push(static_cast<uint64_t>(n));
+  command_key.push(static_cast<uint64_t>(plan.item_size));
+  command_key.push(static_cast<uint64_t>(plan.data_bytes));
+  command_key.push(plan.workspace_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(plan.workspace_alloc));
+  command_key.push(static_cast<uint64_t>(plan.workspace_bytes));
+  command_key.push(plan.dummy_sums_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(plan.dummy_sums_alloc));
+  command_key.push(plan.params_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(plan.params_alloc));
+  command_key.push(static_cast<uint64_t>(plan.params_bytes));
+  command_key.push(static_cast<uint64_t>(offset));
+  command_key.push(static_cast<uint64_t>(stride));
+  command_key.push(plan.use_small_subgroup ? 1 : 0);
+  command_key.push(static_cast<uint64_t>(plan.levels.size()));
+  command_key.push(static_cast<uint64_t>(plan.workspace_offsets.size()));
+  command_key.push_ptr(plan.scan_small);
+  command_key.push_ptr(plan.scan_block);
+  command_key.push_ptr(plan.scan_add);
+  command_key.push_ptr(plan.scan_block_strided);
+  command_key.push_ptr(plan.scan_add_strided);
+  Device *device = program->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native scan requires a compute device.");
+  if (!cache.scan_command_replay.submit_or_record(program, device, command_key,
+                                                  profiler_scopes,
+                                                  record_scan)) {
+    program->enqueue_compute_op_lambda(record_scan, {});
+  }
   return plan.workspace_bytes;
 }
 
@@ -6824,10 +7507,14 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
       get_environ_config("TI_VULKAN_REDUCE_I32_SUM_ATOMIC", 1) != 0;
   if (use_i32_sum_atomic) {
     Pipeline *pipeline = cache.i32_sum_atomic_pipeline(device);
-    cache.prepare_resource_sets(program, 1, 0, 0, 0, 0, 0);
-    ShaderResourceSet *bindings = cache.next_i32_sum_atomic_resource_set();
     const size_t value_bytes = n * element_size;
     const size_t output_bytes = sizeof(int32_t);
+    ShaderResourceSet *bindings =
+        cache
+            .bind_i32_sum_atomic_resource_set(program, values_alloc, offset,
+                                              value_bytes, output_alloc,
+                                              output_offset, output_bytes)
+            .bindings;
     const int items_per_group_config = get_environ_config(
         "TI_VULKAN_REDUCE_I32_SUM_ATOMIC_ITEMS_PER_GROUP", 16384);
     const size_t items_per_group =
@@ -6836,23 +7523,37 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
     const uint32_t groups = static_cast<uint32_t>(
         std::min(kMaxGroups, (n + items_per_group - 1) / items_per_group));
     const bool profiler_scopes = program->profiler != nullptr;
-    program->enqueue_compute_op_lambda(
+    auto record_reduce_atomic =
         [values_alloc, output_alloc, offset, output_offset, value_bytes,
          output_bytes, pipeline, bindings, groups, profiler_scopes](
             Device * /*op_device*/, CommandList *cmdlist) {
           cmdlist->buffer_fill(output_alloc.get_ptr(output_offset),
                                output_bytes, 0);
           cmdlist->buffer_barrier(output_alloc);
-          bindings->rw_buffer(0, values_alloc.get_ptr(offset), value_bytes);
-          bindings->rw_buffer(1, output_alloc.get_ptr(output_offset),
-                              output_bytes);
           dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
                             profiler_scopes ? "vulkan_reduce_i32_sum_atomic"
                                             : nullptr);
           cmdlist->buffer_barrier(output_alloc.get_ptr(output_offset),
                                   output_bytes);
-        },
-        {});
+        };
+    VulkanCommandReplayKey command_key;
+    command_key.push(1);
+    command_key.push(values_alloc.alloc_id);
+    command_key.push(vulkan_allocation_generation(values_alloc));
+    command_key.push(offset);
+    command_key.push(static_cast<uint64_t>(value_bytes));
+    command_key.push(output_alloc.alloc_id);
+    command_key.push(vulkan_allocation_generation(output_alloc));
+    command_key.push(output_offset);
+    command_key.push(static_cast<uint64_t>(output_bytes));
+    command_key.push(groups);
+    command_key.push_ptr(pipeline);
+    command_key.push_ptr(bindings);
+    if (!cache.reduce_i32_sum_atomic_command_replay.submit_or_record(
+            program, device, command_key, profiler_scopes,
+            record_reduce_atomic)) {
+      program->enqueue_compute_op_lambda(record_reduce_atomic, {});
+    }
     return cache.allocated_bytes();
   }
   const int single_shared_max_n_config =
@@ -6894,20 +7595,43 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
   Pipeline *single_pipeline =
       member_source ? pipeline_set.single_strided_pipelines[op].get()
                     : pipeline_set.single_pipelines[op].get();
+  constexpr size_t params_bytes = 3 * sizeof(uint32_t);
   ShaderResourceSet *single_bindings = nullptr;
   ShaderResourceSet *private_bindings = nullptr;
   ShaderResourceSet *final_bindings = nullptr;
   if (use_single_shared) {
-    cache.prepare_resource_sets(program, 0, member_source ? 0 : 1,
-                                member_source ? 1 : 0, 0, 0, 0);
-    single_bindings = member_source ? cache.next_single_strided_resource_set()
-                                    : cache.next_single_resource_set();
+    single_bindings =
+        member_source
+            ? cache
+                  .bind_single_strided_resource_set(
+                      program, values_alloc, values_binding_offset,
+                      value_bytes, output_alloc, output_offset, output_bytes,
+                      params_alloc, params_bytes)
+                  .bindings
+            : cache
+                  .bind_single_resource_set(
+                      program, values_alloc, values_binding_offset,
+                      value_bytes, output_alloc, output_offset, output_bytes)
+                  .bindings;
   } else {
-    cache.prepare_resource_sets(program, 0, 0, 0, member_source ? 0 : 1,
-                                member_source ? 1 : 0, 1);
-    private_bindings = member_source ? cache.next_private_strided_resource_set()
-                                     : cache.next_private_resource_set();
-    final_bindings = cache.next_final_resource_set();
+    private_bindings =
+        member_source
+            ? cache
+                  .bind_private_strided_resource_set(
+                      program, values_alloc, values_binding_offset,
+                      value_bytes, partial_alloc, partial_bytes, params_alloc,
+                      params_bytes)
+                  .bindings
+            : cache
+                  .bind_private_resource_set(program, values_alloc,
+                                             values_binding_offset, value_bytes,
+                                             partial_alloc, partial_bytes)
+                  .bindings;
+    final_bindings =
+        cache
+            .bind_final_resource_set(program, partial_alloc, partial_bytes,
+                                     output_alloc, output_offset, output_bytes)
+            .bindings;
   }
   const bool profiler_scopes = program->profiler != nullptr;
   std::array<uint32_t, 3> param_words{
@@ -6915,15 +7639,14 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
       static_cast<uint32_t>(offset / sizeof(uint32_t)),
       static_cast<uint32_t>(stride / sizeof(uint32_t)),
   };
-  constexpr size_t params_bytes = 3 * sizeof(uint32_t);
 
-  program->enqueue_compute_op_lambda(
+  auto record_reduce_tree =
       [values_alloc, output_alloc, partial_alloc, params_alloc,
        values_binding_offset, value_bytes, output_bytes, partial_bytes,
-        private_pipeline, final_pipeline, single_pipeline, num_chunks,
-        use_single_shared, member_source, output_offset, param_words, profiler_scopes,
-        params_bytes, single_bindings, private_bindings, final_bindings](
-           Device * /*op_device*/, CommandList *cmdlist) {
+       private_pipeline, final_pipeline, single_pipeline, num_chunks,
+       use_single_shared, member_source, output_offset, param_words,
+       profiler_scopes, params_bytes, single_bindings, private_bindings,
+       final_bindings](Device * /*op_device*/, CommandList *cmdlist) {
         auto scope_name = [profiler_scopes](const char *name) {
           return profiler_scopes ? name : nullptr;
         };
@@ -6936,14 +7659,9 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
                                  sizeof(uint32_t), param_words[i]);
           }
           cmdlist->buffer_barrier(params_alloc);
-          bindings->rw_buffer(2, params_alloc.get_ptr(0), params_bytes);
         };
         if (use_single_shared) {
           ShaderResourceSet *bindings = single_bindings;
-          bindings->rw_buffer(0, values_alloc.get_ptr(values_binding_offset),
-                              value_bytes);
-          bindings->rw_buffer(1, output_alloc.get_ptr(output_offset),
-                              output_bytes);
           bind_params(bindings);
           dispatch_pipeline(cmdlist, single_pipeline, bindings, 1, 1, 1,
                             scope_name(member_source
@@ -6955,9 +7673,6 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
         }
         {
           ShaderResourceSet *bindings = private_bindings;
-          bindings->rw_buffer(0, values_alloc.get_ptr(values_binding_offset),
-                              value_bytes);
-          bindings->rw_buffer(1, partial_alloc.get_ptr(0), partial_bytes);
           bind_params(bindings);
           dispatch_pipeline(cmdlist, private_pipeline, bindings,
                             static_cast<uint32_t>(num_chunks), 1, 1,
@@ -6968,16 +7683,47 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
         }
         {
           ShaderResourceSet *bindings = final_bindings;
-          bindings->rw_buffer(0, partial_alloc.get_ptr(0), partial_bytes);
-          bindings->rw_buffer(1, output_alloc.get_ptr(output_offset),
-                              output_bytes);
           dispatch_pipeline(cmdlist, final_pipeline, bindings, 1, 1, 1,
                             scope_name("vulkan_reduce_final"));
           cmdlist->buffer_barrier(output_alloc.get_ptr(output_offset),
                                   output_bytes);
         }
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(2);
+  command_key.push(static_cast<uint64_t>(value_type));
+  command_key.push(static_cast<uint64_t>(op));
+  command_key.push(use_single_shared ? 1 : 0);
+  command_key.push(member_source ? 1 : 0);
+  command_key.push(member_destination ? 1 : 0);
+  command_key.push(values_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(values_alloc));
+  command_key.push(values_binding_offset);
+  command_key.push(static_cast<uint64_t>(value_bytes));
+  command_key.push(output_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(output_alloc));
+  command_key.push(output_offset);
+  command_key.push(static_cast<uint64_t>(output_bytes));
+  command_key.push(partial_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(partial_alloc));
+  command_key.push(static_cast<uint64_t>(partial_bytes));
+  command_key.push(params_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(params_alloc));
+  command_key.push(static_cast<uint64_t>(params_bytes));
+  command_key.push(static_cast<uint64_t>(num_chunks));
+  for (uint32_t word : param_words) {
+    command_key.push(word);
+  }
+  command_key.push_ptr(private_pipeline);
+  command_key.push_ptr(final_pipeline);
+  command_key.push_ptr(single_pipeline);
+  command_key.push_ptr(single_bindings);
+  command_key.push_ptr(private_bindings);
+  command_key.push_ptr(final_bindings);
+  if (!cache.reduce_tree_command_replay.submit_or_record(
+          program, device, command_key, profiler_scopes, record_reduce_tree)) {
+    program->enqueue_compute_op_lambda(record_reduce_tree, {});
+  }
   return cache.cached_bytes;
 }
 
@@ -7123,7 +7869,7 @@ std::size_t vulkan_transform_affine_storage_impl(
                                             src_offset, src_bytes);
     cache.dense_i32_affine_replay.rw_buffer(bindings, 1, dst_alloc,
                                             dst_offset, dst_bytes);
-    program->enqueue_compute_op_lambda(
+    auto record_transform_dense =
         [src_alloc, dst_alloc, bindings, pipeline, src_offset, dst_offset,
          src_bytes, dst_bytes, push_words, push_bytes, groups, profiler_scopes](
             Device * /*op_device*/, CommandList *cmdlist) {
@@ -7132,8 +7878,29 @@ std::size_t vulkan_transform_affine_storage_impl(
               groups, 1, 1,
               profiler_scopes ? "vulkan_transform_i32_affine_dense" : nullptr);
           cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_offset), dst_bytes);
-        },
-        {});
+        };
+    VulkanCommandReplayKey command_key;
+    command_key.push(30);
+    command_key.push(static_cast<uint64_t>(value_type));
+    command_key.push(src_alloc.alloc_id);
+    command_key.push(vulkan_allocation_generation(src_alloc));
+    command_key.push(src_offset);
+    command_key.push(static_cast<uint64_t>(src_bytes));
+    command_key.push(dst_alloc.alloc_id);
+    command_key.push(vulkan_allocation_generation(dst_alloc));
+    command_key.push(dst_offset);
+    command_key.push(static_cast<uint64_t>(dst_bytes));
+    command_key.push(groups);
+    for (uint32_t word : push_words) {
+      command_key.push(word);
+    }
+    command_key.push_ptr(pipeline);
+    command_key.push_ptr(bindings);
+    if (!cache.dense_i32_affine_command_replay.submit_or_record(
+            program, device, command_key, profiler_scopes,
+            record_transform_dense)) {
+      program->enqueue_compute_op_lambda(record_transform_dense, {});
+    }
     return cache.cached_bytes;
   }
 
@@ -7203,14 +7970,8 @@ std::size_t vulkan_transform_affine_storage_impl(
   const uint32_t groups =
       static_cast<uint32_t>((scalar_count + kBlockSize - 1) / kBlockSize);
   const bool profiler_scopes = program->profiler != nullptr;
-  std::array<uint32_t, 10> changed_param_indices{};
-  uint32_t changed_param_count = 0;
   for (uint32_t i = 0; i < param_words.size(); ++i) {
-    if (!cache.affine_param_words_valid ||
-        cache.affine_param_words[i] != param_words[i]) {
-      changed_param_indices[changed_param_count++] = i;
-      cache.affine_param_words[i] = param_words[i];
-    }
+    cache.affine_param_words[i] = param_words[i];
   }
   cache.affine_param_words_valid = true;
   cache.affine_replay.rw_buffer(bindings, 0, src_alloc, src_binding_offset,
@@ -7219,26 +7980,49 @@ std::size_t vulkan_transform_affine_storage_impl(
                                 dst_bytes);
   cache.affine_replay.rw_buffer(bindings, 2, params_alloc, 0, params_bytes);
 
-  program->enqueue_compute_op_lambda(
+  auto record_transform_affine =
       [dst_alloc, params_alloc, bindings, pipeline, dst_binding_offset,
-       dst_bytes, param_words, changed_param_indices, changed_param_count,
-       groups, profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        for (uint32_t i = 0; i < changed_param_count; ++i) {
-          const uint32_t param_index = changed_param_indices[i];
-          cmdlist->buffer_fill(
-              params_alloc.get_ptr(param_index * sizeof(uint32_t)),
-              sizeof(uint32_t), param_words[param_index]);
+       dst_bytes, param_words, groups, profiler_scopes](
+          Device * /*op_device*/, CommandList *cmdlist) {
+        for (uint32_t i = 0; i < param_words.size(); ++i) {
+          cmdlist->buffer_fill(params_alloc.get_ptr(i * sizeof(uint32_t)),
+                               sizeof(uint32_t), param_words[i]);
         }
-        if (changed_param_count > 0) {
-          cmdlist->buffer_barrier(params_alloc);
-        }
+        cmdlist->buffer_barrier(params_alloc);
         dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
                           profiler_scopes ? "vulkan_transform_affine"
                                           : nullptr);
         cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_binding_offset),
                                 dst_bytes);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(31);
+  command_key.push(static_cast<uint64_t>(value_type));
+  command_key.push(static_cast<uint64_t>(lane_count));
+  command_key.push(member_source ? 1 : 0);
+  command_key.push(member_destination ? 1 : 0);
+  command_key.push(src_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(src_alloc));
+  command_key.push(src_binding_offset);
+  command_key.push(static_cast<uint64_t>(src_bytes));
+  command_key.push(dst_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(dst_alloc));
+  command_key.push(dst_binding_offset);
+  command_key.push(static_cast<uint64_t>(dst_bytes));
+  command_key.push(params_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(params_alloc));
+  command_key.push(static_cast<uint64_t>(params_bytes));
+  command_key.push(groups);
+  for (uint32_t word : param_words) {
+    command_key.push(word);
+  }
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.affine_command_replay.submit_or_record(
+          program, device, command_key, profiler_scopes,
+          record_transform_affine)) {
+    program->enqueue_compute_op_lambda(record_transform_affine, {});
+  }
   return cache.cached_bytes;
 }
 
@@ -7335,13 +8119,8 @@ std::size_t vulkan_add_merge_storage_impl(Program *program,
       program->get_device_caps().get(DeviceCapability::spirv_has_float64) != 0;
   Pipeline *pipeline = cache.pipeline_for(device, value_type, has_float64);
   ShaderResourceSet *bindings = cache.cached_resource_set();
-  std::array<uint32_t, 6> changed_param_indices{};
-  uint32_t changed_param_count = 0;
   for (uint32_t i = 0; i < param_words.size(); ++i) {
-    if (!cache.param_words_valid || cache.param_words[i] != param_words[i]) {
-      changed_param_indices[changed_param_count++] = i;
-      cache.param_words[i] = param_words[i];
-    }
+    cache.param_words[i] = param_words[i];
   }
   cache.param_words_valid = true;
   const size_t src_bytes =
@@ -7356,24 +8135,41 @@ std::size_t vulkan_add_merge_storage_impl(Program *program,
   cache.binding_replay.rw_buffer(bindings, 0, src_alloc, 0, src_bytes);
   cache.binding_replay.rw_buffer(bindings, 1, dst_alloc, 0, dst_bytes);
   cache.binding_replay.rw_buffer(bindings, 2, params_alloc, 0, params_bytes);
-  program->enqueue_compute_op_lambda(
+  auto record_add_merge =
       [dst_alloc, params_alloc, bindings, pipeline, dst_bytes, param_words,
-       changed_param_indices, changed_param_count, groups, profiler_scopes](
-          Device * /*op_device*/, CommandList *cmdlist) {
-        for (uint32_t i = 0; i < changed_param_count; ++i) {
-          const uint32_t param_index = changed_param_indices[i];
-          cmdlist->buffer_fill(
-              params_alloc.get_ptr(param_index * sizeof(uint32_t)),
-              sizeof(uint32_t), param_words[param_index]);
+       groups, profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        for (uint32_t i = 0; i < param_words.size(); ++i) {
+          cmdlist->buffer_fill(params_alloc.get_ptr(i * sizeof(uint32_t)),
+                               sizeof(uint32_t), param_words[i]);
         }
-        if (changed_param_count > 0) {
-          cmdlist->buffer_barrier(params_alloc);
-        }
+        cmdlist->buffer_barrier(params_alloc);
         dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
                           profiler_scopes ? "vulkan_add_merge" : nullptr);
         cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(32);
+  command_key.push(static_cast<uint64_t>(value_type));
+  command_key.push(src_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(src_alloc));
+  command_key.push(static_cast<uint64_t>(src_bytes));
+  command_key.push(dst_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(dst_alloc));
+  command_key.push(static_cast<uint64_t>(dst_bytes));
+  command_key.push(params_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(params_alloc));
+  command_key.push(static_cast<uint64_t>(params_bytes));
+  command_key.push(groups);
+  for (uint32_t word : param_words) {
+    command_key.push(word);
+  }
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.command_replay.submit_or_record(program, device, command_key,
+                                             profiler_scopes,
+                                             record_add_merge)) {
+    program->enqueue_compute_op_lambda(record_add_merge, {});
+  }
   return cache.cached_bytes;
 }
 
@@ -7618,23 +8414,22 @@ std::size_t Program::vulkan_grouped_reduce_atomic_ndarray(Ndarray *keys,
               "Vulkan native grouped reduce could not find a pipeline for the "
               "requested value type.");
   ShaderResourceSet *zero_bindings =
-      cache.grouped_reduce_zero_resource_set(value_type);
+      cache
+          .bind_grouped_reduce_zero_resource_set(
+              this, value_type, output_alloc, 0, output_bytes)
+          .bindings;
   ShaderResourceSet *atomic_bindings =
-      cache.grouped_reduce_atomic_resource_set(value_type);
+      cache
+          .bind_grouped_reduce_atomic_resource_set(
+              this, value_type, keys_alloc, 0, input_bytes, values_alloc, 0,
+              values_bytes, output_alloc, 0, output_bytes)
+          .bindings;
   const uint32_t zero_groups =
       static_cast<uint32_t>((num_groups + kBlockSize - 1) / kBlockSize);
   const uint32_t reduce_groups =
       static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
   const bool profiler_scopes = profiler != nullptr;
-  cache.grouped_reduce_zero_replay[value_type].rw_buffer(
-      zero_bindings, 0, output_alloc, 0, output_bytes);
-  cache.grouped_reduce_atomic_replay[value_type].rw_buffer(
-      atomic_bindings, 0, keys_alloc, 0, input_bytes);
-  cache.grouped_reduce_atomic_replay[value_type].rw_buffer(
-      atomic_bindings, 1, values_alloc, 0, values_bytes);
-  cache.grouped_reduce_atomic_replay[value_type].rw_buffer(
-      atomic_bindings, 2, output_alloc, 0, output_bytes);
-  enqueue_compute_op_lambda(
+  auto record_grouped_reduce_atomic =
       [keys_alloc, values_alloc, output_alloc, input_bytes, output_bytes,
        zero_pipeline, atomic_pipeline, zero_bindings, atomic_bindings,
        zero_groups, reduce_groups, value_type, values_bytes,
@@ -7674,8 +8469,30 @@ std::size_t Program::vulkan_grouped_reduce_atomic_ndarray(Ndarray *keys,
                                      : "vulkan_grouped_reduce_atomic_sum_i32")
                               : nullptr);
         cmdlist->buffer_barrier(output_alloc);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(20);
+  command_key.push(static_cast<uint64_t>(value_type));
+  command_key.push(keys_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(keys_alloc));
+  command_key.push(static_cast<uint64_t>(input_bytes));
+  command_key.push(values_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(values_alloc));
+  command_key.push(static_cast<uint64_t>(values_bytes));
+  command_key.push(output_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(output_alloc));
+  command_key.push(static_cast<uint64_t>(output_bytes));
+  command_key.push(zero_groups);
+  command_key.push(reduce_groups);
+  command_key.push_ptr(zero_pipeline);
+  command_key.push_ptr(atomic_pipeline);
+  command_key.push_ptr(zero_bindings);
+  command_key.push_ptr(atomic_bindings);
+  if (!cache.grouped_reduce_atomic_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_grouped_reduce_atomic)) {
+    enqueue_compute_op_lambda(record_grouped_reduce_atomic, {});
+  }
   return 0;
 }
 
@@ -7739,23 +8556,23 @@ std::size_t Program::vulkan_grouped_reduce_atomic_dense_field(
               "Vulkan native dense field grouped reduce could not find a "
               "pipeline for the requested value type.");
   ShaderResourceSet *zero_bindings =
-      cache.grouped_reduce_zero_resource_set(value_type);
+      cache
+          .bind_grouped_reduce_zero_resource_set(
+              this, value_type, output_alloc, output_ptr.offset, output_bytes)
+          .bindings;
   ShaderResourceSet *atomic_bindings =
-      cache.grouped_reduce_atomic_resource_set(value_type);
+      cache
+          .bind_grouped_reduce_atomic_resource_set(
+              this, value_type, keys_alloc, keys_ptr.offset, input_bytes,
+              values_alloc, values_ptr.offset, values_bytes, output_alloc,
+              output_ptr.offset, output_bytes)
+          .bindings;
   const uint32_t zero_groups =
       static_cast<uint32_t>((num_groups + kBlockSize - 1) / kBlockSize);
   const uint32_t reduce_groups =
       static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
   const bool profiler_scopes = profiler != nullptr;
-  cache.grouped_reduce_zero_replay[value_type].rw_buffer(
-      zero_bindings, 0, output_alloc, output_ptr.offset, output_bytes);
-  cache.grouped_reduce_atomic_replay[value_type].rw_buffer(
-      atomic_bindings, 0, keys_alloc, keys_ptr.offset, input_bytes);
-  cache.grouped_reduce_atomic_replay[value_type].rw_buffer(
-      atomic_bindings, 1, values_alloc, values_ptr.offset, values_bytes);
-  cache.grouped_reduce_atomic_replay[value_type].rw_buffer(
-      atomic_bindings, 2, output_alloc, output_ptr.offset, output_bytes);
-  enqueue_compute_op_lambda(
+  auto record_grouped_reduce_atomic =
       [keys_alloc, values_alloc, output_alloc, keys_ptr, values_ptr, output_ptr,
        input_bytes, output_bytes, zero_pipeline, atomic_pipeline,
        zero_bindings, atomic_bindings, zero_groups, reduce_groups, value_type,
@@ -7796,8 +8613,33 @@ std::size_t Program::vulkan_grouped_reduce_atomic_dense_field(
                                      : "vulkan_grouped_reduce_atomic_sum_i32")
                               : nullptr);
         cmdlist->buffer_barrier(output_alloc);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(21);
+  command_key.push(static_cast<uint64_t>(value_type));
+  command_key.push(keys_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(keys_alloc));
+  command_key.push(keys_ptr.offset);
+  command_key.push(static_cast<uint64_t>(input_bytes));
+  command_key.push(values_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(values_alloc));
+  command_key.push(values_ptr.offset);
+  command_key.push(static_cast<uint64_t>(values_bytes));
+  command_key.push(output_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(output_alloc));
+  command_key.push(output_ptr.offset);
+  command_key.push(static_cast<uint64_t>(output_bytes));
+  command_key.push(zero_groups);
+  command_key.push(reduce_groups);
+  command_key.push_ptr(zero_pipeline);
+  command_key.push_ptr(atomic_pipeline);
+  command_key.push_ptr(zero_bindings);
+  command_key.push_ptr(atomic_bindings);
+  if (!cache.grouped_reduce_atomic_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_grouped_reduce_atomic)) {
+    enqueue_compute_op_lambda(record_grouped_reduce_atomic, {});
+  }
   return 0;
 }
 
@@ -7901,27 +8743,24 @@ std::size_t Program::vulkan_grouped_reduce_atomic_strided_keys_ndarray(
               "Vulkan native strided grouped reduce could not find a pipeline "
               "for the requested value type.");
   ShaderResourceSet *zero_bindings =
-      cache.grouped_reduce_zero_strided_resource_set(value_type);
+      cache
+          .bind_grouped_reduce_zero_strided_resource_set(
+              this, value_type, output_alloc, output_bytes, params_alloc,
+              zero_params_bytes)
+          .bindings;
   ShaderResourceSet *atomic_bindings =
-      cache.grouped_reduce_atomic_strided_resource_set(value_type);
+      cache
+          .bind_grouped_reduce_atomic_strided_resource_set(
+              this, value_type, keys_alloc, keys_bytes, values_alloc,
+              values_bytes, output_alloc, output_bytes, params_alloc,
+              reduce_params_bytes)
+          .bindings;
   const uint32_t zero_groups =
       static_cast<uint32_t>((num_groups + kBlockSize - 1) / kBlockSize);
   const uint32_t reduce_groups =
       static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
   const bool profiler_scopes = profiler != nullptr;
-  cache.grouped_reduce_zero_strided_replay[value_type].rw_buffer(
-      zero_bindings, 0, output_alloc, 0, output_bytes);
-  cache.grouped_reduce_zero_strided_replay[value_type].rw_buffer(
-      zero_bindings, 1, params_alloc, 0, zero_params_bytes);
-  cache.grouped_reduce_atomic_strided_replay[value_type].rw_buffer(
-      atomic_bindings, 0, keys_alloc, 0, keys_bytes);
-  cache.grouped_reduce_atomic_strided_replay[value_type].rw_buffer(
-      atomic_bindings, 1, values_alloc, 0, values_bytes);
-  cache.grouped_reduce_atomic_strided_replay[value_type].rw_buffer(
-      atomic_bindings, 2, output_alloc, 0, output_bytes);
-  cache.grouped_reduce_atomic_strided_replay[value_type].rw_buffer(
-      atomic_bindings, 3, params_alloc, 0, reduce_params_bytes);
-  enqueue_compute_op_lambda(
+  auto record_grouped_reduce_atomic_strided =
       [keys_alloc, values_alloc, output_alloc, params_alloc, keys_bytes,
        values_bytes, output_bytes, zero_params_bytes, reduce_params_bytes,
        zero_param_words, reduce_param_words, zero_pipeline, atomic_pipeline,
@@ -7973,8 +8812,40 @@ std::size_t Program::vulkan_grouped_reduce_atomic_strided_keys_ndarray(
                        : "vulkan_grouped_reduce_atomic_sum_i32_strided")
                 : nullptr);
         cmdlist->buffer_barrier(output_alloc);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(22);
+  command_key.push(static_cast<uint64_t>(value_type));
+  command_key.push(keys_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(keys_alloc));
+  command_key.push(static_cast<uint64_t>(keys_bytes));
+  command_key.push(values_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(values_alloc));
+  command_key.push(static_cast<uint64_t>(values_bytes));
+  command_key.push(output_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(output_alloc));
+  command_key.push(static_cast<uint64_t>(output_bytes));
+  command_key.push(params_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(params_alloc));
+  command_key.push(static_cast<uint64_t>(zero_params_bytes));
+  command_key.push(static_cast<uint64_t>(reduce_params_bytes));
+  command_key.push(zero_groups);
+  command_key.push(reduce_groups);
+  for (uint32_t word : zero_param_words) {
+    command_key.push(word);
+  }
+  for (uint32_t word : reduce_param_words) {
+    command_key.push(word);
+  }
+  command_key.push_ptr(zero_pipeline);
+  command_key.push_ptr(atomic_pipeline);
+  command_key.push_ptr(zero_bindings);
+  command_key.push_ptr(atomic_bindings);
+  if (!cache.grouped_reduce_atomic_strided_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_grouped_reduce_atomic_strided)) {
+    enqueue_compute_op_lambda(record_grouped_reduce_atomic_strided, {});
+  }
   return cache.cached_bytes;
 }
 
@@ -8139,23 +9010,30 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
   const bool use_fused_recording =
       compact_fuse_max_n_config > 0 &&
       n <= static_cast<size_t>(compact_fuse_max_n_config);
-  cache.prepare_resource_sets(this, 1, 1);
-  ShaderResourceSet *flags_resource_set = cache.next_flags_resource_set();
-  ShaderResourceSet *scatter_resource_set = cache.next_scatter_resource_set();
+  ShaderResourceSet *flags_resource_set =
+      cache
+          .bind_flags_resource_set(this, flags_alloc, 0, prefix_alloc,
+                                   prefix_bytes)
+          .bindings;
+  ShaderResourceSet *scatter_resource_set =
+      cache
+          .bind_scatter_resource_set(this, values_alloc, 0, value_total_bytes,
+                                     flags_alloc, 0, prefix_bytes,
+                                     prefix_alloc, output_alloc, 0,
+                                     count_alloc, 0)
+          .bindings;
 
   if (use_fused_recording) {
     auto scan_plan = prepare_vulkan_i32_scan(this, cache.scan, prefix_alloc, n);
     cache.cached_bytes = cache.allocated_bytes();
-    enqueue_compute_op_lambda(
+    auto record_compact_fused =
         [flags_alloc, prefix_alloc, prefix_bytes, flags_pipeline, flag_groups,
-          values_alloc, output_alloc, count_alloc, scatter_pipeline, scan_plan,
-          value_total_bytes, word_groups, flags_resource_set,
-          scatter_resource_set, profiler_scopes](Device *op_device,
-                                                 CommandList *cmdlist) {
+         values_alloc, output_alloc, count_alloc, scatter_pipeline, scan_plan,
+         value_total_bytes, word_groups, flags_resource_set,
+         scatter_resource_set, profiler_scopes](Device *op_device,
+                                                CommandList *cmdlist) {
           {
             ShaderResourceSet *bindings = flags_resource_set;
-            bindings->rw_buffer(0, flags_alloc.get_ptr(0), prefix_bytes);
-            bindings->rw_buffer(1, prefix_alloc.get_ptr(0), prefix_bytes);
             dispatch_pipeline(cmdlist, flags_pipeline, bindings,
                               flag_groups, 1, 1,
                               profiler_scopes ? "vulkan_compact_i32_flags"
@@ -8166,11 +9044,6 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
                                  profiler_scopes);
           {
             ShaderResourceSet *bindings = scatter_resource_set;
-            bindings->rw_buffer(0, values_alloc.get_ptr(0), value_total_bytes);
-            bindings->rw_buffer(1, flags_alloc.get_ptr(0), prefix_bytes);
-            bindings->rw_buffer(2, prefix_alloc.get_ptr(0), prefix_bytes);
-            bindings->rw_buffer(3, output_alloc.get_ptr(0), value_total_bytes);
-            bindings->rw_buffer(4, count_alloc.get_ptr(0), sizeof(int32_t));
             dispatch_pipeline(cmdlist, scatter_pipeline, bindings,
                               word_groups, 1, 1,
                               profiler_scopes ? "vulkan_compact_i32_scatter"
@@ -8178,48 +9051,83 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
           }
           cmdlist->buffer_barrier(output_alloc);
           cmdlist->buffer_barrier(count_alloc);
-        },
-        {});
+        };
+    VulkanCommandReplayKey command_key = make_vulkan_compact_fused_command_key(
+        false, value_type, values_alloc, 0, value_total_bytes, flags_alloc, 0,
+        output_alloc, 0, count_alloc, 0, prefix_alloc, prefix_bytes,
+        flag_groups, word_groups, flags_pipeline, scatter_pipeline,
+        flags_resource_set, scatter_resource_set, scan_plan);
+    if (!cache.ndarray_fused_command_replay.submit_or_record(
+            this, device, command_key, profiler_scopes,
+            record_compact_fused)) {
+      enqueue_compute_op_lambda(record_compact_fused, {});
+    }
     return cache.cached_bytes;
   }
 
-  enqueue_compute_op_lambda(
+  auto record_compact_flags =
       [flags_alloc, prefix_alloc, prefix_bytes, flags_pipeline, flag_groups,
        flags_resource_set,
        profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
         ShaderResourceSet *bindings = flags_resource_set;
-        bindings->rw_buffer(0, flags_alloc.get_ptr(0), prefix_bytes);
-        bindings->rw_buffer(1, prefix_alloc.get_ptr(0), prefix_bytes);
         dispatch_pipeline(cmdlist, flags_pipeline, bindings, flag_groups,
                           1, 1,
                           profiler_scopes ? "vulkan_compact_i32_flags"
                                           : nullptr);
         cmdlist->buffer_barrier(prefix_alloc);
-      },
-      {});
+      };
+  VulkanCommandReplayKey flags_command_key;
+  flags_command_key.push(70);
+  push_vulkan_command_key_range(flags_command_key, flags_alloc, 0,
+                                prefix_bytes);
+  push_vulkan_command_key_range(flags_command_key, prefix_alloc, 0,
+                                prefix_bytes);
+  flags_command_key.push(flag_groups);
+  flags_command_key.push_ptr(flags_pipeline);
+  flags_command_key.push_ptr(flags_resource_set);
+  if (!cache.ndarray_flags_command_replay.submit_or_record(
+          this, device, flags_command_key, profiler_scopes,
+          record_compact_flags)) {
+    enqueue_compute_op_lambda(record_compact_flags, {});
+  }
 
   enqueue_vulkan_i32_scan(this, cache.scan, prefix_alloc, n, profiler_scopes);
   cache.cached_bytes = cache.allocated_bytes();
 
-  enqueue_compute_op_lambda(
+  auto record_compact_scatter =
       [values_alloc, flags_alloc, prefix_alloc, output_alloc, count_alloc,
        prefix_bytes, value_total_bytes, scatter_pipeline, word_groups,
        scatter_resource_set,
        profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
         ShaderResourceSet *bindings = scatter_resource_set;
-        bindings->rw_buffer(0, values_alloc.get_ptr(0), value_total_bytes);
-        bindings->rw_buffer(1, flags_alloc.get_ptr(0), prefix_bytes);
-        bindings->rw_buffer(2, prefix_alloc.get_ptr(0), prefix_bytes);
-        bindings->rw_buffer(3, output_alloc.get_ptr(0), value_total_bytes);
-        bindings->rw_buffer(4, count_alloc.get_ptr(0), sizeof(int32_t));
         dispatch_pipeline(cmdlist, scatter_pipeline, bindings,
                           word_groups, 1, 1,
                           profiler_scopes ? "vulkan_compact_i32_scatter"
                                           : nullptr);
         cmdlist->buffer_barrier(output_alloc);
         cmdlist->buffer_barrier(count_alloc);
-      },
-      {});
+      };
+  VulkanCommandReplayKey scatter_command_key;
+  scatter_command_key.push(71);
+  scatter_command_key.push(static_cast<uint64_t>(value_type));
+  push_vulkan_command_key_range(scatter_command_key, values_alloc, 0,
+                                value_total_bytes);
+  push_vulkan_command_key_range(scatter_command_key, flags_alloc, 0,
+                                prefix_bytes);
+  push_vulkan_command_key_range(scatter_command_key, prefix_alloc, 0,
+                                prefix_bytes);
+  push_vulkan_command_key_range(scatter_command_key, output_alloc, 0,
+                                value_total_bytes);
+  push_vulkan_command_key_range(scatter_command_key, count_alloc, 0,
+                                sizeof(int32_t));
+  scatter_command_key.push(word_groups);
+  scatter_command_key.push_ptr(scatter_pipeline);
+  scatter_command_key.push_ptr(scatter_resource_set);
+  if (!cache.ndarray_scatter_command_replay.submit_or_record(
+          this, device, scatter_command_key, profiler_scopes,
+          record_compact_scatter)) {
+    enqueue_compute_op_lambda(record_compact_scatter, {});
+  }
   return cache.cached_bytes;
 }
 
@@ -8302,25 +9210,31 @@ std::size_t Program::vulkan_compact_dense_field(SNode *values,
   const bool use_fused_recording =
       compact_fuse_max_n_config > 0 &&
       n <= static_cast<size_t>(compact_fuse_max_n_config);
-  cache.prepare_resource_sets(this, 1, 1);
-  ShaderResourceSet *flags_resource_set = cache.next_flags_resource_set();
-  ShaderResourceSet *scatter_resource_set = cache.next_scatter_resource_set();
+  ShaderResourceSet *flags_resource_set =
+      cache
+          .bind_flags_resource_set(this, flags_alloc, flags_offset,
+                                   prefix_alloc, prefix_bytes)
+          .bindings;
+  ShaderResourceSet *scatter_resource_set =
+      cache
+          .bind_scatter_resource_set(
+              this, values_alloc, values_offset, value_total_bytes, flags_alloc,
+              flags_offset, prefix_bytes, prefix_alloc, output_alloc,
+              output_offset, count_alloc, count_offset)
+          .bindings;
 
   if (use_fused_recording) {
     auto scan_plan = prepare_vulkan_i32_scan(this, cache.scan, prefix_alloc, n);
     cache.cached_bytes = cache.allocated_bytes();
-    enqueue_compute_op_lambda(
+    auto record_compact_fused =
         [flags_alloc, flags_offset, prefix_alloc, prefix_bytes, flags_pipeline,
-          flag_groups, values_alloc, values_offset, output_alloc, output_offset,
-          count_alloc, count_offset, scatter_pipeline, scan_plan,
-          value_total_bytes, word_groups, flags_resource_set,
-          scatter_resource_set, profiler_scopes](
-             Device *op_device, CommandList *cmdlist) {
+         flag_groups, values_alloc, values_offset, output_alloc, output_offset,
+         count_alloc, count_offset, scatter_pipeline, scan_plan,
+         value_total_bytes, word_groups, flags_resource_set,
+         scatter_resource_set, profiler_scopes](Device *op_device,
+                                                CommandList *cmdlist) {
           {
             ShaderResourceSet *bindings = flags_resource_set;
-            bindings->rw_buffer(0, flags_alloc.get_ptr(flags_offset),
-                                prefix_bytes);
-            bindings->rw_buffer(1, prefix_alloc.get_ptr(0), prefix_bytes);
             dispatch_pipeline(cmdlist, flags_pipeline, bindings,
                               flag_groups, 1, 1,
                               profiler_scopes ? "vulkan_compact_i32_flags"
@@ -8331,15 +9245,6 @@ std::size_t Program::vulkan_compact_dense_field(SNode *values,
                                  profiler_scopes);
           {
             ShaderResourceSet *bindings = scatter_resource_set;
-            bindings->rw_buffer(0, values_alloc.get_ptr(values_offset),
-                                value_total_bytes);
-            bindings->rw_buffer(1, flags_alloc.get_ptr(flags_offset),
-                                prefix_bytes);
-            bindings->rw_buffer(2, prefix_alloc.get_ptr(0), prefix_bytes);
-            bindings->rw_buffer(3, output_alloc.get_ptr(output_offset),
-                                value_total_bytes);
-            bindings->rw_buffer(4, count_alloc.get_ptr(count_offset),
-                                sizeof(int32_t));
             dispatch_pipeline(cmdlist, scatter_pipeline, bindings,
                               word_groups, 1, 1,
                               profiler_scopes ? "vulkan_compact_i32_scatter"
@@ -8347,54 +9252,85 @@ std::size_t Program::vulkan_compact_dense_field(SNode *values,
           }
           cmdlist->buffer_barrier(output_alloc);
           cmdlist->buffer_barrier(count_alloc);
-        },
-        {});
+        };
+    VulkanCommandReplayKey command_key = make_vulkan_compact_fused_command_key(
+        true, value_type, values_alloc, values_offset, value_total_bytes,
+        flags_alloc, flags_offset, output_alloc, output_offset, count_alloc,
+        count_offset, prefix_alloc, prefix_bytes, flag_groups, word_groups,
+        flags_pipeline, scatter_pipeline, flags_resource_set,
+        scatter_resource_set, scan_plan);
+    if (!cache.dense_field_fused_command_replay.submit_or_record(
+            this, device, command_key, profiler_scopes,
+            record_compact_fused)) {
+      enqueue_compute_op_lambda(record_compact_fused, {});
+    }
     return cache.cached_bytes;
   }
 
-  enqueue_compute_op_lambda(
+  auto record_compact_flags =
       [flags_alloc, flags_offset, prefix_alloc, prefix_bytes, flags_pipeline,
        flag_groups, flags_resource_set,
        profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
         ShaderResourceSet *bindings = flags_resource_set;
-        bindings->rw_buffer(0, flags_alloc.get_ptr(flags_offset),
-                            prefix_bytes);
-        bindings->rw_buffer(1, prefix_alloc.get_ptr(0), prefix_bytes);
         dispatch_pipeline(cmdlist, flags_pipeline, bindings, flag_groups,
                           1, 1,
                           profiler_scopes ? "vulkan_compact_i32_flags"
                                           : nullptr);
         cmdlist->buffer_barrier(prefix_alloc);
-      },
-      {});
+      };
+  VulkanCommandReplayKey flags_command_key;
+  flags_command_key.push(72);
+  push_vulkan_command_key_range(flags_command_key, flags_alloc, flags_offset,
+                                prefix_bytes);
+  push_vulkan_command_key_range(flags_command_key, prefix_alloc, 0,
+                                prefix_bytes);
+  flags_command_key.push(flag_groups);
+  flags_command_key.push_ptr(flags_pipeline);
+  flags_command_key.push_ptr(flags_resource_set);
+  if (!cache.dense_field_flags_command_replay.submit_or_record(
+          this, device, flags_command_key, profiler_scopes,
+          record_compact_flags)) {
+    enqueue_compute_op_lambda(record_compact_flags, {});
+  }
 
   enqueue_vulkan_i32_scan(this, cache.scan, prefix_alloc, n, profiler_scopes);
   cache.cached_bytes = cache.allocated_bytes();
 
-  enqueue_compute_op_lambda(
+  auto record_compact_scatter =
       [values_alloc, values_offset, flags_alloc, flags_offset, prefix_alloc,
        output_alloc, output_offset, count_alloc, count_offset, prefix_bytes,
        value_total_bytes, scatter_pipeline, word_groups, scatter_resource_set,
        profiler_scopes](
            Device * /*op_device*/, CommandList *cmdlist) {
         ShaderResourceSet *bindings = scatter_resource_set;
-        bindings->rw_buffer(0, values_alloc.get_ptr(values_offset),
-                            value_total_bytes);
-        bindings->rw_buffer(1, flags_alloc.get_ptr(flags_offset),
-                            prefix_bytes);
-        bindings->rw_buffer(2, prefix_alloc.get_ptr(0), prefix_bytes);
-        bindings->rw_buffer(3, output_alloc.get_ptr(output_offset),
-                            value_total_bytes);
-        bindings->rw_buffer(4, count_alloc.get_ptr(count_offset),
-                            sizeof(int32_t));
         dispatch_pipeline(cmdlist, scatter_pipeline, bindings,
                           word_groups, 1, 1,
                           profiler_scopes ? "vulkan_compact_i32_scatter"
                                           : nullptr);
         cmdlist->buffer_barrier(output_alloc);
         cmdlist->buffer_barrier(count_alloc);
-      },
-      {});
+      };
+  VulkanCommandReplayKey scatter_command_key;
+  scatter_command_key.push(73);
+  scatter_command_key.push(static_cast<uint64_t>(value_type));
+  push_vulkan_command_key_range(scatter_command_key, values_alloc,
+                                values_offset, value_total_bytes);
+  push_vulkan_command_key_range(scatter_command_key, flags_alloc, flags_offset,
+                                prefix_bytes);
+  push_vulkan_command_key_range(scatter_command_key, prefix_alloc, 0,
+                                prefix_bytes);
+  push_vulkan_command_key_range(scatter_command_key, output_alloc,
+                                output_offset, value_total_bytes);
+  push_vulkan_command_key_range(scatter_command_key, count_alloc, count_offset,
+                                sizeof(int32_t));
+  scatter_command_key.push(word_groups);
+  scatter_command_key.push_ptr(scatter_pipeline);
+  scatter_command_key.push_ptr(scatter_resource_set);
+  if (!cache.dense_field_scatter_command_replay.submit_or_record(
+          this, device, scatter_command_key, profiler_scopes,
+          record_compact_scatter)) {
+    enqueue_compute_op_lambda(record_compact_scatter, {});
+  }
   return cache.cached_bytes;
 }
 
@@ -8517,8 +9453,51 @@ std::size_t Program::vulkan_histogram_ndarray(Ndarray *values,
       kBlockSize);
   const uint32_t value_groups = static_cast<uint32_t>(
       (n + kBlockSize - 1) / kBlockSize);
+  ShaderResourceSet *single_shared_bindings = nullptr;
+  ShaderResourceSet *clear_bindings = nullptr;
+  ShaderResourceSet *count_direct_bindings = nullptr;
+  ShaderResourceSet *count_private_bindings = nullptr;
+  ShaderResourceSet *reduce_private_bindings = nullptr;
+  if (use_single_shared) {
+    single_shared_bindings =
+        cache
+            .bind_single_shared_resource_set(this, values_alloc, 0,
+                                             value_bytes, bins_alloc, 0,
+                                             bin_bytes)
+            .bindings;
+  } else if (use_private) {
+    if (!count_private_shared_pipeline) {
+      clear_bindings =
+          cache.bind_clear_resource_set(this, partial_alloc, 0, partial_bytes)
+              .bindings;
+    }
+    count_private_bindings =
+        cache
+            .bind_count_private_resource_set(
+                this, count_private_shared_pipeline != nullptr, values_alloc,
+                0, value_bytes, bins_alloc, 0, bin_bytes, partial_alloc, 0,
+                partial_bytes)
+            .bindings;
+    reduce_private_bindings =
+        cache
+            .bind_reduce_private_resource_set(this, partial_alloc, 0,
+                                              partial_bytes, bins_alloc, 0,
+                                              bin_bytes)
+            .bindings;
+  } else {
+    clear_bindings =
+        cache.bind_clear_resource_set(this, bins_alloc, 0, bin_bytes).bindings;
+    if (value_groups > 0) {
+      count_direct_bindings =
+          cache
+              .bind_count_direct_resource_set(this, values_alloc, 0,
+                                              value_bytes, bins_alloc, 0,
+                                              bin_bytes)
+              .bindings;
+    }
+  }
 
-  enqueue_compute_op_lambda(
+  auto record_histogram =
       [values_alloc, bins_alloc, partial_alloc, value_bytes, bin_bytes,
        partial_bytes, clear_pipeline, count_direct_pipeline,
        count_private_pipeline, count_private_shared_pipeline,
@@ -8526,33 +9505,26 @@ std::size_t Program::vulkan_histogram_ndarray(Ndarray *values,
        clear_scope, reduce_private_scope, count_direct_scope,
        count_private_scope, count_private_shared_scope, value_groups,
        bin_groups, partial_groups, num_chunks, use_private, use_single_shared,
-       profiler_scopes](
-          Device *op_device, CommandList *cmdlist) {
+       profiler_scopes, single_shared_bindings, clear_bindings,
+       count_direct_bindings, count_private_bindings,
+       reduce_private_bindings](Device * /*op_device*/, CommandList *cmdlist) {
         auto scope_name = [profiler_scopes](const char *name) {
           return profiler_scopes ? name : nullptr;
         };
         if (use_single_shared) {
-          auto bindings = op_device->create_resource_set_unique();
-          bindings->rw_buffer(0, values_alloc.get_ptr(0), value_bytes);
-          bindings->rw_buffer(1, bins_alloc.get_ptr(0), bin_bytes);
-          dispatch_pipeline(cmdlist, single_shared_pipeline, bindings.get(), 1,
-                            1, 1, scope_name(single_shared_scope));
+          dispatch_pipeline(cmdlist, single_shared_pipeline,
+                            single_shared_bindings, 1, 1, 1,
+                            scope_name(single_shared_scope));
           cmdlist->buffer_barrier(bins_alloc);
           return;
         }
         if (use_private) {
           if (!count_private_shared_pipeline) {
-            auto bindings = op_device->create_resource_set_unique();
-            bindings->rw_buffer(0, partial_alloc.get_ptr(0), partial_bytes);
-            dispatch_pipeline(cmdlist, clear_pipeline, bindings.get(),
+            dispatch_pipeline(cmdlist, clear_pipeline, clear_bindings,
                               partial_groups, 1, 1, scope_name(clear_scope));
             cmdlist->buffer_barrier(partial_alloc);
           }
           {
-            auto bindings = op_device->create_resource_set_unique();
-            bindings->rw_buffer(0, values_alloc.get_ptr(0), value_bytes);
-            bindings->rw_buffer(1, bins_alloc.get_ptr(0), bin_bytes);
-            bindings->rw_buffer(2, partial_alloc.get_ptr(0), partial_bytes);
             Pipeline *count_pipeline = count_private_shared_pipeline
                                            ? count_private_shared_pipeline
                                            : count_private_pipeline;
@@ -8563,39 +9535,43 @@ std::size_t Program::vulkan_histogram_ndarray(Ndarray *values,
                 count_private_shared_pipeline
                     ? static_cast<uint32_t>(num_chunks)
                     : value_groups;
-            dispatch_pipeline(cmdlist, count_pipeline, bindings.get(),
+            dispatch_pipeline(cmdlist, count_pipeline, count_private_bindings,
                               count_groups, 1, 1, scope_name(count_scope));
             cmdlist->buffer_barrier(partial_alloc);
           }
           {
-            auto bindings = op_device->create_resource_set_unique();
-            bindings->rw_buffer(0, partial_alloc.get_ptr(0), partial_bytes);
-            bindings->rw_buffer(1, bins_alloc.get_ptr(0), bin_bytes);
-            dispatch_pipeline(cmdlist, reduce_private_pipeline, bindings.get(),
-                              bin_groups, 1, 1,
+            dispatch_pipeline(cmdlist, reduce_private_pipeline,
+                              reduce_private_bindings, bin_groups, 1, 1,
                               scope_name(reduce_private_scope));
             cmdlist->buffer_barrier(bins_alloc);
           }
           return;
         }
         {
-          auto bindings = op_device->create_resource_set_unique();
-          bindings->rw_buffer(0, bins_alloc.get_ptr(0), bin_bytes);
-          dispatch_pipeline(cmdlist, clear_pipeline, bindings.get(), bin_groups,
+          dispatch_pipeline(cmdlist, clear_pipeline, clear_bindings, bin_groups,
                             1, 1, scope_name(clear_scope));
           cmdlist->buffer_barrier(bins_alloc);
         }
         if (value_groups > 0) {
-          auto bindings = op_device->create_resource_set_unique();
-          bindings->rw_buffer(0, values_alloc.get_ptr(0), value_bytes);
-          bindings->rw_buffer(1, bins_alloc.get_ptr(0), bin_bytes);
-          dispatch_pipeline(cmdlist, count_direct_pipeline, bindings.get(),
-                            value_groups, 1, 1,
+          dispatch_pipeline(cmdlist, count_direct_pipeline,
+                            count_direct_bindings, value_groups, 1, 1,
                             scope_name(count_direct_scope));
           cmdlist->buffer_barrier(bins_alloc);
         }
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key = make_vulkan_histogram_command_key(
+      false, value_type, bin_type, use_single_shared, use_private,
+      count_private_shared_pipeline != nullptr, values_alloc, 0, value_bytes,
+      bins_alloc, 0, bin_bytes, partial_alloc, partial_bytes, value_groups,
+      bin_groups, partial_groups, num_chunks, clear_pipeline,
+      count_direct_pipeline, count_private_pipeline,
+      count_private_shared_pipeline, reduce_private_pipeline,
+      single_shared_pipeline, single_shared_bindings, clear_bindings,
+      count_direct_bindings, count_private_bindings, reduce_private_bindings);
+  if (!cache.ndarray_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes, record_histogram)) {
+    enqueue_compute_op_lambda(record_histogram, {});
+  }
   return cache.cached_bytes;
 }
 
@@ -8711,8 +9687,55 @@ std::size_t Program::vulkan_histogram_dense_field(SNode *values,
       kBlockSize);
   const uint32_t value_groups = static_cast<uint32_t>(
       (n + kBlockSize - 1) / kBlockSize);
+  ShaderResourceSet *single_shared_bindings = nullptr;
+  ShaderResourceSet *clear_bindings = nullptr;
+  ShaderResourceSet *count_direct_bindings = nullptr;
+  ShaderResourceSet *count_private_bindings = nullptr;
+  ShaderResourceSet *reduce_private_bindings = nullptr;
+  if (use_single_shared) {
+    single_shared_bindings =
+        cache
+            .bind_single_shared_resource_set(this, values_alloc,
+                                             values_ptr.offset, value_bytes,
+                                             bins_alloc, bins_ptr.offset,
+                                             bin_bytes)
+            .bindings;
+  } else if (use_private) {
+    if (!count_private_shared_pipeline) {
+      clear_bindings =
+          cache.bind_clear_resource_set(this, partial_alloc, 0, partial_bytes)
+              .bindings;
+    }
+    count_private_bindings =
+        cache
+            .bind_count_private_resource_set(
+                this, count_private_shared_pipeline != nullptr, values_alloc,
+                values_ptr.offset, value_bytes, bins_alloc, bins_ptr.offset,
+                bin_bytes, partial_alloc, 0, partial_bytes)
+            .bindings;
+    reduce_private_bindings =
+        cache
+            .bind_reduce_private_resource_set(this, partial_alloc, 0,
+                                              partial_bytes, bins_alloc,
+                                              bins_ptr.offset, bin_bytes)
+            .bindings;
+  } else {
+    clear_bindings =
+        cache
+            .bind_clear_resource_set(this, bins_alloc, bins_ptr.offset,
+                                     bin_bytes)
+            .bindings;
+    if (value_groups > 0) {
+      count_direct_bindings =
+          cache
+              .bind_count_direct_resource_set(
+                  this, values_alloc, values_ptr.offset, value_bytes,
+                  bins_alloc, bins_ptr.offset, bin_bytes)
+              .bindings;
+    }
+  }
 
-  enqueue_compute_op_lambda(
+  auto record_histogram =
       [values_alloc, bins_alloc, partial_alloc, values_ptr, bins_ptr,
        value_bytes, bin_bytes, partial_bytes, clear_pipeline,
        count_direct_pipeline, count_private_pipeline,
@@ -8720,37 +9743,27 @@ std::size_t Program::vulkan_histogram_dense_field(SNode *values,
        single_shared_pipeline, single_shared_scope, clear_scope,
        reduce_private_scope, count_direct_scope, count_private_scope,
        count_private_shared_scope, value_groups, bin_groups, partial_groups,
-       num_chunks, use_private, use_single_shared, profiler_scopes](
-          Device *op_device, CommandList *cmdlist) {
+       num_chunks, use_private, use_single_shared, profiler_scopes,
+       single_shared_bindings, clear_bindings, count_direct_bindings,
+       count_private_bindings, reduce_private_bindings](
+          Device * /*op_device*/, CommandList *cmdlist) {
         auto scope_name = [profiler_scopes](const char *name) {
           return profiler_scopes ? name : nullptr;
         };
         if (use_single_shared) {
-          auto bindings = op_device->create_resource_set_unique();
-          bindings->rw_buffer(0, values_alloc.get_ptr(values_ptr.offset),
-                              value_bytes);
-          bindings->rw_buffer(1, bins_alloc.get_ptr(bins_ptr.offset),
-                              bin_bytes);
-          dispatch_pipeline(cmdlist, single_shared_pipeline, bindings.get(), 1,
-                            1, 1, scope_name(single_shared_scope));
+          dispatch_pipeline(cmdlist, single_shared_pipeline,
+                            single_shared_bindings, 1, 1, 1,
+                            scope_name(single_shared_scope));
           cmdlist->buffer_barrier(bins_alloc);
           return;
         }
         if (use_private) {
           if (!count_private_shared_pipeline) {
-            auto bindings = op_device->create_resource_set_unique();
-            bindings->rw_buffer(0, partial_alloc.get_ptr(0), partial_bytes);
-            dispatch_pipeline(cmdlist, clear_pipeline, bindings.get(),
+            dispatch_pipeline(cmdlist, clear_pipeline, clear_bindings,
                               partial_groups, 1, 1, scope_name(clear_scope));
             cmdlist->buffer_barrier(partial_alloc);
           }
           {
-            auto bindings = op_device->create_resource_set_unique();
-            bindings->rw_buffer(0, values_alloc.get_ptr(values_ptr.offset),
-                                value_bytes);
-            bindings->rw_buffer(1, bins_alloc.get_ptr(bins_ptr.offset),
-                                bin_bytes);
-            bindings->rw_buffer(2, partial_alloc.get_ptr(0), partial_bytes);
             Pipeline *count_pipeline = count_private_shared_pipeline
                                            ? count_private_shared_pipeline
                                            : count_private_pipeline;
@@ -8761,43 +9774,43 @@ std::size_t Program::vulkan_histogram_dense_field(SNode *values,
                 count_private_shared_pipeline
                     ? static_cast<uint32_t>(num_chunks)
                     : value_groups;
-            dispatch_pipeline(cmdlist, count_pipeline, bindings.get(),
+            dispatch_pipeline(cmdlist, count_pipeline, count_private_bindings,
                               count_groups, 1, 1, scope_name(count_scope));
             cmdlist->buffer_barrier(partial_alloc);
           }
           {
-            auto bindings = op_device->create_resource_set_unique();
-            bindings->rw_buffer(0, partial_alloc.get_ptr(0), partial_bytes);
-            bindings->rw_buffer(1, bins_alloc.get_ptr(bins_ptr.offset),
-                                bin_bytes);
-            dispatch_pipeline(cmdlist, reduce_private_pipeline, bindings.get(),
-                              bin_groups, 1, 1,
+            dispatch_pipeline(cmdlist, reduce_private_pipeline,
+                              reduce_private_bindings, bin_groups, 1, 1,
                               scope_name(reduce_private_scope));
             cmdlist->buffer_barrier(bins_alloc);
           }
           return;
         }
         {
-          auto bindings = op_device->create_resource_set_unique();
-          bindings->rw_buffer(0, bins_alloc.get_ptr(bins_ptr.offset),
-                              bin_bytes);
-          dispatch_pipeline(cmdlist, clear_pipeline, bindings.get(), bin_groups,
+          dispatch_pipeline(cmdlist, clear_pipeline, clear_bindings, bin_groups,
                             1, 1, scope_name(clear_scope));
           cmdlist->buffer_barrier(bins_alloc);
         }
         if (value_groups > 0) {
-          auto bindings = op_device->create_resource_set_unique();
-          bindings->rw_buffer(0, values_alloc.get_ptr(values_ptr.offset),
-                              value_bytes);
-          bindings->rw_buffer(1, bins_alloc.get_ptr(bins_ptr.offset),
-                              bin_bytes);
-          dispatch_pipeline(cmdlist, count_direct_pipeline, bindings.get(),
-                            value_groups, 1, 1,
+          dispatch_pipeline(cmdlist, count_direct_pipeline,
+                            count_direct_bindings, value_groups, 1, 1,
                             scope_name(count_direct_scope));
           cmdlist->buffer_barrier(bins_alloc);
         }
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key = make_vulkan_histogram_command_key(
+      true, value_type, bin_type, use_single_shared, use_private,
+      count_private_shared_pipeline != nullptr, values_alloc, values_ptr.offset,
+      value_bytes, bins_alloc, bins_ptr.offset, bin_bytes, partial_alloc,
+      partial_bytes, value_groups, bin_groups, partial_groups, num_chunks,
+      clear_pipeline, count_direct_pipeline, count_private_pipeline,
+      count_private_shared_pipeline, reduce_private_pipeline,
+      single_shared_pipeline, single_shared_bindings, clear_bindings,
+      count_direct_bindings, count_private_bindings, reduce_private_bindings);
+  if (!cache.dense_field_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes, record_histogram)) {
+    enqueue_compute_op_lambda(record_histogram, {});
+  }
   return cache.cached_bytes;
 }
 
@@ -9001,7 +10014,7 @@ std::size_t Program::vulkan_gather_ndarray(Ndarray *src,
   cache.gather_replay.rw_buffer(bindings, 1, indices_alloc, 0,
                                 indices_bytes);
   cache.gather_replay.rw_buffer(bindings, 2, dst_alloc, 0, value_bytes);
-  enqueue_compute_op_lambda(
+  auto record_gather =
       [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, src_bytes,
        indices_bytes, value_bytes, groups,
        profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
@@ -9009,8 +10022,20 @@ std::size_t Program::vulkan_gather_ndarray(Ndarray *src,
                           profiler_scopes ? "vulkan_gather_u32_by_i32"
                                           : nullptr);
         cmdlist->buffer_barrier(dst_alloc.get_ptr(0), value_bytes);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(40);
+  command_key.push(static_cast<uint64_t>(item_bytes));
+  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, 0, value_bytes);
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.gather_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes, record_gather)) {
+    enqueue_compute_op_lambda(record_gather, {});
+  }
   return 0;
 }
 
@@ -9085,7 +10110,7 @@ std::size_t Program::vulkan_gather_strided_ndarray(
                                         dst_bytes);
   cache.gather_strided_replay.rw_buffer(bindings, 3, params_alloc, 0,
                                         params_bytes);
-  enqueue_compute_op_lambda(
+  auto record_gather_strided =
       [src_alloc, indices_alloc, dst_alloc, params_alloc, pipeline, bindings,
        src_bytes, indices_bytes, dst_bytes, groups, params,
        profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
@@ -9099,8 +10124,24 @@ std::size_t Program::vulkan_gather_strided_ndarray(
                               ? "vulkan_gather_strided_u32_by_i32"
                               : nullptr);
         cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(41);
+  command_key.push(static_cast<uint64_t>(item_bytes));
+  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
+  push_vulkan_command_key_range(command_key, params_alloc, 0, params_bytes);
+  command_key.push(groups);
+  for (uint32_t word : params) {
+    command_key.push(word);
+  }
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.gather_strided_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes, record_gather_strided)) {
+    enqueue_compute_op_lambda(record_gather_strided, {});
+  }
   return cache.cached_bytes;
 }
 
@@ -9167,7 +10208,7 @@ std::size_t Program::vulkan_gather_dense_field(SNode *src,
                                   indices_bytes);
     cache.gather_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
                                   dst_bytes);
-    enqueue_compute_op_lambda(
+    auto record_gather_dense =
         [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, src_ptr,
          dst_ptr, src_bytes, indices_bytes, dst_bytes, groups,
          profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
@@ -9177,8 +10218,24 @@ std::size_t Program::vulkan_gather_dense_field(SNode *src,
                                 : nullptr);
           cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
                                   dst_bytes);
-        },
-        {});
+        };
+    VulkanCommandReplayKey command_key;
+    command_key.push(42);
+    command_key.push(static_cast<uint64_t>(value_type));
+    push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
+                                  src_bytes);
+    push_vulkan_command_key_range(command_key, indices_alloc, 0,
+                                  indices_bytes);
+    push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
+                                  dst_bytes);
+    command_key.push(groups);
+    command_key.push_ptr(pipeline);
+    command_key.push_ptr(bindings);
+    if (!cache.gather_command_replay.submit_or_record(
+            this, device, command_key, profiler_scopes,
+            record_gather_dense)) {
+      enqueue_compute_op_lambda(record_gather_dense, {});
+    }
     return 0;
   }
   cache.ensure_indexed_copy_params();
@@ -9209,7 +10266,7 @@ std::size_t Program::vulkan_gather_dense_field(SNode *src,
                                         dst_bytes);
   cache.gather_strided_replay.rw_buffer(bindings, 3, params_alloc, 0,
                                         params_bytes);
-  enqueue_compute_op_lambda(
+  auto record_gather_dense_strided =
       [src_alloc, indices_alloc, dst_alloc, params_alloc, pipeline, bindings,
        src_bytes, indices_bytes, dst_bytes, groups, params,
        profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
@@ -9223,8 +10280,25 @@ std::size_t Program::vulkan_gather_dense_field(SNode *src,
                               ? "vulkan_gather_dense_field_u32_by_i32"
                               : nullptr);
         cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(43);
+  command_key.push(static_cast<uint64_t>(value_type));
+  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
+  push_vulkan_command_key_range(command_key, params_alloc, 0, params_bytes);
+  command_key.push(groups);
+  for (uint32_t word : params) {
+    command_key.push(word);
+  }
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.gather_strided_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_gather_dense_strided)) {
+    enqueue_compute_op_lambda(record_gather_dense_strided, {});
+  }
   return cache.cached_bytes;
 }
 
@@ -9285,7 +10359,7 @@ std::size_t Program::vulkan_gather_dense_field_indices_field(
                                 indices_bytes);
   cache.gather_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
                                 dst_bytes);
-  enqueue_compute_op_lambda(
+  auto record_gather_dense_indices_field =
       [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, dst_ptr,
        dst_bytes, groups, profiler_scopes](Device * /*op_device*/,
                                            CommandList *cmdlist) {
@@ -9295,8 +10369,24 @@ std::size_t Program::vulkan_gather_dense_field_indices_field(
                               : nullptr);
         cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
                                 dst_bytes);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(44);
+  command_key.push(static_cast<uint64_t>(value_type));
+  push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
+                                src_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, indices_ptr.offset,
+                                indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
+                                dst_bytes);
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.gather_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_gather_dense_indices_field)) {
+    enqueue_compute_op_lambda(record_gather_dense_indices_field, {});
+  }
   return 0;
 }
 
@@ -9353,7 +10443,7 @@ std::size_t Program::vulkan_scatter_ndarray(Ndarray *src,
   cache.scatter_replay.rw_buffer(bindings, 1, indices_alloc, 0,
                                  indices_bytes);
   cache.scatter_replay.rw_buffer(bindings, 2, dst_alloc, 0, dst_bytes);
-  enqueue_compute_op_lambda(
+  auto record_scatter =
       [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, value_bytes,
        indices_bytes, dst_bytes, groups,
        profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
@@ -9361,8 +10451,20 @@ std::size_t Program::vulkan_scatter_ndarray(Ndarray *src,
                           profiler_scopes ? "vulkan_scatter_u32_by_i32"
                                           : nullptr);
         cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(45);
+  command_key.push(static_cast<uint64_t>(item_bytes));
+  push_vulkan_command_key_range(command_key, src_alloc, 0, value_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.scatter_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes, record_scatter)) {
+    enqueue_compute_op_lambda(record_scatter, {});
+  }
   return 0;
 }
 
@@ -9439,7 +10541,7 @@ std::size_t Program::vulkan_scatter_strided_ndarray(
                                          dst_bytes);
   cache.scatter_strided_replay.rw_buffer(bindings, 3, params_alloc, 0,
                                          params_bytes);
-  enqueue_compute_op_lambda(
+  auto record_scatter_strided =
       [src_alloc, indices_alloc, dst_alloc, params_alloc, pipeline, bindings,
        src_bytes, indices_bytes, dst_bytes, groups, params,
        profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
@@ -9453,8 +10555,25 @@ std::size_t Program::vulkan_scatter_strided_ndarray(
                               ? "vulkan_scatter_strided_u32_by_i32"
                               : nullptr);
         cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(46);
+  command_key.push(static_cast<uint64_t>(item_bytes));
+  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
+  push_vulkan_command_key_range(command_key, params_alloc, 0, params_bytes);
+  command_key.push(groups);
+  for (uint32_t word : params) {
+    command_key.push(word);
+  }
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.scatter_strided_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_scatter_strided)) {
+    enqueue_compute_op_lambda(record_scatter_strided, {});
+  }
   return cache.cached_bytes;
 }
 
@@ -9524,7 +10643,7 @@ std::size_t Program::vulkan_scatter_dense_field(SNode *src,
                                    indices_bytes);
     cache.scatter_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
                                    dst_bytes);
-    enqueue_compute_op_lambda(
+    auto record_scatter_dense =
         [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, src_ptr,
          dst_ptr, src_bytes, indices_bytes, dst_bytes, groups,
          profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
@@ -9534,8 +10653,24 @@ std::size_t Program::vulkan_scatter_dense_field(SNode *src,
                                 : nullptr);
           cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
                                   dst_bytes);
-        },
-        {});
+        };
+    VulkanCommandReplayKey command_key;
+    command_key.push(47);
+    command_key.push(static_cast<uint64_t>(value_type));
+    push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
+                                  src_bytes);
+    push_vulkan_command_key_range(command_key, indices_alloc, 0,
+                                  indices_bytes);
+    push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
+                                  dst_bytes);
+    command_key.push(groups);
+    command_key.push_ptr(pipeline);
+    command_key.push_ptr(bindings);
+    if (!cache.scatter_command_replay.submit_or_record(
+            this, device, command_key, profiler_scopes,
+            record_scatter_dense)) {
+      enqueue_compute_op_lambda(record_scatter_dense, {});
+    }
     return 0;
   }
   cache.ensure_indexed_copy_params();
@@ -9566,7 +10701,7 @@ std::size_t Program::vulkan_scatter_dense_field(SNode *src,
                                          dst_bytes);
   cache.scatter_strided_replay.rw_buffer(bindings, 3, params_alloc, 0,
                                          params_bytes);
-  enqueue_compute_op_lambda(
+  auto record_scatter_dense_strided =
       [src_alloc, indices_alloc, dst_alloc, params_alloc, pipeline, bindings,
        src_bytes, indices_bytes, dst_bytes, groups, params,
        profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
@@ -9580,8 +10715,25 @@ std::size_t Program::vulkan_scatter_dense_field(SNode *src,
                               ? "vulkan_scatter_dense_field_u32_by_i32"
                               : nullptr);
         cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(48);
+  command_key.push(static_cast<uint64_t>(value_type));
+  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
+  push_vulkan_command_key_range(command_key, params_alloc, 0, params_bytes);
+  command_key.push(groups);
+  for (uint32_t word : params) {
+    command_key.push(word);
+  }
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.scatter_strided_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_scatter_dense_strided)) {
+    enqueue_compute_op_lambda(record_scatter_dense_strided, {});
+  }
   return cache.cached_bytes;
 }
 
@@ -9645,7 +10797,7 @@ std::size_t Program::vulkan_scatter_dense_field_indices_field(
                                  indices_bytes);
   cache.scatter_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
                                  dst_bytes);
-  enqueue_compute_op_lambda(
+  auto record_scatter_dense_indices_field =
       [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, dst_ptr,
        dst_bytes, groups, profiler_scopes](Device * /*op_device*/,
                                            CommandList *cmdlist) {
@@ -9655,8 +10807,24 @@ std::size_t Program::vulkan_scatter_dense_field_indices_field(
                               : nullptr);
         cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
                                 dst_bytes);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(49);
+  command_key.push(static_cast<uint64_t>(value_type));
+  push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
+                                src_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, indices_ptr.offset,
+                                indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
+                                dst_bytes);
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.scatter_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_scatter_dense_indices_field)) {
+    enqueue_compute_op_lambda(record_scatter_dense_indices_field, {});
+  }
   return 0;
 }
 
@@ -9717,7 +10885,7 @@ std::size_t Program::vulkan_scatter_add_ndarray(Ndarray *src,
                                                  indices_bytes);
   cache.scatter_add_replay[value_type].rw_buffer(bindings, 2, dst_alloc, 0,
                                                  dst_bytes);
-  enqueue_compute_op_lambda(
+  auto record_scatter_add =
       [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, value_bytes,
        indices_bytes, dst_bytes, groups, value_type,
        profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
@@ -9736,8 +10904,20 @@ std::size_t Program::vulkan_scatter_add_ndarray(Ndarray *src,
                                      : "vulkan_scatter_add_i32_by_i32")
                               : nullptr);
         cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(50);
+  command_key.push(static_cast<uint64_t>(value_type));
+  push_vulkan_command_key_range(command_key, src_alloc, 0, value_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.scatter_add_command_replay[value_type].submit_or_record(
+          this, device, command_key, profiler_scopes, record_scatter_add)) {
+    enqueue_compute_op_lambda(record_scatter_add, {});
+  }
   return 0;
 }
 
@@ -9820,7 +11000,7 @@ std::size_t Program::vulkan_scatter_add_strided_ndarray(
       bindings, 2, dst_alloc, 0, dst_bytes);
   cache.scatter_add_strided_replay[value_type].rw_buffer(
       bindings, 3, params_alloc, 0, params_bytes);
-  enqueue_compute_op_lambda(
+  auto record_scatter_add_strided =
       [src_alloc, indices_alloc, dst_alloc, params_alloc, pipeline, bindings,
        src_bytes, indices_bytes, dst_bytes, params_bytes, param_words, groups,
        value_type, profiler_scopes](Device * /*op_device*/,
@@ -9845,8 +11025,25 @@ std::size_t Program::vulkan_scatter_add_strided_ndarray(
                                      : "vulkan_scatter_add_i32_by_i32_strided")
                               : nullptr);
         cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(51);
+  command_key.push(static_cast<uint64_t>(value_type));
+  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
+  push_vulkan_command_key_range(command_key, params_alloc, 0, params_bytes);
+  command_key.push(groups);
+  for (uint32_t word : param_words) {
+    command_key.push(word);
+  }
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.scatter_add_strided_command_replay[value_type].submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_scatter_add_strided)) {
+    enqueue_compute_op_lambda(record_scatter_add_strided, {});
+  }
   return cache.cached_bytes;
 }
 
@@ -9935,7 +11132,7 @@ std::size_t Program::vulkan_scatter_add_dense_field(SNode *src,
         bindings, 1, indices_alloc, 0, indices_bytes);
     cache.scatter_add_replay[value_type].rw_buffer(
         bindings, 2, dst_alloc, dst_ptr.offset, dst_bytes);
-    enqueue_compute_op_lambda(
+    auto record_scatter_add_dense =
         [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, src_ptr,
          dst_ptr, value_bytes, indices_bytes, dst_bytes, groups, value_type,
          profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
@@ -9955,8 +11152,24 @@ std::size_t Program::vulkan_scatter_add_dense_field(SNode *src,
                                 : nullptr);
           cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
                                   dst_bytes);
-        },
-        {});
+        };
+    VulkanCommandReplayKey command_key;
+    command_key.push(52);
+    command_key.push(static_cast<uint64_t>(value_type));
+    push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
+                                  value_bytes);
+    push_vulkan_command_key_range(command_key, indices_alloc, 0,
+                                  indices_bytes);
+    push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
+                                  dst_bytes);
+    command_key.push(groups);
+    command_key.push_ptr(pipeline);
+    command_key.push_ptr(bindings);
+    if (!cache.scatter_add_command_replay[value_type].submit_or_record(
+            this, device, command_key, profiler_scopes,
+            record_scatter_add_dense)) {
+      enqueue_compute_op_lambda(record_scatter_add_dense, {});
+    }
     return 0;
   }
 
@@ -9992,7 +11205,7 @@ std::size_t Program::vulkan_scatter_add_dense_field(SNode *src,
       bindings, 2, dst_alloc, 0, dst_bytes);
   cache.scatter_add_strided_replay[value_type].rw_buffer(
       bindings, 3, params_alloc, 0, params_bytes);
-  enqueue_compute_op_lambda(
+  auto record_scatter_add_dense_strided =
       [src_alloc, indices_alloc, dst_alloc, params_alloc, pipeline, bindings,
        src_bytes, indices_bytes, dst_bytes, params_bytes, param_words, groups,
        value_type, profiler_scopes](Device * /*op_device*/,
@@ -10017,8 +11230,25 @@ std::size_t Program::vulkan_scatter_add_dense_field(SNode *src,
                                      : "vulkan_scatter_add_dense_i32_by_i32")
                               : nullptr);
         cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(53);
+  command_key.push(static_cast<uint64_t>(value_type));
+  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
+  push_vulkan_command_key_range(command_key, params_alloc, 0, params_bytes);
+  command_key.push(groups);
+  for (uint32_t word : param_words) {
+    command_key.push(word);
+  }
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.scatter_add_strided_command_replay[value_type].submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_scatter_add_dense_strided)) {
+    enqueue_compute_op_lambda(record_scatter_add_dense_strided, {});
+  }
   return cache.cached_bytes;
 }
 
@@ -10086,7 +11316,7 @@ std::size_t Program::vulkan_scatter_add_dense_field_indices_field(
       bindings, 1, indices_alloc, indices_ptr.offset, indices_bytes);
   cache.scatter_add_replay[value_type].rw_buffer(
       bindings, 2, dst_alloc, dst_ptr.offset, dst_bytes);
-  enqueue_compute_op_lambda(
+  auto record_scatter_add_dense_indices_field =
       [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, dst_ptr,
        dst_bytes, groups, value_type,
        profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
@@ -10106,8 +11336,24 @@ std::size_t Program::vulkan_scatter_add_dense_field_indices_field(
                               : nullptr);
         cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
                                 dst_bytes);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(54);
+  command_key.push(static_cast<uint64_t>(value_type));
+  push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
+                                value_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, indices_ptr.offset,
+                                indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
+                                dst_bytes);
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.scatter_add_command_replay[value_type].submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_scatter_add_dense_indices_field)) {
+    enqueue_compute_op_lambda(record_scatter_add_dense_indices_field, {});
+  }
   return 0;
 }
 
@@ -10225,14 +11471,17 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
   Pipeline *prefix_chunks_pipeline = nullptr;
   const int scatter_value_type =
       item_bytes == expected_value_size ? value_type : 7;
-  cache.prepare_bucket_builder_resource_sets(this, use_private,
-                                             scatter_value_type);
+  const DeviceAllocation partial_alloc = cache.partial;
   Pipeline *scatter_pipeline = nullptr;
   Pipeline *scatter_private_pipeline = nullptr;
   ShaderResourceSet *clear_bindings = nullptr;
   ShaderResourceSet *count_bindings = nullptr;
   ShaderResourceSet *count_private_bindings = nullptr;
-  ShaderResourceSet *prefix_bindings = cache.next_bucket_prefix_resource_set();
+  ShaderResourceSet *prefix_bindings =
+      cache
+          .bind_bucket_prefix_resource_set(this, offsets_alloc, 0, offset_bytes,
+                                           cursor_alloc, 0, cursor_bytes)
+          .bindings;
   ShaderResourceSet *prefix_chunks_bindings = nullptr;
   ShaderResourceSet *scatter_bindings = nullptr;
   ShaderResourceSet *scatter_private_bindings = nullptr;
@@ -10243,28 +11492,57 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
     prefix_chunks_pipeline = cache.bucket_prefix_chunks_i32_pipeline();
     scatter_private_pipeline =
         cache.bucket_scatter_private_pipeline(scatter_value_type);
-    count_private_bindings = cache.next_bucket_count_private_resource_set();
+    count_private_bindings =
+        cache
+            .bind_bucket_count_private_resource_set(
+                this, keys_alloc, 0, key_bytes, partial_alloc,
+                private_partial_bytes)
+            .bindings;
     prefix_chunks_bindings =
-        cache.next_bucket_prefix_chunks_resource_set();
+        cache
+            .bind_bucket_prefix_chunks_resource_set(
+                this, partial_alloc, private_partial_bytes, offsets_alloc, 0,
+                offset_bytes)
+            .bindings;
     scatter_private_bindings =
-        cache.next_bucket_scatter_private_resource_set(scatter_value_type);
+        cache
+            .bind_bucket_scatter_private_resource_set(
+                this, scatter_value_type, keys_alloc, 0, key_bytes,
+                values_alloc, 0, value_bytes, partial_alloc,
+                private_partial_bytes, offsets_alloc, 0, offset_bytes,
+                output_alloc, 0)
+            .bindings;
     scatter_private_scope =
         cache.bucket_scatter_private_scope(scatter_value_type);
   } else {
     clear_pipeline = cache.bucket_clear_i32_pipeline();
     count_pipeline = cache.bucket_count_i32_pipeline();
     scatter_pipeline = cache.bucket_scatter_pipeline(scatter_value_type);
-    clear_bindings = cache.next_bucket_clear_resource_set();
-    count_bindings = cache.next_bucket_count_resource_set();
-    scatter_bindings = cache.next_bucket_scatter_resource_set(scatter_value_type);
+    clear_bindings =
+        cache
+            .bind_bucket_clear_resource_set(this, offsets_alloc, 0,
+                                            offset_bytes, cursor_alloc, 0,
+                                            cursor_bytes)
+            .bindings;
+    count_bindings =
+        cache
+            .bind_bucket_count_resource_set(this, keys_alloc, 0, key_bytes,
+                                            offsets_alloc, 0, offset_bytes)
+            .bindings;
+    scatter_bindings =
+        cache
+            .bind_bucket_scatter_resource_set(
+                this, scatter_value_type, keys_alloc, 0, key_bytes,
+                values_alloc, 0, value_bytes, cursor_alloc, 0, cursor_bytes,
+                output_alloc, 0)
+            .bindings;
     scatter_scope = cache.bucket_scatter_scope(scatter_value_type);
   }
-  const DeviceAllocation partial_alloc = cache.partial;
   const uint32_t private_groups = static_cast<uint32_t>(private_chunks);
   const uint32_t prefix_chunk_groups =
       static_cast<uint32_t>((num_bins + kBlockSize - 1) / kBlockSize);
   const bool profiler_scopes = profiler != nullptr;
-  enqueue_compute_op_lambda(
+  auto record_bucket =
       [keys_alloc, values_alloc, offsets_alloc, output_alloc, cursor_alloc,
        partial_alloc, key_bytes, value_bytes, offset_bytes, cursor_bytes,
        private_partial_bytes, item_groups, offset_groups, use_private,
@@ -10276,10 +11554,6 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
        scatter_scope, scatter_private_scope, profiler_scopes](
           Device * /*op_device*/, CommandList *cmdlist) {
         if (use_private) {
-          count_private_bindings->rw_buffer(0, keys_alloc.get_ptr(0),
-                                            key_bytes);
-          count_private_bindings->rw_buffer(1, partial_alloc.get_ptr(0),
-                                            private_partial_bytes);
           dispatch_pipeline(
               cmdlist, count_private_pipeline, count_private_bindings,
               private_groups, 1, 1,
@@ -10287,10 +11561,6 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
                               : nullptr);
           cmdlist->buffer_barrier(partial_alloc);
 
-          prefix_chunks_bindings->rw_buffer(0, partial_alloc.get_ptr(0),
-                                            private_partial_bytes);
-          prefix_chunks_bindings->rw_buffer(1, offsets_alloc.get_ptr(0),
-                                            offset_bytes);
           dispatch_pipeline(cmdlist, prefix_chunks_pipeline,
                             prefix_chunks_bindings, prefix_chunk_groups, 1, 1,
                             profiler_scopes
@@ -10299,24 +11569,12 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
           cmdlist->buffer_barrier(partial_alloc);
           cmdlist->buffer_barrier(offsets_alloc);
 
-          prefix_bindings->rw_buffer(0, offsets_alloc.get_ptr(0), offset_bytes);
-          prefix_bindings->rw_buffer(1, cursor_alloc.get_ptr(0), cursor_bytes);
           dispatch_pipeline(cmdlist, prefix_pipeline, prefix_bindings, 1, 1, 1,
                             profiler_scopes ? "vulkan_bucket_prefix_i32"
                                             : nullptr);
           cmdlist->buffer_barrier(offsets_alloc);
           cmdlist->buffer_barrier(cursor_alloc);
 
-          scatter_private_bindings->rw_buffer(0, keys_alloc.get_ptr(0),
-                                              key_bytes);
-          scatter_private_bindings->rw_buffer(1, values_alloc.get_ptr(0),
-                                              value_bytes);
-          scatter_private_bindings->rw_buffer(2, partial_alloc.get_ptr(0),
-                                              private_partial_bytes);
-          scatter_private_bindings->rw_buffer(3, offsets_alloc.get_ptr(0),
-                                              offset_bytes);
-          scatter_private_bindings->rw_buffer(4, output_alloc.get_ptr(0),
-                                              value_bytes);
           dispatch_pipeline(
               cmdlist, scatter_private_pipeline, scatter_private_bindings,
               private_groups, 1, 1,
@@ -10325,8 +11583,6 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
           return;
         }
 
-        clear_bindings->rw_buffer(0, offsets_alloc.get_ptr(0), offset_bytes);
-        clear_bindings->rw_buffer(1, cursor_alloc.get_ptr(0), cursor_bytes);
         dispatch_pipeline(cmdlist, clear_pipeline, clear_bindings,
                           offset_groups, 1, 1,
                           profiler_scopes ? "vulkan_bucket_clear_i32"
@@ -10335,8 +11591,6 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
         cmdlist->buffer_barrier(cursor_alloc);
 
         if (item_groups > 0) {
-          count_bindings->rw_buffer(0, keys_alloc.get_ptr(0), key_bytes);
-          count_bindings->rw_buffer(1, offsets_alloc.get_ptr(0), offset_bytes);
           dispatch_pipeline(cmdlist, count_pipeline, count_bindings,
                             item_groups, 1, 1,
                             profiler_scopes ? "vulkan_bucket_count_i32"
@@ -10344,8 +11598,6 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
           cmdlist->buffer_barrier(offsets_alloc);
         }
 
-        prefix_bindings->rw_buffer(0, offsets_alloc.get_ptr(0), offset_bytes);
-        prefix_bindings->rw_buffer(1, cursor_alloc.get_ptr(0), cursor_bytes);
         dispatch_pipeline(cmdlist, prefix_pipeline, prefix_bindings, 1, 1, 1,
                           profiler_scopes ? "vulkan_bucket_prefix_i32"
                                           : nullptr);
@@ -10353,17 +11605,56 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
         cmdlist->buffer_barrier(cursor_alloc);
 
         if (item_groups > 0) {
-          scatter_bindings->rw_buffer(0, keys_alloc.get_ptr(0), key_bytes);
-          scatter_bindings->rw_buffer(1, values_alloc.get_ptr(0), value_bytes);
-          scatter_bindings->rw_buffer(2, cursor_alloc.get_ptr(0), cursor_bytes);
-          scatter_bindings->rw_buffer(3, output_alloc.get_ptr(0), value_bytes);
           dispatch_pipeline(cmdlist, scatter_pipeline, scatter_bindings,
                             item_groups, 1, 1,
                             profiler_scopes ? scatter_scope : nullptr);
           cmdlist->buffer_barrier(output_alloc);
         }
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(0);
+  command_key.push(static_cast<uint64_t>(value_type));
+  command_key.push(static_cast<uint64_t>(scatter_value_type));
+  command_key.push(use_private ? 1 : 0);
+  command_key.push(keys_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(keys_alloc));
+  command_key.push(static_cast<uint64_t>(key_bytes));
+  command_key.push(values_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(values_alloc));
+  command_key.push(static_cast<uint64_t>(value_bytes));
+  command_key.push(offsets_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(offsets_alloc));
+  command_key.push(static_cast<uint64_t>(offset_bytes));
+  command_key.push(output_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(output_alloc));
+  command_key.push(cursor_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(cursor_alloc));
+  command_key.push(static_cast<uint64_t>(cursor_bytes));
+  command_key.push(partial_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(partial_alloc));
+  command_key.push(static_cast<uint64_t>(private_partial_bytes));
+  command_key.push(item_groups);
+  command_key.push(offset_groups);
+  command_key.push(private_groups);
+  command_key.push(prefix_chunk_groups);
+  command_key.push_ptr(clear_pipeline);
+  command_key.push_ptr(count_pipeline);
+  command_key.push_ptr(count_private_pipeline);
+  command_key.push_ptr(prefix_pipeline);
+  command_key.push_ptr(prefix_chunks_pipeline);
+  command_key.push_ptr(scatter_pipeline);
+  command_key.push_ptr(scatter_private_pipeline);
+  command_key.push_ptr(clear_bindings);
+  command_key.push_ptr(count_bindings);
+  command_key.push_ptr(count_private_bindings);
+  command_key.push_ptr(prefix_bindings);
+  command_key.push_ptr(prefix_chunks_bindings);
+  command_key.push_ptr(scatter_bindings);
+  command_key.push_ptr(scatter_private_bindings);
+  if (!cache.bucket_ndarray_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes, record_bucket)) {
+    enqueue_compute_op_lambda(record_bucket, {});
+  }
   return use_private ? cache.cached_bytes : 0;
 }
 
@@ -10474,11 +11765,16 @@ std::size_t Program::vulkan_bucket_builder_dense_field(SNode *keys,
   Pipeline *prefix_chunks_pipeline = nullptr;
   Pipeline *scatter_pipeline = nullptr;
   Pipeline *scatter_private_pipeline = nullptr;
-  cache.prepare_bucket_builder_resource_sets(this, use_private, value_type);
+  const DeviceAllocation partial_alloc = cache.partial;
   ShaderResourceSet *clear_bindings = nullptr;
   ShaderResourceSet *count_bindings = nullptr;
   ShaderResourceSet *count_private_bindings = nullptr;
-  ShaderResourceSet *prefix_bindings = cache.next_bucket_prefix_resource_set();
+  ShaderResourceSet *prefix_bindings =
+      cache
+          .bind_bucket_prefix_resource_set(this, offsets_alloc,
+                                           offsets_ptr.offset, offset_bytes,
+                                           cursor_alloc, 0, cursor_bytes)
+          .bindings;
   ShaderResourceSet *prefix_chunks_bindings = nullptr;
   ShaderResourceSet *scatter_bindings = nullptr;
   ShaderResourceSet *scatter_private_bindings = nullptr;
@@ -10489,27 +11785,57 @@ std::size_t Program::vulkan_bucket_builder_dense_field(SNode *keys,
     prefix_chunks_pipeline = cache.bucket_prefix_chunks_i32_pipeline();
     scatter_private_pipeline =
         cache.bucket_scatter_private_pipeline(value_type);
-    count_private_bindings = cache.next_bucket_count_private_resource_set();
+    count_private_bindings =
+        cache
+            .bind_bucket_count_private_resource_set(
+                this, keys_alloc, keys_ptr.offset, key_bytes, partial_alloc,
+                private_partial_bytes)
+            .bindings;
     prefix_chunks_bindings =
-        cache.next_bucket_prefix_chunks_resource_set();
+        cache
+            .bind_bucket_prefix_chunks_resource_set(
+                this, partial_alloc, private_partial_bytes, offsets_alloc,
+                offsets_ptr.offset, offset_bytes)
+            .bindings;
     scatter_private_bindings =
-        cache.next_bucket_scatter_private_resource_set(value_type);
+        cache
+            .bind_bucket_scatter_private_resource_set(
+                this, value_type, keys_alloc, keys_ptr.offset, key_bytes,
+                values_alloc, values_ptr.offset, value_bytes, partial_alloc,
+                private_partial_bytes, offsets_alloc, offsets_ptr.offset,
+                offset_bytes, output_alloc, output_ptr.offset)
+            .bindings;
     scatter_private_scope = cache.bucket_scatter_private_scope(value_type);
   } else {
     clear_pipeline = cache.bucket_clear_i32_pipeline();
     count_pipeline = cache.bucket_count_i32_pipeline();
     scatter_pipeline = cache.bucket_scatter_pipeline(value_type);
-    clear_bindings = cache.next_bucket_clear_resource_set();
-    count_bindings = cache.next_bucket_count_resource_set();
-    scatter_bindings = cache.next_bucket_scatter_resource_set(value_type);
+    clear_bindings =
+        cache
+            .bind_bucket_clear_resource_set(this, offsets_alloc,
+                                            offsets_ptr.offset, offset_bytes,
+                                            cursor_alloc, 0, cursor_bytes)
+            .bindings;
+    count_bindings =
+        cache
+            .bind_bucket_count_resource_set(
+                this, keys_alloc, keys_ptr.offset, key_bytes, offsets_alloc,
+                offsets_ptr.offset, offset_bytes)
+            .bindings;
+    scatter_bindings =
+        cache
+            .bind_bucket_scatter_resource_set(
+                this, value_type, keys_alloc, keys_ptr.offset, key_bytes,
+                values_alloc, values_ptr.offset, value_bytes, cursor_alloc, 0,
+                cursor_bytes, output_alloc, output_ptr.offset)
+            .bindings;
     scatter_scope = cache.bucket_scatter_scope(value_type);
   }
-  const DeviceAllocation partial_alloc = cache.partial;
   const uint32_t private_groups = static_cast<uint32_t>(private_chunks);
   const uint32_t prefix_chunk_groups =
       static_cast<uint32_t>((num_bins + kBlockSize - 1) / kBlockSize);
   const bool profiler_scopes = profiler != nullptr;
-  enqueue_compute_op_lambda(
+  auto record_bucket =
       [keys_alloc, values_alloc, offsets_alloc, output_alloc, cursor_alloc,
        partial_alloc, key_bytes, value_bytes, offset_bytes, cursor_bytes,
        private_partial_bytes, item_groups, offset_groups, use_private,
@@ -10522,10 +11848,6 @@ std::size_t Program::vulkan_bucket_builder_dense_field(SNode *keys,
        output_ptr, profiler_scopes](Device * /*op_device*/,
                                     CommandList *cmdlist) {
         if (use_private) {
-          count_private_bindings->rw_buffer(0, keys_alloc.get_ptr(keys_ptr.offset),
-                                            key_bytes);
-          count_private_bindings->rw_buffer(1, partial_alloc.get_ptr(0),
-                                            private_partial_bytes);
           dispatch_pipeline(
               cmdlist, count_private_pipeline, count_private_bindings,
               private_groups, 1, 1,
@@ -10533,10 +11855,6 @@ std::size_t Program::vulkan_bucket_builder_dense_field(SNode *keys,
                               : nullptr);
           cmdlist->buffer_barrier(partial_alloc);
 
-          prefix_chunks_bindings->rw_buffer(0, partial_alloc.get_ptr(0),
-                                            private_partial_bytes);
-          prefix_chunks_bindings->rw_buffer(1, offsets_alloc.get_ptr(offsets_ptr.offset),
-                                            offset_bytes);
           dispatch_pipeline(cmdlist, prefix_chunks_pipeline,
                             prefix_chunks_bindings, prefix_chunk_groups, 1, 1,
                             profiler_scopes
@@ -10545,28 +11863,12 @@ std::size_t Program::vulkan_bucket_builder_dense_field(SNode *keys,
           cmdlist->buffer_barrier(partial_alloc);
           cmdlist->buffer_barrier(offsets_alloc);
 
-          prefix_bindings->rw_buffer(0, offsets_alloc.get_ptr(offsets_ptr.offset),
-                                     offset_bytes);
-          prefix_bindings->rw_buffer(1, cursor_alloc.get_ptr(0), cursor_bytes);
           dispatch_pipeline(cmdlist, prefix_pipeline, prefix_bindings, 1, 1, 1,
                             profiler_scopes ? "vulkan_bucket_prefix_i32"
                                             : nullptr);
           cmdlist->buffer_barrier(offsets_alloc);
           cmdlist->buffer_barrier(cursor_alloc);
 
-          scatter_private_bindings->rw_buffer(0, keys_alloc.get_ptr(keys_ptr.offset),
-                                              key_bytes);
-          scatter_private_bindings->rw_buffer(1,
-                                              values_alloc.get_ptr(values_ptr.offset),
-                                              value_bytes);
-          scatter_private_bindings->rw_buffer(2, partial_alloc.get_ptr(0),
-                                              private_partial_bytes);
-          scatter_private_bindings->rw_buffer(3,
-                                              offsets_alloc.get_ptr(offsets_ptr.offset),
-                                              offset_bytes);
-          scatter_private_bindings->rw_buffer(4,
-                                              output_alloc.get_ptr(output_ptr.offset),
-                                              value_bytes);
           dispatch_pipeline(
               cmdlist, scatter_private_pipeline, scatter_private_bindings,
               private_groups, 1, 1,
@@ -10575,9 +11877,6 @@ std::size_t Program::vulkan_bucket_builder_dense_field(SNode *keys,
           return;
         }
 
-        clear_bindings->rw_buffer(0, offsets_alloc.get_ptr(offsets_ptr.offset),
-                                  offset_bytes);
-        clear_bindings->rw_buffer(1, cursor_alloc.get_ptr(0), cursor_bytes);
         dispatch_pipeline(cmdlist, clear_pipeline, clear_bindings,
                           offset_groups, 1, 1,
                           profiler_scopes ? "vulkan_bucket_clear_i32"
@@ -10586,10 +11885,6 @@ std::size_t Program::vulkan_bucket_builder_dense_field(SNode *keys,
         cmdlist->buffer_barrier(cursor_alloc);
 
         if (item_groups > 0) {
-          count_bindings->rw_buffer(0, keys_alloc.get_ptr(keys_ptr.offset),
-                                    key_bytes);
-          count_bindings->rw_buffer(1, offsets_alloc.get_ptr(offsets_ptr.offset),
-                                    offset_bytes);
           dispatch_pipeline(cmdlist, count_pipeline, count_bindings,
                             item_groups, 1, 1,
                             profiler_scopes ? "vulkan_bucket_count_i32"
@@ -10597,9 +11892,6 @@ std::size_t Program::vulkan_bucket_builder_dense_field(SNode *keys,
           cmdlist->buffer_barrier(offsets_alloc);
         }
 
-        prefix_bindings->rw_buffer(0, offsets_alloc.get_ptr(offsets_ptr.offset),
-                                   offset_bytes);
-        prefix_bindings->rw_buffer(1, cursor_alloc.get_ptr(0), cursor_bytes);
         dispatch_pipeline(cmdlist, prefix_pipeline, prefix_bindings, 1, 1, 1,
                           profiler_scopes ? "vulkan_bucket_prefix_i32"
                                           : nullptr);
@@ -10607,20 +11899,59 @@ std::size_t Program::vulkan_bucket_builder_dense_field(SNode *keys,
         cmdlist->buffer_barrier(cursor_alloc);
 
         if (item_groups > 0) {
-          scatter_bindings->rw_buffer(0, keys_alloc.get_ptr(keys_ptr.offset),
-                                      key_bytes);
-          scatter_bindings->rw_buffer(1, values_alloc.get_ptr(values_ptr.offset),
-                                      value_bytes);
-          scatter_bindings->rw_buffer(2, cursor_alloc.get_ptr(0), cursor_bytes);
-          scatter_bindings->rw_buffer(3, output_alloc.get_ptr(output_ptr.offset),
-                                      value_bytes);
           dispatch_pipeline(cmdlist, scatter_pipeline, scatter_bindings,
                             item_groups, 1, 1,
                             profiler_scopes ? scatter_scope : nullptr);
           cmdlist->buffer_barrier(output_alloc);
         }
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(1);
+  command_key.push(static_cast<uint64_t>(value_type));
+  command_key.push(use_private ? 1 : 0);
+  command_key.push(keys_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(keys_alloc));
+  command_key.push(keys_ptr.offset);
+  command_key.push(static_cast<uint64_t>(key_bytes));
+  command_key.push(values_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(values_alloc));
+  command_key.push(values_ptr.offset);
+  command_key.push(static_cast<uint64_t>(value_bytes));
+  command_key.push(offsets_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(offsets_alloc));
+  command_key.push(offsets_ptr.offset);
+  command_key.push(static_cast<uint64_t>(offset_bytes));
+  command_key.push(output_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(output_alloc));
+  command_key.push(output_ptr.offset);
+  command_key.push(cursor_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(cursor_alloc));
+  command_key.push(static_cast<uint64_t>(cursor_bytes));
+  command_key.push(partial_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(partial_alloc));
+  command_key.push(static_cast<uint64_t>(private_partial_bytes));
+  command_key.push(item_groups);
+  command_key.push(offset_groups);
+  command_key.push(private_groups);
+  command_key.push(prefix_chunk_groups);
+  command_key.push_ptr(clear_pipeline);
+  command_key.push_ptr(count_pipeline);
+  command_key.push_ptr(count_private_pipeline);
+  command_key.push_ptr(prefix_pipeline);
+  command_key.push_ptr(prefix_chunks_pipeline);
+  command_key.push_ptr(scatter_pipeline);
+  command_key.push_ptr(scatter_private_pipeline);
+  command_key.push_ptr(clear_bindings);
+  command_key.push_ptr(count_bindings);
+  command_key.push_ptr(count_private_bindings);
+  command_key.push_ptr(prefix_bindings);
+  command_key.push_ptr(prefix_chunks_bindings);
+  command_key.push_ptr(scatter_bindings);
+  command_key.push_ptr(scatter_private_bindings);
+  if (!cache.bucket_dense_field_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes, record_bucket)) {
+    enqueue_compute_op_lambda(record_bucket, {});
+  }
   return use_private ? cache.cached_bytes : 0;
 }
 
@@ -10696,24 +12027,44 @@ std::size_t Program::vulkan_grouped_reduce_ndarray(Ndarray *keys,
   const size_t output_bytes = num_groups * value_size;
   Pipeline *pipeline = cache.grouped_reduce_sum_pipeline(value_type);
   ShaderResourceSet *bindings =
-      cache.grouped_reduce_sum_resource_set(value_type);
+      cache
+          .bind_grouped_reduce_sum_resource_set(
+              this, value_type, offsets_alloc, offset_bytes, scratch_alloc,
+              scratch_bytes, output_alloc, output_bytes)
+          .bindings;
   const char *reduce_scope = cache.grouped_reduce_sum_scope(value_type);
   TI_ERROR_IF(!pipeline,
               "Vulkan native grouped reduce could not find a sum pipeline.");
   const uint32_t groups = static_cast<uint32_t>(num_groups);
   const bool profiler_scopes = profiler != nullptr;
-  enqueue_compute_op_lambda(
+  auto record_grouped_reduce_sum =
       [offsets_alloc, scratch_alloc, output_alloc, offset_bytes, scratch_bytes,
        output_bytes, pipeline, bindings, groups, reduce_scope,
        profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
-        bindings->rw_buffer(0, offsets_alloc.get_ptr(0), offset_bytes);
-        bindings->rw_buffer(1, scratch_alloc.get_ptr(0), scratch_bytes);
-        bindings->rw_buffer(2, output_alloc.get_ptr(0), output_bytes);
         dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
                           profiler_scopes ? reduce_scope : nullptr);
         cmdlist->buffer_barrier(output_alloc);
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(23);
+  command_key.push(static_cast<uint64_t>(value_type));
+  command_key.push(offsets_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(offsets_alloc));
+  command_key.push(static_cast<uint64_t>(offset_bytes));
+  command_key.push(scratch_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(scratch_alloc));
+  command_key.push(static_cast<uint64_t>(scratch_bytes));
+  command_key.push(output_alloc.alloc_id);
+  command_key.push(vulkan_allocation_generation(output_alloc));
+  command_key.push(static_cast<uint64_t>(output_bytes));
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.grouped_reduce_sum_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_grouped_reduce_sum)) {
+    enqueue_compute_op_lambda(record_grouped_reduce_sum, {});
+  }
   return bucket_workspace;
 }
 
@@ -10852,7 +12203,7 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
   if (front) {
     start = profile_time_us();
   }
-  program_impl_->enqueue_compute_op_lambda(
+  auto record_sort =
       [&, groups, n, key_type, signed_keys, wide_keys,
        use_index_sort, use_values, key_alloc, value_alloc, key_bytes,
        user_key_bytes, index_bytes, value_bytes, table_bytes, chunk_groups,
@@ -11453,8 +12804,62 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
           profile->lambda_total_us += profile_time_us() - lambda_start;
           g_vulkan_sort_cpu_profile.merge(*profile);
         }
-      },
-      {});
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(80);
+  command_key.push(static_cast<uint64_t>(n));
+  command_key.push(static_cast<uint64_t>(key_type));
+  command_key.push(static_cast<uint64_t>(value_type));
+  command_key.push(use_index_sort ? 1 : 0);
+  command_key.push(use_values ? 1 : 0);
+  command_key.push(signed_keys ? 1 : 0);
+  command_key.push(wide_keys ? 1 : 0);
+  command_key.push(raw64_values ? 1 : 0);
+  command_key.push(use_radix8 ? 1 : 0);
+  command_key.push(inline_chunk_offsets ? 1 : 0);
+  command_key.push(groups);
+  command_key.push(radix8_partitions);
+  command_key.push(chunk_groups);
+  command_key.push(static_cast<uint64_t>(key_bytes));
+  command_key.push(static_cast<uint64_t>(user_key_bytes));
+  command_key.push(static_cast<uint64_t>(index_bytes));
+  command_key.push(static_cast<uint64_t>(value_bytes));
+  command_key.push(static_cast<uint64_t>(table_bytes));
+  command_key.push(static_cast<uint64_t>(chunk_table_bytes));
+  command_key.push(static_cast<uint64_t>(radix8_global_hist_bytes));
+  command_key.push(static_cast<uint64_t>(radix8_partition_hist_bytes));
+  push_vulkan_command_key_range(command_key, key_alloc, 0, user_key_bytes);
+  push_vulkan_command_key_range(command_key, value_alloc, 0,
+                                use_values ? value_bytes : 0);
+  push_vulkan_command_key_range(command_key, cache.key_in, 0,
+                                cache.capacity * cache.key_bytes_per_item);
+  push_vulkan_command_key_range(command_key, cache.key_out, 0,
+                                cache.capacity * cache.key_bytes_per_item);
+  push_vulkan_command_key_range(command_key, cache.rank, 0,
+                                cache.capacity * sizeof(uint32_t));
+  push_vulkan_command_key_range(command_key, cache.hist, 0, table_bytes);
+  push_vulkan_command_key_range(command_key, cache.offsets, 0, table_bytes);
+  push_vulkan_command_key_range(command_key, cache.chunk_sums, 0,
+                                chunk_table_bytes);
+  push_vulkan_command_key_range(command_key, cache.chunk_offsets, 0,
+                                chunk_table_bytes);
+  push_vulkan_command_key_range(command_key, cache.radix8_global_hist, 0,
+                                radix8_global_hist_bytes);
+  push_vulkan_command_key_range(command_key, cache.radix8_partition_hist, 0,
+                                radix8_partition_hist_bytes);
+  push_vulkan_command_key_range(command_key, cache.value_in, 0,
+                                cache.capacity * cache.value_bytes_per_item);
+  push_vulkan_command_key_range(command_key, cache.value_out, 0,
+                                cache.capacity * cache.value_bytes_per_item);
+  push_vulkan_command_key_range(command_key, cache.key_high, 0,
+                                cache.capacity * sizeof(uint32_t));
+  const bool command_replay_profiler_disabled =
+      profiler_scopes || cpu_profile_enabled;
+  if (!cache.command_replay.submit_or_record(this, device, command_key,
+                                             command_replay_profiler_disabled,
+                                             record_sort)) {
+    program_impl_->enqueue_compute_op_lambda(record_sort, {});
+  }
   if (front) {
     front->enqueue_us += profile_time_us() - start;
   }

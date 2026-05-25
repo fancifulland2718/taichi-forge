@@ -107,6 +107,47 @@ def _run_sort_vector_payload_case(method):
     np.testing.assert_allclose(values.to_numpy(), values_np[order], rtol=1e-6, atol=1e-6)
 
 
+def _run_dense_field_sort_case(method):
+    keys_np = np.array([3, -1, 3, 0, -7, 2, -1, 3], dtype=np.int32)
+    values_np = (np.arange(keys_np.shape[0], dtype=np.int32) * 7) - 3
+    order = np.argsort(keys_np, kind="stable")
+    keys = ti.field(ti.i32, shape=keys_np.shape[0])
+    values = ti.field(ti.i32, shape=keys_np.shape[0])
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+    workspace = ti.algorithms.SortWorkspace(max_items=keys_np.shape[0])
+
+    ti.algorithms.sort(keys, values, method=method, workspace=workspace)
+
+    assert keys.to_numpy().tolist() == keys_np[order].tolist()
+    assert values.to_numpy().tolist() == values_np[order].tolist()
+    assert workspace.workspace_bytes_peak >= 0
+
+
+def _run_sort_by_key_native_ndarray_case(method):
+    primary_np = np.array([1, 0, 1, 0, 1, 0, 1, 0], dtype=np.int32)
+    secondary_np = np.array([2, 3, 1, 2, 1, 2, 0, 3], dtype=np.int32)
+    values_np = (np.arange(primary_np.shape[0], dtype=np.int32) * 11) - 5
+    order = np.lexsort((np.arange(primary_np.shape[0]), secondary_np, primary_np))
+    primary = ti.ndarray(ti.i32, shape=primary_np.shape[0])
+    secondary = ti.ndarray(ti.i32, shape=secondary_np.shape[0])
+    values = ti.ndarray(ti.i32, shape=values_np.shape[0])
+    primary.from_numpy(primary_np)
+    secondary.from_numpy(secondary_np)
+    values.from_numpy(values_np)
+    workspace = ti.algorithms.SortWorkspace(max_items=primary_np.shape[0])
+
+    ti.algorithms.sort_by_key(
+        [primary, secondary], values, method=method, workspace=workspace
+    )
+
+    assert primary.to_numpy().tolist() == primary_np[order].tolist()
+    assert secondary.to_numpy().tolist() == secondary_np[order].tolist()
+    assert values.to_numpy().tolist() == values_np[order].tolist()
+    assert workspace._order_apply_indexed_copy_workspace is not None
+    assert workspace._order_apply_transform_workspace is not None
+
+
 def _run_sort_struct_tensor_member_host_case(method, workspace=None):
     keys_np = np.array([3, -1, 3, 0, -7, 2, -1, 3], dtype=np.int32)
     order = np.argsort(keys_np, kind="stable")
@@ -148,7 +189,7 @@ def _run_sort_struct_tensor_member_host_case(method, workspace=None):
 
 
 @test_utils.test(arch=[ti.cpu])
-def test_sort_entrypoint_auto_uses_host_stable_fallback():
+def test_sort_entrypoint_auto_sorts_dense_field():
     keys = ti.field(ti.i32, 8)
     values = ti.field(ti.i32, 8)
 
@@ -163,6 +204,58 @@ def test_sort_entrypoint_auto_uses_host_stable_fallback():
 
     assert keys.to_numpy().tolist() == [1, 2, 3, 4, 5, 6, 7, 8]
     assert values.to_numpy().tolist() == [7, 6, 5, 4, 3, 2, 1, 0]
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_sort_cpu_native_dense_field_default_ready():
+    _run_dense_field_sort_case("cpu_native")
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_sort_auto_cpu_ndarray_uses_native_default():
+    keys_np = np.array([3, -1, 3, 0, -7, 2], dtype=np.int32)
+    values_np = np.arange(keys_np.shape[0], dtype=np.int32) * 3 - 1
+    order = np.argsort(keys_np, kind="stable")
+    keys = ti.ndarray(ti.i32, shape=keys_np.shape[0])
+    values = ti.ndarray(ti.i32, shape=values_np.shape[0])
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+    workspace = ti.algorithms.SortWorkspace(max_items=keys_np.shape[0])
+
+    ti.algorithms.sort(keys, values, workspace=workspace)
+
+    assert keys.to_numpy().tolist() == keys_np[order].tolist()
+    assert values.to_numpy().tolist() == values_np[order].tolist()
+    assert workspace.workspace_bytes_peak > 0
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_sort_auto_cpu_ndarray_descending_uses_native_default():
+    keys_np = np.array([2, 5, 2, -1, 5, 0], dtype=np.int32)
+    values_np = np.arange(keys_np.shape[0], dtype=np.int32)
+    keys = ti.ndarray(ti.i32, shape=keys_np.shape[0])
+    values = ti.ndarray(ti.i32, shape=values_np.shape[0])
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+    workspace = ti.algorithms.SortWorkspace(max_items=keys_np.shape[0])
+
+    ti.algorithms.sort(keys, values, descending=True, workspace=workspace)
+
+    assert keys.to_numpy().tolist() == [5, 5, 2, 2, 0, -1]
+    assert values.to_numpy().tolist() == [1, 4, 0, 2, 5, 3]
+    assert workspace.workspace_bytes_peak > 0
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_sort_cuda_cub_dense_field_default_ready():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cuda_cub_radix_sort_available")
+        and prog.cuda_cub_radix_sort_available()
+        and hasattr(prog, "cuda_cub_radix_sort_dense_field")
+    ):
+        pytest.skip("CUDA CUB dense field sort is unavailable in this runtime.")
+    _run_dense_field_sort_case("cuda_cub_native")
 
 
 @test_utils.test(arch=[ti.cpu])
@@ -266,6 +359,33 @@ def test_sort_by_key_multi_part_is_stable():
     assert primary.to_numpy().tolist() == [0, 0, 0, 1, 1, 1]
     assert secondary.to_numpy().tolist() == [2, 2, 3, 1, 1, 2]
     assert values.to_numpy().tolist() == [3, 5, 1, 2, 4, 0]
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_sort_by_key_multi_part_cpu_native_ndarray():
+    _run_sort_by_key_native_ndarray_case("cpu_native")
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_sort_by_key_multi_part_cuda_native_ndarray():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cuda_cub_radix_sort_available")
+        and prog.cuda_cub_radix_sort_available()
+    ):
+        pytest.skip("CUDA CUB radix sort is not available.")
+    _run_sort_by_key_native_ndarray_case("cuda_cub_native")
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_sort_by_key_multi_part_vulkan_native_ndarray():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_radix_sort_available")
+        and prog.vulkan_radix_sort_available()
+    ):
+        pytest.skip("Vulkan native radix sort is not available.")
+    _run_sort_by_key_native_ndarray_case("vulkan_native_radix_u32")
 
 
 @test_utils.test(arch=[ti.cpu])

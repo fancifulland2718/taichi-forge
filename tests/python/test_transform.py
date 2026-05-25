@@ -1,4 +1,4 @@
-import gc
+﻿import gc
 
 import numpy as np
 import pytest
@@ -135,7 +135,7 @@ def _run_dense_matrix_field_transform_case():
 
     np.testing.assert_array_equal(dst.to_numpy(), values * 3 + 5)
     assert len(workspace._native_transform_plans) == 2
-    assert workspace._native_transform_plan["method_name"] == expected_method
+    assert workspace._native_transform_plan.method_name == expected_method
     assert workspace.workspace_bytes_peak >= 0
     assert len(workspace._native_transform_plan_groups) == 1
 
@@ -331,7 +331,7 @@ def test_experimental_transform_cuda_device_dense_field_workspace_replay():
         )
         np.testing.assert_array_equal(dst.to_numpy(), data * 3 - 2)
     assert workspace._native_transform_plan is not None
-    assert workspace._native_transform_plan["backend"] == "cuda_device"
+    assert workspace._native_transform_plan.backend == "cuda_device"
 
 
 @test_utils.test(arch=[ti.cuda])
@@ -404,7 +404,7 @@ def test_experimental_transform_vulkan_native_ndarray_i32_f32():
     )
     expected_i = (data_i * np.int32(-2) + np.int32(9)).astype(np.int32)
     assert np.array_equal(dst_i.to_numpy(), expected_i)
-    assert workspace.workspace_bytes_peak == 0
+    assert workspace.workspace_bytes_peak == 8
 
     src_f = ti.ndarray(ti.f32, shape=n)
     dst_f = ti.ndarray(ti.f32, shape=n)
@@ -525,7 +525,7 @@ def test_experimental_transform_vulkan_native_dense_field_workspace_replay():
         )
         assert np.array_equal(dst.to_numpy(), data * np.int32(3) + np.int32(7))
     assert workspace._native_transform_plan is not None
-    assert workspace._native_transform_plan["backend"] == "vulkan_native"
+    assert workspace._native_transform_plan.backend == "vulkan_native"
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -704,7 +704,7 @@ def test_experimental_transform_cpu_native_dense_field_workspace_replay():
         )
         np.testing.assert_array_equal(dst.to_numpy(), data * 3 - 2)
     assert workspace._native_transform_plan is not None
-    assert workspace._native_transform_plan["backend"] == "cpu_native"
+    assert workspace._native_transform_plan.backend == "cpu_native"
 
 
 @test_utils.test(arch=[ti.cpu])
@@ -731,9 +731,9 @@ def test_experimental_transform_cpu_native_ndarray_workspace_replay():
             first_plan = workspace._native_transform_plan
         else:
             assert workspace._native_transform_plan is first_plan
-    assert workspace._native_transform_plan["backend"] == "cpu_native"
+    assert workspace._native_transform_plan.backend == "cpu_native"
     assert (
-        workspace._native_transform_plan["method_name"]
+        workspace._native_transform_plan.method_name
         == "cpu_transform_affine_ndarray"
     )
 
@@ -771,9 +771,9 @@ def test_experimental_transform_cpu_native_struct_member_workspace_replay():
             first_plan = workspace._native_transform_plan
         else:
             assert workspace._native_transform_plan is first_plan
-    assert workspace._native_transform_plan["backend"] == "cpu_native"
+    assert workspace._native_transform_plan.backend == "cpu_native"
     assert (
-        workspace._native_transform_plan["method_name"]
+        workspace._native_transform_plan.method_name
         == "cpu_transform_affine_strided_ndarray"
     )
 
@@ -916,9 +916,9 @@ def test_experimental_transform_cpu_native_struct_tensor_member_workspace_replay
             first_plan = workspace._native_transform_plan
         else:
             assert workspace._native_transform_plan is first_plan
-    assert workspace._native_transform_plan["backend"] == "cpu_native"
+    assert workspace._native_transform_plan.backend == "cpu_native"
     assert (
-        workspace._native_transform_plan["method_name"]
+        workspace._native_transform_plan.method_name
         == "cpu_transform_affine_packed_strided_ndarray"
     )
 

@@ -33,6 +33,13 @@ class GfxProgramImpl : public ProgramImpl {
     return runtime_->flush();
   }
 
+  StreamSemaphore flush_if_pending() {
+    if (!runtime_) {
+      return nullptr;
+    }
+    return runtime_->flush_if_pending();
+  }
+
   std::unique_ptr<AotModuleBuilder> make_aot_module_builder(
       const DeviceCapabilityConfig &caps) override;
 

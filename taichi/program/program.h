@@ -108,6 +108,7 @@ class TI_DLL_EXPORT Program {
   void synchronize();
 
   StreamSemaphore flush();
+  StreamSemaphore flush_if_pending();
 
   /**
    * Materializes the runtime.
@@ -607,6 +608,14 @@ class TI_DLL_EXPORT Program {
                                           int mode,
                                           int nan_policy);
 
+  std::size_t cuda_cub_radix_sort_dense_field(SNode *keys,
+                                              SNode *values,
+                                              int key_type,
+                                              int value_type,
+                                              std::size_t n,
+                                              int mode,
+                                              int nan_policy);
+
   void cuda_cub_radix_sort_clear_workspace();
 
   std::size_t cuda_cub_radix_sort_workspace_bytes() const;
@@ -619,6 +628,14 @@ class TI_DLL_EXPORT Program {
                                       int value_type,
                                       bool descending,
                                       int nan_policy);
+
+  std::size_t cpu_stable_sort_dense_field(SNode *keys,
+                                          SNode *values,
+                                          int key_type,
+                                          int value_type,
+                                          std::size_t n,
+                                          bool descending,
+                                          int nan_policy);
 
   bool cuda_cub_scan_available() const;
 

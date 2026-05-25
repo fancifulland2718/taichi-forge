@@ -886,6 +886,20 @@ void export_lang(py::module &m) {
            py::arg("keys"), py::arg("key_type"), py::arg("mode"),
            py::arg("nan_policy"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_radix_sort_dense_field",
+           &Program::cuda_cub_radix_sort_dense_field, py::arg("keys"),
+           py::arg("values"), py::arg("key_type"), py::arg("value_type"),
+           py::arg("n"), py::arg("mode"), py::arg("nan_policy"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_radix_sort_keys_dense_field",
+           [](Program *program, SNode *keys, int key_type, std::size_t n,
+              int mode, int nan_policy) {
+             return program->cuda_cub_radix_sort_dense_field(
+                 keys, nullptr, key_type, 0, n, mode, nan_policy);
+           },
+           py::arg("keys"), py::arg("key_type"), py::arg("n"),
+           py::arg("mode"), py::arg("nan_policy"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_stable_sort_available", &Program::cpu_stable_sort_available)
       .def("cpu_stable_sort_ndarray", &Program::cpu_stable_sort_ndarray,
            py::arg("keys"), py::arg("values"), py::arg("key_type"),
@@ -900,6 +914,20 @@ void export_lang(py::module &m) {
            },
            py::arg("keys"), py::arg("key_type"), py::arg("descending"),
            py::arg("nan_policy"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_stable_sort_dense_field",
+           &Program::cpu_stable_sort_dense_field, py::arg("keys"),
+           py::arg("values"), py::arg("key_type"), py::arg("value_type"),
+           py::arg("n"), py::arg("descending"), py::arg("nan_policy"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_stable_sort_keys_dense_field",
+           [](Program *program, SNode *keys, int key_type, std::size_t n,
+              bool descending, int nan_policy) {
+             return program->cpu_stable_sort_dense_field(
+                 keys, nullptr, key_type, 0, n, descending, nan_policy);
+           },
+           py::arg("keys"), py::arg("key_type"), py::arg("n"),
+           py::arg("descending"), py::arg("nan_policy"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_scan_available", &Program::cuda_cub_scan_available)
       .def("cuda_cub_scan_clear_workspace",
            &Program::cuda_cub_scan_clear_workspace,

@@ -2229,12 +2229,13 @@ StreamSemaphore VulkanStream::submit(
 
   std::vector<VkSemaphore> vk_wait_semaphores;
   std::vector<VkPipelineStageFlags> vk_wait_stages;
+  std::vector<vkapi::IDeviceObj> submit_refs;
 
   for (const StreamSemaphore &sema_ : wait_semaphores) {
     auto sema = std::static_pointer_cast<VulkanStreamSemaphoreObject>(sema_);
     vk_wait_semaphores.push_back(sema->vkapi_ref->semaphore);
     vk_wait_stages.push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
-    buffer->refs.push_back(sema->vkapi_ref);
+    submit_refs.push_back(sema->vkapi_ref);
   }
 
   submit_info.pWaitSemaphores = vk_wait_semaphores.data();
@@ -2242,7 +2243,7 @@ StreamSemaphore VulkanStream::submit(
   submit_info.pWaitDstStageMask = vk_wait_stages.data();
 
   auto semaphore = vkapi::create_semaphore(buffer->device, 0);
-  buffer->refs.push_back(semaphore);
+  submit_refs.push_back(semaphore);
 
   submit_info.signalSemaphoreCount = 1;
   submit_info.pSignalSemaphores = &semaphore->semaphore;
@@ -2251,7 +2252,8 @@ StreamSemaphore VulkanStream::submit(
 
   // Resource tracking, check previously submitted commands
   retire_completed_cmdbuffers();
-  submitted_cmdbuffers_.push_back(TrackedCmdbuf{fence, buffer});
+  submitted_cmdbuffers_.push_back(
+      TrackedCmdbuf{fence, buffer, std::move(submit_refs)});
 
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(
       vkQueueSubmit(queue_, /*submitCount=*/1, &submit_info,

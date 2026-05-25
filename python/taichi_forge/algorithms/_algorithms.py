@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 import numpy as np
 
@@ -322,6 +322,97 @@ def _is_matrix_field(arr):
     return isinstance(arr, MatrixField)
 
 
+class _ProgramCapabilityCache:
+    """Python-side pybind capability cache for one live Program.
+
+    The cache only memoizes Python attribute lookup and side-effect-free
+    availability predicates. It does not compile Taichi kernels, create backend
+    resources, or keep a strong reference to the Program object.
+    """
+
+    __slots__ = ("_has", "_available", "_value_available")
+
+    def __init__(self):
+        self._has = {}
+        self._available = {}
+        self._value_available = {}
+
+    def has(self, prog, name):
+        cached = self._has.get(name)
+        if cached is None:
+            cached = hasattr(prog, name)
+            self._has[name] = cached
+        return cached
+
+    def method(self, prog, name):
+        if not self.has(prog, name):
+            return None
+        return getattr(prog, name)
+
+    def available(self, prog, name):
+        if not self.has(prog, name):
+            return False
+        cached = self._available.get(name)
+        if cached is None:
+            cached = bool(getattr(prog, name)())
+            self._available[name] = cached
+        return cached
+
+    def value_available(self, prog, name, *args, default_if_missing=True):
+        if not self.has(prog, name):
+            return default_if_missing
+        key = (name, tuple(args))
+        cached = self._value_available.get(key)
+        if cached is None:
+            cached = bool(getattr(prog, name)(*args))
+            self._value_available[key] = cached
+        return cached
+
+
+_program_capability_caches = {}
+
+
+def _program_capabilities(prog=None):
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    runtime = impl.get_runtime()
+    if prog is None:
+        prog = runtime.prog
+    key = (id(runtime), id(prog), current_cfg().arch)
+    cache = _program_capability_caches.get(key)
+    if cache is None:
+        if len(_program_capability_caches) > 16:
+            _program_capability_caches.clear()
+        cache = _ProgramCapabilityCache()
+        _program_capability_caches[key] = cache
+    return cache
+
+
+def _prog_has(prog, name):
+    return _program_capabilities(prog).has(prog, name)
+
+
+def _prog_method(prog, name):
+    return _program_capabilities(prog).method(prog, name)
+
+
+def _prog_available(prog, name):
+    return _program_capabilities(prog).available(prog, name)
+
+
+def _prog_value_available(prog, name, *args, default_if_missing=True):
+    return _program_capabilities(prog).value_available(
+        prog, name, *args, default_if_missing=default_if_missing
+    )
+
+
+def _call_optional_prog_method(prog, name, *args):
+    method = _prog_method(prog, name)
+    if method is None:
+        return None
+    return method(*args)
+
+
 class _PrimitiveView:
     __slots__ = (
         "storage",
@@ -428,21 +519,6 @@ class _NativePrimitivePlan:
         self.n = int(n)
         self.object_keys = None
 
-    def __getitem__(self, key):
-        # Keep internal tests and older debugging snippets readable without
-        # exposing this as a public mapping API.
-        if key == "backend":
-            return self.backend
-        if key == "method_name":
-            return self.method_name
-        if key == "prog_id":
-            return self.prog_id
-        if key == "value_type":
-            return self.value_type
-        if key == "n":
-            return self.n
-        raise KeyError(key)
-
     def matches_request(self, backend, objects, semantic_key):
         if self.backend != backend or self.semantic_key != tuple(semantic_key):
             return False
@@ -483,7 +559,7 @@ class _NativePrimitivePlan:
         return id(prog) == self.prog_id
 
     def invoke(self, prog):
-        method = getattr(prog, self.method_name, None)
+        method = _prog_method(prog, self.method_name)
         if method is None:
             return None
         temp_bytes = method(*self.call_args)
@@ -545,7 +621,7 @@ class _NativePrimitivePlanGroup:
     def invoke(self, prog):
         temp_bytes_peak = 0
         for plan in self.plans:
-            method = getattr(prog, plan.method_name, None)
+            method = _prog_method(prog, plan.method_name)
             if method is None:
                 return None
             temp_bytes = method(*plan.call_args)
@@ -783,26 +859,14 @@ def _try_hot_native_plan_group(group, backend, objects, on_success, semantic_key
 def _native_plan_cache_lookup(plan_cache, backend, objects, semantic_key):
     if plan_cache is None:
         return None
-    if isinstance(plan_cache, dict):
-        key = _native_plan_cache_key(backend, objects, semantic_key)
-        return plan_cache.get(key)
-    for cached in plan_cache:
-        if cached.matches_request(backend, objects, semantic_key):
-            return cached
-    return None
+    key = _native_plan_cache_key(backend, objects, semantic_key)
+    return plan_cache.get(key)
 
 
 def _native_plan_cache_store(plan_cache, plan):
     if plan_cache is None:
         return
-    if isinstance(plan_cache, dict):
-        plan_cache[plan.cache_key()] = plan
-        return
-    for i, cached in enumerate(plan_cache):
-        if cached.matches_request(plan.backend, plan.objects, plan.semantic_key):
-            plan_cache[i] = plan
-            return
-    plan_cache.append(plan)
+    plan_cache[plan.cache_key()] = plan
 
 
 def _try_native_plan_from_cache(
@@ -1029,6 +1093,22 @@ def _raw_payload_value_type(arr, value_type_map, op_name):
     raise TypeError(f"unsupported {op_name} value dtype.")
 
 
+def _raw_payload_value_type_or_none(arr, value_type_map):
+    if _is_opaque_raw_payload(arr):
+        return 0
+    return value_type_map.get(getattr(arr, "dtype", None))
+
+
+def _shape0_or_none(arr):
+    shape = getattr(arr, "shape", None)
+    if shape is None or len(shape) == 0:
+        return None
+    n = shape[0]
+    if isinstance(n, (int, np.integer)):
+        return int(n)
+    return None
+
+
 def _reject_struct_numeric_primitive(op_name):
     raise TypeError(
         f"{op_name} does not support StructNdarray directly. Structured "
@@ -1216,12 +1296,7 @@ class _OrderApplyWorkspaceMixin:
 
 
 class SortWorkspace(_OrderApplyWorkspaceMixin):
-    """Workspace handle for future backend sort implementations.
-
-    The current implementation is intentionally metadata-only. It gives the new
-    sort API a stable place to attach allocation accounting without changing the
-    legacy odd-even fallback behavior.
-    """
+    """Workspace handle for native sort and order/apply paths."""
 
     def __init__(self, max_items=None, device=None):
         self.max_items = max_items
@@ -1267,15 +1342,13 @@ class SortWorkspace(_OrderApplyWorkspaceMixin):
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         prog = impl.get_runtime().prog
-        if hasattr(prog, "cuda_cub_radix_sort_clear_workspace"):
-            prog.cuda_cub_radix_sort_clear_workspace()
+        _call_optional_prog_method(prog, "cuda_cub_radix_sort_clear_workspace")
 
     def _clear_vulkan_native_backend_workspace(self):
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         prog = impl.get_runtime().prog
-        if hasattr(prog, "vulkan_radix_sort_clear_workspace"):
-            prog.vulkan_radix_sort_clear_workspace()
+        _call_optional_prog_method(prog, "vulkan_radix_sort_clear_workspace")
 
     def _get_radix_u32_buffers(self, n, value_dtype, use_values):
         if self.max_items is not None and n > self.max_items:
@@ -1364,20 +1437,17 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
-            if hasattr(prog, "cuda_cub_select_clear_workspace"):
-                prog.cuda_cub_select_clear_workspace()
+            _call_optional_prog_method(prog, "cuda_cub_select_clear_workspace")
         if self._cuda_cub_scan_active:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
-            if hasattr(prog, "cuda_cub_scan_clear_workspace"):
-                prog.cuda_cub_scan_clear_workspace()
+            _call_optional_prog_method(prog, "cuda_cub_scan_clear_workspace")
         if self._vulkan_native_active:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
-            if hasattr(prog, "vulkan_compact_clear_workspace"):
-                prog.vulkan_compact_clear_workspace()
+            _call_optional_prog_method(prog, "vulkan_compact_clear_workspace")
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._field_buffers.clear()
@@ -1455,7 +1525,10 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
         prog = impl.get_runtime().prog
         if id(prog) != plan["program_id"]:
             return False
-        temp_bytes = prog.cpu_compact_dense_field(
+        method = _prog_method(prog, "cpu_compact_dense_field")
+        if method is None:
+            return False
+        temp_bytes = method(
             plan["values_snode"],
             plan["flags_snode"],
             plan["output_snode"],
@@ -1546,14 +1619,12 @@ class ReduceWorkspace:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
-            if hasattr(prog, "cuda_cub_reduce_clear_workspace"):
-                prog.cuda_cub_reduce_clear_workspace()
+            _call_optional_prog_method(prog, "cuda_cub_reduce_clear_workspace")
         if self._vulkan_native_active:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
-            if hasattr(prog, "vulkan_reduce_clear_workspace"):
-                prog.vulkan_reduce_clear_workspace()
+            _call_optional_prog_method(prog, "vulkan_reduce_clear_workspace")
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._field_buffers.clear()
@@ -1732,14 +1803,12 @@ class HistogramWorkspace:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
-            if hasattr(prog, "cuda_cub_histogram_clear_workspace"):
-                prog.cuda_cub_histogram_clear_workspace()
+            _call_optional_prog_method(prog, "cuda_cub_histogram_clear_workspace")
         if self._vulkan_native_active:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
-            if hasattr(prog, "vulkan_histogram_clear_workspace"):
-                prog.vulkan_histogram_clear_workspace()
+            _call_optional_prog_method(prog, "vulkan_histogram_clear_workspace")
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._field_buffers.clear()
@@ -2157,8 +2226,7 @@ class TransformWorkspace:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
-            if hasattr(prog, "vulkan_transform_clear_workspace"):
-                prog.vulkan_transform_clear_workspace()
+            _call_optional_prog_method(prog, "vulkan_transform_clear_workspace")
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
@@ -2316,8 +2384,7 @@ class IndexedCopyWorkspace:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
-            if hasattr(prog, "vulkan_indexed_copy_clear_workspace"):
-                prog.vulkan_indexed_copy_clear_workspace()
+            _call_optional_prog_method(prog, "vulkan_indexed_copy_clear_workspace")
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
@@ -2342,11 +2409,11 @@ class ScatterAddWorkspace:
         self.workspace_bytes_peak = 0
         self._vulkan_native_active = False
         self._native_scatter_add_plan = None
-        self._native_scatter_add_plans = []
+        self._native_scatter_add_plans = {}
         self._native_scatter_add_plan_group = None
         self._native_scatter_add_plan_groups = {}
         self._native_add_merge_plan = None
-        self._native_add_merge_plans = []
+        self._native_add_merge_plans = {}
         self._two_level_scatter_add_plan_group = None
         self._two_level_scatter_add_plan_groups = {}
         self._two_level_grouped_reduce_workspace = None
@@ -2768,10 +2835,8 @@ class ScatterAddWorkspace:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
-            if hasattr(prog, "vulkan_scatter_add_clear_workspace"):
-                prog.vulkan_scatter_add_clear_workspace()
-            if hasattr(prog, "vulkan_add_merge_clear_workspace"):
-                prog.vulkan_add_merge_clear_workspace()
+            _call_optional_prog_method(prog, "vulkan_scatter_add_clear_workspace")
+            _call_optional_prog_method(prog, "vulkan_add_merge_clear_workspace")
         if self._two_level_grouped_reduce_workspace is not None:
             self._two_level_grouped_reduce_workspace.clear()
         if self._two_level_transform_workspace is not None:
@@ -2827,8 +2892,7 @@ class BucketBuilderWorkspace(_OrderApplyWorkspaceMixin):
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
-            if hasattr(prog, "vulkan_bucket_builder_clear_workspace"):
-                prog.vulkan_bucket_builder_clear_workspace()
+            _call_optional_prog_method(prog, "vulkan_bucket_builder_clear_workspace")
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._cursor_ndarray = None
@@ -3023,8 +3087,7 @@ class GroupedReduceWorkspace:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
-            if hasattr(prog, "vulkan_grouped_reduce_clear_workspace"):
-                prog.vulkan_grouped_reduce_clear_workspace()
+            _call_optional_prog_method(prog, "vulkan_grouped_reduce_clear_workspace")
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._offsets_ndarray = None
@@ -3139,15 +3202,10 @@ class GroupedReduceWorkspace:
         backend = self._native_grouped_reduce_backend_for_method(method)
         if backend is None:
             return False
-        try:
-            value_type = _grouped_reduce_value_type(
-                getattr(values, "dtype", getattr(values, "scalar_dtype", None))
-            )
-            op_id = _SUPPORTED_GROUPED_REDUCE_OPS[op]
-            n = keys.shape[0]
-            num_groups = output.shape[0]
-        except (AttributeError, KeyError, TypeError):
+        signature = _grouped_reduce_replay_signature(keys, values, output, op)
+        if signature is None:
             return False
+        value_type, op_id, n, num_groups = signature
         objects = (keys, values, output)
         if _try_hot_native_plan(
             self._native_grouped_reduce_plan,
@@ -3834,7 +3892,7 @@ def _vulkan_native_radix_sort_u32(
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not prog.vulkan_radix_sort_available():
+    if not _prog_available(prog, "vulkan_radix_sort_available"):
         raise RuntimeError("method='vulkan_native_radix_u32' requires Vulkan sort support.")
     key_type = _SORT_KEY_TYPE[keys.dtype]
     value_type = (
@@ -3843,11 +3901,13 @@ def _vulkan_native_radix_sort_u32(
         else 0
     )
     temp_bytes = (
-        prog.vulkan_radix_sort_u32_ndarray(
+        _prog_method(prog, "vulkan_radix_sort_u32_ndarray")(
             keys.arr, values.arr, key_type, value_type
         )
         if values is not None
-        else prog.vulkan_radix_sort_u32_keys_ndarray(keys.arr, key_type)
+        else _prog_method(prog, "vulkan_radix_sort_u32_keys_ndarray")(
+            keys.arr, key_type
+        )
     )
     if workspace is not None:
         workspace._vulkan_native_active = True
@@ -3887,7 +3947,7 @@ def _cpu_native_stable_sort(keys, values=None, workspace=None, descending=False,
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not prog.cpu_stable_sort_available():
+    if not _prog_available(prog, "cpu_stable_sort_available"):
         raise RuntimeError("method='cpu_native' requires CPU sort support.")
     key_type = _SORT_KEY_TYPE[keys.dtype]
     value_type = (
@@ -3897,11 +3957,11 @@ def _cpu_native_stable_sort(keys, values=None, workspace=None, descending=False,
     )
     nan_policy_id = {"last": 0, "bitwise": 1}[nan_policy]
     temp_bytes = (
-        prog.cpu_stable_sort_ndarray(
+        _prog_method(prog, "cpu_stable_sort_ndarray")(
             keys.arr, values.arr, key_type, value_type, descending, nan_policy_id
         )
         if values is not None
-        else prog.cpu_stable_sort_keys_ndarray(
+        else _prog_method(prog, "cpu_stable_sort_keys_ndarray")(
             keys.arr, key_type, descending, nan_policy_id
         )
     )
@@ -3954,7 +4014,7 @@ def _cuda_cub_sort_native(
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not prog.cuda_cub_radix_sort_available():
+    if not _prog_available(prog, "cuda_cub_radix_sort_available"):
         raise RuntimeError(
             f"method='{method}' requires CUDA CUB sort support and a "
             "discoverable CUDA runtime library."
@@ -3968,11 +4028,11 @@ def _cuda_cub_sort_native(
     mode = 1 if method == "cuda_cub_split32" else 0
     nan_policy_id = {"last": 0, "bitwise": 1}[nan_policy]
     temp_bytes = (
-        prog.cuda_cub_radix_sort_ndarray(
+        _prog_method(prog, "cuda_cub_radix_sort_ndarray")(
             keys.arr, values.arr, key_type, value_type, mode, nan_policy_id
         )
         if values is not None
-        else prog.cuda_cub_radix_sort_keys_ndarray(
+        else _prog_method(prog, "cuda_cub_radix_sort_keys_ndarray")(
             keys.arr, key_type, mode, nan_policy_id
         )
     )
@@ -4111,10 +4171,43 @@ def _apply_order_to_values(
         )
         return
     if use_temp:
-        raise RuntimeError(
-            "in-place order apply currently requires StructNdarray tensor "
-            "member views."
+        if _is_opaque_raw_payload(values) or _is_opaque_raw_payload(output):
+            raise RuntimeError(
+                "in-place order apply for whole StructNdarray payloads needs a "
+                "dedicated raw-payload staging buffer."
+            )
+        if not hasattr(workspace, "_get_scalar_temp_buffer"):
+            raise RuntimeError("in-place order apply requires a scalar temp buffer.")
+        temp = workspace._get_scalar_temp_buffer(values.dtype, values.shape[0])
+        copy_workspace = None
+        transform_workspace = None
+        if hasattr(workspace, "_get_order_apply_indexed_copy_workspace"):
+            copy_workspace = workspace._get_order_apply_indexed_copy_workspace(
+                values.shape[0]
+            )
+        if hasattr(workspace, "_get_order_apply_transform_workspace"):
+            transform_workspace = workspace._get_order_apply_transform_workspace(
+                values.shape[0]
+            )
+        experimental_gather(
+            values,
+            order,
+            temp,
+            method=copy_method,
+            workspace=copy_workspace,
         )
+        experimental_transform(
+            temp,
+            output,
+            scale=1,
+            bias=0,
+            method=copy_method,
+            workspace=transform_workspace,
+        )
+        if hasattr(workspace, "_record_order_apply_child_workspace"):
+            workspace._record_order_apply_child_workspace(copy_workspace)
+            workspace._record_order_apply_child_workspace(transform_workspace)
+        return
     copy_workspace = None
     if hasattr(workspace, "_get_order_apply_indexed_copy_workspace"):
         copy_workspace = workspace._get_order_apply_indexed_copy_workspace(
@@ -4174,13 +4267,168 @@ def _native_sort_tensor_member_values(
     return workspace
 
 
+def _try_native_dense_field_sort(
+    keys,
+    values,
+    *,
+    method,
+    workspace,
+    descending,
+    nan_policy,
+):
+    key_view = _primitive_view(keys)
+    value_view = _primitive_view(values) if values is not None else None
+    if key_view is None or not key_view.is_dense_field:
+        return False
+    if values is not None and (value_view is None or not value_view.is_dense_field):
+        return False
+    key_type = _SORT_KEY_TYPE.get(keys.dtype)
+    if key_type is None:
+        return False
+    value_type = 0
+    if values is not None:
+        value_type = _SORT_VALUE_TYPE.get(values.dtype)
+        if value_type is None:
+            return False
+    key_size = _dtype_nbytes(keys.dtype)
+    if key_view.stride != key_size:
+        return False
+    if values is not None and value_view.stride != _dtype_nbytes(values.dtype):
+        return False
+    n = key_view.num_elements
+    if values is not None and value_view.num_elements != n:
+        return False
+    if n <= 1:
+        return True
+
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    impl.get_runtime().materialize()
+    prog = impl.get_runtime().prog
+    arch = current_cfg().arch
+    temp_bytes = None
+    if arch in (x64, arm64) and method in ("auto", "cpu_native"):
+        if not _prog_available(prog, "cpu_stable_sort_available"):
+            return False
+        if values is None:
+            method_obj = _prog_method(prog, "cpu_stable_sort_keys_dense_field")
+            call_args = (key_view.snode, key_type, n, descending, {"last": 0, "bitwise": 1}[nan_policy])
+        else:
+            method_obj = _prog_method(prog, "cpu_stable_sort_dense_field")
+            call_args = (
+                key_view.snode,
+                value_view.snode,
+                key_type,
+                value_type,
+                n,
+                descending,
+                {"last": 0, "bitwise": 1}[nan_policy],
+            )
+        if method_obj is None:
+            return False
+        temp_bytes = method_obj(*call_args)
+    elif arch == cuda and method in _CUDA_CUB_SORT_METHODS.union({"auto"}):
+        if descending:
+            return False
+        if not _prog_available(prog, "cuda_cub_radix_sort_available"):
+            return False
+        if values is None:
+            method_obj = _prog_method(prog, "cuda_cub_radix_sort_keys_dense_field")
+            call_args = (
+                key_view.snode,
+                key_type,
+                n,
+                1 if method == "cuda_cub_split32" else 0,
+                {"last": 0, "bitwise": 1}[nan_policy],
+            )
+        else:
+            method_obj = _prog_method(prog, "cuda_cub_radix_sort_dense_field")
+            call_args = (
+                key_view.snode,
+                value_view.snode,
+                key_type,
+                value_type,
+                n,
+                1 if method == "cuda_cub_split32" else 0,
+                {"last": 0, "bitwise": 1}[nan_policy],
+            )
+        if method_obj is None:
+            return False
+        temp_bytes = method_obj(*call_args)
+    else:
+        return False
+
+    if workspace is not None:
+        if arch == cuda:
+            workspace._cuda_cub_active = True
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+    return True
+
+
+def _can_native_sort_by_key_parts(parts, values):
+    if not all(isinstance(part, Ndarray) and part.dtype in _SORT_KEY_DTYPES for part in parts):
+        return False
+    if values is None:
+        return True
+    if _is_opaque_raw_payload(values):
+        return False
+    if _is_struct_tensor_member_view(values):
+        return values.scalar_dtype in _SORT_VALUE_DTYPES
+    if _is_struct_scalar_member_view(values):
+        return values.dtype in _SORT_VALUE_DTYPES
+    return isinstance(values, Ndarray) and values.dtype in _SORT_VALUE_DTYPES
+
+
+def _native_stable_sort_by_key_parts(parts, values, *, method, workspace):
+    if not _can_native_sort_by_key_parts(parts, values):
+        return None
+    if workspace is None:
+        workspace = SortWorkspace(max_items=parts[0].shape[0])
+    n = parts[0].shape[0]
+    workspace.reserve(n=n)
+    if n <= 1:
+        return workspace
+    sort_method, copy_method = _member_sort_backend_method(method)
+    apply_targets = list(parts)
+    if values is not None:
+        apply_targets.append(values)
+    for current_key in reversed(parts):
+        order = _prepare_identity_order(workspace, n)
+        sort(
+            current_key,
+            order,
+            stable=True,
+            method=sort_method,
+            workspace=workspace,
+        )
+        for target in apply_targets:
+            if target is current_key:
+                continue
+            _apply_order_to_values(
+                target,
+                order,
+                target,
+                copy_method=copy_method,
+                workspace=workspace,
+                use_temp=True,
+            )
+    return workspace
+
+
 def _auto_sort(keys, values=None, workspace=None, nan_policy="last", descending=False):
     arch = current_cfg().arch
-    if descending:
-        _host_stable_sort(keys, values, descending=True, nan_policy=nan_policy)
-        return
 
     if _is_struct_tensor_member_view(values):
+        if descending and arch not in (x64, arm64):
+            _host_stable_sort(
+                keys, values, descending=True, nan_policy=nan_policy
+            )
+            return
         _native_sort_tensor_member_values(
             keys,
             values,
@@ -4189,6 +4437,40 @@ def _auto_sort(keys, values=None, workspace=None, nan_policy="last", descending=
             descending=descending,
             nan_policy=nan_policy,
         )
+        return
+
+    if _try_native_dense_field_sort(
+        keys,
+        values,
+        method="auto",
+        workspace=workspace,
+        descending=descending,
+        nan_policy=nan_policy,
+    ):
+        return
+
+    if (
+        arch in (x64, arm64)
+        and isinstance(keys, Ndarray)
+        and (values is None or isinstance(values, Ndarray))
+        and keys.dtype in _SORT_KEY_DTYPES
+        and (values is None or _supports_opaque_raw_payload(values, _SORT_VALUE_DTYPES))
+    ):
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if _prog_available(prog, "cpu_stable_sort_available"):
+            _cpu_native_stable_sort(
+                keys,
+                values,
+                workspace=workspace,
+                descending=descending,
+                nan_policy=nan_policy,
+            )
+            return
+
+    if descending:
+        _host_stable_sort(keys, values, descending=True, nan_policy=nan_policy)
         return
 
     if (
@@ -4200,7 +4482,8 @@ def _auto_sort(keys, values=None, workspace=None, nan_policy="last", descending=
     ):
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
-        if impl.get_runtime().prog.cuda_cub_radix_sort_available():
+        prog = impl.get_runtime().prog
+        if _prog_available(prog, "cuda_cub_radix_sort_available"):
             _cuda_cub_sort_native(
                 keys,
                 values,
@@ -4220,7 +4503,8 @@ def _auto_sort(keys, values=None, workspace=None, nan_policy="last", descending=
     ):
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
-        if impl.get_runtime().prog.vulkan_radix_sort_available():
+        prog = impl.get_runtime().prog
+        if _prog_available(prog, "vulkan_radix_sort_available"):
             _vulkan_native_radix_sort_u32(
                 keys, values, workspace=workspace, nan_policy=nan_policy
             )
@@ -4242,12 +4526,11 @@ def sort(
 ):
     """Sort keys, optionally carrying a value payload.
 
-    This is a Taichi Forge extension. `auto` selects the native CUDA CUB
-    DeviceRadixSort path on CUDA when available, the native Vulkan radix8 path
-    for supported ndarray key dtypes on Vulkan, and otherwise falls back to a
-    host stable sort. Use ``method="legacy"`` for the original odd-even merge
-    implementation. ``cuda_cub_split32`` and ``cpu_native`` are explicit opt-in
-    methods only.
+    This is a Taichi Forge extension. `auto` selects the native CPU stable sort,
+    native CUDA CUB DeviceRadixSort path on CUDA when available, the native
+    Vulkan radix8 path for supported ndarray key dtypes on Vulkan, and otherwise
+    falls back to a host stable sort. Use ``method="legacy"`` for the original
+    odd-even merge implementation.
     """
 
     _check_sort_request(
@@ -4273,6 +4556,15 @@ def sort(
             nan_policy=nan_policy,
         )
     elif method == "cpu_native":
+        if _try_native_dense_field_sort(
+            keys,
+            values,
+            method=method,
+            workspace=workspace,
+            descending=descending,
+            nan_policy=nan_policy,
+        ):
+            return
         _cpu_native_stable_sort(
             keys,
             values,
@@ -4295,6 +4587,15 @@ def sort(
             keys, values, workspace=workspace, nan_policy=nan_policy
         )
     elif method in _CUDA_CUB_SORT_METHODS:
+        if _try_native_dense_field_sort(
+            keys,
+            values,
+            method=method,
+            workspace=workspace,
+            descending=descending,
+            nan_policy=nan_policy,
+        ):
+            return
         _cuda_cub_sort_native(
             keys, values, workspace=workspace, method=method, nan_policy=nan_policy
         )
@@ -4314,8 +4615,9 @@ def sort_by_key(
     """Sort values by key parts.
 
     Single-part keys route to :func:`sort`. Multi-part exact lexicographic sort
-    needs the future stable radix primitive so all key parts and payloads can be
-    permuted together.
+    uses stable native sort passes for ndarray key parts when the current
+    backend has a matching native sort and order/apply path; otherwise it falls
+    back to the host stable path for compatibility.
     """
 
     if order != "lexicographic":
@@ -4339,6 +4641,19 @@ def sort_by_key(
     if len(parts) > 1 and method == "legacy":
         raise NotImplementedError("Multi-part sort_by_key() needs a stable backend.")
     if len(parts) > 1:
+        cpu_auto_uses_host = method == "auto" and current_cfg().arch in (x64, arm64)
+        if method != "host_stable" and not cpu_auto_uses_host:
+            native_workspace = _native_stable_sort_by_key_parts(
+                parts, values, method=method, workspace=workspace
+            )
+            if native_workspace is not None:
+                return
+            if method != "auto":
+                raise RuntimeError(
+                    "Multi-part sort_by_key() native mode requires ndarray key "
+                    "parts and a native sort plus order/apply backend for the "
+                    "current arch."
+                )
         _host_stable_sort_by_key_parts(parts, values)
         return
     sort(
@@ -4468,13 +4783,12 @@ def _try_cuda_cub_compact(values, flags, output, count, workspace):
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "cuda_cub_select_available"):
+    if not _prog_available(prog, "cuda_cub_select_available"):
         return False
-    if not prog.cuda_cub_select_available():
+    method = _prog_method(prog, "cuda_cub_select_ndarray")
+    if method is None:
         return False
-    if not hasattr(prog, "cuda_cub_select_ndarray"):
-        return False
-    temp_bytes = prog.cuda_cub_select_ndarray(
+    temp_bytes = method(
         values.arr,
         flags.arr,
         output.arr,
@@ -4505,13 +4819,12 @@ def _try_vulkan_native_compact(values, flags, output, count, workspace):
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "vulkan_compact_available"):
+    if not _prog_available(prog, "vulkan_compact_available"):
         return False
-    if not prog.vulkan_compact_available():
+    method = _prog_method(prog, "vulkan_compact_ndarray")
+    if method is None:
         return False
-    if not hasattr(prog, "vulkan_compact_ndarray"):
-        return False
-    temp_bytes = prog.vulkan_compact_ndarray(
+    temp_bytes = method(
         values.arr,
         flags.arr,
         output.arr,
@@ -4542,13 +4855,12 @@ def _try_cpu_native_compact(values, flags, output, count, workspace):
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "cpu_compact_available"):
+    if not _prog_available(prog, "cpu_compact_available"):
         return False
-    if not prog.cpu_compact_available():
+    method = _prog_method(prog, "cpu_compact_ndarray")
+    if method is None:
         return False
-    if not hasattr(prog, "cpu_compact_ndarray"):
-        return False
-    temp_bytes = prog.cpu_compact_ndarray(
+    temp_bytes = method(
         values.arr,
         flags.arr,
         output.arr,
@@ -4592,13 +4904,10 @@ def _try_native_dense_field_compact(values, flags, output, count, workspace, n):
     prog = impl.get_runtime().prog
     value_type = _COMPACT_VALUE_TYPE[i32]
     if arch in (x64, arm64):
-        if not (
-            hasattr(prog, "cpu_compact_available")
-            and prog.cpu_compact_available()
-            and hasattr(prog, "cpu_compact_dense_field")
-        ):
+        method = _prog_method(prog, "cpu_compact_dense_field")
+        if not _prog_available(prog, "cpu_compact_available") or method is None:
             return False
-        temp_bytes = prog.cpu_compact_dense_field(
+        temp_bytes = method(
             values_view.snode,
             flags_view.snode,
             output_view.snode,
@@ -4634,13 +4943,10 @@ def _try_native_dense_field_compact(values, flags, output, count, workspace, n):
             and output_view.stride == 4
         ):
             return False
-        if not (
-            hasattr(prog, "cuda_cub_select_available")
-            and prog.cuda_cub_select_available()
-            and hasattr(prog, "cuda_cub_select_dense_field")
-        ):
+        method = _prog_method(prog, "cuda_cub_select_dense_field")
+        if not _prog_available(prog, "cuda_cub_select_available") or method is None:
             return False
-        temp_bytes = prog.cuda_cub_select_dense_field(
+        temp_bytes = method(
             values_view.snode,
             flags_view.snode,
             output_view.snode,
@@ -4664,13 +4970,10 @@ def _try_native_dense_field_compact(values, flags, output, count, workspace, n):
             and output_view.stride == 4
         ):
             return False
-        if not (
-            hasattr(prog, "vulkan_compact_available")
-            and prog.vulkan_compact_available()
-            and hasattr(prog, "vulkan_compact_dense_field")
-        ):
+        method = _prog_method(prog, "vulkan_compact_dense_field")
+        if not _prog_available(prog, "vulkan_compact_available") or method is None:
             return False
-        temp_bytes = prog.vulkan_compact_dense_field(
+        temp_bytes = method(
             values_view.snode,
             flags_view.snode,
             output_view.snode,
@@ -4696,12 +4999,9 @@ def _native_prefix_scan_available_for_current_arch():
     prog = impl.get_runtime().prog
     arch = current_cfg().arch
     if arch == cuda:
-        return (
-            hasattr(prog, "cuda_cub_scan_available")
-            and prog.cuda_cub_scan_available()
-        )
+        return _prog_available(prog, "cuda_cub_scan_available")
     if arch == vulkan:
-        return hasattr(prog, "vulkan_scan_available") and prog.vulkan_scan_available()
+        return _prog_available(prog, "vulkan_scan_available")
     return False
 
 
@@ -4716,9 +5016,9 @@ def _compact_field_native_prefix_scan(values, flags, output, count, workspace, n
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         prog = impl.get_runtime().prog
-        if hasattr(prog, "cuda_cub_scan_workspace_bytes"):
+        if _prog_has(prog, "cuda_cub_scan_workspace_bytes"):
             workspace._cuda_cub_scan_active = True
-            scan_bytes = int(prog.cuda_cub_scan_workspace_bytes())
+            scan_bytes = int(_prog_method(prog, "cuda_cub_scan_workspace_bytes")())
             workspace.workspace_bytes_peak = max(
                 workspace.workspace_bytes_peak,
                 workspace.workspace_bytes_current + scan_bytes,
@@ -4960,13 +5260,12 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
 
         impl.get_runtime().materialize()
         prog = impl.get_runtime().prog
-        if not hasattr(prog, "cuda_cub_reduce_available"):
+        if not _prog_available(prog, "cuda_cub_reduce_available"):
             return False
-        if not prog.cuda_cub_reduce_available():
+        method = _prog_method(prog, "cuda_cub_reduce_dense_field")
+        if method is None:
             return False
-        if not hasattr(prog, "cuda_cub_reduce_dense_field"):
-            return False
-        temp_bytes = prog.cuda_cub_reduce_dense_field(
+        temp_bytes = method(
             values_view.snode,
             output_view.snode,
             _reduce_value_type(values_view.dtype),
@@ -5006,15 +5305,14 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         prog = impl.get_runtime().prog
-        if not hasattr(prog, "cuda_cub_reduce_available"):
+        if not _prog_available(prog, "cuda_cub_reduce_available"):
             return False
-        if not prog.cuda_cub_reduce_available():
-            return False
-        if not hasattr(prog, "cuda_cub_reduce_strided_ndarray"):
+        method = _prog_method(prog, "cuda_cub_reduce_strided_ndarray")
+        if method is None:
             return False
         values_arr, values_offset, values_stride = _scalar_ndarray_payload(values)
         output_arr, output_offset, output_stride = _scalar_ndarray_payload(output)
-        temp_bytes = prog.cuda_cub_reduce_strided_ndarray(
+        temp_bytes = method(
             values_arr,
             output_arr,
             _reduce_value_type(values.dtype),
@@ -5052,11 +5350,12 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "cuda_cub_reduce_available"):
+    if not _prog_available(prog, "cuda_cub_reduce_available"):
         return False
-    if not prog.cuda_cub_reduce_available():
+    method = _prog_method(prog, "cuda_cub_reduce_ndarray")
+    if method is None:
         return False
-    temp_bytes = prog.cuda_cub_reduce_ndarray(
+    temp_bytes = method(
         values.arr, output.arr, _reduce_value_type(values.dtype), _SUPPORTED_REDUCE_OPS[op]
     )
     if workspace is not None:
@@ -5095,17 +5394,17 @@ def _try_vulkan_reduce(values, output, op, workspace):
 
         impl.get_runtime().materialize()
         prog = impl.get_runtime().prog
-        if not hasattr(prog, "vulkan_reduce_available"):
-            return False
-        if not prog.vulkan_reduce_available():
+        if not _prog_available(prog, "vulkan_reduce_available"):
             return False
         value_type = _reduce_value_type(values_view.dtype)
-        if hasattr(prog, "vulkan_reduce_value_type_available"):
-            if not prog.vulkan_reduce_value_type_available(value_type):
-                return False
-        if not hasattr(prog, "vulkan_reduce_dense_field"):
+        if not _prog_value_available(
+            prog, "vulkan_reduce_value_type_available", value_type
+        ):
             return False
-        temp_bytes = prog.vulkan_reduce_dense_field(
+        method = _prog_method(prog, "vulkan_reduce_dense_field")
+        if method is None:
+            return False
+        temp_bytes = method(
             values_view.snode,
             output_view.snode,
             value_type,
@@ -5144,19 +5443,19 @@ def _try_vulkan_reduce(values, output, op, workspace):
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         prog = impl.get_runtime().prog
-        if not hasattr(prog, "vulkan_reduce_available"):
-            return False
-        if not prog.vulkan_reduce_available():
+        if not _prog_available(prog, "vulkan_reduce_available"):
             return False
         value_type = _reduce_value_type(values.dtype)
-        if hasattr(prog, "vulkan_reduce_value_type_available"):
-            if not prog.vulkan_reduce_value_type_available(value_type):
-                return False
-        if not hasattr(prog, "vulkan_reduce_strided_ndarray"):
+        if not _prog_value_available(
+            prog, "vulkan_reduce_value_type_available", value_type
+        ):
+            return False
+        method = _prog_method(prog, "vulkan_reduce_strided_ndarray")
+        if method is None:
             return False
         values_arr, values_offset, values_stride = _scalar_ndarray_payload(values)
         output_arr, output_offset, output_stride = _scalar_ndarray_payload(output)
-        temp_bytes = prog.vulkan_reduce_strided_ndarray(
+        temp_bytes = method(
             values_arr,
             output_arr,
             value_type,
@@ -5194,28 +5493,27 @@ def _try_vulkan_reduce(values, output, op, workspace):
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "vulkan_reduce_available"):
-        return False
-    if not prog.vulkan_reduce_available():
+    if not _prog_available(prog, "vulkan_reduce_available"):
         return False
     value_type = _reduce_value_type(values.dtype)
-    if hasattr(prog, "vulkan_reduce_value_type_available"):
-        if not prog.vulkan_reduce_value_type_available(value_type):
-            return False
-    elif values.dtype != i32:
+    if not _prog_value_available(
+        prog, "vulkan_reduce_value_type_available", value_type
+    ):
         return False
-    if hasattr(prog, "vulkan_reduce_ndarray"):
+    method = _prog_method(prog, "vulkan_reduce_ndarray")
+    if method is not None:
         method_name = "vulkan_reduce_ndarray"
         call_args = (values.arr, output.arr, value_type, _SUPPORTED_REDUCE_OPS[op])
-        temp_bytes = prog.vulkan_reduce_ndarray(
-            values.arr, output.arr, value_type, _SUPPORTED_REDUCE_OPS[op]
-        )
+        temp_bytes = method(*call_args)
     else:
+        if values.dtype != i32:
+            return False
+        method = _prog_method(prog, "vulkan_reduce_i32_ndarray")
+        if method is None:
+            return False
         method_name = "vulkan_reduce_i32_ndarray"
         call_args = (values.arr, output.arr, _SUPPORTED_REDUCE_OPS[op])
-        temp_bytes = prog.vulkan_reduce_i32_ndarray(
-            values.arr, output.arr, _SUPPORTED_REDUCE_OPS[op]
-        )
+        temp_bytes = method(*call_args)
     if workspace is not None:
         workspace._record_native_reduce_plan(
             "vulkan_native",
@@ -5247,11 +5545,10 @@ def _try_cpu_reduce(values, output, op, workspace):
 
         impl.get_runtime().materialize()
         prog = impl.get_runtime().prog
-        if not hasattr(prog, "cpu_reduce_dense_field"):
+        method = _prog_method(prog, "cpu_reduce_dense_field")
+        if method is None or not _prog_available(prog, "cpu_reduce_available"):
             return False
-        if not (hasattr(prog, "cpu_reduce_available") and prog.cpu_reduce_available()):
-            return False
-        temp_bytes = prog.cpu_reduce_dense_field(
+        temp_bytes = method(
             values_view.snode,
             output_view.snode,
             _reduce_value_type(values_view.dtype),
@@ -5291,15 +5588,14 @@ def _try_cpu_reduce(values, output, op, workspace):
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         prog = impl.get_runtime().prog
-        if not hasattr(prog, "cpu_reduce_available"):
+        if not _prog_available(prog, "cpu_reduce_available"):
             return False
-        if not prog.cpu_reduce_available():
-            return False
-        if not hasattr(prog, "cpu_reduce_strided_ndarray"):
+        method = _prog_method(prog, "cpu_reduce_strided_ndarray")
+        if method is None:
             return False
         values_arr, values_offset, values_stride = _scalar_ndarray_payload(values)
         output_arr, output_offset, output_stride = _scalar_ndarray_payload(output)
-        temp_bytes = prog.cpu_reduce_strided_ndarray(
+        temp_bytes = method(
             values_arr,
             output_arr,
             _reduce_value_type(values.dtype),
@@ -5337,11 +5633,12 @@ def _try_cpu_reduce(values, output, op, workspace):
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "cpu_reduce_available"):
+    if not _prog_available(prog, "cpu_reduce_available"):
         return False
-    if not prog.cpu_reduce_available():
+    method = _prog_method(prog, "cpu_reduce_ndarray")
+    if method is None:
         return False
-    temp_bytes = prog.cpu_reduce_ndarray(
+    temp_bytes = method(
         values.arr, output.arr, _reduce_value_type(values.dtype), _SUPPORTED_REDUCE_OPS[op]
     )
     if workspace is not None:
@@ -5641,6 +5938,16 @@ def _histogram_bin_type(dtype):
     raise TypeError("unsupported histogram bin dtype")
 
 
+def _histogram_replay_signature(values, bins):
+    value_type = _raw_payload_value_type_or_none(values, _HISTOGRAM_VALUE_TYPE)
+    bin_type = _raw_payload_value_type_or_none(bins, _HISTOGRAM_BIN_TYPE)
+    n = _shape0_or_none(values)
+    num_bins = _shape0_or_none(bins)
+    if value_type is None or bin_type is None or n is None or num_bins is None:
+        return None
+    return value_type, bin_type, n, num_bins
+
+
 def _dense_histogram_fields_are_contiguous(values_view, bins_view):
     return (
         values_view is not None
@@ -5671,9 +5978,7 @@ def _try_cuda_cub_histogram(values, bins, workspace):
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "cuda_cub_histogram_available"):
-        return False
-    if not prog.cuda_cub_histogram_available():
+    if not _prog_available(prog, "cuda_cub_histogram_available"):
         return False
     value_type = _histogram_value_type(values.dtype)
     bin_type = _histogram_bin_type(bins.dtype)
@@ -5685,7 +5990,8 @@ def _try_cuda_cub_histogram(values, bins, workspace):
         if not _dense_histogram_fields_are_contiguous(values_view, bins_view):
             return False
         method_name = "cuda_cub_histogram_dense_field"
-        if not hasattr(prog, method_name):
+        method = _prog_method(prog, method_name)
+        if method is None:
             return False
         call_args = (
             values_view.snode,
@@ -5695,15 +6001,18 @@ def _try_cuda_cub_histogram(values, bins, workspace):
             values_view.num_elements,
             bins_view.num_elements,
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
-    elif hasattr(prog, "cuda_cub_histogram_ndarray"):
+        temp_bytes = method(*call_args)
+    elif _prog_has(prog, "cuda_cub_histogram_ndarray"):
         method_name = "cuda_cub_histogram_ndarray"
         call_args = (values.arr, bins.arr, value_type, bin_type)
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     elif value_type == 0 and bin_type == 0:
         method_name = "cuda_cub_histogram_i32_ndarray"
+        method = _prog_method(prog, method_name)
+        if method is None:
+            return False
         call_args = (values.arr, bins.arr)
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = method(*call_args)
     else:
         return False
     if workspace is not None:
@@ -5741,16 +6050,13 @@ def _try_vulkan_histogram(values, bins, workspace):
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "vulkan_histogram_available"):
-        return False
-    if not prog.vulkan_histogram_available():
+    if not _prog_available(prog, "vulkan_histogram_available"):
         return False
     value_type = _histogram_value_type(values.dtype)
     bin_type = _histogram_bin_type(bins.dtype)
-    if hasattr(prog, "vulkan_histogram_value_type_available"):
-        if not prog.vulkan_histogram_value_type_available(value_type, bin_type):
-            return False
-    elif value_type != 0 or bin_type != 0:
+    if not _prog_value_available(
+        prog, "vulkan_histogram_value_type_available", value_type, bin_type
+    ):
         return False
     if workspace is not None and workspace._try_native_histogram_plan(
         values, bins, "vulkan_two_level", value_type, bin_type
@@ -5760,7 +6066,8 @@ def _try_vulkan_histogram(values, bins, workspace):
         if not _dense_histogram_fields_are_contiguous(values_view, bins_view):
             return False
         method_name = "vulkan_histogram_dense_field"
-        if not hasattr(prog, method_name):
+        method = _prog_method(prog, method_name)
+        if method is None:
             return False
         call_args = (
             values_view.snode,
@@ -5770,15 +6077,18 @@ def _try_vulkan_histogram(values, bins, workspace):
             values_view.num_elements,
             bins_view.num_elements,
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
-    elif hasattr(prog, "vulkan_histogram_ndarray"):
+        temp_bytes = method(*call_args)
+    elif _prog_has(prog, "vulkan_histogram_ndarray"):
         method_name = "vulkan_histogram_ndarray"
         call_args = (values.arr, bins.arr, value_type, bin_type)
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     elif value_type == 0 and bin_type == 0:
         method_name = "vulkan_histogram_i32_ndarray"
+        method = _prog_method(prog, method_name)
+        if method is None:
+            return False
         call_args = (values.arr, bins.arr)
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = method(*call_args)
     else:
         return False
     if workspace is not None:
@@ -5816,9 +6126,7 @@ def _try_cpu_native_histogram(values, bins, workspace):
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "cpu_histogram_available"):
-        return False
-    if not prog.cpu_histogram_available():
+    if not _prog_available(prog, "cpu_histogram_available"):
         return False
     value_type = _histogram_value_type(values.dtype)
     bin_type = _histogram_bin_type(bins.dtype)
@@ -5828,7 +6136,8 @@ def _try_cpu_native_histogram(values, bins, workspace):
         return True
     if dense_field_mode:
         method_name = "cpu_histogram_dense_field"
-        if not hasattr(prog, method_name):
+        method = _prog_method(prog, method_name)
+        if method is None:
             return False
         call_args = (
             values_view.snode,
@@ -5838,15 +6147,18 @@ def _try_cpu_native_histogram(values, bins, workspace):
             values_view.num_elements,
             bins_view.num_elements,
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
-    elif hasattr(prog, "cpu_histogram_ndarray"):
+        temp_bytes = method(*call_args)
+    elif _prog_has(prog, "cpu_histogram_ndarray"):
         method_name = "cpu_histogram_ndarray"
         call_args = (values.arr, bins.arr, value_type, bin_type)
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     elif value_type == 0 and bin_type == 0:
         method_name = "cpu_histogram_i32_ndarray"
+        method = _prog_method(prog, method_name)
+        if method is None:
+            return False
         call_args = (values.arr, bins.arr)
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = method(*call_args)
     else:
         return False
     if workspace is not None:
@@ -6015,29 +6327,23 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
             return
         if workspace._try_hot_native_histogram_plan(values, bins, method):
             return
-        try:
-            value_type = _raw_payload_value_type(
-                values, _HISTOGRAM_VALUE_TYPE, "experimental_histogram()"
-            )
-            bin_type = _raw_payload_value_type(
-                bins, _HISTOGRAM_BIN_TYPE, "experimental_histogram()"
-            )
+        signature = _histogram_replay_signature(values, bins)
+        if signature is not None:
+            value_type, bin_type, n, num_bins = signature
             if workspace._try_staged_histogram_plan_group(
                 values,
                 bins,
                 method,
                 value_type,
                 bin_type,
-                values.shape[0],
-                bins.shape[0],
+                n,
+                num_bins,
             ):
                 return
             if workspace._try_native_histogram_plan(
                 values, bins, method, value_type, bin_type
             ):
                 return
-        except (AttributeError, TypeError):
-            pass
 
     _check_histogram_request(values, bins, method, workspace)
     if workspace is None:
@@ -6254,18 +6560,16 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
 
         impl.get_runtime().materialize()
         prog = impl.get_runtime().prog
-        if not hasattr(prog, "cuda_device_transform_available"):
+        if not _prog_available(prog, "cuda_device_transform_available"):
             return False
-        if not prog.cuda_device_transform_available():
+        method = _prog_method(prog, "cuda_device_transform_affine_dense_field")
+        if method is None:
             return False
-        if not hasattr(prog, "cuda_device_transform_affine_dense_field"):
-            return False
-        if value_type in (3, 4, 5) and not (
-            hasattr(prog, "cuda_toolkit_transform_available")
-            and prog.cuda_toolkit_transform_available()
+        if value_type in (3, 4, 5) and not _prog_available(
+            prog, "cuda_toolkit_transform_available"
         ):
             return False
-        temp_bytes = prog.cuda_device_transform_affine_dense_field(
+        temp_bytes = method(
             src_view.snode,
             dst_view.snode,
             value_type,
@@ -6307,15 +6611,14 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
     impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
     if src_is_member or dst_is_member:
-        if not (
-            hasattr(prog, "cuda_toolkit_transform_available")
-            and prog.cuda_toolkit_transform_available()
-            and hasattr(prog, "cuda_device_transform_affine_strided_ndarray")
+        method = _prog_method(prog, "cuda_device_transform_affine_strided_ndarray")
+        if method is None or not _prog_available(
+            prog, "cuda_toolkit_transform_available"
         ):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
-        temp_bytes = prog.cuda_device_transform_affine_strided_ndarray(
+        temp_bytes = method(
             src_arr,
             dst_arr,
             value_type,
@@ -6351,16 +6654,16 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
             )
             workspace._mark_native_transform_backend_active("cuda_device", temp_bytes)
         return True
-    if not hasattr(prog, "cuda_device_transform_available"):
+    if not _prog_available(prog, "cuda_device_transform_available"):
         return False
-    if not prog.cuda_device_transform_available():
-        return False
-    if value_type in (3, 4, 5) and not (
-        hasattr(prog, "cuda_toolkit_transform_available")
-        and prog.cuda_toolkit_transform_available()
+    if value_type in (3, 4, 5) and not _prog_available(
+        prog, "cuda_toolkit_transform_available"
     ):
         return False
-    temp_bytes = prog.cuda_device_transform_affine_ndarray(
+    method = _prog_method(prog, "cuda_device_transform_affine_ndarray")
+    if method is None:
+        return False
+    temp_bytes = method(
         src.arr, dst.arr, value_type, scale, bias
     )
     if workspace is not None:
@@ -6395,17 +6698,16 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
 
         impl.get_runtime().materialize()
         prog = impl.get_runtime().prog
-        if not hasattr(prog, "vulkan_transform_available"):
+        if not _prog_available(prog, "vulkan_transform_available"):
             return False
-        if not prog.vulkan_transform_available():
-            return False
-        if hasattr(prog, "vulkan_transform_value_type_available") and not (
-            prog.vulkan_transform_value_type_available(value_type)
+        if not _prog_value_available(
+            prog, "vulkan_transform_value_type_available", value_type
         ):
             return False
-        if not hasattr(prog, "vulkan_transform_affine_dense_field"):
+        method = _prog_method(prog, "vulkan_transform_affine_dense_field")
+        if method is None:
             return False
-        temp_bytes = prog.vulkan_transform_affine_dense_field(
+        temp_bytes = method(
             src_view.snode,
             dst_view.snode,
             value_type,
@@ -6447,16 +6749,15 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "vulkan_transform_available"):
+    if not _prog_available(prog, "vulkan_transform_available"):
         return False
-    if not prog.vulkan_transform_available():
-        return False
-    if hasattr(prog, "vulkan_transform_value_type_available") and not (
-        prog.vulkan_transform_value_type_available(value_type)
+    if not _prog_value_available(
+        prog, "vulkan_transform_value_type_available", value_type
     ):
         return False
     if src_is_member or dst_is_member:
-        if not hasattr(prog, "vulkan_transform_affine_strided_ndarray"):
+        method = _prog_method(prog, "vulkan_transform_affine_strided_ndarray")
+        if method is None:
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
@@ -6472,23 +6773,14 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
             scale,
             bias,
         )
-        temp_bytes = prog.vulkan_transform_affine_strided_ndarray(
-            src_arr,
-            dst_arr,
-            value_type,
-            src_offset,
-            src_stride,
-            dst_offset,
-            dst_stride,
-            scale,
-            bias,
-        )
+        temp_bytes = method(*call_args)
     else:
         method_name = "vulkan_transform_affine_ndarray"
+        method = _prog_method(prog, method_name)
+        if method is None:
+            return False
         call_args = (src.arr, dst.arr, value_type, scale, bias)
-        temp_bytes = prog.vulkan_transform_affine_ndarray(
-            src.arr, dst.arr, value_type, scale, bias
-        )
+        temp_bytes = method(*call_args)
     if workspace is not None:
         workspace._record_native_transform_plan(
             "vulkan_native",
@@ -6521,14 +6813,10 @@ def _try_cpu_transform(src, dst, value_type, scale, bias, workspace):
 
         impl.get_runtime().materialize()
         prog = impl.get_runtime().prog
-        if not hasattr(prog, "cpu_transform_affine_dense_field"):
+        method = _prog_method(prog, "cpu_transform_affine_dense_field")
+        if method is None or not _prog_available(prog, "cpu_transform_available"):
             return False
-        if not (
-            hasattr(prog, "cpu_transform_available")
-            and prog.cpu_transform_available()
-        ):
-            return False
-        temp_bytes = prog.cpu_transform_affine_dense_field(
+        temp_bytes = method(
             src_view.snode,
             dst_view.snode,
             value_type,
@@ -6569,16 +6857,15 @@ def _try_cpu_transform(src, dst, value_type, scale, bias, workspace):
 
     impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "cpu_transform_available"):
-        return False
-    if not prog.cpu_transform_available():
+    if not _prog_available(prog, "cpu_transform_available"):
         return False
     if src_is_member or dst_is_member:
-        if not hasattr(prog, "cpu_transform_affine_strided_ndarray"):
+        method = _prog_method(prog, "cpu_transform_affine_strided_ndarray")
+        if method is None:
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
-        temp_bytes = prog.cpu_transform_affine_strided_ndarray(
+        temp_bytes = method(
             src_arr,
             dst_arr,
             value_type,
@@ -6614,7 +6901,10 @@ def _try_cpu_transform(src, dst, value_type, scale, bias, workspace):
             )
             workspace._mark_native_transform_backend_active("cpu_native", temp_bytes)
         return True
-    temp_bytes = prog.cpu_transform_affine_ndarray(src.arr, dst.arr, value_type, scale, bias)
+    method = _prog_method(prog, "cpu_transform_affine_ndarray")
+    if method is None:
+        return False
+    temp_bytes = method(src.arr, dst.arr, value_type, scale, bias)
     if workspace is not None:
         workspace._record_native_transform_plan(
             "cpu_native",
@@ -6651,10 +6941,11 @@ def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bia
 
     prog = impl.get_runtime().prog
     if method in ("auto", "cuda_device") and current_cfg().arch == cuda:
-        if (
-            hasattr(prog, "cuda_toolkit_transform_available")
-            and prog.cuda_toolkit_transform_available()
-            and hasattr(prog, "cuda_device_transform_affine_packed_strided_ndarray")
+        method_obj = _prog_method(
+            prog, "cuda_device_transform_affine_packed_strided_ndarray"
+        )
+        if method_obj is not None and _prog_available(
+            prog, "cuda_toolkit_transform_available"
         ):
             call_args = (
                 src_arr,
@@ -6668,9 +6959,7 @@ def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bia
                 scale,
                 bias,
             )
-            temp_bytes = prog.cuda_device_transform_affine_packed_strided_ndarray(
-                *call_args
-            )
+            temp_bytes = method_obj(*call_args)
             if workspace is not None:
                 workspace._record_native_transform_plan(
                     "cuda_device",
@@ -6691,14 +6980,15 @@ def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bia
         if method == "cuda_device":
             return False
     if method in ("auto", "vulkan_native") and current_cfg().arch == vulkan:
+        method_obj = _prog_method(
+            prog, "vulkan_transform_affine_packed_strided_ndarray"
+        )
         if (
-            hasattr(prog, "vulkan_transform_available")
-            and prog.vulkan_transform_available()
-            and (
-                not hasattr(prog, "vulkan_transform_value_type_available")
-                or prog.vulkan_transform_value_type_available(value_type)
+            method_obj is not None
+            and _prog_available(prog, "vulkan_transform_available")
+            and _prog_value_available(
+                prog, "vulkan_transform_value_type_available", value_type
             )
-            and hasattr(prog, "vulkan_transform_affine_packed_strided_ndarray")
         ):
             call_args = (
                 src_arr,
@@ -6712,9 +7002,7 @@ def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bia
                 scale,
                 bias,
             )
-            temp_bytes = prog.vulkan_transform_affine_packed_strided_ndarray(
-                *call_args
-            )
+            temp_bytes = method_obj(*call_args)
             if workspace is not None:
                 workspace._record_native_transform_plan(
                     "vulkan_native",
@@ -6735,10 +7023,11 @@ def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bia
         if method == "vulkan_native":
             return False
     if method in ("auto", "cpu_native") and current_cfg().arch in [x64, arm64]:
-        if (
-            hasattr(prog, "cpu_transform_available")
-            and prog.cpu_transform_available()
-            and hasattr(prog, "cpu_transform_affine_packed_strided_ndarray")
+        method_obj = _prog_method(
+            prog, "cpu_transform_affine_packed_strided_ndarray"
+        )
+        if method_obj is not None and _prog_available(
+            prog, "cpu_transform_available"
         ):
             call_args = (
                 src_arr,
@@ -6752,7 +7041,7 @@ def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bia
                 scale,
                 bias,
             )
-            temp_bytes = prog.cpu_transform_affine_packed_strided_ndarray(*call_args)
+            temp_bytes = method_obj(*call_args)
             if workspace is not None:
                 workspace._record_native_transform_plan(
                     "cpu_native",
@@ -7096,9 +7385,8 @@ def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, s
     if arch == cuda and method in ("auto", "cuda_device"):
         backend = "cuda_device"
         item_bytes = _dtype_nbytes(src_view.dtype)
-        if not (
-            hasattr(prog, "cuda_device_indexed_copy_payload_available")
-            and prog.cuda_device_indexed_copy_payload_available(item_bytes)
+        if not _prog_value_available(
+            prog, "cuda_device_indexed_copy_payload_available", item_bytes
         ):
             return False
         if indices_is_dense_field:
@@ -7115,10 +7403,7 @@ def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, s
             )
     elif arch == vulkan and method in ("auto", "vulkan_native"):
         backend = "vulkan_native"
-        if not (
-            hasattr(prog, "vulkan_indexed_copy_available")
-            and prog.vulkan_indexed_copy_available()
-        ):
+        if not _prog_available(prog, "vulkan_indexed_copy_available"):
             return False
         if indices_is_dense_field:
             method_name = (
@@ -7132,10 +7417,7 @@ def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, s
             )
     elif arch in (x64, arm64) and method in ("auto", "cpu_native"):
         backend = "cpu_native"
-        if not (
-            hasattr(prog, "cpu_indexed_copy_available")
-            and prog.cpu_indexed_copy_available()
-        ):
+        if not _prog_available(prog, "cpu_indexed_copy_available"):
             return False
         if indices_is_dense_field:
             method_name = (
@@ -7149,7 +7431,7 @@ def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, s
             )
     else:
         return False
-    if not hasattr(prog, method_name):
+    if not _prog_has(prog, method_name):
         return False
     if indices_is_dense_field:
         call_args = (
@@ -7170,7 +7452,7 @@ def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, s
             src_view.num_elements,
             dst_view.num_elements,
         )
-    temp_bytes = getattr(prog, method_name)(*call_args)
+    temp_bytes = _prog_method(prog, method_name)(*call_args)
     if workspace is not None:
         workspace._record_native_indexed_copy_plan(
             backend,
@@ -7203,9 +7485,7 @@ def _try_cuda_device_indexed_copy(src, indices, dst, scatter, workspace):
 
     impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "cuda_device_indexed_copy_available"):
-        return False
-    if not prog.cuda_device_indexed_copy_available():
+    if not _prog_available(prog, "cuda_device_indexed_copy_available"):
         return False
     if src_is_member or dst_is_member:
         method_name = (
@@ -7213,7 +7493,7 @@ def _try_cuda_device_indexed_copy(src, indices, dst, scatter, workspace):
             if scatter
             else "cuda_device_gather_strided_ndarray"
         )
-        if not hasattr(prog, method_name):
+        if not _prog_has(prog, method_name):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
@@ -7228,7 +7508,7 @@ def _try_cuda_device_indexed_copy(src, indices, dst, scatter, workspace):
             dst_offset,
             dst_stride,
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
         if workspace is not None:
             workspace._record_native_indexed_copy_plan(
                 "cuda_device",
@@ -7246,17 +7526,18 @@ def _try_cuda_device_indexed_copy(src, indices, dst, scatter, workspace):
                 "cuda_device", temp_bytes
             )
         return True
-    if hasattr(prog, "cuda_device_indexed_copy_payload_available"):
-        if not prog.cuda_device_indexed_copy_payload_available(src._get_element_size()):
-            return False
+    if not _prog_value_available(
+        prog, "cuda_device_indexed_copy_payload_available", src._get_element_size()
+    ):
+        return False
     method_name = (
         "cuda_device_scatter_ndarray" if scatter else "cuda_device_gather_ndarray"
     )
     call_args = (src.arr, indices.arr, dst.arr)
-    if scatter:
-        temp_bytes = prog.cuda_device_scatter_ndarray(*call_args)
-    else:
-        temp_bytes = prog.cuda_device_gather_ndarray(*call_args)
+    method = _prog_method(prog, method_name)
+    if method is None:
+        return False
+    temp_bytes = method(*call_args)
     if workspace is not None:
         workspace._record_native_indexed_copy_plan(
             "cuda_device",
@@ -7288,9 +7569,7 @@ def _try_vulkan_indexed_copy(src, indices, dst, scatter, workspace):
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "vulkan_indexed_copy_available"):
-        return False
-    if not prog.vulkan_indexed_copy_available():
+    if not _prog_available(prog, "vulkan_indexed_copy_available"):
         return False
     if src_is_member or dst_is_member:
         method_name = (
@@ -7298,7 +7577,7 @@ def _try_vulkan_indexed_copy(src, indices, dst, scatter, workspace):
             if scatter
             else "vulkan_gather_strided_ndarray"
         )
-        if not hasattr(prog, method_name):
+        if not _prog_has(prog, method_name):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
@@ -7313,15 +7592,14 @@ def _try_vulkan_indexed_copy(src, indices, dst, scatter, workspace):
             dst_offset,
             dst_stride,
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     else:
         method_name = "vulkan_scatter_ndarray" if scatter else "vulkan_gather_ndarray"
         call_args = (src.arr, indices.arr, dst.arr)
-        temp_bytes = (
-            prog.vulkan_scatter_ndarray(*call_args)
-            if scatter
-            else prog.vulkan_gather_ndarray(*call_args)
-        )
+        method = _prog_method(prog, method_name)
+        if method is None:
+            return False
+        temp_bytes = method(*call_args)
     if workspace is not None:
         workspace._record_native_indexed_copy_plan(
             "vulkan_native",
@@ -7359,9 +7637,7 @@ def _try_cpu_indexed_copy(src, indices, dst, scatter, workspace):
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "cpu_indexed_copy_available"):
-        return False
-    if not prog.cpu_indexed_copy_available():
+    if not _prog_available(prog, "cpu_indexed_copy_available"):
         return False
     if src_is_member or dst_is_member:
         method_name = (
@@ -7369,7 +7645,7 @@ def _try_cpu_indexed_copy(src, indices, dst, scatter, workspace):
             if scatter
             else "cpu_gather_strided_ndarray"
         )
-        if not hasattr(prog, method_name):
+        if not _prog_has(prog, method_name):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
@@ -7384,7 +7660,7 @@ def _try_cpu_indexed_copy(src, indices, dst, scatter, workspace):
             dst_offset,
             dst_stride,
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
         if workspace is not None:
             workspace._record_native_indexed_copy_plan(
                 "cpu_native",
@@ -7404,10 +7680,10 @@ def _try_cpu_indexed_copy(src, indices, dst, scatter, workspace):
         return True
     method_name = "cpu_scatter_ndarray" if scatter else "cpu_gather_ndarray"
     call_args = (src.arr, indices.arr, dst.arr)
-    if scatter:
-        temp_bytes = prog.cpu_scatter_ndarray(*call_args)
-    else:
-        temp_bytes = prog.cpu_gather_ndarray(*call_args)
+    method = _prog_method(prog, method_name)
+    if method is None:
+        return False
+    temp_bytes = method(*call_args)
     if workspace is not None:
         workspace._record_native_indexed_copy_plan(
             "cpu_native",
@@ -7440,9 +7716,8 @@ def _try_native_tensor_member_indexed_copy(src, indices, dst, method, workspace,
     prog = impl.get_runtime().prog
     if arch == cuda and method in ("auto", "cuda_device"):
         backend = "cuda_device"
-        if not (
-            hasattr(prog, "cuda_device_indexed_copy_payload_available")
-            and prog.cuda_device_indexed_copy_payload_available(src_item_bytes)
+        if not _prog_value_available(
+            prog, "cuda_device_indexed_copy_payload_available", src_item_bytes
         ):
             return False
         method_name = (
@@ -7452,10 +7727,7 @@ def _try_native_tensor_member_indexed_copy(src, indices, dst, method, workspace,
         )
     elif arch == vulkan and method in ("auto", "vulkan_native"):
         backend = "vulkan_native"
-        if not (
-            hasattr(prog, "vulkan_indexed_copy_available")
-            and prog.vulkan_indexed_copy_available()
-        ):
+        if not _prog_available(prog, "vulkan_indexed_copy_available"):
             return False
         method_name = (
             "vulkan_scatter_strided_ndarray"
@@ -7464,10 +7736,7 @@ def _try_native_tensor_member_indexed_copy(src, indices, dst, method, workspace,
         )
     elif arch in (x64, arm64) and method in ("auto", "cpu_native"):
         backend = "cpu_native"
-        if not (
-            hasattr(prog, "cpu_indexed_copy_available")
-            and prog.cpu_indexed_copy_available()
-        ):
+        if not _prog_available(prog, "cpu_indexed_copy_available"):
             return False
         method_name = (
             "cpu_scatter_strided_ndarray"
@@ -7476,7 +7745,7 @@ def _try_native_tensor_member_indexed_copy(src, indices, dst, method, workspace,
         )
     else:
         return False
-    if not hasattr(prog, method_name):
+    if not _prog_has(prog, method_name):
         return False
     call_args = (
         src_arr,
@@ -7488,7 +7757,7 @@ def _try_native_tensor_member_indexed_copy(src, indices, dst, method, workspace,
         dst_offset,
         dst_stride,
     )
-    temp_bytes = getattr(prog, method_name)(*call_args)
+    temp_bytes = _prog_method(prog, method_name)(*call_args)
     if workspace is not None:
         workspace._record_native_indexed_copy_plan(
             backend,
@@ -7775,6 +8044,15 @@ def _scatter_add_value_type(dtype):
     raise TypeError("unsupported scatter_add dtype")
 
 
+def _scatter_add_replay_signature(src, indices, dst):
+    value_type = _SCATTER_ADD_VALUE_TYPE.get(getattr(src, "dtype", None))
+    n = _shape0_or_none(indices)
+    num_groups = _shape0_or_none(dst)
+    if value_type is None or n is None or num_groups is None:
+        return None
+    return value_type, n, num_groups
+
+
 def _scalar_ndarray_payload(arr):
     if _is_struct_scalar_member_view(arr):
         return arr.base.arr, arr.offset, arr.stride
@@ -7798,9 +8076,7 @@ def _try_cuda_device_scatter_add(src, indices, dst, workspace):
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "cuda_device_scatter_add_available"):
-        return False
-    if not prog.cuda_device_scatter_add_available():
+    if not _prog_available(prog, "cuda_device_scatter_add_available"):
         return False
     value_type = _scatter_add_value_type(src_view.dtype)
     if workspace is not None and workspace._try_native_scatter_add_plan(
@@ -7820,7 +8096,7 @@ def _try_cuda_device_scatter_add(src, indices, dst, workspace):
             if indices_is_dense_field
             else "cuda_device_scatter_add_dense_field"
         )
-        if not hasattr(prog, method_name):
+        if not _prog_has(prog, method_name):
             return False
         if indices_is_dense_field:
             call_args = (
@@ -7841,15 +8117,15 @@ def _try_cuda_device_scatter_add(src, indices, dst, workspace):
                 src_view.num_elements,
                 dst_view.num_elements,
             )
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     elif src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
         if not indices_is_ndarray:
-            return False
-        if not hasattr(prog, "cuda_device_scatter_add_strided_ndarray"):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
         method_name = "cuda_device_scatter_add_strided_ndarray"
+        if not _prog_has(prog, method_name):
+            return False
         call_args = (
             src_arr,
             indices.arr,
@@ -7860,13 +8136,15 @@ def _try_cuda_device_scatter_add(src, indices, dst, workspace):
             dst_offset,
             dst_stride,
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     elif src_view.is_plain_ndarray and dst_view.is_plain_ndarray:
         if not indices_is_ndarray:
             return False
         method_name = "cuda_device_scatter_add_ndarray"
+        if not _prog_has(prog, method_name):
+            return False
         call_args = (src.arr, indices.arr, dst.arr, value_type)
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     else:
         return False
     if workspace is not None:
@@ -7902,15 +8180,12 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "vulkan_scatter_add_available"):
-        return False
-    if not prog.vulkan_scatter_add_available():
+    if not _prog_available(prog, "vulkan_scatter_add_available"):
         return False
     value_type = _scatter_add_value_type(src_view.dtype)
-    if hasattr(prog, "vulkan_scatter_add_value_type_available"):
-        if not prog.vulkan_scatter_add_value_type_available(value_type):
-            return False
-    elif src_view.dtype != i32:
+    if not _prog_value_available(
+        prog, "vulkan_scatter_add_value_type_available", value_type
+    ):
         return False
     if workspace is not None and workspace._try_native_scatter_add_plan(
         src, indices, dst, "vulkan_native", value_type
@@ -7929,7 +8204,7 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
             if indices_is_dense_field
             else "vulkan_scatter_add_dense_field"
         )
-        if not hasattr(prog, method_name):
+        if not _prog_has(prog, method_name):
             return False
         if indices_is_dense_field:
             call_args = (
@@ -7950,15 +8225,15 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
                 src_view.num_elements,
                 dst_view.num_elements,
             )
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     elif src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
         if not indices_is_ndarray:
-            return False
-        if not hasattr(prog, "vulkan_scatter_add_strided_ndarray"):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
         method_name = "vulkan_scatter_add_strided_ndarray"
+        if not _prog_has(prog, method_name):
+            return False
         call_args = (
             src_arr,
             indices.arr,
@@ -7969,13 +8244,15 @@ def _try_vulkan_scatter_add(src, indices, dst, workspace):
             dst_offset,
             dst_stride,
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     elif src_view.is_plain_ndarray and dst_view.is_plain_ndarray:
         if not indices_is_ndarray:
             return False
         method_name = "vulkan_scatter_add_ndarray"
+        if not _prog_has(prog, method_name):
+            return False
         call_args = (src.arr, indices.arr, dst.arr, value_type)
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     else:
         return False
     if workspace is not None:
@@ -8011,9 +8288,7 @@ def _try_cpu_scatter_add(src, indices, dst, workspace):
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "cpu_scatter_add_available"):
-        return False
-    if not prog.cpu_scatter_add_available():
+    if not _prog_available(prog, "cpu_scatter_add_available"):
         return False
     value_type = _scatter_add_value_type(src_view.dtype)
     if workspace is not None and workspace._try_native_scatter_add_plan(
@@ -8028,7 +8303,7 @@ def _try_cpu_scatter_add(src, indices, dst, workspace):
             if indices_is_dense_field
             else "cpu_scatter_add_dense_field"
         )
-        if not hasattr(prog, method_name):
+        if not _prog_has(prog, method_name):
             return False
         if indices_is_dense_field:
             call_args = (
@@ -8049,15 +8324,15 @@ def _try_cpu_scatter_add(src, indices, dst, workspace):
                 src_view.num_elements,
                 dst_view.num_elements,
             )
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     elif src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
         if not indices_is_ndarray:
-            return False
-        if not hasattr(prog, "cpu_scatter_add_strided_ndarray"):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
         method_name = "cpu_scatter_add_strided_ndarray"
+        if not _prog_has(prog, method_name):
+            return False
         call_args = (
             src_arr,
             indices.arr,
@@ -8068,13 +8343,15 @@ def _try_cpu_scatter_add(src, indices, dst, workspace):
             dst_offset,
             dst_stride,
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     elif src_view.is_plain_ndarray and dst_view.is_plain_ndarray:
         if not indices_is_ndarray:
             return False
         method_name = "cpu_scatter_add_ndarray"
+        if not _prog_has(prog, method_name):
+            return False
         call_args = (src.arr, indices.arr, dst.arr, value_type)
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     else:
         return False
     if workspace is not None:
@@ -8109,27 +8386,19 @@ def _try_native_add_merge(src, dst, method, workspace, value_type, n):
     if workspace._try_native_add_merge_plan(src, dst, method, value_type, n):
         return True
     if backend == "cuda_device_add_merge":
-        if not (
-            hasattr(prog, "cuda_device_add_merge_available")
-            and prog.cuda_device_add_merge_available()
-        ):
+        if not _prog_available(prog, "cuda_device_add_merge_available"):
             return False
         prefix = "cuda_device"
     elif backend == "vulkan_native_add_merge":
-        if not (
-            hasattr(prog, "vulkan_add_merge_available")
-            and prog.vulkan_add_merge_available()
+        if not _prog_available(prog, "vulkan_add_merge_available"):
+            return False
+        if not _prog_value_available(
+            prog, "vulkan_add_merge_value_type_available", value_type
         ):
             return False
-        if hasattr(prog, "vulkan_add_merge_value_type_available"):
-            if not prog.vulkan_add_merge_value_type_available(value_type):
-                return False
         prefix = "vulkan"
     elif backend == "cpu_native_add_merge":
-        if not (
-            hasattr(prog, "cpu_add_merge_available")
-            and prog.cpu_add_merge_available()
-        ):
+        if not _prog_available(prog, "cpu_add_merge_available"):
             return False
         prefix = "cpu"
     else:
@@ -8143,7 +8412,7 @@ def _try_native_add_merge(src, dst, method, workspace, value_type, n):
             if prefix == "cuda_device"
             else f"{prefix}_add_merge_dense_field"
         )
-        if not hasattr(prog, method_name):
+        if not _prog_has(prog, method_name):
             return False
         call_args = (src.arr, dst_view.snode, value_type, n)
     elif src_view.is_struct_scalar_member or dst_view.is_struct_scalar_member:
@@ -8152,7 +8421,7 @@ def _try_native_add_merge(src, dst, method, workspace, value_type, n):
             if prefix == "cuda_device"
             else f"{prefix}_add_merge_strided_ndarray"
         )
-        if not hasattr(prog, method_name):
+        if not _prog_has(prog, method_name):
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
@@ -8171,12 +8440,12 @@ def _try_native_add_merge(src, dst, method, workspace, value_type, n):
             if prefix == "cuda_device"
             else f"{prefix}_add_merge_ndarray"
         )
-        if not hasattr(prog, method_name):
+        if not _prog_has(prog, method_name):
             return False
         call_args = (src.arr, dst.arr, value_type)
     else:
         return False
-    temp_bytes = getattr(prog, method_name)(*call_args)
+    temp_bytes = _prog_method(prog, method_name)(*call_args)
     workspace._mark_native_scatter_add_backend_active(backend, temp_bytes)
     workspace._record_native_add_merge_plan(
         backend, method_name, src, dst, value_type, call_args, n, prog
@@ -8403,8 +8672,9 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
         return workspace
 
     if workspace is not None and isinstance(workspace, ScatterAddWorkspace):
-        try:
-            value_type = _scatter_add_value_type(src.dtype)
+        signature = _scatter_add_replay_signature(src, indices, dst)
+        if signature is not None:
+            value_type, _, _ = signature
             if workspace._try_two_level_scatter_add_plan_group(
                 src, indices, dst, method, value_type
             ):
@@ -8413,8 +8683,6 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
                 src, indices, dst, method, value_type
             ):
                 return workspace
-        except (AttributeError, TypeError):
-            pass
 
     _check_scatter_add_request(src, indices, dst, method, workspace)
     n = indices.shape[0]
@@ -8548,6 +8816,15 @@ def _bucket_builder_value_type(values):
     )
 
 
+def _bucket_builder_replay_signature(keys, values, offsets):
+    value_type = _raw_payload_value_type_or_none(values, _BUCKET_BUILDER_VALUE_TYPE)
+    n = _shape0_or_none(keys)
+    offsets_len = _shape0_or_none(offsets)
+    if value_type is None or n is None or offsets_len is None or offsets_len < 1:
+        return None
+    return value_type, n, offsets_len - 1
+
+
 def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, num_bins):
     if current_cfg().arch != cuda:
         return False
@@ -8565,9 +8842,7 @@ def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, nu
 
     impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "cuda_device_bucket_builder_available"):
-        return False
-    if not prog.cuda_device_bucket_builder_available():
+    if not _prog_available(prog, "cuda_device_bucket_builder_available"):
         return False
     cursor = workspace._get_cursor_ndarray(num_bins)
     value_type = _bucket_builder_value_type(values)
@@ -8583,7 +8858,7 @@ def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, nu
             and views[1].stride == value_size
             and views[2].stride == 4
             and views[3].stride == value_size
-            and hasattr(prog, "cuda_device_bucket_builder_dense_field")
+            and _prog_has(prog, "cuda_device_bucket_builder_dense_field")
         ):
             return False
         method_name = "cuda_device_bucket_builder_dense_field"
@@ -8597,19 +8872,21 @@ def _try_cuda_device_bucket_builder(keys, values, offsets, output, workspace, nu
             n,
             num_bins,
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
-    elif hasattr(prog, "cuda_device_bucket_builder_ndarray"):
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
+    elif _prog_has(prog, "cuda_device_bucket_builder_ndarray"):
         method_name = "cuda_device_bucket_builder_ndarray"
         call_args = (
             keys.arr, values.arr, offsets.arr, output.arr, cursor.arr, value_type
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     elif value_type == 0:
         method_name = "cuda_device_bucket_builder_i32_ndarray"
+        if not _prog_has(prog, method_name):
+            return False
         call_args = (
             keys.arr, values.arr, offsets.arr, output.arr, cursor.arr
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     else:
         return False
     workspace._mark_native_bucket_builder_backend_active(
@@ -8647,15 +8924,12 @@ def _try_vulkan_bucket_builder(keys, values, offsets, output, workspace, num_bin
 
     impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "vulkan_bucket_builder_available"):
-        return False
-    if not prog.vulkan_bucket_builder_available():
+    if not _prog_available(prog, "vulkan_bucket_builder_available"):
         return False
     value_type = _bucket_builder_value_type(values)
-    if hasattr(prog, "vulkan_bucket_builder_value_type_available"):
-        if not prog.vulkan_bucket_builder_value_type_available(value_type):
-            return False
-    elif value_type != 0:
+    if not _prog_value_available(
+        prog, "vulkan_bucket_builder_value_type_available", value_type
+    ):
         return False
     cursor = workspace._get_cursor_ndarray(num_bins)
     n = keys.shape[0]
@@ -8670,7 +8944,7 @@ def _try_vulkan_bucket_builder(keys, values, offsets, output, workspace, num_bin
             and views[1].stride == value_size
             and views[2].stride == 4
             and views[3].stride == value_size
-            and hasattr(prog, "vulkan_bucket_builder_dense_field")
+            and _prog_has(prog, "vulkan_bucket_builder_dense_field")
         ):
             return False
         method_name = "vulkan_bucket_builder_dense_field"
@@ -8684,19 +8958,21 @@ def _try_vulkan_bucket_builder(keys, values, offsets, output, workspace, num_bin
             n,
             num_bins,
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
-    elif hasattr(prog, "vulkan_bucket_builder_ndarray"):
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
+    elif _prog_has(prog, "vulkan_bucket_builder_ndarray"):
         method_name = "vulkan_bucket_builder_ndarray"
         call_args = (
             keys.arr, values.arr, offsets.arr, output.arr, cursor.arr, value_type
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     else:
         method_name = "vulkan_bucket_builder_i32_ndarray"
+        if not _prog_has(prog, method_name):
+            return False
         call_args = (
             keys.arr, values.arr, offsets.arr, output.arr, cursor.arr
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     workspace._mark_native_bucket_builder_backend_active(
         "vulkan_native_bucket_builder", temp_bytes
     )
@@ -8732,9 +9008,7 @@ def _try_cpu_bucket_builder(keys, values, offsets, output, workspace):
 
     impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "cpu_bucket_builder_available"):
-        return False
-    if not prog.cpu_bucket_builder_available():
+    if not _prog_available(prog, "cpu_bucket_builder_available"):
         return False
     value_type = _bucket_builder_value_type(values)
     n = keys.shape[0]
@@ -8750,7 +9024,7 @@ def _try_cpu_bucket_builder(keys, values, offsets, output, workspace):
             and views[1].stride == value_size
             and views[2].stride == 4
             and views[3].stride == value_size
-            and hasattr(prog, "cpu_bucket_builder_dense_field")
+            and _prog_has(prog, "cpu_bucket_builder_dense_field")
         ):
             return False
         method_name = "cpu_bucket_builder_dense_field"
@@ -8763,19 +9037,21 @@ def _try_cpu_bucket_builder(keys, values, offsets, output, workspace):
             n,
             num_bins,
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
-    elif hasattr(prog, "cpu_bucket_builder_ndarray"):
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
+    elif _prog_has(prog, "cpu_bucket_builder_ndarray"):
         method_name = "cpu_bucket_builder_ndarray"
         call_args = (
             keys.arr, values.arr, offsets.arr, output.arr, value_type
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     elif value_type == 0:
         method_name = "cpu_bucket_builder_i32_ndarray"
+        if not _prog_has(prog, method_name):
+            return False
         call_args = (
             keys.arr, values.arr, offsets.arr, output.arr
         )
-        temp_bytes = getattr(prog, method_name)(*call_args)
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
     else:
         return False
     workspace._mark_native_bucket_builder_backend_active(
@@ -8901,16 +9177,13 @@ def experimental_bucket_builder(
             "cpu_native",
             "cpu_two_level",
         ):
-            try:
-                n = keys.shape[0]
-                num_bins = offsets.shape[0] - 1
-                value_type = _bucket_builder_value_type(values)
+            signature = _bucket_builder_replay_signature(keys, values, offsets)
+            if signature is not None:
+                value_type, n, num_bins = signature
                 if workspace._try_native_bucket_builder_plan(
                     keys, values, offsets, output, value_type, n, num_bins
                 ):
                     return workspace
-            except (AttributeError, TypeError, ValueError):
-                pass
 
     _check_bucket_builder_request(keys, values, offsets, output, method, workspace)
     n = keys.shape[0]
@@ -9029,6 +9302,18 @@ def _grouped_reduce_value_type(dtype):
     raise TypeError("unsupported grouped_reduce dtype")
 
 
+def _grouped_reduce_replay_signature(keys, values, output, op):
+    value_type = _GROUPED_REDUCE_VALUE_TYPE.get(
+        getattr(values, "dtype", getattr(values, "scalar_dtype", None))
+    )
+    op_id = _SUPPORTED_GROUPED_REDUCE_OPS.get(op)
+    n = _shape0_or_none(keys)
+    num_groups = _shape0_or_none(output)
+    if value_type is None or op_id is None or n is None or num_groups is None:
+        return None
+    return value_type, op_id, n, num_groups
+
+
 def _try_cuda_device_grouped_reduce(
     keys, values, output, workspace, num_groups, op, *, segmented=False
 ):
@@ -9049,9 +9334,7 @@ def _try_cuda_device_grouped_reduce(
 
     impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "cuda_device_grouped_reduce_available"):
-        return False
-    if not prog.cuda_device_grouped_reduce_available():
+    if not _prog_available(prog, "cuda_device_grouped_reduce_available"):
         return False
     value_type = _grouped_reduce_value_type(values.dtype)
     op_id = _SUPPORTED_GROUPED_REDUCE_OPS[op]
@@ -9086,7 +9369,7 @@ def _try_cuda_device_grouped_reduce(
             views[0].stride == 4
             and views[1].stride == value_size
             and views[2].stride == value_size
-            and hasattr(prog, "cuda_device_grouped_reduce_atomic_dense_field")
+            and _prog_has(prog, "cuda_device_grouped_reduce_atomic_dense_field")
         ):
             return False
         call_args = (
@@ -9098,18 +9381,20 @@ def _try_cuda_device_grouped_reduce(
             num_groups,
             op_id,
         )
-        temp_bytes = prog.cuda_device_grouped_reduce_atomic_dense_field(*call_args)
+        temp_bytes = _prog_method(
+            prog, "cuda_device_grouped_reduce_atomic_dense_field"
+        )(*call_args)
         return finish(
             "cuda_device_grouped_reduce_atomic_dense_field", call_args, temp_bytes
         )
-    if (keys_is_member or values_is_member or output_is_member) and hasattr(
+    if (keys_is_member or values_is_member or output_is_member) and _prog_has(
         prog, "cuda_device_grouped_reduce_atomic_strided_keys_ndarray"
     ):
         if segmented:
-            if not hasattr(
-                prog,
-                "cuda_device_grouped_reduce_segmented_strided_keys_ndarray",
-            ):
+            method = _prog_method(
+                prog, "cuda_device_grouped_reduce_segmented_strided_keys_ndarray"
+            )
+            if method is None:
                 return False
             offsets, scratch, cursor = workspace._get_native_buffers_typed(
                 keys.shape[0], num_groups, values.dtype
@@ -9133,9 +9418,7 @@ def _try_cuda_device_grouped_reduce(
                 output_stride,
                 op_id,
             )
-            temp_bytes = prog.cuda_device_grouped_reduce_segmented_strided_keys_ndarray(
-                *call_args
-            )
+            temp_bytes = method(*call_args)
             return finish(
                 "cuda_device_grouped_reduce_segmented_strided_keys_ndarray",
                 call_args,
@@ -9157,9 +9440,9 @@ def _try_cuda_device_grouped_reduce(
             output_stride,
             op_id,
         )
-        temp_bytes = prog.cuda_device_grouped_reduce_atomic_strided_keys_ndarray(
-            *call_args
-        )
+        temp_bytes = _prog_method(
+            prog, "cuda_device_grouped_reduce_atomic_strided_keys_ndarray"
+        )(*call_args)
         return finish(
             "cuda_device_grouped_reduce_atomic_strided_keys_ndarray",
             call_args,
@@ -9167,21 +9450,25 @@ def _try_cuda_device_grouped_reduce(
         )
     if keys_is_member or values_is_member or output_is_member:
         return False
-    if not segmented and hasattr(prog, "cuda_device_grouped_reduce_atomic_ndarray"):
+    if not segmented and _prog_has(prog, "cuda_device_grouped_reduce_atomic_ndarray"):
         call_args = (keys.arr, values.arr, output.arr, value_type, op_id)
-        temp_bytes = prog.cuda_device_grouped_reduce_atomic_ndarray(*call_args)
+        temp_bytes = _prog_method(
+            prog, "cuda_device_grouped_reduce_atomic_ndarray"
+        )(*call_args)
         return finish(
             "cuda_device_grouped_reduce_atomic_ndarray", call_args, temp_bytes
         )
-    if not segmented and value_type == 0 and hasattr(
+    if not segmented and value_type == 0 and _prog_has(
         prog, "cuda_device_grouped_reduce_i32_atomic_ndarray"
     ):
         call_args = (keys.arr, values.arr, output.arr, op_id)
-        temp_bytes = prog.cuda_device_grouped_reduce_i32_atomic_ndarray(*call_args)
+        temp_bytes = _prog_method(
+            prog, "cuda_device_grouped_reduce_i32_atomic_ndarray"
+        )(*call_args)
         return finish(
             "cuda_device_grouped_reduce_i32_atomic_ndarray", call_args, temp_bytes
         )
-    if segmented and hasattr(prog, "cuda_device_grouped_reduce_ndarray"):
+    if segmented and _prog_has(prog, "cuda_device_grouped_reduce_ndarray"):
         offsets, scratch, cursor = workspace._get_native_buffers_typed(
             n, num_groups, values.dtype
         )
@@ -9195,11 +9482,13 @@ def _try_cuda_device_grouped_reduce(
             value_type,
             op_id,
         )
-        temp_bytes = prog.cuda_device_grouped_reduce_ndarray(*call_args)
+        temp_bytes = _prog_method(prog, "cuda_device_grouped_reduce_ndarray")(
+            *call_args
+        )
         return finish("cuda_device_grouped_reduce_ndarray", call_args, temp_bytes)
     if segmented and value_type != 0:
         return False
-    if not hasattr(prog, "cuda_device_grouped_reduce_i32_ndarray"):
+    if not _prog_has(prog, "cuda_device_grouped_reduce_i32_ndarray"):
         return False
     offsets, scratch, cursor = workspace._get_native_buffers(n, num_groups)
     call_args = (
@@ -9211,7 +9500,9 @@ def _try_cuda_device_grouped_reduce(
         cursor.arr,
         op_id,
     )
-    temp_bytes = prog.cuda_device_grouped_reduce_i32_ndarray(*call_args)
+    temp_bytes = _prog_method(prog, "cuda_device_grouped_reduce_i32_ndarray")(
+        *call_args
+    )
     return finish("cuda_device_grouped_reduce_i32_ndarray", call_args, temp_bytes)
 
 
@@ -9237,22 +9528,16 @@ def _try_vulkan_grouped_reduce(
 
     impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "vulkan_grouped_reduce_available"):
-        return False
-    if not prog.vulkan_grouped_reduce_available():
+    if not _prog_available(prog, "vulkan_grouped_reduce_available"):
         return False
     value_type = _grouped_reduce_value_type(values.dtype)
-    if not segmented and hasattr(
-        prog, "vulkan_grouped_reduce_atomic_value_type_available"
+    if not segmented and not _prog_value_available(
+        prog, "vulkan_grouped_reduce_atomic_value_type_available", value_type
     ):
-        if not prog.vulkan_grouped_reduce_atomic_value_type_available(value_type):
-            return False
-    elif not segmented and value_type not in (0, 2):
         return False
-    if segmented and hasattr(prog, "vulkan_grouped_reduce_value_type_available"):
-        if not prog.vulkan_grouped_reduce_value_type_available(value_type):
-            return False
-    elif segmented and values.dtype != i32:
+    if segmented and not _prog_value_available(
+        prog, "vulkan_grouped_reduce_value_type_available", value_type
+    ):
         return False
     op_id = _SUPPORTED_GROUPED_REDUCE_OPS[op]
     n = keys.shape[0]
@@ -9287,7 +9572,7 @@ def _try_vulkan_grouped_reduce(
             views[0].stride == 4
             and views[1].stride == value_size
             and views[2].stride == value_size
-            and hasattr(prog, "vulkan_grouped_reduce_atomic_dense_field")
+            and _prog_has(prog, "vulkan_grouped_reduce_atomic_dense_field")
         ):
             return False
         call_args = (
@@ -9299,14 +9584,16 @@ def _try_vulkan_grouped_reduce(
             num_groups,
             op_id,
         )
-        temp_bytes = prog.vulkan_grouped_reduce_atomic_dense_field(*call_args)
+        temp_bytes = _prog_method(
+            prog, "vulkan_grouped_reduce_atomic_dense_field"
+        )(*call_args)
         return finish(
             "vulkan_grouped_reduce_atomic_dense_field", call_args, temp_bytes
         )
     if (
         (keys_is_member or values_is_member or output_is_member)
         and not segmented
-        and hasattr(prog, "vulkan_grouped_reduce_atomic_strided_keys_ndarray")
+        and _prog_has(prog, "vulkan_grouped_reduce_atomic_strided_keys_ndarray")
     ):
         keys_arr, keys_offset, keys_stride = _scalar_ndarray_payload(keys)
         values_arr, values_offset, values_stride = _scalar_ndarray_payload(values)
@@ -9324,9 +9611,9 @@ def _try_vulkan_grouped_reduce(
             output_stride,
             op_id,
         )
-        temp_bytes = prog.vulkan_grouped_reduce_atomic_strided_keys_ndarray(
-            *call_args
-        )
+        temp_bytes = _prog_method(
+            prog, "vulkan_grouped_reduce_atomic_strided_keys_ndarray"
+        )(*call_args)
         return finish(
             "vulkan_grouped_reduce_atomic_strided_keys_ndarray",
             call_args,
@@ -9334,21 +9621,25 @@ def _try_vulkan_grouped_reduce(
         )
     if keys_is_member or values_is_member or output_is_member:
         return False
-    if not segmented and hasattr(prog, "vulkan_grouped_reduce_atomic_ndarray"):
+    if not segmented and _prog_has(prog, "vulkan_grouped_reduce_atomic_ndarray"):
         call_args = (keys.arr, values.arr, output.arr, value_type, op_id)
-        temp_bytes = prog.vulkan_grouped_reduce_atomic_ndarray(*call_args)
+        temp_bytes = _prog_method(
+            prog, "vulkan_grouped_reduce_atomic_ndarray"
+        )(*call_args)
         return finish(
             "vulkan_grouped_reduce_atomic_ndarray", call_args, temp_bytes
         )
-    if not segmented and value_type == 0 and hasattr(
+    if not segmented and value_type == 0 and _prog_has(
         prog, "vulkan_grouped_reduce_i32_atomic_ndarray"
     ):
         call_args = (keys.arr, values.arr, output.arr, op_id)
-        temp_bytes = prog.vulkan_grouped_reduce_i32_atomic_ndarray(*call_args)
+        temp_bytes = _prog_method(
+            prog, "vulkan_grouped_reduce_i32_atomic_ndarray"
+        )(*call_args)
         return finish(
             "vulkan_grouped_reduce_i32_atomic_ndarray", call_args, temp_bytes
         )
-    if segmented and hasattr(prog, "vulkan_grouped_reduce_ndarray"):
+    if segmented and _prog_has(prog, "vulkan_grouped_reduce_ndarray"):
         offsets, scratch, cursor = workspace._get_native_buffers_typed(
             n, num_groups, values.dtype
         )
@@ -9362,11 +9653,13 @@ def _try_vulkan_grouped_reduce(
             value_type,
             op_id,
         )
-        temp_bytes = prog.vulkan_grouped_reduce_ndarray(*call_args)
+        temp_bytes = _prog_method(prog, "vulkan_grouped_reduce_ndarray")(
+            *call_args
+        )
         return finish("vulkan_grouped_reduce_ndarray", call_args, temp_bytes)
     if segmented and value_type != 0:
         return False
-    if not hasattr(prog, "vulkan_grouped_reduce_i32_ndarray"):
+    if not _prog_has(prog, "vulkan_grouped_reduce_i32_ndarray"):
         return False
     offsets, scratch, cursor = workspace._get_native_buffers(n, num_groups)
     call_args = (
@@ -9378,7 +9671,7 @@ def _try_vulkan_grouped_reduce(
         cursor.arr,
         op_id,
     )
-    temp_bytes = prog.vulkan_grouped_reduce_i32_ndarray(*call_args)
+    temp_bytes = _prog_method(prog, "vulkan_grouped_reduce_i32_ndarray")(*call_args)
     return finish("vulkan_grouped_reduce_i32_ndarray", call_args, temp_bytes)
 
 
@@ -9489,9 +9782,7 @@ def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
 
     impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
-    if not hasattr(prog, "cpu_grouped_reduce_available"):
-        return False
-    if not prog.cpu_grouped_reduce_available():
+    if not _prog_available(prog, "cpu_grouped_reduce_available"):
         return False
     value_type = _grouped_reduce_value_type(values.dtype)
     op_id = _SUPPORTED_GROUPED_REDUCE_OPS[op]
@@ -9526,7 +9817,7 @@ def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
             views[0].stride == 4
             and views[1].stride == value_size
             and views[2].stride == value_size
-            and hasattr(prog, "cpu_grouped_reduce_dense_field")
+            and _prog_has(prog, "cpu_grouped_reduce_dense_field")
         ):
             return False
         call_args = (
@@ -9538,9 +9829,9 @@ def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
             num_groups,
             op_id,
         )
-        temp_bytes = prog.cpu_grouped_reduce_dense_field(*call_args)
+        temp_bytes = _prog_method(prog, "cpu_grouped_reduce_dense_field")(*call_args)
         return finish("cpu_grouped_reduce_dense_field", call_args, temp_bytes)
-    elif (keys_is_member or values_is_member or output_is_member) and hasattr(
+    elif (keys_is_member or values_is_member or output_is_member) and _prog_has(
         prog, "cpu_grouped_reduce_strided_keys_ndarray"
     ):
         keys_arr, keys_offset, keys_stride = _scalar_ndarray_payload(keys)
@@ -9559,21 +9850,27 @@ def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
             output_stride,
             op_id,
         )
-        temp_bytes = prog.cpu_grouped_reduce_strided_keys_ndarray(*call_args)
+        temp_bytes = _prog_method(
+            prog, "cpu_grouped_reduce_strided_keys_ndarray"
+        )(*call_args)
         return finish(
             "cpu_grouped_reduce_strided_keys_ndarray", call_args, temp_bytes
         )
     elif keys_is_member or values_is_member or output_is_member:
         return False
-    elif hasattr(prog, "cpu_grouped_reduce_ndarray"):
+    elif _prog_has(prog, "cpu_grouped_reduce_ndarray"):
         call_args = (keys.arr, values.arr, output.arr, value_type, op_id)
-        temp_bytes = prog.cpu_grouped_reduce_ndarray(*call_args)
+        temp_bytes = _prog_method(prog, "cpu_grouped_reduce_ndarray")(*call_args)
         return finish("cpu_grouped_reduce_ndarray", call_args, temp_bytes)
     else:
         if value_type != 0:
             return False
+        if not _prog_has(prog, "cpu_grouped_reduce_i32_ndarray"):
+            return False
         call_args = (keys.arr, values.arr, output.arr, op_id)
-        temp_bytes = prog.cpu_grouped_reduce_i32_ndarray(*call_args)
+        temp_bytes = _prog_method(prog, "cpu_grouped_reduce_i32_ndarray")(
+            *call_args
+        )
         return finish("cpu_grouped_reduce_i32_ndarray", call_args, temp_bytes)
 
 
@@ -9693,11 +9990,9 @@ def experimental_grouped_reduce(
         )
         backend = workspace._native_grouped_reduce_backend_for_method(method)
         if aggregation_backend is not None and backend is not None:
-            try:
-                value_type = _grouped_reduce_value_type(values.dtype)
-                op_id = _SUPPORTED_GROUPED_REDUCE_OPS[op]
-                n = keys.shape[0]
-                num_groups = output.shape[0]
+            signature = _grouped_reduce_replay_signature(keys, values, output, op)
+            if signature is not None:
+                value_type, op_id, n, num_groups = signature
                 if aggregation_backend == "vulkan_two_level" and workspace._try_staged_grouped_reduce_plan_group(
                     keys, values, output, method, value_type, op_id, n, num_groups
                 ):
@@ -9706,8 +10001,6 @@ def experimental_grouped_reduce(
                     backend, keys, values, output, value_type, op_id, n, num_groups
                 ):
                     return workspace
-            except (AttributeError, KeyError, TypeError, ValueError):
-                pass
 
     _check_grouped_reduce_request(keys, values, output, op, method, workspace)
     n = keys.shape[0]
@@ -9938,17 +10231,14 @@ class PrefixSumExecutor:
         if view.is_dense_field:
             impl.get_runtime().materialize()
         prog = impl.get_runtime().prog
-        if not hasattr(prog, "cuda_cub_scan_available"):
-            return False
-        if not prog.cuda_cub_scan_available():
+        if not _prog_available(prog, "cuda_cub_scan_available"):
             return False
         value_type = self._scan_value_type(view.dtype)
         if view.is_dense_field:
-            if not hasattr(prog, "cuda_cub_inclusive_scan_dense_field"):
+            method = _prog_method(prog, "cuda_cub_inclusive_scan_dense_field")
+            if method is None:
                 return False
-            prog.cuda_cub_inclusive_scan_dense_field(
-                view.snode, value_type, view.num_elements
-            )
+            method(view.snode, value_type, view.num_elements)
             self._record_native_scan_plan(
                 "cuda_cub",
                 "cuda_cub_inclusive_scan_dense_field",
@@ -9958,11 +10248,10 @@ class PrefixSumExecutor:
                 prog,
             )
         elif view.is_struct_scalar_member:
-            if not hasattr(prog, "cuda_cub_inclusive_scan_member_ndarray"):
+            method = _prog_method(prog, "cuda_cub_inclusive_scan_member_ndarray")
+            if method is None:
                 return False
-            prog.cuda_cub_inclusive_scan_member_ndarray(
-                view.payload_arr, value_type, view.offset, view.stride
-            )
+            method(view.payload_arr, value_type, view.offset, view.stride)
             self._record_native_scan_plan(
                 "cuda_cub",
                 "cuda_cub_inclusive_scan_member_ndarray",
@@ -9972,7 +10261,10 @@ class PrefixSumExecutor:
                 prog,
             )
         else:
-            prog.cuda_cub_inclusive_scan_ndarray(view.payload_arr, value_type)
+            method = _prog_method(prog, "cuda_cub_inclusive_scan_ndarray")
+            if method is None:
+                return False
+            method(view.payload_arr, value_type)
             self._record_native_scan_plan(
                 "cuda_cub",
                 "cuda_cub_inclusive_scan_ndarray",
@@ -9994,22 +10286,18 @@ class PrefixSumExecutor:
         if view.is_dense_field:
             impl.get_runtime().materialize()
         prog = impl.get_runtime().prog
-        if not hasattr(prog, "vulkan_scan_available"):
-            return False
-        if not prog.vulkan_scan_available():
+        if not _prog_available(prog, "vulkan_scan_available"):
             return False
         value_type = self._scan_value_type(view.dtype)
-        if hasattr(prog, "vulkan_scan_value_type_available"):
-            if not prog.vulkan_scan_value_type_available(value_type):
-                return False
-        elif view.dtype != i32:
+        if not _prog_value_available(
+            prog, "vulkan_scan_value_type_available", value_type
+        ):
             return False
         if view.is_dense_field:
-            if not hasattr(prog, "vulkan_inclusive_scan_dense_field"):
+            method = _prog_method(prog, "vulkan_inclusive_scan_dense_field")
+            if method is None:
                 return False
-            prog.vulkan_inclusive_scan_dense_field(
-                view.snode, value_type, view.num_elements
-            )
+            method(view.snode, value_type, view.num_elements)
             self._record_native_scan_plan(
                 "vulkan_native",
                 "vulkan_inclusive_scan_dense_field",
@@ -10019,11 +10307,10 @@ class PrefixSumExecutor:
                 prog,
             )
         elif view.is_struct_scalar_member:
-            if not hasattr(prog, "vulkan_inclusive_scan_member_ndarray"):
+            method = _prog_method(prog, "vulkan_inclusive_scan_member_ndarray")
+            if method is None:
                 return False
-            prog.vulkan_inclusive_scan_member_ndarray(
-                view.payload_arr, value_type, view.offset, view.stride
-            )
+            method(view.payload_arr, value_type, view.offset, view.stride)
             self._record_native_scan_plan(
                 "vulkan_native",
                 "vulkan_inclusive_scan_member_ndarray",
@@ -10033,7 +10320,10 @@ class PrefixSumExecutor:
                 prog,
             )
         else:
-            prog.vulkan_inclusive_scan_ndarray(view.payload_arr, value_type)
+            method = _prog_method(prog, "vulkan_inclusive_scan_ndarray")
+            if method is None:
+                return False
+            method(view.payload_arr, value_type)
             self._record_native_scan_plan(
                 "vulkan_native",
                 "vulkan_inclusive_scan_ndarray",
@@ -10055,17 +10345,14 @@ class PrefixSumExecutor:
         if view.is_dense_field:
             impl.get_runtime().materialize()
         prog = impl.get_runtime().prog
-        if not hasattr(prog, "cpu_scan_available"):
-            return False
-        if not prog.cpu_scan_available():
+        if not _prog_available(prog, "cpu_scan_available"):
             return False
         value_type = self._scan_value_type(view.dtype)
         if view.is_dense_field:
-            if not hasattr(prog, "cpu_inclusive_scan_dense_field"):
+            method = _prog_method(prog, "cpu_inclusive_scan_dense_field")
+            if method is None:
                 return False
-            prog.cpu_inclusive_scan_dense_field(
-                view.snode, value_type, view.num_elements
-            )
+            method(view.snode, value_type, view.num_elements)
             self._record_native_scan_plan(
                 "cpu_native",
                 "cpu_inclusive_scan_dense_field",
@@ -10075,11 +10362,10 @@ class PrefixSumExecutor:
                 prog,
             )
         elif view.is_struct_scalar_member:
-            if not hasattr(prog, "cpu_inclusive_scan_member_ndarray"):
+            method = _prog_method(prog, "cpu_inclusive_scan_member_ndarray")
+            if method is None:
                 return False
-            prog.cpu_inclusive_scan_member_ndarray(
-                view.payload_arr, value_type, view.offset, view.stride
-            )
+            method(view.payload_arr, value_type, view.offset, view.stride)
             self._record_native_scan_plan(
                 "cpu_native",
                 "cpu_inclusive_scan_member_ndarray",
@@ -10089,7 +10375,10 @@ class PrefixSumExecutor:
                 prog,
             )
         else:
-            prog.cpu_inclusive_scan_ndarray(view.payload_arr, value_type)
+            method = _prog_method(prog, "cpu_inclusive_scan_ndarray")
+            if method is None:
+                return False
+            method(view.payload_arr, value_type)
             self._record_native_scan_plan(
                 "cpu_native",
                 "cpu_inclusive_scan_ndarray",

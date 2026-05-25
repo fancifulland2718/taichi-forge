@@ -296,6 +296,21 @@ std::size_t cpu_stable_sort_raw_values(KeyT *keys,
          sorted_values.size();
 }
 
+std::size_t sort_key_type_size(int key_type) {
+  switch (key_type) {
+    case 0:
+    case 1:
+    case 2:
+      return sizeof(uint32_t);
+    case 3:
+    case 4:
+    case 5:
+      return sizeof(uint64_t);
+    default:
+      return 0;
+  }
+}
+
 template <typename ValueT, typename CounterT>
 struct CpuHistogramTaskContext {
   const ValueT *values{nullptr};
@@ -3621,6 +3636,13 @@ StreamSemaphore Program::flush() {
   return program_impl_->flush();
 }
 
+StreamSemaphore Program::flush_if_pending() {
+  if (auto *gfx_program = dynamic_cast<GfxProgramImpl *>(program_impl_.get())) {
+    return gfx_program->flush_if_pending();
+  }
+  return program_impl_->flush();
+}
+
 int Program::get_snode_tree_size() {
   return snode_trees_.size();
 }
@@ -5818,6 +5840,74 @@ std::size_t Program::cuda_cub_radix_sort_ndarray(Ndarray *keys,
 #endif
 }
 
+std::size_t Program::cuda_cub_radix_sort_dense_field(SNode *keys,
+                                                     SNode *values,
+                                                     int key_type,
+                                                     int value_type,
+                                                     std::size_t n,
+                                                     int mode,
+                                                     int nan_policy) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB dense field sort is only available on CUDA.");
+  TI_ERROR_IF(!keys, "CUDA CUB dense field sort received null keys.");
+#ifdef TI_WITH_CUDA
+  const std::size_t expected_key_size = sort_key_type_size(key_type);
+  const std::size_t expected_value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_key_size == 0,
+              "CUDA CUB dense field sort received an unsupported key type.");
+  TI_ERROR_IF(mode < 0 || mode > 1,
+              "CUDA CUB dense field sort received an unsupported sort mode.");
+  TI_ERROR_IF(nan_policy < 0 || nan_policy > 1,
+              "CUDA CUB dense field sort received an unsupported NaN policy.");
+  const bool has_values = values != nullptr;
+  TI_ERROR_IF(has_values && expected_value_size == 0,
+              "CUDA CUB dense field sort received an unsupported value type.");
+  const std::size_t key_stride = get_dense_field_stride(keys, expected_key_size);
+  TI_ERROR_IF(key_stride != expected_key_size,
+              "CUDA CUB dense field sort requires contiguous dense field keys.");
+  std::size_t value_stride = 0;
+  if (has_values) {
+    value_stride = get_dense_field_stride(values, expected_value_size);
+    TI_ERROR_IF(value_stride != expected_value_size,
+                "CUDA CUB dense field sort requires contiguous dense field values.");
+  }
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB dense field sort currently supports at most INT_MAX items.");
+  if (n <= 1) {
+    return 0;
+  }
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *key_ptr =
+      raw_ptr(get_dense_field_device_ptr(keys), "CUDA CUB dense field sort");
+  void *value_ptr =
+      has_values
+          ? raw_ptr(get_dense_field_device_ptr(values),
+                    "CUDA CUB dense field sort")
+          : nullptr;
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_radix_sort(
+      key_ptr, value_ptr, static_cast<int>(n),
+      static_cast<cuda::CubSortKeyType>(key_type),
+      static_cast<cuda::CubSortValueType>(value_type),
+      static_cast<cuda::CubSortMode>(mode),
+      static_cast<cuda::CubSortNanPolicy>(nan_policy), has_values,
+      has_values ? static_cast<int>(value_stride / sizeof(uint32_t)) : 0,
+      stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB dense field sort requires building Taichi with TI_WITH_CUDA=ON "
+      "and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 void Program::cuda_cub_radix_sort_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
@@ -5951,6 +6041,74 @@ std::size_t Program::cpu_stable_sort_ndarray(Ndarray *keys,
           descending, nan_policy);
     default:
       TI_ERROR("CPU native sort received an unsupported key type.");
+  }
+}
+
+std::size_t Program::cpu_stable_sort_dense_field(SNode *keys,
+                                                 SNode *values,
+                                                 int key_type,
+                                                 int value_type,
+                                                 std::size_t n,
+                                                 bool descending,
+                                                 int nan_policy) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU dense field sort is only available on CPU backends.");
+  TI_ERROR_IF(!keys, "CPU dense field sort received null keys.");
+  TI_ERROR_IF(nan_policy < 0 || nan_policy > 1,
+              "CPU dense field sort received an unsupported NaN policy.");
+  const std::size_t key_size = sort_key_type_size(key_type);
+  TI_ERROR_IF(key_size == 0,
+              "CPU dense field sort received an unsupported key type.");
+  const bool has_values = values != nullptr;
+  const std::size_t expected_value_size =
+      has_values ? primitive_value_type_size(value_type) : 0;
+  TI_ERROR_IF(has_values && expected_value_size == 0,
+              "CPU dense field sort received an unsupported value type.");
+  if (n <= 1) {
+    return 0;
+  }
+  std::size_t key_stride = 0;
+  auto *key_ptr_bytes = map_cpu_dense_field(
+      this, keys, key_size == sizeof(uint64_t) ? 3 : 0, n,
+      "CPU dense field sort", &key_stride);
+  TI_ERROR_IF(key_stride != key_size,
+              "CPU dense field sort requires contiguous dense field keys.");
+  void *value_ptr = nullptr;
+  std::size_t value_stride = 0;
+  if (has_values) {
+    auto *value_ptr_bytes = map_cpu_dense_field(
+        this, values, value_type, n, "CPU dense field sort", &value_stride);
+    TI_ERROR_IF(value_stride != expected_value_size,
+                "CPU dense field sort requires contiguous dense field values.");
+    value_ptr = value_ptr_bytes;
+  }
+  switch (key_type) {
+    case 0:
+      return cpu_stable_sort_value_dispatch(
+          reinterpret_cast<uint32_t *>(key_ptr_bytes), value_ptr, n,
+          value_type, descending, nan_policy);
+    case 1:
+      return cpu_stable_sort_value_dispatch(
+          reinterpret_cast<int32_t *>(key_ptr_bytes), value_ptr, n, value_type,
+          descending, nan_policy);
+    case 2:
+      return cpu_stable_sort_value_dispatch(
+          reinterpret_cast<float *>(key_ptr_bytes), value_ptr, n, value_type,
+          descending, nan_policy);
+    case 3:
+      return cpu_stable_sort_value_dispatch(
+          reinterpret_cast<uint64_t *>(key_ptr_bytes), value_ptr, n,
+          value_type, descending, nan_policy);
+    case 4:
+      return cpu_stable_sort_value_dispatch(
+          reinterpret_cast<int64_t *>(key_ptr_bytes), value_ptr, n, value_type,
+          descending, nan_policy);
+    case 5:
+      return cpu_stable_sort_value_dispatch(
+          reinterpret_cast<double *>(key_ptr_bytes), value_ptr, n, value_type,
+          descending, nan_policy);
+    default:
+      TI_ERROR("CPU dense field sort received an unsupported key type.");
   }
 }
 

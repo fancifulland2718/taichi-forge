@@ -1,4 +1,4 @@
-import gc
+﻿import gc
 
 import numpy as np
 import pytest
@@ -196,7 +196,7 @@ def test_experimental_bucket_builder_cpu_native_struct_tensor_member_views():
     assert copy_workspace is not None
     assert copy_workspace._native_indexed_copy_plan is not None
     assert (
-        copy_workspace._native_indexed_copy_plan["method_name"]
+        copy_workspace._native_indexed_copy_plan.method_name
         == "cpu_gather_strided_ndarray"
     )
 

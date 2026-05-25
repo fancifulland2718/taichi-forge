@@ -1822,12 +1822,247 @@ bucket-builder 和后续 solver primitive。
 当前决定暂缓继续推进运行时专项优化，先保留问题和后续判断依据，避免在缺少
 物理引擎 workload 的情况下为了 microbenchmark 继续扩大后端复杂度。
 
+低风险例外更新：Vulkan histogram resource binding 短路径（2026-05-24）：
+
+- 按当前推荐顺序先处理 histogram，不做完整 command buffer replay，也不启用全局
+  descriptor set cache；sort 高频 radix8 内部临时资源组保持第二批处理。
+- 在 `taichi/program/vulkan_sort.cpp` 新增 primitive-local
+  `VulkanResourceSetReplayRing<N>`：每个 ring slot 维护独立
+  `VulkanRwBufferReplay<N>`，避免多槽位共用 replay 导致新 descriptor slot
+  漏绑资源。
+- 对 hot histogram 调用增加“descriptor 不变则直接复用当前 resource set”的短路径；
+  只有 values/bins/partial allocation、offset 或 byte size 变化时才推进 ring slot 并
+  更新 descriptor。这样不会更新仍可能 in-flight 的 descriptor set；ring wrap 前
+  优先扩容到 `TI_VULKAN_RESOURCE_REPLAY_RING_MAX_SIZE`，达到上限且可能复用
+  in-flight slot 时才沿用 `program->synchronize()` + rewind 的现有生命周期规则。
+- `vulkan_histogram_ndarray()` 和 `vulkan_histogram_dense_field()` 的 single-shared、
+  direct、private、private-shared、reduce-private 路径均不再在 command lambda 中
+  调用 `create_resource_set_unique()`；resource binding 在 public native path 中由
+  primitive-local ring/replay 管理。
+- 新增 `test_experimental_histogram_vulkan_native_resource_replay_ring_wrap`，将
+  `TI_VULKAN_RESOURCE_REPLAY_RING_SIZE` 和
+  `TI_VULKAN_RESOURCE_REPLAY_RING_MAX_SIZE` 压到 2，覆盖同对象 hot reuse、
+  不同 values/bins 对象交替和 ring wrap correctness。
+- 验证记录：
+  - `cmd /c _run_build.cmd` 通过，生成 fresh
+    `taichi_python.cp310-win_amd64.pyd`。
+  - `py_compile tests/python/test_histogram.py` 通过。
+  - Vulkan 定点测试通过：
+    `test_histogram.py::{vulkan_native_ndarray,vulkan_native_i64_bins_capability,
+    vulkan_native_resource_replay_ring_wrap,vulkan_native_reset_with_live_ndarray}`
+    加 `test_vulkan_native_lifecycle.py`，共 5 passed。
+  - `git diff --check -- taichi/program/vulkan_sort.cpp tests/python/test_histogram.py`
+    通过，仅有工作区既有 LF/CRLF warning。
+  - 本地 wheel 已重新打包：
+    `dist/taichi_forge-0.4.0-cp310-cp310-win_amd64.whl`。将 wheel 复制为
+    `.zip` 后解压到
+    `build_llvm20_test/wheel_smoke_vulkan_hist_replay_20260524_b`，以该目录为
+    `PYTHONPATH` 完成 `import taichi_forge` 和 `ti.init(arch=ti.cpu)` 验证；
+    仅有既有 `C:/taichi_cache/ticache.lock` warning。
+- 基准写入
+  `benchmarks/results/vulkan_hist_resource_hot_replay_repeat_20260524/summary.csv`：
+  - Forge first-call：4096/65536/1048576 分别为
+    24.696/19.600/20.574 ms；vanilla 1.8.0 为
+    30.693/26.721/26.961 ms。
+  - Forge warm median：4096/65536/1048576 分别为
+    0.198/0.205/0.216 ms；vanilla 1.8.0 为
+    0.136/0.133/0.155 ms。
+  - workspace peak 仍为 0B；Forge Vulkan dedicated peak 约 89.145MB，
+    vanilla 约 121.012MB。
+
+第二批更新：Vulkan reduce/compact/bucket/grouped-reduce resource binding
+短路径（2026-05-24）：
+
+- 仍不做完整 command buffer replay，也不启用全局 descriptor set cache；沿用
+  histogram 第一批验证过的 primitive-local `VulkanResourceSetReplayRing<N>`。
+  descriptor 内容完全一致时复用 hot resource set；descriptor 变化时推进 ring
+  slot。ring wrap 前优先扩容到 `TI_VULKAN_RESOURCE_REPLAY_RING_MAX_SIZE`；
+  达到上限且可能复用 in-flight descriptor slot 时才走
+  `program->synchronize()` + rewind，保持 descriptor lifetime 规则不变。
+- `VulkanReduceCache` 的 i32 atomic、single、single-strided、private、
+  private-strided、final 资源组改为 replay ring；reduce command lambda 内不再
+  重绑 values/partial/output/params descriptor，仅保留参数 buffer fill、dispatch
+  和必要 barrier。
+- `VulkanCompactCache` 的 flags/scatter 资源组改为 replay ring；ndarray 与
+  dense field 的 fused/non-fused compact 均在 public native path 中完成绑定。
+- `VulkanBucketBuilderCache` 的 clear/count/count-private/prefix/
+  prefix-chunks/scatter/scatter-private 资源组改为 replay ring；ndarray 与
+  dense field 的 normal/private bucket builder 均移除 lambda 内 descriptor 更新。
+- grouped-reduce 的 zero、atomic、zero-strided、atomic-strided、two-level
+  grouped-reduce sum 资源组改为 value-type 分槽 replay ring，并移除了旧的
+  per-value `ShaderResourceSet` + `VulkanRwBufferReplay` 向后实现。
+- 新增 `test_vulkan_native_batch2_resource_replay_ring_wrap`：将
+  `TI_VULKAN_RESOURCE_REPLAY_RING_SIZE=2`、
+  `TI_VULKAN_RESOURCE_REPLAY_RING_MAX_SIZE=2`，并强制覆盖 reduce private/final、
+  compact non-fused、bucket private、grouped_reduce atomic 和
+  grouped_reduce two-level/sum 路径的同对象 hot reuse、不同对象交替和 ring wrap
+  correctness。
+- 验证记录：
+  - `py_compile tests/python/test_vulkan_native_lifecycle.py` 通过。
+  - `git diff --check -- taichi/program/vulkan_sort.cpp
+    tests/python/test_vulkan_native_lifecycle.py` 通过，仅有工作区既有
+    LF/CRLF warning。
+  - `cmd /c _run_build.cmd` 通过，重新链接 fresh
+    `taichi_python.cp310-win_amd64.pyd`。
+  - 新增 ring-wrap 测试 1 passed；reduce/compact/bucket/grouped_reduce
+    Vulkan 既有定点回归 13 passed。pytest 仅报告 `tests/.pytest_cache`
+    写入权限 warning。
+- 基准写入
+  `benchmarks/results/vulkan_resource_replay_batch2_20260524/summary.csv`：
+  - first-call：Forge reduce 13.337/13.276/15.435 ms，vanilla 为
+    21.954/23.328/25.468 ms；Forge compact 43.793/38.013/38.269 ms，
+    vanilla 为 185.280/167.348/161.305 ms；Forge bucket 47.331/52.434/
+    44.332 ms，vanilla 为 87.581/82.907/71.267 ms；Forge grouped-reduce
+    18.973/22.032/21.154 ms，vanilla 为 27.349/27.173/32.513 ms。
+  - warm median：Forge reduce 0.176/0.190/0.186 ms，vanilla 为
+    0.137/0.143/0.208 ms；Forge compact 0.561/0.604/0.629 ms，vanilla 为
+    0.499/0.633/0.835 ms；Forge bucket 0.426/0.407/0.463 ms，vanilla 为
+    0.451/0.401/0.459 ms；Forge grouped-reduce 0.226/0.184/0.213 ms，
+    vanilla 为 0.132/0.140/0.142 ms。
+  - workspace peak：reduce/grouped-reduce 为 0B；compact 为 16456/263176/
+    4210760B；bucket 为 16384B。Forge Vulkan dedicated peak 约 89.145MB，
+    vanilla 约 121.012-121.074MB。
+- 结论：resource binding 短路径改善或保持 first-call/显存优势，并清理了相关
+  native primitive 每次临时创建或重绑 resource set 的路径；但部分 warm runtime
+  尚未追平 vanilla，剩余主要在 dispatch/barrier/atomic shader 路径，而不是
+  descriptor set 创建本身。因此完整 command buffer replay、具体 shader/private
+  策略和 barrier 合并仍应等待物理引擎 workload 或更强证据后再推进。
+
+第三批低风险清理：Vulkan resource replay ring wrap 同步降频（2026-05-25）：
+
+- 不删除 dispatch 间 write-read barrier，不删除 final output barrier，也不改变
+  params buffer 的 fill 后 read barrier。当前 params buffer 多数由同一 command
+  list 内 `buffer_fill()` 写入，再由 compute shader 读取；在未改成稳定 host-visible
+  参数上传或 push-constant 语义前，该 barrier 不能作为冗余项移除。
+- primitive-local `VulkanResourceSetRing` 新增可配置扩容上限
+  `TI_VULKAN_RESOURCE_REPLAY_RING_MAX_SIZE`，默认 128；基础 ring size 仍由
+  `TI_VULKAN_RESOURCE_REPLAY_RING_SIZE` 控制，默认 32。
+- 当 descriptor 请求推进到 ring 末尾时，先扩容 ring 并使用新 slot，避免复用仍可能
+  in-flight 的 descriptor set；只有达到 max size 后仍要 wrap，才执行
+  `program->synchronize()` + rewind。该策略保持 descriptor lifetime 规则，同时降低
+  多对象交替、workspace 复用或 batch 调用中偶发 wrap sync 的频率。
+- 既有 ring-wrap correctness 测试显式把 base/max 都压到 2，继续覆盖强制 wrap
+  路径；默认配置下则更偏向“扩容而非同步”。
+- 验证记录：
+  - `cmd /c _run_build.cmd` 通过，重新链接 fresh
+    `taichi_python.cp310-win_amd64.pyd`。
+  - `py_compile tests/python/test_vulkan_native_lifecycle.py
+    tests/python/test_histogram.py` 通过。
+  - 强制 wrap 与 lifecycle 定点测试 3 passed；reduce/compact/bucket/
+    grouped_reduce Vulkan 定点回归 8 passed。pytest 仅报告
+    `tests/.pytest_cache` 写入权限 warning。
+  - `git diff --check -- taichi/program/vulkan_sort.cpp
+    tests/python/test_vulkan_native_lifecycle.py tests/python/test_histogram.py
+    docs/forge/field_snode_primitive_view_update_plan.zh.md` 通过，仅有工作区
+    既有 LF/CRLF warning。
+  - version check 使用当前可用 Python 3.10.11 验证 `version.txt=0.4.0` 与
+    `taichi_forge.__version__` 一致；本地 wheel 已重新打包为
+    `dist/taichi_forge-0.4.0-cp310-cp310-win_amd64.whl`，并解压到
+    `build_llvm20_test/wheel_smoke_vulkan_ring_growth_20260525` 完成
+    `import taichi_forge` 和 `ti.init(arch=ti.cpu)` smoke。
+- ring stress 基准写入
+  `benchmarks/results/vulkan_ring_growth_20260525/summary.csv`。该基准用 48/96
+  个不同 histogram ndarray pair 交替调用，比较强制 wrap
+  (`size=2,max=2`) 与允许扩容 (`size=2,max=128`)：
+  - n=8192、48 pair：强制 wrap median 0.1008 ms/op，扩容 0.1061 ms/op。
+  - n=256、96 pair：强制 wrap median 0.0914 ms/op，扩容 0.0928 ms/op；
+    默认 `size=32,max=128` 为 0.0914 ms/op。
+  - workspace peak 均为 0B，正确性检查通过。
+- 结论：该项主要是安全边界和 worst-case sync 降频，不是当前 microbenchmark 的主
+  runtime 瓶颈；测得 hot histogram 仍由 dispatch/barrier 固定成本主导。保留此改动
+  的理由是它不改变 IR/ABI/算法语义，默认仅增加少量 primitive-local descriptor set
+  上限，并避免未来真实 workload 中多对象交替导致的中途同步。
+
+第四批更新：Vulkan native exact command replay（2026-05-25）：
+
+- 新增 `Program::flush_if_pending()` / `GfxRuntime::flush_if_pending()`：
+  command replay 直接提交已 finalize 的 Vulkan command buffer 前，只在 runtime
+  存在 pending command list 时 flush；没有 pending work 时不再通过
+  `Program::flush()` 录入空 memory barrier command list。
+  `flush_if_pending()` 没有加入 `ProgramImpl` 虚接口，避免 wheel/pybind/C API
+  组合中的后端 vtable ABI 扰动；`Program` 内部仅对 `GfxProgramImpl` 做非虚短路径。
+- 新增 primitive-local `VulkanCommandReplayCache`，默认由
+  `TI_VULKAN_NATIVE_COMMAND_REPLAY=1` 启用；`TI_VULKAN_NATIVE_COMMAND_REPLAY=0`
+  可整体关闭。每个 cache 默认保存 16 个 exact key，可用
+  `TI_VULKAN_NATIVE_COMMAND_REPLAY_CACHE_SIZE` 调整。多槽设计用于覆盖
+  StructNdarray tensor/member view 多 component 交替调用，避免单槽 cache 在
+  component0/component1 之间反复 miss。
+- command replay key 包含语义和资源身份：
+  allocation id/generation、offset、byte range、workspace allocation、参数字、
+  dispatch group、pipeline/resource-set 指针或等价 pipeline 语义。workspace
+  扩容、cache reset、device 变化和 resource set reset 都会清空对应 command
+  cache，避免 replay 旧 buffer、旧 descriptor 或旧参数。
+- replay 只在 profiler scope 关闭时启用；sort 的 CPU profile 环境下回退原记录
+  路径，避免 profile 计数失真。
+- 已覆盖的 Vulkan native command replay：
+  scan、reduce、transform、add-merge、gather、scatter、scatter-add、
+  compact fused/非 fused、histogram、bucket-builder、grouped-reduce atomic/
+  strided/two-level sum、radix sort。旧 `enqueue_compute_op_lambda` 仍保留为
+  env 关闭、profiler/profile 激活或 exact key miss 后的 fallback。
+- 本轮没有删除 dispatch 间 write-read barrier、final output barrier 或 params
+  buffer fill 后 barrier。command replay 复用的是已验证 command 序列，不改变
+  shader ABI、SNode allocator 语义或 public API。
+- replay command 必须自包含。transform/add-merge 等使用 shared params buffer
+  的路径已经从“按上次调用增量写参数”改为“每个 replay 命令写完整参数字”，
+  避免多 exact key 交替 replay 时 params buffer 保留其它 key 的 offset/stride。
+- 验证记录：
+  - `cmd /c _run_build.cmd` 多轮通过，最终 fresh
+    `taichi_python.cp310-win_amd64.pyd` 已重新链接。
+  - Vulkan native 定点回归 12 passed，覆盖 scan/reduce/transform/
+    indexed-copy/scatter-add/compact/histogram/bucket/grouped-reduce/sort、
+    ring wrap 和 mixed-use cache reset；pytest 仅报告 `tests/.pytest_cache`
+    写入权限 warning。
+  - sort 专项回归 15 passed，覆盖 i32、宽 key dtype、payload dtype、vector
+    payload 和 StructNdarray tensor member。
+  - compact 非 fused 路径通过 `TI_VULKAN_COMPACT_FUSE_MAX_N=0` 定点回归
+    3 passed，确认 flags/scan/scatter 分段 replay 的正确性。
+- replay 开关对照写入
+  `benchmarks/results/vulkan_command_replay_20260525/`：
+  - `summary_final.csv` 覆盖 Vulkan × 4096/65536 ×
+    transform/scan/reduce/gather/scatter/scatter_add/grouped_reduce/
+    histogram/sort/compact/bucket，repeats=30，所有条目 `ok=true`。
+  - first-call：多数条目下降或持平；4096 transform 22.64 -> 21.30 ms，
+    scan 38.34 -> 35.63 ms，reduce 11.40 -> 10.17 ms，
+    grouped-reduce 16.82 -> 15.21 ms，sort 584.66 -> 561.32 ms；
+    65536 histogram 39.80 -> 38.21 ms，sort 2.64 -> 2.40 ms。
+  - warm median：收益集中在固定记录成本较高或多 dispatch 的路径；
+    4096 scan/reduce/gather/scatter/scatter_add/grouped_reduce/sort
+    分别为原来的 68%/96%/87%/77%/81%/83%/87%，transform 为 90%；
+    65536 scan/gather/scatter/grouped_reduce/histogram/sort/bucket 分别为
+    80%/95%/96%/97%/86%/92%/92%。4096 bucket、65536 transform/compact 等
+    点位仍有小退化或波动，说明 direct command submit 尚未完全等价于
+    `GfxRuntime` pending command list 的批处理语义。
+  - workspace peak 未因 command replay 增加 full-size staging；新增 cache
+    主要保存少量 command buffer/descriptor 引用，不改变已有
+    workspace peak 统计。
+- 结论：command replay 已作为完整后端机制落地，但“直接提交已记录 command
+  buffer”仍不是最终形态。后续若真实 workload 中 warm runtime 仍受限，应优先
+  评估 command replay 与 GfxRuntime batching/graph-style submission 的结合，而
+  不是继续删除必要 barrier。
+
 暂缓项：
 
-1. **Vulkan command/resource replay**：预期对 warm runtime 固定开销有效，但会触达
-   descriptor lifetime、command buffer 复用、barrier 放置和 reset/IMA 安全。近期
-   Vulkan IMA 更容易暴露在 native 调用链，因此该项应在独立 lifecycle 压测和
-   资源所有权审计后再做，不在当前轮继续推进。
+1. **Vulkan command replay 与 batching/graph-style submission 结合**：exact
+   command replay 已完成，但当前直接走 `Stream::submit()`，会绕开
+   `GfxRuntime` pending command list 的批处理窗口。若物理引擎 warm workload 仍
+   受固定提交成本限制，下一步应考虑 command completion token、replay queue 或
+   graph-style batch submission，而不是继续扩大 per-primitive 微优化。
+   当前同步/barrier 分类如下：
+   - workspace realloc 前的 `program->synchronize()` 保留；直接释放旧
+     `DeviceAllocation` 前必须确认没有 in-flight command 仍引用它。后续若要消除，
+     应改为 deferred old allocation list，而不是删除同步。
+   - resource ring wrap 同步已通过 bounded ring growth 降频；进一步降低需要
+     command completion token 或 per-call descriptor 预分配策略。
+   - dispatch 间 write-read barrier 保留；scan/reduce/compact/bucket/grouped_reduce
+     的 prefix、partial、offset、cursor、output 依赖都属于真实 GPU 数据依赖。
+   - final output barrier 暂保留；只有在 runtime pending dispatch barrier 能被逐项
+     证明覆盖时，才能按 primitive 删除。
+   - params buffer barrier 暂保留；当前 `buffer_fill()` 写参数后 shader 读取参数，
+     仍需要同一 command list 内 write-read 可见性。可继续推进“参数未变化则不
+     fill、不 barrier”的局部缓存，但不能泛化删除。
+   - 完整 exact command replay 已完成；剩余风险不再是能否 replay command
+     buffer，而是如何把 replay command buffer 纳入更大的 batch/graph 提交流程，
+     避免在多 primitive 串联时过早切分 queue submit。
 2. **Vulkan reduce/histogram/grouped-reduce/scatter-add 深入 shader 调优**：
    当前弱项主要是固定 submission/resource 成本，局部 shader 调优只能改善一部分
    大规模吞吐，不能解决 4K/64K warm 调用底座。先等 command/resource replay 或
@@ -1857,10 +2092,13 @@ bucket-builder 和后续 solver primitive。
   replay 已经压短 warm 路径，但从维护性看，后续可以把 capability/method routing
   和 workspace support matrix 拆成内部表驱动模块；该拆分不应改变 public API，也不应
   增加 per-call 动态分派成本。
-- **重复 capability 检查是兼容性边界，不是主要性能瓶颈**：大量
-  `hasattr(prog, "...")` 和 `*_available()` 是为了兼容不同 pybind/build 后端组合。
-  在 hot plan 命中后，大多数完整检查已经被绕过。后续若继续清理，应先做内部
-  capability cache，而不是直接删除检查。
+- **重复 capability 检查已收敛为内部 cache**：大量
+  `hasattr(prog, "...")`、`*_available()` 和 `*_value_type_available(...)`
+  不再直接散落在算法路由中，而是经 `_ProgramCapabilityCache` 以
+  `(runtime id, program id, arch)` 为粒度缓存。该 cache 只缓存 Python/pybind
+  属性存在性和无副作用 capability 谓词，不保存 `Program` 强引用，不生成 Taichi
+  kernel，不进入 offline cache key，也不改变 native plan replay 的 program-id
+  校验。
 - **legacy fallback 已经被观测化，但仍是兼容路径**：
   `set_legacy_helper_auto_fallback_enabled()` 和 fallback count API 让 helper IR
   触发可见；默认仍允许 `method="auto"` fallback，保证旧代码可运行。该 API 是新增的
@@ -1873,8 +2111,17 @@ bucket-builder 和后续 solver primitive。
 
 - `sort(method="legacy")` 仍保留 odd-even merge 兼容实现，且多处 `sync()` 属于旧
   helper/host fallback 语义；native radix/CPU sort 才是性能主路径。
-- `sort_by_key()` 多 key 仍主要依赖 host stable path，尚未接入完整 device multi-key
-  stable sort。
+- `sort_by_key()` 多 key 已对 ndarray key parts 接入稳定多轮 native sort +
+  order/apply：CUDA 走 CUB radix sort，Vulkan 走 native radix sort，CPU 保留
+  host stable 作为 `auto` 默认，`method="cpu_native"` 仅作为显式路径。这样避免
+  CPU multi-key 首次 order/apply 编译开销压过 host stable。field key parts、
+  StructNdarray raw payload 原地重排和 sparse key parts 仍保持 host stable /
+  显式 unsupported，避免隐式创建不安全 staging。
+- dense scalar field sort 已补齐 CPU native stable sort 和 CUDA CUB contiguous dense
+  field sort；Vulkan dense field sort 尚未直接接入 native radix sort，因为当前
+  Vulkan radix sort 的资源生命周期和 replay key 基于 Ndarray allocation。Vulkan
+  field sort 继续走 host stable，直到完成 field DevicePtr 版本的 sort resource
+  key / descriptor 生命周期设计。
 - `experimental_compact()` 的 whole tensor member 通过 order/apply 间接实现，
   strided compact backend 尚未直接支持。
 - `experimental_bucket_builder()` 的 whole tensor member 仍通过 order buffer +
@@ -1886,14 +2133,35 @@ bucket-builder 和后续 solver primitive。
 - `PrefixSumExecutor` 的 field fallback 仍会使用 legacy i32 field workspace；native
   dense/ndarray/member path 不受影响。
 
-不必要或可收敛的防御性编程候选：
+已收敛的防御性编程：
 
-- hot-cache 尝试阶段的 `try/except (AttributeError, TypeError, ValueError)` 可在后续
-  稳定后收窄，否则可能把真正的内部 bug 伪装成 fallback miss。
-- 每个 primitive 自己写 public validation、backend method error message 和
-  capability probing，维护成本偏高；适合后续抽出只读 support matrix/route table。
-- 一些 `hasattr + available + hasattr(method)` 三段式检查在已统一 pybind 后可以由
-  capability cache 合并，但不能先于 wheel/多后端 ABI 稳定性验证删除。
+- hot-cache 尝试阶段已移除宽 `try/except (AttributeError, TypeError, ValueError)`
+  miss 逻辑，改为 `_histogram_replay_signature()`、
+  `_scatter_add_replay_signature()`、`_bucket_builder_replay_signature()` 和
+  `_grouped_reduce_replay_signature()`。cache miss 只由显式 dtype/shape/op
+  signature 不成立触发，内部 bug 不再被宽异常吞掉后静默 fallback。
+- 内部 `_NativePrimitivePlan` 不再模拟 dict；测试和 benchmark 改为访问
+  `.backend`、`.method_name`、`.value_type`、`.n` 等属性。plan cache 也统一为
+  dict keyed by stable object/semantic key，移除旧 list-cache 兼容分支。
+- `ScatterAddWorkspace` 的 scatter-add/add-merge plan cache 已从 list 改为 dict，
+  与 reduce/transform/indexed-copy/bucket/grouped-reduce/scan 的 replay cache
+  语义对齐。
+
+capability cache 不适用或不应缓存的路径：
+
+- exact-object hot native plan replay：这里已经持有已验证 method name 和 call
+  args，额外 capability probing 只会增加 warm 调用开销；只保留 program-id
+  校验和 method lookup。
+- public validation：shape、dtype、workspace 上限、StructNdarray whole-payload
+  语义检查必须逐次基于输入对象执行，不能由 Program capability cache 代替。
+- workspace bytes / clear workspace 的返回值：`*_workspace_bytes()` 反映当前
+  backend temporary storage，`*_clear_workspace()` 有资源释放副作用，只缓存 method
+  存在性，不缓存返回值或执行结果。
+- legacy helper / host fallback / field kernel fallback：这些路径不依赖 native
+  pybind capability，主要成本来自 Taichi helper kernel、host readback/writeback
+  或同步语义，capability cache 对其没有直接收益。
+- sparse SNode 或 proof 失败路径：当前仍不进入 native dense proof；cache 不能绕过
+  SNode layout/activation/allocator 语义。
 
 同步和检查策略现状：
 
@@ -1961,23 +2229,72 @@ bucket-builder 和后续 solver primitive。
 
 ## 支持矩阵
 
-当前每个 primitive 必须维护以下矩阵。这里记录的是 2026-05-24 代码状态，
+当前每个 primitive 必须维护以下矩阵。这里记录的是 2026-05-25 代码状态，
 不是早期 P2/P3/P4 规划标记。
 
 | Storage | scan | reduce | histogram | transform | gather/scatter | scatter_add | compact | bucket | grouped_reduce | sort |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| ndarray | native first | native first | native first | native first | native first | native first | native first | native first | native first | CUDA/Vulkan native first，CPU auto host stable / explicit native |
+| ndarray | native first | native first | native first | native first | native first | native first | native first | native first | native first | native first；multi-key sort_by_key 在 CUDA/Vulkan auto 使用稳定多轮 native sort，CPU auto 保持 host stable，CPU native 可显式启用 |
 | StructNdarray raw payload | no numeric | no numeric | no numeric | no numeric | opaque copy/order only | no numeric | opaque payload/order | opaque payload/order | no numeric | payload values supported by native/host paths where method supports payload |
 | StructNdarray scalar member | native strided | native strided | staged native scalar member | native strided | native strided | native strided / two-level opt-in | selected native/order path | selected native/order path | native strided / staged two-level | scalar values/keys selected |
-| StructNdarray tensor member | component group | component group | unsupported | packed/component group | packed/component group | component group / two-level opt-in | order/apply lanes | order/apply lanes | component group | order once + lane apply |
-| DenseFieldView scalar | native first | native first | native first | native first | native first，支持 ndarray 或 contiguous dense-field indices | native first，支持 ndarray 或 contiguous dense-field indices | native/fused compact | native first | native first | field sort 仍为 host/legacy 或显式旧 device helper，未 native-first |
+| StructNdarray tensor member | component group | component group | unsupported | packed/component group | packed/component group | component group / two-level opt-in | order/apply lanes | order/apply lanes | component group | order once + lane apply；multi-key sort values 可随 ndarray keys native 重排 |
+| DenseFieldView scalar | native first | native first | native first | native first | native first，支持 ndarray 或 contiguous dense-field indices | native first，支持 ndarray 或 contiguous dense-field indices | native/fused compact | native first | native first | CPU native stable / CUDA CUB contiguous native；Vulkan host stable until DevicePtr radix sort is designed |
 | Dense vector/matrix field component | component group | component group | scalar component only | component group | component group | component group | scalar compact only | scalar bucket only | not default | not default |
 | SparseSNodeView | skipped | skipped | skipped | limited fallback | skipped | limited fallback | skipped | skipped | skipped | later |
 
+2026-05-25 production-default cleanup / default auto 验证：
+
+- 构建：`cmd /c _run_build.cmd` 通过，并将
+  `build_llvm20_test/taichi_python.cp310-win_amd64.pyd` 同步到
+  `python/taichi_forge/_lib/core/` 后验证。
+- correctness：
+  - `tests/python/test_scan.py tests/python/test_reduce.py
+    tests/python/test_histogram.py`：104 passed；
+  - `tests/python/test_sort_api.py`：56 passed；
+  - 本轮前序拆分组 `tests/python/test_transform.py
+    tests/python/test_indexed_copy.py`：60 passed；
+  - 本轮前序拆分组 `tests/python/test_compact.py
+    tests/python/test_bucket_builder.py tests/python/test_grouped_reduce.py`：
+    60 passed。
+  - 混合 CPU/CUDA/Vulkan pytest 仍按 backend/primitive 分组执行；单进程混合
+    `ti.reset()` 在该 checkout 上存在 teardown 不稳定，不作为 primitive correctness
+    失败处理。
+- 默认 `method="auto"` benchmark 结果写入
+  `benchmarks/results/default_auto_all_algos_20260525/summary.md`：
+  - field/dense SNode：CPU/CUDA/Vulkan 全 primitive 在 4096、65536 两个规模上
+    与 vanilla `taichi 1.8.0` 对比，first-call/compile 压力全部优于 vanilla；
+  - storage replay：field、matrix field、ndarray、StructNdarray scalar/tensor
+    member 在 scan/reduce/transform/gather/scatter/scatter_add 上共 180 行
+    `ok=true` 且 `plan_reused=true`；
+  - StructNdarray 专项：transform、scan、reduce、gather、scatter、scatter_add、
+    grouped_reduce、histogram、sort、compact、bucket 共 66 行 `ok=true`。
+- 65536 规模 public API probe（含 routing，排除 refill/readback setup）：
+  - dense field sort：CPU auto/native first 5.20 ms / warm 3.30 ms，workspace
+    512 KiB；CUDA auto/CUB first 10.59 ms / warm 0.361 ms，workspace 约
+    1.01 MiB；Vulkan 仍为 host stable first 29.97 ms / warm 4.69 ms，
+    workspace 0。三者 warm 均快于 vanilla 1.8.0。
+  - multi-key `sort_by_key()`：CPU auto 保持 host stable first 3.75 ms /
+    warm 3.80 ms；CUDA auto native first 94.68 ms / warm 1.38 ms，workspace
+    约 1.26 MiB；Vulkan auto native first 337.79 ms / warm 1.21 ms，
+    workspace 约 1.28 MiB。
+  - CPU explicit `method="cpu_native"` multi-key 另测 first 约 324 ms、warm
+    约 14 ms，显著弱于 CPU host stable，因此不进入 CPU auto 默认。
+
 ## 默认策略
 
-- `ndarray` 和 `StructNdarray` 已有 native path 继续保持。
-- dense field native path 在严格 contiguity proof 通过后可以默认开启。
+- `ndarray` 和 `StructNdarray` 已有 native path 继续保持默认 `auto` native-first。
+- dense field native path 在严格 contiguity proof 通过后默认开启；proof 失败才回落到
+  field helper / host fallback。
+- `experimental_scatter()` 默认 native 路径要求 indices 有效；重复 index 的写入顺序不
+  承诺确定性，需要累加语义时使用 `experimental_scatter_add()` 或 grouped-reduce。
+- `experimental_bucket_builder()` / `experimental_grouped_reduce()` 生产语义限于固定
+  bin/group、1D 输入、`sum` grouped-reduce，以及当前 support matrix 中列出的 dtype。
+  invalid key/index 继续按现有语义忽略，不新增 per-call debug validation。
+- whole tensor/member-view 的默认实现可以使用 component group 或 order/apply；这属于
+  明确的 DSL 语义层，不承诺所有 component 在单个 backend dispatch 内融合。
+- `sort_by_key()` 多 key 默认只在 CUDA/Vulkan ndarray key parts 上使用 native 稳定
+  多轮排序；CPU auto 保持 host stable，`cpu_native` 可显式启用；field key parts
+  保持 host stable，StructNdarray raw payload 原地重排暂不默认。
 - sparse SNode active-list native path 初期使用 opt-in flag，真实物理引擎验证后
   再考虑默认开启。
 - topology mutation、dynamic append、deactivation 相关优化默认保守。
@@ -2001,6 +2318,54 @@ bucket-builder 和后续 solver primitive。
 - cache key 变更必须版本化或触发安全重编译。
 - 如果真实引擎 compile/cache 指标恶化，默认回退，即使 microbenchmark runtime
   更快。
+
+## 2026-05-25 Vulkan 内存安全与性能闭环
+
+本轮修复重点是 native Vulkan command/resource replay 在反复 reset、workspace
+realloc、resource ring wrap 和 submit semaphore 复用时的生命周期安全：
+
+- `VulkanStream::submit()` 不再把每次提交的 wait/signal semaphore 引用追加到
+  可复用 command buffer 的 recording refs 中；提交期引用移动到
+  `TrackedCmdbuf::submit_refs`，随 fence retirement 释放，避免 replay 缓存
+  command buffer 在 warm 调用中无界持有历史 semaphore。
+- Vulkan native primitive cache 在释放 workspace、params、prefix、partial
+  buffer 前先清理 replay command/resource binding cache，避免旧 descriptor 或
+  replay command 继续引用即将释放的 buffer。
+- 该修复只影响 reset/realloc/finalize 路径；无 realloc 的 warm hot path 不新增
+  dispatch、barrier 或同步，因此不会改变正常缓存复用路径的运行时结构。
+
+验证结果：
+
+- `cmd /c _run_build.cmd` 构建通过，并已同步
+  `python/taichi_forge/_lib/core/taichi_python.cp310-win_amd64.pyd`。
+- 已重新打包本地 wheel：
+  `dist/taichi_forge-0.4.0-cp310-cp310-win_amd64.whl`，
+  SHA256 为
+  `96D2968C3BC7FC0061DA3D13B705E189476844A5E3AA4BC03C27BABDC2226143`。
+  将 wheel 解压到
+  `build_llvm20_test/wheel_smoke_memory_safety_20260525` 后，以该目录为
+  `PYTHONPATH` 完成 `import taichi_forge as ti; ti.init(arch=ti.cpu)` 验证。
+- 限制 `TI_VULKAN_NATIVE_COMMAND_REPLAY_CACHE_SIZE=2`、
+  `TI_VULKAN_RESOURCE_REPLAY_RING_SIZE=2`、
+  `TI_VULKAN_RESOURCE_REPLAY_RING_MAX_SIZE=4` 的 ring-wrap 压力测试通过，结果在
+  `benchmarks/results/vulkan_memory_safety_20260525/replay_stress.json`。
+- Vulkan native correctness suite 覆盖 scan、reduce、transform、
+  gather/scatter、scatter_add、compact、histogram、bucket_builder、
+  grouped_reduce、sort 和 reset/ring-wrap 生命周期用例，全部通过。
+- CPU/CUDA/Vulkan dense field 全矩阵对比本机 vanilla Taichi 1.8.0 完成，结果在
+  `benchmarks/results/memory_safety_full_matrix_20260525/summary_report.md`、
+  `dense_field_compare.csv` 和 `summary.csv`。
+
+当前性能结论：
+
+- dense field 可比较项中，first-call/compile proxy 全部优于 vanilla：CPU 27/27，
+  CUDA 30/30，Vulkan 30/30。
+- warm runtime 胜出比例为 CPU 19/27、CUDA 22/30、Vulkan 23/30；剩余慢项主要是
+  小规模固定 launch/native dispatch 开销、atomic aggregation 路径和
+  compact/order/apply 多 dispatch 固定成本。
+- Vulkan GPU dedicated peak delta 比 vanilla 低约 31.8MB 到 31.9MB；CUDA 当前
+  部分 workspace primitive 多约 2MB 进程峰值，属于 native workspace/cache 常驻
+  成本，需要在后续 allocator/cache 收缩策略中继续观察。
 
 ## 建议启动顺序
 

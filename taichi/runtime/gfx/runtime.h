@@ -173,6 +173,7 @@ class TI_DLL_EXPORT GfxRuntime {
   void synchronize();
 
   StreamSemaphore flush();
+  StreamSemaphore flush_if_pending();
 
   Device *get_ti_device() const;
 

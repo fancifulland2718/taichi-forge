@@ -13,9 +13,12 @@ ARCHES = {
     "cuda": ti.cuda,
     "vulkan": ti.vulkan,
 }
+_METHOD_MODE = "native"
 
 
 def _method_for(arch_name, primitive):
+    if _METHOD_MODE == "auto":
+        return "auto"
     if arch_name == "cpu":
         return "cpu_native"
     if arch_name == "cuda":
@@ -338,7 +341,7 @@ def run_compact(arch_name, n, repeats):
     output.fill(0)
     count.fill(0)
     workspace = ti.algorithms.CompactWorkspace(max_items=n)
-    method = "cpu_native" if arch_name == "cpu" else ("cuda_cub" if arch_name == "cuda" else "vulkan_native")
+    method = _method_for(arch_name, "compact")
 
     def body():
         ti.algorithms.experimental_compact(
@@ -685,6 +688,8 @@ def run_histogram(arch_name, n, repeats, method_override=None):
 
 
 def main():
+    global _METHOD_MODE  # pylint: disable=global-statement
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", choices=sorted(ARCHES), default="cpu")
     parser.add_argument("--sizes", default="2048,262144")
@@ -694,6 +699,7 @@ def main():
     parser.add_argument("--grouped-reduce-method", default=None)
     parser.add_argument("--histogram-method", default=None)
     parser.add_argument("--scatter-add-method", default=None)
+    parser.add_argument("--method-mode", choices=["native", "auto"], default="native")
     parser.add_argument(
         "--primitive",
         choices=[
@@ -713,6 +719,7 @@ def main():
         default="all",
     )
     args = parser.parse_args()
+    _METHOD_MODE = args.method_mode
 
     ti.init(arch=ARCHES[args.arch], offline_cache=False)
     primitives = (
