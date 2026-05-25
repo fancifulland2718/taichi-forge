@@ -2934,22 +2934,6 @@ void check_grouped_reduce_strided_keys_request(const char *backend,
                       output_stride);
 }
 
-void check_grouped_reduce_strided_request(const char *backend,
-                                          Ndarray *keys,
-                                          Ndarray *values,
-                                          Ndarray *output,
-                                          int value_type,
-                                          std::size_t values_offset,
-                                          std::size_t values_stride,
-                                          std::size_t output_offset,
-                                          std::size_t output_stride,
-                                          int op) {
-  TI_ERROR_IF(keys && keys->get_element_size() != sizeof(int32_t),
-              "{} strided grouped reduce expects i32 keys.", backend);
-  check_grouped_reduce_strided_keys_request(
-      backend, keys, values, output, value_type, 0, sizeof(int32_t),
-      values_offset, values_stride, output_offset, output_stride, op);
-}
 
 std::size_t histogram_bin_type_size(int bin_type) {
   if (bin_type == 0) {

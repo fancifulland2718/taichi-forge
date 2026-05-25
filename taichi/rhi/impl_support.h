@@ -69,8 +69,8 @@ constexpr auto saturate_usub(T x, T y) {
 // NOTE: If an internal function can fail, wrap return object with this!
 template <typename T>
 struct RhiReturn {
-  [[nodiscard]] RhiResult result;
-  [[nodiscard]] T object;
+  RhiResult result;
+  T object;
 
   RhiReturn(RhiResult &result, T &object) : result(result), object(object) {
   }

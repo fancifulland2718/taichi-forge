@@ -364,8 +364,7 @@ struct JsonSerde {
     for (const auto &elem : j.elems()) {
       std::pair<typename T::key_type, typename T::mapped_type> xx{};
       JsonSerde<decltype(xx)>::deserialize(elem, xx, strict);
-      x.emplace(std::move(*(std::pair<const typename T::key_type,
-                                      typename T::mapped_type> *)&xx));
+      x.emplace(std::move(xx.first), std::move(xx.second));
     }
   }
   template <typename U = typename std::remove_cv<T>::type>
@@ -381,8 +380,7 @@ struct JsonSerde {
     for (const auto &elem : j.elems()) {
       std::pair<typename T::key_type, typename T::mapped_type> xx{};
       JsonSerde<decltype(xx)>::deserialize(elem, xx, strict);
-      x.emplace(std::move(*(std::pair<const typename T::key_type,
-                                      typename T::mapped_type> *)&xx));
+      x.emplace(std::move(xx.first), std::move(xx.second));
     }
   }
 

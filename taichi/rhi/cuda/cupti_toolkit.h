@@ -38,8 +38,8 @@ class CuptiToolkit {
   void set_status(bool enable);
 
  private:
-  [[maybe_unused]] bool enabled_{false};
-  [[maybe_unused]] CuptiConfig cupti_config_;
+  bool enabled_{false};
+  CuptiConfig cupti_config_;
   CuptiImage cupti_image_;
 };
 

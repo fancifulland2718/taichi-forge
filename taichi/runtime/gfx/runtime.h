@@ -110,7 +110,7 @@ class CompiledTaichiKernel {
   TaichiKernelAttributes ti_kernel_attribs_;
   std::vector<TaskAttributes> tasks_attribs_;
 
-  [[maybe_unused]] Device *device_;
+  Device *device_;
 
   InputBuffersMap input_buffers_;
   // C-2.5 (2026-05): per-binding chunk DeviceAllocation lists for chunked
