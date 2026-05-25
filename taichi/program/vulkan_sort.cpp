@@ -5872,34 +5872,7 @@ VulkanReduceCache &get_reduce_cache(void *owner, Device *device) {
   return *cache;
 }
 
-VulkanReduceCache &get_reduce_cache(void *owner,
-                                    Device *device,
-                                    int value_type) {
-  std::lock_guard<std::mutex> guard(g_vulkan_reduce_mutex);
-  auto &cache = g_vulkan_reduce_caches[owner];
-  if (!cache) {
-    cache = std::make_unique<VulkanReduceCache>();
-  }
-  cache->ensure_pipeline_set(device, value_type);
-  return *cache;
-}
 
-VulkanReduceCache &get_reduce_cache(void *owner,
-                                    Device *device,
-                                    int value_type,
-                                    bool strided_source) {
-  std::lock_guard<std::mutex> guard(g_vulkan_reduce_mutex);
-  auto &cache = g_vulkan_reduce_caches[owner];
-  if (!cache) {
-    cache = std::make_unique<VulkanReduceCache>();
-  }
-  if (strided_source) {
-    cache->ensure_strided_pipeline_set(device, value_type);
-  } else {
-    cache->ensure_pipeline_set(device, value_type);
-  }
-  return *cache;
-}
 
 VulkanTransformCache &get_transform_cache(void *owner, Device *device) {
   std::lock_guard<std::mutex> guard(g_vulkan_transform_mutex);
@@ -6727,7 +6700,7 @@ bool Program::vulkan_histogram_value_type_available(int value_type,
     return true;
   }
   if (bin_type == 4) {
-    auto &caps = const_cast<Program *>(this)->get_device_caps();
+    const auto caps = const_cast<Program *>(this)->get_device_caps();
     return caps.get(DeviceCapability::spirv_has_int64) != 0 &&
            caps.get(DeviceCapability::spirv_has_atomic_int64) != 0;
   }
@@ -6792,44 +6765,6 @@ std::size_t vulkan_transform_value_size(int value_type) {
              : sizeof(uint32_t);
 }
 
-void check_vulkan_transform_member_request(Ndarray *src,
-                                           Ndarray *dst,
-                                           int value_type,
-                                           std::size_t offset,
-                                           std::size_t stride) {
-  TI_ERROR_IF(!src || !dst,
-              "Vulkan native strided transform received a null ndarray.");
-  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
-              "Vulkan native strided transform source and destination sizes "
-              "differ.");
-  const std::size_t value_size = vulkan_transform_value_size(value_type);
-  TI_ERROR_IF(dst->get_element_size() != value_size,
-              "Vulkan native strided transform destination dtype does not "
-              "match value type.");
-  TI_ERROR_IF(stride < value_size,
-              "Vulkan native strided transform source stride is smaller than "
-              "value size.");
-  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
-              "Vulkan native strided transform source offset/stride must "
-              "align to value size.");
-  const std::size_t n = src->get_nelement();
-  if (n == 0) {
-    return;
-  }
-  const std::size_t src_bytes = n * src->get_element_size();
-  TI_ERROR_IF(src_bytes < value_size,
-              "Vulkan native strided transform source buffer is smaller than "
-              "value size.");
-  TI_ERROR_IF(offset > src_bytes - value_size,
-              "Vulkan native strided transform source offset is out of "
-              "bounds.");
-  const std::size_t last = offset + (n - 1) * stride + value_size;
-  TI_ERROR_IF(last > src_bytes,
-              "Vulkan native strided transform source range is out of bounds.");
-  TI_ERROR_IF(offset % sizeof(uint32_t) != 0 || stride % sizeof(uint32_t) != 0,
-              "Vulkan native strided transform source offset/stride must be "
-              "uint32-word aligned.");
-}
 
 void check_vulkan_transform_strided_range(const char *role,
                                           Ndarray *arr,
@@ -7098,48 +7033,6 @@ void check_vulkan_indexed_copy_dense_field_indices_field_request(
               "uint32-word aligned.");
 }
 
-void check_vulkan_reduce_member_request(Ndarray *values,
-                                        Ndarray *output,
-                                        int value_type,
-                                        std::size_t offset,
-                                        std::size_t stride,
-                                        int op) {
-  TI_ERROR_IF(!values || !output,
-              "Vulkan native strided reduce received null ndarray.");
-  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
-              "Vulkan native strided reduce expects 1D ndarrays.");
-  TI_ERROR_IF(values->get_nelement() == 0,
-              "Vulkan native strided reduce expects at least one input item.");
-  TI_ERROR_IF(output->get_nelement() < 1,
-              "Vulkan native strided reduce output must contain at least one "
-              "item.");
-  const std::size_t value_size = vulkan_transform_value_size(value_type);
-  TI_ERROR_IF(output->get_element_size() != value_size,
-              "Vulkan native strided reduce output dtype does not match value "
-              "type.");
-  TI_ERROR_IF(op < 0 || op > 2,
-              "Vulkan native strided reduce supports only sum/min/max "
-              "operations.");
-  TI_ERROR_IF(stride < value_size,
-              "Vulkan native strided reduce source stride is smaller than "
-              "value size.");
-  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
-              "Vulkan native strided reduce source offset/stride must align "
-              "to value size.");
-  const std::size_t n = values->get_nelement();
-  const std::size_t src_bytes = n * values->get_element_size();
-  TI_ERROR_IF(src_bytes < value_size,
-              "Vulkan native strided reduce source buffer is smaller than "
-              "value size.");
-  TI_ERROR_IF(offset > src_bytes - value_size,
-              "Vulkan native strided reduce source offset is out of bounds.");
-  const std::size_t last = offset + (n - 1) * stride + value_size;
-  TI_ERROR_IF(last > src_bytes,
-              "Vulkan native strided reduce source range is out of bounds.");
-  TI_ERROR_IF(offset % sizeof(uint32_t) != 0 || stride % sizeof(uint32_t) != 0,
-              "Vulkan native strided reduce source offset/stride must be "
-              "uint32-word aligned.");
-}
 
 void check_vulkan_reduce_strided_request(Ndarray *values,
                                          Ndarray *output,
@@ -7231,108 +7124,7 @@ void check_vulkan_scan_member_request(Ndarray *data,
               "uint32-word aligned.");
 }
 
-void check_vulkan_scatter_add_member_request(Ndarray *src,
-                                             Ndarray *indices,
-                                             Ndarray *dst,
-                                             int value_type,
-                                             std::size_t offset,
-                                             std::size_t stride) {
-  TI_ERROR_IF(!src || !indices || !dst,
-              "Vulkan native strided scatter-add received a null ndarray.");
-  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
-                  dst->shape.size() != 1,
-              "Vulkan native strided scatter-add expects 1D ndarrays.");
-  TI_ERROR_IF(src->get_nelement() != indices->get_nelement(),
-              "Vulkan native strided scatter-add source and indices sizes "
-              "differ.");
-  const std::size_t value_size = vulkan_scan_value_type_size(value_type);
-  TI_ERROR_IF(value_size == 0,
-              "Vulkan native strided scatter-add received an unsupported "
-              "value type.");
-  TI_ERROR_IF(dst->get_element_size() != value_size ||
-                  indices->get_element_size() != sizeof(int32_t),
-              "Vulkan native strided scatter-add destination dtype or i32 "
-              "index size mismatch.");
-  TI_ERROR_IF(stride < value_size,
-              "Vulkan native strided scatter-add source stride is smaller "
-              "than value size.");
-  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
-              "Vulkan native strided scatter-add source offset/stride must "
-              "align to value size.");
-  const std::size_t n = src->get_nelement();
-  if (n == 0) {
-    return;
-  }
-  const std::size_t src_bytes = n * src->get_element_size();
-  TI_ERROR_IF(src_bytes < value_size,
-              "Vulkan native strided scatter-add source buffer is smaller "
-              "than value size.");
-  TI_ERROR_IF(offset > src_bytes - value_size,
-              "Vulkan native strided scatter-add source offset is out of "
-              "bounds.");
-  const std::size_t last = offset + (n - 1) * stride + value_size;
-  TI_ERROR_IF(last > src_bytes,
-              "Vulkan native strided scatter-add source range is out of "
-              "bounds.");
-  TI_ERROR_IF(offset % sizeof(uint32_t) != 0 || stride % sizeof(uint32_t) != 0,
-              "Vulkan native strided scatter-add source offset/stride must be "
-              "uint32-word aligned.");
-}
 
-void check_vulkan_grouped_reduce_member_request(Ndarray *keys,
-                                                Ndarray *values,
-                                                Ndarray *output,
-                                                int value_type,
-                                                std::size_t offset,
-                                                std::size_t stride,
-                                                int op) {
-  TI_ERROR_IF(!keys || !values || !output,
-              "Vulkan native strided grouped reduce received a null ndarray.");
-  TI_ERROR_IF(keys->shape.size() != 1 || values->shape.size() != 1 ||
-                  output->shape.size() != 1,
-              "Vulkan native strided grouped reduce expects 1D ndarrays.");
-  TI_ERROR_IF(keys->get_nelement() != values->get_nelement(),
-              "Vulkan native strided grouped reduce keys and values sizes "
-              "differ.");
-  TI_ERROR_IF(output->get_nelement() == 0,
-              "Vulkan native strided grouped reduce output must contain at "
-              "least one group.");
-  const std::size_t value_size = vulkan_scan_value_type_size(value_type);
-  TI_ERROR_IF(value_size == 0,
-              "Vulkan native strided grouped reduce received an unsupported "
-              "value type.");
-  TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
-                  output->get_element_size() != value_size,
-              "Vulkan native strided grouped reduce output dtype or i32 key "
-              "size mismatch.");
-  TI_ERROR_IF(op != 0,
-              "Vulkan native strided grouped reduce currently supports only "
-              "sum.");
-  TI_ERROR_IF(stride < value_size,
-              "Vulkan native strided grouped reduce source stride is smaller "
-              "than value size.");
-  TI_ERROR_IF(offset % value_size != 0 || stride % value_size != 0,
-              "Vulkan native strided grouped reduce source offset/stride must "
-              "align to value size.");
-  const std::size_t n = values->get_nelement();
-  if (n == 0) {
-    return;
-  }
-  const std::size_t values_bytes = n * values->get_element_size();
-  TI_ERROR_IF(values_bytes < value_size,
-              "Vulkan native strided grouped reduce source buffer is smaller "
-              "than value size.");
-  TI_ERROR_IF(offset > values_bytes - value_size,
-              "Vulkan native strided grouped reduce source offset is out of "
-              "bounds.");
-  const std::size_t last = offset + (n - 1) * stride + value_size;
-  TI_ERROR_IF(last > values_bytes,
-              "Vulkan native strided grouped reduce source range is out of "
-              "bounds.");
-  TI_ERROR_IF(offset % sizeof(uint32_t) != 0 || stride % sizeof(uint32_t) != 0,
-              "Vulkan native strided grouped reduce source offset/stride must "
-              "be uint32-word aligned.");
-}
 
 void check_vulkan_strided_range(const char *op_name,
                                 const char *arg_name,
@@ -7423,21 +7215,6 @@ void check_vulkan_grouped_reduce_strided_keys_request(Ndarray *keys,
                              value_size, output_offset, output_stride);
 }
 
-void check_vulkan_grouped_reduce_strided_request(Ndarray *keys,
-                                                 Ndarray *values,
-                                                 Ndarray *output,
-                                                 int value_type,
-                                                 size_t values_offset,
-                                                 size_t values_stride,
-                                                 size_t output_offset,
-                                                 size_t output_stride,
-                                                 int op) {
-  TI_ERROR_IF(keys && keys->get_element_size() != sizeof(int32_t),
-              "Vulkan native strided grouped reduce expects i32 keys.");
-  check_vulkan_grouped_reduce_strided_keys_request(
-      keys, values, output, value_type, 0, sizeof(int32_t), values_offset,
-      values_stride, output_offset, output_stride, op);
-}
 
 std::size_t vulkan_reduce_storage_impl(Program *program,
                                        DeviceAllocation values_alloc,
@@ -8292,12 +8069,12 @@ bool Program::vulkan_scatter_add_value_type_available(int value_type) const {
                .get(DeviceCapability::spirv_has_atomic_float_add) != 0;
   }
   if (value_type == 3 || value_type == 4) {
-    auto &caps = const_cast<Program *>(this)->get_device_caps();
+    const auto caps = const_cast<Program *>(this)->get_device_caps();
     return caps.get(DeviceCapability::spirv_has_int64) != 0 &&
            caps.get(DeviceCapability::spirv_has_atomic_int64) != 0;
   }
   if (value_type == 5) {
-    auto &caps = const_cast<Program *>(this)->get_device_caps();
+    const auto caps = const_cast<Program *>(this)->get_device_caps();
     return caps.get(DeviceCapability::spirv_has_float64) != 0 &&
            caps.get(DeviceCapability::spirv_has_atomic_float64_add) != 0;
   }
@@ -8346,12 +8123,12 @@ bool Program::vulkan_grouped_reduce_atomic_value_type_available(
                .get(DeviceCapability::spirv_has_atomic_float_add) != 0;
   }
   if (value_type == 3 || value_type == 4) {
-    auto &caps = const_cast<Program *>(this)->get_device_caps();
+    const auto caps = const_cast<Program *>(this)->get_device_caps();
     return caps.get(DeviceCapability::spirv_has_int64) != 0 &&
            caps.get(DeviceCapability::spirv_has_atomic_int64) != 0;
   }
   if (value_type == 5) {
-    auto &caps = const_cast<Program *>(this)->get_device_caps();
+    const auto caps = const_cast<Program *>(this)->get_device_caps();
     return caps.get(DeviceCapability::spirv_has_float64) != 0 &&
            caps.get(DeviceCapability::spirv_has_atomic_float64_add) != 0;
   }

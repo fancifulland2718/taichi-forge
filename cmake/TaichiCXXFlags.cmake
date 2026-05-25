@@ -91,27 +91,30 @@ else()
     # Therefore we disable such warnings for now.
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-ignored-attributes ")
 
-    # [Global] Clang warns if a C++ pointer's nullability wasn't marked explicitly (__nonnull, nullable, ...).
-    # Nullability seems to be a clang-specific feature, thus we disable this warning.
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-nullability-completeness ")
+    if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
+        # [Global] Clang warns if a C++ pointer's nullability wasn't marked explicitly (__nonnull, nullable, ...).
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-nullability-completeness ")
 
-    # [Global] Disable warning for unused-private-field for convenience in development.
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-private-field ")
+        # [Global] Disable warning for unused-private-field for convenience in development.
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-private-field ")
 
-    # [Global] By evaluating "constexpr", compiler throws a warning for functions known to be dead at compile time.
-    # However, some of these "constexpr" are debug flags and will be manually enabled upon debugging.
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unneeded-internal-declaration ")
+        # [Global] By evaluating "constexpr", compiler throws a warning for functions known to be dead at compile time.
+        # However, some of these "constexpr" are debug flags and will be manually enabled upon debugging.
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unneeded-internal-declaration ")
+
+        if (NOT ANDROID)
+            check_cxx_compiler_flag("-Wno-unqualified-std-cast-call" CXX_HAS_Wno_unqualified_std_cast_call)
+            if (${CXX_HAS_Wno_unqualified_std_cast_call})
+                set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unqualified-std-cast-call ")
+            endif()
+        endif()
+    endif()
 
     # FIXME: Check why Android don't support check_cxx_compiler_flag
     if (NOT ANDROID)
-        check_cxx_compiler_flag("-Wno-unqualified-std-cast-call" CXX_HAS_Wno_unqualified_std_cast_call)
-        if (${CXX_HAS_Wno_unqualified_std_cast_call})
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unqualified-std-cast-call ")
-        endif()
-
         check_cxx_compiler_flag("-Wno-unused-but-set-variable" CXX_HAS_Wno_unused_but_set_variable)
         if (${CXX_HAS_Wno_unused_but_set_variable})
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-but-set-variable ")
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-but-set-variable ")
         endif()
     endif()
 endif ()
