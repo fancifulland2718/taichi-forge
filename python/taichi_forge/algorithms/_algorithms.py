@@ -322,6 +322,9 @@ def _is_matrix_field(arr):
     return isinstance(arr, MatrixField)
 
 
+_PROG_METHOD_MISSING = object()
+
+
 class _ProgramCapabilityCache:
     """Python-side pybind capability cache for one live Program.
 
@@ -330,10 +333,11 @@ class _ProgramCapabilityCache:
     resources, or keep a strong reference to the Program object.
     """
 
-    __slots__ = ("_has", "_available", "_value_available")
+    __slots__ = ("_has", "_method_descriptor", "_available", "_value_available")
 
     def __init__(self):
         self._has = {}
+        self._method_descriptor = {}
         self._available = {}
         self._value_available = {}
 
@@ -344,10 +348,34 @@ class _ProgramCapabilityCache:
             self._has[name] = cached
         return cached
 
+    def method_descriptor(self, prog, name):
+        if not self.has(prog, name):
+            return None
+        cached = self._method_descriptor.get(name, _PROG_METHOD_MISSING)
+        if cached is _PROG_METHOD_MISSING:
+            cached = getattr(type(prog), name, None)
+            self._method_descriptor[name] = cached
+        return cached
+
     def method(self, prog, name):
         if not self.has(prog, name):
             return None
         return getattr(prog, name)
+
+    def invoke_method_result(self, prog, name, *args):
+        descriptor = self.method_descriptor(prog, name)
+        if descriptor is not None:
+            return descriptor(prog, *args)
+        method = self.method(prog, name)
+        if method is None:
+            return _PROG_METHOD_MISSING
+        return method(*args)
+
+    def invoke_method(self, prog, name, *args):
+        result = self.invoke_method_result(prog, name, *args)
+        if result is _PROG_METHOD_MISSING:
+            return False, None
+        return True, result
 
     def available(self, prog, name):
         if not self.has(prog, name):
@@ -392,8 +420,20 @@ def _prog_has(prog, name):
     return _program_capabilities(prog).has(prog, name)
 
 
+def _prog_method_descriptor(prog, name):
+    return _program_capabilities(prog).method_descriptor(prog, name)
+
+
 def _prog_method(prog, name):
     return _program_capabilities(prog).method(prog, name)
+
+
+def _invoke_prog_method_result(prog, name, *args):
+    return _program_capabilities(prog).invoke_method_result(prog, name, *args)
+
+
+def _invoke_prog_method(prog, name, *args):
+    return _program_capabilities(prog).invoke_method(prog, name, *args)
 
 
 def _prog_available(prog, name):
@@ -407,10 +447,10 @@ def _prog_value_available(prog, name, *args, default_if_missing=True):
 
 
 def _call_optional_prog_method(prog, name, *args):
-    method = _prog_method(prog, name)
-    if method is None:
+    result = _invoke_prog_method_result(prog, name, *args)
+    if result is _PROG_METHOD_MISSING:
         return None
-    return method(*args)
+    return result
 
 
 class _PrimitiveView:
@@ -494,6 +534,7 @@ class _NativePrimitivePlan:
         "semantic_key",
         "call_args",
         "prog_id",
+        "method_descriptor",
         "value_type",
         "n",
     )
@@ -515,9 +556,12 @@ class _NativePrimitivePlan:
         self.semantic_key = tuple(semantic_key)
         self.call_args = tuple(call_args)
         self.prog_id = id(prog)
+        self.method_descriptor = _prog_method_descriptor(prog, method_name)
         self.value_type = value_type
         self.n = int(n)
-        self.object_keys = None
+        self.object_keys = tuple(
+            _primitive_plan_object_key(obj) for obj in self.objects
+        )
 
     def matches_request(self, backend, objects, semantic_key):
         if self.backend != backend or self.semantic_key != tuple(semantic_key):
@@ -548,26 +592,36 @@ class _NativePrimitivePlan:
     def cache_key(self):
         return (self.backend, self._object_keys(), self.semantic_key)
 
+    def execution_key(self):
+        return self.cache_key()
+
     def _object_keys(self):
-        if self.object_keys is None:
-            self.object_keys = tuple(
-                _primitive_plan_object_key(obj) for obj in self.objects
-            )
         return self.object_keys
 
     def matches_program(self, prog):
         return id(prog) == self.prog_id
 
     def invoke(self, prog):
-        method = _prog_method(prog, self.method_name)
-        if method is None:
-            return None
-        temp_bytes = method(*self.call_args)
+        if self.method_descriptor is not None:
+            temp_bytes = self.method_descriptor(prog, *self.call_args)
+        else:
+            temp_bytes = _invoke_prog_method_result(
+                prog, self.method_name, *self.call_args
+            )
+            if temp_bytes is _PROG_METHOD_MISSING:
+                return None
         return 0 if temp_bytes is None else temp_bytes
 
 
-class _NativePrimitivePlanGroup:
-    """Cached replay group for whole vector/matrix views split into scalars."""
+def _primitive_stage_signature(plans):
+    return tuple(
+        (plan.backend, plan.method_name, plan.semantic_key, plan.value_type, plan.n)
+        for plan in plans
+    )
+
+
+class _PrimitiveExecutionPlan:
+    """Cached replay plan for a stable sequence of native primitive stages."""
 
     __slots__ = (
         "backend",
@@ -575,16 +629,25 @@ class _NativePrimitivePlanGroup:
         "object_keys",
         "semantic_key",
         "plans",
+        "stage_calls",
         "prog_id",
+        "stage_signature",
     )
 
     def __init__(self, backend, objects, semantic_key, plans, prog):
         self.backend = backend
         self.objects = tuple(objects)
-        self.object_keys = None
+        self.object_keys = tuple(
+            _primitive_plan_object_key(obj) for obj in self.objects
+        )
         self.semantic_key = tuple(semantic_key)
         self.plans = tuple(plans)
+        self.stage_calls = tuple(
+            (plan.method_descriptor, plan.method_name, plan.call_args)
+            for plan in self.plans
+        )
         self.prog_id = id(prog)
+        self.stage_signature = _primitive_stage_signature(self.plans)
 
     def matches_request(self, backend, objects, semantic_key):
         if self.backend != backend or self.semantic_key != tuple(semantic_key):
@@ -608,11 +671,10 @@ class _NativePrimitivePlanGroup:
     def cache_key(self):
         return (self.backend, self._object_keys(), self.semantic_key)
 
+    def execution_key(self):
+        return (self.cache_key(), self.stage_signature)
+
     def _object_keys(self):
-        if self.object_keys is None:
-            self.object_keys = tuple(
-                _primitive_plan_object_key(obj) for obj in self.objects
-            )
         return self.object_keys
 
     def matches_program(self, prog):
@@ -620,14 +682,20 @@ class _NativePrimitivePlanGroup:
 
     def invoke(self, prog):
         temp_bytes_peak = 0
-        for plan in self.plans:
-            method = _prog_method(prog, plan.method_name)
-            if method is None:
-                return None
-            temp_bytes = method(*plan.call_args)
+        for descriptor, method_name, call_args in self.stage_calls:
+            if descriptor is not None:
+                temp_bytes = descriptor(prog, *call_args)
+            else:
+                temp_bytes = _invoke_prog_method_result(prog, method_name, *call_args)
+                if temp_bytes is _PROG_METHOD_MISSING:
+                    return None
             temp_bytes = 0 if temp_bytes is None else temp_bytes
             temp_bytes_peak = max(temp_bytes_peak, temp_bytes)
         return temp_bytes_peak
+
+
+class _NativePrimitivePlanGroup(_PrimitiveExecutionPlan):
+    """Backward-compatible name for component execution plans."""
 
 
 def _tuple_shape(value):
@@ -750,10 +818,11 @@ def _primitive_view(arr):
     return None
 
 
-def _primitive_plan_object_key(obj):
-    view = _primitive_view(obj)
-    if view is None:
-        return ("object", id(obj))
+def _snode_descriptor_key(snode):
+    return (int(snode.get_snode_tree_id()), int(snode.id))
+
+
+def _primitive_view_descriptor_key(view):
     dtype_key = str(view.dtype)
     shape_key = tuple(view.shape)
     element_shape_key = tuple(view.element_shape)
@@ -797,7 +866,7 @@ def _primitive_plan_object_key(obj):
     if view.is_dense_field or view.is_scalar_field:
         return (
             view.storage,
-            id(view.snode),
+            _snode_descriptor_key(view.snode),
             dtype_key,
             shape_key,
             view.offset,
@@ -806,12 +875,56 @@ def _primitive_plan_object_key(obj):
     return (view.storage, id(view.arr), dtype_key, shape_key)
 
 
+def _primitive_plan_object_key(obj):
+    view = _primitive_view(obj)
+    if view is None:
+        return ("object", id(obj))
+    return _primitive_view_descriptor_key(view)
+
+
+def _primitive_plan_object_keys(objects):
+    return tuple(_primitive_plan_object_key(obj) for obj in objects)
+
+
+def _native_plan_cache_key_from_object_keys(backend, object_keys, semantic_key):
+    return (backend, tuple(object_keys), tuple(semantic_key))
+
+
 def _native_plan_cache_key(backend, objects, semantic_key):
-    return (
-        backend,
-        tuple(_primitive_plan_object_key(obj) for obj in objects),
-        tuple(semantic_key),
+    return _native_plan_cache_key_from_object_keys(
+        backend, _primitive_plan_object_keys(objects), semantic_key
     )
+
+
+def _native_plan_matches_request_cached(
+    plan, backend, objects, semantic_key, object_keys=None
+):
+    if (
+        plan is None
+        or plan.backend != backend
+        or plan.semantic_key != tuple(semantic_key)
+    ):
+        return False, object_keys
+    objects = tuple(objects)
+    if len(plan.objects) != len(objects):
+        return False, object_keys
+    same_objects = True
+    for cached, current in zip(plan.objects, objects):
+        if cached is not current:
+            same_objects = False
+            break
+    if same_objects:
+        return True, object_keys
+    if object_keys is None:
+        object_keys = _primitive_plan_object_keys(objects)
+    return plan._object_keys() == object_keys, object_keys
+
+
+def _native_plan_request_matches(plan, backend, objects, semantic_key):
+    matched, _ = _native_plan_matches_request_cached(
+        plan, backend, objects, semantic_key
+    )
+    return matched
 
 
 def _component_group_semantic_key(*items):
@@ -856,11 +969,21 @@ def _try_hot_native_plan_group(group, backend, objects, on_success, semantic_key
     return True
 
 
+def _native_plan_cache_lookup_by_object_keys(
+    plan_cache, backend, object_keys, semantic_key
+):
+    if plan_cache is None:
+        return None
+    key = _native_plan_cache_key_from_object_keys(backend, object_keys, semantic_key)
+    return plan_cache.get(key)
+
+
 def _native_plan_cache_lookup(plan_cache, backend, objects, semantic_key):
     if plan_cache is None:
         return None
-    key = _native_plan_cache_key(backend, objects, semantic_key)
-    return plan_cache.get(key)
+    return _native_plan_cache_lookup_by_object_keys(
+        plan_cache, backend, _primitive_plan_object_keys(objects), semantic_key
+    )
 
 
 def _native_plan_cache_store(plan_cache, plan):
@@ -879,15 +1002,28 @@ def _try_native_plan_from_cache(
 ):
     if backend is None:
         return False
+    objects = tuple(objects)
     semantic_key = tuple(semantic_key)
     if _try_hot_native_plan(
         current_plan, backend, objects, on_success, semantic_key=semantic_key
     ):
         return True
     plan = current_plan
-    if plan is None or not plan.matches_request(backend, objects, semantic_key):
-        plan = _native_plan_cache_lookup(plan_cache, backend, objects, semantic_key)
-    if plan is None or not plan.matches_request(backend, objects, semantic_key):
+    matched, object_keys = _native_plan_matches_request_cached(
+        plan, backend, objects, semantic_key
+    )
+    if not matched:
+        if plan_cache is None:
+            return False
+        if object_keys is None:
+            object_keys = _primitive_plan_object_keys(objects)
+        plan = _native_plan_cache_lookup_by_object_keys(
+            plan_cache, backend, object_keys, semantic_key
+        )
+        matched, object_keys = _native_plan_matches_request_cached(
+            plan, backend, objects, semantic_key, object_keys
+        )
+    if not matched:
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -926,6 +1062,26 @@ def _record_native_primitive_plan(
     return plan
 
 
+def _record_native_plan_group(
+    plan_groups,
+    backend,
+    objects,
+    semantic_key,
+    plans,
+    prog=None,
+):
+    if backend is None or not plans:
+        return None
+    if prog is None:
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+    group = _NativePrimitivePlanGroup(backend, objects, semantic_key, plans, prog)
+    if plan_groups is not None:
+        plan_groups[group.cache_key()] = group
+    return group
+
+
 def _try_native_plan_group_from_cache(
     current_group,
     plan_groups,
@@ -936,6 +1092,7 @@ def _try_native_plan_group_from_cache(
 ):
     if backend is None:
         return False
+    objects = tuple(objects)
     semantic_key = tuple(semantic_key)
     if _try_hot_native_plan_group(
         current_group,
@@ -946,10 +1103,21 @@ def _try_native_plan_group_from_cache(
     ):
         return True
     group = current_group
-    if group is None or not group.matches_request(backend, objects, semantic_key):
-        key = _native_plan_cache_key(backend, objects, semantic_key)
-        group = plan_groups.get(key)
-    if group is None or not group.matches_request(backend, objects, semantic_key):
+    matched, object_keys = _native_plan_matches_request_cached(
+        group, backend, objects, semantic_key
+    )
+    if not matched:
+        if plan_groups is None:
+            return False
+        if object_keys is None:
+            object_keys = _primitive_plan_object_keys(objects)
+        group = _native_plan_cache_lookup_by_object_keys(
+            plan_groups, backend, object_keys, semantic_key
+        )
+        matched, object_keys = _native_plan_matches_request_cached(
+            group, backend, objects, semantic_key, object_keys
+        )
+    if not matched:
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -966,20 +1134,13 @@ def _try_native_plan_group_from_cache(
 def _record_native_component_plan_group(
     plan_groups, backend, objects, semantic_items, plans
 ):
-    if backend is None or not plans:
-        return None
-    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-    prog = impl.get_runtime().prog
-    group = _NativePrimitivePlanGroup(
+    return _record_native_plan_group(
+        plan_groups,
         backend,
         objects,
         _component_group_semantic_key(*semantic_items),
         plans,
-        prog,
     )
-    plan_groups[group.cache_key()] = group
-    return group
 
 
 def _try_native_component_plan_group(
@@ -1282,17 +1443,13 @@ class _OrderApplyWorkspaceMixin:
         if backend is None or not plans:
             return
         semantic_key = self._order_apply_inplace_semantic_key(values, copy_method)
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        group = _NativePrimitivePlanGroup(
+        self._order_apply_inplace_plan_group = _record_native_plan_group(
+            self._order_apply_inplace_plan_groups,
             backend,
             (values, order, output),
             semantic_key,
             plans,
-            impl.get_runtime().prog,
         )
-        self._order_apply_inplace_plan_group = group
-        self._order_apply_inplace_plan_groups[group.cache_key()] = group
 
 
 class SortWorkspace(_OrderApplyWorkspaceMixin):
@@ -1507,7 +1664,13 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
         return self._get_order_apply_scalar_temp_buffer(dtype, n)
 
     def _cpu_field_scan_plan_key(self, values, flags, output, count, n):
-        return (id(values), id(flags), id(output), id(count), int(n))
+        return (
+            tuple(
+                _primitive_plan_object_key(obj)
+                for obj in (values, flags, output, count)
+            ),
+            int(n),
+        )
 
     def _try_cpu_dense_field_compact_plan(self, values, flags, output, count, method):
         if current_cfg().arch not in (x64, arm64):
@@ -1959,44 +2122,25 @@ class HistogramWorkspace:
         )
         objects = (values, bins)
         group = self._staged_histogram_plan_group
-        if _try_hot_native_plan_group(
+
+        def mark_group(matched_group, temp_bytes):
+            self._staged_histogram_plan_group = matched_group
+            self._native_histogram_plan = (
+                matched_group.plans[-1] if matched_group.plans else None
+            )
+            self._mark_native_histogram_backend_active(backend, temp_bytes)
+            self._record_staged_child_workspace(
+                self._staged_member_transform_workspace
+            )
+
+        return _try_native_plan_group_from_cache(
             group,
+            self._staged_histogram_plan_groups,
             backend,
             objects,
-            lambda hot_group, temp_bytes: (
-                setattr(self, "_staged_histogram_plan_group", hot_group),
-                setattr(
-                    self,
-                    "_native_histogram_plan",
-                    hot_group.plans[-1] if hot_group.plans else None,
-                ),
-                self._mark_native_histogram_backend_active(backend, temp_bytes),
-                self._record_staged_child_workspace(
-                    self._staged_member_transform_workspace
-                ),
-            ),
-            semantic_key=semantic_key,
-        ):
-            return True
-        if group is None or not group.matches_request(backend, objects, semantic_key):
-            key = _native_plan_cache_key(backend, objects, semantic_key)
-            group = self._staged_histogram_plan_groups.get(key)
-        if group is None or not group.matches_request(backend, objects, semantic_key):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        if not group.matches_program(prog):
-            return False
-        temp_bytes = group.invoke(prog)
-        if temp_bytes is None:
-            return False
-        self._staged_histogram_plan_group = group
-        if group.plans:
-            self._native_histogram_plan = group.plans[-1]
-        self._mark_native_histogram_backend_active(backend, temp_bytes)
-        self._record_staged_child_workspace(self._staged_member_transform_workspace)
-        return True
+            semantic_key,
+            mark_group,
+        )
 
     def _try_hot_staged_histogram_plan_group(self, values, bins, method):
         backend = self._native_histogram_backend_for_method(method)
@@ -2031,17 +2175,16 @@ class HistogramWorkspace:
         backend = self._native_histogram_backend_for_method(method)
         if backend is None or len(plans) < 2:
             return
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
         semantic_key = self._staged_histogram_semantic_key(
             method, value_type, bin_type, n, num_bins
         )
-        group = _NativePrimitivePlanGroup(
-            backend, (values, bins), semantic_key, plans, prog
+        self._staged_histogram_plan_group = _record_native_plan_group(
+            self._staged_histogram_plan_groups,
+            backend,
+            (values, bins),
+            semantic_key,
+            plans,
         )
-        self._staged_histogram_plan_groups[group.cache_key()] = group
-        self._staged_histogram_plan_group = group
 
     def _record_staged_child_workspace(self, child_workspace):
         if child_workspace is None:
@@ -2672,26 +2815,25 @@ class ScatterAddWorkspace:
         )
         objects = (src, indices, dst)
         group = self._two_level_scatter_add_plan_group
-        if group is None or not group.matches_request(backend, objects, semantic_key):
-            key = _native_plan_cache_key(backend, objects, semantic_key)
-            group = self._two_level_scatter_add_plan_groups.get(key)
-        if group is None or not group.matches_request(backend, objects, semantic_key):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
-        prog = impl.get_runtime().prog
-        if not group.matches_program(prog):
-            return False
-        temp_bytes = group.invoke(prog)
-        if temp_bytes is None:
-            return False
-        self._two_level_scatter_add_plan_group = group
-        self._mark_native_scatter_add_backend_active(backend, temp_bytes)
-        self._record_two_level_child_workspace(
-            self._two_level_grouped_reduce_workspace
+        def mark_group(matched_group, temp_bytes):
+            self._two_level_scatter_add_plan_group = matched_group
+            self._mark_native_scatter_add_backend_active(backend, temp_bytes)
+            self._record_two_level_child_workspace(
+                self._two_level_grouped_reduce_workspace
+            )
+            self._record_two_level_child_workspace(
+                self._two_level_transform_workspace
+            )
+
+        return _try_native_plan_group_from_cache(
+            group,
+            self._two_level_scatter_add_plan_groups,
+            backend,
+            objects,
+            semantic_key,
+            mark_group,
         )
-        self._record_two_level_child_workspace(self._two_level_transform_workspace)
-        return True
 
     def _record_two_level_scatter_add_plan_group(
         self, src, indices, dst, method, value_type, plans
@@ -2699,17 +2841,16 @@ class ScatterAddWorkspace:
         backend = self._native_two_level_scatter_add_backend_for_method(method)
         if backend is None or len(plans) < 2:
             return
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
         semantic_key = self._two_level_scatter_add_semantic_key(
             src, indices, dst, method, value_type
         )
-        group = _NativePrimitivePlanGroup(
-            backend, (src, indices, dst), semantic_key, plans, prog
+        self._two_level_scatter_add_plan_group = _record_native_plan_group(
+            self._two_level_scatter_add_plan_groups,
+            backend,
+            (src, indices, dst),
+            semantic_key,
+            plans,
         )
-        self._two_level_scatter_add_plan_groups[group.cache_key()] = group
-        self._two_level_scatter_add_plan_group = group
 
     def _try_hot_scatter_add_replay(self, src, indices, dst, method):
         objects = (src, indices, dst)
@@ -3295,44 +3436,25 @@ class GroupedReduceWorkspace:
         )
         objects = (keys, values, output)
         group = self._staged_grouped_reduce_plan_group
-        if _try_hot_native_plan_group(
+
+        def mark_group(matched_group, temp_bytes):
+            self._staged_grouped_reduce_plan_group = matched_group
+            self._native_grouped_reduce_plan = (
+                matched_group.plans[-1] if matched_group.plans else None
+            )
+            self._mark_native_grouped_reduce_backend_active(backend, temp_bytes)
+            self._record_staged_child_workspace(
+                self._staged_member_transform_workspace
+            )
+
+        return _try_native_plan_group_from_cache(
             group,
+            self._staged_grouped_reduce_plan_groups,
             backend,
             objects,
-            lambda hot_group, temp_bytes: (
-                setattr(self, "_staged_grouped_reduce_plan_group", hot_group),
-                setattr(
-                    self,
-                    "_native_grouped_reduce_plan",
-                    hot_group.plans[-1] if hot_group.plans else None,
-                ),
-                self._mark_native_grouped_reduce_backend_active(backend, temp_bytes),
-                self._record_staged_child_workspace(
-                    self._staged_member_transform_workspace
-                ),
-            ),
-            semantic_key=semantic_key,
-        ):
-            return True
-        if group is None or not group.matches_request(backend, objects, semantic_key):
-            key = _native_plan_cache_key(backend, objects, semantic_key)
-            group = self._staged_grouped_reduce_plan_groups.get(key)
-        if group is None or not group.matches_request(backend, objects, semantic_key):
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
-        if not group.matches_program(prog):
-            return False
-        temp_bytes = group.invoke(prog)
-        if temp_bytes is None:
-            return False
-        self._staged_grouped_reduce_plan_group = group
-        if group.plans:
-            self._native_grouped_reduce_plan = group.plans[-1]
-        self._mark_native_grouped_reduce_backend_active(backend, temp_bytes)
-        self._record_staged_child_workspace(self._staged_member_transform_workspace)
-        return True
+            semantic_key,
+            mark_group,
+        )
 
     def _record_staged_grouped_reduce_plan_group(
         self, keys, values, output, method, value_type, op_id, n, num_groups, plans
@@ -3340,17 +3462,16 @@ class GroupedReduceWorkspace:
         backend = self._native_grouped_reduce_backend_for_method(method)
         if backend != "vulkan_native_two_level" or len(plans) < 2:
             return
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
         semantic_key = self._staged_grouped_reduce_semantic_key(
             method, value_type, op_id, n, num_groups
         )
-        group = _NativePrimitivePlanGroup(
-            backend, (keys, values, output), semantic_key, plans, prog
+        self._staged_grouped_reduce_plan_group = _record_native_plan_group(
+            self._staged_grouped_reduce_plan_groups,
+            backend,
+            (keys, values, output),
+            semantic_key,
+            plans,
         )
-        self._staged_grouped_reduce_plan_groups[group.cache_key()] = group
-        self._staged_grouped_reduce_plan_group = group
 
     def _record_staged_child_workspace(self, child_workspace):
         if child_workspace is None:
@@ -5750,8 +5871,8 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
             if (
                 backend is not None
                 and plan is not None
-                and plan.matches_request(
-                    backend, (values_component, output_component), (op,)
+                and _native_plan_request_matches(
+                    plan, backend, (values_component, output_component), (op,)
                 )
             ):
                 component_plans.append(plan)
@@ -5792,8 +5913,8 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
             if (
                 backend is not None
                 and plan is not None
-                and plan.matches_request(
-                    backend, (values_component, output_component), (op,)
+                and _native_plan_request_matches(
+                    plan, backend, (values_component, output_component), (op,)
                 )
             ):
                 component_plans.append(plan)
@@ -7141,8 +7262,8 @@ def experimental_transform(
             if (
                 backend is not None
                 and plan is not None
-                and plan.matches_request(
-                    backend, (src_component, dst_component), (scale, bias)
+                and _native_plan_request_matches(
+                    plan, backend, (src_component, dst_component), (scale, bias)
                 )
             ):
                 component_plans.append(plan)
@@ -7205,7 +7326,8 @@ def experimental_transform(
             if (
                 backend is not None
                 and plan is not None
-                and plan.matches_request(
+                and _native_plan_request_matches(
+                    plan,
                     backend,
                     (src_component, dst_component),
                     (normalized_scale, normalized_bias),
@@ -7847,7 +7969,8 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
             if (
                 backend is not None
                 and plan is not None
-                and plan.matches_request(
+                and _native_plan_request_matches(
+                    plan,
                     backend,
                     (src_component, indices, dst_component),
                     (bool(scatter),),
@@ -8614,7 +8737,7 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
                 objects, semantic_key = workspace._native_scatter_add_request_signature(
                     src_component, indices, dst_component, value_type
                 )
-                if plan.matches_request(backend, objects, semantic_key):
+                if _native_plan_request_matches(plan, backend, objects, semantic_key):
                     component_plans.append(plan)
         if len(component_plans) == len(component_pairs):
             workspace._record_native_scatter_add_plan_group(
@@ -8663,7 +8786,7 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
                 objects, semantic_key = workspace._native_scatter_add_request_signature(
                     src_component, indices, dst_component, value_type
                 )
-                if plan.matches_request(backend, objects, semantic_key):
+                if _native_plan_request_matches(plan, backend, objects, semantic_key):
                     component_plans.append(plan)
         if len(component_plans) == len(component_pairs):
             workspace._record_native_scatter_add_plan_group(
@@ -9965,7 +10088,7 @@ def experimental_grouped_reduce(
                     keys.shape[0],
                     output.shape[0],
                 )
-                if plan.matches_request(backend, objects, semantic_key):
+                if _native_plan_request_matches(plan, backend, objects, semantic_key):
                     component_plans.append(plan)
         if len(component_plans) == len(component_pairs):
             workspace._record_native_grouped_reduce_plan_group(
@@ -10441,8 +10564,8 @@ class PrefixSumExecutor:
                 if (
                     backend is not None
                     and plan is not None
-                    and plan.matches_request(
-                        backend, (component,), (self.sorting_length,)
+                    and _native_plan_request_matches(
+                        plan, backend, (component,), (self.sorting_length,)
                     )
                 ):
                     component_plans.append(plan)
@@ -10472,8 +10595,8 @@ class PrefixSumExecutor:
                 if (
                     backend is not None
                     and plan is not None
-                    and plan.matches_request(
-                        backend, (component,), (self.sorting_length,)
+                    and _native_plan_request_matches(
+                        plan, backend, (component,), (self.sorting_length,)
                     )
                 ):
                     component_plans.append(plan)

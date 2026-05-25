@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 import taichi_forge as ti
+import taichi_forge.algorithms._algorithms as alg_impl
 from taichi_forge.lang import impl
 from tests import test_utils
 
@@ -352,6 +353,44 @@ def _make_struct_tensor_indexed_copy_case(n=256):
     return src, dst, indices, index_data, host, dst_host
 
 
+@test_utils.test(arch=ti.cpu)
+def test_primitive_descriptor_key_stable_for_rebuilt_dense_views():
+    n = 16
+    payload = ti.types.struct(
+        val=ti.i32,
+        vec=ti.types.vector(2, ti.i32),
+    )
+    struct_arr = ti.ndarray(payload, shape=n)
+
+    scalar_a = struct_arr.field("val")
+    scalar_b = struct_arr.field("val")
+    assert scalar_a is not scalar_b
+    assert alg_impl._primitive_plan_object_key(
+        scalar_a
+    ) == alg_impl._primitive_plan_object_key(scalar_b)
+
+    tensor_a = struct_arr.field("vec")
+    tensor_b = struct_arr.field("vec")
+    assert tensor_a is not tensor_b
+    assert alg_impl._primitive_plan_object_key(
+        tensor_a
+    ) == alg_impl._primitive_plan_object_key(tensor_b)
+
+    component_a = struct_arr.field("vec", component=0)
+    component_b = struct_arr.field("vec", component=0)
+    assert component_a is not component_b
+    assert alg_impl._primitive_plan_object_key(
+        component_a
+    ) == alg_impl._primitive_plan_object_key(component_b)
+
+    matrix_field = ti.Vector.field(2, ti.i32, shape=n)
+    field_component_a = matrix_field.get_scalar_field(0)
+    field_component_b = matrix_field.get_scalar_field(0)
+    assert alg_impl._primitive_plan_object_key(
+        field_component_a
+    ) == alg_impl._primitive_plan_object_key(field_component_b)
+
+
 def _run_invalid_index_ndarray(method, scatter):
     src = ti.ndarray(ti.i32, shape=4)
     indices = ti.ndarray(ti.i32, shape=4)
@@ -388,6 +427,7 @@ def test_experimental_gather_cpu_native_struct_scalar_member_workspace_replay():
     assert first_plan is not None
     assert first_plan.backend == "cpu_native"
     assert first_plan.method_name == "cpu_gather_strided_ndarray"
+    assert first_plan.object_keys is not None
 
     host["val"] = host["val"] * np.int32(-2) + np.int32(5)
     dst_host["val"] = np.full(src.shape[0], -1000, dtype=np.int32)
@@ -461,6 +501,7 @@ def test_experimental_scatter_cpu_native_struct_tensor_member_workspace_replay()
     assert first_plan is not None
     assert first_plan.backend == "cpu_native"
     assert first_plan.method_name == "cpu_scatter_strided_ndarray"
+    assert first_plan.object_keys is not None
 
     host["vec"] = host["vec"] * np.int32(3) - np.int32(4)
     dst_host["vec"] = np.full((src.shape[0], 2), -1000, dtype=np.int32)

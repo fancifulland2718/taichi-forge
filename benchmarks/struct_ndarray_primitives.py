@@ -14,6 +14,7 @@ ARCHES = {
     "vulkan": ti.vulkan,
 }
 _METHOD_MODE = "native"
+_WARMUPS = 3
 
 
 def _method_for(arch_name, primitive):
@@ -247,6 +248,9 @@ def _time_call(fn, repeats):
     fn()
     ti.sync()
     first_call_ms = (time.perf_counter() - start) * 1000.0
+    for _ in range(_WARMUPS):
+        fn()
+        ti.sync()
     samples = []
     for _ in range(repeats):
         start = time.perf_counter()
@@ -259,6 +263,7 @@ def _time_call(fn, repeats):
         "median_ms": statistics.median(samples),
         "min_ms": min(samples),
         "max_ms": max(samples),
+        "warmups": _WARMUPS,
     }
 
 
@@ -688,12 +693,13 @@ def run_histogram(arch_name, n, repeats, method_override=None):
 
 
 def main():
-    global _METHOD_MODE  # pylint: disable=global-statement
+    global _METHOD_MODE, _WARMUPS  # pylint: disable=global-statement
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", choices=sorted(ARCHES), default="cpu")
     parser.add_argument("--sizes", default="2048,262144")
     parser.add_argument("--repeats", type=int, default=8)
+    parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--output", default=None)
     parser.add_argument("--bucket-method", default=None)
     parser.add_argument("--grouped-reduce-method", default=None)
@@ -720,6 +726,7 @@ def main():
     )
     args = parser.parse_args()
     _METHOD_MODE = args.method_mode
+    _WARMUPS = args.warmups
 
     ti.init(arch=ARCHES[args.arch], offline_cache=False)
     primitives = (

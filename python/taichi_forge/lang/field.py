@@ -49,6 +49,19 @@ def _dense_fill_value_bits(dtype, val):
     return None
 
 
+_DENSE_NATIVE_METHOD_MISSING = object()
+_DENSE_NATIVE_METHOD_CACHE = {}
+
+
+def _dense_native_method_descriptor(prog, name):
+    key = (type(prog), name)
+    cached = _DENSE_NATIVE_METHOD_CACHE.get(key, _DENSE_NATIVE_METHOD_MISSING)
+    if cached is _DENSE_NATIVE_METHOD_MISSING:
+        cached = getattr(type(prog), name, None)
+        _DENSE_NATIVE_METHOD_CACHE[key] = cached
+    return cached
+
+
 class Field:
     """Taichi field class.
 
@@ -415,13 +428,12 @@ class ScalarField(Field):
         if arr.dtype != to_numpy_type(self.dtype):
             return False
         prog = impl.get_runtime().prog
-        if not hasattr(prog, "copy_dense_field_from_host"):
+        method = _dense_native_method_descriptor(prog, "copy_dense_field_from_host")
+        if method is None:
             return False
         impl.get_runtime().materialize()
         try:
-            prog.copy_dense_field_from_host(
-                self.snode.ptr, arr, value_type, int(arr.size)
-            )
+            method(prog, self.snode.ptr, arr, value_type, int(arr.size))
         except RuntimeError as exc:
             message = str(exc)
             if (
@@ -445,13 +457,12 @@ class ScalarField(Field):
         if arr.dtype != to_numpy_type(self.dtype):
             return False
         prog = impl.get_runtime().prog
-        if not hasattr(prog, "copy_dense_field_to_host"):
+        method = _dense_native_method_descriptor(prog, "copy_dense_field_to_host")
+        if method is None:
             return False
         impl.get_runtime().materialize()
         try:
-            prog.copy_dense_field_to_host(
-                self.snode.ptr, arr, value_type, int(arr.size)
-            )
+            method(prog, self.snode.ptr, arr, value_type, int(arr.size))
         except RuntimeError as exc:
             message = str(exc)
             if (
@@ -474,14 +485,15 @@ class ScalarField(Field):
         if value_bits is None:
             return False
         prog = impl.get_runtime().prog
-        if not hasattr(prog, "fill_dense_field"):
+        method = _dense_native_method_descriptor(prog, "fill_dense_field")
+        if method is None:
             return False
         impl.get_runtime().materialize()
         import numpy as np  # pylint: disable=C0415
 
         n = int(np.prod(self.shape, dtype=np.int64))
         try:
-            prog.fill_dense_field(self.snode.ptr, value_type, value_bits, n)
+            method(prog, self.snode.ptr, value_type, value_bits, n)
         except RuntimeError as exc:
             message = str(exc)
             if (
