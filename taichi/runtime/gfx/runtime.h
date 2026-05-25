@@ -1,12 +1,17 @@
 #pragma once
 #include "taichi/util/lang_util.h"
 
+#include <cstddef>
 #include <cstdint>
-#include <vector>
 #include <chrono>
+#include <functional>
 #include <memory>
+#include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "taichi/rhi/device.h"
 #include "taichi/codegen/spirv/snode_struct_compiler.h"

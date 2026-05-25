@@ -8,10 +8,17 @@
 #include "vk_mem_alloc.h"
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <list>
 #include <memory>
 #include <optional>
-#include <list>
+#include <string>
+#include <unordered_map>
+#include <utility>
 #include <variant>
+#include <vector>
 
 namespace taichi::lang {
 namespace vulkan {

@@ -5,10 +5,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
+#include <string>
 #include <atomic>
 #include <stack>
 #include <shared_mutex>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #define TI_RUNTIME_HOST
 #include "taichi/aot/module_builder.h"

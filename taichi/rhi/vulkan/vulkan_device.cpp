@@ -1,14 +1,19 @@
 #include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
+#include <list>
+#include <set>
 #include <stdexcept>
 #include <string>
-#include <unordered_set>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
-#include <array>
-#include <set>
-#include <list>
 
 #include "taichi/rhi/vulkan/vulkan_common.h"
 #include "taichi/rhi/vulkan/vulkan_utils.h"

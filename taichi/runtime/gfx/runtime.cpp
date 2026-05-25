@@ -7,14 +7,18 @@
 #include "taichi/codegen/spirv/spirv_codegen.h"
 
 #include <algorithm>
-#include <chrono>
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <cstring>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "fp16.h"
