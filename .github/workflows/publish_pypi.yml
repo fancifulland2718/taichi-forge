@@ -134,10 +134,31 @@ jobs:
 
       - name: Install Vulkan SDK deps
         if: runner.os == 'Linux'
+        env:
+          VULKAN_SDK_VERSION: "1.4.304.1"
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libvulkan-dev vulkan-tools glslc
+            libvulkan-dev vulkan-tools xz-utils
+
+          sdk_root="$RUNNER_TEMP/vulkan-sdk"
+          sdk_archive="$RUNNER_TEMP/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz"
+          curl -fsSL \
+            "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz" \
+            -o "$sdk_archive"
+          rm -rf "$sdk_root"
+          mkdir -p "$sdk_root"
+          tar -xJf "$sdk_archive" -C "$sdk_root" --strip-components=1
+
+          sdk="$sdk_root/x86_64"
+          test -x "$sdk/bin/glslc"
+          echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
+          echo "VK_SDK_PATH=$sdk" >> "$GITHUB_ENV"
+          echo "VK_LAYER_PATH=$sdk/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$sdk/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "$sdk/bin" >> "$GITHUB_PATH"
+          "$sdk/bin/glslc" --version
 
       - name: Download prebuilt LLVM 20
         env:

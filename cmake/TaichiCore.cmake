@@ -189,7 +189,9 @@ if (TI_WITH_VULKAN)
     find_program(TI_GLSLC_EXECUTABLE
         NAMES glslc glslc.exe
         HINTS
+            "$ENV{VULKAN_SDK}/bin"
             "$ENV{VULKAN_SDK}/Bin"
+            "$ENV{VK_SDK_PATH}/bin"
             "$ENV{VK_SDK_PATH}/Bin"
             "$ENV{VK_LAYER_PATH}"
     )
