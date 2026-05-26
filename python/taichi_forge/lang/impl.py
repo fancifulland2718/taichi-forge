@@ -775,6 +775,11 @@ def reset():
     window_module = sys.modules.get("taichi_forge.ui.window")
     if window_module is not None:
         window_module._destroy_all_windows()
+    algorithms_module = sys.modules.get("taichi_forge.algorithms._algorithms")
+    if algorithms_module is not None and hasattr(
+        algorithms_module, "clear_default_workspaces"
+    ):
+        algorithms_module.clear_default_workspaces()
     pytaichi.clear()
     pytaichi = PyTaichi(old_kernels)
     for k in old_kernels:

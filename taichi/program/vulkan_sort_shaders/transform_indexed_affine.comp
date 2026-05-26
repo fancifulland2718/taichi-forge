@@ -1,0 +1,48 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Src {
+  uint data[];
+} src_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer Indices {
+  int data[];
+} indices_buf;
+
+layout(set = 0, binding = 2, std430) writeonly buffer Dst {
+  uint data[];
+} dst_buf;
+
+layout(push_constant) uniform Params {
+  uint scale;
+  uint bias;
+  uint n;
+  uint src_n;
+  uint dst_n;
+} params;
+
+void main() {
+  uint item = gl_GlobalInvocationID.x;
+  if (item >= params.n) {
+    return;
+  }
+
+  int index = indices_buf.data[item];
+  if (index < 0) {
+    return;
+  }
+  uint dst_i = uint(index);
+  if (dst_i >= params.src_n || dst_i >= params.dst_n) {
+    return;
+  }
+
+#if VALUE_KIND == 1
+  float value = uintBitsToFloat(src_buf.data[dst_i]);
+  float scale = uintBitsToFloat(params.scale);
+  float bias = uintBitsToFloat(params.bias);
+  dst_buf.data[dst_i] = floatBitsToUint(value * scale + bias);
+#else
+  dst_buf.data[dst_i] = src_buf.data[dst_i] * params.scale + params.bias;
+#endif
+}

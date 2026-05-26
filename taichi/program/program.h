@@ -1,4 +1,4 @@
-﻿// Program  - Taichi program execution context
+// Program  - Taichi program execution context
 
 #pragma once
 
@@ -1213,6 +1213,13 @@ class TI_DLL_EXPORT Program {
                                               int value_type,
                                               double scale,
                                               double bias);
+  std::size_t vulkan_transform_indexed_affine_ndarray(Ndarray *src,
+                                                       Ndarray *indices,
+                                                       Ndarray *dst,
+                                                       int value_type,
+                                                       double scale,
+                                                       double bias);
+
   std::size_t vulkan_transform_affine_member_ndarray(Ndarray *src,
                                                      Ndarray *dst,
                                                      int value_type,

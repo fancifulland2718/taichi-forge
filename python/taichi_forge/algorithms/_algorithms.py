@@ -1,4 +1,5 @@
 import os
+from collections import OrderedDict
 
 import numpy as np
 
@@ -975,6 +976,112 @@ def _primitive_plan_object_keys(objects):
     return tuple(_primitive_plan_object_key(obj) for obj in objects)
 
 
+def _read_nonnegative_int_env(name, default):
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(0, value)
+
+
+_DEFAULT_WORKSPACE_CACHE_LIMIT = _read_nonnegative_int_env(
+    "TAICHI_FORGE_DEFAULT_WORKSPACE_CACHE_LIMIT", 64
+)
+_default_workspace_caches = {}
+
+
+def _clear_workspace_safely(workspace):
+    try:
+        workspace.clear()
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+
+def clear_default_workspaces():
+    """Release implicit workspaces cached for workspace=None public calls."""
+
+    for cache in list(_default_workspace_caches.values()):
+        for workspace in list(cache.values()):
+            _clear_workspace_safely(workspace)
+        cache.clear()
+    _default_workspace_caches.clear()
+
+
+def _default_workspace_context_key():
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    runtime = impl.get_runtime()
+    return (id(runtime), current_cfg().arch)
+
+
+def _default_workspace_cache_enabled_for_kind(kind):
+    arch = current_cfg().arch
+    if arch == cuda:
+        return kind in ("scatter_add", "bucket_builder", "grouped_reduce")
+    if arch == vulkan:
+        return kind in ("indexed_copy", "bucket_builder", "grouped_reduce")
+    return True
+
+
+def _default_workspace_cache_for_current_program(kind):
+    if _DEFAULT_WORKSPACE_CACHE_LIMIT <= 0:
+        return None
+    if not _default_workspace_cache_enabled_for_kind(kind):
+        return None
+    context_key = _default_workspace_context_key()
+    cache = _default_workspace_caches.get(context_key)
+    if cache is None:
+        if len(_default_workspace_caches) > 16:
+            clear_default_workspaces()
+        cache = OrderedDict()
+        _default_workspace_caches[context_key] = cache
+    return cache
+
+
+def _default_workspace_key(kind, objects, semantic_key):
+    return (
+        kind,
+        _primitive_plan_object_keys(objects),
+        tuple(semantic_key),
+    )
+
+
+def _get_default_workspace(kind, objects, semantic_key, factory):
+    cache = _default_workspace_cache_for_current_program(kind)
+    if cache is None:
+        workspace = factory()
+        workspace._default_workspace_cache_active = False
+        return workspace
+    cache_key = _default_workspace_key(kind, objects, semantic_key)
+    workspace = cache.get(cache_key)
+    if workspace is not None:
+        cache.move_to_end(cache_key)
+        workspace._default_workspace_cache_active = True
+        return workspace
+    while len(cache) >= _DEFAULT_WORKSPACE_CACHE_LIMIT:
+        _, old_workspace = cache.popitem(last=False)
+        _clear_workspace_safely(old_workspace)
+    workspace = factory()
+    workspace._default_workspace_cache_active = True
+    cache[cache_key] = workspace
+    return workspace
+
+
+def _workspace_uses_default_cache(workspace):
+    return bool(getattr(workspace, "_default_workspace_cache_active", False))
+
+
+def _default_workspace_replay_enabled(workspace, kind):
+    if not _workspace_uses_default_cache(workspace):
+        return False
+    arch = current_cfg().arch
+    if kind == "reduce" and arch == vulkan:
+        return False
+    if kind == "transform" and arch in (cuda, vulkan):
+        return False
+    return True
+
+
 def _native_plan_cache_key_from_object_keys(backend, object_keys, semantic_key):
     return (backend, tuple(object_keys), tuple(semantic_key))
 
@@ -1318,6 +1425,424 @@ def _try_native_component_plan_group(
         on_success,
     )
 
+
+_PRIMITIVE_SEQUENCE_PLAN_ATTRS = {
+    "reduce": ("_native_reduce_plan_group", "_native_reduce_plan"),
+    "histogram": ("_staged_histogram_plan_group", "_native_histogram_plan"),
+    "transform": ("_native_transform_plan_group", "_native_transform_plan"),
+    "indexed_copy": (
+        "_native_indexed_copy_plan_group",
+        "_native_indexed_copy_plan",
+    ),
+    "scatter_add": (
+        "_two_level_scatter_add_plan_group",
+        "_native_scatter_add_plan_group",
+        "_native_scatter_add_plan",
+    ),
+    "compact": ("_native_compact_plan",),
+    "bucket_builder": ("_native_bucket_builder_plan",),
+    "grouped_reduce": (
+        "_staged_grouped_reduce_plan_group",
+        "_native_grouped_reduce_plan_group",
+        "_native_grouped_reduce_plan",
+    ),
+}
+
+
+def _workspace_active_execution_plan(workspace, kind):
+    if workspace is None:
+        return None
+    for attr in _PRIMITIVE_SEQUENCE_PLAN_ATTRS.get(kind, ()):
+        plan = getattr(workspace, attr, None)
+        if isinstance(plan, (_NativePrimitivePlan, _PrimitiveExecutionPlan)):
+            return plan
+    return None
+
+
+class _PrimitiveSequenceCall:
+    __slots__ = (
+        "kind",
+        "func",
+        "args",
+        "kwargs",
+        "workspace",
+        "plan",
+        "last_temp_bytes",
+    )
+
+    def __init__(self, kind, func, args, kwargs, workspace):
+        self.kind = kind
+        self.func = func
+        self.args = tuple(args)
+        self.kwargs = dict(kwargs)
+        self.workspace = workspace
+        self.kwargs["workspace"] = workspace
+        self.plan = None
+        self.last_temp_bytes = 0
+
+    def invoke_public(self):
+        result = self.func(*self.args, **self.kwargs)
+        if self.workspace is None and result is not None:
+            self.workspace = result
+            self.kwargs["workspace"] = result
+        self.capture_plan()
+        return result
+
+    def capture_plan(self):
+        self.plan = _workspace_active_execution_plan(self.workspace, self.kind)
+        return self.plan
+
+    def invoke_direct(self, prog):
+        plan = self.plan
+        if plan is None or not plan.matches_program(prog):
+            return False
+        temp_bytes = plan.invoke(prog)
+        if temp_bytes is None:
+            return False
+        self.last_temp_bytes = temp_bytes
+        return True
+
+
+_PRIMITIVE_SEQUENCE_FUSION_ENV = "TAICHI_FORGE_PRIMITIVE_SEQUENCE_FUSION"
+
+
+def _primitive_sequence_fusion_enabled():
+    value = os.environ.get(_PRIMITIVE_SEQUENCE_FUSION_ENV)
+    if value is None:
+        return True
+    return value.strip().lower() not in ("0", "false", "off", "no")
+
+
+def _same_ndarray_storage(lhs, rhs):
+    return lhs is rhs or getattr(lhs, "arr", None) is getattr(rhs, "arr", None)
+
+
+def _try_build_vulkan_indexed_transform_sequence_plan(calls, prog, *, invoke):
+    if not _primitive_sequence_fusion_enabled() or current_cfg().arch != vulkan:
+        return None
+    if len(calls) != 3:
+        return None
+    transform_call, gather_call, scatter_call = calls
+    if (
+        transform_call.kind != "transform"
+        or gather_call.kind != "indexed_copy"
+        or scatter_call.kind != "indexed_copy"
+        or transform_call.func is not experimental_transform
+        or gather_call.func is not experimental_gather
+        or scatter_call.func is not experimental_scatter
+    ):
+        return None
+    if transform_call.kwargs.get("method", "auto") not in ("auto", "vulkan_native"):
+        return None
+    if gather_call.kwargs.get("method", "auto") not in ("auto", "vulkan_native"):
+        return None
+    if scatter_call.kwargs.get("method", "auto") not in ("auto", "vulkan_native"):
+        return None
+
+    src, tmp = transform_call.args
+    gather_src, indices, gathered = gather_call.args
+    scatter_src, scatter_indices, dst = scatter_call.args
+    if tmp is not gather_src or gathered is not scatter_src or indices is not scatter_indices:
+        return None
+    if not (
+        isinstance(src, Ndarray)
+        and isinstance(tmp, Ndarray)
+        and isinstance(indices, Ndarray)
+        and isinstance(gathered, Ndarray)
+        and isinstance(dst, Ndarray)
+    ):
+        return None
+    if _same_ndarray_storage(src, dst) or _same_ndarray_storage(indices, dst):
+        return None
+    if src.dtype != tmp.dtype or src.dtype != gathered.dtype or src.dtype != dst.dtype:
+        return None
+    if src.dtype not in (i32, f32, u32) or indices.dtype != i32:
+        return None
+    src_shape = _shape_tuple(src)
+    tmp_shape = _shape_tuple(tmp)
+    indices_shape = _shape_tuple(indices)
+    gathered_shape = _shape_tuple(gathered)
+    dst_shape = _shape_tuple(dst)
+    if (
+        src_shape is None
+        or tmp_shape is None
+        or indices_shape is None
+        or gathered_shape is None
+        or dst_shape is None
+        or len(src_shape) != 1
+        or len(tmp_shape) != 1
+        or len(indices_shape) != 1
+        or len(gathered_shape) != 1
+        or len(dst_shape) != 1
+        or src_shape != tmp_shape
+        or indices_shape != gathered_shape
+    ):
+        return None
+
+    value_type = _transform_value_type(src.dtype)
+    if not _prog_available(prog, "vulkan_transform_available"):
+        return None
+    if not _prog_value_available(
+        prog, "vulkan_transform_value_type_available", value_type
+    ):
+        return None
+    method_name = "vulkan_transform_indexed_affine_ndarray"
+    if not _prog_has(prog, method_name):
+        return None
+    scale, bias = _normalize_transform_args(
+        src.dtype,
+        transform_call.kwargs.get("scale", 1),
+        transform_call.kwargs.get("bias", 0),
+    )
+    call_args = (src.arr, indices.arr, dst.arr, value_type, scale, bias)
+    semantic_key = (
+        "transform_indexed_affine",
+        value_type,
+        scale,
+        bias,
+        int(indices_shape[0]),
+        int(src_shape[0]),
+        int(dst_shape[0]),
+    )
+    plan = _NativePrimitivePlan(
+        "vulkan_native",
+        method_name,
+        (src, indices, dst),
+        semantic_key,
+        call_args,
+        prog,
+        value_type,
+        int(indices_shape[0]),
+    )
+    if invoke and plan.invoke(prog) is None:
+        return None
+    return plan
+
+class PrimitiveSequence:
+    """Prewarmed sequence of experimental primitive calls.
+
+    The sequence owns explicit workspaces for calls added through the typed
+    helpers below. After ``prewarm()``, calls with native plans replay those
+    plans directly and skip public-entry routing, shape checks, default
+    workspace lookup, and native-plan lookup. Calls that do not produce a native
+    plan fall back to the normal public function.
+    """
+
+    def __init__(self):
+        self._calls = []
+        self._fused_plan = None
+
+    @property
+    def call_count(self):
+        return len(self._calls)
+
+    @property
+    def direct_plan_count(self):
+        return sum(1 for call in self._calls if call.plan is not None)
+
+    @property
+    def fused_plan_count(self):
+        return 1 if self._fused_plan is not None else 0
+
+    @property
+    def fused_plan_method(self):
+        if self._fused_plan is None:
+            return None
+        return self._fused_plan.method_name
+
+    @property
+    def workspace_bytes_peak(self):
+        total = 0
+        seen = set()
+        for call in self._calls:
+            workspace = call.workspace
+            if workspace is None or id(workspace) in seen:
+                continue
+            seen.add(id(workspace))
+            total += int(getattr(workspace, "workspace_bytes_peak", 0))
+        return total
+
+    @property
+    def workspaces(self):
+        workspaces = []
+        seen = set()
+        for call in self._calls:
+            workspace = call.workspace
+            if workspace is None or id(workspace) in seen:
+                continue
+            seen.add(id(workspace))
+            workspaces.append(workspace)
+        return tuple(workspaces)
+
+    def _add_call(self, kind, func, args, kwargs, workspace):
+        self._calls.append(_PrimitiveSequenceCall(kind, func, args, kwargs, workspace))
+        return self
+
+    def _capture_fused_plan(self, prog, *, invoke):
+        self._fused_plan = _try_build_vulkan_indexed_transform_sequence_plan(
+            self._calls, prog, invoke=invoke
+        )
+        return self._fused_plan is not None
+
+    def _invoke_fused_plan(self, prog):
+        plan = self._fused_plan
+        if plan is None or not plan.matches_program(prog):
+            if not self._capture_fused_plan(prog, invoke=False):
+                return False
+            plan = self._fused_plan
+        temp_bytes = plan.invoke(prog)
+        if temp_bytes is None:
+            self._fused_plan = None
+            return False
+        return True
+
+    def prewarm(self, repeat=1):
+        repeat = max(1, int(repeat))
+        for _ in range(repeat):
+            for call in self._calls:
+                call.invoke_public()
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        self._capture_fused_plan(impl.get_runtime().prog, invoke=True)
+        return self
+
+    def run(self, repeat=1):
+        repeat = max(1, int(repeat))
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        for _ in range(repeat):
+            prog = impl.get_runtime().prog
+            if self._invoke_fused_plan(prog):
+                continue
+            for call in self._calls:
+                if not call.invoke_direct(prog):
+                    call.invoke_public()
+        return self
+
+    def clear(self):
+        for workspace in self.workspaces:
+            _clear_workspace_safely(workspace)
+        for call in self._calls:
+            call.plan = None
+        self._fused_plan = None
+        return self
+
+    def reduce(self, values, output, *, op="sum", method="auto", workspace=None):
+        if workspace is None:
+            workspace = ReduceWorkspace(max_items=_shape_numel(values))
+        return self._add_call(
+            "reduce",
+            experimental_reduce,
+            (values, output),
+            {"op": op, "method": method},
+            workspace,
+        )
+
+    def histogram(self, values, bins, *, method="auto", workspace=None):
+        if workspace is None:
+            workspace = HistogramWorkspace(
+                max_items=_shape_numel(values), max_bins=_shape_numel(bins)
+            )
+        return self._add_call(
+            "histogram",
+            experimental_histogram,
+            (values, bins),
+            {"method": method},
+            workspace,
+        )
+
+    def transform(
+        self, src, dst, *, scale=1, bias=0, method="auto", workspace=None
+    ):
+        if workspace is None:
+            workspace = TransformWorkspace(max_items=_shape_numel(src))
+        return self._add_call(
+            "transform",
+            experimental_transform,
+            (src, dst),
+            {"scale": scale, "bias": bias, "method": method},
+            workspace,
+        )
+
+    def gather(self, src, indices, dst, *, method="auto", workspace=None):
+        if workspace is None:
+            workspace = IndexedCopyWorkspace(max_items=_shape_numel(indices))
+        return self._add_call(
+            "indexed_copy",
+            experimental_gather,
+            (src, indices, dst),
+            {"method": method},
+            workspace,
+        )
+
+    def scatter(self, src, indices, dst, *, method="auto", workspace=None):
+        if workspace is None:
+            workspace = IndexedCopyWorkspace(max_items=_shape_numel(indices))
+        return self._add_call(
+            "indexed_copy",
+            experimental_scatter,
+            (src, indices, dst),
+            {"method": method},
+            workspace,
+        )
+
+    def scatter_add(self, src, indices, dst, *, method="auto", workspace=None):
+        if workspace is None:
+            workspace = ScatterAddWorkspace(max_items=_shape_numel(indices))
+        return self._add_call(
+            "scatter_add",
+            experimental_scatter_add,
+            (src, indices, dst),
+            {"method": method},
+            workspace,
+        )
+
+    def compact(
+        self, values, flags, output, count, *, method="auto", workspace=None
+    ):
+        if workspace is None:
+            workspace = CompactWorkspace(max_items=_shape_numel(values))
+        return self._add_call(
+            "compact",
+            experimental_compact,
+            (values, flags, output, count),
+            {"method": method},
+            workspace,
+        )
+
+    def bucket_builder(
+        self, keys, values, offsets, output, *, method="auto", workspace=None
+    ):
+        if workspace is None:
+            workspace = BucketBuilderWorkspace(
+                max_items=_shape_numel(keys), max_bins=_shape_numel(offsets)
+            )
+        return self._add_call(
+            "bucket_builder",
+            experimental_bucket_builder,
+            (keys, values, offsets, output),
+            {"method": method},
+            workspace,
+        )
+
+    def grouped_reduce(
+        self, keys, values, output, *, op="sum", method="auto", workspace=None
+    ):
+        if workspace is None:
+            workspace = GroupedReduceWorkspace(
+                max_items=_shape_numel(keys), max_groups=_shape_numel(output)
+            )
+        return self._add_call(
+            "grouped_reduce",
+            experimental_grouped_reduce,
+            (keys, values, output),
+            {"op": op, "method": method},
+            workspace,
+        )
+
+
+def primitive_sequence():
+    return PrimitiveSequence()
 
 def _struct_tensor_member_components(view):
     for component in np.ndindex(view.element_shape):
@@ -5403,7 +5928,12 @@ def _compact_field_scan(values, flags, output, count, workspace, method):
         )
     n = values.shape[0]
     if workspace is None:
-        workspace = CompactWorkspace(max_items=n)
+        workspace = _get_default_workspace(
+            "compact",
+            (values, flags, output, count),
+            ("compact", method, int(n)),
+            lambda: CompactWorkspace(max_items=n),
+        )
     if n <= 1:
         compact_single_item_field(values, flags, output, count, n)
         return workspace
@@ -5466,7 +5996,12 @@ def experimental_compact(
                 "incompatible."
             )
         if workspace is None:
-            workspace = CompactWorkspace(max_items=n)
+            workspace = _get_default_workspace(
+                "compact",
+                (values, flags, output, count),
+                ("compact", method, int(n)),
+                lambda: CompactWorkspace(max_items=n),
+            )
         copy_method = _native_copy_method_for_current_arch(method)
         order_in, order_out = _prepare_order_apply_pair(workspace, n)
         experimental_compact(
@@ -5497,7 +6032,20 @@ def experimental_compact(
     if values.shape[0] == 0:
         return
     if workspace is None:
-        workspace = CompactWorkspace(max_items=values.shape[0])
+        workspace = _get_default_workspace(
+            "compact",
+            (values, flags, output, count),
+            ("compact", method, int(values.shape[0])),
+            lambda: CompactWorkspace(max_items=values.shape[0]),
+        )
+    if _workspace_uses_default_cache(workspace) and workspace._try_native_compact_plan(
+        values, flags, output, count, method
+    ):
+        return
+    if _workspace_uses_default_cache(workspace) and workspace._try_cpu_field_scan_plan(
+        values, flags, output, count, method
+    ):
+        return
     if method in ("auto", "cuda_cub") and _try_cuda_cub_compact(
         values, flags, output, count, workspace
     ):
@@ -6095,8 +6643,11 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
                 "have scalar field shape=()."
             )
         if workspace is None:
-            workspace = ReduceWorkspace(
-                max_items=values.shape[0], cache_native_plans=False
+            workspace = _get_default_workspace(
+                "reduce",
+                (values, output),
+                ("reduce", op, method, int(values.shape[0])),
+                lambda: ReduceWorkspace(max_items=values.shape[0]),
             )
         workspace.check_shape(values.shape[0])
         if workspace._try_native_reduce_plan_group(values, output, op, method):
@@ -6136,7 +6687,12 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
         if output.shape[0] < 1:
             raise ValueError("experimental_reduce() ndarray output must be shape >= 1.")
         if workspace is None:
-            workspace = ReduceWorkspace(max_items=values.shape[0])
+            workspace = _get_default_workspace(
+                "reduce",
+                (values, output),
+                ("reduce", op, method, int(values.shape[0])),
+                lambda: ReduceWorkspace(max_items=values.shape[0]),
+            )
         workspace.check_shape(values.shape[0])
         if workspace._try_native_reduce_plan_group(values, output, op, method):
             return workspace
@@ -6177,8 +6733,17 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
 
     _check_reduce_request(values, output, op, method, workspace)
     if workspace is None:
-        workspace = ReduceWorkspace(max_items=values.shape[0])
+        workspace = _get_default_workspace(
+            "reduce",
+            (values, output),
+            ("reduce", op, method, int(values.shape[0])),
+            lambda: ReduceWorkspace(max_items=values.shape[0]),
+        )
     workspace.check_shape(values.shape[0])
+    if _default_workspace_replay_enabled(workspace, "reduce") and workspace._try_native_reduce_plan(
+        values, output, op, method
+    ):
+        return workspace
     if method in ("auto", "cuda_cub") and _try_cuda_cub_reduce(
         values, output, op, workspace
     ):
@@ -6715,7 +7280,12 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
 
     _check_histogram_request(values, bins, method, workspace)
     if workspace is None:
-        workspace = HistogramWorkspace(max_items=values.shape[0], max_bins=bins.shape[0])
+        workspace = _get_default_workspace(
+            "histogram",
+            (values, bins),
+            ("histogram", method, int(values.shape[0]), int(bins.shape[0])),
+            lambda: HistogramWorkspace(max_items=values.shape[0], max_bins=bins.shape[0]),
+        )
     workspace.check_shape(values.shape[0], bins.shape[0])
     aggregation_backend = _aggregation_backend_for_method(
         method,
@@ -6726,6 +7296,15 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
         cpu_native=("cpu_native",),
         cpu_two_level=("cpu_two_level",),
     )
+    signature = _histogram_replay_signature(values, bins)
+    if _workspace_uses_default_cache(workspace) and signature is not None:
+        value_type, bin_type, n, num_bins = signature
+        if workspace._try_staged_histogram_plan_group(
+            values, bins, method, value_type, bin_type, n, num_bins
+        ):
+            return
+        if workspace._try_native_histogram_plan(values, bins, method, value_type, bin_type):
+            return
     if _try_staged_histogram(values, bins, method, workspace, aggregation_backend):
         return
     if aggregation_backend in ("cuda_native", "cuda_two_level") and _try_cuda_cub_histogram(
@@ -7486,7 +8065,12 @@ def experimental_transform(
         _check_matching_matrix_fields("experimental_transform()", src, dst)
         n = _shape_numel(src)
         if workspace is None:
-            workspace = TransformWorkspace(max_items=n, cache_native_plans=False)
+            workspace = _get_default_workspace(
+                "transform",
+                (src, dst),
+                ("transform", method, int(n), scale, bias),
+                lambda: TransformWorkspace(max_items=n),
+            )
         workspace.check_shape(n)
         scale, bias = _normalize_transform_args(src.dtype, scale, bias)
         if workspace._try_native_transform_plan_group(src, dst, method, scale, bias):
@@ -7528,7 +8112,12 @@ def experimental_transform(
         )
         n = _shape_numel(src)
         if workspace is None:
-            workspace = TransformWorkspace(max_items=n, cache_native_plans=False)
+            workspace = _get_default_workspace(
+                "transform",
+                (src, dst),
+                ("transform", method, int(n), scale, bias),
+                lambda: TransformWorkspace(max_items=n),
+            )
         workspace.check_shape(n)
         normalized_scale, normalized_bias = _normalize_transform_args(
             src.scalar_dtype, scale, bias
@@ -7594,11 +8183,20 @@ def experimental_transform(
     _check_transform_request(src, dst, method, workspace)
     n = _shape_numel(src)
     if workspace is None:
-        workspace = TransformWorkspace(max_items=n, cache_native_plans=False)
+        workspace = _get_default_workspace(
+            "transform",
+            (src, dst),
+            ("transform", method, int(n), scale, bias),
+            lambda: TransformWorkspace(max_items=n),
+        )
     workspace.check_shape(n)
     scale, bias = _normalize_transform_args(src.dtype, scale, bias)
     value_type = _transform_value_type(src.dtype)
     if n == 0:
+        return workspace
+    if _default_workspace_replay_enabled(workspace, "transform") and workspace._try_native_transform_plan(
+        src, dst, method, scale, bias
+    ):
         return workspace
     if method in ("auto", "cuda_device") and _try_cuda_device_transform(
         src, dst, value_type, scale, bias, workspace
@@ -8190,7 +8788,12 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
             raise ValueError(f"{op_name} expects 1D source, indices, and destination.")
         n = _indexed_copy_item_count(src, indices, dst, scatter)
         if workspace is None:
-            workspace = IndexedCopyWorkspace(max_items=n, cache_native_plans=False)
+            workspace = _get_default_workspace(
+                "indexed_copy",
+                (src, indices, dst),
+                ("indexed_copy", method, bool(scatter), int(n)),
+                lambda: IndexedCopyWorkspace(max_items=n),
+            )
         workspace.check_shape(n)
         if n == 0:
             return workspace
@@ -8236,7 +8839,12 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
             raise TypeError(f"{op_name} whole tensor member views require ti.ndarray indices.")
         n = _indexed_copy_item_count(src, indices, dst, scatter)
         if workspace is None:
-            workspace = IndexedCopyWorkspace(max_items=n, cache_native_plans=False)
+            workspace = _get_default_workspace(
+                "indexed_copy",
+                (src, indices, dst),
+                ("indexed_copy", method, bool(scatter), int(n)),
+                lambda: IndexedCopyWorkspace(max_items=n),
+            )
         workspace.check_shape(n)
         if n == 0:
             return workspace
@@ -8265,7 +8873,12 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
     _check_indexed_copy_request(src, indices, dst, method, workspace, op_name)
     n = _indexed_copy_item_count(src, indices, dst, scatter)
     if workspace is None:
-        workspace = IndexedCopyWorkspace(max_items=n, cache_native_plans=False)
+        workspace = _get_default_workspace(
+            "indexed_copy",
+            (src, indices, dst),
+            ("indexed_copy", method, bool(scatter), int(n)),
+            lambda: IndexedCopyWorkspace(max_items=n),
+        )
     workspace.check_shape(n)
     if n == 0:
         return workspace
@@ -8957,7 +9570,12 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
             )
         n = indices.shape[0]
         if workspace is None:
-            workspace = ScatterAddWorkspace(max_items=n, max_groups=dst.shape[0])
+            workspace = _get_default_workspace(
+                "scatter_add",
+                (src, indices, dst),
+                ("scatter_add", method, int(n), int(dst.shape[0])),
+                lambda: ScatterAddWorkspace(max_items=n, max_groups=dst.shape[0]),
+            )
         workspace.check_shape(n, dst.shape[0])
         if n == 0:
             return workspace
@@ -9001,8 +9619,13 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
                 "experimental_scatter_add() expects source and indices sizes to match."
             )
         if workspace is None:
-            workspace = ScatterAddWorkspace(
-                max_items=indices.shape[0], max_groups=dst.shape[0]
+            workspace = _get_default_workspace(
+                "scatter_add",
+                (src, indices, dst),
+                ("scatter_add", method, int(indices.shape[0]), int(dst.shape[0])),
+                lambda: ScatterAddWorkspace(
+                    max_items=indices.shape[0], max_groups=dst.shape[0]
+                ),
             )
         workspace.check_shape(indices.shape[0], dst.shape[0])
         if indices.shape[0] == 0:
@@ -9057,10 +9680,26 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
     _check_scatter_add_request(src, indices, dst, method, workspace)
     n = indices.shape[0]
     if workspace is None:
-        workspace = ScatterAddWorkspace(max_items=n, max_groups=dst.shape[0])
+        workspace = _get_default_workspace(
+            "scatter_add",
+            (src, indices, dst),
+            ("scatter_add", method, int(n), int(dst.shape[0])),
+            lambda: ScatterAddWorkspace(max_items=n, max_groups=dst.shape[0]),
+        )
     workspace.check_shape(n, dst.shape[0])
     if n == 0:
         return workspace
+    signature = _scatter_add_replay_signature(src, indices, dst)
+    if _workspace_uses_default_cache(workspace) and signature is not None:
+        value_type, _, _ = signature
+        if workspace._try_two_level_scatter_add_plan_group(
+            src, indices, dst, method, value_type
+        ):
+            return workspace
+        if workspace._try_native_scatter_add_plan(
+            src, indices, dst, method, value_type
+        ):
+            return workspace
     if _try_two_level_scatter_add(src, indices, dst, method, workspace, _scatter_add_value_type(src.dtype)):
         return workspace
     if method in ("two_level", "cuda_two_level", "vulkan_two_level", "cpu_two_level"):
@@ -9502,7 +10141,12 @@ def experimental_bucket_builder(
                 "output sizes are incompatible."
             )
         if workspace is None:
-            workspace = BucketBuilderWorkspace(max_items=n, max_bins=num_bins)
+            workspace = _get_default_workspace(
+                "bucket_builder",
+                (keys, values, offsets, output),
+                ("bucket_builder", method, int(n), int(num_bins)),
+                lambda: BucketBuilderWorkspace(max_items=n, max_bins=num_bins),
+            )
         workspace.check_shape(n, num_bins)
         copy_method = _native_copy_method_for_current_arch(method)
         order_in, order_out = _prepare_order_apply_pair(workspace, n)
@@ -9558,7 +10202,12 @@ def experimental_bucket_builder(
     n = keys.shape[0]
     num_bins = offsets.shape[0] - 1
     if workspace is None:
-        workspace = BucketBuilderWorkspace(max_items=n, max_bins=num_bins)
+        workspace = _get_default_workspace(
+            "bucket_builder",
+            (keys, values, offsets, output),
+            ("bucket_builder", method, int(n), int(num_bins)),
+            lambda: BucketBuilderWorkspace(max_items=n, max_bins=num_bins),
+        )
     workspace.check_shape(n, num_bins)
     aggregation_backend = _aggregation_backend_for_method(
         method,
@@ -9569,6 +10218,21 @@ def experimental_bucket_builder(
         cpu_native=("cpu_native",),
         cpu_two_level=("cpu_two_level",),
     )
+    if _workspace_uses_default_cache(workspace) and aggregation_backend in (
+        "cuda_native",
+        "cuda_two_level",
+        "vulkan_native",
+        "vulkan_two_level",
+        "cpu_native",
+        "cpu_two_level",
+    ):
+        signature = _bucket_builder_replay_signature(keys, values, offsets)
+        if signature is not None:
+            value_type, n, num_bins = signature
+            if workspace._try_native_bucket_builder_plan(
+                keys, values, offsets, output, value_type, n, num_bins
+            ):
+                return workspace
     if aggregation_backend in ("cuda_native", "cuda_two_level") and _try_cuda_device_bucket_builder(
         keys, values, offsets, output, workspace, num_bins
     ):
@@ -10295,8 +10959,13 @@ def experimental_grouped_reduce(
                 "experimental_grouped_reduce() output must contain at least one group."
             )
         if workspace is None:
-            workspace = GroupedReduceWorkspace(
-                max_items=keys.shape[0], max_groups=output.shape[0]
+            workspace = _get_default_workspace(
+                "grouped_reduce",
+                (keys, values, output),
+                ("grouped_reduce", op, method, int(keys.shape[0]), int(output.shape[0])),
+                lambda: GroupedReduceWorkspace(
+                    max_items=keys.shape[0], max_groups=output.shape[0]
+                ),
             )
         workspace.check_shape(keys.shape[0], output.shape[0])
         value_type = _grouped_reduce_value_type(values.scalar_dtype)
@@ -10375,7 +11044,12 @@ def experimental_grouped_reduce(
     n = keys.shape[0]
     num_groups = output.shape[0]
     if workspace is None:
-        workspace = GroupedReduceWorkspace(max_items=n, max_groups=num_groups)
+        workspace = _get_default_workspace(
+            "grouped_reduce",
+            (keys, values, output),
+            ("grouped_reduce", op, method, int(n), int(num_groups)),
+            lambda: GroupedReduceWorkspace(max_items=n, max_groups=num_groups),
+        )
     workspace.check_shape(n, num_groups)
     aggregation_backend = _aggregation_backend_for_method(
         method,
@@ -10387,6 +11061,19 @@ def experimental_grouped_reduce(
         cpu_two_level=("cpu_two_level",),
         generic_two_level=("segmented", "two_level"),
     )
+    backend = workspace._native_grouped_reduce_backend_for_method(method)
+    if (
+        _workspace_uses_default_cache(workspace)
+        and aggregation_backend is not None
+        and backend is not None
+    ):
+        signature = _grouped_reduce_replay_signature(keys, values, output, op)
+        if signature is not None:
+            value_type, op_id, n, num_groups = signature
+            if workspace._try_native_grouped_reduce_plan(
+                backend, keys, values, output, value_type, op_id, n, num_groups
+            ):
+                return workspace
     if aggregation_backend == "cuda_native" and _try_cuda_device_grouped_reduce(
         keys, values, output, workspace, num_groups, op, segmented=False
     ):
@@ -10910,6 +11597,8 @@ __all__ = [
     "ScatterAddWorkspace",
     "BucketBuilderWorkspace",
     "GroupedReduceWorkspace",
+    "PrimitiveSequence",
+    "primitive_sequence",
     "legacy_helper_auto_fallback_enabled",
     "set_legacy_helper_auto_fallback_enabled",
     "reset_legacy_helper_auto_fallback_policy",
@@ -10920,6 +11609,7 @@ __all__ = [
     "clear_primitive_diagnostics",
     "set_primitive_diagnostics_enabled",
     "get_primitive_diagnostics",
+    "clear_default_workspaces",
     "experimental_compact",
     "experimental_reduce",
     "experimental_histogram",

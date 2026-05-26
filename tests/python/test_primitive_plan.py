@@ -1,4 +1,6 @@
-﻿import taichi_forge as ti
+import numpy as np
+import pytest
+import taichi_forge as ti
 import taichi_forge.algorithms._algorithms as alg_impl
 from taichi_forge.lang import impl
 from tests import test_utils
@@ -432,3 +434,168 @@ def test_prog_method_descriptor_cache_invokes_without_bound_lookup():
     assert missing_plan.method_descriptor is None
     assert missing_plan.invoke(prog) is None
 
+
+
+@test_utils.test(arch=ti.cpu)
+def test_default_workspace_reuses_workspace_none_transform_cache_entry():
+    n = 32
+    src = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(ti.i32, shape=n)
+    src.from_numpy(np.arange(n, dtype=np.int32))
+    alg_impl.clear_default_workspaces()
+    try:
+        alg_impl.experimental_transform(src, dst, scale=3, bias=5, workspace=None)
+        workspaces = [
+            workspace
+            for cache in alg_impl._default_workspace_caches.values()
+            for workspace in cache.values()
+        ]
+        assert len(workspaces) == 1
+        cached_workspace = workspaces[0]
+        alg_impl.experimental_transform(src, dst, scale=3, bias=5, workspace=None)
+        workspaces = [
+            workspace
+            for cache in alg_impl._default_workspace_caches.values()
+            for workspace in cache.values()
+        ]
+    finally:
+        alg_impl.clear_default_workspaces()
+    assert len(workspaces) == 1
+    assert workspaces[0] is cached_workspace
+    assert np.array_equal(dst.to_numpy(), np.arange(n, dtype=np.int32) * 3 + 5)
+
+
+@test_utils.test(arch=ti.cpu)
+def test_default_workspace_cache_clears_on_reset():
+    n = 8
+    src = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(ti.i32, shape=n)
+    alg_impl.clear_default_workspaces()
+    workspace = alg_impl._get_default_workspace(
+        "transform",
+        (src, dst),
+        ("transform", "auto", n, 1, 0),
+        lambda: alg_impl.TransformWorkspace(max_items=n),
+    )
+    assert workspace is alg_impl._get_default_workspace(
+        "transform",
+        (src, dst),
+        ("transform", "auto", n, 1, 0),
+        lambda: alg_impl.TransformWorkspace(max_items=n),
+    )
+    assert alg_impl._default_workspace_caches
+    ti.reset()
+    assert not alg_impl._default_workspace_caches
+
+@test_utils.test(arch=ti.cpu)
+def test_primitive_sequence_prewarm_replays_native_plans():
+    n = 32
+    src_np = np.arange(n, dtype=np.int32)
+    idx_np = np.arange(n - 1, -1, -1, dtype=np.int32)
+    src = ti.ndarray(ti.i32, shape=n)
+    tmp = ti.ndarray(ti.i32, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(ti.i32, shape=n)
+    src.from_numpy(src_np)
+    indices.from_numpy(idx_np)
+
+    seq = alg_impl.primitive_sequence()
+    assert seq.transform(src, tmp, scale=2, bias=1).gather(tmp, indices, dst) is seq
+    assert seq.call_count == 2
+    assert seq.direct_plan_count == 0
+
+    seq.prewarm()
+    assert seq.direct_plan_count == 2
+    assert np.array_equal(dst.to_numpy(), (src_np * 2 + 1)[idx_np])
+
+    src_np = src_np + 10
+    src.from_numpy(src_np)
+    seq.run()
+    assert np.array_equal(dst.to_numpy(), (src_np * 2 + 1)[idx_np])
+    assert len(seq.workspaces) == 2
+    assert seq.workspace_bytes_peak >= 0
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_primitive_sequence_vulkan_fuses_indexed_transform_chain():
+    prog = ti.lang.impl.get_runtime().prog
+    if not hasattr(prog, "vulkan_transform_indexed_affine_ndarray"):
+        pytest.skip("Vulkan indexed transform fusion is unavailable.")
+    n = 64
+    src_np = np.arange(n, dtype=np.int32) - 7
+    idx_np = np.arange(n - 1, -1, -1, dtype=np.int32)
+    src = ti.ndarray(ti.i32, shape=n)
+    tmp = ti.ndarray(ti.i32, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    gathered = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(ti.i32, shape=n)
+    src.from_numpy(src_np)
+    indices.from_numpy(idx_np)
+    dst.fill(0)
+
+    seq = alg_impl.primitive_sequence()
+    seq.transform(src, tmp, scale=3, bias=5, method="vulkan_native")
+    seq.gather(tmp, indices, gathered, method="vulkan_native")
+    seq.scatter(gathered, indices, dst, method="vulkan_native")
+    seq.prewarm()
+    assert seq.fused_plan_method == "vulkan_transform_indexed_affine_ndarray"
+    assert np.array_equal(dst.to_numpy(), src_np * 3 + 5)
+
+    src_np = src_np + 11
+    src.from_numpy(src_np)
+    dst.fill(0)
+    seq.run()
+    assert np.array_equal(dst.to_numpy(), src_np * 3 + 5)
+
+@test_utils.test(arch=ti.vulkan)
+def test_primitive_sequence_vulkan_fused_indexed_transform_value_types():
+    prog = ti.lang.impl.get_runtime().prog
+    if not hasattr(prog, "vulkan_transform_indexed_affine_ndarray"):
+        pytest.skip("Vulkan indexed transform fusion is unavailable.")
+    n = 32
+    idx_np = np.arange(n - 1, -1, -1, dtype=np.int32)
+    cases = (
+        (ti.u32, np.uint32, 3, 5),
+        (ti.f32, np.float32, 1.5, -2.25),
+    )
+    for dtype, np_dtype, scale, bias in cases:
+        src_np = (np.arange(n, dtype=np_dtype) + np_dtype(2)).astype(np_dtype)
+        src = ti.ndarray(dtype, shape=n)
+        tmp = ti.ndarray(dtype, shape=n)
+        indices = ti.ndarray(ti.i32, shape=n)
+        gathered = ti.ndarray(dtype, shape=n)
+        dst = ti.ndarray(dtype, shape=n)
+        src.from_numpy(src_np)
+        indices.from_numpy(idx_np)
+        dst.fill(0)
+        seq = alg_impl.primitive_sequence()
+        seq.transform(src, tmp, scale=scale, bias=bias, method="vulkan_native")
+        seq.gather(tmp, indices, gathered, method="vulkan_native")
+        seq.scatter(gathered, indices, dst, method="vulkan_native")
+        seq.prewarm()
+        assert seq.fused_plan_method == "vulkan_transform_indexed_affine_ndarray"
+        expected = (src_np * np_dtype(scale) + np_dtype(bias)).astype(np_dtype)
+        if dtype == ti.f32:
+            assert np.allclose(dst.to_numpy(), expected)
+        else:
+            assert np.array_equal(dst.to_numpy(), expected)
+
+@test_utils.test(arch=ti.cpu)
+def test_primitive_sequence_clear_keeps_calls_and_rebuilds_plans():
+    n = 16
+    src_np = np.arange(n, dtype=np.int32)
+    src = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(ti.i32, shape=n)
+    src.from_numpy(src_np)
+
+    seq = alg_impl.PrimitiveSequence().transform(src, dst, scale=4, bias=-3)
+    seq.prewarm()
+    assert seq.direct_plan_count == 1
+
+    seq.clear()
+    assert seq.call_count == 1
+    assert seq.direct_plan_count == 0
+
+    seq.run()
+    assert seq.direct_plan_count == 1
+    assert np.array_equal(dst.to_numpy(), src_np * 4 - 3)

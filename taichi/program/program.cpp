@@ -1,4 +1,4 @@
-﻿// Program, context for Taichi program execution
+// Program, context for Taichi program execution
 
 #include "program.h"
 
@@ -592,6 +592,28 @@ bool cpu_use_parallel_aggregation(std::size_t n, int target_threads) {
   return n >= 262144 && target_threads >= 4;
 }
 
+int cpu_indexed_copy_target_threads(std::size_t n,
+                                    int max_threads,
+                                    bool scatter) {
+  constexpr int kChunkItems = 32768;
+  int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + kChunkItems - 1) / kChunkItems,
+                            static_cast<std::size_t>(max_threads)));
+  if (scatter && n >= 262144) {
+    target_threads = std::min(target_threads, 4);
+  }
+  return std::max(1, target_threads);
+}
+
+int cpu_aggregation_target_threads(std::size_t n,
+                                   std::size_t groups,
+                                   int max_threads) {
+  int target_threads = std::max(1, static_cast<int>(n / 65536));
+  if (groups <= 1024 && n >= 262144) {
+    target_threads = std::min(16, std::max(1, static_cast<int>(n / 32768)));
+  }
+  return std::min(max_threads, target_threads);
+}
 template <typename T>
 T cpu_reduce_identity(int op) {
   if (op == 1) {
@@ -8654,10 +8676,8 @@ std::size_t Program::cpu_scatter_ndarray(Ndarray *src,
               "CPU native scatter received a null data pointer.");
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
-                            static_cast<std::size_t>(max_threads)));
+  const int target_threads =
+      cpu_indexed_copy_target_threads(n, max_threads, true);
   if (n >= 65536 && target_threads > 1) {
     CpuIndexedCopyTaskContext ctx;
     ctx.src = src_ptr;
@@ -8709,10 +8729,8 @@ std::size_t Program::cpu_scatter_strided_ndarray(Ndarray *src,
               "CPU native strided scatter received a null data pointer.");
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int chunk_items = 32768;
-  const int target_threads = static_cast<int>(
-      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
-                            static_cast<std::size_t>(max_threads)));
+  const int target_threads =
+      cpu_indexed_copy_target_threads(n, max_threads, true);
   if (n >= 65536 && target_threads > 1) {
     CpuStridedIndexedCopyTaskContext ctx;
     ctx.src = src_ptr;
@@ -8918,8 +8936,7 @@ std::size_t Program::cpu_scatter_add_ndarray(Ndarray *src,
   TI_ERROR_IF(!indices_ptr,
               "CPU native scatter-add received a null index pointer.");
   const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
-  const int target_threads =
-      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  const int target_threads = cpu_aggregation_target_threads(n, dst_items, max_threads);
   switch (value_type) {
     case 0:
       return cpu_scatter_add_typed(
@@ -8985,8 +9002,7 @@ std::size_t Program::cpu_scatter_add_member_ndarray(Ndarray *src,
   TI_ERROR_IF(!src_ptr || !indices_ptr,
               "CPU native strided scatter-add received a null data pointer.");
   const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
-  const int target_threads =
-      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  const int target_threads = cpu_aggregation_target_threads(n, dst_items, max_threads);
   switch (value_type) {
     case 0:
       return cpu_scatter_add_strided_typed<int32_t>(
@@ -9053,8 +9069,7 @@ std::size_t Program::cpu_scatter_add_strided_ndarray(
   TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
               "CPU native strided scatter-add received a null data pointer.");
   const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
-  const int target_threads =
-      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  const int target_threads = cpu_aggregation_target_threads(n, dst_items, max_threads);
   switch (value_type) {
     case 0:
       return cpu_scatter_add_strided_io_typed<int32_t>(
@@ -9116,8 +9131,7 @@ std::size_t Program::cpu_scatter_add_dense_field(SNode *src,
               "CPU native dense field scatter-add received a null data "
               "pointer.");
   const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
-  const int target_threads =
-      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  const int target_threads = cpu_aggregation_target_threads(n, dst_n, max_threads);
   switch (value_type) {
     case 0:
       return cpu_scatter_add_strided_io_typed<int32_t>(
@@ -9190,8 +9204,7 @@ std::size_t Program::cpu_scatter_add_dense_field_indices_field(
               "CPU native dense field scatter-add received a null data "
               "pointer.");
   const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
-  const int target_threads =
-      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  const int target_threads = cpu_aggregation_target_threads(n, dst_n, max_threads);
   switch (value_type) {
     case 0:
       return cpu_scatter_add_strided_io_typed<int32_t>(
@@ -9473,8 +9486,7 @@ std::size_t Program::cpu_grouped_reduce_ndarray(Ndarray *keys,
   auto *keys_ptr =
       reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(keys));
   const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
-  const int target_threads =
-      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  const int target_threads = cpu_aggregation_target_threads(n, num_groups, max_threads);
   switch (value_type) {
     case 0:
       return cpu_grouped_reduce_typed(
@@ -9558,8 +9570,7 @@ std::size_t Program::cpu_grouped_reduce_dense_field(SNode *keys,
               "values, and output fields.");
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
-  const int target_threads =
-      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  const int target_threads = cpu_aggregation_target_threads(n, num_groups, max_threads);
   switch (value_type) {
     case 0:
       return cpu_grouped_reduce_typed(
@@ -9625,8 +9636,7 @@ std::size_t Program::cpu_grouped_reduce_member_ndarray(Ndarray *keys,
   TI_ERROR_IF(!keys_ptr || !values_ptr,
               "CPU native strided grouped reduce received a null data pointer.");
   const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
-  const int target_threads =
-      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  const int target_threads = cpu_aggregation_target_threads(n, num_groups, max_threads);
   switch (value_type) {
     case 0:
       return cpu_grouped_reduce_strided_typed<int32_t>(
@@ -9709,8 +9719,7 @@ std::size_t Program::cpu_grouped_reduce_strided_keys_ndarray(
   TI_ERROR_IF(!keys_ptr || !values_ptr || !output_ptr,
               "CPU native strided grouped reduce received a null data pointer.");
   const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
-  const int target_threads =
-      std::min(max_threads, std::max(1, static_cast<int>(n / 65536)));
+  const int target_threads = cpu_aggregation_target_threads(n, num_groups, max_threads);
   switch (value_type) {
     case 0:
       return cpu_grouped_reduce_strided_io_typed<int32_t>(

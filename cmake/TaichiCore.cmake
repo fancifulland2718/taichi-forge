@@ -297,6 +297,8 @@ if (TI_WITH_VULKAN)
     ti_vulkan_sort_shader(transform_i32_affine_dense.comp
         transform_i32_affine_dense.comp.spv.h)
     ti_vulkan_sort_shader(transform_f32_affine.comp transform_f32_affine.comp.spv.h)
+    ti_vulkan_sort_shader(transform_indexed_affine.comp transform_indexed_i32_affine.comp.spv.h "-DVALUE_KIND=0")
+    ti_vulkan_sort_shader(transform_indexed_affine.comp transform_indexed_f32_affine.comp.spv.h "-DVALUE_KIND=1")
     ti_vulkan_sort_shader(transform_u64_affine.comp transform_u64_affine.comp.spv.h)
     ti_vulkan_sort_shader(transform_f64_affine.comp transform_f64_affine.comp.spv.h)
     ti_vulkan_sort_shader(add_merge_i32.comp add_merge_i32.comp.spv.h "-DVALUE_KIND=0")
