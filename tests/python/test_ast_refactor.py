@@ -714,6 +714,20 @@ def test_static_ifexp():
 
 
 @test_utils.test()
+def test_static_ifexp_skips_dead_branch():
+    @ti.kernel
+    def true_branch(flag: ti.template()) -> ti.i32:
+        return 7 if ti.static(flag) else (1 // 0)
+
+    @ti.kernel
+    def false_branch(flag: ti.template()) -> ti.i32:
+        return (1 // 0) if ti.static(flag) else 9
+
+    assert true_branch(True) == 7
+    assert false_branch(False) == 9
+
+
+@test_utils.test()
 def test_static_assign():
     a = ti.field(ti.i32, shape=(1,))
     b = ti.field(ti.i32, shape=(1,))

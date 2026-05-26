@@ -39,6 +39,17 @@ class ScopedProfiler {
   bool stopped_;
 };
 
+// Compile-profile-only scoped profiler. This avoids adding the regular
+// ScopedProfiler tree push/pop cost to hot paths unless compile tracing is
+// explicitly enabled by TI_COMPILE_PROFILE or ti.compile_profile().
+class ConditionalScopedProfiler {
+ public:
+  explicit ConditionalScopedProfiler(std::string name);
+
+ private:
+  std::unique_ptr<ScopedProfiler> profiler_;
+};
+
 // Phase 0': trace event for Chrome Tracing export.
 // Only populated when tracing is enabled (env TI_COMPILE_PROFILE / explicit
 // API). Zero cost when disabled.
@@ -95,5 +106,8 @@ class Profiling {
 #define TI_PROFILER(name) taichi::ScopedProfiler _profiler_##__LINE__(name);
 
 #define TI_AUTO_PROF TI_PROFILER(__FUNCTION__)
+
+#define TI_COMPILE_PROFILER(name) \
+  taichi::ConditionalScopedProfiler _compile_profiler_##__LINE__(name);
 
 }  // namespace taichi

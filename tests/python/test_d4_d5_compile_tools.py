@@ -34,6 +34,40 @@ def test_parallel_compile_accepts_kwargs_task():
     set_x(3, 2)
     assert x[None] == 32
 
+@test_utils.test(arch=_ARCHES, exclude=_EXCLUDE)
+def test_parallel_compile_accepts_kernel_opt_level_overrides():
+    x = ti.field(ti.i32, shape=())
+
+    @ti.kernel(opt_level="fast")
+    def set_fast(v: ti.i32):
+        x[None] = v
+
+    @ti.kernel(opt_level="full")
+    def set_full(v: ti.i32):
+        x[None] = v * 10
+
+    assert ti.compile_kernels([(set_fast, (2,)), (set_full, (3,))]) == 2
+    assert x[None] == 0
+
+    set_fast(2)
+    assert x[None] == 2
+    set_full(3)
+    assert x[None] == 30
+
+
+@test_utils.test(arch=_ARCHES, exclude=_EXCLUDE)
+def test_parallel_compile_accepts_duplicate_specializations():
+    x = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def set_x(v: ti.i32):
+        x[None] = v
+
+    assert ti.compile_kernels([(set_x, (4,)), (set_x, (4,)), (set_x, (4,))]) == 3
+    assert x[None] == 0
+
+    set_x(4)
+    assert x[None] == 4
 
 @test_utils.test(arch=_ARCHES, exclude=_EXCLUDE)
 def test_compile_profile_captures_python_frontend_events():
@@ -57,3 +91,21 @@ def test_compile_profile_captures_python_frontend_events():
     assert any(path == "python.func.inline_transform:add_one" for path in paths)
     assert any(path == "python.parallel_compile.submit" for path in paths)
     assert prof.top_n(5)
+
+@test_utils.test(arch=_ARCHES, exclude=_EXCLUDE, offline_cache=False)
+def test_compile_profile_captures_cpp_ir_events():
+    x = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def d5_cpp_profile_set(v: ti.i32):
+        x[None] = v * 17 + 1
+
+    with ti.compile_profile() as prof:
+        d5_cpp_profile_set(6)
+        ti.sync()
+
+    rows = prof.records(include_python=False)
+    paths = [row["path"] for row in rows]
+    assert any("cpp.compile.ir_pipeline" in path for path in paths)
+    assert any("cpp.compile.backend_codegen" in path for path in paths)
+    assert any("cpp.ir." in path for path in paths)

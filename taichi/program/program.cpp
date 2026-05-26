@@ -62,6 +62,7 @@
 #include <mutex>
 #include <numeric>
 #include <type_traits>
+#include <unordered_set>
 #include <vector>
 
 namespace taichi::lang {
@@ -3399,6 +3400,43 @@ Function *Program::create_function(const FunctionKey &func_key) {
   return functions_.back().get();
 }
 
+namespace {
+
+constexpr int kDefaultFullSimplifyGlobalIterCap = 1;
+
+CompileConfig make_effective_kernel_compile_config(
+    const CompileConfig &base_config,
+    const Kernel &kernel_def) {
+  CompileConfig effective_config = base_config;
+
+  // D2: per-kernel opt_level is represented as a compile_tier override on the
+  // C++ Kernel. Normalize it before cache lookup so single-kernel and
+  // compile_kernels batch paths share the same IR/codegen/cache behavior.
+  const auto &override = kernel_def.get_compile_tier_override();
+  if (override.has_value()) {
+    effective_config.compile_tier = *override;
+  }
+  if (effective_config.compile_tier != "fast" &&
+      effective_config.compile_tier != "balanced" &&
+      effective_config.compile_tier != "full") {
+    TI_ERROR("compile_tier must be one of fast, balanced, full; got {}",
+             effective_config.compile_tier);
+  }
+
+  // D2: "full" should mean the global IR passes may run to fixed point.
+  // Preserve explicit advanced tuning: only rewrite the cap when it still has
+  // the default balanced value.
+  if (effective_config.compile_tier == "full" &&
+      effective_config.full_simplify_global_iter_cap ==
+          kDefaultFullSimplifyGlobalIterCap) {
+    effective_config.full_simplify_global_iter_cap = 0;
+  }
+
+  return effective_config;
+}
+
+}  // namespace
+
 const CompiledKernelData &Program::compile_kernel(
     const CompileConfig &compile_config,
     const DeviceCapabilityConfig &caps,
@@ -3406,20 +3444,9 @@ const CompiledKernelData &Program::compile_kernel(
   auto start_t = Time::get_time();
   TI_AUTO_PROF;
   auto &mgr = program_impl_->get_kernel_compilation_manager();
-  // P-Compile-6: apply per-kernel compile_tier override (if set) by passing
-  // an effective CompileConfig copy down. CompileConfig::compile_tier is
-  // already part of the offline cache key (offline_cache_util.cpp), so cache
-  // entries for the same kernel under different tiers are automatically
-  // segregated.
-  const auto &override = kernel_def.get_compile_tier_override();
-  if (override.has_value() && *override != compile_config.compile_tier) {
-    CompileConfig effective_config = compile_config;
-    effective_config.compile_tier = *override;
-    const auto &ckd = mgr.load_or_compile(effective_config, caps, kernel_def);
-    total_compilation_time_ += Time::get_time() - start_t;
-    return ckd;
-  }
-  const auto &ckd = mgr.load_or_compile(compile_config, caps, kernel_def);
+  const auto effective_config =
+      make_effective_kernel_compile_config(compile_config, kernel_def);
+  const auto &ckd = mgr.load_or_compile(effective_config, caps, kernel_def);
   total_compilation_time_ += Time::get_time() - start_t;
   return ckd;
 }
@@ -3457,6 +3484,58 @@ const CompiledKernelData &Program::compile_kernel(
 // compile_config.compile_dag_scheduler is true.
 namespace {
 thread_local int g_compile_kernels_worker_depth = 0;
+
+bool collect_unique_compile_kernels(
+    const std::vector<const Kernel *> &kernels,
+    std::vector<const Kernel *> &deduplicated) {
+  if (kernels.size() <= 1) {
+    return false;
+  }
+
+  bool has_duplicate = false;
+  if (kernels.size() <= 32) {
+    for (std::size_t i = 1; i < kernels.size() && !has_duplicate; ++i) {
+      for (std::size_t j = 0; j < i; ++j) {
+        if (kernels[i] == kernels[j]) {
+          has_duplicate = true;
+          break;
+        }
+      }
+    }
+    if (!has_duplicate) {
+      return false;
+    }
+  }
+
+  deduplicated.clear();
+  deduplicated.reserve(kernels.size());
+  std::unordered_set<const Kernel *> seen;
+  seen.reserve(kernels.size());
+  for (const Kernel *kernel : kernels) {
+    if (seen.insert(kernel).second) {
+      deduplicated.push_back(kernel);
+    }
+  }
+  return deduplicated.size() != kernels.size();
+}
+
+class CompileKernelsWorkerDepthScope {
+ public:
+  explicit CompileKernelsWorkerDepthScope(bool enabled) : enabled_(enabled) {
+    if (enabled_) {
+      ++g_compile_kernels_worker_depth;
+    }
+  }
+
+  ~CompileKernelsWorkerDepthScope() {
+    if (enabled_) {
+      --g_compile_kernels_worker_depth;
+    }
+  }
+
+ private:
+  bool enabled_{false};
+};
 }  // namespace
 
 bool Program::in_compile_kernels_worker() {
@@ -3472,10 +3551,18 @@ void Program::compile_kernels(
   }
   auto start_t = Time::get_time();
   const auto caps = get_device_caps();
+  // D4: the Python API returns the submitted task count, but the backend only
+  // needs to compile each materialized specialization once. Keep the common
+  // unique-task path allocation-free.
+  std::vector<const Kernel *> deduplicated_jobs;
+  const auto *compile_jobs = &kernels;
+  if (collect_unique_compile_kernels(kernels, deduplicated_jobs)) {
+    compile_jobs = &deduplicated_jobs;
+  }
 
   const int n_compile_threads =
       std::max(1, compile_config.num_compile_threads);
-  int n_workers = std::min<int>(n_compile_threads, (int)kernels.size());
+  int n_workers = std::min<int>(n_compile_threads, (int)compile_jobs->size());
 
   auto &mgr = program_impl_->get_kernel_compilation_manager();
   const bool dag_mode = compile_config.compile_dag_scheduler;
@@ -3487,11 +3574,13 @@ void Program::compile_kernels(
   // create only N outer workers and force inner-serial, leaving (T-N) cores
   // idle. See compile_doc/优化总规划.md §3.5.
   const bool prefer_inner_parallelism =
-      dag_mode && (int)kernels.size() < n_compile_threads;
+      dag_mode && (int)compile_jobs->size() < n_compile_threads;
   if (n_workers <= 1 || prefer_inner_parallelism) {
     // Fast path: honour the same serial path as compile_kernel.
-    for (auto *k : kernels) {
-      mgr.load_or_compile(compile_config, caps, *k);
+    for (auto *k : *compile_jobs) {
+      const auto effective_config =
+          make_effective_kernel_compile_config(compile_config, *k);
+      mgr.load_or_compile(effective_config, caps, *k);
     }
     total_compilation_time_ += Time::get_time() - start_t;
     return;
@@ -3502,22 +3591,19 @@ void Program::compile_kernels(
 
   {
     ParallelExecutor exec("compile_kernels", n_workers);
-    for (auto *k : kernels) {
+    for (auto *k : *compile_jobs) {
       exec.enqueue([&, k]() {
         // V7: mark this worker so the LLVM inner pool stays serial.
-        if (dag_mode) {
-          ++g_compile_kernels_worker_depth;
-        }
+        CompileKernelsWorkerDepthScope worker_scope(dag_mode);
         try {
-          mgr.load_or_compile(compile_config, caps, *k);
+          const auto effective_config =
+              make_effective_kernel_compile_config(compile_config, *k);
+          mgr.load_or_compile(effective_config, caps, *k);
         } catch (...) {
           std::lock_guard<std::mutex> g(err_mu);
           if (!first_error) {
             first_error = std::current_exception();
           }
-        }
-        if (dag_mode) {
-          --g_compile_kernels_worker_depth;
         }
       });
     }

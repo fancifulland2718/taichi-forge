@@ -1,4 +1,5 @@
 ﻿#include "taichi/ir/ir.h"
+#include "taichi/system/profiler.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/pass.h"
@@ -22,6 +23,7 @@ void compile_to_offloads(IRNode *ir,
                          bool ad_use_stack,
                          bool start_from_ast) {
   TI_AUTO_PROF;
+  TI_COMPILE_PROFILER("cpp.ir.compile_to_offloads");
 
   auto print = make_pass_printer(verbose, config.print_ir_dbg_info,
                                  kernel->get_name(), ir);
@@ -41,21 +43,37 @@ void compile_to_offloads(IRNode *ir,
   }
 
   if (start_from_ast) {
-    irpass::frontend_type_check(ir);
-    irpass::lower_ast(ir);
+    {
+      TI_COMPILE_PROFILER("cpp.ir.frontend_type_check");
+      irpass::frontend_type_check(ir);
+    }
+    {
+      TI_COMPILE_PROFILER("cpp.ir.lower_ast");
+      irpass::lower_ast(ir);
+    }
     print("Lowered");
   }
 
-  irpass::compile_taichi_functions(ir, config,
-                                   Function::IRStage::BeforeLowerAccess);
-  irpass::analysis::gather_func_store_dests(ir);
-  irpass::compile_taichi_functions(ir, config, Function::IRStage::OptimizedIR);
-  irpass::analysis::gather_func_store_dests(ir);
+  {
+    TI_COMPILE_PROFILER("cpp.ir.compile_functions");
+    irpass::compile_taichi_functions(ir, config,
+                                     Function::IRStage::BeforeLowerAccess);
+    irpass::analysis::gather_func_store_dests(ir);
+    irpass::compile_taichi_functions(ir, config,
+                                     Function::IRStage::OptimizedIR);
+    irpass::analysis::gather_func_store_dests(ir);
+  }
 
-  irpass::eliminate_immutable_local_vars(ir);
+  {
+    TI_COMPILE_PROFILER("cpp.ir.eliminate_immutable_local_vars");
+    irpass::eliminate_immutable_local_vars(ir);
+  }
   print("Immutable local vars eliminated");
 
-  irpass::type_check(ir, config);
+  {
+    TI_COMPILE_PROFILER("cpp.ir.type_check.initial");
+    irpass::type_check(ir, config);
+  }
   print("Typechecked");
   irpass::analysis::verify(ir);
 
@@ -68,6 +86,7 @@ void compile_to_offloads(IRNode *ir,
   // F2's _can_auto_promote, so no FuncCallStmt should reach here for them).
   if (config.auto_real_function_inline_budget != 0 &&
       arch_uses_llvm(config.arch)) {
+    TI_COMPILE_PROFILER("cpp.ir.auto_real_function_inline");
     InliningPass::Args inl_args;
     inl_args.budget = config.auto_real_function_inline_budget;
     if (irpass::inlining(ir, config, inl_args)) {
@@ -81,6 +100,7 @@ void compile_to_offloads(IRNode *ir,
   //       create a separate CompileConfig flag for the new pass
   if (arch_is_cpu(config.arch) || config.arch == Arch::cuda ||
       config.arch == Arch::amdgpu) {
+    TI_COMPILE_PROFILER("cpp.ir.bit_loop_vectorize");
     irpass::bit_loop_vectorize(ir);
     irpass::type_check(ir, config);
     print("Bit Loop Vectorized");
@@ -88,20 +108,27 @@ void compile_to_offloads(IRNode *ir,
   }
 
   // Removes MatrixOfMatrixPtrStmt & MatrixOfGlobalPtrStmt
-  irpass::lower_matrix_ptr(ir, config.force_scalarize_matrix);
+  {
+    TI_COMPILE_PROFILER("cpp.ir.lower_matrix_ptr");
+    irpass::lower_matrix_ptr(ir, config.force_scalarize_matrix);
+  }
   print("Matrix ptr lowered");
 
   if (config.force_scalarize_matrix) {
+    TI_COMPILE_PROFILER("cpp.ir.scalarize.force_matrix");
     irpass::scalarize(ir, false /*half2_optimization_enabled*/);
 
     irpass::die(ir);
     print("Scalarized");
   }
 
-  irpass::full_simplify(
-      ir, config,
-      {false, /*autodiff_enabled*/ autodiff_mode != AutodiffMode::kNone,
-       kernel->get_name(), verbose});
+  {
+    TI_COMPILE_PROFILER("cpp.ir.full_simplify.I");
+    irpass::full_simplify(
+        ir, config,
+        {false, /*autodiff_enabled*/ autodiff_mode != AutodiffMode::kNone,
+         kernel->get_name(), verbose});
+  }
   print("Simplified I");
   irpass::analysis::verify(ir);
 
@@ -110,8 +137,10 @@ void compile_to_offloads(IRNode *ir,
   // IR converges in one round) and can be skipped — saving one full pass over
   // every kernel that has no external arrays / no autodiff / no debug checks.
   // (P2.a: full_simplify dirty-flag dedupe.)
-  bool dirty_since_simplify_i =
-      irpass::handle_external_ptr_boundary(ir, config);
+  bool dirty_since_simplify_i = [&]() {
+    TI_COMPILE_PROFILER("cpp.ir.external_ptr_boundary");
+    return irpass::handle_external_ptr_boundary(ir, config);
+  }();
   print("External ptr boundary processed");
 
   if (is_extension_supported(config.arch, Extension::mesh)) {
@@ -123,8 +152,11 @@ void compile_to_offloads(IRNode *ir,
     // access rule
     // This check should be performed in the forward kernel i.e., autodiff_mode
     // == AutodiffMode::kCheckAutodiffValid
-    irpass::demote_atomics(ir, config);
-    irpass::differentiation_validation_check(ir, config, kernel->get_name());
+    {
+      TI_COMPILE_PROFILER("cpp.ir.autodiff.validation");
+      irpass::demote_atomics(ir, config);
+      irpass::differentiation_validation_check(ir, config, kernel->get_name());
+    }
     irpass::analysis::verify(ir);
     // demote_atomics + differentiation_validation_check both mutate IR.
     dirty_since_simplify_i = true;
@@ -133,16 +165,19 @@ void compile_to_offloads(IRNode *ir,
   if (autodiff_mode == AutodiffMode::kReverse ||
       autodiff_mode == AutodiffMode::kForward) {
     // Remove local atomics here so that we don't have to handle their gradients
-    irpass::demote_atomics(ir, config);
+    {
+      TI_COMPILE_PROFILER("cpp.ir.autodiff.transform");
+      irpass::demote_atomics(ir, config);
 
-    irpass::full_simplify(
-        ir, config,
-        {false, /*autodiff_enabled*/ true, kernel->get_name(), verbose});
-    irpass::auto_diff(ir, config, autodiff_mode, ad_use_stack);
-    // TODO: Be carefull with the full_simplify when do high-order autodiff
-    irpass::full_simplify(
-        ir, config,
-        {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
+      irpass::full_simplify(
+          ir, config,
+          {false, /*autodiff_enabled*/ true, kernel->get_name(), verbose});
+      irpass::auto_diff(ir, config, autodiff_mode, ad_use_stack);
+      // TODO: Be carefull with the full_simplify when do high-order autodiff
+      irpass::full_simplify(
+          ir, config,
+          {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
+    }
     print("Gradient");
     irpass::analysis::verify(ir);
     // The two full_simplify calls above already left the IR in a fixed-point
@@ -152,7 +187,10 @@ void compile_to_offloads(IRNode *ir,
   }
 
   if (config.check_out_of_bound) {
-    irpass::check_out_of_bound(ir, config, {kernel->get_name()});
+    {
+      TI_COMPILE_PROFILER("cpp.ir.check_out_of_bound");
+      irpass::check_out_of_bound(ir, config, {kernel->get_name()});
+    }
     print("Bound checked");
     irpass::analysis::verify(ir);
     dirty_since_simplify_i = true;
@@ -166,16 +204,22 @@ void compile_to_offloads(IRNode *ir,
   // for the purposes of simplification.
 
   if (dirty_since_simplify_i) {
-    irpass::full_simplify(
-        ir, config,
-        {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
+    {
+      TI_COMPILE_PROFILER("cpp.ir.full_simplify.II");
+      irpass::full_simplify(
+          ir, config,
+          {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
+    }
     print("Simplified II");
     irpass::analysis::verify(ir);
   } else {
     print("Simplified II (skipped: IR unchanged since Simplified I)");
   }
 
-  irpass::offload(ir, config);
+  {
+    TI_COMPILE_PROFILER("cpp.ir.offload");
+    irpass::offload(ir, config);
+  }
   print("Offloaded");
   irpass::analysis::verify(ir);
   // NOTE: There was an additional CFG pass here, removed in
@@ -183,9 +227,12 @@ void compile_to_offloads(IRNode *ir,
   irpass::flag_access(ir);
   print("Access flagged II");
 
-  irpass::full_simplify(
-      ir, config,
-      {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
+  {
+    TI_COMPILE_PROFILER("cpp.ir.full_simplify.III");
+    irpass::full_simplify(
+        ir, config,
+        {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
+  }
   print("Simplified III");
   irpass::analysis::verify(ir);
 }
@@ -199,6 +246,7 @@ void offload_to_executable(IRNode *ir,
                            bool make_thread_local,
                            bool make_block_local) {
   TI_AUTO_PROF;
+  TI_COMPILE_PROFILER("cpp.ir.offload_to_executable");
 
   auto print = make_pass_printer(verbose, config.print_ir_dbg_info,
                                  kernel->get_name(), ir);
@@ -221,21 +269,27 @@ void offload_to_executable(IRNode *ir,
   // longer uses a dirty flag to skip simplifies.
 
   if (config.detect_read_only) {
+    TI_COMPILE_PROFILER("cpp.ir.exec.detect_read_only");
     irpass::detect_read_only(ir);
     print("Detect read-only accesses");
     // detect_read_only is a pure analysis pass — no IR mutation.
   }
 
-  irpass::demote_atomics(ir, config);
+  {
+    TI_COMPILE_PROFILER("cpp.ir.exec.demote_atomics.I");
+    irpass::demote_atomics(ir, config);
+  }
   print("Atomics demoted I");
   irpass::analysis::verify(ir);
 
   if (config.cache_loop_invariant_global_vars) {
+    TI_COMPILE_PROFILER("cpp.ir.exec.cache_loop_invariant");
     irpass::cache_loop_invariant_global_vars(ir, config);
     print("Cache loop-invariant global vars");
   }
 
   if (config.demote_dense_struct_fors) {
+    TI_COMPILE_PROFILER("cpp.ir.exec.demote_dense_struct_fors");
     if (irpass::demote_dense_struct_fors(ir)) {
       irpass::type_check(ir, config);
     }
@@ -244,6 +298,7 @@ void offload_to_executable(IRNode *ir,
   }
 
   if (config.make_cpu_multithreading_loop && arch_is_cpu(config.arch)) {
+    TI_COMPILE_PROFILER("cpp.ir.exec.cpu_multithread_range_for");
     irpass::make_cpu_multithreaded_range_for(ir, config);
     irpass::type_check(ir, config);
     print("Make CPU multithreaded range-for");
@@ -259,11 +314,13 @@ void offload_to_executable(IRNode *ir,
   }
 
   if (make_thread_local) {
+    TI_COMPILE_PROFILER("cpp.ir.exec.make_thread_local");
     irpass::make_thread_local(ir, config);
     print("Make thread local");
   }
 
   if (is_extension_supported(config.arch, Extension::mesh)) {
+    TI_COMPILE_PROFILER("cpp.ir.exec.make_mesh_thread_local");
     irpass::make_mesh_thread_local(ir, config, {kernel->get_name()});
     print("Make mesh thread local");
     if (config.make_mesh_block_local && config.arch == Arch::cuda) {
@@ -276,6 +333,7 @@ void offload_to_executable(IRNode *ir,
   }
 
   if (make_block_local) {
+    TI_COMPILE_PROFILER("cpp.ir.exec.make_block_local");
     irpass::make_block_local(ir, config, {kernel->get_name(), verbose});
     print("Make block local");
   }
@@ -285,7 +343,10 @@ void offload_to_executable(IRNode *ir,
     print("Demote mesh statements");
   }
 
-  irpass::demote_atomics(ir, config);
+  {
+    TI_COMPILE_PROFILER("cpp.ir.exec.demote_atomics.II");
+    irpass::demote_atomics(ir, config);
+  }
   print("Atomics demoted II");
   irpass::analysis::verify(ir);
 
@@ -302,12 +363,18 @@ void offload_to_executable(IRNode *ir,
   irpass::analysis::verify(ir);
 
   if (lower_global_access) {
-    irpass::full_simplify(
-        ir, config,
-        {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
+    {
+      TI_COMPILE_PROFILER("cpp.ir.exec.full_simplify.before_lower_access");
+      irpass::full_simplify(
+          ir, config,
+          {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
+    }
     print("Simplified before lower access");
 
-    irpass::lower_access(ir, config, {kernel->no_activate, true});
+    {
+      TI_COMPILE_PROFILER("cpp.ir.exec.lower_access");
+      irpass::lower_access(ir, config, {kernel->no_activate, true});
+    }
     print("Access lowered");
     irpass::analysis::verify(ir);
 
@@ -322,13 +389,19 @@ void offload_to_executable(IRNode *ir,
     irpass::analysis::verify(ir);
   }
 
-  irpass::demote_operations(ir, config);
+  {
+    TI_COMPILE_PROFILER("cpp.ir.exec.demote_operations");
+    irpass::demote_operations(ir, config);
+  }
   print("Operations demoted");
 
-  irpass::full_simplify(
-      ir, config,
-      {lower_global_access, /*autodiff_enabled*/ false, kernel->get_name(),
-       verbose});
+  {
+    TI_COMPILE_PROFILER("cpp.ir.exec.full_simplify.IV");
+    irpass::full_simplify(
+        ir, config,
+        {lower_global_access, /*autodiff_enabled*/ false, kernel->get_name(),
+         verbose});
+  }
   print("Simplified IV");
 
   if (determine_ad_stack_size) {
@@ -345,6 +418,7 @@ void offload_to_executable(IRNode *ir,
       (config.arch == Arch::cuda && config.half2_vectorization &&
        !get_custom_cuda_library_path().empty());
   if (config.real_matrix_scalarize) {
+    TI_COMPILE_PROFILER("cpp.ir.exec.scalarize.real_matrix");
     if (irpass::scalarize(ir, half2_optimization_enabled)) {
       irpass::die(ir);
       print("DIE");
@@ -358,7 +432,10 @@ void offload_to_executable(IRNode *ir,
   }
 
   // Final field registration correctness & type checking
-  irpass::type_check(ir, config);
+  {
+    TI_COMPILE_PROFILER("cpp.ir.exec.type_check.final");
+    irpass::type_check(ir, config);
+  }
   irpass::analysis::verify(ir);
 }
 
@@ -373,6 +450,7 @@ void compile_to_executable(IRNode *ir,
                            bool make_block_local,
                            bool start_from_ast) {
   TI_AUTO_PROF;
+  TI_COMPILE_PROFILER("cpp.ir.compile_to_executable");
 
   compile_to_offloads(ir, config, kernel, verbose, autodiff_mode, ad_use_stack,
                       start_from_ast);

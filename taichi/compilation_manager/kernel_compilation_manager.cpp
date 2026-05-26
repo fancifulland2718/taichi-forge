@@ -1,4 +1,5 @@
 #include "taichi/compilation_manager/kernel_compilation_manager.h"
+#include "taichi/system/profiler.h"
 
 #include <sstream>
 
@@ -259,10 +260,20 @@ std::unique_ptr<CompiledKernelData> KernelCompilationManager::compile_kernel(
     const CompileConfig &compile_config,
     const DeviceCapabilityConfig &caps,
     const Kernel &kernel_def) const {
+  TI_COMPILE_PROFILER("cpp.compile.kernel");
   auto &compiler = *config_.kernel_compiler;
-  auto ir = compiler.compile(compile_config, kernel_def);
-  auto ckd = compiler.compile(compile_config, caps, kernel_def, *ir);
-  TI_ASSERT(ckd->check() == CompiledKernelData::Err::kNoError);
+  auto ir = [&]() {
+    TI_COMPILE_PROFILER("cpp.compile.ir_pipeline");
+    return compiler.compile(compile_config, kernel_def);
+  }();
+  auto ckd = [&]() {
+    TI_COMPILE_PROFILER("cpp.compile.backend_codegen");
+    return compiler.compile(compile_config, caps, kernel_def, *ir);
+  }();
+  {
+    TI_COMPILE_PROFILER("cpp.compile.ckd_check");
+    TI_ASSERT(ckd->check() == CompiledKernelData::Err::kNoError);
+  }
   return ckd;
 }
 

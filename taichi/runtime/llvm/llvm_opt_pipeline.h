@@ -35,8 +35,8 @@ inline llvm::OptimizationLevel llvm_opt_level_from_int(int level) {
 /// Effective opt level after considering `compile_tier`.
 ///
 /// `compile_tier == "fast"` forces the opt level down so the full
-/// P1.d/P2.c tier semantics line up — Vulkan already caps
-/// `spv_opt_level` at 1 in that tier (see `kernel_compiler.cpp`), and
+/// D2 tier semantics line up -- Vulkan already uses
+/// `spv_opt_level` 0 in that tier (see `kernel_compiler.cpp`), and
 /// this mirrors that policy for CPU / CUDA / AMDGPU / DX12.
 ///
 /// `min_level` is a backend-specific floor: CPU and DX12 tolerate

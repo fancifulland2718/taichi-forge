@@ -22,6 +22,46 @@ def test_function_without_return():
     assert x[None] == 42
 
 
+@test_utils.test(arch=[ti.cpu])
+def test_real_func_cache_invalidated_after_reset():
+    @ti.real_func
+    def add_one(val: ti.i32) -> ti.i32:
+        return val + 1
+
+    @ti.kernel
+    def run(val: ti.i32) -> ti.i32:
+        return add_one(val)
+
+    assert run(1) == 2
+    assert len(add_one.func.taichi_functions) == 1
+
+    ti.reset()
+    ti.init(arch=ti.cpu, enable_fallback=False)
+
+    assert run(2) == 3
+    assert len(add_one.func.taichi_functions) == 1
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_real_func_cache_separates_compile_tier_variants():
+    @ti.real_func
+    def add_one(val: ti.i32) -> ti.i32:
+        return val + 1
+
+    @ti.kernel(opt_level="fast")
+    def run_fast(val: ti.i32) -> ti.i32:
+        return add_one(val)
+
+    @ti.kernel(opt_level="full")
+    def run_full(val: ti.i32) -> ti.i32:
+        return add_one(val)
+
+    assert run_fast(3) == 4
+    assert len(add_one.func.taichi_functions) == 1
+    assert run_full(4) == 5
+    assert len(add_one.func.taichi_functions) == 2
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], debug=True)
 def test_function_with_return():
     x = ti.field(ti.i32, shape=())

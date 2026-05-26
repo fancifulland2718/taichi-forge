@@ -32,6 +32,22 @@ class TypeCheck : public IRVisitor {
     return dst_type;
   }
 
+  bool is_func_return_element_ptr(Stmt *stmt) const {
+    auto *elem = stmt->cast<GetElementStmt>();
+    if (!elem || !stmt->ret_type->is<PointerType>()) {
+      return false;
+    }
+    if (elem->src->is<FuncCallStmt>()) {
+      return true;
+    }
+    return is_func_return_element_ptr(elem->src);
+  }
+
+  bool is_local_load_source(Stmt *stmt) const {
+    return stmt->is<AllocaStmt>() || stmt->is<MatrixPtrStmt>() ||
+           stmt->is<MatrixOfMatrixPtrStmt>() || is_func_return_element_ptr(stmt);
+  }
+
  public:
   explicit TypeCheck(const CompileConfig &config) : config_(config) {
     allow_undefined_visitor = true;
@@ -75,8 +91,7 @@ class TypeCheck : public IRVisitor {
   }
 
   void visit(LocalLoadStmt *stmt) override {
-    TI_ASSERT(stmt->src->is<AllocaStmt>() || stmt->src->is<MatrixPtrStmt>() ||
-              stmt->src->is<MatrixOfMatrixPtrStmt>());
+    TI_ASSERT(is_local_load_source(stmt->src));
     if (auto ptr_offset_stmt = stmt->src->cast<MatrixPtrStmt>()) {
       auto lookup = DataType(ptr_offset_stmt->origin->ret_type.ptr_removed()
                                  ->as<TensorType>()

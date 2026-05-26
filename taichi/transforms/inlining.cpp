@@ -9,7 +9,7 @@
 namespace taichi::lang {
 
 // Inline all FuncCallStmts. When |budget_| >= 0 a per-callee statement-count
-// cap is applied: callees whose top-level Block stmt count exceeds the
+// cap is applied: callees whose recursive IR statement count exceeds the
 // budget are left as FuncCallStmt; budget == 0 disables inlining entirely.
 class Inliner : public BasicStmtVisitor {
  public:
@@ -28,11 +28,10 @@ class Inliner : public BasicStmtVisitor {
       return;
     }
     if (budget_ > 0) {
-      // Top-level statement count is a cheap, conservative proxy: deeply
-      // nested control flow / matrix expansion bloats the count, which is
-      // the right signal to keep an out-of-line FuncCallStmt.
-      int callee_size =
-          static_cast<int>(func->ir->as<Block>()->statements.size());
+      // Use recursive statement count instead of top-level Block size. Nested
+      // control flow and matrix expansion are the common sources of compile
+      // pressure, and a top-level count can incorrectly classify them as tiny.
+      int callee_size = irpass::analysis::count_statements(func->ir.get());
       if (callee_size > budget_) {
         return;
       }

@@ -1628,6 +1628,15 @@ class ASTTransformer(Builder):
     @staticmethod
     def build_IfExp(ctx, node):
         build_stmt(ctx, node.test)
+        is_static_if = ASTTransformer.get_decorator(ctx, node.test) == "static"
+
+        if is_static_if:
+            if node.test.ptr:
+                node.ptr = build_stmt(ctx, node.body)
+            else:
+                node.ptr = build_stmt(ctx, node.orelse)
+            return node.ptr
+
         build_stmt(ctx, node.body)
         build_stmt(ctx, node.orelse)
 
@@ -1647,15 +1656,6 @@ class ASTTransformer(Builder):
                     'Please use "ti.select" instead.'
                 )
             node.ptr = ti_ops.select(node.test.ptr, node.body.ptr, node.orelse.ptr)
-            return node.ptr
-
-        is_static_if = ASTTransformer.get_decorator(ctx, node.test) == "static"
-
-        if is_static_if:
-            if node.test.ptr:
-                node.ptr = build_stmt(ctx, node.body)
-            else:
-                node.ptr = build_stmt(ctx, node.orelse)
             return node.ptr
 
         node.ptr = ti_ops.ifte(node.test.ptr, node.body.ptr, node.orelse.ptr)

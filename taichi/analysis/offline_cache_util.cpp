@@ -46,6 +46,8 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
   serializer(config.external_optimization_level);
   serializer(config.llvm_opt_level);
   serializer(config.compile_tier);
+  serializer(config.tiered_full_simplify);
+  serializer(config.full_simplify_global_iter_cap);
   serializer(config.move_loop_invariant_outside_if);
   serializer(config.demote_dense_struct_fors);
   serializer(config.spirv_skip_intermediate_listgen);

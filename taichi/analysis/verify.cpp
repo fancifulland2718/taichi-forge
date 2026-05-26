@@ -17,6 +17,22 @@ class IRVerifier : public BasicStmtVisitor {
   // each scope corresponds to an unordered_set
   std::vector<std::unordered_set<Stmt *>> visible_stmts_;
 
+  bool is_func_return_element_ptr(Stmt *stmt) const {
+    auto *elem = stmt->cast<GetElementStmt>();
+    if (!elem || !stmt->ret_type->is<PointerType>()) {
+      return false;
+    }
+    if (elem->src->is<FuncCallStmt>()) {
+      return true;
+    }
+    return is_func_return_element_ptr(elem->src);
+  }
+
+  bool is_local_load_source(Stmt *stmt) const {
+    return stmt->is<AllocaStmt>() || stmt->is<MatrixPtrStmt>() ||
+           stmt->is<MatrixOfMatrixPtrStmt>() || is_func_return_element_ptr(stmt);
+  }
+
  public:
   using BasicStmtVisitor::visit;
 
@@ -104,8 +120,7 @@ class IRVerifier : public BasicStmtVisitor {
 
   void visit(LocalLoadStmt *stmt) override {
     basic_verify(stmt);
-    TI_ASSERT(stmt->src->is<AllocaStmt>() || stmt->src->is<MatrixPtrStmt>() ||
-              stmt->src->is<MatrixOfMatrixPtrStmt>());
+    TI_ASSERT(is_local_load_source(stmt->src));
   }
 
   void visit(LocalStoreStmt *stmt) override {

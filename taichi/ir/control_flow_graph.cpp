@@ -11,6 +11,21 @@
 
 namespace taichi::lang {
 
+namespace {
+
+bool is_func_return_element_ptr(Stmt *stmt) {
+  auto *elem = stmt->cast<GetElementStmt>();
+  if (!elem || !stmt->ret_type->is<PointerType>()) {
+    return false;
+  }
+  if (elem->src->is<FuncCallStmt>()) {
+    return true;
+  }
+  return is_func_return_element_ptr(elem->src);
+}
+
+}  // namespace
+
 CFGNode::CFGNode(Block *block,
                  int begin_location,
                  int end_location,
@@ -428,6 +443,9 @@ bool CFGNode::store_to_load_forwarding(bool after_lower_access,
     // stmt
     Stmt *load_src = nullptr;
     if (auto local_load = stmt->cast<LocalLoadStmt>()) {
+      if (is_func_return_element_ptr(local_load->src)) {
+        continue;
+      }
       result = get_store_forwarding_data(local_load->src, i);
       load_src = local_load->src;
     } else if (auto global_load = stmt->cast<GlobalLoadStmt>()) {

@@ -244,10 +244,41 @@ class Func:
         self.mapper = TaichiCallableTemplateMapper(self.arguments, self.template_slot_locations)
         self.taichi_functions = {}  # The |Function| class in C++
         self.has_print = False
+        self._compiled_program = None
+        self._real_function_cache_variants = {}
+        self._next_real_function_variant_id = 0
         # P9.A-2 (F2) — set to True once auto_real_function promotes this
         # Func from inline AST expansion to is_real_function=True. Stays True
         # for the rest of the runtime; we never demote back.
         self._auto_promoted = False
+
+    def _ensure_real_function_cache_current_program(self):
+        prog = impl.get_runtime().prog
+        if self._compiled_program is prog:
+            return
+        self.compiled = {}
+        self.taichi_functions = {}
+        self._real_function_cache_variants = {}
+        self._next_real_function_variant_id = 0
+        self._compiled_program = prog
+
+    def _real_function_compile_variant(self):
+        current_kernel = impl.get_runtime().current_kernel
+        tier = None
+        if current_kernel is not None:
+            tier = current_kernel.opt_level
+        if tier is None:
+            tier = impl.default_cfg().compile_tier
+        return (tier,)
+
+    def _real_function_variant_id(self, instance_id):
+        variant = (instance_id, self._real_function_compile_variant())
+        variant_id = self._real_function_cache_variants.get(variant)
+        if variant_id is None:
+            variant_id = self._next_real_function_variant_id
+            self._next_real_function_variant_id += 1
+            self._real_function_cache_variants[variant] = variant_id
+        return variant_id
 
     def _can_auto_promote(self):
         """P9.A-2 (F2) — structural eligibility for auto-promotion.
@@ -324,8 +355,10 @@ class Func:
         if self.is_real_function:
             if impl.get_runtime().current_kernel.autodiff_mode != AutodiffMode.NONE:
                 raise TaichiSyntaxError("Real function in gradient kernels unsupported.")
+            self._ensure_real_function_cache_current_program()
             instance_id, arg_features = self.mapper.lookup(args)
-            key = _ti_core.FunctionKey(self.func.__name__, self.func_id, instance_id)
+            variant_id = self._real_function_variant_id(instance_id)
+            key = _ti_core.FunctionKey(self.func.__name__, self.func_id, variant_id)
             if self.compiled is None:
                 self.compiled = {}
             if key.instance_id not in self.compiled:

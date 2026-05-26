@@ -69,7 +69,11 @@ class Kernel;
 //       fused_pass_verify and their driver skip counters. Users should clear
 //       old taichi-forge caches when switching to this schema; schema tagging
 //       also prevents old .tic artifacts from being reused silently.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 10;
+//  11 - D2 compile-tier cleanup (2026-05). tiered_full_simplify and
+//       full_simplify_global_iter_cap are public IR-shaping config fields and
+//       now participate in the cache key; "full" also normalizes the default
+//       global-pass cap to unlimited before cache lookup.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 11;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key(const CompileConfig &config,

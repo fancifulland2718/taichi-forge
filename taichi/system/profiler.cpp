@@ -263,6 +263,12 @@ ScopedProfiler::~ScopedProfiler() {
   }
 }
 
+ConditionalScopedProfiler::ConditionalScopedProfiler(std::string name) {
+  if (Profiling::is_tracing_enabled()) {
+    profiler_ = std::make_unique<ScopedProfiler>(std::move(name));
+  }
+}
+
 Profiling &Profiling::get_instance() {
   static auto prof = new Profiling;
   return *prof;
