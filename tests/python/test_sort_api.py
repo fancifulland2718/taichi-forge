@@ -122,6 +122,7 @@ def _run_dense_field_sort_case(method):
     assert keys.to_numpy().tolist() == keys_np[order].tolist()
     assert values.to_numpy().tolist() == values_np[order].tolist()
     assert workspace.workspace_bytes_peak >= 0
+    return workspace
 
 
 def _run_sort_by_key_native_ndarray_case(method):
@@ -256,6 +257,53 @@ def test_sort_cuda_cub_dense_field_default_ready():
     ):
         pytest.skip("CUDA CUB dense field sort is unavailable in this runtime.")
     _run_dense_field_sort_case("cuda_cub_native")
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_sort_vulkan_native_dense_field_default_ready():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_radix_sort_available")
+        and prog.vulkan_radix_sort_available()
+        and hasattr(prog, "vulkan_radix_sort_u32_dense_field")
+    ):
+        pytest.skip("Vulkan dense field radix sort is unavailable in this runtime.")
+    workspace = _run_dense_field_sort_case("auto")
+    assert workspace._vulkan_native_active
+    workspace = _run_dense_field_sort_case("vulkan_native_radix_u32")
+    assert workspace._vulkan_native_active
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_sort_vulkan_native_dense_field_nonzero_root_offset():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_radix_sort_available")
+        and prog.vulkan_radix_sort_available()
+        and hasattr(prog, "vulkan_radix_sort_u32_dense_field")
+    ):
+        pytest.skip("Vulkan dense field radix sort is unavailable in this runtime.")
+
+    keys_np = np.array([4, -2, 4, 1, -9, 0, -2, 3], dtype=np.int32)
+    values_np = (np.arange(keys_np.shape[0], dtype=np.int32) * 5) + 1
+    order = np.argsort(keys_np, kind="stable")
+    pad = ti.field(ti.i32)
+    keys = ti.field(ti.i32)
+    values = ti.field(ti.i32)
+    ti.root.place(pad)
+    ti.root.dense(ti.i, keys_np.shape[0]).place(keys)
+    ti.root.dense(ti.i, keys_np.shape[0]).place(values)
+    values.from_numpy(values_np)
+    keys.from_numpy(keys_np)
+    workspace = ti.algorithms.SortWorkspace(max_items=keys_np.shape[0])
+
+    ti.algorithms.sort(
+        keys, values, method="vulkan_native_radix_u32", workspace=workspace
+    )
+
+    assert keys.to_numpy().tolist() == keys_np[order].tolist()
+    assert values.to_numpy().tolist() == values_np[order].tolist()
+    assert workspace._vulkan_native_active
 
 
 @test_utils.test(arch=[ti.cpu])

@@ -1585,9 +1585,21 @@ void export_lang(py::module &m) {
             py::arg("values"), py::arg("output"), py::arg("offsets"),
             py::arg("scratch"), py::arg("cursor"), py::arg("value_type"),
             py::arg("op"), py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_radix_sort_u32_dense_field",
+            &Program::vulkan_radix_sort_u32_dense_field, py::arg("keys"),
+            py::arg("values"), py::arg("key_type"), py::arg("value_type"),
+            py::arg("n"), py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_radix_sort_u32_keys_dense_field",
+            [](Program *program, SNode *keys, int key_type, std::size_t n) {
+              return program->vulkan_radix_sort_u32_dense_field(
+                  keys, nullptr, key_type, 0, n);
+            },
+            py::arg("keys"), py::arg("key_type"), py::arg("n"),
+            py::call_guard<py::gil_scoped_release>())
        .def("vulkan_radix_sort_u32_ndarray",
            &Program::vulkan_radix_sort_u32_ndarray, py::arg("keys"),
            py::arg("values"), py::arg("key_type"), py::arg("value_type"),
+           py::arg("key_offset") = 0, py::arg("value_offset") = 0,
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_radix_sort_u32_keys_ndarray",
            [](Program *program, Ndarray *keys, int key_type) {

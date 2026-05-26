@@ -1081,7 +1081,15 @@ class TI_DLL_EXPORT Program {
   std::size_t vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                                             Ndarray *values,
                                             int key_type,
-                                            int value_type);
+                                            int value_type,
+                                            std::size_t key_offset = 0,
+                                            std::size_t value_offset = 0);
+
+  std::size_t vulkan_radix_sort_u32_dense_field(SNode *keys,
+                                                SNode *values,
+                                                int key_type,
+                                                int value_type,
+                                                std::size_t n);
 
   void vulkan_radix_sort_clear_workspace();
 

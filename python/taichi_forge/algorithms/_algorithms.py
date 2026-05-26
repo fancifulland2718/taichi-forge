@@ -631,10 +631,7 @@ class _NativePrimitivePlan:
 
         if self.backend != backend:
             return False
-        objects = tuple(objects)
-        return len(self.objects) == len(objects) and all(
-            cached is current for cached, current in zip(self.objects, objects)
-        )
+        return _same_exact_objects(self.objects, objects)
 
     def cache_key(self):
         return (self.backend, self._object_keys(), self.semantic_key)
@@ -670,6 +667,40 @@ def _primitive_stage_signature(plans):
         (plan.backend, plan.method_name, plan.semantic_key, plan.value_type, plan.n)
         for plan in plans
     )
+
+
+def _has_sequence_len(items):
+    try:
+        len(items)
+    except TypeError:
+        return False
+    return True
+
+
+def _same_exact_objects(cached_objects, current_objects):
+    try:
+        if len(cached_objects) != len(current_objects):
+            return False
+    except TypeError:
+        current_objects = tuple(current_objects)
+        if len(cached_objects) != len(current_objects):
+            return False
+    return all(
+        cached is current for cached, current in zip(cached_objects, current_objects)
+    )
+
+
+def _same_tuple_items(cached_items, current_items):
+    if cached_items is current_items:
+        return True
+    if isinstance(current_items, tuple):
+        return cached_items == current_items
+    try:
+        if len(cached_items) != len(current_items):
+            return False
+    except TypeError:
+        return cached_items == tuple(current_items)
+    return all(cached == current for cached, current in zip(cached_items, current_items))
 
 
 class _PrimitiveExecutionPlan:
@@ -715,10 +746,7 @@ class _PrimitiveExecutionPlan:
     def matches_hot_request(self, backend, objects):
         if self.backend != backend:
             return False
-        objects = tuple(objects)
-        return len(self.objects) == len(objects) and all(
-            cached is current for cached, current in zip(self.objects, objects)
-        )
+        return _same_exact_objects(self.objects, objects)
 
     def cache_key(self):
         return (self.backend, self._object_keys(), self.semantic_key)
@@ -995,7 +1023,7 @@ def _component_group_semantic_key(*items):
 def _try_hot_native_plan(plan, backend, objects, on_success, semantic_key=None):
     if backend is None or plan is None:
         return False
-    if semantic_key is not None and plan.semantic_key != tuple(semantic_key):
+    if semantic_key is not None and not _same_tuple_items(plan.semantic_key, semantic_key):
         return False
     if not plan.matches_hot_request(backend, objects):
         return False
@@ -1014,7 +1042,7 @@ def _try_hot_native_plan(plan, backend, objects, on_success, semantic_key=None):
 def _try_hot_native_plan_group(group, backend, objects, on_success, semantic_key=None):
     if backend is None or group is None:
         return False
-    if semantic_key is not None and group.semantic_key != tuple(semantic_key):
+    if semantic_key is not None and not _same_tuple_items(group.semantic_key, semantic_key):
         return False
     if not group.matches_hot_request(backend, objects):
         return False
@@ -1067,9 +1095,16 @@ def _try_native_plan_from_cache(
         if _primitive_diagnostics_enabled:
             _record_primitive_diagnostic("native_plan.lookup.miss.no_backend")
         return False
+    hot_lookup_ready = _has_sequence_len(objects) and _has_sequence_len(semantic_key)
+    if hot_lookup_ready and _try_hot_native_plan(
+        current_plan, backend, objects, on_success, semantic_key=semantic_key
+    ):
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("native_plan.lookup.hot_hit")
+        return True
     objects = tuple(objects)
     semantic_key = tuple(semantic_key)
-    if _try_hot_native_plan(
+    if not hot_lookup_ready and _try_hot_native_plan(
         current_plan, backend, objects, on_success, semantic_key=semantic_key
     ):
         if _primitive_diagnostics_enabled:
@@ -1185,9 +1220,20 @@ def _try_native_plan_group_from_cache(
         if _primitive_diagnostics_enabled:
             _record_primitive_diagnostic("native_plan_group.lookup.miss.no_backend")
         return False
+    hot_lookup_ready = _has_sequence_len(objects) and _has_sequence_len(semantic_key)
+    if hot_lookup_ready and _try_hot_native_plan_group(
+        current_group,
+        backend,
+        objects,
+        on_success,
+        semantic_key=semantic_key,
+    ):
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("native_plan_group.lookup.hot_hit")
+        return True
     objects = tuple(objects)
     semantic_key = tuple(semantic_key)
-    if _try_hot_native_plan_group(
+    if not hot_lookup_ready and _try_hot_native_plan_group(
         current_group,
         backend,
         objects,
@@ -4672,12 +4718,34 @@ def _try_native_dense_field_sort(
         if method_obj is None:
             return False
         temp_bytes = method_obj(*call_args)
+    elif arch == vulkan and method in (
+        "auto",
+        "vulkan_native_radix_u32",
+        "vulkan_radix_u32",
+    ):
+        if descending:
+            return False
+        if nan_policy != "last" and keys.dtype in (f32, f64):
+            return False
+
+        if not _prog_available(prog, "vulkan_radix_sort_available"):
+            return False
+        if values is None:
+            method_obj = _prog_method(prog, "vulkan_radix_sort_u32_keys_dense_field")
+            call_args = (key_view.snode, key_type, n)
+        else:
+            method_obj = _prog_method(prog, "vulkan_radix_sort_u32_dense_field")
+            call_args = (key_view.snode, value_view.snode, key_type, value_type, n)
+        if method_obj is None:
+            return False
+        temp_bytes = method_obj(*call_args)
     else:
         return False
-
     if workspace is not None:
         if arch == cuda:
             workspace._cuda_cub_active = True
+        elif arch == vulkan:
+            workspace._vulkan_native_active = True
         workspace.workspace_bytes_current = max(
             workspace.workspace_bytes_current, temp_bytes
         )
@@ -4900,6 +4968,15 @@ def sort(
     elif method == "vulkan_graph_radix_u32":
         _vulkan_graph_radix_sort_u32(keys, values, workspace=workspace)
     elif method == "vulkan_native_radix_u32":
+        if _try_native_dense_field_sort(
+            keys,
+            values,
+            method=method,
+            workspace=workspace,
+            descending=descending,
+            nan_policy=nan_policy,
+        ):
+            return
         _vulkan_native_radix_sort_u32(
             keys, values, workspace=workspace, nan_policy=nan_policy
         )

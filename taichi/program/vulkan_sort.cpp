@@ -6132,7 +6132,9 @@ void dispatch_unary(CommandList *cmdlist,
                     size_t bytes,
                     uint32_t groups,
                     const char *scope_name,
-                    VulkanSortCpuProfileSample *profile = nullptr) {
+                    VulkanSortCpuProfileSample *profile = nullptr,
+                    size_t in_offset = 0,
+                    size_t out_offset = 0) {
   std::unique_ptr<ShaderResourceSet> bindings;
   if (profile) {
     double start = profile_time_us();
@@ -6143,8 +6145,8 @@ void dispatch_unary(CommandList *cmdlist,
   } else {
     bindings = device->create_resource_set_unique();
   }
-  profiled_rw_buffer(bindings.get(), 0, in.get_ptr(0), bytes, profile);
-  profiled_rw_buffer(bindings.get(), 1, out.get_ptr(0), bytes, profile);
+  profiled_rw_buffer(bindings.get(), 0, in.get_ptr(in_offset), bytes, profile);
+  profiled_rw_buffer(bindings.get(), 1, out.get_ptr(out_offset), bytes, profile);
   dispatch_pipeline(cmdlist, pipeline, bindings.get(), groups, 1, 1,
                     scope_name, profile);
 }
@@ -6207,6 +6209,44 @@ size_t vulkan_sort_key_type_size(int key_type) {
       return sizeof(uint64_t);
     default:
       return 0;
+  }
+}
+
+DataType vulkan_sort_key_data_type(int key_type) {
+  switch (key_type) {
+    case 0:
+      return PrimitiveType::u32;
+    case 1:
+      return PrimitiveType::i32;
+    case 2:
+      return PrimitiveType::f32;
+    case 3:
+      return PrimitiveType::u64;
+    case 4:
+      return PrimitiveType::i64;
+    case 5:
+      return PrimitiveType::f64;
+    default:
+      return nullptr;
+  }
+}
+
+DataType vulkan_sort_value_data_type(int value_type) {
+  switch (value_type) {
+    case 0:
+      return PrimitiveType::i32;
+    case 1:
+      return PrimitiveType::f32;
+    case 2:
+      return PrimitiveType::u32;
+    case 3:
+      return PrimitiveType::u64;
+    case 4:
+      return PrimitiveType::i64;
+    case 5:
+      return PrimitiveType::f64;
+    default:
+      return nullptr;
   }
 }
 
@@ -11848,7 +11888,9 @@ std::size_t Program::vulkan_grouped_reduce_ndarray(Ndarray *keys,
 std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                                                    Ndarray *values,
                                                    int key_type,
-                                                   int value_type) {
+                                                   int value_type,
+                                                   std::size_t key_offset,
+                                                   std::size_t value_offset) {
   const bool cpu_profile_enabled = vulkan_sort_cpu_profile_enabled();
   VulkanSortCpuProfileSample front_profile;
   VulkanSortCpuProfileSample *front =
@@ -11948,6 +11990,10 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
   const bool signed_keys = key_type == 1;
   const bool wide_keys = key_type >= 3;
   const bool profiler_scopes = profiler != nullptr;
+  TI_ERROR_IF(key_offset % key_size != 0,
+              "Vulkan native radix sort key offset must align to key type size.");
+  TI_ERROR_IF(use_values && value_offset % value_size != 0,
+              "Vulkan native radix sort value offset must align to value type size.");
   DeviceAllocation key_alloc = keys->ndarray_alloc_;
   DeviceAllocation value_alloc =
       use_values ? values->ndarray_alloc_ : kDeviceNullAllocation;
@@ -11982,7 +12028,7 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
   }
   auto record_sort =
       [&, groups, n, key_type, signed_keys, wide_keys,
-       use_index_sort, use_values, key_alloc, value_alloc, key_bytes,
+       use_index_sort, use_values, key_alloc, value_alloc, key_offset, value_offset, key_bytes,
        user_key_bytes, index_bytes, value_bytes, table_bytes, chunk_groups,
        chunk_table_bytes, raw64_values, inline_chunk_offsets, use_radix8,
        radix8_partitions,
@@ -11998,17 +12044,19 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
           profile->lambda_calls++;
         }
         auto gather_words_by_index = [&](DeviceAllocation src_alloc,
+                                         size_t src_offset,
                                          size_t src_bytes,
                                          DeviceAllocation indices_alloc,
                                          DeviceAllocation dst_alloc,
+                                         size_t dst_offset,
                                          size_t dst_bytes,
                                          const char *scope) {
           auto bindings = op_device->create_resource_set_unique();
-          profiled_rw_buffer(bindings.get(), 0, src_alloc.get_ptr(0),
+          profiled_rw_buffer(bindings.get(), 0, src_alloc.get_ptr(src_offset),
                              src_bytes, profile);
           profiled_rw_buffer(bindings.get(), 1, indices_alloc.get_ptr(0),
                              index_bytes, profile);
-          profiled_rw_buffer(bindings.get(), 2, dst_alloc.get_ptr(0),
+          profiled_rw_buffer(bindings.get(), 2, dst_alloc.get_ptr(dst_offset),
                              dst_bytes, profile);
           const uint32_t word_groups = static_cast<uint32_t>(
               ((dst_bytes / sizeof(uint32_t)) + kBlockSize - 1) / kBlockSize);
@@ -12212,7 +12260,7 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
           Pipeline *init_pipeline = cache.sort_init_index_pipeline(key_type);
           {
             auto bindings = op_device->create_resource_set_unique();
-            profiled_rw_buffer(bindings.get(), 0, key_alloc.get_ptr(0),
+            profiled_rw_buffer(bindings.get(), 0, key_alloc.get_ptr(key_offset),
                                user_key_bytes, profile);
             profiled_rw_buffer(bindings.get(), 1, cache.key_in.get_ptr(0),
                                key_bytes, profile);
@@ -12234,24 +12282,24 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
           record_radix32_index_sort();
 
           if (wide_keys) {
-            gather_words_by_index(cache.key_high, key_bytes, cache.value_in,
-                                  cache.key_in, key_bytes,
+            gather_words_by_index(cache.key_high, 0, key_bytes, cache.value_in,
+                                  cache.key_in, 0, key_bytes,
                                   "vulkan_sort_gather_high32");
             record_radix32_index_sort();
           }
 
-          gather_words_by_index(key_alloc, user_key_bytes, cache.value_in,
-                                cache.key_out, user_key_bytes,
+          gather_words_by_index(key_alloc, key_offset, user_key_bytes, cache.value_in,
+                                cache.key_out, 0, user_key_bytes,
                                 "vulkan_sort_gather_keys");
-          profiled_buffer_copy(cmdlist, key_alloc.get_ptr(0),
+          profiled_buffer_copy(cmdlist, key_alloc.get_ptr(key_offset),
                                cache.key_out.get_ptr(0), user_key_bytes,
                                profile);
           profiled_buffer_barrier(cmdlist, key_alloc, profile);
           if (use_values) {
-            gather_words_by_index(value_alloc, value_bytes, cache.value_in,
-                                  cache.value_out, value_bytes,
+            gather_words_by_index(value_alloc, value_offset, value_bytes, cache.value_in,
+                                  cache.value_out, 0, value_bytes,
                                   "vulkan_sort_gather_values");
-            profiled_buffer_copy(cmdlist, value_alloc.get_ptr(0),
+            profiled_buffer_copy(cmdlist, value_alloc.get_ptr(value_offset),
                                  cache.value_out.get_ptr(0), value_bytes,
                                  profile);
             profiled_buffer_barrier(cmdlist, value_alloc, profile);
@@ -12273,10 +12321,15 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
           DeviceAllocation value_read =
               use_values ? value_alloc : cache.value_in;
           DeviceAllocation value_write = cache.value_out;
+          size_t key_read_offset = signed_keys ? 0 : key_offset;
+          size_t key_write_offset = 0;
+          size_t value_read_offset = use_values ? value_offset : 0;
+          size_t value_write_offset = 0;
           if (signed_keys) {
             dispatch_unary(cmdlist, op_device, cache.init_i32.get(), key_alloc,
                            cache.key_in, key_bytes, groups,
-                           scope_name("vulkan_sort_init_i32"), profile);
+                           scope_name("vulkan_sort_init_i32"), profile,
+                           key_offset, 0);
             profiled_buffer_barrier(cmdlist, cache.key_in, profile);
           }
           bool keys_written_to_user = false;
@@ -12289,6 +12342,10 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                 direct_key_output ? key_alloc : key_write;
             DeviceAllocation pass_value_write =
                 direct_value_output ? value_alloc : value_write;
+            size_t pass_key_write_offset =
+                direct_key_output ? key_offset : key_write_offset;
+            size_t pass_value_write_offset =
+                direct_value_output ? value_offset : value_write_offset;
             profiled_buffer_fill(cmdlist, cache.radix8_global_hist.get_ptr(0),
                                  radix8_global_hist_bytes, 0, profile);
             profiled_buffer_barrier(cmdlist, cache.radix8_global_hist,
@@ -12299,8 +12356,8 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
               ShaderResourceSet *bindings =
                   cache.cached_resource_set(cache.radix8_upsweep_bindings[pass],
                                             profile);
-              profiled_rw_buffer(bindings, 0, key_read.get_ptr(0), key_bytes,
-                                 profile);
+              profiled_rw_buffer(bindings, 0, key_read.get_ptr(key_read_offset),
+                                 key_bytes, profile);
               if (init_static_bindings) {
                 profiled_rw_buffer(bindings, 1,
                                    cache.radix8_global_hist.get_ptr(0),
@@ -12345,9 +12402,10 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                   !cache.radix8_downsweep_pairs_bindings[pass];
               ShaderResourceSet *bindings = cache.cached_resource_set(
                   cache.radix8_downsweep_pairs_bindings[pass], profile);
-              profiled_rw_buffer(bindings, 0, key_read.get_ptr(0), key_bytes,
-                                 profile);
-              profiled_rw_buffer(bindings, 1, pass_key_write.get_ptr(0),
+              profiled_rw_buffer(bindings, 0, key_read.get_ptr(key_read_offset),
+                                 key_bytes, profile);
+              profiled_rw_buffer(bindings, 1,
+                                 pass_key_write.get_ptr(pass_key_write_offset),
                                  key_bytes, profile);
               if (init_static_bindings) {
                 profiled_rw_buffer(bindings, 2,
@@ -12357,9 +12415,12 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                                    cache.radix8_partition_hist.get_ptr(0),
                                    radix8_partition_hist_bytes, profile);
               }
-              profiled_rw_buffer(bindings, 4, value_read.get_ptr(0),
+              profiled_rw_buffer(bindings, 4,
+                                 value_read.get_ptr(value_read_offset),
                                  value_bytes, profile);
-              profiled_rw_buffer(bindings, 5, pass_value_write.get_ptr(0),
+              profiled_rw_buffer(bindings, 5,
+                                 pass_value_write.get_ptr(
+                                     pass_value_write_offset),
                                  value_bytes, profile);
               dispatch_pipeline(cmdlist,
                                 (raw64_values
@@ -12374,18 +12435,21 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
               profiled_buffer_barrier(cmdlist, pass_value_write, profile);
               if (direct_value_output) {
                 value_read = pass_value_write;
+                value_read_offset = pass_value_write_offset;
                 values_written_to_user = true;
               } else {
                 std::swap(value_read, value_write);
+                std::swap(value_read_offset, value_write_offset);
               }
             } else {
               const bool init_static_bindings =
                   !cache.radix8_downsweep_keys_bindings[pass];
               ShaderResourceSet *bindings = cache.cached_resource_set(
                   cache.radix8_downsweep_keys_bindings[pass], profile);
-              profiled_rw_buffer(bindings, 0, key_read.get_ptr(0), key_bytes,
-                                 profile);
-              profiled_rw_buffer(bindings, 1, pass_key_write.get_ptr(0),
+              profiled_rw_buffer(bindings, 0, key_read.get_ptr(key_read_offset),
+                                 key_bytes, profile);
+              profiled_rw_buffer(bindings, 1,
+                                 pass_key_write.get_ptr(pass_key_write_offset),
                                  key_bytes, profile);
               if (init_static_bindings) {
                 profiled_rw_buffer(bindings, 2,
@@ -12403,25 +12467,30 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
             }
             if (direct_key_output) {
               key_read = pass_key_write;
+              key_read_offset = pass_key_write_offset;
               keys_written_to_user = true;
             } else {
               std::swap(key_read, key_write);
+              std::swap(key_read_offset, key_write_offset);
             }
           }
 
           if (signed_keys) {
             dispatch_unary(cmdlist, op_device, cache.copy_i32.get(), key_read,
                            key_alloc, key_bytes, groups,
-                           scope_name("vulkan_sort_copy_i32"), profile);
+                           scope_name("vulkan_sort_copy_i32"), profile,
+                           key_read_offset, key_offset);
             profiled_buffer_barrier(cmdlist, key_alloc, profile);
           } else if (!keys_written_to_user) {
-            profiled_buffer_copy(cmdlist, key_alloc.get_ptr(0),
-                                 key_read.get_ptr(0), key_bytes, profile);
+            profiled_buffer_copy(cmdlist, key_alloc.get_ptr(key_offset),
+                                 key_read.get_ptr(key_read_offset), key_bytes,
+                                 profile);
             profiled_buffer_barrier(cmdlist, key_alloc, profile);
           }
           if (use_values && !values_written_to_user) {
-            profiled_buffer_copy(cmdlist, value_alloc.get_ptr(0),
-                                 value_read.get_ptr(0), value_bytes, profile);
+            profiled_buffer_copy(cmdlist, value_alloc.get_ptr(value_offset),
+                                 value_read.get_ptr(value_read_offset),
+                                 value_bytes, profile);
             profiled_buffer_barrier(cmdlist, value_alloc, profile);
           }
           if (profile) {
@@ -12434,16 +12503,19 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
         if (signed_keys) {
           dispatch_unary(cmdlist, op_device, cache.init_i32.get(), key_alloc,
                          cache.key_in, key_bytes, groups,
-                         scope_name("vulkan_sort_init_i32"), profile);
+                         scope_name("vulkan_sort_init_i32"), profile,
+                         key_offset, 0);
           profiled_buffer_barrier(cmdlist, cache.key_in, profile);
         } else {
           profiled_buffer_copy(cmdlist, cache.key_in.get_ptr(0),
-                               key_alloc.get_ptr(0), key_bytes, profile);
+                               key_alloc.get_ptr(key_offset), key_bytes,
+                               profile);
           profiled_buffer_barrier(cmdlist, cache.key_in, profile);
         }
         if (use_values) {
           profiled_buffer_copy(cmdlist, cache.value_in.get_ptr(0),
-                               value_alloc.get_ptr(0), value_bytes, profile);
+                               value_alloc.get_ptr(value_offset), value_bytes,
+                               profile);
           profiled_buffer_barrier(cmdlist, cache.value_in, profile);
         }
 
@@ -12565,15 +12637,16 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
         if (signed_keys) {
           dispatch_unary(cmdlist, op_device, cache.copy_i32.get(), key_read,
                          key_alloc, key_bytes, groups,
-                         scope_name("vulkan_sort_copy_i32"), profile);
+                         scope_name("vulkan_sort_copy_i32"), profile, 0,
+                         key_offset);
           profiled_buffer_barrier(cmdlist, key_alloc, profile);
         } else {
-          profiled_buffer_copy(cmdlist, key_alloc.get_ptr(0),
+          profiled_buffer_copy(cmdlist, key_alloc.get_ptr(key_offset),
                                key_read.get_ptr(0), key_bytes, profile);
           profiled_buffer_barrier(cmdlist, key_alloc, profile);
         }
         if (use_values) {
-          profiled_buffer_copy(cmdlist, value_alloc.get_ptr(0),
+          profiled_buffer_copy(cmdlist, value_alloc.get_ptr(value_offset),
                                value_read.get_ptr(0), value_bytes, profile);
           profiled_buffer_barrier(cmdlist, value_alloc, profile);
         }
@@ -12605,8 +12678,9 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
   command_key.push(static_cast<uint64_t>(chunk_table_bytes));
   command_key.push(static_cast<uint64_t>(radix8_global_hist_bytes));
   command_key.push(static_cast<uint64_t>(radix8_partition_hist_bytes));
-  push_vulkan_command_key_range(command_key, key_alloc, 0, user_key_bytes);
-  push_vulkan_command_key_range(command_key, value_alloc, 0,
+  push_vulkan_command_key_range(command_key, key_alloc, key_offset,
+                                user_key_bytes);
+  push_vulkan_command_key_range(command_key, value_alloc, value_offset,
                                 use_values ? value_bytes : 0);
   push_vulkan_command_key_range(command_key, cache.key_in, 0,
                                 cache.capacity * cache.key_bytes_per_item);
@@ -12655,6 +12729,49 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
     g_vulkan_sort_cpu_profile.merge(front_profile);
   }
   return cache.cached_bytes;
+}
+
+std::size_t Program::vulkan_radix_sort_u32_dense_field(SNode *keys,
+                                                       SNode *values,
+                                                       int key_type,
+                                                       int value_type,
+                                                       std::size_t n) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native dense field radix sort is only available on Vulkan.");
+  TI_ERROR_IF(!keys,
+              "Vulkan native dense field radix sort received null keys field.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "Vulkan native dense field radix sort currently supports at most INT_MAX items.");
+  const size_t key_size = vulkan_sort_key_type_size(key_type);
+  DataType key_dtype = vulkan_sort_key_data_type(key_type);
+  TI_ERROR_IF(key_size == 0 || static_cast<const Type *>(key_dtype) == nullptr,
+              "Vulkan native dense field radix sort received an unsupported key type.");
+  DevicePtr key_ptr = get_dense_field_device_ptr(keys);
+  const size_t key_stride = get_dense_field_stride(keys, key_size);
+  TI_ERROR_IF(key_stride != key_size,
+              "Vulkan native dense field radix sort requires contiguous keys.");
+
+  DeviceAllocation key_alloc{key_ptr.device, key_ptr.alloc_id};
+  Ndarray key_view(key_alloc, key_dtype, {static_cast<int>(n)});
+
+  if (!values) {
+    return vulkan_radix_sort_u32_ndarray(&key_view, nullptr, key_type, 0,
+                                         key_ptr.offset, 0);
+  }
+
+  const size_t value_size = vulkan_scan_value_type_size(value_type);
+  DataType value_dtype = vulkan_sort_value_data_type(value_type);
+  TI_ERROR_IF(value_size == 0 || static_cast<const Type *>(value_dtype) == nullptr,
+              "Vulkan native dense field radix sort received an unsupported value type.");
+  DevicePtr value_ptr = get_dense_field_device_ptr(values);
+  const size_t value_stride = get_dense_field_stride(values, value_size);
+  TI_ERROR_IF(value_stride != value_size,
+              "Vulkan native dense field radix sort requires contiguous values.");
+  DeviceAllocation value_alloc{value_ptr.device, value_ptr.alloc_id};
+  Ndarray value_view(value_alloc, value_dtype, {static_cast<int>(n)});
+  return vulkan_radix_sort_u32_ndarray(&key_view, &value_view, key_type,
+                                       value_type, key_ptr.offset,
+                                       value_ptr.offset);
 }
 
 void Program::vulkan_radix_sort_clear_workspace() {
@@ -12902,8 +13019,19 @@ bool Program::vulkan_grouped_reduce_atomic_value_type_available(
 std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                                                    Ndarray *values,
                                                    int key_type,
-                                                   int value_type) {
+                                                   int value_type,
+                                                   std::size_t key_offset,
+                                                   std::size_t value_offset) {
   TI_ERROR("Vulkan native radix sort requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_radix_sort_u32_dense_field(SNode *keys,
+                                                       SNode *values,
+                                                       int key_type,
+                                                       int value_type,
+                                                       std::size_t n) {
+  TI_ERROR("Vulkan native dense field radix sort requires TI_WITH_VULKAN=ON.");
   return 0;
 }
 
