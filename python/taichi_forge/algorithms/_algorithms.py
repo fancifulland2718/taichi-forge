@@ -9259,7 +9259,6 @@ def experimental_bucket_builder(
         workspace.check_shape(n, num_bins)
         copy_method = _native_copy_method_for_current_arch(method)
         order_in, order_out = _prepare_order_apply_pair(workspace, n)
-        offsets.fill(0)
         experimental_bucket_builder(
             keys,
             order_in,

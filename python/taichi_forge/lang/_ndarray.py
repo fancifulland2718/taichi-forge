@@ -716,6 +716,8 @@ class StructNdarray(Ndarray):
         if self._device_write_pending:
             impl.get_runtime().sync()
             self._device_write_pending = False
+            return True
+        return False
 
     @python_scope
     def fill(self, val):
@@ -737,8 +739,8 @@ class StructNdarray(Ndarray):
     @python_scope
     def to_numpy(self):
         arr = np.empty(shape=self.shape, dtype=self.numpy_dtype)
-        self._sync_pending_device_write()
-        impl.get_runtime().sync()
+        if not self._sync_pending_device_write():
+            impl.get_runtime().sync()
         impl.get_runtime().prog.copy_ndarray_to_host(self.arr, arr)
         return arr
 
