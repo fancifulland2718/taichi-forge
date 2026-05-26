@@ -3,6 +3,7 @@ import json
 import numbers
 import os
 import sys
+import time
 import weakref
 from types import FunctionType, MethodType
 from typing import Any, Iterable, Sequence
@@ -65,6 +66,30 @@ from taichi_forge.types.primitive_types import (
     u64,
 )
 
+
+_sync_diagnostics_enabled = bool(
+    int(os.environ.get("TAICHI_FORGE_SYNC_DIAGNOSTICS", "0"))
+)
+_sync_diagnostics = {"count": 0, "total_ms": 0.0}
+
+
+def clear_sync_diagnostics():
+    _sync_diagnostics["count"] = 0
+    _sync_diagnostics["total_ms"] = 0.0
+
+
+def set_sync_diagnostics_enabled(enabled, clear=False):
+    global _sync_diagnostics_enabled
+    _sync_diagnostics_enabled = bool(enabled)
+    if clear:
+        clear_sync_diagnostics()
+
+
+def get_sync_diagnostics(reset=False):
+    stats = dict(_sync_diagnostics)
+    if reset:
+        clear_sync_diagnostics()
+    return stats
 
 @taichi_scope
 def expr_init_shared_array(shape, element_type):
@@ -723,8 +748,17 @@ class PyTaichi:
         self._materialize_dirty = True
 
     def sync(self):
-        self.materialize()
-        self.prog.synchronize()
+        if not _sync_diagnostics_enabled:
+            self.materialize()
+            self.prog.synchronize()
+            return
+        start = time.perf_counter()
+        try:
+            self.materialize()
+            self.prog.synchronize()
+        finally:
+            _sync_diagnostics["count"] += 1
+            _sync_diagnostics["total_ms"] += (time.perf_counter() - start) * 1000.0
 
 
 pytaichi = PyTaichi()

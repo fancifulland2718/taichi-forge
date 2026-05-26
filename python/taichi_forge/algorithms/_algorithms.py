@@ -1,4 +1,4 @@
-﻿import os
+import os
 
 import numpy as np
 
@@ -196,6 +196,10 @@ _LEGACY_HELPER_AUTO_FALLBACK_ENV = "TAICHI_FORGE_LEGACY_HELPER_AUTO_FALLBACK"
 _legacy_helper_auto_fallback_enabled = None
 _legacy_helper_fallback_counting_enabled = False
 _legacy_helper_fallback_counts = {}
+_primitive_diagnostics_enabled = bool(
+    int(os.environ.get("TAICHI_FORGE_PRIMITIVE_DIAGNOSTICS", "0"))
+)
+_primitive_diagnostic_counts = {}
 
 
 def _aggregation_backend_for_method(
@@ -306,6 +310,30 @@ def _should_record_legacy_helper_fallback(method):
     return method == "auto" or _legacy_helper_fallback_counting_enabled
 
 
+def clear_primitive_diagnostics():
+    _primitive_diagnostic_counts.clear()
+
+
+def set_primitive_diagnostics_enabled(enabled, clear=False):
+    global _primitive_diagnostics_enabled
+    _primitive_diagnostics_enabled = bool(enabled)
+    if clear:
+        clear_primitive_diagnostics()
+
+
+def get_primitive_diagnostics(reset=False):
+    counts = dict(_primitive_diagnostic_counts)
+    if reset:
+        clear_primitive_diagnostics()
+    return counts
+
+
+def _record_primitive_diagnostic(name, amount=1):
+    _primitive_diagnostic_counts[name] = (
+        _primitive_diagnostic_counts.get(name, 0) + amount
+    )
+
+
 def _is_opaque_raw_payload(arr):
     return isinstance(arr, StructNdarray)
 
@@ -342,8 +370,12 @@ class _ProgramCapabilityCache:
         self._value_available = {}
 
     def has(self, prog, name):
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("program_capability.has.calls")
         cached = self._has.get(name)
         if cached is None:
+            if _primitive_diagnostics_enabled:
+                _record_primitive_diagnostic("program_capability.has.probes")
             cached = hasattr(prog, name)
             self._has[name] = cached
         return cached
@@ -353,6 +385,8 @@ class _ProgramCapabilityCache:
             return None
         cached = self._method_descriptor.get(name, _PROG_METHOD_MISSING)
         if cached is _PROG_METHOD_MISSING:
+            if _primitive_diagnostics_enabled:
+                _record_primitive_diagnostic("program_capability.descriptor.probes")
             cached = getattr(type(prog), name, None)
             self._method_descriptor[name] = cached
         return cached
@@ -363,11 +397,16 @@ class _ProgramCapabilityCache:
         return getattr(prog, name)
 
     def invoke_method_result(self, prog, name, *args):
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("program_method.invoke.calls")
+            _record_primitive_diagnostic(f"program_method.invoke.{name}")
         descriptor = self.method_descriptor(prog, name)
         if descriptor is not None:
             return descriptor(prog, *args)
         method = self.method(prog, name)
         if method is None:
+            if _primitive_diagnostics_enabled:
+                _record_primitive_diagnostic("program_method.invoke.missing")
             return _PROG_METHOD_MISSING
         return method(*args)
 
@@ -378,20 +417,28 @@ class _ProgramCapabilityCache:
         return True, result
 
     def available(self, prog, name):
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("program_capability.available.calls")
         if not self.has(prog, name):
             return False
         cached = self._available.get(name)
         if cached is None:
+            if _primitive_diagnostics_enabled:
+                _record_primitive_diagnostic("program_capability.available.probes")
             cached = bool(getattr(prog, name)())
             self._available[name] = cached
         return cached
 
     def value_available(self, prog, name, *args, default_if_missing=True):
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("program_capability.value_available.calls")
         if not self.has(prog, name):
             return default_if_missing
         key = (name, tuple(args))
         cached = self._value_available.get(key)
         if cached is None:
+            if _primitive_diagnostics_enabled:
+                _record_primitive_diagnostic("program_capability.value_available.probes")
             cached = bool(getattr(prog, name)(*args))
             self._value_available[key] = cached
         return cached
@@ -602,6 +649,9 @@ class _NativePrimitivePlan:
         return id(prog) == self.prog_id
 
     def invoke(self, prog):
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("native_plan.invoke.calls")
+            _record_primitive_diagnostic(f"native_plan.invoke.{self.method_name}")
         if self.method_descriptor is not None:
             temp_bytes = self.method_descriptor(prog, *self.call_args)
         else:
@@ -609,6 +659,8 @@ class _NativePrimitivePlan:
                 prog, self.method_name, *self.call_args
             )
             if temp_bytes is _PROG_METHOD_MISSING:
+                if _primitive_diagnostics_enabled:
+                    _record_primitive_diagnostic("native_plan.invoke.missing")
                 return None
         return 0 if temp_bytes is None else temp_bytes
 
@@ -682,12 +734,21 @@ class _PrimitiveExecutionPlan:
 
     def invoke(self, prog):
         temp_bytes_peak = 0
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("native_plan_group.invoke.calls")
+            _record_primitive_diagnostic(
+                "native_plan_group.invoke.stages", len(self.stage_calls)
+            )
         for descriptor, method_name, call_args in self.stage_calls:
+            if _primitive_diagnostics_enabled:
+                _record_primitive_diagnostic(f"native_plan.invoke.{method_name}")
             if descriptor is not None:
                 temp_bytes = descriptor(prog, *call_args)
             else:
                 temp_bytes = _invoke_prog_method_result(prog, method_name, *call_args)
                 if temp_bytes is _PROG_METHOD_MISSING:
+                    if _primitive_diagnostics_enabled:
+                        _record_primitive_diagnostic("native_plan.invoke.missing")
                     return None
             temp_bytes = 0 if temp_bytes is None else temp_bytes
             temp_bytes_peak = max(temp_bytes_peak, temp_bytes)
@@ -1000,23 +1061,33 @@ def _try_native_plan_from_cache(
     on_success,
     semantic_key,
 ):
+    if _primitive_diagnostics_enabled:
+        _record_primitive_diagnostic("native_plan.lookup.calls")
     if backend is None:
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("native_plan.lookup.miss.no_backend")
         return False
     objects = tuple(objects)
     semantic_key = tuple(semantic_key)
     if _try_hot_native_plan(
         current_plan, backend, objects, on_success, semantic_key=semantic_key
     ):
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("native_plan.lookup.hot_hit")
         return True
     plan = current_plan
     matched, object_keys = _native_plan_matches_request_cached(
         plan, backend, objects, semantic_key
     )
+    cache_lookup_used = False
     if not matched:
         if plan_cache is None:
+            if _primitive_diagnostics_enabled:
+                _record_primitive_diagnostic("native_plan.lookup.miss.no_cache")
             return False
         if object_keys is None:
             object_keys = _primitive_plan_object_keys(objects)
+        cache_lookup_used = True
         plan = _native_plan_cache_lookup_by_object_keys(
             plan_cache, backend, object_keys, semantic_key
         )
@@ -1024,16 +1095,28 @@ def _try_native_plan_from_cache(
             plan, backend, objects, semantic_key, object_keys
         )
     if not matched:
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("native_plan.lookup.miss")
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
     if not plan.matches_program(prog):
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("native_plan.lookup.miss.program")
         return False
     temp_bytes = plan.invoke(prog)
     if temp_bytes is None:
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("native_plan.lookup.miss.invoke")
         return False
     on_success(plan, temp_bytes)
+    if _primitive_diagnostics_enabled:
+        _record_primitive_diagnostic(
+            "native_plan.lookup.cache_hit"
+            if cache_lookup_used
+            else "native_plan.lookup.active_hit"
+        )
     return True
 
 
@@ -1059,6 +1142,9 @@ def _record_native_primitive_plan(
         n=n,
     )
     _native_plan_cache_store(plan_cache, plan)
+    if _primitive_diagnostics_enabled:
+        _record_primitive_diagnostic("native_plan.record.calls")
+        _record_primitive_diagnostic(f"native_plan.record.{method_name}")
     return plan
 
 
@@ -1079,6 +1165,9 @@ def _record_native_plan_group(
     group = _NativePrimitivePlanGroup(backend, objects, semantic_key, plans, prog)
     if plan_groups is not None:
         plan_groups[group.cache_key()] = group
+    if _primitive_diagnostics_enabled:
+        _record_primitive_diagnostic("native_plan_group.record.calls")
+        _record_primitive_diagnostic("native_plan_group.record.stages", len(plans))
     return group
 
 
@@ -1090,7 +1179,11 @@ def _try_native_plan_group_from_cache(
     semantic_key,
     on_success,
 ):
+    if _primitive_diagnostics_enabled:
+        _record_primitive_diagnostic("native_plan_group.lookup.calls")
     if backend is None:
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("native_plan_group.lookup.miss.no_backend")
         return False
     objects = tuple(objects)
     semantic_key = tuple(semantic_key)
@@ -1101,16 +1194,22 @@ def _try_native_plan_group_from_cache(
         on_success,
         semantic_key=semantic_key,
     ):
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("native_plan_group.lookup.hot_hit")
         return True
     group = current_group
     matched, object_keys = _native_plan_matches_request_cached(
         group, backend, objects, semantic_key
     )
+    cache_lookup_used = False
     if not matched:
         if plan_groups is None:
+            if _primitive_diagnostics_enabled:
+                _record_primitive_diagnostic("native_plan_group.lookup.miss.no_cache")
             return False
         if object_keys is None:
             object_keys = _primitive_plan_object_keys(objects)
+        cache_lookup_used = True
         group = _native_plan_cache_lookup_by_object_keys(
             plan_groups, backend, object_keys, semantic_key
         )
@@ -1118,16 +1217,28 @@ def _try_native_plan_group_from_cache(
             group, backend, objects, semantic_key, object_keys
         )
     if not matched:
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("native_plan_group.lookup.miss")
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
     if not group.matches_program(prog):
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("native_plan_group.lookup.miss.program")
         return False
     temp_bytes = group.invoke(prog)
     if temp_bytes is None:
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("native_plan_group.lookup.miss.invoke")
         return False
     on_success(group, temp_bytes)
+    if _primitive_diagnostics_enabled:
+        _record_primitive_diagnostic(
+            "native_plan_group.lookup.cache_hit"
+            if cache_lookup_used
+            else "native_plan_group.lookup.active_hit"
+        )
     return True
 
 
@@ -1582,8 +1693,9 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
         self.workspace_bytes_peak = 0
         self._field_buffers = {}
         self._cuda_field_buffers = {}
-        self._cpu_dense_field_compact_plans = {}
         self._cpu_field_scan_plans = {}
+        self._native_compact_plan = None
+        self._native_compact_plans = {}
         self._init_order_apply_workspace("compact")
         self._cuda_cub_active = False
         self._cuda_cub_scan_active = False
@@ -1609,8 +1721,9 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
         self.workspace_bytes_peak = 0
         self._field_buffers.clear()
         self._cuda_field_buffers.clear()
-        self._cpu_dense_field_compact_plans.clear()
         self._cpu_field_scan_plans.clear()
+        self._native_compact_plan = None
+        self._native_compact_plans.clear()
         self._clear_order_apply_workspace()
         self._cuda_cub_active = False
         self._cuda_cub_scan_active = False
@@ -1672,65 +1785,148 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
             int(n),
         )
 
-    def _try_cpu_dense_field_compact_plan(self, values, flags, output, count, method):
-        if current_cfg().arch not in (x64, arm64):
-            return False
-        if method not in ("auto", "field_scan"):
-            return False
-        n = values.shape[0]
-        plan = self._cpu_dense_field_compact_plans.get(
-            self._cpu_field_scan_plan_key(values, flags, output, count, n)
+    def _is_dense_field_native_compact_request(self, values, flags, output, count):
+        values_view = _primitive_view(values)
+        flags_view = _primitive_view(flags)
+        output_view = _primitive_view(output)
+        count_view = _primitive_view(count)
+        return (
+            values_view is not None
+            and flags_view is not None
+            and output_view is not None
+            and count_view is not None
+            and values_view.is_dense_field
+            and flags_view.is_dense_field
+            and output_view.is_dense_field
+            and count_view.is_scalar_field
+            and values_view.dtype == i32
+            and flags_view.dtype == i32
+            and output_view.dtype == i32
+            and count_view.dtype == i32
         )
-        if plan is None:
-            return False
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
-        prog = impl.get_runtime().prog
-        if id(prog) != plan["program_id"]:
-            return False
-        method = _prog_method(prog, "cpu_compact_dense_field")
-        if method is None:
-            return False
-        temp_bytes = method(
-            plan["values_snode"],
-            plan["flags_snode"],
-            plan["output_snode"],
-            plan["count_snode"],
-            plan["value_type"],
-            plan["n"],
+    def _native_compact_backend_for_method(self, values, flags, output, count, method):
+        arch = current_cfg().arch
+        dense_field = self._is_dense_field_native_compact_request(
+            values, flags, output, count
         )
+        ndarray = (
+            isinstance(values, Ndarray)
+            and isinstance(flags, Ndarray)
+            and isinstance(output, Ndarray)
+            and isinstance(count, Ndarray)
+        )
+        if arch == cuda:
+            if ndarray and method in ("auto", "cuda_cub"):
+                return "cuda_cub"
+            if dense_field and method in ("auto", "field_scan"):
+                return "cuda_cub"
+        if arch == vulkan:
+            if ndarray and method in ("auto", "vulkan_native"):
+                return "vulkan_native"
+            if dense_field and method in ("auto", "field_scan"):
+                return "vulkan_native"
+        if arch in (x64, arm64):
+            if ndarray and method in ("auto", "cpu_native"):
+                return "cpu_native"
+            if dense_field and method in ("auto", "field_scan"):
+                return "cpu_native"
+        return None
+
+    def _mark_native_compact_backend_active(self, backend, temp_bytes):
+        temp_bytes = 0 if temp_bytes is None else temp_bytes
+        if backend == "cuda_cub":
+            self._cuda_cub_active = True
+        elif backend == "vulkan_native":
+            self._vulkan_native_active = True
         self.workspace_bytes_current = max(self.workspace_bytes_current, temp_bytes)
         self.workspace_bytes_peak = max(
             self.workspace_bytes_peak, self.workspace_bytes_current
         )
-        return True
 
-    def _record_cpu_dense_field_compact_plan(
+    def _compact_method_allows_plan(self, method, plan):
+        if plan is None:
+            return False
+        dense_field_plan = "dense_field" in plan.method_name
+        if method == "auto":
+            return True
+        if method == "field_scan":
+            return dense_field_plan
+        if method == "cuda_cub":
+            return plan.backend == "cuda_cub" and not dense_field_plan
+        if method == "vulkan_native":
+            return plan.backend == "vulkan_native" and not dense_field_plan
+        if method == "cpu_native":
+            return plan.backend == "cpu_native" and not dense_field_plan
+        return False
+
+    def _try_hot_native_compact_plan(self, values, flags, output, count, method):
+        plan = self._native_compact_plan
+        if not self._compact_method_allows_plan(method, plan):
+            return False
+        objects = (values, flags, output, count)
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic("native_plan.lookup.calls")
+        if _try_hot_native_plan(
+            plan,
+            plan.backend,
+            objects,
+            lambda matched_plan, temp_bytes: (
+                setattr(self, "_native_compact_plan", matched_plan),
+                self._mark_native_compact_backend_active(
+                    matched_plan.backend, temp_bytes
+                ),
+            ),
+            semantic_key=("compact",),
+        ):
+            if _primitive_diagnostics_enabled:
+                _record_primitive_diagnostic("native_plan.lookup.hot_hit")
+            return True
+        return False
+
+    def _try_native_compact_plan(self, values, flags, output, count, method):
+        if self._try_hot_native_compact_plan(values, flags, output, count, method):
+            return True
+        backend = self._native_compact_backend_for_method(
+            values, flags, output, count, method
+        )
+        return _try_native_plan_from_cache(
+            self._native_compact_plan,
+            self._native_compact_plans,
+            backend,
+            (values, flags, output, count),
+            lambda plan, temp_bytes: (
+                setattr(self, "_native_compact_plan", plan),
+                self._mark_native_compact_backend_active(backend, temp_bytes),
+            ),
+            ("compact",),
+        )
+
+    def _record_native_compact_plan(
         self,
+        backend,
+        method_name,
         values,
         flags,
         output,
         count,
+        value_type,
+        call_args,
         n,
         prog,
-        value_type,
-        values_snode,
-        flags_snode,
-        output_snode,
-        count_snode,
     ):
-        if current_cfg().arch not in (x64, arm64):
-            return
-        key = self._cpu_field_scan_plan_key(values, flags, output, count, n)
-        self._cpu_dense_field_compact_plans[key] = {
-            "program_id": id(prog),
-            "value_type": value_type,
-            "n": int(n),
-            "values_snode": values_snode,
-            "flags_snode": flags_snode,
-            "output_snode": output_snode,
-            "count_snode": count_snode,
-        }
+        plan = _record_native_primitive_plan(
+            self._native_compact_plans,
+            backend,
+            method_name,
+            (values, flags, output, count),
+            ("compact",),
+            call_args,
+            prog,
+            value_type,
+            n,
+        )
+        self._native_compact_plan = plan
 
     def _try_cpu_field_scan_plan(self, values, flags, output, count, method):
         if current_cfg().arch not in (x64, arm64):
@@ -4909,21 +5105,25 @@ def _try_cuda_cub_compact(values, flags, output, count, workspace):
     method = _prog_method(prog, "cuda_cub_select_ndarray")
     if method is None:
         return False
-    temp_bytes = method(
-        values.arr,
-        flags.arr,
-        output.arr,
-        count.arr,
-        _raw_payload_value_type(values, _COMPACT_VALUE_TYPE, "experimental_compact()"),
+    value_type = _raw_payload_value_type(
+        values, _COMPACT_VALUE_TYPE, "experimental_compact()"
     )
+    call_args = (values.arr, flags.arr, output.arr, count.arr, value_type)
+    temp_bytes = method(*call_args)
     if workspace is not None:
-        workspace._cuda_cub_active = True
-        workspace.workspace_bytes_current = max(
-            workspace.workspace_bytes_current, temp_bytes
+        workspace._record_native_compact_plan(
+            "cuda_cub",
+            "cuda_cub_select_ndarray",
+            values,
+            flags,
+            output,
+            count,
+            value_type,
+            call_args,
+            values.shape[0],
+            prog,
         )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
-        )
+        workspace._mark_native_compact_backend_active("cuda_cub", temp_bytes)
     return True
 
 
@@ -4945,21 +5145,25 @@ def _try_vulkan_native_compact(values, flags, output, count, workspace):
     method = _prog_method(prog, "vulkan_compact_ndarray")
     if method is None:
         return False
-    temp_bytes = method(
-        values.arr,
-        flags.arr,
-        output.arr,
-        count.arr,
-        _raw_payload_value_type(values, _COMPACT_VALUE_TYPE, "experimental_compact()"),
+    value_type = _raw_payload_value_type(
+        values, _COMPACT_VALUE_TYPE, "experimental_compact()"
     )
+    call_args = (values.arr, flags.arr, output.arr, count.arr, value_type)
+    temp_bytes = method(*call_args)
     if workspace is not None:
-        workspace._vulkan_native_active = True
-        workspace.workspace_bytes_current = max(
-            workspace.workspace_bytes_current, temp_bytes
+        workspace._record_native_compact_plan(
+            "vulkan_native",
+            "vulkan_compact_ndarray",
+            values,
+            flags,
+            output,
+            count,
+            value_type,
+            call_args,
+            values.shape[0],
+            prog,
         )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
-        )
+        workspace._mark_native_compact_backend_active("vulkan_native", temp_bytes)
     return True
 
 
@@ -4981,22 +5185,26 @@ def _try_cpu_native_compact(values, flags, output, count, workspace):
     method = _prog_method(prog, "cpu_compact_ndarray")
     if method is None:
         return False
-    temp_bytes = method(
-        values.arr,
-        flags.arr,
-        output.arr,
-        count.arr,
-        _raw_payload_value_type(values, _COMPACT_VALUE_TYPE, "experimental_compact()"),
+    value_type = _raw_payload_value_type(
+        values, _COMPACT_VALUE_TYPE, "experimental_compact()"
     )
+    call_args = (values.arr, flags.arr, output.arr, count.arr, value_type)
+    temp_bytes = method(*call_args)
     if workspace is not None:
-        workspace.workspace_bytes_current = max(
-            workspace.workspace_bytes_current, temp_bytes
+        workspace._record_native_compact_plan(
+            "cpu_native",
+            "cpu_compact_ndarray",
+            values,
+            flags,
+            output,
+            count,
+            value_type,
+            call_args,
+            values.shape[0],
+            prog,
         )
-        workspace.workspace_bytes_peak = max(
-            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
-        )
+        workspace._mark_native_compact_backend_active("cpu_native", temp_bytes)
     return True
-
 
 def _try_native_dense_field_compact(values, flags, output, count, workspace, n):
     values_view = _primitive_view(values)
@@ -5025,94 +5233,58 @@ def _try_native_dense_field_compact(values, flags, output, count, workspace, n):
     prog = impl.get_runtime().prog
     value_type = _COMPACT_VALUE_TYPE[i32]
     if arch in (x64, arm64):
-        method = _prog_method(prog, "cpu_compact_dense_field")
-        if not _prog_available(prog, "cpu_compact_available") or method is None:
-            return False
-        temp_bytes = method(
-            values_view.snode,
-            flags_view.snode,
-            output_view.snode,
-            count_view.snode,
-            value_type,
-            n,
-        )
-        if workspace is not None:
-            workspace.workspace_bytes_current = max(
-                workspace.workspace_bytes_current, temp_bytes
-            )
-            workspace.workspace_bytes_peak = max(
-                workspace.workspace_bytes_peak, workspace.workspace_bytes_current
-            )
-            workspace._record_cpu_dense_field_compact_plan(
-                values,
-                flags,
-                output,
-                count,
-                n,
-                prog,
-                value_type,
-                values_view.snode,
-                flags_view.snode,
-                output_view.snode,
-                count_view.snode,
-            )
-        return True
-    if arch == cuda:
+        method_name = "cpu_compact_dense_field"
+        available_name = "cpu_compact_available"
+        backend = "cpu_native"
+    elif arch == cuda:
         if not (
             values_view.stride == 4
             and flags_view.stride == 4
             and output_view.stride == 4
         ):
             return False
-        method = _prog_method(prog, "cuda_cub_select_dense_field")
-        if not _prog_available(prog, "cuda_cub_select_available") or method is None:
-            return False
-        temp_bytes = method(
-            values_view.snode,
-            flags_view.snode,
-            output_view.snode,
-            count_view.snode,
-            value_type,
-            n,
-        )
-        if workspace is not None:
-            workspace._cuda_cub_active = True
-            workspace.workspace_bytes_current = max(
-                workspace.workspace_bytes_current, temp_bytes
-            )
-            workspace.workspace_bytes_peak = max(
-                workspace.workspace_bytes_peak, workspace.workspace_bytes_current
-            )
-        return True
-    if arch == vulkan:
+        method_name = "cuda_cub_select_dense_field"
+        available_name = "cuda_cub_select_available"
+        backend = "cuda_cub"
+    elif arch == vulkan:
         if not (
             values_view.stride == 4
             and flags_view.stride == 4
             and output_view.stride == 4
         ):
             return False
-        method = _prog_method(prog, "vulkan_compact_dense_field")
-        if not _prog_available(prog, "vulkan_compact_available") or method is None:
-            return False
-        temp_bytes = method(
-            values_view.snode,
-            flags_view.snode,
-            output_view.snode,
-            count_view.snode,
+        method_name = "vulkan_compact_dense_field"
+        available_name = "vulkan_compact_available"
+        backend = "vulkan_native"
+    else:
+        return False
+    method = _prog_method(prog, method_name)
+    if not _prog_available(prog, available_name) or method is None:
+        return False
+    call_args = (
+        values_view.snode,
+        flags_view.snode,
+        output_view.snode,
+        count_view.snode,
+        value_type,
+        n,
+    )
+    temp_bytes = method(*call_args)
+    if workspace is not None:
+        workspace._record_native_compact_plan(
+            backend,
+            method_name,
+            values,
+            flags,
+            output,
+            count,
             value_type,
+            call_args,
             n,
+            prog,
         )
-        if workspace is not None:
-            workspace._vulkan_native_active = True
-            workspace.workspace_bytes_current = max(
-                workspace.workspace_bytes_current, temp_bytes
-            )
-            workspace.workspace_bytes_peak = max(
-                workspace.workspace_bytes_peak, workspace.workspace_bytes_current
-            )
-        return True
-    return False
-
+        workspace._mark_native_compact_backend_active(backend, temp_bytes)
+    return True
 
 def _native_prefix_scan_available_for_current_arch():
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -5239,9 +5411,7 @@ def experimental_compact(
         return
 
     if workspace is not None and isinstance(workspace, CompactWorkspace):
-        if workspace._try_cpu_dense_field_compact_plan(
-            values, flags, output, count, method
-        ):
+        if workspace._try_native_compact_plan(values, flags, output, count, method):
             return
         if workspace._try_cpu_field_scan_plan(values, flags, output, count, method):
             return
@@ -10670,6 +10840,9 @@ __all__ = [
     "set_legacy_helper_fallback_counting_enabled",
     "clear_legacy_helper_fallback_counts",
     "get_legacy_helper_fallback_counts",
+    "clear_primitive_diagnostics",
+    "set_primitive_diagnostics_enabled",
+    "get_primitive_diagnostics",
     "experimental_compact",
     "experimental_reduce",
     "experimental_histogram",

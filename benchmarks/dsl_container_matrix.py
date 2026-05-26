@@ -119,7 +119,7 @@ def _parse_json_payload(stdout: str):
 def _build_cmd(args, container: str, arch: str, op: str, n: int) -> list[str]:
     if container == "field":
         field_op = "bucket_builder" if op == "bucket" else op
-        return [
+        cmd = [
             args.python,
             str(ROOT / "benchmarks" / "s4_dense_field_native_bench.py"),
             "--child",
@@ -138,23 +138,32 @@ def _build_cmd(args, container: str, arch: str, op: str, n: int) -> list[str]:
             "--indices-storage",
             args.field_indices_storage,
         ]
-    script = "ndarray_primitives.py" if container == "ndarray" else "struct_ndarray_primitives.py"
-    return [
-        args.python,
-        str(ROOT / "benchmarks" / script),
-        "--arch",
-        arch,
-        "--primitive",
-        op,
-        "--sizes",
-        str(n),
-        "--repeats",
-        str(args.repeats),
-        "--warmups",
-        str(args.warmups),
-        "--method-mode",
-        args.method_mode,
-    ]
+    else:
+        script = (
+            "ndarray_primitives.py"
+            if container == "ndarray"
+            else "struct_ndarray_primitives.py"
+        )
+        cmd = [
+            args.python,
+            str(ROOT / "benchmarks" / script),
+            "--arch",
+            arch,
+            "--primitive",
+            op,
+            "--sizes",
+            str(n),
+            "--repeats",
+            str(args.repeats),
+            "--warmups",
+            str(args.warmups),
+            "--method-mode",
+            args.method_mode,
+        ]
+    if args.internal_stats:
+        cmd.append("--internal-stats")
+    return cmd
+
 
 def _sample_process(proc: subprocess.Popen, arch: str, interval_s: float):
     rss_samples = []
@@ -178,6 +187,34 @@ def _sample_process(proc: subprocess.Popen, arch: str, interval_s: float):
     return rss_samples, gpu_samples
 
 
+def _sum_internal_counts(counts: dict, prefix: str) -> int:
+    return int(sum(value for key, value in counts.items() if str(key).startswith(prefix)))
+
+
+def _internal_summary(internal: dict) -> dict:
+    primitive = internal.get("primitive", {}) or {}
+    legacy = internal.get("legacy_helper_fallbacks", {}) or {}
+    sync = internal.get("sync", {}) or {}
+    return {
+        "sync_count": int(sync.get("count", 0) or 0),
+        "sync_extra_calls": int(sync.get("extra_calls", 0) or 0),
+        "sync_total_ms": float(sync.get("total_ms", 0.0) or 0.0),
+        "legacy_fallback_total": int(sum(legacy.values())) if legacy else 0,
+        "native_plan_hot_hits": int(primitive.get("native_plan.lookup.hot_hit", 0) or 0),
+        "native_plan_cache_hits": int(primitive.get("native_plan.lookup.cache_hit", 0) or 0),
+        "native_plan_active_hits": int(primitive.get("native_plan.lookup.active_hit", 0) or 0),
+        "native_plan_misses": _sum_internal_counts(primitive, "native_plan.lookup.miss"),
+        "native_plan_records": int(primitive.get("native_plan.record.calls", 0) or 0),
+        "native_group_hot_hits": int(primitive.get("native_plan_group.lookup.hot_hit", 0) or 0),
+        "native_group_cache_hits": int(primitive.get("native_plan_group.lookup.cache_hit", 0) or 0),
+        "native_group_active_hits": int(primitive.get("native_plan_group.lookup.active_hit", 0) or 0),
+        "native_group_misses": _sum_internal_counts(primitive, "native_plan_group.lookup.miss"),
+        "native_group_records": int(primitive.get("native_plan_group.record.calls", 0) or 0),
+        "program_method_invokes": int(primitive.get("program_method.invoke.calls", 0) or 0),
+        "capability_has_probes": int(primitive.get("program_capability.has.probes", 0) or 0),
+        "capability_available_probes": int(primitive.get("program_capability.available.probes", 0) or 0),
+        "capability_value_probes": int(primitive.get("program_capability.value_available.probes", 0) or 0),
+    }
 def _normalize_row(container: str, arch: str, op: str, n: int, raw: dict, rss, gpu):
     if container == "field":
         runtime = raw.get("runtime", {})
@@ -207,6 +244,8 @@ def _normalize_row(container: str, arch: str, op: str, n: int, raw: dict, rss, g
     rss_first = rss[0] if rss else None
     gpu_peak = max(gpu) if gpu else None
     gpu_first = gpu[0] if gpu else None
+    internal = raw.get("internal", {}) or {}
+    internal_summary = _internal_summary(internal)
     return {
         "container": container,
         "arch": arch,
@@ -217,6 +256,8 @@ def _normalize_row(container: str, arch: str, op: str, n: int, raw: dict, rss, g
         "first_call_ms": raw.get("first_call_ms"),
         "runtime": runtime,
         "workspace_peak_bytes": int(workspace or 0),
+        "internal": internal,
+        "internal_summary": internal_summary,
         "process_rss_mb": {
             "first": rss_first,
             "peak": rss_peak,
@@ -410,6 +451,7 @@ def main(argv=None):
     parser.add_argument("--timeout-s", type=float, default=240.0)
     parser.add_argument("--sample-interval-s", type=float, default=0.25)
     parser.add_argument("--sample-gpu-memory", action="store_true")
+    parser.add_argument("--internal-stats", action="store_true")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     return run_matrix(args)
 

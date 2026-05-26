@@ -15,6 +15,7 @@ ARCHES = {
 }
 _METHOD_MODE = "native"
 _WARMUPS = 3
+_INTERNAL_STATS = False
 
 
 def _method_for(arch_name, primitive):
@@ -175,11 +176,58 @@ def _runtime_workspace_peak(arch_name, primitive):
     return 0
 
 
+def _enable_internal_stats():
+    if not _INTERNAL_STATS:
+        return
+    if hasattr(ti.algorithms, "set_primitive_diagnostics_enabled"):
+        ti.algorithms.set_primitive_diagnostics_enabled(True, clear=True)
+    if hasattr(ti.algorithms, "set_legacy_helper_fallback_counting_enabled"):
+        ti.algorithms.set_legacy_helper_fallback_counting_enabled(True, clear=True)
+    if hasattr(impl, "set_sync_diagnostics_enabled"):
+        impl.set_sync_diagnostics_enabled(True, clear=True)
+
+
+def _legacy_counts_for_json(counts):
+    result = {}
+    for key, value in counts.items():
+        if isinstance(key, tuple):
+            key = "|".join(str(item) for item in key)
+        result[str(key)] = value
+    return result
+
+
+def _collect_internal_stats(expected_sync_calls):
+    if not _INTERNAL_STATS:
+        return None
+    primitive = {}
+    legacy = {}
+    sync = {}
+    if hasattr(ti.algorithms, "get_primitive_diagnostics"):
+        primitive = ti.algorithms.get_primitive_diagnostics(reset=True)
+    if hasattr(ti.algorithms, "get_legacy_helper_fallback_counts"):
+        legacy = _legacy_counts_for_json(
+            ti.algorithms.get_legacy_helper_fallback_counts(reset=True)
+        )
+    if hasattr(impl, "get_sync_diagnostics"):
+        sync = impl.get_sync_diagnostics(reset=True)
+    sync_count = int(sync.get("count", 0) or 0)
+    return {
+        "sync": {
+            "count": sync_count,
+            "total_ms": float(sync.get("total_ms", 0.0) or 0.0),
+            "expected_benchmark_calls": int(expected_sync_calls),
+            "extra_calls": max(0, sync_count - int(expected_sync_calls)),
+        },
+        "primitive": primitive,
+        "legacy_helper_fallbacks": legacy,
+    }
 def _values(n):
     return ((np.arange(n, dtype=np.int32) % 97) - 48).astype(np.int32)
 
 
 def _time_call(fn, repeats):
+    _enable_internal_stats()
+    expected_sync_calls = 1 + _WARMUPS + repeats
     start = time.perf_counter()
     fn()
     ti.sync()
@@ -193,7 +241,7 @@ def _time_call(fn, repeats):
         fn()
         ti.sync()
         samples.append((time.perf_counter() - start) * 1000.0)
-    return {
+    result = {
         "first_call_ms": first_call_ms,
         "mean_ms": statistics.fmean(samples),
         "median_ms": statistics.median(samples),
@@ -201,6 +249,10 @@ def _time_call(fn, repeats):
         "max_ms": max(samples),
         "warmups": _WARMUPS,
     }
+    internal = _collect_internal_stats(expected_sync_calls)
+    if internal is not None:
+        result["internal"] = internal
+    return result
 
 
 def _sorted_values(values):
@@ -465,7 +517,7 @@ def run_histogram(arch_name, n, repeats, method_override=None):
 
 
 def main():
-    global _METHOD_MODE, _WARMUPS
+    global _METHOD_MODE, _WARMUPS, _INTERNAL_STATS
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", choices=sorted(ARCHES), default="cpu")
@@ -478,6 +530,7 @@ def main():
     parser.add_argument("--histogram-method", default=None)
     parser.add_argument("--scatter-add-method", default=None)
     parser.add_argument("--method-mode", choices=["native", "auto"], default="native")
+    parser.add_argument("--internal-stats", action="store_true")
     parser.add_argument(
         "--primitive",
         choices=["transform", "scan", "reduce", "sort", "compact", "bucket", "gather", "scatter", "scatter_add", "grouped_reduce", "histogram", "all"],
@@ -486,6 +539,7 @@ def main():
     args = parser.parse_args()
     _METHOD_MODE = args.method_mode
     _WARMUPS = args.warmups
+    _INTERNAL_STATS = args.internal_stats
 
     ti.init(arch=ARCHES[args.arch], offline_cache=False)
     primitives = [

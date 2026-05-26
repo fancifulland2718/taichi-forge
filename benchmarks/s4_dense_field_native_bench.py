@@ -164,6 +164,55 @@ def _init_runtime(ti, arch_name: str) -> None:
     ti.init(**kwargs)
 
 
+def _enable_internal_stats(ti, args: argparse.Namespace) -> None:
+    if not getattr(args, "internal_stats", False) or args.package != "forge":
+        return
+    algorithms = getattr(ti, "algorithms", None)
+    impl_mod = getattr(getattr(ti, "lang", None), "impl", None)
+    if algorithms is not None and hasattr(algorithms, "set_primitive_diagnostics_enabled"):
+        algorithms.set_primitive_diagnostics_enabled(True, clear=True)
+    if algorithms is not None and hasattr(algorithms, "set_legacy_helper_fallback_counting_enabled"):
+        algorithms.set_legacy_helper_fallback_counting_enabled(True, clear=True)
+    if impl_mod is not None and hasattr(impl_mod, "set_sync_diagnostics_enabled"):
+        impl_mod.set_sync_diagnostics_enabled(True, clear=True)
+
+
+def _legacy_counts_for_json(counts: dict) -> dict:
+    result = {}
+    for key, value in counts.items():
+        if isinstance(key, tuple):
+            key = "|".join(str(item) for item in key)
+        result[str(key)] = value
+    return result
+
+
+def _collect_internal_stats(ti, args: argparse.Namespace, expected_sync_calls: int):
+    if not getattr(args, "internal_stats", False) or args.package != "forge":
+        return None
+    algorithms = getattr(ti, "algorithms", None)
+    impl_mod = getattr(getattr(ti, "lang", None), "impl", None)
+    primitive = {}
+    legacy = {}
+    sync = {}
+    if algorithms is not None and hasattr(algorithms, "get_primitive_diagnostics"):
+        primitive = algorithms.get_primitive_diagnostics(reset=True)
+    if algorithms is not None and hasattr(algorithms, "get_legacy_helper_fallback_counts"):
+        legacy = _legacy_counts_for_json(
+            algorithms.get_legacy_helper_fallback_counts(reset=True)
+        )
+    if impl_mod is not None and hasattr(impl_mod, "get_sync_diagnostics"):
+        sync = impl_mod.get_sync_diagnostics(reset=True)
+    sync_count = int(sync.get("count", 0) or 0)
+    return {
+        "sync": {
+            "count": sync_count,
+            "total_ms": float(sync.get("total_ms", 0.0) or 0.0),
+            "expected_benchmark_calls": int(expected_sync_calls),
+            "extra_calls": max(0, sync_count - int(expected_sync_calls)),
+        },
+        "primitive": primitive,
+        "legacy_helper_fallbacks": legacy,
+    }
 def _make_forge_body(
     ti,
     arch_name: str,
@@ -561,12 +610,15 @@ def run_child(args: argparse.Namespace) -> int:
     _sync(ti)
     gpu_after_alloc = _powershell_gpu_process_dedicated_mb(pid) if sample_gpu else None
 
+    _enable_internal_stats(ti, args)
+
     first_t0 = time.perf_counter()
     body()
     _sync(ti)
     first_ms = (time.perf_counter() - first_t0) * 1000.0
     gpu_after_first = _powershell_gpu_process_dedicated_mb(pid) if sample_gpu else None
 
+    expected_sync_calls = 1 + args.warmups + args.repeats
     samples = []
     for _ in range(args.warmups):
         body()
@@ -596,6 +648,8 @@ def run_child(args: argparse.Namespace) -> int:
     ]
     gpu_peak = max(gpu_samples) if gpu_samples else None
     gpu_base = gpu_before_init if gpu_before_init is not None else None
+
+    internal = _collect_internal_stats(ti, args, expected_sync_calls)
 
     result = {
         "package": args.package,
@@ -627,6 +681,8 @@ def run_child(args: argparse.Namespace) -> int:
             else gpu_peak - gpu_base,
         },
     }
+    if internal is not None:
+        result["internal"] = internal
     print(RESULT_PREFIX + json.dumps(result, sort_keys=True))
     return 0
 
@@ -699,6 +755,8 @@ def run_matrix(args: argparse.Namespace) -> int:
                         cmd.extend(["--indices-storage", args.indices_storage])
                     if args.bucket_override is not None:
                         cmd.extend(["--bucket-override", str(args.bucket_override)])
+                    if args.internal_stats:
+                        cmd.append("--internal-stats")
                     if args.key_pattern != "default":
                         cmd.extend(["--key-pattern", args.key_pattern])
                     print("RUN " + " ".join(cmd), flush=True)
@@ -847,6 +905,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--method-override")
+    parser.add_argument("--internal-stats", action="store_true")
     parser.add_argument("--indices-storage", choices=["ndarray", "field"], default="ndarray")
     parser.add_argument("--bucket-override", type=int)
     parser.add_argument(
