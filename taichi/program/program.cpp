@@ -433,6 +433,20 @@ struct CpuStridedIndexedCopyTaskContext {
 };
 
 template <typename T>
+struct CpuStridedGatherAddTaskContext {
+  const uint8_t *src{nullptr};
+  const int32_t *indices{nullptr};
+  uint8_t *dst{nullptr};
+  std::size_t n{0};
+  std::size_t index_bound{0};
+  std::size_t src_offset{0};
+  std::size_t src_stride{sizeof(T)};
+  std::size_t dst_offset{0};
+  std::size_t dst_stride{sizeof(T)};
+  int num_threads{1};
+};
+
+template <typename T>
 struct CpuScatterAddTaskContext {
   const T *src{nullptr};
   const int32_t *indices{nullptr};
@@ -1125,6 +1139,44 @@ void cpu_strided_to_strided_add_merge_task(void *raw_ctx,
 }
 
 template <typename T>
+void cpu_add_scaled_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuTransformTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    ctx->dst[i] += ctx->src[i] * ctx->scale;
+  }
+}
+
+template <typename T>
+void cpu_strided_to_strided_add_scaled_task(void *raw_ctx,
+                                            int /*thread_id*/,
+                                            int task_id) {
+  auto *ctx = static_cast<CpuStridedToStridedTransformTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    const auto *value =
+        reinterpret_cast<const T *>(ctx->src + ctx->src_offset +
+                                    i * ctx->src_stride);
+    auto *out =
+        reinterpret_cast<T *>(ctx->dst + ctx->dst_offset +
+                              i * ctx->dst_stride);
+    *out += (*value) * ctx->scale;
+  }
+}
+
+template <typename T>
 void cpu_add_merge_run_typed(const T *src_ptr,
                              T *dst_ptr,
                              std::size_t n,
@@ -1145,6 +1197,70 @@ void cpu_add_merge_run_typed(const T *src_ptr,
   }
   for (std::size_t i = 0; i < n; ++i) {
     dst_ptr[i] += src_ptr[i];
+  }
+}
+
+template <typename T>
+void cpu_add_scaled_run_typed(const T *src_ptr,
+                              T *dst_ptr,
+                              std::size_t n,
+                              T scale,
+                              bool use_parallel,
+                              int target_threads,
+                              int max_threads) {
+  if (use_parallel) {
+    CpuTransformTaskContext<T> ctx;
+    ctx.src = src_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.scale = scale;
+    ctx.bias = T{};
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx, cpu_add_scaled_task<T>);
+    return;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    dst_ptr[i] += src_ptr[i] * scale;
+  }
+}
+
+template <typename T>
+void cpu_add_scaled_run_strided_to_strided_typed(
+    const uint8_t *src_ptr,
+    uint8_t *dst_ptr,
+    std::size_t n,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    T scale,
+    bool use_parallel,
+    int target_threads,
+    int max_threads) {
+  if (use_parallel) {
+    CpuStridedToStridedTransformTaskContext<T> ctx;
+    ctx.src = src_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.src_offset = src_offset;
+    ctx.src_stride = src_stride;
+    ctx.dst_offset = dst_offset;
+    ctx.dst_stride = dst_stride;
+    ctx.scale = scale;
+    ctx.bias = T{};
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_to_strided_add_scaled_task<T>);
+    return;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto *value =
+        reinterpret_cast<const T *>(src_ptr + src_offset + i * src_stride);
+    auto *out =
+        reinterpret_cast<T *>(dst_ptr + dst_offset + i * dst_stride);
+    *out += (*value) * scale;
   }
 }
 
@@ -1182,6 +1298,74 @@ void cpu_add_merge_run_strided_to_strided_typed(const uint8_t *src_ptr,
     auto *out =
         reinterpret_cast<T *>(dst_ptr + dst_offset + i * dst_stride);
     *out += *value;
+  }
+}
+
+template <typename T>
+void cpu_strided_gather_add_task(void *raw_ctx,
+                                 int /*thread_id*/,
+                                 int task_id) {
+  auto *ctx = static_cast<CpuStridedGatherAddTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    const auto index = static_cast<std::size_t>(ctx->indices[i]);
+    if (index < ctx->index_bound) {
+      const auto *value = reinterpret_cast<const T *>(
+          ctx->src + ctx->src_offset + index * ctx->src_stride);
+      auto *out = reinterpret_cast<T *>(
+          ctx->dst + ctx->dst_offset + i * ctx->dst_stride);
+      *out += *value;
+    }
+  }
+}
+
+template <typename T>
+void cpu_gather_add_run_strided_to_strided_typed(
+    const uint8_t *src_ptr,
+    const int32_t *indices_ptr,
+    uint8_t *dst_ptr,
+    std::size_t n,
+    std::size_t index_bound,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    bool use_parallel,
+    int target_threads,
+    int max_threads) {
+  if (use_parallel) {
+    CpuStridedGatherAddTaskContext<T> ctx;
+    ctx.src = src_ptr;
+    ctx.indices = indices_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.index_bound = index_bound;
+    ctx.src_offset = src_offset;
+    ctx.src_stride = src_stride;
+    ctx.dst_offset = dst_offset;
+    ctx.dst_stride = dst_stride;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_gather_add_task<T>);
+    return;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto index = static_cast<std::size_t>(indices_ptr[i]);
+    if (index < index_bound) {
+      const auto *value =
+          reinterpret_cast<const T *>(src_ptr + src_offset +
+                                      index * src_stride);
+      auto *out =
+          reinterpret_cast<T *>(dst_ptr + dst_offset + i * dst_stride);
+      *out += *value;
+    }
   }
 }
 
@@ -3168,6 +3352,17 @@ std::size_t cpu_scan_typed(T *data_ptr, std::size_t n) {
 }
 
 template <typename T>
+std::size_t cpu_reverse_scan_typed(T *data_ptr, std::size_t n) {
+  TI_ERROR_IF(!data_ptr, "CPU native reverse scan received a null data pointer.");
+  T suffix{};
+  for (std::size_t i = n; i-- > 0;) {
+    suffix += data_ptr[i];
+    data_ptr[i] = suffix;
+  }
+  return 0;
+}
+
+template <typename T>
 std::size_t cpu_scan_strided_typed(uint8_t *data_ptr,
                                    std::size_t n,
                                    std::size_t offset,
@@ -3178,6 +3373,22 @@ std::size_t cpu_scan_strided_typed(uint8_t *data_ptr,
     auto *value = reinterpret_cast<T *>(data_ptr + offset + i * stride);
     prefix += *value;
     *value = prefix;
+  }
+  return 0;
+}
+
+template <typename T>
+std::size_t cpu_reverse_scan_strided_typed(uint8_t *data_ptr,
+                                           std::size_t n,
+                                           std::size_t offset,
+                                           std::size_t stride) {
+  TI_ERROR_IF(!data_ptr,
+              "CPU native reverse strided scan received a null data pointer.");
+  T suffix{};
+  for (std::size_t i = n; i-- > 0;) {
+    auto *value = reinterpret_cast<T *>(data_ptr + offset + i * stride);
+    suffix += *value;
+    *value = suffix;
   }
   return 0;
 }
@@ -3733,6 +3944,13 @@ StreamSemaphore Program::flush_if_pending() {
     return gfx_program->flush_if_pending();
   }
   return program_impl_->flush();
+}
+
+bool Program::has_pending_gfx_command_list() const {
+  if (auto *gfx_program = dynamic_cast<GfxProgramImpl *>(program_impl_.get())) {
+    return gfx_program->has_pending_command_list();
+  }
+  return false;
 }
 
 int Program::get_snode_tree_size() {
@@ -4405,6 +4623,54 @@ std::size_t Program::cuda_device_transform_affine_dense_field(SNode *src,
 #endif
 }
 
+std::size_t Program::cuda_device_zero_dense_field(SNode *dst,
+                                                  int value_type,
+                                                  std::size_t n) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA dense field zero-fill is only available on CUDA.");
+  TI_ERROR_IF(!dst, "CUDA dense field zero-fill received a null field.");
+  TI_ERROR_IF(value_type < 0 || value_type > 5,
+              "CUDA dense field zero-fill received an unsupported value type.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA dense field zero-fill currently supports at most INT_MAX "
+              "items.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA dense field zero-fill received an unsupported value type.");
+  if (n == 0) {
+    return 0;
+  }
+  const std::size_t dst_stride = get_dense_field_stride(dst, value_size);
+  TI_ERROR_IF(dst_stride < value_size,
+              "CUDA dense field zero-fill received an invalid field stride.");
+#ifdef TI_WITH_CUDA
+  DevicePtr dst_device_ptr = get_dense_field_device_ptr(dst);
+  TI_ERROR_IF(!dst_device_ptr.device,
+              "CUDA dense field zero-fill received a null dense field device.");
+  DeviceAllocation alloc{dst_device_ptr.device, dst_device_ptr.alloc_id};
+  auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+  TI_ERROR_IF(!base,
+              "CUDA dense field zero-fill received a null dense field data "
+              "pointer.");
+  void *dst_raw =
+      static_cast<void *>(reinterpret_cast<uint8_t *>(base) + dst_device_ptr.offset);
+  if (dst_stride == value_size) {
+    CUDADriver::get_instance().memset(dst_raw, 0, n * value_size);
+    return 0;
+  }
+  TI_ERROR_IF(!cuda::cub_transform_available(),
+              "CUDA strided dense field zero-fill requires "
+              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_transform_affine_strided_to_strided(
+      dst_raw, dst_raw, static_cast<int>(n),
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, dst_stride, 0,
+      dst_stride, 0.0, 0.0, stream);
+#else
+  TI_ERROR("CUDA dense field zero-fill requires TI_WITH_CUDA=ON.");
+#endif
+}
+
 bool Program::cuda_device_add_merge_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda && cuda::cub_add_merge_available();
@@ -4445,6 +4711,90 @@ std::size_t Program::cuda_device_add_merge_ndarray(Ndarray *src,
       static_cast<cuda::CudaTransformValueType>(value_type), stream);
 #else
   TI_ERROR("CUDA add-merge requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_add_scaled_ndarray(Ndarray *src,
+                                                    Ndarray *dst,
+                                                    int value_type,
+                                                    double scale) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA scaled-add is only available on CUDA.");
+  TI_ERROR_IF(!src || !dst, "CUDA scaled-add received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1 ||
+                  src->get_nelement() != dst->get_nelement(),
+              "CUDA scaled-add expects matching 1D ndarrays.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA scaled-add received an unsupported value type.");
+  TI_ERROR_IF(src->get_element_size() != value_size ||
+                  dst->get_element_size() != value_size,
+              "CUDA scaled-add dtype does not match value type.");
+  TI_ERROR_IF(value_type != 1 && value_type != 5,
+              "CUDA scaled-add is supported only for f32/f64 gradients.");
+  if (src->get_nelement() == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(src->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA scaled-add currently supports at most INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  TI_ERROR_IF(!cuda::cub_add_merge_available(),
+              "CUDA scaled-add requires TI_WITH_CUDA_TOOLKIT=ON and a "
+              "discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_add_scaled(
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
+      static_cast<int>(src->get_nelement()),
+      static_cast<cuda::CudaTransformValueType>(value_type), scale, stream);
+#else
+  TI_ERROR("CUDA scaled-add requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_add_scalar_ndarray_to_ndarray(
+    Ndarray *src,
+    Ndarray *dst,
+    int value_type,
+    double scale) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA scalar-to-ndarray add is only available on CUDA.");
+  TI_ERROR_IF(!src || !dst,
+              "CUDA scalar-to-ndarray add received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1 ||
+                  src->get_nelement() < 1,
+              "CUDA scalar-to-ndarray add expects 1D source and destination "
+              "ndarrays with at least one source element.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA scalar-to-ndarray add received an unsupported value type.");
+  TI_ERROR_IF(src->get_element_size() != value_size ||
+                  dst->get_element_size() != value_size,
+              "CUDA scalar-to-ndarray add dtype does not match value type.");
+  TI_ERROR_IF(value_type != 1 && value_type != 5,
+              "CUDA scalar-to-ndarray add is supported only for f32/f64 "
+              "gradients.");
+  if (dst->get_nelement() == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(dst->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA scalar-to-ndarray add currently supports at most INT_MAX "
+              "items.");
+#ifdef TI_WITH_CUDA
+  TI_ERROR_IF(!cuda::cub_add_merge_available(),
+              "CUDA scalar-to-ndarray add requires TI_WITH_CUDA_TOOLKIT=ON "
+              "and a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_add_scaled_strided(
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
+      static_cast<int>(dst->get_nelement()),
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, 0, 0,
+      value_size, scale, stream);
+#else
+  TI_ERROR("CUDA scalar-to-ndarray add requires TI_WITH_CUDA=ON.");
 #endif
 }
 
@@ -4532,6 +4882,106 @@ std::size_t Program::cuda_device_add_merge_dense_field(Ndarray *src,
       dst_stride, stream);
 #else
   TI_ERROR("CUDA dense field add-merge requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_add_scaled_dense_field(SNode *src,
+                                                        SNode *dst,
+                                                        int value_type,
+                                                        std::size_t n,
+                                                        double scale) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA dense field scaled-add is only available on CUDA.");
+  TI_ERROR_IF(!src || !dst,
+              "CUDA dense field scaled-add received a null field.");
+  TI_ERROR_IF(value_type != 1 && value_type != 5,
+              "CUDA dense field scaled-add is supported only for f32/f64 "
+              "gradients.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA dense field scaled-add received an unsupported value "
+              "type.");
+  if (n == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA dense field scaled-add currently supports at most INT_MAX "
+              "items.");
+  const std::size_t src_stride = get_dense_field_stride(src, value_size);
+  const std::size_t dst_stride = get_dense_field_stride(dst, value_size);
+  TI_ERROR_IF(src_stride < value_size || dst_stride < value_size,
+              "CUDA dense field scaled-add received an invalid field stride.");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *src_raw =
+      raw_ptr(get_dense_field_device_ptr(src), "CUDA dense field scaled-add");
+  void *dst_raw =
+      raw_ptr(get_dense_field_device_ptr(dst), "CUDA dense field scaled-add");
+  TI_ERROR_IF(!cuda::cub_add_merge_available(),
+              "CUDA dense field scaled-add requires TI_WITH_CUDA_TOOLKIT=ON "
+              "and a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_add_scaled_strided(
+      src_raw, dst_raw, static_cast<int>(n),
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, src_stride, 0,
+      dst_stride, scale, stream);
+#else
+  TI_ERROR("CUDA dense field scaled-add requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_add_scalar_field_to_dense_field(
+    SNode *src,
+    SNode *dst,
+    int value_type,
+    std::size_t n) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA scalar-to-dense add is only available on CUDA.");
+  TI_ERROR_IF(!src || !dst, "CUDA scalar-to-dense add received a null field.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA scalar-to-dense add received an unsupported value type.");
+  if (n == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA scalar-to-dense add currently supports at most INT_MAX "
+              "items.");
+  const std::size_t dst_stride = get_dense_field_stride(dst, value_size);
+  TI_ERROR_IF(dst_stride < value_size,
+              "CUDA scalar-to-dense add received an invalid field stride.");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *src_raw =
+      raw_ptr(get_dense_field_device_ptr(src), "CUDA scalar-to-dense add");
+  void *dst_raw =
+      raw_ptr(get_dense_field_device_ptr(dst), "CUDA scalar-to-dense add");
+  TI_ERROR_IF(!cuda::cub_add_merge_available(),
+              "CUDA scalar-to-dense add requires TI_WITH_CUDA_TOOLKIT=ON and "
+              "a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_add_merge_strided(
+      src_raw, dst_raw, static_cast<int>(n),
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, 0, 0,
+      dst_stride, stream);
+#else
+  TI_ERROR("CUDA scalar-to-dense add requires TI_WITH_CUDA=ON.");
 #endif
 }
 
@@ -4814,6 +5264,174 @@ std::size_t Program::cuda_device_gather_dense_field_indices_field(
       dst_stride / sizeof(uint32_t), cuda::CudaIndexedCopyOp::gather, stream);
 #else
   TI_ERROR("CUDA device dense field gather requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_gather_add_ndarray(Ndarray *src,
+                                                    Ndarray *indices,
+                                                    Ndarray *dst,
+                                                    int value_type) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA gather-add is only available on CUDA.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "CUDA gather-add received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1 ||
+                  indices->get_nelement() != dst->get_nelement(),
+              "CUDA gather-add expects 1D src/indices/dst and destination "
+              "size matching indices size.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA gather-add received an unsupported value type.");
+  TI_ERROR_IF(src->get_element_size() != value_size ||
+                  dst->get_element_size() != value_size ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "CUDA gather-add dtype does not match value type or i32 index "
+              "size.");
+  TI_ERROR_IF(value_type != 1 && value_type != 5,
+              "CUDA gather-add is supported only for f32/f64 gradients.");
+  if (indices->get_nelement() == 0 || src->get_nelement() == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(indices->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  src->get_nelement() >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA gather-add currently supports at most INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
+              "CUDA gather-add requires TI_WITH_CUDA_TOOLKIT=ON and a "
+              "discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_gather_add(
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
+      static_cast<int>(indices->get_nelement()),
+      static_cast<int>(src->get_nelement()),
+      static_cast<cuda::CudaTransformValueType>(value_type), stream);
+#else
+  TI_ERROR("CUDA gather-add requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_gather_add_dense_field(SNode *src,
+                                                        Ndarray *indices,
+                                                        SNode *dst,
+                                                        int value_type,
+                                                        std::size_t src_n,
+                                                        std::size_t dst_n) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA dense field gather-add is only available on CUDA.");
+  check_indexed_copy_dense_field_request(this, "CUDA", src, indices, dst,
+                                         value_type, src_n, dst_n, false);
+  TI_ERROR_IF(indices->get_nelement() != dst_n,
+              "CUDA dense field gather-add expects destination size to match "
+              "indices size.");
+  TI_ERROR_IF(value_type != 1 && value_type != 5,
+              "CUDA dense field gather-add is supported only for f32/f64 "
+              "gradients.");
+  const std::size_t n = indices->get_nelement();
+  if (n == 0 || src_n == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  src_n >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA dense field gather-add currently supports at most "
+              "INT_MAX items.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  const std::size_t src_stride = get_dense_field_stride(src, value_size);
+  const std::size_t dst_stride = get_dense_field_stride(dst, value_size);
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *src_ptr =
+      raw_ptr(get_dense_field_device_ptr(src), "CUDA dense field gather-add");
+  void *indices_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
+  void *dst_ptr =
+      raw_ptr(get_dense_field_device_ptr(dst), "CUDA dense field gather-add");
+  TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
+              "CUDA dense field gather-add requires TI_WITH_CUDA_TOOLKIT=ON "
+              "and a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_gather_add_strided(
+      src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
+      static_cast<int>(src_n),
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, src_stride, 0,
+      dst_stride, stream);
+#else
+  TI_ERROR("CUDA dense field gather-add requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_gather_add_dense_field_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA dense field gather-add is only available on CUDA.");
+  check_indexed_copy_dense_field_indices_field_request(
+      this, "CUDA", src, indices, dst, value_type, src_n, indices_n, dst_n,
+      false);
+  TI_ERROR_IF(indices_n != dst_n,
+              "CUDA dense field gather-add expects destination size to match "
+              "indices size.");
+  TI_ERROR_IF(value_type != 1 && value_type != 5,
+              "CUDA dense field gather-add is supported only for f32/f64 "
+              "gradients.");
+  if (indices_n == 0 || src_n == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(indices_n >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  src_n >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA dense field gather-add currently supports at most "
+              "INT_MAX items.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  const std::size_t src_stride = get_dense_field_stride(src, value_size);
+  const std::size_t dst_stride = get_dense_field_stride(dst, value_size);
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *src_ptr =
+      raw_ptr(get_dense_field_device_ptr(src), "CUDA dense field gather-add");
+  void *indices_ptr =
+      raw_ptr(get_dense_field_device_ptr(indices),
+              "CUDA dense field gather-add");
+  void *dst_ptr =
+      raw_ptr(get_dense_field_device_ptr(dst), "CUDA dense field gather-add");
+  TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
+              "CUDA dense field gather-add requires TI_WITH_CUDA_TOOLKIT=ON "
+              "and a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_gather_add_strided(
+      src_ptr, indices_ptr, dst_ptr, static_cast<int>(indices_n),
+      static_cast<int>(src_n),
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, src_stride, 0,
+      dst_stride, stream);
+#else
+  TI_ERROR("CUDA dense field gather-add requires TI_WITH_CUDA=ON.");
 #endif
 }
 
@@ -6259,6 +6877,53 @@ std::size_t Program::cuda_cub_inclusive_scan_ndarray(Ndarray *data,
 #endif
 }
 
+std::size_t Program::cuda_cub_inclusive_reverse_scan_ndarray(Ndarray *data,
+                                                             int value_type) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB reverse scan is only available on the CUDA backend.");
+  TI_ERROR_IF(!data, "CUDA CUB reverse scan received a null ndarray.");
+  TI_ERROR_IF(data->shape.size() != 1,
+              "CUDA CUB reverse scan currently expects a 1D ndarray.");
+#ifdef TI_WITH_CUDA
+  const auto cub_value_type = static_cast<cuda::CubScanValueType>(value_type);
+  std::size_t expected_value_size = 0;
+  switch (cub_value_type) {
+    case cuda::CubScanValueType::i32:
+      expected_value_size = sizeof(int32_t);
+      break;
+    case cuda::CubScanValueType::f32:
+      expected_value_size = sizeof(float);
+      break;
+    case cuda::CubScanValueType::u32:
+      expected_value_size = sizeof(uint32_t);
+      break;
+    case cuda::CubScanValueType::u64:
+      expected_value_size = sizeof(uint64_t);
+      break;
+    case cuda::CubScanValueType::i64:
+      expected_value_size = sizeof(int64_t);
+      break;
+    case cuda::CubScanValueType::f64:
+      expected_value_size = sizeof(double);
+      break;
+  }
+  TI_ERROR_IF(expected_value_size == 0,
+              "CUDA CUB reverse scan received an unsupported value type.");
+  TI_ERROR_IF(data->get_element_size() != expected_value_size,
+              "CUDA CUB reverse scan dtype does not match the requested "
+              "value type.");
+  auto data_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(data));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_inclusive_reverse_scan(
+      data_ptr, static_cast<int>(data->get_nelement()), cub_value_type, stream,
+      this);
+#else
+  TI_ERROR(
+      "CUDA CUB reverse scan requires building Taichi with TI_WITH_CUDA=ON "
+      "and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 std::size_t Program::cuda_cub_inclusive_scan_member_ndarray(
     Ndarray *data,
     int value_type,
@@ -6285,6 +6950,37 @@ std::size_t Program::cuda_cub_inclusive_scan_member_ndarray(
   TI_ERROR(
       "CUDA CUB strided scan requires building Taichi with TI_WITH_CUDA=ON "
       "and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t Program::cuda_cub_inclusive_reverse_scan_member_ndarray(
+    Ndarray *data,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB reverse strided scan is only available on the CUDA "
+              "backend.");
+  check_scan_member_request("CUDA CUB reverse", data, value_type, offset,
+                            stride);
+  TI_ERROR_IF(data->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB reverse strided scan currently supports at most "
+              "INT_MAX items.");
+  if (data->get_nelement() <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  auto data_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(data));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_inclusive_reverse_scan_strided(
+      data_ptr, static_cast<int>(data->get_nelement()),
+      static_cast<cuda::CubScanValueType>(value_type), offset, stride, stream,
+      this);
+#else
+  TI_ERROR(
+      "CUDA CUB reverse strided scan requires building Taichi with "
+      "TI_WITH_CUDA=ON and TI_WITH_CUDA_TOOLKIT=ON.");
 #endif
 }
 
@@ -6321,6 +7017,48 @@ std::size_t Program::cuda_cub_inclusive_scan_dense_field(SNode *data,
 #else
   TI_ERROR(
       "CUDA CUB dense field scan requires building Taichi with "
+      "TI_WITH_CUDA=ON and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t Program::cuda_cub_inclusive_reverse_scan_dense_field(
+    SNode *data,
+    int value_type,
+    std::size_t n) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB dense field reverse scan is only available on CUDA.");
+  TI_ERROR_IF(!data,
+              "CUDA CUB dense field reverse scan received a null field.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB dense field reverse scan currently supports at most "
+              "INT_MAX items.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA CUB dense field reverse scan received an unsupported "
+              "value type.");
+  const std::size_t stride = get_dense_field_stride(data, value_size);
+  TI_ERROR_IF(stride < value_size,
+              "CUDA CUB dense field reverse scan received an invalid field "
+              "stride.");
+  if (n <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  DevicePtr device_ptr = get_dense_field_device_ptr(data);
+  DeviceAllocation alloc{device_ptr.device, device_ptr.alloc_id};
+  auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+  TI_ERROR_IF(!base,
+              "CUDA CUB dense field reverse scan received a null data "
+              "pointer.");
+  void *data_ptr =
+      static_cast<void *>(reinterpret_cast<uint8_t *>(base) + device_ptr.offset);
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_inclusive_reverse_scan_strided(
+      data_ptr, static_cast<int>(n),
+      static_cast<cuda::CubScanValueType>(value_type), 0, stride, stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB dense field reverse scan requires building Taichi with "
       "TI_WITH_CUDA=ON and TI_WITH_CUDA_TOOLKIT=ON.");
 #endif
 }
@@ -6860,6 +7598,41 @@ std::size_t Program::cpu_inclusive_scan_ndarray(Ndarray *data,
   return 0;
 }
 
+std::size_t Program::cpu_inclusive_reverse_scan_ndarray(Ndarray *data,
+                                                        int value_type) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native reverse scan is only available on CPU backends.");
+  TI_ERROR_IF(!data, "CPU native reverse scan received a null ndarray.");
+  TI_ERROR_IF(data->shape.size() != 1,
+              "CPU native reverse scan currently expects a 1D ndarray.");
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_size == 0,
+              "CPU native reverse scan received an unsupported value type.");
+  TI_ERROR_IF(data->get_element_size() != expected_size,
+              "CPU native reverse scan dtype does not match the requested "
+              "value type.");
+  auto ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(data));
+  TI_ERROR_IF(!ptr, "CPU native reverse scan received a null data pointer.");
+  const std::size_t n = data->get_nelement();
+
+  switch (value_type) {
+    case 0:
+      return cpu_reverse_scan_typed(reinterpret_cast<int32_t *>(ptr), n);
+    case 1:
+      return cpu_reverse_scan_typed(reinterpret_cast<float *>(ptr), n);
+    case 2:
+      return cpu_reverse_scan_typed(reinterpret_cast<uint32_t *>(ptr), n);
+    case 3:
+      return cpu_reverse_scan_typed(reinterpret_cast<uint64_t *>(ptr), n);
+    case 4:
+      return cpu_reverse_scan_typed(reinterpret_cast<int64_t *>(ptr), n);
+    case 5:
+      return cpu_reverse_scan_typed(reinterpret_cast<double *>(ptr), n);
+    default:
+      TI_ERROR("CPU native reverse scan received an unsupported value type.");
+  }
+}
+
 std::size_t Program::cpu_inclusive_scan_member_ndarray(Ndarray *data,
                                                        int value_type,
                                                        std::size_t offset,
@@ -6886,6 +7659,40 @@ std::size_t Program::cpu_inclusive_scan_member_ndarray(Ndarray *data,
       return cpu_scan_strided_typed<double>(ptr, n, offset, stride);
     default:
       TI_ERROR("CPU native strided scan received an unsupported value type.");
+  }
+}
+
+std::size_t Program::cpu_inclusive_reverse_scan_member_ndarray(
+    Ndarray *data,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native reverse strided scan is only available on CPU "
+              "backends.");
+  check_scan_member_request("CPU native reverse", data, value_type, offset,
+                            stride);
+  auto ptr = reinterpret_cast<uint8_t *>(get_ndarray_data_ptr_as_int(data));
+  TI_ERROR_IF(!ptr,
+              "CPU native reverse strided scan received a null data pointer.");
+  const std::size_t n = data->get_nelement();
+
+  switch (value_type) {
+    case 0:
+      return cpu_reverse_scan_strided_typed<int32_t>(ptr, n, offset, stride);
+    case 1:
+      return cpu_reverse_scan_strided_typed<float>(ptr, n, offset, stride);
+    case 2:
+      return cpu_reverse_scan_strided_typed<uint32_t>(ptr, n, offset, stride);
+    case 3:
+      return cpu_reverse_scan_strided_typed<uint64_t>(ptr, n, offset, stride);
+    case 4:
+      return cpu_reverse_scan_strided_typed<int64_t>(ptr, n, offset, stride);
+    case 5:
+      return cpu_reverse_scan_strided_typed<double>(ptr, n, offset, stride);
+    default:
+      TI_ERROR(
+          "CPU native reverse strided scan received an unsupported value type.");
   }
 }
 
@@ -6931,6 +7738,56 @@ std::size_t Program::cpu_inclusive_scan_dense_field(SNode *data,
       return cpu_scan_strided_typed<double>(ptr, n, 0, stride);
     default:
       TI_ERROR("CPU native dense field scan received an unsupported value type.");
+  }
+}
+
+std::size_t Program::cpu_inclusive_reverse_scan_dense_field(SNode *data,
+                                                            int value_type,
+                                                            std::size_t n) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field reverse scan is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(n == 0,
+              "CPU native dense field reverse scan expects at least one item.");
+  std::size_t stride = 0;
+  auto *ptr = map_cpu_dense_field(this, data, value_type, n,
+                                  "CPU native dense field reverse scan",
+                                  &stride);
+  switch (value_type) {
+    case 0:
+      if (stride == sizeof(int32_t)) {
+        return cpu_reverse_scan_typed(reinterpret_cast<int32_t *>(ptr), n);
+      }
+      return cpu_reverse_scan_strided_typed<int32_t>(ptr, n, 0, stride);
+    case 1:
+      if (stride == sizeof(float)) {
+        return cpu_reverse_scan_typed(reinterpret_cast<float *>(ptr), n);
+      }
+      return cpu_reverse_scan_strided_typed<float>(ptr, n, 0, stride);
+    case 2:
+      if (stride == sizeof(uint32_t)) {
+        return cpu_reverse_scan_typed(reinterpret_cast<uint32_t *>(ptr), n);
+      }
+      return cpu_reverse_scan_strided_typed<uint32_t>(ptr, n, 0, stride);
+    case 3:
+      if (stride == sizeof(uint64_t)) {
+        return cpu_reverse_scan_typed(reinterpret_cast<uint64_t *>(ptr), n);
+      }
+      return cpu_reverse_scan_strided_typed<uint64_t>(ptr, n, 0, stride);
+    case 4:
+      if (stride == sizeof(int64_t)) {
+        return cpu_reverse_scan_typed(reinterpret_cast<int64_t *>(ptr), n);
+      }
+      return cpu_reverse_scan_strided_typed<int64_t>(ptr, n, 0, stride);
+    case 5:
+      if (stride == sizeof(double)) {
+        return cpu_reverse_scan_typed(reinterpret_cast<double *>(ptr), n);
+      }
+      return cpu_reverse_scan_strided_typed<double>(ptr, n, 0, stride);
+    default:
+      TI_ERROR(
+          "CPU native dense field reverse scan received an unsupported value "
+          "type.");
   }
 }
 
@@ -8236,6 +9093,110 @@ std::size_t Program::cpu_add_merge_ndarray(Ndarray *src,
   return 0;
 }
 
+std::size_t Program::cpu_add_scaled_ndarray(Ndarray *src,
+                                            Ndarray *dst,
+                                            int value_type,
+                                            double scale) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native scaled-add is only available on CPU backends.");
+  TI_ERROR_IF(!src || !dst, "CPU scaled-add received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1 ||
+                  src->get_nelement() != dst->get_nelement(),
+              "CPU scaled-add expects matching 1D ndarrays.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CPU scaled-add received an unsupported value type.");
+  TI_ERROR_IF(src->get_element_size() != value_size ||
+                  dst->get_element_size() != value_size,
+              "CPU scaled-add dtype does not match value type.");
+  const std::size_t n = src->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_simple_loop(n, target_threads);
+  const auto src_addr = get_ndarray_data_ptr_as_int(src);
+  const auto dst_addr = get_ndarray_data_ptr_as_int(dst);
+  TI_ERROR_IF(!src_addr || !dst_addr,
+              "CPU scaled-add received a null data pointer.");
+  switch (value_type) {
+    case 1:
+      cpu_add_scaled_run_typed(reinterpret_cast<const float *>(src_addr),
+                               reinterpret_cast<float *>(dst_addr), n,
+                               static_cast<float>(scale), use_parallel,
+                               target_threads, max_threads);
+      return 0;
+    case 5:
+      cpu_add_scaled_run_typed(reinterpret_cast<const double *>(src_addr),
+                               reinterpret_cast<double *>(dst_addr), n, scale,
+                               use_parallel, target_threads, max_threads);
+      return 0;
+    default:
+      TI_ERROR("CPU scaled-add is supported only for f32/f64 gradients.");
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_add_scalar_ndarray_to_ndarray(Ndarray *src,
+                                                       Ndarray *dst,
+                                                       int value_type,
+                                                       double scale) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native scalar-to-ndarray add is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!src || !dst,
+              "CPU scalar-to-ndarray add received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1 ||
+                  src->get_nelement() < 1,
+              "CPU scalar-to-ndarray add expects 1D source and destination "
+              "ndarrays with at least one source element.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CPU scalar-to-ndarray add received an unsupported value type.");
+  TI_ERROR_IF(src->get_element_size() != value_size ||
+                  dst->get_element_size() != value_size,
+              "CPU scalar-to-ndarray add dtype does not match value type.");
+  const std::size_t n = dst->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_simple_loop(n, target_threads);
+  const auto src_addr = get_ndarray_data_ptr_as_int(src);
+  const auto dst_addr = get_ndarray_data_ptr_as_int(dst);
+  TI_ERROR_IF(!src_addr || !dst_addr,
+              "CPU scalar-to-ndarray add received a null data pointer.");
+  const auto *src_ptr = reinterpret_cast<const uint8_t *>(src_addr);
+  auto *dst_ptr = reinterpret_cast<uint8_t *>(dst_addr);
+  switch (value_type) {
+    case 1:
+      cpu_add_scaled_run_strided_to_strided_typed<float>(
+          src_ptr, dst_ptr, n, 0, 0, 0, value_size,
+          static_cast<float>(scale), use_parallel, target_threads,
+          max_threads);
+      return 0;
+    case 5:
+      cpu_add_scaled_run_strided_to_strided_typed<double>(
+          src_ptr, dst_ptr, n, 0, 0, 0, value_size, scale, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    default:
+      TI_ERROR(
+          "CPU scalar-to-ndarray add is supported only for f32/f64 gradients.");
+  }
+  return 0;
+}
+
 std::size_t Program::cpu_add_merge_strided_ndarray(Ndarray *src,
                                                    Ndarray *dst,
                                                    int value_type,
@@ -8369,6 +9330,121 @@ std::size_t Program::cpu_add_merge_dense_field(Ndarray *src,
       return 0;
     default:
       TI_ERROR("CPU dense field add-merge received an unsupported value type.");
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_add_scaled_dense_field(SNode *src,
+                                                SNode *dst,
+                                                int value_type,
+                                                std::size_t n,
+                                                double scale) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field scaled-add is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!src || !dst,
+              "CPU dense field scaled-add received a null field.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CPU dense field scaled-add received an unsupported value type.");
+  if (n == 0) {
+    return 0;
+  }
+  std::size_t src_stride = 0;
+  std::size_t dst_stride = 0;
+  const auto *src_ptr = map_cpu_dense_field(
+      this, src, value_type, n, "CPU native dense field scaled-add",
+      &src_stride);
+  auto *dst_ptr = map_cpu_dense_field(
+      this, dst, value_type, n, "CPU native dense field scaled-add",
+      &dst_stride);
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_simple_loop(n, target_threads);
+  switch (value_type) {
+    case 1:
+      cpu_add_scaled_run_strided_to_strided_typed<float>(
+          src_ptr, dst_ptr, n, 0, src_stride, 0, dst_stride,
+          static_cast<float>(scale), use_parallel, target_threads,
+          max_threads);
+      return 0;
+    case 5:
+      cpu_add_scaled_run_strided_to_strided_typed<double>(
+          src_ptr, dst_ptr, n, 0, src_stride, 0, dst_stride, scale,
+          use_parallel, target_threads, max_threads);
+      return 0;
+    default:
+      TI_ERROR(
+          "CPU dense field scaled-add is supported only for f32/f64 gradients.");
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_add_scalar_field_to_dense_field(SNode *src,
+                                                         SNode *dst,
+                                                         int value_type,
+                                                         std::size_t n) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native scalar-to-dense add is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!src || !dst,
+              "CPU scalar-to-dense add received a null field.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CPU scalar-to-dense add received an unsupported value type.");
+  if (n == 0) {
+    return 0;
+  }
+  auto *src_ptr = map_cpu_dense_field(this, src, value_type, 1,
+                                      "CPU native scalar-to-dense add", nullptr);
+  std::size_t dst_stride = 0;
+  auto *dst_ptr = map_cpu_dense_field(this, dst, value_type, n,
+                                      "CPU native scalar-to-dense add",
+                                      &dst_stride);
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_simple_loop(n, target_threads);
+  switch (value_type) {
+    case 0:
+      cpu_add_merge_run_strided_to_strided_typed<int32_t>(
+          src_ptr, dst_ptr, n, 0, 0, 0, dst_stride, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 1:
+      cpu_add_merge_run_strided_to_strided_typed<float>(
+          src_ptr, dst_ptr, n, 0, 0, 0, dst_stride, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 2:
+      cpu_add_merge_run_strided_to_strided_typed<uint32_t>(
+          src_ptr, dst_ptr, n, 0, 0, 0, dst_stride, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 3:
+      cpu_add_merge_run_strided_to_strided_typed<uint64_t>(
+          src_ptr, dst_ptr, n, 0, 0, 0, dst_stride, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 4:
+      cpu_add_merge_run_strided_to_strided_typed<int64_t>(
+          src_ptr, dst_ptr, n, 0, 0, 0, dst_stride, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 5:
+      cpu_add_merge_run_strided_to_strided_typed<double>(
+          src_ptr, dst_ptr, n, 0, 0, 0, dst_stride, use_parallel,
+          target_threads, max_threads);
+      return 0;
+    default:
+      TI_ERROR("CPU scalar-to-dense add received an unsupported value type.");
   }
   return 0;
 }
@@ -8639,6 +9715,189 @@ std::size_t Program::cpu_gather_dense_field_indices_field(
     } else {
       std::memset(dst_ptr + i * dst_stride, 0, item_bytes);
     }
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_gather_add_ndarray(Ndarray *src,
+                                            Ndarray *indices,
+                                            Ndarray *dst,
+                                            int value_type) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native gather-add is only available on CPU backends.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "CPU native gather-add received a null ndarray.");
+  TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
+                  dst->shape.size() != 1,
+              "CPU native gather-add expects 1D ndarrays.");
+  TI_ERROR_IF(indices->get_nelement() != dst->get_nelement(),
+              "CPU native gather-add expects indices and destination sizes to "
+              "match.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CPU native gather-add received an unsupported value type.");
+  TI_ERROR_IF(src->get_element_size() != value_size ||
+                  dst->get_element_size() != value_size ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "CPU native gather-add dtype does not match value type or i32 "
+              "index size.");
+  const std::size_t n = indices->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  const auto *src_ptr =
+      reinterpret_cast<const uint8_t *>(get_ndarray_data_ptr_as_int(src));
+  const auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
+  auto *dst_ptr = reinterpret_cast<uint8_t *>(get_ndarray_data_ptr_as_int(dst));
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native gather-add received a null data pointer.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_simple_loop(n, target_threads);
+  switch (value_type) {
+    case 1:
+      cpu_gather_add_run_strided_to_strided_typed<float>(
+          src_ptr, indices_ptr, dst_ptr, n, src->get_nelement(), 0,
+          value_size, 0, value_size, use_parallel, target_threads,
+          max_threads);
+      return 0;
+    case 5:
+      cpu_gather_add_run_strided_to_strided_typed<double>(
+          src_ptr, indices_ptr, dst_ptr, n, src->get_nelement(), 0,
+          value_size, 0, value_size, use_parallel, target_threads,
+          max_threads);
+      return 0;
+    default:
+      TI_ERROR("CPU native gather-add is supported only for f32/f64 "
+               "gradients.");
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_gather_add_dense_field(SNode *src,
+                                                Ndarray *indices,
+                                                SNode *dst,
+                                                int value_type,
+                                                std::size_t src_n,
+                                                std::size_t dst_n) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field gather-add is only available on CPU "
+              "backends.");
+  check_indexed_copy_dense_field_request(this, "CPU native", src, indices, dst,
+                                         value_type, src_n, dst_n, false);
+  const std::size_t n = indices->get_nelement();
+  TI_ERROR_IF(n != dst_n,
+              "CPU native dense field gather-add expects destination size to "
+              "match indices size.");
+  if (n == 0) {
+    return 0;
+  }
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  std::size_t src_stride = 0;
+  std::size_t dst_stride = 0;
+  const auto *src_ptr = map_cpu_dense_field(
+      this, src, value_type, src_n, "CPU native dense field gather-add",
+      &src_stride);
+  auto *dst_ptr = map_cpu_dense_field(
+      this, dst, value_type, dst_n, "CPU native dense field gather-add",
+      &dst_stride);
+  const auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native dense field gather-add received a null data "
+              "pointer.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_simple_loop(n, target_threads);
+  switch (value_type) {
+    case 1:
+      cpu_gather_add_run_strided_to_strided_typed<float>(
+          src_ptr, indices_ptr, dst_ptr, n, src_n, 0, src_stride, 0,
+          dst_stride, use_parallel, target_threads, max_threads);
+      return 0;
+    case 5:
+      cpu_gather_add_run_strided_to_strided_typed<double>(
+          src_ptr, indices_ptr, dst_ptr, n, src_n, 0, src_stride, 0,
+          dst_stride, use_parallel, target_threads, max_threads);
+      return 0;
+    default:
+      TI_ERROR("CPU native dense field gather-add is supported only for "
+               "f32/f64 gradients.");
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_gather_add_dense_field_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field gather-add is only available on CPU "
+              "backends.");
+  check_indexed_copy_dense_field_indices_field_request(
+      this, "CPU native", src, indices, dst, value_type, src_n, indices_n,
+      dst_n, false);
+  TI_ERROR_IF(indices_n != dst_n,
+              "CPU native dense field gather-add expects destination size to "
+              "match indices size.");
+  if (indices_n == 0) {
+    return 0;
+  }
+  std::size_t src_stride = 0;
+  std::size_t indices_stride = 0;
+  std::size_t dst_stride = 0;
+  const auto *src_ptr = map_cpu_dense_field(
+      this, src, value_type, src_n, "CPU native dense field gather-add",
+      &src_stride);
+  const auto *indices_ptr_bytes = map_cpu_dense_field(
+      this, indices, 0, indices_n, "CPU native dense field gather-add",
+      &indices_stride);
+  auto *dst_ptr = map_cpu_dense_field(
+      this, dst, value_type, dst_n, "CPU native dense field gather-add",
+      &dst_stride);
+  TI_ERROR_IF(indices_stride != sizeof(int32_t),
+              "CPU native dense field gather-add requires contiguous i32 "
+              "field indices.");
+  const auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(indices_ptr_bytes);
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native dense field gather-add received a null data "
+              "pointer.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((indices_n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel =
+      cpu_use_parallel_simple_loop(indices_n, target_threads);
+  switch (value_type) {
+    case 1:
+      cpu_gather_add_run_strided_to_strided_typed<float>(
+          src_ptr, indices_ptr, dst_ptr, indices_n, src_n, 0, src_stride, 0,
+          dst_stride, use_parallel, target_threads, max_threads);
+      return 0;
+    case 5:
+      cpu_gather_add_run_strided_to_strided_typed<double>(
+          src_ptr, indices_ptr, dst_ptr, indices_n, src_n, 0, src_stride, 0,
+          dst_stride, use_parallel, target_threads, max_threads);
+      return 0;
+    default:
+      TI_ERROR("CPU native dense field gather-add is supported only for "
+               "f32/f64 gradients.");
   }
   return 0;
 }

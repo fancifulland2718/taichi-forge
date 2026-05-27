@@ -40,6 +40,10 @@ class GfxProgramImpl : public ProgramImpl {
     return runtime_->flush_if_pending();
   }
 
+  bool has_pending_command_list() const {
+    return runtime_ && runtime_->has_pending_command_list();
+  }
+
   std::unique_ptr<AotModuleBuilder> make_aot_module_builder(
       const DeviceCapabilityConfig &caps) override;
 

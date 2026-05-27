@@ -4,6 +4,7 @@ This module supplies two decorators for users to customize their
 gradient computation task.
 """
 
+import os
 import warnings
 from functools import reduce
 
@@ -232,7 +233,8 @@ class Tape:
         if self.eval_on_exit:
             self.grad()
         for calls, mode in zip(self.calls, self.modes):
-            calls[0].autodiff_mode = mode
+            if mode is not None:
+                calls[0].autodiff_mode = mode
 
     def insert(self, func, args):
         # Kernels with mode `AutodiffMode.NONE` and `AutodiffMode.VALIDATION` are all forward kernels.
@@ -245,6 +247,10 @@ class Tape:
         if self.validation:
             func.autodiff_mode = AutodiffMode.VALIDATION
         self.calls.append((func, args))
+
+    def insert_native(self, record):
+        self.modes.append(None)
+        self.calls.append((record, ()))
 
     def grad(self):
         assert self.entered, "Before evaluating gradients tape must be entered."
@@ -279,15 +285,99 @@ def clear_all_gradients(gradient_type=SNodeGradType.ADJOINT):
     """Sets the gradients of all fields to zero."""
     impl.get_runtime().materialize()
 
+    from taichi_forge.lang.field import _dense_host_copy_value_type  # pylint: disable=C0415
+    from taichi_forge.lang.misc import arm64, cuda, vulkan, x64  # pylint: disable=C0415
+
+    arch = impl.current_cfg().arch
+    cuda_clear_method_name = "cuda_device_zero_dense_field" if arch == cuda else None
+    vulkan_clear_enabled = (
+        os.environ.get("TAICHI_FORGE_NATIVE_AD_VULKAN_CLEAR", "0") != "0"
+    )
+    vulkan_batch_method_name = (
+        "vulkan_zero_dense_fields"
+        if arch == vulkan and vulkan_clear_enabled
+        else None
+    )
+
+    def try_cpu_native_clear(ch):
+        field = ScalarField(Expr(ch.get_expr()))
+        if arch in (x64, arm64):
+            try:
+                return field._try_cpu_dense_fill(0)
+            except RuntimeError:
+                return False
+        return False
+
+    def dense_clear_info(ch):
+        field = ScalarField(Expr(ch.get_expr()))
+        value_type = _dense_host_copy_value_type(field.dtype)
+        if value_type is None:
+            return None
+        n = int(np.prod(field.shape, dtype=np.int64))
+        return field, value_type, n
+
+    def try_cuda_native_clear(ch):
+        if cuda_clear_method_name is None:
+            return False
+        clear_info = dense_clear_info(ch)
+        if clear_info is None:
+            return False
+        field, value_type, n = clear_info
+        method = getattr(impl.get_runtime().prog, cuda_clear_method_name, None)
+        if method is None:
+            return False
+        try:
+            method(field.snode.ptr, value_type, n)
+        except RuntimeError:
+            return False
+        return True
+
+    def make_vulkan_native_clear_job(ch):
+        if vulkan_batch_method_name is None:
+            return None
+        clear_info = dense_clear_info(ch)
+        if clear_info is None:
+            return None
+        field, value_type, n = clear_info
+        return field.snode.ptr, value_type, n, ch.get_expr()
+
+    def try_vulkan_native_clear_batch(jobs):
+        if not jobs:
+            return True
+        method = getattr(impl.get_runtime().prog, vulkan_batch_method_name, None)
+        if method is None:
+            return False
+        try:
+            method(
+                [job[0] for job in jobs],
+                [job[1] for job in jobs],
+                [job[2] for job in jobs],
+            )
+        except RuntimeError:
+            return False
+        return True
+
     def visit(node):
         places = []
+        vulkan_jobs = []
         for _i in range(node.ptr.get_num_ch()):
             ch = node.ptr.get_ch(_i)
             if not ch.is_place():
                 visit(SNode(ch))
             else:
                 if ch.get_snode_grad_type() == gradient_type:
-                    places.append(ch.get_expr())
+                    if try_cpu_native_clear(ch):
+                        continue
+                    if try_cuda_native_clear(ch):
+                        continue
+                    vulkan_job = make_vulkan_native_clear_job(ch)
+                    if vulkan_job is not None:
+                        vulkan_jobs.append(vulkan_job)
+                    else:
+                        places.append(ch.get_expr())
+
+        if vulkan_jobs and not try_vulkan_native_clear_batch(vulkan_jobs):
+            places.extend(job[3] for job in vulkan_jobs)
 
         places = tuple(places)
         if places:

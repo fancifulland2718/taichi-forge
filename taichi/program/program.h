@@ -114,6 +114,7 @@ class TI_DLL_EXPORT Program {
 
   StreamSemaphore flush();
   StreamSemaphore flush_if_pending();
+  bool has_pending_gfx_command_list() const;
 
   /**
    * Materializes the runtime.
@@ -372,11 +373,25 @@ class TI_DLL_EXPORT Program {
                                                        double scale,
                                                        double bias);
 
+  std::size_t cuda_device_zero_dense_field(SNode *dst,
+                                           int value_type,
+                                           std::size_t n);
+
   bool cuda_device_add_merge_available() const;
 
   std::size_t cuda_device_add_merge_ndarray(Ndarray *src,
                                             Ndarray *dst,
                                             int value_type);
+
+  std::size_t cuda_device_add_scaled_ndarray(Ndarray *src,
+                                             Ndarray *dst,
+                                             int value_type,
+                                             double scale);
+
+  std::size_t cuda_device_add_scalar_ndarray_to_ndarray(Ndarray *src,
+                                                        Ndarray *dst,
+                                                        int value_type,
+                                                        double scale);
 
   std::size_t cuda_device_add_merge_strided_ndarray(
       Ndarray *src,
@@ -391,6 +406,17 @@ class TI_DLL_EXPORT Program {
                                                 SNode *dst,
                                                 int value_type,
                                                 std::size_t n);
+
+  std::size_t cuda_device_add_scaled_dense_field(SNode *src,
+                                                 SNode *dst,
+                                                 int value_type,
+                                                 std::size_t n,
+                                                 double scale);
+
+  std::size_t cuda_device_add_scalar_field_to_dense_field(SNode *src,
+                                                          SNode *dst,
+                                                          int value_type,
+                                                          std::size_t n);
 
   bool cuda_device_indexed_copy_available() const;
 
@@ -423,6 +449,27 @@ class TI_DLL_EXPORT Program {
                                                            std::size_t src_n,
                                                            std::size_t indices_n,
                                                            std::size_t dst_n);
+
+  std::size_t cuda_device_gather_add_ndarray(Ndarray *src,
+                                             Ndarray *indices,
+                                             Ndarray *dst,
+                                             int value_type);
+
+  std::size_t cuda_device_gather_add_dense_field(SNode *src,
+                                                 Ndarray *indices,
+                                                 SNode *dst,
+                                                 int value_type,
+                                                 std::size_t src_n,
+                                                 std::size_t dst_n);
+
+  std::size_t cuda_device_gather_add_dense_field_indices_field(
+      SNode *src,
+      SNode *indices,
+      SNode *dst,
+      int value_type,
+      std::size_t src_n,
+      std::size_t indices_n,
+      std::size_t dst_n);
 
   std::size_t cuda_device_scatter_ndarray(Ndarray *src,
                                           Ndarray *indices,
@@ -646,14 +693,27 @@ class TI_DLL_EXPORT Program {
 
   std::size_t cuda_cub_inclusive_scan_ndarray(Ndarray *data, int value_type);
 
+  std::size_t cuda_cub_inclusive_reverse_scan_ndarray(Ndarray *data,
+                                                      int value_type);
+
   std::size_t cuda_cub_inclusive_scan_member_ndarray(Ndarray *data,
                                                      int value_type,
                                                      std::size_t offset,
                                                      std::size_t stride);
 
+  std::size_t cuda_cub_inclusive_reverse_scan_member_ndarray(
+      Ndarray *data,
+      int value_type,
+      std::size_t offset,
+      std::size_t stride);
+
   std::size_t cuda_cub_inclusive_scan_dense_field(SNode *data,
                                                   int value_type,
                                                   std::size_t n);
+
+  std::size_t cuda_cub_inclusive_reverse_scan_dense_field(SNode *data,
+                                                          int value_type,
+                                                          std::size_t n);
 
   void cuda_cub_scan_clear_workspace();
 
@@ -740,14 +800,26 @@ class TI_DLL_EXPORT Program {
 
   std::size_t cpu_inclusive_scan_ndarray(Ndarray *data, int value_type);
 
+  std::size_t cpu_inclusive_reverse_scan_ndarray(Ndarray *data,
+                                                 int value_type);
+
   std::size_t cpu_inclusive_scan_member_ndarray(Ndarray *data,
                                                 int value_type,
                                                 std::size_t offset,
                                                 std::size_t stride);
 
+  std::size_t cpu_inclusive_reverse_scan_member_ndarray(Ndarray *data,
+                                                        int value_type,
+                                                        std::size_t offset,
+                                                        std::size_t stride);
+
   std::size_t cpu_inclusive_scan_dense_field(SNode *data,
                                              int value_type,
                                              std::size_t n);
+
+  std::size_t cpu_inclusive_reverse_scan_dense_field(SNode *data,
+                                                     int value_type,
+                                                     std::size_t n);
 
   std::size_t cpu_scan_workspace_bytes() const;
 
@@ -889,6 +961,16 @@ class TI_DLL_EXPORT Program {
                                     Ndarray *dst,
                                     int value_type);
 
+  std::size_t cpu_add_scaled_ndarray(Ndarray *src,
+                                     Ndarray *dst,
+                                     int value_type,
+                                     double scale);
+
+  std::size_t cpu_add_scalar_ndarray_to_ndarray(Ndarray *src,
+                                                Ndarray *dst,
+                                                int value_type,
+                                                double scale);
+
   std::size_t cpu_add_merge_strided_ndarray(Ndarray *src,
                                             Ndarray *dst,
                                             int value_type,
@@ -901,6 +983,17 @@ class TI_DLL_EXPORT Program {
                                         SNode *dst,
                                         int value_type,
                                         std::size_t n);
+
+  std::size_t cpu_add_scaled_dense_field(SNode *src,
+                                         SNode *dst,
+                                         int value_type,
+                                         std::size_t n,
+                                         double scale);
+
+  std::size_t cpu_add_scalar_field_to_dense_field(SNode *src,
+                                                  SNode *dst,
+                                                  int value_type,
+                                                  std::size_t n);
 
   bool cpu_indexed_copy_available() const;
 
@@ -929,6 +1022,26 @@ class TI_DLL_EXPORT Program {
                                                    std::size_t src_n,
                                                    std::size_t indices_n,
                                                    std::size_t dst_n);
+
+  std::size_t cpu_gather_add_ndarray(Ndarray *src,
+                                     Ndarray *indices,
+                                     Ndarray *dst,
+                                     int value_type);
+
+  std::size_t cpu_gather_add_dense_field(SNode *src,
+                                         Ndarray *indices,
+                                         SNode *dst,
+                                         int value_type,
+                                         std::size_t src_n,
+                                         std::size_t dst_n);
+
+  std::size_t cpu_gather_add_dense_field_indices_field(SNode *src,
+                                                       SNode *indices,
+                                                       SNode *dst,
+                                                       int value_type,
+                                                       std::size_t src_n,
+                                                       std::size_t indices_n,
+                                                       std::size_t dst_n);
 
   std::size_t cpu_scatter_ndarray(Ndarray *src, Ndarray *indices, Ndarray *dst);
 
@@ -1213,6 +1326,11 @@ class TI_DLL_EXPORT Program {
                                               int value_type,
                                               double scale,
                                               double bias);
+  std::size_t vulkan_transform_affine_ndarray_trusted(Ndarray *src,
+                                                      Ndarray *dst,
+                                                      int value_type,
+                                                      double scale,
+                                                      double bias);
   std::size_t vulkan_transform_indexed_affine_ndarray(Ndarray *src,
                                                        Ndarray *indices,
                                                        Ndarray *dst,
@@ -1228,6 +1346,16 @@ class TI_DLL_EXPORT Program {
                                                      double scale,
                                                      double bias);
   std::size_t vulkan_transform_affine_strided_ndarray(
+      Ndarray *src,
+      Ndarray *dst,
+      int value_type,
+      std::size_t src_offset,
+      std::size_t src_stride,
+      std::size_t dst_offset,
+      std::size_t dst_stride,
+      double scale,
+      double bias);
+  std::size_t vulkan_transform_affine_strided_ndarray_trusted(
       Ndarray *src,
       Ndarray *dst,
       int value_type,
@@ -1255,6 +1383,21 @@ class TI_DLL_EXPORT Program {
                                                   std::size_t n,
                                                   double scale,
                                                   double bias);
+  std::size_t vulkan_transform_affine_dense_field_trusted(SNode *src,
+                                                          SNode *dst,
+                                                          int value_type,
+                                                          std::size_t n,
+                                                          double scale,
+                                                          double bias);
+
+  std::size_t vulkan_zero_dense_field(SNode *dst,
+                                      int value_type,
+                                      std::size_t n);
+
+  std::size_t vulkan_zero_dense_fields(
+      const std::vector<SNode *> &dsts,
+      const std::vector<int> &value_types,
+      const std::vector<std::size_t> &ns);
 
   void vulkan_transform_clear_workspace();
 
@@ -1280,6 +1423,11 @@ class TI_DLL_EXPORT Program {
                                            SNode *dst,
                                            int value_type,
                                            std::size_t n);
+
+  std::size_t vulkan_add_scalar_field_to_dense_field(SNode *src,
+                                                     SNode *dst,
+                                                     int value_type,
+                                                     std::size_t n);
 
   void vulkan_add_merge_clear_workspace();
 

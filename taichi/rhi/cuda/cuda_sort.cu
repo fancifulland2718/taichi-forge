@@ -911,6 +911,73 @@ __global__ void add_merge_strided_kernel(const uint8_t *src,
 }
 
 template <typename T>
+__global__ void add_scaled_kernel(const T *src,
+                                  T *dst,
+                                  int num_items,
+                                  T scale) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  dst[i] += src[i] * scale;
+}
+
+template <typename T>
+__global__ void add_scaled_strided_kernel(const uint8_t *src,
+                                          uint8_t *dst,
+                                          int num_items,
+                                          std::size_t src_offset,
+                                          std::size_t src_stride,
+                                          std::size_t dst_offset,
+                                          std::size_t dst_stride,
+                                          T scale) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  T *dst_value = strided_value_ptr<T>(dst, i, dst_offset, dst_stride);
+  *dst_value += load_strided_value<T>(src, i, src_offset, src_stride) * scale;
+}
+
+template <typename T>
+__global__ void gather_add_by_i32_kernel(const T *src,
+                                         const int32_t *indices,
+                                         T *dst,
+                                         int num_items,
+                                         int index_bound) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  int index = indices[i];
+  if (index >= 0 && index < index_bound) {
+    dst[i] += src[index];
+  }
+}
+
+template <typename T>
+__global__ void gather_add_strided_by_i32_kernel(
+    const uint8_t *src,
+    const int32_t *indices,
+    uint8_t *dst,
+    int num_items,
+    int index_bound,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= num_items) {
+    return;
+  }
+  int index = indices[i];
+  if (index >= 0 && index < index_bound) {
+    T *dst_value = strided_value_ptr<T>(dst, i, dst_offset, dst_stride);
+    *dst_value += load_strided_value<T>(src, index, src_offset, src_stride);
+  }
+}
+
+template <typename T>
 __global__ void grouped_reduce_atomic_sum_kernel(const int32_t *keys,
                                                  const T *values,
                                                  T *output,
@@ -2309,6 +2376,42 @@ std::size_t inclusive_scan_typed(CubScanCache &cache,
 }
 
 template <typename T>
+std::size_t inclusive_reverse_scan_typed(CubScanCache &cache,
+                                         void *data,
+                                         int num_items,
+                                         void *stream_ptr) {
+  T *data_in_out = static_cast<T *>(data) + (num_items - 1);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  ensure_device_cache(cache);
+  auto reversed_in_out = ::cuda::make_strided_iterator(
+      data_in_out, static_cast<std::ptrdiff_t>(-1));
+
+  std::size_t temp_storage_bytes = 0;
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        nullptr, temp_storage_bytes, reversed_in_out, reversed_in_out,
+        num_items, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        nullptr, temp_storage_bytes, reversed_in_out, reversed_in_out,
+        num_items));
+  }
+  ensure_buffer(&cache.temp_storage, &cache.temp_storage_bytes,
+                temp_storage_bytes);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        cache.temp_storage, temp_storage_bytes, reversed_in_out,
+        reversed_in_out, num_items, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        cache.temp_storage, temp_storage_bytes, reversed_in_out,
+        reversed_in_out, num_items));
+  }
+  return cache.allocated_bytes();
+}
+
+template <typename T>
 std::size_t inclusive_scan_strided_typed(CubScanCache &cache,
                                          void *data,
                                          int num_items,
@@ -2348,6 +2451,47 @@ std::size_t inclusive_scan_strided_typed(CubScanCache &cache,
   return cache.allocated_bytes();
 }
 
+template <typename T>
+std::size_t inclusive_reverse_scan_strided_typed(CubScanCache &cache,
+                                                 void *data,
+                                                 int num_items,
+                                                 std::size_t offset,
+                                                 std::size_t stride,
+                                                 void *stream_ptr) {
+  auto *last_item = reinterpret_cast<T *>(
+      static_cast<uint8_t *>(data) + offset +
+      (static_cast<std::size_t>(num_items) - 1) * stride);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  ensure_device_cache(cache);
+  const auto stride_items = -static_cast<std::ptrdiff_t>(stride / sizeof(T));
+  auto reversed_in_out =
+      ::cuda::make_strided_iterator(last_item, stride_items);
+
+  std::size_t temp_storage_bytes = 0;
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        nullptr, temp_storage_bytes, reversed_in_out, reversed_in_out,
+        num_items, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        nullptr, temp_storage_bytes, reversed_in_out, reversed_in_out,
+        num_items));
+  }
+  ensure_buffer(&cache.temp_storage, &cache.temp_storage_bytes,
+                temp_storage_bytes);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        cache.temp_storage, temp_storage_bytes, reversed_in_out,
+        reversed_in_out, num_items, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceScan::InclusiveSum(
+        cache.temp_storage, temp_storage_bytes, reversed_in_out,
+        reversed_in_out, num_items));
+  }
+  return cache.allocated_bytes();
+}
+
 std::size_t cub_inclusive_scan_impl(void *data,
                                     int num_items,
                                     CubScanValueType value_type,
@@ -2373,6 +2517,39 @@ std::size_t cub_inclusive_scan_impl(void *data,
       return inclusive_scan_typed<double>(cache, data, num_items, stream);
   }
   throw std::runtime_error("Unsupported CUB scan value type");
+}
+
+std::size_t cub_inclusive_reverse_scan_impl(void *data,
+                                            int num_items,
+                                            CubScanValueType value_type,
+                                            void *stream,
+                                            void *owner) {
+  if (!data) {
+    throw std::runtime_error("CUB reverse scan received a null data pointer");
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  CubScanCache &cache = get_scan_cache(owner);
+  switch (value_type) {
+    case CubScanValueType::i32:
+      return inclusive_reverse_scan_typed<int32_t>(
+          cache, data, num_items, stream);
+    case CubScanValueType::f32:
+      return inclusive_reverse_scan_typed<float>(
+          cache, data, num_items, stream);
+    case CubScanValueType::u32:
+      return inclusive_reverse_scan_typed<uint32_t>(
+          cache, data, num_items, stream);
+    case CubScanValueType::u64:
+      return inclusive_reverse_scan_typed<uint64_t>(
+          cache, data, num_items, stream);
+    case CubScanValueType::i64:
+      return inclusive_reverse_scan_typed<int64_t>(
+          cache, data, num_items, stream);
+    case CubScanValueType::f64:
+      return inclusive_reverse_scan_typed<double>(
+          cache, data, num_items, stream);
+  }
+  throw std::runtime_error("Unsupported CUB reverse scan value type");
 }
 
 std::size_t cub_inclusive_scan_strided_impl(void *data,
@@ -2408,6 +2585,42 @@ std::size_t cub_inclusive_scan_strided_impl(void *data,
           cache, data, num_items, offset, stride, stream);
   }
   throw std::runtime_error("Unsupported CUB strided scan value type");
+}
+
+std::size_t cub_inclusive_reverse_scan_strided_impl(void *data,
+                                                    int num_items,
+                                                    CubScanValueType value_type,
+                                                    std::size_t offset,
+                                                    std::size_t stride,
+                                                    void *stream,
+                                                    void *owner) {
+  if (!data) {
+    throw std::runtime_error(
+        "CUB reverse strided scan received a null data pointer");
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  CubScanCache &cache = get_scan_cache(owner);
+  switch (value_type) {
+    case CubScanValueType::i32:
+      return inclusive_reverse_scan_strided_typed<int32_t>(
+          cache, data, num_items, offset, stride, stream);
+    case CubScanValueType::f32:
+      return inclusive_reverse_scan_strided_typed<float>(
+          cache, data, num_items, offset, stride, stream);
+    case CubScanValueType::u32:
+      return inclusive_reverse_scan_strided_typed<uint32_t>(
+          cache, data, num_items, offset, stride, stream);
+    case CubScanValueType::u64:
+      return inclusive_reverse_scan_strided_typed<uint64_t>(
+          cache, data, num_items, offset, stride, stream);
+    case CubScanValueType::i64:
+      return inclusive_reverse_scan_strided_typed<int64_t>(
+          cache, data, num_items, offset, stride, stream);
+    case CubScanValueType::f64:
+      return inclusive_reverse_scan_strided_typed<double>(
+          cache, data, num_items, offset, stride, stream);
+  }
+  throw std::runtime_error("Unsupported CUB reverse strided scan value type");
 }
 
 void cub_inclusive_scan_clear_cache_impl(void *owner) {
@@ -3498,6 +3711,210 @@ std::size_t cub_add_merge_strided_impl(void *src,
       break;
     default:
       throw std::runtime_error("Unsupported CUDA strided add-merge value type");
+  }
+  TI_CUDA_SORT_CHECK(cudaGetLastError());
+  return 0;
+}
+
+template <typename T>
+void add_scaled_launch(const T *src,
+                       T *dst,
+                       int num_items,
+                       T scale,
+                       cudaStream_t stream) {
+  constexpr int kBlockDim = 256;
+  const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+  add_scaled_kernel<T><<<grid_dim, kBlockDim, 0, stream>>>(src, dst,
+                                                           num_items, scale);
+}
+
+std::size_t cub_add_scaled_impl(void *src,
+                                void *dst,
+                                int num_items,
+                                CudaTransformValueType value_type,
+                                double scale,
+                                void *stream_ptr) {
+  if (!src || !dst) {
+    throw std::runtime_error("CUDA scaled-add received a null pointer");
+  }
+  if (num_items == 0) {
+    return 0;
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  switch (value_type) {
+    case CudaTransformValueType::f32:
+      add_scaled_launch(static_cast<const float *>(src),
+                        static_cast<float *>(dst), num_items,
+                        static_cast<float>(scale), stream);
+      break;
+    case CudaTransformValueType::f64:
+      add_scaled_launch(static_cast<const double *>(src),
+                        static_cast<double *>(dst), num_items, scale, stream);
+      break;
+    default:
+      throw std::runtime_error(
+          "CUDA scaled-add is supported only for f32/f64 gradients");
+  }
+  TI_CUDA_SORT_CHECK(cudaGetLastError());
+  return 0;
+}
+
+template <typename T>
+void add_scaled_strided_launch(const uint8_t *src,
+                               uint8_t *dst,
+                               int num_items,
+                               std::size_t src_offset,
+                               std::size_t src_stride,
+                               std::size_t dst_offset,
+                               std::size_t dst_stride,
+                               T scale,
+                               cudaStream_t stream) {
+  constexpr int kBlockDim = 256;
+  const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+  add_scaled_strided_kernel<T><<<grid_dim, kBlockDim, 0, stream>>>(
+      src, dst, num_items, src_offset, src_stride, dst_offset, dst_stride,
+      scale);
+}
+
+std::size_t cub_add_scaled_strided_impl(void *src,
+                                        void *dst,
+                                        int num_items,
+                                        CudaTransformValueType value_type,
+                                        std::size_t src_offset,
+                                        std::size_t src_stride,
+                                        std::size_t dst_offset,
+                                        std::size_t dst_stride,
+                                        double scale,
+                                        void *stream_ptr) {
+  if (!src || !dst) {
+    throw std::runtime_error("CUDA strided scaled-add received a null pointer");
+  }
+  if (num_items == 0) {
+    return 0;
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const auto *src_in = static_cast<const uint8_t *>(src);
+  auto *dst_out = static_cast<uint8_t *>(dst);
+  switch (value_type) {
+    case CudaTransformValueType::f32:
+      add_scaled_strided_launch<float>(
+          src_in, dst_out, num_items, src_offset, src_stride, dst_offset,
+          dst_stride, static_cast<float>(scale), stream);
+      break;
+    case CudaTransformValueType::f64:
+      add_scaled_strided_launch<double>(
+          src_in, dst_out, num_items, src_offset, src_stride, dst_offset,
+          dst_stride, scale, stream);
+      break;
+    default:
+      throw std::runtime_error(
+          "CUDA strided scaled-add is supported only for f32/f64 gradients");
+  }
+  TI_CUDA_SORT_CHECK(cudaGetLastError());
+  return 0;
+}
+
+template <typename T>
+void gather_add_launch(const T *src,
+                       const int32_t *indices,
+                       T *dst,
+                       int num_items,
+                       int index_bound,
+                       cudaStream_t stream) {
+  constexpr int kBlockDim = 256;
+  const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+  gather_add_by_i32_kernel<T><<<grid_dim, kBlockDim, 0, stream>>>(
+      src, indices, dst, num_items, index_bound);
+}
+
+std::size_t cub_gather_add_impl(void *src,
+                                void *indices,
+                                void *dst,
+                                int num_items,
+                                int index_bound,
+                                CudaTransformValueType value_type,
+                                void *stream_ptr) {
+  if (!src || !indices || !dst) {
+    throw std::runtime_error("CUDA gather-add received a null pointer");
+  }
+  if (num_items == 0 || index_bound == 0) {
+    return 0;
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  switch (value_type) {
+    case CudaTransformValueType::f32:
+      gather_add_launch(static_cast<const float *>(src),
+                        static_cast<const int32_t *>(indices),
+                        static_cast<float *>(dst), num_items, index_bound,
+                        stream);
+      break;
+    case CudaTransformValueType::f64:
+      gather_add_launch(static_cast<const double *>(src),
+                        static_cast<const int32_t *>(indices),
+                        static_cast<double *>(dst), num_items, index_bound,
+                        stream);
+      break;
+    default:
+      throw std::runtime_error(
+          "CUDA gather-add is supported only for f32/f64 gradients");
+  }
+  TI_CUDA_SORT_CHECK(cudaGetLastError());
+  return 0;
+}
+
+template <typename T>
+void gather_add_strided_launch(const uint8_t *src,
+                               const int32_t *indices,
+                               uint8_t *dst,
+                               int num_items,
+                               int index_bound,
+                               std::size_t src_offset,
+                               std::size_t src_stride,
+                               std::size_t dst_offset,
+                               std::size_t dst_stride,
+                               cudaStream_t stream) {
+  constexpr int kBlockDim = 256;
+  const int grid_dim = (num_items + kBlockDim - 1) / kBlockDim;
+  gather_add_strided_by_i32_kernel<T><<<grid_dim, kBlockDim, 0, stream>>>(
+      src, indices, dst, num_items, index_bound, src_offset, src_stride,
+      dst_offset, dst_stride);
+}
+
+std::size_t cub_gather_add_strided_impl(void *src,
+                                        void *indices,
+                                        void *dst,
+                                        int num_items,
+                                        int index_bound,
+                                        CudaTransformValueType value_type,
+                                        std::size_t src_offset,
+                                        std::size_t src_stride,
+                                        std::size_t dst_offset,
+                                        std::size_t dst_stride,
+                                        void *stream_ptr) {
+  if (!src || !indices || !dst) {
+    throw std::runtime_error("CUDA strided gather-add received a null pointer");
+  }
+  if (num_items == 0 || index_bound == 0) {
+    return 0;
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const auto *src_in = static_cast<const uint8_t *>(src);
+  const auto *indices_in = static_cast<const int32_t *>(indices);
+  auto *dst_out = static_cast<uint8_t *>(dst);
+  switch (value_type) {
+    case CudaTransformValueType::f32:
+      gather_add_strided_launch<float>(
+          src_in, indices_in, dst_out, num_items, index_bound, src_offset,
+          src_stride, dst_offset, dst_stride, stream);
+      break;
+    case CudaTransformValueType::f64:
+      gather_add_strided_launch<double>(
+          src_in, indices_in, dst_out, num_items, index_bound, src_offset,
+          src_stride, dst_offset, dst_stride, stream);
+      break;
+    default:
+      throw std::runtime_error(
+          "CUDA strided gather-add is supported only for f32/f64 gradients");
   }
   TI_CUDA_SORT_CHECK(cudaGetLastError());
   return 0;

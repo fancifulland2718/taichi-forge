@@ -11,7 +11,7 @@ layout(set = 0, binding = 1, std430) writeonly buffer Dst {
   double data[];
 } dst_buf;
 
-layout(set = 0, binding = 2, std430) readonly buffer Params {
+layout(push_constant) uniform Params {
   double scale;
   double bias;
   uint n;

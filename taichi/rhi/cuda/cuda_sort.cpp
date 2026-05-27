@@ -33,6 +33,11 @@ std::size_t cub_inclusive_scan_impl(void *data,
                                     CubScanValueType value_type,
                                     void *stream,
                                     void *owner);
+std::size_t cub_inclusive_reverse_scan_impl(void *data,
+                                            int num_items,
+                                            CubScanValueType value_type,
+                                            void *stream,
+                                            void *owner);
 std::size_t cub_inclusive_scan_strided_impl(void *data,
                                             int num_items,
                                             CubScanValueType value_type,
@@ -40,6 +45,13 @@ std::size_t cub_inclusive_scan_strided_impl(void *data,
                                             std::size_t stride,
                                             void *stream,
                                             void *owner);
+std::size_t cub_inclusive_reverse_scan_strided_impl(void *data,
+                                                    int num_items,
+                                                    CubScanValueType value_type,
+                                                    std::size_t offset,
+                                                    std::size_t stride,
+                                                    void *stream,
+                                                    void *owner);
 void cub_inclusive_scan_clear_cache_impl(void *owner);
 std::size_t cub_inclusive_scan_cached_bytes_impl(void *owner);
 std::size_t cub_select_flagged_impl(void *values,
@@ -128,6 +140,24 @@ std::size_t cub_indexed_copy_strided_impl(void *src,
                                           std::size_t dst_stride_words,
                                           CudaIndexedCopyOp op,
                                           void *stream);
+std::size_t cub_gather_add_impl(void *src,
+                                void *indices,
+                                void *dst,
+                                int num_items,
+                                int index_bound,
+                                CudaTransformValueType value_type,
+                                void *stream);
+std::size_t cub_gather_add_strided_impl(void *src,
+                                        void *indices,
+                                        void *dst,
+                                        int num_items,
+                                        int index_bound,
+                                        CudaTransformValueType value_type,
+                                        std::size_t src_offset,
+                                        std::size_t src_stride,
+                                        std::size_t dst_offset,
+                                        std::size_t dst_stride,
+                                        void *stream);
 std::size_t cub_transform_affine_impl(void *src,
                                       void *dst,
                                       int num_items,
@@ -183,6 +213,22 @@ std::size_t cub_add_merge_strided_impl(void *src,
                                        std::size_t dst_offset,
                                        std::size_t dst_stride,
                                        void *stream);
+std::size_t cub_add_scaled_impl(void *src,
+                                void *dst,
+                                int num_items,
+                                CudaTransformValueType value_type,
+                                double scale,
+                                void *stream);
+std::size_t cub_add_scaled_strided_impl(void *src,
+                                        void *dst,
+                                        int num_items,
+                                        CudaTransformValueType value_type,
+                                        std::size_t src_offset,
+                                        std::size_t src_stride,
+                                        std::size_t dst_offset,
+                                        std::size_t dst_stride,
+                                        double scale,
+                                        void *stream);
 std::size_t cub_bucket_builder_i32_impl(void *keys,
                                         void *values,
                                         void *offsets,
@@ -967,6 +1013,48 @@ std::size_t cub_add_merge_strided(void *src,
 #endif
 }
 
+std::size_t cub_add_scaled(void *src,
+                           void *dst,
+                           int num_items,
+                           CudaTransformValueType value_type,
+                           double scale,
+                           void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA toolkit scaled-add expects non-negative num_items.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_add_scaled_impl(src, dst, num_items, value_type, scale, stream);
+#else
+  TI_ERROR(
+      "CUDA scaled-add requires building Taichi with TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t cub_add_scaled_strided(void *src,
+                                   void *dst,
+                                   int num_items,
+                                   CudaTransformValueType value_type,
+                                   std::size_t src_offset,
+                                   std::size_t src_stride,
+                                   std::size_t dst_offset,
+                                   std::size_t dst_stride,
+                                   double scale,
+                                   void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA toolkit strided scaled-add expects non-negative "
+              "num_items.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_add_scaled_strided_impl(src, dst, num_items, value_type,
+                                     src_offset, src_stride, dst_offset,
+                                     dst_stride, scale, stream);
+#else
+  TI_ERROR(
+      "CUDA strided scaled-add requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 bool driver_indexed_copy_available() {
   return CUDADriver::get_instance_without_context().detected();
 }
@@ -1120,6 +1208,56 @@ std::size_t cub_indexed_copy_strided(void *src,
 #endif
 }
 
+std::size_t cub_gather_add(void *src,
+                           void *indices,
+                           void *dst,
+                           int num_items,
+                           int index_bound,
+                           CudaTransformValueType value_type,
+                           void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA toolkit gather-add expects non-negative num_items.");
+  TI_ERROR_IF(index_bound < 0,
+              "CUDA toolkit gather-add expects non-negative index_bound.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_gather_add_impl(src, indices, dst, num_items, index_bound,
+                             value_type, stream);
+#else
+  TI_ERROR(
+      "CUDA gather-add requires building Taichi with TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t cub_gather_add_strided(void *src,
+                                   void *indices,
+                                   void *dst,
+                                   int num_items,
+                                   int index_bound,
+                                   CudaTransformValueType value_type,
+                                   std::size_t src_offset,
+                                   std::size_t src_stride,
+                                   std::size_t dst_offset,
+                                   std::size_t dst_stride,
+                                   void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA toolkit strided gather-add expects non-negative "
+              "num_items.");
+  TI_ERROR_IF(index_bound < 0,
+              "CUDA toolkit strided gather-add expects non-negative "
+              "index_bound.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_gather_add_strided_impl(src, indices, dst, num_items, index_bound,
+                                     value_type, src_offset, src_stride,
+                                     dst_offset, dst_stride, stream);
+#else
+  TI_ERROR(
+      "CUDA strided gather-add requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 bool cub_radix_sort_available() {
 #if defined(TI_WITH_CUDA_TOOLKIT)
   return ensure_cudart_for_cub_sort();
@@ -1199,6 +1337,26 @@ std::size_t cub_inclusive_scan(void *data,
 #endif
 }
 
+std::size_t cub_inclusive_reverse_scan(void *data,
+                                       int num_items,
+                                       CubScanValueType value_type,
+                                       void *stream,
+                                       void *owner) {
+  TI_ERROR_IF(num_items < 0, "CUB reverse scan expects non-negative num_items");
+  if (num_items <= 1) {
+    return 0;
+  }
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_inclusive_reverse_scan_impl(data, num_items, value_type, stream,
+                                         owner);
+#else
+  TI_ERROR(
+      "CUDA CUB reverse scan requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 std::size_t cub_inclusive_scan_strided(void *data,
                                        int num_items,
                                        CubScanValueType value_type,
@@ -1217,6 +1375,29 @@ std::size_t cub_inclusive_scan_strided(void *data,
 #else
   TI_ERROR(
       "CUDA CUB strided scan requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t cub_inclusive_reverse_scan_strided(void *data,
+                                               int num_items,
+                                               CubScanValueType value_type,
+                                               std::size_t offset,
+                                               std::size_t stride,
+                                               void *stream,
+                                               void *owner) {
+  TI_ERROR_IF(num_items < 0,
+              "CUB reverse strided scan expects non-negative num_items");
+  if (num_items <= 1) {
+    return 0;
+  }
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_inclusive_reverse_scan_strided_impl(
+      data, num_items, value_type, offset, stride, stream, owner);
+#else
+  TI_ERROR(
+      "CUDA CUB reverse strided scan requires building Taichi with "
       "TI_WITH_CUDA_TOOLKIT=ON.");
 #endif
 }

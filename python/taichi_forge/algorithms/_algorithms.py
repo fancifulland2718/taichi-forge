@@ -4,6 +4,11 @@ from collections import OrderedDict
 import numpy as np
 
 from taichi_forge._lib import core as _ti_core
+from taichi_forge.algorithms._autodiff import (
+    is_tape_active,
+    native_autodiff_method,
+    native_primitive_ad,
+)
 from taichi_forge._kernels import (
     blit_from_field_to_field,
     bucket_copy_offsets_to_cursor_field,
@@ -71,7 +76,12 @@ from taichi_forge._kernels import (
     uniform_add_ndarray,
     warp_shfl_up_i32,
 )
-from taichi_forge.lang.impl import current_cfg, field, ndarray as ti_ndarray
+from taichi_forge.lang.impl import (
+    current_cfg,
+    field,
+    get_runtime,
+    ndarray as ti_ndarray,
+)
 from taichi_forge.lang._ndarray import (
     Ndarray,
     StructNdarray,
@@ -201,6 +211,111 @@ _primitive_diagnostics_enabled = bool(
     int(os.environ.get("TAICHI_FORGE_PRIMITIVE_DIAGNOSTICS", "0"))
 )
 _primitive_diagnostic_counts = {}
+_NATIVE_PRIMITIVE_PROG_METHOD_PREFIXES = (
+    "cpu_",
+    "cuda_",
+    "cuda_cub_",
+    "cuda_device_",
+    "vulkan_",
+)
+_NATIVE_PRIMITIVE_PROG_METHOD_TOKENS = (
+    "add_merge",
+    "bucket",
+    "compact",
+    "copy",
+    "fill",
+    "gather",
+    "grouped_reduce",
+    "histogram",
+    "indexed_copy",
+    "radix_sort",
+    "reduce",
+    "scan",
+    "scatter",
+    "sort",
+    "transform",
+    "workspace",
+    "zero_dense",
+)
+_NATIVE_PRIMITIVE_AVAILABLE_BY_ARCH = {
+    cuda: (
+        "cuda_cub_histogram_available",
+        "cuda_cub_radix_sort_available",
+        "cuda_cub_reduce_available",
+        "cuda_cub_scan_available",
+        "cuda_cub_select_available",
+        "cuda_device_add_merge_available",
+        "cuda_device_bucket_builder_available",
+        "cuda_device_grouped_reduce_available",
+        "cuda_device_indexed_copy_available",
+        "cuda_device_scatter_add_available",
+        "cuda_device_transform_available",
+        "cuda_toolkit_transform_available",
+    ),
+    vulkan: (
+        "vulkan_add_merge_available",
+        "vulkan_bucket_builder_available",
+        "vulkan_compact_available",
+        "vulkan_grouped_reduce_available",
+        "vulkan_histogram_available",
+        "vulkan_indexed_copy_available",
+        "vulkan_radix_sort_available",
+        "vulkan_reduce_available",
+        "vulkan_scan_available",
+        "vulkan_scatter_add_available",
+        "vulkan_transform_available",
+    ),
+    x64: (
+        "cpu_add_merge_available",
+        "cpu_bucket_builder_available",
+        "cpu_compact_available",
+        "cpu_grouped_reduce_available",
+        "cpu_histogram_available",
+        "cpu_indexed_copy_available",
+        "cpu_reduce_available",
+        "cpu_scan_available",
+        "cpu_scatter_add_available",
+        "cpu_stable_sort_available",
+        "cpu_transform_available",
+    ),
+    arm64: (
+        "cpu_add_merge_available",
+        "cpu_bucket_builder_available",
+        "cpu_compact_available",
+        "cpu_grouped_reduce_available",
+        "cpu_histogram_available",
+        "cpu_indexed_copy_available",
+        "cpu_reduce_available",
+        "cpu_scan_available",
+        "cpu_scatter_add_available",
+        "cpu_stable_sort_available",
+        "cpu_transform_available",
+    ),
+}
+_NATIVE_PRIMITIVE_VALUE_AVAILABLE_BY_ARCH = {
+    cuda: (
+        ("cuda_device_indexed_copy_payload_available", (4,)),
+        ("cuda_device_indexed_copy_payload_available", (8,)),
+    ),
+    vulkan: tuple(
+        (name, args)
+        for name in (
+            "vulkan_add_merge_value_type_available",
+            "vulkan_bucket_builder_value_type_available",
+            "vulkan_grouped_reduce_atomic_value_type_available",
+            "vulkan_grouped_reduce_value_type_available",
+            "vulkan_reduce_value_type_available",
+            "vulkan_scan_value_type_available",
+            "vulkan_scatter_add_value_type_available",
+            "vulkan_transform_value_type_available",
+        )
+        for args in ((0,), (1,), (2,), (3,), (4,), (5,))
+    )
+    + tuple(
+        ("vulkan_histogram_value_type_available", args)
+        for args in ((0, 0), (2, 0), (0, 4), (2, 4))
+    ),
+}
 
 
 def _aggregation_backend_for_method(
@@ -354,6 +469,12 @@ def _is_matrix_field(arr):
 _PROG_METHOD_MISSING = object()
 
 
+def _is_native_primitive_prog_method_name(name):
+    return name.startswith(_NATIVE_PRIMITIVE_PROG_METHOD_PREFIXES) and any(
+        token in name for token in _NATIVE_PRIMITIVE_PROG_METHOD_TOKENS
+    )
+
+
 class _ProgramCapabilityCache:
     """Python-side pybind capability cache for one live Program.
 
@@ -362,13 +483,34 @@ class _ProgramCapabilityCache:
     resources, or keep a strong reference to the Program object.
     """
 
-    __slots__ = ("_has", "_method_descriptor", "_available", "_value_available")
+    __slots__ = (
+        "_has",
+        "_method_descriptor",
+        "_available",
+        "_value_available",
+        "_descriptors_preloaded",
+    )
 
     def __init__(self):
         self._has = {}
         self._method_descriptor = {}
         self._available = {}
         self._value_available = {}
+        self._descriptors_preloaded = False
+
+    def preload_method_descriptors(self, prog):
+        if self._descriptors_preloaded:
+            return
+        prog_type = type(prog)
+        for name in dir(prog_type):
+            if not _is_native_primitive_prog_method_name(name):
+                continue
+            descriptor = getattr(prog_type, name, None)
+            if descriptor is None:
+                continue
+            self._has[name] = True
+            self._method_descriptor[name] = descriptor
+        self._descriptors_preloaded = True
 
     def has(self, prog, name):
         if _primitive_diagnostics_enabled:
@@ -446,21 +588,38 @@ class _ProgramCapabilityCache:
 
 
 _program_capability_caches = {}
+_active_program_capability_key = None
+_active_program_capability_cache = None
+
+
+def _current_program():
+    return get_runtime().prog
+
+
+def _clear_program_capability_caches():
+    global _active_program_capability_key, _active_program_capability_cache
+    _program_capability_caches.clear()
+    _active_program_capability_key = None
+    _active_program_capability_cache = None
 
 
 def _program_capabilities(prog=None):
-    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+    global _active_program_capability_key, _active_program_capability_cache
 
-    runtime = impl.get_runtime()
+    runtime = get_runtime()
     if prog is None:
         prog = runtime.prog
     key = (id(runtime), id(prog), current_cfg().arch)
+    if key == _active_program_capability_key:
+        return _active_program_capability_cache
     cache = _program_capability_caches.get(key)
     if cache is None:
         if len(_program_capability_caches) > 16:
-            _program_capability_caches.clear()
+            _clear_program_capability_caches()
         cache = _ProgramCapabilityCache()
         _program_capability_caches[key] = cache
+    _active_program_capability_key = key
+    _active_program_capability_cache = cache
     return cache
 
 
@@ -499,6 +658,28 @@ def _call_optional_prog_method(prog, name, *args):
     if result is _PROG_METHOD_MISSING:
         return None
     return result
+
+
+def initialize_native_primitive_dispatch(prog=None):
+    """Pre-resolve native primitive pybind capabilities for the active Program.
+
+    This is called from ``ti.init()`` when the algorithms module is loaded. It
+    moves pybind descriptor lookup and side-effect-free availability probes to
+    program initialization, so hot public primitive calls mostly reuse cached
+    dispatch metadata instead of repeatedly probing the Program object.
+    """
+
+    if prog is None:
+        prog = _current_program()
+    if prog is None:
+        return
+    cache = _program_capabilities(prog)
+    cache.preload_method_descriptors(prog)
+    arch = current_cfg().arch
+    for name in _NATIVE_PRIMITIVE_AVAILABLE_BY_ARCH.get(arch, ()):
+        cache.available(prog, name)
+    for name, args in _NATIVE_PRIMITIVE_VALUE_AVAILABLE_BY_ARCH.get(arch, ()):
+        cache.value_available(prog, name, *args, default_if_missing=False)
 
 
 class _PrimitiveView:
@@ -1005,12 +1186,11 @@ def clear_default_workspaces():
             _clear_workspace_safely(workspace)
         cache.clear()
     _default_workspace_caches.clear()
+    _clear_program_capability_caches()
 
 
 def _default_workspace_context_key():
-    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-    runtime = impl.get_runtime()
+    runtime = get_runtime()
     return (id(runtime), current_cfg().arch)
 
 
@@ -1134,9 +1314,7 @@ def _try_hot_native_plan(plan, backend, objects, on_success, semantic_key=None):
         return False
     if not plan.matches_hot_request(backend, objects):
         return False
-    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-    prog = impl.get_runtime().prog
+    prog = _current_program()
     if not plan.matches_program(prog):
         return False
     temp_bytes = plan.invoke(prog)
@@ -1153,9 +1331,7 @@ def _try_hot_native_plan_group(group, backend, objects, on_success, semantic_key
         return False
     if not group.matches_hot_request(backend, objects):
         return False
-    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-    prog = impl.get_runtime().prog
+    prog = _current_program()
     if not group.matches_program(prog):
         return False
     temp_bytes = group.invoke(prog)
@@ -1240,9 +1416,7 @@ def _try_native_plan_from_cache(
         if _primitive_diagnostics_enabled:
             _record_primitive_diagnostic("native_plan.lookup.miss")
         return False
-    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-    prog = impl.get_runtime().prog
+    prog = _current_program()
     if not plan.matches_program(prog):
         if _primitive_diagnostics_enabled:
             _record_primitive_diagnostic("native_plan.lookup.miss.program")
@@ -1301,9 +1475,7 @@ def _record_native_plan_group(
     if backend is None or not plans:
         return None
     if prog is None:
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        prog = impl.get_runtime().prog
+        prog = _current_program()
     group = _NativePrimitivePlanGroup(backend, objects, semantic_key, plans, prog)
     if plan_groups is not None:
         plan_groups[group.cache_key()] = group
@@ -1373,9 +1545,7 @@ def _try_native_plan_group_from_cache(
         if _primitive_diagnostics_enabled:
             _record_primitive_diagnostic("native_plan_group.lookup.miss")
         return False
-    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-    prog = impl.get_runtime().prog
+    prog = _current_program()
     if not group.matches_program(prog):
         if _primitive_diagnostics_enabled:
             _record_primitive_diagnostic("native_plan_group.lookup.miss.program")
@@ -1701,17 +1871,14 @@ class PrimitiveSequence:
         for _ in range(repeat):
             for call in self._calls:
                 call.invoke_public()
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
-
-        self._capture_fused_plan(impl.get_runtime().prog, invoke=True)
+        self._capture_fused_plan(_current_program(), invoke=True)
         return self
 
     def run(self, repeat=1):
         repeat = max(1, int(repeat))
-        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         for _ in range(repeat):
-            prog = impl.get_runtime().prog
+            prog = _current_program()
             if self._invoke_fused_plan(prog):
                 continue
             for call in self._calls:
@@ -1981,6 +2148,858 @@ def _native_copy_method_for_current_arch(method):
         "StructNdarray tensor member staging requires a CPU, CUDA, or Vulkan "
         "native ndarray backend."
     )
+
+
+def _native_add_merge_method_for_current_arch():
+    arch = current_cfg().arch
+    if arch == cuda:
+        return "cuda_two_level"
+    if arch == vulkan:
+        return "vulkan_two_level"
+    if arch in (x64, arm64):
+        return "cpu_two_level"
+    return "two_level"
+
+
+def _native_ad_backend_label():
+    arch = current_cfg().arch
+    if arch == cuda:
+        return "cuda_device"
+    if arch == vulkan:
+        return "vulkan_native"
+    if arch in (x64, arm64):
+        return "cpu_native"
+    return "native"
+
+
+def _ad_grad(arr):
+    return getattr(arr, "grad", None)
+
+
+def _ad_real_dtype(arr):
+    return getattr(arr, "dtype", None) in (f32, f64)
+
+
+def _ad_plain_ndarray(arr):
+    view = _primitive_view(arr)
+    return view is not None and view.is_plain_ndarray
+
+
+def _ad_vulkan_ndarray_grad_unsupported(*grads):
+    return current_cfg().arch == vulkan and any(isinstance(grad, Ndarray) for grad in grads)
+
+
+def _ad_native_add_merge_supported(src, dst):
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    if src_view is None or dst_view is None or src_view.dtype != dst_view.dtype:
+        return False
+    if not src_view.is_plain_ndarray:
+        return False
+    return (
+        dst_view.is_plain_ndarray
+        or dst_view.is_dense_field
+        or dst_view.is_struct_scalar_member
+    )
+
+
+def _ad_native_scalar_to_dense_supported(src, dst, n):
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    if src_view is None or dst_view is None or src_view.dtype != dst_view.dtype:
+        return False
+    if not (src_view.is_scalar_field and dst_view.is_dense_field):
+        return False
+    return (
+        _shape_tuple(src) == ()
+        and _is_1d(dst)
+        and int(_shape_numel(dst)) == int(n)
+    )
+
+
+def _ad_native_identity_scatter_supported(src, dst):
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    if src_view is None or dst_view is None or src_view.dtype != dst_view.dtype:
+        return False
+    if not (src_view.is_dense_field and dst_view.is_dense_field):
+        return False
+    return _shape_tuple(src) == _shape_tuple(dst) and _is_1d(src) and _is_1d(dst)
+
+
+def _ad_native_accum_supported(src, dst, n):
+    if not (_is_1d(src) and _is_1d(dst)):
+        return False
+    if _shape_tuple(src) != _shape_tuple(dst):
+        return False
+    if int(_shape_numel(src)) != int(n):
+        return False
+    return _ad_native_add_merge_supported(src, dst) or _ad_native_identity_scatter_supported(
+        src, dst
+    )
+
+
+def _ad_temp_like(arr, n):
+    view = _primitive_view(arr)
+    if view is not None and view.is_dense_field:
+        return field(view.dtype, shape=n)
+    return ti_ndarray(arr.dtype, shape=n)
+
+
+def _ad_native_accum(src, dst, n):
+    value_type = _scatter_add_value_type(dst.dtype)
+    workspace = ScatterAddWorkspace(max_items=n, max_groups=n)
+    method = _native_add_merge_method_for_current_arch()
+    if _try_native_add_merge(src, dst, method, workspace, value_type, n):
+        return
+    if not _ad_native_identity_scatter_supported(src, dst):
+        raise RuntimeError(
+            "native autodiff accumulation requires a supported native "
+            "add-merge path or matching dense field gradients."
+        )
+    identity = ti_ndarray(i32, shape=n)
+    fill_i32_arange_ndarray(identity, n)
+    experimental_scatter_add(src, identity, dst, method="auto", workspace=workspace)
+
+
+def _ad_native_scalar_to_dense_accum(src, dst, n):
+    launcher = _ad_native_scalar_to_dense_accum_launcher(src, dst, n)
+    if launcher is None:
+        return False
+    method, call_args = launcher
+    method(*call_args)
+    return True
+
+
+def _ad_native_scalar_to_dense_accum_launcher(src, dst, n):
+    if not _ad_native_scalar_to_dense_supported(src, dst, n):
+        return None
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    value_type = _scatter_add_value_type(dst_view.dtype)
+
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    arch = current_cfg().arch
+    if arch == cuda:
+        if not _prog_available(prog, "cuda_device_add_merge_available"):
+            return None
+        method_name = "cuda_device_add_scalar_field_to_dense_field"
+    elif arch == vulkan:
+        if not _prog_available(prog, "vulkan_add_merge_available"):
+            return None
+        if not _prog_value_available(
+            prog, "vulkan_add_merge_value_type_available", value_type
+        ):
+            return None
+        method_name = "vulkan_add_scalar_field_to_dense_field"
+    elif arch in (x64, arm64):
+        if not _prog_available(prog, "cpu_add_merge_available"):
+            return None
+        method_name = "cpu_add_scalar_field_to_dense_field"
+    else:
+        return None
+    method = _prog_method(prog, method_name)
+    if method is None:
+        return None
+    return method, (src_view.snode, dst_view.snode, value_type, n)
+
+
+def _ad_native_add_scaled_supported(src, dst, n):
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    if src_view is None or dst_view is None or src_view.dtype != dst_view.dtype:
+        return False
+    if not (_is_1d(src) and _is_1d(dst)):
+        return False
+    if _shape_tuple(src) != _shape_tuple(dst):
+        return False
+    if int(_shape_numel(src)) != int(n):
+        return False
+    if not _ad_real_dtype(src):
+        return False
+    return (
+        src_view.is_plain_ndarray
+        and dst_view.is_plain_ndarray
+        or src_view.is_dense_field
+        and dst_view.is_dense_field
+    )
+
+
+def _ad_native_add_scaled(src, dst, scale, n):
+    launcher = _ad_native_add_scaled_launcher(src, dst, scale, n)
+    if launcher is None:
+        return False
+    method, call_args = launcher
+    method(*call_args)
+    return True
+
+
+def _ad_native_add_scaled_launcher(src, dst, scale, n):
+    if not _ad_native_add_scaled_supported(src, dst, n):
+        return None
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    value_type = _scatter_add_value_type(dst_view.dtype)
+
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    arch = current_cfg().arch
+    if arch == cuda:
+        if not _prog_available(prog, "cuda_device_add_merge_available"):
+            return None
+        if src_view.is_plain_ndarray:
+            method_name = "cuda_device_add_scaled_ndarray"
+            call_args = (
+                src_view.payload_arr,
+                dst_view.payload_arr,
+                value_type,
+                scale,
+            )
+        else:
+            impl.get_runtime().materialize()
+            method_name = "cuda_device_add_scaled_dense_field"
+            call_args = (src_view.snode, dst_view.snode, value_type, n, scale)
+    elif arch in (x64, arm64):
+        if not _prog_available(prog, "cpu_add_merge_available"):
+            return None
+        if src_view.is_plain_ndarray:
+            method_name = "cpu_add_scaled_ndarray"
+            call_args = (
+                src_view.payload_arr,
+                dst_view.payload_arr,
+                value_type,
+                scale,
+            )
+        else:
+            impl.get_runtime().materialize()
+            method_name = "cpu_add_scaled_dense_field"
+            call_args = (src_view.snode, dst_view.snode, value_type, n, scale)
+    else:
+        return None
+    method = _prog_method(prog, method_name)
+    if method is None:
+        return None
+    return method, call_args
+
+
+def _ad_native_scalar_to_ndarray_accum(src, dst, n):
+    launcher = _ad_native_scalar_to_ndarray_accum_launcher(src, dst, n)
+    if launcher is None:
+        return False
+    method, call_args = launcher
+    method(*call_args)
+    return True
+
+
+def _ad_native_scalar_to_ndarray_accum_launcher(src, dst, n):
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    if src_view is None or dst_view is None or src_view.dtype != dst_view.dtype:
+        return None
+    if not (src_view.is_plain_ndarray and dst_view.is_plain_ndarray):
+        return None
+    if not (_is_1d(src) and _is_1d(dst)):
+        return None
+    if int(_shape_numel(src)) < 1 or int(_shape_numel(dst)) != int(n):
+        return None
+    if not _ad_real_dtype(dst):
+        return None
+    value_type = _scatter_add_value_type(dst_view.dtype)
+
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    arch = current_cfg().arch
+    if arch == cuda:
+        if not _prog_available(prog, "cuda_device_add_merge_available"):
+            return None
+        method_name = "cuda_device_add_scalar_ndarray_to_ndarray"
+    elif arch in (x64, arm64):
+        if not _prog_available(prog, "cpu_add_merge_available"):
+            return None
+        method_name = "cpu_add_scalar_ndarray_to_ndarray"
+    else:
+        return None
+    method = _prog_method(prog, method_name)
+    if method is None:
+        return None
+    return method, (src_view.payload_arr, dst_view.payload_arr, value_type, 1.0)
+
+
+def _ad_native_gather_add(src, indices, dst, n):
+    launcher = _ad_native_gather_add_launcher(src, indices, dst, n)
+    if launcher is None:
+        return False
+    method, call_args = launcher
+    method(*call_args)
+    return True
+
+
+def _ad_native_gather_add_launcher(src, indices, dst, n):
+    src_view = _primitive_view(src)
+    indices_view = _primitive_view(indices)
+    dst_view = _primitive_view(dst)
+    if src_view is None or indices_view is None or dst_view is None:
+        return None
+    if src_view.dtype != dst_view.dtype or indices_view.dtype != i32:
+        return None
+    if not (_is_1d(src) and _is_1d(indices) and _is_1d(dst)):
+        return None
+    if int(_shape_numel(indices)) != int(n) or int(_shape_numel(dst)) != int(n):
+        return None
+    if not _ad_real_dtype(dst):
+        return None
+    value_type = _scatter_add_value_type(dst_view.dtype)
+
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    arch = current_cfg().arch
+    if arch == cuda:
+        if not _prog_available(prog, "cuda_device_add_merge_available"):
+            return None
+        if src_view.is_plain_ndarray and dst_view.is_plain_ndarray:
+            if not isinstance(indices, Ndarray):
+                return None
+            method_name = "cuda_device_gather_add_ndarray"
+            call_args = (
+                src_view.payload_arr,
+                indices_view.payload_arr,
+                dst_view.payload_arr,
+                value_type,
+            )
+        elif src_view.is_dense_field and dst_view.is_dense_field:
+            impl.get_runtime().materialize()
+            if isinstance(indices, Ndarray):
+                method_name = "cuda_device_gather_add_dense_field"
+                call_args = (
+                    src_view.snode,
+                    indices.arr,
+                    dst_view.snode,
+                    value_type,
+                    src_view.num_elements,
+                    dst_view.num_elements,
+                )
+            elif indices_view.is_dense_field:
+                method_name = "cuda_device_gather_add_dense_field_indices_field"
+                call_args = (
+                    src_view.snode,
+                    indices_view.snode,
+                    dst_view.snode,
+                    value_type,
+                    src_view.num_elements,
+                    indices_view.num_elements,
+                    dst_view.num_elements,
+                )
+            else:
+                return None
+        else:
+            return None
+    elif arch in (x64, arm64):
+        if not _prog_available(prog, "cpu_indexed_copy_available"):
+            return None
+        if src_view.is_plain_ndarray and dst_view.is_plain_ndarray:
+            if not isinstance(indices, Ndarray):
+                return None
+            method_name = "cpu_gather_add_ndarray"
+            call_args = (
+                src_view.payload_arr,
+                indices_view.payload_arr,
+                dst_view.payload_arr,
+                value_type,
+            )
+        elif src_view.is_dense_field and dst_view.is_dense_field:
+            impl.get_runtime().materialize()
+            if isinstance(indices, Ndarray):
+                method_name = "cpu_gather_add_dense_field"
+                call_args = (
+                    src_view.snode,
+                    indices.arr,
+                    dst_view.snode,
+                    value_type,
+                    src_view.num_elements,
+                    dst_view.num_elements,
+                )
+            elif indices_view.is_dense_field:
+                method_name = "cpu_gather_add_dense_field_indices_field"
+                call_args = (
+                    src_view.snode,
+                    indices_view.snode,
+                    dst_view.snode,
+                    value_type,
+                    src_view.num_elements,
+                    indices_view.num_elements,
+                    dst_view.num_elements,
+                )
+            else:
+                return None
+        else:
+            return None
+    else:
+        return None
+    method = _prog_method(prog, method_name)
+    if method is None:
+        return None
+    return method, call_args
+
+
+def _ad_sync_before_native_grad_read():
+    if current_cfg().arch == vulkan:
+        sync()
+
+
+def _ad_scaled_accum(src, dst, scale, n):
+    if scale == 0:
+        return
+    if _ad_native_add_scaled(src, dst, scale, n):
+        return
+    if scale == 1:
+        _ad_native_accum(src, dst, n)
+        return
+    temp = _ad_temp_like(src, n)
+    experimental_transform(
+        src,
+        temp,
+        scale=scale,
+        bias=0,
+        method=_native_copy_method_for_current_arch("auto"),
+        workspace=TransformWorkspace(max_items=n),
+    )
+    _ad_native_accum(temp, dst, n)
+
+
+def _can_native_ad_transform(src, dst):
+    src_grad = _ad_grad(src)
+    dst_grad = _ad_grad(dst)
+    if src_grad is None or dst_grad is None:
+        return False
+    if _ad_vulkan_ndarray_grad_unsupported(src_grad, dst_grad):
+        return False
+    if not (_is_1d(src_grad) and _is_1d(dst_grad)):
+        return False
+    if _shape_tuple(src_grad) != _shape_tuple(dst_grad):
+        return False
+    return _ad_real_dtype(src_grad) and _ad_native_accum_supported(
+        dst_grad, src_grad, _shape_numel(src_grad)
+    )
+
+
+def _record_native_transform_ad(src, dst, scale):
+    if not is_tape_active():
+        return
+    if not _can_native_ad_transform(src, dst):
+        return
+    native_primitive_ad.record_callable(
+        "transform",
+        _native_ad_backend_label(),
+        _native_ad_transform_backward,
+        src,
+        dst,
+        scale,
+    )
+
+
+def _native_ad_transform_backward(src, dst, scale):
+    _ad_sync_before_native_grad_read()
+    src_grad = _ad_grad(src)
+    dst_grad = _ad_grad(dst)
+    if src_grad is None or dst_grad is None:
+        return
+    _ad_scaled_accum(dst_grad, src_grad, scale, _shape_numel(src_grad))
+
+
+def _can_native_ad_gather(src, indices, dst):
+    src_grad = _ad_grad(src)
+    dst_grad = _ad_grad(dst)
+    if src_grad is None or dst_grad is None:
+        return False
+    if _ad_vulkan_ndarray_grad_unsupported(src_grad, dst_grad):
+        return False
+    if not (_is_1d(src_grad) and _is_1d(indices) and _is_1d(dst_grad)):
+        return False
+    if indices.dtype != i32 or indices.shape[0] != dst_grad.shape[0]:
+        return False
+    return _ad_real_dtype(src_grad)
+
+
+def _record_native_gather_ad(src, indices, dst):
+    if not is_tape_active():
+        return
+    if not _can_native_ad_gather(src, indices, dst):
+        return
+    native_primitive_ad.record_callable(
+        "gather",
+        _native_ad_backend_label(),
+        _native_ad_gather_backward,
+        src,
+        indices,
+        dst,
+    )
+
+
+def _native_ad_gather_backward(src, indices, dst):
+    _ad_sync_before_native_grad_read()
+    src_grad = _ad_grad(src)
+    dst_grad = _ad_grad(dst)
+    if src_grad is None or dst_grad is None:
+        return
+    experimental_scatter_add(
+        dst_grad,
+        indices,
+        src_grad,
+        method=_native_copy_method_for_current_arch("auto"),
+        workspace=ScatterAddWorkspace(
+            max_items=indices.shape[0], max_groups=src_grad.shape[0]
+        ),
+    )
+
+
+def _can_native_ad_scatter_add(src, indices, dst):
+    src_grad = _ad_grad(src)
+    dst_grad = _ad_grad(dst)
+    if src_grad is None or dst_grad is None:
+        return False
+    if _ad_vulkan_ndarray_grad_unsupported(src_grad, dst_grad):
+        return False
+    if not (_is_1d(src_grad) and _is_1d(indices) and _is_1d(dst_grad)):
+        return False
+    if indices.dtype != i32 or indices.shape[0] != src_grad.shape[0]:
+        return False
+    if not _ad_real_dtype(src_grad):
+        return False
+    if isinstance(indices, Ndarray):
+        pass
+    else:
+        indices_view = _primitive_view(indices)
+        if not (indices_view is not None and indices_view.is_dense_field):
+            return False
+    src_view = _primitive_view(src_grad)
+    dst_view = _primitive_view(dst_grad)
+    if src_view is None or dst_view is None:
+        return False
+    if src_view.is_plain_ndarray and dst_view.is_plain_ndarray:
+        return isinstance(indices, Ndarray)
+    return src_view.is_dense_field and dst_view.is_dense_field
+
+
+def _record_native_scatter_add_ad(src, indices, dst):
+    if not is_tape_active():
+        return
+    if not _can_native_ad_scatter_add(src, indices, dst):
+        return
+    native_primitive_ad.record_callable(
+        "scatter_add",
+        _native_ad_backend_label(),
+        _native_ad_scatter_add_backward,
+        src,
+        indices,
+        dst,
+    )
+
+
+def _native_ad_scatter_add_backward(src, indices, dst):
+    _ad_sync_before_native_grad_read()
+    src_grad = _ad_grad(src)
+    dst_grad = _ad_grad(dst)
+    if src_grad is None or dst_grad is None:
+        return
+    n = indices.shape[0]
+    if _ad_native_gather_add(dst_grad, indices, src_grad, n):
+        return
+    temp = _ad_temp_like(src_grad, n)
+    experimental_gather(
+        dst_grad,
+        indices,
+        temp,
+        method=_native_copy_method_for_current_arch("auto"),
+        workspace=IndexedCopyWorkspace(max_items=n),
+    )
+    _ad_native_accum(temp, src_grad, n)
+
+
+def _can_native_ad_scatter(src, indices, dst):
+    src_grad = _ad_grad(src)
+    dst_grad = _ad_grad(dst)
+    if src_grad is None or dst_grad is None:
+        return False
+    if _ad_vulkan_ndarray_grad_unsupported(src_grad, dst_grad):
+        return False
+    if not (_is_1d(src_grad) and _is_1d(indices) and _is_1d(dst_grad)):
+        return False
+    if indices.dtype != i32 or indices.shape[0] != src_grad.shape[0]:
+        return False
+    if not _ad_real_dtype(src_grad):
+        return False
+    if isinstance(indices, Ndarray):
+        pass
+    else:
+        indices_view = _primitive_view(indices)
+        if not (indices_view is not None and indices_view.is_dense_field):
+            return False
+    src_view = _primitive_view(src_grad)
+    dst_view = _primitive_view(dst_grad)
+    if src_view is None or dst_view is None:
+        return False
+    if src_view.is_plain_ndarray and dst_view.is_plain_ndarray:
+        return isinstance(indices, Ndarray)
+    return src_view.is_dense_field and dst_view.is_dense_field
+
+
+def _record_native_scatter_ad(src, indices, dst):
+    if not is_tape_active():
+        return
+    if not _can_native_ad_scatter(src, indices, dst):
+        return
+    native_primitive_ad.record_callable(
+        "scatter",
+        _native_ad_backend_label(),
+        _native_ad_scatter_backward,
+        src,
+        indices,
+        dst,
+    )
+
+
+def _native_ad_scatter_backward(src, indices, dst):
+    _ad_sync_before_native_grad_read()
+    src_grad = _ad_grad(src)
+    dst_grad = _ad_grad(dst)
+    if src_grad is None or dst_grad is None:
+        return
+    n = indices.shape[0]
+    if _ad_native_gather_add(dst_grad, indices, src_grad, n):
+        return
+    temp = _ad_temp_like(src_grad, n)
+    experimental_gather(
+        dst_grad,
+        indices,
+        temp,
+        method=_native_copy_method_for_current_arch("auto"),
+        workspace=IndexedCopyWorkspace(max_items=n),
+    )
+    _ad_native_accum(temp, src_grad, n)
+
+
+def _native_scan_ad_backend_label():
+    arch = current_cfg().arch
+    if arch == cuda:
+        return "cuda_cub"
+    if arch in (x64, arm64):
+        return "cpu_native"
+    return "native"
+
+
+def _can_native_ad_scan(input_arr):
+    grad = _ad_grad(input_arr)
+    if grad is None:
+        return False
+    if current_cfg().arch not in (cuda, x64, arm64):
+        return False
+    if not _is_1d(grad) or not _ad_real_dtype(grad):
+        return False
+    view = _primitive_view(grad)
+    if view is None:
+        return False
+    return view.is_plain_ndarray or view.is_dense_field
+
+
+def _native_scan_ad_required(input_arr):
+    return is_tape_active() and _ad_grad(input_arr) is not None
+
+
+def _ensure_native_scan_ad_supported(input_arr):
+    if not _native_scan_ad_required(input_arr):
+        return False
+    if _can_native_ad_scan(input_arr):
+        return True
+    raise RuntimeError(
+        "PrefixSumExecutor.run() under ti.ad.Tape currently supports native "
+        "autodiff only for 1D real ndarray/dense field values on CPU/CUDA. "
+        "Vulkan scan needs a reverse native scan shader before it can safely "
+        "participate in Tape."
+    )
+
+
+def _record_native_scan_ad(input_arr):
+    if not _native_scan_ad_required(input_arr):
+        return
+    if not _can_native_ad_scan(input_arr):
+        return
+    native_primitive_ad.record_callable(
+        "scan",
+        _native_scan_ad_backend_label(),
+        _native_ad_scan_backward,
+        input_arr,
+    )
+
+
+def _native_ad_scan_backward(input_arr):
+    grad = _ad_grad(input_arr)
+    if grad is None:
+        return
+    view = _primitive_view(grad)
+    if view is None:
+        return
+    value_type = _SCAN_VALUE_TYPE.get(view.dtype)
+    if value_type is None:
+        return
+
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    if view.is_dense_field:
+        impl.get_runtime().materialize()
+    prog = impl.get_runtime().prog
+    arch = current_cfg().arch
+    if arch == cuda:
+        if not _prog_available(prog, "cuda_cub_scan_available"):
+            return
+        if view.is_dense_field:
+            method_name = "cuda_cub_inclusive_reverse_scan_dense_field"
+            call_args = (view.snode, value_type, view.num_elements)
+        else:
+            method_name = "cuda_cub_inclusive_reverse_scan_ndarray"
+            call_args = (view.payload_arr, value_type)
+    elif arch in (x64, arm64):
+        if not _prog_available(prog, "cpu_scan_available"):
+            return
+        if view.is_dense_field:
+            method_name = "cpu_inclusive_reverse_scan_dense_field"
+            call_args = (view.snode, value_type, view.num_elements)
+        else:
+            method_name = "cpu_inclusive_reverse_scan_ndarray"
+            call_args = (view.payload_arr, value_type)
+    else:
+        return
+    method = _prog_method(prog, method_name)
+    if method is None:
+        return
+    method(*call_args)
+
+
+def _can_native_ad_reduce(values, output, op):
+    if op != "sum":
+        return False
+    values_grad = _ad_grad(values)
+    output_grad = _ad_grad(output)
+    if values_grad is None or output_grad is None:
+        return False
+    if _ad_vulkan_ndarray_grad_unsupported(values_grad, output_grad):
+        return False
+    if not _is_1d(values_grad):
+        return False
+    if not _ad_real_dtype(values_grad):
+        return False
+    if _ad_plain_ndarray(values_grad) and _ad_plain_ndarray(output_grad):
+        return _is_1d(output_grad) and output_grad.shape[0] >= 1
+    return _ad_native_scalar_to_dense_supported(
+        output_grad, values_grad, _shape_numel(values_grad)
+    )
+
+
+def _record_native_reduce_ad(values, output, op):
+    if not is_tape_active():
+        return
+    if not _can_native_ad_reduce(values, output, op):
+        return
+    native_primitive_ad.record_callable(
+        "reduce",
+        _native_ad_backend_label(),
+        _native_ad_reduce_backward,
+        values,
+        output,
+    )
+
+
+def _native_ad_reduce_backward(values, output):
+    _ad_sync_before_native_grad_read()
+    values_grad = _ad_grad(values)
+    output_grad = _ad_grad(output)
+    if values_grad is None or output_grad is None:
+        return
+    n = values_grad.shape[0]
+    if _ad_native_scalar_to_dense_accum(output_grad, values_grad, n):
+        return
+    if _ad_native_scalar_to_ndarray_accum(output_grad, values_grad, n):
+        return
+    zeros = ti_ndarray(i32, shape=n)
+    zeros.fill(0)
+    temp = ti_ndarray(values_grad.dtype, shape=n)
+    experimental_gather(
+        output_grad,
+        zeros,
+        temp,
+        method=_native_copy_method_for_current_arch("auto"),
+        workspace=IndexedCopyWorkspace(max_items=n),
+    )
+    _ad_native_accum(temp, values_grad, n)
+
+
+def _can_native_ad_grouped_reduce(keys, values, output, op):
+    if op != "sum":
+        return False
+    values_grad = _ad_grad(values)
+    output_grad = _ad_grad(output)
+    if values_grad is None or output_grad is None:
+        return False
+    if _ad_vulkan_ndarray_grad_unsupported(values_grad, output_grad):
+        return False
+    if not (_is_1d(keys) and _is_1d(values_grad) and _is_1d(output_grad)):
+        return False
+    if keys.dtype != i32 or keys.shape[0] != values_grad.shape[0]:
+        return False
+    if not _ad_real_dtype(values_grad):
+        return False
+    if isinstance(keys, Ndarray):
+        pass
+    else:
+        keys_view = _primitive_view(keys)
+        if not (keys_view is not None and keys_view.is_dense_field):
+            return False
+    values_view = _primitive_view(values_grad)
+    output_view = _primitive_view(output_grad)
+    if values_view is None or output_view is None:
+        return False
+    if values_view.is_plain_ndarray and output_view.is_plain_ndarray:
+        return isinstance(keys, Ndarray)
+    return values_view.is_dense_field and output_view.is_dense_field
+
+
+def _record_native_grouped_reduce_ad(keys, values, output, op):
+    if not is_tape_active():
+        return
+    if not _can_native_ad_grouped_reduce(keys, values, output, op):
+        return
+    native_primitive_ad.record_callable(
+        "grouped_reduce",
+        _native_ad_backend_label(),
+        _native_ad_grouped_reduce_backward,
+        keys,
+        values,
+        output,
+    )
+
+
+def _native_ad_grouped_reduce_backward(keys, values, output):
+    _ad_sync_before_native_grad_read()
+    values_grad = _ad_grad(values)
+    output_grad = _ad_grad(output)
+    if values_grad is None or output_grad is None:
+        return
+    n = keys.shape[0]
+    if _ad_native_gather_add(output_grad, keys, values_grad, n):
+        return
+    temp = _ad_temp_like(values_grad, n)
+    experimental_gather(
+        output_grad,
+        keys,
+        temp,
+        method=_native_copy_method_for_current_arch("auto"),
+        workspace=IndexedCopyWorkspace(max_items=n),
+    )
+    _ad_native_accum(temp, values_grad, n)
 
 
 class _OrderApplyWorkspaceMixin:
@@ -6625,8 +7644,18 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
     supports i32/f32.
     """
 
+    ad_active = is_tape_active()
+    method = native_autodiff_method(
+        "reduce",
+        method,
+        op=op,
+        native_supported=ad_active and _can_native_ad_reduce(values, output, op),
+        tape_active=ad_active,
+    )
+
     if workspace is not None and isinstance(workspace, ReduceWorkspace):
         if workspace._try_hot_reduce_replay(values, output, op, method):
+            _record_native_reduce_ad(values, output, op)
             return workspace
 
     if _is_matrix_field(values) or _is_matrix_field(output):
@@ -6729,6 +7758,7 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
 
     if workspace is not None and isinstance(workspace, ReduceWorkspace):
         if workspace._try_native_reduce_plan(values, output, op, method):
+            _record_native_reduce_ad(values, output, op)
             return workspace
 
     _check_reduce_request(values, output, op, method, workspace)
@@ -6743,10 +7773,12 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
     if _default_workspace_replay_enabled(workspace, "reduce") and workspace._try_native_reduce_plan(
         values, output, op, method
     ):
+        _record_native_reduce_ad(values, output, op)
         return workspace
     if method in ("auto", "cuda_cub") and _try_cuda_cub_reduce(
         values, output, op, workspace
     ):
+        _record_native_reduce_ad(values, output, op)
         return
     if method == "cuda_cub":
         raise RuntimeError(
@@ -6755,6 +7787,7 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
     if method in ("auto", "vulkan_native") and _try_vulkan_reduce(
         values, output, op, workspace
     ):
+        _record_native_reduce_ad(values, output, op)
         return
     if method == "vulkan_native":
         raise RuntimeError(
@@ -6764,6 +7797,7 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
     if method in ("auto", "cpu_native") and _try_cpu_reduce(
         values, output, op, workspace
     ):
+        _record_native_reduce_ad(values, output, op)
         return
     if method == "cpu_native":
         raise RuntimeError(
@@ -7651,7 +8685,12 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
             prog, "vulkan_transform_value_type_available", value_type
         ):
             return False
-        method = _prog_method(prog, "vulkan_transform_affine_dense_field")
+        method_name = (
+            "vulkan_transform_affine_dense_field_trusted"
+            if _prog_has(prog, "vulkan_transform_affine_dense_field_trusted")
+            else "vulkan_transform_affine_dense_field"
+        )
+        method = _prog_method(prog, method_name)
         if method is None:
             return False
         temp_bytes = method(
@@ -7665,7 +8704,7 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
         if workspace is not None:
             workspace._record_native_transform_plan(
                 "vulkan_native",
-                "vulkan_transform_affine_dense_field",
+                method_name,
                 src,
                 dst,
                 value_type,
@@ -7703,12 +8742,16 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
     ):
         return False
     if src_is_member or dst_is_member:
-        method = _prog_method(prog, "vulkan_transform_affine_strided_ndarray")
+        method_name = (
+            "vulkan_transform_affine_strided_ndarray_trusted"
+            if _prog_has(prog, "vulkan_transform_affine_strided_ndarray_trusted")
+            else "vulkan_transform_affine_strided_ndarray"
+        )
+        method = _prog_method(prog, method_name)
         if method is None:
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
-        method_name = "vulkan_transform_affine_strided_ndarray"
         call_args = (
             src_arr,
             dst_arr,
@@ -7722,7 +8765,11 @@ def _try_vulkan_transform(src, dst, value_type, scale, bias, workspace):
         )
         temp_bytes = method(*call_args)
     else:
-        method_name = "vulkan_transform_affine_ndarray"
+        method_name = (
+            "vulkan_transform_affine_ndarray_trusted"
+            if _prog_has(prog, "vulkan_transform_affine_ndarray_trusted")
+            else "vulkan_transform_affine_ndarray"
+        )
         method = _prog_method(prog, method_name)
         if method is None:
             return False
@@ -8057,8 +9104,17 @@ def experimental_transform(
     offset semantics and remains 1D-only.
     """
 
+    ad_active = is_tape_active()
+    method = native_autodiff_method(
+        "transform",
+        method,
+        native_supported=ad_active and _can_native_ad_transform(src, dst),
+        tape_active=ad_active,
+    )
+
     if workspace is not None and isinstance(workspace, TransformWorkspace):
         if workspace._try_hot_transform_replay(src, dst, method, scale, bias):
+            _record_native_transform_ad(src, dst, scale)
             return workspace
 
     if _is_matrix_field(src) or _is_matrix_field(dst):
@@ -8178,6 +9234,7 @@ def experimental_transform(
 
     if workspace is not None and isinstance(workspace, TransformWorkspace):
         if workspace._try_native_transform_plan(src, dst, method, scale, bias):
+            _record_native_transform_ad(src, dst, scale)
             return workspace
 
     _check_transform_request(src, dst, method, workspace)
@@ -8197,10 +9254,12 @@ def experimental_transform(
     if _default_workspace_replay_enabled(workspace, "transform") and workspace._try_native_transform_plan(
         src, dst, method, scale, bias
     ):
+        _record_native_transform_ad(src, dst, scale)
         return workspace
     if method in ("auto", "cuda_device") and _try_cuda_device_transform(
         src, dst, value_type, scale, bias, workspace
     ):
+        _record_native_transform_ad(src, dst, scale)
         return workspace
     if method == "cuda_device":
         raise RuntimeError(
@@ -8210,6 +9269,7 @@ def experimental_transform(
     if method in ("auto", "vulkan_native") and _try_vulkan_transform(
         src, dst, value_type, scale, bias, workspace
     ):
+        _record_native_transform_ad(src, dst, scale)
         return workspace
     if method == "vulkan_native":
         raise RuntimeError(
@@ -8219,6 +9279,7 @@ def experimental_transform(
     if method in ("auto", "cpu_native") and _try_cpu_transform(
         src, dst, value_type, scale, bias, workspace
     ):
+        _record_native_transform_ad(src, dst, scale)
         return workspace
     if method == "cpu_native":
         raise RuntimeError(
@@ -8774,12 +9835,22 @@ def _indexed_copy_kernel(src, indices, dst, scatter):
                 gather_f32_field(src, indices, dst, n)
 
 
-def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter):
+def _experimental_indexed_copy(
+    src, indices, dst, *, method, workspace, scatter, record_ad=False
+):
     op_name = "experimental_scatter()" if scatter else "experimental_gather()"
+
+    def record_native_ad():
+        if record_ad and scatter:
+            _record_native_scatter_ad(src, indices, dst)
+        elif record_ad:
+            _record_native_gather_ad(src, indices, dst)
+
     if workspace is not None and isinstance(workspace, IndexedCopyWorkspace):
         if workspace._try_hot_indexed_copy_replay(
             src, indices, dst, method, scatter
         ):
+            record_native_ad()
             return workspace
 
     if _is_matrix_field(src) or _is_matrix_field(dst):
@@ -8851,10 +9922,12 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
         if workspace._try_native_indexed_copy_plan(
             src, indices, dst, method, scatter
         ):
+            record_native_ad()
             return workspace
         if _try_native_tensor_member_indexed_copy(
             src, indices, dst, method, workspace, scatter
         ):
+            record_native_ad()
             return workspace
         raise RuntimeError(
             f"{op_name} whole tensor member views require an available "
@@ -8868,6 +9941,7 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
         and isinstance(workspace, IndexedCopyWorkspace)
         and workspace._try_native_indexed_copy_plan(src, indices, dst, method, scatter)
     ):
+        record_native_ad()
         return workspace
 
     _check_indexed_copy_request(src, indices, dst, method, workspace, op_name)
@@ -8883,14 +9957,17 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
     if n == 0:
         return workspace
     if workspace._try_native_indexed_copy_plan(src, indices, dst, method, scatter):
+        record_native_ad()
         return workspace
     if _try_native_dense_field_indexed_copy(
         src, indices, dst, method, workspace, scatter
     ):
+        record_native_ad()
         return workspace
     if method in ("auto", "cuda_device") and _try_cuda_device_indexed_copy(
         src, indices, dst, scatter, workspace
     ):
+        record_native_ad()
         return workspace
     if method == "cuda_device":
         raise RuntimeError(
@@ -8900,6 +9977,7 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
     if method in ("auto", "vulkan_native") and _try_vulkan_indexed_copy(
         src, indices, dst, scatter, workspace
     ):
+        record_native_ad()
         return workspace
     if method == "vulkan_native":
         raise RuntimeError(
@@ -8909,6 +9987,7 @@ def _experimental_indexed_copy(src, indices, dst, *, method, workspace, scatter)
     if method in ("auto", "cpu_native") and _try_cpu_indexed_copy(
         src, indices, dst, scatter, workspace
     ):
+        record_native_ad()
         return workspace
     if method == "cpu_native":
         raise RuntimeError(
@@ -8935,8 +10014,21 @@ def experimental_gather(src, indices, dst, *, method="auto", workspace=None):
     and CPU. Field/SNode inputs use Forge kernels.
     """
 
+    ad_active = is_tape_active()
+    method = native_autodiff_method(
+        "gather",
+        method,
+        native_supported=ad_active and _can_native_ad_gather(src, indices, dst),
+        tape_active=ad_active,
+    )
     return _experimental_indexed_copy(
-        src, indices, dst, method=method, workspace=workspace, scatter=False
+        src,
+        indices,
+        dst,
+        method=method,
+        workspace=workspace,
+        scatter=False,
+        record_ad=True,
     )
 
 
@@ -8948,8 +10040,21 @@ def experimental_scatter(src, indices, dst, *, method="auto", workspace=None):
     primitives.
     """
 
+    ad_active = is_tape_active()
+    method = native_autodiff_method(
+        "scatter",
+        method,
+        native_supported=ad_active and _can_native_ad_scatter(src, indices, dst),
+        tape_active=ad_active,
+    )
     return _experimental_indexed_copy(
-        src, indices, dst, method=method, workspace=workspace, scatter=True
+        src,
+        indices,
+        dst,
+        method=method,
+        workspace=workspace,
+        scatter=True,
+        record_ad=True,
     )
 
 
@@ -9551,8 +10656,18 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
     backend atomics; floating-point accumulation order is backend-dependent.
     """
 
+    ad_active = is_tape_active()
+    method = native_autodiff_method(
+        "scatter_add",
+        method,
+        native_supported=ad_active
+        and _can_native_ad_scatter_add(src, indices, dst),
+        tape_active=ad_active,
+    )
+
     if workspace is not None and isinstance(workspace, ScatterAddWorkspace):
         if workspace._try_hot_scatter_add_replay(src, indices, dst, method):
+            _record_native_scatter_add_ad(src, indices, dst)
             return workspace
 
     if _is_matrix_field(src) or _is_matrix_field(dst):
@@ -9671,10 +10786,12 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
             if workspace._try_two_level_scatter_add_plan_group(
                 src, indices, dst, method, value_type
             ):
+                _record_native_scatter_add_ad(src, indices, dst)
                 return workspace
             if workspace._try_native_scatter_add_plan(
                 src, indices, dst, method, value_type
             ):
+                _record_native_scatter_add_ad(src, indices, dst)
                 return workspace
 
     _check_scatter_add_request(src, indices, dst, method, workspace)
@@ -9695,12 +10812,15 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
         if workspace._try_two_level_scatter_add_plan_group(
             src, indices, dst, method, value_type
         ):
+            _record_native_scatter_add_ad(src, indices, dst)
             return workspace
         if workspace._try_native_scatter_add_plan(
             src, indices, dst, method, value_type
         ):
+            _record_native_scatter_add_ad(src, indices, dst)
             return workspace
     if _try_two_level_scatter_add(src, indices, dst, method, workspace, _scatter_add_value_type(src.dtype)):
+        _record_native_scatter_add_ad(src, indices, dst)
         return workspace
     if method in ("two_level", "cuda_two_level", "vulkan_two_level", "cpu_two_level"):
         raise RuntimeError(
@@ -9711,6 +10831,7 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
     if method in ("auto", "cuda_device") and _try_cuda_device_scatter_add(
         src, indices, dst, workspace
     ):
+        _record_native_scatter_add_ad(src, indices, dst)
         return workspace
     if method == "cuda_device":
         raise RuntimeError(
@@ -9720,6 +10841,7 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
     if method in ("auto", "vulkan_native") and _try_vulkan_scatter_add(
         src, indices, dst, workspace
     ):
+        _record_native_scatter_add_ad(src, indices, dst)
         return workspace
     if method == "vulkan_native":
         raise RuntimeError(
@@ -9730,6 +10852,7 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
     if method in ("auto", "cpu_native") and _try_cpu_scatter_add(
         src, indices, dst, workspace
     ):
+        _record_native_scatter_add_ad(src, indices, dst)
         return workspace
     if method == "cpu_native":
         raise RuntimeError(
@@ -10292,6 +11415,24 @@ def _check_grouped_reduce_request(keys, values, output, op, method, workspace):
         raise TypeError("experimental_grouped_reduce() currently expects ti.i32 keys.")
     if values.dtype != output.dtype:
         raise TypeError("experimental_grouped_reduce() values and output dtype must match.")
+    views = tuple(_primitive_view(arr) for arr in (keys, values, output))
+    dense_field_native_mode = (
+        all(view is not None and view.is_dense_field for view in views)
+        and method
+        in (
+            "auto",
+            "cuda_device",
+            "cuda_segmented",
+            "cuda_two_level",
+            "vulkan_native",
+            "vulkan_segmented",
+            "vulkan_two_level",
+            "segmented",
+            "two_level",
+            "cpu_native",
+            "cpu_two_level",
+        )
+    )
     ndarray_mode = (
         isinstance(keys, Ndarray)
         or keys_is_member
@@ -10301,7 +11442,9 @@ def _check_grouped_reduce_request(keys, values, output, op, method, workspace):
         or output_is_member
     )
     supported_dtypes = (
-        _GROUPED_REDUCE_VALUE_DTYPES if ndarray_mode else _GROUPED_REDUCE_FIELD_DTYPES
+        _GROUPED_REDUCE_VALUE_DTYPES
+        if ndarray_mode or dense_field_native_mode
+        else _GROUPED_REDUCE_FIELD_DTYPES
     )
     if values.dtype not in supported_dtypes:
         if ndarray_mode:
@@ -10931,6 +12074,16 @@ def experimental_grouped_reduce(
     fallback stays in Forge kernels.
     """
 
+    ad_active = is_tape_active()
+    method = native_autodiff_method(
+        "grouped_reduce",
+        method,
+        op=op,
+        native_supported=ad_active
+        and _can_native_ad_grouped_reduce(keys, values, output, op),
+        tape_active=ad_active,
+    )
+
     if _is_struct_tensor_member_view(keys):
         raise TypeError(
             "experimental_grouped_reduce() keys must be scalar; use "
@@ -11015,6 +12168,7 @@ def experimental_grouped_reduce(
         if workspace._try_hot_grouped_reduce_replay(
             keys, values, output, method, op
         ):
+            _record_native_grouped_reduce_ad(keys, values, output, op)
             return workspace
         aggregation_backend = _aggregation_backend_for_method(
             method,
@@ -11034,10 +12188,12 @@ def experimental_grouped_reduce(
                 if aggregation_backend == "vulkan_two_level" and workspace._try_staged_grouped_reduce_plan_group(
                     keys, values, output, method, value_type, op_id, n, num_groups
                 ):
+                    _record_native_grouped_reduce_ad(keys, values, output, op)
                     return workspace
                 if workspace._try_native_grouped_reduce_plan(
                     backend, keys, values, output, value_type, op_id, n, num_groups
                 ):
+                    _record_native_grouped_reduce_ad(keys, values, output, op)
                     return workspace
 
     _check_grouped_reduce_request(keys, values, output, op, method, workspace)
@@ -11073,14 +12229,17 @@ def experimental_grouped_reduce(
             if workspace._try_native_grouped_reduce_plan(
                 backend, keys, values, output, value_type, op_id, n, num_groups
             ):
+                _record_native_grouped_reduce_ad(keys, values, output, op)
                 return workspace
     if aggregation_backend == "cuda_native" and _try_cuda_device_grouped_reduce(
         keys, values, output, workspace, num_groups, op, segmented=False
     ):
+        _record_native_grouped_reduce_ad(keys, values, output, op)
         return workspace
     if aggregation_backend == "cuda_two_level" and _try_cuda_device_grouped_reduce(
         keys, values, output, workspace, num_groups, op, segmented=True
     ):
+        _record_native_grouped_reduce_ad(keys, values, output, op)
         return workspace
     if method in ("cuda_segmented", "cuda_two_level"):
         raise RuntimeError(
@@ -11096,6 +12255,7 @@ def experimental_grouped_reduce(
     if aggregation_backend == "vulkan_native" and _try_vulkan_grouped_reduce(
         keys, values, output, workspace, num_groups, op, segmented=False
     ):
+        _record_native_grouped_reduce_ad(keys, values, output, op)
         return workspace
     if aggregation_backend == "vulkan_two_level" and _try_vulkan_grouped_reduce_staged(
         keys,
@@ -11107,10 +12267,12 @@ def experimental_grouped_reduce(
         method,
         _grouped_reduce_value_type(values.dtype),
     ):
+        _record_native_grouped_reduce_ad(keys, values, output, op)
         return workspace
     if aggregation_backend == "vulkan_two_level" and _try_vulkan_grouped_reduce(
         keys, values, output, workspace, num_groups, op, segmented=True
     ):
+        _record_native_grouped_reduce_ad(keys, values, output, op)
         return workspace
     if method in ("vulkan_segmented", "vulkan_two_level"):
         raise RuntimeError(
@@ -11126,6 +12288,7 @@ def experimental_grouped_reduce(
     if aggregation_backend in ("cpu_native", "cpu_two_level") and _try_cpu_grouped_reduce(
         keys, values, output, workspace, op
     ):
+        _record_native_grouped_reduce_ad(keys, values, output, op)
         return workspace
     if method in ("cpu_native", "cpu_two_level"):
         raise RuntimeError(
@@ -11479,9 +12642,12 @@ class PrefixSumExecutor:
 
     def run(self, input_arr):
         length = self.sorting_length
+        record_scan_ad = _ensure_native_scan_ad_supported(input_arr)
 
         if _is_matrix_field(input_arr):
             if self._try_native_scan_plan_group(input_arr):
+                if record_scan_ad:
+                    _record_native_scan_ad(input_arr)
                 return
             if input_arr.dtype not in _SCAN_VALUE_DTYPES:
                 raise RuntimeError(
@@ -11507,6 +12673,8 @@ class PrefixSumExecutor:
             return
 
         if self._try_native_scan_plan(input_arr):
+            if record_scan_ad:
+                _record_native_scan_ad(input_arr)
             return
 
         view = _primitive_view(input_arr)
@@ -11553,10 +12721,14 @@ class PrefixSumExecutor:
                 "PrefixSumExecutor field input currently supports only ti.i32."
             )
         if self._try_cuda_cub_scan(input_arr):
+            if record_scan_ad:
+                _record_native_scan_ad(input_arr)
             return
         if self._try_vulkan_native_scan(input_arr):
             return
         if self._try_cpu_native_scan(input_arr):
+            if record_scan_ad:
+                _record_native_scan_ad(input_arr)
             return
         if view is not None and view.is_dense_field:
             if current_cfg().arch in (cuda, vulkan) and view.dtype == i32:

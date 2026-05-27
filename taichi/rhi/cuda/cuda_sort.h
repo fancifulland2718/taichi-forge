@@ -190,6 +190,24 @@ std::size_t cub_add_merge_strided(void *src,
                                   std::size_t dst_stride,
                                   void *stream);
 
+std::size_t cub_add_scaled(void *src,
+                           void *dst,
+                           int num_items,
+                           CudaTransformValueType value_type,
+                           double scale,
+                           void *stream);
+
+std::size_t cub_add_scaled_strided(void *src,
+                                   void *dst,
+                                   int num_items,
+                                   CudaTransformValueType value_type,
+                                   std::size_t src_offset,
+                                   std::size_t src_stride,
+                                   std::size_t dst_offset,
+                                   std::size_t dst_stride,
+                                   double scale,
+                                   void *stream);
+
 bool driver_indexed_copy_available();
 
 std::size_t driver_indexed_copy(void *src,
@@ -218,6 +236,26 @@ std::size_t cub_indexed_copy(void *src,
                              int item_words,
                              CudaIndexedCopyOp op,
                              void *stream);
+
+std::size_t cub_gather_add(void *src,
+                           void *indices,
+                           void *dst,
+                           int num_items,
+                           int index_bound,
+                           CudaTransformValueType value_type,
+                           void *stream);
+
+std::size_t cub_gather_add_strided(void *src,
+                                   void *indices,
+                                   void *dst,
+                                   int num_items,
+                                   int index_bound,
+                                   CudaTransformValueType value_type,
+                                   std::size_t src_offset,
+                                   std::size_t src_stride,
+                                   std::size_t dst_offset,
+                                   std::size_t dst_stride,
+                                   void *stream);
 
 std::size_t cub_indexed_copy_strided(void *src,
                                      void *indices,
@@ -258,6 +296,12 @@ std::size_t cub_inclusive_scan(void *data,
                                void *stream,
                                void *owner);
 
+std::size_t cub_inclusive_reverse_scan(void *data,
+                                       int num_items,
+                                       CubScanValueType value_type,
+                                       void *stream,
+                                       void *owner);
+
 std::size_t cub_inclusive_scan_strided(void *data,
                                        int num_items,
                                        CubScanValueType value_type,
@@ -265,6 +309,14 @@ std::size_t cub_inclusive_scan_strided(void *data,
                                        std::size_t stride,
                                        void *stream,
                                        void *owner);
+
+std::size_t cub_inclusive_reverse_scan_strided(void *data,
+                                               int num_items,
+                                               CubScanValueType value_type,
+                                               std::size_t offset,
+                                               std::size_t stride,
+                                               void *stream,
+                                               void *owner);
 
 void cub_inclusive_scan_clear_cache(void *owner);
 

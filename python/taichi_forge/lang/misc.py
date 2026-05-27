@@ -2,6 +2,7 @@ import atexit
 import functools
 import os
 import shutil
+import sys
 import tempfile
 import warnings
 from copy import deepcopy as _deepcopy
@@ -488,6 +489,11 @@ def init(
 
     _logging.trace("Materializing runtime...")
     impl.get_runtime().prog.materialize_runtime()
+    algorithms_module = sys.modules.get("taichi_forge.algorithms._algorithms")
+    if algorithms_module is not None and hasattr(
+        algorithms_module, "initialize_native_primitive_dispatch"
+    ):
+        algorithms_module.initialize_native_primitive_dispatch(impl.get_runtime().prog)
 
     impl._root_fb = _snode.FieldsBuilder()
 

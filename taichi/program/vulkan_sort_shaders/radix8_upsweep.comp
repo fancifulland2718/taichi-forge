@@ -1,10 +1,10 @@
 #version 450
 
-#ifndef SHIFT
-#define SHIFT 0
-#endif
-
 layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Radix8Params {
+  uint shift;
+} params;
 
 layout(set = 0, binding = 0, std430) readonly buffer KeysIn {
   uint data[];
@@ -36,7 +36,7 @@ void main() {
   for (uint i = 0u; i < 8u; ++i) {
     uint idx = partition_start + i * 256u + lid;
     uint key = idx < n ? keys_in.data[idx] : 0xffffffffu;
-    uint digit = (key >> SHIFT) & 255u;
+    uint digit = (key >> params.shift) & 255u;
     atomicAdd(local_hist[digit], 1u);
   }
   barrier();

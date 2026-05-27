@@ -40,7 +40,7 @@ layout(set = 0, binding = 2, std430) buffer Dst {
 } dst_buf;
 
 #ifdef STRIDED_SOURCE
-layout(set = 0, binding = 3, std430) readonly buffer Params {
+layout(push_constant) uniform Params {
   uint n;
   uint src_offset_items;
   uint src_stride_items;

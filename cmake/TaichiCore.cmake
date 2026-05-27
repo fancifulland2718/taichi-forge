@@ -422,16 +422,14 @@ if (TI_WITH_VULKAN)
             "scatter_pairs_inline_chunks_raw64_shift${shift}.comp.spv.h" "-DSHIFT=${shift}" "-DVALUE_KIND=6")
     endforeach()
 
-    foreach(shift 0 8 16 24)
-        ti_vulkan_sort_shader(radix8_upsweep.comp
-            "radix8_upsweep_shift${shift}.comp.spv.h" "-DSHIFT=${shift}")
-        ti_vulkan_sort_shader(radix8_downsweep_keys.comp
-            "radix8_downsweep_keys_shift${shift}.comp.spv.h" "-DSHIFT=${shift}")
-        ti_vulkan_sort_shader(radix8_downsweep_pairs.comp
-            "radix8_downsweep_pairs_shift${shift}.comp.spv.h" "-DSHIFT=${shift}")
-        ti_vulkan_sort_shader(radix8_downsweep_pairs.comp
-            "radix8_downsweep_pairs_raw64_shift${shift}.comp.spv.h" "-DSHIFT=${shift}" "-DVALUE_KIND=6")
-    endforeach()
+    ti_vulkan_sort_shader(radix8_upsweep.comp
+        radix8_upsweep.comp.spv.h)
+    ti_vulkan_sort_shader(radix8_downsweep_keys.comp
+        radix8_downsweep_keys.comp.spv.h)
+    ti_vulkan_sort_shader(radix8_downsweep_pairs.comp
+        radix8_downsweep_pairs.comp.spv.h)
+    ti_vulkan_sort_shader(radix8_downsweep_pairs.comp
+        radix8_downsweep_pairs_raw64.comp.spv.h "-DVALUE_KIND=6")
 
     if (TI_GLSLC_EXECUTABLE)
         add_custom_target(vulkan_sort_spv_headers

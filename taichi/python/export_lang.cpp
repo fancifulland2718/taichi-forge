@@ -707,12 +707,24 @@ void export_lang(py::module &m) {
            py::arg("dst"), py::arg("value_type"), py::arg("n"),
            py::arg("scale"), py::arg("bias"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_zero_dense_field",
+           &Program::cuda_device_zero_dense_field, py::arg("dst"),
+           py::arg("value_type"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_device_add_merge_available",
            &Program::cuda_device_add_merge_available)
       .def("cuda_device_add_merge_ndarray",
            &Program::cuda_device_add_merge_ndarray, py::arg("src"),
            py::arg("dst"), py::arg("value_type"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_add_scaled_ndarray",
+           &Program::cuda_device_add_scaled_ndarray, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("scale"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_add_scalar_ndarray_to_ndarray",
+           &Program::cuda_device_add_scalar_ndarray_to_ndarray,
+           py::arg("src"), py::arg("dst"), py::arg("value_type"),
+           py::arg("scale"), py::call_guard<py::gil_scoped_release>())
       .def("cuda_device_add_merge_strided_ndarray",
            &Program::cuda_device_add_merge_strided_ndarray, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("src_offset"),
@@ -722,6 +734,14 @@ void export_lang(py::module &m) {
            &Program::cuda_device_add_merge_dense_field, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("n"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_add_scaled_dense_field",
+           &Program::cuda_device_add_scaled_dense_field, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("n"),
+           py::arg("scale"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_add_scalar_field_to_dense_field",
+           &Program::cuda_device_add_scalar_field_to_dense_field,
+           py::arg("src"), py::arg("dst"), py::arg("value_type"),
+           py::arg("n"), py::call_guard<py::gil_scoped_release>())
       .def("cuda_device_indexed_copy_available",
            &Program::cuda_device_indexed_copy_available)
       .def("cuda_device_indexed_copy_payload_available",
@@ -743,6 +763,20 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("cuda_device_gather_dense_field_indices_field",
            &Program::cuda_device_gather_dense_field_indices_field,
+           py::arg("src"), py::arg("indices"), py::arg("dst"),
+           py::arg("value_type"), py::arg("src_n"), py::arg("indices_n"),
+           py::arg("dst_n"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_gather_add_ndarray",
+           &Program::cuda_device_gather_add_ndarray, py::arg("src"),
+           py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_gather_add_dense_field",
+           &Program::cuda_device_gather_add_dense_field, py::arg("src"),
+           py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+           py::arg("src_n"), py::arg("dst_n"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_gather_add_dense_field_indices_field",
+           &Program::cuda_device_gather_add_dense_field_indices_field,
            py::arg("src"), py::arg("indices"), py::arg("dst"),
            py::arg("value_type"), py::arg("src_n"), py::arg("indices_n"),
            py::arg("dst_n"), py::call_guard<py::gil_scoped_release>())
@@ -938,13 +972,25 @@ void export_lang(py::module &m) {
            &Program::cuda_cub_inclusive_scan_ndarray, py::arg("data"),
            py::arg("value_type"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_inclusive_reverse_scan_ndarray",
+           &Program::cuda_cub_inclusive_reverse_scan_ndarray, py::arg("data"),
+           py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_inclusive_scan_member_ndarray",
            &Program::cuda_cub_inclusive_scan_member_ndarray, py::arg("data"),
            py::arg("value_type"), py::arg("offset"), py::arg("stride"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_inclusive_reverse_scan_member_ndarray",
+           &Program::cuda_cub_inclusive_reverse_scan_member_ndarray,
+           py::arg("data"), py::arg("value_type"), py::arg("offset"),
+           py::arg("stride"), py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_inclusive_scan_dense_field",
            &Program::cuda_cub_inclusive_scan_dense_field, py::arg("data"),
            py::arg("value_type"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_inclusive_reverse_scan_dense_field",
+           &Program::cuda_cub_inclusive_reverse_scan_dense_field,
+           py::arg("data"), py::arg("value_type"), py::arg("n"),
            py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_select_available", &Program::cuda_cub_select_available)
       .def("cuda_cub_select_clear_workspace",
@@ -1013,12 +1059,23 @@ void export_lang(py::module &m) {
       .def("cpu_inclusive_scan_ndarray",
            &Program::cpu_inclusive_scan_ndarray, py::arg("data"),
            py::arg("value_type"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_inclusive_reverse_scan_ndarray",
+           &Program::cpu_inclusive_reverse_scan_ndarray, py::arg("data"),
+           py::arg("value_type"), py::call_guard<py::gil_scoped_release>())
       .def("cpu_inclusive_scan_member_ndarray",
            &Program::cpu_inclusive_scan_member_ndarray, py::arg("data"),
            py::arg("value_type"), py::arg("offset"), py::arg("stride"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cpu_inclusive_reverse_scan_member_ndarray",
+           &Program::cpu_inclusive_reverse_scan_member_ndarray,
+           py::arg("data"), py::arg("value_type"), py::arg("offset"),
+           py::arg("stride"), py::call_guard<py::gil_scoped_release>())
       .def("cpu_inclusive_scan_dense_field",
            &Program::cpu_inclusive_scan_dense_field, py::arg("data"),
+           py::arg("value_type"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_inclusive_reverse_scan_dense_field",
+           &Program::cpu_inclusive_reverse_scan_dense_field, py::arg("data"),
            py::arg("value_type"), py::arg("n"),
            py::call_guard<py::gil_scoped_release>())
       .def("cpu_compact_available", &Program::cpu_compact_available)
@@ -1140,6 +1197,13 @@ void export_lang(py::module &m) {
       .def("cpu_add_merge_ndarray", &Program::cpu_add_merge_ndarray,
            py::arg("src"), py::arg("dst"), py::arg("value_type"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cpu_add_scaled_ndarray", &Program::cpu_add_scaled_ndarray,
+           py::arg("src"), py::arg("dst"), py::arg("value_type"),
+           py::arg("scale"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_add_scalar_ndarray_to_ndarray",
+           &Program::cpu_add_scalar_ndarray_to_ndarray, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("scale"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_add_merge_strided_ndarray",
            &Program::cpu_add_merge_strided_ndarray, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("src_offset"),
@@ -1147,6 +1211,14 @@ void export_lang(py::module &m) {
            py::arg("dst_stride"), py::call_guard<py::gil_scoped_release>())
       .def("cpu_add_merge_dense_field",
            &Program::cpu_add_merge_dense_field, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_add_scaled_dense_field",
+           &Program::cpu_add_scaled_dense_field, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("n"),
+           py::arg("scale"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_add_scalar_field_to_dense_field",
+           &Program::cpu_add_scalar_field_to_dense_field, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("n"),
            py::call_guard<py::gil_scoped_release>())
       .def("cpu_indexed_copy_available", &Program::cpu_indexed_copy_available)
@@ -1170,6 +1242,19 @@ void export_lang(py::module &m) {
            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
            py::arg("src_n"), py::arg("indices_n"), py::arg("dst_n"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cpu_gather_add_ndarray", &Program::cpu_gather_add_ndarray,
+           py::arg("src"), py::arg("indices"), py::arg("dst"),
+           py::arg("value_type"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_gather_add_dense_field",
+           &Program::cpu_gather_add_dense_field, py::arg("src"),
+           py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+           py::arg("src_n"), py::arg("dst_n"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_gather_add_dense_field_indices_field",
+           &Program::cpu_gather_add_dense_field_indices_field,
+           py::arg("src"), py::arg("indices"), py::arg("dst"),
+           py::arg("value_type"), py::arg("src_n"), py::arg("indices_n"),
+           py::arg("dst_n"), py::call_guard<py::gil_scoped_release>())
        .def("cpu_scatter_ndarray", &Program::cpu_scatter_ndarray,
             py::arg("src"), py::arg("indices"), py::arg("dst"),
             py::call_guard<py::gil_scoped_release>())
@@ -1382,6 +1467,10 @@ void export_lang(py::module &m) {
            &Program::vulkan_transform_affine_ndarray, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("scale"),
            py::arg("bias"), py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_transform_affine_ndarray_trusted",
+           &Program::vulkan_transform_affine_ndarray_trusted, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("scale"),
+           py::arg("bias"), py::call_guard<py::gil_scoped_release>())
       .def("vulkan_transform_indexed_affine_ndarray",
            &Program::vulkan_transform_indexed_affine_ndarray, py::arg("src"),
            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
@@ -1398,6 +1487,12 @@ void export_lang(py::module &m) {
            py::arg("src_stride"), py::arg("dst_offset"),
            py::arg("dst_stride"), py::arg("scale"), py::arg("bias"),
            py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_transform_affine_strided_ndarray_trusted",
+           &Program::vulkan_transform_affine_strided_ndarray_trusted,
+           py::arg("src"), py::arg("dst"), py::arg("value_type"),
+           py::arg("src_offset"), py::arg("src_stride"),
+           py::arg("dst_offset"), py::arg("dst_stride"), py::arg("scale"),
+           py::arg("bias"), py::call_guard<py::gil_scoped_release>())
       .def("vulkan_transform_affine_packed_strided_ndarray",
            &Program::vulkan_transform_affine_packed_strided_ndarray,
            py::arg("src"), py::arg("dst"), py::arg("value_type"),
@@ -1409,6 +1504,17 @@ void export_lang(py::module &m) {
            &Program::vulkan_transform_affine_dense_field, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("n"),
            py::arg("scale"), py::arg("bias"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_transform_affine_dense_field_trusted",
+           &Program::vulkan_transform_affine_dense_field_trusted,
+           py::arg("src"), py::arg("dst"), py::arg("value_type"),
+           py::arg("n"), py::arg("scale"), py::arg("bias"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_zero_dense_field", &Program::vulkan_zero_dense_field,
+           py::arg("dst"), py::arg("value_type"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_zero_dense_fields", &Program::vulkan_zero_dense_fields,
+           py::arg("dsts"), py::arg("value_types"), py::arg("ns"),
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_add_merge_available", &Program::vulkan_add_merge_available)
       .def("vulkan_add_merge_value_type_available",
@@ -1429,6 +1535,10 @@ void export_lang(py::module &m) {
            py::arg("dst_stride"), py::call_guard<py::gil_scoped_release>())
       .def("vulkan_add_merge_dense_field",
            &Program::vulkan_add_merge_dense_field, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_add_scalar_field_to_dense_field",
+           &Program::vulkan_add_scalar_field_to_dense_field, py::arg("src"),
            py::arg("dst"), py::arg("value_type"), py::arg("n"),
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_indexed_copy_available",

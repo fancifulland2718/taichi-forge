@@ -4,11 +4,11 @@
 #extension GL_KHR_shader_subgroup_ballot : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 
-#ifndef SHIFT
-#define SHIFT 0
-#endif
-
 layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Radix8Params {
+  uint shift;
+} params;
 
 layout(set = 0, binding = 0, std430) readonly buffer KeysIn {
   uint data[];
@@ -77,7 +77,7 @@ void main() {
     uint key_index =
         partition_start + (8u * subgroup_size) * subgroup_id + i * subgroup_size + lane;
     uint key = key_index < n ? keys_in.data[key_index] : 0xffffffffu;
-    uint digit = (key >> SHIFT) & 255u;
+    uint digit = (key >> params.shift) & 255u;
     local_keys[i] = key;
     local_digits[i] = digit;
 
@@ -160,7 +160,7 @@ void main() {
 
   for (uint i = lid; i < 2048u; i += 256u) {
     uint key = local_hist[i];
-    uint digit = (key >> SHIFT) & 255u;
+    uint digit = (key >> params.shift) & 255u;
     uint dst = local_hist_sum[digit] + i;
     if (dst < n) {
       keys_out.data[dst] = key;

@@ -554,7 +554,8 @@ def test_experimental_transform_vulkan_native_struct_member_view():
         _run_struct_member_transform_case(
             dtype, n, method="vulkan_native", workspace=workspace
         )
-        assert workspace.workspace_bytes_peak >= 28
+        assert workspace._native_transform_plan is not None
+        assert workspace.workspace_bytes_peak < 28
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

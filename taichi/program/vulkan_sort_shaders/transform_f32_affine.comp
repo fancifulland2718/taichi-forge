@@ -10,7 +10,7 @@ layout(set = 0, binding = 1, std430) writeonly buffer Dst {
   uint data[];
 } dst_buf;
 
-layout(set = 0, binding = 2, std430) readonly buffer Params {
+layout(push_constant) uniform Params {
   uint scale;
   uint bias;
   uint unused0;

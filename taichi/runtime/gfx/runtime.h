@@ -179,6 +179,9 @@ class TI_DLL_EXPORT GfxRuntime {
 
   StreamSemaphore flush();
   StreamSemaphore flush_if_pending();
+  bool has_pending_command_list() const {
+    return current_cmdlist_ != nullptr;
+  }
 
   Device *get_ti_device() const;
 
