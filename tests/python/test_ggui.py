@@ -10,7 +10,9 @@ import pytest
 from taichi_forge._lib import core as _ti_core
 
 import taichi_forge as ti
+from taichi_forge.lang import impl
 from taichi_forge.lang.misc import is_arch_supported
+from taichi_forge.ui.staging_buffer import image_field_cache, to_rgba8
 from tests import test_utils
 from tests.test_utils import verify_image
 
@@ -18,6 +20,88 @@ from tests.test_utils import verify_image
 RENDER_REPEAT = 5
 # FIXME: enable ggui tests on ti.cpu backend. It's blocked by macos10.15
 supported_archs = [ti.vulkan, ti.cuda, ti.metal]
+
+
+def _pack_rgba8_numpy_reference(src):
+    if src.dtype == np.uint8:
+        values = src
+    else:
+        values = np.clip(src, 0.0, 1.0) * 255.0
+    if src.ndim == 2:
+        c = values.astype(np.uint32)
+        return c | (c << 8) | (c << 16) | np.uint32(0xFF000000)
+    px = values.astype(np.uint32)
+    channels = src.shape[2]
+    r = px[..., 0]
+    g = px[..., 1] if channels > 1 else 0
+    b = px[..., 2] if channels > 2 else 0
+    a = px[..., 3] if channels > 3 else np.uint32(0xFF)
+    return r | (g << 8) | (b << 16) | (a << 24)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_to_rgba8_numpy_no_helper_compile():
+    image_field_cache.clear()
+    cases = [
+        np.array([[0, 127], [255, 3]], dtype=np.uint8),
+        np.array(
+            [[[255, 0, 8], [1, 2, 3]], [[4, 5, 6], [7, 8, 9]]],
+            dtype=np.uint8,
+        ),
+        np.array(
+            [[[-1.0, 0.5, 2.0, 0.25], [0.1, 0.2, 0.3, 1.0]]],
+            dtype=np.float32,
+        ),
+    ]
+    for image in cases:
+        compiled = impl.get_runtime().get_num_compiled_functions()
+        out = to_rgba8(image)
+        assert impl.get_runtime().get_num_compiled_functions() == compiled
+        np.testing.assert_array_equal(out, _pack_rgba8_numpy_reference(image))
+
+    image = np.zeros((256, 256, 3), dtype=np.uint8)
+    image[:, :, 0] = 7
+    image[:, :, 1] = 13
+    image[:, :, 2] = 29
+    compiled = impl.get_runtime().get_num_compiled_functions()
+    out = to_rgba8(image)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled
+    np.testing.assert_array_equal(out, _pack_rgba8_numpy_reference(image))
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_to_rgba8_small_taichi_image_no_helper_compile():
+    image_field_cache.clear()
+
+    scalar_np = np.array([[0.0, 0.25], [0.5, 1.25]], dtype=np.float32)
+    scalar = ti.field(ti.f32, shape=scalar_np.shape)
+    scalar.from_numpy(scalar_np)
+    compiled = impl.get_runtime().get_num_compiled_functions()
+    out = to_rgba8(scalar)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled
+    np.testing.assert_array_equal(out, _pack_rgba8_numpy_reference(scalar_np))
+
+    vector_np = np.array(
+        [[[0.0, 0.5, 1.0], [1.2, -0.5, 0.25]]],
+        dtype=np.float32,
+    )
+    vector = ti.Vector.field(3, ti.f32, shape=vector_np.shape[:2])
+    vector.from_numpy(vector_np)
+    compiled = impl.get_runtime().get_num_compiled_functions()
+    out = to_rgba8(vector)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled
+    np.testing.assert_array_equal(out, _pack_rgba8_numpy_reference(vector_np))
+
+    ndarray_np = np.array(
+        [[[1, 2, 3, 4], [255, 128, 64, 32]]],
+        dtype=np.uint8,
+    )
+    arr = ti.Vector.ndarray(4, ti.u8, shape=ndarray_np.shape[:2])
+    arr.from_numpy(ndarray_np)
+    compiled = impl.get_runtime().get_num_compiled_functions()
+    out = to_rgba8(arr)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled
+    np.testing.assert_array_equal(out, _pack_rgba8_numpy_reference(ndarray_np))
 
 
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")

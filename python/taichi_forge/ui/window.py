@@ -192,9 +192,8 @@ class Window:
         """
         tmp_depth = get_depth_ndarray(self.window)
         self.window.copy_depth_buffer_to_ndarray(tmp_depth.arr)
-        depth_numpy_arr = numpy.zeros(self.get_window_shape(), dtype=numpy.float32)
-        arr_vulkan_layout_to_arr_normal_layout(tmp_depth, depth_numpy_arr)
-        return depth_numpy_arr
+        w, h = self.get_window_shape()
+        return numpy.ascontiguousarray(tmp_depth.to_numpy().reshape(h, w)[::-1, :].T)
 
     def get_image_buffer_as_numpy(self):
         """Get the window content to numpy array.

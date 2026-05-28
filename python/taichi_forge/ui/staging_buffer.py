@@ -312,6 +312,60 @@ def copy_image_u8_to_rgba8_ti_ndarray(
 # ggui renderer always assumes the input image to be u8 RGBA
 # if the user input is not in this format, a staging ti field is needed
 image_field_cache = {}
+_NUMPY_RGBA8_HOST_PACK_MAX_PIXELS = 256 * 256
+_TAICHI_NDARRAY_RGBA8_HOST_PACK_MAX_PIXELS = 128 * 128
+_TAICHI_FIELD_RGBA8_HOST_PACK_MAX_PIXELS = 128 * 128
+
+
+def _copy_numpy_image_to_rgba8(src, dst, num_components, gray_scale):
+    if num_components < 1 or num_components > 4:
+        raise Exception("the image must have between 1 and 4 channels")
+    if src.dtype == np.uint8:
+        values = src
+    elif src.dtype == np.float32:
+        values = np.clip(src, 0.0, 1.0) * 255.0
+    else:
+        raise Exception("dtype of input image must either be u8 or f32")
+
+    if gray_scale:
+        c = values.astype(np.uint32, copy=False)
+        dst[...] = c | (c << 8) | (c << 16) | np.uint32(0xFF000000)
+        return
+
+    px = values.astype(np.uint32, copy=False)
+    r = px[..., 0]
+    g = px[..., 1] if num_components > 1 else 0
+    b = px[..., 2] if num_components > 2 else 0
+    a = px[..., 3] if num_components > 3 else np.uint32(0xFF)
+    dst[...] = r | (g << 8) | (b << 16) | (a << 24)
+
+
+def _should_pack_numpy_image_on_host(image):
+    return int(image.shape[0]) * int(image.shape[1]) <= _NUMPY_RGBA8_HOST_PACK_MAX_PIXELS
+
+
+def _should_pack_taichi_image_on_host(image):
+    max_pixels = (
+        _TAICHI_FIELD_RGBA8_HOST_PACK_MAX_PIXELS
+        if hasattr(image, "snode")
+        else _TAICHI_NDARRAY_RGBA8_HOST_PACK_MAX_PIXELS
+    )
+    return int(image.shape[0]) * int(image.shape[1]) <= max_pixels
+
+
+def _try_pack_taichi_image_on_host(image, staging_img, num_components, gray_scale):
+    if not _should_pack_taichi_image_on_host(image):
+        return False
+    if image.dtype not in (u8, f32):
+        return False
+    if hasattr(image, "snode") and image.dtype != f32:
+        return False
+    try:
+        image_np = image.to_numpy()
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return False
+    _copy_numpy_image_to_rgba8(image_np, staging_img, num_components, gray_scale)
+    return True
 
 
 def to_rgba8(image):
@@ -351,21 +405,27 @@ def to_rgba8(image):
     if is_texture:
         copy_texture_to_rgba8(image, staging_img, *image.shape[0:2])
     elif is_numpy:
-        if image.dtype == np.uint8:
+        if _should_pack_numpy_image_on_host(image):
+            _copy_numpy_image_to_rgba8(image, staging_img, channels, is_grayscale)
+        elif image.dtype == np.uint8:
             copy_image_u8_to_rgba8_np(image, staging_img, channels, is_grayscale)
         elif image.dtype == np.float32:
             copy_image_f32_to_rgba8_np(image, staging_img, channels, is_grayscale)
         else:
             raise Exception("dtype of input image must either be u8 or f32")
     elif is_ti_ndarray:
-        if image.dtype == u8:
+        if _try_pack_taichi_image_on_host(image, staging_img, channels, is_grayscale):
+            pass
+        elif image.dtype == u8:
             copy_image_u8_to_rgba8_ti_ndarray(image, staging_img, channels, is_grayscale)
         elif image.dtype == f32:
             copy_image_f32_to_rgba8_ti_ndarray(image, staging_img, channels, is_grayscale)
         else:
             raise Exception("dtype of input image must either be u8 or f32")
     else:
-        if image.dtype == u8:
+        if _try_pack_taichi_image_on_host(image, staging_img, channels, is_grayscale):
+            pass
+        elif image.dtype == u8:
             copy_image_u8_to_rgba8(image, staging_img, channels, is_grayscale)
         elif image.dtype == f32:
             copy_image_f32_to_rgba8(image, staging_img, channels, is_grayscale)

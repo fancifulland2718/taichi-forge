@@ -23,6 +23,22 @@ class Canvas:
 
     def __init__(self, canvas) -> None:
         self.canvas = canvas  # reference to a PyCanvas
+        self._set_image_info_cache = {}
+
+    def _get_set_image_info(self, staging_img):
+        key = (
+            id(staging_img),
+            staging_img.ctypes.data,
+            staging_img.shape,
+            staging_img.dtype.str,
+        )
+        info = self._set_image_info_cache.get(key)
+        if info is None:
+            if len(self._set_image_info_cache) >= 16:
+                self._set_image_info_cache.clear()
+            info = get_field_info(staging_img)
+            self._set_image_info_cache[key] = info
+        return info
 
     def set_background_color(self, color):
         """Set the background color of this canvas.
@@ -46,7 +62,7 @@ class Canvas:
             self.canvas.set_image_texture(img.tex)
         else:
             staging_img = to_rgba8(img)
-            info = get_field_info(staging_img)
+            info = self._get_set_image_info(staging_img)
             self.canvas.set_image(info)
 
     def contour(self, scalar_field, cmap_name="plasma", normalize=False):
