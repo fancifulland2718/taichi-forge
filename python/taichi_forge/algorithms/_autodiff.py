@@ -93,7 +93,7 @@ _POLICIES = {
     ),
     "scan": NativePrimitiveADPolicy(
         "PrefixSumExecutor.run()",
-        frozenset(("cuda_cub", "cpu_native")),
+        frozenset(("cuda_cub", "vulkan_native", "cpu_native")),
         "kernel",
     ),
     "reduce": NativePrimitiveADPolicy(

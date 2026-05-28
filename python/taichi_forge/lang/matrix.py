@@ -23,6 +23,11 @@ from taichi_forge.lang.field import (
     SNodeHostAccess,
     _dense_fill_value_bits,
     _dense_host_copy_value_type,
+    _dense_native_bulk_arch_enabled,
+    _dense_native_bulk_host_copy_needs_sync,
+    _dense_native_method_descriptor,
+    _dense_native_copy_ad_required,
+    _dense_value_type_size,
 )
 from taichi_forge.lang.util import (
     cook_dtype,
@@ -1178,7 +1183,13 @@ class MatrixField(Field):
         assert len(indices) in [1, 2]
         i = indices[0]
         j = 0 if len(indices) == 1 else indices[1]
-        return ScalarField(self.vars[i * self.m + j])
+        member = i * self.m + j
+        scalar = ScalarField(self.vars[member])
+        if self.grad is not None:
+            scalar._set_grad(ScalarField(self.grad.vars[member]))
+        if self.dual is not None:
+            scalar._set_dual(ScalarField(self.dual.vars[member]))
+        return scalar
 
     def _get_dynamic_index_stride(self):
         if self.ptr.get_dynamic_indexable():
@@ -1246,7 +1257,7 @@ class MatrixField(Field):
             if self.ndim != 1:
                 assert len(val[0]) == self.m
         if in_python_scope():
-            if self._try_cpu_dense_fill(val):
+            if self._try_native_dense_fill(val):
                 return
             from taichi_forge._kernels import field_fill_python_scope  # pylint: disable=C0415
 
@@ -1256,15 +1267,103 @@ class MatrixField(Field):
 
             field_fill_taichi_scope(self, val)
 
-    def _try_cpu_dense_fill(self, val):
-        if len(self.shape) == 0:
-            return False
-        from taichi_forge.lang.misc import arm64, x64  # pylint: disable=C0415
+    def _native_dense_component_indices(self, as_vector=None):
+        if as_vector is None:
+            as_vector = self.ndim == 1
+        for i in range(self.n):
+            js = (0,) if as_vector else range(self.m)
+            for j in js:
+                yield i, j
 
-        if impl.current_cfg().arch not in (x64, arm64):
+    def _native_dense_packed_plan(self, as_vector=None):
+        if not _dense_native_bulk_arch_enabled():
+            return None
+        value_type = _dense_host_copy_value_type(self.dtype)
+        value_size = _dense_value_type_size(value_type)
+        if value_type is None or value_size == 0:
+            return None
+        indices = tuple(self._native_dense_component_indices(as_vector))
+        lane_count = len(indices)
+        if lane_count == 0:
+            return None
+        expected_stride = lane_count * value_size
+        components = tuple(self.get_scalar_field(i, j) for i, j in indices)
+        snodes = tuple(component.snode for component in components)
+        first_parent = snodes[0].parent()
+        if (
+            first_parent is None
+            or first_parent.ptr.type != ti_python_core.SNodeType.dense
+            or snodes[0].parent(2) is not impl.root
+            or first_parent._cell_size_bytes != expected_stride
+            or snodes[0]._offset_bytes_in_parent_cell != 0
+        ):
+            return None
+        parent_key = (first_parent._snode_tree_id, first_parent._id)
+        for lane, snode in enumerate(snodes):
+            parent = snode.parent()
+            if (
+                parent is None
+                or parent.ptr.type != ti_python_core.SNodeType.dense
+                or snode.parent(2) is not impl.root
+                or (parent._snode_tree_id, parent._id) != parent_key
+                or snode._offset_bytes_in_parent_cell != lane * value_size
+            ):
+                return None
+        n = int(np.prod(self.shape, dtype=np.int64))
+        return components[0], value_type, n, lane_count
+
+    def _try_native_dense_packed_fill(self, val):
+        plan = self._native_dense_packed_plan()
+        if plan is None:
+            return False
+        first_component, value_type, n, lane_count = plan
+        value_bits = None
+        for i, j in self._native_dense_component_indices():
+            component_val = val[i] if self.ndim == 1 else val[i][j]
+            bits = _dense_fill_value_bits(self.dtype, component_val)
+            if bits is None:
+                return False
+            if value_bits is None:
+                value_bits = bits
+            elif value_bits != bits:
+                return False
+        if value_bits is None:
+            return False
+        from taichi_forge.lang.misc import cuda, vulkan  # pylint: disable=C0415
+
+        if value_bits != 0 and value_type > 2 and impl.current_cfg().arch in (cuda, vulkan):
+            return False
+        prog = impl.get_runtime().prog
+        method = _dense_native_method_descriptor(prog, "fill_dense_field_packed")
+        if method is None:
+            return False
+        impl.get_runtime().materialize()
+        try:
+            method(
+                prog,
+                first_component.snode.ptr,
+                value_type,
+                value_bits,
+                n,
+                lane_count,
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            if (
+                "Native packed dense field fill" not in message
+                and "Native dense field path" not in message
+            ):
+                raise
+            return False
+        return True
+
+    def _try_native_dense_fill(self, val):
+        if len(self.shape) == 0:
             return False
         if _dense_host_copy_value_type(self.dtype) is None:
             return False
+        if self._try_native_dense_packed_fill(val):
+            return True
         components = []
         for i in range(self.n):
             js = (0,) if self.ndim == 1 else range(self.m)
@@ -1274,7 +1373,109 @@ class MatrixField(Field):
                     return False
                 components.append((self.get_scalar_field(i, j), component_val))
         for scalar_field, component_val in components:
-            if not scalar_field._try_cpu_dense_fill(component_val):
+            if not scalar_field._try_native_dense_fill(component_val):
+                return False
+        return True
+
+    def _native_dense_packed_copy_ad_supported(self, other, plan, other_plan):
+        if not _dense_native_copy_ad_required(other, self):
+            return True
+        src_grad_plan = other.grad._native_dense_packed_plan()
+        dst_grad_plan = self.grad._native_dense_packed_plan()
+        if src_grad_plan is None or dst_grad_plan is None:
+            return False
+        if src_grad_plan[1:] != plan[1:] or dst_grad_plan[1:] != plan[1:]:
+            return False
+        if other_plan[1:] != plan[1:]:
+            return False
+        from taichi_forge.algorithms._algorithms import (  # pylint: disable=C0415
+            _can_native_dense_field_packed_copy_ad,
+        )
+
+        return _can_native_dense_field_packed_copy_ad(
+            src_grad_plan[0], dst_grad_plan[0], plan[1], plan[2], plan[3]
+        )
+
+    def _record_native_dense_packed_copy_ad(self, other, plan):
+        if not _dense_native_copy_ad_required(other, self):
+            return True
+        src_grad_plan = other.grad._native_dense_packed_plan()
+        dst_grad_plan = self.grad._native_dense_packed_plan()
+        if src_grad_plan is None or dst_grad_plan is None:
+            return False
+        from taichi_forge.algorithms._algorithms import (  # pylint: disable=C0415
+            _record_native_dense_field_packed_copy_ad,
+        )
+
+        return _record_native_dense_field_packed_copy_ad(
+            src_grad_plan[0], dst_grad_plan[0], plan[1], plan[2], plan[3]
+        )
+
+    def _try_native_dense_packed_copy_from(self, other):
+        if type(self) is not type(other):
+            return False
+        if self.n != other.n or self.m != other.m or self.ndim != other.ndim:
+            return False
+        if self.dtype != other.dtype or self.shape != other.shape:
+            return False
+        plan = self._native_dense_packed_plan()
+        other_plan = other._native_dense_packed_plan()
+        if plan is None or other_plan is None or plan[1:] != other_plan[1:]:
+            return False
+        if not self._native_dense_packed_copy_ad_supported(other, plan, other_plan):
+            return False
+        prog = impl.get_runtime().prog
+        method = _dense_native_method_descriptor(prog, "copy_dense_field_packed")
+        if method is None:
+            return False
+        impl.get_runtime().materialize()
+        try:
+            method(
+                prog,
+                plan[0].snode.ptr,
+                other_plan[0].snode.ptr,
+                plan[1],
+                plan[2],
+                plan[3],
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            if (
+                "Native packed dense field copy" not in message
+                and "Native dense field path" not in message
+            ):
+                raise
+            return False
+        if not self._record_native_dense_packed_copy_ad(other, plan):
+            raise RuntimeError(
+                "Native packed dense field copy could not record an autodiff "
+                "backward launcher after a successful native forward copy."
+            )
+        return True
+
+    def _try_native_dense_copy_from(self, other):
+        if type(self) is not type(other):
+            return False
+        if len(self.shape) == 0:
+            return False
+        if self.n != other.n or self.m != other.m or self.ndim != other.ndim:
+            return False
+        if self.dtype != other.dtype:
+            return False
+        if _dense_native_copy_ad_required(other, self) and self._try_native_dense_packed_copy_from(other):
+            return True
+        components = []
+        for i in range(self.n):
+            js = (0,) if self.ndim == 1 else range(self.m)
+            for j in js:
+                dst = self.get_scalar_field(i, j)
+                src = other.get_scalar_field(i, j)
+                plan = dst._native_dense_copy_plan_from(src)
+                if plan is None:
+                    return False
+                components.append((dst, src, plan))
+        for dst, src, plan in components:
+            if not dst._try_native_dense_copy_from(src, plan):
                 return False
         return True
 
@@ -1297,7 +1498,7 @@ class MatrixField(Field):
         as_vector = self.m == 1 and not keep_dims
         shape_ext = (self.n,) if as_vector else (self.n, self.m)
         arr = np.zeros(self.shape + shape_ext, dtype=dtype)
-        if self._try_cpu_dense_to_numpy(arr, as_vector):
+        if self._try_native_dense_to_numpy(arr, as_vector):
             return arr
         from taichi_forge._kernels import matrix_to_ext_arr  # pylint: disable=C0415
 
@@ -1305,15 +1506,17 @@ class MatrixField(Field):
         runtime_ops.sync()
         return arr
 
-    def _try_cpu_dense_to_numpy(self, arr, as_vector):
+    def _try_native_dense_to_numpy(self, arr, as_vector):
         if len(self.shape) == 0 or arr.dtype != to_numpy_type(self.dtype):
             return False
+        if self._try_native_dense_packed_to_numpy(arr, as_vector):
+            return True
         shape = tuple(self.shape)
         for i in range(self.n):
             js = (0,) if as_vector else range(self.m)
             for j in js:
                 tmp = np.empty(shape, dtype=arr.dtype)
-                if not self.get_scalar_field(i, j)._try_cpu_dense_to_numpy(tmp):
+                if not self.get_scalar_field(i, j)._try_native_dense_to_numpy(tmp):
                     return False
                 if as_vector:
                     arr[..., i] = tmp
@@ -1321,18 +1524,74 @@ class MatrixField(Field):
                     arr[..., i, j] = tmp
         return True
 
-    def _try_cpu_dense_from_numpy(self, arr, as_vector):
+    def _try_native_dense_packed_to_numpy(self, arr, as_vector):
+        if not hasattr(arr, "flags") or not arr.flags.c_contiguous:
+            return False
+        plan = self._native_dense_packed_plan(as_vector)
+        if plan is None or arr.dtype != to_numpy_type(self.dtype):
+            return False
+        prog = impl.get_runtime().prog
+        method = _dense_native_method_descriptor(
+            prog, "copy_dense_field_packed_to_host"
+        )
+        if method is None:
+            return False
+        impl.get_runtime().materialize()
+        if _dense_native_bulk_host_copy_needs_sync():
+            impl.get_runtime().sync()
+        try:
+            method(prog, plan[0].snode.ptr, arr, plan[1], plan[2], plan[3])
+        except RuntimeError as exc:
+            message = str(exc)
+            if (
+                "Native packed dense field host readback" not in message
+                and "Native dense field path" not in message
+            ):
+                raise
+            return False
+        return True
+
+    def _try_native_dense_from_numpy(self, arr, as_vector):
         if len(self.shape) == 0 or arr.dtype != to_numpy_type(self.dtype):
             return False
+        if self._try_native_dense_packed_from_numpy(arr, as_vector):
+            return True
         for i in range(self.n):
             js = (0,) if as_vector else range(self.m)
             for j in js:
                 component = arr[..., i] if as_vector else arr[..., i, j]
                 component = np.ascontiguousarray(component)
-                if not self.get_scalar_field(i, j)._try_cpu_dense_from_numpy(
+                if not self.get_scalar_field(i, j)._try_native_dense_from_numpy(
                     component
                 ):
                     return False
+        return True
+
+    def _try_native_dense_packed_from_numpy(self, arr, as_vector):
+        if not hasattr(arr, "flags") or not arr.flags.c_contiguous:
+            return False
+        plan = self._native_dense_packed_plan(as_vector)
+        if plan is None or arr.dtype != to_numpy_type(self.dtype):
+            return False
+        prog = impl.get_runtime().prog
+        method = _dense_native_method_descriptor(
+            prog, "copy_dense_field_packed_from_host"
+        )
+        if method is None:
+            return False
+        impl.get_runtime().materialize()
+        if _dense_native_bulk_host_copy_needs_sync():
+            impl.get_runtime().sync()
+        try:
+            method(prog, plan[0].snode.ptr, arr, plan[1], plan[2], plan[3])
+        except RuntimeError as exc:
+            message = str(exc)
+            if (
+                "Native packed dense field host copy" not in message
+                and "Native dense field path" not in message
+            ):
+                raise
+            return False
         return True
 
     def to_torch(self, device=None, keep_dims=False):
@@ -1351,7 +1610,7 @@ class MatrixField(Field):
         as_vector = self.m == 1 and not keep_dims
         shape_ext = (self.n,) if as_vector else (self.n, self.m)
         np_arr = np.empty(self.shape + shape_ext, dtype=to_numpy_type(self.dtype))
-        if self._try_cpu_dense_to_numpy(np_arr, as_vector):
+        if self._try_native_dense_to_numpy(np_arr, as_vector):
             return torch.as_tensor(
                 np_arr, dtype=to_pytorch_type(self.dtype), device=device
             )
@@ -1379,7 +1638,7 @@ class MatrixField(Field):
         as_vector = self.m == 1 and not keep_dims and self.ndim == 1
         shape_ext = (self.n,) if as_vector else (self.n, self.m)
         np_arr = np.empty(self.shape + shape_ext, dtype=to_numpy_type(self.dtype))
-        if self._try_cpu_dense_to_numpy(np_arr, as_vector):
+        if self._try_native_dense_to_numpy(np_arr, as_vector):
             return paddle.to_tensor(np_arr, place=place)
         # pylint: disable=E1101
         # paddle.empty() doesn't support argument `place``
@@ -1403,7 +1662,7 @@ class MatrixField(Field):
             assert len(arr.shape) == len(self.shape) + 2
         dim_ext = 1 if as_vector else 2
         assert len(arr.shape) == len(self.shape) + dim_ext
-        if self._try_cpu_dense_from_numpy(arr, as_vector):
+        if self._try_native_dense_from_numpy(arr, as_vector):
             return
         from taichi_forge._kernels import ext_arr_to_matrix  # pylint: disable=C0415
 

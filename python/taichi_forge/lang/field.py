@@ -32,6 +32,16 @@ def _dense_host_copy_value_type(dtype):
     }.get(dtype)
 
 
+def _dense_value_type_size(value_type):
+    if value_type is None:
+        return 0
+    if 0 <= value_type <= 2:
+        return 4
+    if 3 <= value_type <= 5:
+        return 8
+    return 0
+
+
 def _dense_fill_value_bits(dtype, val):
     import numpy as np  # pylint: disable=C0415
 
@@ -60,6 +70,71 @@ def _dense_native_method_descriptor(prog, name):
         cached = getattr(type(prog), name, None)
         _DENSE_NATIVE_METHOD_CACHE[key] = cached
     return cached
+
+
+def _dense_native_bulk_arch_enabled():
+    from taichi_forge.lang.misc import arm64, cuda, vulkan, x64  # pylint: disable=C0415
+
+    return impl.current_cfg().arch in (x64, arm64, cuda, vulkan)
+
+
+def _dense_native_bulk_host_copy_needs_sync():
+    from taichi_forge.lang.misc import cuda, vulkan  # pylint: disable=C0415
+
+    return impl.current_cfg().arch in (cuda, vulkan)
+
+
+def _dense_native_device_host_copy_requires_contiguous():
+    from taichi_forge.lang.misc import cuda, vulkan  # pylint: disable=C0415
+
+    return impl.current_cfg().arch in (cuda, vulkan)
+
+
+def _dense_native_field_is_contiguous(field, value_type):
+    item_bytes = _dense_value_type_size(value_type)
+    if item_bytes == 0:
+        return False
+    snode = field.snode
+    parent = snode.parent()
+    if parent is None:
+        return False
+    if parent.ptr.type == _ti_core.SNodeType.root:
+        return True
+    if parent.ptr.type != _ti_core.SNodeType.dense:
+        return False
+    grandparent = snode.parent(2)
+    if grandparent is None or grandparent.ptr.type != _ti_core.SNodeType.root:
+        return False
+    return parent._cell_size_bytes == item_bytes
+
+
+def _dense_native_copy_ad_required(src, dst):
+    if getattr(impl.get_runtime(), "target_tape", None) is None:
+        return False
+    return (
+        getattr(src, "grad", None) is not None
+        and getattr(dst, "grad", None) is not None
+    )
+
+
+def _dense_native_copy_ad_supported(src, dst):
+    if not _dense_native_copy_ad_required(src, dst):
+        return True
+    from taichi_forge.algorithms._algorithms import (  # pylint: disable=C0415
+        _can_native_ad_copy,
+    )
+
+    return _can_native_ad_copy(src, dst)
+
+
+def _dense_native_record_copy_ad(src, dst):
+    if not _dense_native_copy_ad_required(src, dst):
+        return True
+    from taichi_forge.algorithms._algorithms import (  # pylint: disable=C0415
+        _record_native_copy_ad,
+    )
+
+    return _record_native_copy_ad(src, dst)
 
 
 class Field:
@@ -262,6 +337,9 @@ class Field:
             raise TypeError("Cannot copy from a non-field object")
         if self.shape != other.shape:
             raise ValueError(f"ti.field shape {self.shape} does not match" f" the source field shape {other.shape}")
+        native_copy = getattr(self, "_try_native_dense_copy_from", None)
+        if native_copy is not None and native_copy(other):
+            return
         from taichi_forge._kernels import tensor_to_tensor  # pylint: disable=C0415
 
         tensor_to_tensor(self, other)
@@ -332,7 +410,7 @@ class ScalarField(Field):
     def fill(self, val):
         """Fills this scalar field with a specified value."""
         if in_python_scope():
-            if self._try_cpu_dense_fill(val):
+            if self._try_native_dense_fill(val):
                 return
             from taichi_forge._kernels import fill_field  # pylint: disable=C0415
 
@@ -354,7 +432,7 @@ class ScalarField(Field):
         import numpy as np  # pylint: disable=C0415
 
         arr = np.zeros(shape=self.shape, dtype=dtype)
-        if self._try_cpu_dense_to_numpy(arr):
+        if self._try_native_dense_to_numpy(arr):
             return arr
         from taichi_forge._kernels import tensor_to_ext_arr  # pylint: disable=C0415
 
@@ -370,7 +448,7 @@ class ScalarField(Field):
         import numpy as np  # pylint: disable=C0415
 
         arr_np = np.empty(shape=self.shape, dtype=to_numpy_type(self.dtype))
-        if self._try_cpu_dense_to_numpy(arr_np):
+        if self._try_native_dense_to_numpy(arr_np):
             return torch.as_tensor(
                 arr_np, dtype=to_pytorch_type(self.dtype), device=device
             )
@@ -390,7 +468,7 @@ class ScalarField(Field):
         import numpy as np  # pylint: disable=C0415
 
         arr_np = np.empty(shape=self.shape, dtype=to_numpy_type(self.dtype))
-        if self._try_cpu_dense_to_numpy(arr_np):
+        if self._try_native_dense_to_numpy(arr_np):
             return paddle.to_tensor(arr_np, place=place)
         # pylint: disable=E1101
         # paddle.empty() doesn't support argument `place``
@@ -408,22 +486,26 @@ class ScalarField(Field):
         for i, _ in enumerate(self.shape):
             if self.shape[i] != arr.shape[i]:
                 raise ValueError(f"ti.field shape {self.shape} does not match" f" the numpy array shape {arr.shape}")
-        if self._try_cpu_dense_from_numpy(arr):
+        if self._try_native_dense_from_numpy(arr):
             return
         from taichi_forge._kernels import ext_arr_to_tensor  # pylint: disable=C0415
 
         ext_arr_to_tensor(arr, self)
         taichi_forge.lang.runtime_ops.sync()
 
-    def _try_cpu_dense_from_numpy(self, arr):
+    def _try_native_dense_from_numpy(self, arr):
         if not hasattr(arr, "flags") or not arr.flags.c_contiguous:
             return False
-        from taichi_forge.lang.misc import arm64, x64  # pylint: disable=C0415
 
-        if impl.current_cfg().arch not in (x64, arm64):
+        if not _dense_native_bulk_arch_enabled():
             return False
         value_type = _dense_host_copy_value_type(self.dtype)
         if value_type is None:
+            return False
+        if (
+            _dense_native_device_host_copy_requires_contiguous()
+            and not _dense_native_field_is_contiguous(self, value_type)
+        ):
             return False
         if arr.dtype != to_numpy_type(self.dtype):
             return False
@@ -432,27 +514,33 @@ class ScalarField(Field):
         if method is None:
             return False
         impl.get_runtime().materialize()
+        if _dense_native_bulk_host_copy_needs_sync():
+            impl.get_runtime().sync()
         try:
             method(prog, self.snode.ptr, arr, value_type, int(arr.size))
         except RuntimeError as exc:
             message = str(exc)
             if (
-                "CPU native dense field host copy" not in message
+                "Native dense field host copy" not in message
                 and "Native dense field path" not in message
             ):
                 raise
             return False
         return True
 
-    def _try_cpu_dense_to_numpy(self, arr):
+    def _try_native_dense_to_numpy(self, arr):
         if not hasattr(arr, "flags") or not arr.flags.c_contiguous:
             return False
-        from taichi_forge.lang.misc import arm64, x64  # pylint: disable=C0415
 
-        if impl.current_cfg().arch not in (x64, arm64):
+        if not _dense_native_bulk_arch_enabled():
             return False
         value_type = _dense_host_copy_value_type(self.dtype)
         if value_type is None:
+            return False
+        if (
+            _dense_native_device_host_copy_requires_contiguous()
+            and not _dense_native_field_is_contiguous(self, value_type)
+        ):
             return False
         if arr.dtype != to_numpy_type(self.dtype):
             return False
@@ -461,22 +549,22 @@ class ScalarField(Field):
         if method is None:
             return False
         impl.get_runtime().materialize()
+        if _dense_native_bulk_host_copy_needs_sync():
+            impl.get_runtime().sync()
         try:
             method(prog, self.snode.ptr, arr, value_type, int(arr.size))
         except RuntimeError as exc:
             message = str(exc)
             if (
-                "CPU native dense field host readback" not in message
+                "Native dense field host readback" not in message
                 and "Native dense field path" not in message
             ):
                 raise
             return False
         return True
 
-    def _try_cpu_dense_fill(self, val):
-        from taichi_forge.lang.misc import arm64, x64  # pylint: disable=C0415
-
-        if impl.current_cfg().arch not in (x64, arm64):
+    def _try_native_dense_fill(self, val):
+        if not _dense_native_bulk_arch_enabled():
             return False
         value_type = _dense_host_copy_value_type(self.dtype)
         if value_type is None:
@@ -497,11 +585,56 @@ class ScalarField(Field):
         except RuntimeError as exc:
             message = str(exc)
             if (
-                "CPU native dense field fill" not in message
+                "Native dense field fill" not in message
                 and "Native dense field path" not in message
             ):
                 raise
             return False
+        return True
+
+    def _native_dense_copy_plan_from(self, other):
+        if not isinstance(other, ScalarField):
+            return None
+        if self.dtype != other.dtype:
+            return None
+        if not _dense_native_copy_ad_supported(other, self):
+            return None
+        if not _dense_native_bulk_arch_enabled():
+            return None
+        value_type = _dense_host_copy_value_type(self.dtype)
+        if value_type is None:
+            return None
+        prog = impl.get_runtime().prog
+        method = _dense_native_method_descriptor(prog, "copy_dense_field")
+        if method is None:
+            return None
+        import numpy as np  # pylint: disable=C0415
+
+        n = int(np.prod(self.shape, dtype=np.int64))
+        return prog, method, value_type, n
+
+    def _try_native_dense_copy_from(self, other, plan=None):
+        if plan is None:
+            plan = self._native_dense_copy_plan_from(other)
+        if plan is None:
+            return False
+        impl.get_runtime().materialize()
+        prog, method, value_type, n = plan
+        try:
+            method(prog, self.snode.ptr, other.snode.ptr, value_type, n)
+        except RuntimeError as exc:
+            message = str(exc)
+            if (
+                "Native dense field copy" not in message
+                and "Native dense field path" not in message
+            ):
+                raise
+            return False
+        if not _dense_native_record_copy_ad(other, self):
+            raise RuntimeError(
+                "Native dense field copy could not record an autodiff "
+                "backward launcher after a successful native forward copy."
+            )
         return True
 
     @python_scope

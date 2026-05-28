@@ -4,7 +4,6 @@ This module supplies two decorators for users to customize their
 gradient computation task.
 """
 
-import os
 import warnings
 from functools import reduce
 
@@ -259,6 +258,12 @@ class Tape:
         # Set grad for loss
         if isinstance(self.loss, (Field, Ndarray)):
             self.loss.grad.fill(1.0)
+            from taichi_forge.lang.misc import vulkan  # pylint: disable=C0415
+
+            if impl.current_cfg().arch == vulkan:
+                from taichi_forge.lang.runtime_ops import sync  # pylint: disable=C0415
+
+                sync()
         else:
             import torch  # pylint: disable=C0415
 
@@ -285,28 +290,108 @@ def clear_all_gradients(gradient_type=SNodeGradType.ADJOINT):
     """Sets the gradients of all fields to zero."""
     impl.get_runtime().materialize()
 
-    from taichi_forge.lang.field import _dense_host_copy_value_type  # pylint: disable=C0415
-    from taichi_forge.lang.misc import arm64, cuda, vulkan, x64  # pylint: disable=C0415
+    from taichi_forge.lang.field import (  # pylint: disable=C0415
+        _dense_host_copy_value_type,
+        _dense_native_field_is_contiguous,
+        _dense_native_method_descriptor,
+        _dense_value_type_size,
+    )
+    from taichi_forge.lang.misc import vulkan  # pylint: disable=C0415
 
     arch = impl.current_cfg().arch
-    cuda_clear_method_name = "cuda_device_zero_dense_field" if arch == cuda else None
-    vulkan_clear_enabled = (
-        os.environ.get("TAICHI_FORGE_NATIVE_AD_VULKAN_CLEAR", "0") != "0"
-    )
-    vulkan_batch_method_name = (
-        "vulkan_zero_dense_fields"
-        if arch == vulkan and vulkan_clear_enabled
-        else None
-    )
+    vulkan_batch_method_name = "vulkan_zero_dense_fields" if arch == vulkan else None
+    used_vulkan_native_clear = False
 
-    def try_cpu_native_clear(ch):
-        field = ScalarField(Expr(ch.get_expr()))
-        if arch in (x64, arm64):
-            try:
-                return field._try_cpu_dense_fill(0)
-            except RuntimeError:
-                return False
-        return False
+    def try_dense_native_clear_field(field):
+        nonlocal used_vulkan_native_clear
+        try:
+            cleared = field._try_native_dense_fill(0)
+        except RuntimeError:
+            return False
+        if cleared and arch == vulkan:
+            used_vulkan_native_clear = True
+        return cleared
+
+    def try_dense_native_clear_expr(expr):
+        return try_dense_native_clear_field(ScalarField(Expr(expr)))
+
+    def dense_packed_clear_info(node):
+        num_children = node.ptr.get_num_ch()
+        if num_children <= 1:
+            return None
+        try:
+            node_key = (int(node.ptr.get_snode_tree_id()), int(node.ptr.id))
+        except (AttributeError, TypeError, ValueError):
+            return None
+        fields = []
+        for child_index in range(num_children):
+            ch = node.ptr.get_ch(child_index)
+            if not ch.is_place() or ch.get_snode_grad_type() != gradient_type:
+                return None
+            field = ScalarField(Expr(ch.get_expr()))
+            fields.append(field)
+        value_type = _dense_host_copy_value_type(fields[0].dtype)
+        value_size = _dense_value_type_size(value_type)
+        if value_type is None or value_size == 0:
+            return None
+        shape = tuple(fields[0].shape)
+        if len(shape) == 0:
+            return None
+        parent = fields[0].snode.parent()
+        parent_key = (
+            None
+            if parent is None
+            else (int(parent._snode_tree_id), int(parent._id))
+        )
+        if (
+            parent is None
+            or parent_key != node_key
+            or fields[0].snode.parent(2) is not impl.root
+        ):
+            return None
+        lane_count = len(fields)
+        expected_stride = lane_count * value_size
+        if (
+            parent._cell_size_bytes != expected_stride
+            or fields[0].snode._offset_bytes_in_parent_cell != 0
+        ):
+            return None
+        for lane, field in enumerate(fields):
+            snode = field.snode
+            snode_parent = snode.parent()
+            snode_parent_key = (
+                None
+                if snode_parent is None
+                else (int(snode_parent._snode_tree_id), int(snode_parent._id))
+            )
+            if (
+                field.dtype != fields[0].dtype
+                or tuple(field.shape) != shape
+                or snode_parent_key != node_key
+                or snode.parent(2) is not impl.root
+                or snode._offset_bytes_in_parent_cell != lane * value_size
+            ):
+                return None
+        n = int(np.prod(shape, dtype=np.int64))
+        return fields[0], value_type, n, lane_count
+
+    def try_dense_native_clear_packed_node(node):
+        nonlocal used_vulkan_native_clear
+        clear_info = dense_packed_clear_info(node)
+        if clear_info is None:
+            return False
+        field, value_type, n, lane_count = clear_info
+        prog = impl.get_runtime().prog
+        method = _dense_native_method_descriptor(prog, "fill_dense_field_packed")
+        if method is None:
+            return False
+        try:
+            method(prog, field.snode.ptr, value_type, 0, n, lane_count)
+        except RuntimeError:
+            return False
+        if arch == vulkan:
+            used_vulkan_native_clear = True
+        return True
 
     def dense_clear_info(ch):
         field = ScalarField(Expr(ch.get_expr()))
@@ -316,22 +401,6 @@ def clear_all_gradients(gradient_type=SNodeGradType.ADJOINT):
         n = int(np.prod(field.shape, dtype=np.int64))
         return field, value_type, n
 
-    def try_cuda_native_clear(ch):
-        if cuda_clear_method_name is None:
-            return False
-        clear_info = dense_clear_info(ch)
-        if clear_info is None:
-            return False
-        field, value_type, n = clear_info
-        method = getattr(impl.get_runtime().prog, cuda_clear_method_name, None)
-        if method is None:
-            return False
-        try:
-            method(field.snode.ptr, value_type, n)
-        except RuntimeError:
-            return False
-        return True
-
     def make_vulkan_native_clear_job(ch):
         if vulkan_batch_method_name is None:
             return None
@@ -339,9 +408,12 @@ def clear_all_gradients(gradient_type=SNodeGradType.ADJOINT):
         if clear_info is None:
             return None
         field, value_type, n = clear_info
-        return field.snode.ptr, value_type, n, ch.get_expr()
+        if not _dense_native_field_is_contiguous(field, value_type):
+            return None
+        return field, field.snode.ptr, value_type, n, ch.get_expr()
 
     def try_vulkan_native_clear_batch(jobs):
+        nonlocal used_vulkan_native_clear
         if not jobs:
             return True
         method = getattr(impl.get_runtime().prog, vulkan_batch_method_name, None)
@@ -349,35 +421,50 @@ def clear_all_gradients(gradient_type=SNodeGradType.ADJOINT):
             return False
         try:
             method(
-                [job[0] for job in jobs],
                 [job[1] for job in jobs],
                 [job[2] for job in jobs],
+                [job[3] for job in jobs],
             )
         except RuntimeError:
             return False
+        used_vulkan_native_clear = True
         return True
 
+    def try_vulkan_native_clear_jobs(jobs):
+        if not jobs:
+            return []
+        if try_vulkan_native_clear_batch(jobs):
+            return []
+        fallback_places = []
+        for field, _, _, _, expr in jobs:
+            if not try_dense_native_clear_field(field):
+                fallback_places.append(expr)
+        return fallback_places
+
+    def flush_vulkan_jobs(jobs, places):
+        if jobs:
+            places.extend(try_vulkan_native_clear_jobs(jobs))
+            jobs.clear()
+
     def visit(node):
+        if try_dense_native_clear_packed_node(node):
+            return
         places = []
         vulkan_jobs = []
         for _i in range(node.ptr.get_num_ch()):
             ch = node.ptr.get_ch(_i)
             if not ch.is_place():
+                flush_vulkan_jobs(vulkan_jobs, places)
                 visit(SNode(ch))
             else:
                 if ch.get_snode_grad_type() == gradient_type:
-                    if try_cpu_native_clear(ch):
-                        continue
-                    if try_cuda_native_clear(ch):
-                        continue
                     vulkan_job = make_vulkan_native_clear_job(ch)
                     if vulkan_job is not None:
                         vulkan_jobs.append(vulkan_job)
-                    else:
+                    elif not try_dense_native_clear_expr(ch.get_expr()):
                         places.append(ch.get_expr())
 
-        if vulkan_jobs and not try_vulkan_native_clear_batch(vulkan_jobs):
-            places.extend(job[3] for job in vulkan_jobs)
+        flush_vulkan_jobs(vulkan_jobs, places)
 
         places = tuple(places)
         if places:
@@ -387,6 +474,11 @@ def clear_all_gradients(gradient_type=SNodeGradType.ADJOINT):
 
     for root_fb in _snode.FieldsBuilder._finalized_roots():
         visit(root_fb)
+
+    if used_vulkan_native_clear:
+        from taichi_forge.lang.runtime_ops import sync  # pylint: disable=C0415
+
+        sync()
 
 
 def grad_replaced(func):

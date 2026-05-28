@@ -21,6 +21,88 @@ def _is_struct_type(dtype):
     return hasattr(dtype, "members") and hasattr(dtype, "dtype")
 
 
+def _native_copy_ad_required(src, dst):
+    if getattr(impl.get_runtime(), "target_tape", None) is None:
+        return False
+    return (
+        getattr(src, "grad", None) is not None
+        and getattr(dst, "grad", None) is not None
+    )
+
+
+def _native_copy_ad_supported(src, dst):
+    if not _native_copy_ad_required(src, dst):
+        return True
+    from taichi_forge.algorithms._algorithms import (  # pylint: disable=C0415
+        _can_native_ad_copy,
+    )
+
+    return _can_native_ad_copy(src, dst)
+
+
+def _record_native_copy_ad(src, dst):
+    if not _native_copy_ad_required(src, dst):
+        return True
+    from taichi_forge.algorithms._algorithms import (  # pylint: disable=C0415
+        _record_native_copy_ad as record_native_copy_ad,
+    )
+
+    return record_native_copy_ad(src, dst)
+
+
+def _native_bulk_copy_needs_sync():
+    arch = impl.current_cfg().arch
+    return arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)
+
+
+_STRUCT_MEMBER_NATIVE_HOST_COPY_MIN_PAYLOAD_BYTES = 1 << 20
+_STRUCT_MEMBER_NATIVE_HOST_COPY_DTYPES = (
+    primitive_types.u32,
+    primitive_types.i32,
+    primitive_types.f32,
+    primitive_types.u64,
+    primitive_types.i64,
+    primitive_types.f64,
+)
+_NDARRAY_NATIVE_HOST_STAGING_FILL_DTYPES = (
+    primitive_types.u64,
+    primitive_types.i64,
+    primitive_types.f64,
+)
+
+
+def _shape_numel(shape):
+    return int(np.prod(shape, dtype=np.int64))
+
+
+def _struct_scalar_member_native_host_copy_worthwhile(view):
+    if view.dtype not in _STRUCT_MEMBER_NATIVE_HOST_COPY_DTYPES:
+        return False
+    arch = impl.current_cfg().arch
+    if arch not in (_ti_core.Arch.x64, _ti_core.Arch.cuda, _ti_core.Arch.vulkan):
+        return False
+    n = _shape_numel(view.shape)
+    payload_bytes = n * view.stride
+    member_bytes = n * view.element_size
+    if payload_bytes < _STRUCT_MEMBER_NATIVE_HOST_COPY_MIN_PAYLOAD_BYTES:
+        return False
+    return member_bytes < payload_bytes
+
+
+def _struct_tensor_member_native_host_copy_worthwhile(view):
+    if view.scalar_dtype not in _STRUCT_MEMBER_NATIVE_HOST_COPY_DTYPES:
+        return False
+    arch = impl.current_cfg().arch
+    if arch not in (_ti_core.Arch.x64, _ti_core.Arch.cuda, _ti_core.Arch.vulkan):
+        return False
+    n = _shape_numel(view.shape)
+    payload_bytes = n * view.stride
+    member_bytes = n * view.element_size
+    if payload_bytes < _STRUCT_MEMBER_NATIVE_HOST_COPY_MIN_PAYLOAD_BYTES:
+        return False
+    return member_bytes < payload_bytes
+
+
 def _struct_member_numpy_layout(dtype):
     if dtype in primitive_types.all_types:
         cooked_dtype = cook_dtype(dtype)
@@ -230,7 +312,7 @@ class Ndarray:
             self._fill_by_kernel(val)
         elif self._can_fast_zero_fill(val):
             impl.get_runtime().prog.fill_uint(self.arr, 0)
-        elif _ti_core.is_tensor(self.element_type):
+        elif _ti_core.is_tensor(self.element_type) and not self._can_fast_scalar_fill(val):
             self._fill_by_kernel(val)
         elif self.dtype == primitive_types.f32:
             impl.get_runtime().prog.fill_float(self.arr, val)
@@ -238,6 +320,8 @@ class Ndarray:
             impl.get_runtime().prog.fill_int(self.arr, val)
         elif self.dtype == primitive_types.u32:
             impl.get_runtime().prog.fill_uint(self.arr, val)
+        elif self._try_fast_host_staging_fill(val):
+            return
         else:
             self._fill_by_kernel(val)
 
@@ -261,6 +345,32 @@ class Ndarray:
         return (self._get_nelement() * self._get_element_size()) % 4 == 0
 
     @python_scope
+    def _can_fast_scalar_fill(self, val):
+        try:
+            is_scalar = np.isscalar(val)
+        except TypeError:
+            return False
+        return is_scalar and isinstance(val, (bool, int, float, np.integer, np.floating))
+
+    @python_scope
+    def _try_fast_host_staging_fill(self, val):
+        if self.dtype not in _NDARRAY_NATIVE_HOST_STAGING_FILL_DTYPES:
+            return False
+        if not self._can_fast_scalar_fill(val):
+            return False
+        try:
+            arr = np.empty(shape=self.arr.total_shape(), dtype=to_numpy_type(self.dtype))
+            arr.fill(np.array(val, dtype=arr.dtype).item())
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not self._can_fast_host_copy(arr, is_from_host=True):
+            return False
+        if _native_bulk_copy_needs_sync():
+            impl.get_runtime().sync()
+        impl.get_runtime().prog.copy_ndarray_from_host(self.arr, arr)
+        return True
+
+    @python_scope
     def _can_fast_host_copy(self, arr, is_from_host=False):
         arch = impl.current_cfg().arch
         fast_host_copy_archs = (
@@ -273,8 +383,6 @@ class Ndarray:
         if not isinstance(arr, np.ndarray) or not arr.flags.c_contiguous:
             return False
         if self.layout != Layout.AOS:
-            return False
-        if is_from_host and arch == _ti_core.Arch.vulkan and arr.nbytes > (64 << 10):
             return False
         return (
             arr.dtype == np.dtype(to_numpy_type(self.dtype))
@@ -289,9 +397,10 @@ class Ndarray:
         Returns:
             numpy.ndarray: The result numpy array.
         """
-        arr = np.zeros(shape=self.arr.total_shape(), dtype=to_numpy_type(self.dtype))
+        arr = np.empty(shape=self.arr.total_shape(), dtype=to_numpy_type(self.dtype))
         if self._can_fast_host_copy(arr):
-            impl.get_runtime().sync()
+            if _native_bulk_copy_needs_sync():
+                impl.get_runtime().sync()
             impl.get_runtime().prog.copy_ndarray_to_host(self.arr, arr)
             return arr
 
@@ -308,9 +417,10 @@ class Ndarray:
         Returns:
             numpy.ndarray: The result numpy array.
         """
-        arr = np.zeros(shape=self.arr.total_shape(), dtype=to_numpy_type(self.dtype))
+        arr = np.empty(shape=self.arr.total_shape(), dtype=to_numpy_type(self.dtype))
         if self._can_fast_host_copy(arr):
-            impl.get_runtime().sync()
+            if _native_bulk_copy_needs_sync():
+                impl.get_runtime().sync()
             impl.get_runtime().prog.copy_ndarray_to_host(self.arr, arr)
             return arr
 
@@ -335,7 +445,8 @@ class Ndarray:
         if not arr.flags.c_contiguous:
             arr = np.ascontiguousarray(arr)
         if self._can_fast_host_copy(arr, is_from_host=True):
-            impl.get_runtime().sync()
+            if _native_bulk_copy_needs_sync():
+                impl.get_runtime().sync()
             impl.get_runtime().prog.copy_ndarray_from_host(self.arr, arr)
             return
 
@@ -360,7 +471,8 @@ class Ndarray:
         if not arr.flags.c_contiguous:
             arr = np.ascontiguousarray(arr)
         if self._can_fast_host_copy(arr, is_from_host=True):
-            impl.get_runtime().sync()
+            if _native_bulk_copy_needs_sync():
+                impl.get_runtime().sync()
             impl.get_runtime().prog.copy_ndarray_from_host(self.arr, arr)
             return
 
@@ -399,9 +511,15 @@ class Ndarray:
         """
         assert isinstance(other, Ndarray)
         assert tuple(self.arr.shape) == tuple(other.arr.shape)
-        if self._can_fast_copy_from(other):
+        if self._can_fast_copy_from(other) and _native_copy_ad_supported(other, self):
             impl.get_runtime().prog.copy_ndarray(self.arr, other.arr)
-            impl.get_runtime().sync()
+            if _native_bulk_copy_needs_sync():
+                impl.get_runtime().sync()
+            if not _record_native_copy_ad(other, self):
+                raise RuntimeError(
+                    "Native ndarray copy could not record an autodiff "
+                    "backward launcher after a successful native forward copy."
+                )
             return
 
         from taichi_forge._kernels import ndarray_to_ndarray  # pylint: disable=C0415
@@ -418,9 +536,6 @@ class Ndarray:
             _ti_core.Arch.x64,
         )
         if arch not in fast_copy_archs:
-            return False
-        byte_size = self._get_nelement() * self._get_element_size()
-        if arch == _ti_core.Arch.x64 and byte_size >= (1 << 20):
             return False
         return (
             self.dtype == other.dtype
@@ -552,6 +667,8 @@ class StructNdarrayScalarMemberView:
         self.offset = int(offset)
         self.stride = _ti_core.data_type_size(base.dtype)
         self.element_size = _ti_core.data_type_size(self.dtype)
+        self._native_host_copy_tmp = None
+        self._native_host_copy_enabled = _struct_scalar_member_native_host_copy_worthwhile(self)
 
     @property
     def element_shape(self):
@@ -559,6 +676,9 @@ class StructNdarrayScalarMemberView:
 
     @python_scope
     def to_numpy(self):
+        native = self._try_native_to_numpy()
+        if native is not None:
+            return native
         member = _extract_struct_numpy_member(self.base.to_numpy(), self.path)
         if self.component is not None:
             member = member[(...,) + self.component]
@@ -573,6 +693,8 @@ class StructNdarrayScalarMemberView:
         expected_dtype = np.dtype(to_numpy_type(self.dtype))
         if arr.dtype != expected_dtype:
             raise TypeError(f"Mismatch dtype: {expected_dtype} expected, but {arr.dtype} provided")
+        if self._try_native_from_numpy(arr):
+            return
         struct_arr = self.base.to_numpy()
         member = _extract_struct_numpy_member(struct_arr, self.path)
         if self.component is not None:
@@ -580,6 +702,38 @@ class StructNdarrayScalarMemberView:
         else:
             member[...] = np.ascontiguousarray(arr)
         self.base.from_numpy(struct_arr)
+
+    def _native_host_copy_temp(self):
+        if self._native_host_copy_tmp is None:
+            self._native_host_copy_tmp = ScalarNdarray(self.dtype, self.shape)
+        return self._native_host_copy_tmp
+
+    def _try_native_to_numpy(self):
+        if not self._native_host_copy_enabled:
+            return None
+        try:
+            from taichi_forge.algorithms import experimental_transform  # pylint: disable=C0415
+
+            tmp = self._native_host_copy_temp()
+            experimental_transform(self, tmp)
+            return tmp.to_numpy()
+        except (RuntimeError, TypeError, ValueError):
+            return None
+
+    def _try_native_from_numpy(self, arr):
+        if not self._native_host_copy_enabled:
+            return False
+        if not arr.flags.c_contiguous:
+            arr = np.ascontiguousarray(arr)
+        try:
+            from taichi_forge.algorithms import experimental_transform  # pylint: disable=C0415
+
+            tmp = self._native_host_copy_temp()
+            tmp.from_numpy(arr)
+            experimental_transform(tmp, self)
+            return True
+        except (RuntimeError, TypeError, ValueError):
+            return False
 
     def get_type(self):
         return NdarrayTypeMetadata(self.element_type, self.shape, False)
@@ -608,6 +762,9 @@ class StructNdarrayTensorMemberView:
         self.offset = int(offset)
         self.stride = _ti_core.data_type_size(base.dtype)
         self.element_size = _ti_core.data_type_size(self.element_type)
+        self._native_host_copy_tmp = None
+        self._native_host_copy_tmp_view = None
+        self._native_host_copy_enabled = _struct_tensor_member_native_host_copy_worthwhile(self)
 
     @property
     def element_shape(self):
@@ -615,6 +772,9 @@ class StructNdarrayTensorMemberView:
 
     @python_scope
     def to_numpy(self):
+        native = self._try_native_to_numpy()
+        if native is not None:
+            return native
         return np.ascontiguousarray(_extract_struct_numpy_member(self.base.to_numpy(), self.path))
 
     @python_scope
@@ -627,10 +787,50 @@ class StructNdarrayTensorMemberView:
         expected_dtype = np.dtype(to_numpy_type(self.dtype.dtype))
         if arr.dtype != expected_dtype:
             raise TypeError(f"Mismatch dtype: {expected_dtype} expected, but {arr.dtype} provided")
+        if self._try_native_from_numpy(arr):
+            return
         struct_arr = self.base.to_numpy()
         member = _extract_struct_numpy_member(struct_arr, self.path)
         member[...] = np.ascontiguousarray(arr)
         self.base.from_numpy(struct_arr)
+
+    def _native_host_copy_temp_view(self):
+        if self._native_host_copy_tmp is None:
+            from taichi_forge.types import compound_types  # pylint: disable=C0415
+
+            temp_type = compound_types.struct(value=self.dtype)
+            self._native_host_copy_tmp = StructNdarray(temp_type, self.shape)
+            self._native_host_copy_tmp_view = self._native_host_copy_tmp.field("value")
+        return self._native_host_copy_tmp, self._native_host_copy_tmp_view
+
+    def _try_native_to_numpy(self):
+        if not self._native_host_copy_enabled:
+            return None
+        try:
+            from taichi_forge.algorithms import experimental_transform  # pylint: disable=C0415
+
+            tmp, tmp_view = self._native_host_copy_temp_view()
+            experimental_transform(self, tmp_view)
+            return np.ascontiguousarray(tmp.to_numpy()["value"])
+        except (RuntimeError, TypeError, ValueError):
+            return None
+
+    def _try_native_from_numpy(self, arr):
+        if not self._native_host_copy_enabled:
+            return False
+        if not arr.flags.c_contiguous:
+            arr = np.ascontiguousarray(arr)
+        try:
+            from taichi_forge.algorithms import experimental_transform  # pylint: disable=C0415
+
+            tmp, tmp_view = self._native_host_copy_temp_view()
+            struct_arr = np.empty(shape=self.shape, dtype=tmp.numpy_dtype)
+            struct_arr["value"] = arr
+            tmp.from_numpy(struct_arr)
+            experimental_transform(tmp_view, self)
+            return True
+        except (RuntimeError, TypeError, ValueError):
+            return False
 
     def get_type(self):
         return NdarrayTypeMetadata(self.element_type, self.shape, False)
@@ -666,6 +866,7 @@ class StructNdarray(Ndarray):
         self.shape = tuple(self.arr.shape)
         self.element_type = self.dtype
         self._device_write_pending = zero_fill_on_create and impl.current_cfg().arch == _ti_core.Arch.cuda
+        self._member_view_cache = {}
         if not zero_fill_on_create:
             self.fill(0)
 
@@ -695,22 +896,32 @@ class StructNdarray(Ndarray):
     def field(self, name, component=None):
         path = _normalize_struct_member_path(name)
         component = _normalize_component_index(component)
+        cache_key = (path, component)
+        cached = self._member_view_cache.get(cache_key)
+        if cached is not None:
+            return cached
         member_dtype, member_np_dtype, offset = _resolve_struct_member_path(self.struct_type, self.numpy_dtype, path)
         member_name = _format_struct_member_path(path)
         if component is not None:
             component_offset = _resolve_matrix_component_offset(member_dtype, member_np_dtype, component)
             component_name = f"{member_name}[{','.join(str(i) for i in component)}]"
-            return StructNdarrayScalarMemberView(
+            view = StructNdarrayScalarMemberView(
                 self, component_name, member_dtype.dtype, offset + component_offset, path=path, component=component
             )
+            self._member_view_cache[cache_key] = view
+            return view
         if _is_matrix_type(member_dtype):
-            return StructNdarrayTensorMemberView(self, member_name, member_dtype, offset, path=path)
+            view = StructNdarrayTensorMemberView(self, member_name, member_dtype, offset, path=path)
+            self._member_view_cache[cache_key] = view
+            return view
         if member_dtype not in primitive_types.all_types:
             raise TypeError(
                 "StructNdarray.field() currently supports primitive scalar leaves and vector/matrix members. "
                 f"Member '{member_name}' has type {member_dtype}."
             )
-        return StructNdarrayScalarMemberView(self, member_name, member_dtype, offset, path=path)
+        view = StructNdarrayScalarMemberView(self, member_name, member_dtype, offset, path=path)
+        self._member_view_cache[cache_key] = view
+        return view
 
     def _sync_pending_device_write(self):
         if self._device_write_pending:
@@ -739,7 +950,7 @@ class StructNdarray(Ndarray):
     @python_scope
     def to_numpy(self):
         arr = np.empty(shape=self.shape, dtype=self.numpy_dtype)
-        if not self._sync_pending_device_write():
+        if not self._sync_pending_device_write() and _native_bulk_copy_needs_sync():
             impl.get_runtime().sync()
         impl.get_runtime().prog.copy_ndarray_to_host(self.arr, arr)
         return arr
@@ -759,6 +970,14 @@ class StructNdarray(Ndarray):
 
     @python_scope
     def to_numpy_fields(self, *names):
+        if len(names) == 1:
+            path = _normalize_struct_member_path(names[0])
+            try:
+                return {
+                    _format_struct_member_path(path): self.field(path).to_numpy()
+                }
+            except TypeError:
+                pass
         struct_arr = self.to_numpy()
         if len(names) == 0:
             names = tuple(self.struct_type.members.keys())
@@ -779,6 +998,14 @@ class StructNdarray(Ndarray):
         updates.update(kwargs)
         if len(updates) == 0:
             return
+        if len(updates) == 1:
+            name, value = next(iter(updates.items()))
+            path = _normalize_struct_member_path(name)
+            try:
+                self.field(path).from_numpy(np.asarray(value))
+                return
+            except TypeError:
+                pass
         struct_arr = self.to_numpy()
         for name, value in updates.items():
             path = _normalize_struct_member_path(name)
@@ -817,7 +1044,8 @@ class StructNdarray(Ndarray):
         self._sync_pending_device_write()
         other._sync_pending_device_write()
         impl.get_runtime().prog.copy_ndarray(self.arr, other.arr)
-        impl.get_runtime().sync()
+        if _native_bulk_copy_needs_sync():
+            impl.get_runtime().sync()
         self._device_write_pending = False
 
     def __deepcopy__(self, memo=None):

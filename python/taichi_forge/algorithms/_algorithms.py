@@ -89,7 +89,7 @@ from taichi_forge.lang._ndarray import (
     StructNdarrayTensorMemberView,
 )
 from taichi_forge.lang.kernel_impl import data_oriented
-from taichi_forge.lang.matrix import MatrixField
+from taichi_forge.lang.matrix import Matrix, MatrixField
 from taichi_forge.lang.misc import arm64, cuda, vulkan, x64
 from taichi_forge.lang.runtime_ops import sync
 from taichi_forge.lang.simt import subgroup
@@ -2176,8 +2176,58 @@ def _ad_grad(arr):
     return getattr(arr, "grad", None)
 
 
+def _ad_scalar_dtype(arr):
+    dtype = getattr(arr, "dtype", None)
+    if dtype in _SCATTER_ADD_VALUE_TYPE:
+        return dtype
+    if hasattr(dtype, "dtype"):
+        scalar_dtype = getattr(dtype, "dtype")
+        if scalar_dtype in _SCATTER_ADD_VALUE_TYPE:
+            return scalar_dtype
+    if hasattr(dtype, "element_type"):
+        try:
+            scalar_dtype = dtype.element_type()
+        except TypeError:
+            scalar_dtype = None
+        if scalar_dtype in _SCATTER_ADD_VALUE_TYPE:
+            return scalar_dtype
+    element_type = getattr(arr, "element_type", None)
+    if hasattr(element_type, "element_type"):
+        try:
+            scalar_dtype = element_type.element_type()
+        except TypeError:
+            scalar_dtype = None
+        if scalar_dtype in _SCATTER_ADD_VALUE_TYPE:
+            return scalar_dtype
+    return dtype
+
+
 def _ad_real_dtype(arr):
-    return getattr(arr, "dtype", None) in (f32, f64)
+    return _ad_scalar_dtype(arr) in (f32, f64)
+
+
+def _ad_value_type(arr):
+    dtype = _ad_scalar_dtype(arr)
+    if dtype in _SCATTER_ADD_VALUE_TYPE:
+        return _SCATTER_ADD_VALUE_TYPE[dtype]
+    raise TypeError("unsupported native autodiff dtype")
+
+
+def _ad_payload_compatible(src, dst):
+    if getattr(src, "element_shape", ()) != getattr(dst, "element_shape", ()):
+        return False
+    if hasattr(src, "layout") and hasattr(dst, "layout") and src.layout != dst.layout:
+        return False
+    if hasattr(src, "_get_element_size") and hasattr(dst, "_get_element_size"):
+        if src._get_element_size() != dst._get_element_size():
+            return False
+        scalar_dtype = _ad_scalar_dtype(src)
+        value_type = _SCATTER_ADD_VALUE_TYPE.get(scalar_dtype)
+        if value_type is None:
+            return False
+        value_size = 8 if value_type in (3, 4, 5) else 4
+        return src._get_element_size() % value_size == 0
+    return True
 
 
 def _ad_plain_ndarray(arr):
@@ -2186,13 +2236,17 @@ def _ad_plain_ndarray(arr):
 
 
 def _ad_vulkan_ndarray_grad_unsupported(*grads):
-    return current_cfg().arch == vulkan and any(isinstance(grad, Ndarray) for grad in grads)
+    return False
 
 
 def _ad_native_add_merge_supported(src, dst):
     src_view = _primitive_view(src)
     dst_view = _primitive_view(dst)
-    if src_view is None or dst_view is None or src_view.dtype != dst_view.dtype:
+    if src_view is None or dst_view is None:
+        return False
+    if _ad_scalar_dtype(src) != _ad_scalar_dtype(dst):
+        return False
+    if not _ad_payload_compatible(src, dst):
         return False
     if not src_view.is_plain_ndarray:
         return False
@@ -2232,6 +2286,8 @@ def _ad_native_accum_supported(src, dst, n):
         return False
     if _shape_tuple(src) != _shape_tuple(dst):
         return False
+    if not _ad_payload_compatible(src, dst):
+        return False
     if int(_shape_numel(src)) != int(n):
         return False
     return _ad_native_add_merge_supported(src, dst) or _ad_native_identity_scatter_supported(
@@ -2240,14 +2296,75 @@ def _ad_native_accum_supported(src, dst, n):
 
 
 def _ad_temp_like(arr, n):
+    if _is_matrix_field(arr):
+        return Matrix.field(arr.n, arr.m, dtype=arr.dtype, shape=n, ndim=arr.ndim)
     view = _primitive_view(arr)
     if view is not None and view.is_dense_field:
         return field(view.dtype, shape=n)
     return ti_ndarray(arr.dtype, shape=n)
 
 
+def _can_native_dense_matrix_field_add_merge(src, dst, n):
+    if not (_is_matrix_field(src) and _is_matrix_field(dst)):
+        return False
+    if src.n != dst.n or src.m != dst.m or src.ndim != dst.ndim:
+        return False
+    if _shape_tuple(src) != _shape_tuple(dst) or int(_shape_numel(src)) != int(n):
+        return False
+    if not _ad_real_dtype(src) or _ad_scalar_dtype(src) != _ad_scalar_dtype(dst):
+        return False
+    src_plan_fn = getattr(src, "_native_dense_packed_plan", None)
+    dst_plan_fn = getattr(dst, "_native_dense_packed_plan", None)
+    if src_plan_fn is None or dst_plan_fn is None:
+        return False
+    src_plan = src_plan_fn()
+    dst_plan = dst_plan_fn()
+    if src_plan is None or dst_plan is None:
+        return False
+    if src_plan[1] != dst_plan[1] or src_plan[3] != dst_plan[3]:
+        return False
+    value_type = src_plan[1]
+    if value_type not in (1, 5):
+        return False
+    prog = _current_program()
+    if not _prog_has(prog, "add_merge_dense_field_packed"):
+        return False
+    arch = current_cfg().arch
+    if arch == cuda:
+        return _prog_available(prog, "cuda_device_add_merge_available")
+    if arch == vulkan:
+        return _prog_available(prog, "vulkan_add_merge_available") and _prog_value_available(
+            prog, "vulkan_add_merge_value_type_available", value_type
+        )
+    if arch in (x64, arm64):
+        return _prog_available(prog, "cpu_add_merge_available")
+    return False
+
+
+def _try_native_dense_matrix_field_add_merge(src, dst, n):
+    if not _can_native_dense_matrix_field_add_merge(src, dst, n):
+        return False
+    src_plan = src._native_dense_packed_plan()
+    dst_plan = dst._native_dense_packed_plan()
+    method = _prog_method(_current_program(), "add_merge_dense_field_packed")
+    if method is None:
+        return False
+    method(
+        src_plan[0].snode.ptr,
+        dst_plan[0].snode.ptr,
+        src_plan[1],
+        int(n),
+        src_plan[3],
+    )
+    return True
+
+
 def _ad_native_accum(src, dst, n):
-    value_type = _scatter_add_value_type(dst.dtype)
+    if _try_native_dense_matrix_field_add_merge(src, dst, n):
+        return
+    if _ad_native_add_scaled(src, dst, 1.0, n):
+        return
+    value_type = _ad_value_type(dst)
     workspace = ScatterAddWorkspace(max_items=n, max_groups=n)
     method = _native_add_merge_method_for_current_arch()
     if _try_native_add_merge(src, dst, method, workspace, value_type, n):
@@ -2309,13 +2426,17 @@ def _ad_native_scalar_to_dense_accum_launcher(src, dst, n):
 def _ad_native_add_scaled_supported(src, dst, n):
     src_view = _primitive_view(src)
     dst_view = _primitive_view(dst)
-    if src_view is None or dst_view is None or src_view.dtype != dst_view.dtype:
+    if src_view is None or dst_view is None:
+        return False
+    if _ad_scalar_dtype(src) != _ad_scalar_dtype(dst):
         return False
     if not (_is_1d(src) and _is_1d(dst)):
         return False
     if _shape_tuple(src) != _shape_tuple(dst):
         return False
     if int(_shape_numel(src)) != int(n):
+        return False
+    if not _ad_payload_compatible(src, dst):
         return False
     if not _ad_real_dtype(src):
         return False
@@ -2341,7 +2462,7 @@ def _ad_native_add_scaled_launcher(src, dst, scale, n):
         return None
     src_view = _primitive_view(src)
     dst_view = _primitive_view(dst)
-    value_type = _scatter_add_value_type(dst_view.dtype)
+    value_type = _ad_value_type(dst)
 
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -2582,8 +2703,118 @@ def _can_native_ad_transform(src, dst):
         return False
     if _shape_tuple(src_grad) != _shape_tuple(dst_grad):
         return False
+    if _is_matrix_field(src_grad) or _is_matrix_field(dst_grad):
+        return _can_native_dense_matrix_field_add_merge(
+            dst_grad, src_grad, _shape_numel(src_grad)
+        )
     return _ad_real_dtype(src_grad) and _ad_native_accum_supported(
         dst_grad, src_grad, _shape_numel(src_grad)
+    )
+
+
+def _can_native_ad_copy(src, dst):
+    src_grad = _ad_grad(src)
+    dst_grad = _ad_grad(dst)
+    if src_grad is None or dst_grad is None:
+        return False
+    if _ad_vulkan_ndarray_grad_unsupported(src_grad, dst_grad):
+        return False
+    if _shape_tuple(src_grad) != _shape_tuple(dst_grad):
+        return False
+    if not _ad_payload_compatible(src_grad, dst_grad):
+        return False
+    return _ad_real_dtype(src_grad) and _ad_native_accum_supported(
+        dst_grad, src_grad, _shape_numel(src_grad)
+    )
+
+
+def _record_native_copy_ad(src, dst):
+    if not is_tape_active():
+        return False
+    if not _can_native_ad_copy(src, dst):
+        return False
+    native_primitive_ad.record_callable(
+        "copy",
+        _native_ad_backend_label(),
+        _native_ad_copy_backward,
+        src,
+        dst,
+    )
+    return True
+
+
+def _native_ad_copy_backward(src, dst):
+    _ad_sync_before_native_grad_read()
+    src_grad = _ad_grad(src)
+    dst_grad = _ad_grad(dst)
+    if src_grad is None or dst_grad is None:
+        return
+    _ad_native_accum(dst_grad, src_grad, _shape_numel(src_grad))
+
+
+def _can_native_dense_field_packed_copy_ad(
+    src_grad_first, dst_grad_first, value_type, n, lane_count
+):
+    if value_type not in (1, 5):
+        return False
+    if src_grad_first is None or dst_grad_first is None:
+        return False
+    if n < 0 or lane_count <= 0:
+        return False
+    prog = _current_program()
+    if not _prog_has(prog, "add_merge_dense_field_packed"):
+        return False
+    arch = current_cfg().arch
+    if arch == cuda:
+        return _prog_available(prog, "cuda_device_add_merge_available")
+    if arch == vulkan:
+        return _prog_available(prog, "vulkan_add_merge_available") and _prog_value_available(
+            prog, "vulkan_add_merge_value_type_available", value_type
+        )
+    if arch in (x64, arm64):
+        return _prog_available(prog, "cpu_add_merge_available")
+    return False
+
+
+def _record_native_dense_field_packed_copy_ad(
+    src_grad_first, dst_grad_first, value_type, n, lane_count
+):
+    if not is_tape_active():
+        return False
+    if not _can_native_dense_field_packed_copy_ad(
+        src_grad_first, dst_grad_first, value_type, n, lane_count
+    ):
+        return False
+    native_primitive_ad.record_callable(
+        "copy_packed_dense_field",
+        _native_ad_backend_label(),
+        _native_ad_dense_field_packed_copy_backward,
+        src_grad_first,
+        dst_grad_first,
+        int(value_type),
+        int(n),
+        int(lane_count),
+    )
+    return True
+
+
+def _native_ad_dense_field_packed_copy_backward(
+    src_grad_first, dst_grad_first, value_type, n, lane_count
+):
+    _ad_sync_before_native_grad_read()
+    prog = _current_program()
+    method = _prog_method(prog, "add_merge_dense_field_packed")
+    if method is None:
+        raise RuntimeError(
+            "native packed dense field autodiff requires "
+            "add_merge_dense_field_packed."
+        )
+    method(
+        dst_grad_first.snode.ptr,
+        src_grad_first.snode.ptr,
+        value_type,
+        n,
+        lane_count,
     )
 
 
@@ -2622,6 +2853,14 @@ def _can_native_ad_gather(src, indices, dst):
         return False
     if indices.dtype != i32 or indices.shape[0] != dst_grad.shape[0]:
         return False
+    if _is_matrix_field(src_grad) or _is_matrix_field(dst_grad):
+        if not (_is_matrix_field(src_grad) and _is_matrix_field(dst_grad)):
+            return False
+        if src_grad.n != dst_grad.n or src_grad.m != dst_grad.m:
+            return False
+        return _ad_real_dtype(src_grad) and _can_native_dense_matrix_field_add_merge(
+            src_grad, src_grad, src_grad.shape[0]
+        )
     return _ad_real_dtype(src_grad)
 
 
@@ -2670,6 +2909,14 @@ def _can_native_ad_scatter_add(src, indices, dst):
         return False
     if not _ad_real_dtype(src_grad):
         return False
+    if _is_matrix_field(src_grad) or _is_matrix_field(dst_grad):
+        if not (_is_matrix_field(src_grad) and _is_matrix_field(dst_grad)):
+            return False
+        if src_grad.n != dst_grad.n or src_grad.m != dst_grad.m:
+            return False
+        return _can_native_dense_matrix_field_add_merge(
+            src_grad, src_grad, src_grad.shape[0]
+        )
     if isinstance(indices, Ndarray):
         pass
     else:
@@ -2733,6 +2980,14 @@ def _can_native_ad_scatter(src, indices, dst):
         return False
     if not _ad_real_dtype(src_grad):
         return False
+    if _is_matrix_field(src_grad) or _is_matrix_field(dst_grad):
+        if not (_is_matrix_field(src_grad) and _is_matrix_field(dst_grad)):
+            return False
+        if src_grad.n != dst_grad.n or src_grad.m != dst_grad.m:
+            return False
+        return _can_native_dense_matrix_field_add_merge(
+            src_grad, src_grad, src_grad.shape[0]
+        )
     if isinstance(indices, Ndarray):
         pass
     else:
@@ -2787,6 +3042,8 @@ def _native_scan_ad_backend_label():
     arch = current_cfg().arch
     if arch == cuda:
         return "cuda_cub"
+    if arch == vulkan:
+        return "vulkan_native"
     if arch in (x64, arm64):
         return "cpu_native"
     return "native"
@@ -2796,14 +3053,20 @@ def _can_native_ad_scan(input_arr):
     grad = _ad_grad(input_arr)
     if grad is None:
         return False
-    if current_cfg().arch not in (cuda, x64, arm64):
+    if current_cfg().arch not in (cuda, vulkan, x64, arm64):
         return False
     if not _is_1d(grad) or not _ad_real_dtype(grad):
         return False
+    if _is_matrix_field(grad):
+        plan_fn = getattr(grad, "_native_dense_packed_plan", None)
+        if plan_fn is None:
+            return False
+        plan = plan_fn()
+        return plan is not None and plan[1] in _SCAN_VALUE_TYPE.values()
     view = _primitive_view(grad)
     if view is None:
         return False
-    return view.is_plain_ndarray or view.is_dense_field
+    return view.is_plain_ndarray or view.is_dense_field or view.is_struct_scalar_member
 
 
 def _native_scan_ad_required(input_arr):
@@ -2817,9 +3080,8 @@ def _ensure_native_scan_ad_supported(input_arr):
         return True
     raise RuntimeError(
         "PrefixSumExecutor.run() under ti.ad.Tape currently supports native "
-        "autodiff only for 1D real ndarray/dense field values on CPU/CUDA. "
-        "Vulkan scan needs a reverse native scan shader before it can safely "
-        "participate in Tape."
+        "autodiff only for 1D real ndarray/dense field/member values on "
+        "CPU/CUDA/Vulkan."
     )
 
 
@@ -2840,6 +3102,42 @@ def _native_ad_scan_backward(input_arr):
     grad = _ad_grad(input_arr)
     if grad is None:
         return
+    if _is_matrix_field(grad):
+        plan_fn = getattr(grad, "_native_dense_packed_plan", None)
+        plan = plan_fn() if plan_fn is not None else None
+        if plan is None:
+            return
+        first_component, value_type, n, lane_count = plan
+
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        impl.get_runtime().materialize()
+        prog = impl.get_runtime().prog
+        arch = current_cfg().arch
+        if arch == cuda:
+            if not _prog_available(prog, "cuda_cub_scan_available"):
+                return
+            method_name = "cuda_cub_inclusive_reverse_scan_dense_field_packed"
+        elif arch == vulkan:
+            if not _prog_available(prog, "vulkan_scan_available"):
+                return
+            if not _prog_value_available(
+                prog, "vulkan_scan_value_type_available", value_type
+            ):
+                return
+            method_name = "vulkan_inclusive_reverse_scan_dense_field_packed"
+        elif arch in (x64, arm64):
+            if not _prog_available(prog, "cpu_scan_available"):
+                return
+            method_name = "cpu_inclusive_reverse_scan_dense_field_packed"
+        else:
+            return
+        method = _prog_method(prog, method_name)
+        if method is None:
+            return
+        method(first_component.snode.ptr, value_type, n, lane_count)
+        return
+
     view = _primitive_view(grad)
     if view is None:
         return
@@ -2859,8 +3157,27 @@ def _native_ad_scan_backward(input_arr):
         if view.is_dense_field:
             method_name = "cuda_cub_inclusive_reverse_scan_dense_field"
             call_args = (view.snode, value_type, view.num_elements)
+        elif view.is_struct_scalar_member:
+            method_name = "cuda_cub_inclusive_reverse_scan_member_ndarray"
+            call_args = (view.payload_arr, value_type, view.offset, view.stride)
         else:
             method_name = "cuda_cub_inclusive_reverse_scan_ndarray"
+            call_args = (view.payload_arr, value_type)
+    elif arch == vulkan:
+        if not _prog_available(prog, "vulkan_scan_available"):
+            return
+        if not _prog_value_available(
+            prog, "vulkan_scan_value_type_available", value_type
+        ):
+            return
+        if view.is_dense_field:
+            method_name = "vulkan_inclusive_reverse_scan_dense_field"
+            call_args = (view.snode, value_type, view.num_elements)
+        elif view.is_struct_scalar_member:
+            method_name = "vulkan_inclusive_reverse_scan_member_ndarray"
+            call_args = (view.payload_arr, value_type, view.offset, view.stride)
+        else:
+            method_name = "vulkan_inclusive_reverse_scan_ndarray"
             call_args = (view.payload_arr, value_type)
     elif arch in (x64, arm64):
         if not _prog_available(prog, "cpu_scan_available"):
@@ -2868,6 +3185,9 @@ def _native_ad_scan_backward(input_arr):
         if view.is_dense_field:
             method_name = "cpu_inclusive_reverse_scan_dense_field"
             call_args = (view.snode, value_type, view.num_elements)
+        elif view.is_struct_scalar_member:
+            method_name = "cpu_inclusive_reverse_scan_member_ndarray"
+            call_args = (view.payload_arr, value_type, view.offset, view.stride)
         else:
             method_name = "cpu_inclusive_reverse_scan_ndarray"
             call_args = (view.payload_arr, value_type)
@@ -2952,6 +3272,17 @@ def _can_native_ad_grouped_reduce(keys, values, output, op):
         return False
     if not _ad_real_dtype(values_grad):
         return False
+    if _is_matrix_field(values_grad) or _is_matrix_field(output_grad):
+        if not (_is_matrix_field(values_grad) and _is_matrix_field(output_grad)):
+            return False
+        if values_grad.n != output_grad.n or values_grad.m != output_grad.m:
+            return False
+        keys_view = _primitive_view(keys)
+        if not (isinstance(keys, Ndarray) or _is_contiguous_dense_field_view(keys_view)):
+            return False
+        return _can_native_dense_matrix_field_add_merge(
+            values_grad, values_grad, values_grad.shape[0]
+        )
     if isinstance(keys, Ndarray):
         pass
     else:
@@ -3389,9 +3720,9 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
             and flags_view.is_dense_field
             and output_view.is_dense_field
             and count_view.is_scalar_field
-            and values_view.dtype == i32
+            and values_view.dtype in _COMPACT_VALUE_DTYPES
             and flags_view.dtype == i32
-            and output_view.dtype == i32
+            and output_view.dtype == values_view.dtype
             and count_view.dtype == i32
         )
 
@@ -4995,8 +5326,11 @@ class GroupedReduceWorkspace:
         self._native_grouped_reduce_plan_groups = {}
         self._staged_grouped_reduce_plan_group = None
         self._staged_grouped_reduce_plan_groups = {}
+        self._packed_grouped_reduce_plan_group = None
+        self._packed_grouped_reduce_plan_groups = {}
         self._staged_member_buffers = {}
         self._staged_member_transform_workspace = None
+        self._packed_scatter_add_workspace = None
         self._vulkan_native_active = False
 
     def check_shape(self, n, num_groups):
@@ -5024,6 +5358,9 @@ class GroupedReduceWorkspace:
         if self._staged_member_transform_workspace is not None:
             self._staged_member_transform_workspace.clear()
         self._staged_member_transform_workspace = None
+        if self._packed_scatter_add_workspace is not None:
+            self._packed_scatter_add_workspace.clear()
+        self._packed_scatter_add_workspace = None
         self._clear_native_grouped_reduce_plans()
         self._vulkan_native_active = False
 
@@ -5040,6 +5377,8 @@ class GroupedReduceWorkspace:
         self._native_grouped_reduce_plan_groups.clear()
         self._staged_grouped_reduce_plan_group = None
         self._staged_grouped_reduce_plan_groups.clear()
+        self._packed_grouped_reduce_plan_group = None
+        self._packed_grouped_reduce_plan_groups.clear()
 
     def _mark_native_grouped_reduce_backend_active(self, backend, temp_bytes):
         if backend.startswith("vulkan_"):
@@ -5198,6 +5537,75 @@ class GroupedReduceWorkspace:
             (int(value_type), int(op_id), int(output.shape[0])),
             plans,
         )
+
+    def _packed_grouped_reduce_semantic_key(
+        self, method, value_type, op_id, n, num_groups
+    ):
+        return (
+            "packed_matrix_field_grouped_reduce",
+            method,
+            int(value_type),
+            int(op_id),
+            int(n),
+            int(num_groups),
+        )
+
+    def _try_packed_grouped_reduce_plan(
+        self, keys, values, output, method, value_type, op_id, n, num_groups
+    ):
+        backend = self._native_grouped_reduce_backend_for_method(method)
+        if backend is None:
+            return False
+        semantic_key = self._packed_grouped_reduce_semantic_key(
+            method, value_type, op_id, n, num_groups
+        )
+
+        def mark_group(group, temp_bytes):
+            self._packed_grouped_reduce_plan_group = group
+            self._native_grouped_reduce_plan_group = group
+            self._native_grouped_reduce_plan = group.plans[-1] if group.plans else None
+            self._mark_native_grouped_reduce_backend_active(backend, temp_bytes)
+            self._record_staged_child_workspace(self._packed_scatter_add_workspace)
+
+        return _try_native_plan_group_from_cache(
+            self._packed_grouped_reduce_plan_group,
+            self._packed_grouped_reduce_plan_groups,
+            backend,
+            (keys, values, output),
+            semantic_key,
+            mark_group,
+        )
+
+    def _record_packed_grouped_reduce_plan(
+        self,
+        keys,
+        values,
+        output,
+        method,
+        value_type,
+        op_id,
+        n,
+        num_groups,
+        plans,
+        temp_bytes,
+    ):
+        backend = self._native_grouped_reduce_backend_for_method(method)
+        if backend is None or len(plans) < 2:
+            return
+        semantic_key = self._packed_grouped_reduce_semantic_key(
+            method, value_type, op_id, n, num_groups
+        )
+        group = _record_native_plan_group(
+            self._packed_grouped_reduce_plan_groups,
+            backend,
+            (keys, values, output),
+            semantic_key,
+            plans,
+        )
+        self._packed_grouped_reduce_plan_group = group
+        self._native_grouped_reduce_plan_group = group
+        self._native_grouped_reduce_plan = group.plans[-1] if group.plans else None
+        self._mark_native_grouped_reduce_backend_active(backend, temp_bytes)
 
     def _staged_grouped_reduce_semantic_key(
         self, method, value_type, op_id, n, num_groups
@@ -6695,12 +7103,38 @@ def _check_compact_request(values, flags, output, count, method, workspace):
             values, output, "experimental_compact()"
         )
     else:
-        if values.dtype != i32:
-            raise TypeError(
-                "experimental_compact() field_scan fallback currently supports "
-                "only ti.i32 values."
+        count_is_scalar_field = (
+            not isinstance(count, Ndarray)
+            and hasattr(count, "shape")
+            and count.shape == ()
+        )
+        dense_field_native_mode = False
+        if count_is_scalar_field and method in ("auto", "field_scan"):
+            values_view = _primitive_view(values)
+            flags_view = _primitive_view(flags)
+            output_view = _primitive_view(output)
+            count_view = _primitive_view(count)
+            dense_field_native_mode = (
+                values_view is not None
+                and flags_view is not None
+                and output_view is not None
+                and count_view is not None
+                and values_view.is_dense_field
+                and flags_view.is_dense_field
+                and output_view.is_dense_field
+                and count_view.is_scalar_field
+                and values_view.dtype in _COMPACT_VALUE_DTYPES
+                and flags_view.dtype == i32
+                and output_view.dtype == values_view.dtype
+                and count_view.dtype == i32
             )
-        if isinstance(count, Ndarray) or not hasattr(count, "shape") or count.shape != ():
+        if not dense_field_native_mode and values.dtype != i32:
+            raise TypeError(
+                "experimental_compact() field_scan helper fallback currently "
+                "supports only ti.i32 values; dense native field mode supports "
+                "ti.u32, ti.i32, ti.f32, ti.u64, ti.i64, and ti.f64 values."
+            )
+        if not count_is_scalar_field:
             raise TypeError(
                 "experimental_compact() field mode requires a scalar ti.field count."
             )
@@ -6841,9 +7275,9 @@ def _try_native_dense_field_compact(values, flags, output, count, workspace, n):
         and flags_view.is_dense_field
         and output_view.is_dense_field
         and count_view.is_scalar_field
-        and values_view.dtype == i32
+        and values_view.dtype in _COMPACT_VALUE_DTYPES
         and flags_view.dtype == i32
-        and output_view.dtype == i32
+        and output_view.dtype == values_view.dtype
         and count_view.dtype == i32
     ):
         return False
@@ -6852,16 +7286,17 @@ def _try_native_dense_field_compact(values, flags, output, count, workspace, n):
 
     impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
-    value_type = _COMPACT_VALUE_TYPE[i32]
+    value_type = _COMPACT_VALUE_TYPE[values_view.dtype]
+    value_size = _dtype_nbytes(values_view.dtype)
     if arch in (x64, arm64):
         method_name = "cpu_compact_dense_field"
         available_name = "cpu_compact_available"
         backend = "cpu_native"
     elif arch == cuda:
         if not (
-            values_view.stride == 4
+            values_view.stride == value_size
             and flags_view.stride == 4
-            and output_view.stride == 4
+            and output_view.stride == value_size
         ):
             return False
         method_name = "cuda_cub_select_dense_field"
@@ -6869,9 +7304,9 @@ def _try_native_dense_field_compact(values, flags, output, count, workspace, n):
         backend = "cuda_cub"
     elif arch == vulkan:
         if not (
-            values_view.stride == 4
+            values_view.stride == value_size
             and flags_view.stride == 4
-            and output_view.stride == 4
+            and output_view.stride == value_size
         ):
             return False
         method_name = "vulkan_compact_dense_field"
@@ -6961,6 +7396,11 @@ def _compact_field_scan(values, flags, output, count, workspace, method):
         values, flags, output, count, workspace, n
     ):
         return workspace
+    if values.dtype != i32:
+        raise RuntimeError(
+            "experimental_compact() dense field values wider than ti.i32 "
+            "require an available native dense field compact backend."
+        )
     if arch in (x64, arm64):
         compact_stable_serial_field_static_n(values, flags, output, count, n)
         workspace._record_cpu_field_scan_plan(values, flags, output, count, n)
@@ -7178,6 +7618,85 @@ def _reduce_value_type(dtype):
     if dtype in _REDUCE_VALUE_TYPE:
         return _REDUCE_VALUE_TYPE[dtype]
     raise TypeError("unsupported reduce dtype")
+
+
+def _try_native_dense_matrix_field_reduce(values, output, op, method, workspace):
+    if not (_is_matrix_field(values) and _is_matrix_field(output)):
+        return False
+    values_plan_fn = getattr(values, "_native_dense_packed_plan", None)
+    output_plan_fn = getattr(output, "_native_dense_packed_plan", None)
+    if values_plan_fn is None or output_plan_fn is None:
+        return False
+    values_plan = values_plan_fn()
+    output_plan = output_plan_fn()
+    if values_plan is None or output_plan is None:
+        return False
+    if (
+        values_plan[1] != output_plan[1]
+        or values_plan[3] != output_plan[3]
+        or output_plan[2] != 1
+    ):
+        return False
+    value_type = values_plan[1]
+    lane_count = values_plan[3]
+    op_id = _SUPPORTED_REDUCE_OPS[op]
+    arch = current_cfg().arch
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    impl.get_runtime().materialize()
+    prog = impl.get_runtime().prog
+    if arch == cuda and method in ("auto", "cuda_cub"):
+        backend = "cuda_cub"
+        if not _prog_available(prog, "cuda_cub_reduce_available"):
+            return False
+        method_name = "cuda_cub_reduce_dense_field_packed"
+    elif arch == vulkan and method in ("auto", "vulkan_native"):
+        backend = "vulkan_native"
+        if not _prog_available(prog, "vulkan_reduce_available"):
+            return False
+        if not _prog_value_available(
+            prog, "vulkan_reduce_value_type_available", value_type
+        ):
+            return False
+        method_name = "vulkan_reduce_dense_field_packed"
+    elif arch in (x64, arm64) and method in ("auto", "cpu_native"):
+        backend = "cpu_native"
+        if not _prog_available(prog, "cpu_reduce_available"):
+            return False
+        method_name = "cpu_reduce_dense_field_packed"
+    else:
+        return False
+    if not _prog_has(prog, method_name):
+        return False
+    call_args = (
+        values_plan[0].snode.ptr,
+        output_plan[0].snode.ptr,
+        value_type,
+        values_plan[2],
+        lane_count,
+        op_id,
+    )
+    try:
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
+    except RuntimeError as exc:
+        message = str(exc)
+        if "packed dense field reduce" not in message:
+            raise
+        return False
+    if workspace is not None:
+        workspace._record_native_reduce_plan(
+            backend,
+            method_name,
+            values,
+            output,
+            value_type,
+            op,
+            call_args,
+            values_plan[2],
+            prog,
+        )
+        workspace._mark_native_reduce_backend_active(backend, temp_bytes)
+    return True
 
 
 def _try_cuda_cub_reduce(values, output, op, workspace):
@@ -7679,6 +8198,9 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
                 lambda: ReduceWorkspace(max_items=values.shape[0]),
             )
         workspace.check_shape(values.shape[0])
+        if _try_native_dense_matrix_field_reduce(values, output, op, method, workspace):
+            _record_native_reduce_ad(values, output, op)
+            return workspace
         if workspace._try_native_reduce_plan_group(values, output, op, method):
             return workspace
         backend = workspace._native_reduce_backend_for_method(method)
@@ -8916,6 +9438,87 @@ def _try_cpu_transform(src, dst, value_type, scale, bias, workspace):
     return True
 
 
+def _try_native_dense_matrix_field_transform(
+    src, dst, method, value_type, scale, bias, workspace
+):
+    if not (_is_matrix_field(src) and _is_matrix_field(dst)):
+        return False
+    src_plan_fn = getattr(src, "_native_dense_packed_plan", None)
+    dst_plan_fn = getattr(dst, "_native_dense_packed_plan", None)
+    if src_plan_fn is None or dst_plan_fn is None:
+        return False
+    src_plan = src_plan_fn()
+    dst_plan = dst_plan_fn()
+    if src_plan is None or dst_plan is None:
+        return False
+    if src_plan[1] != dst_plan[1] or src_plan[2] != dst_plan[2] or src_plan[3] != dst_plan[3]:
+        return False
+    if src_plan[1] != value_type:
+        return False
+    arch = current_cfg().arch
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    impl.get_runtime().materialize()
+    prog = impl.get_runtime().prog
+    if arch == cuda and method in ("auto", "cuda_device"):
+        backend = "cuda_device"
+        if not _prog_available(prog, "cuda_device_transform_available"):
+            return False
+        if value_type in (3, 4, 5) and not _prog_available(
+            prog, "cuda_toolkit_transform_available"
+        ):
+            return False
+    elif arch == vulkan and method in ("auto", "vulkan_native"):
+        backend = "vulkan_native"
+        if not _prog_available(prog, "vulkan_transform_available"):
+            return False
+        if not _prog_value_available(
+            prog, "vulkan_transform_value_type_available", value_type
+        ):
+            return False
+    elif arch in (x64, arm64) and method in ("auto", "cpu_native"):
+        backend = "cpu_native"
+        if not _prog_available(prog, "cpu_transform_available"):
+            return False
+    else:
+        return False
+    method_name = "transform_affine_dense_field_packed"
+    method_obj = _prog_method(prog, method_name)
+    if method_obj is None:
+        return False
+    call_args = (
+        src_plan[0].snode.ptr,
+        dst_plan[0].snode.ptr,
+        value_type,
+        src_plan[2],
+        src_plan[3],
+        scale,
+        bias,
+    )
+    try:
+        temp_bytes = method_obj(*call_args)
+    except RuntimeError as exc:
+        message = str(exc)
+        if "packed dense field" not in message and "Native dense field path" not in message:
+            raise
+        return False
+    if workspace is not None:
+        workspace._record_native_transform_plan(
+            backend,
+            method_name,
+            src,
+            dst,
+            value_type,
+            scale,
+            bias,
+            call_args,
+            src_plan[2],
+            prog,
+        )
+        workspace._mark_native_transform_backend_active(backend, temp_bytes)
+    return True
+
+
 def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bias, workspace):
     src_payload = _packed_tensor_member_payload(src)
     dst_payload = _packed_tensor_member_payload(dst)
@@ -9129,7 +9732,17 @@ def experimental_transform(
             )
         workspace.check_shape(n)
         scale, bias = _normalize_transform_args(src.dtype, scale, bias)
+        value_type = _transform_value_type(src.dtype)
+        if workspace._try_native_transform_plan(src, dst, method, scale, bias):
+            _record_native_transform_ad(src, dst, scale)
+            return workspace
+        if _try_native_dense_matrix_field_transform(
+            src, dst, method, value_type, scale, bias, workspace
+        ):
+            _record_native_transform_ad(src, dst, scale)
+            return workspace
         if workspace._try_native_transform_plan_group(src, dst, method, scale, bias):
+            _record_native_transform_ad(src, dst, scale)
             return workspace
         backend = workspace._native_transform_backend_for_method(method)
         component_plans = []
@@ -9492,6 +10105,137 @@ def _try_native_dense_field_indexed_copy(src, indices, dst, method, workspace, s
             scatter,
             call_args,
             indices.shape[0],
+            prog,
+        )
+        workspace._mark_native_indexed_copy_backend_active(backend, temp_bytes)
+    return True
+
+
+def _try_native_dense_matrix_field_indexed_copy(
+    src, indices, dst, method, workspace, scatter
+):
+    if not (_is_matrix_field(src) and _is_matrix_field(dst)):
+        return False
+    indices_view = _primitive_view(indices)
+    indices_is_ndarray = isinstance(indices, Ndarray)
+    indices_is_dense_field = _is_contiguous_dense_field_view(indices_view)
+    if not indices_is_ndarray and not indices_is_dense_field:
+        return False
+    if indices_view is None or indices_view.dtype != i32:
+        return False
+    src_plan_fn = getattr(src, "_native_dense_packed_plan", None)
+    dst_plan_fn = getattr(dst, "_native_dense_packed_plan", None)
+    if src_plan_fn is None or dst_plan_fn is None:
+        return False
+    src_plan = src_plan_fn()
+    dst_plan = dst_plan_fn()
+    if src_plan is None or dst_plan is None:
+        return False
+    if src_plan[1] != dst_plan[1] or src_plan[3] != dst_plan[3]:
+        return False
+    value_type = src_plan[1]
+    lane_count = src_plan[3]
+    item_bytes = _dtype_nbytes(src.dtype) * lane_count
+    arch = current_cfg().arch
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    impl.get_runtime().materialize()
+    prog = impl.get_runtime().prog
+    if arch == cuda and method in ("auto", "cuda_device"):
+        backend = "cuda_device"
+        if not _prog_value_available(
+            prog, "cuda_device_indexed_copy_payload_available", item_bytes
+        ):
+            return False
+        if indices_is_dense_field:
+            method_name = (
+                "cuda_device_scatter_dense_field_packed_indices_field"
+                if scatter
+                else "cuda_device_gather_dense_field_packed_indices_field"
+            )
+        else:
+            method_name = (
+                "cuda_device_scatter_dense_field_packed"
+                if scatter
+                else "cuda_device_gather_dense_field_packed"
+            )
+    elif arch == vulkan and method in ("auto", "vulkan_native"):
+        backend = "vulkan_native"
+        if not _prog_available(prog, "vulkan_indexed_copy_available"):
+            return False
+        if indices_is_dense_field:
+            method_name = (
+                "vulkan_scatter_dense_field_packed_indices_field"
+                if scatter
+                else "vulkan_gather_dense_field_packed_indices_field"
+            )
+        else:
+            method_name = (
+                "vulkan_scatter_dense_field_packed"
+                if scatter
+                else "vulkan_gather_dense_field_packed"
+            )
+    elif arch in (x64, arm64) and method in ("auto", "cpu_native"):
+        backend = "cpu_native"
+        if not _prog_available(prog, "cpu_indexed_copy_available"):
+            return False
+        if indices_is_dense_field:
+            method_name = (
+                "cpu_scatter_dense_field_packed_indices_field"
+                if scatter
+                else "cpu_gather_dense_field_packed_indices_field"
+            )
+        else:
+            method_name = (
+                "cpu_scatter_dense_field_packed"
+                if scatter
+                else "cpu_gather_dense_field_packed"
+            )
+    else:
+        return False
+    if not _prog_has(prog, method_name):
+        return False
+    if indices_is_dense_field:
+        call_args = (
+            src_plan[0].snode.ptr,
+            indices_view.snode,
+            dst_plan[0].snode.ptr,
+            value_type,
+            src_plan[2],
+            indices_view.num_elements,
+            dst_plan[2],
+            lane_count,
+        )
+        request_items = indices_view.num_elements
+    else:
+        call_args = (
+            src_plan[0].snode.ptr,
+            indices.arr,
+            dst_plan[0].snode.ptr,
+            value_type,
+            src_plan[2],
+            dst_plan[2],
+            lane_count,
+        )
+        request_items = indices.shape[0]
+    try:
+        temp_bytes = _prog_method(prog, method_name)(*call_args)
+    except RuntimeError as exc:
+        message = str(exc)
+        if "packed dense field" not in message and "Native dense field path" not in message:
+            raise
+        return False
+    if workspace is not None:
+        workspace._record_native_indexed_copy_plan(
+            backend,
+            method_name,
+            src,
+            indices,
+            dst,
+            item_bytes,
+            scatter,
+            call_args,
+            request_items,
             prog,
         )
         workspace._mark_native_indexed_copy_backend_active(backend, temp_bytes)
@@ -9868,9 +10612,18 @@ def _experimental_indexed_copy(
         workspace.check_shape(n)
         if n == 0:
             return workspace
+        if workspace._try_native_indexed_copy_plan(src, indices, dst, method, scatter):
+            record_native_ad()
+            return workspace
+        if _try_native_dense_matrix_field_indexed_copy(
+            src, indices, dst, method, workspace, scatter
+        ):
+            record_native_ad()
+            return workspace
         if workspace._try_native_indexed_copy_plan_group(
             src, indices, dst, method, scatter
         ):
+            record_native_ad()
             return workspace
         backend = workspace._native_indexed_copy_backend_for_method(method)
         component_plans = []
@@ -10458,6 +11211,114 @@ def _try_cpu_scatter_add(src, indices, dst, workspace):
     return True
 
 
+def _try_native_dense_matrix_field_scatter_add(
+    src, indices, dst, method, workspace, value_type
+):
+    if not (_is_matrix_field(src) and _is_matrix_field(dst)):
+        return False
+    indices_view = _primitive_view(indices)
+    indices_is_ndarray = isinstance(indices, Ndarray)
+    indices_is_dense_field = _is_contiguous_dense_field_view(indices_view)
+    if not indices_is_ndarray and not indices_is_dense_field:
+        return False
+    if indices_view is None or indices_view.dtype != i32:
+        return False
+    src_plan_fn = getattr(src, "_native_dense_packed_plan", None)
+    dst_plan_fn = getattr(dst, "_native_dense_packed_plan", None)
+    if src_plan_fn is None or dst_plan_fn is None:
+        return False
+    src_plan = src_plan_fn()
+    dst_plan = dst_plan_fn()
+    if src_plan is None or dst_plan is None:
+        return False
+    if src_plan[1] != dst_plan[1] or src_plan[3] != dst_plan[3]:
+        return False
+    if src_plan[1] != value_type:
+        return False
+    indices_n = indices_view.num_elements if indices_is_dense_field else indices.shape[0]
+    if int(indices_n) != int(src_plan[2]):
+        return False
+    arch = current_cfg().arch
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    impl.get_runtime().materialize()
+    prog = impl.get_runtime().prog
+    if arch == cuda and method in ("auto", "cuda_device"):
+        backend = "cuda_device"
+        if not _prog_available(prog, "cuda_device_scatter_add_available"):
+            return False
+    elif arch == vulkan and method in ("auto", "vulkan_native"):
+        backend = "vulkan_native"
+        if not _prog_available(prog, "vulkan_scatter_add_available"):
+            return False
+        if not _prog_value_available(
+            prog, "vulkan_scatter_add_value_type_available", value_type
+        ):
+            return False
+    elif arch in (x64, arm64) and method in ("auto", "cpu_native"):
+        backend = "cpu_native"
+        if not _prog_available(prog, "cpu_scatter_add_available"):
+            return False
+    else:
+        return False
+    method_name = (
+        "scatter_add_dense_field_packed_indices_field"
+        if indices_is_dense_field
+        else "scatter_add_dense_field_packed"
+    )
+    method_obj = _prog_method(prog, method_name)
+    if method_obj is None:
+        return False
+    if workspace is not None and workspace._try_native_scatter_add_plan(
+        src, indices, dst, method, value_type
+    ):
+        return True
+    if indices_is_dense_field:
+        call_args = (
+            src_plan[0].snode.ptr,
+            indices_view.snode,
+            dst_plan[0].snode.ptr,
+            value_type,
+            src_plan[2],
+            indices_view.num_elements,
+            dst_plan[2],
+            src_plan[3],
+        )
+        request_items = indices_view.num_elements
+    else:
+        call_args = (
+            src_plan[0].snode.ptr,
+            indices.arr,
+            dst_plan[0].snode.ptr,
+            value_type,
+            src_plan[2],
+            dst_plan[2],
+            src_plan[3],
+        )
+        request_items = indices.shape[0]
+    try:
+        temp_bytes = method_obj(*call_args)
+    except RuntimeError as exc:
+        message = str(exc)
+        if "packed dense field" not in message and "Native dense field path" not in message:
+            raise
+        return False
+    if workspace is not None:
+        workspace._mark_native_scatter_add_backend_active(backend, temp_bytes)
+        workspace._record_native_scatter_add_plan(
+            backend,
+            method_name,
+            src,
+            indices,
+            dst,
+            value_type,
+            call_args,
+            request_items,
+            prog,
+        )
+    return True
+
+
 def _try_native_add_merge(src, dst, method, workspace, value_type, n):
     backend = workspace._native_add_merge_backend_for_method(method)
     if backend is None:
@@ -10466,7 +11327,9 @@ def _try_native_add_merge(src, dst, method, workspace, value_type, n):
     dst_view = _primitive_view(dst)
     if src_view is None or dst_view is None:
         return False
-    if src_view.dtype != dst_view.dtype:
+    if _ad_scalar_dtype(src) != _ad_scalar_dtype(dst):
+        return False
+    if not _ad_payload_compatible(src, dst):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -10695,9 +11558,15 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
         if n == 0:
             return workspace
         value_type = _scatter_add_value_type(src.dtype)
+        if _try_native_dense_matrix_field_scatter_add(
+            src, indices, dst, method, workspace, value_type
+        ):
+            _record_native_scatter_add_ad(src, indices, dst)
+            return workspace
         if workspace._try_native_scatter_add_plan_group(
             src, indices, dst, method, value_type
         ):
+            _record_native_scatter_add_ad(src, indices, dst)
             return workspace
         backend = workspace._native_scatter_add_backend_for_method(method)
         component_plans = []
@@ -10905,6 +11774,26 @@ def _check_bucket_builder_request(keys, values, offsets, output, method, workspa
         or isinstance(offsets, Ndarray)
         or isinstance(output, Ndarray)
     )
+    views = tuple(_primitive_view(arr) for arr in (keys, values, offsets, output))
+    dense_field_native_mode = (
+        not ndarray_mode
+        and method
+        in (
+            "auto",
+            "two_level",
+            "cuda_device",
+            "cuda_two_level",
+            "vulkan_native",
+            "vulkan_two_level",
+            "cpu_native",
+            "cpu_two_level",
+        )
+        and all(view is not None and view.is_dense_field for view in views)
+        and values.dtype in _BUCKET_BUILDER_VALUE_DTYPES
+        and output.dtype == values.dtype
+        and keys.dtype == i32
+        and offsets.dtype == i32
+    )
     if ndarray_mode and not _supports_opaque_raw_payload(
         values, _BUCKET_BUILDER_VALUE_DTYPES
     ):
@@ -10912,9 +11801,15 @@ def _check_bucket_builder_request(keys, values, offsets, output, method, workspa
             "experimental_bucket_builder() ndarray mode currently supports "
             "ti.u32, ti.i32, ti.f32, ti.u64, ti.i64, ti.f64, and StructNdarray values."
         )
-    elif not ndarray_mode and values.dtype not in _BUCKET_BUILDER_FIELD_DTYPES:
+    elif (
+        not ndarray_mode
+        and not dense_field_native_mode
+        and values.dtype not in _BUCKET_BUILDER_FIELD_DTYPES
+    ):
         raise TypeError(
-            "experimental_bucket_builder() field mode currently supports ti.i32 values."
+            "experimental_bucket_builder() field helper fallback currently "
+            "supports ti.i32 values; dense native field mode supports ti.u32, "
+            "ti.i32, ti.f32, ti.u64, ti.i64, and ti.f64 values."
         )
     if keys.shape[0] != values.shape[0]:
         raise ValueError("experimental_bucket_builder() keys and values sizes must match.")
@@ -11218,6 +12113,12 @@ def _bucket_builder_kernel(keys, values, offsets, output, workspace, num_bins):
         bucket_copy_offsets_to_cursor_ndarray(offsets, cursor, num_bins)
         bucket_scatter_i32_ndarray(keys, values, cursor, output, n, num_bins)
     else:
+        if values.dtype != i32:
+            raise RuntimeError(
+                "experimental_bucket_builder() field helper fallback currently "
+                "supports only ti.i32 values; select a native dense field "
+                "backend for wider values."
+            )
         cursor = workspace._get_cursor_field(num_bins)
         bucket_count_i32_field(keys, offsets, n, num_bins)
         if current_cfg().arch in [x64, arm64]:
@@ -12050,6 +12951,111 @@ def _try_cpu_grouped_reduce(keys, values, output, workspace, op):
         return finish("cpu_grouped_reduce_i32_ndarray", call_args, temp_bytes)
 
 
+def _try_native_dense_matrix_field_grouped_reduce(
+    keys, values, output, method, workspace, op
+):
+    if op != "sum":
+        return False
+    if not (_is_matrix_field(values) and _is_matrix_field(output)):
+        return False
+    if method not in ("auto", "cpu_native", "cuda_device", "vulkan_native"):
+        return False
+    backend = workspace._native_grouped_reduce_backend_for_method(method)
+    if backend is None:
+        return False
+    if not (_is_1d(keys) and _is_1d(values) and _is_1d(output)):
+        return False
+    if keys.dtype != i32 or keys.shape[0] != values.shape[0]:
+        return False
+    value_type = _grouped_reduce_value_type(values.dtype)
+    op_id = _SUPPORTED_GROUPED_REDUCE_OPS[op]
+    n = int(keys.shape[0])
+    num_groups = int(output.shape[0])
+    if workspace._try_packed_grouped_reduce_plan(
+        keys, values, output, method, value_type, op_id, n, num_groups
+    ):
+        return True
+
+    values_plan_fn = getattr(values, "_native_dense_packed_plan", None)
+    output_plan_fn = getattr(output, "_native_dense_packed_plan", None)
+    if values_plan_fn is None or output_plan_fn is None:
+        return False
+    values_plan = values_plan_fn()
+    output_plan = output_plan_fn()
+    if values_plan is None or output_plan is None:
+        return False
+    if (
+        values_plan[1] != value_type
+        or output_plan[1] != value_type
+        or values_plan[2] != n
+        or output_plan[2] != num_groups
+        or values_plan[3] != output_plan[3]
+    ):
+        return False
+
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    impl.get_runtime().materialize()
+    prog = impl.get_runtime().prog
+    fill_method = _prog_method(prog, "fill_dense_field_packed")
+    if fill_method is None:
+        return False
+    fill_args = (
+        output_plan[0].snode.ptr,
+        value_type,
+        0,
+        num_groups,
+        output_plan[3],
+    )
+    fill_temp_bytes = fill_method(*fill_args)
+    fill_plan = _NativePrimitivePlan(
+        backend=backend,
+        method_name="fill_dense_field_packed",
+        objects=(output,),
+        semantic_key=(
+            "packed_grouped_reduce_zero_fill",
+            int(value_type),
+            int(num_groups),
+            int(output_plan[3]),
+        ),
+        call_args=fill_args,
+        prog=prog,
+        value_type=value_type,
+        n=num_groups,
+    )
+
+    if workspace._packed_scatter_add_workspace is None:
+        workspace._packed_scatter_add_workspace = ScatterAddWorkspace(
+            max_items=n, max_groups=num_groups
+        )
+    scatter_workspace = workspace._packed_scatter_add_workspace
+    if not _try_native_dense_matrix_field_scatter_add(
+        values, keys, output, method, scatter_workspace, value_type
+    ):
+        return False
+    scatter_plan = scatter_workspace._native_scatter_add_plan
+    if scatter_plan is None:
+        return True
+    temp_bytes = max(
+        0 if fill_temp_bytes is None else fill_temp_bytes,
+        scatter_workspace.workspace_bytes_peak,
+    )
+    workspace.workspace_bytes_peak = max(workspace.workspace_bytes_peak, temp_bytes)
+    workspace._record_packed_grouped_reduce_plan(
+        keys,
+        values,
+        output,
+        method,
+        value_type,
+        op_id,
+        n,
+        num_groups,
+        (fill_plan, scatter_plan),
+        temp_bytes,
+    )
+    return True
+
+
 def _grouped_reduce_kernel(keys, values, output):
     n = keys.shape[0]
     num_groups = output.shape[0]
@@ -12089,6 +13095,74 @@ def experimental_grouped_reduce(
             "experimental_grouped_reduce() keys must be scalar; use "
             "arr.field(..., component=...) for vector/matrix key members."
         )
+    if _is_matrix_field(values) or _is_matrix_field(output):
+        if method not in _SUPPORTED_GROUPED_REDUCE_METHODS:
+            raise NotImplementedError(
+                f"grouped reduce method '{method}' is not implemented."
+            )
+        if op not in _SUPPORTED_GROUPED_REDUCE_OPS:
+            raise ValueError(
+                f"grouped reduce op must be one of {sorted(_SUPPORTED_GROUPED_REDUCE_OPS)}."
+            )
+        _check_matching_matrix_fields(
+            "experimental_grouped_reduce()", values, output, require_same_shape=False
+        )
+        if not (_is_1d(keys) and _is_1d(values) and _is_1d(output)):
+            raise ValueError(
+                "experimental_grouped_reduce() expects 1D keys, values, and output."
+            )
+        if keys.dtype != i32:
+            raise TypeError("experimental_grouped_reduce() currently expects ti.i32 keys.")
+        if keys.shape[0] != values.shape[0]:
+            raise ValueError(
+                "experimental_grouped_reduce() keys and values sizes must match."
+            )
+        if output.shape[0] <= 0:
+            raise ValueError(
+                "experimental_grouped_reduce() output must contain at least one group."
+            )
+        if workspace is not None and not isinstance(workspace, GroupedReduceWorkspace):
+            raise TypeError("workspace must be a GroupedReduceWorkspace instance or None.")
+        if workspace is None:
+            workspace = _get_default_workspace(
+                "grouped_reduce",
+                (keys, values, output),
+                ("grouped_reduce", op, method, int(keys.shape[0]), int(output.shape[0])),
+                lambda: GroupedReduceWorkspace(
+                    max_items=keys.shape[0], max_groups=output.shape[0]
+                ),
+            )
+        workspace.check_shape(keys.shape[0], output.shape[0])
+        if keys.shape[0] == 0:
+            output.fill(0)
+            return workspace
+        if _try_native_dense_matrix_field_grouped_reduce(
+            keys, values, output, method, workspace, op
+        ):
+            _record_native_grouped_reduce_ad(keys, values, output, op)
+            return workspace
+        scatter_method = {
+            "cuda_segmented": "cuda_two_level",
+            "vulkan_segmented": "vulkan_two_level",
+            "segmented": "two_level",
+        }.get(method, method)
+        if workspace._packed_scatter_add_workspace is None:
+            workspace._packed_scatter_add_workspace = ScatterAddWorkspace(
+                max_items=keys.shape[0], max_groups=output.shape[0]
+            )
+        output.fill(0)
+        experimental_scatter_add(
+            values,
+            keys,
+            output,
+            method=scatter_method,
+            workspace=workspace._packed_scatter_add_workspace,
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak,
+            workspace._packed_scatter_add_workspace.workspace_bytes_peak,
+        )
+        return workspace
     if _is_struct_tensor_member_view(values) or _is_struct_tensor_member_view(output):
         if method not in _SUPPORTED_GROUPED_REDUCE_METHODS:
             raise NotImplementedError(
@@ -12312,6 +13386,12 @@ def experimental_grouped_reduce(
             "consume strided member views."
         )
     if method in ("kernel", "field_kernel", "auto"):
+        if values.dtype != i32:
+            raise RuntimeError(
+                "experimental_grouped_reduce() field helper fallback currently "
+                "supports only ti.i32 values; select a native dense field "
+                "backend for wider values."
+            )
         if _should_record_legacy_helper_fallback(method):
             _record_legacy_helper_fallback(
                 "experimental_grouped_reduce()", method, "field_kernel"
@@ -12412,10 +13492,9 @@ class PrefixSumExecutor:
         if group.plans:
             self._native_scan_plan = group.plans[-1]
 
-    def _record_native_scan_plan(
-        self, backend, method_name, input_arr, view, call_args, prog
+    def _record_native_scan_plan_raw(
+        self, backend, method_name, input_arr, value_type, n, call_args, prog
     ):
-        value_type = self._scan_value_type(view.dtype)
         plan = _record_native_primitive_plan(
             self._native_scan_plans,
             backend,
@@ -12425,9 +13504,23 @@ class PrefixSumExecutor:
             call_args,
             prog,
             value_type,
-            view.num_elements,
+            n,
         )
         self._native_scan_plan = plan
+
+    def _record_native_scan_plan(
+        self, backend, method_name, input_arr, view, call_args, prog
+    ):
+        value_type = self._scan_value_type(view.dtype)
+        self._record_native_scan_plan_raw(
+            backend,
+            method_name,
+            input_arr,
+            value_type,
+            view.num_elements,
+            call_args,
+            prog,
+        )
 
     def _record_native_scan_plan_group(self, input_arr, plans):
         backend = self._native_scan_backend_for_arch()
@@ -12438,6 +13531,55 @@ class PrefixSumExecutor:
             (self.sorting_length,),
             plans,
         )
+
+    def _try_native_dense_matrix_field_scan(self, input_arr):
+        if not _is_matrix_field(input_arr) or not _is_1d(input_arr):
+            return False
+        plan_fn = getattr(input_arr, "_native_dense_packed_plan", None)
+        if plan_fn is None:
+            return False
+        plan = plan_fn()
+        if plan is None:
+            return False
+        first_component, value_type, n, lane_count = plan
+        if n != self.sorting_length:
+            return False
+
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        impl.get_runtime().materialize()
+        prog = impl.get_runtime().prog
+        arch = current_cfg().arch
+        if arch == cuda:
+            backend = "cuda_cub"
+            if not _prog_available(prog, "cuda_cub_scan_available"):
+                return False
+            method_name = "cuda_cub_inclusive_scan_dense_field_packed"
+        elif arch == vulkan:
+            backend = "vulkan_native"
+            if not _prog_available(prog, "vulkan_scan_available"):
+                return False
+            if not _prog_value_available(
+                prog, "vulkan_scan_value_type_available", value_type
+            ):
+                return False
+            method_name = "vulkan_inclusive_scan_dense_field_packed"
+        elif arch in (x64, arm64):
+            backend = "cpu_native"
+            if not _prog_available(prog, "cpu_scan_available"):
+                return False
+            method_name = "cpu_inclusive_scan_dense_field_packed"
+        else:
+            return False
+        method = _prog_method(prog, method_name)
+        if method is None:
+            return False
+        call_args = (first_component.snode.ptr, value_type, n, lane_count)
+        method(*call_args)
+        self._record_native_scan_plan_raw(
+            backend, method_name, input_arr, value_type, n, call_args, prog
+        )
+        return True
 
     def _try_cuda_cub_scan(self, input_arr):
         if current_cfg().arch != cuda:
@@ -12645,6 +13787,14 @@ class PrefixSumExecutor:
         record_scan_ad = _ensure_native_scan_ad_supported(input_arr)
 
         if _is_matrix_field(input_arr):
+            if self._try_native_scan_plan(input_arr):
+                if record_scan_ad:
+                    _record_native_scan_ad(input_arr)
+                return
+            if self._try_native_dense_matrix_field_scan(input_arr):
+                if record_scan_ad:
+                    _record_native_scan_ad(input_arr)
+                return
             if self._try_native_scan_plan_group(input_arr):
                 if record_scan_ad:
                     _record_native_scan_ad(input_arr)
@@ -12725,6 +13875,8 @@ class PrefixSumExecutor:
                 _record_native_scan_ad(input_arr)
             return
         if self._try_vulkan_native_scan(input_arr):
+            if record_scan_ad:
+                _record_native_scan_ad(input_arr)
             return
         if self._try_cpu_native_scan(input_arr):
             if record_scan_ad:
