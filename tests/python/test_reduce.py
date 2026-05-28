@@ -92,6 +92,7 @@ def _native_reduce_method_for_current_arch():
 def _run_dense_matrix_field_reduce_case():
     n = 128
     method, expected_method = _native_reduce_method_for_current_arch()
+    expected_method = f"{expected_method}_packed"
     values = ti.Vector.field(2, ti.i32, shape=n)
     output = ti.Vector.field(2, ti.i32, shape=())
     values_np = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 17) - 8
@@ -106,9 +107,9 @@ def _run_dense_matrix_field_reduce_case():
     np.testing.assert_array_equal(
         output.to_numpy(), np.sum(values_np, axis=0, dtype=np.int32)
     )
-    assert len(workspace._native_reduce_plans) == 2
+    assert len(workspace._native_reduce_plans) == 1
     assert workspace._native_reduce_plan.method_name == expected_method
-    assert len(workspace._native_reduce_plan_groups) == 1
+    assert len(workspace._native_reduce_plan_groups) == 0
 
     output.fill(0)
     ti.algorithms.experimental_reduce(
@@ -117,7 +118,7 @@ def _run_dense_matrix_field_reduce_case():
     np.testing.assert_array_equal(
         output.to_numpy(), np.sum(values_np, axis=0, dtype=np.int32)
     )
-    assert len(workspace._native_reduce_plan_groups) == 1
+    assert len(workspace._native_reduce_plans) == 1
 
 
 def _run_struct_member_reduce_case(n, dtype, np_dtype, method, workspace):

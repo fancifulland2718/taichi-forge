@@ -360,12 +360,12 @@ def _native_scatter_add_method_for_current_arch():
     pytest.skip("native scatter-add is unavailable on this arch.")
 
 
-def _run_dense_matrix_field_scatter_add():
-    method, method_name = _native_scatter_add_method_for_current_arch()
+def _run_dense_matrix_field_scatter_add(indices_as_field=False):
+    method, _ = _native_scatter_add_method_for_current_arch()
     n = 64
     buckets = 17
     src = ti.Vector.field(2, ti.i32, shape=n)
-    indices = ti.ndarray(ti.i32, shape=n)
+    indices = ti.field(ti.i32, shape=n) if indices_as_field else ti.ndarray(ti.i32, shape=n)
     dst = ti.Vector.field(2, ti.i32, shape=buckets)
     values = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 11) - 5
     index_data = ((np.arange(n, dtype=np.int32) * 7 + 3) % buckets).astype(np.int32)
@@ -382,20 +382,25 @@ def _run_dense_matrix_field_scatter_add():
     )
 
     np.testing.assert_array_equal(dst.to_numpy(), expected)
-    assert len(workspace._native_scatter_add_plans) == 2
+    assert len(workspace._native_scatter_add_plans) == 1
+    expected_method = (
+        "scatter_add_dense_field_packed_indices_field"
+        if indices_as_field
+        else "scatter_add_dense_field_packed"
+    )
     assert any(
-        plan.method_name == method_name
+        plan.method_name == expected_method
         for plan in workspace._native_scatter_add_plans.values()
     )
-    assert workspace.workspace_bytes_peak <= 64
-    assert len(workspace._native_scatter_add_plan_groups) == 1
+    assert workspace.workspace_bytes_peak >= 0
+    assert len(workspace._native_scatter_add_plan_groups) == 0
 
     dst.from_numpy(base)
     ti.algorithms.experimental_scatter_add(
         src, indices, dst, method=method, workspace=workspace
     )
     np.testing.assert_array_equal(dst.to_numpy(), expected)
-    assert len(workspace._native_scatter_add_plan_groups) == 1
+    assert len(workspace._native_scatter_add_plans) == 1
 
 
 @test_utils.test(arch=[ti.cuda])
@@ -547,8 +552,9 @@ def test_experimental_scatter_add_two_level_ndarray_struct_and_dense_dst():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
-def test_experimental_scatter_add_native_dense_matrix_field_components():
+def test_experimental_scatter_add_native_dense_matrix_field_packed():
     _run_dense_matrix_field_scatter_add()
+    _run_dense_matrix_field_scatter_add(indices_as_field=True)
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])

@@ -233,6 +233,32 @@ def test_struct_ndarray_numpy_roundtrip_and_copy():
     np.testing.assert_array_equal(dst.to_numpy(), src)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_struct_ndarray_native_bulk_no_compile():
+    pixel = ti.types.struct(depth=ti.f32, color=ti.types.vector(3, ti.f32), idx=ti.i32)
+    arr = ti.ndarray(pixel, shape=257)
+    dst = ti.ndarray(pixel, shape=257)
+
+    src = np.zeros((257,), dtype=arr.numpy_dtype)
+    src["depth"] = np.arange(257, dtype=np.float32) * 0.5
+    src["color"] = np.arange(257 * 3, dtype=np.float32).reshape(257, 3) - 11.0
+    src["idx"] = np.arange(257, dtype=np.int32) * 7 - 13
+
+    compiled_functions = impl.get_runtime().get_num_compiled_functions()
+    arr.from_numpy(src)
+    np.testing.assert_array_equal(arr.to_numpy(), src)
+
+    dst.fill(0)
+    zeroed = dst.to_numpy()
+    assert (zeroed["depth"] == 0).all()
+    assert (zeroed["color"] == 0).all()
+    assert (zeroed["idx"] == 0).all()
+
+    dst.copy_from(arr)
+    np.testing.assert_array_equal(dst.to_numpy(), src)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
+
+
 @test_utils.test(arch=get_host_arch_list())
 def test_struct_ndarray_rejects_unsupported_python_access_and_dtype():
     pixel = ti.types.struct(depth=ti.f32, idx=ti.i32)
@@ -334,6 +360,70 @@ def test_struct_ndarray_scalar_member_view_roundtrip():
     color.from_numpy(updated_color)
     expected["color"] = updated_color
     np.testing.assert_array_equal(arr.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_struct_ndarray_large_scalar_member_view_native_host_copy_no_compile():
+    n = 65536
+    pixel = ti.types.struct(depth=ti.f32, color=ti.types.vector(3, ti.f32), idx=ti.i32)
+    arr = ti.ndarray(pixel, shape=n)
+    src = np.zeros((n,), dtype=arr.numpy_dtype)
+    src["depth"] = np.arange(n, dtype=np.float32) * 0.25
+    src["color"] = np.arange(n * 3, dtype=np.float32).reshape(n, 3) - 9.0
+    src["idx"] = np.arange(n, dtype=np.int32) * 2 - 5
+    arr.from_numpy(src)
+
+    depth = arr.field("depth")
+    compiled_functions = impl.get_runtime().get_num_compiled_functions()
+    np.testing.assert_array_equal(depth.to_numpy(), src["depth"])
+    assert depth._native_host_copy_tmp is not None
+
+    updated = np.arange(n, dtype=np.float32) * -0.5
+    depth.from_numpy(updated)
+    expected = src.copy()
+    expected["depth"] = updated
+    np.testing.assert_array_equal(arr.to_numpy(), expected)
+
+    fields = arr.to_numpy_fields("depth")
+    np.testing.assert_array_equal(fields["depth"], updated)
+
+    restored = src["depth"].copy()
+    arr.from_numpy_fields({"depth": restored})
+    expected["depth"] = restored
+    np.testing.assert_array_equal(arr.to_numpy(), expected)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_struct_ndarray_large_tensor_member_view_native_host_copy_no_compile():
+    n = 65536
+    pixel = ti.types.struct(depth=ti.f32, color=ti.types.vector(3, ti.f32), idx=ti.i32)
+    arr = ti.ndarray(pixel, shape=n)
+    src = np.zeros((n,), dtype=arr.numpy_dtype)
+    src["depth"] = np.arange(n, dtype=np.float32) * 0.25
+    src["color"] = np.arange(n * 3, dtype=np.float32).reshape(n, 3) - 9.0
+    src["idx"] = np.arange(n, dtype=np.int32) * 2 - 5
+    arr.from_numpy(src)
+
+    color = arr.field("color")
+    compiled_functions = impl.get_runtime().get_num_compiled_functions()
+    np.testing.assert_array_equal(color.to_numpy(), src["color"])
+    assert color._native_host_copy_tmp is not None
+
+    updated = np.arange(n * 3, dtype=np.float32).reshape(n, 3) * -0.125
+    color.from_numpy(updated)
+    expected = src.copy()
+    expected["color"] = updated
+    np.testing.assert_array_equal(arr.to_numpy(), expected)
+
+    fields = arr.to_numpy_fields("color")
+    np.testing.assert_array_equal(fields["color"], updated)
+
+    restored = src["color"].copy()
+    arr.from_numpy_fields({"color": restored})
+    expected["color"] = restored
+    np.testing.assert_array_equal(arr.to_numpy(), expected)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
 
 
 @test_utils.test(arch=get_host_arch_list())
@@ -638,6 +728,66 @@ def test_ndarray_native_copy_from():
     assert (dst_mat.to_numpy() == src_mat_np).all()
 
 
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
+def test_scalar_ndarray_native_copy_from_tape_grad_no_compile():
+    n = 16
+    src = ti.ndarray(ti.f32, shape=n, needs_grad=True)
+    dst = ti.ndarray(ti.f32, shape=n, needs_grad=True)
+    loss = ti.field(ti.f32, shape=(), needs_grad=True)
+    src.from_numpy(np.arange(n, dtype=np.float32))
+
+    @ti.kernel
+    def reduce_dst(arr: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        for i in range(n):
+            loss[None] += 3.0 * arr[i]
+
+    with ti.ad.Tape(loss):
+        compiled_functions = impl.get_runtime().get_num_compiled_functions()
+        dst.copy_from(src)
+        assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
+        reduce_dst(dst)
+
+    np.testing.assert_array_equal(
+        src.grad.to_numpy(), np.full((n,), 3.0, dtype=np.float32)
+    )
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
+def test_matrix_ndarray_native_copy_from_tape_grad_no_compile():
+    n = 8
+    src = ti.ndarray(ti.math.mat2, shape=n, needs_grad=True)
+    dst = ti.ndarray(ti.math.mat2, shape=n, needs_grad=True)
+    loss = ti.field(ti.f32, shape=(), needs_grad=True)
+    src.from_numpy(np.arange(n * 4, dtype=np.float32).reshape(n, 2, 2))
+
+    @ti.kernel
+    def reduce_dst(arr: ti.types.ndarray(dtype=ti.math.mat2, ndim=1)):
+        for i in range(n):
+            for j, k in ti.static(ti.ndrange(2, 2)):
+                loss[None] += (j + 2 * k + 1) * arr[i][j, k]
+
+    expected = np.zeros((n, 2, 2), dtype=np.float32)
+    for j in range(2):
+        for k in range(2):
+            expected[:, j, k] = j + 2 * k + 1
+
+    with ti.ad.Tape(loss):
+        compiled_functions = impl.get_runtime().get_num_compiled_functions()
+        dst.copy_from(src)
+        assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
+        reduce_dst(dst)
+
+    np.testing.assert_array_equal(src.grad.to_numpy(), expected)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_ndarray_copy_from_dtype_cast_fallback():
     n = 8
@@ -783,6 +933,77 @@ def test_ndarray_native_zero_fill():
     mat.fill(5)
     mat.fill(0)
     assert (mat.to_numpy() == np.zeros((n, 2, 2), dtype=np.int32)).all()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_matrix_ndarray_scalar_fill_native_no_compile():
+    n = 257
+
+    vec = ti.Vector.ndarray(4, ti.f32, shape=n)
+    compiled_functions = impl.get_runtime().get_num_compiled_functions()
+    vec.fill(2.5)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
+    np.testing.assert_array_equal(
+        vec.to_numpy(), np.full((n, 4), 2.5, dtype=np.float32)
+    )
+
+    mat = ti.Matrix.ndarray(2, 3, ti.i32, shape=n)
+    compiled_functions = impl.get_runtime().get_num_compiled_functions()
+    mat.fill(7)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
+    np.testing.assert_array_equal(
+        mat.to_numpy(), np.full((n, 2, 3), 7, dtype=np.int32)
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_ndarray_64bit_scalar_fill_no_compile():
+    n = 257
+
+    scalar_f64 = ti.ndarray(ti.f64, shape=n)
+    compiled_functions = impl.get_runtime().get_num_compiled_functions()
+    scalar_f64.fill(-3.25)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
+    np.testing.assert_array_equal(
+        scalar_f64.to_numpy(), np.full((n,), -3.25, dtype=np.float64)
+    )
+
+    scalar_i64 = ti.ndarray(ti.i64, shape=n)
+    compiled_functions = impl.get_runtime().get_num_compiled_functions()
+    scalar_i64.fill(-1234567890123)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
+    np.testing.assert_array_equal(
+        scalar_i64.to_numpy(), np.full((n,), -1234567890123, dtype=np.int64)
+    )
+
+    vec_f64 = ti.Vector.ndarray(3, ti.f64, shape=n)
+    compiled_functions = impl.get_runtime().get_num_compiled_functions()
+    vec_f64.fill(1.25)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
+    np.testing.assert_array_equal(
+        vec_f64.to_numpy(), np.full((n, 3), 1.25, dtype=np.float64)
+    )
+
+    mat_u64 = ti.Matrix.ndarray(2, 2, ti.u64, shape=n)
+    fill_value = np.uint64(0xFEDCBA9876543210)
+    compiled_functions = impl.get_runtime().get_num_compiled_functions()
+    mat_u64.fill(fill_value)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
+    np.testing.assert_array_equal(
+        mat_u64.to_numpy(), np.full((n, 2, 2), fill_value, dtype=np.uint64)
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_ndarray_large_native_host_copy_no_compile():
+    n = 8192
+    arr = ti.Vector.ndarray(4, ti.f32, shape=n)
+    src = np.arange(n * 4, dtype=np.float32).reshape(n, 4) * 0.25
+
+    compiled_functions = impl.get_runtime().get_num_compiled_functions()
+    arr.from_numpy(src)
+    np.testing.assert_array_equal(arr.to_numpy(), src)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
 
 
 @test_utils.test(arch=supported_archs_taichi_ndarray)

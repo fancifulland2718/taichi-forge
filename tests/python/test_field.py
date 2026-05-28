@@ -166,6 +166,59 @@ def test_scalar_field_cpu_dense_native_fill(dtype, np_dtype, value):
     np.testing.assert_array_equal(x.to_numpy(), expected)
 
 
+@pytest.mark.parametrize(
+    "dtype, np_dtype, fill_value",
+    [
+        (ti.i32, np.int32, -11),
+        (ti.u32, np.uint32, 13),
+        (ti.f32, np.float32, 2.25),
+    ],
+)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_scalar_field_dense_native_bulk_api(dtype, np_dtype, fill_value):
+    n = 257
+    x = ti.field(dtype, shape=n)
+    src = (np.arange(n, dtype=np_dtype) % np_dtype(23)).astype(np_dtype)
+    x.from_numpy(src)
+    np.testing.assert_array_equal(x.to_numpy(), src)
+
+    x.fill(0)
+    np.testing.assert_array_equal(x.to_numpy(), np.zeros(n, dtype=np_dtype))
+
+    x.fill(fill_value)
+    expected = np.full(n, fill_value, dtype=np_dtype)
+    np.testing.assert_array_equal(x.to_numpy(), expected)
+
+
+@pytest.mark.parametrize("dtype, np_dtype", [(ti.i32, np.int32), (ti.f32, np.float32)])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_matrix_field_dense_bulk_api_correctness(dtype, np_dtype):
+    n = 17
+    x = ti.Matrix.field(2, 2, dtype=dtype, shape=n)
+    src = np.arange(n * 4, dtype=np_dtype).reshape(n, 2, 2)
+    x.from_numpy(src)
+    np.testing.assert_array_equal(x.to_numpy(), src)
+
+    x.fill(0)
+    np.testing.assert_array_equal(x.to_numpy(), np.zeros((n, 2, 2), dtype=np_dtype))
+
+
+@pytest.mark.parametrize("dtype, np_dtype", [(ti.i32, np.int32), (ti.f32, np.float32)])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_matrix_field_dense_packed_bulk_no_compile(dtype, np_dtype):
+    n = 23
+    x = ti.Matrix.field(2, 2, dtype=dtype, shape=n)
+    values = np.arange(n * 4, dtype=np_dtype).reshape(n, 2, 2)
+    compiled_functions = impl.get_runtime().get_num_compiled_functions()
+    x.from_numpy(values)
+    np.testing.assert_array_equal(x.to_numpy(), values)
+    x.fill(0)
+    np.testing.assert_array_equal(
+        x.to_numpy(), np.zeros((n, 2, 2), dtype=np_dtype)
+    )
+    assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
+
+
 @test_utils.test(arch=get_host_arch_list())
 def test_field_needs_grad():
     # Just make sure the usage doesn't crash, see #1545
@@ -296,6 +349,97 @@ def test_field_copy_from(shape, dtype):
     assert convert(x.shape) == shape
     assert x.dtype == ti.f32
     assert (x.to_numpy() == 1).all()
+
+
+@pytest.mark.parametrize(
+    "dtype, np_dtype",
+    [(ti.i32, np.int32), (ti.f32, np.float32), (ti.u32, np.uint32)],
+)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_scalar_field_dense_native_copy_from_no_compile(dtype, np_dtype):
+    n = 257
+    src = ti.field(dtype=dtype, shape=n)
+    dst = ti.field(dtype=dtype, shape=n)
+    values = np.arange(n, dtype=np_dtype)
+    src.from_numpy(values)
+    dst.fill(0)
+
+    compiled_functions = impl.get_runtime().get_num_compiled_functions()
+    dst.copy_from(src)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
+    np.testing.assert_array_equal(dst.to_numpy(), values)
+
+
+@pytest.mark.parametrize(
+    "dtype, np_dtype",
+    [(ti.i32, np.int32), (ti.f32, np.float32)],
+)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_matrix_field_dense_native_copy_from_no_compile(dtype, np_dtype):
+    n = 37
+    src = ti.Matrix.field(2, 3, dtype=dtype, shape=n)
+    dst = ti.Matrix.field(2, 3, dtype=dtype, shape=n)
+    values = np.arange(n * 6, dtype=np_dtype).reshape(n, 2, 3)
+    src.from_numpy(values)
+    dst.fill(0)
+
+    compiled_functions = impl.get_runtime().get_num_compiled_functions()
+    dst.copy_from(src)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
+    np.testing.assert_array_equal(dst.to_numpy(), values)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_scalar_field_dense_native_copy_from_tape_grad_no_compile():
+    n = 16
+    src = ti.field(dtype=ti.f32, shape=n, needs_grad=True)
+    dst = ti.field(dtype=ti.f32, shape=n, needs_grad=True)
+    loss = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
+    src.from_numpy(np.arange(n, dtype=np.float32))
+
+    @ti.kernel
+    def reduce_dst():
+        for i in range(n):
+            loss[None] += 2.0 * dst[i]
+
+    with ti.ad.Tape(loss):
+        compiled_functions = impl.get_runtime().get_num_compiled_functions()
+        dst.copy_from(src)
+        assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
+        reduce_dst()
+
+    np.testing.assert_array_equal(
+        src.grad.to_numpy(), np.full((n,), 2.0, dtype=np.float32)
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_matrix_field_dense_native_copy_from_tape_grad_no_compile():
+    n = 8
+    src = ti.Matrix.field(2, 3, dtype=ti.f32, shape=n, needs_grad=True)
+    dst = ti.Matrix.field(2, 3, dtype=ti.f32, shape=n, needs_grad=True)
+    loss = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
+    values = np.arange(n * 6, dtype=np.float32).reshape(n, 2, 3)
+    src.from_numpy(values)
+
+    @ti.kernel
+    def reduce_dst():
+        for i in range(n):
+            for j, k in ti.static(ti.ndrange(2, 3)):
+                loss[None] += (j + k + 1) * dst[i][j, k]
+
+    expected = np.zeros((n, 2, 3), dtype=np.float32)
+    for j in range(2):
+        for k in range(3):
+            expected[:, j, k] = j + k + 1
+
+    with ti.ad.Tape(loss):
+        compiled_functions = impl.get_runtime().get_num_compiled_functions()
+        dst.copy_from(src)
+        assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
+        reduce_dst()
+
+    np.testing.assert_array_equal(src.grad.to_numpy(), expected)
 
 
 @test_utils.test()

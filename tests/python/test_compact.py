@@ -267,6 +267,42 @@ def test_experimental_compact_cpu_dense_field_native_avoids_helper_policy():
     assert np.array_equal(output.to_numpy()[: expected.shape[0]], expected)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_compact_dense_field_native_f32_no_helper():
+    n = 512
+    values_np = _compact_values(n, np.float32)
+    flags_np = ((np.arange(n) % 4 == 0) | (np.arange(n) % 9 == 0)).astype(
+        np.int32
+    )
+    values = ti.field(ti.f32, shape=n)
+    flags = ti.field(ti.i32, shape=n)
+    output = ti.field(ti.f32, shape=n)
+    count = ti.field(ti.i32, shape=())
+    values.from_numpy(values_np)
+    flags.from_numpy(flags_np)
+    output.fill(np.float32(-999.0))
+    count[None] = -1
+
+    workspace = ti.algorithms.CompactWorkspace(max_items=n)
+    ti.algorithms.clear_legacy_helper_fallback_counts()
+    ti.algorithms.set_legacy_helper_auto_fallback_enabled(False)
+    try:
+        try:
+            ti.algorithms.experimental_compact(
+                values, flags, output, count, method="auto", workspace=workspace
+            )
+        except RuntimeError as exc:
+            pytest.skip(str(exc))
+        assert ti.algorithms.get_legacy_helper_fallback_counts() == {}
+    finally:
+        ti.algorithms.reset_legacy_helper_auto_fallback_policy()
+        ti.algorithms.clear_legacy_helper_fallback_counts()
+
+    expected = values_np[flags_np != 0]
+    assert count[None] == expected.shape[0]
+    _assert_compact_matches(output.to_numpy()[: expected.shape[0]], expected)
+
+
 @test_utils.test(arch=[ti.cuda])
 def test_experimental_compact_cuda_field_scan_uses_cub_native_workspace():
     n = 4096

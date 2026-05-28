@@ -121,7 +121,7 @@ def _native_transform_method_for_current_arch():
 
 def _run_dense_matrix_field_transform_case():
     n = 128
-    method, expected_method = _native_transform_method_for_current_arch()
+    method, _ = _native_transform_method_for_current_arch()
     src = ti.Vector.field(2, ti.i32, shape=n)
     dst = ti.Vector.field(2, ti.i32, shape=n)
     values = np.arange(n * 2, dtype=np.int32).reshape(n, 2) - 17
@@ -134,17 +134,20 @@ def _run_dense_matrix_field_transform_case():
     )
 
     np.testing.assert_array_equal(dst.to_numpy(), values * 3 + 5)
-    assert len(workspace._native_transform_plans) == 2
-    assert workspace._native_transform_plan.method_name == expected_method
+    assert len(workspace._native_transform_plans) == 1
+    assert (
+        workspace._native_transform_plan.method_name
+        == "transform_affine_dense_field_packed"
+    )
     assert workspace.workspace_bytes_peak >= 0
-    assert len(workspace._native_transform_plan_groups) == 1
+    assert len(workspace._native_transform_plan_groups) == 0
 
     dst.fill(0)
     ti.algorithms.experimental_transform(
         src, dst, scale=3, bias=5, method=method, workspace=workspace
     )
     np.testing.assert_array_equal(dst.to_numpy(), values * 3 + 5)
-    assert len(workspace._native_transform_plan_groups) == 1
+    assert len(workspace._native_transform_plans) == 1
 
 
 def _run_struct_tensor_member_transform_case(dtype, shape, method, workspace=None):
@@ -577,7 +580,12 @@ def test_experimental_transform_vulkan_native_struct_tensor_member_view():
         _run_struct_tensor_member_transform_case(
             dtype, n, method="vulkan_native", workspace=workspace
         )
-        assert workspace.workspace_bytes_peak >= 28
+        assert workspace._native_transform_plan is not None
+        assert (
+            workspace._native_transform_plan.method_name
+            == "vulkan_transform_affine_packed_strided_ndarray"
+        )
+        assert workspace.workspace_bytes_peak >= 8
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

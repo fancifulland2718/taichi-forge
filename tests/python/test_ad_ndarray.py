@@ -9,11 +9,12 @@ from taichi_forge.lang.util import has_pytorch
 if has_pytorch():
     import torch
 
-archs_support_ndarray_ad = [ti.cpu, ti.cuda]
+archs_support_ndarray_ad = [ti.cpu, ti.cuda, ti.vulkan]
+archs_support_torch_ndarray_ad = [ti.cpu, ti.cuda]
 
 
 @pytest.mark.skipif(not has_pytorch(), reason="Pytorch not installed.")
-@test_utils.test(arch=archs_support_ndarray_ad, default_fp=ti.f64)
+@test_utils.test(arch=archs_support_torch_ndarray_ad, default_fp=ti.f64)
 def test_simple_demo():
     @test_utils.torch_op(output_shapes=[(1,)])
     @ti.kernel
@@ -30,7 +31,7 @@ def test_simple_demo():
 
 
 @pytest.mark.skipif(not has_pytorch(), reason="Pytorch not installed.")
-@test_utils.test(arch=archs_support_ndarray_ad, default_fp=ti.f64)
+@test_utils.test(arch=archs_support_torch_ndarray_ad, default_fp=ti.f64)
 def test_ad_reduce():
     @test_utils.torch_op(output_shapes=[(1,)])
     @ti.kernel
@@ -84,7 +85,7 @@ def test_ad_reduce():
     ],
 )
 @pytest.mark.skipif(not has_pytorch(), reason="Pytorch not installed.")
-@test_utils.test(arch=archs_support_ndarray_ad, default_fp=ti.f64)
+@test_utils.test(arch=archs_support_torch_ndarray_ad, default_fp=ti.f64)
 def test_poly(tifunc):
     s = (4,)
 
@@ -100,7 +101,7 @@ def test_poly(tifunc):
 
 
 @pytest.mark.skipif(not has_pytorch(), reason="Pytorch not installed.")
-@test_utils.test(arch=archs_support_ndarray_ad, default_fp=ti.f64)
+@test_utils.test(arch=archs_support_torch_ndarray_ad, default_fp=ti.f64)
 def test_ad_select():
     s = (4,)
 
@@ -1261,7 +1262,7 @@ def test_ad_set_loss_grad():
 
 
 @pytest.mark.skipif(not has_pytorch(), reason="Pytorch not installed.")
-@test_utils.test(arch=archs_support_ndarray_ad)
+@test_utils.test(arch=archs_support_torch_ndarray_ad)
 def test_ad_mixed_with_torch():
     @test_utils.torch_op(output_shapes=[(1,)])
     @ti.kernel
@@ -1280,7 +1281,7 @@ def test_ad_mixed_with_torch():
 
 
 @pytest.mark.skipif(not has_pytorch(), reason="Pytorch not installed.")
-@test_utils.test(arch=archs_support_ndarray_ad)
+@test_utils.test(arch=archs_support_torch_ndarray_ad)
 def test_ad_tape_throw():
     N = 4
 
@@ -1321,7 +1322,7 @@ def test_ad_tape_throw():
 
 
 @pytest.mark.skipif(not has_pytorch(), reason="Pytorch not installed.")
-@test_utils.test(arch=archs_support_ndarray_ad)
+@test_utils.test(arch=archs_support_torch_ndarray_ad)
 def test_tape_torch_tensor_grad_none():
     N = 3
 
@@ -1366,7 +1367,7 @@ def test_grad_tensor_in_kernel():
 
 
 @pytest.mark.skipif(not has_pytorch(), reason="Pytorch not installed.")
-@test_utils.test(arch=archs_support_ndarray_ad)
+@test_utils.test(arch=archs_support_torch_ndarray_ad)
 def test_tensor_shape():
     N = 3
 
@@ -1414,7 +1415,7 @@ def test_ndarray_needs_grad_false():
 
 
 @pytest.mark.skipif(not has_pytorch(), reason="Pytorch not installed.")
-@test_utils.test(arch=archs_support_ndarray_ad)
+@test_utils.test(arch=archs_support_torch_ndarray_ad)
 def test_torch_needs_grad_false():
     N = 3
 

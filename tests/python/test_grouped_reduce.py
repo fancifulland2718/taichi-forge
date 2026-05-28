@@ -403,6 +403,96 @@ def test_experimental_grouped_reduce_dense_field_native_i32():
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_grouped_reduce_dense_field_native_f32_no_helper():
+    n = 1024
+    groups = 65
+    keys = ti.field(ti.i32, shape=n)
+    values = ti.field(ti.f32, shape=n)
+    output = ti.field(ti.f32, shape=groups)
+    keys_np, values_np, expected = _grouped_reduce_input(n, groups, np.float32)
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+    output.fill(np.float32(-777))
+    workspace = ti.algorithms.GroupedReduceWorkspace(
+        max_items=n, max_groups=groups
+    )
+    ti.algorithms.clear_legacy_helper_fallback_counts()
+    ti.algorithms.set_legacy_helper_auto_fallback_enabled(False)
+    try:
+        try:
+            ti.algorithms.experimental_grouped_reduce(
+                keys, values, output, method="auto", workspace=workspace
+            )
+        except RuntimeError as exc:
+            pytest.skip(str(exc))
+        assert ti.algorithms.get_legacy_helper_fallback_counts() == {}
+    finally:
+        ti.algorithms.reset_legacy_helper_auto_fallback_policy()
+        ti.algorithms.clear_legacy_helper_fallback_counts()
+    _assert_matches(output.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])
+def test_experimental_grouped_reduce_dense_matrix_field_packed():
+    n = 1024
+    groups = 97
+    keys_np = (np.arange(n, dtype=np.int32) * 31 + 5) % groups
+    values_np = (np.arange(n * 2, dtype=np.int32).reshape(n, 2) % 19) - 9
+    expected = np.zeros((groups, 2), dtype=np.int32)
+    np.add.at(expected, keys_np, values_np)
+    method = {
+        ti.cpu: "cpu_native",
+        ti.cuda: "cuda_device",
+        ti.vulkan: "vulkan_native",
+    }[impl.current_cfg().arch]
+    for keys_as_field, expected_method in (
+        (False, "scatter_add_dense_field_packed"),
+        (True, "scatter_add_dense_field_packed_indices_field"),
+    ):
+        keys = ti.field(ti.i32, shape=n) if keys_as_field else ti.ndarray(ti.i32, shape=n)
+        values = ti.Vector.field(2, ti.i32, shape=n)
+        output = ti.Vector.field(2, ti.i32, shape=groups)
+        keys.from_numpy(keys_np)
+        values.from_numpy(values_np)
+        output.fill(np.int32(-777))
+        workspace = ti.algorithms.GroupedReduceWorkspace(
+            max_items=n, max_groups=groups
+        )
+        try:
+            ti.algorithms.experimental_grouped_reduce(
+                keys, values, output, method=method, workspace=workspace
+            )
+        except RuntimeError as exc:
+            pytest.skip(str(exc))
+        assert np.array_equal(output.to_numpy(), expected)
+        assert workspace._packed_scatter_add_workspace is not None
+        scatter_workspace = workspace._packed_scatter_add_workspace
+        assert scatter_workspace._native_scatter_add_plan is not None
+        assert (
+            scatter_workspace._native_scatter_add_plan.method_name
+            == expected_method
+        )
+        assert workspace._packed_grouped_reduce_plan_group is not None
+        assert workspace._native_grouped_reduce_plan_group is (
+            workspace._packed_grouped_reduce_plan_group
+        )
+        stage_methods = [
+            method_name
+            for _descriptor, method_name, _args in workspace._packed_grouped_reduce_plan_group.stage_calls
+        ]
+        assert stage_methods == ["fill_dense_field_packed", expected_method]
+
+        output.fill(np.int32(-777))
+        ti.algorithms.experimental_grouped_reduce(
+            keys, values, output, method=method, workspace=workspace
+        )
+        assert np.array_equal(output.to_numpy(), expected)
+        assert workspace._native_grouped_reduce_plan_group is (
+            workspace._packed_grouped_reduce_plan_group
+        )
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan, ti.cpu], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_grouped_reduce_invalid_keys_are_ignored():
     keys = ti.ndarray(ti.i32, shape=5)
     values = ti.ndarray(ti.i32, shape=5)

@@ -115,21 +115,21 @@ def _native_scan_method_for_current_arch():
     if arch == ti.cpu:
         if not (hasattr(prog, "cpu_scan_available") and prog.cpu_scan_available()):
             pytest.skip("CPU native scan is unavailable.")
-        return "cpu_native", "cpu_inclusive_scan_dense_field"
+        return "cpu_native", "cpu_inclusive_scan_dense_field_packed"
     if arch == ti.cuda:
         if not (
             hasattr(prog, "cuda_cub_scan_available")
             and prog.cuda_cub_scan_available()
         ):
             pytest.skip("CUDA CUB scan is unavailable.")
-        return "cuda_cub", "cuda_cub_inclusive_scan_dense_field"
+        return "cuda_cub", "cuda_cub_inclusive_scan_dense_field_packed"
     if arch == ti.vulkan:
         if not (
             hasattr(prog, "vulkan_scan_available")
             and prog.vulkan_scan_available()
         ):
             pytest.skip("Vulkan native scan is unavailable.")
-        return "vulkan_native", "vulkan_inclusive_scan_dense_field"
+        return "vulkan_native", "vulkan_inclusive_scan_dense_field_packed"
     pytest.skip("native scan is unavailable on this arch.")
 
 
@@ -145,14 +145,16 @@ def _run_dense_matrix_field_scan_case():
 
     expected = np.cumsum(values, axis=0, dtype=np.int32)
     np.testing.assert_array_equal(arr.to_numpy(), expected)
-    assert len(executor._native_scan_plans) == 2
+    assert len(executor._native_scan_plans) == 1
     assert executor._native_scan_plan.method_name == expected_method
-    assert len(executor._native_scan_plan_groups) == 1
+    assert len(executor._native_scan_plan_groups) == 0
+    first_plan = executor._native_scan_plan
 
     arr.from_numpy(values)
     executor.run(arr)
     np.testing.assert_array_equal(arr.to_numpy(), expected)
-    assert len(executor._native_scan_plan_groups) == 1
+    assert executor._native_scan_plan is first_plan
+    assert len(executor._native_scan_plan_groups) == 0
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -331,7 +333,7 @@ def test_scan_dense_field_cpu_native_executor_replay():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
-def test_scan_native_dense_matrix_field_components():
+def test_scan_native_dense_matrix_field_packed():
     _run_dense_matrix_field_scan_case()
 
 

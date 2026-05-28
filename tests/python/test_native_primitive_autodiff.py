@@ -205,7 +205,11 @@ def test_transform_auto_preserves_tape_gradients():
         assert x.grad[i] == pytest.approx(3.0)
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda])
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
 def test_transform_cpu_native_tape_gradients_ndarray():
     n = 8
     x = ti.ndarray(ti.f32, shape=n, needs_grad=True)
@@ -229,7 +233,11 @@ def test_transform_cpu_native_tape_gradients_ndarray():
         assert grads[i] == pytest.approx(2.5)
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda])
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
 def test_gather_cpu_native_tape_gradients_ndarray():
     _require_native_scatter_add_for_arch()
 
@@ -256,7 +264,11 @@ def test_gather_cpu_native_tape_gradients_ndarray():
     )
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda])
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
 def test_scatter_add_cpu_native_tape_gradients_ndarray():
     _require_native_scatter_add_for_arch()
 
@@ -282,7 +294,7 @@ def test_scatter_add_cpu_native_tape_gradients_ndarray():
     np.testing.assert_allclose(src.grad.to_numpy(), np.ones(6, dtype=np.float32))
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_scatter_cpu_native_tape_gradients_ndarray():
     src = ti.ndarray(ti.f32, shape=5, needs_grad=True)
     indices = ti.ndarray(ti.i32, shape=5)
@@ -311,7 +323,7 @@ def test_scatter_cpu_native_tape_gradients_ndarray():
     )
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_scan_native_tape_gradients_ndarray():
     n = 7
     values = ti.ndarray(ti.f32, shape=n, needs_grad=True)
@@ -334,7 +346,7 @@ def test_scan_native_tape_gradients_ndarray():
     )
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_reduce_cpu_native_tape_gradients_ndarray():
     values = ti.ndarray(ti.f32, shape=7, needs_grad=True)
     output = ti.ndarray(ti.f32, shape=1, needs_grad=True)
@@ -346,6 +358,118 @@ def test_reduce_cpu_native_tape_gradients_ndarray():
         )
 
     np.testing.assert_allclose(values.grad.to_numpy(), np.ones(7, dtype=np.float32))
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_transform_vulkan_native_tape_gradients_ndarray_chain():
+    n = 8
+    x = ti.ndarray(ti.f32, shape=n, needs_grad=True)
+    y = ti.ndarray(ti.f32, shape=n, needs_grad=True)
+    loss = ti.ndarray(ti.f32, shape=1, needs_grad=True)
+    x.from_numpy(np.arange(n, dtype=np.float32))
+
+    with ti.ad.Tape(loss):
+        ti.algorithms.experimental_transform(
+            x, y, scale=2.5, bias=1.0, method="vulkan_native"
+        )
+        ti.algorithms.experimental_reduce(y, loss, op="sum", method="vulkan_native")
+
+    np.testing.assert_allclose(x.grad.to_numpy(), np.full(n, 2.5, dtype=np.float32))
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_gather_vulkan_native_tape_gradients_ndarray_chain():
+    _require_native_scatter_add_for_arch()
+
+    src = ti.ndarray(ti.f32, shape=5, needs_grad=True)
+    indices = ti.ndarray(ti.i32, shape=6)
+    dst = ti.ndarray(ti.f32, shape=6, needs_grad=True)
+    loss = ti.ndarray(ti.f32, shape=1, needs_grad=True)
+    src.from_numpy(np.arange(5, dtype=np.float32))
+    indices.from_numpy(np.array([0, 1, 2, 2, 4, 1], dtype=np.int32))
+
+    with ti.ad.Tape(loss):
+        ti.algorithms.experimental_gather(src, indices, dst, method="vulkan_native")
+        ti.algorithms.experimental_reduce(dst, loss, op="sum", method="vulkan_native")
+
+    np.testing.assert_allclose(
+        src.grad.to_numpy(), np.array([1, 2, 2, 0, 1], dtype=np.float32)
+    )
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_scatter_add_vulkan_native_tape_gradients_ndarray_chain():
+    _require_native_scatter_add_for_arch()
+
+    src = ti.ndarray(ti.f32, shape=6, needs_grad=True)
+    indices = ti.ndarray(ti.i32, shape=6)
+    dst = ti.ndarray(ti.f32, shape=5, needs_grad=True)
+    loss = ti.ndarray(ti.f32, shape=1, needs_grad=True)
+    src.from_numpy(np.ones(6, dtype=np.float32))
+    indices.from_numpy(np.array([0, 1, 2, 2, 4, 1], dtype=np.int32))
+    dst.fill(0)
+
+    with ti.ad.Tape(loss):
+        ti.algorithms.experimental_scatter_add(
+            src, indices, dst, method="vulkan_native"
+        )
+        ti.algorithms.experimental_reduce(dst, loss, op="sum", method="vulkan_native")
+
+    np.testing.assert_allclose(src.grad.to_numpy(), np.ones(6, dtype=np.float32))
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_scatter_vulkan_native_tape_gradients_ndarray_chain():
+    src = ti.ndarray(ti.f32, shape=5, needs_grad=True)
+    indices = ti.ndarray(ti.i32, shape=5)
+    dst = ti.ndarray(ti.f32, shape=7, needs_grad=True)
+    loss = ti.ndarray(ti.f32, shape=1, needs_grad=True)
+    src.from_numpy(np.arange(5, dtype=np.float32))
+    indices.from_numpy(np.array([2, 5, 1, 6, 3], dtype=np.int32))
+    dst.fill(0)
+
+    with ti.ad.Tape(loss):
+        ti.algorithms.experimental_scatter(src, indices, dst, method="vulkan_native")
+        ti.algorithms.experimental_reduce(dst, loss, op="sum", method="vulkan_native")
+
+    np.testing.assert_allclose(src.grad.to_numpy(), np.ones(5, dtype=np.float32))
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_scan_vulkan_native_tape_gradients_ndarray_chain():
+    n = 7
+    values = ti.ndarray(ti.f32, shape=n, needs_grad=True)
+    loss = ti.ndarray(ti.f32, shape=1, needs_grad=True)
+    values.from_numpy(np.arange(1, n + 1, dtype=np.float32))
+    scanner = ti.algorithms.PrefixSumExecutor(n)
+
+    with ti.ad.Tape(loss):
+        scanner.run(values)
+        ti.algorithms.experimental_reduce(values, loss, op="sum", method="vulkan_native")
+
+    np.testing.assert_allclose(
+        values.grad.to_numpy(), np.arange(n, 0, -1, dtype=np.float32)
+    )
+
+
+@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_grouped_reduce_vulkan_native_tape_gradients_ndarray_chain():
+    _require_native_grouped_reduce_for_arch()
+
+    keys = ti.ndarray(ti.i32, shape=6)
+    values = ti.ndarray(ti.f32, shape=6, needs_grad=True)
+    output = ti.ndarray(ti.f32, shape=3, needs_grad=True)
+    loss = ti.ndarray(ti.f32, shape=1, needs_grad=True)
+    keys.from_numpy(np.array([0, 1, 2, 2, 1, 0], dtype=np.int32))
+    values.from_numpy(np.ones(6, dtype=np.float32))
+
+    with ti.ad.Tape(loss):
+        ti.algorithms.experimental_grouped_reduce(
+            keys, values, output, op="sum", method="vulkan_native"
+        )
+        ti.algorithms.experimental_reduce(output, loss, op="sum", method="vulkan_native")
+
+    np.testing.assert_allclose(values.grad.to_numpy(), np.ones(6, dtype=np.float32))
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -364,7 +488,11 @@ def test_reduce_native_tape_gradients_dense_field():
     np.testing.assert_allclose(actual, np.ones(n, dtype=np.float32))
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda])
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
 def test_grouped_reduce_cpu_native_tape_gradients_ndarray():
     _require_native_grouped_reduce_for_arch()
 
@@ -416,6 +544,29 @@ def test_transform_native_tape_gradients_dense_field():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_transform_native_tape_gradients_dense_matrix_field():
+    n = 8
+    x = ti.Vector.field(2, ti.f32, shape=n, needs_grad=True)
+    y = ti.Vector.field(2, ti.f32, shape=n, needs_grad=True)
+    loss = ti.field(ti.f32, shape=(), needs_grad=True)
+    x.from_numpy(np.arange(n * 2, dtype=np.float32).reshape(n, 2))
+
+    @ti.kernel
+    def weighted_sum():
+        for i in y:
+            loss[None] += y[i][0] * 2.0 + y[i][1] * 3.0
+
+    with ti.ad.Tape(loss):
+        ti.algorithms.experimental_transform(
+            x, y, scale=2.5, bias=1.0, method=_native_copy_method_for_arch()
+        )
+        weighted_sum()
+
+    expected = np.tile(np.array([5.0, 7.5], dtype=np.float32), (n, 1))
+    np.testing.assert_allclose(x.grad.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_gather_native_tape_gradients_dense_field():
     _require_native_scatter_add_for_arch()
 
@@ -439,6 +590,37 @@ def test_gather_native_tape_gradients_dense_field():
 
     actual = np.array([src.grad[i] for i in range(5)], dtype=np.float32)
     np.testing.assert_allclose(actual, np.array([1, 2, 2, 0, 1], dtype=np.float32))
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_gather_native_tape_gradients_dense_matrix_field():
+    _require_native_scatter_add_for_arch()
+
+    src = ti.Vector.field(2, ti.f32, shape=5, needs_grad=True)
+    indices = ti.ndarray(ti.i32, shape=6)
+    dst = ti.Vector.field(2, ti.f32, shape=6, needs_grad=True)
+    loss = ti.field(ti.f32, shape=(), needs_grad=True)
+    src.from_numpy(np.arange(10, dtype=np.float32).reshape(5, 2))
+    index_data = np.array([0, 1, 2, 2, 4, 1], dtype=np.int32)
+    indices.from_numpy(index_data)
+
+    @ti.kernel
+    def weighted_sum():
+        for i in dst:
+            loss[None] += dst[i][0] * ti.cast(i + 1, ti.f32)
+            loss[None] += dst[i][1] * ti.cast(i + 2, ti.f32)
+
+    with ti.ad.Tape(loss):
+        ti.algorithms.experimental_gather(
+            src, indices, dst, method=_native_copy_method_for_arch()
+        )
+        weighted_sum()
+
+    expected = np.zeros((5, 2), dtype=np.float32)
+    for i, target in enumerate(index_data):
+        expected[target, 0] += i + 1
+        expected[target, 1] += i + 2
+    np.testing.assert_allclose(src.grad.to_numpy(), expected)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -469,6 +651,38 @@ def test_scatter_add_native_tape_gradients_dense_field():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_scatter_add_native_tape_gradients_dense_matrix_field():
+    _require_native_scatter_add_for_arch()
+
+    src = ti.Vector.field(2, ti.f32, shape=6, needs_grad=True)
+    indices = ti.ndarray(ti.i32, shape=6)
+    dst = ti.Vector.field(2, ti.f32, shape=5, needs_grad=True)
+    loss = ti.field(ti.f32, shape=(), needs_grad=True)
+    src.from_numpy(np.ones((6, 2), dtype=np.float32))
+    index_data = np.array([0, 1, 2, 2, 4, 1], dtype=np.int32)
+    indices.from_numpy(index_data)
+    dst.fill(0)
+
+    @ti.kernel
+    def weighted_sum():
+        for i in dst:
+            loss[None] += dst[i][0] * ti.cast(i + 1, ti.f32)
+            loss[None] += dst[i][1] * ti.cast(i + 2, ti.f32)
+
+    with ti.ad.Tape(loss):
+        ti.algorithms.experimental_scatter_add(
+            src, indices, dst, method=_native_copy_method_for_arch()
+        )
+        weighted_sum()
+
+    expected = np.zeros((6, 2), dtype=np.float32)
+    for i, target in enumerate(index_data):
+        expected[i, 0] = target + 1
+        expected[i, 1] = target + 2
+    np.testing.assert_allclose(src.grad.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_scatter_native_tape_gradients_dense_field():
     src = ti.field(ti.f32, shape=5, needs_grad=True)
     indices = ti.ndarray(ti.i32, shape=5)
@@ -496,7 +710,37 @@ def test_scatter_native_tape_gradients_dense_field():
     np.testing.assert_allclose(actual, np.array([3, 7, 2, 11, 5], dtype=np.float32))
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_scatter_native_tape_gradients_dense_matrix_field():
+    src = ti.Vector.field(2, ti.f32, shape=5, needs_grad=True)
+    indices = ti.ndarray(ti.i32, shape=5)
+    dst = ti.Vector.field(2, ti.f32, shape=7, needs_grad=True)
+    loss = ti.field(ti.f32, shape=(), needs_grad=True)
+    src.from_numpy(np.arange(10, dtype=np.float32).reshape(5, 2))
+    index_data = np.array([2, 5, 1, 6, 3], dtype=np.int32)
+    indices.from_numpy(index_data)
+    dst.fill(0)
+
+    @ti.kernel
+    def weighted_sum():
+        for i in dst:
+            loss[None] += dst[i][0] * ti.cast(i + 1, ti.f32)
+            loss[None] += dst[i][1] * ti.cast(i + 2, ti.f32)
+
+    with ti.ad.Tape(loss):
+        ti.algorithms.experimental_scatter(
+            src, indices, dst, method=_native_copy_method_for_arch()
+        )
+        weighted_sum()
+
+    expected = np.zeros((5, 2), dtype=np.float32)
+    for i, target in enumerate(index_data):
+        expected[i, 0] = target + 1
+        expected[i, 1] = target + 2
+    np.testing.assert_allclose(src.grad.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_scan_native_tape_gradients_dense_field():
     n = 7
     values = ti.field(ti.f32, shape=n, needs_grad=True)
@@ -517,17 +761,36 @@ def test_scan_native_tape_gradients_dense_field():
     np.testing.assert_allclose(actual, np.arange(n, 0, -1, dtype=np.float32))
 
 
-@test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
-def test_scan_native_tape_rejects_vulkan_until_reverse_shader():
-    n = 4
-    values = ti.field(ti.f32, shape=n, needs_grad=True)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_scan_native_tape_gradients_dense_matrix_field():
+    n = 7
+    values = ti.Vector.field(2, ti.f32, shape=n, needs_grad=True)
+    weight_field = ti.Vector.field(2, ti.f32, shape=n)
     loss = ti.field(ti.f32, shape=(), needs_grad=True)
-    values.from_numpy(np.arange(1, n + 1, dtype=np.float32))
+    initial = np.arange(1, n * 2 + 1, dtype=np.float32).reshape(n, 2)
+    weights = np.stack(
+        (
+            np.arange(1, n + 1, dtype=np.float32),
+            np.arange(2, n + 2, dtype=np.float32),
+        ),
+        axis=1,
+    )
+    values.from_numpy(initial)
+    weight_field.from_numpy(weights)
     scanner = ti.algorithms.PrefixSumExecutor(n)
 
-    with pytest.raises(RuntimeError, match="Vulkan scan needs a reverse native scan"):
-        with ti.ad.Tape(loss):
-            scanner.run(values)
+    @ti.kernel
+    def weighted_sum():
+        for i in values:
+            loss[None] += values[i][0] * weight_field[i][0]
+            loss[None] += values[i][1] * weight_field[i][1]
+
+    with ti.ad.Tape(loss):
+        scanner.run(values)
+        weighted_sum()
+
+    expected = np.flip(np.cumsum(np.flip(weights, axis=0), axis=0), axis=0)
+    np.testing.assert_allclose(values.grad.to_numpy(), expected)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -557,3 +820,36 @@ def test_grouped_reduce_native_tape_gradients_dense_field():
     np.testing.assert_allclose(
         actual, np.array([2, 3, 5, 5, 3, 2], dtype=np.float32)
     )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_grouped_reduce_native_tape_gradients_dense_matrix_field():
+    _require_native_grouped_reduce_for_arch()
+
+    key_data = np.array([0, 1, 2, 2, 1, 0], dtype=np.int32)
+    expected = np.zeros((6, 2), dtype=np.float32)
+    for i, key in enumerate(key_data):
+        expected[i, 0] = key + 2
+        expected[i, 1] = key + 5
+
+    for keys_as_field in (False, True):
+        keys = ti.field(ti.i32, shape=6) if keys_as_field else ti.ndarray(ti.i32, shape=6)
+        values = ti.Vector.field(2, ti.f32, shape=6, needs_grad=True)
+        output = ti.Vector.field(2, ti.f32, shape=3, needs_grad=True)
+        loss = ti.field(ti.f32, shape=(), needs_grad=True)
+        keys.from_numpy(key_data)
+        values.from_numpy(np.ones((6, 2), dtype=np.float32))
+
+        @ti.kernel
+        def weighted_sum():
+            for i in output:
+                loss[None] += output[i][0] * ti.cast(i + 2, ti.f32)
+                loss[None] += output[i][1] * ti.cast(i + 5, ti.f32)
+
+        with ti.ad.Tape(loss):
+            ti.algorithms.experimental_grouped_reduce(
+                keys, values, output, op="sum", method=_native_copy_method_for_arch()
+            )
+            weighted_sum()
+
+        np.testing.assert_allclose(values.grad.to_numpy(), expected)
