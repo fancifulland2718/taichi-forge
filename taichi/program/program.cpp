@@ -355,6 +355,16 @@ struct CpuCopyTaskContext {
   int num_threads{1};
 };
 
+struct CpuDenseFieldCopyTaskContext {
+  uint8_t *dst{nullptr};
+  const uint8_t *src{nullptr};
+  std::size_t item_bytes{0};
+  std::size_t dst_stride{0};
+  std::size_t src_stride{0};
+  std::size_t n{0};
+  int num_threads{1};
+};
+
 template <typename T>
 struct CpuTransformTaskContext {
   const T *src{nullptr};
@@ -478,6 +488,22 @@ struct CpuStridedScatterAddIoTaskContext {
   uint8_t *dst{nullptr};
   std::size_t n{0};
   std::size_t dst_items{0};
+  std::size_t src_offset{0};
+  std::size_t src_stride{0};
+  std::size_t dst_offset{0};
+  std::size_t dst_stride{0};
+  int num_threads{1};
+};
+
+template <typename T>
+struct CpuPackedScatterAddIoTaskContext {
+  const uint8_t *src{nullptr};
+  const int32_t *indices{nullptr};
+  T *partial{nullptr};
+  uint8_t *dst{nullptr};
+  std::size_t n{0};
+  std::size_t dst_items{0};
+  int lane_count{1};
   std::size_t src_offset{0};
   std::size_t src_stride{0};
   std::size_t dst_offset{0};
@@ -814,6 +840,23 @@ void cpu_copy_task(void *raw_ctx, int /*thread_id*/, int task_id) {
       ctx->bytes * static_cast<std::size_t>(tid + 1) /
       static_cast<std::size_t>(ctx->num_threads);
   std::memcpy(ctx->dst + begin, ctx->src + begin, end - begin);
+}
+
+void cpu_dense_field_copy_task(void *raw_ctx,
+                               int /*thread_id*/,
+                               int task_id) {
+  auto *ctx = static_cast<CpuDenseFieldCopyTaskContext *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    std::memcpy(ctx->dst + i * ctx->dst_stride,
+                ctx->src + i * ctx->src_stride, ctx->item_bytes);
+  }
 }
 
 void cpu_compact_count_task(void *raw_ctx, int /*thread_id*/, int task_id) {
@@ -1877,6 +1920,68 @@ void cpu_strided_scatter_add_io_merge_task(void *raw_ctx,
 }
 
 template <typename T>
+void cpu_packed_scatter_add_io_count_task(void *raw_ctx,
+                                          int /*thread_id*/,
+                                          int task_id) {
+  auto *ctx = static_cast<CpuPackedScatterAddIoTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const auto lanes = static_cast<std::size_t>(ctx->lane_count);
+  T *local = ctx->partial +
+             ctx->dst_items * lanes * static_cast<std::size_t>(tid);
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t i = begin; i < end; ++i) {
+    const auto index = static_cast<std::size_t>(ctx->indices[i]);
+    if (index < ctx->dst_items) {
+      const uint8_t *src_item =
+          ctx->src + ctx->src_offset + i * ctx->src_stride;
+      T *local_item = local + index * lanes;
+      for (std::size_t lane = 0; lane < lanes; ++lane) {
+        const auto *value =
+            reinterpret_cast<const T *>(src_item + lane * sizeof(T));
+        local_item[lane] = cpu_reduce_combine(local_item[lane], *value, 0);
+      }
+    }
+  }
+}
+
+template <typename T>
+void cpu_packed_scatter_add_io_merge_task(void *raw_ctx,
+                                          int /*thread_id*/,
+                                          int task_id) {
+  auto *ctx = static_cast<CpuPackedScatterAddIoTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const auto lanes = static_cast<std::size_t>(ctx->lane_count);
+  const std::size_t total = ctx->dst_items * lanes;
+  const std::size_t begin =
+      total * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      total * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  for (std::size_t scalar_i = begin; scalar_i < end; ++scalar_i) {
+    const std::size_t item = scalar_i / lanes;
+    const std::size_t lane = scalar_i - item * lanes;
+    T value{};
+    for (int t = 0; t < ctx->num_threads; ++t) {
+      value = cpu_reduce_combine(
+          value,
+          ctx->partial[(ctx->dst_items * lanes) * static_cast<std::size_t>(t) +
+                       scalar_i],
+          0);
+    }
+    auto *dst_value = reinterpret_cast<T *>(
+        ctx->dst + ctx->dst_offset + item * ctx->dst_stride +
+        lane * sizeof(T));
+    *dst_value = cpu_reduce_combine(*dst_value, value, 0);
+  }
+}
+
+template <typename T>
 std::size_t cpu_scatter_add_typed(const T *src_ptr,
                                   const int32_t *indices_ptr,
                                   T *dst_ptr,
@@ -2013,6 +2118,80 @@ std::size_t cpu_scatter_add_strided_io_typed(const uint8_t *src_ptr,
       auto *dst_value = reinterpret_cast<T *>(dst_ptr + dst_offset +
                                               index * dst_stride);
       *dst_value = cpu_reduce_combine(*dst_value, *value, 0);
+    }
+  }
+  return 0;
+}
+
+template <typename T>
+std::size_t cpu_scatter_add_packed_strided_io_typed(
+    const uint8_t *src_ptr,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    const int32_t *indices_ptr,
+    uint8_t *dst_ptr,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    std::size_t n,
+    std::size_t dst_items,
+    int lane_count,
+    int max_threads,
+    int target_threads) {
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native packed scatter-add received a null data pointer.");
+  TI_ERROR_IF(lane_count <= 0,
+              "CPU native packed scatter-add received an invalid lane count.");
+  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
+  const auto lanes = static_cast<std::size_t>(lane_count);
+  TI_ERROR_IF(dst_items >
+                  std::numeric_limits<std::size_t>::max() / lanes,
+              "CPU native packed scatter-add destination scalar count "
+              "overflowed.");
+  const std::size_t dst_scalars = dst_items * lanes;
+  TI_ERROR_IF(static_cast<std::size_t>(target_threads) >
+                  std::numeric_limits<std::size_t>::max() / dst_scalars,
+              "CPU native packed scatter-add workspace size overflowed.");
+  const std::size_t workspace_items =
+      static_cast<std::size_t>(target_threads) * dst_scalars;
+  TI_ERROR_IF(workspace_items >
+                  std::numeric_limits<std::size_t>::max() / sizeof(T),
+              "CPU native packed scatter-add workspace byte size overflowed.");
+  const std::size_t workspace_bytes = workspace_items * sizeof(T);
+  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
+    std::vector<T> partial(workspace_items, T{});
+    CpuPackedScatterAddIoTaskContext<T> ctx;
+    ctx.src = src_ptr;
+    ctx.indices = indices_ptr;
+    ctx.partial = partial.data();
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.dst_items = dst_items;
+    ctx.lane_count = lane_count;
+    ctx.src_offset = src_offset;
+    ctx.src_stride = src_stride;
+    ctx.dst_offset = dst_offset;
+    ctx.dst_stride = dst_stride;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_packed_scatter_add_io_count_task<T>);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_packed_scatter_add_io_merge_task<T>);
+    update_cpu_scatter_add_workspace_peak(workspace_bytes);
+    return workspace_bytes;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto index = static_cast<std::size_t>(indices_ptr[i]);
+    if (index < dst_items) {
+      const uint8_t *src_item = src_ptr + src_offset + i * src_stride;
+      uint8_t *dst_item = dst_ptr + dst_offset + index * dst_stride;
+      for (std::size_t lane = 0; lane < lanes; ++lane) {
+        const auto *value =
+            reinterpret_cast<const T *>(src_item + lane * sizeof(T));
+        auto *dst_value =
+            reinterpret_cast<T *>(dst_item + lane * sizeof(T));
+        *dst_value = cpu_reduce_combine(*dst_value, *value, 0);
+      }
     }
   }
   return 0;
@@ -3432,6 +3611,72 @@ uint8_t *map_cpu_dense_field(Program *program,
   return reinterpret_cast<uint8_t *>(mapped);
 }
 
+std::size_t dense_field_packed_scalar_items(std::size_t n,
+                                            int lane_count,
+                                            const char *op_name) {
+  TI_ERROR_IF(lane_count <= 0,
+              "{} received an invalid packed dense field lane count.",
+              op_name);
+  const auto lanes = static_cast<std::size_t>(lane_count);
+  TI_ERROR_IF(n > std::numeric_limits<std::size_t>::max() / lanes,
+              "{} received an oversized packed dense field request.",
+              op_name);
+  return n * lanes;
+}
+
+std::size_t dense_field_packed_bytes(int value_type,
+                                     std::size_t n,
+                                     int lane_count,
+                                     const char *op_name) {
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "{} received an unsupported packed dense field value type.",
+              op_name);
+  const std::size_t scalar_items =
+      dense_field_packed_scalar_items(n, lane_count, op_name);
+  TI_ERROR_IF(scalar_items >
+                  std::numeric_limits<std::size_t>::max() / value_size,
+              "{} received an oversized packed dense field byte range.",
+              op_name);
+  return scalar_items * value_size;
+}
+
+std::size_t check_dense_field_packed_stride(Program *program,
+                                            SNode *snode,
+                                            int value_type,
+                                            int lane_count,
+                                            const char *op_name) {
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "{} received an unsupported packed dense field value type.",
+              op_name);
+  const std::size_t expected_stride =
+      dense_field_packed_scalar_items(1, lane_count, op_name) * value_size;
+  const std::size_t stride = program->get_dense_field_stride(snode, value_size);
+  TI_ERROR_IF(stride != expected_stride,
+              "{} expects a packed contiguous dense MatrixField layout.",
+              op_name);
+  return stride;
+}
+
+uint8_t *map_cpu_dense_field_packed(Program *program,
+                                    SNode *snode,
+                                    int value_type,
+                                    std::size_t n,
+                                    int lane_count,
+                                    const char *op_name) {
+  const std::size_t bytes =
+      dense_field_packed_bytes(value_type, n, lane_count, op_name);
+  check_dense_field_packed_stride(program, snode, value_type, lane_count,
+                                  op_name);
+  DevicePtr ptr = program->get_dense_field_device_ptr(snode);
+  void *mapped = nullptr;
+  RhiResult res = ptr.device->map_range(ptr, bytes, &mapped);
+  TI_ERROR_IF(res != RhiResult::success || !mapped,
+              "{} failed to map CPU packed dense field storage.", op_name);
+  return reinterpret_cast<uint8_t *>(mapped);
+}
+
 bool snode_tree_contains_hash(const SNode *snode) {
   if (snode == nullptr) {
     return false;
@@ -4039,6 +4284,13 @@ void Program::finalize() {
   textures_.clear();
   argpacks_.clear();
   ndarrays_.clear();
+  {
+    std::lock_guard<std::mutex> lock(dense_field_host_copy_staging_.mutex);
+    dense_field_host_copy_staging_.upload.reset();
+    dense_field_host_copy_staging_.upload_capacity = 0;
+    dense_field_host_copy_staging_.readback.reset();
+    dense_field_host_copy_staging_.readback_capacity = 0;
+  }
   if (arch_uses_llvm(compile_config().arch) ||
       compile_config().arch == Arch::vulkan) {
     program_impl_->finalize();
@@ -4690,15 +4942,21 @@ std::size_t Program::cuda_device_add_merge_ndarray(Ndarray *src,
   const std::size_t value_size = primitive_value_type_size(value_type);
   TI_ERROR_IF(value_size == 0,
               "CUDA add-merge received an unsupported value type.");
-  TI_ERROR_IF(src->get_element_size() != value_size ||
-                  dst->get_element_size() != value_size,
-              "CUDA add-merge dtype does not match value type.");
-  if (src->get_nelement() == 0) {
+  const std::size_t src_element_size = src->get_element_size();
+  const std::size_t dst_element_size = dst->get_element_size();
+  TI_ERROR_IF(src_element_size != dst_element_size ||
+                  src_element_size < value_size ||
+                  src_element_size % value_size != 0,
+              "CUDA add-merge payload does not match value type.");
+  const std::size_t lanes = src_element_size / value_size;
+  if (src->get_nelement() == 0 || lanes == 0) {
     return 0;
   }
   TI_ERROR_IF(src->get_nelement() >
-                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()) /
+                      lanes,
               "CUDA add-merge currently supports at most INT_MAX items.");
+  const std::size_t scalar_items = src->get_nelement() * lanes;
 #ifdef TI_WITH_CUDA
   TI_ERROR_IF(!cuda::cub_add_merge_available(),
               "CUDA add-merge requires TI_WITH_CUDA_TOOLKIT=ON and a "
@@ -4707,7 +4965,7 @@ std::size_t Program::cuda_device_add_merge_ndarray(Ndarray *src,
   return cuda::cub_add_merge(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
-      static_cast<int>(src->get_nelement()),
+      static_cast<int>(scalar_items),
       static_cast<cuda::CudaTransformValueType>(value_type), stream);
 #else
   TI_ERROR("CUDA add-merge requires TI_WITH_CUDA=ON.");
@@ -4727,17 +4985,23 @@ std::size_t Program::cuda_device_add_scaled_ndarray(Ndarray *src,
   const std::size_t value_size = primitive_value_type_size(value_type);
   TI_ERROR_IF(value_size == 0,
               "CUDA scaled-add received an unsupported value type.");
-  TI_ERROR_IF(src->get_element_size() != value_size ||
-                  dst->get_element_size() != value_size,
-              "CUDA scaled-add dtype does not match value type.");
+  const std::size_t src_element_size = src->get_element_size();
+  const std::size_t dst_element_size = dst->get_element_size();
+  TI_ERROR_IF(src_element_size != dst_element_size ||
+                  src_element_size < value_size ||
+                  src_element_size % value_size != 0,
+              "CUDA scaled-add payload does not match value type.");
   TI_ERROR_IF(value_type != 1 && value_type != 5,
               "CUDA scaled-add is supported only for f32/f64 gradients.");
-  if (src->get_nelement() == 0) {
+  const std::size_t lanes = src_element_size / value_size;
+  if (src->get_nelement() == 0 || lanes == 0) {
     return 0;
   }
   TI_ERROR_IF(src->get_nelement() >
-                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()) /
+                      lanes,
               "CUDA scaled-add currently supports at most INT_MAX items.");
+  const std::size_t scalar_items = src->get_nelement() * lanes;
 #ifdef TI_WITH_CUDA
   TI_ERROR_IF(!cuda::cub_add_merge_available(),
               "CUDA scaled-add requires TI_WITH_CUDA_TOOLKIT=ON and a "
@@ -4746,7 +5010,7 @@ std::size_t Program::cuda_device_add_scaled_ndarray(Ndarray *src,
   return cuda::cub_add_scaled(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
-      static_cast<int>(src->get_nelement()),
+      static_cast<int>(scalar_items),
       static_cast<cuda::CudaTransformValueType>(value_type), scale, stream);
 #else
   TI_ERROR("CUDA scaled-add requires TI_WITH_CUDA=ON.");
@@ -5190,6 +5454,140 @@ std::size_t Program::cuda_device_gather_dense_field(SNode *src,
 #endif
 }
 
+std::size_t Program::cuda_device_gather_dense_field_packed(SNode *src,
+                                                           Ndarray *indices,
+                                                           SNode *dst,
+                                                           int value_type,
+                                                           std::size_t src_n,
+                                                           std::size_t dst_n,
+                                                           int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA device packed dense field gather is only available on "
+              "CUDA.");
+  TI_ERROR_IF(!indices || indices->shape.size() != 1 ||
+                  indices->get_nelement() != dst_n ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "CUDA device packed dense field gather expects 1D i32 indices "
+              "matching destination size.");
+  const std::size_t n = indices->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  src_n >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device packed dense field gather currently supports up to "
+              "INT_MAX items.");
+  const std::size_t item_bytes =
+      dense_field_packed_bytes(value_type, 1, lane_count,
+                               "CUDA packed dense field gather");
+  check_dense_field_packed_stride(this, src, value_type, lane_count,
+                                  "CUDA packed dense field gather");
+  check_dense_field_packed_stride(this, dst, value_type, lane_count,
+                                  "CUDA packed dense field gather");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *src_ptr = raw_ptr(get_dense_field_device_ptr(src),
+                          "CUDA packed dense field gather");
+  auto *indices_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
+  void *dst_ptr = raw_ptr(get_dense_field_device_ptr(dst),
+                          "CUDA packed dense field gather");
+  const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                           item_words),
+              "CUDA device packed dense field gather word count exceeds "
+              "INT_MAX.");
+  TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
+              "CUDA device packed dense field gather requires "
+              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_indexed_copy(src_ptr, indices_ptr, dst_ptr,
+                                static_cast<int>(n),
+                                static_cast<int>(src_n), item_words,
+                                cuda::CudaIndexedCopyOp::gather, stream);
+#else
+  TI_ERROR("CUDA device packed dense field gather requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_gather_dense_field_packed_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n,
+    int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA device packed dense field gather is only available on "
+              "CUDA.");
+  TI_ERROR_IF(indices_n != dst_n,
+              "CUDA device packed dense field gather expects field indices "
+              "matching destination size.");
+  const std::size_t n = indices_n;
+  if (n == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  src_n >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device packed dense field gather currently supports up to "
+              "INT_MAX items.");
+  const std::size_t item_bytes =
+      dense_field_packed_bytes(value_type, 1, lane_count,
+                               "CUDA packed dense field gather");
+  check_dense_field_packed_stride(this, src, value_type, lane_count,
+                                  "CUDA packed dense field gather");
+  check_dense_field_packed_stride(this, dst, value_type, lane_count,
+                                  "CUDA packed dense field gather");
+  TI_ERROR_IF(get_dense_field_stride(indices, sizeof(int32_t)) !=
+                  sizeof(int32_t),
+              "CUDA packed dense field gather requires contiguous i32 field "
+              "indices.");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *src_ptr = raw_ptr(get_dense_field_device_ptr(src),
+                          "CUDA packed dense field gather");
+  void *indices_ptr = raw_ptr(get_dense_field_device_ptr(indices),
+                              "CUDA packed dense field gather");
+  void *dst_ptr = raw_ptr(get_dense_field_device_ptr(dst),
+                          "CUDA packed dense field gather");
+  const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                           item_words),
+              "CUDA device packed dense field gather word count exceeds "
+              "INT_MAX.");
+  TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
+              "CUDA device packed dense field gather requires "
+              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_indexed_copy(src_ptr, indices_ptr, dst_ptr,
+                                static_cast<int>(n),
+                                static_cast<int>(src_n), item_words,
+                                cuda::CudaIndexedCopyOp::gather, stream);
+#else
+  TI_ERROR("CUDA device packed dense field gather requires TI_WITH_CUDA=ON.");
+#endif
+}
+
 std::size_t Program::cuda_device_gather_dense_field_indices_field(
     SNode *src,
     SNode *indices,
@@ -5609,6 +6007,140 @@ std::size_t Program::cuda_device_scatter_dense_field(SNode *src,
       dst_stride / sizeof(uint32_t), cuda::CudaIndexedCopyOp::scatter, stream);
 #else
   TI_ERROR("CUDA device dense field scatter requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_scatter_dense_field_packed(SNode *src,
+                                                            Ndarray *indices,
+                                                            SNode *dst,
+                                                            int value_type,
+                                                            std::size_t src_n,
+                                                            std::size_t dst_n,
+                                                            int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA device packed dense field scatter is only available on "
+              "CUDA.");
+  TI_ERROR_IF(!indices || indices->shape.size() != 1 ||
+                  indices->get_nelement() != src_n ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "CUDA device packed dense field scatter expects 1D i32 indices "
+              "matching source size.");
+  const std::size_t n = indices->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  dst_n >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device packed dense field scatter currently supports up "
+              "to INT_MAX items.");
+  const std::size_t item_bytes =
+      dense_field_packed_bytes(value_type, 1, lane_count,
+                               "CUDA packed dense field scatter");
+  check_dense_field_packed_stride(this, src, value_type, lane_count,
+                                  "CUDA packed dense field scatter");
+  check_dense_field_packed_stride(this, dst, value_type, lane_count,
+                                  "CUDA packed dense field scatter");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *src_ptr = raw_ptr(get_dense_field_device_ptr(src),
+                          "CUDA packed dense field scatter");
+  auto *indices_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
+  void *dst_ptr = raw_ptr(get_dense_field_device_ptr(dst),
+                          "CUDA packed dense field scatter");
+  const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                           item_words),
+              "CUDA device packed dense field scatter word count exceeds "
+              "INT_MAX.");
+  TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
+              "CUDA device packed dense field scatter requires "
+              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_indexed_copy(src_ptr, indices_ptr, dst_ptr,
+                                static_cast<int>(n),
+                                static_cast<int>(dst_n), item_words,
+                                cuda::CudaIndexedCopyOp::scatter, stream);
+#else
+  TI_ERROR("CUDA device packed dense field scatter requires TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_device_scatter_dense_field_packed_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n,
+    int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA device packed dense field scatter is only available on "
+              "CUDA.");
+  TI_ERROR_IF(src_n != indices_n,
+              "CUDA device packed dense field scatter expects field indices "
+              "matching source size.");
+  const std::size_t n = indices_n;
+  if (n == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  dst_n >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA device packed dense field scatter currently supports up "
+              "to INT_MAX items.");
+  const std::size_t item_bytes =
+      dense_field_packed_bytes(value_type, 1, lane_count,
+                               "CUDA packed dense field scatter");
+  check_dense_field_packed_stride(this, src, value_type, lane_count,
+                                  "CUDA packed dense field scatter");
+  check_dense_field_packed_stride(this, dst, value_type, lane_count,
+                                  "CUDA packed dense field scatter");
+  TI_ERROR_IF(get_dense_field_stride(indices, sizeof(int32_t)) !=
+                  sizeof(int32_t),
+              "CUDA packed dense field scatter requires contiguous i32 field "
+              "indices.");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *src_ptr = raw_ptr(get_dense_field_device_ptr(src),
+                          "CUDA packed dense field scatter");
+  void *indices_ptr = raw_ptr(get_dense_field_device_ptr(indices),
+                              "CUDA packed dense field scatter");
+  void *dst_ptr = raw_ptr(get_dense_field_device_ptr(dst),
+                          "CUDA packed dense field scatter");
+  const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max() /
+                                           item_words),
+              "CUDA device packed dense field scatter word count exceeds "
+              "INT_MAX.");
+  TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
+              "CUDA device packed dense field scatter requires "
+              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_indexed_copy(src_ptr, indices_ptr, dst_ptr,
+                                static_cast<int>(n),
+                                static_cast<int>(dst_n), item_words,
+                                cuda::CudaIndexedCopyOp::scatter, stream);
+#else
+  TI_ERROR("CUDA device packed dense field scatter requires TI_WITH_CUDA=ON.");
 #endif
 }
 
@@ -7063,6 +7595,100 @@ std::size_t Program::cuda_cub_inclusive_reverse_scan_dense_field(
 #endif
 }
 
+std::size_t Program::cuda_cub_inclusive_scan_dense_field_packed(
+    SNode *data,
+    int value_type,
+    std::size_t n,
+    int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB packed dense field scan is only available on CUDA.");
+  TI_ERROR_IF(!data, "CUDA CUB packed dense field scan received a null field.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB packed dense field scan currently supports at most "
+              "INT_MAX items.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  const std::size_t item_bytes = dense_field_packed_bytes(
+      value_type, 1, lane_count, "CUDA CUB packed dense field scan");
+  check_dense_field_packed_stride(this, data, value_type, lane_count,
+                                  "CUDA CUB packed dense field scan");
+  if (n <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  DevicePtr device_ptr = get_dense_field_device_ptr(data);
+  DeviceAllocation alloc{device_ptr.device, device_ptr.alloc_id};
+  auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+  TI_ERROR_IF(!base,
+              "CUDA CUB packed dense field scan received a null data pointer.");
+  auto *data_ptr = reinterpret_cast<uint8_t *>(base) + device_ptr.offset;
+  void *stream = CUDAContext::get_instance().get_stream();
+  std::size_t temp_bytes = 0;
+  for (int lane = 0; lane < lane_count; ++lane) {
+    temp_bytes = std::max(
+        temp_bytes,
+        cuda::cub_inclusive_scan_strided(
+            data_ptr, static_cast<int>(n),
+            static_cast<cuda::CubScanValueType>(value_type),
+            static_cast<std::size_t>(lane) * value_size, item_bytes, stream,
+            this));
+  }
+  return temp_bytes;
+#else
+  TI_ERROR(
+      "CUDA CUB packed dense field scan requires building Taichi with "
+      "TI_WITH_CUDA=ON and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t Program::cuda_cub_inclusive_reverse_scan_dense_field_packed(
+    SNode *data,
+    int value_type,
+    std::size_t n,
+    int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB packed dense field reverse scan is only available on "
+              "CUDA.");
+  TI_ERROR_IF(!data,
+              "CUDA CUB packed dense field reverse scan received a null "
+              "field.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB packed dense field reverse scan currently supports at "
+              "most INT_MAX items.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  const std::size_t item_bytes = dense_field_packed_bytes(
+      value_type, 1, lane_count, "CUDA CUB packed dense field reverse scan");
+  check_dense_field_packed_stride(this, data, value_type, lane_count,
+                                  "CUDA CUB packed dense field reverse scan");
+  if (n <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  DevicePtr device_ptr = get_dense_field_device_ptr(data);
+  DeviceAllocation alloc{device_ptr.device, device_ptr.alloc_id};
+  auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+  TI_ERROR_IF(!base,
+              "CUDA CUB packed dense field reverse scan received a null data "
+              "pointer.");
+  auto *data_ptr = reinterpret_cast<uint8_t *>(base) + device_ptr.offset;
+  void *stream = CUDAContext::get_instance().get_stream();
+  std::size_t temp_bytes = 0;
+  for (int lane = 0; lane < lane_count; ++lane) {
+    temp_bytes = std::max(
+        temp_bytes,
+        cuda::cub_inclusive_reverse_scan_strided(
+            data_ptr, static_cast<int>(n),
+            static_cast<cuda::CubScanValueType>(value_type),
+            static_cast<std::size_t>(lane) * value_size, item_bytes, stream,
+            this));
+  }
+  return temp_bytes;
+#else
+  TI_ERROR(
+      "CUDA CUB packed dense field reverse scan requires building Taichi with "
+      "TI_WITH_CUDA=ON and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 void Program::cuda_cub_scan_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
@@ -7527,6 +8153,69 @@ std::size_t Program::cuda_cub_reduce_dense_field(SNode *values,
 #endif
 }
 
+std::size_t Program::cuda_cub_reduce_dense_field_packed(SNode *values,
+                                                        SNode *output,
+                                                        int value_type,
+                                                        std::size_t n,
+                                                        int lane_count,
+                                                        int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB packed dense field reduce is only available on CUDA.");
+  TI_ERROR_IF(!values || !output,
+              "CUDA CUB packed dense field reduce received a null field.");
+  TI_ERROR_IF(n == 0,
+              "CUDA CUB packed dense field reduce expects at least one input "
+              "item.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB packed dense field reduce currently supports at most "
+              "INT_MAX items.");
+  TI_ERROR_IF(op < 0 || op > 2,
+              "CUDA CUB packed dense field reduce received an unsupported op.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA CUB packed dense field reduce received an unsupported "
+              "value type.");
+  const std::size_t item_bytes =
+      dense_field_packed_bytes(value_type, 1, lane_count,
+                               "CUDA CUB packed dense field reduce");
+  check_dense_field_packed_stride(this, values, value_type, lane_count,
+                                  "CUDA CUB packed dense field reduce");
+  check_dense_field_packed_stride(this, output, value_type, lane_count,
+                                  "CUDA CUB packed dense field reduce");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return reinterpret_cast<uint8_t *>(base) + ptr.offset;
+  };
+  auto *values_ptr = raw_ptr(get_dense_field_device_ptr(values),
+                             "CUDA CUB packed dense field reduce");
+  auto *output_ptr = raw_ptr(get_dense_field_device_ptr(output),
+                             "CUDA CUB packed dense field reduce");
+  void *stream = CUDAContext::get_instance().get_stream();
+  std::size_t temp_bytes = 0;
+  for (int lane = 0; lane < lane_count; ++lane) {
+    const std::size_t lane_offset =
+        static_cast<std::size_t>(lane) * value_size;
+    temp_bytes = std::max(
+        temp_bytes,
+        cuda::cub_reduce_strided(
+            values_ptr, output_ptr + lane_offset, static_cast<int>(n),
+            static_cast<cuda::CubReduceValueType>(value_type), lane_offset,
+            item_bytes, static_cast<cuda::CubReduceOp>(op), stream, this));
+  }
+  return temp_bytes;
+#else
+  TI_ERROR(
+      "CUDA CUB packed dense field reduce requires building Taichi with "
+      "TI_WITH_CUDA=ON and TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
 void Program::cuda_cub_reduce_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
@@ -7791,6 +8480,127 @@ std::size_t Program::cpu_inclusive_reverse_scan_dense_field(SNode *data,
   }
 }
 
+std::size_t Program::cpu_inclusive_scan_dense_field_packed(SNode *data,
+                                                           int value_type,
+                                                           std::size_t n,
+                                                           int lane_count) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native packed dense field scan is only available on CPU "
+              "backends.");
+  if (n <= 1) {
+    return 0;
+  }
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  const std::size_t item_bytes = dense_field_packed_bytes(
+      value_type, 1, lane_count, "CPU native packed dense field scan");
+  auto *ptr = map_cpu_dense_field_packed(
+      this, data, value_type, n, lane_count,
+      "CPU native packed dense field scan");
+  switch (value_type) {
+    case 0:
+      for (int lane = 0; lane < lane_count; ++lane) {
+        cpu_scan_strided_typed<int32_t>(
+            ptr, n, static_cast<std::size_t>(lane) * value_size, item_bytes);
+      }
+      return 0;
+    case 1:
+      for (int lane = 0; lane < lane_count; ++lane) {
+        cpu_scan_strided_typed<float>(
+            ptr, n, static_cast<std::size_t>(lane) * value_size, item_bytes);
+      }
+      return 0;
+    case 2:
+      for (int lane = 0; lane < lane_count; ++lane) {
+        cpu_scan_strided_typed<uint32_t>(
+            ptr, n, static_cast<std::size_t>(lane) * value_size, item_bytes);
+      }
+      return 0;
+    case 3:
+      for (int lane = 0; lane < lane_count; ++lane) {
+        cpu_scan_strided_typed<uint64_t>(
+            ptr, n, static_cast<std::size_t>(lane) * value_size, item_bytes);
+      }
+      return 0;
+    case 4:
+      for (int lane = 0; lane < lane_count; ++lane) {
+        cpu_scan_strided_typed<int64_t>(
+            ptr, n, static_cast<std::size_t>(lane) * value_size, item_bytes);
+      }
+      return 0;
+    case 5:
+      for (int lane = 0; lane < lane_count; ++lane) {
+        cpu_scan_strided_typed<double>(
+            ptr, n, static_cast<std::size_t>(lane) * value_size, item_bytes);
+      }
+      return 0;
+    default:
+      TI_ERROR(
+          "CPU native packed dense field scan received an unsupported value "
+          "type.");
+  }
+}
+
+std::size_t Program::cpu_inclusive_reverse_scan_dense_field_packed(
+    SNode *data,
+    int value_type,
+    std::size_t n,
+    int lane_count) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native packed dense field reverse scan is only available "
+              "on CPU backends.");
+  if (n <= 1) {
+    return 0;
+  }
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  const std::size_t item_bytes = dense_field_packed_bytes(
+      value_type, 1, lane_count, "CPU native packed dense field reverse scan");
+  auto *ptr = map_cpu_dense_field_packed(
+      this, data, value_type, n, lane_count,
+      "CPU native packed dense field reverse scan");
+  switch (value_type) {
+    case 0:
+      for (int lane = 0; lane < lane_count; ++lane) {
+        cpu_reverse_scan_strided_typed<int32_t>(
+            ptr, n, static_cast<std::size_t>(lane) * value_size, item_bytes);
+      }
+      return 0;
+    case 1:
+      for (int lane = 0; lane < lane_count; ++lane) {
+        cpu_reverse_scan_strided_typed<float>(
+            ptr, n, static_cast<std::size_t>(lane) * value_size, item_bytes);
+      }
+      return 0;
+    case 2:
+      for (int lane = 0; lane < lane_count; ++lane) {
+        cpu_reverse_scan_strided_typed<uint32_t>(
+            ptr, n, static_cast<std::size_t>(lane) * value_size, item_bytes);
+      }
+      return 0;
+    case 3:
+      for (int lane = 0; lane < lane_count; ++lane) {
+        cpu_reverse_scan_strided_typed<uint64_t>(
+            ptr, n, static_cast<std::size_t>(lane) * value_size, item_bytes);
+      }
+      return 0;
+    case 4:
+      for (int lane = 0; lane < lane_count; ++lane) {
+        cpu_reverse_scan_strided_typed<int64_t>(
+            ptr, n, static_cast<std::size_t>(lane) * value_size, item_bytes);
+      }
+      return 0;
+    case 5:
+      for (int lane = 0; lane < lane_count; ++lane) {
+        cpu_reverse_scan_strided_typed<double>(
+            ptr, n, static_cast<std::size_t>(lane) * value_size, item_bytes);
+      }
+      return 0;
+    default:
+      TI_ERROR(
+          "CPU native packed dense field reverse scan received an unsupported "
+          "value type.");
+  }
+}
+
 std::size_t Program::cpu_scan_workspace_bytes() const {
   return 0;
 }
@@ -7833,24 +8643,141 @@ void cpu_fill_dense_field_typed(uint8_t *dst_ptr,
   }
 }
 
+double dense_field_fill_value_as_double(int value_type, uint64_t value_bits) {
+  switch (value_type) {
+    case 0: {
+      int32_t value{};
+      std::memcpy(&value, &value_bits, sizeof(value));
+      return static_cast<double>(value);
+    }
+    case 1: {
+      float value{};
+      std::memcpy(&value, &value_bits, sizeof(value));
+      return static_cast<double>(value);
+    }
+    case 2: {
+      uint32_t value{};
+      std::memcpy(&value, &value_bits, sizeof(value));
+      return static_cast<double>(value);
+    }
+    default:
+      TI_ERROR(
+          "Native dense field fill cannot represent this value type as a "
+          "32-bit device fill value.");
+  }
+  return 0.0;
+}
+
+bool native_dense_field_bulk_arch(Arch arch) {
+  return arch_is_cpu(arch) || arch == Arch::cuda || arch == Arch::vulkan;
+}
+
+DeviceAllocationUnique ensure_vulkan_dense_host_staging(
+    Device *device,
+    DeviceAllocationUnique &staging,
+    std::size_t &capacity,
+    std::size_t bytes,
+    bool host_write,
+    bool host_read,
+    AllocUsage usage) {
+  TI_ERROR_IF(!device,
+              "Native dense field host copy requires a valid Vulkan device.");
+  if (!staging || capacity < bytes) {
+    auto [new_staging, res] = device->allocate_memory_unique(
+        {bytes, host_write, host_read, false, usage});
+    TI_ERROR_IF(res != RhiResult::success,
+                "Native dense field host copy failed to allocate staging "
+                "buffer: {}",
+                res);
+    capacity = bytes;
+    return std::move(new_staging);
+  }
+  return nullptr;
+}
+
 void Program::fill_dense_field(SNode *dst,
                                int value_type,
                                uint64_t value_bits,
                                std::size_t n) {
-  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
-              "CPU native dense field fill is only available on CPU backends.");
-  TI_ERROR_IF(!dst, "CPU native dense field fill received a null field.");
+  const Arch arch = compile_config().arch;
+  TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
+              "Native dense field fill is only available on CPU, CUDA, and "
+              "Vulkan backends.");
+  TI_ERROR_IF(!dst, "Native dense field fill received a null field.");
   const std::size_t item_bytes = primitive_value_type_size(value_type);
   TI_ERROR_IF(item_bytes == 0,
-              "CPU native dense field fill received an unsupported value "
-              "type.");
+              "Native dense field fill received an unsupported value type.");
   if (n == 0) {
+    return;
+  }
+  if (arch == Arch::cuda) {
+#ifdef TI_WITH_CUDA
+    if (value_bits == 0) {
+      cuda_device_zero_dense_field(dst, value_type, n);
+      return;
+    }
+    TI_ERROR_IF(value_type > 2,
+                "Native dense field fill currently supports non-zero CUDA "
+                "device fills only for 32-bit primitive fields.");
+    DevicePtr dst_device_ptr = get_dense_field_device_ptr(dst);
+    const std::size_t dst_stride = get_dense_field_stride(dst, item_bytes);
+    TI_ERROR_IF(dst_stride < item_bytes,
+                "Native dense field fill received an invalid field stride.");
+    if (dst_stride == item_bytes) {
+      DeviceAllocation alloc{dst_device_ptr.device, dst_device_ptr.alloc_id};
+      auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+      TI_ERROR_IF(!base,
+                  "Native dense field fill received a null CUDA field data "
+                  "pointer.");
+      auto *dst_raw =
+          reinterpret_cast<uint8_t *>(base) + dst_device_ptr.offset;
+      CUDADriver::get_instance().memsetd32(
+          dst_raw, static_cast<uint32_t>(value_bits), n);
+      return;
+    }
+    const double value = dense_field_fill_value_as_double(value_type, value_bits);
+    cuda_device_transform_affine_dense_field(dst, dst, value_type, n, 0.0,
+                                             value);
+    return;
+#else
+    TI_ERROR("Native CUDA dense field fill requires TI_WITH_CUDA=ON.");
+#endif
+  }
+  if (arch == Arch::vulkan) {
+    if (value_bits == 0) {
+      vulkan_zero_dense_field(dst, value_type, n);
+      return;
+    }
+    TI_ERROR_IF(value_type > 2,
+                "Native dense field fill currently supports non-zero Vulkan "
+                "device fills only for 32-bit primitive fields.");
+    DevicePtr dst_device_ptr = get_dense_field_device_ptr(dst);
+    const std::size_t dst_stride = get_dense_field_stride(dst, item_bytes);
+    TI_ERROR_IF(dst_stride < item_bytes,
+                "Native dense field fill received an invalid field stride.");
+    DeviceAllocation dst_alloc{dst_device_ptr.device, dst_device_ptr.alloc_id};
+    TI_ERROR_IF(!dst_alloc.device,
+                "Native dense field fill received null Vulkan storage.");
+    if (dst_stride == item_bytes) {
+      const std::size_t dst_bytes = n * item_bytes;
+      enqueue_compute_op_lambda(
+          [dst_alloc, dst_offset = dst_device_ptr.offset, dst_bytes,
+           value = static_cast<uint32_t>(value_bits)](
+              Device * /*device*/, CommandList *cmdlist) {
+            cmdlist->buffer_fill(dst_alloc.get_ptr(dst_offset), dst_bytes,
+                                 value);
+            cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_offset), dst_bytes);
+          },
+          {});
+      return;
+    }
+    const double value = dense_field_fill_value_as_double(value_type, value_bits);
+    vulkan_transform_affine_dense_field(dst, dst, value_type, n, 0.0, value);
     return;
   }
   std::size_t dst_stride = 0;
   auto *dst_ptr = map_cpu_dense_field(this, dst, value_type, n,
-                                      "CPU native dense field fill",
-                                      &dst_stride);
+                                      "Native dense field fill", &dst_stride);
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   switch (value_type) {
@@ -7879,8 +8806,434 @@ void Program::fill_dense_field(SNode *dst,
                                          max_threads);
       return;
     default:
-      TI_ERROR("CPU native dense field fill received an unsupported value type.");
+      TI_ERROR("Native dense field fill received an unsupported value type.");
   }
+}
+
+void Program::fill_dense_field_packed(SNode *dst,
+                                      int value_type,
+                                      uint64_t value_bits,
+                                      std::size_t n,
+                                      int lane_count) {
+  const Arch arch = compile_config().arch;
+  TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
+              "Native packed dense field fill is only available on CPU, CUDA, "
+              "and Vulkan backends.");
+  TI_ERROR_IF(!dst, "Native packed dense field fill received a null field.");
+  const std::size_t item_bytes = primitive_value_type_size(value_type);
+  TI_ERROR_IF(item_bytes == 0,
+              "Native packed dense field fill received an unsupported value "
+              "type.");
+  const std::size_t scalar_items =
+      dense_field_packed_scalar_items(n, lane_count,
+                                      "Native packed dense field fill");
+  const std::size_t bytes =
+      dense_field_packed_bytes(value_type, n, lane_count,
+                               "Native packed dense field fill");
+  if (n == 0) {
+    return;
+  }
+  check_dense_field_packed_stride(this, dst, value_type, lane_count,
+                                  "Native packed dense field fill");
+  if (arch == Arch::cuda) {
+#ifdef TI_WITH_CUDA
+    DevicePtr dst_device_ptr = get_dense_field_device_ptr(dst);
+    DeviceAllocation alloc{dst_device_ptr.device, dst_device_ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base,
+                "Native packed dense field fill received a null CUDA field "
+                "data pointer.");
+    auto *dst_raw =
+        reinterpret_cast<uint8_t *>(base) + dst_device_ptr.offset;
+    if (value_bits == 0) {
+      CUDADriver::get_instance().memset(dst_raw, 0, bytes);
+      return;
+    }
+    TI_ERROR_IF(value_type > 2,
+                "Native packed dense field fill currently supports non-zero "
+                "CUDA device fills only for 32-bit primitive fields.");
+    CUDADriver::get_instance().memsetd32(
+        dst_raw, static_cast<uint32_t>(value_bits), scalar_items);
+    return;
+#else
+    TI_ERROR("Native CUDA packed dense field fill requires TI_WITH_CUDA=ON.");
+#endif
+  }
+  if (arch == Arch::vulkan) {
+    TI_ERROR_IF(value_bits != 0 && value_type > 2,
+                "Native packed dense field fill currently supports non-zero "
+                "Vulkan device fills only for 32-bit primitive fields.");
+    DevicePtr dst_device_ptr = get_dense_field_device_ptr(dst);
+    DeviceAllocation dst_alloc{dst_device_ptr.device, dst_device_ptr.alloc_id};
+    TI_ERROR_IF(!dst_alloc.device,
+                "Native packed dense field fill received null Vulkan "
+                "storage.");
+    enqueue_compute_op_lambda(
+        [dst_alloc, dst_offset = dst_device_ptr.offset, bytes,
+         value = static_cast<uint32_t>(value_bits)](
+            Device * /*device*/, CommandList *cmdlist) {
+          cmdlist->buffer_fill(dst_alloc.get_ptr(dst_offset), bytes, value);
+          cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_offset), bytes);
+        },
+        {});
+    return;
+  }
+  auto *dst_ptr = map_cpu_dense_field_packed(
+      this, dst, value_type, n, lane_count, "Native packed dense field fill");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  switch (value_type) {
+    case 0:
+      cpu_fill_dense_field_typed<int32_t>(dst_ptr, item_bytes, scalar_items,
+                                          value_bits, max_threads);
+      return;
+    case 1:
+      cpu_fill_dense_field_typed<float>(dst_ptr, item_bytes, scalar_items,
+                                        value_bits, max_threads);
+      return;
+    case 2:
+      cpu_fill_dense_field_typed<uint32_t>(dst_ptr, item_bytes, scalar_items,
+                                           value_bits, max_threads);
+      return;
+    case 3:
+      cpu_fill_dense_field_typed<uint64_t>(dst_ptr, item_bytes, scalar_items,
+                                           value_bits, max_threads);
+      return;
+    case 4:
+      cpu_fill_dense_field_typed<int64_t>(dst_ptr, item_bytes, scalar_items,
+                                          value_bits, max_threads);
+      return;
+    case 5:
+      cpu_fill_dense_field_typed<double>(dst_ptr, item_bytes, scalar_items,
+                                         value_bits, max_threads);
+      return;
+    default:
+      TI_ERROR(
+          "Native packed dense field fill received an unsupported value type.");
+  }
+}
+
+std::size_t Program::transform_affine_dense_field_packed(SNode *src,
+                                                         SNode *dst,
+                                                         int value_type,
+                                                         std::size_t n,
+                                                         int lane_count,
+                                                         double scale,
+                                                         double bias) {
+  const Arch arch = compile_config().arch;
+  TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
+              "Native packed dense field transform is only available on CPU, "
+              "CUDA, and Vulkan backends.");
+  TI_ERROR_IF(!src || !dst,
+              "Native packed dense field transform received a null field.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Native packed dense field transform received an unsupported "
+              "value type.");
+  const std::size_t scalar_items =
+      dense_field_packed_scalar_items(n, lane_count,
+                                      "Native packed dense field transform");
+  if (n == 0) {
+    return 0;
+  }
+  check_dense_field_packed_stride(this, src, value_type, lane_count,
+                                  "Native packed dense field transform");
+  check_dense_field_packed_stride(this, dst, value_type, lane_count,
+                                  "Native packed dense field transform");
+
+  if (arch == Arch::vulkan) {
+    return vulkan_transform_affine_dense_field_packed(
+        src, dst, value_type, n, lane_count, scale, bias);
+  }
+
+  if (arch == Arch::cuda) {
+#ifdef TI_WITH_CUDA
+    TI_ERROR_IF(
+        scalar_items >
+            static_cast<std::size_t>(std::numeric_limits<int>::max()),
+        "CUDA packed dense field transform currently supports at most INT_MAX "
+        "scalar items.");
+    auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+      TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                  op_name);
+      DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+      auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+      TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                  op_name);
+      return static_cast<void *>(reinterpret_cast<uint8_t *>(base) +
+                                 ptr.offset);
+    };
+    void *src_raw = raw_ptr(get_dense_field_device_ptr(src),
+                            "CUDA packed dense field transform");
+    void *dst_raw = raw_ptr(get_dense_field_device_ptr(dst),
+                            "CUDA packed dense field transform");
+    const auto cuda_value_type =
+        static_cast<cuda::CudaTransformValueType>(value_type);
+    if ((cuda_value_type == cuda::CudaTransformValueType::i32 ||
+         cuda_value_type == cuda::CudaTransformValueType::u32 ||
+         cuda_value_type == cuda::CudaTransformValueType::f32) &&
+        cuda::driver_transform_available()) {
+      return cuda::driver_transform_affine(
+          src_raw, dst_raw, static_cast<int>(scalar_items), cuda_value_type,
+          scale, bias);
+    }
+    TI_ERROR_IF(!cuda::cub_transform_available(),
+                "CUDA packed dense field transform requires "
+                "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+    void *stream = CUDAContext::get_instance().get_stream();
+    return cuda::cub_transform_affine(
+        src_raw, dst_raw, static_cast<int>(scalar_items), cuda_value_type,
+        scale, bias, stream);
+#else
+    TI_ERROR("CUDA packed dense field transform requires TI_WITH_CUDA=ON.");
+#endif
+  }
+
+  const auto *src_ptr = map_cpu_dense_field_packed(
+      this, src, value_type, n, lane_count,
+      "CPU native packed dense field transform");
+  auto *dst_ptr = map_cpu_dense_field_packed(
+      this, dst, value_type, n, lane_count,
+      "CPU native packed dense field transform");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((scalar_items + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel =
+      cpu_use_parallel_simple_loop(scalar_items, target_threads);
+  switch (value_type) {
+    case 0:
+      cpu_transform_run_typed<uint32_t>(
+          reinterpret_cast<const uint32_t *>(src_ptr),
+          reinterpret_cast<uint32_t *>(dst_ptr), scalar_items,
+          static_cast<uint32_t>(static_cast<int32_t>(scale)),
+          static_cast<uint32_t>(static_cast<int32_t>(bias)), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 1:
+      cpu_transform_run_typed<float>(
+          reinterpret_cast<const float *>(src_ptr),
+          reinterpret_cast<float *>(dst_ptr), scalar_items,
+          static_cast<float>(scale), static_cast<float>(bias), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 2:
+      cpu_transform_run_typed<uint32_t>(
+          reinterpret_cast<const uint32_t *>(src_ptr),
+          reinterpret_cast<uint32_t *>(dst_ptr), scalar_items,
+          static_cast<uint32_t>(scale), static_cast<uint32_t>(bias),
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 3:
+      cpu_transform_run_typed<uint64_t>(
+          reinterpret_cast<const uint64_t *>(src_ptr),
+          reinterpret_cast<uint64_t *>(dst_ptr), scalar_items,
+          static_cast<uint64_t>(scale), static_cast<uint64_t>(bias),
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 4:
+      cpu_transform_run_typed<uint64_t>(
+          reinterpret_cast<const uint64_t *>(src_ptr),
+          reinterpret_cast<uint64_t *>(dst_ptr), scalar_items,
+          static_cast<uint64_t>(static_cast<int64_t>(scale)),
+          static_cast<uint64_t>(static_cast<int64_t>(bias)), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    case 5:
+      cpu_transform_run_typed<double>(
+          reinterpret_cast<const double *>(src_ptr),
+          reinterpret_cast<double *>(dst_ptr), scalar_items,
+          static_cast<double>(scale), static_cast<double>(bias), use_parallel,
+          target_threads, max_threads);
+      return 0;
+    default:
+      TI_ERROR(
+          "Native packed dense field transform received an unsupported value "
+          "type.");
+  }
+  return 0;
+}
+
+void Program::copy_dense_field(SNode *dst,
+                               SNode *src,
+                               int value_type,
+                               std::size_t n) {
+  const Arch arch = compile_config().arch;
+  TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
+              "Native dense field copy is only available on CPU, CUDA, and "
+              "Vulkan backends.");
+  TI_ERROR_IF(!dst || !src,
+              "Native dense field copy received a null field.");
+  const std::size_t item_bytes = primitive_value_type_size(value_type);
+  TI_ERROR_IF(item_bytes == 0,
+              "Native dense field copy received an unsupported value type.");
+  if (n == 0 || dst == src) {
+    return;
+  }
+  if (n > std::numeric_limits<std::size_t>::max() / item_bytes) {
+    TI_ERROR("Native dense field copy received an oversized request.");
+  }
+
+  if (arch == Arch::cuda || arch == Arch::vulkan) {
+    const std::size_t dst_stride = get_dense_field_stride(dst, item_bytes);
+    const std::size_t src_stride = get_dense_field_stride(src, item_bytes);
+    DevicePtr dst_ptr = get_dense_field_device_ptr(dst);
+    DevicePtr src_ptr = get_dense_field_device_ptr(src);
+    Device *device = program_impl_->get_compute_device();
+    TI_ERROR_IF(!device || dst_ptr.device != device || src_ptr.device != device,
+                "Native dense field copy received invalid device storage.");
+    const std::size_t bytes = n * item_bytes;
+    if (arch == Arch::vulkan) {
+      if (dst_stride != item_bytes || src_stride != item_bytes) {
+        vulkan_transform_affine_dense_field(src, dst, value_type, n, 1.0, 0.0);
+        return;
+      }
+      DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
+      DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
+      enqueue_compute_op_lambda(
+          [dst_alloc, src_alloc, dst_offset = dst_ptr.offset,
+           src_offset = src_ptr.offset,
+           bytes](Device * /*device*/, CommandList *cmdlist) {
+            cmdlist->buffer_copy(dst_alloc.get_ptr(dst_offset),
+                                 src_alloc.get_ptr(src_offset), bytes);
+            cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_offset), bytes);
+          },
+          {});
+      return;
+    }
+    if (dst_stride != item_bytes || src_stride != item_bytes) {
+      cuda_device_transform_affine_dense_field(src, dst, value_type, n, 1.0,
+                                               0.0);
+      return;
+    }
+    Device::memcpy_direct(dst_ptr, src_ptr, bytes);
+    return;
+  }
+
+  std::size_t dst_stride = 0;
+  std::size_t src_stride = 0;
+  auto *dst_ptr = map_cpu_dense_field(this, dst, value_type, n,
+                                      "Native dense field copy", &dst_stride);
+  const auto *src_ptr = map_cpu_dense_field(this, src, value_type, n,
+                                           "Native dense field copy",
+                                           &src_stride);
+  const std::size_t bytes = n * item_bytes;
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  if (dst_stride == item_bytes && src_stride == item_bytes) {
+    const std::size_t chunk_bytes =
+        bytes <= (4 << 20) ? (1 << 20) : (256 << 10);
+    const int target_threads = static_cast<int>(
+        std::min<std::size_t>((bytes + chunk_bytes - 1) / chunk_bytes,
+                              static_cast<std::size_t>(max_threads)));
+    if (bytes >= (1 << 20) && target_threads > 1) {
+      CpuCopyTaskContext ctx;
+      ctx.dst = dst_ptr;
+      ctx.src = src_ptr;
+      ctx.bytes = bytes;
+      ctx.num_threads = target_threads;
+      auto &pool = get_cpu_primitive_thread_pool(max_threads);
+      pool.run(target_threads, target_threads, &ctx, cpu_copy_task);
+      return;
+    }
+    std::memcpy(dst_ptr, src_ptr, bytes);
+    return;
+  }
+
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  if (cpu_use_parallel_simple_loop(n, target_threads)) {
+    CpuDenseFieldCopyTaskContext ctx;
+    ctx.dst = dst_ptr;
+    ctx.src = src_ptr;
+    ctx.item_bytes = item_bytes;
+    ctx.dst_stride = dst_stride;
+    ctx.src_stride = src_stride;
+    ctx.n = n;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx, cpu_dense_field_copy_task);
+    return;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    std::memcpy(dst_ptr + i * dst_stride, src_ptr + i * src_stride,
+                item_bytes);
+  }
+}
+
+void Program::copy_dense_field_packed(SNode *dst,
+                                      SNode *src,
+                                      int value_type,
+                                      std::size_t n,
+                                      int lane_count) {
+  const Arch arch = compile_config().arch;
+  TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
+              "Native packed dense field copy is only available on CPU, CUDA, "
+              "and Vulkan backends.");
+  TI_ERROR_IF(!dst || !src,
+              "Native packed dense field copy received a null field.");
+  const std::size_t bytes =
+      dense_field_packed_bytes(value_type, n, lane_count,
+                               "Native packed dense field copy");
+  if (n == 0 || dst == src) {
+    return;
+  }
+  check_dense_field_packed_stride(this, dst, value_type, lane_count,
+                                  "Native packed dense field copy");
+  check_dense_field_packed_stride(this, src, value_type, lane_count,
+                                  "Native packed dense field copy");
+
+  if (arch == Arch::cuda || arch == Arch::vulkan) {
+    DevicePtr dst_ptr = get_dense_field_device_ptr(dst);
+    DevicePtr src_ptr = get_dense_field_device_ptr(src);
+    Device *device = program_impl_->get_compute_device();
+    TI_ERROR_IF(!device || dst_ptr.device != device || src_ptr.device != device,
+                "Native packed dense field copy received invalid device "
+                "storage.");
+    if (arch == Arch::vulkan) {
+      DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
+      DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
+      enqueue_compute_op_lambda(
+          [dst_alloc, src_alloc, dst_offset = dst_ptr.offset,
+           src_offset = src_ptr.offset,
+           bytes](Device * /*device*/, CommandList *cmdlist) {
+            cmdlist->buffer_copy(dst_alloc.get_ptr(dst_offset),
+                                 src_alloc.get_ptr(src_offset), bytes);
+            cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_offset), bytes);
+          },
+          {});
+      return;
+    }
+    Device::memcpy_direct(dst_ptr, src_ptr, bytes);
+    return;
+  }
+
+  auto *dst_ptr = map_cpu_dense_field_packed(
+      this, dst, value_type, n, lane_count, "Native packed dense field copy");
+  const auto *src_ptr = map_cpu_dense_field_packed(
+      this, src, value_type, n, lane_count, "Native packed dense field copy");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const std::size_t chunk_bytes =
+      bytes <= (4 << 20) ? (1 << 20) : (256 << 10);
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((bytes + chunk_bytes - 1) / chunk_bytes,
+                            static_cast<std::size_t>(max_threads)));
+  if (bytes >= (1 << 20) && target_threads > 1) {
+    CpuCopyTaskContext ctx;
+    ctx.dst = dst_ptr;
+    ctx.src = src_ptr;
+    ctx.bytes = bytes;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx, cpu_copy_task);
+    return;
+  }
+  std::memcpy(dst_ptr, src_ptr, bytes);
 }
 
 void Program::copy_dense_field_from_host(SNode *dst,
@@ -7888,24 +9241,70 @@ void Program::copy_dense_field_from_host(SNode *dst,
                                          std::size_t src_bytes,
                                          int value_type,
                                          std::size_t n) {
-  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
-              "CPU native dense field host copy is only available on CPU "
-              "backends.");
-  TI_ERROR_IF(!dst || !src, "CPU native dense field host copy received a null "
+  const Arch arch = compile_config().arch;
+  TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
+              "Native dense field host copy is only available on CPU, CUDA, "
+              "and Vulkan backends.");
+  TI_ERROR_IF(!dst || !src, "Native dense field host copy received a null "
                             "field or source pointer.");
   const std::size_t item_bytes = primitive_value_type_size(value_type);
   TI_ERROR_IF(item_bytes == 0,
-              "CPU native dense field host copy received an unsupported value "
+              "Native dense field host copy received an unsupported value "
               "type.");
   TI_ERROR_IF(src_bytes != n * item_bytes,
-              "CPU native dense field host copy received mismatched source "
-              "size.");
+              "Native dense field host copy received mismatched source size.");
   if (n == 0) {
+    return;
+  }
+  if (arch == Arch::cuda || arch == Arch::vulkan) {
+    const std::size_t dst_stride = get_dense_field_stride(dst, item_bytes);
+    TI_ERROR_IF(dst_stride != item_bytes,
+                "Native dense field path currently supports device host copy "
+                "only for contiguous dense fields.");
+    DevicePtr dst_ptr = get_dense_field_device_ptr(dst);
+    Device *device = program_impl_->get_compute_device();
+    TI_ERROR_IF(!device || dst_ptr.device != device,
+                "Native dense field host copy received invalid device "
+                "storage.");
+    if (arch == Arch::vulkan) {
+      std::lock_guard<std::mutex> lock(dense_field_host_copy_staging_.mutex);
+      if (auto new_staging = ensure_vulkan_dense_host_staging(
+              device, dense_field_host_copy_staging_.upload,
+              dense_field_host_copy_staging_.upload_capacity, src_bytes,
+              /*host_write=*/true, /*host_read=*/false, AllocUsage::Upload)) {
+        dense_field_host_copy_staging_.upload = std::move(new_staging);
+      }
+      void *mapped{nullptr};
+      RhiResult res = device->map(*dense_field_host_copy_staging_.upload,
+                                  &mapped);
+      TI_ERROR_IF(res != RhiResult::success || !mapped,
+                  "Native dense field host copy failed to map staging buffer: "
+                  "{}",
+                  res);
+      std::memcpy(mapped, reinterpret_cast<const void *>(src), src_bytes);
+      device->unmap(*dense_field_host_copy_staging_.upload);
+      Stream *stream = device->get_compute_stream();
+      auto [cmdlist, cmd_res] = stream->new_command_list_unique();
+      TI_ERROR_IF(cmd_res != RhiResult::success,
+                  "Native dense field host copy failed to create command "
+                  "list: {}",
+                  cmd_res);
+      cmdlist->buffer_copy(dst_ptr,
+                           dense_field_host_copy_staging_.upload->get_ptr(0),
+                           src_bytes);
+      stream->submit_synced(cmdlist.get());
+      return;
+    }
+    const void *src_ptr = reinterpret_cast<const void *>(src);
+    std::size_t size = src_bytes;
+    const RhiResult res = device->upload_data(&dst_ptr, &src_ptr, &size, 1);
+    TI_ERROR_IF(res != RhiResult::success,
+                "Native dense field host copy failed: {}", res);
     return;
   }
   std::size_t dst_stride = 0;
   auto *dst_ptr = map_cpu_dense_field(this, dst, value_type, n,
-                                      "CPU native dense field host copy",
+                                      "Native dense field host copy",
                                       &dst_stride);
   const auto *src_ptr = reinterpret_cast<const uint8_t *>(src);
   if (dst_stride == item_bytes) {
@@ -7917,31 +9316,149 @@ void Program::copy_dense_field_from_host(SNode *dst,
   }
 }
 
+void Program::copy_dense_field_packed_from_host(SNode *dst,
+                                                std::uintptr_t src,
+                                                std::size_t src_bytes,
+                                                int value_type,
+                                                std::size_t n,
+                                                int lane_count) {
+  const Arch arch = compile_config().arch;
+  TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
+              "Native packed dense field host copy is only available on CPU, "
+              "CUDA, and Vulkan backends.");
+  TI_ERROR_IF(!dst || !src,
+              "Native packed dense field host copy received a null field or "
+              "source pointer.");
+  const std::size_t expected_bytes =
+      dense_field_packed_bytes(value_type, n, lane_count,
+                               "Native packed dense field host copy");
+  TI_ERROR_IF(src_bytes != expected_bytes,
+              "Native packed dense field host copy received mismatched source "
+              "size.");
+  if (n == 0) {
+    return;
+  }
+  check_dense_field_packed_stride(this, dst, value_type, lane_count,
+                                  "Native packed dense field host copy");
+  if (arch == Arch::cuda || arch == Arch::vulkan) {
+    DevicePtr dst_ptr = get_dense_field_device_ptr(dst);
+    Device *device = program_impl_->get_compute_device();
+    TI_ERROR_IF(!device || dst_ptr.device != device,
+                "Native packed dense field host copy received invalid device "
+                "storage.");
+    if (arch == Arch::vulkan) {
+      std::lock_guard<std::mutex> lock(dense_field_host_copy_staging_.mutex);
+      if (auto new_staging = ensure_vulkan_dense_host_staging(
+              device, dense_field_host_copy_staging_.upload,
+              dense_field_host_copy_staging_.upload_capacity, src_bytes,
+              /*host_write=*/true, /*host_read=*/false, AllocUsage::Upload)) {
+        dense_field_host_copy_staging_.upload = std::move(new_staging);
+      }
+      void *mapped{nullptr};
+      RhiResult res = device->map(*dense_field_host_copy_staging_.upload,
+                                  &mapped);
+      TI_ERROR_IF(res != RhiResult::success || !mapped,
+                  "Native packed dense field host copy failed to map staging "
+                  "buffer: {}",
+                  res);
+      std::memcpy(mapped, reinterpret_cast<const void *>(src), src_bytes);
+      device->unmap(*dense_field_host_copy_staging_.upload);
+      Stream *stream = device->get_compute_stream();
+      auto [cmdlist, cmd_res] = stream->new_command_list_unique();
+      TI_ERROR_IF(cmd_res != RhiResult::success,
+                  "Native packed dense field host copy failed to create "
+                  "command list: {}",
+                  cmd_res);
+      cmdlist->buffer_copy(dst_ptr,
+                           dense_field_host_copy_staging_.upload->get_ptr(0),
+                           src_bytes);
+      stream->submit_synced(cmdlist.get());
+      return;
+    }
+    const void *src_ptr = reinterpret_cast<const void *>(src);
+    std::size_t size = src_bytes;
+    const RhiResult res = device->upload_data(&dst_ptr, &src_ptr, &size, 1);
+    TI_ERROR_IF(res != RhiResult::success,
+                "Native packed dense field host copy failed: {}", res);
+    return;
+  }
+  auto *dst_ptr = map_cpu_dense_field_packed(
+      this, dst, value_type, n, lane_count,
+      "Native packed dense field host copy");
+  std::memcpy(dst_ptr, reinterpret_cast<const void *>(src), src_bytes);
+}
+
 void Program::copy_dense_field_to_host(SNode *src,
                                        std::uintptr_t dst,
                                        std::size_t dst_bytes,
                                        int value_type,
                                        std::size_t n) {
-  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
-              "CPU native dense field host readback is only available on CPU "
-              "backends.");
+  const Arch arch = compile_config().arch;
+  TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
+              "Native dense field host readback is only available on CPU, "
+              "CUDA, and Vulkan backends.");
   TI_ERROR_IF(!src || !dst,
-              "CPU native dense field host readback received a null field or "
+              "Native dense field host readback received a null field or "
               "destination pointer.");
   const std::size_t item_bytes = primitive_value_type_size(value_type);
   TI_ERROR_IF(item_bytes == 0,
-              "CPU native dense field host readback received an unsupported "
+              "Native dense field host readback received an unsupported "
               "value type.");
   TI_ERROR_IF(dst_bytes != n * item_bytes,
-              "CPU native dense field host readback received mismatched "
+              "Native dense field host readback received mismatched "
               "destination size.");
   if (n == 0) {
     return;
   }
+  if (arch == Arch::cuda || arch == Arch::vulkan) {
+    const std::size_t src_stride = get_dense_field_stride(src, item_bytes);
+    TI_ERROR_IF(src_stride != item_bytes,
+                "Native dense field path currently supports device host "
+                "readback only for contiguous dense fields.");
+    DevicePtr src_ptr = get_dense_field_device_ptr(src);
+    Device *device = program_impl_->get_compute_device();
+    TI_ERROR_IF(!device || src_ptr.device != device,
+                "Native dense field host readback received invalid device "
+                "storage.");
+    if (arch == Arch::vulkan) {
+      std::lock_guard<std::mutex> lock(dense_field_host_copy_staging_.mutex);
+      if (auto new_staging = ensure_vulkan_dense_host_staging(
+              device, dense_field_host_copy_staging_.readback,
+              dense_field_host_copy_staging_.readback_capacity, dst_bytes,
+              /*host_write=*/false, /*host_read=*/true, AllocUsage::None)) {
+        dense_field_host_copy_staging_.readback = std::move(new_staging);
+      }
+      Stream *stream = device->get_compute_stream();
+      auto [cmdlist, cmd_res] = stream->new_command_list_unique();
+      TI_ERROR_IF(cmd_res != RhiResult::success,
+                  "Native dense field host readback failed to create command "
+                  "list: {}",
+                  cmd_res);
+      cmdlist->buffer_copy(
+          dense_field_host_copy_staging_.readback->get_ptr(0), src_ptr,
+          dst_bytes);
+      stream->submit_synced(cmdlist.get());
+      void *mapped{nullptr};
+      RhiResult res = device->map(*dense_field_host_copy_staging_.readback,
+                                  &mapped);
+      TI_ERROR_IF(res != RhiResult::success || !mapped,
+                  "Native dense field host readback failed to map staging "
+                  "buffer: {}",
+                  res);
+      std::memcpy(reinterpret_cast<void *>(dst), mapped, dst_bytes);
+      device->unmap(*dense_field_host_copy_staging_.readback);
+      return;
+    }
+    void *dst_ptr = reinterpret_cast<void *>(dst);
+    std::size_t size = dst_bytes;
+    const RhiResult res = device->readback_data(&src_ptr, &dst_ptr, &size, 1);
+    TI_ERROR_IF(res != RhiResult::success,
+                "Native dense field host readback failed: {}", res);
+    return;
+  }
   std::size_t src_stride = 0;
   const auto *src_ptr = map_cpu_dense_field(this, src, value_type, n,
-                                           "CPU native dense field host "
-                                           "readback",
+                                           "Native dense field host readback",
                                            &src_stride);
   auto *dst_ptr = reinterpret_cast<uint8_t *>(dst);
   if (src_stride == item_bytes) {
@@ -7952,6 +9469,78 @@ void Program::copy_dense_field_to_host(SNode *src,
     std::memcpy(dst_ptr + i * item_bytes, src_ptr + i * src_stride,
                 item_bytes);
   }
+}
+
+void Program::copy_dense_field_packed_to_host(SNode *src,
+                                              std::uintptr_t dst,
+                                              std::size_t dst_bytes,
+                                              int value_type,
+                                              std::size_t n,
+                                              int lane_count) {
+  const Arch arch = compile_config().arch;
+  TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
+              "Native packed dense field host readback is only available on "
+              "CPU, CUDA, and Vulkan backends.");
+  TI_ERROR_IF(!src || !dst,
+              "Native packed dense field host readback received a null field "
+              "or destination pointer.");
+  const std::size_t expected_bytes =
+      dense_field_packed_bytes(value_type, n, lane_count,
+                               "Native packed dense field host readback");
+  TI_ERROR_IF(dst_bytes != expected_bytes,
+              "Native packed dense field host readback received mismatched "
+              "destination size.");
+  if (n == 0) {
+    return;
+  }
+  check_dense_field_packed_stride(this, src, value_type, lane_count,
+                                  "Native packed dense field host readback");
+  if (arch == Arch::cuda || arch == Arch::vulkan) {
+    DevicePtr src_ptr = get_dense_field_device_ptr(src);
+    Device *device = program_impl_->get_compute_device();
+    TI_ERROR_IF(!device || src_ptr.device != device,
+                "Native packed dense field host readback received invalid "
+                "device storage.");
+    if (arch == Arch::vulkan) {
+      std::lock_guard<std::mutex> lock(dense_field_host_copy_staging_.mutex);
+      if (auto new_staging = ensure_vulkan_dense_host_staging(
+              device, dense_field_host_copy_staging_.readback,
+              dense_field_host_copy_staging_.readback_capacity, dst_bytes,
+              /*host_write=*/false, /*host_read=*/true, AllocUsage::None)) {
+        dense_field_host_copy_staging_.readback = std::move(new_staging);
+      }
+      Stream *stream = device->get_compute_stream();
+      auto [cmdlist, cmd_res] = stream->new_command_list_unique();
+      TI_ERROR_IF(cmd_res != RhiResult::success,
+                  "Native packed dense field host readback failed to create "
+                  "command list: {}",
+                  cmd_res);
+      cmdlist->buffer_copy(
+          dense_field_host_copy_staging_.readback->get_ptr(0), src_ptr,
+          dst_bytes);
+      stream->submit_synced(cmdlist.get());
+      void *mapped{nullptr};
+      RhiResult res = device->map(*dense_field_host_copy_staging_.readback,
+                                  &mapped);
+      TI_ERROR_IF(res != RhiResult::success || !mapped,
+                  "Native packed dense field host readback failed to map "
+                  "staging buffer: {}",
+                  res);
+      std::memcpy(reinterpret_cast<void *>(dst), mapped, dst_bytes);
+      device->unmap(*dense_field_host_copy_staging_.readback);
+      return;
+    }
+    void *dst_ptr = reinterpret_cast<void *>(dst);
+    std::size_t size = dst_bytes;
+    const RhiResult res = device->readback_data(&src_ptr, &dst_ptr, &size, 1);
+    TI_ERROR_IF(res != RhiResult::success,
+                "Native packed dense field host readback failed: {}", res);
+    return;
+  }
+  const auto *src_ptr = map_cpu_dense_field_packed(
+      this, src, value_type, n, lane_count,
+      "Native packed dense field host readback");
+  std::memcpy(reinterpret_cast<void *>(dst), src_ptr, dst_bytes);
 }
 
 std::size_t Program::cpu_compact_ndarray(Ndarray *values,
@@ -8561,6 +10150,104 @@ std::size_t Program::cpu_reduce_dense_field(SNode *values,
   }
 }
 
+std::size_t Program::cpu_reduce_dense_field_packed(SNode *values,
+                                                   SNode *output,
+                                                   int value_type,
+                                                   std::size_t n,
+                                                   int lane_count,
+                                                   int op) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native packed dense field reduce is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(n == 0,
+              "CPU native packed dense field reduce expects at least one "
+              "input item.");
+  TI_ERROR_IF(op < 0 || op > 2,
+              "CPU native packed dense field reduce received an unsupported "
+              "op.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CPU native packed dense field reduce received an unsupported "
+              "value type.");
+  const std::size_t item_bytes =
+      dense_field_packed_bytes(value_type, 1, lane_count,
+                               "CPU native packed dense field reduce");
+  const auto *values_ptr = map_cpu_dense_field_packed(
+      this, values, value_type, n, lane_count,
+      "CPU native packed dense field reduce");
+  auto *output_ptr = map_cpu_dense_field_packed(
+      this, output, value_type, 1, lane_count,
+      "CPU native packed dense field reduce");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
+  std::size_t temp_bytes = 0;
+  for (int lane = 0; lane < lane_count; ++lane) {
+    const std::size_t lane_offset =
+        static_cast<std::size_t>(lane) * value_size;
+    auto *lane_output = output_ptr + lane_offset;
+    switch (value_type) {
+      case 0:
+        temp_bytes = std::max(
+            temp_bytes,
+            cpu_reduce_strided_typed<int32_t>(
+                values_ptr, reinterpret_cast<int32_t *>(lane_output), op, n,
+                lane_offset, item_bytes, max_threads, target_threads,
+                use_parallel));
+        break;
+      case 1:
+        temp_bytes = std::max(
+            temp_bytes,
+            cpu_reduce_strided_typed<float>(
+                values_ptr, reinterpret_cast<float *>(lane_output), op, n,
+                lane_offset, item_bytes, max_threads, target_threads,
+                use_parallel));
+        break;
+      case 2:
+        temp_bytes = std::max(
+            temp_bytes,
+            cpu_reduce_strided_typed<uint32_t>(
+                values_ptr, reinterpret_cast<uint32_t *>(lane_output), op, n,
+                lane_offset, item_bytes, max_threads, target_threads,
+                use_parallel));
+        break;
+      case 3:
+        temp_bytes = std::max(
+            temp_bytes,
+            cpu_reduce_strided_typed<uint64_t>(
+                values_ptr, reinterpret_cast<uint64_t *>(lane_output), op, n,
+                lane_offset, item_bytes, max_threads, target_threads,
+                use_parallel));
+        break;
+      case 4:
+        temp_bytes = std::max(
+            temp_bytes,
+            cpu_reduce_strided_typed<int64_t>(
+                values_ptr, reinterpret_cast<int64_t *>(lane_output), op, n,
+                lane_offset, item_bytes, max_threads, target_threads,
+                use_parallel));
+        break;
+      case 5:
+        temp_bytes = std::max(
+            temp_bytes,
+            cpu_reduce_strided_typed<double>(
+                values_ptr, reinterpret_cast<double *>(lane_output), op, n,
+                lane_offset, item_bytes, max_threads, target_threads,
+                use_parallel));
+        break;
+      default:
+        TI_ERROR(
+            "CPU native packed dense field reduce received an unsupported "
+            "value type.");
+    }
+  }
+  return temp_bytes;
+}
+
 std::size_t Program::cpu_reduce_workspace_bytes() const {
   return 0;
 }
@@ -9034,10 +10721,13 @@ std::size_t Program::cpu_add_merge_ndarray(Ndarray *src,
   const std::size_t value_size = primitive_value_type_size(value_type);
   TI_ERROR_IF(value_size == 0,
               "CPU add-merge received an unsupported value type.");
-  TI_ERROR_IF(src->get_element_size() != value_size ||
-                  dst->get_element_size() != value_size,
-              "CPU add-merge dtype does not match value type.");
-  const std::size_t n = src->get_nelement();
+  const std::size_t src_element_size = src->get_element_size();
+  const std::size_t dst_element_size = dst->get_element_size();
+  TI_ERROR_IF(src_element_size != dst_element_size ||
+                  src_element_size < value_size ||
+                  src_element_size % value_size != 0,
+              "CPU add-merge payload does not match value type.");
+  const std::size_t n = src->get_nelement() * (src_element_size / value_size);
   if (n == 0) {
     return 0;
   }
@@ -9106,10 +10796,13 @@ std::size_t Program::cpu_add_scaled_ndarray(Ndarray *src,
   const std::size_t value_size = primitive_value_type_size(value_type);
   TI_ERROR_IF(value_size == 0,
               "CPU scaled-add received an unsupported value type.");
-  TI_ERROR_IF(src->get_element_size() != value_size ||
-                  dst->get_element_size() != value_size,
-              "CPU scaled-add dtype does not match value type.");
-  const std::size_t n = src->get_nelement();
+  const std::size_t src_element_size = src->get_element_size();
+  const std::size_t dst_element_size = dst->get_element_size();
+  TI_ERROR_IF(src_element_size != dst_element_size ||
+                  src_element_size < value_size ||
+                  src_element_size % value_size != 0,
+              "CPU scaled-add payload does not match value type.");
+  const std::size_t n = src->get_nelement() * (src_element_size / value_size);
   if (n == 0) {
     return 0;
   }
@@ -9330,6 +11023,380 @@ std::size_t Program::cpu_add_merge_dense_field(Ndarray *src,
       return 0;
     default:
       TI_ERROR("CPU dense field add-merge received an unsupported value type.");
+  }
+  return 0;
+}
+
+std::size_t Program::add_merge_dense_field_packed(SNode *src,
+                                                  SNode *dst,
+                                                  int value_type,
+                                                  std::size_t n,
+                                                  int lane_count) {
+  const Arch arch = compile_config().arch;
+  TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
+              "Native packed dense field add-merge is only available on CPU, "
+              "CUDA, and Vulkan backends.");
+  TI_ERROR_IF(!src || !dst,
+              "Native packed dense field add-merge received a null field.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Native packed dense field add-merge received an unsupported "
+              "value type.");
+  const std::size_t scalar_items =
+      dense_field_packed_scalar_items(n, lane_count,
+                                      "Native packed dense field add-merge");
+  if (n == 0) {
+    return 0;
+  }
+  check_dense_field_packed_stride(this, src, value_type, lane_count,
+                                  "Native packed dense field add-merge");
+  check_dense_field_packed_stride(this, dst, value_type, lane_count,
+                                  "Native packed dense field add-merge");
+
+  if (arch == Arch::vulkan) {
+    return vulkan_add_merge_dense_field_packed(src, dst, value_type, n,
+                                               lane_count);
+  }
+
+  if (arch == Arch::cuda) {
+#ifdef TI_WITH_CUDA
+    TI_ERROR_IF(
+        scalar_items >
+            static_cast<std::size_t>(std::numeric_limits<int>::max()),
+        "CUDA packed dense field add-merge currently supports at most INT_MAX "
+        "scalar items.");
+    auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+      TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                  op_name);
+      DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+      auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+      TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                  op_name);
+      return static_cast<void *>(reinterpret_cast<uint8_t *>(base) +
+                                 ptr.offset);
+    };
+    void *src_raw = raw_ptr(get_dense_field_device_ptr(src),
+                            "CUDA packed dense field add-merge");
+    void *dst_raw = raw_ptr(get_dense_field_device_ptr(dst),
+                            "CUDA packed dense field add-merge");
+    TI_ERROR_IF(!cuda::cub_add_merge_available(),
+                "CUDA packed dense field add-merge requires "
+                "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+    void *stream = CUDAContext::get_instance().get_stream();
+    return cuda::cub_add_merge(
+        src_raw, dst_raw, static_cast<int>(scalar_items),
+        static_cast<cuda::CudaTransformValueType>(value_type), stream);
+#else
+    TI_ERROR("CUDA packed dense field add-merge requires TI_WITH_CUDA=ON.");
+#endif
+  }
+
+  const auto *src_ptr = map_cpu_dense_field_packed(
+      this, src, value_type, n, lane_count,
+      "CPU native packed dense field add-merge");
+  auto *dst_ptr = map_cpu_dense_field_packed(
+      this, dst, value_type, n, lane_count,
+      "CPU native packed dense field add-merge");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((scalar_items + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel =
+      cpu_use_parallel_simple_loop(scalar_items, target_threads);
+  switch (value_type) {
+    case 0:
+      cpu_add_merge_run_strided_to_strided_typed<int32_t>(
+          src_ptr, dst_ptr, scalar_items, 0, value_size, 0, value_size,
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 1:
+      cpu_add_merge_run_strided_to_strided_typed<float>(
+          src_ptr, dst_ptr, scalar_items, 0, value_size, 0, value_size,
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 2:
+      cpu_add_merge_run_strided_to_strided_typed<uint32_t>(
+          src_ptr, dst_ptr, scalar_items, 0, value_size, 0, value_size,
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 3:
+      cpu_add_merge_run_strided_to_strided_typed<uint64_t>(
+          src_ptr, dst_ptr, scalar_items, 0, value_size, 0, value_size,
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 4:
+      cpu_add_merge_run_strided_to_strided_typed<int64_t>(
+          src_ptr, dst_ptr, scalar_items, 0, value_size, 0, value_size,
+          use_parallel, target_threads, max_threads);
+      return 0;
+    case 5:
+      cpu_add_merge_run_strided_to_strided_typed<double>(
+          src_ptr, dst_ptr, scalar_items, 0, value_size, 0, value_size,
+          use_parallel, target_threads, max_threads);
+      return 0;
+    default:
+      TI_ERROR(
+          "CPU packed dense field add-merge received an unsupported value "
+          "type.");
+  }
+  return 0;
+}
+
+std::size_t Program::scatter_add_dense_field_packed(SNode *src,
+                                                    Ndarray *indices,
+                                                    SNode *dst,
+                                                    int value_type,
+                                                    std::size_t src_n,
+                                                    std::size_t dst_n,
+                                                    int lane_count) {
+  const Arch arch = compile_config().arch;
+  TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
+              "Native packed dense field scatter-add is only available on "
+              "CPU, CUDA, and Vulkan backends.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "Native packed dense field scatter-add received a null "
+              "argument.");
+  TI_ERROR_IF(!indices || indices->shape.size() != 1 ||
+                  indices->get_nelement() != src_n ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "Native packed dense field scatter-add expects 1D i32 indices "
+              "matching source size.");
+  const std::size_t n = indices->get_nelement();
+  if (n == 0 || dst_n == 0) {
+    return 0;
+  }
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Native packed dense field scatter-add received an unsupported "
+              "value type.");
+  const std::size_t item_bytes =
+      dense_field_packed_bytes(value_type, 1, lane_count,
+                               "Native packed dense field scatter-add");
+  check_dense_field_packed_stride(this, src, value_type, lane_count,
+                                  "Native packed dense field scatter-add");
+  check_dense_field_packed_stride(this, dst, value_type, lane_count,
+                                  "Native packed dense field scatter-add");
+
+  if (arch == Arch::vulkan) {
+    return vulkan_scatter_add_dense_field_packed(
+        src, indices, dst, value_type, src_n, dst_n, lane_count);
+  }
+
+  if (arch == Arch::cuda) {
+#ifdef TI_WITH_CUDA
+    TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                    dst_n >
+                        static_cast<std::size_t>(std::numeric_limits<int>::max()),
+                "CUDA packed dense field scatter-add currently supports up "
+                "to INT_MAX items.");
+    TI_ERROR_IF(static_cast<std::size_t>(lane_count) >
+                    static_cast<std::size_t>(std::numeric_limits<int>::max()),
+                "CUDA packed dense field scatter-add received an invalid "
+                "lane count.");
+    auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+      TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                  op_name);
+      DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+      auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+      TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                  op_name);
+      return static_cast<void *>(reinterpret_cast<uint8_t *>(base) +
+                                 ptr.offset);
+    };
+    void *src_raw = raw_ptr(get_dense_field_device_ptr(src),
+                            "CUDA packed dense field scatter-add");
+    auto *indices_ptr =
+        reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
+    void *dst_raw = raw_ptr(get_dense_field_device_ptr(dst),
+                            "CUDA packed dense field scatter-add");
+    TI_ERROR_IF(!cuda::cub_scatter_add_available(),
+                "CUDA packed dense field scatter-add requires "
+                "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+    void *stream = CUDAContext::get_instance().get_stream();
+    return cuda::cub_scatter_add_packed_strided_io(
+        src_raw, indices_ptr, dst_raw, static_cast<int>(n),
+        static_cast<int>(dst_n), lane_count,
+        static_cast<cuda::CudaScatterAddValueType>(value_type), 0, item_bytes,
+        0, item_bytes, stream);
+#else
+    TI_ERROR("CUDA packed dense field scatter-add requires TI_WITH_CUDA=ON.");
+#endif
+  }
+
+  const auto *src_ptr = map_cpu_dense_field_packed(
+      this, src, value_type, src_n, lane_count,
+      "CPU native packed dense field scatter-add");
+  auto *dst_ptr = map_cpu_dense_field_packed(
+      this, dst, value_type, dst_n, lane_count,
+      "CPU native packed dense field scatter-add");
+  auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
+  const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
+  const int target_threads =
+      cpu_aggregation_target_threads(n, dst_n, max_threads);
+  switch (value_type) {
+    case 0:
+      return cpu_scatter_add_packed_strided_io_typed<int32_t>(
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
+          dst_n, lane_count, max_threads, target_threads);
+    case 1:
+      return cpu_scatter_add_packed_strided_io_typed<float>(
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
+          dst_n, lane_count, max_threads, target_threads);
+    case 2:
+      return cpu_scatter_add_packed_strided_io_typed<uint32_t>(
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
+          dst_n, lane_count, max_threads, target_threads);
+    case 3:
+      return cpu_scatter_add_packed_strided_io_typed<uint64_t>(
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
+          dst_n, lane_count, max_threads, target_threads);
+    case 4:
+      return cpu_scatter_add_packed_strided_io_typed<int64_t>(
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
+          dst_n, lane_count, max_threads, target_threads);
+    case 5:
+      return cpu_scatter_add_packed_strided_io_typed<double>(
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
+          dst_n, lane_count, max_threads, target_threads);
+    default:
+      TI_ERROR(
+          "Native packed dense field scatter-add received an unsupported "
+          "value type.");
+  }
+  return 0;
+}
+
+std::size_t Program::scatter_add_dense_field_packed_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n,
+    int lane_count) {
+  const Arch arch = compile_config().arch;
+  TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
+              "Native packed dense field scatter-add is only available on "
+              "CPU, CUDA, and Vulkan backends.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "Native packed dense field scatter-add received a null "
+              "argument.");
+  TI_ERROR_IF(src_n != indices_n,
+              "Native packed dense field scatter-add expects source and "
+              "field-index sizes to match.");
+  const std::size_t n = indices_n;
+  if (n == 0 || dst_n == 0) {
+    return 0;
+  }
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Native packed dense field scatter-add received an unsupported "
+              "value type.");
+  const std::size_t item_bytes =
+      dense_field_packed_bytes(value_type, 1, lane_count,
+                               "Native packed dense field scatter-add");
+  check_dense_field_packed_stride(this, src, value_type, lane_count,
+                                  "Native packed dense field scatter-add");
+  check_dense_field_packed_stride(this, dst, value_type, lane_count,
+                                  "Native packed dense field scatter-add");
+  TI_ERROR_IF(get_dense_field_stride(indices, sizeof(int32_t)) !=
+                  sizeof(int32_t),
+              "Native packed dense field scatter-add requires contiguous i32 "
+              "field indices.");
+
+  if (arch == Arch::vulkan) {
+    return vulkan_scatter_add_dense_field_packed_indices_field(
+        src, indices, dst, value_type, src_n, indices_n, dst_n, lane_count);
+  }
+
+  if (arch == Arch::cuda) {
+#ifdef TI_WITH_CUDA
+    TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                    dst_n >
+                        static_cast<std::size_t>(std::numeric_limits<int>::max()),
+                "CUDA packed dense field scatter-add currently supports up "
+                "to INT_MAX items.");
+    TI_ERROR_IF(static_cast<std::size_t>(lane_count) >
+                    static_cast<std::size_t>(std::numeric_limits<int>::max()),
+                "CUDA packed dense field scatter-add received an invalid "
+                "lane count.");
+    auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+      TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                  op_name);
+      DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+      auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+      TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                  op_name);
+      return static_cast<void *>(reinterpret_cast<uint8_t *>(base) +
+                                 ptr.offset);
+    };
+    void *src_raw = raw_ptr(get_dense_field_device_ptr(src),
+                            "CUDA packed dense field scatter-add");
+    void *indices_raw = raw_ptr(get_dense_field_device_ptr(indices),
+                                "CUDA packed dense field scatter-add");
+    void *dst_raw = raw_ptr(get_dense_field_device_ptr(dst),
+                            "CUDA packed dense field scatter-add");
+    TI_ERROR_IF(!cuda::cub_scatter_add_available(),
+                "CUDA packed dense field scatter-add requires "
+                "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
+    void *stream = CUDAContext::get_instance().get_stream();
+    return cuda::cub_scatter_add_packed_strided_io(
+        src_raw, indices_raw, dst_raw, static_cast<int>(n),
+        static_cast<int>(dst_n), lane_count,
+        static_cast<cuda::CudaScatterAddValueType>(value_type), 0, item_bytes,
+        0, item_bytes, stream);
+#else
+    TI_ERROR("CUDA packed dense field scatter-add requires TI_WITH_CUDA=ON.");
+#endif
+  }
+
+  const auto *src_ptr = map_cpu_dense_field_packed(
+      this, src, value_type, src_n, lane_count,
+      "CPU native packed dense field scatter-add");
+  const auto *indices_ptr_bytes = map_cpu_dense_field(
+      this, indices, 0, indices_n, "CPU native packed dense field scatter-add",
+      nullptr);
+  auto *dst_ptr = map_cpu_dense_field_packed(
+      this, dst, value_type, dst_n, lane_count,
+      "CPU native packed dense field scatter-add");
+  const auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(indices_ptr_bytes);
+  const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
+  const int target_threads =
+      cpu_aggregation_target_threads(n, dst_n, max_threads);
+  switch (value_type) {
+    case 0:
+      return cpu_scatter_add_packed_strided_io_typed<int32_t>(
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
+          dst_n, lane_count, max_threads, target_threads);
+    case 1:
+      return cpu_scatter_add_packed_strided_io_typed<float>(
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
+          dst_n, lane_count, max_threads, target_threads);
+    case 2:
+      return cpu_scatter_add_packed_strided_io_typed<uint32_t>(
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
+          dst_n, lane_count, max_threads, target_threads);
+    case 3:
+      return cpu_scatter_add_packed_strided_io_typed<uint64_t>(
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
+          dst_n, lane_count, max_threads, target_threads);
+    case 4:
+      return cpu_scatter_add_packed_strided_io_typed<int64_t>(
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
+          dst_n, lane_count, max_threads, target_threads);
+    case 5:
+      return cpu_scatter_add_packed_strided_io_typed<double>(
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
+          dst_n, lane_count, max_threads, target_threads);
+    default:
+      TI_ERROR(
+          "Native packed dense field scatter-add received an unsupported "
+          "value type.");
   }
   return 0;
 }
@@ -9639,6 +11706,153 @@ std::size_t Program::cpu_gather_dense_field(SNode *src,
                   item_bytes);
     } else {
       std::memset(dst_ptr + i * dst_stride, 0, item_bytes);
+    }
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_gather_dense_field_packed(SNode *src,
+                                                   Ndarray *indices,
+                                                   SNode *dst,
+                                                   int value_type,
+                                                   std::size_t src_n,
+                                                   std::size_t dst_n,
+                                                   int lane_count) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native packed dense field gather is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!indices || indices->shape.size() != 1 ||
+                  indices->get_nelement() != dst_n ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "CPU native packed dense field gather expects 1D i32 indices "
+              "matching destination size.");
+  const std::size_t n = indices->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  const std::size_t item_bytes =
+      dense_field_packed_bytes(value_type, 1, lane_count,
+                               "CPU packed dense field gather");
+  const auto *src_ptr = map_cpu_dense_field_packed(
+      this, src, value_type, src_n, lane_count,
+      "CPU packed dense field gather");
+  auto *dst_ptr = map_cpu_dense_field_packed(
+      this, dst, value_type, dst_n, lane_count,
+      "CPU packed dense field gather");
+  auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native packed dense field gather received a null data "
+              "pointer.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  if (n >= 65536 && target_threads > 1) {
+    CpuStridedIndexedCopyTaskContext ctx;
+    ctx.src = src_ptr;
+    ctx.indices = indices_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.index_bound = src_n;
+    ctx.item_bytes = item_bytes;
+    ctx.src_offset = 0;
+    ctx.src_stride = item_bytes;
+    ctx.dst_offset = 0;
+    ctx.dst_stride = item_bytes;
+    ctx.scatter = false;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_indexed_copy_task);
+    return 0;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto index = static_cast<std::size_t>(indices_ptr[i]);
+    if (index < src_n) {
+      std::memcpy(dst_ptr + i * item_bytes, src_ptr + index * item_bytes,
+                  item_bytes);
+    } else {
+      std::memset(dst_ptr + i * item_bytes, 0, item_bytes);
+    }
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_gather_dense_field_packed_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n,
+    int lane_count) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native packed dense field gather is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(indices_n != dst_n,
+              "CPU native packed dense field gather expects field indices "
+              "matching destination size.");
+  const std::size_t n = indices_n;
+  if (n == 0) {
+    return 0;
+  }
+  const std::size_t item_bytes =
+      dense_field_packed_bytes(value_type, 1, lane_count,
+                               "CPU packed dense field gather");
+  const auto *src_ptr = map_cpu_dense_field_packed(
+      this, src, value_type, src_n, lane_count,
+      "CPU packed dense field gather");
+  std::size_t indices_stride = 0;
+  const auto *indices_ptr_bytes = map_cpu_dense_field(
+      this, indices, 0, indices_n, "CPU packed dense field gather",
+      &indices_stride);
+  auto *dst_ptr = map_cpu_dense_field_packed(
+      this, dst, value_type, dst_n, lane_count,
+      "CPU packed dense field gather");
+  TI_ERROR_IF(indices_stride != sizeof(int32_t),
+              "CPU packed dense field gather requires contiguous i32 field "
+              "indices.");
+  const auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(indices_ptr_bytes);
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native packed dense field gather received a null data "
+              "pointer.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  if (n >= 65536 && target_threads > 1) {
+    CpuStridedIndexedCopyTaskContext ctx;
+    ctx.src = src_ptr;
+    ctx.indices = indices_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.index_bound = src_n;
+    ctx.item_bytes = item_bytes;
+    ctx.src_offset = 0;
+    ctx.src_stride = item_bytes;
+    ctx.dst_offset = 0;
+    ctx.dst_stride = item_bytes;
+    ctx.scatter = false;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_indexed_copy_task);
+    return 0;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto index = static_cast<std::size_t>(indices_ptr[i]);
+    if (index < src_n) {
+      std::memcpy(dst_ptr + i * item_bytes, src_ptr + index * item_bytes,
+                  item_bytes);
+    } else {
+      std::memset(dst_ptr + i * item_bytes, 0, item_bytes);
     }
   }
   return 0;
@@ -10076,6 +12290,149 @@ std::size_t Program::cpu_scatter_dense_field(SNode *src,
     const auto index = static_cast<std::size_t>(indices_ptr[i]);
     if (index < dst_n) {
       std::memcpy(dst_ptr + index * dst_stride, src_ptr + i * src_stride,
+                  item_bytes);
+    }
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_scatter_dense_field_packed(SNode *src,
+                                                    Ndarray *indices,
+                                                    SNode *dst,
+                                                    int value_type,
+                                                    std::size_t src_n,
+                                                    std::size_t dst_n,
+                                                    int lane_count) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native packed dense field scatter is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!indices || indices->shape.size() != 1 ||
+                  indices->get_nelement() != src_n ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "CPU native packed dense field scatter expects 1D i32 indices "
+              "matching source size.");
+  const std::size_t n = indices->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  const std::size_t item_bytes =
+      dense_field_packed_bytes(value_type, 1, lane_count,
+                               "CPU packed dense field scatter");
+  const auto *src_ptr = map_cpu_dense_field_packed(
+      this, src, value_type, src_n, lane_count,
+      "CPU packed dense field scatter");
+  auto *dst_ptr = map_cpu_dense_field_packed(
+      this, dst, value_type, dst_n, lane_count,
+      "CPU packed dense field scatter");
+  auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native packed dense field scatter received a null data "
+              "pointer.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  if (n >= 65536 && target_threads > 1) {
+    CpuStridedIndexedCopyTaskContext ctx;
+    ctx.src = src_ptr;
+    ctx.indices = indices_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.index_bound = dst_n;
+    ctx.item_bytes = item_bytes;
+    ctx.src_offset = 0;
+    ctx.src_stride = item_bytes;
+    ctx.dst_offset = 0;
+    ctx.dst_stride = item_bytes;
+    ctx.scatter = true;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_indexed_copy_task);
+    return 0;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto index = static_cast<std::size_t>(indices_ptr[i]);
+    if (index < dst_n) {
+      std::memcpy(dst_ptr + index * item_bytes, src_ptr + i * item_bytes,
+                  item_bytes);
+    }
+  }
+  return 0;
+}
+
+std::size_t Program::cpu_scatter_dense_field_packed_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n,
+    int lane_count) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native packed dense field scatter is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(src_n != indices_n,
+              "CPU native packed dense field scatter expects field indices "
+              "matching source size.");
+  const std::size_t n = indices_n;
+  if (n == 0) {
+    return 0;
+  }
+  const std::size_t item_bytes =
+      dense_field_packed_bytes(value_type, 1, lane_count,
+                               "CPU packed dense field scatter");
+  const auto *src_ptr = map_cpu_dense_field_packed(
+      this, src, value_type, src_n, lane_count,
+      "CPU packed dense field scatter");
+  std::size_t indices_stride = 0;
+  const auto *indices_ptr_bytes = map_cpu_dense_field(
+      this, indices, 0, indices_n, "CPU packed dense field scatter",
+      &indices_stride);
+  auto *dst_ptr = map_cpu_dense_field_packed(
+      this, dst, value_type, dst_n, lane_count,
+      "CPU packed dense field scatter");
+  TI_ERROR_IF(indices_stride != sizeof(int32_t),
+              "CPU packed dense field scatter requires contiguous i32 field "
+              "indices.");
+  const auto *indices_ptr =
+      reinterpret_cast<const int32_t *>(indices_ptr_bytes);
+  TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
+              "CPU native packed dense field scatter received a null data "
+              "pointer.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  if (n >= 65536 && target_threads > 1) {
+    CpuStridedIndexedCopyTaskContext ctx;
+    ctx.src = src_ptr;
+    ctx.indices = indices_ptr;
+    ctx.dst = dst_ptr;
+    ctx.n = n;
+    ctx.index_bound = dst_n;
+    ctx.item_bytes = item_bytes;
+    ctx.src_offset = 0;
+    ctx.src_stride = item_bytes;
+    ctx.dst_offset = 0;
+    ctx.dst_stride = item_bytes;
+    ctx.scatter = true;
+    ctx.num_threads = target_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(target_threads, target_threads, &ctx,
+             cpu_strided_indexed_copy_task);
+    return 0;
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto index = static_cast<std::size_t>(indices_ptr[i]);
+    if (index < dst_n) {
+      std::memcpy(dst_ptr + index * item_bytes, src_ptr + i * item_bytes,
                   item_bytes);
     }
   }

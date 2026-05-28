@@ -761,6 +761,17 @@ void export_lang(py::module &m) {
            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
            py::arg("src_n"), py::arg("dst_n"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_gather_dense_field_packed",
+           &Program::cuda_device_gather_dense_field_packed, py::arg("src"),
+           py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+           py::arg("src_n"), py::arg("dst_n"), py::arg("lane_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_gather_dense_field_packed_indices_field",
+           &Program::cuda_device_gather_dense_field_packed_indices_field,
+           py::arg("src"), py::arg("indices"), py::arg("dst"),
+           py::arg("value_type"), py::arg("src_n"), py::arg("indices_n"),
+           py::arg("dst_n"), py::arg("lane_count"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_device_gather_dense_field_indices_field",
            &Program::cuda_device_gather_dense_field_indices_field,
            py::arg("src"), py::arg("indices"), py::arg("dst"),
@@ -794,6 +805,17 @@ void export_lang(py::module &m) {
             &Program::cuda_device_scatter_dense_field, py::arg("src"),
             py::arg("indices"), py::arg("dst"), py::arg("value_type"),
             py::arg("src_n"), py::arg("dst_n"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_scatter_dense_field_packed",
+            &Program::cuda_device_scatter_dense_field_packed, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("src_n"), py::arg("dst_n"), py::arg("lane_count"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cuda_device_scatter_dense_field_packed_indices_field",
+            &Program::cuda_device_scatter_dense_field_packed_indices_field,
+            py::arg("src"), py::arg("indices"), py::arg("dst"),
+            py::arg("value_type"), py::arg("src_n"), py::arg("indices_n"),
+            py::arg("dst_n"), py::arg("lane_count"),
             py::call_guard<py::gil_scoped_release>())
        .def("cuda_device_scatter_dense_field_indices_field",
             &Program::cuda_device_scatter_dense_field_indices_field,
@@ -992,6 +1014,14 @@ void export_lang(py::module &m) {
            &Program::cuda_cub_inclusive_reverse_scan_dense_field,
            py::arg("data"), py::arg("value_type"), py::arg("n"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_inclusive_scan_dense_field_packed",
+           &Program::cuda_cub_inclusive_scan_dense_field_packed,
+           py::arg("data"), py::arg("value_type"), py::arg("n"),
+           py::arg("lane_count"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_inclusive_reverse_scan_dense_field_packed",
+           &Program::cuda_cub_inclusive_reverse_scan_dense_field_packed,
+           py::arg("data"), py::arg("value_type"), py::arg("n"),
+           py::arg("lane_count"), py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_select_available", &Program::cuda_cub_select_available)
       .def("cuda_cub_select_clear_workspace",
            &Program::cuda_cub_select_clear_workspace,
@@ -1054,6 +1084,11 @@ void export_lang(py::module &m) {
            py::arg("values"), py::arg("output"), py::arg("value_type"),
            py::arg("n"), py::arg("op"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_reduce_dense_field_packed",
+           &Program::cuda_cub_reduce_dense_field_packed, py::arg("values"),
+           py::arg("output"), py::arg("value_type"), py::arg("n"),
+           py::arg("lane_count"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_scan_available", &Program::cpu_scan_available)
       .def("cpu_scan_workspace_bytes", &Program::cpu_scan_workspace_bytes)
       .def("cpu_inclusive_scan_ndarray",
@@ -1078,10 +1113,34 @@ void export_lang(py::module &m) {
            &Program::cpu_inclusive_reverse_scan_dense_field, py::arg("data"),
            py::arg("value_type"), py::arg("n"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cpu_inclusive_scan_dense_field_packed",
+           &Program::cpu_inclusive_scan_dense_field_packed, py::arg("data"),
+           py::arg("value_type"), py::arg("n"), py::arg("lane_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_inclusive_reverse_scan_dense_field_packed",
+           &Program::cpu_inclusive_reverse_scan_dense_field_packed,
+           py::arg("data"), py::arg("value_type"), py::arg("n"),
+           py::arg("lane_count"), py::call_guard<py::gil_scoped_release>())
       .def("cpu_compact_available", &Program::cpu_compact_available)
       .def("cpu_compact_workspace_bytes", &Program::cpu_compact_workspace_bytes)
       .def("fill_dense_field", &Program::fill_dense_field, py::arg("dst"),
            py::arg("value_type"), py::arg("value_bits"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("fill_dense_field_packed", &Program::fill_dense_field_packed,
+           py::arg("dst"), py::arg("value_type"), py::arg("value_bits"),
+           py::arg("n"), py::arg("lane_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("transform_affine_dense_field_packed",
+           &Program::transform_affine_dense_field_packed, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("n"),
+           py::arg("lane_count"), py::arg("scale"), py::arg("bias"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("copy_dense_field", &Program::copy_dense_field, py::arg("dst"),
+           py::arg("src"), py::arg("value_type"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("copy_dense_field_packed", &Program::copy_dense_field_packed,
+           py::arg("dst"), py::arg("src"), py::arg("value_type"),
+           py::arg("n"), py::arg("lane_count"),
            py::call_guard<py::gil_scoped_release>())
       .def(
           "copy_dense_field_from_host",
@@ -1089,7 +1148,7 @@ void export_lang(py::module &m) {
              std::size_t n) {
             py::buffer_info info = src.request();
             TI_ERROR_IF(info.ndim < 0 || info.itemsize < 0 || info.size < 0,
-                        "CPU dense field host copy received an invalid "
+                        "Native dense field host copy received an invalid "
                         "source buffer.");
             const auto src_ptr =
                 reinterpret_cast<std::uintptr_t>(info.ptr);
@@ -1102,12 +1161,31 @@ void export_lang(py::module &m) {
           },
           py::arg("dst"), py::arg("src"), py::arg("value_type"), py::arg("n"))
       .def(
+          "copy_dense_field_packed_from_host",
+          [](Program &program, SNode *dst, py::buffer src, int value_type,
+             std::size_t n, int lane_count) {
+            py::buffer_info info = src.request();
+            TI_ERROR_IF(info.ndim < 0 || info.itemsize < 0 || info.size < 0,
+                        "Native packed dense field host copy received an "
+                        "invalid source buffer.");
+            const auto src_ptr =
+                reinterpret_cast<std::uintptr_t>(info.ptr);
+            const std::size_t src_bytes =
+                static_cast<std::size_t>(info.size) *
+                static_cast<std::size_t>(info.itemsize);
+            py::gil_scoped_release release;
+            program.copy_dense_field_packed_from_host(
+                dst, src_ptr, src_bytes, value_type, n, lane_count);
+          },
+          py::arg("dst"), py::arg("src"), py::arg("value_type"), py::arg("n"),
+          py::arg("lane_count"))
+      .def(
           "copy_dense_field_to_host",
           [](Program &program, SNode *src, py::buffer dst, int value_type,
              std::size_t n) {
             py::buffer_info info = dst.request();
             TI_ERROR_IF(info.ndim < 0 || info.itemsize < 0 || info.size < 0,
-                        "CPU dense field host readback received an invalid "
+                        "Native dense field host readback received an invalid "
                         "destination buffer.");
             const auto dst_ptr = reinterpret_cast<std::uintptr_t>(info.ptr);
             const std::size_t dst_bytes =
@@ -1118,6 +1196,39 @@ void export_lang(py::module &m) {
                                              value_type, n);
           },
           py::arg("src"), py::arg("dst"), py::arg("value_type"), py::arg("n"))
+      .def(
+          "copy_dense_field_packed_to_host",
+          [](Program &program, SNode *src, py::buffer dst, int value_type,
+             std::size_t n, int lane_count) {
+            py::buffer_info info = dst.request();
+            TI_ERROR_IF(info.ndim < 0 || info.itemsize < 0 || info.size < 0,
+                        "Native packed dense field host readback received an "
+                        "invalid destination buffer.");
+            const auto dst_ptr = reinterpret_cast<std::uintptr_t>(info.ptr);
+            const std::size_t dst_bytes =
+                static_cast<std::size_t>(info.size) *
+                static_cast<std::size_t>(info.itemsize);
+            py::gil_scoped_release release;
+            program.copy_dense_field_packed_to_host(
+                src, dst_ptr, dst_bytes, value_type, n, lane_count);
+          },
+          py::arg("src"), py::arg("dst"), py::arg("value_type"),
+          py::arg("n"), py::arg("lane_count"))
+      .def("add_merge_dense_field_packed",
+           &Program::add_merge_dense_field_packed, py::arg("src"),
+           py::arg("dst"), py::arg("value_type"), py::arg("n"),
+           py::arg("lane_count"), py::call_guard<py::gil_scoped_release>())
+      .def("scatter_add_dense_field_packed",
+           &Program::scatter_add_dense_field_packed, py::arg("src"),
+           py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+           py::arg("src_n"), py::arg("dst_n"), py::arg("lane_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("scatter_add_dense_field_packed_indices_field",
+           &Program::scatter_add_dense_field_packed_indices_field,
+           py::arg("src"), py::arg("indices"), py::arg("dst"),
+           py::arg("value_type"), py::arg("src_n"), py::arg("indices_n"),
+           py::arg("dst_n"), py::arg("lane_count"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_compact_ndarray", &Program::cpu_compact_ndarray,
            py::arg("values"), py::arg("flags"), py::arg("output"),
            py::arg("count"), py::arg("value_type"),
@@ -1162,6 +1273,11 @@ void export_lang(py::module &m) {
       .def("cpu_reduce_dense_field", &Program::cpu_reduce_dense_field,
            py::arg("values"), py::arg("output"), py::arg("value_type"),
            py::arg("n"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_reduce_dense_field_packed",
+           &Program::cpu_reduce_dense_field_packed, py::arg("values"),
+           py::arg("output"), py::arg("value_type"), py::arg("n"),
+           py::arg("lane_count"), py::arg("op"),
            py::call_guard<py::gil_scoped_release>())
       .def("cpu_transform_available", &Program::cpu_transform_available)
       .def("cpu_transform_workspace_bytes",
@@ -1237,6 +1353,17 @@ void export_lang(py::module &m) {
            py::arg("src"), py::arg("indices"), py::arg("dst"),
            py::arg("value_type"), py::arg("src_n"), py::arg("dst_n"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cpu_gather_dense_field_packed",
+           &Program::cpu_gather_dense_field_packed, py::arg("src"),
+           py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+           py::arg("src_n"), py::arg("dst_n"), py::arg("lane_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_gather_dense_field_packed_indices_field",
+           &Program::cpu_gather_dense_field_packed_indices_field,
+           py::arg("src"), py::arg("indices"), py::arg("dst"),
+           py::arg("value_type"), py::arg("src_n"), py::arg("indices_n"),
+           py::arg("dst_n"), py::arg("lane_count"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_gather_dense_field_indices_field",
            &Program::cpu_gather_dense_field_indices_field, py::arg("src"),
            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
@@ -1267,6 +1394,17 @@ void export_lang(py::module &m) {
        .def("cpu_scatter_dense_field", &Program::cpu_scatter_dense_field,
             py::arg("src"), py::arg("indices"), py::arg("dst"),
             py::arg("value_type"), py::arg("src_n"), py::arg("dst_n"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cpu_scatter_dense_field_packed",
+            &Program::cpu_scatter_dense_field_packed, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("src_n"), py::arg("dst_n"), py::arg("lane_count"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("cpu_scatter_dense_field_packed_indices_field",
+            &Program::cpu_scatter_dense_field_packed_indices_field,
+            py::arg("src"), py::arg("indices"), py::arg("dst"),
+            py::arg("value_type"), py::arg("src_n"), py::arg("indices_n"),
+            py::arg("dst_n"), py::arg("lane_count"),
             py::call_guard<py::gil_scoped_release>())
        .def("cpu_scatter_dense_field_indices_field",
             &Program::cpu_scatter_dense_field_indices_field, py::arg("src"),
@@ -1375,14 +1513,34 @@ void export_lang(py::module &m) {
            &Program::vulkan_inclusive_scan_ndarray, py::arg("data"),
            py::arg("value_type"),
            py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_inclusive_reverse_scan_ndarray",
+           &Program::vulkan_inclusive_reverse_scan_ndarray, py::arg("data"),
+           py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_inclusive_scan_member_ndarray",
            &Program::vulkan_inclusive_scan_member_ndarray, py::arg("data"),
            py::arg("value_type"), py::arg("offset"), py::arg("stride"),
            py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_inclusive_reverse_scan_member_ndarray",
+           &Program::vulkan_inclusive_reverse_scan_member_ndarray,
+           py::arg("data"), py::arg("value_type"), py::arg("offset"),
+           py::arg("stride"), py::call_guard<py::gil_scoped_release>())
       .def("vulkan_inclusive_scan_dense_field",
            &Program::vulkan_inclusive_scan_dense_field, py::arg("data"),
            py::arg("value_type"), py::arg("n"),
            py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_inclusive_reverse_scan_dense_field",
+           &Program::vulkan_inclusive_reverse_scan_dense_field,
+           py::arg("data"), py::arg("value_type"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_inclusive_scan_dense_field_packed",
+           &Program::vulkan_inclusive_scan_dense_field_packed, py::arg("data"),
+           py::arg("value_type"), py::arg("n"), py::arg("lane_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_inclusive_reverse_scan_dense_field_packed",
+           &Program::vulkan_inclusive_reverse_scan_dense_field_packed,
+           py::arg("data"), py::arg("value_type"), py::arg("n"),
+           py::arg("lane_count"), py::call_guard<py::gil_scoped_release>())
       .def("vulkan_compact_available", &Program::vulkan_compact_available)
       .def("vulkan_compact_clear_workspace",
            &Program::vulkan_compact_clear_workspace,
@@ -1449,6 +1607,11 @@ void export_lang(py::module &m) {
       .def("vulkan_reduce_dense_field", &Program::vulkan_reduce_dense_field,
            py::arg("values"), py::arg("output"), py::arg("value_type"),
            py::arg("n"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_reduce_dense_field_packed",
+           &Program::vulkan_reduce_dense_field_packed, py::arg("values"),
+           py::arg("output"), py::arg("value_type"), py::arg("n"),
+           py::arg("lane_count"), py::arg("op"),
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_reduce_i32_ndarray",
            &Program::vulkan_reduce_i32_ndarray, py::arg("values"),
@@ -1561,6 +1724,17 @@ void export_lang(py::module &m) {
            py::arg("src"), py::arg("indices"), py::arg("dst"),
            py::arg("value_type"), py::arg("src_n"), py::arg("dst_n"),
            py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_gather_dense_field_packed",
+           &Program::vulkan_gather_dense_field_packed, py::arg("src"),
+           py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+           py::arg("src_n"), py::arg("dst_n"), py::arg("lane_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_gather_dense_field_packed_indices_field",
+           &Program::vulkan_gather_dense_field_packed_indices_field,
+           py::arg("src"), py::arg("indices"), py::arg("dst"),
+           py::arg("value_type"), py::arg("src_n"), py::arg("indices_n"),
+           py::arg("dst_n"), py::arg("lane_count"),
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_gather_dense_field_indices_field",
            &Program::vulkan_gather_dense_field_indices_field, py::arg("src"),
            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
@@ -1579,6 +1753,17 @@ void export_lang(py::module &m) {
             &Program::vulkan_scatter_dense_field, py::arg("src"),
             py::arg("indices"), py::arg("dst"), py::arg("value_type"),
             py::arg("src_n"), py::arg("dst_n"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_scatter_dense_field_packed",
+            &Program::vulkan_scatter_dense_field_packed, py::arg("src"),
+            py::arg("indices"), py::arg("dst"), py::arg("value_type"),
+            py::arg("src_n"), py::arg("dst_n"), py::arg("lane_count"),
+            py::call_guard<py::gil_scoped_release>())
+       .def("vulkan_scatter_dense_field_packed_indices_field",
+            &Program::vulkan_scatter_dense_field_packed_indices_field,
+            py::arg("src"), py::arg("indices"), py::arg("dst"),
+            py::arg("value_type"), py::arg("src_n"), py::arg("indices_n"),
+            py::arg("dst_n"), py::arg("lane_count"),
             py::call_guard<py::gil_scoped_release>())
        .def("vulkan_scatter_dense_field_indices_field",
             &Program::vulkan_scatter_dense_field_indices_field, py::arg("src"),

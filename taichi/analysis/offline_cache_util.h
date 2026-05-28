@@ -73,7 +73,10 @@ class Kernel;
 //       full_simplify_global_iter_cap are public IR-shaping config fields and
 //       now participate in the cache key; "full" also normalizes the default
 //       global-pass cap to unlimited before cache lookup.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 11;
+//  12 - Native AD / dense bulk API refresh (2026-05). Invalidate stale Vulkan
+//       kernels observed on field-loss + ndarray-grad AD paths after native
+//       dense clear/fill became the default boundary path.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 12;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key(const CompileConfig &config,

@@ -120,6 +120,19 @@ std::size_t cub_scatter_add_strided_io_impl(void *src,
                                             std::size_t dst_offset,
                                             std::size_t dst_stride,
                                             void *stream);
+std::size_t cub_scatter_add_packed_strided_io_impl(
+    void *src,
+    void *indices,
+    void *dst,
+    int num_items,
+    int index_bound,
+    int lane_count,
+    CudaScatterAddValueType value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    void *stream);
 std::size_t cub_indexed_copy_impl(void *src,
                                   void *indices,
                                   void *dst,
@@ -1651,6 +1664,38 @@ std::size_t cub_scatter_add_strided_io(void *src,
 #else
   TI_ERROR(
       "CUDA strided scatter-add requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t cub_scatter_add_packed_strided_io(void *src,
+                                              void *indices,
+                                              void *dst,
+                                              int num_items,
+                                              int index_bound,
+                                              int lane_count,
+                                              CudaScatterAddValueType value_type,
+                                              std::size_t src_offset,
+                                              std::size_t src_stride,
+                                              std::size_t dst_offset,
+                                              std::size_t dst_stride,
+                                              void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA toolkit packed scatter-add expects non-negative "
+              "num_items.");
+  TI_ERROR_IF(index_bound < 0,
+              "CUDA toolkit packed scatter-add expects non-negative "
+              "index_bound.");
+  TI_ERROR_IF(lane_count <= 0,
+              "CUDA toolkit packed scatter-add expects a positive lane_count.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_scatter_add_packed_strided_io_impl(
+      src, indices, dst, num_items, index_bound, lane_count, value_type,
+      src_offset, src_stride, dst_offset, dst_stride, stream);
+#else
+  TI_ERROR(
+      "CUDA packed scatter-add requires building Taichi with "
       "TI_WITH_CUDA_TOOLKIT=ON.");
 #endif
 }

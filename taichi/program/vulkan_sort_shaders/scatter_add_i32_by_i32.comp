@@ -39,7 +39,40 @@ layout(set = 0, binding = 2, std430) buffer Dst {
   VALUE_T data[];
 } dst_buf;
 
-#ifdef STRIDED_SOURCE
+#ifdef PACKED_SOURCE
+layout(push_constant) uniform Params {
+  uint n;
+  uint src_offset_items;
+  uint dst_count;
+  uint dst_offset_items;
+  uint lane_count;
+} params_buf;
+
+uint value_count() {
+  return params_buf.n * params_buf.lane_count;
+}
+
+uint source_item(uint i) {
+  return i / params_buf.lane_count;
+}
+
+uint source_lane(uint i) {
+  return i - source_item(i) * params_buf.lane_count;
+}
+
+VALUE_T load_value(uint i) {
+  return src_buf.data[params_buf.src_offset_items + i];
+}
+
+uint destination_count() {
+  return params_buf.dst_count;
+}
+
+uint destination_index(uint i, uint logical_index) {
+  return params_buf.dst_offset_items +
+         logical_index * params_buf.lane_count + source_lane(i);
+}
+#elif defined(STRIDED_SOURCE)
 layout(push_constant) uniform Params {
   uint n;
   uint src_offset_items;
@@ -57,12 +90,16 @@ VALUE_T load_value(uint i) {
   return src_buf.data[params_buf.src_offset_items + i * params_buf.src_stride_items];
 }
 
+uint source_item(uint i) {
+  return i;
+}
+
 uint destination_count() {
   return params_buf.dst_count;
 }
 
-uint destination_index(uint i) {
-  return params_buf.dst_offset_items + i * params_buf.dst_stride_items;
+uint destination_index(uint i, uint logical_index) {
+  return params_buf.dst_offset_items + logical_index * params_buf.dst_stride_items;
 }
 #else
 uint value_count() {
@@ -73,12 +110,16 @@ VALUE_T load_value(uint i) {
   return src_buf.data[i];
 }
 
+uint source_item(uint i) {
+  return i;
+}
+
 uint destination_count() {
   return uint(dst_buf.data.length());
 }
 
-uint destination_index(uint i) {
-  return i;
+uint destination_index(uint i, uint logical_index) {
+  return logical_index;
 }
 #endif
 
@@ -87,11 +128,11 @@ void main() {
   if (i >= value_count()) {
     return;
   }
-  int index = indices_buf.data[i];
+  int index = indices_buf.data[source_item(i)];
   uint logical_index = uint(index);
   if (index < 0 || logical_index >= destination_count()) {
     return;
   }
-  uint dst_index = destination_index(logical_index);
+  uint dst_index = destination_index(i, logical_index);
   atomicAdd(dst_buf.data[dst_index], load_value(i));
 }

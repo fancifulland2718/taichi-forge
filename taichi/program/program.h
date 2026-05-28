@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <atomic>
@@ -442,6 +443,24 @@ class TI_DLL_EXPORT Program {
                                              std::size_t src_n,
                                              std::size_t dst_n);
 
+  std::size_t cuda_device_gather_dense_field_packed(SNode *src,
+                                                    Ndarray *indices,
+                                                    SNode *dst,
+                                                    int value_type,
+                                                    std::size_t src_n,
+                                                    std::size_t dst_n,
+                                                    int lane_count);
+
+  std::size_t cuda_device_gather_dense_field_packed_indices_field(
+      SNode *src,
+      SNode *indices,
+      SNode *dst,
+      int value_type,
+      std::size_t src_n,
+      std::size_t indices_n,
+      std::size_t dst_n,
+      int lane_count);
+
   std::size_t cuda_device_gather_dense_field_indices_field(SNode *src,
                                                            SNode *indices,
                                                            SNode *dst,
@@ -490,6 +509,24 @@ class TI_DLL_EXPORT Program {
                                               int value_type,
                                               std::size_t src_n,
                                               std::size_t dst_n);
+
+  std::size_t cuda_device_scatter_dense_field_packed(SNode *src,
+                                                     Ndarray *indices,
+                                                     SNode *dst,
+                                                     int value_type,
+                                                     std::size_t src_n,
+                                                     std::size_t dst_n,
+                                                     int lane_count);
+
+  std::size_t cuda_device_scatter_dense_field_packed_indices_field(
+      SNode *src,
+      SNode *indices,
+      SNode *dst,
+      int value_type,
+      std::size_t src_n,
+      std::size_t indices_n,
+      std::size_t dst_n,
+      int lane_count);
 
   std::size_t cuda_device_scatter_dense_field_indices_field(SNode *src,
                                                             SNode *indices,
@@ -715,6 +752,17 @@ class TI_DLL_EXPORT Program {
                                                           int value_type,
                                                           std::size_t n);
 
+  std::size_t cuda_cub_inclusive_scan_dense_field_packed(SNode *data,
+                                                         int value_type,
+                                                         std::size_t n,
+                                                         int lane_count);
+
+  std::size_t cuda_cub_inclusive_reverse_scan_dense_field_packed(
+      SNode *data,
+      int value_type,
+      std::size_t n,
+      int lane_count);
+
   void cuda_cub_scan_clear_workspace();
 
   std::size_t cuda_cub_scan_workspace_bytes() const;
@@ -792,6 +840,13 @@ class TI_DLL_EXPORT Program {
                                           std::size_t n,
                                           int op);
 
+  std::size_t cuda_cub_reduce_dense_field_packed(SNode *values,
+                                                 SNode *output,
+                                                 int value_type,
+                                                 std::size_t n,
+                                                 int lane_count,
+                                                 int op);
+
   void cuda_cub_reduce_clear_workspace();
 
   std::size_t cuda_cub_reduce_workspace_bytes() const;
@@ -821,6 +876,16 @@ class TI_DLL_EXPORT Program {
                                                      int value_type,
                                                      std::size_t n);
 
+  std::size_t cpu_inclusive_scan_dense_field_packed(SNode *data,
+                                                    int value_type,
+                                                    std::size_t n,
+                                                    int lane_count);
+
+  std::size_t cpu_inclusive_reverse_scan_dense_field_packed(SNode *data,
+                                                            int value_type,
+                                                            std::size_t n,
+                                                            int lane_count);
+
   std::size_t cpu_scan_workspace_bytes() const;
 
   bool cpu_compact_available() const;
@@ -830,17 +895,80 @@ class TI_DLL_EXPORT Program {
                         uint64_t value_bits,
                         std::size_t n);
 
+  void fill_dense_field_packed(SNode *dst,
+                               int value_type,
+                               uint64_t value_bits,
+                               std::size_t n,
+                               int lane_count);
+
+  std::size_t transform_affine_dense_field_packed(SNode *src,
+                                                  SNode *dst,
+                                                  int value_type,
+                                                  std::size_t n,
+                                                  int lane_count,
+                                                  double scale,
+                                                  double bias);
+
+  void copy_dense_field(SNode *dst,
+                        SNode *src,
+                        int value_type,
+                        std::size_t n);
+
+  void copy_dense_field_packed(SNode *dst,
+                               SNode *src,
+                               int value_type,
+                               std::size_t n,
+                               int lane_count);
+
   void copy_dense_field_from_host(SNode *dst,
                                   std::uintptr_t src,
                                   std::size_t src_bytes,
                                   int value_type,
                                   std::size_t n);
 
+  void copy_dense_field_packed_from_host(SNode *dst,
+                                         std::uintptr_t src,
+                                         std::size_t src_bytes,
+                                         int value_type,
+                                         std::size_t n,
+                                         int lane_count);
+
   void copy_dense_field_to_host(SNode *src,
                                 std::uintptr_t dst,
                                 std::size_t dst_bytes,
                                 int value_type,
                                 std::size_t n);
+
+  void copy_dense_field_packed_to_host(SNode *src,
+                                       std::uintptr_t dst,
+                                       std::size_t dst_bytes,
+                                       int value_type,
+                                       std::size_t n,
+                                       int lane_count);
+
+  std::size_t add_merge_dense_field_packed(SNode *src,
+                                           SNode *dst,
+                                           int value_type,
+                                           std::size_t n,
+                                           int lane_count);
+
+  std::size_t scatter_add_dense_field_packed(SNode *src,
+                                             Ndarray *indices,
+                                             SNode *dst,
+                                             int value_type,
+                                             std::size_t src_n,
+                                             std::size_t dst_n,
+                                             int lane_count);
+
+  std::size_t scatter_add_dense_field_packed_indices_field(
+      SNode *src,
+      SNode *indices,
+      SNode *dst,
+      int value_type,
+      std::size_t src_n,
+      std::size_t indices_n,
+      std::size_t dst_n,
+      int lane_count);
 
   std::size_t cpu_compact_ndarray(Ndarray *values,
                                   Ndarray *flags,
@@ -908,6 +1036,13 @@ class TI_DLL_EXPORT Program {
                                      int value_type,
                                      std::size_t n,
                                      int op);
+
+  std::size_t cpu_reduce_dense_field_packed(SNode *values,
+                                            SNode *output,
+                                            int value_type,
+                                            std::size_t n,
+                                            int lane_count,
+                                            int op);
 
   std::size_t cpu_reduce_workspace_bytes() const;
 
@@ -1015,6 +1150,24 @@ class TI_DLL_EXPORT Program {
                                      std::size_t src_n,
                                      std::size_t dst_n);
 
+  std::size_t cpu_gather_dense_field_packed(SNode *src,
+                                            Ndarray *indices,
+                                            SNode *dst,
+                                            int value_type,
+                                            std::size_t src_n,
+                                            std::size_t dst_n,
+                                            int lane_count);
+
+  std::size_t cpu_gather_dense_field_packed_indices_field(
+      SNode *src,
+      SNode *indices,
+      SNode *dst,
+      int value_type,
+      std::size_t src_n,
+      std::size_t indices_n,
+      std::size_t dst_n,
+      int lane_count);
+
   std::size_t cpu_gather_dense_field_indices_field(SNode *src,
                                                    SNode *indices,
                                                    SNode *dst,
@@ -1060,6 +1213,24 @@ class TI_DLL_EXPORT Program {
                                       int value_type,
                                       std::size_t src_n,
                                       std::size_t dst_n);
+
+  std::size_t cpu_scatter_dense_field_packed(SNode *src,
+                                             Ndarray *indices,
+                                             SNode *dst,
+                                             int value_type,
+                                             std::size_t src_n,
+                                             std::size_t dst_n,
+                                             int lane_count);
+
+  std::size_t cpu_scatter_dense_field_packed_indices_field(
+      SNode *src,
+      SNode *indices,
+      SNode *dst,
+      int value_type,
+      std::size_t src_n,
+      std::size_t indices_n,
+      std::size_t dst_n,
+      int lane_count);
 
   std::size_t cpu_scatter_dense_field_indices_field(SNode *src,
                                                     SNode *indices,
@@ -1218,14 +1389,38 @@ class TI_DLL_EXPORT Program {
 
   std::size_t vulkan_inclusive_scan_ndarray(Ndarray *data, int value_type);
 
+  std::size_t vulkan_inclusive_reverse_scan_ndarray(Ndarray *data,
+                                                    int value_type);
+
   std::size_t vulkan_inclusive_scan_member_ndarray(Ndarray *data,
                                                    int value_type,
                                                    std::size_t offset,
                                                    std::size_t stride);
 
+  std::size_t vulkan_inclusive_reverse_scan_member_ndarray(
+      Ndarray *data,
+      int value_type,
+      std::size_t offset,
+      std::size_t stride);
+
   std::size_t vulkan_inclusive_scan_dense_field(SNode *data,
                                                 int value_type,
                                                 std::size_t n);
+
+  std::size_t vulkan_inclusive_reverse_scan_dense_field(SNode *data,
+                                                        int value_type,
+                                                        std::size_t n);
+
+  std::size_t vulkan_inclusive_scan_dense_field_packed(SNode *data,
+                                                       int value_type,
+                                                       std::size_t n,
+                                                       int lane_count);
+
+  std::size_t vulkan_inclusive_reverse_scan_dense_field_packed(
+      SNode *data,
+      int value_type,
+      std::size_t n,
+      int lane_count);
 
   void vulkan_scan_clear_workspace();
 
@@ -1309,6 +1504,13 @@ class TI_DLL_EXPORT Program {
                                         std::size_t n,
                                         int op);
 
+  std::size_t vulkan_reduce_dense_field_packed(SNode *values,
+                                               SNode *output,
+                                               int value_type,
+                                               std::size_t n,
+                                               int lane_count,
+                                               int op);
+
   std::size_t vulkan_reduce_i32_ndarray(Ndarray *values,
                                         Ndarray *output,
                                         int op);
@@ -1389,6 +1591,13 @@ class TI_DLL_EXPORT Program {
                                                           std::size_t n,
                                                           double scale,
                                                           double bias);
+  std::size_t vulkan_transform_affine_dense_field_packed(SNode *src,
+                                                         SNode *dst,
+                                                         int value_type,
+                                                         std::size_t n,
+                                                         int lane_count,
+                                                         double scale,
+                                                         double bias);
 
   std::size_t vulkan_zero_dense_field(SNode *dst,
                                       int value_type,
@@ -1424,6 +1633,12 @@ class TI_DLL_EXPORT Program {
                                            int value_type,
                                            std::size_t n);
 
+  std::size_t vulkan_add_merge_dense_field_packed(SNode *src,
+                                                  SNode *dst,
+                                                  int value_type,
+                                                  std::size_t n,
+                                                  int lane_count);
+
   std::size_t vulkan_add_scalar_field_to_dense_field(SNode *src,
                                                      SNode *dst,
                                                      int value_type,
@@ -1455,6 +1670,24 @@ class TI_DLL_EXPORT Program {
                                         std::size_t src_n,
                                         std::size_t dst_n);
 
+  std::size_t vulkan_gather_dense_field_packed(SNode *src,
+                                               Ndarray *indices,
+                                               SNode *dst,
+                                               int value_type,
+                                               std::size_t src_n,
+                                               std::size_t dst_n,
+                                               int lane_count);
+
+  std::size_t vulkan_gather_dense_field_packed_indices_field(
+      SNode *src,
+      SNode *indices,
+      SNode *dst,
+      int value_type,
+      std::size_t src_n,
+      std::size_t indices_n,
+      std::size_t dst_n,
+      int lane_count);
+
   std::size_t vulkan_gather_dense_field_indices_field(SNode *src,
                                                       SNode *indices,
                                                       SNode *dst,
@@ -1482,6 +1715,24 @@ class TI_DLL_EXPORT Program {
                                          int value_type,
                                          std::size_t src_n,
                                          std::size_t dst_n);
+
+  std::size_t vulkan_scatter_dense_field_packed(SNode *src,
+                                                Ndarray *indices,
+                                                SNode *dst,
+                                                int value_type,
+                                                std::size_t src_n,
+                                                std::size_t dst_n,
+                                                int lane_count);
+
+  std::size_t vulkan_scatter_dense_field_packed_indices_field(
+      SNode *src,
+      SNode *indices,
+      SNode *dst,
+      int value_type,
+      std::size_t src_n,
+      std::size_t indices_n,
+      std::size_t dst_n,
+      int lane_count);
 
   std::size_t vulkan_scatter_dense_field_indices_field(SNode *src,
                                                        SNode *indices,
@@ -1526,6 +1777,23 @@ class TI_DLL_EXPORT Program {
                                              int value_type,
                                              std::size_t src_n,
                                              std::size_t dst_n);
+  std::size_t vulkan_scatter_add_dense_field_packed(SNode *src,
+                                                    Ndarray *indices,
+                                                    SNode *dst,
+                                                    int value_type,
+                                                    std::size_t src_n,
+                                                    std::size_t dst_n,
+                                                    int lane_count);
+
+  std::size_t vulkan_scatter_add_dense_field_packed_indices_field(
+      SNode *src,
+      SNode *indices,
+      SNode *dst,
+      int value_type,
+      std::size_t src_n,
+      std::size_t indices_n,
+      std::size_t dst_n,
+      int lane_count);
 
   std::size_t vulkan_scatter_add_dense_field_indices_field(
       SNode *src,
@@ -1705,6 +1973,15 @@ class TI_DLL_EXPORT Program {
   std::unordered_map<FunctionKey, Function *> function_map_;
 
   std::unique_ptr<ProgramImpl> program_impl_;
+  struct DenseFieldHostCopyStagingCache {
+    DeviceAllocationUnique upload;
+    std::size_t upload_capacity{0};
+    DeviceAllocationUnique readback;
+    std::size_t readback_capacity{0};
+    std::mutex mutex;
+  };
+
+  DenseFieldHostCopyStagingCache dense_field_host_copy_staging_;
   float64 total_compilation_time_{0.0};
   static std::atomic<int> num_instances_;
   bool finalized_{false};

@@ -409,6 +409,19 @@ std::size_t cub_scatter_add_strided_io(void *src,
                                        std::size_t dst_stride,
                                        void *stream);
 
+std::size_t cub_scatter_add_packed_strided_io(void *src,
+                                              void *indices,
+                                              void *dst,
+                                              int num_items,
+                                              int index_bound,
+                                              int lane_count,
+                                              CudaScatterAddValueType value_type,
+                                              std::size_t src_offset,
+                                              std::size_t src_stride,
+                                              std::size_t dst_offset,
+                                              std::size_t dst_stride,
+                                              void *stream);
+
 bool cub_bucket_builder_available();
 
 std::size_t cub_bucket_builder_i32(void *keys,

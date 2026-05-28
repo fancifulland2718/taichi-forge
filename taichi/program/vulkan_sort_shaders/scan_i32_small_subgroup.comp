@@ -41,23 +41,34 @@ uint value_count() {
 #endif
 }
 
+uint physical_index(uint logical_index) {
+#ifdef REVERSE_SCAN
+  uint n = value_count();
+  return n - 1u - logical_index;
+#else
+  return logical_index;
+#endif
+}
+
 VALUE_T load_value(uint logical_index) {
+  uint data_index = physical_index(logical_index);
 #ifdef STRIDED_SOURCE
   uint word_index =
-      params_buf.data_offset_words + logical_index * params_buf.data_stride_words;
+      params_buf.data_offset_words + data_index * params_buf.data_stride_words;
   return data_buf.data[word_index];
 #else
-  return data_buf.data[logical_index];
+  return data_buf.data[data_index];
 #endif
 }
 
 void store_value(uint logical_index, VALUE_T value) {
+  uint data_index = physical_index(logical_index);
 #ifdef STRIDED_SOURCE
   uint word_index =
-      params_buf.data_offset_words + logical_index * params_buf.data_stride_words;
+      params_buf.data_offset_words + data_index * params_buf.data_stride_words;
   data_buf.data[word_index] = value;
 #else
-  data_buf.data[logical_index] = value;
+  data_buf.data[data_index] = value;
 #endif
 }
 

@@ -114,8 +114,15 @@ class HostDeviceContextBlitter {
               device_->get_memory_physical_pointer(ext_arrays.at(indices));
           auto grad_ptr_idx = indices;
           grad_ptr_idx.push_back(TypeFactory::GRAD_PTR_POS_IN_NDARRAY);
-          host_ctx_.set_ndarray_ptrs(
-              indices, addr, (uint64)host_ctx_.array_ptrs[grad_ptr_idx]);
+          uint64_t grad_addr = (uint64)host_ctx_.array_ptrs[grad_ptr_idx];
+          if (host_ctx_.device_allocation_type[indices] ==
+                  LaunchContextBuilder::DevAllocType::kNdarray &&
+              host_ctx_.array_ptrs[grad_ptr_idx] != nullptr) {
+            auto grad_alloc =
+                *(DeviceAllocation *)(host_ctx_.array_ptrs[grad_ptr_idx]);
+            grad_addr = device_->get_memory_physical_pointer(grad_alloc);
+          }
+          host_ctx_.set_ndarray_ptrs(indices, addr, grad_addr);
         }
       }
     }
@@ -913,7 +920,19 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
           if (host_ctx.device_allocation_type[indices] ==
               LaunchContextBuilder::DevAllocType::kNdarray) {
             any_arrays[indices] = devalloc;
+            auto data_slot_indices = indices;
+            data_slot_indices.push_back(TypeFactory::DATA_PTR_POS_IN_NDARRAY);
+            any_arrays[data_slot_indices] = devalloc;
             ndarrays_in_use_.insert(devalloc.alloc_id);
+            auto grad_ptr_indices = indices;
+            grad_ptr_indices.push_back(TypeFactory::GRAD_PTR_POS_IN_NDARRAY);
+            auto grad_it = host_ctx.array_ptrs.find(grad_ptr_indices);
+            if (grad_it != host_ctx.array_ptrs.end() &&
+                grad_it->second != nullptr) {
+              auto grad_alloc = *(DeviceAllocation *)(grad_it->second);
+              any_arrays[grad_ptr_indices] = grad_alloc;
+              ndarrays_in_use_.insert(grad_alloc.alloc_id);
+            }
           } else if (host_ctx.device_allocation_type[indices] ==
                      LaunchContextBuilder::DevAllocType::kTexture) {
             textures[indices] = devalloc;
@@ -949,6 +968,9 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
           TI_ASSERT_INFO(res == RhiResult::success,
                          "Failed to allocate ext arr buffer");
           any_arrays[indices] = *allocated.get();
+          auto data_slot_indices = indices;
+          data_slot_indices.push_back(TypeFactory::DATA_PTR_POS_IN_NDARRAY);
+          any_arrays[data_slot_indices] = *allocated.get();
           ctx_buffers_.push_back(std::move(allocated));
         }
       }
@@ -1056,6 +1078,9 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
       bindings = one_shot_bindings.get();
     }
     for (auto &bind : attribs.buffer_binds) {
+      if (bind.binding < 0) {
+        continue;
+      }
       // We might have to bind a invalid buffer (this is fine as long as
       // shader don't do anything with it)
       if (bind.buffer.type == BufferType::ExtArr) {

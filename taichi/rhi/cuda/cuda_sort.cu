@@ -849,6 +849,119 @@ __global__ void scatter_add_by_i32_warp_aggregated_strided_io_kernel(
 }
 
 template <typename T>
+__global__ void scatter_add_by_i32_packed_strided_io_kernel(
+    const uint8_t *src,
+    const int32_t *indices,
+    uint8_t *dst,
+    int num_items,
+    int index_bound,
+    int lane_count,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  const int scalar_i = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total = num_items * lane_count;
+  if (scalar_i >= total) {
+    return;
+  }
+  const int item = scalar_i / lane_count;
+  const int lane = scalar_i - item * lane_count;
+  const int index = indices[item];
+  if (index >= 0 && index < index_bound) {
+    const std::size_t lane_offset = static_cast<std::size_t>(lane) * sizeof(T);
+    const auto *value = reinterpret_cast<const T *>(
+        src + src_offset + static_cast<std::size_t>(item) * src_stride +
+        lane_offset);
+    auto *dst_value = reinterpret_cast<T *>(
+        dst + dst_offset + static_cast<std::size_t>(index) * dst_stride +
+        lane_offset);
+    scatter_atomic_add(dst_value, *value);
+  }
+}
+
+template <typename T>
+__global__ void scatter_add_by_i32_packed_warp_aggregated_strided_io_kernel(
+    const uint8_t *src,
+    const int32_t *indices,
+    uint8_t *dst,
+    int num_items,
+    int index_bound,
+    int lane_count,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride) {
+  const int scalar_i = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total = num_items * lane_count;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+  int key = -1;
+  int item = -1;
+  int lane = -1;
+  T value{};
+  bool valid = false;
+  if (scalar_i < total) {
+    item = scalar_i / lane_count;
+    lane = scalar_i - item * lane_count;
+    const int index = indices[item];
+    valid = index >= 0 && index < index_bound;
+    if (valid) {
+      key = index * lane_count + lane;
+      const std::size_t lane_offset =
+          static_cast<std::size_t>(lane) * sizeof(T);
+      value = *reinterpret_cast<const T *>(
+          src + src_offset + static_cast<std::size_t>(item) * src_stride +
+          lane_offset);
+    }
+  }
+  const unsigned active = __activemask();
+  const unsigned valid_mask = __ballot_sync(active, valid);
+  if (valid) {
+    const unsigned peers = __match_any_sync(valid_mask, key);
+    const int leader = __ffs(static_cast<int>(peers)) - 1;
+    const int warp_lane = threadIdx.x & 31;
+    T aggregate{};
+    unsigned remaining = peers;
+    while (remaining) {
+      const int source_lane = __ffs(static_cast<int>(remaining)) - 1;
+      const T peer_value = __shfl_sync(peers, value, source_lane);
+      if (warp_lane == leader) {
+        aggregate = scatter_value_add(aggregate, peer_value);
+      }
+      remaining &= remaining - 1;
+    }
+    if (warp_lane == leader) {
+      const std::size_t lane_offset =
+          static_cast<std::size_t>(lane) * sizeof(T);
+      scatter_atomic_add(
+          reinterpret_cast<T *>(dst + dst_offset +
+                                static_cast<std::size_t>(key / lane_count) *
+                                    dst_stride +
+                                lane_offset),
+          aggregate);
+    }
+  }
+#else
+  if (scalar_i < total) {
+    const int item = scalar_i / lane_count;
+    const int lane = scalar_i - item * lane_count;
+    const int index = indices[item];
+    if (index >= 0 && index < index_bound) {
+      const std::size_t lane_offset =
+          static_cast<std::size_t>(lane) * sizeof(T);
+      scatter_atomic_add(
+          reinterpret_cast<T *>(dst + dst_offset +
+                                static_cast<std::size_t>(index) * dst_stride +
+                                lane_offset),
+          *reinterpret_cast<const T *>(
+              src + src_offset + static_cast<std::size_t>(item) * src_stride +
+              lane_offset));
+    }
+  }
+#endif
+}
+
+template <typename T>
 __global__ void scatter_add_by_i32_block_private_strided_io_kernel(
     const uint8_t *src,
     const int32_t *indices,
@@ -3585,6 +3698,105 @@ std::size_t cub_scatter_add_strided_io_impl(void *src,
     default:
       throw std::runtime_error(
           "Unsupported CUDA strided scatter-add value type");
+  }
+  TI_CUDA_SORT_CHECK(cudaGetLastError());
+  return 0;
+}
+
+template <typename T>
+void scatter_add_packed_strided_io_launch(const uint8_t *src,
+                                          const int32_t *indices,
+                                          uint8_t *dst,
+                                          int num_items,
+                                          int index_bound,
+                                          int lane_count,
+                                          std::size_t src_offset,
+                                          std::size_t src_stride,
+                                          std::size_t dst_offset,
+                                          std::size_t dst_stride,
+                                          cudaStream_t stream) {
+  constexpr int kBlockDim = 256;
+  const int total = num_items * lane_count;
+  const int grid_dim = (total + kBlockDim - 1) / kBlockDim;
+  const int key_bound = index_bound * lane_count;
+  if (use_warp_aggregated_scatter_add(total, key_bound, true)) {
+    scatter_add_by_i32_packed_warp_aggregated_strided_io_kernel<T>
+        <<<grid_dim, kBlockDim, 0, stream>>>(
+            src, indices, dst, num_items, index_bound, lane_count, src_offset,
+            src_stride, dst_offset, dst_stride);
+    return;
+  }
+  scatter_add_by_i32_packed_strided_io_kernel<T>
+      <<<grid_dim, kBlockDim, 0, stream>>>(
+          src, indices, dst, num_items, index_bound, lane_count, src_offset,
+          src_stride, dst_offset, dst_stride);
+}
+
+std::size_t cub_scatter_add_packed_strided_io_impl(
+    void *src,
+    void *indices,
+    void *dst,
+    int num_items,
+    int index_bound,
+    int lane_count,
+    CudaScatterAddValueType value_type,
+    std::size_t src_offset,
+    std::size_t src_stride,
+    std::size_t dst_offset,
+    std::size_t dst_stride,
+    void *stream_ptr) {
+  if (!src || !indices || !dst) {
+    throw std::runtime_error(
+        "CUDA packed scatter-add received a null pointer");
+  }
+  if (num_items == 0 || index_bound == 0) {
+    return 0;
+  }
+  if (lane_count <= 0 ||
+      num_items > std::numeric_limits<int>::max() / lane_count ||
+      index_bound > std::numeric_limits<int>::max() / lane_count) {
+    throw std::runtime_error(
+        "CUDA packed scatter-add received an invalid lane count or item "
+        "count");
+  }
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const auto *src_in = static_cast<const uint8_t *>(src);
+  const auto *indices_in = static_cast<const int32_t *>(indices);
+  auto *dst_out = static_cast<uint8_t *>(dst);
+  switch (value_type) {
+    case CudaScatterAddValueType::i32:
+      scatter_add_packed_strided_io_launch<int32_t>(
+          src_in, indices_in, dst_out, num_items, index_bound, lane_count,
+          src_offset, src_stride, dst_offset, dst_stride, stream);
+      break;
+    case CudaScatterAddValueType::f32:
+      scatter_add_packed_strided_io_launch<float>(
+          src_in, indices_in, dst_out, num_items, index_bound, lane_count,
+          src_offset, src_stride, dst_offset, dst_stride, stream);
+      break;
+    case CudaScatterAddValueType::u32:
+      scatter_add_packed_strided_io_launch<uint32_t>(
+          src_in, indices_in, dst_out, num_items, index_bound, lane_count,
+          src_offset, src_stride, dst_offset, dst_stride, stream);
+      break;
+    case CudaScatterAddValueType::u64:
+      scatter_add_packed_strided_io_launch<uint64_t>(
+          src_in, indices_in, dst_out, num_items, index_bound, lane_count,
+          src_offset, src_stride, dst_offset, dst_stride, stream);
+      break;
+    case CudaScatterAddValueType::i64:
+      scatter_add_packed_strided_io_launch<int64_t>(
+          src_in, indices_in, dst_out, num_items, index_bound, lane_count,
+          src_offset, src_stride, dst_offset, dst_stride, stream);
+      break;
+    case CudaScatterAddValueType::f64:
+      scatter_add_packed_strided_io_launch<double>(
+          src_in, indices_in, dst_out, num_items, index_bound, lane_count,
+          src_offset, src_stride, dst_offset, dst_stride, stream);
+      break;
+    default:
+      throw std::runtime_error(
+          "Unsupported CUDA packed scatter-add value type");
   }
   TI_CUDA_SORT_CHECK(cudaGetLastError());
   return 0;

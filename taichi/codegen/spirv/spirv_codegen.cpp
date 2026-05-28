@@ -3385,9 +3385,13 @@ class TaskCodegen : public IRVisitor {
                       spv::DecorationNoSignedWrap);
       }
     }
-    if (caps_->get(DeviceCapability::spirv_has_physical_storage_buffer)) {
+    bool uses_physical_storage =
+        caps_->get(DeviceCapability::spirv_has_physical_storage_buffer);
+    int ndarray_ptr_slot = stmt->is_grad ? TypeFactory::GRAD_PTR_POS_IN_NDARRAY
+                                         : TypeFactory::DATA_PTR_POS_IN_NDARRAY;
+    if (uses_physical_storage) {
       std::vector<int> indices = arg_id;
-      indices.push_back(1);
+      indices.push_back(ndarray_ptr_slot);
       spirv::Value addr_ptr = ir_->make_access_chain(
           ir_->get_pointer_type(ir_->u64_type(), spv::StorageClassUniform),
           get_buffer_value(BufferType::Args, PrimitiveType::i32), indices);
@@ -3400,7 +3404,16 @@ class TaskCodegen : public IRVisitor {
     }
 
     if (ctx_attribs_->arg_at(arg_id).is_array) {
-      ptr_to_buffers_[stmt] = {BufferType::ExtArr, arg_id};
+      std::vector<int> ext_arr_id = arg_id;
+      if (uses_physical_storage || stmt->is_grad) {
+        // Physical-storage-buffer ndarray accesses do not need an ExtArr
+        // descriptor, but the runtime still needs exact data/grad allocation
+        // access metadata to insert dispatch barriers. Non-physical Vulkan
+        // uses ExtArr descriptors, so grad accesses also need a distinct
+        // binding that points at the ndarray grad allocation.
+        ext_arr_id.push_back(ndarray_ptr_slot);
+      }
+      ptr_to_buffers_[stmt] = {BufferType::ExtArr, ext_arr_id};
     } else {
       ptr_to_buffers_[stmt] = BufferType::Args;
     }
@@ -6718,6 +6731,12 @@ class TaskCodegen : public IRVisitor {
 
   std::vector<BufferBind> get_buffer_binds() {
     std::vector<BufferBind> result;
+    auto has_descriptor_binding = [&](const BufferInfo &buffer) {
+      return std::any_of(buffer_binding_map_.begin(), buffer_binding_map_.end(),
+                         [&](const auto &binding) {
+                           return binding.first.first == buffer;
+                         });
+    };
     for (auto &[key, val] : buffer_binding_map_) {
       BufferBind bb{key.first, int(val)};
       if (auto access = buffer_access_map_.find(key.first);
@@ -6735,6 +6754,15 @@ class TaskCodegen : public IRVisitor {
         }
       }
       result.push_back(bb);
+    }
+    for (auto &[buffer, access] : buffer_access_map_) {
+      if (buffer.type != BufferType::ExtArr || has_descriptor_binding(buffer)) {
+        continue;
+      }
+      // Physical-storage-buffer ndarray pointers do not create ExtArr
+      // descriptors. Keep an access-only bind so the runtime can barrier the
+      // underlying data/grad DeviceAllocation between dispatches.
+      result.push_back(BufferBind{buffer, -1, 0, access});
     }
     return result;
   }

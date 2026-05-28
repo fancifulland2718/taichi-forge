@@ -747,6 +747,96 @@ static const uint32_t kScanF64AddSpv[] =
 static const uint32_t kScanF64AddStridedSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scan_f64_add_strided.comp.spv.h"
     ;
+static const uint32_t kScanI32BlockReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i32_block_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanI32BlockStridedReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i32_block_strided_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanI32AddReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i32_add_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanI32AddStridedReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i32_add_strided_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanI32SmallSubgroupReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i32_small_subgroup_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanI32SmallSubgroupStridedReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i32_small_subgroup_strided_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanF32BlockReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_f32_block_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanF32BlockStridedReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_f32_block_strided_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanF32AddReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_f32_add_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanF32AddStridedReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_f32_add_strided_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanF32SmallSubgroupReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_f32_small_subgroup_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanF32SmallSubgroupStridedReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_f32_small_subgroup_strided_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanU32BlockReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_u32_block_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanU32BlockStridedReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_u32_block_strided_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanU32AddReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_u32_add_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanU32AddStridedReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_u32_add_strided_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanU32SmallSubgroupReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_u32_small_subgroup_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanU32SmallSubgroupStridedReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_u32_small_subgroup_strided_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanU64BlockReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_u64_block_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanU64BlockStridedReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_u64_block_strided_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanU64AddReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_u64_add_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanU64AddStridedReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_u64_add_strided_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanI64BlockReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i64_block_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanI64BlockStridedReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i64_block_strided_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanI64AddReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i64_add_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanI64AddStridedReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_i64_add_strided_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanF64BlockReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_f64_block_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanF64BlockStridedReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_f64_block_strided_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanF64AddReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_f64_add_reverse.comp.spv.h"
+    ;
+static const uint32_t kScanF64AddStridedReverseSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scan_f64_add_strided_reverse.comp.spv.h"
+    ;
 static const uint32_t kCompactI32FlagsSpv[] =
 #include "taichi/program/vulkan_sort_shaders/compact_i32_flags.comp.spv.h"
     ;
@@ -1170,6 +1260,24 @@ static const uint32_t kScatterAddI64ByI32StridedSpv[] =
 static const uint32_t kScatterAddF64ByI32StridedSpv[] =
 #include "taichi/program/vulkan_sort_shaders/scatter_add_f64_by_i32_strided.comp.spv.h"
     ;
+static const uint32_t kScatterAddI32ByI32PackedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scatter_add_i32_by_i32_packed.comp.spv.h"
+    ;
+static const uint32_t kScatterAddF32ByI32PackedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scatter_add_f32_by_i32_packed.comp.spv.h"
+    ;
+static const uint32_t kScatterAddU32ByI32PackedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scatter_add_u32_by_i32_packed.comp.spv.h"
+    ;
+static const uint32_t kScatterAddU64ByI32PackedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scatter_add_u64_by_i32_packed.comp.spv.h"
+    ;
+static const uint32_t kScatterAddI64ByI32PackedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scatter_add_i64_by_i32_packed.comp.spv.h"
+    ;
+static const uint32_t kScatterAddF64ByI32PackedSpv[] =
+#include "taichi/program/vulkan_sort_shaders/scatter_add_f64_by_i32_packed.comp.spv.h"
+    ;
 static const uint32_t kBucketClearI32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/bucket_clear_i32.comp.spv.h"
     ;
@@ -1549,6 +1657,22 @@ struct VulkanScanStridedSpvSet {
   const char *dtype_name;
 };
 
+struct VulkanScanReverseSpvSet {
+  const uint32_t *block_spv;
+  size_t block_bytes;
+  const uint32_t *block_strided_spv;
+  size_t block_strided_bytes;
+  const uint32_t *add_spv;
+  size_t add_bytes;
+  const uint32_t *add_strided_spv;
+  size_t add_strided_bytes;
+  const uint32_t *small_spv;
+  size_t small_bytes;
+  const uint32_t *small_strided_spv;
+  size_t small_strided_bytes;
+  const char *dtype_name;
+};
+
 const VulkanScanStridedSpvSet &vulkan_scan_strided_spv_set(int value_type) {
   static const VulkanScanStridedSpvSet sets[] = {
       {kScanI32BlockStridedSpv, sizeof(kScanI32BlockStridedSpv),
@@ -1575,6 +1699,53 @@ const VulkanScanStridedSpvSet &vulkan_scan_strided_spv_set(int value_type) {
   };
   TI_ERROR_IF(value_type < 0 || value_type >= 6,
               "Unsupported Vulkan strided scan value type.");
+  return sets[value_type];
+}
+
+const VulkanScanReverseSpvSet &vulkan_scan_reverse_spv_set(int value_type) {
+  static const VulkanScanReverseSpvSet sets[] = {
+      {kScanI32BlockReverseSpv, sizeof(kScanI32BlockReverseSpv),
+       kScanI32BlockStridedReverseSpv,
+       sizeof(kScanI32BlockStridedReverseSpv), kScanI32AddReverseSpv,
+       sizeof(kScanI32AddReverseSpv), kScanI32AddStridedReverseSpv,
+       sizeof(kScanI32AddStridedReverseSpv), kScanI32SmallSubgroupReverseSpv,
+       sizeof(kScanI32SmallSubgroupReverseSpv),
+       kScanI32SmallSubgroupStridedReverseSpv,
+       sizeof(kScanI32SmallSubgroupStridedReverseSpv), "i32"},
+      {kScanF32BlockReverseSpv, sizeof(kScanF32BlockReverseSpv),
+       kScanF32BlockStridedReverseSpv,
+       sizeof(kScanF32BlockStridedReverseSpv), kScanF32AddReverseSpv,
+       sizeof(kScanF32AddReverseSpv), kScanF32AddStridedReverseSpv,
+       sizeof(kScanF32AddStridedReverseSpv), kScanF32SmallSubgroupReverseSpv,
+       sizeof(kScanF32SmallSubgroupReverseSpv),
+       kScanF32SmallSubgroupStridedReverseSpv,
+       sizeof(kScanF32SmallSubgroupStridedReverseSpv), "f32"},
+      {kScanU32BlockReverseSpv, sizeof(kScanU32BlockReverseSpv),
+       kScanU32BlockStridedReverseSpv,
+       sizeof(kScanU32BlockStridedReverseSpv), kScanU32AddReverseSpv,
+       sizeof(kScanU32AddReverseSpv), kScanU32AddStridedReverseSpv,
+       sizeof(kScanU32AddStridedReverseSpv), kScanU32SmallSubgroupReverseSpv,
+       sizeof(kScanU32SmallSubgroupReverseSpv),
+       kScanU32SmallSubgroupStridedReverseSpv,
+       sizeof(kScanU32SmallSubgroupStridedReverseSpv), "u32"},
+      {kScanU64BlockReverseSpv, sizeof(kScanU64BlockReverseSpv),
+       kScanU64BlockStridedReverseSpv,
+       sizeof(kScanU64BlockStridedReverseSpv), kScanU64AddReverseSpv,
+       sizeof(kScanU64AddReverseSpv), kScanU64AddStridedReverseSpv,
+       sizeof(kScanU64AddStridedReverseSpv), nullptr, 0, nullptr, 0, "u64"},
+      {kScanI64BlockReverseSpv, sizeof(kScanI64BlockReverseSpv),
+       kScanI64BlockStridedReverseSpv,
+       sizeof(kScanI64BlockStridedReverseSpv), kScanI64AddReverseSpv,
+       sizeof(kScanI64AddReverseSpv), kScanI64AddStridedReverseSpv,
+       sizeof(kScanI64AddStridedReverseSpv), nullptr, 0, nullptr, 0, "i64"},
+      {kScanF64BlockReverseSpv, sizeof(kScanF64BlockReverseSpv),
+       kScanF64BlockStridedReverseSpv,
+       sizeof(kScanF64BlockStridedReverseSpv), kScanF64AddReverseSpv,
+       sizeof(kScanF64AddReverseSpv), kScanF64AddStridedReverseSpv,
+       sizeof(kScanF64AddStridedReverseSpv), nullptr, 0, nullptr, 0, "f64"},
+  };
+  TI_ERROR_IF(value_type < 0 || value_type >= 6,
+              "Unsupported Vulkan reverse scan value type.");
   return sets[value_type];
 }
 
@@ -2691,6 +2862,12 @@ struct VulkanScanCache {
   std::array<std::unique_ptr<Pipeline>, 6> scan_block_strided;
   std::array<std::unique_ptr<Pipeline>, 6> scan_add_strided;
   std::array<std::unique_ptr<Pipeline>, 3> scan_small_strided;
+  std::array<std::unique_ptr<Pipeline>, 6> scan_block_reverse;
+  std::array<std::unique_ptr<Pipeline>, 6> scan_add_reverse;
+  std::array<std::unique_ptr<Pipeline>, 3> scan_small_reverse;
+  std::array<std::unique_ptr<Pipeline>, 6> scan_block_strided_reverse;
+  std::array<std::unique_ptr<Pipeline>, 6> scan_add_strided_reverse;
+  std::array<std::unique_ptr<Pipeline>, 3> scan_small_strided_reverse;
   bool subgroup_scan_enabled{false};
   VulkanResourceSetRing scan_small_bindings;
   VulkanResourceSetRing scan_small_strided_bindings;
@@ -2736,6 +2913,24 @@ struct VulkanScanCache {
       pipeline.reset();
     }
     for (auto &pipeline : scan_small_strided) {
+      pipeline.reset();
+    }
+    for (auto &pipeline : scan_block_reverse) {
+      pipeline.reset();
+    }
+    for (auto &pipeline : scan_add_reverse) {
+      pipeline.reset();
+    }
+    for (auto &pipeline : scan_small_reverse) {
+      pipeline.reset();
+    }
+    for (auto &pipeline : scan_block_strided_reverse) {
+      pipeline.reset();
+    }
+    for (auto &pipeline : scan_add_strided_reverse) {
+      pipeline.reset();
+    }
+    for (auto &pipeline : scan_small_strided_reverse) {
       pipeline.reset();
     }
     reset_resource_sets();
@@ -3022,6 +3217,57 @@ struct VulkanScanCache {
         fmt::format("vulkan_scan_{}_small_subgroup_strided", spv.dtype_name));
   }
 
+  void ensure_scan_reverse_block_add_pipelines(Device *dev,
+                                               int value_type,
+                                               bool strided) {
+    ensure_device(dev);
+    TI_ERROR_IF(value_type < 0 || value_type >= 6,
+                "Unsupported Vulkan reverse scan value type.");
+    const auto &spv = vulkan_scan_reverse_spv_set(value_type);
+    auto &block_pipeline =
+        strided ? scan_block_strided_reverse[value_type]
+                : scan_block_reverse[value_type];
+    auto &add_pipeline = strided ? scan_add_strided_reverse[value_type]
+                                 : scan_add_reverse[value_type];
+    if (!block_pipeline) {
+      block_pipeline = create_pipeline_from_spv(
+          dev, strided ? spv.block_strided_spv : spv.block_spv,
+          strided ? spv.block_strided_bytes : spv.block_bytes,
+          fmt::format("vulkan_scan_{}_block{}_reverse", spv.dtype_name,
+                      strided ? "_strided" : ""));
+    }
+    if (!add_pipeline) {
+      add_pipeline = create_pipeline_from_spv(
+          dev, strided ? spv.add_strided_spv : spv.add_spv,
+          strided ? spv.add_strided_bytes : spv.add_bytes,
+          fmt::format("vulkan_scan_{}_add{}_reverse", spv.dtype_name,
+                      strided ? "_strided" : ""));
+    }
+  }
+
+  void ensure_scan_reverse_small_pipeline(Device *dev,
+                                          int value_type,
+                                          bool strided) {
+    ensure_device(dev);
+    TI_ERROR_IF(!subgroup_scan_enabled || value_type < 0 || value_type > 2,
+                "Unsupported Vulkan reverse small subgroup scan value type.");
+    const auto &spv = vulkan_scan_reverse_spv_set(value_type);
+    auto &pipeline =
+        strided ? scan_small_strided_reverse[value_type]
+                : scan_small_reverse[value_type];
+    if (pipeline) {
+      return;
+    }
+    const uint32_t *shader = strided ? spv.small_strided_spv : spv.small_spv;
+    const size_t shader_bytes =
+        strided ? spv.small_strided_bytes : spv.small_bytes;
+    TI_ERROR_IF(!shader, "Missing Vulkan reverse small subgroup scan shader.");
+    pipeline = create_pipeline_from_spv(
+        dev, shader, shader_bytes,
+        fmt::format("vulkan_scan_{}_small_subgroup{}_reverse", spv.dtype_name,
+                    strided ? "_strided" : ""));
+  }
+
   void ensure_strided_pipelines(Device *dev, int value_type) {
     ensure_scan_strided_block_add_pipelines(dev, value_type);
     if (value_type >= 0 && value_type < 3 && subgroup_scan_enabled &&
@@ -3107,6 +3353,33 @@ struct VulkanScanCache {
       return nullptr;
     }
     return scan_small_strided[value_type].get();
+  }
+
+  Pipeline *scan_block_reverse_pipeline(int value_type, bool strided) const {
+    if (value_type < 0 || value_type >= 6) {
+      return nullptr;
+    }
+    return (strided ? scan_block_strided_reverse[value_type]
+                    : scan_block_reverse[value_type])
+        .get();
+  }
+
+  Pipeline *scan_add_reverse_pipeline(int value_type, bool strided) const {
+    if (value_type < 0 || value_type >= 6) {
+      return nullptr;
+    }
+    return (strided ? scan_add_strided_reverse[value_type]
+                    : scan_add_reverse[value_type])
+        .get();
+  }
+
+  Pipeline *scan_small_reverse_pipeline(int value_type, bool strided) const {
+    if (value_type < 0 || value_type >= 3) {
+      return nullptr;
+    }
+    return (strided ? scan_small_strided_reverse[value_type]
+                    : scan_small_reverse[value_type])
+        .get();
   }
 
   const char *scan_small_scope(int value_type) const {
@@ -4436,6 +4709,7 @@ struct VulkanIndexedCopyCache {
   std::unique_ptr<Pipeline> scatter_add_i64_by_i32;
   std::unique_ptr<Pipeline> scatter_add_f64_by_i32;
   std::array<std::unique_ptr<Pipeline>, 6> scatter_add_strided;
+  std::array<std::unique_ptr<Pipeline>, 6> scatter_add_packed;
   std::unique_ptr<ShaderResourceSet> gather_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_bindings;
   std::unique_ptr<ShaderResourceSet> gather_strided_bindings;
@@ -4447,18 +4721,21 @@ struct VulkanIndexedCopyCache {
   std::unique_ptr<ShaderResourceSet> scatter_add_i64_bindings;
   std::unique_ptr<ShaderResourceSet> scatter_add_f64_bindings;
   std::array<std::unique_ptr<ShaderResourceSet>, 6> scatter_add_strided_bindings;
+  std::array<std::unique_ptr<ShaderResourceSet>, 6> scatter_add_packed_bindings;
   VulkanRwBufferReplay<3> gather_replay;
   VulkanRwBufferReplay<3> scatter_replay;
   VulkanRwBufferReplay<4> gather_strided_replay;
   VulkanRwBufferReplay<4> scatter_strided_replay;
   std::array<VulkanRwBufferReplay<3>, 6> scatter_add_replay;
   std::array<VulkanRwBufferReplay<3>, 6> scatter_add_strided_replay;
+  std::array<VulkanRwBufferReplay<3>, 6> scatter_add_packed_replay;
   VulkanCommandReplayCache gather_command_replay;
   VulkanCommandReplayCache scatter_command_replay;
   VulkanCommandReplayCache gather_strided_command_replay;
   VulkanCommandReplayCache scatter_strided_command_replay;
   std::array<VulkanCommandReplayCache, 6> scatter_add_command_replay;
   std::array<VulkanCommandReplayCache, 6> scatter_add_strided_command_replay;
+  std::array<VulkanCommandReplayCache, 6> scatter_add_packed_command_replay;
   DeviceAllocation indexed_copy_params{kDeviceNullAllocation};
 
   void clear_allocs() {
@@ -4489,10 +4766,16 @@ struct VulkanIndexedCopyCache {
     for (auto &replay : scatter_add_strided_replay) {
       replay.reset();
     }
+    for (auto &replay : scatter_add_packed_replay) {
+      replay.reset();
+    }
     for (auto &replay : scatter_add_command_replay) {
       replay.reset();
     }
     for (auto &replay : scatter_add_strided_command_replay) {
+      replay.reset();
+    }
+    for (auto &replay : scatter_add_packed_command_replay) {
       replay.reset();
     }
   }
@@ -4517,6 +4800,9 @@ struct VulkanIndexedCopyCache {
       for (auto &pipeline : scatter_add_strided) {
         pipeline.reset();
       }
+      for (auto &pipeline : scatter_add_packed) {
+        pipeline.reset();
+      }
       gather_bindings.reset();
       scatter_bindings.reset();
       gather_strided_bindings.reset();
@@ -4528,6 +4814,9 @@ struct VulkanIndexedCopyCache {
       scatter_add_i64_bindings.reset();
       scatter_add_f64_bindings.reset();
       for (auto &bindings : scatter_add_strided_bindings) {
+        bindings.reset();
+      }
+      for (auto &bindings : scatter_add_packed_bindings) {
         bindings.reset();
       }
       reset_binding_replay();
@@ -4613,6 +4902,44 @@ struct VulkanIndexedCopyCache {
     }
   }
 
+  void ensure_scatter_add_packed_pipeline(int value_type) {
+    if (scatter_add_packed[value_type]) {
+      return;
+    }
+    switch (value_type) {
+      case 1:
+        scatter_add_packed[value_type] = create_pipeline(
+            device, kScatterAddF32ByI32PackedSpv,
+            "vulkan_scatter_add_f32_by_i32_packed");
+        return;
+      case 2:
+        scatter_add_packed[value_type] = create_pipeline(
+            device, kScatterAddU32ByI32PackedSpv,
+            "vulkan_scatter_add_u32_by_i32_packed");
+        return;
+      case 3:
+        scatter_add_packed[value_type] = create_pipeline(
+            device, kScatterAddU64ByI32PackedSpv,
+            "vulkan_scatter_add_u64_by_i32_packed");
+        return;
+      case 4:
+        scatter_add_packed[value_type] = create_pipeline(
+            device, kScatterAddI64ByI32PackedSpv,
+            "vulkan_scatter_add_i64_by_i32_packed");
+        return;
+      case 5:
+        scatter_add_packed[value_type] = create_pipeline(
+            device, kScatterAddF64ByI32PackedSpv,
+            "vulkan_scatter_add_f64_by_i32_packed");
+        return;
+      default:
+        scatter_add_packed[value_type] = create_pipeline(
+            device, kScatterAddI32ByI32PackedSpv,
+            "vulkan_scatter_add_i32_by_i32_packed");
+        return;
+    }
+  }
+
   ShaderResourceSet *cached_resource_set(bool scatter) {
     auto &bindings = scatter ? scatter_bindings : gather_bindings;
     if (!bindings) {
@@ -4644,6 +4971,14 @@ struct VulkanIndexedCopyCache {
 
   ShaderResourceSet *cached_scatter_add_strided_resource_set(int value_type) {
     auto &bindings = scatter_add_strided_bindings[value_type];
+    if (!bindings) {
+      bindings.reset(device->create_resource_set());
+    }
+    return bindings.get();
+  }
+
+  ShaderResourceSet *cached_scatter_add_packed_resource_set(int value_type) {
+    auto &bindings = scatter_add_packed_bindings[value_type];
     if (!bindings) {
       bindings.reset(device->create_resource_set());
     }
@@ -4735,6 +5070,10 @@ struct VulkanIndexedCopyCache {
 
   Pipeline *scatter_add_strided_pipeline(int value_type) const {
     return scatter_add_strided[value_type].get();
+  }
+
+  Pipeline *scatter_add_packed_pipeline(int value_type) const {
+    return scatter_add_packed[value_type].get();
   }
 };
 
@@ -6122,6 +6461,7 @@ struct VulkanScanDispatchPlan {
   size_t item_size{sizeof(int32_t)};
   size_t workspace_bytes{0};
   bool use_small_subgroup{false};
+  bool reverse{false};
   size_t data_bytes{0};
   DeviceAllocation workspace_alloc{kDeviceNullAllocation};
   DeviceAllocation dummy_sums_alloc{kDeviceNullAllocation};
@@ -6133,11 +6473,17 @@ struct VulkanScanDispatchPlan {
   Pipeline *scan_add{nullptr};
   Pipeline *scan_block_strided{nullptr};
   Pipeline *scan_add_strided{nullptr};
+  Pipeline *scan_small_reverse{nullptr};
+  Pipeline *scan_block_reverse{nullptr};
+  Pipeline *scan_add_reverse{nullptr};
   const char *scan_small_scope{nullptr};
   const char *scan_block_scope{nullptr};
   const char *scan_add_scope{nullptr};
   const char *scan_block_strided_scope{nullptr};
   const char *scan_add_strided_scope{nullptr};
+  const char *scan_small_reverse_scope{nullptr};
+  const char *scan_block_reverse_scope{nullptr};
+  const char *scan_add_reverse_scope{nullptr};
   bool member_source{false};
   size_t offset{0};
   size_t stride{0};
@@ -6214,7 +6560,8 @@ VulkanScanDispatchPlan prepare_vulkan_scan(Program *program,
                                            bool member_source = false,
                                            size_t offset = 0,
                                            size_t stride = 0,
-                                           size_t data_offset = 0) {
+                                           size_t data_offset = 0,
+                                           bool reverse = false) {
   VulkanScanDispatchPlan plan;
   plan.data_alloc = data_alloc;
   plan.data_offset = data_offset;
@@ -6222,6 +6569,7 @@ VulkanScanDispatchPlan prepare_vulkan_scan(Program *program,
   plan.value_type = value_type;
   plan.item_size = vulkan_scan_value_type_size(value_type);
   plan.member_source = member_source;
+  plan.reverse = reverse;
   plan.offset = offset;
   plan.stride = stride;
   TI_ERROR_IF(plan.item_size == 0,
@@ -6245,17 +6593,27 @@ VulkanScanDispatchPlan prepare_vulkan_scan(Program *program,
       small_subgroup_supported && small_subgroup_threshold > 0 &&
       n <= static_cast<size_t>(small_subgroup_threshold);
   if (plan.use_small_subgroup) {
-    if (member_source) {
+    if (reverse) {
+      cache.ensure_scan_reverse_small_pipeline(cache.device, value_type,
+                                               member_source);
+    } else if (member_source) {
       cache.ensure_scan_strided_small_pipeline(cache.device, value_type);
     } else {
       cache.ensure_scan_small_pipeline(cache.device, value_type);
     }
-    plan.scan_small =
-        member_source ? cache.scan_small_strided_pipeline(value_type)
-                      : cache.scan_small_pipeline(value_type);
-    plan.scan_small_scope =
-        member_source ? "vulkan_scan_small_subgroup_strided"
-                      : cache.scan_small_scope(value_type);
+    plan.scan_small = reverse
+                          ? cache.scan_small_reverse_pipeline(value_type,
+                                                             member_source)
+                          : (member_source
+                                 ? cache.scan_small_strided_pipeline(value_type)
+                                 : cache.scan_small_pipeline(value_type));
+    plan.scan_small_scope = member_source
+                                ? "vulkan_scan_small_subgroup_strided"
+                                : cache.scan_small_scope(value_type);
+    plan.scan_small_reverse = plan.scan_small;
+    plan.scan_small_reverse_scope =
+        member_source ? "vulkan_scan_small_subgroup_strided_reverse"
+                      : "vulkan_scan_small_subgroup_reverse";
     plan.data_bytes =
         member_source ? strided_binding_bytes(n, plan.item_size, offset, stride)
                       : n * plan.item_size;
@@ -6294,6 +6652,7 @@ VulkanScanDispatchPlan prepare_vulkan_scan(Program *program,
   const bool use_subgroup_block = cache.subgroup_scan_enabled &&
                                   !member_source &&
                                   value_type >= 0 && value_type <= 2 &&
+                                  !reverse &&
                                   n >= subgroup_block_min_n;
   if (!member_source) {
     cache.ensure_scan_block_pipeline(cache.device, value_type,
@@ -6301,6 +6660,10 @@ VulkanScanDispatchPlan prepare_vulkan_scan(Program *program,
   } else {
     cache.ensure_scan_strided_block_add_pipelines(cache.device, value_type);
     cache.ensure_scan_block_pipeline(cache.device, value_type, false);
+  }
+  if (reverse) {
+    cache.ensure_scan_reverse_block_add_pipelines(cache.device, value_type,
+                                                  member_source);
   }
   plan.scan_block = cache.scan_block_pipeline(value_type, use_subgroup_block);
   plan.scan_block_scope =
@@ -6313,9 +6676,23 @@ VulkanScanDispatchPlan prepare_vulkan_scan(Program *program,
     plan.scan_block_strided_scope = "vulkan_scan_block_strided";
     plan.scan_add_strided_scope = "vulkan_scan_add_strided";
   }
+  if (reverse) {
+    plan.scan_block_reverse =
+        cache.scan_block_reverse_pipeline(value_type, member_source);
+    plan.scan_add_reverse =
+        cache.scan_add_reverse_pipeline(value_type, member_source);
+    plan.scan_block_reverse_scope =
+        member_source ? "vulkan_scan_block_strided_reverse"
+                      : "vulkan_scan_block_reverse";
+    plan.scan_add_reverse_scope =
+        member_source ? "vulkan_scan_add_strided_reverse"
+                      : "vulkan_scan_add_reverse";
+  }
   TI_ERROR_IF(!plan.scan_block || !plan.scan_add ||
                   (member_source &&
-                   (!plan.scan_block_strided || !plan.scan_add_strided)),
+                   (!plan.scan_block_strided || !plan.scan_add_strided)) ||
+                  (reverse &&
+                   (!plan.scan_block_reverse || !plan.scan_add_reverse)),
               "Vulkan native scan could not find a scan pipeline.");
   const size_t block_count = plan.levels.size();
   const size_t add_count = plan.levels.size() > 1 ? plan.levels.size() - 1 : 0;
@@ -6380,7 +6757,10 @@ void record_vulkan_scan(Device * /*op_device*/,
                         plan.data_bytes);
     bind_params(bindings);
     dispatch_pipeline(cmdlist, plan.scan_small, bindings, 1, 1, 1,
-                      profiler_scopes ? plan.scan_small_scope : nullptr);
+                      profiler_scopes
+                          ? (plan.reverse ? plan.scan_small_reverse_scope
+                                          : plan.scan_small_scope)
+                          : nullptr);
     cmdlist->buffer_barrier(plan.data_alloc);
     return;
   }
@@ -6423,10 +6803,15 @@ void record_vulkan_scan(Device * /*op_device*/,
     }
     const uint32_t groups = static_cast<uint32_t>(
         (plan.levels[level] + kBlockSize - 1) / kBlockSize);
-    Pipeline *pipeline =
-        strided_level ? plan.scan_block_strided : plan.scan_block;
-    const char *scope =
-        strided_level ? plan.scan_block_strided_scope : plan.scan_block_scope;
+    const bool reverse_level = plan.reverse && level == 0;
+    Pipeline *pipeline = reverse_level
+                             ? plan.scan_block_reverse
+                             : (strided_level ? plan.scan_block_strided
+                                              : plan.scan_block);
+    const char *scope = reverse_level
+                            ? plan.scan_block_reverse_scope
+                            : (strided_level ? plan.scan_block_strided_scope
+                                             : plan.scan_block_scope);
     dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
                       scope_name(scope));
     barrier_level(cmdlist, level);
@@ -6460,10 +6845,15 @@ void record_vulkan_scan(Device * /*op_device*/,
       }
       const uint32_t groups = static_cast<uint32_t>(
           (plan.levels[level] + kBlockSize - 1) / kBlockSize);
-      Pipeline *pipeline =
-          strided_level ? plan.scan_add_strided : plan.scan_add;
-      const char *scope =
-          strided_level ? plan.scan_add_strided_scope : plan.scan_add_scope;
+      const bool reverse_level = plan.reverse && level == 0;
+      Pipeline *pipeline = reverse_level
+                               ? plan.scan_add_reverse
+                               : (strided_level ? plan.scan_add_strided
+                                                : plan.scan_add);
+      const char *scope = reverse_level
+                              ? plan.scan_add_reverse_scope
+                              : (strided_level ? plan.scan_add_strided_scope
+                                               : plan.scan_add_scope);
       dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
                         scope_name(scope));
       barrier_level(cmdlist, level);
@@ -6487,9 +6877,11 @@ size_t enqueue_vulkan_scan(Program *program,
                            bool member_source = false,
                            size_t offset = 0,
                            size_t stride = 0,
-                           size_t data_offset = 0) {
+                           size_t data_offset = 0,
+                           bool reverse = false) {
   auto plan = prepare_vulkan_scan(program, cache, data_alloc, n, value_type,
-                                  member_source, offset, stride, data_offset);
+                                  member_source, offset, stride, data_offset,
+                                  reverse);
   if (plan.n <= 1) {
     return 0;
   }
@@ -6499,6 +6891,7 @@ size_t enqueue_vulkan_scan(Program *program,
       };
   VulkanCommandReplayKey command_key;
   command_key.push(60);
+  command_key.push(reverse ? 1 : 0);
   command_key.push(static_cast<uint64_t>(value_type));
   command_key.push(member_source ? 1 : 0);
   command_key.push(data_alloc.alloc_id);
@@ -6525,6 +6918,9 @@ size_t enqueue_vulkan_scan(Program *program,
   command_key.push_ptr(plan.scan_add);
   command_key.push_ptr(plan.scan_block_strided);
   command_key.push_ptr(plan.scan_add_strided);
+  command_key.push_ptr(plan.scan_small_reverse);
+  command_key.push_ptr(plan.scan_block_reverse);
+  command_key.push_ptr(plan.scan_add_reverse);
   Device *device = program->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native scan requires a compute device.");
   if (!cache.scan_command_replay.submit_or_record(program, device, command_key,
@@ -8004,11 +8400,21 @@ std::size_t Program::vulkan_add_merge_ndarray(Ndarray *src,
               "type.");
   const size_t value_size = vulkan_transform_value_size(value_type);
   TI_ERROR_IF(!src || !dst, "Vulkan native add-merge received null ndarray.");
-  TI_ERROR_IF(src->get_element_size() != value_size ||
-                  dst->get_element_size() != value_size,
-              "Vulkan native add-merge dtype does not match value type.");
-  return vulkan_add_merge_ndarray_impl(this, src, dst, value_type, 0,
-                                       value_size, 0, value_size);
+  TI_ERROR_IF(src->shape.size() != 1 || dst->shape.size() != 1,
+              "Vulkan native add-merge expects 1D ndarrays.");
+  TI_ERROR_IF(src->get_nelement() != dst->get_nelement(),
+              "Vulkan native add-merge source and destination sizes differ.");
+  const size_t src_element_size = src->get_element_size();
+  const size_t dst_element_size = dst->get_element_size();
+  TI_ERROR_IF(src_element_size != dst_element_size ||
+                  src_element_size < value_size ||
+                  src_element_size % value_size != 0,
+              "Vulkan native add-merge payload does not match value type.");
+  const size_t scalar_items =
+      src->get_nelement() * (src_element_size / value_size);
+  return vulkan_add_merge_storage_impl(
+      this, src->ndarray_alloc_, dst->ndarray_alloc_, scalar_items, value_size,
+      value_size, value_type, 0, value_size, 0, value_size);
 }
 
 std::size_t Program::vulkan_add_merge_strided_ndarray(
@@ -8049,6 +8455,47 @@ std::size_t Program::vulkan_add_merge_dense_field(Ndarray *src,
   return vulkan_add_merge_storage_impl(
       this, src->ndarray_alloc_, dst_alloc, n, value_size, value_size,
       value_type, 0, value_size, dst_ptr.offset, dst_stride);
+}
+
+std::size_t Program::vulkan_add_merge_dense_field_packed(SNode *src,
+                                                         SNode *dst,
+                                                         int value_type,
+                                                         std::size_t n,
+                                                         int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native packed dense field add-merge is only available "
+              "on Vulkan.");
+  TI_ERROR_IF(!src || !dst,
+              "Vulkan native packed dense field add-merge received a null "
+              "field.");
+  TI_ERROR_IF(!vulkan_add_merge_value_type_available(value_type),
+              "Vulkan native packed dense field add-merge does not support "
+              "the requested value type.");
+  TI_ERROR_IF(lane_count <= 0,
+              "Vulkan native packed dense field add-merge received an invalid "
+              "lane count.");
+  const size_t value_size = vulkan_transform_value_size(value_type);
+  const size_t lanes = static_cast<size_t>(lane_count);
+  TI_ERROR_IF(n > std::numeric_limits<size_t>::max() / lanes,
+              "Vulkan native packed dense field add-merge received an "
+              "oversized request.");
+  const size_t scalar_items = n * lanes;
+  if (scalar_items == 0) {
+    return 0;
+  }
+  const size_t expected_stride = lanes * value_size;
+  DevicePtr src_ptr = get_dense_field_device_ptr(src);
+  DevicePtr dst_ptr = get_dense_field_device_ptr(dst);
+  const size_t src_stride = get_dense_field_stride(src, value_size);
+  const size_t dst_stride = get_dense_field_stride(dst, value_size);
+  TI_ERROR_IF(src_stride != expected_stride || dst_stride != expected_stride,
+              "Vulkan native packed dense field add-merge expects packed "
+              "contiguous dense MatrixField gradients.");
+  DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
+  DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
+  return vulkan_add_merge_storage_impl(
+      this, src_alloc, dst_alloc, scalar_items, value_size, value_size,
+      value_type, src_ptr.offset, value_size, dst_ptr.offset, value_size);
 }
 
 std::size_t Program::vulkan_add_scalar_field_to_dense_field(SNode *src,
@@ -8663,6 +9110,32 @@ std::size_t Program::vulkan_inclusive_scan_ndarray(Ndarray *data,
                              profiler != nullptr);
 }
 
+std::size_t Program::vulkan_inclusive_reverse_scan_ndarray(Ndarray *data,
+                                                           int value_type) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native reverse scan is only available on Vulkan.");
+  TI_ERROR_IF(!data, "Vulkan native reverse scan received null ndarray.");
+  TI_ERROR_IF(data->shape.size() != 1,
+              "Vulkan native reverse scan expects a 1D ndarray.");
+  TI_ERROR_IF(!vulkan_scan_value_type_available(value_type),
+              "Vulkan native reverse scan received an unsupported value type.");
+  const size_t value_size = vulkan_scan_value_type_size(value_type);
+  TI_ERROR_IF(data->get_element_size() != value_size,
+              "Vulkan native reverse scan dtype does not match the requested "
+              "value type.");
+
+  const size_t n = data->get_nelement();
+  if (n <= 1) {
+    return 0;
+  }
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native reverse scan requires a compute device.");
+  auto &cache = get_scan_cache(this, device);
+  return enqueue_vulkan_scan(this, cache, data->ndarray_alloc_, n, value_type,
+                             profiler != nullptr, false, 0, 0, 0, true);
+}
+
 std::size_t Program::vulkan_inclusive_scan_member_ndarray(
     Ndarray *data,
     int value_type,
@@ -8684,6 +9157,32 @@ std::size_t Program::vulkan_inclusive_scan_member_ndarray(
   auto &cache = get_scan_cache(this, device);
   return enqueue_vulkan_scan(this, cache, data->ndarray_alloc_, n, value_type,
                              profiler != nullptr, true, offset, stride);
+}
+
+std::size_t Program::vulkan_inclusive_reverse_scan_member_ndarray(
+    Ndarray *data,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native strided reverse scan is only available on Vulkan.");
+  check_vulkan_scan_member_request(data, value_type, offset, stride);
+  TI_ERROR_IF(!vulkan_scan_value_type_available(value_type),
+              "Vulkan native strided reverse scan received an unsupported "
+              "value type.");
+
+  const size_t n = data->get_nelement();
+  if (n <= 1) {
+    return 0;
+  }
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan native strided reverse scan requires a compute device.");
+  auto &cache = get_scan_cache(this, device);
+  return enqueue_vulkan_scan(this, cache, data->ndarray_alloc_, n, value_type,
+                             profiler != nullptr, true, offset, stride, 0,
+                             true);
 }
 
 std::size_t Program::vulkan_inclusive_scan_dense_field(SNode *data,
@@ -8723,6 +9222,154 @@ std::size_t Program::vulkan_inclusive_scan_dense_field(SNode *data,
   }
   return enqueue_vulkan_scan(this, cache, alloc, n, value_type,
                              profiler != nullptr, true, ptr.offset, stride);
+}
+
+std::size_t Program::vulkan_inclusive_reverse_scan_dense_field(SNode *data,
+                                                               int value_type,
+                                                               std::size_t n) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native dense field reverse scan is only available on "
+              "Vulkan.");
+  TI_ERROR_IF(!data,
+              "Vulkan native dense field reverse scan received null field.");
+  TI_ERROR_IF(!vulkan_scan_value_type_available(value_type),
+              "Vulkan native dense field reverse scan received an unsupported "
+              "value type.");
+  const size_t value_size = vulkan_scan_value_type_size(value_type);
+  DevicePtr ptr = get_dense_field_device_ptr(data);
+  const size_t stride = get_dense_field_stride(data, value_size);
+  TI_ERROR_IF(stride < value_size,
+              "Vulkan native dense field reverse scan source stride is "
+              "smaller than value size.");
+  TI_ERROR_IF(ptr.offset % value_size != 0 || stride % value_size != 0,
+              "Vulkan native dense field reverse scan source offset/stride "
+              "must align to value size.");
+  TI_ERROR_IF(ptr.offset % sizeof(uint32_t) != 0 ||
+                  stride % sizeof(uint32_t) != 0,
+              "Vulkan native dense field reverse scan source offset/stride "
+              "must be uint32-word aligned.");
+  if (n <= 1) {
+    return 0;
+  }
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan native dense field reverse scan requires a compute "
+              "device.");
+  auto &cache = get_scan_cache(this, device);
+  DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+  if (stride == value_size) {
+    return enqueue_vulkan_scan(this, cache, alloc, n, value_type,
+                               profiler != nullptr, false, 0, value_size,
+                               ptr.offset, true);
+  }
+  return enqueue_vulkan_scan(this, cache, alloc, n, value_type,
+                             profiler != nullptr, true, ptr.offset, stride, 0,
+                             true);
+}
+
+std::size_t Program::vulkan_inclusive_scan_dense_field_packed(SNode *data,
+                                                              int value_type,
+                                                              std::size_t n,
+                                                              int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native packed dense field scan is only available on "
+              "Vulkan.");
+  TI_ERROR_IF(!data,
+              "Vulkan native packed dense field scan received null field.");
+  TI_ERROR_IF(!vulkan_scan_value_type_available(value_type),
+              "Vulkan native packed dense field scan received an unsupported "
+              "value type.");
+  const size_t value_size = vulkan_scan_value_type_size(value_type);
+  const size_t item_bytes =
+      value_size * static_cast<size_t>(std::max(1, lane_count));
+  TI_ERROR_IF(lane_count <= 0,
+              "Vulkan native packed dense field scan received an invalid lane "
+              "count.");
+  DevicePtr ptr = get_dense_field_device_ptr(data);
+  TI_ERROR_IF(get_dense_field_stride(data, value_size) != item_bytes,
+              "Vulkan native packed dense field scan expects a packed "
+              "contiguous MatrixField layout.");
+  TI_ERROR_IF(ptr.offset % value_size != 0 || item_bytes % value_size != 0,
+              "Vulkan native packed dense field scan source offset/stride "
+              "must align to value size.");
+  TI_ERROR_IF(ptr.offset % sizeof(uint32_t) != 0 ||
+                  item_bytes % sizeof(uint32_t) != 0,
+              "Vulkan native packed dense field scan source offset/stride "
+              "must be uint32-word aligned.");
+  if (n <= 1) {
+    return 0;
+  }
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan native packed dense field scan requires a compute "
+              "device.");
+  auto &cache = get_scan_cache(this, device);
+  DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+  std::size_t temp_bytes = 0;
+  for (int lane = 0; lane < lane_count; ++lane) {
+    temp_bytes = std::max(
+        temp_bytes,
+        enqueue_vulkan_scan(this, cache, alloc, n, value_type,
+                            profiler != nullptr, true,
+                            ptr.offset + static_cast<size_t>(lane) * value_size,
+                            item_bytes));
+  }
+  return temp_bytes;
+}
+
+std::size_t Program::vulkan_inclusive_reverse_scan_dense_field_packed(
+    SNode *data,
+    int value_type,
+    std::size_t n,
+    int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native packed dense field reverse scan is only "
+              "available on Vulkan.");
+  TI_ERROR_IF(!data,
+              "Vulkan native packed dense field reverse scan received null "
+              "field.");
+  TI_ERROR_IF(!vulkan_scan_value_type_available(value_type),
+              "Vulkan native packed dense field reverse scan received an "
+              "unsupported value type.");
+  const size_t value_size = vulkan_scan_value_type_size(value_type);
+  const size_t item_bytes =
+      value_size * static_cast<size_t>(std::max(1, lane_count));
+  TI_ERROR_IF(lane_count <= 0,
+              "Vulkan native packed dense field reverse scan received an "
+              "invalid lane count.");
+  DevicePtr ptr = get_dense_field_device_ptr(data);
+  TI_ERROR_IF(get_dense_field_stride(data, value_size) != item_bytes,
+              "Vulkan native packed dense field reverse scan expects a packed "
+              "contiguous MatrixField layout.");
+  TI_ERROR_IF(ptr.offset % value_size != 0 || item_bytes % value_size != 0,
+              "Vulkan native packed dense field reverse scan source "
+              "offset/stride must align to value size.");
+  TI_ERROR_IF(ptr.offset % sizeof(uint32_t) != 0 ||
+                  item_bytes % sizeof(uint32_t) != 0,
+              "Vulkan native packed dense field reverse scan source "
+              "offset/stride must be uint32-word aligned.");
+  if (n <= 1) {
+    return 0;
+  }
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan native packed dense field reverse scan requires a "
+              "compute device.");
+  auto &cache = get_scan_cache(this, device);
+  DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+  std::size_t temp_bytes = 0;
+  for (int lane = 0; lane < lane_count; ++lane) {
+    temp_bytes = std::max(
+        temp_bytes,
+        enqueue_vulkan_scan(this, cache, alloc, n, value_type,
+                            profiler != nullptr, true,
+                            ptr.offset + static_cast<size_t>(lane) * value_size,
+                            item_bytes, 0, true));
+  }
+  return temp_bytes;
 }
 
 std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
@@ -9672,6 +10319,46 @@ std::size_t Program::vulkan_reduce_dense_field(SNode *values,
       !contiguous, !contiguous);
 }
 
+std::size_t Program::vulkan_reduce_dense_field_packed(SNode *values,
+                                                      SNode *output,
+                                                      int value_type,
+                                                      std::size_t n,
+                                                      int lane_count,
+                                                      int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native packed dense field reduce is only available on "
+              "Vulkan.");
+  TI_ERROR_IF(!values || !output,
+              "Vulkan native packed dense field reduce received null field.");
+  TI_ERROR_IF(n == 0,
+              "Vulkan native packed dense field reduce expects at least one "
+              "input item.");
+  const size_t value_size = vulkan_transform_value_size(value_type);
+  TI_ERROR_IF(value_size == 0 || lane_count <= 0,
+              "Vulkan native packed dense field reduce received an invalid "
+              "value type or lane count.");
+  const size_t item_bytes = value_size * static_cast<size_t>(lane_count);
+  DevicePtr values_ptr = get_dense_field_device_ptr(values);
+  DevicePtr output_ptr = get_dense_field_device_ptr(output);
+  TI_ERROR_IF(get_dense_field_stride(values, value_size) != item_bytes ||
+                  get_dense_field_stride(output, value_size) != item_bytes,
+              "Vulkan native packed dense field reduce expects a packed "
+              "contiguous MatrixField layout.");
+  DeviceAllocation values_alloc{values_ptr.device, values_ptr.alloc_id};
+  DeviceAllocation output_alloc{output_ptr.device, output_ptr.alloc_id};
+  std::size_t temp_bytes = 0;
+  for (int lane = 0; lane < lane_count; ++lane) {
+    const size_t lane_offset = static_cast<size_t>(lane) * value_size;
+    temp_bytes = std::max(
+        temp_bytes,
+        vulkan_reduce_storage_impl(
+            this, values_alloc, output_alloc, n, value_size, value_size,
+            value_type, op, values_ptr.offset + lane_offset, item_bytes,
+            output_ptr.offset + lane_offset, value_size, true, true));
+  }
+  return temp_bytes;
+}
+
 std::size_t Program::vulkan_transform_affine_ndarray(Ndarray *src,
                                                      Ndarray *dst,
                                                      int value_type,
@@ -9806,6 +10493,39 @@ std::size_t Program::vulkan_transform_affine_dense_field_trusted(SNode *src,
       this, src_alloc, dst_alloc, n, value_size, value_size, value_type, 1,
       src_ptr.offset, src_stride, dst_ptr.offset, dst_stride, scale, bias,
       !contiguous, !contiguous, true);
+}
+
+std::size_t Program::vulkan_transform_affine_dense_field_packed(
+    SNode *src,
+    SNode *dst,
+    int value_type,
+    std::size_t n,
+    int lane_count,
+    double scale,
+    double bias) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native packed dense field transform is only available "
+              "on Vulkan.");
+  TI_ERROR_IF(!src || !dst,
+              "Vulkan native packed dense field transform received null "
+              "field.");
+  const size_t value_size = vulkan_transform_value_size(value_type);
+  TI_ERROR_IF(value_size == 0 || lane_count <= 0,
+              "Vulkan native packed dense field transform received an "
+              "invalid value type or lane count.");
+  const size_t item_bytes = value_size * static_cast<size_t>(lane_count);
+  DevicePtr src_ptr = get_dense_field_device_ptr(src);
+  DevicePtr dst_ptr = get_dense_field_device_ptr(dst);
+  TI_ERROR_IF(get_dense_field_stride(src, value_size) != item_bytes ||
+                  get_dense_field_stride(dst, value_size) != item_bytes,
+              "Vulkan native packed dense field transform expects a packed "
+              "contiguous MatrixField layout.");
+  DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
+  DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
+  return vulkan_transform_affine_storage_impl(
+      this, src_alloc, dst_alloc, n, item_bytes, item_bytes, value_type,
+      lane_count, src_ptr.offset, item_bytes, dst_ptr.offset, item_bytes, scale,
+      bias, true, true);
 }
 
 std::size_t Program::vulkan_zero_dense_field(SNode *dst,
@@ -10251,6 +10971,195 @@ std::size_t Program::vulkan_gather_dense_field(SNode *src,
   return cache.cached_bytes;
 }
 
+std::size_t Program::vulkan_gather_dense_field_packed(SNode *src,
+                                                      Ndarray *indices,
+                                                      SNode *dst,
+                                                      int value_type,
+                                                      std::size_t src_n,
+                                                      std::size_t dst_n,
+                                                      int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native packed dense field gather is only available on "
+              "Vulkan.");
+  TI_ERROR_IF(!indices || indices->shape.size() != 1 ||
+                  indices->get_nelement() != dst_n ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "Vulkan native packed dense field gather expects 1D i32 "
+              "indices matching destination size.");
+  const size_t n = indices->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  const size_t value_size = vulkan_transform_value_size(value_type);
+  TI_ERROR_IF(value_size == 0 || lane_count <= 0,
+              "Vulkan native packed dense field gather received an invalid "
+              "value type or lane count.");
+  const size_t item_bytes = value_size * static_cast<size_t>(lane_count);
+  const size_t item_words = item_bytes / sizeof(uint32_t);
+  const size_t word_count = n * item_words;
+  TI_ERROR_IF(word_count >
+                  static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native packed dense field gather word count exceeds "
+              "UINT32_MAX.");
+  TI_ERROR_IF(src_n >
+                  static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native packed dense field gather source size exceeds "
+              "UINT32_MAX.");
+  DevicePtr src_ptr = get_dense_field_device_ptr(src);
+  DevicePtr dst_ptr = get_dense_field_device_ptr(dst);
+  TI_ERROR_IF(get_dense_field_stride(src, value_size) != item_bytes ||
+                  get_dense_field_stride(dst, value_size) != item_bytes,
+              "Vulkan native packed dense field gather expects a packed "
+              "contiguous MatrixField layout.");
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan native packed dense field gather requires a compute "
+              "device.");
+  auto &cache = get_indexed_copy_cache(this, device);
+  ShaderResourceSet *bindings = cache.cached_resource_set(false);
+  Pipeline *pipeline = cache.indexed_copy_pipeline(false, false);
+  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
+  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
+  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
+  const size_t src_bytes = src_n * item_bytes;
+  const size_t indices_bytes = n * sizeof(int32_t);
+  const size_t dst_bytes = n * item_bytes;
+  const uint32_t groups =
+      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
+  const bool profiler_scopes = profiler != nullptr;
+  cache.gather_replay.rw_buffer(bindings, 0, src_alloc, src_ptr.offset,
+                                src_bytes);
+  cache.gather_replay.rw_buffer(bindings, 1, indices_alloc, 0,
+                                indices_bytes);
+  cache.gather_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
+                                dst_bytes);
+  auto record_gather_packed =
+      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, dst_ptr,
+       src_bytes, indices_bytes, dst_bytes, groups,
+       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
+                          profiler_scopes
+                              ? "vulkan_gather_packed_dense_field_u32_by_i32"
+                              : nullptr);
+        cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
+                                dst_bytes);
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(142);
+  command_key.push(static_cast<uint64_t>(item_bytes));
+  push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
+                                src_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
+                                dst_bytes);
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.gather_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes, record_gather_packed)) {
+    enqueue_compute_op_lambda(record_gather_packed, {});
+  }
+  return 0;
+}
+
+std::size_t Program::vulkan_gather_dense_field_packed_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n,
+    int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native packed dense field gather is only available on "
+              "Vulkan.");
+  TI_ERROR_IF(indices_n != dst_n,
+              "Vulkan native packed dense field gather expects field indices "
+              "matching destination size.");
+  const size_t n = indices_n;
+  if (n == 0) {
+    return 0;
+  }
+  const size_t value_size = vulkan_transform_value_size(value_type);
+  TI_ERROR_IF(value_size == 0 || lane_count <= 0,
+              "Vulkan native packed dense field gather received an invalid "
+              "value type or lane count.");
+  const size_t item_bytes = value_size * static_cast<size_t>(lane_count);
+  const size_t item_words = item_bytes / sizeof(uint32_t);
+  const size_t word_count = n * item_words;
+  TI_ERROR_IF(word_count >
+                  static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native packed dense field gather word count exceeds "
+              "UINT32_MAX.");
+  TI_ERROR_IF(src_n >
+                  static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native packed dense field gather source size exceeds "
+              "UINT32_MAX.");
+  DevicePtr src_ptr = get_dense_field_device_ptr(src);
+  DevicePtr indices_ptr = get_dense_field_device_ptr(indices);
+  DevicePtr dst_ptr = get_dense_field_device_ptr(dst);
+  TI_ERROR_IF(get_dense_field_stride(src, value_size) != item_bytes ||
+                  get_dense_field_stride(dst, value_size) != item_bytes,
+              "Vulkan native packed dense field gather expects a packed "
+              "contiguous MatrixField layout.");
+  TI_ERROR_IF(get_dense_field_stride(indices, sizeof(int32_t)) !=
+                  sizeof(int32_t),
+              "Vulkan native packed dense field gather requires contiguous "
+              "i32 field indices.");
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan native packed dense field gather requires a compute "
+              "device.");
+  auto &cache = get_indexed_copy_cache(this, device);
+  ShaderResourceSet *bindings = cache.cached_resource_set(false);
+  Pipeline *pipeline = cache.indexed_copy_pipeline(false, false);
+  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
+  const DeviceAllocation indices_alloc{indices_ptr.device, indices_ptr.alloc_id};
+  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
+  const size_t src_bytes = src_n * item_bytes;
+  const size_t indices_bytes = n * sizeof(int32_t);
+  const size_t dst_bytes = n * item_bytes;
+  const uint32_t groups =
+      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
+  const bool profiler_scopes = profiler != nullptr;
+  cache.gather_replay.rw_buffer(bindings, 0, src_alloc, src_ptr.offset,
+                                src_bytes);
+  cache.gather_replay.rw_buffer(bindings, 1, indices_alloc,
+                                indices_ptr.offset, indices_bytes);
+  cache.gather_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
+                                dst_bytes);
+  auto record_gather_packed_indices_field =
+      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, dst_ptr,
+       dst_bytes, groups, profiler_scopes](Device * /*op_device*/,
+                                           CommandList *cmdlist) {
+        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
+                          profiler_scopes
+                              ? "vulkan_gather_packed_field_indices_u32_by_i32"
+                              : nullptr);
+        cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
+                                dst_bytes);
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(143);
+  command_key.push(static_cast<uint64_t>(item_bytes));
+  push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
+                                src_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, indices_ptr.offset,
+                                indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
+                                dst_bytes);
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.gather_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_gather_packed_indices_field)) {
+    enqueue_compute_op_lambda(record_gather_packed_indices_field, {});
+  }
+  return 0;
+}
+
 std::size_t Program::vulkan_gather_dense_field_indices_field(
     SNode *src,
     SNode *indices,
@@ -10683,6 +11592,199 @@ std::size_t Program::vulkan_scatter_dense_field(SNode *src,
     enqueue_compute_op_lambda(record_scatter_dense_strided, {});
   }
   return cache.cached_bytes;
+}
+
+std::size_t Program::vulkan_scatter_dense_field_packed(SNode *src,
+                                                       Ndarray *indices,
+                                                       SNode *dst,
+                                                       int value_type,
+                                                       std::size_t src_n,
+                                                       std::size_t dst_n,
+                                                       int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native packed dense field scatter is only available on "
+              "Vulkan.");
+  TI_ERROR_IF(!indices || indices->shape.size() != 1 ||
+                  indices->get_nelement() != src_n ||
+                  indices->get_element_size() != sizeof(int32_t),
+              "Vulkan native packed dense field scatter expects 1D i32 "
+              "indices matching source size.");
+  const size_t n = indices->get_nelement();
+  if (n == 0) {
+    return 0;
+  }
+  const size_t value_size = vulkan_transform_value_size(value_type);
+  TI_ERROR_IF(value_size == 0 || lane_count <= 0,
+              "Vulkan native packed dense field scatter received an invalid "
+              "value type or lane count.");
+  const size_t item_bytes = value_size * static_cast<size_t>(lane_count);
+  const size_t item_words = item_bytes / sizeof(uint32_t);
+  const size_t word_count = n * item_words;
+  TI_ERROR_IF(word_count >
+                  static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native packed dense field scatter word count exceeds "
+              "UINT32_MAX.");
+  TI_ERROR_IF(dst_n >
+                  static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native packed dense field scatter destination size "
+              "exceeds UINT32_MAX.");
+  DevicePtr src_ptr = get_dense_field_device_ptr(src);
+  DevicePtr dst_ptr = get_dense_field_device_ptr(dst);
+  TI_ERROR_IF(get_dense_field_stride(src, value_size) != item_bytes ||
+                  get_dense_field_stride(dst, value_size) != item_bytes,
+              "Vulkan native packed dense field scatter expects a packed "
+              "contiguous MatrixField layout.");
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan native packed dense field scatter requires a compute "
+              "device.");
+  auto &cache = get_indexed_copy_cache(this, device);
+  ShaderResourceSet *bindings = cache.cached_resource_set(true);
+  Pipeline *pipeline = item_words == 1
+                           ? cache.indexed_copy_dense_u32_scatter_pipeline()
+                           : cache.indexed_copy_pipeline(true, false);
+  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
+  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
+  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
+  const size_t src_bytes = n * item_bytes;
+  const size_t indices_bytes = n * sizeof(int32_t);
+  const size_t dst_bytes = dst_n * item_bytes;
+  const uint32_t groups =
+      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
+  const bool profiler_scopes = profiler != nullptr;
+  cache.scatter_replay.rw_buffer(bindings, 0, src_alloc, src_ptr.offset,
+                                 src_bytes);
+  cache.scatter_replay.rw_buffer(bindings, 1, indices_alloc, 0,
+                                 indices_bytes);
+  cache.scatter_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
+                                 dst_bytes);
+  auto record_scatter_packed =
+      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, dst_ptr,
+       src_bytes, indices_bytes, dst_bytes, groups,
+       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        dispatch_pipeline(cmdlist, pipeline, bindings, groups, 1, 1,
+                          profiler_scopes
+                              ? "vulkan_scatter_packed_dense_field_u32_by_i32"
+                              : nullptr);
+        cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
+                                dst_bytes);
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(147);
+  command_key.push(static_cast<uint64_t>(item_bytes));
+  push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
+                                src_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
+                                dst_bytes);
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.scatter_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes, record_scatter_packed)) {
+    enqueue_compute_op_lambda(record_scatter_packed, {});
+  }
+  return 0;
+}
+
+std::size_t Program::vulkan_scatter_dense_field_packed_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n,
+    int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native packed dense field scatter is only available on "
+              "Vulkan.");
+  TI_ERROR_IF(src_n != indices_n,
+              "Vulkan native packed dense field scatter expects field indices "
+              "matching source size.");
+  const size_t n = indices_n;
+  if (n == 0) {
+    return 0;
+  }
+  const size_t value_size = vulkan_transform_value_size(value_type);
+  TI_ERROR_IF(value_size == 0 || lane_count <= 0,
+              "Vulkan native packed dense field scatter received an invalid "
+              "value type or lane count.");
+  const size_t item_bytes = value_size * static_cast<size_t>(lane_count);
+  const size_t item_words = item_bytes / sizeof(uint32_t);
+  const size_t word_count = n * item_words;
+  TI_ERROR_IF(word_count >
+                  static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native packed dense field scatter word count exceeds "
+              "UINT32_MAX.");
+  TI_ERROR_IF(dst_n >
+                  static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native packed dense field scatter destination size "
+              "exceeds UINT32_MAX.");
+  DevicePtr src_ptr = get_dense_field_device_ptr(src);
+  DevicePtr indices_ptr = get_dense_field_device_ptr(indices);
+  DevicePtr dst_ptr = get_dense_field_device_ptr(dst);
+  TI_ERROR_IF(get_dense_field_stride(src, value_size) != item_bytes ||
+                  get_dense_field_stride(dst, value_size) != item_bytes,
+              "Vulkan native packed dense field scatter expects a packed "
+              "contiguous MatrixField layout.");
+  TI_ERROR_IF(get_dense_field_stride(indices, sizeof(int32_t)) !=
+                  sizeof(int32_t),
+              "Vulkan native packed dense field scatter requires contiguous "
+              "i32 field indices.");
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan native packed dense field scatter requires a compute "
+              "device.");
+  auto &cache = get_indexed_copy_cache(this, device);
+  ShaderResourceSet *bindings = cache.cached_resource_set(true);
+  Pipeline *pipeline = item_words == 1
+                           ? cache.indexed_copy_dense_u32_scatter_pipeline()
+                           : cache.indexed_copy_pipeline(true, false);
+  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
+  const DeviceAllocation indices_alloc{indices_ptr.device, indices_ptr.alloc_id};
+  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
+  const size_t src_bytes = n * item_bytes;
+  const size_t indices_bytes = n * sizeof(int32_t);
+  const size_t dst_bytes = dst_n * item_bytes;
+  const uint32_t groups =
+      static_cast<uint32_t>((word_count + kBlockSize - 1) / kBlockSize);
+  const bool profiler_scopes = profiler != nullptr;
+  cache.scatter_replay.rw_buffer(bindings, 0, src_alloc, src_ptr.offset,
+                                 src_bytes);
+  cache.scatter_replay.rw_buffer(bindings, 1, indices_alloc,
+                                 indices_ptr.offset, indices_bytes);
+  cache.scatter_replay.rw_buffer(bindings, 2, dst_alloc, dst_ptr.offset,
+                                 dst_bytes);
+  auto record_scatter_packed_indices_field =
+      [src_alloc, indices_alloc, dst_alloc, pipeline, bindings, dst_ptr,
+       dst_bytes, groups, profiler_scopes](Device * /*op_device*/,
+                                           CommandList *cmdlist) {
+        dispatch_pipeline(
+            cmdlist, pipeline, bindings, groups, 1, 1,
+            profiler_scopes ? "vulkan_scatter_packed_field_indices_u32_by_i32"
+                            : nullptr);
+        cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_ptr.offset),
+                                dst_bytes);
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(148);
+  command_key.push(static_cast<uint64_t>(item_bytes));
+  push_vulkan_command_key_range(command_key, src_alloc, src_ptr.offset,
+                                src_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, indices_ptr.offset,
+                                indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, dst_ptr.offset,
+                                dst_bytes);
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.scatter_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_scatter_packed_indices_field)) {
+    enqueue_compute_op_lambda(record_scatter_packed_indices_field, {});
+  }
+  return 0;
 }
 
 std::size_t Program::vulkan_scatter_dense_field_indices_field(
@@ -11178,6 +12280,301 @@ std::size_t Program::vulkan_scatter_add_dense_field(SNode *src,
           this, device, command_key, profiler_scopes,
           record_scatter_add_dense_strided)) {
     enqueue_compute_op_lambda(record_scatter_add_dense_strided, {});
+  }
+  return cache.cached_bytes;
+}
+
+std::size_t Program::vulkan_scatter_add_dense_field_packed(
+    SNode *src,
+    Ndarray *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t dst_n,
+    int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native packed dense field scatter-add is only "
+              "available on Vulkan.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "Vulkan native packed dense field scatter-add received a null "
+              "argument.");
+  TI_ERROR_IF(indices->shape.size() != 1 ||
+                  indices->get_element_size() != sizeof(int32_t) ||
+                  indices->get_nelement() != src_n,
+              "Vulkan native packed dense field scatter-add expects 1D i32 "
+              "indices matching source size.");
+  TI_ERROR_IF(!vulkan_scatter_add_value_type_available(value_type),
+              "Vulkan native packed dense field scatter-add does not support "
+              "the requested value type.");
+  const size_t value_size = vulkan_scan_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0 || lane_count <= 0,
+              "Vulkan native packed dense field scatter-add received an "
+              "invalid value type or lane count.");
+  const size_t item_bytes = value_size * static_cast<size_t>(lane_count);
+  const size_t n = indices->get_nelement();
+  if (n == 0 || dst_n == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(n > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ||
+                  dst_n >
+                      static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native packed dense field scatter-add item count "
+              "exceeds UINT32_MAX.");
+  DevicePtr src_ptr = get_dense_field_device_ptr(src);
+  DevicePtr dst_ptr = get_dense_field_device_ptr(dst);
+  TI_ERROR_IF(get_dense_field_stride(src, value_size) != item_bytes ||
+                  get_dense_field_stride(dst, value_size) != item_bytes,
+              "Vulkan native packed dense field scatter-add expects a packed "
+              "contiguous MatrixField layout.");
+  auto check_param = [value_size](const char *name, size_t value) {
+    TI_ERROR_IF(value % value_size != 0,
+                "Vulkan native packed dense field scatter-add {} must align "
+                "to value size.",
+                name);
+    TI_ERROR_IF(value / value_size >
+                    static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+                "Vulkan native packed dense field scatter-add {} exceeds "
+                "UINT32_MAX items.",
+                name);
+  };
+  check_param("source offset", src_ptr.offset);
+  check_param("destination offset", dst_ptr.offset);
+  check_param("item stride", item_bytes);
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan native packed dense field scatter-add requires a "
+              "compute device.");
+  auto &cache = get_indexed_copy_cache(this, device);
+  TI_ERROR_IF(
+      static_cast<size_t>(lane_count) >
+              static_cast<size_t>(std::numeric_limits<uint32_t>::max()) / n ||
+          static_cast<size_t>(lane_count) >
+              static_cast<size_t>(std::numeric_limits<uint32_t>::max()) / dst_n,
+      "Vulkan native packed dense field scatter-add scalar item count "
+      "exceeds UINT32_MAX.");
+  cache.ensure_scatter_add_packed_pipeline(value_type);
+  ShaderResourceSet *bindings =
+      cache.cached_scatter_add_packed_resource_set(value_type);
+  Pipeline *pipeline = cache.scatter_add_packed_pipeline(value_type);
+  TI_ERROR_IF(!pipeline,
+              "Vulkan native packed dense field scatter-add could not find a "
+              "packed pipeline for the requested value type.");
+
+  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
+  const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
+  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
+  const size_t indices_bytes = n * sizeof(int32_t);
+  const size_t src_bytes = src_ptr.offset + src_n * item_bytes;
+  const size_t dst_bytes = dst_ptr.offset + dst_n * item_bytes;
+  cache.scatter_add_packed_replay[value_type].rw_buffer(
+      bindings, 0, src_alloc, 0, src_bytes);
+  cache.scatter_add_packed_replay[value_type].rw_buffer(
+      bindings, 1, indices_alloc, 0, indices_bytes);
+  cache.scatter_add_packed_replay[value_type].rw_buffer(
+      bindings, 2, dst_alloc, 0, dst_bytes);
+
+  const uint32_t scalar_items =
+      static_cast<uint32_t>(n * static_cast<size_t>(lane_count));
+  const uint32_t groups =
+      static_cast<uint32_t>((scalar_items + kBlockSize - 1) / kBlockSize);
+  const std::array<uint32_t, 5> param_words{
+      static_cast<uint32_t>(n),
+      static_cast<uint32_t>(src_ptr.offset / value_size),
+      static_cast<uint32_t>(dst_n),
+      static_cast<uint32_t>(dst_ptr.offset / value_size),
+      static_cast<uint32_t>(lane_count),
+  };
+  const uint32_t push_bytes =
+      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
+  const bool profiler_scopes = profiler != nullptr;
+  auto record_scatter_add_packed =
+      [dst_alloc, pipeline, bindings, dst_bytes, param_words, push_bytes, groups,
+       value_type, profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        dispatch_pipeline_with_push_constants(
+            cmdlist, pipeline, bindings, param_words.data(), push_bytes, groups,
+            1, 1,
+            profiler_scopes
+                ? (value_type == 1
+                       ? "vulkan_scatter_add_packed_f32_by_i32"
+                       : value_type == 2
+                       ? "vulkan_scatter_add_packed_u32_by_i32"
+                       : value_type == 3
+                       ? "vulkan_scatter_add_packed_u64_by_i32"
+                       : value_type == 4
+                       ? "vulkan_scatter_add_packed_i64_by_i32"
+                       : value_type == 5
+                       ? "vulkan_scatter_add_packed_f64_by_i32"
+                       : "vulkan_scatter_add_packed_i32_by_i32")
+                : nullptr);
+        cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(155);
+  command_key.push(static_cast<uint64_t>(value_type));
+  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, 0, indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
+  command_key.push(groups);
+  for (uint32_t word : param_words) {
+    command_key.push(word);
+  }
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.scatter_add_packed_command_replay[value_type].submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_scatter_add_packed)) {
+    enqueue_compute_op_lambda(record_scatter_add_packed, {});
+  }
+  return cache.cached_bytes;
+}
+
+std::size_t Program::vulkan_scatter_add_dense_field_packed_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n,
+    int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native packed dense field scatter-add is only "
+              "available on Vulkan.");
+  TI_ERROR_IF(!src || !indices || !dst,
+              "Vulkan native packed dense field scatter-add received a null "
+              "argument.");
+  TI_ERROR_IF(src_n != indices_n,
+              "Vulkan native packed dense field scatter-add expects source "
+              "and field-index sizes to match.");
+  TI_ERROR_IF(!vulkan_scatter_add_value_type_available(value_type),
+              "Vulkan native packed dense field scatter-add does not support "
+              "the requested value type.");
+  const size_t value_size = vulkan_scan_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0 || lane_count <= 0,
+              "Vulkan native packed dense field scatter-add received an "
+              "invalid value type or lane count.");
+  const size_t item_bytes = value_size * static_cast<size_t>(lane_count);
+  const size_t n = indices_n;
+  if (n == 0 || dst_n == 0) {
+    return 0;
+  }
+  TI_ERROR_IF(n > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ||
+                  dst_n >
+                      static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native packed dense field scatter-add item count "
+              "exceeds UINT32_MAX.");
+  DevicePtr src_ptr = get_dense_field_device_ptr(src);
+  DevicePtr indices_ptr = get_dense_field_device_ptr(indices);
+  DevicePtr dst_ptr = get_dense_field_device_ptr(dst);
+  TI_ERROR_IF(get_dense_field_stride(src, value_size) != item_bytes ||
+                  get_dense_field_stride(dst, value_size) != item_bytes,
+              "Vulkan native packed dense field scatter-add expects a packed "
+              "contiguous MatrixField layout.");
+  TI_ERROR_IF(get_dense_field_stride(indices, sizeof(int32_t)) !=
+                  sizeof(int32_t),
+              "Vulkan native packed dense field scatter-add requires "
+              "contiguous i32 field indices.");
+  auto check_param = [value_size](const char *name, size_t value) {
+    TI_ERROR_IF(value % value_size != 0,
+                "Vulkan native packed dense field scatter-add {} must align "
+                "to value size.",
+                name);
+    TI_ERROR_IF(value / value_size >
+                    static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+                "Vulkan native packed dense field scatter-add {} exceeds "
+                "UINT32_MAX items.",
+                name);
+  };
+  check_param("source offset", src_ptr.offset);
+  check_param("destination offset", dst_ptr.offset);
+  check_param("item stride", item_bytes);
+
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan native packed dense field scatter-add requires a "
+              "compute device.");
+  auto &cache = get_indexed_copy_cache(this, device);
+  TI_ERROR_IF(
+      static_cast<size_t>(lane_count) >
+              static_cast<size_t>(std::numeric_limits<uint32_t>::max()) / n ||
+          static_cast<size_t>(lane_count) >
+              static_cast<size_t>(std::numeric_limits<uint32_t>::max()) / dst_n,
+      "Vulkan native packed dense field scatter-add scalar item count "
+      "exceeds UINT32_MAX.");
+  cache.ensure_scatter_add_packed_pipeline(value_type);
+  ShaderResourceSet *bindings =
+      cache.cached_scatter_add_packed_resource_set(value_type);
+  Pipeline *pipeline = cache.scatter_add_packed_pipeline(value_type);
+  TI_ERROR_IF(!pipeline,
+              "Vulkan native packed dense field scatter-add could not find a "
+              "packed pipeline for the requested value type.");
+
+  const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
+  const DeviceAllocation indices_alloc{indices_ptr.device, indices_ptr.alloc_id};
+  const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
+  const size_t indices_bytes = n * sizeof(int32_t);
+  const size_t src_bytes = src_ptr.offset + src_n * item_bytes;
+  const size_t dst_bytes = dst_ptr.offset + dst_n * item_bytes;
+  cache.scatter_add_packed_replay[value_type].rw_buffer(
+      bindings, 0, src_alloc, 0, src_bytes);
+  cache.scatter_add_packed_replay[value_type].rw_buffer(
+      bindings, 1, indices_alloc, indices_ptr.offset, indices_bytes);
+  cache.scatter_add_packed_replay[value_type].rw_buffer(
+      bindings, 2, dst_alloc, 0, dst_bytes);
+
+  const uint32_t scalar_items =
+      static_cast<uint32_t>(n * static_cast<size_t>(lane_count));
+  const uint32_t groups =
+      static_cast<uint32_t>((scalar_items + kBlockSize - 1) / kBlockSize);
+  const std::array<uint32_t, 5> param_words{
+      static_cast<uint32_t>(n),
+      static_cast<uint32_t>(src_ptr.offset / value_size),
+      static_cast<uint32_t>(dst_n),
+      static_cast<uint32_t>(dst_ptr.offset / value_size),
+      static_cast<uint32_t>(lane_count),
+  };
+  const uint32_t push_bytes =
+      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
+  const bool profiler_scopes = profiler != nullptr;
+  auto record_scatter_add_packed_indices_field =
+      [dst_alloc, pipeline, bindings, dst_bytes, param_words, push_bytes, groups,
+       value_type, profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        dispatch_pipeline_with_push_constants(
+            cmdlist, pipeline, bindings, param_words.data(), push_bytes, groups,
+            1, 1,
+            profiler_scopes
+                ? (value_type == 1
+                       ? "vulkan_scatter_add_packed_f32_by_i32"
+                       : value_type == 2
+                       ? "vulkan_scatter_add_packed_u32_by_i32"
+                       : value_type == 3
+                       ? "vulkan_scatter_add_packed_u64_by_i32"
+                       : value_type == 4
+                       ? "vulkan_scatter_add_packed_i64_by_i32"
+                       : value_type == 5
+                       ? "vulkan_scatter_add_packed_f64_by_i32"
+                       : "vulkan_scatter_add_packed_i32_by_i32")
+                : nullptr);
+        cmdlist->buffer_barrier(dst_alloc.get_ptr(0), dst_bytes);
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(156);
+  command_key.push(static_cast<uint64_t>(value_type));
+  push_vulkan_command_key_range(command_key, src_alloc, 0, src_bytes);
+  push_vulkan_command_key_range(command_key, indices_alloc, indices_ptr.offset,
+                                indices_bytes);
+  push_vulkan_command_key_range(command_key, dst_alloc, 0, dst_bytes);
+  command_key.push(groups);
+  for (uint32_t word : param_words) {
+    command_key.push(word);
+  }
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.scatter_add_packed_command_replay[value_type].submit_or_record(
+          this, device, command_key, profiler_scopes,
+          record_scatter_add_packed_indices_field)) {
+    enqueue_compute_op_lambda(record_scatter_add_packed_indices_field, {});
   }
   return cache.cached_bytes;
 }
@@ -13170,6 +14567,12 @@ std::size_t Program::vulkan_inclusive_scan_ndarray(Ndarray *data,
   return 0;
 }
 
+std::size_t Program::vulkan_inclusive_reverse_scan_ndarray(Ndarray *data,
+                                                           int value_type) {
+  TI_ERROR("Vulkan native reverse scan requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 std::size_t Program::vulkan_inclusive_scan_member_ndarray(
     Ndarray *data,
     int value_type,
@@ -13179,10 +14582,45 @@ std::size_t Program::vulkan_inclusive_scan_member_ndarray(
   return 0;
 }
 
+std::size_t Program::vulkan_inclusive_reverse_scan_member_ndarray(
+    Ndarray *data,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride) {
+  TI_ERROR("Vulkan native strided reverse scan requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 std::size_t Program::vulkan_inclusive_scan_dense_field(SNode *data,
                                                        int value_type,
                                                        std::size_t n) {
   TI_ERROR("Vulkan native dense field scan requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_inclusive_reverse_scan_dense_field(SNode *data,
+                                                               int value_type,
+                                                               std::size_t n) {
+  TI_ERROR("Vulkan native dense field reverse scan requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_inclusive_scan_dense_field_packed(SNode *data,
+                                                              int value_type,
+                                                              std::size_t n,
+                                                              int lane_count) {
+  TI_ERROR("Vulkan native packed dense field scan requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_inclusive_reverse_scan_dense_field_packed(
+    SNode *data,
+    int value_type,
+    std::size_t n,
+    int lane_count) {
+  TI_ERROR(
+      "Vulkan native packed dense field reverse scan requires "
+      "TI_WITH_VULKAN=ON.");
   return 0;
 }
 
@@ -13284,6 +14722,17 @@ std::size_t Program::vulkan_reduce_dense_field(SNode *values,
   return 0;
 }
 
+std::size_t Program::vulkan_reduce_dense_field_packed(SNode *values,
+                                                      SNode *output,
+                                                      int value_type,
+                                                      std::size_t n,
+                                                      int lane_count,
+                                                      int op) {
+  TI_ERROR(
+      "Vulkan native packed dense field reduce requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 std::size_t Program::vulkan_transform_affine_ndarray(Ndarray *src,
                                                      Ndarray *dst,
                                                      int value_type,
@@ -13353,6 +14802,19 @@ std::size_t Program::vulkan_transform_affine_dense_field(SNode *src,
   return 0;
 }
 
+std::size_t Program::vulkan_transform_affine_dense_field_packed(
+    SNode *src,
+    SNode *dst,
+    int value_type,
+    std::size_t n,
+    int lane_count,
+    double scale,
+    double bias) {
+  TI_ERROR(
+      "Vulkan native packed dense field transform requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 std::size_t Program::vulkan_zero_dense_field(SNode *dst,
                                              int value_type,
                                              std::size_t n) {
@@ -13395,6 +14857,16 @@ std::size_t Program::vulkan_add_merge_dense_field(Ndarray *src,
   return 0;
 }
 
+std::size_t Program::vulkan_add_merge_dense_field_packed(SNode *src,
+                                                         SNode *dst,
+                                                         int value_type,
+                                                         std::size_t n,
+                                                         int lane_count) {
+  TI_ERROR(
+      "Vulkan native packed dense field add-merge requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
 std::size_t Program::vulkan_add_scalar_field_to_dense_field(SNode *src,
                                                             SNode *dst,
                                                             int value_type,
@@ -13430,6 +14902,32 @@ std::size_t Program::vulkan_gather_dense_field(SNode *src,
                                                std::size_t src_n,
                                                std::size_t dst_n) {
   TI_ERROR("Vulkan native dense field gather requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_gather_dense_field_packed(SNode *src,
+                                                      Ndarray *indices,
+                                                      SNode *dst,
+                                                      int value_type,
+                                                      std::size_t src_n,
+                                                      std::size_t dst_n,
+                                                      int lane_count) {
+  TI_ERROR(
+      "Vulkan native packed dense field gather requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_gather_dense_field_packed_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n,
+    int lane_count) {
+  TI_ERROR(
+      "Vulkan native packed dense field gather requires TI_WITH_VULKAN=ON.");
   return 0;
 }
 
@@ -13472,6 +14970,32 @@ std::size_t Program::vulkan_scatter_dense_field(SNode *src,
                                                 std::size_t src_n,
                                                 std::size_t dst_n) {
   TI_ERROR("Vulkan native dense field scatter requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_scatter_dense_field_packed(SNode *src,
+                                                       Ndarray *indices,
+                                                       SNode *dst,
+                                                       int value_type,
+                                                       std::size_t src_n,
+                                                       std::size_t dst_n,
+                                                       int lane_count) {
+  TI_ERROR(
+      "Vulkan native packed dense field scatter requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_scatter_dense_field_packed_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n,
+    int lane_count) {
+  TI_ERROR(
+      "Vulkan native packed dense field scatter requires TI_WITH_VULKAN=ON.");
   return 0;
 }
 
@@ -13525,6 +15049,34 @@ std::size_t Program::vulkan_scatter_add_dense_field(SNode *src,
                                                     std::size_t src_n,
                                                     std::size_t dst_n) {
   TI_ERROR("Vulkan native dense field scatter-add requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_scatter_add_dense_field_packed(SNode *src,
+                                                           Ndarray *indices,
+                                                           SNode *dst,
+                                                           int value_type,
+                                                           std::size_t src_n,
+                                                           std::size_t dst_n,
+                                                           int lane_count) {
+  TI_ERROR(
+      "Vulkan native packed dense field scatter-add requires "
+      "TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_scatter_add_dense_field_packed_indices_field(
+    SNode *src,
+    SNode *indices,
+    SNode *dst,
+    int value_type,
+    std::size_t src_n,
+    std::size_t indices_n,
+    std::size_t dst_n,
+    int lane_count) {
+  TI_ERROR(
+      "Vulkan native packed dense field scatter-add requires "
+      "TI_WITH_VULKAN=ON.");
   return 0;
 }
 
