@@ -2,6 +2,7 @@
 #define TI_RUNTIME_HOST
 #include <taichi/program/context.h>
 #undef TI_RUNTIME_HOST
+#include "taichi/system/profiler.h"
 #include "fp16.h"
 
 namespace taichi::lang {
@@ -27,6 +28,7 @@ LaunchContextBuilder::LaunchContextBuilder(CallableBase *kernel)
       arg_buffer_size(kernel->args_size),
       args_type(kernel->args_type),
       result_buffer_size(kernel->ret_size) {
+  TI_COMPILE_PROFILER("launch_context_builder_ctor");
   ctx_->result_buffer = (uint64 *)result_buffer_.get();
   ctx_->arg_buffer = arg_buffer_.get();
 }

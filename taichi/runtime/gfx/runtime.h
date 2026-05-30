@@ -46,6 +46,33 @@ class SNodeTreeManager;
 
 class CompiledTaichiKernel {
  public:
+  struct RuntimeArrayArg {
+    std::vector<int> indices;
+    std::vector<int> data_ptr_indices;
+    std::vector<int> grad_ptr_indices;
+    uint32_t access{0};
+  };
+
+  enum class BufferBindingKind : uint8_t {
+    Skip,
+    ExtArrRw,
+    Args,
+    ArgPack,
+    RetsRw,
+    StaticRw,
+    StaticLookupRw,
+    ChunkedRwArray,
+  };
+
+  struct BufferBindingPlan {
+    BufferBindingKind kind{BufferBindingKind::Skip};
+    BufferInfo buffer;
+    int binding{-1};
+    uint32_t chunk_count{0};
+    DeviceAllocation *static_alloc{nullptr};
+    const std::vector<DeviceAllocation> *chunk_array{nullptr};
+  };
+
   struct Params {
     const TaichiKernelAttributes *ti_kernel_attribs{nullptr};
     std::vector<std::vector<uint32_t>> spirv_bins;
@@ -85,6 +112,15 @@ class CompiledTaichiKernel {
 
   Pipeline *get_pipeline(int i);
   ShaderResourceSet *get_cached_resource_set(int i);
+  const std::vector<RuntimeArrayArg> &runtime_array_args() const {
+    return runtime_array_args_;
+  }
+  const std::vector<std::vector<int>> &runtime_argpack_args() const {
+    return runtime_argpack_args_;
+  }
+  const std::vector<BufferBindingPlan> &buffer_binding_plan(int i) const {
+    return buffer_binding_plans_[i];
+  }
 
   void set_listgen_buffer(DeviceAllocation *listgen_buffer) {
     input_buffers_[BufferInfo(BufferType::ListGen)] = listgen_buffer;
@@ -120,6 +156,9 @@ class CompiledTaichiKernel {
 
   size_t args_buffer_size_{0};
   size_t ret_buffer_size_{0};
+  std::vector<RuntimeArrayArg> runtime_array_args_;
+  std::vector<std::vector<int>> runtime_argpack_args_;
+  std::vector<std::vector<BufferBindingPlan>> buffer_binding_plans_;
   std::vector<std::unique_ptr<Pipeline>> pipelines_;
   std::vector<std::unique_ptr<ShaderResourceSet>> cached_resource_sets_;
 };
@@ -164,6 +203,66 @@ class TI_DLL_EXPORT GfxRuntime {
   KernelHandle register_taichi_kernel(RegisterParams params);
 
   void launch_kernel(KernelHandle handle, LaunchContextBuilder &host_ctx);
+
+  struct GraphDispatch {
+    KernelHandle handle;
+    LaunchContextBuilder *host_ctx{nullptr};
+  };
+
+  struct GraphReplayExecutable {
+    using AllocationMap =
+        std::unordered_map<std::vector<int>,
+                           DeviceAllocation,
+                           hashing::Hasher<std::vector<int>>>;
+
+    struct PreparedDispatch {
+      CompiledTaichiKernel *kernel{nullptr};
+      LaunchContextBuilder *host_ctx{nullptr};
+      DeviceAllocation *args_buffer{nullptr};
+      const AllocationMap *any_arrays{nullptr};
+    };
+
+    struct CachedPreparedDispatch {
+      AllocationMap any_arrays;
+    };
+
+    struct Slot {
+      std::vector<std::unique_ptr<DeviceAllocationGuard>> args_buffers;
+      std::vector<size_t> args_buffer_sizes;
+      std::vector<std::unique_ptr<ShaderResourceSet>> resource_sets;
+      std::unique_ptr<CommandList> cmdlist;
+      StreamSemaphore completion;
+      std::vector<uint64_t> key;
+      bool recorded{false};
+    };
+
+    static constexpr size_t kReplaySlots = 8;
+
+    Device *device{nullptr};
+    std::vector<CachedPreparedDispatch> cached_prepared;
+    std::vector<uint64_t> cached_prepare_key;
+    std::vector<Slot> slots;
+    size_t next_slot{0};
+
+    void bind_device(Device *new_device);
+    bool refresh_prepared_cache(const std::vector<uint64_t> &key,
+                                std::vector<PreparedDispatch> &prepared);
+    Slot *acquire_ready_slot();
+    void reset();
+  };
+
+  struct GraphReplayState {
+    GraphReplayExecutable executable;
+    uint64_t attempts{0};
+    uint64_t recorded{0};
+    uint64_t replayed{0};
+    uint64_t fallbacks{0};
+
+    void reset();
+  };
+
+  bool try_launch_graph(const std::vector<GraphDispatch> &dispatches,
+                        const void *cache_key);
 
   void buffer_copy(DevicePtr dst, DevicePtr src, size_t size);
   void copy_image(DeviceAllocation dst,
@@ -297,6 +396,7 @@ class TI_DLL_EXPORT GfxRuntime {
   int resident_sparse_list_snode_id_{-1};
   std::vector<HashOverflowWatch> hash_overflow_watches_;
   bool hash_overflow_error_reported_{false};
+  std::unordered_map<const void *, GraphReplayState> graph_replay_states_;
   bool pending_dispatch_global_barrier_{false};
   std::vector<DeviceAllocation> pending_dispatch_barrier_buffers_;
   std::unordered_set<DeviceAllocationId> pending_dispatch_barrier_buffer_ids_;

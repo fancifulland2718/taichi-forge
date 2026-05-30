@@ -3929,7 +3929,16 @@ const CompiledKernelData &Program::compile_kernel(
   return ckd;
 }
 
-// P5.b — batch / parallel kernel compilation.
+const CompiledKernelData *Program::find_cached_kernel(
+    const CompileConfig &compile_config,
+    const std::string &kernel_key,
+    const Kernel &kernel_def) {
+  auto &mgr = program_impl_->get_kernel_compilation_manager();
+  return mgr.find_cached_kernel(kernel_key, kernel_def, compile_config.arch,
+                                compile_config.offline_cache);
+}
+
+// P5.b: batch / parallel kernel compilation.
 //
 // Design:
 // 1. Compilation is dispatched to a ParallelExecutor with
@@ -4098,6 +4107,11 @@ void Program::compile_kernels(
 void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,
                             LaunchContextBuilder &ctx) {
   program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data, ctx);
+  check_runtime_error_after_kernel_launch(compiled_kernel_data);
+}
+
+void Program::check_runtime_error_after_kernel_launch(
+    const CompiledKernelData &compiled_kernel_data) {
   const bool check_runtime_error =
       compile_config().debug || hash_snode_tree_count_ > 0;
   if (check_runtime_error && arch_uses_llvm(compiled_kernel_data.arch())) {

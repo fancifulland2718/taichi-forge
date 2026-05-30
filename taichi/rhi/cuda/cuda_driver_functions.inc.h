@@ -20,6 +20,7 @@ PER_CUDA_FUNCTION(context_set_limit, cuCtxSetLimit, int, std::size_t);
 
 // Stream management
 PER_CUDA_FUNCTION(stream_create, cuStreamCreate, void **, uint32);
+PER_CUDA_FUNCTION(stream_destroy, cuStreamDestroy_v2, void *);
 
 // Memory management
 PER_CUDA_FUNCTION(memcpy_host_to_device, cuMemcpyHtoD_v2, void *, void *, std::size_t);
@@ -49,9 +50,16 @@ PER_CUDA_FUNCTION(kernel_get_attribute, cuFuncGetAttribute, int *, uint32, void 
 PER_CUDA_FUNCTION(kernel_get_occupancy, cuOccupancyMaxActiveBlocksPerMultiprocessor, int *, void *, int, size_t);
 PER_CUDA_FUNCTION(kernel_set_attribute, cuFuncSetAttribute, void *, CUfunction_attribute_enum, int);
 
-
 // Stream management
 PER_CUDA_FUNCTION(stream_synchronize, cuStreamSynchronize, void *);
+PER_CUDA_FUNCTION(stream_begin_capture, cuStreamBeginCapture_v2, void *, CUstreamCaptureMode);
+PER_CUDA_FUNCTION(stream_end_capture, cuStreamEndCapture, void *, CUgraph *);
+
+// CUDA graph
+PER_CUDA_FUNCTION(graph_instantiate_with_flags, cuGraphInstantiateWithFlags, CUgraphExec *, CUgraph, unsigned long long);
+PER_CUDA_FUNCTION(graph_launch, cuGraphLaunch, CUgraphExec, void *);
+PER_CUDA_FUNCTION(graph_destroy, cuGraphDestroy, CUgraph);
+PER_CUDA_FUNCTION(graph_exec_destroy, cuGraphExecDestroy, CUgraphExec);
 
 // Event management
 PER_CUDA_FUNCTION(event_create, cuEventCreate, void **, uint32)

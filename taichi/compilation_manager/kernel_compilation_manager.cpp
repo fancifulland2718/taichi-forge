@@ -156,6 +156,21 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
   return result;
 }
 
+const CompiledKernelData *KernelCompilationManager::find_cached_kernel(
+    const std::string &kernel_key,
+    const Kernel &kernel_def,
+    Arch arch,
+    bool offline_cache) {
+  if (kernel_key.empty()) {
+    return nullptr;
+  }
+  const auto cache_mode =
+      offline_cache && kernel_def.ir_is_ast() ? CacheData::MemAndDiskCache
+                                             : CacheData::MemCache;
+  std::lock_guard<std::mutex> lock(cache_mutex_);
+  return try_load_cached_kernel_locked(kernel_def, kernel_key, arch, cache_mode);
+}
+
 void KernelCompilationManager::dump() {
   // P5.a — take a consistent snapshot of the in-memory caches before
   // touching disk. `dump()` is typically called at Program shutdown from

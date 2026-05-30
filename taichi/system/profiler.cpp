@@ -263,6 +263,12 @@ ScopedProfiler::~ScopedProfiler() {
   }
 }
 
+ConditionalScopedProfiler::ConditionalScopedProfiler(const char *name) {
+  if (Profiling::is_tracing_enabled()) {
+    profiler_ = std::make_unique<ScopedProfiler>(std::string(name));
+  }
+}
+
 ConditionalScopedProfiler::ConditionalScopedProfiler(std::string name) {
   if (Profiling::is_tracing_enabled()) {
     profiler_ = std::make_unique<ScopedProfiler>(std::move(name));

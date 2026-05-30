@@ -9,8 +9,313 @@ from taichi_forge.lang._texture import Texture
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.matrix import Matrix, MatrixType
 from taichi_forge.types.texture_type import FORMAT2TY_CH, TY_CH2FORMAT
+from taichi_forge.graph._native import compile_native_graph_node
 
 ArgKind = _ti_core.ArgKind
+
+
+class _NativeReplayExecutable:
+    def __init__(self, nodes):
+        self._executables = tuple(node.executable for node in nodes)
+
+    def prewarm(self):
+        for executable in self._executables:
+            executable.prewarm()
+        return self
+
+    def run(self, context):
+        for executable in self._executables:
+            executable.run()
+
+
+class _CGraphJITExecutable:
+    def __init__(self, compiled_graph):
+        self.compiled_graph = compiled_graph
+        self._jit_cache = _ti_core.CompiledGraphJITCache()
+
+    def prewarm(self):
+        return self
+
+    def run(self, context):
+        self.compiled_graph.jit_run_cached(
+            context.compile_config(), context.flattened_args(), self._jit_cache
+        )
+
+
+class _GraphRunContext:
+    _empty_args = {}
+
+    def __init__(self):
+        self._args = None
+        self._flattened_args = None
+        self._compile_config = None
+        self._last_arg_signature = None
+        self._last_flattened = None
+
+    def begin(self, args):
+        self._args = args
+        self._flattened_args = None
+
+    def runtime_args(self):
+        return self._args
+
+    def compile_config(self):
+        if self._compile_config is None:
+            self._compile_config = impl.get_runtime().prog.config()
+        return self._compile_config
+
+    def flattened_args(self):
+        if self._flattened_args is None:
+            self._flattened_args = self._flatten_runtime_args(self._args)
+        return self._flattened_args
+
+    def _flatten_runtime_args(self, args):
+        if not args:
+            return self._empty_args
+
+        signature = []
+        flattened = {}
+        dynamic_items = []
+        for k, v in args.items():
+            if isinstance(v, Ndarray):
+                signature.append((k, "ndarray", id(v), id(v.arr)))
+                flattened[k] = v.arr
+            elif isinstance(v, Texture):
+                signature.append((k, "texture", id(v), id(v.tex)))
+                flattened[k] = v.tex
+            elif isinstance(v, Matrix):
+                signature.append((k, "matrix"))
+                dynamic_items.append((k, v.entries))
+            elif isinstance(v, (int, float)):
+                signature.append((k, "scalar", type(v)))
+                dynamic_items.append((k, v))
+            else:
+                raise TaichiRuntimeError(
+                    f"Only python int, float, ti.Matrix and ti.Ndarray are supported as runtime arguments but got {type(v)}"
+                )
+
+        signature = tuple(signature)
+        if signature == self._last_arg_signature:
+            flattened = self._last_flattened
+        else:
+            self._last_arg_signature = signature
+            self._last_flattened = flattened
+        for k, v in dynamic_items:
+            flattened[k] = v
+        return flattened
+
+
+class _CompiledCGraphNode:
+    needs_runtime_args = True
+
+    def __init__(self, compiled_graph, dispatch_count):
+        self.compiled_graph = compiled_graph
+        self.dispatch_count = dispatch_count
+        self._jit_cache = _ti_core.CompiledGraphJITCache()
+
+    def run(self, context):
+        self.compiled_graph.jit_run_cached(
+            context.compile_config(), context.flattened_args(), self._jit_cache
+        )
+
+    @property
+    def debug_info(self):
+        return {"kind": "cgraph", "dispatch_count": self.dispatch_count}
+
+
+class _CompiledNativeGraphNode:
+    needs_runtime_args = False
+
+    def __init__(self, executable):
+        self.executable = executable
+
+    def run(self, context):
+        self.executable.run()
+
+    @property
+    def debug_info(self):
+        return self.executable.debug_info
+
+
+class _GraphSpec:
+    def __init__(self, nodes, aot_graph_builder=None, aot_compiled_graph=None):
+        self.nodes = tuple(nodes)
+        self._aot_graph_builder = aot_graph_builder
+        self._aot_compiled_graph = aot_compiled_graph
+        self.needs_runtime_args = any(n.needs_runtime_args for n in self.nodes)
+        self.dispatch_count = sum(
+            getattr(n, "dispatch_count", 0) for n in self.nodes
+        )
+        self.native_count = sum(
+            isinstance(n, _CompiledNativeGraphNode) for n in self.nodes
+        )
+        self.repeat_count = 0
+
+    def instantiate(self, key=None):
+        if key is None:
+            key = self.instance_key()
+        return _GraphInstance(self, key)
+
+    def instance_key(self):
+        runtime = impl.get_runtime()
+        return (impl.current_cfg().arch, id(runtime.prog))
+
+    def compiled_graph(self):
+        if self.native_count:
+            raise TaichiRuntimeError(
+                "Graphs containing native nodes cannot be serialized as AOT CGraph yet"
+            )
+        if self._aot_compiled_graph is None:
+            if self._aot_graph_builder is None:
+                raise TaichiRuntimeError("This graph does not have an AOT CGraph")
+            self._aot_compiled_graph = self._aot_graph_builder.compile()
+        return self._aot_compiled_graph
+
+    @property
+    def debug_info(self):
+        info = {
+            "node_count": len(self.nodes),
+            "dispatch_count": self.dispatch_count,
+            "native_count": self.native_count,
+            "repeat_count": self.repeat_count,
+            "nodes": [n.debug_info for n in self.nodes],
+        }
+        if hasattr(self._aot_graph_builder, "item_count"):
+            info["aot_item_count"] = self._aot_graph_builder.item_count
+        return info
+
+
+class _GraphExecutable:
+    def __init__(self, spec):
+        self.spec = spec
+        self._context = _GraphRunContext() if spec.needs_runtime_args else None
+
+    def run(self, args):
+        if self._context is not None:
+            self._context.begin(args)
+        for node in self.spec.nodes:
+            node.run(self._context)
+
+
+class _GraphInstance:
+    def __init__(self, spec, key):
+        self.spec = spec
+        self.key = key
+        self._executable = None
+        self._native_nodes = None
+        self._backend_executable = None
+        self._backend_context = None
+
+        if len(spec.nodes) == 1 and isinstance(spec.nodes[0], _CompiledCGraphNode):
+            node = spec.nodes[0]
+            self._install_backend_executable(
+                _CGraphJITExecutable(node.compiled_graph), "single_cgraph"
+            )
+        elif not spec.needs_runtime_args:
+            self._native_nodes = spec.nodes
+            self._kind = "native_only"
+            self._set_run_impl(self._run_native_only)
+        else:
+            self._executable = _GraphExecutable(spec)
+            self._kind = "dispatch_loop"
+            self._set_run_impl(self._run_general)
+
+        self._maybe_install_native_replay()
+
+    @property
+    def run_impl(self):
+        return self._run_impl
+
+    def _set_run_impl(self, run_impl):
+        self._run_impl = run_impl
+
+    def _maybe_install_native_replay(self):
+        arch = impl.current_cfg().arch
+        if arch not in (_ti_core.Arch.cuda, _ti_core.Arch.x64, _ti_core.Arch.arm64):
+            return
+        if self.spec.native_count != len(self.spec.nodes):
+            return
+        if self.spec.needs_runtime_args:
+            return
+        kind = "cuda_native_replay" if arch == _ti_core.Arch.cuda else "cpu_native_replay"
+        self._install_backend_executable(
+            _NativeReplayExecutable(self.spec.nodes),
+            kind,
+        )
+
+    def _install_backend_executable(self, executable, kind):
+        self._backend_executable = executable
+        self._backend_context = (
+            _GraphRunContext() if self.spec.needs_runtime_args else None
+        )
+        self._kind = kind
+        self._set_run_impl(self._run_backend)
+        return self
+
+    def prewarm(self):
+        if self._backend_executable is not None:
+            prewarm = getattr(self._backend_executable, "prewarm", None)
+            if prewarm is not None:
+                prewarm()
+            return self
+
+        for node in self.spec.nodes:
+            if isinstance(node, _CompiledNativeGraphNode):
+                node.executable.prewarm()
+        return self
+
+    def _run_backend(self, args):
+        if self._backend_executable is None:
+            return self._run_general(args)
+        if self._backend_context is not None:
+            self._backend_context.begin(args)
+        self._backend_executable.run(self._backend_context)
+
+    def _run_native_only(self, args):
+        for node in self._native_nodes:
+            node.run(None)
+
+    def _run_general(self, args):
+        self._executable.run(args)
+
+    @property
+    def debug_info(self):
+        return {"kind": self._kind}
+
+
+class _AOTGraphBuilderPlan:
+    def __init__(self):
+        self._items = []
+
+    def dispatch(self, kernel_cpp, args):
+        self._items.append(("dispatch", kernel_cpp, args))
+
+    def append(self, node):
+        if self._items and self._items[-1][0] == "append" and self._items[-1][1] is node:
+            kind, prev_node, count = self._items[-1]
+            self._items[-1] = (kind, prev_node, count + 1)
+        else:
+            self._items.append(("append", node, 1))
+
+    def compile(self):
+        builder = _ti_core.GraphBuilder()
+        for item in self._items:
+            if item[0] == "dispatch":
+                _, kernel_cpp, args = item
+                builder.dispatch(kernel_cpp, args)
+            elif item[0] == "append":
+                _, node, count = item
+                seq = builder.create_sequential()
+                node._dispatch_to(seq)
+                for _ in range(count):
+                    builder.seq().append(seq)
+            else:
+                raise TaichiRuntimeError(f"Unknown AOT graph item kind {item[0]}")
+        return builder.compile()
+
+    @property
+    def item_count(self):
+        return len(self._items)
 
 
 def gen_cpp_kernel(kernel_fn, args):
@@ -35,59 +340,121 @@ def flatten_args(args):
 
 
 class Sequential:
-    def __init__(self, seq):
-        self.seq_ = seq
+    def __init__(self):
+        self._dispatch_count = 0
+        self._dispatches = []
 
     def dispatch(self, kernel_fn, *args):
         kernel_cpp = gen_cpp_kernel(kernel_fn, args)
         unzipped_args = flatten_args(args)
-        self.seq_.dispatch(kernel_cpp, unzipped_args)
+        self._dispatches.append((kernel_cpp, unzipped_args))
+        self._dispatch_count += 1
+
+    def _dispatch_to(self, builder):
+        for kernel_cpp, args in self._dispatches:
+            builder.dispatch(kernel_cpp, args)
 
 
 class GraphBuilder:
     def __init__(self):
-        self._graph_builder = _ti_core.GraphBuilder()
+        self._aot_graph_plan = _AOTGraphBuilderPlan()
+        self._runtime_graph_builder = _ti_core.GraphBuilder()
+        self._dispatch_count = 0
+        self._nodes = []
 
     def dispatch(self, kernel_fn, *args):
         kernel_cpp = gen_cpp_kernel(kernel_fn, args)
         unzipped_args = flatten_args(args)
-        self._graph_builder.dispatch(kernel_cpp, unzipped_args)
+        self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args)
+        self._ensure_runtime_graph_builder().dispatch(kernel_cpp, unzipped_args)
+        self._dispatch_count += 1
 
     def create_sequential(self):
-        return Sequential(self._graph_builder.create_sequential())
+        return Sequential()
 
     def append(self, node):
         # TODO: support appending dispatch node as well.
         assert isinstance(node, Sequential)
-        self._graph_builder.seq().append(node.seq_)
+        self._aot_graph_plan.append(node)
+        node._dispatch_to(self._runtime_graph_builder)
+        self._dispatch_count += node._dispatch_count
+
+    def _ensure_runtime_graph_builder(self):
+        return self._runtime_graph_builder
+
+    def _flush_graph_builder(self):
+        if self._dispatch_count == 0:
+            return
+        self._nodes.append(
+            _CompiledCGraphNode(
+                self._runtime_graph_builder.compile(),
+                self._dispatch_count,
+            )
+        )
+        self._runtime_graph_builder = _ti_core.GraphBuilder()
+        self._dispatch_count = 0
+
+    def _append_native(self, node, *, prewarm=False):
+        self._flush_graph_builder()
+        executable = compile_native_graph_node(node)
+        if prewarm:
+            executable.prewarm()
+        self._nodes.append(_CompiledNativeGraphNode(executable))
+        return self
 
     def compile(self):
-        return Graph(self._graph_builder.compile())
+        self._flush_graph_builder()
+        if not self._nodes:
+            return Graph(
+                _CompiledCGraphNode(
+                    self._ensure_runtime_graph_builder().compile(),
+                    0,
+                )
+            )
+        return Graph(_GraphSpec(self._nodes, aot_graph_builder=self._aot_graph_plan))
 
 
 class Graph:
     def __init__(self, compiled_graph) -> None:
-        self._compiled_graph = compiled_graph
+        if isinstance(compiled_graph, _GraphSpec):
+            self._spec = compiled_graph
+        elif isinstance(compiled_graph, _CompiledCGraphNode):
+            self._spec = _GraphSpec(
+                [compiled_graph], aot_compiled_graph=compiled_graph.compiled_graph
+            )
+        else:
+            node = _CompiledCGraphNode(compiled_graph, 0)
+            self._spec = _GraphSpec([node], aot_compiled_graph=compiled_graph)
+        self._instances = {}
+        self._instance = self._instance_for_current_runtime()
+        self._run_impl = self._instance.run_impl
 
     def run(self, args):
-        # Support native python numerical types (int, float), Ndarray.
-        # Taichi Matrix types are flattened into (int, float) arrays.
-        # TODO diminish the flatten behavior when Matrix becomes a Taichi native type.
-        flattened = {}
-        for k, v in args.items():
-            if isinstance(v, Ndarray):
-                flattened[k] = v.arr
-            elif isinstance(v, Texture):
-                flattened[k] = v.tex
-            elif isinstance(v, Matrix):
-                flattened[k] = v.entries
-            elif isinstance(v, (int, float)):
-                flattened[k] = v
-            else:
-                raise TaichiRuntimeError(
-                    f"Only python int, float, ti.Matrix and ti.Ndarray are supported as runtime arguments but got {type(v)}"
-                )
-        self._compiled_graph.jit_run(impl.get_runtime().prog.config(), flattened)
+        self._run_impl(args)
+
+    def _instance_for_current_runtime(self):
+        key = self._spec.instance_key()
+        instance = self._instances.get(key)
+        if instance is None:
+            instance = self._spec.instantiate(key)
+            self._instances[key] = instance
+        return instance
+
+    def _prewarm(self):
+        self._instance.prewarm()
+        return self
+
+    @property
+    def _debug_info(self):
+        return self._spec.debug_info
+
+    @property
+    def _instance_debug_info(self):
+        return self._instance.debug_info
+
+    @property
+    def _compiled_graph(self):
+        return self._spec.compiled_graph()
 
 
 def _deprecate_arg_args(kwargs: Dict[str, Any]):

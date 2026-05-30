@@ -5,6 +5,9 @@
 
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/runtime/llvm/kernel_launcher.h"
+#define TI_RUNTIME_HOST
+#include "taichi/program/context.h"
+#undef TI_RUNTIME_HOST
 
 namespace taichi::lang {
 namespace cuda {
@@ -32,9 +35,21 @@ class KernelLauncher : public LLVM::KernelLauncher {
  public:
   using Base::Base;
 
+  struct GraphLaunchPacket {
+    Handle handle;
+    RuntimeContext context;
+    void *device_arg_buffer{nullptr};
+    std::size_t arg_buffer_size{0};
+  };
+
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
   Handle register_llvm_kernel(
       const LLVM::CompiledKernelData &compiled) override;
+  bool prepare_cuda_graph_launch(Handle handle,
+                                 LaunchContextBuilder &ctx,
+                                 GraphLaunchPacket &packet,
+                                 void *stream);
+  void capture_cuda_graph_launch(const GraphLaunchPacket &packet);
 
  private:
   bool on_cuda_device(void *ptr);

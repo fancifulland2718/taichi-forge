@@ -1,6 +1,9 @@
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 
+#include <cstdint>
+#include <unordered_map>
+
 namespace taichi::lang {
 namespace cuda {
 
@@ -101,10 +104,110 @@ void KernelLauncher::invalidate_sparse_list_cache(
   }
 }
 
+bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
+                                               LaunchContextBuilder &ctx,
+                                               GraphLaunchPacket &packet,
+                                               void *stream) {
+  TI_ASSERT(handle.get_launch_id() < contexts_.size());
+  const auto &launcher_ctx = contexts_[handle.get_launch_id()];
+  const auto &parameters = launcher_ctx.parameters;
+  const auto &offloaded_tasks = launcher_ctx.offloaded_tasks;
+  for (const auto &task : offloaded_tasks) {
+    if (task.sparse_list_op != OffloadedTask::kSparseListOpNone ||
+        task.may_mutate_sparse_topology) {
+      return false;
+    }
+  }
+  if (ctx.result_buffer_size > 0 || ctx.arg_buffer_size == 0) {
+    return false;
+  }
+
+  auto *executor = get_runtime_executor();
+  ctx.get_context().runtime = executor->get_llvm_runtime();
+  for (int i = 0; i < (int)parameters.size(); i++) {
+    const auto &kv = parameters[i];
+    const auto &key = kv.first;
+    const auto &parameter = kv.second;
+    if (parameter.is_array) {
+      const auto arr_sz = ctx.array_runtime_sizes[key];
+      if (arr_sz == 0) {
+        continue;
+      }
+      std::vector<int> data_ptr_idx = key;
+      data_ptr_idx.push_back(TypeFactory::DATA_PTR_POS_IN_NDARRAY);
+      auto data_ptr = ctx.array_ptrs[data_ptr_idx];
+      std::vector<int> grad_ptr_idx = key;
+      grad_ptr_idx.push_back(TypeFactory::GRAD_PTR_POS_IN_NDARRAY);
+      auto grad_ptr = ctx.array_ptrs[grad_ptr_idx];
+      if (ctx.device_allocation_type[key] ==
+          LaunchContextBuilder::DevAllocType::kNone) {
+        if (!on_cuda_device(data_ptr)) {
+          return false;
+        }
+        ctx.set_ndarray_ptrs(key, reinterpret_cast<uint64>(data_ptr),
+                             reinterpret_cast<uint64>(grad_ptr));
+      } else if (ctx.device_allocation_type[key] ==
+                 LaunchContextBuilder::DevAllocType::kNdarray) {
+        DeviceAllocation *ptr = static_cast<DeviceAllocation *>(data_ptr);
+        auto *data_device_ptr = executor->get_device_alloc_info_ptr(*ptr);
+        void *grad_device_ptr = nullptr;
+        if (grad_ptr != nullptr) {
+          ptr = static_cast<DeviceAllocation *>(grad_ptr);
+          grad_device_ptr = executor->get_device_alloc_info_ptr(*ptr);
+        }
+        ctx.set_ndarray_ptrs(key, reinterpret_cast<uint64>(data_device_ptr),
+                             reinterpret_cast<uint64>(grad_device_ptr));
+      } else {
+        return false;
+      }
+    } else if (parameter.is_argpack) {
+      std::vector<int> data_ptr_idx = key;
+      data_ptr_idx.push_back(TypeFactory::DATA_PTR_POS_IN_ARGPACK);
+      auto *argpack = ctx.argpack_ptrs[key];
+      auto argpack_ptr = argpack->get_device_allocation();
+      auto *device_ptr = executor->get_device_alloc_info_ptr(argpack_ptr);
+      if (key.size() == 1) {
+        ctx.set_argpack_ptr(key, reinterpret_cast<uint64>(device_ptr));
+      } else {
+        auto key_parent = key;
+        key_parent.pop_back();
+        auto *argpack_parent = ctx.argpack_ptrs[key_parent];
+        argpack_parent->set_arg_nested_argpack_ptr(
+            key.back(), reinterpret_cast<uint64>(device_ptr));
+      }
+    }
+  }
+
+  packet.handle = handle;
+  packet.arg_buffer_size = ctx.arg_buffer_size;
+  packet.context = ctx.get_context();
+  CUDADriver::get_instance().malloc_async(&packet.device_arg_buffer,
+                                          packet.arg_buffer_size, stream);
+  CUDADriver::get_instance().memcpy_host_to_device_async(
+      packet.device_arg_buffer, packet.context.arg_buffer,
+      packet.arg_buffer_size, stream);
+  packet.context.arg_buffer = static_cast<char *>(packet.device_arg_buffer);
+  return true;
+}
+
+void KernelLauncher::capture_cuda_graph_launch(
+    const GraphLaunchPacket &packet) {
+  TI_ASSERT(packet.handle.get_launch_id() < contexts_.size());
+  const auto &launcher_ctx = contexts_[packet.handle.get_launch_id()];
+  auto *cuda_module = launcher_ctx.jit_module;
+  const auto &offloaded_tasks = launcher_ctx.offloaded_tasks;
+  for (auto task : offloaded_tasks) {
+    TI_TRACE("Capturing kernel {}<<<{}, {}>>>", task.name, task.grid_dim,
+             task.block_dim);
+    cuda_module->launch(task.name, task.grid_dim, task.block_dim, 0,
+                        {const_cast<RuntimeContext *>(&packet.context)}, {});
+  }
+}
+
 void KernelLauncher::launch_llvm_kernel(Handle handle,
                                         LaunchContextBuilder &ctx) {
   TI_ASSERT(handle.get_launch_id() < contexts_.size());
-  auto launcher_ctx = contexts_[handle.get_launch_id()];
+  const auto &launcher_ctx = contexts_[handle.get_launch_id()];
   auto *executor = get_runtime_executor();
   listgen_reuse_adaptive_ =
       executor->get_config().cuda_listgen_reuse_adaptive;
@@ -141,7 +244,6 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
       (void **)&device_result_buffer,
       std::max(ctx.result_buffer_size, sizeof(uint64)), nullptr);
   ctx.get_context().runtime = executor->get_llvm_runtime();
-
   for (int i = 0; i < (int)parameters.size(); i++) {
     const auto &kv = parameters[i];
     const auto &key = kv.first;
@@ -171,8 +273,9 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
           device_ptrs[data_ptr_idx] = data_ptr;
           device_ptrs[grad_ptr_idx] = grad_ptr;
         } else {
-          DeviceAllocation devalloc = executor->allocate_memory_on_device(
-              arr_sz, (uint64 *)device_result_buffer);
+          DeviceAllocation devalloc =
+              executor->allocate_memory_on_device(
+                  arr_sz, (uint64 *)device_result_buffer);
           device_ptrs[data_ptr_idx] =
               executor->get_device_alloc_info_ptr(devalloc);
           transfers[data_ptr_idx] = {data_ptr, devalloc};
@@ -233,6 +336,7 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   if (transfers.size() > 0) {
     CUDADriver::get_instance().stream_synchronize(nullptr);
   }
+  char *host_arg_buffer = ctx.get_context().arg_buffer;
   char *host_result_buffer = (char *)ctx.get_context().result_buffer;
   if (ctx.result_buffer_size > 0) {
     ctx.get_context().result_buffer = (uint64 *)device_result_buffer;
@@ -242,7 +346,7 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     CUDADriver::get_instance().malloc_async((void **)&device_arg_buffer,
                                             ctx.arg_buffer_size, nullptr);
     CUDADriver::get_instance().memcpy_host_to_device_async(
-        device_arg_buffer, ctx.get_context().arg_buffer, ctx.arg_buffer_size,
+        device_arg_buffer, host_arg_buffer, ctx.arg_buffer_size,
         nullptr);
     ctx.get_context().arg_buffer = device_arg_buffer;
   }
@@ -270,6 +374,8 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
         nullptr);
   }
   CUDADriver::get_instance().mem_free_async(device_result_buffer, nullptr);
+  ctx.get_context().arg_buffer = host_arg_buffer;
+  ctx.get_context().result_buffer = (uint64 *)host_result_buffer;
   // copy data back to host
   if (transfers.size() > 0) {
     CUDADriver::get_instance().stream_synchronize(nullptr);

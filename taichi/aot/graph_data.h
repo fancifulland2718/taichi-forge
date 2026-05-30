@@ -2,6 +2,7 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include "taichi/ir/type.h"
 #include "taichi/program/callable.h"
 #include "taichi/aot/module_data.h"
@@ -19,8 +20,10 @@ class Ndarray;
 class Texture;
 class Matrix;
 class Kernel;
+class CompiledKernelData;
 
 namespace aot {
+
 // Currently only scalar, matrix and ndarray are supported.
 enum class ArgKind {
   kScalar,
@@ -53,7 +56,8 @@ struct Arg {
         name(""),
         dtype_id(PrimitiveTypeID::unknown),
         field_dim(0),
-        element_shape({}) {
+        element_shape({}),
+        num_channels(0) {
   }
 
   explicit Arg(ArgKind tag,
@@ -66,7 +70,8 @@ struct Arg {
         name(name),
         dtype_id(dtype_id),
         field_dim(field_dim),
-        element_shape(element_shape) {
+        element_shape(element_shape),
+        num_channels(0) {
   }
 
   // Python/C++ interface that's user facing.
@@ -76,6 +81,8 @@ struct Arg {
                size_t dim = 0,
                const std::vector<int> &element_shape = {})
       : tag(tag), name(name), element_shape(element_shape) {
+    field_dim = 0;
+    num_channels = 0;
     if (tag == ArgKind::kTexture || tag == ArgKind::kRWTexture) {
       num_channels = dim;
     } else {
@@ -91,7 +98,8 @@ struct Arg {
   bool operator==(const Arg &other) const {
     return tag == other.tag && name == other.name &&
            field_dim == other.field_dim && dtype_id == other.dtype_id &&
-           element_shape == other.element_shape;
+           element_shape == other.element_shape &&
+           num_channels == other.num_channels;
   }
 
   bool operator!=(const Arg &other) const {
@@ -162,17 +170,70 @@ struct CompiledDispatch {
   TI_IO_DEF(kernel_name, symbolic_args);
 };
 
+struct CompiledGraphJITCachedKernel {
+  std::string kernel_key;
+  const CompiledKernelData *compiled_kernel_data{nullptr};
+  int llvm_launch_id{-1};
+};
+
+struct CompiledGraphRuntimeArgPlan {
+  ArgKind tag{ArgKind::kUnknown};
+  std::string name;
+  std::vector<int> arg_id;
+  PrimitiveTypeID dtype_id{PrimitiveTypeID::unknown};
+  size_t field_dim{0};
+  int type_size{0};
+  int arg_buffer_offset{-1};
+  std::vector<int> element_shape;
+  std::vector<int> ndarray_data_ptr_key;
+  std::vector<int> ndarray_grad_ptr_key;
+  std::vector<int> ndarray_shape_offsets;
+};
+
+struct CompiledGraphDispatchRuntimePlan {
+  bool cpu_fast_path{false};
+  std::vector<CompiledGraphRuntimeArgPlan> args;
+};
+
+struct CompiledGraphJITCache {
+  CompiledGraphJITCache() = default;
+  ~CompiledGraphJITCache();
+  CompiledGraphJITCache(const CompiledGraphJITCache &) = delete;
+  CompiledGraphJITCache &operator=(const CompiledGraphJITCache &) = delete;
+
+  std::vector<CompiledGraphJITCachedKernel> kernels;
+  std::vector<CompiledGraphDispatchRuntimePlan> runtime_arg_plans;
+  void *cuda_graph_state{nullptr};
+};
+
 struct TI_DLL_EXPORT CompiledGraph {
   std::vector<CompiledDispatch> dispatches;
   std::unordered_map<std::string, aot::Arg> args;
 
+  CompiledGraph() = default;
+  explicit CompiledGraph(std::vector<CompiledDispatch> compiled_dispatches)
+      : dispatches(std::move(compiled_dispatches)) {
+  }
+  CompiledGraph(std::vector<CompiledDispatch> compiled_dispatches,
+                std::unordered_map<std::string, aot::Arg> graph_args)
+      : dispatches(std::move(compiled_dispatches)),
+        args(std::move(graph_args)) {
+  }
+  CompiledGraph(const CompiledGraph &) = default;
+  CompiledGraph &operator=(const CompiledGraph &) = default;
+  CompiledGraph(CompiledGraph &&) = default;
+  CompiledGraph &operator=(CompiledGraph &&) = default;
+
   void run(const std::unordered_map<std::string, IValue> &args) const;
   void jit_run(const CompileConfig &compile_config,
                const std::unordered_map<std::string, IValue> &args) const;
+  void jit_run_cached(const CompileConfig &compile_config,
+                      const std::unordered_map<std::string, IValue> &args,
+                      CompiledGraphJITCache &cache) const;
 
   TI_IO_DEF(dispatches);
 
- private:
+  // Internal helper shared by graph replay backends.
   static void init_runtime_context(
       const std::vector<Arg> &paramter_list,
       const std::unordered_map<std::string, IValue> &args,

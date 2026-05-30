@@ -17,6 +17,13 @@ class KernelLauncher : public lang::KernelLauncher {
   void launch_kernel(const lang::CompiledKernelData &compiled_kernel_data,
                      LaunchContextBuilder &ctx) override;
 
+  Handle get_or_register_kernel(
+      const lang::CompiledKernelData &compiled_kernel_data);
+
+  GfxRuntime *runtime() const {
+    return config_.gfx_runtime_;
+  }
+
  private:
   Handle register_kernel(const lang::CompiledKernelData &compiled_kernel_data);
 

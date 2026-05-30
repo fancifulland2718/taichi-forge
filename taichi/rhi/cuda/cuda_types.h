@@ -23,6 +23,8 @@ using CUexternalMemory = void *;
 using CUexternalSemaphore = void *;
 using CUsurfObject = uint64_t;
 using CUstream = void *;
+using CUgraph = void *;
+using CUgraphExec = void *;
 using CUdeviceptr = void *;
 using CUmipmappedArray = void *;
 using CUarray = void *;
@@ -66,6 +68,12 @@ typedef enum CUfunction_attribute_enum {
   CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT = 9,
   CU_FUNC_ATTRIBUTE_MAX
 } CUfunction_attribute;
+
+typedef enum CUstreamCaptureMode_enum {
+  CU_STREAM_CAPTURE_MODE_GLOBAL = 0,
+  CU_STREAM_CAPTURE_MODE_THREAD_LOCAL = 1,
+  CU_STREAM_CAPTURE_MODE_RELAXED = 2
+} CUstreamCaptureMode;
 
 /**
  * 3D array descriptor

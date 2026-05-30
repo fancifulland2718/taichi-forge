@@ -66,6 +66,14 @@ class KernelCompilationManager final {
                                             const DeviceCapabilityConfig &caps,
                                             const Kernel &kernel_def);
 
+  // Return an already materialized in-memory kernel for a known specialization
+  // key. This intentionally does not load from disk or compile; callers that
+  // miss must fall back to load_or_compile().
+  const CompiledKernelData *find_cached_kernel(const std::string &kernel_key,
+                                               const Kernel &kernel_def,
+                                               Arch arch,
+                                               bool offline_cache);
+
   // Dump the cached data in memory to disk
   void dump();
 

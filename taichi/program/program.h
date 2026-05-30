@@ -140,6 +140,11 @@ class TI_DLL_EXPORT Program {
                                            const DeviceCapabilityConfig &caps,
                                            const Kernel &kernel_def);
 
+  const CompiledKernelData *find_cached_kernel(
+      const CompileConfig &compile_config,
+      const std::string &kernel_key,
+      const Kernel &kernel_def);
+
   // P5.b — parallel batch compilation. Compiles every kernel in `kernels`
   // through the shared KernelCompilationManager, dispatching to
   // `compile_config.num_compile_threads` worker threads. Kernel order is
@@ -159,6 +164,13 @@ class TI_DLL_EXPORT Program {
 
   void launch_kernel(const CompiledKernelData &compiled_kernel_data,
                      LaunchContextBuilder &ctx);
+
+  void check_runtime_error_after_kernel_launch(
+      const CompiledKernelData &compiled_kernel_data);
+
+  KernelLauncher &get_kernel_launcher() {
+    return program_impl_->get_kernel_launcher();
+  }
 
   DeviceCapabilityConfig get_device_caps() {
     return program_impl_->get_device_caps();

@@ -44,6 +44,7 @@ class ScopedProfiler {
 // explicitly enabled by TI_COMPILE_PROFILE or ti.compile_profile().
 class ConditionalScopedProfiler {
  public:
+  explicit ConditionalScopedProfiler(const char *name);
   explicit ConditionalScopedProfiler(std::string name);
 
  private:

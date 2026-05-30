@@ -12,15 +12,21 @@ void KernelLauncher::launch_kernel(
     const lang::CompiledKernelData &compiled_kernel_data,
     LaunchContextBuilder &ctx) {
   TI_AUTO_PROF;
-  KernelLauncher::Handle handle;
-  {
-    TI_PROFILER("register_gfx_kernel");
-    handle = register_kernel(compiled_kernel_data);
-  }
+  KernelLauncher::Handle handle = get_or_register_kernel(compiled_kernel_data);
   {
     TI_PROFILER("gfx_runtime.launch_kernel");
     config_.gfx_runtime_->launch_kernel(handle, ctx);
   }
+}
+
+KernelLauncher::Handle KernelLauncher::get_or_register_kernel(
+    const lang::CompiledKernelData &compiled_kernel_data) {
+  const auto &cached_handle = compiled_kernel_data.get_handle();
+  if (cached_handle) {
+    return *cached_handle;
+  }
+  TI_PROFILER("register_gfx_kernel");
+  return register_kernel(compiled_kernel_data);
 }
 
 KernelLauncher::Handle KernelLauncher::register_kernel(

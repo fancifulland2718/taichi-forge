@@ -93,6 +93,7 @@ from taichi_forge.lang.matrix import Matrix, MatrixField
 from taichi_forge.lang.misc import arm64, cuda, vulkan, x64
 from taichi_forge.lang.runtime_ops import sync
 from taichi_forge.lang.simt import subgroup
+from taichi_forge.graph._native import NativeGraphExecutable, NativeGraphNode
 from taichi_forge.types.primitive_types import f32, f64, i32, i64, u32, u64
 
 _CUDA_CUB_SORT_METHODS = {"cuda_cub_native", "cuda_cub_split32", "cuda_cub_u32"}
@@ -1848,6 +1849,9 @@ class PrimitiveSequence:
         self._calls.append(_PrimitiveSequenceCall(kind, func, args, kwargs, workspace))
         return self
 
+    def _as_graph_native_node(self):
+        return _PrimitiveSequenceGraphNode(self)
+
     def _capture_fused_plan(self, prog, *, invoke):
         self._fused_plan = _try_build_vulkan_indexed_transform_sequence_plan(
             self._calls, prog, invoke=invoke
@@ -2010,6 +2014,37 @@ class PrimitiveSequence:
 
 def primitive_sequence():
     return PrimitiveSequence()
+
+
+class _PrimitiveSequenceGraphExecutable(NativeGraphExecutable):
+    def __init__(self, sequence):
+        self.sequence = sequence
+
+    def prewarm(self):
+        self.sequence.prewarm()
+        return self
+
+    def run(self):
+        self.sequence.run()
+
+    @property
+    def debug_info(self):
+        return {
+            "kind": "primitive_sequence",
+            "call_count": self.sequence.call_count,
+            "direct_plan_count": self.sequence.direct_plan_count,
+            "fused_plan_count": self.sequence.fused_plan_count,
+            "fused_plan_method": self.sequence.fused_plan_method,
+            "workspace_bytes_peak": self.sequence.workspace_bytes_peak,
+        }
+
+
+class _PrimitiveSequenceGraphNode(NativeGraphNode):
+    def __init__(self, sequence):
+        self.sequence = sequence
+
+    def compile(self):
+        return _PrimitiveSequenceGraphExecutable(self.sequence)
 
 def _struct_tensor_member_components(view):
     for component in np.ndindex(view.element_shape):

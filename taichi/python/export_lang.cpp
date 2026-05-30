@@ -38,6 +38,7 @@
 
 #if defined(TI_WITH_CUDA)
 #include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/runtime/cuda/kernel_launcher.h"
 #endif
 
 namespace taichi {
@@ -2131,10 +2132,10 @@ void export_lang(py::module &m) {
            py::return_value_policy::reference)
       .def("seq", &GraphBuilder::seq, py::return_value_policy::reference);
 
-  py::class_<aot::CompiledGraph>(m, "CompiledGraph")
-      .def("jit_run", [](aot::CompiledGraph *self,
-                         const CompileConfig &compile_config,
-                         const py::dict &pyargs) {
+  auto jit_run_graph = [](aot::CompiledGraph *self,
+                          const CompileConfig &compile_config,
+                          const py::dict &pyargs,
+                          aot::CompiledGraphJITCache *cache) {
         std::unordered_map<std::string, aot::IValue> args;
         auto insert_scalar_arg = [&args](std::string arg_name,
                                          DataType expected_dtype,
@@ -2223,8 +2224,30 @@ void export_lang(py::module &m) {
             TI_NOT_IMPLEMENTED;
           }
         }
-        self->jit_run(compile_config, args);
-      });
+        if (cache) {
+          self->jit_run_cached(compile_config, args, *cache);
+        } else {
+          self->jit_run(compile_config, args);
+        }
+      };
+
+  py::class_<aot::CompiledGraphJITCache>(m, "CompiledGraphJITCache")
+      .def(py::init<>());
+
+  py::class_<aot::CompiledGraph>(m, "CompiledGraph")
+      .def("jit_run",
+           [jit_run_graph](aot::CompiledGraph *self,
+                           const CompileConfig &compile_config,
+                           const py::dict &pyargs) {
+             jit_run_graph(self, compile_config, pyargs, nullptr);
+           })
+      .def("jit_run_cached",
+           [jit_run_graph](aot::CompiledGraph *self,
+                           const CompileConfig &compile_config,
+                           const py::dict &pyargs,
+                           aot::CompiledGraphJITCache &cache) {
+             jit_run_graph(self, compile_config, pyargs, &cache);
+           });
 
   py::class_<Kernel>(m, "Kernel")
       .def("no_activate",

@@ -15,6 +15,7 @@
 #include <vector>
 
 #if defined(TI_WITH_VULKAN)
+#include "taichi/program/vulkan_command_replay.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
 
 namespace taichi::lang {
@@ -229,41 +230,6 @@ struct VulkanReplayResourceSet {
   VulkanRwBufferReplay<N> *replay{nullptr};
 };
 
-bool vulkan_native_command_replay_enabled() {
-  return get_environ_config("TI_VULKAN_NATIVE_COMMAND_REPLAY", 1) != 0;
-}
-
-struct VulkanCommandReplayKey {
-  std::array<uint64_t, 128> words{};
-  uint32_t size{0};
-
-  void push(uint64_t word) {
-    TI_ASSERT_INFO(size < words.size(),
-                   "Vulkan native command replay key is too small.");
-    words[size++] = word;
-  }
-
-  void push_ptr(const void *ptr) {
-    push(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ptr)));
-  }
-
-  bool operator==(const VulkanCommandReplayKey &other) const {
-    if (size != other.size) {
-      return false;
-    }
-    for (uint32_t i = 0; i < size; ++i) {
-      if (words[i] != other.words[i]) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  bool operator!=(const VulkanCommandReplayKey &other) const {
-    return !(*this == other);
-  }
-};
-
 void push_vulkan_command_key_range(VulkanCommandReplayKey &key,
                                    DeviceAllocation alloc,
                                    uint64_t offset,
@@ -273,85 +239,6 @@ void push_vulkan_command_key_range(VulkanCommandReplayKey &key,
   key.push(offset);
   key.push(static_cast<uint64_t>(bytes));
 }
-
-struct VulkanCommandReplayCache {
-  struct Entry {
-    VulkanCommandReplayKey key;
-    std::unique_ptr<CommandList> cmdlist;
-  };
-
-  Device *device{nullptr};
-  std::vector<Entry> entries;
-  size_t next_slot{0};
-
-  void reset() {
-    entries.clear();
-    device = nullptr;
-    next_slot = 0;
-  }
-
-  size_t capacity() const {
-    // Native primitive descriptors are mostly primitive-local mutable resource
-    // sets. Keeping multiple recorded command lists with different keys can
-    // replay an old command buffer after its descriptor set has been rebound
-    // for a newer key. Last-key replay preserves the hot repeated-shape path
-    // while avoiding stale descriptor reuse.
-    return 1;
-  }
-
-  template <typename RecordFn>
-  bool submit_or_record(Program *program,
-                        Device *dev,
-                        const VulkanCommandReplayKey &new_key,
-                        bool profiler_scopes,
-                        RecordFn &&record) {
-    if (!vulkan_native_command_replay_enabled() || profiler_scopes) {
-      reset();
-      return false;
-    }
-    if (device != dev) {
-      reset();
-      device = dev;
-    }
-    if (program->has_pending_gfx_command_list()) {
-      reset();
-      return false;
-    }
-
-    std::vector<StreamSemaphore> waits;
-    if (auto pending = program->flush_if_pending()) {
-      waits.push_back(std::move(pending));
-    }
-
-    Stream *stream = dev->get_compute_stream();
-    for (auto &entry : entries) {
-      if (entry.cmdlist && entry.key == new_key) {
-        stream->submit(entry.cmdlist.get(), waits);
-        return true;
-      }
-    }
-
-    auto [recorded_cmdlist, res] = stream->new_command_list_unique();
-    TI_ERROR_IF(res != RhiResult::success,
-                "Vulkan native command replay could not allocate a command "
-                "list: RhiResult({})",
-                res);
-    record(dev, recorded_cmdlist.get());
-    const size_t max_entries = capacity();
-    Entry *entry = nullptr;
-    if (entries.size() < max_entries) {
-      entries.push_back({});
-      entry = &entries.back();
-    } else {
-      entry = &entries[next_slot];
-      next_slot = (next_slot + 1) % max_entries;
-    }
-    entry->key = new_key;
-    entry->cmdlist = std::move(recorded_cmdlist);
-    stream->submit(entry->cmdlist.get(), waits);
-    return true;
-  }
-};
 
 template <size_t N>
 struct VulkanResourceSetReplayRing {
