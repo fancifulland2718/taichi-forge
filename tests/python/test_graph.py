@@ -306,6 +306,112 @@ def test_arg_float(dt):
     assert k.to_numpy()[0] == test_utils.approx(3.12, rel=1e-5)
 
 
+@test_utils.test(arch=supported_archs_cgraph)
+def test_mixed_runtime_arg_cache_updates_dynamic_values():
+    n = 8
+
+    @ti.kernel
+    def scale(
+        src: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        factor: ti.i32,
+        bias: ti.i32,
+        dst: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in src:
+            dst[i] = src[i] * factor + bias
+
+    sym_src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.i32, ndim=1)
+    sym_factor = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "factor", ti.i32)
+    sym_bias = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "bias", ti.i32)
+    sym_dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(scale, sym_src, sym_factor, sym_bias, sym_dst)
+    graph = builder.compile()
+
+    src_np = np.arange(n, dtype=np.int32)
+    src = ti.ndarray(ti.i32, shape=n)
+    src.from_numpy(src_np)
+    dst = ti.ndarray(ti.i32, shape=n)
+
+    graph.run({"src": src, "factor": 2, "bias": 3, "dst": dst})
+    assert np.array_equal(dst.to_numpy(), src_np * 2 + 3)
+
+    graph.run({"src": src, "factor": 5, "bias": -1, "dst": dst})
+    assert np.array_equal(dst.to_numpy(), src_np * 5 - 1)
+
+    other_np = (src_np + 10).astype(np.int32)
+    other = ti.ndarray(ti.i32, shape=n)
+    other.from_numpy(other_np)
+    graph.run({"src": other, "factor": 4, "bias": 7, "dst": dst})
+    assert np.array_equal(dst.to_numpy(), other_np * 4 + 7)
+
+
+@test_utils.test(arch=ti.cpu)
+def test_graph_instance_keeps_single_cgraph_fast_path():
+    @ti.kernel
+    def fill(value: ti.i32, out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in out:
+            out[i] = value
+
+    sym_value = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.i32)
+    sym_out = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(fill, sym_value, sym_out)
+    graph = builder.compile()
+
+    assert graph._instance_debug_info == {"kind": "single_cgraph"}
+
+    out = ti.ndarray(ti.i32, shape=4)
+    graph._prewarm()
+    graph.run({"value": 42, "out": out})
+    assert np.array_equal(out.to_numpy(), np.full(4, 42, dtype=np.int32))
+
+
+def _build_repeated_inc_graph():
+    @ti.kernel
+    def inc(arr: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        arr[None] += 1
+
+    sym_arr = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "arr", ti.i32, ndim=0)
+    builder = ti.graph.GraphBuilder()
+    step = builder.create_sequential()
+    step.dispatch(inc, sym_arr)
+    for _ in range(4):
+        builder.append(step)
+    return builder.compile()
+
+
+def _run_repeated_inc_graph(graph):
+    arr = ti.ndarray(ti.i32, shape=())
+    arr.fill(0)
+    graph.run({"arr": arr})
+    assert arr.to_numpy()[()] == 4
+
+
+@test_utils.test(arch=ti.cpu)
+def test_repeated_sequential_keeps_cpu_expanded_runtime_and_aot_graph():
+    graph = _build_repeated_inc_graph()
+    debug = graph._debug_info
+    assert debug["dispatch_count"] == 4
+    assert debug["repeat_count"] == 0
+    assert debug["nodes"] == [{"kind": "cgraph", "dispatch_count": 4}]
+    assert graph._instance_debug_info == {"kind": "single_cgraph"}
+    assert graph._compiled_graph is not None
+    _run_repeated_inc_graph(graph)
+
+
+@test_utils.test(arch=ti.cuda)
+def test_repeated_sequential_keeps_cuda_expanded_runtime_by_default():
+    graph = _build_repeated_inc_graph()
+    debug = graph._debug_info
+    assert debug["dispatch_count"] == 4
+    assert debug["repeat_count"] == 0
+    assert debug["nodes"] == [{"kind": "cgraph", "dispatch_count": 4}]
+    assert graph._instance_debug_info == {"kind": "single_cgraph"}
+    assert graph._compiled_graph is not None
+    _run_repeated_inc_graph(graph)
+
+
 @pytest.mark.parametrize("dt", [ti.i32, ti.i64, ti.u32, ti.u64])
 @test_utils.test(arch=supported_archs_cgraph, exclude=[(ti.vulkan, "Darwin")])
 def test_arg_int(dt):

@@ -13,6 +13,21 @@
 
 using namespace taichi;
 using namespace lang;
+
+TEST(GraphTest, TextureArgChannelAffectsEquality) {
+  auto r32 = aot::Arg{
+      aot::ArgKind::kRWTexture, "tex", PrimitiveType::f32, 1, {2, 2}};
+  auto rgba32 = aot::Arg{
+      aot::ArgKind::kRWTexture, "tex", PrimitiveType::f32, 4, {2, 2}};
+  auto r32_again = aot::Arg{
+      aot::ArgKind::kRWTexture, "tex", PrimitiveType::f32, 1, {2, 2}};
+
+  EXPECT_EQ(r32, r32_again);
+  EXPECT_NE(r32, rgba32);
+  EXPECT_EQ(r32.field_dim, 0);
+  EXPECT_EQ(r32.num_channels, 1);
+}
+
 #ifdef TI_WITH_VULKAN
 TEST(GraphTest, SimpleGraphRun) {
   // Otherwise will segfault on macOS VM,

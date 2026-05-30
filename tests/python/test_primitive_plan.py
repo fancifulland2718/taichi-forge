@@ -516,6 +516,156 @@ def test_primitive_sequence_prewarm_replays_native_plans():
     assert seq.workspace_bytes_peak >= 0
 
 
+@test_utils.test(arch=ti.cpu)
+def test_graph_private_native_sequence_replays_native_plans():
+    n = 32
+    src_np = np.arange(n, dtype=np.int32)
+    idx_np = np.arange(n - 1, -1, -1, dtype=np.int32)
+    src = ti.ndarray(ti.i32, shape=n)
+    tmp = ti.ndarray(ti.i32, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(ti.i32, shape=n)
+    src.from_numpy(src_np)
+    indices.from_numpy(idx_np)
+
+    seq = alg_impl.primitive_sequence()
+    seq.transform(src, tmp, scale=2, bias=1).gather(tmp, indices, dst)
+    builder = ti.graph.GraphBuilder()
+    assert builder._append_native(seq) is builder
+    graph = builder.compile()
+
+    graph.run({})
+    assert seq.direct_plan_count == 2
+    assert np.array_equal(dst.to_numpy(), (src_np * 2 + 1)[idx_np])
+
+    src_np = src_np + 10
+    src.from_numpy(src_np)
+    graph.run({})
+    assert np.array_equal(dst.to_numpy(), (src_np * 2 + 1)[idx_np])
+
+
+@test_utils.test(arch=ti.cpu)
+def test_graph_cpu_native_sequence_joins_kernel_chain():
+    n = 32
+    src_np = np.arange(n, dtype=np.int32)
+    idx_np = np.arange(n - 1, -1, -1, dtype=np.int32)
+    src = ti.ndarray(ti.i32, shape=n)
+    tmp0 = ti.ndarray(ti.i32, shape=n)
+    tmp1 = ti.ndarray(ti.i32, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    gathered = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(ti.i32, shape=n)
+    src.from_numpy(src_np)
+    indices.from_numpy(idx_np)
+
+    @ti.kernel
+    def prepare(
+        src_arr: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        tmp_arr: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in src_arr:
+            tmp_arr[i] = src_arr[i] + 10
+
+    @ti.kernel
+    def finalize(
+        gathered_arr: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        dst_arr: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in gathered_arr:
+            dst_arr[i] = gathered_arr[i] - 3
+
+    src_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.i32, ndim=1)
+    tmp0_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "tmp0", ti.i32, ndim=1)
+    gathered_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "gathered", ti.i32, ndim=1
+    )
+    dst_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=1)
+
+    seq = alg_impl.primitive_sequence()
+    seq.transform(tmp0, tmp1, scale=2, bias=1).gather(tmp1, indices, gathered)
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(prepare, src_arg, tmp0_arg)
+    assert builder._append_native(seq) is builder
+    builder.dispatch(finalize, gathered_arg, dst_arg)
+    graph = builder.compile()
+
+    graph.run({"src": src, "tmp0": tmp0, "gathered": gathered, "dst": dst})
+    expected = ((src_np + 10) * 2 + 1)[idx_np] - 3
+    assert seq.direct_plan_count == 2
+    assert np.array_equal(dst.to_numpy(), expected)
+
+    src_np = src_np + 5
+    src.from_numpy(src_np)
+    graph.run({"src": src, "tmp0": tmp0, "gathered": gathered, "dst": dst})
+    expected = ((src_np + 10) * 2 + 1)[idx_np] - 3
+    assert np.array_equal(dst.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cuda)
+def test_graph_private_native_sequence_uses_cuda_native_replay_backend():
+    n = 32
+    src_np = np.arange(n, dtype=np.int32)
+    src = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(ti.i32, shape=n)
+    src.from_numpy(src_np)
+
+    seq = alg_impl.primitive_sequence()
+    seq.transform(src, dst, scale=4, bias=-3)
+    builder = ti.graph.GraphBuilder()
+    assert builder._append_native(seq) is builder
+    graph = builder.compile()
+
+    info = graph._instance_debug_info
+    assert info["kind"] == "cuda_native_replay"
+
+    graph._prewarm()
+    assert seq.direct_plan_count == 1
+    assert np.array_equal(dst.to_numpy(), src_np * 4 - 3)
+
+    src_np = src_np + 7
+    src.from_numpy(src_np)
+    graph.run({})
+    assert np.array_equal(dst.to_numpy(), src_np * 4 - 3)
+
+
+@test_utils.test(arch=ti.cpu)
+def test_graph_private_native_sequence_uses_cpu_native_replay_backend():
+    n = 32
+    src_np = np.arange(n, dtype=np.int32)
+    src = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(ti.i32, shape=n)
+    src.from_numpy(src_np)
+
+    seq = alg_impl.primitive_sequence()
+    seq.transform(src, dst, scale=4, bias=-3)
+    builder = ti.graph.GraphBuilder()
+    assert builder._append_native(seq) is builder
+    graph = builder.compile()
+
+    info = graph._instance_debug_info
+    assert info["kind"] == "cpu_native_replay"
+
+    graph._prewarm()
+    assert seq.direct_plan_count == 1
+    assert np.array_equal(dst.to_numpy(), src_np * 4 - 3)
+
+    src_np = src_np + 7
+    src.from_numpy(src_np)
+    graph.run({})
+    assert np.array_equal(dst.to_numpy(), src_np * 4 - 3)
+
+
+@test_utils.test(arch=ti.cpu)
+def test_graph_private_native_sequence_rejects_unregistered_native_node():
+    class RunOnly:
+        def run(self):
+            pass
+
+    with pytest.raises(ti.TaichiRuntimeError, match="DSL-defined native graph"):
+        ti.graph.GraphBuilder()._append_native(RunOnly())
+
+
 @test_utils.test(arch=ti.vulkan)
 def test_primitive_sequence_vulkan_fuses_indexed_transform_chain():
     prog = ti.lang.impl.get_runtime().prog
