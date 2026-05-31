@@ -2,6 +2,8 @@
 #include "taichi/system/profiler.h"
 
 #include <sstream>
+#include <string>
+#include <string_view>
 
 #include "taichi/analysis/offline_cache_util.h"
 #include "taichi/codegen/compiled_kernel_data.h"
@@ -9,6 +11,26 @@
 #include "taichi/util/offline_cache.h"
 
 namespace taichi::lang {
+
+namespace {
+
+std::string cache_prefix_from_metadata_filename(
+    const std::string &metadata_filename) {
+  constexpr std::string_view kMetadataExtension = ".tcb";
+  if (metadata_filename.size() > kMetadataExtension.size() &&
+      metadata_filename.compare(metadata_filename.size() -
+                                    kMetadataExtension.size(),
+                                kMetadataExtension.size(),
+                                kMetadataExtension.data(),
+                                kMetadataExtension.size()) == 0) {
+    return metadata_filename.substr(0,
+                                    metadata_filename.size() -
+                                        kMetadataExtension.size());
+  }
+  return metadata_filename;
+}
+
+}  // namespace
 
 namespace offline_cache {
 
@@ -35,6 +57,8 @@ struct CacheCleanerUtils<CacheData> {
       const CacheCleanerConfig &config,
       const KernelMetaData &kernel_meta) {
     auto fn = fmt::format(KernelCompilationManager::kCacheFilenameFormat,
+                          cache_prefix_from_metadata_filename(
+                              config.metadata_filename),
                           kernel_meta.kernel_key);
     return {fn};
   }
@@ -48,7 +72,9 @@ struct CacheCleanerUtils<CacheData> {
   static bool is_valid_cache_file(const CacheCleanerConfig &config,
                                   const std::string &name) {
     std::string ext = filename_extension(name);
-    return ext == kTiCacheFilenameExt;
+    const auto prefix =
+        cache_prefix_from_metadata_filename(config.metadata_filename) + "_";
+    return ext == kTiCacheFilenameExt && name.rfind(prefix, 0) == 0;
   }
 };
 
@@ -58,8 +84,41 @@ KernelCompilationManager::KernelCompilationManager(Config config)
     : config_(std::move(config)) {
   TI_DEBUG("Create KernelCompilationManager with offline_cache_file_path = {}",
            config_.offline_cache_path);
-  auto filepath = join_path(config_.offline_cache_path, kMetadataFilename);
-  auto lock_path = join_path(config_.offline_cache_path, kMetadataLockName);
+}
+
+std::string KernelCompilationManager::cache_file_prefix(Arch arch) {
+  return fmt::format("ticache_{}_s{}", arch_name(arch),
+                     kOfflineCacheSchemaVersion);
+}
+
+std::string KernelCompilationManager::metadata_filename(Arch arch) {
+  return fmt::format(kMetadataFilenameFormat, arch_name(arch),
+                     kOfflineCacheSchemaVersion);
+}
+
+std::string KernelCompilationManager::metadata_lock_name(Arch arch) {
+  return fmt::format(kMetadataLockNameFormat, arch_name(arch),
+                     kOfflineCacheSchemaVersion);
+}
+
+void KernelCompilationManager::ensure_metadata_loaded_locked(Arch arch) {
+  const auto next_metadata_filename = metadata_filename(arch);
+  if (metadata_loaded_) {
+    TI_ASSERT_INFO(
+        metadata_filename_ == next_metadata_filename,
+        "KernelCompilationManager cannot switch offline-cache metadata shard "
+        "from {} to {} within one Program",
+        metadata_filename_, next_metadata_filename);
+    return;
+  }
+
+  metadata_filename_ = next_metadata_filename;
+  metadata_lock_name_ = metadata_lock_name(arch);
+  cache_file_prefix_ = cache_file_prefix(arch);
+  metadata_loaded_ = true;
+
+  auto filepath = join_path(config_.offline_cache_path, metadata_filename_);
+  auto lock_path = join_path(config_.offline_cache_path, metadata_lock_name_);
   if (path_exists(filepath)) {
     if (lock_with_file(lock_path)) {
       auto _ = make_unlocker(lock_path);
@@ -83,6 +142,9 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
   // compile work happens OUTSIDE the lock inside
   // compile_and_cache_kernel().
   std::unique_lock<std::mutex> lock(cache_mutex_);
+  if (cache_mode == CacheData::MemAndDiskCache) {
+    ensure_metadata_loaded_locked(compile_config.arch);
+  }
 
   // Wait-loop: another worker may already be compiling this exact key. If
   // so, we block on cache_cv_ and re-probe the cache on wake-up.
@@ -168,6 +230,9 @@ const CompiledKernelData *KernelCompilationManager::find_cached_kernel(
       offline_cache && kernel_def.ir_is_ast() ? CacheData::MemAndDiskCache
                                              : CacheData::MemCache;
   std::lock_guard<std::mutex> lock(cache_mutex_);
+  if (cache_mode == CacheData::MemAndDiskCache) {
+    ensure_metadata_loaded_locked(arch);
+  }
   return try_load_cached_kernel_locked(kernel_def, kernel_key, arch, cache_mode);
 }
 
@@ -181,10 +246,14 @@ void KernelCompilationManager::dump() {
   if (caching_kernels_.empty()) {
     return;
   }
+  if (metadata_filename_.empty()) {
+    caching_kernels_.clear();
+    return;
+  }
 
   taichi::create_directories(config_.offline_cache_path);
-  auto filepath = join_path(config_.offline_cache_path, kMetadataFilename);
-  auto lock_path = join_path(config_.offline_cache_path, kMetadataLockName);
+  auto filepath = join_path(config_.offline_cache_path, metadata_filename_);
+  auto lock_path = join_path(config_.offline_cache_path, metadata_lock_name_);
 
   if (!lock_with_file(lock_path)) {
     TI_WARN("Lock {} failed. Please run 'ti cache clean -p {}' and try again.",
@@ -252,23 +321,30 @@ void KernelCompilationManager::dump() {
 void KernelCompilationManager::clean_offline_cache(
     offline_cache::CleanCachePolicy policy,
     int max_bytes,
-    double cleaning_factor) const {
+    double cleaning_factor,
+    Arch arch) {
   using CacheCleaner = offline_cache::CacheCleaner<CacheData>;
   offline_cache::CacheCleanerConfig config;
   config.path = config_.offline_cache_path;
   config.policy = policy;
   config.cleaning_factor = cleaning_factor;
   config.max_size = max_bytes;
-  config.metadata_filename = kMetadataFilename;
+  {
+    std::lock_guard<std::mutex> guard(cache_mutex_);
+    ensure_metadata_loaded_locked(arch);
+    config.metadata_filename = metadata_filename_;
+    config.metadata_lock_name = metadata_lock_name_;
+  }
   config.debugging_metadata_filename = "";
-  config.metadata_lock_name = kMetadataLockName;
   CacheCleaner::run(config);
 }
 
 std::string KernelCompilationManager::make_filename(
     const std::string &kernel_key) const {
+  TI_ASSERT(!cache_file_prefix_.empty());
   return join_path(config_.offline_cache_path,
-                   fmt::format(kCacheFilenameFormat, kernel_key));
+                   fmt::format(kCacheFilenameFormat, cache_file_prefix_,
+                               kernel_key));
 }
 
 std::unique_ptr<CompiledKernelData> KernelCompilationManager::compile_kernel(
@@ -299,7 +375,9 @@ std::string KernelCompilationManager::make_kernel_key(
   auto kernel_key = kernel_def.get_cached_kernel_key();
   if (kernel_key.empty()) {
     if (!kernel_def.ir_is_ast()) {
-      kernel_key = kernel_def.get_name();
+      const auto cache_context_key = get_hashed_offline_cache_key_context(
+          compile_config, caps, (Kernel *)&kernel_def);
+      kernel_key = "N" + cache_context_key + "_" + kernel_def.get_name();
     } else {  // The kernel key is generated from AST
       kernel_key = get_hashed_offline_cache_key(compile_config, caps,
                                                 (Kernel *)&kernel_def);

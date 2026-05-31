@@ -26,19 +26,15 @@ class Kernel;
 // metadata version check there serves a different purpose (binary-format
 // compatibility of the metadata file itself).
 //
-// IMPORTANT — version 1 is special: it produces the SAME hash as the
-// pre-P-Compile-2-A algorithm, i.e. no schema tag is mixed into the
-// hasher. This preserves all existing .tic caches written by older builds
-// of this fork. From version 2 onward we inject a schema tag so any key
-// algo change is observable in the hash, and old v1 caches naturally miss
-// without breaking anything.
+// Current fork builds always mix this schema tag into kernel cache hashes.
+// We intentionally do not preserve key compatibility with old .tic files:
+// schema bumps miss and recompile under the new key.
 //
 // History:
 //   1 - initial schema (2026-04, baseline before P-Compile-2-A landed).
 //       Hash-equivalent to no schema versioning at all.
 //   2 - P-Compile-1 phase 1 (2026-04). First schema bump after the P-Compile-1
-//       driver experiments. With v>=2, a "tcs:N" schema tag is mixed into the
-//       hasher, so all v1 caches naturally miss once.
+//       driver experiments.
 //   3 - CS-3.B/C (2026-05). LLVMRuntime listgen-reuse state changed from a
 //       scalar dirty epoch to per-SNode arrays and list-version dependencies.
 //       Old CUDA LLVM kernels embed LLVMRuntime field offsets, so reusing old
@@ -76,9 +72,17 @@ class Kernel;
 //  12 - Native AD / dense bulk API refresh (2026-05). Invalidate stale Vulkan
 //       kernels observed on field-loss + ndarray-grad AD paths after native
 //       dense clear/fill became the default boundary path.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 12;
+//  13 - P-Compile-10 C2 (2026-05). Kernel cache keys use dirty-bit
+//       invalidation for supported per-kernel effective-config changes and
+//       cache the AST body string after first key generation. Old key
+//       compatibility is intentionally dropped.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 13;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
+std::string get_hashed_offline_cache_key_context(
+    const CompileConfig &config,
+    const DeviceCapabilityConfig &caps,
+    Kernel *kernel);
 std::string get_hashed_offline_cache_key(const CompileConfig &config,
                                          const DeviceCapabilityConfig &caps,
                                          Kernel *kernel);

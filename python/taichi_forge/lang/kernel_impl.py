@@ -1,4 +1,5 @@
 import ast
+import copy
 import functools
 import inspect
 import operator
@@ -143,13 +144,15 @@ def _get_tree_and_ctx(
                 src, start_lineno = getsourcelines(self.func)
                 src = [textwrap.fill(line, tabsize=4, width=9999) for line in src]
                 source = textwrap.dedent("\n".join(src))
-                cache = (file, src, start_lineno, source)
+                cache = (file, src, start_lineno, source, None)
                 self._source_template_cache = cache
-            file, src, start_lineno, source = cache
+            file, src, start_lineno, source, tree_template = cache
         with python_compile_profile_event(f"{profile_prefix}.ast_parse"):
-            tree = ast.parse(source)
-        func_body = tree.body[0]
-        func_body.decorator_list = []
+            if tree_template is None:
+                tree_template = ast.parse(source)
+                tree_template.body[0].decorator_list = []
+                self._source_template_cache = (file, src, start_lineno, source, tree_template)
+            tree = copy.deepcopy(tree_template)
     else:
         with python_compile_profile_event(f"{profile_prefix}.source"):
             file = getsourcefile(self.func)
@@ -552,6 +555,54 @@ class TaichiCallableTemplateMapper:
         self.num_args = len(arguments)
         self.template_slot_locations = template_slot_locations
         self.mapping = {}
+        self._static_arg_features = tuple("#" for _ in arguments)
+        self._dynamic_arg_extractors = tuple(
+            (i, arg.annotation, arg.name)
+            for i, arg in enumerate(arguments)
+            if self._annotation_needs_arg_feature(arg.annotation)
+        )
+        self._arg_feature_caches = {
+            i: weakref.WeakKeyDictionary()
+            for i, annotation, _ in self._dynamic_arg_extractors
+            if self._annotation_uses_weak_feature_cache(annotation)
+        }
+        if not self._dynamic_arg_extractors:
+            self.mapping[self._static_arg_features] = 0
+
+    @staticmethod
+    def _annotation_needs_arg_feature(anno):
+        return isinstance(
+            anno,
+            (
+                template,
+                ArgPackType,
+                texture_type.TextureType,
+                texture_type.RWTextureType,
+                ndarray_type.NdarrayType,
+                sparse_matrix_builder,
+            ),
+        )
+
+    @staticmethod
+    def _annotation_uses_weak_feature_cache(anno):
+        return isinstance(anno, ndarray_type.NdarrayType)
+
+    @staticmethod
+    def _arg_uses_weak_feature_cache(arg):
+        return isinstance(
+            arg,
+            (
+                taichi_forge.lang._ndarray.Ndarray,
+                taichi_forge.lang._ndarray.StructNdarrayScalarMemberView,
+                taichi_forge.lang._ndarray.StructNdarrayTensorMemberView,
+            ),
+        )
+
+    @staticmethod
+    def _arg_feature_cache_token(arg, anno):
+        if anno.needs_grad is None and getattr(arg, "grad", None) is not None:
+            return id(arg.grad)
+        return 0
 
     @staticmethod
     def extract_arg(arg, anno, arg_name):
@@ -719,10 +770,33 @@ class TaichiCallableTemplateMapper:
         return "#"
 
     def extract(self, args):
-        extracted = []
-        for arg, kernel_arg in zip(args, self.arguments):
-            extracted.append(self.extract_arg(arg, kernel_arg.annotation, kernel_arg.name))
-        return tuple(extracted)
+        return self._extract_features_and_key(args)[0]
+
+    def _extract_features_and_key(self, args):
+        if not self._dynamic_arg_extractors:
+            return self._static_arg_features, self._static_arg_features
+        extracted = list(self._static_arg_features)
+        key_features = list(self._static_arg_features)
+        for i, annotation, name in self._dynamic_arg_extractors:
+            arg = args[i]
+            cache = self._arg_feature_caches.get(i)
+            if cache is not None and self._arg_uses_weak_feature_cache(arg):
+                token = self._arg_feature_cache_token(arg, annotation)
+                cached = cache.get(arg)
+                if cached is not None and cached[0] == token:
+                    extracted[i] = cached[1]
+                    key_features[i] = cached[2]
+                    continue
+                feature = self.extract_arg(arg, annotation, name)
+                key_feature = self._make_cache_key(feature)
+                cache[arg] = (token, feature, key_feature)
+                extracted[i] = feature
+                key_features[i] = key_feature
+            else:
+                feature = self.extract_arg(arg, annotation, name)
+                extracted[i] = feature
+                key_features[i] = self._make_cache_key(feature)
+        return tuple(extracted), tuple(key_features)
 
     @staticmethod
     def _make_cache_key(value):
@@ -742,8 +816,10 @@ class TaichiCallableTemplateMapper:
         if len(args) != self.num_args:
             raise TypeError(f"{self.num_args} argument(s) needed but {len(args)} provided.")
 
-        arg_features = self.extract(args)
-        key = self._make_cache_key(arg_features)
+        if not self._dynamic_arg_extractors:
+            return 0, self._static_arg_features
+
+        arg_features, key = self._extract_features_and_key(args)
         if key not in self.mapping:
             count = len(self.mapping)
             self.mapping[key] = count

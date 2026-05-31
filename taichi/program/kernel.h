@@ -49,30 +49,28 @@ class TI_DLL_EXPORT Kernel : public Callable {
 
   [[nodiscard]] std::string get_name() const override;
 
-  void set_kernel_key_for_cache(const std::string &kernel_key) const {
-    kernel_key_ = kernel_key;
-  }
+  void set_kernel_key_for_cache(const std::string &kernel_key) const;
 
-  const std::string &get_cached_kernel_key() const {
-    return kernel_key_;
-  }
+  const std::string &get_cached_kernel_key() const;
+
+  void invalidate_kernel_key_for_cache() const;
+
+  bool has_cached_offline_cache_body() const;
+
+  const std::string &get_cached_offline_cache_body() const;
+
+  void set_offline_cache_body(std::string body) const;
 
   // P-Compile-6: per-kernel compile_tier override.
   // When set, takes precedence over CompileConfig::compile_tier for this
   // kernel only. Empty optional = use program-level compile_tier (default).
   // Valid values: "fast", "balanced", "full". Invalid values are rejected at
   // the Python boundary; C++ side stores the string verbatim.
-  void set_compile_tier_override(const std::string &tier) {
-    compile_tier_override_ = tier;
-  }
+  void set_compile_tier_override(const std::string &tier);
 
-  void clear_compile_tier_override() {
-    compile_tier_override_.reset();
-  }
+  void clear_compile_tier_override();
 
-  const std::optional<std::string> &get_compile_tier_override() const {
-    return compile_tier_override_;
-  }
+  const std::optional<std::string> &get_compile_tier_override() const;
 
  private:
   void init(Program &program,
@@ -83,6 +81,8 @@ class TI_DLL_EXPORT Kernel : public Callable {
   // True if |ir| is a frontend AST. False if it's already offloaded to CHI IR.
   bool ir_is_ast_{false};
   mutable std::string kernel_key_;
+  mutable bool kernel_key_valid_{false};
+  mutable std::optional<std::string> offline_cache_body_;
   std::optional<std::string> compile_tier_override_;
 };
 

@@ -12,6 +12,7 @@
 #include "picosha2.h"
 
 #include <algorithm>
+#include <sstream>
 #include <vector>
 
 namespace taichi::lang {
@@ -257,29 +258,26 @@ std::string get_hashed_offline_cache_key(const CompileConfig &config,
     kernel_params_string =
         get_offline_cache_key_of_parameter_list(kernel->parameter_list);
     kernel_rets_string = get_offline_cache_key_of_rets(kernel->rets);
-    std::ostringstream oss;
-    {
-      TI_PROFILER("gen_offline_cache_key.body");
-      gen_offline_cache_key(kernel->ir.get(), &oss);
+    if (kernel->has_cached_offline_cache_body()) {
+      kernel_body_string = kernel->get_cached_offline_cache_body();
+    } else {
+      std::ostringstream oss;
+      {
+        TI_PROFILER("gen_offline_cache_key.body");
+        gen_offline_cache_key(kernel->ir.get(), &oss);
+      }
+      kernel_body_string = oss.str();
+      kernel->set_offline_cache_body(kernel_body_string);
     }
-    kernel_body_string = oss.str();
   }
 
   auto compile_config_key = get_offline_cache_key_of_compile_config(config);
   auto device_caps_key = get_offline_cache_key_of_device_caps(caps);
   std::string autodiff_mode =
       std::to_string(static_cast<std::size_t>(kernel->autodiff_mode));
-  // [P-Compile-2-A] Mix in cache schema version so future key-algo changes
-  // automatically invalidate old .tic files without bumping TI_VERSION_*.
-  // v1 is intentionally hash-equivalent to the pre-P-Compile-2-A algorithm
-  // so existing .tic caches keep hitting; only v>=2 actually injects a
-  // schema tag. See offline_cache_util.h for rationale.
   picosha2::hash256_one_by_one hasher;
-  if constexpr (kOfflineCacheSchemaVersion >= 2) {
-    std::string schema_tag =
-        "tcs:" + std::to_string(kOfflineCacheSchemaVersion);
-    hasher.process(schema_tag.begin(), schema_tag.end());
-  }
+  std::string schema_tag = "tcs:" + std::to_string(kOfflineCacheSchemaVersion);
+  hasher.process(schema_tag.begin(), schema_tag.end());
   hasher.process(compile_config_key.begin(), compile_config_key.end());
   hasher.process(device_caps_key.begin(), device_caps_key.end());
   hasher.process(kernel_params_string.begin(), kernel_params_string.end());
@@ -290,6 +288,40 @@ std::string get_hashed_offline_cache_key(const CompileConfig &config,
 
   auto res = picosha2::get_hash_hex_string(hasher);
   res.insert(res.begin(), 'T');  // The key must start with a letter
+  return res;
+}
+
+std::string get_hashed_offline_cache_key_context(
+    const CompileConfig &config,
+    const DeviceCapabilityConfig &caps,
+    Kernel *kernel) {
+  TI_AUTO_PROF;
+  std::vector<std::uint8_t> kernel_params_string, kernel_rets_string;
+  if (kernel) {
+    kernel_params_string =
+        get_offline_cache_key_of_parameter_list(kernel->parameter_list);
+    kernel_rets_string = get_offline_cache_key_of_rets(kernel->rets);
+  }
+
+  auto compile_config_key = get_offline_cache_key_of_compile_config(config);
+  auto device_caps_key = get_offline_cache_key_of_device_caps(caps);
+  std::string autodiff_mode =
+      kernel ? std::to_string(static_cast<std::size_t>(kernel->autodiff_mode))
+             : "";
+
+  picosha2::hash256_one_by_one hasher;
+  std::string schema_tag =
+      "tcs-ctx:" + std::to_string(kOfflineCacheSchemaVersion);
+  hasher.process(schema_tag.begin(), schema_tag.end());
+  hasher.process(compile_config_key.begin(), compile_config_key.end());
+  hasher.process(device_caps_key.begin(), device_caps_key.end());
+  hasher.process(kernel_params_string.begin(), kernel_params_string.end());
+  hasher.process(kernel_rets_string.begin(), kernel_rets_string.end());
+  hasher.process(autodiff_mode.begin(), autodiff_mode.end());
+  hasher.finish();
+
+  auto res = picosha2::get_hash_hex_string(hasher);
+  res.insert(res.begin(), 'C');
   return res;
 }
 

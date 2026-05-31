@@ -72,3 +72,22 @@ def test_callable_template_mapper_numpy():
     assert mapper.lookup((0, 0, np.ones(shape=(1, 2, 3), dtype=np.float32)))[0] == 0
     assert mapper.lookup((0, 0, np.ones(shape=(1, 2, 4), dtype=np.float32)))[0] == 0
     assert mapper.lookup((0, 0, np.ones(shape=(1, 2, 1), dtype=np.int32)))[0] == 1
+
+
+@test_utils.test()
+def test_callable_template_mapper_ndarray_cache_tracks_grad_state():
+    arr = ti.ndarray(ti.f32, shape=4)
+    grad = ti.ndarray(ti.f32, shape=4)
+    mapper = TaichiCallableTemplateMapper(
+        (KernelArgument(ti.types.ndarray(), "arr"),),
+        (),
+    )
+
+    instance_id, features = mapper.lookup((arr,))
+    assert instance_id == 0
+    assert features[0][2] is False
+
+    arr._set_grad(grad)
+    instance_id, features = mapper.lookup((arr,))
+    assert instance_id == 1
+    assert features[0][2] is True

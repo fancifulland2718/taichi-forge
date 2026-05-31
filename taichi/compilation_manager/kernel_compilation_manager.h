@@ -47,9 +47,9 @@ struct CacheData {
 
 class KernelCompilationManager final {
  public:
-  static constexpr char kMetadataFilename[] = "ticache.tcb";
-  static constexpr char kCacheFilenameFormat[] = "{}.tic";
-  static constexpr char kMetadataLockName[] = "ticache.lock";
+  static constexpr char kMetadataFilenameFormat[] = "ticache_{}_s{}.tcb";
+  static constexpr char kCacheFilenameFormat[] = "{}_{}.tic";
+  static constexpr char kMetadataLockNameFormat[] = "ticache_{}_s{}.lock";
 
   using KernelCacheData = CacheData::KernelData;
   using CachingKernels = std::unordered_map<std::string, KernelCacheData>;
@@ -80,9 +80,18 @@ class KernelCompilationManager final {
   // Run offline cache cleaning
   void clean_offline_cache(offline_cache::CleanCachePolicy policy,
                            int max_bytes,
-                           double cleaning_factor) const;
+                           double cleaning_factor,
+                           Arch arch);
 
  private:
+  static std::string cache_file_prefix(Arch arch);
+
+  static std::string metadata_filename(Arch arch);
+
+  static std::string metadata_lock_name(Arch arch);
+
+  void ensure_metadata_loaded_locked(Arch arch);
+
   std::string make_filename(const std::string &kernel_key) const;
 
   std::unique_ptr<CompiledKernelData> compile_kernel(
@@ -119,6 +128,10 @@ class KernelCompilationManager final {
   CachingKernels caching_kernels_;
   CacheData cached_data_;
   std::vector<KernelCacheData *> updated_data_;
+  std::string metadata_filename_;
+  std::string metadata_lock_name_;
+  std::string cache_file_prefix_;
+  bool metadata_loaded_{false};
 
   // P5.a — thread-safety for parallel kernel compilation.
   //

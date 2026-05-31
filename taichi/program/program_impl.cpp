@@ -15,7 +15,7 @@ void ProgramImpl::dump_cache_data_to_disk() {
   mgr.clean_offline_cache(offline_cache::string_to_clean_cache_policy(
                               config->offline_cache_cleaning_policy),
                           config->offline_cache_max_size_of_files,
-                          config->offline_cache_cleaning_factor);
+                          config->offline_cache_cleaning_factor, config->arch);
   mgr.dump();
 }
 

@@ -7,6 +7,8 @@
 #include "taichi/ir/statements.h"
 #include "taichi/program/program.h"
 
+#include <utility>
+
 #ifdef TI_WITH_LLVM
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #endif
@@ -95,6 +97,49 @@ T Kernel::fetch_ret(DataType dt, int i) {
 
 std::string Kernel::get_name() const {
   return name;
+}
+
+void Kernel::set_kernel_key_for_cache(const std::string &kernel_key) const {
+  kernel_key_ = kernel_key;
+  kernel_key_valid_ = true;
+}
+
+const std::string &Kernel::get_cached_kernel_key() const {
+  if (kernel_key_valid_) {
+    return kernel_key_;
+  }
+  static const std::string empty;
+  return empty;
+}
+
+void Kernel::invalidate_kernel_key_for_cache() const {
+  kernel_key_valid_ = false;
+}
+
+bool Kernel::has_cached_offline_cache_body() const {
+  return offline_cache_body_.has_value();
+}
+
+const std::string &Kernel::get_cached_offline_cache_body() const {
+  return *offline_cache_body_;
+}
+
+void Kernel::set_offline_cache_body(std::string body) const {
+  offline_cache_body_ = std::move(body);
+}
+
+void Kernel::set_compile_tier_override(const std::string &tier) {
+  compile_tier_override_ = tier;
+  invalidate_kernel_key_for_cache();
+}
+
+void Kernel::clear_compile_tier_override() {
+  compile_tier_override_.reset();
+  invalidate_kernel_key_for_cache();
+}
+
+const std::optional<std::string> &Kernel::get_compile_tier_override() const {
+  return compile_tier_override_;
 }
 
 void Kernel::init(Program &program,

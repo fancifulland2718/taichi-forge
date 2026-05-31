@@ -1,3 +1,5 @@
+import ast
+
 import taichi_forge as ti
 from tests import test_utils
 
@@ -109,3 +111,45 @@ def test_compile_profile_captures_cpp_ir_events():
     assert any("cpp.compile.ir_pipeline" in path for path in paths)
     assert any("cpp.compile.backend_codegen" in path for path in paths)
     assert any("cpp.ir." in path for path in paths)
+
+
+@test_utils.test(arch=ti.cpu)
+def test_source_template_cache_reuses_ast_template_for_specializations():
+    x = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def set_x(v: ti.template()):
+        if ti.static(v == 3):
+            x[None] = 3
+        else:
+            x[None] = 5
+
+    set_x(3)
+    cache = set_x._primal._source_template_cache
+    assert len(cache) == 5
+    assert isinstance(cache[4], ast.Module)
+    template_id = id(cache[4])
+
+    set_x(5)
+    assert id(set_x._primal._source_template_cache[4]) == template_id
+    assert len(set_x._primal.compiled_kernels) == 2
+    assert x[None] == 5
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_kernel_cache_key_separates_compile_tier_changes():
+    x = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def set_x(v: ti.i32):
+        x[None] = v
+
+    set_x(1)
+    key = set_x._primal.ensure_compiled(2)
+    set_x._primal.compiled_kernels[key].set_compile_tier_override("fast")
+    with ti.compile_profile() as prof:
+        set_x(2)
+
+    paths = [row["path"] for row in prof.records(include_python=False)]
+    assert any("cpp.compile.backend_codegen" in path for path in paths)
+    assert x[None] == 2
