@@ -1598,6 +1598,7 @@ def _try_native_component_plan_group(
 
 
 _PRIMITIVE_SEQUENCE_PLAN_ATTRS = {
+    "scan": ("_native_scan_plan_group", "_native_scan_plan"),
     "reduce": ("_native_reduce_plan_group", "_native_reduce_plan"),
     "histogram": ("_staged_histogram_plan_group", "_native_histogram_plan"),
     "transform": ("_native_transform_plan_group", "_native_transform_plan"),
@@ -1618,6 +1619,17 @@ _PRIMITIVE_SEQUENCE_PLAN_ATTRS = {
         "_native_grouped_reduce_plan",
     ),
 }
+
+
+def _first_sort_key(key_parts):
+    return key_parts[0] if isinstance(key_parts, (list, tuple)) else key_parts
+
+
+def _primitive_sequence_scan(input_arr, *, workspace=None):
+    if workspace is None:
+        workspace = PrefixSumExecutor(_shape_numel(input_arr))
+    workspace.run(input_arr)
+    return workspace
 
 
 def _workspace_active_execution_plan(workspace, kind):
@@ -1897,6 +1909,63 @@ class PrimitiveSequence:
             call.plan = None
         self._fused_plan = None
         return self
+
+    def scan(self, input_arr, *, executor=None):
+        if executor is None:
+            executor = PrefixSumExecutor(_shape_numel(input_arr))
+        return self._add_call(
+            "scan", _primitive_sequence_scan, (input_arr,), {}, executor
+        )
+
+    def sort(
+        self,
+        keys,
+        values=None,
+        *,
+        stable=True,
+        descending=False,
+        method="auto",
+        precision="exact",
+        workspace=None,
+        nan_policy="last",
+    ):
+        if workspace is None:
+            workspace = SortWorkspace(max_items=_shape_numel(keys))
+        return self._add_call(
+            "sort",
+            sort,
+            (keys, values),
+            {
+                "stable": stable,
+                "descending": descending,
+                "method": method,
+                "precision": precision,
+                "nan_policy": nan_policy,
+            },
+            workspace,
+        )
+
+    def sort_by_key(
+        self,
+        key_parts,
+        values=None,
+        *,
+        stable=True,
+        order="lexicographic",
+        method="auto",
+        workspace=None,
+    ):
+        if workspace is None:
+            workspace = SortWorkspace(
+                max_items=_shape_numel(_first_sort_key(key_parts))
+            )
+        return self._add_call(
+            "sort_by_key",
+            sort_by_key,
+            (key_parts, values),
+            {"stable": stable, "order": order, "method": method},
+            workspace,
+        )
 
     def reduce(self, values, output, *, op="sum", method="auto", workspace=None):
         if workspace is None:

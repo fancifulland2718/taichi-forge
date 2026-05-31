@@ -47,6 +47,37 @@ def _assert_group_reuses_rebuilt_wrappers(name, objects_a, objects_b, semantic_k
     )
 
 
+def _native_sort_method_for_current_arch():
+    arch = impl.current_cfg().arch
+    prog = impl.get_runtime().prog
+    if arch == ti.cuda:
+        if not prog.cuda_cub_radix_sort_available():
+            pytest.skip("CUDA CUB native sort is unavailable in this build/runtime.")
+        return "cuda_cub_native"
+    if arch == ti.vulkan:
+        if not prog.vulkan_radix_sort_available():
+            pytest.skip("Vulkan native sort is unavailable in this build/runtime.")
+        return "vulkan_native_radix_u32"
+    if not prog.cpu_stable_sort_available():
+        pytest.skip("CPU native sort is unavailable in this build/runtime.")
+    return "cpu_native"
+
+
+def _require_native_scan_for_current_arch():
+    arch = impl.current_cfg().arch
+    prog = impl.get_runtime().prog
+    if arch == ti.cuda:
+        if not prog.cuda_cub_scan_available():
+            pytest.skip("CUDA CUB native scan is unavailable in this build/runtime.")
+        return
+    if arch == ti.vulkan:
+        if not prog.vulkan_scan_available():
+            pytest.skip("Vulkan native scan is unavailable in this build/runtime.")
+        return
+    if not prog.cpu_scan_available():
+        pytest.skip("CPU native scan is unavailable in this build/runtime.")
+
+
 @test_utils.test(arch=ti.cpu)
 def test_native_plan_descriptor_reuses_rebuilt_wrappers_for_algorithm_semantics():
     n = 32
@@ -258,6 +289,8 @@ def test_native_plan_cached_match_reuses_rebuilt_wrapper_keys():
     backend = "cpu_native"
     semantic_key = ("order_apply", n)
     objects_a = (src.field("vec"), order, dst.field("vec"))
+    src._member_view_cache.clear()
+    dst._member_view_cache.clear()
     objects_b = (src.field("vec"), order, dst.field("vec"))
     group = alg_impl._NativePrimitivePlanGroup(
         backend,
@@ -542,6 +575,84 @@ def test_graph_private_native_sequence_replays_native_plans():
     src.from_numpy(src_np)
     graph.run({})
     assert np.array_equal(dst.to_numpy(), (src_np * 2 + 1)[idx_np])
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_graph_private_native_sequence_sorts_with_native_backend():
+    method = _native_sort_method_for_current_arch()
+    n = 32
+    keys_np = ((np.arange(n, dtype=np.int32) * 17) % 41 - 20).astype(np.int32)
+    values_np = np.arange(n, dtype=np.int32) * 3 + 1
+    keys = ti.ndarray(ti.i32, shape=n)
+    values = ti.ndarray(ti.i32, shape=n)
+
+    seq = alg_impl.primitive_sequence()
+    seq.sort(keys, values, method=method)
+    builder = ti.graph.GraphBuilder()
+    assert builder._append_native(seq) is builder
+    graph = builder.compile()
+
+    for offset in (0, 7):
+        current_keys = (keys_np + offset).astype(np.int32)
+        keys.from_numpy(current_keys)
+        values.from_numpy(values_np)
+        graph.run({})
+        order = np.argsort(current_keys, kind="stable")
+        assert np.array_equal(keys.to_numpy(), current_keys[order])
+        assert np.array_equal(values.to_numpy(), values_np[order])
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_graph_private_native_sequence_sort_by_key_with_native_backend():
+    method = _native_sort_method_for_current_arch()
+    n = 32
+    primary_np = (np.arange(n, dtype=np.int32) % 5).astype(np.int32)
+    secondary_np = ((np.arange(n, dtype=np.int32) * 7) % 11).astype(np.int32)
+    values_np = np.arange(n, dtype=np.int32) * 13 + 3
+    primary = ti.ndarray(ti.i32, shape=n)
+    secondary = ti.ndarray(ti.i32, shape=n)
+    values = ti.ndarray(ti.i32, shape=n)
+
+    seq = alg_impl.primitive_sequence()
+    seq.sort_by_key([primary, secondary], values, method=method)
+    builder = ti.graph.GraphBuilder()
+    assert builder._append_native(seq) is builder
+    graph = builder.compile()
+
+    for offset in (0, 2):
+        current_primary = (primary_np + offset).astype(np.int32)
+        current_secondary = (secondary_np - offset).astype(np.int32)
+        primary.from_numpy(current_primary)
+        secondary.from_numpy(current_secondary)
+        values.from_numpy(values_np)
+        graph.run({})
+        order = np.lexsort((np.arange(n), current_secondary, current_primary))
+        assert np.array_equal(primary.to_numpy(), current_primary[order])
+        assert np.array_equal(secondary.to_numpy(), current_secondary[order])
+        assert np.array_equal(values.to_numpy(), values_np[order])
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_graph_private_native_sequence_scan_uses_prefix_sum_executor_plan():
+    _require_native_scan_for_current_arch()
+
+    n = 64
+    values_np = (np.arange(n, dtype=np.int32) % 13 - 4).astype(np.int32)
+    values = ti.ndarray(ti.i32, shape=n)
+
+    seq = alg_impl.primitive_sequence()
+    seq.scan(values)
+    builder = ti.graph.GraphBuilder()
+    assert builder._append_native(seq) is builder
+    graph = builder.compile()
+
+    for offset in (0, 5):
+        current = (values_np + offset).astype(np.int32)
+        values.from_numpy(current)
+        graph.run({})
+        expected = np.cumsum(current, dtype=np.int32).astype(np.int32)
+        assert np.array_equal(values.to_numpy(), expected)
+        assert seq.direct_plan_count == 1
 
 
 @test_utils.test(arch=ti.cpu)
