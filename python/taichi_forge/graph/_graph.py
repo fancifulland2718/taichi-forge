@@ -158,7 +158,7 @@ class _GraphSpec:
 
     def instance_key(self):
         runtime = impl.get_runtime()
-        return (impl.current_cfg().arch, id(runtime.prog))
+        return (impl.runtime_generation(), impl.current_cfg().arch, id(runtime.prog))
 
     def compiled_graph(self):
         if self.native_count:
@@ -427,9 +427,12 @@ class Graph:
             self._spec = _GraphSpec([node], aot_compiled_graph=compiled_graph)
         self._instances = {}
         self._instance = self._instance_for_current_runtime()
+        self._runtime_valid = True
         self._run_impl = self._instance.run_impl
+        impl.get_runtime().register_runtime_object(self)
 
     def run(self, args):
+        self._check_runtime_valid()
         self._run_impl(args)
 
     def _instance_for_current_runtime(self):
@@ -441,8 +444,22 @@ class Graph:
         return instance
 
     def _prewarm(self):
+        self._check_runtime_valid()
         self._instance.prewarm()
         return self
+
+    def _check_runtime_valid(self):
+        if not self._runtime_valid:
+            raise TaichiRuntimeError(
+                "This graph was compiled before ti.reset() or a runtime "
+                "reinitialization. Please rebuild the graph after ti.init()."
+            )
+
+    def _invalidate_runtime(self):
+        self._runtime_valid = False
+        self._run_impl = None
+        self._instance = None
+        self._instances.clear()
 
     @property
     def _debug_info(self):
@@ -450,10 +467,12 @@ class Graph:
 
     @property
     def _instance_debug_info(self):
+        self._check_runtime_valid()
         return self._instance.debug_info
 
     @property
     def _compiled_graph(self):
+        self._check_runtime_valid()
         return self._spec.compiled_graph()
 
 

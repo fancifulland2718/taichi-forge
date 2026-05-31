@@ -761,6 +761,7 @@ class PyTaichi:
             _sync_diagnostics["total_ms"] += (time.perf_counter() - start) * 1000.0
 
 
+_runtime_generation = 0
 pytaichi = PyTaichi()
 
 
@@ -768,8 +769,12 @@ def get_runtime():
     return pytaichi
 
 
+def runtime_generation():
+    return _runtime_generation
+
+
 def reset():
-    global pytaichi
+    global pytaichi, _runtime_generation
     old_kernels = pytaichi.kernels
     _dump_func_expansion_stats(pytaichi)
     window_module = sys.modules.get("taichi_forge.ui.window")
@@ -782,6 +787,7 @@ def reset():
         algorithms_module.clear_default_workspaces()
     pytaichi.clear()
     pytaichi = PyTaichi(old_kernels)
+    _runtime_generation += 1
     for k in old_kernels:
         k.reset()
     _ti_core.reset_default_compile_config()

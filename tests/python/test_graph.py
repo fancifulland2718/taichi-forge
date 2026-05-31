@@ -1,8 +1,9 @@
 import platform
+import gc
 
 import numpy as np
 import pytest
-from taichi_forge.lang.exception import TaichiCompilationError
+from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeError
 
 import taichi_forge as ti
 from tests import test_utils
@@ -410,6 +411,39 @@ def test_repeated_sequential_keeps_cuda_expanded_runtime_by_default():
     assert graph._instance_debug_info == {"kind": "single_cgraph"}
     assert graph._compiled_graph is not None
     _run_repeated_inc_graph(graph)
+
+
+@test_utils.test(arch=ti.cuda)
+def test_cuda_cgraph_cache_survives_reset_then_delete():
+    graph = _build_repeated_inc_graph()
+    arr = ti.ndarray(ti.i32, shape=())
+    arr.fill(0)
+    graph.run({"arr": arr})
+    assert arr.to_numpy()[()] == 4
+
+    ti.reset()
+    del graph
+    del arr
+    gc.collect()
+
+
+@test_utils.test(arch=[ti.cpu, ti.vulkan])
+def test_cgraph_run_after_reset_is_rejected():
+    graph = _build_repeated_inc_graph()
+    arr = ti.ndarray(ti.i32, shape=())
+    arr.fill(0)
+    graph.run({"arr": arr})
+    assert arr.to_numpy()[()] == 4
+
+    arch = ti.lang.impl.current_cfg().arch
+    ti.reset()
+    ti.init(arch=arch, enable_fallback=False)
+    assert graph._instance is None
+    assert graph._instances == {}
+    arr_after_reset = ti.ndarray(ti.i32, shape=())
+    arr_after_reset.fill(0)
+    with pytest.raises(TaichiRuntimeError, match="compiled before ti.reset"):
+        graph.run({"arr": arr_after_reset})
 
 
 @pytest.mark.parametrize("dt", [ti.i32, ti.i64, ti.u32, ti.u64])

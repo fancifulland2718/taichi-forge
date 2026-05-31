@@ -175,7 +175,7 @@ Vulkan 侧明确拒绝并裁剪过的方向：
 
 - `_GraphInstance._install_backend_executable()`：内部实现细节，用于安装默认 single CGraph 和 native replay executable。
 - `TI_VULKAN_NATIVE_COMMAND_REPLAY`：属于 native primitive command replay 组件，不控制普通 CGraph graph replay。
-- 文档中的历史实验记录：保留在 `graph_modernization_plan.zh.md`，用于解释为什么某些路径被拒绝或裁剪。
+- 历史实验记录：不作为对外文档发布；对外文档只保留 API、能力、限制和迁移边界。
 
 ## 5. 运行边界
 
