@@ -1,7 +1,10 @@
 import atexit
 import functools
 import math
+import os
 import shutil
+import subprocess
+import sys
 import threading
 from os import listdir, rmdir, stat
 from os.path import join
@@ -60,6 +63,36 @@ def cache_files_cnt():
         return len(listdir(tmp_offline_cache_file_path()))
     except FileNotFoundError:
         return 0
+
+
+def test_offline_cache_disabled_does_not_touch_locked_cache(tmp_path):
+    cache_dir = tmp_path / "ticache"
+    cache_dir.mkdir()
+    # Simulate a stale or concurrently held cache lock. offline_cache=False
+    # should keep reset/finalize away from disk cache maintenance entirely.
+    (cache_dir / "ticache_x64_s13.lock").write_text("locked")
+    script = tmp_path / "offline_cache_false_smoke.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import taichi_forge as ti",
+                f"ti.init(arch=ti.cpu, offline_cache=False, offline_cache_file_path={str(cache_dir)!r})",
+                "@ti.kernel",
+                "def k() -> ti.i32:",
+                "    return 7",
+                "assert k() == 7",
+                "ti.reset()",
+            ]
+        )
+    )
+    env = os.environ.copy()
+    env["TI_SKIP_VERSION_CHECK"] = "ON"
+    env["PYTHONPATH"] = os.pathsep.join(
+        [os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "python")), env.get("PYTHONPATH", "")]
+    )
+    proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, env=env, check=False)
+    assert proc.returncode == 0, proc.stderr
+    assert "Lock " not in proc.stdout + proc.stderr
 
 
 @ti.kernel

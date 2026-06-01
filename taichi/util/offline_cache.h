@@ -29,6 +29,13 @@ constexpr char kMetalCacheSubPath[] = "metal";
 
 using Version = std::uint16_t[3];  // {MAJOR, MINOR, PATCH}
 
+constexpr int kMetadataLockDelayMs = 50;
+constexpr int kMetadataLockTryCount = 40;
+
+inline bool lock_metadata_file(const std::string &path) {
+  return lock_with_file(path, kMetadataLockDelayMs, kMetadataLockTryCount);
+}
+
 enum CleanCacheFlags {
   NotClean = 0b000,
   CleanOldVersion = 0b001,
@@ -172,6 +179,9 @@ class CacheCleaner {
     if (!taichi::path_exists(path)) {
       return;
     }
+    if (!taichi::path_exists(metadata_file)) {
+      return;
+    }
 
     MetadataType cache_data;
     std::vector<std::string> files_to_rm;
@@ -181,10 +191,8 @@ class CacheCleaner {
     {
       std::string lock_path =
           taichi::join_path(path, config.metadata_lock_name);
-      if (!lock_with_file(lock_path)) {
-        TI_WARN(
-            "Lock {} failed. You can run 'ti cache clean -p {}' and try again.",
-            lock_path, path);
+      if (!lock_metadata_file(lock_path)) {
+        TI_DEBUG("Skip cache cleaning because lock {} is busy", lock_path);
         return;
       }
       auto _ = make_cleanup([&lock_path]() {

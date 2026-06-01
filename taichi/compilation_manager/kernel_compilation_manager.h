@@ -77,6 +77,10 @@ class KernelCompilationManager final {
   // Dump the cached data in memory to disk
   void dump();
 
+  // Drop in-memory compiled kernels without touching disk metadata. Used when
+  // offline_cache is disabled, while preserving finalize-time ownership order.
+  void clear();
+
   // Run offline cache cleaning
   void clean_offline_cache(offline_cache::CleanCachePolicy policy,
                            int max_bytes,

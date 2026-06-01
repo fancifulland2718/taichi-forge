@@ -11,12 +11,20 @@ void ProgramImpl::compile_snode_tree_types(SNodeTree *tree) {
 }
 
 void ProgramImpl::dump_cache_data_to_disk() {
-  auto &mgr = get_kernel_compilation_manager();
+  if (!config->offline_cache && !kernel_com_mgr_) {
+    return;
+  }
+  auto &mgr =
+      kernel_com_mgr_ ? *kernel_com_mgr_ : get_kernel_compilation_manager();
+  if (!config->offline_cache) {
+    mgr.clear();
+    return;
+  }
+  mgr.dump();
   mgr.clean_offline_cache(offline_cache::string_to_clean_cache_policy(
                               config->offline_cache_cleaning_policy),
                           config->offline_cache_max_size_of_files,
                           config->offline_cache_cleaning_factor, config->arch);
-  mgr.dump();
 }
 
 KernelCompilationManager &ProgramImpl::get_kernel_compilation_manager() {

@@ -120,7 +120,7 @@ void KernelCompilationManager::ensure_metadata_loaded_locked(Arch arch) {
   auto filepath = join_path(config_.offline_cache_path, metadata_filename_);
   auto lock_path = join_path(config_.offline_cache_path, metadata_lock_name_);
   if (path_exists(filepath)) {
-    if (lock_with_file(lock_path)) {
+    if (offline_cache::lock_metadata_file(lock_path)) {
       auto _ = make_unlocker(lock_path);
       offline_cache::load_metadata_with_checking(cached_data_, filepath);
     } else {
@@ -243,11 +243,25 @@ void KernelCompilationManager::dump() {
   // is still finishing a compile during shutdown.
   std::lock_guard<std::mutex> guard(cache_mutex_);
 
-  if (caching_kernels_.empty()) {
+  if (caching_kernels_.empty() && updated_data_.empty()) {
+    return;
+  }
+  bool has_disk_cache_work = !updated_data_.empty();
+  if (!has_disk_cache_work) {
+    for (const auto &[_, kernel] : caching_kernels_) {
+      if (kernel.cache_mode == CacheData::MemAndDiskCache) {
+        has_disk_cache_work = true;
+        break;
+      }
+    }
+  }
+  if (!has_disk_cache_work) {
+    caching_kernels_.clear();
     return;
   }
   if (metadata_filename_.empty()) {
     caching_kernels_.clear();
+    updated_data_.clear();
     return;
   }
 
@@ -255,10 +269,11 @@ void KernelCompilationManager::dump() {
   auto filepath = join_path(config_.offline_cache_path, metadata_filename_);
   auto lock_path = join_path(config_.offline_cache_path, metadata_lock_name_);
 
-  if (!lock_with_file(lock_path)) {
+  if (!offline_cache::lock_metadata_file(lock_path)) {
     TI_WARN("Lock {} failed. Please run 'ti cache clean -p {}' and try again.",
             lock_path, config_.offline_cache_path);
     caching_kernels_.clear();  // Ignore the caching kernels
+    updated_data_.clear();
     return;
   }
 
@@ -316,6 +331,16 @@ void KernelCompilationManager::dump() {
   if (!kernels.empty()) {
     write_to_binary_file(data, filepath);
   }
+  updated_data_.clear();
+}
+
+void KernelCompilationManager::clear() {
+  std::lock_guard<std::mutex> guard(cache_mutex_);
+  caching_kernels_.clear();
+  cached_data_.kernels.clear();
+  cached_data_.size = 0;
+  updated_data_.clear();
+  in_progress_keys_.clear();
 }
 
 void KernelCompilationManager::clean_offline_cache(
@@ -331,9 +356,14 @@ void KernelCompilationManager::clean_offline_cache(
   config.max_size = max_bytes;
   {
     std::lock_guard<std::mutex> guard(cache_mutex_);
-    ensure_metadata_loaded_locked(arch);
-    config.metadata_filename = metadata_filename_;
-    config.metadata_lock_name = metadata_lock_name_;
+    const auto clean_metadata_filename = metadata_filename(arch);
+    TI_ASSERT_INFO(
+        !metadata_loaded_ || metadata_filename_ == clean_metadata_filename,
+        "KernelCompilationManager cannot clean offline-cache metadata shard "
+        "{} while loaded shard is {}",
+        clean_metadata_filename, metadata_filename_);
+    config.metadata_filename = clean_metadata_filename;
+    config.metadata_lock_name = metadata_lock_name(arch);
   }
   config.debugging_metadata_filename = "";
   CacheCleaner::run(config);

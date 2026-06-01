@@ -127,7 +127,7 @@ bool LlvmOfflineCacheFileReader::load_meta_data(
 
   std::string lock_path =
       taichi::join_path(cache_file_path, kMetadataFileLockName);
-  if (lock_with_file(lock_path)) {
+  if (offline_cache::lock_metadata_file(lock_path)) {
     auto _ = make_cleanup([&lock_path]() {
       if (!unlock_with_file(lock_path)) {
         TI_WARN(
@@ -315,7 +315,7 @@ void LlvmOfflineCacheFileWriter::dump(const std::string &path,
     // TODO(PGZXB): High overhead (read -> merge -> write). Redesign the
     // metadata file format to reduce overhead.
     std::string lock_path = taichi::join_path(path, kMetadataFileLockName);
-    if (!lock_with_file(lock_path)) {
+    if (!offline_cache::lock_metadata_file(lock_path)) {
       TI_WARN(
           "Lock {} failed. You can run 'ti cache clean -p {}' and try again.",
           lock_path, path);
