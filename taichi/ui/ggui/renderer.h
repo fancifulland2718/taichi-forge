@@ -13,6 +13,7 @@
 #include <optional>
 #include <set>
 #include <memory>
+#include <deque>
 
 #include "taichi/ui/utils/utils.h"
 #include "taichi/ui/ggui/vertex.h"
@@ -51,6 +52,7 @@ class TI_DLL_EXPORT Renderer {
   ~Renderer();
 
   void prepare_for_next_frame();
+  void wait_for_in_flight_frames();
 
   void set_background_color(const glm::vec3 &color);
 
@@ -84,9 +86,18 @@ class TI_DLL_EXPORT Renderer {
   taichi::lang::StreamSemaphore get_render_complete_semaphore();
 
  private:
+  struct InFlightFrame {
+    taichi::lang::StreamSemaphore complete;
+    std::vector<std::unique_ptr<Renderable>> renderables;
+  };
+
   void resize_lights_ssbo(int new_ssbo_size);
   void update_scene_data(SceneBase *scene);
   void init_scene_ubo();
+  void retire_completed_frames();
+  void wait_oldest_frame();
+  size_t max_frames_in_flight();
+
   glm::vec3 background_color_ = glm::vec3(0.f, 0.f, 0.f);
 
   AppContext app_context_;
@@ -94,6 +105,7 @@ class TI_DLL_EXPORT Renderer {
 
   std::vector<std::unique_ptr<Renderable>> renderables_;
   std::vector<Renderable *> render_queue_;
+  std::deque<InFlightFrame> in_flight_frames_;
 
   DeviceAllocationUnique lights_ssbo_{nullptr};
   unsigned long long lights_ssbo_size{0};

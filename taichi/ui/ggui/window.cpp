@@ -96,6 +96,7 @@ void Window::resize() {
     glfwGetFramebufferSize(glfw_window_, &width, &height);
     glfwWaitEvents();
   }
+  renderer_->wait_for_in_flight_frames();
   renderer_->app_context().config.width = width;
   renderer_->app_context().config.height = height;
 
@@ -137,6 +138,7 @@ void Window::present_frame() {
 
 Window::~Window() {
   if (renderer_) {
+    renderer_->wait_for_in_flight_frames();
     renderer_->app_context().device().wait_idle();
   }
   gui_.reset();

@@ -309,9 +309,108 @@ def copy_image_u8_to_rgba8_ti_ndarray(
         dst[i, j] = pack
 
 
+@ti.kernel
+def copy_image_f32_to_rgba8_texture(
+    src: ti.template(),
+    dst: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.rgba8, lod=0),
+    num_components: ti.template(),
+    gray_scale: ti.template(),
+):
+    for i, j in ti.ndrange(src.shape[0], src.shape[1]):
+        px = ti.Vector([0.0, 0.0, 0.0, 1.0])
+        if ti.static(gray_scale):
+            c = src[i, j]
+            c = ops.max(0.0, ops.min(1.0, c))
+            c = ti.floor(c * 255.0) / 255.0
+            px[0] = px[1] = px[2] = c
+        else:
+            for k in ti.static(range(num_components)):
+                c = 0.0
+                if ti.static(len(src.shape) == 3):
+                    c = src[i, j, k]
+                else:
+                    c = src[i, j][k]
+                c = ops.max(0.0, ops.min(1.0, c))
+                px[k] = ti.floor(c * 255.0) / 255.0
+        dst.store(ti.Vector([i, j]), px)
+
+
+@ti.kernel
+def copy_image_u8_to_rgba8_texture(
+    src: ti.template(),
+    dst: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.rgba8, lod=0),
+    num_components: ti.template(),
+    gray_scale: ti.template(),
+):
+    for i, j in ti.ndrange(src.shape[0], src.shape[1]):
+        px = ti.Vector([0.0, 0.0, 0.0, 1.0])
+        if ti.static(gray_scale):
+            c = ti.cast(src[i, j], f32) / 255.0
+            px[0] = px[1] = px[2] = c
+        else:
+            for k in ti.static(range(num_components)):
+                c = 0
+                if ti.static(len(src.shape) == 3):
+                    c = src[i, j, k]
+                else:
+                    c = src[i, j][k]
+                px[k] = ti.cast(c, f32) / 255.0
+        dst.store(ti.Vector([i, j]), px)
+
+
+@ti.kernel
+def copy_ndarray_f32_to_rgba8_texture(
+    src: ti.types.ndarray(),
+    dst: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.rgba8, lod=0),
+    num_components: ti.template(),
+    gray_scale: ti.template(),
+):
+    for i, j in ti.ndrange(src.shape[0], src.shape[1]):
+        px = ti.Vector([0.0, 0.0, 0.0, 1.0])
+        if ti.static(gray_scale):
+            c = src[i, j]
+            c = ops.max(0.0, ops.min(1.0, c))
+            c = ti.floor(c * 255.0) / 255.0
+            px[0] = px[1] = px[2] = c
+        else:
+            for k in ti.static(range(num_components)):
+                c = 0.0
+                if ti.static(len(src.shape) == 3):
+                    c = src[i, j, k]
+                else:
+                    c = src[i, j][k]
+                c = ops.max(0.0, ops.min(1.0, c))
+                px[k] = ti.floor(c * 255.0) / 255.0
+        dst.store(ti.Vector([i, j]), px)
+
+
+@ti.kernel
+def copy_ndarray_u8_to_rgba8_texture(
+    src: ti.types.ndarray(),
+    dst: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.rgba8, lod=0),
+    num_components: ti.template(),
+    gray_scale: ti.template(),
+):
+    for i, j in ti.ndrange(src.shape[0], src.shape[1]):
+        px = ti.Vector([0.0, 0.0, 0.0, 1.0])
+        if ti.static(gray_scale):
+            c = ti.cast(src[i, j], f32) / 255.0
+            px[0] = px[1] = px[2] = c
+        else:
+            for k in ti.static(range(num_components)):
+                c = 0
+                if ti.static(len(src.shape) == 3):
+                    c = src[i, j, k]
+                else:
+                    c = src[i, j][k]
+                px[k] = ti.cast(c, f32) / 255.0
+        dst.store(ti.Vector([i, j]), px)
+
+
 # ggui renderer always assumes the input image to be u8 RGBA
 # if the user input is not in this format, a staging ti field is needed
 image_field_cache = {}
+image_texture_cache = {}
 _NUMPY_RGBA8_HOST_PACK_MAX_PIXELS = 256 * 256
 _TAICHI_NDARRAY_RGBA8_HOST_PACK_MAX_PIXELS = 128 * 128
 _TAICHI_FIELD_RGBA8_HOST_PACK_MAX_PIXELS = 128 * 128
@@ -366,6 +465,47 @@ def _try_pack_taichi_image_on_host(image, staging_img, num_components, gray_scal
         return False
     _copy_numpy_image_to_rgba8(image_np, staging_img, num_components, gray_scale)
     return True
+
+
+def _get_image_channel_info(image):
+    if len(image.shape) == 2:
+        if hasattr(image, "n"):
+            return image.n, False
+        return 3, True
+    if len(image.shape) == 3:
+        return image.shape[2], False
+    raise Exception("the shape of the image must be of the form (width,height) or (width,height,channels)")
+
+
+def to_rgba8_texture(image):
+    if isinstance(image, (Texture, np.ndarray)):
+        return None
+    if image.dtype not in (u8, f32):
+        return None
+    try:
+        channels, is_grayscale = _get_image_channel_info(image)
+    except Exception:
+        return None
+    if channels < 1 or channels > 4:
+        return None
+
+    texture_shape = (image.shape[0], image.shape[1])
+    cached = image_texture_cache.get(image)
+    if cached is None or cached.shape != texture_shape:
+        cached = ti.Texture(ti.Format.rgba8, texture_shape)
+        image_texture_cache[image] = cached
+
+    is_ti_ndarray = hasattr(image, "to_numpy") and not hasattr(image, "snode")
+    if is_ti_ndarray:
+        if image.dtype == u8:
+            copy_ndarray_u8_to_rgba8_texture(image, cached, channels, is_grayscale)
+        else:
+            copy_ndarray_f32_to_rgba8_texture(image, cached, channels, is_grayscale)
+    elif image.dtype == u8:
+        copy_image_u8_to_rgba8_texture(image, cached, channels, is_grayscale)
+    else:
+        copy_image_f32_to_rgba8_texture(image, cached, channels, is_grayscale)
+    return cached
 
 
 def to_rgba8(image):

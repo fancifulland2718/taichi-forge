@@ -548,7 +548,8 @@ class VulkanSurface : public Surface {
   VulkanDevice *device_{nullptr};
   VkSurfaceKHR surface_{VK_NULL_HANDLE};
   VkSwapchainKHR swapchain_{VK_NULL_HANDLE};
-  vkapi::IVkSemaphore image_available_{nullptr};
+  std::vector<vkapi::IVkSemaphore> image_available_;
+  uint32_t image_available_index_{0};
   BufferFormat image_format_{BufferFormat::unknown};
 
   uint32_t image_index_{0};

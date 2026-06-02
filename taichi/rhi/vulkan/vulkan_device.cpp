@@ -2952,8 +2952,6 @@ VulkanSurface::VulkanSurface(VulkanDevice *device, const SurfaceConfig &config)
     surface_ = (VkSurfaceKHR)config.native_surface_handle;
 
     create_swap_chain();
-
-    image_available_ = vkapi::create_semaphore(device->vk_device(), 0);
   } else {
     create_offscreen_images();
   }
@@ -3113,6 +3111,13 @@ void VulkanSurface::create_swap_chain() {
     swapchain_images_.push_back(
         device_->import_vk_image(image, view, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR));
   }
+
+  image_available_.clear();
+  image_available_.reserve(swapchain_images_.size());
+  for (size_t i = 0; i < swapchain_images_.size(); ++i) {
+    image_available_.push_back(vkapi::create_semaphore(device_->vk_device(), 0));
+  }
+  image_available_index_ = 0;
 }
 
 void VulkanSurface::destroy_swap_chain() {
@@ -3123,6 +3128,7 @@ void VulkanSurface::destroy_swap_chain() {
     std::get<1>(device_->get_vk_image(alloc)) = nullptr;
     device_->destroy_image(alloc);
   }
+  image_available_.clear();
   swapchain_images_.clear();
   vkDestroySwapchainKHR(device_->vk_device(), swapchain_, nullptr);
   swapchain_ = VK_NULL_HANDLE;
@@ -3135,7 +3141,6 @@ int VulkanSurface::get_image_count() {
 VulkanSurface::~VulkanSurface() {
   if (config_.native_surface_handle) {
     destroy_swap_chain();
-    image_available_ = nullptr;
   } else {
     destroy_offscreen_images();
   }
@@ -3165,13 +3170,16 @@ StreamSemaphore VulkanSurface::acquire_next_image() {
     image_index_ = (image_index_ + 1) % uint32_t(swapchain_images_.size());
     return nullptr;
   } else {
+    auto image_available = image_available_[image_available_index_];
+    image_available_index_ =
+        (image_available_index_ + 1) % uint32_t(image_available_.size());
     VkResult res = vkAcquireNextImageKHR(
         device_->vk_device(), swapchain_, uint64_t(4 * 1e9),
-        image_available_->semaphore, VK_NULL_HANDLE, &image_index_);
+        image_available->semaphore, VK_NULL_HANDLE, &image_index_);
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
       BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "vkAcquireNextImageKHR failed");
     }
-    return std::make_shared<VulkanStreamSemaphoreObject>(image_available_);
+    return std::make_shared<VulkanStreamSemaphoreObject>(image_available);
   }
 }
 
@@ -3218,8 +3226,6 @@ void VulkanSurface::present_image(
   presentInfo.pResults = nullptr;
 
   vkQueuePresentKHR(device_->graphics_queue(), &presentInfo);
-
-  device_->wait_idle();
 }
 
 VulkanStream::VulkanStream(VulkanDevice &device,

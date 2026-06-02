@@ -228,6 +228,44 @@ Renderer::~Renderer() {
 }
 
 void Renderer::prepare_for_next_frame() {
+  retire_completed_frames();
+  while (in_flight_frames_.size() >= max_frames_in_flight()) {
+    wait_oldest_frame();
+  }
+}
+
+size_t Renderer::max_frames_in_flight() {
+  return std::max<size_t>(
+      2, static_cast<size_t>(swap_chain_.surface().get_image_count()));
+}
+
+void Renderer::retire_completed_frames() {
+  while (!in_flight_frames_.empty()) {
+    auto &frame = in_flight_frames_.front();
+    if (frame.complete && !frame.complete->is_ready()) {
+      return;
+    }
+    in_flight_frames_.pop_front();
+  }
+}
+
+void Renderer::wait_oldest_frame() {
+  if (in_flight_frames_.empty()) {
+    return;
+  }
+  auto &frame = in_flight_frames_.front();
+  if (!frame.complete || !frame.complete->wait()) {
+    app_context_.device().wait_idle();
+    in_flight_frames_.clear();
+    return;
+  }
+  in_flight_frames_.pop_front();
+}
+
+void Renderer::wait_for_in_flight_frames() {
+  while (!in_flight_frames_.empty()) {
+    wait_oldest_frame();
+  }
 }
 
 void Renderer::draw_frame(GuiBase *gui_base) {
@@ -308,7 +346,10 @@ void Renderer::draw_frame(GuiBase *gui_base) {
   render_complete_semaphore_ = stream->submit(cmd_list.get(), wait_semaphores);
 
   render_queue_.clear();
-  renderables_.clear();
+  InFlightFrame frame;
+  frame.complete = render_complete_semaphore_;
+  frame.renderables = std::move(renderables_);
+  in_flight_frames_.push_back(std::move(frame));
 }
 
 const AppContext &Renderer::app_context() const {
@@ -328,7 +369,7 @@ SwapChain &Renderer::swap_chain() {
 }
 
 taichi::lang::StreamSemaphore Renderer::get_render_complete_semaphore() {
-  return std::move(render_complete_semaphore_);
+  return render_complete_semaphore_;
 }
 
 }  // namespace vulkan

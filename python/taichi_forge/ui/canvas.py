@@ -9,6 +9,7 @@ from .staging_buffer import (
     get_indices_field_v2,
     get_vbo_field_v2,
     to_rgba8,
+    to_rgba8_texture,
 )
 from .utils import get_field_info
 
@@ -61,6 +62,11 @@ class Canvas:
         if is_texture and prog_is_vk:
             self.canvas.set_image_texture(img.tex)
         else:
+            if prog_is_vk:
+                rgba8_texture = to_rgba8_texture(img)
+                if rgba8_texture is not None:
+                    self.canvas.set_image_texture(rgba8_texture.tex)
+                    return
             staging_img = to_rgba8(img)
             info = self._get_set_image_info(staging_img)
             self.canvas.set_image(info)
