@@ -613,6 +613,100 @@ def test_hidden_window_show_after_set_image():
 
 
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=supported_archs)
+def test_hidden_window_display_stats_after_set_image():
+    window = ti.ui.Window("test", (64, 64), show_window=False)
+    canvas = window.get_canvas()
+
+    img = ti.Vector.field(4, ti.f32, (64, 64))
+
+    @ti.kernel
+    def init_img():
+        for i, j in img:
+            img[i, j] = ti.Vector([i, j, 0, 64], dt=ti.f32) / 64
+
+    init_img()
+    window.reset_display_stats()
+    assert window.is_headless_display() is True
+    assert canvas.set_image(img) is True
+    stats = window.get_display_stats()
+    assert stats["display_mode"] == "offscreen"
+    assert stats["headless"] is True
+    assert stats["accepted_frames"] == 1
+    assert stats["submitted_frames"] == 0
+    assert stats["window_submitted_frames"] == 0
+    assert stats["offscreen_submitted_frames"] == 0
+    assert stats["last_accepted"] is True
+
+    assert window.show() is True
+    stats = window.get_display_stats()
+    assert stats["accepted_frames"] == 1
+    assert stats["submitted_frames"] == 1
+    assert stats["window_submitted_frames"] == 0
+    assert stats["offscreen_submitted_frames"] == 1
+    assert stats["dropped_frames"] == 0
+    assert stats["last_submitted"] is True
+    assert stats["last_window_submitted"] is False
+    assert stats["last_offscreen_submitted"] is True
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_set_image_display_frame_host_rgba8():
+    window = ti.ui.Window("test", (64, 64), show_window=False)
+    canvas = window.get_canvas()
+
+    x = np.arange(64, dtype=np.uint8)[:, None]
+    y = np.arange(64, dtype=np.uint8)[None, :]
+    image = np.empty((64, 64, 4), dtype=np.uint8)
+    image[..., 0] = x
+    image[..., 1] = y
+    image[..., 2] = np.uint8(0)
+    image[..., 3] = np.uint8(255)
+
+    frame = ti.ui.DisplayFrame.from_numpy_rgba8(image)
+    window.reset_display_stats()
+    assert canvas.submit_frame(frame) is True
+    stats = window.get_display_stats()
+    assert stats["accepted_frames"] == 1
+    assert stats["last_accepted"] is True
+
+    rendered = window.get_image_buffer_as_numpy()
+    expected = image.astype(np.float32) / 255.0
+    np.testing.assert_allclose(rendered, expected, atol=1.0 / 255.0 + 1e-5)
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_set_image_display_frame_packed_u32_ndarray():
+    window = ti.ui.Window("test", (64, 64), show_window=False)
+    canvas = window.get_canvas()
+    image = ti.ndarray(ti.u32, shape=(64, 64))
+
+    @ti.kernel
+    def init_img(img: ti.types.ndarray()):
+        for i, j in ti.ndrange(64, 64):
+            img[i, j] = ti.cast(i, ti.u32) | (ti.cast(j, ti.u32) << 8) | (ti.u32(255) << 24)
+
+    init_img(image)
+    frame = ti.ui.DisplayFrame.from_packed_u32_ndarray(image)
+    assert canvas.submit_frame(frame) is True
+
+    rendered = window.get_image_buffer_as_numpy()
+    expected = np.empty((64, 64, 4), dtype=np.float32)
+    x = np.arange(64, dtype=np.float32)[:, None]
+    y = np.arange(64, dtype=np.float32)[None, :]
+    expected[..., 0] = x / 255.0
+    expected[..., 1] = y / 255.0
+    expected[..., 2] = 0.0
+    expected[..., 3] = 1.0
+    np.testing.assert_allclose(rendered, expected, atol=1.0 / 255.0 + 1e-5)
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
 def test_hidden_window_show_after_set_image_process_exit(tmp_path):
     if not is_arch_supported(ti.vulkan):
         pytest.skip("Vulkan is not supported")
