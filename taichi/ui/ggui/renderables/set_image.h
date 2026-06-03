@@ -43,7 +43,12 @@ class SetImage final : public Renderable {
   void record_this_frame_commands(
       taichi::lang::CommandList *command_list) final;
 
+  void record_prepass_this_frame_commands(
+      taichi::lang::CommandList *command_list) final;
+
   void update_data(const SetImageInfo &info);
+
+  void update_data(const DisplayFrameInfo &info);
 
   void update_data(taichi::lang::Texture *tex);
 
@@ -52,6 +57,12 @@ class SetImage final : public Renderable {
   int height_{0};
 
   taichi::lang::DeviceImageUnique texture_{nullptr};
+  taichi::lang::DeviceAllocationUnique host_staging_{nullptr};
+  uint64_t upload_staging_size_{0};
+  bool upload_staging_host_write_{false};
+  bool upload_staging_export_sharing_{false};
+  taichi::lang::DevicePtr pending_upload_buffer_{taichi::lang::kDeviceNullPtr};
+  bool pending_upload_{false};
 
   taichi::lang::BufferFormat format_;
 
@@ -59,6 +70,20 @@ class SetImage final : public Renderable {
   void resize_texture(int width, int height, taichi::lang::BufferFormat format);
 
   void update_ubo(float x_factor, float y_factor, bool transpose);
+
+  taichi::lang::DevicePtr upload_host_rgba8(const void *host_ptr,
+                                            int width,
+                                            int height,
+                                            int row_stride_bytes);
+
+  taichi::lang::DevicePtr stage_device_rgba8(taichi::lang::DevicePtr src,
+                                             uint64_t size_bytes);
+
+  taichi::lang::DevicePtr ensure_upload_staging(uint64_t size_bytes,
+                                                bool host_write,
+                                                bool export_sharing);
+
+  void reset_upload_staging();
 };
 
 }  // namespace vulkan

@@ -2,6 +2,7 @@ from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
 from taichi_forge.lang._texture import Texture
 from .scene import SceneV2
+from .display_frame import DisplayFrame
 
 from .staging_buffer import (
     copy_all_to_vbo,
@@ -22,8 +23,9 @@ class Canvas:
     please call the `get_canvas()` method of :class:`~taichi_forge.ui.Window`.
     """
 
-    def __init__(self, canvas) -> None:
+    def __init__(self, canvas, window=None) -> None:
         self.canvas = canvas  # reference to a PyCanvas
+        self.window = window
         self._set_image_info_cache = {}
 
     def _get_set_image_info(self, staging_img):
@@ -56,20 +58,56 @@ class Canvas:
             img (numpy.ndarray, :class:`~taichi_forge.MatrixField`, :class:`~taichi_forge.Field`, :class:`~taichi_forge.Texture`): \
                 the image to be shown.
         """
+        if isinstance(img, DisplayFrame):
+            return self.submit_frame(img)
+        if self.window is not None and not self.window.can_render_frame():
+            self.window.record_display_frame_dropped()
+            return False
         is_texture = isinstance(img, Texture)
         prog_is_vk = impl.pytaichi.prog.config().arch == _ti_core.Arch.vulkan
         # FIXME: Remove this hack. Maybe add a query function for whether the texture can be presented
         if is_texture and prog_is_vk:
             self.canvas.set_image_texture(img.tex)
+            if self.window is not None:
+                self.window.record_display_frame_accepted()
+            return True
         else:
             if prog_is_vk:
                 rgba8_texture = to_rgba8_texture(img)
                 if rgba8_texture is not None:
                     self.canvas.set_image_texture(rgba8_texture.tex)
-                    return
+                    if self.window is not None:
+                        self.window.record_display_frame_accepted()
+                    return True
             staging_img = to_rgba8(img)
             info = self._get_set_image_info(staging_img)
             self.canvas.set_image(info)
+            if self.window is not None:
+                self.window.record_display_frame_accepted()
+            return True
+
+    def submit_frame(self, frame):
+        """Submit a display-ready frame to the canvas."""
+        if self.window is not None and not self.window.can_render_frame():
+            self.window.record_display_frame_dropped()
+            return False
+        if frame.kind == DisplayFrame.HOST_RGBA8:
+            self.canvas.set_image_host_rgba8(
+                frame.host_rgba8,
+                frame.width,
+                frame.height,
+                frame.row_stride_bytes,
+                frame.transpose,
+            )
+        elif frame.kind == DisplayFrame.PACKED_U32:
+            self.canvas.set_image(get_field_info(frame.packed_u32))
+        elif frame.kind == DisplayFrame.TEXTURE:
+            self.canvas.set_image_texture(frame.texture.tex)
+        else:
+            raise ValueError(f"unsupported display frame kind: {frame.kind}")
+        if self.window is not None:
+            self.window.record_display_frame_accepted()
+        return True
 
     def contour(self, scalar_field, cmap_name="plasma", normalize=False):
         """Plot a contour view of a scalar field.

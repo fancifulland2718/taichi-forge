@@ -139,12 +139,11 @@ void cuda_memcpy(void *dst, void *src, size_t size) {
   CUDADriver::get_instance().memcpy_device_to_device(dst, src, size);
 }
 
-}  // namespace
-
-void memcpy_cuda_to_vulkan(DevicePtr dst, DevicePtr src, uint64_t size) {
-  VulkanDevice *vk_dev = dynamic_cast<VulkanDevice *>(dst.device);
-  CudaDevice *cuda_dev = dynamic_cast<CudaDevice *>(src.device);
-
+void memcpy_cuda_to_vulkan_impl(VulkanDevice *vk_dev,
+                                CudaDevice *cuda_dev,
+                                DevicePtr dst,
+                                DevicePtr src,
+                                uint64_t size) {
   DeviceAllocation dst_alloc(dst);
   DeviceAllocation src_alloc(src);
 
@@ -177,6 +176,26 @@ void memcpy_cuda_to_vulkan(DevicePtr dst, DevicePtr src, uint64_t size) {
       (unsigned char *)src_alloc_info.ptr + src.offset;
 
   cuda_memcpy(dst_cuda_ptr, src_cuda_ptr, size);
+}
+
+}  // namespace
+
+bool is_cuda_to_vulkan_copy(Device *dst_device, Device *src_device) {
+  return dynamic_cast<VulkanDevice *>(dst_device) &&
+         dynamic_cast<CudaDevice *>(src_device);
+}
+
+void memcpy_cuda_to_vulkan_fast(DevicePtr dst, DevicePtr src, uint64_t size) {
+  VulkanDevice *vk_dev = dynamic_cast<VulkanDevice *>(dst.device);
+  CudaDevice *cuda_dev = dynamic_cast<CudaDevice *>(src.device);
+  TI_ASSERT(vk_dev && cuda_dev);
+  memcpy_cuda_to_vulkan_impl(vk_dev, cuda_dev, dst, src, size);
+}
+
+void memcpy_cuda_to_vulkan(DevicePtr dst, DevicePtr src, uint64_t size) {
+  VulkanDevice *vk_dev = dynamic_cast<VulkanDevice *>(dst.device);
+  CudaDevice *cuda_dev = dynamic_cast<CudaDevice *>(src.device);
+  memcpy_cuda_to_vulkan_impl(vk_dev, cuda_dev, dst, src, size);
 }
 
 void memcpy_vulkan_to_cuda(DevicePtr dst, DevicePtr src, uint64_t size) {
@@ -218,6 +237,14 @@ void memcpy_vulkan_to_cuda(DevicePtr dst, DevicePtr src, uint64_t size) {
 }
 
 #else
+bool is_cuda_to_vulkan_copy(Device *dst_device, Device *src_device) {
+  return false;
+}
+
+void memcpy_cuda_to_vulkan_fast(DevicePtr dst, DevicePtr src, uint64_t size) {
+  TI_NOT_IMPLEMENTED;
+}
+
 void memcpy_cuda_to_vulkan(DevicePtr dst, DevicePtr src, uint64_t size) {
   TI_NOT_IMPLEMENTED;
 }

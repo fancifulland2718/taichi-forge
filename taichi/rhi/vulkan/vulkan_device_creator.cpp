@@ -547,6 +547,7 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       physical_device_, nullptr, &extension_count, extension_properties.data());
 
   bool has_swapchain = false;
+  bool has_present_mode_fifo_latest_ready = false;
 
   [[maybe_unused]] bool portability_subset_enabled = false;
 
@@ -599,6 +600,12 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (name == VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME) {
       enabled_extensions.push_back(ext.extensionName);
+    } else if (name == VK_KHR_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME ||
+               name == VK_EXT_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME) {
+      if (!has_present_mode_fifo_latest_ready) {
+        has_present_mode_fifo_latest_ready = true;
+        enabled_extensions.push_back(ext.extensionName);
+      }
     } else if (name == VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME &&
                params_.enable_validation_layer) {
       // VK_KHR_shader_non_semantic_info isn't supported on molten-vk.
@@ -712,6 +719,10 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_feature{};
   dynamic_rendering_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
+  VkPhysicalDevicePresentModeFifoLatestReadyFeaturesKHR
+      present_mode_fifo_latest_ready_feature{};
+  present_mode_fifo_latest_ready_feature.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_MODE_FIFO_LATEST_READY_FEATURES_KHR;
 
   if (ti_device_->vk_caps().physical_device_features2) {
     VkPhysicalDeviceFeatures2KHR features2{};
@@ -867,6 +878,19 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       pNextEnd = &dynamic_rendering_feature.pNext;
     }
     */
+
+    // FIFO_LATEST_READY present mode
+    if (CHECK_EXTENSION(VK_KHR_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME) ||
+        CHECK_EXTENSION(VK_EXT_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME)) {
+      features2.pNext = &present_mode_fifo_latest_ready_feature;
+      vkGetPhysicalDeviceFeatures2KHR(physical_device_, &features2);
+
+      if (present_mode_fifo_latest_ready_feature.presentModeFifoLatestReady) {
+        ti_device_->vk_caps().present_mode_fifo_latest_ready = true;
+        *pNextEnd = &present_mode_fifo_latest_ready_feature;
+        pNextEnd = &present_mode_fifo_latest_ready_feature.pNext;
+      }
+    }
 
     // TODO: add atomic min/max feature
   }

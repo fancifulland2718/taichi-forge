@@ -912,6 +912,12 @@ class RHI_DLL_EXPORT Device {
   }
 };
 
+struct SurfaceImage {
+  StreamSemaphore image_available{nullptr};
+  DeviceAllocation image;
+  uint32_t image_index{0};
+};
+
 class RHI_DLL_EXPORT Surface {
  public:
   virtual ~Surface() {
@@ -919,8 +925,24 @@ class RHI_DLL_EXPORT Surface {
 
   virtual StreamSemaphore acquire_next_image() = 0;
   virtual DeviceAllocation get_target_image() = 0;
+  virtual SurfaceImage acquire_surface_image() {
+    SurfaceImage surface_image;
+    surface_image.image_available = acquire_next_image();
+    surface_image.image = get_target_image();
+    return surface_image;
+  }
+  virtual bool try_acquire_surface_image(SurfaceImage *surface_image) {
+    *surface_image = acquire_surface_image();
+    return true;
+  }
   virtual void present_image(
       const std::vector<StreamSemaphore> &wait_semaphores = {}) = 0;
+  virtual void present_surface_image(
+      const SurfaceImage &surface_image,
+      const std::vector<StreamSemaphore> &wait_semaphores = {}) {
+    (void)surface_image;
+    present_image(wait_semaphores);
+  }
   virtual std::pair<uint32_t, uint32_t> get_size() = 0;
   virtual int get_image_count() = 0;
   virtual BufferFormat image_format() = 0;

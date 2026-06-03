@@ -19,6 +19,10 @@ void Canvas::set_image(const SetImageInfo &info) {
   renderer_->set_image(info);
 }
 
+void Canvas::set_image(const DisplayFrameInfo &info) {
+  renderer_->set_image(info);
+}
+
 void Canvas::set_image(Texture *tex) {
   renderer_->set_image(tex);
 }

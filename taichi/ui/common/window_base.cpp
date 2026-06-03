@@ -8,6 +8,7 @@ namespace taichi::ui {
               "show_window must be True to use this method")
 
 WindowBase::WindowBase(AppConfig config) : config_(config) {
+  display_stats_ = {};
   if (config_.show_window) {
     glfw_window_ = create_glfw_window_(config_.name, config_.width,
                                        config_.height, config_.window_pos_x,
@@ -57,7 +58,7 @@ SceneBase *WindowBase::get_scene() {
   return nullptr;
 }
 
-void WindowBase::show() {
+bool WindowBase::show() {
   CHECK_WINDOW_SHOWING;
   ++frames_since_last_record_;
 
@@ -75,6 +76,78 @@ void WindowBase::show() {
   }
 
   glfwPollEvents();
+  return true;
+}
+
+bool WindowBase::can_render_frame() {
+  return true;
+}
+
+void WindowBase::clear_display_last_flags() {
+  display_stats_.last_accepted = false;
+  display_stats_.last_submitted = false;
+  display_stats_.last_window_submitted = false;
+  display_stats_.last_offscreen_submitted = false;
+  display_stats_.last_dropped = false;
+  display_stats_.last_reused = false;
+}
+
+void WindowBase::record_display_frame_accepted() {
+  clear_display_last_flags();
+  ++display_stats_.accepted_frames;
+  display_stats_.last_accepted = true;
+}
+
+void WindowBase::record_display_frame_submitted() {
+  clear_display_last_flags();
+  ++display_stats_.submitted_frames;
+  display_stats_.last_submitted = true;
+  if (config_.show_window) {
+    ++display_stats_.window_submitted_frames;
+    display_stats_.last_window_submitted = true;
+  } else {
+    ++display_stats_.offscreen_submitted_frames;
+    display_stats_.last_offscreen_submitted = true;
+  }
+}
+
+void WindowBase::record_display_frame_dropped() {
+  clear_display_last_flags();
+  ++display_stats_.dropped_frames;
+  display_stats_.last_dropped = true;
+}
+
+void WindowBase::record_display_frame_reused() {
+  clear_display_last_flags();
+  ++display_stats_.reused_frames;
+  display_stats_.last_reused = true;
+}
+
+DisplayStats WindowBase::get_display_stats() const {
+  DisplayStats stats = display_stats_;
+  if (stats.accepted_frames == 0) {
+    stats.last_accepted = false;
+  }
+  if (stats.submitted_frames == 0) {
+    stats.last_submitted = false;
+  }
+  if (stats.window_submitted_frames == 0) {
+    stats.last_window_submitted = false;
+  }
+  if (stats.offscreen_submitted_frames == 0) {
+    stats.last_offscreen_submitted = false;
+  }
+  if (stats.dropped_frames == 0) {
+    stats.last_dropped = false;
+  }
+  if (stats.reused_frames == 0) {
+    stats.last_reused = false;
+  }
+  return stats;
+}
+
+void WindowBase::reset_display_stats() {
+  display_stats_ = {};
 }
 
 bool WindowBase::is_pressed(std::string button) {
@@ -86,7 +159,7 @@ bool WindowBase::is_pressed(std::string button) {
     TI_TRACE("Pressed: {}.", e.what());
     return false;
   }
-  return input_handler_.is_pressed(button_id) > 0;
+  return input_handler_.is_pressed(button_id);
 }
 
 bool WindowBase::is_running() {

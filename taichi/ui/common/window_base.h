@@ -9,6 +9,7 @@
 #include <queue>
 #include <list>
 #include <tuple>
+#include <cstdint>
 
 #include "taichi/ui/common/canvas_base.h"
 #include "taichi/ui/common/event.h"
@@ -19,6 +20,21 @@
 struct GLFWwindow;
 
 namespace taichi::ui {
+
+struct DisplayStats {
+  uint64_t accepted_frames{0};
+  uint64_t submitted_frames{0};
+  uint64_t window_submitted_frames{0};
+  uint64_t offscreen_submitted_frames{0};
+  uint64_t dropped_frames{0};
+  uint64_t reused_frames{0};
+  bool last_accepted{false};
+  bool last_submitted{false};
+  bool last_window_submitted{false};
+  bool last_offscreen_submitted{false};
+  bool last_dropped{false};
+  bool last_reused{false};
+};
 
 class WindowBase {
  public:
@@ -42,7 +58,17 @@ class WindowBase {
 
   virtual SceneBase *get_scene();
 
-  virtual void show();
+  virtual bool show();
+
+  virtual bool can_render_frame();
+
+  virtual void record_display_frame_accepted();
+
+  virtual void record_display_frame_dropped();
+
+  virtual DisplayStats get_display_stats() const;
+
+  virtual void reset_display_stats();
 
   virtual std::pair<uint32_t, uint32_t> get_window_shape() = 0;
 
@@ -67,11 +93,18 @@ class WindowBase {
 
   std::list<Event> events_;
   Event current_event_{EventType::Any, ""};
+  DisplayStats display_stats_;
 
  protected:
   explicit WindowBase(AppConfig config);
 
   void set_callbacks();
+
+  void record_display_frame_submitted();
+
+  void record_display_frame_reused();
+
+  void clear_display_last_flags();
 
   static void key_callback(GLFWwindow *glfw_window,
                            int key,

@@ -1,6 +1,9 @@
 #include "taichi/ui/ggui/window.h"
 #include "taichi/program/callable.h"
 
+#include <chrono>
+#include <thread>
+
 #include "taichi/program/program.h"
 #include "taichi/ui/utils/utils.h"
 #include "taichi/rhi/common/window_system.h"
@@ -10,6 +13,11 @@ using taichi::lang::Program;
 namespace taichi::ui {
 
 namespace vulkan {
+
+namespace {
+using Clock = std::chrono::high_resolution_clock;
+
+}  // namespace
 
 Window::Window(Program *prog, const AppConfig &config) : WindowBase(config) {
   init(prog, config);
@@ -23,7 +31,6 @@ void Window::init(Program *prog, const AppConfig &config) {
   renderer_ = std::make_unique<Renderer>();
   renderer_->init(prog, glfw_window_, config);
   canvas_ = std::make_unique<Canvas>(renderer_.get());
-  scene_ = std::make_unique<SceneV2>(renderer_.get());
   switch (config.ggui_arch) {
     case Arch::vulkan:
       gui_ = std::make_unique<Gui>(&renderer_->app_context(),
@@ -47,26 +54,53 @@ void Window::init(Program *prog, const AppConfig &config) {
   prepare_for_next_frame();
 }
 
-void Window::show() {
+bool Window::show() {
+  if (config_.show_window) {
+    WindowBase::show();
+    if (!is_running()) {
+      return false;
+    }
+  }
   if (!drawn_frame_) {
-    draw_frame();
+    if (config_.show_window && !renderer_->can_accept_frame()) {
+      renderer_->discard_pending_frame();
+      record_display_frame_dropped();
+      return false;
+    }
+    if (config_.show_window && !renderer_->has_render_work()) {
+      return false;
+    }
+    if (!draw_frame()) {
+      renderer_->discard_pending_frame();
+      record_display_frame_dropped();
+      return false;
+    }
   }
   if (!config_.show_window) {
     prepare_for_next_frame();
-    return;
+    record_display_frame_submitted();
+    return true;
   }
   present_frame();
-  WindowBase::show();
-  if (!is_running()) {
-    return;
-  }
   prepare_for_next_frame();
+  record_display_frame_submitted();
+  return true;
 }
 
 void Window::prepare_for_next_frame() {
   renderer_->prepare_for_next_frame();
-  gui_->prepare_for_next_frame();
+  if (gui_) {
+    gui_->prepare_for_next_frame();
+  }
   drawn_frame_ = false;
+}
+
+bool Window::can_render_frame() {
+  if (!config_.show_window) {
+    return true;
+  }
+  return renderer_ && !drawn_frame_ && !renderer_->has_render_work() &&
+         renderer_->can_accept_frame();
 }
 
 CanvasBase *Window::get_canvas() {
@@ -74,6 +108,9 @@ CanvasBase *Window::get_canvas() {
 }
 
 SceneBase *Window::get_scene() {
+  if (!scene_) {
+    scene_ = std::make_unique<SceneV2>(renderer_.get());
+  }
   return scene_.get();
 }
 
@@ -108,12 +145,21 @@ void Window::resize() {
   config_.height = height;
 }
 
-void Window::draw_frame() {
-  renderer_->draw_frame(gui_.get());
+bool Window::draw_frame(bool blocking_acquire) {
+  if (!renderer_->draw_frame(gui_.get(), blocking_acquire)) {
+    return false;
+  }
   drawn_frame_ = true;
+  return true;
 }
 
 void Window::present_frame() {
+  if (fps_limit_ >= 1000.0) {
+    renderer_->swap_chain().surface().present_surface_image(
+        renderer_->get_render_surface_image(),
+        {renderer_->get_render_complete_semaphore()});
+    return;
+  }
   const double target = 1000.0 / fps_limit_ - limiter_overshoot_;
   const auto time_now = std::chrono::high_resolution_clock::now();
   const double time_diff =
@@ -132,12 +178,14 @@ void Window::present_frame() {
     last_frame_time_ = time_now;
     limiter_overshoot_ *= 0.9;
   }
-  renderer_->swap_chain().surface().present_image(
+  renderer_->swap_chain().surface().present_surface_image(
+      renderer_->get_render_surface_image(),
       {renderer_->get_render_complete_semaphore()});
 }
 
 Window::~Window() {
   if (renderer_) {
+    renderer_->discard_pending_frame();
     renderer_->wait_for_in_flight_frames();
     renderer_->app_context().device().wait_idle();
   }
@@ -151,7 +199,9 @@ std::pair<uint32_t, uint32_t> Window::get_window_shape() {
 
 void Window::write_image(const std::string &filename) {
   if (!drawn_frame_) {
-    draw_frame();
+    if (!draw_frame(/*blocking_acquire=*/true)) {
+      return;
+    }
   }
   renderer_->swap_chain().write_image(filename);
   if (!config_.show_window) {
@@ -162,7 +212,9 @@ void Window::write_image(const std::string &filename) {
 void Window::copy_depth_buffer_to_ndarray(
     const taichi::lang::Ndarray &depth_arr) {
   if (!drawn_frame_) {
-    draw_frame();
+    if (!draw_frame(/*blocking_acquire=*/true)) {
+      return;
+    }
   }
 
   if (depth_arr.dtype != taichi::lang::PrimitiveType::f32) {
@@ -201,7 +253,7 @@ void Window::copy_depth_buffer_to_ndarray(
 
 std::vector<uint32_t> &Window::get_image_buffer(uint32_t &w, uint32_t &h) {
   if (!drawn_frame_) {
-    draw_frame();
+    draw_frame(/*blocking_acquire=*/true);
   }
   w = renderer_->swap_chain().width();
   h = renderer_->swap_chain().height();

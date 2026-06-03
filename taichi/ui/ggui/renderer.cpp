@@ -13,6 +13,7 @@ using namespace taichi::lang::vulkan;
 #ifdef TI_WITH_METAL
 using namespace taichi::lang::metal;
 #endif
+
 void Renderer::init(Program *prog,
                     TaichiWindow *window,
                     const AppConfig &config) {
@@ -54,15 +55,33 @@ void Renderer::set_background_color(const glm::vec3 &color) {
 }
 
 void Renderer::set_image(const SetImageInfo &info) {
-  SetImage *s = get_renderable_of_type<SetImage>(VboHelpers::all());
+  SetImage *s = pending_set_image_;
+  if (!s) {
+    s = get_set_image_renderable();
+    render_queue_.push_back(s);
+    pending_set_image_ = s;
+  }
   s->update_data(info);
-  render_queue_.push_back(s);
+}
+
+void Renderer::set_image(const DisplayFrameInfo &info) {
+  SetImage *s = pending_set_image_;
+  if (!s) {
+    s = get_set_image_renderable();
+    render_queue_.push_back(s);
+    pending_set_image_ = s;
+  }
+  s->update_data(info);
 }
 
 void Renderer::set_image(Texture *tex) {
-  SetImage *s = get_renderable_of_type<SetImage>(VboHelpers::all());
+  SetImage *s = pending_set_image_;
+  if (!s) {
+    s = get_set_image_renderable();
+    render_queue_.push_back(s);
+    pending_set_image_ = s;
+  }
   s->update_data(tex);
-  render_queue_.push_back(s);
 }
 
 void Renderer::triangles(const TrianglesInfo &info) {
@@ -225,18 +244,67 @@ void Renderer::scene(SceneBase *scene) {
 }
 
 Renderer::~Renderer() {
+  discard_pending_frame();
+  wait_for_in_flight_frames();
 }
 
 void Renderer::prepare_for_next_frame() {
   retire_completed_frames();
-  while (in_flight_frames_.size() >= max_frames_in_flight()) {
+}
+
+bool Renderer::can_accept_frame() {
+  retire_completed_frames();
+  return in_flight_frames_.size() < max_frames_in_flight();
+}
+
+void Renderer::wait_for_frame_slot() {
+  while (!can_accept_frame()) {
     wait_oldest_frame();
   }
+}
+
+bool Renderer::has_render_work() const {
+  return !render_queue_.empty();
+}
+
+void Renderer::discard_pending_frame() {
+  recycle_renderable_list(renderables_);
+  render_queue_.clear();
+  pending_set_image_ = nullptr;
 }
 
 size_t Renderer::max_frames_in_flight() {
   return std::max<size_t>(
       2, static_cast<size_t>(swap_chain_.surface().get_image_count()));
+}
+
+SetImage *Renderer::get_set_image_renderable() {
+  std::unique_ptr<SetImage> r;
+  if (!reusable_set_images_.empty()) {
+    r = std::move(reusable_set_images_.back());
+    reusable_set_images_.pop_back();
+  }
+  if (!r) {
+    r = std::make_unique<SetImage>(&app_context_, VboHelpers::all());
+  }
+  SetImage *ret = r.get();
+  renderables_.push_back(std::move(r));
+  return ret;
+}
+
+void Renderer::recycle_renderable_list(
+    std::vector<std::unique_ptr<Renderable>> &list) {
+  for (auto &renderable : list) {
+    if (auto *set_image = dynamic_cast<SetImage *>(renderable.get())) {
+      renderable.release();
+      reusable_set_images_.push_back(std::unique_ptr<SetImage>(set_image));
+    }
+  }
+  list.clear();
+}
+
+void Renderer::recycle_renderables(InFlightFrame &frame) {
+  recycle_renderable_list(frame.renderables);
 }
 
 void Renderer::retire_completed_frames() {
@@ -245,6 +313,7 @@ void Renderer::retire_completed_frames() {
     if (frame.complete && !frame.complete->is_ready()) {
       return;
     }
+    recycle_renderables(frame);
     in_flight_frames_.pop_front();
   }
 }
@@ -256,9 +325,13 @@ void Renderer::wait_oldest_frame() {
   auto &frame = in_flight_frames_.front();
   if (!frame.complete || !frame.complete->wait()) {
     app_context_.device().wait_idle();
-    in_flight_frames_.clear();
+    while (!in_flight_frames_.empty()) {
+      recycle_renderables(in_flight_frames_.front());
+      in_flight_frames_.pop_front();
+    }
     return;
   }
+  recycle_renderables(frame);
   in_flight_frames_.pop_front();
 }
 
@@ -268,7 +341,24 @@ void Renderer::wait_for_in_flight_frames() {
   }
 }
 
-void Renderer::draw_frame(GuiBase *gui_base) {
+bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
+  SurfaceImage surface_image;
+  if (blocking_acquire) {
+    surface_image = swap_chain_.surface().acquire_surface_image();
+  } else if (!swap_chain_.surface().try_acquire_surface_image(&surface_image)) {
+    return false;
+  }
+  StreamSemaphore semaphore = surface_image.image_available;
+  auto image = surface_image.image;
+  std::vector<StreamSemaphore> present_waits_after_acquire;
+  if (app_context_.config.ggui_arch == Arch::vulkan) {
+    auto *surface = dynamic_cast<VulkanSurface *>(&swap_chain_.surface());
+    if (surface) {
+      present_waits_after_acquire =
+          surface->take_present_waits_after_acquire(surface_image.image_index);
+    }
+  }
+
   auto stream = app_context_.device().get_graphics_stream();
   auto [cmd_list, res] = stream->new_command_list_unique();
   assert(res == RhiResult::success && "Failed to allocate command list");
@@ -276,8 +366,6 @@ void Renderer::draw_frame(GuiBase *gui_base) {
   bool color_clear = true;
   std::vector<float> clear_colors = {background_color_[0], background_color_[1],
                                      background_color_[2], 1};
-  auto semaphore = swap_chain_.surface().acquire_next_image();
-  auto image = swap_chain_.surface().get_target_image();
   cmd_list->image_transition(image, ImageLayout::undefined,
                              ImageLayout::color_attachment);
   auto depth_image = swap_chain_.depth_allocation();
@@ -298,30 +386,34 @@ void Renderer::draw_frame(GuiBase *gui_base) {
 
   if (app_context_.config.ggui_arch == Arch::vulkan) {
     Gui *gui = static_cast<Gui *>(gui_base);
-    VkRenderPass pass = static_cast<VulkanCommandList *>(cmd_list.get())
-                            ->current_renderpass()
-                            ->renderpass;
+    if (gui != nullptr && !gui->is_empty()) {
+      VkRenderPass pass = static_cast<VulkanCommandList *>(cmd_list.get())
+                              ->current_renderpass()
+                              ->renderpass;
 
-    if (gui->render_pass() == VK_NULL_HANDLE) {
-      gui->init_render_resources(pass);
-    } else if (gui->render_pass() != pass) {
-      gui->cleanup_render_resources();
-      gui->init_render_resources(pass);
+      if (gui->render_pass() == VK_NULL_HANDLE) {
+        gui->init_render_resources(pass);
+      } else if (gui->render_pass() != pass) {
+        gui->cleanup_render_resources();
+        gui->init_render_resources(pass);
+      }
+      gui->draw(cmd_list.get());
     }
-    gui->draw(cmd_list.get());
   }
 #ifdef TI_WITH_METAL
   else if (app_context_.config.ggui_arch == Arch::metal) {
     GuiMetal *gui = static_cast<GuiMetal *>(gui_base);
+    if (gui != nullptr) {
 
-    auto mtl_cmd_list = static_cast<MetalCommandList *>(cmd_list.get());
+      auto mtl_cmd_list = static_cast<MetalCommandList *>(cmd_list.get());
 
-    MTLRenderPassDescriptor *pass = mtl_cmd_list->create_render_pass_desc(
-        false, mtl_cmd_list->is_renderpass_active());
-    mtl_cmd_list->set_renderpass_active();
+      MTLRenderPassDescriptor *pass = mtl_cmd_list->create_render_pass_desc(
+          false, mtl_cmd_list->is_renderpass_active());
+      mtl_cmd_list->set_renderpass_active();
 
-    gui->init_render_resources(pass);
-    gui->draw(cmd_list.get());
+      gui->init_render_resources(pass);
+      gui->draw(cmd_list.get());
+    }
   }
 #endif
   else {
@@ -344,12 +436,16 @@ void Renderer::draw_frame(GuiBase *gui_base) {
   }
 
   render_complete_semaphore_ = stream->submit(cmd_list.get(), wait_semaphores);
+  render_surface_image_ = surface_image;
 
   render_queue_.clear();
+  pending_set_image_ = nullptr;
   InFlightFrame frame;
   frame.complete = render_complete_semaphore_;
+  frame.present_waits_after_acquire = std::move(present_waits_after_acquire);
   frame.renderables = std::move(renderables_);
   in_flight_frames_.push_back(std::move(frame));
+  return true;
 }
 
 const AppContext &Renderer::app_context() const {
@@ -370,6 +466,10 @@ SwapChain &Renderer::swap_chain() {
 
 taichi::lang::StreamSemaphore Renderer::get_render_complete_semaphore() {
   return render_complete_semaphore_;
+}
+
+const taichi::lang::SurfaceImage &Renderer::get_render_surface_image() const {
+  return render_surface_image_;
 }
 
 }  // namespace vulkan

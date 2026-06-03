@@ -2,6 +2,7 @@
 
 #include "taichi/program/program.h"
 #include "taichi/program/texture.h"
+#include "taichi/rhi/interop/vulkan_cuda_interop.h"
 #include "taichi/ui/utils/utils.h"
 
 using taichi::lang::Program;
@@ -46,30 +47,33 @@ void SetImage::update_data(const SetImageInfo &info) {
 
   update_ubo(1.0f, 1.0f, true);
 
-  const uint64_t img_size_bytes = width_ * height_ * sizeof(uint32_t);
-
   // If data source is not a host mapped pointer, it is a DeviceAllocation
   // from the same backend as GGUI
   DevicePtr img_dev_ptr = info.img.dev_alloc.get_ptr();
   bool uses_host = img.field_source == FieldSource::HostMappedPtr;
   if (uses_host) {
-    DeviceAllocation staging;
-    RhiResult res = app_context_->device().allocate_memory(
-        {img_size_bytes, true, false, false, AllocUsage::None}, &staging);
-    TI_ASSERT(res == RhiResult::success);
-
-    // Map the staing buffer and perform memcpy
-    void *dst_ptr{nullptr};
-    RHI_VERIFY(app_context_->device().map(staging.get_ptr(), &dst_ptr));
     void *src_ptr = reinterpret_cast<uint8_t *>(img.dev_alloc.alloc_id);
-    memcpy(dst_ptr, src_ptr, img_size_bytes);
-    app_context_->device().unmap(staging);
-
-    img_dev_ptr = staging.get_ptr(0);
+    img_dev_ptr = upload_host_rgba8(src_ptr, width_, height_,
+                                    height_ * sizeof(uint32_t));
+    pending_upload_buffer_ = img_dev_ptr;
+    pending_upload_ = true;
+    return;
+  } else {
+    reset_upload_staging();
+    pending_upload_ = false;
   }
 
-  auto copy_op = [&, img_dev_ptr, uses_host](Device *device,
-                                             CommandList *cmdlist) {
+  if (img_dev_ptr.device != &app_context_->device()) {
+    img_dev_ptr = stage_device_rgba8(
+        img_dev_ptr,
+        static_cast<uint64_t>(width_) * static_cast<uint64_t>(height_) *
+            sizeof(uint32_t));
+    pending_upload_buffer_ = img_dev_ptr;
+    pending_upload_ = true;
+    return;
+  }
+
+  auto copy_op = [&, img_dev_ptr](Device *, CommandList *cmdlist) {
     BufferImageCopyParams copy_params;
     // these are flipped because taichi is y-major and vulkan is x-major
     copy_params.image_extent.x = height_;
@@ -81,9 +85,6 @@ void SetImage::update_data(const SetImageInfo &info) {
                              copy_params);
     cmdlist->image_transition(*texture_, ImageLayout::transfer_dst,
                               ImageLayout::shader_read);
-    if (uses_host) {
-      device->dealloc_memory(img_dev_ptr);
-    }
   };
 
   if (prog && prog->get_graphics_device() == &app_context_->device()) {
@@ -105,8 +106,29 @@ void SetImage::update_data(const SetImageInfo &info) {
   }
 }
 
+void SetImage::update_data(const DisplayFrameInfo &info) {
+  TI_ASSERT_INFO(info.host_rgba8 != nullptr,
+                 "display frame host RGBA8 pointer must not be null");
+  TI_ASSERT_INFO(info.width > 0 && info.height > 0,
+                 "display frame size must be positive");
+
+  resize_texture(info.width, info.height, BufferFormat::rgba8);
+  update_ubo(1.0f, 1.0f, info.transpose);
+
+  int row_stride_bytes = info.row_stride_bytes;
+  if (row_stride_bytes == 0) {
+    row_stride_bytes = info.height * 4;
+  }
+  DevicePtr img_dev_ptr =
+      upload_host_rgba8(info.host_rgba8, width_, height_, row_stride_bytes);
+  pending_upload_buffer_ = img_dev_ptr;
+  pending_upload_ = true;
+}
+
 void SetImage::update_data(Texture *tex) {
   Program *prog = app_context_->prog();
+  reset_upload_staging();
+  pending_upload_ = false;
 
   auto shape = tex->get_size();
   auto new_format = tex->get_buffer_format();
@@ -210,6 +232,23 @@ void SetImage::record_this_frame_commands(CommandList *command_list) {
   command_list->draw(6);
 }
 
+void SetImage::record_prepass_this_frame_commands(CommandList *command_list) {
+  if (!pending_upload_) {
+    return;
+  }
+  BufferImageCopyParams copy_params;
+  copy_params.image_extent.x = height_;
+  copy_params.image_extent.y = width_;
+  command_list->image_transition(*texture_, ImageLayout::undefined,
+                                 ImageLayout::transfer_dst);
+  command_list->buffer_barrier(pending_upload_buffer_);
+  command_list->buffer_to_image(*texture_, pending_upload_buffer_,
+                                ImageLayout::transfer_dst, copy_params);
+  command_list->image_transition(*texture_, ImageLayout::transfer_dst,
+                                 ImageLayout::shader_read);
+  pending_upload_ = false;
+}
+
 void SetImage::resize_texture(int width,
                               int height,
                               taichi::lang::BufferFormat format) {
@@ -235,6 +274,86 @@ void SetImage::resize_texture(int width,
   params.export_sharing = false;
 
   texture_ = app_context_->device().create_image_unique(params);
+}
+
+DevicePtr SetImage::upload_host_rgba8(const void *host_ptr,
+                                      int width,
+                                      int height,
+                                      int row_stride_bytes) {
+  const int packed_row_bytes = height * 4;
+  const uint64_t img_size_bytes =
+      static_cast<uint64_t>(width) * static_cast<uint64_t>(packed_row_bytes);
+  DevicePtr staging_ptr =
+      ensure_upload_staging(img_size_bytes, true, false);
+
+  void *dst_ptr{nullptr};
+  RHI_VERIFY(app_context_->device().map(host_staging_->get_ptr(0), &dst_ptr));
+  if (row_stride_bytes == packed_row_bytes) {
+    memcpy(dst_ptr, host_ptr, img_size_bytes);
+  } else {
+    auto *dst = reinterpret_cast<uint8_t *>(dst_ptr);
+    auto *src = reinterpret_cast<const uint8_t *>(host_ptr);
+    for (int i = 0; i < width; ++i) {
+      memcpy(dst + static_cast<uint64_t>(i) * packed_row_bytes,
+             src + static_cast<uint64_t>(i) * row_stride_bytes,
+             packed_row_bytes);
+    }
+  }
+  app_context_->device().unmap(*host_staging_);
+  return staging_ptr;
+}
+
+DevicePtr SetImage::stage_device_rgba8(DevicePtr src, uint64_t size_bytes) {
+  if (is_cuda_to_vulkan_copy(&app_context_->device(), src.device)) {
+    DevicePtr dst = ensure_upload_staging(size_bytes, false, true);
+    memcpy_cuda_to_vulkan_fast(dst, src, size_bytes);
+    return dst;
+  }
+
+  DevicePtr dst = ensure_upload_staging(size_bytes, true, false);
+  auto capability = Device::check_memcpy_capability(dst, src, size_bytes);
+  TI_ASSERT_INFO(
+      capability != Device::MemcpyCapability::RequiresHost,
+      "display frame device RGBA8 source cannot be copied to Vulkan directly");
+  Device::memcpy_direct(dst, src, size_bytes);
+  return dst;
+}
+
+DevicePtr SetImage::ensure_upload_staging(uint64_t size_bytes,
+                                          bool host_write,
+                                          bool export_sharing) {
+  if (export_sharing) {
+    auto [staging, res] = app_context_->device().allocate_memory_unique(
+        {size_bytes, host_write, false, export_sharing, AllocUsage::Upload});
+    TI_ASSERT(res == RhiResult::success);
+    host_staging_ = std::move(staging);
+    upload_staging_size_ = size_bytes;
+    upload_staging_host_write_ = host_write;
+    upload_staging_export_sharing_ = export_sharing;
+    return host_staging_->get_ptr(0);
+  }
+
+  if (host_staging_ && upload_staging_size_ >= size_bytes &&
+      upload_staging_host_write_ == host_write &&
+      upload_staging_export_sharing_ == export_sharing) {
+    return host_staging_->get_ptr(0);
+  }
+
+  auto [staging, res] = app_context_->device().allocate_memory_unique(
+      {size_bytes, host_write, false, export_sharing, AllocUsage::Upload});
+  TI_ASSERT(res == RhiResult::success);
+  host_staging_ = std::move(staging);
+  upload_staging_size_ = size_bytes;
+  upload_staging_host_write_ = host_write;
+  upload_staging_export_sharing_ = export_sharing;
+  return host_staging_->get_ptr(0);
+}
+
+void SetImage::reset_upload_staging() {
+  host_staging_.reset();
+  upload_staging_size_ = 0;
+  upload_staging_host_write_ = false;
+  upload_staging_export_sharing_ = false;
 }
 
 }  // namespace vulkan

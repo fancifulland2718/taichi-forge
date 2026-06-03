@@ -25,9 +25,9 @@ def get_field_info(field):
         return info
     if isinstance(field, Ndarray):
         info.field_source = _ti_core.FieldSource.TaichiNDarray
-        info.dev_alloc = field.arr.get_device_allocation()
+        info.dev_alloc = field.arr.device_allocation()
         info.dtype = field.dtype
-        info.num_elements = np.prod(field.shape) * np.prod(field.element_shape)
+        info.num_elements = int(np.prod(field.shape) * np.prod(field.element_shape))
         info.shape = field.shape + field.element_shape
         return info
     # SNode

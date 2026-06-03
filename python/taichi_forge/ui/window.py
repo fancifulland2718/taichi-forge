@@ -127,7 +127,7 @@ class Window:
 
     def get_canvas(self):
         """Returns a canvas handle. See :class`~taichi_forge.ui.canvas.Canvas`"""
-        return Canvas(self.window.get_canvas())
+        return Canvas(self.window.get_canvas(), self.window)
 
     def get_scene(self):
         """Returns a scene handle. See :class`~taichi_forge.ui.scene.SceneV2`"""
@@ -151,6 +151,18 @@ class Window:
     def show(self):
         """Display this window."""
         return self.window.show()
+
+    def is_headless_display(self):
+        """Return whether this window uses the offscreen display sink."""
+        return self.window.is_headless_display()
+
+    def get_display_stats(self):
+        """Return display submission statistics for set_image/show."""
+        return self.window.get_display_stats()
+
+    def reset_display_stats(self):
+        """Reset display submission statistics."""
+        return self.window.reset_display_stats()
 
     def get_window_shape(self):
         """Return the shape of window.

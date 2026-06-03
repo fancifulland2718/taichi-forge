@@ -125,6 +125,10 @@ bool Gui::initialized() {
   return render_pass_ != VK_NULL_HANDLE;
 }
 
+void Gui::mark_used() {
+  is_empty_ = false;
+}
+
 float Gui::abs_x(float x) {
   return x * widthBeforeDPIScale;
 }
@@ -137,13 +141,13 @@ void Gui::begin(const std::string &name,
                 float y,
                 float width,
                 float height) {
+  mark_used();
   if (!initialized()) {
     return;
   }
   ImGui::SetNextWindowPos(ImVec2(abs_x(x), abs_y(y)), ImGuiCond_Once);
   ImGui::SetNextWindowSize(ImVec2(abs_x(width), abs_y(height)), ImGuiCond_Once);
   ImGui::Begin(name.c_str());
-  is_empty_ = false;
 }
 void Gui::end() {
   if (!initialized()) {
@@ -152,12 +156,14 @@ void Gui::end() {
   ImGui::End();
 }
 void Gui::text(const std::string &text) {
+  mark_used();
   if (!initialized()) {
     return;
   }
   ImGui::Text("%s", text.c_str());
 }
 void Gui::text(const std::string &text, glm::vec3 color) {
+  mark_used();
   if (!initialized()) {
     return;
   }
@@ -165,6 +171,7 @@ void Gui::text(const std::string &text, glm::vec3 color) {
                      text.c_str());
 }
 bool Gui::checkbox(const std::string &name, bool old_value) {
+  mark_used();
   if (!initialized()) {
     return old_value;
   }
@@ -175,6 +182,7 @@ int Gui::slider_int(const std::string &name,
                     int old_value,
                     int minimum,
                     int maximum) {
+  mark_used();
   if (!initialized()) {
     return old_value;
   }
@@ -185,6 +193,7 @@ float Gui::slider_float(const std::string &name,
                         float old_value,
                         float minimum,
                         float maximum) {
+  mark_used();
   if (!initialized()) {
     return old_value;
   }
@@ -192,6 +201,7 @@ float Gui::slider_float(const std::string &name,
   return old_value;
 }
 glm::vec3 Gui::color_edit_3(const std::string &name, glm::vec3 old_value) {
+  mark_used();
   if (!initialized()) {
     return old_value;
   }
@@ -199,6 +209,7 @@ glm::vec3 Gui::color_edit_3(const std::string &name, glm::vec3 old_value) {
   return old_value;
 }
 bool Gui::button(const std::string &text) {
+  mark_used();
   if (!initialized()) {
     return false;
   }

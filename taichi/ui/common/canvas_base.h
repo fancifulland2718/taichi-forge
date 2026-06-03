@@ -17,6 +17,14 @@ struct SetImageInfo {
   FieldInfo img;
 };
 
+struct DisplayFrameInfo {
+  const void *host_rgba8{nullptr};
+  int width{0};
+  int height{0};
+  int row_stride_bytes{0};
+  bool transpose{true};
+};
+
 struct TrianglesInfo {
   RenderableInfo renderable_info;
   glm::vec3 color;
@@ -38,6 +46,7 @@ class CanvasBase {
  public:
   virtual void set_background_color(const glm::vec3 &color) = 0;
   virtual void set_image(const SetImageInfo &info) = 0;
+  virtual void set_image(const DisplayFrameInfo &info) = 0;
   virtual void set_image(taichi::lang::Texture *tex) = 0;
   virtual void triangles(const TrianglesInfo &info) = 0;
   virtual void circles(const CirclesInfo &info) = 0;

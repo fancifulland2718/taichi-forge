@@ -61,7 +61,7 @@ class TI_DLL_EXPORT Gui final : public GuiBase {
   bool is_empty();
 
  private:
-  bool is_empty_;
+  bool is_empty_{true};
   AppContext *app_context_{nullptr};
   SwapChain *swap_chain_{nullptr};
   ImGuiContext *imgui_context_{nullptr};
@@ -79,6 +79,8 @@ class TI_DLL_EXPORT Gui final : public GuiBase {
   float abs_y(float y);
 
   bool initialized();
+
+  void mark_used();
 };
 
 }  // namespace vulkan

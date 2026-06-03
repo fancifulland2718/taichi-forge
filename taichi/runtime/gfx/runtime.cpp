@@ -1727,7 +1727,7 @@ void GfxRuntime::synchronize() {
 
 void GfxRuntime::synchronize_impl(bool check_hash_overflow) {
   flush_if_pending();
-  device_->wait_idle();
+  device_->get_compute_stream()->command_sync();
   // Profiler support
   if (profiler_) {
     device_->profiler_sync();

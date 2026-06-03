@@ -3,7 +3,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <iostream>
 #include <limits>
 #include <list>
 #include <set>
@@ -2909,31 +2908,31 @@ RhiResult VulkanDevice::new_descriptor_pool() {
 VkPresentModeKHR choose_swap_present_mode(
     const std::vector<VkPresentModeKHR> &available_present_modes,
     bool vsync,
-    bool adaptive) {
-  if (vsync) {
-    if (adaptive) {
-      for (const auto &available_present_mode : available_present_modes) {
-        if (available_present_mode == VK_PRESENT_MODE_FIFO_RELAXED_KHR) {
-          return available_present_mode;
-        }
-      }
-    }
+    bool adaptive,
+    bool fifo_latest_ready_supported) {
+  (void)vsync;
+  (void)adaptive;
+  auto find_present_mode = [&](VkPresentModeKHR mode) {
     for (const auto &available_present_mode : available_present_modes) {
-      if (available_present_mode == VK_PRESENT_MODE_FIFO_KHR) {
-        return available_present_mode;
+      if (available_present_mode == mode) {
+        return true;
       }
     }
-  } else {
-    for (const auto &available_present_mode : available_present_modes) {
-      if (available_present_mode == VK_PRESENT_MODE_MAILBOX_KHR) {
-        return available_present_mode;
-      }
-    }
-    for (const auto &available_present_mode : available_present_modes) {
-      if (available_present_mode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
-        return available_present_mode;
-      }
-    }
+    return false;
+  };
+
+  if (find_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)) {
+    return VK_PRESENT_MODE_MAILBOX_KHR;
+  }
+  if (fifo_latest_ready_supported &&
+      find_present_mode(VK_PRESENT_MODE_FIFO_LATEST_READY_KHR)) {
+    return VK_PRESENT_MODE_FIFO_LATEST_READY_KHR;
+  }
+  if (find_present_mode(VK_PRESENT_MODE_FIFO_KHR)) {
+    return VK_PRESENT_MODE_FIFO_KHR;
+  }
+  if (find_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)) {
+    return VK_PRESENT_MODE_IMMEDIATE_KHR;
   }
 
   if (available_present_modes.size() == 0) {
@@ -2941,6 +2940,16 @@ VkPresentModeKHR choose_swap_present_mode(
   }
 
   return available_present_modes[0];
+}
+
+uint32_t choose_swapchain_image_count(
+    const VkSurfaceCapabilitiesKHR &capabilities) {
+  uint32_t requested_image_count =
+      std::max<uint32_t>(capabilities.minImageCount, 4);
+  if (capabilities.maxImageCount == 0) {
+    return requested_image_count;
+  }
+  return std::min<uint32_t>(capabilities.maxImageCount, requested_image_count);
 }
 
 VulkanSurface::VulkanSurface(VulkanDevice *device, const SurfaceConfig &config)
@@ -2992,13 +3001,6 @@ void VulkanSurface::create_swap_chain() {
   VkSurfaceCapabilitiesKHR capabilities;
   vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device_->vk_physical_device(),
                                             surface_, &capabilities);
-  if (capabilities.maxImageCount == 0) {
-    // https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkSurfaceCapabilitiesKHR.html
-    // When maxImageCount is 0, there is no limit on the number of images.
-    capabilities.maxImageCount =
-        std::max<uint32_t>(capabilities.minImageCount, 3);
-  }
-
   VkBool32 supported = false;
   vkGetPhysicalDeviceSurfaceSupportKHR(device_->vk_physical_device(),
                                        device_->graphics_queue_family_index(),
@@ -3030,7 +3032,9 @@ void VulkanSurface::create_swap_chain() {
                                               present_modes.data());
   }
   VkPresentModeKHR present_mode =
-      choose_swap_present_mode(present_modes, config_.vsync, config_.adaptive);
+      choose_swap_present_mode(
+          present_modes, config_.vsync, config_.adaptive,
+          device_->vk_caps().present_mode_fifo_latest_ready);
 
   VkExtent2D extent = {uint32_t(width_), uint32_t(height_)};
   extent.width =
@@ -3057,7 +3061,8 @@ void VulkanSurface::create_swap_chain() {
   createInfo.pNext = nullptr;
   createInfo.flags = 0;
   createInfo.surface = surface_;
-  createInfo.minImageCount = std::min<uint32_t>(capabilities.maxImageCount, 3);
+  uint32_t requested_image_count = choose_swapchain_image_count(capabilities);
+  createInfo.minImageCount = requested_image_count;
   createInfo.imageFormat = surface_format.format;
   createInfo.imageColorSpace = surface_format.colorSpace;
   createInfo.imageExtent = extent;
@@ -3118,6 +3123,8 @@ void VulkanSurface::create_swap_chain() {
     image_available_.push_back(vkapi::create_semaphore(device_->vk_device(), 0));
   }
   image_available_index_ = 0;
+  present_waits_by_image_.clear();
+  present_waits_by_image_.resize(swapchain_images_.size());
 }
 
 void VulkanSurface::destroy_swap_chain() {
@@ -3129,6 +3136,7 @@ void VulkanSurface::destroy_swap_chain() {
     device_->destroy_image(alloc);
   }
   image_available_.clear();
+  present_waits_by_image_.clear();
   swapchain_images_.clear();
   vkDestroySwapchainKHR(device_->vk_device(), swapchain_, nullptr);
   swapchain_ = VK_NULL_HANDLE;
@@ -3166,21 +3174,70 @@ std::pair<uint32_t, uint32_t> VulkanSurface::get_size() {
 }
 
 StreamSemaphore VulkanSurface::acquire_next_image() {
+  SurfaceImage surface_image = acquire_surface_image();
+  return surface_image.image_available;
+}
+
+SurfaceImage VulkanSurface::acquire_surface_image() {
+  SurfaceImage surface_image;
   if (!config_.native_surface_handle) {
     image_index_ = (image_index_ + 1) % uint32_t(swapchain_images_.size());
-    return nullptr;
+    surface_image.image = swapchain_images_[image_index_];
+    surface_image.image_index = image_index_;
+    return surface_image;
   } else {
     auto image_available = image_available_[image_available_index_];
-    image_available_index_ =
-        (image_available_index_ + 1) % uint32_t(image_available_.size());
     VkResult res = vkAcquireNextImageKHR(
         device_->vk_device(), swapchain_, uint64_t(4 * 1e9),
         image_available->semaphore, VK_NULL_HANDLE, &image_index_);
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
       BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "vkAcquireNextImageKHR failed");
     }
-    return std::make_shared<VulkanStreamSemaphoreObject>(image_available);
+    image_available_index_ =
+        (image_available_index_ + 1) % uint32_t(image_available_.size());
+    surface_image.image_available =
+        std::make_shared<VulkanStreamSemaphoreObject>(image_available);
+    surface_image.image = swapchain_images_[image_index_];
+    surface_image.image_index = image_index_;
+    return surface_image;
   }
+}
+
+bool VulkanSurface::try_acquire_surface_image(SurfaceImage *surface_image) {
+  if (!config_.native_surface_handle) {
+    *surface_image = acquire_surface_image();
+    return true;
+  }
+
+  auto image_available = image_available_[image_available_index_];
+  VkResult res = vkAcquireNextImageKHR(
+      device_->vk_device(), swapchain_, 0, image_available->semaphore,
+      VK_NULL_HANDLE, &image_index_);
+  if (res == VK_NOT_READY || res == VK_TIMEOUT) {
+    return false;
+  }
+  if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
+    BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "vkAcquireNextImageKHR failed");
+    return false;
+  }
+
+  image_available_index_ =
+      (image_available_index_ + 1) % uint32_t(image_available_.size());
+  surface_image->image_available =
+      std::make_shared<VulkanStreamSemaphoreObject>(image_available);
+  surface_image->image = swapchain_images_[image_index_];
+  surface_image->image_index = image_index_;
+  return true;
+}
+
+std::vector<StreamSemaphore> VulkanSurface::take_present_waits_after_acquire(
+    uint32_t image_index) {
+  if (image_index >= present_waits_by_image_.size()) {
+    return {};
+  }
+  auto waits = std::move(present_waits_by_image_[image_index]);
+  present_waits_by_image_[image_index].clear();
+  return waits;
 }
 
 DeviceAllocation VulkanSurface::get_target_image() {
@@ -3196,12 +3253,25 @@ void VulkanSurface::present_image(
   if (!config_.native_surface_handle) {
     return;
   }
+  SurfaceImage surface_image;
+  surface_image.image = swapchain_images_[image_index_];
+  surface_image.image_index = image_index_;
+  present_surface_image(surface_image, wait_semaphores);
+}
+
+void VulkanSurface::present_surface_image(
+    const SurfaceImage &surface_image,
+    const std::vector<StreamSemaphore> &wait_semaphores) {
+  if (!config_.native_surface_handle) {
+    return;
+  }
   if (swapchain_ == VK_NULL_HANDLE) {
     RHI_LOG_ERROR("Cannot present image without a valid Vulkan swapchain");
     return;
   }
 
   std::vector<VkSemaphore> vk_wait_semaphores;
+  std::vector<StreamSemaphore> tracked_wait_semaphores;
 
   // Already transitioned to `present_src` at the end of the render pass.
   // device_->image_transition(get_target_image(),
@@ -3214,6 +3284,7 @@ void VulkanSurface::present_image(
     }
     auto sema = std::static_pointer_cast<VulkanStreamSemaphoreObject>(sema_);
     vk_wait_semaphores.push_back(sema->vkapi_ref->semaphore);
+    tracked_wait_semaphores.push_back(sema_);
   }
 
   VkPresentInfoKHR presentInfo{};
@@ -3222,10 +3293,14 @@ void VulkanSurface::present_image(
   presentInfo.pWaitSemaphores = vk_wait_semaphores.data();
   presentInfo.swapchainCount = 1;
   presentInfo.pSwapchains = &swapchain_;
-  presentInfo.pImageIndices = &image_index_;
+  presentInfo.pImageIndices = &surface_image.image_index;
   presentInfo.pResults = nullptr;
 
   vkQueuePresentKHR(device_->graphics_queue(), &presentInfo);
+  if (surface_image.image_index < present_waits_by_image_.size()) {
+    present_waits_by_image_[surface_image.image_index] =
+        std::move(tracked_wait_semaphores);
+  }
 }
 
 VulkanStream::VulkanStream(VulkanDevice &device,

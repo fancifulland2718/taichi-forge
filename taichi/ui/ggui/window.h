@@ -37,7 +37,9 @@ class Window final : public WindowBase {
  public:
   Window(lang::Program *prog, const AppConfig &config);
 
-  void show() override;
+  bool show() override;
+  bool can_render_frame() override;
+
   CanvasBase *get_canvas() override;
   SceneBase *get_scene() override;
   GuiBase *gui() override;
@@ -69,7 +71,7 @@ class Window final : public WindowBase {
 
   void prepare_for_next_frame();
 
-  void draw_frame();
+  bool draw_frame(bool blocking_acquire = false);
 
   void present_frame();
 

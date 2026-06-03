@@ -529,9 +529,16 @@ class VulkanSurface : public Surface {
 
   StreamSemaphore acquire_next_image() override;
   DeviceAllocation get_target_image() override;
+  SurfaceImage acquire_surface_image() override;
+  bool try_acquire_surface_image(SurfaceImage *surface_image) override;
 
   void present_image(
       const std::vector<StreamSemaphore> &wait_semaphores = {}) override;
+  void present_surface_image(
+      const SurfaceImage &surface_image,
+      const std::vector<StreamSemaphore> &wait_semaphores = {}) override;
+  std::vector<StreamSemaphore> take_present_waits_after_acquire(
+      uint32_t image_index);
   std::pair<uint32_t, uint32_t> get_size() override;
   int get_image_count() override;
   BufferFormat image_format() override;
@@ -558,6 +565,7 @@ class VulkanSurface : public Surface {
   uint32_t height_{0};
 
   std::vector<DeviceAllocation> swapchain_images_;
+  std::vector<std::vector<StreamSemaphore>> present_waits_by_image_;
 };
 
 struct DescPool {
@@ -631,6 +639,7 @@ struct VulkanCapabilities {
   bool surface{false};
   bool present{false};
   bool dynamic_rendering{false};
+  bool present_mode_fifo_latest_ready{false};
 };
 
 class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {

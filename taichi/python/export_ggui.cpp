@@ -444,6 +444,26 @@ struct PyCanvas {
     canvas->set_image({img});
   }
 
+  void set_image_host_rgba8(py::array_t<uint8_t, py::array::c_style> image,
+                            int width,
+                            int height,
+                            int row_stride_bytes,
+                            bool transpose) {
+    py::buffer_info buffer = image.request();
+    if (row_stride_bytes == 0) {
+      row_stride_bytes =
+          buffer.ndim >= 2 ? static_cast<int>(buffer.strides[0]) : height * 4;
+    }
+
+    DisplayFrameInfo info;
+    info.host_rgba8 = buffer.ptr;
+    info.width = width;
+    info.height = height;
+    info.row_stride_bytes = row_stride_bytes;
+    info.transpose = transpose;
+    canvas->set_image(info);
+  }
+
   void set_image_texture(Texture *texture) {
     canvas->set_image(texture);
   }
@@ -511,6 +531,7 @@ struct PyCanvas {
 
 struct PyWindow {
   std::unique_ptr<WindowBase> window{nullptr};
+  bool headless_display_{false};
 
   PyWindow(Program *prog,
            std::string name,
@@ -521,6 +542,7 @@ struct PyWindow {
            double fps_limit,
            std::string package_path,
            Arch ti_arch) {
+    headless_display_ = !show_window;
     Arch ggui_arch = Arch::vulkan;
 
     if (ti_arch == Arch::metal) {
@@ -594,8 +616,48 @@ struct PyWindow {
         image, free_imgae);
   }
 
-  void show() {
-    window->show();
+  bool show() {
+    return window->show();
+  }
+
+  bool can_render_frame() {
+    return window->can_render_frame();
+  }
+
+  bool is_headless_display() const {
+    return headless_display_;
+  }
+
+  void record_display_frame_accepted() {
+    window->record_display_frame_accepted();
+  }
+
+  void record_display_frame_dropped() {
+    window->record_display_frame_dropped();
+  }
+
+  py::dict get_display_stats() {
+    auto stats = window->get_display_stats();
+    py::dict ret;
+    ret["accepted_frames"] = stats.accepted_frames;
+    ret["submitted_frames"] = stats.submitted_frames;
+    ret["window_submitted_frames"] = stats.window_submitted_frames;
+    ret["offscreen_submitted_frames"] = stats.offscreen_submitted_frames;
+    ret["dropped_frames"] = stats.dropped_frames;
+    ret["reused_frames"] = stats.reused_frames;
+    ret["display_mode"] = headless_display_ ? "offscreen" : "window";
+    ret["headless"] = headless_display_;
+    ret["last_accepted"] = stats.last_accepted;
+    ret["last_submitted"] = stats.last_submitted;
+    ret["last_window_submitted"] = stats.last_window_submitted;
+    ret["last_offscreen_submitted"] = stats.last_offscreen_submitted;
+    ret["last_dropped"] = stats.last_dropped;
+    ret["last_reused"] = stats.last_reused;
+    return ret;
+  }
+
+  void reset_display_stats() {
+    window->reset_display_stats();
   }
 
   bool is_pressed(std::string button) {
@@ -664,6 +726,14 @@ void export_ggui(py::module &m) {
       .def("get_canvas", &PyWindow::get_canvas)
       .def("get_scene", &PyWindow::get_scene)
       .def("show", &PyWindow::show)
+      .def("can_render_frame", &PyWindow::can_render_frame)
+      .def("is_headless_display", &PyWindow::is_headless_display)
+      .def("record_display_frame_accepted",
+           &PyWindow::record_display_frame_accepted)
+      .def("record_display_frame_dropped",
+           &PyWindow::record_display_frame_dropped)
+      .def("get_display_stats", &PyWindow::get_display_stats)
+      .def("reset_display_stats", &PyWindow::reset_display_stats)
       .def("get_window_shape", &PyWindow::get_window_shape)
       .def("write_image", &PyWindow::write_image)
       .def("copy_depth_buffer_to_ndarray",
@@ -683,6 +753,7 @@ void export_ggui(py::module &m) {
   py::class_<PyCanvas>(m, "PyCanvas")
       .def("set_background_color", &PyCanvas::set_background_color)
       .def("set_image", &PyCanvas::set_image)
+      .def("set_image_host_rgba8", &PyCanvas::set_image_host_rgba8)
       .def("set_image_texture", &PyCanvas::set_image_texture)
       .def("triangles", &PyCanvas::triangles)
       .def("lines", &PyCanvas::lines)
