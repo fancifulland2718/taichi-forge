@@ -39,6 +39,31 @@ def _pack_rgba8_numpy_reference(src):
     return r | (g << 8) | (b << 16) | (a << 24)
 
 
+def _make_solid_packed_frame(width, height, rgba):
+    image = ti.ndarray(ti.u32, shape=(width, height))
+    r, g, b, a = rgba
+
+    @ti.kernel
+    def fill(img: ti.types.ndarray()):
+        packed = (
+            ti.cast(r, ti.u32)
+            | (ti.cast(g, ti.u32) << 8)
+            | (ti.cast(b, ti.u32) << 16)
+            | (ti.cast(a, ti.u32) << 24)
+        )
+        for i, j in ti.ndrange(width, height):
+            img[i, j] = packed
+
+    fill(image)
+    return ti.ui.DisplayFrame.from_packed_u32_ndarray(image)
+
+
+def _assert_solid_rgba(rendered, rgba):
+    expected = np.empty_like(rendered)
+    expected[...] = np.array(rgba, dtype=np.float32) / 255.0
+    np.testing.assert_allclose(rendered, expected, atol=1.0 / 255.0 + 1e-5)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_to_rgba8_numpy_no_helper_compile():
     image_field_cache.clear()
@@ -703,6 +728,78 @@ def test_set_image_display_frame_packed_u32_ndarray():
     expected[..., 2] = 0.0
     expected[..., 3] = 1.0
     np.testing.assert_allclose(rendered, expected, atol=1.0 / 255.0 + 1e-5)
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_set_image_display_frame_packed_u32_ndarray_non_square():
+    width, height = 32, 48
+    window = ti.ui.Window("test", (width, height), show_window=False)
+    canvas = window.get_canvas()
+    image = ti.ndarray(ti.u32, shape=(width, height))
+
+    @ti.kernel
+    def init_img(img: ti.types.ndarray()):
+        for i, j in ti.ndrange(width, height):
+            red = ti.cast(i * 3, ti.u32)
+            green = ti.cast(j * 5, ti.u32) << 8
+            alpha = ti.u32(255) << 24
+            img[i, j] = red | green | alpha
+
+    init_img(image)
+    frame = ti.ui.DisplayFrame.from_packed_u32_ndarray(image)
+    assert canvas.submit_frame(frame) is True
+
+    rendered = window.get_image_buffer_as_numpy()
+    expected = np.empty((width, height, 4), dtype=np.float32)
+    x = np.arange(width, dtype=np.float32)[:, None]
+    y = np.arange(height, dtype=np.float32)[None, :]
+    expected[..., 0] = (x * 3) / 255.0
+    expected[..., 1] = (y * 5) / 255.0
+    expected[..., 2] = 0.0
+    expected[..., 3] = 1.0
+    np.testing.assert_allclose(rendered, expected, atol=1.0 / 255.0 + 1e-5)
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_set_image_display_frame_packed_u32_ndarray_resize_sequence():
+    window = ti.ui.Window("test", (64, 64), show_window=False)
+    canvas = window.get_canvas()
+
+    assert (
+        canvas.submit_frame(_make_solid_packed_frame(64, 64, (255, 0, 0, 255)))
+        is True
+    )
+    _assert_solid_rgba(window.get_image_buffer_as_numpy(), (255, 0, 0, 255))
+
+    assert (
+        canvas.submit_frame(_make_solid_packed_frame(32, 48, (0, 255, 0, 255)))
+        is True
+    )
+    _assert_solid_rgba(window.get_image_buffer_as_numpy(), (0, 255, 0, 255))
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_set_image_display_frame_switch_packed_to_host_rgba8_resize():
+    window = ti.ui.Window("test", (64, 64), show_window=False)
+    canvas = window.get_canvas()
+
+    assert (
+        canvas.submit_frame(_make_solid_packed_frame(64, 64, (255, 0, 0, 255)))
+        is True
+    )
+    _assert_solid_rgba(window.get_image_buffer_as_numpy(), (255, 0, 0, 255))
+
+    image = np.zeros((16, 24, 4), dtype=np.uint8)
+    image[..., 1] = np.uint8(255)
+    image[..., 3] = np.uint8(255)
+    assert canvas.submit_frame(ti.ui.DisplayFrame.from_numpy_rgba8(image)) is True
+    _assert_solid_rgba(window.get_image_buffer_as_numpy(), (0, 255, 0, 255))
     window.destroy()
 
 

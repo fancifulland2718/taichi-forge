@@ -26,6 +26,9 @@ namespace taichi::ui {
 
 namespace vulkan {
 
+class SetImage;
+void erase_direct_set_image_state(const SetImage *set_image);
+
 class SetImage final : public Renderable {
  public:
   struct UniformBufferObject {
@@ -38,7 +41,24 @@ class SetImage final : public Renderable {
     int transpose{0};
   };
 
+  struct DirectUniformBufferObject {
+    glm::vec2 lower_bound;
+    glm::vec2 upper_bound;
+    float x_factor{1.0};
+    float y_factor{1.0};
+    int transpose{0};
+    int width{0};
+    int height{0};
+    int padding0{0};
+    int padding1{0};
+    int padding2{0};
+  };
+
   SetImage(AppContext *app_context, VertexAttributes vbo_attrs);
+
+  ~SetImage() override {
+    erase_direct_set_image_state(this);
+  }
 
   void record_this_frame_commands(
       taichi::lang::CommandList *command_list) final;
@@ -70,6 +90,14 @@ class SetImage final : public Renderable {
   void resize_texture(int width, int height, taichi::lang::BufferFormat format);
 
   void update_ubo(float x_factor, float y_factor, bool transpose);
+
+  void update_direct_buffer_ubo();
+
+  bool can_use_direct_buffer(taichi::lang::DevicePtr ptr) const;
+
+  void use_direct_buffer_pipeline();
+
+  void use_texture_pipeline();
 
   taichi::lang::DevicePtr upload_host_rgba8(const void *host_ptr,
                                             int width,

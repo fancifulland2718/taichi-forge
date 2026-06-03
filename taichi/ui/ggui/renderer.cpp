@@ -246,6 +246,10 @@ void Renderer::scene(SceneBase *scene) {
 Renderer::~Renderer() {
   discard_pending_frame();
   wait_for_in_flight_frames();
+  app_context_.device().wait_idle();
+  for (const auto &set_image : reusable_set_images_) {
+    erase_direct_set_image_state(set_image.get());
+  }
 }
 
 void Renderer::prepare_for_next_frame() {

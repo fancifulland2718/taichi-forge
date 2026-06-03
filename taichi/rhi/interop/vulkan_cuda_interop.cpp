@@ -18,6 +18,24 @@ using namespace taichi::lang::cuda;
 
 namespace {
 
+struct VulkanAllocCacheKey {
+  DeviceAllocationId alloc_id{0};
+  uint64_t generation{0};
+
+  bool operator==(const VulkanAllocCacheKey &other) const {
+    return alloc_id == other.alloc_id && generation == other.generation;
+  }
+};
+
+struct VulkanAllocCacheKeyHasher {
+  size_t operator()(const VulkanAllocCacheKey &key) const {
+    return std::hash<DeviceAllocationId>{}(key.alloc_id) ^
+           (std::hash<uint64_t>{}(key.generation) + 0x9e3779b97f4a7c15ull +
+            (std::hash<DeviceAllocationId>{}(key.alloc_id) << 6) +
+            (std::hash<DeviceAllocationId>{}(key.alloc_id) >> 2));
+  }
+};
+
 #ifdef _WIN64  // For windows
 HANDLE get_device_mem_handle(VkDeviceMemory &mem, VkDevice device) {
   HANDLE handle;
@@ -150,12 +168,18 @@ void memcpy_cuda_to_vulkan_impl(VulkanDevice *vk_dev,
   static std::unordered_map<
       VulkanDevice *,
       std::unordered_map<CudaDevice *,
-                         std::unordered_map<int, unsigned char *>>>
+                         std::unordered_map<VulkanAllocCacheKey,
+                                            unsigned char *,
+                                            VulkanAllocCacheKeyHasher>>>
       alloc_base_ptrs_all;
-  std::unordered_map<int, unsigned char *> &alloc_base_ptrs =
+  std::unordered_map<VulkanAllocCacheKey,
+                     unsigned char *,
+                     VulkanAllocCacheKeyHasher> &alloc_base_ptrs =
       alloc_base_ptrs_all[vk_dev][cuda_dev];
+  VulkanAllocCacheKey dst_key{
+      dst_alloc.alloc_id, vk_dev->allocation_generation(dst_alloc)};
 
-  if (alloc_base_ptrs.find(dst_alloc.alloc_id) == alloc_base_ptrs.end()) {
+  if (alloc_base_ptrs.find(dst_key) == alloc_base_ptrs.end()) {
     auto [base_mem, alloc_offset, alloc_size] =
         vk_dev->get_vkmemory_offset_size(dst_alloc);
     // this might be smaller than the actual size of the VkDeviceMemory, but it
@@ -164,11 +188,11 @@ void memcpy_cuda_to_vulkan_impl(VulkanDevice *vk_dev,
     void *alloc_base_ptr = get_cuda_memory_pointer(
         base_mem, /*mem_size=*/mem_size, /*offset=*/alloc_offset,
         /*buffer_size=*/alloc_size, vk_dev->vk_device());
-    alloc_base_ptrs[dst_alloc.alloc_id] = (unsigned char *)alloc_base_ptr;
+    alloc_base_ptrs[dst_key] = (unsigned char *)alloc_base_ptr;
   }
 
   unsigned char *dst_cuda_ptr =
-      alloc_base_ptrs.at(dst_alloc.alloc_id) + dst.offset;
+      alloc_base_ptrs.at(dst_key) + dst.offset;
 
   CudaDevice::AllocInfo src_alloc_info = cuda_dev->get_alloc_info(src_alloc);
 
@@ -208,12 +232,18 @@ void memcpy_vulkan_to_cuda(DevicePtr dst, DevicePtr src, uint64_t size) {
   static std::unordered_map<
       VulkanDevice *,
       std::unordered_map<CudaDevice *,
-                         std::unordered_map<int, unsigned char *>>>
+                         std::unordered_map<VulkanAllocCacheKey,
+                                            unsigned char *,
+                                            VulkanAllocCacheKeyHasher>>>
       alloc_base_ptrs_all;
-  std::unordered_map<int, unsigned char *> &alloc_base_ptrs =
+  std::unordered_map<VulkanAllocCacheKey,
+                     unsigned char *,
+                     VulkanAllocCacheKeyHasher> &alloc_base_ptrs =
       alloc_base_ptrs_all[vk_dev][cuda_dev];
+  VulkanAllocCacheKey src_key{
+      src_alloc.alloc_id, vk_dev->allocation_generation(src_alloc)};
 
-  if (alloc_base_ptrs.find(src_alloc.alloc_id) == alloc_base_ptrs.end()) {
+  if (alloc_base_ptrs.find(src_key) == alloc_base_ptrs.end()) {
     auto [base_mem, alloc_offset, alloc_size] =
         vk_dev->get_vkmemory_offset_size(src_alloc);
     // this might be smaller than the actual size of the VkDeviceMemory, but it
@@ -222,11 +252,10 @@ void memcpy_vulkan_to_cuda(DevicePtr dst, DevicePtr src, uint64_t size) {
     void *alloc_base_ptr = get_cuda_memory_pointer(
         base_mem, /*mem_size=*/mem_size, /*offset=*/alloc_offset,
         /*buffer_size=*/alloc_size, vk_dev->vk_device());
-    alloc_base_ptrs[src_alloc.alloc_id] = (unsigned char *)alloc_base_ptr;
+    alloc_base_ptrs[src_key] = (unsigned char *)alloc_base_ptr;
   }
 
-  unsigned char *src_cuda_ptr =
-      alloc_base_ptrs.at(src_alloc.alloc_id) + src.offset;
+  unsigned char *src_cuda_ptr = alloc_base_ptrs.at(src_key) + src.offset;
 
   CudaDevice::AllocInfo dst_alloc_info = cuda_dev->get_alloc_info(dst_alloc);
 

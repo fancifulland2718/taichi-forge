@@ -22,6 +22,7 @@ class DisplayFrame:
         "_host_rgba8",
         "_packed_u32",
         "_texture",
+        "_field_info",
     )
 
     HOST_RGBA8 = "host_rgba8"
@@ -38,6 +39,7 @@ class DisplayFrame:
         host_rgba8=None,
         packed_u32=None,
         texture=None,
+        field_info=None,
     ):
         self.kind = kind
         self.width = int(width)
@@ -47,6 +49,7 @@ class DisplayFrame:
         self._host_rgba8 = host_rgba8
         self._packed_u32 = packed_u32
         self._texture = texture
+        self._field_info = field_info
 
     @classmethod
     def from_numpy_rgba8(cls, image, *, copy=False, transpose=True):
@@ -85,6 +88,8 @@ class DisplayFrame:
             raise TypeError("DisplayFrame.from_packed_u32_ndarray() expects a ti.ndarray")
         if image.dtype != u32 or len(image.shape) != 2:
             raise ValueError("packed display frame input must be a 2D u32 ndarray")
+        from .utils import get_field_info  # pylint: disable=import-outside-toplevel
+
         return cls(
             cls.PACKED_U32,
             image.shape[0],
@@ -92,6 +97,7 @@ class DisplayFrame:
             0,
             transpose,
             packed_u32=image,
+            field_info=get_field_info(image),
         )
 
     @property
@@ -105,3 +111,7 @@ class DisplayFrame:
     @property
     def texture(self):
         return self._texture
+
+    @property
+    def field_info(self):
+        return self._field_info

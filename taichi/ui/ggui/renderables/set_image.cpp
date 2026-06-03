@@ -5,6 +5,8 @@
 #include "taichi/rhi/interop/vulkan_cuda_interop.h"
 #include "taichi/ui/utils/utils.h"
 
+#include <unordered_map>
+
 using taichi::lang::Program;
 
 namespace taichi::ui {
@@ -13,6 +15,35 @@ namespace vulkan {
 
 using namespace taichi::lang;
 using namespace taichi::lang::vulkan;
+
+static_assert(sizeof(SetImage::DirectUniformBufferObject) == 48);
+
+namespace {
+
+struct DirectSetImageState {
+  taichi::lang::Pipeline *pipeline{nullptr};
+  std::unique_ptr<taichi::lang::ShaderResourceSet> resource_set{nullptr};
+  taichi::lang::DeviceAllocationUnique ubo{nullptr};
+  taichi::lang::DevicePtr display_buffer{taichi::lang::kDeviceNullPtr};
+  bool enabled{false};
+};
+
+std::unordered_map<const SetImage *, DirectSetImageState>
+    direct_set_image_states;
+
+DirectSetImageState *find_direct_state(const SetImage *set_image) {
+  auto it = direct_set_image_states.find(set_image);
+  if (it == direct_set_image_states.end()) {
+    return nullptr;
+  }
+  return &it->second;
+}
+
+DirectSetImageState &get_direct_state(const SetImage *set_image) {
+  return direct_set_image_states[set_image];
+}
+
+}  // namespace
 
 void SetImage::update_ubo(float x_factor, float y_factor, bool transpose) {
   glm::vec2 pixel_size = glm::vec2(1.0f / width_, 1.0f / height_);
@@ -25,6 +56,61 @@ void SetImage::update_ubo(float x_factor, float y_factor, bool transpose) {
                                         &mapped));
   memcpy(mapped, &ubo, sizeof(ubo));
   app_context_->device().unmap(*uniform_buffer_renderable_);
+}
+
+void SetImage::update_direct_buffer_ubo() {
+  DirectSetImageState &state = get_direct_state(this);
+  if (!state.ubo) {
+    auto [buf, res] = app_context_->device().allocate_memory_unique(
+        {sizeof(DirectUniformBufferObject), /*host_write=*/true,
+         /*host_read=*/false, /*export_sharing=*/false, AllocUsage::Uniform});
+    TI_ASSERT(res == RhiResult::success);
+    state.ubo = std::move(buf);
+  }
+
+  glm::vec2 pixel_size = glm::vec2(1.0f / width_, 1.0f / height_);
+  glm::vec2 lower_bound = pixel_size * 0.5f;
+  glm::vec2 upper_bound = glm::vec2(1.0f, 1.0f) - pixel_size * 0.5f;
+  DirectUniformBufferObject ubo = {lower_bound,
+                                   upper_bound,
+                                   1.0f,
+                                   1.0f,
+                                   1,
+                                   width_,
+                                   height_};
+  void *mapped{nullptr};
+  RHI_VERIFY(app_context_->device().map(state.ubo->get_ptr(0), &mapped));
+  memcpy(mapped, &ubo, sizeof(ubo));
+  app_context_->device().unmap(*state.ubo);
+}
+
+bool SetImage::can_use_direct_buffer(DevicePtr ptr) const {
+  return app_context_->config.ggui_arch == Arch::vulkan &&
+         (ptr.device == &app_context_->device() ||
+          is_cuda_to_vulkan_copy(&app_context_->device(), ptr.device));
+}
+
+void SetImage::use_direct_buffer_pipeline() {
+  DirectSetImageState &state = get_direct_state(this);
+  if (!state.pipeline) {
+    state.pipeline = app_context_->get_raster_pipeline(
+        {app_context_->config.package_path + "/shaders/SetImageBuffer_vk_frag.spv",
+         config_.vertex_shader_path,
+         config_.topology_type, config_.depth, config_.polygon_mode,
+         config_.blending, config_.vertex_input_rate_instance});
+  }
+  if (!state.resource_set) {
+    state.resource_set = app_context_->device().create_resource_set_unique();
+  }
+  state.enabled = true;
+  pending_upload_ = false;
+}
+
+void SetImage::use_texture_pipeline() {
+  if (auto *state = find_direct_state(this)) {
+    state->enabled = false;
+    state->display_buffer = kDeviceNullPtr;
+  }
 }
 
 void SetImage::update_data(const SetImageInfo &info) {
@@ -43,25 +129,43 @@ void SetImage::update_data(const SetImageInfo &info) {
   int new_width = img.shape[0];
   int new_height = img.shape[1];
 
-  resize_texture(new_width, new_height, BufferFormat::rgba8);
-
-  update_ubo(1.0f, 1.0f, true);
-
   // If data source is not a host mapped pointer, it is a DeviceAllocation
   // from the same backend as GGUI
   DevicePtr img_dev_ptr = info.img.dev_alloc.get_ptr();
   bool uses_host = img.field_source == FieldSource::HostMappedPtr;
   if (uses_host) {
+    use_texture_pipeline();
+    resize_texture(new_width, new_height, BufferFormat::rgba8);
+    update_ubo(1.0f, 1.0f, true);
     void *src_ptr = reinterpret_cast<uint8_t *>(img.dev_alloc.alloc_id);
     img_dev_ptr = upload_host_rgba8(src_ptr, width_, height_,
                                     height_ * sizeof(uint32_t));
     pending_upload_buffer_ = img_dev_ptr;
     pending_upload_ = true;
     return;
-  } else {
-    reset_upload_staging();
-    pending_upload_ = false;
   }
+
+  if (can_use_direct_buffer(img_dev_ptr)) {
+    width_ = new_width;
+    height_ = new_height;
+    format_ = BufferFormat::rgba8;
+    update_direct_buffer_ubo();
+    if (img_dev_ptr.device != &app_context_->device()) {
+      img_dev_ptr = stage_device_rgba8(
+          img_dev_ptr,
+          static_cast<uint64_t>(width_) * static_cast<uint64_t>(height_) *
+              sizeof(uint32_t));
+    } else {
+      reset_upload_staging();
+    }
+    get_direct_state(this).display_buffer = img_dev_ptr;
+    use_direct_buffer_pipeline();
+    return;
+  }
+
+  use_texture_pipeline();
+  resize_texture(new_width, new_height, BufferFormat::rgba8);
+  update_ubo(1.0f, 1.0f, true);
 
   if (img_dev_ptr.device != &app_context_->device()) {
     img_dev_ptr = stage_device_rgba8(
@@ -72,6 +176,9 @@ void SetImage::update_data(const SetImageInfo &info) {
     pending_upload_ = true;
     return;
   }
+
+  reset_upload_staging();
+  pending_upload_ = false;
 
   auto copy_op = [&, img_dev_ptr](Device *, CommandList *cmdlist) {
     BufferImageCopyParams copy_params;
@@ -112,6 +219,7 @@ void SetImage::update_data(const DisplayFrameInfo &info) {
   TI_ASSERT_INFO(info.width > 0 && info.height > 0,
                  "display frame size must be positive");
 
+  use_texture_pipeline();
   resize_texture(info.width, info.height, BufferFormat::rgba8);
   update_ubo(1.0f, 1.0f, info.transpose);
 
@@ -127,6 +235,7 @@ void SetImage::update_data(const DisplayFrameInfo &info) {
 
 void SetImage::update_data(Texture *tex) {
   Program *prog = app_context_->prog();
+  use_texture_pipeline();
   reset_upload_staging();
   pending_upload_ = false;
 
@@ -219,7 +328,30 @@ SetImage::SetImage(AppContext *app_context, VertexAttributes vbo_attrs) {
   app_context_->device().unmap(*vertex_buffer_);
 }
 
+void erase_direct_set_image_state(const SetImage *set_image) {
+  direct_set_image_states.erase(set_image);
+}
+
 void SetImage::record_this_frame_commands(CommandList *command_list) {
+  if (auto *state = find_direct_state(this); state && state->enabled) {
+    TI_ASSERT_INFO(state->display_buffer != kDeviceNullPtr,
+                   "set_image direct display buffer must be valid");
+    state->resource_set->rw_buffer(
+        0, state->display_buffer,
+        static_cast<uint64_t>(width_) * static_cast<uint64_t>(height_) *
+            sizeof(uint32_t));
+    state->resource_set->buffer(1, state->ubo->get_ptr());
+
+    auto raster_state = app_context_->device().create_raster_resources_unique();
+    raster_state->vertex_buffer(vertex_buffer_->get_ptr(), 0);
+
+    command_list->bind_pipeline(state->pipeline);
+    command_list->bind_raster_resources(raster_state.get());
+    command_list->bind_shader_resources(state->resource_set.get());
+    command_list->draw(6);
+    return;
+  }
+
   resource_set_->image(0, *texture_, {});
   resource_set_->buffer(1, uniform_buffer_renderable_->get_ptr());
 
@@ -233,6 +365,12 @@ void SetImage::record_this_frame_commands(CommandList *command_list) {
 }
 
 void SetImage::record_prepass_this_frame_commands(CommandList *command_list) {
+  if (auto *state = find_direct_state(this); state && state->enabled) {
+    if (state->display_buffer != kDeviceNullPtr) {
+      command_list->buffer_barrier(state->display_buffer);
+    }
+    return;
+  }
   if (!pending_upload_) {
     return;
   }
@@ -322,17 +460,6 @@ DevicePtr SetImage::stage_device_rgba8(DevicePtr src, uint64_t size_bytes) {
 DevicePtr SetImage::ensure_upload_staging(uint64_t size_bytes,
                                           bool host_write,
                                           bool export_sharing) {
-  if (export_sharing) {
-    auto [staging, res] = app_context_->device().allocate_memory_unique(
-        {size_bytes, host_write, false, export_sharing, AllocUsage::Upload});
-    TI_ASSERT(res == RhiResult::success);
-    host_staging_ = std::move(staging);
-    upload_staging_size_ = size_bytes;
-    upload_staging_host_write_ = host_write;
-    upload_staging_export_sharing_ = export_sharing;
-    return host_staging_->get_ptr(0);
-  }
-
   if (host_staging_ && upload_staging_size_ >= size_bytes &&
       upload_staging_host_write_ == host_write &&
       upload_staging_export_sharing_ == export_sharing) {
@@ -340,7 +467,9 @@ DevicePtr SetImage::ensure_upload_staging(uint64_t size_bytes,
   }
 
   auto [staging, res] = app_context_->device().allocate_memory_unique(
-      {size_bytes, host_write, false, export_sharing, AllocUsage::Upload});
+      {size_bytes, host_write, false, export_sharing,
+       export_sharing ? (AllocUsage::Upload | AllocUsage::Storage)
+                      : AllocUsage::Upload});
   TI_ASSERT(res == RhiResult::success);
   host_staging_ = std::move(staging);
   upload_staging_size_ = size_bytes;
@@ -354,6 +483,7 @@ void SetImage::reset_upload_staging() {
   upload_staging_size_ = 0;
   upload_staging_host_write_ = false;
   upload_staging_export_sharing_ = false;
+  pending_upload_buffer_ = kDeviceNullPtr;
 }
 
 }  // namespace vulkan

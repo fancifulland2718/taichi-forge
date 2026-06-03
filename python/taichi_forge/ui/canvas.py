@@ -100,7 +100,7 @@ class Canvas:
                 frame.transpose,
             )
         elif frame.kind == DisplayFrame.PACKED_U32:
-            self.canvas.set_image(get_field_info(frame.packed_u32))
+            self.canvas.set_image(frame.field_info)
         elif frame.kind == DisplayFrame.TEXTURE:
             self.canvas.set_image_texture(frame.texture.tex)
         else:
