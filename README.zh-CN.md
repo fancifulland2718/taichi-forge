@@ -67,7 +67,7 @@ README 只说明用户可见变化和兼容边界，不列具体 benchmark 数�
 [Hash SNode](docs/forge/hash_snode.zh.md)、
 [并行排序 API](docs/forge/sort_api.zh.md)。
 
-### 0.4.0：Graph、native 算法、缓存与显示提交
+### 0.4.x：Graph、native 算法、缓存与显示提交
 
 - 在保持公开 graph builder 形态的前提下现代化 graph 执行层：`GraphBuilder.dispatch`、sequential graph、`compile`、`Graph.run` 和 AOT CGraph 仍是用户可见模型。
 - 支持 DSL 内预定义的 native 算法节点进入 graph replay。这不是任意 native callback 的公开 API。
@@ -78,12 +78,6 @@ README 只说明用户可见变化和兼容边界，不列具体 benchmark 数�
 参考：[Graph 升级说明](docs/forge/graph_upgrade_from_taichi_1_7_4.zh.md)、
 [Native 算法](docs/forge/native_algorithms.zh.md)、
 [显示帧提交](docs/forge/display_frame.zh.md)。
-
-### 0.4.1：当前修复后基准
-
-- 保留 `0.4.x` 功能集作为当前 release baseline。
-- 较早 `0.4.x` 上传中只涉及过期元数据或 bugfix 的版本，以修复后的当前版本为准。
-- 后续 PyPI 长描述从主 README 生成，避免包页面和 GitHub 主页说明不一致。
 
 ## 公开文档
 

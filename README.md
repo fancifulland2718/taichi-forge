@@ -90,7 +90,7 @@ See [Vulkan sparse SNode](docs/forge/sparse_snode_on_vulkan.en.md),
 [Hash SNode](docs/forge/hash_snode.en.md), and
 [Parallel sort API](docs/forge/sort_api.en.md).
 
-### 0.4.0: Graph, Native Algorithms, Cache, and Display Submission
+### 0.4.x: Graph, Native Algorithms, Cache, and Display Submission
 
 - Modernized graph execution below the public graph-builder API while keeping
   `GraphBuilder.dispatch`, sequential graphs, `compile`, `Graph.run`, and AOT
@@ -113,14 +113,6 @@ See [Vulkan sparse SNode](docs/forge/sparse_snode_on_vulkan.en.md),
 See [Graph upgrade notes](docs/forge/graph_upgrade_from_taichi_1_7_4.en.md),
 [Native algorithms](docs/forge/native_algorithms.en.md), and
 [Display frame submission](docs/forge/display_frame.en.md).
-
-### 0.4.1: Current Fixed Baseline
-
-- Keeps the `0.4.x` feature set as the current release baseline.
-- Treats earlier `0.4.x` uploads with stale metadata or bugfix-only differences
-  as superseded by the fixed release.
-- Future PyPI long descriptions are sourced from this README so the package page
-  and GitHub front page stay aligned.
 
 ## Public Documentation
 
