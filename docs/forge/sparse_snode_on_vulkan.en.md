@@ -1,14 +1,12 @@
 # Sparse SNode on Vulkan — User Guide
 
-> Applies to **Taichi Forge 0.3.13**. Vanilla Taichi 1.7.4's Vulkan/SPIRV backend supports only `dense` + `root`. Taichi Forge additionally supports `pointer`, `bitmasked`, `dynamic`, and experimental `hash` SNodes on Vulkan, with three-backend (cpu / cuda / vulkan) numerical equivalence.
->
-> 中文版：[sparse_snode_on_vulkan.zh.md](sparse_snode_on_vulkan.zh.md)
+> Applies to **Taichi Forge 0.4.1**. Vanilla Taichi 1.7.4's Vulkan/SPIRV backend supports only `dense` + `root`. Taichi Forge additionally supports `pointer`, `bitmasked`, `dynamic`, and experimental `hash` SNodes on Vulkan, with three-backend (cpu / cuda / vulkan) numerical equivalence.
 
 ---
 
 ## 1. Overview
 
-| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.3.13 Vulkan | LLVM (cpu/cuda) |
+| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.4.1 Vulkan | LLVM (cpu/cuda) |
 |---|---|---|---|
 | `dense` | ✅ | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ | ✅ |

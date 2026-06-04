@@ -9,7 +9,7 @@ build-backend = "scikit_build_core.build"
 name = "taichi-forge"
 dynamic = ["version"]
 description = "Taichi Forge - a community-maintained fork of the Taichi Programming Language (import name: taichi_forge)."
-readme = "README_FORGE.md"
+readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10,<4.0"
 authors = [

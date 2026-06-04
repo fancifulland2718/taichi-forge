@@ -1,8 +1,6 @@
 # Taichi Forge — 编译 / 运行时 / 架构 / 现代化选项一览
 
-> 适用于 **Taichi Forge 0.3.13**。除非特别说明，本文列出的选项均为**可选启用**；未显式启用的功能尽量保留 upstream Taichi 1.7.4 行为。
->
-> English: [forge_options.en.md](forge_options.en.md)
+> 适用于 **Taichi Forge 0.4.1**。除非特别说明，本文列出的选项均为**可选启用**；未显式启用的功能尽量保留 upstream Taichi 1.7.4 行为。
 
 本文档是本 fork 所有公开新增配置项与工具链变更的**唯一权威清单**。实验性或内部专用 flag 不收录于此。
 
@@ -63,11 +61,10 @@
 | `auto_real_function` | `False` | 自动将昂贵 `@ti.func` 实例提升为 `is_real_function=True`（LLVM-only，非 autodiff）。 |
 | `auto_real_function_threshold_us` | `1000` | 提升阈值（微秒，估算编译耗时）。 |
 
-### 2.5 兼容性占位
+### 2.5 Vulkan quantization
 
 | 参数 | 默认 | 用途 |
 |---|---|---|
-| `offline_cache_l_sem` | （关） | 内部测试 flag，不应在生产中使用。 |
 | `vulkan_quant_experimental` | `False` | **0.3.0 新增**。启用后 Vulkan 后端接受 `quant_array` / `bit_struct` 字段（即 `Extension::quant` / `Extension::quant_basic` 在 Vulkan 上可用）。已支持 `QuantInt` / `QuantFixed` 的读、写与多线程并发 `ti.atomic_add`（`OpAtomicCompareExchange` 自旋 RMW，`quant_array` 与 `BitpackedFields` / `bit_struct` 多字段同字均 OK），三后端字节等价。明确不支持：`QuantFloat` 共享指数、非 add 的原子操作（`atomic_min/max/and/or/xor`，与 LLVM 后端一致）。未实现路径会抛 `TI_NOT_IMPLEMENTED` / `TI_ERROR` 而非静默误编译。等价 env var：`TI_VULKAN_QUANT=1`。 |
 
 ### 2.6 CUDA sparse 内存池
@@ -93,7 +90,7 @@
 
 ### 2.8 Hash SNode
 
-`hash` SNode 是实验功能，在 Taichi Forge 0.3.13 中默认开启。它可在 CPU、CUDA、Vulkan 上使用，第一次调用 `SNode.hash()` 会提示实验功能警告；如果需要复现 vanilla 兼容的拒绝行为，或隔离回归，可以传入 `hash_snode_experimental=False` 关闭。API 与迁移说明见 [hash_snode.zh.md](hash_snode.zh.md)。
+`hash` SNode 是实验功能，在 Taichi Forge 0.4.1 中默认开启。它可在 CPU、CUDA、Vulkan 上使用，第一次调用 `SNode.hash()` 会提示实验功能警告；如果需要复现 vanilla 兼容的拒绝行为，或隔离回归，可以传入 `hash_snode_experimental=False` 关闭。API 与迁移说明见 [hash_snode.zh.md](hash_snode.zh.md)。
 
 | 参数 | 允许值 / 默认值 | 用途 | 风险与建议 |
 |---|---|---|---|
@@ -132,7 +129,7 @@ PyPI 发布的 wheel 三项均为 ON。
 
 ## 5. SNode 覆盖度扩展
 
-| SNode 类型 | vanilla 1.7.4 Vulkan | Taichi Forge 0.3.13 Vulkan |
+| SNode 类型 | vanilla 1.7.4 Vulkan | Taichi Forge 0.4.1 Vulkan |
 |---|---|---|
 | `dense` | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ |
@@ -148,7 +145,7 @@ Vulkan 稀疏 SNode 用法与语义见 [sparse_snode_on_vulkan.zh.md](sparse_sno
 
 Forge 同步至现代工具链；下表对比 vanilla 1.7.4。
 
-| 组件 | vanilla 1.7.4 | Forge 0.3.13 |
+| 组件 | vanilla 1.7.4 | Forge 0.4.1 |
 |---|---|---|
 | LLVM | 15 | **20.1.7** |
 | Python | 3.7 – 3.12 | **3.10 – 3.14** |

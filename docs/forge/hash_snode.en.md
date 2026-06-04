@@ -1,8 +1,6 @@
 # Hash SNode — User Guide
 
-> Applies to **Taichi Forge 0.3.13**. `hash` SNode is an experimental, fixed-capacity sparse SNode available on the CPU, CUDA, and Vulkan backends. It is enabled by default and emits an experimental-feature warning on first use.
->
-> 中文版：[hash_snode.zh.md](hash_snode.zh.md)
+> Applies to **Taichi Forge 0.4.1**. `hash` SNode is an experimental, fixed-capacity sparse SNode available on the CPU, CUDA, and Vulkan backends. It is enabled by default and emits an experimental-feature warning on first use.
 
 ---
 
@@ -10,7 +8,7 @@
 
 Vanilla Taichi 1.7.4 kept `hash` SNode behind a frontend gate and did not ship it as a usable feature. Taichi Forge revives it as a controlled sparse structure:
 
-- It is **default on** in Taichi Forge 0.3.13. The first `SNode.hash()` call emits a warning because the feature is still experimental.
+- It is **default on** in Taichi Forge 0.4.1. The first `SNode.hash()` call emits a warning because the feature is still experimental.
 - You can disable it with `ti.init(hash_snode_experimental=False)` when isolating regressions or reproducing vanilla Taichi's disabled-hash behavior.
 - Capacity is fixed before JIT. There is no device-side grow or rehash.
 - Overflow is diagnosed instead of silently dropping writes.

@@ -1,8 +1,6 @@
 # Taichi Forge — Compile, Runtime, Architecture & Modernization Options
 
-> Applies to **Taichi Forge 0.3.13**. Every option listed here is **opt-in** unless explicitly noted; defaults preserve upstream Taichi 1.7.4 behaviour wherever a feature is not intentionally enabled by Forge.
->
-> 中文版：[forge_options.zh.md](forge_options.zh.md)
+> Applies to **Taichi Forge 0.4.1**. Every option listed here is **opt-in** unless explicitly noted; defaults preserve upstream Taichi 1.7.4 behaviour wherever a feature is not intentionally enabled by Forge.
 
 This document is the single canonical reference for Forge-specific knobs and toolchain changes. Older fork-only settings are kept here once they are part of the public API; experimental or internal-only flags are intentionally excluded.
 
@@ -63,11 +61,10 @@ All defaults match upstream 1.7.4 unless noted.
 | `auto_real_function` | `False` | Auto-promote expensive `@ti.func` instances to `is_real_function=True` (LLVM-only, non-autodiff). |
 | `auto_real_function_threshold_us` | `1000` | Promotion threshold in microseconds of estimated compile cost. |
 
-### 2.5 Compatibility-only
+### 2.5 Vulkan quantization
 
 | Kwarg | Default | Purpose |
 |---|---|---|
-| `offline_cache_l_sem` | (off) | Internal / testing flag, not for production use. |
 | `vulkan_quant_experimental` | `False` | **New in 0.3.0.** When ON, the Vulkan backend accepts `quant_array` / `bit_struct` fields (i.e. `Extension::quant` / `Extension::quant_basic` are reported supported on Vulkan). Supported: `QuantInt` / `QuantFixed` read, write, and concurrent multi-thread `ti.atomic_add` (via SPIR-V `OpAtomicCompareExchange` spin RMW) on `quant_array` and on multi-field `BitpackedFields` / `bit_struct`, byte-equivalent to cpu / cuda. **Explicitly not supported**: `QuantFloat` shared-exponent and the non-add atomic ops (`atomic_min/max/and/or/xor`, identical restriction to the LLVM backend). Unsupported sites raise `TI_NOT_IMPLEMENTED` / `TI_ERROR` rather than silently miscompile. Equivalent env var: `TI_VULKAN_QUANT=1`. |
 
 ### 2.6 CUDA sparse memory pool
@@ -93,7 +90,7 @@ Both flags default OFF and are bit-identical to the legacy path when off. Enabli
 
 ### 2.8 Hash SNode
 
-`hash` SNode is experimental and default ON in Taichi Forge 0.3.13. It is available on CPU, CUDA, and Vulkan, emits an experimental-feature warning on first `SNode.hash()` use, and can be disabled with `hash_snode_experimental=False`. See [hash_snode.en.md](hash_snode.en.md) for the API and migration notes.
+`hash` SNode is experimental and default ON in Taichi Forge 0.4.1. It is available on CPU, CUDA, and Vulkan, emits an experimental-feature warning on first `SNode.hash()` use, and can be disabled with `hash_snode_experimental=False`. See [hash_snode.en.md](hash_snode.en.md) for the API and migration notes.
 
 | Kwarg | Values / default | Purpose | Risk / guidance |
 |---|---|---|---|
@@ -132,7 +129,7 @@ The wheel published to PyPI builds with all three flags ON.
 
 ## 5. SNode coverage extensions
 
-| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.3.13 Vulkan |
+| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.4.1 Vulkan |
 |---|---|---|
 | `dense` | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ |
@@ -148,7 +145,7 @@ Full Vulkan sparse usage and semantics: [sparse_snode_on_vulkan.en.md](sparse_sn
 
 Forge ships against modern toolchains; the table below summarises the versions vs. vanilla 1.7.4.
 
-| Component | vanilla 1.7.4 | Forge 0.3.13 |
+| Component | vanilla 1.7.4 | Forge 0.4.1 |
 |---|---|---|
 | LLVM | 15 | **20.1.7** |
 | Python | 3.7 – 3.12 | **3.10 – 3.14** |
