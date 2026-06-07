@@ -1067,6 +1067,18 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_reduce_workspace_bytes",
            &Program::cuda_cub_reduce_workspace_bytes)
+      .def("cuda_cub_check_count_available",
+           &Program::cuda_cub_check_count_available)
+      .def("cuda_cub_check_count_clear_workspace",
+           &Program::cuda_cub_check_count_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_check_count_workspace_bytes",
+           &Program::cuda_cub_check_count_workspace_bytes)
+      .def("cuda_cub_check_count_ndarray",
+           &Program::cuda_cub_check_count_ndarray, py::arg("values"),
+           py::arg("output"), py::arg("value_type"), py::arg("check_op"),
+           py::arg("lower"), py::arg("upper"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_reduce_ndarray", &Program::cuda_cub_reduce_ndarray,
            py::arg("values"), py::arg("output"), py::arg("value_type"),
            py::arg("op"), py::call_guard<py::gil_scoped_release>())
@@ -1258,6 +1270,13 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("cpu_reduce_available", &Program::cpu_reduce_available)
       .def("cpu_reduce_workspace_bytes", &Program::cpu_reduce_workspace_bytes)
+      .def("cpu_check_count_available", &Program::cpu_check_count_available)
+      .def("cpu_check_count_workspace_bytes",
+           &Program::cpu_check_count_workspace_bytes)
+      .def("cpu_check_count_ndarray", &Program::cpu_check_count_ndarray,
+           py::arg("values"), py::arg("output"), py::arg("value_type"),
+           py::arg("check_op"), py::arg("lower"), py::arg("upper"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cpu_reduce_ndarray", &Program::cpu_reduce_ndarray,
            py::arg("values"), py::arg("output"), py::arg("value_type"),
            py::arg("op"), py::call_guard<py::gil_scoped_release>())
@@ -1588,6 +1607,20 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_reduce_workspace_bytes",
            &Program::vulkan_reduce_workspace_bytes)
+      .def("vulkan_check_count_available",
+           &Program::vulkan_check_count_available)
+      .def("vulkan_check_count_clear_workspace",
+           &Program::vulkan_check_count_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_check_count_workspace_bytes",
+           &Program::vulkan_check_count_workspace_bytes)
+      .def("vulkan_check_count_value_type_available",
+           &Program::vulkan_check_count_value_type_available,
+           py::arg("value_type"))
+      .def("vulkan_check_count_ndarray", &Program::vulkan_check_count_ndarray,
+           py::arg("values"), py::arg("output"), py::arg("value_type"),
+           py::arg("check_op"), py::arg("lower"), py::arg("upper"),
+           py::call_guard<py::gil_scoped_release>())
       .def("vulkan_reduce_value_type_available",
            &Program::vulkan_reduce_value_type_available,
            py::arg("value_type"))

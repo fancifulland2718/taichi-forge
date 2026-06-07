@@ -56,6 +56,7 @@
 #endif  // defined(_M_X64) || defined(__x86_64)
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -3516,6 +3517,113 @@ std::size_t cpu_reduce_strided_typed(const uint8_t *values_ptr,
     result = cpu_reduce_combine(result, *value, op);
   }
   output_ptr[0] = result;
+  return 0;
+}
+
+template <typename T>
+bool cpu_check_predicate(T value, int check_op, int lower, int upper) {
+  switch (check_op) {
+    case 0:
+      return value != T{};
+    case 1:
+      return value == T{};
+    case 2:
+      if constexpr (std::is_floating_point_v<T>) {
+        return std::isnan(value);
+      }
+      return false;
+    case 3:
+      if constexpr (std::is_floating_point_v<T>) {
+        return std::isinf(value);
+      }
+      return false;
+    case 4:
+      if constexpr (std::is_floating_point_v<T>) {
+        return !std::isfinite(value);
+      }
+      return false;
+    case 5:
+      if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
+        return value < static_cast<T>(lower) || value >= static_cast<T>(upper);
+      } else if constexpr (std::is_integral_v<T>) {
+        if (lower < 0) {
+          return value >= static_cast<T>(upper);
+        }
+        return value < static_cast<T>(lower) || value >= static_cast<T>(upper);
+      }
+      return false;
+  }
+  return false;
+}
+
+template <typename T>
+struct CpuCheckCountTaskContext {
+  const T *values{nullptr};
+  int32_t *partial{nullptr};
+  std::size_t n{0};
+  int check_op{0};
+  int lower{0};
+  int upper{0};
+  int num_threads{1};
+};
+
+template <typename T>
+void cpu_check_count_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuCheckCountTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  int32_t local = 0;
+  for (std::size_t i = begin; i < end; ++i) {
+    local += cpu_check_predicate(ctx->values[i], ctx->check_op, ctx->lower,
+                                 ctx->upper)
+                 ? 1
+                 : 0;
+  }
+  ctx->partial[tid] = local;
+}
+
+template <typename T>
+std::size_t cpu_check_count_typed(const T *values_ptr,
+                                  int32_t *output_ptr,
+                                  int check_op,
+                                  int lower,
+                                  int upper,
+                                  std::size_t n,
+                                  int max_threads,
+                                  int target_threads,
+                                  bool use_parallel) {
+  TI_ERROR_IF(!values_ptr || !output_ptr,
+              "CPU native check_count received a null data pointer.");
+  if (use_parallel) {
+    const int num_threads = target_threads;
+    std::vector<int32_t> partial(num_threads, 0);
+    CpuCheckCountTaskContext<T> ctx;
+    ctx.values = values_ptr;
+    ctx.partial = partial.data();
+    ctx.n = n;
+    ctx.check_op = check_op;
+    ctx.lower = lower;
+    ctx.upper = upper;
+    ctx.num_threads = num_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(num_threads, num_threads, &ctx, cpu_check_count_task<T>);
+    int32_t total = 0;
+    for (int32_t value : partial) {
+      total += value;
+    }
+    output_ptr[0] = total;
+    return partial.size() * sizeof(int32_t);
+  }
+  int32_t total = 0;
+  for (std::size_t i = 0; i < n; ++i) {
+    total += cpu_check_predicate(values_ptr[i], check_op, lower, upper) ? 1 : 0;
+  }
+  output_ptr[0] = total;
   return 0;
 }
 
@@ -8247,6 +8355,74 @@ std::size_t Program::cuda_cub_reduce_workspace_bytes() const {
   return 0;
 }
 
+bool Program::cuda_cub_check_count_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::cub_check_count_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_cub_check_count_ndarray(Ndarray *values,
+                                                  Ndarray *output,
+                                                  int value_type,
+                                                  int check_op,
+                                                  int lower,
+                                                  int upper) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB check_count is only available on CUDA.");
+  TI_ERROR_IF(!values || !output,
+              "CUDA CUB check_count received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "CUDA CUB check_count expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "CUDA CUB check_count expects at least one input item.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "CUDA CUB check_count output must contain at least one item.");
+  TI_ERROR_IF(output->get_element_size() != sizeof(int32_t),
+              "CUDA CUB check_count output must be i32.");
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_size == 0,
+              "CUDA CUB check_count received an unsupported value type.");
+  TI_ERROR_IF(values->get_element_size() != expected_size,
+              "CUDA CUB check_count dtype does not match value type.");
+  TI_ERROR_IF(check_op < 0 || check_op > 5,
+              "CUDA CUB check_count received an unsupported check op.");
+  TI_ERROR_IF(values->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB check_count currently supports at most INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  void *values_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
+  void *output_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_check_count(
+      values_ptr, output_ptr, static_cast<int>(values->get_nelement()),
+      static_cast<cuda::CubReduceValueType>(value_type),
+      static_cast<cuda::CudaCheckOp>(check_op), lower, upper, stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB check_count requires building Taichi with TI_WITH_CUDA=ON.");
+#endif
+}
+
+void Program::cuda_cub_check_count_clear_workspace() {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    cuda::cub_check_count_clear_cache(this);
+  }
+#endif
+}
+
+std::size_t Program::cuda_cub_check_count_workspace_bytes() const {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    return cuda::cub_check_count_cached_bytes(const_cast<Program *>(this));
+  }
+#endif
+  return 0;
+}
+
 bool Program::cpu_scan_available() const {
   return arch_is_cpu(compile_config().arch);
 }
@@ -10263,6 +10439,81 @@ std::size_t Program::cpu_reduce_dense_field_packed(SNode *values,
 }
 
 std::size_t Program::cpu_reduce_workspace_bytes() const {
+  return 0;
+}
+
+bool Program::cpu_check_count_available() const {
+  return arch_is_cpu(compile_config().arch);
+}
+
+std::size_t Program::cpu_check_count_ndarray(Ndarray *values,
+                                             Ndarray *output,
+                                             int value_type,
+                                             int check_op,
+                                             int lower,
+                                             int upper) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native check_count is only available on CPU backends.");
+  TI_ERROR_IF(!values || !output,
+              "CPU native check_count received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "CPU native check_count expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "CPU native check_count expects at least one input item.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "CPU native check_count output must contain at least one item.");
+  TI_ERROR_IF(output->get_element_size() != sizeof(int32_t),
+              "CPU native check_count output must be i32.");
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_size == 0,
+              "CPU native check_count received an unsupported value type.");
+  TI_ERROR_IF(values->get_element_size() != expected_size,
+              "CPU native check_count dtype does not match value type.");
+  TI_ERROR_IF(check_op < 0 || check_op > 5,
+              "CPU native check_count received an unsupported check op.");
+
+  const std::size_t n = values->get_nelement();
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
+  const auto values_addr = get_ndarray_data_ptr_as_int(values);
+  const auto output_addr = get_ndarray_data_ptr_as_int(output);
+  auto *output_ptr = reinterpret_cast<int32_t *>(output_addr);
+  switch (value_type) {
+    case 0:
+      return cpu_check_count_typed(
+          reinterpret_cast<const int32_t *>(values_addr), output_ptr, check_op,
+          lower, upper, n, max_threads, target_threads, use_parallel);
+    case 1:
+      return cpu_check_count_typed(
+          reinterpret_cast<const float *>(values_addr), output_ptr, check_op,
+          lower, upper, n, max_threads, target_threads, use_parallel);
+    case 2:
+      return cpu_check_count_typed(
+          reinterpret_cast<const uint32_t *>(values_addr), output_ptr, check_op,
+          lower, upper, n, max_threads, target_threads, use_parallel);
+    case 3:
+      return cpu_check_count_typed(
+          reinterpret_cast<const uint64_t *>(values_addr), output_ptr, check_op,
+          lower, upper, n, max_threads, target_threads, use_parallel);
+    case 4:
+      return cpu_check_count_typed(
+          reinterpret_cast<const int64_t *>(values_addr), output_ptr, check_op,
+          lower, upper, n, max_threads, target_threads, use_parallel);
+    case 5:
+      return cpu_check_count_typed(
+          reinterpret_cast<const double *>(values_addr), output_ptr, check_op,
+          lower, upper, n, max_threads, target_threads, use_parallel);
+  }
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::cpu_check_count_workspace_bytes() const {
   return 0;
 }
 

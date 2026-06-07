@@ -125,6 +125,18 @@ _SUPPORTED_REDUCE_OPS = {"sum": 0, "min": 1, "max": 2}
 _REDUCE_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _REDUCE_FIELD_DTYPES = (i32, f32)
 _REDUCE_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
+_SUPPORTED_CHECK_METHODS = {"auto", "cuda_cub", "vulkan_native", "cpu_native"}
+_CHECK_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
+_CHECK_INTEGER_DTYPES = (u32, i32, u64, i64)
+_CHECK_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
+_CHECK_OPS = {
+    "nonzero": 0,
+    "zero": 1,
+    "nan": 2,
+    "inf": 3,
+    "not_finite": 4,
+    "index_oob": 5,
+}
 _SUPPORTED_TRANSFORM_METHODS = {
     "auto",
     "cuda_device",
@@ -222,6 +234,7 @@ _NATIVE_PRIMITIVE_PROG_METHOD_PREFIXES = (
 _NATIVE_PRIMITIVE_PROG_METHOD_TOKENS = (
     "add_merge",
     "bucket",
+    "check_count",
     "compact",
     "copy",
     "fill",
@@ -242,6 +255,7 @@ _NATIVE_PRIMITIVE_AVAILABLE_BY_ARCH = {
     cuda: (
         "cuda_cub_histogram_available",
         "cuda_cub_radix_sort_available",
+        "cuda_cub_check_count_available",
         "cuda_cub_reduce_available",
         "cuda_cub_scan_available",
         "cuda_cub_select_available",
@@ -256,6 +270,7 @@ _NATIVE_PRIMITIVE_AVAILABLE_BY_ARCH = {
     vulkan: (
         "vulkan_add_merge_available",
         "vulkan_bucket_builder_available",
+        "vulkan_check_count_available",
         "vulkan_compact_available",
         "vulkan_grouped_reduce_available",
         "vulkan_histogram_available",
@@ -269,6 +284,7 @@ _NATIVE_PRIMITIVE_AVAILABLE_BY_ARCH = {
     x64: (
         "cpu_add_merge_available",
         "cpu_bucket_builder_available",
+        "cpu_check_count_available",
         "cpu_compact_available",
         "cpu_grouped_reduce_available",
         "cpu_histogram_available",
@@ -282,6 +298,7 @@ _NATIVE_PRIMITIVE_AVAILABLE_BY_ARCH = {
     arm64: (
         "cpu_add_merge_available",
         "cpu_bucket_builder_available",
+        "cpu_check_count_available",
         "cpu_compact_available",
         "cpu_grouped_reduce_available",
         "cpu_histogram_available",
@@ -303,6 +320,7 @@ _NATIVE_PRIMITIVE_VALUE_AVAILABLE_BY_ARCH = {
         for name in (
             "vulkan_add_merge_value_type_available",
             "vulkan_bucket_builder_value_type_available",
+            "vulkan_check_count_value_type_available",
             "vulkan_grouped_reduce_atomic_value_type_available",
             "vulkan_grouped_reduce_value_type_available",
             "vulkan_reduce_value_type_available",
@@ -4156,6 +4174,329 @@ class ReduceWorkspace:
                 self.workspace_bytes_peak, self.workspace_bytes_current
             )
         return self._field_buffers[key]
+
+
+class DeviceCheckResult:
+    """Device scalar result for Python-level native checks."""
+
+    __slots__ = ("_scalar", "_kind", "_truth_when", "_ok_when")
+
+    def __init__(self, scalar, *, kind="count", truth_when="nonzero", ok_when=None):
+        self._scalar = scalar
+        self._kind = kind
+        self._truth_when = truth_when
+        self._ok_when = ok_when
+
+    @property
+    def device_scalar(self):
+        return self._scalar
+
+    @property
+    def kind(self):
+        return self._kind
+
+    def to_int(self):
+        if isinstance(self._scalar, Ndarray):
+            return int(self._scalar.to_numpy()[0])
+        return int(self._scalar[None])
+
+    def to_bool(self):
+        value = self.to_int()
+        if self._truth_when == "zero":
+            return value == 0
+        return value != 0
+
+    def ok(self):
+        if self._ok_when == "zero":
+            return self.to_int() == 0
+        if self._ok_when == "nonzero":
+            return self.to_int() != 0
+        return self.to_bool()
+
+
+class CheckWorkspace:
+    """Workspace for Python-level device checks.
+
+    These checks are scheduled from Python like sort/reduce native algorithms.
+    The backend writes one device-side i32 scalar and Python reads it back only
+    when callers ask for ``to_int()``, ``to_bool()``, or ``ok()``.
+    """
+
+    def __init__(self, max_items=None):
+        self.max_items = max_items
+        self._owned_workspace_bytes = 0
+        self._native_workspace_bytes = 0
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._result_i32_ndarray = None
+        self._cuda_active = False
+        self._vulkan_active = False
+
+    def clear(self):
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if self._cuda_active:
+            _call_optional_prog_method(prog, "cuda_cub_check_count_clear_workspace")
+        if self._vulkan_active:
+            _call_optional_prog_method(prog, "vulkan_check_count_clear_workspace")
+        self._owned_workspace_bytes = 0
+        self._native_workspace_bytes = 0
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._result_i32_ndarray = None
+        self._cuda_active = False
+        self._vulkan_active = False
+
+    def check_shape(self, n):
+        if n <= 0:
+            raise ValueError("device check expects at least one input item.")
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} check items, exceeding max_items={self.max_items}."
+            )
+
+    def _reserve_bytes(self, byte_count):
+        self._owned_workspace_bytes += byte_count
+        self._refresh_workspace_bytes()
+
+    def _refresh_workspace_bytes(self):
+        self.workspace_bytes_current = (
+            self._owned_workspace_bytes + self._native_workspace_bytes
+        )
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak, self.workspace_bytes_current
+        )
+
+    def _get_result_i32_ndarray(self):
+        if self._result_i32_ndarray is None:
+            self._result_i32_ndarray = ti_ndarray(i32, shape=1)
+            self._reserve_bytes(_dtype_nbytes(i32))
+        return self._result_i32_ndarray
+
+    def _mark_native_check_backend_active(self, backend, temp_bytes):
+        self._native_workspace_bytes = int(temp_bytes or 0)
+        if backend == "cuda_cub":
+            self._cuda_active = True
+        elif backend == "vulkan_native":
+            self._vulkan_active = True
+        self._refresh_workspace_bytes()
+
+
+def _as_check_workspace(workspace, n):
+    if workspace is None:
+        workspace = CheckWorkspace(max_items=n)
+    if not isinstance(workspace, CheckWorkspace):
+        raise TypeError("workspace must be a CheckWorkspace instance or None.")
+    workspace.check_shape(n)
+    return workspace
+
+
+def _check_value_type(dtype):
+    if dtype not in _CHECK_VALUE_DTYPES:
+        raise TypeError(
+            "native device check currently supports i32/u32/i64/u64/f32/f64 "
+            "scalar ndarrays."
+        )
+    return _CHECK_VALUE_TYPE[dtype]
+
+
+def _check_1d_ndarray(op_name, arr, *, dtype=None, integer=False):
+    if not isinstance(arr, Ndarray):
+        raise TypeError(f"{op_name} expects a 1D ti.ndarray.")
+    if _is_matrix_field(arr) or _is_struct_tensor_member_view(arr):
+        raise TypeError(f"{op_name} expects scalar 1D values.")
+    if len(arr.shape) != 1:
+        raise ValueError(f"{op_name} expects 1D input.")
+    if arr.shape[0] <= 0:
+        raise ValueError(f"{op_name} expects at least one input item.")
+    if dtype is not None and arr.dtype != dtype:
+        raise TypeError(f"{op_name} expects {dtype} input.")
+    if integer and arr.dtype not in _CHECK_INTEGER_DTYPES:
+        raise TypeError(f"{op_name} expects integer indices.")
+    _check_value_type(arr.dtype)
+    return arr
+
+
+def _check_count_backend(method):
+    if method not in _SUPPORTED_CHECK_METHODS:
+        raise ValueError(
+            f"Unsupported device check method '{method}'. Supported methods: "
+            f"{sorted(_SUPPORTED_CHECK_METHODS)}"
+        )
+    arch = current_cfg().arch
+    if method == "cuda_cub":
+        return "cuda_cub" if arch == cuda else None
+    if method == "vulkan_native":
+        return "vulkan_native" if arch == vulkan else None
+    if method == "cpu_native":
+        return "cpu_native" if arch in (x64, arm64) else None
+    if arch == cuda:
+        return "cuda_cub"
+    if arch == vulkan:
+        return "vulkan_native"
+    if arch in (x64, arm64):
+        return "cpu_native"
+    return None
+
+
+def _native_check_count(
+    values,
+    *,
+    check_op,
+    lower=0,
+    upper=0,
+    kind="count",
+    truth_when="nonzero",
+    ok_when=None,
+    method="auto",
+    workspace=None,
+):
+    values = _check_1d_ndarray(
+        "index_bounds_check" if check_op == "index_oob" else check_op,
+        values,
+        integer=check_op == "index_oob",
+    )
+    n = values.shape[0]
+    workspace = _as_check_workspace(workspace, n)
+    output = workspace._get_result_i32_ndarray()
+    backend = _check_count_backend(method)
+    if backend is None:
+        raise RuntimeError(
+            f"Native device check method '{method}' is unavailable for arch "
+            f"{current_cfg().arch}."
+        )
+
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    value_type = _check_value_type(values.dtype)
+    check_op_id = _CHECK_OPS[check_op]
+    lower = int(lower)
+    upper = int(upper)
+    if backend == "cuda_cub":
+        if not _prog_available(prog, "cuda_cub_check_count_available"):
+            raise RuntimeError("CUDA CUB check_count is unavailable.")
+        native_method = _prog_method(prog, "cuda_cub_check_count_ndarray")
+        if native_method is None:
+            raise RuntimeError("CUDA CUB check_count method is unavailable.")
+    elif backend == "vulkan_native":
+        if not _prog_available(prog, "vulkan_check_count_available"):
+            raise RuntimeError("Vulkan check_count is unavailable.")
+        if not _prog_value_available(
+            prog, "vulkan_check_count_value_type_available", value_type
+        ):
+            raise RuntimeError("Vulkan check_count does not support this dtype.")
+        native_method = _prog_method(prog, "vulkan_check_count_ndarray")
+        if native_method is None:
+            raise RuntimeError("Vulkan check_count method is unavailable.")
+    else:
+        if not _prog_available(prog, "cpu_check_count_available"):
+            raise RuntimeError("CPU check_count is unavailable.")
+        native_method = _prog_method(prog, "cpu_check_count_ndarray")
+        if native_method is None:
+            raise RuntimeError("CPU check_count method is unavailable.")
+
+    temp_bytes = native_method(
+        values.arr, output.arr, value_type, check_op_id, lower, upper
+    )
+    workspace._mark_native_check_backend_active(backend, temp_bytes)
+    return DeviceCheckResult(
+        output, kind=kind, truth_when=truth_when, ok_when=ok_when
+    )
+
+
+def count_if(flags, *, method="auto", workspace=None):
+    return _native_check_count(
+        flags, check_op="nonzero", method=method, workspace=workspace
+    )
+
+
+def any_if(flags, *, method="auto", workspace=None):
+    return _native_check_count(
+        flags,
+        check_op="nonzero",
+        kind="predicate",
+        truth_when="nonzero",
+        ok_when="nonzero",
+        method=method,
+        workspace=workspace,
+    )
+
+
+def all_if(flags, *, method="auto", workspace=None):
+    return _native_check_count(
+        flags,
+        check_op="zero",
+        kind="predicate",
+        truth_when="zero",
+        ok_when="zero",
+        method=method,
+        workspace=workspace,
+    )
+
+
+def nan_count(values, *, method="auto", workspace=None):
+    return _native_check_count(
+        values,
+        check_op="nan",
+        kind="count",
+        truth_when="nonzero",
+        ok_when="zero",
+        method=method,
+        workspace=workspace,
+    )
+
+
+def inf_count(values, *, method="auto", workspace=None):
+    return _native_check_count(
+        values,
+        check_op="inf",
+        kind="count",
+        truth_when="nonzero",
+        ok_when="zero",
+        method=method,
+        workspace=workspace,
+    )
+
+
+def all_finite(values, *, method="auto", workspace=None):
+    return _native_check_count(
+        values,
+        check_op="not_finite",
+        kind="predicate",
+        truth_when="zero",
+        ok_when="zero",
+        method=method,
+        workspace=workspace,
+    )
+
+
+def index_bounds_check(indices, upper, *, lower=0, method="auto", workspace=None):
+    return _native_check_count(
+        indices,
+        check_op="index_oob",
+        lower=lower,
+        upper=upper,
+        kind="count",
+        truth_when="nonzero",
+        ok_when="zero",
+        method=method,
+        workspace=workspace,
+    )
+
+
+class _DeviceCheckNamespace:
+    count_if = staticmethod(count_if)
+    any_if = staticmethod(any_if)
+    all_if = staticmethod(all_if)
+    nan_count = staticmethod(nan_count)
+    inf_count = staticmethod(inf_count)
+    all_finite = staticmethod(all_finite)
+    index_bounds_check = staticmethod(index_bounds_check)
+
+
+check = _DeviceCheckNamespace()
 
 
 class HistogramWorkspace:
@@ -14019,6 +14360,8 @@ __all__ = [
     "PrefixSumExecutor",
     "CompactWorkspace",
     "ReduceWorkspace",
+    "CheckWorkspace",
+    "DeviceCheckResult",
     "HistogramWorkspace",
     "TransformWorkspace",
     "IndexedCopyWorkspace",
@@ -14047,4 +14390,12 @@ __all__ = [
     "experimental_scatter_add",
     "experimental_bucket_builder",
     "experimental_grouped_reduce",
+    "count_if",
+    "any_if",
+    "all_if",
+    "nan_count",
+    "inf_count",
+    "all_finite",
+    "index_bounds_check",
+    "check",
 ]

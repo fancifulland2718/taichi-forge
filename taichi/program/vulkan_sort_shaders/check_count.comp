@@ -1,0 +1,107 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+#ifndef VALUE_KIND
+#define VALUE_KIND 0
+#endif
+
+#if VALUE_KIND == 3 || VALUE_KIND == 4
+#extension GL_ARB_gpu_shader_int64 : require
+#endif
+
+#if VALUE_KIND == 5
+#extension GL_ARB_gpu_shader_fp64 : require
+#endif
+
+#if VALUE_KIND == 1
+#define VALUE_T float
+#elif VALUE_KIND == 2
+#define VALUE_T uint
+#elif VALUE_KIND == 3
+#define VALUE_T uint64_t
+#elif VALUE_KIND == 4
+#define VALUE_T int64_t
+#elif VALUE_KIND == 5
+#define VALUE_T double
+#else
+#define VALUE_T int
+#endif
+
+layout(set = 0, binding = 0, std430) readonly buffer Values {
+  VALUE_T data[];
+} values_buf;
+
+layout(set = 0, binding = 1, std430) buffer Output {
+  int data[];
+} output_buf;
+
+layout(push_constant) uniform Params {
+  uint op;
+  int lower;
+  int upper;
+  uint unused0;
+} params;
+
+shared int local_reduce[256];
+
+int predicate(VALUE_T value) {
+  if (params.op == 0u) {
+    return value != VALUE_T(0) ? 1 : 0;
+  }
+  if (params.op == 1u) {
+    return value == VALUE_T(0) ? 1 : 0;
+  }
+#if VALUE_KIND == 1 || VALUE_KIND == 5
+  if (params.op == 2u) {
+    return isnan(value) ? 1 : 0;
+  }
+  if (params.op == 3u) {
+    return isinf(value) ? 1 : 0;
+  }
+  if (params.op == 4u) {
+    return (isnan(value) || isinf(value)) ? 1 : 0;
+  }
+#else
+  if (params.op == 2u || params.op == 3u || params.op == 4u) {
+    return 0;
+  }
+#endif
+  if (params.op == 5u) {
+#if VALUE_KIND == 0 || VALUE_KIND == 4
+    return (value < VALUE_T(params.lower) || value >= VALUE_T(params.upper)) ? 1 : 0;
+#elif VALUE_KIND == 2 || VALUE_KIND == 3
+    if (params.lower < 0) {
+      return value >= VALUE_T(params.upper) ? 1 : 0;
+    }
+    return (value < VALUE_T(params.lower) || value >= VALUE_T(params.upper)) ? 1 : 0;
+#else
+    return 0;
+#endif
+  }
+  return 0;
+}
+
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint n = values_buf.data.length();
+  uint global_stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+
+  int acc = 0;
+  for (uint idx = gl_GlobalInvocationID.x; idx < n; idx += global_stride) {
+    acc += predicate(values_buf.data[idx]);
+  }
+  local_reduce[lid] = acc;
+  barrier();
+
+  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+    if (lid < stride) {
+      local_reduce[lid] += local_reduce[lid + stride];
+    }
+    barrier();
+  }
+
+  if (lid == 0u) {
+    atomicAdd(output_buf.data[0], local_reduce[0]);
+  }
+}

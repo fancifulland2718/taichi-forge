@@ -12,6 +12,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 
 namespace taichi::lang::cuda {
@@ -191,6 +192,29 @@ struct CubReduceCache {
   }
 };
 
+struct CubCheckCountCache {
+  void *temp_storage{nullptr};
+  std::size_t temp_storage_bytes{0};
+  int device_id{-1};
+
+  ~CubCheckCountCache() {
+    release_noexcept();
+  }
+
+  void release_noexcept() {
+    if (temp_storage) {
+      cudaFree(temp_storage);
+    }
+    temp_storage = nullptr;
+    temp_storage_bytes = 0;
+    device_id = -1;
+  }
+
+  std::size_t allocated_bytes() const {
+    return temp_storage_bytes;
+  }
+};
+
 struct CubBucketBuilderCache {
   void *temp_storage{nullptr};
   std::size_t temp_storage_bytes{0};
@@ -271,6 +295,12 @@ get_reduce_caches() {
   return caches;
 }
 
+std::unordered_map<void *, std::unique_ptr<CubCheckCountCache>> &
+get_check_count_caches() {
+  static std::unordered_map<void *, std::unique_ptr<CubCheckCountCache>> caches;
+  return caches;
+}
+
 std::unordered_map<void *, std::unique_ptr<CubBucketBuilderCache>> &
 get_bucket_builder_caches() {
   static std::unordered_map<void *, std::unique_ptr<CubBucketBuilderCache>>
@@ -333,6 +363,19 @@ CubReduceCache &get_reduce_cache(void *owner) {
   auto it = caches.find(owner);
   if (it == caches.end()) {
     it = caches.emplace(owner, std::make_unique<CubReduceCache>()).first;
+  }
+  return *it->second;
+}
+
+CubCheckCountCache &get_check_count_cache(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  auto &caches = get_check_count_caches();
+  auto it = caches.find(owner);
+  if (it == caches.end()) {
+    it = caches.emplace(owner, std::make_unique<CubCheckCountCache>()).first;
   }
   return *it->second;
 }
@@ -408,6 +451,17 @@ void ensure_device_cache(CubSelectCache &cache) {
 }
 
 void ensure_device_cache(CubReduceCache &cache) {
+  int device_id = 0;
+  TI_CUDA_SORT_CHECK(cudaGetDevice(&device_id));
+  if (cache.device_id == -1) {
+    cache.device_id = device_id;
+  } else if (cache.device_id != device_id) {
+    cache.release_noexcept();
+    cache.device_id = device_id;
+  }
+}
+
+void ensure_device_cache(CubCheckCountCache &cache) {
   int device_id = 0;
   TI_CUDA_SORT_CHECK(cudaGetDevice(&device_id));
   if (cache.device_id == -1) {
@@ -3269,6 +3323,99 @@ std::size_t reduce_strided_typed(CubReduceCache &cache,
   return cache.allocated_bytes();
 }
 
+template <typename T>
+struct CheckCountLoadOp {
+  const T *values{nullptr};
+  CudaCheckOp op{CudaCheckOp::nonzero};
+  int lower{0};
+  int upper{0};
+
+  __host__ __device__ int32_t operator()(const int &i) const {
+    const T value = values[i];
+    switch (op) {
+      case CudaCheckOp::nonzero:
+        return value != T{} ? 1 : 0;
+      case CudaCheckOp::zero:
+        return value == T{} ? 1 : 0;
+      case CudaCheckOp::nan:
+        if constexpr (std::is_floating_point_v<T>) {
+          return isnan(value) ? 1 : 0;
+        }
+        return 0;
+      case CudaCheckOp::inf:
+        if constexpr (std::is_floating_point_v<T>) {
+          return isinf(value) ? 1 : 0;
+        }
+        return 0;
+      case CudaCheckOp::not_finite:
+        if constexpr (std::is_floating_point_v<T>) {
+          return (!isfinite(value)) ? 1 : 0;
+        }
+        return 0;
+      case CudaCheckOp::index_oob:
+        if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
+          return (value < static_cast<T>(lower) ||
+                  value >= static_cast<T>(upper))
+                     ? 1
+                     : 0;
+        } else if constexpr (std::is_integral_v<T>) {
+          if (lower < 0) {
+            return value >= static_cast<T>(upper) ? 1 : 0;
+          }
+          return (value < static_cast<T>(lower) ||
+                  value >= static_cast<T>(upper))
+                     ? 1
+                     : 0;
+        }
+        return 0;
+    }
+    return 0;
+  }
+};
+
+template <typename T>
+std::size_t check_count_typed(CubCheckCountCache &cache,
+                              void *values,
+                              void *output,
+                              int num_items,
+                              CudaCheckOp op,
+                              int lower,
+                              int upper,
+                              void *stream_ptr) {
+  if (!values || !output) {
+    throw std::runtime_error("CUB check_count received a null pointer");
+  }
+  const T *values_in = static_cast<const T *>(values);
+  int32_t *output_out = static_cast<int32_t *>(output);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  ensure_device_cache(cache);
+
+  CheckCountLoadOp<T> load_op{values_in, op, lower, upper};
+  auto counting = ::cuda::make_counting_iterator(0);
+  auto checks = ::cuda::make_transform_iterator(counting, load_op);
+
+  std::size_t temp_storage_bytes = 0;
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceReduce::Sum(
+        nullptr, temp_storage_bytes, checks, output_out, num_items, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceReduce::Sum(
+        nullptr, temp_storage_bytes, checks, output_out, num_items));
+  }
+  ensure_buffer(&cache.temp_storage, &cache.temp_storage_bytes,
+                temp_storage_bytes);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceReduce::Sum(
+        cache.temp_storage, temp_storage_bytes, checks, output_out, num_items,
+        stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceReduce::Sum(
+        cache.temp_storage, temp_storage_bytes, checks, output_out, num_items));
+  }
+  return cache.allocated_bytes();
+}
+
 std::size_t cub_reduce_impl(void *values,
                             void *output,
                             int num_items,
@@ -3332,6 +3479,67 @@ std::size_t cub_reduce_strided_impl(void *values,
           cache, values, output, num_items, offset, stride, op, stream);
   }
   throw std::runtime_error("Unsupported CUB strided reduce value type");
+}
+
+std::size_t cub_check_count_impl(void *values,
+                                 void *output,
+                                 int num_items,
+                                 CubReduceValueType value_type,
+                                 CudaCheckOp op,
+                                 int lower,
+                                 int upper,
+                                 void *stream,
+                                 void *owner) {
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  CubCheckCountCache &cache = get_check_count_cache(owner);
+  switch (value_type) {
+    case CubReduceValueType::i32:
+      return check_count_typed<int32_t>(cache, values, output, num_items, op,
+                                        lower, upper, stream);
+    case CubReduceValueType::f32:
+      return check_count_typed<float>(cache, values, output, num_items, op,
+                                      lower, upper, stream);
+    case CubReduceValueType::u32:
+      return check_count_typed<uint32_t>(cache, values, output, num_items, op,
+                                         lower, upper, stream);
+    case CubReduceValueType::u64:
+      return check_count_typed<uint64_t>(cache, values, output, num_items, op,
+                                         lower, upper, stream);
+    case CubReduceValueType::i64:
+      return check_count_typed<int64_t>(cache, values, output, num_items, op,
+                                        lower, upper, stream);
+    case CubReduceValueType::f64:
+      return check_count_typed<double>(cache, values, output, num_items, op,
+                                       lower, upper, stream);
+  }
+  throw std::runtime_error("Unsupported CUB check_count value type");
+}
+
+void cub_check_count_clear_cache_impl(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  auto &caches = get_check_count_caches();
+  auto it = caches.find(owner);
+  if (it != caches.end()) {
+    caches.erase(it);
+  }
+}
+
+std::size_t cub_check_count_cached_bytes_impl(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  auto &caches = get_check_count_caches();
+  auto it = caches.find(owner);
+  if (it == caches.end()) {
+    return 0;
+  }
+  return it->second->allocated_bytes();
 }
 
 void cub_reduce_clear_cache_impl(void *owner) {

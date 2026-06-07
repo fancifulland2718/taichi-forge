@@ -93,6 +93,17 @@ std::size_t cub_reduce_strided_impl(void *values,
                                     void *owner);
 void cub_reduce_clear_cache_impl(void *owner);
 std::size_t cub_reduce_cached_bytes_impl(void *owner);
+std::size_t cub_check_count_impl(void *values,
+                                 void *output,
+                                 int num_items,
+                                 CubReduceValueType value_type,
+                                 CudaCheckOp op,
+                                 int lower,
+                                 int upper,
+                                 void *stream,
+                                 void *owner);
+void cub_check_count_clear_cache_impl(void *owner);
+std::size_t cub_check_count_cached_bytes_impl(void *owner);
 std::size_t cub_scatter_add_impl(void *src,
                                  void *indices,
                                  void *dst,
@@ -1579,6 +1590,49 @@ void cub_reduce_clear_cache(void *owner) {
 std::size_t cub_reduce_cached_bytes(void *owner) {
 #if defined(TI_WITH_CUDA_TOOLKIT)
   return cub_reduce_cached_bytes_impl(owner);
+#else
+  return 0;
+#endif
+}
+
+bool cub_check_count_available() {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return ensure_cudart_for_cub_sort();
+#else
+  return false;
+#endif
+}
+
+std::size_t cub_check_count(void *values,
+                            void *output,
+                            int num_items,
+                            CubReduceValueType value_type,
+                            CudaCheckOp op,
+                            int lower,
+                            int upper,
+                            void *stream,
+                            void *owner) {
+  TI_ERROR_IF(num_items <= 0, "CUB check_count expects positive num_items");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  return cub_check_count_impl(values, output, num_items, value_type, op, lower,
+                              upper, stream, owner);
+#else
+  TI_ERROR(
+      "CUDA CUB check_count requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+void cub_check_count_clear_cache(void *owner) {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  cub_check_count_clear_cache_impl(owner);
+#endif
+}
+
+std::size_t cub_check_count_cached_bytes(void *owner) {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return cub_check_count_cached_bytes_impl(owner);
 #else
   return 0;
 #endif

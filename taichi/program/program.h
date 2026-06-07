@@ -863,6 +863,19 @@ class TI_DLL_EXPORT Program {
 
   std::size_t cuda_cub_reduce_workspace_bytes() const;
 
+  bool cuda_cub_check_count_available() const;
+
+  std::size_t cuda_cub_check_count_ndarray(Ndarray *values,
+                                           Ndarray *output,
+                                           int value_type,
+                                           int check_op,
+                                           int lower,
+                                           int upper);
+
+  void cuda_cub_check_count_clear_workspace();
+
+  std::size_t cuda_cub_check_count_workspace_bytes() const;
+
   bool cpu_scan_available() const;
 
   std::size_t cpu_inclusive_scan_ndarray(Ndarray *data, int value_type);
@@ -1057,6 +1070,17 @@ class TI_DLL_EXPORT Program {
                                             int op);
 
   std::size_t cpu_reduce_workspace_bytes() const;
+
+  bool cpu_check_count_available() const;
+
+  std::size_t cpu_check_count_ndarray(Ndarray *values,
+                                      Ndarray *output,
+                                      int value_type,
+                                      int check_op,
+                                      int lower,
+                                      int upper);
+
+  std::size_t cpu_check_count_workspace_bytes() const;
 
   bool cpu_transform_available() const;
 
@@ -1530,6 +1554,21 @@ class TI_DLL_EXPORT Program {
   void vulkan_reduce_clear_workspace();
 
   std::size_t vulkan_reduce_workspace_bytes() const;
+
+  bool vulkan_check_count_available() const;
+
+  bool vulkan_check_count_value_type_available(int value_type) const;
+
+  std::size_t vulkan_check_count_ndarray(Ndarray *values,
+                                         Ndarray *output,
+                                         int value_type,
+                                         int check_op,
+                                         int lower,
+                                         int upper);
+
+  void vulkan_check_count_clear_workspace();
+
+  std::size_t vulkan_check_count_workspace_bytes() const;
 
   bool vulkan_transform_available() const;
 

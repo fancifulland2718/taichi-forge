@@ -75,6 +75,15 @@ enum class CubReduceOp : int {
   max = 2,
 };
 
+enum class CudaCheckOp : int {
+  nonzero = 0,
+  zero = 1,
+  nan = 2,
+  inf = 3,
+  not_finite = 4,
+  index_oob = 5,
+};
+
 enum class CudaTransformValueType : int {
   i32 = 0,
   f32 = 1,
@@ -376,6 +385,22 @@ std::size_t cub_reduce_strided(void *values,
 void cub_reduce_clear_cache(void *owner);
 
 std::size_t cub_reduce_cached_bytes(void *owner);
+
+bool cub_check_count_available();
+
+std::size_t cub_check_count(void *values,
+                            void *output,
+                            int num_items,
+                            CubReduceValueType value_type,
+                            CudaCheckOp op,
+                            int lower,
+                            int upper,
+                            void *stream,
+                            void *owner);
+
+void cub_check_count_clear_cache(void *owner);
+
+std::size_t cub_check_count_cached_bytes(void *owner);
 
 bool cub_scatter_add_available();
 
