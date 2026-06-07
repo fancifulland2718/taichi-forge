@@ -826,6 +826,9 @@ static const uint32_t kCheckCountI64Spv[] =
 static const uint32_t kCheckCountF64Spv[] =
 #include "taichi/program/vulkan_sort_shaders/check_count_f64.comp.spv.h"
     ;
+static const uint32_t kMetricReduceF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/metric_reduce_f32.comp.spv.h"
+    ;
 static const uint32_t kReduceI32MinSingleSpv[] =
 #include "taichi/program/vulkan_sort_shaders/reduce_i32_min_single.comp.spv.h"
     ;
@@ -4464,6 +4467,70 @@ struct VulkanCheckCountCache {
   }
 };
 
+struct VulkanMetricReduceCache {
+  Device *device{nullptr};
+  size_t cached_bytes{0};
+  std::unique_ptr<Pipeline> metric_reduce_f32;
+  VulkanResourceSetReplayRing<3> bindings;
+  VulkanCommandReplayCache command_replay;
+
+  void clear_allocs() {
+    bindings.reset();
+    command_replay.reset();
+    cached_bytes = 0;
+  }
+
+  ~VulkanMetricReduceCache() {
+    clear_allocs();
+  }
+
+  void reset_pipelines() {
+    metric_reduce_f32.reset();
+    clear_allocs();
+  }
+
+  void ensure_device(Device *dev) {
+    if (device == dev) {
+      return;
+    }
+    if (device && device != dev) {
+      reset_pipelines();
+    }
+    device = dev;
+  }
+
+  Pipeline *pipeline_for(Device *dev, int value_type) {
+    ensure_device(dev);
+    TI_ERROR_IF(value_type != 1,
+                "Vulkan native metric_reduce currently supports only f32.");
+    if (!metric_reduce_f32) {
+      metric_reduce_f32 = create_pipeline_from_spv(
+          dev, kMetricReduceF32Spv, sizeof(kMetricReduceF32Spv),
+          "vulkan_metric_reduce_f32");
+    }
+    return metric_reduce_f32.get();
+  }
+
+  VulkanReplayResourceSet<3> bind_resource_set(
+      Program *program,
+      DeviceAllocation values_alloc,
+      uint64_t values_offset,
+      size_t values_bytes,
+      DeviceAllocation other_alloc,
+      uint64_t other_offset,
+      size_t other_bytes,
+      DeviceAllocation output_alloc,
+      uint64_t output_offset,
+      size_t output_bytes) {
+    return bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 3>{
+            rw_buffer_request(values_alloc, values_offset, values_bytes),
+            rw_buffer_request(other_alloc, other_offset, other_bytes),
+            rw_buffer_request(output_alloc, output_offset, output_bytes)});
+  }
+};
+
 struct VulkanTransformCache {
   Device *device{nullptr};
   size_t cached_bytes{0};
@@ -5886,6 +5953,9 @@ std::unordered_map<void *, std::unique_ptr<VulkanReduceCache>>
 std::mutex g_vulkan_check_count_mutex;
 std::unordered_map<void *, std::unique_ptr<VulkanCheckCountCache>>
     g_vulkan_check_count_caches;
+std::mutex g_vulkan_metric_reduce_mutex;
+std::unordered_map<void *, std::unique_ptr<VulkanMetricReduceCache>>
+    g_vulkan_metric_reduce_caches;
 std::mutex g_vulkan_transform_mutex;
 std::unordered_map<void *, std::unique_ptr<VulkanTransformCache>>
     g_vulkan_transform_caches;
@@ -5934,6 +6004,8 @@ bool vulkan_primitive_cache_exists(void *owner) {
                              owner) ||
          vulkan_cache_exists(g_vulkan_check_count_caches,
                              g_vulkan_check_count_mutex, owner) ||
+         vulkan_cache_exists(g_vulkan_metric_reduce_caches,
+                             g_vulkan_metric_reduce_mutex, owner) ||
          vulkan_cache_exists(g_vulkan_transform_caches,
                              g_vulkan_transform_mutex, owner) ||
          vulkan_cache_exists(g_vulkan_add_merge_caches,
@@ -5953,6 +6025,8 @@ void vulkan_erase_primitive_caches(void *owner) {
   vulkan_erase_cache(g_vulkan_reduce_caches, g_vulkan_reduce_mutex, owner);
   vulkan_erase_cache(g_vulkan_check_count_caches,
                      g_vulkan_check_count_mutex, owner);
+  vulkan_erase_cache(g_vulkan_metric_reduce_caches,
+                     g_vulkan_metric_reduce_mutex, owner);
   vulkan_erase_cache(g_vulkan_transform_caches, g_vulkan_transform_mutex,
                      owner);
   vulkan_erase_cache(g_vulkan_add_merge_caches, g_vulkan_add_merge_mutex,
@@ -6023,7 +6097,15 @@ VulkanCheckCountCache &get_check_count_cache(void *owner, Device *device) {
   return *cache;
 }
 
-
+VulkanMetricReduceCache &get_metric_reduce_cache(void *owner, Device *device) {
+  std::lock_guard<std::mutex> guard(g_vulkan_metric_reduce_mutex);
+  auto &cache = g_vulkan_metric_reduce_caches[owner];
+  if (!cache) {
+    cache = std::make_unique<VulkanMetricReduceCache>();
+  }
+  cache->ensure_device(device);
+  return *cache;
+}
 
 VulkanTransformCache &get_transform_cache(void *owner, Device *device) {
   std::lock_guard<std::mutex> guard(g_vulkan_transform_mutex);
@@ -7041,6 +7123,14 @@ bool Program::vulkan_check_count_value_type_available(int value_type) const {
   return vulkan_reduce_value_type_available(value_type);
 }
 
+bool Program::vulkan_metric_reduce_available() const {
+  return compile_config().arch == Arch::vulkan;
+}
+
+bool Program::vulkan_metric_reduce_value_type_available(int value_type) const {
+  return compile_config().arch == Arch::vulkan && value_type == 1;
+}
+
 bool Program::vulkan_transform_available() const {
   return compile_config().arch == Arch::vulkan;
 }
@@ -7848,32 +7938,33 @@ std::size_t vulkan_reduce_ndarray_impl(Program *program,
       output_offset, output_stride, member_source, member_destination);
 }
 
-std::size_t vulkan_check_count_ndarray_impl(Program *program,
-                                            Ndarray *values,
-                                            Ndarray *output,
+std::size_t vulkan_check_count_storage_impl(Program *program,
+                                            DeviceAllocation values_alloc,
+                                            DeviceAllocation output_alloc,
+                                            std::size_t n,
+                                            std::size_t values_element_size,
                                             int value_type,
                                             int check_op,
                                             int lower,
-                                            int upper) {
-  TI_ERROR_IF(!values || !output,
-              "Vulkan native check_count received null ndarray.");
-  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
-              "Vulkan native check_count expects 1D ndarrays.");
-  TI_ERROR_IF(values->get_nelement() == 0,
+                                            int upper,
+                                            std::size_t offset,
+                                            std::size_t stride) {
+  TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
+              "Vulkan native check_count is only available on Vulkan.");
+  TI_ERROR_IF(values_alloc.device == nullptr || output_alloc.device == nullptr,
+              "Vulkan native check_count received null storage.");
+  TI_ERROR_IF(n == 0,
               "Vulkan native check_count expects at least one input item.");
-  TI_ERROR_IF(output->get_nelement() < 1,
-              "Vulkan native check_count output must contain at least one "
-              "item.");
   TI_ERROR_IF(!program->vulkan_check_count_value_type_available(value_type),
               "Vulkan native check_count received an unsupported value type.");
   TI_ERROR_IF(check_op < 0 || check_op > 5,
               "Vulkan native check_count received an unsupported check op.");
   const size_t value_size = vulkan_transform_value_size(value_type);
-  TI_ERROR_IF(values->get_element_size() != value_size,
-              "Vulkan native check_count dtype does not match value type.");
-  TI_ERROR_IF(output->get_element_size() != sizeof(int32_t),
-              "Vulkan native check_count output must be i32.");
-  const size_t n = values->get_nelement();
+  TI_ERROR_IF(values_element_size < value_size,
+              "Vulkan native check_count value storage is smaller than dtype.");
+  TI_ERROR_IF(stride < value_size || offset % value_size != 0 ||
+                  stride % value_size != 0,
+              "Vulkan native check_count received invalid offset/stride.");
   TI_ERROR_IF(n > static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
               "Vulkan native check_count currently supports at most "
               "UINT32_MAX input items.");
@@ -7881,9 +7972,7 @@ std::size_t vulkan_check_count_ndarray_impl(Program *program,
   TI_ERROR_IF(!device, "Vulkan native check_count requires a compute device.");
   auto &cache = get_check_count_cache(program, device);
   Pipeline *pipeline = cache.pipeline_for(device, value_type);
-  const DeviceAllocation values_alloc = values->ndarray_alloc_;
-  const DeviceAllocation output_alloc = output->ndarray_alloc_;
-  const size_t values_bytes = n * value_size;
+  const size_t values_bytes = strided_binding_bytes(n, value_size, offset, stride);
   const size_t output_bytes = sizeof(int32_t);
   ShaderResourceSet *bindings =
       cache
@@ -7897,9 +7986,15 @@ std::size_t vulkan_check_count_ndarray_impl(Program *program,
   constexpr size_t kMaxGroups = 65535;
   const uint32_t groups = static_cast<uint32_t>(
       std::min(kMaxGroups, (n + items_per_group - 1) / items_per_group));
-  const std::array<uint32_t, 4> param_words{
-      static_cast<uint32_t>(check_op), static_cast<uint32_t>(lower),
-      static_cast<uint32_t>(upper), 0u};
+  const std::array<uint32_t, 8> param_words{
+      static_cast<uint32_t>(check_op),
+      static_cast<uint32_t>(lower),
+      static_cast<uint32_t>(upper),
+      static_cast<uint32_t>(n),
+      static_cast<uint32_t>(offset / value_size),
+      static_cast<uint32_t>(stride / value_size),
+      0u,
+      0u};
   const uint32_t push_bytes =
       static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
   const bool profiler_scopes = program->profiler != nullptr;
@@ -7933,6 +8028,9 @@ std::size_t vulkan_check_count_ndarray_impl(Program *program,
   command_key.push(static_cast<uint64_t>(check_op));
   command_key.push(static_cast<uint64_t>(static_cast<int64_t>(lower)));
   command_key.push(static_cast<uint64_t>(static_cast<int64_t>(upper)));
+  command_key.push(static_cast<uint64_t>(n));
+  command_key.push(static_cast<uint64_t>(offset));
+  command_key.push(static_cast<uint64_t>(stride));
   push_vulkan_command_key_range(command_key, values_alloc, 0, values_bytes);
   push_vulkan_command_key_range(command_key, output_alloc, 0, output_bytes);
   command_key.push(groups);
@@ -7945,6 +8043,221 @@ std::size_t vulkan_check_count_ndarray_impl(Program *program,
   }
   cache.cached_bytes = 0;
   return cache.cached_bytes;
+}
+
+std::size_t vulkan_check_count_ndarray_impl(Program *program,
+                                            Ndarray *values,
+                                            Ndarray *output,
+                                            int value_type,
+                                            int check_op,
+                                            int lower,
+                                            int upper,
+                                            std::size_t offset,
+                                            std::size_t stride,
+                                            bool member_source) {
+  TI_ERROR_IF(!values || !output,
+              "Vulkan native check_count received null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "Vulkan native check_count expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "Vulkan native check_count expects at least one input item.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "Vulkan native check_count output must contain at least one "
+              "item.");
+  const size_t value_size = vulkan_transform_value_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Vulkan native check_count received an unsupported value type.");
+  if (!member_source) {
+    TI_ERROR_IF(values->get_element_size() != value_size,
+              "Vulkan native check_count dtype does not match value type.");
+    offset = 0;
+    stride = value_size;
+  } else {
+    check_vulkan_strided_range("Vulkan native check_count", "source", values,
+                               values->get_nelement(), value_size, offset,
+                               stride);
+  }
+  TI_ERROR_IF(output->get_element_size() != sizeof(int32_t),
+              "Vulkan native check_count output must be i32.");
+  const size_t n = values->get_nelement();
+  return vulkan_check_count_storage_impl(
+      program, values->ndarray_alloc_, output->ndarray_alloc_, n,
+      values->get_element_size(), value_type, check_op, lower, upper, offset,
+      stride);
+}
+
+std::size_t vulkan_metric_reduce_storage_impl(Program *program,
+                                              DeviceAllocation values_alloc,
+                                              DeviceAllocation other_alloc,
+                                              DeviceAllocation output_alloc,
+                                              std::size_t n,
+                                              int value_type,
+                                              int metric_op,
+                                              std::size_t values_offset,
+                                              std::size_t values_stride,
+                                              std::size_t other_offset,
+                                              std::size_t other_stride) {
+  TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
+              "Vulkan native metric_reduce is only available on Vulkan.");
+  TI_ERROR_IF(values_alloc.device == nullptr || other_alloc.device == nullptr ||
+                  output_alloc.device == nullptr,
+              "Vulkan native metric_reduce received null storage.");
+  TI_ERROR_IF(n == 0,
+              "Vulkan native metric_reduce expects at least one input item.");
+  TI_ERROR_IF(!program->vulkan_metric_reduce_value_type_available(value_type),
+              "Vulkan native metric_reduce currently supports only f32.");
+  TI_ERROR_IF(metric_op < 0 || metric_op > 1,
+              "Vulkan native metric_reduce received an unsupported metric op.");
+  const size_t value_size = vulkan_transform_value_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Vulkan native metric_reduce received an unsupported value "
+              "type.");
+  TI_ERROR_IF(values_stride < value_size || other_stride < value_size ||
+                  values_offset % value_size != 0 ||
+                  values_stride % value_size != 0 ||
+                  other_offset % value_size != 0 ||
+                  other_stride % value_size != 0,
+              "Vulkan native metric_reduce received invalid offset/stride.");
+  TI_ERROR_IF(n > static_cast<size_t>(std::numeric_limits<uint32_t>::max()),
+              "Vulkan native metric_reduce currently supports at most "
+              "UINT32_MAX input items.");
+  Device *device = program->get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan native metric_reduce requires a compute device.");
+  auto &cache = get_metric_reduce_cache(program, device);
+  Pipeline *pipeline = cache.pipeline_for(device, value_type);
+  const size_t values_bytes =
+      strided_binding_bytes(n, value_size, values_offset, values_stride);
+  const size_t other_bytes =
+      strided_binding_bytes(n, value_size, other_offset, other_stride);
+  const size_t output_bytes = value_size;
+  ShaderResourceSet *bindings =
+      cache
+          .bind_resource_set(program, values_alloc, 0, values_bytes,
+                             other_alloc, 0, other_bytes, output_alloc, 0,
+                             output_bytes)
+          .bindings;
+  const int items_per_group_config =
+      get_environ_config("TI_VULKAN_METRIC_REDUCE_ITEMS_PER_GROUP", 16384);
+  const size_t items_per_group =
+      static_cast<size_t>(std::max(256, items_per_group_config));
+  constexpr size_t kMaxGroups = 65535;
+  const uint32_t groups = static_cast<uint32_t>(
+      std::min(kMaxGroups, (n + items_per_group - 1) / items_per_group));
+  const std::array<uint32_t, 8> param_words{
+      static_cast<uint32_t>(metric_op),
+      static_cast<uint32_t>(n),
+      static_cast<uint32_t>(values_offset / value_size),
+      static_cast<uint32_t>(values_stride / value_size),
+      static_cast<uint32_t>(other_offset / value_size),
+      static_cast<uint32_t>(other_stride / value_size),
+      0u,
+      0u};
+  const uint32_t push_bytes =
+      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
+  const bool profiler_scopes = program->profiler != nullptr;
+  auto record_metric_reduce =
+      [output_alloc, output_bytes, pipeline, bindings, param_words, push_bytes,
+       groups, metric_op, profiler_scopes](Device * /*op_device*/,
+                                           CommandList *cmdlist) {
+        cmdlist->buffer_fill(output_alloc.get_ptr(0), output_bytes, 0);
+        cmdlist->buffer_barrier(output_alloc);
+        dispatch_pipeline_with_push_constants(
+            cmdlist, pipeline, bindings, param_words.data(), push_bytes,
+            groups, 1, 1,
+            profiler_scopes
+                ? (metric_op == 1 ? "vulkan_max_abs_delta_f32"
+                                  : "vulkan_max_abs_f32")
+                : nullptr);
+        cmdlist->buffer_barrier(output_alloc.get_ptr(0), output_bytes);
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(91);
+  command_key.push(static_cast<uint64_t>(value_type));
+  command_key.push(static_cast<uint64_t>(metric_op));
+  command_key.push(static_cast<uint64_t>(n));
+  command_key.push(static_cast<uint64_t>(values_offset));
+  command_key.push(static_cast<uint64_t>(values_stride));
+  command_key.push(static_cast<uint64_t>(other_offset));
+  command_key.push(static_cast<uint64_t>(other_stride));
+  push_vulkan_command_key_range(command_key, values_alloc, 0, values_bytes);
+  push_vulkan_command_key_range(command_key, other_alloc, 0, other_bytes);
+  push_vulkan_command_key_range(command_key, output_alloc, 0, output_bytes);
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.command_replay.submit_or_record(program, device, command_key,
+                                             profiler_scopes,
+                                             record_metric_reduce)) {
+    program->enqueue_compute_op_lambda(record_metric_reduce, {});
+  }
+  cache.cached_bytes = 0;
+  return cache.cached_bytes;
+}
+
+std::size_t vulkan_metric_reduce_ndarray_impl(Program *program,
+                                              Ndarray *values,
+                                              Ndarray *other,
+                                              Ndarray *output,
+                                              int value_type,
+                                              int metric_op,
+                                              std::size_t values_offset,
+                                              std::size_t values_stride,
+                                              std::size_t other_offset,
+                                              std::size_t other_stride,
+                                              bool member_source) {
+  TI_ERROR_IF(!values || !output,
+              "Vulkan native metric_reduce received null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "Vulkan native metric_reduce expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "Vulkan native metric_reduce expects at least one input item.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "Vulkan native metric_reduce output must contain at least one "
+              "item.");
+  TI_ERROR_IF(!program->vulkan_metric_reduce_value_type_available(value_type),
+              "Vulkan native metric_reduce currently supports only f32.");
+  TI_ERROR_IF(metric_op < 0 || metric_op > 1,
+              "Vulkan native metric_reduce received an unsupported metric op.");
+  TI_ERROR_IF(metric_op == 1 && !other,
+              "Vulkan native max_abs_delta received a null rhs ndarray.");
+  if (!other) {
+    other = values;
+    other_offset = values_offset;
+    other_stride = values_stride;
+  }
+  TI_ERROR_IF(other->shape.size() != 1,
+              "Vulkan native metric_reduce rhs must be a 1D ndarray.");
+  TI_ERROR_IF(other->get_nelement() != values->get_nelement(),
+              "Vulkan native metric_reduce inputs must have the same length.");
+  const size_t value_size = vulkan_transform_value_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Vulkan native metric_reduce received an unsupported value "
+              "type.");
+  if (!member_source) {
+    TI_ERROR_IF(values->get_element_size() != value_size ||
+                    other->get_element_size() != value_size,
+                "Vulkan native metric_reduce dtype does not match value "
+                "type.");
+    values_offset = 0;
+    values_stride = value_size;
+    other_offset = 0;
+    other_stride = value_size;
+  } else {
+    check_vulkan_strided_range("Vulkan native metric_reduce", "source", values,
+                               values->get_nelement(), value_size,
+                               values_offset, values_stride);
+    check_vulkan_strided_range("Vulkan native metric_reduce", "rhs", other,
+                               other->get_nelement(), value_size,
+                               other_offset, other_stride);
+  }
+  TI_ERROR_IF(output->get_element_size() != value_size,
+              "Vulkan native metric_reduce output dtype does not match value "
+              "type.");
+  const size_t n = values->get_nelement();
+  return vulkan_metric_reduce_storage_impl(
+      program, values->ndarray_alloc_, other->ndarray_alloc_,
+      output->ndarray_alloc_, n, value_type, metric_op, values_offset,
+      values_stride, other_offset, other_stride);
 }
 
 std::size_t vulkan_transform_affine_storage_impl(
@@ -10408,7 +10721,122 @@ std::size_t Program::vulkan_check_count_ndarray(Ndarray *values,
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native check_count is only available on Vulkan.");
   return vulkan_check_count_ndarray_impl(this, values, output, value_type,
-                                         check_op, lower, upper);
+                                         check_op, lower, upper, 0,
+                                         vulkan_transform_value_size(value_type),
+                                         false);
+}
+
+std::size_t Program::vulkan_check_count_strided_ndarray(Ndarray *values,
+                                                        Ndarray *output,
+                                                        int value_type,
+                                                        std::size_t offset,
+                                                        std::size_t stride,
+                                                        int check_op,
+                                                        int lower,
+                                                        int upper) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native strided check_count is only available on "
+              "Vulkan.");
+  return vulkan_check_count_ndarray_impl(this, values, output, value_type,
+                                         check_op, lower, upper, offset,
+                                         stride, true);
+}
+
+std::size_t Program::vulkan_check_count_dense_field(SNode *values,
+                                                    Ndarray *output,
+                                                    int value_type,
+                                                    std::size_t n,
+                                                    int check_op,
+                                                    int lower,
+                                                    int upper) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native dense field check_count is only available on "
+              "Vulkan.");
+  TI_ERROR_IF(!values || !output,
+              "Vulkan native dense field check_count received a null "
+              "argument.");
+  TI_ERROR_IF(output->shape.size() != 1 || output->get_nelement() < 1 ||
+                  output->get_element_size() != sizeof(int32_t),
+              "Vulkan native dense field check_count output must be a "
+              "non-empty i32 ndarray.");
+  const size_t value_size = vulkan_transform_value_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Vulkan native dense field check_count received an unsupported "
+              "value type.");
+  DevicePtr values_ptr = get_dense_field_device_ptr(values);
+  const size_t stride = get_dense_field_stride(values, value_size);
+  DeviceAllocation values_alloc{values_ptr.device, values_ptr.alloc_id};
+  return vulkan_check_count_storage_impl(
+      this, values_alloc, output->ndarray_alloc_, n, value_size, value_type,
+      check_op, lower, upper, values_ptr.offset, stride);
+}
+
+std::size_t Program::vulkan_metric_reduce_ndarray(Ndarray *values,
+                                                  Ndarray *other,
+                                                  Ndarray *output,
+                                                  int value_type,
+                                                  int metric_op) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native metric_reduce is only available on Vulkan.");
+  return vulkan_metric_reduce_ndarray_impl(this, values, other, output,
+                                           value_type, metric_op, 0,
+                                           vulkan_transform_value_size(value_type),
+                                           0,
+                                           vulkan_transform_value_size(value_type),
+                                           false);
+}
+
+std::size_t Program::vulkan_metric_reduce_strided_ndarray(
+    Ndarray *values,
+    Ndarray *other,
+    Ndarray *output,
+    int value_type,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t other_offset,
+    std::size_t other_stride,
+    int metric_op) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native strided metric_reduce is only available on "
+              "Vulkan.");
+  return vulkan_metric_reduce_ndarray_impl(
+      this, values, other, output, value_type, metric_op, values_offset,
+      values_stride, other_offset, other_stride, true);
+}
+
+std::size_t Program::vulkan_metric_reduce_dense_field(SNode *values,
+                                                      SNode *other,
+                                                      Ndarray *output,
+                                                      int value_type,
+                                                      std::size_t n,
+                                                      int metric_op) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native dense field metric_reduce is only available on "
+              "Vulkan.");
+  TI_ERROR_IF(!values || !output,
+              "Vulkan native dense field metric_reduce received a null "
+              "argument.");
+  if (!other) {
+    other = values;
+  }
+  const size_t value_size = vulkan_transform_value_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Vulkan native dense field metric_reduce received an unsupported "
+              "value type.");
+  TI_ERROR_IF(output->shape.size() != 1 || output->get_nelement() < 1 ||
+                  output->get_element_size() != value_size,
+              "Vulkan native dense field metric_reduce output must be a "
+              "non-empty ndarray matching value type.");
+  DevicePtr values_ptr = get_dense_field_device_ptr(values);
+  DevicePtr other_ptr = get_dense_field_device_ptr(other);
+  const size_t values_stride = get_dense_field_stride(values, value_size);
+  const size_t other_stride = get_dense_field_stride(other, value_size);
+  DeviceAllocation values_alloc{values_ptr.device, values_ptr.alloc_id};
+  DeviceAllocation other_alloc{other_ptr.device, other_ptr.alloc_id};
+  return vulkan_metric_reduce_storage_impl(
+      this, values_alloc, other_alloc, output->ndarray_alloc_, n, value_type,
+      metric_op, values_ptr.offset, values_stride, other_ptr.offset,
+      other_stride);
 }
 
 std::size_t Program::vulkan_reduce_strided_ndarray(
@@ -14459,6 +14887,11 @@ void Program::vulkan_check_count_clear_workspace() {
                      g_vulkan_check_count_mutex);
 }
 
+void Program::vulkan_metric_reduce_clear_workspace() {
+  vulkan_clear_cache(this, g_vulkan_metric_reduce_caches,
+                     g_vulkan_metric_reduce_mutex);
+}
+
 void Program::vulkan_transform_clear_workspace() {
   vulkan_clear_cache(this, g_vulkan_transform_caches,
                      g_vulkan_transform_mutex);
@@ -14544,6 +14977,15 @@ std::size_t Program::vulkan_check_count_workspace_bytes() const {
   std::lock_guard<std::mutex> guard(g_vulkan_check_count_mutex);
   auto it = g_vulkan_check_count_caches.find(const_cast<Program *>(this));
   if (it == g_vulkan_check_count_caches.end()) {
+    return 0;
+  }
+  return it->second->cached_bytes;
+}
+
+std::size_t Program::vulkan_metric_reduce_workspace_bytes() const {
+  std::lock_guard<std::mutex> guard(g_vulkan_metric_reduce_mutex);
+  auto it = g_vulkan_metric_reduce_caches.find(const_cast<Program *>(this));
+  if (it == g_vulkan_metric_reduce_caches.end()) {
     return 0;
   }
   return it->second->cached_bytes;
@@ -14645,6 +15087,14 @@ bool Program::vulkan_check_count_available() const {
 }
 
 bool Program::vulkan_check_count_value_type_available(int value_type) const {
+  return false;
+}
+
+bool Program::vulkan_metric_reduce_available() const {
+  return false;
+}
+
+bool Program::vulkan_metric_reduce_value_type_available(int value_type) const {
   return false;
 }
 
@@ -14875,6 +15325,62 @@ std::size_t Program::vulkan_check_count_ndarray(Ndarray *values,
                                                 int lower,
                                                 int upper) {
   TI_ERROR("Vulkan native check_count requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_check_count_strided_ndarray(Ndarray *values,
+                                                        Ndarray *output,
+                                                        int value_type,
+                                                        std::size_t offset,
+                                                        std::size_t stride,
+                                                        int check_op,
+                                                        int lower,
+                                                        int upper) {
+  TI_ERROR("Vulkan native strided check_count requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_check_count_dense_field(SNode *values,
+                                                    Ndarray *output,
+                                                    int value_type,
+                                                    std::size_t n,
+                                                    int check_op,
+                                                    int lower,
+                                                    int upper) {
+  TI_ERROR("Vulkan native dense field check_count requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_metric_reduce_ndarray(Ndarray *values,
+                                                  Ndarray *other,
+                                                  Ndarray *output,
+                                                  int value_type,
+                                                  int metric_op) {
+  TI_ERROR("Vulkan native metric_reduce requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_metric_reduce_strided_ndarray(
+    Ndarray *values,
+    Ndarray *other,
+    Ndarray *output,
+    int value_type,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t other_offset,
+    std::size_t other_stride,
+    int metric_op) {
+  TI_ERROR("Vulkan native strided metric_reduce requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_metric_reduce_dense_field(SNode *values,
+                                                      SNode *other,
+                                                      Ndarray *output,
+                                                      int value_type,
+                                                      std::size_t n,
+                                                      int metric_op) {
+  TI_ERROR("Vulkan native dense field metric_reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
 
@@ -15400,6 +15906,9 @@ void Program::vulkan_reduce_clear_workspace() {
 void Program::vulkan_check_count_clear_workspace() {
 }
 
+void Program::vulkan_metric_reduce_clear_workspace() {
+}
+
 void Program::vulkan_transform_clear_workspace() {
 }
 
@@ -15442,6 +15951,10 @@ std::size_t Program::vulkan_reduce_workspace_bytes() const {
 }
 
 std::size_t Program::vulkan_check_count_workspace_bytes() const {
+  return 0;
+}
+
+std::size_t Program::vulkan_metric_reduce_workspace_bytes() const {
   return 0;
 }
 

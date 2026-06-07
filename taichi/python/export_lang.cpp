@@ -1079,6 +1079,41 @@ void export_lang(py::module &m) {
            py::arg("output"), py::arg("value_type"), py::arg("check_op"),
            py::arg("lower"), py::arg("upper"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_check_count_strided_ndarray",
+           &Program::cuda_cub_check_count_strided_ndarray, py::arg("values"),
+           py::arg("output"), py::arg("value_type"), py::arg("offset"),
+           py::arg("stride"), py::arg("check_op"), py::arg("lower"),
+           py::arg("upper"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_check_count_dense_field",
+           &Program::cuda_cub_check_count_dense_field, py::arg("values"),
+           py::arg("output"), py::arg("value_type"), py::arg("n"),
+           py::arg("check_op"), py::arg("lower"), py::arg("upper"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_metric_reduce_available",
+           &Program::cuda_cub_metric_reduce_available)
+      .def("cuda_cub_metric_reduce_value_type_available",
+           &Program::cuda_cub_metric_reduce_value_type_available,
+           py::arg("value_type"))
+      .def("cuda_cub_metric_reduce_clear_workspace",
+           &Program::cuda_cub_metric_reduce_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_metric_reduce_workspace_bytes",
+           &Program::cuda_cub_metric_reduce_workspace_bytes)
+      .def("cuda_cub_metric_reduce_ndarray",
+           &Program::cuda_cub_metric_reduce_ndarray, py::arg("values"),
+           py::arg("other"), py::arg("output"), py::arg("value_type"),
+           py::arg("metric_op"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_metric_reduce_strided_ndarray",
+           &Program::cuda_cub_metric_reduce_strided_ndarray, py::arg("values"),
+           py::arg("other"), py::arg("output"), py::arg("value_type"),
+           py::arg("values_offset"), py::arg("values_stride"),
+           py::arg("other_offset"), py::arg("other_stride"),
+           py::arg("metric_op"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_metric_reduce_dense_field",
+           &Program::cuda_cub_metric_reduce_dense_field, py::arg("values"),
+           py::arg("other"), py::arg("output"), py::arg("value_type"),
+           py::arg("n"), py::arg("metric_op"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_reduce_ndarray", &Program::cuda_cub_reduce_ndarray,
            py::arg("values"), py::arg("output"), py::arg("value_type"),
            py::arg("op"), py::call_guard<py::gil_scoped_release>())
@@ -1276,6 +1311,36 @@ void export_lang(py::module &m) {
       .def("cpu_check_count_ndarray", &Program::cpu_check_count_ndarray,
            py::arg("values"), py::arg("output"), py::arg("value_type"),
            py::arg("check_op"), py::arg("lower"), py::arg("upper"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_check_count_strided_ndarray",
+           &Program::cpu_check_count_strided_ndarray, py::arg("values"),
+           py::arg("output"), py::arg("value_type"), py::arg("offset"),
+           py::arg("stride"), py::arg("check_op"), py::arg("lower"),
+           py::arg("upper"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_check_count_dense_field", &Program::cpu_check_count_dense_field,
+           py::arg("values"), py::arg("output"), py::arg("value_type"),
+           py::arg("n"), py::arg("check_op"), py::arg("lower"),
+           py::arg("upper"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_metric_reduce_available", &Program::cpu_metric_reduce_available)
+      .def("cpu_metric_reduce_value_type_available",
+           &Program::cpu_metric_reduce_value_type_available,
+           py::arg("value_type"))
+      .def("cpu_metric_reduce_workspace_bytes",
+           &Program::cpu_metric_reduce_workspace_bytes)
+      .def("cpu_metric_reduce_ndarray", &Program::cpu_metric_reduce_ndarray,
+           py::arg("values"), py::arg("other"), py::arg("output"),
+           py::arg("value_type"), py::arg("metric_op"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cpu_metric_reduce_strided_ndarray",
+           &Program::cpu_metric_reduce_strided_ndarray, py::arg("values"),
+           py::arg("other"), py::arg("output"), py::arg("value_type"),
+           py::arg("values_offset"), py::arg("values_stride"),
+           py::arg("other_offset"), py::arg("other_stride"),
+           py::arg("metric_op"), py::call_guard<py::gil_scoped_release>())
+      .def("cpu_metric_reduce_dense_field",
+           &Program::cpu_metric_reduce_dense_field, py::arg("values"),
+           py::arg("other"), py::arg("output"), py::arg("value_type"),
+           py::arg("n"), py::arg("metric_op"),
            py::call_guard<py::gil_scoped_release>())
       .def("cpu_reduce_ndarray", &Program::cpu_reduce_ndarray,
            py::arg("values"), py::arg("output"), py::arg("value_type"),
@@ -1620,6 +1685,41 @@ void export_lang(py::module &m) {
       .def("vulkan_check_count_ndarray", &Program::vulkan_check_count_ndarray,
            py::arg("values"), py::arg("output"), py::arg("value_type"),
            py::arg("check_op"), py::arg("lower"), py::arg("upper"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_check_count_strided_ndarray",
+           &Program::vulkan_check_count_strided_ndarray, py::arg("values"),
+           py::arg("output"), py::arg("value_type"), py::arg("offset"),
+           py::arg("stride"), py::arg("check_op"), py::arg("lower"),
+           py::arg("upper"), py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_check_count_dense_field",
+           &Program::vulkan_check_count_dense_field, py::arg("values"),
+           py::arg("output"), py::arg("value_type"), py::arg("n"),
+           py::arg("check_op"), py::arg("lower"), py::arg("upper"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_metric_reduce_available",
+           &Program::vulkan_metric_reduce_available)
+      .def("vulkan_metric_reduce_clear_workspace",
+           &Program::vulkan_metric_reduce_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_metric_reduce_workspace_bytes",
+           &Program::vulkan_metric_reduce_workspace_bytes)
+      .def("vulkan_metric_reduce_value_type_available",
+           &Program::vulkan_metric_reduce_value_type_available,
+           py::arg("value_type"))
+      .def("vulkan_metric_reduce_ndarray",
+           &Program::vulkan_metric_reduce_ndarray, py::arg("values"),
+           py::arg("other"), py::arg("output"), py::arg("value_type"),
+           py::arg("metric_op"), py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_metric_reduce_strided_ndarray",
+           &Program::vulkan_metric_reduce_strided_ndarray, py::arg("values"),
+           py::arg("other"), py::arg("output"), py::arg("value_type"),
+           py::arg("values_offset"), py::arg("values_stride"),
+           py::arg("other_offset"), py::arg("other_stride"),
+           py::arg("metric_op"), py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_metric_reduce_dense_field",
+           &Program::vulkan_metric_reduce_dense_field, py::arg("values"),
+           py::arg("other"), py::arg("output"), py::arg("value_type"),
+           py::arg("n"), py::arg("metric_op"),
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_reduce_value_type_available",
            &Program::vulkan_reduce_value_type_available,

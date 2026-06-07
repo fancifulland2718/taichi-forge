@@ -3628,6 +3628,311 @@ std::size_t cpu_check_count_typed(const T *values_ptr,
 }
 
 template <typename T>
+struct CpuStridedCheckCountTaskContext {
+  const uint8_t *values{nullptr};
+  std::size_t offset{0};
+  std::size_t stride{sizeof(T)};
+  int32_t *partial{nullptr};
+  std::size_t n{0};
+  int check_op{0};
+  int lower{0};
+  int upper{0};
+  int num_threads{1};
+};
+
+template <typename T>
+void cpu_strided_check_count_task(void *raw_ctx,
+                                  int /*thread_id*/,
+                                  int task_id) {
+  auto *ctx = static_cast<CpuStridedCheckCountTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  int32_t local = 0;
+  for (std::size_t i = begin; i < end; ++i) {
+    const auto value = *reinterpret_cast<const T *>(
+        ctx->values + ctx->offset + i * ctx->stride);
+    local += cpu_check_predicate(value, ctx->check_op, ctx->lower, ctx->upper)
+                 ? 1
+                 : 0;
+  }
+  ctx->partial[tid] = local;
+}
+
+template <typename T>
+std::size_t cpu_check_count_strided_typed(const uint8_t *values_ptr,
+                                          std::size_t offset,
+                                          std::size_t stride,
+                                          int32_t *output_ptr,
+                                          int check_op,
+                                          int lower,
+                                          int upper,
+                                          std::size_t n,
+                                          int max_threads,
+                                          int target_threads,
+                                          bool use_parallel) {
+  TI_ERROR_IF(!values_ptr || !output_ptr,
+              "CPU native strided check_count received a null data pointer.");
+  if (stride == sizeof(T) && offset == 0) {
+    return cpu_check_count_typed(reinterpret_cast<const T *>(values_ptr),
+                                 output_ptr, check_op, lower, upper, n,
+                                 max_threads, target_threads, use_parallel);
+  }
+  if (use_parallel) {
+    const int num_threads = target_threads;
+    std::vector<int32_t> partial(num_threads, 0);
+    CpuStridedCheckCountTaskContext<T> ctx;
+    ctx.values = values_ptr;
+    ctx.offset = offset;
+    ctx.stride = stride;
+    ctx.partial = partial.data();
+    ctx.n = n;
+    ctx.check_op = check_op;
+    ctx.lower = lower;
+    ctx.upper = upper;
+    ctx.num_threads = num_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(num_threads, num_threads, &ctx, cpu_strided_check_count_task<T>);
+    int32_t total = 0;
+    for (int32_t value : partial) {
+      total += value;
+    }
+    output_ptr[0] = total;
+    return partial.size() * sizeof(int32_t);
+  }
+  int32_t total = 0;
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto value =
+        *reinterpret_cast<const T *>(values_ptr + offset + i * stride);
+    total += cpu_check_predicate(value, check_op, lower, upper) ? 1 : 0;
+  }
+  output_ptr[0] = total;
+  return 0;
+}
+
+template <typename T>
+T cpu_metric_abs(T value) {
+  if constexpr (std::is_floating_point_v<T>) {
+    if (std::isnan(value)) {
+      return std::numeric_limits<T>::infinity();
+    }
+    return value < T{} ? -value : value;
+  } else if constexpr (std::is_signed_v<T>) {
+    return value < T{} ? -value : value;
+  } else {
+    return value;
+  }
+}
+
+template <typename T>
+T cpu_metric_value(const T *values, const T *other, std::size_t i, int op) {
+  switch (op) {
+    case 0:
+      return cpu_metric_abs(values[i]);
+    case 1:
+      return cpu_metric_abs(values[i] - other[i]);
+  }
+  return T{};
+}
+
+template <typename T>
+struct CpuMetricReduceTaskContext {
+  const T *values{nullptr};
+  const T *other{nullptr};
+  T *partial{nullptr};
+  std::size_t n{0};
+  int metric_op{0};
+  int num_threads{1};
+};
+
+template <typename T>
+void cpu_metric_reduce_task(void *raw_ctx, int /*thread_id*/, int task_id) {
+  auto *ctx = static_cast<CpuMetricReduceTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  T local{};
+  for (std::size_t i = begin; i < end; ++i) {
+    local = std::max(local,
+                     cpu_metric_value(ctx->values, ctx->other, i,
+                                      ctx->metric_op));
+  }
+  ctx->partial[tid] = local;
+}
+
+template <typename T>
+std::size_t cpu_metric_reduce_typed(const T *values_ptr,
+                                    const T *other_ptr,
+                                    T *output_ptr,
+                                    int metric_op,
+                                    std::size_t n,
+                                    int max_threads,
+                                    int target_threads,
+                                    bool use_parallel) {
+  TI_ERROR_IF(!values_ptr || !output_ptr,
+              "CPU native metric_reduce received a null data pointer.");
+  TI_ERROR_IF(metric_op == 1 && !other_ptr,
+              "CPU native max_abs_delta received a null rhs pointer.");
+  if (use_parallel) {
+    const int num_threads = target_threads;
+    std::vector<T> partial(num_threads, T{});
+    CpuMetricReduceTaskContext<T> ctx;
+    ctx.values = values_ptr;
+    ctx.other = other_ptr;
+    ctx.partial = partial.data();
+    ctx.n = n;
+    ctx.metric_op = metric_op;
+    ctx.num_threads = num_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(num_threads, num_threads, &ctx, cpu_metric_reduce_task<T>);
+    T result{};
+    for (T value : partial) {
+      result = std::max(result, value);
+    }
+    output_ptr[0] = result;
+    return partial.size() * sizeof(T);
+  }
+  T result{};
+  for (std::size_t i = 0; i < n; ++i) {
+    result = std::max(result,
+                      cpu_metric_value(values_ptr, other_ptr, i, metric_op));
+  }
+  output_ptr[0] = result;
+  return 0;
+}
+
+template <typename T>
+T cpu_metric_strided_value(const uint8_t *values,
+                           const uint8_t *other,
+                           std::size_t values_offset,
+                           std::size_t values_stride,
+                           std::size_t other_offset,
+                           std::size_t other_stride,
+                           std::size_t i,
+                           int op) {
+  const T value =
+      *reinterpret_cast<const T *>(values + values_offset + i * values_stride);
+  switch (op) {
+    case 0:
+      return cpu_metric_abs(value);
+    case 1:
+      return cpu_metric_abs(
+          value - *reinterpret_cast<const T *>(other + other_offset +
+                                               i * other_stride));
+  }
+  return T{};
+}
+
+template <typename T>
+struct CpuStridedMetricReduceTaskContext {
+  const uint8_t *values{nullptr};
+  const uint8_t *other{nullptr};
+  T *partial{nullptr};
+  std::size_t n{0};
+  std::size_t values_offset{0};
+  std::size_t values_stride{sizeof(T)};
+  std::size_t other_offset{0};
+  std::size_t other_stride{sizeof(T)};
+  int metric_op{0};
+  int num_threads{1};
+};
+
+template <typename T>
+void cpu_strided_metric_reduce_task(void *raw_ctx,
+                                    int /*thread_id*/,
+                                    int task_id) {
+  auto *ctx = static_cast<CpuStridedMetricReduceTaskContext<T> *>(raw_ctx);
+  const int tid = task_id;
+  const std::size_t begin =
+      ctx->n * static_cast<std::size_t>(tid) /
+      static_cast<std::size_t>(ctx->num_threads);
+  const std::size_t end =
+      ctx->n * static_cast<std::size_t>(tid + 1) /
+      static_cast<std::size_t>(ctx->num_threads);
+  T local{};
+  for (std::size_t i = begin; i < end; ++i) {
+    local = std::max(local,
+                     cpu_metric_strided_value<T>(
+                         ctx->values, ctx->other, ctx->values_offset,
+                         ctx->values_stride, ctx->other_offset,
+                         ctx->other_stride, i, ctx->metric_op));
+  }
+  ctx->partial[tid] = local;
+}
+
+template <typename T>
+std::size_t cpu_metric_reduce_strided_typed(const uint8_t *values_ptr,
+                                            const uint8_t *other_ptr,
+                                            T *output_ptr,
+                                            int metric_op,
+                                            std::size_t n,
+                                            std::size_t values_offset,
+                                            std::size_t values_stride,
+                                            std::size_t other_offset,
+                                            std::size_t other_stride,
+                                            int max_threads,
+                                            int target_threads,
+                                            bool use_parallel) {
+  TI_ERROR_IF(!values_ptr || !output_ptr,
+              "CPU native strided metric_reduce received a null data pointer.");
+  TI_ERROR_IF(metric_op == 1 && !other_ptr,
+              "CPU native strided max_abs_delta received a null rhs pointer.");
+  if (!other_ptr) {
+    other_ptr = values_ptr;
+    other_offset = values_offset;
+    other_stride = values_stride;
+  }
+  if (values_offset == 0 && values_stride == sizeof(T) && other_offset == 0 &&
+      other_stride == sizeof(T)) {
+    return cpu_metric_reduce_typed(reinterpret_cast<const T *>(values_ptr),
+                                   reinterpret_cast<const T *>(other_ptr),
+                                   output_ptr, metric_op, n, max_threads,
+                                   target_threads, use_parallel);
+  }
+  if (use_parallel) {
+    const int num_threads = target_threads;
+    std::vector<T> partial(num_threads, T{});
+    CpuStridedMetricReduceTaskContext<T> ctx;
+    ctx.values = values_ptr;
+    ctx.other = other_ptr;
+    ctx.partial = partial.data();
+    ctx.n = n;
+    ctx.values_offset = values_offset;
+    ctx.values_stride = values_stride;
+    ctx.other_offset = other_offset;
+    ctx.other_stride = other_stride;
+    ctx.metric_op = metric_op;
+    ctx.num_threads = num_threads;
+    auto &pool = get_cpu_primitive_thread_pool(max_threads);
+    pool.run(num_threads, num_threads, &ctx,
+             cpu_strided_metric_reduce_task<T>);
+    T result{};
+    for (T value : partial) {
+      result = std::max(result, value);
+    }
+    output_ptr[0] = result;
+    return partial.size() * sizeof(T);
+  }
+  T result{};
+  for (std::size_t i = 0; i < n; ++i) {
+    result = std::max(result,
+                      cpu_metric_strided_value<T>(
+                          values_ptr, other_ptr, values_offset, values_stride,
+                          other_offset, other_stride, i, metric_op));
+  }
+  output_ptr[0] = result;
+  return 0;
+}
+
+template <typename T>
 std::size_t cpu_scan_typed(T *data_ptr, std::size_t n) {
   TI_ERROR_IF(!data_ptr, "CPU native scan received a null data pointer.");
   T prefix{};
@@ -8406,6 +8711,119 @@ std::size_t Program::cuda_cub_check_count_ndarray(Ndarray *values,
 #endif
 }
 
+std::size_t Program::cuda_cub_check_count_strided_ndarray(
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride,
+    int check_op,
+    int lower,
+    int upper) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB strided check_count is only available on CUDA.");
+  TI_ERROR_IF(!values || !output,
+              "CUDA CUB strided check_count received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "CUDA CUB strided check_count expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "CUDA CUB strided check_count expects at least one input item.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "CUDA CUB strided check_count output must contain at least one "
+              "item.");
+  TI_ERROR_IF(output->get_element_size() != sizeof(int32_t),
+              "CUDA CUB strided check_count output must be i32.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA CUB strided check_count received an unsupported value "
+              "type.");
+  TI_ERROR_IF(check_op < 0 || check_op > 5,
+              "CUDA CUB strided check_count received an unsupported check op.");
+  TI_ERROR_IF(stride < value_size || offset % value_size != 0 ||
+                  stride % value_size != 0,
+              "CUDA CUB strided check_count received invalid offset/stride.");
+  const std::size_t n = values->get_nelement();
+  const std::size_t src_bytes = n * values->get_element_size();
+  TI_ERROR_IF(src_bytes < value_size || offset > src_bytes - value_size ||
+                  offset + (n - 1) * stride + value_size > src_bytes,
+              "CUDA CUB strided check_count source range is out of bounds.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB strided check_count currently supports at most "
+              "INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  void *values_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
+  void *output_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_check_count_strided(
+      values_ptr, output_ptr, static_cast<int>(n),
+      static_cast<cuda::CubReduceValueType>(value_type), offset, stride,
+      static_cast<cuda::CudaCheckOp>(check_op), lower, upper, stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB strided check_count requires building Taichi with "
+      "TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_cub_check_count_dense_field(SNode *values,
+                                                      Ndarray *output,
+                                                      int value_type,
+                                                      std::size_t n,
+                                                      int check_op,
+                                                      int lower,
+                                                      int upper) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB dense field check_count is only available on CUDA.");
+  TI_ERROR_IF(!values || !output,
+              "CUDA CUB dense field check_count received a null argument.");
+  TI_ERROR_IF(n == 0,
+              "CUDA CUB dense field check_count expects at least one item.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB dense field check_count currently supports at most "
+              "INT_MAX items.");
+  TI_ERROR_IF(output->shape.size() != 1 || output->get_nelement() < 1 ||
+                  output->get_element_size() != sizeof(int32_t),
+              "CUDA CUB dense field check_count output must be a non-empty "
+              "i32 ndarray.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA CUB dense field check_count received an unsupported value "
+              "type.");
+  TI_ERROR_IF(check_op < 0 || check_op > 5,
+              "CUDA CUB dense field check_count received an unsupported check "
+              "op.");
+  const std::size_t stride = get_dense_field_stride(values, value_size);
+  TI_ERROR_IF(stride < value_size,
+              "CUDA CUB dense field check_count received an invalid field "
+              "stride.");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *values_ptr = raw_ptr(get_dense_field_device_ptr(values),
+                             "CUDA CUB dense field check_count");
+  void *output_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_check_count_strided(
+      values_ptr, output_ptr, static_cast<int>(n),
+      static_cast<cuda::CubReduceValueType>(value_type), 0, stride,
+      static_cast<cuda::CudaCheckOp>(check_op), lower, upper, stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB dense field check_count requires building Taichi with "
+      "TI_WITH_CUDA=ON.");
+#endif
+}
+
 void Program::cuda_cub_check_count_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
@@ -8418,6 +8836,251 @@ std::size_t Program::cuda_cub_check_count_workspace_bytes() const {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
     return cuda::cub_check_count_cached_bytes(const_cast<Program *>(this));
+  }
+#endif
+  return 0;
+}
+
+bool Program::cuda_cub_metric_reduce_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::cub_metric_reduce_available();
+#else
+  return false;
+#endif
+}
+
+bool Program::cuda_cub_metric_reduce_value_type_available(
+    int value_type) const {
+#ifdef TI_WITH_CUDA
+  return cuda::cub_metric_reduce_value_type_available(
+      static_cast<cuda::CubReduceValueType>(value_type));
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_cub_metric_reduce_ndarray(Ndarray *values,
+                                                    Ndarray *other,
+                                                    Ndarray *output,
+                                                    int value_type,
+                                                    int metric_op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB metric_reduce is only available on CUDA.");
+  TI_ERROR_IF(!values || !output,
+              "CUDA CUB metric_reduce received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "CUDA CUB metric_reduce expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "CUDA CUB metric_reduce expects at least one input item.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "CUDA CUB metric_reduce output must contain at least one item.");
+  TI_ERROR_IF(metric_op < 0 || metric_op > 1,
+              "CUDA CUB metric_reduce received an unsupported metric op.");
+  TI_ERROR_IF(metric_op == 1 && !other,
+              "CUDA CUB max_abs_delta received a null rhs ndarray.");
+  if (other) {
+    TI_ERROR_IF(other->shape.size() != 1,
+                "CUDA CUB metric_reduce rhs must be a 1D ndarray.");
+    TI_ERROR_IF(other->get_nelement() != values->get_nelement(),
+                "CUDA CUB metric_reduce inputs must have the same length.");
+  }
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_size == 0,
+              "CUDA CUB metric_reduce received an unsupported value type.");
+  TI_ERROR_IF(!cuda_cub_metric_reduce_value_type_available(value_type),
+              "CUDA CUB metric_reduce currently supports only f32/f64.");
+  TI_ERROR_IF(values->get_element_size() != expected_size ||
+                  output->get_element_size() != expected_size ||
+                  (other && other->get_element_size() != expected_size),
+              "CUDA CUB metric_reduce dtype does not match value type.");
+  TI_ERROR_IF(values->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB metric_reduce currently supports at most INT_MAX "
+              "items.");
+#ifdef TI_WITH_CUDA
+  void *values_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
+  void *other_ptr =
+      other ? reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(other))
+            : nullptr;
+  void *output_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_metric_reduce(
+      values_ptr, other_ptr, output_ptr,
+      static_cast<int>(values->get_nelement()),
+      static_cast<cuda::CubReduceValueType>(value_type),
+      static_cast<cuda::CudaMetricOp>(metric_op), stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB metric_reduce requires building Taichi with TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_cub_metric_reduce_strided_ndarray(
+    Ndarray *values,
+    Ndarray *other,
+    Ndarray *output,
+    int value_type,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t other_offset,
+    std::size_t other_stride,
+    int metric_op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB strided metric_reduce is only available on CUDA.");
+  TI_ERROR_IF(!values || !output,
+              "CUDA CUB strided metric_reduce received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "CUDA CUB strided metric_reduce expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "CUDA CUB strided metric_reduce expects at least one item.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "CUDA CUB strided metric_reduce output must contain at least "
+              "one item.");
+  TI_ERROR_IF(metric_op < 0 || metric_op > 1,
+              "CUDA CUB strided metric_reduce received an unsupported metric "
+              "op.");
+  TI_ERROR_IF(metric_op == 1 && !other,
+              "CUDA CUB strided max_abs_delta received a null rhs ndarray.");
+  if (!other) {
+    other = values;
+    other_offset = values_offset;
+    other_stride = values_stride;
+  }
+  TI_ERROR_IF(other->shape.size() != 1,
+              "CUDA CUB strided metric_reduce rhs must be a 1D ndarray.");
+  TI_ERROR_IF(other->get_nelement() != values->get_nelement(),
+              "CUDA CUB strided metric_reduce inputs must have the same "
+              "length.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA CUB strided metric_reduce received an unsupported value "
+              "type.");
+  TI_ERROR_IF(!cuda_cub_metric_reduce_value_type_available(value_type),
+              "CUDA CUB strided metric_reduce currently supports only "
+              "f32/f64.");
+  TI_ERROR_IF(output->get_element_size() != value_size,
+              "CUDA CUB strided metric_reduce output dtype does not match "
+              "value type.");
+  auto check_range = [&](const char *role, Ndarray *arr, std::size_t offset,
+                         std::size_t stride) {
+    TI_ERROR_IF(stride < value_size || offset % value_size != 0 ||
+                    stride % value_size != 0,
+                "CUDA CUB strided metric_reduce {} received invalid "
+                "offset/stride.",
+                role);
+    const std::size_t bytes = arr->get_nelement() * arr->get_element_size();
+    TI_ERROR_IF(bytes < value_size || offset > bytes - value_size ||
+                    offset + (arr->get_nelement() - 1) * stride + value_size >
+                        bytes,
+                "CUDA CUB strided metric_reduce {} range is out of bounds.",
+                role);
+  };
+  check_range("source", values, values_offset, values_stride);
+  check_range("rhs", other, other_offset, other_stride);
+  const std::size_t n = values->get_nelement();
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB strided metric_reduce currently supports at most "
+              "INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  void *values_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
+  void *other_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(other));
+  void *output_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_metric_reduce_strided(
+      values_ptr, other_ptr, output_ptr, static_cast<int>(n),
+      static_cast<cuda::CubReduceValueType>(value_type), values_offset,
+      values_stride, other_offset, other_stride,
+      static_cast<cuda::CudaMetricOp>(metric_op), stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB strided metric_reduce requires building Taichi with "
+      "TI_WITH_CUDA=ON.");
+#endif
+}
+
+std::size_t Program::cuda_cub_metric_reduce_dense_field(SNode *values,
+                                                        SNode *other,
+                                                        Ndarray *output,
+                                                        int value_type,
+                                                        std::size_t n,
+                                                        int metric_op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB dense field metric_reduce is only available on CUDA.");
+  TI_ERROR_IF(!values || !output,
+              "CUDA CUB dense field metric_reduce received a null argument.");
+  if (!other) {
+    other = values;
+  }
+  TI_ERROR_IF(n == 0,
+              "CUDA CUB dense field metric_reduce expects at least one item.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB dense field metric_reduce currently supports at most "
+              "INT_MAX items.");
+  TI_ERROR_IF(output->shape.size() != 1 || output->get_nelement() < 1,
+              "CUDA CUB dense field metric_reduce output must be a non-empty "
+              "ndarray.");
+  TI_ERROR_IF(metric_op < 0 || metric_op > 1,
+              "CUDA CUB dense field metric_reduce received an unsupported "
+              "metric op.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA CUB dense field metric_reduce received an unsupported "
+              "value type.");
+  TI_ERROR_IF(!cuda_cub_metric_reduce_value_type_available(value_type),
+              "CUDA CUB dense field metric_reduce currently supports only "
+              "f32/f64.");
+  TI_ERROR_IF(output->get_element_size() != value_size,
+              "CUDA CUB dense field metric_reduce output dtype does not match "
+              "value type.");
+  const std::size_t values_stride = get_dense_field_stride(values, value_size);
+  const std::size_t other_stride = get_dense_field_stride(other, value_size);
+  TI_ERROR_IF(values_stride < value_size || other_stride < value_size,
+              "CUDA CUB dense field metric_reduce received an invalid field "
+              "stride.");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *values_ptr = raw_ptr(get_dense_field_device_ptr(values),
+                             "CUDA CUB dense field metric_reduce");
+  void *other_ptr = raw_ptr(get_dense_field_device_ptr(other),
+                            "CUDA CUB dense field metric_reduce");
+  void *output_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
+  void *stream = CUDAContext::get_instance().get_stream();
+  return cuda::cub_metric_reduce_strided(
+      values_ptr, other_ptr, output_ptr, static_cast<int>(n),
+      static_cast<cuda::CubReduceValueType>(value_type), 0, values_stride, 0,
+      other_stride, static_cast<cuda::CudaMetricOp>(metric_op), stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB dense field metric_reduce requires building Taichi with "
+      "TI_WITH_CUDA=ON.");
+#endif
+}
+
+void Program::cuda_cub_metric_reduce_clear_workspace() {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    cuda::cub_metric_reduce_clear_cache(this);
+  }
+#endif
+}
+
+std::size_t Program::cuda_cub_metric_reduce_workspace_bytes() const {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    return cuda::cub_metric_reduce_cached_bytes(const_cast<Program *>(this));
   }
 #endif
   return 0;
@@ -10513,7 +11176,379 @@ std::size_t Program::cpu_check_count_ndarray(Ndarray *values,
   return 0;
 }
 
+std::size_t Program::cpu_check_count_strided_ndarray(Ndarray *values,
+                                                     Ndarray *output,
+                                                     int value_type,
+                                                     std::size_t offset,
+                                                     std::size_t stride,
+                                                     int check_op,
+                                                     int lower,
+                                                     int upper) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native strided check_count is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!values || !output,
+              "CPU native strided check_count received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "CPU native strided check_count expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "CPU native strided check_count expects at least one item.");
+  TI_ERROR_IF(output->get_nelement() < 1 ||
+                  output->get_element_size() != sizeof(int32_t),
+              "CPU native strided check_count output must be a non-empty i32 "
+              "ndarray.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CPU native strided check_count received an unsupported value "
+              "type.");
+  TI_ERROR_IF(check_op < 0 || check_op > 5,
+              "CPU native strided check_count received an unsupported check "
+              "op.");
+  const std::size_t n = values->get_nelement();
+  const std::size_t src_bytes = n * values->get_element_size();
+  TI_ERROR_IF(stride < value_size || offset % value_size != 0 ||
+                  stride % value_size != 0 || src_bytes < value_size ||
+                  offset > src_bytes - value_size ||
+                  offset + (n - 1) * stride + value_size > src_bytes,
+              "CPU native strided check_count source range is out of bounds.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
+  const auto values_addr = get_ndarray_data_ptr_as_int(values);
+  const auto output_addr = get_ndarray_data_ptr_as_int(output);
+  auto *values_ptr = reinterpret_cast<const uint8_t *>(values_addr);
+  auto *output_ptr = reinterpret_cast<int32_t *>(output_addr);
+  switch (value_type) {
+    case 0:
+      return cpu_check_count_strided_typed<int32_t>(
+          values_ptr, offset, stride, output_ptr, check_op, lower, upper, n,
+          max_threads, target_threads, use_parallel);
+    case 1:
+      return cpu_check_count_strided_typed<float>(
+          values_ptr, offset, stride, output_ptr, check_op, lower, upper, n,
+          max_threads, target_threads, use_parallel);
+    case 2:
+      return cpu_check_count_strided_typed<uint32_t>(
+          values_ptr, offset, stride, output_ptr, check_op, lower, upper, n,
+          max_threads, target_threads, use_parallel);
+    case 3:
+      return cpu_check_count_strided_typed<uint64_t>(
+          values_ptr, offset, stride, output_ptr, check_op, lower, upper, n,
+          max_threads, target_threads, use_parallel);
+    case 4:
+      return cpu_check_count_strided_typed<int64_t>(
+          values_ptr, offset, stride, output_ptr, check_op, lower, upper, n,
+          max_threads, target_threads, use_parallel);
+    case 5:
+      return cpu_check_count_strided_typed<double>(
+          values_ptr, offset, stride, output_ptr, check_op, lower, upper, n,
+          max_threads, target_threads, use_parallel);
+  }
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::cpu_check_count_dense_field(SNode *values,
+                                                 Ndarray *output,
+                                                 int value_type,
+                                                 std::size_t n,
+                                                 int check_op,
+                                                 int lower,
+                                                 int upper) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field check_count is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!values || !output,
+              "CPU native dense field check_count received a null argument.");
+  TI_ERROR_IF(n == 0,
+              "CPU native dense field check_count expects at least one item.");
+  TI_ERROR_IF(output->shape.size() != 1 || output->get_nelement() < 1 ||
+                  output->get_element_size() != sizeof(int32_t),
+              "CPU native dense field check_count output must be a non-empty "
+              "i32 ndarray.");
+  TI_ERROR_IF(check_op < 0 || check_op > 5,
+              "CPU native dense field check_count received an unsupported "
+              "check op.");
+  std::size_t stride = 0;
+  const auto *values_ptr = map_cpu_dense_field(
+      this, values, value_type, n, "CPU native dense field check_count",
+      &stride);
+  auto *output_ptr =
+      reinterpret_cast<int32_t *>(get_ndarray_data_ptr_as_int(output));
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
+  switch (value_type) {
+    case 0:
+      return cpu_check_count_strided_typed<int32_t>(
+          values_ptr, 0, stride, output_ptr, check_op, lower, upper, n,
+          max_threads, target_threads, use_parallel);
+    case 1:
+      return cpu_check_count_strided_typed<float>(
+          values_ptr, 0, stride, output_ptr, check_op, lower, upper, n,
+          max_threads, target_threads, use_parallel);
+    case 2:
+      return cpu_check_count_strided_typed<uint32_t>(
+          values_ptr, 0, stride, output_ptr, check_op, lower, upper, n,
+          max_threads, target_threads, use_parallel);
+    case 3:
+      return cpu_check_count_strided_typed<uint64_t>(
+          values_ptr, 0, stride, output_ptr, check_op, lower, upper, n,
+          max_threads, target_threads, use_parallel);
+    case 4:
+      return cpu_check_count_strided_typed<int64_t>(
+          values_ptr, 0, stride, output_ptr, check_op, lower, upper, n,
+          max_threads, target_threads, use_parallel);
+    case 5:
+      return cpu_check_count_strided_typed<double>(
+          values_ptr, 0, stride, output_ptr, check_op, lower, upper, n,
+          max_threads, target_threads, use_parallel);
+    default:
+      TI_ERROR(
+          "CPU native dense field check_count received an unsupported value "
+          "type.");
+  }
+}
+
 std::size_t Program::cpu_check_count_workspace_bytes() const {
+  return 0;
+}
+
+bool Program::cpu_metric_reduce_available() const {
+  return arch_is_cpu(compile_config().arch);
+}
+
+bool Program::cpu_metric_reduce_value_type_available(int value_type) const {
+  return value_type == 1 || value_type == 5;
+}
+
+std::size_t Program::cpu_metric_reduce_ndarray(Ndarray *values,
+                                               Ndarray *other,
+                                               Ndarray *output,
+                                               int value_type,
+                                               int metric_op) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native metric_reduce is only available on CPU backends.");
+  TI_ERROR_IF(!values || !output,
+              "CPU native metric_reduce received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "CPU native metric_reduce expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "CPU native metric_reduce expects at least one input item.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "CPU native metric_reduce output must contain at least one item.");
+  TI_ERROR_IF(metric_op < 0 || metric_op > 1,
+              "CPU native metric_reduce received an unsupported metric op.");
+  TI_ERROR_IF(metric_op == 1 && !other,
+              "CPU native max_abs_delta received a null rhs ndarray.");
+  if (other) {
+    TI_ERROR_IF(other->shape.size() != 1,
+                "CPU native metric_reduce rhs must be a 1D ndarray.");
+    TI_ERROR_IF(other->get_nelement() != values->get_nelement(),
+                "CPU native metric_reduce inputs must have the same length.");
+  }
+  const std::size_t expected_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_size == 0,
+              "CPU native metric_reduce received an unsupported value type.");
+  TI_ERROR_IF(!cpu_metric_reduce_value_type_available(value_type),
+              "CPU native metric_reduce currently supports only f32/f64.");
+  TI_ERROR_IF(values->get_element_size() != expected_size ||
+                  output->get_element_size() != expected_size ||
+                  (other && other->get_element_size() != expected_size),
+              "CPU native metric_reduce dtype does not match value type.");
+
+  const std::size_t n = values->get_nelement();
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
+  const auto values_addr = get_ndarray_data_ptr_as_int(values);
+  const auto other_addr = other ? get_ndarray_data_ptr_as_int(other) : 0;
+  const auto output_addr = get_ndarray_data_ptr_as_int(output);
+  switch (value_type) {
+    case 1:
+      return cpu_metric_reduce_typed(
+          reinterpret_cast<const float *>(values_addr),
+          reinterpret_cast<const float *>(other_addr),
+          reinterpret_cast<float *>(output_addr), metric_op, n, max_threads,
+          target_threads, use_parallel);
+    case 5:
+      return cpu_metric_reduce_typed(
+          reinterpret_cast<const double *>(values_addr),
+          reinterpret_cast<const double *>(other_addr),
+          reinterpret_cast<double *>(output_addr), metric_op, n, max_threads,
+          target_threads, use_parallel);
+  }
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::cpu_metric_reduce_strided_ndarray(
+    Ndarray *values,
+    Ndarray *other,
+    Ndarray *output,
+    int value_type,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t other_offset,
+    std::size_t other_stride,
+    int metric_op) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native strided metric_reduce is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!values || !output,
+              "CPU native strided metric_reduce received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "CPU native strided metric_reduce expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0,
+              "CPU native strided metric_reduce expects at least one item.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "CPU native strided metric_reduce output must contain at least "
+              "one item.");
+  TI_ERROR_IF(metric_op < 0 || metric_op > 1,
+              "CPU native strided metric_reduce received an unsupported "
+              "metric op.");
+  TI_ERROR_IF(metric_op == 1 && !other,
+              "CPU native strided max_abs_delta received a null rhs ndarray.");
+  if (!other) {
+    other = values;
+    other_offset = values_offset;
+    other_stride = values_stride;
+  }
+  TI_ERROR_IF(other->shape.size() != 1,
+              "CPU native strided metric_reduce rhs must be a 1D ndarray.");
+  TI_ERROR_IF(other->get_nelement() != values->get_nelement(),
+              "CPU native strided metric_reduce inputs must have the same "
+              "length.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CPU native strided metric_reduce received an unsupported value "
+              "type.");
+  TI_ERROR_IF(!cpu_metric_reduce_value_type_available(value_type),
+              "CPU native strided metric_reduce currently supports only "
+              "f32/f64.");
+  TI_ERROR_IF(output->get_element_size() != value_size,
+              "CPU native strided metric_reduce output dtype does not match "
+              "value type.");
+  auto check_range = [&](const char *role, Ndarray *arr, std::size_t offset,
+                         std::size_t stride) {
+    const std::size_t bytes = arr->get_nelement() * arr->get_element_size();
+    TI_ERROR_IF(stride < value_size || offset % value_size != 0 ||
+                    stride % value_size != 0 || bytes < value_size ||
+                    offset > bytes - value_size ||
+                    offset + (arr->get_nelement() - 1) * stride + value_size >
+                        bytes,
+                "CPU native strided metric_reduce {} range is out of bounds.",
+                role);
+  };
+  check_range("source", values, values_offset, values_stride);
+  check_range("rhs", other, other_offset, other_stride);
+  const std::size_t n = values->get_nelement();
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
+  const auto values_addr = get_ndarray_data_ptr_as_int(values);
+  const auto other_addr = get_ndarray_data_ptr_as_int(other);
+  const auto output_addr = get_ndarray_data_ptr_as_int(output);
+  const auto *values_ptr = reinterpret_cast<const uint8_t *>(values_addr);
+  const auto *other_ptr = reinterpret_cast<const uint8_t *>(other_addr);
+  switch (value_type) {
+    case 1:
+      return cpu_metric_reduce_strided_typed<float>(
+          values_ptr, other_ptr, reinterpret_cast<float *>(output_addr),
+          metric_op, n, values_offset, values_stride, other_offset,
+          other_stride, max_threads, target_threads, use_parallel);
+    case 5:
+      return cpu_metric_reduce_strided_typed<double>(
+          values_ptr, other_ptr, reinterpret_cast<double *>(output_addr),
+          metric_op, n, values_offset, values_stride, other_offset,
+          other_stride, max_threads, target_threads, use_parallel);
+  }
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::cpu_metric_reduce_dense_field(SNode *values,
+                                                   SNode *other,
+                                                   Ndarray *output,
+                                                   int value_type,
+                                                   std::size_t n,
+                                                   int metric_op) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native dense field metric_reduce is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!values || !output,
+              "CPU native dense field metric_reduce received a null argument.");
+  if (!other) {
+    other = values;
+  }
+  TI_ERROR_IF(n == 0,
+              "CPU native dense field metric_reduce expects at least one "
+              "item.");
+  TI_ERROR_IF(output->shape.size() != 1 || output->get_nelement() < 1,
+              "CPU native dense field metric_reduce output must be a "
+              "non-empty ndarray.");
+  TI_ERROR_IF(metric_op < 0 || metric_op > 1,
+              "CPU native dense field metric_reduce received an unsupported "
+              "metric op.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CPU native dense field metric_reduce received an unsupported "
+              "value type.");
+  TI_ERROR_IF(!cpu_metric_reduce_value_type_available(value_type),
+              "CPU native dense field metric_reduce currently supports only "
+              "f32/f64.");
+  TI_ERROR_IF(output->get_element_size() != value_size,
+              "CPU native dense field metric_reduce output dtype does not "
+              "match value type.");
+  std::size_t values_stride = 0;
+  std::size_t other_stride = 0;
+  const auto *values_ptr = map_cpu_dense_field(
+      this, values, value_type, n, "CPU native dense field metric_reduce",
+      &values_stride);
+  const auto *other_ptr = map_cpu_dense_field(
+      this, other, value_type, n, "CPU native dense field metric_reduce",
+      &other_stride);
+  const auto output_addr = get_ndarray_data_ptr_as_int(output);
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
+  switch (value_type) {
+    case 1:
+      return cpu_metric_reduce_strided_typed<float>(
+          values_ptr, other_ptr, reinterpret_cast<float *>(output_addr),
+          metric_op, n, 0, values_stride, 0, other_stride, max_threads,
+          target_threads, use_parallel);
+    case 5:
+      return cpu_metric_reduce_strided_typed<double>(
+          values_ptr, other_ptr, reinterpret_cast<double *>(output_addr),
+          metric_op, n, 0, values_stride, 0, other_stride, max_threads,
+          target_threads, use_parallel);
+  }
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::cpu_metric_reduce_workspace_bytes() const {
   return 0;
 }
 

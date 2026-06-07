@@ -21,6 +21,10 @@
 | `ti.algorithms.experimental_scatter_add(src, indices, dst, ...)` | Indexed add；支持时走后端 atomics 或 staged reduction。 |
 | `ti.algorithms.experimental_bucket_builder(keys, values, offsets, output, ...)` | 构建 grouped/bucketed value output。 |
 | `ti.algorithms.experimental_grouped_reduce(keys, values, output, ...)` | 按整数 group key reduce values。 |
+| `ti.algorithms.count_if(flags, ...)` / `any_if()` / `all_if()` | 在 kernel 外部发起 device-side 数值谓词检查。 |
+| `ti.algorithms.nan_count(values, ...)` / `inf_count()` / `all_finite()` | 在 device 上统计 NaN/Inf/非有限值。 |
+| `ti.algorithms.index_bounds_check(indices, lower=..., upper=...)` | 在 device 上统计越界 index。 |
+| `ti.algorithms.max_abs(values, ...)` / `max_abs_delta(values, reference, ...)` | 在 device 上计算收敛/误差类最大绝对值指标。 |
 
 名称里的 `experimental_` 表示这是 Forge 公开入口，但演进节奏会比长期 vanilla API 更保守。
 
@@ -46,6 +50,29 @@
 - 稀疏、非连续、复杂 SNode 拓扑不能默认假设走 native。
 - duplicate target 的 floating scatter-add 可能受后端 atomic 顺序影响；只有数值合同允许时才应使用。
 
+## Device-side 数值检查
+
+这些 API 是 Forge 新增公开 API，不是 vanilla Taichi 1.7.4/1.8.0 API。它们必须在
+Python scope 调用，不能在 `@ti.kernel` 或 `@ti.func` 内部调用。调用本身只提交后端
+native primitive，并把结果写入 device-side scalar；只有调用 `to_int()`、`to_bool()`、
+`ok()` 或 `to_float()` 时才把标量读回 Python。
+
+`check_count` 类 API 支持 `i32/u32/i64/u64/f32/f64` 的 scalar 1D `ti.ndarray`、
+`StructNdarray` scalar member view，以及 root-dense-place dense field。`metric_reduce`
+类 API 支持 `f32/f64` 的同类输入；Vulkan 当前只开放 `f32` metric fast path。
+
+```python
+workspace = ti.algorithms.CheckWorkspace(max_items=n)
+bad = ti.algorithms.index_bounds_check(indices, lower=0, upper=n, workspace=workspace)
+
+# Python 分支会同步读取 1 个标量。
+if not bad.ok():
+    raise RuntimeError("indices out of bounds")
+```
+
+对热循环，显式复用 `CheckWorkspace` / `MetricWorkspace` 可以复用 result scalar、scratch
+buffer 和后端 replay plan。
+
 ## Workspace
 
 多数 native 算法接受 `workspace=` 或返回可复用 workspace。复用 workspace 可以让后端 scratch
@@ -62,6 +89,23 @@ for _ in range(num_steps):
 ## 与 graph 的关系
 
 Forge 可以把由算法层产出的 DSL-defined native primitive sequence 放进 graph replay。
+`DeviceCheckResult`、`DeviceMetricResult` 和 `PrimitiveSequence` 都可以通过
+`GraphBuilder.append_native(...)` 作为 native graph node 追加。graph replay 只更新
+device-side scalar，不会自动把结果读回 Python，也不会把检查结果转换成 graph 内部 host
+控制流。
+
+```python
+workspace = ti.algorithms.MetricWorkspace(max_items=n)
+err = ti.algorithms.max_abs_delta(values, reference, workspace=workspace)
+
+builder = ti.graph.GraphBuilder()
+builder.append_native(err)
+graph = builder.compile()
+
+graph.run({})
+print(err.to_float())  # 显式读取 1 个 device scalar
+```
+
 这不等于向用户暴露任意 native callback；普通 Python 算法调用也不要求 graph 参与。
 
 ## 与 vanilla Taichi 的关系

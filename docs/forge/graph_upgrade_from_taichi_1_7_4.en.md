@@ -32,6 +32,9 @@ The user-visible additions are:
 - Stable fallback when a backend replay path is not supported.
 - Internal native replay for Forge-defined primitive sequences produced by the
   algorithm layer.
+- `GraphBuilder.append_native(node, prewarm=False)` for Forge DSL-defined native
+  nodes such as `PrimitiveSequence`, `DeviceCheckResult`, and
+  `DeviceMetricResult`.
 
 ## Native Graph Boundary
 
@@ -40,6 +43,9 @@ Native graph support is intentionally narrow:
 - Supported: native nodes produced by Forge's own DSL/native algorithm layer.
 - Not supported: arbitrary user native callbacks inside graph.
 - Not promised: cross-backend graph execution in a single graph.
+- Numeric-check result nodes replay only the device-side native primitive. Result
+  reads are still explicit through `to_int()`, `to_bool()`, `ok()`, or
+  `to_float()`.
 
 This keeps resource ownership and backend lifetime rules explicit.
 

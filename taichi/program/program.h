@@ -872,9 +872,58 @@ class TI_DLL_EXPORT Program {
                                            int lower,
                                            int upper);
 
+  std::size_t cuda_cub_check_count_strided_ndarray(Ndarray *values,
+                                                   Ndarray *output,
+                                                   int value_type,
+                                                   std::size_t offset,
+                                                   std::size_t stride,
+                                                   int check_op,
+                                                   int lower,
+                                                   int upper);
+
+  std::size_t cuda_cub_check_count_dense_field(SNode *values,
+                                               Ndarray *output,
+                                               int value_type,
+                                               std::size_t n,
+                                               int check_op,
+                                               int lower,
+                                               int upper);
+
   void cuda_cub_check_count_clear_workspace();
 
   std::size_t cuda_cub_check_count_workspace_bytes() const;
+
+  bool cuda_cub_metric_reduce_available() const;
+
+  bool cuda_cub_metric_reduce_value_type_available(int value_type) const;
+
+  std::size_t cuda_cub_metric_reduce_ndarray(Ndarray *values,
+                                             Ndarray *other,
+                                             Ndarray *output,
+                                             int value_type,
+                                             int metric_op);
+
+  std::size_t cuda_cub_metric_reduce_strided_ndarray(
+      Ndarray *values,
+      Ndarray *other,
+      Ndarray *output,
+      int value_type,
+      std::size_t values_offset,
+      std::size_t values_stride,
+      std::size_t other_offset,
+      std::size_t other_stride,
+      int metric_op);
+
+  std::size_t cuda_cub_metric_reduce_dense_field(SNode *values,
+                                                 SNode *other,
+                                                 Ndarray *output,
+                                                 int value_type,
+                                                 std::size_t n,
+                                                 int metric_op);
+
+  void cuda_cub_metric_reduce_clear_workspace();
+
+  std::size_t cuda_cub_metric_reduce_workspace_bytes() const;
 
   bool cpu_scan_available() const;
 
@@ -1080,7 +1129,53 @@ class TI_DLL_EXPORT Program {
                                       int lower,
                                       int upper);
 
+  std::size_t cpu_check_count_strided_ndarray(Ndarray *values,
+                                              Ndarray *output,
+                                              int value_type,
+                                              std::size_t offset,
+                                              std::size_t stride,
+                                              int check_op,
+                                              int lower,
+                                              int upper);
+
+  std::size_t cpu_check_count_dense_field(SNode *values,
+                                          Ndarray *output,
+                                          int value_type,
+                                          std::size_t n,
+                                          int check_op,
+                                          int lower,
+                                          int upper);
+
   std::size_t cpu_check_count_workspace_bytes() const;
+
+  bool cpu_metric_reduce_available() const;
+
+  bool cpu_metric_reduce_value_type_available(int value_type) const;
+
+  std::size_t cpu_metric_reduce_ndarray(Ndarray *values,
+                                        Ndarray *other,
+                                        Ndarray *output,
+                                        int value_type,
+                                        int metric_op);
+
+  std::size_t cpu_metric_reduce_strided_ndarray(Ndarray *values,
+                                                Ndarray *other,
+                                                Ndarray *output,
+                                                int value_type,
+                                                std::size_t values_offset,
+                                                std::size_t values_stride,
+                                                std::size_t other_offset,
+                                                std::size_t other_stride,
+                                                int metric_op);
+
+  std::size_t cpu_metric_reduce_dense_field(SNode *values,
+                                            SNode *other,
+                                            Ndarray *output,
+                                            int value_type,
+                                            std::size_t n,
+                                            int metric_op);
+
+  std::size_t cpu_metric_reduce_workspace_bytes() const;
 
   bool cpu_transform_available() const;
 
@@ -1566,9 +1661,58 @@ class TI_DLL_EXPORT Program {
                                          int lower,
                                          int upper);
 
+  std::size_t vulkan_check_count_strided_ndarray(Ndarray *values,
+                                                 Ndarray *output,
+                                                 int value_type,
+                                                 std::size_t offset,
+                                                 std::size_t stride,
+                                                 int check_op,
+                                                 int lower,
+                                                 int upper);
+
+  std::size_t vulkan_check_count_dense_field(SNode *values,
+                                             Ndarray *output,
+                                             int value_type,
+                                             std::size_t n,
+                                             int check_op,
+                                             int lower,
+                                             int upper);
+
   void vulkan_check_count_clear_workspace();
 
   std::size_t vulkan_check_count_workspace_bytes() const;
+
+  bool vulkan_metric_reduce_available() const;
+
+  bool vulkan_metric_reduce_value_type_available(int value_type) const;
+
+  std::size_t vulkan_metric_reduce_ndarray(Ndarray *values,
+                                           Ndarray *other,
+                                           Ndarray *output,
+                                           int value_type,
+                                           int metric_op);
+
+  std::size_t vulkan_metric_reduce_strided_ndarray(
+      Ndarray *values,
+      Ndarray *other,
+      Ndarray *output,
+      int value_type,
+      std::size_t values_offset,
+      std::size_t values_stride,
+      std::size_t other_offset,
+      std::size_t other_stride,
+      int metric_op);
+
+  std::size_t vulkan_metric_reduce_dense_field(SNode *values,
+                                               SNode *other,
+                                               Ndarray *output,
+                                               int value_type,
+                                               std::size_t n,
+                                               int metric_op);
+
+  void vulkan_metric_reduce_clear_workspace();
+
+  std::size_t vulkan_metric_reduce_workspace_bytes() const;
 
   bool vulkan_transform_available() const;
 

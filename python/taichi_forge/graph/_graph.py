@@ -402,6 +402,9 @@ class GraphBuilder:
         self._nodes.append(_CompiledNativeGraphNode(executable))
         return self
 
+    def append_native(self, node, *, prewarm=False):
+        return self._append_native(node, prewarm=prewarm)
+
     def compile(self):
         self._flush_graph_builder()
         if not self._nodes:

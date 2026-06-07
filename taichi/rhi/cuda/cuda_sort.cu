@@ -215,6 +215,29 @@ struct CubCheckCountCache {
   }
 };
 
+struct CubMetricReduceCache {
+  void *temp_storage{nullptr};
+  std::size_t temp_storage_bytes{0};
+  int device_id{-1};
+
+  ~CubMetricReduceCache() {
+    release_noexcept();
+  }
+
+  void release_noexcept() {
+    if (temp_storage) {
+      cudaFree(temp_storage);
+    }
+    temp_storage = nullptr;
+    temp_storage_bytes = 0;
+    device_id = -1;
+  }
+
+  std::size_t allocated_bytes() const {
+    return temp_storage_bytes;
+  }
+};
+
 struct CubBucketBuilderCache {
   void *temp_storage{nullptr};
   std::size_t temp_storage_bytes{0};
@@ -301,6 +324,13 @@ get_check_count_caches() {
   return caches;
 }
 
+std::unordered_map<void *, std::unique_ptr<CubMetricReduceCache>> &
+get_metric_reduce_caches() {
+  static std::unordered_map<void *, std::unique_ptr<CubMetricReduceCache>>
+      caches;
+  return caches;
+}
+
 std::unordered_map<void *, std::unique_ptr<CubBucketBuilderCache>> &
 get_bucket_builder_caches() {
   static std::unordered_map<void *, std::unique_ptr<CubBucketBuilderCache>>
@@ -376,6 +406,19 @@ CubCheckCountCache &get_check_count_cache(void *owner) {
   auto it = caches.find(owner);
   if (it == caches.end()) {
     it = caches.emplace(owner, std::make_unique<CubCheckCountCache>()).first;
+  }
+  return *it->second;
+}
+
+CubMetricReduceCache &get_metric_reduce_cache(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  auto &caches = get_metric_reduce_caches();
+  auto it = caches.find(owner);
+  if (it == caches.end()) {
+    it = caches.emplace(owner, std::make_unique<CubMetricReduceCache>()).first;
   }
   return *it->second;
 }
@@ -462,6 +505,17 @@ void ensure_device_cache(CubReduceCache &cache) {
 }
 
 void ensure_device_cache(CubCheckCountCache &cache) {
+  int device_id = 0;
+  TI_CUDA_SORT_CHECK(cudaGetDevice(&device_id));
+  if (cache.device_id == -1) {
+    cache.device_id = device_id;
+  } else if (cache.device_id != device_id) {
+    cache.release_noexcept();
+    cache.device_id = device_id;
+  }
+}
+
+void ensure_device_cache(CubMetricReduceCache &cache) {
   int device_id = 0;
   TI_CUDA_SORT_CHECK(cudaGetDevice(&device_id));
   if (cache.device_id == -1) {
@@ -3325,13 +3379,17 @@ std::size_t reduce_strided_typed(CubReduceCache &cache,
 
 template <typename T>
 struct CheckCountLoadOp {
-  const T *values{nullptr};
+  const uint8_t *values{nullptr};
+  std::size_t offset{0};
+  std::size_t stride{sizeof(T)};
   CudaCheckOp op{CudaCheckOp::nonzero};
   int lower{0};
   int upper{0};
 
   __host__ __device__ int32_t operator()(const int &i) const {
-    const T value = values[i];
+    const T value =
+        *reinterpret_cast<const T *>(values + offset +
+                                     static_cast<std::size_t>(i) * stride);
     switch (op) {
       case CudaCheckOp::nonzero:
         return value != T{} ? 1 : 0;
@@ -3378,6 +3436,8 @@ std::size_t check_count_typed(CubCheckCountCache &cache,
                               void *values,
                               void *output,
                               int num_items,
+                              std::size_t offset,
+                              std::size_t stride,
                               CudaCheckOp op,
                               int lower,
                               int upper,
@@ -3385,13 +3445,13 @@ std::size_t check_count_typed(CubCheckCountCache &cache,
   if (!values || !output) {
     throw std::runtime_error("CUB check_count received a null pointer");
   }
-  const T *values_in = static_cast<const T *>(values);
+  const uint8_t *values_in = static_cast<const uint8_t *>(values);
   int32_t *output_out = static_cast<int32_t *>(output);
   cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   const bool use_stream = stream != nullptr;
   ensure_device_cache(cache);
 
-  CheckCountLoadOp<T> load_op{values_in, op, lower, upper};
+  CheckCountLoadOp<T> load_op{values_in, offset, stride, op, lower, upper};
   auto counting = ::cuda::make_counting_iterator(0);
   auto checks = ::cuda::make_transform_iterator(counting, load_op);
 
@@ -3412,6 +3472,113 @@ std::size_t check_count_typed(CubCheckCountCache &cache,
   } else {
     TI_CUDA_SORT_CHECK(cub::DeviceReduce::Sum(
         cache.temp_storage, temp_storage_bytes, checks, output_out, num_items));
+  }
+  return cache.allocated_bytes();
+}
+
+template <typename T>
+struct MetricReduceLoadOp {
+  const uint8_t *values{nullptr};
+  const uint8_t *other{nullptr};
+  std::size_t values_offset{0};
+  std::size_t values_stride{sizeof(T)};
+  std::size_t other_offset{0};
+  std::size_t other_stride{sizeof(T)};
+  CudaMetricOp op{CudaMetricOp::max_abs};
+
+  __host__ __device__ T metric_inf() const {
+    if constexpr (std::is_same_v<T, float>) {
+      union {
+        uint32_t bits;
+        float value;
+      } inf{0x7f800000u};
+      return inf.value;
+    } else {
+      union {
+        uint64_t bits;
+        double value;
+      } inf{0x7ff0000000000000ULL};
+      return inf.value;
+    }
+  }
+
+  __host__ __device__ T metric_abs(T value) const {
+    if constexpr (std::is_floating_point_v<T>) {
+      if (isnan(value)) {
+        return metric_inf();
+      }
+      return value < T{} ? -value : value;
+    } else if constexpr (std::is_signed_v<T>) {
+      return value < T{} ? -value : value;
+    } else {
+      return value;
+    }
+  }
+
+  __host__ __device__ T operator()(const int &i) const {
+    const auto item = static_cast<std::size_t>(i);
+    const T value =
+        *reinterpret_cast<const T *>(values + values_offset +
+                                     item * values_stride);
+    switch (op) {
+      case CudaMetricOp::max_abs:
+        return metric_abs(value);
+      case CudaMetricOp::max_abs_delta:
+        return metric_abs(
+            value - *reinterpret_cast<const T *>(other + other_offset +
+                                                 item * other_stride));
+    }
+    return T{};
+  }
+};
+
+template <typename T>
+std::size_t metric_reduce_typed(CubMetricReduceCache &cache,
+                                void *values,
+                                void *other,
+                                void *output,
+                                int num_items,
+                                std::size_t values_offset,
+                                std::size_t values_stride,
+                                std::size_t other_offset,
+                                std::size_t other_stride,
+                                CudaMetricOp op,
+                                void *stream_ptr) {
+  if (!values || !output) {
+    throw std::runtime_error("CUB metric_reduce received a null pointer");
+  }
+  if (op == CudaMetricOp::max_abs_delta && !other) {
+    throw std::runtime_error("CUB max_abs_delta received a null rhs pointer");
+  }
+  const uint8_t *values_in = static_cast<const uint8_t *>(values);
+  const uint8_t *other_in = static_cast<const uint8_t *>(other);
+  T *output_out = static_cast<T *>(output);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  const bool use_stream = stream != nullptr;
+  ensure_device_cache(cache);
+
+  MetricReduceLoadOp<T> load_op{values_in, other_in, values_offset,
+                                values_stride, other_offset, other_stride, op};
+  auto counting = ::cuda::make_counting_iterator(0);
+  auto metrics = ::cuda::make_transform_iterator(counting, load_op);
+
+  std::size_t temp_storage_bytes = 0;
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceReduce::Max(
+        nullptr, temp_storage_bytes, metrics, output_out, num_items, stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceReduce::Max(
+        nullptr, temp_storage_bytes, metrics, output_out, num_items));
+  }
+  ensure_buffer(&cache.temp_storage, &cache.temp_storage_bytes,
+                temp_storage_bytes);
+  if (use_stream) {
+    TI_CUDA_SORT_CHECK(cub::DeviceReduce::Max(
+        cache.temp_storage, temp_storage_bytes, metrics, output_out, num_items,
+        stream));
+  } else {
+    TI_CUDA_SORT_CHECK(cub::DeviceReduce::Max(
+        cache.temp_storage, temp_storage_bytes, metrics, output_out, num_items));
   }
   return cache.allocated_bytes();
 }
@@ -3485,6 +3652,8 @@ std::size_t cub_check_count_impl(void *values,
                                  void *output,
                                  int num_items,
                                  CubReduceValueType value_type,
+                                 std::size_t offset,
+                                 std::size_t stride,
                                  CudaCheckOp op,
                                  int lower,
                                  int upper,
@@ -3494,23 +3663,28 @@ std::size_t cub_check_count_impl(void *values,
   CubCheckCountCache &cache = get_check_count_cache(owner);
   switch (value_type) {
     case CubReduceValueType::i32:
-      return check_count_typed<int32_t>(cache, values, output, num_items, op,
-                                        lower, upper, stream);
+      return check_count_typed<int32_t>(cache, values, output, num_items,
+                                        offset, stride, op, lower, upper,
+                                        stream);
     case CubReduceValueType::f32:
-      return check_count_typed<float>(cache, values, output, num_items, op,
-                                      lower, upper, stream);
+      return check_count_typed<float>(cache, values, output, num_items, offset,
+                                      stride, op, lower, upper, stream);
     case CubReduceValueType::u32:
-      return check_count_typed<uint32_t>(cache, values, output, num_items, op,
-                                         lower, upper, stream);
+      return check_count_typed<uint32_t>(cache, values, output, num_items,
+                                         offset, stride, op, lower, upper,
+                                         stream);
     case CubReduceValueType::u64:
-      return check_count_typed<uint64_t>(cache, values, output, num_items, op,
-                                         lower, upper, stream);
+      return check_count_typed<uint64_t>(cache, values, output, num_items,
+                                         offset, stride, op, lower, upper,
+                                         stream);
     case CubReduceValueType::i64:
-      return check_count_typed<int64_t>(cache, values, output, num_items, op,
-                                        lower, upper, stream);
+      return check_count_typed<int64_t>(cache, values, output, num_items,
+                                        offset, stride, op, lower, upper,
+                                        stream);
     case CubReduceValueType::f64:
-      return check_count_typed<double>(cache, values, output, num_items, op,
-                                       lower, upper, stream);
+      return check_count_typed<double>(cache, values, output, num_items,
+                                       offset, stride, op, lower, upper,
+                                       stream);
   }
   throw std::runtime_error("Unsupported CUB check_count value type");
 }
@@ -3535,6 +3709,64 @@ std::size_t cub_check_count_cached_bytes_impl(void *owner) {
   }
   std::lock_guard<std::mutex> lock(get_cache_mutex());
   auto &caches = get_check_count_caches();
+  auto it = caches.find(owner);
+  if (it == caches.end()) {
+    return 0;
+  }
+  return it->second->allocated_bytes();
+}
+
+std::size_t cub_metric_reduce_impl(void *values,
+                                   void *other,
+                                   void *output,
+                                   int num_items,
+                                   CubReduceValueType value_type,
+                                   std::size_t values_offset,
+                                   std::size_t values_stride,
+                                   std::size_t other_offset,
+                                   std::size_t other_stride,
+                                   CudaMetricOp op,
+                                   void *stream,
+                                   void *owner) {
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  CubMetricReduceCache &cache = get_metric_reduce_cache(owner);
+  switch (value_type) {
+    case CubReduceValueType::f32:
+      return metric_reduce_typed<float>(cache, values, other, output, num_items,
+                                        values_offset, values_stride,
+                                        other_offset, other_stride,
+                                        op, stream);
+    case CubReduceValueType::f64:
+      return metric_reduce_typed<double>(cache, values, other, output,
+                                         num_items, values_offset,
+                                         values_stride, other_offset,
+                                         other_stride, op, stream);
+    default:
+      break;
+  }
+  throw std::runtime_error("Unsupported CUB metric_reduce value type");
+}
+
+void cub_metric_reduce_clear_cache_impl(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  auto &caches = get_metric_reduce_caches();
+  auto it = caches.find(owner);
+  if (it != caches.end()) {
+    caches.erase(it);
+  }
+}
+
+std::size_t cub_metric_reduce_cached_bytes_impl(void *owner) {
+  static int fallback_owner = 0;
+  if (!owner) {
+    owner = &fallback_owner;
+  }
+  std::lock_guard<std::mutex> lock(get_cache_mutex());
+  auto &caches = get_metric_reduce_caches();
   auto it = caches.find(owner);
   if (it == caches.end()) {
     return 0;

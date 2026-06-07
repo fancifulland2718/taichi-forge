@@ -40,7 +40,11 @@ layout(push_constant) uniform Params {
   uint op;
   int lower;
   int upper;
+  uint n;
+  uint offset;
+  uint stride;
   uint unused0;
+  uint unused1;
 } params;
 
 shared int local_reduce[256];
@@ -84,12 +88,12 @@ int predicate(VALUE_T value) {
 
 void main() {
   uint lid = gl_LocalInvocationID.x;
-  uint n = values_buf.data.length();
   uint global_stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
 
   int acc = 0;
-  for (uint idx = gl_GlobalInvocationID.x; idx < n; idx += global_stride) {
-    acc += predicate(values_buf.data[idx]);
+  for (uint idx = gl_GlobalInvocationID.x; idx < params.n;
+       idx += global_stride) {
+    acc += predicate(values_buf.data[params.offset + idx * params.stride]);
   }
   local_reduce[lid] = acc;
   barrier();

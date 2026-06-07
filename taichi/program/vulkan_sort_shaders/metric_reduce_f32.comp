@@ -1,0 +1,51 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Values {
+  float data[];
+} values_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer Other {
+  float data[];
+} other_buf;
+
+layout(set = 0, binding = 2, std430) buffer OutputBits {
+  uint data[];
+} output_buf;
+
+layout(push_constant) uniform Params {
+  uint op;
+  uint n;
+  uint values_offset;
+  uint values_stride;
+  uint other_offset;
+  uint other_stride;
+  uint unused0;
+  uint unused1;
+} params;
+
+float metric_abs(float value) {
+  if (isnan(value)) {
+    return uintBitsToFloat(0x7f800000u);
+  }
+  return abs(value);
+}
+
+void main() {
+  uint global_stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+
+  float acc = 0.0;
+  for (uint idx = gl_GlobalInvocationID.x; idx < params.n;
+       idx += global_stride) {
+    float value = values_buf.data[params.values_offset +
+                                  idx * params.values_stride];
+    if (params.op == 1u) {
+      value -= other_buf.data[params.other_offset +
+                              idx * params.other_stride];
+    }
+    acc = max(acc, metric_abs(value));
+  }
+
+  atomicMax(output_buf.data[0], floatBitsToUint(acc));
+}

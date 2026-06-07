@@ -27,6 +27,9 @@ native algorithm replay，而不要求用户学习新的 graph API。
 - scalar、matrix、ndarray、texture、RW texture 路径的 runtime 参数处理。
 - 后端 replay 路径不支持时保持稳定 fallback。
 - 算法层产出的 Forge-defined primitive sequence 可走 native replay。
+- `GraphBuilder.append_native(node, prewarm=False)` 可追加 Forge DSL-defined
+  native node，例如 `PrimitiveSequence`、`DeviceCheckResult` 和
+  `DeviceMetricResult`。
 
 ## Native graph 边界
 
@@ -35,6 +38,8 @@ native graph 支持是有意收窄的：
 - 支持：Forge 自身 DSL/native 算法层产出的 native node。
 - 不支持：任意用户 native callback 直接放入 graph。
 - 不承诺：同一个 graph 内跨 CUDA/Vulkan/CPU 混合执行。
+- 数值检查 result 进入 graph 时只重放 device-side native primitive；读取结果仍由
+  `to_int()` / `to_bool()` / `ok()` / `to_float()` 显式触发。
 
 这样可以让资源所有权和后端生命周期规则保持明确。
 

@@ -84,6 +84,11 @@ enum class CudaCheckOp : int {
   index_oob = 5,
 };
 
+enum class CudaMetricOp : int {
+  max_abs = 0,
+  max_abs_delta = 1,
+};
+
 enum class CudaTransformValueType : int {
   i32 = 0,
   f32 = 1,
@@ -398,9 +403,51 @@ std::size_t cub_check_count(void *values,
                             void *stream,
                             void *owner);
 
+std::size_t cub_check_count_strided(void *values,
+                                    void *output,
+                                    int num_items,
+                                    CubReduceValueType value_type,
+                                    std::size_t offset,
+                                    std::size_t stride,
+                                    CudaCheckOp op,
+                                    int lower,
+                                    int upper,
+                                    void *stream,
+                                    void *owner);
+
 void cub_check_count_clear_cache(void *owner);
 
 std::size_t cub_check_count_cached_bytes(void *owner);
+
+bool cub_metric_reduce_available();
+
+bool cub_metric_reduce_value_type_available(CubReduceValueType value_type);
+
+std::size_t cub_metric_reduce(void *values,
+                              void *other,
+                              void *output,
+                              int num_items,
+                              CubReduceValueType value_type,
+                              CudaMetricOp op,
+                              void *stream,
+                              void *owner);
+
+std::size_t cub_metric_reduce_strided(void *values,
+                                      void *other,
+                                      void *output,
+                                      int num_items,
+                                      CubReduceValueType value_type,
+                                      std::size_t values_offset,
+                                      std::size_t values_stride,
+                                      std::size_t other_offset,
+                                      std::size_t other_stride,
+                                      CudaMetricOp op,
+                                      void *stream,
+                                      void *owner);
+
+void cub_metric_reduce_clear_cache(void *owner);
+
+std::size_t cub_metric_reduce_cached_bytes(void *owner);
 
 bool cub_scatter_add_available();
 

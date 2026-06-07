@@ -97,6 +97,8 @@ std::size_t cub_check_count_impl(void *values,
                                  void *output,
                                  int num_items,
                                  CubReduceValueType value_type,
+                                 std::size_t offset,
+                                 std::size_t stride,
                                  CudaCheckOp op,
                                  int lower,
                                  int upper,
@@ -104,6 +106,20 @@ std::size_t cub_check_count_impl(void *values,
                                  void *owner);
 void cub_check_count_clear_cache_impl(void *owner);
 std::size_t cub_check_count_cached_bytes_impl(void *owner);
+std::size_t cub_metric_reduce_impl(void *values,
+                                   void *other,
+                                   void *output,
+                                   int num_items,
+                                   CubReduceValueType value_type,
+                                   std::size_t values_offset,
+                                   std::size_t values_stride,
+                                   std::size_t other_offset,
+                                   std::size_t other_stride,
+                                   CudaMetricOp op,
+                                   void *stream,
+                                   void *owner);
+void cub_metric_reduce_clear_cache_impl(void *owner);
+std::size_t cub_metric_reduce_cached_bytes_impl(void *owner);
 std::size_t cub_scatter_add_impl(void *src,
                                  void *indices,
                                  void *dst,
@@ -1603,6 +1619,8 @@ bool cub_check_count_available() {
 #endif
 }
 
+std::size_t cub_reduce_value_type_size(CubReduceValueType value_type);
+
 std::size_t cub_check_count(void *values,
                             void *output,
                             int num_items,
@@ -1615,11 +1633,44 @@ std::size_t cub_check_count(void *values,
   TI_ERROR_IF(num_items <= 0, "CUB check_count expects positive num_items");
 #if defined(TI_WITH_CUDA_TOOLKIT)
   TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
-  return cub_check_count_impl(values, output, num_items, value_type, op, lower,
-                              upper, stream, owner);
+  const std::size_t value_size = cub_reduce_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUB check_count received an unsupported value type.");
+  return cub_check_count_impl(values, output, num_items, value_type, 0,
+                              value_size, op, lower, upper, stream, owner);
 #else
   TI_ERROR(
       "CUDA CUB check_count requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t cub_check_count_strided(void *values,
+                                    void *output,
+                                    int num_items,
+                                    CubReduceValueType value_type,
+                                    std::size_t offset,
+                                    std::size_t stride,
+                                    CudaCheckOp op,
+                                    int lower,
+                                    int upper,
+                                    void *stream,
+                                    void *owner) {
+  TI_ERROR_IF(num_items <= 0,
+              "CUB strided check_count expects positive num_items");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  const std::size_t value_size = cub_reduce_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUB strided check_count received an unsupported value type.");
+  TI_ERROR_IF(stride < value_size || offset % value_size != 0 ||
+                  stride % value_size != 0,
+              "CUB strided check_count received invalid offset/stride.");
+  return cub_check_count_impl(values, output, num_items, value_type, offset,
+                              stride, op, lower, upper, stream, owner);
+#else
+  TI_ERROR(
+      "CUDA CUB strided check_count requires building Taichi with "
       "TI_WITH_CUDA_TOOLKIT=ON.");
 #endif
 }
@@ -1633,6 +1684,108 @@ void cub_check_count_clear_cache(void *owner) {
 std::size_t cub_check_count_cached_bytes(void *owner) {
 #if defined(TI_WITH_CUDA_TOOLKIT)
   return cub_check_count_cached_bytes_impl(owner);
+#else
+  return 0;
+#endif
+}
+
+bool cub_metric_reduce_available() {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return ensure_cudart_for_cub_sort();
+#else
+  return false;
+#endif
+}
+
+bool cub_metric_reduce_value_type_available(CubReduceValueType value_type) {
+  return value_type == CubReduceValueType::f32 ||
+         value_type == CubReduceValueType::f64;
+}
+
+std::size_t cub_reduce_value_type_size(CubReduceValueType value_type) {
+  switch (value_type) {
+    case CubReduceValueType::i32:
+    case CubReduceValueType::f32:
+    case CubReduceValueType::u32:
+      return sizeof(uint32_t);
+    case CubReduceValueType::u64:
+    case CubReduceValueType::i64:
+    case CubReduceValueType::f64:
+      return sizeof(uint64_t);
+  }
+  return 0;
+}
+
+std::size_t cub_metric_reduce(void *values,
+                              void *other,
+                              void *output,
+                              int num_items,
+                              CubReduceValueType value_type,
+                              CudaMetricOp op,
+                              void *stream,
+                              void *owner) {
+  TI_ERROR_IF(num_items <= 0, "CUB metric_reduce expects positive num_items");
+  TI_ERROR_IF(!cub_metric_reduce_value_type_available(value_type),
+              "CUB metric_reduce currently supports only f32/f64.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  const std::size_t value_size = cub_reduce_value_type_size(value_type);
+  return cub_metric_reduce_impl(values, other, output, num_items, value_type,
+                                0, value_size, 0, value_size, op, stream,
+                                owner);
+#else
+  TI_ERROR(
+      "CUDA CUB metric_reduce requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+std::size_t cub_metric_reduce_strided(void *values,
+                                      void *other,
+                                      void *output,
+                                      int num_items,
+                                      CubReduceValueType value_type,
+                                      std::size_t values_offset,
+                                      std::size_t values_stride,
+                                      std::size_t other_offset,
+                                      std::size_t other_stride,
+                                      CudaMetricOp op,
+                                      void *stream,
+                                      void *owner) {
+  TI_ERROR_IF(num_items <= 0,
+              "CUB strided metric_reduce expects positive num_items");
+  TI_ERROR_IF(!cub_metric_reduce_value_type_available(value_type),
+              "CUB metric_reduce currently supports only f32/f64.");
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  TI_ERROR_IF(!ensure_cudart_for_cub_sort(), "{}", cudart_error());
+  const std::size_t value_size = cub_reduce_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUB strided metric_reduce received an unsupported value type.");
+  TI_ERROR_IF(values_stride < value_size ||
+                  values_offset % value_size != 0 ||
+                  values_stride % value_size != 0 ||
+                  other_stride < value_size || other_offset % value_size != 0 ||
+                  other_stride % value_size != 0,
+              "CUB strided metric_reduce received invalid offset/stride.");
+  return cub_metric_reduce_impl(values, other, output, num_items, value_type,
+                                values_offset, values_stride, other_offset,
+                                other_stride, op, stream, owner);
+#else
+  TI_ERROR(
+      "CUDA CUB strided metric_reduce requires building Taichi with "
+      "TI_WITH_CUDA_TOOLKIT=ON.");
+#endif
+}
+
+void cub_metric_reduce_clear_cache(void *owner) {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  cub_metric_reduce_clear_cache_impl(owner);
+#endif
+}
+
+std::size_t cub_metric_reduce_cached_bytes(void *owner) {
+#if defined(TI_WITH_CUDA_TOOLKIT)
+  return cub_metric_reduce_cached_bytes_impl(owner);
 #else
   return 0;
 #endif

@@ -137,6 +137,13 @@ _CHECK_OPS = {
     "not_finite": 4,
     "index_oob": 5,
 }
+_SUPPORTED_METRIC_METHODS = {"auto", "cuda_cub", "vulkan_native", "cpu_native"}
+_METRIC_VALUE_DTYPES = (f32, f64)
+_METRIC_VALUE_TYPE = {f32: 1, f64: 5}
+_METRIC_OPS = {
+    "max_abs": 0,
+    "max_abs_delta": 1,
+}
 _SUPPORTED_TRANSFORM_METHODS = {
     "auto",
     "cuda_device",
@@ -243,6 +250,7 @@ _NATIVE_PRIMITIVE_PROG_METHOD_TOKENS = (
     "histogram",
     "indexed_copy",
     "radix_sort",
+    "metric_reduce",
     "reduce",
     "scan",
     "scatter",
@@ -256,6 +264,7 @@ _NATIVE_PRIMITIVE_AVAILABLE_BY_ARCH = {
         "cuda_cub_histogram_available",
         "cuda_cub_radix_sort_available",
         "cuda_cub_check_count_available",
+        "cuda_cub_metric_reduce_available",
         "cuda_cub_reduce_available",
         "cuda_cub_scan_available",
         "cuda_cub_select_available",
@@ -275,6 +284,7 @@ _NATIVE_PRIMITIVE_AVAILABLE_BY_ARCH = {
         "vulkan_grouped_reduce_available",
         "vulkan_histogram_available",
         "vulkan_indexed_copy_available",
+        "vulkan_metric_reduce_available",
         "vulkan_radix_sort_available",
         "vulkan_reduce_available",
         "vulkan_scan_available",
@@ -289,6 +299,7 @@ _NATIVE_PRIMITIVE_AVAILABLE_BY_ARCH = {
         "cpu_grouped_reduce_available",
         "cpu_histogram_available",
         "cpu_indexed_copy_available",
+        "cpu_metric_reduce_available",
         "cpu_reduce_available",
         "cpu_scan_available",
         "cpu_scatter_add_available",
@@ -323,6 +334,7 @@ _NATIVE_PRIMITIVE_VALUE_AVAILABLE_BY_ARCH = {
             "vulkan_check_count_value_type_available",
             "vulkan_grouped_reduce_atomic_value_type_available",
             "vulkan_grouped_reduce_value_type_available",
+            "vulkan_metric_reduce_value_type_available",
             "vulkan_reduce_value_type_available",
             "vulkan_scan_value_type_available",
             "vulkan_scatter_add_value_type_available",
@@ -861,6 +873,42 @@ class _NativePrimitivePlan:
                     _record_primitive_diagnostic("native_plan.invoke.missing")
                 return None
         return 0 if temp_bytes is None else temp_bytes
+
+
+class _NativePrimitivePlanGraphExecutable(NativeGraphExecutable):
+    def __init__(self, plan, kind):
+        self.plan = plan
+        self.kind = kind
+
+    def prewarm(self):
+        self.run()
+        return self
+
+    def run(self):
+        prog = _current_program()
+        if not self.plan.matches_program(prog) or self.plan.invoke(prog) is None:
+            raise RuntimeError(
+                f"{self.kind} native graph node is not valid for the current runtime."
+            )
+
+    @property
+    def debug_info(self):
+        return {
+            "kind": self.kind,
+            "backend": self.plan.backend,
+            "method": self.plan.method_name,
+            "value_type": self.plan.value_type,
+            "n": self.plan.n,
+        }
+
+
+class _NativePrimitivePlanGraphNode(NativeGraphNode):
+    def __init__(self, plan, kind):
+        self.plan = plan
+        self.kind = kind
+
+    def compile(self):
+        return _NativePrimitivePlanGraphExecutable(self.plan, self.kind)
 
 
 def _primitive_stage_signature(plans):
@@ -1617,6 +1665,8 @@ def _try_native_component_plan_group(
 
 _PRIMITIVE_SEQUENCE_PLAN_ATTRS = {
     "scan": ("_native_scan_plan_group", "_native_scan_plan"),
+    "check": ("_native_check_plan",),
+    "metric": ("_native_metric_plan",),
     "reduce": ("_native_reduce_plan_group", "_native_reduce_plan"),
     "histogram": ("_staged_histogram_plan_group", "_native_histogram_plan"),
     "transform": ("_native_transform_plan_group", "_native_transform_plan"),
@@ -1933,6 +1983,79 @@ class PrimitiveSequence:
             executor = PrefixSumExecutor(_shape_numel(input_arr))
         return self._add_call(
             "scan", _primitive_sequence_scan, (input_arr,), {}, executor
+        )
+
+    def count_if(self, flags, *, method="auto", workspace=None):
+        if workspace is None:
+            workspace = CheckWorkspace(max_items=_shape_numel(flags))
+        return self._add_call(
+            "check", count_if, (flags,), {"method": method}, workspace
+        )
+
+    def any_if(self, flags, *, method="auto", workspace=None):
+        if workspace is None:
+            workspace = CheckWorkspace(max_items=_shape_numel(flags))
+        return self._add_call(
+            "check", any_if, (flags,), {"method": method}, workspace
+        )
+
+    def all_if(self, flags, *, method="auto", workspace=None):
+        if workspace is None:
+            workspace = CheckWorkspace(max_items=_shape_numel(flags))
+        return self._add_call(
+            "check", all_if, (flags,), {"method": method}, workspace
+        )
+
+    def nan_count(self, values, *, method="auto", workspace=None):
+        if workspace is None:
+            workspace = CheckWorkspace(max_items=_shape_numel(values))
+        return self._add_call(
+            "check", nan_count, (values,), {"method": method}, workspace
+        )
+
+    def inf_count(self, values, *, method="auto", workspace=None):
+        if workspace is None:
+            workspace = CheckWorkspace(max_items=_shape_numel(values))
+        return self._add_call(
+            "check", inf_count, (values,), {"method": method}, workspace
+        )
+
+    def all_finite(self, values, *, method="auto", workspace=None):
+        if workspace is None:
+            workspace = CheckWorkspace(max_items=_shape_numel(values))
+        return self._add_call(
+            "check", all_finite, (values,), {"method": method}, workspace
+        )
+
+    def index_bounds_check(
+        self, indices, upper, *, lower=0, method="auto", workspace=None
+    ):
+        if workspace is None:
+            workspace = CheckWorkspace(max_items=_shape_numel(indices))
+        return self._add_call(
+            "check",
+            index_bounds_check,
+            (indices, upper),
+            {"lower": lower, "method": method},
+            workspace,
+        )
+
+    def max_abs(self, values, *, method="auto", workspace=None):
+        if workspace is None:
+            workspace = MetricWorkspace(max_items=_shape_numel(values))
+        return self._add_call(
+            "metric", max_abs, (values,), {"method": method}, workspace
+        )
+
+    def max_abs_delta(self, values, reference, *, method="auto", workspace=None):
+        if workspace is None:
+            workspace = MetricWorkspace(max_items=_shape_numel(values))
+        return self._add_call(
+            "metric",
+            max_abs_delta,
+            (values, reference),
+            {"method": method},
+            workspace,
         )
 
     def sort(
@@ -4179,13 +4302,22 @@ class ReduceWorkspace:
 class DeviceCheckResult:
     """Device scalar result for Python-level native checks."""
 
-    __slots__ = ("_scalar", "_kind", "_truth_when", "_ok_when")
+    __slots__ = ("_scalar", "_kind", "_truth_when", "_ok_when", "_plan")
 
-    def __init__(self, scalar, *, kind="count", truth_when="nonzero", ok_when=None):
+    def __init__(
+        self,
+        scalar,
+        *,
+        kind="count",
+        truth_when="nonzero",
+        ok_when=None,
+        plan=None,
+    ):
         self._scalar = scalar
         self._kind = kind
         self._truth_when = truth_when
         self._ok_when = ok_when
+        self._plan = plan
 
     @property
     def device_scalar(self):
@@ -4213,6 +4345,11 @@ class DeviceCheckResult:
             return self.to_int() != 0
         return self.to_bool()
 
+    def _as_graph_native_node(self):
+        if self._plan is None:
+            raise RuntimeError("DeviceCheckResult does not have a native replay plan.")
+        return _NativePrimitivePlanGraphNode(self._plan, "device_check")
+
 
 class CheckWorkspace:
     """Workspace for Python-level device checks.
@@ -4231,6 +4368,8 @@ class CheckWorkspace:
         self._result_i32_ndarray = None
         self._cuda_active = False
         self._vulkan_active = False
+        self._native_check_plan = None
+        self._native_check_plans = {}
 
     def clear(self):
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -4247,6 +4386,8 @@ class CheckWorkspace:
         self._result_i32_ndarray = None
         self._cuda_active = False
         self._vulkan_active = False
+        self._native_check_plan = None
+        self._native_check_plans.clear()
 
     def check_shape(self, n):
         if n <= 0:
@@ -4282,6 +4423,158 @@ class CheckWorkspace:
             self._vulkan_active = True
         self._refresh_workspace_bytes()
 
+    def _record_native_check_plan(
+        self,
+        backend,
+        method_name,
+        values,
+        output,
+        value_type,
+        check_op_id,
+        lower,
+        upper,
+        call_args,
+        n,
+        prog,
+    ):
+        plan = _record_native_primitive_plan(
+            self._native_check_plans,
+            backend,
+            method_name,
+            (values, output),
+            (int(value_type), int(check_op_id), int(lower), int(upper)),
+            call_args,
+            prog,
+            value_type,
+            n,
+        )
+        self._native_check_plan = plan
+        return plan
+
+
+class DeviceMetricResult:
+    __slots__ = ("_scalar", "_kind", "_plan")
+
+    def __init__(self, scalar, *, kind="metric", plan=None):
+        self._scalar = scalar
+        self._kind = kind
+        self._plan = plan
+
+    @property
+    def device_scalar(self):
+        return self._scalar
+
+    @property
+    def kind(self):
+        return self._kind
+
+    def to_float(self):
+        if isinstance(self._scalar, Ndarray):
+            return float(self._scalar.to_numpy()[0])
+        return float(self._scalar[None])
+
+    def _as_graph_native_node(self):
+        if self._plan is None:
+            raise RuntimeError("DeviceMetricResult does not have a native replay plan.")
+        return _NativePrimitivePlanGraphNode(self._plan, "device_metric")
+
+
+class MetricWorkspace:
+    """Workspace for Python-level device metric reductions."""
+
+    def __init__(self, max_items=None):
+        self.max_items = max_items
+        self._owned_workspace_bytes = 0
+        self._native_workspace_bytes = 0
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._result_ndarrays = {}
+        self._cuda_active = False
+        self._vulkan_active = False
+        self._native_metric_plan = None
+        self._native_metric_plans = {}
+
+    def clear(self):
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        if self._cuda_active:
+            _call_optional_prog_method(prog, "cuda_cub_metric_reduce_clear_workspace")
+        if self._vulkan_active:
+            _call_optional_prog_method(prog, "vulkan_metric_reduce_clear_workspace")
+        self._owned_workspace_bytes = 0
+        self._native_workspace_bytes = 0
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._result_ndarrays.clear()
+        self._cuda_active = False
+        self._vulkan_active = False
+        self._native_metric_plan = None
+        self._native_metric_plans.clear()
+
+    def check_shape(self, n):
+        if n <= 0:
+            raise ValueError("device metric expects at least one input item.")
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} metric items, exceeding max_items={self.max_items}."
+            )
+
+    def _reserve_bytes(self, byte_count):
+        self._owned_workspace_bytes += byte_count
+        self._refresh_workspace_bytes()
+
+    def _refresh_workspace_bytes(self):
+        self.workspace_bytes_current = (
+            self._owned_workspace_bytes + self._native_workspace_bytes
+        )
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak, self.workspace_bytes_current
+        )
+
+    def _get_result_ndarray(self, dtype):
+        result = self._result_ndarrays.get(dtype)
+        if result is None:
+            result = ti_ndarray(dtype, shape=1)
+            self._result_ndarrays[dtype] = result
+            self._reserve_bytes(_dtype_nbytes(dtype))
+        return result
+
+    def _mark_native_metric_backend_active(self, backend, temp_bytes):
+        self._native_workspace_bytes = int(temp_bytes or 0)
+        if backend == "cuda_cub":
+            self._cuda_active = True
+        elif backend == "vulkan_native":
+            self._vulkan_active = True
+        self._refresh_workspace_bytes()
+
+    def _record_native_metric_plan(
+        self,
+        backend,
+        method_name,
+        values,
+        other,
+        output,
+        value_type,
+        metric_op_id,
+        call_args,
+        n,
+        prog,
+    ):
+        plan = _record_native_primitive_plan(
+            self._native_metric_plans,
+            backend,
+            method_name,
+            (values, other, output),
+            (int(value_type), int(metric_op_id)),
+            call_args,
+            prog,
+            value_type,
+            n,
+        )
+        self._native_metric_plan = plan
+        return plan
+
 
 def _as_check_workspace(workspace, n):
     if workspace is None:
@@ -4292,30 +4585,73 @@ def _as_check_workspace(workspace, n):
     return workspace
 
 
+def _as_metric_workspace(workspace, n):
+    if workspace is None:
+        workspace = MetricWorkspace(max_items=n)
+    if not isinstance(workspace, MetricWorkspace):
+        raise TypeError("workspace must be a MetricWorkspace instance or None.")
+    workspace.check_shape(n)
+    return workspace
+
+
 def _check_value_type(dtype):
     if dtype not in _CHECK_VALUE_DTYPES:
         raise TypeError(
             "native device check currently supports i32/u32/i64/u64/f32/f64 "
-            "scalar ndarrays."
+            "scalar ndarray, StructNdarray scalar member, and dense field inputs."
         )
     return _CHECK_VALUE_TYPE[dtype]
 
 
-def _check_1d_ndarray(op_name, arr, *, dtype=None, integer=False):
-    if not isinstance(arr, Ndarray):
-        raise TypeError(f"{op_name} expects a 1D ti.ndarray.")
-    if _is_matrix_field(arr) or _is_struct_tensor_member_view(arr):
+def _metric_value_type(dtype):
+    if dtype not in _METRIC_VALUE_DTYPES:
+        raise TypeError(
+            "native device metric currently supports f32/f64 scalar ndarray, "
+            "StructNdarray scalar member, and dense field inputs."
+        )
+    return _METRIC_VALUE_TYPE[dtype]
+
+
+def _check_numeric_view(op_name, arr, *, dtype=None, integer=False):
+    view = _primitive_view(arr)
+    if view is None or not (
+        view.is_plain_ndarray or view.is_struct_scalar_member or view.is_dense_field
+    ):
+        raise TypeError(
+            f"{op_name} expects a scalar 1D ndarray, StructNdarray scalar "
+            "member, or dense field."
+        )
+    if view.element_shape:
         raise TypeError(f"{op_name} expects scalar 1D values.")
-    if len(arr.shape) != 1:
+    if len(view.shape) != 1:
         raise ValueError(f"{op_name} expects 1D input.")
-    if arr.shape[0] <= 0:
+    if view.shape[0] <= 0:
         raise ValueError(f"{op_name} expects at least one input item.")
-    if dtype is not None and arr.dtype != dtype:
+    if dtype is not None and view.dtype != dtype:
         raise TypeError(f"{op_name} expects {dtype} input.")
-    if integer and arr.dtype not in _CHECK_INTEGER_DTYPES:
+    if integer and view.dtype not in _CHECK_INTEGER_DTYPES:
         raise TypeError(f"{op_name} expects integer indices.")
-    _check_value_type(arr.dtype)
-    return arr
+    _check_value_type(view.dtype)
+    return view
+
+
+def _metric_numeric_view(op_name, arr):
+    view = _primitive_view(arr)
+    if view is None or not (
+        view.is_plain_ndarray or view.is_struct_scalar_member or view.is_dense_field
+    ):
+        raise TypeError(
+            f"{op_name} expects a scalar 1D ndarray, StructNdarray scalar "
+            "member, or dense field."
+        )
+    if view.element_shape:
+        raise TypeError(f"{op_name} expects scalar 1D values.")
+    if len(view.shape) != 1:
+        raise ValueError(f"{op_name} expects 1D input.")
+    if view.shape[0] <= 0:
+        raise ValueError(f"{op_name} expects at least one input item.")
+    _metric_value_type(view.dtype)
+    return view
 
 
 def _check_count_backend(method):
@@ -4323,6 +4659,28 @@ def _check_count_backend(method):
         raise ValueError(
             f"Unsupported device check method '{method}'. Supported methods: "
             f"{sorted(_SUPPORTED_CHECK_METHODS)}"
+        )
+    arch = current_cfg().arch
+    if method == "cuda_cub":
+        return "cuda_cub" if arch == cuda else None
+    if method == "vulkan_native":
+        return "vulkan_native" if arch == vulkan else None
+    if method == "cpu_native":
+        return "cpu_native" if arch in (x64, arm64) else None
+    if arch == cuda:
+        return "cuda_cub"
+    if arch == vulkan:
+        return "vulkan_native"
+    if arch in (x64, arm64):
+        return "cpu_native"
+    return None
+
+
+def _metric_reduce_backend(method):
+    if method not in _SUPPORTED_METRIC_METHODS:
+        raise ValueError(
+            f"Unsupported device metric method '{method}'. Supported methods: "
+            f"{sorted(_SUPPORTED_METRIC_METHODS)}"
         )
     arch = current_cfg().arch
     if method == "cuda_cub":
@@ -4352,12 +4710,12 @@ def _native_check_count(
     method="auto",
     workspace=None,
 ):
-    values = _check_1d_ndarray(
+    values_view = _check_numeric_view(
         "index_bounds_check" if check_op == "index_oob" else check_op,
         values,
         integer=check_op == "index_oob",
     )
-    n = values.shape[0]
+    n = values_view.num_elements
     workspace = _as_check_workspace(workspace, n)
     output = workspace._get_result_i32_ndarray()
     backend = _check_count_backend(method)
@@ -4370,14 +4728,20 @@ def _native_check_count(
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    value_type = _check_value_type(values.dtype)
+    value_type = _check_value_type(values_view.dtype)
     check_op_id = _CHECK_OPS[check_op]
     lower = int(lower)
     upper = int(upper)
     if backend == "cuda_cub":
         if not _prog_available(prog, "cuda_cub_check_count_available"):
             raise RuntimeError("CUDA CUB check_count is unavailable.")
-        native_method = _prog_method(prog, "cuda_cub_check_count_ndarray")
+        if values_view.is_dense_field:
+            native_method_name = "cuda_cub_check_count_dense_field"
+        elif values_view.is_plain_ndarray:
+            native_method_name = "cuda_cub_check_count_ndarray"
+        else:
+            native_method_name = "cuda_cub_check_count_strided_ndarray"
+        native_method = _prog_method(prog, native_method_name)
         if native_method is None:
             raise RuntimeError("CUDA CUB check_count method is unavailable.")
     elif backend == "vulkan_native":
@@ -4387,23 +4751,191 @@ def _native_check_count(
             prog, "vulkan_check_count_value_type_available", value_type
         ):
             raise RuntimeError("Vulkan check_count does not support this dtype.")
-        native_method = _prog_method(prog, "vulkan_check_count_ndarray")
+        if values_view.is_dense_field:
+            native_method_name = "vulkan_check_count_dense_field"
+        elif values_view.is_plain_ndarray:
+            native_method_name = "vulkan_check_count_ndarray"
+        else:
+            native_method_name = "vulkan_check_count_strided_ndarray"
+        native_method = _prog_method(prog, native_method_name)
         if native_method is None:
             raise RuntimeError("Vulkan check_count method is unavailable.")
     else:
         if not _prog_available(prog, "cpu_check_count_available"):
             raise RuntimeError("CPU check_count is unavailable.")
-        native_method = _prog_method(prog, "cpu_check_count_ndarray")
+        if values_view.is_dense_field:
+            native_method_name = "cpu_check_count_dense_field"
+        elif values_view.is_plain_ndarray:
+            native_method_name = "cpu_check_count_ndarray"
+        else:
+            native_method_name = "cpu_check_count_strided_ndarray"
+        native_method = _prog_method(prog, native_method_name)
         if native_method is None:
             raise RuntimeError("CPU check_count method is unavailable.")
 
-    temp_bytes = native_method(
-        values.arr, output.arr, value_type, check_op_id, lower, upper
-    )
+    if values_view.is_dense_field:
+        call_args = (
+            values_view.snode, output.arr, value_type, n, check_op_id, lower, upper
+        )
+    elif values_view.is_plain_ndarray:
+        call_args = (
+            values_view.payload_arr, output.arr, value_type, check_op_id, lower, upper
+        )
+    else:
+        call_args = (
+            values_view.payload_arr,
+            output.arr,
+            value_type,
+            values_view.offset,
+            values_view.stride,
+            check_op_id,
+            lower,
+            upper,
+        )
+    temp_bytes = native_method(*call_args)
     workspace._mark_native_check_backend_active(backend, temp_bytes)
-    return DeviceCheckResult(
-        output, kind=kind, truth_when=truth_when, ok_when=ok_when
+    plan = workspace._record_native_check_plan(
+        backend,
+        native_method_name,
+        values,
+        output,
+        value_type,
+        check_op_id,
+        lower,
+        upper,
+        call_args,
+        n,
+        prog,
     )
+    return DeviceCheckResult(
+        output, kind=kind, truth_when=truth_when, ok_when=ok_when, plan=plan
+    )
+
+
+def _native_metric_reduce(
+    values,
+    *,
+    other=None,
+    metric_op,
+    kind="metric",
+    method="auto",
+    workspace=None,
+):
+    values_view = _metric_numeric_view(metric_op, values)
+    if other is not None:
+        other_view = _metric_numeric_view(metric_op, other)
+        if other_view.dtype != values_view.dtype or other_view.shape != values_view.shape:
+            raise TypeError(f"{metric_op} inputs must have the same dtype and shape.")
+        if values_view.is_dense_field != other_view.is_dense_field:
+            raise TypeError(
+                f"{metric_op} does not mix dense field inputs with ndarray or "
+                "StructNdarray member inputs."
+            )
+    else:
+        other_view = values_view
+    n = values_view.num_elements
+    workspace = _as_metric_workspace(workspace, n)
+    output = workspace._get_result_ndarray(values_view.dtype)
+    backend = _metric_reduce_backend(method)
+    if backend is None:
+        raise RuntimeError(
+            f"Native device metric method '{method}' is unavailable for arch "
+            f"{current_cfg().arch}."
+        )
+
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    value_type = _metric_value_type(values_view.dtype)
+    metric_op_id = _METRIC_OPS[metric_op]
+    if backend == "cuda_cub":
+        if not _prog_available(prog, "cuda_cub_metric_reduce_available"):
+            raise RuntimeError("CUDA CUB metric_reduce is unavailable.")
+        if not _prog_value_available(
+            prog, "cuda_cub_metric_reduce_value_type_available", value_type
+        ):
+            raise RuntimeError("CUDA CUB metric_reduce does not support this dtype.")
+        if values_view.is_dense_field:
+            native_method_name = "cuda_cub_metric_reduce_dense_field"
+        elif values_view.is_plain_ndarray and other_view.is_plain_ndarray:
+            native_method_name = "cuda_cub_metric_reduce_ndarray"
+        else:
+            native_method_name = "cuda_cub_metric_reduce_strided_ndarray"
+        native_method = _prog_method(prog, native_method_name)
+        if native_method is None:
+            raise RuntimeError("CUDA CUB metric_reduce method is unavailable.")
+    elif backend == "vulkan_native":
+        if not _prog_available(prog, "vulkan_metric_reduce_available"):
+            raise RuntimeError("Vulkan metric_reduce is unavailable.")
+        if not _prog_value_available(
+            prog, "vulkan_metric_reduce_value_type_available", value_type
+        ):
+            raise RuntimeError("Vulkan metric_reduce does not support this dtype.")
+        if values_view.is_dense_field:
+            native_method_name = "vulkan_metric_reduce_dense_field"
+        elif values_view.is_plain_ndarray and other_view.is_plain_ndarray:
+            native_method_name = "vulkan_metric_reduce_ndarray"
+        else:
+            native_method_name = "vulkan_metric_reduce_strided_ndarray"
+        native_method = _prog_method(prog, native_method_name)
+        if native_method is None:
+            raise RuntimeError("Vulkan metric_reduce method is unavailable.")
+    else:
+        if not _prog_available(prog, "cpu_metric_reduce_available"):
+            raise RuntimeError("CPU metric_reduce is unavailable.")
+        if not _prog_value_available(
+            prog, "cpu_metric_reduce_value_type_available", value_type
+        ):
+            raise RuntimeError("CPU metric_reduce does not support this dtype.")
+        if values_view.is_dense_field:
+            native_method_name = "cpu_metric_reduce_dense_field"
+        elif values_view.is_plain_ndarray and other_view.is_plain_ndarray:
+            native_method_name = "cpu_metric_reduce_ndarray"
+        else:
+            native_method_name = "cpu_metric_reduce_strided_ndarray"
+        native_method = _prog_method(prog, native_method_name)
+        if native_method is None:
+            raise RuntimeError("CPU metric_reduce method is unavailable.")
+
+    if values_view.is_dense_field:
+        call_args = (
+            values_view.snode, other_view.snode, output.arr, value_type, n, metric_op_id
+        )
+    elif values_view.is_plain_ndarray and other_view.is_plain_ndarray:
+        call_args = (
+            values_view.payload_arr,
+            other_view.payload_arr,
+            output.arr,
+            value_type,
+            metric_op_id,
+        )
+    else:
+        call_args = (
+            values_view.payload_arr,
+            other_view.payload_arr,
+            output.arr,
+            value_type,
+            values_view.offset,
+            values_view.stride,
+            other_view.offset,
+            other_view.stride,
+            metric_op_id,
+        )
+    temp_bytes = native_method(*call_args)
+    workspace._mark_native_metric_backend_active(backend, temp_bytes)
+    plan = workspace._record_native_metric_plan(
+        backend,
+        native_method_name,
+        values,
+        other,
+        output,
+        value_type,
+        metric_op_id,
+        call_args,
+        n,
+        prog,
+    )
+    return DeviceMetricResult(output, kind=kind, plan=plan)
 
 
 def count_if(flags, *, method="auto", workspace=None):
@@ -4486,6 +5018,27 @@ def index_bounds_check(indices, upper, *, lower=0, method="auto", workspace=None
     )
 
 
+def max_abs(values, *, method="auto", workspace=None):
+    return _native_metric_reduce(
+        values,
+        metric_op="max_abs",
+        kind="max_abs",
+        method=method,
+        workspace=workspace,
+    )
+
+
+def max_abs_delta(values, reference, *, method="auto", workspace=None):
+    return _native_metric_reduce(
+        values,
+        other=reference,
+        metric_op="max_abs_delta",
+        kind="max_abs_delta",
+        method=method,
+        workspace=workspace,
+    )
+
+
 class _DeviceCheckNamespace:
     count_if = staticmethod(count_if)
     any_if = staticmethod(any_if)
@@ -4494,6 +5047,8 @@ class _DeviceCheckNamespace:
     inf_count = staticmethod(inf_count)
     all_finite = staticmethod(all_finite)
     index_bounds_check = staticmethod(index_bounds_check)
+    max_abs = staticmethod(max_abs)
+    max_abs_delta = staticmethod(max_abs_delta)
 
 
 check = _DeviceCheckNamespace()
@@ -14362,6 +14917,8 @@ __all__ = [
     "ReduceWorkspace",
     "CheckWorkspace",
     "DeviceCheckResult",
+    "MetricWorkspace",
+    "DeviceMetricResult",
     "HistogramWorkspace",
     "TransformWorkspace",
     "IndexedCopyWorkspace",
@@ -14397,5 +14954,7 @@ __all__ = [
     "inf_count",
     "all_finite",
     "index_bounds_check",
+    "max_abs",
+    "max_abs_delta",
     "check",
 ]
