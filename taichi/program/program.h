@@ -921,6 +921,17 @@ class TI_DLL_EXPORT Program {
                                                  std::size_t n,
                                                  int metric_op);
 
+  std::size_t cuda_cub_metric_reduce_dense_field_strided_ndarray(
+      SNode *field,
+      Ndarray *array,
+      Ndarray *output,
+      int value_type,
+      std::size_t n,
+      std::size_t array_offset,
+      std::size_t array_stride,
+      bool field_is_values,
+      int metric_op);
+
   void cuda_cub_metric_reduce_clear_workspace();
 
   std::size_t cuda_cub_metric_reduce_workspace_bytes() const;
@@ -1174,6 +1185,17 @@ class TI_DLL_EXPORT Program {
                                             int value_type,
                                             std::size_t n,
                                             int metric_op);
+
+  std::size_t cpu_metric_reduce_dense_field_strided_ndarray(
+      SNode *field,
+      Ndarray *array,
+      Ndarray *output,
+      int value_type,
+      std::size_t n,
+      std::size_t array_offset,
+      std::size_t array_stride,
+      bool field_is_values,
+      int metric_op);
 
   std::size_t cpu_metric_reduce_workspace_bytes() const;
 
@@ -1709,6 +1731,17 @@ class TI_DLL_EXPORT Program {
                                                int value_type,
                                                std::size_t n,
                                                int metric_op);
+
+  std::size_t vulkan_metric_reduce_dense_field_strided_ndarray(
+      SNode *field,
+      Ndarray *array,
+      Ndarray *output,
+      int value_type,
+      std::size_t n,
+      std::size_t array_offset,
+      std::size_t array_stride,
+      bool field_is_values,
+      int metric_op);
 
   void vulkan_metric_reduce_clear_workspace();
 

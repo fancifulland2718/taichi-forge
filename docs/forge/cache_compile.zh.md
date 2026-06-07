@@ -3,6 +3,8 @@
 Forge 将可安全复用的前端信息与各后端编译产物分离。目标是在不改变运行语义、不让某个后端覆
 盖另一个后端 cache 的前提下，降低重复编译成本。
 
+包含编译辅助和 CLI 入口的模块化 API 参考见 [Forge API 参考](forge_api_reference.zh.md)。
+
 ## 公开 API
 
 | API | 用途 |

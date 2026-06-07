@@ -4,6 +4,8 @@
 `method="auto"`，只有当 dtype、shape、layout 和后端能力都满足已知合同时才选择 native
 路径；不支持的组合必须回退到正确的通用路径。显式指定 native method 时，不支持应清晰拒绝。
 
+按模块整理的 Forge-only API 符号清单见 [Forge API 参考](forge_api_reference.zh.md)。
+
 ## 公开入口
 
 | 入口 | 用途 |
@@ -60,6 +62,9 @@ native primitive，并把结果写入 device-side scalar；只有调用 `to_int(
 `check_count` 类 API 支持 `i32/u32/i64/u64/f32/f64` 的 scalar 1D `ti.ndarray`、
 `StructNdarray` scalar member view，以及 root-dense-place dense field。`metric_reduce`
 类 API 支持 `f32/f64` 的同类输入；Vulkan 当前只开放 `f32` metric fast path。
+`max_abs_delta` 可以直接比较 shape/dtype 相同的 dense field 与 plain ndarray 或
+`StructNdarray` scalar member view；这会走后端 native mixed-storage 路径，不经过
+host staging。
 
 ```python
 workspace = ti.algorithms.CheckWorkspace(max_items=n)
@@ -107,6 +112,8 @@ print(err.to_float())  # 显式读取 1 个 device scalar
 ```
 
 这不等于向用户暴露任意 native callback；普通 Python 算法调用也不要求 graph 参与。
+native graph node 是 JIT replay node；`ti.aot.Module.add_graph()` 当前只导出普通
+kernel CGraph，会拒绝包含 Forge native node 的 graph。
 
 ## 与 vanilla Taichi 的关系
 

@@ -2,6 +2,8 @@
 
 本文说明 Forge graph 相比 vanilla Taichi 1.7.4 的公开行为和兼容边界。
 
+Forge-only graph 与 native replay API 的精确签名见 [Forge API 参考](forge_api_reference.zh.md)。
+
 ## 公开兼容
 
 Forge 保留用户熟悉的 graph builder 表面：
@@ -37,6 +39,8 @@ native graph 支持是有意收窄的：
 
 - 支持：Forge 自身 DSL/native 算法层产出的 native node。
 - 不支持：任意用户 native callback 直接放入 graph。
+- 不支持：包含 Forge native node 的 graph 做 AOT 序列化；`ti.aot.Module.add_graph()`
+  当前只接受普通 kernel CGraph。
 - 不承诺：同一个 graph 内跨 CUDA/Vulkan/CPU 混合执行。
 - 数值检查 result 进入 graph 时只重放 device-side native primitive；读取结果仍由
   `to_int()` / `to_bool()` / `ok()` / `to_float()` 显式触发。

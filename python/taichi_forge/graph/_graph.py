@@ -478,6 +478,10 @@ class Graph:
         self._check_runtime_valid()
         return self._spec.compiled_graph()
 
+    @property
+    def _contains_native_nodes(self):
+        return self._spec.native_count > 0
+
 
 def _deprecate_arg_args(kwargs: Dict[str, Any]):
     if "field_dim" in kwargs:

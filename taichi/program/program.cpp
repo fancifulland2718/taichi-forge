@@ -9069,6 +9069,91 @@ std::size_t Program::cuda_cub_metric_reduce_dense_field(SNode *values,
 #endif
 }
 
+std::size_t Program::cuda_cub_metric_reduce_dense_field_strided_ndarray(
+    SNode *field,
+    Ndarray *array,
+    Ndarray *output,
+    int value_type,
+    std::size_t n,
+    std::size_t array_offset,
+    std::size_t array_stride,
+    bool field_is_values,
+    int metric_op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA CUB mixed metric_reduce is only available on CUDA.");
+  TI_ERROR_IF(!field || !array || !output,
+              "CUDA CUB mixed metric_reduce received a null argument.");
+  TI_ERROR_IF(n == 0,
+              "CUDA CUB mixed metric_reduce expects at least one item.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA CUB mixed metric_reduce currently supports at most "
+              "INT_MAX items.");
+  TI_ERROR_IF(array->shape.size() != 1 || output->shape.size() != 1,
+              "CUDA CUB mixed metric_reduce expects 1D ndarrays.");
+  TI_ERROR_IF(array->get_nelement() != n,
+              "CUDA CUB mixed metric_reduce inputs must have the same length.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "CUDA CUB mixed metric_reduce output must be a non-empty "
+              "ndarray.");
+  TI_ERROR_IF(metric_op < 0 || metric_op > 1,
+              "CUDA CUB mixed metric_reduce received an unsupported metric "
+              "op.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA CUB mixed metric_reduce received an unsupported value "
+              "type.");
+  TI_ERROR_IF(!cuda_cub_metric_reduce_value_type_available(value_type),
+              "CUDA CUB mixed metric_reduce currently supports only f32/f64.");
+  TI_ERROR_IF(output->get_element_size() != value_size,
+              "CUDA CUB mixed metric_reduce output dtype does not match value "
+              "type.");
+  const std::size_t array_bytes =
+      array->get_nelement() * array->get_element_size();
+  TI_ERROR_IF(array_stride < value_size || array_offset % value_size != 0 ||
+                  array_stride % value_size != 0 || array_bytes < value_size ||
+                  array_offset > array_bytes - value_size ||
+                  array_offset + (n - 1) * array_stride + value_size >
+                      array_bytes,
+              "CUDA CUB mixed metric_reduce ndarray range is out of bounds.");
+  const std::size_t field_stride = get_dense_field_stride(field, value_size);
+  TI_ERROR_IF(field_stride < value_size,
+              "CUDA CUB mixed metric_reduce received an invalid field stride.");
+#ifdef TI_WITH_CUDA
+  auto raw_field_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
+                op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
+  };
+  void *field_ptr = raw_field_ptr(get_dense_field_device_ptr(field),
+                                  "CUDA CUB mixed metric_reduce");
+  void *array_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(array));
+  void *output_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
+  void *stream = CUDAContext::get_instance().get_stream();
+  if (field_is_values) {
+    return cuda::cub_metric_reduce_strided(
+        field_ptr, array_ptr, output_ptr, static_cast<int>(n),
+        static_cast<cuda::CubReduceValueType>(value_type), 0, field_stride,
+        array_offset, array_stride, static_cast<cuda::CudaMetricOp>(metric_op),
+        stream, this);
+  }
+  return cuda::cub_metric_reduce_strided(
+      array_ptr, field_ptr, output_ptr, static_cast<int>(n),
+      static_cast<cuda::CubReduceValueType>(value_type), array_offset,
+      array_stride, 0, field_stride,
+      static_cast<cuda::CudaMetricOp>(metric_op), stream, this);
+#else
+  TI_ERROR(
+      "CUDA CUB mixed metric_reduce requires building Taichi with "
+      "TI_WITH_CUDA=ON.");
+#endif
+}
+
 void Program::cuda_cub_metric_reduce_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
@@ -11543,6 +11628,88 @@ std::size_t Program::cpu_metric_reduce_dense_field(SNode *values,
           values_ptr, other_ptr, reinterpret_cast<double *>(output_addr),
           metric_op, n, 0, values_stride, 0, other_stride, max_threads,
           target_threads, use_parallel);
+  }
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::cpu_metric_reduce_dense_field_strided_ndarray(
+    SNode *field,
+    Ndarray *array,
+    Ndarray *output,
+    int value_type,
+    std::size_t n,
+    std::size_t array_offset,
+    std::size_t array_stride,
+    bool field_is_values,
+    int metric_op) {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native mixed metric_reduce is only available on CPU "
+              "backends.");
+  TI_ERROR_IF(!field || !array || !output,
+              "CPU native mixed metric_reduce received a null argument.");
+  TI_ERROR_IF(n == 0,
+              "CPU native mixed metric_reduce expects at least one item.");
+  TI_ERROR_IF(array->shape.size() != 1 || output->shape.size() != 1,
+              "CPU native mixed metric_reduce expects 1D ndarrays.");
+  TI_ERROR_IF(array->get_nelement() != n,
+              "CPU native mixed metric_reduce inputs must have the same "
+              "length.");
+  TI_ERROR_IF(output->get_nelement() < 1,
+              "CPU native mixed metric_reduce output must contain at least "
+              "one item.");
+  TI_ERROR_IF(metric_op < 0 || metric_op > 1,
+              "CPU native mixed metric_reduce received an unsupported metric "
+              "op.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CPU native mixed metric_reduce received an unsupported value "
+              "type.");
+  TI_ERROR_IF(!cpu_metric_reduce_value_type_available(value_type),
+              "CPU native mixed metric_reduce currently supports only "
+              "f32/f64.");
+  TI_ERROR_IF(output->get_element_size() != value_size,
+              "CPU native mixed metric_reduce output dtype does not match "
+              "value type.");
+  const std::size_t array_bytes =
+      array->get_nelement() * array->get_element_size();
+  TI_ERROR_IF(array_stride < value_size || array_offset % value_size != 0 ||
+                  array_stride % value_size != 0 || array_bytes < value_size ||
+                  array_offset > array_bytes - value_size ||
+                  array_offset + (n - 1) * array_stride + value_size >
+                      array_bytes,
+              "CPU native mixed metric_reduce ndarray range is out of bounds.");
+  std::size_t field_stride = 0;
+  const auto *field_ptr = map_cpu_dense_field(
+      this, field, value_type, n, "CPU native mixed metric_reduce",
+      &field_stride);
+  const auto array_addr = get_ndarray_data_ptr_as_int(array);
+  const auto output_addr = get_ndarray_data_ptr_as_int(output);
+  const auto *array_ptr = reinterpret_cast<const uint8_t *>(array_addr);
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const int chunk_items = 32768;
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
+                            static_cast<std::size_t>(max_threads)));
+  const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads);
+  const auto *values_ptr = field_is_values ? field_ptr : array_ptr;
+  const auto *other_ptr = field_is_values ? array_ptr : field_ptr;
+  const std::size_t values_offset = field_is_values ? 0 : array_offset;
+  const std::size_t values_stride = field_is_values ? field_stride : array_stride;
+  const std::size_t other_offset = field_is_values ? array_offset : 0;
+  const std::size_t other_stride = field_is_values ? array_stride : field_stride;
+  switch (value_type) {
+    case 1:
+      return cpu_metric_reduce_strided_typed<float>(
+          values_ptr, other_ptr, reinterpret_cast<float *>(output_addr),
+          metric_op, n, values_offset, values_stride, other_offset,
+          other_stride, max_threads, target_threads, use_parallel);
+    case 5:
+      return cpu_metric_reduce_strided_typed<double>(
+          values_ptr, other_ptr, reinterpret_cast<double *>(output_addr),
+          metric_op, n, values_offset, values_stride, other_offset,
+          other_stride, max_threads, target_threads, use_parallel);
   }
   TI_NOT_IMPLEMENTED;
   return 0;

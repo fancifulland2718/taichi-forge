@@ -3,6 +3,9 @@
 This document describes the public behavior and compatibility boundary of Forge
 graph support relative to vanilla Taichi 1.7.4.
 
+For exact signatures of Forge-only graph and native replay APIs, see
+[Forge API reference](forge_api_reference.en.md).
+
 ## Public Compatibility
 
 Forge keeps the familiar graph-builder surface:
@@ -42,6 +45,8 @@ Native graph support is intentionally narrow:
 
 - Supported: native nodes produced by Forge's own DSL/native algorithm layer.
 - Not supported: arbitrary user native callbacks inside graph.
+- Not supported: AOT serialization for graphs containing Forge native nodes;
+  `ti.aot.Module.add_graph()` accepts ordinary kernel CGraphs only.
 - Not promised: cross-backend graph execution in a single graph.
 - Numeric-check result nodes replay only the device-side native primitive. Result
   reads are still explicit through `to_int()`, `to_bool()`, `ok()`, or

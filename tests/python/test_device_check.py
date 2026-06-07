@@ -269,6 +269,56 @@ def test_native_device_metric_dense_field_and_struct_member_f32():
 @test_utils.test(
     arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")]
 )
+def test_native_device_metric_mixed_dense_array_f32():
+    _skip_if_native_metric_unavailable(value_type=1)
+    dense = ti.field(ti.f32, shape=5)
+    ref = ti.ndarray(ti.f32, shape=5)
+    dense.from_numpy(np.array([-2.0, 3.5, -4.25, 0.5, 1.0], dtype=np.float32))
+    ref.from_numpy(np.array([-1.0, 1.0, -3.0, -0.5, 5.0], dtype=np.float32))
+    workspace = ti.algorithms.MetricWorkspace(max_items=5)
+
+    assert ti.algorithms.max_abs_delta(
+        dense, ref, workspace=workspace
+    ).to_float() == pytest.approx(4.0)
+    assert ti.algorithms.max_abs_delta(
+        ref, dense, workspace=workspace
+    ).to_float() == pytest.approx(4.0)
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")]
+)
+def test_native_device_metric_mixed_dense_struct_member_graph_replay_f32():
+    _skip_if_native_metric_unavailable(value_type=1)
+    dense = ti.field(ti.f32, shape=5)
+    payload = ti.types.struct(value=ti.f32, tag=ti.i32)
+    values = ti.ndarray(payload, shape=5)
+    workspace = ti.algorithms.MetricWorkspace(max_items=5)
+
+    dense.from_numpy(np.array([-2.0, 3.5, -4.25, 0.5, 1.0], dtype=np.float32))
+    host = np.zeros((5,), dtype=values.numpy_dtype)
+    host["value"] = np.array([-1.0, 1.0, -3.0, -0.5, 5.0], dtype=np.float32)
+    host["tag"] = np.arange(5, dtype=np.int32) + 100
+    values.from_numpy(host)
+    result = ti.algorithms.max_abs_delta(
+        dense, values.field("value"), workspace=workspace
+    )
+    assert result.to_float() == pytest.approx(4.0)
+
+    builder = ti.graph.GraphBuilder()
+    assert builder.append_native(result) is builder
+    graph = builder.compile()
+
+    dense.from_numpy(np.array([0.0, 1.0, 8.0, -2.0, 3.0], dtype=np.float32))
+    host["value"] = np.array([0.0, -3.0, 1.0, -8.0, 3.5], dtype=np.float32)
+    values.from_numpy(host)
+    graph.run({})
+    assert result.to_float() == pytest.approx(7.0)
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")]
+)
 def test_native_device_metric_result_graph_replay_struct_member_f32():
     _skip_if_native_metric_unavailable(value_type=1)
     payload = ti.types.struct(value=ti.f32, tag=ti.i32)
@@ -342,3 +392,32 @@ def test_native_device_metric_f64():
     assert ti.algorithms.max_abs_delta(
         values, ref, workspace=workspace
     ).to_float() == pytest.approx(2.5)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda])
+def test_native_device_metric_mixed_dense_array_f64():
+    _skip_if_native_metric_unavailable(value_type=5)
+    dense = ti.field(ti.f64, shape=4)
+    ref = ti.ndarray(ti.f64, shape=4)
+    dense.from_numpy(np.array([-2.0, 3.5, -4.25, 0.5], dtype=np.float64))
+    ref.from_numpy(np.array([-1.0, 1.0, -3.0, -0.5], dtype=np.float64))
+    workspace = ti.algorithms.MetricWorkspace(max_items=4)
+
+    assert ti.algorithms.max_abs_delta(
+        dense, ref, workspace=workspace
+    ).to_float() == pytest.approx(2.5)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_native_graph_aot_rejects_native_nodes():
+    _skip_if_native_check_unavailable()
+    flags = ti.ndarray(ti.i32, shape=4)
+    flags.from_numpy(np.array([0, 1, 0, 2], dtype=np.int32))
+    result = ti.algorithms.count_if(flags)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(result)
+    graph = builder.compile()
+
+    module = ti.aot.Module()
+    with pytest.raises(Exception, match="Native graph replay is JIT-only"):
+        module.add_graph("native_check", graph)

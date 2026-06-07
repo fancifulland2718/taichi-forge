@@ -5,6 +5,9 @@ CPU, CUDA, or Vulkan implementations when the input contract is supported.
 Unsupported `method="auto"` cases must fall back to a correct generic path;
 unsupported explicit native methods should reject clearly.
 
+For a module-oriented list of all Forge-only API symbols, see
+[Forge API reference](forge_api_reference.en.md).
+
 ## Public Entry Points
 
 | Entry point | Purpose |
@@ -71,6 +74,9 @@ device-side scalar. The scalar is copied back to Python only when callers use
 member views, and root-dense-place dense fields with
 `i32/u32/i64/u64/f32/f64`. `metric_reduce`-style APIs support the same input
 forms for `f32/f64`; Vulkan currently exposes only the `f32` metric fast path.
+For `max_abs_delta`, dense fields can be compared directly with same-shaped
+plain ndarrays or `StructNdarray` scalar member views; this uses the backend
+native mixed-storage path and does not stage through host memory.
 
 ```python
 workspace = ti.algorithms.CheckWorkspace(max_items=n)
@@ -122,7 +128,9 @@ print(err.to_float())  # Explicitly reads one device scalar.
 ```
 
 This does not expose arbitrary native callbacks to users, and ordinary Python
-algorithm calls do not require graph.
+algorithm calls do not require graph. Native graph nodes are JIT replay nodes;
+`ti.aot.Module.add_graph()` currently exports ordinary kernel CGraphs only and
+rejects graphs containing Forge native nodes.
 
 ## Relationship to Vanilla Taichi
 

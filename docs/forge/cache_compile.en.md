@@ -4,6 +4,9 @@ Forge separates safe frontend reuse from backend-specific compiled artifacts.
 The goal is to reduce repeated compile overhead without changing runtime
 semantics or letting one backend overwrite another backend's cache entries.
 
+For a module-oriented API reference covering compile helpers and CLI entry
+points, see [Forge API reference](forge_api_reference.en.md).
+
 ## Public APIs
 
 | API | Purpose |

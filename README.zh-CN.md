@@ -52,7 +52,8 @@ README 只说明用户可见变化和兼容边界，不列具体 benchmark 数�
 - 增加 `ti.compile_profile()` 与 `ti cache warmup ...`，用于编译耗时诊断和 offline cache 预热。
 - 将可安全复用的前端/source 解析状态与各后端编译产物分离。后端缓存彼此隔离，切换 arch 不会覆盖另一个后端的编译产物。
 
-参考：[编译与缓存说明](docs/forge/cache_compile.zh.md)、
+参考：[Forge API 参考](docs/forge/forge_api_reference.zh.md)、
+[编译与缓存说明](docs/forge/cache_compile.zh.md)、
 [Forge 选项](docs/forge/forge_options.zh.md)。
 
 ### 0.3.x：Vulkan 稀疏 SNode 与 native sort
@@ -75,7 +76,8 @@ README 只说明用户可见变化和兼容边界，不列具体 benchmark 数�
 - 将 `canvas.set_image()` 形式化为显示帧提交链路，增加 `ti.ui.DisplayFrame` 和 `Canvas.submit_frame(...)`，用于 display-ready host、texture 和 packed `u32` frame 输入。
 - 增加 display stats API，使引擎可以区分 accepted、submitted、dropped、reused 等显示帧状态。
 
-参考：[Graph 升级说明](docs/forge/graph_upgrade_from_taichi_1_7_4.zh.md)、
+参考：[Forge API 参考](docs/forge/forge_api_reference.zh.md)、
+[Graph 升级说明](docs/forge/graph_upgrade_from_taichi_1_7_4.zh.md)、
 [Native 算法](docs/forge/native_algorithms.zh.md)、
 [显示帧提交](docs/forge/display_frame.zh.md)。
 
@@ -84,6 +86,7 @@ README 只说明用户可见变化和兼容边界，不列具体 benchmark 数�
 中文公开文档：
 
 - [构建 Forge wheel](docs/forge/build_wheels.zh.md)
+- [Forge API 参考](docs/forge/forge_api_reference.zh.md)
 - [Forge 选项](docs/forge/forge_options.zh.md)
 - [编译与缓存说明](docs/forge/cache_compile.zh.md)
 - [Vulkan 稀疏 SNode](docs/forge/sparse_snode_on_vulkan.zh.md)

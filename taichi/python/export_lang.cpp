@@ -1114,6 +1114,12 @@ void export_lang(py::module &m) {
            py::arg("other"), py::arg("output"), py::arg("value_type"),
            py::arg("n"), py::arg("metric_op"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_cub_metric_reduce_dense_field_strided_ndarray",
+           &Program::cuda_cub_metric_reduce_dense_field_strided_ndarray,
+           py::arg("field"), py::arg("array"), py::arg("output"),
+           py::arg("value_type"), py::arg("n"), py::arg("array_offset"),
+           py::arg("array_stride"), py::arg("field_is_values"),
+           py::arg("metric_op"), py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_reduce_ndarray", &Program::cuda_cub_reduce_ndarray,
            py::arg("values"), py::arg("output"), py::arg("value_type"),
            py::arg("op"), py::call_guard<py::gil_scoped_release>())
@@ -1342,6 +1348,12 @@ void export_lang(py::module &m) {
            py::arg("other"), py::arg("output"), py::arg("value_type"),
            py::arg("n"), py::arg("metric_op"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cpu_metric_reduce_dense_field_strided_ndarray",
+           &Program::cpu_metric_reduce_dense_field_strided_ndarray,
+           py::arg("field"), py::arg("array"), py::arg("output"),
+           py::arg("value_type"), py::arg("n"), py::arg("array_offset"),
+           py::arg("array_stride"), py::arg("field_is_values"),
+           py::arg("metric_op"), py::call_guard<py::gil_scoped_release>())
       .def("cpu_reduce_ndarray", &Program::cpu_reduce_ndarray,
            py::arg("values"), py::arg("output"), py::arg("value_type"),
            py::arg("op"), py::call_guard<py::gil_scoped_release>())
@@ -1721,6 +1733,12 @@ void export_lang(py::module &m) {
            py::arg("other"), py::arg("output"), py::arg("value_type"),
            py::arg("n"), py::arg("metric_op"),
            py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_metric_reduce_dense_field_strided_ndarray",
+           &Program::vulkan_metric_reduce_dense_field_strided_ndarray,
+           py::arg("field"), py::arg("array"), py::arg("output"),
+           py::arg("value_type"), py::arg("n"), py::arg("array_offset"),
+           py::arg("array_stride"), py::arg("field_is_values"),
+           py::arg("metric_op"), py::call_guard<py::gil_scoped_release>())
       .def("vulkan_reduce_value_type_available",
            &Program::vulkan_reduce_value_type_available,
            py::arg("value_type"))

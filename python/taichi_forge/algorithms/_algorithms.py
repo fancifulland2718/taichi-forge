@@ -4654,6 +4654,14 @@ def _metric_numeric_view(op_name, arr):
     return view
 
 
+def _metric_array_call_parts(view):
+    if view.is_dense_field:
+        raise TypeError("internal error: dense field is not an ndarray call view.")
+    if view.is_plain_ndarray:
+        return view.payload_arr, 0, _dtype_nbytes(view.dtype)
+    return view.payload_arr, view.offset, view.stride
+
+
 def _check_count_backend(method):
     if method not in _SUPPORTED_CHECK_METHODS:
         raise ValueError(
@@ -4826,11 +4834,6 @@ def _native_metric_reduce(
         other_view = _metric_numeric_view(metric_op, other)
         if other_view.dtype != values_view.dtype or other_view.shape != values_view.shape:
             raise TypeError(f"{metric_op} inputs must have the same dtype and shape.")
-        if values_view.is_dense_field != other_view.is_dense_field:
-            raise TypeError(
-                f"{metric_op} does not mix dense field inputs with ndarray or "
-                "StructNdarray member inputs."
-            )
     else:
         other_view = values_view
     n = values_view.num_elements
@@ -4848,6 +4851,7 @@ def _native_metric_reduce(
     prog = impl.get_runtime().prog
     value_type = _metric_value_type(values_view.dtype)
     metric_op_id = _METRIC_OPS[metric_op]
+    mixed_dense_array = values_view.is_dense_field != other_view.is_dense_field
     if backend == "cuda_cub":
         if not _prog_available(prog, "cuda_cub_metric_reduce_available"):
             raise RuntimeError("CUDA CUB metric_reduce is unavailable.")
@@ -4855,8 +4859,10 @@ def _native_metric_reduce(
             prog, "cuda_cub_metric_reduce_value_type_available", value_type
         ):
             raise RuntimeError("CUDA CUB metric_reduce does not support this dtype.")
-        if values_view.is_dense_field:
+        if values_view.is_dense_field and other_view.is_dense_field:
             native_method_name = "cuda_cub_metric_reduce_dense_field"
+        elif mixed_dense_array:
+            native_method_name = "cuda_cub_metric_reduce_dense_field_strided_ndarray"
         elif values_view.is_plain_ndarray and other_view.is_plain_ndarray:
             native_method_name = "cuda_cub_metric_reduce_ndarray"
         else:
@@ -4871,8 +4877,10 @@ def _native_metric_reduce(
             prog, "vulkan_metric_reduce_value_type_available", value_type
         ):
             raise RuntimeError("Vulkan metric_reduce does not support this dtype.")
-        if values_view.is_dense_field:
+        if values_view.is_dense_field and other_view.is_dense_field:
             native_method_name = "vulkan_metric_reduce_dense_field"
+        elif mixed_dense_array:
+            native_method_name = "vulkan_metric_reduce_dense_field_strided_ndarray"
         elif values_view.is_plain_ndarray and other_view.is_plain_ndarray:
             native_method_name = "vulkan_metric_reduce_ndarray"
         else:
@@ -4887,8 +4895,10 @@ def _native_metric_reduce(
             prog, "cpu_metric_reduce_value_type_available", value_type
         ):
             raise RuntimeError("CPU metric_reduce does not support this dtype.")
-        if values_view.is_dense_field:
+        if values_view.is_dense_field and other_view.is_dense_field:
             native_method_name = "cpu_metric_reduce_dense_field"
+        elif mixed_dense_array:
+            native_method_name = "cpu_metric_reduce_dense_field_strided_ndarray"
         elif values_view.is_plain_ndarray and other_view.is_plain_ndarray:
             native_method_name = "cpu_metric_reduce_ndarray"
         else:
@@ -4897,9 +4907,30 @@ def _native_metric_reduce(
         if native_method is None:
             raise RuntimeError("CPU metric_reduce method is unavailable.")
 
-    if values_view.is_dense_field:
+    if values_view.is_dense_field and other_view.is_dense_field:
         call_args = (
             values_view.snode, other_view.snode, output.arr, value_type, n, metric_op_id
+        )
+    elif mixed_dense_array:
+        if values_view.is_dense_field:
+            field_view = values_view
+            array_view = other_view
+            field_is_values = True
+        else:
+            field_view = other_view
+            array_view = values_view
+            field_is_values = False
+        array_arr, array_offset, array_stride = _metric_array_call_parts(array_view)
+        call_args = (
+            field_view.snode,
+            array_arr,
+            output.arr,
+            value_type,
+            n,
+            array_offset,
+            array_stride,
+            field_is_values,
+            metric_op_id,
         )
     elif values_view.is_plain_ndarray and other_view.is_plain_ndarray:
         call_args = (

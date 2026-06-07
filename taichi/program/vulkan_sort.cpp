@@ -10839,6 +10839,55 @@ std::size_t Program::vulkan_metric_reduce_dense_field(SNode *values,
       other_stride);
 }
 
+std::size_t Program::vulkan_metric_reduce_dense_field_strided_ndarray(
+    SNode *field,
+    Ndarray *array,
+    Ndarray *output,
+    int value_type,
+    std::size_t n,
+    std::size_t array_offset,
+    std::size_t array_stride,
+    bool field_is_values,
+    int metric_op) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan native mixed metric_reduce is only available on "
+              "Vulkan.");
+  TI_ERROR_IF(!field || !array || !output,
+              "Vulkan native mixed metric_reduce received a null argument.");
+  TI_ERROR_IF(array->shape.size() != 1 || output->shape.size() != 1,
+              "Vulkan native mixed metric_reduce expects 1D ndarrays.");
+  TI_ERROR_IF(n == 0,
+              "Vulkan native mixed metric_reduce expects at least one input "
+              "item.");
+  TI_ERROR_IF(array->get_nelement() != n,
+              "Vulkan native mixed metric_reduce inputs must have the same "
+              "length.");
+  const size_t value_size = vulkan_transform_value_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "Vulkan native mixed metric_reduce received an unsupported "
+              "value type.");
+  TI_ERROR_IF(output->get_nelement() < 1 ||
+                  output->get_element_size() != value_size,
+              "Vulkan native mixed metric_reduce output must be a non-empty "
+              "ndarray matching value type.");
+  check_vulkan_strided_range("Vulkan native mixed metric_reduce", "ndarray",
+                             array, n, value_size, array_offset,
+                             array_stride);
+  DevicePtr field_ptr = get_dense_field_device_ptr(field);
+  const size_t field_stride = get_dense_field_stride(field, value_size);
+  DeviceAllocation field_alloc{field_ptr.device, field_ptr.alloc_id};
+  if (field_is_values) {
+    return vulkan_metric_reduce_storage_impl(
+        this, field_alloc, array->ndarray_alloc_, output->ndarray_alloc_, n,
+        value_type, metric_op, field_ptr.offset, field_stride, array_offset,
+        array_stride);
+  }
+  return vulkan_metric_reduce_storage_impl(
+      this, array->ndarray_alloc_, field_alloc, output->ndarray_alloc_, n,
+      value_type, metric_op, array_offset, array_stride, field_ptr.offset,
+      field_stride);
+}
+
 std::size_t Program::vulkan_reduce_strided_ndarray(
     Ndarray *values,
     Ndarray *output,
@@ -15381,6 +15430,20 @@ std::size_t Program::vulkan_metric_reduce_dense_field(SNode *values,
                                                       std::size_t n,
                                                       int metric_op) {
   TI_ERROR("Vulkan native dense field metric_reduce requires TI_WITH_VULKAN=ON.");
+  return 0;
+}
+
+std::size_t Program::vulkan_metric_reduce_dense_field_strided_ndarray(
+    SNode *field,
+    Ndarray *array,
+    Ndarray *output,
+    int value_type,
+    std::size_t n,
+    std::size_t array_offset,
+    std::size_t array_stride,
+    bool field_is_values,
+    int metric_op) {
+  TI_ERROR("Vulkan native mixed metric_reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
 

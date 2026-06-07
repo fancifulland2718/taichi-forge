@@ -2,7 +2,7 @@
 
 > Applies to **Taichi Forge 0.4.1**. Every option listed here is **opt-in** unless explicitly noted; defaults preserve upstream Taichi 1.7.4 behaviour wherever a feature is not intentionally enabled by Forge.
 
-This document is the single canonical reference for Forge-specific knobs and toolchain changes. Older fork-only settings are kept here once they are part of the public API; experimental or internal-only flags are intentionally excluded.
+This document is the single canonical reference for Forge-specific knobs and toolchain changes. Older fork-only settings are kept here once they are part of the public API; experimental or internal-only flags are intentionally excluded. For a module-oriented list of Forge-only API symbols, see [Forge API reference](forge_api_reference.en.md).
 
 ---
 

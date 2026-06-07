@@ -3,6 +3,9 @@
 Forge keeps ordinary `canvas.set_image(...)` compatibility while adding a
 narrower display-ready path for engines that already produce final images.
 
+For a module-oriented list of Forge-only UI API symbols, see
+[Forge API reference](forge_api_reference.en.md).
+
 ## Public Entry Points
 
 ```python

@@ -10,6 +10,7 @@ from zipfile import ZipFile
 
 from taichi_forge.aot.utils import produce_injected_args, produce_injected_args_from_template
 from taichi_forge.lang import impl, kernel_impl
+from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.field import ScalarField
 from taichi_forge.lang.matrix import MatrixField
 from taichi_forge.types.annotations import template
@@ -176,6 +177,13 @@ class Module:
         self._content += ["kernel:" + kernel_name]
 
     def add_graph(self, name, graph):
+        if getattr(graph, "_contains_native_nodes", False):
+            raise TaichiRuntimeError(
+                "AOT Module.add_graph() does not serialize Forge native graph "
+                "nodes. Native graph replay is JIT-only and limited to "
+                "DSL-defined native methods; AOT graph export currently "
+                "supports ordinary kernel CGraphs only."
+            )
         self._aot_builder.add_graph(name, graph._compiled_graph)
         self._content += ["cgraph:" + name]
 

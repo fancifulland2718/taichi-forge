@@ -3,6 +3,8 @@
 Forge 保留普通 `canvas.set_image(...)` 兼容路径，同时为已经产出最终图像的引擎提供更窄的
 display-ready 提交路径。
 
+按模块整理的 Forge-only UI API 符号清单见 [Forge API 参考](forge_api_reference.zh.md)。
+
 ## 公开入口
 
 ```python

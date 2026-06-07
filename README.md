@@ -70,7 +70,8 @@ boundaries instead of detailed benchmark numbers.
   artifacts where reuse is safe. Backend-specific cache entries stay isolated
   so switching arch does not overwrite another backend's compiled artifact.
 
-See [Compile and cache guide](docs/forge/cache_compile.en.md) and
+See [Forge API reference](docs/forge/forge_api_reference.en.md),
+[Compile and cache guide](docs/forge/cache_compile.en.md), and
 [Forge options](docs/forge/forge_options.en.md).
 
 ### 0.3.x: Vulkan Sparse SNode and Native Sort
@@ -110,7 +111,8 @@ See [Vulkan sparse SNode](docs/forge/sparse_snode_on_vulkan.en.md),
 - Added display statistics APIs so engines can distinguish accepted, submitted,
   dropped, and reused display frames.
 
-See [Graph upgrade notes](docs/forge/graph_upgrade_from_taichi_1_7_4.en.md),
+See [Forge API reference](docs/forge/forge_api_reference.en.md),
+[Graph upgrade notes](docs/forge/graph_upgrade_from_taichi_1_7_4.en.md),
 [Native algorithms](docs/forge/native_algorithms.en.md), and
 [Display frame submission](docs/forge/display_frame.en.md).
 
@@ -119,6 +121,7 @@ See [Graph upgrade notes](docs/forge/graph_upgrade_from_taichi_1_7_4.en.md),
 English public docs:
 
 - [Building Forge wheels](docs/forge/build_wheels.en.md)
+- [Forge API reference](docs/forge/forge_api_reference.en.md)
 - [Forge options](docs/forge/forge_options.en.md)
 - [Compile and cache guide](docs/forge/cache_compile.en.md)
 - [Vulkan sparse SNode](docs/forge/sparse_snode_on_vulkan.en.md)
