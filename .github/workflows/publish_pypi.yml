@@ -207,7 +207,7 @@ jobs:
         # sys.path[0] so the repo-local build.py does not shadow the PyPI
         # `build` package.
         run: |
-          python -I -m build --wheel --no-isolation -Cinstall.components=python
+          python -I -m build --wheel --no-isolation
 
       - name: Audit wheel (auditwheel repair)
         run: |
@@ -418,12 +418,24 @@ jobs:
           Get-Content version.txt
           python scripts/sync_runtime_dependency.py
 
+      - name: Download prebuilt runtime link artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-link-windows
+          path: runtime-link
+
+      - name: Configure prebuilt runtime for shim
+        shell: pwsh
+        run: |
+          $runtimeDir = (Resolve-Path runtime-link).Path.Replace('\', '/')
+          "CMAKE_ARGS=$($env:CMAKE_ARGS) -DTI_PREBUILT_PYTHON_RUNTIME_DIR=$runtimeDir" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+
       - name: Build wheel
         shell: pwsh
         run: |
           # Isolated mode drops cwd from sys.path so the local build.py
           # does not shadow the PyPI `build` package.
-          python -I -m build --wheel --no-isolation -Cinstall.components=python
+          python -I -m build --wheel --no-isolation
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -504,6 +516,39 @@ jobs:
         shell: pwsh
         run: |
           python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
+
+      - name: Collect runtime link artifacts
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "runtime-link"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          $dll = Get-ChildItem -Path _skbuild -Recurse -File -Filter taichi_runtime.dll |
+            Sort-Object FullName |
+            Select-Object -First 1
+          $lib = Get-ChildItem -Path _skbuild -Recurse -File -Filter taichi_runtime.lib |
+            Sort-Object FullName |
+            Select-Object -First 1
+
+          if (-not $dll) {
+            Write-Error "Could not find taichi_runtime.dll in _skbuild after runtime build."
+            exit 1
+          }
+          if (-not $lib) {
+            Write-Error "Could not find taichi_runtime.lib in _skbuild after runtime build."
+            exit 1
+          }
+
+          Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $stage "taichi_runtime.dll")
+          Copy-Item -LiteralPath $lib.FullName -Destination (Join-Path $stage "taichi_runtime.lib")
+          Get-ChildItem -Path $stage
+
+      - name: Upload runtime link artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-link-windows
+          path: ${{ runner.temp }}/runtime-link/*
+          if-no-files-found: error
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

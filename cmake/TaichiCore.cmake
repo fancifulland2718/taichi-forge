@@ -19,6 +19,8 @@ option(TI_WITH_GGUI "Build with GGUI" OFF)                      # wheel-tag: ggu
 option(TI_WITH_SPLIT_PYTHON_RUNTIME
        "Build taichi_python as a small shim linked against a shared native runtime"
        OFF)
+set(TI_PREBUILT_PYTHON_RUNTIME_DIR ""
+    CACHE PATH "Directory containing a prebuilt split Python runtime library for shim-only builds")
 
 # Force symbols to be 'hidden' by default so nothing is exported from the Taichi
 # library including the third-party dependencies.
@@ -762,21 +764,61 @@ if(TI_WITH_PYTHON)
 
     if(TI_WITH_SPLIT_PYTHON_RUNTIME)
         set(CORE_PYTHON_RUNTIME_LIBRARY_NAME taichi_runtime)
-        add_library(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} SHARED)
-        target_link_libraries(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PRIVATE taichi_ui)
-        target_link_libraries(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PRIVATE ${CORE_LIBRARY_NAME})
-        target_enable_function_level_linking(${CORE_PYTHON_RUNTIME_LIBRARY_NAME})
 
-        if(WIN32)
+        if(TI_PREBUILT_PYTHON_RUNTIME_DIR)
+            get_filename_component(TI_PREBUILT_PYTHON_RUNTIME_DIR
+                "${TI_PREBUILT_PYTHON_RUNTIME_DIR}" ABSOLUTE)
+
+            if(WIN32)
+                set(_ti_prebuilt_runtime_location
+                    "${TI_PREBUILT_PYTHON_RUNTIME_DIR}/taichi_runtime.dll")
+                set(_ti_prebuilt_runtime_implib
+                    "${TI_PREBUILT_PYTHON_RUNTIME_DIR}/taichi_runtime.lib")
+            elseif(APPLE)
+                set(_ti_prebuilt_runtime_location
+                    "${TI_PREBUILT_PYTHON_RUNTIME_DIR}/libtaichi_runtime.dylib")
+            else()
+                set(_ti_prebuilt_runtime_location
+                    "${TI_PREBUILT_PYTHON_RUNTIME_DIR}/libtaichi_runtime.so")
+            endif()
+
+            if(NOT EXISTS "${_ti_prebuilt_runtime_location}")
+                message(FATAL_ERROR
+                    "TI_PREBUILT_PYTHON_RUNTIME_DIR does not contain ${_ti_prebuilt_runtime_location}")
+            endif()
+
+            add_library(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} SHARED IMPORTED GLOBAL)
             set_target_properties(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PROPERTIES
-                WINDOWS_EXPORT_ALL_SYMBOLS ON)
-        endif()
+                IMPORTED_LOCATION "${_ti_prebuilt_runtime_location}")
 
-        install(TARGETS ${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
-                RUNTIME DESTINATION ${INSTALL_LIB_DIR}/runtime_native
-                LIBRARY DESTINATION ${INSTALL_LIB_DIR}/runtime_native
-                ARCHIVE DESTINATION ${INSTALL_LIB_DIR}/runtime_native
-                COMPONENT runtime)
+            if(WIN32)
+                if(NOT EXISTS "${_ti_prebuilt_runtime_implib}")
+                    message(FATAL_ERROR
+                        "TI_PREBUILT_PYTHON_RUNTIME_DIR does not contain ${_ti_prebuilt_runtime_implib}")
+                endif()
+                set_target_properties(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PROPERTIES
+                    IMPORTED_IMPLIB "${_ti_prebuilt_runtime_implib}")
+            endif()
+
+            message(STATUS
+                "Using prebuilt split Python runtime: ${_ti_prebuilt_runtime_location}")
+        else()
+            add_library(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} SHARED)
+            target_link_libraries(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PRIVATE taichi_ui)
+            target_link_libraries(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PRIVATE ${CORE_LIBRARY_NAME})
+            target_enable_function_level_linking(${CORE_PYTHON_RUNTIME_LIBRARY_NAME})
+
+            if(WIN32)
+                set_target_properties(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PROPERTIES
+                    WINDOWS_EXPORT_ALL_SYMBOLS ON)
+            endif()
+
+            install(TARGETS ${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                    RUNTIME DESTINATION ${INSTALL_LIB_DIR}/runtime_native
+                    LIBRARY DESTINATION ${INSTALL_LIB_DIR}/runtime_native
+                    ARCHIVE DESTINATION ${INSTALL_LIB_DIR}/runtime_native
+                    COMPONENT runtime)
+        endif()
 
         if(WIN32 OR APPLE)
             target_link_libraries(${CORE_WITH_PYBIND_LIBRARY_NAME} PRIVATE ${CORE_PYTHON_RUNTIME_LIBRARY_NAME})
@@ -784,8 +826,9 @@ if(TI_WITH_PYTHON)
             # Keep Linux shim wheels free of a direct DT_NEEDED edge to the
             # large runtime library. Python preloads the runtime with
             # RTLD_GLOBAL before importing this module so auditwheel does not
-            # copy the runtime back into every CPython shim wheel.
-            add_dependencies(${CORE_WITH_PYBIND_LIBRARY_NAME} ${CORE_PYTHON_RUNTIME_LIBRARY_NAME})
+            # copy the runtime back into every CPython shim wheel. Do not add
+            # a build dependency here: the runtime wheel job builds this target
+            # separately, and the shim wheel job must remain pybind-only.
         endif()
     else()
         target_link_libraries(${CORE_WITH_PYBIND_LIBRARY_NAME} PRIVATE taichi_ui)

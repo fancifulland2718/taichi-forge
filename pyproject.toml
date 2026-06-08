@@ -56,6 +56,11 @@ ti = "taichi_forge._main:main"
 cmake.version = ">=3.20,<4"
 cmake.build-type = "Release"
 build-dir = "_skbuild/{wheel_tag}"
+# The public taichi-forge wheel is the CPython/pybind shim. The large native
+# runtime is built and published as taichi-forge-runtime, which keeps PyPI
+# storage bounded across Python versions.
+install.components = ["python"]
+build.targets = ["taichi_python"]
 wheel.packages = ["python/taichi_forge"]
 wheel.exclude = [
   # Keep the default Python wheel focused on import/runtime use. The C API is a
@@ -72,6 +77,7 @@ wheel.exclude = [
   "**/*.pdb",
   "**/*.ilk",
   "**/*.exp",
+  "**/*.lib",
   "**/libSPIRV-Tools-shared.so",
   "**/libSPIRV-Tools-shared.dll",
 ]
