@@ -2023,79 +2023,20 @@ class TaskCodegen : public IRVisitor {
       // 已确认 pool_capacity >= worst_capacity 且 allocator_kind == Bump，
       // 因此 `new_slot = idx_u32 + 1` ∈ [1, pool_capacity] 唯一对应一个
       // 池 slot，互不冲突。所有并发线程对同一 outer cell 计算同一 new_slot，
-      // CAS 直接发布；CAS 返回值任意（winner 见 0、loser 见 new_slot 或上一帧
-      // deactivate=0），但 `final_slot = new_slot` 永远正确。无 spin、无
+      // 直接原子发布；所有竞争者写入同一值，因此 `final_slot = new_slot`
+      // 永远正确。无 spin、无
       // watermark、无 freelist；与 G10-P1 的 64-way single-slot spin-loop
       // device-lost 完全脱钩。
       if (contract.deterministic_slot) {
         auto new_slot =
             ir_->add(idx_u32, ir_->uint_immediate_number(u32_t, 1));
-        // 公布 new_slot：CAS(slot, 0, new_slot)。返回值忽略——所有竞争者
-        // 都会写入同一 new_slot，最终 slot_ptr 必为 new_slot；listgen
-        // 与下次 do_activate=false 的 atomicLoad 都会观察到一致结果。
-        auto busy_v = ir_->uint_immediate_number(u32_t, 0xFFFFFFFFu);
-        auto zero_v = ir_->uint_immediate_number(u32_t, 0);
-        auto cas_old = ir_->make_value(
-            spv::OpAtomicCompareExchange, u32_t, slot_ptr,
-            /*scope=*/ir_->const_i32_one_,
-            /*semantics_eq=*/ir_->const_i32_zero_,
-            /*semantics_uneq=*/ir_->const_i32_zero_, busy_v, zero_v);
-        auto we_won = ir_->make_value(spv::OpIEqual, ir_->bool_type(),
-                                      cas_old, zero_v);
-
-        spirv::Label winner_label = ir_->new_label();
-        spirv::Label waiter_label = ir_->new_label();
-        spirv::Label done_label = ir_->new_label();
-        ir_->make_inst(spv::OpSelectionMerge, done_label,
-                       spv::SelectionControlMaskNone);
-        ir_->make_inst(spv::OpBranchConditional, we_won, winner_label,
-                       waiter_label);
-
-        ir_->start_label(winner_label);
-        auto cell_stride_v =
-            ir_->uint_immediate_number(u32_t, contract.cell_stride_bytes);
-        auto pool_offset_v =
-            ir_->uint_immediate_number(u32_t, contract.pool_data_offset);
-        auto new_effective_slot =
-            ir_->sub(new_slot, ir_->uint_immediate_number(u32_t, 1));
-        auto new_cell_offset = ir_->add(
-            pool_offset_v, ir_->mul(new_effective_slot, cell_stride_v));
-        if (contract.cell_stride_bytes % 4 == 0) {
-          zero_u32_region(pool_meta_buffer, new_cell_offset,
-                          contract.cell_stride_bytes,
-                          "Vulkan pointer deterministic-slot zero-init");
-          hash_device_memory_barrier();
-        }
+        // The pool is zeroed on materialization and deterministic deactivate.
+        // Publishing a stable slot directly avoids same-subgroup BUSY spin
+        // deadlocks when many lanes activate the same pointer cell.
         ir_->make_inst(spv::OpAtomicStore, slot_ptr,
                        /*scope=*/ir_->const_i32_one_,
                        /*semantics=*/ir_->const_i32_zero_, new_slot);
-        ir_->make_inst(spv::OpBranch, done_label);
-
-        ir_->start_label(waiter_label);
-        spirv::Label spin_head = ir_->new_label();
-        spirv::Label spin_continue = ir_->new_label();
-        spirv::Label spin_merge = ir_->new_label();
-        ir_->make_inst(spv::OpBranch, spin_head);
-
-        ir_->start_label(spin_head);
-        auto spin_cur =
-            ir_->make_value(spv::OpAtomicLoad, u32_t, slot_ptr,
-                            /*scope=*/ir_->const_i32_one_,
-                            /*semantics=*/ir_->const_i32_zero_);
-        auto spin_busy = ir_->make_value(spv::OpIEqual, ir_->bool_type(),
-                                         spin_cur, busy_v);
-        ir_->make_inst(spv::OpLoopMerge, spin_merge, spin_continue,
-                       spv::LoopControlMaskNone);
-        ir_->make_inst(spv::OpBranchConditional, spin_busy, spin_continue,
-                       spin_merge);
-        ir_->start_label(spin_continue);
-        ir_->make_inst(spv::OpBranch, spin_head);
-        ir_->start_label(spin_merge);
-        ir_->make_inst(spv::OpBranch, done_label);
-
-        ir_->start_label(done_label);
-        final_slot = ir_->make_value(spv::OpPhi, u32_t, new_slot,
-                                     winner_label, spin_cur, spin_merge);
+        final_slot = new_slot;
       } else
       // B-2.b（2026-05）：原 #if TI_VULKAN_POINTER_CAS_MARKER 下放为运行时
       // contract.alloc_protocol 分支，与 layout 路径同源于 CompileConfig
@@ -2536,6 +2477,41 @@ class TaskCodegen : public IRVisitor {
     auto idx_u32 = ir_->cast(u32_t, index_u32);
     auto slot_ptr =
         pointer_slot_ptr(root_buffer, parent_byte_offset, idx_u32);
+    if (contract.deterministic_slot) {
+      auto zero_v = ir_->uint_immediate_number(u32_t, 0);
+      auto old_slot = ir_->make_value(
+          spv::OpAtomicExchange, u32_t, slot_ptr,
+          /*scope=*/ir_->const_i32_one_,
+          /*semantics=*/ir_->const_i32_zero_, zero_v);
+      auto was_active = ir_->make_value(spv::OpINotEqual, ir_->bool_type(),
+                                        old_slot, zero_v);
+
+      spirv::Label clear_label = ir_->new_label();
+      spirv::Label done_label = ir_->new_label();
+      ir_->make_inst(spv::OpSelectionMerge, done_label,
+                     spv::SelectionControlMaskNone);
+      ir_->make_inst(spv::OpBranchConditional, was_active, clear_label,
+                     done_label);
+
+      ir_->start_label(clear_label);
+      auto cell_stride_v =
+          ir_->uint_immediate_number(u32_t, contract.cell_stride_bytes);
+      auto pool_offset_v =
+          ir_->uint_immediate_number(u32_t, contract.pool_data_offset);
+      auto effective_slot =
+          ir_->sub(old_slot, ir_->uint_immediate_number(u32_t, 1));
+      auto cell_offset =
+          ir_->add(pool_offset_v, ir_->mul(effective_slot, cell_stride_v));
+      if (contract.cell_stride_bytes % 4 == 0) {
+        zero_u32_region(pool_meta_buffer, cell_offset,
+                        contract.cell_stride_bytes,
+                        "Vulkan pointer deterministic-slot deactivate clear");
+        hash_device_memory_barrier();
+      }
+      ir_->make_inst(spv::OpBranch, done_label);
+      ir_->start_label(done_label);
+      return;
+    }
     if (contract.has_freelist) {
       // G1.b (2026-04-30 → B-2.a 2026-05): push the slot onto the freelist
       // before clearing it, so a later activate can recycle the pool cell

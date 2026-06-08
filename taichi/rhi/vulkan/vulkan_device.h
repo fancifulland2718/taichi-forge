@@ -908,6 +908,10 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
     VkDeviceAddress addr{0};
     // If mapped, the currently mapped address
     void *mapped{nullptr};
+    VkDeviceSize mapped_offset{0};
+    VkDeviceSize mapped_size{VK_WHOLE_SIZE};
+    bool host_read{false};
+    bool host_write{false};
     // Is the allocation external (imported) or not (VMA)
     bool external{false};
     uint64_t generation{0};

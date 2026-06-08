@@ -92,10 +92,18 @@ std::unique_ptr<AotModuleBuilder> GfxProgramImpl::make_aot_module_builder(
 DeviceAllocation GfxProgramImpl::allocate_memory_on_device(
     std::size_t alloc_size,
     uint64 *result_buffer) {
+  return allocate_memory_on_device(alloc_size, result_buffer,
+                                   AllocUsage::Storage);
+}
+
+DeviceAllocation GfxProgramImpl::allocate_memory_on_device(
+    std::size_t alloc_size,
+    uint64 *result_buffer,
+    AllocUsage usage) {
   DeviceAllocation alloc;
   RhiResult res = get_compute_device()->allocate_memory(
       {alloc_size, /*host_write=*/false, /*host_read=*/false,
-       /*export_sharing=*/false},
+       /*export_sharing=*/false, usage},
       &alloc);
   TI_ASSERT(res == RhiResult::success);
   return alloc;

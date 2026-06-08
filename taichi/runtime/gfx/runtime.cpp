@@ -956,6 +956,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
   std::unordered_map<std::vector<int>, const ArgPack *,
                      hashing::Hasher<std::vector<int>>>
       argpacks;
+  std::vector<DeviceAllocation> argpack_allocations;
 
   // Prepare context buffers & arrays
   if (ctx_blitter) {
@@ -1029,6 +1030,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
       DeviceAllocation devalloc = argpack->get_device_allocation();
       argpacks_in_use_.insert(devalloc.alloc_id);
       argpacks[indices] = argpack;
+      argpack_allocations.push_back(devalloc);
     }
 
     ctx_blitter->host_to_device(any_arrays, ext_array_size, argpacks);
@@ -1038,6 +1040,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
 
   // Record commands
   const auto &task_attribs = ti_kernel->ti_kernel_attribs().tasks_attribs;
+  bool argpack_barriers_inserted = false;
 
   auto mark_storage_buffer_write = [&](const BufferBind &bind) {
     if (!bind.may_write()) {
@@ -1107,6 +1110,12 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
       listgen_buffer_used_ = true;
     }
     insert_pending_dispatch_barriers();
+    if (!argpack_barriers_inserted) {
+      for (DeviceAllocation alloc : argpack_allocations) {
+        current_cmdlist_->buffer_barrier(alloc);
+      }
+      argpack_barriers_inserted = true;
+    }
     auto vp = ti_kernel->get_pipeline(i);
     const int group_x = (attribs.advisory_total_num_threads +
                          attribs.advisory_num_threads_per_group - 1) /

@@ -14,8 +14,9 @@ ArgPack::ArgPack(Program *prog, const DataType type) : prog_(prog) {
   auto [argpack_type, alloc_size] = prog->get_argpack_type_with_data_layout(
       old_type, prog->get_kernel_argument_data_layout());
   dtype = DataType(argpack_type);
-  argpack_alloc_ =
-      prog->allocate_memory_on_device(alloc_size, prog->result_buffer);
+  argpack_alloc_ = prog->allocate_memory_on_device(
+      alloc_size, prog->result_buffer,
+      AllocUsage::Storage | AllocUsage::Uniform);
 }
 
 ArgPack::~ArgPack() {

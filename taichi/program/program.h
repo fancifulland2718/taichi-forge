@@ -294,6 +294,12 @@ class TI_DLL_EXPORT Program {
                                              uint64 *result_buffer) {
     return program_impl_->allocate_memory_on_device(alloc_size, result_buffer);
   }
+  DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,
+                                             uint64 *result_buffer,
+                                             AllocUsage usage) {
+    return program_impl_->allocate_memory_on_device(alloc_size, result_buffer,
+                                                   usage);
+  }
   DeviceAllocation allocate_texture(const ImageParams &params) {
     return program_impl_->allocate_texture(params);
   }

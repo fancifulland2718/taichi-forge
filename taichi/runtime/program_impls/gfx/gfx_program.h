@@ -54,6 +54,9 @@ class GfxProgramImpl : public ProgramImpl {
 
   DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,
                                              uint64 *result_buffer) override;
+  DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,
+                                             uint64 *result_buffer,
+                                             AllocUsage usage) override;
 
   bool used_in_kernel(DeviceAllocationId id) override {
     return runtime_->used_in_kernel(id);

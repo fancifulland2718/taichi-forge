@@ -107,6 +107,13 @@ class ProgramImpl {
     return kDeviceNullAllocation;
   }
 
+  virtual DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,
+                                                     uint64 *result_buffer,
+                                                     AllocUsage usage) {
+    (void)usage;
+    return allocate_memory_on_device(alloc_size, result_buffer);
+  }
+
   virtual bool used_in_kernel(DeviceAllocationId) {
     return false;
   }

@@ -1775,16 +1775,16 @@ RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
   // FIXME: How to express this in a backend-neutral way?
   buffer_info.usage =
       VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-  if (params.usage && AllocUsage::Storage) {
+  if (int(params.usage & AllocUsage::Storage)) {
     buffer_info.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
   }
-  if (params.usage && AllocUsage::Uniform) {
+  if (int(params.usage & AllocUsage::Uniform)) {
     buffer_info.usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
   }
-  if (params.usage && AllocUsage::Vertex) {
+  if (int(params.usage & AllocUsage::Vertex)) {
     buffer_info.usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
   }
-  if (params.usage && AllocUsage::Index) {
+  if (int(params.usage & AllocUsage::Index)) {
     buffer_info.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
   }
 
@@ -1850,12 +1850,12 @@ RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
   }
 
   if (get_caps().get(DeviceCapability::spirv_has_physical_storage_buffer) &&
-      ((alloc_info.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
-       (alloc_info.usage &
+      ((buffer_info.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
+       (buffer_info.usage &
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR) ||
-       (alloc_info.usage &
+       (buffer_info.usage &
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR) ||
-       (alloc_info.usage & VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR))) {
+       (buffer_info.usage & VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR))) {
     buffer_info.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT_KHR;
   }
 
@@ -1868,6 +1868,11 @@ RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
 
   vmaGetAllocationInfo(alloc.buffer->allocator, alloc.buffer->allocation,
                        &alloc.alloc_info);
+  alloc.host_read = params.host_read;
+  alloc.host_write = params.host_write;
+  alloc.mapped = nullptr;
+  alloc.mapped_offset = 0;
+  alloc.mapped_size = VK_WHOLE_SIZE;
 
   if (get_caps().get(DeviceCapability::spirv_has_physical_storage_buffer)) {
     VkBufferDeviceAddressInfoKHR info{};
@@ -1899,11 +1904,34 @@ RhiResult VulkanDevice::map_internal(AllocationInternal &alloc_int,
   if (alloc_int.buffer->allocator) {
     res = vmaMapMemory(alloc_int.buffer->allocator,
                        alloc_int.buffer->allocation, &alloc_int.mapped);
+    if (res == VK_SUCCESS && alloc_int.host_read) {
+      vmaInvalidateAllocation(alloc_int.buffer->allocator,
+                              alloc_int.buffer->allocation, offset, size);
+    }
     alloc_int.mapped = (uint8_t *)(alloc_int.mapped) + offset;
   } else {
     res = vkMapMemory(device_, alloc_int.alloc_info.deviceMemory,
                       alloc_int.alloc_info.offset + offset, size, 0,
                       &alloc_int.mapped);
+    if (res == VK_SUCCESS && alloc_int.host_read) {
+      const VkDeviceSize atom =
+          vk_device_properties_.limits.nonCoherentAtomSize;
+      const VkDeviceSize mapped_begin = alloc_int.alloc_info.offset + offset;
+      const VkDeviceSize mapped_end =
+          size == VK_WHOLE_SIZE
+              ? alloc_int.alloc_info.offset + alloc_int.alloc_info.size
+              : mapped_begin + size;
+      const VkDeviceSize range_begin = mapped_begin / atom * atom;
+      const VkDeviceSize range_end =
+          std::min((mapped_end + atom - 1) / atom * atom,
+                   alloc_int.alloc_info.offset + alloc_int.alloc_info.size);
+      VkMappedMemoryRange range{};
+      range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+      range.memory = alloc_int.alloc_info.deviceMemory;
+      range.offset = range_begin;
+      range.size = range_end - range_begin;
+      vkInvalidateMappedMemoryRanges(device_, 1, &range);
+    }
   }
 
   if (alloc_int.mapped == nullptr || res == VK_ERROR_MEMORY_MAP_FAILED) {
@@ -1923,6 +1951,8 @@ RhiResult VulkanDevice::map_internal(AllocationInternal &alloc_int,
   }
 
   *mapped_ptr = alloc_int.mapped;
+  alloc_int.mapped_offset = offset;
+  alloc_int.mapped_size = size;
 
   return RhiResult::success;
 }
@@ -1966,12 +1996,39 @@ void VulkanDevice::unmap(DeviceAllocation alloc) {
   }
 
   if (alloc_int.buffer->allocator) {
+    if (alloc_int.host_write) {
+      vmaFlushAllocation(alloc_int.buffer->allocator,
+                         alloc_int.buffer->allocation,
+                         alloc_int.mapped_offset, alloc_int.mapped_size);
+    }
     vmaUnmapMemory(alloc_int.buffer->allocator, alloc_int.buffer->allocation);
   } else {
+    if (alloc_int.host_write) {
+      const VkDeviceSize atom =
+          vk_device_properties_.limits.nonCoherentAtomSize;
+      const VkDeviceSize mapped_begin =
+          alloc_int.alloc_info.offset + alloc_int.mapped_offset;
+      const VkDeviceSize mapped_end =
+          alloc_int.mapped_size == VK_WHOLE_SIZE
+              ? alloc_int.alloc_info.offset + alloc_int.alloc_info.size
+              : mapped_begin + alloc_int.mapped_size;
+      const VkDeviceSize range_begin = mapped_begin / atom * atom;
+      const VkDeviceSize range_end =
+          std::min((mapped_end + atom - 1) / atom * atom,
+                   alloc_int.alloc_info.offset + alloc_int.alloc_info.size);
+      VkMappedMemoryRange range{};
+      range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+      range.memory = alloc_int.alloc_info.deviceMemory;
+      range.offset = range_begin;
+      range.size = range_end - range_begin;
+      vkFlushMappedMemoryRanges(device_, 1, &range);
+    }
     vkUnmapMemory(device_, alloc_int.alloc_info.deviceMemory);
   }
 
   alloc_int.mapped = nullptr;
+  alloc_int.mapped_offset = 0;
+  alloc_int.mapped_size = VK_WHOLE_SIZE;
 }
 
 RhiResult VulkanDevice::upload_data(DevicePtr *device_ptr,
