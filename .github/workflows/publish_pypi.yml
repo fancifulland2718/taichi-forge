@@ -87,7 +87,10 @@ jobs:
 
   build_linux:
     name: Linux wheel (py${{ matrix.python }})
-    needs: resolve_version
+    # Build the platform-native runtime wheel first.  The per-CPython wheel is
+    # only the Python/pybind shim and must never be packaged before its matching
+    # runtime artifact exists for the same release.
+    needs: [resolve_version, build_linux_runtime]
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -331,7 +334,10 @@ jobs:
 
   build_windows:
     name: Windows wheel (py${{ matrix.python }})
-    needs: resolve_version
+    # Build the platform-native runtime wheel first.  The per-CPython wheel is
+    # only the Python/pybind shim and must never be packaged before its matching
+    # runtime artifact exists for the same release.
+    needs: [resolve_version, build_windows_runtime]
     runs-on: windows-latest
     strategy:
       fail-fast: false
