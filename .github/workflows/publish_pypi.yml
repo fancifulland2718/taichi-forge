@@ -105,13 +105,17 @@ jobs:
       # TAICHI_CMAKE_ARGS (only honored by the legacy setup.py build,
       # which no longer exists after the scikit-build-core migration).
       # Setting TAICHI_CMAKE_ARGS here is a silent no-op and produces a
-      # wheel with all backends OFF (no GGUI, no CUDA, no C-API).
+      # wheel with all backends OFF (no GGUI or CUDA).
+      # The Python PyPI wheel intentionally omits the C API package tree to
+      # keep per-release PyPI storage bounded; C API artifacts should be built
+      # and distributed separately when needed.
       CMAKE_ARGS: >-
         -DTI_WITH_VULKAN:BOOL=ON
         -DTI_WITH_OPENGL:BOOL=ON
         -DTI_WITH_CUDA:BOOL=ON
         -DTI_WITH_LLVM:BOOL=ON
-        -DTI_WITH_C_API:BOOL=ON
+        -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON
+        -DTI_WITH_C_API:BOOL=OFF
         -DTI_BUILD_TESTS:BOOL=OFF
     steps:
       - uses: actions/checkout@v4
@@ -193,13 +197,14 @@ jobs:
         run: |
           echo -n "${{ needs.resolve_version.outputs.version }}" > version.txt
           cat version.txt
+          python scripts/sync_runtime_dependency.py
 
       - name: Build wheel
         # `python -I -m build` runs in isolated mode, which drops cwd from
         # sys.path[0] so the repo-local build.py does not shadow the PyPI
         # `build` package.
         run: |
-          python -I -m build --wheel --no-isolation
+          python -I -m build --wheel --no-isolation -Cinstall.components=python
 
       - name: Audit wheel (auditwheel repair)
         run: |
@@ -220,6 +225,110 @@ jobs:
           path: wheelhouse/*.whl
           if-no-files-found: error
 
+  build_linux_runtime:
+    name: Linux runtime wheel
+    needs: resolve_version
+    runs-on: ubuntu-22.04
+    env:
+      CMAKE_ARGS: >-
+        -DTI_WITH_VULKAN:BOOL=ON
+        -DTI_WITH_OPENGL:BOOL=ON
+        -DTI_WITH_CUDA:BOOL=ON
+        -DTI_WITH_LLVM:BOOL=ON
+        -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON
+        -DTI_WITH_C_API:BOOL=OFF
+        -DTI_BUILD_TESTS:BOOL=OFF
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build ccache libxrandr-dev \
+            libxinerama-dev libxcursor-dev libxi-dev libx11-dev \
+            libxrender-dev libgl-dev libtinfo-dev libxml2-dev
+
+      - name: Install Vulkan SDK deps
+        env:
+          VULKAN_SDK_VERSION: "1.4.304.1"
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan-dev vulkan-tools xz-utils
+
+          sdk_root="$RUNNER_TEMP/vulkan-sdk"
+          sdk_archive="$RUNNER_TEMP/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz"
+          curl -fsSL \
+            "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz" \
+            -o "$sdk_archive"
+          rm -rf "$sdk_root"
+          mkdir -p "$sdk_root"
+          tar -xJf "$sdk_archive" -C "$sdk_root" --strip-components=1
+
+          sdk="$sdk_root/x86_64"
+          test -x "$sdk/bin/glslc"
+          echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
+          echo "VK_SDK_PATH=$sdk" >> "$GITHUB_ENV"
+          echo "VK_LAYER_PATH=$sdk/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$sdk/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "$sdk/bin" >> "$GITHUB_PATH"
+          "$sdk/bin/glslc" --version
+
+      - name: Download prebuilt LLVM 20
+        env:
+          LLVM20_LINUX_URL: ${{ vars.LLVM20_LINUX_URL || env.LLVM20_LINUX_MANYLINUX_URL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${LLVM20_LINUX_URL}" ]]; then
+            echo "::error::LLVM20_LINUX_URL (or LLVM20_LINUX_MANYLINUX_URL) is not configured as a repository variable."
+            exit 1
+          fi
+          mkdir -p dist
+          curl -fsSL "$LLVM20_LINUX_URL" -o /tmp/llvm20.zip
+          mkdir -p dist/taichi-llvm-20
+          python -m zipfile -e /tmp/llvm20.zip dist/taichi-llvm-20
+          echo "LLVM_DIR=$GITHUB_WORKSPACE/dist/taichi-llvm-20/lib/cmake/llvm" >> "$GITHUB_ENV"
+
+      - name: Install python build deps
+        run: |
+          python -m pip install --upgrade pip build
+          python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" ninja numpy
+
+      - name: Override version
+        shell: bash
+        run: |
+          echo -n "${{ needs.resolve_version.outputs.version }}" > version.txt
+          cat version.txt
+          python scripts/sync_runtime_dependency.py
+
+      - name: Build runtime wheel
+        run: |
+          python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
+
+      - name: Audit runtime wheel
+        run: |
+          python -m pip install auditwheel patchelf
+          mkdir -p wheelhouse-runtime
+          auditwheel show dist-runtime/*.whl || true
+          auditwheel repair dist-runtime/*.whl -w wheelhouse-runtime/ --plat manylinux_2_35_x86_64 || cp dist-runtime/*.whl wheelhouse-runtime/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-linux-runtime
+          path: wheelhouse-runtime/*.whl
+          if-no-files-found: error
+
   build_windows:
     name: Windows wheel (py${{ matrix.python }})
     needs: resolve_version
@@ -234,12 +343,16 @@ jobs:
       # CMAKE_POLICY_VERSION_MINIMUM shim.
       # Must be CMAKE_ARGS (read by scikit-build-core); TAICHI_CMAKE_ARGS
       # is a silent no-op under the new build backend.
+      # The Python PyPI wheel intentionally omits the C API package tree to
+      # keep per-release PyPI storage bounded; C API artifacts should be built
+      # and distributed separately when needed.
       CMAKE_ARGS: >-
         -DTI_WITH_VULKAN:BOOL=ON
         -DTI_WITH_OPENGL:BOOL=ON
         -DTI_WITH_CUDA:BOOL=ON
         -DTI_WITH_LLVM:BOOL=ON
-        -DTI_WITH_C_API:BOOL=ON
+        -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON
+        -DTI_WITH_C_API:BOOL=OFF
         -DTI_BUILD_TESTS:BOOL=OFF
     steps:
       - uses: actions/checkout@v4
@@ -297,13 +410,14 @@ jobs:
         run: |
           Set-Content -Path version.txt -NoNewline -Value "${{ needs.resolve_version.outputs.version }}"
           Get-Content version.txt
+          python scripts/sync_runtime_dependency.py
 
       - name: Build wheel
         shell: pwsh
         run: |
           # Isolated mode drops cwd from sys.path so the local build.py
           # does not shadow the PyPI `build` package.
-          python -I -m build --wheel --no-isolation
+          python -I -m build --wheel --no-isolation -Cinstall.components=python
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -312,9 +426,89 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
 
+  build_windows_runtime:
+    name: Windows runtime wheel
+    needs: resolve_version
+    runs-on: windows-latest
+    env:
+      CMAKE_ARGS: >-
+        -DTI_WITH_VULKAN:BOOL=ON
+        -DTI_WITH_OPENGL:BOOL=ON
+        -DTI_WITH_CUDA:BOOL=ON
+        -DTI_WITH_LLVM:BOOL=ON
+        -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON
+        -DTI_WITH_C_API:BOOL=OFF
+        -DTI_BUILD_TESTS:BOOL=OFF
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Setup MSVC dev cmd
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          $version = "1.4.304.1"
+          $installer = "$env:TEMP\VulkanSDK.exe"
+          Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe" -OutFile $installer
+          Start-Process -FilePath $installer -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" -Wait
+          "VULKAN_SDK=C:\VulkanSDK\$version" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "PATH=C:\VulkanSDK\$version\Bin;$env:PATH" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+
+      - name: Download prebuilt LLVM 20
+        shell: pwsh
+        run: |
+          $url = "${{ env.LLVM20_WIN_URL }}"
+          if (-not $url) {
+            Write-Error "LLVM20_WIN_URL is not configured as a repo variable. Run the 'Build LLVM 20 for Windows' workflow first and set the variable to the release asset URL."
+            exit 1
+          }
+          New-Item -ItemType Directory -Force -Path dist/taichi-llvm-20 | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile $env:TEMP/llvm20.zip
+          Expand-Archive -Path $env:TEMP/llvm20.zip -DestinationPath dist/taichi-llvm-20
+          "LLVM_DIR=$(Resolve-Path dist/taichi-llvm-20/lib/cmake/llvm)" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+
+      - name: Install python build deps
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip build
+          python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" numpy
+
+      - name: Override version
+        shell: pwsh
+        run: |
+          Set-Content -Path version.txt -NoNewline -Value "${{ needs.resolve_version.outputs.version }}"
+          Get-Content version.txt
+          python scripts/sync_runtime_dependency.py
+
+      - name: Build runtime wheel
+        shell: pwsh
+        run: |
+          python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-windows-runtime
+          path: dist-runtime/*.whl
+          if-no-files-found: error
+
   collect_and_release:
     name: GitHub Release + PyPI upload
-    needs: [resolve_version, build_linux, build_windows]
+    needs: [resolve_version, build_linux_runtime, build_windows_runtime, build_linux, build_windows]
     runs-on: ubuntu-latest
     # Only publish when:
     #   * a v-tag was pushed, OR

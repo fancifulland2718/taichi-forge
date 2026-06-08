@@ -3,6 +3,8 @@ import platform
 import re
 import sys
 import warnings
+import ctypes
+import importlib.util
 
 from colorama import Fore, Style
 
@@ -17,6 +19,90 @@ def in_docker():
     if os.environ.get("TI_IN_DOCKER", "") == "":
         return False
     return True
+
+
+_dll_dir_handles = []
+_native_runtime_loaded = False
+
+
+def _dedupe_existing_dirs(paths):
+    seen = set()
+    for path in paths:
+        if not path:
+            continue
+        path = os.path.abspath(path)
+        key = os.path.normcase(path)
+        if key in seen or not os.path.isdir(path):
+            continue
+        seen.add(key)
+        yield path
+
+
+def _external_runtime_roots():
+    spec = importlib.util.find_spec("taichi_forge_runtime")
+    if spec is None or spec.submodule_search_locations is None:
+        return []
+    return list(spec.submodule_search_locations)
+
+
+def _native_runtime_dirs():
+    package_lib = os.path.join(package_root, "_lib")
+    candidates = [
+        os.environ.get("TAICHI_NATIVE_RUNTIME_DIR", ""),
+        os.path.join(package_lib, "runtime_native"),
+        os.path.join(package_lib, "core"),
+    ]
+    for root in _external_runtime_roots():
+        candidates.extend(
+            [
+                os.path.join(root, "native"),
+                os.path.join(root, "runtime_native"),
+                os.path.join(root, "_lib", "runtime_native"),
+            ]
+        )
+    return list(_dedupe_existing_dirs(candidates))
+
+
+def _runtime_bitcode_dir():
+    candidates = [os.environ.get("TAICHI_RUNTIME_DIR", ""), os.path.join(package_root, "_lib", "runtime")]
+    for root in _external_runtime_roots():
+        candidates.extend([os.path.join(root, "runtime"), os.path.join(root, "_lib", "runtime")])
+    for path in _dedupe_existing_dirs(candidates):
+        return path
+    return os.path.join(package_root, "_lib", "runtime")
+
+
+def _native_runtime_library_name():
+    if get_os_name() == "win":
+        return "taichi_runtime.dll"
+    if get_os_name() == "osx":
+        return "libtaichi_runtime.dylib"
+    return "libtaichi_runtime.so"
+
+
+def _prepare_native_runtime():
+    global _native_runtime_loaded  # pylint: disable=global-statement
+    if _native_runtime_loaded:
+        return
+
+    runtime_dirs = _native_runtime_dirs()
+    if get_os_name() == "win":
+        for path in runtime_dirs:
+            if hasattr(os, "add_dll_directory"):
+                _dll_dir_handles.append(os.add_dll_directory(path))
+            os.environ["PATH"] += os.pathsep + path
+
+    lib_name = _native_runtime_library_name()
+    for path in runtime_dirs:
+        lib_path = os.path.join(path, lib_name)
+        if not os.path.exists(lib_path):
+            continue
+        if get_os_name() == "win":
+            ctypes.WinDLL(lib_path)  # pylint: disable=no-member
+        else:
+            ctypes.CDLL(lib_path, mode=getattr(os, "RTLD_GLOBAL", 0))
+        _native_runtime_loaded = True
+        return
 
 
 def get_os_name():
@@ -35,6 +121,7 @@ def get_os_name():
 
 
 def import_ti_python_core():
+    _prepare_native_runtime()
     if get_os_name() != "win":
         # pylint: disable=E1101
         old_flags = sys.getdlopenflags()
@@ -58,7 +145,7 @@ def import_ti_python_core():
 
     if get_os_name() != "win":
         sys.setdlopenflags(old_flags)  # pylint: disable=E1101
-    lib_dir = os.path.join(package_root, "_lib", "runtime")
+    lib_dir = _runtime_bitcode_dir()
     core.set_lib_dir(locale_encode(lib_dir))
     return core
 

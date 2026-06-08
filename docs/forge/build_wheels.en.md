@@ -6,14 +6,19 @@ want to reproduce the PyPI-style Windows or Ubuntu builds locally.
 
 ## Wheel Matrix
 
-The publish workflow builds CPython wheels for:
+The publish workflow builds two wheel families:
 
-- Python 3.10, 3.11, 3.12, 3.13, and 3.14.
-- Windows x86_64.
-- Ubuntu 22.04 x86_64, repaired as `manylinux_2_35_x86_64`.
+- `taichi-forge-runtime`: platform-native runtime wheels tagged as
+  `py3-none-win_amd64` and `py3-none-manylinux_2_35_x86_64`.
+- `taichi-forge`: small CPython pybind shim wheels for Python 3.10, 3.11,
+  3.12, 3.13, and 3.14 on Windows x86_64 and Linux x86_64.
 
-Forge wheels are per-CPython-minor wheels. `pyproject.toml` currently sets
-`wheel.py-api = ""`; the project does not publish `abi3` wheels.
+`pip install taichi-forge` installs the shim wheel for the active Python
+version and pulls the matching `taichi-forge-runtime` wheel through the package
+dependency. The public import path remains `import taichi_forge`.
+
+The pybind shim is still per-CPython-minor. `pyproject.toml` currently sets
+`wheel.py-api = ""`; the project does not publish `abi3` shim wheels.
 
 ## Common Rules
 
@@ -34,8 +39,14 @@ Important details:
   will be ignored here.
 - Set `LLVM_DIR` to a prebuilt LLVM 20 installation containing
   `lib/cmake/llvm/LLVMConfig.cmake`.
-- The release wheel configuration enables Vulkan, OpenGL, CUDA, LLVM, and the
-  C API, and disables test binaries.
+- The release wheel configuration enables Vulkan, OpenGL, CUDA, and LLVM,
+  splits the native runtime out of the CPython shim, omits the C API package
+  tree, and disables test binaries. C API artifacts are native distribution
+  outputs and should be built or published separately when needed.
+- After changing `version.txt`, run `python scripts/sync_runtime_dependency.py`
+  before building release wheels. The publish workflow does this automatically.
+- PyPI/TestPyPI publishing must be authorized for both project names:
+  `taichi-forge` and `taichi-forge-runtime`.
 
 Release build `CMAKE_ARGS`:
 
@@ -44,7 +55,8 @@ Release build `CMAKE_ARGS`:
 -DTI_WITH_OPENGL:BOOL=ON
 -DTI_WITH_CUDA:BOOL=ON
 -DTI_WITH_LLVM:BOOL=ON
--DTI_WITH_C_API:BOOL=ON
+-DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON
+-DTI_WITH_C_API:BOOL=OFF
 -DTI_BUILD_TESTS:BOOL=OFF
 ```
 
@@ -116,22 +128,36 @@ export LD_LIBRARY_PATH="$VULKAN_SDK/lib:${LD_LIBRARY_PATH:-}"
 export PATH="$VULKAN_SDK/bin:$PATH"
 ```
 
-Install Python build packages and build:
+Install Python build packages:
 
 ```bash
 python -m pip install --upgrade pip build
 python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" ninja numpy
 
-export CMAKE_ARGS="-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CUDA:BOOL=ON -DTI_WITH_LLVM:BOOL=ON -DTI_WITH_C_API:BOOL=ON -DTI_BUILD_TESTS:BOOL=OFF"
-python -I -m build --wheel --no-isolation
+export CMAKE_ARGS="-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CUDA:BOOL=ON -DTI_WITH_LLVM:BOOL=ON -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON -DTI_WITH_C_API:BOOL=OFF -DTI_BUILD_TESTS:BOOL=OFF"
+python scripts/sync_runtime_dependency.py
 ```
 
-The workflow then runs `auditwheel repair`:
+Build the platform runtime wheel once:
+
+```bash
+python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
+```
+
+Build the CPython shim wheel for the active Python interpreter:
+
+```bash
+python -I -m build --wheel --no-isolation -Cinstall.components=python
+```
+
+The workflow then runs `auditwheel repair` on both wheel families:
 
 ```bash
 python -m pip install auditwheel patchelf
 mkdir -p wheelhouse
 auditwheel repair dist/*.whl -w wheelhouse/ --plat manylinux_2_35_x86_64
+mkdir -p wheelhouse-runtime
+auditwheel repair dist-runtime/*.whl -w wheelhouse-runtime/ --plat manylinux_2_35_x86_64
 ```
 
 Ubuntu 22.04 uses glibc 2.35. To produce a lower manylinux tag, build inside a
@@ -160,13 +186,20 @@ Set paths:
 $env:VULKAN_SDK = "C:\VulkanSDK\1.4.304.1"
 $env:PATH = "$env:VULKAN_SDK\Bin;$env:PATH"
 $env:LLVM_DIR = "C:\path\to\dist\taichi-llvm-20\lib\cmake\llvm"
-$env:CMAKE_ARGS = "-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CUDA:BOOL=ON -DTI_WITH_LLVM:BOOL=ON -DTI_WITH_C_API:BOOL=ON -DTI_BUILD_TESTS:BOOL=OFF"
+$env:CMAKE_ARGS = "-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CUDA:BOOL=ON -DTI_WITH_LLVM:BOOL=ON -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON -DTI_WITH_C_API:BOOL=OFF -DTI_BUILD_TESTS:BOOL=OFF"
+python scripts\sync_runtime_dependency.py
 ```
 
-Build:
+Build the platform runtime wheel once:
 
 ```powershell
-python -I -m build --wheel --no-isolation
+python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
+```
+
+Build the CPython shim wheel for the active Python interpreter:
+
+```powershell
+python -I -m build --wheel --no-isolation -Cinstall.components=python
 ```
 
 For local Windows LLVM builds, prefer:

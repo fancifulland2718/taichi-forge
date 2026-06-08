@@ -1,0 +1,64 @@
+[build-system]
+requires = [
+  "scikit-build-core>=0.10",
+  "pybind11>=2.13",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "taichi-forge-runtime"
+dynamic = ["version"]
+description = "Platform native runtime libraries for Taichi Forge."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<4.0"
+authors = [
+  { name = "Taichi Forge contributors" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Topic :: Software Development :: Compilers",
+  "Topic :: Multimedia :: Graphics",
+  "Topic :: Games/Entertainment :: Simulation",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+]
+
+[tool.scikit-build]
+cmake.source-dir = "../.."
+cmake.version = ">=3.20,<4"
+cmake.build-type = "Release"
+build-dir = "../../_skbuild/runtime-{wheel_tag}"
+wheel.packages = ["src/taichi_forge_runtime"]
+wheel.py-api = "py3"
+install.components = ["runtime"]
+build.targets = ["taichi_runtime"]
+wheel.exclude = [
+  "**/__pycache__/**",
+  "**/*.pyc",
+  "**/*.pyo",
+  "**/*.bak",
+  "**/*.bak_*",
+  "**/*.old",
+  "**/*.pdb",
+  "**/*.ilk",
+  "**/*.exp",
+  "**/c_api/**",
+]
+
+[tool.scikit-build.cmake.define]
+TI_VERSION_MAJOR = "0"
+TI_VERSION_MINOR = "4"
+TI_VERSION_PATCH = "1"
+TI_WITH_SPLIT_PYTHON_RUNTIME = "ON"
+TI_WITH_PYTHON = "ON"
+TI_WITH_C_API = "OFF"
+TI_BUILD_TESTS = "OFF"
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "../../version.txt"
+regex = 'v?(?P<version>[0-9]+\.[0-9]+\.[0-9]+(?:[-+.][0-9A-Za-z.-]+)?)'
+result = "{version}"

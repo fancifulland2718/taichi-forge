@@ -5,14 +5,18 @@
 
 ## Wheel 矩阵
 
-发布 workflow 构建：
+发布 workflow 构建两类 wheel：
 
-- Python 3.10、3.11、3.12、3.13、3.14。
-- Windows x86_64。
-- Ubuntu 22.04 x86_64，并通过 `auditwheel` 修复为 `manylinux_2_35_x86_64`。
+- `taichi-forge-runtime`：平台原生 runtime wheel，标签为
+  `py3-none-win_amd64` 和 `py3-none-manylinux_2_35_x86_64`。
+- `taichi-forge`：很小的 CPython pybind shim wheel，覆盖 Python 3.10、3.11、
+  3.12、3.13、3.14，以及 Windows x86_64 和 Linux x86_64。
 
-Forge 当前发布 per-CPython-minor wheel。`pyproject.toml` 中 `wheel.py-api = ""`，因此不
-发布 `abi3` wheel。
+`pip install taichi-forge` 会安装当前 Python 对应的 shim wheel，并通过包依赖拉取匹配的
+`taichi-forge-runtime` wheel。公开调用方式仍是 `import taichi_forge`。
+
+pybind shim 仍是 per-CPython-minor wheel。`pyproject.toml` 中 `wheel.py-api = ""`，因此
+shim 暂不发布 `abi3` wheel。
 
 ## 通用规则
 
@@ -29,7 +33,13 @@ python -I -m build --wheel --no-isolation
 - 使用 `CMAKE_ARGS`，不要使用 `TAICHI_CMAKE_ARGS`。发布 workflow 走 scikit-build-core，
   `TAICHI_CMAKE_ARGS` 是旧 setup.py 构建变量，在这里会被忽略。
 - `LLVM_DIR` 必须指向 LLVM 20 安装中的 `lib/cmake/llvm/LLVMConfig.cmake`。
-- 发布 wheel 配置启用 Vulkan、OpenGL、CUDA、LLVM、C API，并关闭测试二进制。
+- 发布 wheel 配置启用 Vulkan、OpenGL、CUDA 和 LLVM，把原生 runtime 从 CPython shim
+  中拆出，关闭 C API 打包树和测试二进制。C API 属于原生分发产物；需要时应单独构建或
+  单独发布。
+- 修改 `version.txt` 后，发布构建前先运行 `python scripts/sync_runtime_dependency.py`。
+  发布 workflow 会自动执行这一步。
+- PyPI/TestPyPI 发布权限必须同时覆盖两个 project：`taichi-forge` 和
+  `taichi-forge-runtime`。
 
 发布构建的 `CMAKE_ARGS`：
 
@@ -38,7 +48,8 @@ python -I -m build --wheel --no-isolation
 -DTI_WITH_OPENGL:BOOL=ON
 -DTI_WITH_CUDA:BOOL=ON
 -DTI_WITH_LLVM:BOOL=ON
--DTI_WITH_C_API:BOOL=ON
+-DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON
+-DTI_WITH_C_API:BOOL=OFF
 -DTI_BUILD_TESTS:BOOL=OFF
 ```
 
@@ -109,22 +120,36 @@ export LD_LIBRARY_PATH="$VULKAN_SDK/lib:${LD_LIBRARY_PATH:-}"
 export PATH="$VULKAN_SDK/bin:$PATH"
 ```
 
-安装 Python 构建包并构建：
+安装 Python 构建包：
 
 ```bash
 python -m pip install --upgrade pip build
 python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" ninja numpy
 
-export CMAKE_ARGS="-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CUDA:BOOL=ON -DTI_WITH_LLVM:BOOL=ON -DTI_WITH_C_API:BOOL=ON -DTI_BUILD_TESTS:BOOL=OFF"
-python -I -m build --wheel --no-isolation
+export CMAKE_ARGS="-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CUDA:BOOL=ON -DTI_WITH_LLVM:BOOL=ON -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON -DTI_WITH_C_API:BOOL=OFF -DTI_BUILD_TESTS:BOOL=OFF"
+python scripts/sync_runtime_dependency.py
 ```
 
-workflow 随后执行 `auditwheel repair`：
+平台 runtime wheel 只需要构建一次：
+
+```bash
+python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
+```
+
+为当前 Python 解释器构建 CPython shim wheel：
+
+```bash
+python -I -m build --wheel --no-isolation -Cinstall.components=python
+```
+
+workflow 随后对两类 wheel 执行 `auditwheel repair`：
 
 ```bash
 python -m pip install auditwheel patchelf
 mkdir -p wheelhouse
 auditwheel repair dist/*.whl -w wheelhouse/ --plat manylinux_2_35_x86_64
+mkdir -p wheelhouse-runtime
+auditwheel repair dist-runtime/*.whl -w wheelhouse-runtime/ --plat manylinux_2_35_x86_64
 ```
 
 Ubuntu 22.04 使用 glibc 2.35。若需要更低 manylinux tag，应改在对应 manylinux container
@@ -153,13 +178,20 @@ python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2
 $env:VULKAN_SDK = "C:\VulkanSDK\1.4.304.1"
 $env:PATH = "$env:VULKAN_SDK\Bin;$env:PATH"
 $env:LLVM_DIR = "C:\path\to\dist\taichi-llvm-20\lib\cmake\llvm"
-$env:CMAKE_ARGS = "-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CUDA:BOOL=ON -DTI_WITH_LLVM:BOOL=ON -DTI_WITH_C_API:BOOL=ON -DTI_BUILD_TESTS:BOOL=OFF"
+$env:CMAKE_ARGS = "-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CUDA:BOOL=ON -DTI_WITH_LLVM:BOOL=ON -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON -DTI_WITH_C_API:BOOL=OFF -DTI_BUILD_TESTS:BOOL=OFF"
+python scripts\sync_runtime_dependency.py
 ```
 
-构建：
+平台 runtime wheel 只需要构建一次：
 
 ```powershell
-python -I -m build --wheel --no-isolation
+python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
+```
+
+为当前 Python 解释器构建 CPython shim wheel：
+
+```powershell
+python -I -m build --wheel --no-isolation -Cinstall.components=python
 ```
 
 Windows 本地 LLVM 构建推荐：

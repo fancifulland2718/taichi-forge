@@ -16,14 +16,27 @@ option(TI_WITH_VULKAN "Build with the Vulkan backend" OFF)      # wheel-tag: vk
 option(TI_WITH_DX11 "Build with the DX11 backend" OFF)          # wheel-tag: dx11
 option(TI_WITH_DX12 "Build with the DX12 backend" OFF)          # wheel-tag: dx12
 option(TI_WITH_GGUI "Build with GGUI" OFF)                      # wheel-tag: ggui
+option(TI_WITH_SPLIT_PYTHON_RUNTIME
+       "Build taichi_python as a small shim linked against a shared native runtime"
+       OFF)
 
 # Force symbols to be 'hidden' by default so nothing is exported from the Taichi
 # library including the third-party dependencies.
 # As Taichi can be used by external projects, some of the internal dependencies
 # such as Vulkan, ImGui, etc. could be in conflict with the dependencies of those
 # projects.
-set(CMAKE_CXX_VISIBILITY_PRESET hidden)
-set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+#
+# Split Python runtime builds are different: taichi_python is a CPython-specific
+# shim and must resolve C++ symbols from a separate platform shared library.
+# Keep symbol visibility broad for the first split-runtime stage; once the split
+# is validated, this can be tightened with explicit exports/version scripts.
+if(TI_WITH_SPLIT_PYTHON_RUNTIME)
+    set(CMAKE_CXX_VISIBILITY_PRESET default)
+    set(CMAKE_VISIBILITY_INLINES_HIDDEN OFF)
+else()
+    set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+    set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+endif()
 # Suppress warnings from submodules introduced by the above symbol visibility change
 set(CMAKE_POLICY_DEFAULT_CMP0063 NEW)
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
@@ -49,7 +62,11 @@ set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 # defined `SKBUILD_PROJECT_NAME` variable instead.
 if(DEFINED SKBUILD_PROJECT_NAME)
     # scikit-build-core: relative path lands directly at wheel root.
-    set(INSTALL_LIB_DIR taichi_forge/_lib)
+    if(SKBUILD_PROJECT_NAME STREQUAL "taichi-forge-runtime")
+        set(INSTALL_LIB_DIR taichi_forge_runtime/_lib)
+    else()
+        set(INSTALL_LIB_DIR taichi_forge/_lib)
+    endif()
 elseif(DEFINED SKBUILD AND SKBUILD)
     # Legacy scikit-build: absolute staging path.
     set(INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/python/taichi_forge/_lib)
@@ -743,8 +760,37 @@ if(TI_WITH_PYTHON)
         target_compile_definitions(${CORE_WITH_PYBIND_LIBRARY_NAME} PRIVATE -DTI_WITH_GGUI)
     endif()
 
-    target_link_libraries(${CORE_WITH_PYBIND_LIBRARY_NAME} PRIVATE taichi_ui)
-    target_link_libraries(${CORE_WITH_PYBIND_LIBRARY_NAME} PRIVATE ${CORE_LIBRARY_NAME})
+    if(TI_WITH_SPLIT_PYTHON_RUNTIME)
+        set(CORE_PYTHON_RUNTIME_LIBRARY_NAME taichi_runtime)
+        add_library(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} SHARED)
+        target_link_libraries(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PRIVATE taichi_ui)
+        target_link_libraries(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PRIVATE ${CORE_LIBRARY_NAME})
+        target_enable_function_level_linking(${CORE_PYTHON_RUNTIME_LIBRARY_NAME})
+
+        if(WIN32)
+            set_target_properties(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PROPERTIES
+                WINDOWS_EXPORT_ALL_SYMBOLS ON)
+        endif()
+
+        install(TARGETS ${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                RUNTIME DESTINATION ${INSTALL_LIB_DIR}/runtime_native
+                LIBRARY DESTINATION ${INSTALL_LIB_DIR}/runtime_native
+                ARCHIVE DESTINATION ${INSTALL_LIB_DIR}/runtime_native
+                COMPONENT runtime)
+
+        if(WIN32 OR APPLE)
+            target_link_libraries(${CORE_WITH_PYBIND_LIBRARY_NAME} PRIVATE ${CORE_PYTHON_RUNTIME_LIBRARY_NAME})
+        else()
+            # Keep Linux shim wheels free of a direct DT_NEEDED edge to the
+            # large runtime library. Python preloads the runtime with
+            # RTLD_GLOBAL before importing this module so auditwheel does not
+            # copy the runtime back into every CPython shim wheel.
+            add_dependencies(${CORE_WITH_PYBIND_LIBRARY_NAME} ${CORE_PYTHON_RUNTIME_LIBRARY_NAME})
+        endif()
+    else()
+        target_link_libraries(${CORE_WITH_PYBIND_LIBRARY_NAME} PRIVATE taichi_ui)
+        target_link_libraries(${CORE_WITH_PYBIND_LIBRARY_NAME} PRIVATE ${CORE_LIBRARY_NAME})
+    endif()
 
     target_include_directories(${CORE_WITH_PYBIND_LIBRARY_NAME}
       PRIVATE
@@ -782,16 +828,19 @@ if(TI_WITH_PYTHON)
 
     install(TARGETS ${CORE_WITH_PYBIND_LIBRARY_NAME}
             RUNTIME DESTINATION ${INSTALL_LIB_DIR}/core
-            LIBRARY DESTINATION ${INSTALL_LIB_DIR}/core)
+            LIBRARY DESTINATION ${INSTALL_LIB_DIR}/core
+            COMPONENT python)
 endif()
 
 if (NOT APPLE)
     install(FILES ${CMAKE_SOURCE_DIR}/external/cuda_libdevice/slim_libdevice.10.bc
-            DESTINATION ${INSTALL_LIB_DIR}/runtime)
+            DESTINATION ${INSTALL_LIB_DIR}/runtime
+            COMPONENT runtime)
 endif()
 
 if (TI_WITH_AMDGPU)
     file(GLOB AMDGPU_BC_FILES ${CMAKE_SOURCE_DIR}/external/amdgpu_libdevice/*.bc)
     install(FILES ${AMDGPU_BC_FILES}
-            DESTINATION ${INSTALL_LIB_DIR}/runtime)
+            DESTINATION ${INSTALL_LIB_DIR}/runtime
+            COMPONENT runtime)
 endif()

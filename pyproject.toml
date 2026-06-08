@@ -36,6 +36,7 @@ dependencies = [
   "colorama",
   "dill",
   "rich",
+  "taichi-forge-runtime==0.4.1",
 ]
 
 [project.urls]
@@ -57,6 +58,20 @@ cmake.build-type = "Release"
 build-dir = "_skbuild/{wheel_tag}"
 wheel.packages = ["python/taichi_forge"]
 wheel.exclude = [
+  # Keep the default Python wheel focused on import/runtime use. The C API is a
+  # separate native distribution concern and is large enough to dominate PyPI
+  # storage when multiplied by the Python/platform wheel matrix.
+  "taichi_forge/_lib/c_api/**",
+  "**/c_api/**",
+  "**/__pycache__/**",
+  "**/*.pyc",
+  "**/*.pyo",
+  "**/*.bak",
+  "**/*.bak_*",
+  "**/*.old",
+  "**/*.pdb",
+  "**/*.ilk",
+  "**/*.exp",
   "**/libSPIRV-Tools-shared.so",
   "**/libSPIRV-Tools-shared.dll",
 ]
