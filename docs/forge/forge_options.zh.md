@@ -1,6 +1,6 @@
 # Taichi Forge — 编译 / 运行时 / 架构 / 现代化选项一览
 
-> 适用于 **Taichi Forge 0.4.1**。除非特别说明，本文列出的选项均为**可选启用**；未显式启用的功能尽量保留 upstream Taichi 1.7.4 行为。
+> 适用于 **Taichi Forge 0.4.2**。除非特别说明，本文列出的选项均为**可选启用**；未显式启用的功能尽量保留 upstream Taichi 1.7.4 行为。
 
 本文档是本 fork 所有公开新增配置项与工具链变更的**唯一权威清单**。实验性或内部专用 flag 不收录于此。按模块整理的 Forge-only API 符号清单见 [Forge API 参考](forge_api_reference.zh.md)。
 
@@ -90,7 +90,7 @@
 
 ### 2.8 Hash SNode
 
-`hash` SNode 是实验功能，在 Taichi Forge 0.4.1 中默认开启。它可在 CPU、CUDA、Vulkan 上使用，第一次调用 `SNode.hash()` 会提示实验功能警告；如果需要复现 vanilla 兼容的拒绝行为，或隔离回归，可以传入 `hash_snode_experimental=False` 关闭。API 与迁移说明见 [hash_snode.zh.md](hash_snode.zh.md)。
+`hash` SNode 是实验功能，在 Taichi Forge 0.4.2 中默认开启。它可在 CPU、CUDA、Vulkan 上使用，第一次调用 `SNode.hash()` 会提示实验功能警告；如果需要复现 vanilla 兼容的拒绝行为，或隔离回归，可以传入 `hash_snode_experimental=False` 关闭。API 与迁移说明见 [hash_snode.zh.md](hash_snode.zh.md)。
 
 | 参数 | 允许值 / 默认值 | 用途 | 风险与建议 |
 |---|---|---|---|
@@ -129,7 +129,7 @@ PyPI 发布的 wheel 三项均为 ON。
 
 ## 5. SNode 覆盖度扩展
 
-| SNode 类型 | vanilla 1.7.4 Vulkan | Taichi Forge 0.4.1 Vulkan |
+| SNode 类型 | vanilla 1.7.4 Vulkan | Taichi Forge 0.4.2 Vulkan |
 |---|---|---|
 | `dense` | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ |
@@ -145,7 +145,7 @@ Vulkan 稀疏 SNode 用法与语义见 [sparse_snode_on_vulkan.zh.md](sparse_sno
 
 Forge 同步至现代工具链；下表对比 vanilla 1.7.4。
 
-| 组件 | vanilla 1.7.4 | Forge 0.4.1 |
+| 组件 | vanilla 1.7.4 | Forge 0.4.2 |
 |---|---|---|
 | LLVM | 15 | **20.1.7** |
 | Python | 3.7 – 3.12 | **3.10 – 3.14** |

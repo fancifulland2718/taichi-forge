@@ -1,6 +1,6 @@
 # Taichi Forge API Reference
 
-> Applies to **Taichi Forge 0.4.1**. This page lists Forge-only public API
+> Applies to **Taichi Forge 0.4.2**. This page lists Forge-only public API
 > entry points. New options added to Taichi-compatible APIs, such as
 > `ti.init(...)` keywords and `@ti.kernel(...)` keyword options, stay in
 > [Forge options](forge_options.en.md).
