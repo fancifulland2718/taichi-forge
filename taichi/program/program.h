@@ -13,6 +13,7 @@
 #include <stack>
 #include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -2184,6 +2185,8 @@ class TI_DLL_EXPORT Program {
   // could store ProgramImpl rather than Program.
 
  private:
+  void recycle_pending_argpacks();
+
   CompileConfig compile_config_;
 
   uint64 ndarray_writer_counter_{0};
@@ -2218,6 +2221,7 @@ class TI_DLL_EXPORT Program {
   // TODO: Move ndarrays_, argpacks_ and textures_ to be managed by runtime
   std::unordered_map<void *, std::unique_ptr<Ndarray>> ndarrays_;
   std::unordered_map<void *, std::unique_ptr<ArgPack>> argpacks_;
+  std::unordered_set<ArgPack *> argpacks_pending_deletion_;
   std::vector<std::unique_ptr<Texture>> textures_;
 };
 

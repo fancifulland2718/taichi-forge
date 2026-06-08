@@ -45,7 +45,7 @@ independent from upstream Taichi version numbers.
 
 ## Changelog-Oriented Highlights
 
-Current release baseline: `0.4.1`.
+Current release baseline: `0.4.2`.
 
 The README intentionally describes user-visible changes and compatibility
 boundaries instead of detailed benchmark numbers.
@@ -110,6 +110,7 @@ See [Vulkan sparse SNode](docs/forge/sparse_snode_on_vulkan.en.md),
   texture, and packed `u32` frame inputs.
 - Added display statistics APIs so engines can distinguish accepted, submitted,
   dropped, and reused display frames.
+- Fixed some issues in vanilla Taichi as well.
 
 See [Forge API reference](docs/forge/forge_api_reference.en.md),
 [Graph upgrade notes](docs/forge/graph_upgrade_from_taichi_1_7_4.en.md),
@@ -121,6 +122,7 @@ See [Forge API reference](docs/forge/forge_api_reference.en.md),
 English public docs:
 
 - [Building Forge wheels](docs/forge/build_wheels.en.md)
+- [Bug fixes compared with vanilla Taichi](docs/forge/bug_fixes.en.md)
 - [Forge API reference](docs/forge/forge_api_reference.en.md)
 - [Forge options](docs/forge/forge_options.en.md)
 - [Compile and cache guide](docs/forge/cache_compile.en.md)

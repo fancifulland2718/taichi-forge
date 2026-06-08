@@ -1742,6 +1742,7 @@ void GfxRuntime::synchronize_impl(bool check_hash_overflow) {
     recycle_pools_to_free();
   }
   ndarrays_in_use_.clear();
+  argpacks_in_use_.clear();
   // Hash SNodes use a static table. Since there is no device-side grow path,
   // overflow must become a host-visible error at the sync boundary instead of
   // silently returning ambient-zero cells.

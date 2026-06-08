@@ -1,0 +1,21 @@
+# Taichi Forge Bug Fixes
+
+## Fixed Issues
+
+| Area | Fix | User impact |
+| --- | --- | --- |
+| ArgPack lifetime | Fixed premature Python GC of `ti.types.argpack(...)` objects while GPU kernels may still use their runtime allocations. See upstream [#8788](https://github.com/taichi-dev/taichi/issues/8788). | Long-running simulations, reinforcement-learning environments, graph replay, and high-frequency kernel launch loops no longer hit random crashes from ArgPack lifetime races. |
+| Vulkan small-integer fields | Fixed SPIR-V support for `ti.u8` / `ti.i8` / `ti.u16` / `ti.i16` fields on devices that expose the required Vulkan storage capabilities. See upstream [#8758](https://github.com/taichi-dev/taichi/issues/8758). | Color buffers, masks, voxels, compressed state, and image-like data can use small integer storage on the Vulkan backend. |
+| Vector / Matrix ndarray release | Fixed runtime memory not being released when `ti.Vector.ndarray(...)` or `ti.Matrix.ndarray(...)` objects are destroyed. See upstream [#8763](https://github.com/taichi-dev/taichi/issues/8763). | Rendering staging buffers, particle buffers, and test loops that create temporary ndarrays no longer keep growing device memory. |
+| PrefixSumExecutor warning | Fixed the AST warning caused by Python float division inside the internal scan kernel. See upstream [#8777](https://github.com/taichi-dev/taichi/issues/8777). | `ti.algorithms.PrefixSumExecutor`, compact, bucket builder, and other scan-based paths avoid a misleading compile warning. |
+| GGUI `ti.ndarray` image input | Fixed `canvas.set_image()` on `ti.ndarray` image inputs so it no longer has to fall back to a per-frame GPU-to-CPU staging path. | Rendering and simulation visualization can submit device-side ndarray images through a more direct RGBA8 staging path. |
+| GGUI hidden-window submission | Fixed a Windows/Vulkan crash that could happen when a hidden window completed one `canvas.set_image()` / `window.show()` frame and then released window resources. | Headless rendering, CI visualization smoke tests, and simulation screenshots can safely use `show_window=False`. |
+| Vulkan sparse SNode | Fixed early Forge Vulkan sparse SNode issues where inactive cell reads could return nonzero values and full activation of 3D pointer SNodes could lead to device loss. | MPM, SPH, sparse voxel, and brick-based rendering workloads get sparse data-structure semantics that are closer to CPU/CUDA. |
+
+## Notes
+
+- This page lists bug fixes only. Forge-only API and feature contracts are
+  documented in their own pages.
+- For Vulkan sparse SNode behavior, see [Vulkan sparse SNode](sparse_snode_on_vulkan.en.md).
+- For public display-frame APIs, see [Display frame submission](display_frame.en.md).
+- For native algorithm APIs, see [Native algorithms](native_algorithms.en.md).

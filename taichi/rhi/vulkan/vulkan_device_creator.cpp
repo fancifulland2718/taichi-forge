@@ -829,6 +829,9 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       features2.pNext = &shader_8bit_storage_feature;
       vkGetPhysicalDeviceFeatures2KHR(physical_device_, &features2);
 
+      if (shader_8bit_storage_feature.uniformAndStorageBuffer8BitAccess) {
+        caps.set(DeviceCapability::spirv_has_int8_storage, true);
+      }
       *pNextEnd = &shader_8bit_storage_feature;
       pNextEnd = &shader_8bit_storage_feature.pNext;
     }
@@ -837,6 +840,9 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       features2.pNext = &shader_16bit_storage_feature;
       vkGetPhysicalDeviceFeatures2KHR(physical_device_, &features2);
 
+      if (shader_16bit_storage_feature.uniformAndStorageBuffer16BitAccess) {
+        caps.set(DeviceCapability::spirv_has_int16_storage, true);
+      }
       *pNextEnd = &shader_16bit_storage_feature;
       pNextEnd = &shader_16bit_storage_feature.pNext;
     }

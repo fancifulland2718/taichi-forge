@@ -6445,6 +6445,16 @@ class TaskCodegen : public IRVisitor {
   }
 
   spirv::Value get_buffer_value(BufferInfo buffer, DataType dt) {
+    if ((dt->is_primitive(PrimitiveTypeID::i8) ||
+         dt->is_primitive(PrimitiveTypeID::u8)) &&
+        !caps_->get(DeviceCapability::spirv_has_int8_storage)) {
+      TI_ERROR("8-bit scalar storage is not supported by this SPIR-V device.");
+    }
+    if ((dt->is_primitive(PrimitiveTypeID::i16) ||
+         dt->is_primitive(PrimitiveTypeID::u16)) &&
+        !caps_->get(DeviceCapability::spirv_has_int16_storage)) {
+      TI_ERROR("16-bit scalar storage is not supported by this SPIR-V device.");
+    }
     auto type = ir_->get_primitive_type(dt);
     auto key = std::make_pair(buffer, type.id);
 

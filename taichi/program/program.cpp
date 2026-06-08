@@ -4605,6 +4605,7 @@ SNode *Program::get_snode_root(int tree_id) {
 
 void Program::synchronize() {
   program_impl_->synchronize();
+  recycle_pending_argpacks();
 }
 
 StreamSemaphore Program::flush() {
@@ -4794,6 +4795,29 @@ ArgPack *Program::create_argpack(const DataType dt) {
   return pack_ptr;
 }
 
+void Program::recycle_pending_argpacks() {
+  if (argpacks_pending_deletion_.empty()) {
+    return;
+  }
+
+  for (auto it = argpacks_pending_deletion_.begin();
+       it != argpacks_pending_deletion_.end();) {
+    ArgPack *argpack = *it;
+    auto map_it = argpacks_.find(argpack);
+    if (map_it == argpacks_.end()) {
+      it = argpacks_pending_deletion_.erase(it);
+      continue;
+    }
+
+    if (!program_impl_->used_in_kernel(argpack->argpack_alloc_.alloc_id)) {
+      argpacks_.erase(map_it);
+      it = argpacks_pending_deletion_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 void Program::delete_ndarray(Ndarray *ndarray) {
   // [Note] Ndarray memory deallocation
   // Ndarray's memory allocation is managed by Taichi and Python can control
@@ -4824,10 +4848,19 @@ void Program::delete_argpack(ArgPack *argpack) {
   // runtime instead of this giant program and it should be freed when:
   // - Python GC signals taichi that it's no longer useful
   // - All kernels using it are executed.
-  if (argpacks_.count(argpack) &&
-      !program_impl_->used_in_kernel(argpack->argpack_alloc_.alloc_id)) {
-    argpacks_.erase(argpack);
+  auto it = argpacks_.find(argpack);
+  if (it == argpacks_.end()) {
+    return;
   }
+
+  const bool used_by_tracked_backend =
+      program_impl_->used_in_kernel(argpack->argpack_alloc_.alloc_id);
+  if (used_by_tracked_backend || arch_is_gpu(compile_config().arch)) {
+    argpacks_pending_deletion_.insert(argpack);
+    return;
+  }
+
+  argpacks_.erase(it);
 }
 
 Texture *Program::create_texture(BufferFormat buffer_format,

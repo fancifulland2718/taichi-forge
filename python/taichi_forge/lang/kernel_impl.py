@@ -1213,6 +1213,7 @@ class Kernel:
             if isinstance(needed, ArgPackType):
                 if not isinstance(v, ArgPack):
                     raise TaichiRuntimeTypeError.get(indices, str(needed), str(provided))
+                tmps.append(v)
                 idx_new = 0
                 for j, (name, anno) in enumerate(needed.members.items()):
                     idx_new += recursive_set_args(anno, type(v[name]), v[name], indices + (idx_new,))

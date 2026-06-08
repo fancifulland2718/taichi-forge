@@ -262,6 +262,13 @@ class Ndarray:
         if prog is not None and arr is not None:
             prog.delete_ndarray(arr)
 
+    def __del__(self):
+        if impl is not None:
+            try:
+                self._delete_runtime_ndarray()
+            except Exception:
+                pass
+
     def get_type(self):
         return NdarrayTypeMetadata(self.element_type, self.shape, self.grad is not None)
 
@@ -605,13 +612,6 @@ class ScalarNdarray(Ndarray):
         self.shape = tuple(self.arr.shape)
         self.element_type = dtype
 
-    def __del__(self):
-        if impl is not None:
-            try:
-                self._delete_runtime_ndarray()
-            except Exception:
-                pass
-
     @property
     def element_shape(self):
         return ()
@@ -869,13 +869,6 @@ class StructNdarray(Ndarray):
         self._member_view_cache = {}
         if not zero_fill_on_create:
             self.fill(0)
-
-    def __del__(self):
-        if impl is not None:
-            try:
-                self._delete_runtime_ndarray()
-            except Exception:
-                pass
 
     @property
     def element_shape(self):

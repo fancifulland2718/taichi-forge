@@ -61,6 +61,16 @@ void IRBuilder::init_header() {
   if (caps_->get(cap::spirv_has_int16)) {
     ib_.begin(spv::OpCapability).add(spv::CapabilityInt16).commit(&header_);
   }
+  if (caps_->get(cap::spirv_has_int8_storage)) {
+    ib_.begin(spv::OpCapability)
+        .add(spv::CapabilityUniformAndStorageBuffer8BitAccess)
+        .commit(&header_);
+  }
+  if (caps_->get(cap::spirv_has_int16_storage)) {
+    ib_.begin(spv::OpCapability)
+        .add(spv::CapabilityUniformAndStorageBuffer16BitAccess)
+        .commit(&header_);
+  }
   if (caps_->get(cap::spirv_has_int64)) {
     ib_.begin(spv::OpCapability).add(spv::CapabilityInt64).commit(&header_);
   }
@@ -112,6 +122,18 @@ void IRBuilder::init_header() {
   if (caps_->get(cap::spirv_has_variable_ptr)) {
     ib_.begin(spv::OpExtension)
         .add("SPV_KHR_variable_pointers")
+        .commit(&header_);
+  }
+
+  if (caps_->get(cap::spirv_has_int8_storage)) {
+    ib_.begin(spv::OpExtension)
+        .add("SPV_KHR_8bit_storage")
+        .commit(&header_);
+  }
+
+  if (caps_->get(cap::spirv_has_int16_storage)) {
+    ib_.begin(spv::OpExtension)
+        .add("SPV_KHR_16bit_storage")
         .commit(&header_);
   }
 

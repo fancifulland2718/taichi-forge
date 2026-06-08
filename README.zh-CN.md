@@ -34,7 +34,7 @@ Forge 主要以 vanilla Taichi 1.7.4 的公开 API 作为兼容参考。Forge �
 
 ## 按 Changelog 顺序的功能说明
 
-当前 release baseline：`0.4.1`。
+当前 release baseline：`0.4.2`。
 
 README 只说明用户可见变化和兼容边界，不列具体 benchmark 数字。
 
@@ -75,6 +75,7 @@ README 只说明用户可见变化和兼容边界，不列具体 benchmark 数�
 - native 算法覆盖从 sort 扩展到更多 primitive。公开算法入口包括 `PrefixSumExecutor.run()`、`experimental_compact()`、`experimental_reduce()`、`experimental_histogram()`、`experimental_transform()`、`experimental_gather()`、`experimental_scatter()`、`experimental_scatter_add()`、`experimental_bucket_builder()`、`experimental_grouped_reduce()`，并配套可复用 workspace。
 - 将 `canvas.set_image()` 形式化为显示帧提交链路，增加 `ti.ui.DisplayFrame` 和 `Canvas.submit_frame(...)`，用于 display-ready host、texture 和 packed `u32` frame 输入。
 - 增加 display stats API，使引擎可以区分 accepted、submitted、dropped、reused 等显示帧状态。
+- vanilla taichi 中一些 issues 的修复。
 
 参考：[Forge API 参考](docs/forge/forge_api_reference.zh.md)、
 [Graph 升级说明](docs/forge/graph_upgrade_from_taichi_1_7_4.zh.md)、
@@ -86,6 +87,7 @@ README 只说明用户可见变化和兼容边界，不列具体 benchmark 数�
 中文公开文档：
 
 - [构建 Forge wheel](docs/forge/build_wheels.zh.md)
+- [相比 vanilla Taichi 的 bug 修复](docs/forge/bug_fixes.zh.md)
 - [Forge API 参考](docs/forge/forge_api_reference.zh.md)
 - [Forge 选项](docs/forge/forge_options.zh.md)
 - [编译与缓存说明](docs/forge/cache_compile.zh.md)

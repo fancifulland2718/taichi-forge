@@ -921,7 +921,7 @@ def scan_add_inclusive_ndarray(
         block.sync()
 
         if warp_id == 0 and lane_id == 0:
-            for k in range(1, BLOCK_SZ / WARP_SZ):
+            for k in range(1, BLOCK_SZ // WARP_SZ):
                 pad_shared[k] += pad_shared[k - 1]
         block.sync()
 
@@ -1010,7 +1010,7 @@ def scan_add_inclusive(
 
         # Inter-warp scan, use the first thread in the first warp
         if warp_id == 0 and lane_id == 0:
-            for k in range(1, BLOCK_SZ / WARP_SZ):
+            for k in range(1, BLOCK_SZ // WARP_SZ):
                 pad_shared[k] += pad_shared[k - 1]
         block.sync()
 
@@ -1049,7 +1049,7 @@ def scan_add_inclusive_cuda(arr_in: template(), in_beg: i32, in_end: i32, single
         block.sync()
 
         if warp_id == 0 and lane_id == 0:
-            for k in range(1, BLOCK_SZ / WARP_SZ):
+            for k in range(1, BLOCK_SZ // WARP_SZ):
                 pad_shared[k] += pad_shared[k - 1]
         block.sync()
 
