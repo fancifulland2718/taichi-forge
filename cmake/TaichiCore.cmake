@@ -21,6 +21,10 @@ option(TI_WITH_SPLIT_PYTHON_RUNTIME
        OFF)
 set(TI_PREBUILT_PYTHON_RUNTIME_DIR ""
     CACHE PATH "Directory containing a prebuilt split Python runtime library for shim-only builds")
+set(TI_WITH_PREBUILT_PYTHON_RUNTIME OFF)
+if(TI_WITH_SPLIT_PYTHON_RUNTIME AND TI_PREBUILT_PYTHON_RUNTIME_DIR)
+    set(TI_WITH_PREBUILT_PYTHON_RUNTIME ON)
+endif()
 
 # Force symbols to be 'hidden' by default so nothing is exported from the Taichi
 # library including the third-party dependencies.
@@ -118,7 +122,8 @@ if(TI_WITH_VULKAN)
     set(TI_WITH_GGUI ON)
 endif()
 
-if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/glad/src/gl.c")
+if (NOT TI_WITH_PREBUILT_PYTHON_RUNTIME AND
+        NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/glad/src/gl.c")
     set(TI_WITH_OPENGL OFF)
     message(WARNING "external/glad submodule not detected. Settings TI_WITH_OPENGL to OFF.")
 endif()
@@ -133,6 +138,7 @@ if(NOT TI_WITH_CUDA)
     set(TI_WITH_CUDA_TOOLKIT OFF)
 endif()
 
+if(NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
 file(GLOB TAICHI_CORE_SOURCE
     "taichi/analysis/*.cpp" "taichi/analysis/*.h"
     "taichi/ir/*"
@@ -721,12 +727,15 @@ foreach (source IN LISTS TAICHI_CORE_SOURCE)
     string(REPLACE "/" "\\" source_path_msvc "${source_path}")
     source_group("${source_path_msvc}" FILES "${source}")
 endforeach ()
+endif()
 
 if(TI_WITH_PYTHON)
     # TODO Use TI_WITH_UI to guard the compilation of this target.
     # This requires refactoring on the python/export_*.cpp as well as better
     # error message on the Python side.
-    add_subdirectory(taichi/ui)
+    if(NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
+        add_subdirectory(taichi/ui)
+    endif()
 
     message("PYTHON_LIBRARIES: " ${PYTHON_LIBRARIES})
     set(CORE_WITH_PYBIND_LIBRARY_NAME taichi_python)
@@ -751,7 +760,7 @@ if(TI_WITH_PYTHON)
         endif()
     endif()
 
-    if (TI_WITH_BACKTRACE)
+    if (TI_WITH_BACKTRACE AND NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
         # Defined by external/backward-cpp:
         # This will add libraries, definitions and include directories needed by backward
         # by setting each property on the target.
@@ -760,6 +769,23 @@ if(TI_WITH_PYTHON)
 
     if(TI_WITH_GGUI)
         target_compile_definitions(${CORE_WITH_PYBIND_LIBRARY_NAME} PRIVATE -DTI_WITH_GGUI)
+    endif()
+    if(TI_WITH_PREBUILT_PYTHON_RUNTIME)
+        foreach(_ti_backend_define IN ITEMS
+            TI_WITH_LLVM
+            TI_WITH_CUDA
+            TI_WITH_CUDA_TOOLKIT
+            TI_WITH_AMDGPU
+            TI_WITH_METAL
+            TI_WITH_OPENGL
+            TI_WITH_VULKAN
+            TI_WITH_DX11
+            TI_WITH_DX12)
+            if(${_ti_backend_define})
+                target_compile_definitions(${CORE_WITH_PYBIND_LIBRARY_NAME}
+                    PRIVATE -D${_ti_backend_define})
+            endif()
+        endforeach()
     endif()
 
     if(TI_WITH_SPLIT_PYTHON_RUNTIME)

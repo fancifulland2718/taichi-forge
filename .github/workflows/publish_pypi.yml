@@ -202,6 +202,18 @@ jobs:
           cat version.txt
           python scripts/sync_runtime_dependency.py
 
+      - name: Download prebuilt runtime link artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-link-linux
+          path: runtime-link
+
+      - name: Configure prebuilt runtime for shim
+        shell: bash
+        run: |
+          runtime_dir="$(realpath runtime-link)"
+          echo "CMAKE_ARGS=${CMAKE_ARGS} -DTI_PREBUILT_PYTHON_RUNTIME_DIR=${runtime_dir}" >> "$GITHUB_ENV"
+
       - name: Build wheel
         # `python -I -m build` runs in isolated mode, which drops cwd from
         # sys.path[0] so the repo-local build.py does not shadow the PyPI
@@ -317,6 +329,40 @@ jobs:
       - name: Build runtime wheel
         run: |
           python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
+
+      - name: Collect runtime link artifact
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/runtime-link"
+          mkdir -p "$stage"
+
+          roots=()
+          for path in _skbuild runtimes dist-runtime; do
+            if [[ -d "$path" ]]; then
+              roots+=("$path")
+            fi
+          done
+          if [[ "${#roots[@]}" -eq 0 ]]; then
+            echo "::error::No runtime artifact search roots exist after runtime build."
+            exit 1
+          fi
+
+          runtime_so="$(find "${roots[@]}" -type f -name 'libtaichi_runtime.so' | sort | head -n 1)"
+          if [[ -z "$runtime_so" ]]; then
+            echo "::error::Could not find libtaichi_runtime.so after runtime build. Searched: ${roots[*]}"
+            exit 1
+          fi
+
+          echo "Found runtime SO: $runtime_so"
+          cp "$runtime_so" "$stage/libtaichi_runtime.so"
+          ls -la "$stage"
+
+      - name: Upload runtime link artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-link-linux
+          path: ${{ runner.temp }}/runtime-link/*
+          if-no-files-found: error
 
       - name: Audit runtime wheel
         run: |
