@@ -523,22 +523,31 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP "runtime-link"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
-          $dll = Get-ChildItem -Path _skbuild -Recurse -File -Filter taichi_runtime.dll |
+          $searchRoots = @("_skbuild", "runtimes", "dist-runtime") |
+            Where-Object { Test-Path $_ }
+          if (-not $searchRoots) {
+            Write-Error "No runtime artifact search roots exist after runtime build."
+            exit 1
+          }
+
+          $dll = Get-ChildItem -Path $searchRoots -Recurse -File -Filter taichi_runtime.dll |
             Sort-Object FullName |
             Select-Object -First 1
-          $lib = Get-ChildItem -Path _skbuild -Recurse -File -Filter taichi_runtime.lib |
+          $lib = Get-ChildItem -Path $searchRoots -Recurse -File -Filter taichi_runtime.lib |
             Sort-Object FullName |
             Select-Object -First 1
 
           if (-not $dll) {
-            Write-Error "Could not find taichi_runtime.dll in _skbuild after runtime build."
+            Write-Error "Could not find taichi_runtime.dll after runtime build. Searched: $($searchRoots -join ', ')"
             exit 1
           }
           if (-not $lib) {
-            Write-Error "Could not find taichi_runtime.lib in _skbuild after runtime build."
+            Write-Error "Could not find taichi_runtime.lib after runtime build. Searched: $($searchRoots -join ', ')"
             exit 1
           }
 
+          Write-Host "Found runtime DLL: $($dll.FullName)"
+          Write-Host "Found runtime import library: $($lib.FullName)"
           Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $stage "taichi_runtime.dll")
           Copy-Item -LiteralPath $lib.FullName -Destination (Join-Path $stage "taichi_runtime.lib")
           Get-ChildItem -Path $stage
