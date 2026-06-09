@@ -142,6 +142,11 @@ jobs:
         run: |
           python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 
+      - name: Repair runtime wheel contents
+        run: |
+          set -euo pipefail
+          python scripts/repair_runtime_wheel.py --wheel-dir dist-runtime --platform linux
+
       - name: Validate runtime wheel contents
         run: |
           set -euo pipefail
@@ -156,8 +161,10 @@ jobs:
           wheel = wheels[0]
           with ZipFile(wheel) as zf:
               names = zf.namelist()
-          runtime_libs = [name for name in names if name.endswith("/libtaichi_runtime.so")]
-          if len(runtime_libs) != 1:
+          expected = "taichi_forge_runtime/_lib/runtime_native/libtaichi_runtime.so"
+          runtime_libs = [name for name in names if name == expected]
+          wrong_entries = [name for name in names if name.startswith("taichi_forge/_lib/")]
+          if len(runtime_libs) != 1 or wrong_entries:
               print(f"Runtime wheel contents from {wheel}:")
               for name in names:
                   if "taichi_runtime" in name or "_lib/" in name:
@@ -167,7 +174,10 @@ jobs:
                   print("Built runtime libraries under _skbuild:")
                   for path in built:
                       print(f"  {path}")
-              raise SystemExit(f"Expected one libtaichi_runtime.so in runtime wheel, found {runtime_libs}")
+              raise SystemExit(
+                  f"Expected {expected} and no taichi_forge/_lib entries; "
+                  f"found runtime_libs={runtime_libs}, wrong_entries={wrong_entries}"
+              )
           print(f"Runtime wheel native library: {runtime_libs[0]}")
           PY
 
@@ -270,6 +280,11 @@ jobs:
         run: |
           python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 
+      - name: Repair runtime wheel contents
+        shell: pwsh
+        run: |
+          python scripts/repair_runtime_wheel.py --wheel-dir dist-runtime --platform windows
+
       - name: Validate runtime wheel contents
         shell: pwsh
         run: |
@@ -284,16 +299,19 @@ jobs:
           wheel = wheels[0]
           with ZipFile(wheel) as zf:
               names = zf.namelist()
-          runtime_dlls = [name for name in names if name.endswith("/taichi_runtime.dll")]
-          runtime_libs = [name for name in names if name.endswith("/taichi_runtime.lib")]
-          if len(runtime_dlls) != 1 or len(runtime_libs) != 1:
+          expected_dll = "taichi_forge_runtime/_lib/runtime_native/taichi_runtime.dll"
+          expected_lib = "taichi_forge_runtime/_lib/runtime_native/taichi_runtime.lib"
+          runtime_dlls = [name for name in names if name == expected_dll]
+          runtime_libs = [name for name in names if name == expected_lib]
+          wrong_entries = [name for name in names if name.startswith("taichi_forge/_lib/")]
+          if len(runtime_dlls) != 1 or len(runtime_libs) != 1 or wrong_entries:
               print(f"Runtime wheel contents from {wheel}:")
               for name in names:
                   if "taichi_runtime" in name or "_lib/" in name:
                       print(f"  {name}")
               raise SystemExit(
-                  "Expected one taichi_runtime.dll and one taichi_runtime.lib "
-                  f"in runtime wheel, found dlls={runtime_dlls}, libs={runtime_libs}"
+                  f"Expected {expected_dll}, {expected_lib}, and no taichi_forge/_lib entries; "
+                  f"found dlls={runtime_dlls}, libs={runtime_libs}, wrong_entries={wrong_entries}"
               )
           print(f"Runtime wheel native DLL: {runtime_dlls[0]}")
           print(f"Runtime wheel import library: {runtime_libs[0]}")

@@ -21,6 +21,8 @@ option(TI_WITH_SPLIT_PYTHON_RUNTIME
        OFF)
 set(TI_PREBUILT_PYTHON_RUNTIME_DIR ""
     CACHE PATH "Directory containing a prebuilt split Python runtime library for shim-only builds")
+set(TI_PYTHON_INSTALL_PACKAGE ""
+    CACHE STRING "Python package directory that receives installed Taichi native libraries")
 set(TI_WITH_PREBUILT_PYTHON_RUNTIME OFF)
 if(TI_WITH_SPLIT_PYTHON_RUNTIME AND TI_PREBUILT_PYTHON_RUNTIME_DIR)
     set(TI_WITH_PREBUILT_PYTHON_RUNTIME ON)
@@ -66,9 +68,12 @@ set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 # and the wheel ships without `taichi_forge._lib.core`, breaking
 # `import taichi_forge`. Detect scikit-build-core via its uniquely
 # defined `SKBUILD_PROJECT_NAME` variable instead.
-if(DEFINED SKBUILD_PROJECT_NAME)
+if(TI_PYTHON_INSTALL_PACKAGE)
+    set(INSTALL_LIB_DIR ${TI_PYTHON_INSTALL_PACKAGE}/_lib)
+elseif(DEFINED SKBUILD_PROJECT_NAME)
     # scikit-build-core: relative path lands directly at wheel root.
-    if(SKBUILD_PROJECT_NAME STREQUAL "taichi-forge-runtime")
+    string(REPLACE "_" "-" _ti_skbuild_project_name "${SKBUILD_PROJECT_NAME}")
+    if(_ti_skbuild_project_name STREQUAL "taichi-forge-runtime")
         set(INSTALL_LIB_DIR taichi_forge_runtime/_lib)
     else()
         set(INSTALL_LIB_DIR taichi_forge/_lib)
