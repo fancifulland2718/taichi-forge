@@ -4,6 +4,11 @@
 #include <vector>
 #include "taichi/ui/utils/utils.h"
 
+#ifndef GLFW_INCLUDE_NONE
+#define GLFW_INCLUDE_NONE
+#endif
+#include <GLFW/glfw3.h>
+
 namespace taichi::ui {
 
 class InputHandler {
