@@ -159,7 +159,7 @@ jobs:
   build_windows_runtime:
     name: Windows runtime wheel
     needs: resolve_version
-    runs-on: windows-latest
+    runs-on: windows-2022
     env:
       CMAKE_ARGS: >-
         -DTI_WITH_VULKAN:BOOL=ON
