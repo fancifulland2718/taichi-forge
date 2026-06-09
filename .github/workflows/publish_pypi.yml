@@ -35,6 +35,10 @@ on:
         description: "Version (e.g. 1.8.0 or 1.8.0.dev20260424); leaves empty for whatever is in version.txt"
         required: false
         default: ""
+      runtime_version:
+        description: "taichi-forge-runtime version to depend on and link against; leaves empty to match version"
+        required: false
+        default: ""
       publish:
         description: "Upload to PyPI after building (true/false)"
         required: false
@@ -68,6 +72,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.set.outputs.version }}
+      runtime_version: ${{ steps.set.outputs.runtime_version }}
       is_tag: ${{ steps.set.outputs.is_tag }}
     steps:
       - uses: actions/checkout@v4
@@ -85,8 +90,16 @@ jobs:
             ver="$(tr -d ' \t\n' < version.txt)"
             echo "is_tag=false" >> "$GITHUB_OUTPUT"
           fi
+          if [[ -n "${{ github.event.inputs.runtime_version }}" ]]; then
+            runtime_ver="${{ github.event.inputs.runtime_version }}"
+            runtime_ver="${runtime_ver#v}"
+          else
+            runtime_ver="$ver"
+          fi
           echo "Resolved version: $ver"
+          echo "Resolved runtime version: $runtime_ver"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "runtime_version=$runtime_ver" >> "$GITHUB_OUTPUT"
 
   build_linux:
     name: Linux wheel (py${{ matrix.python }})
@@ -197,6 +210,8 @@ jobs:
 
       - name: Override version
         shell: bash
+        env:
+          TAICHI_FORGE_RUNTIME_VERSION: ${{ needs.resolve_version.outputs.runtime_version }}
         run: |
           echo -n "${{ needs.resolve_version.outputs.version }}" > version.txt
           cat version.txt
@@ -206,7 +221,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          runtime_version="${{ needs.resolve_version.outputs.version }}"
+          runtime_version="${{ needs.resolve_version.outputs.runtime_version }}"
           index_args=()
           if [[ "${{ needs.resolve_version.outputs.is_tag }}" != "true" && "${{ github.event.inputs.target }}" == "testpypi" ]]; then
             index_args=(--index-url https://test.pypi.org/simple/)
@@ -372,6 +387,8 @@ jobs:
 
       - name: Override version
         shell: pwsh
+        env:
+          TAICHI_FORGE_RUNTIME_VERSION: ${{ needs.resolve_version.outputs.runtime_version }}
         run: |
           Set-Content -Path version.txt -NoNewline -Value "${{ needs.resolve_version.outputs.version }}"
           Get-Content version.txt
@@ -380,7 +397,7 @@ jobs:
       - name: Download runtime wheel for shim link
         shell: pwsh
         run: |
-          $runtimeVersion = "${{ needs.resolve_version.outputs.version }}"
+          $runtimeVersion = "${{ needs.resolve_version.outputs.runtime_version }}"
           New-Item -ItemType Directory -Force -Path runtime-wheel, runtime-link | Out-Null
 
           $indexArgs = @()
