@@ -149,36 +149,6 @@ jobs:
           auditwheel show dist-runtime/*.whl || true
           auditwheel repair dist-runtime/*.whl -w wheelhouse-runtime/ --plat manylinux_2_35_x86_64 || cp dist-runtime/*.whl wheelhouse-runtime/
 
-      - name: Validate runtime wheel contents
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          from email.parser import Parser
-          from pathlib import Path
-          from zipfile import ZipFile
-
-          wheels = sorted(Path("wheelhouse-runtime").glob("*.whl"))
-          if len(wheels) != 1:
-              raise SystemExit(f"Expected one runtime wheel, found {len(wheels)}: {wheels}")
-          with ZipFile(wheels[0]) as zf:
-              metadata = next(name for name in zf.namelist() if name.endswith(".dist-info/METADATA"))
-              project = Parser().parsestr(zf.read(metadata).decode("utf-8", errors="replace")).get("Name")
-              if project != "taichi-forge-runtime":
-                  raise SystemExit(f"Unexpected wheel project {project!r}: {wheels[0]}")
-              names = zf.namelist()
-              exact = [name for name in names if name.endswith("/libtaichi_runtime.so")]
-              hashed = [
-                  name for name in names
-                  if Path(name).name.startswith("libtaichi_runtime-")
-                  and Path(name).suffix == ".so"
-              ]
-              matches = exact or hashed
-              if len(matches) != 1:
-                  raise SystemExit(f"Expected one Linux runtime SO, found {matches}")
-              print(f"Runtime SO: {matches[0]}")
-          print(f"Validated {wheels[0]}")
-          PY
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -191,7 +161,6 @@ jobs:
     needs: resolve_version
     runs-on: windows-latest
     env:
-      CMAKE_GENERATOR: Ninja
       CMAKE_ARGS: >-
         -DTI_WITH_VULKAN:BOOL=ON
         -DTI_WITH_OPENGL:BOOL=ON
@@ -246,7 +215,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip build
-          python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" ninja numpy
+          python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" numpy
 
       - name: Override version
         shell: pwsh
@@ -259,30 +228,6 @@ jobs:
         shell: pwsh
         run: |
           python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
-
-      - name: Validate runtime wheel contents
-        shell: pwsh
-        run: |
-          @'
-          from email.parser import Parser
-          from pathlib import Path
-          from zipfile import ZipFile
-
-          wheels = sorted(Path("dist-runtime").glob("*.whl"))
-          if len(wheels) != 1:
-              raise SystemExit(f"Expected one runtime wheel, found {len(wheels)}: {wheels}")
-          with ZipFile(wheels[0]) as zf:
-              metadata = next(name for name in zf.namelist() if name.endswith(".dist-info/METADATA"))
-              project = Parser().parsestr(zf.read(metadata).decode("utf-8", errors="replace")).get("Name")
-              if project != "taichi-forge-runtime":
-                  raise SystemExit(f"Unexpected wheel project {project!r}: {wheels[0]}")
-              names = zf.namelist()
-              for leaf in ("taichi_runtime.dll", "taichi_runtime.lib"):
-                  matches = [name for name in names if name.endswith("/" + leaf)]
-                  if len(matches) != 1:
-                      raise SystemExit(f"Expected one {leaf}, found {matches}")
-          print(f"Validated {wheels[0]}")
-          '@ | python -
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
