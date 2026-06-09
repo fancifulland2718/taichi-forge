@@ -1,6 +1,6 @@
 # ./taichi/codegen/spirv/CMakeLists.txt
 
-add_library(spirv_codegen)
+ti_add_native_library(spirv_codegen)
 target_sources(spirv_codegen
   PRIVATE
     kernel_utils.cpp

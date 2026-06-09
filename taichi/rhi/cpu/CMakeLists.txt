@@ -1,7 +1,7 @@
 # ./taichi/rhi/cpu/CMakeLists.txt
 
 set(CPU_RHI cpu_rhi)
-add_library(${CPU_RHI})
+ti_add_native_library(${CPU_RHI})
 target_sources(${CPU_RHI}
   PRIVATE
     cpu_device.cpp

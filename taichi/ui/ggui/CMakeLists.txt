@@ -1,6 +1,10 @@
 # ./taichi/ui/ggui/CMakeLists.txt
 
 add_library(taichi_ui_ggui OBJECT)
+if(WIN32 AND TI_WITH_SPLIT_PYTHON_RUNTIME AND NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
+  target_compile_definitions(taichi_ui_ggui
+    PRIVATE TI_WITH_SPLIT_PYTHON_RUNTIME TI_BUILDING_PYTHON_RUNTIME)
+endif()
 target_sources(taichi_ui_ggui
   PRIVATE
     app_context.cpp

@@ -1,6 +1,6 @@
 # ./taichi/codegen/amdgpu/CMakeLists.txt
 
-add_library(amdgpu_codegen)
+ti_add_native_library(amdgpu_codegen)
 target_sources(amdgpu_codegen
   PRIVATE
     codegen_amdgpu.cpp

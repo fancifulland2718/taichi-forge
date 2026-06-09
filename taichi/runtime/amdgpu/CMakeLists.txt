@@ -1,6 +1,6 @@
 # ./taichi/runtime/amdgpu/CMakeLists.txt
 
-add_library(amdgpu_runtime)
+ti_add_native_library(amdgpu_runtime)
 target_sources(amdgpu_runtime
   PRIVATE
     jit_amdgpu.cpp

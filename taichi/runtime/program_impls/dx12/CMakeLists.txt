@@ -1,6 +1,6 @@
 # ./taichi/runtime/program_impls/dx12/CMakeLists.txt
 
-add_library(dx12_program_impl)
+ti_add_native_library(dx12_program_impl)
 target_sources(dx12_program_impl
   PRIVATE
     dx12_program.cpp

@@ -1,7 +1,7 @@
 # ./taichi/rhi/vulkan/CMakeLists.txt
 
 set(VULKAN_RHI vulkan_rhi)
-add_library(${VULKAN_RHI})
+ti_add_native_library(${VULKAN_RHI})
 target_sources(${VULKAN_RHI}
   PRIVATE
     vulkan_api.cpp

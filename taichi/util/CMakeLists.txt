@@ -1,6 +1,6 @@
 # ./taichi/util/CMakeLists.txt
 
-add_library(taichi_util)
+ti_add_native_library(taichi_util)
 target_sources(taichi_util
   PRIVATE
     bit.cpp

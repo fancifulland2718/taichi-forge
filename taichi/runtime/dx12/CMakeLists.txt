@@ -1,6 +1,6 @@
 # ./taichi/runtime/dx12/CMakeLists.txt
 
-add_library(dx12_runtime)
+ti_add_native_library(dx12_runtime)
 target_sources(dx12_runtime
   PRIVATE
     aot_module_builder_impl.cpp

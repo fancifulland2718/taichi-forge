@@ -1,6 +1,6 @@
 # ./taichi/runtime/program_impls/vulkan/CMakeLists.txt
 
-add_library(vulkan_program_impl)
+ti_add_native_library(vulkan_program_impl)
 target_sources(vulkan_program_impl
   PRIVATE
     vulkan_program.cpp

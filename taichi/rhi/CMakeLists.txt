@@ -1,7 +1,7 @@
 # ./taichi/rhi/CMakeLists.txt
 
 set(TAICHI_DEVICE_API ti_device_api)
-add_library(${TAICHI_DEVICE_API} STATIC)
+ti_add_native_library(${TAICHI_DEVICE_API})
 target_sources(${TAICHI_DEVICE_API}
   PRIVATE
     arch.cpp

@@ -1,6 +1,6 @@
 # ./taichi/runtime/program_impls/llvm/CMakeLists.txt
 
-add_library(llvm_program_impl)
+ti_add_native_library(llvm_program_impl)
 target_sources(llvm_program_impl
   PRIVATE
     llvm_program.cpp

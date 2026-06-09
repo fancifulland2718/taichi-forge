@@ -1,6 +1,6 @@
 # ./taichi/runtime/program_impls/metal/CMakeLists.txt
 
-add_library(metal_program_impl)
+ti_add_native_library(metal_program_impl)
 target_sources(metal_program_impl
   PRIVATE
     metal_program.cpp

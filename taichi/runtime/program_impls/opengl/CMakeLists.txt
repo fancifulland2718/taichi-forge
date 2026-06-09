@@ -1,6 +1,6 @@
 # ./taichi/runtime/program_impls/opengl/CMakeLists.txt
 
-add_library(opengl_program_impl)
+ti_add_native_library(opengl_program_impl)
 target_sources(opengl_program_impl
   PRIVATE
     opengl_program.cpp

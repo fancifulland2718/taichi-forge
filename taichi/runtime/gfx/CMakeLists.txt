@@ -6,7 +6,7 @@
 # 同时 GfxRuntime 不持有 node_allocators_，作为 ABI fallback 保留。
 option(TI_WITH_VULKAN_POINTER "Enable pointer-SNode-on-Vulkan allocator (Route B)" ON)
 
-add_library(gfx_runtime)
+ti_add_native_library(gfx_runtime)
 target_sources(gfx_runtime
   PRIVATE
     runtime.cpp

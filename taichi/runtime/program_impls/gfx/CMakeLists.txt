@@ -1,6 +1,6 @@
 # ./taichi/runtime/program_impls/gfx/CMakeLists.txt
 
-add_library(gfx_program_impl)
+ti_add_native_library(gfx_program_impl)
 target_sources(gfx_program_impl
         PRIVATE
         gfx_program.cpp

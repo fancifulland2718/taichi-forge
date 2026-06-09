@@ -1,6 +1,6 @@
 # ./taichi/runtime/cuda/CMakeLists.txt
 
-add_library(cuda_runtime)
+ti_add_native_library(cuda_runtime)
 target_sources(cuda_runtime
   PRIVATE
     jit_cuda.cpp

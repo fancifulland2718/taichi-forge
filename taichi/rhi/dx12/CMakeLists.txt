@@ -1,7 +1,7 @@
 # ./taichi/rhi/dx12/CMakeLists.txt
 
 set(DX12_RHI dx12_rhi)
-add_library(${DX12_RHI})
+ti_add_native_library(${DX12_RHI})
 target_sources(${DX12_RHI}
   PRIVATE
     dx12_api.cpp

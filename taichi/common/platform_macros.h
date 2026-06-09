@@ -11,11 +11,20 @@
 
 // https://gcc.gnu.org/wiki/Visibility
 #if defined _WIN32 || defined _WIN64 || defined __CYGWIN__
+#if defined(TI_WITH_SPLIT_PYTHON_RUNTIME) && \
+    !defined(TI_BUILDING_PYTHON_RUNTIME)
+#ifdef __GNUC__
+#define TI_DLL_EXPORT __attribute__((dllimport))
+#else
+#define TI_DLL_EXPORT __declspec(dllimport)
+#endif  //  __GNUC__
+#else
 #ifdef __GNUC__
 #define TI_DLL_EXPORT __attribute__((dllexport))
 #else
 #define TI_DLL_EXPORT __declspec(dllexport)
 #endif  //  __GNUC__
+#endif  // split Python runtime import/export
 #else
 #define TI_DLL_EXPORT __attribute__((visibility("default")))
 #endif  // defined _WIN32 || defined _WIN64 || defined __CYGWIN__

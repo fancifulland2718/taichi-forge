@@ -1,7 +1,7 @@
 # ./taichi/rhi/dx/CMakeLists.txt
 
 set(DX_RHI dx_rhi)
-add_library(${DX_RHI})
+ti_add_native_library(${DX_RHI})
 target_sources(${DX_RHI}
   PRIVATE
     dx_api.cpp

@@ -1,6 +1,6 @@
 # ./taichi/runtime/cpu/CMakeLists.txt
 
-add_library(cpu_runtime)
+ti_add_native_library(cpu_runtime)
 target_sources(cpu_runtime
   PRIVATE
     jit_cpu.cpp

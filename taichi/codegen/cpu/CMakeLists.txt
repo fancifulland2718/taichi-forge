@@ -1,6 +1,6 @@
 # ./taichi/codegen/cpu/CMakeLists.txt
 
-add_library(cpu_codegen)
+ti_add_native_library(cpu_codegen)
 target_sources(cpu_codegen
   PRIVATE
     codegen_cpu.cpp

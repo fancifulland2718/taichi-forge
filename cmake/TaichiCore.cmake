@@ -200,6 +200,10 @@ add_subdirectory(taichi/rhi)
 
 set(CORE_LIBRARY_NAME taichi_core)
 add_library(${CORE_LIBRARY_NAME} OBJECT ${TAICHI_CORE_SOURCE})
+if(WIN32 AND TI_WITH_SPLIT_PYTHON_RUNTIME AND NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
+    target_compile_definitions(${CORE_LIBRARY_NAME}
+        PRIVATE TI_WITH_SPLIT_PYTHON_RUNTIME TI_BUILDING_PYTHON_RUNTIME)
+endif()
 
 if (TI_WITH_VULKAN)
     set(TI_VULKAN_SORT_SHADER_SOURCE_DIR
@@ -818,7 +822,46 @@ if(TI_WITH_PYTHON)
     endif()
 
     if(TI_WITH_SPLIT_PYTHON_RUNTIME)
+        target_compile_definitions(${CORE_WITH_PYBIND_LIBRARY_NAME}
+            PRIVATE TI_WITH_SPLIT_PYTHON_RUNTIME)
         set(CORE_PYTHON_RUNTIME_LIBRARY_NAME taichi_runtime)
+
+        function(_ti_link_windows_runtime_whole_archive target)
+            if(NOT MSVC)
+                return()
+            endif()
+
+            foreach(_ti_runtime_lib IN LISTS ARGN)
+                if(TARGET ${_ti_runtime_lib})
+                    get_target_property(_ti_runtime_lib_type
+                        ${_ti_runtime_lib} TYPE)
+                    if(_ti_runtime_lib_type STREQUAL "OBJECT_LIBRARY")
+                        target_link_libraries(${target}
+                            PRIVATE ${_ti_runtime_lib})
+                    elseif(_ti_runtime_lib_type STREQUAL "STATIC_LIBRARY")
+                        target_link_libraries(${target}
+                            PRIVATE ${_ti_runtime_lib})
+                        target_link_options(${target}
+                            PRIVATE "/WHOLEARCHIVE:$<TARGET_FILE:${_ti_runtime_lib}>")
+                    endif()
+                endif()
+            endforeach()
+        endfunction()
+
+        function(_ti_collect_windows_runtime_objects output_var)
+            set(_ti_runtime_objects)
+            foreach(_ti_runtime_lib IN LISTS ARGN)
+                if(TARGET ${_ti_runtime_lib})
+                    get_target_property(_ti_runtime_lib_type
+                        ${_ti_runtime_lib} TYPE)
+                    if(_ti_runtime_lib_type STREQUAL "OBJECT_LIBRARY")
+                        list(APPEND _ti_runtime_objects
+                            "$<TARGET_OBJECTS:${_ti_runtime_lib}>")
+                    endif()
+                endif()
+            endforeach()
+            set(${output_var} ${_ti_runtime_objects} PARENT_SCOPE)
+        endfunction()
 
         if(TI_PREBUILT_PYTHON_RUNTIME_DIR)
             get_filename_component(TI_PREBUILT_PYTHON_RUNTIME_DIR
@@ -859,13 +902,84 @@ if(TI_WITH_PYTHON)
                 "Using prebuilt split Python runtime: ${_ti_prebuilt_runtime_location}")
         else()
             add_library(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} SHARED)
+            if(WIN32)
+                target_compile_definitions(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                    PRIVATE
+                        TI_WITH_SPLIT_PYTHON_RUNTIME
+                        TI_BUILDING_PYTHON_RUNTIME)
+            endif()
+            set(_ti_windows_runtime_native_targets
+                taichi_ui
+                taichi_ui_ggui
+                taichi_common
+                taichi_util
+                compilation_manager
+                ti_device_api
+                cpu_codegen
+                cpu_runtime
+                cuda_codegen
+                cuda_runtime
+                llvm_program_impl
+                llvm_codegen
+                llvm_runtime
+                gfx_program_impl
+                opengl_program_impl
+                vulkan_program_impl
+                spirv_codegen
+                gfx_runtime
+                common_rhi
+                interop_rhi
+                cpu_rhi
+                cuda_rhi
+                llvm_rhi
+                opengl_rhi
+                vulkan_rhi)
+
             target_link_libraries(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PRIVATE taichi_ui)
             target_link_libraries(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PRIVATE ${CORE_LIBRARY_NAME})
+            _ti_link_windows_runtime_whole_archive(
+                ${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                ${_ti_windows_runtime_native_targets})
+
+            if(MSVC)
+                _ti_collect_windows_runtime_objects(
+                    _ti_windows_runtime_export_objects
+                    ${CORE_LIBRARY_NAME}
+                    ${_ti_windows_runtime_native_targets})
+                set(_ti_runtime_export_objlist
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.exports.def.objs")
+                set(_ti_runtime_raw_exports
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.raw.exports.def")
+                set(_ti_runtime_filtered_exports
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.exports.def")
+
+                file(GENERATE
+                    OUTPUT "${_ti_runtime_export_objlist}"
+                    CONTENT "$<JOIN:${_ti_windows_runtime_export_objects},\n>\n")
+                add_custom_command(
+                    OUTPUT "${_ti_runtime_filtered_exports}"
+                    COMMAND ${CMAKE_COMMAND} -E __create_def
+                        "${_ti_runtime_raw_exports}"
+                        "${_ti_runtime_export_objlist}"
+                    COMMAND "${PYTHON_EXECUTABLE}"
+                        "${PROJECT_SOURCE_DIR}/misc/filter_windows_runtime_exports.py"
+                        "${_ti_runtime_raw_exports}"
+                        "${_ti_runtime_filtered_exports}"
+                    DEPENDS
+                        ${_ti_windows_runtime_export_objects}
+                        "${PROJECT_SOURCE_DIR}/misc/filter_windows_runtime_exports.py"
+                    VERBATIM)
+                set_source_files_properties("${_ti_runtime_filtered_exports}"
+                    PROPERTIES GENERATED TRUE)
+                target_sources(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                    PRIVATE "${_ti_runtime_filtered_exports}")
+                set_target_properties(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                    PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS OFF)
+            endif()
             target_enable_function_level_linking(${CORE_PYTHON_RUNTIME_LIBRARY_NAME})
 
             if(WIN32)
                 set_target_properties(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PROPERTIES
-                    WINDOWS_EXPORT_ALL_SYMBOLS ON
                     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/runtimes"
                     RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/runtimes"
                     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/runtimes"
@@ -876,6 +990,10 @@ if(TI_WITH_PYTHON)
                     ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/runtimes"
                     ARCHIVE_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_CURRENT_SOURCE_DIR}/runtimes"
                     ARCHIVE_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_CURRENT_SOURCE_DIR}/runtimes")
+                if(NOT MSVC)
+                    set_target_properties(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                        PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+                endif()
             endif()
 
             install(TARGETS ${CORE_PYTHON_RUNTIME_LIBRARY_NAME}

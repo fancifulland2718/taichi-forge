@@ -82,7 +82,7 @@ class TI_DLL_EXPORT Canvas {
     real _radius;
     int n_vertices;
     bool finished;
-    static Vector2 vertices[128];  // TODO: ...
+    static TI_DLL_EXPORT Vector2 vertices[128];  // TODO: ...
 
     TI_FORCE_INLINE explicit Line(Canvas &canvas)
         : canvas(canvas),

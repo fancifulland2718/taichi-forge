@@ -1,7 +1,7 @@
 # ./taichi/rhi/common/CMakeLists.txt
 
 set(COMMON_RHI common_rhi)
-add_library(${COMMON_RHI})
+ti_add_native_library(${COMMON_RHI})
 target_sources(${COMMON_RHI}
   PRIVATE
     host_memory_pool.cpp

@@ -1,7 +1,7 @@
 # ./taichi/rhi/opengl/CMakeLists.txt
 
 set(OPENGL_RHI opengl_rhi)
-add_library(${OPENGL_RHI})
+ti_add_native_library(${OPENGL_RHI})
 target_sources(${OPENGL_RHI}
   PRIVATE
     opengl_device.cpp

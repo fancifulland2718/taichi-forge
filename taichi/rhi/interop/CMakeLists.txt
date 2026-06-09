@@ -1,7 +1,7 @@
 # ./taichi/rhi/interop/CMakeLists.txt
 
 set(INTEROP_RHI interop_rhi)
-add_library(${INTEROP_RHI})
+ti_add_native_library(${INTEROP_RHI})
 target_sources(${INTEROP_RHI}
   PRIVATE
     vulkan_cpu_interop.cpp

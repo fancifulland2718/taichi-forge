@@ -1,6 +1,6 @@
 # ./taichi/common/CMakeLists.txt
 
-add_library(taichi_common)
+ti_add_native_library(taichi_common)
 target_sources(taichi_common
   PRIVATE
     cleanup.cpp

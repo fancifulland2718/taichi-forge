@@ -1,7 +1,7 @@
 # ./taichi/rhi/metal/CMakeLists.txt
 
 set(METAL_RHI metal_rhi)
-add_library(${METAL_RHI})
+ti_add_native_library(${METAL_RHI})
 target_sources(${METAL_RHI}
   PRIVATE
     metal_api.cpp

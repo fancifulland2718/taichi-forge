@@ -1,7 +1,7 @@
 # ./taichi/rhi/cuda/CMakeLists.txt
 
 set(CUDA_RHI cuda_rhi)
-add_library(${CUDA_RHI})
+ti_add_native_library(${CUDA_RHI})
 target_sources(${CUDA_RHI}
   PRIVATE
     cuda_device.cpp

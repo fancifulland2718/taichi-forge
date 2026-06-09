@@ -1,6 +1,6 @@
 # ./taichi/ui/CMakeLists.txt
 
-add_library(taichi_ui
+ti_add_native_library(taichi_ui
     gui/gui.cpp
     gui/android.cpp
     gui/cocoa.cpp

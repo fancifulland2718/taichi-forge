@@ -1,6 +1,6 @@
 # ./taichi/codegen/cuda/CMakeLists.txt
 
-add_library(cuda_codegen)
+ti_add_native_library(cuda_codegen)
 target_sources(cuda_codegen
   PRIVATE
     codegen_cuda.cpp

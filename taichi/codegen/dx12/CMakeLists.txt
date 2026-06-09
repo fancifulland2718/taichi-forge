@@ -1,6 +1,6 @@
 # ./taichi/codegen/dx12/CMakeLists.txt
 
-add_library(dx12_codegen)
+ti_add_native_library(dx12_codegen)
 target_sources(dx12_codegen
   PRIVATE
     codegen_dx12.cpp

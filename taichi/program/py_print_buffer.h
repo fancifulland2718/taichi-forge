@@ -3,6 +3,8 @@
 #include <sstream>
 #include <iostream>
 
+#include "taichi/common/platform_macros.h"
+
 namespace taichi {
 
 // PythonPrintBuffer holds the logs printed from kernel before sending them back
@@ -27,6 +29,6 @@ struct PythonPrintBuffer {
   }
 };
 
-extern PythonPrintBuffer py_cout;
+extern TI_DLL_EXPORT PythonPrintBuffer py_cout;
 
 }  // namespace taichi

@@ -1,6 +1,6 @@
 # ./taichi/com_mgr/CMakeLists.txt
 
-add_library(compilation_manager)
+ti_add_native_library(compilation_manager)
 target_sources(compilation_manager
   PRIVATE
     kernel_compilation_manager.cpp

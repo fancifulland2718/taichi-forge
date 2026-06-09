@@ -1,6 +1,6 @@
 # ./taichi/codegen/llvm/CMakeLists.txt
 
-add_library(llvm_codegen)
+ti_add_native_library(llvm_codegen)
 target_sources(llvm_codegen
   PRIVATE
     codegen_llvm.cpp

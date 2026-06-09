@@ -1,7 +1,7 @@
 # ./taichi/rhi/amdgpu/CMakeLists.txt
 
 set(AMDGPU_RHI amdgpu_rhi)
-add_library(${AMDGPU_RHI})
+ti_add_native_library(${AMDGPU_RHI})
 target_sources(${AMDGPU_RHI}
   PRIVATE
     amdgpu_device.cpp
