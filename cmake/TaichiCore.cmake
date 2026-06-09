@@ -947,11 +947,11 @@ if(TI_WITH_PYTHON)
                     ${CORE_LIBRARY_NAME}
                     ${_ti_windows_runtime_native_targets})
                 set(_ti_runtime_export_objlist
-                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.exports.def.objs")
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.$<CONFIG>.exports.def.objs")
                 set(_ti_runtime_raw_exports
-                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.raw.exports.def")
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.$<CONFIG>.raw.exports.def")
                 set(_ti_runtime_filtered_exports
-                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.exports.def")
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.$<CONFIG>.exports.def")
 
                 file(GENERATE
                     OUTPUT "${_ti_runtime_export_objlist}"
