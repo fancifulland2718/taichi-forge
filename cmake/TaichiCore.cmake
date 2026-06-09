@@ -902,6 +902,12 @@ if(TI_WITH_PYTHON)
                 "Using prebuilt split Python runtime: ${_ti_prebuilt_runtime_location}")
         else()
             add_library(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} SHARED)
+            set(_ti_runtime_anchor_source
+                "${CMAKE_CURRENT_BINARY_DIR}/${CORE_PYTHON_RUNTIME_LIBRARY_NAME}_anchor.cpp")
+            file(WRITE "${_ti_runtime_anchor_source}"
+                "extern \"C\" void taichi_runtime_anchor() {}\n")
+            target_sources(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                PRIVATE "${_ti_runtime_anchor_source}")
             if(WIN32)
                 target_compile_definitions(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
                     PRIVATE

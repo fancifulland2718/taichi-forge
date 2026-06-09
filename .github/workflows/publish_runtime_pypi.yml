@@ -57,7 +57,6 @@ jobs:
     needs: resolve_version
     runs-on: ubuntu-22.04
     env:
-      SKBUILD_WHEEL_TAG_PLATFORM: manylinux_2_35_x86_64
       CMAKE_ARGS: >-
         -DTI_WITH_VULKAN:BOOL=ON
         -DTI_WITH_OPENGL:BOOL=ON
@@ -149,21 +148,7 @@ jobs:
           python -m pip install auditwheel patchelf
           mkdir -p wheelhouse-runtime
           auditwheel show dist-runtime/*.whl || true
-          if ! auditwheel repair dist-runtime/*.whl -w wheelhouse-runtime/ --plat manylinux_2_35_x86_64; then
-          python - <<'PY'
-          from pathlib import Path
-          import shutil
-
-          wheels = sorted(Path("dist-runtime").glob("*.whl"))
-          if len(wheels) != 1:
-              raise SystemExit(f"Expected one runtime wheel, found {len(wheels)}: {wheels}")
-          wheel = wheels[0]
-          if "manylinux" not in wheel.name:
-              raise SystemExit(f"auditwheel failed and source wheel is not manylinux-tagged: {wheel}")
-          shutil.copy2(wheel, Path("wheelhouse-runtime") / wheel.name)
-          print(f"Copied already-manylinux runtime wheel: {wheel}")
-          PY
-          fi
+          auditwheel repair dist-runtime/*.whl -w wheelhouse-runtime/ --plat manylinux_2_35_x86_64
           python - <<'PY'
           from pathlib import Path
 
