@@ -235,9 +235,16 @@ jobs:
               raise SystemExit(f"Expected one runtime wheel, found {len(wheels)}: {wheels}")
 
           with ZipFile(wheels[0]) as zf:
-              members = [name for name in zf.namelist() if name.endswith("/libtaichi_runtime.so")]
+              names = zf.namelist()
+              exact = [name for name in names if name.endswith("/libtaichi_runtime.so")]
+              hashed = [
+                  name for name in names
+                  if Path(name).name.startswith("libtaichi_runtime-")
+                  and Path(name).suffix == ".so"
+              ]
+              members = exact or hashed
               if len(members) != 1:
-                  raise SystemExit(f"Expected one libtaichi_runtime.so in {wheels[0]}, found {members}")
+                  raise SystemExit(f"Expected one Linux runtime SO in {wheels[0]}, found {members}")
               target = Path("runtime-link/libtaichi_runtime.so")
               with zf.open(members[0]) as src, target.open("wb") as dst:
                   copyfileobj(src, dst)
@@ -284,6 +291,7 @@ jobs:
         python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     env:
       PY: ${{ matrix.python }}
+      CMAKE_GENERATOR: Ninja
       # See build_linux comment: we pin cmake<4 instead of using the
       # CMAKE_POLICY_VERSION_MINIMUM shim.
       # Must be CMAKE_ARGS (read by scikit-build-core); TAICHI_CMAKE_ARGS
@@ -348,7 +356,7 @@ jobs:
           # cmake<4 matches the VS2026-bundled CMake 3.x used by the local
           # Windows build. CMake 4 breaks vendored external/SPIRV-Tools.
           # numpy is required at configure time by PythonNumpyPybind11.cmake.
-          python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" numpy
+          python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" ninja numpy
 
       - name: Override version
         shell: pwsh

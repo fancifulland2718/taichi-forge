@@ -165,9 +165,17 @@ jobs:
               project = Parser().parsestr(zf.read(metadata).decode("utf-8", errors="replace")).get("Name")
               if project != "taichi-forge-runtime":
                   raise SystemExit(f"Unexpected wheel project {project!r}: {wheels[0]}")
-              matches = [name for name in zf.namelist() if name.endswith("/libtaichi_runtime.so")]
+              names = zf.namelist()
+              exact = [name for name in names if name.endswith("/libtaichi_runtime.so")]
+              hashed = [
+                  name for name in names
+                  if Path(name).name.startswith("libtaichi_runtime-")
+                  and Path(name).suffix == ".so"
+              ]
+              matches = exact or hashed
               if len(matches) != 1:
-                  raise SystemExit(f"Expected one libtaichi_runtime.so, found {matches}")
+                  raise SystemExit(f"Expected one Linux runtime SO, found {matches}")
+              print(f"Runtime SO: {matches[0]}")
           print(f"Validated {wheels[0]}")
           PY
 
@@ -183,6 +191,7 @@ jobs:
     needs: resolve_version
     runs-on: windows-latest
     env:
+      CMAKE_GENERATOR: Ninja
       CMAKE_ARGS: >-
         -DTI_WITH_VULKAN:BOOL=ON
         -DTI_WITH_OPENGL:BOOL=ON
@@ -237,7 +246,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip build
-          python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" numpy
+          python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" ninja numpy
 
       - name: Override version
         shell: pwsh

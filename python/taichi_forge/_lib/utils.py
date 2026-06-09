@@ -5,6 +5,7 @@ import sys
 import warnings
 import ctypes
 import importlib.util
+import glob
 
 from colorama import Fore, Style
 
@@ -53,11 +54,13 @@ def _native_runtime_dirs():
         os.path.join(package_lib, "core"),
     ]
     for root in _external_runtime_roots():
+        auditwheel_lib_dir = os.path.join(os.path.dirname(root), os.path.basename(root) + ".libs")
         candidates.extend(
             [
                 os.path.join(root, "native"),
                 os.path.join(root, "runtime_native"),
                 os.path.join(root, "_lib", "runtime_native"),
+                auditwheel_lib_dir,
             ]
         )
     return list(_dedupe_existing_dirs(candidates))
@@ -80,6 +83,15 @@ def _native_runtime_library_name():
     return "libtaichi_runtime.so"
 
 
+def _native_runtime_library_candidates(directory):
+    exact = os.path.join(directory, _native_runtime_library_name())
+    yield exact
+    if get_os_name() == "linux":
+        for path in sorted(glob.glob(os.path.join(directory, "libtaichi_runtime-*.so"))):
+            if os.path.abspath(path) != os.path.abspath(exact):
+                yield path
+
+
 def _prepare_native_runtime():
     global _native_runtime_loaded  # pylint: disable=global-statement
     if _native_runtime_loaded:
@@ -92,17 +104,16 @@ def _prepare_native_runtime():
                 _dll_dir_handles.append(os.add_dll_directory(path))
             os.environ["PATH"] += os.pathsep + path
 
-    lib_name = _native_runtime_library_name()
     for path in runtime_dirs:
-        lib_path = os.path.join(path, lib_name)
-        if not os.path.exists(lib_path):
-            continue
-        if get_os_name() == "win":
-            ctypes.WinDLL(lib_path)  # pylint: disable=no-member
-        else:
-            ctypes.CDLL(lib_path, mode=getattr(os, "RTLD_GLOBAL", 0))
-        _native_runtime_loaded = True
-        return
+        for lib_path in _native_runtime_library_candidates(path):
+            if not os.path.exists(lib_path):
+                continue
+            if get_os_name() == "win":
+                ctypes.WinDLL(lib_path)  # pylint: disable=no-member
+            else:
+                ctypes.CDLL(lib_path, mode=getattr(os, "RTLD_GLOBAL", 0))
+            _native_runtime_loaded = True
+            return
 
 
 def get_os_name():
