@@ -142,6 +142,35 @@ jobs:
         run: |
           python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 
+      - name: Validate runtime wheel contents
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = sorted(Path("dist-runtime").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"Expected one runtime wheel, found {[str(w) for w in wheels]}")
+
+          wheel = wheels[0]
+          with ZipFile(wheel) as zf:
+              names = zf.namelist()
+          runtime_libs = [name for name in names if name.endswith("/libtaichi_runtime.so")]
+          if len(runtime_libs) != 1:
+              print(f"Runtime wheel contents from {wheel}:")
+              for name in names:
+                  if "taichi_runtime" in name or "_lib/" in name:
+                      print(f"  {name}")
+              built = sorted(Path("_skbuild").rglob("libtaichi_runtime.so"))
+              if built:
+                  print("Built runtime libraries under _skbuild:")
+                  for path in built:
+                      print(f"  {path}")
+              raise SystemExit(f"Expected one libtaichi_runtime.so in runtime wheel, found {runtime_libs}")
+          print(f"Runtime wheel native library: {runtime_libs[0]}")
+          PY
+
       - name: Audit runtime wheel
         run: |
           set -euo pipefail
@@ -240,6 +269,35 @@ jobs:
         shell: pwsh
         run: |
           python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
+
+      - name: Validate runtime wheel contents
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = sorted(Path("dist-runtime").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"Expected one runtime wheel, found {[str(w) for w in wheels]}")
+
+          wheel = wheels[0]
+          with ZipFile(wheel) as zf:
+              names = zf.namelist()
+          runtime_dlls = [name for name in names if name.endswith("/taichi_runtime.dll")]
+          runtime_libs = [name for name in names if name.endswith("/taichi_runtime.lib")]
+          if len(runtime_dlls) != 1 or len(runtime_libs) != 1:
+              print(f"Runtime wheel contents from {wheel}:")
+              for name in names:
+                  if "taichi_runtime" in name or "_lib/" in name:
+                      print(f"  {name}")
+              raise SystemExit(
+                  "Expected one taichi_runtime.dll and one taichi_runtime.lib "
+                  f"in runtime wheel, found dlls={runtime_dlls}, libs={runtime_libs}"
+              )
+          print(f"Runtime wheel native DLL: {runtime_dlls[0]}")
+          print(f"Runtime wheel import library: {runtime_libs[0]}")
+          '@ | python -
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

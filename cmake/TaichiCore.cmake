@@ -200,7 +200,7 @@ add_subdirectory(taichi/rhi)
 
 set(CORE_LIBRARY_NAME taichi_core)
 add_library(${CORE_LIBRARY_NAME} OBJECT ${TAICHI_CORE_SOURCE})
-if(WIN32 AND TI_WITH_SPLIT_PYTHON_RUNTIME AND NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
+if(TI_WITH_SPLIT_PYTHON_RUNTIME AND NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
     target_compile_definitions(${CORE_LIBRARY_NAME}
         PRIVATE TI_WITH_SPLIT_PYTHON_RUNTIME TI_BUILDING_PYTHON_RUNTIME)
 endif()
@@ -826,11 +826,7 @@ if(TI_WITH_PYTHON)
             PRIVATE TI_WITH_SPLIT_PYTHON_RUNTIME)
         set(CORE_PYTHON_RUNTIME_LIBRARY_NAME taichi_runtime)
 
-        function(_ti_link_windows_runtime_whole_archive target)
-            if(NOT MSVC)
-                return()
-            endif()
-
+        function(_ti_link_split_runtime_native_targets target)
             foreach(_ti_runtime_lib IN LISTS ARGN)
                 if(TARGET ${_ti_runtime_lib})
                     get_target_property(_ti_runtime_lib_type
@@ -839,10 +835,24 @@ if(TI_WITH_PYTHON)
                         target_link_libraries(${target}
                             PRIVATE ${_ti_runtime_lib})
                     elseif(_ti_runtime_lib_type STREQUAL "STATIC_LIBRARY")
+                        if(MSVC)
+                            target_link_libraries(${target}
+                                PRIVATE ${_ti_runtime_lib})
+                            target_link_options(${target}
+                                PRIVATE "/WHOLEARCHIVE:$<TARGET_FILE:${_ti_runtime_lib}>")
+                        elseif(LINUX)
+                            target_link_libraries(${target}
+                                PRIVATE
+                                    "-Wl,--whole-archive"
+                                    ${_ti_runtime_lib}
+                                    "-Wl,--no-whole-archive")
+                        else()
+                            target_link_libraries(${target}
+                                PRIVATE ${_ti_runtime_lib})
+                        endif()
+                    else()
                         target_link_libraries(${target}
                             PRIVATE ${_ti_runtime_lib})
-                        target_link_options(${target}
-                            PRIVATE "/WHOLEARCHIVE:$<TARGET_FILE:${_ti_runtime_lib}>")
                     endif()
                 endif()
             endforeach()
@@ -908,13 +918,11 @@ if(TI_WITH_PYTHON)
                 "extern \"C\" void taichi_runtime_anchor() {}\n")
             target_sources(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
                 PRIVATE "${_ti_runtime_anchor_source}")
-            if(WIN32)
-                target_compile_definitions(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
-                    PRIVATE
-                        TI_WITH_SPLIT_PYTHON_RUNTIME
-                        TI_BUILDING_PYTHON_RUNTIME)
-            endif()
-            set(_ti_windows_runtime_native_targets
+            target_compile_definitions(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                PRIVATE
+                    TI_WITH_SPLIT_PYTHON_RUNTIME
+                    TI_BUILDING_PYTHON_RUNTIME)
+            set(_ti_runtime_native_targets
                 taichi_ui
                 taichi_ui_ggui
                 taichi_common
@@ -943,15 +951,15 @@ if(TI_WITH_PYTHON)
 
             target_link_libraries(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PRIVATE taichi_ui)
             target_link_libraries(${CORE_PYTHON_RUNTIME_LIBRARY_NAME} PRIVATE ${CORE_LIBRARY_NAME})
-            _ti_link_windows_runtime_whole_archive(
+            _ti_link_split_runtime_native_targets(
                 ${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
-                ${_ti_windows_runtime_native_targets})
+                ${_ti_runtime_native_targets})
 
             if(MSVC)
                 _ti_collect_windows_runtime_objects(
                     _ti_windows_runtime_export_objects
                     ${CORE_LIBRARY_NAME}
-                    ${_ti_windows_runtime_native_targets})
+                    ${_ti_runtime_native_targets})
                 set(_ti_runtime_export_objlist
                     "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.$<CONFIG>.exports.def.objs")
                 set(_ti_runtime_raw_exports

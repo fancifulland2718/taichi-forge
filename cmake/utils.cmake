@@ -22,7 +22,7 @@ function(target_silence_llvm_deprecated_warnings TARGET)
 endfunction()
 
 function(ti_add_native_library TARGET)
-    if(WIN32 AND TI_WITH_SPLIT_PYTHON_RUNTIME AND NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
+    if(TI_WITH_SPLIT_PYTHON_RUNTIME AND NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
         add_library(${TARGET} OBJECT ${ARGN})
         target_compile_definitions(${TARGET}
             PRIVATE TI_WITH_SPLIT_PYTHON_RUNTIME TI_BUILDING_PYTHON_RUNTIME)
