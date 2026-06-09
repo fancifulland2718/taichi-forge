@@ -264,6 +264,7 @@ jobs:
 
       - name: Audit wheel (auditwheel repair)
         run: |
+          set -euo pipefail
           python -m pip install auditwheel patchelf
           mkdir -p wheelhouse
           # ubuntu-22.04 ships glibc 2.35, so the wheel will reference glibc 2.35
@@ -272,7 +273,18 @@ jobs:
           # To produce a more-compatible manylinux_2_28 wheel, switch the build_linux
           # job to run inside a quay.io/pypa/manylinux_2_28_x86_64 container instead.
           auditwheel show dist/*.whl || true
-          auditwheel repair dist/*.whl -w wheelhouse/ --plat manylinux_2_35_x86_64 || cp dist/*.whl wheelhouse/
+          auditwheel repair dist/*.whl -w wheelhouse/ --plat manylinux_2_35_x86_64
+          python - <<'PY'
+          from pathlib import Path
+
+          wheels = sorted(Path("wheelhouse").glob("*.whl"))
+          if not wheels:
+              raise SystemExit("No repaired Python wheels found")
+          for wheel in wheels:
+              if "linux_x86_64" in wheel.name or "manylinux" not in wheel.name:
+                  raise SystemExit(f"Unsupported Linux Python wheel tag: {wheel.name}")
+              print(f"Linux Python upload candidate: {wheel.name}")
+          PY
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -480,6 +492,8 @@ jobs:
                   ).get("Name")
               if project != "taichi-forge":
                   raise SystemExit(f"Unexpected wheel project {project!r}: {wheel}")
+              if "linux_x86_64" in wheel.name:
+                  raise SystemExit(f"Unsupported Linux platform tag in upload set: {wheel.name}")
           print(f"taichi-forge: {len(wheels)} wheel(s)")
           PY
           ls -la dist/
