@@ -768,7 +768,8 @@ if(TI_WITH_PYTHON)
     endif()
 
     if(TI_WITH_GGUI)
-        target_compile_definitions(${CORE_WITH_PYBIND_LIBRARY_NAME} PRIVATE -DTI_WITH_GGUI)
+        target_compile_definitions(${CORE_WITH_PYBIND_LIBRARY_NAME}
+            PRIVATE -DTI_WITH_GGUI -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES)
     endif()
     if(TI_WITH_PREBUILT_PYTHON_RUNTIME)
         foreach(_ti_backend_define IN ITEMS
@@ -786,6 +787,34 @@ if(TI_WITH_PYTHON)
                     PRIVATE -D${_ti_backend_define})
             endif()
         endforeach()
+
+        if(TI_WITH_LLVM)
+            if(NOT LLVM_DIR AND DEFINED ENV{LLVM_DIR})
+                set(LLVM_DIR $ENV{LLVM_DIR})
+                message("Getting LLVM_DIR=${LLVM_DIR} from the environment variable")
+            endif()
+            if(NOT LLVM_DIR)
+                message(FATAL_ERROR
+                    "Prebuilt split Python runtime shim requires LLVM_DIR to "
+                    "point to the LLVM 20 package downloaded from "
+                    "LLVM20_WIN_URL/LLVM20_LINUX_URL in the publish workflow.")
+            endif()
+
+            # The prebuilt-runtime shim still compiles Python binding sources
+            # that include Taichi LLVM/GFX headers.  The native LLVM libraries
+            # stay in taichi_runtime; the shim only needs LLVM compile inputs.
+            find_package(LLVM REQUIRED CONFIG)
+            message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+            if("${LLVM_PACKAGE_VERSION}" VERSION_LESS "20.0" OR
+                    NOT "${LLVM_PACKAGE_VERSION}" VERSION_LESS "21.0")
+                message(FATAL_ERROR
+                    "Prebuilt split Python runtime shim requires LLVM 20.x; "
+                    "found LLVM ${LLVM_PACKAGE_VERSION}")
+            endif()
+            message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
+            message("LLVM include dirs ${LLVM_INCLUDE_DIRS}")
+            add_definitions(${LLVM_DEFINITIONS})
+        endif()
     endif()
 
     if(TI_WITH_SPLIT_PYTHON_RUNTIME)
@@ -878,7 +907,9 @@ if(TI_WITH_PYTHON)
         ${PROJECT_SOURCE_DIR}/external/eigen
         ${PROJECT_SOURCE_DIR}/external/volk
         ${PROJECT_SOURCE_DIR}/external/SPIRV-Tools/include
+        ${PROJECT_SOURCE_DIR}/external/SPIRV-Headers/include
         ${PROJECT_SOURCE_DIR}/external/Vulkan-Headers/include
+        ${PROJECT_SOURCE_DIR}/external/glm
         ${PROJECT_SOURCE_DIR}/external/imgui
         ${PROJECT_SOURCE_DIR}/external/imgui/backends
         ${PROJECT_SOURCE_DIR}/external/FP16/include
@@ -888,10 +919,18 @@ if(TI_WITH_PYTHON)
         ${PROJECT_SOURCE_DIR}/external/VulkanMemoryAllocator/include
       )
 
+    if(TI_WITH_LLVM)
+      target_include_directories(${CORE_WITH_PYBIND_LIBRARY_NAME} SYSTEM
+        PRIVATE
+          ${LLVM_INCLUDE_DIRS}
+        )
+    endif()
+
     if (NOT ANDROID)
       target_include_directories(${CORE_WITH_PYBIND_LIBRARY_NAME}
         PRIVATE
           external/glfw/include
+          external/glad/include
         )
     endif()
 
