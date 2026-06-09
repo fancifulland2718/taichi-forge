@@ -18,6 +18,8 @@
 #include "taichi/rhi/common/host_memory_pool.h"
 #include "taichi/program/parallel_executor.h"
 
+#include <stdexcept>
+
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
@@ -3985,15 +3987,33 @@ std::size_t cpu_reverse_scan_strided_typed(uint8_t *data_ptr,
   return 0;
 }
 
+constexpr char kNativeDenseSimpleLayoutMessage[] =
+    "Native dense field path currently supports only root.place "
+    "and root.dense.place layouts.";
+
+bool native_dense_linear_root_child_supported(SNode *root_child) {
+  return root_child &&
+         (root_child->type == SNodeType::place ||
+          root_child->type == SNodeType::dense);
+}
+
 std::size_t root_child_offset(SNode *root_child) {
-  TI_ERROR_IF(!root_child || !root_child->parent ||
-                  root_child->parent->type != SNodeType::root,
-              "Native dense field path expects a root child SNode.");
+  if (!root_child || !root_child->parent ||
+      root_child->parent->type != SNodeType::root) {
+    throw std::runtime_error(
+        "Native dense field path expects a root child SNode.");
+  }
+  if (!native_dense_linear_root_child_supported(root_child)) {
+    throw std::runtime_error(kNativeDenseSimpleLayoutMessage);
+  }
   SNode *root = root_child->parent;
   std::size_t offset = 0;
   const int child_id = root->child_id(root_child);
   for (int i = 0; i < child_id; ++i) {
     SNode *child = root->ch[i].get();
+    if (!native_dense_linear_root_child_supported(child)) {
+      throw std::runtime_error(kNativeDenseSimpleLayoutMessage);
+    }
     offset += child->cell_size_bytes * child->num_cells_per_container;
   }
   return offset;
@@ -4117,10 +4137,10 @@ DevicePtr Program::get_dense_field_device_ptr(SNode *snode) {
   if (parent->type == SNodeType::root) {
     root_child = snode;
   } else {
-    TI_ERROR_IF(parent->type != SNodeType::dense || !parent->parent ||
-                    parent->parent->type != SNodeType::root,
-                "Native dense field path currently supports only root.place "
-                "and root.dense.place layouts.");
+    if (parent->type != SNodeType::dense || !parent->parent ||
+        parent->parent->type != SNodeType::root) {
+      throw std::runtime_error(kNativeDenseSimpleLayoutMessage);
+    }
     root_child = parent;
     leaf_offset = snode->offset_bytes_in_parent_cell;
   }

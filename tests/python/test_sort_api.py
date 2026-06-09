@@ -212,6 +212,24 @@ def test_sort_cpu_native_dense_field_default_ready():
     _run_dense_field_sort_case("cpu_native")
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_sort_dense_field_after_sparse_snode_tree():
+    n = 32
+    warm = ti.field(dtype=ti.i32, shape=n)
+    warm.from_numpy(np.arange(n, dtype=np.int32))
+
+    grid_t = ti.types.struct(mass=ti.f32)
+    grid = grid_t.field(shape=None)
+    ptr = ti.root.pointer(ti.ijk, (3, 3, 3))
+    ptr.bitmasked(ti.ijk, 8).place(grid)
+
+    keys = ti.field(dtype=ti.i32, shape=n)
+    keys.from_numpy(np.arange(n - 1, -1, -1, dtype=np.int32))
+    ti.algorithms.sort(keys)
+
+    np.testing.assert_array_equal(keys.to_numpy(), np.arange(n, dtype=np.int32))
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_sort_auto_cpu_ndarray_uses_native_default():
     keys_np = np.array([3, -1, 3, 0, -7, 2], dtype=np.int32)

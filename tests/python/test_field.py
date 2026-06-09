@@ -203,6 +203,40 @@ def test_matrix_field_dense_bulk_api_correctness(dtype, np_dtype):
     np.testing.assert_array_equal(x.to_numpy(), np.zeros((n, 2, 2), dtype=np_dtype))
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_dense_from_numpy_after_sparse_snode_tree():
+    n = 27
+    init_pos = ti.Vector.field(3, dtype=ti.f32, shape=n)
+    init_pos.from_numpy(np.zeros((n, 3), dtype=np.float32))
+
+    particle = ti.types.struct(
+        pos=ti.types.vector(3, ti.f32),
+        vel=ti.types.vector(3, ti.f32),
+        C=ti.types.matrix(3, 3, ti.f32),
+        F=ti.types.matrix(3, 3, ti.f32),
+    )
+    _particles = particle.field(shape=n, layout=ti.Layout.SOA)
+
+    grid_t = ti.types.struct(
+        mass=ti.f32,
+        vel_in=ti.types.vector(3, ti.f32),
+        vel_out=ti.types.vector(3, ti.f32),
+    )
+    grid = grid_t.field(shape=None)
+    ptr = ti.root.pointer(ti.ijk, (3, 3, 3))
+    ptr.bitmasked(ti.ijk, 8).place(grid)
+
+    init_vel = ti.Vector.field(3, dtype=ti.f32, shape=n)
+    vel = np.arange(n * 3, dtype=np.float32).reshape(n, 3)
+    init_vel.from_numpy(vel)
+    np.testing.assert_array_equal(init_vel.to_numpy(), vel)
+
+    marker = ti.field(dtype=ti.i32, shape=n)
+    marker_np = np.arange(n, dtype=np.int32)
+    marker.from_numpy(marker_np)
+    np.testing.assert_array_equal(marker.to_numpy(), marker_np)
+
+
 @pytest.mark.parametrize("dtype, np_dtype", [(ti.i32, np.int32), (ti.f32, np.float32)])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_matrix_field_dense_packed_bulk_no_compile(dtype, np_dtype):

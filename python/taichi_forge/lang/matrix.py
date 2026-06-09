@@ -25,6 +25,7 @@ from taichi_forge.lang.field import (
     _dense_host_copy_value_type,
     _dense_native_bulk_arch_enabled,
     _dense_native_bulk_host_copy_needs_sync,
+    _dense_native_field_layout_supported,
     _dense_native_method_descriptor,
     _dense_native_copy_ad_required,
     _dense_value_type_size,
@@ -1297,6 +1298,8 @@ class MatrixField(Field):
             or first_parent._cell_size_bytes != expected_stride
             or snodes[0]._offset_bytes_in_parent_cell != 0
         ):
+            return None
+        if not _dense_native_field_layout_supported(components[0]):
             return None
         parent_key = (first_parent._snode_tree_id, first_parent._id)
         for lane, snode in enumerate(snodes):

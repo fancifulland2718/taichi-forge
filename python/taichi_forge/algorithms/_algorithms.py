@@ -88,6 +88,7 @@ from taichi_forge.lang._ndarray import (
     StructNdarrayScalarMemberView,
     StructNdarrayTensorMemberView,
 )
+from taichi_forge.lang.field import _dense_native_field_layout_supported
 from taichi_forge.lang.kernel_impl import data_oriented
 from taichi_forge.lang.matrix import Matrix, MatrixField
 from taichi_forge.lang.misc import arm64, cuda, vulkan, x64
@@ -1059,6 +1060,8 @@ def _dense_field_view(arr):
         return None
     snode = arr._snode
     if snode.ptr.type != _ti_core.SNodeType.place:
+        return None
+    if not _dense_native_field_layout_supported(arr):
         return None
     shape = _tuple_shape(arr.shape)
     from taichi_forge.lang import impl as ti_impl  # pylint: disable=import-outside-toplevel

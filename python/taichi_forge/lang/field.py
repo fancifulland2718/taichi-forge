@@ -61,6 +61,8 @@ def _dense_fill_value_bits(dtype, val):
 
 _DENSE_NATIVE_METHOD_MISSING = object()
 _DENSE_NATIVE_METHOD_CACHE = {}
+_DENSE_NATIVE_LAYOUT_SUPPORT_CACHE = {}
+_DENSE_NATIVE_LAYOUT_SUPPORT_CACHE_GENERATION = -1
 
 
 def _dense_native_method_descriptor(prog, name):
@@ -88,6 +90,60 @@ def _dense_native_device_host_copy_requires_contiguous():
     from taichi_forge.lang.misc import cuda, vulkan  # pylint: disable=C0415
 
     return impl.current_cfg().arch in (cuda, vulkan)
+
+
+def _dense_native_uses_compiled_field_offsets():
+    from taichi_forge.lang.misc import vulkan  # pylint: disable=C0415
+
+    return impl.current_cfg().arch in (vulkan,)
+
+
+def _dense_native_root_child_ptr(field):
+    snode_ptr = field.snode.ptr
+    parent_ptr = snode_ptr.parent
+    if parent_ptr is None:
+        return None, None
+    if parent_ptr.type == _ti_core.SNodeType.root:
+        return parent_ptr, snode_ptr
+    if parent_ptr.type != _ti_core.SNodeType.dense:
+        return None, None
+    root_ptr = parent_ptr.parent
+    if root_ptr is None or root_ptr.type != _ti_core.SNodeType.root:
+        return None, None
+    return root_ptr, parent_ptr
+
+
+def _dense_native_field_layout_supported(field):
+    global _DENSE_NATIVE_LAYOUT_SUPPORT_CACHE_GENERATION  # pylint: disable=global-statement
+
+    if _dense_native_uses_compiled_field_offsets():
+        return True
+
+    root_ptr, root_child_ptr = _dense_native_root_child_ptr(field)
+    if root_ptr is None or root_child_ptr is None:
+        return False
+    generation = impl.runtime_generation()
+    if _DENSE_NATIVE_LAYOUT_SUPPORT_CACHE_GENERATION != generation:
+        _DENSE_NATIVE_LAYOUT_SUPPORT_CACHE.clear()
+        _DENSE_NATIVE_LAYOUT_SUPPORT_CACHE_GENERATION = generation
+    cache_key = root_child_ptr.id
+    cached = _DENSE_NATIVE_LAYOUT_SUPPORT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    if root_child_ptr.type not in (_ti_core.SNodeType.place, _ti_core.SNodeType.dense):
+        _DENSE_NATIVE_LAYOUT_SUPPORT_CACHE[cache_key] = False
+        return False
+
+    for i in range(root_ptr.get_num_ch()):
+        child_ptr = root_ptr.get_ch(i)
+        if child_ptr.id == root_child_ptr.id:
+            _DENSE_NATIVE_LAYOUT_SUPPORT_CACHE[cache_key] = True
+            return True
+        if child_ptr.type not in (_ti_core.SNodeType.place, _ti_core.SNodeType.dense):
+            _DENSE_NATIVE_LAYOUT_SUPPORT_CACHE[cache_key] = False
+            return False
+    _DENSE_NATIVE_LAYOUT_SUPPORT_CACHE[cache_key] = False
+    return False
 
 
 def _dense_native_field_is_contiguous(field, value_type):
@@ -507,6 +563,8 @@ class ScalarField(Field):
             and not _dense_native_field_is_contiguous(self, value_type)
         ):
             return False
+        if not _dense_native_field_layout_supported(self):
+            return False
         if arr.dtype != to_numpy_type(self.dtype):
             return False
         prog = impl.get_runtime().prog
@@ -542,6 +600,8 @@ class ScalarField(Field):
             and not _dense_native_field_is_contiguous(self, value_type)
         ):
             return False
+        if not _dense_native_field_layout_supported(self):
+            return False
         if arr.dtype != to_numpy_type(self.dtype):
             return False
         prog = impl.get_runtime().prog
@@ -571,6 +631,8 @@ class ScalarField(Field):
             return False
         value_bits = _dense_fill_value_bits(self.dtype, val)
         if value_bits is None:
+            return False
+        if not _dense_native_field_layout_supported(self):
             return False
         prog = impl.get_runtime().prog
         method = _dense_native_method_descriptor(prog, "fill_dense_field")
@@ -603,6 +665,10 @@ class ScalarField(Field):
             return None
         value_type = _dense_host_copy_value_type(self.dtype)
         if value_type is None:
+            return None
+        if not _dense_native_field_layout_supported(self):
+            return None
+        if not _dense_native_field_layout_supported(other):
             return None
         prog = impl.get_runtime().prog
         method = _dense_native_method_descriptor(prog, "copy_dense_field")
