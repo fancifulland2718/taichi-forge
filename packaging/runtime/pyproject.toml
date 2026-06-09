@@ -45,7 +45,6 @@ wheel.exclude = [
   "**/*.pdb",
   "**/*.ilk",
   "**/*.exp",
-  "**/*.lib",
   "**/c_api/**",
 ]
 

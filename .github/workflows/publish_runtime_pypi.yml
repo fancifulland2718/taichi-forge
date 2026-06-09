@@ -1,0 +1,335 @@
+name: Publish runtime wheels to PyPI
+
+# Builds and optionally publishes the platform-native taichi-forge-runtime
+# wheels. Run this workflow before publish_pypi.yml for the same version: the
+# Python-facing taichi-forge workflow downloads this package from PyPI/TestPyPI
+# and extracts the native library artifacts for shim linking.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (e.g. 0.4.2 or 0.4.2.dev20260609); leaves empty for version.txt"
+        required: false
+        default: ""
+      publish:
+        description: "Upload to PyPI after building (true/false)"
+        required: false
+        default: "false"
+      target:
+        description: "pypi | testpypi - which index to publish to"
+        required: false
+        default: "testpypi"
+
+permissions:
+  contents: read
+  # Needed by pypa/gh-action-pypi-publish (Trusted Publishing / OIDC).
+  id-token: write
+
+env:
+  TI_SKIP_VERSION_CHECK: "ON"
+  TI_CI: "1"
+  LLVM20_WIN_URL: ${{ vars.LLVM20_WIN_URL }}
+  LLVM20_LINUX_MANYLINUX_URL: ${{ vars.LLVM20_LINUX_MANYLINUX_URL }}
+
+jobs:
+  resolve_version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.set.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: set
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ github.event.inputs.version }}" ]]; then
+            ver="${{ github.event.inputs.version }}"
+          else
+            ver="$(tr -d ' \t\n' < version.txt)"
+          fi
+          echo "Resolved version: $ver"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+  build_linux_runtime:
+    name: Linux runtime wheel
+    needs: resolve_version
+    runs-on: ubuntu-22.04
+    env:
+      CMAKE_ARGS: >-
+        -DTI_WITH_VULKAN:BOOL=ON
+        -DTI_WITH_OPENGL:BOOL=ON
+        -DTI_WITH_CUDA:BOOL=ON
+        -DTI_WITH_LLVM:BOOL=ON
+        -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON
+        -DTI_WITH_C_API:BOOL=OFF
+        -DTI_BUILD_TESTS:BOOL=OFF
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build ccache libxrandr-dev \
+            libxinerama-dev libxcursor-dev libxi-dev libx11-dev \
+            libxrender-dev libgl-dev libtinfo-dev libxml2-dev
+
+      - name: Install Vulkan SDK deps
+        env:
+          VULKAN_SDK_VERSION: "1.4.304.1"
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan-dev vulkan-tools xz-utils
+
+          sdk_root="$RUNNER_TEMP/vulkan-sdk"
+          sdk_archive="$RUNNER_TEMP/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz"
+          curl -fsSL \
+            "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz" \
+            -o "$sdk_archive"
+          rm -rf "$sdk_root"
+          mkdir -p "$sdk_root"
+          tar -xJf "$sdk_archive" -C "$sdk_root" --strip-components=1
+
+          sdk="$sdk_root/x86_64"
+          test -x "$sdk/bin/glslc"
+          echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
+          echo "VK_SDK_PATH=$sdk" >> "$GITHUB_ENV"
+          echo "VK_LAYER_PATH=$sdk/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$sdk/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "$sdk/bin" >> "$GITHUB_PATH"
+          "$sdk/bin/glslc" --version
+
+      - name: Download prebuilt LLVM 20
+        env:
+          LLVM20_LINUX_URL: ${{ vars.LLVM20_LINUX_URL || env.LLVM20_LINUX_MANYLINUX_URL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${LLVM20_LINUX_URL}" ]]; then
+            echo "::error::LLVM20_LINUX_URL (or LLVM20_LINUX_MANYLINUX_URL) is not configured as a repository variable."
+            exit 1
+          fi
+          mkdir -p dist
+          curl -fsSL "$LLVM20_LINUX_URL" -o /tmp/llvm20.zip
+          mkdir -p dist/taichi-llvm-20
+          python -m zipfile -e /tmp/llvm20.zip dist/taichi-llvm-20
+          echo "LLVM_DIR=$GITHUB_WORKSPACE/dist/taichi-llvm-20/lib/cmake/llvm" >> "$GITHUB_ENV"
+
+      - name: Install python build deps
+        run: |
+          python -m pip install --upgrade pip build
+          python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" ninja numpy
+
+      - name: Override version
+        shell: bash
+        run: |
+          echo -n "${{ needs.resolve_version.outputs.version }}" > version.txt
+          cat version.txt
+          python scripts/sync_runtime_dependency.py
+
+      - name: Build runtime wheel
+        run: |
+          python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
+
+      - name: Audit runtime wheel
+        run: |
+          python -m pip install auditwheel patchelf
+          mkdir -p wheelhouse-runtime
+          auditwheel show dist-runtime/*.whl || true
+          auditwheel repair dist-runtime/*.whl -w wheelhouse-runtime/ --plat manylinux_2_35_x86_64 || cp dist-runtime/*.whl wheelhouse-runtime/
+
+      - name: Validate runtime wheel contents
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from email.parser import Parser
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = sorted(Path("wheelhouse-runtime").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"Expected one runtime wheel, found {len(wheels)}: {wheels}")
+          with ZipFile(wheels[0]) as zf:
+              metadata = next(name for name in zf.namelist() if name.endswith(".dist-info/METADATA"))
+              project = Parser().parsestr(zf.read(metadata).decode("utf-8", errors="replace")).get("Name")
+              if project != "taichi-forge-runtime":
+                  raise SystemExit(f"Unexpected wheel project {project!r}: {wheels[0]}")
+              matches = [name for name in zf.namelist() if name.endswith("/libtaichi_runtime.so")]
+              if len(matches) != 1:
+                  raise SystemExit(f"Expected one libtaichi_runtime.so, found {matches}")
+          print(f"Validated {wheels[0]}")
+          PY
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-linux-runtime
+          path: wheelhouse-runtime/*.whl
+          if-no-files-found: error
+
+  build_windows_runtime:
+    name: Windows runtime wheel
+    needs: resolve_version
+    runs-on: windows-latest
+    env:
+      CMAKE_ARGS: >-
+        -DTI_WITH_VULKAN:BOOL=ON
+        -DTI_WITH_OPENGL:BOOL=ON
+        -DTI_WITH_CUDA:BOOL=ON
+        -DTI_WITH_LLVM:BOOL=ON
+        -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON
+        -DTI_WITH_C_API:BOOL=OFF
+        -DTI_BUILD_TESTS:BOOL=OFF
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Setup MSVC dev cmd
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          $version = "1.4.304.1"
+          $installer = "$env:TEMP\VulkanSDK.exe"
+          Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe" -OutFile $installer
+          Start-Process -FilePath $installer -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" -Wait
+          "VULKAN_SDK=C:\VulkanSDK\$version" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+          "PATH=C:\VulkanSDK\$version\Bin;$env:PATH" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+
+      - name: Download prebuilt LLVM 20
+        shell: pwsh
+        run: |
+          $url = "${{ env.LLVM20_WIN_URL }}"
+          if (-not $url) {
+            Write-Error "LLVM20_WIN_URL is not configured as a repo variable. Run the 'Build LLVM 20 for Windows' workflow first and set the variable to the release asset URL."
+            exit 1
+          }
+          New-Item -ItemType Directory -Force -Path dist/taichi-llvm-20 | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile $env:TEMP/llvm20.zip
+          Expand-Archive -Path $env:TEMP/llvm20.zip -DestinationPath dist/taichi-llvm-20
+          "LLVM_DIR=$(Resolve-Path dist/taichi-llvm-20/lib/cmake/llvm)" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
+
+      - name: Install python build deps
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip build
+          python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" numpy
+
+      - name: Override version
+        shell: pwsh
+        run: |
+          Set-Content -Path version.txt -NoNewline -Value "${{ needs.resolve_version.outputs.version }}"
+          Get-Content version.txt
+          python scripts/sync_runtime_dependency.py
+
+      - name: Build runtime wheel
+        shell: pwsh
+        run: |
+          python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
+
+      - name: Validate runtime wheel contents
+        shell: pwsh
+        run: |
+          @'
+          from email.parser import Parser
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = sorted(Path("dist-runtime").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"Expected one runtime wheel, found {len(wheels)}: {wheels}")
+          with ZipFile(wheels[0]) as zf:
+              metadata = next(name for name in zf.namelist() if name.endswith(".dist-info/METADATA"))
+              project = Parser().parsestr(zf.read(metadata).decode("utf-8", errors="replace")).get("Name")
+              if project != "taichi-forge-runtime":
+                  raise SystemExit(f"Unexpected wheel project {project!r}: {wheels[0]}")
+              names = zf.namelist()
+              for leaf in ("taichi_runtime.dll", "taichi_runtime.lib"):
+                  matches = [name for name in names if name.endswith("/" + leaf)]
+                  if len(matches) != 1:
+                      raise SystemExit(f"Expected one {leaf}, found {matches}")
+          print(f"Validated {wheels[0]}")
+          '@ | python -
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-windows-runtime
+          path: dist-runtime/*.whl
+          if-no-files-found: error
+
+  collect_and_publish:
+    name: PyPI upload
+    needs: [resolve_version, build_linux_runtime, build_windows_runtime]
+    runs-on: ubuntu-latest
+    if: github.event.inputs.publish == 'true'
+    environment:
+      name: ${{ github.event.inputs.target == 'pypi' && 'pypi' || 'testpypi' }}
+      url: ${{ github.event.inputs.target == 'pypi' && 'https://pypi.org/p/taichi-forge-runtime' || 'https://test.pypi.org/p/taichi-forge-runtime' }}
+    steps:
+      - name: Download all runtime wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Gather wheels
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find artifacts -type f -name '*.whl' -exec cp -v {} dist/ \;
+          python - <<'PY'
+          from email.parser import Parser
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = sorted(Path("dist").glob("*.whl"))
+          if not wheels:
+              raise SystemExit("No wheels gathered")
+          for wheel in wheels:
+              with ZipFile(wheel) as zf:
+                  metadata = next(name for name in zf.namelist() if name.endswith(".dist-info/METADATA"))
+                  project = Parser().parsestr(zf.read(metadata).decode("utf-8", errors="replace")).get("Name")
+              if project != "taichi-forge-runtime":
+                  raise SystemExit(f"Unexpected wheel project {project!r}: {wheel}")
+          print(f"taichi-forge-runtime: {len(wheels)} wheel(s)")
+          PY
+          ls -la dist/
+
+      - name: Publish to TestPyPI
+        if: github.event.inputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+          packages-dir: dist
+
+      - name: Publish to PyPI
+        if: github.event.inputs.target == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+          packages-dir: dist
