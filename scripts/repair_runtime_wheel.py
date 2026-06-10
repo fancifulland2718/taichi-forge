@@ -101,7 +101,7 @@ def _linux_cudart_name(runtime_so: Path) -> str | None:
         {
             match.group(0).decode("ascii")
             for match in re.finditer(
-                rb"libcudart\.so(?:\.[0-9]+(?:\.[0-9]+)*)?",
+                rb"libcudart\.so\.13(?:\.[0-9]+)*",
                 runtime_so.read_bytes(),
             )
         },
@@ -125,29 +125,18 @@ def _cuda_runtime_artifacts(
                 "Runtime build uses dynamic CUDA runtime, but taichi_runtime.dll "
                 "does not reference cudart64_*.dll"
             )
-        roots = _candidate_dirs_from_env(
-            [
-                "CUDA_PATH",
-                "CUDA_HOME",
-                "CUDA_ROOT",
-                "CUDA_PATH_V13_2",
-                "CUDA_PATH_V13_1",
-                "CUDA_PATH_V13_0",
-                "CUDA_PATH_V12_9",
-                "CUDA_PATH_V12_8",
-                "CUDA_PATH_V12_7",
-                "CUDA_PATH_V12_6",
-                "CUDA_PATH_V12_5",
-                "CUDA_PATH_V12_4",
-            ]
-        )
+        if runtime_name != "cudart64_13.dll":
+            raise SystemExit(
+                f"Runtime build must bind CUDA 13 cudart, found {runtime_name}"
+            )
+        roots = _candidate_dirs_from_env(["CUDA_PATH", "CUDA_HOME", "CUDA_ROOT"])
         if cache.get("CUDAToolkit_BIN_DIR"):
-            roots.append(Path(cache["CUDAToolkit_BIN_DIR"]))
+            roots.insert(0, Path(cache["CUDAToolkit_BIN_DIR"]))
         search_dirs = _existing_dirs(
             roots
             + [root / "bin" for root in roots]
             + [root / "bin" / "x64" for root in roots]
-            + [Path("C:/bin/x64"), Path("C:/bin")]
+            + [root / "x64" for root in roots]
         )
         candidates = [path / runtime_name for path in search_dirs]
         return {runtime_name: _choose_artifact(candidates, runtime_name)}
@@ -157,7 +146,7 @@ def _cuda_runtime_artifacts(
         if runtime_name is None:
             raise SystemExit(
                 "Runtime build uses dynamic CUDA runtime, but libtaichi_runtime.so "
-                "does not reference libcudart.so"
+                "does not reference CUDA 13 libcudart.so.13"
             )
         roots = _candidate_dirs_from_env(["CUDA_PATH", "CUDA_HOME", "CUDA_ROOT"])
         implicit_dirs = cache.get("_cmake_CUDAToolkit_implicit_link_directories", "")

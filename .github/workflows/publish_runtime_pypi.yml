@@ -29,7 +29,11 @@ permissions:
 env:
   TI_SKIP_VERSION_CHECK: "ON"
   TI_CI: "1"
-  CUDA_TOOLKIT_VERSION: "13.2.0"
+  # Internal test runtime wheels intentionally bind against the CUDA 13 runtime
+  # packaged inside taichi-forge-runtime instead of probing user CUDA installs.
+  # Use CUDA 13.0 by default to keep Blackwell support while avoiding the
+  # CUDA 13.2 driver floor for CUB native kernels.
+  CUDA_TOOLKIT_VERSION: "13.0.3"
   LLVM20_WIN_URL: ${{ vars.LLVM20_WIN_URL }}
   LLVM20_LINUX_MANYLINUX_URL: ${{ vars.LLVM20_LINUX_MANYLINUX_URL }}
 
@@ -96,7 +100,8 @@ jobs:
       - name: Validate CUDA Toolkit
         run: |
           set -euo pipefail
-          nvcc -V
+          nvcc -V | tee /tmp/nvcc-version.txt
+          grep -F "release 13.0" /tmp/nvcc-version.txt
           test -n "${CUDA_PATH:-}"
           test -x "$CUDA_PATH/bin/nvcc"
 
@@ -194,7 +199,7 @@ jobs:
           runtime_libs = [name for name in names if name == expected]
           cuda_runtime_libs = [
               name for name in names
-              if name.startswith("taichi_forge_runtime/_lib/runtime_native/libcudart.so")
+              if name.startswith("taichi_forge_runtime/_lib/runtime_native/libcudart.so.13")
           ]
           wrong_entries = [name for name in names if name.startswith("taichi_forge/_lib/")]
           if len(runtime_libs) != 1 or len(cuda_runtime_libs) != 1 or wrong_entries:
@@ -285,7 +290,12 @@ jobs:
       - name: Validate CUDA Toolkit
         shell: pwsh
         run: |
-          nvcc -V
+          $nvccVersion = nvcc -V
+          $nvccVersion
+          if ($nvccVersion -notmatch "release 13\.0") {
+            Write-Error "Expected CUDA Toolkit 13.0, got: $nvccVersion"
+            exit 1
+          }
           if (-not $env:CUDA_PATH) {
             Write-Error "CUDA_PATH was not configured by the CUDA Toolkit action."
             exit 1
@@ -385,8 +395,7 @@ jobs:
           runtime_libs = [name for name in names if name == expected_lib]
           cuda_runtime_dlls = [
               name for name in names
-              if name.startswith("taichi_forge_runtime/_lib/runtime_native/cudart64_")
-              and name.endswith(".dll")
+              if name == "taichi_forge_runtime/_lib/runtime_native/cudart64_13.dll"
           ]
           wrong_entries = [name for name in names if name.startswith("taichi_forge/_lib/")]
           if (

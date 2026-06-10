@@ -381,28 +381,36 @@ std::once_flag cudart_load_once;
 bool cudart_loaded{false};
 std::string cudart_load_error;
 
-void append_cuda_runtime_candidates(std::vector<std::string> &candidates,
-                                    const char *root) {
-  if (root == nullptr || root[0] == '\0') {
-    return;
+bool cuda_toolkit_driver_compatible_for_cub_sort() {
+#if defined(TI_CUDA_TOOLKIT_VERSION_MAJOR) && \
+    defined(TI_CUDA_TOOLKIT_VERSION_MINOR)
+  auto &driver = CUDADriver::get_instance_without_context();
+  if (!driver.detected()) {
+    cudart_load_error =
+        "CUDA CUB native primitives require a detectable CUDA driver.";
+    return false;
   }
-  std::string base(root);
-  while (!base.empty() && (base.back() == '/' || base.back() == '\\')) {
-    base.pop_back();
+  constexpr int kToolkitMajor = TI_CUDA_TOOLKIT_VERSION_MAJOR;
+  constexpr int kToolkitMinor = TI_CUDA_TOOLKIT_VERSION_MINOR;
+  const int driver_major = driver.get_version_major();
+  const int driver_minor = driver.get_version_minor();
+  if (driver_major < kToolkitMajor ||
+      (driver_major == kToolkitMajor && driver_minor < kToolkitMinor)) {
+    cudart_load_error = fmt::format(
+        "CUDA CUB native primitives were built with CUDA {}.{}, but the "
+        "NVIDIA driver reports CUDA {}.{}. This driver may reject the bundled "
+        "CUDA kernels with an unsupported toolchain error. Update the driver "
+        "or install a taichi-forge-runtime wheel built with an older CUDA "
+        "Toolkit.",
+        kToolkitMajor, kToolkitMinor, driver_major, driver_minor);
+    TI_TRACE("{}", cudart_load_error);
+    return false;
   }
-  if (base.empty()) {
-    return;
-  }
-#if defined(TI_PLATFORM_WINDOWS)
-  candidates.push_back(base + "\\bin\\" + TI_CUDA_CUB_SORT_CUDART_DLL);
-  candidates.push_back(base + "\\bin\\x64\\" + TI_CUDA_CUB_SORT_CUDART_DLL);
-#else
-  candidates.push_back(base + "/lib64/libcudart.so");
-  candidates.push_back(base + "/lib/libcudart.so");
 #endif
+  return true;
 }
 
-bool try_load_cudart_candidate(const std::string &candidate) {
+bool try_load_bundled_cudart(const std::string &candidate) {
   if (taichi::DynamicLoader::check_lib_loaded(candidate)) {
     cudart_loader = std::make_unique<taichi::DynamicLoader>(candidate);
     return cudart_loader->loaded();
@@ -416,60 +424,32 @@ bool try_load_cudart_candidate(const std::string &candidate) {
 }
 
 void load_cudart_for_cub_sort_once() {
-  std::vector<std::string> candidates;
-  const char *explicit_path = std::getenv("TI_CUDA_CUB_SORT_CUDART_PATH");
-  if (explicit_path != nullptr && explicit_path[0] != '\0') {
-    candidates.emplace_back(explicit_path);
-  }
-  append_cuda_runtime_candidates(candidates, std::getenv("CUDA_PATH"));
-  append_cuda_runtime_candidates(candidates, std::getenv("CUDA_HOME"));
-  append_cuda_runtime_candidates(candidates, std::getenv("CUDA_ROOT"));
-#if defined(TI_PLATFORM_WINDOWS)
-  append_cuda_runtime_candidates(candidates, std::getenv("CUDA_PATH_V13_2"));
-  append_cuda_runtime_candidates(candidates, std::getenv("CUDA_PATH_V13_1"));
-  append_cuda_runtime_candidates(candidates, std::getenv("CUDA_PATH_V13_0"));
-  append_cuda_runtime_candidates(candidates, std::getenv("CUDA_PATH_V12_9"));
-  append_cuda_runtime_candidates(candidates, std::getenv("CUDA_PATH_V12_8"));
-  append_cuda_runtime_candidates(candidates, std::getenv("CUDA_PATH_V12_7"));
-  append_cuda_runtime_candidates(candidates, std::getenv("CUDA_PATH_V12_6"));
-  append_cuda_runtime_candidates(candidates, std::getenv("CUDA_PATH_V12_5"));
-  append_cuda_runtime_candidates(candidates, std::getenv("CUDA_PATH_V12_4"));
-#endif
-#if defined(TI_PLATFORM_WINDOWS)
-  candidates.emplace_back(TI_CUDA_CUB_SORT_CUDART_DLL);
-#else
-  candidates.emplace_back("libcudart.so");
-#endif
   const char *bundled_path =
       std::getenv("TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH");
   if (bundled_path != nullptr && bundled_path[0] != '\0') {
-    candidates.emplace_back(bundled_path);
-  }
-
-  for (const auto &candidate : candidates) {
-    if (candidate.empty()) {
-      continue;
-    }
-    if (try_load_cudart_candidate(candidate)) {
+    if (try_load_bundled_cudart(bundled_path)) {
       cudart_loaded = true;
-      TI_TRACE("CUDA CUB sort runtime loaded from {}", candidate);
+      TI_TRACE("CUDA CUB sort runtime loaded from {}", bundled_path);
       return;
     }
   }
 
 #if defined(TI_PLATFORM_WINDOWS)
   cudart_load_error = fmt::format(
-      "CUDA CUB sort could not load {}. Set CUDA_PATH or "
-      "TI_CUDA_CUB_SORT_CUDART_PATH to the CUDA runtime DLL.",
+      "CUDA CUB sort could not load the bundled {} from "
+      "taichi-forge-runtime.",
       TI_CUDA_CUB_SORT_CUDART_DLL);
 #else
   cudart_load_error =
-      "CUDA CUB sort could not load libcudart.so. Set CUDA_PATH, CUDA_HOME, "
-      "or TI_CUDA_CUB_SORT_CUDART_PATH.";
+      "CUDA CUB sort could not load the bundled libcudart.so from "
+      "taichi-forge-runtime.";
 #endif
 }
 
 bool ensure_cudart_for_cub_sort() {
+  if (!cuda_toolkit_driver_compatible_for_cub_sort()) {
+    return false;
+  }
   std::call_once(cudart_load_once, load_cudart_for_cub_sort_once);
   return cudart_loaded;
 }

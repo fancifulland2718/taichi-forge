@@ -34,8 +34,17 @@ if (TI_WITH_CUDA_TOOLKIT)
     PROPERTIES COMPILE_DEFINITIONS TI_WITH_CUDA_TOOLKIT)
   get_filename_component(TI_CUDA_TOOLKIT_ROOT
     "${CUDAToolkit_INCLUDE_DIRS}/.." ABSOLUTE)
+  target_compile_definitions(${CUDA_RHI}
+    PRIVATE
+      TI_CUDA_TOOLKIT_VERSION_MAJOR=${CUDAToolkit_VERSION_MAJOR}
+      TI_CUDA_TOOLKIT_VERSION_MINOR=${CUDAToolkit_VERSION_MINOR})
 
   if (TI_CUDA_CUB_SORT_DYNAMIC_CUDART)
+    if (NOT CUDAToolkit_VERSION_MAJOR STREQUAL "13")
+      message(FATAL_ERROR
+        "TI_CUDA_CUB_SORT_DYNAMIC_CUDART is currently pinned to CUDA 13; "
+        "found CUDA Toolkit ${CUDAToolkit_VERSION}")
+    endif()
     target_link_libraries(${CUDA_RHI} PUBLIC CUDA::cudart)
     set_property(TARGET ${CUDA_RHI} PROPERTY CUDA_RUNTIME_LIBRARY Shared)
     target_compile_definitions(${CUDA_RHI}

@@ -7365,8 +7365,9 @@ def _cuda_cub_sort_native(
     prog = impl.get_runtime().prog
     if not _prog_available(prog, "cuda_cub_radix_sort_available"):
         raise RuntimeError(
-            f"method='{method}' requires CUDA CUB sort support and a "
-            "discoverable CUDA runtime library."
+            f"method='{method}' requires CUDA CUB sort support, the bundled "
+            "CUDA 13 runtime from taichi-forge-runtime, and a compatible "
+            "NVIDIA driver."
         )
     key_type = _SORT_KEY_TYPE[keys.dtype]
     value_type = (
