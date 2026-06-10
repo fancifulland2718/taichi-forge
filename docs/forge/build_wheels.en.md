@@ -1,6 +1,7 @@
 # Building Forge Wheels
 
 This document mirrors the public wheel build path used by
+`.github/workflows/publish_runtime_pypi.yml` and
 `.github/workflows/publish_pypi.yml`. It is intended for external developers who
 want to reproduce the PyPI-style Windows or Ubuntu builds locally.
 
@@ -43,12 +44,15 @@ Important details:
   splits the native runtime out of the CPython shim, omits the C API package
   tree, and disables test binaries. C API artifacts are native distribution
   outputs and should be built or published separately when needed.
+- The platform runtime wheel is built before the CPython shim wheels. Shim
+  builds should consume the already-built or already-published runtime wheel
+  instead of rebuilding the C++ runtime for every Python version.
 - After changing `version.txt`, run `python scripts/sync_runtime_dependency.py`
   before building release wheels. The publish workflow does this automatically.
 - PyPI/TestPyPI publishing must be authorized for both project names:
   `taichi-forge` and `taichi-forge-runtime`.
 
-Release build `CMAKE_ARGS`:
+Base release build `CMAKE_ARGS`:
 
 ```bash
 -DTI_WITH_VULKAN:BOOL=ON
@@ -60,12 +64,39 @@ Release build `CMAKE_ARGS`:
 -DTI_BUILD_TESTS:BOOL=OFF
 ```
 
+The `taichi-forge-runtime` workflow appends these runtime-only flags:
+
+```bash
+-DTI_WITH_CUDA_TOOLKIT:BOOL=ON
+-DTI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON
+```
+
 The workflow also sets:
 
 ```bash
 TI_SKIP_VERSION_CHECK=ON
 TI_CI=1
 ```
+
+## CUDA Toolkit for Native Methods
+
+Forge native CUDA primitive methods are built in the platform runtime wheel.
+The current release workflow hard-requires CUDA Toolkit `13.2.0` for that
+runtime build because the native CUDA implementation includes CUDA/CCCL headers
+such as `<cuda/iterator>` that are not available in older CUDA 13.0 toolkits.
+
+The runtime workflow installs CUDA Toolkit `13.2.0` with
+`Jimver/cuda-toolkit@v0.2.35` using `method: network`, verifies `nvcc -V`
+against `CUDA_TOOLKIT_VERSION`, and validates that the runtime wheel bundles the
+CUDA 13 runtime library:
+
+- Windows: `taichi_forge_runtime/_lib/runtime_native/cudart64_13.dll`
+- Linux: `taichi_forge_runtime/_lib/runtime_native/libcudart.so.13*`
+
+Installing `taichi-forge` does not require users to install the CUDA Toolkit
+locally, but building the `taichi-forge-runtime` wheel with native CUDA methods
+does. Do not downgrade the runtime build to CUDA 13.0 or 13.1 unless the native
+CUDA iterator code is also rewritten.
 
 ## LLVM 20
 
@@ -128,25 +159,34 @@ export LD_LIBRARY_PATH="$VULKAN_SDK/lib:${LD_LIBRARY_PATH:-}"
 export PATH="$VULKAN_SDK/bin:$PATH"
 ```
 
+Install CUDA Toolkit `13.2.0` for runtime wheel builds and verify `nvcc`:
+
+```bash
+nvcc -V
+# The output must contain: release 13.2
+```
+
 Install Python build packages:
 
 ```bash
 python -m pip install --upgrade pip build
 python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" ninja numpy
 
-export CMAKE_ARGS="-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CUDA:BOOL=ON -DTI_WITH_LLVM:BOOL=ON -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON -DTI_WITH_C_API:BOOL=OFF -DTI_BUILD_TESTS:BOOL=OFF"
+export BASE_CMAKE_ARGS="-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CUDA:BOOL=ON -DTI_WITH_LLVM:BOOL=ON -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON -DTI_WITH_C_API:BOOL=OFF -DTI_BUILD_TESTS:BOOL=OFF"
 python scripts/sync_runtime_dependency.py
 ```
 
 Build the platform runtime wheel once:
 
 ```bash
+CMAKE_ARGS="$BASE_CMAKE_ARGS -DTI_WITH_CUDA_TOOLKIT:BOOL=ON -DTI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON" \
 python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 ```
 
 Build the CPython shim wheel for the active Python interpreter:
 
 ```bash
+CMAKE_ARGS="$BASE_CMAKE_ARGS" \
 python -I -m build --wheel --no-isolation -Cinstall.components=python
 ```
 
@@ -171,6 +211,7 @@ Required tools:
 - MSVC x64 developer environment.
 - Ninja.
 - Vulkan SDK `1.4.304.1`.
+- CUDA Toolkit `13.2.0` for platform runtime wheel builds.
 - Prebuilt LLVM 20 archive from `LLVM20_WIN_URL`, or a local LLVM 20 build.
 
 Install Python build packages:
@@ -184,21 +225,25 @@ Set paths:
 
 ```powershell
 $env:VULKAN_SDK = "C:\VulkanSDK\1.4.304.1"
-$env:PATH = "$env:VULKAN_SDK\Bin;$env:PATH"
+$env:CUDA_PATH = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
+$env:PATH = "$env:CUDA_PATH\bin;$env:VULKAN_SDK\Bin;$env:PATH"
 $env:LLVM_DIR = "C:\path\to\dist\taichi-llvm-20\lib\cmake\llvm"
-$env:CMAKE_ARGS = "-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CUDA:BOOL=ON -DTI_WITH_LLVM:BOOL=ON -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON -DTI_WITH_C_API:BOOL=OFF -DTI_BUILD_TESTS:BOOL=OFF"
+$baseCmakeArgs = "-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CUDA:BOOL=ON -DTI_WITH_LLVM:BOOL=ON -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON -DTI_WITH_C_API:BOOL=OFF -DTI_BUILD_TESTS:BOOL=OFF"
+nvcc -V
 python scripts\sync_runtime_dependency.py
 ```
 
 Build the platform runtime wheel once:
 
 ```powershell
+$env:CMAKE_ARGS = "$baseCmakeArgs -DTI_WITH_CUDA_TOOLKIT:BOOL=ON -DTI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON"
 python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 ```
 
 Build the CPython shim wheel for the active Python interpreter:
 
 ```powershell
+$env:CMAKE_ARGS = $baseCmakeArgs
 python -I -m build --wheel --no-isolation -Cinstall.components=python
 ```
 

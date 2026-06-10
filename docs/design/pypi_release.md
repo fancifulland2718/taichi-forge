@@ -61,6 +61,33 @@ PyPI 申请短期 token，**无需手动维护任何 secret**。
 `publish_pypi.yml` 已经用 `${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}` 优先
 使用它。
 
+### 1.6 CUDA 13.2 与 native runtime 构建
+
+`publish_runtime_pypi.yml` 是唯一需要安装 CUDA Toolkit 的发布 workflow。它构建平台级
+`taichi-forge-runtime` wheel，并启用：
+
+```text
+-DTI_WITH_CUDA_TOOLKIT:BOOL=ON
+-DTI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON
+```
+
+当前 native CUDA primitive 方法对 CUDA Toolkit `13.2.0` 是硬约束：`cuda_sort.cu` 中的
+CUDA/CCCL 代码引用了 `<cuda/iterator>` 等版本专属头文件，CUDA 13.0 缺这些头会在编译期
+失败。workflow 中的 `CUDA_TOOLKIT_VERSION` 默认应保持为 `13.2.0`；如果后续升级 CUDA，
+优先只改这个环境变量，并让 Linux/Windows 的 `nvcc -V` 校验从该变量推导期望版本，避免
+再次出现硬编码版本字符串。
+
+runtime wheel 必须包含 native runtime 和动态 CUDA runtime：
+
+- Linux：`taichi_forge_runtime/_lib/runtime_native/libtaichi_runtime.so` 和
+  `libcudart.so.13*`。
+- Windows：`taichi_forge_runtime/_lib/runtime_native/taichi_runtime.dll`、
+  `taichi_runtime.lib` 和 `cudart64_13.dll`。
+
+`publish_pypi.yml` 不应重新编译 C++ runtime，也不应重新安装 CUDA Toolkit。它只从目标
+PyPI/TestPyPI 下载指定版本的 `taichi-forge-runtime` wheel，解包 link artifacts，然后构建
+各 Python 版本的 pybind shim wheel。
+
 ## 2. 触发方式
 
 ### 2.1 预演（不上传 PyPI）
@@ -135,6 +162,9 @@ git push origin v1.8.0
 | Release step 成功但 asset 为空 | artifact download 失败 / path 不对 | 看 `Gather wheels` step 输出，确认 `dist/*.whl` 确实存在 |
 | shim workflow 下载 runtime 失败 | 同版本 `taichi-forge-runtime` 尚未发布到目标索引 | 先运行 `publish_runtime_pypi.yml`，并确认目标是同一个 `pypi` / `testpypi` |
 | fork 触发 workflow 没有 id-token | fork 的 `pull_request` 默认没 OIDC 权限 | 改用 `workflow_dispatch` 或从 canonical repo 发起 |
+| Linux runtime 编译报 `fatal error: cuda/iterator: No such file or directory` | CUDA Toolkit 版本过低，通常是 workflow 不再使用 13.2 | 恢复 `CUDA_TOOLKIT_VERSION=13.2.0`，或先重写 native CUDA iterator 代码 |
+| Windows CUDA 版本校验误报 | `nvcc -V` 是多行输出，或校验字符串被硬编码 | 把输出 join 成字符串，并从 `CUDA_TOOLKIT_VERSION` 推导 `major.minor` |
+| runtime wheel 中缺 `cudart64_13.dll` / `libcudart.so.13*` | runtime 构建没有启用动态 cudart，或 wheel 打包路径错误 | 检查 `TI_WITH_CUDA_TOOLKIT`、`TI_CUDA_CUB_SORT_DYNAMIC_CUDART` 和 wheel contents validate step |
 
 ## 4. 和 LLVM 20 的关系
 
