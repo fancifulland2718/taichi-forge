@@ -33,7 +33,7 @@ env:
   # packaged inside taichi-forge-runtime instead of probing user CUDA installs.
   # Use CUDA 13.0 by default to keep Blackwell support while avoiding the
   # CUDA 13.2 driver floor for CUB native kernels.
-  CUDA_TOOLKIT_VERSION: "13.0.3"
+  CUDA_TOOLKIT_VERSION: "13.0"
   LLVM20_WIN_URL: ${{ vars.LLVM20_WIN_URL }}
   LLVM20_LINUX_MANYLINUX_URL: ${{ vars.LLVM20_LINUX_MANYLINUX_URL }}
 
