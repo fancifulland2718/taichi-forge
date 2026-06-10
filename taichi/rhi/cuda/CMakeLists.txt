@@ -79,7 +79,7 @@ if (TI_WITH_CUDA_TOOLKIT)
       set(TI_CUDA_RHI_ARCHITECTURES
           ${TI_CUDA_RHI_BASELINE_ARCH}-real
           ${TI_CUDA_RHI_BASELINE_ARCH}-virtual)
-    elseif (CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+    elseif (CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.2)
       # CUDA 13 no longer supports generating code below compute_75.  Keep the
       # default wheel broad and compact for that toolkit by shipping sm_75 SASS
       # plus compute_75 PTX; newer devices can JIT the PTX.

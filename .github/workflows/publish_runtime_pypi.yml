@@ -31,9 +31,9 @@ env:
   TI_CI: "1"
   # Internal test runtime wheels intentionally bind against the CUDA 13 runtime
   # packaged inside taichi-forge-runtime instead of probing user CUDA installs.
-  # Use CUDA 13.0.x by default to keep Blackwell support while avoiding the
+  # Use CUDA 13.2.x by default to keep Blackwell support while avoiding the
   # CUDA 13.2 driver floor for CUB native kernels.
-  CUDA_TOOLKIT_VERSION: "13.0.2"
+  CUDA_TOOLKIT_VERSION: "13.2.0"
   LLVM20_WIN_URL: ${{ vars.LLVM20_WIN_URL }}
   LLVM20_LINUX_MANYLINUX_URL: ${{ vars.LLVM20_LINUX_MANYLINUX_URL }}
 
@@ -102,7 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           nvcc -V | tee /tmp/nvcc-version.txt
-          grep -F "release 13.0" /tmp/nvcc-version.txt
+          grep -F "release 13.2" /tmp/nvcc-version.txt
           test -n "${CUDA_PATH:-}"
           test -x "$CUDA_PATH/bin/nvcc"
 
@@ -292,10 +292,10 @@ jobs:
       - name: Validate CUDA Toolkit
         shell: pwsh
         run: |
-          $nvccVersion = nvcc -V
+          $nvccVersion = (nvcc -V) -join "`n"
           $nvccVersion
           if ($nvccVersion -notmatch "release 13\.0") {
-            Write-Error "Expected CUDA Toolkit 13.0, got: $nvccVersion"
+            Write-Error "Expected CUDA Toolkit 13.2, got: $nvccVersion"
             exit 1
           }
           if (-not $env:CUDA_PATH) {
