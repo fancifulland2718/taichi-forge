@@ -102,7 +102,9 @@ jobs:
         run: |
           set -euo pipefail
           nvcc -V | tee /tmp/nvcc-version.txt
-          grep -F "release 13.2" /tmp/nvcc-version.txt
+          IFS='.' read -r cuda_major cuda_minor _ <<< "${CUDA_TOOLKIT_VERSION}"
+          expected_release="${cuda_major}.${cuda_minor}"
+          grep -E "release ${expected_release//./\\.}([,[:space:]]|$)" /tmp/nvcc-version.txt
           test -n "${CUDA_PATH:-}"
           test -x "$CUDA_PATH/bin/nvcc"
 
@@ -294,8 +296,11 @@ jobs:
         run: |
           $nvccVersion = (nvcc -V) -join "`n"
           $nvccVersion
-          if ($nvccVersion -notmatch "release 13\.0") {
-            Write-Error "Expected CUDA Toolkit 13.2, got: $nvccVersion"
+          $versionParts = $env:CUDA_TOOLKIT_VERSION.Split(".")
+          $expectedRelease = "$($versionParts[0]).$($versionParts[1])"
+          $expectedPattern = "release\s+$([regex]::Escape($expectedRelease))([,\s]|$)"
+          if ($nvccVersion -notmatch $expectedPattern) {
+            Write-Error "Expected CUDA Toolkit $expectedRelease, got: $nvccVersion"
             exit 1
           }
           if (-not $env:CUDA_PATH) {
