@@ -92,12 +92,105 @@ def _native_runtime_library_candidates(directory):
                 yield path
 
 
+def _cuda_runtime_library_candidates(directory):
+    if get_os_name() == "win":
+        patterns = ["cudart64_*.dll"]
+    elif get_os_name() == "linux":
+        patterns = ["libcudart.so", "libcudart.so.*", "libcudart-*.so*"]
+    else:
+        patterns = []
+
+    seen = set()
+    for pattern in patterns:
+        for path in sorted(glob.glob(os.path.join(directory, pattern))):
+            abspath = os.path.abspath(path)
+            key = os.path.normcase(abspath)
+            if key in seen or not os.path.isfile(abspath):
+                continue
+            seen.add(key)
+            yield abspath
+
+
+def _prepare_bundled_cuda_runtime(runtime_dirs):
+    if os.environ.get("TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH", ""):
+        return
+    for path in runtime_dirs:
+        for lib_path in _cuda_runtime_library_candidates(path):
+            os.environ["TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH"] = lib_path
+            return
+
+
+def _append_cuda_runtime_root_candidates(candidates, root):
+    if not root:
+        return
+    if get_os_name() == "win":
+        patterns = ["cudart64_13.dll", "cudart64_12.dll"]
+        subdirs = ["bin", os.path.join("bin", "x64")]
+    elif get_os_name() == "linux":
+        patterns = ["libcudart.so"]
+        subdirs = ["lib64", "lib"]
+    else:
+        return
+    for subdir in subdirs:
+        for pattern in patterns:
+            candidates.append(os.path.join(root, subdir, pattern))
+
+
+def _cuda_runtime_preload_candidates():
+    candidates = []
+    explicit_path = os.environ.get("TI_CUDA_CUB_SORT_CUDART_PATH", "")
+    if explicit_path:
+        candidates.append(explicit_path)
+    for name in ["CUDA_PATH", "CUDA_HOME", "CUDA_ROOT"]:
+        _append_cuda_runtime_root_candidates(candidates, os.environ.get(name, ""))
+    if get_os_name() == "win":
+        for name in [
+            "CUDA_PATH_V13_2",
+            "CUDA_PATH_V13_1",
+            "CUDA_PATH_V13_0",
+            "CUDA_PATH_V12_9",
+            "CUDA_PATH_V12_8",
+            "CUDA_PATH_V12_7",
+            "CUDA_PATH_V12_6",
+            "CUDA_PATH_V12_5",
+            "CUDA_PATH_V12_4",
+        ]:
+            _append_cuda_runtime_root_candidates(candidates, os.environ.get(name, ""))
+    elif get_os_name() == "linux":
+        candidates.append("libcudart.so")
+    bundled_path = os.environ.get("TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH", "")
+    if bundled_path:
+        candidates.append(bundled_path)
+    return candidates
+
+
+def _preload_cuda_runtime_for_native_runtime():
+    if get_os_name() != "linux":
+        return
+    flags = getattr(os, "RTLD_GLOBAL", 0) | getattr(os, "RTLD_NOW", 2)
+    seen = set()
+    for candidate in _cuda_runtime_preload_candidates():
+        if not candidate:
+            continue
+        key = os.path.normcase(os.path.abspath(candidate)) if os.path.sep in candidate else candidate
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            ctypes.CDLL(candidate, mode=flags)
+            return
+        except OSError:
+            continue
+
+
 def _prepare_native_runtime():
     global _native_runtime_loaded  # pylint: disable=global-statement
     if _native_runtime_loaded:
         return
 
     runtime_dirs = _native_runtime_dirs()
+    _prepare_bundled_cuda_runtime(runtime_dirs)
+    _preload_cuda_runtime_for_native_runtime()
     if get_os_name() == "win":
         for path in runtime_dirs:
             if hasattr(os, "add_dll_directory"):

@@ -260,10 +260,21 @@ jobs:
               members = exact or hashed
               if len(members) != 1:
                   raise SystemExit(f"Expected one Linux runtime SO in {wheels[0]}, found {members}")
+              cudart_members = [
+                  name for name in names
+                  if Path(name).name.startswith("libcudart.so")
+                  or "/libcudart-" in name
+              ]
+              if not cudart_members:
+                  raise SystemExit(
+                      f"Expected a bundled Linux CUDA runtime library in {wheels[0]}. "
+                      "Publish a fixed taichi-forge-runtime wheel first."
+                  )
               target = Path("runtime-link/libtaichi_runtime.so")
               with zf.open(members[0]) as src, target.open("wb") as dst:
                   copyfileobj(src, dst)
               print(f"Extracted {members[0]} from {wheels[0]} -> {target}")
+              print(f"Found bundled CUDA runtime: {cudart_members}")
           PY
 
           runtime_dir="$(realpath runtime-link)"
@@ -436,6 +447,16 @@ jobs:
           }
           with ZipFile(wheels[0]) as zf:
               names = zf.namelist()
+              cudart_members = [
+                  name for name in names
+                  if Path(name).name.startswith("cudart64_")
+                  and Path(name).suffix.lower() == ".dll"
+              ]
+              if not cudart_members:
+                  raise SystemExit(
+                      f"Expected a bundled Windows CUDA runtime DLL in {wheels[0]}. "
+                      "Publish a fixed taichi-forge-runtime wheel first."
+                  )
               for leaf, target in required.items():
                   members = [name for name in names if name.endswith("/" + leaf)]
                   if len(members) != 1:
@@ -443,6 +464,7 @@ jobs:
                   with zf.open(members[0]) as src, target.open("wb") as dst:
                       copyfileobj(src, dst)
                   print(f"Extracted {members[0]} from {wheels[0]} -> {target}")
+              print(f"Found bundled CUDA runtime: {cudart_members}")
           '@ | python -
 
           $runtimeDir = (Resolve-Path runtime-link).Path.Replace('\', '/')

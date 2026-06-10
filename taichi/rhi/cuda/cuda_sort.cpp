@@ -421,11 +421,6 @@ void load_cudart_for_cub_sort_once() {
   if (explicit_path != nullptr && explicit_path[0] != '\0') {
     candidates.emplace_back(explicit_path);
   }
-#if defined(TI_PLATFORM_WINDOWS)
-  candidates.emplace_back(TI_CUDA_CUB_SORT_CUDART_DLL);
-#else
-  candidates.emplace_back("libcudart.so");
-#endif
   append_cuda_runtime_candidates(candidates, std::getenv("CUDA_PATH"));
   append_cuda_runtime_candidates(candidates, std::getenv("CUDA_HOME"));
   append_cuda_runtime_candidates(candidates, std::getenv("CUDA_ROOT"));
@@ -440,6 +435,16 @@ void load_cudart_for_cub_sort_once() {
   append_cuda_runtime_candidates(candidates, std::getenv("CUDA_PATH_V12_5"));
   append_cuda_runtime_candidates(candidates, std::getenv("CUDA_PATH_V12_4"));
 #endif
+#if defined(TI_PLATFORM_WINDOWS)
+  candidates.emplace_back(TI_CUDA_CUB_SORT_CUDART_DLL);
+#else
+  candidates.emplace_back("libcudart.so");
+#endif
+  const char *bundled_path =
+      std::getenv("TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH");
+  if (bundled_path != nullptr && bundled_path[0] != '\0') {
+    candidates.emplace_back(bundled_path);
+  }
 
   for (const auto &candidate : candidates) {
     if (candidate.empty()) {

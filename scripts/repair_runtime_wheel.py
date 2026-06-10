@@ -8,6 +8,7 @@ import base64
 import csv
 import hashlib
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -16,6 +17,24 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 PACKAGE = "taichi_forge_runtime"
 WRONG_PACKAGE = "taichi_forge"
+
+
+def _cmake_cache_values() -> dict[str, str]:
+    values: dict[str, str] = {}
+    for cache in sorted(Path("_skbuild").rglob("CMakeCache.txt")):
+        for line in cache.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line or line.startswith("//") or line.startswith("#"):
+                continue
+            key_type, sep, value = line.partition("=")
+            if not sep:
+                continue
+            key = key_type.split(":", 1)[0]
+            values.setdefault(key, value)
+    return values
+
+
+def _enabled(value: str | None) -> bool:
+    return value is not None and value.upper() in {"1", "ON", "TRUE", "YES"}
 
 
 def _hash_record(path: Path) -> tuple[str, str]:
@@ -37,6 +56,124 @@ def _choose_artifact(candidates: list[Path], name: str) -> Path:
 def _artifact_roots() -> list[Path]:
     roots = [Path("_skbuild"), Path("runtimes"), Path("dist-runtime")]
     return [root for root in roots if root.exists()]
+
+
+def _candidate_dirs_from_env(names: list[str]) -> list[Path]:
+    dirs: list[Path] = []
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            dirs.append(Path(value))
+    return dirs
+
+
+def _existing_dirs(paths: list[Path]) -> list[Path]:
+    seen: set[str] = set()
+    existing: list[Path] = []
+    for path in paths:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        key = os.path.normcase(str(resolved))
+        if key in seen or not resolved.is_dir():
+            continue
+        seen.add(key)
+        existing.append(resolved)
+    return existing
+
+
+def _dynamic_cuda_runtime_required(cache: dict[str, str]) -> bool:
+    return _enabled(cache.get("TI_WITH_CUDA_TOOLKIT")) and _enabled(
+        cache.get("TI_CUDA_CUB_SORT_DYNAMIC_CUDART")
+    )
+
+
+def _windows_cudart_name(runtime_dll: Path) -> str | None:
+    match = re.search(rb"cudart64_\d+\.dll", runtime_dll.read_bytes())
+    if match is None:
+        return None
+    return match.group(0).decode("ascii")
+
+
+def _linux_cudart_name(runtime_so: Path) -> str | None:
+    matches = sorted(
+        {
+            match.group(0).decode("ascii")
+            for match in re.finditer(
+                rb"libcudart\.so(?:\.[0-9]+(?:\.[0-9]+)*)?",
+                runtime_so.read_bytes(),
+            )
+        },
+        key=len,
+        reverse=True,
+    )
+    return matches[0] if matches else None
+
+
+def _cuda_runtime_artifacts(
+    platform: str, artifacts: dict[str, Path]
+) -> dict[str, Path]:
+    cache = _cmake_cache_values()
+    if not _dynamic_cuda_runtime_required(cache):
+        return {}
+
+    if platform == "windows":
+        runtime_name = _windows_cudart_name(artifacts["taichi_runtime.dll"])
+        if runtime_name is None:
+            raise SystemExit(
+                "Runtime build uses dynamic CUDA runtime, but taichi_runtime.dll "
+                "does not reference cudart64_*.dll"
+            )
+        roots = _candidate_dirs_from_env(
+            [
+                "CUDA_PATH",
+                "CUDA_HOME",
+                "CUDA_ROOT",
+                "CUDA_PATH_V13_2",
+                "CUDA_PATH_V13_1",
+                "CUDA_PATH_V13_0",
+                "CUDA_PATH_V12_9",
+                "CUDA_PATH_V12_8",
+                "CUDA_PATH_V12_7",
+                "CUDA_PATH_V12_6",
+                "CUDA_PATH_V12_5",
+                "CUDA_PATH_V12_4",
+            ]
+        )
+        if cache.get("CUDAToolkit_BIN_DIR"):
+            roots.append(Path(cache["CUDAToolkit_BIN_DIR"]))
+        search_dirs = _existing_dirs(
+            roots
+            + [root / "bin" for root in roots]
+            + [root / "bin" / "x64" for root in roots]
+            + [Path("C:/bin/x64"), Path("C:/bin")]
+        )
+        candidates = [path / runtime_name for path in search_dirs]
+        return {runtime_name: _choose_artifact(candidates, runtime_name)}
+
+    if platform == "linux":
+        runtime_name = _linux_cudart_name(artifacts["libtaichi_runtime.so"])
+        if runtime_name is None:
+            raise SystemExit(
+                "Runtime build uses dynamic CUDA runtime, but libtaichi_runtime.so "
+                "does not reference libcudart.so"
+            )
+        roots = _candidate_dirs_from_env(["CUDA_PATH", "CUDA_HOME", "CUDA_ROOT"])
+        implicit_dirs = cache.get("_cmake_CUDAToolkit_implicit_link_directories", "")
+        for item in implicit_dirs.split(";"):
+            if item:
+                roots.append(Path(item))
+        search_dirs = _existing_dirs(
+            roots
+            + [root / "lib64" for root in roots]
+            + [root / "lib" for root in roots]
+            + [Path("/usr/local/cuda/lib64"), Path("/usr/local/cuda/lib")]
+        )
+        candidates = [path / runtime_name for path in search_dirs]
+        return {runtime_name: _choose_artifact(candidates, runtime_name)}
+
+    return {}
 
 
 def _runtime_artifacts(platform: str) -> dict[str, Path]:
@@ -61,6 +198,7 @@ def _runtime_artifacts(platform: str) -> dict[str, Path]:
         )
     else:
         raise SystemExit(f"Unsupported platform: {platform}")
+    artifacts.update(_cuda_runtime_artifacts(platform, artifacts))
     return artifacts
 
 

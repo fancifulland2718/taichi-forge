@@ -192,11 +192,15 @@ jobs:
               names = zf.namelist()
           expected = "taichi_forge_runtime/_lib/runtime_native/libtaichi_runtime.so"
           runtime_libs = [name for name in names if name == expected]
+          cuda_runtime_libs = [
+              name for name in names
+              if name.startswith("taichi_forge_runtime/_lib/runtime_native/libcudart.so")
+          ]
           wrong_entries = [name for name in names if name.startswith("taichi_forge/_lib/")]
-          if len(runtime_libs) != 1 or wrong_entries:
+          if len(runtime_libs) != 1 or len(cuda_runtime_libs) != 1 or wrong_entries:
               print(f"Runtime wheel contents from {wheel}:")
               for name in names:
-                  if "taichi_runtime" in name or "_lib/" in name:
+                  if "taichi_runtime" in name or "cudart" in name or "_lib/" in name:
                       print(f"  {name}")
               built = sorted(Path("_skbuild").rglob("libtaichi_runtime.so"))
               if built:
@@ -204,10 +208,12 @@ jobs:
                   for path in built:
                       print(f"  {path}")
               raise SystemExit(
-                  f"Expected {expected} and no taichi_forge/_lib entries; "
-                  f"found runtime_libs={runtime_libs}, wrong_entries={wrong_entries}"
+                  f"Expected {expected}, one dynamic libcudart, and no taichi_forge/_lib entries; "
+                  f"found runtime_libs={runtime_libs}, cuda_runtime_libs={cuda_runtime_libs}, "
+                  f"wrong_entries={wrong_entries}"
               )
           print(f"Runtime wheel native library: {runtime_libs[0]}")
+          print(f"Runtime wheel CUDA runtime: {cuda_runtime_libs[0]}")
           PY
 
       - name: Audit runtime wheel
@@ -377,18 +383,31 @@ jobs:
           expected_lib = "taichi_forge_runtime/_lib/runtime_native/taichi_runtime.lib"
           runtime_dlls = [name for name in names if name == expected_dll]
           runtime_libs = [name for name in names if name == expected_lib]
+          cuda_runtime_dlls = [
+              name for name in names
+              if name.startswith("taichi_forge_runtime/_lib/runtime_native/cudart64_")
+              and name.endswith(".dll")
+          ]
           wrong_entries = [name for name in names if name.startswith("taichi_forge/_lib/")]
-          if len(runtime_dlls) != 1 or len(runtime_libs) != 1 or wrong_entries:
+          if (
+              len(runtime_dlls) != 1
+              or len(runtime_libs) != 1
+              or len(cuda_runtime_dlls) != 1
+              or wrong_entries
+          ):
               print(f"Runtime wheel contents from {wheel}:")
               for name in names:
-                  if "taichi_runtime" in name or "_lib/" in name:
+                  if "taichi_runtime" in name or "cudart" in name or "_lib/" in name:
                       print(f"  {name}")
               raise SystemExit(
-                  f"Expected {expected_dll}, {expected_lib}, and no taichi_forge/_lib entries; "
-                  f"found dlls={runtime_dlls}, libs={runtime_libs}, wrong_entries={wrong_entries}"
+                  f"Expected {expected_dll}, {expected_lib}, one dynamic cudart DLL, "
+                  f"and no taichi_forge/_lib entries; found dlls={runtime_dlls}, "
+                  f"libs={runtime_libs}, cuda_runtime_dlls={cuda_runtime_dlls}, "
+                  f"wrong_entries={wrong_entries}"
               )
           print(f"Runtime wheel native DLL: {runtime_dlls[0]}")
           print(f"Runtime wheel import library: {runtime_libs[0]}")
+          print(f"Runtime wheel CUDA runtime DLL: {cuda_runtime_dlls[0]}")
           '@ | python -
 
       - name: Upload artifact
