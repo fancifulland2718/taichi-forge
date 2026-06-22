@@ -2,6 +2,7 @@
 #include "taichi/program/callable.h"
 
 #include <chrono>
+#include <cmath>
 #include <thread>
 
 #include "taichi/program/program.h"
@@ -16,6 +17,12 @@ namespace vulkan {
 
 namespace {
 using Clock = std::chrono::high_resolution_clock;
+constexpr double kUnpacedFpsLimit = 65535.0;
+
+bool should_limit_frame_rate(double fps_limit) {
+  return std::isfinite(fps_limit) && fps_limit > 0.0 &&
+         fps_limit < kUnpacedFpsLimit;
+}
 
 }  // namespace
 
@@ -154,29 +161,25 @@ bool Window::draw_frame(bool blocking_acquire) {
 }
 
 void Window::present_frame() {
-  if (fps_limit_ >= 1000.0) {
-    renderer_->swap_chain().surface().present_surface_image(
-        renderer_->get_render_surface_image(),
-        {renderer_->get_render_complete_semaphore()});
-    return;
-  }
-  const double target = 1000.0 / fps_limit_ - limiter_overshoot_;
-  const auto time_now = std::chrono::high_resolution_clock::now();
-  const double time_diff =
-      std::chrono::duration<double, std::milli>(time_now - last_frame_time_)
-          .count();
-  if (time_diff <= target) {
-    std::this_thread::sleep_until(
-        last_frame_time_ + std::chrono::duration<double, std::milli>(target));
-    const auto after_sleep = std::chrono::high_resolution_clock::now();
-    const double sleep_diff = std::chrono::duration<double, std::milli>(
-                                  after_sleep - last_frame_time_)
-                                  .count();
-    limiter_overshoot_ = sleep_diff - target;
-    last_frame_time_ = after_sleep;
-  } else {
-    last_frame_time_ = time_now;
-    limiter_overshoot_ *= 0.9;
+  if (should_limit_frame_rate(fps_limit_)) {
+    const double target = 1000.0 / fps_limit_ - limiter_overshoot_;
+    const auto time_now = Clock::now();
+    const double time_diff =
+        std::chrono::duration<double, std::milli>(time_now - last_frame_time_)
+            .count();
+    if (target > 0.0 && time_diff <= target) {
+      std::this_thread::sleep_until(
+          last_frame_time_ + std::chrono::duration<double, std::milli>(target));
+      const auto after_sleep = Clock::now();
+      const double sleep_diff = std::chrono::duration<double, std::milli>(
+                                    after_sleep - last_frame_time_)
+                                    .count();
+      limiter_overshoot_ = sleep_diff - target;
+      last_frame_time_ = after_sleep;
+    } else {
+      last_frame_time_ = time_now;
+      limiter_overshoot_ *= 0.9;
+    }
   }
   renderer_->swap_chain().surface().present_surface_image(
       renderer_->get_render_surface_image(),

@@ -43,7 +43,7 @@ window = ti.ui.Window(name='Window Title', res = (640, 360), fps_limit=200, pos 
 
 - The `name` parameter sets the title of the window.
 - The `res` parameter specifies the resolution (width and height) of the window.
-- The `fps_limit` parameter sets the maximum frames per second (FPS) for the window.
+- The `fps_limit` parameter sets the maximum frames per second (FPS) for the window. By default, GGUI does not apply an FPS limit. Set `fps_limit` to a non-positive value or a value greater than or equal to 65535 to keep frame pacing disabled.
 - The `pos` parameter specifies the position of the window with respect to the top-left corner of the main screen.
 
 A `ti.ui.Window` can display three types of objects:

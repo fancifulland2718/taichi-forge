@@ -63,7 +63,7 @@ class Window final : public WindowBase {
   std::unique_ptr<GuiBase> gui_;
   std::unique_ptr<Renderer> renderer_;
   bool drawn_frame_{false};
-  double fps_limit_{1000.0};
+  double fps_limit_{65535.0};
   double limiter_overshoot_{0.0};
 
  private:

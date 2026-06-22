@@ -327,7 +327,15 @@ def parse_args():
     parser.add_argument("--warmup", type=int, default=30)
     parser.add_argument("--warmup-drain-ms", type=float, default=0.0)
     parser.add_argument("--resolution", type=int, nargs=2, default=[640, 480])
-    parser.add_argument("--fps-limit", type=int, default=1000)
+    parser.add_argument(
+        "--fps-limit",
+        type=float,
+        default=65535.0,
+        help=(
+            "Maximum FPS for visible windows. Use 0 or a value >= 65535 "
+            "to disable GGUI pacing."
+        ),
+    )
     parser.add_argument("--vsync", action="store_true")
     parser.add_argument("--hidden", action="store_true")
     parser.add_argument("--verify-output", action="store_true")
