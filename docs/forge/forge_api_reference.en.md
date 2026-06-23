@@ -388,7 +388,9 @@ Location: `taichi_forge.ui.display_frame`; exported as `ti.ui.DisplayFrame`.
 
 A display-ready frame object for the GGUI `set_image` submission path. Use it
 when the caller already owns a displayable representation and wants to skip
-generic input detection and repacking.
+generic input detection and repacking. For ordinary images, `canvas.set_image`
+remains the preferred API and uses optimized CUDA/Vulkan device-side staging
+for Taichi field and ndarray inputs.
 
 Constructors:
 
@@ -415,8 +417,12 @@ was dropped by the window frame policy.
 Notes:
 
 - `canvas.set_image(frame)` forwards to `canvas.submit_frame(frame)`.
-- Ordinary `canvas.set_image(...)` inputs remain supported and still use the
-  generic conversion path.
+- Ordinary `canvas.set_image(...)` inputs remain supported. CUDA/Vulkan Taichi
+  field and ndarray inputs are packed to RGBA8 on the device before display
+  submission, avoiding a per-frame device-to-host staging round trip.
+- Contiguous host `uint8` RGBA NumPy inputs are submitted directly through the
+  host RGBA8 path. Use `DisplayFrame.from_packed_u32_ndarray(...)` only when
+  the producer already writes packed RGBA8 into a 2D `ti.u32` ndarray.
 - Strict cross-device zero-copy is not guaranteed by this API. The concrete
   path depends on source backend, display backend, and resource ownership.
 

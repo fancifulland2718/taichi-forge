@@ -12,7 +12,12 @@ from taichi_forge._lib import core as _ti_core
 import taichi_forge as ti
 from taichi_forge.lang import impl
 from taichi_forge.lang.misc import is_arch_supported
-from taichi_forge.ui.staging_buffer import image_field_cache, to_rgba8
+from taichi_forge.ui.staging_buffer import (
+    image_field_cache,
+    image_packed_ndarray_cache,
+    to_rgba8,
+    to_rgba8_packed_ndarray,
+)
 from tests import test_utils
 from tests.test_utils import verify_image
 
@@ -93,6 +98,16 @@ def test_to_rgba8_numpy_no_helper_compile():
     assert impl.get_runtime().get_num_compiled_functions() == compiled
     np.testing.assert_array_equal(out, _pack_rgba8_numpy_reference(image))
 
+    image = np.zeros((512, 512, 4), dtype=np.float32)
+    image[:, :, 0] = 0.25
+    image[:, :, 1] = 0.5
+    image[:, :, 2] = 0.75
+    image[:, :, 3] = 1.0
+    compiled = impl.get_runtime().get_num_compiled_functions()
+    out = to_rgba8(image)
+    assert impl.get_runtime().get_num_compiled_functions() == compiled
+    np.testing.assert_array_equal(out, _pack_rgba8_numpy_reference(image))
+
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_to_rgba8_small_taichi_image_no_helper_compile():
@@ -127,6 +142,33 @@ def test_to_rgba8_small_taichi_image_no_helper_compile():
     out = to_rgba8(arr)
     assert impl.get_runtime().get_num_compiled_functions() == compiled
     np.testing.assert_array_equal(out, _pack_rgba8_numpy_reference(ndarray_np))
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
+def test_to_rgba8_packed_ndarray_taichi_image():
+    image_packed_ndarray_cache.clear()
+
+    vector_np = np.array(
+        [
+            [[0.0, 0.5, 1.0, 1.0], [1.2, -0.5, 0.25, 0.75]],
+            [[0.1, 0.2, 0.3, 0.4], [0.9, 0.8, 0.7, 0.6]],
+        ],
+        dtype=np.float32,
+    )
+    vector = ti.Vector.field(4, ti.f32, shape=vector_np.shape[:2])
+    vector.from_numpy(vector_np)
+
+    packed = to_rgba8_packed_ndarray(vector)
+    assert packed.dtype == ti.u32
+    assert packed.shape == vector_np.shape[:2]
+    np.testing.assert_array_equal(packed.to_numpy(), _pack_rgba8_numpy_reference(vector_np))
+    assert to_rgba8_packed_ndarray(vector) is packed
+
+    scalar_np = np.array([[0, 127], [255, 3]], dtype=np.uint8)
+    scalar = ti.ndarray(ti.u8, shape=scalar_np.shape)
+    scalar.from_numpy(scalar_np)
+    packed_scalar = to_rgba8_packed_ndarray(scalar)
+    np.testing.assert_array_equal(packed_scalar.to_numpy(), _pack_rgba8_numpy_reference(scalar_np))
 
 
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
@@ -673,6 +715,27 @@ def test_hidden_window_display_stats_after_set_image():
     assert stats["last_submitted"] is True
     assert stats["last_window_submitted"] is False
     assert stats["last_offscreen_submitted"] is True
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_set_image_numpy_rgba8_direct():
+    window = ti.ui.Window("test", (64, 64), show_window=False)
+    canvas = window.get_canvas()
+
+    x = np.arange(64, dtype=np.uint8)[:, None]
+    y = np.arange(64, dtype=np.uint8)[None, :]
+    image = np.empty((64, 64, 4), dtype=np.uint8)
+    image[..., 0] = x
+    image[..., 1] = y
+    image[..., 2] = np.uint8(0)
+    image[..., 3] = np.uint8(255)
+
+    assert canvas.set_image(image) is True
+    rendered = window.get_image_buffer_as_numpy()
+    expected = image.astype(np.float32) / 255.0
+    np.testing.assert_allclose(rendered, expected, atol=1.0 / 255.0 + 1e-5)
     window.destroy()
 
 

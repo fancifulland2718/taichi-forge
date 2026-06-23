@@ -2,6 +2,8 @@
 
 Forge keeps ordinary `canvas.set_image(...)` compatibility while adding a
 narrower display-ready path for engines that already produce final images.
+For normal field, ndarray, NumPy, or texture images, prefer `canvas.set_image`.
+Forge optimizes the common CUDA/Vulkan device-image path internally.
 
 For a module-oriented list of Forge-only UI API symbols, see
 [Forge API reference](forge_api_reference.en.md).
@@ -22,8 +24,9 @@ Supported constructors:
 | `DisplayFrame.from_packed_u32_ndarray(image, transpose=True)` | 2D `ti.ndarray(ti.u32)` packed RGBA8 image. |
 
 `canvas.set_image(frame)` forwards to `canvas.submit_frame(frame)`. Ordinary
-`set_image()` inputs such as numpy arrays, fields, ndarrays, and textures remain
-available as compatibility and fallback paths.
+`set_image()` inputs such as NumPy arrays, fields, ndarrays, and textures remain
+the recommended compatibility path unless the caller already owns a
+display-ready frame.
 
 ## Display Statistics
 
@@ -38,8 +41,15 @@ Use `Window.reset_display_stats()` before a profiling window.
 
 - `DisplayFrame` avoids repeated generic input detection and repacking when the
   caller already owns a display-ready representation.
+- Ordinary CUDA/Vulkan Taichi field and ndarray images are packed to RGBA8 on
+  the device before display submission. This avoids the older per-frame
+  device-to-host staging round trip for the common `canvas.set_image(image)`
+  path.
+- Contiguous host `uint8` RGBA NumPy images are submitted directly through the
+  host RGBA8 path. Float NumPy images still need host-side conversion to RGBA8.
 - Packed `u32` device frames can use a Vulkan storage-buffer display path when
-  available.
+  available. This is the lowest-overhead path when the producer already writes
+  packed RGBA8, but it is not intended to replace normal `set_image()` inputs.
 - CUDA sources may still require CUDA-to-Vulkan staging unless a stricter
   external memory/semaphore ownership protocol is provided by the producer.
 - Visible window presentation is bounded by the platform WSI/swapchain

@@ -411,7 +411,8 @@ def copy_ndarray_u8_to_rgba8_texture(
 # if the user input is not in this format, a staging ti field is needed
 image_field_cache = {}
 image_texture_cache = {}
-_NUMPY_RGBA8_HOST_PACK_MAX_PIXELS = 256 * 256
+image_packed_ndarray_cache = {}
+_NUMPY_RGBA8_HOST_PACK_MAX_PIXELS = 1024 * 1024
 _TAICHI_NDARRAY_RGBA8_HOST_PACK_MAX_PIXELS = 128 * 128
 _TAICHI_FIELD_RGBA8_HOST_PACK_MAX_PIXELS = 128 * 128
 
@@ -505,6 +506,47 @@ def to_rgba8_texture(image):
         copy_image_u8_to_rgba8_texture(image, cached, channels, is_grayscale)
     else:
         copy_image_f32_to_rgba8_texture(image, cached, channels, is_grayscale)
+    return cached
+
+
+def _cached_ndarray_matches(cached, shape):
+    return cached is not None and getattr(cached, "arr", None) is not None and cached.shape == shape
+
+
+def to_rgba8_packed_ndarray(image):
+    """Pack a Taichi image into a device-side u32 RGBA8 ndarray.
+
+    This is the fast GGUI staging path for device images. It keeps conversion on
+    the Taichi backend device, so CUDA/Vulkan set_image can avoid the old
+    device -> host numpy -> graphics upload round trip.
+    """
+    if isinstance(image, (Texture, np.ndarray)):
+        return None
+    if image.dtype not in (u8, f32):
+        return None
+    try:
+        channels, is_grayscale = _get_image_channel_info(image)
+    except Exception:
+        return None
+    if channels < 1 or channels > 4:
+        return None
+
+    packed_shape = (image.shape[0], image.shape[1])
+    cached = image_packed_ndarray_cache.get(image)
+    if not _cached_ndarray_matches(cached, packed_shape):
+        cached = ndarray(dtype=u32, shape=packed_shape)
+        image_packed_ndarray_cache[image] = cached
+
+    is_ti_ndarray = hasattr(image, "to_numpy") and not hasattr(image, "snode")
+    if is_ti_ndarray:
+        if image.dtype == u8:
+            copy_image_u8_to_rgba8_ti_ndarray(image, cached, channels, is_grayscale)
+        else:
+            copy_image_f32_to_rgba8_ti_ndarray(image, cached, channels, is_grayscale)
+    elif image.dtype == u8:
+        copy_image_u8_to_rgba8(image, cached, channels, is_grayscale)
+    else:
+        copy_image_f32_to_rgba8(image, cached, channels, is_grayscale)
     return cached
 
 

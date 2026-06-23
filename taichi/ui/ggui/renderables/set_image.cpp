@@ -25,6 +25,9 @@ struct DirectSetImageState {
   std::unique_ptr<taichi::lang::ShaderResourceSet> resource_set{nullptr};
   taichi::lang::DeviceAllocationUnique ubo{nullptr};
   taichi::lang::DevicePtr display_buffer{taichi::lang::kDeviceNullPtr};
+  int ubo_width{0};
+  int ubo_height{0};
+  bool ubo_valid{false};
   bool enabled{false};
 };
 
@@ -67,6 +70,10 @@ void SetImage::update_direct_buffer_ubo() {
     TI_ASSERT(res == RhiResult::success);
     state.ubo = std::move(buf);
   }
+  if (state.ubo_valid && state.ubo_width == width_ &&
+      state.ubo_height == height_) {
+    return;
+  }
 
   glm::vec2 pixel_size = glm::vec2(1.0f / width_, 1.0f / height_);
   glm::vec2 lower_bound = pixel_size * 0.5f;
@@ -82,6 +89,9 @@ void SetImage::update_direct_buffer_ubo() {
   RHI_VERIFY(app_context_->device().map(state.ubo->get_ptr(0), &mapped));
   memcpy(mapped, &ubo, sizeof(ubo));
   app_context_->device().unmap(*state.ubo);
+  state.ubo_width = width_;
+  state.ubo_height = height_;
+  state.ubo_valid = true;
 }
 
 bool SetImage::can_use_direct_buffer(DevicePtr ptr) const {

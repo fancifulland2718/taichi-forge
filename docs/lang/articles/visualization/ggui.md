@@ -81,6 +81,19 @@ The positions/centers of geometries are represented as floats between `0.0` and 
 
 The canvas is cleared after every frame. Always call these methods within the render loop.
 
+#### `set_image()` performance notes
+
+For ordinary images, call `canvas.set_image(image)` directly. GGUI accepts Taichi fields, Taichi ndarrays, NumPy arrays, and textures. On CUDA and Vulkan backends, Taichi field and ndarray inputs are converted to the display RGBA8 format on the device before submission, avoiding a device-to-host round trip. A contiguous NumPy `uint8` RGBA image is submitted through the host RGBA8 path directly.
+
+If your renderer already produces a display-ready frame, `ti.ui.DisplayFrame` can avoid the generic conversion step:
+
+```python
+frame = ti.ui.DisplayFrame.from_packed_u32_ndarray(packed_rgba8)
+canvas.submit_frame(frame)
+```
+
+Use this only when `packed_rgba8` is a 2D `ti.u32` ndarray containing packed RGBA8 pixels. The normal `set_image()` API remains the recommended entry point for float or vector image fields.
+
 ## 3D Scene
 
 ### Create a scene

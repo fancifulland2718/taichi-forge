@@ -1,3 +1,5 @@
+import numpy as np
+
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
 from taichi_forge.lang._texture import Texture
@@ -10,6 +12,7 @@ from .staging_buffer import (
     get_indices_field_v2,
     get_vbo_field_v2,
     to_rgba8,
+    to_rgba8_packed_ndarray,
     to_rgba8_texture,
 )
 from .utils import get_field_info
@@ -29,12 +32,20 @@ class Canvas:
         self._set_image_info_cache = {}
 
     def _get_set_image_info(self, staging_img):
-        key = (
-            id(staging_img),
-            staging_img.ctypes.data,
-            staging_img.shape,
-            staging_img.dtype.str,
-        )
+        if hasattr(staging_img, "ctypes"):
+            key = (
+                id(staging_img),
+                staging_img.ctypes.data,
+                staging_img.shape,
+                staging_img.dtype.str,
+            )
+        else:
+            key = (
+                id(staging_img),
+                id(getattr(staging_img, "arr", None)),
+                getattr(staging_img, "shape", None),
+                str(getattr(staging_img, "dtype", None)),
+            )
         info = self._set_image_info_cache.get(key)
         if info is None:
             if len(self._set_image_info_cache) >= 16:
@@ -64,7 +75,25 @@ class Canvas:
             self.window.record_display_frame_dropped()
             return False
         is_texture = isinstance(img, Texture)
-        prog_is_vk = impl.pytaichi.prog.config().arch == _ti_core.Arch.vulkan
+        prog_arch = impl.pytaichi.prog.config().arch
+        prog_is_vk = prog_arch == _ti_core.Arch.vulkan
+        if (
+            isinstance(img, np.ndarray)
+            and img.dtype == np.uint8
+            and img.ndim == 3
+            and img.shape[2] == 4
+            and img.flags.c_contiguous
+        ):
+            self.canvas.set_image_host_rgba8(
+                img,
+                img.shape[0],
+                img.shape[1],
+                img.strides[0],
+                True,
+            )
+            if self.window is not None:
+                self.window.record_display_frame_accepted()
+            return True
         # FIXME: Remove this hack. Maybe add a query function for whether the texture can be presented
         if is_texture and prog_is_vk:
             self.canvas.set_image_texture(img.tex)
@@ -72,6 +101,13 @@ class Canvas:
                 self.window.record_display_frame_accepted()
             return True
         else:
+            if prog_arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan):
+                packed_img = to_rgba8_packed_ndarray(img)
+                if packed_img is not None:
+                    self.canvas.set_image(self._get_set_image_info(packed_img))
+                    if self.window is not None:
+                        self.window.record_display_frame_accepted()
+                    return True
             if prog_is_vk:
                 rgba8_texture = to_rgba8_texture(img)
                 if rgba8_texture is not None:

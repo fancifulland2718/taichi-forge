@@ -369,7 +369,9 @@ graph.run({})
 位置：`taichi_forge.ui.display_frame`，导出为 `ti.ui.DisplayFrame`。
 
 GGUI `set_image` 提交链路使用的 display-ready frame 对象。当调用方已经持有可显示
-表示，并希望跳过通用输入识别和 repack 时使用。
+表示，并希望跳过通用输入识别和 repack 时使用。普通图像仍优先使用
+`canvas.set_image`；Taichi field 和 ndarray 输入在 CUDA/Vulkan 后端会走优化过的
+device-side staging 路径。
 
 构造函数：
 
@@ -395,7 +397,12 @@ canvas.submit_frame(frame)
 说明：
 
 - `canvas.set_image(frame)` 会转发到 `canvas.submit_frame(frame)`。
-- 普通 `canvas.set_image(...)` 输入仍然保留，并继续走通用转换路径。
+- 普通 `canvas.set_image(...)` 输入仍然保留。CUDA/Vulkan Taichi field 和 ndarray
+  输入会先在 device 侧 pack 成 RGBA8 再提交显示，避免每帧 device-to-host staging
+  往返。
+- C-contiguous host `uint8` RGBA NumPy 输入会直接走 host RGBA8 提交路径。只有当
+  producer 已经把 packed RGBA8 写入 2D `ti.u32` ndarray 时，才需要直接使用
+  `DisplayFrame.from_packed_u32_ndarray(...)`。
 - 这个 API 不承诺严格跨设备 zero-copy。实际路径取决于 source backend、display
   backend 和资源所有权。
 

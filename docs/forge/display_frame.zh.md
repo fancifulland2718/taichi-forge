@@ -1,7 +1,8 @@
 # 显示帧提交
 
 Forge 保留普通 `canvas.set_image(...)` 兼容路径，同时为已经产出最终图像的引擎提供更窄的
-display-ready 提交路径。
+display-ready 提交路径。普通 field、ndarray、NumPy 或 texture 图像仍优先使用
+`canvas.set_image`；Forge 会在内部优化常见 CUDA/Vulkan device 图像路径。
 
 按模块整理的 Forge-only UI API 符号清单见 [Forge API 参考](forge_api_reference.zh.md)。
 
@@ -21,7 +22,8 @@ canvas.submit_frame(frame)
 | `DisplayFrame.from_packed_u32_ndarray(image, transpose=True)` | 2D `ti.ndarray(ti.u32)` packed RGBA8 图像。 |
 
 `canvas.set_image(frame)` 会转发到 `canvas.submit_frame(frame)`。普通 `set_image()` 输入
-如 numpy、field、ndarray、texture 仍作为兼容和 fallback 路径保留。
+如 NumPy、field、ndarray、texture 仍是推荐的兼容路径，除非调用方已经持有
+display-ready frame。
 
 ## Display stats
 
@@ -33,7 +35,13 @@ submitted、dropped、reused 和最近一次提交状态等信息。
 ## 性能模型
 
 - 当调用方已经持有 display-ready 表示时，`DisplayFrame` 避免反复走通用输入识别和 repack。
+- 普通 CUDA/Vulkan Taichi field 和 ndarray 图像会先在 device 侧 pack 成 RGBA8，
+  再提交显示，避免旧路径中每帧 device-to-host staging 往返。
+- C-contiguous host `uint8` RGBA NumPy 图像会直接走 host RGBA8 提交路径。float
+  NumPy 图像仍需要在 host 侧转换为 RGBA8。
 - packed `u32` device frame 在可用时可走 Vulkan storage-buffer 显示路径。
+  当 producer 已经直接写 packed RGBA8 时，这是固定开销最低的路径，但它不是普通
+  `set_image()` 输入的替代 API。
 - CUDA source 在 producer 没有提供更严格 external memory/semaphore 所有权协议时，仍可能需要 CUDA-to-Vulkan staging。
 - 可见窗口 present 受平台 WSI/swapchain 合同限制。测量 display sink 原始吞吐时，hidden/offscreen 提交更合适。
 
