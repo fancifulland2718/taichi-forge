@@ -46,9 +46,11 @@ class WindowBase {
 
   std::pair<float, float> get_cursor_pos();
 
-  std::vector<Event> get_events(EventType tag);
+  void poll_events();
 
-  bool get_event(EventType tag);
+  std::vector<Event> get_events(EventType tag, bool poll = true);
+
+  bool get_event(EventType tag, bool poll = true);
 
   Event get_current_event();
 

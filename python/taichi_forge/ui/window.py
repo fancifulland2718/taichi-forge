@@ -81,34 +81,51 @@ class Window:
         """Set the current unprocessed event."""
         self.window.set_current_event(value)
 
-    def get_events(self, tag=None):
+    def poll_events(self):
+        """Poll window events without drawing or presenting a frame.
+
+        ``show()`` already polls events once per frame. This method is only
+        needed by custom loops that want an explicit event-pump point.
+        """
+        return self.window.poll_events()
+
+    def get_events(self, tag=None, poll=True):
         """Get the current list of unprocessed events.
 
         Args:
             tag (str): A tag used for filtering events. \
                 If it is None, then all events are returned.
+            poll (bool): Whether to poll GLFW events before draining the queue.
+                Set this to ``False`` in high-throughput render loops that use
+                ``show()`` as the single event-pump point.
         """
         if tag is None:
-            return self.window.get_events(_ti_core.EventType.Any)
+            return self.window.get_events(_ti_core.EventType.Any, poll)
         if tag is PRESS:
-            return self.window.get_events(_ti_core.EventType.Press)
+            return self.window.get_events(_ti_core.EventType.Press, poll)
         if tag is RELEASE:
-            return self.window.get_events(_ti_core.EventType.Release)
+            return self.window.get_events(_ti_core.EventType.Release, poll)
         raise Exception("unrecognized event tag")
 
-    def get_event(self, tag=None):
+    def get_event(self, tag=None, poll=True):
         """Returns whether or not a event that matches tag has occurred.
 
         If tag is None, then no filters are applied. If this function
         returns `True`, the `event` property of the window will be set
         to the corresponding event.
+
+        Args:
+            tag (str): A tag used for filtering events.
+            poll (bool): Whether to poll GLFW events before draining the queue.
+                Set this to ``False`` in high-throughput render loops that use
+                ``show()`` as the single event-pump point.
         """
         if tag is None:
-            return self.window.get_event(_ti_core.EventType.Any)
+            return self.window.get_event(_ti_core.EventType.Any, poll)
         if tag is PRESS:
-            return self.window.get_event(_ti_core.EventType.Press)
+            return self.window.get_event(_ti_core.EventType.Press, poll)
         if tag is RELEASE:
-            return self.window.get_event(_ti_core.EventType.Release)
+            return self.window.get_event(_ti_core.EventType.Release, poll)
         raise Exception("unrecognized event tag")
 
     def is_pressed(self, *keys):

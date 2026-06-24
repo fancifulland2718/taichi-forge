@@ -459,6 +459,7 @@ window.show()
 ```
 
 Call this method _only_ at the end of the render loop for each frame.
+`show()` also polls window events once per frame.
 
 ## User input processing
 
@@ -467,6 +468,19 @@ To retrieve the events that have occurred since the last method call:
 ```python cont
 events = window.get_events()
 ```
+
+For compatibility, `window.get_events()` and `window.get_event()` poll GLFW
+events before draining Taichi's event queue. In asynchronous simulation/rendering
+loops, this can add a second event pump if the same frame also ends with
+`window.show()`. Use `poll=False` to drain only the events already collected by
+the previous `show()` call:
+
+```python
+events = window.get_events(poll=False)
+```
+
+This keeps `window.show()` as the single event-pump point for the frame, which is
+preferred for high-throughput headed GGUI loops.
 
 Each `event` in `events` is an instance of `ti.ui.Event`. It has the following properties:
 

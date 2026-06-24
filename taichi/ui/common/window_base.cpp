@@ -75,7 +75,7 @@ bool WindowBase::show() {
     frames_since_last_record_ = 0;
   }
 
-  glfwPollEvents();
+  poll_events();
   return true;
 }
 
@@ -183,9 +183,16 @@ std::pair<float, float> WindowBase::get_cursor_pos() {
   return std::make_pair(x, y);
 }
 
-std::vector<Event> WindowBase::get_events(EventType tag) {
+void WindowBase::poll_events() {
   CHECK_WINDOW_SHOWING;
   glfwPollEvents();
+}
+
+std::vector<Event> WindowBase::get_events(EventType tag, bool poll) {
+  CHECK_WINDOW_SHOWING;
+  if (poll) {
+    poll_events();
+  }
   std::vector<Event> result;
   std::list<Event>::iterator i = events_.begin();
   while (i != events_.end()) {
@@ -199,9 +206,11 @@ std::vector<Event> WindowBase::get_events(EventType tag) {
   return result;
 }
 
-bool WindowBase::get_event(EventType tag) {
+bool WindowBase::get_event(EventType tag, bool poll) {
   CHECK_WINDOW_SHOWING;
-  glfwPollEvents();
+  if (poll) {
+    poll_events();
+  }
   if (events_.size() == 0) {
     return false;
   }

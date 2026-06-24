@@ -672,12 +672,16 @@ struct PyWindow {
     return window->set_is_running(value);
   }
 
-  py::list get_events(EventType tag) {
-    return py::cast(window->get_events(tag));
+  void poll_events() {
+    window->poll_events();
   }
 
-  bool get_event(EventType e) {
-    return window->get_event(e);
+  py::list get_events(EventType tag, bool poll = true) {
+    return py::cast(window->get_events(tag, poll));
+  }
+
+  bool get_event(EventType e, bool poll = true) {
+    return window->get_event(e, poll);
   }
 
   Event get_current_event() {
@@ -743,8 +747,11 @@ void export_ggui(py::module &m) {
       .def("get_cursor_pos", &PyWindow::py_get_cursor_pos)
       .def("is_running", &PyWindow::is_running)
       .def("set_is_running", &PyWindow::set_is_running)
-      .def("get_event", &PyWindow::get_event)
-      .def("get_events", &PyWindow::get_events)
+      .def("poll_events", &PyWindow::poll_events)
+      .def("get_event", &PyWindow::get_event, py::arg("event_type"),
+           py::arg("poll") = true)
+      .def("get_events", &PyWindow::get_events, py::arg("event_type"),
+           py::arg("poll") = true)
       .def("get_current_event", &PyWindow::get_current_event)
       .def("set_current_event", &PyWindow::set_current_event)
       .def("destroy", &PyWindow::destroy)

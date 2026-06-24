@@ -23,7 +23,11 @@ Gui::Gui(AppContext *app_context, SwapChain *swap_chain, TaichiWindow *window) {
 
   IMGUI_CHECKVERSION();
   imgui_context_ = ImGui::CreateContext();
-  [[maybe_unused]] ImGuiIO &io = ImGui::GetIO();
+  ImGuiIO &io = ImGui::GetIO();
+  // GGUI owns GLFW cursor visibility through InputHandler. The ImGui GLFW
+  // backend otherwise writes the native cursor every frame, which can add
+  // visible Windows event-pump stalls when mouse enter/leave events are dense.
+  io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 
   ImGui::StyleColorsDark();
 
