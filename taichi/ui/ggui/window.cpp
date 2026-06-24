@@ -69,17 +69,22 @@ bool Window::show() {
     }
   }
   if (!drawn_frame_) {
+    const bool has_gui_work = gui_ && gui_->has_widgets();
     if (config_.show_window && !renderer_->can_accept_frame()) {
       renderer_->discard_pending_frame();
       record_display_frame_dropped();
+      prepare_for_next_frame();
       return false;
     }
-    if (config_.show_window && !renderer_->has_render_work()) {
+    if (config_.show_window && !renderer_->has_render_work() &&
+        !has_gui_work) {
+      prepare_for_next_frame();
       return false;
     }
     if (!draw_frame()) {
       renderer_->discard_pending_frame();
       record_display_frame_dropped();
+      prepare_for_next_frame();
       return false;
     }
   }
@@ -107,7 +112,7 @@ bool Window::can_render_frame() {
     return true;
   }
   return renderer_ && !drawn_frame_ && !renderer_->has_render_work() &&
-         renderer_->can_accept_frame();
+         !(gui_ && gui_->has_widgets()) && renderer_->can_accept_frame();
 }
 
 CanvasBase *Window::get_canvas() {

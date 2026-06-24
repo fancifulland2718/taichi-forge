@@ -45,13 +45,16 @@ class TI_DLL_EXPORT GuiMetal final : public GuiBase {
   bool button(const std::string &text) override;
 
   void prepare_for_next_frame() override;
+  bool has_widgets() const override;
+  void end_frame() override;
 
   void draw(taichi::lang::CommandList *cmd_list);
 
-  bool is_empty();
+  bool is_empty() const;
 
  private:
-  bool is_empty_;
+  bool is_empty_{true};
+  bool frame_started_{false};
   AppContext *app_context_{nullptr};
   ImGuiContext *imgui_context_{nullptr};
   int widthBeforeDPIScale{0};

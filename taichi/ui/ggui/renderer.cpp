@@ -390,7 +390,7 @@ bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
 
   if (app_context_.config.ggui_arch == Arch::vulkan) {
     Gui *gui = static_cast<Gui *>(gui_base);
-    if (gui != nullptr && !gui->is_empty()) {
+    if (gui != nullptr && gui->has_widgets()) {
       VkRenderPass pass = static_cast<VulkanCommandList *>(cmd_list.get())
                               ->current_renderpass()
                               ->renderpass;
@@ -402,12 +402,14 @@ bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
         gui->init_render_resources(pass);
       }
       gui->draw(cmd_list.get());
+    } else if (gui != nullptr) {
+      gui->end_frame();
     }
   }
 #ifdef TI_WITH_METAL
   else if (app_context_.config.ggui_arch == Arch::metal) {
     GuiMetal *gui = static_cast<GuiMetal *>(gui_base);
-    if (gui != nullptr) {
+    if (gui != nullptr && gui->has_widgets()) {
 
       auto mtl_cmd_list = static_cast<MetalCommandList *>(cmd_list.get());
 
@@ -417,6 +419,8 @@ bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
 
       gui->init_render_resources(pass);
       gui->draw(cmd_list.get());
+    } else if (gui != nullptr) {
+      gui->end_frame();
     }
   }
 #endif

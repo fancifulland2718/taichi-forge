@@ -37,6 +37,7 @@ void GuiMetal::init_render_resources(void *rpd) {
 }
 
 void GuiMetal::prepare_for_next_frame() {
+  end_frame();
   if (app_context_->config.show_window) {
     ImGui_ImplGlfw_NewFrame();
   } else {
@@ -48,6 +49,7 @@ void GuiMetal::prepare_for_next_frame() {
     io.DisplaySize = ImVec2((float)w, (float)h);
   }
   ImGui::NewFrame();
+  frame_started_ = true;
   is_empty_ = true;
 }
 
@@ -92,10 +94,14 @@ bool GuiMetal::button(const std::string &text) {
 }
 
 void GuiMetal::draw(taichi::lang::CommandList *cmd_list) {
+  if (!frame_started_) {
+    return;
+  }
   ImGui_ImplMetal_NewFrame(current_rpd_);
 
   // Rendering
   ImGui::Render();
+  frame_started_ = false;
 
   @autoreleasepool {
     MTLCommandBuffer_id buffer =
@@ -108,6 +114,7 @@ void GuiMetal::draw(taichi::lang::CommandList *cmd_list) {
   }
 }
 void GuiMetal::cleanup_render_resources() {
+  end_frame();
   ImGui_ImplMetal_Shutdown();
   current_rpd_ = nullptr;
 }
@@ -120,7 +127,17 @@ GuiMetal::~GuiMetal() {
   ImGui::DestroyContext(imgui_context_);
 }
 
-bool GuiMetal::is_empty() { return is_empty_; }
+bool GuiMetal::has_widgets() const { return !is_empty_; }
+
+void GuiMetal::end_frame() {
+  if (!frame_started_) {
+    return;
+  }
+  ImGui::EndFrame();
+  frame_started_ = false;
+}
+
+bool GuiMetal::is_empty() const { return is_empty_; }
 
 } // namespace vulkan
 

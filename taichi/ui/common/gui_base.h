@@ -27,6 +27,8 @@ class GuiBase {
                                  glm::vec3 old_value) = 0;
   virtual bool button(const std::string &text) = 0;
   virtual void prepare_for_next_frame() = 0;
+  virtual bool has_widgets() const = 0;
+  virtual void end_frame() = 0;
   virtual ~GuiBase() = default;
 };
 

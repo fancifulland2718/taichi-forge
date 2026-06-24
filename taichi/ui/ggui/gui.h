@@ -53,15 +53,18 @@ class TI_DLL_EXPORT Gui final : public GuiBase {
   void draw(taichi::lang::CommandList *cmd_list);
 
   void prepare_for_next_frame() override;
+  bool has_widgets() const override;
+  void end_frame() override;
 
   VkRenderPass render_pass() {
     return render_pass_;
   }
 
-  bool is_empty();
+  bool is_empty() const;
 
  private:
   bool is_empty_{true};
+  bool frame_started_{false};
   AppContext *app_context_{nullptr};
   SwapChain *swap_chain_{nullptr};
   ImGuiContext *imgui_context_{nullptr};

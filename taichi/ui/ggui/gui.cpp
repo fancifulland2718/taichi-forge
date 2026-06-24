@@ -103,6 +103,7 @@ void Gui::create_descriptor_pool() {
 }
 
 void Gui::prepare_for_next_frame() {
+  end_frame();
   if (render_pass_ == VK_NULL_HANDLE) {
     return;
   }
@@ -122,6 +123,7 @@ void Gui::prepare_for_next_frame() {
     io.DisplaySize = ImVec2((float)w, (float)h);
   }
   ImGui::NewFrame();
+  frame_started_ = true;
   is_empty_ = true;
 }
 
@@ -221,8 +223,13 @@ bool Gui::button(const std::string &text) {
 }
 
 void Gui::draw(taichi::lang::CommandList *cmd_list) {
+  if (!frame_started_) {
+    return;
+  }
+
   // Rendering
   ImGui::Render();
+  frame_started_ = false;
   ImDrawData *draw_data = ImGui::GetDrawData();
 
   VkCommandBuffer buffer =
@@ -232,6 +239,7 @@ void Gui::draw(taichi::lang::CommandList *cmd_list) {
 }
 
 void Gui::cleanup_render_resources() {
+  end_frame();
   if (initialized()) {
     ImGui_ImplVulkan_Shutdown();
   }
@@ -257,7 +265,19 @@ Gui::~Gui() {
   ImGui::DestroyContext(imgui_context_);
 }
 
-bool Gui::is_empty() {
+bool Gui::has_widgets() const {
+  return !is_empty_;
+}
+
+void Gui::end_frame() {
+  if (!frame_started_) {
+    return;
+  }
+  ImGui::EndFrame();
+  frame_started_ = false;
+}
+
+bool Gui::is_empty() const {
   return is_empty_;
 }
 

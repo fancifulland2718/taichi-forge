@@ -1017,6 +1017,32 @@ def test_imgui():
 
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
 @test_utils.test(arch=supported_archs)
+def test_imgui_empty_frame_after_widget_frame():
+    w, h = 320, 240
+    image = np.zeros((w, h, 3), dtype=np.float32)
+    image[..., 0] = 0.2
+    image[..., 1] = 0.3
+    image[..., 2] = 0.4
+
+    window = ti.ui.Window("test", (w, h), show_window=False, fps_limit=65535)
+    canvas = window.get_canvas()
+    gui = window.get_gui()
+
+    canvas.set_image(image)
+    with gui.sub_window("Panel", 0.02, 0.02, 0.2, 0.12) as panel:
+        panel.text("first")
+    assert window.show()
+
+    canvas.set_image(image)
+    assert window.show()
+
+    canvas.set_image(image)
+    assert window.show()
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=supported_archs)
 def test_exit_without_showing():
     window = ti.ui.Window("Taichi", (256, 256), show_window=False)
 
