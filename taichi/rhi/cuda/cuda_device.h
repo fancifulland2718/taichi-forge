@@ -1,8 +1,11 @@
 #pragma once
+#include <memory>
+#include <mutex>
 #include <vector>
 #include <set>
 
 #include "taichi/common/core.h"
+#include "taichi/rhi/common/allocation_registry.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/rhi/llvm/allocator.h"
 #include "taichi/rhi/cuda/cuda_context.h"
@@ -101,7 +104,7 @@ class CudaDevice : public LlvmDevice {
   AllocInfo get_alloc_info(const DeviceAllocation handle);
 
   CudaDevice();
-  ~CudaDevice() override {};
+  ~CudaDevice() override;
 
   RhiResult allocate_memory(const AllocParams &params,
                             DeviceAllocation *out_devalloc) override;
@@ -143,6 +146,15 @@ class CudaDevice : public LlvmDevice {
 
   void memcpy_internal(DevicePtr dst, DevicePtr src, uint64_t size) override;
 
+  // Internal interop helpers. They retain the source/destination registry
+  // lease through the CUDA copy; callers retain ownership of external_ptr.
+  RhiResult copy_to_external(void *external_ptr,
+                             DevicePtr src,
+                             uint64_t size);
+  RhiResult copy_from_external(DevicePtr dst,
+                               void *external_ptr,
+                               uint64_t size);
+
   DeviceAllocation import_memory(void *ptr, size_t size) override;
 
   void *get_memory_addr(DeviceAllocation devalloc) override {
@@ -160,16 +172,59 @@ class CudaDevice : public LlvmDevice {
   void clear() override;
 
  private:
-  std::vector<AllocInfo> allocations_;
-  bool is_valid_device_alloc(const DeviceAllocation alloc) const {
-    return alloc.device == this && alloc.alloc_id < allocations_.size();
-  }
+  struct MappingState {
+    std::mutex mutex;
+    std::unique_ptr<char[]> staging;
+  };
 
-  void validate_device_alloc(const DeviceAllocation alloc) {
-    if (!is_valid_device_alloc(alloc)) {
-      TI_ERROR("invalid DeviceAllocation");
+  struct AllocationRecord {
+    AllocationRecord(void *ptr,
+                     size_t size,
+                     bool is_imported,
+                     bool use_preallocated,
+                     bool use_cached,
+                     bool use_memory_pool,
+                     CUstream stream,
+                     std::unique_ptr<MappingState> mapping)
+        : ptr(ptr),
+          size(size),
+          is_imported(is_imported),
+          use_preallocated(use_preallocated),
+          use_cached(use_cached),
+          use_memory_pool(use_memory_pool),
+          stream(stream),
+          mapping(std::move(mapping)) {
     }
-  }
+    ~AllocationRecord();
+    AllocationRecord(const AllocationRecord &) = delete;
+    AllocationRecord &operator=(const AllocationRecord &) = delete;
+    AllocationRecord(AllocationRecord &&other) noexcept;
+    AllocationRecord &operator=(AllocationRecord &&other) noexcept;
+
+    AllocInfo info() const {
+      AllocInfo result;
+      result.ptr = ptr;
+      result.size = size;
+      result.is_imported = is_imported;
+      result.use_preallocated = use_preallocated;
+      result.use_cached = use_cached;
+      result.use_memory_pool = use_memory_pool;
+      return result;
+    }
+
+    void release();
+
+    void *ptr{nullptr};
+    size_t size{0};
+    bool is_imported{false};
+    bool use_preallocated{true};
+    bool use_cached{false};
+    bool use_memory_pool{false};
+    CUstream stream{nullptr};
+    std::unique_ptr<MappingState> mapping;
+  };
+
+  AllocationRegistry<AllocationRecord> allocations_;
 };
 
 }  // namespace cuda

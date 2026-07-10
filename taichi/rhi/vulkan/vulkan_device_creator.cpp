@@ -548,6 +548,11 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
 
   bool has_swapchain = false;
   bool has_present_mode_fifo_latest_ready = false;
+  // VK_KHR_external_memory became core in Vulkan 1.1.  Exporting the memory
+  // object still needs the platform-specific handle extension, so report the
+  // capability only when both pieces are available on the device we create.
+  bool has_external_memory_base = vk_api_version >= VK_API_VERSION_1_1;
+  bool has_external_memory_platform_handle = false;
 
   [[maybe_unused]] bool portability_subset_enabled = false;
 
@@ -582,10 +587,18 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
         caps.set(DeviceCapability::spirv_version, 0x10400);
         enabled_extensions.push_back(ext.extensionName);
       }
-    } else if (name == VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME ||
-               name == VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME) {
-      ti_device_->vk_caps().external_memory = true;
+    } else if (name == VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME) {
+      has_external_memory_base = true;
       enabled_extensions.push_back(ext.extensionName);
+#if defined(_WIN32) || defined(_WIN64)
+    } else if (name == VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME) {
+      has_external_memory_platform_handle = true;
+      enabled_extensions.push_back(ext.extensionName);
+#else
+    } else if (name == VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) {
+      has_external_memory_platform_handle = true;
+      enabled_extensions.push_back(ext.extensionName);
+#endif
     } else if (name == VK_KHR_VARIABLE_POINTERS_EXTENSION_NAME) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (name == VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME) {
@@ -623,6 +636,9 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
     }
     // Vulkan doesn't seem to support SPV_KHR_no_integer_wrap_decoration at all.
   }
+
+  ti_device_->vk_caps().external_memory =
+      has_external_memory_base && has_external_memory_platform_handle;
 
   if (has_swapchain) {
     ti_device_->vk_caps().present = true;

@@ -1728,6 +1728,15 @@ VulkanDevice::~VulkanDevice() {
   // approaches.
   vkDeviceWaitIdle(device_);
 
+  InteropDeviceReleaseCallback interop_device_release = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(interop_cleanup_mutex_);
+    interop_device_release = interop_device_release_;
+  }
+  if (interop_device_release != nullptr) {
+    interop_device_release(this);
+  }
+
   allocations_.clear();
   image_allocations_.clear();
 
@@ -1857,7 +1866,7 @@ RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
       VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
   external_mem_buffer_create_info.pNext = nullptr;
 
-#ifdef _WIN64
+#if defined(_WIN32) || defined(_WIN64)
   external_mem_buffer_create_info.handleTypes =
       VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
 #else
@@ -2011,6 +2020,15 @@ RhiResult VulkanDevice::map_internal(AllocationInternal &alloc_int,
 }
 
 void VulkanDevice::dealloc_memory(DeviceAllocation handle) {
+  const uint64_t generation = allocation_generation(handle);
+  InteropAllocationReleaseCallback interop_allocation_release = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(interop_cleanup_mutex_);
+    interop_allocation_release = interop_allocation_release_;
+  }
+  if (interop_allocation_release != nullptr) {
+    interop_allocation_release(this, handle.alloc_id, generation);
+  }
   allocations_.release(&get_alloc_internal(handle));
 }
 
@@ -2665,7 +2683,7 @@ DeviceAllocation VulkanDevice::create_image(const ImageParams &params) {
         VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
     external_mem_image_create_info.pNext = nullptr;
 
-#ifdef _WIN64
+#if defined(_WIN32) || defined(_WIN64)
     external_mem_image_create_info.handleTypes =
         VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
 #else
@@ -3030,7 +3048,7 @@ void VulkanDevice::create_vma_allocator() {
   for (int i = 0; i < properties.memoryTypeCount; i++) {
     auto flag = properties.memoryTypes[i].propertyFlags;
     if (flag & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
-#ifdef _WIN64
+#if defined(_WIN32) || defined(_WIN64)
       flags[i] = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
 #else
       flags[i] = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;

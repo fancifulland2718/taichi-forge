@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -30,6 +31,9 @@ namespace taichi::lang {
 // responsibility and must be synchronized independently.
 template <typename Record>
 class AllocationRegistry {
+  static_assert(std::is_nothrow_move_constructible<Record>::value,
+                "AllocationRegistry records must be noexcept-movable");
+
  public:
   enum class State {
     kLive,
@@ -108,8 +112,9 @@ class AllocationRegistry {
 
   template <typename... Args>
   std::pair<RhiResult, DeviceAllocationId> emplace(Args &&...args) {
+    std::vector<Record> retired;
     std::lock_guard<std::mutex> lock(mutex_);
-    collect_retired_locked();
+    collect_retired_locked(retired);
 
     try {
       const auto reusable_slot = find_released_slot_locked();
@@ -158,22 +163,25 @@ class AllocationRegistry {
   }
 
   RhiResult retire(DeviceAllocationId handle) {
+    std::vector<Record> retired;
     std::lock_guard<std::mutex> lock(mutex_);
     auto *slot = find_live_slot_locked(handle);
     if (!slot) {
       return RhiResult::invalid_usage;
     }
     slot->state = State::kRetiring;
-    collect_retired_locked();
+    collect_retired_locked(retired);
     return RhiResult::success;
   }
 
   // Destroys records whose retirement is no longer protected by a Lease and
   // makes their slots eligible for reuse. Backends may call this after a batch
   // of retirements; emplace() also performs collection opportunistically.
-  size_t collect_retired() {
+  std::vector<Record> collect_retired() {
+    std::vector<Record> retired;
     std::lock_guard<std::mutex> lock(mutex_);
-    return collect_retired_locked();
+    collect_retired_locked(retired);
+    return retired;
   }
 
   std::optional<State> state(DeviceAllocationId handle) const {
@@ -212,13 +220,14 @@ class AllocationRegistry {
   }
 
   void clear() {
+    std::vector<Record> retired;
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto &slot : slots_) {
       if (slot && slot->state == State::kLive) {
         slot->state = State::kRetiring;
       }
     }
-    collect_retired_locked();
+    collect_retired_locked(retired);
   }
 
   static bool is_valid_range(uint64_t allocation_size,
@@ -261,7 +270,7 @@ class AllocationRegistry {
     return slot.get();
   }
 
-  size_t collect_retired_locked() {
+  size_t collect_retired_locked(std::vector<Record> &retired) {
     size_t collected = 0;
     for (size_t index = 0; index < slots_.size(); ++index) {
       auto &slot = slots_[index];
@@ -270,6 +279,7 @@ class AllocationRegistry {
       // zero count is sufficient to destroy the record outside their reach.
       if (slot && slot->state == State::kRetiring &&
           slot->lease_count.load(std::memory_order_acquire) == 0) {
+        retired.emplace_back(std::move(*slot->record));
         slot->record.reset();
         slot->state = State::kReleased;
         // Do not wrap generation: a handle that may still exist must never

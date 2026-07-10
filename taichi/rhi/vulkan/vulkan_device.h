@@ -693,6 +693,10 @@ struct VulkanCapabilities {
 
 class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
  public:
+  using InteropAllocationReleaseCallback =
+      void (*)(VulkanDevice *, DeviceAllocationId, uint64_t);
+  using InteropDeviceReleaseCallback = void (*)(VulkanDevice *);
+
   struct Params {
     PFN_vkGetInstanceProcAddr get_proc_addr{nullptr};
     VkInstance instance{VK_NULL_HANDLE};
@@ -810,6 +814,18 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
 
   uint64_t allocation_generation(DeviceAllocation handle) const {
     return get_alloc_internal(handle).generation;
+  }
+
+  void set_interop_cleanup_callbacks(
+      InteropAllocationReleaseCallback allocation_release,
+      InteropDeviceReleaseCallback device_release) {
+    std::lock_guard<std::mutex> lock(interop_cleanup_mutex_);
+    TI_ASSERT(interop_allocation_release_ == nullptr ||
+              interop_allocation_release_ == allocation_release);
+    TI_ASSERT(interop_device_release_ == nullptr ||
+              interop_device_release_ == device_release);
+    interop_allocation_release_ = allocation_release;
+    interop_device_release_ = device_release;
   }
 
   std::tuple<vkapi::IVkImage, vkapi::IVkImageView, VkFormat> get_vk_image(
@@ -990,6 +1006,9 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   rhi_impl::SyncedPtrStableObjectList<AllocationInternal> allocations_;
   rhi_impl::SyncedPtrStableObjectList<ImageAllocInternal> image_allocations_;
   std::atomic<uint64_t> allocation_generation_counter_{1};
+  std::mutex interop_cleanup_mutex_;
+  InteropAllocationReleaseCallback interop_allocation_release_{nullptr};
+  InteropDeviceReleaseCallback interop_device_release_{nullptr};
 
   // Renderpass
   unordered_map<VulkanRenderPassDesc,

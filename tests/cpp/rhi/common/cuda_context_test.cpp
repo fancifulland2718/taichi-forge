@@ -5,8 +5,11 @@
 #include <taichi/rhi/cuda/cuda_device.h>
 
 #include <atomic>
+#include <array>
 #include <cstdint>
+#include <cstring>
 #include <thread>
+#include <vector>
 
 namespace taichi::lang {
 
@@ -82,6 +85,119 @@ TEST(CUDAContext, GraphCaptureStreamIsThreadLocal) {
   EXPECT_EQ(worker_initial.load(std::memory_order_relaxed), nullptr);
   EXPECT_EQ(worker_observed.load(std::memory_order_relaxed), worker_stream);
   context.set_stream(original_stream);
+}
+
+TEST(CUDADevice, RejectsStaleWrongDeviceAndOutOfRangeAllocations) {
+  if (!CUDADriver::get_instance_without_context().detected()) {
+    GTEST_SKIP();
+  }
+
+  cuda::CudaDevice device;
+  cuda::CudaDevice other_device;
+  Device::AllocParams params;
+  params.size = 32;
+  DeviceAllocation allocation;
+  ASSERT_EQ(device.allocate_memory(params, &allocation), RhiResult::success);
+
+  std::array<uint8_t, 8> input{};
+  input.fill(42);
+  const void *input_ptr = input.data();
+  size_t input_size = input.size();
+  DevicePtr ptr = allocation.get_ptr(8);
+  ASSERT_EQ(device.upload_data(&ptr, &input_ptr, &input_size),
+            RhiResult::success);
+  DevicePtr out_of_range = allocation.get_ptr(31);
+  EXPECT_EQ(device.upload_data(&out_of_range, &input_ptr, &input_size),
+            RhiResult::invalid_usage);
+
+  void *mapped = nullptr;
+  DeviceAllocation wrong_device = allocation;
+  wrong_device.device = &other_device;
+  EXPECT_EQ(other_device.map(wrong_device, &mapped), RhiResult::invalid_usage);
+
+  device.dealloc_memory(allocation);
+  EXPECT_EQ(device.map(allocation, &mapped), RhiResult::invalid_usage);
+  EXPECT_EQ(device.upload_data(&ptr, &input_ptr, &input_size),
+            RhiResult::invalid_usage);
+
+  DeviceAllocation replacement;
+  ASSERT_EQ(device.allocate_memory(params, &replacement), RhiResult::success);
+  EXPECT_NE(replacement.alloc_id, allocation.alloc_id);
+  device.dealloc_memory(replacement);
+}
+
+TEST(CUDADevice, ConcurrentAllocateCopyReadbackAndRelease) {
+  if (!CUDADriver::get_instance_without_context().detected()) {
+    GTEST_SKIP();
+  }
+
+  cuda::CudaDevice device;
+  constexpr int kThreads = 4;
+  constexpr int kIterations = 32;
+  constexpr size_t kBytes = 128;
+  std::atomic<bool> succeeded{true};
+  std::vector<std::thread> threads;
+  threads.reserve(kThreads);
+
+  for (int thread_index = 0; thread_index < kThreads; ++thread_index) {
+    threads.emplace_back([&, thread_index] {
+      Device::AllocParams params;
+      params.size = kBytes;
+      for (int iteration = 0; iteration < kIterations; ++iteration) {
+        DeviceAllocation src;
+        DeviceAllocation dst;
+        if (device.allocate_memory(params, &src) != RhiResult::success ||
+            device.allocate_memory(params, &dst) != RhiResult::success) {
+          succeeded.store(false, std::memory_order_relaxed);
+          return;
+        }
+
+        std::array<uint8_t, 128> input{};
+        input.fill(static_cast<uint8_t>(thread_index + iteration));
+        const void *input_ptr = input.data();
+        size_t input_size = input.size();
+        DevicePtr src_ptr = src.get_ptr();
+        DevicePtr dst_ptr = dst.get_ptr();
+        if (device.upload_data(&src_ptr, &input_ptr, &input_size) !=
+            RhiResult::success) {
+          succeeded.store(false, std::memory_order_relaxed);
+          return;
+        }
+
+        device.memcpy_internal(dst_ptr, src_ptr, kBytes);
+        std::array<uint8_t, 128> output{};
+        void *output_ptr = output.data();
+        size_t output_size = output.size();
+        if (device.readback_data(&dst_ptr, &output_ptr, &output_size) !=
+                RhiResult::success ||
+            output != input) {
+          succeeded.store(false, std::memory_order_relaxed);
+          return;
+        }
+        device.dealloc_memory(src);
+        device.dealloc_memory(dst);
+      }
+    });
+  }
+  for (auto &thread : threads) {
+    thread.join();
+  }
+  EXPECT_TRUE(succeeded.load(std::memory_order_relaxed));
+}
+
+TEST(CUDADevice, RuntimeAsyncAllocationUsesItsAllocationStream) {
+  if (!CUDADriver::get_instance_without_context().detected()) {
+    GTEST_SKIP();
+  }
+
+  cuda::CudaDevice device;
+  LlvmDevice::LlvmRuntimeAllocParams params;
+  params.size = 256;
+  params.use_memory_pool = true;
+  DeviceAllocation allocation = device.allocate_memory_runtime(params);
+  ASSERT_EQ(allocation.device, &device);
+  device.dealloc_memory(allocation);
+  CUDADriver::get_instance().stream_synchronize(nullptr);
 }
 
 }  // namespace taichi::lang

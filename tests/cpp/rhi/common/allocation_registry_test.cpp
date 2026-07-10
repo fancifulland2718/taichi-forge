@@ -26,7 +26,22 @@ struct TrackedRecord {
   }
 
   ~TrackedRecord() {
-    destructions->fetch_add(1, std::memory_order_relaxed);
+    if (destructions) {
+      destructions->fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
+  TrackedRecord(const TrackedRecord &) = delete;
+  TrackedRecord &operator=(const TrackedRecord &) = delete;
+  TrackedRecord(TrackedRecord &&other) noexcept
+      : size(other.size), destructions(std::move(other.destructions)) {
+  }
+  TrackedRecord &operator=(TrackedRecord &&other) noexcept {
+    if (this != &other) {
+      size = other.size;
+      destructions = std::move(other.destructions);
+    }
+    return *this;
   }
 
   uint64_t size;
@@ -64,11 +79,11 @@ TEST(AllocationRegistryTest, RetiredRecordsWaitForLeasesAndReuseGeneration) {
   EXPECT_EQ(registry.state(first),
             AllocationRegistry<TrackedRecord>::State::kRetiring);
   EXPECT_EQ(registry.acquire(first).first, RhiResult::invalid_usage);
-  EXPECT_EQ(registry.collect_retired(), 0u);
+  EXPECT_EQ(registry.collect_retired().size(), 0u);
   EXPECT_EQ(destructions->load(std::memory_order_relaxed), 0);
 
   lease = {};
-  EXPECT_EQ(registry.collect_retired(), 1u);
+  EXPECT_EQ(registry.collect_retired().size(), 1u);
   EXPECT_EQ(destructions->load(std::memory_order_relaxed), 1);
   EXPECT_EQ(registry.state(first),
             AllocationRegistry<TrackedRecord>::State::kReleased);

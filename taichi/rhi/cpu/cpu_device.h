@@ -5,6 +5,8 @@
 #include <vector>
 
 #include "taichi/common/core.h"
+#include "taichi/rhi/common/allocation_registry.h"
+#include "taichi/rhi/common/host_memory_pool.h"
 #include "taichi/rhi/llvm/llvm_device.h"
 
 namespace taichi::lang {
@@ -85,7 +87,7 @@ class CpuDevice : public LlvmDevice {
   AllocInfo get_alloc_info(const DeviceAllocation handle);
 
   CpuDevice();
-  ~CpuDevice() override {};
+  ~CpuDevice() override;
 
   RhiResult allocate_memory(const AllocParams &params,
                             DeviceAllocation *out_devalloc) override;
@@ -131,14 +133,33 @@ class CpuDevice : public LlvmDevice {
 
   void wait_idle() override { TI_NOT_IMPLEMENTED };
 
- private:
-  std::vector<AllocInfo> allocations_;
+  void clear() override;
 
-  void validate_device_alloc(const DeviceAllocation alloc) {
-    if (allocations_.size() <= alloc.alloc_id) {
-      TI_ERROR("invalid DeviceAllocation");
+ private:
+  struct AllocationRecord {
+    AllocationRecord(void *ptr,
+                     size_t size,
+                     bool use_cached,
+                     bool is_imported)
+        : ptr(ptr), size(size), use_cached(use_cached), is_imported(is_imported) {
     }
-  }
+    ~AllocationRecord();
+    AllocationRecord(const AllocationRecord &) = delete;
+    AllocationRecord &operator=(const AllocationRecord &) = delete;
+    AllocationRecord(AllocationRecord &&other) noexcept;
+    AllocationRecord &operator=(AllocationRecord &&other) noexcept;
+
+    AllocInfo info() const {
+      return {ptr, size, use_cached};
+    }
+
+    void *ptr{nullptr};
+    size_t size{0};
+    bool use_cached{false};
+    bool is_imported{false};
+  };
+
+  AllocationRegistry<AllocationRecord> allocations_;
 };
 
 }  // namespace cpu

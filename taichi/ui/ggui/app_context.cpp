@@ -50,7 +50,7 @@ std::vector<std::string> get_required_device_extensions() {
 #if !defined(ANDROID)
       VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
       VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
-#ifdef _WIN64
+#if defined(_WIN32) || defined(_WIN64)
       VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
       VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
 #else

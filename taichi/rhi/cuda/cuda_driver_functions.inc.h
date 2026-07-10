@@ -70,6 +70,7 @@ PER_CUDA_FUNCTION(event_elapsed_time, cuEventElapsedTime, float *, void *, void 
 
 // Vulkan interop
 PER_CUDA_FUNCTION(import_external_memory, cuImportExternalMemory, CUexternalMemory*, CUDA_EXTERNAL_MEMORY_HANDLE_DESC*)
+PER_CUDA_FUNCTION(external_memory_destroy, cuDestroyExternalMemory, CUexternalMemory)
 PER_CUDA_FUNCTION(external_memory_get_mapped_buffer,cuExternalMemoryGetMappedBuffer,CUdeviceptr *, CUexternalMemory, const CUDA_EXTERNAL_MEMORY_BUFFER_DESC *)
 PER_CUDA_FUNCTION(external_memory_get_mapped_mipmapped_array,cuExternalMemoryGetMappedMipmappedArray,CUmipmappedArray *, CUexternalMemory, const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC *)
 PER_CUDA_FUNCTION(mipmapped_array_get_level,cuMipmappedArrayGetLevel,CUarray *, CUmipmappedArray, unsigned int)

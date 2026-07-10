@@ -4,6 +4,10 @@
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "tests/cpp/aot/gfx_utils.h"
 
+#if defined(TI_WITH_CUDA)
+#include "taichi/rhi/cuda/cuda_device.h"
+#endif
+
 #include <array>
 #include <atomic>
 #include <thread>
@@ -284,3 +288,70 @@ TEST(VulkanProfilerTest, CommandListScopesKeepTheirOwnQueryPools) {
     EXPECT_LT(duration_ms, 10000.0);
   }
 }
+
+#if defined(TI_WITH_CUDA)
+TEST(VulkanCudaInteropTest, ExternalMemoryCacheReleasesWithAllocation) {
+  if (!vulkan::is_vulkan_api_available() ||
+      !CUDADriver::get_instance_without_context().detected()) {
+    GTEST_SKIP();
+  }
+
+  cuda::CudaDevice cuda_device;
+  vulkan::VulkanDeviceCreator::Params params;
+  params.api_version = std::nullopt;
+  auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(params);
+  auto *vulkan_device =
+      static_cast<vulkan::VulkanDevice *>(creator->device());
+  if (!vulkan_device->vk_caps().external_memory) {
+    GTEST_SKIP();
+  }
+
+  constexpr size_t kBytes = sizeof(uint32_t) * 16;
+  Device::AllocParams vulkan_params;
+  vulkan_params.size = kBytes;
+  vulkan_params.export_sharing = true;
+  vulkan_params.usage = AllocUsage::Storage;
+  DeviceAllocation vulkan_allocation;
+  ASSERT_EQ(vulkan_device->allocate_memory(vulkan_params, &vulkan_allocation),
+            RhiResult::success);
+
+  Device::AllocParams cuda_params;
+  cuda_params.size = kBytes;
+  DeviceAllocation cuda_source;
+  DeviceAllocation cuda_destination;
+  ASSERT_EQ(cuda_device.allocate_memory(cuda_params, &cuda_source),
+            RhiResult::success);
+  ASSERT_EQ(cuda_device.allocate_memory(cuda_params, &cuda_destination),
+            RhiResult::success);
+
+  std::array<uint32_t, 16> input{};
+  for (uint32_t i = 0; i < input.size(); ++i) {
+    input[i] = i * 17 + 3;
+  }
+  const void *input_ptr = input.data();
+  size_t copy_size = kBytes;
+  DevicePtr source_ptr = cuda_source.get_ptr();
+  ASSERT_EQ(cuda_device.upload_data(&source_ptr, &input_ptr, &copy_size),
+            RhiResult::success);
+
+  Device::memcpy_direct(vulkan_allocation.get_ptr(), cuda_source.get_ptr(),
+                        kBytes);
+  Device::memcpy_direct(cuda_destination.get_ptr(), vulkan_allocation.get_ptr(),
+                        kBytes);
+
+  std::array<uint32_t, 16> output{};
+  void *output_ptr = output.data();
+  copy_size = kBytes;
+  DevicePtr destination_ptr = cuda_destination.get_ptr();
+  ASSERT_EQ(cuda_device.readback_data(&destination_ptr, &output_ptr,
+                                      &copy_size),
+            RhiResult::success);
+  EXPECT_EQ(output, input);
+
+  // This exercises the generation-keyed interop cache purge before Vulkan
+  // returns the allocation slot to its pointer-stable object list.
+  vulkan_device->dealloc_memory(vulkan_allocation);
+  cuda_device.dealloc_memory(cuda_source);
+  cuda_device.dealloc_memory(cuda_destination);
+}
+#endif

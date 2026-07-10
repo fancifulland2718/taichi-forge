@@ -20,15 +20,11 @@ void memcpy_cpu_to_vulkan(DevicePtr dst, DevicePtr src, uint64_t size) {
   VulkanDevice *vk_dev = dynamic_cast<VulkanDevice *>(dst.device);
   CpuDevice *cpu_dev = dynamic_cast<CpuDevice *>(src.device);
 
-  DeviceAllocation src_alloc(src);
-
-  CpuDevice::AllocInfo src_alloc_info = cpu_dev->get_alloc_info(src_alloc);
-
   void *dst_ptr{nullptr};
   TI_ASSERT(vk_dev->map_range(dst, size, &dst_ptr) == RhiResult::success);
-  void *src_ptr = (uint8_t *)src_alloc_info.ptr + src.offset;
-
-  memcpy(dst_ptr, src_ptr, size);
+  size_t copy_size = size;
+  TI_ASSERT(cpu_dev->readback_data(&src, &dst_ptr, &copy_size) ==
+            RhiResult::success);
   vk_dev->unmap(dst);
 }
 
@@ -39,15 +35,11 @@ void memcpy_cpu_to_vulkan_via_staging(DevicePtr dst,
   VulkanDevice *vk_dev = dynamic_cast<VulkanDevice *>(dst.device);
   CpuDevice *cpu_dev = dynamic_cast<CpuDevice *>(src.device);
 
-  DeviceAllocation src_alloc(src);
-
-  CpuDevice::AllocInfo src_alloc_info = cpu_dev->get_alloc_info(src_alloc);
-
   void *dst_ptr{nullptr};
   TI_ASSERT(vk_dev->map_range(staging, size, &dst_ptr) == RhiResult::success);
-  void *src_ptr = (uint8_t *)src_alloc_info.ptr + src.offset;
-
-  memcpy(dst_ptr, src_ptr, size);
+  size_t copy_size = size;
+  TI_ASSERT(cpu_dev->readback_data(&src, &dst_ptr, &copy_size) ==
+            RhiResult::success);
   vk_dev->unmap(staging);
 
   auto stream = vk_dev->get_compute_stream();
