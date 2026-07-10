@@ -78,7 +78,6 @@ LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
   }
 
   snode_tree_buffer_manager_ = std::make_unique<SNodeTreeBufferManager>(this);
-  thread_pool_ = std::make_unique<ThreadPool>(config.cpu_max_num_threads);
 
   llvm_runtime_ = nullptr;
 
@@ -1256,6 +1255,10 @@ void LlvmRuntimeExecutor::materialize_runtime(KernelProfilerBase *profiler,
   }
 
   if (arch_use_host_memory(config_.arch)) {
+    if (!thread_pool_) {
+      thread_pool_ = std::make_unique<ThreadPool>(
+          std::max(1, config_.cpu_max_num_threads));
+    }
     runtime_jit->call<void *, void *, void *>(
         "LLVMRuntime_initialize_thread_pool", llvm_runtime_, thread_pool_.get(),
         (void *)ThreadPool::static_run);

@@ -9,6 +9,8 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -47,6 +49,57 @@ void outer_run_task(void *context, int thread_id, int) {
 void count_task(void *context, int, int) {
   static_cast<std::atomic<int> *>(context)->fetch_add(1,
                                                        std::memory_order_relaxed);
+}
+
+struct ParallelismContext {
+  std::atomic<int> active{0};
+  std::atomic<int> max_active{0};
+  std::atomic<int> completed{0};
+};
+
+struct FifoContext {
+  std::mutex mutex;
+  std::condition_variable started_cv;
+  std::condition_variable release_cv;
+  bool first_started{false};
+  bool release_first{false};
+  std::vector<int> execution_order;
+};
+
+void first_fifo_task(void *context, int, int) {
+  auto *state = static_cast<FifoContext *>(context);
+  std::unique_lock<std::mutex> lock(state->mutex);
+  if (!state->first_started) {
+    state->first_started = true;
+    state->started_cv.notify_one();
+    state->release_cv.wait(lock, [&] { return state->release_first; });
+  }
+  state->execution_order.push_back(0);
+}
+
+void second_fifo_task(void *context, int, int) {
+  auto *state = static_cast<FifoContext *>(context);
+  std::lock_guard<std::mutex> lock(state->mutex);
+  state->execution_order.push_back(1);
+}
+
+void bounded_parallel_task(void *context, int, int) {
+  auto *state = static_cast<ParallelismContext *>(context);
+  const int active = state->active.fetch_add(1, std::memory_order_relaxed) + 1;
+  int observed = state->max_active.load(std::memory_order_relaxed);
+  while (observed < active &&
+         !state->max_active.compare_exchange_weak(
+             observed, active, std::memory_order_relaxed)) {
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  state->completed.fetch_add(1, std::memory_order_relaxed);
+  state->active.fetch_sub(1, std::memory_order_relaxed);
+}
+
+void throwing_task(void *, int, int task_id) {
+  if (task_id == 2) {
+    throw std::runtime_error("expected task failure");
+  }
 }
 
 TEST(ThreadPoolTest, ConcurrentRunCallsKeepTheirContextsIsolated) {
@@ -113,6 +166,61 @@ TEST(ThreadPoolTest, ZeroThreadRequestsAreClampedToOne) {
   pool.run(5, 0, &completed, count_task);
 
   EXPECT_EQ(completed.load(std::memory_order_relaxed), 5);
+}
+
+TEST(ThreadPoolTest, ConcurrentJobsRespectTheirOwnParallelismBudget) {
+  ThreadPool pool(4);
+  ParallelismContext first;
+  ParallelismContext second;
+  std::thread first_caller(
+      [&] { pool.run(32, 2, &first, bounded_parallel_task); });
+  std::thread second_caller(
+      [&] { pool.run(32, 2, &second, bounded_parallel_task); });
+  first_caller.join();
+  second_caller.join();
+
+  EXPECT_EQ(first.completed.load(std::memory_order_relaxed), 32);
+  EXPECT_EQ(second.completed.load(std::memory_order_relaxed), 32);
+  EXPECT_EQ(first.max_active.load(std::memory_order_relaxed), 2);
+  EXPECT_EQ(second.max_active.load(std::memory_order_relaxed), 2);
+}
+
+TEST(ThreadPoolTest, ConcurrentJobsRunInFifoSubmissionOrder) {
+  ThreadPool pool(2);
+  FifoContext context;
+
+  std::thread first([&] { pool.run(4, 1, &context, first_fifo_task); });
+  {
+    std::unique_lock<std::mutex> lock(context.mutex);
+    context.started_cv.wait(lock, [&] { return context.first_started; });
+  }
+  std::thread second(
+      [&] { pool.run(4, 1, &context, second_fifo_task); });
+  {
+    std::lock_guard<std::mutex> lock(context.mutex);
+    context.release_first = true;
+  }
+  context.release_cv.notify_one();
+  first.join();
+  second.join();
+
+  std::lock_guard<std::mutex> lock(context.mutex);
+  ASSERT_EQ(context.execution_order.size(), 8);
+  EXPECT_EQ(std::vector<int>(context.execution_order.begin(),
+                             context.execution_order.begin() + 4),
+            std::vector<int>(4, 0));
+  EXPECT_EQ(std::vector<int>(context.execution_order.begin() + 4,
+                             context.execution_order.end()),
+            std::vector<int>(4, 1));
+}
+
+TEST(ThreadPoolTest, WorkerExceptionCompletesJobAndPoolRemainsUsable) {
+  ThreadPool pool(2);
+  EXPECT_THROW(pool.run(8, 2, nullptr, throwing_task), std::runtime_error);
+
+  std::atomic<int> completed{0};
+  pool.run(8, 2, &completed, count_task);
+  EXPECT_EQ(completed.load(std::memory_order_relaxed), 8);
 }
 
 }  // namespace

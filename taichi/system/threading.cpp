@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <exception>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -48,21 +50,10 @@ bool test_threading() {
 }
 
 ThreadPool::ThreadPool(int max_num_threads)
-    : max_num_threads(std::max(1, max_num_threads)) {
-  exiting = false;
-  started = false;
-  running_threads = 0;
-  desired_num_threads = 0;
-  timestamp = 0;
-  last_finished = 0;
-  task_head = 0;
-  task_tail = 0;
-  func = nullptr;
-  range_for_task_context = nullptr;
-  thread_counter = 0;
-  threads.resize((std::size_t)this->max_num_threads);
-  for (int i = 0; i < this->max_num_threads; i++) {
-    threads[i] = std::thread([this] { this->target(); });
+    : max_num_threads_(std::max(1, max_num_threads)) {
+  threads_.reserve(static_cast<std::size_t>(max_num_threads_));
+  for (int i = 0; i < max_num_threads_; i++) {
+    threads_.emplace_back([this] { target(); });
   }
 }
 
@@ -86,96 +77,123 @@ void ThreadPool::run(int splits,
     return;
   }
 
-  std::unique_lock<std::mutex> run_lock(run_mutex_);
+  auto job = std::make_shared<Job>();
+  job->splits = splits;
+  job->desired_num_threads =
+      std::clamp(desired_num_threads, 1, max_num_threads_);
+  job->range_for_task_context = range_for_task_context;
+  job->func = func;
+
+  std::exception_ptr exception;
   {
-    std::lock_guard _(mutex);
-    this->range_for_task_context = range_for_task_context;
-    this->func = func;
-    this->desired_num_threads =
-        std::clamp(desired_num_threads, 1, max_num_threads);
-    // TI_P(this->desired_num_threads);
-    started = false;
-    task_head = 0;
-    task_tail = splits;
-    timestamp++;
-    TI_ASSERT(timestamp < (1LL << 62));  // avoid overflowing here
+    std::unique_lock<std::mutex> lock(mutex_);
+    TI_ERROR_IF(exiting_, "ThreadPool is shutting down.");
+    pending_jobs_.push_back(job);
+    activate_next_job_locked();
+    // A new job can use up to its requested number of already-created
+    // workers. Waking all is only a cold submit-side cost; workers that do not
+    // obtain a task sleep again under the same mutex.
+    worker_cv_.notify_all();
+    completion_cv_.wait(lock, [&job] { return job->completed; });
+    exception = job->exception;
+  }
+  if (exception) {
+    std::rethrow_exception(exception);
+  }
+}
+
+void ThreadPool::activate_next_job_locked() {
+  if (active_job_) {
+    return;
+  }
+  while (!pending_jobs_.empty()) {
+    auto job = pending_jobs_.front();
+    pending_jobs_.pop_front();
+    if (!job->completed && !job->cancelled) {
+      active_job_ = std::move(job);
+      return;
+    }
+  }
+}
+
+bool ThreadPool::take_task_locked(std::shared_ptr<Job> *job, int *task_id) {
+  auto candidate = active_job_;
+  if (!candidate || candidate->completed || candidate->cancelled ||
+      candidate->next_task >= candidate->splits ||
+      candidate->active_workers >= candidate->desired_num_threads) {
+    return false;
   }
 
-  // wake up all slaves
-  slave_cv.notify_all();
-  {
-    std::unique_lock<std::mutex> lock(mutex);
-    // TODO: the workers may have finished before master waiting on master_cv
-    master_cv.wait(lock, [this] { return started && running_threads == 0; });
-  }
-  TI_ASSERT(task_head >= task_tail);
+  *task_id = candidate->next_task++;
+  candidate->active_workers++;
+  *job = std::move(candidate);
+  return true;
 }
 
 void ThreadPool::target() {
-  uint64 last_timestamp = 0;
-  int thread_id;
-  {
-    std::lock_guard<std::mutex> lock(mutex);
-    thread_id = thread_counter++;
-  }
+  const int thread_id = next_worker_id_.fetch_add(1, std::memory_order_relaxed);
   while (true) {
+    std::shared_ptr<Job> job;
+    int task_id = 0;
     {
-      std::unique_lock<std::mutex> lock(mutex);
-      slave_cv.wait(lock, [this, last_timestamp, thread_id] {
-        return (timestamp > last_timestamp &&
-                thread_id < desired_num_threads) ||
-               this->exiting;
+      std::unique_lock<std::mutex> lock(mutex_);
+      worker_cv_.wait(lock, [this] {
+        return exiting_ ||
+               (active_job_ && !active_job_->cancelled &&
+                active_job_->next_task < active_job_->splits &&
+                active_job_->active_workers <
+                    active_job_->desired_num_threads);
       });
-      last_timestamp = timestamp;
-      if (exiting) {
+      if (exiting_) {
         break;
-      } else {
-        if (last_finished >= last_timestamp) {
-          continue;
-          // This could happen when part of the desired threads wake up and
-          // finish all the task, and then this thread wake up finding nothing
-          // to do. Should skip this task directly.
-        } else {
-          started = true;
-          running_threads++;
-        }
       }
+      if (!take_task_locked(&job, &task_id)) {
+        continue;
+      }
+      // The active job still has another slot in its requested parallelism
+      // budget. Wake one peer so it does not silently degrade to one worker.
+      worker_cv_.notify_one();
     }
 
-    while (true) {
-      // For a single parallel task
-      int task_id;
-      {
-        task_id = task_head.fetch_add(1, std::memory_order_relaxed);
-        if (task_id >= task_tail)
-          break;
-      }
-
+    std::exception_ptr exception;
+    try {
       ScopedThreadPoolExecution execution(this);
-      func(this->range_for_task_context, thread_id, task_id);
+      job->func(job->range_for_task_context, thread_id, task_id);
+    } catch (...) {
+      exception = std::current_exception();
     }
 
-    bool all_finished = false;
     {
-      std::lock_guard<std::mutex> lock(mutex);
-      running_threads--;
-      if (running_threads == 0) {
-        all_finished = true;
-        last_finished = last_timestamp;
+      std::lock_guard<std::mutex> lock(mutex_);
+      TI_ASSERT(job->active_workers > 0);
+      job->active_workers--;
+      if (exception && !job->exception) {
+        job->exception = exception;
+        job->cancelled = true;
+      }
+      if ((job->cancelled && job->active_workers == 0) ||
+          (!job->cancelled && job->next_task == job->splits &&
+           job->active_workers == 0)) {
+        job->completed = true;
+        TI_ASSERT(active_job_ == job);
+        active_job_.reset();
+        activate_next_job_locked();
+        completion_cv_.notify_all();
+        worker_cv_.notify_all();
+      } else {
+        worker_cv_.notify_all();
       }
     }
-    if (all_finished)
-      master_cv.notify_one();
   }
 }
 
 ThreadPool::~ThreadPool() {
   {
-    std::lock_guard<std::mutex> lg(mutex);
-    exiting = true;
+    std::lock_guard<std::mutex> lock(mutex_);
+    exiting_ = true;
   }
-  slave_cv.notify_all();
-  for (auto &th : threads)
+  worker_cv_.notify_all();
+  for (auto &th : threads_)
     th.join();
 }
 

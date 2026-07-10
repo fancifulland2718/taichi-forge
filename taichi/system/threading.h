@@ -9,7 +9,10 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <deque>
+#include <exception>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -21,26 +24,6 @@ using ParallelFor = void(int n, int num_threads, void *, RangeForTaskFunc func);
 
 class ThreadPool {
  public:
-  std::vector<std::thread> threads;
-  std::condition_variable slave_cv;
-  std::condition_variable master_cv;
-  std::mutex mutex;
-  std::atomic<int> task_head;
-  int task_tail;
-  int running_threads;
-  int max_num_threads;
-  int desired_num_threads;
-  uint64 timestamp;
-  uint64 last_finished;
-  bool started;
-  bool exiting;
-  RangeForTaskFunc *func;
-  void *range_for_task_context;  // Note: this is a pointer to a
-                                 // range_task_helper_context defined in the
-                                 // LLVM runtime, which is different from
-                                 // taichi::lang::Context.
-  int thread_counter;
-
   explicit ThreadPool(int max_num_threads);
 
   void run(int splits,
@@ -56,15 +39,38 @@ class ThreadPool {
     return pool->run(splits, desired_num_threads, range_for_task_context, func);
   }
 
-  void target();
-
   ~ThreadPool();
 
  private:
-  // `mutex` protects a single job's worker-visible state. Keep the whole
-  // lifecycle of that job exclusive so concurrent callers cannot overwrite
-  // its callback/context while workers are still consuming it.
-  std::mutex run_mutex_;
+  struct Job {
+    int splits{0};
+    int desired_num_threads{1};
+    void *range_for_task_context{nullptr};
+    RangeForTaskFunc *func{nullptr};
+    int next_task{0};
+    int active_workers{0};
+    bool completed{false};
+    bool cancelled{false};
+    std::exception_ptr exception;
+  };
+
+  // Takes one task from the active FIFO job. `mutex_` must be held. Producers
+  // may enqueue concurrently, but a full job owns the fixed worker budget
+  // until completion: the measured workload does not justify interleaving two
+  // saturated memory-bound jobs.
+  bool take_task_locked(std::shared_ptr<Job> *job, int *task_id);
+  void activate_next_job_locked();
+  void target();
+
+  const int max_num_threads_;
+  std::vector<std::thread> threads_;
+  std::deque<std::shared_ptr<Job>> pending_jobs_;
+  std::shared_ptr<Job> active_job_;
+  std::condition_variable worker_cv_;
+  std::condition_variable completion_cv_;
+  std::mutex mutex_;
+  std::atomic<int> next_worker_id_{0};
+  bool exiting_{false};
 };
 
 }  // namespace taichi
