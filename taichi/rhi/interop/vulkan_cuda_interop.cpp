@@ -343,6 +343,25 @@ void memcpy_cuda_to_vulkan_impl(VulkanDevice *vk_dev,
                                 DevicePtr dst,
                                 DevicePtr src,
                                 uint64_t size) {
+  if (size == 0) {
+    return;
+  }
+  if (!vk_dev->vk_caps().external_memory) {
+    TI_ERROR_IF(size > std::numeric_limits<size_t>::max(),
+                "CUDA-Vulkan host staging size overflow");
+    std::vector<uint8_t> host_staging(static_cast<size_t>(size));
+    DevicePtr source = src;
+    void *host_ptr = host_staging.data();
+    size_t copy_size = host_staging.size();
+    TI_ASSERT(cuda_dev->readback_data(&source, &host_ptr, &copy_size) ==
+              RhiResult::success);
+    DevicePtr destination = dst;
+    const void *input_ptr = host_staging.data();
+    TI_ASSERT(vk_dev->upload_data(&destination, &input_ptr, &copy_size) ==
+              RhiResult::success);
+    return;
+  }
+
   auto context_guard = CUDAContext::get_instance().get_guard();
   DeviceAllocation dst_alloc(dst);
 
@@ -360,8 +379,10 @@ void memcpy_cuda_to_vulkan_impl(VulkanDevice *vk_dev,
 }  // namespace
 
 bool is_cuda_to_vulkan_copy(Device *dst_device, Device *src_device) {
-  return dynamic_cast<VulkanDevice *>(dst_device) &&
-         dynamic_cast<CudaDevice *>(src_device);
+  auto *vk_dev = dynamic_cast<VulkanDevice *>(dst_device);
+  return vk_dev != nullptr &&
+         dynamic_cast<CudaDevice *>(src_device) != nullptr &&
+         vk_dev->vk_caps().external_memory;
 }
 
 void memcpy_cuda_to_vulkan_fast(DevicePtr dst, DevicePtr src, uint64_t size) {
@@ -380,6 +401,24 @@ void memcpy_cuda_to_vulkan(DevicePtr dst, DevicePtr src, uint64_t size) {
 void memcpy_vulkan_to_cuda(DevicePtr dst, DevicePtr src, uint64_t size) {
   VulkanDevice *vk_dev = dynamic_cast<VulkanDevice *>(src.device);
   CudaDevice *cuda_dev = dynamic_cast<CudaDevice *>(dst.device);
+  if (size == 0) {
+    return;
+  }
+  if (!vk_dev->vk_caps().external_memory) {
+    TI_ERROR_IF(size > std::numeric_limits<size_t>::max(),
+                "Vulkan-CUDA host staging size overflow");
+    std::vector<uint8_t> host_staging(static_cast<size_t>(size));
+    DevicePtr source = src;
+    void *host_ptr = host_staging.data();
+    size_t copy_size = host_staging.size();
+    TI_ASSERT(vk_dev->readback_data(&source, &host_ptr, &copy_size) ==
+              RhiResult::success);
+    DevicePtr destination = dst;
+    const void *input_ptr = host_staging.data();
+    TI_ASSERT(cuda_dev->upload_data(&destination, &input_ptr, &copy_size) ==
+              RhiResult::success);
+    return;
+  }
   auto context_guard = CUDAContext::get_instance().get_guard();
 
   DeviceAllocation src_alloc(src);
