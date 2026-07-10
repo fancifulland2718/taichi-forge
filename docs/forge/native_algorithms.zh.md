@@ -50,6 +50,9 @@
 - Dense field/SNode 只有在能证明兼容 dense layout，或能提供安全 staging 路径时才走支持路径。
 - `StructNdarray` 可作为 order/copy 类 primitive 的 opaque payload。部分数值 primitive 支持 scalar 或 packed tensor member view。
 - 稀疏、非连续、复杂 SNode 拓扑不能默认假设走 native。
+- 普通 `experimental_scatter()` 要求所有有效 destination index 唯一。
+  CPU native scatter 会在写入前验证，并拒绝 duplicate；需要 duplicate target 时应使用
+  `experimental_scatter_add()`。
 - duplicate target 的 floating scatter-add 可能受后端 atomic 顺序影响；只有数值合同允许时才应使用。
 
 ## Device-side 数值检查

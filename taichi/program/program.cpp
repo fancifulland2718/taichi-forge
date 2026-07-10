@@ -649,6 +649,64 @@ int cpu_indexed_copy_target_threads(std::size_t n,
   return std::max(1, target_threads);
 }
 
+void validate_cpu_plain_scatter_indices(const int32_t *indices,
+                                        std::size_t n,
+                                        std::size_t dst_items) {
+  // Plain scatter has a unique-target contract. In particular, allowing two
+  // worker tasks to memcpy to one destination is a host data race, not a
+  // permissible last-writer-wins implementation. Check before either the
+  // parallel or serial write path so an invalid request leaves dst untouched.
+  // Invalid indices remain ignored, matching the established indexed-copy
+  // contract; only in-range targets participate in uniqueness validation.
+  if (n == 0 || dst_items == 0) {
+    return;
+  }
+
+  try {
+    // A byte marker is much cheaper than a hash table for the usual
+    // permutation-like case. Do not size it wildly beyond input cardinality:
+    // sparse destination index spaces instead use an O(n) hash set.
+    if (n >= std::numeric_limits<std::size_t>::max() / 8 ||
+        dst_items <= n * 8) {
+      std::vector<uint8_t> seen(dst_items, 0);
+      for (std::size_t i = 0; i < n; ++i) {
+        const int32_t raw_index = indices[i];
+        if (raw_index < 0) {
+          continue;
+        }
+        const std::size_t index = static_cast<std::size_t>(raw_index);
+        if (index >= dst_items) {
+          continue;
+        }
+        TI_ERROR_IF(seen[index] != 0,
+                    "CPU native plain scatter requires unique destination "
+                    "indices; use experimental_scatter_add() for duplicate "
+                    "targets.");
+        seen[index] = 1;
+      }
+      return;
+    }
+
+    std::unordered_set<int32_t> seen;
+    seen.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+      const int32_t raw_index = indices[i];
+      if (raw_index < 0 ||
+          static_cast<std::size_t>(raw_index) >= dst_items) {
+        continue;
+      }
+      TI_ERROR_IF(!seen.insert(raw_index).second,
+                  "CPU native plain scatter requires unique destination "
+                  "indices; use experimental_scatter_add() for duplicate "
+                  "targets.");
+    }
+  } catch (const std::bad_alloc &) {
+    TI_ERROR("CPU native plain scatter could not allocate uniqueness "
+             "validation storage; use experimental_scatter_add() for "
+             "duplicate targets or reduce the request size.");
+  }
+}
+
 int cpu_aggregation_target_threads(std::size_t n,
                                    std::size_t groups,
                                    int max_threads) {
@@ -13668,6 +13726,7 @@ std::size_t Program::cpu_scatter_ndarray(Ndarray *src,
   auto *dst_ptr = reinterpret_cast<uint8_t *>(get_ndarray_data_ptr_as_int(dst));
   TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
               "CPU native scatter received a null data pointer.");
+  validate_cpu_plain_scatter_indices(indices_ptr, n, dst_items);
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   const int target_threads =
@@ -13721,6 +13780,7 @@ std::size_t Program::cpu_scatter_strided_ndarray(Ndarray *src,
   auto *dst_ptr = reinterpret_cast<uint8_t *>(get_ndarray_data_ptr_as_int(dst));
   TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
               "CPU native strided scatter received a null data pointer.");
+  validate_cpu_plain_scatter_indices(indices_ptr, n, dst_items);
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   const int target_threads =
@@ -13782,6 +13842,7 @@ std::size_t Program::cpu_scatter_dense_field(SNode *src,
       reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
   TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
               "CPU native dense field scatter received a null data pointer.");
+  validate_cpu_plain_scatter_indices(indices_ptr, n, dst_n);
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   const int chunk_items = 32768;
@@ -13850,6 +13911,7 @@ std::size_t Program::cpu_scatter_dense_field_packed(SNode *src,
   TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
               "CPU native packed dense field scatter received a null data "
               "pointer.");
+  validate_cpu_plain_scatter_indices(indices_ptr, n, dst_n);
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   const int chunk_items = 32768;
@@ -13925,6 +13987,7 @@ std::size_t Program::cpu_scatter_dense_field_packed_indices_field(
   TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
               "CPU native packed dense field scatter received a null data "
               "pointer.");
+  validate_cpu_plain_scatter_indices(indices_ptr, n, dst_n);
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   const int chunk_items = 32768;
@@ -13998,6 +14061,7 @@ std::size_t Program::cpu_scatter_dense_field_indices_field(
       reinterpret_cast<const int32_t *>(indices_ptr_bytes);
   TI_ERROR_IF(!src_ptr || !indices_ptr || !dst_ptr,
               "CPU native dense field scatter received a null data pointer.");
+  validate_cpu_plain_scatter_indices(indices_ptr, n, dst_n);
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   const int chunk_items = 32768;

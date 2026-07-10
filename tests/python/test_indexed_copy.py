@@ -919,6 +919,39 @@ def test_experimental_indexed_copy_cpu_native_invalid_indices_are_ignored():
     _run_invalid_index_ndarray("cpu_native", scatter=True)
 
 
+@test_utils.test(arch=ti.cpu, cpu_max_num_threads=4)
+def test_experimental_scatter_cpu_native_parallel_unique_targets_are_exact():
+    n = 1 << 16
+    src = ti.ndarray(ti.i32, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(ti.i32, shape=n)
+    source = np.arange(n, dtype=np.int32) * 3 - 7
+    src.from_numpy(source)
+    indices.from_numpy(np.arange(n - 1, -1, -1, dtype=np.int32))
+    dst.fill(-1)
+
+    ti.algorithms.experimental_scatter(src, indices, dst, method="cpu_native")
+
+    np.testing.assert_array_equal(dst.to_numpy(), source[::-1])
+
+
+@test_utils.test(arch=ti.cpu, cpu_max_num_threads=4)
+def test_experimental_scatter_cpu_native_rejects_duplicate_targets_before_writes():
+    n = 1 << 16
+    src = ti.ndarray(ti.i32, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(ti.i32, shape=n)
+    src.from_numpy(np.arange(n, dtype=np.int32))
+    indices.from_numpy(np.arange(n, dtype=np.int32) % (n // 2))
+    initial = np.full(n, -17, dtype=np.int32)
+    dst.from_numpy(initial)
+
+    with pytest.raises(RuntimeError, match="requires unique destination indices"):
+        ti.algorithms.experimental_scatter(src, indices, dst, method="cpu_native")
+
+    np.testing.assert_array_equal(dst.to_numpy(), initial)
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_experimental_indexed_copy_ndarray_rejects_mismatched_element_shape():
     n = 8

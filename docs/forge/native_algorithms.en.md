@@ -59,6 +59,9 @@ should not be used as portability promises across all backends.
   numeric primitives.
 - Sparse, non-contiguous, or complex SNode topologies should not be assumed to
   use native paths.
+- Plain `experimental_scatter()` requires unique in-range destination indices.
+  CPU native scatter validates this before writing and rejects duplicates;
+  use `experimental_scatter_add()` when duplicate targets are intended.
 - Floating-point duplicate-target scatter-add can differ by backend atomic
   order. Use it only where that numerical contract is acceptable.
 
