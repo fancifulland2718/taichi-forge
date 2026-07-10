@@ -13,6 +13,7 @@
 #include <functional>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -625,6 +626,7 @@ class VulkanStream : public Stream {
 
   // Command pools are per-thread
   vkapi::IVkCommandPool command_pool_;
+  std::mutex submission_mutex_;
   std::vector<TrackedCmdbuf> submitted_cmdbuffers_;
 };
 
@@ -874,8 +876,10 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
       override;
 
  private:
+  friend class VulkanStream;
   friend VulkanSurface;
 
+  std::mutex &get_queue_mutex(VkQueue queue);
   void create_vma_allocator();
   [[nodiscard]] RhiResult new_descriptor_pool();
 
@@ -890,9 +894,11 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
 
   VkQueue compute_queue_{VK_NULL_HANDLE};
   uint32_t compute_queue_family_index_{0};
+  std::mutex compute_queue_mutex_;
 
   VkQueue graphics_queue_{VK_NULL_HANDLE};
   uint32_t graphics_queue_family_index_{0};
+  std::mutex graphics_queue_mutex_;
 
   struct ThreadLocalStreams;
   std::unique_ptr<ThreadLocalStreams> compute_streams_{nullptr};

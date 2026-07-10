@@ -4,6 +4,8 @@ import pathlib
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 
 import numpy as np
 import pytest
@@ -25,6 +27,72 @@ from tests.test_utils import verify_image
 RENDER_REPEAT = 5
 # FIXME: enable ggui tests on ti.cpu backend. It's blocked by macos10.15
 supported_archs = [ti.vulkan, ti.cuda, ti.metal]
+
+
+@pytest.mark.skipif(
+    os.environ.get("TI_RUN_HEADED_GGUI_TESTS") != "1",
+    reason="requires an opt-in headed desktop session",
+)
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.vulkan])
+def test_vulkan_async_kernel_and_present_queue_concurrency():
+    width, height = 640, 360
+    state = ti.field(dtype=ti.f32, shape=1 << 18)
+    image = np.zeros((height, width, 4), dtype=np.uint8)
+
+    @ti.kernel
+    def producer_step():
+        for i in state:
+            state[i] = state[i] * 0.999 + 0.001
+
+    producer_step()
+    ti.sync()
+
+    stop = threading.Event()
+    worker_errors = []
+
+    def producer():
+        try:
+            while not stop.is_set():
+                producer_step()
+        except BaseException as exc:
+            worker_errors.append(exc)
+            stop.set()
+
+    worker = threading.Thread(target=producer, daemon=True)
+    worker.start()
+    window = None
+    frame = 0
+    try:
+        window = ti.ui.Window(
+            "Vulkan queue concurrency test",
+            (width, height),
+            vsync=False,
+            fps_limit=65535,
+            show_window=True,
+        )
+        canvas = window.get_canvas()
+        duration = float(os.environ.get("TI_HEADED_GGUI_STRESS_SECONDS", "5"))
+        deadline = time.perf_counter() + duration
+        while window.running and not stop.is_set() and time.perf_counter() < deadline:
+            image[..., 0] = frame & 0xFF
+            image[..., 1] = (frame * 3) & 0xFF
+            image[..., 2] = 96
+            image[..., 3] = 255
+            canvas.set_image(image)
+            window.show()
+            frame += 1
+    finally:
+        stop.set()
+        worker.join(timeout=10)
+        if window is not None:
+            window.destroy()
+
+    assert not worker.is_alive()
+    assert frame > 0
+    if worker_errors:
+        raise worker_errors[0]
+    ti.sync()
 
 
 def _pack_rgba8_numpy_reference(src):

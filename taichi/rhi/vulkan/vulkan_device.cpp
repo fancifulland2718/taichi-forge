@@ -1640,6 +1640,7 @@ vkapi::IVkCommandBuffer VulkanCommandList::finalize() {
 }
 
 struct VulkanDevice::ThreadLocalStreams {
+  std::mutex map_mutex;
   unordered_map<std::thread::id, std::unique_ptr<VulkanStream>> map;
 };
 
@@ -2139,7 +2140,9 @@ void VulkanDevice::memcpy_internal(DevicePtr dst,
 
 Stream *VulkanDevice::get_compute_stream() {
   auto tid = std::this_thread::get_id();
-  auto &stream_map = compute_streams_->map;
+  auto &streams = *compute_streams_;
+  std::lock_guard<std::mutex> lock(streams.map_mutex);
+  auto &stream_map = streams.map;
   auto iter = stream_map.find(tid);
   if (iter == stream_map.end()) {
     stream_map[tid] = std::make_unique<VulkanStream>(
@@ -2190,7 +2193,9 @@ VulkanDevice::profiler_flush_sampled_time() {
 
 Stream *VulkanDevice::get_graphics_stream() {
   auto tid = std::this_thread::get_id();
-  auto &stream_map = graphics_streams_->map;
+  auto &streams = *graphics_streams_;
+  std::lock_guard<std::mutex> lock(streams.map_mutex);
+  auto &stream_map = streams.map;
   auto iter = stream_map.find(tid);
   if (iter == stream_map.end()) {
     stream_map[tid] = std::make_unique<VulkanStream>(
@@ -2201,12 +2206,25 @@ Stream *VulkanDevice::get_graphics_stream() {
 }
 
 void VulkanDevice::wait_idle() {
+  std::scoped_lock lock(compute_streams_->map_mutex,
+                        graphics_streams_->map_mutex);
   for (auto &[tid, stream] : compute_streams_->map) {
     stream->command_sync();
   }
   for (auto &[tid, stream] : graphics_streams_->map) {
     stream->command_sync();
   }
+}
+
+std::mutex &VulkanDevice::get_queue_mutex(VkQueue queue) {
+  TI_ASSERT(queue != VK_NULL_HANDLE);
+  // Compute and graphics can alias queue index 0. Resolve compute first so
+  // aliased handles share one mutex while distinct queues remain independent.
+  if (queue == compute_queue_) {
+    return compute_queue_mutex_;
+  }
+  TI_ASSERT(queue == graphics_queue_);
+  return graphics_queue_mutex_;
 }
 
 bool VulkanStreamSemaphoreObject::is_ready() const {
@@ -2273,6 +2291,7 @@ void VulkanStream::retire_completed_cmdbuffers() {
 StreamSemaphore VulkanStream::submit(
     CommandList *cmdlist_,
     const std::vector<StreamSemaphore> &wait_semaphores) {
+  std::lock_guard<std::mutex> submission_lock(submission_mutex_);
   VulkanCommandList *cmdlist = static_cast<VulkanCommandList *>(cmdlist_);
   vkapi::IVkCommandBuffer buffer = cmdlist->finalize();
 
@@ -2316,11 +2335,13 @@ StreamSemaphore VulkanStream::submit(
   submitted_cmdbuffers_.push_back(
       TrackedCmdbuf{fence, buffer, std::move(submit_refs)});
 
-  BAIL_ON_VK_BAD_RESULT_NO_RETURN(
-      vkQueueSubmit(queue_, /*submitCount=*/1, &submit_info,
-                    /*fence=*/fence->fence),
-      "Vulkan device might be lost (vkQueueSubmit failed)");
-
+  {
+    std::lock_guard<std::mutex> queue_lock(device_.get_queue_mutex(queue_));
+    BAIL_ON_VK_BAD_RESULT_NO_RETURN(
+        vkQueueSubmit(queue_, /*submitCount=*/1, &submit_info,
+                      /*fence=*/fence->fence),
+        "Vulkan device might be lost (vkQueueSubmit failed)");
+  }
   return std::make_shared<VulkanStreamSemaphoreObject>(semaphore, fence);
 }
 
@@ -2333,7 +2354,11 @@ StreamSemaphore VulkanStream::submit_synced(
 }
 
 void VulkanStream::command_sync() {
-  vkQueueWaitIdle(queue_);
+  std::lock_guard<std::mutex> submission_lock(submission_mutex_);
+  {
+    std::lock_guard<std::mutex> queue_lock(device_.get_queue_mutex(queue_));
+    vkQueueWaitIdle(queue_);
+  }
 
   device_.profiler_sync();
 
@@ -3353,7 +3378,11 @@ void VulkanSurface::present_surface_image(
   presentInfo.pImageIndices = &surface_image.image_index;
   presentInfo.pResults = nullptr;
 
-  vkQueuePresentKHR(device_->graphics_queue(), &presentInfo);
+  {
+    std::lock_guard<std::mutex> queue_lock(
+        device_->get_queue_mutex(device_->graphics_queue()));
+    vkQueuePresentKHR(device_->graphics_queue(), &presentInfo);
+  }
   if (surface_image.image_index < present_waits_by_image_.size()) {
     present_waits_by_image_[surface_image.image_index] =
         std::move(tracked_wait_semaphores);

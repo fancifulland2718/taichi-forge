@@ -14,6 +14,7 @@
 | GGUI 事件泵 | 降低可见 GGUI 窗口鼠标移入/移出时的开销：阻止 ImGui GLFW backend 每帧改写原生鼠标光标，并为 `Window.get_event()` / `Window.get_events()` 增加 `poll=False`，让异步渲染循环可以只 drain 队列而不再次调用 `glfwPollEvents()`。 | 异步仿真/渲染循环可以让 `window.show()` 成为唯一的每帧事件泵，同时保留事件读取 API 的旧默认行为。 |
 | GGUI 空 ImGui 帧 | 修复有渲染工作但没有 ImGui widget 的帧生命周期：GGUI 现在会对空 UI 帧调用 `EndFrame()`，并跳过 backend ImGui draw 提交。 | 可见窗口和 offscreen GGUI 循环可以在有 widget / 无 widget 帧之间切换，不再触发 ImGui 的 "Forgot to call Render() or EndFrame()" assertion，同时空 UI 帧不会产生不必要的 ImGui 渲染命令。 |
 | GGUI 隐藏窗口提交 | 修复 Windows/Vulkan 隐藏窗口完成一次 `canvas.set_image()` / `window.show()` 后，进程退出或窗口资源释放阶段可能崩溃的问题。 | headless 渲染、CI 可视化 smoke test 和仿真截图路径可以安全使用 `show_window=False`。 |
+| Vulkan 异步 GGUI queue 提交 | 按实际 `VkQueue` handle 对 `vkQueueSubmit`、`vkQueueWaitIdle` 和 `vkQueuePresentKHR` 做 external synchronization，并保护逐线程 stream 创建和提交追踪状态。只有 compute 与 graphics stream 指向同一个 Vulkan queue 时才共享同一把锁。 | Python worker 可以持续提交 Vulkan kernel，同时由主线程上传并 present GGUI 帧，不再并发访问同一个 queue。应用不需要仅为 queue 安全增加粗粒度 Python submission lock 或额外 `ti.sync()`；应用自己持有的仿真/显示数据仍需明确的 producer-consumer 协议。 |
 | Vulkan sparse SNode | 修复 Forge Vulkan sparse SNode 早期的 inactive cell 读值不为零，以及 pointer cell 并发激活后可能 device-lost 的问题。 | MPM、SPH、稀疏体素和 brick-based 渲染工作负载在 Vulkan 上获得与 CPU/CUDA 更一致的稀疏数据结构语义。 |
 
 ## 说明

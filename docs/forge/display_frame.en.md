@@ -56,6 +56,24 @@ Use `Window.reset_display_stats()` before a profiling window.
   contract. Offscreen or hidden submission is the better path for measuring
   raw display-sink throughput.
 
+## Async Simulation and Presentation
+
+A Python simulation worker may submit kernels while the main thread uploads
+and presents GGUI frames. On Vulkan, Forge externally synchronizes host calls
+when compute and graphics streams refer to the same `VkQueue`; distinct queue
+handles remain independently submit-capable.
+
+This queue-level guarantee does not replace application data ownership:
+
+- Keep `window.show()` on the window-owning thread and use it as the normal
+  per-frame event pump.
+- Do not add a coarse Python submission lock or an extra `ti.sync()` solely to
+  protect Vulkan queue calls.
+- If simulation and display access the same field, ndarray, texture, or slot,
+  use snapshots, bounded slots, semaphores, or another explicit
+  producer-consumer protocol. Queue serialization alone does not make
+  overlapping reads and writes to application resources safe.
+
 ## Resize and Lifetime
 
 Display frames carry width, height, row stride, and transpose metadata. Resize

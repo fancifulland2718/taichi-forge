@@ -45,6 +45,20 @@ submitted、dropped、reused 和最近一次提交状态等信息。
 - CUDA source 在 producer 没有提供更严格 external memory/semaphore 所有权协议时，仍可能需要 CUDA-to-Vulkan staging。
 - 可见窗口 present 受平台 WSI/swapchain 合同限制。测量 display sink 原始吞吐时，hidden/offscreen 提交更合适。
 
+## 异步仿真与显示提交
+
+Python 仿真 worker 可以持续提交 kernel，同时由主线程上传并 present GGUI 帧。Vulkan
+后端会在 compute 与 graphics stream 指向同一个 `VkQueue` 时，对相关 host queue 调用做
+external synchronization；不同 queue handle 仍可独立提交。
+
+该 queue 级保证不会替代应用层数据所有权协议：
+
+- `window.show()` 应留在持有窗口的线程，并作为常规的逐帧事件泵。
+- 不需要仅为保护 Vulkan queue 调用增加粗粒度 Python submission lock 或额外 `ti.sync()`。
+- 如果仿真与显示会访问同一个 field、ndarray、texture 或 slot，应使用 snapshot、bounded
+  slot、semaphore 或其他明确的 producer-consumer 协议。queue 串行化本身不能让应用
+  resource 的重叠读写变得安全。
+
 ## Resize 与生命周期
 
 Display frame 携带 width、height、row stride 和 transpose metadata。允许 resize 或路径切
