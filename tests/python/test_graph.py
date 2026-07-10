@@ -427,6 +427,25 @@ def test_cuda_cgraph_cache_survives_reset_then_delete():
     gc.collect()
 
 
+@test_utils.test(arch=ti.cuda)
+def test_cuda_cgraph_recaptures_for_distinct_ndarray_arguments():
+    graph = _build_repeated_inc_graph()
+    first = ti.ndarray(ti.i32, shape=())
+    second = ti.ndarray(ti.i32, shape=())
+    first.fill(0)
+    second.fill(10)
+
+    # Different ndarray identities force a CUDA graph signature change. The
+    # executable must retire capture-owned packets on its own capture stream,
+    # then replay with the new argument state without touching another run.
+    graph.run({"arr": first})
+    graph.run({"arr": second})
+    graph.run({"arr": first})
+
+    assert first.to_numpy()[()] == 8
+    assert second.to_numpy()[()] == 14
+
+
 @test_utils.test(arch=[ti.cpu, ti.vulkan])
 def test_cgraph_run_after_reset_is_rejected():
     graph = _build_repeated_inc_graph()

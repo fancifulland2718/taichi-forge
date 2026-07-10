@@ -130,8 +130,7 @@ DeviceAllocation CudaDevice::allocate_memory_runtime(
 
   auto context_guard = CUDAContext::get_instance().get_guard();
   const size_t size = taichi::iroundup(params.size, taichi_page_size);
-  const CUstream stream =
-      static_cast<CUstream>(CUDAContext::get_instance().get_stream());
+  const CUstream stream = nullptr;
   void *ptr = nullptr;
   if (size != 0) {
     if (params.use_memory_pool) {

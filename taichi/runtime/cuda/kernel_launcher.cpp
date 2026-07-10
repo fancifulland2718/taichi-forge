@@ -1,4 +1,5 @@
 #include "taichi/runtime/cuda/kernel_launcher.h"
+#include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 
 #include <cstdint>
@@ -191,16 +192,20 @@ bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
 }
 
 void KernelLauncher::capture_cuda_graph_launch(
-    const GraphLaunchPacket &packet) {
+    const GraphLaunchPacket &packet,
+    void *stream) {
   TI_ASSERT(packet.handle.get_launch_id() < contexts_.size());
   const auto &launcher_ctx = contexts_[packet.handle.get_launch_id()];
   auto *cuda_module = launcher_ctx.jit_module;
+  auto *cuda_jit_module = dynamic_cast<JITModuleCUDA *>(cuda_module);
+  TI_ASSERT(cuda_jit_module != nullptr);
   const auto &offloaded_tasks = launcher_ctx.offloaded_tasks;
   for (auto task : offloaded_tasks) {
     TI_TRACE("Capturing kernel {}<<<{}, {}>>>", task.name, task.grid_dim,
              task.block_dim);
-    cuda_module->launch(task.name, task.grid_dim, task.block_dim, 0,
-                        {const_cast<RuntimeContext *>(&packet.context)}, {});
+    cuda_jit_module->launch_with_stream(
+        task.name, task.grid_dim, task.block_dim, 0,
+        {const_cast<RuntimeContext *>(&packet.context)}, {}, stream);
   }
 }
 

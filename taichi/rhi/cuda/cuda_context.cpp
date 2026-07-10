@@ -11,8 +11,6 @@
 
 namespace taichi::lang {
 
-thread_local void *CUDAContext::stream_ = nullptr;
-
 CUDAContext::CUDAContext()
     : profiler_(nullptr),
       driver_(CUDADriver::get_instance_without_context()) {
@@ -114,7 +112,8 @@ void CUDAContext::launch(void *func,
                          std::vector<int> arg_sizes,
                          unsigned grid_dim,
                          unsigned block_dim,
-                         std::size_t dynamic_shared_mem_bytes) {
+                         std::size_t dynamic_shared_mem_bytes,
+                         void *stream) {
   // It is important to keep a handle since in async mode (deleted)
   // a constant folding kernel may happen during a kernel launch
   // then profiler->start and profiler->stop mismatch.
@@ -161,14 +160,14 @@ void CUDAContext::launch(void *func,
           dynamic_shared_mem_bytes);
     }
     driver_.launch_kernel(func, grid_dim, 1, 1, block_dim, 1, 1,
-                          dynamic_shared_mem_bytes, stream_,
+                          dynamic_shared_mem_bytes, stream,
                           arg_pointers.data(), nullptr);
   }
   if (profiler_)
     profiler_->stop(task_handle);
 
   if (debug_) {
-    driver_.stream_synchronize(stream_);
+    driver_.stream_synchronize(stream);
   }
 }
 

@@ -2813,7 +2813,7 @@ std::size_t cuda_scatter_add_contiguous(void *src,
   TI_ERROR_IF(!cuda::cub_scatter_add_available(),
               "CUDA scatter-add for this dtype/layout requires "
               "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_scatter_add(src, indices, dst, static_cast<int>(n),
                                static_cast<int>(dst_n), typed_value_type,
                                stream);
@@ -5177,7 +5177,7 @@ std::size_t Program::cuda_device_transform_affine_ndarray(Ndarray *src,
         cuda_value_type, scale, bias);
   }
   if (cuda::cub_transform_available()) {
-    void *stream = CUDAContext::get_instance().get_stream();
+    void *stream = nullptr;
     return cuda::cub_transform_affine(
         src_ptr, dst_ptr, static_cast<int>(src->get_nelement()),
         cuda_value_type, scale, bias, stream);
@@ -5214,7 +5214,7 @@ std::size_t Program::cuda_device_transform_affine_member_ndarray(
               "discoverable CUDA runtime.");
   auto *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
   auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_transform_affine_strided(
       src_ptr, dst_ptr, static_cast<int>(src->get_nelement()),
       static_cast<cuda::CudaTransformValueType>(value_type), offset, stride,
@@ -5248,7 +5248,7 @@ std::size_t Program::cuda_device_transform_affine_strided_ndarray(
               "discoverable CUDA runtime.");
   auto *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
   auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_transform_affine_strided_to_strided(
       src_ptr, dst_ptr, static_cast<int>(src->get_nelement()),
       static_cast<cuda::CudaTransformValueType>(value_type), src_offset,
@@ -5284,7 +5284,7 @@ std::size_t Program::cuda_device_transform_affine_packed_strided_ndarray(
               "and a discoverable CUDA runtime.");
   auto *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
   auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_transform_affine_packed_strided(
       src_ptr, dst_ptr, static_cast<int>(src->get_nelement()), lane_count,
       static_cast<cuda::CudaTransformValueType>(value_type), src_offset,
@@ -5347,7 +5347,7 @@ std::size_t Program::cuda_device_transform_affine_dense_field(SNode *src,
   TI_ERROR_IF(!cuda::cub_transform_available(),
               "CUDA dense field strided transform requires "
               "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_transform_affine_strided_to_strided(
       src_ptr, dst_ptr, static_cast<int>(n), cuda_value_type, 0, src_stride, 0,
       dst_stride, scale, bias, stream);
@@ -5394,7 +5394,7 @@ std::size_t Program::cuda_device_zero_dense_field(SNode *dst,
   TI_ERROR_IF(!cuda::cub_transform_available(),
               "CUDA strided dense field zero-fill requires "
               "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_transform_affine_strided_to_strided(
       dst_raw, dst_raw, static_cast<int>(n),
       static_cast<cuda::CudaTransformValueType>(value_type), 0, dst_stride, 0,
@@ -5442,7 +5442,7 @@ std::size_t Program::cuda_device_add_merge_ndarray(Ndarray *src,
   TI_ERROR_IF(!cuda::cub_add_merge_available(),
               "CUDA add-merge requires TI_WITH_CUDA_TOOLKIT=ON and a "
               "discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_add_merge(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
@@ -5487,7 +5487,7 @@ std::size_t Program::cuda_device_add_scaled_ndarray(Ndarray *src,
   TI_ERROR_IF(!cuda::cub_add_merge_available(),
               "CUDA scaled-add requires TI_WITH_CUDA_TOOLKIT=ON and a "
               "discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_add_scaled(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
@@ -5531,7 +5531,7 @@ std::size_t Program::cuda_device_add_scalar_ndarray_to_ndarray(
   TI_ERROR_IF(!cuda::cub_add_merge_available(),
               "CUDA scalar-to-ndarray add requires TI_WITH_CUDA_TOOLKIT=ON "
               "and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_add_scaled_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
@@ -5566,7 +5566,7 @@ std::size_t Program::cuda_device_add_merge_strided_ndarray(
   TI_ERROR_IF(!cuda::cub_add_merge_available(),
               "CUDA strided add-merge requires TI_WITH_CUDA_TOOLKIT=ON and a "
               "discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_add_merge_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
@@ -5615,7 +5615,7 @@ std::size_t Program::cuda_device_add_merge_dense_field(Ndarray *src,
   TI_ERROR_IF(!cuda::cub_add_merge_available(),
               "CUDA dense field add-merge requires TI_WITH_CUDA_TOOLKIT=ON and "
               "a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   if (dst_stride == value_size) {
     return cuda::cub_add_merge(
         src_ptr, dst_raw, static_cast<int>(n),
@@ -5673,7 +5673,7 @@ std::size_t Program::cuda_device_add_scaled_dense_field(SNode *src,
   TI_ERROR_IF(!cuda::cub_add_merge_available(),
               "CUDA dense field scaled-add requires TI_WITH_CUDA_TOOLKIT=ON "
               "and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_add_scaled_strided(
       src_raw, dst_raw, static_cast<int>(n),
       static_cast<cuda::CudaTransformValueType>(value_type), 0, src_stride, 0,
@@ -5720,7 +5720,7 @@ std::size_t Program::cuda_device_add_scalar_field_to_dense_field(
   TI_ERROR_IF(!cuda::cub_add_merge_available(),
               "CUDA scalar-to-dense add requires TI_WITH_CUDA_TOOLKIT=ON and "
               "a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_add_merge_strided(
       src_raw, dst_raw, static_cast<int>(n),
       static_cast<cuda::CudaTransformValueType>(value_type), 0, 0, 0,
@@ -5795,7 +5795,7 @@ std::size_t Program::cuda_device_gather_ndarray(Ndarray *src,
                                            item_words),
               "CUDA device gather word count exceeds INT_MAX.");
   if (cuda::cub_indexed_copy_available()) {
-    void *stream = CUDAContext::get_instance().get_stream();
+    void *stream = nullptr;
     return cuda::cub_indexed_copy(
         src_ptr, indices_ptr, dst_ptr,
         static_cast<int>(indices->get_nelement()),
@@ -5849,7 +5849,7 @@ std::size_t Program::cuda_device_gather_strided_ndarray(
                   static_cast<std::size_t>(std::numeric_limits<int>::max() /
                                            item_words),
               "CUDA device strided gather word count exceeds INT_MAX.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_indexed_copy_strided(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(indices->get_nelement()),
       static_cast<int>(src->get_nelement()), item_words,
@@ -5907,7 +5907,7 @@ std::size_t Program::cuda_device_gather_dense_field(SNode *src,
               "CUDA device dense field gather word count exceeds INT_MAX.");
   if (src_stride == item_bytes && dst_stride == item_bytes) {
     if (cuda::cub_indexed_copy_available()) {
-      void *stream = CUDAContext::get_instance().get_stream();
+      void *stream = nullptr;
       return cuda::cub_indexed_copy(src_ptr, indices_ptr, dst_ptr,
                                     static_cast<int>(n),
                                     static_cast<int>(src_n), item_words,
@@ -5925,7 +5925,7 @@ std::size_t Program::cuda_device_gather_dense_field(SNode *src,
   TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
               "CUDA device strided dense field gather requires "
               "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_indexed_copy_strided(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
       static_cast<int>(src_n), item_words, 0, src_stride / sizeof(uint32_t), 0,
@@ -5990,7 +5990,7 @@ std::size_t Program::cuda_device_gather_dense_field_packed(SNode *src,
   TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
               "CUDA device packed dense field gather requires "
               "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_indexed_copy(src_ptr, indices_ptr, dst_ptr,
                                 static_cast<int>(n),
                                 static_cast<int>(src_n), item_words,
@@ -6059,7 +6059,7 @@ std::size_t Program::cuda_device_gather_dense_field_packed_indices_field(
   TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
               "CUDA device packed dense field gather requires "
               "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_indexed_copy(src_ptr, indices_ptr, dst_ptr,
                                 static_cast<int>(n),
                                 static_cast<int>(src_n), item_words,
@@ -6118,7 +6118,7 @@ std::size_t Program::cuda_device_gather_dense_field_indices_field(
               "CUDA device dense field gather word count exceeds INT_MAX.");
   if (src_stride == item_bytes && dst_stride == item_bytes) {
     if (cuda::cub_indexed_copy_available()) {
-      void *stream = CUDAContext::get_instance().get_stream();
+      void *stream = nullptr;
       return cuda::cub_indexed_copy(src_ptr, indices_ptr, dst_ptr,
                                     static_cast<int>(n),
                                     static_cast<int>(src_n), item_words,
@@ -6136,7 +6136,7 @@ std::size_t Program::cuda_device_gather_dense_field_indices_field(
   TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
               "CUDA device strided dense field gather requires "
               "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_indexed_copy_strided(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
       static_cast<int>(src_n), item_words, 0, src_stride / sizeof(uint32_t), 0,
@@ -6181,7 +6181,7 @@ std::size_t Program::cuda_device_gather_add_ndarray(Ndarray *src,
   TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
               "CUDA gather-add requires TI_WITH_CUDA_TOOLKIT=ON and a "
               "discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_gather_add(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices)),
@@ -6241,7 +6241,7 @@ std::size_t Program::cuda_device_gather_add_dense_field(SNode *src,
   TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
               "CUDA dense field gather-add requires TI_WITH_CUDA_TOOLKIT=ON "
               "and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_gather_add_strided(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
       static_cast<int>(src_n),
@@ -6303,7 +6303,7 @@ std::size_t Program::cuda_device_gather_add_dense_field_indices_field(
   TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
               "CUDA dense field gather-add requires TI_WITH_CUDA_TOOLKIT=ON "
               "and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_gather_add_strided(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(indices_n),
       static_cast<int>(src_n),
@@ -6351,7 +6351,7 @@ std::size_t Program::cuda_device_scatter_ndarray(Ndarray *src,
                                            item_words),
               "CUDA device scatter word count exceeds INT_MAX.");
   if (cuda::cub_indexed_copy_available()) {
-    void *stream = CUDAContext::get_instance().get_stream();
+    void *stream = nullptr;
     return cuda::cub_indexed_copy(
         src_ptr, indices_ptr, dst_ptr,
         static_cast<int>(indices->get_nelement()),
@@ -6405,7 +6405,7 @@ std::size_t Program::cuda_device_scatter_strided_ndarray(
                   static_cast<std::size_t>(std::numeric_limits<int>::max() /
                                            item_words),
               "CUDA device strided scatter word count exceeds INT_MAX.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_indexed_copy_strided(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(indices->get_nelement()),
       static_cast<int>(dst->get_nelement()), item_words,
@@ -6463,7 +6463,7 @@ std::size_t Program::cuda_device_scatter_dense_field(SNode *src,
               "CUDA device dense field scatter word count exceeds INT_MAX.");
   if (src_stride == item_bytes && dst_stride == item_bytes) {
     if (cuda::cub_indexed_copy_available()) {
-      void *stream = CUDAContext::get_instance().get_stream();
+      void *stream = nullptr;
       return cuda::cub_indexed_copy(src_ptr, indices_ptr, dst_ptr,
                                     static_cast<int>(n),
                                     static_cast<int>(dst_n), item_words,
@@ -6481,7 +6481,7 @@ std::size_t Program::cuda_device_scatter_dense_field(SNode *src,
   TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
               "CUDA device strided dense field scatter requires "
               "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_indexed_copy_strided(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
       static_cast<int>(dst_n), item_words, 0, src_stride / sizeof(uint32_t), 0,
@@ -6546,7 +6546,7 @@ std::size_t Program::cuda_device_scatter_dense_field_packed(SNode *src,
   TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
               "CUDA device packed dense field scatter requires "
               "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_indexed_copy(src_ptr, indices_ptr, dst_ptr,
                                 static_cast<int>(n),
                                 static_cast<int>(dst_n), item_words,
@@ -6615,7 +6615,7 @@ std::size_t Program::cuda_device_scatter_dense_field_packed_indices_field(
   TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
               "CUDA device packed dense field scatter requires "
               "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_indexed_copy(src_ptr, indices_ptr, dst_ptr,
                                 static_cast<int>(n),
                                 static_cast<int>(dst_n), item_words,
@@ -6674,7 +6674,7 @@ std::size_t Program::cuda_device_scatter_dense_field_indices_field(
               "CUDA device dense field scatter word count exceeds INT_MAX.");
   if (src_stride == item_bytes && dst_stride == item_bytes) {
     if (cuda::cub_indexed_copy_available()) {
-      void *stream = CUDAContext::get_instance().get_stream();
+      void *stream = nullptr;
       return cuda::cub_indexed_copy(src_ptr, indices_ptr, dst_ptr,
                                     static_cast<int>(n),
                                     static_cast<int>(dst_n), item_words,
@@ -6692,7 +6692,7 @@ std::size_t Program::cuda_device_scatter_dense_field_indices_field(
   TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
               "CUDA device strided dense field scatter requires "
               "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_indexed_copy_strided(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
       static_cast<int>(dst_n), item_words, 0, src_stride / sizeof(uint32_t), 0,
@@ -6778,7 +6778,7 @@ std::size_t Program::cuda_device_scatter_add_member_ndarray(
               "CUDA toolkit strided scatter-add currently supports "
               "destination sizes up to INT_MAX items.");
 #ifdef TI_WITH_CUDA
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_scatter_add_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices)),
@@ -6817,7 +6817,7 @@ std::size_t Program::cuda_device_scatter_add_strided_ndarray(
               "CUDA toolkit strided scatter-add currently supports "
               "destination sizes up to INT_MAX items.");
 #ifdef TI_WITH_CUDA
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_scatter_add_strided_io(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices)),
@@ -6881,7 +6881,7 @@ std::size_t Program::cuda_device_scatter_add_dense_field(SNode *src,
   TI_ERROR_IF(!cuda::cub_scatter_add_available(),
               "CUDA strided dense field scatter-add requires "
               "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_scatter_add_strided_io(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
       static_cast<int>(dst_n),
@@ -6945,7 +6945,7 @@ std::size_t Program::cuda_device_scatter_add_dense_field_indices_field(
   TI_ERROR_IF(!cuda::cub_scatter_add_available(),
               "CUDA strided dense field scatter-add requires "
               "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_scatter_add_strided_io(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
       static_cast<int>(dst_n),
@@ -7022,7 +7022,7 @@ std::size_t Program::cuda_device_bucket_builder_ndarray(Ndarray *keys,
                                            item_words),
               "CUDA bucket builder word count exceeds INT_MAX.");
 #ifdef TI_WITH_CUDA
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_bucket_builder(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
@@ -7105,7 +7105,7 @@ std::size_t Program::cuda_device_bucket_builder_dense_field(
                              "CUDA toolkit dense field bucket builder");
   void *cursor_ptr =
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(cursor));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_bucket_builder(
       keys_ptr, values_ptr, offsets_ptr, output_ptr, cursor_ptr,
       static_cast<int>(n), static_cast<int>(num_bins),
@@ -7166,7 +7166,7 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_ndarray(Ndarray *keys,
                       static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA grouped reduce input is too large for int launch parameters.");
 #ifdef TI_WITH_CUDA
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_grouped_reduce_atomic(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
@@ -7229,7 +7229,7 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_dense_field(
                              "CUDA dense field grouped reduce");
   void *output_ptr = raw_ptr(get_dense_field_device_ptr(output),
                              "CUDA dense field grouped reduce");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_grouped_reduce_atomic(
       keys_ptr, values_ptr, output_ptr, static_cast<int>(n),
       static_cast<int>(num_groups),
@@ -7261,7 +7261,7 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_member_ndarray(
               "CUDA strided grouped reduce input is too large for int launch "
               "parameters.");
 #ifdef TI_WITH_CUDA
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_grouped_reduce_atomic_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
@@ -7316,7 +7316,7 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_strided_keys_ndarray(
               "CUDA strided grouped reduce input is too large for int launch "
               "parameters.");
 #ifdef TI_WITH_CUDA
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_grouped_reduce_atomic_strided_io(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
@@ -7387,7 +7387,7 @@ std::size_t Program::cuda_device_grouped_reduce_ndarray(Ndarray *keys,
                       static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA grouped reduce input is too large for int launch parameters.");
 #ifdef TI_WITH_CUDA
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_grouped_reduce(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
@@ -7455,7 +7455,7 @@ std::size_t Program::cuda_device_grouped_reduce_segmented_strided_keys_ndarray(
               "CUDA strided segmented grouped reduce input is too large for "
               "int launch parameters.");
 #ifdef TI_WITH_CUDA
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_grouped_reduce_strided_io(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
@@ -7550,7 +7550,7 @@ std::size_t Program::cuda_cub_radix_sort_ndarray(Ndarray *keys,
                              get_ndarray_data_ptr_as_int(values))
                        : nullptr;
 #ifdef TI_WITH_CUDA
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_radix_sort(
       key_ptr, value_ptr, static_cast<int>(keys->get_nelement()),
       cub_key_type, cub_value_type, cub_mode, cub_nan_policy, has_values,
@@ -7615,7 +7615,7 @@ std::size_t Program::cuda_cub_radix_sort_dense_field(SNode *keys,
           ? raw_ptr(get_dense_field_device_ptr(values),
                     "CUDA CUB dense field sort")
           : nullptr;
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_radix_sort(
       key_ptr, value_ptr, static_cast<int>(n),
       static_cast<cuda::CubSortKeyType>(key_type),
@@ -7879,7 +7879,7 @@ std::size_t Program::cuda_cub_inclusive_scan_ndarray(Ndarray *data,
   TI_ERROR_IF(data->get_element_size() != expected_value_size,
               "CUDA CUB scan dtype does not match the requested value type.");
   auto data_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(data));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_inclusive_scan(
       data_ptr, static_cast<int>(data->get_nelement()), cub_value_type, stream,
       this);
@@ -7926,7 +7926,7 @@ std::size_t Program::cuda_cub_inclusive_reverse_scan_ndarray(Ndarray *data,
               "CUDA CUB reverse scan dtype does not match the requested "
               "value type.");
   auto data_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(data));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_inclusive_reverse_scan(
       data_ptr, static_cast<int>(data->get_nelement()), cub_value_type, stream,
       this);
@@ -7954,7 +7954,7 @@ std::size_t Program::cuda_cub_inclusive_scan_member_ndarray(
   }
 #ifdef TI_WITH_CUDA
   auto data_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(data));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_inclusive_scan_strided(
       data_ptr, static_cast<int>(data->get_nelement()),
       static_cast<cuda::CubScanValueType>(value_type), offset, stride, stream,
@@ -7985,7 +7985,7 @@ std::size_t Program::cuda_cub_inclusive_reverse_scan_member_ndarray(
   }
 #ifdef TI_WITH_CUDA
   auto data_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(data));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_inclusive_reverse_scan_strided(
       data_ptr, static_cast<int>(data->get_nelement()),
       static_cast<cuda::CubScanValueType>(value_type), offset, stride, stream,
@@ -8023,7 +8023,7 @@ std::size_t Program::cuda_cub_inclusive_scan_dense_field(SNode *data,
               "CUDA CUB dense field scan received a null data pointer.");
   void *data_ptr =
       static_cast<void *>(reinterpret_cast<uint8_t *>(base) + device_ptr.offset);
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_inclusive_scan_strided(
       data_ptr, static_cast<int>(n),
       static_cast<cuda::CubScanValueType>(value_type), 0, stride, stream, this);
@@ -8065,7 +8065,7 @@ std::size_t Program::cuda_cub_inclusive_reverse_scan_dense_field(
               "pointer.");
   void *data_ptr =
       static_cast<void *>(reinterpret_cast<uint8_t *>(base) + device_ptr.offset);
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_inclusive_reverse_scan_strided(
       data_ptr, static_cast<int>(n),
       static_cast<cuda::CubScanValueType>(value_type), 0, stride, stream, this);
@@ -8102,7 +8102,7 @@ std::size_t Program::cuda_cub_inclusive_scan_dense_field_packed(
   TI_ERROR_IF(!base,
               "CUDA CUB packed dense field scan received a null data pointer.");
   auto *data_ptr = reinterpret_cast<uint8_t *>(base) + device_ptr.offset;
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   std::size_t temp_bytes = 0;
   for (int lane = 0; lane < lane_count; ++lane) {
     temp_bytes = std::max(
@@ -8151,7 +8151,7 @@ std::size_t Program::cuda_cub_inclusive_reverse_scan_dense_field_packed(
               "CUDA CUB packed dense field reverse scan received a null data "
               "pointer.");
   auto *data_ptr = reinterpret_cast<uint8_t *>(base) + device_ptr.offset;
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   std::size_t temp_bytes = 0;
   for (int lane = 0; lane < lane_count; ++lane) {
     temp_bytes = std::max(
@@ -8250,7 +8250,7 @@ std::size_t Program::cuda_cub_select_ndarray(Ndarray *values,
   auto flags_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(flags));
   auto output_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
   auto count_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(count));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_select_flagged(
       values_ptr, flags_ptr, output_ptr, count_ptr,
       static_cast<int>(values->get_nelement()),
@@ -8314,7 +8314,7 @@ std::size_t Program::cuda_cub_select_dense_field(SNode *values,
                              "CUDA CUB dense field select");
   void *count_ptr =
       raw_ptr(get_dense_field_device_ptr(count), "CUDA CUB dense field select");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_select_flagged(
       values_ptr, flags_ptr, output_ptr, count_ptr, static_cast<int>(n),
       static_cast<cuda::CubSelectValueType>(value_type),
@@ -8389,7 +8389,7 @@ std::size_t Program::cuda_cub_histogram_ndarray(Ndarray *values,
   auto values_ptr =
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
   auto bins_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(bins));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_histogram_even(
       values_ptr, bins_ptr, static_cast<int>(values->get_nelement()),
       static_cast<int>(bins->get_nelement()),
@@ -8443,7 +8443,7 @@ std::size_t Program::cuda_cub_histogram_dense_field(SNode *values,
                              "CUDA CUB dense field histogram");
   void *bins_ptr =
       raw_ptr(get_dense_field_device_ptr(bins), "CUDA CUB dense field histogram");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_histogram_even(
       values_ptr, bins_ptr, static_cast<int>(n), static_cast<int>(num_bins),
       static_cast<cuda::CubHistogramValueType>(value_type),
@@ -8508,7 +8508,7 @@ std::size_t Program::cuda_cub_reduce_ndarray(Ndarray *values,
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
   auto output_ptr =
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_reduce(values_ptr, output_ptr,
                           static_cast<int>(values->get_nelement()),
                           static_cast<cuda::CubReduceValueType>(value_type),
@@ -8539,7 +8539,7 @@ std::size_t Program::cuda_cub_reduce_member_ndarray(Ndarray *values,
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
   auto output_ptr =
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_reduce_strided(
       values_ptr, output_ptr, static_cast<int>(values->get_nelement()),
       static_cast<cuda::CubReduceValueType>(value_type), offset, stride,
@@ -8574,7 +8574,7 @@ std::size_t Program::cuda_cub_reduce_strided_ndarray(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
   auto output_ptr = reinterpret_cast<void *>(
       get_ndarray_data_ptr_as_int(output) + output_offset);
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_reduce_strided(
       values_ptr, output_ptr, static_cast<int>(values->get_nelement()),
       static_cast<cuda::CubReduceValueType>(value_type), values_offset,
@@ -8622,7 +8622,7 @@ std::size_t Program::cuda_cub_reduce_dense_field(SNode *values,
       raw_ptr(get_dense_field_device_ptr(values), "CUDA CUB dense field reduce");
   void *output_ptr =
       raw_ptr(get_dense_field_device_ptr(output), "CUDA CUB dense field reduce");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_reduce_strided(
       values_ptr, output_ptr, static_cast<int>(n),
       static_cast<cuda::CubReduceValueType>(value_type), 0, stride,
@@ -8677,7 +8677,7 @@ std::size_t Program::cuda_cub_reduce_dense_field_packed(SNode *values,
                              "CUDA CUB packed dense field reduce");
   auto *output_ptr = raw_ptr(get_dense_field_device_ptr(output),
                              "CUDA CUB packed dense field reduce");
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   std::size_t temp_bytes = 0;
   for (int lane = 0; lane < lane_count; ++lane) {
     const std::size_t lane_offset =
@@ -8754,7 +8754,7 @@ std::size_t Program::cuda_cub_check_count_ndarray(Ndarray *values,
 #ifdef TI_WITH_CUDA
   void *values_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
   void *output_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_check_count(
       values_ptr, output_ptr, static_cast<int>(values->get_nelement()),
       static_cast<cuda::CubReduceValueType>(value_type),
@@ -8809,7 +8809,7 @@ std::size_t Program::cuda_cub_check_count_strided_ndarray(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
   void *output_ptr =
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_check_count_strided(
       values_ptr, output_ptr, static_cast<int>(n),
       static_cast<cuda::CubReduceValueType>(value_type), offset, stride,
@@ -8866,7 +8866,7 @@ std::size_t Program::cuda_cub_check_count_dense_field(SNode *values,
                              "CUDA CUB dense field check_count");
   void *output_ptr =
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_check_count_strided(
       values_ptr, output_ptr, static_cast<int>(n),
       static_cast<cuda::CubReduceValueType>(value_type), 0, stride,
@@ -8958,7 +8958,7 @@ std::size_t Program::cuda_cub_metric_reduce_ndarray(Ndarray *values,
       other ? reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(other))
             : nullptr;
   void *output_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_metric_reduce(
       values_ptr, other_ptr, output_ptr,
       static_cast<int>(values->get_nelement()),
@@ -9043,7 +9043,7 @@ std::size_t Program::cuda_cub_metric_reduce_strided_ndarray(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(other));
   void *output_ptr =
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_metric_reduce_strided(
       values_ptr, other_ptr, output_ptr, static_cast<int>(n),
       static_cast<cuda::CubReduceValueType>(value_type), values_offset,
@@ -9111,7 +9111,7 @@ std::size_t Program::cuda_cub_metric_reduce_dense_field(SNode *values,
                             "CUDA CUB dense field metric_reduce");
   void *output_ptr =
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   return cuda::cub_metric_reduce_strided(
       values_ptr, other_ptr, output_ptr, static_cast<int>(n),
       static_cast<cuda::CubReduceValueType>(value_type), 0, values_stride, 0,
@@ -9188,7 +9188,7 @@ std::size_t Program::cuda_cub_metric_reduce_dense_field_strided_ndarray(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(array));
   void *output_ptr =
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
-  void *stream = CUDAContext::get_instance().get_stream();
+  void *stream = nullptr;
   if (field_is_values) {
     return cuda::cub_metric_reduce_strided(
         field_ptr, array_ptr, output_ptr, static_cast<int>(n),
@@ -9972,7 +9972,7 @@ std::size_t Program::transform_affine_dense_field_packed(SNode *src,
     TI_ERROR_IF(!cuda::cub_transform_available(),
                 "CUDA packed dense field transform requires "
                 "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-    void *stream = CUDAContext::get_instance().get_stream();
+    void *stream = nullptr;
     return cuda::cub_transform_affine(
         src_raw, dst_raw, static_cast<int>(scalar_items), cuda_value_type,
         scale, bias, stream);
@@ -12603,7 +12603,7 @@ std::size_t Program::add_merge_dense_field_packed(SNode *src,
     TI_ERROR_IF(!cuda::cub_add_merge_available(),
                 "CUDA packed dense field add-merge requires "
                 "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-    void *stream = CUDAContext::get_instance().get_stream();
+    void *stream = nullptr;
     return cuda::cub_add_merge(
         src_raw, dst_raw, static_cast<int>(scalar_items),
         static_cast<cuda::CudaTransformValueType>(value_type), stream);
@@ -12735,7 +12735,7 @@ std::size_t Program::scatter_add_dense_field_packed(SNode *src,
     TI_ERROR_IF(!cuda::cub_scatter_add_available(),
                 "CUDA packed dense field scatter-add requires "
                 "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-    void *stream = CUDAContext::get_instance().get_stream();
+    void *stream = nullptr;
     return cuda::cub_scatter_add_packed_strided_io(
         src_raw, indices_ptr, dst_raw, static_cast<int>(n),
         static_cast<int>(dst_n), lane_count,
@@ -12864,7 +12864,7 @@ std::size_t Program::scatter_add_dense_field_packed_indices_field(
     TI_ERROR_IF(!cuda::cub_scatter_add_available(),
                 "CUDA packed dense field scatter-add requires "
                 "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
-    void *stream = CUDAContext::get_instance().get_stream();
+    void *stream = nullptr;
     return cuda::cub_scatter_add_packed_strided_io(
         src_raw, indices_raw, dst_raw, static_cast<int>(n),
         static_cast<int>(dst_n), lane_count,

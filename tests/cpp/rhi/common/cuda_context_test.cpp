@@ -61,32 +61,6 @@ TEST(CUDADevice, MapLifecycleRejectsInvalidTransitions) {
   device.unmap(allocation);
 }
 
-TEST(CUDAContext, GraphCaptureStreamIsThreadLocal) {
-  if (!CUDADriver::get_instance_without_context().detected()) {
-    GTEST_SKIP();
-  }
-
-  auto &context = CUDAContext::get_instance();
-  void *original_stream = context.get_stream();
-  void *main_stream = reinterpret_cast<void *>(uintptr_t{1});
-  void *worker_stream = reinterpret_cast<void *>(uintptr_t{2});
-  std::atomic<void *> worker_initial{nullptr};
-  std::atomic<void *> worker_observed{nullptr};
-
-  context.set_stream(main_stream);
-  std::thread worker([&] {
-    worker_initial.store(context.get_stream(), std::memory_order_relaxed);
-    context.set_stream(worker_stream);
-    worker_observed.store(context.get_stream(), std::memory_order_relaxed);
-  });
-  worker.join();
-
-  EXPECT_EQ(context.get_stream(), main_stream);
-  EXPECT_EQ(worker_initial.load(std::memory_order_relaxed), nullptr);
-  EXPECT_EQ(worker_observed.load(std::memory_order_relaxed), worker_stream);
-  context.set_stream(original_stream);
-}
-
 TEST(CUDADevice, RejectsStaleWrongDeviceAndOutOfRangeAllocations) {
   if (!CUDADriver::get_instance_without_context().detected()) {
     GTEST_SKIP();

@@ -188,13 +188,17 @@ class _GraphSpec:
 class _GraphExecutable:
     def __init__(self, spec):
         self.spec = spec
-        self._context = _GraphRunContext() if spec.needs_runtime_args else None
 
     def run(self, args):
-        if self._context is not None:
-            self._context.begin(args)
+        # Runtime arguments and their flattened Python containers belong to
+        # one invocation. Reusing this object would let two callers overwrite
+        # each other's arguments before the backend cache can serialize its
+        # executable state.
+        context = _GraphRunContext() if self.spec.needs_runtime_args else None
+        if context is not None:
+            context.begin(args)
         for node in self.spec.nodes:
-            node.run(self._context)
+            node.run(context)
 
 
 class _GraphInstance:
@@ -204,7 +208,6 @@ class _GraphInstance:
         self._executable = None
         self._native_nodes = None
         self._backend_executable = None
-        self._backend_context = None
 
         if len(spec.nodes) == 1 and isinstance(spec.nodes[0], _CompiledCGraphNode):
             node = spec.nodes[0]
@@ -245,9 +248,6 @@ class _GraphInstance:
 
     def _install_backend_executable(self, executable, kind):
         self._backend_executable = executable
-        self._backend_context = (
-            _GraphRunContext() if self.spec.needs_runtime_args else None
-        )
         self._kind = kind
         self._set_run_impl(self._run_backend)
         return self
@@ -267,9 +267,10 @@ class _GraphInstance:
     def _run_backend(self, args):
         if self._backend_executable is None:
             return self._run_general(args)
-        if self._backend_context is not None:
-            self._backend_context.begin(args)
-        self._backend_executable.run(self._backend_context)
+        context = _GraphRunContext() if self.spec.needs_runtime_args else None
+        if context is not None:
+            context.begin(args)
+        self._backend_executable.run(context)
 
     def _run_native_only(self, args):
         for node in self._native_nodes:

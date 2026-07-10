@@ -2,7 +2,6 @@
 
 #include <mutex>
 #include <unordered_map>
-#include <thread>
 #include <taichi/rhi/cuda/cuda_capability.h>
 
 #include "taichi/program/kernel_profiler.h"
@@ -31,10 +30,6 @@ class CUDAContext {
   int max_shared_memory_bytes_;
   bool debug_{false};
   bool supports_mem_pool_{false};
-  // A graph capture redirects launches only on the capturing host thread.
-  // Keeping this process-wide state would send unrelated CUDA/CUB work from
-  // other Python threads into the capture stream.
-  static thread_local void *stream_;
 
  public:
   CUDAContext();
@@ -53,7 +48,8 @@ class CUDAContext {
               std::vector<int> arg_sizes,
               unsigned grid_dim,
               unsigned block_dim,
-              std::size_t dynamic_shared_mem_bytes);
+              std::size_t dynamic_shared_mem_bytes,
+              void *stream = nullptr);
 
   void set_profiler(KernelProfilerBase *profiler) {
     profiler_ = profiler;
@@ -119,13 +115,6 @@ class CUDAContext {
 
   static CUDAContext &get_instance();
 
-  void set_stream(void *stream) {
-    stream_ = stream;
-  }
-
-  void *get_stream() const {
-    return stream_;
-  }
 };
 
 }  // namespace taichi::lang

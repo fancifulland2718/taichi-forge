@@ -49,7 +49,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                  LaunchContextBuilder &ctx,
                                  GraphLaunchPacket &packet,
                                  void *stream);
-  void capture_cuda_graph_launch(const GraphLaunchPacket &packet);
+  void capture_cuda_graph_launch(const GraphLaunchPacket &packet,
+                                 void *stream);
 
  private:
   bool on_cuda_device(void *ptr);
