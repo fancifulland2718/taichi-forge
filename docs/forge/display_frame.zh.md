@@ -63,3 +63,18 @@ external synchronization；不同 queue handle 仍可独立提交。
 
 Display frame 携带 width、height、row stride 和 transpose metadata。允许 resize 或路径切
 换，但 producer 必须按正常对象生命周期规则，让 source resource 存活到显示提交链路消费完成。
+
+## Vulkan cache 与 swapchain 恢复
+
+Vulkan pipeline cache data 只是可选的启动优化。Forge 会写出完整的 cache snapshot；如果
+当前 driver 或设备拒绝该 cache，就将其视为 cache miss，安全丢弃并自动从空 cache 重建。
+应用不需要删除 `rhi_cache.bin`，也不需要为不兼容 cache 额外加同步；cache 复用不会改变
+kernel 结果。
+
+对于可见 GGUI 窗口，suboptimal 或 out-of-date 的 acquire/present 结果会把 swapchain 标记为
+在后续窗口帧正常重建。受影响的帧可以被丢弃，而不会向失效 image 提交。该重建不会默认增加
+`ti.sync()`，也不会在共享 Vulkan queue lock 持有期间执行。
+
+`VK_ERROR_DEVICE_LOST` 不同：Forge 只报告一次，并停止对该 Vulkan program/window 的后续
+surface 提交。应把它当作当前 program 的终止性错误，排查 driver 或设备故障后新建
+program/window，而不是尝试继续使用已经丢失的 device。

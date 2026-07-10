@@ -472,10 +472,16 @@ GfxRuntime::GfxRuntime(const Params &params)
   } else {
     TI_TRACE("Pipeline cache not found at {}", cache_path.generic_string());
   }
-  auto [cache, res] = device_->create_pipeline_cache_unique(cache_data.size(),
-                                                            cache_data.data());
-  if (res == RhiResult::success) {
-    backend_cache_ = std::move(cache);
+  auto cache_result = device_->create_pipeline_cache_unique(
+      cache_data.size(), cache_data.empty() ? nullptr : cache_data.data());
+  if (cache_result.second != RhiResult::success && !cache_data.empty()) {
+    TI_WARN("Discarding incompatible Vulkan pipeline cache at {}",
+            cache_path.generic_string());
+    cache_data.clear();
+    cache_result = device_->create_pipeline_cache_unique();
+  }
+  if (cache_result.second == RhiResult::success) {
+    backend_cache_ = std::move(cache_result.first);
   }
 }
 

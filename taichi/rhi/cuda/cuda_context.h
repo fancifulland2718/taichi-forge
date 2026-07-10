@@ -3,6 +3,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <thread>
+#include <taichi/rhi/cuda/cuda_capability.h>
 
 #include "taichi/program/kernel_profiler.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
@@ -27,8 +28,8 @@ class CUDAContext {
   KernelProfilerBase *profiler_;
   CUDADriver &driver_;
   int max_shared_memory_bytes_;
-  bool debug_;
-  bool supports_mem_pool_;
+  bool debug_{false};
+  bool supports_mem_pool_{false};
   void *stream_;
 
  public:

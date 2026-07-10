@@ -49,8 +49,10 @@ CUDAContext::CUDAContext()
     device_supports_mem_pool = 0;
   }
 
-  if (device_supports_mem_pool) {
-    supports_mem_pool_ = true;
+  supports_mem_pool_ = cuda::detail::supports_memory_pool(
+      driver_.get_version_major(), driver_.get_version_minor(),
+      device_supports_mem_pool);
+  if (supports_mem_pool_) {
     void *default_mem_pool;
     driver_.device_get_default_mem_pool(&default_mem_pool, device_);
     // Let the memory pool have 128MB

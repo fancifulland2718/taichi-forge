@@ -287,7 +287,14 @@ IVkPipelineCache create_pipeline_cache(VkDevice device,
   info.pInitialData = initial_data;
 
   VkResult res = vkCreatePipelineCache(device, &info, nullptr, &obj->cache);
-  BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create pipeline cache");
+  if (res != VK_SUCCESS) {
+    char message[128];
+    std::snprintf(message, sizeof(message),
+                  "failed to create pipeline cache: VkResult %d",
+                  static_cast<int>(res));
+    RHI_LOG_ERROR(message);
+    return nullptr;
+  }
 
   return obj;
 }

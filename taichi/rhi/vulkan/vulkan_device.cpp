@@ -158,22 +158,61 @@ VulkanPipelineCache ::~VulkanPipelineCache() {
 }
 
 void *VulkanPipelineCache::data() noexcept {
-  try {
-    data_shadow_.resize(size());
-    size_t size = 0;
-    vkGetPipelineCacheData(device_->vk_device(), cache_->cache, &size,
-                           data_shadow_.data());
-  } catch (std::bad_alloc &) {
+  if (!cache_) {
     return nullptr;
   }
 
-  return data_shadow_.data();
+  try {
+    constexpr int kMaxSnapshotAttempts = 3;
+    for (int attempt = 0; attempt < kMaxSnapshotAttempts; ++attempt) {
+      size_t queried_size = 0;
+      VkResult result = vkGetPipelineCacheData(device_->vk_device(),
+                                                cache_->cache, &queried_size,
+                                                nullptr);
+      if (result != VK_SUCCESS) {
+        char message[128];
+        std::snprintf(message, sizeof(message),
+                      "failed to query pipeline cache size: VkResult %d",
+                      static_cast<int>(result));
+        RHI_LOG_ERROR(message);
+        data_shadow_.clear();
+        return nullptr;
+      }
+      if (queried_size == 0) {
+        data_shadow_.clear();
+        return nullptr;
+      }
+
+      std::vector<uint8_t> snapshot(queried_size);
+      size_t written_size = snapshot.size();
+      result = vkGetPipelineCacheData(device_->vk_device(), cache_->cache,
+                                      &written_size, snapshot.data());
+      if (result == VK_SUCCESS) {
+        snapshot.resize(written_size);
+        data_shadow_.swap(snapshot);
+        return data_shadow_.empty() ? nullptr : data_shadow_.data();
+      }
+      if (result != VK_INCOMPLETE) {
+        char message[128];
+        std::snprintf(message, sizeof(message),
+                      "failed to read pipeline cache data: VkResult %d",
+                      static_cast<int>(result));
+        RHI_LOG_ERROR(message);
+        data_shadow_.clear();
+        return nullptr;
+      }
+    }
+  } catch (std::bad_alloc &) {
+    RHI_LOG_ERROR("out of memory while snapshotting pipeline cache");
+  }
+
+  RHI_LOG_ERROR("pipeline cache snapshot did not stabilize");
+  data_shadow_.clear();
+  return nullptr;
 }
 
 size_t VulkanPipelineCache::size() const noexcept {
-  size_t size = 0;
-  vkGetPipelineCacheData(device_->vk_device(), cache_->cache, &size, nullptr);
-  return size;
+  return data_shadow_.size();
 }
 
 VulkanPipeline::VulkanPipeline(const Params &params)
@@ -1702,10 +1741,15 @@ RhiResult VulkanDevice::create_pipeline_cache(
     PipelineCache **out_cache,
     size_t initial_size,
     const void *initial_data) noexcept {
+  *out_cache = nullptr;
   try {
-    *out_cache = new VulkanPipelineCache(this, initial_size, initial_data);
+    auto *cache = new VulkanPipelineCache(this, initial_size, initial_data);
+    if (!cache->is_valid()) {
+      delete cache;
+      return RhiResult::error;
+    }
+    *out_cache = cache;
   } catch (std::bad_alloc &) {
-    *out_cache = nullptr;
     return RhiResult::out_of_memory;
   }
   return RhiResult::success;
@@ -3043,6 +3087,7 @@ VulkanSurface::VulkanSurface(VulkanDevice *device, const SurfaceConfig &config)
     surface_ = (VkSurfaceKHR)config.native_surface_handle;
 
     create_swap_chain();
+    swapchain_needs_recreate_ = swapchain_ == VK_NULL_HANDLE;
   } else {
     create_offscreen_images();
   }
@@ -3228,6 +3273,37 @@ int VulkanSurface::get_image_count() {
   return swapchain_images_.size();
 }
 
+bool VulkanSurface::handle_surface_result(VkResult result,
+                                          const char *operation) {
+  switch (classify_vulkan_surface_result(result)) {
+    case VulkanSurfaceResult::kSuccess:
+      return true;
+    case VulkanSurfaceResult::kSuboptimal:
+      swapchain_needs_recreate_ = true;
+      return true;
+    case VulkanSurfaceResult::kOutOfDate:
+      swapchain_needs_recreate_ = true;
+      return false;
+    case VulkanSurfaceResult::kDeviceLost:
+      if (!device_lost_) {
+        char message[160];
+        std::snprintf(message, sizeof(message), "Vulkan device lost while %s",
+                      operation);
+        RHI_LOG_ERROR(message);
+      }
+      device_lost_ = true;
+      return false;
+    case VulkanSurfaceResult::kError:
+      char message[160];
+      std::snprintf(message, sizeof(message),
+                    "Vulkan surface %s failed with VkResult %d", operation,
+                    static_cast<int>(result));
+      RHI_LOG_ERROR(message);
+      return false;
+  }
+  return false;
+}
+
 VulkanSurface::~VulkanSurface() {
   if (config_.native_surface_handle) {
     destroy_swap_chain();
@@ -3237,6 +3313,9 @@ VulkanSurface::~VulkanSurface() {
 }
 
 void VulkanSurface::resize(uint32_t width, uint32_t height) {
+  if (device_lost_) {
+    return;
+  }
   if (config_.native_surface_handle) {
     destroy_swap_chain();
   } else {
@@ -3246,6 +3325,7 @@ void VulkanSurface::resize(uint32_t width, uint32_t height) {
   this->height_ = height;
   if (config_.native_surface_handle) {
     create_swap_chain();
+    swapchain_needs_recreate_ = swapchain_ == VK_NULL_HANDLE;
   } else {
     create_offscreen_images();
   }
@@ -3268,12 +3348,16 @@ SurfaceImage VulkanSurface::acquire_surface_image() {
     surface_image.image_index = image_index_;
     return surface_image;
   } else {
+    if (swapchain_needs_recreate_ || device_lost_ ||
+        swapchain_ == VK_NULL_HANDLE || image_available_.empty()) {
+      return surface_image;
+    }
     auto image_available = image_available_[image_available_index_];
     VkResult res = vkAcquireNextImageKHR(
         device_->vk_device(), swapchain_, uint64_t(4 * 1e9),
         image_available->semaphore, VK_NULL_HANDLE, &image_index_);
-    if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
-      BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "vkAcquireNextImageKHR failed");
+    if (!handle_surface_result(res, "acquiring the next swapchain image")) {
+      return surface_image;
     }
     image_available_index_ =
         (image_available_index_ + 1) % uint32_t(image_available_.size());
@@ -3291,6 +3375,11 @@ bool VulkanSurface::try_acquire_surface_image(SurfaceImage *surface_image) {
     return true;
   }
 
+  if (swapchain_needs_recreate_ || device_lost_ ||
+      swapchain_ == VK_NULL_HANDLE || image_available_.empty()) {
+    return false;
+  }
+
   auto image_available = image_available_[image_available_index_];
   VkResult res = vkAcquireNextImageKHR(
       device_->vk_device(), swapchain_, 0, image_available->semaphore,
@@ -3298,8 +3387,7 @@ bool VulkanSurface::try_acquire_surface_image(SurfaceImage *surface_image) {
   if (res == VK_NOT_READY || res == VK_TIMEOUT) {
     return false;
   }
-  if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
-    BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "vkAcquireNextImageKHR failed");
+  if (!handle_surface_result(res, "acquiring the next swapchain image")) {
     return false;
   }
 
@@ -3347,6 +3435,9 @@ void VulkanSurface::present_surface_image(
   if (!config_.native_surface_handle) {
     return;
   }
+  if (device_lost_) {
+    return;
+  }
   if (swapchain_ == VK_NULL_HANDLE) {
     RHI_LOG_ERROR("Cannot present image without a valid Vulkan swapchain");
     return;
@@ -3378,11 +3469,13 @@ void VulkanSurface::present_surface_image(
   presentInfo.pImageIndices = &surface_image.image_index;
   presentInfo.pResults = nullptr;
 
+  VkResult present_result = VK_SUCCESS;
   {
     std::lock_guard<std::mutex> queue_lock(
         device_->get_queue_mutex(device_->graphics_queue()));
-    vkQueuePresentKHR(device_->graphics_queue(), &presentInfo);
+    present_result = vkQueuePresentKHR(device_->graphics_queue(), &presentInfo);
   }
+  handle_surface_result(present_result, "presenting a swapchain image");
   if (surface_image.image_index < present_waits_by_image_.size()) {
     present_waits_by_image_[surface_image.image_index] =
         std::move(tracked_wait_semaphores);

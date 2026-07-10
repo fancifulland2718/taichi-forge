@@ -67,6 +67,16 @@ void SwapChain::resize(uint32_t width, uint32_t height) {
   create_image_resources();
 }
 
+bool SwapChain::needs_swapchain_recreate() const {
+  auto *surface = dynamic_cast<const VulkanSurface *>(surface_.get());
+  return surface && surface->needs_swapchain_recreate();
+}
+
+bool SwapChain::device_lost() const {
+  auto *surface = dynamic_cast<const VulkanSurface *>(surface_.get());
+  return surface && surface->device_lost();
+}
+
 bool SwapChain::copy_depth_buffer_to_ndarray(
     taichi::lang::DevicePtr &arr_dev_ptr) {
   auto [w, h] = surface_->get_size();

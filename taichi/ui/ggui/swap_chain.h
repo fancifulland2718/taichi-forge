@@ -18,6 +18,9 @@ class TI_DLL_EXPORT SwapChain {
 
   void resize(uint32_t width, uint32_t height);
 
+  bool needs_swapchain_recreate() const;
+  bool device_lost() const;
+
   bool copy_depth_buffer_to_ndarray(taichi::lang::DevicePtr &arr_dev_ptr);
 
   std::vector<uint32_t> &dump_image_buffer();

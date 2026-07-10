@@ -80,3 +80,22 @@ Display frames carry width, height, row stride, and transpose metadata. Resize
 or path switches are allowed, but the producer must keep source resources alive
 until the display submission path has consumed them according to the API's
 normal object-lifetime rules.
+
+## Vulkan Cache and Swapchain Recovery
+
+Vulkan pipeline-cache data is an optional startup optimization. Forge writes a
+complete cache snapshot and treats a cache rejected by the current driver or
+device as a cache miss: it is discarded and rebuilt automatically. Applications
+do not need to delete `rhi_cache.bin` or add synchronization to recover from an
+incompatible cache; cache reuse never changes kernel results.
+
+For a visible GGUI window, a suboptimal or out-of-date acquire/present result
+marks the swapchain for normal recreation on a later window frame. The affected
+frame can be dropped rather than submitted against stale images. This rebuild
+does not add a default `ti.sync()` and is not performed while holding the shared
+Vulkan queue lock.
+
+`VK_ERROR_DEVICE_LOST` is different: Forge reports it once and stops further
+surface submission for that Vulkan program/window. Treat it as terminal for the
+current program, investigate the driver or device failure, and create a fresh
+program/window instead of trying to continue with the lost device.

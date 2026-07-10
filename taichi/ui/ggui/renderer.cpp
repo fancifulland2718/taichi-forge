@@ -352,6 +352,9 @@ bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
   } else if (!swap_chain_.surface().try_acquire_surface_image(&surface_image)) {
     return false;
   }
+  if (surface_image.image.device == nullptr) {
+    return false;
+  }
   StreamSemaphore semaphore = surface_image.image_available;
   auto image = surface_image.image;
   std::vector<StreamSemaphore> present_waits_after_acquire;

@@ -95,6 +95,7 @@ class CudaDevice : public LlvmDevice {
     bool use_cached{false};
     bool use_memory_pool{false};
     void *mapped{nullptr};
+    bool is_mapped{false};
   };
 
   AllocInfo get_alloc_info(const DeviceAllocation handle);
@@ -156,14 +157,16 @@ class CudaDevice : public LlvmDevice {
 
   void wait_idle() override { TI_NOT_IMPLEMENTED };
 
-  void clear() override {
-    allocations_.clear();
-  }
+  void clear() override;
 
  private:
   std::vector<AllocInfo> allocations_;
+  bool is_valid_device_alloc(const DeviceAllocation alloc) const {
+    return alloc.device == this && alloc.alloc_id < allocations_.size();
+  }
+
   void validate_device_alloc(const DeviceAllocation alloc) {
-    if (allocations_.size() <= alloc.alloc_id) {
+    if (!is_valid_device_alloc(alloc)) {
       TI_ERROR("invalid DeviceAllocation");
     }
   }

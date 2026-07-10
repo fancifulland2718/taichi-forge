@@ -67,6 +67,12 @@ bool Window::show() {
     if (!is_running()) {
       return false;
     }
+    if (renderer_->swap_chain().device_lost()) {
+      return false;
+    }
+    if (renderer_->swap_chain().needs_swapchain_recreate()) {
+      resize();
+    }
   }
   if (!drawn_frame_) {
     const bool has_gui_work = gui_ && gui_->has_widgets();

@@ -65,6 +65,22 @@ TEST(VulkanDeviceTest, ConcurrentQueueSubmissions) {
   device->wait_idle();
 }
 
+TEST(VulkanSurfaceResultTest, ClassifiesRecoverableAndFatalResults) {
+  using vulkan::VulkanSurfaceResult;
+  using vulkan::classify_vulkan_surface_result;
+
+  EXPECT_EQ(classify_vulkan_surface_result(VK_SUCCESS),
+            VulkanSurfaceResult::kSuccess);
+  EXPECT_EQ(classify_vulkan_surface_result(VK_SUBOPTIMAL_KHR),
+            VulkanSurfaceResult::kSuboptimal);
+  EXPECT_EQ(classify_vulkan_surface_result(VK_ERROR_OUT_OF_DATE_KHR),
+            VulkanSurfaceResult::kOutOfDate);
+  EXPECT_EQ(classify_vulkan_surface_result(VK_ERROR_DEVICE_LOST),
+            VulkanSurfaceResult::kDeviceLost);
+  EXPECT_EQ(classify_vulkan_surface_result(VK_ERROR_SURFACE_LOST_KHR),
+            VulkanSurfaceResult::kError);
+}
+
 TEST(DeviceTest, ViewDevAllocAsNdarray) {
   // Otherwise will segfault on macOS VM,
   // where Vulkan is installed but no devices are present
@@ -82,4 +98,32 @@ TEST(DeviceTest, ViewDevAllocAsNdarray) {
           embedded_device->device());
 
   aot_test_utils::view_devalloc_as_ndarray(device_);
+}
+
+TEST(VulkanPipelineCacheTest, SnapshotRoundTrip) {
+  if (!vulkan::is_vulkan_api_available()) {
+    return;
+  }
+
+  vulkan::VulkanDeviceCreator::Params params;
+  params.api_version = std::nullopt;
+  auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(params);
+  auto *device = static_cast<vulkan::VulkanDevice *>(creator->device());
+
+  auto [cache, result] = device->create_pipeline_cache_unique();
+  ASSERT_EQ(result, RhiResult::success);
+  ASSERT_NE(cache, nullptr);
+
+  auto *cache_data = static_cast<uint8_t *>(cache->data());
+  const size_t cache_size = cache->size();
+  ASSERT_NE(cache_data, nullptr);
+  ASSERT_GT(cache_size, 0);
+  std::vector<uint8_t> blob(cache_data, cache_data + cache_size);
+
+  auto [restored, restored_result] =
+      device->create_pipeline_cache_unique(blob.size(), blob.data());
+  ASSERT_EQ(restored_result, RhiResult::success);
+  ASSERT_NE(restored, nullptr);
+  EXPECT_NE(restored->data(), nullptr);
+  EXPECT_GT(restored->size(), 0);
 }

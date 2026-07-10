@@ -1,6 +1,8 @@
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/rhi/llvm/device_memory_pool.h"
 
+#include <memory>
+
 #include "taichi/jit/jit_module.h"
 
 namespace taichi::lang {
@@ -94,8 +96,17 @@ void CudaDevice::dealloc_memory(DeviceAllocation handle) {
   if (allocations_.empty())
     return;
 
-  validate_device_alloc(handle);
+  if (!is_valid_device_alloc(handle)) {
+    TI_WARN("invalid DeviceAllocation");
+    return;
+  }
   AllocInfo &info = allocations_[handle.alloc_id];
+
+  if (info.is_mapped) {
+    delete[] static_cast<char *>(info.mapped);
+    info.mapped = nullptr;
+    info.is_mapped = false;
+  }
 
   if (info.size == 0) {
     return;
@@ -161,21 +172,64 @@ RhiResult CudaDevice::readback_data(
 }
 
 RhiResult CudaDevice::map(DeviceAllocation alloc, void **mapped_ptr) {
+  if (mapped_ptr == nullptr || !is_valid_device_alloc(alloc)) {
+    return RhiResult::invalid_usage;
+  }
+
+  *mapped_ptr = nullptr;
   AllocInfo &info = allocations_[alloc.alloc_id];
-  size_t size = info.size;
-  info.mapped = new char[size];
-  // FIXME: there should be a better way to do this...
-  CUDADriver::get_instance().memcpy_device_to_host(info.mapped, info.ptr, size);
+  if (info.is_mapped || (info.size != 0 && info.ptr == nullptr)) {
+    return RhiResult::invalid_usage;
+  }
+
+  std::unique_ptr<char[]> mapped;
+  try {
+    if (info.size != 0) {
+      mapped = std::make_unique<char[]>(info.size);
+      CUDADriver::get_instance().memcpy_device_to_host(mapped.get(), info.ptr,
+                                                        info.size);
+    }
+  } catch (const std::bad_alloc &) {
+    return RhiResult::out_of_memory;
+  } catch (...) {
+    return RhiResult::error;
+  }
+
+  info.mapped = mapped.release();
+  info.is_mapped = true;
   *mapped_ptr = info.mapped;
   return RhiResult::success;
 }
 
 void CudaDevice::unmap(DeviceAllocation alloc) {
+  if (!is_valid_device_alloc(alloc)) {
+    TI_WARN("invalid DeviceAllocation");
+    return;
+  }
   AllocInfo &info = allocations_[alloc.alloc_id];
-  CUDADriver::get_instance().memcpy_host_to_device(info.ptr, info.mapped,
-                                                   info.size);
-  delete[] static_cast<char *>(info.mapped);
-  return;
+  if (!info.is_mapped) {
+    TI_WARN("unmapping a CUDA allocation that is not mapped");
+    return;
+  }
+
+  std::unique_ptr<char[]> mapped(static_cast<char *>(info.mapped));
+  info.mapped = nullptr;
+  info.is_mapped = false;
+  if (info.size != 0) {
+    CUDADriver::get_instance().memcpy_host_to_device(info.ptr, mapped.get(),
+                                                     info.size);
+  }
+}
+
+void CudaDevice::clear() {
+  for (auto &info : allocations_) {
+    if (info.is_mapped) {
+      delete[] static_cast<char *>(info.mapped);
+      info.mapped = nullptr;
+      info.is_mapped = false;
+    }
+  }
+  allocations_.clear();
 }
 
 void CudaDevice::memcpy_internal(DevicePtr dst, DevicePtr src, uint64_t size) {

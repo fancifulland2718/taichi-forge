@@ -320,6 +320,10 @@ class VulkanPipelineCache : public PipelineCache {
     return cache_;
   }
 
+  bool is_valid() const {
+    return cache_ != nullptr;
+  }
+
  private:
   VulkanDevice *device_{nullptr};
   vkapi::IVkPipelineCache cache_{nullptr};
@@ -523,6 +527,30 @@ class VulkanCommandList : public CommandList {
   uint32_t viewport_width_{0}, viewport_height_{0};
 };
 
+enum class VulkanSurfaceResult {
+  kSuccess,
+  kSuboptimal,
+  kOutOfDate,
+  kDeviceLost,
+  kError,
+};
+
+constexpr VulkanSurfaceResult classify_vulkan_surface_result(VkResult result) {
+  if (result == VK_SUCCESS) {
+    return VulkanSurfaceResult::kSuccess;
+  }
+  if (result == VK_SUBOPTIMAL_KHR) {
+    return VulkanSurfaceResult::kSuboptimal;
+  }
+  if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+    return VulkanSurfaceResult::kOutOfDate;
+  }
+  if (result == VK_ERROR_DEVICE_LOST) {
+    return VulkanSurfaceResult::kDeviceLost;
+  }
+  return VulkanSurfaceResult::kError;
+}
+
 class VulkanSurface : public Surface {
  public:
   VulkanSurface(VulkanDevice *device, const SurfaceConfig &config);
@@ -545,11 +573,20 @@ class VulkanSurface : public Surface {
   BufferFormat image_format() override;
   void resize(uint32_t width, uint32_t height) override;
 
+  bool needs_swapchain_recreate() const {
+    return swapchain_needs_recreate_;
+  }
+
+  bool device_lost() const {
+    return device_lost_;
+  }
+
  private:
   void create_swap_chain();
   void destroy_swap_chain();
   void create_offscreen_images();
   void destroy_offscreen_images();
+  bool handle_surface_result(VkResult result, const char *operation);
 
   SurfaceConfig config_;
 
@@ -567,6 +604,8 @@ class VulkanSurface : public Surface {
 
   std::vector<DeviceAllocation> swapchain_images_;
   std::vector<std::vector<StreamSemaphore>> present_waits_by_image_;
+  bool swapchain_needs_recreate_{false};
+  bool device_lost_{false};
 };
 
 struct DescPool {
