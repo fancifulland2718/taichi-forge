@@ -72,6 +72,10 @@ class LlvmRuntimeExecutor {
 
   Device *get_compute_device();
 
+  // Lazily creates the host scheduler for CPU execution. CUDA/AMDGPU callers
+  // receive nullptr and therefore never create unrelated CPU worker threads.
+  ThreadPool *get_cpu_thread_pool();
+
   LlvmDevice *llvm_device();
 
   void synchronize();

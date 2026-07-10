@@ -289,6 +289,10 @@ class TI_DLL_EXPORT Program {
     return program_impl_->get_graphics_device();
   }
 
+  // Internal CPU-native primitive scheduler. The returned object is owned by
+  // this Program's LLVM runtime and is never a process-global worker pool.
+  ThreadPool *get_cpu_thread_pool();
+
   // TODO: do we still need result_buffer?
   DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,
                                              uint64 *result_buffer) {

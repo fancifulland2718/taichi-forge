@@ -75,6 +75,23 @@ namespace {
 std::atomic<std::size_t> cpu_scatter_add_workspace_bytes_peak{0};
 std::atomic<std::size_t> cpu_grouped_reduce_workspace_bytes_peak{0};
 
+thread_local Program *active_cpu_primitive_program = nullptr;
+
+class ScopedCpuPrimitiveProgram {
+ public:
+  explicit ScopedCpuPrimitiveProgram(Program *program)
+      : previous_program_(active_cpu_primitive_program) {
+    active_cpu_primitive_program = program;
+  }
+
+  ~ScopedCpuPrimitiveProgram() {
+    active_cpu_primitive_program = previous_program_;
+  }
+
+ private:
+  Program *previous_program_;
+};
+
 void update_cpu_scatter_add_workspace_peak(std::size_t bytes) {
   auto current = cpu_scatter_add_workspace_bytes_peak.load(std::memory_order_relaxed);
   while (current < bytes &&
@@ -615,16 +632,13 @@ struct CpuStridedGroupedReduceIoTaskContext {
   int num_threads{1};
 };
 
-std::shared_ptr<taichi::ThreadPool> get_cpu_primitive_thread_pool(
-    int max_threads) {
-  static std::mutex mutex;
-  static std::shared_ptr<taichi::ThreadPool> pool;
-  static int pool_threads = 0;
-  std::lock_guard<std::mutex> lock(mutex);
-  if (!pool || pool_threads < max_threads) {
-    pool = std::make_shared<taichi::ThreadPool>(max_threads);
-    pool_threads = max_threads;
-  }
+ThreadPool *get_cpu_primitive_thread_pool(int max_threads) {
+  TI_ERROR_IF(active_cpu_primitive_program == nullptr,
+              "CPU native primitive scheduler was used outside a Program "
+              "submission scope.");
+  auto *const pool = active_cpu_primitive_program->get_cpu_thread_pool();
+  TI_ASSERT(pool != nullptr);
+  (void)max_threads;
   return pool;
 }
 
@@ -4615,6 +4629,20 @@ void Program::materialize_runtime() {
   program_impl_->materialize_runtime(profiler.get(), &result_buffer);
 }
 
+ThreadPool *Program::get_cpu_thread_pool() {
+  TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
+              "CPU native primitive scheduler requested on a non-CPU "
+              "backend.");
+#ifdef TI_WITH_LLVM
+  auto *const pool = get_llvm_program(this)->get_cpu_thread_pool();
+  TI_ASSERT(pool != nullptr);
+  return pool;
+#else
+  TI_ERROR("CPU native primitive scheduler requires LLVM support.");
+  return nullptr;
+#endif
+}
+
 static void remove_rw_accessor_cache(
     SNode *parent_snode,
     SNodeRwAccessorsBank *snode_rw_accessors_bank) {
@@ -4973,6 +5001,7 @@ intptr_t Program::get_ndarray_data_ptr_as_int(const Ndarray *ndarray) {
 }
 
 void Program::fill_ndarray_fast_u32(Ndarray *ndarray, uint32_t val) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!ndarray, "fill_ndarray_fast_u32 received a null ndarray.");
   const std::size_t bytes =
       ndarray->get_nelement() * ndarray->get_element_size();
@@ -5038,6 +5067,7 @@ void Program::fill_ndarray_fast_u32(Ndarray *ndarray, uint32_t val) {
 }
 
 void Program::copy_ndarray_fast(Ndarray *dst, Ndarray *src) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!dst || !src, "copy_ndarray_fast received a null ndarray.");
   const std::size_t dst_bytes = dst->get_nelement() * dst->get_element_size();
   const std::size_t src_bytes = src->get_nelement() * src->get_element_size();
@@ -9749,6 +9779,7 @@ void Program::fill_dense_field(SNode *dst,
                                int value_type,
                                uint64_t value_bits,
                                std::size_t n) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   const Arch arch = compile_config().arch;
   TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
               "Native dense field fill is only available on CPU, CUDA, and "
@@ -9865,6 +9896,7 @@ void Program::fill_dense_field_packed(SNode *dst,
                                       uint64_t value_bits,
                                       std::size_t n,
                                       int lane_count) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   const Arch arch = compile_config().arch;
   TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
               "Native packed dense field fill is only available on CPU, CUDA, "
@@ -9970,6 +10002,7 @@ std::size_t Program::transform_affine_dense_field_packed(SNode *src,
                                                          int lane_count,
                                                          double scale,
                                                          double bias) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   const Arch arch = compile_config().arch;
   TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
               "Native packed dense field transform is only available on CPU, "
@@ -10110,6 +10143,7 @@ void Program::copy_dense_field(SNode *dst,
                                SNode *src,
                                int value_type,
                                std::size_t n) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   const Arch arch = compile_config().arch;
   TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
               "Native dense field copy is only available on CPU, CUDA, and "
@@ -10220,6 +10254,7 @@ void Program::copy_dense_field_packed(SNode *dst,
                                       int value_type,
                                       std::size_t n,
                                       int lane_count) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   const Arch arch = compile_config().arch;
   TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
               "Native packed dense field copy is only available on CPU, CUDA, "
@@ -10660,6 +10695,7 @@ std::size_t Program::cpu_compact_dense_field(SNode *values,
                                              SNode *count,
                                              int value_type,
                                              std::size_t n) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field compact is only available on CPU "
               "backends.");
@@ -10766,6 +10802,7 @@ std::size_t Program::cpu_histogram_ndarray(Ndarray *values,
                                            Ndarray *bins,
                                            int value_type,
                                            int bin_type) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native histogram is only available on CPU backends.");
   TI_ERROR_IF(!values || !bins,
@@ -10833,6 +10870,7 @@ std::size_t Program::cpu_histogram_dense_field(SNode *values,
                                                int bin_type,
                                                std::size_t n,
                                                std::size_t num_bins) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field histogram is only available on CPU "
               "backends.");
@@ -10925,6 +10963,7 @@ std::size_t Program::cpu_reduce_ndarray(Ndarray *values,
                                         Ndarray *output,
                                         int value_type,
                                         int op) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native reduce is only available on CPU backends.");
   TI_ERROR_IF(!values || !output,
@@ -10996,6 +11035,7 @@ std::size_t Program::cpu_reduce_member_ndarray(Ndarray *values,
                                                std::size_t offset,
                                                std::size_t stride,
                                                int op) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native strided reduce is only available on CPU backends.");
   check_reduce_member_request("CPU native", values, output, value_type, offset,
@@ -11053,6 +11093,7 @@ std::size_t Program::cpu_reduce_strided_ndarray(Ndarray *values,
                                                 std::size_t output_offset,
                                                 std::size_t output_stride,
                                                 int op) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native strided reduce is only available on CPU backends.");
   check_reduce_strided_request("CPU native", values, output, value_type,
@@ -11115,6 +11156,7 @@ std::size_t Program::cpu_reduce_dense_field(SNode *values,
                                             int value_type,
                                             std::size_t n,
                                             int op) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field reduce is only available on CPU "
               "backends.");
@@ -11206,6 +11248,7 @@ std::size_t Program::cpu_reduce_dense_field_packed(SNode *values,
                                                    std::size_t n,
                                                    int lane_count,
                                                    int op) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native packed dense field reduce is only available on CPU "
               "backends.");
@@ -11312,6 +11355,7 @@ std::size_t Program::cpu_check_count_ndarray(Ndarray *values,
                                              int check_op,
                                              int lower,
                                              int upper) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native check_count is only available on CPU backends.");
   TI_ERROR_IF(!values || !output,
@@ -11381,6 +11425,7 @@ std::size_t Program::cpu_check_count_strided_ndarray(Ndarray *values,
                                                      int check_op,
                                                      int lower,
                                                      int upper) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native strided check_count is only available on CPU "
               "backends.");
@@ -11456,6 +11501,7 @@ std::size_t Program::cpu_check_count_dense_field(SNode *values,
                                                  int check_op,
                                                  int lower,
                                                  int upper) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field check_count is only available on CPU "
               "backends.");
@@ -11532,6 +11578,7 @@ std::size_t Program::cpu_metric_reduce_ndarray(Ndarray *values,
                                                Ndarray *output,
                                                int value_type,
                                                int metric_op) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native metric_reduce is only available on CPU backends.");
   TI_ERROR_IF(!values || !output,
@@ -11601,6 +11648,7 @@ std::size_t Program::cpu_metric_reduce_strided_ndarray(
     std::size_t other_offset,
     std::size_t other_stride,
     int metric_op) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native strided metric_reduce is only available on CPU "
               "backends.");
@@ -11686,6 +11734,7 @@ std::size_t Program::cpu_metric_reduce_dense_field(SNode *values,
                                                    int value_type,
                                                    std::size_t n,
                                                    int metric_op) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field metric_reduce is only available on CPU "
               "backends.");
@@ -11755,6 +11804,7 @@ std::size_t Program::cpu_metric_reduce_dense_field_strided_ndarray(
     std::size_t array_stride,
     bool field_is_values,
     int metric_op) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native mixed metric_reduce is only available on CPU "
               "backends.");
@@ -11840,6 +11890,7 @@ std::size_t Program::cpu_transform_affine_ndarray(Ndarray *src,
                                                   int value_type,
                                                   double scale,
                                                   double bias) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native transform is only available on CPU backends.");
   TI_ERROR_IF(!src || !dst, "CPU native transform received a null ndarray.");
@@ -11926,6 +11977,7 @@ std::size_t Program::cpu_transform_affine_member_ndarray(Ndarray *src,
                                                          std::size_t stride,
                                                          double scale,
                                                          double bias) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native strided transform is only available on CPU "
               "backends.");
@@ -12003,6 +12055,7 @@ std::size_t Program::cpu_transform_affine_strided_ndarray(
     std::size_t dst_stride,
     double scale,
     double bias) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native strided transform is only available on CPU "
               "backends.");
@@ -12083,6 +12136,7 @@ std::size_t Program::cpu_transform_affine_packed_strided_ndarray(
     std::size_t dst_stride,
     double scale,
     double bias) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native packed strided transform is only available on CPU "
               "backends.");
@@ -12166,6 +12220,7 @@ std::size_t Program::cpu_transform_affine_dense_field(SNode *src,
                                                       std::size_t n,
                                                       double scale,
                                                       double bias) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field transform is only available on CPU "
               "backends.");
@@ -12292,6 +12347,7 @@ bool Program::cpu_add_merge_available() const {
 std::size_t Program::cpu_add_merge_ndarray(Ndarray *src,
                                            Ndarray *dst,
                                            int value_type) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native add-merge is only available on CPU backends.");
   TI_ERROR_IF(!src || !dst, "CPU add-merge received a null ndarray.");
@@ -12366,6 +12422,7 @@ std::size_t Program::cpu_add_scaled_ndarray(Ndarray *src,
                                             Ndarray *dst,
                                             int value_type,
                                             double scale) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native scaled-add is only available on CPU backends.");
   TI_ERROR_IF(!src || !dst, "CPU scaled-add received a null ndarray.");
@@ -12418,6 +12475,7 @@ std::size_t Program::cpu_add_scalar_ndarray_to_ndarray(Ndarray *src,
                                                        Ndarray *dst,
                                                        int value_type,
                                                        double scale) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native scalar-to-ndarray add is only available on CPU "
               "backends.");
@@ -12476,6 +12534,7 @@ std::size_t Program::cpu_add_merge_strided_ndarray(Ndarray *src,
                                                    std::size_t src_stride,
                                                    std::size_t dst_offset,
                                                    std::size_t dst_stride) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native strided add-merge is only available on CPU "
               "backends.");
@@ -12540,6 +12599,7 @@ std::size_t Program::cpu_add_merge_dense_field(Ndarray *src,
                                                SNode *dst,
                                                int value_type,
                                                std::size_t n) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field add-merge is only available on CPU "
               "backends.");
@@ -12611,6 +12671,7 @@ std::size_t Program::add_merge_dense_field_packed(SNode *src,
                                                   int value_type,
                                                   std::size_t n,
                                                   int lane_count) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   const Arch arch = compile_config().arch;
   TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
               "Native packed dense field add-merge is only available on CPU, "
@@ -12730,6 +12791,7 @@ std::size_t Program::scatter_add_dense_field_packed(SNode *src,
                                                     std::size_t src_n,
                                                     std::size_t dst_n,
                                                     int lane_count) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   const Arch arch = compile_config().arch;
   TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
               "Native packed dense field scatter-add is only available on "
@@ -12857,6 +12919,7 @@ std::size_t Program::scatter_add_dense_field_packed_indices_field(
     std::size_t indices_n,
     std::size_t dst_n,
     int lane_count) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   const Arch arch = compile_config().arch;
   TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
               "Native packed dense field scatter-add is only available on "
@@ -12985,6 +13048,7 @@ std::size_t Program::cpu_add_scaled_dense_field(SNode *src,
                                                 int value_type,
                                                 std::size_t n,
                                                 double scale) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field scaled-add is only available on CPU "
               "backends.");
@@ -13034,6 +13098,7 @@ std::size_t Program::cpu_add_scalar_field_to_dense_field(SNode *src,
                                                          SNode *dst,
                                                          int value_type,
                                                          std::size_t n) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native scalar-to-dense add is only available on CPU "
               "backends.");
@@ -13102,6 +13167,7 @@ bool Program::cpu_indexed_copy_available() const {
 std::size_t Program::cpu_gather_ndarray(Ndarray *src,
                                         Ndarray *indices,
                                         Ndarray *dst) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native gather is only available on CPU backends.");
   TI_ERROR_IF(!src || !indices || !dst,
@@ -13171,6 +13237,7 @@ std::size_t Program::cpu_gather_strided_ndarray(Ndarray *src,
                                                 std::size_t src_stride,
                                                 std::size_t dst_offset,
                                                 std::size_t dst_stride) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native strided gather is only available on CPU backends.");
   check_indexed_copy_strided_request("CPU native", src, indices, dst,
@@ -13231,6 +13298,7 @@ std::size_t Program::cpu_gather_dense_field(SNode *src,
                                             int value_type,
                                             std::size_t src_n,
                                             std::size_t dst_n) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field gather is only available on CPU "
               "backends.");
@@ -13297,6 +13365,7 @@ std::size_t Program::cpu_gather_dense_field_packed(SNode *src,
                                                    std::size_t src_n,
                                                    std::size_t dst_n,
                                                    int lane_count) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native packed dense field gather is only available on CPU "
               "backends.");
@@ -13369,6 +13438,7 @@ std::size_t Program::cpu_gather_dense_field_packed_indices_field(
     std::size_t indices_n,
     std::size_t dst_n,
     int lane_count) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native packed dense field gather is only available on CPU "
               "backends.");
@@ -13445,6 +13515,7 @@ std::size_t Program::cpu_gather_dense_field_indices_field(
     std::size_t src_n,
     std::size_t indices_n,
     std::size_t dst_n) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field gather is only available on CPU "
               "backends.");
@@ -13516,6 +13587,7 @@ std::size_t Program::cpu_gather_add_ndarray(Ndarray *src,
                                             Ndarray *indices,
                                             Ndarray *dst,
                                             int value_type) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native gather-add is only available on CPU backends.");
   TI_ERROR_IF(!src || !indices || !dst,
@@ -13578,6 +13650,7 @@ std::size_t Program::cpu_gather_add_dense_field(SNode *src,
                                                 int value_type,
                                                 std::size_t src_n,
                                                 std::size_t dst_n) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field gather-add is only available on CPU "
               "backends.");
@@ -13637,6 +13710,7 @@ std::size_t Program::cpu_gather_add_dense_field_indices_field(
     std::size_t src_n,
     std::size_t indices_n,
     std::size_t dst_n) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field gather-add is only available on CPU "
               "backends.");
@@ -13698,6 +13772,7 @@ std::size_t Program::cpu_gather_add_dense_field_indices_field(
 std::size_t Program::cpu_scatter_ndarray(Ndarray *src,
                                          Ndarray *indices,
                                          Ndarray *dst) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native scatter is only available on CPU backends.");
   TI_ERROR_IF(!src || !indices || !dst,
@@ -13763,6 +13838,7 @@ std::size_t Program::cpu_scatter_strided_ndarray(Ndarray *src,
                                                  std::size_t src_stride,
                                                  std::size_t dst_offset,
                                                  std::size_t dst_stride) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native strided scatter is only available on CPU backends.");
   check_indexed_copy_strided_request("CPU native", src, indices, dst,
@@ -13820,6 +13896,7 @@ std::size_t Program::cpu_scatter_dense_field(SNode *src,
                                              int value_type,
                                              std::size_t src_n,
                                              std::size_t dst_n) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field scatter is only available on CPU "
               "backends.");
@@ -13885,6 +13962,7 @@ std::size_t Program::cpu_scatter_dense_field_packed(SNode *src,
                                                     std::size_t src_n,
                                                     std::size_t dst_n,
                                                     int lane_count) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native packed dense field scatter is only available on CPU "
               "backends.");
@@ -13956,6 +14034,7 @@ std::size_t Program::cpu_scatter_dense_field_packed_indices_field(
     std::size_t indices_n,
     std::size_t dst_n,
     int lane_count) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native packed dense field scatter is only available on CPU "
               "backends.");
@@ -14031,6 +14110,7 @@ std::size_t Program::cpu_scatter_dense_field_indices_field(
     std::size_t src_n,
     std::size_t indices_n,
     std::size_t dst_n) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field scatter is only available on CPU "
               "backends.");
@@ -14109,6 +14189,7 @@ std::size_t Program::cpu_scatter_add_ndarray(Ndarray *src,
                                              Ndarray *indices,
                                              Ndarray *dst,
                                              int value_type) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native scatter-add is only available on CPU backends.");
   TI_ERROR_IF(!src || !indices || !dst,
@@ -14186,6 +14267,7 @@ std::size_t Program::cpu_scatter_add_member_ndarray(Ndarray *src,
                                                     int value_type,
                                                     std::size_t offset,
                                                     std::size_t stride) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native strided scatter-add is only available on CPU "
               "backends.");
@@ -14251,6 +14333,7 @@ std::size_t Program::cpu_scatter_add_strided_ndarray(
     std::size_t src_stride,
     std::size_t dst_offset,
     std::size_t dst_stride) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native strided scatter-add is only available on CPU "
               "backends.");
@@ -14309,6 +14392,7 @@ std::size_t Program::cpu_scatter_add_dense_field(SNode *src,
                                                  int value_type,
                                                  std::size_t src_n,
                                                  std::size_t dst_n) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field scatter-add is only available on CPU "
               "backends.");
@@ -14374,6 +14458,7 @@ std::size_t Program::cpu_scatter_add_dense_field_indices_field(
     std::size_t src_n,
     std::size_t indices_n,
     std::size_t dst_n) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field scatter-add is only available on CPU "
               "backends.");
@@ -14459,6 +14544,7 @@ std::size_t Program::cpu_bucket_builder_ndarray(Ndarray *keys,
                                                 Ndarray *offsets,
                                                 Ndarray *output,
                                                 int value_type) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native bucket builder is only available on CPU backends.");
   TI_ERROR_IF(!keys || !values || !offsets || !output,
@@ -14561,6 +14647,7 @@ std::size_t Program::cpu_bucket_builder_dense_field(SNode *keys,
                                                     int value_type,
                                                     std::size_t n,
                                                     std::size_t num_bins) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field bucket builder is only available on CPU "
               "backends.");
@@ -14663,6 +14750,7 @@ std::size_t Program::cpu_grouped_reduce_ndarray(Ndarray *keys,
                                                 Ndarray *output,
                                                 int value_type,
                                                 int op) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native grouped reduce is only available on CPU backends.");
   TI_ERROR_IF(!keys || !values || !output,
@@ -14738,6 +14826,7 @@ std::size_t Program::cpu_grouped_reduce_dense_field(SNode *keys,
                                                     std::size_t n,
                                                     std::size_t num_groups,
                                                     int op) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native dense field grouped reduce is only available on CPU "
               "backends.");
@@ -14823,6 +14912,7 @@ std::size_t Program::cpu_grouped_reduce_member_ndarray(Ndarray *keys,
                                                        std::size_t offset,
                                                        std::size_t stride,
                                                        int op) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native strided grouped reduce is only available on CPU "
               "backends.");
@@ -14903,6 +14993,7 @@ std::size_t Program::cpu_grouped_reduce_strided_keys_ndarray(
     std::size_t output_offset,
     std::size_t output_stride,
     int op) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!arch_is_cpu(compile_config().arch),
               "CPU native strided grouped reduce is only available on CPU "
               "backends.");

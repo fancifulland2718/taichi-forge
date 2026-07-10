@@ -130,6 +130,10 @@ class LlvmProgramImpl : public ProgramImpl {
     return runtime_exec_->get_compute_device();
   }
 
+  ThreadPool *get_cpu_thread_pool() {
+    return runtime_exec_->get_cpu_thread_pool();
+  }
+
   /**
    * Initializes the SNodes for LLVM based backends.
    */

@@ -2,6 +2,8 @@
 
 #include "taichi/rhi/common/host_memory_pool.h"
 #include "taichi/runtime/llvm/llvm_offline_cache.h"
+
+#include <mutex>
 #include "taichi/rhi/cpu/cpu_device.h"
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/platform/cuda/detect_cuda.h"
@@ -920,6 +922,23 @@ LlvmDevice *LlvmRuntimeExecutor::llvm_device() {
   return static_cast<LlvmDevice *>(device_.get());
 }
 
+ThreadPool *LlvmRuntimeExecutor::get_cpu_thread_pool() {
+  if (!arch_use_host_memory(config_.arch)) {
+    return nullptr;
+  }
+  // This lock protects only first construction. It does not schedule work or
+  // serialize an already-created Program scheduler, and keeping it out of the
+  // executor object preserves the stable runtime layout used by incremental
+  // native builds.
+  static std::mutex thread_pool_creation_mutex;
+  std::lock_guard<std::mutex> lock(thread_pool_creation_mutex);
+  if (!thread_pool_) {
+    thread_pool_ =
+        std::make_unique<ThreadPool>(std::max(1, config_.cpu_max_num_threads));
+  }
+  return thread_pool_.get();
+}
+
 DeviceAllocation LlvmRuntimeExecutor::allocate_memory_on_device(
     std::size_t alloc_size,
     uint64 *result_buffer) {
@@ -1255,12 +1274,9 @@ void LlvmRuntimeExecutor::materialize_runtime(KernelProfilerBase *profiler,
   }
 
   if (arch_use_host_memory(config_.arch)) {
-    if (!thread_pool_) {
-      thread_pool_ = std::make_unique<ThreadPool>(
-          std::max(1, config_.cpu_max_num_threads));
-    }
+    auto *const thread_pool = get_cpu_thread_pool();
     runtime_jit->call<void *, void *, void *>(
-        "LLVMRuntime_initialize_thread_pool", llvm_runtime_, thread_pool_.get(),
+        "LLVMRuntime_initialize_thread_pool", llvm_runtime_, thread_pool,
         (void *)ThreadPool::static_run);
 
     runtime_jit->call<void *, void *>("LLVMRuntime_set_assert_failed",
