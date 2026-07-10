@@ -5,6 +5,7 @@
 #include <vk_mem_alloc.h>
 
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <stack>
 #include <unordered_map>
@@ -126,6 +127,7 @@ IVkPipelineLayout create_pipeline_layout(
 // VkPipelineCache
 struct DeviceObjVkPipelineCache : public DeviceObj {
   VkPipelineCache cache{VK_NULL_HANDLE};
+  std::mutex mutex;
   ~DeviceObjVkPipelineCache() override;
 };
 using IVkPipelineCache = std::shared_ptr<DeviceObjVkPipelineCache>;

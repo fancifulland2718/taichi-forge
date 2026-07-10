@@ -314,15 +314,19 @@ class CudaGraphCaptureStream {
 class CudaCurrentStreamGuard {
  public:
   explicit CudaCurrentStreamGuard(void *stream)
-      : old_stream_(CUDAContext::get_instance().get_stream()) {
-    CUDAContext::get_instance().set_stream(stream);
+      : context_(CUDAContext::get_instance()),
+        capture_lock_(context_.get_graph_capture_lock_guard()),
+        old_stream_(context_.get_stream()) {
+    context_.set_stream(stream);
   }
 
   ~CudaCurrentStreamGuard() {
-    CUDAContext::get_instance().set_stream(old_stream_);
+    context_.set_stream(old_stream_);
   }
 
  private:
+  CUDAContext &context_;
+  std::unique_lock<std::mutex> capture_lock_;
   void *old_stream_{nullptr};
 };
 
@@ -545,6 +549,7 @@ void CompiledGraph::jit_run_cached(
     const CompileConfig &compile_config,
     const std::unordered_map<std::string, IValue> &args,
     CompiledGraphJITCache &cache) const {
+  std::lock_guard<std::mutex> lock(cache.run_mutex);
 #if defined(TI_WITH_CUDA)
   if (compile_config.arch == Arch::cuda &&
       try_run_cuda_graph(*this, compile_config, args, cache)) {

@@ -327,6 +327,7 @@ class VulkanPipelineCache : public PipelineCache {
  private:
   VulkanDevice *device_{nullptr};
   vkapi::IVkPipelineCache cache_{nullptr};
+  mutable std::mutex mutex_;
   std::vector<uint8_t> data_shadow_;
 };
 
@@ -416,6 +417,7 @@ class VulkanPipeline : public Pipeline {
   std::vector<VkPipelineShaderStageCreateInfo> shader_stages_;
 
   std::unique_ptr<GraphicsPipelineTemplate> graphics_pipeline_template_;
+  std::mutex graphics_pipeline_mutex_;
   std::unordered_map<vkapi::IVkRenderPass, vkapi::IVkPipeline>
       graphics_pipeline_;
 
@@ -518,6 +520,12 @@ class VulkanCommandList : public CommandList {
   VkDevice device_;
   vkapi::IVkCommandBuffer buffer_;
   VulkanPipeline *current_pipeline_{nullptr};
+
+  struct ProfilerScope {
+    std::string kernel_name;
+    vkapi::IVkQueryPool query_pool;
+  };
+  std::vector<ProfilerScope> profiler_scopes_;
 
   // Renderpass & raster pipeline
   std::vector<vkapi::IVkImage> current_dynamic_targets_;
@@ -829,6 +837,8 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   vkapi::IVkDescriptorSetLayout get_desc_set_layout(VulkanResourceSet &set);
   rhi_impl::RhiReturn<vkapi::IVkDescriptorSet> alloc_desc_set(
       vkapi::IVkDescriptorSetLayout layout);
+  void update_descriptor_sets(
+      const std::vector<VkWriteDescriptorSet> &desc_writes);
 
   constexpr VulkanCapabilities &vk_caps() {
     return vk_caps_;
@@ -847,6 +857,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   }
 
   void set_descriptor_set_cache_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(descriptor_mutex_);
     descriptor_set_cache_enabled_ = enabled;
     if (!enabled) {
       desc_set_cache_.clear();
@@ -855,6 +866,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   }
 
   void set_descriptor_set_cache_options(int capacity, bool lru) {
+    std::lock_guard<std::mutex> lock(descriptor_mutex_);
     desc_set_cache_capacity_ = capacity > 0 ? static_cast<size_t>(capacity)
                                             : size_t{1024};
     if (descriptor_set_cache_lru_ != lru) {
@@ -875,20 +887,23 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   }
 
   bool descriptor_set_cache_enabled() const {
+    std::lock_guard<std::mutex> lock(descriptor_mutex_);
     return descriptor_set_cache_enabled_;
   }
 
   vkapi::IVkDescriptorSet find_cached_desc_set(const VulkanResourceSet &set);
   void cache_desc_set(const VulkanResourceSet &set,
                       vkapi::IVkDescriptorSet desc_set);
-  bool should_touch_desc_set_cache_lru() const;
   size_t descriptor_set_cache_hits() const {
+    std::lock_guard<std::mutex> lock(descriptor_mutex_);
     return desc_set_cache_hits_;
   }
   size_t descriptor_set_cache_misses() const {
+    std::lock_guard<std::mutex> lock(descriptor_mutex_);
     return desc_set_cache_misses_;
   }
   size_t descriptor_set_cache_evictions() const {
+    std::lock_guard<std::mutex> lock(descriptor_mutex_);
     return desc_set_cache_evictions_;
   }
 
@@ -899,14 +914,12 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   // Profiler support
   void profiler_add_sampler(const std::string &kernel_name,
                             vkapi::IVkQueryPool query_pool) {
+    std::lock_guard<std::mutex> lock(profiler_mutex_);
     samplers_.push_back(std::make_pair(kernel_name, query_pool));
   }
 
-  vkapi::IVkQueryPool profiler_get_last_query_pool() {
-    return samplers_.back().second;
-  }
-
   size_t profiler_get_sampler_count() override {
+    std::lock_guard<std::mutex> lock(profiler_mutex_);
     return samplers_.size();
   }
 
@@ -920,7 +933,8 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
 
   std::mutex &get_queue_mutex(VkQueue queue);
   void create_vma_allocator();
-  [[nodiscard]] RhiResult new_descriptor_pool();
+  [[nodiscard]] RhiResult new_descriptor_pool_locked();
+  bool should_touch_desc_set_cache_lru_locked() const;
 
   VulkanCapabilities vk_caps_;
   VkPhysicalDeviceProperties vk_device_properties_;
@@ -982,8 +996,10 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
                 vkapi::IVkRenderPass,
                 RenderPassDescHasher>
       renderpass_pools_;
+  std::mutex renderpass_mutex_;
 
   // Descriptors / Layouts / Pools
+  mutable std::mutex descriptor_mutex_;
   unordered_map<VulkanResourceSet,
                 vkapi::IVkDescriptorSetLayout,
                 VulkanResourceSet::SetLayoutHasher,
@@ -1035,6 +1051,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
                          void **mapped_ptr);
 
   // Profiler support
+  std::mutex profiler_mutex_;
   std::vector<std::pair<std::string, vkapi::IVkQueryPool>> samplers_;
   std::vector<std::pair<std::string, double>> sampled_records_;
 };

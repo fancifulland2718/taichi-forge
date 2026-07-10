@@ -12,6 +12,27 @@
 
 namespace taichi {
 
+namespace {
+
+thread_local ThreadPool *active_thread_pool = nullptr;
+
+class ScopedThreadPoolExecution {
+ public:
+  explicit ScopedThreadPoolExecution(ThreadPool *pool)
+      : previous_pool_(active_thread_pool) {
+    active_thread_pool = pool;
+  }
+
+  ~ScopedThreadPoolExecution() {
+    active_thread_pool = previous_pool_;
+  }
+
+ private:
+  ThreadPool *previous_pool_;
+};
+
+}  // namespace
+
 bool test_threading() {
   auto tp = ThreadPool(20);
   for (int j = 0; j < 100; j++) {
@@ -26,17 +47,21 @@ bool test_threading() {
   return true;
 }
 
-ThreadPool::ThreadPool(int max_num_threads) : max_num_threads(max_num_threads) {
+ThreadPool::ThreadPool(int max_num_threads)
+    : max_num_threads(std::max(1, max_num_threads)) {
   exiting = false;
   started = false;
   running_threads = 0;
-  timestamp = 1;
+  desired_num_threads = 0;
+  timestamp = 0;
   last_finished = 0;
   task_head = 0;
   task_tail = 0;
+  func = nullptr;
+  range_for_task_context = nullptr;
   thread_counter = 0;
-  threads.resize((std::size_t)max_num_threads);
-  for (int i = 0; i < max_num_threads; i++) {
+  threads.resize((std::size_t)this->max_num_threads);
+  for (int i = 0; i < this->max_num_threads; i++) {
     threads[i] = std::thread([this] { this->target(); });
   }
 }
@@ -45,12 +70,29 @@ void ThreadPool::run(int splits,
                      int desired_num_threads,
                      void *range_for_task_context,
                      RangeForTaskFunc *func) {
+  if (splits <= 0) {
+    return;
+  }
+  TI_ASSERT(func != nullptr);
+
+  // A worker must not wait for another shared pool while it owns an outer job:
+  // nested pools can form a lock cycle. Execute nested work on the current
+  // host thread with logical worker 0, which is valid even when the nested
+  // request asks for fewer workers than the outer one.
+  if (active_thread_pool != nullptr) {
+    for (int task_id = 0; task_id < splits; task_id++) {
+      func(range_for_task_context, /*thread_id=*/0, task_id);
+    }
+    return;
+  }
+
+  std::unique_lock<std::mutex> run_lock(run_mutex_);
   {
     std::lock_guard _(mutex);
     this->range_for_task_context = range_for_task_context;
     this->func = func;
-    this->desired_num_threads = std::min(desired_num_threads, max_num_threads);
-    TI_ASSERT(this->desired_num_threads > 0);
+    this->desired_num_threads =
+        std::clamp(desired_num_threads, 1, max_num_threads);
     // TI_P(this->desired_num_threads);
     started = false;
     task_head = 0;
@@ -109,6 +151,7 @@ void ThreadPool::target() {
           break;
       }
 
+      ScopedThreadPoolExecution execution(this);
       func(this->range_for_task_context, thread_id, task_id);
     }
 

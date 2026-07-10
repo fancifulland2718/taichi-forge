@@ -10,7 +10,9 @@
 #include <atomic>
 #include <condition_variable>
 #include <functional>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 namespace taichi {
 
@@ -57,6 +59,12 @@ class ThreadPool {
   void target();
 
   ~ThreadPool();
+
+ private:
+  // `mutex` protects a single job's worker-visible state. Keep the whole
+  // lifecycle of that job exclusive so concurrent callers cannot overwrite
+  // its callback/context while workers are still consuming it.
+  std::mutex run_mutex_;
 };
 
 }  // namespace taichi

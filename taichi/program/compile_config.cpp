@@ -1,5 +1,6 @@
 #include "compile_config.h"
 
+#include <algorithm>
 #include <thread>
 #include "taichi/rhi/arch.h"
 #include "taichi/util/offline_cache.h"
@@ -76,7 +77,8 @@ CompileConfig::CompileConfig() {
 
   saturating_grid_dim = 0;
   max_block_dim = 0;
-  cpu_max_num_threads = std::thread::hardware_concurrency();
+  cpu_max_num_threads =
+      static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
   random_seed = 0;
 
   // LLVM backend options:

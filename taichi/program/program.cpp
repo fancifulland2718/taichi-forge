@@ -615,16 +615,17 @@ struct CpuStridedGroupedReduceIoTaskContext {
   int num_threads{1};
 };
 
-taichi::ThreadPool &get_cpu_primitive_thread_pool(int max_threads) {
+std::shared_ptr<taichi::ThreadPool> get_cpu_primitive_thread_pool(
+    int max_threads) {
   static std::mutex mutex;
-  static std::unique_ptr<taichi::ThreadPool> pool;
+  static std::shared_ptr<taichi::ThreadPool> pool;
   static int pool_threads = 0;
   std::lock_guard<std::mutex> lock(mutex);
   if (!pool || pool_threads < max_threads) {
-    pool = std::make_unique<taichi::ThreadPool>(max_threads);
+    pool = std::make_shared<taichi::ThreadPool>(max_threads);
     pool_threads = max_threads;
   }
-  return *pool;
+  return pool;
 }
 
 bool cpu_use_parallel_simple_loop(std::size_t n, int target_threads) {
@@ -1017,8 +1018,8 @@ void cpu_transform_run_typed(const T *src_ptr,
     ctx.scale = scale;
     ctx.bias = bias;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx, cpu_transform_task<T>);
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx, cpu_transform_task<T>);
     return;
   }
   for (std::size_t i = 0; i < n; ++i) {
@@ -1047,8 +1048,8 @@ void cpu_transform_run_strided_typed(const uint8_t *src_ptr,
     ctx.scale = scale;
     ctx.bias = bias;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_transform_task<T>);
     return;
   }
@@ -1084,8 +1085,8 @@ void cpu_transform_run_strided_to_strided_typed(const uint8_t *src_ptr,
     ctx.scale = scale;
     ctx.bias = bias;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_to_strided_transform_task<T>);
     return;
   }
@@ -1126,8 +1127,8 @@ void cpu_transform_run_packed_strided_to_strided_typed(
     ctx.scale = scale;
     ctx.bias = bias;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_packed_strided_to_strided_transform_task<T>);
     return;
   }
@@ -1237,8 +1238,8 @@ void cpu_add_merge_run_typed(const T *src_ptr,
     ctx.scale = T{};
     ctx.bias = T{};
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx, cpu_add_merge_task<T>);
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx, cpu_add_merge_task<T>);
     return;
   }
   for (std::size_t i = 0; i < n; ++i) {
@@ -1262,8 +1263,8 @@ void cpu_add_scaled_run_typed(const T *src_ptr,
     ctx.scale = scale;
     ctx.bias = T{};
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx, cpu_add_scaled_task<T>);
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx, cpu_add_scaled_task<T>);
     return;
   }
   for (std::size_t i = 0; i < n; ++i) {
@@ -1296,8 +1297,8 @@ void cpu_add_scaled_run_strided_to_strided_typed(
     ctx.scale = scale;
     ctx.bias = T{};
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_to_strided_add_scaled_task<T>);
     return;
   }
@@ -1333,8 +1334,8 @@ void cpu_add_merge_run_strided_to_strided_typed(const uint8_t *src_ptr,
     ctx.scale = T{};
     ctx.bias = T{};
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_to_strided_add_merge_task<T>);
     return;
   }
@@ -1397,8 +1398,8 @@ void cpu_gather_add_run_strided_to_strided_typed(
     ctx.dst_offset = dst_offset;
     ctx.dst_stride = dst_stride;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_gather_add_task<T>);
     return;
   }
@@ -2008,10 +2009,10 @@ std::size_t cpu_scatter_add_typed(const T *src_ptr,
     ctx.n = n;
     ctx.dst_items = dst_items;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_scatter_add_count_task<T>);
-    pool.run(target_threads, target_threads, &ctx,
+    pool->run(target_threads, target_threads, &ctx,
              cpu_scatter_add_merge_task<T>);
     update_cpu_scatter_add_workspace_peak(workspace_bytes);
     return workspace_bytes;
@@ -2053,10 +2054,10 @@ std::size_t cpu_scatter_add_strided_typed(const uint8_t *src_ptr,
     ctx.offset = offset;
     ctx.stride = stride;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_scatter_add_count_task<T>);
-    pool.run(target_threads, target_threads, &ctx,
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_scatter_add_merge_task<T>);
     update_cpu_scatter_add_workspace_peak(workspace_bytes);
     return workspace_bytes;
@@ -2105,10 +2106,10 @@ std::size_t cpu_scatter_add_strided_io_typed(const uint8_t *src_ptr,
     ctx.dst_offset = dst_offset;
     ctx.dst_stride = dst_stride;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_scatter_add_io_count_task<T>);
-    pool.run(target_threads, target_threads, &ctx,
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_scatter_add_io_merge_task<T>);
     update_cpu_scatter_add_workspace_peak(workspace_bytes);
     return workspace_bytes;
@@ -2175,10 +2176,10 @@ std::size_t cpu_scatter_add_packed_strided_io_typed(
     ctx.dst_offset = dst_offset;
     ctx.dst_stride = dst_stride;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_packed_scatter_add_io_count_task<T>);
-    pool.run(target_threads, target_threads, &ctx,
+    pool->run(target_threads, target_threads, &ctx,
              cpu_packed_scatter_add_io_merge_task<T>);
     update_cpu_scatter_add_workspace_peak(workspace_bytes);
     return workspace_bytes;
@@ -2302,8 +2303,8 @@ std::size_t cpu_bucket_builder_typed(const int32_t *keys_ptr,
     count_ctx.n = n;
     count_ctx.num_bins = num_bins;
     count_ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &count_ctx, cpu_bucket_count_task);
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &count_ctx, cpu_bucket_count_task);
 
     std::vector<int32_t> thread_offsets(
         static_cast<std::size_t>(target_threads) * num_bins, 0);
@@ -2331,7 +2332,7 @@ std::size_t cpu_bucket_builder_typed(const int32_t *keys_ptr,
     scatter_ctx.n = n;
     scatter_ctx.num_bins = num_bins;
     scatter_ctx.num_threads = target_threads;
-    pool.run(target_threads, target_threads, &scatter_ctx,
+    pool->run(target_threads, target_threads, &scatter_ctx,
              cpu_bucket_scatter_task<T>);
     return parallel_workspace;
   }
@@ -2397,8 +2398,8 @@ std::size_t cpu_bucket_builder_raw(const int32_t *keys_ptr,
     count_ctx.n = n;
     count_ctx.num_bins = num_bins;
     count_ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &count_ctx, cpu_bucket_count_task);
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &count_ctx, cpu_bucket_count_task);
 
     std::vector<int32_t> thread_offsets(
         static_cast<std::size_t>(target_threads) * num_bins, 0);
@@ -2427,7 +2428,7 @@ std::size_t cpu_bucket_builder_raw(const int32_t *keys_ptr,
     scatter_ctx.num_bins = num_bins;
     scatter_ctx.item_bytes = item_bytes;
     scatter_ctx.num_threads = target_threads;
-    pool.run(target_threads, target_threads, &scatter_ctx,
+    pool->run(target_threads, target_threads, &scatter_ctx,
              cpu_bucket_scatter_raw_task);
     return parallel_workspace;
   }
@@ -2632,10 +2633,10 @@ std::size_t cpu_grouped_reduce_typed(const int32_t *keys_ptr,
     ctx.n = n;
     ctx.num_groups = num_groups;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_grouped_reduce_count_task<T>);
-    pool.run(target_threads, target_threads, &ctx,
+    pool->run(target_threads, target_threads, &ctx,
              cpu_grouped_reduce_merge_task<T>);
     update_cpu_grouped_reduce_workspace_peak(workspace_bytes);
     return workspace_bytes;
@@ -2683,10 +2684,10 @@ std::size_t cpu_grouped_reduce_strided_typed(const int32_t *keys_ptr,
     ctx.offset = offset;
     ctx.stride = stride;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_grouped_reduce_count_task<T>);
-    pool.run(target_threads, target_threads, &ctx,
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_grouped_reduce_merge_task<T>);
     update_cpu_grouped_reduce_workspace_peak(workspace_bytes);
     return workspace_bytes;
@@ -2748,10 +2749,10 @@ std::size_t cpu_grouped_reduce_strided_io_typed(const uint8_t *keys_ptr,
     ctx.output_offset = output_offset;
     ctx.output_stride = output_stride;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_grouped_reduce_io_count_task<T>);
-    pool.run(target_threads, target_threads, &ctx,
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_grouped_reduce_io_merge_task<T>);
     update_cpu_grouped_reduce_workspace_peak(workspace_bytes);
     return workspace_bytes;
@@ -2843,8 +2844,8 @@ std::size_t cpu_compact_dense_field_typed(const uint8_t *values_ptr,
     count_ctx.counts = offsets.data();
     count_ctx.n = n;
     count_ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &count_ctx, cpu_compact_count_task);
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &count_ctx, cpu_compact_count_task);
     std::size_t running = 0;
     for (int tid = 0; tid < target_threads; ++tid) {
       const std::size_t count = offsets[tid];
@@ -2862,7 +2863,7 @@ std::size_t cpu_compact_dense_field_typed(const uint8_t *values_ptr,
     scatter_ctx.offsets = offsets.data();
     scatter_ctx.n = n;
     scatter_ctx.num_threads = target_threads;
-    pool.run(target_threads, target_threads, &scatter_ctx,
+    pool->run(target_threads, target_threads, &scatter_ctx,
              cpu_compact_scatter_task<T>);
     if (workspace_bytes) {
       *workspace_bytes = offsets.size() * sizeof(std::size_t);
@@ -3385,8 +3386,8 @@ std::size_t cpu_histogram_typed(const ValueT *values_ptr,
     ctx.n = n;
     ctx.num_bins = num_bins;
     ctx.num_threads = num_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(num_threads, num_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(num_threads, num_threads, &ctx,
              cpu_histogram_task<ValueT, CounterT>);
     for (std::size_t bin = 0; bin < num_bins; ++bin) {
       CounterT total{};
@@ -3454,8 +3455,8 @@ std::size_t cpu_reduce_typed(const T *values_ptr,
     ctx.n = n;
     ctx.num_threads = num_threads;
     ctx.op = op;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(num_threads, num_threads, &ctx, cpu_reduce_task<T>);
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(num_threads, num_threads, &ctx, cpu_reduce_task<T>);
     for (int tid = 0; tid < num_threads; ++tid) {
       result = cpu_reduce_combine(result, partial[tid], op);
     }
@@ -3499,8 +3500,8 @@ std::size_t cpu_reduce_strided_typed(const uint8_t *values_ptr,
     ctx.stride = stride;
     ctx.num_threads = num_threads;
     ctx.op = op;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(num_threads, num_threads, &ctx, cpu_strided_reduce_task<T>);
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(num_threads, num_threads, &ctx, cpu_strided_reduce_task<T>);
     for (int tid = 0; tid < num_threads; ++tid) {
       result = cpu_reduce_combine(result, partial[tid], op);
     }
@@ -3612,8 +3613,8 @@ std::size_t cpu_check_count_typed(const T *values_ptr,
     ctx.lower = lower;
     ctx.upper = upper;
     ctx.num_threads = num_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(num_threads, num_threads, &ctx, cpu_check_count_task<T>);
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(num_threads, num_threads, &ctx, cpu_check_count_task<T>);
     int32_t total = 0;
     for (int32_t value : partial) {
       total += value;
@@ -3697,8 +3698,8 @@ std::size_t cpu_check_count_strided_typed(const uint8_t *values_ptr,
     ctx.lower = lower;
     ctx.upper = upper;
     ctx.num_threads = num_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(num_threads, num_threads, &ctx, cpu_strided_check_count_task<T>);
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(num_threads, num_threads, &ctx, cpu_strided_check_count_task<T>);
     int32_t total = 0;
     for (int32_t value : partial) {
       total += value;
@@ -3793,8 +3794,8 @@ std::size_t cpu_metric_reduce_typed(const T *values_ptr,
     ctx.n = n;
     ctx.metric_op = metric_op;
     ctx.num_threads = num_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(num_threads, num_threads, &ctx, cpu_metric_reduce_task<T>);
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(num_threads, num_threads, &ctx, cpu_metric_reduce_task<T>);
     T result{};
     for (T value : partial) {
       result = std::max(result, value);
@@ -3913,8 +3914,8 @@ std::size_t cpu_metric_reduce_strided_typed(const uint8_t *values_ptr,
     ctx.other_stride = other_stride;
     ctx.metric_op = metric_op;
     ctx.num_threads = num_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(num_threads, num_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(num_threads, num_threads, &ctx,
              cpu_strided_metric_reduce_task<T>);
     T result{};
     for (T value : partial) {
@@ -4966,8 +4967,8 @@ void Program::fill_ndarray_fast_u32(Ndarray *ndarray, uint32_t val) {
       ctx.words = words;
       ctx.value = val;
       ctx.num_threads = target_threads;
-      auto &pool = get_cpu_primitive_thread_pool(max_threads);
-      pool.run(target_threads, target_threads, &ctx, cpu_fill_u32_task);
+      auto pool = get_cpu_primitive_thread_pool(max_threads);
+      pool->run(target_threads, target_threads, &ctx, cpu_fill_u32_task);
       return;
     }
     std::fill(ptr, ptr + words, val);
@@ -5023,8 +5024,8 @@ void Program::copy_ndarray_fast(Ndarray *dst, Ndarray *src) {
       ctx.src = src_ptr;
       ctx.bytes = dst_bytes;
       ctx.num_threads = target_threads;
-      auto &pool = get_cpu_primitive_thread_pool(max_threads);
-      pool.run(target_threads, target_threads, &ctx, cpu_copy_task);
+      auto pool = get_cpu_primitive_thread_pool(max_threads);
+      pool->run(target_threads, target_threads, &ctx, cpu_copy_task);
       return;
     }
     std::memcpy(dst_ptr, src_ptr, dst_bytes);
@@ -9619,8 +9620,8 @@ void cpu_fill_dense_field_typed(uint8_t *dst_ptr,
     ctx.value = value;
     ctx.n = n;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_dense_field_fill_task<T>);
     return;
   }
@@ -10125,8 +10126,8 @@ void Program::copy_dense_field(SNode *dst,
       ctx.src = src_ptr;
       ctx.bytes = bytes;
       ctx.num_threads = target_threads;
-      auto &pool = get_cpu_primitive_thread_pool(max_threads);
-      pool.run(target_threads, target_threads, &ctx, cpu_copy_task);
+      auto pool = get_cpu_primitive_thread_pool(max_threads);
+      pool->run(target_threads, target_threads, &ctx, cpu_copy_task);
       return;
     }
     std::memcpy(dst_ptr, src_ptr, bytes);
@@ -10146,8 +10147,8 @@ void Program::copy_dense_field(SNode *dst,
     ctx.src_stride = src_stride;
     ctx.n = n;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx, cpu_dense_field_copy_task);
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx, cpu_dense_field_copy_task);
     return;
   }
   for (std::size_t i = 0; i < n; ++i) {
@@ -10220,8 +10221,8 @@ void Program::copy_dense_field_packed(SNode *dst,
     ctx.src = src_ptr;
     ctx.bytes = bytes;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx, cpu_copy_task);
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx, cpu_copy_task);
     return;
   }
   std::memcpy(dst_ptr, src_ptr, bytes);
@@ -13088,8 +13089,8 @@ std::size_t Program::cpu_gather_ndarray(Ndarray *src,
     ctx.item_bytes = item_bytes;
     ctx.scatter = false;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx, cpu_indexed_copy_task);
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx, cpu_indexed_copy_task);
     return 0;
   }
   for (std::size_t i = 0; i < n; ++i) {
@@ -13149,8 +13150,8 @@ std::size_t Program::cpu_gather_strided_ndarray(Ndarray *src,
     ctx.dst_stride = dst_stride;
     ctx.scatter = false;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_indexed_copy_task);
     return 0;
   }
@@ -13214,8 +13215,8 @@ std::size_t Program::cpu_gather_dense_field(SNode *src,
     ctx.dst_stride = dst_stride;
     ctx.scatter = false;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_indexed_copy_task);
     return 0;
   }
@@ -13284,8 +13285,8 @@ std::size_t Program::cpu_gather_dense_field_packed(SNode *src,
     ctx.dst_stride = item_bytes;
     ctx.scatter = false;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_indexed_copy_task);
     return 0;
   }
@@ -13361,8 +13362,8 @@ std::size_t Program::cpu_gather_dense_field_packed_indices_field(
     ctx.dst_stride = item_bytes;
     ctx.scatter = false;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_indexed_copy_task);
     return 0;
   }
@@ -13436,8 +13437,8 @@ std::size_t Program::cpu_gather_dense_field_indices_field(
     ctx.dst_stride = dst_stride;
     ctx.scatter = false;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_indexed_copy_task);
     return 0;
   }
@@ -13681,8 +13682,8 @@ std::size_t Program::cpu_scatter_ndarray(Ndarray *src,
     ctx.item_bytes = item_bytes;
     ctx.scatter = true;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx, cpu_indexed_copy_task);
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx, cpu_indexed_copy_task);
     return 0;
   }
   for (std::size_t i = 0; i < n; ++i) {
@@ -13738,8 +13739,8 @@ std::size_t Program::cpu_scatter_strided_ndarray(Ndarray *src,
     ctx.dst_stride = dst_stride;
     ctx.scatter = true;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_indexed_copy_task);
     return 0;
   }
@@ -13801,8 +13802,8 @@ std::size_t Program::cpu_scatter_dense_field(SNode *src,
     ctx.dst_stride = dst_stride;
     ctx.scatter = true;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_indexed_copy_task);
     return 0;
   }
@@ -13869,8 +13870,8 @@ std::size_t Program::cpu_scatter_dense_field_packed(SNode *src,
     ctx.dst_stride = item_bytes;
     ctx.scatter = true;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_indexed_copy_task);
     return 0;
   }
@@ -13944,8 +13945,8 @@ std::size_t Program::cpu_scatter_dense_field_packed_indices_field(
     ctx.dst_stride = item_bytes;
     ctx.scatter = true;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_indexed_copy_task);
     return 0;
   }
@@ -14017,8 +14018,8 @@ std::size_t Program::cpu_scatter_dense_field_indices_field(
     ctx.dst_stride = dst_stride;
     ctx.scatter = true;
     ctx.num_threads = target_threads;
-    auto &pool = get_cpu_primitive_thread_pool(max_threads);
-    pool.run(target_threads, target_threads, &ctx,
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx,
              cpu_strided_indexed_copy_task);
     return 0;
   }

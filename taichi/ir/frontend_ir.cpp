@@ -5,6 +5,7 @@
 #include "taichi/program/program.h"
 #include "taichi/common/exceptions.h"
 
+#include <algorithm>
 #include <numeric>
 
 namespace taichi::lang {
@@ -132,7 +133,8 @@ void FrontendForStmt::init_config(Arch arch, const ForLoopConfig &config) {
     TI_ASSERT(block_dim <= taichi_max_gpu_block_dim);
   } else {  // cpu
     if (config.num_cpu_threads == 0) {
-      num_cpu_threads = std::thread::hardware_concurrency();
+      num_cpu_threads =
+          static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
     } else {
       num_cpu_threads = config.num_cpu_threads;
     }

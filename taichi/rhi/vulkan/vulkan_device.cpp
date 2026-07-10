@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <list>
 #include <set>
@@ -158,9 +159,12 @@ VulkanPipelineCache ::~VulkanPipelineCache() {
 }
 
 void *VulkanPipelineCache::data() noexcept {
+  std::lock_guard<std::mutex> data_lock(mutex_);
   if (!cache_) {
     return nullptr;
   }
+
+  std::lock_guard<std::mutex> cache_lock(cache_->mutex);
 
   try {
     constexpr int kMaxSnapshotAttempts = 3;
@@ -212,6 +216,7 @@ void *VulkanPipelineCache::data() noexcept {
 }
 
 size_t VulkanPipelineCache::size() const noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
   return data_shadow_.size();
 }
 
@@ -274,6 +279,7 @@ VkShaderModule VulkanPipeline::create_shader_module(VkDevice device,
 vkapi::IVkPipeline VulkanPipeline::graphics_pipeline(
     const VulkanRenderPassDesc &renderpass_desc,
     vkapi::IVkRenderPass renderpass) {
+  std::lock_guard<std::mutex> lock(graphics_pipeline_mutex_);
   if (graphics_pipeline_.find(renderpass) != graphics_pipeline_.end()) {
     return graphics_pipeline_.at(renderpass);
   }
@@ -289,6 +295,7 @@ vkapi::IVkPipeline VulkanPipeline::graphics_pipeline(
 
 vkapi::IVkPipeline VulkanPipeline::graphics_pipeline_dynamic(
     const VulkanRenderPassDesc &renderpass_desc) {
+  std::lock_guard<std::mutex> lock(graphics_pipeline_mutex_);
   if (graphics_pipeline_dynamic_.find(renderpass_desc) !=
       graphics_pipeline_dynamic_.end()) {
     return graphics_pipeline_dynamic_.at(renderpass_desc);
@@ -905,9 +912,7 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize() {
     }
   }
 
-  vkUpdateDescriptorSets(device_->vk_device(), desc_writes.size(),
-                         desc_writes.data(), /*descriptorCopyCount=*/0,
-                         /*pDescriptorCopies=*/nullptr);
+  device_->update_descriptor_sets(desc_writes);
 
   dirty_ = false;
   if (device_->descriptor_set_cache_enabled()) {
@@ -1701,8 +1706,11 @@ void VulkanDevice::init_vulkan_structs(Params &params) {
   graphics_queue_family_index_ = params.graphics_queue_family_index;
 
   create_vma_allocator();
-  RHI_ASSERT(new_descriptor_pool() == RhiResult::success &&
-             "Failed to allocate initial descriptor pool");
+  {
+    std::lock_guard<std::mutex> lock(descriptor_mutex_);
+    RHI_ASSERT(new_descriptor_pool_locked() == RhiResult::success &&
+               "Failed to allocate initial descriptor pool");
+  }
 
   vkGetPhysicalDeviceProperties(physical_device_, &vk_device_properties_);
 }
@@ -2201,17 +2209,31 @@ void VulkanCommandList::begin_profiler_scope(const std::string &kernel_name) {
   vkCmdResetQueryPool(buffer_->buffer, pool->query_pool, 0, 2);
   vkCmdWriteTimestamp(buffer_->buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                       pool->query_pool, 0);
-  ti_device_->profiler_add_sampler(kernel_name, pool);
+  profiler_scopes_.push_back({kernel_name, pool});
 }
 
 void VulkanCommandList::end_profiler_scope() {
-  auto pool = ti_device_->profiler_get_last_query_pool();
+  RHI_ASSERT(!profiler_scopes_.empty() &&
+             "Profiler scope ended without a matching begin");
+  auto scope = std::move(profiler_scopes_.back());
+  profiler_scopes_.pop_back();
+  auto pool = scope.query_pool;
   vkCmdWriteTimestamp(buffer_->buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                       pool->query_pool, 1);
+  buffer_->refs.push_back(pool);
+  ti_device_->profiler_add_sampler(scope.kernel_name, pool);
 }
 
 void VulkanDevice::profiler_sync() {
-  for (auto &sampler : samplers_) {
+  std::vector<std::pair<std::string, vkapi::IVkQueryPool>> samplers;
+  {
+    std::lock_guard<std::mutex> lock(profiler_mutex_);
+    samplers.swap(samplers_);
+  }
+
+  std::vector<std::pair<std::string, double>> records;
+  records.reserve(samplers.size());
+  for (auto &sampler : samplers) {
     auto kernel_name = sampler.first;
     auto query_pool = sampler.second->query_pool;
 
@@ -2223,16 +2245,24 @@ void VulkanDevice::profiler_sync() {
                           VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
     duration_ms = (t[1] - t[0]) * vk_device_properties_.limits.timestampPeriod /
                   1000000.0;
-    sampled_records_.push_back(std::make_pair(kernel_name, duration_ms));
+    records.push_back(std::make_pair(kernel_name, duration_ms));
   }
-  samplers_.clear();
+  {
+    std::lock_guard<std::mutex> lock(profiler_mutex_);
+    sampled_records_.insert(sampled_records_.end(),
+                            std::make_move_iterator(records.begin()),
+                            std::make_move_iterator(records.end()));
+  }
 }
 
 std::vector<std::pair<std::string, double>>
 VulkanDevice::profiler_flush_sampled_time() {
-  auto records_ = sampled_records_;
-  sampled_records_.clear();
-  return records_;
+  std::vector<std::pair<std::string, double>> records;
+  {
+    std::lock_guard<std::mutex> lock(profiler_mutex_);
+    records.swap(sampled_records_);
+  }
+  return records;
 }
 
 Stream *VulkanDevice::get_graphics_stream() {
@@ -2493,6 +2523,7 @@ vkapi::IVkFramebuffer VulkanDevice::get_framebuffer(
 }
 
 vkapi::IVkSampler VulkanDevice::get_default_sampler() {
+  std::lock_guard<std::mutex> lock(descriptor_mutex_);
   if (!default_sampler_) {
     VkSamplerCreateInfo sampler_info{};
     sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -2702,6 +2733,7 @@ void VulkanDevice::destroy_image(DeviceAllocation handle) {
 
 vkapi::IVkRenderPass VulkanDevice::get_renderpass(
     const VulkanRenderPassDesc &desc) {
+  std::lock_guard<std::mutex> lock(renderpass_mutex_);
   if (renderpass_pools_.find(desc) != renderpass_pools_.end()) {
     return renderpass_pools_.at(desc);
   }
@@ -2785,6 +2817,7 @@ vkapi::IVkRenderPass VulkanDevice::get_renderpass(
 
 vkapi::IVkDescriptorSetLayout VulkanDevice::get_desc_set_layout(
     VulkanResourceSet &set) {
+  std::lock_guard<std::mutex> lock(descriptor_mutex_);
   auto it = desc_set_layouts_.find(set);
   if (it != desc_set_layouts_.end()) {
     return it->second;
@@ -2812,6 +2845,7 @@ vkapi::IVkDescriptorSetLayout VulkanDevice::get_desc_set_layout(
 
 vkapi::IVkDescriptorSet VulkanDevice::find_cached_desc_set(
     const VulkanResourceSet &set) {
+  std::lock_guard<std::mutex> lock(descriptor_mutex_);
   if (!descriptor_set_cache_enabled_) {
     return nullptr;
   }
@@ -2821,7 +2855,7 @@ vkapi::IVkDescriptorSet VulkanDevice::find_cached_desc_set(
     return nullptr;
   }
   ++desc_set_cache_hits_;
-  if (should_touch_desc_set_cache_lru()) {
+  if (should_touch_desc_set_cache_lru_locked()) {
     auto &entry = it->second;
     if (entry.has_lru_entry) {
       desc_set_cache_lru_.splice(desc_set_cache_lru_.end(),
@@ -2837,13 +2871,14 @@ vkapi::IVkDescriptorSet VulkanDevice::find_cached_desc_set(
 
 void VulkanDevice::cache_desc_set(const VulkanResourceSet &set,
                                   vkapi::IVkDescriptorSet desc_set) {
+  std::lock_guard<std::mutex> lock(descriptor_mutex_);
   if (!descriptor_set_cache_enabled_ || !desc_set) {
     return;
   }
   auto existing = desc_set_cache_.find(set);
   if (existing != desc_set_cache_.end()) {
     existing->second.set = desc_set;
-    if (should_touch_desc_set_cache_lru()) {
+    if (should_touch_desc_set_cache_lru_locked()) {
       auto &entry = existing->second;
       if (entry.has_lru_entry) {
         desc_set_cache_lru_.splice(desc_set_cache_lru_.end(),
@@ -2886,7 +2921,7 @@ void VulkanDevice::cache_desc_set(const VulkanResourceSet &set,
   }
 }
 
-bool VulkanDevice::should_touch_desc_set_cache_lru() const {
+bool VulkanDevice::should_touch_desc_set_cache_lru_locked() const {
   if (!descriptor_set_cache_lru_) {
     return false;
   }
@@ -2897,12 +2932,13 @@ bool VulkanDevice::should_touch_desc_set_cache_lru() const {
 
 RhiReturn<vkapi::IVkDescriptorSet> VulkanDevice::alloc_desc_set(
     vkapi::IVkDescriptorSetLayout layout) {
+  std::lock_guard<std::mutex> lock(descriptor_mutex_);
   // This returns nullptr if can't allocate (OOM or pool is full)
   vkapi::IVkDescriptorSet set =
       vkapi::allocate_descriptor_sets(desc_pool_, layout);
 
   if (set == nullptr) {
-    RhiResult status = new_descriptor_pool();
+    RhiResult status = new_descriptor_pool_locked();
     // Allocating new descriptor pool failed
     if (status != RhiResult::success) {
       return {status, nullptr};
@@ -2911,6 +2947,14 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanDevice::alloc_desc_set(
   }
 
   return {RhiResult::success, set};
+}
+
+void VulkanDevice::update_descriptor_sets(
+    const std::vector<VkWriteDescriptorSet> &desc_writes) {
+  std::lock_guard<std::mutex> lock(descriptor_mutex_);
+  vkUpdateDescriptorSets(device_, desc_writes.size(), desc_writes.data(),
+                         /*descriptorCopyCount=*/0,
+                         /*pDescriptorCopies=*/nullptr);
 }
 
 void VulkanDevice::create_vma_allocator() {
@@ -3001,7 +3045,7 @@ void VulkanDevice::create_vma_allocator() {
   vmaCreateAllocator(&allocatorInfo, &allocator_export_);
 }
 
-RhiResult VulkanDevice::new_descriptor_pool() {
+RhiResult VulkanDevice::new_descriptor_pool_locked() {
   std::vector<VkDescriptorPoolSize> pool_sizes{
       {VK_DESCRIPTOR_TYPE_SAMPLER, 64},
       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 256},

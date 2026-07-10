@@ -324,6 +324,10 @@ IVkPipeline create_compute_pipeline(VkDevice device,
     info.basePipelineIndex = 0;
   }
 
+  std::unique_lock<std::mutex> cache_lock;
+  if (cache) {
+    cache_lock = std::unique_lock<std::mutex>(cache->mutex);
+  }
   VkResult res =
       vkCreateComputePipelines(device, cache ? cache->cache : VK_NULL_HANDLE, 1,
                                &info, nullptr, &obj->pipeline);
@@ -356,6 +360,10 @@ IVkPipeline create_graphics_pipeline(VkDevice device,
     create_info->basePipelineIndex = 0;
   }
 
+  std::unique_lock<std::mutex> cache_lock;
+  if (cache) {
+    cache_lock = std::unique_lock<std::mutex>(cache->mutex);
+  }
   VkResult res =
       vkCreateGraphicsPipelines(device, cache ? cache->cache : VK_NULL_HANDLE,
                                 1, create_info, nullptr, &obj->pipeline);
@@ -388,6 +396,10 @@ IVkPipeline create_graphics_pipeline_dynamic(
     create_info->basePipelineIndex = 0;
   }
 
+  std::unique_lock<std::mutex> cache_lock;
+  if (cache) {
+    cache_lock = std::unique_lock<std::mutex>(cache->mutex);
+  }
   VkResult res =
       vkCreateGraphicsPipelines(device, cache ? cache->cache : VK_NULL_HANDLE,
                                 1, create_info, nullptr, &obj->pipeline);
@@ -425,6 +437,10 @@ IVkPipeline create_raytracing_pipeline(
           taichi::lang::vulkan::VulkanLoader::instance().get_instance(),
           "vkCreateRayTracingPipelinesKHR"));
 
+  std::unique_lock<std::mutex> cache_lock;
+  if (cache) {
+    cache_lock = std::unique_lock<std::mutex>(cache->mutex);
+  }
   VkResult res = create_raytracing_pipeline_khr(
       device, deferredOperation, cache ? cache->cache : VK_NULL_HANDLE, 1,
       create_info, nullptr, &obj->pipeline);

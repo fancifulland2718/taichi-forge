@@ -118,3 +118,49 @@ if(LINUX)
     target_link_options(${TESTS_NAME} PUBLIC -static-libgcc -static-libstdc++)
 endif()
 add_test(NAME ${TESTS_NAME} COMMAND ${TESTS_NAME})
+
+# Keep the concurrency-sensitive backend regression cases independently
+# runnable.  The main C++ test executable also includes LLVM-only tests, which
+# may be unavailable in a lightweight backend runtime build.
+if (TI_WITH_VULKAN AND TI_WITH_CUDA)
+  set(TAICHI_BACKEND_SAFETY_TESTS_NAME taichi_backend_safety_tests)
+  add_executable(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
+    tests/cpp/common/threading_test.cpp
+    tests/cpp/rhi/common/cuda_context_test.cpp
+    tests/cpp/aot/gfx_utils.cpp
+    tests/cpp/aot/vulkan/device_test.cpp)
+  target_link_libraries(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
+    PRIVATE
+      taichi_core
+      taichi_common
+      gtest_main
+      gfx_runtime
+      cuda_rhi
+      vulkan_rhi)
+  target_include_directories(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
+    PRIVATE
+      ${PROJECT_SOURCE_DIR}
+      ${PROJECT_SOURCE_DIR}/external/spdlog/include
+      ${PROJECT_SOURCE_DIR}/external/include
+      ${PROJECT_SOURCE_DIR}/external/eigen
+      ${PROJECT_SOURCE_DIR}/external/volk
+      ${PROJECT_SOURCE_DIR}/external/glad/include
+      ${PROJECT_SOURCE_DIR}/external/SPIRV-Tools/include
+      ${PROJECT_SOURCE_DIR}/external/Vulkan-Headers/include)
+  target_include_directories(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
+    SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/external/VulkanMemoryAllocator/include)
+  if (NOT ANDROID)
+    target_include_directories(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
+      PRIVATE external/glfw/include)
+  endif()
+  if (WIN32)
+    set_target_properties(${TAICHI_BACKEND_SAFETY_TESTS_NAME} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${TESTS_OUTPUT_DIR}"
+      RUNTIME_OUTPUT_DIRECTORY_DEBUG "${TESTS_OUTPUT_DIR}"
+      RUNTIME_OUTPUT_DIRECTORY_RELEASE "${TESTS_OUTPUT_DIR}"
+      RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${TESTS_OUTPUT_DIR}"
+      RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${TESTS_OUTPUT_DIR}")
+  endif()
+  add_test(NAME ${TAICHI_BACKEND_SAFETY_TESTS_NAME}
+           COMMAND ${TAICHI_BACKEND_SAFETY_TESTS_NAME})
+endif()

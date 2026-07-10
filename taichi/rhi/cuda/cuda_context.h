@@ -25,12 +25,16 @@ class CUDAContext {
   int compute_capability_;
   std::string mcpu_;
   std::mutex lock_;
+  std::mutex graph_capture_mutex_;
   KernelProfilerBase *profiler_;
   CUDADriver &driver_;
   int max_shared_memory_bytes_;
   bool debug_{false};
   bool supports_mem_pool_{false};
-  void *stream_;
+  // A graph capture redirects launches only on the capturing host thread.
+  // Keeping this process-wide state would send unrelated CUDA/CUB work from
+  // other Python threads into the capture stream.
+  static thread_local void *stream_;
 
  public:
   CUDAContext();
@@ -107,6 +111,10 @@ class CUDAContext {
 
   std::unique_lock<std::mutex> get_lock_guard() {
     return std::unique_lock<std::mutex>(lock_);
+  }
+
+  std::unique_lock<std::mutex> get_graph_capture_lock_guard() {
+    return std::unique_lock<std::mutex>(graph_capture_mutex_);
   }
 
   static CUDAContext &get_instance();
