@@ -157,9 +157,11 @@ class CudaDevice : public LlvmDevice {
 
   DeviceAllocation import_memory(void *ptr, size_t size) override;
 
-  void *get_memory_addr(DeviceAllocation devalloc) override {
-    return get_alloc_info(devalloc).ptr;
-  }
+  // Runtime shutdown probes allocations that may already have been retired by
+  // a Program-owned Ndarray. A raw-address query has no error return channel,
+  // so a stale/wrong-device allocation is represented as nullptr rather than
+  // turning normal reset cleanup into a fatal error.
+  void *get_memory_addr(DeviceAllocation devalloc) override;
 
   std::size_t get_total_memory() override {
     return CUDAContext::get_instance().get_total_memory();

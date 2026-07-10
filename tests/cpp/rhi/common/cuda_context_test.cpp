@@ -174,4 +174,20 @@ TEST(CUDADevice, RuntimeAsyncAllocationUsesItsAllocationStream) {
   CUDADriver::get_instance().stream_synchronize(nullptr);
 }
 
+TEST(CUDADevice, RuntimeAddressQueryTreatsRetiredAllocationAsNull) {
+  if (!CUDADriver::get_instance_without_context().detected()) {
+    GTEST_SKIP();
+  }
+
+  cuda::CudaDevice device;
+  LlvmDevice::LlvmRuntimeAllocParams params;
+  params.size = 256;
+  params.use_memory_pool = true;
+  DeviceAllocation allocation = device.allocate_memory_runtime(params);
+  ASSERT_NE(device.get_memory_addr(allocation), nullptr);
+  device.dealloc_memory(allocation);
+  EXPECT_EQ(device.get_memory_addr(allocation), nullptr);
+  CUDADriver::get_instance().stream_synchronize(nullptr);
+}
+
 }  // namespace taichi::lang

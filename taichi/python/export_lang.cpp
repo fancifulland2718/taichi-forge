@@ -2375,6 +2375,13 @@ void export_lang(py::module &m) {
             TI_NOT_IMPLEMENTED;
           }
         }
+        // Argument conversion above touches Python objects and must keep the
+        // GIL. Once it is complete, graph execution is entirely native. In
+        // particular, releasing the GIL here lets independent Python callers
+        // reach CompiledGraphJITCache::run_mutex instead of being accidentally
+        // serialized by Python. The cache owns the C++ transaction boundary;
+        // Python objects passed in pyargs remain alive for this call.
+        py::gil_scoped_release release;
         if (cache) {
           self->jit_run_cached(compile_config, args, *cache);
         } else {

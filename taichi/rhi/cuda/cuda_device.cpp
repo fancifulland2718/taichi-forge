@@ -84,6 +84,17 @@ CudaDevice::AllocInfo CudaDevice::get_alloc_info(
   return lease->info();
 }
 
+void *CudaDevice::get_memory_addr(DeviceAllocation handle) {
+  if (handle.device != this) {
+    return nullptr;
+  }
+  auto [result, lease] = allocations_.acquire(handle.alloc_id);
+  if (result != RhiResult::success) {
+    return nullptr;
+  }
+  return lease->ptr;
+}
+
 RhiResult CudaDevice::allocate_memory(const AllocParams &params,
                                       DeviceAllocation *out_devalloc) {
   if (out_devalloc == nullptr) {
