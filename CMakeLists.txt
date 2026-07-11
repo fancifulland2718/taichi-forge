@@ -146,11 +146,6 @@ endif()
 message("C++ Flags: ${CMAKE_CXX_FLAGS}")
 message("Build type: ${CMAKE_BUILD_TYPE}")
 
-if (NOT TI_WITH_CUDA)
-    set(CUDA_VERSION "0.0")
-    set(CUDA_TOOLKIT_ROOT_DIR "")
-endif()
-
 if (TI_WITH_CUDA)
     set(CUDA_ARCH "cuda")
 endif()

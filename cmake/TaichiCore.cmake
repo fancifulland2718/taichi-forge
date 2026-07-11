@@ -164,10 +164,29 @@ if(TI_WITH_LLVM)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DTI_WITH_LLVM")
 endif()
 
-## This version var is only used to locate slim_libdevice.10.bc
-if(NOT CUDA_VERSION)
-    set(CUDA_VERSION 10.0)
+# The CUDA driver and toolkit version are independent from the slim libdevice
+# bitcode shipped by this package. Derive the latter from the actual asset so a
+# repackaged wheel cannot silently advertise or look up a hardcoded version.
+file(GLOB _ti_cuda_libdevice_files
+    RELATIVE "${CMAKE_SOURCE_DIR}/external/cuda_libdevice"
+    "${CMAKE_SOURCE_DIR}/external/cuda_libdevice/slim_libdevice.*.bc")
+list(LENGTH _ti_cuda_libdevice_files _ti_cuda_libdevice_count)
+if(NOT _ti_cuda_libdevice_count EQUAL 1)
+    message(FATAL_ERROR
+        "Expected exactly one slim_libdevice.<major>.bc asset, found: "
+        "${_ti_cuda_libdevice_files}")
 endif()
+list(GET _ti_cuda_libdevice_files 0 _ti_cuda_libdevice_filename)
+string(REGEX MATCH "^slim_libdevice\\.([0-9]+)\\.bc$"
+    _ti_cuda_libdevice_match "${_ti_cuda_libdevice_filename}")
+if(NOT _ti_cuda_libdevice_match)
+    message(FATAL_ERROR
+        "Unsupported slim libdevice filename: ${_ti_cuda_libdevice_filename}")
+endif()
+set(TI_CUDA_LIBDEVICE_MAJOR "${CMAKE_MATCH_1}")
+# Retain the historical public string format while deriving it solely from the
+# bundled major-versioned asset.
+set(TI_CUDA_LIBDEVICE_VERSION "${TI_CUDA_LIBDEVICE_MAJOR}.0")
 
 if (TI_WITH_CUDA)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DTI_WITH_CUDA")
@@ -1088,7 +1107,7 @@ if(TI_WITH_PYTHON)
 endif()
 
 if (NOT APPLE)
-    install(FILES ${CMAKE_SOURCE_DIR}/external/cuda_libdevice/slim_libdevice.10.bc
+    install(FILES ${CMAKE_SOURCE_DIR}/external/cuda_libdevice/${_ti_cuda_libdevice_filename}
             DESTINATION ${INSTALL_LIB_DIR}/runtime
             COMPONENT runtime)
 endif()

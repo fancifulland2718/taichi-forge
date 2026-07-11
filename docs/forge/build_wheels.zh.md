@@ -70,6 +70,18 @@ TI_SKIP_VERSION_CHECK=ON
 TI_CI=1
 ```
 
+## 随附 libdevice 的兼容版本
+
+native runtime 会打包唯一一个 `slim_libdevice.<major>.bc` 兼容 asset。构建配置阶段会发现
+该文件名，安装同一个文件，并从其主版本推导内部字符串
+`TI_CUDA_LIBDEVICE_VERSION`。这样重新打包 runtime wheel 时，版本信息与实际 asset
+始终一致，同时不把它绑定到构建时的 CUDA Toolkit，也不绑定到最终用户机器上的 GPU driver
+版本。
+
+`taichi_forge._lib.core.cuda_version()` 保留历史字符串返回形式，但其含义是随附 libdevice
+asset 的兼容版本，不是 driver 或 Toolkit 版本探测。发布验证应确认构建出的 runtime wheel
+恰好包含一个这样的 asset，且安装后它的主版本与该查询值一致。
+
 ## Native 方法的 CUDA Toolkit 要求
 
 Forge 的 CUDA native primitive 方法在平台 runtime wheel 中构建。当前发布 workflow 对

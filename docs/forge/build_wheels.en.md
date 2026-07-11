@@ -78,6 +78,21 @@ TI_SKIP_VERSION_CHECK=ON
 TI_CI=1
 ```
 
+## Bundled libdevice compatibility version
+
+The native runtime packages exactly one
+`slim_libdevice.<major>.bc` compatibility asset. At configure time, the build
+discovers that filename, installs the same file, and derives the internal
+`TI_CUDA_LIBDEVICE_VERSION` string from its major version. This keeps a
+repackaged runtime wheel internally consistent without tying it to the CUDA
+Toolkit used to build it or to the GPU driver's version on an end-user system.
+
+`taichi_forge._lib.core.cuda_version()` retains its historical string return
+shape, but means the compatibility version of that bundled libdevice asset.
+It is not a driver or Toolkit version probe. A release validation job should
+assert that a built runtime wheel contains exactly one such asset and that its
+major version matches this value after installation.
+
 ## CUDA Toolkit for Native Methods
 
 Forge native CUDA primitive methods are built in the platform runtime wheel.

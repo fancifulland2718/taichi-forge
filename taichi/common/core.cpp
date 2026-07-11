@@ -85,7 +85,7 @@ std::string get_commit_hash() {
 }
 
 std::string get_cuda_version_string() {
-  return CUDA_VERSION;
+  return TI_CUDA_LIBDEVICE_VERSION;
 }
 
 int PID::get_pid() {

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <taichi/common/core.h>
 #include <taichi/rhi/cuda/cuda_capability.h>
 #include <taichi/rhi/cuda/cuda_context.h>
 #include <taichi/rhi/cuda/cuda_device.h>
@@ -12,6 +13,12 @@
 #include <vector>
 
 namespace taichi::lang {
+
+TEST(CUDAVersion, ReportsTheBundledLibdeviceCompatibilityVersion) {
+  const auto version = get_cuda_version_string();
+  EXPECT_FALSE(version.empty());
+  EXPECT_EQ(version.find_first_not_of("0123456789."), std::string::npos);
+}
 
 TEST(CUDAContext, MemoryPoolSupportRequiresDriverAndDeviceCapability) {
   using cuda::detail::MemoryAllocationRoute;

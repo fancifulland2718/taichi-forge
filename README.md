@@ -132,6 +132,7 @@ English public docs:
 - [Native algorithms](docs/forge/native_algorithms.en.md)
 - [Graph upgrade notes](docs/forge/graph_upgrade_from_taichi_1_7_4.en.md)
 - [Display frame submission](docs/forge/display_frame.en.md)
+- [Linux revalidation status](docs/forge/linux_revalidation.en.md)
 
 ## Build From Source
 
