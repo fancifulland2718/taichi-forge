@@ -245,9 +245,19 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
       device_ptrs;
 
   char *device_result_buffer{nullptr};
-  CUDADriver::get_instance().malloc_async(
-      (void **)&device_result_buffer,
-      std::max(ctx.result_buffer_size, sizeof(uint64)), nullptr);
+  // Most void kernels with only Taichi fields do not need a device result
+  // buffer. Allocate lazily for an actual return value or a host-array
+  // transfer, both of which use it as the runtime allocation result channel.
+  // This preserves the default-stream ordering of the existing allocation and
+  // free while avoiding one async allocation/free pair per ordinary launch.
+  auto ensure_device_result_buffer = [&] {
+    if (device_result_buffer == nullptr) {
+      CUDADriver::get_instance().malloc_async(
+          (void **)&device_result_buffer,
+          std::max(ctx.result_buffer_size, sizeof(uint64)), nullptr);
+    }
+    return device_result_buffer;
+  };
   ctx.get_context().runtime = executor->get_llvm_runtime();
   for (int i = 0; i < (int)parameters.size(); i++) {
     const auto &kv = parameters[i];
@@ -280,7 +290,7 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
         } else {
           DeviceAllocation devalloc =
               executor->allocate_memory_on_device(
-                  arr_sz, (uint64 *)device_result_buffer);
+                  arr_sz, (uint64 *)ensure_device_result_buffer());
           device_ptrs[data_ptr_idx] =
               executor->get_device_alloc_info_ptr(devalloc);
           transfers[data_ptr_idx] = {data_ptr, devalloc};
@@ -290,7 +300,7 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
           if (grad_ptr != nullptr) {
             DeviceAllocation grad_devalloc =
                 executor->allocate_memory_on_device(
-                    arr_sz, (uint64 *)device_result_buffer);
+                    arr_sz, (uint64 *)ensure_device_result_buffer());
             device_ptrs[grad_ptr_idx] =
                 executor->get_device_alloc_info_ptr(grad_devalloc);
             transfers[grad_ptr_idx] = {grad_ptr, grad_devalloc};
@@ -344,7 +354,8 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   char *host_arg_buffer = ctx.get_context().arg_buffer;
   char *host_result_buffer = (char *)ctx.get_context().result_buffer;
   if (ctx.result_buffer_size > 0) {
-    ctx.get_context().result_buffer = (uint64 *)device_result_buffer;
+    ctx.get_context().result_buffer =
+        (uint64 *)ensure_device_result_buffer();
   }
   char *device_arg_buffer = nullptr;
   if (ctx.arg_buffer_size > 0) {
@@ -378,7 +389,9 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
         host_result_buffer, device_result_buffer, ctx.result_buffer_size,
         nullptr);
   }
-  CUDADriver::get_instance().mem_free_async(device_result_buffer, nullptr);
+  if (device_result_buffer != nullptr) {
+    CUDADriver::get_instance().mem_free_async(device_result_buffer, nullptr);
+  }
   ctx.get_context().arg_buffer = host_arg_buffer;
   ctx.get_context().result_buffer = (uint64 *)host_result_buffer;
   // copy data back to host

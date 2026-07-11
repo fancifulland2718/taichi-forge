@@ -93,6 +93,7 @@ def main():
                 worker.join()
             ti.sync()
             elapsed_ms = (time.perf_counter() - started) * 1e3
+            after_submissions = _snapshot()
             result = counter[None]
             expected = thread_count * args.iterations
             if result != expected:
@@ -107,8 +108,10 @@ def main():
                 round(elapsed_ms, 4),
                 "submissions_per_second":
                 round(expected * 1e3 / elapsed_ms, 2),
-                "diagnostic_delta":
-                _delta(before, after),
+                "submission_diagnostic_delta":
+                _delta(before, after_submissions),
+                "result_read_diagnostic_delta":
+                _delta(after_submissions, after),
             })
 
         print(
