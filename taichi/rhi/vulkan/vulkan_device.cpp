@@ -969,6 +969,10 @@ VulkanCommandList::VulkanCommandList(VulkanDevice *ti_device,
 }
 
 VulkanCommandList::~VulkanCommandList() {
+  if (profiler_sampler_reservations_ != 0) {
+    ti_device_->profiler_discard_reserved_samplers(
+        profiler_sampler_reservations_);
+  }
 }
 
 void VulkanCommandList::bind_pipeline(Pipeline *p) noexcept {
@@ -2239,38 +2243,105 @@ void VulkanCommandList::end_profiler_scope() {
   vkCmdWriteTimestamp(buffer_->buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                       pool->query_pool, 1);
   buffer_->refs.push_back(pool);
-  ti_device_->profiler_add_sampler(scope.kernel_name, pool);
+  completed_profiler_samplers_.push_back(
+      {std::move(scope.kernel_name), pool, nullptr});
+  ++profiler_sampler_reservations_;
+  ti_device_->profiler_reserve_samplers(1);
 }
 
-void VulkanDevice::profiler_sync() {
-  std::vector<std::pair<std::string, vkapi::IVkQueryPool>> samplers;
-  {
-    std::lock_guard<std::mutex> lock(profiler_mutex_);
-    samplers.swap(samplers_);
+std::vector<VulkanProfilerSampler>
+VulkanCommandList::take_completed_profiler_samplers() {
+  // Keep the device-level reservations: they become owned by the submitted
+  // samplers and are released when their results are collected.
+  profiler_sampler_reservations_ = 0;
+  return std::move(completed_profiler_samplers_);
+}
+
+void VulkanDevice::profiler_collect_samplers(
+    std::vector<VulkanProfilerSampler> samplers) {
+  if (samplers.empty()) {
+    return;
   }
 
   std::vector<std::pair<std::string, double>> records;
   records.reserve(samplers.size());
   for (auto &sampler : samplers) {
-    auto kernel_name = sampler.first;
-    auto query_pool = sampler.second->query_pool;
-
-    double duration_ms = 0.0;
+    TI_ASSERT(sampler.query_pool != nullptr);
+    auto query_pool = sampler.query_pool->query_pool;
 
     uint64_t t[2];
-    vkGetQueryPoolResults(vk_device(), query_pool, 0, 2, sizeof(uint64_t) * 2,
-                          &t, sizeof(uint64_t),
-                          VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-    duration_ms = (t[1] - t[0]) * vk_device_properties_.limits.timestampPeriod /
-                  1000000.0;
-    records.push_back(std::make_pair(kernel_name, duration_ms));
+    BAIL_ON_VK_BAD_RESULT_NO_RETURN(
+        vkGetQueryPoolResults(vk_device(), query_pool, 0, 2,
+                              sizeof(uint64_t) * 2, &t, sizeof(uint64_t),
+                              VK_QUERY_RESULT_64_BIT),
+        "failed to get Vulkan profiler query results");
+    double duration_ms =
+        (t[1] - t[0]) * vk_device_properties_.limits.timestampPeriod /
+        1000000.0;
+    records.push_back(std::make_pair(std::move(sampler.kernel_name),
+                                     duration_ms));
   }
+
   {
     std::lock_guard<std::mutex> lock(profiler_mutex_);
+    TI_ASSERT(profiler_pending_sampler_count_ >= samplers.size());
+    profiler_pending_sampler_count_ -= samplers.size();
     sampled_records_.insert(sampled_records_.end(),
                             std::make_move_iterator(records.begin()),
                             std::make_move_iterator(records.end()));
   }
+}
+
+void VulkanDevice::profiler_sync_fences(
+    const std::vector<vkapi::IVkFence> &fences) {
+  if (fences.empty()) {
+    return;
+  }
+
+  std::vector<VulkanProfilerSampler> completed_samplers;
+  {
+    std::lock_guard<std::mutex> lock(profiler_mutex_);
+    std::vector<VulkanProfilerSampler> still_pending;
+    still_pending.reserve(samplers_.size());
+    for (auto &sampler : samplers_) {
+      bool completed = std::find(fences.begin(), fences.end(), sampler.fence) !=
+                       fences.end();
+      if (completed) {
+        completed_samplers.push_back(std::move(sampler));
+      } else {
+        still_pending.push_back(std::move(sampler));
+      }
+    }
+    samplers_ = std::move(still_pending);
+  }
+  profiler_collect_samplers(std::move(completed_samplers));
+}
+
+void VulkanDevice::profiler_sync() {
+  std::vector<VulkanProfilerSampler> samplers;
+  {
+    std::lock_guard<std::mutex> lock(profiler_mutex_);
+    samplers.swap(samplers_);
+  }
+
+  std::vector<vkapi::IVkFence> fences;
+  fences.reserve(samplers.size());
+  for (const auto &sampler : samplers) {
+    TI_ASSERT(sampler.fence != nullptr);
+    if (std::find(fences.begin(), fences.end(), sampler.fence) ==
+        fences.end()) {
+      fences.push_back(sampler.fence);
+    }
+  }
+  for (const auto &fence : fences) {
+    std::lock_guard<std::mutex> lock(fence->mutex);
+    BAIL_ON_VK_BAD_RESULT_NO_RETURN(
+        vkWaitForFences(fence->device, /*fenceCount=*/1, &fence->fence,
+                        VK_TRUE, UINT64_MAX),
+        "failed to wait for Vulkan profiler fence");
+  }
+
+  profiler_collect_samplers(std::move(samplers));
 }
 
 std::vector<std::pair<std::string, double>>
@@ -2323,6 +2394,7 @@ bool VulkanStreamSemaphoreObject::is_ready() const {
   if (!fence_ref) {
     return false;
   }
+  std::lock_guard<std::mutex> lock(fence_ref->mutex);
   VkResult res = vkGetFenceStatus(fence_ref->device, fence_ref->fence);
   if (res == VK_SUCCESS) {
     return true;
@@ -2338,6 +2410,7 @@ bool VulkanStreamSemaphoreObject::wait() const {
   if (!fence_ref) {
     return false;
   }
+  std::lock_guard<std::mutex> lock(fence_ref->mutex);
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(
       vkWaitForFences(fence_ref->device, /*fenceCount=*/1, &fence_ref->fence,
                       VK_TRUE, UINT64_MAX),
@@ -2364,6 +2437,7 @@ void VulkanStream::retire_completed_cmdbuffers() {
   std::vector<TrackedCmdbuf> still_submitted;
   still_submitted.reserve(submitted_cmdbuffers_.size());
   for (auto &tracked : submitted_cmdbuffers_) {
+    std::lock_guard<std::mutex> lock(tracked.fence->mutex);
     VkResult res = vkGetFenceStatus(tracked.fence->device,
                                     tracked.fence->fence);
     if (res == VK_SUCCESS) {
@@ -2386,6 +2460,7 @@ StreamSemaphore VulkanStream::submit(
   std::lock_guard<std::mutex> submission_lock(submission_mutex_);
   VulkanCommandList *cmdlist = static_cast<VulkanCommandList *>(cmdlist_);
   vkapi::IVkCommandBuffer buffer = cmdlist->finalize();
+  auto profiler_samplers = cmdlist->take_completed_profiler_samplers();
 
   /*
   if (in_flight_cmdlists_.find(buffer) != in_flight_cmdlists_.end()) {
@@ -2424,8 +2499,6 @@ StreamSemaphore VulkanStream::submit(
 
   // Resource tracking, check previously submitted commands
   retire_completed_cmdbuffers();
-  submitted_cmdbuffers_.push_back(
-      TrackedCmdbuf{fence, buffer, std::move(submit_refs)});
 
   {
     std::lock_guard<std::mutex> queue_lock(device_.get_queue_mutex(queue_));
@@ -2434,6 +2507,12 @@ StreamSemaphore VulkanStream::submit(
                       /*fence=*/fence->fence),
         "Vulkan device might be lost (vkQueueSubmit failed)");
   }
+  submitted_cmdbuffers_.push_back(
+      TrackedCmdbuf{fence, buffer, std::move(submit_refs)});
+  for (auto &sampler : profiler_samplers) {
+    sampler.fence = fence;
+  }
+  device_.profiler_add_samplers(std::move(profiler_samplers));
   return std::make_shared<VulkanStreamSemaphoreObject>(semaphore, fence);
 }
 
@@ -2446,15 +2525,25 @@ StreamSemaphore VulkanStream::submit_synced(
 }
 
 void VulkanStream::command_sync() {
-  std::lock_guard<std::mutex> submission_lock(submission_mutex_);
+  std::vector<vkapi::IVkFence> fences;
   {
-    std::lock_guard<std::mutex> queue_lock(device_.get_queue_mutex(queue_));
-    vkQueueWaitIdle(queue_);
+    std::lock_guard<std::mutex> submission_lock(submission_mutex_);
+    fences.reserve(submitted_cmdbuffers_.size());
+    for (const auto &tracked : submitted_cmdbuffers_) {
+      fences.push_back(tracked.fence);
+    }
+    for (const auto &fence : fences) {
+      std::lock_guard<std::mutex> lock(fence->mutex);
+      BAIL_ON_VK_BAD_RESULT_NO_RETURN(
+          vkWaitForFences(fence->device, /*fenceCount=*/1, &fence->fence,
+                          VK_TRUE, UINT64_MAX),
+          "failed to wait for Vulkan stream fence");
+    }
+    retire_completed_cmdbuffers();
   }
-
-  device_.profiler_sync();
-
-  submitted_cmdbuffers_.clear();
+  // The fences above make only this stream's query results available. Do not
+  // drain or wait for profiler work submitted by another stream.
+  device_.profiler_sync_fences(fences);
 }
 
 std::unique_ptr<Pipeline> VulkanDevice::create_raster_pipeline(

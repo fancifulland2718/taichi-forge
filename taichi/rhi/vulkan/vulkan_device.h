@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -29,6 +30,13 @@ using std::unordered_map;
 class VulkanDevice;
 class VulkanResourceBinder;
 class VulkanStream;
+
+struct VulkanProfilerSampler {
+  std::string kernel_name;
+  vkapi::IVkQueryPool query_pool;
+  // Assigned only after the command buffer has been submitted successfully.
+  vkapi::IVkFence fence;
+};
 
 struct SpirvCodeView {
   const uint32_t *data = nullptr;
@@ -512,6 +520,7 @@ class VulkanCommandList : public CommandList {
   // Profiler support
   void begin_profiler_scope(const std::string &kernel_name) override;
   void end_profiler_scope() override;
+  std::vector<VulkanProfilerSampler> take_completed_profiler_samplers();
 
  private:
   bool finalized_{false};
@@ -526,6 +535,11 @@ class VulkanCommandList : public CommandList {
     vkapi::IVkQueryPool query_pool;
   };
   std::vector<ProfilerScope> profiler_scopes_;
+  // Each completed scope reserves one device-level sampler slot. The
+  // reservation is released by the device after its result is collected, or
+  // by this command list if it is discarded before submission.
+  size_t profiler_sampler_reservations_{0};
+  std::vector<VulkanProfilerSampler> completed_profiler_samplers_;
 
   // Renderpass & raster pipeline
   std::vector<vkapi::IVkImage> current_dynamic_targets_;
@@ -928,18 +942,34 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   }
 
   // Profiler support
-  void profiler_add_sampler(const std::string &kernel_name,
-                            vkapi::IVkQueryPool query_pool) {
+  void profiler_reserve_samplers(size_t count) {
     std::lock_guard<std::mutex> lock(profiler_mutex_);
-    samplers_.push_back(std::make_pair(kernel_name, query_pool));
+    profiler_pending_sampler_count_ += count;
+  }
+
+  void profiler_discard_reserved_samplers(size_t count) {
+    std::lock_guard<std::mutex> lock(profiler_mutex_);
+    TI_ASSERT(profiler_pending_sampler_count_ >= count);
+    profiler_pending_sampler_count_ -= count;
+  }
+
+  void profiler_add_samplers(std::vector<VulkanProfilerSampler> samplers) {
+    if (samplers.empty()) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(profiler_mutex_);
+    samplers_.insert(samplers_.end(),
+                     std::make_move_iterator(samplers.begin()),
+                     std::make_move_iterator(samplers.end()));
   }
 
   size_t profiler_get_sampler_count() override {
     std::lock_guard<std::mutex> lock(profiler_mutex_);
-    return samplers_.size();
+    return profiler_pending_sampler_count_;
   }
 
   void profiler_sync() override;
+  void profiler_sync_fences(const std::vector<vkapi::IVkFence> &fences);
   std::vector<std::pair<std::string, double>> profiler_flush_sampled_time()
       override;
 
@@ -1069,9 +1099,12 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
                          size_t size,
                          void **mapped_ptr);
 
+  void profiler_collect_samplers(std::vector<VulkanProfilerSampler> samplers);
+
   // Profiler support
   std::mutex profiler_mutex_;
-  std::vector<std::pair<std::string, vkapi::IVkQueryPool>> samplers_;
+  size_t profiler_pending_sampler_count_{0};
+  std::vector<VulkanProfilerSampler> samplers_;
   std::vector<std::pair<std::string, double>> sampled_records_;
 };
 

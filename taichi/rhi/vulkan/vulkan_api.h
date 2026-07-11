@@ -32,6 +32,8 @@ IVkSemaphore create_semaphore(VkDevice device,
 // VkFence
 struct DeviceObjVkFence : public DeviceObj {
   VkFence fence{VK_NULL_HANDLE};
+  // Vulkan requires external synchronization for host access to a fence.
+  mutable std::mutex mutex;
   ~DeviceObjVkFence() override;
 };
 using IVkFence = std::shared_ptr<DeviceObjVkFence>;

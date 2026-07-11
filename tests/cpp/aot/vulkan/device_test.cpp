@@ -289,6 +289,49 @@ TEST(VulkanProfilerTest, CommandListScopesKeepTheirOwnQueryPools) {
   }
 }
 
+TEST(VulkanProfilerTest, CommandSyncCollectsOnlyItsOwnSubmissionFences) {
+  if (!vulkan::is_vulkan_api_available()) {
+    return;
+  }
+
+  vulkan::VulkanDeviceCreator::Params params;
+  params.api_version = std::nullopt;
+  auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(params);
+  auto *device = static_cast<vulkan::VulkanDevice *>(creator->device());
+  auto *compute_stream = device->get_compute_stream();
+  auto *graphics_stream = device->get_graphics_stream();
+  auto [compute_cmd, compute_result] =
+      compute_stream->new_command_list_unique();
+  auto [graphics_cmd, graphics_result] =
+      graphics_stream->new_command_list_unique();
+  ASSERT_EQ(compute_result, RhiResult::success);
+  ASSERT_EQ(graphics_result, RhiResult::success);
+  ASSERT_NE(compute_cmd, nullptr);
+  ASSERT_NE(graphics_cmd, nullptr);
+
+  compute_cmd->begin_profiler_scope("compute_scope");
+  compute_cmd->end_profiler_scope();
+  graphics_cmd->begin_profiler_scope("graphics_scope");
+  graphics_cmd->end_profiler_scope();
+  ASSERT_TRUE(compute_stream->submit(compute_cmd.get()));
+  ASSERT_TRUE(graphics_stream->submit(graphics_cmd.get()));
+
+  // The two streams can alias the same VkQueue. Synchronizing the first one
+  // must not turn into a queue-wide idle or collect the second stream's
+  // profiler scope just because it was queued behind the first submission.
+  compute_stream->command_sync();
+  auto compute_records = device->profiler_flush_sampled_time();
+  ASSERT_EQ(compute_records.size(), 1u);
+  EXPECT_EQ(compute_records[0].first, "compute_scope");
+  EXPECT_GE(compute_records[0].second, 0.0);
+
+  graphics_stream->command_sync();
+  auto graphics_records = device->profiler_flush_sampled_time();
+  ASSERT_EQ(graphics_records.size(), 1u);
+  EXPECT_EQ(graphics_records[0].first, "graphics_scope");
+  EXPECT_GE(graphics_records[0].second, 0.0);
+}
+
 #if defined(TI_WITH_CUDA)
 TEST(VulkanCudaInteropTest, ExternalMemoryCacheReleasesWithAllocation) {
   if (!vulkan::is_vulkan_api_available() ||
