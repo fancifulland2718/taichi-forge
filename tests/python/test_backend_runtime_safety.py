@@ -48,7 +48,9 @@ def test_async_graph_and_cold_kernel_registration_are_thread_safe():
     """
 
     n = 1 << 15
-    iterations = 32
+    # Keep enough overlap to catch short capture/replay versus ordinary-launch
+    # races without turning the cross-backend CI test into a benchmark.
+    iterations = 128
     simulation = ti.ndarray(ti.i32, shape=n)
     render_source = ti.ndarray(ti.i32, shape=n)
     render_output = ti.ndarray(ti.i32, shape=n)

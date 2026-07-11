@@ -59,7 +59,17 @@ def main() -> None:
     parser.add_argument("--offscreen", action="store_true")
     parser.add_argument("--producer-sample-every", type=int, default=64)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--producer-mode", choices=("kernel", "graph"), default="graph"
+    )
+    parser.add_argument(
+        "--image-source", choices=("host", "device"), default=None,
+        help="default: device on CUDA, host on CPU/Vulkan",
+    )
     args = parser.parse_args()
+    image_source = args.image_source or (
+        "device" if args.arch == "cuda" else "host"
+    )
     if (args.seconds <= 0 or args.warmup_seconds < 0 or args.width <= 0
             or args.height <= 0 or args.producer_sample_every <= 0):
         raise ValueError(
@@ -69,15 +79,34 @@ def main() -> None:
     ti.init(arch=getattr(ti, args.arch))
     state = ti.field(dtype=ti.f32, shape=1 << 18)
     image = np.zeros((args.height, args.width, 4), dtype=np.uint8)
+    device_image = ti.Vector.field(
+        4, dtype=ti.f32, shape=(args.width, args.height)
+    )
 
     @ti.kernel
     def producer_step():
         for i in state:
             state[i] = state[i] * 0.999 + 0.001
 
+    @ti.kernel
+    def update_device_image():
+        for i, j in device_image:
+            device_image[i, j] = ti.Vector([
+                ti.cast(i & 255, ti.f32) / 255.0,
+                ti.cast((i + j) & 255, ti.f32) / 255.0,
+                96.0 / 255.0,
+                1.0,
+            ])
+
     # Compile before entering the competing producer/display loops.
     producer_step()
     ti.sync()
+    producer_operation = producer_step
+    if args.producer_mode == "graph":
+        graph_builder = ti.graph.GraphBuilder()
+        graph_builder.dispatch(producer_step)
+        producer_graph = graph_builder.compile()
+        producer_operation = lambda: producer_graph.run({})
 
     stop = threading.Event()
     measurement_started = threading.Event()
@@ -91,7 +120,7 @@ def main() -> None:
         try:
             while not stop.is_set():
                 start = time.perf_counter()
-                producer_step()
+                producer_operation()
                 elapsed_ms = (time.perf_counter() - start) * 1000.0
                 submitted += 1
                 if measurement_started.is_set():
@@ -128,11 +157,15 @@ def main() -> None:
                 measurement_start = now
                 measurement_started.set()
             frame_start = time.perf_counter()
-            image[..., 0] = frames & 0xFF
-            image[..., 1] = (frames * 3) & 0xFF
-            image[..., 2] = 96
-            image[..., 3] = 255
-            canvas.set_image(image)
+            if image_source == "device":
+                update_device_image()
+                canvas.set_image(device_image)
+            else:
+                image[..., 0] = frames & 0xFF
+                image[..., 1] = (frames * 3) & 0xFF
+                image[..., 2] = 96
+                image[..., 3] = 255
+                canvas.set_image(image)
             window.show()
             if measurement_started.is_set():
                 measured_frames += 1
@@ -153,6 +186,8 @@ def main() -> None:
                measurement_start if measurement_start is not None
                and measurement_end is not None else 0.0)
     report = {
+        "producer_mode": args.producer_mode,
+        "image_source": image_source,
         "arch": args.arch,
         "mode": "offscreen" if args.offscreen else "headed",
         "seconds": round(elapsed, 3),

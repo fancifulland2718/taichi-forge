@@ -123,6 +123,10 @@ void CUDAContext::launch(void *func,
                          unsigned block_dim,
                          std::size_t dynamic_shared_mem_bytes,
                          void *stream) {
+  // Direct CUDA primitives enter here without a KernelLauncher transaction.
+  // Recursive ownership is intentional when a regular or captured Taichi
+  // kernel already owns the wider submission transaction.
+  auto submission_lock = get_submission_lock_guard();
   // It is important to keep a handle since in async mode (deleted)
   // a constant folding kernel may happen during a kernel launch
   // then profiler->start and profiler->stop mismatch.

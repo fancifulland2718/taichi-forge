@@ -525,6 +525,13 @@ void CompiledGraph::run(
 void CompiledGraph::jit_run(
     const CompileConfig &compile_config,
     const std::unordered_map<std::string, IValue> &args) const {
+#if defined(TI_WITH_CUDA)
+  std::unique_lock<std::recursive_mutex> cuda_submission_lock;
+  if (compile_config.arch == Arch::cuda) {
+    cuda_submission_lock =
+        CUDAContext::get_instance().get_submission_lock_guard();
+  }
+#endif
   for (const auto &dispatch : dispatches) {
     TI_ASSERT(dispatch.ti_kernel);
     LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
@@ -543,6 +550,17 @@ void CompiledGraph::jit_run_cached(
     const CompileConfig &compile_config,
     const std::unordered_map<std::string, IValue> &args,
     CompiledGraphJITCache &cache) const {
+#if defined(TI_WITH_CUDA)
+  // A graph is one submission transaction. This is required not only while
+  // capturing: replaying a CUDA graph concurrently with an ordinary kernel on
+  // the shared legacy default stream exposed invalid runtime state to both
+  // callers once Python graph execution started releasing the GIL.
+  std::unique_lock<std::recursive_mutex> cuda_submission_lock;
+  if (compile_config.arch == Arch::cuda) {
+    cuda_submission_lock =
+        CUDAContext::get_instance().get_submission_lock_guard();
+  }
+#endif
   std::lock_guard<std::mutex> lock(cache.run_mutex);
 #if defined(TI_WITH_CUDA)
   if (compile_config.arch == Arch::cuda &&

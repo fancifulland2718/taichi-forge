@@ -30,6 +30,12 @@ class CUDAContext {
   std::string mcpu_;
   std::string mattrs_;
   std::mutex lock_;
+  // One CUDA primary context and its legacy default stream are shared by all
+  // Taichi Programs in this process. A submission transaction keeps graph
+  // capture/replay, ordinary multi-task kernels, and direct driver kernels
+  // from interleaving their host-side setup. It never waits for queued device
+  // work on steady-state field/ndarray launches.
+  std::recursive_mutex submission_mutex_;
   CUDASampledLockTelemetry lock_telemetry_;
   std::mutex graph_capture_mutex_;
   KernelProfilerBase *profiler_;
@@ -122,6 +128,10 @@ class CUDAContext {
 
   std::unique_lock<std::mutex> get_lock_guard() {
     return lock_telemetry_.acquire(lock_);
+  }
+
+  std::unique_lock<std::recursive_mutex> get_submission_lock_guard() {
+    return std::unique_lock<std::recursive_mutex>(submission_mutex_);
   }
 
   CUDASampledLockTelemetry::Snapshot get_lock_telemetry_snapshot() const {

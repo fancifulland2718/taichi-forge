@@ -217,6 +217,12 @@ void KernelLauncher::capture_cuda_graph_launch(
 
 void KernelLauncher::launch_llvm_kernel(Handle handle,
                                         LaunchContextBuilder &ctx) {
+  // Keep argument-buffer preparation, every offloaded task, and stream-ordered
+  // cleanup contiguous with respect to CUDA graph replay and other host
+  // launchers. The default ndarray/field path only enqueues work while holding
+  // this lock; it does not add a device synchronization.
+  auto submission_lock =
+      CUDAContext::get_instance().get_submission_lock_guard();
   std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
   std::shared_ptr<const Context> launcher_ctx;
   TI_ASSERT(handle.get_launch_id() < contexts_.size());
