@@ -46,6 +46,9 @@ target fallback 的较新设备。验证数值结果、offline-cache target 隔�
 
 - 运行 `tests/python/cuda_driver_telemetry_stress.py`，保留其采样的 lock 与 allocation-route
   输出；诊断不得改变结果或引入默认同步点；
+- 在 fresh process 中运行
+  `tests/python/backend_async_runtime_stress.py --arch cuda`，覆盖 graph producer 与冷注册
+  display-style kernel，并验证逐元素结果；
 - 在 fresh process 中运行 `tests/python/cuda_graph_runtime_bench.py`。它用于检查 p50/p95 与
   reset 稳定性，不可作为跨机器性能对比；
 - 以 `TI_WITH_CUDA_TOOLKIT=ON` 和 dynamic CUDART 构建，并实际覆盖 native CUB reduce。
@@ -67,7 +70,9 @@ import 成功后移交 FD 所有权。若设备缺少任一平台扩展，应验
 只支持基础 external-memory 就视为支持 GPU-direct interop。
 
 使用 `tests/python/ggui_vulkan_queue_concurrency_stress.py` 收集 queue stress 的 frame/producer
-p50 与 p95。只比较同一 runner 的重复样本；Windows 数据不是 Linux 性能基线。
+p50 与 p95，并显式传入 `--arch vulkan`。先用
+`tests/python/backend_async_runtime_stress.py --arch vulkan` 隔离无窗口 runtime 层。只比较
+同一 runner 的重复样本；Windows 数据不是 Linux 性能基线。
 
 ### CPU scheduler 与生命周期安全
 
@@ -75,6 +80,14 @@ p50 与 p95。只比较同一 runner 的重复样本；Windows 数据不是 Linu
 对 scheduler 和 allocation registry 生命周期路径执行 ThreadSanitizer；也应使用
 AddressSanitizer/UBSan 覆盖析构、reset 与 range-validation。integer copy/gather/unique-scatter
 仍要求精确结果；浮点 reduction 使用公开约定的 tolerance。
+
+- 用 GCC 与 Clang release build 分别编译标准 C++ `call_once` / `shared_mutex` 路径；
+- 在 fresh process 中运行
+  `tests/python/backend_async_runtime_stress.py --arch cpu`，并用 TSAN 覆盖
+  compilation-manager/launcher 首次构造、冷 kernel 注册和完整 CPU kernel execution mutex；
+- 运行至少 30–60 秒的复杂 graph solver + raytracer producer/consumer，而不只运行单-task
+  ndarray smoke；确认 CPU kernel 内 worker 并行仍生效，且不同 host caller 在完整 kernel
+  边界安全排队。
 
 ## 验收记录
 

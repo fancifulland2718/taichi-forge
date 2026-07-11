@@ -58,6 +58,9 @@ target separation, capture/recapture/reset, and 1/2/4-submitter telemetry.
 - Run `tests/python/cuda_driver_telemetry_stress.py` and preserve its sampled
   lock and allocation-route output; diagnostics must not change results or add
   a default synchronization point.
+- Run `tests/python/backend_async_runtime_stress.py --arch cuda` in fresh
+  processes to overlap a graph producer with a cold display-shaped kernel and
+  validate elementwise results.
 - Run `tests/python/cuda_graph_runtime_bench.py` in fresh processes. Treat it
   as a p50/p95 and reset-stability check, not as a cross-machine performance
   comparison.
@@ -87,8 +90,11 @@ verify the synchronous host-staging fallback; do not treat base
 external-memory support alone as GPU-direct interop support.
 
 Collect the queue-stress frame/producer p50 and p95 with
-`tests/python/ggui_vulkan_queue_concurrency_stress.py`. Compare only repeated
-samples on the same runner; no Windows number is a Linux performance baseline.
+`tests/python/ggui_vulkan_queue_concurrency_stress.py --arch vulkan`. First
+isolate the windowless runtime layer with
+`tests/python/backend_async_runtime_stress.py --arch vulkan`. Compare only
+repeated samples on the same runner; no Windows number is a Linux performance
+baseline.
 
 ### CPU scheduler and lifetime safety
 
@@ -98,6 +104,17 @@ registry lifetime paths; AddressSanitizer/UBSan should also cover destruction,
 reset, and range-validation paths. Numerical contracts remain exact for
 integer copy/gather/unique-scatter and use the documented tolerance for
 floating reductions.
+
+- Compile the standard-C++ `call_once` / `shared_mutex` paths in both GCC
+  and Clang release builds.
+- Run `tests/python/backend_async_runtime_stress.py --arch cpu` in fresh
+  processes and use TSAN to cover first construction of the compilation
+  manager/launcher, cold kernel registration, and the whole-CPU-kernel
+  execution mutex.
+- Run a complex graph solver plus raytracer producer/consumer for at least
+  30–60 seconds, not only a single-task ndarray smoke. Confirm that worker
+  parallelism remains active inside each CPU kernel and independent host
+  callers queue safely at whole-kernel boundaries.
 
 ## Acceptance record
 

@@ -47,14 +47,23 @@ submitted、dropped、reused 和最近一次提交状态等信息。
 
 ## 异步仿真与显示提交
 
-Python 仿真 worker 可以持续提交 kernel，同时由主线程上传并 present GGUI 帧。Vulkan
-后端会在 compute 与 graphics stream 指向同一个 `VkQueue` 时，对相关 host queue 调用做
-external synchronization；不同 queue handle 仍可独立提交。
+Python 仿真 worker 可以持续提交 graph/kernel，同时由主线程上传并 present GGUI 帧。backend
+launcher、首次 kernel 注册和 GFX command recording 都有 runtime 级同步，不需要由应用把
+整个 simulation step 与 render frame 放进同一把 Python 锁。
+
+- CUDA/Vulkan 保持 GPU 异步提交；同步只覆盖 native 注册、共享 host recording state 和
+  必须 external-synchronize 的 queue 调用，不会默认增加 `ti.sync()`。
+- CPU 允许独立 producer/consumer 线程，但同一 `Program` 的普通 Taichi kernel 会在完整
+  kernel 边界排队。每个 kernel 内部仍使用 `cpu_max_num_threads` 的 worker 并行，避免复杂
+  kernel 的多段 offloaded task 交错使用共享 LLVM runtime scratch/list 状态。
+- Vulkan compute 与 graphics stream 指向同一个 `VkQueue` 时，相关 host queue 调用做
+  external synchronization；不同 queue handle 仍可独立提交。
 
 该 queue 级保证不会替代应用层数据所有权协议：
 
 - `window.show()` 应留在持有窗口的线程，并作为常规的逐帧事件泵。
-- 不需要仅为保护 Vulkan queue 调用增加粗粒度 Python submission lock 或额外 `ti.sync()`。
+- 不需要仅为保护 backend runtime/queue 调用增加粗粒度 Python submission lock 或额外
+  `ti.sync()`。
 - 如果仿真与显示会访问同一个 field、ndarray、texture 或 slot，应使用 snapshot、bounded
   slot、semaphore 或其他明确的 producer-consumer 协议。queue 串行化本身不能让应用
   resource 的重叠读写变得安全。

@@ -58,17 +58,30 @@ Use `Window.reset_display_stats()` before a profiling window.
 
 ## Async Simulation and Presentation
 
-A Python simulation worker may submit kernels while the main thread uploads
-and presents GGUI frames. On Vulkan, Forge externally synchronizes host calls
-when compute and graphics streams refer to the same `VkQueue`; distinct queue
-handles remain independently submit-capable.
+A Python simulation worker may continuously submit graphs/kernels while the
+main thread uploads and presents GGUI frames. Backend launcher creation,
+first-kernel registration, and GFX command recording have runtime-level
+synchronization, so an application does not need one Python lock around an
+entire simulation step and render frame.
+
+- CUDA/Vulkan retain asynchronous GPU submission. Synchronization covers
+  native registration, shared host recording state, and queue calls that
+  require external synchronization; it does not add a default `ti.sync()`.
+- CPU permits independent producer/consumer threads, but ordinary Taichi
+  kernels from one `Program` queue at the whole-kernel boundary. Each kernel
+  still uses the configured `cpu_max_num_threads` workers internally. This
+  prevents multiple offloaded-task sequences from interleaving on shared LLVM
+  runtime scratch/list state.
+- On Vulkan, Forge externally synchronizes host calls when compute and graphics
+  streams refer to the same `VkQueue`; distinct queue handles remain
+  independently submit-capable.
 
 This queue-level guarantee does not replace application data ownership:
 
 - Keep `window.show()` on the window-owning thread and use it as the normal
   per-frame event pump.
 - Do not add a coarse Python submission lock or an extra `ti.sync()` solely to
-  protect Vulkan queue calls.
+  protect backend runtime/queue calls.
 - If simulation and display access the same field, ndarray, texture, or slot,
   use snapshots, bounded slots, semaphores, or another explicit
   producer-consumer protocol. Queue serialization alone does not make
