@@ -39,6 +39,10 @@ python -I -m build --wheel --no-isolation
   单独发布。
 - 平台 runtime wheel 必须先于 CPython shim wheel 构建。shim 构建应消费已经构建或已经
   发布的 runtime wheel，不应为每个 Python 版本重复编译 C++ runtime。
+- shim 构建从 runtime wheel 提取 native library/import library，并传入
+  `TI_PREBUILT_PYTHON_RUNTIME_DIR`。runtime bitcode 和 libdevice install 规则只属于
+  `taichi-forge-runtime`；shim wheel 只能包含 pybind extension，不能重复携带 runtime、
+  CUDART 或 bitcode asset。
 - 修改 `version.txt` 后，发布构建前先运行 `python scripts/sync_runtime_dependency.py`。
   发布 workflow 会自动执行这一步。
 - PyPI/TestPyPI 发布权限必须同时覆盖两个 project：`taichi-forge` 和
@@ -100,6 +104,12 @@ adapter 已改为仓库内实现，不再依赖 CUDA 13.2 专属的 `<cuda/itera
 `scripts/validate_runtime_wheel.py` 是 raw Linux wheel、auditwheel 修复后的 manylinux
 wheel、Windows wheel 和最终 Windows+Linux 成对产物共用的发行门禁。它会核对项目名/版本、
 唯一 native runtime、唯一且与清单一致的 CUDART，以及两个系统包的 CUDART major 相同。
+两个 distribution 安装后，`scripts/validate_installed_runtime.py` 还会要求 shim/runtime
+版本相同，并确认实际选择的 CUDART 路径属于 runtime 包或其 auditwheel `.libs` 目录。
+每个 CPython 构建都会运行 `scripts/validate_shim_wheel.py`，拒绝重复的
+runtime payload 或不匹配的 runtime 依赖。Windows runtime job 还会拒绝
+`taichi_runtime.dll` 对 Toolkit DLL 的隐式导入；包内 CUDART 必须从
+runtime package 显式发现并加载。
 
 Python shim 会读取清单并定位这份随包库，调用方无需选择 CUDA 专属 extra 或包。用户安装
 `taichi-forge` 因此不需要本机 CUDA Toolkit；只有构建 runtime wheel 时才需要所选 Toolkit。

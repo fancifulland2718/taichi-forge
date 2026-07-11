@@ -47,6 +47,10 @@ Important details:
 - The platform runtime wheel is built before the CPython shim wheels. Shim
   builds should consume the already-built or already-published runtime wheel
   instead of rebuilding the C++ runtime for every Python version.
+- Shim builds extract the native library/import library and pass
+  `TI_PREBUILT_PYTHON_RUNTIME_DIR`. Runtime bitcode and libdevice install rules
+  remain owned by `taichi-forge-runtime`; a shim wheel must contain one pybind
+  extension and no duplicate runtime, CUDART, or bitcode assets.
 - After changing `version.txt`, run `python scripts/sync_runtime_dependency.py`
   before building release wheels. The publish workflow does this automatically.
 - PyPI/TestPyPI publishing must be authorized for both project names:
@@ -115,6 +119,13 @@ packages exactly one matching dynamic CUDART plus
 Linux wheel, the auditwheel-repaired manylinux wheel, the Windows wheel, and
 the final Windows+Linux pair. It verifies project/version identity, one native
 runtime, one matching CUDART/manifest, and equal CUDART majors across the pair.
+After installing both distributions, `scripts/validate_installed_runtime.py`
+also requires equal shim/runtime versions and verifies that the selected
+CUDART path belongs to the runtime package (or its auditwheel `.libs` directory).
+Each CPython build runs `scripts/validate_shim_wheel.py` to reject duplicated
+runtime payloads or a mismatched runtime dependency. The Windows runtime job
+also rejects implicit Toolkit DLL imports in `taichi_runtime.dll`; the bundled
+CUDART is discovered and loaded explicitly from the runtime package instead.
 
 The Python shim reads the manifest and locates that bundled library; callers do
 not select a CUDA-specific extra or package. Installing `taichi-forge` therefore

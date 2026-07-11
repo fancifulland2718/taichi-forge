@@ -143,30 +143,11 @@ if(NOT TI_WITH_CUDA)
     set(TI_WITH_CUDA_TOOLKIT OFF)
 endif()
 
-if(NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
-file(GLOB TAICHI_CORE_SOURCE
-    "taichi/analysis/*.cpp" "taichi/analysis/*.h"
-    "taichi/ir/*"
-    "taichi/jit/*"
-    "taichi/math/*"
-    "taichi/program/*"
-    "taichi/struct/*"
-    "taichi/system/*"
-    "taichi/transforms/*"
-    "taichi/aot/*.cpp" "taichi/aot/*.h"
-    "taichi/platform/cuda/*" "taichi/platform/amdgpu/*"
-    "taichi/platform/mac/*" "taichi/platform/windows/*"
-    "taichi/codegen/*.cpp" "taichi/codegen/*.h"
-    "taichi/runtime/*.h" "taichi/runtime/*.cpp"
-)
-
-if(TI_WITH_LLVM)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DTI_WITH_LLVM")
-endif()
-
 # The CUDA driver and toolkit version are independent from the slim libdevice
 # bitcode shipped by this package. Derive the latter from the actual asset so a
 # repackaged wheel cannot silently advertise or look up a hardcoded version.
+# This also runs for a prebuilt-runtime shim: CMake configures version.h before
+# compiling the shim, even though that wheel does not install runtime assets.
 file(GLOB _ti_cuda_libdevice_files
     RELATIVE "${CMAKE_SOURCE_DIR}/external/cuda_libdevice"
     "${CMAKE_SOURCE_DIR}/external/cuda_libdevice/slim_libdevice.*.bc")
@@ -187,6 +168,27 @@ set(TI_CUDA_LIBDEVICE_MAJOR "${CMAKE_MATCH_1}")
 # Retain the historical public string format while deriving it solely from the
 # bundled major-versioned asset.
 set(TI_CUDA_LIBDEVICE_VERSION "${TI_CUDA_LIBDEVICE_MAJOR}.0")
+
+if(NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
+file(GLOB TAICHI_CORE_SOURCE
+    "taichi/analysis/*.cpp" "taichi/analysis/*.h"
+    "taichi/ir/*"
+    "taichi/jit/*"
+    "taichi/math/*"
+    "taichi/program/*"
+    "taichi/struct/*"
+    "taichi/system/*"
+    "taichi/transforms/*"
+    "taichi/aot/*.cpp" "taichi/aot/*.h"
+    "taichi/platform/cuda/*" "taichi/platform/amdgpu/*"
+    "taichi/platform/mac/*" "taichi/platform/windows/*"
+    "taichi/codegen/*.cpp" "taichi/codegen/*.h"
+    "taichi/runtime/*.h" "taichi/runtime/*.cpp"
+)
+
+if(TI_WITH_LLVM)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DTI_WITH_LLVM")
+endif()
 
 if (TI_WITH_CUDA)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DTI_WITH_CUDA")
@@ -1106,15 +1108,19 @@ if(TI_WITH_PYTHON)
             COMPONENT python)
 endif()
 
-if (NOT APPLE)
-    install(FILES ${CMAKE_SOURCE_DIR}/external/cuda_libdevice/${_ti_cuda_libdevice_filename}
-            DESTINATION ${INSTALL_LIB_DIR}/runtime
-            COMPONENT runtime)
-endif()
+# Runtime bitcode belongs to taichi-forge-runtime. A shim build that links a
+# prebuilt split runtime must not register install rules for those assets.
+if (NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
+    if (NOT APPLE)
+        install(FILES ${CMAKE_SOURCE_DIR}/external/cuda_libdevice/${_ti_cuda_libdevice_filename}
+                DESTINATION ${INSTALL_LIB_DIR}/runtime
+                COMPONENT runtime)
+    endif()
 
-if (TI_WITH_AMDGPU)
-    file(GLOB AMDGPU_BC_FILES ${CMAKE_SOURCE_DIR}/external/amdgpu_libdevice/*.bc)
-    install(FILES ${AMDGPU_BC_FILES}
-            DESTINATION ${INSTALL_LIB_DIR}/runtime
-            COMPONENT runtime)
+    if (TI_WITH_AMDGPU)
+        file(GLOB AMDGPU_BC_FILES ${CMAKE_SOURCE_DIR}/external/amdgpu_libdevice/*.bc)
+        install(FILES ${AMDGPU_BC_FILES}
+                DESTINATION ${INSTALL_LIB_DIR}/runtime
+                COMPONENT runtime)
+    endif()
 endif()

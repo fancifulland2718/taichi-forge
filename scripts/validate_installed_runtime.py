@@ -4,11 +4,58 @@
 import os
 import platform
 import re
+from importlib import metadata
+from importlib.util import find_spec
 from pathlib import Path
 
 import numpy as np
 
 import taichi_forge as ti
+
+
+def _validate_distribution_versions() -> str:
+    shim_version = metadata.version("taichi-forge")
+    runtime_version = metadata.version("taichi-forge-runtime")
+    if shim_version != runtime_version:
+        raise RuntimeError(
+            "installed shim/runtime version mismatch: "
+            f"taichi-forge={shim_version}, "
+            f"taichi-forge-runtime={runtime_version}"
+        )
+    return shim_version
+
+
+def _runtime_package_dirs() -> list[Path]:
+    spec = find_spec("taichi_forge_runtime")
+    if spec is None or spec.submodule_search_locations is None:
+        raise RuntimeError("taichi_forge_runtime package is not importable")
+    return [Path(path).resolve() for path in spec.submodule_search_locations]
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_cudart_belongs_to_runtime_package(path: Path) -> None:
+    candidate_roots = []
+    for package_dir in _runtime_package_dirs():
+        candidate_roots.append(package_dir)
+        candidate_roots.append(
+            package_dir.parent / f"{package_dir.name}.libs"
+        )
+    resolved = path.resolve()
+    if not any(
+        root.is_dir() and _is_relative_to(resolved, root.resolve())
+        for root in candidate_roots
+    ):
+        raise RuntimeError(
+            "bundled CUDART was not loaded from taichi-forge-runtime: "
+            f"{resolved}"
+        )
 
 
 def _packaged_cuda_runtime_major(path: Path) -> int:
@@ -36,6 +83,7 @@ def _validate_packaged_cuda_runtime() -> tuple[Path, int]:
     path = Path(candidate)
     if not path.is_file():
         raise RuntimeError(f"the discovered bundled CUDART does not exist: {path}")
+    _validate_cudart_belongs_to_runtime_package(path)
 
     major = _packaged_cuda_runtime_major(path)
     declared_major = os.environ.get(
@@ -80,10 +128,11 @@ def _validate_cpu_native_ad() -> None:
 
 
 def main() -> None:
+    version = _validate_distribution_versions()
     cudart, cudart_major = _validate_packaged_cuda_runtime()
     _validate_cpu_native_ad()
     print(
-        "installed runtime validation passed; "
+        f"installed runtime validation passed for {version}; "
         f"bundled CUDART major {cudart_major}: {cudart}"
     )
 

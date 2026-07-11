@@ -8,6 +8,7 @@ import pytest
 from scripts import repair_runtime_wheel
 from scripts import validate_installed_runtime
 from scripts import validate_runtime_wheel
+from scripts import validate_shim_wheel
 from taichi_forge._lib import utils as runtime_utils
 
 
@@ -21,6 +22,8 @@ def _write_runtime_wheel(
     version: str,
     cuda_major: int,
     extra_cudart_major: int | None = None,
+    hashed_runtime: bool = False,
+    misplaced_cudart: bool = False,
 ) -> None:
     dist_info = f"taichi_forge_runtime-{version}.dist-info"
     native = "taichi_forge_runtime/_lib/runtime_native"
@@ -28,7 +31,11 @@ def _write_runtime_wheel(
         runtime_name = "taichi_runtime.dll"
         cudart_name = f"cudart64_{cuda_major}.dll"
     else:
-        runtime_name = "libtaichi_runtime.so"
+        runtime_name = (
+            "libtaichi_runtime-deadbeef.so"
+            if hashed_runtime
+            else "libtaichi_runtime.so"
+        )
         cudart_name = f"libcudart-deadbeef.so.{cuda_major}"
     with ZipFile(wheel, "w") as zf:
         zf.writestr(
@@ -38,7 +45,8 @@ def _write_runtime_wheel(
         zf.writestr(f"{dist_info}/RECORD", "")
         zf.writestr(f"{native}/cuda_runtime_major.txt", f"{cuda_major}\n")
         zf.writestr(f"{native}/{runtime_name}", b"runtime")
-        zf.writestr(f"{native}/{cudart_name}", b"cudart")
+        cudart_dir = "unrelated_package" if misplaced_cudart else native
+        zf.writestr(f"{cudart_dir}/{cudart_name}", b"cudart")
         if platform == "windows":
             zf.writestr(f"{native}/taichi_runtime.lib", b"import library")
         if extra_cudart_major is not None:
@@ -47,6 +55,34 @@ def _write_runtime_wheel(
             else:
                 extra_name = f"libcudart-other.so.{extra_cudart_major}"
             zf.writestr(f"{native}/{extra_name}", b"stale cudart")
+
+
+def _write_shim_wheel(
+    wheel: Path,
+    *,
+    platform: str,
+    version: str,
+    runtime_version: str | None = None,
+    duplicate_runtime: bool = False,
+) -> None:
+    dist_info = f"taichi_forge-{version}.dist-info"
+    extension = "taichi_python.pyd" if platform == "windows" else "taichi_python.so"
+    requirement_version = runtime_version or version
+    with ZipFile(wheel, "w") as zf:
+        zf.writestr(
+            f"{dist_info}/METADATA",
+            "Metadata-Version: 2.1\n"
+            "Name: taichi-forge\n"
+            f"Version: {version}\n"
+            f"Requires-Dist: taichi-forge-runtime=={requirement_version}\n",
+        )
+        zf.writestr(f"{dist_info}/RECORD", "")
+        zf.writestr(f"taichi_forge/_lib/core/{extension}", b"shim")
+        if duplicate_runtime:
+            zf.writestr(
+                "taichi_forge/_lib/runtime/taichi_runtime.dll",
+                b"duplicated runtime",
+            )
 
 
 def test_runtime_repair_discovers_versioned_windows_cudart(tmp_path):
@@ -134,6 +170,23 @@ def test_installed_runtime_validator_rejects_unversioned_cudart(monkeypatch):
         )
 
 
+def test_installed_runtime_validator_requires_matching_distribution_versions(
+    monkeypatch,
+):
+    versions = {
+        "taichi-forge": "1.2.3",
+        "taichi-forge-runtime": "1.2.4",
+    }
+    monkeypatch.setattr(
+        validate_installed_runtime.metadata,
+        "version",
+        versions.__getitem__,
+    )
+
+    with pytest.raises(RuntimeError, match="version mismatch"):
+        validate_installed_runtime._validate_distribution_versions()
+
+
 def test_shared_wheel_validator_accepts_windows_and_manylinux_pair(tmp_path):
     windows = tmp_path / "taichi_forge_runtime-0.4.2-py3-none-win_amd64.whl"
     linux = (
@@ -144,7 +197,11 @@ def test_shared_wheel_validator_accepts_windows_and_manylinux_pair(tmp_path):
         windows, platform="windows", version="0.4.2", cuda_major=12
     )
     _write_runtime_wheel(
-        linux, platform="manylinux", version="0.4.2", cuda_major=12
+        linux,
+        platform="manylinux",
+        version="0.4.2",
+        cuda_major=12,
+        hashed_runtime=True,
     )
 
     infos = validate_runtime_wheel.validate_runtime_wheels(
@@ -165,6 +222,20 @@ def test_shared_wheel_validator_rejects_stale_second_cudart(tmp_path):
     )
 
     with pytest.raises(RuntimeError, match="Expected one CUDART"):
+        validate_runtime_wheel.inspect_runtime_wheel(wheel)
+
+
+def test_shared_wheel_validator_rejects_cudart_outside_runtime_package(tmp_path):
+    wheel = tmp_path / "taichi_forge_runtime-0.4.2-py3-none-win_amd64.whl"
+    _write_runtime_wheel(
+        wheel,
+        platform="windows",
+        version="0.4.2",
+        cuda_major=12,
+        misplaced_cudart=True,
+    )
+
+    with pytest.raises(RuntimeError, match="outside the runtime package"):
         validate_runtime_wheel.inspect_runtime_wheel(wheel)
 
 
@@ -193,6 +264,48 @@ def test_shared_wheel_validator_rejects_cuda_versioned_release(tmp_path):
 
     with pytest.raises(RuntimeError, match="CUDA-versioned runtime wheel"):
         validate_runtime_wheel.inspect_runtime_wheel(wheel)
+
+
+@pytest.mark.parametrize(
+    ("platform", "tag"),
+    [
+        ("windows", "cp310-cp310-win_amd64"),
+        ("manylinux", "cp310-cp310-manylinux_2_35_x86_64"),
+    ],
+)
+def test_shim_wheel_validator_accepts_runtime_free_wheel(
+    tmp_path, platform, tag
+):
+    wheel = tmp_path / f"taichi_forge-0.4.2-{tag}.whl"
+    _write_shim_wheel(wheel, platform=platform, version="0.4.2")
+
+    assert validate_shim_wheel.validate_shim_wheel(wheel, platform) == "0.4.2"
+
+
+def test_shim_wheel_validator_rejects_duplicate_runtime(tmp_path):
+    wheel = tmp_path / "taichi_forge-0.4.2-cp310-cp310-win_amd64.whl"
+    _write_shim_wheel(
+        wheel,
+        platform="windows",
+        version="0.4.2",
+        duplicate_runtime=True,
+    )
+
+    with pytest.raises(RuntimeError, match="duplicates runtime artifacts"):
+        validate_shim_wheel.validate_shim_wheel(wheel, "windows")
+
+
+def test_shim_wheel_validator_rejects_mismatched_runtime_version(tmp_path):
+    wheel = tmp_path / "taichi_forge-0.4.2-cp310-cp310-win_amd64.whl"
+    _write_shim_wheel(
+        wheel,
+        platform="windows",
+        version="0.4.2",
+        runtime_version="0.4.1",
+    )
+
+    with pytest.raises(RuntimeError, match="Expected runtime dependency"):
+        validate_shim_wheel.validate_shim_wheel(wheel, "windows")
 
 
 @pytest.mark.parametrize(
@@ -285,6 +398,38 @@ def test_runtime_distribution_is_platform_only_not_cuda_versioned():
     )
 
 
+def test_prebuilt_shim_configures_libdevice_version_without_installing_assets():
+    cmake = (REPO_ROOT / "cmake" / "TaichiCore.cmake").read_text(
+        encoding="utf-8"
+    )
+    guarded_runtime_assets = re.search(
+        r"if\s*\(NOT TI_WITH_PREBUILT_PYTHON_RUNTIME\)"
+        r".*install\(FILES[^)]*_ti_cuda_libdevice_filename[^)]*"
+        r"COMPONENT runtime\)",
+        cmake,
+        re.DOTALL,
+    )
+
+    version_discovery = cmake.index("file(GLOB _ti_cuda_libdevice_files")
+    prebuilt_source_guard = cmake.index(
+        "if(NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)", version_discovery
+    )
+    assert version_discovery < prebuilt_source_guard
+    assert guarded_runtime_assets
+
+
+def test_shim_publish_workflow_validates_wheel_boundaries():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "publish_pypi.yml"
+    ).read_text(encoding="utf-8")
+
+    assert workflow.count("scripts/validate_runtime_wheel.py") == 2
+    assert workflow.count("scripts/validate_shim_wheel.py") == 2
+    assert "--wheel-dir wheelhouse --platform manylinux" in workflow
+    assert "--wheel-dir dist --platform windows" in workflow
+    assert "Reject implicit CUDA Toolkit DLL imports" not in workflow
+
+
 def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
     workflow = (
         REPO_ROOT / ".github" / "workflows" / "publish_runtime_pypi.yml"
@@ -298,6 +443,8 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
     assert "--wheel-dir wheelhouse-runtime --platform manylinux" in workflow
     assert "--wheel-dir dist-runtime --platform windows" in workflow
     assert "--wheel-dir dist --platform pair" in workflow
+    assert "Reject implicit CUDA Toolkit DLL imports" in workflow
+    assert "cudart64_|cupti64_|nvrtc64_" in workflow
     assert not re.search(
         r"taichi[-_]forge[-_]runtime[-_](?:cu|cuda)\d+",
         workflow,

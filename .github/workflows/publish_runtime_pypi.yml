@@ -362,6 +362,30 @@ jobs:
           python scripts/validate_runtime_wheel.py `
             --wheel-dir dist-runtime --platform windows --cuda-major $cudaMajor
 
+      - name: Reject implicit CUDA Toolkit DLL imports
+        shell: pwsh
+        run: |
+          $runtimeDlls = @(Get-ChildItem -Path runtimes -Recurse `
+            -Filter taichi_runtime.dll)
+          if ($runtimeDlls.Count -ne 1) {
+            Write-Error "Expected one built taichi_runtime.dll, found: $($runtimeDlls.FullName -join ', ')"
+            exit 1
+          }
+          $imports = & dumpbin /dependents $runtimeDlls[0].FullName 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            $imports | Write-Output
+            Write-Error "dumpbin failed for $($runtimeDlls[0].FullName)"
+            exit 1
+          }
+          $imports | Write-Output
+          $toolkitDlls = @($imports | Where-Object {
+            $_ -match '(?i)\b(?:cudart64_|cupti64_|nvrtc64_|cublas(?:lt)?64_|cusparse64_|curand64_|cufft64_|cusolver64_|nvjitlink_)[^\s]*\.dll\b'
+          })
+          if ($toolkitDlls.Count -ne 0) {
+            Write-Error "taichi_runtime.dll has implicit CUDA Toolkit dependencies: $($toolkitDlls -join ', ')"
+            exit 1
+          }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

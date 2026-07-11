@@ -111,17 +111,46 @@ def inspect_runtime_wheel(
                 f"Expected one CUDART matching manifest major {cuda_major} in "
                 f"{wheel.name}, found {cudarts}"
             )
+        cudart_path = cudarts[0][0]
+        runtime_native_prefix = f"{PACKAGE}/_lib/runtime_native/"
+        auditwheel_prefix = f"{PACKAGE}.libs/"
+        if not (
+            cudart_path.startswith(runtime_native_prefix)
+            or (
+                platform == "manylinux"
+                and cudart_path.startswith(auditwheel_prefix)
+            )
+        ):
+            raise RuntimeError(
+                f"CUDART is outside the runtime package in {wheel.name}: "
+                f"{cudart_path}"
+            )
 
-        native_name = (
-            "taichi_runtime.dll"
-            if platform == "windows"
-            else "libtaichi_runtime.so"
-        )
-        native_path = f"{PACKAGE}/_lib/runtime_native/{native_name}"
-        native_runtimes = [name for name in names if name == native_path]
+        if platform == "windows":
+            native_runtimes = [
+                name
+                for name in names
+                if name == f"{PACKAGE}/_lib/runtime_native/taichi_runtime.dll"
+            ]
+        else:
+            native_runtimes = [
+                name
+                for name in names
+                if name == f"{PACKAGE}/_lib/runtime_native/libtaichi_runtime.so"
+                or (
+                    platform == "manylinux"
+                    and (
+                        name.startswith(runtime_native_prefix)
+                        or name.startswith(auditwheel_prefix)
+                    )
+                    and re.fullmatch(
+                        r"libtaichi_runtime-[^.]+\.so", Path(name).name
+                    )
+                )
+            ]
         if len(native_runtimes) != 1:
             raise RuntimeError(
-                f"Expected one {native_path} in {wheel.name}, "
+                f"Expected one platform native runtime in {wheel.name}, "
                 f"found {native_runtimes}"
             )
         if platform == "windows":
