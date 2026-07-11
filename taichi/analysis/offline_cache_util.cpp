@@ -7,6 +7,9 @@
 #include "taichi/program/compile_config.h"
 #include "taichi/program/kernel.h"
 #include "taichi/rhi/device_capability.h"
+#if defined(TI_WITH_CUDA)
+#include "taichi/rhi/cuda/cuda_context.h"
+#endif
 #include "taichi/system/profiler.h"
 
 #include "picosha2.h"
@@ -156,6 +159,13 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
     serializer(config.cuda_pointer_fast_reset);
     serializer(config.cuda_listgen_reuse);
     serializer(config.bitmasked_clear_data_on_deactivate);
+#if defined(TI_WITH_CUDA)
+    // The selected LLVM NVPTX target changes emitted PTX. Cache entries must
+    // not cross a target fallback boundary when the same cache directory is
+    // shared by devices with different compute capabilities.
+    serializer(
+        CUDAContext::get_instance().get_codegen_compute_capability());
+#endif
   }
   serializer.finalize();
 

@@ -21,8 +21,14 @@ class CUDAContext {
   void *device_;
   void *context_;
   int dev_count_;
-  int compute_capability_;
+  // Keep the hardware capability separate from the target accepted by the
+  // bundled LLVM NVPTX backend. User code and runtime feature checks need the
+  // former, while JIT target selection and cache keys need the latter.
+  int device_compute_capability_;
+  int codegen_compute_capability_;
+  int ptx_version_;
   std::string mcpu_;
+  std::string mattrs_;
   std::mutex lock_;
   std::mutex graph_capture_mutex_;
   KernelProfilerBase *profiler_;
@@ -63,6 +69,10 @@ class CUDAContext {
     return mcpu_;
   }
 
+  std::string get_mattrs() const {
+    return mattrs_;
+  }
+
   void *get_context() {
     return context_;
   }
@@ -72,7 +82,11 @@ class CUDAContext {
   }
 
   int get_compute_capability() const {
-    return compute_capability_;
+    return device_compute_capability_;
+  }
+
+  int get_codegen_compute_capability() const {
+    return codegen_compute_capability_;
   }
 
   bool supports_mem_pool() const {

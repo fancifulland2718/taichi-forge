@@ -71,19 +71,28 @@ CUDAContext::CUDAContext()
   TI_TRACE("Total memory {:.2f} GB; free memory {:.2f} GB",
            get_total_memory() / GB, get_free_memory() / GB);
 
-  compute_capability_ = cc_major * 10 + cc_minor;
-
-  if (compute_capability_ > 86) {
-    compute_capability_ = 86;
-  }
+  auto target = cuda::detail::resolve_compute_capability_target(
+      cc_major * 10 + cc_minor);
+  device_compute_capability_ = target.device_compute_capability;
+  codegen_compute_capability_ = target.codegen_compute_capability;
+  ptx_version_ = target.ptx_version;
 
   driver_.device_get_attribute(
       &max_shared_memory_bytes_,
       CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, device_);
 
-  mcpu_ = fmt::format("sm_{}", compute_capability_);
+  mcpu_ = fmt::format("sm_{}", codegen_compute_capability_);
+  mattrs_ = fmt::format("+ptx{}", ptx_version_);
 
-  TI_TRACE("Emitting CUDA code for {}", mcpu_);
+  if (target.uses_fallback) {
+    TI_WARN(
+        "CUDA device capability {} is newer than the bundled LLVM NVPTX "
+        "targets. Emitting {} with PTX {} as the highest compatible "
+        "fallback.",
+        device_compute_capability_, mcpu_, ptx_version_);
+  } else {
+    TI_TRACE("Emitting CUDA code for {} with PTX {}", mcpu_, ptx_version_);
+  }
 }
 
 std::size_t CUDAContext::get_total_memory() {

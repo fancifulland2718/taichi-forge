@@ -76,7 +76,10 @@ class Kernel;
 //       invalidation for supported per-kernel effective-config changes and
 //       cache the AST body string after first key generation. Old key
 //       compatibility is intentionally dropped.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 13;
+//  14 - R7.1 (2026-07). CUDA cache keys include the resolved LLVM NVPTX
+//       compute target because it changes emitted PTX. This prevents a newer
+//       device from reusing an artifact compiled for an older fallback target.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 14;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

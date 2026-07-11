@@ -30,6 +30,41 @@ TEST(CUDAContext, MemoryPoolSupportRequiresDriverAndDeviceCapability) {
             MemoryAllocationRoute::kAsyncMemoryPool);
 }
 
+TEST(CUDACapability, ResolvesNativeAndCompilerFallbackTargets) {
+  using cuda::detail::resolve_compute_capability_target;
+
+  const auto ampere = resolve_compute_capability_target(86);
+  EXPECT_EQ(ampere.codegen_compute_capability, 86);
+  EXPECT_EQ(ampere.ptx_version, 71);
+  EXPECT_FALSE(ampere.uses_fallback);
+
+  const auto blackwell = resolve_compute_capability_target(120);
+  EXPECT_EQ(blackwell.codegen_compute_capability, 120);
+  EXPECT_EQ(blackwell.ptx_version, 87);
+  EXPECT_FALSE(blackwell.uses_fallback);
+
+  const auto future = resolve_compute_capability_target(121);
+  EXPECT_EQ(future.codegen_compute_capability, 120);
+  EXPECT_EQ(future.ptx_version, 87);
+  EXPECT_TRUE(future.uses_fallback);
+}
+
+TEST(CUDAContext, SeparatesDeviceCapabilityFromCodegenTarget) {
+  if (!CUDADriver::get_instance_without_context().detected()) {
+    GTEST_SKIP();
+  }
+
+  auto &context = CUDAContext::get_instance();
+  const auto target = cuda::detail::resolve_compute_capability_target(
+      context.get_compute_capability());
+  EXPECT_EQ(context.get_codegen_compute_capability(),
+            target.codegen_compute_capability);
+  EXPECT_EQ(context.get_mcpu(),
+            "sm_" + std::to_string(target.codegen_compute_capability));
+  EXPECT_EQ(context.get_mattrs(),
+            "+ptx" + std::to_string(target.ptx_version));
+}
+
 TEST(CUDADevice, MapLifecycleRejectsInvalidTransitions) {
   if (!CUDADriver::get_instance_without_context().detected()) {
     GTEST_SKIP();

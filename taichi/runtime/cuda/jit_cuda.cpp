@@ -47,7 +47,7 @@ JITModule *JITSessionCUDA ::add_module(std::unique_ptr<llvm::Module> M,
 }
 
 std::string cuda_mattrs() {
-  return "+ptx63";
+  return CUDAContext::get_instance().get_mattrs();
 }
 
 std::string convert(std::string new_name) {
