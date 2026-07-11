@@ -32,3 +32,4 @@
 - Vulkan sparse SNode 的完整语义和限制见 [Vulkan 稀疏 SNode](sparse_snode_on_vulkan.zh.md)。
 - 显示帧提交相关公开入口见 [显示帧提交](display_frame.zh.md)。
 - native 算法相关入口见 [Native 算法](native_algorithms.zh.md)。
+- 如需采集可重复的 Vulkan async-kernel/GGUI queue 样本，请在 fresh process 中运行 `tests/python/ggui_vulkan_queue_concurrency_stress.py`，并使用 `--warmup-seconds`、`--seconds`，以及可选的 `--offscreen` / `--output`。它会报告 frame-submit 和采样 producer-submit 的 p50/p95；这是测量工具，不对不同 GPU、driver 或 window system 作性能承诺。

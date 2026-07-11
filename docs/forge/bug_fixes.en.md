@@ -33,3 +33,4 @@
 - For Vulkan sparse SNode behavior, see [Vulkan sparse SNode](sparse_snode_on_vulkan.en.md).
 - For public display-frame APIs, see [Display frame submission](display_frame.en.md).
 - For native algorithm APIs, see [Native algorithms](native_algorithms.en.md).
+- To collect repeatable Vulkan async-kernel/GGUI queue samples, run `tests/python/ggui_vulkan_queue_concurrency_stress.py` in fresh processes with `--warmup-seconds`, `--seconds`, and optionally `--offscreen` / `--output`. It reports frame-submit and sampled producer-submit p50/p95; it is a measurement tool, not a performance promise for a different GPU, driver, or window system.
