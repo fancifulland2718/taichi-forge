@@ -61,6 +61,11 @@ target separation, capture/recapture/reset, and 1/2/4-submitter telemetry.
 - Run `tests/python/backend_async_runtime_stress.py --arch cuda` in fresh
   processes to overlap a graph producer with a cold display-shaped kernel and
   validate elementwise results.
+- Run `tests/python/ggui_vulkan_queue_concurrency_stress.py --arch cuda` in
+  both headed and offscreen modes. Keep the default graph producer and device
+  image so Linux covers GIL-released graph replay, CUDA staging kernels,
+  external-memory fd import, Vulkan submit, and present together. Record p50,
+  p95, producer progress, and the active X11/Wayland session.
 - Run `tests/python/cuda_graph_runtime_bench.py` in fresh processes. Treat it
   as a p50/p95 and reset-stability check, not as a cross-machine performance
   comparison.

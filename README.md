@@ -126,6 +126,7 @@ English public docs:
 - [Forge API reference](docs/forge/forge_api_reference.en.md)
 - [Forge options](docs/forge/forge_options.en.md)
 - [Compile and cache guide](docs/forge/cache_compile.en.md)
+- [Compilation and advanced-optimization trade-offs](docs/forge/compilation_tradeoffs.en.md)
 - [Vulkan sparse SNode](docs/forge/sparse_snode_on_vulkan.en.md)
 - [Hash SNode](docs/forge/hash_snode.en.md)
 - [Parallel sort API](docs/forge/sort_api.en.md)

@@ -49,6 +49,11 @@ target fallback 的较新设备。验证数值结果、offline-cache target 隔�
 - 在 fresh process 中运行
   `tests/python/backend_async_runtime_stress.py --arch cuda`，覆盖 graph producer 与冷注册
   display-style kernel，并验证逐元素结果；
+- 分别以 headed 与 offscreen 模式运行
+  `tests/python/ggui_vulkan_queue_concurrency_stress.py --arch cuda`。保持默认 graph
+  producer 和 device image，使 Linux 同时覆盖释放 GIL 的 graph replay、CUDA staging
+  kernel、external-memory fd import、Vulkan submit 与 present；记录 p50、p95、producer
+  实际推进量及 X11/Wayland session；
 - 在 fresh process 中运行 `tests/python/cuda_graph_runtime_bench.py`。它用于检查 p50/p95 与
   reset 稳定性，不可作为跨机器性能对比；
 - 以 `TI_WITH_CUDA_TOOLKIT=ON` 和 dynamic CUDART 构建，并实际覆盖 native CUB reduce。
