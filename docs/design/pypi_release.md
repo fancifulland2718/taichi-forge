@@ -61,7 +61,7 @@ PyPI 申请短期 token，**无需手动维护任何 secret**。
 `publish_pypi.yml` 已经用 `${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}` 优先
 使用它。
 
-### 1.6 CUDA 13.2 与 native runtime 构建
+### 1.6 单一平台 runtime wheel 与 CUDA 构建基线
 
 `publish_runtime_pypi.yml` 是唯一需要安装 CUDA Toolkit 的发布 workflow。它构建平台级
 `taichi-forge-runtime` wheel，并启用：
@@ -71,18 +71,24 @@ PyPI 申请短期 token，**无需手动维护任何 secret**。
 -DTI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON
 ```
 
-当前 native CUDA primitive 方法对 CUDA Toolkit `13.2.0` 是硬约束：`cuda_sort.cu` 中的
-CUDA/CCCL 代码引用了 `<cuda/iterator>` 等版本专属头文件，CUDA 13.0 缺这些头会在编译期
-失败。workflow 中的 `CUDA_TOOLKIT_VERSION` 默认应保持为 `13.2.0`；如果后续升级 CUDA，
-优先只改这个环境变量，并让 Linux/Windows 的 `nvcc -V` 校验从该变量推导期望版本，避免
-再次出现硬编码版本字符串。
+发行拓扑固定为每个平台一个 `taichi-forge-runtime` wheel；不能按 CUDA 版本创建
+`cu11` / `cu12` / `cu13` 包、extra 或 wheel tag。native iterator 已由仓库内 adapter 实现，
+不再依赖 CUDA 13.2 专属 `<cuda/iterator>`。workflow 中的 `CUDA_TOOLKIT_VERSION` 默认值
+目前仍为 `13.2.0`，但它只是可替换的内部构建基线。降低它之前必须分别完成对应 Toolkit、
+目标旧驱动、GPU 架构和 Linux manylinux 实包验证；发行包的项目名和 shim 依赖保持不变。
 
-runtime wheel 必须包含 native runtime 和动态 CUDA runtime：
+runtime wheel 必须包含 native runtime、唯一的动态 CUDA runtime 和
+`cuda_runtime_major.txt`：
 
 - Linux：`taichi_forge_runtime/_lib/runtime_native/libtaichi_runtime.so` 和
-  `libcudart.so.13*`。
+  `libcudart.so.<major>*`（auditwheel 可能加 hash）。
 - Windows：`taichi_forge_runtime/_lib/runtime_native/taichi_runtime.dll`、
-  `taichi_runtime.lib` 和 `cudart64_13.dll`。
+  `taichi_runtime.lib` 和 `cudart64_<major>.dll`。
+
+repair/validate step 从实际 CUDART 文件名生成并核对 major 清单。Python shim 只按清单寻找
+包内 CUDART，因此最终用户无需安装对应 Toolkit，也无需选择 CUDA 版本化依赖。构建所用
+Toolkit/CUDART 仍决定最低驱动兼容边界；单一包策略不会自动消除这个边界，而是允许发行方
+在验证后通过一次下调构建基线，使同一个包覆盖更旧的兼容驱动。
 
 `publish_pypi.yml` 不应重新编译 C++ runtime，也不应重新安装 CUDA Toolkit。它只从目标
 PyPI/TestPyPI 下载指定版本的 `taichi-forge-runtime` wheel，解包 link artifacts，然后构建
@@ -162,9 +168,9 @@ git push origin v1.8.0
 | Release step 成功但 asset 为空 | artifact download 失败 / path 不对 | 看 `Gather wheels` step 输出，确认 `dist/*.whl` 确实存在 |
 | shim workflow 下载 runtime 失败 | 同版本 `taichi-forge-runtime` 尚未发布到目标索引 | 先运行 `publish_runtime_pypi.yml`，并确认目标是同一个 `pypi` / `testpypi` |
 | fork 触发 workflow 没有 id-token | fork 的 `pull_request` 默认没 OIDC 权限 | 改用 `workflow_dispatch` 或从 canonical repo 发起 |
-| Linux runtime 编译报 `fatal error: cuda/iterator: No such file or directory` | CUDA Toolkit 版本过低，通常是 workflow 不再使用 13.2 | 恢复 `CUDA_TOOLKIT_VERSION=13.2.0`，或先重写 native CUDA iterator 代码 |
+| Linux runtime 编译报缺少 CUDA/CCCL 头文件 | 所选 Toolkit 与 native 实现仍有未移除的版本专属依赖 | 保持单一包名不变；补齐兼容 adapter，并在该 Toolkit 的 Linux 构建中复测 |
 | Windows CUDA 版本校验误报 | `nvcc -V` 是多行输出，或校验字符串被硬编码 | 把输出 join 成字符串，并从 `CUDA_TOOLKIT_VERSION` 推导 `major.minor` |
-| runtime wheel 中缺 `cudart64_13.dll` / `libcudart.so.13*` | runtime 构建没有启用动态 cudart，或 wheel 打包路径错误 | 检查 `TI_WITH_CUDA_TOOLKIT`、`TI_CUDA_CUB_SORT_DYNAMIC_CUDART` 和 wheel contents validate step |
+| runtime wheel 缺 CUDART 或 `cuda_runtime_major.txt` | runtime 构建没有启用动态 cudart，或 repair/打包路径错误 | 检查 `TI_WITH_CUDA_TOOLKIT`、`TI_CUDA_CUB_SORT_DYNAMIC_CUDART` 和 wheel contents validate step |
 
 ## 4. 和 LLVM 20 的关系
 

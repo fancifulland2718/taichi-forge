@@ -23,6 +23,15 @@ constexpr MemoryAllocationRoute memory_allocation_route(
                              : MemoryAllocationRoute::kSynchronous;
 }
 
+// CUDA minor-version compatibility is defined within a Toolkit major.  Do not
+// reject, for example, a CUDA 12.8-built runtime solely because the driver
+// reports CUDA 12.0.  Individual APIs and embedded PTX/cubins remain subject to
+// their own capability checks and launch-time errors.
+constexpr bool supports_cuda_toolkit_major(int driver_major,
+                                           int toolkit_major) {
+  return driver_major >= toolkit_major;
+}
+
 // Keep this table in sync with the bundled LLVM NVPTX backend. LLVM 20.1.7
 // defines these generic (non-architecture-suffix) processors and their
 // minimum PTX ISA versions in llvm/lib/Target/NVPTX/NVPTX.td. A physical CUDA

@@ -24,6 +24,7 @@ def in_docker():
 
 _dll_dir_handles = []
 _native_runtime_loaded = False
+_CUDA_RUNTIME_MAJOR_MANIFEST = "cuda_runtime_major.txt"
 
 
 def _dedupe_existing_dirs(paths):
@@ -92,13 +93,33 @@ def _native_runtime_library_candidates(directory):
                 yield path
 
 
-def _cuda_runtime_library_candidates(directory):
+def _cuda_runtime_major_from_name(name):
+    name = os.path.basename(name).lower()
     if get_os_name() == "win":
-        patterns = ["cudart64_13.dll"]
+        match = re.fullmatch(r"cudart64_(\d+)\.dll", name)
     elif get_os_name() == "linux":
-        patterns = ["libcudart.so.13*", "libcudart-*.so.13*"]
+        match = re.fullmatch(
+            r"(?:libcudart\.so\.|libcudart-[^.]+\.so\.)(\d+)(?:\.\d+)*",
+            name,
+        )
     else:
-        patterns = []
+        return None
+    return int(match.group(1)) if match else None
+
+
+def _cuda_runtime_patterns(major=None):
+    if get_os_name() == "win":
+        version = str(major) if major is not None else "*"
+        return [f"cudart64_{version}.dll"]
+    if get_os_name() == "linux":
+        if major is None:
+            return ["libcudart.so.*", "libcudart-*.so.*"]
+        return [f"libcudart.so.{major}*", f"libcudart-*.so.{major}*"]
+    return []
+
+
+def _cuda_runtime_library_candidates(directory, major=None):
+    patterns = _cuda_runtime_patterns(major)
 
     seen = set()
     for pattern in patterns:
@@ -111,12 +132,61 @@ def _cuda_runtime_library_candidates(directory):
             yield abspath
 
 
+def _bundled_cuda_runtime_major(runtime_dirs):
+    manifest_majors = set()
+    for directory in runtime_dirs:
+        manifest = os.path.join(directory, _CUDA_RUNTIME_MAJOR_MANIFEST)
+        if not os.path.isfile(manifest):
+            continue
+        try:
+            with open(manifest, "r", encoding="ascii") as f:
+                major = int(f.read().strip())
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"Invalid CUDA runtime manifest: {manifest}") from exc
+        if major <= 0:
+            raise RuntimeError(f"Invalid CUDA runtime major {major} in {manifest}")
+        manifest_majors.add(major)
+
+    if len(manifest_majors) > 1:
+        raise RuntimeError(
+            "Conflicting bundled CUDA runtime manifests: "
+            f"{sorted(manifest_majors)}"
+        )
+    if manifest_majors:
+        return next(iter(manifest_majors))
+
+    # Backward compatibility for existing runtime wheels and source builds
+    # created before the manifest was introduced. Runtime search roots never
+    # include arbitrary system CUDA directories.
+    discovered_majors = {
+        major
+        for directory in runtime_dirs
+        for path in _cuda_runtime_library_candidates(directory)
+        if (major := _cuda_runtime_major_from_name(path)) is not None
+    }
+    if len(discovered_majors) > 1:
+        raise RuntimeError(
+            "Multiple bundled CUDA runtime majors found without a manifest: "
+            f"{sorted(discovered_majors)}"
+        )
+    return next(iter(discovered_majors)) if discovered_majors else None
+
+
 def _prepare_bundled_cuda_runtime(runtime_dirs):
     os.environ.pop("TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH", None)
+    os.environ.pop("TI_CUDA_CUB_SORT_BUNDLED_CUDART_MAJOR", None)
+    major = _bundled_cuda_runtime_major(runtime_dirs)
+    if major is None:
+        return
     for path in runtime_dirs:
-        for lib_path in _cuda_runtime_library_candidates(path):
+        for lib_path in _cuda_runtime_library_candidates(path, major):
             os.environ["TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH"] = lib_path
+            os.environ["TI_CUDA_CUB_SORT_BUNDLED_CUDART_MAJOR"] = str(major)
             return
+    raise RuntimeError(
+        f"Bundled CUDA runtime major {major} was declared but no matching "
+        "library was found."
+    )
 
 
 def _preload_cuda_runtime_for_native_runtime():

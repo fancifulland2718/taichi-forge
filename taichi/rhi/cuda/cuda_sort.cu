@@ -1,12 +1,12 @@
 #include "taichi/rhi/cuda/cuda_sort.h"
 
 #include <cub/cub.cuh>
-#include <cuda/iterator>
 #include <cuda_runtime.h>
 
 #include <cstdlib>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -27,6 +27,238 @@ bool cuda_env_flag_enabled(const char *name, bool default_value) {
   return text != "0" && text != "false" && text != "False" &&
          text != "off" && text != "OFF";
 }
+
+// Keep the native primitive translation unit compatible with pre-CUDA-13
+// toolkits.  cuda::strided_iterator and the corresponding counting/transform
+// helpers live in <cuda/iterator>, which is not available in CUDA 11/12.  CUB
+// only needs a regular random-access iterator here, so these small local
+// iterators avoid a high-version CCCL dependency without changing the
+// algorithm, stream, or workspace behavior.
+template <typename T>
+class CudaStridedIterator {
+ public:
+  using value_type = T;
+  using difference_type = std::ptrdiff_t;
+  using pointer = T *;
+  using reference = T &;
+  using iterator_category = std::random_access_iterator_tag;
+
+  __host__ __device__ CudaStridedIterator() {
+  }
+
+  __host__ __device__ CudaStridedIterator(pointer base,
+                                          difference_type stride)
+      : base_(base), stride_(stride) {
+  }
+
+  __host__ __device__ reference operator*() const {
+    return base_[index_ * stride_];
+  }
+
+  __host__ __device__ reference operator[](difference_type offset) const {
+    return base_[(index_ + offset) * stride_];
+  }
+
+  __host__ __device__ CudaStridedIterator &operator++() {
+    ++index_;
+    return *this;
+  }
+
+  __host__ __device__ CudaStridedIterator operator++(int) {
+    CudaStridedIterator copy = *this;
+    ++index_;
+    return copy;
+  }
+
+  __host__ __device__ CudaStridedIterator &operator--() {
+    --index_;
+    return *this;
+  }
+
+  __host__ __device__ CudaStridedIterator operator--(int) {
+    CudaStridedIterator copy = *this;
+    --index_;
+    return copy;
+  }
+
+  __host__ __device__ CudaStridedIterator &operator+=(
+      difference_type offset) {
+    index_ += offset;
+    return *this;
+  }
+
+  __host__ __device__ CudaStridedIterator &operator-=(
+      difference_type offset) {
+    index_ -= offset;
+    return *this;
+  }
+
+  __host__ __device__ CudaStridedIterator operator+(
+      difference_type offset) const {
+    CudaStridedIterator copy = *this;
+    copy += offset;
+    return copy;
+  }
+
+  __host__ __device__ CudaStridedIterator operator-(
+      difference_type offset) const {
+    CudaStridedIterator copy = *this;
+    copy -= offset;
+    return copy;
+  }
+
+  __host__ __device__ difference_type operator-(
+      const CudaStridedIterator &other) const {
+    return index_ - other.index_;
+  }
+
+  __host__ __device__ bool operator==(
+      const CudaStridedIterator &other) const {
+    return base_ == other.base_ && stride_ == other.stride_ &&
+           index_ == other.index_;
+  }
+
+  __host__ __device__ bool operator!=(
+      const CudaStridedIterator &other) const {
+    return !(*this == other);
+  }
+
+  __host__ __device__ bool operator<(
+      const CudaStridedIterator &other) const {
+    return index_ < other.index_;
+  }
+
+  __host__ __device__ bool operator>(
+      const CudaStridedIterator &other) const {
+    return other < *this;
+  }
+
+  __host__ __device__ bool operator<=(
+      const CudaStridedIterator &other) const {
+    return !(other < *this);
+  }
+
+  __host__ __device__ bool operator>=(
+      const CudaStridedIterator &other) const {
+    return !(*this < other);
+  }
+
+ private:
+  pointer base_{nullptr};
+  difference_type stride_{1};
+  difference_type index_{0};
+};
+
+template <typename T, typename Op>
+class CudaIndexTransformIterator {
+ public:
+  using value_type = T;
+  using difference_type = std::ptrdiff_t;
+  using pointer = void;
+  using reference = T;
+  using iterator_category = std::random_access_iterator_tag;
+
+  __host__ __device__ CudaIndexTransformIterator() {
+  }
+
+  __host__ __device__ explicit CudaIndexTransformIterator(Op op) : op_(op) {
+  }
+
+  __host__ __device__ reference operator*() const {
+    return op_(static_cast<int>(index_));
+  }
+
+  __host__ __device__ reference operator[](difference_type offset) const {
+    return op_(static_cast<int>(index_ + offset));
+  }
+
+  __host__ __device__ CudaIndexTransformIterator &operator++() {
+    ++index_;
+    return *this;
+  }
+
+  __host__ __device__ CudaIndexTransformIterator operator++(int) {
+    CudaIndexTransformIterator copy = *this;
+    ++index_;
+    return copy;
+  }
+
+  __host__ __device__ CudaIndexTransformIterator &operator--() {
+    --index_;
+    return *this;
+  }
+
+  __host__ __device__ CudaIndexTransformIterator operator--(int) {
+    CudaIndexTransformIterator copy = *this;
+    --index_;
+    return copy;
+  }
+
+  __host__ __device__ CudaIndexTransformIterator &operator+=(
+      difference_type offset) {
+    index_ += offset;
+    return *this;
+  }
+
+  __host__ __device__ CudaIndexTransformIterator &operator-=(
+      difference_type offset) {
+    index_ -= offset;
+    return *this;
+  }
+
+  __host__ __device__ CudaIndexTransformIterator operator+(
+      difference_type offset) const {
+    CudaIndexTransformIterator copy = *this;
+    copy += offset;
+    return copy;
+  }
+
+  __host__ __device__ CudaIndexTransformIterator operator-(
+      difference_type offset) const {
+    CudaIndexTransformIterator copy = *this;
+    copy -= offset;
+    return copy;
+  }
+
+  __host__ __device__ difference_type operator-(
+      const CudaIndexTransformIterator &other) const {
+    return index_ - other.index_;
+  }
+
+  __host__ __device__ bool operator==(
+      const CudaIndexTransformIterator &other) const {
+    return index_ == other.index_;
+  }
+
+  __host__ __device__ bool operator!=(
+      const CudaIndexTransformIterator &other) const {
+    return !(*this == other);
+  }
+
+  __host__ __device__ bool operator<(
+      const CudaIndexTransformIterator &other) const {
+    return index_ < other.index_;
+  }
+
+  __host__ __device__ bool operator>(
+      const CudaIndexTransformIterator &other) const {
+    return other < *this;
+  }
+
+  __host__ __device__ bool operator<=(
+      const CudaIndexTransformIterator &other) const {
+    return !(other < *this);
+  }
+
+  __host__ __device__ bool operator>=(
+      const CudaIndexTransformIterator &other) const {
+    return !(*this < other);
+  }
+
+ private:
+  Op op_{};
+  difference_type index_{0};
+};
 
 struct CubSortCache {
   void *keys_out{nullptr};
@@ -2605,7 +2837,7 @@ std::size_t inclusive_reverse_scan_typed(CubScanCache &cache,
   cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   const bool use_stream = stream != nullptr;
   ensure_device_cache(cache);
-  auto reversed_in_out = ::cuda::make_strided_iterator(
+  CudaStridedIterator<T> reversed_in_out(
       data_in_out, static_cast<std::ptrdiff_t>(-1));
 
   std::size_t temp_storage_bytes = 0;
@@ -2645,8 +2877,7 @@ std::size_t inclusive_scan_strided_typed(CubScanCache &cache,
   const bool use_stream = stream != nullptr;
   ensure_device_cache(cache);
   const auto stride_items = static_cast<std::ptrdiff_t>(stride / sizeof(T));
-  auto strided_in_out =
-      ::cuda::make_strided_iterator(data_in_out, stride_items);
+  CudaStridedIterator<T> strided_in_out(data_in_out, stride_items);
 
   std::size_t temp_storage_bytes = 0;
   if (use_stream) {
@@ -2686,8 +2917,7 @@ std::size_t inclusive_reverse_scan_strided_typed(CubScanCache &cache,
   const bool use_stream = stream != nullptr;
   ensure_device_cache(cache);
   const auto stride_items = -static_cast<std::ptrdiff_t>(stride / sizeof(T));
-  auto reversed_in_out =
-      ::cuda::make_strided_iterator(last_item, stride_items);
+  CudaStridedIterator<T> reversed_in_out(last_item, stride_items);
 
   std::size_t temp_storage_bytes = 0;
   if (use_stream) {
@@ -3296,8 +3526,7 @@ std::size_t reduce_strided_typed(CubReduceCache &cache,
   ensure_device_cache(cache);
 
   StridedLoadOp<T> load_op{values_in, offset, stride};
-  auto counting = ::cuda::make_counting_iterator(0);
-  auto strided_in = ::cuda::make_transform_iterator(counting, load_op);
+  CudaIndexTransformIterator<T, StridedLoadOp<T>> strided_in(load_op);
 
   std::size_t temp_storage_bytes = 0;
   auto query = [&]() {
@@ -3452,8 +3681,7 @@ std::size_t check_count_typed(CubCheckCountCache &cache,
   ensure_device_cache(cache);
 
   CheckCountLoadOp<T> load_op{values_in, offset, stride, op, lower, upper};
-  auto counting = ::cuda::make_counting_iterator(0);
-  auto checks = ::cuda::make_transform_iterator(counting, load_op);
+  CudaIndexTransformIterator<int32_t, CheckCountLoadOp<T>> checks(load_op);
 
   std::size_t temp_storage_bytes = 0;
   if (use_stream) {
@@ -3559,8 +3787,7 @@ std::size_t metric_reduce_typed(CubMetricReduceCache &cache,
 
   MetricReduceLoadOp<T> load_op{values_in, other_in, values_offset,
                                 values_stride, other_offset, other_stride, op};
-  auto counting = ::cuda::make_counting_iterator(0);
-  auto metrics = ::cuda::make_transform_iterator(counting, load_op);
+  CudaIndexTransformIterator<T, MetricReduceLoadOp<T>> metrics(load_op);
 
   std::size_t temp_storage_bytes = 0;
   if (use_stream) {

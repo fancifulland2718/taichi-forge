@@ -2,6 +2,7 @@
 
 #include "taichi/common/core.h"
 #include "taichi/common/dynamic_loader.h"
+#include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
 
@@ -391,18 +392,15 @@ bool cuda_toolkit_driver_compatible_for_cub_sort() {
     return false;
   }
   constexpr int kToolkitMajor = TI_CUDA_TOOLKIT_VERSION_MAJOR;
-  constexpr int kToolkitMinor = TI_CUDA_TOOLKIT_VERSION_MINOR;
   const int driver_major = driver.get_version_major();
   const int driver_minor = driver.get_version_minor();
-  if (driver_major < kToolkitMajor ||
-      (driver_major == kToolkitMajor && driver_minor < kToolkitMinor)) {
+  if (!detail::supports_cuda_toolkit_major(driver_major, kToolkitMajor)) {
     cudart_load_error = fmt::format(
         "CUDA CUB native primitives were built with CUDA {}.{}, but the "
-        "NVIDIA driver reports CUDA {}.{}. This driver may reject the bundled "
-        "CUDA kernels with an unsupported toolchain error. Update the driver "
-        "or install a taichi-forge-runtime wheel built with an older CUDA "
-        "Toolkit.",
-        kToolkitMajor, kToolkitMinor, driver_major, driver_minor);
+        "NVIDIA driver reports CUDA {}.{}. A CUDA {}-compatible driver or "
+        "newer is required.",
+        kToolkitMajor, TI_CUDA_TOOLKIT_VERSION_MINOR, driver_major,
+        driver_minor, kToolkitMajor);
     TI_TRACE("{}", cudart_load_error);
     return false;
   }

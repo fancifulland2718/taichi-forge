@@ -4,10 +4,12 @@ This distribution contains platform-native Taichi Forge runtime libraries and
 runtime bitcode resources. It is installed as a dependency of the Python-facing
 `taichi-forge` distribution.
 
-Release wheels are currently built with CUDA Toolkit 13.2 for Forge native CUDA
-primitive methods and bundle the CUDA 13 runtime library. Installing
-`taichi-forge` does not require a local CUDA Toolkit; this requirement applies
-to building the platform runtime wheel.
+Each release publishes one runtime wheel per supported platform, not one wheel
+per CUDA version. The build uses one selected compatibility-baseline CUDA
+Toolkit for Forge native primitives and bundles its matching CUDA runtime
+library. The CUDA build version is internal metadata, not part of the
+distribution name, dependency, or wheel tag. Installing `taichi-forge` does
+not require a local CUDA Toolkit.
 
 It intentionally does not expose the public `taichi_forge` Python API. The
 Python package imports `taichi_forge_runtime` only to locate native resources.

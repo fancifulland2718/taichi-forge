@@ -177,6 +177,17 @@ TEST(CUDADevice, RejectsStaleWrongDeviceAndOutOfRangeAllocations) {
   device.dealloc_memory(replacement);
 }
 
+TEST(CUDAContext, ToolkitCompatibilityUsesCudaMajorVersion) {
+  using cuda::detail::supports_cuda_toolkit_major;
+
+  EXPECT_TRUE(supports_cuda_toolkit_major(11, 11));
+  EXPECT_TRUE(supports_cuda_toolkit_major(12, 11));
+  EXPECT_TRUE(supports_cuda_toolkit_major(12, 12));
+  EXPECT_TRUE(supports_cuda_toolkit_major(13, 12));
+  EXPECT_FALSE(supports_cuda_toolkit_major(11, 12));
+  EXPECT_FALSE(supports_cuda_toolkit_major(12, 13));
+}
+
 TEST(CUDADevice, RejectsDeallocationWhileMapped) {
   if (!CUDADriver::get_instance_without_context().detected()) {
     GTEST_SKIP();

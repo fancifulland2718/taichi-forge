@@ -17,11 +17,17 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 PACKAGE = "taichi_forge_runtime"
 WRONG_PACKAGE = "taichi_forge"
+CUDA_RUNTIME_MAJOR_MANIFEST = "cuda_runtime_major.txt"
 
 
-def _cmake_cache_values() -> dict[str, str]:
+def _cmake_cache_values(roots: list[Path] | None = None) -> dict[str, str]:
     values: dict[str, str] = {}
-    for cache in sorted(Path("_skbuild").rglob("CMakeCache.txt")):
+    search_roots = roots if roots is not None else [Path("_skbuild")]
+    for cache in sorted(
+        path
+        for root in search_roots
+        for path in root.rglob("CMakeCache.txt")
+    ):
         for line in cache.read_text(encoding="utf-8", errors="replace").splitlines():
             if not line or line.startswith("//") or line.startswith("#"):
                 continue
@@ -53,7 +59,28 @@ def _choose_artifact(candidates: list[Path], name: str) -> Path:
     return chosen
 
 
-def _artifact_roots() -> list[Path]:
+def _artifact_roots(
+    build_dir: Path | None = None, platform: str | None = None
+) -> list[Path]:
+    if build_dir is not None:
+        if not build_dir.is_dir():
+            raise SystemExit(f"Runtime build directory does not exist: {build_dir}")
+        if platform == "linux":
+            # Linux shared libraries keep their default build-tree location.
+            return [build_dir]
+        cache = _cmake_cache_values([build_dir])
+        source_dir = cache.get("CMAKE_HOME_DIRECTORY")
+        if not source_dir:
+            raise SystemExit(
+                f"CMAKE_HOME_DIRECTORY is missing from {build_dir / 'CMakeCache.txt'}"
+            )
+        runtime_dir = Path(source_dir) / "runtimes"
+        if not runtime_dir.is_dir():
+            raise SystemExit(
+                f"Runtime output directory from selected build does not exist: "
+                f"{runtime_dir}"
+            )
+        return [runtime_dir]
     roots = [Path("_skbuild"), Path("runtimes"), Path("dist-runtime")]
     return [root for root in roots if root.exists()]
 
@@ -101,7 +128,7 @@ def _linux_cudart_name(runtime_so: Path) -> str | None:
         {
             match.group(0).decode("ascii")
             for match in re.finditer(
-                rb"libcudart\.so\.13(?:\.[0-9]+)*",
+                rb"libcudart\.so\.[0-9]+(?:\.[0-9]+)*",
                 runtime_so.read_bytes(),
             )
         },
@@ -111,10 +138,30 @@ def _linux_cudart_name(runtime_so: Path) -> str | None:
     return matches[0] if matches else None
 
 
+def _cuda_runtime_major_from_name(platform: str, name: str) -> int:
+    if platform == "windows":
+        match = re.fullmatch(r"cudart64_(\d+)\.dll", name)
+    elif platform == "linux":
+        match = re.fullmatch(r"libcudart\.so\.(\d+)(?:\.\d+)*", name)
+    else:
+        raise ValueError(f"Unsupported CUDA runtime platform: {platform}")
+    if match is None:
+        raise ValueError(f"Unrecognized {platform} CUDA runtime name: {name}")
+    return int(match.group(1))
+
+
+def _is_cuda_runtime_name(platform: str, name: str) -> bool:
+    try:
+        _cuda_runtime_major_from_name(platform, name)
+    except ValueError:
+        return False
+    return True
+
+
 def _cuda_runtime_artifacts(
-    platform: str, artifacts: dict[str, Path]
+    platform: str, artifacts: dict[str, Path], roots: list[Path]
 ) -> dict[str, Path]:
-    cache = _cmake_cache_values()
+    cache = _cmake_cache_values(roots)
     if not _dynamic_cuda_runtime_required(cache):
         return {}
 
@@ -124,10 +171,6 @@ def _cuda_runtime_artifacts(
             raise SystemExit(
                 "Runtime build uses dynamic CUDA runtime, but taichi_runtime.dll "
                 "does not reference cudart64_*.dll"
-            )
-        if runtime_name != "cudart64_13.dll":
-            raise SystemExit(
-                f"Runtime build must bind CUDA 13 cudart, found {runtime_name}"
             )
         roots = _candidate_dirs_from_env(["CUDA_PATH", "CUDA_HOME", "CUDA_ROOT"])
         if cache.get("CUDAToolkit_BIN_DIR"):
@@ -146,7 +189,7 @@ def _cuda_runtime_artifacts(
         if runtime_name is None:
             raise SystemExit(
                 "Runtime build uses dynamic CUDA runtime, but libtaichi_runtime.so "
-                "does not reference CUDA 13 libcudart.so.13"
+                "does not reference a versioned libcudart.so"
             )
         roots = _candidate_dirs_from_env(["CUDA_PATH", "CUDA_HOME", "CUDA_ROOT"])
         implicit_dirs = cache.get("_cmake_CUDAToolkit_implicit_link_directories", "")
@@ -165,8 +208,11 @@ def _cuda_runtime_artifacts(
     return {}
 
 
-def _runtime_artifacts(platform: str) -> dict[str, Path]:
-    roots = _artifact_roots()
+def _runtime_artifacts(
+    platform: str, build_dir: Path | None = None
+) -> dict[str, Path]:
+    roots = _artifact_roots(build_dir, platform)
+    cache_roots = [build_dir] if build_dir is not None else roots
     if not roots:
         raise SystemExit("No runtime artifact search roots exist")
 
@@ -187,7 +233,7 @@ def _runtime_artifacts(platform: str) -> dict[str, Path]:
         )
     else:
         raise SystemExit(f"Unsupported platform: {platform}")
-    artifacts.update(_cuda_runtime_artifacts(platform, artifacts))
+    artifacts.update(_cuda_runtime_artifacts(platform, artifacts, cache_roots))
     return artifacts
 
 
@@ -244,8 +290,10 @@ def _rewrite_wheel(wheel: Path, root: Path) -> None:
     tmp.replace(wheel)
 
 
-def repair_wheel(wheel: Path, platform: str) -> None:
-    artifacts = _runtime_artifacts(platform)
+def repair_wheel(
+    wheel: Path, platform: str, build_dir: Path | None = None
+) -> None:
+    artifacts = _runtime_artifacts(platform, build_dir)
     with tempfile.TemporaryDirectory(prefix="taichi-runtime-wheel-") as td:
         root = Path(td)
         with ZipFile(wheel) as zf:
@@ -255,10 +303,43 @@ def repair_wheel(wheel: Path, platform: str) -> None:
 
         native_dir = root / PACKAGE / "_lib" / "runtime_native"
         native_dir.mkdir(parents=True, exist_ok=True)
+        manifest = native_dir / CUDA_RUNTIME_MAJOR_MANIFEST
+        manifest.unlink(missing_ok=True)
+        for existing in native_dir.iterdir():
+            if existing.is_file() and _is_cuda_runtime_name(
+                platform, existing.name
+            ):
+                existing.unlink()
+                print(
+                    "Removed stale wheel CUDA runtime: "
+                    f"{existing.relative_to(root)}"
+                )
         for filename, artifact in artifacts.items():
             dst = native_dir / filename
             shutil.copy2(artifact, dst)
             print(f"Installed wheel native artifact: {dst.relative_to(root)}")
+
+        cuda_runtime_names = [
+            name
+            for name in artifacts
+            if (platform == "windows" and name.startswith("cudart64_"))
+            or (platform == "linux" and name.startswith("libcudart.so."))
+        ]
+        if cuda_runtime_names:
+            if len(cuda_runtime_names) != 1:
+                raise SystemExit(
+                    "Expected one bundled CUDA runtime, found "
+                    f"{cuda_runtime_names}"
+                )
+            cuda_major = _cuda_runtime_major_from_name(
+                platform, cuda_runtime_names[0]
+            )
+            with manifest.open("w", encoding="ascii", newline="\n") as f:
+                f.write(f"{cuda_major}\n")
+            print(
+                "Installed wheel CUDA runtime manifest: "
+                f"{manifest.relative_to(root)} -> {cuda_major}"
+            )
 
         wrong_entries = sorted((root / WRONG_PACKAGE).rglob("*")) if (root / WRONG_PACKAGE).exists() else []
         if wrong_entries:
@@ -272,13 +353,18 @@ def repair_wheel(wheel: Path, platform: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--wheel-dir", default="dist-runtime")
+    parser.add_argument(
+        "--build-dir",
+        type=Path,
+        help="Use artifacts and CMake metadata only from this wheel build directory",
+    )
     parser.add_argument("--platform", choices=["linux", "windows"], required=True)
     args = parser.parse_args()
 
     wheels = sorted(Path(args.wheel_dir).glob("*.whl"))
     if len(wheels) != 1:
         raise SystemExit(f"Expected one runtime wheel, found {[str(w) for w in wheels]}")
-    repair_wheel(wheels[0], args.platform)
+    repair_wheel(wheels[0], args.platform, args.build_dir)
 
 
 if __name__ == "__main__":

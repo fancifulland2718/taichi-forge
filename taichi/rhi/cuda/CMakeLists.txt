@@ -40,11 +40,6 @@ if (TI_WITH_CUDA_TOOLKIT)
       TI_CUDA_TOOLKIT_VERSION_MINOR=${CUDAToolkit_VERSION_MINOR})
 
   if (TI_CUDA_CUB_SORT_DYNAMIC_CUDART)
-    if (NOT CUDAToolkit_VERSION_MAJOR STREQUAL "13")
-      message(FATAL_ERROR
-        "TI_CUDA_CUB_SORT_DYNAMIC_CUDART is currently pinned to CUDA 13; "
-        "found CUDA Toolkit ${CUDAToolkit_VERSION}")
-    endif()
     target_link_libraries(${CUDA_RHI} PUBLIC CUDA::cudart)
     set_property(TARGET ${CUDA_RHI} PROPERTY CUDA_RUNTIME_LIBRARY Shared)
     target_compile_definitions(${CUDA_RHI}
@@ -85,10 +80,11 @@ if (TI_WITH_CUDA_TOOLKIT)
       # plus compute_75 PTX; newer devices can JIT the PTX.
       set(TI_CUDA_RHI_ARCHITECTURES 75-real 75-virtual)
     else()
-      # CUDA 11/12 release builds can use a lower PTX baseline to cover a wider
-      # NVIDIA driver/GPU range with one wheel.  Builders that prefer a native
-      # fatbin can still pass -DCMAKE_CUDA_ARCHITECTURES=all explicitly.
-      set(TI_CUDA_RHI_ARCHITECTURES 52-real 52-virtual)
+      # Lowering the Toolkit/runtime driver requirement must not silently
+      # expand Forge's supported GPU range to legacy architectures.  Preserve
+      # the current sm_75 baseline unless a release build supplies an explicit
+      # architecture matrix.
+      set(TI_CUDA_RHI_ARCHITECTURES 75-real 75-virtual)
     endif()
   endif()
   message(STATUS "CUDA RHI architectures: ${TI_CUDA_RHI_ARCHITECTURES}")

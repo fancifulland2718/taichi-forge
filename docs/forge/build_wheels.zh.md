@@ -84,21 +84,24 @@ asset 的兼容版本，不是 driver 或 Toolkit 版本探测。发布验证应
 
 ## Native 方法的 CUDA Toolkit 要求
 
-Forge 的 CUDA native primitive 方法在平台 runtime wheel 中构建。当前发布 workflow 对
-runtime 构建硬性要求 CUDA Toolkit `13.2.0`，因为 native CUDA 实现引用了
-`<cuda/iterator>` 等 CUDA/CCCL 版本专属头文件，这些头文件在较旧的 CUDA 13.0 toolkit
-中不可用。
+Forge 的 CUDA native primitive 方法会构建进唯一的平台 runtime 发行包。一次发行只发布
+一个 Windows `taichi-forge-runtime` wheel 和一个 Linux wheel；发行名、依赖名和 wheel tag
+都不得带 CUDA 版本后缀。`CUDA_TOOLKIT_VERSION` 选择的 Toolkit 只是内部构建基线，不会
+形成另一套包。
 
-runtime workflow 使用 `Jimver/cuda-toolkit@v0.2.35`、`method: network` 安装 CUDA
-Toolkit `13.2.0`，用 `CUDA_TOOLKIT_VERSION` 校验 `nvcc -V`，并检查 runtime wheel 中
-包含 CUDA 13 runtime library：
+较低基线的发行验证完成前，workflow 默认值仍为 CUDA Toolkit `13.2.0`。native iterator
+adapter 已改为仓库内实现，不再依赖 CUDA 13.2 专属的 `<cuda/iterator>` 头文件。workflow
+会依据 `CUDA_TOOLKIT_VERSION` 校验 `nvcc -V`，并打包唯一一个匹配的动态 CUDART 和
+`cuda_runtime_major.txt`。随所选基线不同，文件形式为：
 
-- Windows：`taichi_forge_runtime/_lib/runtime_native/cudart64_13.dll`
-- Linux：`taichi_forge_runtime/_lib/runtime_native/libcudart.so.13*`
+- Windows：`cudart64_<major>.dll`
+- Linux：`libcudart.so.<major>*`（auditwheel 可能给文件名加 hash）
 
-用户安装 `taichi-forge` 不需要本机安装 CUDA Toolkit，但构建带 CUDA native 方法的
-`taichi-forge-runtime` wheel 必须安装 CUDA Toolkit。除非同步重写 native CUDA iterator
-代码，否则不要把 runtime 构建降到 CUDA 13.0 或 13.1。
+Python shim 会读取清单并定位这份随包库，调用方无需选择 CUDA 专属 extra 或包。用户安装
+`taichi-forge` 因此不需要本机 CUDA Toolkit；只有构建 runtime wheel 时才需要所选 Toolkit。
+降低驱动版本门槛应通过验证并下调这一处构建基线完成，不能发布平行的 `cu11`、`cu12`、
+`cu13` wheel。在目标驱动范围完成 GPU 实测前不得宣称更低的驱动下限；Toolkit 11.8/12.x
+以及 Linux 实包验证仍是发行门槛。
 
 ## LLVM 20
 

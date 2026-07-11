@@ -3,6 +3,7 @@
 
 import os
 import platform
+import re
 from pathlib import Path
 
 import numpy as np
@@ -10,7 +11,25 @@ import numpy as np
 import taichi_forge as ti
 
 
-def _validate_packaged_cuda_runtime() -> Path:
+def _packaged_cuda_runtime_major(path: Path) -> int:
+    name = path.name.lower()
+    if platform.system() == "Windows":
+        match = re.fullmatch(r"cudart64_(\d+)\.dll", name)
+    elif platform.system() == "Linux":
+        match = re.fullmatch(
+            r"(?:libcudart\.so\.|libcudart-[^.]+\.so\.)(\d+)(?:\.\d+)*",
+            name,
+        )
+    else:
+        raise RuntimeError(
+            f"unsupported platform for bundled CUDART validation: {platform.system()}"
+        )
+    if match is None:
+        raise RuntimeError(f"unrecognized bundled CUDART name: {path.name}")
+    return int(match.group(1))
+
+
+def _validate_packaged_cuda_runtime() -> tuple[Path, int]:
     candidate = os.environ.get("TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH", "")
     if not candidate:
         raise RuntimeError("the installed runtime did not discover bundled CUDART")
@@ -18,16 +37,23 @@ def _validate_packaged_cuda_runtime() -> Path:
     if not path.is_file():
         raise RuntimeError(f"the discovered bundled CUDART does not exist: {path}")
 
-    system = platform.system()
-    name = path.name.lower()
-    if system == "Windows" and name != "cudart64_13.dll":
-        raise RuntimeError(f"expected CUDA 13 CUDART on Windows, found {path.name}")
-    if system == "Linux" and not (
-        name.startswith("libcudart.so.13")
-        or (name.startswith("libcudart-") and ".so.13" in name)
-    ):
-        raise RuntimeError(f"expected CUDA 13 CUDART on Linux, found {path.name}")
-    return path
+    major = _packaged_cuda_runtime_major(path)
+    declared_major = os.environ.get(
+        "TI_CUDA_CUB_SORT_BUNDLED_CUDART_MAJOR", ""
+    )
+    if declared_major:
+        try:
+            declared_major_value = int(declared_major)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"invalid bundled CUDART manifest major: {declared_major!r}"
+            ) from exc
+        if declared_major_value != major:
+            raise RuntimeError(
+                "bundled CUDART manifest/library mismatch: "
+                f"manifest={declared_major_value}, library={path.name}"
+            )
+    return path, major
 
 
 def _validate_cpu_native_ad() -> None:
@@ -54,9 +80,12 @@ def _validate_cpu_native_ad() -> None:
 
 
 def main() -> None:
-    cudart = _validate_packaged_cuda_runtime()
+    cudart, cudart_major = _validate_packaged_cuda_runtime()
     _validate_cpu_native_ad()
-    print(f"installed runtime validation passed; bundled CUDART: {cudart}")
+    print(
+        "installed runtime validation passed; "
+        f"bundled CUDART major {cudart_major}: {cudart}"
+    )
 
 
 if __name__ == "__main__":

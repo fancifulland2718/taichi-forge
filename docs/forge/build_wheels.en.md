@@ -95,23 +95,30 @@ major version matches this value after installation.
 
 ## CUDA Toolkit for Native Methods
 
-Forge native CUDA primitive methods are built in the platform runtime wheel.
-The current release workflow hard-requires CUDA Toolkit `13.2.0` for that
-runtime build because the native CUDA implementation includes CUDA/CCCL headers
-such as `<cuda/iterator>` that are not available in older CUDA 13.0 toolkits.
+Forge native CUDA primitive methods are built into the single platform runtime
+distribution. A release publishes one `taichi-forge-runtime` wheel for Windows
+and one for Linux; the distribution name, dependency and wheel tag never carry
+a CUDA version suffix. The Toolkit selected by `CUDA_TOOLKIT_VERSION` is an
+internal build baseline, not a separate package variant.
 
-The runtime workflow installs CUDA Toolkit `13.2.0` with
-`Jimver/cuda-toolkit@v0.2.35` using `method: network`, verifies `nvcc -V`
-against `CUDA_TOOLKIT_VERSION`, and validates that the runtime wheel bundles the
-CUDA 13 runtime library:
+The current workflow default remains CUDA Toolkit `13.2.0` while lower-baseline
+release validation is in progress. Native iterator adapters are implemented in
+the repository and no longer require the CUDA-13.2-only `<cuda/iterator>`
+header. The workflow verifies `nvcc -V` against `CUDA_TOOLKIT_VERSION` and
+packages exactly one matching dynamic CUDART plus
+`cuda_runtime_major.txt`. Depending on the selected baseline, examples are:
 
-- Windows: `taichi_forge_runtime/_lib/runtime_native/cudart64_13.dll`
-- Linux: `taichi_forge_runtime/_lib/runtime_native/libcudart.so.13*`
+- Windows: `cudart64_<major>.dll`
+- Linux: `libcudart.so.<major>*` (auditwheel may hash the filename)
 
-Installing `taichi-forge` does not require users to install the CUDA Toolkit
-locally, but building the `taichi-forge-runtime` wheel with native CUDA methods
-does. Do not downgrade the runtime build to CUDA 13.0 or 13.1 unless the native
-CUDA iterator code is also rewritten.
+The Python shim reads the manifest and locates that bundled library; callers do
+not select a CUDA-specific extra or package. Installing `taichi-forge` therefore
+does not require a local CUDA Toolkit. Building the runtime wheel does require
+the selected Toolkit. A lower driver floor is obtained by validating and then
+lowering the one build baseline, not by publishing parallel `cu11`, `cu12`, or
+`cu13` wheels. Do not claim a lower driver floor until that wheel has passed GPU
+tests on the target driver range; Toolkit 11.8/12.x and Linux validation remain
+release gates.
 
 ## LLVM 20
 
