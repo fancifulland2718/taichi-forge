@@ -204,18 +204,18 @@ def test_installed_runtime_validator_requires_matching_distribution_versions(
 
 
 def test_shared_wheel_validator_accepts_windows_and_manylinux_pair(tmp_path):
-    windows = tmp_path / "taichi_forge_runtime-0.4.2-py3-none-win_amd64.whl"
+    windows = tmp_path / "taichi_forge_runtime-0.4.3-py3-none-win_amd64.whl"
     linux = (
         tmp_path
-        / "taichi_forge_runtime-0.4.2-py3-none-manylinux_2_35_x86_64.whl"
+        / "taichi_forge_runtime-0.4.3-py3-none-manylinux_2_35_x86_64.whl"
     )
     _write_runtime_wheel(
-        windows, platform="windows", version="0.4.2", cuda_major=12
+        windows, platform="windows", version="0.4.3", cuda_major=12
     )
     _write_runtime_wheel(
         linux,
         platform="manylinux",
-        version="0.4.2",
+        version="0.4.3",
         cuda_major=12,
         hashed_runtime=True,
         auditwheel_layout=True,
@@ -231,12 +231,12 @@ def test_shared_wheel_validator_accepts_windows_and_manylinux_pair(tmp_path):
 def test_manylinux_normalizer_prunes_raw_cudart_and_rewrites_record(tmp_path):
     wheel = (
         tmp_path
-        / "taichi_forge_runtime-0.4.2-py3-none-manylinux_2_35_x86_64.whl"
+        / "taichi_forge_runtime-0.4.3-py3-none-manylinux_2_35_x86_64.whl"
     )
     _write_runtime_wheel(
         wheel,
         platform="manylinux",
-        version="0.4.2",
+        version="0.4.3",
         cuda_major=13,
         auditwheel_layout=True,
         duplicate_raw_cudart=True,
@@ -270,11 +270,11 @@ def test_manylinux_normalizer_prunes_raw_cudart_and_rewrites_record(tmp_path):
 
 
 def test_shared_wheel_validator_rejects_stale_second_cudart(tmp_path):
-    wheel = tmp_path / "taichi_forge_runtime-0.4.2-py3-none-win_amd64.whl"
+    wheel = tmp_path / "taichi_forge_runtime-0.4.3-py3-none-win_amd64.whl"
     _write_runtime_wheel(
         wheel,
         platform="windows",
-        version="0.4.2",
+        version="0.4.3",
         cuda_major=12,
         extra_cudart_major=11,
     )
@@ -284,11 +284,11 @@ def test_shared_wheel_validator_rejects_stale_second_cudart(tmp_path):
 
 
 def test_shared_wheel_validator_rejects_cudart_outside_runtime_package(tmp_path):
-    wheel = tmp_path / "taichi_forge_runtime-0.4.2-py3-none-win_amd64.whl"
+    wheel = tmp_path / "taichi_forge_runtime-0.4.3-py3-none-win_amd64.whl"
     _write_runtime_wheel(
         wheel,
         platform="windows",
-        version="0.4.2",
+        version="0.4.3",
         cuda_major=12,
         misplaced_cudart=True,
     )
@@ -298,16 +298,16 @@ def test_shared_wheel_validator_rejects_cudart_outside_runtime_package(tmp_path)
 
 
 def test_shared_wheel_validator_rejects_pair_with_different_majors(tmp_path):
-    windows = tmp_path / "taichi_forge_runtime-0.4.2-py3-none-win_amd64.whl"
+    windows = tmp_path / "taichi_forge_runtime-0.4.3-py3-none-win_amd64.whl"
     linux = (
         tmp_path
-        / "taichi_forge_runtime-0.4.2-py3-none-manylinux_2_35_x86_64.whl"
+        / "taichi_forge_runtime-0.4.3-py3-none-manylinux_2_35_x86_64.whl"
     )
     _write_runtime_wheel(
-        windows, platform="windows", version="0.4.2", cuda_major=12
+        windows, platform="windows", version="0.4.3", cuda_major=12
     )
     _write_runtime_wheel(
-        linux, platform="manylinux", version="0.4.2", cuda_major=13
+        linux, platform="manylinux", version="0.4.3", cuda_major=13
     )
 
     with pytest.raises(RuntimeError, match="CUDART majors differ"):
@@ -315,9 +315,9 @@ def test_shared_wheel_validator_rejects_pair_with_different_majors(tmp_path):
 
 
 def test_shared_wheel_validator_rejects_cuda_versioned_release(tmp_path):
-    wheel = tmp_path / "taichi_forge_runtime-0.4.2+cu12-py3-none-win_amd64.whl"
+    wheel = tmp_path / "taichi_forge_runtime-0.4.3+cu12-py3-none-win_amd64.whl"
     _write_runtime_wheel(
-        wheel, platform="windows", version="0.4.2+cu12", cuda_major=12
+        wheel, platform="windows", version="0.4.3+cu12", cuda_major=12
     )
 
     with pytest.raises(RuntimeError, match="CUDA-versioned runtime wheel"):
@@ -334,18 +334,18 @@ def test_shared_wheel_validator_rejects_cuda_versioned_release(tmp_path):
 def test_shim_wheel_validator_accepts_runtime_free_wheel(
     tmp_path, platform, tag
 ):
-    wheel = tmp_path / f"taichi_forge-0.4.2-{tag}.whl"
-    _write_shim_wheel(wheel, platform=platform, version="0.4.2")
+    wheel = tmp_path / f"taichi_forge-0.4.3-{tag}.whl"
+    _write_shim_wheel(wheel, platform=platform, version="0.4.3")
 
-    assert validate_shim_wheel.validate_shim_wheel(wheel, platform) == "0.4.2"
+    assert validate_shim_wheel.validate_shim_wheel(wheel, platform) == "0.4.3"
 
 
 def test_shim_wheel_validator_rejects_duplicate_runtime(tmp_path):
-    wheel = tmp_path / "taichi_forge-0.4.2-cp310-cp310-win_amd64.whl"
+    wheel = tmp_path / "taichi_forge-0.4.3-cp310-cp310-win_amd64.whl"
     _write_shim_wheel(
         wheel,
         platform="windows",
-        version="0.4.2",
+        version="0.4.3",
         duplicate_runtime=True,
     )
 
@@ -354,11 +354,11 @@ def test_shim_wheel_validator_rejects_duplicate_runtime(tmp_path):
 
 
 def test_shim_wheel_validator_rejects_mismatched_runtime_version(tmp_path):
-    wheel = tmp_path / "taichi_forge-0.4.2-cp310-cp310-win_amd64.whl"
+    wheel = tmp_path / "taichi_forge-0.4.3-cp310-cp310-win_amd64.whl"
     _write_shim_wheel(
         wheel,
         platform="windows",
-        version="0.4.2",
+        version="0.4.3",
         runtime_version="0.4.1",
     )
 

@@ -159,7 +159,7 @@ struct CompileConfig {
   //   - vulkan_pointer_ambient_zone: G10-P2 inactive read 路由零页（true=ON）
   //   - vulkan_pointer_cas_marker: G1.a CAS-marker-first alloc 协议（true=ON）
   //   - vulkan_pointer_pool_fraction: 池容量收缩比例 (0,1]，1.0=不收缩
-  // 各字段语义详见 compile_doc/SNode_Vulkan_规划.md §10.4.2。
+  // 各字段语义详见 compile_doc/SNode_Vulkan_规划.md §10.4.3。
   bool vulkan_pointer_freelist{true};
   bool vulkan_pointer_ambient_zone{true};
   bool vulkan_pointer_cas_marker{true};
