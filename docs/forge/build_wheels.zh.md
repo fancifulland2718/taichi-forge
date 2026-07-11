@@ -104,6 +104,10 @@ adapter 已改为仓库内实现，不再依赖 CUDA 13.2 专属的 `<cuda/itera
 `scripts/validate_runtime_wheel.py` 是 raw Linux wheel、auditwheel 修复后的 manylinux
 wheel、Windows wheel 和最终 Windows+Linux 成对产物共用的发行门禁。它会核对项目名/版本、
 唯一 native runtime、唯一且与清单一致的 CUDART，以及两个系统包的 CUDART major 相同。
+在 Linux 上，`auditwheel repair` 会把 DT_NEEDED 的 CUDART 加 hash 后放入
+`taichi_forge_runtime.libs`，但可能保留 raw wheel 在 `runtime_native` 中的数据文件副本。
+因此 workflow 会先核对 hashed 副本与 manifest、删除已被替代的 raw 副本并重写
+`RECORD`，然后才运行 manylinux 校验；最终发行 wheel 必须只包含一份 CUDART。
 两个 distribution 安装后，`scripts/validate_installed_runtime.py` 还会要求 shim/runtime
 版本相同，并确认实际选择的 CUDART 路径属于 runtime 包或其 auditwheel `.libs` 目录。
 每个 CPython 构建都会运行 `scripts/validate_shim_wheel.py`，拒绝重复的

@@ -203,6 +203,9 @@ jobs:
           mkdir -p wheelhouse-runtime
           auditwheel show dist-runtime/*.whl || true
           auditwheel repair dist-runtime/*.whl -w wheelhouse-runtime/ --plat manylinux_2_35_x86_64
+          python scripts/repair_runtime_wheel.py \
+            --wheel-dir wheelhouse-runtime --platform manylinux
+          auditwheel show wheelhouse-runtime/*.whl
           cuda_major="${CUDA_TOOLKIT_VERSION%%.*}"
           python scripts/validate_runtime_wheel.py \
             --wheel-dir wheelhouse-runtime --platform manylinux \

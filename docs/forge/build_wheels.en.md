@@ -119,6 +119,11 @@ packages exactly one matching dynamic CUDART plus
 Linux wheel, the auditwheel-repaired manylinux wheel, the Windows wheel, and
 the final Windows+Linux pair. It verifies project/version identity, one native
 runtime, one matching CUDART/manifest, and equal CUDART majors across the pair.
+On Linux, `auditwheel repair` hashes the DT_NEEDED CUDART into
+`taichi_forge_runtime.libs` but can leave the raw wheel's data-file copy in
+`runtime_native`. The workflow therefore verifies the hashed copy against the
+manifest, removes the superseded raw copy, rewrites `RECORD`, and only then
+runs the manylinux validator. A release wheel must contain exactly one CUDART.
 After installing both distributions, `scripts/validate_installed_runtime.py`
 also requires equal shim/runtime versions and verifies that the selected
 CUDART path belongs to the runtime package (or its auditwheel `.libs` directory).

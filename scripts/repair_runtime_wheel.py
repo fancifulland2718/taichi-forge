@@ -150,6 +150,14 @@ def _cuda_runtime_major_from_name(platform: str, name: str) -> int:
     return int(match.group(1))
 
 
+def _manylinux_cuda_runtime_major_from_name(name: str) -> int | None:
+    match = re.fullmatch(
+        r"libcudart(?:-[^.]+)?\.so\.(\d+)(?:\.\d+)*",
+        name,
+    )
+    return int(match.group(1)) if match else None
+
+
 def _is_cuda_runtime_name(platform: str, name: str) -> bool:
     try:
         _cuda_runtime_major_from_name(platform, name)
@@ -290,6 +298,81 @@ def _rewrite_wheel(wheel: Path, root: Path) -> None:
     tmp.replace(wheel)
 
 
+def normalize_manylinux_wheel(wheel: Path) -> None:
+    """Remove the raw CUDART copy superseded by auditwheel's hashed copy."""
+    with tempfile.TemporaryDirectory(prefix="taichi-manylinux-wheel-") as td:
+        root = Path(td)
+        with ZipFile(wheel) as zf:
+            zf.extractall(root)
+
+        native_dir = root / PACKAGE / "_lib" / "runtime_native"
+        manifest = native_dir / CUDA_RUNTIME_MAJOR_MANIFEST
+        if not manifest.is_file():
+            raise SystemExit(
+                f"CUDA runtime manifest is missing from repaired wheel: {manifest}"
+            )
+        major_text = manifest.read_text(encoding="ascii").strip()
+        if not major_text.isdigit() or int(major_text) <= 0:
+            raise SystemExit(
+                f"Invalid CUDA runtime manifest in repaired wheel: {major_text!r}"
+            )
+        manifest_major = int(major_text)
+
+        auditwheel_dir = root / f"{PACKAGE}.libs"
+        auditwheel_cudarts = [
+            path
+            for path in sorted(auditwheel_dir.glob("libcudart-*.so.*"))
+            if _manylinux_cuda_runtime_major_from_name(path.name) is not None
+        ]
+        if len(auditwheel_cudarts) != 1:
+            raise SystemExit(
+                "Expected one auditwheel-managed hashed CUDART, found "
+                f"{[path.relative_to(root) for path in auditwheel_cudarts]}"
+            )
+        auditwheel_major = _manylinux_cuda_runtime_major_from_name(
+            auditwheel_cudarts[0].name
+        )
+        if auditwheel_major != manifest_major:
+            raise SystemExit(
+                "Auditwheel CUDART conflicts with runtime manifest: "
+                f"manifest={manifest_major}, library={auditwheel_cudarts[0].name}"
+            )
+
+        raw_cudarts = [
+            path
+            for path in sorted(native_dir.glob("libcudart.so.*"))
+            if _manylinux_cuda_runtime_major_from_name(path.name) is not None
+        ]
+        for path in raw_cudarts:
+            raw_major = _manylinux_cuda_runtime_major_from_name(path.name)
+            if raw_major != manifest_major:
+                raise SystemExit(
+                    "Raw CUDART conflicts with runtime manifest: "
+                    f"manifest={manifest_major}, library={path.name}"
+                )
+            path.unlink()
+            print(
+                "Removed raw CUDART superseded by auditwheel: "
+                f"{path.relative_to(root)}"
+            )
+
+        remaining_cudarts = [
+            path
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+            and _manylinux_cuda_runtime_major_from_name(path.name) is not None
+        ]
+        if remaining_cudarts != auditwheel_cudarts:
+            raise SystemExit(
+                "Expected only the auditwheel-managed CUDART after normalization, "
+                f"found {[path.relative_to(root) for path in remaining_cudarts]}"
+            )
+
+        _rewrite_record(root)
+        _rewrite_wheel(wheel, root)
+    print(f"Normalized manylinux runtime wheel: {wheel}")
+
+
 def repair_wheel(
     wheel: Path, platform: str, build_dir: Path | None = None
 ) -> None:
@@ -358,13 +441,22 @@ def main() -> None:
         type=Path,
         help="Use artifacts and CMake metadata only from this wheel build directory",
     )
-    parser.add_argument("--platform", choices=["linux", "windows"], required=True)
+    parser.add_argument(
+        "--platform",
+        choices=["linux", "manylinux", "windows"],
+        required=True,
+    )
     args = parser.parse_args()
 
     wheels = sorted(Path(args.wheel_dir).glob("*.whl"))
     if len(wheels) != 1:
         raise SystemExit(f"Expected one runtime wheel, found {[str(w) for w in wheels]}")
-    repair_wheel(wheels[0], args.platform, args.build_dir)
+    if args.platform == "manylinux":
+        if args.build_dir is not None:
+            raise SystemExit("--build-dir is not used for manylinux normalization")
+        normalize_manylinux_wheel(wheels[0])
+    else:
+        repair_wheel(wheels[0], args.platform, args.build_dir)
 
 
 if __name__ == "__main__":

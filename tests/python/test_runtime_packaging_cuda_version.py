@@ -24,6 +24,8 @@ def _write_runtime_wheel(
     extra_cudart_major: int | None = None,
     hashed_runtime: bool = False,
     misplaced_cudart: bool = False,
+    auditwheel_layout: bool = False,
+    duplicate_raw_cudart: bool = False,
 ) -> None:
     dist_info = f"taichi_forge_runtime-{version}.dist-info"
     native = "taichi_forge_runtime/_lib/runtime_native"
@@ -36,7 +38,11 @@ def _write_runtime_wheel(
             if hashed_runtime
             else "libtaichi_runtime.so"
         )
-        cudart_name = f"libcudart-deadbeef.so.{cuda_major}"
+        cudart_name = (
+            f"libcudart-deadbeef.so.{cuda_major}.2.75"
+            if auditwheel_layout
+            else f"libcudart.so.{cuda_major}"
+        )
     with ZipFile(wheel, "w") as zf:
         zf.writestr(
             f"{dist_info}/METADATA",
@@ -45,8 +51,18 @@ def _write_runtime_wheel(
         zf.writestr(f"{dist_info}/RECORD", "")
         zf.writestr(f"{native}/cuda_runtime_major.txt", f"{cuda_major}\n")
         zf.writestr(f"{native}/{runtime_name}", b"runtime")
-        cudart_dir = "unrelated_package" if misplaced_cudart else native
+        if misplaced_cudart:
+            cudart_dir = "unrelated_package"
+        elif auditwheel_layout:
+            cudart_dir = "taichi_forge_runtime.libs"
+        else:
+            cudart_dir = native
         zf.writestr(f"{cudart_dir}/{cudart_name}", b"cudart")
+        if duplicate_raw_cudart:
+            zf.writestr(
+                f"{native}/libcudart.so.{cuda_major}",
+                b"redundant raw cudart",
+            )
         if platform == "windows":
             zf.writestr(f"{native}/taichi_runtime.lib", b"import library")
         if extra_cudart_major is not None:
@@ -202,6 +218,7 @@ def test_shared_wheel_validator_accepts_windows_and_manylinux_pair(tmp_path):
         version="0.4.2",
         cuda_major=12,
         hashed_runtime=True,
+        auditwheel_layout=True,
     )
 
     infos = validate_runtime_wheel.validate_runtime_wheels(
@@ -209,6 +226,47 @@ def test_shared_wheel_validator_accepts_windows_and_manylinux_pair(tmp_path):
     )
 
     assert {info.platform for info in infos} == {"windows", "manylinux"}
+
+
+def test_manylinux_normalizer_prunes_raw_cudart_and_rewrites_record(tmp_path):
+    wheel = (
+        tmp_path
+        / "taichi_forge_runtime-0.4.2-py3-none-manylinux_2_35_x86_64.whl"
+    )
+    _write_runtime_wheel(
+        wheel,
+        platform="manylinux",
+        version="0.4.2",
+        cuda_major=13,
+        auditwheel_layout=True,
+        duplicate_raw_cudart=True,
+    )
+
+    with pytest.raises(RuntimeError, match="Expected one CUDART"):
+        validate_runtime_wheel.inspect_runtime_wheel(wheel)
+
+    repair_runtime_wheel.normalize_manylinux_wheel(wheel)
+    info = validate_runtime_wheel.inspect_runtime_wheel(wheel)
+
+    assert info.cuda_major == 13
+    with ZipFile(wheel) as zf:
+        names = zf.namelist()
+        assert (
+            "taichi_forge_runtime/_lib/runtime_native/libcudart.so.13"
+            not in names
+        )
+        hashed = [
+            name
+            for name in names
+            if name.startswith("taichi_forge_runtime.libs/libcudart-")
+        ]
+        assert len(hashed) == 1
+        record_name = next(
+            name for name in names if name.endswith(".dist-info/RECORD")
+        )
+        record = zf.read(record_name).decode("utf-8")
+        assert hashed[0] in record
+        assert "runtime_native/libcudart.so.13" not in record
 
 
 def test_shared_wheel_validator_rejects_stale_second_cudart(tmp_path):
@@ -337,6 +395,28 @@ def test_shim_uses_single_runtime_manifest_major(
     assert os.environ[major_var] == str(major)
 
 
+def test_shim_discovers_auditwheel_cudart_separate_from_manifest(
+    monkeypatch, tmp_path
+):
+    native = tmp_path / "taichi_forge_runtime" / "_lib" / "runtime_native"
+    auditwheel_libs = tmp_path / "taichi_forge_runtime.libs"
+    native.mkdir(parents=True)
+    auditwheel_libs.mkdir()
+    (native / "cuda_runtime_major.txt").write_text("13\n", encoding="ascii")
+    cudart = auditwheel_libs / "libcudart-deadbeef.so.13.2.75"
+    cudart.write_bytes(b"")
+    monkeypatch.setattr(runtime_utils, "get_os_name", lambda: "linux")
+
+    runtime_utils._prepare_bundled_cuda_runtime(
+        [str(native), str(auditwheel_libs)]
+    )
+
+    assert Path(
+        os.environ["TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH"]
+    ) == cudart
+    assert os.environ["TI_CUDA_CUB_SORT_BUNDLED_CUDART_MAJOR"] == "13"
+
+
 def test_shim_rejects_conflicting_runtime_manifests(monkeypatch, tmp_path):
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -440,9 +520,13 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
     assert "matrix:" not in workflow
     assert workflow.count("scripts/validate_runtime_wheel.py") == 4
     assert "--wheel-dir dist-runtime --platform linux" in workflow
-    assert "--wheel-dir wheelhouse-runtime --platform manylinux" in workflow
+    assert (
+        workflow.count("--wheel-dir wheelhouse-runtime --platform manylinux")
+        == 2
+    )
     assert "--wheel-dir dist-runtime --platform windows" in workflow
     assert "--wheel-dir dist --platform pair" in workflow
+    assert "auditwheel show wheelhouse-runtime/*.whl" in workflow
     assert "Reject implicit CUDA Toolkit DLL imports" in workflow
     assert "cudart64_|cupti64_|nvrtc64_" in workflow
     assert not re.search(
