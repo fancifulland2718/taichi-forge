@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <mutex>
 
 #include "taichi/common/dynamic_loader.h"
@@ -48,6 +50,52 @@ constexpr uint32 CU_LIMIT_STACK_SIZE = 0;
 
 std::string get_cuda_error_message(uint32 err);
 
+// A low-overhead contention indicator for host-side CUDA locks. The regular
+// path preserves std::mutex semantics; only one acquisition per thread per
+// sampling period first tries the lock and records whether it was contended.
+class CUDASampledLockTelemetry {
+ public:
+  struct Snapshot {
+    uint64_t sampled_acquisitions;
+    uint64_t contended_acquisitions;
+  };
+
+  static constexpr uint32_t kSamplingPeriod = 64;
+
+  std::unique_lock<std::mutex> acquire(std::mutex &mutex) {
+    if ((++sampling_tick_ & (kSamplingPeriod - 1)) != 0) {
+      return std::unique_lock<std::mutex>(mutex);
+    }
+
+    if (!mutex.try_lock()) {
+      sampled_acquisitions_.fetch_add(1, std::memory_order_relaxed);
+      contended_acquisitions_.fetch_add(1, std::memory_order_relaxed);
+      mutex.lock();
+    } else {
+      sampled_acquisitions_.fetch_add(1, std::memory_order_relaxed);
+    }
+    return std::unique_lock<std::mutex>(mutex, std::adopt_lock);
+  }
+
+  Snapshot snapshot() const {
+    return {sampled_acquisitions_.load(std::memory_order_relaxed),
+            contended_acquisitions_.load(std::memory_order_relaxed)};
+  }
+
+ private:
+  inline static thread_local uint64_t sampling_tick_{0};
+  std::atomic<uint64_t> sampled_acquisitions_{0};
+  std::atomic<uint64_t> contended_acquisitions_{0};
+};
+
+struct CUDADriverTelemetrySnapshot {
+  CUDASampledLockTelemetry::Snapshot lock;
+  uint64_t async_allocation_calls;
+  uint64_t sync_allocation_fallback_calls;
+  uint64_t async_free_calls;
+  uint64_t sync_free_fallback_calls;
+};
+
 template <typename... Args>
 class CUDADriverFunction {
  public:
@@ -62,7 +110,9 @@ class CUDADriverFunction {
   uint32 call(Args... args) {
     TI_ASSERT(function_ != nullptr);
     TI_ASSERT(driver_lock_ != nullptr);
-    std::lock_guard<std::mutex> _(*driver_lock_);
+    auto lock = driver_lock_telemetry_
+                    ? driver_lock_telemetry_->acquire(*driver_lock_)
+                    : std::unique_lock<std::mutex>(*driver_lock_);
     return (uint32)function_(args...);
   }
 
@@ -73,6 +123,10 @@ class CUDADriverFunction {
 
   void set_lock(std::mutex *lock) {
     driver_lock_ = lock;
+  }
+
+  void set_lock_telemetry(CUDASampledLockTelemetry *telemetry) {
+    driver_lock_telemetry_ = telemetry;
   }
 
   std::string get_error_message(uint32 err) {
@@ -98,6 +152,7 @@ class CUDADriverFunction {
   func_type *function_{nullptr};
   std::string name_, symbol_name_;
   std::mutex *driver_lock_{nullptr};
+  CUDASampledLockTelemetry *driver_lock_telemetry_{nullptr};
 };
 
 class CUDADriverBase {
@@ -150,10 +205,23 @@ class CUDADriver : protected CUDADriverBase {
     return version_minor_;
   }
 
+  CUDADriverTelemetrySnapshot get_telemetry_snapshot() const {
+    return {lock_telemetry_.snapshot(),
+            async_allocation_calls_.load(std::memory_order_relaxed),
+            sync_allocation_fallback_calls_.load(std::memory_order_relaxed),
+            async_free_calls_.load(std::memory_order_relaxed),
+            sync_free_fallback_calls_.load(std::memory_order_relaxed)};
+  }
+
  private:
   CUDADriver();
 
   std::mutex lock_;
+  CUDASampledLockTelemetry lock_telemetry_;
+  std::atomic<uint64_t> async_allocation_calls_{0};
+  std::atomic<uint64_t> sync_allocation_fallback_calls_{0};
+  std::atomic<uint64_t> async_free_calls_{0};
+  std::atomic<uint64_t> sync_free_fallback_calls_{0};
 
   bool cuda_version_valid_{false};
 

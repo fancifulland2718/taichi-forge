@@ -65,6 +65,40 @@ TEST(CUDAContext, SeparatesDeviceCapabilityFromCodegenTarget) {
             "+ptx" + std::to_string(target.ptx_version));
 }
 
+TEST(CUDADiagnostics, SamplesLockContentionWithoutChangingLockOwnership) {
+  CUDASampledLockTelemetry telemetry;
+  std::mutex mutex;
+  for (uint32_t i = 0; i < CUDASampledLockTelemetry::kSamplingPeriod; ++i) {
+    auto lock = telemetry.acquire(mutex);
+  }
+  EXPECT_EQ(telemetry.snapshot().sampled_acquisitions, 1u);
+  EXPECT_EQ(telemetry.snapshot().contended_acquisitions, 0u);
+
+  std::atomic<bool> ready{false};
+  std::atomic<bool> start_contention{false};
+  std::thread contender([&] {
+    for (uint32_t i = 1; i < CUDASampledLockTelemetry::kSamplingPeriod; ++i) {
+      auto lock = telemetry.acquire(mutex);
+    }
+    ready.store(true, std::memory_order_release);
+    while (!start_contention.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    auto lock = telemetry.acquire(mutex);
+  });
+  while (!ready.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  mutex.lock();
+  start_contention.store(true, std::memory_order_release);
+  while (telemetry.snapshot().sampled_acquisitions < 2) {
+    std::this_thread::yield();
+  }
+  mutex.unlock();
+  contender.join();
+  EXPECT_EQ(telemetry.snapshot().contended_acquisitions, 1u);
+}
+
 TEST(CUDADevice, MapLifecycleRejectsInvalidTransitions) {
   if (!CUDADriver::get_instance_without_context().detected()) {
     GTEST_SKIP();
@@ -199,6 +233,8 @@ TEST(CUDADevice, RuntimeAsyncAllocationUsesItsAllocationStream) {
     GTEST_SKIP();
   }
 
+  auto &driver = CUDADriver::get_instance();
+  const auto before = driver.get_telemetry_snapshot();
   cuda::CudaDevice device;
   LlvmDevice::LlvmRuntimeAllocParams params;
   params.size = 256;
@@ -207,6 +243,16 @@ TEST(CUDADevice, RuntimeAsyncAllocationUsesItsAllocationStream) {
   ASSERT_EQ(allocation.device, &device);
   device.dealloc_memory(allocation);
   CUDADriver::get_instance().stream_synchronize(nullptr);
+  const auto after = driver.get_telemetry_snapshot();
+  if (CUDAContext::get_instance().supports_mem_pool()) {
+    EXPECT_GE(after.async_allocation_calls, before.async_allocation_calls + 1);
+    EXPECT_GE(after.async_free_calls, before.async_free_calls + 1);
+  } else {
+    EXPECT_GE(after.sync_allocation_fallback_calls,
+              before.sync_allocation_fallback_calls + 1);
+    EXPECT_GE(after.sync_free_fallback_calls,
+              before.sync_free_fallback_calls + 1);
+  }
 }
 
 TEST(CUDADevice, RuntimeAddressQueryTreatsRetiredAllocationAsNull) {

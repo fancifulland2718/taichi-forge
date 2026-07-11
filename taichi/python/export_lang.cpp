@@ -2910,7 +2910,72 @@ void export_lang(py::module &m) {
   m.def("query_int64", [](const std::string &key) {
     if (key == "cuda_compute_capability") {
 #if defined(TI_WITH_CUDA)
-      return CUDAContext::get_instance().get_compute_capability();
+      return static_cast<int64_t>(
+          CUDAContext::get_instance().get_compute_capability());
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_driver_lock_sampled_acquisitions") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(CUDADriver::get_instance()
+                                      .get_telemetry_snapshot()
+                                      .lock.sampled_acquisitions);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_driver_lock_contended_acquisitions") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(CUDADriver::get_instance()
+                                      .get_telemetry_snapshot()
+                                      .lock.contended_acquisitions);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_context_lock_sampled_acquisitions") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          CUDAContext::get_instance()
+              .get_lock_telemetry_snapshot()
+              .sampled_acquisitions);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_context_lock_contended_acquisitions") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          CUDAContext::get_instance()
+              .get_lock_telemetry_snapshot()
+              .contended_acquisitions);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_async_allocation_calls") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          CUDADriver::get_instance().get_telemetry_snapshot().async_allocation_calls);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_sync_allocation_fallback_calls") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(CUDADriver::get_instance()
+                                      .get_telemetry_snapshot()
+                                      .sync_allocation_fallback_calls);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_async_free_calls") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          CUDADriver::get_instance().get_telemetry_snapshot().async_free_calls);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_sync_free_fallback_calls") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(CUDADriver::get_instance()
+                                      .get_telemetry_snapshot()
+                                      .sync_free_fallback_calls);
 #else
       TI_NOT_IMPLEMENTED
 #endif

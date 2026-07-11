@@ -30,6 +30,7 @@ class CUDAContext {
   std::string mcpu_;
   std::string mattrs_;
   std::mutex lock_;
+  CUDASampledLockTelemetry lock_telemetry_;
   std::mutex graph_capture_mutex_;
   KernelProfilerBase *profiler_;
   CUDADriver &driver_;
@@ -120,7 +121,11 @@ class CUDAContext {
   }
 
   std::unique_lock<std::mutex> get_lock_guard() {
-    return std::unique_lock<std::mutex>(lock_);
+    return lock_telemetry_.acquire(lock_);
+  }
+
+  CUDASampledLockTelemetry::Snapshot get_lock_telemetry_snapshot() const {
+    return lock_telemetry_.snapshot();
   }
 
   std::unique_lock<std::mutex> get_graph_capture_lock_guard() {

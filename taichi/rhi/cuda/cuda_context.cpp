@@ -156,7 +156,7 @@ void CUDAContext::launch(void *func,
   // get_current_program().config.max_block_dim);
 
   if (grid_dim > 0) {
-    std::lock_guard<std::mutex> _(lock_);
+    auto lock = get_lock_guard();
     if (dynamic_shared_mem_bytes > 0) {
       if (dynamic_shared_mem_bytes > max_shared_memory_bytes_) {
         TI_ERROR(

@@ -192,7 +192,8 @@ CUDADriver::CUDADriver() {
 
 #define PER_CUDA_FUNCTION(name, symbol_name, ...) \
   name.set(loader_->load_function(#symbol_name)); \
-  name.set_lock(&lock_);                          \
+  name.set_lock(&lock_);                           \
+  name.set_lock_telemetry(&lock_telemetry_);        \
   name.set_names(#name, #symbol_name);
 #include "taichi/rhi/cuda/cuda_driver_functions.inc.h"
 #undef PER_CUDA_FUNCTION
@@ -216,8 +217,10 @@ void CUDADriver::malloc_async(void **dev_ptr, size_t size, CUstream stream) {
   if (cuda::detail::memory_allocation_route(
           CUDAContext::get_instance().supports_mem_pool()) ==
       cuda::detail::MemoryAllocationRoute::kAsyncMemoryPool) {
+    async_allocation_calls_.fetch_add(1, std::memory_order_relaxed);
     malloc_async_impl(dev_ptr, size, stream);
   } else {
+    sync_allocation_fallback_calls_.fetch_add(1, std::memory_order_relaxed);
     malloc(dev_ptr, size);
   }
 }
@@ -226,8 +229,10 @@ void CUDADriver::mem_free_async(void *dev_ptr, CUstream stream) {
   if (cuda::detail::memory_allocation_route(
           CUDAContext::get_instance().supports_mem_pool()) ==
       cuda::detail::MemoryAllocationRoute::kAsyncMemoryPool) {
+    async_free_calls_.fetch_add(1, std::memory_order_relaxed);
     mem_free_async_impl(dev_ptr, stream);
   } else {
+    sync_free_fallback_calls_.fetch_add(1, std::memory_order_relaxed);
     mem_free(dev_ptr);
   }
 }
