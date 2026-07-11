@@ -312,6 +312,13 @@ jobs:
               print(f"Linux Python upload candidate: {wheel.name}")
           PY
 
+      - name: Validate installed runtime and shim wheels
+        run: |
+          set -euo pipefail
+          python -m pip install --force-reinstall --no-deps runtime-wheel/*.whl wheelhouse/*.whl
+          cd /tmp
+          python -I "$GITHUB_WORKSPACE/scripts/validate_installed_runtime.py"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -477,6 +484,19 @@ jobs:
           # Isolated mode drops cwd from sys.path so the local build.py
           # does not shadow the PyPI `build` package.
           python -I -m build --wheel --no-isolation
+
+      - name: Validate installed runtime and shim wheels
+        shell: pwsh
+        run: |
+          $runtimeWheel = (Get-ChildItem runtime-wheel\*.whl | Select-Object -First 1).FullName
+          $shimWheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
+          python -m pip install --force-reinstall --no-deps $runtimeWheel $shimWheel
+          Push-Location $env:TEMP
+          try {
+            python -I "$env:GITHUB_WORKSPACE\scripts\validate_installed_runtime.py"
+          } finally {
+            Pop-Location
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

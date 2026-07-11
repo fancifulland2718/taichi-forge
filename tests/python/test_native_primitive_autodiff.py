@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import numpy as np
 
@@ -7,9 +9,29 @@ from taichi_forge.lang import impl
 from tests import test_utils
 
 
+def _require_cuda_capability(name, description):
+    prog = impl.get_runtime().prog
+    available = hasattr(prog, name) and getattr(prog, name)()
+    if available:
+        return
+    message = (
+        f"CUDA {description} is unavailable. Native Tape coverage requires "
+        "a Toolkit-enabled runtime and its packaged CUDA runtime library."
+    )
+    if os.environ.get("TI_REQUIRE_CUDA_NATIVE_AD_CAPABILITIES") == "1":
+        pytest.fail(message)
+    pytest.skip(message)
+
+
 def _native_copy_method_for_arch():
     arch = impl.current_cfg().arch
     if arch == ti.cuda:
+        # Forward device copy kernels are available without the CUDA Toolkit,
+        # but their Tape records still need native add/merge accumulation.
+        # Treat the forward/backward pair as one capability contract.
+        _require_cuda_capability(
+            "cuda_device_add_merge_available", "native AD accumulation"
+        )
         return "cuda_device"
     if arch == ti.vulkan:
         return "vulkan_native"
@@ -19,12 +41,7 @@ def _native_copy_method_for_arch():
 def _native_reduce_method_for_arch():
     arch = impl.current_cfg().arch
     if arch == ti.cuda:
-        prog = impl.get_runtime().prog
-        if not (
-            hasattr(prog, "cuda_cub_reduce_available")
-            and prog.cuda_cub_reduce_available()
-        ):
-            pytest.skip("CUDA native reduce is unavailable.")
+        _require_cuda_capability("cuda_cub_reduce_available", "native reduce")
         return "cuda_cub"
     if arch == ti.vulkan:
         prog = impl.get_runtime().prog
@@ -41,11 +58,12 @@ def _require_native_scatter_add_for_arch():
     arch = impl.current_cfg().arch
     prog = impl.get_runtime().prog
     if arch == ti.cuda:
-        if not (
-            hasattr(prog, "cuda_device_scatter_add_available")
-            and prog.cuda_device_scatter_add_available()
-        ):
-            pytest.skip("CUDA native scatter-add is unavailable.")
+        _require_cuda_capability(
+            "cuda_device_scatter_add_available", "native scatter-add"
+        )
+        _require_cuda_capability(
+            "cuda_device_add_merge_available", "native AD accumulation"
+        )
     elif arch == ti.vulkan:
         if not (
             hasattr(prog, "vulkan_scatter_add_available")
@@ -60,11 +78,9 @@ def _require_native_grouped_reduce_for_arch():
     arch = impl.current_cfg().arch
     prog = impl.get_runtime().prog
     if arch == ti.cuda:
-        if not (
-            hasattr(prog, "cuda_device_grouped_reduce_available")
-            and prog.cuda_device_grouped_reduce_available()
-        ):
-            pytest.skip("CUDA native grouped-reduce is unavailable.")
+        _require_cuda_capability(
+            "cuda_device_grouped_reduce_available", "native grouped-reduce"
+        )
     elif arch == ti.vulkan:
         if not (
             hasattr(prog, "vulkan_grouped_reduce_available")
@@ -73,6 +89,11 @@ def _require_native_grouped_reduce_for_arch():
             pytest.skip("Vulkan native grouped-reduce is unavailable.")
         if not prog.vulkan_grouped_reduce_atomic_value_type_available(1):
             pytest.skip("Vulkan f32 grouped-reduce atomics are unavailable.")
+
+
+def _require_native_scan_for_arch():
+    if impl.current_cfg().arch == ti.cuda:
+        _require_cuda_capability("cuda_cub_scan_available", "native scan")
 
 
 def test_native_autodiff_no_tape_keeps_method(monkeypatch):
@@ -325,6 +346,7 @@ def test_scatter_cpu_native_tape_gradients_ndarray():
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_scan_native_tape_gradients_ndarray():
+    _require_native_scan_for_arch()
     n = 7
     values = ti.ndarray(ti.f32, shape=n, needs_grad=True)
     loss = ti.field(ti.f32, shape=(), needs_grad=True)
@@ -742,6 +764,7 @@ def test_scatter_native_tape_gradients_dense_matrix_field():
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_scan_native_tape_gradients_dense_field():
+    _require_native_scan_for_arch()
     n = 7
     values = ti.field(ti.f32, shape=n, needs_grad=True)
     loss = ti.field(ti.f32, shape=(), needs_grad=True)
@@ -763,6 +786,7 @@ def test_scan_native_tape_gradients_dense_field():
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_scan_native_tape_gradients_dense_matrix_field():
+    _require_native_scan_for_arch()
     n = 7
     values = ti.Vector.field(2, ti.f32, shape=n, needs_grad=True)
     weight_field = ti.Vector.field(2, ti.f32, shape=n)

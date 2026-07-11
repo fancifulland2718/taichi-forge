@@ -44,8 +44,8 @@ jobs:
           python-version: "3.11"
 
       - name: Syntax check (py_compile)
-        # Walk every .py under python/taichi, fail on the first syntax error.
-        run: python -m compileall -q python/taichi
+        # Check the package that is actually included in the public wheel.
+        run: python -m compileall -q python/taichi_forge
 
       - name: Validate version.txt
         run: |
@@ -66,7 +66,8 @@ jobs:
       PY: ${{ inputs.python || '3.11' }}
       # CPU + LLVM only — no CUDA, Vulkan, OpenGL, C-API, or test binaries.
       # Keeps build time under ~30 min on a GitHub-hosted runner.
-      TAICHI_CMAKE_ARGS: >-
+      # scikit-build-core reads CMAKE_ARGS; TAICHI_CMAKE_ARGS is ignored.
+      CMAKE_ARGS: >-
         -DTI_WITH_CUDA:BOOL=OFF
         -DTI_WITH_VULKAN:BOOL=OFF
         -DTI_WITH_OPENGL:BOOL=OFF
@@ -115,7 +116,7 @@ jobs:
         run: |
           pip install dist/*.whl
           python -c "
-          import taichi as ti
+          import taichi_forge as ti
           ti.init(arch=ti.cpu)
           @ti.kernel
           def double(x: float) -> float:
@@ -140,7 +141,8 @@ jobs:
     runs-on: windows-latest
     env:
       PY: ${{ inputs.python || '3.11' }}
-      TAICHI_CMAKE_ARGS: >-
+      # scikit-build-core reads CMAKE_ARGS; TAICHI_CMAKE_ARGS is ignored.
+      CMAKE_ARGS: >-
         -DTI_WITH_CUDA:BOOL=OFF
         -DTI_WITH_VULKAN:BOOL=OFF
         -DTI_WITH_OPENGL:BOOL=OFF
@@ -199,7 +201,7 @@ jobs:
           $whl = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
           pip install $whl
           python -c "
-          import taichi as ti
+          import taichi_forge as ti
           ti.init(arch=ti.cpu)
           @ti.kernel
           def double(x: float) -> float:
