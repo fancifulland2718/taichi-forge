@@ -34,7 +34,7 @@ Forge 主要以 vanilla Taichi 1.7.4 的公开 API 作为兼容参考。Forge �
 
 ## 按 Changelog 顺序的功能说明
 
-当前 release baseline：`0.4.2`。
+当前文档对应的 release line：`0.4.x`。
 
 README 只说明用户可见变化和兼容边界，不列具体 benchmark 数字。
 
@@ -98,12 +98,14 @@ README 只说明用户可见变化和兼容边界，不列具体 benchmark 数�
 - [Graph 升级说明](docs/forge/graph_upgrade_from_taichi_1_7_4.zh.md)
 - [显示帧提交](docs/forge/display_frame.zh.md)
 - [StructNdarray primitive 语义](docs/forge/struct_ndarray_api.zh.md)
+- [Linux 发行复测状态](docs/forge/linux_revalidation.zh.md)
 
 ## 从源码构建
 
 Forge wheel 通过 scikit-build-core 构建，并与 `.github/workflows/publish_pypi.yml` 保持
 一致。PyPI 风格构建覆盖 Windows x86_64 和 Ubuntu 22.04 x86_64，Python 3.10 到 3.14，
-并启用 Vulkan、OpenGL、CUDA、LLVM 和 C API。
+并启用 Vulkan、OpenGL、CUDA 和 LLVM。PyPI shim 不包含 C API package tree；需要 C API
+时应单独构建和分发。
 
 Windows/Ubuntu 需要安装的包、LLVM 20、Vulkan SDK、`CMAKE_ARGS` 以及
 `python -I -m build --wheel --no-isolation` 命令，见

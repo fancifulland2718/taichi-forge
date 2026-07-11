@@ -206,7 +206,8 @@ Install CUDA Toolkit `13.2.0` for runtime wheel builds and verify `nvcc`:
 
 ```bash
 nvcc -V
-# The output must contain: release 13.2
+# The output must match CUDA_TOOLKIT_VERSION major.minor
+# (current default: release 13.2)
 ```
 
 Install Python build packages:

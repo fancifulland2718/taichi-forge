@@ -1,6 +1,6 @@
 # Taichi Forge — Compile, Runtime, Architecture & Modernization Options
 
-> Applies to **Taichi Forge 0.4.2**. Every option listed here is **opt-in** unless explicitly noted; defaults preserve upstream Taichi 1.7.4 behaviour wherever a feature is not intentionally enabled by Forge.
+> Applies to the **Taichi Forge 0.4.x** release line. Every option listed here is **opt-in** unless explicitly noted; defaults preserve upstream Taichi 1.7.4 behaviour wherever a feature is not intentionally enabled by Forge.
 
 This document is the single canonical reference for Forge-specific knobs and toolchain changes. Older fork-only settings are kept here once they are part of the public API; experimental or internal-only flags are intentionally excluded. For a module-oriented list of Forge-only API symbols, see [Forge API reference](forge_api_reference.en.md).
 
@@ -90,7 +90,7 @@ Both flags default OFF and are bit-identical to the legacy path when off. Enabli
 
 ### 2.8 Hash SNode
 
-`hash` SNode is experimental and default ON in Taichi Forge 0.4.2. It is available on CPU, CUDA, and Vulkan, emits an experimental-feature warning on first `SNode.hash()` use, and can be disabled with `hash_snode_experimental=False`. See [hash_snode.en.md](hash_snode.en.md) for the API and migration notes.
+`hash` SNode is experimental and default ON in the Taichi Forge 0.4.x release line. It is available on CPU, CUDA, and Vulkan, emits an experimental-feature warning on first `SNode.hash()` use, and can be disabled with `hash_snode_experimental=False`. See [hash_snode.en.md](hash_snode.en.md) for the API and migration notes.
 
 | Kwarg | Values / default | Purpose | Risk / guidance |
 |---|---|---|---|
@@ -129,7 +129,7 @@ The wheel published to PyPI builds with all three flags ON.
 
 ## 5. SNode coverage extensions
 
-| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.4.2 Vulkan |
+| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.4.x Vulkan |
 |---|---|---|
 | `dense` | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ |
@@ -145,7 +145,7 @@ Full Vulkan sparse usage and semantics: [sparse_snode_on_vulkan.en.md](sparse_sn
 
 Forge ships against modern toolchains; the table below summarises the versions vs. vanilla 1.7.4.
 
-| Component | vanilla 1.7.4 | Forge 0.4.2 |
+| Component | vanilla 1.7.4 | Forge 0.4.x |
 |---|---|---|
 | LLVM | 15 | **20.1.7** |
 | Python | 3.7 – 3.12 | **3.10 – 3.14** |
@@ -174,9 +174,13 @@ These are not user-tunable; they ship enabled by default. Listed for visibility 
 
 ## 8. Compatibility statement
 
-- All public Python and C-API surfaces from upstream Taichi 1.7.4 remain unchanged.
-- Every fork-only knob in this document is additive and defaults to upstream behaviour.
-- The published wheel is drop-in for any code that imports `taichi`.
+- Supported upstream Taichi 1.7.4 Python APIs are the compatibility reference;
+  documented Forge changes and experimental paths remain explicit exceptions.
+- Every fork-only knob in this document is additive and defaults to upstream
+  behaviour unless its entry explicitly says otherwise.
+- The PyPI package imports as `taichi_forge`; it does not replace the upstream
+  `taichi` package. The C API package tree is not included in PyPI shim wheels
+  and must be built separately when required.
 
 ---
 

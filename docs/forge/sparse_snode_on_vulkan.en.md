@@ -1,12 +1,12 @@
 # Sparse SNode on Vulkan — User Guide
 
-> Applies to **Taichi Forge 0.4.2**. Vanilla Taichi 1.7.4's Vulkan/SPIRV backend supports only `dense` + `root`. Taichi Forge additionally supports `pointer`, `bitmasked`, `dynamic`, and experimental `hash` SNodes on Vulkan, with three-backend (cpu / cuda / vulkan) numerical equivalence.
+> Applies to the **Taichi Forge 0.4.x** release line. Vanilla Taichi 1.7.4's Vulkan/SPIRV backend supports only `dense` + `root`. Taichi Forge additionally supports `pointer`, `bitmasked`, `dynamic`, and experimental `hash` SNodes on Vulkan, with three-backend (cpu / cuda / vulkan) numerical equivalence.
 
 ---
 
 ## 1. Overview
 
-| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.4.2 Vulkan | LLVM (cpu/cuda) |
+| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.4.x Vulkan | LLVM (cpu/cuda) |
 |---|---|---|---|
 | `dense` | ✅ | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ | ✅ |
@@ -24,7 +24,7 @@ Supported ops on Vulkan: `activate`, `deactivate`, `is_active`, `length`, `appen
 No extra switch is required for `pointer`, `bitmasked`, `dynamic`, or `hash` — `ti.init(arch=ti.vulkan)` is enough. `hash` remains experimental and warns on first use; pass `hash_snode_experimental=False` to disable it. `quant_array` / `bit_struct` remains a separate experimental path and requires its own explicit gate.
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 ti.init(arch=ti.vulkan)
 
 x = ti.field(ti.f32)

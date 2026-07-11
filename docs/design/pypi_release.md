@@ -11,6 +11,11 @@
 下载同版本的 `taichi-forge-runtime` wheel，解包出 native runtime link artifacts，再构建
 各 Python 版本的 shim wheel。
 
+下文以 `0.4.3` 为发布示例。发布其它版本时必须统一替换 runtime workflow 输入、shim
+workflow 输入或 tag，以及安装验证命令中的版本。runtime 与 shim 版本必须完全一致。
+`publish_runtime_pypi.yml` 仅由 `workflow_dispatch` 触发；若仓库 `version.txt` 尚未更新，
+正式发布时必须显式填写版本，不能留空依赖旧 fallback。
+
 ## 1. 一次成功发行需要的全部前置条件
 
 ### 1.1 GitHub 仓库设置
@@ -78,7 +83,8 @@ PyPI 申请短期 token，**无需手动维护任何 secret**。
   版本后缀或 wheel tag；
 - Windows/Linux wheel 都包含唯一 native runtime、唯一动态 CUDART 和
   `cuda_runtime_major.txt`，并通过 `scripts/validate_runtime_wheel.py`；Linux 必须验证
-  auditwheel 后的最终候选；
+  auditwheel 后的最终候选。auditwheel 生成 hashed `.libs` CUDART 后，workflow 会删除
+  已被替代的 raw CUDART、重写 `RECORD`，再执行 `auditwheel show` 和单副本校验；
 - `CUDA_TOOLKIT_VERSION` 当前默认 `13.2.0`，只作为可替换的内部构建基线。降低前必须完成
   [Linux 复测清单](../forge/linux_revalidation.zh.md)和目标旧 driver 实测，不能只凭编译成功
   修改对外最低驱动声明。
@@ -93,12 +99,12 @@ PyPI/TestPyPI 下载指定版本的 `taichi-forge-runtime` wheel，解包 link a
 
 ```
 Actions → Publish runtime wheels to PyPI → Run workflow
-  version: 1.8.0.dev20260424
+  version: 0.4.3.dev20260712
   publish: false
   target:  testpypi        (忽略，不会上传)
 
 Actions → Publish wheels to PyPI → Run workflow
-  version: 1.8.0.dev20260424
+  version: 0.4.3.dev20260712
   publish: false
   target:  testpypi        (忽略，不会上传)
 ```
@@ -112,12 +118,12 @@ runtime workflow 会产出 2 个 runtime wheel artifacts（Windows + Linux）。
 
 ```
 Actions → Publish runtime wheels to PyPI → Run workflow
-  version: 1.8.0rc1
+  version: 0.4.3rc1
   publish: true
   target:  testpypi
 
 Actions → Publish wheels to PyPI → Run workflow
-  version: 1.8.0rc1
+  version: 0.4.3rc1
   publish: true
   target:  testpypi
 ```
@@ -128,22 +134,27 @@ tag 触发）。
 
 安装验证：
 ```
-pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ taichi-forge==1.8.0rc1
+pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ taichi-forge==0.4.3rc1
 ```
 
 ### 2.3 生产发行（推 tag）
 
+创建正式 tag 前，tag 所指向的 commit 必须已经把 `version.txt` 更新为 `v0.4.3`，并运行
+`python scripts/sync_runtime_dependency.py`，使 `pyproject.toml` 精确依赖
+`taichi-forge-runtime==0.4.3`。workflow 会再次同步构建工作区，但不能用这一临时覆盖替代
+正式源码 tag 中的版本一致性。
+
 ```
 Actions → Publish runtime wheels to PyPI → Run workflow
-  version: 1.8.0
+  version: 0.4.3
   publish: true
   target:  pypi
 
-git tag v1.8.0
-git push origin v1.8.0
+git tag v0.4.3
+git push origin v0.4.3
 ```
 
-生产发布也要先跑 runtime workflow，确认 `taichi-forge-runtime==1.8.0` 已经在 PyPI
+生产发布也要先跑 runtime workflow，确认 `taichi-forge-runtime==0.4.3` 已经在 PyPI
 可下载；随后推 tag 触发 `publish_pypi.yml` 构建 shim wheels。tag 触发后 shim workflow 会：
 1. 从 PyPI 下载并解包同版本 runtime wheel。
 2. 10 个 shim wheel 并行构建（Windows + Linux × Python 3.10-3.14）。
@@ -164,6 +175,7 @@ git push origin v1.8.0
 | Linux runtime 编译报缺少 CUDA/CCCL 头文件 | 所选 Toolkit 与 native 实现仍有未移除的版本专属依赖 | 保持单一包名不变；补齐兼容 adapter，并在该 Toolkit 的 Linux 构建中复测 |
 | Windows CUDA 版本校验误报 | `nvcc -V` 是多行输出，或校验字符串被硬编码 | 把输出 join 成字符串，并从 `CUDA_TOOLKIT_VERSION` 推导 `major.minor` |
 | runtime wheel 缺 CUDART 或 `cuda_runtime_major.txt` | runtime 构建没有启用动态 cudart，或 repair/打包路径错误 | 检查 `TI_WITH_CUDA_TOOLKIT`、`TI_CUDA_CUB_SORT_DYNAMIC_CUDART` 和 wheel contents validate step |
+| manylinux wheel 出现 raw 与 hashed 两份 CUDART | auditwheel 已复制并改写依赖，但 raw 数据文件副本尚未规范化 | 确认 auditwheel 后运行 `repair_runtime_wheel.py --platform manylinux`，再执行 `auditwheel show` 和严格校验 |
 
 ## 4. 和 LLVM 20 的关系
 
@@ -174,16 +186,23 @@ git push origin v1.8.0
 - Linux 端同理，需要在 manylinux 容器里 build LLVM 20 并发到 Release，再
   设置 `LLVM20_LINUX_MANYLINUX_URL`。
 
-## 5. Smoke test 建议
+## 5. 发布前验证
 
-每次 publish 前在本地至少跑一次：
+源码侧最低门槛：
 
 ```powershell
-# Windows
-$env:LLVM_DIR = "D:\taichi\dist\taichi-llvm-20\lib\cmake\llvm"
-python build.py --python 3.10
-python -m pytest tests/python/test_offline_cache.py -x -q
+python -m pytest tests/python/test_runtime_packaging_cuda_version.py -q
+python -m py_compile scripts/repair_runtime_wheel.py scripts/validate_runtime_wheel.py scripts/validate_shim_wheel.py scripts/validate_installed_runtime.py
 ```
 
-CI 上 wheels 构建完毕后下载一个 artifact 本地 `pip install` 并导入 `import taichi_forge as ti; ti.init()`
-以确认运行时加载正常——wheel tag 对不上 Python/OS 是最常见的隐性发行 bug。
+workflow 产出后，必须对最终上传候选运行：
+
+```text
+python scripts/validate_runtime_wheel.py --wheel-dir <runtime-wheel-dir> --platform pair
+python scripts/validate_shim_wheel.py --wheel-dir <one-shim-wheel-dir> --platform <windows-or-manylinux>
+```
+
+随后在仓库目录之外安装同版本 runtime/shim wheel pair，运行
+`scripts/validate_installed_runtime.py`，并确认实际 CUDART 来自 runtime package。正式发布
+还必须完成 [Linux 复测清单](../forge/linux_revalidation.zh.md) 中适用于发布环境的 GPU、
+sanitizer、GGUI/interop 和性能稳定性门槛；仅 `import` 或 smoke test 不足以替代这些检查。

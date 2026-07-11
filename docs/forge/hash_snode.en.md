@@ -1,6 +1,6 @@
 # Hash SNode — User Guide
 
-> Applies to **Taichi Forge 0.4.2**. `hash` SNode is an experimental, fixed-capacity sparse SNode available on the CPU, CUDA, and Vulkan backends. It is enabled by default and emits an experimental-feature warning on first use.
+> Applies to the **Taichi Forge 0.4.x** release line. `hash` SNode is an experimental, fixed-capacity sparse SNode available on the CPU, CUDA, and Vulkan backends. It is enabled by default and emits an experimental-feature warning on first use.
 
 ---
 
@@ -8,7 +8,7 @@
 
 Vanilla Taichi 1.7.4 kept `hash` SNode behind a frontend gate and did not ship it as a usable feature. Taichi Forge revives it as a controlled sparse structure:
 
-- It is **default on** in Taichi Forge 0.4.2. The first `SNode.hash()` call emits a warning because the feature is still experimental.
+- It is **default on** in the Taichi Forge 0.4.x release line. The first `SNode.hash()` call emits a warning because the feature is still experimental.
 - You can disable it with `ti.init(hash_snode_experimental=False)` when isolating regressions or reproducing vanilla Taichi's disabled-hash behavior.
 - Capacity is fixed before JIT. There is no device-side grow or rehash.
 - Overflow is diagnosed instead of silently dropping writes.
@@ -22,7 +22,7 @@ This is not the old vanilla hash contract. Code that relied on `ti.root.hash(axi
 ## 2. Basic API
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.cuda)
 
@@ -84,7 +84,7 @@ Not supported:
 ### 4.1 Sparse 2D field
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.vulkan)
 
@@ -102,7 +102,7 @@ def write():
 ### 4.2 Nested hash
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.cuda)
 
@@ -118,7 +118,7 @@ This is useful when both parent blocks and child entries are sparse. If the oute
 ### 4.3 Hash under pointer
 
 ```python
-import taichi as ti
+import taichi_forge as ti
 
 ti.init(arch=ti.cuda)
 

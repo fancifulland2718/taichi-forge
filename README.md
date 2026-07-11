@@ -45,7 +45,7 @@ independent from upstream Taichi version numbers.
 
 ## Changelog-Oriented Highlights
 
-Current release baseline: `0.4.2`.
+Current documented release line: `0.4.x`.
 
 The README intentionally describes user-visible changes and compatibility
 boundaries instead of detailed benchmark numbers.
@@ -139,7 +139,8 @@ English public docs:
 Forge wheels are built with scikit-build-core, matching
 `.github/workflows/publish_pypi.yml`. The PyPI-style build supports Windows
 x86_64 and Ubuntu 22.04 x86_64 for Python 3.10 through 3.14, with Vulkan,
-OpenGL, CUDA, LLVM, and the C API enabled.
+OpenGL, CUDA, and LLVM enabled. The PyPI shim omits the C API package tree;
+C API artifacts must be built and distributed separately when needed.
 
 Use [Building Forge wheels](docs/forge/build_wheels.en.md) for the exact
 Windows and Ubuntu package list, LLVM 20 setup, Vulkan SDK setup, `CMAKE_ARGS`,

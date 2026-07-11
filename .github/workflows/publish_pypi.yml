@@ -32,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version (e.g. 1.8.0 or 1.8.0.dev20260424); leaves empty for whatever is in version.txt"
+        description: "Version (e.g. 0.4.3 or 0.4.3rc1); leave empty to use version.txt"
         required: false
         default: ""
       runtime_version:

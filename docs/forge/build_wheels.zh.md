@@ -185,7 +185,8 @@ export PATH="$VULKAN_SDK/bin:$PATH"
 
 ```bash
 nvcc -V
-# 输出必须包含：release 13.2
+# 输出必须匹配 CUDA_TOOLKIT_VERSION 的 major.minor
+# （当前默认：release 13.2）
 ```
 
 安装 Python 构建包：
