@@ -819,6 +819,16 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize() {
     layout_ = new_layout;
   }
 
+  if (set_) {
+    std::lock_guard<std::mutex> descriptor_set_lock(set_->mutex);
+    // A command buffer keeps this pin until it is either discarded or retired
+    // after its submission fence. Updating the set in place before then would
+    // change descriptors referenced by recorded or pending GPU work.
+    if (set_->recording_use_count != 0) {
+      set_ = nullptr;
+    }
+  }
+
   if (!set_) {
     // If set_ is null, create a new one
     auto [status, new_set] = device_->alloc_desc_set(layout_);
@@ -837,82 +847,94 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize() {
   std::list<std::vector<VkDescriptorBufferInfo>> buffer_array_infos;
   std::vector<VkWriteDescriptorSet> desc_writes;
 
-  set_->ref_binding_objs.clear();
-
-  for (auto &pair : bindings_) {
-    uint32_t binding = pair.first;
-    VkDescriptorType type = pair.second.type;
-    auto &resource = pair.second.res;
-
-    VkWriteDescriptorSet &write = desc_writes.emplace_back();
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.pNext = nullptr;
-    write.dstSet = set_->set;
-    write.dstBinding = binding;
-    write.dstArrayElement = 0;
-    write.descriptorCount = 1;
-    write.descriptorType = type;
-    write.pImageInfo = nullptr;
-    write.pBufferInfo = nullptr;
-    write.pTexelBufferView = nullptr;
-
-    if (Buffer *buf = std::get_if<Buffer>(&resource)) {
-      VkDescriptorBufferInfo &buffer_info = buffer_infos.emplace_front();
-      buffer_info.buffer = buf->buffer ? buf->buffer->buffer : VK_NULL_HANDLE;
-      buffer_info.offset = buf->offset;
-      buffer_info.range = buf->size;
-
-      write.pBufferInfo = &buffer_info;
-      if (buf->buffer) {
-        set_->ref_binding_objs.push_back(buf->buffer);
-      }
-    } else if (Image *img = std::get_if<Image>(&resource)) {
-      VkDescriptorImageInfo &image_info = image_infos.emplace_front();
-      image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-      image_info.imageView = img->view ? img->view->view : VK_NULL_HANDLE;
-      image_info.sampler = VK_NULL_HANDLE;
-
-      write.pImageInfo = &image_info;
-      if (img->view) {
-        set_->ref_binding_objs.push_back(img->view);
-      }
-    } else if (Texture *tex = std::get_if<Texture>(&resource)) {
-      VkDescriptorImageInfo &image_info = image_infos.emplace_front();
-      image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-      image_info.imageView = tex->view ? tex->view->view : VK_NULL_HANDLE;
-      image_info.sampler =
-          tex->sampler ? tex->sampler->sampler : VK_NULL_HANDLE;
-
-      write.pImageInfo = &image_info;
-      if (tex->view) {
-        set_->ref_binding_objs.push_back(tex->view);
-      }
-      if (tex->sampler) {
-        set_->ref_binding_objs.push_back(tex->sampler);
-      }
-    } else if (BufferArray *ba = std::get_if<BufferArray>(&resource)) {
-      // C-2.5: emit N contiguous VkDescriptorBufferInfo entries; each
-      // buffer is bound with offset=0, range=VK_WHOLE_SIZE. Empty array
-      // is rejected by Vulkan (descriptorCount must be > 0).
-      auto &infos = buffer_array_infos.emplace_back();
-      infos.resize(ba->buffers.size());
-      for (size_t i = 0; i < ba->buffers.size(); ++i) {
-        const auto &b = ba->buffers[i];
-        infos[i].buffer = b ? b->buffer : VK_NULL_HANDLE;
-        infos[i].offset = 0;
-        infos[i].range = VK_WHOLE_SIZE;
-        if (b) {
-          set_->ref_binding_objs.push_back(b);
-        }
-      }
-      write.descriptorCount = static_cast<uint32_t>(infos.size());
-      write.pBufferInfo = infos.data();
-    } else {
-      RHI_LOG_ERROR("Ignoring unsupported Descriptor Type");
+  {
+    std::unique_lock<std::mutex> descriptor_set_lock(set_->mutex);
+    // A cache hit in another resource set may bind this descriptor between the
+    // earlier availability check and this update lock. Retry with a replacement
+    // instead of rewriting the newly recorded set.
+    if (set_->recording_use_count != 0) {
+      descriptor_set_lock.unlock();
+      set_ = nullptr;
+      return finalize();
     }
-  }
+    set_->ref_binding_objs.clear();
 
-  device_->update_descriptor_sets(desc_writes);
+    for (auto &pair : bindings_) {
+      uint32_t binding = pair.first;
+      VkDescriptorType type = pair.second.type;
+      auto &resource = pair.second.res;
+
+      VkWriteDescriptorSet &write = desc_writes.emplace_back();
+      write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      write.pNext = nullptr;
+      write.dstSet = set_->set;
+      write.dstBinding = binding;
+      write.dstArrayElement = 0;
+      write.descriptorCount = 1;
+      write.descriptorType = type;
+      write.pImageInfo = nullptr;
+      write.pBufferInfo = nullptr;
+      write.pTexelBufferView = nullptr;
+
+      if (Buffer *buf = std::get_if<Buffer>(&resource)) {
+        VkDescriptorBufferInfo &buffer_info = buffer_infos.emplace_front();
+        buffer_info.buffer =
+            buf->buffer ? buf->buffer->buffer : VK_NULL_HANDLE;
+        buffer_info.offset = buf->offset;
+        buffer_info.range = buf->size;
+
+        write.pBufferInfo = &buffer_info;
+        if (buf->buffer) {
+          set_->ref_binding_objs.push_back(buf->buffer);
+        }
+      } else if (Image *img = std::get_if<Image>(&resource)) {
+        VkDescriptorImageInfo &image_info = image_infos.emplace_front();
+        image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        image_info.imageView = img->view ? img->view->view : VK_NULL_HANDLE;
+        image_info.sampler = VK_NULL_HANDLE;
+
+        write.pImageInfo = &image_info;
+        if (img->view) {
+          set_->ref_binding_objs.push_back(img->view);
+        }
+      } else if (Texture *tex = std::get_if<Texture>(&resource)) {
+        VkDescriptorImageInfo &image_info = image_infos.emplace_front();
+        image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        image_info.imageView = tex->view ? tex->view->view : VK_NULL_HANDLE;
+        image_info.sampler =
+            tex->sampler ? tex->sampler->sampler : VK_NULL_HANDLE;
+
+        write.pImageInfo = &image_info;
+        if (tex->view) {
+          set_->ref_binding_objs.push_back(tex->view);
+        }
+        if (tex->sampler) {
+          set_->ref_binding_objs.push_back(tex->sampler);
+        }
+      } else if (BufferArray *ba = std::get_if<BufferArray>(&resource)) {
+        // C-2.5: emit N contiguous VkDescriptorBufferInfo entries; each
+        // buffer is bound with offset=0, range=VK_WHOLE_SIZE. Empty array
+        // is rejected by Vulkan (descriptorCount must be > 0).
+        auto &infos = buffer_array_infos.emplace_back();
+        infos.resize(ba->buffers.size());
+        for (size_t i = 0; i < ba->buffers.size(); ++i) {
+          const auto &b = ba->buffers[i];
+          infos[i].buffer = b ? b->buffer : VK_NULL_HANDLE;
+          infos[i].offset = 0;
+          infos[i].range = VK_WHOLE_SIZE;
+          if (b) {
+            set_->ref_binding_objs.push_back(b);
+          }
+        }
+        write.descriptorCount = static_cast<uint32_t>(infos.size());
+        write.pBufferInfo = infos.data();
+      } else {
+        RHI_LOG_ERROR("Ignoring unsupported Descriptor Type");
+      }
+    }
+
+    device_->update_descriptor_sets_locked(desc_writes);
+  }
 
   dirty_ = false;
   if (device_->descriptor_set_cache_enabled()) {
@@ -1063,11 +1085,16 @@ RhiResult VulkanCommandList::bind_shader_resources(ShaderResourceSet *res,
                                        ? VK_PIPELINE_BIND_POINT_GRAPHICS
                                        : VK_PIPELINE_BIND_POINT_COMPUTE;
 
-  vkCmdBindDescriptorSets(buffer_->buffer, bind_point, pipeline_layout,
-                          /*firstSet=*/set_index,
-                          /*descriptorSetCount=*/1, &vk_set->set,
-                          /*dynamicOffsetCount=*/0,
-                          /*pDynamicOffsets=*/nullptr);
+  {
+    std::lock_guard<std::mutex> descriptor_set_lock(vk_set->mutex);
+    ++vk_set->recording_use_count;
+    vkCmdBindDescriptorSets(buffer_->buffer, bind_point, pipeline_layout,
+                            /*firstSet=*/set_index,
+                            /*descriptorSetCount=*/1, &vk_set->set,
+                            /*dynamicOffsetCount=*/0,
+                            /*pDynamicOffsets=*/nullptr);
+  }
+  buffer_->descriptor_sets_in_use.push_back(vk_set);
   buffer_->refs.push_back(vk_set);
 
   return RhiResult::success;
@@ -1711,7 +1738,7 @@ void VulkanDevice::init_vulkan_structs(Params &params) {
 
   create_vma_allocator();
   {
-    std::lock_guard<std::mutex> lock(descriptor_mutex_);
+    std::lock_guard<std::mutex> lock(descriptor_pool_mutex_);
     RHI_ASSERT(new_descriptor_pool_locked() == RhiResult::success &&
                "Failed to allocate initial descriptor pool");
   }
@@ -3039,7 +3066,7 @@ bool VulkanDevice::should_touch_desc_set_cache_lru_locked() const {
 
 RhiReturn<vkapi::IVkDescriptorSet> VulkanDevice::alloc_desc_set(
     vkapi::IVkDescriptorSetLayout layout) {
-  std::lock_guard<std::mutex> lock(descriptor_mutex_);
+  std::lock_guard<std::mutex> lock(descriptor_pool_mutex_);
   // This returns nullptr if can't allocate (OOM or pool is full)
   vkapi::IVkDescriptorSet set =
       vkapi::allocate_descriptor_sets(desc_pool_, layout);
@@ -3056,9 +3083,8 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanDevice::alloc_desc_set(
   return {RhiResult::success, set};
 }
 
-void VulkanDevice::update_descriptor_sets(
+void VulkanDevice::update_descriptor_sets_locked(
     const std::vector<VkWriteDescriptorSet> &desc_writes) {
-  std::lock_guard<std::mutex> lock(descriptor_mutex_);
   vkUpdateDescriptorSets(device_, desc_writes.size(), desc_writes.data(),
                          /*descriptorCopyCount=*/0,
                          /*pDescriptorCopies=*/nullptr);

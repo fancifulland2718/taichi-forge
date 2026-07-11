@@ -23,6 +23,11 @@ DeviceObjVkCommandPool::~DeviceObjVkCommandPool() {
 }
 
 DeviceObjVkCommandBuffer::~DeviceObjVkCommandBuffer() {
+  for (auto &descriptor_set : descriptor_sets_in_use) {
+    std::lock_guard<std::mutex> lock(descriptor_set->mutex);
+    TI_ASSERT(descriptor_set->recording_use_count > 0);
+    --descriptor_set->recording_use_count;
+  }
   if (this->level == VK_COMMAND_BUFFER_LEVEL_PRIMARY) {
     ref_pool->free_primary.push(buffer);
   } else {

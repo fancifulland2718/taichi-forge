@@ -4,6 +4,7 @@
 
 #include <vk_mem_alloc.h>
 
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -68,6 +69,11 @@ struct DeviceObjVkDescriptorSet : public DeviceObj {
   VkDescriptorSet set{VK_NULL_HANDLE};
   IVkDescriptorSetLayout ref_layout{nullptr};
   IVkDescriptorPool ref_pool{nullptr};
+  // Vulkan requires external synchronization for host access to a descriptor
+  // set. The recording count keeps the set immutable while a command buffer
+  // that bound it still owns a reference.
+  mutable std::mutex mutex;
+  size_t recording_use_count{0};
   std::vector<IDeviceObj> ref_binding_objs;
   ~DeviceObjVkDescriptorSet() override;
 };
@@ -97,6 +103,9 @@ struct DeviceObjVkCommandBuffer : public DeviceObj {
   VkCommandBufferLevel level{VK_COMMAND_BUFFER_LEVEL_PRIMARY};
   IVkCommandPool ref_pool{nullptr};
   std::vector<IDeviceObj> refs;
+  // One entry per vkCmdBindDescriptorSets call. Destruction releases the
+  // matching recording-use pin on the descriptor set.
+  std::vector<IVkDescriptorSet> descriptor_sets_in_use;
   ~DeviceObjVkCommandBuffer() override;
 };
 using IVkCommandBuffer = std::shared_ptr<DeviceObjVkCommandBuffer>;

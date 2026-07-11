@@ -142,6 +142,111 @@ TEST(VulkanDeviceTest, ConcurrentDescriptorAndRenderPassCreation) {
   device->wait_idle();
 }
 
+TEST(VulkanDescriptorSetTest, DirtyResourceSetDoesNotMutateRecordedSet) {
+  if (!vulkan::is_vulkan_api_available()) {
+    return;
+  }
+
+  vulkan::VulkanDeviceCreator::Params params;
+  params.api_version = std::nullopt;
+  auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(params);
+  auto *device = static_cast<vulkan::VulkanDevice *>(creator->device());
+
+  Device::AllocParams alloc_params;
+  alloc_params.size = sizeof(uint32_t);
+  alloc_params.usage = AllocUsage::Storage;
+  DeviceAllocation first_allocation;
+  DeviceAllocation second_allocation;
+  ASSERT_EQ(device->allocate_memory(alloc_params, &first_allocation),
+            RhiResult::success);
+  ASSERT_EQ(device->allocate_memory(alloc_params, &second_allocation),
+            RhiResult::success);
+  DeviceAllocationGuard first_guard(first_allocation);
+  DeviceAllocationGuard second_guard(second_allocation);
+
+  vulkan::VulkanResourceSet resource_set(device);
+  resource_set.rw_buffer(0, first_allocation);
+  auto [first_result, first_set] = resource_set.finalize();
+  ASSERT_EQ(first_result, RhiResult::success);
+  ASSERT_NE(first_set, nullptr);
+
+  // This is the same owner pin added when a command buffer binds the set. It
+  // models a recorded buffer whose reference has not yet been retired.
+  {
+    std::lock_guard<std::mutex> lock(first_set->mutex);
+    ++first_set->recording_use_count;
+  }
+  resource_set.rw_buffer(0, second_allocation);
+  auto [second_result, second_set] = resource_set.finalize();
+  ASSERT_EQ(second_result, RhiResult::success);
+  ASSERT_NE(second_set, nullptr);
+  EXPECT_NE(second_set, first_set);
+  {
+    std::lock_guard<std::mutex> lock(first_set->mutex);
+    ASSERT_EQ(first_set->recording_use_count, 1u);
+    --first_set->recording_use_count;
+  }
+
+  // An unrecorded set can still be updated in place, avoiding an allocation on
+  // every resource-set mutation after the command buffer has released its pin.
+  resource_set.rw_buffer(0, first_allocation);
+  auto [third_result, third_set] = resource_set.finalize();
+  ASSERT_EQ(third_result, RhiResult::success);
+  EXPECT_EQ(third_set, second_set);
+}
+
+TEST(VulkanDescriptorSetTest, CachedSetIsReplacedWhenAnotherRecordingUsesIt) {
+  if (!vulkan::is_vulkan_api_available()) {
+    return;
+  }
+
+  vulkan::VulkanDeviceCreator::Params params;
+  params.api_version = std::nullopt;
+  auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(params);
+  auto *device = static_cast<vulkan::VulkanDevice *>(creator->device());
+  device->set_descriptor_set_cache_enabled(true);
+
+  Device::AllocParams alloc_params;
+  alloc_params.size = sizeof(uint32_t);
+  alloc_params.usage = AllocUsage::Storage;
+  DeviceAllocation first_allocation;
+  DeviceAllocation second_allocation;
+  ASSERT_EQ(device->allocate_memory(alloc_params, &first_allocation),
+            RhiResult::success);
+  ASSERT_EQ(device->allocate_memory(alloc_params, &second_allocation),
+            RhiResult::success);
+  DeviceAllocationGuard first_guard(first_allocation);
+  DeviceAllocationGuard second_guard(second_allocation);
+
+  vulkan::VulkanResourceSet first_resource_set(device);
+  first_resource_set.rw_buffer(0, first_allocation);
+  auto [first_result, first_set] = first_resource_set.finalize();
+  ASSERT_EQ(first_result, RhiResult::success);
+  ASSERT_NE(first_set, nullptr);
+
+  vulkan::VulkanResourceSet cached_resource_set(device);
+  cached_resource_set.rw_buffer(0, first_allocation);
+  auto [cached_result, cached_set] = cached_resource_set.finalize();
+  ASSERT_EQ(cached_result, RhiResult::success);
+  ASSERT_EQ(cached_set, first_set);
+
+  {
+    std::lock_guard<std::mutex> lock(first_set->mutex);
+    ++first_set->recording_use_count;
+  }
+  first_resource_set.rw_buffer(0, second_allocation);
+  auto [replacement_result, replacement_set] =
+      first_resource_set.finalize();
+  ASSERT_EQ(replacement_result, RhiResult::success);
+  ASSERT_NE(replacement_set, nullptr);
+  EXPECT_NE(replacement_set, first_set);
+  {
+    std::lock_guard<std::mutex> lock(first_set->mutex);
+    ASSERT_EQ(first_set->recording_use_count, 1u);
+    --first_set->recording_use_count;
+  }
+}
+
 TEST(VulkanSurfaceResultTest, ClassifiesRecoverableAndFatalResults) {
   using vulkan::VulkanSurfaceResult;
   using vulkan::classify_vulkan_surface_result;

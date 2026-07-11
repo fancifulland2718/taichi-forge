@@ -867,8 +867,6 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   vkapi::IVkDescriptorSetLayout get_desc_set_layout(VulkanResourceSet &set);
   rhi_impl::RhiReturn<vkapi::IVkDescriptorSet> alloc_desc_set(
       vkapi::IVkDescriptorSetLayout layout);
-  void update_descriptor_sets(
-      const std::vector<VkWriteDescriptorSet> &desc_writes);
 
   constexpr VulkanCapabilities &vk_caps() {
     return vk_caps_;
@@ -974,12 +972,15 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
       override;
 
  private:
+  friend class VulkanResourceSet;
   friend class VulkanStream;
   friend VulkanSurface;
 
   std::mutex &get_queue_mutex(VkQueue queue);
   void create_vma_allocator();
   [[nodiscard]] RhiResult new_descriptor_pool_locked();
+  void update_descriptor_sets_locked(
+      const std::vector<VkWriteDescriptorSet> &desc_writes);
   bool should_touch_desc_set_cache_lru_locked() const;
 
   VulkanCapabilities vk_caps_;
@@ -1047,8 +1048,12 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
       renderpass_pools_;
   std::mutex renderpass_mutex_;
 
-  // Descriptors / Layouts / Pools
+  // Descriptor layouts, cache metadata, and the default sampler are shared
+  // device-level owner state. Allocation remains separately serialized by its
+  // VkDescriptorPool, while each descriptor-set update is serialized by that
+  // descriptor set itself.
   mutable std::mutex descriptor_mutex_;
+  std::mutex descriptor_pool_mutex_;
   unordered_map<VulkanResourceSet,
                 vkapi::IVkDescriptorSetLayout,
                 VulkanResourceSet::SetLayoutHasher,
