@@ -97,6 +97,10 @@ adapter 已改为仓库内实现，不再依赖 CUDA 13.2 专属的 `<cuda/itera
 - Windows：`cudart64_<major>.dll`
 - Linux：`libcudart.so.<major>*`（auditwheel 可能给文件名加 hash）
 
+`scripts/validate_runtime_wheel.py` 是 raw Linux wheel、auditwheel 修复后的 manylinux
+wheel、Windows wheel 和最终 Windows+Linux 成对产物共用的发行门禁。它会核对项目名/版本、
+唯一 native runtime、唯一且与清单一致的 CUDART，以及两个系统包的 CUDART major 相同。
+
 Python shim 会读取清单并定位这份随包库，调用方无需选择 CUDA 专属 extra 或包。用户安装
 `taichi-forge` 因此不需要本机 CUDA Toolkit；只有构建 runtime wheel 时才需要所选 Toolkit。
 降低驱动版本门槛应通过验证并下调这一处构建基线完成，不能发布平行的 `cu11`、`cu12`、

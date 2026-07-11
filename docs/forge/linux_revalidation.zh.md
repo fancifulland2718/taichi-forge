@@ -19,6 +19,24 @@ driver、Vulkan loader、窗口系统以及（构建 native method 时）CUDA To
 
 这验证了包更新随附 libdevice asset 时无需再依赖源码中写死的新版本号。
 
+### 单 runtime wheel 与 CUDA 驱动兼容边界
+
+以最终候选 `CUDA_TOOLKIT_VERSION` 构建 runtime workflow，并对 auditwheel 处理后的上传候选
+执行以下检查：
+
+- Linux 只产出一个项目名为 `taichi-forge-runtime` 的 manylinux wheel；distribution、版本、
+  extra 和 wheel tag 都不带 `cu11` / `cu12` / `cu13` 后缀；
+- wheel 中恰好包含一个 `libtaichi_runtime.so`、一个 `cuda_runtime_major.txt`，以及一个与清单
+  major 一致的 `libcudart.so.<major>*` 或 auditwheel hash 名；检查 `DT_NEEDED`、RPATH 和实际
+  loader 路径均指向包内库；
+- 在无 CUDA Toolkit 的干净环境安装 wheel，运行 CUDA native scan/reduce/sort、device-check、
+  native AD、reset 和 workspace 稳定性矩阵；
+- 若候选基线低于当前默认 CUDA 13.2，必须在目标旧 driver 上运行相同 wheel。只在新 driver
+  编译或执行通过，不能证明最低 driver 已降低。
+
+这个矩阵可以用 11.8/12.x 候选做内部验证，但最终只发布一套通过门槛的 Linux wheel，不建立
+按 CUDA 版本分叉的包系列。
+
 ### CUDA 执行、graph 与 allocator 路径
 
 在发布支持的 Linux NVIDIA driver 和真实 GPU 上运行 C++ backend safety target 与 CUDA

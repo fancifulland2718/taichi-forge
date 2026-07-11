@@ -49,6 +49,18 @@ Common explicit method families include:
 Explicit native methods are useful for testing or controlled deployments. They
 should not be used as portability promises across all backends.
 
+### CUDA runtime portability
+
+CUDA native/CUB providers ship in the platform `taichi-forge-runtime` wheel.
+Users do not install a local CUDA Toolkit or select a CUDA-versioned package.
+`method="auto"` still checks runtime capabilities and uses the established
+correct fallback when unsupported; an explicit CUDA native method rejects
+clearly when its provider or driver is incompatible. The build Toolkit, bundled
+CUDART, and minimum driver are separate boundaries. See
+[Building wheels](build_wheels.en.md) for the current baseline and the gates for
+lowering it, and [Linux revalidation](linux_revalidation.en.md) for outstanding
+Linux evidence.
+
 ## Data Contracts
 
 - Dense 1D `ti.ndarray` inputs are the primary native algorithm ABI.

@@ -71,24 +71,17 @@ PyPI 申请短期 token，**无需手动维护任何 secret**。
 -DTI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON
 ```
 
-发行拓扑固定为每个平台一个 `taichi-forge-runtime` wheel；不能按 CUDA 版本创建
-`cu11` / `cu12` / `cu13` 包、extra 或 wheel tag。native iterator 已由仓库内 adapter 实现，
-不再依赖 CUDA 13.2 专属 `<cuda/iterator>`。workflow 中的 `CUDA_TOOLKIT_VERSION` 默认值
-目前仍为 `13.2.0`，但它只是可替换的内部构建基线。降低它之前必须分别完成对应 Toolkit、
-目标旧驱动、GPU 架构和 Linux manylinux 实包验证；发行包的项目名和 shim 依赖保持不变。
+完整的用户侧合同和版本边界见 [构建 Wheel](../forge/build_wheels.zh.md)。维护者在本 workflow
+中只需守住以下发行不变量：
 
-runtime wheel 必须包含 native runtime、唯一的动态 CUDA runtime 和
-`cuda_runtime_major.txt`：
-
-- Linux：`taichi_forge_runtime/_lib/runtime_native/libtaichi_runtime.so` 和
-  `libcudart.so.<major>*`（auditwheel 可能加 hash）。
-- Windows：`taichi_forge_runtime/_lib/runtime_native/taichi_runtime.dll`、
-  `taichi_runtime.lib` 和 `cudart64_<major>.dll`。
-
-repair/validate step 从实际 CUDART 文件名生成并核对 major 清单。Python shim 只按清单寻找
-包内 CUDART，因此最终用户无需安装对应 Toolkit，也无需选择 CUDA 版本化依赖。构建所用
-Toolkit/CUDART 仍决定最低驱动兼容边界；单一包策略不会自动消除这个边界，而是允许发行方
-在验证后通过一次下调构建基线，使同一个包覆盖更旧的兼容驱动。
+- 每个平台恰好一个 `taichi-forge-runtime` wheel，不创建 `cu11` / `cu12` / `cu13` 包、extra、
+  版本后缀或 wheel tag；
+- Windows/Linux wheel 都包含唯一 native runtime、唯一动态 CUDART 和
+  `cuda_runtime_major.txt`，并通过 `scripts/validate_runtime_wheel.py`；Linux 必须验证
+  auditwheel 后的最终候选；
+- `CUDA_TOOLKIT_VERSION` 当前默认 `13.2.0`，只作为可替换的内部构建基线。降低前必须完成
+  [Linux 复测清单](../forge/linux_revalidation.zh.md)和目标旧 driver 实测，不能只凭编译成功
+  修改对外最低驱动声明。
 
 `publish_pypi.yml` 不应重新编译 C++ runtime，也不应重新安装 CUDA Toolkit。它只从目标
 PyPI/TestPyPI 下载指定版本的 `taichi-forge-runtime` wheel，解包 link artifacts，然后构建

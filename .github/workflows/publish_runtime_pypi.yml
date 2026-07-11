@@ -192,74 +192,9 @@ jobs:
       - name: Validate runtime wheel contents
         run: |
           set -euo pipefail
-          python - <<'PY'
-          import os
-          from pathlib import Path
-          import re
-          from zipfile import ZipFile
-
-          wheels = sorted(Path("dist-runtime").glob("*.whl"))
-          if len(wheels) != 1:
-              raise SystemExit(f"Expected one runtime wheel, found {[str(w) for w in wheels]}")
-
-          wheel = wheels[0]
-          if not wheel.name.startswith("taichi_forge_runtime-"):
-              raise SystemExit(f"CUDA-specific or unexpected runtime wheel name: {wheel.name}")
-          expected = "taichi_forge_runtime/_lib/runtime_native/libtaichi_runtime.so"
-          expected_manifest = (
-              "taichi_forge_runtime/_lib/runtime_native/"
-              "cuda_runtime_major.txt"
-          )
-          with ZipFile(wheel) as zf:
-              names = zf.namelist()
-              manifest_value = (
-                  zf.read(expected_manifest).decode("ascii").strip()
-                  if expected_manifest in names
-                  else None
-              )
-          runtime_libs = [name for name in names if name == expected]
-          manifests = [name for name in names if name == expected_manifest]
-          cuda_major = os.environ["CUDA_TOOLKIT_VERSION"].split(".", 1)[0]
-          cudart_prefix = (
-              "taichi_forge_runtime/_lib/runtime_native/"
-              f"libcudart.so.{cuda_major}"
-          )
-          all_cuda_runtime_libs = [
-              name for name in names
-              if re.fullmatch(
-                  r"libcudart\.so\.\d+(?:\.\d+)*", Path(name).name
-              )
-          ]
-          cuda_runtime_libs = [
-              name for name in all_cuda_runtime_libs
-              if name.startswith(cudart_prefix)
-          ]
-          wrong_entries = [name for name in names if name.startswith("taichi_forge/_lib/")]
-          if (
-              len(runtime_libs) != 1
-              or len(cuda_runtime_libs) != 1
-              or len(all_cuda_runtime_libs) != 1
-              or len(manifests) != 1
-              or manifest_value != cuda_major
-              or wrong_entries
-          ):
-              print(f"Runtime wheel contents from {wheel}:")
-              for name in names:
-                  if "taichi_runtime" in name or "cudart" in name or "_lib/" in name:
-                      print(f"  {name}")
-              built = sorted(Path("_skbuild").rglob("libtaichi_runtime.so"))
-              if built:
-                  print("Built runtime libraries under _skbuild:")
-                  for path in built:
-                      print(f"  {path}")
-              raise SystemExit(
-                  f"Expected {expected}, one dynamic libcudart, and no taichi_forge/_lib entries; "
-                  f"found runtime_libs={runtime_libs}, cuda_runtime_libs={all_cuda_runtime_libs}, "
-                  f"manifest={manifest_value!r}, wrong_entries={wrong_entries}"
-              )
-          print(f"Runtime wheel native library: {runtime_libs[0]}")
-          print(f"Runtime wheel CUDA runtime: {cuda_runtime_libs[0]}")
-          PY
+          cuda_major="${CUDA_TOOLKIT_VERSION%%.*}"
+          python scripts/validate_runtime_wheel.py \
+            --wheel-dir dist-runtime --platform linux --cuda-major "$cuda_major"
 
       - name: Audit runtime wheel
         run: |
@@ -268,17 +203,10 @@ jobs:
           mkdir -p wheelhouse-runtime
           auditwheel show dist-runtime/*.whl || true
           auditwheel repair dist-runtime/*.whl -w wheelhouse-runtime/ --plat manylinux_2_35_x86_64
-          python - <<'PY'
-          from pathlib import Path
-
-          wheels = sorted(Path("wheelhouse-runtime").glob("*.whl"))
-          if not wheels:
-              raise SystemExit("No repaired runtime wheels found")
-          for wheel in wheels:
-              if "linux_x86_64" in wheel.name or "manylinux" not in wheel.name:
-                  raise SystemExit(f"Unsupported Linux runtime wheel tag: {wheel.name}")
-              print(f"Linux runtime upload candidate: {wheel.name}")
-          PY
+          cuda_major="${CUDA_TOOLKIT_VERSION%%.*}"
+          python scripts/validate_runtime_wheel.py \
+            --wheel-dir wheelhouse-runtime --platform manylinux \
+            --cuda-major "$cuda_major"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -430,72 +358,9 @@ jobs:
       - name: Validate runtime wheel contents
         shell: pwsh
         run: |
-          @'
-          import os
-          from pathlib import Path
-          import re
-          from zipfile import ZipFile
-
-          wheels = sorted(Path("dist-runtime").glob("*.whl"))
-          if len(wheels) != 1:
-              raise SystemExit(f"Expected one runtime wheel, found {[str(w) for w in wheels]}")
-
-          wheel = wheels[0]
-          if not wheel.name.startswith("taichi_forge_runtime-"):
-              raise SystemExit(f"CUDA-specific or unexpected runtime wheel name: {wheel.name}")
-          expected_dll = "taichi_forge_runtime/_lib/runtime_native/taichi_runtime.dll"
-          expected_lib = "taichi_forge_runtime/_lib/runtime_native/taichi_runtime.lib"
-          expected_manifest = (
-              "taichi_forge_runtime/_lib/runtime_native/"
-              "cuda_runtime_major.txt"
-          )
-          with ZipFile(wheel) as zf:
-              names = zf.namelist()
-              manifest_value = (
-                  zf.read(expected_manifest).decode("ascii").strip()
-                  if expected_manifest in names
-                  else None
-              )
-          runtime_dlls = [name for name in names if name == expected_dll]
-          runtime_libs = [name for name in names if name == expected_lib]
-          manifests = [name for name in names if name == expected_manifest]
-          cuda_major = os.environ["CUDA_TOOLKIT_VERSION"].split(".", 1)[0]
-          expected_cudart = (
-              "taichi_forge_runtime/_lib/runtime_native/"
-              f"cudart64_{cuda_major}.dll"
-          )
-          all_cuda_runtime_dlls = [
-              name for name in names
-              if re.fullmatch(r"cudart64_\d+\.dll", Path(name).name, re.IGNORECASE)
-          ]
-          cuda_runtime_dlls = [
-              name for name in all_cuda_runtime_dlls
-              if name == expected_cudart
-          ]
-          wrong_entries = [name for name in names if name.startswith("taichi_forge/_lib/")]
-          if (
-              len(runtime_dlls) != 1
-              or len(runtime_libs) != 1
-              or len(cuda_runtime_dlls) != 1
-              or len(all_cuda_runtime_dlls) != 1
-              or len(manifests) != 1
-              or manifest_value != cuda_major
-              or wrong_entries
-          ):
-              print(f"Runtime wheel contents from {wheel}:")
-              for name in names:
-                  if "taichi_runtime" in name or "cudart" in name or "_lib/" in name:
-                      print(f"  {name}")
-              raise SystemExit(
-                  f"Expected {expected_dll}, {expected_lib}, one dynamic cudart DLL, "
-                  f"and no taichi_forge/_lib entries; found dlls={runtime_dlls}, "
-                  f"libs={runtime_libs}, cuda_runtime_dlls={all_cuda_runtime_dlls}, "
-                  f"manifest={manifest_value!r}, wrong_entries={wrong_entries}"
-              )
-          print(f"Runtime wheel native DLL: {runtime_dlls[0]}")
-          print(f"Runtime wheel import library: {runtime_libs[0]}")
-          print(f"Runtime wheel CUDA runtime DLL: {cuda_runtime_dlls[0]}")
-          '@ | python -
+          $cudaMajor = $env:CUDA_TOOLKIT_VERSION.Split('.')[0]
+          python scripts/validate_runtime_wheel.py `
+            --wheel-dir dist-runtime --platform windows --cuda-major $cudaMajor
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -513,6 +378,8 @@ jobs:
       name: ${{ github.event.inputs.target == 'pypi' && 'pypi' || 'testpypi' }}
       url: ${{ github.event.inputs.target == 'pypi' && 'https://pypi.org/p/taichi-forge-runtime' || 'https://test.pypi.org/p/taichi-forge-runtime' }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all runtime wheel artifacts
         uses: actions/download-artifact@v4
         with:
@@ -523,90 +390,8 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           find artifacts -type f -name '*.whl' -exec cp -v {} dist/ \;
-          python - <<'PY'
-          from email.parser import Parser
-          from pathlib import Path
-          import re
-          from zipfile import ZipFile
-
-          wheels = sorted(Path("dist").glob("*.whl"))
-          if len(wheels) != 2:
-              raise SystemExit(
-                  "Expected exactly one Windows and one Linux runtime wheel, "
-                  f"found {[wheel.name for wheel in wheels]}"
-              )
-          versions = set()
-          for wheel in wheels:
-              if not wheel.name.startswith("taichi_forge_runtime-"):
-                  raise SystemExit(
-                      f"CUDA-specific or unexpected runtime wheel name: {wheel.name}"
-                  )
-              with ZipFile(wheel) as zf:
-                  names = zf.namelist()
-                  metadata = next(name for name in names if name.endswith(".dist-info/METADATA"))
-                  parsed = Parser().parsestr(
-                      zf.read(metadata).decode("utf-8", errors="replace")
-                  )
-                  project = parsed.get("Name")
-                  versions.add(parsed.get("Version"))
-                  manifests = [
-                      name for name in names
-                      if name.endswith("/cuda_runtime_major.txt")
-                  ]
-                  if len(manifests) != 1:
-                      raise SystemExit(
-                          f"Expected one CUDA runtime manifest in {wheel.name}, "
-                          f"found {manifests}"
-                      )
-                  major_text = zf.read(manifests[0]).decode("ascii").strip()
-                  if not major_text.isdigit() or int(major_text) <= 0:
-                      raise SystemExit(
-                          f"Invalid CUDA runtime manifest in {wheel.name}: "
-                          f"{major_text!r}"
-                      )
-                  major = int(major_text)
-                  if "win_amd64" in wheel.name:
-                      cudart_pattern = re.compile(
-                          r"cudart64_(\d+)\.dll", re.IGNORECASE
-                      )
-                      native_name = "taichi_runtime.dll"
-                  else:
-                      cudart_pattern = re.compile(
-                          r"libcudart(?:-[^.]+)?\.so\.(\d+)(?:\.\d+)*",
-                          re.IGNORECASE,
-                      )
-                      native_name = "libtaichi_runtime.so"
-                  cudarts = []
-                  for name in names:
-                      match = cudart_pattern.fullmatch(Path(name).name)
-                      if match:
-                          cudarts.append((name, int(match.group(1))))
-                  native_runtimes = [
-                      name for name in names
-                      if Path(name).name == native_name
-                  ]
-                  if (
-                      len(cudarts) != 1
-                      or cudarts[0][1] != major
-                      or len(native_runtimes) != 1
-                  ):
-                      raise SystemExit(
-                          f"Runtime contents mismatch in {wheel.name}: "
-                          f"manifest major={major}, cudarts={cudarts}, "
-                          f"native_runtimes={native_runtimes}"
-                      )
-              if project != "taichi-forge-runtime":
-                  raise SystemExit(f"Unexpected wheel project {project!r}: {wheel}")
-              if "linux_x86_64" in wheel.name:
-                  raise SystemExit(f"Unsupported Linux platform tag in upload set: {wheel.name}")
-          if len(versions) != 1:
-              raise SystemExit(f"Runtime wheel versions differ: {sorted(versions)}")
-          if sum("win_amd64" in wheel.name for wheel in wheels) != 1:
-              raise SystemExit("Expected exactly one Windows runtime wheel")
-          if sum("manylinux" in wheel.name for wheel in wheels) != 1:
-              raise SystemExit("Expected exactly one manylinux runtime wheel")
-          print(f"taichi-forge-runtime: {len(wheels)} wheel(s)")
-          PY
+          python scripts/validate_runtime_wheel.py \
+            --wheel-dir dist --platform pair
           ls -la dist/
 
       - name: Publish to TestPyPI

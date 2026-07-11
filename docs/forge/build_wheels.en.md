@@ -111,6 +111,11 @@ packages exactly one matching dynamic CUDART plus
 - Windows: `cudart64_<major>.dll`
 - Linux: `libcudart.so.<major>*` (auditwheel may hash the filename)
 
+`scripts/validate_runtime_wheel.py` is the shared release gate for the raw
+Linux wheel, the auditwheel-repaired manylinux wheel, the Windows wheel, and
+the final Windows+Linux pair. It verifies project/version identity, one native
+runtime, one matching CUDART/manifest, and equal CUDART majors across the pair.
+
 The Python shim reads the manifest and locates that bundled library; callers do
 not select a CUDA-specific extra or package. Installing `taichi-forge` therefore
 does not require a local CUDA Toolkit. Building the runtime wheel does require

@@ -44,6 +44,15 @@
 
 显式 native method 适合测试或受控部署，不应被当成跨所有后端的可移植承诺。
 
+### CUDA runtime 可移植性
+
+CUDA native/CUB provider 随平台级 `taichi-forge-runtime` wheel 发行。用户不需要安装本机
+CUDA Toolkit，也不需要选择 CUDA 版本化包；`method="auto"` 仍以运行时 capability 为准，
+不支持时走既有正确 fallback。显式 CUDA native method 在 provider 或 driver 不兼容时会清晰
+拒绝。构建 Toolkit、包内 CUDART 与最低 driver 是不同边界；当前默认构建基线和降低门槛前的
+验证要求见 [构建 Wheel](build_wheels.zh.md)，尚待 Linux 实测的项目见
+[Linux 复测状态](linux_revalidation.zh.md)。
+
 ## 数据合同
 
 - Dense 1D `ti.ndarray` 是主要 native 算法 ABI。

@@ -152,18 +152,25 @@ def _bundled_cuda_runtime_major(runtime_dirs):
             "Conflicting bundled CUDA runtime manifests: "
             f"{sorted(manifest_majors)}"
         )
-    if manifest_majors:
-        return next(iter(manifest_majors))
-
-    # Backward compatibility for existing runtime wheels and source builds
-    # created before the manifest was introduced. Runtime search roots never
-    # include arbitrary system CUDA directories.
     discovered_majors = {
         major
         for directory in runtime_dirs
         for path in _cuda_runtime_library_candidates(directory)
         if (major := _cuda_runtime_major_from_name(path)) is not None
     }
+    if manifest_majors:
+        manifest_major = next(iter(manifest_majors))
+        unexpected_majors = discovered_majors - {manifest_major}
+        if unexpected_majors:
+            raise RuntimeError(
+                "Bundled CUDA runtime libraries conflict with manifest major "
+                f"{manifest_major}: {sorted(unexpected_majors)}"
+            )
+        return manifest_major
+
+    # Backward compatibility for existing runtime wheels and source builds
+    # created before the manifest was introduced. Runtime search roots never
+    # include arbitrary system CUDA directories.
     if len(discovered_majors) > 1:
         raise RuntimeError(
             "Multiple bundled CUDA runtime majors found without a manifest: "

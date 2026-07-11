@@ -25,6 +25,28 @@ following:
 This verifies that a package may update its bundled libdevice asset without a
 source edit that hardcodes a new version.
 
+### Single runtime wheel and CUDA driver boundary
+
+Build the runtime workflow with the final candidate `CUDA_TOOLKIT_VERSION`,
+then validate the upload candidate after auditwheel repair:
+
+- Linux produces exactly one manylinux wheel whose project is
+  `taichi-forge-runtime`; its distribution, version, extras, and wheel tag have
+  no `cu11` / `cu12` / `cu13` suffix.
+- The wheel contains exactly one `libtaichi_runtime.so`, one
+  `cuda_runtime_major.txt`, and one `libcudart.so.<major>*` or auditwheel-hashed
+  equivalent matching the manifest. Verify `DT_NEEDED`, RPATH, and the actual
+  loader path all resolve to the bundled library.
+- Install the wheel without a CUDA Toolkit and run CUDA native scan/reduce/sort,
+  device checks, native AD, reset, and workspace-stability coverage.
+- If the candidate baseline is below the current CUDA 13.2 default, run that
+  same wheel on the target older driver. A build or run only on a new driver
+  does not prove a lower minimum driver.
+
+CUDA 11.8/12.x candidates may be built for internal validation, but the release
+still publishes only the single Linux wheel that passes these gates; it does
+not create CUDA-versioned package families.
+
 ### CUDA execution, graph, and allocator paths
 
 On a Linux NVIDIA driver supported by the release, run the C++ backend safety
