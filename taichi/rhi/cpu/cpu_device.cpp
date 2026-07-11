@@ -98,8 +98,16 @@ uint64_t *CpuDevice::allocate_llvm_runtime_memory_jit(
 }
 
 void CpuDevice::dealloc_memory(DeviceAllocation handle) {
-  if (handle.device != this ||
-      allocations_.retire(handle.alloc_id) != RhiResult::success) {
+  if (handle.device != this) {
+    TI_WARN("invalid DeviceAllocation");
+    return;
+  }
+  std::lock_guard<std::mutex> lock(mapping_lifecycle_mutex_);
+  if (mapped_allocations_.find(handle.alloc_id) != mapped_allocations_.end()) {
+    TI_WARN("cannot deallocate a mapped CPU allocation");
+    return;
+  }
+  if (allocations_.retire(handle.alloc_id) != RhiResult::success) {
     TI_WARN("invalid DeviceAllocation");
   }
 }
@@ -170,11 +178,23 @@ RhiResult CpuDevice::map_range(DevicePtr ptr,
     return RhiResult::invalid_usage;
   }
   *mapped_ptr = nullptr;
+  std::lock_guard<std::mutex> lock(mapping_lifecycle_mutex_);
   auto [result, lease] = allocations_.acquire(ptr.alloc_id, ptr.offset, size);
   if (result != RhiResult::success || lease->ptr == nullptr) {
     return result == RhiResult::success ? RhiResult::error : result;
   }
-  *mapped_ptr = static_cast<uint8_t *>(lease->ptr) + ptr.offset;
+  if (mapped_allocations_.find(ptr.alloc_id) != mapped_allocations_.end()) {
+    return RhiResult::invalid_usage;
+  }
+  void *host_ptr = static_cast<uint8_t *>(lease->ptr) + ptr.offset;
+  try {
+    mapped_allocations_.emplace(ptr.alloc_id, std::move(lease));
+  } catch (const std::bad_alloc &) {
+    return RhiResult::out_of_memory;
+  } catch (...) {
+    return RhiResult::error;
+  }
+  *mapped_ptr = host_ptr;
   return RhiResult::success;
 }
 
@@ -183,19 +203,56 @@ RhiResult CpuDevice::map(DeviceAllocation alloc, void **mapped_ptr) {
     return RhiResult::invalid_usage;
   }
   *mapped_ptr = nullptr;
+  std::lock_guard<std::mutex> lock(mapping_lifecycle_mutex_);
   auto [result, lease] = allocations_.acquire(alloc.alloc_id);
   if (result != RhiResult::success || lease->ptr == nullptr) {
     return result == RhiResult::success ? RhiResult::error : result;
   }
-  *mapped_ptr = lease->ptr;
+  if (mapped_allocations_.find(alloc.alloc_id) != mapped_allocations_.end()) {
+    return RhiResult::invalid_usage;
+  }
+  void *host_ptr = lease->ptr;
+  try {
+    mapped_allocations_.emplace(alloc.alloc_id, std::move(lease));
+  } catch (const std::bad_alloc &) {
+    return RhiResult::out_of_memory;
+  } catch (...) {
+    return RhiResult::error;
+  }
+  *mapped_ptr = host_ptr;
   return RhiResult::success;
 }
 
-void CpuDevice::unmap(DeviceAllocation alloc) {
-  if (alloc.device != this ||
-      allocations_.acquire(alloc.alloc_id).first != RhiResult::success) {
-    TI_WARN("invalid DeviceAllocation");
+RhiResult CpuDevice::map_range_for_cpu_native(DevicePtr ptr,
+                                              uint64_t size,
+                                              void **mapped_ptr) {
+  if (mapped_ptr == nullptr || ptr.device != this) {
+    return RhiResult::invalid_usage;
   }
+  *mapped_ptr = nullptr;
+  auto [result, lease] = allocations_.acquire(ptr.alloc_id, ptr.offset, size);
+  if (result != RhiResult::success || lease->ptr == nullptr) {
+    return result == RhiResult::success ? RhiResult::error : result;
+  }
+  // The synchronous Program call owns the field allocation until the native
+  // primitive returns. No persistent map state or host copy is needed here.
+  *mapped_ptr = static_cast<uint8_t *>(lease->ptr) + ptr.offset;
+  return RhiResult::success;
+}
+
+void CpuDevice::unmap(DevicePtr ptr) {
+  if (ptr.device != this) {
+    TI_WARN("invalid DevicePtr");
+    return;
+  }
+  std::lock_guard<std::mutex> lock(mapping_lifecycle_mutex_);
+  if (mapped_allocations_.erase(ptr.alloc_id) == 0) {
+    TI_WARN("unmapping a CPU allocation that is not mapped");
+  }
+}
+
+void CpuDevice::unmap(DeviceAllocation alloc) {
+  unmap(alloc.get_ptr());
 }
 
 void CpuDevice::memcpy_internal(DevicePtr dst, DevicePtr src, uint64_t size) {
@@ -227,6 +284,12 @@ DeviceAllocation CpuDevice::import_memory(void *ptr, size_t size) {
 }
 
 void CpuDevice::clear() {
+  std::lock_guard<std::mutex> lock(mapping_lifecycle_mutex_);
+  if (!mapped_allocations_.empty()) {
+    TI_WARN("cannot clear CPU allocations while {} allocation(s) are mapped",
+            mapped_allocations_.size());
+    return;
+  }
   allocations_.clear();
 }
 

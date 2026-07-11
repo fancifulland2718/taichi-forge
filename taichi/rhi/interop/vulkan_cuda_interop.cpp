@@ -9,6 +9,7 @@
 
 #include <limits>
 #include <mutex>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -50,6 +51,17 @@ struct ImportedVulkanMemory {
   CUexternalMemory external_memory{nullptr};
   unsigned char *mapped_buffer{nullptr};
 };
+
+void destroy_imported_vulkan_memory(ImportedVulkanMemory &entry) {
+  if (entry.mapped_buffer != nullptr) {
+    CUDADriver::get_instance().mem_free(entry.mapped_buffer);
+    entry.mapped_buffer = nullptr;
+  }
+  if (entry.external_memory != nullptr) {
+    CUDADriver::get_instance().external_memory_destroy(entry.external_memory);
+    entry.external_memory = nullptr;
+  }
+}
 
 #if defined(_WIN32) || defined(_WIN64) || defined(WIN32) || \
     defined(_MSC_VER)
@@ -113,14 +125,8 @@ void release_imported_vulkan_memory(
   // This slow interop path must complete before a Vulkan allocation's external
   // mapping can be freed or recycled.
   CUDADriver::get_instance().stream_synchronize(nullptr);
-  for (const auto &entry : entries) {
-    if (entry.mapped_buffer != nullptr) {
-      CUDADriver::get_instance().mem_free(entry.mapped_buffer);
-    }
-    if (entry.external_memory != nullptr) {
-      CUDADriver::get_instance().external_memory_destroy(
-          entry.external_memory);
-    }
+  for (auto &entry : entries) {
+    destroy_imported_vulkan_memory(entry);
   }
 }
 
@@ -303,9 +309,15 @@ ImportedVulkanMemory get_cuda_memory_pointer(VkDeviceMemory mem,
   // application-owned and are closed by ScopedExternalMemoryHandle instead.
   handle_guard.release_to_cuda();
 #endif
-  return {external_memory,
-          static_cast<unsigned char *>(map_buffer_onto_external_memory(
-              external_memory, offset, buffer_size))};
+  ImportedVulkanMemory imported{external_memory, nullptr};
+  try {
+    imported.mapped_buffer = static_cast<unsigned char *>(
+        map_buffer_onto_external_memory(external_memory, offset, buffer_size));
+  } catch (...) {
+    destroy_imported_vulkan_memory(imported);
+    throw;
+  }
+  return imported;
 }
 
 unsigned char *get_or_import_vulkan_allocation(
@@ -332,8 +344,15 @@ unsigned char *get_or_import_vulkan_allocation(
   const size_t mem_size = alloc_offset + alloc_size;
   auto imported_memory = get_cuda_memory_pointer(
       base_mem, mem_size, alloc_offset, alloc_size, vk_dev->vk_device());
-  auto [inserted, was_inserted] =
-      allocation_base_ptrs.emplace(key, std::move(imported_memory));
+  decltype(allocation_base_ptrs.begin()) inserted;
+  bool was_inserted = false;
+  try {
+    std::tie(inserted, was_inserted) =
+        allocation_base_ptrs.emplace(key, imported_memory);
+  } catch (...) {
+    destroy_imported_vulkan_memory(imported_memory);
+    throw;
+  }
   TI_ASSERT(was_inserted);
   return inserted->second.mapped_buffer;
 }

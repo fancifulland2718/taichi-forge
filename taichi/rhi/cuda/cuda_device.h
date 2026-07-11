@@ -177,6 +177,7 @@ class CudaDevice : public LlvmDevice {
   struct MappingState {
     std::mutex mutex;
     std::unique_ptr<char[]> staging;
+    bool mapped{false};
   };
 
   struct AllocationRecord {
@@ -227,6 +228,11 @@ class CudaDevice : public LlvmDevice {
   };
 
   AllocationRegistry<AllocationRecord> allocations_;
+  // Serializes transitions between mapped and retiring allocations. The lock
+  // is held only while map/unmap copies or allocation metadata changes; it is
+  // not held while callers use the returned host pointer.
+  std::mutex mapping_lifecycle_mutex_;
+  size_t mapped_allocation_count_{0};
 };
 
 }  // namespace cuda

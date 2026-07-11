@@ -53,6 +53,7 @@ class AllocationRegistry {
     State state{State::kReleased};
     std::atomic<uint32_t> lease_count{0};
     std::optional<Record> record;
+    uint32_t next_retiring{std::numeric_limits<uint32_t>::max()};
   };
 
  public:
@@ -169,7 +170,10 @@ class AllocationRegistry {
     if (!slot) {
       return RhiResult::invalid_usage;
     }
+    const uint32_t index = decode_index(handle);
     slot->state = State::kRetiring;
+    slot->next_retiring = retiring_head_;
+    retiring_head_ = index;
     collect_retired_locked(retired);
     return RhiResult::success;
   }
@@ -222,9 +226,12 @@ class AllocationRegistry {
   void clear() {
     std::vector<Record> retired;
     std::lock_guard<std::mutex> lock(mutex_);
-    for (auto &slot : slots_) {
+    for (size_t index = 0; index < slots_.size(); ++index) {
+      auto &slot = slots_[index];
       if (slot && slot->state == State::kLive) {
         slot->state = State::kRetiring;
+        slot->next_retiring = retiring_head_;
+        retiring_head_ = static_cast<uint32_t>(index);
       }
     }
     collect_retired_locked(retired);
@@ -272,14 +279,22 @@ class AllocationRegistry {
 
   size_t collect_retired_locked(std::vector<Record> &retired) {
     size_t collected = 0;
-    for (size_t index = 0; index < slots_.size(); ++index) {
+    uint32_t *link = &retiring_head_;
+    while (*link != kInvalidIndex) {
+      const uint32_t index = *link;
+      TI_ASSERT(index < slots_.size());
       auto &slot = slots_[index];
+      TI_ASSERT(slot && slot->state == State::kRetiring && slot->record);
       // Once a slot starts retiring, no new lease can be acquired. Existing
       // leases increment this counter while holding the registry mutex, so a
       // zero count is sufficient to destroy the record outside their reach.
-      if (slot && slot->state == State::kRetiring &&
-          slot->lease_count.load(std::memory_order_acquire) == 0) {
+      if (slot->lease_count.load(std::memory_order_acquire) == 0) {
+        const uint32_t next_retiring = slot->next_retiring;
+        // Record is noexcept-movable, so allocation is the only operation
+        // here that may throw. Keep the entry linked until emplace succeeds.
         retired.emplace_back(std::move(*slot->record));
+        *link = next_retiring;
+        slot->next_retiring = kInvalidIndex;
         slot->record.reset();
         slot->state = State::kReleased;
         // Do not wrap generation: a handle that may still exist must never
@@ -294,6 +309,8 @@ class AllocationRegistry {
           }
         }
         ++collected;
+      } else {
+        link = &slot->next_retiring;
       }
     }
     return collected;
@@ -319,6 +336,9 @@ class AllocationRegistry {
   mutable std::mutex mutex_;
   std::vector<std::unique_ptr<Slot>> slots_;
   std::vector<uint32_t> free_slots_;
+  static constexpr uint32_t kInvalidIndex =
+      std::numeric_limits<uint32_t>::max();
+  uint32_t retiring_head_{kInvalidIndex};
 };
 
 }  // namespace taichi::lang

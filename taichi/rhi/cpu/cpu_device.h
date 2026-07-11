@@ -122,8 +122,15 @@ class CpuDevice : public LlvmDevice {
   RhiResult map_range(DevicePtr ptr, uint64_t size, void **mapped_ptr) final;
   RhiResult map(DeviceAllocation alloc, void **mapped_ptr) final;
 
-  void unmap(DevicePtr ptr) final { TI_NOT_IMPLEMENTED };
+  void unmap(DevicePtr ptr) final;
   void unmap(DeviceAllocation alloc) final;
+
+  // Internal synchronous CPU primitive access. The Program owns the backing
+  // field for the complete native call; external callers must use map_range()
+  // and unmap() so deallocation is rejected while a host pointer is exposed.
+  RhiResult map_range_for_cpu_native(DevicePtr ptr,
+                                     uint64_t size,
+                                     void **mapped_ptr);
 
   DeviceAllocation import_memory(void *ptr, size_t size) override;
 
@@ -160,6 +167,9 @@ class CpuDevice : public LlvmDevice {
   };
 
   AllocationRegistry<AllocationRecord> allocations_;
+  using AllocationLease = AllocationRegistry<AllocationRecord>::Lease;
+  std::mutex mapping_lifecycle_mutex_;
+  std::unordered_map<DeviceAllocationId, AllocationLease> mapped_allocations_;
 };
 
 }  // namespace cpu

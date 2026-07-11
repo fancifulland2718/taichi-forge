@@ -95,6 +95,44 @@ TEST(AllocationRegistryTest, RetiredRecordsWaitForLeasesAndReuseGeneration) {
   EXPECT_EQ(registry.acquire(second).first, RhiResult::success);
 }
 
+TEST(AllocationRegistryTest, CollectsOnlyReadyEntriesFromRetiringList) {
+  AllocationRegistry<TrackedRecord> registry;
+  auto destructions = std::make_shared<std::atomic<int>>(0);
+  auto [first_result, first] = registry.emplace(8, destructions);
+  auto [second_result, second] = registry.emplace(8, destructions);
+  auto [third_result, third] = registry.emplace(8, destructions);
+  ASSERT_EQ(first_result, RhiResult::success);
+  ASSERT_EQ(second_result, RhiResult::success);
+  ASSERT_EQ(third_result, RhiResult::success);
+
+  auto [first_lease_result, first_lease] = registry.acquire(first);
+  auto [second_lease_result, second_lease] = registry.acquire(second);
+  auto [third_lease_result, third_lease] = registry.acquire(third);
+  ASSERT_EQ(first_lease_result, RhiResult::success);
+  ASSERT_EQ(second_lease_result, RhiResult::success);
+  ASSERT_EQ(third_lease_result, RhiResult::success);
+  ASSERT_EQ(registry.retire(first), RhiResult::success);
+  ASSERT_EQ(registry.retire(second), RhiResult::success);
+  ASSERT_EQ(registry.retire(third), RhiResult::success);
+
+  // The protected middle entry must remain linked while newer and older
+  // ready entries are removed from either side of the retiring list.
+  first_lease = {};
+  third_lease = {};
+  auto retired = registry.collect_retired();
+  EXPECT_EQ(retired.size(), 2u);
+  auto stats = registry.stats();
+  EXPECT_EQ(stats.retiring, 1u);
+  EXPECT_EQ(stats.released, 2u);
+
+  second_lease = {};
+  retired = registry.collect_retired();
+  EXPECT_EQ(retired.size(), 1u);
+  stats = registry.stats();
+  EXPECT_EQ(stats.retiring, 0u);
+  EXPECT_EQ(stats.released, 3u);
+}
+
 TEST(AllocationRegistryTest, ConcurrentAllocateLeaseAndRetireIsRaceFree) {
   AllocationRegistry<FakeRecord> registry;
   constexpr int kThreads = 4;

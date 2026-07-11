@@ -16,6 +16,9 @@
 #include "taichi/program/snode_expr_utils.h"
 #include "taichi/math/arithmetic.h"
 #include "taichi/rhi/common/host_memory_pool.h"
+#ifdef TI_WITH_LLVM
+#include "taichi/rhi/cpu/cpu_device.h"
+#endif
 #include "taichi/program/parallel_executor.h"
 
 #include <stdexcept>
@@ -4111,7 +4114,13 @@ uint8_t *map_cpu_dense_field(Program *program,
   }
   const std::size_t span = n == 0 ? value_size : (n - 1) * field_stride + value_size;
   void *mapped = nullptr;
-  RhiResult res = ptr.device->map_range(ptr, span, &mapped);
+#ifdef TI_WITH_LLVM
+  auto *cpu_device = dynamic_cast<cpu::CpuDevice *>(ptr.device);
+  TI_ERROR_IF(!cpu_device, "{} expected CPU field storage.", op_name);
+  RhiResult res = cpu_device->map_range_for_cpu_native(ptr, span, &mapped);
+#else
+  RhiResult res = RhiResult::invalid_usage;
+#endif
   TI_ERROR_IF(res != RhiResult::success || !mapped,
               "{} failed to map CPU dense field storage.", op_name);
   return reinterpret_cast<uint8_t *>(mapped);
@@ -4177,7 +4186,13 @@ uint8_t *map_cpu_dense_field_packed(Program *program,
                                   op_name);
   DevicePtr ptr = program->get_dense_field_device_ptr(snode);
   void *mapped = nullptr;
-  RhiResult res = ptr.device->map_range(ptr, bytes, &mapped);
+#ifdef TI_WITH_LLVM
+  auto *cpu_device = dynamic_cast<cpu::CpuDevice *>(ptr.device);
+  TI_ERROR_IF(!cpu_device, "{} expected CPU field storage.", op_name);
+  RhiResult res = cpu_device->map_range_for_cpu_native(ptr, bytes, &mapped);
+#else
+  RhiResult res = RhiResult::invalid_usage;
+#endif
   TI_ERROR_IF(res != RhiResult::success || !mapped,
               "{} failed to map CPU packed dense field storage.", op_name);
   return reinterpret_cast<uint8_t *>(mapped);
@@ -5231,27 +5246,15 @@ std::size_t Program::cuda_device_transform_affine_ndarray(Ndarray *src,
               "CUDA device transform source and destination dtypes differ.");
   TI_ERROR_IF(value_type < 0 || value_type > 5,
               "CUDA device transform received an unsupported value type.");
-  const auto cuda_value_type =
-      static_cast<cuda::CudaTransformValueType>(value_type);
-  std::size_t expected_size = 0;
-  switch (cuda_value_type) {
-    case cuda::CudaTransformValueType::i32:
-    case cuda::CudaTransformValueType::f32:
-    case cuda::CudaTransformValueType::u32:
-      expected_size = sizeof(uint32_t);
-      break;
-    case cuda::CudaTransformValueType::u64:
-    case cuda::CudaTransformValueType::i64:
-    case cuda::CudaTransformValueType::f64:
-      expected_size = sizeof(uint64_t);
-      break;
-  }
+  const std::size_t expected_size = primitive_value_type_size(value_type);
   TI_ERROR_IF(src->get_element_size() != expected_size,
               "CUDA device transform dtype does not match value type.");
   TI_ERROR_IF(src->get_nelement() >
                   static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA device transform currently supports at most INT_MAX items.");
 #ifdef TI_WITH_CUDA
+  const auto cuda_value_type =
+      static_cast<cuda::CudaTransformValueType>(value_type);
   auto *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
   auto *dst_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst));
   if (cuda_value_type == cuda::CudaTransformValueType::i32 ||

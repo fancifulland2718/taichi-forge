@@ -177,8 +177,27 @@ uint64_t *CudaDevice::allocate_llvm_runtime_memory_jit(
 
 void CudaDevice::dealloc_memory(DeviceAllocation handle) {
   auto context_guard = CUDAContext::get_instance().get_guard();
-  if (handle.device != this ||
-      allocations_.retire(handle.alloc_id) != RhiResult::success) {
+  if (handle.device != this) {
+    TI_WARN("invalid DeviceAllocation");
+    return;
+  }
+  std::lock_guard<std::mutex> lifecycle_lock(mapping_lifecycle_mutex_);
+  auto [result, lease] = allocations_.acquire(handle.alloc_id);
+  if (result != RhiResult::success) {
+    TI_WARN("invalid DeviceAllocation");
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> mapping_lock(lease->mapping->mutex);
+    if (lease->mapping->mapped) {
+      TI_WARN("cannot deallocate a mapped CUDA allocation");
+      return;
+    }
+  }
+  // The lifecycle lock prevents a map transition after the check. Drop the
+  // inspection lease so retire() can reclaim the allocation immediately.
+  lease = {};
+  if (allocations_.retire(handle.alloc_id) != RhiResult::success) {
     TI_WARN("invalid DeviceAllocation");
   }
 }
@@ -249,6 +268,7 @@ RhiResult CudaDevice::map(DeviceAllocation alloc, void **mapped_ptr) {
   }
   *mapped_ptr = nullptr;
   auto context_guard = CUDAContext::get_instance().get_guard();
+  std::lock_guard<std::mutex> lifecycle_lock(mapping_lifecycle_mutex_);
   auto [result, lease] = allocations_.acquire(alloc.alloc_id);
   if (result != RhiResult::success ||
       (lease->size != 0 && lease->ptr == nullptr)) {
@@ -257,7 +277,7 @@ RhiResult CudaDevice::map(DeviceAllocation alloc, void **mapped_ptr) {
 
   auto &mapping = *lease->mapping;
   std::lock_guard<std::mutex> lock(mapping.mutex);
-  if (mapping.staging) {
+  if (mapping.mapped) {
     return RhiResult::invalid_usage;
   }
   try {
@@ -271,6 +291,8 @@ RhiResult CudaDevice::map(DeviceAllocation alloc, void **mapped_ptr) {
   } catch (...) {
     return RhiResult::error;
   }
+  mapping.mapped = true;
+  ++mapped_allocation_count_;
   *mapped_ptr = mapping.staging.get();
   return RhiResult::success;
 }
@@ -281,6 +303,7 @@ void CudaDevice::unmap(DeviceAllocation alloc) {
     return;
   }
   auto context_guard = CUDAContext::get_instance().get_guard();
+  std::lock_guard<std::mutex> lifecycle_lock(mapping_lifecycle_mutex_);
   auto [result, lease] = allocations_.acquire(alloc.alloc_id);
   if (result != RhiResult::success) {
     TI_WARN("invalid DeviceAllocation");
@@ -289,7 +312,7 @@ void CudaDevice::unmap(DeviceAllocation alloc) {
 
   auto &mapping = *lease->mapping;
   std::lock_guard<std::mutex> lock(mapping.mutex);
-  if (!mapping.staging && lease->size != 0) {
+  if (!mapping.mapped) {
     TI_WARN("unmapping a CUDA allocation that is not mapped");
     return;
   }
@@ -299,10 +322,19 @@ void CudaDevice::unmap(DeviceAllocation alloc) {
                                                      lease->size);
   }
   mapping.staging.reset();
+  mapping.mapped = false;
+  TI_ASSERT(mapped_allocation_count_ > 0);
+  --mapped_allocation_count_;
 }
 
 void CudaDevice::clear() {
   auto context_guard = CUDAContext::get_instance().get_guard();
+  std::lock_guard<std::mutex> lifecycle_lock(mapping_lifecycle_mutex_);
+  if (mapped_allocation_count_ != 0) {
+    TI_WARN("cannot clear CUDA allocations while {} allocation(s) are mapped",
+            mapped_allocation_count_);
+    return;
+  }
   allocations_.clear();
 }
 

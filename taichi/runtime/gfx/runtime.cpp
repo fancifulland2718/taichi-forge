@@ -464,13 +464,39 @@ GfxRuntime::GfxRuntime(const Params &params)
   std::filesystem::path cache_path(get_repo_dir());
   cache_path /= "rhi_cache.bin";
   std::vector<char> cache_data;
-  if (std::filesystem::exists(cache_path)) {
-    TI_TRACE("Loading pipeline cache from {}", cache_path.generic_string());
-    std::ifstream cache_file(cache_path, std::ios::binary);
-    cache_data.assign(std::istreambuf_iterator<char>(cache_file),
-                      std::istreambuf_iterator<char>());
-  } else {
+  constexpr uintmax_t kMaxPipelineCacheBytes = 256u * 1024u * 1024u;
+  std::error_code cache_ec;
+  const bool cache_exists = std::filesystem::exists(cache_path, cache_ec);
+  if (cache_exists && !cache_ec) {
+    const uintmax_t cache_size =
+        std::filesystem::file_size(cache_path, cache_ec);
+    if (cache_ec) {
+      TI_WARN("Ignoring unreadable Vulkan pipeline cache at {}: {}",
+              cache_path.generic_string(), cache_ec.message());
+    } else if (cache_size > kMaxPipelineCacheBytes) {
+      TI_WARN("Ignoring oversized Vulkan pipeline cache at {} ({} bytes)",
+              cache_path.generic_string(), cache_size);
+    } else if (cache_size != 0) {
+      TI_TRACE("Loading pipeline cache from {}", cache_path.generic_string());
+      std::ifstream cache_file(cache_path, std::ios::binary);
+      if (cache_file) {
+        cache_data.resize(static_cast<size_t>(cache_size));
+        cache_file.read(cache_data.data(),
+                        static_cast<std::streamsize>(cache_data.size()));
+        if (!cache_file ||
+            cache_file.gcount() !=
+                static_cast<std::streamsize>(cache_data.size())) {
+          TI_WARN("Ignoring truncated Vulkan pipeline cache at {}",
+                  cache_path.generic_string());
+          cache_data.clear();
+        }
+      }
+    }
+  } else if (!cache_ec) {
     TI_TRACE("Pipeline cache not found at {}", cache_path.generic_string());
+  } else {
+    TI_WARN("Failed to inspect Vulkan pipeline cache at {}: {}",
+            cache_path.generic_string(), cache_ec.message());
   }
   auto cache_result = device_->create_pipeline_cache_unique(
       cache_data.size(), cache_data.empty() ? nullptr : cache_data.data());
