@@ -6,6 +6,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -279,6 +280,7 @@ class TI_DLL_EXPORT GfxRuntime {
   StreamSemaphore flush();
   StreamSemaphore flush_if_pending();
   bool has_pending_command_list() const {
+    std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
     return current_cmdlist_ != nullptr;
   }
 
@@ -300,6 +302,7 @@ class TI_DLL_EXPORT GfxRuntime {
       const std::vector<ComputeOpImageRef> &image_refs);
 
   bool used_in_kernel(DeviceAllocationId id) {
+    std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
     return ndarrays_in_use_.count(id) > 0 || argpacks_in_use_.count(id) > 0;
   }
 
@@ -313,6 +316,14 @@ class TI_DLL_EXPORT GfxRuntime {
 
  private:
   friend class taichi::lang::gfx::SNodeTreeManager;
+
+  // GfxRuntime owns a single mutable command-recording state (command list,
+  // barriers, descriptor caches, temporary buffers, image layouts, and graph
+  // replay tables). Public host API calls may arrive from different Python
+  // threads, so they must not mutate that state concurrently. Recursive
+  // locking is intentional: public operations compose other public operations
+  // (for example copy_image -> transition_image and synchronize -> flush).
+  mutable std::recursive_mutex host_api_mutex_;
 
   void ensure_current_cmdlist();
   void submit_current_cmdlist_if_timeout();

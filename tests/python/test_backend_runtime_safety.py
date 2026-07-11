@@ -32,6 +32,81 @@ def _run_concurrently(workers):
         raise failures[0]
 
 
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    cpu_max_num_threads=4,
+)
+def test_async_graph_and_cold_kernel_registration_are_thread_safe():
+    """Keep a producer graph running while a distinct kernel registers.
+
+    Graph execution releases the GIL, matching an async simulation producer.
+    The second kernel has a scalar argument and two ndarray bindings, matching
+    the GGUI staging-kernel descriptor shape that exposed the Vulkan handle
+    mix-up. The buffers are deliberately disjoint so failures belong to the
+    backend runtime rather than application data ownership.
+    """
+
+    n = 1 << 15
+    iterations = 32
+    simulation = ti.ndarray(ti.i32, shape=n)
+    render_source = ti.ndarray(ti.i32, shape=n)
+    render_output = ti.ndarray(ti.i32, shape=n)
+    simulation.fill(0)
+    render_source.from_numpy(np.arange(n, dtype=np.int32))
+    render_output.fill(0)
+
+    @ti.kernel
+    def simulate(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in values:
+            values[i] += 1
+
+    @ti.kernel
+    def stage_for_display(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        bias: ti.i32,
+    ):
+        for i in output:
+            output[i] = source[i] + bias
+
+    symbolic_values = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(simulate, symbolic_values)
+    producer_graph = builder.compile()
+
+    # Finish Python/IR compilation on the owner thread, but deliberately do
+    # not launch/register this kernel. This isolates the native registration
+    # race from Python compiler callbacks that are not part of the worker-safe
+    # submission contract.
+    primal = stage_for_display._primal
+    key = primal.ensure_compiled(render_source, render_output, 7)
+    kernel_cpp = primal.compiled_kernels[key]
+    prog = impl.get_runtime().prog
+    prog.compile_kernel(prog.config(), prog.get_device_caps(), kernel_cpp)
+
+    def producer():
+        for _ in range(iterations):
+            producer_graph.run({"values": simulation})
+
+    def renderer():
+        # Intentionally cold: registration races the already-running producer
+        # on runtimes that do not protect their kernel/context tables.
+        for _ in range(iterations):
+            stage_for_display(render_source, render_output, 7)
+
+    _run_concurrently([producer, renderer])
+    ti.sync()
+    np.testing.assert_array_equal(
+        simulation.to_numpy(), np.full(n, iterations, dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        render_output.to_numpy(), np.arange(n, dtype=np.int32) + 7
+    )
+
+
 @test_utils.test(arch=ti.cpu, cpu_max_num_threads=4)
 def test_cpu_native_primitives_are_safe_for_two_gil_released_callers():
     """Exercise the real native bindings on two disjoint buffers concurrently."""

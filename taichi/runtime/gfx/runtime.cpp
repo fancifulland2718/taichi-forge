@@ -854,6 +854,7 @@ void GfxRuntime::check_hash_overflow_counters() {
 
 GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
     GfxRuntime::RegisterParams reg_params) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   CompiledTaichiKernel::Params params;
   params.ti_kernel_attribs = &(reg_params.kernel_attribs);
   params.num_snode_trees = reg_params.num_snode_trees;
@@ -912,6 +913,7 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
 
 void GfxRuntime::launch_kernel(KernelHandle handle,
                                LaunchContextBuilder &host_ctx) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   auto *ti_kernel = ti_kernels_[handle.get_launch_id()].get();
 
 #if defined(__APPLE__)
@@ -1405,6 +1407,7 @@ void GfxRuntime::GraphReplayState::reset() {
 bool GfxRuntime::try_launch_graph(
     const std::vector<GraphDispatch> &dispatches,
     const void *cache_key) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   GraphReplayState &state = graph_replay_states_[cache_key];
   GraphReplayExecutable &executable = state.executable;
   ++state.attempts;
@@ -1719,6 +1722,7 @@ bool GfxRuntime::try_launch_graph(
 }
 
 void GfxRuntime::buffer_copy(DevicePtr dst, DevicePtr src, size_t size) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   ensure_current_cmdlist();
   insert_pending_dispatch_barriers();
   current_cmdlist_->buffer_barrier(src);
@@ -1729,6 +1733,7 @@ void GfxRuntime::buffer_copy(DevicePtr dst, DevicePtr src, size_t size) {
 void GfxRuntime::copy_image(DeviceAllocation dst,
                             DeviceAllocation src,
                             const ImageCopyParams &params) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   ensure_current_cmdlist();
   insert_pending_dispatch_barriers();
   transition_image(dst, ImageLayout::transfer_dst);
@@ -1739,6 +1744,7 @@ void GfxRuntime::copy_image(DeviceAllocation dst,
 }
 
 DeviceAllocation GfxRuntime::create_image(const ImageParams &params) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   GraphicsDevice *gfx_device = dynamic_cast<GraphicsDevice *>(device_);
   TI_ERROR_IF(gfx_device == nullptr,
               "Image can only be created on a graphics device");
@@ -1749,12 +1755,15 @@ DeviceAllocation GfxRuntime::create_image(const ImageParams &params) {
 }
 
 void GfxRuntime::track_image(DeviceAllocation image, ImageLayout layout) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   last_image_layouts_[image.alloc_id] = layout;
 }
 void GfxRuntime::untrack_image(DeviceAllocation image) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   last_image_layouts_.erase(image.alloc_id);
 }
 void GfxRuntime::transition_image(DeviceAllocation image, ImageLayout layout) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   ImageLayout &last_layout = last_image_layouts_.at(image.alloc_id);
   ensure_current_cmdlist();
   insert_pending_dispatch_barriers();
@@ -1763,6 +1772,7 @@ void GfxRuntime::transition_image(DeviceAllocation image, ImageLayout layout) {
 }
 
 void GfxRuntime::synchronize() {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   synchronize_impl(/*check_hash_overflow=*/true);
 }
 
@@ -1794,6 +1804,7 @@ void GfxRuntime::synchronize_impl(bool check_hash_overflow) {
 }
 
 StreamSemaphore GfxRuntime::flush() {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   StreamSemaphore sema;
   if (current_cmdlist_) {
     insert_pending_dispatch_barriers();
@@ -1816,6 +1827,7 @@ StreamSemaphore GfxRuntime::flush() {
 }
 
 StreamSemaphore GfxRuntime::flush_if_pending() {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   if (!current_cmdlist_) {
     return nullptr;
   }
@@ -2147,6 +2159,7 @@ void GfxRuntime::ensure_listgen_capacity_for_kernel(
 
 void GfxRuntime::update_listgen_buffer_for_snode_tree(
     const CompiledSNodeStructs &compiled_structs) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   const size_t requested_entries = estimate_listgen_entries(compiled_structs);
   if (requested_entries > 0) {
     ensure_listgen_capacity_entries(requested_entries,
@@ -2191,6 +2204,7 @@ void GfxRuntime::init_nonroot_buffers() {
 }
 
 void GfxRuntime::add_root_buffer(size_t root_buffer_size) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   if (root_buffer_size == 0) {
     root_buffer_size = 4;  // there might be empty roots
   }
@@ -2213,15 +2227,20 @@ void GfxRuntime::add_root_buffer(size_t root_buffer_size) {
 }
 
 DeviceAllocation *GfxRuntime::get_root_buffer(int id) const {
-  if (id >= root_buffers_.size()) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  if (id < 0 || static_cast<size_t>(id) >= root_buffers_.size()) {
     TI_ERROR("root buffer id {} not found", id);
   }
   return root_buffers_[id].get();
 }
 
 size_t GfxRuntime::get_root_buffer_size(int id) const {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  if (id < 0 || static_cast<size_t>(id) >= root_buffers_.size()) {
+    TI_ERROR("root buffer id {} not found", id);
+  }
   auto it = root_buffers_size_map_.find(root_buffers_[id].get());
-  if (id >= root_buffers_.size() || it == root_buffers_size_map_.end()) {
+  if (it == root_buffers_size_map_.end()) {
     TI_ERROR("root buffer id {} not found", id);
   }
   return it->second;
@@ -2230,6 +2249,7 @@ size_t GfxRuntime::get_root_buffer_size(int id) const {
 void GfxRuntime::enqueue_compute_op_lambda(
     std::function<void(Device *device, CommandList *cmdlist)> op,
     const std::vector<ComputeOpImageRef> &image_refs) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   for (const auto &ref : image_refs) {
     TI_ASSERT(last_image_layouts_.find(ref.image.alloc_id) !=
               last_image_layouts_.end());

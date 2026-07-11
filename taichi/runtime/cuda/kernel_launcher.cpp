@@ -109,10 +109,13 @@ bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
                                                LaunchContextBuilder &ctx,
                                                GraphLaunchPacket &packet,
                                                void *stream) {
+  std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
+  std::shared_ptr<const Context> launcher_ctx;
   TI_ASSERT(handle.get_launch_id() < contexts_.size());
-  const auto &launcher_ctx = contexts_[handle.get_launch_id()];
-  const auto &parameters = launcher_ctx.parameters;
-  const auto &offloaded_tasks = launcher_ctx.offloaded_tasks;
+  launcher_ctx = contexts_[handle.get_launch_id()];
+  TI_ASSERT(launcher_ctx != nullptr);
+  const auto &parameters = launcher_ctx->parameters;
+  const auto &offloaded_tasks = launcher_ctx->offloaded_tasks;
   for (const auto &task : offloaded_tasks) {
     if (task.sparse_list_op != OffloadedTask::kSparseListOpNone ||
         task.may_mutate_sparse_topology) {
@@ -194,12 +197,15 @@ bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
 void KernelLauncher::capture_cuda_graph_launch(
     const GraphLaunchPacket &packet,
     void *stream) {
+  std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
+  std::shared_ptr<const Context> launcher_ctx;
   TI_ASSERT(packet.handle.get_launch_id() < contexts_.size());
-  const auto &launcher_ctx = contexts_[packet.handle.get_launch_id()];
-  auto *cuda_module = launcher_ctx.jit_module;
+  launcher_ctx = contexts_[packet.handle.get_launch_id()];
+  TI_ASSERT(launcher_ctx != nullptr);
+  auto *cuda_module = launcher_ctx->jit_module;
   auto *cuda_jit_module = dynamic_cast<JITModuleCUDA *>(cuda_module);
   TI_ASSERT(cuda_jit_module != nullptr);
-  const auto &offloaded_tasks = launcher_ctx.offloaded_tasks;
+  const auto &offloaded_tasks = launcher_ctx->offloaded_tasks;
   for (auto task : offloaded_tasks) {
     TI_TRACE("Capturing kernel {}<<<{}, {}>>>", task.name, task.grid_dim,
              task.block_dim);
@@ -211,14 +217,17 @@ void KernelLauncher::capture_cuda_graph_launch(
 
 void KernelLauncher::launch_llvm_kernel(Handle handle,
                                         LaunchContextBuilder &ctx) {
+  std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
+  std::shared_ptr<const Context> launcher_ctx;
   TI_ASSERT(handle.get_launch_id() < contexts_.size());
-  const auto &launcher_ctx = contexts_[handle.get_launch_id()];
+  launcher_ctx = contexts_[handle.get_launch_id()];
+  TI_ASSERT(launcher_ctx != nullptr);
   auto *executor = get_runtime_executor();
-  listgen_reuse_adaptive_ =
+  const bool listgen_reuse_adaptive =
       executor->get_config().cuda_listgen_reuse_adaptive;
-  auto *cuda_module = launcher_ctx.jit_module;
-  const auto &parameters = launcher_ctx.parameters;
-  const auto &offloaded_tasks = launcher_ctx.offloaded_tasks;
+  auto *cuda_module = launcher_ctx->jit_module;
+  const auto &parameters = launcher_ctx->parameters;
+  const auto &offloaded_tasks = launcher_ctx->offloaded_tasks;
 
   CUDAContext::get_instance().make_current();
 
@@ -368,6 +377,15 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   }
 
   for (auto task : offloaded_tasks) {
+    const bool uses_sparse_state =
+        task.sparse_list_op != OffloadedTask::kSparseListOpNone ||
+        task.may_mutate_sparse_topology;
+    std::unique_lock<std::mutex> sparse_lock(sparse_list_mutex_,
+                                             std::defer_lock);
+    if (uses_sparse_state) {
+      sparse_lock.lock();
+      listgen_reuse_adaptive_ = listgen_reuse_adaptive;
+    }
     if (sparse_list_task_is_current(task)) {
       TI_TRACE("Skipping current sparse list kernel {}", task.name);
       continue;
@@ -412,13 +430,14 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
 KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     const LLVM::CompiledKernelData &compiled) {
   TI_ASSERT(compiled.arch() == Arch::cuda);
+  std::unique_lock<std::shared_mutex> lock(registration_mutex());
 
   if (!compiled.get_handle()) {
     auto handle = make_handle();
     auto index = handle.get_launch_id();
     contexts_.resize(index + 1);
 
-    auto &ctx = contexts_[index];
+    auto ctx = std::make_shared<Context>();
     auto *executor = get_runtime_executor();
 
     auto data = compiled.get_internal_data().compiled_data.clone();
@@ -426,9 +445,10 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     auto *jit_module = executor->create_jit_module(std::move(data.module));
 
     // Populate ctx
-    ctx.jit_module = jit_module;
-    ctx.parameters = std::move(parameters);
-    ctx.offloaded_tasks = std::move(data.tasks);
+    ctx->jit_module = jit_module;
+    ctx->parameters = std::move(parameters);
+    ctx->offloaded_tasks = std::move(data.tasks);
+    contexts_[index] = std::move(ctx);
 
     compiled.set_handle(handle);
   }

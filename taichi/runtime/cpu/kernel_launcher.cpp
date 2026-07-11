@@ -7,14 +7,18 @@ namespace cpu {
 
 void KernelLauncher::launch_llvm_kernel(Handle handle,
                                         LaunchContextBuilder &ctx) {
+  std::unique_lock<std::mutex> execution_lock(execution_mutex_);
+  std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
+  std::shared_ptr<const Context> launcher_ctx;
   TI_ASSERT(handle.get_launch_id() < contexts_.size());
-  const auto &launcher_ctx = contexts_[handle.get_launch_id()];
+  launcher_ctx = contexts_[handle.get_launch_id()];
+  TI_ASSERT(launcher_ctx != nullptr);
   auto *executor = get_runtime_executor();
 
   ctx.get_context().runtime = executor->get_llvm_runtime();
   // For taichi ndarrays, context.array_ptrs saves pointer to its
   // |DeviceAllocation|, CPU backend actually want to use the raw ptr here.
-  const auto &parameters = launcher_ctx.parameters;
+  const auto &parameters = launcher_ctx->parameters;
   {
     TI_COMPILE_PROFILER("cpu_launch_bind_args");
     for (int i = 0; i < (int)parameters.size(); i++) {
@@ -69,7 +73,7 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   }
   {
     TI_COMPILE_PROFILER("cpu_launch_tasks");
-    for (auto task : launcher_ctx.task_funcs) {
+    for (auto task : launcher_ctx->task_funcs) {
       task(&ctx.get_context());
     }
   }
@@ -78,13 +82,14 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
 KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     const LLVM::CompiledKernelData &compiled) {
   TI_ASSERT(arch_is_cpu(compiled.arch()));
+  std::unique_lock<std::shared_mutex> lock(registration_mutex());
 
   if (!compiled.get_handle()) {
     auto handle = make_handle();
     auto index = handle.get_launch_id();
     contexts_.resize(index + 1);
 
-    auto &ctx = contexts_[index];
+    auto ctx = std::make_shared<Context>();
     auto *executor = get_runtime_executor();
 
     const auto &internal_data = compiled.get_internal_data();
@@ -104,8 +109,9 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     }
 
     // Populate ctx
-    ctx.parameters = std::move(parameters);
-    ctx.task_funcs = std::move(task_funcs);
+    ctx->parameters = std::move(parameters);
+    ctx->task_funcs = std::move(task_funcs);
+    contexts_[index] = std::move(ctx);
 
     compiled.set_handle(handle);
   }

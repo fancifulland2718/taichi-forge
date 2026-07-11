@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/runtime/llvm/kernel_launcher.h"
 
@@ -24,7 +26,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
 
  private:
   bool on_amdgpu_device(void *ptr);
-  std::vector<Context> contexts_;
+  std::vector<std::shared_ptr<const Context>> contexts_;
 };
 
 }  // namespace amdgpu

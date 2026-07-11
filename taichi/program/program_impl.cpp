@@ -28,21 +28,22 @@ void ProgramImpl::dump_cache_data_to_disk() {
 }
 
 KernelCompilationManager &ProgramImpl::get_kernel_compilation_manager() {
-  if (kernel_com_mgr_) {
-    return *kernel_com_mgr_;
-  }
-  KernelCompilationManager::Config cfg;
-  cfg.offline_cache_path = config->offline_cache_file_path;
-  cfg.kernel_compiler = make_kernel_compiler();
-  kernel_com_mgr_ = std::make_unique<KernelCompilationManager>(std::move(cfg));
+  std::call_once(kernel_com_mgr_once_, [this] {
+    KernelCompilationManager::Config cfg;
+    cfg.offline_cache_path = config->offline_cache_file_path;
+    cfg.kernel_compiler = make_kernel_compiler();
+    kernel_com_mgr_ =
+        std::make_unique<KernelCompilationManager>(std::move(cfg));
+  });
+  TI_ASSERT(kernel_com_mgr_ != nullptr);
   return *kernel_com_mgr_;
 }
 
 KernelLauncher &ProgramImpl::get_kernel_launcher() {
-  if (kernel_launcher_) {
-    return *kernel_launcher_;
-  }
-  return *(kernel_launcher_ = make_kernel_launcher());
+  std::call_once(kernel_launcher_once_,
+                 [this] { kernel_launcher_ = make_kernel_launcher(); });
+  TI_ASSERT(kernel_launcher_ != nullptr);
+  return *kernel_launcher_;
 }
 
 }  // namespace taichi::lang

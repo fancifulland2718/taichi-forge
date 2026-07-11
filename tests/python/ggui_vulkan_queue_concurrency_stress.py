@@ -1,14 +1,16 @@
-"""Manual headed Vulkan GGUI/worker queue-concurrency stress check.
+"""Manual headed GGUI/worker backend-concurrency stress check.
 
 Run this on a desktop session (and, for extra input traffic, move or rotate the
 camera while it is running):
 
-  python tests/python/ggui_vulkan_queue_concurrency_stress.py --seconds 30
+  python tests/python/ggui_vulkan_queue_concurrency_stress.py \
+      --arch vulkan --seconds 30
 
 For a repeatable performance sample, use fresh processes and a warm-up period:
 
   python tests/python/ggui_vulkan_queue_concurrency_stress.py \
-      --warmup-seconds 5 --seconds 30 --output tmp/vulkan_ggui.json
+      --arch cuda --warmup-seconds 5 --seconds 30 \
+      --output tmp/cuda_ggui.json
 
 The JSON report records p50/p95 host frame-submit and sampled worker-submit
 latencies. ``--offscreen`` keeps the same upload/submit workload without a
@@ -47,6 +49,9 @@ def _latency_summary(samples: list[float]) -> dict[str, float | int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--arch", choices=("cpu", "cuda", "vulkan"), default="vulkan"
+    )
     parser.add_argument("--seconds", type=float, default=30.0)
     parser.add_argument("--warmup-seconds", type=float, default=0.0)
     parser.add_argument("--width", type=int, default=640)
@@ -61,7 +66,7 @@ def main() -> None:
             "seconds, width, height, and producer-sample-every must be "
             "positive; warmup-seconds must be non-negative")
 
-    ti.init(arch=ti.vulkan)
+    ti.init(arch=getattr(ti, args.arch))
     state = ti.field(dtype=ti.f32, shape=1 << 18)
     image = np.zeros((args.height, args.width, 4), dtype=np.uint8)
 
@@ -101,7 +106,7 @@ def main() -> None:
     worker.start()
 
     window = ti.ui.Window(
-        "Vulkan GGUI queue-concurrency stress",
+        f"{args.arch.upper()} GGUI backend-concurrency stress",
         (args.width, args.height),
         vsync=False,
         fps_limit=65535,
@@ -148,6 +153,7 @@ def main() -> None:
                measurement_start if measurement_start is not None
                and measurement_end is not None else 0.0)
     report = {
+        "arch": args.arch,
         "mode": "offscreen" if args.offscreen else "headed",
         "seconds": round(elapsed, 3),
         "frames": frames,

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/runtime/llvm/kernel_launcher.h"
 
@@ -23,7 +25,13 @@ class KernelLauncher : public LLVM::KernelLauncher {
       const LLVM::CompiledKernelData &compiled) override;
 
  private:
-  std::vector<Context> contexts_;
+  // A CPU kernel can contain multiple offloaded tasks that share LLVM runtime
+  // scratch/list state. The ThreadPool queues individual parallel-for jobs,
+  // not whole kernels, so two host callers could otherwise interleave those
+  // tasks. Serialize at the kernel boundary while retaining full parallelism
+  // inside each kernel and asynchronous producer/render host threads.
+  std::mutex execution_mutex_;
+  std::vector<std::shared_ptr<const Context>> contexts_;
 };
 
 }  // namespace cpu

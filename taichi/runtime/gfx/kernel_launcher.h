@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mutex>
+
 #include "taichi/program/kernel_launcher.h"
 #include "taichi/runtime/gfx/runtime.h"
 
@@ -28,6 +30,9 @@ class KernelLauncher : public lang::KernelLauncher {
   Handle register_kernel(const lang::CompiledKernelData &compiled_kernel_data);
 
   Config config_;
+  // CompiledKernelData caches a mutable launch handle. Its check/register/set
+  // sequence and the runtime kernel table must be one atomic host operation.
+  std::mutex registration_mutex_;
 };
 
 }  // namespace gfx

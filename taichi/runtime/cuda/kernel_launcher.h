@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
@@ -62,8 +64,13 @@ class KernelLauncher : public LLVM::KernelLauncher {
   void invalidate_sparse_list_cache(int sparse_mutation_snode_id);
 
   bool listgen_reuse_adaptive_{false};
+  // Sparse-list reuse metadata describes one CUDA runtime, not one launch.
+  // Dense kernels never take this lock. Sparse list generation/mutation holds
+  // it only while checking state and enqueueing the corresponding task so
+  // async host callers preserve submission order without a global launch lock.
+  std::mutex sparse_list_mutex_;
   std::unordered_map<int, SparseListState> sparse_list_states_;
-  std::vector<Context> contexts_;
+  std::vector<std::shared_ptr<const Context>> contexts_;
 };
 
 }  // namespace cuda

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mutex>
+
 #include "taichi/aot/module_builder.h"
 #include "taichi/ir/statements.h"
 #include "taichi/common/logging.h"
@@ -193,6 +195,8 @@ class ProgramImpl {
   }
 
  private:
+  std::once_flag kernel_com_mgr_once_;
+  std::once_flag kernel_launcher_once_;
   std::unique_ptr<KernelCompilationManager> kernel_com_mgr_;
   std::unique_ptr<KernelLauncher> kernel_launcher_;
 };

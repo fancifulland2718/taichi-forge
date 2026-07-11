@@ -15,12 +15,15 @@ bool KernelLauncher::on_amdgpu_device(void *ptr) {
 
 void KernelLauncher::launch_llvm_kernel(Handle handle,
                                         LaunchContextBuilder &ctx) {
+  std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
+  std::shared_ptr<const Context> launcher_ctx;
   TI_ASSERT(handle.get_launch_id() < contexts_.size());
-  auto launcher_ctx = contexts_[handle.get_launch_id()];
+  launcher_ctx = contexts_[handle.get_launch_id()];
+  TI_ASSERT(launcher_ctx != nullptr);
   auto *executor = get_runtime_executor();
-  auto *amdgpu_module = launcher_ctx.jit_module;
-  const auto &parameters = launcher_ctx.parameters;
-  const auto &offloaded_tasks = launcher_ctx.offloaded_tasks;
+  auto *amdgpu_module = launcher_ctx->jit_module;
+  const auto &parameters = launcher_ctx->parameters;
+  const auto &offloaded_tasks = launcher_ctx->offloaded_tasks;
 
   AMDGPUContext::get_instance().make_current();
   ctx.get_context().runtime = executor->get_llvm_runtime();
@@ -152,13 +155,14 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
 KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     const LLVM::CompiledKernelData &compiled) {
   TI_ASSERT(compiled.arch() == Arch::amdgpu);
+  std::unique_lock<std::shared_mutex> lock(registration_mutex());
 
   if (!compiled.get_handle()) {
     auto handle = make_handle();
     auto index = handle.get_launch_id();
     contexts_.resize(index + 1);
 
-    auto &ctx = contexts_[index];
+    auto ctx = std::make_shared<Context>();
     auto *executor = get_runtime_executor();
 
     auto data = compiled.get_internal_data().compiled_data.clone();
@@ -166,9 +170,10 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     auto *jit_module = executor->create_jit_module(std::move(data.module));
 
     // Populate ctx
-    ctx.jit_module = jit_module;
-    ctx.parameters = std::move(parameters);
-    ctx.offloaded_tasks = std::move(data.tasks);
+    ctx->jit_module = jit_module;
+    ctx->parameters = std::move(parameters);
+    ctx->offloaded_tasks = std::move(data.tasks);
+    contexts_[index] = std::move(ctx);
 
     compiled.set_handle(handle);
   }

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <mutex>
+#include <shared_mutex>
+
 #include "taichi/program/kernel_launcher.h"
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/runtime/llvm/llvm_runtime_executor.h"
@@ -33,9 +36,18 @@ class KernelLauncher : public lang::KernelLauncher {
     return config_.executor;
   }
 
+  std::shared_mutex &registration_mutex() {
+    return registration_mutex_;
+  }
+
  private:
   Config config_;
   int launch_id_counter_{0};
+  // Registration/JIT construction mutates shared executor state and therefore
+  // takes this mutex exclusively. Already-registered launches take it shared,
+  // preserving concurrent simulation/render submission without allowing a
+  // module or context table to change underneath an active launch.
+  std::shared_mutex registration_mutex_;
 };
 
 }  // namespace LLVM

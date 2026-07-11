@@ -21,9 +21,9 @@ void KernelLauncher::launch_kernel(
 
 KernelLauncher::Handle KernelLauncher::get_or_register_kernel(
     const lang::CompiledKernelData &compiled_kernel_data) {
-  const auto &cached_handle = compiled_kernel_data.get_handle();
-  if (cached_handle) {
-    return *cached_handle;
+  std::lock_guard<std::mutex> lock(registration_mutex_);
+  if (compiled_kernel_data.get_handle()) {
+    return *compiled_kernel_data.get_handle();
   }
   TI_PROFILER("register_gfx_kernel");
   return register_kernel(compiled_kernel_data);
