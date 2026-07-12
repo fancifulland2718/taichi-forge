@@ -1,4 +1,6 @@
 #pragma once
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -203,6 +205,31 @@ struct CompiledGraphCudaStateDeleter {
   void operator()(CompiledGraphCudaState *state) const noexcept;
 };
 
+class CompiledGraphReplayIdentity {
+ public:
+  CompiledGraphReplayIdentity()
+      : value_(next_value_.fetch_add(1, std::memory_order_relaxed)) {
+    // Zero is reserved as an invalid/unregistered token. Reaching it requires
+    // exhausting the complete 64-bit process lifetime, at which point
+    // continuing would reintroduce identity reuse.
+    TI_ASSERT(value_ != 0);
+  }
+  CompiledGraphReplayIdentity(const CompiledGraphReplayIdentity &) = delete;
+  CompiledGraphReplayIdentity &operator=(
+      const CompiledGraphReplayIdentity &) = delete;
+  CompiledGraphReplayIdentity(CompiledGraphReplayIdentity &&) = delete;
+  CompiledGraphReplayIdentity &operator=(
+      CompiledGraphReplayIdentity &&) = delete;
+
+  uint64_t value() const noexcept {
+    return value_;
+  }
+
+ private:
+  inline static std::atomic<uint64_t> next_value_{1};
+  uint64_t value_{0};
+};
+
 struct CompiledGraphJITCache {
   CompiledGraphJITCache() = default;
   ~CompiledGraphJITCache();
@@ -218,6 +245,13 @@ struct CompiledGraphJITCache {
   std::vector<CompiledGraphDispatchRuntimePlan> runtime_arg_plans;
   std::unique_ptr<CompiledGraphCudaState, CompiledGraphCudaStateDeleter>
       cuda_graph_state;
+  // GfxRuntime may retain replay state after this cache is destroyed. A
+  // monotonic token, rather than the reusable cache-object address, prevents a
+  // later cache at the same host address from inheriting that state.
+  CompiledGraphReplayIdentity graph_replay_identity;
+  uint64_t graph_replay_token() const noexcept {
+    return graph_replay_identity.value();
+  }
   // One replay mutates the cached kernels, argument plans and optional graph
   // capture state as a transaction. Do not expose partially updated state to
   // another caller sharing this cache.

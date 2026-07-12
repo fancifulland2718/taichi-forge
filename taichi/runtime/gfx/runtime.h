@@ -263,7 +263,7 @@ class TI_DLL_EXPORT GfxRuntime {
   };
 
   bool try_launch_graph(const std::vector<GraphDispatch> &dispatches,
-                        const void *cache_key);
+                        uint64_t replay_token);
 
   void buffer_copy(DevicePtr dst, DevicePtr src, size_t size);
   void copy_image(DeviceAllocation dst,
@@ -407,7 +407,7 @@ class TI_DLL_EXPORT GfxRuntime {
   int resident_sparse_list_snode_id_{-1};
   std::vector<HashOverflowWatch> hash_overflow_watches_;
   bool hash_overflow_error_reported_{false};
-  std::unordered_map<const void *, GraphReplayState> graph_replay_states_;
+  std::unordered_map<uint64_t, GraphReplayState> graph_replay_states_;
   bool pending_dispatch_global_barrier_{false};
   std::vector<DeviceAllocation> pending_dispatch_barrier_buffers_;
   std::unordered_set<DeviceAllocationId> pending_dispatch_barrier_buffer_ids_;

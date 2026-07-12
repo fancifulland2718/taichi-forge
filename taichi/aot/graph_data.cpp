@@ -967,7 +967,7 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
     return false;
   }
   return gfx_launcher->runtime()->try_launch_graph(
-      gfx_dispatches, static_cast<const void *>(&cache));
+      gfx_dispatches, cache.graph_replay_token());
 }
 
 }  // namespace

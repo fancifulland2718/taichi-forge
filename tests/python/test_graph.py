@@ -722,6 +722,44 @@ def test_cgraph_run_after_reset_is_rejected():
         graph.run({"arr": arr_after_reset})
 
 
+@test_utils.test(arch=ti.vulkan)
+def test_vulkan_cgraph_replay_identity_survives_cache_churn():
+    graph_count = 64
+
+    @ti.kernel
+    def add_bias(
+        values: ti.types.ndarray(dtype=ti.i32, ndim=1), bias: ti.i32
+    ):
+        for i in values:
+            values[i] += bias
+
+    sym_values = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    sym_bias = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "bias", ti.i32)
+    values = ti.ndarray(ti.i32, shape=256)
+    values.fill(0)
+
+    for iteration in range(graph_count):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(add_bias, sym_values, sym_bias)
+        builder.dispatch(add_bias, sym_values, sym_bias)
+        graph = builder.compile()
+        runtime_args = {"values": values, "bias": iteration + 1}
+        # First launch records a Vulkan replay slot; the second replays it.
+        graph.run(runtime_args)
+        graph.run(runtime_args)
+        del graph
+        del builder
+        gc.collect()
+
+    ti.sync()
+    expected = 4 * sum(range(1, graph_count + 1))
+    np.testing.assert_array_equal(
+        values.to_numpy(), np.full(256, expected, dtype=np.int32)
+    )
+
+
 @pytest.mark.parametrize("dt", [ti.i32, ti.i64, ti.u32, ti.u64])
 @test_utils.test(arch=supported_archs_cgraph, exclude=[(ti.vulkan, "Darwin")])
 def test_arg_int(dt):

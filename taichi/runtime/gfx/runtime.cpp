@@ -1406,9 +1406,10 @@ void GfxRuntime::GraphReplayState::reset() {
 
 bool GfxRuntime::try_launch_graph(
     const std::vector<GraphDispatch> &dispatches,
-    const void *cache_key) {
+    uint64_t replay_token) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
-  GraphReplayState &state = graph_replay_states_[cache_key];
+  TI_ASSERT(replay_token != 0);
+  GraphReplayState &state = graph_replay_states_[replay_token];
   GraphReplayExecutable &executable = state.executable;
   ++state.attempts;
   if (dispatches.empty() || profiler_ || dispatch_cache_) {
