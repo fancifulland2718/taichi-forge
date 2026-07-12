@@ -40,6 +40,14 @@ if (WIN32)
     link_directories(${CMAKE_CURRENT_SOURCE_DIR}/external/lib)
     if (MSVC)
         # C++17, and C++ conformance
+        # TI_PASS_EXCEPTION_TO_PYTHON relies on C++ exceptions crossing native
+        # stack frames into pybind translators. /EHsc is also required for
+        # RAII cleanup (for example an active CUDA stream capture) during
+        # unwinding; without it MSVC emits C4530 and may skip destructors or
+        # terminate with an access violation on an expected runtime error.
+        if (NOT CMAKE_CXX_FLAGS MATCHES "(^| )/EH[^ ]*($| )")
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc")
+        endif()
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zc:__cplusplus /Zc:inline /std:c++17")
         # UTF-8 source/exec charset (required by fmt 11 / spdlog 1.15+; all
         # non-ASCII source files in this repo verified valid UTF-8 2026-04-29).
