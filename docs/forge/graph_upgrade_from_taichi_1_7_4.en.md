@@ -69,12 +69,16 @@ The user-visible additions are:
   on the conservative fallback path until they have an equivalent lifetime
   owner. This optimization uses the dynamically loaded CUDA Driver API and
   adds no CUDA Toolkit header, CUDART, or CUDA-versioned wheel requirement.
-- Vulkan replay state uses a monotonic graph identity instead of the reusable
-  host address of its JIT cache. Repeated graph construction, deletion, and
-  allocator address reuse therefore cannot make a new graph inherit an old
-  executable or replay slot. This identity change adds no synchronization and
-  does not alter descriptor or command-recording semantics; runtime
-  reset/finalization remains the definitive cleanup boundary.
+- Vulkan replay state uses a monotonic graph identity and an explicit
+  runtime-owned registration instead of the reusable host address of its JIT
+  cache. Repeated graph construction, deletion, allocator address reuse, and
+  clear-then-reuse therefore cannot inherit an old executable or replay slot.
+  Cache destruction only requests retirement: command buffers, descriptors,
+  and completion semaphores remain owned until every in-flight slot is ready,
+  then a later launch or synchronization collects them. This adds no default
+  synchronization and does not alter descriptor or command-recording
+  semantics. Runtime finalization closes the registration path before device
+  teardown and remains the definitive cleanup boundary.
 
 ## Native Graph Boundary
 

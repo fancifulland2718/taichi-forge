@@ -113,10 +113,17 @@ baseline.
 
 Within one Vulkan runtime, repeatedly construct, record, replay, delete, and
 garbage-collect at least 64 two-dispatch graphs while reusing the same ndarray.
-Verify the exact final result with
-`test_vulkan_cgraph_replay_identity_survives_cache_churn`, and record host
-memory plus VRAM slope before and after a longer churn run. Enable validation
-layers so stale command-buffer, descriptor, or allocation use is reported.
+Verify exact results with
+`test_vulkan_cgraph_replay_identity_survives_cache_churn`. Also run
+`test_vulkan_cgraph_clear_retires_in_flight_slots_and_reregisters` so a cache
+is cleared with submissions still in flight and then obtains a fresh runtime
+registration. Run `tests/python/vulkan_graph_retirement_stress.py` with at
+least 1024 graphs and nine launches per graph (crossing the eight-slot reuse
+boundary), and record host-memory and VRAM slope. Memory may reach a bounded
+allocator high-water mark but must not grow linearly with graph count. Enable
+validation layers, including synchronization validation when available, so
+premature command-buffer, descriptor, semaphore, or allocation destruction is
+reported.
 
 ### CPU scheduler and lifetime safety
 

@@ -88,9 +88,13 @@ p50 与 p95，并显式传入 `--arch vulkan`。先用
 
 在同一个 Vulkan runtime 内至少循环 64 次构造、record、replay、删除并 GC 两-dispatch
 graph，且复用同一 ndarray。运行
-`test_vulkan_cgraph_replay_identity_survives_cache_churn` 校验最终精确结果，并在更长
-churn 中记录 host memory 与 VRAM slope。启用 validation layer，使 stale command-buffer、
-descriptor 或 allocation 使用能够被报告。
+`test_vulkan_cgraph_replay_identity_survives_cache_churn` 校验最终精确结果；同时运行
+`test_vulkan_cgraph_clear_retires_in_flight_slots_and_reregisters`，覆盖仍有在途提交时清理
+cache、随后取得新 runtime registration 的路径。以至少 1024 个 graph、每图 9 次 launch
+运行 `tests/python/vulkan_graph_retirement_stress.py`，确保跨过 8-slot 复用边界，并记录
+host memory 与 VRAM slope。内存可以达到有界 allocator 高水位，但不得随 graph 数量线性
+增长。启用 validation layer；loader 支持时同时启用 synchronization validation，使过早销毁
+command buffer、descriptor、semaphore 或 allocation 能够被报告。
 
 ### CPU scheduler 与生命周期安全
 
