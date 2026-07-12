@@ -264,11 +264,6 @@ struct CudaGraphSignatureCandidate {
   std::vector<DeviceAllocation> allocations;
 };
 
-struct CudaGraphCapturePacket {
-  cuda::KernelLauncher *launcher{nullptr};
-  cuda::KernelLauncher::GraphLaunchPacket packet;
-};
-
 class CudaGraphCaptureStream {
  public:
   CudaGraphCaptureStream() {
@@ -277,6 +272,7 @@ class CudaGraphCaptureStream {
 
   ~CudaGraphCaptureStream() {
     if (stream_ != nullptr) {
+      CUDAContext::get_instance().make_current();
       CUDADriver::get_instance().stream_destroy(stream_);
     }
   }
@@ -289,17 +285,150 @@ class CudaGraphCaptureStream {
   void *stream_{nullptr};
 };
 
-struct CudaGraphState {
+class CudaGraphHandle {
+ public:
+  CudaGraphHandle() = default;
+  ~CudaGraphHandle() {
+    reset();
+  }
+  CudaGraphHandle(const CudaGraphHandle &) = delete;
+  CudaGraphHandle &operator=(const CudaGraphHandle &) = delete;
+
+  CUgraph *put() {
+    reset();
+    return &graph_;
+  }
+
+  CUgraph get() const {
+    return graph_;
+  }
+
+  explicit operator bool() const {
+    return graph_ != nullptr;
+  }
+
+  void reset() {
+    if (graph_ != nullptr) {
+      CUDAContext::get_instance().make_current();
+      CUDADriver::get_instance().graph_destroy(graph_);
+      graph_ = nullptr;
+    }
+  }
+
+ private:
+  CUgraph graph_{nullptr};
+};
+
+class CudaGraphExecHandle {
+ public:
+  CudaGraphExecHandle() = default;
+  ~CudaGraphExecHandle() {
+    reset();
+  }
+  CudaGraphExecHandle(const CudaGraphExecHandle &) = delete;
+  CudaGraphExecHandle &operator=(const CudaGraphExecHandle &) = delete;
+
+  CUgraphExec *put() {
+    reset();
+    return &graph_exec_;
+  }
+
+  CUgraphExec get() const {
+    return graph_exec_;
+  }
+
+  explicit operator bool() const {
+    return graph_exec_ != nullptr;
+  }
+
+  void reset() {
+    if (graph_exec_ != nullptr) {
+      auto &context = CUDAContext::get_instance();
+      context.make_current();
+      // Replay stays on the default stream to preserve the ordering contract
+      // visible to ordinary CUDA launches.
+      auto &driver = CUDADriver::get_instance();
+      driver.stream_synchronize(nullptr);
+      driver.graph_exec_destroy(graph_exec_);
+      graph_exec_ = nullptr;
+    }
+  }
+
+ private:
+  CUgraphExec graph_exec_{nullptr};
+};
+
+class CudaGraphCapturePacket {
+ public:
+  explicit CudaGraphCapturePacket(void *stream) : stream_(stream) {
+  }
+  ~CudaGraphCapturePacket() {
+    release_and_wait();
+  }
+  CudaGraphCapturePacket(const CudaGraphCapturePacket &) = delete;
+  CudaGraphCapturePacket &operator=(const CudaGraphCapturePacket &) = delete;
+  CudaGraphCapturePacket(CudaGraphCapturePacket &&other) noexcept
+      : launcher(std::exchange(other.launcher, nullptr)),
+        packet(std::move(other.packet)),
+        stream_(std::exchange(other.stream_, nullptr)) {
+    other.packet.device_arg_buffer = nullptr;
+  }
+  CudaGraphCapturePacket &operator=(
+      CudaGraphCapturePacket &&other) noexcept {
+    if (this != &other) {
+      release_and_wait();
+      launcher = std::exchange(other.launcher, nullptr);
+      packet = std::move(other.packet);
+      stream_ = std::exchange(other.stream_, nullptr);
+      other.packet.device_arg_buffer = nullptr;
+    }
+    return *this;
+  }
+
+  bool retire_argument_buffer() {
+    if (packet.device_arg_buffer == nullptr) {
+      return false;
+    }
+    auto &context = CUDAContext::get_instance();
+    context.make_current();
+    auto &driver = CUDADriver::get_instance();
+    bool stream_ordered_free = false;
+    if (context.supports_mem_pool()) {
+      driver.mem_free_async_impl(packet.device_arg_buffer, stream_);
+      stream_ordered_free = true;
+    } else {
+      driver.mem_free(packet.device_arg_buffer);
+    }
+    packet.device_arg_buffer = nullptr;
+    return stream_ordered_free;
+  }
+
+  cuda::KernelLauncher *launcher{nullptr};
+  cuda::KernelLauncher::GraphLaunchPacket packet;
+
+ private:
+  void release_and_wait() {
+    if (retire_argument_buffer()) {
+      CUDADriver::get_instance().stream_synchronize(stream_);
+    }
+  }
+
+  void *stream_{nullptr};
+};
+
+}  // namespace
+
+struct CompiledGraphCudaState {
   std::vector<CudaGraphArgSignatureEntry> signature;
   std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>
       allocation_leases;
-  std::vector<CudaGraphCapturePacket> packets;
   std::unique_ptr<CudaGraphCaptureStream> capture_stream;
-  CUgraphExec graph_exec{nullptr};
+  std::vector<CudaGraphCapturePacket> packets;
+  CudaGraphExecHandle graph_exec;
   bool disabled{false};
 
-  ~CudaGraphState() {
-    destroy();
+  ~CompiledGraphCudaState() {
+    retire();
   }
 
   void *ensure_capture_stream() {
@@ -309,33 +438,18 @@ struct CudaGraphState {
     return capture_stream->get();
   }
 
-  void destroy() {
+  void retire() {
     auto &context = CUDAContext::get_instance();
-    auto &driver = CUDADriver::get_instance();
     context.make_current();
-    if (graph_exec != nullptr) {
-      // Replay stays on the default stream to preserve the ordering contract
-      // visible to ordinary CUDA launches.
-      driver.stream_synchronize(nullptr);
-      driver.graph_exec_destroy(graph_exec);
-      graph_exec = nullptr;
-    }
+    graph_exec.reset();
     void *stream = capture_stream == nullptr ? nullptr : capture_stream->get();
     bool stream_ordered_free = false;
     for (auto &packet : packets) {
-      if (packet.packet.device_arg_buffer != nullptr) {
-        if (context.supports_mem_pool()) {
-          driver.mem_free_async_impl(packet.packet.device_arg_buffer,
-                                     stream);
-          stream_ordered_free = true;
-        } else {
-          driver.mem_free(packet.packet.device_arg_buffer);
-        }
-        packet.packet.device_arg_buffer = nullptr;
-      }
+      stream_ordered_free =
+          packet.retire_argument_buffer() || stream_ordered_free;
     }
     if (stream_ordered_free) {
-      driver.stream_synchronize(stream);
+      CUDADriver::get_instance().stream_synchronize(stream);
     }
     packets.clear();
     signature.clear();
@@ -346,11 +460,18 @@ struct CudaGraphState {
   }
 };
 
-CudaGraphState *get_cuda_graph_state(CompiledGraphJITCache &cache) {
-  if (cache.cuda_graph_state == nullptr) {
-    cache.cuda_graph_state = new CudaGraphState();
+void CompiledGraphCudaStateDeleter::operator()(
+    CompiledGraphCudaState *state) const noexcept {
+  delete state;
+}
+
+namespace {
+
+CompiledGraphCudaState *get_cuda_graph_state(CompiledGraphJITCache &cache) {
+  if (!cache.cuda_graph_state) {
+    cache.cuda_graph_state.reset(new CompiledGraphCudaState());
   }
-  return static_cast<CudaGraphState *>(cache.cuda_graph_state);
+  return cache.cuda_graph_state.get();
 }
 
 std::optional<CudaGraphSignatureCandidate>
@@ -440,9 +561,9 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   if (state->disabled) {
     return false;
   }
-  if (state->graph_exec != nullptr &&
+  if (state->graph_exec &&
       state->signature == signature->entries) {
-    CUDADriver::get_instance().graph_launch(state->graph_exec, nullptr);
+    CUDADriver::get_instance().graph_launch(state->graph_exec.get(), nullptr);
     return true;
   }
 
@@ -451,7 +572,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   if (!allocation_leases.has_value()) {
     return false;
   }
-  state->destroy();
+  state->retire();
   state->signature = std::move(signature->entries);
   state->allocation_leases = std::move(*allocation_leases);
   if (cache.kernels.size() != graph.dispatches.size()) {
@@ -468,7 +589,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     auto *launcher = dynamic_cast<cuda::KernelLauncher *>(
         &prog->get_program_impl()->get_kernel_launcher());
     if (launcher == nullptr) {
-      state->destroy();
+      state->retire();
       return false;
     }
 
@@ -481,12 +602,12 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
 
     LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
-    CudaGraphCapturePacket capture_packet;
+    CudaGraphCapturePacket capture_packet(capture_stream);
     capture_packet.launcher = launcher;
     if (!launcher->prepare_cuda_graph_launch(
             handle, launch_ctx, capture_packet.packet, capture_stream)) {
       driver.stream_synchronize(capture_stream);
-      state->destroy();
+      state->retire();
       return false;
     }
     state->packets.push_back(std::move(capture_packet));
@@ -498,33 +619,40 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
       capture_stream, CU_STREAM_CAPTURE_MODE_RELAXED);
   if (begin_err != CUDA_SUCCESS) {
     state->disabled = true;
-    state->destroy();
+    state->retire();
     return false;
   }
   for (const auto &packet : state->packets) {
     packet.launcher->capture_cuda_graph_launch(packet.packet, capture_stream);
   }
-  CUgraph captured_graph{nullptr};
+  CudaGraphHandle captured_graph;
   auto end_err = driver.stream_end_capture.call_with_warning(
-      capture_stream, &captured_graph);
-  if (end_err != CUDA_SUCCESS || captured_graph == nullptr) {
+      capture_stream, captured_graph.put());
+  if (end_err != CUDA_SUCCESS || !captured_graph) {
     state->disabled = true;
-    state->destroy();
+    state->retire();
     return false;
   }
   auto instantiate_err = driver.graph_instantiate_with_flags.call_with_warning(
-      &state->graph_exec, captured_graph, 0);
-  driver.graph_destroy(captured_graph);
-  if (instantiate_err != CUDA_SUCCESS || state->graph_exec == nullptr) {
+      state->graph_exec.put(), captured_graph.get(), 0);
+  captured_graph.reset();
+  if (instantiate_err != CUDA_SUCCESS || !state->graph_exec) {
     state->disabled = true;
-    state->destroy();
+    state->retire();
     return false;
   }
-  driver.graph_launch(state->graph_exec, nullptr);
+  driver.graph_launch(state->graph_exec.get(), nullptr);
   return true;
 }
 
 }  // namespace
+#endif
+
+#if !defined(TI_WITH_CUDA)
+void CompiledGraphCudaStateDeleter::operator()(
+    CompiledGraphCudaState *state) const noexcept {
+  TI_ASSERT(state == nullptr);
+}
 #endif
 
 #if defined(TI_WITH_VULKAN)
@@ -584,11 +712,14 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
 #endif
 
 void CompiledGraphJITCache::clear_runtime_state() {
-  std::lock_guard<std::mutex> lock(run_mutex);
 #if defined(TI_WITH_CUDA)
-  delete static_cast<CudaGraphState *>(cuda_graph_state);
+  // Match jit_run_cached() lock ordering so reset/destruction cannot retire a
+  // graph executable while another CUDA submission transaction is active.
+  auto cuda_submission_lock =
+      CUDAContext::get_instance().get_submission_lock_guard();
 #endif
-  cuda_graph_state = nullptr;
+  std::lock_guard<std::mutex> lock(run_mutex);
+  cuda_graph_state.reset();
   kernels.clear();
   runtime_arg_plans.clear();
 }

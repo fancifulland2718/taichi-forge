@@ -1,4 +1,5 @@
 #pragma once
+#include <memory>
 #include <mutex>
 #include <vector>
 #include <string>
@@ -196,6 +197,12 @@ struct CompiledGraphDispatchRuntimePlan {
   std::vector<CompiledGraphRuntimeArgPlan> args;
 };
 
+struct CompiledGraphCudaState;
+
+struct CompiledGraphCudaStateDeleter {
+  void operator()(CompiledGraphCudaState *state) const noexcept;
+};
+
 struct CompiledGraphJITCache {
   CompiledGraphJITCache() = default;
   ~CompiledGraphJITCache();
@@ -209,7 +216,8 @@ struct CompiledGraphJITCache {
 
   std::vector<CompiledGraphJITCachedKernel> kernels;
   std::vector<CompiledGraphDispatchRuntimePlan> runtime_arg_plans;
-  void *cuda_graph_state{nullptr};
+  std::unique_ptr<CompiledGraphCudaState, CompiledGraphCudaStateDeleter>
+      cuda_graph_state;
   // One replay mutates the cached kernels, argument plans and optional graph
   // capture state as a transaction. Do not expose partially updated state to
   // another caller sharing this cache.

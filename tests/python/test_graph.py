@@ -556,6 +556,25 @@ def test_cuda_cgraph_recaptures_for_distinct_ndarray_arguments():
 
 
 @test_utils.test(arch=ti.cuda)
+def test_cuda_cgraph_runtime_state_clear_is_idempotent_and_reusable():
+    graph = _build_repeated_inc_graph()
+    arr = ti.ndarray(ti.i32, shape=())
+    arr.fill(0)
+    graph.run({"arr": arr})
+    assert arr.to_numpy()[()] == 4
+
+    cache = graph._instance._backend_executable._jit_cache
+    cache.clear_runtime_state()
+    cache.clear_runtime_state()
+
+    # A cleared cache remains usable and performs one fresh capture rather
+    # than retaining any packet, stream, executable, or allocation lease from
+    # the retired state.
+    graph.run({"arr": arr})
+    assert arr.to_numpy()[()] == 8
+
+
+@test_utils.test(arch=ti.cuda)
 def test_cuda_cgraph_signature_tracks_allocation_generation_reuse():
     graph = _build_repeated_inc_graph()
     generations_by_slot = {}
