@@ -45,6 +45,10 @@ class _CGraphJITExecutable:
     def invalidate_runtime(self):
         self._jit_cache.clear_runtime_state()
 
+    @property
+    def debug_graph_stats(self):
+        return self._jit_cache._debug_graph_stats()
+
 
 class _GraphRunContext:
     _empty_args = {}
@@ -125,6 +129,10 @@ class _CompiledCGraphNode:
 
     def invalidate_runtime(self):
         self._jit_cache.clear_runtime_state()
+
+    @property
+    def debug_graph_stats(self):
+        return self._jit_cache._debug_graph_stats()
 
     @property
     def debug_info(self):
@@ -333,6 +341,16 @@ class _GraphInstance:
     @property
     def debug_info(self):
         return {"kind": self._kind}
+
+    @property
+    def debug_graph_stats(self):
+        if isinstance(self._backend_executable, _CGraphJITExecutable):
+            return [self._backend_executable.debug_graph_stats]
+        return [
+            node.debug_graph_stats
+            for node in self.spec.nodes
+            if isinstance(node, _CompiledCGraphNode)
+        ]
 
 
 class _AOTGraphBuilderPlan:
@@ -591,6 +609,12 @@ class Graph:
         with self._lifecycle_lock:
             self._check_runtime_valid()
             return self._instance.debug_info
+
+    @property
+    def _graph_stats(self):
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            return self._instance.debug_graph_stats
 
     @property
     def _compiled_graph(self):

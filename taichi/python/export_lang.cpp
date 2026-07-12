@@ -2393,7 +2393,94 @@ void export_lang(py::module &m) {
   py::class_<aot::CompiledGraphJITCache>(m, "CompiledGraphJITCache")
       .def(py::init<>())
       .def("clear_runtime_state",
-           &aot::CompiledGraphJITCache::clear_runtime_state);
+           &aot::CompiledGraphJITCache::clear_runtime_state)
+      .def("_debug_graph_stats", [](aot::CompiledGraphJITCache &cache) {
+        const auto stats = cache.debug_graph_stats();
+        auto backend_name = [](aot::CompiledGraphBackend backend) {
+          switch (backend) {
+            case aot::CompiledGraphBackend::cuda:
+              return "cuda";
+            case aot::CompiledGraphBackend::vulkan:
+              return "vulkan";
+            case aot::CompiledGraphBackend::none:
+              return "none";
+          }
+          return "unknown";
+        };
+        auto path_name = [](aot::CompiledGraphExecutionPath path) {
+          switch (path) {
+            case aot::CompiledGraphExecutionPath::ordinary_fallback:
+              return "ordinary_fallback";
+            case aot::CompiledGraphExecutionPath::cuda_capture:
+              return "cuda_capture";
+            case aot::CompiledGraphExecutionPath::cuda_exact_replay:
+              return "cuda_exact_replay";
+            case aot::CompiledGraphExecutionPath::cuda_patched_replay:
+              return "cuda_patched_replay";
+            case aot::CompiledGraphExecutionPath::vulkan_record:
+              return "vulkan_record";
+            case aot::CompiledGraphExecutionPath::vulkan_replay:
+              return "vulkan_replay";
+            case aot::CompiledGraphExecutionPath::none:
+              return "none";
+          }
+          return "unknown";
+        };
+        auto fallback_name = [](aot::CompiledGraphFallbackReason reason) {
+          switch (reason) {
+            case aot::CompiledGraphFallbackReason::debug_mode:
+              return "debug_mode";
+            case aot::CompiledGraphFallbackReason::insufficient_dispatches:
+              return "insufficient_dispatches";
+            case aot::CompiledGraphFallbackReason::unsupported_arguments:
+              return "unsupported_arguments";
+            case aot::CompiledGraphFallbackReason::resource_unavailable:
+              return "resource_unavailable";
+            case aot::CompiledGraphFallbackReason::structural_unsupported:
+              return "structural_unsupported";
+            case aot::CompiledGraphFallbackReason::transient_driver_failure:
+              return "transient_driver_failure";
+            case aot::CompiledGraphFallbackReason::retry_backoff:
+              return "retry_backoff";
+            case aot::CompiledGraphFallbackReason::runtime_mode:
+              return "runtime_mode";
+            case aot::CompiledGraphFallbackReason::replay_slot_saturated:
+              return "replay_slot_saturated";
+            case aot::CompiledGraphFallbackReason::none:
+              return "none";
+          }
+          return "unknown";
+        };
+        py::dict result;
+        result["backend"] = backend_name(stats.backend);
+        result["last_path"] = path_name(stats.last_path);
+        result["last_fallback_reason"] =
+            fallback_name(stats.last_fallback_reason);
+        result["attempts"] = stats.attempts;
+        result["ordinary_fallbacks"] = stats.ordinary_fallbacks;
+        result["capture_attempts"] = stats.capture_attempts;
+        result["captures"] = stats.captures;
+        result["exact_replays"] = stats.exact_replays;
+        result["patched_replays"] = stats.patched_replays;
+        result["recaptures"] = stats.recaptures;
+        result["records"] = stats.records;
+        result["replays"] = stats.replays;
+        result["structural_fallbacks"] = stats.structural_fallbacks;
+        result["transient_failures"] = stats.transient_failures;
+        result["retry_backoff_fallbacks"] =
+            stats.retry_backoff_fallbacks;
+        result["replay_slot_saturation_fallbacks"] =
+            stats.replay_slot_saturation_fallbacks;
+        result["capture_exceptions"] = stats.capture_exceptions;
+        result["known_persistent_argument_bytes"] =
+            stats.known_persistent_argument_bytes;
+        result["last_driver_error"] = stats.last_driver_error;
+        result["retry_backoff_remaining"] =
+            stats.retry_backoff_remaining;
+        result["consecutive_transient_failures"] =
+            stats.consecutive_transient_failures;
+        return result;
+      });
 
   py::class_<aot::CompiledGraph>(m, "CompiledGraph")
       .def("jit_run",

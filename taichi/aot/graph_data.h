@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -211,6 +212,116 @@ struct CompiledGraphVulkanStateDeleter {
   void operator()(CompiledGraphVulkanState *state) const noexcept;
 };
 
+enum class CompiledGraphBackend : uint8_t {
+  none,
+  cuda,
+  vulkan,
+};
+
+enum class CompiledGraphExecutionPath : uint8_t {
+  none,
+  ordinary_fallback,
+  cuda_capture,
+  cuda_exact_replay,
+  cuda_patched_replay,
+  vulkan_record,
+  vulkan_replay,
+};
+
+enum class CompiledGraphFallbackReason : uint8_t {
+  none,
+  debug_mode,
+  insufficient_dispatches,
+  unsupported_arguments,
+  resource_unavailable,
+  structural_unsupported,
+  transient_driver_failure,
+  retry_backoff,
+  runtime_mode,
+  replay_slot_saturated,
+};
+
+// Internal diagnostics snapshot. Counters are maintained with integer writes
+// on the serialized graph-cache path; labels are constructed only when a
+// caller explicitly requests the debug snapshot.
+struct CompiledGraphStats {
+  CompiledGraphBackend backend{CompiledGraphBackend::none};
+  CompiledGraphExecutionPath last_path{CompiledGraphExecutionPath::none};
+  CompiledGraphFallbackReason last_fallback_reason{
+      CompiledGraphFallbackReason::none};
+  uint64_t attempts{0};
+  uint64_t ordinary_fallbacks{0};
+  uint64_t capture_attempts{0};
+  uint64_t captures{0};
+  uint64_t exact_replays{0};
+  uint64_t patched_replays{0};
+  uint64_t recaptures{0};
+  uint64_t records{0};
+  uint64_t replays{0};
+  uint64_t structural_fallbacks{0};
+  uint64_t transient_failures{0};
+  uint64_t retry_backoff_fallbacks{0};
+  uint64_t replay_slot_saturation_fallbacks{0};
+  uint64_t capture_exceptions{0};
+  uint64_t known_persistent_argument_bytes{0};
+  uint64_t last_driver_error{0};
+  uint32_t retry_backoff_remaining{0};
+  uint32_t consecutive_transient_failures{0};
+};
+
+// A transient capture error must not permanently disable an otherwise valid
+// graph. Retry periodically with bounded exponential backoff; structural
+// incompatibility remains disabled because repeating it cannot recover.
+class CompiledGraphCaptureRetryState {
+ public:
+  static constexpr uint32_t kMaxBackoffInvocations = 32;
+
+  bool should_attempt() noexcept {
+    if (structurally_disabled_) {
+      return false;
+    }
+    if (retry_backoff_remaining_ > 0) {
+      --retry_backoff_remaining_;
+      return false;
+    }
+    return true;
+  }
+
+  void record_success() noexcept {
+    consecutive_transient_failures_ = 0;
+    retry_backoff_remaining_ = 0;
+  }
+
+  void record_structural_failure() noexcept {
+    structurally_disabled_ = true;
+  }
+
+  void record_transient_failure() noexcept {
+    consecutive_transient_failures_ =
+        std::min<uint32_t>(consecutive_transient_failures_ + 1, 32);
+    const uint32_t shift =
+        std::min<uint32_t>(consecutive_transient_failures_ - 1, 5);
+    retry_backoff_remaining_ = uint32_t{1} << shift;
+  }
+
+  bool structurally_disabled() const noexcept {
+    return structurally_disabled_;
+  }
+
+  uint32_t consecutive_transient_failures() const noexcept {
+    return consecutive_transient_failures_;
+  }
+
+  uint32_t retry_backoff_remaining() const noexcept {
+    return retry_backoff_remaining_;
+  }
+
+ private:
+  bool structurally_disabled_{false};
+  uint32_t consecutive_transient_failures_{0};
+  uint32_t retry_backoff_remaining_{0};
+};
+
 class CompiledGraphReplayIdentity {
  public:
   CompiledGraphReplayIdentity()
@@ -246,6 +357,7 @@ struct CompiledGraphJITCache {
   // still alive. This is intentionally separate from the destructor: Python
   // GC may destroy a graph after ti.reset() has already finalized its Program.
   void clear_runtime_state();
+  CompiledGraphStats debug_graph_stats();
 
   std::vector<CompiledGraphJITCachedKernel> kernels;
   std::vector<CompiledGraphDispatchRuntimePlan> runtime_arg_plans;
@@ -253,6 +365,10 @@ struct CompiledGraphJITCache {
       cuda_graph_state;
   std::unique_ptr<CompiledGraphVulkanState, CompiledGraphVulkanStateDeleter>
       vulkan_graph_state;
+  // Detailed counters are opt-in. Failure recovery keeps its own bounded
+  // backoff state, so ordinary graph replay does not pay for diagnostics until
+  // an internal caller requests _graph_stats.
+  bool graph_diagnostics_enabled{false};
   // GfxRuntime may retain replay state after this cache is destroyed. A
   // monotonic token, rather than the reusable cache-object address, prevents a
   // later cache at the same host address from inheriting that state.

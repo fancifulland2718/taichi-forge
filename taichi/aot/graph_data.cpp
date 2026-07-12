@@ -379,6 +379,40 @@ class CudaGraphExecHandle {
   CUgraphExec graph_exec_{nullptr};
 };
 
+class CudaStreamCaptureGuard {
+ public:
+  explicit CudaStreamCaptureGuard(void *stream) : stream_(stream) {
+  }
+  ~CudaStreamCaptureGuard() {
+    abort();
+  }
+  CudaStreamCaptureGuard(const CudaStreamCaptureGuard &) = delete;
+  CudaStreamCaptureGuard &operator=(const CudaStreamCaptureGuard &) = delete;
+
+  uint32_t end(CUgraph *graph) {
+    active_ = false;
+    return CUDADriver::get_instance().stream_end_capture.call(stream_, graph);
+  }
+
+  void abort() noexcept {
+    if (!active_) {
+      return;
+    }
+    active_ = false;
+    CUgraph graph = nullptr;
+    auto &driver = CUDADriver::get_instance();
+    const uint32_t result =
+        driver.stream_end_capture.call(stream_, &graph);
+    if (result == CUDA_SUCCESS && graph != nullptr) {
+      driver.graph_destroy.call(graph);
+    }
+  }
+
+ private:
+  void *stream_{nullptr};
+  bool active_{true};
+};
+
 class CudaGraphCapturePacket {
  public:
   explicit CudaGraphCapturePacket(void *stream) : stream_(stream) {
@@ -550,7 +584,10 @@ struct CompiledGraphCudaState {
   CudaGraphExecHandle graph_exec;
   std::vector<CudaDeferredReplayResources> deferred_resources;
   std::vector<CudaEventHandle> reusable_events;
-  bool disabled{false};
+  CompiledGraphCaptureRetryState retry;
+  CompiledGraphStats stats;
+  bool diagnostics_enabled{false};
+  bool has_captured_once{false};
 
   static constexpr std::size_t kMaxDeferredReplayBatches = 2;
 
@@ -623,6 +660,19 @@ struct CompiledGraphCudaState {
     // capture-owned argument buffers that contain the address are retired.
     allocation_leases.clear();
   }
+
+  uint64_t known_persistent_argument_bytes() const {
+    uint64_t bytes = 0;
+    for (const auto &packet : packets) {
+      bytes += packet.packet.arg_buffer_size;
+    }
+    for (const auto &batch : deferred_resources) {
+      for (const auto &buffer : batch.host_arg_buffers) {
+        bytes += buffer.size();
+      }
+    }
+    return bytes;
+  }
 };
 
 void CompiledGraphCudaStateDeleter::operator()(
@@ -635,6 +685,9 @@ namespace {
 CompiledGraphCudaState *get_cuda_graph_state(CompiledGraphJITCache &cache) {
   if (!cache.cuda_graph_state) {
     cache.cuda_graph_state.reset(new CompiledGraphCudaState());
+  }
+  if (cache.graph_diagnostics_enabled) {
+    cache.cuda_graph_state->diagnostics_enabled = true;
   }
   return cache.cuda_graph_state.get();
 }
@@ -775,35 +828,128 @@ bool patch_cuda_graph_arguments(
   return true;
 }
 
+bool is_cuda_graph_structural_driver_error(uint32_t error) {
+  return error == CUDA_ERROR_NOT_SUPPORTED ||
+         error == CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED;
+}
+
+bool is_cuda_context_fatal_error(uint32_t error) {
+  switch (error) {
+    case CUDA_ERROR_ILLEGAL_ADDRESS:
+    case CUDA_ERROR_LAUNCH_TIMEOUT:
+    case CUDA_ERROR_ASSERT:
+    case CUDA_ERROR_HARDWARE_STACK_ERROR:
+    case CUDA_ERROR_ILLEGAL_INSTRUCTION:
+    case CUDA_ERROR_MISALIGNED_ADDRESS:
+    case CUDA_ERROR_INVALID_ADDRESS_SPACE:
+    case CUDA_ERROR_INVALID_PC:
+    case CUDA_ERROR_LAUNCH_FAILED:
+      return true;
+    default:
+      return false;
+  }
+}
+
+void mark_cuda_graph_fallback(
+    CompiledGraphCudaState &state,
+    CompiledGraphFallbackReason reason,
+    bool structural = false) {
+  if (!state.diagnostics_enabled) {
+    return;
+  }
+  ++state.stats.ordinary_fallbacks;
+  state.stats.last_path = CompiledGraphExecutionPath::ordinary_fallback;
+  state.stats.last_fallback_reason = reason;
+  if (structural) {
+    ++state.stats.structural_fallbacks;
+  }
+}
+
+bool handle_cuda_graph_driver_failure(CompiledGraphCudaState &state,
+                                      uint32_t error,
+                                      const char *stage) {
+  if (state.diagnostics_enabled) {
+    state.stats.last_driver_error = error;
+  }
+  if (is_cuda_context_fatal_error(error)) {
+    TI_ERROR("CUDA graph {} failed with a context-fatal error: {}", stage,
+             get_cuda_error_message(error));
+  }
+
+  if (is_cuda_graph_structural_driver_error(error)) {
+    state.retry.record_structural_failure();
+    mark_cuda_graph_fallback(
+        state, CompiledGraphFallbackReason::structural_unsupported, true);
+  } else {
+    state.retry.record_transient_failure();
+    if (state.diagnostics_enabled) {
+      ++state.stats.transient_failures;
+    }
+    mark_cuda_graph_fallback(
+        state, CompiledGraphFallbackReason::transient_driver_failure);
+  }
+  state.retire();
+  return false;
+}
+
 bool try_run_cuda_graph(const CompiledGraph &graph,
                         const CompileConfig &compile_config,
                         const std::unordered_map<std::string, IValue> &args,
                         CompiledGraphJITCache &cache) {
+  auto *state = get_cuda_graph_state(cache);
+  if (state->diagnostics_enabled) {
+    state->stats.backend = CompiledGraphBackend::cuda;
+    ++state->stats.attempts;
+    state->stats.last_driver_error = 0;
+  }
   if (compile_config.debug) {
+    mark_cuda_graph_fallback(*state,
+                             CompiledGraphFallbackReason::debug_mode);
     return false;
   }
   if (graph.dispatches.empty()) {
+    mark_cuda_graph_fallback(
+        *state, CompiledGraphFallbackReason::insufficient_dispatches, true);
     return false;
   }
   auto signature = make_cuda_graph_signature(graph, args);
   if (!signature.has_value()) {
+    mark_cuda_graph_fallback(
+        *state, CompiledGraphFallbackReason::unsupported_arguments, true);
     return false;
   }
   CUDAContext::get_instance().make_current();
-  auto state = get_cuda_graph_state(cache);
-  if (state->disabled) {
+  if (state->retry.structurally_disabled()) {
+    mark_cuda_graph_fallback(
+        *state, CompiledGraphFallbackReason::structural_unsupported, true);
     return false;
   }
   state->collect_ready_deferred_resources();
   if (state->graph_exec &&
       state->signature == signature->entries) {
     CUDADriver::get_instance().graph_launch(state->graph_exec.get(), nullptr);
+    if (state->diagnostics_enabled) {
+      ++state->stats.exact_replays;
+      state->stats.last_path = CompiledGraphExecutionPath::cuda_exact_replay;
+      state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
+    }
     return true;
+  }
+
+  if (!state->graph_exec && !state->retry.should_attempt()) {
+    if (state->diagnostics_enabled) {
+      ++state->stats.retry_backoff_fallbacks;
+    }
+    mark_cuda_graph_fallback(
+        *state, CompiledGraphFallbackReason::retry_backoff);
+    return false;
   }
 
   auto allocation_leases =
       acquire_cuda_graph_allocation_leases(signature->allocations);
   if (!allocation_leases.has_value()) {
+    mark_cuda_graph_fallback(
+        *state, CompiledGraphFallbackReason::resource_unavailable);
     return false;
   }
   if (state->graph_exec &&
@@ -828,6 +974,12 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
                                     std::move(host_arg_buffers));
       CUDADriver::get_instance().graph_launch(state->graph_exec.get(),
                                               nullptr);
+      if (state->diagnostics_enabled) {
+        ++state->stats.patched_replays;
+        state->stats.last_path =
+            CompiledGraphExecutionPath::cuda_patched_replay;
+        state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
+      }
       return true;
     }
   }
@@ -837,6 +989,12 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   state->signature = std::move(signature->entries);
   state->allocations = signature->allocations;
   state->allocation_leases = std::move(*allocation_leases);
+  if (state->diagnostics_enabled) {
+    ++state->stats.capture_attempts;
+    if (state->has_captured_once) {
+      ++state->stats.recaptures;
+    }
+  }
   if (cache.kernels.size() != graph.dispatches.size()) {
     cache.kernels.assign(graph.dispatches.size(), {});
   }
@@ -851,6 +1009,9 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     auto *launcher = dynamic_cast<cuda::KernelLauncher *>(
         &prog->get_program_impl()->get_kernel_launcher());
     if (launcher == nullptr) {
+      state->retry.record_structural_failure();
+      mark_cuda_graph_fallback(
+          *state, CompiledGraphFallbackReason::structural_unsupported, true);
       state->retire();
       return false;
     }
@@ -869,6 +1030,9 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     if (!launcher->prepare_cuda_graph_launch(
             handle, launch_ctx, capture_packet.packet, capture_stream)) {
       driver.stream_synchronize(capture_stream);
+      state->retry.record_structural_failure();
+      mark_cuda_graph_fallback(
+          *state, CompiledGraphFallbackReason::structural_unsupported, true);
       state->retire();
       return false;
     }
@@ -877,31 +1041,44 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
 
   driver.stream_synchronize(capture_stream);
   auto capture_lock = CUDAContext::get_instance().get_graph_capture_lock_guard();
-  auto begin_err = driver.stream_begin_capture.call_with_warning(
+  auto begin_err = driver.stream_begin_capture.call(
       capture_stream, CU_STREAM_CAPTURE_MODE_RELAXED);
   if (begin_err != CUDA_SUCCESS) {
-    state->disabled = true;
-    state->retire();
-    return false;
+    return handle_cuda_graph_driver_failure(*state, begin_err,
+                                            "stream begin capture");
   }
-  for (const auto &packet : state->packets) {
-    packet.launcher->capture_cuda_graph_launch(packet.packet, capture_stream);
+  CudaStreamCaptureGuard capture_guard(capture_stream);
+  try {
+    for (const auto &packet : state->packets) {
+      packet.launcher->capture_cuda_graph_launch(packet.packet,
+                                                 capture_stream);
+    }
+  } catch (...) {
+    if (state->diagnostics_enabled) {
+      ++state->stats.capture_exceptions;
+    }
+    capture_guard.abort();
+    throw;
   }
   CudaGraphHandle captured_graph;
-  auto end_err = driver.stream_end_capture.call_with_warning(
-      capture_stream, captured_graph.put());
+  auto end_err = capture_guard.end(captured_graph.put());
   if (end_err != CUDA_SUCCESS || !captured_graph) {
-    state->disabled = true;
-    state->retire();
-    return false;
+    return handle_cuda_graph_driver_failure(*state, end_err,
+                                            "stream end capture");
   }
-  auto instantiate_err = driver.graph_instantiate_with_flags.call_with_warning(
+  auto instantiate_err = driver.graph_instantiate_with_flags.call(
       state->graph_exec.put(), captured_graph.get(), 0);
   captured_graph.reset();
   if (instantiate_err != CUDA_SUCCESS || !state->graph_exec) {
-    state->disabled = true;
-    state->retire();
-    return false;
+    return handle_cuda_graph_driver_failure(*state, instantiate_err,
+                                            "instantiate");
+  }
+  state->retry.record_success();
+  state->has_captured_once = true;
+  if (state->diagnostics_enabled) {
+    ++state->stats.captures;
+    state->stats.last_path = CompiledGraphExecutionPath::cuda_capture;
+    state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
   }
   driver.graph_launch(state->graph_exec.get(), nullptr);
   return true;
@@ -1007,6 +1184,72 @@ void CompiledGraphVulkanStateDeleter::operator()(
   TI_ASSERT(state == nullptr);
 }
 #endif
+
+CompiledGraphStats CompiledGraphJITCache::debug_graph_stats() {
+  std::lock_guard<std::mutex> lock(run_mutex);
+  graph_diagnostics_enabled = true;
+#if defined(TI_WITH_CUDA)
+  if (cuda_graph_state) {
+    cuda_graph_state->diagnostics_enabled = true;
+    cuda_graph_state->stats.backend = CompiledGraphBackend::cuda;
+    CompiledGraphStats result = cuda_graph_state->stats;
+    result.known_persistent_argument_bytes =
+        cuda_graph_state->known_persistent_argument_bytes();
+    result.retry_backoff_remaining =
+        cuda_graph_state->retry.retry_backoff_remaining();
+    result.consecutive_transient_failures =
+        cuda_graph_state->retry.consecutive_transient_failures();
+    return result;
+  }
+#endif
+#if defined(TI_WITH_VULKAN)
+  if (vulkan_graph_state && vulkan_graph_state->registration) {
+    const auto source = vulkan_graph_state->registration->debug_stats();
+    CompiledGraphStats result;
+    result.backend = CompiledGraphBackend::vulkan;
+    result.attempts = source.attempts;
+    result.ordinary_fallbacks = source.fallbacks;
+    result.records = source.recorded;
+    result.replays = source.replayed;
+    result.structural_fallbacks = source.structural_fallbacks;
+    result.replay_slot_saturation_fallbacks =
+        source.slot_saturation_fallbacks;
+    result.known_persistent_argument_bytes =
+        source.known_persistent_argument_bytes;
+    switch (source.last_path) {
+      case gfx::GraphReplayLastPath::fallback:
+        result.last_path = CompiledGraphExecutionPath::ordinary_fallback;
+        break;
+      case gfx::GraphReplayLastPath::record:
+        result.last_path = CompiledGraphExecutionPath::vulkan_record;
+        break;
+      case gfx::GraphReplayLastPath::replay:
+        result.last_path = CompiledGraphExecutionPath::vulkan_replay;
+        break;
+      case gfx::GraphReplayLastPath::none:
+        break;
+    }
+    switch (source.last_fallback_reason) {
+      case gfx::GraphReplayFallbackReason::runtime_mode:
+        result.last_fallback_reason =
+            CompiledGraphFallbackReason::runtime_mode;
+        break;
+      case gfx::GraphReplayFallbackReason::structural_unsupported:
+        result.last_fallback_reason =
+            CompiledGraphFallbackReason::structural_unsupported;
+        break;
+      case gfx::GraphReplayFallbackReason::slot_saturated:
+        result.last_fallback_reason =
+            CompiledGraphFallbackReason::replay_slot_saturated;
+        break;
+      case gfx::GraphReplayFallbackReason::none:
+        break;
+    }
+    return result;
+  }
+#endif
+  return {};
+}
 
 void CompiledGraphJITCache::clear_runtime_state() {
 #if defined(TI_WITH_CUDA)

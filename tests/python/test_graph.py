@@ -557,6 +557,40 @@ def test_cuda_cgraph_recaptures_for_distinct_ndarray_arguments():
 
 
 @test_utils.test(arch=ti.cuda)
+def test_cuda_cgraph_internal_stats_report_capture_and_replay():
+    graph = _build_repeated_inc_graph()
+    arr = ti.ndarray(ti.i32, shape=())
+    arr.fill(0)
+
+    # Detailed CUDA counters are opt-in so the default replay hot path does not
+    # update diagnostic state. Failure recovery owns a separate backoff state.
+    initial = graph._graph_stats
+    assert len(initial) == 1
+    assert initial[0]["backend"] == "none"
+    assert initial[0]["attempts"] == 0
+
+    graph.run({"arr": arr})
+    first = graph._graph_stats
+    assert len(first) == 1
+    assert first[0]["backend"] == "cuda"
+    assert first[0]["attempts"] == 1
+    assert first[0]["capture_attempts"] == 1
+    assert first[0]["captures"] == 1
+    assert first[0]["last_path"] == "cuda_capture"
+    assert first[0]["known_persistent_argument_bytes"] > 0
+
+    graph.run({"arr": arr})
+    second = graph._graph_stats[0]
+    assert second["attempts"] == 2
+    assert second["exact_replays"] == 1
+    assert second["ordinary_fallbacks"] == 0
+    assert second["last_path"] == "cuda_exact_replay"
+    assert second["last_fallback_reason"] == "none"
+    assert second["consecutive_transient_failures"] == 0
+    assert arr.to_numpy()[()] == 8
+
+
+@test_utils.test(arch=ti.cuda)
 def test_cuda_cgraph_patches_scalar_matrix_and_ndarray_arguments():
     n = 64
 
@@ -820,6 +854,19 @@ def test_vulkan_cgraph_replay_slot_saturation_telemetry_is_monotonic():
     launch_count = 12
     for _ in range(launch_count):
         graph.run({"values": values})
+
+    stats = graph._graph_stats
+    assert len(stats) == 1
+    assert stats[0]["backend"] == "vulkan"
+    assert stats[0]["attempts"] == launch_count
+    assert (
+        stats[0]["records"]
+        + stats[0]["replays"]
+        + stats[0]["ordinary_fallbacks"]
+        == launch_count
+    )
+    assert stats[0]["records"] > 0
+    assert stats[0]["known_persistent_argument_bytes"] > 0
 
     fallback_after = ti_core.query_int64(
         "vulkan_graph_replay_slot_saturation_fallbacks"

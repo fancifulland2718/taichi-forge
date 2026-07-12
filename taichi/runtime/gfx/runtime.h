@@ -49,6 +49,34 @@ class GraphReplayRegistry;
 
 TI_DLL_EXPORT uint64_t get_graph_replay_slot_saturation_fallbacks();
 
+enum class GraphReplayLastPath : uint8_t {
+  none,
+  fallback,
+  record,
+  replay,
+};
+
+enum class GraphReplayFallbackReason : uint8_t {
+  none,
+  runtime_mode,
+  structural_unsupported,
+  slot_saturated,
+};
+
+struct GraphReplayStats {
+  uint64_t attempts{0};
+  uint64_t recorded{0};
+  uint64_t replayed{0};
+  uint64_t fallbacks{0};
+  uint64_t structural_fallbacks{0};
+  uint64_t runtime_mode_fallbacks{0};
+  uint64_t slot_saturation_fallbacks{0};
+  uint64_t known_persistent_argument_bytes{0};
+  GraphReplayLastPath last_path{GraphReplayLastPath::none};
+  GraphReplayFallbackReason last_fallback_reason{
+      GraphReplayFallbackReason::none};
+};
+
 class TI_DLL_EXPORT GraphReplayRegistration {
  public:
   ~GraphReplayRegistration();
@@ -59,6 +87,7 @@ class TI_DLL_EXPORT GraphReplayRegistration {
   uint64_t replay_key() const noexcept {
     return replay_key_;
   }
+  GraphReplayStats debug_stats() const;
 
  private:
   friend class GfxRuntime;
@@ -277,6 +306,7 @@ class TI_DLL_EXPORT GfxRuntime {
                                 std::vector<PreparedDispatch> &prepared);
     Slot *acquire_ready_slot();
     bool ready_for_retirement() const;
+    uint64_t known_persistent_argument_bytes() const;
     void reset();
   };
 
@@ -286,6 +316,12 @@ class TI_DLL_EXPORT GfxRuntime {
     uint64_t recorded{0};
     uint64_t replayed{0};
     uint64_t fallbacks{0};
+    uint64_t structural_fallbacks{0};
+    uint64_t runtime_mode_fallbacks{0};
+    uint64_t slot_saturation_fallbacks{0};
+    GraphReplayLastPath last_path{GraphReplayLastPath::none};
+    GraphReplayFallbackReason last_fallback_reason{
+        GraphReplayFallbackReason::none};
     bool retirement_requested{false};
 
     void reset();
@@ -386,6 +422,7 @@ class TI_DLL_EXPORT GfxRuntime {
   void check_hash_overflow_counters();
   void synchronize_impl(bool check_hash_overflow);
   void retire_graph_replay(uint64_t replay_token);
+  GraphReplayStats debug_graph_replay_stats(uint64_t replay_token) const;
   void collect_ready_graph_replays();
 
   struct HashOverflowWatch {
