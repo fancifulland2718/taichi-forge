@@ -556,6 +556,106 @@ def test_cuda_cgraph_recaptures_for_distinct_ndarray_arguments():
 
 
 @test_utils.test(arch=ti.cuda)
+def test_cuda_cgraph_patches_scalar_matrix_and_ndarray_arguments():
+    n = 64
+
+    @ti.kernel
+    def transform(
+        scale: ti.i32,
+        offset: ti.types.vector(2, ti.i32),
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in output:
+            output[i] = source[i] * scale + offset[0] + offset[1]
+
+    sym_scale = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "scale", ti.i32)
+    sym_offset = ti.graph.Arg(
+        ti.graph.ArgKind.MATRIX, "offset", ti.types.vector(2, ti.i32)
+    )
+    sym_source = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1
+    )
+    sym_output = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        transform, sym_scale, sym_offset, sym_source, sym_output
+    )
+    graph = builder.compile()
+
+    source_a_np = np.arange(n, dtype=np.int32)
+    source_b_np = np.arange(n, dtype=np.int32)[::-1].copy()
+    source_a = ti.ndarray(ti.i32, shape=n)
+    source_b = ti.ndarray(ti.i32, shape=n)
+    output_a = ti.ndarray(ti.i32, shape=n)
+    output_b = ti.ndarray(ti.i32, shape=n)
+    source_a.from_numpy(source_a_np)
+    source_b.from_numpy(source_b_np)
+
+    graph.run(
+        {
+            "scale": 2,
+            "offset": ti.Vector([1, 3], dt=ti.i32),
+            "source": source_a,
+            "output": output_a,
+        }
+    )
+    graph.run(
+        {
+            "scale": -3,
+            "offset": ti.Vector([7, -2], dt=ti.i32),
+            "source": source_b,
+            "output": output_b,
+        }
+    )
+    graph.run(
+        {
+            "scale": 4,
+            "offset": ti.Vector([-5, 2], dt=ti.i32),
+            "source": source_a,
+            "output": output_a,
+        }
+    )
+
+    np.testing.assert_array_equal(output_a.to_numpy(), source_a_np * 4 - 3)
+    np.testing.assert_array_equal(output_b.to_numpy(), source_b_np * -3 + 5)
+
+
+@test_utils.test(arch=ti.cuda)
+def test_cuda_cgraph_recaptures_when_ndarray_structure_changes():
+    @ti.kernel
+    def fill(
+        value: ti.i32,
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in output:
+            output[i] = value + i
+
+    sym_value = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.i32)
+    sym_output = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(fill, sym_value, sym_output)
+    graph = builder.compile()
+    small = ti.ndarray(ti.i32, shape=17)
+    large = ti.ndarray(ti.i32, shape=37)
+
+    graph.run({"value": 3, "output": small})
+    graph.run({"value": 5, "output": large})
+    graph.run({"value": 7, "output": small})
+
+    np.testing.assert_array_equal(
+        small.to_numpy(), np.arange(17, dtype=np.int32) + 7
+    )
+    np.testing.assert_array_equal(
+        large.to_numpy(), np.arange(37, dtype=np.int32) + 5
+    )
+
+
+@test_utils.test(arch=ti.cuda)
 def test_cuda_cgraph_runtime_state_clear_is_idempotent_and_reusable():
     graph = _build_repeated_inc_graph()
     arr = ti.ndarray(ti.i32, shape=())

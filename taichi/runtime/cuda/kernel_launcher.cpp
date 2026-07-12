@@ -2,6 +2,7 @@
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 
+#include <cstring>
 #include <cstdint>
 #include <unordered_map>
 
@@ -105,10 +106,9 @@ void KernelLauncher::invalidate_sparse_list_cache(
   }
 }
 
-bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
-                                               LaunchContextBuilder &ctx,
-                                               GraphLaunchPacket &packet,
-                                               void *stream) {
+bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
+                                                LaunchContextBuilder &ctx,
+                                                RuntimeContext &context) {
   std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
   std::shared_ptr<const Context> launcher_ctx;
   TI_ASSERT(handle.get_launch_id() < contexts_.size());
@@ -182,15 +182,54 @@ bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
     }
   }
 
+  context = ctx.get_context();
+  return true;
+}
+
+bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
+                                               LaunchContextBuilder &ctx,
+                                               GraphLaunchPacket &packet,
+                                               void *stream) {
+  RuntimeContext context;
+  if (!prepare_cuda_graph_context(handle, ctx, context)) {
+    return false;
+  }
   packet.handle = handle;
   packet.arg_buffer_size = ctx.arg_buffer_size;
-  packet.context = ctx.get_context();
+  packet.context = context;
   CUDADriver::get_instance().malloc_async(&packet.device_arg_buffer,
                                           packet.arg_buffer_size, stream);
   CUDADriver::get_instance().memcpy_host_to_device_async(
       packet.device_arg_buffer, packet.context.arg_buffer,
       packet.arg_buffer_size, stream);
   packet.context.arg_buffer = static_cast<char *>(packet.device_arg_buffer);
+  return true;
+}
+
+bool KernelLauncher::update_cuda_graph_launch(
+    const GraphLaunchPacket &packet,
+    LaunchContextBuilder &ctx,
+    std::vector<uint8_t> &host_arg_buffer,
+    void *stream) {
+  if (packet.device_arg_buffer == nullptr ||
+      packet.arg_buffer_size != ctx.arg_buffer_size) {
+    return false;
+  }
+  RuntimeContext context;
+  if (!prepare_cuda_graph_context(packet.handle, ctx, context)) {
+    return false;
+  }
+  if (context.runtime != packet.context.runtime ||
+      context.result_buffer != packet.context.result_buffer) {
+    return false;
+  }
+
+  host_arg_buffer.resize(packet.arg_buffer_size);
+  std::memcpy(host_arg_buffer.data(), context.arg_buffer,
+              packet.arg_buffer_size);
+  CUDADriver::get_instance().memcpy_host_to_device_async(
+      packet.device_arg_buffer, host_arg_buffer.data(),
+      packet.arg_buffer_size, stream);
   return true;
 }
 

@@ -28,6 +28,7 @@ namespace taichi::lang {
 // Driver constants from cuda.h
 
 constexpr uint32 CU_EVENT_DEFAULT = 0x0;
+constexpr uint32 CU_EVENT_DISABLE_TIMING = 0x2;
 constexpr uint32 CU_STREAM_DEFAULT = 0x0;
 constexpr uint32 CU_STREAM_NON_BLOCKING = 0x1;
 constexpr uint32 CU_MEM_ATTACH_GLOBAL = 0x1;
@@ -41,6 +42,7 @@ constexpr uint32 CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED = 115;
 constexpr uint32 CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76;
 constexpr uint32 CU_MEMPOOL_ATTR_RELEASE_THRESHOLD = 4;
 constexpr uint32 CUDA_ERROR_ASSERT = 710;
+constexpr uint32 CUDA_ERROR_NOT_READY = 600;
 constexpr uint32 CU_JIT_MAX_REGISTERS = 0;
 constexpr uint32 CU_POINTER_ATTRIBUTE_MEMORY_TYPE = 2;
 constexpr uint32 CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING = 41;

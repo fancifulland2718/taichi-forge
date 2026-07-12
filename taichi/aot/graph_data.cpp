@@ -241,6 +241,7 @@ namespace {
 
 struct CudaGraphArgSignatureEntry {
   std::string name;
+  ArgKind tag{ArgKind::kUnknown};
   Device *device{nullptr};
   DeviceAllocationId alloc_id{0};
   uint64_t byte_offset{0};
@@ -249,13 +250,19 @@ struct CudaGraphArgSignatureEntry {
   ExternalArrayLayout layout{ExternalArrayLayout::kNull};
   std::vector<int> shape;
   std::vector<int> element_shape;
+  uint64 value{0};
+  std::vector<uint8_t> value_bytes;
 
   bool operator==(const CudaGraphArgSignatureEntry &other) const {
-    return name == other.name && device == other.device &&
-           alloc_id == other.alloc_id && byte_offset == other.byte_offset &&
-           byte_size == other.byte_size && dtype_id == other.dtype_id &&
-           layout == other.layout && shape == other.shape &&
-           element_shape == other.element_shape;
+    return structurally_equals(other) && alloc_id == other.alloc_id &&
+           value == other.value && value_bytes == other.value_bytes;
+  }
+
+  bool structurally_equals(const CudaGraphArgSignatureEntry &other) const {
+    return name == other.name && tag == other.tag && device == other.device &&
+           byte_offset == other.byte_offset && byte_size == other.byte_size &&
+           dtype_id == other.dtype_id && layout == other.layout &&
+           shape == other.shape && element_shape == other.element_shape;
   }
 };
 
@@ -263,6 +270,20 @@ struct CudaGraphSignatureCandidate {
   std::vector<CudaGraphArgSignatureEntry> entries;
   std::vector<DeviceAllocation> allocations;
 };
+
+bool cuda_graph_signatures_are_structurally_compatible(
+    const std::vector<CudaGraphArgSignatureEntry> &lhs,
+    const std::vector<CudaGraphArgSignatureEntry> &rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < lhs.size(); ++i) {
+    if (!lhs[i].structurally_equals(rhs[i])) {
+      return false;
+    }
+  }
+  return true;
+}
 
 class CudaGraphCaptureStream {
  public:
@@ -416,16 +437,122 @@ class CudaGraphCapturePacket {
   void *stream_{nullptr};
 };
 
+class CudaEventHandle {
+ public:
+  CudaEventHandle() {
+    CUDADriver::get_instance().event_create(&event_,
+                                            CU_EVENT_DISABLE_TIMING);
+  }
+  ~CudaEventHandle() {
+    reset();
+  }
+  CudaEventHandle(const CudaEventHandle &) = delete;
+  CudaEventHandle &operator=(const CudaEventHandle &) = delete;
+  CudaEventHandle(CudaEventHandle &&other) noexcept
+      : event_(std::exchange(other.event_, nullptr)),
+        recorded_(std::exchange(other.recorded_, false)) {
+  }
+  CudaEventHandle &operator=(CudaEventHandle &&other) noexcept {
+    if (this != &other) {
+      reset();
+      event_ = std::exchange(other.event_, nullptr);
+      recorded_ = std::exchange(other.recorded_, false);
+    }
+    return *this;
+  }
+
+  void record(void *stream) {
+    CUDADriver::get_instance().event_record(event_, stream);
+    recorded_ = true;
+  }
+
+  bool ready() const {
+    if (!recorded_) {
+      return true;
+    }
+    auto &driver = CUDADriver::get_instance();
+    const uint32_t result = driver.event_query.call(event_);
+    if (result == CUDA_SUCCESS) {
+      return true;
+    }
+    if (result == CUDA_ERROR_NOT_READY) {
+      return false;
+    }
+    TI_ERROR("{}", driver.event_query.get_error_message(result));
+  }
+
+  void wait() {
+    if (recorded_) {
+      CUDADriver::get_instance().event_synchronize(event_);
+      recorded_ = false;
+    }
+  }
+
+ private:
+  void reset() {
+    if (event_ != nullptr) {
+      wait();
+      CUDADriver::get_instance().event_destroy(event_);
+      event_ = nullptr;
+    }
+  }
+
+  void *event_{nullptr};
+  bool recorded_{false};
+};
+
+struct CudaDeferredReplayResources {
+  CudaDeferredReplayResources(
+      std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>> leases,
+      std::vector<std::vector<uint8_t>> host_buffers)
+      : allocation_leases(std::move(leases)),
+        host_arg_buffers(std::move(host_buffers)) {
+    ready_event.record(nullptr);
+  }
+  CudaDeferredReplayResources(
+      CudaEventHandle event,
+      std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>> leases,
+      std::vector<std::vector<uint8_t>> host_buffers)
+      : ready_event(std::move(event)),
+        allocation_leases(std::move(leases)),
+        host_arg_buffers(std::move(host_buffers)) {
+    ready_event.record(nullptr);
+  }
+  ~CudaDeferredReplayResources() {
+    // Host patch buffers and old allocation leases remain valid until every
+    // preceding default-stream replay and the patch that replaced them has
+    // completed.
+    ready_event.wait();
+  }
+  CudaDeferredReplayResources(const CudaDeferredReplayResources &) = delete;
+  CudaDeferredReplayResources &operator=(
+      const CudaDeferredReplayResources &) = delete;
+  CudaDeferredReplayResources(CudaDeferredReplayResources &&) noexcept =
+      default;
+  CudaDeferredReplayResources &operator=(
+      CudaDeferredReplayResources &&) noexcept = default;
+
+  CudaEventHandle ready_event;
+  std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>
+      allocation_leases;
+  std::vector<std::vector<uint8_t>> host_arg_buffers;
+};
+
 }  // namespace
 
 struct CompiledGraphCudaState {
   std::vector<CudaGraphArgSignatureEntry> signature;
+  std::vector<DeviceAllocation> allocations;
   std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>
       allocation_leases;
   std::unique_ptr<CudaGraphCaptureStream> capture_stream;
   std::vector<CudaGraphCapturePacket> packets;
   CudaGraphExecHandle graph_exec;
+  std::vector<CudaDeferredReplayResources> deferred_resources;
+  std::vector<CudaEventHandle> reusable_events;
   bool disabled{false};
+
+  static constexpr std::size_t kMaxDeferredReplayBatches = 2;
 
   ~CompiledGraphCudaState() {
     retire();
@@ -436,6 +563,38 @@ struct CompiledGraphCudaState {
       capture_stream = std::make_unique<CudaGraphCaptureStream>();
     }
     return capture_stream->get();
+  }
+
+  void recycle_front_deferred_resources() {
+    deferred_resources.front().ready_event.wait();
+    reusable_events.push_back(
+        std::move(deferred_resources.front().ready_event));
+    deferred_resources.erase(deferred_resources.begin());
+  }
+
+  void collect_ready_deferred_resources() {
+    while (!deferred_resources.empty() &&
+           deferred_resources.front().ready_event.ready()) {
+      recycle_front_deferred_resources();
+    }
+  }
+
+  void defer_replay_resources(
+      std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>> leases,
+      std::vector<std::vector<uint8_t>> host_buffers) {
+    collect_ready_deferred_resources();
+    if (deferred_resources.size() >= kMaxDeferredReplayBatches) {
+      recycle_front_deferred_resources();
+    }
+    if (reusable_events.empty()) {
+      deferred_resources.emplace_back(std::move(leases),
+                                      std::move(host_buffers));
+    } else {
+      CudaEventHandle event = std::move(reusable_events.back());
+      reusable_events.pop_back();
+      deferred_resources.emplace_back(std::move(event), std::move(leases),
+                                      std::move(host_buffers));
+    }
   }
 
   void retire() {
@@ -452,7 +611,13 @@ struct CompiledGraphCudaState {
       CUDADriver::get_instance().stream_synchronize(stream);
     }
     packets.clear();
+    // graph_exec.reset() synchronized the default stream, so all deferred
+    // events are ready. Recycle their handles for a later recapture/patch.
+    while (!deferred_resources.empty()) {
+      recycle_front_deferred_resources();
+    }
     signature.clear();
+    allocations.clear();
     // A lease may be the last owner preventing an Ndarray allocation retired
     // by Python GC from being released. Drop it only after all replay and
     // capture-owned argument buffers that contain the address are retired.
@@ -475,49 +640,86 @@ CompiledGraphCudaState *get_cuda_graph_state(CompiledGraphJITCache &cache) {
 }
 
 std::optional<CudaGraphSignatureCandidate>
-make_cuda_graph_signature(const std::unordered_map<std::string, IValue> &args) {
+make_cuda_graph_signature(const CompiledGraph &graph,
+                          const std::unordered_map<std::string, IValue> &args) {
   CudaGraphSignatureCandidate signature;
   signature.entries.reserve(args.size());
   signature.allocations.reserve(args.size());
   for (const auto &kv : args) {
-    if (kv.second.tag != ArgKind::kNdarray) {
-      return std::nullopt;
-    }
-    auto *arr = reinterpret_cast<Ndarray *>(kv.second.val);
-    DeviceAllocation allocation = arr->get_device_allocation();
-    auto *device = dynamic_cast<cuda::CudaDevice *>(allocation.device);
-    if (device == nullptr) {
+    const auto declared_it = graph.args.find(kv.first);
+    if (declared_it == graph.args.end() ||
+        declared_it->second.tag != kv.second.tag) {
       return std::nullopt;
     }
 
     CudaGraphArgSignatureEntry entry;
     entry.name = kv.first;
-    entry.device = allocation.device;
-    entry.alloc_id = allocation.alloc_id;
-    // Ndarray currently represents its complete DeviceAllocation and has no
-    // subview offset. Keep the zero offset explicit so a future view type
-    // cannot accidentally inherit the same replay identity.
-    entry.byte_offset = 0;
-    entry.byte_size = arr->get_nelement() * arr->get_element_size();
-    entry.dtype_id = arr->get_element_data_type()
-                         ->as<PrimitiveType>()
-                         ->type;
-    entry.layout = arr->layout;
-    entry.shape = arr->shape;
-    entry.element_shape = arr->get_element_shape();
-    signature.entries.push_back(std::move(entry));
+    entry.tag = kv.second.tag;
+    entry.dtype_id = declared_it->second.dtype_id;
+    entry.element_shape = declared_it->second.element_shape;
 
-    const bool already_listed =
-        std::find(signature.allocations.begin(), signature.allocations.end(),
-                  allocation) != signature.allocations.end();
-    if (!already_listed) {
-      signature.allocations.push_back(allocation);
+    if (kv.second.tag == ArgKind::kNdarray) {
+      auto *arr = reinterpret_cast<Ndarray *>(kv.second.val);
+      DeviceAllocation allocation = arr->get_device_allocation();
+      auto *device = dynamic_cast<cuda::CudaDevice *>(allocation.device);
+      if (device == nullptr) {
+        return std::nullopt;
+      }
+      entry.device = allocation.device;
+      entry.alloc_id = allocation.alloc_id;
+      // Ndarray currently represents its complete DeviceAllocation and has no
+      // subview offset. Keep the zero offset explicit so a future view type
+      // cannot accidentally inherit the same replay identity.
+      entry.byte_offset = 0;
+      entry.byte_size = arr->get_nelement() * arr->get_element_size();
+      entry.dtype_id = arr->get_element_data_type()
+                           ->as<PrimitiveType>()
+                           ->type;
+      entry.layout = arr->layout;
+      entry.shape = arr->shape;
+      entry.element_shape = arr->get_element_shape();
+
+      const bool already_listed =
+          std::find(signature.allocations.begin(),
+                    signature.allocations.end(),
+                    allocation) != signature.allocations.end();
+      if (!already_listed) {
+        signature.allocations.push_back(allocation);
+      }
+    } else if (kv.second.tag == ArgKind::kScalar) {
+      entry.byte_size = data_type_size(declared_it->second.dtype());
+      entry.value = kv.second.val;
+    } else if (kv.second.tag == ArgKind::kMatrix) {
+      auto *matrix = reinterpret_cast<Matrix *>(kv.second.val);
+      entry.byte_size =
+          matrix->length() * data_type_size(matrix->dtype());
+      if (entry.byte_size > 128) {
+        return std::nullopt;
+      }
+      entry.value_bytes.resize(entry.byte_size);
+      std::memcpy(entry.value_bytes.data(),
+                  reinterpret_cast<const void *>(matrix->data()),
+                  entry.byte_size);
+    } else {
+      // Texture handles require a backend-specific lifetime owner and are not
+      // eligible for CUDA argument-buffer patching yet.
+      return std::nullopt;
     }
+    signature.entries.push_back(std::move(entry));
   }
   std::sort(signature.entries.begin(), signature.entries.end(),
             [](const CudaGraphArgSignatureEntry &lhs,
                const CudaGraphArgSignatureEntry &rhs) {
               return lhs.name < rhs.name;
+            });
+  std::sort(signature.allocations.begin(), signature.allocations.end(),
+            [](const DeviceAllocation &lhs, const DeviceAllocation &rhs) {
+              const auto lhs_device =
+                  reinterpret_cast<std::uintptr_t>(lhs.device);
+              const auto rhs_device =
+                  reinterpret_cast<std::uintptr_t>(rhs.device);
+              return lhs_device == rhs_device ? lhs.alloc_id < rhs.alloc_id
+                                              : lhs_device < rhs_device;
             });
   return signature;
 }
@@ -542,6 +744,37 @@ acquire_cuda_graph_allocation_leases(
   return leases;
 }
 
+bool patch_cuda_graph_arguments(
+    const CompiledGraph &graph,
+    const std::unordered_map<std::string, IValue> &args,
+    CompiledGraphCudaState &state,
+    std::vector<std::vector<uint8_t>> &host_arg_buffers) {
+  if (state.packets.size() != graph.dispatches.size()) {
+    return false;
+  }
+  host_arg_buffers.clear();
+  host_arg_buffers.reserve(graph.dispatches.size());
+  for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
+    const auto &dispatch = graph.dispatches[i];
+    auto *prog = dispatch.ti_kernel->program;
+    auto *launcher = dynamic_cast<cuda::KernelLauncher *>(
+        &prog->get_program_impl()->get_kernel_launcher());
+    if (launcher == nullptr || launcher != state.packets[i].launcher) {
+      return false;
+    }
+
+    LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
+    graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    host_arg_buffers.emplace_back();
+    if (!launcher->update_cuda_graph_launch(
+            state.packets[i].packet, launch_ctx, host_arg_buffers.back(),
+            /*stream=*/nullptr)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool try_run_cuda_graph(const CompiledGraph &graph,
                         const CompileConfig &compile_config,
                         const std::unordered_map<std::string, IValue> &args,
@@ -552,7 +785,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   if (graph.dispatches.empty()) {
     return false;
   }
-  auto signature = make_cuda_graph_signature(args);
+  auto signature = make_cuda_graph_signature(graph, args);
   if (!signature.has_value()) {
     return false;
   }
@@ -561,6 +794,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   if (state->disabled) {
     return false;
   }
+  state->collect_ready_deferred_resources();
   if (state->graph_exec &&
       state->signature == signature->entries) {
     CUDADriver::get_instance().graph_launch(state->graph_exec.get(), nullptr);
@@ -572,8 +806,36 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   if (!allocation_leases.has_value()) {
     return false;
   }
+  if (state->graph_exec &&
+      cuda_graph_signatures_are_structurally_compatible(
+          state->signature, signature->entries)) {
+    std::vector<std::vector<uint8_t>> host_arg_buffers;
+    if (patch_cuda_graph_arguments(graph, args, *state, host_arg_buffers)) {
+      std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>
+          old_allocation_leases;
+      if (state->allocations != signature->allocations) {
+        old_allocation_leases = std::move(state->allocation_leases);
+        state->allocation_leases = std::move(*allocation_leases);
+        state->allocations = signature->allocations;
+      }
+      state->signature = std::move(signature->entries);
+      // The default stream orders this event after the previous replay and
+      // every argument-buffer upload above. At that point old allocations are
+      // no longer referenced and the host staging buffers have been consumed.
+      // Record before the new replay so bounded retirement does not wait for
+      // one more graph execution than correctness requires.
+      state->defer_replay_resources(std::move(old_allocation_leases),
+                                    std::move(host_arg_buffers));
+      CUDADriver::get_instance().graph_launch(state->graph_exec.get(),
+                                              nullptr);
+      return true;
+    }
+  }
+  // Any partial argument-buffer update is ordered on the default stream.
+  // Retiring the old executable synchronizes that stream before recapture.
   state->retire();
   state->signature = std::move(signature->entries);
+  state->allocations = signature->allocations;
   state->allocation_leases = std::move(*allocation_leases);
   if (cache.kernels.size() != graph.dispatches.size()) {
     cache.kernels.assign(graph.dispatches.size(), {});

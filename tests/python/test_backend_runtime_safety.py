@@ -215,6 +215,54 @@ def test_async_graph_and_cold_kernel_registration_are_thread_safe():
     )
 
 
+@test_utils.test(arch=ti.cuda)
+def test_cuda_graph_dynamic_patch_is_safe_for_two_host_callers():
+    n = 1 << 14
+    iterations = 128
+
+    @ti.kernel
+    def transform(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        bias: ti.i32,
+    ):
+        for i in output:
+            output[i] = source[i] + bias
+
+    sym_source = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1
+    )
+    sym_output = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    sym_bias = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "bias", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(transform, sym_source, sym_output, sym_bias)
+    graph = builder.compile()
+
+    source_a_np = np.arange(n, dtype=np.int32)
+    source_b_np = np.arange(n, dtype=np.int32) * -2
+    source_a = ti.ndarray(ti.i32, shape=n)
+    source_b = ti.ndarray(ti.i32, shape=n)
+    output_a = ti.ndarray(ti.i32, shape=n)
+    output_b = ti.ndarray(ti.i32, shape=n)
+    source_a.from_numpy(source_a_np)
+    source_b.from_numpy(source_b_np)
+
+    def run_a():
+        for _ in range(iterations):
+            graph.run({"source": source_a, "output": output_a, "bias": 11})
+
+    def run_b():
+        for _ in range(iterations):
+            graph.run({"source": source_b, "output": output_b, "bias": -7})
+
+    _run_concurrently([run_a, run_b])
+    ti.sync()
+    np.testing.assert_array_equal(output_a.to_numpy(), source_a_np + 11)
+    np.testing.assert_array_equal(output_b.to_numpy(), source_b_np - 7)
+
+
 @test_utils.test(arch=ti.cpu, cpu_max_num_threads=4)
 def test_cpu_native_primitives_are_safe_for_two_gil_released_callers():
     """Exercise the real native bindings on two disjoint buffers concurrently."""

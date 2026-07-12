@@ -51,10 +51,17 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                  LaunchContextBuilder &ctx,
                                  GraphLaunchPacket &packet,
                                  void *stream);
+  bool update_cuda_graph_launch(const GraphLaunchPacket &packet,
+                                LaunchContextBuilder &ctx,
+                                std::vector<uint8_t> &host_arg_buffer,
+                                void *stream);
   void capture_cuda_graph_launch(const GraphLaunchPacket &packet,
                                  void *stream);
 
  private:
+  bool prepare_cuda_graph_context(Handle handle,
+                                  LaunchContextBuilder &ctx,
+                                  RuntimeContext &context);
   bool on_cuda_device(void *ptr);
   int64 get_sparse_list_version(int snode_id) const;
   void record_sparse_list_reuse_sample(SparseListState &state,
