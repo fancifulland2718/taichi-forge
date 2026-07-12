@@ -234,6 +234,42 @@ void push_graph_allocation_key(std::vector<uint64_t> &key,
 
 }  // namespace
 
+class GraphReplayRegistry {
+ public:
+  explicit GraphReplayRegistry(GfxRuntime *runtime) : runtime_(runtime) {
+  }
+
+  void retire(uint64_t token) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (runtime_ != nullptr) {
+      runtime_->retire_graph_replay(token);
+    }
+  }
+
+  void close() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    runtime_ = nullptr;
+  }
+
+ private:
+  std::mutex mutex_;
+  GfxRuntime *runtime_{nullptr};
+};
+
+GraphReplayRegistration::GraphReplayRegistration(
+    std::shared_ptr<GraphReplayRegistry> registry,
+    uint64_t replay_key)
+    : registry_(std::move(registry)), replay_key_(replay_key) {
+  TI_ASSERT(registry_ != nullptr);
+  TI_ASSERT(replay_key_ != 0);
+}
+
+GraphReplayRegistration::~GraphReplayRegistration() {
+  if (registry_ != nullptr) {
+    registry_->retire(replay_key_);
+  }
+}
+
 constexpr size_t kGtmpBufferSize = 1024 * 1024;
 constexpr size_t kHashOverflowBufferSize = 5 * sizeof(uint32_t);
 constexpr size_t kListGenBufferSize = 32 << 20;
@@ -446,6 +482,7 @@ GfxRuntime::GfxRuntime(const Params &params)
               ? static_cast<size_t>(params.cmdlist_max_dispatches)
               : size_t{0}),
       debug_mode_(params.debug) {
+  graph_replay_registry_ = std::make_shared<GraphReplayRegistry>(this);
   TI_ERROR_IF(params.listgen_buffer_MB < 0,
               "vulkan_listgen_buffer_MB must be >= 0, got {}",
               params.listgen_buffer_MB);
@@ -512,6 +549,10 @@ GfxRuntime::GfxRuntime(const Params &params)
 }
 
 GfxRuntime::~GfxRuntime() {
+  // Close the registry before touching device state. A late graph-cache
+  // destructor may retain the registry object, but it can no longer call back
+  // into this runtime after close() returns.
+  graph_replay_registry_->close();
   synchronize_impl(/*check_hash_overflow=*/false);
   graph_replay_states_.clear();
 
@@ -1396,20 +1437,69 @@ GfxRuntime::GraphReplayExecutable::acquire_ready_slot() {
   return slot;
 }
 
+bool GfxRuntime::GraphReplayExecutable::ready_for_retirement() const {
+  for (const auto &slot : slots) {
+    if (slot.completion && !slot.completion->is_ready()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void GfxRuntime::GraphReplayState::reset() {
   executable.reset();
   attempts = 0;
   recorded = 0;
   replayed = 0;
   fallbacks = 0;
+  retirement_requested = false;
+}
+
+std::unique_ptr<GraphReplayRegistration> GfxRuntime::register_graph_replay(
+    uint64_t replay_token) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  TI_ASSERT(replay_token != 0);
+  const uint64_t replay_key = next_graph_replay_registration_id_++;
+  TI_ASSERT(replay_key != 0);
+  return std::unique_ptr<GraphReplayRegistration>(
+      new GraphReplayRegistration(graph_replay_registry_, replay_key));
+}
+
+bool GfxRuntime::owns_graph_replay_registration(
+    const GraphReplayRegistration &registration) const {
+  return registration.registry_.get() == graph_replay_registry_.get();
+}
+
+void GfxRuntime::collect_ready_graph_replays() {
+  for (auto it = graph_replay_states_.begin();
+       it != graph_replay_states_.end();) {
+    if (it->second.retirement_requested &&
+        it->second.executable.ready_for_retirement()) {
+      it = graph_replay_states_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void GfxRuntime::retire_graph_replay(uint64_t replay_token) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  auto active = graph_replay_states_.find(replay_token);
+  if (active == graph_replay_states_.end()) {
+    return;
+  }
+  active->second.retirement_requested = true;
+  collect_ready_graph_replays();
 }
 
 bool GfxRuntime::try_launch_graph(
     const std::vector<GraphDispatch> &dispatches,
-    uint64_t replay_token) {
+    uint64_t replay_key) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
-  TI_ASSERT(replay_token != 0);
-  GraphReplayState &state = graph_replay_states_[replay_token];
+  collect_ready_graph_replays();
+  TI_ASSERT(replay_key != 0);
+  GraphReplayState &state = graph_replay_states_[replay_key];
+  TI_ASSERT(!state.retirement_requested);
   GraphReplayExecutable &executable = state.executable;
   ++state.attempts;
   if (dispatches.empty() || profiler_ || dispatch_cache_) {
@@ -1780,6 +1870,9 @@ void GfxRuntime::synchronize() {
 void GfxRuntime::synchronize_impl(bool check_hash_overflow) {
   flush_if_pending();
   device_->get_compute_stream()->command_sync();
+  // The stream is idle, so every retirement-requested state can now release
+  // its graph-owned command/resource objects.
+  collect_ready_graph_replays();
   // Profiler support
   if (profiler_) {
     device_->profiler_sync();

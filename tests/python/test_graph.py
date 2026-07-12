@@ -746,17 +746,53 @@ def test_vulkan_cgraph_replay_identity_survives_cache_churn():
         builder.dispatch(add_bias, sym_values, sym_bias)
         graph = builder.compile()
         runtime_args = {"values": values, "bias": iteration + 1}
-        # First launch records a Vulkan replay slot; the second replays it.
-        graph.run(runtime_args)
-        graph.run(runtime_args)
+        # The first eight launches populate the bounded slot ring; launch nine
+        # replays slot zero.
+        for _ in range(9):
+            graph.run(runtime_args)
         del graph
         del builder
         gc.collect()
 
     ti.sync()
-    expected = 4 * sum(range(1, graph_count + 1))
+    expected = 18 * sum(range(1, graph_count + 1))
     np.testing.assert_array_equal(
         values.to_numpy(), np.full(256, expected, dtype=np.int32)
+    )
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_vulkan_cgraph_clear_retires_in_flight_slots_and_reregisters():
+    @ti.kernel
+    def increment(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in values:
+            values[i] += 1
+
+    sym_values = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(increment, sym_values)
+    builder.dispatch(increment, sym_values)
+    graph = builder.compile()
+    values = ti.ndarray(ti.i32, shape=1 << 14)
+    values.fill(0)
+
+    for _ in range(9):
+        graph.run({"values": values})
+    cache = graph._instance._backend_executable._jit_cache
+    cache.clear_runtime_state()
+    cache.clear_runtime_state()
+
+    # Reuse the same cache identity while its previous slot generation may
+    # still be in flight. The new registration must create independent active
+    # state while the runtime-owned retirement queue pins the old resources.
+    for _ in range(9):
+        graph.run({"values": values})
+
+    ti.sync()
+    np.testing.assert_array_equal(
+        values.to_numpy(), np.full(1 << 14, 36, dtype=np.int32)
     )
 
 

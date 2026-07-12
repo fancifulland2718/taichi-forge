@@ -44,6 +44,28 @@ using InputBuffersMap =
     std::unordered_map<BufferInfo, DeviceAllocation *, BufferInfoHasher>;
 
 class SNodeTreeManager;
+class GfxRuntime;
+class GraphReplayRegistry;
+
+class TI_DLL_EXPORT GraphReplayRegistration {
+ public:
+  ~GraphReplayRegistration();
+  GraphReplayRegistration(const GraphReplayRegistration &) = delete;
+  GraphReplayRegistration &operator=(const GraphReplayRegistration &) = delete;
+  GraphReplayRegistration(GraphReplayRegistration &&) = delete;
+  GraphReplayRegistration &operator=(GraphReplayRegistration &&) = delete;
+  uint64_t replay_key() const noexcept {
+    return replay_key_;
+  }
+
+ private:
+  friend class GfxRuntime;
+  GraphReplayRegistration(std::shared_ptr<GraphReplayRegistry> registry,
+                          uint64_t replay_key);
+
+  std::shared_ptr<GraphReplayRegistry> registry_;
+  uint64_t replay_key_{0};
+};
 
 class CompiledTaichiKernel {
  public:
@@ -249,6 +271,7 @@ class TI_DLL_EXPORT GfxRuntime {
     bool refresh_prepared_cache(const std::vector<uint64_t> &key,
                                 std::vector<PreparedDispatch> &prepared);
     Slot *acquire_ready_slot();
+    bool ready_for_retirement() const;
     void reset();
   };
 
@@ -258,12 +281,17 @@ class TI_DLL_EXPORT GfxRuntime {
     uint64_t recorded{0};
     uint64_t replayed{0};
     uint64_t fallbacks{0};
+    bool retirement_requested{false};
 
     void reset();
   };
 
   bool try_launch_graph(const std::vector<GraphDispatch> &dispatches,
-                        uint64_t replay_token);
+                        uint64_t replay_key);
+  std::unique_ptr<GraphReplayRegistration> register_graph_replay(
+      uint64_t replay_token);
+  bool owns_graph_replay_registration(
+      const GraphReplayRegistration &registration) const;
 
   void buffer_copy(DevicePtr dst, DevicePtr src, size_t size);
   void copy_image(DeviceAllocation dst,
@@ -316,6 +344,7 @@ class TI_DLL_EXPORT GfxRuntime {
 
  private:
   friend class taichi::lang::gfx::SNodeTreeManager;
+  friend class GraphReplayRegistry;
 
   // GfxRuntime owns a single mutable command-recording state (command list,
   // barriers, descriptor caches, temporary buffers, image layouts, and graph
@@ -351,6 +380,8 @@ class TI_DLL_EXPORT GfxRuntime {
       const CompiledSNodeStructs &compiled_structs);
   void check_hash_overflow_counters();
   void synchronize_impl(bool check_hash_overflow);
+  void retire_graph_replay(uint64_t replay_token);
+  void collect_ready_graph_replays();
 
   struct HashOverflowWatch {
     int root_id{-1};
@@ -408,6 +439,8 @@ class TI_DLL_EXPORT GfxRuntime {
   std::vector<HashOverflowWatch> hash_overflow_watches_;
   bool hash_overflow_error_reported_{false};
   std::unordered_map<uint64_t, GraphReplayState> graph_replay_states_;
+  std::shared_ptr<GraphReplayRegistry> graph_replay_registry_;
+  uint64_t next_graph_replay_registration_id_{1};
   bool pending_dispatch_global_barrier_{false};
   std::vector<DeviceAllocation> pending_dispatch_barrier_buffers_;
   std::unordered_set<DeviceAllocationId> pending_dispatch_barrier_buffer_ids_;

@@ -918,7 +918,33 @@ void CompiledGraphCudaStateDeleter::operator()(
 #endif
 
 #if defined(TI_WITH_VULKAN)
+struct CompiledGraphVulkanState {
+  std::unique_ptr<gfx::GraphReplayRegistration> registration;
+};
+
+void CompiledGraphVulkanStateDeleter::operator()(
+    CompiledGraphVulkanState *state) const noexcept {
+  delete state;
+}
+
 namespace {
+
+CompiledGraphVulkanState *get_vulkan_graph_state(
+    CompiledGraphJITCache &cache,
+    gfx::GfxRuntime *runtime) {
+  if (cache.vulkan_graph_state &&
+      !runtime->owns_graph_replay_registration(
+          *cache.vulkan_graph_state->registration)) {
+    cache.vulkan_graph_state.reset();
+  }
+  if (!cache.vulkan_graph_state) {
+    auto state = std::make_unique<CompiledGraphVulkanState>();
+    state->registration =
+        runtime->register_graph_replay(cache.graph_replay_token());
+    cache.vulkan_graph_state.reset(state.release());
+  }
+  return cache.vulkan_graph_state.get();
+}
 
 bool try_run_vulkan_graph(const CompiledGraph &graph,
                           const CompileConfig &compile_config,
@@ -966,11 +992,20 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
   if (gfx_launcher == nullptr) {
     return false;
   }
-  return gfx_launcher->runtime()->try_launch_graph(
-      gfx_dispatches, cache.graph_replay_token());
+  auto *runtime = gfx_launcher->runtime();
+  auto *state = get_vulkan_graph_state(cache, runtime);
+  return runtime->try_launch_graph(
+      gfx_dispatches, state->registration->replay_key());
 }
 
 }  // namespace
+#endif
+
+#if !defined(TI_WITH_VULKAN)
+void CompiledGraphVulkanStateDeleter::operator()(
+    CompiledGraphVulkanState *state) const noexcept {
+  TI_ASSERT(state == nullptr);
+}
 #endif
 
 void CompiledGraphJITCache::clear_runtime_state() {
@@ -982,6 +1017,7 @@ void CompiledGraphJITCache::clear_runtime_state() {
 #endif
   std::lock_guard<std::mutex> lock(run_mutex);
   cuda_graph_state.reset();
+  vulkan_graph_state.reset();
   kernels.clear();
   runtime_arg_plans.clear();
 }

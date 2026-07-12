@@ -205,6 +205,12 @@ struct CompiledGraphCudaStateDeleter {
   void operator()(CompiledGraphCudaState *state) const noexcept;
 };
 
+struct CompiledGraphVulkanState;
+
+struct CompiledGraphVulkanStateDeleter {
+  void operator()(CompiledGraphVulkanState *state) const noexcept;
+};
+
 class CompiledGraphReplayIdentity {
  public:
   CompiledGraphReplayIdentity()
@@ -245,6 +251,8 @@ struct CompiledGraphJITCache {
   std::vector<CompiledGraphDispatchRuntimePlan> runtime_arg_plans;
   std::unique_ptr<CompiledGraphCudaState, CompiledGraphCudaStateDeleter>
       cuda_graph_state;
+  std::unique_ptr<CompiledGraphVulkanState, CompiledGraphVulkanStateDeleter>
+      vulkan_graph_state;
   // GfxRuntime may retain replay state after this cache is destroyed. A
   // monotonic token, rather than the reusable cache-object address, prevents a
   // later cache at the same host address from inheriting that state.
