@@ -80,6 +80,8 @@ class CudaStream : public Stream {
 
 class CudaDevice : public LlvmDevice {
  public:
+  class AllocationLease;
+
   struct AllocInfo {
     void *ptr{nullptr};
     size_t size{0};
@@ -102,6 +104,11 @@ class CudaDevice : public LlvmDevice {
   };
 
   AllocInfo get_alloc_info(const DeviceAllocation handle);
+  // Pins one generation-qualified registry allocation while a CUDA graph
+  // executable may still contain its device address. The returned lease must
+  // be destroyed before this CudaDevice.
+  std::unique_ptr<AllocationLease> acquire_allocation_lease(
+      DeviceAllocation handle);
 
   CudaDevice();
   ~CudaDevice() override;
@@ -233,6 +240,24 @@ class CudaDevice : public LlvmDevice {
   // not held while callers use the returned host pointer.
   std::mutex mapping_lifecycle_mutex_;
   size_t mapped_allocation_count_{0};
+};
+
+class CudaDevice::AllocationLease {
+ public:
+  ~AllocationLease();
+  AllocationLease(const AllocationLease &) = delete;
+  AllocationLease &operator=(const AllocationLease &) = delete;
+
+ private:
+  friend class CudaDevice;
+  explicit AllocationLease(
+      CudaDevice *device,
+      AllocationRegistry<AllocationRecord>::Lease registry_lease)
+      : device_(device), registry_lease_(std::move(registry_lease)) {
+  }
+
+  CudaDevice *device_{nullptr};
+  AllocationRegistry<AllocationRecord>::Lease registry_lease_;
 };
 
 }  // namespace cuda

@@ -1,6 +1,7 @@
 import threading
 
 import numpy as np
+import pytest
 
 import taichi_forge as ti
 from taichi_forge.lang import impl
@@ -30,6 +31,111 @@ def _run_concurrently(workers):
     assert all(not thread.is_alive() for thread in threads), "worker deadlocked"
     if failures:
         raise failures[0]
+
+
+@test_utils.test(arch=ti.cpu)
+def test_graph_run_serializes_the_complete_dispatch_loop():
+    """Two callers must not interleave nodes inside one Graph.run()."""
+
+    from taichi_forge.graph._graph import Graph, _GraphSpec
+
+    trace = []
+    trace_lock = threading.Lock()
+    second_caller_entered_first_node = threading.Event()
+    first_node_calls = 0
+
+    class RecordingNode:
+        needs_runtime_args = True
+        runtime_arg_names = frozenset()
+
+        def __init__(self, index):
+            self.index = index
+
+        def run(self, context):
+            nonlocal first_node_calls
+            thread_id = threading.get_ident()
+            with trace_lock:
+                trace.append((self.index, thread_id))
+                if self.index == 0:
+                    first_node_calls += 1
+                    call_index = first_node_calls
+                else:
+                    call_index = 0
+            if self.index != 0:
+                return
+            if call_index == 1:
+                # Without a whole-Graph transaction, the second caller enters
+                # node 0 and releases this wait, producing 0,0,1,1.
+                second_caller_entered_first_node.wait(timeout=0.1)
+            else:
+                second_caller_entered_first_node.set()
+
+        @property
+        def debug_info(self):
+            return {"kind": "recording", "index": self.index}
+
+    graph = Graph(_GraphSpec([RecordingNode(0), RecordingNode(1)]))
+    _run_concurrently([lambda: graph.run({}), lambda: graph.run({})])
+
+    assert [index for index, _ in trace] == [0, 1, 0, 1]
+    assert trace[0][1] == trace[1][1]
+    assert trace[2][1] == trace[3][1]
+    assert trace[0][1] != trace[2][1]
+
+
+@test_utils.test(arch=ti.cpu)
+def test_graph_invalidation_waits_for_an_active_invocation():
+    """Invalidation must not clear an instance while its run is active."""
+
+    from taichi_forge.graph._graph import Graph, _GraphSpec
+    from taichi_forge.lang.exception import TaichiRuntimeError
+
+    entered = threading.Event()
+    release = threading.Event()
+    invalidated = threading.Event()
+    failures = []
+
+    class BlockingNode:
+        needs_runtime_args = True
+        runtime_arg_names = frozenset()
+
+        def run(self, context):
+            entered.set()
+            if not release.wait(timeout=5):
+                raise RuntimeError("test did not release the active graph run")
+
+        @property
+        def debug_info(self):
+            return {"kind": "blocking"}
+
+    graph = Graph(_GraphSpec([BlockingNode()]))
+
+    def run_graph():
+        try:
+            graph.run({})
+        except BaseException as exc:
+            failures.append(exc)
+
+    def invalidate_graph():
+        graph._invalidate_runtime()
+        invalidated.set()
+
+    run_thread = threading.Thread(target=run_graph)
+    run_thread.start()
+    assert entered.wait(timeout=5)
+    invalidate_thread = threading.Thread(target=invalidate_graph)
+    invalidate_thread.start()
+    assert not invalidated.wait(timeout=0.05)
+    release.set()
+    run_thread.join(timeout=5)
+    invalidate_thread.join(timeout=5)
+
+    assert not failures
+    assert not run_thread.is_alive()
+    assert not invalidate_thread.is_alive()
+    assert invalidated.is_set()
+    with pytest.raises(TaichiRuntimeError, match="compiled before ti.reset"):
+        graph.run({})
 
 
 @test_utils.test(

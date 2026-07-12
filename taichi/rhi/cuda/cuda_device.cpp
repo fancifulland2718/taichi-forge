@@ -63,6 +63,30 @@ void CudaDevice::AllocationRecord::release() {
   ptr = nullptr;
 }
 
+CudaDevice::AllocationLease::~AllocationLease() {
+  registry_lease_ = {};
+  if (device_ != nullptr) {
+    // A Program-owned Ndarray may have retired the handle while the graph
+    // executable still pinned it. Collect immediately when the final graph
+    // lease goes away instead of retaining the allocation until a later
+    // allocation or device shutdown happens to sweep the registry.
+    device_->allocations_.collect_retired();
+  }
+}
+
+std::unique_ptr<CudaDevice::AllocationLease>
+CudaDevice::acquire_allocation_lease(DeviceAllocation handle) {
+  if (handle.device != this) {
+    return nullptr;
+  }
+  auto [result, registry_lease] = allocations_.acquire(handle.alloc_id);
+  if (result != RhiResult::success) {
+    return nullptr;
+  }
+  return std::unique_ptr<AllocationLease>(
+      new AllocationLease(this, std::move(registry_lease)));
+}
+
 CudaDevice::CudaDevice() {
   // Initialize the device memory pool
   DeviceMemoryPool::get_instance(true /*merge_upon_release*/);

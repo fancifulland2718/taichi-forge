@@ -2390,7 +2390,9 @@ void export_lang(py::module &m) {
       };
 
   py::class_<aot::CompiledGraphJITCache>(m, "CompiledGraphJITCache")
-      .def(py::init<>());
+      .def(py::init<>())
+      .def("clear_runtime_state",
+           &aot::CompiledGraphJITCache::clear_runtime_state);
 
   py::class_<aot::CompiledGraph>(m, "CompiledGraph")
       .def("jit_run",

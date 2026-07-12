@@ -1,3 +1,4 @@
+import threading
 import warnings
 from typing import Any, Dict, List
 
@@ -40,6 +41,9 @@ class _CGraphJITExecutable:
         self.compiled_graph.jit_run_cached(
             context.compile_config(), context.flattened_args(), self._jit_cache
         )
+
+    def invalidate_runtime(self):
+        self._jit_cache.clear_runtime_state()
 
 
 class _GraphRunContext:
@@ -108,15 +112,19 @@ class _GraphRunContext:
 class _CompiledCGraphNode:
     needs_runtime_args = True
 
-    def __init__(self, compiled_graph, dispatch_count):
+    def __init__(self, compiled_graph, dispatch_count, runtime_arg_names=()):
         self.compiled_graph = compiled_graph
         self.dispatch_count = dispatch_count
+        self.runtime_arg_names = frozenset(runtime_arg_names)
         self._jit_cache = _ti_core.CompiledGraphJITCache()
 
     def run(self, context):
         self.compiled_graph.jit_run_cached(
             context.compile_config(), context.flattened_args(), self._jit_cache
         )
+
+    def invalidate_runtime(self):
+        self._jit_cache.clear_runtime_state()
 
     @property
     def debug_info(self):
@@ -125,6 +133,7 @@ class _CompiledCGraphNode:
 
 class _CompiledNativeGraphNode:
     needs_runtime_args = False
+    runtime_arg_names = frozenset()
 
     def __init__(self, executable):
         self.executable = executable
@@ -149,12 +158,40 @@ class _GraphSpec:
         self.native_count = sum(
             isinstance(n, _CompiledNativeGraphNode) for n in self.nodes
         )
+        self.runtime_arg_names = frozenset().union(
+            *(n.runtime_arg_names for n in self.nodes)
+        )
         self.repeat_count = 0
+
+    def validate_runtime_args(self, args):
+        if not isinstance(args, dict):
+            raise TaichiRuntimeError(
+                f"Graph.run() expects a dict of runtime arguments, got {type(args)}"
+            )
+        if args.keys() == self.runtime_arg_names:
+            return
+
+        missing = sorted(self.runtime_arg_names.difference(args.keys()))
+        unexpected = sorted(args.keys() - self.runtime_arg_names)
+        details = []
+        if missing:
+            details.append(f"Missing graph runtime arguments: {', '.join(missing)}")
+        if unexpected:
+            details.append(
+                f"Unexpected graph runtime arguments: {', '.join(unexpected)}"
+            )
+        raise TaichiRuntimeError("; ".join(details))
 
     def instantiate(self, key=None):
         if key is None:
             key = self.instance_key()
         return _GraphInstance(self, key)
+
+    def invalidate_runtime(self):
+        for node in self.nodes:
+            invalidate = getattr(node, "invalidate_runtime", None)
+            if invalidate is not None:
+                invalidate()
 
     def instance_key(self):
         runtime = impl.get_runtime()
@@ -227,10 +264,16 @@ class _GraphInstance:
 
     @property
     def run_impl(self):
-        return self._run_impl
+        return self.run
 
     def _set_run_impl(self, run_impl):
-        self._run_impl = run_impl
+        # Store an unbound class function. Keeping a bound method here creates
+        # a self-cycle (instance -> method -> instance), which can defer a JIT
+        # cache and its backend leases until after Program teardown.
+        self._run_impl = run_impl.__func__
+
+    def run(self, args):
+        self._run_impl(self, args)
 
     def _maybe_install_native_replay(self):
         arch = impl.current_cfg().arch
@@ -251,6 +294,14 @@ class _GraphInstance:
         self._kind = kind
         self._set_run_impl(self._run_backend)
         return self
+
+    def invalidate_runtime(self):
+        if self._backend_executable is not None:
+            invalidate = getattr(
+                self._backend_executable, "invalidate_runtime", None
+            )
+            if invalidate is not None:
+                invalidate()
 
     def prewarm(self):
         if self._backend_executable is not None:
@@ -292,11 +343,30 @@ class _AOTGraphBuilderPlan:
         self._items.append(("dispatch", kernel_cpp, args))
 
     def append(self, node):
-        if self._items and self._items[-1][0] == "append" and self._items[-1][1] is node:
-            kind, prev_node, count = self._items[-1]
-            self._items[-1] = (kind, prev_node, count + 1)
-        else:
-            self._items.append(("append", node, 1))
+        # Freeze each append at the point where the runtime builder consumes it.
+        # Reusing and then mutating one Sequential between appends must not make
+        # the lazily compiled AOT plan observe only its final definition.
+        self._items.append(
+            ("append", _AOTSequentialSnapshot(node._dispatches), 1)
+        )
+
+    def snapshot(self):
+        items = []
+        for item in self._items:
+            if item[0] == "dispatch":
+                _, kernel_cpp, args = item
+                items.append(("dispatch", kernel_cpp, tuple(args)))
+            elif item[0] == "append":
+                _, node, count = item
+                items.append(
+                    ("append", _AOTSequentialSnapshot(node._dispatches), count)
+                )
+            else:
+                raise TaichiRuntimeError(f"Unknown AOT graph item kind {item[0]}")
+
+        snapshot = _AOTGraphBuilderPlan()
+        snapshot._items = tuple(items)
+        return snapshot
 
     def compile(self):
         builder = _ti_core.GraphBuilder()
@@ -340,15 +410,32 @@ def flatten_args(args):
     return unzipped_args
 
 
+def _runtime_arg_names(args):
+    return {arg.name for arg in args}
+
+
+class _AOTSequentialSnapshot:
+    def __init__(self, dispatches):
+        self._dispatches = tuple(
+            (kernel_cpp, tuple(args)) for kernel_cpp, args in dispatches
+        )
+
+    def _dispatch_to(self, builder):
+        for kernel_cpp, args in self._dispatches:
+            builder.dispatch(kernel_cpp, args)
+
+
 class Sequential:
     def __init__(self):
         self._dispatch_count = 0
         self._dispatches = []
+        self._runtime_arg_names = set()
 
     def dispatch(self, kernel_fn, *args):
         kernel_cpp = gen_cpp_kernel(kernel_fn, args)
         unzipped_args = flatten_args(args)
         self._dispatches.append((kernel_cpp, unzipped_args))
+        self._runtime_arg_names.update(_runtime_arg_names(unzipped_args))
         self._dispatch_count += 1
 
     def _dispatch_to(self, builder):
@@ -361,6 +448,7 @@ class GraphBuilder:
         self._aot_graph_plan = _AOTGraphBuilderPlan()
         self._runtime_graph_builder = _ti_core.GraphBuilder()
         self._dispatch_count = 0
+        self._runtime_graph_arg_names = set()
         self._nodes = []
 
     def dispatch(self, kernel_fn, *args):
@@ -368,6 +456,7 @@ class GraphBuilder:
         unzipped_args = flatten_args(args)
         self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args)
         self._ensure_runtime_graph_builder().dispatch(kernel_cpp, unzipped_args)
+        self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))
         self._dispatch_count += 1
 
     def create_sequential(self):
@@ -378,6 +467,7 @@ class GraphBuilder:
         assert isinstance(node, Sequential)
         self._aot_graph_plan.append(node)
         node._dispatch_to(self._runtime_graph_builder)
+        self._runtime_graph_arg_names.update(node._runtime_arg_names)
         self._dispatch_count += node._dispatch_count
 
     def _ensure_runtime_graph_builder(self):
@@ -390,10 +480,12 @@ class GraphBuilder:
             _CompiledCGraphNode(
                 self._runtime_graph_builder.compile(),
                 self._dispatch_count,
+                self._runtime_graph_arg_names,
             )
         )
         self._runtime_graph_builder = _ti_core.GraphBuilder()
         self._dispatch_count = 0
+        self._runtime_graph_arg_names = set()
 
     def _append_native(self, node, *, prewarm=False):
         self._flush_graph_builder()
@@ -413,13 +505,20 @@ class GraphBuilder:
                 _CompiledCGraphNode(
                     self._ensure_runtime_graph_builder().compile(),
                     0,
+                    (),
                 )
             )
-        return Graph(_GraphSpec(self._nodes, aot_graph_builder=self._aot_graph_plan))
+        return Graph(
+            _GraphSpec(
+                self._nodes,
+                aot_graph_builder=self._aot_graph_plan.snapshot(),
+            )
+        )
 
 
 class Graph:
     def __init__(self, compiled_graph) -> None:
+        self._lifecycle_lock = threading.Lock()
         if isinstance(compiled_graph, _GraphSpec):
             self._spec = compiled_graph
         elif isinstance(compiled_graph, _CompiledCGraphNode):
@@ -427,8 +526,9 @@ class Graph:
                 [compiled_graph], aot_compiled_graph=compiled_graph.compiled_graph
             )
         else:
-            node = _CompiledCGraphNode(compiled_graph, 0)
+            node = _CompiledCGraphNode(compiled_graph, 0, ())
             self._spec = _GraphSpec([node], aot_compiled_graph=compiled_graph)
+        self._contains_native_nodes_value = self._spec.native_count > 0
         self._instances = {}
         self._instance = self._instance_for_current_runtime()
         self._runtime_valid = True
@@ -436,8 +536,13 @@ class Graph:
         impl.get_runtime().register_runtime_object(self)
 
     def run(self, args):
-        self._check_runtime_valid()
-        self._run_impl(args)
+        # A graph invocation is one host-side transaction, including mixed
+        # CGraph/native sequences. The lock is per Graph and does not wait for
+        # GPU completion, so independent graphs remain independently submitable.
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            self._spec.validate_runtime_args(args)
+            self._run_impl(args)
 
     def _instance_for_current_runtime(self):
         key = self._spec.instance_key()
@@ -448,8 +553,9 @@ class Graph:
         return instance
 
     def _prewarm(self):
-        self._check_runtime_valid()
-        self._instance.prewarm()
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            self._instance.prewarm()
         return self
 
     def _check_runtime_valid(self):
@@ -460,28 +566,41 @@ class Graph:
             )
 
     def _invalidate_runtime(self):
-        self._runtime_valid = False
-        self._run_impl = None
-        self._instance = None
-        self._instances.clear()
+        with self._lifecycle_lock:
+            self._runtime_valid = False
+            self._run_impl = None
+            for instance in self._instances.values():
+                instance.invalidate_runtime()
+            if self._spec is not None:
+                self._spec.invalidate_runtime()
+            self._instance = None
+            self._instances.clear()
+            # Definition nodes currently own mixed-graph JIT caches and native
+            # executables. Release them before Program/backend teardown so
+            # backend allocation leases cannot outlive their Device registry.
+            self._spec = None
 
     @property
     def _debug_info(self):
-        return self._spec.debug_info
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            return self._spec.debug_info
 
     @property
     def _instance_debug_info(self):
-        self._check_runtime_valid()
-        return self._instance.debug_info
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            return self._instance.debug_info
 
     @property
     def _compiled_graph(self):
-        self._check_runtime_valid()
-        return self._spec.compiled_graph()
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            return self._spec.compiled_graph()
 
     @property
     def _contains_native_nodes(self):
-        return self._spec.native_count > 0
+        return self._contains_native_nodes_value
 
 
 def _deprecate_arg_args(kwargs: Dict[str, Any]):

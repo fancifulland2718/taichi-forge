@@ -1,5 +1,6 @@
 import platform
 import gc
+import weakref
 
 import numpy as np
 import pytest
@@ -348,6 +349,100 @@ def test_mixed_runtime_arg_cache_updates_dynamic_values():
 
 
 @test_utils.test(arch=ti.cpu)
+def test_graph_rejects_runtime_arg_key_mismatch():
+    @ti.kernel
+    def fill(value: ti.i32, out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in out:
+            out[i] = value
+
+    sym_value = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.i32)
+    sym_out = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(fill, sym_value, sym_out)
+    graph = builder.compile()
+    out = ti.ndarray(ti.i32, shape=4)
+
+    with pytest.raises(
+        TaichiRuntimeError, match="Missing graph runtime arguments: value"
+    ):
+        graph.run({"out": out})
+    with pytest.raises(
+        TaichiRuntimeError, match="Unexpected graph runtime arguments: typo"
+    ):
+        graph.run({"value": 3, "out": out, "typo": 1})
+    with pytest.raises(TaichiRuntimeError, match=r"Graph\.run\(\) expects a dict"):
+        graph.run([out])
+
+
+@pytest.mark.parametrize("mutation", ["builder", "sequential"])
+@test_utils.test(arch=ti.cpu)
+def test_compiled_graph_freezes_aot_plan(mutation):
+    @ti.kernel
+    def increment(value: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        value[None] += 1
+
+    sym_value = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "value", ti.i32, ndim=0
+    )
+    builder = ti.graph.GraphBuilder()
+    sequential = None
+    if mutation == "builder":
+        builder.dispatch(increment, sym_value)
+    else:
+        sequential = builder.create_sequential()
+        sequential.dispatch(increment, sym_value)
+        builder.append(sequential)
+
+    graph = builder.compile()
+    if mutation == "builder":
+        builder.dispatch(increment, sym_value)
+    else:
+        sequential.dispatch(increment, sym_value)
+
+    value = ti.ndarray(ti.i32, shape=())
+    value.fill(0)
+    graph._compiled_graph.jit_run(
+        ti.lang.impl.current_cfg(),
+        {"value": value.arr},
+    )
+    ti.sync()
+    assert value.to_numpy()[()] == 1
+
+
+@test_utils.test(arch=ti.cpu)
+def test_reused_sequential_append_freezes_each_version():
+    @ti.kernel
+    def increment(value: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        value[None] += 1
+
+    sym_value = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "value", ti.i32, ndim=0
+    )
+    builder = ti.graph.GraphBuilder()
+    sequential = builder.create_sequential()
+    sequential.dispatch(increment, sym_value)
+    builder.append(sequential)
+    sequential.dispatch(increment, sym_value)
+    builder.append(sequential)
+    graph = builder.compile()
+
+    runtime_value = ti.ndarray(ti.i32, shape=())
+    runtime_value.fill(0)
+    graph.run({"value": runtime_value})
+    ti.sync()
+    assert runtime_value.to_numpy()[()] == 3
+
+    aot_value = ti.ndarray(ti.i32, shape=())
+    aot_value.fill(0)
+    graph._compiled_graph.jit_run(
+        ti.lang.impl.current_cfg(),
+        {"value": aot_value.arr},
+    )
+    ti.sync()
+    assert aot_value.to_numpy()[()] == 3
+
+
+@test_utils.test(arch=ti.cpu)
 def test_graph_instance_keeps_single_cgraph_fast_path():
     @ti.kernel
     def fill(value: ti.i32, out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
@@ -390,6 +485,19 @@ def _run_repeated_inc_graph(graph):
 
 
 @test_utils.test(arch=ti.cpu)
+def test_graph_instance_does_not_form_a_self_cycle():
+    graph = _build_repeated_inc_graph()
+    instance_ref = weakref.ref(graph._instance)
+
+    del graph
+
+    # Runtime registration is weak. The instance and its backend JIT cache
+    # must therefore be released immediately, without waiting for cyclic GC
+    # that could run only after the Program/Device has been finalized.
+    assert instance_ref() is None
+
+
+@test_utils.test(arch=ti.cpu)
 def test_repeated_sequential_keeps_cpu_expanded_runtime_and_aot_graph():
     graph = _build_repeated_inc_graph()
     debug = graph._debug_info
@@ -422,6 +530,7 @@ def test_cuda_cgraph_cache_survives_reset_then_delete():
     assert arr.to_numpy()[()] == 4
 
     ti.reset()
+    assert graph._spec is None
     del graph
     del arr
     gc.collect()
@@ -446,6 +555,34 @@ def test_cuda_cgraph_recaptures_for_distinct_ndarray_arguments():
     assert second.to_numpy()[()] == 14
 
 
+@test_utils.test(arch=ti.cuda)
+def test_cuda_cgraph_signature_tracks_allocation_generation_reuse():
+    graph = _build_repeated_inc_graph()
+    generations_by_slot = {}
+    reused_slot = False
+
+    for iteration in range(32):
+        arr = ti.ndarray(ti.i32, shape=())
+        arr.fill(iteration)
+        allocation_id = arr.arr.device_allocation().alloc_id
+        slot = allocation_id & 0xFFFFFFFF
+        previous_id = generations_by_slot.get(slot)
+        if previous_id is not None:
+            assert previous_id != allocation_id
+            reused_slot = True
+        generations_by_slot[slot] = allocation_id
+
+        graph.run({"arr": arr})
+        assert arr.to_numpy()[()] == iteration + 4
+        del arr
+        gc.collect()
+
+    # The graph lease pins its current allocation, while recapture releases
+    # the previous one. Registry slots should therefore be reused with a new
+    # generation rather than growing one slot per invocation.
+    assert reused_slot
+
+
 @test_utils.test(arch=[ti.cpu, ti.vulkan])
 def test_cgraph_run_after_reset_is_rejected():
     graph = _build_repeated_inc_graph()
@@ -456,6 +593,7 @@ def test_cgraph_run_after_reset_is_rejected():
 
     arch = ti.lang.impl.current_cfg().arch
     ti.reset()
+    assert graph._spec is None
     ti.init(arch=arch, enable_fallback=False)
     assert graph._instance is None
     assert graph._instances == {}

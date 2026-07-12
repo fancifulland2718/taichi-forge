@@ -202,6 +202,11 @@ struct CompiledGraphJITCache {
   CompiledGraphJITCache(const CompiledGraphJITCache &) = delete;
   CompiledGraphJITCache &operator=(const CompiledGraphJITCache &) = delete;
 
+  // Release all state tied to the current Program/Device while that runtime is
+  // still alive. This is intentionally separate from the destructor: Python
+  // GC may destroy a graph after ti.reset() has already finalized its Program.
+  void clear_runtime_state();
+
   std::vector<CompiledGraphJITCachedKernel> kernels;
   std::vector<CompiledGraphDispatchRuntimePlan> runtime_arg_plans;
   void *cuda_graph_state{nullptr};

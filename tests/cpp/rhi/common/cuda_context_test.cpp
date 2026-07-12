@@ -177,6 +177,37 @@ TEST(CUDADevice, RejectsStaleWrongDeviceAndOutOfRangeAllocations) {
   device.dealloc_memory(replacement);
 }
 
+TEST(CUDADevice, GraphAllocationLeasePinsARetiredGeneration) {
+  if (!CUDADriver::get_instance_without_context().detected()) {
+    GTEST_SKIP();
+  }
+
+  cuda::CudaDevice device;
+  Device::AllocParams params;
+  params.size = 4096;
+  DeviceAllocation allocation;
+  ASSERT_EQ(device.allocate_memory(params, &allocation), RhiResult::success);
+  void *allocation_address = device.get_memory_addr(allocation);
+  ASSERT_NE(allocation_address, nullptr);
+
+  auto lease = device.acquire_allocation_lease(allocation);
+  ASSERT_NE(lease, nullptr);
+  device.dealloc_memory(allocation);
+  EXPECT_EQ(device.get_memory_addr(allocation), nullptr);
+
+  // The registry handle is retired immediately, but its record and memory
+  // remain pinned until the graph lease is gone. A replacement allocation
+  // therefore cannot alias the address still captured by the graph.
+  DeviceAllocation replacement;
+  ASSERT_EQ(device.allocate_memory(params, &replacement), RhiResult::success);
+  EXPECT_NE(replacement.alloc_id, allocation.alloc_id);
+  EXPECT_NE(device.get_memory_addr(replacement), allocation_address);
+
+  lease.reset();
+  device.dealloc_memory(replacement);
+  EXPECT_EQ(device.acquire_allocation_lease(allocation), nullptr);
+}
+
 TEST(CUDAContext, ToolkitCompatibilityUsesCudaMajorVersion) {
   using cuda::detail::supports_cuda_toolkit_major;
 
