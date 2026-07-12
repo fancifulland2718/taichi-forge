@@ -86,6 +86,12 @@ p50 与 p95，并显式传入 `--arch vulkan`。先用
 `tests/python/backend_async_runtime_stress.py --arch vulkan` 隔离无窗口 runtime 层。只比较
 同一 runner 的重复样本；Windows 数据不是 Linux 性能基线。
 
+在同一个 Vulkan runtime 内至少循环 64 次构造、record、replay、删除并 GC 两-dispatch
+graph，且复用同一 ndarray。运行
+`test_vulkan_cgraph_replay_identity_survives_cache_churn` 校验最终精确结果，并在更长
+churn 中记录 host memory 与 VRAM slope。启用 validation layer，使 stale command-buffer、
+descriptor 或 allocation 使用能够被报告。
+
 ### CPU scheduler 与生命周期安全
 
 在 Linux 运行 CPU allocation、native primitive 和 graph concurrency regression。正式 gate 是

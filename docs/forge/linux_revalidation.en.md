@@ -111,6 +111,13 @@ isolate the windowless runtime layer with
 repeated samples on the same runner; no Windows number is a Linux performance
 baseline.
 
+Within one Vulkan runtime, repeatedly construct, record, replay, delete, and
+garbage-collect at least 64 two-dispatch graphs while reusing the same ndarray.
+Verify the exact final result with
+`test_vulkan_cgraph_replay_identity_survives_cache_churn`, and record host
+memory plus VRAM slope before and after a longer churn run. Enable validation
+layers so stale command-buffer, descriptor, or allocation use is reported.
+
 ### CPU scheduler and lifetime safety
 
 Run the CPU allocation, native-primitive, and graph-concurrency regressions on

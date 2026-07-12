@@ -55,6 +55,10 @@ native algorithm replay，而不要求用户学习新的 graph API。
 - ndarray 结构变化仍会安全重捕获。texture 参数在具备等价生命周期 owner 前继续走保守
   fallback。此优化只使用动态加载的 CUDA Driver API，不新增 CUDA Toolkit header、
   CUDART 或按 CUDA 版本拆分 wheel 的要求。
+- Vulkan replay state 使用单调 graph identity，不再使用可能被复用的 JIT cache host
+  地址。反复构造/删除 graph 或 allocator 复用地址时，新 graph 不会继承旧 executable
+  或 replay slot。identity 变更不增加同步，也不改变 descriptor/command-recording
+  语义；runtime reset/finalize 仍是最终清理边界。
 
 ## Native graph 边界
 
