@@ -91,54 +91,15 @@ timestep 仍受益于优化代码时，这比全局关闭更合适。
 - unroll/inline hard limit 是防止意外编译爆炸的安全栏。触发时应明确失败，不能静默换
   算法。
 
-## Vulkan graph replay slot 容量
+## Graph replay
 
-Vulkan graph replay 使用固定 8 个在途 slot 的 ring。这是经过测量的资源策略，不是 DSL
-复杂度限制。更小 ring 会增加 ordinary-dispatch fallback 并降低吞吐；超过 8 的有界弹性
-增长可以消除剩余饱和 fallback，但本机长样本没有得到可重复的中位吞吐收益。更重要的是，
-16-slot 上限的 1024-graph churn 实验使 driver 报告的 Vulkan memory 增加约 2.55 GiB，
-即使 host RSS 和精确结果仍稳定。driver 可能在 host graph state 退役后继续保留 command
-buffer、descriptor 与 semaphore pool。
+Graph replay 包含后端特定的容量、生命周期、失败恢复、诊断与显存策略。例如，Vulkan
+在弹性容量实验显示显存权衡不理想后，有意保留固定 8-slot ring；CUDA 则区分结构性
+capture 拒绝、暂态失败与 context-fatal 错误。
 
-因此 Forge 保留固定 8 slot，不提供公共容量设置；ring 满时直接走无等待 fallback。若要在
-其他 driver 上重新评估，应同时运行 `tests/python/vulkan_graph_slot_bench.py` 与
-1024-graph retirement stress。仅仅消除 fallback 计数不足以证明优化成立。
-
-## Graph replay 诊断与 capture 失败策略
-
-`Graph._graph_stats` 是回归测试和生产问题调查使用的内部实验 snapshot。下划线是刻意的：
-字段名与兼容性尚未形成公开 API 合同。CUDA 第一次读取 snapshot 后，才为该 graph cache 的
-后续 invocation 启用详细 counter；在此之前，普通 capture/replay 路径不构造字符串、不输出
-失败日志，也不更新整组诊断 counter。Vulkan 则复用 replay registry 原本就维护的 runtime
-counter。
-
-snapshot 区分 capture/record、精确或 patched replay、recapture、ordinary fallback、结构性
-拒绝、暂态 driver 失败、retry backoff 和 Vulkan slot 饱和。
-`known_persistent_argument_bytes` 只是 Forge 可见参数 buffer 的下界诊断值；它不包含不透明
-graph executable、command buffer、descriptor pool、allocator 高水位或其他 driver 保留内存，
-因此仍需结合 `nvidia-smi`、RSS 和 graph-churn stress。
-
-CUDA capture 失败按以下策略处理：
-
-- 不支持的 graph 结构或 `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED` 会对这个固定 graph cache
-  停止 capture；
-- 其他非 fatal Driver API capture/instantiate 失败会周期重试，依次跳过 1、2、4、8、16，
-  最多 32 次 ordinary invocation；
-- illegal address、assert、launch failure 等 context-fatal 结果会立即上抛。CUDA context
-  可能已经不一致时，Forge 不会再对同一次 invocation 执行 ordinary launch；
-- capture 中 kernel launch 抛异常时，RAII guard 仍会在异常离开 native frame 前调用
-  `cuStreamEndCapture`。
-
-该分类依据 NVIDIA 的
-[Driver API 结果语义](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TYPES.html)
-与 [stream capture 合同](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__STREAM.html)。
-Windows build 在外部未指定 `/EH*` 时启用标准 MSVC 异常展开（`/EHsc`）；Linux compiler
-flag 不变。
-
-本机 Windows 验证中，四 dispatch、1,048,576 元素 graph 的三组逐次同步 CUDA replay
-median 为 0.0385/0.0446/0.0380 ms，GPU memory 均为 756 MiB；512 次 Vulkan 样本约完成
-12.4k graph/s，slot fallback 为 0，报告显存 536→536 MiB。这些数字用于回归裁决，不是
-跨机器性能承诺。
+这些策略、测量结果及内部 `Graph._graph_stats` 边界统一维护在
+[Graph Runtime 与优化](graph_runtime_optimization.zh.md)。集中维护可以避免这份通用编译
+指南变成第二份、以后可能漂移的 graph 规范。
 
 ## 数值与自动微分验证
 
