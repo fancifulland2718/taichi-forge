@@ -32,6 +32,7 @@
 #include "taichi/program/sparse_solver.h"
 #include "taichi/program/conjugate_gradient.h"
 #include "taichi/aot/graph_data.h"
+#include "taichi/runtime/gfx/runtime.h"
 #include "taichi/ir/mesh.h"
 
 #include "taichi/program/kernel_profiler.h"
@@ -2978,6 +2979,13 @@ void export_lang(py::module &m) {
       return static_cast<int64_t>(CUDADriver::get_instance()
                                       .get_telemetry_snapshot()
                                       .sync_free_fallback_calls);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "vulkan_graph_replay_slot_saturation_fallbacks") {
+#if defined(TI_WITH_VULKAN)
+      return static_cast<int64_t>(
+          gfx::get_graph_replay_slot_saturation_fallbacks());
 #else
       TI_NOT_IMPLEMENTED
 #endif

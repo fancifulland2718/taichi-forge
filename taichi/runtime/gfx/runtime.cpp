@@ -32,6 +32,8 @@ namespace gfx {
 
 namespace {
 
+std::atomic<uint64_t> graph_replay_slot_saturation_fallbacks{0};
+
 class HostDeviceContextBlitter {
  public:
   HostDeviceContextBlitter(const KernelContextAttributes *ctx_attribs,
@@ -233,6 +235,11 @@ void push_graph_allocation_key(std::vector<uint64_t> &key,
 }
 
 }  // namespace
+
+uint64_t get_graph_replay_slot_saturation_fallbacks() {
+  return graph_replay_slot_saturation_fallbacks.load(
+      std::memory_order_relaxed);
+}
 
 class GraphReplayRegistry {
  public:
@@ -1433,8 +1440,12 @@ GfxRuntime::GraphReplayExecutable::acquire_ready_slot() {
   }
   if (slot != nullptr) {
     next_slot = (slot_index + 1) % slots.size();
+    return slot;
   }
-  return slot;
+
+  graph_replay_slot_saturation_fallbacks.fetch_add(
+      1, std::memory_order_relaxed);
+  return nullptr;
 }
 
 bool GfxRuntime::GraphReplayExecutable::ready_for_retirement() const {

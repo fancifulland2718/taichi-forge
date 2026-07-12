@@ -47,6 +47,8 @@ class SNodeTreeManager;
 class GfxRuntime;
 class GraphReplayRegistry;
 
+TI_DLL_EXPORT uint64_t get_graph_replay_slot_saturation_fallbacks();
+
 class TI_DLL_EXPORT GraphReplayRegistration {
  public:
   ~GraphReplayRegistration();
@@ -259,6 +261,9 @@ class TI_DLL_EXPORT GfxRuntime {
       bool recorded{false};
     };
 
+    // O4.3: keep this fixed. Bounded elastic growth removed rare fallbacks
+    // without a repeatable throughput gain and caused a multi-GiB Vulkan
+    // driver-memory high-water mark during graph churn.
     static constexpr size_t kReplaySlots = 8;
 
     Device *device{nullptr};

@@ -7,6 +7,7 @@ import pytest
 from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeError
 
 import taichi_forge as ti
+from taichi_forge._lib import core as ti_core
 from tests import test_utils
 
 supported_floating_types = [ti.f32] if platform.system() == "Darwin" else [ti.f32, ti.f64]
@@ -793,6 +794,41 @@ def test_vulkan_cgraph_clear_retires_in_flight_slots_and_reregisters():
     ti.sync()
     np.testing.assert_array_equal(
         values.to_numpy(), np.full(1 << 14, 36, dtype=np.int32)
+    )
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_vulkan_cgraph_replay_slot_saturation_telemetry_is_monotonic():
+    @ti.kernel
+    def increment(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in values:
+            values[i] += 1
+
+    sym_values = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(increment, sym_values)
+    builder.dispatch(increment, sym_values)
+    graph = builder.compile()
+    values = ti.ndarray(ti.i32, shape=1 << 14)
+    values.fill(0)
+
+    fallback_before = ti_core.query_int64(
+        "vulkan_graph_replay_slot_saturation_fallbacks"
+    )
+    launch_count = 12
+    for _ in range(launch_count):
+        graph.run({"values": values})
+
+    fallback_after = ti_core.query_int64(
+        "vulkan_graph_replay_slot_saturation_fallbacks"
+    )
+    assert fallback_after >= fallback_before
+
+    ti.sync()
+    np.testing.assert_array_equal(
+        values.to_numpy(), np.full(1 << 14, 2 * launch_count, dtype=np.int32)
     )
 
 
