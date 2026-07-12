@@ -62,6 +62,10 @@ native algorithm replay，而不要求用户学习新的 graph API。
   ready，再由后续 launch 或同步回收。该路径不增加默认同步，也不改变 descriptor 或
   command-recording 语义；runtime finalize 会在 device teardown 前关闭注册入口，并仍是
   最终清理边界。
+- Vulkan replay 有意保留固定 8-slot ring。全部 slot 在途时，本次调用走既有 ordinary
+  dispatch fallback，并递增轻量饱和计数；不会等待 slot。有界增长实验虽然消除了这些少量
+  fallback，却没有提升中位吞吐，并在 graph churn 下形成数 GiB driver memory 高水位。
+  因此 Forge 不提供 replay-slot DSL 设置，也不会让该资源随每个 graph 弹性增长。
 
 ## Native graph 边界
 

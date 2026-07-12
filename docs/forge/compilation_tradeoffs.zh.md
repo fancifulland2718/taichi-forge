@@ -91,6 +91,19 @@ timestep 仍受益于优化代码时，这比全局关闭更合适。
 - unroll/inline hard limit 是防止意外编译爆炸的安全栏。触发时应明确失败，不能静默换
   算法。
 
+## Vulkan graph replay slot 容量
+
+Vulkan graph replay 使用固定 8 个在途 slot 的 ring。这是经过测量的资源策略，不是 DSL
+复杂度限制。更小 ring 会增加 ordinary-dispatch fallback 并降低吞吐；超过 8 的有界弹性
+增长可以消除剩余饱和 fallback，但本机长样本没有得到可重复的中位吞吐收益。更重要的是，
+16-slot 上限的 1024-graph churn 实验使 driver 报告的 Vulkan memory 增加约 2.55 GiB，
+即使 host RSS 和精确结果仍稳定。driver 可能在 host graph state 退役后继续保留 command
+buffer、descriptor 与 semaphore pool。
+
+因此 Forge 保留固定 8 slot，不提供公共容量设置；ring 满时直接走无等待 fallback。若要在
+其他 driver 上重新评估，应同时运行 `tests/python/vulkan_graph_slot_bench.py` 与
+1024-graph retirement stress。仅仅消除 fallback 计数不足以证明优化成立。
+
 ## 数值与自动微分验证
 
 每个生产 profile 至少应覆盖：

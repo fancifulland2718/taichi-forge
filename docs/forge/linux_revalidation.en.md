@@ -125,6 +125,16 @@ validation layers, including synchronization validation when available, so
 premature command-buffer, descriptor, semaphore, or allocation destruction is
 reported.
 
+Run `tests/python/vulkan_graph_slot_bench.py --iterations 4096 --items
+1048576 --dispatches 2 --work 32` in at least five fresh processes. Record
+median/p95 throughput, RSS/VRAM, and
+`vulkan_graph_replay_slot_saturation_fallbacks`. The production policy is a
+fixed eight-slot ring: a runner-specific result may motivate a new experiment,
+but release validation must not enable unbounded or per-graph elastic growth.
+Repeat the 1024-graph retirement stress after any slot-policy experiment;
+multi-GiB driver-memory high-water growth blocks the change even when host RSS
+and numerical results remain stable.
+
 ### CPU scheduler and lifetime safety
 
 Run the CPU allocation, native-primitive, and graph-concurrency regressions on

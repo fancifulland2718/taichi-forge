@@ -96,6 +96,14 @@ host memory 与 VRAM slope。内存可以达到有界 allocator 高水位，但�
 增长。启用 validation layer；loader 支持时同时启用 synchronization validation，使过早销毁
 command buffer、descriptor、semaphore 或 allocation 能够被报告。
 
+在至少 5 个 fresh process 中运行
+`tests/python/vulkan_graph_slot_bench.py --iterations 4096 --items 1048576
+--dispatches 2 --work 32`，记录 median/p95 吞吐、RSS/VRAM 和
+`vulkan_graph_replay_slot_saturation_fallbacks`。生产策略是固定 8-slot ring：
+runner 特有结果可以触发新实验，但发布验证不得启用无界或 per-graph 弹性增长。任何 slot
+策略实验后都必须重跑 1024-graph retirement stress；即使 host RSS 与数值结果稳定，只要
+driver memory 出现数 GiB 高水位增长，也必须阻断该变更。
+
 ### CPU scheduler 与生命周期安全
 
 在 Linux 运行 CPU allocation、native primitive 和 graph concurrency regression。正式 gate 是

@@ -79,6 +79,13 @@ The user-visible additions are:
   synchronization and does not alter descriptor or command-recording
   semantics. Runtime finalization closes the registration path before device
   teardown and remains the definitive cleanup boundary.
+- Vulkan replay deliberately retains a fixed eight-slot ring. If all slots
+  are in flight, that invocation uses the existing ordinary-dispatch fallback
+  and increments a lightweight saturation counter; it does not wait for a
+  slot. A bounded-growth experiment removed those rare fallbacks but did not
+  improve median throughput and produced a multi-GiB driver-memory high-water
+  mark under graph churn. Forge therefore does not expose a replay-slot DSL
+  setting or grow this resource per graph.
 
 ## Native Graph Boundary
 

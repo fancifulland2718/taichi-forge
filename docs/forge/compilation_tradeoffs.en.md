@@ -109,6 +109,24 @@ benefits from optimized code.
   explosions. A limit should fail clearly rather than silently generate a
   different algorithm.
 
+## Vulkan graph replay slot capacity
+
+Vulkan graph replay uses a fixed ring of eight in-flight slots. This is a
+measured resource policy, not a DSL complexity limitation. A smaller ring
+causes more ordinary-dispatch fallback and reduces throughput. Bounded elastic
+growth above eight can remove the remaining saturation fallbacks, but local
+long-sample measurements found no repeatable median throughput improvement.
+More importantly, a 1024-graph churn experiment with a 16-slot cap increased
+driver-reported Vulkan memory by about 2.55 GiB even though host RSS and exact
+results remained stable. The driver may retain command-buffer, descriptor, and
+semaphore pools beyond host-side graph-state retirement.
+
+Forge therefore keeps eight slots, does not expose a public capacity setting,
+and falls back without waiting when the ring is full. Use
+`tests/python/vulkan_graph_slot_bench.py` together with the 1024-graph
+retirement stress when reassessing this choice on another driver. Eliminating
+fallback counts alone is not a sufficient optimization result.
+
 ## Numerical and autodiff validation
 
 For every production profile, test at least:
