@@ -59,6 +59,16 @@ The user-visible additions are:
   retirement, so ndarray deletion, GC, or allocation-slot reuse cannot bind an
   old captured address to a new resource. This does not replace an
   application-level producer-consumer or snapshot protocol.
+- On CUDA, changing scalar or matrix values, or rebinding an ndarray with the
+  same dtype, shape, element shape, and layout, patches stable graph-owned
+  argument buffers and reuses the existing graph executable. It does not
+  perform the old default-stream synchronization and full recapture for every
+  A/B/A resource switch. Old allocation leases and host patch buffers retire
+  behind CUDA events with a bounded in-flight budget.
+- A structural ndarray change still recaptures safely. Texture arguments remain
+  on the conservative fallback path until they have an equivalent lifetime
+  owner. This optimization uses the dynamically loaded CUDA Driver API and
+  adds no CUDA Toolkit header, CUDART, or CUDA-versioned wheel requirement.
 
 ## Native Graph Boundary
 

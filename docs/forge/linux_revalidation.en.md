@@ -69,6 +69,16 @@ target separation, capture/recapture/reset, and 1/2/4-submitter telemetry.
 - Run `tests/python/cuda_graph_runtime_bench.py` in fresh processes. Treat it
   as a p50/p95 and reset-stability check, not as a cross-machine performance
   comparison.
+- Run `tests/python/cuda_graph_dynamic_patch_bench.py` in fresh processes and
+  retain both synchronized p50/p95-style samples and batched submission
+  throughput. Alternate same-structure ndarray bindings and scalar values;
+  require correct results, bounded memory, and a measurable improvement over
+  the forced-recapture baseline. Also run the scalar/matrix patch, structural
+  recapture, allocation-generation, and two-host-caller regressions.
+- Compile one CUDA-enabled safety target with `TI_WITH_CUDA_TOOLKIT=OFF`.
+  CUDA graph event/query support must build from Forge''s dynamic Driver-API
+  declarations without Toolkit headers. This is an additional portability
+  gate and does not replace the release-wheel build with Toolkit integration.
 - Build with `TI_WITH_CUDA_TOOLKIT=ON` and dynamic CUDART, then exercise the
   native CUB reduction path. A runner where that optional path is unavailable
   must report the established fallback rather than being counted as CUB

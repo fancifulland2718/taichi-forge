@@ -48,6 +48,13 @@ native algorithm replay，而不要求用户学习新的 graph API。
   executable 在退役前固定其捕获的 allocation，因此 ndarray 删除、GC 或 allocation slot
   复用不会把旧 graph 地址错误地绑定到新资源。该安全性不替代应用自己的
   producer-consumer/snapshot 协议。
+- CUDA 上修改 scalar/matrix 值，或重新绑定 dtype、shape、element shape、layout
+  相同的 ndarray 时，会更新 graph 自有的稳定 argument buffer，并复用既有 graph
+  executable；A/B/A 资源切换不再每次执行旧路径的 default-stream 同步和完整重捕获。
+  旧 allocation lease 与 host patch buffer 会在 CUDA event 之后按有界在途预算退役。
+- ndarray 结构变化仍会安全重捕获。texture 参数在具备等价生命周期 owner 前继续走保守
+  fallback。此优化只使用动态加载的 CUDA Driver API，不新增 CUDA Toolkit header、
+  CUDART 或按 CUDA 版本拆分 wheel 的要求。
 
 ## Native graph 边界
 

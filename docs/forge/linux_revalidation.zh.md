@@ -56,6 +56,13 @@ target fallback 的较新设备。验证数值结果、offline-cache target 隔�
   实际推进量及 X11/Wayland session；
 - 在 fresh process 中运行 `tests/python/cuda_graph_runtime_bench.py`。它用于检查 p50/p95 与
   reset 稳定性，不可作为跨机器性能对比；
+- 在 fresh process 中运行 `tests/python/cuda_graph_dynamic_patch_bench.py`，同时保留
+  逐次同步的 p50/p95 类样本与批量提交吞吐。交替绑定同结构 ndarray 并改变 scalar，
+  要求结果正确、内存有界，且相对强制重捕获基线有可测收益；同时运行 scalar/matrix
+  patch、结构变化重捕获、allocation generation 和双 host caller 回归；
+- 额外以 `TI_WITH_CUDA_TOOLKIT=OFF` 编译一个 CUDA-enabled safety target。CUDA graph
+  event/query 必须只依赖 Forge 动态 Driver API 声明即可编译，不得要求 Toolkit header。
+  这是附加可移植性门槛，不能替代启用 Toolkit 集成的正式 runtime wheel 构建；
 - 以 `TI_WITH_CUDA_TOOLKIT=ON` 和 dynamic CUDART 构建，并实际覆盖 native CUB reduce。
   该可选路径不可用的 runner 必须报告既有 fallback，不能被计为 CUB 覆盖；
 - 对受影响 CUDA regression 运行 `compute-sanitizer --tool memcheck`。只有已知当前 CUDA
