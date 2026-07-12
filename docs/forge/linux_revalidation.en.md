@@ -69,6 +69,12 @@ target separation, capture/recapture/reset, and 1/2/4-submitter telemetry.
 - Run `tests/python/cuda_graph_runtime_bench.py` in fresh processes. Treat it
   as a p50/p95 and reset-stability check, not as a cross-machine performance
   comparison.
+- Read the internal `Graph._graph_stats` snapshot before a measured diagnostic
+  run and verify capture/replay/recapture/fallback accounting. Run the normal
+  benchmark without reading it to confirm the default CUDA path keeps detailed
+  counters disabled. Inject or reproduce one recoverable capture failure and
+  verify bounded 1/2/4/8/16/32 backoff; separately verify that a context-fatal
+  error is reported without an ordinary duplicate launch.
 - Run `tests/python/cuda_graph_dynamic_patch_bench.py` in fresh processes and
   retain both synchronized p50/p95-style samples and batched submission
   throughput. Alternate same-structure ndarray bindings and scalar values;
@@ -79,6 +85,10 @@ target separation, capture/recapture/reset, and 1/2/4-submitter telemetry.
   CUDA graph event/query support must build from Forge''s dynamic Driver-API
   declarations without Toolkit headers. This is an additional portability
   gate and does not replace the release-wheel build with Toolkit integration.
+- Build the affected graph sources with both GCC and Clang. The `/EHsc`
+  prerequisite is MSVC-only; Linux flags and exception ABI must remain
+  unchanged, and an exception raised during capture must still terminate the
+  active capture before unwinding.
 - Build with `TI_WITH_CUDA_TOOLKIT=ON` and dynamic CUDART, then exercise the
   native CUB reduction path. A runner where that optional path is unavailable
   must report the established fallback rather than being counted as CUB

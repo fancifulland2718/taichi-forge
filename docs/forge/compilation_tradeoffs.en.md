@@ -127,6 +127,51 @@ and falls back without waiting when the ring is full. Use
 retirement stress when reassessing this choice on another driver. Eliminating
 fallback counts alone is not a sufficient optimization result.
 
+## Graph replay diagnostics and capture failure policy
+
+`Graph._graph_stats` is an internal, experimental snapshot used by regression
+tests and production investigations. It is intentionally underscored: field
+names and compatibility are not yet a public API contract. The first CUDA
+snapshot enables detailed counters for subsequent invocations of that graph
+cache. Before that point, the normal capture/replay path does not construct
+labels, emit failure logs, or update the detailed counter set. Vulkan reuses
+the runtime counters already maintained for its replay registry.
+
+The snapshot distinguishes capture/record, exact or patched replay, recapture,
+ordinary fallback, structural rejection, transient driver failure, retry
+backoff, and Vulkan slot saturation. `known_persistent_argument_bytes` is a
+lower-bound diagnostic for argument buffers visible to Forge. It excludes
+opaque graph executables, command buffers, descriptor pools, allocator
+high-water marks, and other driver-retained memory, so use `nvidia-smi`, RSS,
+and graph-churn stress alongside it.
+
+CUDA capture failures follow this policy:
+
+- unsupported graph structure or `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`
+  disables capture for that fixed graph cache;
+- other non-fatal Driver API capture/instantiate failures retry periodically,
+  skipping 1, 2, 4, 8, 16, then at most 32 ordinary invocations between
+  attempts;
+- illegal address, assert, launch failure, and related context-fatal results
+  are raised immediately. Forge does not ordinary-launch the same invocation
+  after the CUDA context may be inconsistent;
+- if a kernel launch throws during capture, an RAII guard still calls
+  `cuStreamEndCapture` before the exception leaves the native frame.
+
+This classification follows NVIDIA's
+[Driver API result semantics](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TYPES.html)
+and [stream capture contract](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__STREAM.html).
+Windows builds enable standard MSVC exception unwinding (`/EHsc`) when the
+embedding build has not already selected an `/EH*` mode; Linux compiler flags
+are unchanged.
+
+On the local Windows validation system, three synchronized CUDA samples of a
+four-dispatch, 1,048,576-element graph reported replay medians of
+0.0385/0.0446/0.0380 ms with GPU memory unchanged at 756 MiB. A 512-invocation
+Vulkan sample completed about 12.4k graphs/s with zero slot fallback and
+536-to-536 MiB reported GPU memory. These are regression checks, not portable
+performance promises.
+
 ## Numerical and autodiff validation
 
 For every production profile, test at least:
