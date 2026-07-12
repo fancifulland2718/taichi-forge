@@ -39,6 +39,27 @@ The user-visible additions are:
   nodes such as `PrimitiveSequence`, `DeviceCheckResult`, and
   `DeviceMetricResult`.
 
+## Definition, Argument, and Runtime Lifetime Contracts
+
+- `GraphBuilder.compile()` freezes the current dispatch/sequential definition.
+  Later builder changes, including mutation and reuse of the original
+  `Sequential`, do not change the compiled graph's runtime or lazy AOT result.
+- `Graph.run(args)` requires a dictionary whose keys exactly match the
+  declared runtime arguments. Missing and unexpected keys raise
+  `TaichiRuntimeError` before submission.
+- One call on a `Graph` object is a complete host invocation: two Python
+  callers cannot interleave its CGraph/native nodes. Independent graphs remain
+  independently submitable; the guard does not wait for GPU completion or add
+  a default `ti.sync()`.
+- `ti.reset()` invalidates graphs from the old runtime. Rebuild the
+  builder/graph after reset; invoking an old graph produces an explicit runtime
+  error.
+- CUDA replay uses a generation-qualified allocation identity plus complete
+  ndarray metadata. A graph executable pins captured allocations until safe
+  retirement, so ndarray deletion, GC, or allocation-slot reuse cannot bind an
+  old captured address to a new resource. This does not replace an
+  application-level producer-consumer or snapshot protocol.
+
 ## Native Graph Boundary
 
 Native graph support is intentionally narrow:

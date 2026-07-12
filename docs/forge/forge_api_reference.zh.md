@@ -330,6 +330,20 @@ print(err.to_float())
 
 ## Graph API
 
+### `GraphBuilder.compile()` 与 `Graph.run(args)`
+
+`compile()` 冻结调用时的 dispatch/sequential 定义并返回 runtime-bound `Graph`。
+`run(args)` 提交一次完整 graph invocation。
+
+| API | 合同 |
+| --- | --- |
+| `GraphBuilder.compile()` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。 |
+| `Graph.run(args)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。 |
+| `Graph._prewarm()` | 预热当前 runtime 的 backend plan；这是内部/高级入口，不改变 graph 参数合同。 |
+
+同一个 graph 的并发 host 调用以完整 invocation 为单位排队；不同 graph 不共享该锁。
+该边界不等待 GPU 完成，也不隐含 `ti.sync()`。调用 `ti.reset()` 后必须重新编译 graph。
+
 ### `GraphBuilder.append_native(node, *, prewarm=False)`
 
 位置：`taichi_forge.graph._graph`，在 Forge graph builder 上可用。

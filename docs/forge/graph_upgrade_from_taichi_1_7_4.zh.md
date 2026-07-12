@@ -33,6 +33,22 @@ native algorithm replay，而不要求用户学习新的 graph API。
   native node，例如 `PrimitiveSequence`、`DeviceCheckResult` 和
   `DeviceMetricResult`。
 
+## 定义、参数与 runtime 生命周期
+
+- `GraphBuilder.compile()` 会冻结当前 dispatch/sequential 定义。之后继续修改 builder
+  或复用并修改原 `Sequential`，不会改变已经编译 graph 的 runtime 或延迟 AOT 结果。
+- `Graph.run(args)` 要求 `args` 是字典，且 key 必须与 graph 声明的 runtime 参数
+  完全一致；缺失和多余 key 都会在提交前以 `TaichiRuntimeError` 报告。
+- 同一个 `Graph` 对象的一次调用是完整 host invocation；两个 Python caller 不会在
+  CGraph/native 节点之间交错。不同 graph 仍可独立提交，锁不等待 GPU 完成，也不增加
+  默认 `ti.sync()`。
+- `ti.reset()` 会使旧 graph 失效。reset 后应重新创建 builder/graph；继续调用旧 graph
+  会得到明确的 runtime 错误。
+- CUDA replay 使用带 generation 的 allocation 身份和完整 ndarray 元数据。graph
+  executable 在退役前固定其捕获的 allocation，因此 ndarray 删除、GC 或 allocation slot
+  复用不会把旧 graph 地址错误地绑定到新资源。该安全性不替代应用自己的
+  producer-consumer/snapshot 协议。
+
 ## Native graph 边界
 
 native graph 支持是有意收窄的：

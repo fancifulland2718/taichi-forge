@@ -345,6 +345,21 @@ See also [Native algorithms](native_algorithms.en.md).
 
 ## Graph APIs
 
+### `GraphBuilder.compile()` and `Graph.run(args)`
+
+`compile()` freezes the dispatch/sequential definition at the call and returns
+a runtime-bound `Graph`. `run(args)` submits one complete graph invocation.
+
+| API | Contract |
+| --- | --- |
+| `GraphBuilder.compile()` | Later changes to the builder or original `Sequential` do not modify the compiled graph. |
+| `Graph.run(args)` | `args` must be a dictionary with exactly the declared keys; missing or extra keys raise `TaichiRuntimeError`. |
+| `Graph._prewarm()` | Warm the current runtime's backend plan; this internal/advanced entry point does not change the argument contract. |
+
+Concurrent host calls on one graph queue at the complete-invocation boundary;
+independent graphs do not share that lock. This guard does not wait for GPU
+completion or imply `ti.sync()`. Recompile graphs after `ti.reset()`.
+
 ### `GraphBuilder.append_native(node, *, prewarm=False)`
 
 Location: `taichi_forge.graph._graph`; available on the Forge graph builder.
