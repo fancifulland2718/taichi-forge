@@ -375,6 +375,40 @@ def test_graph_rejects_runtime_arg_key_mismatch():
         graph.run([out])
 
 
+@test_utils.test(arch=ti.cpu)
+def test_graph_recovers_runtime_args_from_legacy_low_level_dispatch():
+    """Strict validation remains compatible with precompiled-kernel adapters."""
+
+    @ti.kernel
+    def fill(value: ti.i32, out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in out:
+            out[i] = value
+
+    from taichi_forge.graph._graph import flatten_args, gen_cpp_kernel
+
+    sym_value = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.i32)
+    sym_out = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1)
+    symbolic_args = flatten_args((sym_value, sym_out))
+    kernel_cpp = gen_cpp_kernel(fill, (sym_value, sym_out))
+
+    # Compatibility path used by adapters that instantiate template arguments
+    # before dispatch and therefore cannot call GraphBuilder.dispatch().
+    builder = ti.graph.GraphBuilder()
+    builder._aot_graph_plan.dispatch(kernel_cpp, symbolic_args)
+    builder._ensure_runtime_graph_builder().dispatch(kernel_cpp, symbolic_args)
+    builder._dispatch_count += 1
+    graph = builder.compile()
+
+    out = ti.ndarray(ti.i32, shape=4)
+    graph.run({"value": 7, "out": out})
+    assert np.array_equal(out.to_numpy(), np.full(4, 7, dtype=np.int32))
+
+    with pytest.raises(
+        TaichiRuntimeError, match="Unexpected graph runtime arguments: typo"
+    ):
+        graph.run({"value": 7, "out": out, "typo": 1})
+
+
 @pytest.mark.parametrize("mutation", ["builder", "sequential"])
 @test_utils.test(arch=ti.cpu)
 def test_compiled_graph_freezes_aot_plan(mutation):

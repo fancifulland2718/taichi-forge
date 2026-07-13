@@ -48,6 +48,9 @@ Forge 在公开 API 之下增加 backend-owned execution planning，用于支持
   两条路径都保持 binding 与执行语义；
 - runtime graph 安全不能替代应用对共享仿真/渲染数据使用 snapshot、slot 或
   producer-consumer 协议。
+- 引擎级旧模板适配器若在构图期绑定 `self`、Field 等 `ti.template()` 参数，并将
+  预编译 kernel 写入 durable AOT plan，Forge 会从该 plan 恢复真实 runtime 参数名；
+  missing/unexpected key 的严格检查不变，Field 绑定也不会变成每次 run 的字典参数。
 
 CUDA resource lease 与 dynamic patch、Vulkan identity 与延迟退役、固定 replay 容量、失败
 恢复和 `Graph._graph_stats` 的实现策略见

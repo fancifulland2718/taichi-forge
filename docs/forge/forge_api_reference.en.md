@@ -360,6 +360,14 @@ Concurrent host calls on one graph queue at the complete-invocation boundary;
 independent graphs do not share that lock. This guard does not wait for GPU
 completion or imply `ti.sync()`. Recompile graphs after `ti.reset()`.
 
+Runtime keys come from the compiled graph definition. If an engine-level
+template adapter binds a `self`, Field, or another `ti.template()` argument at
+definition time, that Field does not appear in the `Graph.run()` dictionary;
+Forge recovers the actual `ti.graph.Arg` names recorded by the durable AOT
+plan. This compatibility path does not relax the contract, and undeclared extra
+keys still raise. Direct access to underscored AOT/native builder objects is
+not a public user API.
+
 ### `GraphBuilder.append_native(node, *, prewarm=False)`
 
 Location: `taichi_forge.graph._graph`; available on the Forge graph builder.

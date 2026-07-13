@@ -344,6 +344,11 @@ print(err.to_float())
 同一个 graph 的并发 host 调用以完整 invocation 为单位排队；不同 graph 不共享该锁。
 该边界不等待 GPU 完成，也不隐含 `ti.sync()`。调用 `ti.reset()` 后必须重新编译 graph。
 
+运行参数 key 来自已编译的 graph 定义。引擎级模板适配器若在构图期固定 `self`、Field
+等 `ti.template()` 参数，Field 本身不出现在 `Graph.run()` 字典中；Forge 会从 durable
+AOT plan 恢复适配器实际写入的 `ti.graph.Arg` 名称。该兼容路径不放宽合同，未声明的
+extra key 仍会报错。直接访问下划线 AOT/native builder 对象不是公开用户 API。
+
 ### `GraphBuilder.append_native(node, *, prewarm=False)`
 
 位置：`taichi_forge.graph._graph`，在 Forge graph builder 上可用。

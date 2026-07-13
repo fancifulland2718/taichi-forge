@@ -60,6 +60,11 @@ The user-visible additions are:
   semantics.
 - Runtime graph safety does not replace an application-level snapshot, slot,
   or producer-consumer protocol for shared simulation and rendering data.
+- Legacy engine template adapters that bind a `self`, Field, or another
+  `ti.template()` argument at definition time and write a precompiled kernel to
+  the durable AOT plan retain exact runtime-argument discovery. Strict
+  missing/unexpected-key checks remain in force, and the Field binding does not
+  become a per-run dictionary argument.
 
 The implementation details behind CUDA resource leases and dynamic patching,
 Vulkan identity and deferred retirement, fixed replay capacity, failure

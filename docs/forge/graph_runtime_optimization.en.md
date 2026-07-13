@@ -26,6 +26,25 @@ state. It does not make application-owned simulation and rendering data safe.
 Asynchronous producers and renderers still need snapshots, slots, double
 buffering, or another explicit ownership protocol.
 
+## Runtime argument discovery and template adapters
+
+Public applications should declare graph arguments through
+`GraphBuilder.dispatch()` and pass exactly matching keys to `Graph.run()`. A
+physics or rendering engine adapter may instead bind a data-oriented `self`, a
+Field, or another `ti.template()` argument before dispatching a precompiled
+kernel with its real `ti.graph.Arg` objects to the low-level builders. Such a
+Field is a definition-time binding, not a runtime argument passed again on each
+`Graph.run()`.
+
+Forge treats the durable AOT plan as the source of truth for dispatch
+definitions and incrementally records its real symbolic argument names. This
+recovers the exact runtime key set even when a legacy adapter bypasses the
+Python fast-path registration in public `GraphBuilder.dispatch()`. Validation
+remains strict: missing keys and extra keys not declared by the AOT plan still
+raise instead of being ignored. Direct access to `_aot_graph_plan` and the
+native builder remains a private framework-integration path; ordinary user code
+should not depend on these underscored objects.
+
 ## Backend execution model
 
 | Backend | Graph execution | Main safety boundary | Replay resource policy |

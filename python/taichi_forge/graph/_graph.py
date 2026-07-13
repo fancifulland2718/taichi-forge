@@ -356,9 +356,24 @@ class _GraphInstance:
 class _AOTGraphBuilderPlan:
     def __init__(self):
         self._items = []
+        self._runtime_arg_names = set()
 
     def dispatch(self, kernel_cpp, args):
         self._items.append(("dispatch", kernel_cpp, args))
+        self._runtime_arg_names.update(_runtime_arg_names(args))
+
+    @property
+    def runtime_arg_names(self):
+        """Return symbolic arguments recorded by the durable AOT plan.
+
+        Low-level graph adapters historically dispatched a precompiled kernel
+        directly to both ``_aot_graph_plan`` and the native graph builder.  In
+        that path ``GraphBuilder.dispatch()`` cannot update its fast-path name
+        cache, but the AOT plan still owns the complete symbolic argument list.
+        Recovering names here keeps strict runtime validation compatible with
+        those adapters without accepting genuinely unknown arguments.
+        """
+        return self._runtime_arg_names
 
     def append(self, node):
         # Freeze each append at the point where the runtime builder consumes it.
@@ -367,6 +382,7 @@ class _AOTGraphBuilderPlan:
         self._items.append(
             ("append", _AOTSequentialSnapshot(node._dispatches), 1)
         )
+        self._runtime_arg_names.update(node._runtime_arg_names)
 
     def snapshot(self):
         items = []
@@ -384,6 +400,7 @@ class _AOTGraphBuilderPlan:
 
         snapshot = _AOTGraphBuilderPlan()
         snapshot._items = tuple(items)
+        snapshot._runtime_arg_names = set(self._runtime_arg_names)
         return snapshot
 
     def compile(self):
@@ -494,6 +511,12 @@ class GraphBuilder:
     def _flush_graph_builder(self):
         if self._dispatch_count == 0:
             return
+        # ``_aot_graph_plan`` is the durable source of truth for dispatches.
+        # Also consult it here so legacy low-level adapters that dispatch a
+        # precompiled kernel directly retain exact runtime-argument validation.
+        self._runtime_graph_arg_names.update(
+            self._aot_graph_plan.runtime_arg_names
+        )
         self._nodes.append(
             _CompiledCGraphNode(
                 self._runtime_graph_builder.compile(),
