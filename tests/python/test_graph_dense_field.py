@@ -83,6 +83,141 @@ def test_dense_field_graph_global_zero_args_matches_direct():
     )
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_dense_field_zero_arg_graph_captures_without_arg_storage():
+    scalar = ti.field(dtype=ti.i32, shape=())
+    values = ti.field(dtype=ti.i32, shape=64)
+    vectors = ti.Vector.field(3, dtype=ti.f32, shape=64)
+    matrices = ti.Matrix.field(2, 2, dtype=ti.f32, shape=64)
+
+    @ti.kernel
+    def advance():
+        scalar[None] += 1
+        for i in values:
+            values[i] += i + 1
+            vectors[i] += ti.Vector([1.0, 2.0, 3.0])
+            matrices[i] += ti.Matrix([[1.0, 2.0], [3.0, 4.0]])
+
+    builder = ti.graph.GraphBuilder()
+    for _ in range(4):
+        builder.dispatch(advance)
+    graph = builder.compile()
+
+    # The first explicit snapshot enables lazy counters before capture. It
+    # must not allocate a runtime argument buffer for this static-Field graph.
+    assert graph._graph_stats[0]["zero_arg_captures"] == 0
+    graph.run({})
+    ti.sync()
+    first = graph._graph_stats[0]
+    assert first["last_path"] == "cuda_capture"
+    assert first["zero_arg_eligible"]
+    assert first["zero_arg_captures"] == 1
+    assert first["known_persistent_argument_bytes"] == 0
+    assert scalar[None] == 4
+
+    graph.run({})
+    ti.sync()
+    second = graph._graph_stats[0]
+    assert second["last_path"] == "cuda_exact_replay"
+    assert second["exact_replays"] >= 1
+    assert second["known_persistent_argument_bytes"] == 0
+    assert scalar[None] == 8
+    np.testing.assert_array_equal(
+        values.to_numpy(), (np.arange(64, dtype=np.int32) + 1) * 8
+    )
+    np.testing.assert_allclose(
+        vectors.to_numpy(), np.tile([8.0, 16.0, 24.0], (64, 1)),
+        rtol=0.0,
+    )
+    np.testing.assert_allclose(
+        matrices.to_numpy(),
+        np.tile([[8.0, 16.0], [24.0, 32.0]], (64, 1, 1)),
+        rtol=0.0,
+    )
+
+    cache = graph._instance._backend_executable._jit_cache
+    cache.clear_runtime_state()
+    cache.clear_runtime_state()
+    graph.run({})
+    ti.sync()
+    rebuilt = graph._graph_stats[0]
+    assert rebuilt["last_path"] == "cuda_capture"
+    assert rebuilt["zero_arg_eligible"]
+    assert rebuilt["known_persistent_argument_bytes"] == 0
+    assert scalar[None] == 12
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_dense_field_graph_concurrent_simulation_and_display_submission():
+    simulation = ti.field(dtype=ti.i32, shape=1 << 14)
+    image = ti.Vector.field(4, dtype=ti.u8, shape=(96, 64))
+
+    @ti.kernel
+    def simulation_step():
+        for i in simulation:
+            simulation[i] += 1
+
+    @ti.kernel
+    def render_frame():
+        for i, j in image:
+            image[i, j] = ti.cast(
+                ti.Vector([i % 251, j % 251, (i * 3 + j * 5) % 251, 255]),
+                ti.u8,
+            )
+
+    simulation_builder = ti.graph.GraphBuilder()
+    for _ in range(4):
+        simulation_builder.dispatch(simulation_step)
+    simulation_graph = simulation_builder.compile()
+    display_builder = ti.graph.GraphBuilder()
+    for _ in range(2):
+        display_builder.dispatch(render_frame)
+    display_graph = display_builder.compile()
+
+    # Enable lazy diagnostics before the first concurrent capture. Separate
+    # Fields avoid introducing an application-level data race into this host
+    # submission safety test.
+    assert simulation_graph._graph_stats[0]["attempts"] == 0
+    assert display_graph._graph_stats[0]["attempts"] == 0
+    start = threading.Barrier(2)
+    errors = []
+
+    def submit(graph):
+        try:
+            start.wait(timeout=10.0)
+            for _ in range(128):
+                graph.run({})
+        except BaseException as exc:
+            errors.append(exc)
+
+    simulation_thread = threading.Thread(target=submit, args=(simulation_graph,))
+    display_thread = threading.Thread(target=submit, args=(display_graph,))
+    simulation_thread.start()
+    display_thread.start()
+    simulation_thread.join(timeout=30.0)
+    display_thread.join(timeout=30.0)
+    assert not simulation_thread.is_alive()
+    assert not display_thread.is_alive()
+    assert not errors
+    ti.sync()
+
+    np.testing.assert_array_equal(
+        simulation.to_numpy(),
+        np.full(1 << 14, 128 * 4, dtype=np.int32),
+    )
+    expected = np.empty((96, 64, 4), dtype=np.uint8)
+    for i in range(96):
+        for j in range(64):
+            expected[i, j] = [i % 251, j % 251, (i * 3 + j * 5) % 251, 255]
+    np.testing.assert_array_equal(image.to_numpy(), expected)
+    for graph in (simulation_graph, display_graph):
+        stats = graph._graph_stats[0]
+        assert stats["zero_arg_eligible"]
+        assert stats["captures"] == 1
+        assert stats["exact_replays"] == 127
+        assert stats["known_persistent_argument_bytes"] == 0
+
+
 @test_utils.test(arch=_DENSE_GRAPH_ARCHS)
 def test_dense_field_graph_updates_scalar_runtime_argument():
     values = ti.field(dtype=ti.i32, shape=16)

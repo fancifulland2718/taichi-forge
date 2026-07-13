@@ -2475,6 +2475,8 @@ void export_lang(py::module &m) {
         result["replay_slot_saturation_fallbacks"] =
             stats.replay_slot_saturation_fallbacks;
         result["capture_exceptions"] = stats.capture_exceptions;
+        result["zero_arg_captures"] = stats.zero_arg_captures;
+        result["zero_arg_eligible"] = stats.zero_arg_eligible;
         result["known_persistent_argument_bytes"] =
             stats.known_persistent_argument_bytes;
         result["last_driver_error"] = stats.last_driver_error;

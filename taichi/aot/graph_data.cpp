@@ -1086,6 +1086,14 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     state->packets.push_back(std::move(capture_packet));
   }
 
+  state->stats.zero_arg_eligible =
+      !state->packets.empty() &&
+      std::all_of(state->packets.begin(), state->packets.end(),
+                  [](const CudaGraphCapturePacket &packet) {
+                    return packet.packet.arg_buffer_size == 0 &&
+                           packet.packet.device_arg_buffer == nullptr;
+                  });
+
   driver.stream_synchronize(capture_stream);
   auto capture_lock = CUDAContext::get_instance().get_graph_capture_lock_guard();
   auto begin_err = driver.stream_begin_capture.call(
@@ -1124,6 +1132,9 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   state->has_captured_once = true;
   if (state->diagnostics_enabled) {
     ++state->stats.captures;
+    if (state->stats.zero_arg_eligible) {
+      ++state->stats.zero_arg_captures;
+    }
     state->stats.last_path = CompiledGraphExecutionPath::cuda_capture;
     state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
   }

@@ -269,10 +269,12 @@ struct CompiledGraphStats {
   uint64_t retry_backoff_fallbacks{0};
   uint64_t replay_slot_saturation_fallbacks{0};
   uint64_t capture_exceptions{0};
+  uint64_t zero_arg_captures{0};
   uint64_t known_persistent_argument_bytes{0};
   uint64_t last_driver_error{0};
   uint32_t retry_backoff_remaining{0};
   uint32_t consecutive_transient_failures{0};
+  bool zero_arg_eligible{false};
 };
 
 // A transient capture error must not permanently disable an otherwise valid

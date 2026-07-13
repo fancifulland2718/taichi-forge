@@ -843,6 +843,10 @@ def test_graph_field_only_segment_native_sort_and_runtime_segment():
         frozenset({"scale", "keys", "values", "output"}),
     ]
 
+    if ti.lang.impl.current_cfg().arch == ti.cuda:
+        # Enable lazy CUDA counters before the Field-only segment is captured.
+        assert graph._graph_stats[0]["attempts"] == 0
+
     order = np.argsort(base_keys, kind="stable")
     for initial_state, scale in ((0, 3), (7, -2)):
         state[None] = initial_state
@@ -865,8 +869,15 @@ def test_graph_field_only_segment_native_sort_and_runtime_segment():
         assert np.array_equal(keys.to_numpy(), base_keys[order])
         assert np.array_equal(values.to_numpy(), base_values[order])
 
-    for stats in graph._graph_stats:
+    graph_stats = graph._graph_stats
+    for stats in graph_stats:
         assert stats["last_fallback_reason"] != "unsupported_arguments"
+    if ti.lang.impl.current_cfg().arch == ti.cuda:
+        field_segment = graph_stats[0]
+        assert field_segment["zero_arg_eligible"]
+        assert field_segment["captures"] == 1
+        assert field_segment["exact_replays"] == 1
+        assert field_segment["known_persistent_argument_bytes"] == 0
 
 
 @test_utils.test(arch=ti.cuda)

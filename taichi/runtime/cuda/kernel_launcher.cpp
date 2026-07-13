@@ -122,7 +122,7 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
       return false;
     }
   }
-  if (ctx.result_buffer_size > 0 || ctx.arg_buffer_size == 0) {
+  if (ctx.result_buffer_size > 0) {
     return false;
   }
 
@@ -197,6 +197,14 @@ bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
   packet.handle = handle;
   packet.arg_buffer_size = ctx.arg_buffer_size;
   packet.context = context;
+  if (packet.arg_buffer_size == 0) {
+    // A Field-only graph has no runtime argument storage. The RuntimeContext
+    // still carries the runtime/root state used by statically bound fields,
+    // but capture needs neither a device allocation nor an H2D upload.
+    packet.device_arg_buffer = nullptr;
+    packet.context.arg_buffer = nullptr;
+    return true;
+  }
   CUDADriver::get_instance().malloc_async(&packet.device_arg_buffer,
                                           packet.arg_buffer_size, stream);
   CUDADriver::get_instance().memcpy_host_to_device_async(
@@ -211,8 +219,7 @@ bool KernelLauncher::update_cuda_graph_launch(
     LaunchContextBuilder &ctx,
     std::vector<uint8_t> &host_arg_buffer,
     void *stream) {
-  if (packet.device_arg_buffer == nullptr ||
-      packet.arg_buffer_size != ctx.arg_buffer_size) {
+  if (packet.arg_buffer_size != ctx.arg_buffer_size) {
     return false;
   }
   RuntimeContext context;
@@ -221,6 +228,19 @@ bool KernelLauncher::update_cuda_graph_launch(
   }
   if (context.runtime != packet.context.runtime ||
       context.result_buffer != packet.context.result_buffer) {
+    return false;
+  }
+
+  if (packet.arg_buffer_size == 0) {
+    if (packet.device_arg_buffer != nullptr ||
+        packet.context.arg_buffer != nullptr) {
+      return false;
+    }
+    context.arg_buffer = nullptr;
+    host_arg_buffer.clear();
+    return true;
+  }
+  if (packet.device_arg_buffer == nullptr || context.arg_buffer == nullptr) {
     return false;
   }
 

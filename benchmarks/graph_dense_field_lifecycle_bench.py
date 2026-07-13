@@ -3,6 +3,8 @@
 Each iteration creates a dense FieldsBuilder tree, compiles and runs a Graph,
 destroys the tree, and then allows the tree id to be reused.  This measures the
 cold lifecycle transaction separately from steady Graph replay benchmarks.
+Use ``--zero-runtime-arg`` to exercise CUDA null argument packets and report
+capture count plus persistent argument storage.
 """
 
 import argparse
@@ -119,6 +121,11 @@ def run(args):
         for i in field:
             field[i] = value + i
 
+    @ti.kernel
+    def write_values_zero_arg(field: ti.template()):
+        for i in field:
+            field[i] = i + 1
+
     sym_value = ti.graph.Arg(
         ti.graph.ArgKind.SCALAR, "value", ti.i32
     )
@@ -129,6 +136,8 @@ def run(args):
     iteration_times = []
     identities = []
     stale_rejected = False
+    zero_arg_captures = 0
+    max_persistent_argument_bytes = 0
     sample_period = max(1, args.iterations // args.memory_samples)
     memory = [
         {
@@ -152,21 +161,40 @@ def run(args):
 
         build_start = time.perf_counter()
         graph_builder = ti.graph.GraphBuilder()
-        graph_builder.dispatch(
-            write_values,
-            sym_value,
-            template_args={"field": values},
-        )
+        if args.zero_runtime_arg:
+            graph_builder.dispatch(
+                write_values_zero_arg,
+                template_args={"field": values},
+            )
+        else:
+            graph_builder.dispatch(
+                write_values,
+                sym_value,
+                template_args={"field": values},
+            )
         graph = graph_builder.compile()
         build_times.append((time.perf_counter() - build_start) * 1000.0)
 
+        if args.zero_runtime_arg and args.arch == "cuda":
+            # Opt in before capture so lifecycle stress also proves the null
+            # argument packet path was used rather than ordinary fallback.
+            graph._graph_stats
         run_start = time.perf_counter()
-        graph.run({"value": iteration})
+        runtime_args = {} if args.zero_runtime_arg else {"value": iteration}
+        graph.run(runtime_args)
         ti.sync()
         run_times.append((time.perf_counter() - run_start) * 1000.0)
+        if args.zero_runtime_arg and args.arch == "cuda":
+            stats = graph._graph_stats[0]
+            zero_arg_captures += stats["zero_arg_captures"]
+            max_persistent_argument_bytes = max(
+                max_persistent_argument_bytes,
+                stats["known_persistent_argument_bytes"],
+            )
         if iteration in (0, args.iterations - 1):
             actual = values.to_numpy()
-            expected = np.arange(args.size, dtype=np.int32) + iteration
+            expected_offset = 1 if args.zero_runtime_arg else iteration
+            expected = np.arange(args.size, dtype=np.int32) + expected_offset
             if not np.array_equal(actual, expected):
                 raise RuntimeError(f"result mismatch at iteration {iteration}")
 
@@ -175,7 +203,7 @@ def run(args):
         destroy_times.append((time.perf_counter() - destroy_start) * 1000.0)
         if iteration == 0:
             try:
-                graph.run({"value": iteration})
+                graph.run(runtime_args)
             except TaichiRuntimeError:
                 stale_rejected = True
             else:
@@ -208,6 +236,9 @@ def run(args):
         "python": platform.python_version(),
         "iterations": args.iterations,
         "field_size": args.size,
+        "runtime_arg_mode": (
+            "zero" if args.zero_runtime_arg else "scalar"
+        ),
         "init_ms": init_ms,
         "total_ms": total_ms,
         "iterations_per_second": args.iterations / (total_ms / 1000.0),
@@ -226,6 +257,8 @@ def run(args):
         "first_identity": identities[0],
         "last_identity": identities[-1],
         "stale_graph_rejected": stale_rejected,
+        "zero_arg_captures": zero_arg_captures,
+        "max_persistent_argument_bytes": max_persistent_argument_bytes,
     }
     ti.reset()
     gc.collect()
@@ -244,6 +277,7 @@ def main():
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--size", type=int, default=256)
     parser.add_argument("--memory-samples", type=int, default=20)
+    parser.add_argument("--zero-runtime-arg", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.iterations <= 0 or args.size <= 0 or args.memory_samples <= 0:
