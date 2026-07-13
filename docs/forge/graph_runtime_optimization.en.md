@@ -56,6 +56,21 @@ raise instead of being ignored. Direct access to `_aot_graph_plan` and the
 native builder remains only for legacy compatibility; new engine code should
 use `template_args=`.
 
+For a mixed `CGraph(a) -> native -> CGraph(b)`, the native node ends the
+current CGraph segment. Forge recovers symbolic names only from AOT items added
+to that segment, so `a` cannot contaminate the later `b` segment.
+`Graph.run()` still validates the exact union of every segment's arguments. A
+Field-only CGraph receives an empty argument map at the C++ execution layer,
+and a native-only node receives no runtime dictionary.
+
+Python flattens one invocation once and reuses its resource signature and
+containers under the same Graph's per-Graph lock. The CompiledGraph binding
+constructs a segment-local C++ `IValue` map from that segment's own
+declarations; Python does not copy another dictionary per segment. This keeps
+the backend semantics segment-local while preserving a zero-copy host path.
+Legacy adapters that access underscored objects still work, but recovery reads
+only AOT items added since the previous segment flush.
+
 ## Backend execution model
 
 | Backend | Graph execution | Main safety boundary | Replay resource policy |

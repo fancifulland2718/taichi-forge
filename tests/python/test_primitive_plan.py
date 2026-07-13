@@ -2,7 +2,10 @@ import numpy as np
 import pytest
 import taichi_forge as ti
 import taichi_forge.algorithms._algorithms as alg_impl
+from taichi_forge.aot.utils import produce_injected_args_from_template
+from taichi_forge.graph._graph import flatten_args
 from taichi_forge.lang import impl
+from taichi_forge.lang.exception import TaichiRuntimeError
 from tests import test_utils
 
 
@@ -655,8 +658,12 @@ def test_graph_private_native_sequence_scan_uses_prefix_sum_executor_plan():
         assert seq.direct_plan_count == 1
 
 
-@test_utils.test(arch=ti.cpu)
-def test_graph_cpu_native_sequence_joins_kernel_chain():
+@pytest.mark.parametrize("adapter", ["public", "legacy"])
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+)
+def test_graph_native_sequence_joins_disjoint_cgraph_segments(adapter):
     n = 32
     src_np = np.arange(n, dtype=np.int32)
     idx_np = np.arange(n - 1, -1, -1, dtype=np.int32)
@@ -677,13 +684,16 @@ def test_graph_cpu_native_sequence_joins_kernel_chain():
         for i in src_arr:
             tmp_arr[i] = src_arr[i] + 10
 
-    @ti.kernel
-    def finalize(
-        gathered_arr: ti.types.ndarray(dtype=ti.i32, ndim=1),
-        dst_arr: ti.types.ndarray(dtype=ti.i32, ndim=1),
-    ):
-        for i in gathered_arr:
-            dst_arr[i] = gathered_arr[i] - 3
+    @ti.data_oriented
+    class Finalizer:
+        @ti.kernel
+        def apply(
+            self,
+            gathered_arr: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            dst_arr: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        ):
+            for i in gathered_arr:
+                dst_arr[i] = gathered_arr[i] - 3
 
     src_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.i32, ndim=1)
     tmp0_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "tmp0", ti.i32, ndim=1)
@@ -698,8 +708,41 @@ def test_graph_cpu_native_sequence_joins_kernel_chain():
     builder = ti.graph.GraphBuilder()
     builder.dispatch(prepare, src_arg, tmp0_arg)
     assert builder._append_native(seq) is builder
-    builder.dispatch(finalize, gathered_arg, dst_arg)
+    finalizer = Finalizer()
+    if adapter == "public":
+        builder.dispatch(
+            finalizer.apply,
+            gathered_arg,
+            dst_arg,
+            template_args={"self": finalizer},
+        )
+    else:
+        kernel = finalizer.apply._primal
+        injected = produce_injected_args_from_template(
+            kernel,
+            {
+                "self": finalizer,
+                "gathered_arr": gathered,
+                "dst_arr": dst,
+            },
+        )
+        key = kernel.ensure_compiled(*injected)
+        kernel_cpp = kernel.compiled_kernels[key]
+        symbolic_args = flatten_args((gathered_arg, dst_arg))
+        builder._aot_graph_plan.dispatch(kernel_cpp, symbolic_args)
+        builder._ensure_runtime_graph_builder().dispatch(
+            kernel_cpp, symbolic_args
+        )
+        builder._dispatch_count += 1
     graph = builder.compile()
+
+    assert [
+        node.runtime_arg_names for node in graph._spec.nodes
+    ] == [
+        frozenset({"src", "tmp0"}),
+        frozenset(),
+        frozenset({"gathered", "dst"}),
+    ]
 
     graph.run({"src": src, "tmp0": tmp0, "gathered": gathered, "dst": dst})
     expected = ((src_np + 10) * 2 + 1)[idx_np] - 3
@@ -711,6 +754,119 @@ def test_graph_cpu_native_sequence_joins_kernel_chain():
     graph.run({"src": src, "tmp0": tmp0, "gathered": gathered, "dst": dst})
     expected = ((src_np + 10) * 2 + 1)[idx_np] - 3
     assert np.array_equal(dst.to_numpy(), expected)
+
+    for stats in graph._graph_stats:
+        assert stats["last_fallback_reason"] != "unsupported_arguments"
+
+    with pytest.raises(
+        TaichiRuntimeError,
+        match="Missing graph runtime arguments: dst",
+    ):
+        graph.run(
+            {"src": src, "tmp0": tmp0, "gathered": gathered}
+        )
+    with pytest.raises(
+        TaichiRuntimeError,
+        match="Unexpected graph runtime arguments: extra",
+    ):
+        graph.run(
+            {
+                "src": src,
+                "tmp0": tmp0,
+                "gathered": gathered,
+                "dst": dst,
+                "extra": 1,
+            }
+        )
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+)
+def test_graph_field_only_segment_native_sort_and_runtime_segment():
+    method = _native_sort_method_for_current_arch()
+    n = 32
+    state = ti.field(ti.i32, shape=())
+    keys = ti.ndarray(ti.i32, shape=n)
+    values = ti.ndarray(ti.i32, shape=n)
+    output = ti.ndarray(ti.i32, shape=1)
+    base_keys = ((np.arange(n, dtype=np.int32) * 17) % 41 - 20).astype(
+        np.int32
+    )
+    base_values = np.arange(n, dtype=np.int32) * 5 + 3
+
+    @ti.kernel
+    def advance_field():
+        state[None] += 1
+
+    @ti.kernel
+    def finalize(
+        scale: ti.i32,
+        sorted_keys: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        sorted_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        dst: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        dst[0] = (
+            state[None] * scale + sorted_keys[0] + sorted_values[0]
+        )
+
+    scale_arg = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "scale", ti.i32
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    keys_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "keys", ti.i32, ndim=1
+    )
+    values_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    sequence = alg_impl.primitive_sequence()
+    sequence.sort(keys, values, method=method)
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(advance_field)
+    builder.dispatch(advance_field)
+    builder.append_native(sequence)
+    builder.dispatch(
+        finalize, scale_arg, keys_arg, values_arg, output_arg
+    )
+    graph = builder.compile()
+
+    assert [
+        node.runtime_arg_names for node in graph._spec.nodes
+    ] == [
+        frozenset(),
+        frozenset(),
+        frozenset({"scale", "keys", "values", "output"}),
+    ]
+
+    order = np.argsort(base_keys, kind="stable")
+    for initial_state, scale in ((0, 3), (7, -2)):
+        state[None] = initial_state
+        keys.from_numpy(base_keys)
+        values.from_numpy(base_values)
+        graph.run(
+            {
+                "scale": scale,
+                "keys": keys,
+                "values": values,
+                "output": output,
+            }
+        )
+        expected = (
+            (initial_state + 2) * scale
+            + base_keys[order[0]]
+            + base_values[order[0]]
+        )
+        assert output.to_numpy()[0] == expected
+        assert np.array_equal(keys.to_numpy(), base_keys[order])
+        assert np.array_equal(values.to_numpy(), base_values[order])
+
+    for stats in graph._graph_stats:
+        assert stats["last_fallback_reason"] != "unsupported_arguments"
 
 
 @test_utils.test(arch=ti.cuda)

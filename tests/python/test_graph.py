@@ -1,5 +1,7 @@
 import platform
 import gc
+import threading
+import time
 import weakref
 
 import numpy as np
@@ -373,6 +375,58 @@ def test_graph_rejects_runtime_arg_key_mismatch():
         graph.run({"value": 3, "out": out, "typo": 1})
     with pytest.raises(TaichiRuntimeError, match=r"Graph\.run\(\) expects a dict"):
         graph.run([out])
+
+
+@test_utils.test(arch=ti.cpu)
+def test_same_graph_two_thread_invocations_do_not_interleave():
+    counter = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def increment():
+        counter[None] += 1
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(increment)
+    graph = builder.compile()
+    original_run_impl = graph._run_impl
+    state_lock = threading.Lock()
+    start = threading.Barrier(2)
+    active = 0
+    max_active = 0
+    errors = []
+
+    def observed_run(args):
+        nonlocal active, max_active
+        with state_lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            time.sleep(0.001)
+            original_run_impl(args)
+        finally:
+            with state_lock:
+                active -= 1
+
+    graph._run_impl = observed_run
+
+    def worker():
+        try:
+            start.wait()
+            for _ in range(8):
+                graph.run({})
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    ti.sync()
+    assert not errors
+    assert max_active == 1
+    assert counter[None] == 16
 
 
 @test_utils.test(arch=ti.cpu)

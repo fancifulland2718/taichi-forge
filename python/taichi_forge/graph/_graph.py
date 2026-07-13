@@ -72,9 +72,19 @@ class _GraphRunContext:
             self._compile_config = impl.get_runtime().prog.config()
         return self._compile_config
 
-    def flattened_args(self):
+    def flattened_args(self, arg_names=None):
         if self._flattened_args is None:
             self._flattened_args = self._flatten_runtime_args(self._args)
+        if arg_names is not None and not arg_names.issubset(
+            self._flattened_args
+        ):
+            raise TaichiRuntimeError(
+                "CGraph segment requested undeclared runtime arguments"
+            )
+        # The CompiledGraph Python binding iterates the compiled segment's own
+        # declarations and constructs a node-local C++ IValue map. Passing the
+        # shared flattened dict here is therefore a zero-copy filtered view;
+        # slicing it again in Python adds two dict copies to every mixed run.
         return self._flattened_args
 
     def _flatten_runtime_args(self, args):
@@ -124,7 +134,9 @@ class _CompiledCGraphNode:
 
     def run(self, context):
         self.compiled_graph.jit_run_cached(
-            context.compile_config(), context.flattened_args(), self._jit_cache
+            context.compile_config(),
+            context.flattened_args(self.runtime_arg_names),
+            self._jit_cache,
         )
 
     def invalidate_runtime(self):
@@ -233,13 +245,14 @@ class _GraphSpec:
 class _GraphExecutable:
     def __init__(self, spec):
         self.spec = spec
+        self._context = (
+            _GraphRunContext() if self.spec.needs_runtime_args else None
+        )
 
     def run(self, args):
-        # Runtime arguments and their flattened Python containers belong to
-        # one invocation. Reusing this object would let two callers overwrite
-        # each other's arguments before the backend cache can serialize its
-        # executable state.
-        context = _GraphRunContext() if self.spec.needs_runtime_args else None
+        # Graph.run() holds a per-Graph lock, so this context can safely reuse
+        # flattened runtime arguments and resource signatures across invocations.
+        context = self._context
         if context is not None:
             context.begin(args)
         for node in self.spec.nodes:
@@ -253,9 +266,12 @@ class _GraphInstance:
         self._executable = None
         self._native_nodes = None
         self._backend_executable = None
+        self._run_context = None
 
         if len(spec.nodes) == 1 and isinstance(spec.nodes[0], _CompiledCGraphNode):
             node = spec.nodes[0]
+            if spec.needs_runtime_args:
+                self._run_context = _GraphRunContext()
             self._install_backend_executable(
                 _CGraphJITExecutable(node.compiled_graph), "single_cgraph"
             )
@@ -326,7 +342,7 @@ class _GraphInstance:
     def _run_backend(self, args):
         if self._backend_executable is None:
             return self._run_general(args)
-        context = _GraphRunContext() if self.spec.needs_runtime_args else None
+        context = self._run_context
         if context is not None:
             context.begin(args)
         self._backend_executable.run(context)
@@ -359,8 +375,11 @@ class _AOTGraphBuilderPlan:
         self._runtime_arg_names = set()
 
     def dispatch(self, kernel_cpp, args):
-        self._items.append(("dispatch", kernel_cpp, args))
-        self._runtime_arg_names.update(_runtime_arg_names(args))
+        runtime_arg_names = frozenset(_runtime_arg_names(args))
+        self._items.append(
+            ("dispatch", kernel_cpp, args, runtime_arg_names)
+        )
+        self._runtime_arg_names.update(runtime_arg_names)
 
     @property
     def runtime_arg_names(self):
@@ -373,27 +392,54 @@ class _AOTGraphBuilderPlan:
         Recovering names here keeps strict runtime validation compatible with
         those adapters without accepting genuinely unknown arguments.
         """
-        return self._runtime_arg_names
+        return frozenset(self._runtime_arg_names)
+
+    def runtime_arg_names_since(self, cursor):
+        if cursor < 0 or cursor > len(self._items):
+            raise TaichiRuntimeError(
+                f"Invalid AOT graph plan cursor {cursor}"
+            )
+        return frozenset().union(
+            *(item[3] for item in self._items[cursor:])
+        )
 
     def append(self, node):
         # Freeze each append at the point where the runtime builder consumes it.
         # Reusing and then mutating one Sequential between appends must not make
         # the lazily compiled AOT plan observe only its final definition.
+        runtime_arg_names = frozenset(node._runtime_arg_names)
         self._items.append(
-            ("append", _AOTSequentialSnapshot(node._dispatches), 1)
+            (
+                "append",
+                _AOTSequentialSnapshot(node._dispatches),
+                1,
+                runtime_arg_names,
+            )
         )
-        self._runtime_arg_names.update(node._runtime_arg_names)
+        self._runtime_arg_names.update(runtime_arg_names)
 
     def snapshot(self):
         items = []
         for item in self._items:
             if item[0] == "dispatch":
-                _, kernel_cpp, args = item
-                items.append(("dispatch", kernel_cpp, tuple(args)))
-            elif item[0] == "append":
-                _, node, count = item
+                _, kernel_cpp, args, runtime_arg_names = item
                 items.append(
-                    ("append", _AOTSequentialSnapshot(node._dispatches), count)
+                    (
+                        "dispatch",
+                        kernel_cpp,
+                        tuple(args),
+                        runtime_arg_names,
+                    )
+                )
+            elif item[0] == "append":
+                _, node, count, runtime_arg_names = item
+                items.append(
+                    (
+                        "append",
+                        _AOTSequentialSnapshot(node._dispatches),
+                        count,
+                        runtime_arg_names,
+                    )
                 )
             else:
                 raise TaichiRuntimeError(f"Unknown AOT graph item kind {item[0]}")
@@ -407,10 +453,10 @@ class _AOTGraphBuilderPlan:
         builder = _ti_core.GraphBuilder()
         for item in self._items:
             if item[0] == "dispatch":
-                _, kernel_cpp, args = item
+                _, kernel_cpp, args, _ = item
                 builder.dispatch(kernel_cpp, args)
             elif item[0] == "append":
-                _, node, count = item
+                _, node, count, _ = item
                 seq = builder.create_sequential()
                 node._dispatch_to(seq)
                 for _ in range(count):
@@ -485,6 +531,7 @@ class Sequential:
 class GraphBuilder:
     def __init__(self):
         self._aot_graph_plan = _AOTGraphBuilderPlan()
+        self._aot_plan_cursor = 0
         self._runtime_graph_builder = _ti_core.GraphBuilder()
         self._dispatch_count = 0
         self._runtime_graph_arg_names = set()
@@ -521,11 +568,15 @@ class GraphBuilder:
         if self._dispatch_count == 0:
             return
         # ``_aot_graph_plan`` is the durable source of truth for dispatches.
-        # Also consult it here so legacy low-level adapters that dispatch a
-        # precompiled kernel directly retain exact runtime-argument validation.
+        # Only recover items added since the previous flush: legacy low-level
+        # adapters can bypass ``_record_dispatch()``, but names from an older
+        # segment must not leak across a native node boundary.
         self._runtime_graph_arg_names.update(
-            self._aot_graph_plan.runtime_arg_names
+            self._aot_graph_plan.runtime_arg_names_since(
+                self._aot_plan_cursor
+            )
         )
+        self._aot_plan_cursor = self._aot_graph_plan.item_count
         self._nodes.append(
             _CompiledCGraphNode(
                 self._runtime_graph_builder.compile(),

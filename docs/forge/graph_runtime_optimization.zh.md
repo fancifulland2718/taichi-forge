@@ -46,6 +46,18 @@ runtime key 集合。严格校验仍然有效：missing key 和未在 AOT plan �
 报错，不会因为兼容旧适配器而被忽略。直接操作 `_aot_graph_plan` 和 native builder 仅作
 旧版本兼容；新引擎代码应迁移到 `template_args=`。
 
+对于 `CGraph(a) -> native -> CGraph(b)` 这类 mixed Graph，native 节点会结束
+当前 CGraph segment。Forge 只从该 segment 新增的 AOT items 恢复符号参数名，因此
+`a` 不会污染后续 `b` segment；整张 Graph 的 `Graph.run()` 仍严格校验各 segment
+参数并集。Field-only CGraph 在 C++ 执行层收到空参数表，native-only 节点不接收
+runtime 字典。
+
+Python 侧为一次调用只 flatten 一次参数，并在同一 Graph 的 per-Graph 锁内复用
+resource signature 与容器。CompiledGraph binding 按当前 segment 自己的声明构造局部
+C++ `IValue` map；不会在 Python 为每个 segment 复制字典。这样同时保持 segment-local
+后端语义和 zero-copy host path。直接读取下划线对象的旧适配器仍可工作，但只恢复上次
+segment flush 后新增的 AOT items。
+
 ## 后端执行模型
 
 | 后端 | Graph 执行方式 | 主要安全边界 | Replay 资源策略 |
