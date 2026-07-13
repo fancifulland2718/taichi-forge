@@ -23,6 +23,10 @@ std::unique_ptr<lang::CompiledKernelData> CompiledKernelData::clone() const {
   return std::make_unique<CompiledKernelData>(arch_, data_);
 }
 
+std::vector<int> CompiledKernelData::snode_tree_ids() const {
+  return data_.metadata.used_snode_tree_ids;
+}
+
 CompiledKernelData::Err CompiledKernelData::load_impl(
     const CompiledKernelDataFile &file) {
   arch_ = file.arch();

@@ -44,6 +44,7 @@ PER_CUDA_FUNCTION(mem_pool_set_attribute, cuMemPoolSetAttribute, void *, uint32,
 PER_CUDA_FUNCTION(module_get_function, cuModuleGetFunction, void **, void *, const char *);
 PER_CUDA_FUNCTION(module_load_data_ex, cuModuleLoadDataEx, void **, const char *,
                   uint32, uint32 *, void **)
+PER_CUDA_FUNCTION(module_unload, cuModuleUnload, void *);
 PER_CUDA_FUNCTION(launch_kernel, cuLaunchKernel, void *, uint32, uint32, uint32,
                   uint32, uint32, uint32, uint32, void *, void **, void **);
 PER_CUDA_FUNCTION(kernel_get_attribute, cuFuncGetAttribute, int *, uint32, void *);

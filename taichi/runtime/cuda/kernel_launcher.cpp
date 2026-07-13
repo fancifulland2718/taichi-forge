@@ -491,6 +491,7 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
 
     // Populate ctx
     ctx->jit_module = jit_module;
+    ctx->snode_tree_ids = compiled.snode_tree_ids();
     ctx->parameters = std::move(parameters);
     ctx->offloaded_tasks = std::move(data.tasks);
     contexts_[index] = std::move(ctx);
@@ -498,6 +499,23 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     compiled.set_handle(handle);
   }
   return *compiled.get_handle();
+}
+
+void KernelLauncher::retire_snode_tree(int tree_id) {
+  auto submission_lock =
+      CUDAContext::get_instance().get_submission_lock_guard();
+  std::unique_lock<std::shared_mutex> registration_lock(registration_mutex());
+  auto *executor = get_runtime_executor();
+  for (auto &context : contexts_) {
+    if (context == nullptr ||
+        !std::binary_search(context->snode_tree_ids.begin(),
+                            context->snode_tree_ids.end(), tree_id)) {
+      continue;
+    }
+    auto module = context->jit_module;
+    context.reset();
+    executor->remove_jit_module(module);
+  }
 }
 
 }  // namespace cuda

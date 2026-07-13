@@ -2074,6 +2074,8 @@ void export_lang(py::module &m) {
           },
           py::call_guard<py::gil_scoped_release>())
       .def("launch_kernel", &Program::launch_kernel)
+      .def("compile_and_launch_kernel", &Program::compile_and_launch_kernel,
+           py::call_guard<py::gil_scoped_release>())
       .def("get_device_caps", &Program::get_device_caps);
 
   py::class_<AotModuleBuilder>(m, "AotModuleBuilder")
@@ -2189,6 +2191,7 @@ void export_lang(py::module &m) {
 
   py::class_<SNodeTree>(m, "SNodeTree")
       .def("id", &SNodeTree::id)
+      .def("generation", &SNodeTree::generation)
       .def("destroy_snode_tree", [](SNodeTree *snode_tree, Program *program) {
         program->destroy_snode_tree(snode_tree);
       });
@@ -2483,6 +2486,16 @@ void export_lang(py::module &m) {
       });
 
   py::class_<aot::CompiledGraph>(m, "CompiledGraph")
+      .def_property_readonly(
+          "_snode_tree_dependencies",
+          [](const aot::CompiledGraph &graph) {
+            py::list dependencies;
+            for (const auto &dependency : graph.snode_tree_dependencies) {
+              dependencies.append(
+                  py::make_tuple(dependency.tree_id, dependency.generation));
+            }
+            return dependencies;
+          })
       .def("jit_run",
            [jit_run_graph](aot::CompiledGraph *self,
                            const CompileConfig &compile_config,

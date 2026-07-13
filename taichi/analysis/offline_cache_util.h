@@ -79,7 +79,10 @@ class Kernel;
 //  14 - R7.1 (2026-07). CUDA cache keys include the resolved LLVM NVPTX
 //       compute target because it changes emitted PTX. This prevents a newer
 //       device from reusing an artifact compiled for an older fallback target.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 14;
+//  15 - DF3 (2026-07). Compiled-kernel metadata records the generation-safe
+//       SNodeTree dependencies consumed by Graph lifecycle validation. Older
+//       artifacts do not contain that metadata and must not be reused.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 15;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

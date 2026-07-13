@@ -130,6 +130,12 @@ class _CompiledCGraphNode:
         self.compiled_graph = compiled_graph
         self.dispatch_count = dispatch_count
         self.runtime_arg_names = frozenset(runtime_arg_names)
+        self.snode_tree_dependencies = frozenset(
+            tuple(dependency)
+            for dependency in getattr(
+                compiled_graph, "_snode_tree_dependencies", ()
+            )
+        )
         self._jit_cache = _ti_core.CompiledGraphJITCache()
 
     def run(self, context):
@@ -154,6 +160,7 @@ class _CompiledCGraphNode:
 class _CompiledNativeGraphNode:
     needs_runtime_args = False
     runtime_arg_names = frozenset()
+    snode_tree_dependencies = frozenset()
 
     def __init__(self, executable):
         self.executable = executable
@@ -180,6 +187,9 @@ class _GraphSpec:
         )
         self.runtime_arg_names = frozenset().union(
             *(n.runtime_arg_names for n in self.nodes)
+        )
+        self.snode_tree_dependencies = frozenset().union(
+            *(n.snode_tree_dependencies for n in self.nodes)
         )
         self.repeat_count = 0
 
@@ -620,6 +630,7 @@ class GraphBuilder:
 class Graph:
     def __init__(self, compiled_graph) -> None:
         self._lifecycle_lock = threading.Lock()
+        self._stale_snode_tree_dependencies = set()
         if isinstance(compiled_graph, _GraphSpec):
             self._spec = compiled_graph
         elif isinstance(compiled_graph, _CompiledCGraphNode):
@@ -665,6 +676,37 @@ class Graph:
                 "This graph was compiled before ti.reset() or a runtime "
                 "reinitialization. Please rebuild the graph after ti.init()."
             )
+        if self._stale_snode_tree_dependencies:
+            dependencies = ", ".join(
+                f"id={tree_id} generation={generation}"
+                for tree_id, generation in sorted(
+                    self._stale_snode_tree_dependencies
+                )
+            )
+            raise TaichiRuntimeError(
+                "This graph references a destroyed SNodeTree "
+                f"({dependencies}); rebuild the Graph."
+            )
+
+    def _retire_snode_tree(self, dependency):
+        dependency = tuple(dependency)
+        with self._lifecycle_lock:
+            if (
+                self._spec is None
+                or dependency not in self._spec.snode_tree_dependencies
+            ):
+                return False
+            if dependency in self._stale_snode_tree_dependencies:
+                return True
+            self._stale_snode_tree_dependencies.add(dependency)
+            for instance in self._instances.values():
+                instance.invalidate_runtime()
+            self._spec.invalidate_runtime()
+            return True
+
+    def _cancel_snode_tree_retirement(self, dependency):
+        with self._lifecycle_lock:
+            self._stale_snode_tree_dependencies.discard(tuple(dependency))
 
     def _invalidate_runtime(self):
         with self._lifecycle_lock:

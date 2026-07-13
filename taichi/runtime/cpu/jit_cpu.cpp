@@ -80,6 +80,7 @@ class JITSessionCPU;
 
 class JITModuleCPU : public JITModule {
  private:
+  friend class JITSessionCPU;
   JITSessionCPU *session_;
   JITDylib *dylib_;
 
@@ -171,6 +172,33 @@ class JITSessionCPU : public JITSession {
     modules.push_back(std::move(new_module));
     module_counter_++;
     return new_module_raw_ptr;
+  }
+
+  bool remove_module(JITModule *module) override {
+    std::lock_guard<std::mutex> _(mut_);
+    auto module_it = std::find_if(
+        modules.begin(), modules.end(),
+        [module](const std::unique_ptr<JITModule> &owned) {
+          return owned.get() == module;
+        });
+    if (module_it == modules.end()) {
+      return false;
+    }
+    auto *cpu_module = dynamic_cast<JITModuleCPU *>(module_it->get());
+    TI_ASSERT(cpu_module != nullptr);
+    auto lib_it =
+        std::find(all_libs_.begin(), all_libs_.end(), cpu_module->dylib_);
+    TI_ASSERT(lib_it != all_libs_.end());
+    cantFail(es_.removeJITDylib(*cpu_module->dylib_));
+    // RTDyldObjectLinkingLayer owns one SectionMemoryManager per object. The
+    // legacy raw pointer only supported an eager final deregistration, but it
+    // may point at the manager just destroyed by removeJITDylib(). Never keep
+    // that non-owning pointer across individual module retirement; ORC owns
+    // deregistration/destruction for the remaining runtime module.
+    memory_manager_ = nullptr;
+    all_libs_.erase(lib_it);
+    modules.erase(module_it);
+    return true;
   }
 
   void *lookup(const std::string Name) override {

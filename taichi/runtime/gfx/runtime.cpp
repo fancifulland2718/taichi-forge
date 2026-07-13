@@ -970,13 +970,36 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
   }
   KernelHandle res;
   res.set_launch_id(ti_kernels_.size());
+  ti_kernel_snode_tree_ids_.push_back(std::move(reg_params.snode_tree_ids));
   ti_kernels_.push_back(std::make_unique<CompiledTaichiKernel>(params));
   return res;
+}
+
+void GfxRuntime::retire_snode_tree_kernels(int tree_id) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  // Graph replay executables cache raw CompiledTaichiKernel pointers. The
+  // Program destroy transaction synchronized the device before entering here,
+  // so dropping every replay recording is safe. Registrations remain alive;
+  // unrelated graphs simply record again on their next run.
+  graph_replay_states_.clear();
+  TI_ASSERT(ti_kernel_snode_tree_ids_.size() == ti_kernels_.size());
+  for (std::size_t i = 0; i < ti_kernels_.size(); ++i) {
+    const auto &tree_ids = ti_kernel_snode_tree_ids_[i];
+    if (ti_kernels_[i] != nullptr &&
+        std::binary_search(tree_ids.begin(), tree_ids.end(), tree_id)) {
+      ti_kernels_[i].reset();
+      ti_kernel_snode_tree_ids_[i].clear();
+    }
+  }
 }
 
 void GfxRuntime::launch_kernel(KernelHandle handle,
                                LaunchContextBuilder &host_ctx) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  TI_ASSERT(handle.get_launch_id() >= 0 &&
+            static_cast<std::size_t>(handle.get_launch_id()) <
+                ti_kernels_.size() &&
+            ti_kernels_[handle.get_launch_id()] != nullptr);
   auto *ti_kernel = ti_kernels_[handle.get_launch_id()].get();
 
 #if defined(__APPLE__)
@@ -2377,6 +2400,17 @@ void GfxRuntime::init_nonroot_buffers() {
 
 void GfxRuntime::add_root_buffer(size_t root_buffer_size) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  add_root_buffer(static_cast<int>(root_buffers_.size()), root_buffer_size);
+}
+
+void GfxRuntime::add_root_buffer(int root_id, size_t root_buffer_size) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  TI_ERROR_IF(root_id < 0 ||
+                  static_cast<std::size_t>(root_id) > root_buffers_.size(),
+              "Cannot install root buffer at invalid id {}.", root_id);
+  TI_ERROR_IF(static_cast<std::size_t>(root_id) < root_buffers_.size() &&
+                  root_buffers_[root_id],
+              "Cannot replace live root buffer id {}.", root_id);
   if (root_buffer_size == 0) {
     root_buffer_size = 4;  // there might be empty roots
   }
@@ -2393,14 +2427,36 @@ void GfxRuntime::add_root_buffer(size_t root_buffer_size) {
   cmdlist->buffer_fill(new_buffer->get_ptr(0), kBufferSizeEntireSize,
                        /*data=*/0);
   stream->submit_synced(cmdlist.get());
-  root_buffers_.push_back(std::move(new_buffer));
+  if (static_cast<std::size_t>(root_id) == root_buffers_.size()) {
+    root_buffers_.push_back(std::move(new_buffer));
+  } else {
+    root_buffers_[root_id] = std::move(new_buffer);
+  }
   // cache the root buffer size
-  root_buffers_size_map_[root_buffers_.back().get()] = root_buffer_size;
+  root_buffers_size_map_[root_buffers_[root_id].get()] = root_buffer_size;
+}
+
+void GfxRuntime::remove_root_buffer(int root_id) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  TI_ERROR_IF(root_id < 0 ||
+                  static_cast<std::size_t>(root_id) >= root_buffers_.size() ||
+                  !root_buffers_[root_id],
+              "Cannot remove missing root buffer id {}.", root_id);
+  root_buffers_size_map_.erase(root_buffers_[root_id].get());
+  root_buffers_[root_id].reset();
+  hash_overflow_watches_.erase(
+      std::remove_if(hash_overflow_watches_.begin(),
+                     hash_overflow_watches_.end(),
+                     [root_id](const HashOverflowWatch &watch) {
+                       return watch.root_id == root_id;
+                     }),
+      hash_overflow_watches_.end());
 }
 
 DeviceAllocation *GfxRuntime::get_root_buffer(int id) const {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
-  if (id < 0 || static_cast<size_t>(id) >= root_buffers_.size()) {
+  if (id < 0 || static_cast<size_t>(id) >= root_buffers_.size() ||
+      !root_buffers_[id]) {
     TI_ERROR("root buffer id {} not found", id);
   }
   return root_buffers_[id].get();
@@ -2408,7 +2464,8 @@ DeviceAllocation *GfxRuntime::get_root_buffer(int id) const {
 
 size_t GfxRuntime::get_root_buffer_size(int id) const {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
-  if (id < 0 || static_cast<size_t>(id) >= root_buffers_.size()) {
+  if (id < 0 || static_cast<size_t>(id) >= root_buffers_.size() ||
+      !root_buffers_[id]) {
     TI_ERROR("root buffer id {} not found", id);
   }
   auto it = root_buffers_size_map_.find(root_buffers_[id].get());

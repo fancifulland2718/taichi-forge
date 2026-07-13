@@ -37,6 +37,7 @@ namespace taichi::lang {
 #if defined(TI_WITH_CUDA)
 class JITModuleCUDA : public JITModule {
  private:
+  friend class JITSessionCUDA;
   void *module_;
 
  public:
@@ -105,6 +106,8 @@ class JITSessionCUDA : public JITSession {
   }
 
   JITModule *add_module(std::unique_ptr<llvm::Module> M, int max_reg) override;
+
+  bool remove_module(JITModule *module) override;
 
   llvm::DataLayout get_data_layout() override {
     return data_layout;

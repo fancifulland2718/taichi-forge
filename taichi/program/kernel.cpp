@@ -142,6 +142,27 @@ const std::optional<std::string> &Kernel::get_compile_tier_override() const {
   return compile_tier_override_;
 }
 
+void Kernel::retire_definition() {
+  ir.reset();
+  context.reset();
+  std::vector<SNode *>().swap(no_activate);
+  std::vector<Parameter>().swap(parameter_list);
+  decltype(nested_parameters)().swap(nested_parameters);
+  decltype(argpack_types)().swap(argpack_types);
+  std::vector<Ret>().swap(rets);
+  args_type = nullptr;
+  args_size = 0;
+  ret_type = nullptr;
+  ret_size = 0;
+  name.clear();
+  name.shrink_to_fit();
+  kernel_key_.clear();
+  kernel_key_.shrink_to_fit();
+  kernel_key_valid_ = false;
+  offline_cache_body_.reset();
+  compile_tier_override_.reset();
+}
+
 void Kernel::init(Program &program,
                   const std::function<void()> &func,
                   const std::string &primal_name,

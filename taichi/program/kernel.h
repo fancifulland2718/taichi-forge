@@ -72,6 +72,11 @@ class TI_DLL_EXPORT Kernel : public Callable {
 
   const std::optional<std::string> &get_compile_tier_override() const;
 
+  // Preserve the Kernel object's address for stale Graph/AOT plans while
+  // releasing the frontend/lowered IR and specialization metadata that can no
+  // longer be compiled after an explicitly bound SNodeTree is destroyed.
+  void retire_definition();
+
  private:
   void init(Program &program,
             const std::function<void()> &func,

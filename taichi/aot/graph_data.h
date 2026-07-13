@@ -12,6 +12,7 @@
 #include "taichi/program/callable.h"
 #include "taichi/aot/module_data.h"
 #include "taichi/program/compile_config.h"
+#include "taichi/struct/snode_tree.h"
 #define TI_RUNTIME_HOST
 #include "taichi/program/context.h"
 #undef TI_RUNTIME_HOST
@@ -26,6 +27,7 @@ class Texture;
 class Matrix;
 class Kernel;
 class CompiledKernelData;
+class Program;
 
 namespace aot {
 
@@ -171,6 +173,10 @@ struct CompiledDispatch {
   std::vector<Arg> symbolic_args;
   Kernel *compiled_kernel{nullptr};
   taichi::lang::Kernel *ti_kernel{nullptr};
+  // JIT-only metadata. AOT serialization intentionally remains unchanged:
+  // loaded module fields have a module-owned lifecycle rather than Program
+  // SNodeTree identities.
+  std::vector<SNodeTreeDependency> snode_tree_dependencies;
 
   TI_IO_DEF(kernel_name, symbolic_args);
 };
@@ -361,6 +367,8 @@ struct CompiledGraphJITCache {
 
   std::vector<CompiledGraphJITCachedKernel> kernels;
   std::vector<CompiledGraphDispatchRuntimePlan> runtime_arg_plans;
+  Program *validated_snode_tree_program{nullptr};
+  std::uint64_t validated_snode_tree_epoch{0};
   std::unique_ptr<CompiledGraphCudaState, CompiledGraphCudaStateDeleter>
       cuda_graph_state;
   std::unique_ptr<CompiledGraphVulkanState, CompiledGraphVulkanStateDeleter>
@@ -385,16 +393,12 @@ struct CompiledGraphJITCache {
 struct TI_DLL_EXPORT CompiledGraph {
   std::vector<CompiledDispatch> dispatches;
   std::unordered_map<std::string, aot::Arg> args;
+  std::vector<SNodeTreeDependency> snode_tree_dependencies;
 
   CompiledGraph() = default;
-  explicit CompiledGraph(std::vector<CompiledDispatch> compiled_dispatches)
-      : dispatches(std::move(compiled_dispatches)) {
-  }
+  explicit CompiledGraph(std::vector<CompiledDispatch> compiled_dispatches);
   CompiledGraph(std::vector<CompiledDispatch> compiled_dispatches,
-                std::unordered_map<std::string, aot::Arg> graph_args)
-      : dispatches(std::move(compiled_dispatches)),
-        args(std::move(graph_args)) {
-  }
+                std::unordered_map<std::string, aot::Arg> graph_args);
   CompiledGraph(const CompiledGraph &) = default;
   CompiledGraph &operator=(const CompiledGraph &) = default;
   CompiledGraph(CompiledGraph &&) = default;

@@ -9,6 +9,7 @@
 
 #include <cstring>
 #include <memory>
+#include <optional>
 
 #if defined(TI_WITH_LLVM)
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
@@ -17,8 +18,6 @@
 
 #if defined(TI_WITH_CUDA)
 #include <algorithm>
-#include <optional>
-
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
@@ -33,6 +32,38 @@ namespace taichi::lang {
 namespace aot {
 
 namespace {
+
+std::vector<SNodeTreeDependency> collect_snode_tree_dependencies(
+    const std::vector<CompiledDispatch> &dispatches) {
+  std::vector<SNodeTreeDependency> dependencies;
+  for (const auto &dispatch : dispatches) {
+    dependencies.insert(dependencies.end(),
+                        dispatch.snode_tree_dependencies.begin(),
+                        dispatch.snode_tree_dependencies.end());
+  }
+  std::sort(dependencies.begin(), dependencies.end());
+  dependencies.erase(
+      std::unique(dependencies.begin(), dependencies.end()),
+      dependencies.end());
+  return dependencies;
+}
+
+Program *jit_graph_program(const CompiledGraph &graph) {
+  Program *program = nullptr;
+  for (const auto &dispatch : graph.dispatches) {
+    if (dispatch.ti_kernel == nullptr) {
+      continue;
+    }
+    if (program == nullptr) {
+      program = dispatch.ti_kernel->program;
+    } else {
+      TI_ERROR_IF(program != dispatch.ti_kernel->program,
+                  "A JIT Graph cannot dispatch kernels from multiple "
+                  "Programs.");
+    }
+  }
+  return program;
+}
 
 const CompiledKernelData *get_or_compile_cached_kernel(
     const CompiledDispatch &dispatch,
@@ -235,6 +266,22 @@ bool try_launch_cached_llvm_kernel(Program *prog,
 #endif
 
 }  // namespace
+
+CompiledGraph::CompiledGraph(
+    std::vector<CompiledDispatch> compiled_dispatches)
+    : dispatches(std::move(compiled_dispatches)),
+      snode_tree_dependencies(
+          collect_snode_tree_dependencies(dispatches)) {
+}
+
+CompiledGraph::CompiledGraph(
+    std::vector<CompiledDispatch> compiled_dispatches,
+    std::unordered_map<std::string, aot::Arg> graph_args)
+    : dispatches(std::move(compiled_dispatches)),
+      args(std::move(graph_args)),
+      snode_tree_dependencies(
+          collect_snode_tree_dependencies(dispatches)) {
+}
 
 #if defined(TI_WITH_CUDA)
 namespace {
@@ -1085,6 +1132,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
 }
 
 }  // namespace
+
 #endif
 
 #if !defined(TI_WITH_CUDA)
@@ -1263,6 +1311,8 @@ void CompiledGraphJITCache::clear_runtime_state() {
   vulkan_graph_state.reset();
   kernels.clear();
   runtime_arg_plans.clear();
+  validated_snode_tree_program = nullptr;
+  validated_snode_tree_epoch = 0;
 }
 
 CompiledGraphJITCache::~CompiledGraphJITCache() {
@@ -1283,6 +1333,13 @@ void CompiledGraph::run(
 void CompiledGraph::jit_run(
     const CompileConfig &compile_config,
     const std::unordered_map<std::string, IValue> &args) const {
+  Program *program = jit_graph_program(*this);
+  std::optional<Program::SNodeTreeLifecycleReadGuard> tree_lifecycle_guard;
+  if (program != nullptr) {
+    tree_lifecycle_guard.emplace(
+        program->acquire_snode_tree_lifecycle_read_guard());
+    program->validate_snode_tree_dependencies(snode_tree_dependencies);
+  }
 #if defined(TI_WITH_CUDA)
   std::unique_lock<std::recursive_mutex> cuda_submission_lock;
   if (compile_config.arch == Arch::cuda) {
@@ -1308,6 +1365,12 @@ void CompiledGraph::jit_run_cached(
     const CompileConfig &compile_config,
     const std::unordered_map<std::string, IValue> &args,
     CompiledGraphJITCache &cache) const {
+  Program *program = jit_graph_program(*this);
+  std::optional<Program::SNodeTreeLifecycleReadGuard> tree_lifecycle_guard;
+  if (program != nullptr) {
+    tree_lifecycle_guard.emplace(
+        program->acquire_snode_tree_lifecycle_read_guard());
+  }
 #if defined(TI_WITH_CUDA)
   // A graph is one submission transaction. This is required not only while
   // capturing: replaying a CUDA graph concurrently with an ordinary kernel on
@@ -1320,6 +1383,26 @@ void CompiledGraph::jit_run_cached(
   }
 #endif
   std::lock_guard<std::mutex> lock(cache.run_mutex);
+  if (program != nullptr &&
+      (cache.validated_snode_tree_program != program ||
+       cache.validated_snode_tree_epoch != tree_lifecycle_guard->epoch())) {
+    try {
+      program->validate_snode_tree_dependencies(snode_tree_dependencies);
+    } catch (...) {
+      // The dependency is stale. Retire replay/cached launch state before
+      // surfacing the rebuild requirement so no backend object keeps an
+      // executable containing the old root binding.
+      cache.cuda_graph_state.reset();
+      cache.vulkan_graph_state.reset();
+      cache.kernels.clear();
+      cache.runtime_arg_plans.clear();
+      cache.validated_snode_tree_program = nullptr;
+      cache.validated_snode_tree_epoch = 0;
+      throw;
+    }
+    cache.validated_snode_tree_program = program;
+    cache.validated_snode_tree_epoch = tree_lifecycle_guard->epoch();
+  }
 #if defined(TI_WITH_CUDA)
   if (compile_config.arch == Arch::cuda &&
       try_run_cuda_graph(*this, compile_config, args, cache)) {

@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <algorithm>
+#include <vector>
 
 #include "taichi/rhi/arch.h"
 
@@ -107,6 +108,10 @@ class CompiledKernelData {
   Err dump(std::ostream &os) const;
 
   virtual std::unique_ptr<CompiledKernelData> clone() const = 0;
+
+  // Sorted, unique Program SNodeTree ids actually referenced by the lowered
+  // kernel. Graph lifecycle tracking consumes this backend-neutral view.
+  virtual std::vector<int> snode_tree_ids() const = 0;
 
   virtual Err debug_print(std::ostream &os) const {
     return dump(os);

@@ -82,7 +82,7 @@ TaichiLLVMContext::TaichiLLVMContext(const CompileConfig &config, Arch arch)
       nullptr);
 
   if (arch_is_cpu(arch)) {
-#if defined(TI_PLATFORM_OSX) and defined(TI_ARCH_ARM)
+#if defined(TI_PLATFORM_OSX) && defined(TI_ARCH_ARM)
     // Note that on Apple Silicon (M1), "native" seems to mean arm instead of
     // arm64 (aka AArch64).
     LLVMInitializeAArch64Target();
@@ -968,7 +968,10 @@ void TaichiLLVMContext::init_runtime_module(llvm::Module *runtime_module) {
 void TaichiLLVMContext::delete_snode_tree(int id) {
   TI_ASSERT(linking_context_data->struct_modules.erase(id));
   for (auto &[thread_id, data] : per_thread_data_) {
-    TI_ASSERT(data->struct_modules.erase(id));
+    // A worker may have acquired thread-local LLVM state without ever
+    // compiling a kernel that needs this tree. Such a context legitimately
+    // has no cloned struct module to erase.
+    data->struct_modules.erase(id);
   }
 }
 

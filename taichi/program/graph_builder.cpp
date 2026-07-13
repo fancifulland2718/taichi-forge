@@ -10,6 +10,12 @@ void Dispatch::compile(
   dispatch.symbolic_args = symbolic_args_;
   dispatch.ti_kernel = kernel_;
   dispatch.compiled_kernel = nullptr;
+  const auto &compiled = kernel_->program->compile_kernel(
+      kernel_->program->compile_config(),
+      kernel_->program->get_device_caps(), *kernel_);
+  dispatch.snode_tree_dependencies =
+      kernel_->program->snapshot_snode_tree_dependencies(
+          compiled.snode_tree_ids());
   compiled_dispatches.push_back(std::move(dispatch));
 }
 

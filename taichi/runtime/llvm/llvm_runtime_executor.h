@@ -66,6 +66,8 @@ class LlvmRuntimeExecutor {
 
   JITModule *create_jit_module(std::unique_ptr<llvm::Module> module);
 
+  bool remove_jit_module(JITModule *module);
+
   JITModule *get_runtime_jit_module();
 
   LLVMRuntime *get_llvm_runtime();

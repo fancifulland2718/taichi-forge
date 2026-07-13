@@ -27,7 +27,12 @@ class JITSession {
   virtual JITModule *add_module(std::unique_ptr<llvm::Module> M,
                                 int max_reg = 0) = 0;
 
-  // virtual void remove_module(JITModule *module) = 0;
+  // Release a non-runtime module after the owning launcher has drained every
+  // invocation that can call it. Backends that cannot unload individual
+  // modules retain the old lifetime by returning false.
+  virtual bool remove_module(JITModule *module) {
+    return false;
+  }
 
   virtual void *lookup(const std::string Name) {
     TI_NOT_IMPLEMENTED

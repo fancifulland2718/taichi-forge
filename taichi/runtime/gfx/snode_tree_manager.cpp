@@ -17,8 +17,8 @@ void SNodeTreeManager::materialize_snode_tree(
   auto *const root = tree->root();
   CompiledSNodeStructs compiled_structs = compile_snode_structs(*root, policy);
   runtime_->update_listgen_buffer_for_snode_tree(compiled_structs);
-  runtime_->add_root_buffer(compiled_structs.root_size);
-  const int root_id = static_cast<int>(runtime_->root_buffers_.size()) - 1;
+  const int root_id = tree->id();
+  runtime_->add_root_buffer(root_id, compiled_structs.root_size);
   runtime_->register_hash_overflow_checks(root_id, compiled_structs);
 #if defined(TI_WITH_VULKAN_POINTER)
   // 路线 B B-1（2026-04-30）：用 contracts 在该 root_buffer 上构造 BumpOnly
@@ -70,23 +70,29 @@ void SNodeTreeManager::materialize_snode_tree(
   }
   runtime_->node_allocators_[root_id] = std::move(allocators_for_tree);
 #endif
-  compiled_snode_structs_.push_back(compiled_structs);
+  if (static_cast<std::size_t>(root_id) == compiled_snode_structs_.size()) {
+    compiled_snode_structs_.push_back(std::move(compiled_structs));
+  } else {
+    TI_ASSERT(root_id >= 0 &&
+              static_cast<std::size_t>(root_id) <
+                  compiled_snode_structs_.size());
+    TI_ASSERT(compiled_snode_structs_[root_id].root == nullptr);
+    compiled_snode_structs_[root_id] = std::move(compiled_structs);
+  }
 }
 
 void SNodeTreeManager::destroy_snode_tree(SNodeTree *snode_tree) {
-  int root_id = -1;
-  for (int i = 0; i < compiled_snode_structs_.size(); ++i) {
-    if (compiled_snode_structs_[i].root == snode_tree->root()) {
-      root_id = i;
-    }
-  }
-  if (root_id == -1) {
-    TI_ERROR("the tree to be destroyed cannot be found");
-  }
-  runtime_->root_buffers_[root_id].reset();
+  const int root_id = snode_tree->id();
+  TI_ERROR_IF(
+      root_id < 0 ||
+          static_cast<std::size_t>(root_id) >= compiled_snode_structs_.size() ||
+          compiled_snode_structs_[root_id].root != snode_tree->root(),
+      "the tree to be destroyed cannot be found");
+  runtime_->remove_root_buffer(root_id);
 #if defined(TI_WITH_VULKAN_POINTER)
   runtime_->node_allocators_.erase(root_id);
 #endif
+  compiled_snode_structs_[root_id] = {};
 }
 
 size_t SNodeTreeManager::get_field_in_tree_offset(int tree_id,
@@ -108,6 +114,11 @@ size_t SNodeTreeManager::get_field_in_tree_offset(int tree_id,
 }
 
 DevicePtr SNodeTreeManager::get_snode_tree_device_ptr(int tree_id) {
+  TI_ERROR_IF(tree_id < 0 ||
+                  static_cast<std::size_t>(tree_id) >=
+                      compiled_snode_structs_.size() ||
+                  compiled_snode_structs_[tree_id].root == nullptr,
+              "Requested SNodeTree id {} is not active.", tree_id);
   return runtime_->root_buffers_[tree_id]->get_ptr();
 }
 

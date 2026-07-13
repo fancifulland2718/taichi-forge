@@ -27,6 +27,10 @@ std::unique_ptr<lang::CompiledKernelData> CompiledKernelData::clone() const {
   return std::make_unique<CompiledKernelData>(arch_, data_);
 }
 
+std::vector<int> CompiledKernelData::snode_tree_ids() const {
+  return data_.used_snode_tree_ids;
+}
+
 CompiledKernelData::Err CompiledKernelData::check() const {
   const auto &compiled_data = data_.compiled_data;
   const auto &tasks = compiled_data.tasks;

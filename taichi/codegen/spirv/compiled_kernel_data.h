@@ -17,7 +17,8 @@ class CompiledKernelData : public lang::CompiledKernelData {
     struct Metadata {
       TaichiKernelAttributes kernel_attribs;
       std::size_t num_snode_trees{0};
-      TI_IO_DEF(kernel_attribs, num_snode_trees);
+      std::vector<int> used_snode_tree_ids;
+      TI_IO_DEF(kernel_attribs, num_snode_trees, used_snode_tree_ids);
     } metadata;
     // source code
     struct Source {
@@ -31,6 +32,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
 
   Arch arch() const override;
   std::unique_ptr<lang::CompiledKernelData> clone() const override;
+  std::vector<int> snode_tree_ids() const override;
 
   const InternalData &get_internal_data() const {
     return data_;

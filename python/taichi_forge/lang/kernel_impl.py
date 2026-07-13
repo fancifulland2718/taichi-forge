@@ -555,6 +555,7 @@ class TaichiCallableTemplateMapper:
         self.num_args = len(arguments)
         self.template_slot_locations = template_slot_locations
         self.mapping = {}
+        self._next_mapping_id = 0
         self._static_arg_features = tuple("#" for _ in arguments)
         self._dynamic_arg_extractors = tuple(
             (i, arg.annotation, arg.name)
@@ -568,6 +569,7 @@ class TaichiCallableTemplateMapper:
         }
         if not self._dynamic_arg_extractors:
             self.mapping[self._static_arg_features] = 0
+            self._next_mapping_id = 1
 
     @staticmethod
     def _annotation_needs_arg_feature(anno):
@@ -607,6 +609,10 @@ class TaichiCallableTemplateMapper:
     @staticmethod
     def extract_arg(arg, anno, arg_name):
         if isinstance(anno, template):
+            # Import lazily: field.py and kernel_impl.py participate in the
+            # frontend import cycle.
+            from taichi_forge.lang.field import Field  # pylint: disable=C0415
+
             if isinstance(arg, taichi_forge.lang.snode.SNode):
                 return arg.ptr
             if isinstance(arg, taichi_forge.lang.expr.Expr):
@@ -620,7 +626,11 @@ class TaichiCallableTemplateMapper:
                     "Ndarray shouldn't be passed in via `ti.template()`, please annotate your kernel using `ti.types.ndarray(...)` instead"
                 )
 
-            if isinstance(arg, (list, tuple, dict, set)) or hasattr(arg, "_data_oriented"):
+            if (
+                isinstance(arg, Field)
+                or isinstance(arg, (list, tuple, dict, set))
+                or hasattr(arg, "_data_oriented")
+            ):
                 # [Composite arguments] Return weak reference to the object
                 # Taichi kernel will cache the extracted arguments, thus we can't simply return the original argument.
                 # Instead, a weak reference to the original value is returned to avoid memory leak.
@@ -819,11 +829,33 @@ class TaichiCallableTemplateMapper:
         if not self._dynamic_arg_extractors:
             return 0, self._static_arg_features
 
+        # Field/data-oriented template identities are represented by weak
+        # references. Remove dead specialization keys before adding another
+        # one so explicit SNodeTree churn does not retain every historical
+        # Python Field wrapper. IDs remain monotonic to avoid aliasing a still
+        # cached compiled specialization with a newer object.
+        dead_keys = [
+            key for key in self.mapping if self._cache_key_is_dead(key)
+        ]
+        for key in dead_keys:
+            del self.mapping[key]
+
         arg_features, key = self._extract_features_and_key(args)
         if key not in self.mapping:
-            count = len(self.mapping)
-            self.mapping[key] = count
+            self.mapping[key] = self._next_mapping_id
+            self._next_mapping_id += 1
         return self.mapping[key], arg_features
+
+    @staticmethod
+    def _cache_key_is_dead(value):
+        if isinstance(value, weakref.ReferenceType):
+            return value() is None
+        if isinstance(value, tuple):
+            return any(
+                TaichiCallableTemplateMapper._cache_key_is_dead(item)
+                for item in value
+            )
+        return False
 
 
 def _get_global_vars(_func):
@@ -1315,10 +1347,13 @@ class Kernel:
 
         try:
             prog = impl.get_runtime().prog
-            # Compile kernel (& Online Cache & Offline Cache)
-            compiled_kernel_data = prog.compile_kernel(prog.config(), prog.get_device_caps(), t_kernel)
-            # Launch kernel
-            prog.launch_kernel(compiled_kernel_data, launch_ctx)
+            # Compile/cache lookup and launch form one native SNodeTree
+            # lifecycle transaction. This also removes a cross-language call
+            # from the steady path while preventing explicit tree destruction
+            # from retiring the compiled handle between the two operations.
+            prog.compile_and_launch_kernel(
+                prog.config(), prog.get_device_caps(), t_kernel, launch_ctx
+            )
         except Exception as e:
             e = handle_exception_from_cpp(e)
             if impl.get_runtime().print_full_traceback:

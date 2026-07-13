@@ -1,4 +1,5 @@
 #include "taichi/codegen/spirv/kernel_compiler.h"
+#include "taichi/analysis/gather_snode_tree_dependencies.h"
 #include "taichi/system/profiler.h"
 
 #include "taichi/ir/analysis.h"
@@ -101,6 +102,8 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
                 internal_data.src.spirv_src);
   }
   internal_data.metadata.num_snode_trees = config_.compiled_struct_data->size();
+  internal_data.metadata.used_snode_tree_ids =
+      irpass::analysis::gather_snode_tree_dependencies(chi_ir);
   return std::make_unique<spirv::CompiledKernelData>(compile_config.arch,
                                                      internal_data);
 }

@@ -1,6 +1,7 @@
 #include "taichi/compilation_manager/kernel_compilation_manager.h"
 #include "taichi/system/profiler.h"
 
+#include <algorithm>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -341,6 +342,46 @@ void KernelCompilationManager::clear() {
   cached_data_.size = 0;
   updated_data_.clear();
   in_progress_keys_.clear();
+}
+
+void KernelCompilationManager::invalidate_snode_tree(int tree_id) {
+  auto depends_on_tree = [tree_id](const KernelCacheData &kernel) {
+    if (!kernel.compiled_kernel_data) {
+      return false;
+    }
+    const auto &tree_ids = kernel.compiled_kernel_data->snode_tree_ids();
+    return std::find(tree_ids.begin(), tree_ids.end(), tree_id) !=
+           tree_ids.end();
+  };
+
+  std::unique_lock<std::mutex> lock(cache_mutex_);
+  cache_cv_.wait(lock, [this] { return in_progress_keys_.empty(); });
+
+  for (auto iter = caching_kernels_.begin();
+       iter != caching_kernels_.end();) {
+    if (depends_on_tree(iter->second)) {
+      iter = caching_kernels_.erase(iter);
+    } else {
+      ++iter;
+    }
+  }
+
+  for (auto iter = cached_data_.kernels.begin();
+       iter != cached_data_.kernels.end();) {
+    if (!depends_on_tree(iter->second)) {
+      ++iter;
+      continue;
+    }
+    KernelCacheData *entry = &iter->second;
+    updated_data_.erase(
+        std::remove(updated_data_.begin(), updated_data_.end(), entry),
+        updated_data_.end());
+    cached_data_.size =
+        iter->second.size > cached_data_.size
+            ? 0
+            : cached_data_.size - iter->second.size;
+    iter = cached_data_.kernels.erase(iter);
+  }
 }
 
 void KernelCompilationManager::clean_offline_cache(

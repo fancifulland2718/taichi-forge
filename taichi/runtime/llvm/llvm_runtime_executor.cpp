@@ -182,6 +182,12 @@ JITModule *LlvmRuntimeExecutor::create_jit_module(
   return jit_session_->add_module(std::move(module));
 }
 
+bool LlvmRuntimeExecutor::remove_jit_module(JITModule *module) {
+  TI_ASSERT(module != nullptr);
+  TI_ASSERT(module != runtime_jit_module_);
+  return jit_session_->remove_module(module);
+}
+
 JITModule *LlvmRuntimeExecutor::get_runtime_jit_module() {
   return runtime_jit_module_;
 }

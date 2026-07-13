@@ -81,6 +81,11 @@ class KernelCompilationManager final {
   // offline_cache is disabled, while preserving finalize-time ownership order.
   void clear();
 
+  // Retire in-memory compiled artifacts that contain a static binding to the
+  // specified SNodeTree. Explicit tree destruction is a cold transaction, so
+  // this waits for outstanding compilation before removing matching entries.
+  void invalidate_snode_tree(int tree_id);
+
   // Run offline cache cleaning
   void clean_offline_cache(offline_cache::CleanCachePolicy policy,
                            int max_bytes,

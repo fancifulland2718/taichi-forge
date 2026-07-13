@@ -252,9 +252,15 @@ class TI_DLL_EXPORT GfxRuntime {
     TaichiKernelAttributes kernel_attribs;
     std::vector<std::vector<uint32_t>> task_spirv_source_codes;
     std::size_t num_snode_trees{0};
+    std::vector<int> snode_tree_ids;
   };
 
   KernelHandle register_taichi_kernel(RegisterParams params);
+
+  // Called only after an explicit Program-side synchronize. Releases compiled
+  // pipelines that statically bind the destroyed root allocation. Existing
+  // replay registrations survive and can record again for unrelated graphs.
+  void retire_snode_tree_kernels(int tree_id);
 
   void launch_kernel(KernelHandle handle, LaunchContextBuilder &host_ctx);
 
@@ -358,6 +364,13 @@ class TI_DLL_EXPORT GfxRuntime {
   PipelineCache *get_backend_cache() const;
 
   void add_root_buffer(size_t root_buffer_size);
+
+  // Install a root buffer at the generation-safe Program SNodeTree id. The
+  // indexed overload permits an explicitly destroyed slot to be reused
+  // without changing the root binding seen by compiled kernels.
+  void add_root_buffer(int root_id, size_t root_buffer_size);
+
+  void remove_root_buffer(int root_id);
 
   void update_listgen_buffer_for_snode_tree(
       const CompiledSNodeStructs &compiled_structs);
@@ -537,6 +550,7 @@ class TI_DLL_EXPORT GfxRuntime {
   bool debug_mode_{false};
 
   std::vector<std::unique_ptr<CompiledTaichiKernel>> ti_kernels_;
+  std::vector<std::vector<int>> ti_kernel_snode_tree_ids_;
 
   std::unordered_map<DeviceAllocation *, size_t> root_buffers_size_map_;
   std::unordered_map<DeviceAllocationId, ImageLayout> last_image_layouts_;

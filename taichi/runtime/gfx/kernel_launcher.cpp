@@ -39,10 +39,16 @@ KernelLauncher::Handle KernelLauncher::register_kernel(
     params.kernel_attribs = spirv_data.metadata.kernel_attribs;
     params.task_spirv_source_codes = spirv_data.src.spirv_src;
     params.num_snode_trees = spirv_data.metadata.num_snode_trees;
+    params.snode_tree_ids = compiled_kernel_data.snode_tree_ids();
     auto h = config_.gfx_runtime_->register_taichi_kernel(std::move(params));
     compiled_kernel_data.set_handle(h);
   }
   return *compiled_kernel_data.get_handle();
+}
+
+void KernelLauncher::retire_snode_tree(int tree_id) {
+  std::lock_guard<std::mutex> lock(registration_mutex_);
+  config_.gfx_runtime_->retire_snode_tree_kernels(tree_id);
 }
 
 }  // namespace gfx

@@ -561,6 +561,27 @@ class PyTaichi:
     def register_runtime_object(self, obj):
         self._runtime_object_refs.append(weakref.ref(obj))
 
+    def begin_snode_tree_destroy(self, dependency):
+        notified = []
+        live_refs = []
+        for ref in self._runtime_object_refs:
+            obj = ref()
+            if obj is None:
+                continue
+            live_refs.append(ref)
+            retire = getattr(obj, "_retire_snode_tree", None)
+            if retire is not None and retire(dependency):
+                notified.append(obj)
+        self._runtime_object_refs = live_refs
+        return notified
+
+    @staticmethod
+    def cancel_snode_tree_destroy(dependency, notified):
+        for obj in notified:
+            cancel = getattr(obj, "_cancel_snode_tree_retirement", None)
+            if cancel is not None:
+                cancel(dependency)
+
     def invalidate_runtime_objects(self):
         refs = self._runtime_object_refs
         self._runtime_object_refs = []

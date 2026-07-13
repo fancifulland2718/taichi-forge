@@ -14,8 +14,11 @@ void get_snodes_to_root_id_impl(const SNode &node,
 
 }  // namespace
 
-SNodeTree::SNodeTree(int id, std::unique_ptr<SNode> root)
-    : id_(id), root_(std::move(root)) {
+SNodeTree::SNodeTree(int id,
+                     std::uint64_t generation,
+                     std::unique_ptr<SNode> root)
+    : id_(id), generation_(generation), root_(std::move(root)) {
+  TI_ASSERT(generation_ != 0);
   check_tree_validity(*root_);
 }
 

@@ -1,3 +1,6 @@
+import gc
+import weakref
+
 from taichi_forge.lang.kernel_arguments import KernelArgument
 from taichi_forge.lang.kernel_impl import TaichiCallableTemplateMapper
 
@@ -91,3 +94,21 @@ def test_callable_template_mapper_ndarray_cache_tracks_grad_state():
     instance_id, features = mapper.lookup((arr,))
     assert instance_id == 1
     assert features[0][2] is True
+
+
+@test_utils.test()
+def test_callable_template_mapper_prunes_dead_field_identities():
+    mapper = TaichiCallableTemplateMapper(
+        (KernelArgument(ti.template(), "field"),),
+        (0,),
+    )
+    first = ti.field(ti.i32, shape=4)
+    assert mapper.lookup((first,))[0] == 0
+    first_ref = weakref.ref(first)
+    del first
+    gc.collect()
+    assert first_ref() is None
+
+    second = ti.field(ti.i32, shape=4)
+    assert mapper.lookup((second,))[0] == 1
+    assert len(mapper.mapping) == 1

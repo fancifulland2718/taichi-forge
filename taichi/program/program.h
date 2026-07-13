@@ -59,6 +59,30 @@ class TI_DLL_EXPORT Program {
  public:
   using Kernel = taichi::lang::Kernel;
 
+  class SNodeTreeLifecycleReadGuard {
+   public:
+    SNodeTreeLifecycleReadGuard(const SNodeTreeLifecycleReadGuard &) = delete;
+    SNodeTreeLifecycleReadGuard &operator=(
+        const SNodeTreeLifecycleReadGuard &) = delete;
+    SNodeTreeLifecycleReadGuard(SNodeTreeLifecycleReadGuard &&other) noexcept;
+    SNodeTreeLifecycleReadGuard &operator=(
+        SNodeTreeLifecycleReadGuard &&other) = delete;
+    ~SNodeTreeLifecycleReadGuard();
+
+    std::uint64_t epoch() const {
+      return epoch_;
+    }
+
+   private:
+    friend class Program;
+    explicit SNodeTreeLifecycleReadGuard(Program *program);
+
+    Program *program_{nullptr};
+    Program *previous_program_{nullptr};
+    std::shared_lock<std::shared_mutex> lock_;
+    std::uint64_t epoch_{0};
+  };
+
   uint64 *result_buffer{nullptr};  // Note that this result_buffer is used
                                    // only for runtime JIT functions (e.g.
                                    // `runtime_memory_allocate_aligned`)
@@ -125,6 +149,18 @@ class TI_DLL_EXPORT Program {
 
   int get_snode_tree_size();
 
+  SNodeTreeLifecycleReadGuard acquire_snode_tree_lifecycle_read_guard();
+
+  std::vector<SNodeTreeDependency> snapshot_snode_tree_dependencies(
+      const std::vector<int> &tree_ids) const;
+
+  void validate_snode_tree_dependencies(
+      const std::vector<SNodeTreeDependency> &dependencies) const;
+
+  std::uint64_t snode_tree_mutation_epoch() const {
+    return snode_tree_mutation_epoch_.load(std::memory_order_acquire);
+  }
+
   Kernel &kernel(const std::function<void(Kernel *)> &body,
                  const std::string &name = "",
                  AutodiffMode autodiff_mode = AutodiffMode::kNone) {
@@ -165,6 +201,14 @@ class TI_DLL_EXPORT Program {
 
   void launch_kernel(const CompiledKernelData &compiled_kernel_data,
                      LaunchContextBuilder &ctx);
+
+  // Python ordinary-kernel fast path. Keep cache lookup/compilation and launch
+  // in one SNodeTree lifecycle read transaction so explicit tree destruction
+  // cannot retire CompiledKernelData or a backend handle in the call gap.
+  void compile_and_launch_kernel(const CompileConfig &compile_config,
+                                 const DeviceCapabilityConfig &caps,
+                                 const Kernel &kernel_def,
+                                 LaunchContextBuilder &ctx);
 
   void check_runtime_error_after_kernel_launch(
       const CompiledKernelData &compiled_kernel_data);
@@ -2209,6 +2253,10 @@ class TI_DLL_EXPORT Program {
 
   std::vector<std::unique_ptr<SNodeTree>> snode_trees_;
   std::stack<int> free_snode_tree_ids_;
+  std::vector<std::uint64_t> snode_tree_generations_;
+  std::vector<std::uint8_t> snode_tree_active_;
+  mutable std::shared_mutex snode_tree_lifecycle_mutex_;
+  std::atomic<std::uint64_t> snode_tree_mutation_epoch_{1};
 
   std::vector<std::unique_ptr<Function>> functions_;
   std::unordered_map<FunctionKey, Function *> function_map_;

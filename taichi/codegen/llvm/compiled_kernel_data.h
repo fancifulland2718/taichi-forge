@@ -16,6 +16,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
     std::vector<std::pair<std::vector<int>, Callable::Parameter>> args;
     std::vector<Callable::Ret> rets;
     LLVMCompiledKernel compiled_data;
+    std::vector<int> used_snode_tree_ids;
 
     const StructType *ret_type = nullptr;
     size_t ret_size{0};
@@ -26,6 +27,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
     TI_IO_DEF(args,
               rets,
               compiled_data,
+              used_snode_tree_ids,
               ret_type,
               ret_size,
               args_type,
@@ -37,6 +39,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
         : args(o.args),
           rets(o.rets),
           compiled_data(o.compiled_data.clone()),
+          used_snode_tree_ids(o.used_snode_tree_ids),
           ret_type(o.ret_type),
           ret_size(o.ret_size),
           args_type(o.args_type),
@@ -51,6 +54,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
 
   Arch arch() const override;
   std::unique_ptr<lang::CompiledKernelData> clone() const override;
+  std::vector<int> snode_tree_ids() const override;
 
   Err check() const override;
 

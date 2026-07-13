@@ -20,8 +20,11 @@
 #include "taichi/rhi/cpu/cpu_device.h"
 #endif
 #include "taichi/program/parallel_executor.h"
+#include "taichi/analysis/gather_snode_tree_dependencies.h"
 
+#include <limits>
 #include <stdexcept>
+#include <utility>
 
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_context.h"
@@ -72,6 +75,89 @@
 #include <vector>
 
 namespace taichi::lang {
+
+namespace {
+
+thread_local Program *active_snode_tree_lifecycle_program = nullptr;
+
+void advance_snode_tree_epoch(std::atomic<std::uint64_t> &epoch) {
+  const std::uint64_t current = epoch.load(std::memory_order_relaxed);
+  TI_ASSERT(current != std::numeric_limits<std::uint64_t>::max());
+  epoch.store(current + 1, std::memory_order_release);
+}
+
+}  // namespace
+
+Program::SNodeTreeLifecycleReadGuard::SNodeTreeLifecycleReadGuard(
+    Program *program)
+    : program_(program),
+      previous_program_(active_snode_tree_lifecycle_program),
+      lock_(program->snode_tree_lifecycle_mutex_),
+      epoch_(program->snode_tree_mutation_epoch()) {
+  active_snode_tree_lifecycle_program = program_;
+}
+
+Program::SNodeTreeLifecycleReadGuard::SNodeTreeLifecycleReadGuard(
+    SNodeTreeLifecycleReadGuard &&other) noexcept
+    : program_(std::exchange(other.program_, nullptr)),
+      previous_program_(std::exchange(other.previous_program_, nullptr)),
+      lock_(std::move(other.lock_)),
+      epoch_(other.epoch_) {
+}
+
+Program::SNodeTreeLifecycleReadGuard::~SNodeTreeLifecycleReadGuard() {
+  if (program_ == nullptr) {
+    return;
+  }
+  TI_ASSERT(active_snode_tree_lifecycle_program == program_);
+  active_snode_tree_lifecycle_program = previous_program_;
+}
+
+Program::SNodeTreeLifecycleReadGuard
+Program::acquire_snode_tree_lifecycle_read_guard() {
+  return SNodeTreeLifecycleReadGuard(this);
+}
+
+std::vector<SNodeTreeDependency> Program::snapshot_snode_tree_dependencies(
+    const std::vector<int> &tree_ids) const {
+  std::shared_lock<std::shared_mutex> lock(snode_tree_lifecycle_mutex_);
+  std::vector<SNodeTreeDependency> dependencies;
+  dependencies.reserve(tree_ids.size());
+  for (const int tree_id : tree_ids) {
+    TI_ERROR_IF(tree_id < 0 ||
+                    static_cast<std::size_t>(tree_id) >=
+                        snode_tree_active_.size() ||
+                    !snode_tree_active_[tree_id],
+                "Cannot compile a graph that references destroyed SNodeTree "
+                "id={}.",
+                tree_id);
+    dependencies.push_back(
+        {tree_id, snode_tree_generations_[tree_id]});
+  }
+  return dependencies;
+}
+
+void Program::validate_snode_tree_dependencies(
+    const std::vector<SNodeTreeDependency> &dependencies) const {
+  TI_ASSERT(active_snode_tree_lifecycle_program == this);
+  for (const auto &dependency : dependencies) {
+    const int tree_id = dependency.tree_id;
+    TI_ERROR_IF(tree_id < 0 ||
+                    static_cast<std::size_t>(tree_id) >=
+                        snode_tree_active_.size() ||
+                    !snode_tree_active_[tree_id],
+                "Graph references destroyed SNodeTree id={} generation={}; "
+                "rebuild the Graph.",
+                tree_id, dependency.generation);
+    const std::uint64_t current_generation =
+        snode_tree_generations_[tree_id];
+    TI_ERROR_IF(
+        current_generation != dependency.generation,
+        "Graph references stale SNodeTree id={} generation={}, but the "
+        "current generation is {}; rebuild the Graph.",
+        tree_id, dependency.generation, current_generation);
+  }
+}
 std::atomic<int> Program::num_instances_;
 
 namespace {
@@ -4440,6 +4526,9 @@ const CompiledKernelData &Program::compile_kernel(
     const CompileConfig &compile_config,
     const DeviceCapabilityConfig &caps,
     const Kernel &kernel_def) {
+  TI_ERROR_IF(kernel_def.ir == nullptr,
+              "Cannot compile a kernel whose SNodeTree dependency has been "
+              "destroyed; rebuild the kernel/Graph.");
   auto start_t = Time::get_time();
   TI_AUTO_PROF;
   auto &mgr = program_impl_->get_kernel_compilation_manager();
@@ -4454,6 +4543,9 @@ const CompiledKernelData *Program::find_cached_kernel(
     const CompileConfig &compile_config,
     const std::string &kernel_key,
     const Kernel &kernel_def) {
+  if (kernel_def.ir == nullptr) {
+    return nullptr;
+  }
   auto &mgr = program_impl_->get_kernel_compilation_manager();
   return mgr.find_cached_kernel(kernel_key, kernel_def, compile_config.arch,
                                 compile_config.offline_cache);
@@ -4627,8 +4719,25 @@ void Program::compile_kernels(
 
 void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,
                             LaunchContextBuilder &ctx) {
+  if (active_snode_tree_lifecycle_program != this) {
+    auto lifecycle_guard = acquire_snode_tree_lifecycle_read_guard();
+    program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
+                                                        ctx);
+    check_runtime_error_after_kernel_launch(compiled_kernel_data);
+    return;
+  }
   program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data, ctx);
   check_runtime_error_after_kernel_launch(compiled_kernel_data);
+}
+
+void Program::compile_and_launch_kernel(
+    const CompileConfig &compile_config,
+    const DeviceCapabilityConfig &caps,
+    const Kernel &kernel_def,
+    LaunchContextBuilder &ctx) {
+  auto lifecycle_guard = acquire_snode_tree_lifecycle_read_guard();
+  const auto &compiled = compile_kernel(compile_config, caps, kernel_def);
+  launch_kernel(compiled, ctx);
 }
 
 void Program::check_runtime_error_after_kernel_launch(
@@ -4676,6 +4785,27 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
             compile_config().arch == Arch::dx11 ||
             compile_config().arch == Arch::dx12);
 
+  std::unique_lock<std::shared_mutex> lifecycle_lock(
+      snode_tree_lifecycle_mutex_);
+  TI_ERROR_IF(snode_tree == nullptr, "Cannot destroy a null SNodeTree.");
+  const int tree_id = snode_tree->id();
+  TI_ERROR_IF(tree_id < 0 ||
+                  static_cast<std::size_t>(tree_id) >= snode_trees_.size() ||
+                  static_cast<std::size_t>(tree_id) >=
+                      snode_tree_active_.size() ||
+                  !snode_tree_active_[tree_id] ||
+                  snode_trees_[tree_id].get() != snode_tree ||
+                  snode_tree_generations_[tree_id] !=
+                      snode_tree->generation(),
+              "SNodeTree id={} generation={} is no longer active.", tree_id,
+              snode_tree->generation());
+
+  // The exclusive lifecycle transaction prevents new graph/kernel enqueue
+  // sections and waits for current host submissions to finish. Explicit tree
+  // destruction is a cold path, so complete outstanding device work before
+  // releasing the root allocation.
+  program_impl_->synchronize();
+
   // When accessing a ti.field at Python scope, SNodeRwAccessorsBank creates
   // a Taichi Kernel to read/write the field in a JIT manner, which caches the
   // compiled JIT Kernel so as to avoid recompilation when accessing the same
@@ -4691,23 +4821,71 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
   // Traverse SNodeTree to remove all cached RWAccessor kernels
   remove_rw_accessor_cache(root, &snode_rw_accessors_bank_);
 
+  // Destroy the root before retiring executable state so an exceptional
+  // backend teardown can still leave the old Graph/kernel artifacts intact
+  // for the Python transaction's cancellation path.
   program_impl_->destroy_snode_tree(snode_tree);
+
+  // Compiled Graph/kernel artifacts contain static root bindings. Python Graph
+  // retirement already drained host invocation sections; the Program lifecycle
+  // lock and device synchronize above make backend module/pipeline unload safe.
+  program_impl_->get_kernel_compilation_manager().invalidate_snode_tree(
+      tree_id);
+  program_impl_->get_kernel_launcher().retire_snode_tree(tree_id);
+
+  // CompiledGraph keeps stable Kernel pointers for its whole Python lifetime.
+  // Do not erase Program::kernels and create a dangling pointer: convert every
+  // affected definition into a small retired shell instead. This releases the
+  // otherwise linear IR/specialization growth during tree-id churn while any
+  // attempted stale compile fails explicitly above.
+  for (auto &kernel : kernels) {
+    if (kernel->ir == nullptr) {
+      continue;
+    }
+    const auto dependencies =
+        irpass::analysis::gather_snode_tree_dependencies(*kernel);
+    if (std::binary_search(dependencies.begin(), dependencies.end(), tree_id)) {
+      kernel->retire_definition();
+    }
+  }
   if (contains_hash) {
     --hash_snode_tree_count_;
   }
-  free_snode_tree_ids_.push(snode_tree->id());
+  snode_tree_active_[tree_id] = 0;
+  free_snode_tree_ids_.push(tree_id);
+  advance_snode_tree_epoch(snode_tree_mutation_epoch_);
 }
 
 SNodeTree *Program::add_snode_tree(std::unique_ptr<SNode> root,
                                    bool compile_only) {
+  std::unique_lock<std::shared_mutex> lifecycle_lock(
+      snode_tree_lifecycle_mutex_);
   const int id = allocate_snode_tree_id();
-  auto tree = std::make_unique<SNodeTree>(id, std::move(root));
+  if (static_cast<std::size_t>(id) == snode_tree_generations_.size()) {
+    snode_tree_generations_.push_back(1);
+    snode_tree_active_.push_back(0);
+  } else {
+    TI_ASSERT(id >= 0 &&
+              static_cast<std::size_t>(id) < snode_tree_generations_.size());
+    TI_ASSERT(!snode_tree_active_[id]);
+    TI_ASSERT(snode_tree_generations_[id] !=
+              std::numeric_limits<std::uint64_t>::max());
+    ++snode_tree_generations_[id];
+  }
+  const std::uint64_t generation = snode_tree_generations_[id];
+  auto tree =
+      std::make_unique<SNodeTree>(id, generation, std::move(root));
   tree->root()->set_snode_tree_id(id);
   const bool contains_hash = snode_tree_contains_hash(tree->root());
-  if (compile_only) {
-    program_impl_->compile_snode_tree_types(tree.get());
-  } else {
-    program_impl_->materialize_snode_tree(tree.get(), result_buffer);
+  try {
+    if (compile_only) {
+      program_impl_->compile_snode_tree_types(tree.get());
+    } else {
+      program_impl_->materialize_snode_tree(tree.get(), result_buffer);
+    }
+  } catch (...) {
+    free_snode_tree_ids_.push(id);
+    throw;
   }
   if (contains_hash) {
     ++hash_snode_tree_count_;
@@ -4718,6 +4896,8 @@ SNodeTree *Program::add_snode_tree(std::unique_ptr<SNode> root,
     TI_ASSERT(id == snode_trees_.size());
     snode_trees_.push_back(std::move(tree));
   }
+  snode_tree_active_[id] = 1;
+  advance_snode_tree_epoch(snode_tree_mutation_epoch_);
   return snode_trees_[id].get();
 }
 

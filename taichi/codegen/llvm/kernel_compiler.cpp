@@ -1,4 +1,5 @@
 #include "taichi/codegen/codegen.h"
+#include "taichi/analysis/gather_snode_tree_dependencies.h"
 #include "taichi/system/profiler.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/transforms.h"
@@ -49,6 +50,8 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
     TI_COMPILE_PROFILER("cpp.compile.llvm.emit_module");
     return codegen->compile_kernel_to_module();
   }();
+  data.used_snode_tree_ids =
+      irpass::analysis::gather_snode_tree_dependencies(chi_ir);
   data.args.reserve(kernel_def.nested_parameters.size());
   for (const auto &p : kernel_def.nested_parameters)
     data.args.push_back(p);

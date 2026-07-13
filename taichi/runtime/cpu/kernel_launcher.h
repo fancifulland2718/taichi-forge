@@ -13,6 +13,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
 
   struct Context {
     using TaskFunc = int32 (*)(void *);
+    JITModule *jit_module{nullptr};
+    std::vector<int> snode_tree_ids;
     std::vector<TaskFunc> task_funcs;
     std::vector<std::pair<std::vector<int>, Callable::Parameter>> parameters;
   };
@@ -23,6 +25,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
   Handle register_llvm_kernel(
       const LLVM::CompiledKernelData &compiled) override;
+  void retire_snode_tree(int tree_id) override;
 
  private:
   // A CPU kernel can contain multiple offloaded tasks that share LLVM runtime

@@ -18,7 +18,14 @@ class SNodeTree:
             raise TaichiRuntimeError("SNode tree has been destroyed")
         if self.prog != impl.get_runtime().prog:
             return
-        self.ptr.destroy_snode_tree(impl.get_runtime().prog)
+        runtime = impl.get_runtime()
+        dependency = (int(self.ptr.id()), int(self.ptr.generation()))
+        notified = runtime.begin_snode_tree_destroy(dependency)
+        try:
+            self.ptr.destroy_snode_tree(runtime.prog)
+        except BaseException:
+            runtime.cancel_snode_tree_destroy(dependency, notified)
+            raise
 
         # FieldExpression holds a SNode* to the place-SNode associated with a SNodeTree
         # Therefore, we have to recompile all the kernels after destroying a SNodeTree
@@ -30,3 +37,9 @@ class SNodeTree:
         if self.destroyed:
             raise TaichiRuntimeError("SNode tree has been destroyed")
         return self.ptr.id()
+
+    @property
+    def generation(self):
+        if self.destroyed:
+            raise TaichiRuntimeError("SNode tree has been destroyed")
+        return self.ptr.generation()

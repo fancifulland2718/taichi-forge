@@ -46,6 +46,25 @@ JITModule *JITSessionCUDA ::add_module(std::unique_ptr<llvm::Module> M,
   return modules.back().get();
 }
 
+bool JITSessionCUDA::remove_module(JITModule *module) {
+  auto module_it = std::find_if(
+      modules.begin(), modules.end(),
+      [module](const std::unique_ptr<JITModule> &owned) {
+        return owned.get() == module;
+      });
+  if (module_it == modules.end()) {
+    return false;
+  }
+  auto *cuda_module = dynamic_cast<JITModuleCUDA *>(module_it->get());
+  TI_ASSERT(cuda_module != nullptr);
+  CUDAContext::get_instance().make_current();
+  auto context_lock = CUDAContext::get_instance().get_lock_guard();
+  CUDADriver::get_instance().module_unload(cuda_module->module_);
+  cuda_module->module_ = nullptr;
+  modules.erase(module_it);
+  return true;
+}
+
 std::string cuda_mattrs() {
   return CUDAContext::get_instance().get_mattrs();
 }

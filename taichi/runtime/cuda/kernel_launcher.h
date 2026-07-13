@@ -30,6 +30,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
 
   struct Context {
     JITModule *jit_module{nullptr};
+    std::vector<int> snode_tree_ids;
     std::vector<std::pair<std::vector<int>, Callable::Parameter>> parameters;
     std::vector<OffloadedTask> offloaded_tasks;
   };
@@ -47,6 +48,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
   Handle register_llvm_kernel(
       const LLVM::CompiledKernelData &compiled) override;
+  void retire_snode_tree(int tree_id) override;
   bool prepare_cuda_graph_launch(Handle handle,
                                  LaunchContextBuilder &ctx,
                                  GraphLaunchPacket &packet,
