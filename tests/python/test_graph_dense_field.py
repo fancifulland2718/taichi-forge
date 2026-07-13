@@ -1,38 +1,15 @@
+import gc
+import weakref
+
 import numpy as np
+import pytest
 
 import taichi_forge as ti
-from taichi_forge.aot.utils import produce_injected_args_from_template
-from taichi_forge.graph._graph import flatten_args
+from taichi_forge.lang.exception import TaichiCompilationError
 from tests import test_utils
 
 
 _DENSE_GRAPH_ARCHS = [ti.cpu, ti.cuda, ti.vulkan]
-
-
-def _dispatch_template_baseline(
-    builder, kernel_fn, symbolic_args, template_args
-):
-    """Compile the current private template path used by GeoPhys.
-
-    DF0 records existing dense Field behavior without changing the public API.
-    DF1 must replace this helper with GraphBuilder.dispatch(template_args=...).
-    """
-
-    kernel = kernel_fn._primal
-    injected_args = produce_injected_args_from_template(kernel, template_args)
-    key = kernel.ensure_compiled(*injected_args)
-    kernel_cpp = kernel.compiled_kernels[key]
-    unzipped_args = flatten_args(symbolic_args)
-    builder._aot_graph_plan.dispatch(kernel_cpp, unzipped_args)
-    builder._ensure_runtime_graph_builder().dispatch(
-        kernel_cpp, unzipped_args
-    )
-    builder._runtime_graph_arg_names.update(
-        arg.name for arg in unzipped_args
-    )
-    builder._dispatch_count += 1
-
-
 @test_utils.test(arch=_DENSE_GRAPH_ARCHS)
 def test_dense_field_graph_global_zero_args_matches_direct():
     counter = ti.field(dtype=ti.i32, shape=())
@@ -161,8 +138,9 @@ def test_dense_field_graph_accepts_ndarray_runtime_input():
     )
 
 
+@pytest.mark.parametrize("container", ["builder", "sequential"])
 @test_utils.test(arch=_DENSE_GRAPH_ARCHS)
-def test_dense_field_graph_template_owner_uses_two_dense_trees():
+def test_dense_field_graph_template_owner_uses_two_dense_trees(container):
     source = ti.field(dtype=ti.i32)
     target = ti.field(dtype=ti.i32)
     source_builder = ti.FieldsBuilder()
@@ -194,12 +172,16 @@ def test_dense_field_graph_template_owner_uses_two_dense_trees():
     owner = DenseOwner(target)
     sym_bias = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "bias", ti.i32)
     builder = ti.graph.GraphBuilder()
-    _dispatch_template_baseline(
-        builder,
+    dispatch_target = builder
+    if container == "sequential":
+        dispatch_target = builder.create_sequential()
+    dispatch_target.dispatch(
         owner.accumulate,
-        (sym_bias,),
-        {"self": owner, "source_field": source},
+        sym_bias,
+        template_args={"self": owner, "source_field": source},
     )
+    if container == "sequential":
+        builder.append(dispatch_target)
     graph = builder.compile()
 
     graph.run({"bias": 3})
@@ -207,6 +189,174 @@ def test_dense_field_graph_template_owner_uses_two_dense_trees():
     expected = 1 + np.arange(24, dtype=np.int32) * 4 + 1
     np.testing.assert_array_equal(target.to_numpy(), expected)
 
+    graph._compiled_graph.jit_run(
+        ti.lang.impl.current_cfg(), {"bias": 4}
+    )
+    ti.sync()
+    expected += np.arange(24, dtype=np.int32) * 2 + 4
+    np.testing.assert_array_equal(target.to_numpy(), expected)
+
+    owner_ref = weakref.ref(owner)
+    del owner
+    gc.collect()
+    assert owner_ref() is None
+    graph.run({"bias": 0})
+
     # Keep both trees alive through the final graph use. Explicit destruction
     # while a graph is alive belongs to DF3's generation/lifetime contract.
     assert source_tree is not target_tree
+
+
+@test_utils.test(arch=_DENSE_GRAPH_ARCHS)
+def test_dense_field_graph_ndarray_compile_exemplar_stays_runtime_bound():
+    output = ti.field(dtype=ti.f32, shape=32)
+
+    @ti.kernel
+    def transform(
+        source: ti.types.ndarray(ndim=1), scale: ti.f32
+    ):
+        for i in output:
+            output[i] = source[i] * scale
+
+    sym_source = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=1
+    )
+    sym_scale = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "scale", ti.f32)
+    exemplar = ti.ndarray(dtype=ti.f32, shape=4)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        transform,
+        sym_source,
+        sym_scale,
+        template_args={"source": exemplar},
+    )
+    graph = builder.compile()
+
+    source_np = np.arange(32, dtype=np.float32)
+    source = ti.ndarray(dtype=ti.f32, shape=32)
+    source.from_numpy(source_np)
+    graph.run({"source": source, "scale": 1.25})
+    np.testing.assert_allclose(
+        output.to_numpy(), source_np * 1.25, rtol=1e-6
+    )
+
+
+@test_utils.test(arch=ti.cpu)
+def test_graph_template_args_reject_invalid_bindings_at_build_time():
+    values = ti.field(dtype=ti.i32, shape=8)
+
+    @ti.data_oriented
+    class Owner:
+        @ti.kernel
+        def update(self, value: ti.i32):
+            for i in values:
+                values[i] = value
+
+    owner = Owner()
+    sym_value = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.i32)
+
+    with pytest.raises(
+        TaichiCompilationError,
+        match="Missing required Graph template arguments: self",
+    ):
+        ti.graph.GraphBuilder().dispatch(owner.update, sym_value)
+
+    with pytest.raises(
+        TaichiCompilationError, match="Unknown Graph template arguments: typo"
+    ):
+        ti.graph.GraphBuilder().dispatch(
+            owner.update,
+            sym_value,
+            template_args={"self": owner, "typo": values},
+        )
+
+    with pytest.raises(
+        TaichiCompilationError, match="invalid: value"
+    ):
+        ti.graph.GraphBuilder().dispatch(
+            owner.update,
+            sym_value,
+            template_args={"self": owner, "value": 3},
+        )
+
+    with pytest.raises(
+        TaichiCompilationError, match="received 2 symbolic arguments"
+    ):
+        ti.graph.GraphBuilder().dispatch(
+            owner.update,
+            sym_value,
+            sym_value,
+            template_args={"self": owner},
+        )
+
+    with pytest.raises(
+        TaichiCompilationError, match="template_args must be a dict"
+    ):
+        ti.graph.GraphBuilder().dispatch(
+            owner.update, sym_value, template_args=[owner]
+        )
+
+
+@test_utils.test(arch=ti.cpu)
+def test_graph_ndarray_template_exemplar_must_match_symbolic_arg():
+    @ti.kernel
+    def copy(source: ti.types.ndarray(ndim=1)):
+        for i in source:
+            source[i] = source[i]
+
+    sym_source = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=1
+    )
+    wrong_dtype = ti.ndarray(dtype=ti.i32, shape=8)
+    with pytest.raises(
+        TaichiCompilationError, match="does not match its symbolic ndarray"
+    ):
+        ti.graph.GraphBuilder().dispatch(
+            copy,
+            sym_source,
+            template_args={"source": wrong_dtype},
+        )
+
+
+@test_utils.test(arch=ti.cpu)
+def test_graph_template_injection_cache_is_weak_and_identity_safe():
+    values = ti.field(dtype=ti.i32, shape=8)
+
+    @ti.data_oriented
+    class Owner:
+        @ti.kernel
+        def update(self, value: ti.i32):
+            for i in values:
+                values[i] = value
+
+    owner = Owner()
+    sym_value = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.i32)
+    sym_value_ref = weakref.ref(sym_value)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        owner.update,
+        sym_value,
+        template_args={"self": owner},
+    )
+    graph = builder.compile()
+
+    graph.run({"value": 7})
+    np.testing.assert_array_equal(
+        values.to_numpy(), np.full(8, 7, dtype=np.int32)
+    )
+
+    del builder
+    del graph
+    del sym_value
+    gc.collect()
+    assert sym_value_ref() is None
+
+    replacement = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "value", ti.f32
+    )
+    with pytest.raises(TaichiCompilationError, match="doesn't match"):
+        ti.graph.GraphBuilder().dispatch(
+            owner.update,
+            replacement,
+            template_args={"self": owner},
+        )

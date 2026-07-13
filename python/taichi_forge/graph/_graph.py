@@ -3,7 +3,7 @@ import warnings
 from typing import Any, Dict, List
 
 from taichi_forge._lib import core as _ti_core
-from taichi_forge.aot.utils import produce_injected_args
+from taichi_forge.aot.utils import produce_injected_args_for_graph
 from taichi_forge.lang import enums, impl, kernel_impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang._texture import Texture
@@ -424,10 +424,12 @@ class _AOTGraphBuilderPlan:
         return len(self._items)
 
 
-def gen_cpp_kernel(kernel_fn, args):
+def gen_cpp_kernel(kernel_fn, args, *, template_args=None):
     kernel = kernel_fn._primal
     assert isinstance(kernel, kernel_impl.Kernel)
-    injected_args = produce_injected_args(kernel, symbolic_args=args)
+    injected_args = produce_injected_args_for_graph(
+        kernel, symbolic_args=args, template_args=template_args
+    )
     key = kernel.ensure_compiled(*injected_args)
     return kernel.compiled_kernels[key]
 
@@ -466,8 +468,10 @@ class Sequential:
         self._dispatches = []
         self._runtime_arg_names = set()
 
-    def dispatch(self, kernel_fn, *args):
-        kernel_cpp = gen_cpp_kernel(kernel_fn, args)
+    def dispatch(self, kernel_fn, *args, template_args=None):
+        kernel_cpp = gen_cpp_kernel(
+            kernel_fn, args, template_args=template_args
+        )
         unzipped_args = flatten_args(args)
         self._dispatches.append((kernel_cpp, unzipped_args))
         self._runtime_arg_names.update(_runtime_arg_names(unzipped_args))
@@ -486,9 +490,14 @@ class GraphBuilder:
         self._runtime_graph_arg_names = set()
         self._nodes = []
 
-    def dispatch(self, kernel_fn, *args):
-        kernel_cpp = gen_cpp_kernel(kernel_fn, args)
+    def dispatch(self, kernel_fn, *args, template_args=None):
+        kernel_cpp = gen_cpp_kernel(
+            kernel_fn, args, template_args=template_args
+        )
         unzipped_args = flatten_args(args)
+        self._record_dispatch(kernel_cpp, unzipped_args)
+
+    def _record_dispatch(self, kernel_cpp, unzipped_args):
         self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args)
         self._ensure_runtime_graph_builder().dispatch(kernel_cpp, unzipped_args)
         self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))

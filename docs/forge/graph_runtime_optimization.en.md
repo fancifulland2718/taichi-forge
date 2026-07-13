@@ -30,11 +30,22 @@ buffering, or another explicit ownership protocol.
 
 Public applications should declare graph arguments through
 `GraphBuilder.dispatch()` and pass exactly matching keys to `Graph.run()`. A
-physics or rendering engine adapter may instead bind a data-oriented `self`, a
-Field, or another `ti.template()` argument before dispatching a precompiled
-kernel with its real `ti.graph.Arg` objects to the low-level builders. Such a
-Field is a definition-time binding, not a runtime argument passed again on each
-`Graph.run()`.
+physics or rendering engine can use the keyword-only `template_args=` parameter
+to bind a data-oriented `self`, a Field, or another `ti.template()` argument at
+definition time:
+
+```python
+builder.dispatch(
+    solver.step_kernel,
+    slot_arg,
+    template_args={"self": solver, "state": solver.state},
+)
+```
+
+These objects participate in specialization but do not enter the `Graph.run()`
+dictionary. Field contents may change between replays; replacing Field identity
+or layout requires rebuilding the graph. An ndarray or texture compile exemplar
+still has a symbolic Arg, and each run still receives the real runtime resource.
 
 Forge treats the durable AOT plan as the source of truth for dispatch
 definitions and incrementally records its real symbolic argument names. This
@@ -42,8 +53,8 @@ recovers the exact runtime key set even when a legacy adapter bypasses the
 Python fast-path registration in public `GraphBuilder.dispatch()`. Validation
 remains strict: missing keys and extra keys not declared by the AOT plan still
 raise instead of being ignored. Direct access to `_aot_graph_plan` and the
-native builder remains a private framework-integration path; ordinary user code
-should not depend on these underscored objects.
+native builder remains only for legacy compatibility; new engine code should
+use `template_args=`.
 
 ## Backend execution model
 

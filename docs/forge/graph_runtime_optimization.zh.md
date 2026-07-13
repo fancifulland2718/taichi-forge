@@ -25,15 +25,26 @@ Runtime 同步只保护 Forge 自己的 launch、replay 与资源状态，不会
 ## Runtime 参数发现与模板适配器
 
 公开应用应通过 `GraphBuilder.dispatch()` 声明 graph 参数，并向 `Graph.run()` 传入完全
-一致的 key。物理/渲染引擎的模板适配器有时会先固定 data-oriented `self`、Field 或其他
-`ti.template()` 参数，再把预编译 kernel 同真实 `ti.graph.Arg` 写入底层 builder。这里的
-Field 是构图期绑定资源，不是每次 `Graph.run()` 重传的 runtime 参数。
+一致的 key。物理/渲染引擎可使用 keyword-only `template_args=` 在构图期固定
+data-oriented `self`、Field 或其他 `ti.template()` 参数：
+
+```python
+builder.dispatch(
+    solver.step_kernel,
+    slot_arg,
+    template_args={"self": solver, "state": solver.state},
+)
+```
+
+这些对象只参与 specialization，不进入 `Graph.run()` 参数字典。Field 内容可在 replay 之间
+变化，但替换 Field identity/layout 需要重建 graph。ndarray/texture compile exemplar 仍须
+配套 symbolic Arg，真实资源继续在每次 `run()` 传入。
 
 Forge 将 durable AOT plan 作为 dispatch 定义的事实源，增量记录其中真实符号参数名。即使
-旧适配器绕过公开 `GraphBuilder.dispatch()` 的 Python 快速登记，编译时也会恢复准确的
+旧适配器绕过公开 `GraphBuilder.dispatch()` 的 Python 快速登记时，编译仍会恢复准确的
 runtime key 集合。严格校验仍然有效：missing key 和未在 AOT plan 中声明的 extra key 都会
-报错，不会因为兼容旧适配器而被忽略。直接操作 `_aot_graph_plan` 和 native builder 仍是
-私有框架集成路径；普通用户代码不应依赖这些下划线对象。
+报错，不会因为兼容旧适配器而被忽略。直接操作 `_aot_graph_plan` 和 native builder 仅作
+旧版本兼容；新引擎代码应迁移到 `template_args=`。
 
 ## 后端执行模型
 

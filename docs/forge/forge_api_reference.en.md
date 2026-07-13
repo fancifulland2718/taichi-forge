@@ -345,6 +345,38 @@ See also [Native algorithms](native_algorithms.en.md).
 
 ## Graph APIs
 
+### `GraphBuilder.dispatch(kernel, *args, template_args=None)`
+
+`Sequential.dispatch()` provides the same keyword-only `template_args`
+parameter. It binds a data-oriented `self`, a Field, or another
+`ti.template()` parameter at graph definition/compile time. These objects do
+not become `Graph.run()` runtime arguments.
+
+```python
+builder.dispatch(
+    solver.step_kernel,
+    slot_arg,
+    template_args={"self": solver, "state": solver.state},
+)
+graph = builder.compile()
+graph.run({"slot": 3})
+```
+
+Contract:
+
+- Every `ti.template()` parameter must be provided by kernel argument name.
+  Unknown, missing, or ordinary scalar/matrix names raise
+  `TaichiCompilationError` while the graph is built.
+- A Field is a definition-time binding. Its contents may change between runs,
+  but the Field does not appear in the runtime argument dictionary.
+- An ndarray or texture may provide a compile exemplar in `template_args`, but
+  it still needs a matching `ti.graph.Arg` and a real runtime resource in each
+  `run()` call.
+- An ndarray exemplar must match the symbolic Arg's dtype, ndim, and element
+  shape.
+- The Graph retains the compiled kernel, not an additional strong solver
+  reference from `template_args`.
+
 ### `GraphBuilder.compile()` and `Graph.run(args)`
 
 `compile()` freezes the dispatch/sequential definition at the call and returns
@@ -360,13 +392,12 @@ Concurrent host calls on one graph queue at the complete-invocation boundary;
 independent graphs do not share that lock. This guard does not wait for GPU
 completion or imply `ti.sync()`. Recompile graphs after `ti.reset()`.
 
-Runtime keys come from the compiled graph definition. If an engine-level
-template adapter binds a `self`, Field, or another `ti.template()` argument at
-definition time, that Field does not appear in the `Graph.run()` dictionary;
-Forge recovers the actual `ti.graph.Arg` names recorded by the durable AOT
-plan. This compatibility path does not relax the contract, and undeclared extra
-keys still raise. Direct access to underscored AOT/native builder objects is
-not a public user API.
+Runtime keys come from the compiled graph definition. Forge still recovers the
+actual `ti.graph.Arg` names when a legacy engine adapter writes directly to the
+durable AOT plan, but new code should use the public `template_args=` entry
+point above. This compatibility path does not relax the contract, and
+undeclared extra keys still raise. Direct access to underscored AOT/native
+builder objects is not a public user API.
 
 ### `GraphBuilder.append_native(node, *, prewarm=False)`
 

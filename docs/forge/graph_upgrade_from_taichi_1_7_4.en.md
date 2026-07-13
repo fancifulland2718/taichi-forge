@@ -13,7 +13,7 @@ For exact signatures of Forge-only graph and native replay APIs, see
 Forge keeps the familiar graph-builder surface:
 
 - `ti.graph.GraphBuilder`
-- `GraphBuilder.dispatch(kernel, *args)`
+- `GraphBuilder.dispatch(kernel, *args, template_args=None)`
 - `GraphBuilder.create_sequential()`
 - `GraphBuilder.append(sequential)`
 - `GraphBuilder.compile()`
@@ -32,6 +32,9 @@ new graph API.
 
 The user-visible additions are:
 
+- `GraphBuilder.dispatch()` and `Sequential.dispatch()` can use the
+  keyword-only `template_args=` parameter to bind a data-oriented `self`, a
+  Field, or another definition-time argument;
 - runtime argument handling for scalar, matrix, ndarray, texture, and RW
   texture paths;
 - stable ordinary-dispatch fallback when an optimized replay path is not
@@ -60,11 +63,10 @@ The user-visible additions are:
   semantics.
 - Runtime graph safety does not replace an application-level snapshot, slot,
   or producer-consumer protocol for shared simulation and rendering data.
-- Legacy engine template adapters that bind a `self`, Field, or another
-  `ti.template()` argument at definition time and write a precompiled kernel to
-  the durable AOT plan retain exact runtime-argument discovery. Strict
-  missing/unexpected-key checks remain in force, and the Field binding does not
-  become a per-run dictionary argument.
+- New engine code should bind a `self`, Field, or another `ti.template()`
+  argument through `template_args=`; the Field still does not enter each run's
+  dictionary. Legacy adapters that write directly to the durable AOT plan keep
+  exact runtime-argument discovery and strict missing/unexpected-key checks.
 
 The implementation details behind CUDA resource leases and dynamic patching,
 Vulkan identity and deferred retirement, fixed replay capacity, failure
