@@ -1,6 +1,6 @@
 # Taichi Forge API 参考
 
-> 适用于 **Taichi Forge 0.4.x** 发布线。本文只列 Forge-only 的公开 API 入口。
+> 适用于 **Taichi Forge 0.5.x** 发布线。本文只列 Forge-only 的公开 API 入口。
 > 加在 Taichi 兼容 API 里的新选项，例如 `ti.init(...)` 关键字参数和
 > `@ti.kernel(...)` 关键字选项，仍统一放在 [Forge 选项](forge_options.zh.md)。
 

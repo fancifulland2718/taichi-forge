@@ -45,7 +45,7 @@ independent from upstream Taichi version numbers.
 
 ## Changelog-Oriented Highlights
 
-Current documented release line: `0.4.x`.
+Current documented release line: `0.5.x`.
 
 The README intentionally describes user-visible changes and compatibility
 boundaries instead of detailed benchmark numbers.
@@ -91,7 +91,7 @@ See [Vulkan sparse SNode](docs/forge/sparse_snode_on_vulkan.en.md),
 [Hash SNode](docs/forge/hash_snode.en.md), and
 [Parallel sort API](docs/forge/sort_api.en.md).
 
-### 0.4.x: Graph, Native Algorithms, Cache, and Display Submission
+### 0.5.x: Graph, Native Algorithms, Cache, and Display Submission
 
 - Modernized graph execution below the public graph-builder API while keeping
   `GraphBuilder.dispatch`, sequential graphs, `compile`, `Graph.run`, and AOT
@@ -99,6 +99,10 @@ See [Vulkan sparse SNode](docs/forge/sparse_snode_on_vulkan.en.md),
 - Added Dense Field Graph support for statically bound scalar, vector, and
   matrix Fields on CPU, CUDA, and Vulkan, with generation-qualified SNodeTree
   lifetime checks, asynchronous submission boundaries, and explicit AD guards.
+- Supports heterogeneous engines as independently compiled Graph blocks, with
+  homogeneous environments batched inside each stable block signature. A
+  unified heterogeneous orchestration DSL and automatic cross-block scheduler
+  are intentionally outside the 0.5.0 compatibility promise.
 - Added support for Forge-defined DSL native algorithm nodes in graph replay.
   This is not a public arbitrary native callback API.
 - Broadened native algorithm coverage beyond sort. Public algorithm entry

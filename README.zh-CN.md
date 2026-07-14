@@ -34,7 +34,7 @@ Forge 主要以 vanilla Taichi 1.7.4 的公开 API 作为兼容参考。Forge �
 
 ## 按 Changelog 顺序的功能说明
 
-当前文档对应的 release line：`0.4.x`。
+当前文档对应的 release line：`0.5.x`。
 
 README 只说明用户可见变化和兼容边界，不列具体 benchmark 数字。
 
@@ -68,10 +68,11 @@ README 只说明用户可见变化和兼容边界，不列具体 benchmark 数�
 [Hash SNode](docs/forge/hash_snode.zh.md)、
 [并行排序 API](docs/forge/sort_api.zh.md)。
 
-### 0.4.x：Graph、native 算法、缓存与显示提交
+### 0.5.x：Graph、native 算法、缓存与显示提交
 
 - 在保持公开 graph builder 形态的前提下现代化 graph 执行层：`GraphBuilder.dispatch`、sequential graph、`compile`、`Graph.run` 和 AOT CGraph 仍是用户可见模型。
 - 新增 CPU、CUDA、Vulkan Dense Field Graph：静态绑定 scalar/vector/matrix Field，使用带 generation 的 SNodeTree 生命周期校验，并明确异步提交与自动微分边界。
+- 异构引擎可由多张独立编译的 Graph block 组成，每个稳定 signature 的 block 内批处理同构环境；统一异构编排 DSL 与自动跨 block 调度器不属于 0.5.0 的兼容承诺。
 - 支持 DSL 内预定义的 native 算法节点进入 graph replay。这不是任意 native callback 的公开 API。
 - native 算法覆盖从 sort 扩展到更多 primitive。公开算法入口包括 `PrefixSumExecutor.run()`、`experimental_compact()`、`experimental_reduce()`、`experimental_histogram()`、`experimental_transform()`、`experimental_gather()`、`experimental_scatter()`、`experimental_scatter_add()`、`experimental_bucket_builder()`、`experimental_grouped_reduce()`，并配套可复用 workspace。
 - 将 `canvas.set_image()` 形式化为显示帧提交链路，增加 `ti.ui.DisplayFrame` 和 `Canvas.submit_frame(...)`，用于 display-ready host、texture 和 packed `u32` frame 输入。

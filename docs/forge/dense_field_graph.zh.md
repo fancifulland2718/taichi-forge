@@ -1,6 +1,6 @@
 # Dense Field Graph
 
-Dense Field Graph 是 Taichi Forge `0.4.x` 新增的能力，用于编译和 replay 闭包引用
+Dense Field Graph 是 Taichi Forge `0.5.x` 新增的能力，用于编译和 replay 闭包引用
 dense `ti.field`、vector Field 与 matrix Field 的 kernel。Field binding 保持静态，
 Field 内容可在不同 run 之间变化；CPU、CUDA 和 Vulkan 使用同一套公开
 `ti.graph.GraphBuilder` API。
@@ -133,6 +133,17 @@ heterogeneous engine
 每个 data-oriented owner 仍是独立 kernel specialization，因为其 root binding 可能不同。
 Forge 不通过 pointer 或 cache-key 技巧合并任意 owner；安全的透明合并需要新的 runtime
 Field-binding ABI。
+
+### 0.5.0 发布边界
+
+Taichi Forge 0.5.0 通过现有公开 Graph API 支持上述 block 模型：引擎可以持有和调度
+多张独立编译的 Graph，各自使用稳定但不同的 solver、layout、shape 或 feature
+signature；每个 block 内批处理同构环境。若域随机化不改变 signature，则继续留在
+block 内；改变 signature 的环境应进入另一个已预编译 block。
+
+0.5.0 的兼容承诺不包含统一异构编排 DSL、自动跨 block 调度器、动态 Field 重绑定或
+跨设备依赖规划器。这些能力需要独立的引擎/runtime 合同，可以在 0.5.0 之后增加，
+而不改变本文的静态 Field binding 与 Graph replay 合同。
 
 持久 offline cache 与有计划的 prewarm 可以减少重复编译成本，同时不削弱 identity 或
 lifetime 校验。

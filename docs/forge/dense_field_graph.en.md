@@ -1,6 +1,6 @@
 # Dense Field Graph
 
-Dense Field Graph is a new Taichi Forge `0.4.x` capability for compiling and
+Dense Field Graph is a new Taichi Forge `0.5.x` capability for compiling and
 replaying kernels that close over dense `ti.field`, vector fields, and matrix
 fields. It keeps Field binding static while allowing Field contents to change
 between runs. The same public `ti.graph.GraphBuilder` API is used on CPU, CUDA,
@@ -147,6 +147,21 @@ layouts between blocks. Each data-oriented owner remains a distinct kernel
 specialization because its root bindings may differ. Forge does not merge
 arbitrary owners by pointer or cache-key tricks; a safe transparent merge would
 require a runtime Field-binding ABI.
+
+### 0.5.0 release boundary
+
+Taichi Forge 0.5.0 supports the block model above through the existing public
+Graph API: an engine may own and schedule independently compiled Graphs with
+different stable solver, layout, shape, or feature signatures, while each block
+batches homogeneous environments. Domain randomization stays inside a block
+when it preserves that signature; a signature-changing environment belongs in
+another precompiled block.
+
+The 0.5.0 compatibility promise does not include a unified heterogeneous
+orchestration DSL, an automatic cross-block scheduler, dynamic Field rebinding,
+or a cross-device dependency planner. Those facilities require an engine/runtime
+contract of their own and can be added after 0.5.0 without changing the static
+Field-binding and Graph replay contracts documented here.
 
 Persistent offline cache and deliberate prewarming can reduce repeated compile
 cost without weakening identity or lifetime checks.

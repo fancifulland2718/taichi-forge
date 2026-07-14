@@ -1,6 +1,6 @@
 # Hash SNode 使用指南
 
-> 适用于 **Taichi Forge 0.4.x** 发布线。`hash` SNode 是实验性的固定容量稀疏 SNode，当前可在 CPU、CUDA、Vulkan 后端使用。它默认开启，并会在第一次使用 `SNode.hash()` 时给出实验功能警告。
+> 适用于 **Taichi Forge 0.5.x** 发布线。`hash` SNode 是实验性的固定容量稀疏 SNode，当前可在 CPU、CUDA、Vulkan 后端使用。它默认开启，并会在第一次使用 `SNode.hash()` 时给出实验功能警告。
 
 ---
 
@@ -198,7 +198,7 @@ ti.root.hash(ti.i, 1024, capacity=2).place(x)
 | overflow 静默发生 | 不支持。overflow 会诊断出来。 |
 | 各后端 hash 行为分叉 | 避免。CPU、CUDA、Vulkan 共享同一容量与 overflow 合同。 |
 
-Forge 0.4.x 发布线默认允许 `hash` API；需要 vanilla 兼容的拒绝行为时，显式传入 `ti.init(hash_snode_experimental=False)`。
+Forge 0.5.x 发布线默认允许 `hash` API；需要 vanilla 兼容的拒绝行为时，显式传入 `ti.init(hash_snode_experimental=False)`。
 
 ---
 
