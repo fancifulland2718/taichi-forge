@@ -6,6 +6,10 @@
 
 按模块整理的 Forge-only API 符号清单见 [Forge API 参考](forge_api_reference.zh.md)。
 
+核心 native 算法族首次发布于 Forge 0.4.0；Graph native replay 与 device-side 检查分别
+在 0.4.1 和 0.4.23 进入公开版本。本文说明当前 0.5.x 的可移植性与安全合同；只有
+[发行说明](release_notes.zh.md#050)明确列出的变化才属于 0.5.0 新增。
+
 ## 公开入口
 
 | 入口 | 用途 |
@@ -57,7 +61,7 @@ CUDA Toolkit，也不需要选择 CUDA 版本化包；`method="auto"` 仍以运�
 
 - Dense 1D `ti.ndarray` 是主要 native 算法 ABI。
 - Dense field/SNode 只有在能证明兼容 dense layout，或能提供安全 staging 路径时才走支持路径。
-- `StructNdarray` 可作为 order/copy 类 primitive 的 opaque payload。部分数值 primitive 支持 scalar 或 packed tensor member view。
+- `StructNdarray` 可作为 order/copy 类 primitive 的 opaque payload。部分数值 primitive 支持 scalar 或 packed tensor member view；完整语义见 [StructNdarray primitive 语义](struct_ndarray_api.zh.md)。
 - 稀疏、非连续、复杂 SNode 拓扑不能默认假设走 native。
 - 普通 `experimental_scatter()` 要求所有有效 destination index 唯一。
   CPU native scatter 会在写入前验证，并拒绝 duplicate；需要 duplicate target 时应使用

@@ -1,12 +1,12 @@
 # Sparse SNode on Vulkan — 使用指南
 
-> 适用于 **Taichi Forge 0.5.x** 发布线。vanilla Taichi 1.7.4 的 Vulkan/SPIRV 后端**只支持 `dense` + `root`**；Taichi Forge 在 Vulkan 上额外支持 `pointer` / `bitmasked` / `dynamic` / 实验性 `hash` SNode，并保证 cpu / cuda / vulkan 三后端数值等价。
+> Vulkan sparse SNode 支持在历史 Forge 0.3.0–0.3.2 版本中逐步引入，在 0.3.12 前后完善，并于 0.3.13 加入实验性 `hash`。本文说明当前 0.5.x 合同，不表示这些能力都是 0.5.0 新增。受 PyPI 项目容量限制，部分历史 wheel 可能已不再保留。
 
 ---
 
 ## 1. 速览
 
-| 数据结构 | vanilla 1.7.4 Vulkan | Taichi Forge 0.5.x Vulkan | LLVM (cpu/cuda) |
+| 数据结构 | vanilla 1.7.4 Vulkan | 当前 Taichi Forge Vulkan | LLVM (cpu/cuda) |
 |---|---|---|---|
 | `dense` | ✅ | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ | ✅ |

@@ -1,5 +1,9 @@
 # Parallel Sort API
 
+The Forge native sort dispatcher first shipped in 0.4.0. This page describes
+the current 0.5.x API and backend-selection contract; the compatible legacy
+`parallel_sort()` entry point predates Forge.
+
 Taichi Forge keeps the vanilla-compatible entry point:
 
 ```python

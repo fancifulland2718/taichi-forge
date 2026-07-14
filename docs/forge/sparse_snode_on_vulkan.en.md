@@ -1,12 +1,12 @@
 # Sparse SNode on Vulkan — User Guide
 
-> Applies to the **Taichi Forge 0.5.x** release line. Vanilla Taichi 1.7.4's Vulkan/SPIRV backend supports only `dense` + `root`. Taichi Forge additionally supports `pointer`, `bitmasked`, `dynamic`, and experimental `hash` SNodes on Vulkan, with three-backend (cpu / cuda / vulkan) numerical equivalence.
+> Vulkan sparse SNode support was introduced across historical Forge 0.3.0–0.3.2 releases, matured through 0.3.12, and added experimental `hash` in 0.3.13. This guide describes the current 0.5.x contract; it does not treat those capabilities as 0.5.0 additions. Some historical wheel artifacts may no longer be retained on PyPI because of project storage limits.
 
 ---
 
 ## 1. Overview
 
-| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.5.x Vulkan | LLVM (cpu/cuda) |
+| SNode type | vanilla 1.7.4 Vulkan | Current Taichi Forge Vulkan | LLVM (cpu/cuda) |
 |---|---|---|---|
 | `dense` | ✅ | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ | ✅ |
@@ -238,7 +238,7 @@ python tests\p4\vulkan_pointer_smoke.py
 | `Hash SNode is experimental` warning | First use of the default-enabled experimental `hash` API | Expected. Review §6 / [hash_snode.en.md](hash_snode.en.md), or pass `ti.init(hash_snode_experimental=False)` to disable `hash`. |
 | Hash overflow error at `ti.sync()` | More distinct hash keys than the fixed table can hold | Increase `expected_active` / `capacity`, or lower `hash_load_factor`. |
 | Vulkan first launch slow, second launch fast | Offline cache cold compile | Expected; subsequent runs hit the cache. |
-| `~/.cache/taichi/` `ticache.tcb` corrupted on next launch | Built-in fallback recompile | Forge 0.3.0+ handles `kVersionNotMatched` / `kCorrupted` automatically; no exception. |
+| `~/.cache/taichi/` `ticache.tcb` corrupted on next launch | Built-in fallback recompile | Forge 0.2.4+ handles `kVersionNotMatched` / `kCorrupted` automatically; no exception. |
 | Hang / device lost in race tests | Warp-lockstep (§3.4) | Open an issue with GPU model + driver version. |
 
 ---

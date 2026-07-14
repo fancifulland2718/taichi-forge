@@ -1,6 +1,8 @@
 # Taichi Forge — Compile, Runtime, Architecture & Modernization Options
 
 > Applies to the **Taichi Forge 0.5.x** release line. Every option listed here is **opt-in** unless explicitly noted; defaults preserve upstream Taichi 1.7.4 behaviour wherever a feature is not intentionally enabled by Forge.
+> Option introduction versions are indexed in [release notes](release_notes.en.md);
+> this current-contract page does not reclassify older options as `0.5.0` work.
 
 This document is the single canonical reference for Forge-specific knobs and toolchain changes. Older fork-only settings are kept here once they are part of the public API; experimental or internal-only flags are intentionally excluded. For a module-oriented list of Forge-only API symbols, see [Forge API reference](forge_api_reference.en.md).
 
@@ -90,7 +92,7 @@ Both flags default OFF and are bit-identical to the legacy path when off. Enabli
 
 ### 2.8 Hash SNode
 
-`hash` SNode is experimental and default ON in the Taichi Forge 0.5.x release line. It is available on CPU, CUDA, and Vulkan, emits an experimental-feature warning on first `SNode.hash()` use, and can be disabled with `hash_snode_experimental=False`. See [hash_snode.en.md](hash_snode.en.md) for the API and migration notes.
+`hash` SNode is experimental and has been default ON since Taichi Forge 0.3.13. It is available on CPU, CUDA, and Vulkan, emits an experimental-feature warning on first `SNode.hash()` use, and can be disabled with `hash_snode_experimental=False`. See [hash_snode.en.md](hash_snode.en.md) for the API and migration notes.
 
 | Kwarg | Values / default | Purpose | Risk / guidance |
 |---|---|---|---|
@@ -123,7 +125,7 @@ Both flags default OFF and are bit-identical to the legacy path when off. Enabli
 | `TI_VULKAN_DYNAMIC` | ON | Master switch for `dynamic` SNode on Vulkan. OFF → vanilla `TI_NOT_IMPLEMENTED`. |
 | `TI_VULKAN_POINTER_POOL_FRACTION` | ON | Activates `TI_VULKAN_POOL_FRACTION`. OFF makes the env var a no-op; capacity is reserved for the worst case. |
 
-The wheel published to PyPI builds with all three flags ON.
+Release wheel builds enable all three flags.
 
 ---
 

@@ -1,5 +1,9 @@
 # Display Frame Submission
 
+> DisplayFrame and direct display submission first shipped in `0.4.1`;
+> device-image staging was expanded in `0.4.24`, and `0.5.0` adds runtime
+> concurrency hardening. See [release notes](release_notes.en.md).
+
 Forge keeps ordinary `canvas.set_image(...)` compatibility while adding a
 narrower display-ready path for engines that already produce final images.
 For normal field, ndarray, NumPy, or texture images, prefer `canvas.set_image`.

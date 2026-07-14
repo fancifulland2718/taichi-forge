@@ -32,59 +32,29 @@ Forge 主要以 vanilla Taichi 1.7.4 的公开 API 作为兼容参考。Forge �
 | 实验路径 | 实验功能通过 API 名、选项、警告或文档标记；它们不是 vanilla 兼容承诺。 |
 | 仅修 bug 的上传 | 如果某个 PyPI 上传只修复打包、崩溃、缓存或文档问题，没有改变预期功能语义，则以同一发布线最新修复后的 patch 版本为准。 |
 
-## 按 Changelog 顺序的功能说明
+## 版本历史
 
-当前文档对应的 release line：`0.5.x`。
+当前源码版本是 `0.5.0`；`0.4.25` 是最后一个公开的 `0.4.x` 基线。由于 PyPI
+项目容量有限，部分不再重要的旧发行文件已经移除。因此，完整版本索引使用长期稳定的
+Git 源码边界，不把当前 PyPI 文件列表误当成全部历史。
 
-README 只说明用户可见变化和兼容边界，不列具体 benchmark 数字。
+| 版本 | 用户可见范围 |
+| --- | --- |
+| [0.5.0](docs/forge/release_notes.zh.md#050) | `0.4.25` 之后的异步 backend/runtime 安全；CUDA/Vulkan Graph replay 与生命周期加固；Dense Field Graph、严格参数/AD 合同和 block 级异构环境。 |
+| [0.4.25](docs/forge/release_notes.zh.md#0425) | GGUI 事件泵与空 ImGui frame 生命周期修复。 |
+| [0.4.24](docs/forge/release_notes.zh.md#0424) | device-side GGUI 图像 packing 与渲染 cadence 改进。 |
+| [0.4.23](docs/forge/release_notes.zh.md#0423) | runtime/shim 拆包、device checks/metrics、Vulkan ArgPack 与 dense-native 修复。 |
+| [0.4.2](docs/forge/release_notes.zh.md#042) | ArgPack、小整数、ndarray 生命周期、hidden-window 与 sparse-SNode 修复；旧发行文件可能已不在 PyPI 保留。 |
+| [0.4.1](docs/forge/release_notes.zh.md#041) | 最初的 Graph modernization/native replay、PrimitiveSequence、compile profiling、DisplayFrame 与 Vulkan 直接显示。 |
+| [0.4.0](docs/forge/release_notes.zh.md#040) | native sort/scan/compact/reduce 等 primitive、StructNdarray 路径与 Vulkan offscreen。 |
+| [0.3.13](docs/forge/release_notes.zh.md#0313) | 实验性 Hash SNode。 |
+| [0.3.0-0.3.12](docs/forge/release_notes.zh.md#030) | Vulkan sparse/quantized bring-up、allocator/list-generation 修复、CUDA sparse-pool 策略和 runtime cache/lifetime 工作。 |
+| [0.2.4](docs/forge/release_notes.zh.md#024) | 编译器/cache 扩展、并行 SPIR-V、内存诊断与 materialize fast path。 |
+| [0.1.0-0.1.3](docs/forge/release_notes.zh.md#010) | scikit-build-core 迁移、Forge 发行/import 身份、打包修复与首批编译/cache 控制。 |
 
-### 0.1.x：工具链现代化
-
-- 将分支迁移到基于 LLVM 20 的现代工具链。
-- 支持目标覆盖 Python 3.10 到 3.14。
-- 更新 Windows 下当前 MSVC/Visual Studio 环境的构建路径。
-- 在独立的 `taichi_forge` 包名下保留 vanilla Taichi DSL 使用方式。
-
-### 0.2.x：编译与缓存基础设施
-
-- 增加 `ti.init(compile_tier=...)` 和 `@ti.kernel(opt_level=...)` 等编译 tier 控制。
-- 增加批量预编译入口：`ti.compile_kernels(...)` 和别名 `ti.parallel_compile(...)`。
-- 增加 `ti.compile_profile()` 与 `ti cache warmup ...`，用于编译耗时诊断和 offline cache 预热。
-- 将可安全复用的前端/source 解析状态与各后端编译产物分离。后端缓存彼此隔离，切换 arch 不会覆盖另一个后端的编译产物。
-
-参考：[Forge API 参考](docs/forge/forge_api_reference.zh.md)、
-[编译与缓存说明](docs/forge/cache_compile.zh.md)、
-[Forge 选项](docs/forge/forge_options.zh.md)。
-
-### 0.3.x：Vulkan 稀疏 SNode 与 native sort
-
-- 在 vanilla 1.7.4 的 Vulkan dense/root-only 能力之外，增加 Vulkan 稀疏 SNode 支持。公开目标包括 Vulkan 上的 `pointer`、`bitmasked`、`dynamic` SNode。
-- 增加 CPU、CUDA、Vulkan 上的实验性固定容量 hash SNode。
-- Vulkan quantized 路径仍保留在显式实验开关后。
-- 增加 Forge-only 稳定排序调度器 `ti.algorithms.sort(...)`，同时保留 vanilla 兼容的 `ti.algorithms.parallel_sort(...)`。
-- 稀疏池和打包相关的仅修复 bug 上传，以同一发布线最新修复后的 patch 版本为准。
-
-参考：[Vulkan 稀疏 SNode](docs/forge/sparse_snode_on_vulkan.zh.md)、
-[Hash SNode](docs/forge/hash_snode.zh.md)、
-[并行排序 API](docs/forge/sort_api.zh.md)。
-
-### 0.5.x：Graph、native 算法、缓存与显示提交
-
-- 在保持公开 graph builder 形态的前提下现代化 graph 执行层：`GraphBuilder.dispatch`、sequential graph、`compile`、`Graph.run` 和 AOT CGraph 仍是用户可见模型。
-- 新增 CPU、CUDA、Vulkan Dense Field Graph：静态绑定 scalar/vector/matrix Field，使用带 generation 的 SNodeTree 生命周期校验，并明确异步提交与自动微分边界。
-- 异构引擎可由多张独立编译的 Graph block 组成，每个稳定 signature 的 block 内批处理同构环境；统一异构编排 DSL 与自动跨 block 调度器不属于 0.5.0 的兼容承诺。
-- 支持 DSL 内预定义的 native 算法节点进入 graph replay。这不是任意 native callback 的公开 API。
-- native 算法覆盖从 sort 扩展到更多 primitive。公开算法入口包括 `PrefixSumExecutor.run()`、`experimental_compact()`、`experimental_reduce()`、`experimental_histogram()`、`experimental_transform()`、`experimental_gather()`、`experimental_scatter()`、`experimental_scatter_add()`、`experimental_bucket_builder()`、`experimental_grouped_reduce()`，并配套可复用 workspace。
-- 将 `canvas.set_image()` 形式化为显示帧提交链路，增加 `ti.ui.DisplayFrame` 和 `Canvas.submit_frame(...)`，用于 display-ready host、texture 和 packed `u32` frame 输入。
-- 增加 display stats API，使引擎可以区分 accepted、submitted、dropped、reused 等显示帧状态。
-- vanilla taichi 中一些 issues 的修复。
-
-参考：[Forge API 参考](docs/forge/forge_api_reference.zh.md)、
-[Graph Runtime 与优化](docs/forge/graph_runtime_optimization.zh.md)、
-[Dense Field Graph](docs/forge/dense_field_graph.zh.md)、
-[Graph 兼容性与迁移指南](docs/forge/graph_migration_guide.zh.md)、
-[Native 算法](docs/forge/native_algorithms.zh.md)、
-[显示帧提交](docs/forge/display_frame.zh.md)。
+native algorithms、最初的 Graph modernization、DisplayFrame 和 compile profiling 在
+`0.4.25` 前已经可用，不属于 `0.5.0` 新增。每个当前保留或已经归档版本的完整内容
+与源码边界见[版本更新说明](docs/forge/release_notes.zh.md)。
 
 ## 公开文档
 
@@ -94,7 +64,7 @@ README 只说明用户可见变化和兼容边界，不列具体 benchmark 数�
 
 - [Forge API 参考](docs/forge/forge_api_reference.zh.md)
 - [Forge 选项](docs/forge/forge_options.zh.md)
-- [相比 vanilla Taichi 的 bug 修复](docs/forge/bug_fixes.zh.md)
+- [按版本整理的更新与修复](docs/forge/release_notes.zh.md)
 
 ### Graph 与执行
 
@@ -108,7 +78,6 @@ README 只说明用户可见变化和兼容边界，不列具体 benchmark 数�
 
 - [Vulkan 稀疏 SNode](docs/forge/sparse_snode_on_vulkan.zh.md)
 - [Hash SNode](docs/forge/hash_snode.zh.md)
-- [StructNdarray primitive 语义](docs/forge/struct_ndarray_api.zh.md)
 - [显示帧提交](docs/forge/display_frame.zh.md)
 
 ### 编译、打包与平台

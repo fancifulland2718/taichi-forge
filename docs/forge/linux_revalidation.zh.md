@@ -4,6 +4,9 @@
 路径已经在 Linux 通过。请在干净的 x86_64 Linux runner 上，以目标发布依赖运行，并记录 GPU、
 driver、Vulkan loader、窗口系统以及（构建 native method 时）CUDA Toolkit。
 
+该矩阵是 0.5.x runtime 更新的发布门槛。已经在 0.4.25 或更早版本公开的功能，只有在
+0.5.x 实现或打包发生变化、需要重新取得 Linux 证据时才会列入，不应被理解为 0.5.0 新增。
+
 ## Release 阻断项
 
 ### Runtime package 与随附 libdevice

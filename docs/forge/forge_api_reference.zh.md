@@ -3,6 +3,8 @@
 > 适用于 **Taichi Forge 0.5.x** 发布线。本文只列 Forge-only 的公开 API 入口。
 > 加在 Taichi 兼容 API 里的新选项，例如 `ti.init(...)` 关键字参数和
 > `@ti.kernel(...)` 关键字选项，仍统一放在 [Forge 选项](forge_options.zh.md)。
+> API 首次公开版本统一见[版本更新说明](release_notes.zh.md)；本文适用于 `0.5.x`
+> 并不表示所有列出的符号都在 `0.5.0` 才新增。
 
 Taichi Forge 保留 vanilla Taichi 的 DSL 模型，同时增加了编译控制、native
 device primitive、graph replay、显示帧提交、稀疏布局实验能力和诊断 API。

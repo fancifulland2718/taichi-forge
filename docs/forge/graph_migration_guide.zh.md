@@ -1,5 +1,9 @@
 # Graph 兼容性与迁移指南
 
+> 基础 Graph modernization 与 native replay 模型首次公开于 `0.4.1`；Dense Field
+> Graph、replay 生命周期加固、诊断和更严格的并发/AD 合同属于 `0.5.0`。
+> 版本归属见[版本更新说明](release_notes.zh.md)。
+
 本文说明 Forge graph 相比 vanilla Taichi 1.7.4 的公开行为与兼容边界。后端架构、性能、
 显存策略与诊断统一维护在 [Graph Runtime 与优化](graph_runtime_optimization.zh.md)。
 使用 dense Field 的用户还应阅读 [Dense Field Graph](dense_field_graph.zh.md)中的

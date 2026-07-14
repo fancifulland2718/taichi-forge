@@ -43,88 +43,32 @@ independent from upstream Taichi version numbers.
 | Experimental paths | Experimental features are marked by API name, option, warning, or documentation. They are not treated as vanilla compatibility promises. |
 | Bugfix-only uploads | If a PyPI upload only fixes packaging, crash, cache, or documentation problems without changing intended feature semantics, the latest fixed patch in that release line is the authoritative version. |
 
-## Changelog-Oriented Highlights
+## Release History
 
-Current documented release line: `0.5.x`.
+The current source release is `0.5.0`; `0.4.25` is the final public
+`0.4.x` baseline. PyPI storage is limited, so some nonessential older
+distribution files have been removed. The complete version index therefore
+uses durable Git source boundaries instead of treating the current PyPI file
+list as the whole history.
 
-The README intentionally describes user-visible changes and compatibility
-boundaries instead of detailed benchmark numbers.
+| Release | User-visible scope |
+| --- | --- |
+| [0.5.0](docs/forge/release_notes.en.md#050) | Post-`0.4.25` async backend/runtime safety; CUDA/Vulkan Graph replay and lifetime hardening; Dense Field Graph, strict argument/AD contracts, and block-level heterogeneous environments. |
+| [0.4.25](docs/forge/release_notes.en.md#0425) | GGUI event-pump and empty-ImGui-frame lifecycle fixes. |
+| [0.4.24](docs/forge/release_notes.en.md#0424) | Device-side GGUI image packing and render-cadence improvements. |
+| [0.4.23](docs/forge/release_notes.en.md#0423) | Split runtime/shim packaging, device checks/metrics, Vulkan ArgPack and dense-native fixes. |
+| [0.4.2](docs/forge/release_notes.en.md#042) | ArgPack, small-integer, ndarray-lifetime, hidden-window, and sparse-SNode fixes; old artifact may no longer be retained on PyPI. |
+| [0.4.1](docs/forge/release_notes.en.md#041) | Original Graph modernization/native replay, PrimitiveSequence, compile profiling, DisplayFrame, and direct Vulkan display paths. |
+| [0.4.0](docs/forge/release_notes.en.md#040) | Native sort/scan/compact/reduce and related primitives, StructNdarray routes, and Vulkan offscreen support. |
+| [0.3.13](docs/forge/release_notes.en.md#0313) | Experimental Hash SNode. |
+| [0.3.0-0.3.12](docs/forge/release_notes.en.md#030) | Vulkan sparse/quantized bring-up, allocator/list-generation fixes, CUDA sparse-pool policy, and runtime cache/lifetime work. |
+| [0.2.4](docs/forge/release_notes.en.md#024) | Compiler/cache expansion, parallel SPIR-V, memory diagnostics, and materialization fast paths. |
+| [0.1.0-0.1.3](docs/forge/release_notes.en.md#010) | scikit-build-core migration, Forge distribution/import identity, packaging fixes, and initial compile/cache controls. |
 
-### 0.1.x: Toolchain Modernization
-
-- Moved the fork onto a modern LLVM 20 based toolchain.
-- Added support targets for Python 3.10 through 3.14.
-- Updated the Windows build path for current MSVC/Visual Studio environments.
-- Kept the vanilla Taichi DSL import style under the separate `taichi_forge`
-  package name.
-
-### 0.2.x: Compile and Cache Infrastructure
-
-- Added compile-tier controls such as `ti.init(compile_tier=...)` and
-  per-kernel `@ti.kernel(opt_level=...)`.
-- Added batch precompile helpers: `ti.compile_kernels(...)` and the
-  `ti.parallel_compile(...)` alias.
-- Added `ti.compile_profile()` and `ti cache warmup ...` for compile-time
-  diagnosis and offline-cache warmup.
-- Split reusable frontend/source parsing state from backend-specific compiled
-  artifacts where reuse is safe. Backend-specific cache entries stay isolated
-  so switching arch does not overwrite another backend's compiled artifact.
-
-See [Forge API reference](docs/forge/forge_api_reference.en.md),
-[Compile and cache guide](docs/forge/cache_compile.en.md), and
-[Forge options](docs/forge/forge_options.en.md).
-
-### 0.3.x: Vulkan Sparse SNode and Native Sort
-
-- Added Vulkan sparse SNode support beyond vanilla 1.7.4's dense/root-only
-  Vulkan path. The documented public target includes `pointer`, `bitmasked`,
-  and `dynamic` SNodes on Vulkan.
-- Added experimental hash SNode support on CPU, CUDA, and Vulkan with fixed
-  capacity semantics.
-- Kept quantized Vulkan paths behind explicit experimental gates.
-- Added the Forge-only stable sort dispatcher `ti.algorithms.sort(...)`, while
-  keeping vanilla-compatible `ti.algorithms.parallel_sort(...)`.
-- Treated bugfix-only sparse-pool and package uploads as superseded by the
-  latest fixed patch in the same release line.
-
-See [Vulkan sparse SNode](docs/forge/sparse_snode_on_vulkan.en.md),
-[Hash SNode](docs/forge/hash_snode.en.md), and
-[Parallel sort API](docs/forge/sort_api.en.md).
-
-### 0.5.x: Graph, Native Algorithms, Cache, and Display Submission
-
-- Modernized graph execution below the public graph-builder API while keeping
-  `GraphBuilder.dispatch`, sequential graphs, `compile`, `Graph.run`, and AOT
-  CGraph as the user-facing model.
-- Added Dense Field Graph support for statically bound scalar, vector, and
-  matrix Fields on CPU, CUDA, and Vulkan, with generation-qualified SNodeTree
-  lifetime checks, asynchronous submission boundaries, and explicit AD guards.
-- Supports heterogeneous engines as independently compiled Graph blocks, with
-  homogeneous environments batched inside each stable block signature. A
-  unified heterogeneous orchestration DSL and automatic cross-block scheduler
-  are intentionally outside the 0.5.0 compatibility promise.
-- Added support for Forge-defined DSL native algorithm nodes in graph replay.
-  This is not a public arbitrary native callback API.
-- Broadened native algorithm coverage beyond sort. Public algorithm entry
-  points include `PrefixSumExecutor.run()`, `experimental_compact()`,
-  `experimental_reduce()`, `experimental_histogram()`,
-  `experimental_transform()`, `experimental_gather()`,
-  `experimental_scatter()`, `experimental_scatter_add()`,
-  `experimental_bucket_builder()`, and `experimental_grouped_reduce()`, with
-  reusable workspace objects for repeated calls.
-- Formalized `canvas.set_image()` as a display-frame submission path and added
-  `ti.ui.DisplayFrame` plus `Canvas.submit_frame(...)` for display-ready host,
-  texture, and packed `u32` frame inputs.
-- Added display statistics APIs so engines can distinguish accepted, submitted,
-  dropped, and reused display frames.
-- Fixed some issues in vanilla Taichi as well.
-
-See [Forge API reference](docs/forge/forge_api_reference.en.md),
-[Graph runtime and optimization](docs/forge/graph_runtime_optimization.en.md),
-[Dense Field Graph](docs/forge/dense_field_graph.en.md),
-[Graph compatibility and migration guide](docs/forge/graph_migration_guide.en.md),
-[Native algorithms](docs/forge/native_algorithms.en.md), and
-[Display frame submission](docs/forge/display_frame.en.md).
+Native algorithms, the original Graph modernization, DisplayFrame, and compile
+profiling were already available by `0.4.25`; they are not `0.5.0`
+introductions. See the [complete release notes](docs/forge/release_notes.en.md)
+for every retained or archived version and its source boundary.
 
 ## Public Documentation
 
@@ -134,7 +78,7 @@ English public docs are grouped by use case:
 
 - [Forge API reference](docs/forge/forge_api_reference.en.md)
 - [Forge options](docs/forge/forge_options.en.md)
-- [Bug fixes compared with vanilla Taichi](docs/forge/bug_fixes.en.md)
+- [Versioned release notes and fixes](docs/forge/release_notes.en.md)
 
 ### Graph and execution
 

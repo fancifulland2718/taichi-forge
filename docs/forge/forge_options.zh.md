@@ -1,6 +1,8 @@
 # Taichi Forge — 编译 / 运行时 / 架构 / 现代化选项一览
 
 > 适用于 **Taichi Forge 0.5.x** 发布线。除非特别说明，本文列出的选项均为**可选启用**；未显式启用的功能尽量保留 upstream Taichi 1.7.4 行为。
+> 各选项首次公开版本见[版本更新说明](release_notes.zh.md)；本文描述当前合同，
+> 不会把历史选项重新归类为 `0.5.0` 更新。
 
 本文档是本 fork 所有公开新增配置项与工具链变更的**唯一权威清单**。实验性或内部专用 flag 不收录于此。按模块整理的 Forge-only API 符号清单见 [Forge API 参考](forge_api_reference.zh.md)。
 
@@ -90,7 +92,7 @@
 
 ### 2.8 Hash SNode
 
-`hash` SNode 是实验功能，在 Taichi Forge 0.5.x 发布线中默认开启。它可在 CPU、CUDA、Vulkan 上使用，第一次调用 `SNode.hash()` 会提示实验功能警告；如果需要复现 vanilla 兼容的拒绝行为，或隔离回归，可以传入 `hash_snode_experimental=False` 关闭。API 与迁移说明见 [hash_snode.zh.md](hash_snode.zh.md)。
+`hash` SNode 是实验功能，从 Taichi Forge 0.3.13 起默认开启。它可在 CPU、CUDA、Vulkan 上使用，第一次调用 `SNode.hash()` 会提示实验功能警告；如果需要复现 vanilla 兼容的拒绝行为，或隔离回归，可以传入 `hash_snode_experimental=False` 关闭。API 与迁移说明见 [hash_snode.zh.md](hash_snode.zh.md)。
 
 | 参数 | 允许值 / 默认值 | 用途 | 风险与建议 |
 |---|---|---|---|
@@ -123,7 +125,7 @@
 | `TI_VULKAN_DYNAMIC` | ON | Vulkan 上 `dynamic` SNode 总开关。OFF 回退 `TI_NOT_IMPLEMENTED`。 |
 | `TI_VULKAN_POINTER_POOL_FRACTION` | ON | 启用 `TI_VULKAN_POOL_FRACTION`。OFF 时该 env var 完全失效，按最坏情况预留 capacity。 |
 
-PyPI 发布的 wheel 三项均为 ON。
+发行 wheel 构建会启用以上三项。
 
 ---
 

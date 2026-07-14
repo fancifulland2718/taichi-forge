@@ -4,6 +4,9 @@
 > entry points. New options added to Taichi-compatible APIs, such as
 > `ti.init(...)` keywords and `@ti.kernel(...)` keyword options, stay in
 > [Forge options](forge_options.en.md).
+> API introduction versions are indexed separately in
+> [release notes](release_notes.en.md); applying this page to `0.5.x` does not
+> imply that every listed symbol was introduced in `0.5.0`.
 
 Taichi Forge keeps the vanilla Taichi DSL model, but adds APIs for compile
 control, native device primitives, graph replay, display submission, sparse

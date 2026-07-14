@@ -1,5 +1,10 @@
 # Graph Compatibility and Migration Guide
 
+> The base Graph modernization and native replay model shipped in `0.4.1`.
+> Dense Field Graph, replay lifetime hardening, diagnostics, and stricter
+> concurrency/AD contracts are `0.5.0` work. See
+> [release notes](release_notes.en.md).
+
 This document describes the public behavior and compatibility boundary of Forge
 graph support relative to vanilla Taichi 1.7.4. Backend architecture,
 performance, memory policy, and diagnostics are maintained separately in

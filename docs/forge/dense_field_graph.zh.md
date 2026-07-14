@@ -1,6 +1,8 @@
 # Dense Field Graph
 
-Dense Field Graph 是 Taichi Forge `0.5.x` 新增的能力，用于编译和 replay 闭包引用
+> 首次公开于 `0.5.0`；版本归属见[版本更新说明](release_notes.zh.md)。
+
+Dense Field Graph 是 Taichi Forge `0.5.x` 的能力，用于编译和 replay 闭包引用
 dense `ti.field`、vector Field 与 matrix Field 的 kernel。Field binding 保持静态，
 Field 内容可在不同 run 之间变化；CPU、CUDA 和 Vulkan 使用同一套公开
 `ti.graph.GraphBuilder` API。

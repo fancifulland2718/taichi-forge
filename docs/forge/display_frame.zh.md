@@ -1,5 +1,9 @@
 # 显示帧提交
 
+> DisplayFrame 与直接显示提交首次公开于 `0.4.1`；device-image staging 在
+> `0.4.24` 扩展，`0.5.0` 增加 runtime 并发加固。版本归属见
+> [版本更新说明](release_notes.zh.md)。
+
 Forge 保留普通 `canvas.set_image(...)` 兼容路径，同时为已经产出最终图像的引擎提供更窄的
 display-ready 提交路径。普通 field、ndarray、NumPy 或 texture 图像仍优先使用
 `canvas.set_image`；Forge 会在内部优化常见 CUDA/Vulkan device 图像路径。

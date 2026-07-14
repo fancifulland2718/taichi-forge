@@ -8,6 +8,11 @@ unsupported explicit native methods should reject clearly.
 For a module-oriented list of all Forge-only API symbols, see
 [Forge API reference](forge_api_reference.en.md).
 
+The core native algorithm family first shipped in Forge 0.4.0, with Graph
+native replay and device-side checks following in 0.4.1 and 0.4.23. This page
+documents the current 0.5.x portability and safety contract; only the changes
+identified in the [release notes](release_notes.en.md#050) are new to 0.5.0.
+
 ## Public Entry Points
 
 | Entry point | Purpose |

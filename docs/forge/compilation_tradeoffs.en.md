@@ -2,6 +2,10 @@
 
 [中文](compilation_tradeoffs.zh.md)
 
+> This is current `0.5.0` operational guidance for compile controls that
+> largely predate `0.5.0`. Feature history is indexed in
+> [release notes](release_notes.en.md).
+
 This guide explains how to shorten Taichi Forge cold compilation without
 quietly trading away production throughput, numerical confidence, or
 autodiff coverage. It complements the [compile and cache guide](cache_compile.en.md),

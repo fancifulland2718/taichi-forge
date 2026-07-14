@@ -8,6 +8,11 @@ signatures, see [Forge API reference](forge_api_reference.en.md).
 The static-Field feature contract is maintained separately in
 [Dense Field Graph](dense_field_graph.en.md).
 
+The base Graph modernization and native-node replay model first shipped in
+Forge 0.4.1. The stricter lifetime, backend replay, diagnostics, and Dense
+Field Graph contracts described here are the current 0.5.x contract; they do
+not reclassify the whole Graph API as a 0.5.0 addition.
+
 ## Scope and invariants
 
 Forge keeps Taichi's public graph-builder model. Backend optimization must not

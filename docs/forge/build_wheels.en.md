@@ -1,5 +1,8 @@
 # Building Forge Wheels
 
+> Current source contract: `0.5.0`. The split runtime/shim model first shipped
+> in `0.4.23`; see [release notes](release_notes.en.md).
+
 This document mirrors the public wheel build path used by
 `.github/workflows/publish_runtime_pypi.yml` and
 `.github/workflows/publish_pypi.yml`. It is intended for external developers who

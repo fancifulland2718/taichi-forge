@@ -1,5 +1,8 @@
 # 构建 Forge wheel
 
+> 当前源码合同：`0.5.0`。runtime/shim 拆包从 `0.4.23` 开始公开；版本归属见
+> [版本更新说明](release_notes.zh.md)。
+
 本文对齐 `.github/workflows/publish_runtime_pypi.yml` 和
 `.github/workflows/publish_pypi.yml` 的公开 wheel 构建路径，供外部开发者在本地复现
 PyPI 风格的 Windows 或 Ubuntu 构建。

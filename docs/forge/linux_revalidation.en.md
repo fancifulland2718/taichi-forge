@@ -6,6 +6,10 @@ have passed on Linux. Run it on a clean x86_64 Linux runner with the intended
 release dependencies and record the GPU, driver, Vulkan loader, window system,
 and CUDA Toolkit (when used to build native methods).
 
+This matrix is a release gate for the 0.5.x runtime changes. Historical
+features that already shipped in 0.4.25 or earlier are listed here only when a
+0.5.x implementation or packaging change requires renewed Linux evidence.
+
 ## Release blockers
 
 ### Runtime package and bundled libdevice
