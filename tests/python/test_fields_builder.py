@@ -239,3 +239,103 @@ def test_fields_builder_numpy_dimension():
     fb.dense(ti.i, shape).place(x)
     fb.pointer(ti.j, shape).place(y)
     fb.finalize()
+
+
+def test_snode_tree_from_previous_runtime_drops_native_references(monkeypatch):
+    from taichi_forge._snode.snode_tree import SNodeTree
+    from taichi_forge.lang import impl
+
+    class StalePointer:
+        def id(self):
+            raise AssertionError("stale native pointer was dereferenced")
+
+    class Runtime:
+        prog = object()
+
+    tree = object.__new__(SNodeTree)
+    tree.prog = object()
+    tree.ptr = StalePointer()
+    tree.destroyed = False
+    monkeypatch.setattr(impl, "get_runtime", lambda: Runtime())
+
+    tree.destroy()
+
+    assert tree.destroyed
+    assert tree.ptr is None
+    assert tree.prog is None
+    with pytest.raises(TaichiRuntimeError, match="destroyed"):
+        _ = tree.id
+
+
+def test_snode_tree_registers_for_pre_finalize_runtime_invalidation(monkeypatch):
+    from taichi_forge._snode.snode_tree import SNodeTree
+    from taichi_forge.lang import impl
+
+    class Runtime:
+        prog = object()
+
+        def __init__(self):
+            self.registered = []
+
+        def register_runtime_object(self, obj):
+            self.registered.append(obj)
+
+    runtime = Runtime()
+    pointer = object()
+    monkeypatch.setattr(impl, "get_runtime", lambda: runtime)
+
+    tree = SNodeTree(pointer)
+    assert runtime.registered == [tree]
+
+    tree._invalidate_runtime()
+    assert tree.destroyed
+    assert tree.ptr is None
+    assert tree.prog is None
+
+
+def test_snode_tree_stays_destroyed_if_cache_cleanup_fails(monkeypatch):
+    from taichi_forge._snode.snode_tree import SNodeTree
+    from taichi_forge.lang import impl
+
+    class Pointer:
+        @staticmethod
+        def id():
+            return 3
+
+        @staticmethod
+        def generation():
+            return 5
+
+        @staticmethod
+        def destroy_snode_tree(prog):
+            assert prog is runtime.prog
+
+    class Runtime:
+        prog = object()
+
+        @staticmethod
+        def begin_snode_tree_destroy(dependency):
+            assert dependency == (3, 5)
+            return []
+
+        @staticmethod
+        def cancel_snode_tree_destroy(dependency, notified):
+            raise AssertionError("successful native destroy must not roll back")
+
+        @staticmethod
+        def clear_compiled_functions():
+            raise RuntimeError("injected cache cleanup failure")
+
+    runtime = Runtime()
+    tree = object.__new__(SNodeTree)
+    tree.prog = runtime.prog
+    tree.ptr = Pointer()
+    tree.destroyed = False
+    monkeypatch.setattr(impl, "get_runtime", lambda: runtime)
+
+    with pytest.raises(RuntimeError, match="injected cache cleanup failure"):
+        tree.destroy()
+
+    assert tree.destroyed
+    assert tree.ptr is None
+    assert tree.prog is None

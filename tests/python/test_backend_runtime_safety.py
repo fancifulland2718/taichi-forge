@@ -47,6 +47,8 @@ def test_graph_run_serializes_the_complete_dispatch_loop():
     class RecordingNode:
         needs_runtime_args = True
         runtime_arg_names = frozenset()
+        snode_tree_dependencies = frozenset()
+        snode_tree_dependency_info = frozenset()
 
         def __init__(self, index):
             self.index = index
@@ -98,6 +100,8 @@ def test_graph_invalidation_waits_for_an_active_invocation():
     class BlockingNode:
         needs_runtime_args = True
         runtime_arg_names = frozenset()
+        snode_tree_dependencies = frozenset()
+        snode_tree_dependency_info = frozenset()
 
         def run(self, context):
             entered.set()

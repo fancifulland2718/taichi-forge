@@ -8,7 +8,7 @@ from taichi_forge.aot.utils import produce_injected_args_for_graph
 from taichi_forge.lang import enums, impl, kernel_impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang._texture import Texture
-from taichi_forge.lang.exception import TaichiRuntimeError
+from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeError
 from taichi_forge.lang.matrix import Matrix, MatrixType
 from taichi_forge.types.texture_type import FORMAT2TY_CH, TY_CH2FORMAT
 from taichi_forge.graph._native import compile_native_graph_node
@@ -852,9 +852,14 @@ def gen_cpp_kernel(kernel_fn, args, *, template_args=None):
     kernel = (
         kernel_fn
         if isinstance(kernel_fn, kernel_impl.Kernel)
-        else kernel_fn._primal
+        else getattr(kernel_fn, "_primal", None)
     )
-    assert isinstance(kernel, kernel_impl.Kernel)
+    if not isinstance(kernel, kernel_impl.Kernel):
+        raise TaichiCompilationError(
+            "Graph dispatch expects a decorated Taichi kernel or an explicit "
+            "kernel.grad object. Python callables and ti.func objects cannot "
+            "be submitted as Graph nodes."
+        )
     injected_args = produce_injected_args_for_graph(
         kernel, symbolic_args=args, template_args=template_args
     )
@@ -1028,6 +1033,14 @@ class Graph:
         with self._lifecycle_lock:
             self._check_runtime_valid()
             runtime = impl.pytaichi
+            self._spec.validate_runtime_args(args)
+            submission_state = runtime._active_graph_submissions
+            if submission_state < 0:
+                raise TaichiRuntimeError(
+                    "Graph.run() is primal-only and cannot start while another "
+                    "Python thread is entering ti.ad.Tape() or ti.ad.FwdMode(). "
+                    "Wait for automatic AD setup to finish."
+                )
             if runtime.target_tape is not None:
                 raise TaichiRuntimeError(
                     "Graph.run() is primal-only and cannot execute inside an "
@@ -1043,8 +1056,17 @@ class Graph:
                     "forward AD and would omit dual propagation. Run the Graph "
                     "outside automatic AD."
                 )
-            self._spec.validate_runtime_args(args)
-            self._run_impl(args)
+            # Runtime AD state is process-global rather than thread-local. The
+            # signed state closes the window where this native call releases
+            # the GIL and another Python thread enters Tape/FwdMode.
+            # Updates and AD-entry checks are atomic with respect to each other
+            # on supported CPython builds because they execute while holding
+            # the GIL. This does not serialize independent Graph submissions.
+            runtime._active_graph_submissions = submission_state + 1
+            try:
+                self._run_impl(args)
+            finally:
+                runtime._active_graph_submissions -= 1
 
     def _instance_for_current_runtime(self):
         key = self._spec.instance_key()

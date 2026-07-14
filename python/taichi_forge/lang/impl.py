@@ -530,6 +530,11 @@ class PyTaichi:
         self.default_up = u32
         self.target_tape = None
         self.fwd_mode_manager = None
+        # Positive values count active Graph.run() host submissions; -1 means
+        # Tape/FwdMode is entering and may release the GIL before publishing
+        # its manager. The compact state machine closes both cross-thread
+        # directions without a device wait or global Graph submission lock.
+        self._active_graph_submissions = 0
         self.grad_replaced = False
         self.kernels = kernels or []
         self._signal_handler_registry = None
@@ -564,14 +569,21 @@ class PyTaichi:
     def begin_snode_tree_destroy(self, dependency):
         notified = []
         live_refs = []
-        for ref in self._runtime_object_refs:
-            obj = ref()
-            if obj is None:
-                continue
-            live_refs.append(ref)
-            retire = getattr(obj, "_retire_snode_tree", None)
-            if retire is not None and retire(dependency):
-                notified.append(obj)
+        try:
+            for ref in self._runtime_object_refs:
+                obj = ref()
+                if obj is None:
+                    continue
+                live_refs.append(ref)
+                retire = getattr(obj, "_retire_snode_tree", None)
+                if retire is not None and retire(dependency):
+                    notified.append(obj)
+        except BaseException:
+            # Retirement is the prepare phase of SNodeTree.destroy(). If any
+            # participant fails, restore every object already prepared before
+            # surfacing the original error; the C++ tree is still live here.
+            self.cancel_snode_tree_destroy(dependency, reversed(notified))
+            raise
         self._runtime_object_refs = live_refs
         return notified
 

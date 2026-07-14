@@ -463,6 +463,27 @@ def test_graph_recovers_runtime_args_from_legacy_low_level_dispatch():
         graph.run({"value": 7, "out": out, "typo": 1})
 
 
+@test_utils.test(arch=ti.cpu)
+def test_graph_dispatch_rejects_non_kernel_callables():
+    @ti.func
+    def helper():
+        return 1
+
+    builder = ti.graph.GraphBuilder()
+    with pytest.raises(
+        TaichiCompilationError,
+        match="decorated Taichi kernel or an explicit kernel.grad",
+    ):
+        builder.dispatch(lambda: None)
+
+    sequential = builder.create_sequential()
+    with pytest.raises(
+        TaichiCompilationError,
+        match="Python callables and ti.func objects",
+    ):
+        sequential.dispatch(helper)
+
+
 @pytest.mark.parametrize("mutation", ["builder", "sequential"])
 @test_utils.test(arch=ti.cpu)
 def test_compiled_graph_freezes_aot_plan(mutation):

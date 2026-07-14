@@ -13,6 +13,7 @@ from taichi_forge.lang import impl
 from taichi_forge.lang.enums import AutodiffMode, SNodeGradType
 from taichi_forge.lang.expr import Expr
 from taichi_forge.lang.field import Field, ScalarField
+from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.kernel_impl import kernel
 from taichi_forge.lang.snode import SNode
@@ -186,6 +187,29 @@ class Tape:
 
     def __enter__(self):
         assert not self.entered, "Tape can be entered only once."
+        submission_state = self.runtime._active_graph_submissions
+        if submission_state > 0:
+            raise TaichiRuntimeError(
+                "Cannot enter ti.ad.Tape() while another Python thread has an "
+                "active Graph.run() host submission. Wait for that submission "
+                "to return before starting automatic differentiation."
+            )
+        if (
+            submission_state < 0
+            or self.runtime.target_tape is not None
+            or self.runtime.fwd_mode_manager is not None
+        ):
+            raise TaichiRuntimeError(
+                "Cannot enter ti.ad.Tape() while another automatic AD context "
+                "is active or being initialized. Runtime AD state is global."
+            )
+        self.runtime._active_graph_submissions = -1
+        try:
+            return self._enter_impl()
+        finally:
+            self.runtime._active_graph_submissions = 0
+
+    def _enter_impl(self):
         self.entered = True
 
         if isinstance(self.loss, Field):
@@ -611,6 +635,29 @@ class FwdMode:
 
     def __enter__(self):
         assert not self.entered, "Forward mode manager can be entered only once."
+        submission_state = self.runtime._active_graph_submissions
+        if submission_state > 0:
+            raise TaichiRuntimeError(
+                "Cannot enter ti.ad.FwdMode() while another Python thread has "
+                "an active Graph.run() host submission. Wait for that "
+                "submission to return before starting automatic differentiation."
+            )
+        if (
+            submission_state < 0
+            or self.runtime.target_tape is not None
+            or self.runtime.fwd_mode_manager is not None
+        ):
+            raise TaichiRuntimeError(
+                "Cannot enter ti.ad.FwdMode() while another automatic AD "
+                "context is active or being initialized. Runtime AD state is global."
+            )
+        self.runtime._active_graph_submissions = -1
+        try:
+            return self._enter_impl()
+        finally:
+            self.runtime._active_graph_submissions = 0
+
+    def _enter_impl(self):
         self.entered = True
         impl.get_runtime().materialize()
         if not isinstance(self.loss, list):

@@ -1,3 +1,5 @@
+import threading
+
 import numpy as np
 import pytest
 
@@ -333,3 +335,132 @@ def test_explicit_grad_kernel_graph_runs_outside_tape():
 
     assert x.grad[None] == pytest.approx(6.0)
     assert ti.lang.impl.get_runtime().target_tape is None
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_ad_context_entry_rejects_cross_thread_graph_submission(monkeypatch):
+    values = ti.field(ti.i32, shape=8)
+    x = ti.field(ti.f32, shape=(), needs_grad=True, needs_dual=True)
+    loss = ti.field(ti.f32, shape=(), needs_grad=True, needs_dual=True)
+
+    @ti.kernel
+    def advance():
+        for i in values:
+            values[i] += 1
+
+    @ti.kernel
+    def square():
+        loss[None] = x[None] * x[None]
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(advance)
+    graph = builder.compile()
+    original_run = graph._run_impl
+    entered = threading.Event()
+    release = threading.Event()
+    failures = []
+
+    def gated_run(args):
+        entered.set()
+        if not release.wait(timeout=10):
+            raise RuntimeError("test did not release Graph.run")
+        original_run(args)
+
+    def worker():
+        try:
+            graph.run({})
+        except BaseException as exc:
+            failures.append(exc)
+
+    graph._run_impl = gated_run
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert entered.wait(timeout=10)
+    try:
+        tape = ti.ad.Tape(loss)
+        with pytest.raises(
+            TaichiRuntimeError,
+            match=r"Cannot enter ti\.ad\.Tape.*active Graph\.run",
+        ):
+            with tape:
+                pass
+        assert not tape.entered
+
+        fwd = ti.ad.FwdMode(loss=loss, param=x)
+        with pytest.raises(
+            TaichiRuntimeError,
+            match=r"Cannot enter ti\.ad\.FwdMode.*active Graph\.run",
+        ):
+            with fwd:
+                pass
+        assert not fwd.entered
+    finally:
+        release.set()
+        thread.join(timeout=20)
+
+    assert not thread.is_alive()
+    assert not failures
+    runtime = ti.lang.impl.get_runtime()
+    assert runtime._active_graph_submissions == 0
+    assert runtime.target_tape is None
+    assert runtime.fwd_mode_manager is None
+
+    graph._run_impl = original_run
+
+    # Exercise the reciprocal window: Tape performs setup work before it is
+    # published as target_tape, and that setup may release the GIL.
+    original_materialize = runtime.materialize
+    ad_setup_entered = threading.Event()
+    ad_setup_release = threading.Event()
+    ad_failures = []
+
+    def gated_materialize():
+        ad_setup_entered.set()
+        if not ad_setup_release.wait(timeout=10):
+            raise RuntimeError("test did not release Tape setup")
+        original_materialize()
+
+    def tape_worker():
+        try:
+            with ti.ad.Tape(loss):
+                square()
+        except BaseException as exc:
+            ad_failures.append(exc)
+
+    monkeypatch.setattr(runtime, "materialize", gated_materialize)
+    ad_thread = threading.Thread(target=tape_worker)
+    ad_thread.start()
+    assert ad_setup_entered.wait(timeout=10)
+    try:
+        overlapping_fwd = ti.ad.FwdMode(loss=loss, param=x)
+        with pytest.raises(
+            TaichiRuntimeError,
+            match="another automatic AD context.*being initialized",
+        ):
+            with overlapping_fwd:
+                pass
+        assert not overlapping_fwd.entered
+
+        with pytest.raises(
+            TaichiRuntimeError,
+            match="cannot start while another Python thread is entering",
+        ):
+            graph.run({})
+    finally:
+        ad_setup_release.set()
+        ad_thread.join(timeout=20)
+
+    assert not ad_thread.is_alive()
+    assert not ad_failures
+    assert runtime._active_graph_submissions == 0
+    assert runtime.target_tape is None
+    monkeypatch.setattr(runtime, "materialize", original_materialize)
+
+    graph.run({})
+    ti.sync()
+    np.testing.assert_array_equal(values.to_numpy(), np.full(8, 2, np.int32))
+
+    x[None] = 3.0
+    with ti.ad.Tape(loss):
+        square()
+    assert x.grad[None] == pytest.approx(6.0)

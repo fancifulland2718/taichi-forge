@@ -776,6 +776,46 @@ def test_dense_field_graph_destroyed_tree_is_rejected():
         graph.run({})
 
 
+@test_utils.test(arch=ti.cpu)
+def test_snode_tree_destroy_prepare_rolls_back_partial_retirement():
+    runtime = ti.lang.impl.get_runtime()
+    dependency = (2**30, 7)
+    events = []
+
+    class PreparedObject:
+        retired = False
+
+        def _retire_snode_tree(self, candidate):
+            if candidate != dependency:
+                return False
+            self.retired = True
+            events.append("retire")
+            return True
+
+        def _cancel_snode_tree_retirement(self, candidate):
+            assert candidate == dependency
+            self.retired = False
+            events.append("cancel")
+
+    class FailingObject:
+        @staticmethod
+        def _retire_snode_tree(candidate):
+            if candidate == dependency:
+                raise RuntimeError("injected retirement failure")
+            return False
+
+    prepared = PreparedObject()
+    failing = FailingObject()
+    runtime.register_runtime_object(prepared)
+    runtime.register_runtime_object(failing)
+
+    with pytest.raises(RuntimeError, match="injected retirement failure"):
+        runtime.begin_snode_tree_destroy(dependency)
+
+    assert not prepared.retired
+    assert events == ["retire", "cancel"]
+
+
 @test_utils.test(arch=_DENSE_GRAPH_ARCHS)
 def test_destroying_unrelated_tree_keeps_dense_field_graph_valid():
     values = ti.field(dtype=ti.i32)
