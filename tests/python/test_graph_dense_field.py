@@ -1138,3 +1138,129 @@ def test_graph_template_injection_cache_is_weak_and_identity_safe():
             replacement,
             template_args={"self": owner},
         )
+
+
+@test_utils.test(arch=_DENSE_GRAPH_ARCHS, offline_cache=False)
+def test_dense_field_graph_heterogeneous_blocks_run_on_independent_threads():
+    @ti.data_oriented
+    class DenseBlock:
+        def __init__(self, envs, items, scale):
+            self.envs = envs
+            self.items = items
+            self.scale = scale
+            self.state = ti.field(ti.i32)
+            self.snapshot = ti.field(ti.i32)
+            self.counter = ti.field(ti.i32)
+            self.domain = ti.field(ti.i32)
+            builder = ti.FieldsBuilder()
+            builder.dense(ti.ij, (envs, items)).place(
+                self.state,
+                self.snapshot,
+            )
+            builder.dense(ti.i, envs).place(
+                self.counter,
+                self.domain,
+            )
+            self.tree = builder.finalize()
+
+        @ti.kernel
+        def initialize(self):
+            for env in self.counter:
+                self.counter[env] = 0
+                self.domain[env] = env + 1
+            for env, item in self.state:
+                self.state[env, item] = item
+                self.snapshot[env, item] = 0
+
+        @ti.kernel
+        def advance(self):
+            for env in self.counter:
+                self.counter[env] += 1
+            for env, item in self.state:
+                self.state[env, item] += (
+                    self.domain[env] * ti.static(self.scale)
+                )
+
+        @ti.kernel
+        def publish(self):
+            for env, item in self.snapshot:
+                self.snapshot[env, item] = self.state[env, item]
+
+    blocks = [
+        DenseBlock(2, 8, 1),
+        DenseBlock(3, 12, 2),
+        DenseBlock(4, 16, 3),
+    ]
+    graphs = []
+    for block in blocks:
+        block.initialize()
+        builder = ti.graph.GraphBuilder()
+        for kernel in (
+            block.advance,
+            block.publish,
+            block.advance,
+            block.publish,
+        ):
+            builder.dispatch(
+                kernel,
+                template_args={"self": block},
+            )
+        graph = builder.compile()
+        graph.execution_stats()
+        graph.run({})
+        graphs.append(graph)
+    ti.sync()
+
+    barrier = threading.Barrier(len(graphs))
+    errors = []
+    error_lock = threading.Lock()
+
+    def producer(graph):
+        try:
+            barrier.wait(timeout=10.0)
+            # Vulkan deliberately fills all eight bounded replay slots before
+            # rotating back to an already-recorded slot.
+            for _ in range(10):
+                graph.run({})
+                ti.sync()
+        except BaseException as exc:
+            with error_lock:
+                errors.append(exc)
+
+    threads = [
+        threading.Thread(target=producer, args=(graph,))
+        for graph in graphs
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30.0)
+    assert all(not thread.is_alive() for thread in threads)
+    assert not errors
+    ti.sync()
+
+    fingerprints = set()
+    for block, graph in zip(blocks, graphs):
+        np.testing.assert_array_equal(
+            block.counter.to_numpy(),
+            np.full(block.envs, 22, dtype=np.int32),
+        )
+        report = graph.execution_stats()
+        fingerprints.add(report.static_layout_fingerprint)
+        assert report.static_dependency_count == 1
+        assert report.dispatch_count == 4
+        assert report.runtime_arg_count == 0
+        assert report.counters_complete
+        assert all(
+            segment.persistent_argument_bytes == 0
+            for segment in report.segments
+        )
+        if ti.lang.impl.current_cfg().arch == ti.cpu:
+            assert report.execution_path == "ordinary"
+        elif ti.lang.impl.current_cfg().arch == ti.cuda:
+            assert report.execution_path == "cuda_exact_replay"
+            assert report.backend_replay_segments == 1
+        else:
+            assert report.execution_path == "vulkan_replay"
+            assert report.backend_replay_segments == 1
+    assert len(fingerprints) == len(blocks)
