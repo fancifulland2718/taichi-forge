@@ -137,6 +137,11 @@ importing from outside the repository. Each CPython build runs
 duplicated runtime payloads, or a mismatched runtime dependency. The Windows runtime job
 also rejects implicit Toolkit DLL imports in `taichi_runtime.dll`; the bundled
 CUDART is discovered and loaded explicitly from the runtime package instead.
+The prebuilt Linux shim uses LLVM headers only and intentionally does not link
+LLVMSupport, so it disables LLVM's link sentinel with the header's supported
+`LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING` mode. Wheel validation rejects any
+Linux extension that still contains an LLVM Enable/Disable ABI sentinel; the
+full native runtime retains normal LLVM ABI checks.
 
 The Python shim reads the manifest and locates that bundled library; callers do
 not select a CUDA-specific extra or package. Installing `taichi-forge` therefore

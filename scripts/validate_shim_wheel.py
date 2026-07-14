@@ -15,6 +15,10 @@ RUNTIME_PROJECT = "taichi-forge-runtime"
 REQUIRED_PYTHON_DEPENDENCIES = frozenset(
     {"colorama", "dill", "numpy", "rich", RUNTIME_PROJECT}
 )
+LINUX_LLVM_ABI_SENTINELS = (
+    b"_ZN4llvm23EnableABIBreakingChecksE",
+    b"_ZN4llvm24DisableABIBreakingChecksE",
+)
 CUDA_VARIANT = re.compile(r"(?:^|[+_.-])(?:cu|cuda)\d+", re.IGNORECASE)
 
 
@@ -104,6 +108,18 @@ def validate_shim_wheel(wheel: Path, expected_platform: str) -> str:
             raise RuntimeError(
                 f"Expected one pybind extension in {wheel.name}, found {extensions}"
             )
+        if platform == "manylinux":
+            extension = zf.read(extensions[0])
+            abi_sentinels = [
+                symbol.decode("ascii")
+                for symbol in LINUX_LLVM_ABI_SENTINELS
+                if symbol in extension
+            ]
+            if abi_sentinels:
+                raise RuntimeError(
+                    "Linux shim retains LLVM ABI link sentinels despite its "
+                    f"header-only LLVM boundary: {abi_sentinels}"
+                )
 
         forbidden = []
         for name in names:

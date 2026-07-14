@@ -25,6 +25,9 @@ following:
   installed CUDA Toolkit or driver version.
 - The shim wheel still resolves the matching runtime wheel and imports on every
   supported CPython version in the release matrix.
+- `scripts/validate_shim_wheel.py` reports no LLVM Enable/Disable ABI sentinel
+  in the Linux extension, and an import from outside the checkout does not fail
+  with an undefined `llvm::DisableABIBreakingChecks` symbol.
 
 This verifies that a package may update its bundled libdevice asset without a
 source edit that hardcodes a new version.

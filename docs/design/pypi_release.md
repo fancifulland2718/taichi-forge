@@ -176,6 +176,7 @@ git push origin v0.5.0
 | Windows CUDA 版本校验误报 | `nvcc -V` 是多行输出，或校验字符串被硬编码 | 把输出 join 成字符串，并从 `CUDA_TOOLKIT_VERSION` 推导 `major.minor` |
 | runtime wheel 缺 CUDART 或 `cuda_runtime_major.txt` | runtime 构建没有启用动态 cudart，或 repair/打包路径错误 | 检查 `TI_WITH_CUDA_TOOLKIT`、`TI_CUDA_CUB_SORT_DYNAMIC_CUDART` 和 wheel contents validate step |
 | manylinux wheel 出现 raw 与 hashed 两份 CUDART | auditwheel 已复制并改写依赖，但 raw 数据文件副本尚未规范化 | 确认 auditwheel 后运行 `repair_runtime_wheel.py --platform manylinux`，再执行 `auditwheel show` 和严格校验 |
+| Linux shim 导入时报 `llvm::DisableABIBreakingChecks` 未定义 | prebuilt shim 只使用 LLVM headers 且不链接 LLVMSupport，却没有关闭 header 的 link sentinel | 保持 runtime/shim 分包边界；确认 Linux shim 定义 `LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1`，并让 `validate_shim_wheel.py` 拒绝残留 sentinel 的 wheel |
 
 ## 4. 和 LLVM 20 的关系
 

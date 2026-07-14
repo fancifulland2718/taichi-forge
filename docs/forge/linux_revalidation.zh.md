@@ -19,6 +19,8 @@ driver、Vulkan loader、窗口系统以及（构建 native method 时）CUDA To
 - CUDA-enabled build 中，生成的 header 不会与 NVIDIA 表示数值 toolkit 版本的
   `CUDA_VERSION` 宏冲突；该查询值不得被描述为已安装 CUDA Toolkit 或 driver 版本；
 - shim wheel 仍能解析对应 runtime wheel，并在发布矩阵的所有受支持 CPython 版本导入。
+- `scripts/validate_shim_wheel.py` 确认 Linux extension 不含 LLVM Enable/Disable ABI
+  sentinel；从仓库目录外导入时不得再出现 `llvm::DisableABIBreakingChecks` 未定义符号。
 
 这验证了包更新随附 libdevice asset 时无需再依赖源码中写死的新版本号。
 

@@ -81,6 +81,7 @@ def _write_shim_wheel(
     runtime_version: str | None = None,
     duplicate_runtime: bool = False,
     missing_dependency: str | None = None,
+    llvm_abi_sentinel: bool = False,
 ) -> None:
     dist_info = f"taichi_forge-{version}.dist-info"
     extension = "taichi_python.pyd" if platform == "windows" else "taichi_python.so"
@@ -112,7 +113,10 @@ def _write_shim_wheel(
             f"{requirement_metadata}",
         )
         zf.writestr(f"{dist_info}/RECORD", "")
-        zf.writestr(f"taichi_forge/_lib/core/{extension}", b"shim")
+        extension_payload = b"shim"
+        if llvm_abi_sentinel:
+            extension_payload += b"\0_ZN4llvm24DisableABIBreakingChecksE\0"
+        zf.writestr(f"taichi_forge/_lib/core/{extension}", extension_payload)
         if duplicate_runtime:
             zf.writestr(
                 "taichi_forge/_lib/runtime/taichi_runtime.dll",
@@ -401,6 +405,22 @@ def test_shim_wheel_validator_rejects_missing_python_dependency(
         validate_shim_wheel.validate_shim_wheel(wheel, "windows")
 
 
+def test_manylinux_shim_rejects_llvm_abi_link_sentinel(tmp_path):
+    wheel = (
+        tmp_path
+        / "taichi_forge-0.4.3-cp310-cp310-manylinux_2_35_x86_64.whl"
+    )
+    _write_shim_wheel(
+        wheel,
+        platform="manylinux",
+        version="0.4.3",
+        llvm_abi_sentinel=True,
+    )
+
+    with pytest.raises(RuntimeError, match="LLVM ABI link sentinels"):
+        validate_shim_wheel.validate_shim_wheel(wheel, "manylinux")
+
+
 @pytest.mark.parametrize(
     ("system", "library_name", "major"),
     [
@@ -531,6 +551,19 @@ def test_prebuilt_shim_configures_libdevice_version_without_installing_assets():
     )
     assert version_discovery < prebuilt_source_guard
     assert guarded_runtime_assets
+
+
+def test_prebuilt_linux_shim_disables_llvm_abi_link_sentinel():
+    cmake = (REPO_ROOT / "cmake" / "TaichiCore.cmake").read_text(
+        encoding="utf-8"
+    )
+    prebuilt_llvm = cmake[cmake.index("if(TI_WITH_PREBUILT_PYTHON_RUNTIME)") :]
+
+    assert "if(LINUX)" in prebuilt_llvm
+    assert (
+        "PRIVATE LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1"
+        in prebuilt_llvm
+    )
 
 
 def test_shim_publish_workflow_validates_wheel_boundaries():

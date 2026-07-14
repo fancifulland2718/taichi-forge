@@ -844,6 +844,17 @@ if(TI_WITH_PYTHON)
             message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
             message("LLVM include dirs ${LLVM_INCLUDE_DIRS}")
             add_definitions(${LLVM_DEFINITIONS})
+
+            if(LINUX)
+                # The prebuilt Linux shim consumes LLVM header-only ADTs but
+                # deliberately has no DT_NEEDED edge to libLLVM/LLVMSupport.
+                # LLVM's generated abi-breaking.h explicitly supports this
+                # mode; otherwise every binding translation unit retains an
+                # unresolved Enable/DisableABIBreakingChecks sentinel. The
+                # native runtime build remains fully ABI-checked.
+                target_compile_definitions(${CORE_WITH_PYBIND_LIBRARY_NAME}
+                    PRIVATE LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1)
+            endif()
         endif()
     endif()
 

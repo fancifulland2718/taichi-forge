@@ -119,6 +119,10 @@ wheel、Windows wheel 和最终 Windows+Linux 成对产物共用的发行门禁�
 不匹配的 runtime 依赖。Windows runtime job 还会拒绝
 `taichi_runtime.dll` 对 Toolkit DLL 的隐式导入；包内 CUDART 必须从
 runtime package 显式发现并加载。
+Linux prebuilt shim 只使用 LLVM headers，且刻意不链接 LLVMSupport，因此使用该 header
+正式支持的 `LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING` 模式关闭 link sentinel。wheel
+校验会拒绝仍包含 LLVM Enable/Disable ABI sentinel 的 Linux extension；完整 native runtime
+仍保留正常的 LLVM ABI 检查。
 
 Python shim 会读取清单并定位这份随包库，调用方无需选择 CUDA 专属 extra 或包。用户安装
 `taichi-forge` 因此不需要本机 CUDA Toolkit；只有构建 runtime wheel 时才需要所选 Toolkit。
