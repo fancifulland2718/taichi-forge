@@ -12,7 +12,17 @@ from zipfile import ZipFile
 
 PROJECT = "taichi-forge"
 RUNTIME_PROJECT = "taichi-forge-runtime"
+REQUIRED_PYTHON_DEPENDENCIES = frozenset(
+    {"colorama", "dill", "numpy", "rich", RUNTIME_PROJECT}
+)
 CUDA_VARIANT = re.compile(r"(?:^|[+_.-])(?:cu|cuda)\d+", re.IGNORECASE)
+
+
+def _requirement_project(requirement: str) -> str:
+    match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", requirement)
+    if match is None:
+        raise RuntimeError(f"Invalid Requires-Dist entry: {requirement!r}")
+    return re.sub(r"[-_.]+", "-", match.group(1)).lower()
 
 
 def _wheel_platform(wheel: Path) -> str:
@@ -62,10 +72,21 @@ def validate_shim_wheel(wheel: Path, expected_platform: str) -> str:
                 f"CUDA-versioned shim wheel versions are forbidden: {version}"
             )
         requirements = metadata.get_all("Requires-Dist", [])
+        requirements_by_project = {}
+        for requirement in requirements:
+            requirements_by_project.setdefault(
+                _requirement_project(requirement), []
+            ).append(requirement)
+        missing_dependencies = sorted(
+            REQUIRED_PYTHON_DEPENDENCIES - requirements_by_project.keys()
+        )
+        if missing_dependencies:
+            raise RuntimeError(
+                "Missing required Python dependencies in "
+                f"{wheel.name}: {', '.join(missing_dependencies)}"
+            )
         expected_runtime = f"{RUNTIME_PROJECT}=={version}"
-        runtime_requirements = [
-            item for item in requirements if item.startswith(RUNTIME_PROJECT)
-        ]
+        runtime_requirements = requirements_by_project[RUNTIME_PROJECT]
         if runtime_requirements != [expected_runtime]:
             raise RuntimeError(
                 f"Expected runtime dependency {expected_runtime!r} in {wheel.name}, "

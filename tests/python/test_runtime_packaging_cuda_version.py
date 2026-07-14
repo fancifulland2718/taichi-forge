@@ -80,17 +80,36 @@ def _write_shim_wheel(
     version: str,
     runtime_version: str | None = None,
     duplicate_runtime: bool = False,
+    missing_dependency: str | None = None,
 ) -> None:
     dist_info = f"taichi_forge-{version}.dist-info"
     extension = "taichi_python.pyd" if platform == "windows" else "taichi_python.so"
     requirement_version = runtime_version or version
+    requirements = [
+        "numpy>=1.23; python_version < '3.14'",
+        "numpy>=2.1; python_version >= '3.14'",
+        "colorama",
+        "dill",
+        "rich",
+        f"taichi-forge-runtime=={requirement_version}",
+    ]
+    if missing_dependency is not None:
+        requirements = [
+            requirement
+            for requirement in requirements
+            if validate_shim_wheel._requirement_project(requirement)
+            != missing_dependency
+        ]
+    requirement_metadata = "".join(
+        f"Requires-Dist: {requirement}\n" for requirement in requirements
+    )
     with ZipFile(wheel, "w") as zf:
         zf.writestr(
             f"{dist_info}/METADATA",
             "Metadata-Version: 2.1\n"
             "Name: taichi-forge\n"
             f"Version: {version}\n"
-            f"Requires-Dist: taichi-forge-runtime=={requirement_version}\n",
+            f"{requirement_metadata}",
         )
         zf.writestr(f"{dist_info}/RECORD", "")
         zf.writestr(f"taichi_forge/_lib/core/{extension}", b"shim")
@@ -366,6 +385,22 @@ def test_shim_wheel_validator_rejects_mismatched_runtime_version(tmp_path):
         validate_shim_wheel.validate_shim_wheel(wheel, "windows")
 
 
+@pytest.mark.parametrize("dependency", ["colorama", "dill", "numpy", "rich"])
+def test_shim_wheel_validator_rejects_missing_python_dependency(
+    tmp_path, dependency
+):
+    wheel = tmp_path / "taichi_forge-0.4.3-cp310-cp310-win_amd64.whl"
+    _write_shim_wheel(
+        wheel,
+        platform="windows",
+        version="0.4.3",
+        missing_dependency=dependency,
+    )
+
+    with pytest.raises(RuntimeError, match=rf"dependencies.*{dependency}"):
+        validate_shim_wheel.validate_shim_wheel(wheel, "windows")
+
+
 @pytest.mark.parametrize(
     ("system", "library_name", "major"),
     [
@@ -508,6 +543,13 @@ def test_shim_publish_workflow_validates_wheel_boundaries():
     assert "--wheel-dir wheelhouse --platform manylinux" in workflow
     assert "--wheel-dir dist --platform windows" in workflow
     assert "Reject implicit CUDA Toolkit DLL imports" not in workflow
+    install_commands = re.findall(
+        r"^\s*python -m pip install --force-reinstall.*$", workflow, re.MULTILINE
+    )
+    assert len(install_commands) == 2
+    assert all("--no-deps" not in command for command in install_commands)
+    assert all("--only-binary=:all:" in command for command in install_commands)
+    assert workflow.count("python -m pip check") == 2
 
 
 def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():

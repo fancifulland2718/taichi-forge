@@ -202,7 +202,8 @@ python scripts/validate_runtime_wheel.py --wheel-dir <runtime-wheel-dir> --platf
 python scripts/validate_shim_wheel.py --wheel-dir <one-shim-wheel-dir> --platform <windows-or-manylinux>
 ```
 
-随后在仓库目录之外安装同版本 runtime/shim wheel pair，运行
+随后让 pip 按 shim wheel 的 `Requires-Dist` 安装其 Python 依赖和本地同版本 runtime wheel，
+运行 `pip check`；不得在最终安装验证中使用 `--no-deps`。再到仓库目录之外运行
 `scripts/validate_installed_runtime.py`，并确认实际 CUDART 来自 runtime package。正式发布
 还必须完成 [Linux 复测清单](../forge/linux_revalidation.zh.md) 中适用于发布环境的 GPU、
 sanitizer、GGUI/interop 和性能稳定性门槛；仅 `import` 或 smoke test 不足以替代这些检查。

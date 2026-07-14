@@ -309,7 +309,8 @@ jobs:
           set -euo pipefail
           python scripts/validate_shim_wheel.py \
             --wheel-dir wheelhouse --platform manylinux
-          python -m pip install --force-reinstall --no-deps runtime-wheel/*.whl wheelhouse/*.whl
+          python -m pip install --force-reinstall --only-binary=:all: runtime-wheel/*.whl wheelhouse/*.whl
+          python -m pip check
           cd /tmp
           python -I "$GITHUB_WORKSPACE/scripts/validate_installed_runtime.py"
 
@@ -478,7 +479,8 @@ jobs:
             --wheel-dir dist --platform windows
           $runtimeWheel = (Get-ChildItem runtime-wheel\*.whl | Select-Object -First 1).FullName
           $shimWheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
-          python -m pip install --force-reinstall --no-deps $runtimeWheel $shimWheel
+          python -m pip install --force-reinstall --only-binary=:all: $runtimeWheel $shimWheel
+          python -m pip check
           Push-Location $env:TEMP
           try {
             python -I "$env:GITHUB_WORKSPACE\scripts\validate_installed_runtime.py"

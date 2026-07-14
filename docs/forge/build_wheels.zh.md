@@ -113,8 +113,10 @@ wheel、Windows wheel 和最终 Windows+Linux 成对产物共用的发行门禁�
 `RECORD`，然后才运行 manylinux 校验；最终发行 wheel 必须只包含一份 CUDART。
 两个 distribution 安装后，`scripts/validate_installed_runtime.py` 还会要求 shim/runtime
 版本相同，并确认实际选择的 CUDART 路径属于 runtime 包或其 auditwheel `.libs` 目录。
-每个 CPython 构建都会运行 `scripts/validate_shim_wheel.py`，拒绝重复的
-runtime payload 或不匹配的 runtime 依赖。Windows runtime job 还会拒绝
+安装验证会从包索引解析 shim wheel 声明的 Python 依赖、使用本地 runtime wheel，并在离开
+仓库目录执行 import 前运行 `pip check`。每个 CPython 构建都会运行
+`scripts/validate_shim_wheel.py`，拒绝缺失的直接 Python 依赖、重复的 runtime payload 或
+不匹配的 runtime 依赖。Windows runtime job 还会拒绝
 `taichi_runtime.dll` 对 Toolkit DLL 的隐式导入；包内 CUDART 必须从
 runtime package 显式发现并加载。
 

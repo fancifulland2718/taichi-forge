@@ -113,3 +113,4 @@ temp_outputs/
 /taichi/program/vulkan_sort_shaders/prefix_offsets.comp
 dist-runtime/
 runtimes/
+temp/

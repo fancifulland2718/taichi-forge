@@ -130,8 +130,11 @@ runs the manylinux validator. A release wheel must contain exactly one CUDART.
 After installing both distributions, `scripts/validate_installed_runtime.py`
 also requires equal shim/runtime versions and verifies that the selected
 CUDART path belongs to the runtime package (or its auditwheel `.libs` directory).
-Each CPython build runs `scripts/validate_shim_wheel.py` to reject duplicated
-runtime payloads or a mismatched runtime dependency. The Windows runtime job
+The install validation resolves the shim wheel's declared Python dependencies
+from the package index, uses the local runtime wheel, and runs `pip check` before
+importing from outside the repository. Each CPython build runs
+`scripts/validate_shim_wheel.py` to reject missing direct Python dependencies,
+duplicated runtime payloads, or a mismatched runtime dependency. The Windows runtime job
 also rejects implicit Toolkit DLL imports in `taichi_runtime.dll`; the bundled
 CUDART is discovered and loaded explicitly from the runtime package instead.
 
