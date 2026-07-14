@@ -375,6 +375,10 @@ struct CompiledGraphJITCache {
       cuda_graph_state;
   std::unique_ptr<CompiledGraphVulkanState, CompiledGraphVulkanStateDeleter>
       vulkan_graph_state;
+  // Single-dispatch Vulkan graphs intentionally stay on the ordinary path.
+  // Keep their cheap classification in the cache so diagnostics can explain
+  // the decision without constructing replay slots or compiling twice.
+  CompiledGraphStats vulkan_inline_stats;
   // Detailed counters are opt-in. Failure recovery keeps its own bounded
   // backoff state, so ordinary graph replay does not pay for diagnostics until
   // an internal caller requests _graph_stats.

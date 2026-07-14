@@ -1728,7 +1728,7 @@ bool GfxRuntime::try_launch_graph(
     prepared.push_back(std::move(prepared_dispatch));
   }
   if (total_tasks <= 1) {
-    return reject();
+    return reject(GraphReplayFallbackReason::insufficient_tasks);
   }
 
   executable.refresh_prepared_cache(key, prepared);

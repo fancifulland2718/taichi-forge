@@ -138,6 +138,9 @@ def run(args):
     stale_rejected = False
     zero_arg_captures = 0
     max_persistent_argument_bytes = 0
+    vulkan_records = 0
+    vulkan_replays = 0
+    vulkan_fallbacks = 0
     sample_period = max(1, args.iterations // args.memory_samples)
     memory = [
         {
@@ -161,17 +164,18 @@ def run(args):
 
         build_start = time.perf_counter()
         graph_builder = ti.graph.GraphBuilder()
-        if args.zero_runtime_arg:
-            graph_builder.dispatch(
-                write_values_zero_arg,
-                template_args={"field": values},
-            )
-        else:
-            graph_builder.dispatch(
-                write_values,
-                sym_value,
-                template_args={"field": values},
-            )
+        for _ in range(args.dispatches):
+            if args.zero_runtime_arg:
+                graph_builder.dispatch(
+                    write_values_zero_arg,
+                    template_args={"field": values},
+                )
+            else:
+                graph_builder.dispatch(
+                    write_values,
+                    sym_value,
+                    template_args={"field": values},
+                )
         graph = graph_builder.compile()
         build_times.append((time.perf_counter() - build_start) * 1000.0)
 
@@ -181,12 +185,27 @@ def run(args):
             graph._graph_stats
         run_start = time.perf_counter()
         runtime_args = {} if args.zero_runtime_arg else {"value": iteration}
-        graph.run(runtime_args)
+        for run_index in range(args.runs_per_graph):
+            if args.arch == "vulkan" and run_index == 8:
+                # The fixed replay ring has eight slots. Make slot zero ready
+                # so run nine deterministically exercises replay, not the
+                # non-blocking saturation fallback.
+                ti.sync()
+            graph.run(runtime_args)
         ti.sync()
         run_times.append((time.perf_counter() - run_start) * 1000.0)
         if args.zero_runtime_arg and args.arch == "cuda":
             stats = graph._graph_stats[0]
             zero_arg_captures += stats["zero_arg_captures"]
+            max_persistent_argument_bytes = max(
+                max_persistent_argument_bytes,
+                stats["known_persistent_argument_bytes"],
+            )
+        if args.arch == "vulkan":
+            stats = graph._graph_stats[0]
+            vulkan_records += stats["records"]
+            vulkan_replays += stats["replays"]
+            vulkan_fallbacks += stats["ordinary_fallbacks"]
             max_persistent_argument_bytes = max(
                 max_persistent_argument_bytes,
                 stats["known_persistent_argument_bytes"],
@@ -236,6 +255,8 @@ def run(args):
         "python": platform.python_version(),
         "iterations": args.iterations,
         "field_size": args.size,
+        "dispatches_per_graph": args.dispatches,
+        "runs_per_graph": args.runs_per_graph,
         "runtime_arg_mode": (
             "zero" if args.zero_runtime_arg else "scalar"
         ),
@@ -258,6 +279,9 @@ def run(args):
         "last_identity": identities[-1],
         "stale_graph_rejected": stale_rejected,
         "zero_arg_captures": zero_arg_captures,
+        "vulkan_records": vulkan_records,
+        "vulkan_replays": vulkan_replays,
+        "vulkan_fallbacks": vulkan_fallbacks,
         "max_persistent_argument_bytes": max_persistent_argument_bytes,
     }
     ti.reset()
@@ -277,11 +301,22 @@ def main():
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--size", type=int, default=256)
     parser.add_argument("--memory-samples", type=int, default=20)
+    parser.add_argument("--dispatches", type=int, default=1)
+    parser.add_argument("--runs-per-graph", type=int, default=1)
     parser.add_argument("--zero-runtime-arg", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    if args.iterations <= 0 or args.size <= 0 or args.memory_samples <= 0:
-        parser.error("iterations, size, and memory-samples must be positive")
+    if min(
+        args.iterations,
+        args.size,
+        args.memory_samples,
+        args.dispatches,
+        args.runs_per_graph,
+    ) <= 0:
+        parser.error(
+            "iterations, size, memory-samples, dispatches, and "
+            "runs-per-graph must be positive"
+        )
 
     result = run(args)
     encoded = json.dumps(result, indent=2, sort_keys=True)

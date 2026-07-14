@@ -83,6 +83,184 @@ def test_dense_field_graph_global_zero_args_matches_direct():
     )
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_dense_field_single_dispatch_reports_insufficient_dispatches():
+    values = ti.field(dtype=ti.i32, shape=32)
+
+    @ti.kernel
+    def advance():
+        for i in values:
+            values[i] += i + 1
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(advance)
+    graph = builder.compile()
+    graph.run({})
+    graph.run({})
+    ti.sync()
+
+    stats = graph._graph_stats[0]
+    assert stats["backend"] == "vulkan"
+    assert stats["attempts"] == 2
+    assert stats["ordinary_fallbacks"] == 2
+    assert stats["records"] == 0
+    assert stats["replays"] == 0
+    assert stats["structural_fallbacks"] == 0
+    assert stats["last_path"] == "ordinary_fallback"
+    assert stats["last_fallback_reason"] == "insufficient_dispatches"
+    assert stats["known_persistent_argument_bytes"] == 0
+    np.testing.assert_array_equal(
+        values.to_numpy(), (np.arange(32, dtype=np.int32) + 1) * 2
+    )
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_dense_field_multi_tree_graph_records_and_replays():
+    values = ti.field(dtype=ti.i32)
+    vectors = ti.Vector.field(3, dtype=ti.f32)
+    matrices = ti.Matrix.field(2, 2, dtype=ti.f32)
+    first_builder = ti.FieldsBuilder()
+    first_builder.dense(ti.i, 64).place(values, vectors)
+    first_tree = first_builder.finalize()
+    second_builder = ti.FieldsBuilder()
+    second_builder.dense(ti.i, 64).place(matrices)
+    second_tree = second_builder.finalize()
+
+    @ti.kernel
+    def advance_values():
+        for i in values:
+            values[i] += i + 1
+            vectors[i] += ti.Vector([1.0, 2.0, 3.0])
+
+    @ti.kernel
+    def advance_matrices():
+        for i in matrices:
+            matrices[i] += ti.Matrix([[1.0, 2.0], [3.0, 4.0]])
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(advance_values)
+    builder.dispatch(advance_matrices)
+    graph = builder.compile()
+    assert graph._spec.snode_tree_dependencies == {
+        (first_tree.id, first_tree.generation),
+        (second_tree.id, second_tree.generation),
+    }
+
+    # Populate all eight fixed replay slots, synchronize so slot zero is
+    # reusable, then prove the ninth launch replays its recorded command list.
+    for _ in range(8):
+        graph.run({})
+    ti.sync()
+    graph.run({})
+    ti.sync()
+
+    stats = graph._graph_stats[0]
+    assert stats["backend"] == "vulkan"
+    assert stats["attempts"] == 9
+    assert stats["records"] == 8
+    assert stats["replays"] == 1
+    assert stats["ordinary_fallbacks"] == 0
+    assert stats["last_path"] == "vulkan_replay"
+    assert stats["last_fallback_reason"] == "none"
+    assert stats["known_persistent_argument_bytes"] == 0
+    np.testing.assert_array_equal(
+        values.to_numpy(), (np.arange(64, dtype=np.int32) + 1) * 9
+    )
+    np.testing.assert_allclose(
+        vectors.to_numpy(), np.tile([9.0, 18.0, 27.0], (64, 1)),
+        rtol=0.0,
+    )
+    np.testing.assert_allclose(
+        matrices.to_numpy(),
+        np.tile([[9.0, 18.0], [27.0, 36.0]], (64, 1, 1)),
+        rtol=0.0,
+    )
+    first_tree.destroy()
+    second_tree.destroy()
+
+
+@test_utils.test(arch=ti.cpu, cpu_max_num_threads=4, offline_cache=False)
+def test_cpu_dense_field_same_graph_two_host_callers_are_serialized():
+    values = ti.field(dtype=ti.i32, shape=1 << 14)
+
+    @ti.kernel
+    def advance():
+        for i in values:
+            values[i] += 1
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(advance)
+    graph = builder.compile()
+    graph.run({})
+    values.fill(0)
+    start = threading.Barrier(2)
+    errors = []
+
+    def submit():
+        try:
+            start.wait(timeout=10.0)
+            for _ in range(32):
+                graph.run({})
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=submit) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30.0)
+    assert all(not thread.is_alive() for thread in threads)
+    assert not errors
+    np.testing.assert_array_equal(
+        values.to_numpy(), np.full(1 << 14, 64, dtype=np.int32)
+    )
+
+
+@test_utils.test(arch=ti.cpu, cpu_max_num_threads=4, offline_cache=False)
+def test_cpu_dense_field_independent_graph_callers_share_bounded_pool():
+    fields = [ti.field(dtype=ti.i32, shape=1 << 14) for _ in range(4)]
+
+    @ti.kernel
+    def advance(field: ti.template()):
+        for i in field:
+            field[i] += 1
+
+    graphs = []
+    for field in fields:
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(advance, template_args={"field": field})
+        graphs.append(builder.compile())
+    for graph in graphs:
+        graph.run({})
+    for field in fields:
+        field.fill(0)
+
+    start = threading.Barrier(len(graphs))
+    errors = []
+
+    def submit(graph):
+        try:
+            start.wait(timeout=10.0)
+            for _ in range(16):
+                graph.run({})
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=submit, args=(graph,)) for graph in graphs
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30.0)
+    assert all(not thread.is_alive() for thread in threads)
+    assert not errors
+    for field in fields:
+        np.testing.assert_array_equal(
+            field.to_numpy(), np.full(1 << 14, 16, dtype=np.int32)
+        )
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_cuda_dense_field_zero_arg_graph_captures_without_arg_storage():
     scalar = ti.field(dtype=ti.i32, shape=())

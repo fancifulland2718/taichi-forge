@@ -62,6 +62,7 @@ def main() -> None:
     parser.add_argument(
         "--producer-mode", choices=("kernel", "graph"), default="graph"
     )
+    parser.add_argument("--producer-dispatches", type=int, default=2)
     parser.add_argument(
         "--image-source", choices=("host", "device"), default=None,
         help="default: device on CUDA, host on CPU/Vulkan",
@@ -71,7 +72,8 @@ def main() -> None:
         "device" if args.arch == "cuda" else "host"
     )
     if (args.seconds <= 0 or args.warmup_seconds < 0 or args.width <= 0
-            or args.height <= 0 or args.producer_sample_every <= 0):
+            or args.height <= 0 or args.producer_sample_every <= 0
+            or args.producer_dispatches <= 0):
         raise ValueError(
             "seconds, width, height, and producer-sample-every must be "
             "positive; warmup-seconds must be non-negative")
@@ -102,9 +104,11 @@ def main() -> None:
     producer_step()
     ti.sync()
     producer_operation = producer_step
+    producer_graph = None
     if args.producer_mode == "graph":
         graph_builder = ti.graph.GraphBuilder()
-        graph_builder.dispatch(producer_step)
+        for _ in range(args.producer_dispatches):
+            graph_builder.dispatch(producer_step)
         producer_graph = graph_builder.compile()
         producer_operation = lambda: producer_graph.run({})
 
@@ -187,6 +191,12 @@ def main() -> None:
                and measurement_end is not None else 0.0)
     report = {
         "producer_mode": args.producer_mode,
+        "producer_dispatches": (
+            args.producer_dispatches if producer_graph is not None else 1
+        ),
+        "producer_graph_stats": (
+            producer_graph._graph_stats if producer_graph is not None else None
+        ),
         "image_source": image_source,
         "arch": args.arch,
         "mode": "offscreen" if args.offscreen else "headed",

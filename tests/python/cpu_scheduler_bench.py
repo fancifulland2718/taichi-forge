@@ -1,13 +1,15 @@
-"""Manual CPU scheduler baseline for independent graph submissions.
+"""CPU dense-Field Graph scheduler benchmark for 1/2/4/8 host callers.
 
-Run in a fresh process after deploying the local runtime:
+Each caller owns an independent Graph and dense Field, while all kernels use
+one Program-owned bounded worker pool. The benchmark compares serial and
+GIL-released concurrent submission, verifies every result, and reports caller
+fairness plus process RSS. It intentionally does not create one worker pool per
+Graph or Python thread.
 
-    python tests/python/cpu_scheduler_bench.py --items 4194304 --runs 12
+Example:
 
-Two separately compiled graph executables share one Program but own different
-graph caches. Each contains one CPU range-for kernel. The benchmark compares
-the total time of running both workloads serially with two GIL-released host
-callers running them concurrently, and checks both outputs.
+    python tests/python/cpu_scheduler_bench.py --items 1048576 \
+        --runs 12 --samples 5 --threads 4 --caller-counts 1 2 4 8
 """
 
 import argparse
@@ -15,6 +17,7 @@ import json
 import statistics
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -27,112 +30,181 @@ def _percentile(values, fraction):
     return ordered[index]
 
 
+def _rss_mb():
+    try:
+        import psutil  # pylint: disable=import-outside-toplevel
+
+        return psutil.Process().memory_info().rss / (1024.0 * 1024.0)
+    except Exception:
+        return None
+
+
+def _summary(values):
+    return {
+        "median_ms": statistics.median(values),
+        "p95_ms": _percentile(values, 0.95),
+        "samples_ms": values,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--items", type=int, default=1 << 22)
+    parser.add_argument("--items", type=int, default=1 << 20)
     parser.add_argument("--runs", type=int, default=12)
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument(
+        "--caller-counts", nargs="+", type=int, default=[1, 2, 4, 8]
+    )
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    if min(args.items, args.runs, args.samples, args.threads) <= 0:
-        parser.error("items, runs, samples, and threads must be positive")
+    if min(
+        args.items,
+        args.runs,
+        args.samples,
+        args.threads,
+        *args.caller_counts,
+    ) <= 0:
+        parser.error("all numeric arguments must be positive")
 
-    ti.init(arch=ti.cpu, cpu_max_num_threads=args.threads)
+    ti.init(
+        arch=ti.cpu,
+        cpu_max_num_threads=args.threads,
+        enable_fallback=False,
+        offline_cache=False,
+    )
 
     @ti.kernel
-    def step(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    def step(values: ti.template()):
         for i in values:
             values[i] += 1
 
-    symbolic_values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
-
-    def make_graph():
+    max_callers = max(args.caller_counts)
+    fields = [ti.field(ti.i32, shape=args.items) for _ in range(max_callers)]
+    graphs = []
+    for values in fields:
         builder = ti.graph.GraphBuilder()
-        builder.dispatch(step, symbolic_values)
-        return builder.compile()
+        builder.dispatch(step, template_args={"values": values})
+        graphs.append(builder.compile())
 
-    first_graph = make_graph()
-    second_graph = make_graph()
-    first = ti.ndarray(ti.i32, shape=args.items)
-    second = ti.ndarray(ti.i32, shape=args.items)
+    # Compile every specialization and initialize every graph cache before
+    # timing scheduler work.
+    for graph in graphs:
+        graph.run({})
+    for values in fields:
+        values.fill(0)
 
-    # Compile and initialize both graph caches before timing scheduler work.
-    first.fill(0)
-    second.fill(0)
-    first_graph.run({"values": first})
-    second_graph.run({"values": second})
-    ti.sync()
+    rss_before_mb = _rss_mb()
+    results = []
+    for caller_count in args.caller_counts:
+        selected_graphs = graphs[:caller_count]
+        selected_fields = fields[:caller_count]
+        serial_ms = []
+        concurrent_ms = []
+        fairness = []
 
-    serial_ms = []
-    concurrent_ms = []
-    for _ in range(args.samples):
-        first.fill(0)
-        second.fill(0)
-        started = time.perf_counter()
-        for _ in range(args.runs):
-            first_graph.run({"values": first})
-        for _ in range(args.runs):
-            second_graph.run({"values": second})
-        ti.sync()
-        serial_ms.append((time.perf_counter() - started) * 1e3)
-        if not np.all(first.to_numpy() == args.runs) or not np.all(
-            second.to_numpy() == args.runs
-        ):
-            raise RuntimeError("serial scheduler result mismatch")
+        def check(expected):
+            for values in selected_fields:
+                actual = values.to_numpy()
+                if not np.all(actual == expected):
+                    raise RuntimeError(
+                        f"scheduler result mismatch: expected {expected}"
+                    )
 
-        first.fill(0)
-        second.fill(0)
-        start = threading.Barrier(2)
-        failures = []
-        failure_lock = threading.Lock()
+        for _ in range(args.samples):
+            for values in selected_fields:
+                values.fill(0)
+            started = time.perf_counter()
+            # Match the cross-Field working-set rotation produced by FIFO host
+            # callers. Grouping all runs of one Field would keep 16 MiB hot in
+            # LLC and incorrectly charge cache-locality loss to the scheduler.
+            for _ in range(args.runs):
+                for graph in selected_graphs:
+                    graph.run({})
+            ti.sync()
+            serial_ms.append((time.perf_counter() - started) * 1e3)
+            check(args.runs)
 
-        def run_graph(graph, values):
-            try:
-                start.wait(timeout=10)
-                for _ in range(args.runs):
-                    graph.run({"values": values})
-            except BaseException as exc:
-                with failure_lock:
-                    failures.append(exc)
+            for values in selected_fields:
+                values.fill(0)
+            start = threading.Barrier(caller_count)
+            failures = []
+            failure_lock = threading.Lock()
+            worker_ms = [0.0] * caller_count
 
-        first_thread = threading.Thread(target=run_graph, args=(first_graph, first))
-        second_thread = threading.Thread(target=run_graph, args=(second_graph, second))
-        started = time.perf_counter()
-        first_thread.start()
-        second_thread.start()
-        first_thread.join(timeout=120)
-        second_thread.join(timeout=120)
-        ti.sync()
-        if first_thread.is_alive() or second_thread.is_alive():
-            raise RuntimeError("concurrent scheduler workers deadlocked")
-        if failures:
-            raise failures[0]
-        concurrent_ms.append((time.perf_counter() - started) * 1e3)
-        if not np.all(first.to_numpy() == args.runs) or not np.all(
-            second.to_numpy() == args.runs
-        ):
-            raise RuntimeError("concurrent scheduler result mismatch")
+            def run_graph(index, graph):
+                try:
+                    start.wait(timeout=10.0)
+                    worker_start = time.perf_counter()
+                    for _ in range(args.runs):
+                        graph.run({})
+                    worker_ms[index] = (
+                        time.perf_counter() - worker_start
+                    ) * 1e3
+                except BaseException as exc:
+                    with failure_lock:
+                        failures.append(exc)
 
-    serial_median = statistics.median(serial_ms)
-    concurrent_median = statistics.median(concurrent_ms)
-    print(
-        json.dumps(
+            threads = [
+                threading.Thread(target=run_graph, args=(index, graph))
+                for index, graph in enumerate(selected_graphs)
+            ]
+            started = time.perf_counter()
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=120.0)
+            ti.sync()
+            if any(thread.is_alive() for thread in threads):
+                raise RuntimeError("concurrent scheduler workers deadlocked")
+            if failures:
+                raise failures[0]
+            concurrent_ms.append((time.perf_counter() - started) * 1e3)
+            positive_worker_ms = [value for value in worker_ms if value > 0]
+            fairness.append(
+                min(positive_worker_ms) / max(positive_worker_ms)
+            )
+            check(args.runs)
+
+        serial = _summary(serial_ms)
+        concurrent = _summary(concurrent_ms)
+        results.append(
             {
-                "items": args.items,
-                "runs_per_graph": args.runs,
-                "samples": args.samples,
-                "cpu_max_num_threads": args.threads,
-                "serial_median_ms": round(serial_median, 4),
-                "serial_p95_ms": round(_percentile(serial_ms, 0.95), 4),
-                "concurrent_median_ms": round(concurrent_median, 4),
-                "concurrent_p95_ms": round(_percentile(concurrent_ms, 0.95), 4),
-                "concurrent_speedup": round(serial_median / concurrent_median, 4),
-            },
-            sort_keys=True,
+                "callers": caller_count,
+                "serial": serial,
+                "concurrent": concurrent,
+                "concurrent_speedup": (
+                    serial["median_ms"] / concurrent["median_ms"]
+                ),
+                "concurrent_invocations_per_second": (
+                    caller_count
+                    * args.runs
+                    / (concurrent["median_ms"] / 1000.0)
+                ),
+                "caller_fairness_min_over_max_median": statistics.median(
+                    fairness
+                ),
+                "caller_fairness_samples": fairness,
+            }
         )
-    )
 
-    del first_graph, second_graph, first, second
+    report = {
+        "schema": "taichi_forge.cpu_dense_field_graph_callers.v1",
+        "items_per_caller": args.items,
+        "runs_per_caller": args.runs,
+        "samples": args.samples,
+        "cpu_max_num_threads": args.threads,
+        "rss_before_mb": rss_before_mb,
+        "rss_after_mb": _rss_mb(),
+        "results": results,
+    }
+    encoded = json.dumps(report, indent=2, sort_keys=True)
+    print(encoded)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(encoded + "\n", encoding="utf-8")
+
+    del graphs, fields
     ti.reset()
 
 

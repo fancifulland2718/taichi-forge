@@ -1186,7 +1186,17 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
                           const CompileConfig &compile_config,
                           const std::unordered_map<std::string, IValue> &args,
                           CompiledGraphJITCache &cache) {
-  if (compile_config.debug || graph.dispatches.size() <= 1) {
+  if (compile_config.debug) {
+    return false;
+  }
+  if (graph.dispatches.size() <= 1) {
+    auto &stats = cache.vulkan_inline_stats;
+    stats.backend = CompiledGraphBackend::vulkan;
+    stats.last_path = CompiledGraphExecutionPath::ordinary_fallback;
+    stats.last_fallback_reason =
+        CompiledGraphFallbackReason::insufficient_dispatches;
+    ++stats.attempts;
+    ++stats.ordinary_fallbacks;
     return false;
   }
   if (cache.kernels.size() != graph.dispatches.size()) {
@@ -1293,6 +1303,10 @@ CompiledGraphStats CompiledGraphJITCache::debug_graph_stats() {
         result.last_fallback_reason =
             CompiledGraphFallbackReason::runtime_mode;
         break;
+      case gfx::GraphReplayFallbackReason::insufficient_tasks:
+        result.last_fallback_reason =
+            CompiledGraphFallbackReason::insufficient_dispatches;
+        break;
       case gfx::GraphReplayFallbackReason::structural_unsupported:
         result.last_fallback_reason =
             CompiledGraphFallbackReason::structural_unsupported;
@@ -1307,6 +1321,9 @@ CompiledGraphStats CompiledGraphJITCache::debug_graph_stats() {
     return result;
   }
 #endif
+  if (vulkan_inline_stats.attempts > 0) {
+    return vulkan_inline_stats;
+  }
   return {};
 }
 
@@ -1320,6 +1337,7 @@ void CompiledGraphJITCache::clear_runtime_state() {
   std::lock_guard<std::mutex> lock(run_mutex);
   cuda_graph_state.reset();
   vulkan_graph_state.reset();
+  vulkan_inline_stats = {};
   kernels.clear();
   runtime_arg_plans.clear();
   validated_snode_tree_program = nullptr;
@@ -1405,6 +1423,7 @@ void CompiledGraph::jit_run_cached(
       // executable containing the old root binding.
       cache.cuda_graph_state.reset();
       cache.vulkan_graph_state.reset();
+      cache.vulkan_inline_stats = {};
       cache.kernels.clear();
       cache.runtime_arg_plans.clear();
       cache.validated_snode_tree_program = nullptr;

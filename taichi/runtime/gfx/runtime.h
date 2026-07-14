@@ -59,6 +59,7 @@ enum class GraphReplayLastPath : uint8_t {
 enum class GraphReplayFallbackReason : uint8_t {
   none,
   runtime_mode,
+  insufficient_tasks,
   structural_unsupported,
   slot_saturated,
 };
