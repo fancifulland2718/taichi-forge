@@ -170,6 +170,11 @@ grouped under the behavior they shipped.
 - Added device-side numeric checks/metrics and native Graph result nodes.
 - Hardened Vulkan ArgPack mapping, small-integer SPIR-V, CUDART linkage,
   version propagation, and release workflows.
+- Removed the abandoned `use_fused_passes` / `pipeline_dirty` experiment
+  and retired the standalone Vulkan buffer-pool/listgen-barrier
+  implementations after they showed negligible ROI. The latter fields
+  remained accepted no-op compatibility names; the cache schema rejects
+  artifacts from the transient fused-pass configuration.
 
 ## 0.4.24
 

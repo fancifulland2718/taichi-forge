@@ -4,7 +4,7 @@
 > Option introduction versions are indexed in [release notes](release_notes.en.md);
 > this current-contract page does not reclassify older options as `0.5.0` work.
 
-This document is the single canonical reference for Forge-specific knobs and toolchain changes. Older fork-only settings are kept here once they are part of the public API; experimental or internal-only flags are intentionally excluded. For a module-oriented list of Forge-only API symbols, see [Forge API reference](forge_api_reference.en.md).
+This document is the single canonical reference for Forge-specific knobs and toolchain changes. Only options in the supported sections should be surfaced by applications. Section 2.9 records retired, compatibility-only, and validation-only names so old configurations fail or migrate clearly; listing a name there is not a support recommendation. For a module-oriented list of Forge-only API symbols, see [Forge API reference](forge_api_reference.en.md).
 
 ---
 
@@ -32,9 +32,8 @@ All defaults match upstream 1.7.4 unless noted.
 
 | Kwarg | Default | Purpose |
 |---|---|---|
-| `compile_tier` | `"balanced"` | `"fast"` lowers LLVM to `-O0` (floor `-O1` on NVPTX / AMDGCN) and SPIR-V to optimization level 1. `"full"` preserves the pre-fork pipeline. |
-| `llvm_opt_level` | `-1` (use tier) | Explicit LLVM `-O` override (`0`–`3`). |
-| `spv_opt_level` | `-1` (use tier) | Explicit `spirv-opt` optimisation level override. |
+| `compile_tier` | `"balanced"` | `"fast"` forces LLVM to `-O0` (floor `-O1` on NVPTX / AMDGCN) and skips `spirv-opt` at level 0. `"balanced"` and `"full"` keep the configured backend level. This is the recommended application-facing control. |
+| `llvm_opt_level` | `3` | Explicit LLVM `-O` level (`0`–`3`) for non-`fast` tiers. `compile_tier="fast"` still forces the backend-safe O0/O1 level. Prefer `compile_tier` unless a representative benchmark justifies a backend-specific override. |
 
 ### 2.2 Compile-pipeline batch & threading
 
@@ -43,24 +42,21 @@ All defaults match upstream 1.7.4 unless noted.
 | `num_compile_threads` | logical-core count | Thread-pool size used by `ti.compile_kernels`. |
 | `compile_dag_scheduler` | `True` | DAG-aware anti-saturation scheduler for `ti.compile_kernels` batches; balances inner LLVM thread pool vs. outer kernel pool. Set `False` to fall back to the legacy two-tier model. |
 | `spirv_parallel_codegen` | `False` | Opt-in per-kernel task-level parallel SPIR-V codegen. |
-| `spirv_disabled_passes` | `[]` | Per-call disable list for individual `spirv-opt` passes (e.g. `["loop-unroll"]`). Cache-key isolated. Disabling `loop-unroll` alone yields ~54 % SPIR-V codegen wall-time reduction on the validated Vulkan suite; the three heaviest passes together yield ~61 %, with byte-identical kernel results. |
 
 ### 2.3 Pass / IR controls
 
 | Kwarg | Default | Purpose |
 |---|---|---|
-| `use_fused_passes` | `False` | Enable `pipeline_dirty` short-circuit around `full_simplify`; numerically bit-identical to off. |
-| `tiered_full_simplify` | `True` | Splits `full_simplify` into a local fixed-point phase plus a single global round per outer iteration. Set `False` for the legacy cadence. |
+| `tiered_full_simplify` | `True` | Splits `full_simplify` into a local fixed-point phase plus a single global round per outer iteration. It is cache-key isolated. Keep `True`; use `False` only to isolate a compiler regression against the legacy cadence. |
 | `unrolling_hard_limit` | `0` (off) | Per-`ti.static(for ...)` unroll iteration cap. Aborts with `TaichiCompilationError` instead of silently consuming compile time. |
 | `unrolling_kernel_hard_limit` | `0` (off) | Total unroll iteration cap across a single kernel. |
 | `func_inline_depth_limit` | upstream default | Hard cap on `@ti.func` inline recursion depth. |
-| `cache_loop_invariant_global_vars` | `False` | Opt in to SNode loop-invariant caching in hot loops. |
 
 ### 2.4 Real-function & inlining
 
 | Kwarg | Default | Purpose |
 |---|---|---|
-| `auto_real_function` | `False` | Auto-promote expensive `@ti.func` instances to `is_real_function=True` (LLVM-only, non-autodiff). |
+| `auto_real_function` | `False` | Experimental one-way promotion of expensive `@ti.func` instances to `is_real_function=True` (LLVM-only, non-autodiff, cache-key isolated). Do not enable engine-wide or on AD/cross-backend paths; use only after workload-specific compile and runtime validation. |
 | `auto_real_function_threshold_us` | `1000` | Promotion threshold in microseconds of estimated compile cost. |
 
 ### 2.5 Vulkan quantization
@@ -101,6 +97,31 @@ Both flags default OFF and are bit-identical to the legacy path when off. Enabli
 | `hash_snode_active_list` | Bool, default `False`. | Experimental active-bucket list for hash traversal. | Changes generated layout/code and may regress churn-heavy workloads. Enable only after focused benchmarks show a win. Env alias: `TI_HASH_SNODE_ACTIVE_LIST=0/1`. |
 | `hash_snode_diagnostics` | Bool, default `False`. | Extra runtime counters for probe/tombstone debugging. | Diagnostic-only; can add memory/counter traffic and should stay off for production performance. Env alias: `TI_HASH_SNODE_DIAGNOSTICS=0/1`. |
 | `hash_snode_compact_child_pool` | Bool, default `False`. | Experimental memory mode for `hash -> hash` / nested hash. Reduces reserved child-container memory when parent active count is much smaller than parent capacity. | Adds a parent-bucket to child-slot lookup, so it can trade latency for memory. Enable only when nested hash memory dominates and benchmark data supports it. Env alias: `TI_HASH_SNODE_COMPACT_CHILD_POOL=0/1`. |
+
+### 2.9 Retired, compatibility-only, and validation-only settings
+
+These names are documented only to make old configuration files and research
+results unambiguous. Applications and engines should not expose them.
+
+| Name | Current behavior | Required action |
+|---|---|---|
+| `use_fused_passes`, `fused_pass_verify` | Removed before the 0.4.23 public baseline together with the low-ROI `pipeline_dirty` experiment. Current wheels reject them as unknown `ti.init` arguments. | Delete them. The stable pipeline always runs the required simplification path. |
+| `spv_opt_level` | Not a current Python/CompileConfig field; current wheels reject it. The implementation's raw field is `external_optimization_level`. | Use `compile_tier`. Do not rename the old setting to the raw field in application code. |
+| `skip-loop-unroll`, `skip_loop_unroll` | Not accepted `ti.init` names. The current raw experiment is `spirv_skip_loop_unroll`. | Delete them; do not translate them into engine configuration. |
+| `vulkan_listgen_lite_barrier` | Accepted only as a deprecated no-op compatibility field. The active narrow-barrier path belongs to `vulkan_dispatch_cache`. | Delete it; changing the value has no supported effect. |
+| `vulkan_launch_buffer_pool`, `vulkan_launch_buffer_pool_capacity` | Accepted deprecated no-op fields. The old standalone pool was removed for negligible ROI and superseded by fence-safe GFX context handling. | Delete them; do not tune the capacity. |
+
+The following fields still exist for compiler experiments, but their public
+naming, cache contract, or cross-driver evidence is not strong enough for
+production configuration:
+
+| Name | Current implementation contract | Production guidance |
+|---|---|---|
+| `external_optimization_level` | Raw SPIR-V optimizer level, default `3`; serialized in the offline-cache key. `compile_tier="fast"` overrides it to level `0`. | Keep application code on `compile_tier`; do not expose this field through GeoPhys or another engine. |
+| `spirv_disabled_passes` | Default `[]`; changes emitted SPIR-V and uses a sorted, cache-isolated list. Current internal pass IDs are case-sensitive (for example `LoopUnroll`), but that vocabulary is not a stable public API. | Keep empty until naming and cross-driver validation are finalized. |
+| `spirv_skip_loop_unroll` | Default `False`; changes the optimizer chain and emitted SPIR-V, but is currently not represented in the offline-cache key. | Keep `False`; do not expose or use it with production/offline-cache workloads. |
+| `spirv_adaptive_opt`, `spirv_adaptive_opt_threshold` | Default `False` / `64`; cache-key isolated, but changes the optimizer chain by task shape. | Validation and benchmarking only until the driver matrix converges. |
+| `cache_loop_invariant_global_vars` | Default `False`; changes IR for a narrow workload and is currently not represented in the offline-cache key. Prior measurements showed cold-compile cost with limited physics-runtime benefit. | Keep `False`; do not expose it as a general performance knob. |
 
 ---
 
@@ -168,7 +189,6 @@ These are not user-tunable; they ship enabled by default. Listed for visibility 
 
 - **Offline cache cross-version safety** — corrupt or version-mismatched `ticache.tcb` triggers an automatic fallback recompile rather than crashing.
 - **`rhi_cache.bin` atomic write** — write-then-rename eliminates half-written cache files after abrupt termination.
-- **`pipeline_dirty` precise tracking** — explicit OR-combined dirty marks across the five mutating passes that affect `full_simplify`. Removes spurious dirty marks at no-op call sites; verified across CPU / CUDA / Vulkan smoke matrices with no regression.
 - **Single-offload bypass on the LLVM CPU path** — removes the prior 0.89× CPU regression introduced by earlier batch-compile work.
 - **Defensive type-context guards** on `linking_context_data->llvm_context` to catch accidental cross-context type queries.
 
@@ -178,8 +198,9 @@ These are not user-tunable; they ship enabled by default. Listed for visibility 
 
 - Supported upstream Taichi 1.7.4 Python APIs are the compatibility reference;
   documented Forge changes and experimental paths remain explicit exceptions.
-- Every fork-only knob in this document is additive and defaults to upstream
-  behaviour unless its entry explicitly says otherwise.
+- Every supported fork-only knob in sections 1–2.8 is additive and defaults to
+  upstream behaviour unless its entry explicitly says otherwise. Section 2.9
+  is a migration/diagnostic registry, not a supported-option list.
 - The PyPI package imports as `taichi_forge`; it does not replace the upstream
   `taichi` package. The C API package tree is not included in PyPI shim wheels
   and must be built separately when required.

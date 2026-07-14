@@ -153,6 +153,22 @@ def test_init_bad_arg():
         ti.init(_test_mode=True, debug=True, foo_bar=233)
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "use_fused_passes",
+        "fused_pass_verify",
+        "spv_opt_level",
+        "skip_loop_unroll",
+        "skip-loop-unroll",
+    ],
+)
+@test_utils.test(arch=ti.cpu)
+def test_removed_forge_init_args_are_rejected(key):
+    with pytest.raises(KeyError, match="Unrecognized keyword argument"):
+        ti.init(_test_mode=True, **{key: True})
+
+
 @test_utils.test(arch=ti.cpu)
 def test_init_require_version():
     ti_python_core = ti._lib.utils.import_ti_python_core()

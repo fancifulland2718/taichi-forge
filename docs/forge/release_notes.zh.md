@@ -158,6 +158,9 @@
   Field 访问。
 - 增加 device-side 数值 checks/metrics 与 native Graph result node。
 - 加固 Vulkan ArgPack mapping、小整数 SPIR-V、CUDART 链接、版本传播与发布 workflow。
+- 在确认 ROI 很低后，移除废弃的 `use_fused_passes` / `pipeline_dirty` 实验，并
+  退役独立 Vulkan buffer-pool/listgen-barrier 实现。后两者的字段仍作为 no-op 兼容
+  名称被接受；cache schema 会拒绝 fused-pass 过渡配置产生的 artifact。
 
 ## 0.4.24
 

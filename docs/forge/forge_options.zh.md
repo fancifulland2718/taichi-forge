@@ -4,7 +4,10 @@
 > 各选项首次公开版本见[版本更新说明](release_notes.zh.md)；本文描述当前合同，
 > 不会把历史选项重新归类为 `0.5.0` 更新。
 
-本文档是本 fork 所有公开新增配置项与工具链变更的**唯一权威清单**。实验性或内部专用 flag 不收录于此。按模块整理的 Forge-only API 符号清单见 [Forge API 参考](forge_api_reference.zh.md)。
+本文档是本 fork 公开新增配置项与工具链变更的**唯一权威清单**。应用只应暴露“受支持”
+章节中的选项。第 2.9 节专门记录已删除、仅兼容保留或仅供验证的旧名称，帮助旧配置明确
+失败或迁移；列入该节不代表建议使用。按模块整理的 Forge-only API 符号清单见
+[Forge API 参考](forge_api_reference.zh.md)。
 
 ---
 
@@ -32,9 +35,8 @@
 
 | 参数 | 默认 | 用途 |
 |---|---|---|
-| `compile_tier` | `"balanced"` | `"fast"` 把 LLVM 拉到 `-O0`（NVPTX / AMDGCN 下兜底 `-O1`），SPIR-V 优化等级降到 1。`"full"` 保持 pre-fork 管线。 |
-| `llvm_opt_level` | `-1`（沿用 tier） | 显式 LLVM `-O` 覆盖（`0`–`3`）。 |
-| `spv_opt_level` | `-1`（沿用 tier） | 显式 `spirv-opt` 优化级别覆盖。 |
+| `compile_tier` | `"balanced"` | `"fast"` 强制 LLVM 使用 `-O0`（NVPTX / AMDGCN 下兜底 `-O1`），并以 level 0 跳过 `spirv-opt`；`"balanced"` 与 `"full"` 保留已配置的后端等级。应用层推荐只使用该选项。 |
+| `llvm_opt_level` | `3` | 非 `fast` tier 下显式指定 LLVM `-O` 等级（`0`–`3`）；`compile_tier="fast"` 仍会强制后端安全的 O0/O1。除非代表性 benchmark 证明有必要，否则优先使用 `compile_tier`。 |
 
 ### 2.2 编译管线 / 线程
 
@@ -43,24 +45,21 @@
 | `num_compile_threads` | 逻辑核数 | `ti.compile_kernels` 使用的线程池大小。 |
 | `compile_dag_scheduler` | `True` | `ti.compile_kernels` 批次的 DAG 反饱和调度器；平衡内 LLVM 线程池与外 kernel 池。`False` 回退两层调度。 |
 | `spirv_parallel_codegen` | `False` | 启用每 kernel 的任务级并行 SPIR-V codegen。 |
-| `spirv_disabled_passes` | `[]` | 单次调用禁用某些 `spirv-opt` pass（例如 `["loop-unroll"]`），独立 cache key。仅禁 `loop-unroll` 即可在验证 Vulkan 套件上获得 ~54% SPIR-V codegen wall-time 缩减；最重的 3 个一起禁则 ~61%，kernel 字节等价。 |
 
 ### 2.3 Pass / IR 控制
 
 | 参数 | 默认 | 用途 |
 |---|---|---|
-| `use_fused_passes` | `False` | 在 `full_simplify` 周围加 `pipeline_dirty` 短路；与关闭等价的数值字节兼容。 |
-| `tiered_full_simplify` | `True` | 把 `full_simplify` 拆为局部 fixed-point + 每外圈一次 global pass。`False` 回退旧节奏。 |
+| `tiered_full_simplify` | `True` | 把 `full_simplify` 拆为局部 fixed-point + 每外圈一次 global pass，并有独立 cache key。建议保持 `True`；只有隔离编译器回归、对照旧 cadence 时才设 `False`。 |
 | `unrolling_hard_limit` | `0`（关） | 每个 `ti.static(for ...)` 的 unroll 迭代上限；超出抛 `TaichiCompilationError`，避免静默吃编译时间。 |
 | `unrolling_kernel_hard_limit` | `0`（关） | 单 kernel 内 unroll 总迭代上限。 |
 | `func_inline_depth_limit` | 上游默认 | `@ti.func` 内联递归深度硬上限。 |
-| `cache_loop_invariant_global_vars` | `False` | 在热循环中启用 SNode 循环不变量缓存。 |
 
 ### 2.4 Real-function 与内联
 
 | 参数 | 默认 | 用途 |
 |---|---|---|
-| `auto_real_function` | `False` | 自动将昂贵 `@ti.func` 实例提升为 `is_real_function=True`（LLVM-only，非 autodiff）。 |
+| `auto_real_function` | `False` | 实验性地将昂贵 `@ti.func` 单向提升为 `is_real_function=True`（LLVM-only、非 autodiff、有独立 cache key）。不要全引擎启用，也不要用于 AD/跨后端路径；仅在具体 workload 的编译与运行测试都通过后使用。 |
 | `auto_real_function_threshold_us` | `1000` | 提升阈值（微秒，估算编译耗时）。 |
 
 ### 2.5 Vulkan quantization
@@ -101,6 +100,28 @@
 | `hash_snode_active_list` | bool，默认 `False` | 实验性 active bucket list，用于 hash 遍历优化。 | 会改变生成布局/代码，对 churn-heavy workload 可能退步。只建议在 focused benchmark 证明收益后启用。环境变量别名：`TI_HASH_SNODE_ACTIVE_LIST=0/1`。 |
 | `hash_snode_diagnostics` | bool，默认 `False` | 启用额外运行时计数器，用于调试 probe / tombstone 行为。 | 诊断模式，不是生产性能默认项；会增加计数器流量和少量内存/运行时开销。环境变量别名：`TI_HASH_SNODE_DIAGNOSTICS=0/1`。 |
 | `hash_snode_compact_child_pool` | bool，默认 `False` | `hash -> hash` / nested hash 的实验性内存模式。当 parent active count 远小于 parent capacity 时，可减少 child-container 预留内存。 | 会增加 parent bucket 到 child slot 的解析，可能以延迟换内存。只在 nested hash 内存占用主导且 benchmark 支持时启用。环境变量别名：`TI_HASH_SNODE_COMPACT_CHILD_POOL=0/1`。 |
+
+### 2.9 已删除、仅兼容保留与仅供验证的设置
+
+以下名称只用于说明旧配置和历史实验，不应由应用或引擎暴露。
+
+| 名称 | 当前行为 | 必须采取的操作 |
+|---|---|---|
+| `use_fused_passes`、`fused_pass_verify` | 已在公开 0.4.23 基线前随低 ROI 的 `pipeline_dirty` 实验一起物理删除；当前 wheel 会把它们作为未知 `ti.init` 参数拒绝。 | 从配置中删除；稳定管线会始终执行必要的 simplify 路径。 |
+| `spv_opt_level` | 不是当前 Python/CompileConfig 字段，wheel 会直接拒绝；实现中的低层字段名是 `external_optimization_level`。 | 使用 `compile_tier`，不要在应用代码中把旧名称机械改成低层字段。 |
+| `skip-loop-unroll`、`skip_loop_unroll` | 不是可接受的 `ti.init` 名称；当前原始实验字段是 `spirv_skip_loop_unroll`。 | 删除，不要转换成引擎配置。 |
+| `vulkan_listgen_lite_barrier` | 仅作为 deprecated no-op 兼容字段被接受；当前窄 barrier 路径属于 `vulkan_dispatch_cache`。 | 删除；调整该值没有受支持的效果。 |
+| `vulkan_launch_buffer_pool`、`vulkan_launch_buffer_pool_capacity` | 被接受但已是 deprecated no-op。旧独立 pool 因 ROI 很低而移除，并由 fence-safe GFX context 处理替代。 | 删除，不要调整 capacity。 |
+
+以下字段仍为编译器实验保留，但公开命名、cache 合同或跨 driver 证据不足以支持生产配置：
+
+| 名称 | 当前实现合同 | 生产建议 |
+|---|---|---|
+| `external_optimization_level` | 原始 SPIR-V optimizer 等级，默认 `3`，进入 offline-cache key；`compile_tier="fast"` 会覆盖为 level `0`。 | 应用保持使用 `compile_tier`；GeoPhys 或其它引擎不要暴露该字段。 |
+| `spirv_disabled_passes` | 默认 `[]`；会改变 SPIR-V，并使用排序后的独立 cache key。当前内部 pass ID 区分大小写，例如 `LoopUnroll`，但该词表不是稳定公开 API。 | 在命名与跨 driver 验证完成前保持空列表。 |
+| `spirv_skip_loop_unroll` | 默认 `False`；会改变 optimizer chain 与 SPIR-V，但当前没有进入 offline-cache key。 | 保持 `False`；不要暴露，也不要用于生产/offline-cache workload。 |
+| `spirv_adaptive_opt`、`spirv_adaptive_opt_threshold` | 默认 `False` / `64`，有独立 cache key，但会按 task 形态改变 optimizer chain。 | 仅供验证和 benchmark，等待 driver matrix 收敛。 |
+| `cache_loop_invariant_global_vars` | 默认 `False`；只对窄 workload 改变 IR，当前没有进入 offline-cache key。历史测量显示 cold-compile 成本明显，而物理运行收益有限。 | 保持 `False`，不要作为通用性能开关暴露。 |
 
 ---
 
@@ -168,7 +189,6 @@ Vulkan ImGui 后端已迁移到新的 `ImGui_ImplVulkan_InitInfo` 布局（`Rend
 
 - **Offline cache 跨版本兼容**：损坏或版本不匹配的 `ticache.tcb` 自动 fallback 重编译，不崩溃。
 - **`rhi_cache.bin` 原子写入**：write-then-rename 避免崩溃中断时留下半写文件。
-- **`pipeline_dirty` 精确跟踪**：在影响 `full_simplify` 的 5 个修改性 pass 上显式 OR；消除空操作时的伪 dirty 标记。CPU / CUDA / Vulkan 烟测无回归。
 - **LLVM CPU 路径单 offload 旁路**：移除前期 batch-compile 工作引入的 0.89× CPU 回归。
 - **类型上下文防御性 assert**：`linking_context_data->llvm_context` 上的 forbidden-zone 注释 + assert，提前捕捉跨上下文类型查询。
 
@@ -178,7 +198,8 @@ Vulkan ImGui 后端已迁移到新的 `ImGui_ImplVulkan_InitInfo` 布局（`Rend
 
 - 已支持的上游 Taichi 1.7.4 Python API 是兼容性参考；文档明确列出的 Forge 改动和实验路径
   属于显式例外。
-- 本文所列 fork 专属选项全部为新增；除非条目明确说明，默认值保留上游行为。
+- 第 1–2.8 节中的受支持 fork 选项均为 additive；除非条目明确说明，默认值保留上游
+  行为。第 2.9 节是迁移/诊断登记表，不是受支持选项清单。
 - PyPI 包使用 `taichi_forge` 导入，不会替换上游 `taichi` 包。PyPI shim wheel 不包含
   C API package tree；需要 C API 时必须单独构建。
 

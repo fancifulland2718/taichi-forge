@@ -103,9 +103,20 @@ benefits from optimized code.
   scheduler itself.
 - `spirv_parallel_codegen=True` changes scheduling, not intended results. Test
   peak host memory as well as wall time.
+- Keep application-level Vulkan optimization control on `compile_tier`.
+  `spv_opt_level` is rejected, while `external_optimization_level` is a raw
+  implementation field and should not be exposed by an engine.
 - `spirv_disabled_passes`, `spirv_skip_loop_unroll`, and adaptive SPIR-V
-  optimization change emitted artifacts. They require Vulkan result and
-  runtime validation on each target driver class.
+  optimization remain validation-only. Pass IDs are internal and
+  case-sensitive; more importantly, the skip-loop flag is not yet isolated in
+  the offline-cache key. Keep their defaults until naming, cache semantics,
+  and the cross-driver matrix converge.
+- Keep `cache_loop_invariant_global_vars=False`: it changes IR without a
+  dedicated cache identity and has shown limited runtime ROI for physics
+  workloads relative to its cold-compile cost.
+- Remove retired/no-op settings such as `use_fused_passes`,
+  `vulkan_listgen_lite_barrier`, and `vulkan_launch_buffer_pool` from
+  application configuration instead of carrying version-specific branches.
 - `fast_math=True` may use faster floating-point transformations. Disable it
   when strict IEEE behavior, exceptional values, or tight cross-backend
   agreement is more important than throughput.

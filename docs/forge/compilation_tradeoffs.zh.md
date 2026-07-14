@@ -87,8 +87,16 @@ timestep 仍受益于优化代码时，这比全局关闭更合适。
   本身，否则建议保持开启。
 - `spirv_parallel_codegen=True` 改变调度而非预期结果；除了 wall time，也要测 host 峰值
   内存。
-- `spirv_disabled_passes`、`spirv_skip_loop_unroll` 和 adaptive SPIR-V optimization 会
-  改变产物；需要在每类目标 Vulkan driver 上验证结果与运行性能。
+- 应用层 Vulkan 优化只使用 `compile_tier`。`spv_opt_level` 会被拒绝；
+  `external_optimization_level` 是实现层原始字段，不应由引擎暴露。
+- `spirv_disabled_passes`、`spirv_skip_loop_unroll` 与 adaptive SPIR-V optimization
+  仍只供验证。pass ID 是区分大小写的内部名称；更重要的是 skip-loop flag 尚未进入
+  offline-cache key。在命名、cache 语义和跨 driver matrix 收敛前保持默认值。
+- 保持 `cache_loop_invariant_global_vars=False`：它会改变 IR，却没有独立 cache
+  identity；历史测量中，相对 cold-compile 成本，它对物理 workload 的运行期 ROI 有限。
+- `use_fused_passes`、`vulkan_listgen_lite_barrier`、
+  `vulkan_launch_buffer_pool` 等已删除/no-op 设置应直接从应用配置移除，不要维护
+  按版本分支。
 - `fast_math=True` 可能采用更快的浮点变换。若严格 IEEE 行为、异常值或紧密跨后端
   一致性比吞吐更重要，应关闭并重新测量。
 - unroll/inline hard limit 是防止意外编译爆炸的安全栏。触发时应明确失败，不能静默换
