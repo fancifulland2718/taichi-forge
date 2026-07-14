@@ -369,6 +369,9 @@ Contract:
   `TaichiCompilationError` while the graph is built.
 - A Field is a definition-time binding. Its contents may change between runs,
   but the Field does not appear in the runtime argument dictionary.
+- Dense Field dependencies are tracked by SNodeTree id and generation.
+  Destroying a referenced tree invalidates the Graph; a later tree that reuses
+  the numeric id does not revive it.
 - An ndarray or texture may provide a compile exemplar in `template_args`, but
   it still needs a matching `ti.graph.Arg` and a real runtime resource in each
   `run()` call.
@@ -376,6 +379,9 @@ Contract:
   shape.
 - The Graph retains the compiled kernel, not an additional strong solver
   reference from `template_args`.
+- `kernel` is normally a decorated primal kernel. An explicit `kernel.grad`
+  object is also accepted for a manually managed gradient Graph; run that
+  Graph outside `ti.ad.Tape()` / `ti.ad.FwdMode()`.
 
 ### `GraphBuilder.compile()` and `Graph.run(args)`
 
@@ -391,6 +397,15 @@ a runtime-bound `Graph`. `run(args)` submits one complete graph invocation.
 Concurrent host calls on one graph queue at the complete-invocation boundary;
 independent graphs do not share that lock. This guard does not wait for GPU
 completion or imply `ti.sync()`. Recompile graphs after `ti.reset()`.
+Destroying any referenced SNodeTree also makes the Graph stale; rebuild it
+after constructing the replacement Field layout.
+
+`Graph.run()` is primal-only. It raises `TaichiRuntimeError` inside an active
+`ti.ad.Tape()` or `ti.ad.FwdMode()` because a backend Graph invocation is
+opaque to automatic AD and would otherwise silently omit gradients or dual
+propagation. A user may build an explicit `kernel.grad` Graph and run it
+manually outside those contexts; Forge does not claim automatic primal/adjoint
+Graph pairing.
 
 Runtime keys come from the compiled graph definition. Forge still recovers the
 actual `ti.graph.Arg` names when a legacy engine adapter writes directly to the
@@ -398,6 +413,32 @@ durable AOT plan, but new code should use the public `template_args=` entry
 point above. This compatibility path does not relax the contract, and
 undeclared extra keys still raise. Direct access to underscored AOT/native
 builder objects is not a public user API.
+
+### `Graph.execution_stats()`
+
+Returns a frozen `GraphExecutionReport` snapshot with schema version 1. The
+report is a stable public diagnostic API; do not consume `_graph_stats`
+directly in application code.
+
+The top-level report includes:
+
+- architecture and lifecycle state;
+- node, CGraph, native-node, dispatch, and compiled-task counts;
+- runtime-argument and generation-qualified static-dependency counts;
+- a pointer-free static layout fingerprint;
+- the last aggregate execution path and fallback reason;
+- backend-graph, backend-replay, and ordinary-fallback segment counts;
+- immutable per-segment reports and counter-completeness state.
+
+Per-segment data distinguishes CPU `ordinary`, CUDA capture/exact
+replay/patched replay/recapture, Vulkan record/replay, native dispatch, and
+ordinary fallback. It also reports bounded persistent argument bytes, replay
+eligibility, fallback classification, retry state, and detailed counters.
+
+Detailed GPU counters are opt-in. The first call enables them for later
+executions; if GPU work ran before opt-in, `counters_complete` remains false
+for that runtime epoch instead of pretending the older work was counted.
+Calling `execution_stats()` does not synchronize the device.
 
 ### `GraphBuilder.append_native(node, *, prewarm=False)`
 

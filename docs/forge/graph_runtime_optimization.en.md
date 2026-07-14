@@ -18,6 +18,10 @@ change these contracts:
 - Independent graphs remain independently submitable. Runtime guards end after
   host submission and do not add a default `ti.sync()`.
 - `ti.reset()` invalidates graphs owned by the previous runtime.
+- Destroying a referenced SNodeTree invalidates the Graph even if a later tree
+  reuses the same numeric id.
+- `Graph.run()` is primal-only and rejects active Tape/FwdMode contexts rather
+  than silently dropping automatic differentiation.
 - An optimized backend path may fall back to ordinary dispatch, but may not
   silently change results, bindings, or execution order.
 
@@ -70,6 +74,39 @@ declarations; Python does not copy another dictionary per segment. This keeps
 the backend semantics segment-local while preserving a zero-copy host path.
 Legacy adapters that access underscored objects still work, but recovery reads
 only AOT items added since the previous segment flush.
+
+## Dense Field lifetime and heterogeneous blocks
+
+Forge supports Graph kernels that close over dense scalar, vector, and matrix
+Fields, including `shape=...` Fields and simple `root -> dense -> place`
+layouts. Both same-node AOS-style placement and separate dense-node SOA-style
+placement are covered. Pointer, bitmasked, dynamic, hash, activation-list, and
+other sparse topology behavior is outside this dense-Field contract.
+
+A Field is a definition-time/static binding:
+
+- contents may change between runs;
+- identity, SNodeTree generation, shape, dtype, element shape, and layout may
+  not be hot-rebound;
+- destroying a referenced SNodeTree makes the Graph stale, and `run()` raises
+  until the application rebuilds it;
+- tree-id reuse is generation-qualified and cannot redirect an old Graph to a
+  new allocation;
+- Graph does not duplicate the Field payload.
+
+For heterogeneous multi-environment engines, use one block per stable
+solver/layout/shape/feature signature and put homogeneous environments on a
+leading Field axis inside that block. Different blocks should own disjoint
+writable Fields. Share read-only Fields only with an explicit engine lifetime
+contract. Simulation and rendering should communicate through immutable or
+slot/epoch-owned snapshot Fields; Graph does not infer cross-Graph hazards.
+
+Each data-oriented `self` identity is a distinct specialization because its
+root bindings can differ. Forge intentionally does not merge compiled kernels
+across arbitrary owners. Such merging would require a new runtime Field
+binding ABI, not a safe cache-key tweak. Persistent offline cache and deliberate
+prewarming reduce repeated backend compilation without weakening binding
+safety.
 
 ## Backend execution model
 
@@ -155,22 +192,40 @@ eliminating fallback counts alone is not a sufficient optimization result.
 
 ## Diagnostics
 
-`Graph._graph_stats` is an internal, experimental snapshot for regression
-tests and production investigations. Its underscore is intentional: field
-names and compatibility are not a stable public API. On CUDA, the first read
-enables detailed counters for later invocations of that graph; the normal path
-does not pay detailed counter or logging overhead before opt-in. Vulkan reuses
-lightweight registry counters already needed by replay.
+Use the stable, frozen `Graph.execution_stats()` schema v1 report. It exposes
+definition counts, compiled task count, segment-local runtime arguments,
+generation-qualified static dependencies, a pointer-free layout fingerprint,
+execution/fallback path, replay eligibility, persistent argument bytes, and
+immutable per-segment counters. Application code should not read the internal
+`Graph._graph_stats` cache.
 
-The snapshot can distinguish capture or record, exact replay, patched replay,
+The report distinguishes capture or record, exact replay, patched replay,
 recapture, ordinary fallback, structural rejection, transient failure, retry
-backoff, capture exceptions, and Vulkan slot saturation. It also reports the
-last path, fallback reason, and driver error where available.
-`known_persistent_argument_bytes` is only a lower bound for Forge-visible
-argument buffers. It excludes opaque graph executables, command buffers,
-descriptor pools, allocator high-water marks, and other driver-retained
-memory. Use GPU memory telemetry, host RSS, and graph-churn stress alongside
-it.
+backoff, capture exceptions, native dispatch, and Vulkan slot saturation. The
+first report opts in to detailed GPU counters for later executions. If work
+ran before opt-in, `counters_complete=False` remains explicit for that runtime
+epoch. Reading a report does not call `ti.sync()`.
+
+Persistent argument bytes are only Forge-visible host/backend argument
+storage. They exclude opaque graph executables, command buffers, descriptor
+pools, allocator high-water marks, and other driver-retained memory. Use GPU
+memory telemetry, host RSS, and graph/tree churn stress alongside the report.
+
+## Numerical and automatic-differentiation contract
+
+Replay changes host submission only; it does not change kernel arithmetic,
+dispatch order, or Field dependencies. The release matrix requires exact
+direct-versus-Graph equality for integer copy/gather/update without data
+races. Normal f32 arithmetic uses `rtol=1e-5`; supported f64 paths use
+`rtol=1e-12`. Floating atomic/reduction checks use an explicitly stated
+tolerance because backend execution order may differ.
+
+Graph is currently primal-only. Calling `Graph.run()` while `ti.ad.Tape()` or
+`ti.ad.FwdMode()` is active raises before submission, preventing silent loss
+of gradients or dual values. An explicit `kernel.grad` may be dispatched into
+its own Graph and run manually outside automatic-AD contexts. Forge does not
+yet provide an immutable primal/adjoint Graph pair, reverse dispatch ordering,
+or native-node gradient executable contract.
 
 ## Performance and memory trade-offs
 
@@ -186,12 +241,31 @@ and tail latency, and record GPU memory before and after long replay and churn
 samples. Check results against ordinary dispatch rather than judging only
 throughput.
 
-On one local Windows validation system, three synchronized CUDA samples of a
-four-dispatch, 1,048,576-element graph produced replay medians of
-0.0385/0.0446/0.0380 ms with reported GPU memory unchanged at 756 MiB. A
-512-invocation Vulkan sample completed about 12.4k graphs/s with zero slot
-fallback and 536-to-536 MiB reported GPU memory. These numbers are local
-regression evidence, not portable performance promises.
+One Windows fresh-process dense-Field multi-block validation used four
+heterogeneous blocks, eight homogeneous environments per block, 256 base
+items, ten warmups, 200 measured rounds, and five trials:
+
+| Backend | Direct block invocations/s | Graph block invocations/s | Trial range | Result |
+| --- | ---: | ---: | ---: | --- |
+| CPU | 487.265 | 675.139 | 0.783% / 1.862% | **+38.56% formal** |
+| Vulkan | 3072.662 | 11390.738 | 2.156% / 4.815% | **+270.71% formal** |
+| CUDA | 3138.267 | 66534.153 | 39.37% / 11.06% | observational only |
+
+An extended seven-trial CUDA run still measured 4217.079 versus 68626.702
+invocations/s (16.27x), but its 14.61% / 8.16% ranges remained above the 5%
+formal gate. It proves the expected exact-replay direction on that system, not
+a portable percentage.
+
+CUDA build-plus-first-run scaled from 371.107 ms for one block to 3246.939 ms
+for eight blocks: 8.749x total, or 1.094x normalized per block. The eight-block
+case had 50 specializations and 52 backend tasks, with no unexplained
+superlinear compilation growth. In one deterministic CPU cold/warm cache
+observation, backend compilation fell from 453.507 to 26.058 ms and
+build-plus-first-run from 552.645 to 132.660 ms. That single cache pair is
+evidence of a hit, not a statistical performance claim.
+
+These numbers are local regression evidence, not portable performance
+promises. A relative trial range above 5% must remain observational.
 
 ## Native and AOT boundary
 
@@ -211,6 +285,14 @@ The focused validation set includes:
 
 - `tests/python/test_graph.py` for public contracts, lifetime, replay, and
   diagnostics;
+- `tests/python/test_graph_dense_field.py` for static Field binding, SNodeTree
+  generation/lifetime, zero-argument replay, mixed segments, and concurrency;
+- `tests/python/test_graph_dense_field_numerics.py` for integer exactness,
+  f32/f64 tolerance, AOS/SOA layouts, multiple trees, primal-only AD rejection,
+  and explicit grad-kernel Graphs;
+- `benchmarks/graph_dense_field_multiblock_bench.py` for fresh-process
+  1/2/4/8-block compilation, cache, throughput, fairness, RSS/VRAM, display,
+  and reset reports;
 - `tests/python/cuda_graph_runtime_bench.py` and
   `tests/python/cuda_graph_dynamic_patch_bench.py` for CUDA replay;
 - `tests/python/vulkan_graph_slot_bench.py` and
@@ -225,8 +307,12 @@ The focused validation set includes:
 Windows validation covers CPU, CUDA, and Vulkan runtime paths. Linux compiler
 branches were kept platform-neutral, but real Linux build, driver, window
 system, and long-stress results must be rechecked before making a Linux release
-claim. See [Linux revalidation status](linux_revalidation.en.md) for the exact
-remaining matrix.
+claim. In particular, dense Field Graph still needs GCC/Clang builds, Linux CPU
+multi-block runs, CUDA Driver-only/Toolkit-OFF zero-argument capture, Vulkan
+validation/headless/headed replay, sanitizer coverage, and allocator-specific
+RSS/VRAM/reset measurements. See
+[Linux revalidation status](linux_revalidation.en.md) for the exact remaining
+matrix.
 
 ## Related documents
 

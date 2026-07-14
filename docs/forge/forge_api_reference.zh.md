@@ -352,10 +352,14 @@ graph.run({"slot": 3})
   参数的名称会在构图期抛出 `TaichiCompilationError`；
 - Field 是 definition-time binding。其内容可在不同 `run()` 之间变化，但 Field 不出现在
   runtime 参数字典中；
+- dense Field dependency 以 SNodeTree id + generation 跟踪；销毁被引用 tree 会使 Graph
+  失效，之后复用相同数值 id 的新 tree 也不会让旧 Graph 恢复；
 - ndarray/texture 可在 `template_args` 中提供 compile exemplar，但仍须有对应的
   `ti.graph.Arg`，并在每次 `run()` 中传入真实 runtime resource；
 - ndarray exemplar 必须与 symbolic Arg 的 dtype、ndim 和 element shape 一致；
 - Graph 只保留 compiled kernel，不为 `template_args` 额外保留 solver 强引用。
+- `kernel` 通常是 decorated primal kernel；也可传入显式 `kernel.grad` 来构造手工管理的
+  gradient Graph，但必须在 `ti.ad.Tape()` / `ti.ad.FwdMode()` 之外运行。
 
 ### `GraphBuilder.compile()` 与 `Graph.run(args)`
 
@@ -370,11 +374,40 @@ graph.run({"slot": 3})
 
 同一个 graph 的并发 host 调用以完整 invocation 为单位排队；不同 graph 不共享该锁。
 该边界不等待 GPU 完成，也不隐含 `ti.sync()`。调用 `ti.reset()` 后必须重新编译 graph。
+销毁任一被引用的 SNodeTree 也会使 Graph stale；构造替代 Field layout 后必须重建 Graph。
+
+`Graph.run()` 是 primal-only。active `ti.ad.Tape()` 或 `ti.ad.FwdMode()` 内调用会抛出
+`TaichiRuntimeError`，因为 backend Graph invocation 对自动 AD 不透明，否则会静默漏掉
+gradient 或 dual propagation。用户可显式构建 `kernel.grad` Graph 并在上述上下文外手工
+运行；Forge 当前不声明自动 primal/adjoint Graph pair。
 
 运行参数 key 来自已编译的 graph 定义。旧引擎模板适配器若直接写入 durable AOT plan，
 Forge 仍会恢复其中实际的 `ti.graph.Arg` 名称以保持兼容；新代码应使用上面的
 `template_args=` 公共入口。该兼容路径不放宽合同，未声明的 extra key 仍会报错。直接
 访问下划线 AOT/native builder 对象不是公开用户 API。
+
+### `Graph.execution_stats()`
+
+返回冻结的 schema v1 `GraphExecutionReport` snapshot。这是稳定公开诊断 API；应用代码
+不应直接读取 `_graph_stats`。
+
+顶层 report 包含：
+
+- architecture 与 lifecycle state；
+- node、CGraph、native node、dispatch 和 compiled task 数；
+- runtime argument 与带 generation 的 static dependency 数；
+- 不包含 pointer 的 static layout fingerprint；
+- 最近一次聚合 execution path 与 fallback reason；
+- backend Graph、backend replay、ordinary fallback segment 数；
+- immutable per-segment report 与 counter completeness 状态。
+
+per-segment 数据可区分 CPU `ordinary`、CUDA capture/exact replay/patched
+replay/recapture、Vulkan record/replay、native dispatch 和 ordinary fallback；同时报告
+有界 persistent argument bytes、replay eligibility、fallback 分类、retry 状态与详细计数。
+
+GPU 详细 counter 为 opt-in：第一次调用只为之后的执行启用。若 opt-in 前已有 GPU 工作，
+`counters_complete` 会在该 runtime epoch 保持 false，而不会伪装成已统计旧执行。
+`execution_stats()` 本身不做 device synchronization。
 
 ### `GraphBuilder.append_native(node, *, prewarm=False)`
 

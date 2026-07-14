@@ -117,8 +117,8 @@ fixed eight-slot ring after elastic-capacity experiments showed an unfavorable
 memory trade-off, while CUDA distinguishes structural capture rejection from
 transient failures and context-fatal errors.
 
-These policies, their measurements, and the internal `Graph._graph_stats`
-boundary are maintained in
+These policies, their measurements, and the public `Graph.execution_stats()`
+schema are maintained in
 [Graph runtime and optimization](graph_runtime_optimization.en.md). Keeping
 the details there avoids making this general compilation guide a second,
 potentially divergent graph specification.
@@ -132,6 +132,8 @@ For every production profile, test at least:
 - long-horizon drift, invariants, NaN/Inf behavior, and deterministic seeds;
 - reverse- and forward-mode gradients used by the application, including
   finite-difference checks around non-smooth cases;
+- the explicit primal-only Graph boundary: active Tape/FwdMode must fail
+  clearly, while manually dispatched grad-kernel Graphs run outside AD;
 - sparse activation/deactivation, atomics, reductions, and graph replay;
 - release settings separately from `debug=True` or profiler-enabled settings.
 

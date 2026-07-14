@@ -56,8 +56,9 @@ target fallback 的较新设备。验证数值结果、offline-cache target 隔�
   实际推进量及 X11/Wayland session；
 - 在 fresh process 中运行 `tests/python/cuda_graph_runtime_bench.py`。它用于检查 p50/p95 与
   reset 稳定性，不可作为跨机器性能对比；
-- 在诊断样本开始前读取内部 `Graph._graph_stats`，校验 capture/replay/recapture/fallback
-  计数；普通 benchmark 不读取该属性，以确认默认 CUDA 路径保持详细 counter 关闭。注入或
+- 在诊断样本开始前调用公开 `Graph.execution_stats()`，校验
+  capture/replay/recapture/fallback 计数；普通 benchmark 不读取该属性，以确认默认 CUDA
+  路径保持详细 counter 关闭。注入或
   复现一次可恢复 capture 失败，验证 1/2/4/8/16/32 有界 backoff；另行确认 context-fatal
   错误会上报且不会再执行一次 ordinary duplicate launch；
 - 在 fresh process 中运行 `tests/python/cuda_graph_dynamic_patch_bench.py`，同时保留
@@ -73,6 +74,29 @@ target fallback 的较新设备。验证数值结果、offline-cache target 隔�
   该可选路径不可用的 runner 必须报告既有 fallback，不能被计为 CUB 覆盖；
 - 对受影响 CUDA regression 运行 `compute-sanitizer --tool memcheck`。只有已知当前 CUDA
   版本支持的 device-side atomic/duplicate-sensitive 用例才追加 `racecheck`。
+
+### Dense Field Graph 矩阵
+
+本小节全部仍待 Linux 复测；Windows 结果不能满足这些门禁。
+
+- 分别用 GCC/Clang 构建受影响 Python/native Graph 源码，覆盖 release 与 sanitizer 配置；
+- 在 CPU/CUDA/Vulkan 上运行 `tests/python/test_graph_dense_field.py` 和
+  `tests/python/test_graph_dense_field_numerics.py`。要求 integer
+  AOS/SOA/multi-tree 精确一致；backend 声明 data64 时满足公开 f32/f64 tolerance；
+  Tape/FwdMode 明确拒绝；自动 AD context 外显式 `kernel.grad` Graph 可运行；
+- 以 fresh process 运行 `benchmarks/graph_dense_field_multiblock_bench.py --arches
+  cpu,cuda,vulkan --modes direct,graph --matrix --display --diagnostics
+  --sample-gpu-memory --trials 5`。保留 build/first、specialization/task/cache 增长、
+  steady median/p95、host submitter 公平性、Field payload、RSS/VRAM、execution report
+  和 reset 状态。relative trial range 超过 5% 时只能作为观察值；
+- 在 `TI_WITH_CUDA_TOOLKIT=OFF` build 重跑 CUDA zero-runtime-argument Field Graph；
+  必须只通过动态加载 Driver API capture/replay，不依赖 Toolkit header 或 CUDA 版本化 wheel；
+- 在 ASan/UBSan 下运行 SNodeTree destroy/id reuse/generation 与 1000+ tree/Graph churn；
+  CPU 独立 Graph caller 追加 TSAN，CUDA 追加 compute-sanitizer memcheck；
+- Vulkan 启用 validation 与 synchronization validation，每 Graph 至少运行 9 次跨过 slot
+  录制阶段；随后运行 headless 及可用 X11/Wayland headed 异步 snapshot/display；
+- 分别记录 Linux allocator 下 Field 前、compile 后、first replay、steady replay 与
+  `ti.reset()` 后的 RSS/VRAM。不得从 Windows WDDM process-memory counter 推断 Linux 回收。
 
 ### Vulkan、GGUI 与 Vulkan-CUDA interop
 

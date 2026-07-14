@@ -39,6 +39,9 @@ The user-visible additions are:
   texture paths;
 - stable ordinary-dispatch fallback when an optimized replay path is not
   supported;
+- public `Graph.execution_stats()` execution/fallback/resource reports;
+- explicit `kernel.grad` dispatch for manually managed gradient Graphs outside
+  automatic-AD contexts;
 - internal native replay for Forge-defined primitive sequences produced by the
   algorithm layer;
 - `GraphBuilder.append_native(node, prewarm=False)` for Forge DSL-defined
@@ -58,6 +61,9 @@ The user-visible additions are:
   completion or add a default `ti.sync()`.
 - `ti.reset()` invalidates graphs from the old runtime. Rebuild the builder
   and graph after reset.
+- Dense Fields are definition-time bindings. Their contents may change, but
+  replacing identity/layout or destroying their generation-qualified SNodeTree
+  requires rebuilding the Graph. Numeric tree-id reuse does not revive it.
 - Same-structure runtime resources may use backend replay; structural changes
   may recapture or fall back. Both paths preserve binding and execution
   semantics.
@@ -67,11 +73,44 @@ The user-visible additions are:
   argument through `template_args=`; the Field still does not enter each run's
   dictionary. Legacy adapters that write directly to the durable AOT plan keep
   exact runtime-argument discovery and strict missing/unexpected-key checks.
+- `Graph.run()` is primal-only. Active `ti.ad.Tape()` and
+  `ti.ad.FwdMode()` are rejected before submission instead of silently losing
+  gradient/dual recording. An explicit `kernel.grad` Graph may be run manually
+  outside those contexts.
 
 The implementation details behind CUDA resource leases and dynamic patching,
 Vulkan identity and deferred retirement, fixed replay capacity, failure
-recovery, and `Graph._graph_stats` are documented in
+recovery, and `Graph.execution_stats()` are documented in
 [Graph runtime and optimization](graph_runtime_optimization.en.md).
+
+## Strict runtime-key migration
+
+Definition-time template bindings must be removed from the runtime dictionary.
+Code that kept passing them may have appeared to work with a permissive legacy
+adapter, but Forge now rejects the extra key:
+
+```python
+builder.dispatch(
+    solver.step,
+    template_args={"self": solver, "state": solver.state},
+)
+graph = builder.compile()
+
+graph.run({"state": solver.state})  # wrong: unexpected runtime argument
+graph.run({})                       # correct for this zero-runtime-arg graph
+```
+
+Keep only declared `ti.graph.Arg` names in `Graph.run()`. This catches stale
+engine adapters and misspelled parameters before backend submission.
+
+## Heterogeneous multi-environment layout
+
+Do not create one Graph per homogeneous environment. Use one block/Graph per
+stable solver-layout-shape-feature signature and store homogeneous environments
+on a leading Field axis. Separate heterogeneous blocks keep independent
+writable Fields and submit independently. Simulation/render overlap still
+requires slot/epoch-owned snapshot Fields; Graph does not add data-hazard
+tracking.
 
 ## Native graph boundary
 

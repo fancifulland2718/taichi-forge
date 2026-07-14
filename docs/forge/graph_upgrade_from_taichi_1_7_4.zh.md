@@ -32,6 +32,8 @@ Forge 在公开 API 之下增加 backend-owned execution planning，用于支持
   `template_args=` 正式绑定 data-oriented `self`、Field 等构图期参数；
 - scalar、matrix、ndarray、texture 与 RW texture 的 runtime 参数路径；
 - 优化 replay 路径不支持时稳定回退到 ordinary dispatch；
+- 公开 `Graph.execution_stats()` execution/fallback/resource report；
+- 可显式 dispatch `kernel.grad`，在自动 AD context 外手工管理 gradient Graph；
 - algorithm 层生成的 Forge-defined primitive sequence 可内部 native replay；
 - `GraphBuilder.append_native(node, prewarm=False)` 可追加
   `PrimitiveSequence`、`DeviceCheckResult`、`DeviceMetricResult` 等
@@ -46,6 +48,8 @@ Forge 在公开 API 之下增加 backend-owned execution planning，用于支持
 - 同一个 `Graph` 的一次调用是完整 host invocation；不同 graph 仍可独立提交，该保护
   不等待 GPU 完成，也不增加默认 `ti.sync()`；
 - `ti.reset()` 会使旧 runtime 的 graph 失效，reset 后应重建 builder 与 graph；
+- dense Field 是 definition-time binding；内容可变，但替换 identity/layout 或销毁其带
+  generation 的 SNodeTree 后必须重建 Graph。复用相同数值 tree id 不会恢复旧 Graph；
 - 结构相同的 runtime resource 可使用后端 replay；结构变化可触发 recapture 或 fallback，
   两条路径都保持 binding 与执行语义；
 - runtime graph 安全不能替代应用对共享仿真/渲染数据使用 snapshot、slot 或
@@ -53,10 +57,39 @@ Forge 在公开 API 之下增加 backend-owned execution planning，用于支持
 - 新引擎代码应使用 `template_args=` 绑定 `self`、Field 等 `ti.template()` 参数；Field
   仍不进入每次 run 的字典。旧适配器直接写入 durable AOT plan 时，Forge 继续恢复真实
   runtime 参数名，missing/unexpected key 的严格检查不变。
+- `Graph.run()` 是 primal-only；active `ti.ad.Tape()` 与 `ti.ad.FwdMode()` 会在提交前
+  被拒绝，而不是静默漏记 gradient/dual。显式 `kernel.grad` Graph 可在这些 context 外
+  手工运行。
 
 CUDA resource lease 与 dynamic patch、Vulkan identity 与延迟退役、固定 replay 容量、失败
-恢复和 `Graph._graph_stats` 的实现策略见
+恢复和 `Graph.execution_stats()` 的实现策略见
 [Graph Runtime 与优化](graph_runtime_optimization.zh.md)。
+
+## 严格 runtime key 迁移
+
+definition-time template binding 必须从 runtime 字典移除。旧的 permissive adapter 可能
+曾容忍重复传入，但 Forge 现在会拒绝这个 extra key：
+
+```python
+builder.dispatch(
+    solver.step,
+    template_args={"self": solver, "state": solver.state},
+)
+graph = builder.compile()
+
+graph.run({"state": solver.state})  # 错误：unexpected runtime argument
+graph.run({})                       # 正确：该 Graph 没有 runtime argument
+```
+
+`Graph.run()` 中只保留已声明的 `ti.graph.Arg` 名称。这会在 backend submission 之前发现
+过期 engine adapter 和参数拼写错误。
+
+## 异构多环境 layout
+
+不要为每个同构环境创建一张 Graph。应按稳定的 solver-layout-shape-feature signature
+建立 block/Graph，并把同构环境放到 Field 前导维度。不同异构 block 持有独立可写 Field
+并独立提交。simulation/render overlap 仍须使用 slot/epoch-owned snapshot Field；
+Graph 不增加 data-hazard tracking。
 
 ## Native graph 边界
 

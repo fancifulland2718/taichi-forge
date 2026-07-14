@@ -849,7 +849,11 @@ class _AOTGraphBuilderPlan:
 
 
 def gen_cpp_kernel(kernel_fn, args, *, template_args=None):
-    kernel = kernel_fn._primal
+    kernel = (
+        kernel_fn
+        if isinstance(kernel_fn, kernel_impl.Kernel)
+        else kernel_fn._primal
+    )
     assert isinstance(kernel, kernel_impl.Kernel)
     injected_args = produce_injected_args_for_graph(
         kernel, symbolic_args=args, template_args=template_args
@@ -1023,6 +1027,22 @@ class Graph:
         # GPU completion, so independent graphs remain independently submitable.
         with self._lifecycle_lock:
             self._check_runtime_valid()
+            runtime = impl.pytaichi
+            if runtime.target_tape is not None:
+                raise TaichiRuntimeError(
+                    "Graph.run() is primal-only and cannot execute inside an "
+                    "active ti.ad.Tape(). Graph dispatches are opaque to Tape "
+                    "and would omit gradients. Run the Graph outside automatic "
+                    "AD, or manually run an explicit grad-kernel Graph outside "
+                    "the Tape context."
+                )
+            if runtime.fwd_mode_manager is not None:
+                raise TaichiRuntimeError(
+                    "Graph.run() is primal-only and cannot execute inside an "
+                    "active ti.ad.FwdMode(). Graph dispatches are opaque to "
+                    "forward AD and would omit dual propagation. Run the Graph "
+                    "outside automatic AD."
+                )
             self._spec.validate_runtime_args(args)
             self._run_impl(args)
 

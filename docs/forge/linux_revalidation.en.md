@@ -69,8 +69,8 @@ target separation, capture/recapture/reset, and 1/2/4-submitter telemetry.
 - Run `tests/python/cuda_graph_runtime_bench.py` in fresh processes. Treat it
   as a p50/p95 and reset-stability check, not as a cross-machine performance
   comparison.
-- Read the internal `Graph._graph_stats` snapshot before a measured diagnostic
-  run and verify capture/replay/recapture/fallback accounting. Run the normal
+- Call public `Graph.execution_stats()` before a measured diagnostic run and
+  verify capture/replay/recapture/fallback accounting. Run the normal
   benchmark without reading it to confirm the default CUDA path keeps detailed
   counters disabled. Inject or reproduce one recoverable capture failure and
   verify bounded 1/2/4/8/16/32 backoff; separately verify that a context-fatal
@@ -96,6 +96,37 @@ target separation, capture/recapture/reset, and 1/2/4-submitter telemetry.
 - Run `compute-sanitizer --tool memcheck` for the affected CUDA regression
   set. Add `racecheck` only to device-side atomic/duplicate-sensitive cases
   whose CUDA-version support is known.
+
+### Dense Field Graph matrix
+
+This subsection is entirely pending Linux revalidation; Windows results do not
+satisfy it.
+
+- Build the affected Python/native Graph sources with GCC and Clang, with both
+  release and sanitizer configurations.
+- Run `tests/python/test_graph_dense_field.py` and
+  `tests/python/test_graph_dense_field_numerics.py` on CPU, CUDA, and Vulkan.
+  Require exact integer AOS/SOA/multi-tree results, the documented f32/f64
+  tolerances where the backend advertises data64, explicit Tape/FwdMode
+  rejection, and manual `kernel.grad` Graph execution outside AD contexts.
+- Run `benchmarks/graph_dense_field_multiblock_bench.py --arches
+  cpu,cuda,vulkan --modes direct,graph --matrix --display --diagnostics
+  --sample-gpu-memory --trials 5` in fresh processes. Preserve build/first,
+  specialization/task/cache growth, steady median/p95, host-submitter
+  fairness, Field payload, RSS/VRAM, execution reports, and reset state.
+  Relative trial ranges above 5% remain observational.
+- Repeat the CUDA zero-runtime-argument Field Graph path in a
+  `TI_WITH_CUDA_TOOLKIT=OFF` build. It must capture/replay through dynamically
+  loaded Driver APIs without CUDA Toolkit headers or a CUDA-versioned wheel.
+- Run SNodeTree destroy/id-reuse/generation and 1000+ tree/Graph churn under
+  ASan/UBSan; add TSAN for CPU independent-Graph callers and
+  compute-sanitizer memcheck for CUDA.
+- Run Vulkan with validation and synchronization validation through at least
+  nine launches per Graph, then perform headless and available X11/Wayland
+  headed asynchronous snapshot/display tests.
+- Record Linux allocator-specific RSS/VRAM before fields, after compile,
+  first replay, steady replay, and `ti.reset()`. Do not infer reclamation from
+  a Windows WDDM process-memory counter.
 
 ### Vulkan, GGUI, and Vulkan-CUDA interop
 

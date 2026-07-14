@@ -16,6 +16,8 @@ Forge 保留 Taichi 的公开 graph builder 模型。后端优化不得改变以
 - 不同 graph 仍可独立提交；runtime guard 在 host submission 后结束，不增加默认
   `ti.sync()`；
 - `ti.reset()` 会使旧 runtime 所有的 graph 失效；
+- 销毁被引用的 SNodeTree 会使 Graph 失效，即使后续 tree 复用了相同数值 id；
+- `Graph.run()` 是 primal-only；active Tape/FwdMode 会被明确拒绝，而不是静默漏掉 AD；
 - 后端优化路径可以回退到 ordinary dispatch，但不能静默改变结果、binding 或执行顺序。
 
 Runtime 同步只保护 Forge 自己的 launch、replay 与资源状态，不会自动解决应用持有的仿真/
@@ -57,6 +59,31 @@ resource signature 与容器。CompiledGraph binding 按当前 segment 自己的
 C++ `IValue` map；不会在 Python 为每个 segment 复制字典。这样同时保持 segment-local
 后端语义和 zero-copy host path。直接读取下划线对象的旧适配器仍可工作，但只恢复上次
 segment flush 后新增的 AOT items。
+
+## Dense Field 生命周期与异构 block
+
+Forge 支持 Graph kernel 闭包引用 dense scalar/vector/matrix Field，包括 `shape=...`
+自动 Field 和简单 `root -> dense -> place` layout；覆盖同一 dense node 放置多个 Field
+的 AOS-style 形式，以及多个独立 dense node 的 SOA-style 形式。pointer、bitmasked、
+dynamic、hash、activation list 等稀疏拓扑不属于本 dense Field 合同。
+
+Field 是 definition-time/static binding：
+
+- 内容可在不同 run 之间变化；
+- identity、SNodeTree generation、shape、dtype、element shape 和 layout 不可热替换；
+- 销毁被引用的 SNodeTree 后 Graph 进入 stale，应用必须重建后才能再次 `run()`；
+- tree id 复用受 generation 限定，旧 Graph 不会被重定向到新 allocation；
+- Graph 不复制 Field payload。
+
+异构多环境引擎应按稳定的 solver/layout/shape/feature signature 划分 block，在每个 block
+内部把同构环境放到 Field 前导维度。不同 block 应持有互不重叠的可写 Field；共享只读
+Field 也必须由引擎明确 lifetime。仿真与渲染应通过 immutable 或 slot/epoch-owned
+snapshot Field 交接；Graph 不会推断跨 Graph data hazard。
+
+每个 data-oriented `self` identity 都是独立 specialization，因为其 root binding 可能不同。
+Forge 不透明合并任意 owner 的 compiled kernel；那需要新的 runtime Field binding ABI，
+不是安全的 cache-key 小改。持久 offline cache 与有计划的 prewarm 可以减少重复 backend
+compile，同时不削弱 binding 安全。
 
 ## 后端执行模型
 
@@ -129,18 +156,34 @@ fallback 计数不足以证明优化成立。
 
 ## 诊断
 
-`Graph._graph_stats` 是用于回归测试和生产问题调查的内部实验 snapshot。下划线是刻意
-的：字段名与兼容性不属于稳定公开 API。CUDA 首次读取后才为该 graph 的后续调用启用详细
-counter；opt-in 前的正常路径不支付详细计数或日志开销。Vulkan 复用 replay registry
-本身需要的轻量计数。
+应使用稳定、冻结的 `Graph.execution_stats()` schema v1 report。它公开 definition count、
+compiled task count、segment-local runtime argument、带 generation 的 static dependency、
+不含 pointer 的 layout fingerprint、execution/fallback path、replay eligibility、
+persistent argument bytes 与 immutable per-segment counter。应用代码不应读取内部
+`Graph._graph_stats` cache。
 
-Snapshot 可区分 capture/record、exact replay、patched replay、recapture、ordinary
-fallback、结构性拒绝、暂态失败、retry backoff、capture exception 与 Vulkan slot
-饱和，并在可用时报告 last path、fallback reason 与 driver error。
-`known_persistent_argument_bytes` 只是 Forge 可见 argument buffer 的下界，不包含
+report 可区分 capture/record、exact replay、patched replay、recapture、ordinary
+fallback、结构性拒绝、暂态失败、retry backoff、capture exception、native dispatch 与
+Vulkan slot saturation。第一次读取会为之后的 GPU 执行 opt-in 详细计数；若此前已有工作，
+`counters_complete=False` 会在该 runtime epoch 明确保留。读取 report 不调用 `ti.sync()`。
+
+persistent argument bytes 只表示 Forge 可见的 host/backend argument storage，不包含
 不透明 graph executable、command buffer、descriptor pool、allocator high-water mark
-或其他 driver-retained memory。应结合 GPU memory telemetry、host RSS 与 graph-churn
-stress 使用。
+或其他 driver-retained memory。应同时使用 GPU memory telemetry、host RSS 和
+graph/tree churn stress。
+
+## 数值与自动微分合同
+
+replay 只改变 host submission，不改变 kernel 算术、dispatch 顺序或 Field dependency。
+release 矩阵要求无 data race 的 integer copy/gather/update 在 direct 与 Graph 间精确一致；
+常规 f32 算术使用 `rtol=1e-5`，支持 f64 的路径使用 `rtol=1e-12`。floating
+atomic/reduction 因 backend 执行顺序可能不同，必须使用明确写出的 tolerance。
+
+Graph 当前是 primal-only。active `ti.ad.Tape()` 或 `ti.ad.FwdMode()` 内调用
+`Graph.run()` 会在提交前抛错，防止 gradient 或 dual value 静默丢失。可把显式
+`kernel.grad` dispatch 到独立 Graph，并在自动 AD context 外手工运行。Forge 当前尚未
+提供 immutable primal/adjoint Graph pair、反向 dispatch 顺序或 native-node gradient
+executable 合同。
 
 ## 性能与显存权衡
 
@@ -152,10 +195,27 @@ Graph 最适合 dispatch 拓扑与资源结构能在大量 replay 中保持稳�
 median 与 tail latency，并记录长时间 replay/churn 前后的 GPU memory。必须与 ordinary
 dispatch 校验结果，不能只看吞吐。
 
-一台本地 Windows 验证机上，四 dispatch、1,048,576 元素 graph 的三组逐次同步 CUDA
-replay 中位数为 0.0385/0.0446/0.0380 ms，报告显存保持 756 MiB。512 次 Vulkan 样本约
-12.4k graph/s，slot fallback 为 0，报告显存 536→536 MiB。这些数字只作为本机回归证据，
-不构成跨设备性能承诺。
+一台 Windows 机器上的 fresh-process dense Field multi-block 验证使用四个异构 block、
+每 block 八个同构环境、256 base items、10 次 warmup、200 个测量 round 和 5 trials：
+
+| 后端 | Direct block invocation/s | Graph block invocation/s | Trial range | 结果 |
+| --- | ---: | ---: | ---: | --- |
+| CPU | 487.265 | 675.139 | 0.783% / 1.862% | **正式 +38.56%** |
+| Vulkan | 3072.662 | 11390.738 | 2.156% / 4.815% | **正式 +270.71%** |
+| CUDA | 3138.267 | 66534.153 | 39.37% / 11.06% | 仅观察 |
+
+延长到 7 trials 的 CUDA 仍测得 4217.079 -> 68626.702 invocation/s（16.27x），但
+14.61% / 8.16% range 仍超过 5% 正式门禁。它证明该机器上 exact replay 的预期收益方向，
+不构成可移植百分比。
+
+CUDA build+first 从 1 block 的 371.107 ms 增至 8 block 的 3246.939 ms：总计
+8.749x，按 block 归一为 1.094x。8-block case 有 50 个 specialization、52 个 backend
+task，没有无法解释的超线性编译增长。一次确定性的 CPU cold/warm cache 观察中，
+backend compile 从 453.507 降到 26.058 ms，build+first 从 552.645 降到
+132.660 ms。该单次 cache pair 只证明命中，不是统计性能声明。
+
+这些数字只作为本机回归证据，不构成跨设备性能承诺。relative trial range 超过 5% 时
+必须保持“仅观察”。
 
 ## Native 与 AOT 边界
 
@@ -171,6 +231,12 @@ Primitive 所有权与结果 API 见 [Native algorithms](native_algorithms.zh.md
 专项验证包括：
 
 - `tests/python/test_graph.py`：公开合同、生命周期、replay 与诊断；
+- `tests/python/test_graph_dense_field.py`：static Field binding、SNodeTree
+  generation/lifetime、零参数 replay、mixed segment 与并发；
+- `tests/python/test_graph_dense_field_numerics.py`：integer exact、f32/f64
+  tolerance、AOS/SOA layout、多个 tree、primal-only AD 拒绝和显式 grad-kernel Graph；
+- `benchmarks/graph_dense_field_multiblock_bench.py`：fresh-process
+  1/2/4/8-block 编译、cache、吞吐、公平性、RSS/VRAM、display 与 reset report；
 - `tests/python/cuda_graph_runtime_bench.py` 和
   `tests/python/cuda_graph_dynamic_patch_bench.py`：CUDA replay；
 - `tests/python/vulkan_graph_slot_bench.py` 和
@@ -181,7 +247,10 @@ Primitive 所有权与结果 API 见 [Native algorithms](native_algorithms.zh.md
 
 Windows 验证覆盖 CPU、CUDA 与 Vulkan runtime 路径。Linux 编译分支保持 platform-neutral，
 但在正式声明 Linux 状态前，仍须在真实 Linux build、driver、window system 与长时 stress
-上复测。准确待测矩阵见 [Linux 复测状态](linux_revalidation.zh.md)。
+上复测。dense Field Graph 特别仍需 GCC/Clang build、Linux CPU multi-block、CUDA
+Driver-only/Toolkit-OFF 零参数 capture、Vulkan validation/headless/headed replay、
+sanitizer，以及 allocator-specific RSS/VRAM/reset 测量。准确待测矩阵见
+[Linux 复测状态](linux_revalidation.zh.md)。
 
 ## 相关文档
 

@@ -97,7 +97,7 @@ Graph replay 包含后端特定的容量、生命周期、失败恢复、诊断�
 在弹性容量实验显示显存权衡不理想后，有意保留固定 8-slot ring；CUDA 则区分结构性
 capture 拒绝、暂态失败与 context-fatal 错误。
 
-这些策略、测量结果及内部 `Graph._graph_stats` 边界统一维护在
+这些策略、测量结果及公开 `Graph.execution_stats()` schema 统一维护在
 [Graph Runtime 与优化](graph_runtime_optimization.zh.md)。集中维护可以避免这份通用编译
 指南变成第二份、以后可能漂移的 graph 规范。
 
@@ -108,6 +108,8 @@ capture 拒绝、暂态失败与 context-fatal 错误。
 - CPU、CUDA、Vulkan primal output 对可信 reference 的绝对/相对误差；
 - 长时间 drift、守恒量、NaN/Inf 行为和确定性 seed；
 - 应用实际使用的 reverse/forward AD，以及非光滑点附近的 finite difference；
+- 明确的 primal-only Graph 边界：active Tape/FwdMode 必须清晰失败，手工 dispatch 的
+  grad-kernel Graph 在 AD context 外运行；
 - sparse activate/deactivate、atomic、reduction 和 graph replay；
 - release 配置与 `debug=True` / profiler-on 配置分开验证。
 
