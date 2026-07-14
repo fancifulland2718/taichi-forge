@@ -101,6 +101,8 @@ target separation, capture/recapture/reset, and 1/2/4-submitter telemetry.
 
 This subsection is entirely pending Linux revalidation; Windows results do not
 satisfy it.
+The public feature contract and Windows evidence are maintained in
+[Dense Field Graph](dense_field_graph.en.md).
 
 - Build the affected Python/native Graph sources with GCC and Clang, with both
   release and sanitizer configurations.
@@ -109,6 +111,11 @@ satisfy it.
   Require exact integer AOS/SOA/multi-tree results, the documented f32/f64
   tolerances where the backend advertises data64, explicit Tape/FwdMode
   rejection, and manual `kernel.grad` Graph execution outside AD contexts.
+- In one process, complete at least three init/Graph/reset cycles while test
+  frames or engine owners retain SNodeTree wrappers; do not insert
+  `gc.collect()` as a workaround. Program finalization must invalidate those
+  wrappers before any delayed Python destruction. Also run the bidirectional
+  cross-thread Graph/Tape/FwdMode entry regression under TSAN on CPU.
 - Run `benchmarks/graph_dense_field_multiblock_bench.py --arches
   cpu,cuda,vulkan --modes direct,graph --matrix --display --diagnostics
   --sample-gpu-memory --trials 5` in fresh processes. Preserve build/first,

@@ -71,6 +71,7 @@ README 只说明用户可见变化和兼容边界，不列具体 benchmark 数�
 ### 0.4.x：Graph、native 算法、缓存与显示提交
 
 - 在保持公开 graph builder 形态的前提下现代化 graph 执行层：`GraphBuilder.dispatch`、sequential graph、`compile`、`Graph.run` 和 AOT CGraph 仍是用户可见模型。
+- 新增 CPU、CUDA、Vulkan Dense Field Graph：静态绑定 scalar/vector/matrix Field，使用带 generation 的 SNodeTree 生命周期校验，并明确异步提交与自动微分边界。
 - 支持 DSL 内预定义的 native 算法节点进入 graph replay。这不是任意 native callback 的公开 API。
 - native 算法覆盖从 sort 扩展到更多 primitive。公开算法入口包括 `PrefixSumExecutor.run()`、`experimental_compact()`、`experimental_reduce()`、`experimental_histogram()`、`experimental_transform()`、`experimental_gather()`、`experimental_scatter()`、`experimental_scatter_add()`、`experimental_bucket_builder()`、`experimental_grouped_reduce()`，并配套可复用 workspace。
 - 将 `canvas.set_image()` 形式化为显示帧提交链路，增加 `ti.ui.DisplayFrame` 和 `Canvas.submit_frame(...)`，用于 display-ready host、texture 和 packed `u32` frame 输入。
@@ -78,26 +79,42 @@ README 只说明用户可见变化和兼容边界，不列具体 benchmark 数�
 - vanilla taichi 中一些 issues 的修复。
 
 参考：[Forge API 参考](docs/forge/forge_api_reference.zh.md)、
-[Graph 升级说明](docs/forge/graph_upgrade_from_taichi_1_7_4.zh.md)、
+[Graph Runtime 与优化](docs/forge/graph_runtime_optimization.zh.md)、
+[Dense Field Graph](docs/forge/dense_field_graph.zh.md)、
+[Graph 兼容性与迁移指南](docs/forge/graph_migration_guide.zh.md)、
 [Native 算法](docs/forge/native_algorithms.zh.md)、
 [显示帧提交](docs/forge/display_frame.zh.md)。
 
 ## 公开文档
 
-中文公开文档：
+中文公开文档按用途分组：
 
-- [构建 Forge wheel](docs/forge/build_wheels.zh.md)
-- [相比 vanilla Taichi 的 bug 修复](docs/forge/bug_fixes.zh.md)
+### API 与兼容性
+
 - [Forge API 参考](docs/forge/forge_api_reference.zh.md)
 - [Forge 选项](docs/forge/forge_options.zh.md)
-- [编译与缓存说明](docs/forge/cache_compile.zh.md)
+- [相比 vanilla Taichi 的 bug 修复](docs/forge/bug_fixes.zh.md)
+
+### Graph 与执行
+
+- [Graph 兼容性与迁移指南](docs/forge/graph_migration_guide.zh.md)
+- [Graph Runtime 与优化](docs/forge/graph_runtime_optimization.zh.md)
+- [Dense Field Graph](docs/forge/dense_field_graph.zh.md)
+- [Native 算法](docs/forge/native_algorithms.zh.md)
+- [并行排序 API](docs/forge/sort_api.zh.md)
+
+### 数据结构与显示
+
 - [Vulkan 稀疏 SNode](docs/forge/sparse_snode_on_vulkan.zh.md)
 - [Hash SNode](docs/forge/hash_snode.zh.md)
-- [并行排序 API](docs/forge/sort_api.zh.md)
-- [Native 算法](docs/forge/native_algorithms.zh.md)
-- [Graph 升级说明](docs/forge/graph_upgrade_from_taichi_1_7_4.zh.md)
-- [显示帧提交](docs/forge/display_frame.zh.md)
 - [StructNdarray primitive 语义](docs/forge/struct_ndarray_api.zh.md)
+- [显示帧提交](docs/forge/display_frame.zh.md)
+
+### 编译、打包与平台
+
+- [编译与缓存说明](docs/forge/cache_compile.zh.md)
+- [编译与高级优化 trade-off](docs/forge/compilation_tradeoffs.zh.md)
+- [构建 Forge wheel](docs/forge/build_wheels.zh.md)
 - [Linux 发行复测状态](docs/forge/linux_revalidation.zh.md)
 
 ## 从源码构建

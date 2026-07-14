@@ -96,6 +96,9 @@ See [Vulkan sparse SNode](docs/forge/sparse_snode_on_vulkan.en.md),
 - Modernized graph execution below the public graph-builder API while keeping
   `GraphBuilder.dispatch`, sequential graphs, `compile`, `Graph.run`, and AOT
   CGraph as the user-facing model.
+- Added Dense Field Graph support for statically bound scalar, vector, and
+  matrix Fields on CPU, CUDA, and Vulkan, with generation-qualified SNodeTree
+  lifetime checks, asynchronous submission boundaries, and explicit AD guards.
 - Added support for Forge-defined DSL native algorithm nodes in graph replay.
   This is not a public arbitrary native callback API.
 - Broadened native algorithm coverage beyond sort. Public algorithm entry
@@ -114,27 +117,40 @@ See [Vulkan sparse SNode](docs/forge/sparse_snode_on_vulkan.en.md),
 
 See [Forge API reference](docs/forge/forge_api_reference.en.md),
 [Graph runtime and optimization](docs/forge/graph_runtime_optimization.en.md),
-[Graph upgrade notes](docs/forge/graph_upgrade_from_taichi_1_7_4.en.md),
+[Dense Field Graph](docs/forge/dense_field_graph.en.md),
+[Graph compatibility and migration guide](docs/forge/graph_migration_guide.en.md),
 [Native algorithms](docs/forge/native_algorithms.en.md), and
 [Display frame submission](docs/forge/display_frame.en.md).
 
 ## Public Documentation
 
-English public docs:
+English public docs are grouped by use case:
 
-- [Building Forge wheels](docs/forge/build_wheels.en.md)
-- [Bug fixes compared with vanilla Taichi](docs/forge/bug_fixes.en.md)
+### API and compatibility
+
 - [Forge API reference](docs/forge/forge_api_reference.en.md)
 - [Forge options](docs/forge/forge_options.en.md)
-- [Compile and cache guide](docs/forge/cache_compile.en.md)
-- [Compilation and advanced-optimization trade-offs](docs/forge/compilation_tradeoffs.en.md)
+- [Bug fixes compared with vanilla Taichi](docs/forge/bug_fixes.en.md)
+
+### Graph and execution
+
+- [Graph compatibility and migration guide](docs/forge/graph_migration_guide.en.md)
+- [Graph runtime and optimization](docs/forge/graph_runtime_optimization.en.md)
+- [Dense Field Graph](docs/forge/dense_field_graph.en.md)
+- [Native algorithms](docs/forge/native_algorithms.en.md)
+- [Parallel sort API](docs/forge/sort_api.en.md)
+
+### Data structures and display
+
 - [Vulkan sparse SNode](docs/forge/sparse_snode_on_vulkan.en.md)
 - [Hash SNode](docs/forge/hash_snode.en.md)
-- [Parallel sort API](docs/forge/sort_api.en.md)
-- [Native algorithms](docs/forge/native_algorithms.en.md)
-- [Graph runtime and optimization](docs/forge/graph_runtime_optimization.en.md)
-- [Graph upgrade notes](docs/forge/graph_upgrade_from_taichi_1_7_4.en.md)
 - [Display frame submission](docs/forge/display_frame.en.md)
+
+### Compilation, packaging, and platforms
+
+- [Compile and cache guide](docs/forge/cache_compile.en.md)
+- [Compilation and advanced-optimization trade-offs](docs/forge/compilation_tradeoffs.en.md)
+- [Building Forge wheels](docs/forge/build_wheels.en.md)
 - [Linux revalidation status](docs/forge/linux_revalidation.en.md)
 
 ## Build From Source

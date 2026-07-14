@@ -122,6 +122,8 @@ schema are maintained in
 [Graph runtime and optimization](graph_runtime_optimization.en.md). Keeping
 the details there avoids making this general compilation guide a second,
 potentially divergent graph specification.
+Dense Field-specific compile scaling, prewarming, and static-binding trade-offs
+are in [Dense Field Graph](dense_field_graph.en.md).
 
 ## Numerical and autodiff validation
 

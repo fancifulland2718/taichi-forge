@@ -330,6 +330,9 @@ print(err.to_float())
 
 ## Graph API
 
+Dense Field 专属 layout、生命周期、并发、AD 与后端行为见
+[Dense Field Graph](dense_field_graph.zh.md)。
+
 ### `GraphBuilder.dispatch(kernel, *args, template_args=None)`
 
 `Sequential.dispatch()` 提供相同的 keyword-only `template_args` 参数。它在构图/编译期
@@ -380,6 +383,8 @@ graph.run({"slot": 3})
 `TaichiRuntimeError`，因为 backend Graph invocation 对自动 AD 不透明，否则会静默漏掉
 gradient 或 dual propagation。用户可显式构建 `kernel.grad` Graph 并在上述上下文外手工
 运行；Forge 当前不声明自动 primal/adjoint Graph pair。
+同一规则覆盖跨线程：Graph host submission 活跃时 automatic AD 不得进入，AD setup
+期间 Graph 不得启动，runtime-global AD context 不得重叠。这些检查不等待 device 完成。
 
 运行参数 key 来自已编译的 graph 定义。旧引擎模板适配器若直接写入 durable AOT plan，
 Forge 仍会恢复其中实际的 `ti.graph.Arg` 名称以保持兼容；新代码应使用上面的
@@ -439,7 +444,8 @@ graph.run({})
 - native graph replay 目前面向 JIT/runtime。AOT native-node serialization 不是当前公开能力。
 - 不隐含跨后端 graph 执行。node 必须匹配它编译时所在 runtime 和资源。
 
-参考：[Graph 升级说明](graph_upgrade_from_taichi_1_7_4.zh.md)。
+参考：[Dense Field Graph](dense_field_graph.zh.md)与
+[Graph 兼容性与迁移指南](graph_migration_guide.zh.md)。
 
 ## `taichi_forge.ui`
 

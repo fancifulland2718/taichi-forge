@@ -1,7 +1,9 @@
-# Graph 相比 Taichi 1.7.4 的升级说明
+# Graph 兼容性与迁移指南
 
 本文说明 Forge graph 相比 vanilla Taichi 1.7.4 的公开行为与兼容边界。后端架构、性能、
 显存策略与诊断统一维护在 [Graph Runtime 与优化](graph_runtime_optimization.zh.md)。
+使用 dense Field 的用户还应阅读 [Dense Field Graph](dense_field_graph.zh.md)中的
+静态 binding 合同。
 
 Forge-only graph 与 native replay API 的精确签名见
 [Forge API 参考](forge_api_reference.zh.md)。

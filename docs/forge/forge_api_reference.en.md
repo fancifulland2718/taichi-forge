@@ -345,6 +345,9 @@ See also [Native algorithms](native_algorithms.en.md).
 
 ## Graph APIs
 
+Dense Field-specific layouts, lifetime, concurrency, AD, and backend behavior
+are documented in [Dense Field Graph](dense_field_graph.en.md).
+
 ### `GraphBuilder.dispatch(kernel, *args, template_args=None)`
 
 `Sequential.dispatch()` provides the same keyword-only `template_args`
@@ -406,6 +409,10 @@ opaque to automatic AD and would otherwise silently omit gradients or dual
 propagation. A user may build an explicit `kernel.grad` Graph and run it
 manually outside those contexts; Forge does not claim automatic primal/adjoint
 Graph pairing.
+The same rule is enforced across threads: automatic AD cannot enter during a
+Graph host submission, Graph cannot start during AD setup, and overlapping
+runtime-global AD contexts are rejected. These checks do not wait for device
+completion.
 
 Runtime keys come from the compiled graph definition. Forge still recovers the
 actual `ti.graph.Arg` names when a legacy engine adapter writes directly to the
@@ -473,7 +480,8 @@ Limits:
 - Cross-backend graph execution is not implied. The node must match the runtime
   and resources it was compiled for.
 
-See also [Graph upgrade notes](graph_upgrade_from_taichi_1_7_4.en.md).
+See also [Dense Field Graph](dense_field_graph.en.md) and
+[Graph compatibility and migration guide](graph_migration_guide.en.md).
 
 ## `taichi_forge.ui`
 

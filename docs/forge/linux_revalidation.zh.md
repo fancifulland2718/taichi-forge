@@ -78,12 +78,17 @@ target fallback 的较新设备。验证数值结果、offline-cache target 隔�
 ### Dense Field Graph 矩阵
 
 本小节全部仍待 Linux 复测；Windows 结果不能满足这些门禁。
+公开功能合同与 Windows 证据统一维护在 [Dense Field Graph](dense_field_graph.zh.md)。
 
 - 分别用 GCC/Clang 构建受影响 Python/native Graph 源码，覆盖 release 与 sanitizer 配置；
 - 在 CPU/CUDA/Vulkan 上运行 `tests/python/test_graph_dense_field.py` 和
   `tests/python/test_graph_dense_field_numerics.py`。要求 integer
   AOS/SOA/multi-tree 精确一致；backend 声明 data64 时满足公开 f32/f64 tolerance；
   Tape/FwdMode 明确拒绝；自动 AD context 外显式 `kernel.grad` Graph 可运行；
+- 在同一进程至少完成三轮 init/Graph/reset，并由 test frame 或 engine owner 保留
+  SNodeTree wrapper；不得插入 `gc.collect()` 规避。Program finalize 必须先使这些 wrapper
+  失效，再允许 Python 延迟析构；CPU 还须在 TSAN 下运行双向跨线程
+  Graph/Tape/FwdMode entry regression；
 - 以 fresh process 运行 `benchmarks/graph_dense_field_multiblock_bench.py --arches
   cpu,cuda,vulkan --modes direct,graph --matrix --display --diagnostics
   --sample-gpu-memory --trials 5`。保留 build/first、specialization/task/cache 增长、

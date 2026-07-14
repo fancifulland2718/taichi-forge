@@ -100,6 +100,8 @@ capture 拒绝、暂态失败与 context-fatal 错误。
 这些策略、测量结果及公开 `Graph.execution_stats()` schema 统一维护在
 [Graph Runtime 与优化](graph_runtime_optimization.zh.md)。集中维护可以避免这份通用编译
 指南变成第二份、以后可能漂移的 graph 规范。
+Dense Field 专属编译扩展、prewarm 与静态 binding 权衡见
+[Dense Field Graph](dense_field_graph.zh.md)。
 
 ## 数值与自动微分验证
 

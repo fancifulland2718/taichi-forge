@@ -1,4 +1,4 @@
-# Graph Upgrade Notes from Taichi 1.7.4
+# Graph Compatibility and Migration Guide
 
 This document describes the public behavior and compatibility boundary of Forge
 graph support relative to vanilla Taichi 1.7.4. Backend architecture,
@@ -82,6 +82,8 @@ The implementation details behind CUDA resource leases and dynamic patching,
 Vulkan identity and deferred retirement, fixed replay capacity, failure
 recovery, and `Graph.execution_stats()` are documented in
 [Graph runtime and optimization](graph_runtime_optimization.en.md).
+Dense Field users should also read
+[Dense Field Graph](dense_field_graph.en.md) for the static-binding contract.
 
 ## Strict runtime-key migration
 

@@ -3,8 +3,10 @@
 This document is the public source of truth for Forge graph runtime architecture,
 backend replay, performance policy, diagnostics, and validation. For migration
 from vanilla Taichi 1.7.4, see
-[Graph upgrade notes](graph_upgrade_from_taichi_1_7_4.en.md). For exact public
+[Graph compatibility and migration guide](graph_migration_guide.en.md). For exact public
 signatures, see [Forge API reference](forge_api_reference.en.md).
+The static-Field feature contract is maintained separately in
+[Dense Field Graph](dense_field_graph.en.md).
 
 ## Scope and invariants
 
@@ -20,8 +22,8 @@ change these contracts:
 - `ti.reset()` invalidates graphs owned by the previous runtime.
 - Destroying a referenced SNodeTree invalidates the Graph even if a later tree
   reuses the same numeric id.
-- `Graph.run()` is primal-only and rejects active Tape/FwdMode contexts rather
-  than silently dropping automatic differentiation.
+- `Graph.run()` is primal-only and rejects active or concurrently entering
+  Tape/FwdMode contexts rather than silently dropping automatic differentiation.
 - An optimized backend path may fall back to ordinary dispatch, but may not
   silently change results, bindings, or execution order.
 
@@ -77,36 +79,16 @@ only AOT items added since the previous segment flush.
 
 ## Dense Field lifetime and heterogeneous blocks
 
-Forge supports Graph kernels that close over dense scalar, vector, and matrix
-Fields, including `shape=...` Fields and simple `root -> dense -> place`
-layouts. Both same-node AOS-style placement and separate dense-node SOA-style
-placement are covered. Pointer, bitmasked, dynamic, hash, activation-list, and
-other sparse topology behavior is outside this dense-Field contract.
+Dense scalar, vector, and matrix Fields are supported as definition-time
+bindings. Their contents may change; identity, layout, shape, dtype, element
+shape, SNodeTree generation, and owning runtime may not be hot-rebound. Sparse
+topologies remain outside this contract. Heterogeneous engines should group
+homogeneous environments inside stable blocks and use explicit snapshot
+ownership between asynchronous simulation and rendering.
 
-A Field is a definition-time/static binding:
-
-- contents may change between runs;
-- identity, SNodeTree generation, shape, dtype, element shape, and layout may
-  not be hot-rebound;
-- destroying a referenced SNodeTree makes the Graph stale, and `run()` raises
-  until the application rebuilds it;
-- tree-id reuse is generation-qualified and cannot redirect an old Graph to a
-  new allocation;
-- Graph does not duplicate the Field payload.
-
-For heterogeneous multi-environment engines, use one block per stable
-solver/layout/shape/feature signature and put homogeneous environments on a
-leading Field axis inside that block. Different blocks should own disjoint
-writable Fields. Share read-only Fields only with an explicit engine lifetime
-contract. Simulation and rendering should communicate through immutable or
-slot/epoch-owned snapshot Fields; Graph does not infer cross-Graph hazards.
-
-Each data-oriented `self` identity is a distinct specialization because its
-root bindings can differ. Forge intentionally does not merge compiled kernels
-across arbitrary owners. Such merging would require a new runtime Field
-binding ABI, not a safe cache-key tweak. Persistent offline cache and deliberate
-prewarming reduce repeated backend compilation without weakening binding
-safety.
+The complete support matrix, lifecycle transaction, multi-environment layout,
+AD boundary, performance evidence, and Linux status are maintained in
+[Dense Field Graph](dense_field_graph.en.md).
 
 ## Backend execution model
 
@@ -221,11 +203,13 @@ races. Normal f32 arithmetic uses `rtol=1e-5`; supported f64 paths use
 tolerance because backend execution order may differ.
 
 Graph is currently primal-only. Calling `Graph.run()` while `ti.ad.Tape()` or
-`ti.ad.FwdMode()` is active raises before submission, preventing silent loss
-of gradients or dual values. An explicit `kernel.grad` may be dispatched into
-its own Graph and run manually outside automatic-AD contexts. Forge does not
-yet provide an immutable primal/adjoint Graph pair, reverse dispatch ordering,
-or native-node gradient executable contract.
+`ti.ad.FwdMode()` is active or entering raises before submission. Conversely,
+automatic AD cannot enter while a Graph host submission is active, and
+overlapping runtime-global AD contexts are rejected. These guards add no device
+wait. An explicit `kernel.grad` may be dispatched into its own Graph and run
+manually outside automatic-AD contexts. Forge does not yet provide an immutable
+primal/adjoint Graph pair, reverse dispatch ordering, or native-node gradient
+executable contract.
 
 ## Performance and memory trade-offs
 
@@ -241,31 +225,11 @@ and tail latency, and record GPU memory before and after long replay and churn
 samples. Check results against ordinary dispatch rather than judging only
 throughput.
 
-One Windows fresh-process dense-Field multi-block validation used four
-heterogeneous blocks, eight homogeneous environments per block, 256 base
-items, ten warmups, 200 measured rounds, and five trials:
-
-| Backend | Direct block invocations/s | Graph block invocations/s | Trial range | Result |
-| --- | ---: | ---: | ---: | --- |
-| CPU | 487.265 | 675.139 | 0.783% / 1.862% | **+38.56% formal** |
-| Vulkan | 3072.662 | 11390.738 | 2.156% / 4.815% | **+270.71% formal** |
-| CUDA | 3138.267 | 66534.153 | 39.37% / 11.06% | observational only |
-
-An extended seven-trial CUDA run still measured 4217.079 versus 68626.702
-invocations/s (16.27x), but its 14.61% / 8.16% ranges remained above the 5%
-formal gate. It proves the expected exact-replay direction on that system, not
-a portable percentage.
-
-CUDA build-plus-first-run scaled from 371.107 ms for one block to 3246.939 ms
-for eight blocks: 8.749x total, or 1.094x normalized per block. The eight-block
-case had 50 specializations and 52 backend tasks, with no unexplained
-superlinear compilation growth. In one deterministic CPU cold/warm cache
-observation, backend compilation fell from 453.507 to 26.058 ms and
-build-plus-first-run from 552.645 to 132.660 ms. That single cache pair is
-evidence of a hit, not a statistical performance claim.
-
-These numbers are local regression evidence, not portable performance
-promises. A relative trial range above 5% must remain observational.
+Current Dense Field multi-block throughput, compile scaling, cache, RSS/VRAM,
+and the Graph/AD guard microbenchmark are reported in
+[Dense Field Graph](dense_field_graph.en.md). They are local regression evidence,
+not portable performance promises; a relative trial range above 5% remains
+observational.
 
 ## Native and AOT boundary
 
@@ -316,7 +280,8 @@ matrix.
 
 ## Related documents
 
-- [Graph upgrade notes](graph_upgrade_from_taichi_1_7_4.en.md)
+- [Dense Field Graph](dense_field_graph.en.md)
+- [Graph compatibility and migration guide](graph_migration_guide.en.md)
 - [Forge API reference](forge_api_reference.en.md)
 - [Native algorithms](native_algorithms.en.md)
 - [Compilation and advanced-optimization trade-offs](compilation_tradeoffs.en.md)

@@ -2,8 +2,9 @@
 
 本文是 Forge graph runtime 架构、后端 replay、性能策略、诊断与验证的公开事实源。
 从 vanilla Taichi 1.7.4 迁移请看
-[Graph 升级说明](graph_upgrade_from_taichi_1_7_4.zh.md)，公开 API 精确签名请看
+[Graph 兼容性与迁移指南](graph_migration_guide.zh.md)，公开 API 精确签名请看
 [Forge API 参考](forge_api_reference.zh.md)。
+静态 Field 功能合同单独维护在 [Dense Field Graph](dense_field_graph.zh.md)。
 
 ## 范围与不变量
 
@@ -17,7 +18,8 @@ Forge 保留 Taichi 的公开 graph builder 模型。后端优化不得改变以
   `ti.sync()`；
 - `ti.reset()` 会使旧 runtime 所有的 graph 失效；
 - 销毁被引用的 SNodeTree 会使 Graph 失效，即使后续 tree 复用了相同数值 id；
-- `Graph.run()` 是 primal-only；active Tape/FwdMode 会被明确拒绝，而不是静默漏掉 AD；
+- `Graph.run()` 是 primal-only；active 或正在跨线程进入的 Tape/FwdMode 会被明确拒绝，
+  而不是静默漏掉 AD；
 - 后端优化路径可以回退到 ordinary dispatch，但不能静默改变结果、binding 或执行顺序。
 
 Runtime 同步只保护 Forge 自己的 launch、replay 与资源状态，不会自动解决应用持有的仿真/
@@ -62,28 +64,13 @@ segment flush 后新增的 AOT items。
 
 ## Dense Field 生命周期与异构 block
 
-Forge 支持 Graph kernel 闭包引用 dense scalar/vector/matrix Field，包括 `shape=...`
-自动 Field 和简单 `root -> dense -> place` layout；覆盖同一 dense node 放置多个 Field
-的 AOS-style 形式，以及多个独立 dense node 的 SOA-style 形式。pointer、bitmasked、
-dynamic、hash、activation list 等稀疏拓扑不属于本 dense Field 合同。
+dense scalar、vector 与 matrix Field 可作为 definition-time binding。内容可变，但
+identity、layout、shape、dtype、element shape、SNodeTree generation 与 owning runtime
+不可热替换；稀疏拓扑不属于本合同。异构引擎应在稳定 block 内组织同构 environment，
+并在异步仿真与渲染之间使用明确的 snapshot ownership。
 
-Field 是 definition-time/static binding：
-
-- 内容可在不同 run 之间变化；
-- identity、SNodeTree generation、shape、dtype、element shape 和 layout 不可热替换；
-- 销毁被引用的 SNodeTree 后 Graph 进入 stale，应用必须重建后才能再次 `run()`；
-- tree id 复用受 generation 限定，旧 Graph 不会被重定向到新 allocation；
-- Graph 不复制 Field payload。
-
-异构多环境引擎应按稳定的 solver/layout/shape/feature signature 划分 block，在每个 block
-内部把同构环境放到 Field 前导维度。不同 block 应持有互不重叠的可写 Field；共享只读
-Field 也必须由引擎明确 lifetime。仿真与渲染应通过 immutable 或 slot/epoch-owned
-snapshot Field 交接；Graph 不会推断跨 Graph data hazard。
-
-每个 data-oriented `self` identity 都是独立 specialization，因为其 root binding 可能不同。
-Forge 不透明合并任意 owner 的 compiled kernel；那需要新的 runtime Field binding ABI，
-不是安全的 cache-key 小改。持久 offline cache 与有计划的 prewarm 可以减少重复 backend
-compile，同时不削弱 binding 安全。
+完整支持矩阵、生命周期事务、多环境布局、AD 边界、性能证据与 Linux 状态统一维护在
+[Dense Field Graph](dense_field_graph.zh.md)。
 
 ## 后端执行模型
 
@@ -179,11 +166,11 @@ release 矩阵要求无 data race 的 integer copy/gather/update 在 direct 与 
 常规 f32 算术使用 `rtol=1e-5`，支持 f64 的路径使用 `rtol=1e-12`。floating
 atomic/reduction 因 backend 执行顺序可能不同，必须使用明确写出的 tolerance。
 
-Graph 当前是 primal-only。active `ti.ad.Tape()` 或 `ti.ad.FwdMode()` 内调用
-`Graph.run()` 会在提交前抛错，防止 gradient 或 dual value 静默丢失。可把显式
-`kernel.grad` dispatch 到独立 Graph，并在自动 AD context 外手工运行。Forge 当前尚未
-提供 immutable primal/adjoint Graph pair、反向 dispatch 顺序或 native-node gradient
-executable 合同。
+Graph 当前是 primal-only。active 或正在进入的 `ti.ad.Tape()` / `ti.ad.FwdMode()` 会在
+`Graph.run()` 提交前被拒绝；反过来，Graph host submission 活跃时 automatic AD 也不得
+进入，runtime-global AD context 不得重叠。这些 guard 不增加 device wait。显式
+`kernel.grad` 可 dispatch 到独立 Graph，并在自动 AD context 外手工运行。Forge 尚未提供
+immutable primal/adjoint Graph pair、反向 dispatch 顺序或 native-node gradient 合同。
 
 ## 性能与显存权衡
 
@@ -195,27 +182,9 @@ Graph 最适合 dispatch 拓扑与资源结构能在大量 replay 中保持稳�
 median 与 tail latency，并记录长时间 replay/churn 前后的 GPU memory。必须与 ordinary
 dispatch 校验结果，不能只看吞吐。
 
-一台 Windows 机器上的 fresh-process dense Field multi-block 验证使用四个异构 block、
-每 block 八个同构环境、256 base items、10 次 warmup、200 个测量 round 和 5 trials：
-
-| 后端 | Direct block invocation/s | Graph block invocation/s | Trial range | 结果 |
-| --- | ---: | ---: | ---: | --- |
-| CPU | 487.265 | 675.139 | 0.783% / 1.862% | **正式 +38.56%** |
-| Vulkan | 3072.662 | 11390.738 | 2.156% / 4.815% | **正式 +270.71%** |
-| CUDA | 3138.267 | 66534.153 | 39.37% / 11.06% | 仅观察 |
-
-延长到 7 trials 的 CUDA 仍测得 4217.079 -> 68626.702 invocation/s（16.27x），但
-14.61% / 8.16% range 仍超过 5% 正式门禁。它证明该机器上 exact replay 的预期收益方向，
-不构成可移植百分比。
-
-CUDA build+first 从 1 block 的 371.107 ms 增至 8 block 的 3246.939 ms：总计
-8.749x，按 block 归一为 1.094x。8-block case 有 50 个 specialization、52 个 backend
-task，没有无法解释的超线性编译增长。一次确定性的 CPU cold/warm cache 观察中，
-backend compile 从 453.507 降到 26.058 ms，build+first 从 552.645 降到
-132.660 ms。该单次 cache pair 只证明命中，不是统计性能声明。
-
-这些数字只作为本机回归证据，不构成跨设备性能承诺。relative trial range 超过 5% 时
-必须保持“仅观察”。
+当前 Dense Field multi-block 吞吐、编译扩展、cache、RSS/VRAM 与 Graph/AD guard
+微基准统一记录在 [Dense Field Graph](dense_field_graph.zh.md)。这些只作为本机回归证据，
+不构成跨设备性能承诺；relative trial range 超过 5% 时保持“仅观察”。
 
 ## Native 与 AOT 边界
 
@@ -254,7 +223,8 @@ sanitizer，以及 allocator-specific RSS/VRAM/reset 测量。准确待测矩阵
 
 ## 相关文档
 
-- [Graph 升级说明](graph_upgrade_from_taichi_1_7_4.zh.md)
+- [Dense Field Graph](dense_field_graph.zh.md)
+- [Graph 兼容性与迁移指南](graph_migration_guide.zh.md)
 - [Forge API 参考](forge_api_reference.zh.md)
 - [Native algorithms](native_algorithms.zh.md)
 - [编译与高级优化权衡](compilation_tradeoffs.zh.md)
