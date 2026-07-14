@@ -179,10 +179,12 @@ def run(args):
         graph = graph_builder.compile()
         build_times.append((time.perf_counter() - build_start) * 1000.0)
 
-        if args.zero_runtime_arg and args.arch == "cuda":
-            # Opt in before capture so lifecycle stress also proves the null
-            # argument packet path was used rather than ordinary fallback.
-            graph._graph_stats
+        # Lifecycle stress consumes detailed counters, so opt in outside build
+        # and run timing. This also proves task/layout metadata is available
+        # without reaching through private Graph internals.
+        initial_report = graph.execution_stats()
+        if initial_report.execution_path != "not_run":
+            raise RuntimeError("new Graph unexpectedly has an execution path")
         run_start = time.perf_counter()
         runtime_args = {} if args.zero_runtime_arg else {"value": iteration}
         for run_index in range(args.runs_per_graph):
@@ -194,21 +196,21 @@ def run(args):
             graph.run(runtime_args)
         ti.sync()
         run_times.append((time.perf_counter() - run_start) * 1000.0)
+        execution_report = graph.execution_stats()
+        segment = execution_report.segments[0]
         if args.zero_runtime_arg and args.arch == "cuda":
-            stats = graph._graph_stats[0]
-            zero_arg_captures += stats["zero_arg_captures"]
+            zero_arg_captures += segment.counters.zero_arg_captures
             max_persistent_argument_bytes = max(
                 max_persistent_argument_bytes,
-                stats["known_persistent_argument_bytes"],
+                segment.persistent_argument_bytes,
             )
         if args.arch == "vulkan":
-            stats = graph._graph_stats[0]
-            vulkan_records += stats["records"]
-            vulkan_replays += stats["replays"]
-            vulkan_fallbacks += stats["ordinary_fallbacks"]
+            vulkan_records += segment.counters.records
+            vulkan_replays += segment.counters.replays
+            vulkan_fallbacks += segment.counters.ordinary_fallbacks
             max_persistent_argument_bytes = max(
                 max_persistent_argument_bytes,
-                stats["known_persistent_argument_bytes"],
+                segment.persistent_argument_bytes,
             )
         if iteration in (0, args.iterations - 1):
             actual = values.to_numpy()
@@ -221,6 +223,9 @@ def run(args):
         tree.destroy()
         destroy_times.append((time.perf_counter() - destroy_start) * 1000.0)
         if iteration == 0:
+            stale_report = graph.execution_stats()
+            if stale_report.lifecycle_state != "stale_field_dependency":
+                raise RuntimeError("destroyed-tree Graph report is not stale")
             try:
                 graph.run(runtime_args)
             except TaichiRuntimeError:

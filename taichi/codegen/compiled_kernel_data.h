@@ -113,6 +113,10 @@ class CompiledKernelData {
   // kernel. Graph lifecycle tracking consumes this backend-neutral view.
   virtual std::vector<int> snode_tree_ids() const = 0;
 
+  // Number of backend tasks generated for this kernel. Graph diagnostics use
+  // this metadata after compilation; it does not trigger compilation itself.
+  virtual std::size_t task_count() const = 0;
+
   virtual Err debug_print(std::ostream &os) const {
     return dump(os);
   }

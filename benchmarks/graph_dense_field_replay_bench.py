@@ -16,6 +16,7 @@ import statistics
 import subprocess
 import sys
 import time
+from dataclasses import asdict
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
@@ -290,6 +291,9 @@ def _run_child(args) -> dict[str, object]:
             builder.dispatch(kernel)
         graph = builder.compile()
         graph_build_ms = (time.perf_counter() - build_start) * 1000.0
+        if args.diagnostics == "on":
+            # Enable detailed counters outside both build and first-run timing.
+            graph.execution_stats()
 
         def invoke():
             graph.run({})
@@ -333,6 +337,7 @@ def _run_child(args) -> dict[str, object]:
         "warmups": args.warmups,
         "repeats": args.repeats,
         "batch": args.batch,
+        "diagnostics": args.diagnostics,
         "package_file": str(Path(ti.__file__).resolve()),
         "package_version": _package_version(),
         "ti_version": list(ti.__version__),
@@ -355,11 +360,9 @@ def _run_child(args) -> dict[str, object]:
         "gpu_after_steady_mb": (
             _gpu_process_mb(os.getpid()) if sample_gpu else None
         ),
-        "graph_debug_info": getattr(graph, "_debug_info", None),
-        "graph_instance_debug_info": getattr(
-            graph, "_instance_debug_info", None
+        "graph_execution_report": (
+            asdict(graph.execution_stats()) if graph is not None else None
         ),
-        "graph_stats": getattr(graph, "_graph_stats", None),
     }
     result.update(_stats_ms(samples))
     return result
@@ -388,6 +391,8 @@ def _child_command(args, arch, mode, payload, size, dispatches, trial):
         str(args.repeats),
         "--batch",
         str(args.batch),
+        "--diagnostics",
+        args.diagnostics,
     ]
     if args.sample_gpu_memory:
         command.append("--sample-gpu-memory")
@@ -461,9 +466,12 @@ def _graph_paths(rows: list[dict]) -> tuple[list[str], list[str]]:
     paths = set()
     reasons = set()
     for row in rows:
-        for stats in row.get("graph_stats") or []:
-            path = stats.get("last_path")
-            reason = stats.get("last_fallback_reason")
+        report = row.get("graph_execution_report") or {}
+        for segment in report.get("segments") or []:
+            if segment.get("kind") != "cgraph":
+                continue
+            path = segment.get("last_path")
+            reason = segment.get("fallback_reason")
             if path:
                 paths.add(path)
             if reason and reason != "none":
@@ -548,6 +556,7 @@ def _aggregate(rows: list[dict]) -> list[dict[str, object]]:
                 "payload": payload,
                 "size": size,
                 "dispatches": dispatches,
+                "diagnostics": rows[0]["diagnostics"],
                 "skipped": False,
                 "summary_ok": all(paired_ok),
                 "direct_median_ms": direct_steady,
@@ -630,6 +639,9 @@ def main() -> None:
     parser.add_argument("--warmups", type=int, default=5)
     parser.add_argument("--repeats", type=int, default=20)
     parser.add_argument("--batch", type=int, default=10)
+    parser.add_argument(
+        "--diagnostics", choices=["off", "on"], default="off"
+    )
     parser.add_argument("--sample-gpu-memory", action="store_true")
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--matrix", action="store_true")

@@ -131,8 +131,11 @@ std::vector<SNodeTreeDependency> Program::snapshot_snode_tree_dependencies(
                 "Cannot compile a graph that references destroyed SNodeTree "
                 "id={}.",
                 tree_id);
+    TI_ASSERT(static_cast<std::size_t>(tree_id) < snode_trees_.size());
+    TI_ASSERT(snode_trees_[tree_id] != nullptr);
     dependencies.push_back(
-        {tree_id, snode_tree_generations_[tree_id]});
+        {tree_id, snode_tree_generations_[tree_id],
+         snode_tree_layout_fingerprint(*snode_trees_[tree_id])});
   }
   return dependencies;
 }
@@ -4883,6 +4886,10 @@ SNodeTree *Program::add_snode_tree(std::unique_ptr<SNode> root,
     } else {
       program_impl_->materialize_snode_tree(tree.get(), result_buffer);
     }
+    // Layout compilation has now finalized cell sizes, offsets and backend-
+    // neutral structural metadata. Cache the diagnostic fingerprint once;
+    // Graph dispatch collection remains O(number of referenced trees).
+    tree->refresh_layout_fingerprint();
   } catch (...) {
     free_snode_tree_ids_.push(id);
     throw;

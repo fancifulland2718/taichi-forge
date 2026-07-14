@@ -2398,7 +2398,8 @@ void export_lang(py::module &m) {
       .def("clear_runtime_state",
            &aot::CompiledGraphJITCache::clear_runtime_state)
       .def("_debug_graph_stats", [](aot::CompiledGraphJITCache &cache) {
-        const auto stats = cache.debug_graph_stats();
+        const auto snapshot = cache.debug_graph_stats();
+        const auto &stats = snapshot.stats;
         auto backend_name = [](aot::CompiledGraphBackend backend) {
           switch (backend) {
             case aot::CompiledGraphBackend::cuda:
@@ -2443,6 +2444,8 @@ void export_lang(py::module &m) {
               return "structural_unsupported";
             case aot::CompiledGraphFallbackReason::transient_driver_failure:
               return "transient_driver_failure";
+            case aot::CompiledGraphFallbackReason::fatal_driver_failure:
+              return "fatal_driver_failure";
             case aot::CompiledGraphFallbackReason::retry_backoff:
               return "retry_backoff";
             case aot::CompiledGraphFallbackReason::runtime_mode:
@@ -2479,11 +2482,19 @@ void export_lang(py::module &m) {
         result["zero_arg_eligible"] = stats.zero_arg_eligible;
         result["known_persistent_argument_bytes"] =
             stats.known_persistent_argument_bytes;
+        result["known_compiled_tasks"] =
+            snapshot.known_compiled_tasks;
+        result["known_compiled_dispatches"] =
+            snapshot.known_compiled_dispatches;
         result["last_driver_error"] = stats.last_driver_error;
         result["retry_backoff_remaining"] =
             stats.retry_backoff_remaining;
         result["consecutive_transient_failures"] =
             stats.consecutive_transient_failures;
+        result["diagnostics_previously_enabled"] =
+            snapshot.diagnostics_previously_enabled;
+        result["diagnostics_counters_complete"] =
+            snapshot.diagnostics_counters_complete;
         return result;
       });
 
@@ -2495,6 +2506,17 @@ void export_lang(py::module &m) {
             for (const auto &dependency : graph.snode_tree_dependencies) {
               dependencies.append(
                   py::make_tuple(dependency.tree_id, dependency.generation));
+            }
+            return dependencies;
+          })
+      .def_property_readonly(
+          "_snode_tree_dependency_info",
+          [](const aot::CompiledGraph &graph) {
+            py::list dependencies;
+            for (const auto &dependency : graph.snode_tree_dependencies) {
+              dependencies.append(py::make_tuple(
+                  dependency.tree_id, dependency.generation,
+                  dependency.layout_fingerprint));
             }
             return dependencies;
           })

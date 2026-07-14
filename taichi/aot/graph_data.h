@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <vector>
 #include <string>
@@ -185,6 +186,9 @@ struct CompiledGraphJITCachedKernel {
   std::string kernel_key;
   const CompiledKernelData *compiled_kernel_data{nullptr};
   int llvm_launch_id{-1};
+  // UINT32_MAX is the unknown sentinel. Keeping this beside llvm_launch_id
+  // consumes the struct's existing alignment padding on 64-bit builds.
+  std::uint32_t task_count{std::numeric_limits<std::uint32_t>::max()};
 };
 
 struct CompiledGraphRuntimeArgPlan {
@@ -242,6 +246,7 @@ enum class CompiledGraphFallbackReason : uint8_t {
   resource_unavailable,
   structural_unsupported,
   transient_driver_failure,
+  fatal_driver_failure,
   retry_backoff,
   runtime_mode,
   replay_slot_saturated,
@@ -275,6 +280,19 @@ struct CompiledGraphStats {
   uint32_t retry_backoff_remaining{0};
   uint32_t consecutive_transient_failures{0};
   bool zero_arg_eligible{false};
+};
+
+// Ephemeral report metadata. Keeping this wrapper separate prevents opt-in
+// diagnostics from enlarging every persistent CUDA/Vulkan stats object.
+struct CompiledGraphDebugSnapshot {
+  CompiledGraphStats stats;
+  uint64_t known_compiled_tasks{0};
+  uint32_t known_compiled_dispatches{0};
+  // False on the first snapshot request. Detailed counters are opt-in and
+  // cover subsequent executions; path/fallback enums and static metadata are
+  // still available immediately.
+  bool diagnostics_previously_enabled{false};
+  bool diagnostics_counters_complete{true};
 };
 
 // A transient capture error must not permanently disable an otherwise valid
@@ -365,7 +383,7 @@ struct CompiledGraphJITCache {
   // still alive. This is intentionally separate from the destructor: Python
   // GC may destroy a graph after ti.reset() has already finalized its Program.
   void clear_runtime_state();
-  CompiledGraphStats debug_graph_stats();
+  CompiledGraphDebugSnapshot debug_graph_stats();
 
   std::vector<CompiledGraphJITCachedKernel> kernels;
   std::vector<CompiledGraphDispatchRuntimePlan> runtime_arg_plans;
@@ -383,6 +401,10 @@ struct CompiledGraphJITCache {
   // backoff state, so ordinary graph replay does not pay for diagnostics until
   // an internal caller requests _graph_stats.
   bool graph_diagnostics_enabled{false};
+  // Once diagnostics are enabled after a GPU execution, lifetime counters
+  // can never be reconstructed. Keep that incompleteness sticky across later
+  // snapshots until runtime state is cleared.
+  bool graph_diagnostics_counters_complete{true};
   // GfxRuntime may retain replay state after this cache is destroyed. A
   // monotonic token, rather than the reusable cache-object address, prevents a
   // later cache at the same host address from inheriting that state.

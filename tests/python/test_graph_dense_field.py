@@ -2,6 +2,7 @@ import gc
 import threading
 import time
 import weakref
+from dataclasses import FrozenInstanceError
 
 import numpy as np
 import pytest
@@ -95,6 +96,9 @@ def test_vulkan_dense_field_single_dispatch_reports_insufficient_dispatches():
     builder = ti.graph.GraphBuilder()
     builder.dispatch(advance)
     graph = builder.compile()
+    initial = graph.execution_stats()
+    assert initial.execution_path == "not_run"
+    assert initial.counters_complete
     graph.run({})
     graph.run({})
     ti.sync()
@@ -109,8 +113,47 @@ def test_vulkan_dense_field_single_dispatch_reports_insufficient_dispatches():
     assert stats["last_path"] == "ordinary_fallback"
     assert stats["last_fallback_reason"] == "insufficient_dispatches"
     assert stats["known_persistent_argument_bytes"] == 0
+    report = graph.execution_stats()
+    assert report.execution_path == "ordinary_fallback"
+    assert report.fallback_reason == "insufficient_dispatches"
+    assert report.ordinary_fallback_segments == 1
+    assert report.backend_graph_segments == 0
     np.testing.assert_array_equal(
         values.to_numpy(), (np.arange(32, dtype=np.int32) + 1) * 2
+    )
+
+
+@test_utils.test(
+    arch=[ti.cuda, ti.vulkan], debug=True, offline_cache=False
+)
+def test_dense_field_graph_report_classifies_debug_mode_fallback():
+    values = ti.field(dtype=ti.i32, shape=32)
+
+    @ti.kernel
+    def advance():
+        for i in values:
+            values[i] += 1
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(advance)
+    builder.dispatch(advance)
+    graph = builder.compile()
+    assert graph.execution_stats().execution_path == "not_run"
+    graph.run({})
+    graph.run({})
+    ti.sync()
+
+    report = graph.execution_stats()
+    segment = report.segments[0]
+    assert report.execution_path == "ordinary_fallback"
+    assert report.fallback_reason == "debug_mode"
+    assert report.backend_graph_segments == 0
+    assert report.backend_replay_segments == 0
+    assert report.ordinary_fallback_segments == 1
+    assert segment.counters.attempts == 2
+    assert segment.counters.ordinary_fallbacks == 2
+    np.testing.assert_array_equal(
+        values.to_numpy(), np.full(32, 4, dtype=np.int32)
     )
 
 
@@ -145,6 +188,7 @@ def test_vulkan_dense_field_multi_tree_graph_records_and_replays():
         (first_tree.id, first_tree.generation),
         (second_tree.id, second_tree.generation),
     }
+    assert graph.execution_stats().execution_path == "not_run"
 
     # Populate all eight fixed replay slots, synchronize so slot zero is
     # reusable, then prove the ninth launch replays its recorded command list.
@@ -177,6 +221,188 @@ def test_vulkan_dense_field_multi_tree_graph_records_and_replays():
     )
     first_tree.destroy()
     second_tree.destroy()
+
+
+@test_utils.test(arch=_DENSE_GRAPH_ARCHS, offline_cache=False)
+def test_dense_field_graph_execution_report_explains_backend_path():
+    values = ti.field(dtype=ti.i32, shape=64)
+
+    @ti.kernel
+    def advance():
+        for i in values:
+            values[i] += i + 1
+
+    @ti.kernel
+    def scale():
+        for i in values:
+            values[i] *= 2
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(advance)
+    builder.dispatch(scale)
+    graph = builder.compile()
+
+    initial = graph.execution_stats()
+    assert isinstance(initial, ti.graph.GraphExecutionReport)
+    assert initial.schema_version == 1
+    assert initial.lifecycle_state == "ready"
+    assert initial.node_count == 1
+    assert initial.cgraph_segment_count == 1
+    assert initial.native_node_count == 0
+    assert initial.dispatch_count == 2
+    assert initial.compiled_task_count is None
+    assert initial.runtime_arg_count == 0
+    assert initial.static_dependency_count == 1
+    assert len(initial.static_layout_fingerprint) == 16
+    assert initial.execution_path == "not_run"
+    assert initial.fallback_reason == "none"
+    assert initial.counters_complete
+    assert initial.segments[0].runtime_arg_count == 0
+    with pytest.raises(FrozenInstanceError):
+        initial.arch = "mutated"
+
+    arch = ti.lang.impl.current_cfg().arch
+    run_count = 9 if arch == ti.vulkan else 2
+    for run_index in range(run_count):
+        if arch == ti.vulkan and run_index == 8:
+            ti.sync()
+        graph.run({})
+    ti.sync()
+
+    report = graph.execution_stats()
+    segment = report.segments[0]
+    assert report.compiled_task_count is not None
+    assert report.compiled_task_count >= 2
+    assert segment.compiled_task_count == report.compiled_task_count
+    assert segment.persistent_argument_bytes == 0
+    assert segment.counters_complete
+    if arch == ti.cuda:
+        assert report.execution_path == "cuda_exact_replay"
+        assert report.backend_graph_segments == 1
+        assert report.backend_replay_segments == 1
+        assert report.ordinary_fallback_segments == 0
+        assert segment.zero_arg_eligible
+        assert segment.counters.captures == 1
+        assert segment.counters.exact_replays == 1
+    elif arch == ti.vulkan:
+        assert report.execution_path == "vulkan_replay"
+        assert report.backend_graph_segments == 1
+        assert report.backend_replay_segments == 1
+        assert report.ordinary_fallback_segments == 0
+        assert segment.counters.records == 8
+        assert segment.counters.replays == 1
+    else:
+        assert report.execution_path == "ordinary"
+        assert report.backend_graph_segments == 0
+        assert report.backend_replay_segments == 0
+        assert report.ordinary_fallback_segments == 1
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_dense_field_graph_report_layout_fingerprint_is_structural():
+    @ti.kernel
+    def touch(bound: ti.template()):
+        for i in bound:
+            bound[i] += 1
+
+    trees = []
+    graphs = []
+    fingerprints = []
+    for shape in (32, 32, 48):
+        field = ti.field(dtype=ti.f32)
+        fields_builder = ti.FieldsBuilder()
+        fields_builder.dense(ti.i, shape).place(field)
+        tree = fields_builder.finalize()
+        graph_builder = ti.graph.GraphBuilder()
+        graph_builder.dispatch(touch, template_args={"bound": field})
+        graph = graph_builder.compile()
+        report = graph.execution_stats()
+        assert report.static_dependency_count == 1
+        assert len(report.static_layout_fingerprint) == 16
+        int(report.static_layout_fingerprint, 16)
+        trees.append(tree)
+        graphs.append(graph)
+        fingerprints.append(report.static_layout_fingerprint)
+
+    assert fingerprints[0] == fingerprints[1]
+    assert fingerprints[0] != fingerprints[2]
+    trees[0].destroy()
+
+    stale = graphs[0].execution_stats()
+    assert stale.lifecycle_state == "stale_field_dependency"
+    assert stale.execution_path == "stale_field_dependency"
+    assert stale.fallback_reason == "stale_field_dependency"
+    assert stale.segments[0].last_path == "unavailable"
+    trees[1].destroy()
+    trees[2].destroy()
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_dense_field_graph_report_marks_pre_opt_in_gpu_counters_incomplete():
+    values = ti.field(dtype=ti.i32, shape=32)
+
+    @ti.kernel
+    def advance():
+        for i in values:
+            values[i] += 1
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(advance)
+    builder.dispatch(advance)
+    graph = builder.compile()
+    graph.run({})
+    ti.sync()
+
+    first = graph.execution_stats()
+    assert first.execution_path in ("cuda_capture", "vulkan_record")
+    assert not first.counters_complete
+    assert first.segments[0].counters.attempts == 0
+
+    graph.run({})
+    ti.sync()
+    second = graph.execution_stats()
+    # Lifetime totals remain explicitly incomplete because the first launch
+    # happened before opt-in; later interval deltas are still valid.
+    assert not second.counters_complete
+    assert second.segments[0].counters.attempts == 1
+
+
+@test_utils.test(arch=ti.cpu, cpu_max_num_threads=4, offline_cache=False)
+def test_dense_field_graph_execution_report_multithread_reads_are_immutable():
+    values = ti.field(dtype=ti.i32, shape=64)
+
+    @ti.kernel
+    def advance():
+        for i in values:
+            values[i] += 1
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(advance)
+    graph = builder.compile()
+    graph.run({})
+
+    start = threading.Barrier(4)
+    reports = []
+    errors = []
+
+    def read_report():
+        try:
+            start.wait(timeout=10.0)
+            for _ in range(64):
+                reports.append(graph.execution_stats())
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=read_report) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20.0)
+    assert all(not thread.is_alive() for thread in threads)
+    assert not errors
+    assert len(reports) == 256
+    assert all(report.execution_path == "ordinary" for report in reports)
+    assert all(report.compiled_task_count is not None for report in reports)
 
 
 @test_utils.test(arch=ti.cpu, cpu_max_num_threads=4, offline_cache=False)

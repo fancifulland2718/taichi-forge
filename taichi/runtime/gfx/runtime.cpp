@@ -1517,6 +1517,7 @@ void GfxRuntime::GraphReplayState::reset() {
   slot_saturation_fallbacks = 0;
   last_path = GraphReplayLastPath::none;
   last_fallback_reason = GraphReplayFallbackReason::none;
+  diagnostics_enabled = false;
   retirement_requested = false;
 }
 
@@ -1558,14 +1559,15 @@ void GfxRuntime::retire_graph_replay(uint64_t replay_token) {
 }
 
 GraphReplayStats GfxRuntime::debug_graph_replay_stats(
-    uint64_t replay_token) const {
+    uint64_t replay_token) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
-  auto it = graph_replay_states_.find(replay_token);
-  if (it == graph_replay_states_.end()) {
-    return {};
-  }
-  const GraphReplayState &state = it->second;
-  return {
+  // A report can opt in before the first launch. Materialize only the tiny
+  // host state here (not replay slots or GPU resources) so the next launch
+  // observes diagnostics_enabled from its first attempt.
+  auto [it, inserted] = graph_replay_states_.try_emplace(replay_token);
+  (void)inserted;
+  GraphReplayState &state = it->second;
+  GraphReplayStats result{
       state.attempts,
       state.recorded,
       state.replayed,
@@ -1577,6 +1579,8 @@ GraphReplayStats GfxRuntime::debug_graph_replay_stats(
       state.last_path,
       state.last_fallback_reason,
   };
+  state.diagnostics_enabled = true;
+  return result;
 }
 
 bool GfxRuntime::try_launch_graph(
@@ -1588,12 +1592,16 @@ bool GfxRuntime::try_launch_graph(
   GraphReplayState &state = graph_replay_states_[replay_key];
   TI_ASSERT(!state.retirement_requested);
   GraphReplayExecutable &executable = state.executable;
-  ++state.attempts;
+  if (state.diagnostics_enabled) {
+    ++state.attempts;
+  }
   state.last_path = GraphReplayLastPath::none;
   state.last_fallback_reason = GraphReplayFallbackReason::none;
   if (dispatches.empty() || profiler_ || dispatch_cache_) {
-    ++state.fallbacks;
-    ++state.runtime_mode_fallbacks;
+    if (state.diagnostics_enabled) {
+      ++state.fallbacks;
+      ++state.runtime_mode_fallbacks;
+    }
     state.last_path = GraphReplayLastPath::fallback;
     state.last_fallback_reason = GraphReplayFallbackReason::runtime_mode;
     return false;
@@ -1617,9 +1625,11 @@ bool GfxRuntime::try_launch_graph(
 
   auto reject = [&](GraphReplayFallbackReason reason =
                         GraphReplayFallbackReason::structural_unsupported) {
-    ++state.fallbacks;
-    if (reason == GraphReplayFallbackReason::structural_unsupported) {
-      ++state.structural_fallbacks;
+    if (state.diagnostics_enabled) {
+      ++state.fallbacks;
+      if (reason == GraphReplayFallbackReason::structural_unsupported) {
+        ++state.structural_fallbacks;
+      }
     }
     state.last_path = GraphReplayLastPath::fallback;
     state.last_fallback_reason = reason;
@@ -1736,7 +1746,9 @@ bool GfxRuntime::try_launch_graph(
   GfxRuntime::GraphReplayExecutable::Slot *slot =
       executable.acquire_ready_slot();
   if (slot == nullptr) {
-    ++state.slot_saturation_fallbacks;
+    if (state.diagnostics_enabled) {
+      ++state.slot_saturation_fallbacks;
+    }
     return reject(GraphReplayFallbackReason::slot_saturated);
   }
 
@@ -1776,7 +1788,9 @@ bool GfxRuntime::try_launch_graph(
   if (slot->recorded && slot->cmdlist && slot->key == key) {
     slot->completion =
         device_->get_compute_stream()->submit(slot->cmdlist.get());
-    ++state.replayed;
+    if (state.diagnostics_enabled) {
+      ++state.replayed;
+    }
     state.last_path = GraphReplayLastPath::replay;
     return true;
   }
@@ -1908,7 +1922,9 @@ bool GfxRuntime::try_launch_graph(
   slot->cmdlist = std::move(recorded_cmdlist);
   slot->recorded = true;
   slot->completion = device_->get_compute_stream()->submit(slot->cmdlist.get());
-  ++state.recorded;
+  if (state.diagnostics_enabled) {
+    ++state.recorded;
+  }
   state.last_path = GraphReplayLastPath::record;
   return true;
 }

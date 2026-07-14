@@ -1,6 +1,7 @@
 import threading
 import warnings
-from typing import Any, Dict, List
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.aot.utils import produce_injected_args_for_graph
@@ -13,6 +14,331 @@ from taichi_forge.types.texture_type import FORMAT2TY_CH, TY_CH2FORMAT
 from taichi_forge.graph._native import compile_native_graph_node
 
 ArgKind = _ti_core.ArgKind
+
+
+@dataclass(frozen=True)
+class GraphExecutionCounters:
+    """Detailed backend counters captured after diagnostics are enabled."""
+
+    attempts: int
+    ordinary_fallbacks: int
+    capture_attempts: int
+    captures: int
+    exact_replays: int
+    patched_replays: int
+    recaptures: int
+    records: int
+    replays: int
+    structural_fallbacks: int
+    transient_failures: int
+    retry_backoff_fallbacks: int
+    replay_slot_saturation_fallbacks: int
+    capture_exceptions: int
+    zero_arg_captures: int
+
+
+@dataclass(frozen=True)
+class GraphExecutionSegmentReport:
+    """Read-only execution snapshot for one CGraph or native segment."""
+
+    node_index: int
+    kind: str
+    dispatch_count: int
+    compiled_task_count: Optional[int]
+    runtime_arg_count: int
+    static_dependency_count: int
+    static_layout_fingerprint: str
+    backend: str
+    last_path: str
+    fallback_reason: str
+    backend_graph_path: bool
+    backend_replay_path: bool
+    zero_arg_eligible: bool
+    persistent_argument_bytes: int
+    last_driver_error: int
+    retry_backoff_remaining: int
+    consecutive_transient_failures: int
+    counters_complete: bool
+    counters: GraphExecutionCounters
+
+
+@dataclass(frozen=True)
+class GraphExecutionReport:
+    """Stable, immutable snapshot returned by Graph.execution_stats().
+
+    Detailed backend counters are intentionally lazy. Calling
+    execution_stats() enables them for later executions; the first report
+    still exposes the latest path, fallback classification, task metadata and
+    resource footprint. counters_complete is false only when GPU executions
+    happened before this opt-in point.
+    """
+
+    schema_version: int
+    arch: str
+    lifecycle_state: str
+    node_count: int
+    cgraph_segment_count: int
+    native_node_count: int
+    dispatch_count: int
+    compiled_task_count: Optional[int]
+    runtime_arg_count: int
+    static_dependency_count: int
+    static_layout_fingerprint: str
+    execution_path: str
+    fallback_reason: str
+    backend_graph_segments: int
+    backend_replay_segments: int
+    ordinary_fallback_segments: int
+    counters_complete: bool
+    segments: Tuple[GraphExecutionSegmentReport, ...]
+
+
+_COUNTER_FIELDS = (
+    "attempts",
+    "ordinary_fallbacks",
+    "capture_attempts",
+    "captures",
+    "exact_replays",
+    "patched_replays",
+    "recaptures",
+    "records",
+    "replays",
+    "structural_fallbacks",
+    "transient_failures",
+    "retry_backoff_fallbacks",
+    "replay_slot_saturation_fallbacks",
+    "capture_exceptions",
+    "zero_arg_captures",
+)
+_BACKEND_GRAPH_PATHS = frozenset(
+    (
+        "cuda_capture",
+        "cuda_exact_replay",
+        "cuda_patched_replay",
+        "vulkan_record",
+        "vulkan_replay",
+    )
+)
+_BACKEND_REPLAY_PATHS = frozenset(
+    ("cuda_exact_replay", "cuda_patched_replay", "vulkan_replay")
+)
+
+
+def _combine_layout_fingerprints(fingerprints):
+    # FNV-1a over sorted fixed-width values. Tree identity and addresses are
+    # deliberately absent, so equal layouts produce equal report values.
+    value = 14695981039346656037
+    prime = 1099511628211
+    ordered = sorted(int(item) for item in fingerprints)
+    for item in (len(ordered), *ordered):
+        for shift in range(0, 64, 8):
+            value ^= (item >> shift) & 0xFF
+            value = (value * prime) & 0xFFFFFFFFFFFFFFFF
+    return f"{value:016x}"
+
+
+def _empty_backend_stats():
+    stats = {name: 0 for name in _COUNTER_FIELDS}
+    stats.update(
+        {
+            "backend": "none",
+            "last_path": "none",
+            "last_fallback_reason": "none",
+            "zero_arg_eligible": False,
+            "known_persistent_argument_bytes": 0,
+            "known_compiled_tasks": 0,
+            "known_compiled_dispatches": 0,
+            "last_driver_error": 0,
+            "retry_backoff_remaining": 0,
+            "consecutive_transient_failures": 0,
+            "diagnostics_previously_enabled": False,
+            "diagnostics_counters_complete": True,
+        }
+    )
+    return stats
+
+
+def _backend_name(arch):
+    if arch in ("x64", "arm64"):
+        return "cpu"
+    return arch
+
+
+def _execution_report(
+    definition, arch, lifecycle_state, instance_kind, backend_stats
+):
+    segments = []
+    stats_cursor = 0
+    for index, node in enumerate(definition["nodes"]):
+        kind = node["kind"]
+        if kind != "cgraph":
+            path = (
+                "unavailable"
+                if lifecycle_state != "ready"
+                else (
+                    "native_replay"
+                    if instance_kind in ("cuda_native_replay", "cpu_native_replay")
+                    else "native_dispatch"
+                )
+            )
+            segments.append(
+                GraphExecutionSegmentReport(
+                    node_index=index,
+                    kind=kind,
+                    dispatch_count=0,
+                    compiled_task_count=None,
+                    runtime_arg_count=0,
+                    static_dependency_count=0,
+                    static_layout_fingerprint=_combine_layout_fingerprints(()),
+                    backend=_backend_name(arch),
+                    last_path=path,
+                    fallback_reason=(
+                        lifecycle_state if lifecycle_state != "ready" else "none"
+                    ),
+                    backend_graph_path=False,
+                    backend_replay_path=False,
+                    zero_arg_eligible=False,
+                    persistent_argument_bytes=0,
+                    last_driver_error=0,
+                    retry_backoff_remaining=0,
+                    consecutive_transient_failures=0,
+                    counters_complete=True,
+                    counters=GraphExecutionCounters(
+                        **{name: 0 for name in _COUNTER_FIELDS}
+                    ),
+                )
+            )
+            continue
+
+        stats = (
+            backend_stats[stats_cursor]
+            if stats_cursor < len(backend_stats)
+            else _empty_backend_stats()
+        )
+        stats_cursor += 1
+        known_dispatches = int(stats.get("known_compiled_dispatches", 0))
+        tasks = (
+            int(stats.get("known_compiled_tasks", 0))
+            if known_dispatches == node["dispatch_count"]
+            else None
+        )
+        backend = stats.get("backend", "none")
+        if backend == "none":
+            backend = _backend_name(arch)
+        path = stats.get("last_path", "none")
+        if lifecycle_state != "ready":
+            path = "unavailable"
+        elif path == "none" and tasks is not None:
+            path = "ordinary"
+        elif path == "none":
+            path = "not_run"
+        fallback_reason = stats.get("last_fallback_reason", "none")
+        if lifecycle_state != "ready":
+            fallback_reason = lifecycle_state
+        gpu_backend = backend in ("cuda", "vulkan")
+        counters_complete = (
+            not gpu_backend
+            or bool(stats.get("diagnostics_counters_complete", True))
+        )
+        segments.append(
+            GraphExecutionSegmentReport(
+                node_index=index,
+                kind=kind,
+                dispatch_count=node["dispatch_count"],
+                compiled_task_count=tasks,
+                runtime_arg_count=node["runtime_arg_count"],
+                static_dependency_count=len(node["dependency_info"]),
+                static_layout_fingerprint=_combine_layout_fingerprints(
+                    dependency[2] for dependency in node["dependency_info"]
+                ),
+                backend=backend,
+                last_path=path,
+                fallback_reason=fallback_reason,
+                backend_graph_path=path in _BACKEND_GRAPH_PATHS,
+                backend_replay_path=path in _BACKEND_REPLAY_PATHS,
+                zero_arg_eligible=bool(
+                    stats.get("zero_arg_eligible", False)
+                ),
+                persistent_argument_bytes=int(
+                    stats.get("known_persistent_argument_bytes", 0)
+                ),
+                last_driver_error=int(stats.get("last_driver_error", 0)),
+                retry_backoff_remaining=int(
+                    stats.get("retry_backoff_remaining", 0)
+                ),
+                consecutive_transient_failures=int(
+                    stats.get("consecutive_transient_failures", 0)
+                ),
+                counters_complete=counters_complete,
+                counters=GraphExecutionCounters(
+                    **{
+                        name: int(stats.get(name, 0))
+                        for name in _COUNTER_FIELDS
+                    }
+                ),
+            )
+        )
+
+    cgraph_segments = tuple(s for s in segments if s.kind == "cgraph")
+    task_counts = tuple(s.compiled_task_count for s in cgraph_segments)
+    compiled_task_count = (
+        sum(task_counts)
+        if task_counts and all(value is not None for value in task_counts)
+        else None
+    )
+    path_segments = cgraph_segments or tuple(segments)
+    paths = {segment.last_path for segment in path_segments}
+    execution_path = (
+        lifecycle_state
+        if lifecycle_state != "ready"
+        else (next(iter(paths)) if len(paths) == 1 else "mixed")
+        if paths
+        else "not_run"
+    )
+    reasons = {
+        segment.fallback_reason
+        for segment in segments
+        if segment.fallback_reason != "none"
+    }
+    fallback_reason = (
+        "none"
+        if not reasons
+        else next(iter(reasons))
+        if len(reasons) == 1
+        else "mixed"
+    )
+    dependency_info = definition["dependency_info"]
+    return GraphExecutionReport(
+        schema_version=1,
+        arch=arch,
+        lifecycle_state=lifecycle_state,
+        node_count=len(segments),
+        cgraph_segment_count=len(cgraph_segments),
+        native_node_count=definition["native_count"],
+        dispatch_count=definition["dispatch_count"],
+        compiled_task_count=compiled_task_count,
+        runtime_arg_count=definition["runtime_arg_count"],
+        static_dependency_count=len(dependency_info),
+        static_layout_fingerprint=_combine_layout_fingerprints(
+            dependency[2] for dependency in dependency_info
+        ),
+        execution_path=execution_path,
+        fallback_reason=fallback_reason,
+        backend_graph_segments=sum(
+            segment.backend_graph_path for segment in cgraph_segments
+        ),
+        backend_replay_segments=sum(
+            segment.backend_replay_path for segment in cgraph_segments
+        ),
+        ordinary_fallback_segments=sum(
+            segment.last_path in ("ordinary", "ordinary_fallback")
+            for segment in cgraph_segments
+        ),
+        counters_complete=all(
+            segment.counters_complete for segment in segments
+        ),
+        segments=tuple(segments),
+    )
 
 
 class _NativeReplayExecutable:
@@ -130,11 +456,21 @@ class _CompiledCGraphNode:
         self.compiled_graph = compiled_graph
         self.dispatch_count = dispatch_count
         self.runtime_arg_names = frozenset(runtime_arg_names)
-        self.snode_tree_dependencies = frozenset(
-            tuple(dependency)
-            for dependency in getattr(
-                compiled_graph, "_snode_tree_dependencies", ()
+        dependency_info = getattr(
+            compiled_graph, "_snode_tree_dependency_info", None
+        )
+        if dependency_info is None:
+            dependency_info = (
+                (*dependency, 0)
+                for dependency in getattr(
+                    compiled_graph, "_snode_tree_dependencies", ()
+                )
             )
+        self.snode_tree_dependency_info = frozenset(
+            tuple(dependency) for dependency in dependency_info
+        )
+        self.snode_tree_dependencies = frozenset(
+            dependency[:2] for dependency in self.snode_tree_dependency_info
         )
         self._jit_cache = _ti_core.CompiledGraphJITCache()
 
@@ -161,6 +497,7 @@ class _CompiledNativeGraphNode:
     needs_runtime_args = False
     runtime_arg_names = frozenset()
     snode_tree_dependencies = frozenset()
+    snode_tree_dependency_info = frozenset()
 
     def __init__(self, executable):
         self.executable = executable
@@ -190,6 +527,9 @@ class _GraphSpec:
         )
         self.snode_tree_dependencies = frozenset().union(
             *(n.snode_tree_dependencies for n in self.nodes)
+        )
+        self.snode_tree_dependency_info = frozenset().union(
+            *(n.snode_tree_dependency_info for n in self.nodes)
         )
         self.repeat_count = 0
 
@@ -250,6 +590,34 @@ class _GraphSpec:
         if hasattr(self._aot_graph_builder, "item_count"):
             info["aot_item_count"] = self._aot_graph_builder.item_count
         return info
+
+    @property
+    def execution_definition(self):
+        nodes = []
+        for node in self.nodes:
+            nodes.append(
+                {
+                    "kind": (
+                        "cgraph"
+                        if isinstance(node, _CompiledCGraphNode)
+                        else "native"
+                    ),
+                    "dispatch_count": getattr(node, "dispatch_count", 0),
+                    "runtime_arg_count": len(node.runtime_arg_names),
+                    "dependency_info": tuple(
+                        sorted(node.snode_tree_dependency_info)
+                    ),
+                }
+            )
+        return {
+            "nodes": tuple(nodes),
+            "dispatch_count": self.dispatch_count,
+            "native_count": self.native_count,
+            "runtime_arg_count": len(self.runtime_arg_names),
+            "dependency_info": tuple(
+                sorted(self.snode_tree_dependency_info)
+            ),
+        }
 
 
 class _GraphExecutable:
@@ -641,6 +1009,8 @@ class Graph:
             node = _CompiledCGraphNode(compiled_graph, 0, ())
             self._spec = _GraphSpec([node], aot_compiled_graph=compiled_graph)
         self._contains_native_nodes_value = self._spec.native_count > 0
+        self._execution_definition = self._spec.execution_definition
+        self._execution_arch = _ti_core.arch_name(impl.current_cfg().arch)
         self._instances = {}
         self._instance = self._instance_for_current_runtime()
         self._runtime_valid = True
@@ -740,6 +1110,34 @@ class Graph:
         with self._lifecycle_lock:
             self._check_runtime_valid()
             return self._instance.debug_graph_stats
+
+    def execution_stats(self):
+        """Return an immutable execution-path and static-Field report.
+
+        The first call enables detailed backend counters for subsequent runs.
+        No per-run report objects or strings are created while diagnostics are
+        disabled.
+        """
+        with self._lifecycle_lock:
+            if not self._runtime_valid:
+                lifecycle_state = "runtime_invalid"
+                instance_kind = "unavailable"
+                backend_stats = ()
+            elif self._stale_snode_tree_dependencies:
+                lifecycle_state = "stale_field_dependency"
+                instance_kind = self._instance.debug_info["kind"]
+                backend_stats = ()
+            else:
+                lifecycle_state = "ready"
+                instance_kind = self._instance.debug_info["kind"]
+                backend_stats = self._instance.debug_graph_stats
+            return _execution_report(
+                self._execution_definition,
+                self._execution_arch,
+                lifecycle_state,
+                instance_kind,
+                backend_stats,
+            )
 
     @property
     def _compiled_graph(self):
@@ -948,4 +1346,12 @@ def Arg(*args, **kwargs):
     return _make_arg(kwargs)
 
 
-__all__ = ["GraphBuilder", "Graph", "Arg", "ArgKind"]
+__all__ = [
+    "GraphBuilder",
+    "Graph",
+    "GraphExecutionCounters",
+    "GraphExecutionSegmentReport",
+    "GraphExecutionReport",
+    "Arg",
+    "ArgKind",
+]

@@ -8,9 +8,16 @@
 
 namespace taichi::lang {
 
+class SNodeTree;
+
 struct SNodeTreeDependency {
   int tree_id{-1};
   std::uint64_t generation{0};
+  // Deterministic structural fingerprint of the materialized SNode layout.
+  // This is diagnostic metadata only: identity/lifetime comparisons continue
+  // to use (tree_id, generation), while reports can describe a layout without
+  // exposing an SNode or allocation address.
+  std::uint64_t layout_fingerprint{0};
 
   bool operator==(const SNodeTreeDependency &other) const {
     return tree_id == other.tree_id && generation == other.generation;
@@ -21,6 +28,10 @@ struct SNodeTreeDependency {
            (tree_id == other.tree_id && generation < other.generation);
   }
 };
+
+// Returns a process-independent fingerprint of the materialized tree layout.
+// Runtime contents and object addresses are deliberately excluded.
+std::uint64_t snode_tree_layout_fingerprint(const SNodeTree &tree);
 
 /**
  * Represents a tree of SNodes.
@@ -57,9 +68,16 @@ class SNodeTree {
     return root_.get();
   }
 
+  void refresh_layout_fingerprint();
+
+  std::uint64_t layout_fingerprint() const {
+    return layout_fingerprint_;
+  }
+
  private:
   int id_{0};
   std::uint64_t generation_{0};
+  std::uint64_t layout_fingerprint_{0};
   std::unique_ptr<SNode> root_{nullptr};
 
   void check_tree_validity(SNode &node);

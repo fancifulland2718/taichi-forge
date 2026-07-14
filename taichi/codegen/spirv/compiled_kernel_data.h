@@ -33,6 +33,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
   Arch arch() const override;
   std::unique_ptr<lang::CompiledKernelData> clone() const override;
   std::vector<int> snode_tree_ids() const override;
+  std::size_t task_count() const override;
 
   const InternalData &get_internal_data() const {
     return data_;

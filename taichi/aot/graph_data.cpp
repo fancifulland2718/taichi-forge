@@ -90,6 +90,11 @@ const CompiledKernelData *get_or_compile_cached_kernel(
       cached.compiled_kernel_data = compiled_kernel_data;
     }
   }
+  if (cached.task_count == std::numeric_limits<std::uint32_t>::max()) {
+    const std::size_t task_count = compiled_kernel_data->task_count();
+    TI_ASSERT(task_count < std::numeric_limits<std::uint32_t>::max());
+    cached.task_count = static_cast<std::uint32_t>(task_count);
+  }
   return compiled_kernel_data;
 }
 
@@ -901,14 +906,13 @@ void mark_cuda_graph_fallback(
     CompiledGraphCudaState &state,
     CompiledGraphFallbackReason reason,
     bool structural = false) {
-  if (!state.diagnostics_enabled) {
-    return;
-  }
-  ++state.stats.ordinary_fallbacks;
   state.stats.last_path = CompiledGraphExecutionPath::ordinary_fallback;
   state.stats.last_fallback_reason = reason;
-  if (structural) {
-    ++state.stats.structural_fallbacks;
+  if (state.diagnostics_enabled) {
+    ++state.stats.ordinary_fallbacks;
+    if (structural) {
+      ++state.stats.structural_fallbacks;
+    }
   }
 }
 
@@ -919,6 +923,10 @@ bool handle_cuda_graph_driver_failure(CompiledGraphCudaState &state,
     state.stats.last_driver_error = error;
   }
   if (is_cuda_context_fatal_error(error)) {
+    state.stats.last_path = CompiledGraphExecutionPath::none;
+    state.stats.last_fallback_reason =
+        CompiledGraphFallbackReason::fatal_driver_failure;
+    state.stats.last_driver_error = error;
     TI_ERROR("CUDA graph {} failed with a context-fatal error: {}", stage,
              get_cuda_error_message(error));
   }
@@ -975,10 +983,10 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   if (state->graph_exec &&
       state->signature == signature->entries) {
     CUDADriver::get_instance().graph_launch(state->graph_exec.get(), nullptr);
+    state->stats.last_path = CompiledGraphExecutionPath::cuda_exact_replay;
+    state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
     if (state->diagnostics_enabled) {
       ++state->stats.exact_replays;
-      state->stats.last_path = CompiledGraphExecutionPath::cuda_exact_replay;
-      state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
     }
     return true;
   }
@@ -1021,11 +1029,11 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
                                     std::move(host_arg_buffers));
       CUDADriver::get_instance().graph_launch(state->graph_exec.get(),
                                               nullptr);
+      state->stats.last_path =
+          CompiledGraphExecutionPath::cuda_patched_replay;
+      state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
       if (state->diagnostics_enabled) {
         ++state->stats.patched_replays;
-        state->stats.last_path =
-            CompiledGraphExecutionPath::cuda_patched_replay;
-        state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
       }
       return true;
     }
@@ -1130,13 +1138,13 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   }
   state->retry.record_success();
   state->has_captured_once = true;
+  state->stats.last_path = CompiledGraphExecutionPath::cuda_capture;
+  state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
   if (state->diagnostics_enabled) {
     ++state->stats.captures;
     if (state->stats.zero_arg_eligible) {
       ++state->stats.zero_arg_captures;
     }
-    state->stats.last_path = CompiledGraphExecutionPath::cuda_capture;
-    state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
   }
   driver.graph_launch(state->graph_exec.get(), nullptr);
   return true;
@@ -1156,6 +1164,7 @@ void CompiledGraphCudaStateDeleter::operator()(
 #if defined(TI_WITH_VULKAN)
 struct CompiledGraphVulkanState {
   std::unique_ptr<gfx::GraphReplayRegistration> registration;
+  bool diagnostics_enabled{false};
 };
 
 void CompiledGraphVulkanStateDeleter::operator()(
@@ -1179,6 +1188,14 @@ CompiledGraphVulkanState *get_vulkan_graph_state(
         runtime->register_graph_replay(cache.graph_replay_token());
     cache.vulkan_graph_state.reset(state.release());
   }
+  if (cache.graph_diagnostics_enabled &&
+      !cache.vulkan_graph_state->diagnostics_enabled) {
+    // A report may be requested before the first Vulkan run, before a runtime
+    // replay state exists. Touching the registration here enables detailed
+    // counters before this very launch instead of dropping the first sample.
+    cache.vulkan_graph_state->registration->debug_stats();
+    cache.vulkan_graph_state->diagnostics_enabled = true;
+  }
   return cache.vulkan_graph_state.get();
 }
 
@@ -1187,6 +1204,14 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
                           const std::unordered_map<std::string, IValue> &args,
                           CompiledGraphJITCache &cache) {
   if (compile_config.debug) {
+    auto &stats = cache.vulkan_inline_stats;
+    stats.backend = CompiledGraphBackend::vulkan;
+    stats.last_path = CompiledGraphExecutionPath::ordinary_fallback;
+    stats.last_fallback_reason = CompiledGraphFallbackReason::debug_mode;
+    if (cache.graph_diagnostics_enabled) {
+      ++stats.attempts;
+      ++stats.ordinary_fallbacks;
+    }
     return false;
   }
   if (graph.dispatches.size() <= 1) {
@@ -1195,8 +1220,10 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
     stats.last_path = CompiledGraphExecutionPath::ordinary_fallback;
     stats.last_fallback_reason =
         CompiledGraphFallbackReason::insufficient_dispatches;
-    ++stats.attempts;
-    ++stats.ordinary_fallbacks;
+    if (cache.graph_diagnostics_enabled) {
+      ++stats.attempts;
+      ++stats.ordinary_fallbacks;
+    }
     return false;
   }
   if (cache.kernels.size() != graph.dispatches.size()) {
@@ -1254,27 +1281,55 @@ void CompiledGraphVulkanStateDeleter::operator()(
 }
 #endif
 
-CompiledGraphStats CompiledGraphJITCache::debug_graph_stats() {
+CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
   std::lock_guard<std::mutex> lock(run_mutex);
+  const bool diagnostics_previously_enabled = graph_diagnostics_enabled;
   graph_diagnostics_enabled = true;
+  auto finalize = [&](CompiledGraphStats result) {
+    CompiledGraphDebugSnapshot snapshot;
+    snapshot.stats = result;
+    snapshot.diagnostics_previously_enabled =
+        diagnostics_previously_enabled;
+    snapshot.diagnostics_counters_complete =
+        graph_diagnostics_counters_complete;
+    for (const auto &kernel : kernels) {
+      if (kernel.task_count ==
+          std::numeric_limits<std::uint32_t>::max()) {
+        continue;
+      }
+      ++snapshot.known_compiled_dispatches;
+      snapshot.known_compiled_tasks += kernel.task_count;
+    }
+    return snapshot;
+  };
 #if defined(TI_WITH_CUDA)
   if (cuda_graph_state) {
     cuda_graph_state->diagnostics_enabled = true;
     cuda_graph_state->stats.backend = CompiledGraphBackend::cuda;
     CompiledGraphStats result = cuda_graph_state->stats;
+    if (!diagnostics_previously_enabled &&
+        (result.last_path != CompiledGraphExecutionPath::none ||
+         result.last_fallback_reason != CompiledGraphFallbackReason::none)) {
+      graph_diagnostics_counters_complete = false;
+    }
     result.known_persistent_argument_bytes =
         cuda_graph_state->known_persistent_argument_bytes();
     result.retry_backoff_remaining =
         cuda_graph_state->retry.retry_backoff_remaining();
     result.consecutive_transient_failures =
         cuda_graph_state->retry.consecutive_transient_failures();
-    return result;
+    return finalize(result);
   }
 #endif
 #if defined(TI_WITH_VULKAN)
   if (vulkan_graph_state && vulkan_graph_state->registration) {
     const auto source = vulkan_graph_state->registration->debug_stats();
+    vulkan_graph_state->diagnostics_enabled = true;
     CompiledGraphStats result;
+    if (!diagnostics_previously_enabled &&
+        source.last_path != gfx::GraphReplayLastPath::none) {
+      graph_diagnostics_counters_complete = false;
+    }
     result.backend = CompiledGraphBackend::vulkan;
     result.attempts = source.attempts;
     result.ordinary_fallbacks = source.fallbacks;
@@ -1318,13 +1373,22 @@ CompiledGraphStats CompiledGraphJITCache::debug_graph_stats() {
       case gfx::GraphReplayFallbackReason::none:
         break;
     }
-    return result;
+    return finalize(result);
   }
 #endif
   if (vulkan_inline_stats.attempts > 0) {
-    return vulkan_inline_stats;
+    if (!diagnostics_previously_enabled) {
+      graph_diagnostics_counters_complete = false;
+    }
+    return finalize(vulkan_inline_stats);
   }
-  return {};
+  if (vulkan_inline_stats.backend != CompiledGraphBackend::none) {
+    if (!diagnostics_previously_enabled) {
+      graph_diagnostics_counters_complete = false;
+    }
+    return finalize(vulkan_inline_stats);
+  }
+  return finalize({});
 }
 
 void CompiledGraphJITCache::clear_runtime_state() {
@@ -1338,6 +1402,7 @@ void CompiledGraphJITCache::clear_runtime_state() {
   cuda_graph_state.reset();
   vulkan_graph_state.reset();
   vulkan_inline_stats = {};
+  graph_diagnostics_counters_complete = true;
   kernels.clear();
   runtime_arg_plans.clear();
   validated_snode_tree_program = nullptr;

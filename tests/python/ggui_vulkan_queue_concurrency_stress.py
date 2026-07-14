@@ -28,6 +28,7 @@ import json
 import math
 import threading
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -110,6 +111,9 @@ def main() -> None:
         for _ in range(args.producer_dispatches):
             graph_builder.dispatch(producer_step)
         producer_graph = graph_builder.compile()
+        # Enable detailed backend counters before the worker starts. This call
+        # is outside the measured interval and replaces private stats access.
+        producer_graph.execution_stats()
         producer_operation = lambda: producer_graph.run({})
 
     stop = threading.Event()
@@ -195,7 +199,9 @@ def main() -> None:
             args.producer_dispatches if producer_graph is not None else 1
         ),
         "producer_graph_stats": (
-            producer_graph._graph_stats if producer_graph is not None else None
+            asdict(producer_graph.execution_stats())
+            if producer_graph is not None
+            else None
         ),
         "image_source": image_source,
         "arch": args.arch,

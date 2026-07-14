@@ -31,6 +31,10 @@ std::vector<int> CompiledKernelData::snode_tree_ids() const {
   return data_.used_snode_tree_ids;
 }
 
+std::size_t CompiledKernelData::task_count() const {
+  return data_.compiled_data.tasks.size();
+}
+
 CompiledKernelData::Err CompiledKernelData::check() const {
   const auto &compiled_data = data_.compiled_data;
   const auto &tasks = compiled_data.tasks;

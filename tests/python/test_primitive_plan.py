@@ -842,10 +842,18 @@ def test_graph_field_only_segment_native_sort_and_runtime_segment():
         frozenset(),
         frozenset({"scale", "keys", "values", "output"}),
     ]
-
-    if ti.lang.impl.current_cfg().arch == ti.cuda:
-        # Enable lazy CUDA counters before the Field-only segment is captured.
-        assert graph._graph_stats[0]["attempts"] == 0
+    initial_report = graph.execution_stats()
+    assert initial_report.node_count == 3
+    assert initial_report.cgraph_segment_count == 2
+    assert initial_report.native_node_count == 1
+    assert initial_report.dispatch_count == 3
+    assert initial_report.execution_path == "not_run"
+    assert [
+        segment.runtime_arg_count for segment in initial_report.segments
+    ] == [0, 0, 4]
+    assert [
+        segment.dispatch_count for segment in initial_report.segments
+    ] == [2, 0, 1]
 
     order = np.argsort(base_keys, kind="stable")
     for initial_state, scale in ((0, 3), (7, -2)):
@@ -869,15 +877,20 @@ def test_graph_field_only_segment_native_sort_and_runtime_segment():
         assert np.array_equal(keys.to_numpy(), base_keys[order])
         assert np.array_equal(values.to_numpy(), base_values[order])
 
-    graph_stats = graph._graph_stats
-    for stats in graph_stats:
-        assert stats["last_fallback_reason"] != "unsupported_arguments"
+    execution_report = graph.execution_stats()
+    cgraph_segments = [
+        segment
+        for segment in execution_report.segments
+        if segment.kind == "cgraph"
+    ]
+    for segment in cgraph_segments:
+        assert segment.fallback_reason != "unsupported_arguments"
     if ti.lang.impl.current_cfg().arch == ti.cuda:
-        field_segment = graph_stats[0]
-        assert field_segment["zero_arg_eligible"]
-        assert field_segment["captures"] == 1
-        assert field_segment["exact_replays"] == 1
-        assert field_segment["known_persistent_argument_bytes"] == 0
+        field_segment = cgraph_segments[0]
+        assert field_segment.zero_arg_eligible
+        assert field_segment.counters.captures == 1
+        assert field_segment.counters.exact_replays == 1
+        assert field_segment.persistent_argument_bytes == 0
 
 
 @test_utils.test(arch=ti.cuda)
@@ -896,6 +909,12 @@ def test_graph_private_native_sequence_uses_cuda_native_replay_backend():
 
     info = graph._instance_debug_info
     assert info["kind"] == "cuda_native_replay"
+    report = graph.execution_stats()
+    assert report.execution_path == "native_replay"
+    assert report.node_count == 1
+    assert report.cgraph_segment_count == 0
+    assert report.native_node_count == 1
+    assert report.segments[0].backend == "cuda"
 
     graph._prewarm()
     assert seq.direct_plan_count == 1
@@ -923,6 +942,12 @@ def test_graph_private_native_sequence_uses_cpu_native_replay_backend():
 
     info = graph._instance_debug_info
     assert info["kind"] == "cpu_native_replay"
+    report = graph.execution_stats()
+    assert report.execution_path == "native_replay"
+    assert report.node_count == 1
+    assert report.cgraph_segment_count == 0
+    assert report.native_node_count == 1
+    assert report.segments[0].backend == "cpu"
 
     graph._prewarm()
     assert seq.direct_plan_count == 1

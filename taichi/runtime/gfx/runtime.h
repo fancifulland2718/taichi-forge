@@ -329,6 +329,7 @@ class TI_DLL_EXPORT GfxRuntime {
     GraphReplayLastPath last_path{GraphReplayLastPath::none};
     GraphReplayFallbackReason last_fallback_reason{
         GraphReplayFallbackReason::none};
+    bool diagnostics_enabled{false};
     bool retirement_requested{false};
 
     void reset();
@@ -436,7 +437,7 @@ class TI_DLL_EXPORT GfxRuntime {
   void check_hash_overflow_counters();
   void synchronize_impl(bool check_hash_overflow);
   void retire_graph_replay(uint64_t replay_token);
-  GraphReplayStats debug_graph_replay_stats(uint64_t replay_token) const;
+  GraphReplayStats debug_graph_replay_stats(uint64_t replay_token);
   void collect_ready_graph_replays();
 
   struct HashOverflowWatch {

@@ -27,6 +27,10 @@ std::vector<int> CompiledKernelData::snode_tree_ids() const {
   return data_.metadata.used_snode_tree_ids;
 }
 
+std::size_t CompiledKernelData::task_count() const {
+  return data_.metadata.kernel_attribs.tasks_attribs.size();
+}
+
 CompiledKernelData::Err CompiledKernelData::load_impl(
     const CompiledKernelDataFile &file) {
   arch_ = file.arch();

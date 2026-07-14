@@ -620,6 +620,10 @@ def test_cuda_cgraph_cache_survives_reset_then_delete():
 
     ti.reset()
     assert graph._spec is None
+    report = graph.execution_stats()
+    assert report.lifecycle_state == "runtime_invalid"
+    assert report.execution_path == "runtime_invalid"
+    assert report.fallback_reason == "runtime_invalid"
     del graph
     del arr
     gc.collect()
@@ -939,6 +943,9 @@ def test_vulkan_cgraph_replay_slot_saturation_telemetry_is_monotonic():
     fallback_before = ti_core.query_int64(
         "vulkan_graph_replay_slot_saturation_fallbacks"
     )
+    # Detailed per-Graph counters are opt-in; global saturation telemetry
+    # remains always-on because it is a bounded safety signal.
+    assert graph.execution_stats().execution_path == "not_run"
     launch_count = 12
     for _ in range(launch_count):
         graph.run({"values": values})
