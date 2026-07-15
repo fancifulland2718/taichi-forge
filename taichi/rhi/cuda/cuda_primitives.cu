@@ -1,4 +1,4 @@
-#include "taichi/rhi/cuda/cuda_sort.h"
+#include "taichi/rhi/cuda/cuda_primitives.h"
 
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>

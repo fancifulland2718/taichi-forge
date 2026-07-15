@@ -30,7 +30,7 @@
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
-#include "taichi/rhi/cuda/cuda_sort.h"
+#include "taichi/rhi/cuda/cuda_primitives.h"
 #endif
 
 #ifdef TI_WITH_LLVM

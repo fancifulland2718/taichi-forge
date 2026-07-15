@@ -63,8 +63,8 @@ Taichi Forge 引入原生算法的初衷是弥补部分 Taichi kernel 在性能�
 
 - `python/taichi_forge/algorithms/_algorithms.py` 约 1.6 万行，混合公开包装、验证、provider 选择、plan/cache 和算法实现。
 - `python/taichi_forge/algorithms/_kernels.py` 同时承载多个互不相干的 kernel 家族。
-- `taichi/rhi/cuda/cuda_sort.{h,cpp,cu}` 名称仍是 sort，实际已包含大部分 CUDA 原生 primitive。
-- `taichi/program/vulkan_sort.cpp` 约 1.6 万行，包含 Vulkan 多类算法、管线、缓存和工作区逻辑。
+- `taichi/rhi/cuda/cuda_primitives.{h,cpp,cu}`（N1 前名为 `cuda_sort.*`）包含大部分 CUDA 原生 primitive，仍需继续按 runtime/reference 职责拆分。
+- `taichi/program/vulkan_primitives.cpp`（N1 前名为 `vulkan_sort.cpp`）约 1.6 万行，包含 Vulkan 多类算法、管线、缓存和工作区逻辑。
 - `taichi/program/program.cpp` 约 1.7 万行，CPU primitive 与 Program 通用职责耦合。
 
 这些问题会增加修改冲突、审查成本和缓存/所有权误用风险。拆分必须保持 ABI/API 和 kernel 源码迁移边界明确，同时注意 Python kernel 文件位置变化可能使离线 cache 首次失效。
@@ -73,13 +73,13 @@ Taichi Forge 引入原生算法的初衷是弥补部分 Taichi kernel 在性能�
 
 产品代码中的主要 Toolkit 依赖不是单一来源：
 
-1. `cuda_sort.cu` 直接包含 CUB 与 `cuda_runtime.h`，使用 CUB DeviceRadixSort、Scan、Select、Reduce、SegmentedReduce 等，并调用 CUDART 内存和同步 API。
+1. `cuda_primitives.cu` 直接包含 CUB 与 `cuda_runtime.h`，使用 CUB DeviceRadixSort、Scan、Select、Reduce、SegmentedReduce 等，并调用 CUDART 内存和同步 API。
 2. CUPTI/NVPerf profiler 使用 Toolkit 头文件和库，但它与原生算法运行没有必要的依赖关系。
 3. CUDA Driver API 通过动态加载使用，属于基础 CUDA 后端能力，不应与 CUDART/CUB 混为一谈。
 4. cuBLAS/cuSPARSE/cuSOLVER 等可选库也由动态能力决定，不应成为常用原生算法的强制依赖。
 5. 当前发布脚本和校验逻辑仍以“恰好携带一个 CUDART”为前提，最终迁移时必须同步调整。
 
-当前 `cuda_sort.cu` 已不再依赖高版本 `<cuda/iterator>`，但这只消除了一个头文件版本门槛，不能消除 CUB/CUDART 的运行依赖。构建时能用较新 Toolkit 编译并不自动保证旧驱动可运行；发布物中的二进制依赖、PTX/机器码版本以及实际加载路径都必须分别验证。
+当前 `cuda_primitives.cu` 已不再依赖高版本 `<cuda/iterator>`，但这只消除了一个头文件版本门槛，不能消除 CUB/CUDART 的运行依赖。构建时能用较新 Toolkit 编译并不自动保证旧驱动可运行；发布物中的二进制依赖、PTX/机器码版本以及实际加载路径都必须分别验证。
 
 ### 2.4 缓存、并发和内存风险
 
@@ -193,7 +193,7 @@ Program 公共方法保留为薄转发层，避免 ABI 和调用方大范围变�
 
 适用：fill/copy/transform/gather/scatter、部分检查。
 
-- 优先复用现有 Driver API 嵌入 PTX，并将其从 `cuda_sort.cpp` 移入独立 linear provider。
+- 优先复用现有 Driver API 嵌入 PTX，并将其从 `cuda_primitives.cpp` 移入独立 linear provider。
 - 对复合 dtype、field member、matrix field 等不能由简单 PTX 覆盖的情况，使用 Forge optimized Taichi kernel。
 - 合并连续的检查或 transform，减少启动次数，但不得改变异常发生在写入前的保证。
 - 为重叠输入/输出定义清晰规则；不能安全原地执行时在 launch 前拒绝，或显式使用工作区。

@@ -8,7 +8,7 @@ target_sources(${CUDA_RHI}
     cuda_context.cpp
     cuda_driver.cpp
     cuda_profiler.cpp
-    cuda_sort.cpp
+    cuda_primitives.cpp
     cupti_toolkit.cpp
   )
 
@@ -28,9 +28,9 @@ if (TI_WITH_CUDA_TOOLKIT)
 endif()
 
 if (TI_WITH_CUDA_TOOLKIT)
-  target_sources(${CUDA_RHI} PRIVATE cuda_sort.cu)
+  target_sources(${CUDA_RHI} PRIVATE cuda_primitives.cu)
   target_include_directories(${CUDA_RHI} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
-  set_source_files_properties(cuda_sort.cpp
+  set_source_files_properties(cuda_primitives.cpp
     PROPERTIES COMPILE_DEFINITIONS TI_WITH_CUDA_TOOLKIT)
   get_filename_component(TI_CUDA_TOOLKIT_ROOT
     "${CUDAToolkit_INCLUDE_DIRS}/.." ABSOLUTE)

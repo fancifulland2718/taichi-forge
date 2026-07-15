@@ -1,4 +1,4 @@
-#include "taichi/rhi/cuda/cuda_sort.h"
+#include "taichi/rhi/cuda/cuda_primitives.h"
 
 #include "taichi/common/core.h"
 #include "taichi/common/dynamic_loader.h"
