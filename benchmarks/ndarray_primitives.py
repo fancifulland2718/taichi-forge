@@ -87,7 +87,10 @@ def _available(arch_name, primitive, method=None):
             return hasattr(prog, "cpu_histogram_available") and prog.cpu_histogram_available()
     if arch_name == "cuda":
         if primitive == "transform":
-            return hasattr(prog, "cuda_toolkit_transform_available") and prog.cuda_toolkit_transform_available()
+            return (
+                hasattr(prog, "cuda_device_transform_available")
+                and prog.cuda_device_transform_available()
+            )
         if primitive == "sort":
             return (
                 hasattr(prog, "cuda_cub_radix_sort_available")

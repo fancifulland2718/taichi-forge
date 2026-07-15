@@ -1152,6 +1152,79 @@ class TI_DLL_EXPORT Program {
 
   std::size_t cuda_cub_reduce_workspace_bytes() const;
 
+  bool cuda_device_check_count_available() const;
+
+  std::size_t cuda_device_check_count_ndarray(Ndarray *values,
+                                           Ndarray *output,
+                                           int value_type,
+                                           int check_op,
+                                           int lower,
+                                           int upper);
+
+  std::size_t cuda_device_check_count_strided_ndarray(Ndarray *values,
+                                                   Ndarray *output,
+                                                   int value_type,
+                                                   std::size_t offset,
+                                                   std::size_t stride,
+                                                   int check_op,
+                                                   int lower,
+                                                   int upper);
+
+  std::size_t cuda_device_check_count_dense_field(SNode *values,
+                                               Ndarray *output,
+                                               int value_type,
+                                               std::size_t n,
+                                               int check_op,
+                                               int lower,
+                                               int upper);
+
+  void cuda_device_check_count_clear_workspace();
+
+  std::size_t cuda_device_check_count_workspace_bytes() const;
+
+  bool cuda_device_metric_reduce_available() const;
+
+  bool cuda_device_metric_reduce_value_type_available(int value_type) const;
+
+  std::size_t cuda_device_metric_reduce_ndarray(Ndarray *values,
+                                             Ndarray *other,
+                                             Ndarray *output,
+                                             int value_type,
+                                             int metric_op);
+
+  std::size_t cuda_device_metric_reduce_strided_ndarray(
+      Ndarray *values,
+      Ndarray *other,
+      Ndarray *output,
+      int value_type,
+      std::size_t values_offset,
+      std::size_t values_stride,
+      std::size_t other_offset,
+      std::size_t other_stride,
+      int metric_op);
+
+  std::size_t cuda_device_metric_reduce_dense_field(SNode *values,
+                                                 SNode *other,
+                                                 Ndarray *output,
+                                                 int value_type,
+                                                 std::size_t n,
+                                                 int metric_op);
+
+  std::size_t cuda_device_metric_reduce_dense_field_strided_ndarray(
+      SNode *field,
+      Ndarray *array,
+      Ndarray *output,
+      int value_type,
+      std::size_t n,
+      std::size_t array_offset,
+      std::size_t array_stride,
+      bool field_is_values,
+      int metric_op);
+
+  void cuda_device_metric_reduce_clear_workspace();
+
+  std::size_t cuda_device_metric_reduce_workspace_bytes() const;
+
   bool cuda_cub_check_count_available() const;
 
   std::size_t cuda_cub_check_count_ndarray(Ndarray *values,

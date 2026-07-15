@@ -119,12 +119,12 @@ def _native_transform_method_for_current_arch():
     pytest.skip("native transform is unavailable on this arch.")
 
 
-def _run_dense_matrix_field_transform_case():
+def _run_dense_matrix_field_transform_case(dtype=ti.i32, np_dtype=np.int32):
     n = 128
     method, _ = _native_transform_method_for_current_arch()
-    src = ti.Vector.field(2, ti.i32, shape=n)
-    dst = ti.Vector.field(2, ti.i32, shape=n)
-    values = np.arange(n * 2, dtype=np.int32).reshape(n, 2) - 17
+    src = ti.Vector.field(2, dtype, shape=n)
+    dst = ti.Vector.field(2, dtype, shape=n)
+    values = np.arange(n * 2, dtype=np_dtype).reshape(n, 2) - np_dtype(17)
     src.from_numpy(values)
     dst.fill(0)
     workspace = ti.algorithms.TransformWorkspace(max_items=n)
@@ -254,11 +254,6 @@ def test_experimental_transform_cuda_device_ndarray_extended_dtypes():
         pytest.skip("CUDA device transform is unavailable in this runtime.")
 
     for dtype in _TRANSFORM_DTYPES:
-        if dtype in (ti.u64, ti.i64, ti.f64) and not (
-            hasattr(prog, "cuda_toolkit_transform_available")
-            and prog.cuda_toolkit_transform_available()
-        ):
-            continue
         data, scale, bias, expected = _transform_case(dtype, n)
         src = ti.ndarray(dtype, shape=n)
         dst = ti.ndarray(dtype, shape=n)
@@ -277,10 +272,10 @@ def test_experimental_transform_cuda_device_struct_member_view():
     n = 4096
     prog = impl.get_runtime().prog
     if not (
-        hasattr(prog, "cuda_toolkit_transform_available")
-        and prog.cuda_toolkit_transform_available()
+        hasattr(prog, "cuda_device_transform_available")
+        and prog.cuda_device_transform_available()
     ):
-        pytest.skip("CUDA toolkit transform is unavailable in this runtime.")
+        pytest.skip("CUDA driver transform is unavailable in this runtime.")
 
     for dtype in _TRANSFORM_DTYPES:
         workspace = ti.algorithms.TransformWorkspace(max_items=n)
@@ -301,11 +296,6 @@ def test_experimental_transform_cuda_device_dense_field_dtypes():
         pytest.skip("CUDA device transform is unavailable in this runtime.")
 
     for dtype in _TRANSFORM_DTYPES:
-        if dtype in (ti.u64, ti.i64, ti.f64) and not (
-            hasattr(prog, "cuda_toolkit_transform_available")
-            and prog.cuda_toolkit_transform_available()
-        ):
-            continue
         workspace = ti.algorithms.TransformWorkspace(max_items=n)
         _run_dense_field_transform_case(
             dtype, n, method="cuda_device", workspace=workspace
@@ -342,10 +332,10 @@ def test_experimental_transform_cuda_device_struct_tensor_member_view():
     n = 4096
     prog = impl.get_runtime().prog
     if not (
-        hasattr(prog, "cuda_toolkit_transform_available")
-        and prog.cuda_toolkit_transform_available()
+        hasattr(prog, "cuda_device_transform_available")
+        and prog.cuda_device_transform_available()
     ):
-        pytest.skip("CUDA toolkit transform is unavailable in this runtime.")
+        pytest.skip("CUDA driver transform is unavailable in this runtime.")
 
     for dtype in (ti.i32, ti.f32):
         workspace = ti.algorithms.TransformWorkspace(max_items=n)
@@ -378,13 +368,9 @@ def test_experimental_transform_cuda_device_nd_shape():
     assert np.array_equal(dst.to_numpy(), expected.reshape(shape))
     assert workspace.workspace_bytes_peak == 0
 
-    if (
-        hasattr(prog, "cuda_toolkit_transform_available")
-        and prog.cuda_toolkit_transform_available()
-    ):
-        _run_struct_tensor_member_transform_case(
-            ti.i32, shape, method="cuda_device", workspace=workspace
-        )
+    _run_struct_tensor_member_transform_case(
+        ti.i32, shape, method="cuda_device", workspace=workspace
+    )
 
 
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
@@ -881,6 +867,11 @@ def test_experimental_transform_cpu_native_struct_tensor_member_view():
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_transform_native_dense_matrix_field_components():
     _run_dense_matrix_field_transform_case()
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_transform_cuda_device_dense_matrix_field_f64():
+    _run_dense_matrix_field_transform_case(ti.f64, np.float64)
 
 
 @test_utils.test(arch=[ti.cpu])

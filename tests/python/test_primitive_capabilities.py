@@ -70,8 +70,22 @@ def test_static_primitive_capability_catalog_is_complete_and_immutable():
     )
     assert (
         methods_by_family["transform"]["cuda_device"].dependency_class
-        == "cuda_driver_or_toolkit_runtime"
+        == "cuda_driver"
     )
+    for family in ("gather", "scatter"):
+        assert (
+            methods_by_family[family]["cuda_device"].dependency_class
+            == "cuda_driver"
+        )
+    for family in ("check", "metric"):
+        assert (
+            methods_by_family[family]["cuda_device"].dependency_class
+            == "cuda_driver"
+        )
+        assert (
+            methods_by_family[family]["cuda_cub"].dependency_class
+            == "cuda_toolkit_runtime"
+        )
     assert (
         methods_by_family["bucket_builder"]["cuda_device"].dependency_class
         == "cuda_toolkit_runtime"

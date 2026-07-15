@@ -654,6 +654,42 @@ def test_experimental_indexed_copy_cuda_device_invalid_indices_are_ignored():
     _run_invalid_index_ndarray("cuda_device", scatter=True)
 
 
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_indexed_copy_cuda_device_invalid_wide_payload_is_atomic():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cuda_device_indexed_copy_payload_available")
+        and prog.cuda_device_indexed_copy_payload_available(12)
+    ):
+        pytest.skip("CUDA driver indexed-copy wide payload is unavailable.")
+
+    src = ti.Vector.ndarray(3, ti.i32, shape=4)
+    indices = ti.ndarray(ti.i32, shape=4)
+    dst = ti.Vector.ndarray(3, ti.i32, shape=4)
+    data = np.arange(12, dtype=np.int32).reshape(4, 3) + 10
+    index_data = np.array([3, -1, 99, 0], dtype=np.int32)
+    src.from_numpy(data)
+    indices.from_numpy(index_data)
+
+    dst.fill(-7)
+    ti.algorithms.experimental_gather(
+        src, indices, dst, method="cuda_device"
+    )
+    expected_gather = np.stack(
+        (data[3], np.zeros(3, np.int32), np.zeros(3, np.int32), data[0])
+    )
+    assert np.array_equal(dst.to_numpy(), expected_gather)
+
+    dst.fill(-7)
+    ti.algorithms.experimental_scatter(
+        src, indices, dst, method="cuda_device"
+    )
+    expected_scatter = np.full((4, 3), -7, dtype=np.int32)
+    expected_scatter[0] = data[3]
+    expected_scatter[3] = data[0]
+    assert np.array_equal(dst.to_numpy(), expected_scatter)
+
+
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_gather_scatter_vulkan_native_ndarray_supported_dtypes():
     prog = impl.get_runtime().prog

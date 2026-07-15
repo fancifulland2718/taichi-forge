@@ -10,10 +10,10 @@ def _skip_if_native_check_unavailable():
     prog = impl.get_runtime().prog
     if arch == ti.cuda:
         if not (
-            hasattr(prog, "cuda_cub_check_count_available")
-            and prog.cuda_cub_check_count_available()
+            hasattr(prog, "cuda_device_check_count_available")
+            and prog.cuda_device_check_count_available()
         ):
-            pytest.skip("CUDA native check_count is unavailable.")
+            pytest.skip("CUDA Driver check_count is unavailable.")
         return
     if arch == ti.vulkan:
         if not (
@@ -39,15 +39,15 @@ def _skip_if_native_metric_unavailable(value_type=1):
     prog = impl.get_runtime().prog
     if arch == ti.cuda:
         if not (
-            hasattr(prog, "cuda_cub_metric_reduce_available")
-            and prog.cuda_cub_metric_reduce_available()
+            hasattr(prog, "cuda_device_metric_reduce_available")
+            and prog.cuda_device_metric_reduce_available()
         ):
-            pytest.skip("CUDA native metric_reduce is unavailable.")
+            pytest.skip("CUDA Driver metric_reduce is unavailable.")
         if (
-            hasattr(prog, "cuda_cub_metric_reduce_value_type_available")
-            and not prog.cuda_cub_metric_reduce_value_type_available(value_type)
+            hasattr(prog, "cuda_device_metric_reduce_value_type_available")
+            and not prog.cuda_device_metric_reduce_value_type_available(value_type)
         ):
-            pytest.skip("CUDA native metric_reduce dtype is unavailable.")
+            pytest.skip("CUDA Driver metric_reduce dtype is unavailable.")
         return
     if arch == ti.vulkan:
         if not (
@@ -227,6 +227,29 @@ def test_native_device_metric_f32():
         values, ref, workspace=workspace
     ).to_float() == pytest.approx(4.0)
     assert workspace.workspace_bytes_peak >= 4
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_cuda_device_diagnostics_use_driver_provider():
+    _skip_if_native_check_unavailable()
+    _skip_if_native_metric_unavailable(value_type=1)
+    flags = ti.ndarray(ti.i32, shape=5)
+    values = ti.ndarray(ti.f32, shape=5)
+    flags.from_numpy(np.array([0, 1, 0, 2, 3], dtype=np.int32))
+    values.from_numpy(np.array([0.0, -2.0, np.nan, 3.5, -1.0], dtype=np.float32))
+    check_workspace = ti.algorithms.CheckWorkspace(max_items=5)
+    metric_workspace = ti.algorithms.MetricWorkspace(max_items=5)
+
+    count = ti.algorithms.count_if(
+        flags, method="cuda_device", workspace=check_workspace
+    )
+    metric = ti.algorithms.max_abs(
+        values, method="cuda_device", workspace=metric_workspace
+    )
+    assert count.to_int() == 3
+    assert np.isinf(metric.to_float())
+    assert check_workspace._native_check_plan.backend == "cuda_device"
+    assert metric_workspace._native_metric_plan.backend == "cuda_device"
 
 
 @test_utils.test(

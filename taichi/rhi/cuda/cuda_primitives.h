@@ -77,20 +77,6 @@ enum class CubReduceOp : int {
   max = 2,
 };
 
-enum class CudaCheckOp : int {
-  nonzero = 0,
-  zero = 1,
-  nan = 2,
-  inf = 3,
-  not_finite = 4,
-  index_oob = 5,
-};
-
-enum class CudaMetricOp : int {
-  max_abs = 0,
-  max_abs_delta = 1,
-};
-
 enum class CudaGroupedReduceValueType : int {
   i32 = 0,
   f32 = 1,

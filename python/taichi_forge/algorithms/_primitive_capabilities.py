@@ -139,9 +139,7 @@ _CUDA_TOOLKIT_ONLY_PROBES = frozenset(
 )
 _CUDA_DRIVER_OR_TOOLKIT_PROBES = frozenset(
     {
-        "cuda_device_indexed_copy_available",
         "cuda_device_scatter_add_available",
-        "cuda_device_transform_available",
     }
 )
 
@@ -570,6 +568,11 @@ _GROUPED_REDUCE_METHODS = (
 _CHECK_METHODS = (
     _auto(),
     _method(
+        "cuda_device",
+        ("cuda",),
+        ("cuda_device_check_count_available",),
+    ),
+    _method(
         "cuda_cub",
         ("cuda",),
         ("cuda_cub_check_count_available",),
@@ -584,6 +587,11 @@ _CHECK_METHODS = (
 
 _METRIC_METHODS = (
     _auto(),
+    _method(
+        "cuda_device",
+        ("cuda",),
+        ("cuda_device_metric_reduce_available",),
+    ),
     _method(
         "cuda_cub",
         ("cuda",),

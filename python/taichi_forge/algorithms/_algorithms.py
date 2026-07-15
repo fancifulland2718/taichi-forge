@@ -246,8 +246,10 @@ _NATIVE_PRIMITIVE_AVAILABLE_BY_ARCH = {
         "cuda_cub_select_available",
         "cuda_device_add_merge_available",
         "cuda_device_bucket_builder_available",
+        "cuda_device_check_count_available",
         "cuda_device_grouped_reduce_available",
         "cuda_device_indexed_copy_available",
+        "cuda_device_metric_reduce_available",
         "cuda_device_scatter_add_available",
         "cuda_device_transform_available",
         "cuda_toolkit_transform_available",
@@ -5270,12 +5272,14 @@ def _check_count_backend(method):
     arch = current_cfg().arch
     if method == "cuda_cub":
         return "cuda_cub" if arch == cuda else None
+    if method == "cuda_device":
+        return "cuda_device" if arch == cuda else None
     if method == "vulkan_native":
         return "vulkan_native" if arch == vulkan else None
     if method == "cpu_native":
         return "cpu_native" if arch in (x64, arm64) else None
     if arch == cuda:
-        return "cuda_cub"
+        return "cuda_device"
     if arch == vulkan:
         return "vulkan_native"
     if arch in (x64, arm64):
@@ -5292,12 +5296,14 @@ def _metric_reduce_backend(method):
     arch = current_cfg().arch
     if method == "cuda_cub":
         return "cuda_cub" if arch == cuda else None
+    if method == "cuda_device":
+        return "cuda_device" if arch == cuda else None
     if method == "vulkan_native":
         return "vulkan_native" if arch == vulkan else None
     if method == "cpu_native":
         return "cpu_native" if arch in (x64, arm64) else None
     if arch == cuda:
-        return "cuda_cub"
+        return "cuda_device"
     if arch == vulkan:
         return "vulkan_native"
     if arch in (x64, arm64):
@@ -5340,18 +5346,19 @@ def _native_check_count(
     check_op_id = _CHECK_OPS[check_op]
     lower = int(lower)
     upper = int(upper)
-    if backend == "cuda_cub":
-        if not _prog_available(prog, "cuda_cub_check_count_available"):
-            raise RuntimeError("CUDA CUB check_count is unavailable.")
+    if backend in ("cuda_device", "cuda_cub"):
+        prefix = "cuda_device" if backend == "cuda_device" else "cuda_cub"
+        if not _prog_available(prog, f"{prefix}_check_count_available"):
+            raise RuntimeError(f"CUDA {backend} check_count is unavailable.")
         if values_view.is_dense_field:
-            native_method_name = "cuda_cub_check_count_dense_field"
+            native_method_name = f"{prefix}_check_count_dense_field"
         elif values_view.is_plain_ndarray:
-            native_method_name = "cuda_cub_check_count_ndarray"
+            native_method_name = f"{prefix}_check_count_ndarray"
         else:
-            native_method_name = "cuda_cub_check_count_strided_ndarray"
+            native_method_name = f"{prefix}_check_count_strided_ndarray"
         native_method = _prog_method(prog, native_method_name)
         if native_method is None:
-            raise RuntimeError("CUDA CUB check_count method is unavailable.")
+            raise RuntimeError(f"CUDA {backend} check_count method is unavailable.")
     elif backend == "vulkan_native":
         if not _prog_available(prog, "vulkan_check_count_available"):
             raise RuntimeError("Vulkan check_count is unavailable.")
@@ -5453,24 +5460,31 @@ def _native_metric_reduce(
     value_type = _metric_value_type(values_view.dtype)
     metric_op_id = _METRIC_OPS[metric_op]
     mixed_dense_array = values_view.is_dense_field != other_view.is_dense_field
-    if backend == "cuda_cub":
-        if not _prog_available(prog, "cuda_cub_metric_reduce_available"):
-            raise RuntimeError("CUDA CUB metric_reduce is unavailable.")
+    if backend in ("cuda_device", "cuda_cub"):
+        prefix = "cuda_device" if backend == "cuda_device" else "cuda_cub"
+        if not _prog_available(prog, f"{prefix}_metric_reduce_available"):
+            raise RuntimeError(f"CUDA {backend} metric_reduce is unavailable.")
         if not _prog_value_available(
-            prog, "cuda_cub_metric_reduce_value_type_available", value_type
+            prog, f"{prefix}_metric_reduce_value_type_available", value_type
         ):
-            raise RuntimeError("CUDA CUB metric_reduce does not support this dtype.")
+            raise RuntimeError(
+                f"CUDA {backend} metric_reduce does not support this dtype."
+            )
         if values_view.is_dense_field and other_view.is_dense_field:
-            native_method_name = "cuda_cub_metric_reduce_dense_field"
+            native_method_name = f"{prefix}_metric_reduce_dense_field"
         elif mixed_dense_array:
-            native_method_name = "cuda_cub_metric_reduce_dense_field_strided_ndarray"
+            native_method_name = (
+                f"{prefix}_metric_reduce_dense_field_strided_ndarray"
+            )
         elif values_view.is_plain_ndarray and other_view.is_plain_ndarray:
-            native_method_name = "cuda_cub_metric_reduce_ndarray"
+            native_method_name = f"{prefix}_metric_reduce_ndarray"
         else:
-            native_method_name = "cuda_cub_metric_reduce_strided_ndarray"
+            native_method_name = f"{prefix}_metric_reduce_strided_ndarray"
         native_method = _prog_method(prog, native_method_name)
         if native_method is None:
-            raise RuntimeError("CUDA CUB metric_reduce method is unavailable.")
+            raise RuntimeError(
+                f"CUDA {backend} metric_reduce method is unavailable."
+            )
     elif backend == "vulkan_native":
         if not _prog_available(prog, "vulkan_metric_reduce_available"):
             raise RuntimeError("Vulkan metric_reduce is unavailable.")
@@ -11415,10 +11429,6 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
         method = _prog_method(prog, "cuda_device_transform_affine_dense_field")
         if method is None:
             return False
-        if value_type in (3, 4, 5) and not _prog_available(
-            prog, "cuda_toolkit_transform_available"
-        ):
-            return False
         temp_bytes = method(
             src_view.snode,
             dst_view.snode,
@@ -11462,9 +11472,7 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
     prog = impl.get_runtime().prog
     if src_is_member or dst_is_member:
         method = _prog_method(prog, "cuda_device_transform_affine_strided_ndarray")
-        if method is None or not _prog_available(
-            prog, "cuda_toolkit_transform_available"
-        ):
+        if method is None:
             return False
         src_arr, src_offset, src_stride = _scalar_ndarray_payload(src)
         dst_arr, dst_offset, dst_stride = _scalar_ndarray_payload(dst)
@@ -11505,10 +11513,6 @@ def _try_cuda_device_transform(src, dst, value_type, scale, bias, workspace):
             workspace._mark_native_transform_backend_active("cuda_device", temp_bytes)
         return True
     if not _prog_available(prog, "cuda_device_transform_available"):
-        return False
-    if value_type in (3, 4, 5) and not _prog_available(
-        prog, "cuda_toolkit_transform_available"
-    ):
         return False
     method = _prog_method(prog, "cuda_device_transform_affine_ndarray")
     if method is None:
@@ -11811,10 +11815,6 @@ def _try_native_dense_matrix_field_transform(
         backend = "cuda_device"
         if not _prog_available(prog, "cuda_device_transform_available"):
             return False
-        if value_type in (3, 4, 5) and not _prog_available(
-            prog, "cuda_toolkit_transform_available"
-        ):
-            return False
     elif arch == vulkan and method in ("auto", "vulkan_native"):
         backend = "vulkan_native"
         if not _prog_available(prog, "vulkan_transform_available"):
@@ -11889,7 +11889,7 @@ def _try_native_tensor_member_transform(src, dst, method, value_type, scale, bia
             prog, "cuda_device_transform_affine_packed_strided_ndarray"
         )
         if method_obj is not None and _prog_available(
-            prog, "cuda_toolkit_transform_available"
+            prog, "cuda_device_transform_available"
         ):
             call_args = (
                 src_arr,
