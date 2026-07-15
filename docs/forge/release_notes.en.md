@@ -212,6 +212,11 @@ profiling, and GGUI device-image staging were already public by `0.4.25`.
   submission, synchronization, memory, transfer, Graph, display, fault, and
   trace data; unavailable optional measurements remain `None`, and trace
   export records bounded host events without pretending to be a GPU profiler.
+- Extended runtime statistics to schema v2 with exact host allocator capacity,
+  cursor consumption, alignment/unreclaimed-release waste, slab/large/exclusive
+  chunk classes, and lifetime peaks. Windows reserve+commit is distinguished
+  from Linux anonymous-mapping residency instead of fabricating committed
+  bytes.
 - Separated CUDA device capability from LLVM code-generation targets, isolated
   target-specific caches, removed the CUDA-13.2-only iterator dependency,
   hardened the single-runtime-wheel contract, and avoided unused CUDA

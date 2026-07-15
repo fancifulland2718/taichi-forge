@@ -733,6 +733,46 @@ void export_lang(py::module &m) {
         memory["live_resources"] = snapshot.memory.live_resources;
         memory["retiring_resources"] = snapshot.memory.retiring_resources;
         memory["inflight_resources"] = snapshot.memory.inflight_resources;
+        const auto &host_allocator_snapshot =
+            snapshot.memory.host_allocator;
+        py::dict host_allocator;
+        host_allocator["requested_live_bytes"] = optional_counter(
+            host_allocator_snapshot.requested_live_bytes);
+        host_allocator["peak_requested_live_bytes"] = optional_counter(
+            host_allocator_snapshot.peak_requested_live_bytes);
+        host_allocator["reserved_bytes"] = optional_counter(
+            host_allocator_snapshot.reserved_bytes);
+        host_allocator["committed_bytes"] = optional_counter(
+            host_allocator_snapshot.committed_bytes);
+        host_allocator["capacity_bytes"] = optional_counter(
+            host_allocator_snapshot.capacity_bytes);
+        host_allocator["used_bytes"] =
+            optional_counter(host_allocator_snapshot.used_bytes);
+        host_allocator["available_bytes"] = optional_counter(
+            host_allocator_snapshot.available_bytes);
+        host_allocator["alignment_waste_bytes"] = optional_counter(
+            host_allocator_snapshot.alignment_waste_bytes);
+        host_allocator["unreclaimed_released_bytes"] = optional_counter(
+            host_allocator_snapshot.unreclaimed_released_bytes);
+        host_allocator["wasted_bytes"] =
+            optional_counter(host_allocator_snapshot.wasted_bytes);
+        host_allocator["chunk_count"] =
+            optional_counter(host_allocator_snapshot.chunk_count);
+        host_allocator["slab_chunk_count"] = optional_counter(
+            host_allocator_snapshot.slab_chunk_count);
+        host_allocator["large_chunk_count"] = optional_counter(
+            host_allocator_snapshot.large_chunk_count);
+        host_allocator["exclusive_chunk_count"] = optional_counter(
+            host_allocator_snapshot.exclusive_chunk_count);
+        host_allocator["peak_reserved_bytes"] = optional_counter(
+            host_allocator_snapshot.peak_reserved_bytes);
+        host_allocator["peak_used_bytes"] = optional_counter(
+            host_allocator_snapshot.peak_used_bytes);
+        host_allocator["peak_wasted_bytes"] = optional_counter(
+            host_allocator_snapshot.peak_wasted_bytes);
+        host_allocator["peak_chunk_count"] = optional_counter(
+            host_allocator_snapshot.peak_chunk_count);
+        memory["host_allocator"] = host_allocator;
         memory["host_requested_live_bytes"] =
             optional_counter(snapshot.memory.host_requested_live_bytes);
         memory["host_raw_bytes"] =

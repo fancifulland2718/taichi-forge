@@ -144,9 +144,13 @@ evidence. Their Linux release evidence remains pending:
 - Run `tests/python/test_runtime_statistics.py`,
   `tests/python/test_runtime_trace.py`, and
   `tests/python/test_runtime_public_api.py` on CPU, CUDA, and Vulkan. Verify
-  immutable schema-v1 snapshots, backend-specific `None` availability,
+  immutable schema-v2 snapshots, backend-specific `None` availability,
   Program-domain reset isolation, exception-preserving export, bounded
   overflow accounting, and valid Chrome/Perfetto JSON.
+- For host allocator telemetry, require `committed_bytes is None` on Linux,
+  verify capacity/used/available and requested-live/waste invariants under
+  concurrent allocation/snapshot stress, and collect RSS/page faults outside
+  the allocator rather than relabeling reserved virtual bytes.
 - Confirm the implementation uses standard C++ synchronization, TLS, clocks,
   and file output only; it must not acquire a Win32 handle or depend on Windows
   path semantics. Exercise non-ASCII and failed export paths on Linux.

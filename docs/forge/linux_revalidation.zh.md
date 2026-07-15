@@ -112,9 +112,13 @@ F4 runtime statistics/trace 已取得 Windows CPU/CUDA/Vulkan 功能证据，但
   与 Program reset 执行 TSAN；
 - 在 CPU、CUDA、Vulkan 上运行 `tests/python/test_runtime_statistics.py`、
   `tests/python/test_runtime_trace.py` 和
-  `tests/python/test_runtime_public_api.py`。验证不可变 schema-v1 snapshot、
+  `tests/python/test_runtime_public_api.py`。验证不可变 schema-v2 snapshot、
   backend-specific `None` 可用性、Program-domain reset 隔离、保留 workload
   exception 的导出、有界 overflow 计数，以及有效的 Chrome/Perfetto JSON；
+- host allocator telemetry 在 Linux 必须满足 `committed_bytes is None`；并发
+  allocation/snapshot stress 下验证 capacity/used/available 与
+  requested-live/waste 恒等式；RSS/page fault 在 allocator 外部采集，不能把 reserved
+  virtual bytes 改名为 committed；
 - 确认实现只使用标准 C++ synchronization、TLS、clock 和文件输出，不取得 Win32
   handle，也不依赖 Windows path 语义；在 Linux 覆盖非 ASCII 路径与导出失败；
 - 仅在确认没有其他 Python 进程占用 GPU 后运行

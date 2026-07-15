@@ -12,7 +12,7 @@ namespace taichi::lang {
 // Public runtime statistics snapshots use a versioned, backend-neutral POD
 // contract. Backends may populate only the fields they can measure; an
 // unavailable value is different from a measured zero.
-constexpr std::uint32_t kRuntimeStatisticsSchemaVersion = 1;
+constexpr std::uint32_t kRuntimeStatisticsSchemaVersion = 2;
 
 struct RuntimeOptionalCounter {
   std::uint64_t value{0};
@@ -40,10 +40,32 @@ struct RuntimeSynchronizationStatistics {
   RuntimeOptionalCounter backend_lock_sampled_wait_ns;
 };
 
+struct RuntimeHostAllocatorStatistics {
+  RuntimeOptionalCounter requested_live_bytes;
+  RuntimeOptionalCounter peak_requested_live_bytes;
+  RuntimeOptionalCounter reserved_bytes;
+  RuntimeOptionalCounter committed_bytes;
+  RuntimeOptionalCounter capacity_bytes;
+  RuntimeOptionalCounter used_bytes;
+  RuntimeOptionalCounter available_bytes;
+  RuntimeOptionalCounter alignment_waste_bytes;
+  RuntimeOptionalCounter unreclaimed_released_bytes;
+  RuntimeOptionalCounter wasted_bytes;
+  RuntimeOptionalCounter chunk_count;
+  RuntimeOptionalCounter slab_chunk_count;
+  RuntimeOptionalCounter large_chunk_count;
+  RuntimeOptionalCounter exclusive_chunk_count;
+  RuntimeOptionalCounter peak_reserved_bytes;
+  RuntimeOptionalCounter peak_used_bytes;
+  RuntimeOptionalCounter peak_wasted_bytes;
+  RuntimeOptionalCounter peak_chunk_count;
+};
+
 struct RuntimeMemoryStatistics {
   std::uint64_t live_resources{0};
   std::uint64_t retiring_resources{0};
   std::uint64_t inflight_resources{0};
+  RuntimeHostAllocatorStatistics host_allocator;
   RuntimeOptionalCounter host_requested_live_bytes;
   RuntimeOptionalCounter host_raw_bytes;
   RuntimeOptionalCounter host_capacity_bytes;

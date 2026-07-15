@@ -127,7 +127,8 @@ add_executable(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
   tests/cpp/program/runtime_completion_test.cpp
   tests/cpp/program/runtime_fault_test.cpp
   tests/cpp/program/runtime_statistics_test.cpp
-  tests/cpp/program/runtime_trace_test.cpp)
+  tests/cpp/program/runtime_trace_test.cpp
+  tests/cpp/rhi/common/host_memory_pool_test.cpp)
 target_link_libraries(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
   PRIVATE
     taichi_core
@@ -178,7 +179,27 @@ if (LINUX)
     -Wl,--exclude-libs=ALL -static-libgcc -static-libstdc++)
 endif()
 add_test(NAME ${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
-         COMMAND ${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME})
+  COMMAND ${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME})
+
+# F5 measurement-only host allocator benchmark. Keep it independent from the
+# aggregate C++ tests so unrelated compiler/backend mocks cannot block the
+# allocator performance gate.
+add_executable(taichi_host_allocator_bench
+  benchmarks/host_allocator_bench.cpp)
+target_link_libraries(taichi_host_allocator_bench
+  PRIVATE
+    common_rhi
+    ti_device_api
+    taichi_core
+    taichi_common)
+target_include_directories(taichi_host_allocator_bench
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/external/spdlog/include)
+if (WIN32)
+  set_target_properties(taichi_host_allocator_bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${TESTS_OUTPUT_DIR}")
+endif()
 
 # Keep the concurrency-sensitive backend regression cases independently
 # runnable.  The main C++ test executable also includes LLVM-only tests, which

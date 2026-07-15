@@ -10,6 +10,8 @@ from typing import Optional
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 
+_RUNTIME_STATISTICS_SCHEMA_VERSION = 2
+
 
 @dataclass(frozen=True)
 class SubmissionStatistics:
@@ -35,10 +37,33 @@ class SynchronizationStatistics:
 
 
 @dataclass(frozen=True)
+class HostAllocatorStatistics:
+    requested_live_bytes: Optional[int]
+    peak_requested_live_bytes: Optional[int]
+    reserved_bytes: Optional[int]
+    committed_bytes: Optional[int]
+    capacity_bytes: Optional[int]
+    used_bytes: Optional[int]
+    available_bytes: Optional[int]
+    alignment_waste_bytes: Optional[int]
+    unreclaimed_released_bytes: Optional[int]
+    wasted_bytes: Optional[int]
+    chunk_count: Optional[int]
+    slab_chunk_count: Optional[int]
+    large_chunk_count: Optional[int]
+    exclusive_chunk_count: Optional[int]
+    peak_reserved_bytes: Optional[int]
+    peak_used_bytes: Optional[int]
+    peak_wasted_bytes: Optional[int]
+    peak_chunk_count: Optional[int]
+
+
+@dataclass(frozen=True)
 class MemoryStatistics:
     live_resources: int
     retiring_resources: int
     inflight_resources: int
+    host_allocator: HostAllocatorStatistics
     host_requested_live_bytes: Optional[int]
     host_raw_bytes: Optional[int]
     host_capacity_bytes: Optional[int]
@@ -173,13 +198,44 @@ def _runtime_fault(raw):
 
 
 def _statistics_from_raw(raw) -> RuntimeStatistics:
+    schema_version = raw.get("schema_version")
+    if schema_version != _RUNTIME_STATISTICS_SCHEMA_VERSION:
+        raise TaichiRuntimeError(
+            "unsupported runtime statistics schema "
+            f"{schema_version!r}; expected "
+            f"{_RUNTIME_STATISTICS_SCHEMA_VERSION}. Install matching "
+            "taichi-forge and taichi-forge-runtime packages"
+        )
     return RuntimeStatistics(
-        schema_version=raw["schema_version"],
+        schema_version=schema_version,
         backend=raw["backend"],
         program_domain=raw["program_domain"],
         submission=SubmissionStatistics(**raw["submission"]),
         synchronization=SynchronizationStatistics(**raw["synchronization"]),
-        memory=MemoryStatistics(**raw["memory"]),
+        memory=MemoryStatistics(
+            live_resources=raw["memory"]["live_resources"],
+            retiring_resources=raw["memory"]["retiring_resources"],
+            inflight_resources=raw["memory"]["inflight_resources"],
+            host_allocator=HostAllocatorStatistics(
+                **raw["memory"]["host_allocator"]
+            ),
+            host_requested_live_bytes=raw["memory"][
+                "host_requested_live_bytes"
+            ],
+            host_raw_bytes=raw["memory"]["host_raw_bytes"],
+            host_capacity_bytes=raw["memory"]["host_capacity_bytes"],
+            device_requested_live_bytes=raw["memory"][
+                "device_requested_live_bytes"
+            ],
+            device_raw_bytes=raw["memory"]["device_raw_bytes"],
+            device_cached_bytes=raw["memory"]["device_cached_bytes"],
+            cuda_mempool_reserved_bytes=raw["memory"][
+                "cuda_mempool_reserved_bytes"
+            ],
+            cuda_mempool_used_bytes=raw["memory"][
+                "cuda_mempool_used_bytes"
+            ],
+        ),
         transfer=TransferStatistics(**raw["transfer"]),
         graph=GraphStatistics(**raw["graph"]),
         display=DisplayStatistics(**raw["display"]),
@@ -236,12 +292,15 @@ def capabilities() -> RuntimeCapabilities:
         "_runtime_trace_export",
     )
     bounded_trace = all(getattr(prog, name, None) is not None for name in trace_methods)
+    statistics_schema_version = raw.get("schema_version")
     return RuntimeCapabilities(
         schema_version=1,
         backend=raw["backend"],
         program_domain=raw["program_domain"],
-        statistics=True,
-        statistics_schema_version=raw["schema_version"],
+        statistics=(
+            statistics_schema_version == _RUNTIME_STATISTICS_SCHEMA_VERSION
+        ),
+        statistics_schema_version=statistics_schema_version,
         bounded_trace=bounded_trace,
         trace_schema_version=1 if bounded_trace else None,
         chrome_trace_export=bounded_trace,
@@ -361,6 +420,7 @@ __all__ = [
     "DisplayStatistics",
     "FaultStatistics",
     "GraphStatistics",
+    "HostAllocatorStatistics",
     "MemoryStatistics",
     "RuntimeCapabilities",
     "RuntimeFault",

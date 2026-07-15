@@ -96,9 +96,17 @@ void *UnifiedAllocator::allocate(std::size_t size,
       }
 
       // The subtraction check above proves this addition cannot overflow.
+      const auto old_head = head;
       TI_ASSERT(checked_add_address(ret, size, &head));
       TI_ASSERT(ret % alignment == 0);
       chunk.head = reinterpret_cast<void *>(head);
+      const auto alignment_waste = ret - old_head;
+      const auto consumed = head - old_head;
+      TI_ASSERT(consumed <= capacity_bytes_ - used_bytes_);
+      used_bytes_ += consumed;
+      alignment_waste_bytes_ += alignment_waste;
+      requested_live_bytes_ += size;
+      chunk.requested_size += size;
       return reinterpret_cast<void *>(ret);
     }
   }
@@ -147,12 +155,29 @@ void *UnifiedAllocator::allocate(std::size_t size,
   chunk.head = reinterpret_cast<void *>(head);
   chunk.tail = reinterpret_cast<void *>(tail);
   chunk.is_exclusive = exclusive;
+  chunk.is_large =
+      !exclusive && minimum_allocation_size > default_allocator_size;
+  chunk.requested_size = size;
+  chunk.released_size = 0;
 
   TI_ASSERT(chunk.data != nullptr);
   TI_ASSERT(uint64(chunk.data) % HostMemoryPool::page_size == 0);
   TI_ASSERT(ret % alignment == 0);
 
   chunks_.emplace_back(std::move(chunk));
+  const auto consumed = head - data;
+  const auto alignment_waste = ret - data;
+  capacity_bytes_ += allocation_size;
+  used_bytes_ += consumed;
+  alignment_waste_bytes_ += alignment_waste;
+  requested_live_bytes_ += size;
+  if (exclusive) {
+    ++exclusive_chunk_count_;
+  } else if (minimum_allocation_size > default_allocator_size) {
+    ++large_chunk_count_;
+  } else {
+    ++slab_chunk_count_;
+  }
   return reinterpret_cast<void *>(ret);
 }
 
@@ -160,9 +185,10 @@ void *UnifiedAllocator::release(std::size_t size, void *ptr) {
   // UnifiedAllocator is special in that it never reuses the previously
   // allocated memory We have to release the entire memory chunk to avoid memory
   // leak
-  (void)size;
   int remove_idx = -1;
+  int nonexclusive_idx = -1;
   void *raw_ptr = nullptr;
+  const auto released_address = reinterpret_cast<std::uintptr_t>(ptr);
   for (size_t chunk_idx = 0; chunk_idx < chunks_.size(); chunk_idx++) {
     auto &chunk = chunks_[chunk_idx];
 
@@ -171,15 +197,66 @@ void *UnifiedAllocator::release(std::size_t size, void *ptr) {
       raw_ptr = chunk.data;
       break;
     }
+    if (!chunk.is_exclusive) {
+      const auto data = reinterpret_cast<std::uintptr_t>(chunk.data);
+      const auto head = reinterpret_cast<std::uintptr_t>(chunk.head);
+      if (released_address >= data &&
+          (released_address < head ||
+           (size == 0 && released_address == head))) {
+        nonexclusive_idx = chunk_idx;
+      }
+    }
   }
 
   if (remove_idx != -1) {
+    const auto &chunk = chunks_[remove_idx];
+    const auto data = reinterpret_cast<std::uintptr_t>(chunk.data);
+    const auto allocation =
+        reinterpret_cast<std::uintptr_t>(chunk.allocation);
+    const auto head = reinterpret_cast<std::uintptr_t>(chunk.head);
+    const auto tail = reinterpret_cast<std::uintptr_t>(chunk.tail);
+    capacity_bytes_ -= tail - data;
+    used_bytes_ -= head - data;
+    alignment_waste_bytes_ -= allocation - data;
+    requested_live_bytes_ -=
+        std::min<std::uint64_t>(requested_live_bytes_, chunk.requested_size);
+    --exclusive_chunk_count_;
     swap_erase_vector<MemoryChunk>(chunks_, remove_idx);
     // MemoryPool is responsible for releasing the raw memory
     return raw_ptr;
   }
 
+  if (nonexclusive_idx != -1) {
+    auto &chunk = chunks_[nonexclusive_idx];
+    const auto unreclaimed_capacity =
+        chunk.requested_size -
+        std::min(chunk.requested_size, chunk.released_size);
+    const auto released =
+        std::min<std::uint64_t>(size, unreclaimed_capacity);
+    chunk.released_size += released;
+    unreclaimed_released_bytes_ += released;
+    requested_live_bytes_ -=
+        std::min(requested_live_bytes_, released);
+  }
+
   return nullptr;
+}
+
+UnifiedAllocator::Statistics UnifiedAllocator::get_stats() const {
+  Statistics stats;
+  stats.capacity_bytes = capacity_bytes_;
+  stats.used_bytes = used_bytes_;
+  stats.available_bytes = capacity_bytes_ - used_bytes_;
+  stats.alignment_waste_bytes = alignment_waste_bytes_;
+  stats.unreclaimed_released_bytes = unreclaimed_released_bytes_;
+  stats.wasted_bytes =
+      alignment_waste_bytes_ + unreclaimed_released_bytes_;
+  stats.requested_live_bytes = requested_live_bytes_;
+  stats.chunk_count = chunks_.size();
+  stats.slab_chunk_count = slab_chunk_count_;
+  stats.large_chunk_count = large_chunk_count_;
+  stats.exclusive_chunk_count = exclusive_chunk_count_;
+  return stats;
 }
 
 }  // namespace taichi::lang

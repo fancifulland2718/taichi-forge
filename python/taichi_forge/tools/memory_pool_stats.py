@@ -26,7 +26,7 @@ from typing import Any, Dict
 from taichi_forge._lib import core as _ti_core
 
 
-def memory_pool_stats() -> Dict[str, Dict[str, int]]:
+def memory_pool_stats() -> Dict[str, Dict[str, Any]]:
     """Return a snapshot of host + device memory pool counters.
 
     Returns
@@ -35,7 +35,11 @@ def memory_pool_stats() -> Dict[str, Dict[str, int]]:
         ``{"host": {...}, "device": {...}}``. The ``host`` dict has keys
         ``allocate_count``, ``release_count``, ``bytes_allocated_total``,
         ``bytes_released_total``, ``raw_chunks``, ``raw_bytes``,
-        ``unified_chunks``. The ``device`` dict additionally has
+        ``unified_chunks``, plus exact current/peak allocator capacity,
+        consumption, alignment/released waste, and chunk-class counters.
+        ``committed_bytes`` is an integer on Windows and ``None`` on
+        Linux, where anonymous-mapping residency requires an OS-level RSS/page
+        query. The ``device`` dict additionally has
         ``cache_hit_count``, ``cache_miss_count``, ``cached_blocks``,
         ``cached_bytes``.
 

@@ -6402,13 +6402,37 @@ RuntimeStatisticsSnapshot Program::runtime_statistics_snapshot() {
 
   const HostMemoryPoolStats host =
       HostMemoryPool::get_instance().get_stats();
-  const std::uint64_t host_live =
-      host.bytes_allocated_total >= host.bytes_released_total
-          ? host.bytes_allocated_total - host.bytes_released_total
-          : 0;
-  snapshot.memory.host_requested_live_bytes = {host_live, true};
-  snapshot.memory.host_raw_bytes = {host.raw_bytes, true};
-  snapshot.memory.host_capacity_bytes = {host.raw_bytes, true};
+  snapshot.memory.host_requested_live_bytes = {
+      host.requested_live_bytes, true};
+  snapshot.memory.host_raw_bytes = {host.reserved_bytes, true};
+  snapshot.memory.host_capacity_bytes = {host.capacity_bytes, true};
+  auto &host_allocator = snapshot.memory.host_allocator;
+  host_allocator.requested_live_bytes = {
+      host.requested_live_bytes, true};
+  host_allocator.peak_requested_live_bytes = {
+      host.peak_requested_live_bytes, true};
+  host_allocator.reserved_bytes = {host.reserved_bytes, true};
+  host_allocator.committed_bytes = {
+      host.committed_bytes, host.committed_bytes_available};
+  host_allocator.capacity_bytes = {host.capacity_bytes, true};
+  host_allocator.used_bytes = {host.used_bytes, true};
+  host_allocator.available_bytes = {host.available_bytes, true};
+  host_allocator.alignment_waste_bytes = {
+      host.alignment_waste_bytes, true};
+  host_allocator.unreclaimed_released_bytes = {
+      host.unreclaimed_released_bytes, true};
+  host_allocator.wasted_bytes = {host.wasted_bytes, true};
+  host_allocator.chunk_count = {host.unified_chunks, true};
+  host_allocator.slab_chunk_count = {host.slab_chunks, true};
+  host_allocator.large_chunk_count = {host.large_chunks, true};
+  host_allocator.exclusive_chunk_count = {
+      host.exclusive_chunks, true};
+  host_allocator.peak_reserved_bytes = {
+      host.peak_reserved_bytes, true};
+  host_allocator.peak_used_bytes = {host.peak_used_bytes, true};
+  host_allocator.peak_wasted_bytes = {
+      host.peak_wasted_bytes, true};
+  host_allocator.peak_chunk_count = {host.peak_chunks, true};
 
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {

@@ -1,5 +1,7 @@
 #include "taichi/rhi/common/host_memory_pool.h"
 
+#include <algorithm>
+#include <limits>
 #include <memory>
 
 #if defined(TI_PLATFORM_UNIX)
@@ -9,6 +11,16 @@
 #endif
 
 namespace taichi::lang {
+
+namespace {
+
+uint64_t saturating_add(uint64_t lhs, uint64_t rhs) {
+  return rhs > std::numeric_limits<uint64_t>::max() - lhs
+             ? std::numeric_limits<uint64_t>::max()
+             : lhs + rhs;
+}
+
+}  // namespace
 
 HostMemoryPool::HostMemoryPool() {
   allocator_ = std::unique_ptr<UnifiedAllocator>(new UnifiedAllocator(this));
@@ -27,8 +39,9 @@ void *HostMemoryPool::allocate(std::size_t size,
   }
   void *ret = allocator_->allocate(size, alignment, exclusive);
   // R1.c counters: update under existing lock (no extra cost on hot path).
-  ++allocate_count_;
-  bytes_allocated_total_ += size;
+  allocate_count_ = saturating_add(allocate_count_, 1);
+  bytes_allocated_total_ = saturating_add(bytes_allocated_total_, size);
+  update_allocator_peaks_locked();
   return ret;
 }
 
@@ -42,8 +55,9 @@ void HostMemoryPool::release(std::size_t size, void *ptr) {
   if (void *raw_ptr = allocator_->release(size, ptr)) {
     deallocate_raw_memory(raw_ptr);  // release raw memory as well
   }
-  ++release_count_;
-  bytes_released_total_ += size;
+  release_count_ = saturating_add(release_count_, 1);
+  bytes_released_total_ = saturating_add(bytes_released_total_, size);
+  update_allocator_peaks_locked();
 }
 
 HostMemoryPoolStats HostMemoryPool::get_stats() {
@@ -54,13 +68,47 @@ HostMemoryPoolStats HostMemoryPool::get_stats() {
   s.bytes_allocated_total = bytes_allocated_total_;
   s.bytes_released_total = bytes_released_total_;
   s.raw_chunks = raw_memory_chunks_.size();
-  uint64_t raw_bytes = 0;
-  for (auto &kv : raw_memory_chunks_) {
-    raw_bytes += kv.second;
+  s.raw_bytes = raw_bytes_;
+  s.reserved_bytes = raw_bytes_;
+#if defined(TI_PLATFORM_UNIX)
+  s.committed_bytes_available = false;
+#else
+  s.committed_bytes = raw_bytes_;
+  s.committed_bytes_available = true;
+#endif
+  if (allocator_) {
+    const auto allocator = allocator_->get_stats();
+    s.unified_chunks = allocator.chunk_count;
+    s.requested_live_bytes = allocator.requested_live_bytes;
+    s.capacity_bytes = allocator.capacity_bytes;
+    s.used_bytes = allocator.used_bytes;
+    s.available_bytes = allocator.available_bytes;
+    s.alignment_waste_bytes = allocator.alignment_waste_bytes;
+    s.unreclaimed_released_bytes =
+        allocator.unreclaimed_released_bytes;
+    s.wasted_bytes = allocator.wasted_bytes;
+    s.slab_chunks = allocator.slab_chunk_count;
+    s.large_chunks = allocator.large_chunk_count;
+    s.exclusive_chunks = allocator.exclusive_chunk_count;
   }
-  s.raw_bytes = raw_bytes;
-  s.unified_chunks = allocator_ ? allocator_->chunks_.size() : 0;
+  s.peak_requested_live_bytes = peak_requested_live_bytes_;
+  s.peak_reserved_bytes = peak_reserved_bytes_;
+  s.peak_used_bytes = peak_used_bytes_;
+  s.peak_wasted_bytes = peak_wasted_bytes_;
+  s.peak_chunks = peak_chunks_;
   return s;
+}
+
+void HostMemoryPool::update_allocator_peaks_locked() {
+  if (!allocator_) {
+    return;
+  }
+  const auto stats = allocator_->get_stats();
+  peak_requested_live_bytes_ =
+      std::max(peak_requested_live_bytes_, stats.requested_live_bytes);
+  peak_used_bytes_ = std::max(peak_used_bytes_, stats.used_bytes);
+  peak_wasted_bytes_ = std::max(peak_wasted_bytes_, stats.wasted_bytes);
+  peak_chunks_ = std::max(peak_chunks_, stats.chunk_count);
 }
 
 void *HostMemoryPool::allocate_raw_memory(std::size_t size) {
@@ -101,6 +149,8 @@ void *HostMemoryPool::allocate_raw_memory(std::size_t size) {
   }
 
   raw_memory_chunks_[ptr] = size;
+  raw_bytes_ = saturating_add(raw_bytes_, size);
+  peak_reserved_bytes_ = std::max(peak_reserved_bytes_, raw_bytes_);
   return ptr;
 }
 
@@ -129,6 +179,8 @@ void HostMemoryPool::deallocate_raw_memory(void *ptr) {
     TI_ERROR("Failed to free virtual memory ({} B)", size);
 
   raw_memory_chunks_.erase(ptr);
+  TI_ASSERT(size <= raw_bytes_);
+  raw_bytes_ -= size;
 }
 
 void HostMemoryPool::reset() {

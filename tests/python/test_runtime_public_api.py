@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 import taichi_forge as ti
+from taichi_forge import runtime as runtime_api
 from tests import test_utils
 
 
@@ -22,6 +23,14 @@ def test_runtime_public_api_requires_an_initialized_program():
                 pass
 
 
+def test_runtime_public_api_rejects_mismatched_statistics_schema():
+    with pytest.raises(
+        ti.TaichiRuntimeError,
+        match=r"unsupported runtime statistics schema 1.*matching",
+    ):
+        runtime_api._statistics_from_raw({"schema_version": 1})
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_runtime_stats_and_capabilities_are_immutable_and_exact():
     @ti.kernel
@@ -35,7 +44,7 @@ def test_runtime_stats_and_capabilities_are_immutable_and_exact():
     prog = ti.lang.impl.get_runtime().prog
     raw = prog._runtime_statistics_snapshot()
     snapshot = ti.runtime.stats()
-    assert snapshot.schema_version == raw["schema_version"] == 1
+    assert snapshot.schema_version == raw["schema_version"] == 2
     assert snapshot.backend == raw["backend"]
     assert snapshot.program_domain == raw["program_domain"]
     assert asdict(snapshot.submission) == raw["submission"]

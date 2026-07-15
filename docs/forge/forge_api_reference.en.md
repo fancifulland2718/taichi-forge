@@ -110,16 +110,34 @@ print(snapshot.submission.kernel_submissions)
 print(snapshot.memory.device_raw_bytes)
 ```
 
-The schema groups submission, synchronization, memory, transfer, Graph,
-display, first-fault, and trace counters. Counters are cumulative for one
-Program generation and a snapshot remains valid after a later `ti.reset()`.
-A new Program has a different `program_domain` and fresh counters.
+Statistics schema v2 groups submission, synchronization, memory, transfer,
+Graph, display, first-fault, and trace counters. Counters are cumulative for
+one Program generation and a snapshot remains valid after a later
+`ti.reset()`. A new Program has a different `program_domain` and fresh
+Program-owned counters.
 
 An optional measurement is `None` when the active backend or build cannot
 observe it. Zero means that the measurement is available and no activity was
 observed. In particular, do not convert unavailable device-memory or backend
 wait data into a measured zero. Taking a snapshot does not intentionally wait
 for GPU completion.
+
+`snapshot.memory.host_allocator` is a process-owned host-pool snapshot:
+
+| Fields | Meaning |
+| --- | --- |
+| `requested_live_bytes`, `peak_requested_live_bytes` | Requested bytes not yet released through the pool, and its lifetime peak. This is not RSS. |
+| `reserved_bytes`, `committed_bytes` | Current OS mapping size; committed bytes equal reserved bytes for Windows reserve+commit. Linux reports `None` because anonymous-mapping residency needs an OS RSS/page query. |
+| `capacity_bytes`, `used_bytes`, `available_bytes` | Allocator-owned capacity, bump-cursor consumption including alignment, and still-allocatable tails. |
+| `alignment_waste_bytes`, `unreclaimed_released_bytes`, `wasted_bytes` | Alignment loss, released slab bytes that the current policy cannot reuse, and their sum. |
+| `*_chunk_count` | Current total, default slab, request-larger-than-default, and exclusive mapping counts. |
+| `peak_reserved_bytes`, `peak_used_bytes`, `peak_wasted_bytes`, `peak_chunk_count` | Host-pool lifetime peaks; they intentionally survive Program reset. |
+
+The older flat `host_requested_live_bytes`, `host_raw_bytes`, and
+`host_capacity_bytes` fields remain compatibility aliases. New measurement
+code should prefer `host_allocator`. `ti.tools.memory_pool_stats()` exposes
+the same host values in its legacy dictionary and remains a diagnostic
+snapshot, not a reset or allocator-control API.
 
 ### `ti.runtime.capabilities()`
 

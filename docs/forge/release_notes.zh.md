@@ -194,6 +194,10 @@
   submission、synchronization、memory、transfer、Graph、display、fault 与 trace
   数据；不可用的可选测量保持 `None`，trace 导出只记录有界 host event，不伪装成
   GPU profiler。
+- 将 runtime statistics 扩展到 schema v2，准确区分 host allocator capacity、
+  cursor consumption、alignment/已释放不可复用 waste、slab/large/exclusive chunk
+  与 lifetime peak。Windows reserve+commit 和 Linux anonymous-mapping residency
+  分开表达，不伪造 committed bytes。
 - 分离 CUDA device capability 与 LLVM code-generation target，隔离 target cache，
   移除 CUDA-13.2-only iterator 依赖，加固单 runtime wheel，并避免无返回值 CUDA
   kernel 的无用 result allocation。

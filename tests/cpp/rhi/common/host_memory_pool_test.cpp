@@ -1,5 +1,7 @@
+#include <atomic>
 #include <cstdint>
 #include <limits>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -209,6 +211,158 @@ TEST(HostMemoryPool, NonExclusiveZeroSizeKeepsExistingContract) {
   expectAllocationInsideRawChunk(pool, zero1, 0);
   expectAllocationInsideRawChunk(pool, first_byte, 1);
   expectUnifiedChunksConsistent(pool);
+}
+
+TEST(HostMemoryPool, AllocatorTelemetrySeparatesCapacityAndWaste) {
+  DefaultAllocatorSizeGuard allocator_size(64);
+  HostMemoryPool pool;
+
+  void *first = pool.allocate(3, 1);
+  void *aligned = pool.allocate(1, 8);
+  auto stats = pool.get_stats();
+
+  EXPECT_EQ(stats.requested_live_bytes, 4);
+  EXPECT_EQ(stats.reserved_bytes, 64);
+  EXPECT_EQ(stats.capacity_bytes, 64);
+  EXPECT_EQ(stats.used_bytes, 9);
+  EXPECT_EQ(stats.available_bytes, 55);
+  EXPECT_EQ(stats.alignment_waste_bytes, 5);
+  EXPECT_EQ(stats.unreclaimed_released_bytes, 0);
+  EXPECT_EQ(stats.wasted_bytes, 5);
+  EXPECT_EQ(stats.slab_chunks, 1);
+  EXPECT_EQ(stats.large_chunks, 0);
+  EXPECT_EQ(stats.exclusive_chunks, 0);
+  EXPECT_EQ(stats.peak_requested_live_bytes, 4);
+  EXPECT_EQ(stats.peak_reserved_bytes, 64);
+  EXPECT_EQ(stats.peak_used_bytes, 9);
+  EXPECT_EQ(stats.peak_wasted_bytes, 5);
+  EXPECT_EQ(stats.peak_chunks, 1);
+  EXPECT_EQ(stats.raw_bytes, stats.reserved_bytes);
+  EXPECT_EQ(stats.unified_chunks, stats.slab_chunks + stats.large_chunks +
+                                      stats.exclusive_chunks);
+#if defined(TI_PLATFORM_UNIX)
+  EXPECT_FALSE(stats.committed_bytes_available);
+#else
+  EXPECT_TRUE(stats.committed_bytes_available);
+  EXPECT_EQ(stats.committed_bytes, stats.reserved_bytes);
+#endif
+
+  pool.release(3, first);
+  stats = pool.get_stats();
+  EXPECT_EQ(stats.requested_live_bytes, 1);
+  EXPECT_EQ(stats.used_bytes, 9);
+  EXPECT_EQ(stats.unreclaimed_released_bytes, 3);
+  EXPECT_EQ(stats.wasted_bytes, 8);
+  EXPECT_EQ(stats.peak_wasted_bytes, 8);
+
+  pool.release(1, aligned);
+  stats = pool.get_stats();
+  EXPECT_EQ(stats.requested_live_bytes, 0);
+  EXPECT_EQ(stats.unreclaimed_released_bytes, 4);
+  EXPECT_EQ(stats.wasted_bytes, 9);
+  EXPECT_EQ(stats.used_bytes, stats.wasted_bytes);
+}
+
+TEST(HostMemoryPool, TelemetryClassifiesLargeAndExclusiveChunks) {
+  DefaultAllocatorSizeGuard allocator_size(64);
+  HostMemoryPool pool;
+
+  pool.allocate(65, 1);
+  auto stats = pool.get_stats();
+  EXPECT_EQ(stats.slab_chunks, 0);
+  EXPECT_EQ(stats.large_chunks, 1);
+  EXPECT_EQ(stats.exclusive_chunks, 0);
+  EXPECT_EQ(stats.capacity_bytes, 65);
+  EXPECT_EQ(stats.used_bytes, 65);
+
+  void *exclusive =
+      pool.allocate(17, HostMemoryPool::page_size * 2, true);
+  stats = pool.get_stats();
+  EXPECT_EQ(stats.large_chunks, 1);
+  EXPECT_EQ(stats.exclusive_chunks, 1);
+  EXPECT_EQ(stats.requested_live_bytes, 82);
+  const auto peak_reserved = stats.peak_reserved_bytes;
+  const auto peak_used = stats.peak_used_bytes;
+  const auto peak_chunks = stats.peak_chunks;
+
+  pool.release(17, exclusive);
+  stats = pool.get_stats();
+  EXPECT_EQ(stats.large_chunks, 1);
+  EXPECT_EQ(stats.exclusive_chunks, 0);
+  EXPECT_EQ(stats.requested_live_bytes, 65);
+  EXPECT_LT(stats.reserved_bytes, peak_reserved);
+  EXPECT_LT(stats.used_bytes, peak_used);
+  EXPECT_EQ(stats.peak_reserved_bytes, peak_reserved);
+  EXPECT_EQ(stats.peak_used_bytes, peak_used);
+  EXPECT_EQ(stats.peak_chunks, peak_chunks);
+
+  pool.reset();
+  stats = pool.get_stats();
+  EXPECT_EQ(stats.reserved_bytes, 0);
+  EXPECT_EQ(stats.capacity_bytes, 0);
+  EXPECT_EQ(stats.used_bytes, 0);
+  EXPECT_EQ(stats.unified_chunks, 0);
+  EXPECT_EQ(stats.peak_reserved_bytes, peak_reserved);
+  EXPECT_EQ(stats.peak_used_bytes, peak_used);
+  EXPECT_EQ(stats.peak_chunks, peak_chunks);
+}
+
+TEST(HostMemoryPool, ConcurrentTelemetrySnapshotsStayConsistent) {
+  DefaultAllocatorSizeGuard allocator_size(1 << 20);
+  HostMemoryPool pool;
+  constexpr int kThreadCount = 8;
+  constexpr int kAllocationsPerThread = 1000;
+  std::atomic<bool> start{false};
+  std::atomic<int> active{kThreadCount};
+  std::atomic<int> invariant_failures{0};
+  std::vector<std::thread> workers;
+
+  for (int thread = 0; thread < kThreadCount; ++thread) {
+    workers.emplace_back([&, thread] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      std::vector<std::pair<void *, std::size_t>> allocations;
+      allocations.reserve(kAllocationsPerThread);
+      for (int index = 0; index < kAllocationsPerThread; ++index) {
+        const std::size_t size = 1 + ((thread * 17 + index) % 64);
+        allocations.emplace_back(pool.allocate(size, 8), size);
+      }
+      for (const auto &[ptr, size] : allocations) {
+        pool.release(size, ptr);
+      }
+      active.fetch_sub(1, std::memory_order_release);
+    });
+  }
+
+  start.store(true, std::memory_order_release);
+  while (active.load(std::memory_order_acquire) != 0) {
+    const auto stats = pool.get_stats();
+    if (stats.used_bytes > stats.capacity_bytes ||
+        stats.available_bytes != stats.capacity_bytes - stats.used_bytes ||
+        stats.wasted_bytes > stats.used_bytes ||
+        stats.requested_live_bytes + stats.wasted_bytes !=
+            stats.used_bytes ||
+        stats.unified_chunks !=
+            stats.slab_chunks + stats.large_chunks +
+                stats.exclusive_chunks) {
+      invariant_failures.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+  for (auto &worker : workers) {
+    worker.join();
+  }
+
+  const auto stats = pool.get_stats();
+  EXPECT_EQ(invariant_failures.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(stats.allocate_count,
+            kThreadCount * kAllocationsPerThread);
+  EXPECT_EQ(stats.release_count,
+            kThreadCount * kAllocationsPerThread);
+  EXPECT_EQ(stats.requested_live_bytes, 0);
+  EXPECT_EQ(stats.wasted_bytes, stats.used_bytes);
+  EXPECT_GT(stats.peak_requested_live_bytes, 0);
+  EXPECT_GE(stats.peak_used_bytes, stats.used_bytes);
 }
 
 TEST(HostMemoryPool, CheckedArithmeticRejectsOverflowAndZeroAlignment) {

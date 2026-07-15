@@ -19,13 +19,27 @@ def test_runtime_statistics_kernel_completion_sync_and_memory():
 
     prog = ti.lang.impl.get_runtime().prog
     before = prog._runtime_statistics_snapshot()
-    assert before["schema_version"] == 1
+    assert before["schema_version"] == 2
     assert before["backend"] in ("x64", "cuda", "vulkan")
     assert before["program_domain"] > 0
     assert before["memory"]["live_resources"] >= 1
     assert isinstance(before["memory"]["host_raw_bytes"], int)
     legacy_host = dict(_ti_core.get_host_memory_pool_stats())
     assert before["memory"]["host_raw_bytes"] == legacy_host["raw_bytes"]
+    host_allocator = before["memory"]["host_allocator"]
+    assert host_allocator["requested_live_bytes"] == legacy_host[
+        "requested_live_bytes"
+    ]
+    assert host_allocator["reserved_bytes"] == legacy_host["reserved_bytes"]
+    assert host_allocator["capacity_bytes"] == legacy_host["capacity_bytes"]
+    assert host_allocator["used_bytes"] == legacy_host["used_bytes"]
+    assert host_allocator["available_bytes"] == legacy_host["available_bytes"]
+    assert host_allocator["wasted_bytes"] == legacy_host["wasted_bytes"]
+    assert host_allocator["chunk_count"] == legacy_host["unified_chunks"]
+    assert (
+        host_allocator["committed_bytes"]
+        == legacy_host["committed_bytes"]
+    )
     resource_snapshots = (
         prog._debug_argpack_resource_stats(),
         prog._debug_ndarray_resource_stats(),

@@ -154,6 +154,25 @@ void export_misc(py::module &m) {
     d["raw_chunks"] = s.raw_chunks;
     d["raw_bytes"] = s.raw_bytes;
     d["unified_chunks"] = s.unified_chunks;
+    d["requested_live_bytes"] = s.requested_live_bytes;
+    d["reserved_bytes"] = s.reserved_bytes;
+    d["committed_bytes"] =
+        s.committed_bytes_available ? py::cast(s.committed_bytes) : py::none();
+    d["capacity_bytes"] = s.capacity_bytes;
+    d["used_bytes"] = s.used_bytes;
+    d["available_bytes"] = s.available_bytes;
+    d["alignment_waste_bytes"] = s.alignment_waste_bytes;
+    d["unreclaimed_released_bytes"] =
+        s.unreclaimed_released_bytes;
+    d["wasted_bytes"] = s.wasted_bytes;
+    d["slab_chunks"] = s.slab_chunks;
+    d["large_chunks"] = s.large_chunks;
+    d["exclusive_chunks"] = s.exclusive_chunks;
+    d["peak_requested_live_bytes"] = s.peak_requested_live_bytes;
+    d["peak_reserved_bytes"] = s.peak_reserved_bytes;
+    d["peak_used_bytes"] = s.peak_used_bytes;
+    d["peak_wasted_bytes"] = s.peak_wasted_bytes;
+    d["peak_chunks"] = s.peak_chunks;
     return d;
   });
   m.def("get_device_memory_pool_stats", []() {
