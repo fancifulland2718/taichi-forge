@@ -222,6 +222,12 @@
   FwdMode 对 transform、reduce-sum、gather、scatter、scatter-add 在 CPU/CUDA/Vulkan
   上使用已验证 kernel fallback；不支持的 native、scan/grouped-reduce 和离散
   automatic-AD 路径都会在写入前拒绝。
+- 增加面向整数 key、dense ndarray/field storage 的 device-resident consecutive
+  run-length encode、unique 与 unique-by-key primitive。CPU/CUDA/Vulkan 已覆盖
+  固定容量 `size=0` 逻辑空输入、device-side count、first-payload 语义、可复用
+  `RunLengthWorkspace`、PrimitiveSequence Graph replay、alias/AD guard、
+  StructNdarray payload 与独立 workspace 的多线程提交。实现复用既有 compact
+  provider，不增加 runtime-wheel ABI 依赖。
 - 增加面向生产形态的 CPU/CUDA/Vulkan 并发、数值、生命周期、内存与 replay
   regression/benchmark。剩余 Linux 发行证据见
   [Linux 复测状态](linux_revalidation.zh.md)。

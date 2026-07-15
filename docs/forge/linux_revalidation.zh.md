@@ -138,8 +138,9 @@ F6.1 已取得 Windows CPU/CUDA/Vulkan 的 provider 解析和数值 AD 证据；
   `tests/python/test_primitive_capabilities.py`、
   `tests/python/test_native_primitive_autodiff.py` 与
   `tests/python/test_primitive_plan.py`；
-- 在 `ti.init()` 前校验 13 个静态 family descriptor、frozen schema-v1 dataclass、
-  alias、逐 operand 合同与 method set 精确一致；每个后端 init 后，把所有
+- 在 `ti.init()` 前校验 F6.1 的 13 个 baseline descriptor 与 F6.2 的 3 个
+  RLE/Unique descriptor、frozen schema-v1 dataclass、alias、逐 operand 合同与
+  method set 精确一致；每个后端 init 后，把所有
   `ResolvedPrimitiveMethod.provider_probes` 与已安装 Program 逐项比较。缺失的可选
   provider 必须为 false，不能用版本字符串猜测能力；
 - integer 结果必须 exact，浮点使用公开 tolerance。在三个后端运行
@@ -151,6 +152,27 @@ F6.1 已取得 Windows CPU/CUDA/Vulkan 的 provider 解析和数值 AD 证据；
   synchronization 或 driver call；
 - 复用既有 primitive baseline，不另开微小优化实验。记录 steady median/p95 与
   workspace peak；只有可重复超过 2% 的回退才进入诊断。F6.1 不声称带来加速。
+
+### Consecutive RLE/Unique
+
+F6.2 只复用既有 compact provider，并增加 Python/Taichi-kernel 代码，不要求重新
+发布 native runtime wheel。Linux release 仍需以下证据：
+
+- 用配对的 0.5.x shim/runtime wheel 在 CPU、CUDA、Vulkan 上运行
+  `tests/python/test_rle_unique.py`，覆盖 ndarray、dense field、全部整数 key dtype、
+  StructNdarray payload、逻辑空 `size=0`、单元素、非幂次容量、active-prefix 复用、
+  写入前校验、AD 拒绝和 PrimitiveSequence Graph replay；
+- 重跑两个 thread、独立 workspace 的 submission 测试。同一 workspace 刻意不支持
+  并发共享；Linux TSAN 应关注 Program provider cache / queue submission，不能把
+  same-workspace 用法当成受支持合同；
+- 以 NumPy oracle exact 校验 run key、length、count 与 first-payload。只有 device
+  count 以下输出有效；Python 读取 count 可以同步，普通执行与 Graph replay 不得读取；
+- 在 1,048,576 个 i32 item 和代表性 run 分布上报告 public、PrimitiveSequence
+  Graph、host-round-trip median/p95 与 `workspace_bytes_peak`。确认 Unique 最低
+  scratch 4 bytes/item、RLE 12 bytes/item，再加已安装 compact provider 临时空间；
+  不得把 Windows RTX 5090 的 speedup 外推到 Linux；
+- 复查 CPU-only、CUDA-disabled、Vulkan-disabled、GCC 与 Clang build。F6.2 源码
+  不含 Win32/NT-handle 路径，也没有新增 CUDA library/header 依赖。
 
 ### Dense Field Graph 矩阵
 

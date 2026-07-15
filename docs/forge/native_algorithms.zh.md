@@ -19,6 +19,9 @@
 | `ti.algorithms.parallel_sort(keys, values=None)` | vanilla 兼容的 legacy sorter。 |
 | `ti.algorithms.PrefixSumExecutor(n).run(values)` | Prefix sum / scan。 |
 | `ti.algorithms.experimental_compact(values, flags, output, count, ...)` | 按 flags 过滤并写入紧凑输出。 |
+| `ti.algorithms.experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, ...)` | 完全在 device 上编码连续整数 key run。 |
+| `ti.algorithms.experimental_unique(values, output, count, ...)` | 选择每个连续相等 run 的首项。 |
+| `ti.algorithms.experimental_unique_by_key(keys, values, unique_keys, unique_values, count, ...)` | 选择每个连续 key run 的第一个 payload。 |
 | `ti.algorithms.experimental_reduce(values, output, op="sum", ...)` | 将 values reduce 到 `output[0]`。 |
 | `ti.algorithms.experimental_histogram(values, bins, ...)` | 将整数 values 统计到 bins。 |
 | `ti.algorithms.experimental_transform(src, dst, scale=..., bias=..., ...)` | 元素级 affine transform 和 copy。 |
@@ -88,9 +91,9 @@ method/adjoint 能力与真实调度逐渐漂移。
   由于还没有 native forward launcher，显式 native method 会拒绝。
 - scan 与 grouped-reduce 当前会在写入前拒绝 `FwdMode`；它们的现有 fallback
   不能提供可移植的实数 forward 合同。
-- sort、compact、histogram、bucket-builder、device check 与 device metric 被明确
-  标为不可微，在写入前拒绝 automatic AD context。应在 Tape/FwdMode 外完成这类
-  预处理或诊断。
+- sort、compact、RLE/Unique、histogram、bucket-builder、device check 与 device
+  metric 被明确标为不可微，在写入前拒绝 automatic AD context。应在
+  Tape/FwdMode 外完成这类预处理或诊断。
 
 这些规则只说明 automatic AD。native Graph node 仍是 primal-only，native-node AOT
 serialization 仍不支持。
@@ -114,6 +117,57 @@ CUDA Toolkit，也不需要选择 CUDA 版本化包；`method="auto"` 仍以运�
   CPU native scatter 会在写入前验证，并拒绝 duplicate；需要 duplicate target 时应使用
   `experimental_scatter_add()`。
 - duplicate target 的 floating scatter-add 可能受后端 atomic 顺序影响；只有数值合同允许时才应使用。
+
+## Consecutive RLE 与 Unique
+
+Forge 提供 device-resident consecutive-run primitive：
+
+```python
+workspace = ti.algorithms.RunLengthWorkspace(max_items=capacity)
+ti.algorithms.experimental_run_length_encode(
+    keys,
+    unique_keys,
+    run_lengths,
+    run_count,
+    size=active_count,
+    workspace=workspace,
+)
+```
+
+`experimental_unique()` 选择每个连续相等 run 的第一个 value；
+`experimental_unique_by_key()` 同时选择每个 key run 的第一个 payload。这些 API
+都不会隐式排序或构造 hash table。已排序输入会得到全局 sorted unique；任意输入
+保持 consecutive run 顺序。首版不实现 global first-occurrence unique。
+unique-by-key 接受 StructNdarray raw payload；dense MatrixField payload 当前要求
+输入输出同形且元素为 `ti.i32`。
+
+首版 key 支持 `i32/u32/i64/u64`。`size=None` 使用完整固定容量；integer
+`size` 只处理 active prefix，`size=0` 是支持的逻辑空输入表示。count 与 length
+均为 i32，所以容量上限为 `2^31-1`。input/output storage 不可 alias；只有
+device-side count 以下的输出有效。
+
+这是固定容量 tradeoff：`size` 改变语义，但 flags、compact dispatch 与 scratch
+仍按物理 capacity 保留，从而避免 Graph replay 重建。若利用率长期偏低，应按 capacity
+对 workload 分桶。
+
+实现把一个 boundary kernel 与既有 native compact provider 组合。RLE 还会 compact
+run start 并执行一个 length kernel，因此不新增 backend ABI 或 versioned CUDA
+library 依赖。Unique 的最低可复用 scratch 为 4 bytes/item，RLE 为 12 bytes/item，
+另加 compact provider 的临时空间。`RunLengthWorkspace` 可以复用但不可并发共享；
+CPU、CUDA、Vulkan 已用两个 Python submission thread 和独立 workspace 做压力回归。
+
+Windows 开发机（Ryzen 9 9950X、RTX 5090 driver 610.62）上，1,048,576 个 i32 key、
+262,144 个 run 的实测如下：
+
+| 后端 | public RLE | PrimitiveSequence Graph | host round-trip | host/public |
+| --- | ---: | ---: | ---: | ---: |
+| CPU | 4.85 ms | 4.22 ms | 4.98 ms | 1.03x |
+| CUDA | 0.418 ms | 0.456 ms | 12.19 ms | 29.2x |
+| Vulkan | 0.643 ms | 0.632 ms | 16.03 ms | 24.9x |
+
+compile/warmup 不计时，workspace 已复用，测量前没有其他 Python/GPU compute
+process。这是开发证据，不是跨驱动性能保证。CUDA Graph 差异约 38 microseconds，
+记录为通用 native-node replay 开销；F6.2 不为此增加 RLE 专用优化。
 
 ## Device-side 数值检查
 
@@ -144,7 +198,8 @@ buffer 和后端 replay plan。
 ## Workspace
 
 多数 native 算法接受 `workspace=` 或返回可复用 workspace。复用 workspace 可以让后端 scratch
-buffer 和 native plan 跨帧或跨重复调用存活，是热循环推荐写法。
+buffer 和 native plan 跨帧或跨重复调用存活，是热循环推荐写法。除非具体 workspace
+明确提供同步，否则并发调用必须使用独立 workspace。
 
 ```python
 workspace = None
@@ -157,6 +212,9 @@ for _ in range(num_steps):
 ## 与 graph 的关系
 
 Forge 可以把由算法层产出的 DSL-defined native primitive sequence 放进 graph replay。
+`PrimitiveSequence.run_length_encode()`、`unique()` 与
+`unique_by_key()` 会持有固定数组和可复用 `RunLengthWorkspace`；replay 不读取
+device count。
 `DeviceCheckResult`、`DeviceMetricResult` 和 `PrimitiveSequence` 都可以通过
 `GraphBuilder.append_native(...)` 作为 native graph node 追加。graph replay 只更新
 device-side scalar，不会自动把结果读回 Python，也不会把检查结果转换成 graph 内部 host

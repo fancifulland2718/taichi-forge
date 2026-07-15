@@ -293,6 +293,9 @@ workspace 可以复用 scratch buffer 和 native plan。
 | API | 用途 |
 | --- | --- |
 | `experimental_compact(values, flags, output, count, *, method="auto", workspace=None)` | 稳定 compact。把 `flags[i] != 0` 的元素写到 `output`，并把数量写入 device scalar。 |
+| `experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, *, size=None, method="auto", workspace=None)` | 把连续相等的整数 key run 编码为 unique key 与 i32 length。 |
+| `experimental_unique(values, output, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | 选择每个连续相等 value run 的首项。 |
+| `experimental_unique_by_key(keys, values, unique_keys, unique_values, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | 选择每个连续 key run 的 key 与第一个 payload。 |
 | `experimental_reduce(values, output, *, op="sum", method="auto", workspace=None)` | 将 1D `values` reduce 到 scalar `output[0]`。选定后端支持时 `op` 可为 `"sum"`、`"min"`、`"max"`。 |
 | `experimental_histogram(values, bins, *, method="auto", workspace=None)` | 将整数 values 统计到固定 bins。 |
 | `experimental_transform(src, dst, *, scale=1, bias=0, method="auto", workspace=None)` | 计算 `dst = src * scale + bias`。 |
@@ -310,6 +313,35 @@ workspace 可以复用 scratch buffer 和 native plan。
   scalar path 更窄。
 - `experimental_scatter_add()` 对 duplicate floating target 的结果可能随后端变化，
   因为 atomic 不保证完全相同的累加顺序。
+
+#### Consecutive RLE 与 Unique
+
+RLE/Unique 刻意采用明确的 consecutive 语义，不会隐式排序或构造 hash。任意输入保持
+run 顺序；因此已排序输入自然得到全局 sorted unique key。`unique_by_key` 选择每个
+run 的第一个 payload。unique-by-key 接受 StructNdarray raw payload；dense
+MatrixField payload 当前要求输入输出同形且元素为 `ti.i32`。
+
+首版 key 只支持 `i32/u32/i64/u64`。`size` 是可选 Python integer，选择固定容量
+storage 的 active prefix `[0, size)`；默认使用完整输入容量。`size=0` 表示逻辑
+空输入，因为 Taichi dense array 本身不能具有物理 shape 0。输出容量仍必须至少等于
+物理输入容量。
+
+`size` 只改变逻辑结果，不改变物理 scratch capacity 或 compact dispatch extent：
+boundary kernel 会清零 inactive tail，compact provider 仍处理固定容量数组。这样可避免
+Graph 重建和重新分配；若 active size 长期远小于 capacity，应按容量分桶，或使用更小
+storage/workspace。
+
+`run_count` / `count` 留在 device：ndarray 模式使用 one-element i32 ndarray，
+field 模式使用 scalar i32 field。只有 count 以下的输出有效；Python 读取 count 时
+才同步该 scalar。input/output alias 会在提交前拒绝；这些离散操作也会在写入前拒绝
+Tape/FwdMode。
+
+`method="auto"` 把 boundary kernel 与既有 CPU native、CUDA CUB 或 Vulkan native
+compact provider 组合；dense-field fallback 使用 `field_scan`。
+`RunLengthWorkspace(max_items=None)` 复用 flags，并在 RLE 时复用 start buffer。
+Unique 的最低 scratch 为 4 bytes/item，RLE 为 12 bytes/item，此外还需选定 compact
+provider 的临时空间。同一个 workspace 不可被并发调用；每个并发 producer 或 Graph
+应持有独立 workspace。
 
 ### Device-side 数值检查
 
@@ -360,6 +392,7 @@ ti.algorithms.experimental_reduce(values, out, workspace=workspace)
 | --- | --- |
 | `SortWorkspace(max_items=None, device=None)` | `sort()`、`sort_by_key()` |
 | `CompactWorkspace(max_items=None)` | `experimental_compact()` |
+| `RunLengthWorkspace(max_items=None)` | `experimental_run_length_encode()`、`experimental_unique()`、`experimental_unique_by_key()` |
 | `ReduceWorkspace(max_items=None, cache_native_plans=True)` | `experimental_reduce()` |
 | `HistogramWorkspace(max_items=None, max_bins=None)` | `experimental_histogram()` |
 | `TransformWorkspace(max_items=None, cache_native_plans=True)` | `experimental_transform()` |
@@ -407,6 +440,9 @@ print(err.to_float())
 | `scatter(src, indices, dst, *, method="auto", workspace=None)` | 添加 indexed write primitive。 |
 | `scatter_add(src, indices, dst, *, method="auto", workspace=None)` | 添加 indexed add primitive。 |
 | `compact(values, flags, output, count, *, method="auto", workspace=None)` | 添加 compact primitive。 |
+| `run_length_encode(keys, unique_keys, run_lengths, run_count, *, size=None, method="auto", workspace=None)` | 添加 consecutive RLE primitive。 |
+| `unique(values, output, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | 添加 consecutive unique primitive。 |
+| `unique_by_key(keys, values, unique_keys, unique_values, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | 添加采用 first-payload 语义的 consecutive unique-by-key。 |
 | `bucket_builder(keys, values, offsets, output, *, method="auto", workspace=None)` | 添加 bucket-builder primitive。 |
 | `grouped_reduce(keys, values, output, *, op="sum", method="auto", workspace=None)` | 添加 grouped-reduce primitive。 |
 | `clear()` | 清理持有的 workspace 和已捕获 native plan。 |

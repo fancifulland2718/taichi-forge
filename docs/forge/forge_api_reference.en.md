@@ -327,6 +327,9 @@ alive across frames.
 | API | Purpose |
 | --- | --- |
 | `experimental_compact(values, flags, output, count, *, method="auto", workspace=None)` | Stable compact. Writes items whose `flags[i] != 0` into `output`, and writes the count to a device scalar. |
+| `experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, *, size=None, method="auto", workspace=None)` | Encode consecutive equal integer-key runs into unique keys and i32 lengths. |
+| `experimental_unique(values, output, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | Select the first value from each consecutive equal-value run. |
+| `experimental_unique_by_key(keys, values, unique_keys, unique_values, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | Select one key and the first payload from each consecutive key run. |
 | `experimental_reduce(values, output, *, op="sum", method="auto", workspace=None)` | Reduce 1D `values` into scalar `output[0]`. `op` supports `"sum"`, `"min"`, and `"max"` where the selected backend supports them. |
 | `experimental_histogram(values, bins, *, method="auto", workspace=None)` | Histogram integer values into fixed bins. |
 | `experimental_transform(src, dst, *, scale=1, bias=0, method="auto", workspace=None)` | Compute `dst = src * scale + bias`. |
@@ -344,6 +347,41 @@ Common limits:
   intentionally narrower than ndarray scalar paths.
 - `experimental_scatter_add()` with duplicate floating-point targets can differ
   across backends because atomics do not guarantee the same accumulation order.
+
+#### Consecutive RLE and Unique
+
+RLE/Unique has deliberately explicit consecutive semantics. It never sorts or
+hashes implicitly. Arbitrary input preserves run order; sorted input therefore
+produces global sorted unique keys. `unique_by_key` selects the first payload
+in each run. StructNdarray raw payloads are accepted by unique-by-key. Dense
+MatrixField payloads currently require matching input/output shapes and
+`ti.i32` elements.
+
+Only integer keys (`i32/u32/i64/u64`) are supported in the first release.
+`size` is an optional Python integer selecting the active prefix
+`[0, size)` of fixed-capacity storage. It defaults to the full input capacity;
+`size=0` represents a logical empty input even though Taichi dense arrays
+cannot have physical shape zero. Output capacity must still be at least the
+physical input capacity.
+
+`size` changes logical results but not physical scratch capacity or compact
+dispatch extent: the boundary kernel clears the inactive tail and the compact
+provider still processes fixed-capacity arrays. This avoids Graph rebuilds and
+reallocations. If active sizes are usually much smaller than capacity, bucket
+workloads by capacity or use smaller storage/workspaces.
+
+`run_count`/`count` remains on device (one-element i32 ndarray or scalar i32
+field). Only output entries below that count are defined; reading the count in
+Python synchronizes that scalar. Input/output aliasing is rejected before
+submission. These discrete operations reject Tape/FwdMode before writing.
+
+`method="auto"` composes a boundary kernel with the existing CPU native,
+CUDA CUB, or Vulkan native compact provider; dense-field fallback uses
+`field_scan`. `RunLengthWorkspace(max_items=None)` owns reusable flags and,
+for RLE, start buffers. The minimum scratch is 4 bytes/item for Unique and
+12 bytes/item for RLE, plus the selected compact provider's temporary storage.
+One workspace is not safe for concurrent calls; give each concurrent producer
+or Graph its own workspace.
 
 ### Device-Side Numeric Checks
 
@@ -394,6 +432,7 @@ ti.algorithms.experimental_reduce(values, out, workspace=workspace)
 | --- | --- |
 | `SortWorkspace(max_items=None, device=None)` | `sort()`, `sort_by_key()` |
 | `CompactWorkspace(max_items=None)` | `experimental_compact()` |
+| `RunLengthWorkspace(max_items=None)` | `experimental_run_length_encode()`, `experimental_unique()`, `experimental_unique_by_key()` |
 | `ReduceWorkspace(max_items=None, cache_native_plans=True)` | `experimental_reduce()` |
 | `HistogramWorkspace(max_items=None, max_bins=None)` | `experimental_histogram()` |
 | `TransformWorkspace(max_items=None, cache_native_plans=True)` | `experimental_transform()` |
@@ -441,6 +480,9 @@ Common methods:
 | `scatter(src, indices, dst, *, method="auto", workspace=None)` | Add an indexed write primitive. |
 | `scatter_add(src, indices, dst, *, method="auto", workspace=None)` | Add an indexed add primitive. |
 | `compact(values, flags, output, count, *, method="auto", workspace=None)` | Add a compact primitive. |
+| `run_length_encode(keys, unique_keys, run_lengths, run_count, *, size=None, method="auto", workspace=None)` | Add a consecutive RLE primitive. |
+| `unique(values, output, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | Add a consecutive unique primitive. |
+| `unique_by_key(keys, values, unique_keys, unique_values, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | Add consecutive unique-by-key with first-payload semantics. |
 | `bucket_builder(keys, values, offsets, output, *, method="auto", workspace=None)` | Add a bucket-builder primitive. |
 | `grouped_reduce(keys, values, output, *, op="sum", method="auto", workspace=None)` | Add a grouped-reduce primitive. |
 | `clear()` | Clear owned workspaces and captured native plans. |

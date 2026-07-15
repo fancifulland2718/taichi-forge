@@ -22,6 +22,9 @@ identified in the [release notes](release_notes.en.md#050) are new to 0.5.0.
 | `ti.algorithms.parallel_sort(keys, values=None)` | Vanilla-compatible legacy sorter. |
 | `ti.algorithms.PrefixSumExecutor(n).run(values)` | Prefix sum / scan. |
 | `ti.algorithms.experimental_compact(values, flags, output, count, ...)` | Filter values by flags and write compacted output. |
+| `ti.algorithms.experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, ...)` | Encode consecutive integer-key runs entirely on device. |
+| `ti.algorithms.experimental_unique(values, output, count, ...)` | Select the first item from every consecutive equal run. |
+| `ti.algorithms.experimental_unique_by_key(keys, values, unique_keys, unique_values, count, ...)` | Select the first payload from every consecutive key run. |
 | `ti.algorithms.experimental_reduce(values, output, op="sum", ...)` | Reduce values into `output[0]`. |
 | `ti.algorithms.experimental_histogram(values, bins, ...)` | Histogram integer values into bins. |
 | `ti.algorithms.experimental_transform(src, dst, scale=..., bias=..., ...)` | Elementwise affine transform and copy. |
@@ -101,9 +104,10 @@ drifting away from dispatch behavior.
   because native forward launchers are not implemented.
 - Scan and grouped-reduce currently reject `FwdMode` before writing. Their
   available fallbacks do not provide a portable real-valued forward contract.
-- Sort, compact, histogram, bucket-builder, device checks, and device metrics
-  are declared non-differentiable and reject automatic AD contexts before
-  writing. Run such preprocessing or diagnostics outside Tape/FwdMode.
+- Sort, compact, RLE/Unique, histogram, bucket-builder, device checks, and
+  device metrics are declared non-differentiable and reject automatic AD
+  contexts before writing. Run such preprocessing or diagnostics outside
+  Tape/FwdMode.
 
 These rules describe automatic AD only. Native Graph nodes remain primal-only,
 and native-node AOT serialization remains unsupported.
@@ -135,6 +139,64 @@ Linux evidence.
   use `experimental_scatter_add()` when duplicate targets are intended.
 - Floating-point duplicate-target scatter-add can differ by backend atomic
   order. Use it only where that numerical contract is acceptable.
+
+## Consecutive RLE and Unique
+
+Forge provides device-resident consecutive-run primitives:
+
+```python
+workspace = ti.algorithms.RunLengthWorkspace(max_items=capacity)
+ti.algorithms.experimental_run_length_encode(
+    keys,
+    unique_keys,
+    run_lengths,
+    run_count,
+    size=active_count,
+    workspace=workspace,
+)
+```
+
+`experimental_unique()` selects the first value from each consecutive equal
+run. `experimental_unique_by_key()` also selects the first payload in each
+key run. None of these APIs performs an implicit sort or hash-table build.
+Sorted input produces global sorted unique output; arbitrary input preserves
+consecutive run order. Global first-occurrence unique is not implemented in
+this release. Unique-by-key accepts StructNdarray raw payloads; dense
+MatrixField payloads currently require matching input/output shapes and
+`ti.i32` elements.
+
+The first release supports `i32/u32/i64/u64` keys. `size=None` consumes the
+full fixed capacity; an integer `size` consumes only that active prefix, and
+`size=0` is the supported logical-empty representation. Count and lengths
+are i32, so capacity is limited to `2^31-1`. Input and output storage must not
+alias, and only entries below the device-side count are defined.
+
+This is a fixed-capacity tradeoff: `size` changes semantics, but flags, compact
+dispatch, and scratch remain sized to physical capacity so Graph replay does
+not rebuild. Capacity-bucket workloads when utilization is persistently low.
+
+The implementation composes one boundary kernel with existing native compact
+providers. RLE additionally compacts run starts and launches one length kernel.
+It therefore adds no backend ABI or versioned CUDA-library dependency. Minimum
+reusable scratch is 4 bytes/item for Unique and 12 bytes/item for RLE, plus the
+compact provider's temporary storage. A `RunLengthWorkspace` is reusable but
+not concurrently shareable; independent workspaces were stress-tested from two
+Python submission threads on CPU, CUDA, and Vulkan.
+
+On the Windows development machine (Ryzen 9 9950X, RTX 5090 driver 610.62),
+1,048,576 i32 keys with 262,144 runs measured:
+
+| backend | public RLE | PrimitiveSequence Graph | host round-trip | host/public |
+| --- | ---: | ---: | ---: | ---: |
+| CPU | 4.85 ms | 4.22 ms | 4.98 ms | 1.03x |
+| CUDA | 0.418 ms | 0.456 ms | 12.19 ms | 29.2x |
+| Vulkan | 0.643 ms | 0.632 ms | 16.03 ms | 24.9x |
+
+Compilation/warmup was outside timing, workspaces were reused, and no other
+Python/GPU compute process was active. These are development measurements, not
+cross-driver guarantees. The CUDA Graph delta is about 38 microseconds and is
+recorded as general native-node replay overhead; F6.2 does not add an
+RLE-specific optimization for it.
 
 ## Device-side Numeric Checks
 
@@ -169,7 +231,8 @@ the result scalar, scratch buffers, and backend replay plans alive.
 Most native algorithms accept a `workspace=` object or return a reusable
 workspace. Reusing workspaces keeps backend scratch buffers and native plans
 alive across frames or repeated calls. This is the preferred pattern for hot
-loops.
+loops. Concurrent calls must use independent workspaces unless the individual
+workspace explicitly documents synchronization.
 
 ```python
 workspace = None
@@ -183,6 +246,9 @@ for _ in range(num_steps):
 
 Forge can replay DSL-defined native primitive sequences through graph execution
 when the sequence is produced by Forge's own algorithm layer.
+`PrimitiveSequence.run_length_encode()`, `unique()`, and
+`unique_by_key()` retain fixed arrays and a reusable `RunLengthWorkspace`;
+their device count is not read during replay.
 `DeviceCheckResult`, `DeviceMetricResult`, and `PrimitiveSequence` can be
 appended as native graph nodes with `GraphBuilder.append_native(...)`. Graph
 replay updates only the device-side scalar. It does not automatically copy the

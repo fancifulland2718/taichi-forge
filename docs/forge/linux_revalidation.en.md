@@ -174,8 +174,9 @@ Win32/NT-handle path.
   `tests/python/test_primitive_capabilities.py`,
   `tests/python/test_native_primitive_autodiff.py`, and
   `tests/python/test_primitive_plan.py` on CPU, CUDA, and Vulkan.
-- Before `ti.init()`, verify all 13 static family descriptors, frozen schema-v1
-  dataclasses, aliases, role-specific operand contracts, and exact method-set
+- Before `ti.init()`, verify the 13 F6.1 baseline descriptors plus the three
+  F6.2 RLE/Unique descriptors, frozen schema-v1 dataclasses, aliases,
+  role-specific operand contracts, and exact method-set
   parity. After each backend init, compare every
   `ResolvedPrimitiveMethod.provider_probes` result with the installed
   Program. A missing optional provider must be false and must not be converted
@@ -193,6 +194,33 @@ Win32/NT-handle path.
   micro-optimization campaign. Record steady median/p95 and workspace peak;
   investigate only a repeatable regression above 2%. F6.1 makes no speedup
   claim.
+
+### Consecutive RLE/Unique
+
+F6.2 reuses existing compact providers and adds Python/Taichi-kernel code only,
+so it does not require a new native runtime wheel. Linux release evidence is
+still required:
+
+- Run `tests/python/test_rle_unique.py` on CPU, CUDA, and Vulkan with paired
+  0.5.x shim/runtime wheels. Cover ndarray, dense field, all integer key dtypes,
+  StructNdarray payload, logical empty `size=0`, single item, non-power-of-two
+  capacity, active-prefix reuse, validation-before-write, AD rejection, and
+  PrimitiveSequence Graph replay.
+- Repeat the two-thread independent-workspace submission test. A workspace is
+  intentionally not concurrently shareable; Linux TSAN should focus on Program
+  provider caches/queue submission rather than treating same-workspace use as
+  supported.
+- Verify exact run keys/lengths/count and first-payload selection against the
+  NumPy oracle. Only entries below device count are defined; Python count reads
+  may synchronize, but ordinary execution and Graph replay must not.
+- At 1,048,576 i32 items and representative run distributions, report public,
+  PrimitiveSequence Graph, and host-round-trip median/p95 plus
+  `workspace_bytes_peak`. Confirm minimum scratch of 4 bytes/item for Unique and
+  12 bytes/item for RLE, then add the installed compact provider's temporary
+  storage. Do not extrapolate the Windows RTX 5090 speedups to Linux.
+- Recheck CPU-only, CUDA-disabled, Vulkan-disabled, GCC, and Clang builds. No
+  F6.2 source file contains Win32/NT-handle logic or a new CUDA library/header
+  dependency.
 
 ### Dense Field Graph matrix
 
