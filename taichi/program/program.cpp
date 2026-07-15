@@ -66,19 +66,43 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <thread>
 #include <type_traits>
 #include <unordered_set>
 #include <vector>
 
 namespace taichi::lang {
 
+Program *&runtime_completion_detail::active_runtime_submission_program()
+    noexcept {
+  static thread_local Program *active_program = nullptr;
+  return active_program;
+}
+
 namespace {
 
 thread_local Program *active_snode_tree_lifecycle_program = nullptr;
+thread_local Program *active_runtime_resource_graph_program = nullptr;
+std::atomic<std::uint64_t> next_runtime_resource_domain{1};
+
+std::uint64_t allocate_runtime_resource_domain() {
+  std::uint64_t domain =
+      next_runtime_resource_domain.load(std::memory_order_relaxed);
+  for (;;) {
+    TI_ASSERT(domain != 0 &&
+              domain != (std::numeric_limits<std::uint64_t>::max)());
+    if (next_runtime_resource_domain.compare_exchange_weak(
+            domain, domain + 1, std::memory_order_relaxed,
+            std::memory_order_relaxed)) {
+      return domain;
+    }
+  }
+}
 
 void advance_snode_tree_epoch(std::atomic<std::uint64_t> &epoch) {
   const std::uint64_t current = epoch.load(std::memory_order_relaxed);
@@ -116,6 +140,39 @@ Program::SNodeTreeLifecycleReadGuard::~SNodeTreeLifecycleReadGuard() {
 Program::SNodeTreeLifecycleReadGuard
 Program::acquire_snode_tree_lifecycle_read_guard() {
   return SNodeTreeLifecycleReadGuard(this);
+}
+
+Program::RuntimeResourceGraphScope::RuntimeResourceGraphScope(Program *program)
+    : program_(program),
+      previous_program_(active_runtime_resource_graph_program),
+      lock_(program->runtime_resource_submission_mutex_) {
+  TI_ASSERT(previous_program_ == nullptr || previous_program_ == program_);
+  active_runtime_resource_graph_program = program_;
+}
+
+Program::RuntimeResourceGraphScope::RuntimeResourceGraphScope(
+    RuntimeResourceGraphScope &&other) noexcept
+    : program_(std::exchange(other.program_, nullptr)),
+      previous_program_(std::exchange(other.previous_program_, nullptr)),
+      lock_(std::move(other.lock_)) {
+}
+
+Program::RuntimeResourceGraphScope::~RuntimeResourceGraphScope() {
+  if (program_ == nullptr) {
+    return;
+  }
+  TI_ASSERT(active_runtime_resource_graph_program == program_);
+  active_runtime_resource_graph_program = previous_program_;
+}
+
+Program::RuntimeSubmissionWriteScope::RuntimeSubmissionWriteScope(
+    Program *program)
+    : program_(program) {
+  program_->acquire_runtime_submission_writer();
+}
+
+Program::RuntimeSubmissionWriteScope::~RuntimeSubmissionWriteScope() {
+  program_->release_runtime_submission_writer();
 }
 
 std::vector<SNodeTreeDependency> Program::snapshot_snode_tree_dependencies(
@@ -172,7 +229,9 @@ thread_local Program *active_cpu_primitive_program = nullptr;
 class ScopedCpuPrimitiveProgram {
  public:
   explicit ScopedCpuPrimitiveProgram(Program *program)
-      : previous_program_(active_cpu_primitive_program) {
+      : submission_guard_(
+            program->acquire_runtime_resource_submission_guard()),
+        previous_program_(active_cpu_primitive_program) {
     active_cpu_primitive_program = program;
   }
 
@@ -181,6 +240,7 @@ class ScopedCpuPrimitiveProgram {
   }
 
  private:
+  Program::RuntimeResourceSubmissionGuard submission_guard_;
   Program *previous_program_;
 };
 
@@ -4340,8 +4400,27 @@ std::size_t Program::get_dense_field_stride(SNode *snode,
   return value_size;
 }
 
-Program::Program(Arch desired_arch) : snode_rw_accessors_bank_(this) {
+Program::Program(Arch desired_arch)
+    : snode_rw_accessors_bank_(this),
+      runtime_completion_domain_(allocate_runtime_resource_domain()),
+      dense_field_staging_resources_(allocate_runtime_resource_domain()),
+      argpack_resources_(allocate_runtime_resource_domain()),
+      ndarray_resources_(allocate_runtime_resource_domain()),
+      texture_resources_(allocate_runtime_resource_domain()) {
   TI_TRACE("Program initializing...");
+
+  auto [staging_result, staging_handle] =
+      dense_field_staging_resources_.emplace(
+          kDenseFieldStagingResourceKind);
+  TI_ERROR_IF(staging_result != DenseFieldStagingRegistry::Result::kSuccess,
+              "Unable to register dense-field staging cache");
+  auto [staging_lease_result, staging_lease] =
+      dense_field_staging_resources_.acquire(staging_handle);
+  TI_ERROR_IF(
+      staging_lease_result != DenseFieldStagingRegistry::Result::kSuccess,
+      "Unable to acquire dense-field staging cache");
+  dense_field_staging_handle_ = staging_handle;
+  dense_field_staging_lease_ = std::move(staging_lease);
 
   // For performance considerations and correctness of QuantFloatType
   // operations, we force floating-point operations to flush to zero on all
@@ -4722,15 +4801,254 @@ void Program::compile_kernels(
 
 void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,
                             LaunchContextBuilder &ctx) {
-  if (active_snode_tree_lifecycle_program != this) {
-    auto lifecycle_guard = acquire_snode_tree_lifecycle_read_guard();
+  if (ctx.argpack_ptrs.empty() && ctx.ndarray_ptrs.empty() &&
+      ctx.texture_ptrs.empty()) {
+    // Keep the pre-registry ordinary-launch machine path intact. Routing this
+    // overwhelmingly common case through launch_kernel_impl() added an
+    // out-of-line call, optional guard construction, and a registered-handle
+    // branch even though none of them can contribute ownership here.
+    if (active_snode_tree_lifecycle_program != this) {
+      auto lifecycle_guard = acquire_snode_tree_lifecycle_read_guard();
+      if (!runtime_completion_tracking_enabled_.load(
+              std::memory_order_acquire)) {
+        program_impl_->get_kernel_launcher().launch_kernel(
+            compiled_kernel_data, ctx);
+        mark_runtime_submission();
+        check_runtime_error_after_kernel_launch(compiled_kernel_data);
+        return;
+      }
+      auto completion_scope = acquire_runtime_submission_scope();
+      program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
+                                                          ctx);
+      mark_runtime_submission();
+      check_runtime_error_after_kernel_launch(compiled_kernel_data);
+      return;
+    }
+    if (!runtime_completion_tracking_enabled_.load(
+            std::memory_order_acquire)) {
+      program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
+                                                          ctx);
+      mark_runtime_submission();
+      check_runtime_error_after_kernel_launch(compiled_kernel_data);
+      return;
+    }
+    auto completion_scope = acquire_runtime_submission_scope();
     program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
                                                         ctx);
+    mark_runtime_submission();
     check_runtime_error_after_kernel_launch(compiled_kernel_data);
     return;
   }
-  program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data, ctx);
-  check_runtime_error_after_kernel_launch(compiled_kernel_data);
+
+  if (active_runtime_resource_graph_program == this) {
+    // The enclosing Graph transaction has validated and pinned every runtime
+    // argument while owning runtime_resource_submission_mutex_. Per-dispatch
+    // owner/handle checks remain, but no registry lookup or recursive lock is
+    // needed here.
+    TI_ASSERT(ctx.argpack_ptrs.empty());
+    resolve_ndarray_launch_context_under_guard(ctx);
+    resolve_texture_launch_context_under_guard(ctx);
+    auto completion_scope = acquire_runtime_submission_scope();
+    program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
+                                                        ctx);
+    mark_runtime_submission();
+    check_runtime_error_after_kernel_launch(compiled_kernel_data);
+    return;
+  }
+  launch_kernel_impl(compiled_kernel_data, ctx, nullptr);
+}
+
+void Program::launch_registered_kernel(
+    const CompiledKernelData &compiled_kernel_data,
+    KernelLaunchHandle handle,
+    LaunchContextBuilder &ctx) {
+  launch_kernel_impl(compiled_kernel_data, ctx, &handle);
+}
+
+void Program::launch_kernel_impl(
+    const CompiledKernelData &compiled_kernel_data,
+    LaunchContextBuilder &ctx,
+    const KernelLaunchHandle *registered_handle) {
+  std::optional<SNodeTreeLifecycleReadGuard> lifecycle_guard;
+  if (active_snode_tree_lifecycle_program != this) {
+    // Global lock order is SNodeTree lifecycle -> runtime-resource submission.
+    // Graph already holds the former; ordinary launches acquire it here.
+    lifecycle_guard.emplace(acquire_snode_tree_lifecycle_read_guard());
+  }
+  // launch_kernel() handles the dominant no-resource path before entering this
+  // ownership-oriented slow path. Keep a defensive fast path for internal
+  // registered-handle callers that do not make the same promise.
+  if (ctx.argpack_ptrs.empty() && ctx.ndarray_ptrs.empty() &&
+      ctx.texture_ptrs.empty()) {
+    auto completion_scope = acquire_runtime_submission_scope();
+    if (registered_handle) {
+      program_impl_->get_kernel_launcher().launch_registered_kernel(
+          compiled_kernel_data, *registered_handle, ctx);
+    } else {
+      program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
+                                                          ctx);
+    }
+    mark_runtime_submission();
+    check_runtime_error_after_kernel_launch(compiled_kernel_data);
+    return;
+  }
+
+  if (active_runtime_resource_graph_program == this) {
+    TI_ASSERT(ctx.argpack_ptrs.empty());
+    resolve_ndarray_launch_context_under_guard(ctx);
+    resolve_texture_launch_context_under_guard(ctx);
+    auto completion_scope = acquire_runtime_submission_scope();
+    if (registered_handle) {
+      program_impl_->get_kernel_launcher().launch_registered_kernel(
+          compiled_kernel_data, *registered_handle, ctx);
+    } else {
+      program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
+                                                          ctx);
+    }
+    mark_runtime_submission();
+    check_runtime_error_after_kernel_launch(compiled_kernel_data);
+    return;
+  }
+
+  if (ctx.argpack_ptrs.empty() && ctx.ndarray_ptrs.empty()) {
+    // Texture-only kernels are common in staging and visualization. Do not
+    // value-initialize the unrelated ArgPack/Ndarray inline lease arrays on
+    // every submission. This keeps the same submission transaction and
+    // failure recovery as the general mixed-resource path below.
+    std::lock_guard<std::recursive_mutex> resource_submission_lock(
+        runtime_resource_submission_mutex_);
+    auto completion_scope = acquire_runtime_submission_scope();
+    const bool retain_resources_until_sync =
+        arch_is_gpu(compile_config().arch);
+    TextureLaunchLeases texture_leases;
+    if (retain_resources_until_sync) {
+      texture_leases = acquire_texture_launch_leases(ctx);
+    } else {
+      resolve_texture_launch_context(ctx);
+    }
+
+    bool pin_attempted = false;
+    auto pin_after_submission = [&] {
+      if (!retain_resources_until_sync || pin_attempted) {
+        return;
+      }
+      pin_attempted = true;
+      if (texture_leases.empty()) {
+        return;
+      }
+      try {
+        pin_texture_launch_leases(texture_leases);
+      } catch (...) {
+        program_impl_->synchronize();
+        release_completed_texture_leases();
+        throw;
+      }
+    };
+    auto launch = [&] {
+      if (registered_handle) {
+        program_impl_->get_kernel_launcher().launch_registered_kernel(
+            compiled_kernel_data, *registered_handle, ctx);
+      } else {
+        program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
+                                                            ctx);
+      }
+      mark_runtime_submission();
+      pin_after_submission();
+      check_runtime_error_after_kernel_launch(compiled_kernel_data);
+    };
+    try {
+      launch();
+    } catch (...) {
+      const std::exception_ptr launch_error = std::current_exception();
+      if (retain_resources_until_sync && !pin_attempted) {
+        try {
+          pin_after_submission();
+        } catch (...) {
+        }
+      }
+      std::rethrow_exception(launch_error);
+    }
+    return;
+  }
+
+  std::lock_guard<std::recursive_mutex> resource_submission_lock(
+      runtime_resource_submission_mutex_);
+  auto completion_scope = acquire_runtime_submission_scope();
+  const bool retain_resources_until_sync = arch_is_gpu(compile_config().arch);
+  ArgPackLaunchLeases argpack_leases;
+  if (!ctx.argpack_ptrs.empty()) {
+    argpack_leases = acquire_argpack_launch_leases(ctx);
+  }
+  NdarrayLaunchLeases ndarray_leases;
+  if (!ctx.ndarray_ptrs.empty()) {
+    if (retain_resources_until_sync) {
+      ndarray_leases = acquire_ndarray_launch_leases(ctx);
+    } else {
+      resolve_ndarray_launch_context(ctx);
+    }
+  }
+  TextureLaunchLeases texture_leases;
+  if (!ctx.texture_ptrs.empty()) {
+    if (retain_resources_until_sync) {
+      texture_leases = acquire_texture_launch_leases(ctx);
+    } else {
+      resolve_texture_launch_context(ctx);
+    }
+  }
+
+  bool pin_attempted = false;
+  auto pin_after_submission = [&] {
+    if (!retain_resources_until_sync || pin_attempted) {
+      return;
+    }
+    pin_attempted = true;
+    try {
+      if (!argpack_leases.empty()) {
+        pin_argpack_launch_leases(argpack_leases);
+      }
+      if (!ndarray_leases.empty()) {
+        pin_ndarray_launch_leases(ndarray_leases);
+      }
+      if (!texture_leases.empty()) {
+        pin_texture_launch_leases(texture_leases);
+      }
+    } catch (...) {
+      // Submission already happened. If metadata allocation fails, complete
+      // the backend work before allowing the stack leases to unwind.
+      program_impl_->synchronize();
+      release_completed_argpack_leases();
+      release_completed_ndarray_leases();
+      release_completed_texture_leases();
+      throw;
+    }
+  };
+  auto launch = [&] {
+    if (registered_handle) {
+      program_impl_->get_kernel_launcher().launch_registered_kernel(
+          compiled_kernel_data, *registered_handle, ctx);
+    } else {
+      program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
+                                                          ctx);
+    }
+    mark_runtime_submission();
+    pin_after_submission();
+    check_runtime_error_after_kernel_launch(compiled_kernel_data);
+  };
+
+  try {
+    launch();
+  } catch (...) {
+    const std::exception_ptr launch_error = std::current_exception();
+    if (retain_resources_until_sync && !pin_attempted) {
+      try {
+        pin_after_submission();
+      } catch (...) {
+        // pin_after_submission synchronized before reporting its own failure;
+        // preserve the backend exception that initiated this recovery path.
+      }
+    }
+    std::rethrow_exception(launch_error);
+  }
 }
 
 void Program::compile_and_launch_kernel(
@@ -4912,9 +5230,1089 @@ SNode *Program::get_snode_root(int tree_id) {
   return snode_trees_[tree_id]->root();
 }
 
+bool Program::ArgPackLaunchLeases::contains(
+    ArgPackResourceHandle handle) const noexcept {
+  for (std::size_t i = 0; i < inline_count_; ++i) {
+    if (inline_leases_[i]->handle() == handle) {
+      return true;
+    }
+  }
+  for (const auto &lease : overflow_leases_) {
+    if (lease.handle() == handle) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Program::ArgPackLaunchLeases::empty() const noexcept {
+  return inline_count_ == 0 && overflow_leases_.empty();
+}
+
+void Program::ArgPackLaunchLeases::add(ArgPackResourceLease lease) {
+  if (inline_count_ < inline_leases_.size()) {
+    inline_leases_[inline_count_++].emplace(std::move(lease));
+    return;
+  }
+  overflow_leases_.push_back(std::move(lease));
+}
+
+bool Program::NdarrayLaunchLeases::contains(
+    NdarrayResourceHandle handle) const noexcept {
+  for (std::size_t i = 0; i < inline_count_; ++i) {
+    if (inline_leases_[i]->handle() == handle) {
+      return true;
+    }
+  }
+  for (const auto &lease : overflow_leases_) {
+    if (lease.handle() == handle) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Program::NdarrayLaunchLeases::empty() const noexcept {
+  return inline_count_ == 0 && overflow_leases_.empty();
+}
+
+void Program::NdarrayLaunchLeases::add(NdarrayResourceLease lease) {
+  if (inline_count_ < inline_leases_.size()) {
+    inline_leases_[inline_count_++].emplace(std::move(lease));
+    return;
+  }
+  overflow_leases_.push_back(std::move(lease));
+}
+
+bool Program::TextureLaunchLeases::contains(
+    TextureResourceHandle handle) const noexcept {
+  for (std::size_t i = 0; i < inline_count_; ++i) {
+    if (inline_leases_[i]->handle() == handle) {
+      return true;
+    }
+  }
+  for (const auto &lease : overflow_leases_) {
+    if (lease.handle() == handle) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Program::TextureLaunchLeases::empty() const noexcept {
+  return inline_count_ == 0 && overflow_leases_.empty();
+}
+
+void Program::TextureLaunchLeases::add(TextureResourceLease lease) {
+  if (inline_count_ < inline_leases_.size()) {
+    inline_leases_[inline_count_++].emplace(std::move(lease));
+    return;
+  }
+  overflow_leases_.push_back(std::move(lease));
+}
+
+std::uint64_t Program::argpack_lease_key(ArgPackResourceHandle handle) {
+  return (static_cast<std::uint64_t>(handle.generation) << 32u) |
+         static_cast<std::uint64_t>(handle.index);
+}
+
+std::uint64_t Program::ndarray_lease_key(NdarrayResourceHandle handle) {
+  return (static_cast<std::uint64_t>(handle.generation) << 32u) |
+         static_cast<std::uint64_t>(handle.index);
+}
+
+std::uint64_t Program::texture_lease_key(TextureResourceHandle handle) {
+  return (static_cast<std::uint64_t>(handle.generation) << 32u) |
+         static_cast<std::uint64_t>(handle.index);
+}
+
+RuntimeResourceHandle Program::capture_argpack_resource_handle(
+    const ArgPack *view) const {
+  std::lock_guard<std::mutex> lock(argpack_lifecycle_mutex_);
+  TI_ERROR_IF(!argpack_resources_open_,
+              "Cannot bind an ArgPack after Program finalize");
+  const auto found = argpack_views_.find(view);
+  TI_ERROR_IF(found == argpack_views_.end(),
+              "Cannot bind a stale or retired ArgPack");
+  return found->second.handle;
+}
+
+Program::ArgPackLaunchLeases Program::acquire_argpack_launch_leases(
+    const LaunchContextBuilder &ctx) {
+  ArgPackLaunchLeases leases;
+  std::lock_guard<std::mutex> lock(argpack_lifecycle_mutex_);
+  TI_ERROR_IF(!argpack_resources_open_,
+              "Cannot launch a kernel with ArgPack after Program finalize");
+  for (const auto &entry : ctx.argpack_ptrs) {
+    const auto expected = ctx.argpack_resource_handles.find(entry.first);
+    TI_ERROR_IF(expected == ctx.argpack_resource_handles.end(),
+                "Kernel launch is missing its captured ArgPack generation");
+    const ArgPack *view = entry.second;
+    const auto found = argpack_views_.find(view);
+    TI_ERROR_IF(found == argpack_views_.end() ||
+                    found->second.handle != expected->second,
+                "Kernel launch references a stale or retired ArgPack");
+    const ArgPackResourceView &resource_view = found->second;
+    if (leases.contains(resource_view.handle)) {
+      continue;
+    }
+    TI_ASSERT(resource_view.lease &&
+              resource_view.lease.handle() == resource_view.handle);
+    if (argpack_inflight_leases_.find(
+            argpack_lease_key(resource_view.handle)) !=
+        argpack_inflight_leases_.end()) {
+      continue;
+    }
+    auto lease = resource_view.lease.clone();
+    TI_ERROR_IF(!lease, "Kernel launch could not clone its ArgPack lease");
+    leases.add(std::move(lease));
+  }
+  return leases;
+}
+
+Program::NdarrayLaunchLeases Program::acquire_ndarray_leases(
+    std::initializer_list<const Ndarray *> views) {
+  NdarrayLaunchLeases leases;
+  // Every caller owns runtime_resource_submission_mutex_. Create, retire,
+  // close, pin and completion release take the same outer gate before they
+  // mutate these maps, so a second mutex on this read/clone path is redundant.
+  TI_ERROR_IF(!ndarray_resources_open_,
+              "Cannot use an Ndarray after Program finalize");
+  for (const Ndarray *view : views) {
+    if (view == nullptr) {
+      continue;
+    }
+    const auto found = ndarray_views_.find(view);
+    TI_ERROR_IF(found == ndarray_views_.end(),
+                "Runtime operation references a stale or retired Ndarray");
+    const NdarrayResourceView &resource_view = found->second;
+    if (leases.contains(resource_view.handle)) {
+      continue;
+    }
+    TI_ASSERT(resource_view.lease &&
+              resource_view.lease.handle() == resource_view.handle);
+    if (ndarray_inflight_leases_.find(
+            ndarray_lease_key(resource_view.handle)) !=
+        ndarray_inflight_leases_.end()) {
+      continue;
+    }
+    auto lease = resource_view.lease.clone();
+    TI_ERROR_IF(!lease, "Runtime operation could not clone its Ndarray lease");
+    leases.add(std::move(lease));
+  }
+  return leases;
+}
+
+Program::NdarrayLaunchLeases Program::acquire_ndarray_leases(
+    const std::vector<const Ndarray *> &views) {
+  return acquire_ndarray_leases(views.data(), views.size());
+}
+
+Program::NdarrayLaunchLeases Program::acquire_ndarray_leases(
+    const Ndarray *const *views,
+    std::size_t count) {
+  NdarrayLaunchLeases leases;
+  // See the initializer_list overload: the submission gate is the outer
+  // lifecycle transaction and keeps all map entries stable here.
+  TI_ERROR_IF(!ndarray_resources_open_,
+              "Cannot use an Ndarray after Program finalize");
+  for (std::size_t i = 0; i < count; ++i) {
+    const Ndarray *view = views[i];
+    if (view == nullptr) {
+      continue;
+    }
+    const auto found = ndarray_views_.find(view);
+    TI_ERROR_IF(found == ndarray_views_.end(),
+                "Runtime operation references a stale or retired Ndarray");
+    const NdarrayResourceView &resource_view = found->second;
+    if (leases.contains(resource_view.handle)) {
+      continue;
+    }
+    if (ndarray_inflight_leases_.find(
+            ndarray_lease_key(resource_view.handle)) !=
+        ndarray_inflight_leases_.end()) {
+      continue;
+    }
+    auto lease = resource_view.lease.clone();
+    TI_ERROR_IF(!lease, "Runtime operation could not clone its Ndarray lease");
+    leases.add(std::move(lease));
+  }
+  return leases;
+}
+
+Program::TextureLaunchLeases Program::acquire_texture_leases(
+    std::initializer_list<const Texture *> views) {
+  TextureLaunchLeases leases;
+  TI_ERROR_IF(!texture_resources_open_,
+              "Cannot use a Texture after Program finalize");
+  for (const Texture *view : views) {
+    if (view == nullptr) {
+      continue;
+    }
+    const auto found = texture_views_.find(view);
+    TI_ERROR_IF(found == texture_views_.end(),
+                "Runtime operation references a stale or retired Texture");
+    const TextureResourceView &resource_view = found->second;
+    if (leases.contains(resource_view.handle) ||
+        texture_inflight_leases_.find(
+            texture_lease_key(resource_view.handle)) !=
+            texture_inflight_leases_.end()) {
+      continue;
+    }
+    auto lease = resource_view.lease.clone();
+    TI_ERROR_IF(!lease, "Runtime operation could not clone its Texture lease");
+    leases.add(std::move(lease));
+  }
+  return leases;
+}
+
+Program::TextureLaunchLeases Program::acquire_texture_leases(
+    const std::vector<const Texture *> &views) {
+  return acquire_texture_leases(views.data(), views.size());
+}
+
+Program::TextureLaunchLeases Program::acquire_texture_leases(
+    const Texture *const *views,
+    std::size_t count) {
+  TextureLaunchLeases leases;
+  TI_ERROR_IF(!texture_resources_open_,
+              "Cannot use a Texture after Program finalize");
+  for (std::size_t i = 0; i < count; ++i) {
+    const Texture *view = views[i];
+    if (view == nullptr) {
+      continue;
+    }
+    const auto found = texture_views_.find(view);
+    TI_ERROR_IF(found == texture_views_.end(),
+                "Runtime operation references a stale or retired Texture");
+    const TextureResourceView &resource_view = found->second;
+    if (leases.contains(resource_view.handle) ||
+        texture_inflight_leases_.find(
+            texture_lease_key(resource_view.handle)) !=
+            texture_inflight_leases_.end()) {
+      continue;
+    }
+    auto lease = resource_view.lease.clone();
+    TI_ERROR_IF(!lease, "Runtime operation could not clone its Texture lease");
+    leases.add(std::move(lease));
+  }
+  return leases;
+}
+
+Program::NdarrayResourceLease Program::acquire_ndarray_external_lease(
+    RuntimeResourceHandle handle) {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  TI_ERROR_IF(!ndarray_resources_open_,
+              "Cannot retain an Ndarray after Program finalize");
+  auto [result, lease] = ndarray_resources_.acquire(handle);
+  TI_ERROR_IF(result != NdarrayResourceRegistry::Result::kSuccess,
+              "Cannot retain a stale or retired Ndarray");
+  return std::move(lease);
+}
+
+Program::TextureResourceLease Program::acquire_texture_external_lease(
+    const Texture *view) {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  TI_ERROR_IF(!texture_resources_open_,
+              "Cannot retain a Texture after Program finalize");
+  const auto found = texture_views_.find(view);
+  TI_ERROR_IF(found == texture_views_.end() ||
+                  found->second.handle != view->runtime_resource_handle(),
+              "Cannot retain a stale or retired Texture");
+  auto lease = found->second.lease.clone();
+  TI_ERROR_IF(!lease, "Cannot clone the Texture external lease");
+  return std::move(lease);
+}
+
+void Program::retain_ndarrays_for_external_submission(
+    const std::vector<const Ndarray *> &views) {
+  retain_ndarrays_for_external_submission(views.data(), views.size());
+}
+
+void Program::retain_ndarrays_for_external_submission(
+    const Ndarray *const *views,
+    std::size_t count) {
+  // The public contract requires the caller to keep
+  // runtime_resource_submission_mutex_ for the whole external transaction.
+  // Re-locking the recursive mutex here is safe but adds measurable fixed
+  // overhead to every Graph replay without extending the protected interval.
+  if (!arch_is_gpu(compile_config().arch)) {
+    validate_ndarrays_for_external_submission(views, count);
+    return;
+  }
+  auto leases = acquire_ndarray_leases(views, count);
+  if (!leases.empty()) {
+    pin_ndarray_launch_leases(leases);
+  }
+}
+
+void Program::validate_ndarrays_for_external_submission(
+    const std::vector<const Ndarray *> &views) {
+  validate_ndarrays_for_external_submission(views.data(), views.size());
+}
+
+void Program::validate_ndarrays_for_external_submission(
+    const Ndarray *const *views,
+    std::size_t count) {
+  // Callers keep the submission guard alive through a synchronous external
+  // operation. The temporary leases prove that every view still belongs to
+  // this Program; the live-view lease then remains protected from retire by
+  // the same gate until the operation completes.
+  // Graph, Texture and GGUI callers hold runtime_resource_submission_mutex_
+  // across validation and the synchronous operation.
+  // The caller's submission guard keeps the live-view map stable through the
+  // external operation. Debug readers may run concurrently, but all writers
+  // also require the submission gate before taking ndarray_lifecycle_mutex_.
+  TI_ERROR_IF(!ndarray_resources_open_,
+              "Cannot use an Ndarray after Program finalize");
+  for (std::size_t i = 0; i < count; ++i) {
+    const Ndarray *view = views[i];
+    if (view == nullptr) {
+      continue;
+    }
+    const auto found = ndarray_views_.find(view);
+    TI_ERROR_IF(found == ndarray_views_.end() ||
+                    found->second.handle != view->runtime_resource_handle(),
+                "Runtime operation references a stale or retired Ndarray");
+    TI_ASSERT(found->second.lease && found->second.lease.get() == view &&
+              found->second.lease.handle() == found->second.handle);
+  }
+}
+
+void Program::retain_textures_for_external_submission(
+    const std::vector<const Texture *> &views) {
+  retain_textures_for_external_submission(views.data(), views.size());
+}
+
+void Program::retain_textures_for_external_submission(
+    const Texture *const *views,
+    std::size_t count) {
+  if (!arch_is_gpu(compile_config().arch)) {
+    validate_textures_for_external_submission(views, count);
+    return;
+  }
+  auto leases = acquire_texture_leases(views, count);
+  if (!leases.empty()) {
+    pin_texture_launch_leases(leases);
+  }
+}
+
+void Program::validate_textures_for_external_submission(
+    const std::vector<const Texture *> &views) {
+  validate_textures_for_external_submission(views.data(), views.size());
+}
+
+void Program::validate_textures_for_external_submission(
+    const Texture *const *views,
+    std::size_t count) {
+  TI_ERROR_IF(!texture_resources_open_,
+              "Cannot use a Texture after Program finalize");
+  for (std::size_t i = 0; i < count; ++i) {
+    const Texture *view = views[i];
+    if (view == nullptr) {
+      continue;
+    }
+    const auto found = texture_views_.find(view);
+    TI_ERROR_IF(found == texture_views_.end() ||
+                    found->second.handle != view->runtime_resource_handle(),
+                "Runtime operation references a stale or retired Texture");
+    TI_ASSERT(found->second.lease && found->second.lease.get() == view &&
+              found->second.lease.handle() == found->second.handle);
+  }
+}
+
+void Program::resolve_ndarray_launch_context(LaunchContextBuilder &ctx) {
+  if (ctx.ndarray_ptrs.empty()) {
+    return;
+  }
+  // Both callers hold runtime_resource_submission_mutex_: ordinary launch owns
+  // it in launch_kernel_impl(), while AOT Graph owns an explicit transaction.
+  TI_ERROR_IF(!ndarray_resources_open_,
+              "Cannot resolve an Ndarray after Program finalize");
+
+  auto resolve_view = [&](Program *owner, const Ndarray *view,
+                          RuntimeResourceHandle expected_handle)
+      -> const Ndarray * {
+    if (view == nullptr) {
+      return nullptr;
+    }
+    TI_ERROR_IF(owner != this,
+                "Kernel launch references an Ndarray from another Program");
+    const auto found = ndarray_views_.find(view);
+    TI_ERROR_IF(found == ndarray_views_.end() ||
+                    found->second.handle != expected_handle,
+                "Kernel launch references a stale or retired Ndarray");
+    TI_ASSERT(found->second.lease && found->second.lease.get() == view);
+    return found->second.lease.get();
+  };
+
+  for (const auto &resource_ref : ctx.ndarray_ptrs) {
+    const Ndarray *data = resolve_view(resource_ref.owner, resource_ref.data,
+                                       resource_ref.data_handle);
+    TI_ASSERT(data != nullptr);
+    const Ndarray *grad = resolve_view(resource_ref.owner, resource_ref.grad,
+                                       resource_ref.grad_handle);
+    (void)data;
+    (void)grad;
+  }
+}
+
+void Program::resolve_ndarray_launch_context_under_guard(
+    LaunchContextBuilder &ctx) {
+  // Caller owns runtime_resource_submission_mutex_ continuously from before
+  // handle capture until backend submission. That prevents view retirement,
+  // so repeating the lifecycle-map lookup per dispatch would add no safety.
+  auto resolve_view = [&](Program *owner, const Ndarray *view,
+                          RuntimeResourceHandle expected_handle)
+      -> const Ndarray * {
+    if (view == nullptr) {
+      return nullptr;
+    }
+    TI_ERROR_IF(owner != this || !expected_handle,
+                "Graph launch references an invalid Ndarray owner");
+    return view;
+  };
+
+  for (const auto &ref : ctx.ndarray_ptrs) {
+    const Ndarray *data = resolve_view(ref.owner, ref.data, ref.data_handle);
+    TI_ASSERT(data != nullptr);
+    const Ndarray *grad = resolve_view(ref.owner, ref.grad, ref.grad_handle);
+    (void)data;
+    (void)grad;
+  }
+}
+
+void Program::resolve_texture_launch_context(LaunchContextBuilder &ctx) {
+  if (ctx.texture_ptrs.empty()) {
+    return;
+  }
+  TI_ERROR_IF(!texture_resources_open_,
+              "Cannot resolve a Texture after Program finalize");
+  for (const auto &ref : ctx.texture_ptrs) {
+    TI_ERROR_IF(ref.owner != this,
+                "Kernel launch references a Texture from another Program");
+    TI_ERROR_IF(ref.handle.index >= texture_view_slots_.size(),
+                "Kernel launch references a stale or retired Texture");
+    const auto &slot = texture_view_slots_[ref.handle.index];
+    TI_ERROR_IF(slot.view != ref.texture || slot.handle != ref.handle,
+                "Kernel launch references a stale or retired Texture");
+  }
+}
+
+void Program::resolve_texture_launch_context_under_guard(
+    LaunchContextBuilder &ctx) {
+  for (const auto &ref : ctx.texture_ptrs) {
+    TI_ERROR_IF(ref.owner != this || !ref.handle,
+                "Graph launch references an invalid Texture owner");
+  }
+}
+
+Program::NdarrayLaunchLeases Program::acquire_ndarray_launch_leases(
+    LaunchContextBuilder &ctx) {
+  NdarrayLaunchLeases leases;
+  // launch_kernel_impl() owns runtime_resource_submission_mutex_. It excludes
+  // create/retire/close and in-flight-map mutation for this entire validation
+  // and backend submission interval; avoid a second mutex on every kernel.
+  TI_ERROR_IF(!ndarray_resources_open_,
+              "Cannot launch a kernel with Ndarray after Program finalize");
+
+  auto acquire_view = [&](Program *owner, const Ndarray *view,
+                           RuntimeResourceHandle expected_handle) {
+    if (view == nullptr) {
+      return;
+    }
+    TI_ERROR_IF(owner != this,
+                "Kernel launch references an Ndarray from another Program");
+    const auto found = ndarray_views_.find(view);
+    TI_ERROR_IF(found == ndarray_views_.end() ||
+                    found->second.handle != expected_handle,
+                "Kernel launch references a stale or retired Ndarray");
+    const NdarrayResourceView &resource_view = found->second;
+    TI_ASSERT(resource_view.lease && resource_view.lease.get() == view &&
+              resource_view.lease.handle() == expected_handle);
+    if (leases.contains(expected_handle) ||
+        ndarray_inflight_leases_.find(ndarray_lease_key(expected_handle)) !=
+            ndarray_inflight_leases_.end()) {
+      return;
+    }
+    auto lease = resource_view.lease.clone();
+    TI_ERROR_IF(!lease, "Kernel launch could not clone its Ndarray lease");
+    leases.add(std::move(lease));
+  };
+
+  for (const auto &resource_ref : ctx.ndarray_ptrs) {
+    acquire_view(resource_ref.owner, resource_ref.data,
+                 resource_ref.data_handle);
+    acquire_view(resource_ref.owner, resource_ref.grad,
+                 resource_ref.grad_handle);
+  }
+  return leases;
+}
+
+Program::TextureLaunchLeases Program::acquire_texture_launch_leases(
+    LaunchContextBuilder &ctx) {
+  TextureLaunchLeases leases;
+  TI_ERROR_IF(!texture_resources_open_,
+              "Cannot launch a kernel with Texture after Program finalize");
+  for (const auto &ref : ctx.texture_ptrs) {
+    TI_ERROR_IF(ref.owner != this,
+                "Kernel launch references a Texture from another Program");
+    TI_ERROR_IF(ref.handle.index >= texture_view_slots_.size(),
+                "Kernel launch references a stale or retired Texture");
+    const auto &slot = texture_view_slots_[ref.handle.index];
+    TI_ERROR_IF(slot.view != ref.texture || slot.handle != ref.handle,
+                "Kernel launch references a stale or retired Texture");
+    if (leases.contains(ref.handle) ||
+        texture_inflight_leases_.find(texture_lease_key(ref.handle)) !=
+            texture_inflight_leases_.end()) {
+      continue;
+    }
+    const auto found = texture_views_.find(ref.texture);
+    TI_ASSERT(found != texture_views_.end() &&
+              found->second.handle == ref.handle);
+    const TextureResourceView &resource_view = found->second;
+    TI_ASSERT(resource_view.lease &&
+              resource_view.lease.get() == ref.texture &&
+              resource_view.lease.handle() == ref.handle);
+    auto lease = resource_view.lease.clone();
+    TI_ERROR_IF(!lease, "Kernel launch could not clone its Texture lease");
+    leases.add(std::move(lease));
+  }
+  return leases;
+}
+
+void Program::pin_argpack_launch_leases(ArgPackLaunchLeases &leases) {
+  std::lock_guard<std::mutex> lock(argpack_lifecycle_mutex_);
+  auto pin_lease = [&](ArgPackResourceLease &lease) {
+    if (!lease) {
+      return;
+    }
+    const std::uint64_t key = argpack_lease_key(lease.handle());
+    if (argpack_inflight_leases_.find(key) ==
+        argpack_inflight_leases_.end()) {
+      argpack_inflight_leases_.emplace(key, std::move(lease));
+    }
+  };
+  for (std::size_t i = 0; i < leases.inline_count_; ++i) {
+    pin_lease(*leases.inline_leases_[i]);
+  }
+  for (auto &lease : leases.overflow_leases_) {
+    pin_lease(lease);
+  }
+}
+
+void Program::pin_ndarray_launch_leases(NdarrayLaunchLeases &leases) {
+  std::lock_guard<std::mutex> lock(ndarray_lifecycle_mutex_);
+  auto pin_lease = [&](NdarrayResourceLease &lease) {
+    if (!lease) {
+      return;
+    }
+    const std::uint64_t key = ndarray_lease_key(lease.handle());
+    if (ndarray_inflight_leases_.find(key) ==
+        ndarray_inflight_leases_.end()) {
+      ndarray_inflight_leases_.emplace(key, std::move(lease));
+    }
+  };
+  for (std::size_t i = 0; i < leases.inline_count_; ++i) {
+    pin_lease(*leases.inline_leases_[i]);
+  }
+  for (auto &lease : leases.overflow_leases_) {
+    pin_lease(lease);
+  }
+}
+
+void Program::pin_texture_launch_leases(TextureLaunchLeases &leases) {
+  std::lock_guard<std::mutex> lock(texture_lifecycle_mutex_);
+  auto pin_lease = [&](TextureResourceLease &lease) {
+    if (!lease) {
+      return;
+    }
+    const std::uint64_t key = texture_lease_key(lease.handle());
+    if (texture_inflight_leases_.find(key) ==
+        texture_inflight_leases_.end()) {
+      texture_inflight_leases_.emplace(key, std::move(lease));
+    }
+  };
+  for (std::size_t i = 0; i < leases.inline_count_; ++i) {
+    pin_lease(*leases.inline_leases_[i]);
+  }
+  for (auto &lease : leases.overflow_leases_) {
+    pin_lease(lease);
+  }
+}
+
+void Program::release_completed_argpack_leases() {
+  ArgPackInflightLeaseMap completed;
+  {
+    std::lock_guard<std::mutex> lock(argpack_lifecycle_mutex_);
+    completed.swap(argpack_inflight_leases_);
+  }
+  completed.clear();
+}
+
+void Program::release_completed_ndarray_leases() {
+  NdarrayInflightLeaseMap completed;
+  {
+    std::lock_guard<std::mutex> lock(ndarray_lifecycle_mutex_);
+    completed.swap(ndarray_inflight_leases_);
+  }
+  completed.clear();
+}
+
+void Program::release_completed_texture_leases() {
+  TextureInflightLeaseMap completed;
+  {
+    std::lock_guard<std::mutex> lock(texture_lifecycle_mutex_);
+    completed.swap(texture_inflight_leases_);
+  }
+  completed.clear();
+}
+
+std::size_t Program::RuntimeCompletionResourceBatch::retained_resource_count(
+    std::uint32_t kind) const noexcept {
+  if (kind == kArgPackResourceKind) {
+    return argpacks.size();
+  }
+  if (kind == kNdarrayResourceKind) {
+    return ndarrays.size();
+  }
+  if (kind == kTextureResourceKind) {
+    return textures.size();
+  }
+  return 0;
+}
+
+std::shared_ptr<Program::RuntimeCompletionResourceBatch>
+Program::detach_runtime_completion_resources() {
+  bool has_resources = false;
+  {
+    std::lock_guard<std::mutex> lock(argpack_lifecycle_mutex_);
+    has_resources = !argpack_inflight_leases_.empty();
+  }
+  if (!has_resources) {
+    std::lock_guard<std::mutex> lock(ndarray_lifecycle_mutex_);
+    has_resources = !ndarray_inflight_leases_.empty();
+  }
+  if (!has_resources) {
+    std::lock_guard<std::mutex> lock(texture_lifecycle_mutex_);
+    has_resources = !texture_inflight_leases_.empty();
+  }
+  if (!has_resources) {
+    return nullptr;
+  }
+
+  // Allocate the control block before moving any lease. A metadata allocation
+  // failure therefore leaves the legacy synchronize-owned maps intact.
+  auto batch = std::make_shared<RuntimeCompletionResourceBatch>();
+  {
+    std::lock_guard<std::mutex> lock(argpack_lifecycle_mutex_);
+    batch->argpacks.swap(argpack_inflight_leases_);
+  }
+  {
+    std::lock_guard<std::mutex> lock(ndarray_lifecycle_mutex_);
+    batch->ndarrays.swap(ndarray_inflight_leases_);
+  }
+  {
+    std::lock_guard<std::mutex> lock(texture_lifecycle_mutex_);
+    batch->textures.swap(texture_inflight_leases_);
+  }
+  TI_ASSERT(!batch->empty());
+  return batch;
+}
+
+void Program::acquire_runtime_submission_reader() noexcept {
+  for (;;) {
+    const std::uint64_t previous =
+        runtime_submission_gate_.fetch_add(1, std::memory_order_acquire);
+    TI_ASSERT((previous & kRuntimeSubmissionReaderMask) !=
+              kRuntimeSubmissionReaderMask);
+    if ((previous & kRuntimeSubmissionWriterBit) == 0) {
+      return;
+    }
+    runtime_submission_gate_.fetch_sub(1, std::memory_order_release);
+    std::this_thread::yield();
+  }
+}
+
+void Program::release_runtime_submission_reader() noexcept {
+  const std::uint64_t previous =
+      runtime_submission_gate_.fetch_sub(1, std::memory_order_release);
+  TI_ASSERT((previous & kRuntimeSubmissionReaderMask) != 0);
+}
+
+void Program::acquire_runtime_submission_writer() noexcept {
+  for (;;) {
+    std::uint64_t observed =
+        runtime_submission_gate_.load(std::memory_order_acquire);
+    if ((observed & kRuntimeSubmissionWriterBit) != 0) {
+      std::this_thread::yield();
+      continue;
+    }
+    if (runtime_submission_gate_.compare_exchange_weak(
+            observed, observed | kRuntimeSubmissionWriterBit,
+            std::memory_order_acq_rel, std::memory_order_acquire)) {
+      break;
+    }
+  }
+  while ((runtime_submission_gate_.load(std::memory_order_acquire) &
+          kRuntimeSubmissionReaderMask) != 0) {
+    std::this_thread::yield();
+  }
+}
+
+void Program::release_runtime_submission_writer() noexcept {
+  const std::uint64_t observed =
+      runtime_submission_gate_.load(std::memory_order_relaxed);
+  TI_ASSERT(observed == kRuntimeSubmissionWriterBit);
+  runtime_submission_gate_.store(0, std::memory_order_release);
+}
+
+void Program::track_runtime_completion(
+    const RuntimeCompletion &completion) {
+  TI_ASSERT(completion.valid() && completion.has_backend_work());
+  std::lock_guard<std::mutex> lock(runtime_completion_mutex_);
+  runtime_completions_.push_back(completion);
+}
+
+void Program::collect_ready_runtime_completions() {
+  std::lock_guard<std::mutex> lock(runtime_completion_mutex_);
+  for (auto it = runtime_completions_.begin();
+       it != runtime_completions_.end();) {
+    if (it->done()) {
+      it = runtime_completions_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void Program::complete_all_runtime_completions() noexcept {
+  std::deque<RuntimeCompletion> completed;
+  {
+    std::lock_guard<std::mutex> lock(runtime_completion_mutex_);
+    completed.swap(runtime_completions_);
+  }
+  for (const auto &completion : completed) {
+    completion.mark_completed();
+  }
+}
+
+std::size_t Program::runtime_completion_resource_count(
+    std::uint32_t kind) const noexcept {
+  std::lock_guard<std::mutex> lock(runtime_completion_mutex_);
+  std::size_t count = 0;
+  for (const auto &completion : runtime_completions_) {
+    count += completion.retained_resource_count(kind);
+  }
+  return count;
+}
+
+RuntimeCompletion Program::record_runtime_completion() {
+  collect_ready_runtime_completions();
+
+  RuntimeCompletion result;
+  {
+    // Lock order: resource submission -> completion submission. Kernel/Graph
+    // paths acquire the corresponding shared scope only after their existing
+    // SNode/resource guards, so completion recording cannot invert the order.
+    std::lock_guard<std::recursive_mutex> resource_lock(
+        runtime_resource_submission_mutex_);
+    // New submissions acquire the reader gate from this point onward. A
+    // submission that observed the old disabled state may still overlap this
+    // writer; its successful dirty-bit publication linearizes it after this
+    // completion, which is valid because the two host calls overlap.
+    runtime_completion_tracking_enabled_.store(true,
+                                               std::memory_order_release);
+    RuntimeSubmissionWriteScope submission_scope(this);
+    TI_ERROR_IF(finalized_,
+                "Cannot record a completion after Program finalize");
+
+    if (!runtime_submission_pending_.exchange(false,
+                                              std::memory_order_acq_rel)) {
+      const std::uint64_t next =
+          next_runtime_completion_sequence_.load(std::memory_order_relaxed);
+      return RuntimeCompletion::completed(
+          compile_config().arch, runtime_completion_domain_,
+          next > 1 ? next - 1 : 0);
+    }
+
+    const std::uint64_t previous_submission_epoch =
+        runtime_submission_epoch_.fetch_add(1, std::memory_order_relaxed);
+    TI_ASSERT(previous_submission_epoch !=
+              (std::numeric_limits<std::uint64_t>::max)());
+    const std::uint64_t submission_epoch = previous_submission_epoch + 1;
+
+    const std::uint64_t sequence =
+        next_runtime_completion_sequence_.fetch_add(
+            1, std::memory_order_relaxed);
+    TI_ASSERT(sequence != 0 &&
+              sequence != (std::numeric_limits<std::uint64_t>::max)());
+
+    try {
+      if (arch_is_cpu(compile_config().arch)) {
+        // CPU launches are synchronous. Preserve that contract and reuse the
+        // completed singleton instead of pretending to run a background task.
+        program_impl_->synchronize();
+        result = RuntimeCompletion::completed(
+            compile_config().arch, runtime_completion_domain_, sequence);
+      } else if (compile_config().arch == Arch::cuda) {
+        // Existing Driver API symbols are loaded dynamically; no cudart or
+        // Toolkit-versioned runtime dependency is introduced.
+        result = RuntimeCompletion::from_cuda_stream(
+            runtime_completion_domain_, sequence, nullptr);
+      } else if (compile_config().arch == Arch::vulkan) {
+        // A work epoch exists, so flush() intentionally records a fence even
+        // when the work came from a replay/native path outside current_cmdlist.
+        result = RuntimeCompletion::from_stream_semaphore(
+            Arch::vulkan, runtime_completion_domain_, sequence,
+            program_impl_->flush());
+      } else {
+        // F2's supported contract is CPU/CUDA/Vulkan. Other compiled backends
+        // retain their legacy synchronous fallback without a fake token.
+        program_impl_->synchronize();
+        result = RuntimeCompletion::completed(
+            compile_config().arch, runtime_completion_domain_, sequence);
+      }
+
+      if (result.has_backend_work()) {
+        result.attach_resources(detach_runtime_completion_resources());
+        track_runtime_completion(result);
+      } else {
+        release_completed_argpack_leases();
+        release_completed_ndarray_leases();
+        release_completed_texture_leases();
+      }
+      last_runtime_completion_submission_epoch_.store(
+          submission_epoch, std::memory_order_release);
+    } catch (...) {
+      // No completion can safely own a partially detached submission. Finish
+      // the backend first, then restore the pre-F2 synchronize release rule.
+      program_impl_->synchronize();
+      result.mark_completed();
+      complete_all_runtime_completions();
+      release_completed_argpack_leases();
+      release_completed_ndarray_leases();
+      release_completed_texture_leases();
+      last_runtime_completion_submission_epoch_.store(
+          submission_epoch, std::memory_order_release);
+      throw;
+    }
+  }
+
+  collect_ready_runtime_completions();
+
+  RuntimeCompletion oldest;
+  {
+    std::lock_guard<std::mutex> lock(runtime_completion_mutex_);
+    if (runtime_completions_.size() > kMaxTrackedRuntimeCompletions) {
+      oldest = runtime_completions_.front();
+    }
+  }
+  if (oldest.valid()) {
+    // Bounded backpressure applies only to the opt-in completion path. No
+    // Program/resource or Vulkan queue mutex is held while waiting.
+    oldest.wait();
+    collect_ready_runtime_completions();
+  }
+  return result;
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_runtime_completion_stats() const {
+  std::uint64_t active = 0;
+  std::uint64_t pending = 0;
+  std::uint64_t failed = 0;
+  {
+    std::lock_guard<std::mutex> lock(runtime_completion_mutex_);
+    active = runtime_completions_.size();
+    for (const auto &completion : runtime_completions_) {
+      if (!completion.first_error_message().empty()) {
+        ++failed;
+      } else if (completion.has_backend_work()) {
+        ++pending;
+      }
+    }
+  }
+  return {
+      {"domain", runtime_completion_domain_},
+      {"submission_epoch",
+       runtime_submission_epoch_.load(std::memory_order_acquire)},
+      {"completed_submission_epoch",
+       last_runtime_completion_submission_epoch_.load(
+           std::memory_order_acquire)},
+      {"next_sequence",
+       next_runtime_completion_sequence_.load(std::memory_order_acquire)},
+      {"active", active},
+      {"pending", pending},
+      {"failed", failed},
+      {"retained_argpacks",
+       runtime_completion_resource_count(kArgPackResourceKind)},
+      {"retained_ndarrays",
+       runtime_completion_resource_count(kNdarrayResourceKind)},
+      {"retained_textures",
+       runtime_completion_resource_count(kTextureResourceKind)},
+  };
+}
+
+void Program::close_argpack_resources() {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  std::lock_guard<std::mutex> lifecycle_lock(argpack_lifecycle_mutex_);
+  argpack_resources_open_ = false;
+  argpack_views_.clear();
+}
+
+void Program::close_ndarray_resources() {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  std::lock_guard<std::mutex> lifecycle_lock(ndarray_lifecycle_mutex_);
+  ndarray_resources_open_ = false;
+  ndarray_views_.clear();
+}
+
+void Program::close_texture_resources() {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  std::lock_guard<std::mutex> lifecycle_lock(texture_lifecycle_mutex_);
+  texture_resources_open_ = false;
+  texture_views_.clear();
+  texture_view_slots_.clear();
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_argpack_resource_stats() const {
+  const auto completion_inflight =
+      runtime_completion_resource_count(kArgPackResourceKind);
+  std::lock_guard<std::mutex> lock(argpack_lifecycle_mutex_);
+  const auto stats = argpack_resources_.stats();
+  return {{"slots", stats.slots},
+          {"live", stats.live},
+          {"retiring", stats.retiring},
+          {"released", stats.released},
+          {"leases", stats.leases},
+          {"created_total", stats.created_total},
+          {"retired_total", stats.retired_total},
+          {"released_total", stats.released_total},
+          {"release_errors", stats.release_errors},
+          {"views", argpack_views_.size()},
+          {"inflight",
+           argpack_inflight_leases_.size() + completion_inflight},
+          {"closed", stats.closed ? 1u : 0u}};
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_argpack_resource_identity(const ArgPack *view) const {
+  std::lock_guard<std::mutex> lock(argpack_lifecycle_mutex_);
+  const auto found = argpack_views_.find(view);
+  TI_ERROR_IF(found == argpack_views_.end(),
+              "Cannot inspect a stale or retired ArgPack");
+  const auto handle = found->second.handle;
+  return {{"domain", handle.domain},
+          {"kind", handle.kind},
+          {"index", handle.index},
+          {"generation", handle.generation}};
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_ndarray_resource_stats() const {
+  const auto completion_inflight =
+      runtime_completion_resource_count(kNdarrayResourceKind);
+  std::lock_guard<std::mutex> lock(ndarray_lifecycle_mutex_);
+  const auto stats = ndarray_resources_.stats();
+  return {{"slots", stats.slots},
+          {"live", stats.live},
+          {"retiring", stats.retiring},
+          {"released", stats.released},
+          {"leases", stats.leases},
+          {"created_total", stats.created_total},
+          {"retired_total", stats.retired_total},
+          {"released_total", stats.released_total},
+          {"release_errors", stats.release_errors},
+          {"views", ndarray_views_.size()},
+          {"inflight",
+           ndarray_inflight_leases_.size() + completion_inflight},
+          {"closed", stats.closed ? 1u : 0u}};
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_ndarray_resource_identity(const Ndarray *view) const {
+  std::lock_guard<std::mutex> lock(ndarray_lifecycle_mutex_);
+  const auto found = ndarray_views_.find(view);
+  TI_ERROR_IF(found == ndarray_views_.end(),
+              "Cannot inspect a stale or retired Ndarray");
+  const auto handle = found->second.handle;
+  return {{"domain", handle.domain},
+          {"kind", handle.kind},
+          {"index", handle.index},
+          {"generation", handle.generation}};
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_texture_resource_stats() const {
+  const auto completion_inflight =
+      runtime_completion_resource_count(kTextureResourceKind);
+  std::lock_guard<std::mutex> lock(texture_lifecycle_mutex_);
+  const auto stats = texture_resources_.stats();
+  return {{"slots", stats.slots},
+          {"live", stats.live},
+          {"retiring", stats.retiring},
+          {"released", stats.released},
+          {"leases", stats.leases},
+          {"created_total", stats.created_total},
+          {"retired_total", stats.retired_total},
+          {"released_total", stats.released_total},
+          {"release_errors", stats.release_errors},
+          {"views", texture_views_.size()},
+          {"inflight",
+           texture_inflight_leases_.size() + completion_inflight},
+          {"closed", stats.closed ? 1u : 0u}};
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_texture_resource_identity(const Texture *view) const {
+  std::lock_guard<std::mutex> lock(texture_lifecycle_mutex_);
+  const auto found = texture_views_.find(view);
+  TI_ERROR_IF(found == texture_views_.end(),
+              "Cannot inspect a stale or retired Texture");
+  const auto handle = found->second.handle;
+  return {{"domain", handle.domain},
+          {"kind", handle.kind},
+          {"index", handle.index},
+          {"generation", handle.generation}};
+}
+
 void Program::synchronize() {
-  program_impl_->synchronize();
-  recycle_pending_argpacks();
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  const bool tracking_was_enabled =
+      runtime_completion_tracking_enabled_.exchange(
+          true, std::memory_order_acq_rel);
+  {
+    RuntimeSubmissionWriteScope completion_submission_scope(this);
+    program_impl_->synchronize();
+    const bool had_submission = runtime_submission_pending_.exchange(
+        false, std::memory_order_acq_rel);
+    std::uint64_t submission_epoch =
+        runtime_submission_epoch_.load(std::memory_order_relaxed);
+    if (had_submission) {
+      const std::uint64_t previous = runtime_submission_epoch_.fetch_add(
+          1, std::memory_order_relaxed);
+      TI_ASSERT(previous != (std::numeric_limits<std::uint64_t>::max)());
+      submission_epoch = previous + 1;
+    }
+    complete_all_runtime_completions();
+    release_completed_argpack_leases();
+    release_completed_ndarray_leases();
+    release_completed_texture_leases();
+    last_runtime_completion_submission_epoch_.store(
+        submission_epoch, std::memory_order_release);
+  }
+  if (!tracking_was_enabled) {
+    runtime_completion_tracking_enabled_.store(false,
+                                               std::memory_order_release);
+  }
 }
 
 StreamSemaphore Program::flush() {
@@ -5005,7 +6403,14 @@ void Program::finalize() {
     return;
   }
 
-  synchronize();
+  {
+    std::lock_guard<std::recursive_mutex> submission_lock(
+        runtime_resource_submission_mutex_);
+    close_argpack_resources();
+    close_ndarray_resources();
+    close_texture_resources();
+    dense_field_staging_open_ = false;
+  }
   TI_TRACE("Program finalizing...");
 
   synchronize();
@@ -5018,15 +6423,13 @@ void Program::finalize() {
     cuda::cub_grouped_reduce_clear_cache(this);
   }
 #endif
-  textures_.clear();
-  argpacks_.clear();
-  ndarrays_.clear();
+  argpack_resources_.finalize({kArgPackResourceKind});
+  ndarray_resources_.finalize({kNdarrayResourceKind});
+  texture_resources_.finalize({kTextureResourceKind});
   {
-    std::lock_guard<std::mutex> lock(dense_field_host_copy_staging_.mutex);
-    dense_field_host_copy_staging_.upload.reset();
-    dense_field_host_copy_staging_.upload_capacity = 0;
-    dense_field_host_copy_staging_.readback.reset();
-    dense_field_host_copy_staging_.readback_capacity = 0;
+    std::lock_guard<std::recursive_mutex> submission_lock(
+        runtime_resource_submission_mutex_);
+    close_dense_field_staging_resource();
   }
   if (arch_uses_llvm(compile_config().arch) ||
       compile_config().arch == Arch::vulkan) {
@@ -5075,56 +6478,121 @@ Ndarray *Program::create_ndarray(const DataType type,
                                  ExternalArrayLayout layout,
                                  bool zero_fill,
                                  const DebugInfo &dbg_info) {
-  auto arr = std::make_unique<Ndarray>(this, type, shape, layout, dbg_info);
-  if (zero_fill) {
-    Arch arch = compile_config().arch;
-    if (arch_is_cpu(arch) || arch == Arch::cuda || arch == Arch::amdgpu) {
-      fill_ndarray_fast_u32(arr.get(), /*data=*/0);
-    } else if (arch != Arch::dx12) {
-      // Device api support for dx12 backend are not complete yet
-      Stream *stream =
-          program_impl_->get_compute_device()->get_compute_stream();
-      auto [cmdlist, res] = stream->new_command_list_unique();
-      TI_ASSERT(res == RhiResult::success);
-      cmdlist->buffer_fill(arr->ndarray_alloc_.get_ptr(0),
-                           arr->get_element_size() * arr->get_nelement(),
-                           /*data=*/0);
-      stream->submit_synced(cmdlist.get());
-    }
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  {
+    std::lock_guard<std::mutex> lifecycle_lock(ndarray_lifecycle_mutex_);
+    TI_ERROR_IF(!ndarray_resources_open_,
+                "Cannot create Ndarray after Program finalize");
   }
-  auto arr_ptr = arr.get();
-  ndarrays_.insert({arr_ptr, std::move(arr)});
-  return arr_ptr;
+
+  auto arr = std::make_unique<Ndarray>(this, type, shape, layout, dbg_info);
+  Ndarray *view = arr.get();
+  std::unique_lock<std::mutex> lock(ndarray_lifecycle_mutex_);
+  auto [result, handle] =
+      ndarray_resources_.insert(kNdarrayResourceKind, std::move(arr));
+  TI_ERROR_IF(result != NdarrayResourceRegistry::Result::kSuccess,
+              "Unable to register the new Ndarray runtime resource");
+  auto [lease_result, lease] = ndarray_resources_.acquire(handle);
+  if (lease_result != NdarrayResourceRegistry::Result::kSuccess) {
+    lock.unlock();
+    ndarray_resources_.retire(handle);
+    TI_ERROR("Unable to acquire the new Ndarray runtime resource");
+  }
+  view->bind_runtime_resource_handle(handle);
+  bool inserted = false;
+  try {
+    inserted = ndarray_views_
+                   .emplace(view,
+                            NdarrayResourceView{handle, std::move(lease)})
+                   .second;
+  } catch (...) {
+    lock.unlock();
+    ndarray_resources_.retire(handle);
+    throw;
+  }
+  if (!inserted) {
+    lock.unlock();
+    ndarray_resources_.retire(handle);
+    TI_ERROR("Ndarray view identity collision inside one Program");
+  }
+  lock.unlock();
+
+  try {
+    if (zero_fill) {
+      Arch arch = compile_config().arch;
+      if (arch_is_cpu(arch) || arch == Arch::cuda || arch == Arch::amdgpu) {
+        fill_ndarray_fast_u32(view, /*data=*/0);
+      } else if (arch != Arch::dx12) {
+        // Device api support for dx12 backend are not complete yet
+        Stream *stream =
+            program_impl_->get_compute_device()->get_compute_stream();
+        auto [cmdlist, res] = stream->new_command_list_unique();
+        TI_ASSERT(res == RhiResult::success);
+        cmdlist->buffer_fill(view->ndarray_alloc_.get_ptr(0),
+                             view->get_element_size() * view->get_nelement(),
+                             /*data=*/0);
+        stream->submit_synced(cmdlist.get());
+      }
+    }
+  } catch (...) {
+    delete_ndarray(view);
+    if (arch_is_gpu(compile_config().arch)) {
+      synchronize();
+    }
+    throw;
+  }
+  return view;
 }
 
 ArgPack *Program::create_argpack(const DataType dt) {
+  // Serialize the open check, backend allocation and publication with
+  // close_argpack_resources(). This prevents a creator that started around
+  // finalize from allocating against a backend whose teardown has begun.
+  // The narrower lifecycle mutex is still never held across the backend call.
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  {
+    std::lock_guard<std::mutex> lifecycle_lock(argpack_lifecycle_mutex_);
+    TI_ERROR_IF(!argpack_resources_open_,
+                "Cannot create ArgPack after Program finalize");
+  }
+
+  // Device allocation can enter a backend allocator. Keep it outside the
+  // lifecycle critical section; only publication into the registry/view map
+  // needs serialization with launch, retire and finalize.
   auto pack = std::make_unique<ArgPack>(this, dt);
-  auto pack_ptr = pack.get();
-  argpacks_.insert({pack_ptr, std::move(pack)});
-  return pack_ptr;
-}
+  ArgPack *view = pack.get();
+  std::unique_lock<std::mutex> lock(argpack_lifecycle_mutex_);
+  auto [result, handle] =
+      argpack_resources_.insert(kArgPackResourceKind, std::move(pack));
+  TI_ERROR_IF(result != ArgPackResourceRegistry::Result::kSuccess,
+              "Unable to register the new ArgPack runtime resource");
 
-void Program::recycle_pending_argpacks() {
-  if (argpacks_pending_deletion_.empty()) {
-    return;
+  auto [lease_result, lease] = argpack_resources_.acquire(handle);
+  if (lease_result != ArgPackResourceRegistry::Result::kSuccess) {
+    lock.unlock();
+    argpack_resources_.retire(handle);
+    TI_ERROR("Unable to acquire the new ArgPack runtime resource");
   }
 
-  for (auto it = argpacks_pending_deletion_.begin();
-       it != argpacks_pending_deletion_.end();) {
-    ArgPack *argpack = *it;
-    auto map_it = argpacks_.find(argpack);
-    if (map_it == argpacks_.end()) {
-      it = argpacks_pending_deletion_.erase(it);
-      continue;
-    }
-
-    if (!program_impl_->used_in_kernel(argpack->argpack_alloc_.alloc_id)) {
-      argpacks_.erase(map_it);
-      it = argpacks_pending_deletion_.erase(it);
-    } else {
-      ++it;
-    }
+  bool inserted = false;
+  try {
+    inserted =
+        argpack_views_
+            .emplace(view, ArgPackResourceView{handle, std::move(lease)})
+            .second;
+  } catch (...) {
+    lock.unlock();
+    argpack_resources_.retire(handle);
+    throw;
   }
+  if (!inserted) {
+    lock.unlock();
+    argpack_resources_.retire(handle);
+    TI_ERROR("ArgPack view identity collision inside one Program");
+  }
+  return view;
 }
 
 void Program::delete_ndarray(Ndarray *ndarray) {
@@ -5135,61 +6603,137 @@ void Program::delete_ndarray(Ndarray *ndarray) {
   // make sure **no pending kernels to be executed needs the ndarray** before it
   // actually frees the memory. When `ti.reset()` is called, all ndarrays
   // allocated in this program should be gone and no longer valid in Python.
-  // This isn't the best implementation, ndarrays should be managed by taichi
-  // runtime instead of this giant program and it should be freed when:
+  // The registry retires an ndarray once Python no longer owns its view and
+  // frees it after all submission/completion leases have been released:
   // - Python GC signals taichi that it's no longer useful
   // - All kernels using it are executed.
-  if (ndarrays_.count(ndarray) &&
-      !program_impl_->used_in_kernel(ndarray->ndarray_alloc_.alloc_id)) {
-    ndarrays_.erase(ndarray);
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  NdarrayResourceHandle handle;
+  {
+    std::lock_guard<std::mutex> lock(ndarray_lifecycle_mutex_);
+    const auto found = ndarray_views_.find(ndarray);
+    if (found == ndarray_views_.end()) {
+      return;
+    }
+    handle = found->second.handle;
+    // Every asynchronous use pins before releasing the Program submission
+    // transaction. The owner is either in ndarray_inflight_leases_ or in a
+    // RuntimeCompletion resource batch; if neither exists there is no pending
+    // backend dereference to protect. Creating a new lease here would retain a
+    // resource after its completion has already proved safety and force an
+    // unrelated later ti.sync(). Texture/ArgPack already follow this rule.
+    ndarray_views_.erase(found);
   }
+  const auto result = ndarray_resources_.retire(handle);
+  TI_ASSERT(result == NdarrayResourceRegistry::Result::kSuccess ||
+            result == NdarrayResourceRegistry::Result::kInvalidHandle);
 }
 
 void Program::delete_argpack(ArgPack *argpack) {
-  // [Note] Argpack memory deallocation
-  // Argpack's memory allocation is managed by Taichi and Python can control
-  // this via Taichi indirectly. For example, when an argpack is GC-ed in
-  // Python, it signals Taichi to free its memory allocation. But Taichi will
-  // make sure **no pending kernels to be executed needs the argpack** before it
-  // actually frees the memory. When `ti.reset()` is called, all argpack
-  // allocated in this program should be gone and no longer valid in Python.
-  // This isn't the best implementation, argpacks should be managed by taichi
-  // runtime instead of this giant program and it should be freed when:
-  // - Python GC signals taichi that it's no longer useful
-  // - All kernels using it are executed.
-  auto it = argpacks_.find(argpack);
-  if (it == argpacks_.end()) {
-    return;
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  ArgPackResourceHandle handle;
+  {
+    std::lock_guard<std::mutex> lock(argpack_lifecycle_mutex_);
+    const auto found = argpack_views_.find(argpack);
+    if (found == argpack_views_.end()) {
+      return;
+    }
+    handle = found->second.handle;
+    argpack_views_.erase(found);
   }
-
-  const bool used_by_tracked_backend =
-      program_impl_->used_in_kernel(argpack->argpack_alloc_.alloc_id);
-  if (used_by_tracked_backend || arch_is_gpu(compile_config().arch)) {
-    argpacks_pending_deletion_.insert(argpack);
-    return;
-  }
-
-  argpacks_.erase(it);
+  const auto result = argpack_resources_.retire(handle);
+  TI_ASSERT(result == ArgPackResourceRegistry::Result::kSuccess ||
+            result == ArgPackResourceRegistry::Result::kInvalidHandle);
 }
 
 Texture *Program::create_texture(BufferFormat buffer_format,
                                  const std::vector<int> &shape) {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  {
+    std::lock_guard<std::mutex> lifecycle_lock(texture_lifecycle_mutex_);
+    TI_ERROR_IF(!texture_resources_open_,
+                "Cannot create Texture after Program finalize");
+  }
+
+  std::unique_ptr<Texture> texture;
   if (shape.size() == 1) {
-    textures_.push_back(
-        std::make_unique<Texture>(this, buffer_format, shape[0], 1, 1));
+    texture = std::make_unique<Texture>(this, buffer_format, shape[0], 1, 1);
   } else if (shape.size() == 2) {
-    textures_.push_back(
-        std::make_unique<Texture>(this, buffer_format, shape[0], shape[1], 1));
+    texture =
+        std::make_unique<Texture>(this, buffer_format, shape[0], shape[1], 1);
   } else if (shape.size() == 3) {
-    textures_.push_back(std::make_unique<Texture>(this, buffer_format, shape[0],
-                                                  shape[1], shape[2]));
+    texture = std::make_unique<Texture>(this, buffer_format, shape[0],
+                                        shape[1], shape[2]);
   } else {
     TI_ERROR("Texture shape invalid");
   }
-  return textures_.back().get();
+
+  Texture *view = texture.get();
+  std::unique_lock<std::mutex> lock(texture_lifecycle_mutex_);
+  auto [result, handle] =
+      texture_resources_.insert(kTextureResourceKind, std::move(texture));
+  TI_ERROR_IF(result != TextureResourceRegistry::Result::kSuccess,
+              "Unable to register the new Texture runtime resource");
+  auto [lease_result, lease] = texture_resources_.acquire(handle);
+  if (lease_result != TextureResourceRegistry::Result::kSuccess) {
+    lock.unlock();
+    texture_resources_.retire(handle);
+    TI_ERROR("Unable to acquire the new Texture runtime resource");
+  }
+  view->bind_runtime_resource_handle(handle);
+  bool inserted = false;
+  try {
+    if (texture_view_slots_.size() <= handle.index) {
+      texture_view_slots_.resize(static_cast<std::size_t>(handle.index) + 1);
+    }
+    inserted = texture_views_
+                   .emplace(view,
+                            TextureResourceView{handle, std::move(lease)})
+                   .second;
+  } catch (...) {
+    lock.unlock();
+    texture_resources_.retire(handle);
+    throw;
+  }
+  if (!inserted) {
+    lock.unlock();
+    texture_resources_.retire(handle);
+    TI_ERROR("Texture view identity collision inside one Program");
+  }
+  TI_ASSERT(texture_view_slots_[handle.index].view == nullptr);
+  texture_view_slots_[handle.index] = {view, handle};
+  return view;
+}
+
+void Program::delete_texture(Texture *texture) {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  TextureResourceHandle handle;
+  {
+    std::lock_guard<std::mutex> lock(texture_lifecycle_mutex_);
+    const auto found = texture_views_.find(texture);
+    if (found == texture_views_.end()) {
+      return;
+    }
+    handle = found->second.handle;
+    TI_ASSERT(handle.index < texture_view_slots_.size() &&
+              texture_view_slots_[handle.index].view == texture &&
+              texture_view_slots_[handle.index].handle == handle);
+    texture_view_slots_[handle.index] = {};
+    texture_views_.erase(found);
+  }
+  const auto result = texture_resources_.retire(handle);
+  TI_ASSERT(result == TextureResourceRegistry::Result::kSuccess ||
+            result == TextureResourceRegistry::Result::kInvalidHandle);
 }
 
 intptr_t Program::get_ndarray_data_ptr_as_int(const Ndarray *ndarray) {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  auto leases = acquire_ndarray_leases({ndarray});
   uint64_t *data_ptr{nullptr};
   if (arch_is_cpu(compile_config().arch) ||
       compile_config().arch == Arch::cuda ||
@@ -5199,12 +6743,20 @@ intptr_t Program::get_ndarray_data_ptr_as_int(const Ndarray *ndarray) {
         program_impl_->get_device_alloc_info_ptr(ndarray->ndarray_alloc_);
   }
 
+  // Native CUDA primitives consume the raw pointer after this helper returns.
+  // Pin before releasing the submission gate; delete/reset then either sees
+  // the existing in-flight owner or waits for backend synchronization.
+  if (arch_is_gpu(compile_config().arch)) {
+    pin_ndarray_launch_leases(leases);
+  }
+
   return reinterpret_cast<intptr_t>(data_ptr);
 }
 
 void Program::fill_ndarray_fast_u32(Ndarray *ndarray, uint32_t val) {
   ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!ndarray, "fill_ndarray_fast_u32 received a null ndarray.");
+  auto leases = acquire_ndarray_leases({ndarray});
   const std::size_t bytes =
       ndarray->get_nelement() * ndarray->get_element_size();
   if (bytes == 0) {
@@ -5271,6 +6823,7 @@ void Program::fill_ndarray_fast_u32(Ndarray *ndarray, uint32_t val) {
 void Program::copy_ndarray_fast(Ndarray *dst, Ndarray *src) {
   ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!dst || !src, "copy_ndarray_fast received a null ndarray.");
+  auto leases = acquire_ndarray_leases({dst, src});
   const std::size_t dst_bytes = dst->get_nelement() * dst->get_element_size();
   const std::size_t src_bytes = src->get_nelement() * src->get_element_size();
   TI_ERROR_IF(dst_bytes != src_bytes,
@@ -5340,8 +6893,11 @@ void Program::copy_ndarray_fast(Ndarray *dst, Ndarray *src) {
 void Program::copy_ndarray_from_host(Ndarray *dst,
                                      const void *src,
                                      std::size_t bytes) {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
   TI_ERROR_IF(!dst || !src,
               "copy_ndarray_from_host received a null pointer.");
+  auto leases = acquire_ndarray_leases({dst});
   const std::size_t expected_bytes =
       dst->get_nelement() * dst->get_element_size();
   TI_ERROR_IF(bytes != expected_bytes,
@@ -5372,7 +6928,10 @@ void Program::copy_ndarray_from_host(Ndarray *dst,
 void Program::copy_ndarray_to_host(Ndarray *src,
                                    void *dst,
                                    std::size_t bytes) {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
   TI_ERROR_IF(!src || !dst, "copy_ndarray_to_host received a null pointer.");
+  auto leases = acquire_ndarray_leases({src});
   const std::size_t expected_bytes =
       src->get_nelement() * src->get_element_size();
   TI_ERROR_IF(bytes != expected_bytes,
@@ -5424,6 +6983,8 @@ std::size_t Program::cuda_device_transform_affine_ndarray(Ndarray *src,
                                                           int value_type,
                                                           double scale,
                                                           double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA device transform is only available on CUDA.");
   TI_ERROR_IF(!src || !dst, "CUDA device transform received a null ndarray.");
@@ -5479,6 +7040,8 @@ std::size_t Program::cuda_device_transform_affine_member_ndarray(
     std::size_t stride,
     double scale,
     double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA strided transform is only available on CUDA.");
   check_transform_member_request("CUDA", src, dst, value_type, offset, stride);
@@ -5512,6 +7075,8 @@ std::size_t Program::cuda_device_transform_affine_strided_ndarray(
     std::size_t dst_stride,
     double scale,
     double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA strided transform is only available on CUDA.");
   check_transform_strided_request("CUDA", src, dst, value_type, src_offset,
@@ -5547,6 +7112,8 @@ std::size_t Program::cuda_device_transform_affine_packed_strided_ndarray(
     std::size_t dst_stride,
     double scale,
     double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA packed strided transform is only available on CUDA.");
   check_transform_packed_strided_request("CUDA", src, dst, value_type,
@@ -5693,6 +7260,8 @@ bool Program::cuda_device_add_merge_available() const {
 std::size_t Program::cuda_device_add_merge_ndarray(Ndarray *src,
                                                    Ndarray *dst,
                                                    int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA add-merge is only available on CUDA.");
   TI_ERROR_IF(!src || !dst, "CUDA add-merge received a null ndarray.");
@@ -5735,6 +7304,8 @@ std::size_t Program::cuda_device_add_scaled_ndarray(Ndarray *src,
                                                     Ndarray *dst,
                                                     int value_type,
                                                     double scale) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA scaled-add is only available on CUDA.");
   TI_ERROR_IF(!src || !dst, "CUDA scaled-add received a null ndarray.");
@@ -5781,6 +7352,8 @@ std::size_t Program::cuda_device_add_scalar_ndarray_to_ndarray(
     Ndarray *dst,
     int value_type,
     double scale) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA scalar-to-ndarray add is only available on CUDA.");
   TI_ERROR_IF(!src || !dst,
@@ -5829,6 +7402,8 @@ std::size_t Program::cuda_device_add_merge_strided_ndarray(
     std::size_t src_stride,
     std::size_t dst_offset,
     std::size_t dst_stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA strided add-merge is only available on CUDA.");
   check_add_merge_strided_request("CUDA", src, dst, value_type, src_offset,
@@ -5859,6 +7434,8 @@ std::size_t Program::cuda_device_add_merge_dense_field(Ndarray *src,
                                                        SNode *dst,
                                                        int value_type,
                                                        std::size_t n) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA dense field add-merge is only available on CUDA.");
   TI_ERROR_IF(!src || !dst, "CUDA dense field add-merge received a null input.");
@@ -6038,6 +7615,8 @@ bool Program::cuda_device_indexed_copy_payload_available(
 std::size_t Program::cuda_device_gather_ndarray(Ndarray *src,
                                                 Ndarray *indices,
                                                 Ndarray *dst) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA device gather is only available on CUDA.");
   TI_ERROR_IF(!src || !indices || !dst,
@@ -6101,6 +7680,8 @@ std::size_t Program::cuda_device_gather_strided_ndarray(
     std::size_t src_stride,
     std::size_t dst_offset,
     std::size_t dst_stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA device strided gather is only available on CUDA.");
   check_indexed_copy_strided_request("CUDA", src, indices, dst, item_bytes,
@@ -6145,6 +7726,8 @@ std::size_t Program::cuda_device_gather_dense_field(SNode *src,
                                                     int value_type,
                                                     std::size_t src_n,
                                                     std::size_t dst_n) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA device dense field gather is only available on CUDA.");
   check_indexed_copy_dense_field_request(this, "CUDA", src, indices, dst,
@@ -6220,6 +7803,8 @@ std::size_t Program::cuda_device_gather_dense_field_packed(SNode *src,
                                                            std::size_t src_n,
                                                            std::size_t dst_n,
                                                            int lane_count) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA device packed dense field gather is only available on "
               "CUDA.");
@@ -6428,6 +8013,8 @@ std::size_t Program::cuda_device_gather_add_ndarray(Ndarray *src,
                                                     Ndarray *indices,
                                                     Ndarray *dst,
                                                     int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA gather-add is only available on CUDA.");
   TI_ERROR_IF(!src || !indices || !dst,
@@ -6478,6 +8065,8 @@ std::size_t Program::cuda_device_gather_add_dense_field(SNode *src,
                                                         int value_type,
                                                         std::size_t src_n,
                                                         std::size_t dst_n) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA dense field gather-add is only available on CUDA.");
   check_indexed_copy_dense_field_request(this, "CUDA", src, indices, dst,
@@ -6595,6 +8184,8 @@ std::size_t Program::cuda_device_gather_add_dense_field_indices_field(
 std::size_t Program::cuda_device_scatter_ndarray(Ndarray *src,
                                                  Ndarray *indices,
                                                  Ndarray *dst) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA device scatter is only available on CUDA.");
   TI_ERROR_IF(!src || !indices || !dst,
@@ -6657,6 +8248,8 @@ std::size_t Program::cuda_device_scatter_strided_ndarray(
     std::size_t src_stride,
     std::size_t dst_offset,
     std::size_t dst_stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA device strided scatter is only available on CUDA.");
   check_indexed_copy_strided_request("CUDA", src, indices, dst, item_bytes,
@@ -6701,6 +8294,8 @@ std::size_t Program::cuda_device_scatter_dense_field(SNode *src,
                                                      int value_type,
                                                      std::size_t src_n,
                                                      std::size_t dst_n) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA device dense field scatter is only available on CUDA.");
   check_indexed_copy_dense_field_request(this, "CUDA", src, indices, dst,
@@ -6776,6 +8371,8 @@ std::size_t Program::cuda_device_scatter_dense_field_packed(SNode *src,
                                                             std::size_t src_n,
                                                             std::size_t dst_n,
                                                             int lane_count) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA device packed dense field scatter is only available on "
               "CUDA.");
@@ -6994,6 +8591,8 @@ std::size_t Program::cuda_device_scatter_add_ndarray(Ndarray *src,
                                                      Ndarray *indices,
                                                      Ndarray *dst,
                                                      int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA toolkit scatter-add is only available on CUDA.");
   TI_ERROR_IF(!src || !indices || !dst,
@@ -7043,6 +8642,8 @@ std::size_t Program::cuda_device_scatter_add_member_ndarray(
     int value_type,
     std::size_t offset,
     std::size_t stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA toolkit strided scatter-add is only available on CUDA.");
   check_scatter_add_member_request("CUDA toolkit", src, indices, dst,
@@ -7081,6 +8682,8 @@ std::size_t Program::cuda_device_scatter_add_strided_ndarray(
     std::size_t src_stride,
     std::size_t dst_offset,
     std::size_t dst_stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA toolkit strided scatter-add is only available on CUDA.");
   check_scatter_add_strided_request("CUDA toolkit", src, indices, dst,
@@ -7117,6 +8720,8 @@ std::size_t Program::cuda_device_scatter_add_dense_field(SNode *src,
                                                          int value_type,
                                                          std::size_t src_n,
                                                          std::size_t dst_n) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA toolkit dense field scatter-add is only available on "
               "CUDA.");
@@ -7250,6 +8855,8 @@ std::size_t Program::cuda_device_bucket_builder_i32_ndarray(Ndarray *keys,
                                                             Ndarray *offsets,
                                                             Ndarray *output,
                                                             Ndarray *cursor) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return cuda_device_bucket_builder_ndarray(keys, values, offsets, output,
                                             cursor, 0);
 }
@@ -7260,6 +8867,8 @@ std::size_t Program::cuda_device_bucket_builder_ndarray(Ndarray *keys,
                                                         Ndarray *output,
                                                         Ndarray *cursor,
                                                         int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA toolkit bucket builder is only available on CUDA.");
   TI_ERROR_IF(!keys || !values || !offsets || !output || !cursor,
@@ -7326,6 +8935,8 @@ std::size_t Program::cuda_device_bucket_builder_dense_field(
     int value_type,
     std::size_t n,
     std::size_t num_bins) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA toolkit dense field bucket builder is only available on "
               "CUDA.");
@@ -7410,6 +9021,8 @@ std::size_t Program::cuda_device_grouped_reduce_i32_atomic_ndarray(
     Ndarray *values,
     Ndarray *output,
     int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return cuda_device_grouped_reduce_atomic_ndarray(keys, values, output, 0, op);
 }
 
@@ -7418,6 +9031,8 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_ndarray(Ndarray *keys,
                                                                Ndarray *output,
                                                                int value_type,
                                                                int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA grouped reduce is only available on CUDA.");
   TI_ERROR_IF(!keys || !values || !output,
@@ -7527,6 +9142,8 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_member_ndarray(
     std::size_t offset,
     std::size_t stride,
     int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA strided grouped reduce is only available on CUDA.");
   check_grouped_reduce_member_request("CUDA", keys, values, output, value_type,
@@ -7564,6 +9181,8 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_strided_ndarray(
     std::size_t output_offset,
     std::size_t output_stride,
     int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return cuda_device_grouped_reduce_atomic_strided_keys_ndarray(
       keys, values, output, value_type, 0, sizeof(int32_t), values_offset,
       values_stride, output_offset, output_stride, op);
@@ -7581,6 +9200,8 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_strided_keys_ndarray(
     std::size_t output_offset,
     std::size_t output_stride,
     int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA strided grouped reduce is only available on CUDA.");
   check_grouped_reduce_strided_keys_request(
@@ -7617,6 +9238,8 @@ std::size_t Program::cuda_device_grouped_reduce_i32_ndarray(Ndarray *keys,
                                                             Ndarray *scratch,
                                                             Ndarray *cursor,
                                                             int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return cuda_device_grouped_reduce_ndarray(keys, values, output, offsets,
                                             scratch, cursor, 0, op);
 }
@@ -7629,6 +9252,8 @@ std::size_t Program::cuda_device_grouped_reduce_ndarray(Ndarray *keys,
                                                         Ndarray *cursor,
                                                         int value_type,
                                                         int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA grouped reduce is only available on CUDA.");
   TI_ERROR_IF(!keys || !values || !output || !offsets || !scratch || !cursor,
@@ -7698,6 +9323,8 @@ std::size_t Program::cuda_device_grouped_reduce_segmented_strided_keys_ndarray(
     std::size_t output_offset,
     std::size_t output_stride,
     int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA strided segmented grouped reduce is only available on "
               "CUDA.");
@@ -7767,6 +9394,8 @@ std::size_t Program::cuda_cub_radix_sort_ndarray(Ndarray *keys,
                                                  int value_type,
                                                  int mode,
                                                  int nan_policy) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB sort is only available on the CUDA backend.");
   TI_ERROR_IF(!keys, "CUDA CUB sort received null keys ndarray.");
@@ -8124,6 +9753,8 @@ bool Program::cuda_cub_scan_available() const {
 
 std::size_t Program::cuda_cub_inclusive_scan_ndarray(Ndarray *data,
                                                      int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB scan is only available on the CUDA backend.");
   TI_ERROR_IF(!data, "CUDA CUB scan received a null ndarray.");
@@ -8170,6 +9801,8 @@ std::size_t Program::cuda_cub_inclusive_scan_ndarray(Ndarray *data,
 
 std::size_t Program::cuda_cub_inclusive_reverse_scan_ndarray(Ndarray *data,
                                                              int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB reverse scan is only available on the CUDA backend.");
   TI_ERROR_IF(!data, "CUDA CUB reverse scan received a null ndarray.");
@@ -8220,6 +9853,8 @@ std::size_t Program::cuda_cub_inclusive_scan_member_ndarray(
     int value_type,
     std::size_t offset,
     std::size_t stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB strided scan is only available on the CUDA backend.");
   check_scan_member_request("CUDA CUB", data, value_type, offset, stride);
@@ -8249,6 +9884,8 @@ std::size_t Program::cuda_cub_inclusive_reverse_scan_member_ndarray(
     int value_type,
     std::size_t offset,
     std::size_t stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB reverse strided scan is only available on the CUDA "
               "backend.");
@@ -8478,6 +10115,8 @@ std::size_t Program::cuda_cub_select_ndarray(Ndarray *values,
                                              Ndarray *output,
                                              Ndarray *count,
                                              int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB select is only available on the CUDA backend.");
   TI_ERROR_IF(!values || !flags || !output || !count,
@@ -8608,6 +10247,8 @@ std::size_t Program::cuda_cub_select_i32_ndarray(Ndarray *values,
                                                  Ndarray *flags,
                                                  Ndarray *output,
                                                  Ndarray *count) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return cuda_cub_select_ndarray(values, flags, output, count, 0);
 }
 
@@ -8638,6 +10279,8 @@ bool Program::cuda_cub_histogram_available() const {
 
 std::size_t Program::cuda_cub_histogram_i32_ndarray(Ndarray *values,
                                                     Ndarray *bins) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return cuda_cub_histogram_ndarray(values, bins, 0, 0);
 }
 
@@ -8645,6 +10288,8 @@ std::size_t Program::cuda_cub_histogram_ndarray(Ndarray *values,
                                                 Ndarray *bins,
                                                 int value_type,
                                                 int bin_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB histogram is only available on CUDA.");
   TI_ERROR_IF(!values || !bins,
@@ -8762,6 +10407,8 @@ std::size_t Program::cuda_cub_reduce_ndarray(Ndarray *values,
                                              Ndarray *output,
                                              int value_type,
                                              int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB reduce is only available on CUDA.");
   TI_ERROR_IF(!values || !output,
@@ -8804,6 +10451,8 @@ std::size_t Program::cuda_cub_reduce_member_ndarray(Ndarray *values,
                                                     std::size_t offset,
                                                     std::size_t stride,
                                                     int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB strided reduce is only available on CUDA.");
   check_reduce_member_request("CUDA CUB", values, output, value_type, offset,
@@ -8838,6 +10487,8 @@ std::size_t Program::cuda_cub_reduce_strided_ndarray(
     std::size_t output_offset,
     std::size_t output_stride,
     int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB strided reduce is only available on CUDA.");
   check_reduce_strided_request("CUDA CUB", values, output, value_type,
@@ -9007,6 +10658,8 @@ std::size_t Program::cuda_cub_check_count_ndarray(Ndarray *values,
                                                   int check_op,
                                                   int lower,
                                                   int upper) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB check_count is only available on CUDA.");
   TI_ERROR_IF(!values || !output,
@@ -9052,6 +10705,8 @@ std::size_t Program::cuda_cub_check_count_strided_ndarray(
     int check_op,
     int lower,
     int upper) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB strided check_count is only available on CUDA.");
   TI_ERROR_IF(!values || !output,
@@ -9106,6 +10761,8 @@ std::size_t Program::cuda_cub_check_count_dense_field(SNode *values,
                                                       int check_op,
                                                       int lower,
                                                       int upper) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB dense field check_count is only available on CUDA.");
   TI_ERROR_IF(!values || !output,
@@ -9197,6 +10854,8 @@ std::size_t Program::cuda_cub_metric_reduce_ndarray(Ndarray *values,
                                                     Ndarray *output,
                                                     int value_type,
                                                     int metric_op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB metric_reduce is only available on CUDA.");
   TI_ERROR_IF(!values || !output,
@@ -9258,6 +10917,8 @@ std::size_t Program::cuda_cub_metric_reduce_strided_ndarray(
     std::size_t other_offset,
     std::size_t other_stride,
     int metric_op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB strided metric_reduce is only available on CUDA.");
   TI_ERROR_IF(!values || !output,
@@ -9340,6 +11001,8 @@ std::size_t Program::cuda_cub_metric_reduce_dense_field(SNode *values,
                                                         int value_type,
                                                         std::size_t n,
                                                         int metric_op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB dense field metric_reduce is only available on CUDA.");
   TI_ERROR_IF(!values || !output,
@@ -9411,6 +11074,8 @@ std::size_t Program::cuda_cub_metric_reduce_dense_field_strided_ndarray(
     std::size_t array_stride,
     bool field_is_values,
     int metric_op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA CUB mixed metric_reduce is only available on CUDA.");
   TI_ERROR_IF(!field || !array || !output,
@@ -9965,6 +11630,74 @@ DeviceAllocationUnique ensure_vulkan_dense_host_staging(
   return nullptr;
 }
 
+Program::DenseFieldHostCopyStagingResource &
+Program::dense_field_staging_resource() {
+  TI_ERROR_IF(!dense_field_staging_open_ || !dense_field_staging_lease_,
+              "Dense-field staging cache is unavailable after Program "
+              "finalize");
+  TI_ASSERT(dense_field_staging_lease_.handle() ==
+            dense_field_staging_handle_);
+  return *dense_field_staging_lease_;
+}
+
+void Program::close_dense_field_staging_resource() {
+  if (dense_field_staging_lease_) {
+    auto &staging = *dense_field_staging_lease_;
+    std::lock_guard<std::mutex> lock(staging.mutex);
+    staging.upload.reset();
+    staging.upload_capacity = 0;
+    staging.readback.reset();
+    staging.readback_capacity = 0;
+  }
+  dense_field_staging_lease_.reset();
+  if (dense_field_staging_handle_) {
+    const auto result =
+        dense_field_staging_resources_.retire(dense_field_staging_handle_);
+    TI_ASSERT(result == DenseFieldStagingRegistry::Result::kSuccess ||
+              result == DenseFieldStagingRegistry::Result::kInvalidHandle);
+    dense_field_staging_handle_ = {};
+  }
+  dense_field_staging_resources_.finalize(
+      {kDenseFieldStagingResourceKind});
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_dense_field_staging_stats() {
+  auto resource_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  const auto stats = dense_field_staging_resources_.stats();
+  std::unordered_map<std::string, std::uint64_t> result{
+      {"slots", stats.slots},
+      {"live", stats.live},
+      {"retiring", stats.retiring},
+      {"released", stats.released},
+      {"leases", stats.leases},
+      {"created_total", stats.created_total},
+      {"retired_total", stats.retired_total},
+      {"released_total", stats.released_total},
+      {"release_errors", stats.release_errors},
+      {"closed", stats.closed ? 1u : 0u},
+      {"open", dense_field_staging_open_ ? 1u : 0u},
+      {"domain", dense_field_staging_handle_.domain},
+      {"kind", dense_field_staging_handle_.kind},
+      {"index", dense_field_staging_handle_.index},
+      {"generation", dense_field_staging_handle_.generation},
+      {"upload_capacity", 0},
+      {"readback_capacity", 0},
+      {"has_upload", 0},
+      {"has_readback", 0},
+  };
+  if (dense_field_staging_lease_) {
+    auto &staging = *dense_field_staging_lease_;
+    std::lock_guard<std::mutex> lock(staging.mutex);
+    result["upload_capacity"] = staging.upload_capacity;
+    result["readback_capacity"] = staging.readback_capacity;
+    result["has_upload"] = staging.upload ? 1u : 0u;
+    result["has_readback"] = staging.readback ? 1u : 0u;
+  }
+  return result;
+}
+
 void Program::fill_dense_field(SNode *dst,
                                int value_type,
                                uint64_t value_bits,
@@ -10517,6 +12250,11 @@ void Program::copy_dense_field_from_host(SNode *dst,
                                          int value_type,
                                          std::size_t n) {
   const Arch arch = compile_config().arch;
+  std::optional<RuntimeResourceSubmissionGuard> resource_submission_guard;
+  if (arch == Arch::vulkan) {
+    resource_submission_guard.emplace(
+        acquire_runtime_resource_submission_guard());
+  }
   TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
               "Native dense field host copy is only available on CPU, CUDA, "
               "and Vulkan backends.");
@@ -10542,31 +12280,28 @@ void Program::copy_dense_field_from_host(SNode *dst,
                 "Native dense field host copy received invalid device "
                 "storage.");
     if (arch == Arch::vulkan) {
-      std::lock_guard<std::mutex> lock(dense_field_host_copy_staging_.mutex);
+      auto &staging = dense_field_staging_resource();
+      std::lock_guard<std::mutex> lock(staging.mutex);
       if (auto new_staging = ensure_vulkan_dense_host_staging(
-              device, dense_field_host_copy_staging_.upload,
-              dense_field_host_copy_staging_.upload_capacity, src_bytes,
+              device, staging.upload, staging.upload_capacity, src_bytes,
               /*host_write=*/true, /*host_read=*/false, AllocUsage::Upload)) {
-        dense_field_host_copy_staging_.upload = std::move(new_staging);
+        staging.upload = std::move(new_staging);
       }
       void *mapped{nullptr};
-      RhiResult res = device->map(*dense_field_host_copy_staging_.upload,
-                                  &mapped);
+      RhiResult res = device->map(*staging.upload, &mapped);
       TI_ERROR_IF(res != RhiResult::success || !mapped,
                   "Native dense field host copy failed to map staging buffer: "
                   "{}",
                   res);
       std::memcpy(mapped, reinterpret_cast<const void *>(src), src_bytes);
-      device->unmap(*dense_field_host_copy_staging_.upload);
+      device->unmap(*staging.upload);
       Stream *stream = device->get_compute_stream();
       auto [cmdlist, cmd_res] = stream->new_command_list_unique();
       TI_ERROR_IF(cmd_res != RhiResult::success,
                   "Native dense field host copy failed to create command "
                   "list: {}",
                   cmd_res);
-      cmdlist->buffer_copy(dst_ptr,
-                           dense_field_host_copy_staging_.upload->get_ptr(0),
-                           src_bytes);
+      cmdlist->buffer_copy(dst_ptr, staging.upload->get_ptr(0), src_bytes);
       stream->submit_synced(cmdlist.get());
       return;
     }
@@ -10598,6 +12333,11 @@ void Program::copy_dense_field_packed_from_host(SNode *dst,
                                                 std::size_t n,
                                                 int lane_count) {
   const Arch arch = compile_config().arch;
+  std::optional<RuntimeResourceSubmissionGuard> resource_submission_guard;
+  if (arch == Arch::vulkan) {
+    resource_submission_guard.emplace(
+        acquire_runtime_resource_submission_guard());
+  }
   TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
               "Native packed dense field host copy is only available on CPU, "
               "CUDA, and Vulkan backends.");
@@ -10622,31 +12362,28 @@ void Program::copy_dense_field_packed_from_host(SNode *dst,
                 "Native packed dense field host copy received invalid device "
                 "storage.");
     if (arch == Arch::vulkan) {
-      std::lock_guard<std::mutex> lock(dense_field_host_copy_staging_.mutex);
+      auto &staging = dense_field_staging_resource();
+      std::lock_guard<std::mutex> lock(staging.mutex);
       if (auto new_staging = ensure_vulkan_dense_host_staging(
-              device, dense_field_host_copy_staging_.upload,
-              dense_field_host_copy_staging_.upload_capacity, src_bytes,
+              device, staging.upload, staging.upload_capacity, src_bytes,
               /*host_write=*/true, /*host_read=*/false, AllocUsage::Upload)) {
-        dense_field_host_copy_staging_.upload = std::move(new_staging);
+        staging.upload = std::move(new_staging);
       }
       void *mapped{nullptr};
-      RhiResult res = device->map(*dense_field_host_copy_staging_.upload,
-                                  &mapped);
+      RhiResult res = device->map(*staging.upload, &mapped);
       TI_ERROR_IF(res != RhiResult::success || !mapped,
                   "Native packed dense field host copy failed to map staging "
                   "buffer: {}",
                   res);
       std::memcpy(mapped, reinterpret_cast<const void *>(src), src_bytes);
-      device->unmap(*dense_field_host_copy_staging_.upload);
+      device->unmap(*staging.upload);
       Stream *stream = device->get_compute_stream();
       auto [cmdlist, cmd_res] = stream->new_command_list_unique();
       TI_ERROR_IF(cmd_res != RhiResult::success,
                   "Native packed dense field host copy failed to create "
                   "command list: {}",
                   cmd_res);
-      cmdlist->buffer_copy(dst_ptr,
-                           dense_field_host_copy_staging_.upload->get_ptr(0),
-                           src_bytes);
+      cmdlist->buffer_copy(dst_ptr, staging.upload->get_ptr(0), src_bytes);
       stream->submit_synced(cmdlist.get());
       return;
     }
@@ -10669,6 +12406,11 @@ void Program::copy_dense_field_to_host(SNode *src,
                                        int value_type,
                                        std::size_t n) {
   const Arch arch = compile_config().arch;
+  std::optional<RuntimeResourceSubmissionGuard> resource_submission_guard;
+  if (arch == Arch::vulkan) {
+    resource_submission_guard.emplace(
+        acquire_runtime_resource_submission_guard());
+  }
   TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
               "Native dense field host readback is only available on CPU, "
               "CUDA, and Vulkan backends.");
@@ -10696,12 +12438,12 @@ void Program::copy_dense_field_to_host(SNode *src,
                 "Native dense field host readback received invalid device "
                 "storage.");
     if (arch == Arch::vulkan) {
-      std::lock_guard<std::mutex> lock(dense_field_host_copy_staging_.mutex);
+      auto &staging = dense_field_staging_resource();
+      std::lock_guard<std::mutex> lock(staging.mutex);
       if (auto new_staging = ensure_vulkan_dense_host_staging(
-              device, dense_field_host_copy_staging_.readback,
-              dense_field_host_copy_staging_.readback_capacity, dst_bytes,
+              device, staging.readback, staging.readback_capacity, dst_bytes,
               /*host_write=*/false, /*host_read=*/true, AllocUsage::None)) {
-        dense_field_host_copy_staging_.readback = std::move(new_staging);
+        staging.readback = std::move(new_staging);
       }
       Stream *stream = device->get_compute_stream();
       auto [cmdlist, cmd_res] = stream->new_command_list_unique();
@@ -10710,18 +12452,16 @@ void Program::copy_dense_field_to_host(SNode *src,
                   "list: {}",
                   cmd_res);
       cmdlist->buffer_copy(
-          dense_field_host_copy_staging_.readback->get_ptr(0), src_ptr,
-          dst_bytes);
+          staging.readback->get_ptr(0), src_ptr, dst_bytes);
       stream->submit_synced(cmdlist.get());
       void *mapped{nullptr};
-      RhiResult res = device->map(*dense_field_host_copy_staging_.readback,
-                                  &mapped);
+      RhiResult res = device->map(*staging.readback, &mapped);
       TI_ERROR_IF(res != RhiResult::success || !mapped,
                   "Native dense field host readback failed to map staging "
                   "buffer: {}",
                   res);
       std::memcpy(reinterpret_cast<void *>(dst), mapped, dst_bytes);
-      device->unmap(*dense_field_host_copy_staging_.readback);
+      device->unmap(*staging.readback);
       return;
     }
     void *dst_ptr = reinterpret_cast<void *>(dst);
@@ -10753,6 +12493,11 @@ void Program::copy_dense_field_packed_to_host(SNode *src,
                                               std::size_t n,
                                               int lane_count) {
   const Arch arch = compile_config().arch;
+  std::optional<RuntimeResourceSubmissionGuard> resource_submission_guard;
+  if (arch == Arch::vulkan) {
+    resource_submission_guard.emplace(
+        acquire_runtime_resource_submission_guard());
+  }
   TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
               "Native packed dense field host readback is only available on "
               "CPU, CUDA, and Vulkan backends.");
@@ -10777,12 +12522,12 @@ void Program::copy_dense_field_packed_to_host(SNode *src,
                 "Native packed dense field host readback received invalid "
                 "device storage.");
     if (arch == Arch::vulkan) {
-      std::lock_guard<std::mutex> lock(dense_field_host_copy_staging_.mutex);
+      auto &staging = dense_field_staging_resource();
+      std::lock_guard<std::mutex> lock(staging.mutex);
       if (auto new_staging = ensure_vulkan_dense_host_staging(
-              device, dense_field_host_copy_staging_.readback,
-              dense_field_host_copy_staging_.readback_capacity, dst_bytes,
+              device, staging.readback, staging.readback_capacity, dst_bytes,
               /*host_write=*/false, /*host_read=*/true, AllocUsage::None)) {
-        dense_field_host_copy_staging_.readback = std::move(new_staging);
+        staging.readback = std::move(new_staging);
       }
       Stream *stream = device->get_compute_stream();
       auto [cmdlist, cmd_res] = stream->new_command_list_unique();
@@ -10791,18 +12536,16 @@ void Program::copy_dense_field_packed_to_host(SNode *src,
                   "command list: {}",
                   cmd_res);
       cmdlist->buffer_copy(
-          dense_field_host_copy_staging_.readback->get_ptr(0), src_ptr,
-          dst_bytes);
+          staging.readback->get_ptr(0), src_ptr, dst_bytes);
       stream->submit_synced(cmdlist.get());
       void *mapped{nullptr};
-      RhiResult res = device->map(*dense_field_host_copy_staging_.readback,
-                                  &mapped);
+      RhiResult res = device->map(*staging.readback, &mapped);
       TI_ERROR_IF(res != RhiResult::success || !mapped,
                   "Native packed dense field host readback failed to map "
                   "staging buffer: {}",
                   res);
       std::memcpy(reinterpret_cast<void *>(dst), mapped, dst_bytes);
-      device->unmap(*dense_field_host_copy_staging_.readback);
+      device->unmap(*staging.readback);
       return;
     }
     void *dst_ptr = reinterpret_cast<void *>(dst);

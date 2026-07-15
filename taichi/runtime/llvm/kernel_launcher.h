@@ -21,6 +21,14 @@ class KernelLauncher : public lang::KernelLauncher {
   void launch_kernel(const lang::CompiledKernelData &compiled_kernel_data,
                      LaunchContextBuilder &ctx) override;
 
+  void launch_registered_kernel(
+      const lang::CompiledKernelData &compiled_kernel_data,
+      Handle handle,
+      LaunchContextBuilder &ctx) override {
+    TI_ASSERT(arch_uses_llvm(compiled_kernel_data.arch()));
+    launch_llvm_kernel(handle, ctx);
+  }
+
   virtual void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) = 0;
   virtual Handle register_llvm_kernel(
       const LLVM::CompiledKernelData &compiled) = 0;

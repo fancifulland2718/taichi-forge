@@ -1,4 +1,7 @@
+#include <algorithm>
+
 #include <taichi/program/launch_context_builder.h>
+#include "taichi/program/program.h"
 #define TI_RUNTIME_HOST
 #include <taichi/program/context.h>
 #undef TI_RUNTIME_HOST
@@ -245,44 +248,141 @@ void LaunchContextBuilder::set_arg_external_array_with_shape(
 
 void LaunchContextBuilder::set_arg_ndarray(const std::vector<int> &arg_id,
                                            const Ndarray &arr) {
-  intptr_t ptr = arr.get_device_allocation_ptr_as_int();
+  Program *owner = arr.owning_program();
+  const bool registry_owned = owner != nullptr;
+  if (registry_owned) {
+    NdarrayResourceRef ref;
+    ref.arg_offset = args_type->get_element_offset(arg_id);
+    ref.owner = owner;
+    ref.data = &arr;
+    ref.data_handle = arr.runtime_resource_handle();
+    TI_ERROR_IF(!ref.data_handle,
+                "Cannot bind an unregistered Ndarray runtime resource");
+    ndarray_ptrs.push_back(std::move(ref));
+  }
   TI_ASSERT_INFO(arr.shape.size() <= taichi_max_num_indices,
                  "External array cannot have > {max_num_indices} indices");
-  set_arg_ndarray_impl(arg_id, ptr, arr.shape);
+  // Store the address as an opaque context value, but never dereference it
+  // before Program validates the captured generation and owns the view. This
+  // avoids rebuilding and rehashing the same array_ptrs keys at submission.
+  set_arg_ndarray_impl(arg_id, arr.get_device_allocation_ptr_as_int(), arr.shape);
 }
 
 void LaunchContextBuilder::set_arg_argpack(const std::vector<int> &arg_id,
                                            const ArgPack &argpack) {
+  Program *owner = argpack.owning_program();
+  TI_ERROR_IF(owner == nullptr,
+              "Program-owned ArgPack is missing its owning Program");
+  auto submission_guard = owner->acquire_runtime_resource_submission_guard();
   argpack_ptrs[arg_id] = &argpack;
+  argpack_resource_handles[arg_id] =
+      owner->capture_argpack_resource_handle(&argpack);
   if (arg_id.size() == 1) {
-    // Only set ptr to arg buffer if this argpack is not nested
-    set_argpack_ptr(arg_id, argpack.get_device_allocation_ptr_as_int());
+    // Program resolves and leases this non-owning view immediately before the
+    // backend first dereferences it. Keep only a placeholder here so a retire
+    // racing the gap between context construction and launch cannot turn this
+    // method into a use-after-free.
+    set_argpack_ptr(arg_id, 0);
   }
   // TODO: Consider renaming this method to `set_device_allocation_type`
   set_array_device_allocation_type(arg_id, DevAllocType::kArgPack);
+}
+
+void LaunchContextBuilder::debug_set_argpack_resource_handle(
+    const std::vector<int> &arg_id,
+    RuntimeResourceHandle handle) {
+  const auto found = argpack_resource_handles.find(arg_id);
+  TI_ERROR_IF(found == argpack_resource_handles.end(),
+              "Cannot override an unbound ArgPack resource handle");
+  found->second = handle;
 }
 
 void LaunchContextBuilder::set_arg_ndarray_with_grad(
     const std::vector<int> &arg_id,
     const Ndarray &arr,
     const Ndarray &arr_grad) {
-  intptr_t ptr = arr.get_device_allocation_ptr_as_int();
-  intptr_t ptr_grad = arr_grad.get_device_allocation_ptr_as_int();
+  Program *owner = arr.owning_program();
+  Program *grad_owner = arr_grad.owning_program();
+  const bool registry_owned = owner != nullptr;
+  const bool grad_registry_owned = grad_owner != nullptr;
+  TI_ERROR_IF(registry_owned != grad_registry_owned,
+              "Ndarray primal and grad must share the same ownership model");
+  TI_ERROR_IF(registry_owned && owner != grad_owner,
+              "Ndarray primal and grad must belong to the same Program");
+  if (registry_owned) {
+    NdarrayResourceRef ref;
+    ref.arg_offset = args_type->get_element_offset(arg_id);
+    ref.owner = owner;
+    ref.data = &arr;
+    ref.grad = &arr_grad;
+    ref.data_handle = arr.runtime_resource_handle();
+    ref.grad_handle = arr_grad.runtime_resource_handle();
+    TI_ERROR_IF(!ref.data_handle || !ref.grad_handle,
+                "Cannot bind an unregistered Ndarray runtime resource");
+    ndarray_ptrs.push_back(std::move(ref));
+  }
   TI_ASSERT_INFO(arr.shape.size() <= taichi_max_num_indices,
                  "External array cannot have > {max_num_indices} indices");
-  set_arg_ndarray_impl(arg_id, ptr, arr.shape, ptr_grad);
+  set_arg_ndarray_impl(arg_id, arr.get_device_allocation_ptr_as_int(), arr.shape,
+                       arr_grad.get_device_allocation_ptr_as_int());
+}
+
+void LaunchContextBuilder::debug_set_ndarray_resource_handle(
+    const std::vector<int> &arg_id,
+    RuntimeResourceHandle handle) {
+  const int arg_offset = args_type->get_element_offset(arg_id);
+  const auto found = std::find_if(
+      ndarray_ptrs.begin(), ndarray_ptrs.end(), [&](const auto &ref) {
+        return ref.arg_offset == arg_offset;
+      });
+  TI_ERROR_IF(found == ndarray_ptrs.end(),
+              "Cannot override an unbound Ndarray resource handle");
+  found->data_handle = handle;
 }
 
 void LaunchContextBuilder::set_arg_texture(const std::vector<int> &arg_id,
                                            const Texture &tex) {
+  if (Program *owner = tex.owning_program()) {
+    TextureResourceRef ref;
+    ref.arg_offset = args_type->get_element_offset(arg_id);
+    ref.owner = owner;
+    ref.texture = &tex;
+    ref.handle = tex.runtime_resource_handle();
+    TI_ERROR_IF(!ref.handle,
+                "Cannot bind an unregistered Texture runtime resource");
+    texture_ptrs.push_back(std::move(ref));
+  }
   intptr_t ptr = tex.get_device_allocation_ptr_as_int();
   set_arg_texture_impl(arg_id, ptr);
 }
 
 void LaunchContextBuilder::set_arg_rw_texture(const std::vector<int> &arg_id,
                                               const Texture &tex) {
+  if (Program *owner = tex.owning_program()) {
+    TextureResourceRef ref;
+    ref.arg_offset = args_type->get_element_offset(arg_id);
+    ref.owner = owner;
+    ref.texture = &tex;
+    ref.handle = tex.runtime_resource_handle();
+    TI_ERROR_IF(!ref.handle,
+                "Cannot bind an unregistered Texture runtime resource");
+    texture_ptrs.push_back(std::move(ref));
+  }
   intptr_t ptr = tex.get_device_allocation_ptr_as_int();
   set_arg_rw_texture_impl(arg_id, ptr, tex.get_size());
+}
+
+void LaunchContextBuilder::debug_set_texture_resource_handle(
+    const std::vector<int> &arg_id,
+    RuntimeResourceHandle handle) {
+  const int arg_offset = args_type->get_element_offset(arg_id);
+  const auto found = std::find_if(
+      texture_ptrs.begin(), texture_ptrs.end(), [&](const auto &ref) {
+        return ref.arg_offset == arg_offset;
+      });
+  TI_ERROR_IF(found == texture_ptrs.end(),
+              "Cannot override an unbound Texture resource handle");
+  found->handle = handle;
 }
 
 RuntimeContext &LaunchContextBuilder::get_context() {

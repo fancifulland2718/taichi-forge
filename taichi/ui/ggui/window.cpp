@@ -247,6 +247,17 @@ void Window::copy_depth_buffer_to_ndarray(
   // load AOT modules
   Program *prog = renderer_->app_context().prog();
 
+  // Program-owned Ndarrays must remain live until the synchronous graphics
+  // copy has completed. AOT DeviceAllocation-backed views have no Program
+  // owner and preserve their existing external ownership contract.
+  Program::RuntimeResourceSubmissionGuard resource_guard;
+  if (Program *owner = depth_arr.owning_program()) {
+    TI_ERROR_IF(prog && owner != prog,
+                "Depth-Ndarray belongs to a different Program");
+    resource_guard = owner->acquire_runtime_resource_submission_guard();
+    owner->validate_ndarrays_for_external_submission({&depth_arr});
+  }
+
   if (prog) {
     prog->flush();
   }

@@ -8829,6 +8829,8 @@ bool Program::vulkan_add_merge_value_type_available(int value_type) const {
 std::size_t Program::vulkan_add_merge_ndarray(Ndarray *src,
                                               Ndarray *dst,
                                               int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(!vulkan_add_merge_value_type_available(value_type),
               "Vulkan native add-merge does not support the requested value "
               "type.");
@@ -8859,6 +8861,8 @@ std::size_t Program::vulkan_add_merge_strided_ndarray(
     std::size_t src_stride,
     std::size_t dst_offset,
     std::size_t dst_stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(!vulkan_add_merge_value_type_available(value_type),
               "Vulkan native strided add-merge does not support the requested "
               "value type.");
@@ -8870,6 +8874,8 @@ std::size_t Program::vulkan_add_merge_dense_field(Ndarray *src,
                                                   SNode *dst,
                                                   int value_type,
                                                   std::size_t n) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native dense field add-merge is only available on "
               "Vulkan.");
@@ -9046,6 +9052,8 @@ std::size_t Program::vulkan_grouped_reduce_i32_atomic_ndarray(Ndarray *keys,
                                                               Ndarray *values,
                                                               Ndarray *output,
                                                               int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_grouped_reduce_atomic_ndarray(keys, values, output, 0, op);
 }
 
@@ -9054,6 +9062,8 @@ std::size_t Program::vulkan_grouped_reduce_atomic_ndarray(Ndarray *keys,
                                                           Ndarray *output,
                                                           int value_type,
                                                           int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native grouped reduce is only available on Vulkan.");
   TI_ERROR_IF(!keys || !values || !output,
@@ -9335,6 +9345,8 @@ std::size_t Program::vulkan_grouped_reduce_atomic_member_ndarray(
     std::size_t offset,
     std::size_t stride,
     int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_grouped_reduce_atomic_strided_ndarray(
       keys, values, output, value_type, offset, stride, 0,
       vulkan_scan_value_type_size(value_type), op);
@@ -9350,6 +9362,8 @@ std::size_t Program::vulkan_grouped_reduce_atomic_strided_ndarray(
     std::size_t output_offset,
     std::size_t output_stride,
     int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_grouped_reduce_atomic_strided_keys_ndarray(
       keys, values, output, value_type, 0, sizeof(int32_t), values_offset,
       values_stride, output_offset, output_stride, op);
@@ -9367,6 +9381,8 @@ std::size_t Program::vulkan_grouped_reduce_atomic_strided_keys_ndarray(
     std::size_t output_offset,
     std::size_t output_stride,
     int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native strided grouped reduce is only available on "
               "Vulkan.");
@@ -9521,6 +9537,8 @@ std::size_t Program::vulkan_grouped_reduce_atomic_strided_keys_ndarray(
 
 std::size_t Program::vulkan_inclusive_scan_ndarray(Ndarray *data,
                                                    int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native scan is only available on Vulkan.");
   TI_ERROR_IF(!data, "Vulkan native scan received null ndarray.");
@@ -9546,6 +9564,8 @@ std::size_t Program::vulkan_inclusive_scan_ndarray(Ndarray *data,
 
 std::size_t Program::vulkan_inclusive_reverse_scan_ndarray(Ndarray *data,
                                                            int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native reverse scan is only available on Vulkan.");
   TI_ERROR_IF(!data, "Vulkan native reverse scan received null ndarray.");
@@ -9575,6 +9595,8 @@ std::size_t Program::vulkan_inclusive_scan_member_ndarray(
     int value_type,
     std::size_t offset,
     std::size_t stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native strided scan is only available on Vulkan.");
   check_vulkan_scan_member_request(data, value_type, offset, stride);
@@ -9598,6 +9620,8 @@ std::size_t Program::vulkan_inclusive_reverse_scan_member_ndarray(
     int value_type,
     std::size_t offset,
     std::size_t stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native strided reverse scan is only available on Vulkan.");
   check_vulkan_scan_member_request(data, value_type, offset, stride);
@@ -9811,6 +9835,8 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
                                             Ndarray *output,
                                             Ndarray *count,
                                             int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native compact is only available on Vulkan.");
   TI_ERROR_IF(!values || !flags || !output || !count,
@@ -10208,11 +10234,15 @@ std::size_t Program::vulkan_compact_i32_ndarray(Ndarray *values,
                                                 Ndarray *flags,
                                                 Ndarray *output,
                                                 Ndarray *count) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_compact_ndarray(values, flags, output, count, 0);
 }
 
 std::size_t Program::vulkan_histogram_i32_ndarray(Ndarray *values,
                                                   Ndarray *bins) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_histogram_ndarray(values, bins, 0, 0);
 }
 
@@ -10220,6 +10250,8 @@ std::size_t Program::vulkan_histogram_ndarray(Ndarray *values,
                                               Ndarray *bins,
                                               int value_type,
                                               int bin_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native histogram is only available on Vulkan.");
   TI_ERROR_IF(!values || !bins,
@@ -10688,6 +10720,8 @@ std::size_t Program::vulkan_reduce_ndarray(Ndarray *values,
                                            Ndarray *output,
                                            int value_type,
                                            int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_reduce_ndarray_impl(this, values, output, value_type, op, 0,
                                     vulkan_transform_value_size(value_type), 0,
                                     vulkan_transform_value_size(value_type),
@@ -10700,6 +10734,8 @@ std::size_t Program::vulkan_reduce_member_ndarray(Ndarray *values,
                                                   std::size_t offset,
                                                   std::size_t stride,
                                                   int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_reduce_ndarray_impl(this, values, output, value_type, op,
                                     offset, stride, 0,
                                     vulkan_transform_value_size(value_type),
@@ -10709,6 +10745,8 @@ std::size_t Program::vulkan_reduce_member_ndarray(Ndarray *values,
 std::size_t Program::vulkan_reduce_i32_ndarray(Ndarray *values,
                                                Ndarray *output,
                                                int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_reduce_ndarray(values, output, 0, op);
 }
 
@@ -10718,6 +10756,8 @@ std::size_t Program::vulkan_check_count_ndarray(Ndarray *values,
                                                 int check_op,
                                                 int lower,
                                                 int upper) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native check_count is only available on Vulkan.");
   return vulkan_check_count_ndarray_impl(this, values, output, value_type,
@@ -10734,6 +10774,8 @@ std::size_t Program::vulkan_check_count_strided_ndarray(Ndarray *values,
                                                         int check_op,
                                                         int lower,
                                                         int upper) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native strided check_count is only available on "
               "Vulkan.");
@@ -10749,6 +10791,8 @@ std::size_t Program::vulkan_check_count_dense_field(SNode *values,
                                                     int check_op,
                                                     int lower,
                                                     int upper) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native dense field check_count is only available on "
               "Vulkan.");
@@ -10776,6 +10820,8 @@ std::size_t Program::vulkan_metric_reduce_ndarray(Ndarray *values,
                                                   Ndarray *output,
                                                   int value_type,
                                                   int metric_op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native metric_reduce is only available on Vulkan.");
   return vulkan_metric_reduce_ndarray_impl(this, values, other, output,
@@ -10796,6 +10842,8 @@ std::size_t Program::vulkan_metric_reduce_strided_ndarray(
     std::size_t other_offset,
     std::size_t other_stride,
     int metric_op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native strided metric_reduce is only available on "
               "Vulkan.");
@@ -10810,6 +10858,8 @@ std::size_t Program::vulkan_metric_reduce_dense_field(SNode *values,
                                                       int value_type,
                                                       std::size_t n,
                                                       int metric_op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native dense field metric_reduce is only available on "
               "Vulkan.");
@@ -10849,6 +10899,8 @@ std::size_t Program::vulkan_metric_reduce_dense_field_strided_ndarray(
     std::size_t array_stride,
     bool field_is_values,
     int metric_op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native mixed metric_reduce is only available on "
               "Vulkan.");
@@ -10897,6 +10949,8 @@ std::size_t Program::vulkan_reduce_strided_ndarray(
     std::size_t output_offset,
     std::size_t output_stride,
     int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_reduce_ndarray_impl(this, values, output, value_type, op,
                                     values_offset, values_stride,
                                     output_offset, output_stride, true, true);
@@ -10974,6 +11028,8 @@ std::size_t Program::vulkan_transform_affine_ndarray(Ndarray *src,
                                                      int value_type,
                                                      double scale,
                                                      double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_transform_affine_ndarray_impl(
       this, src, dst, value_type, 1, 0,
       vulkan_transform_value_size(value_type), 0,
@@ -10985,6 +11041,8 @@ std::size_t Program::vulkan_transform_affine_ndarray_trusted(Ndarray *src,
                                                              int value_type,
                                                              double scale,
                                                              double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   const size_t value_size = vulkan_transform_value_size(value_type);
   return vulkan_transform_affine_ndarray_impl(
       this, src, dst, value_type, 1, 0, value_size, 0, value_size, scale, bias,
@@ -10997,6 +11055,8 @@ std::size_t Program::vulkan_transform_indexed_affine_ndarray(Ndarray *src,
                                                               int value_type,
                                                               double scale,
                                                               double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_transform_indexed_affine_ndarray_impl(
       this, src, indices, dst, value_type, scale, bias);
 }
@@ -11009,6 +11069,8 @@ std::size_t Program::vulkan_transform_affine_member_ndarray(
     std::size_t stride,
     double scale,
     double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_transform_affine_ndarray_impl(
       this, src, dst, value_type, 1, offset, stride, 0,
       vulkan_transform_value_size(value_type), scale, bias, true, false);
@@ -11024,6 +11086,8 @@ std::size_t Program::vulkan_transform_affine_strided_ndarray(
     std::size_t dst_stride,
     double scale,
     double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_transform_affine_ndarray_impl(
       this, src, dst, value_type, 1, src_offset, src_stride, dst_offset,
       dst_stride, scale, bias, true, true);
@@ -11039,6 +11103,8 @@ std::size_t Program::vulkan_transform_affine_strided_ndarray_trusted(
     std::size_t dst_stride,
     double scale,
     double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_transform_affine_ndarray_impl(
       this, src, dst, value_type, 1, src_offset, src_stride, dst_offset,
       dst_stride, scale, bias, true, true, true);
@@ -11055,6 +11121,8 @@ std::size_t Program::vulkan_transform_affine_packed_strided_ndarray(
     std::size_t dst_stride,
     double scale,
     double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_transform_affine_ndarray_impl(
       this, src, dst, value_type, lane_count, src_offset, src_stride,
       dst_offset, dst_stride, scale, bias, true, true);
@@ -11246,6 +11314,8 @@ std::size_t Program::vulkan_zero_dense_fields(
 std::size_t Program::vulkan_gather_ndarray(Ndarray *src,
                                            Ndarray *indices,
                                            Ndarray *dst) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native gather is only available on Vulkan.");
   TI_ERROR_IF(!src || !indices || !dst,
@@ -11328,6 +11398,8 @@ std::size_t Program::vulkan_gather_strided_ndarray(
     std::size_t src_stride,
     std::size_t dst_offset,
     std::size_t dst_stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native strided gather is only available on Vulkan.");
   check_vulkan_indexed_copy_strided_request(
@@ -11430,6 +11502,8 @@ std::size_t Program::vulkan_gather_dense_field(SNode *src,
                                                int value_type,
                                                std::size_t src_n,
                                                std::size_t dst_n) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native dense field gather is only available on Vulkan.");
   check_vulkan_indexed_copy_dense_field_request(
@@ -11588,6 +11662,8 @@ std::size_t Program::vulkan_gather_dense_field_packed(SNode *src,
                                                       std::size_t src_n,
                                                       std::size_t dst_n,
                                                       int lane_count) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native packed dense field gather is only available on "
               "Vulkan.");
@@ -11861,6 +11937,8 @@ std::size_t Program::vulkan_gather_dense_field_indices_field(
 std::size_t Program::vulkan_scatter_ndarray(Ndarray *src,
                                             Ndarray *indices,
                                             Ndarray *dst) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native scatter is only available on Vulkan.");
   TI_ERROR_IF(!src || !indices || !dst,
@@ -11945,6 +12023,8 @@ std::size_t Program::vulkan_scatter_strided_ndarray(
     std::size_t src_stride,
     std::size_t dst_offset,
     std::size_t dst_stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native strided scatter is only available on Vulkan.");
   check_vulkan_indexed_copy_strided_request(
@@ -12050,6 +12130,8 @@ std::size_t Program::vulkan_scatter_dense_field(SNode *src,
                                                 int value_type,
                                                 std::size_t src_n,
                                                 std::size_t dst_n) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native dense field scatter is only available on "
               "Vulkan.");
@@ -12211,6 +12293,8 @@ std::size_t Program::vulkan_scatter_dense_field_packed(SNode *src,
                                                        std::size_t src_n,
                                                        std::size_t dst_n,
                                                        int lane_count) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native packed dense field scatter is only available on "
               "Vulkan.");
@@ -12492,6 +12576,8 @@ std::size_t Program::vulkan_scatter_add_ndarray(Ndarray *src,
                                                 Ndarray *indices,
                                                 Ndarray *dst,
                                                 int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native scatter-add is only available on Vulkan.");
   TI_ERROR_IF(!src || !indices || !dst,
@@ -12588,6 +12674,8 @@ std::size_t Program::vulkan_scatter_add_member_ndarray(
     int value_type,
     std::size_t offset,
     std::size_t stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_scatter_add_strided_ndarray(
       src, indices, dst, value_type, offset, stride, 0,
       vulkan_scan_value_type_size(value_type));
@@ -12602,6 +12690,8 @@ std::size_t Program::vulkan_scatter_add_strided_ndarray(
     std::size_t src_stride,
     std::size_t dst_offset,
     std::size_t dst_stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native strided scatter-add is only available on Vulkan.");
   check_vulkan_scatter_add_strided_request(
@@ -12704,6 +12794,8 @@ std::size_t Program::vulkan_scatter_add_dense_field(SNode *src,
                                                     int value_type,
                                                     std::size_t src_n,
                                                     std::size_t dst_n) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native dense field scatter-add is only available on "
               "Vulkan.");
@@ -12902,6 +12994,8 @@ std::size_t Program::vulkan_scatter_add_dense_field_packed(
     std::size_t src_n,
     std::size_t dst_n,
     int lane_count) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native packed dense field scatter-add is only "
               "available on Vulkan.");
@@ -13304,6 +13398,8 @@ std::size_t Program::vulkan_bucket_builder_i32_ndarray(Ndarray *keys,
                                                        Ndarray *offsets,
                                                        Ndarray *output,
                                                        Ndarray *cursor) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_bucket_builder_ndarray(keys, values, offsets, output, cursor,
                                        0);
 }
@@ -13314,6 +13410,8 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
                                                    Ndarray *output,
                                                    Ndarray *cursor,
                                                    int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native bucket builder is only available on Vulkan.");
   TI_ERROR_IF(!keys || !values || !offsets || !output || !cursor,
@@ -13603,6 +13701,8 @@ std::size_t Program::vulkan_bucket_builder_dense_field(SNode *keys,
                                                        int value_type,
                                                        std::size_t n,
                                                        std::size_t num_bins) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native dense field bucket builder is only available on "
               "Vulkan.");
@@ -13899,6 +13999,8 @@ std::size_t Program::vulkan_grouped_reduce_i32_ndarray(Ndarray *keys,
                                                        Ndarray *scratch,
                                                        Ndarray *cursor,
                                                        int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   return vulkan_grouped_reduce_ndarray(keys, values, output, offsets, scratch,
                                        cursor, 0, op);
 }
@@ -13911,6 +14013,8 @@ std::size_t Program::vulkan_grouped_reduce_ndarray(Ndarray *keys,
                                                    Ndarray *cursor,
                                                    int value_type,
                                                    int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Vulkan native grouped reduce is only available on Vulkan.");
   TI_ERROR_IF(!keys || !values || !output || !offsets || !scratch || !cursor,
@@ -14011,6 +14115,8 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                                                    int value_type,
                                                    std::size_t key_offset,
                                                    std::size_t value_offset) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   const bool cpu_profile_enabled = vulkan_sort_cpu_profile_enabled();
   VulkanSortCpuProfileSample front_profile;
   VulkanSortCpuProfileSample *front =
@@ -15202,6 +15308,8 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
                                                    int value_type,
                                                    std::size_t key_offset,
                                                    std::size_t value_offset) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native radix sort requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15217,12 +15325,16 @@ std::size_t Program::vulkan_radix_sort_u32_dense_field(SNode *keys,
 
 std::size_t Program::vulkan_inclusive_scan_ndarray(Ndarray *data,
                                                    int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native scan requires TI_WITH_VULKAN=ON.");
   return 0;
 }
 
 std::size_t Program::vulkan_inclusive_reverse_scan_ndarray(Ndarray *data,
                                                            int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native reverse scan requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15232,6 +15344,8 @@ std::size_t Program::vulkan_inclusive_scan_member_ndarray(
     int value_type,
     std::size_t offset,
     std::size_t stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided scan requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15241,6 +15355,8 @@ std::size_t Program::vulkan_inclusive_reverse_scan_member_ndarray(
     int value_type,
     std::size_t offset,
     std::size_t stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided reverse scan requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15283,6 +15399,8 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
                                             Ndarray *output,
                                             Ndarray *count,
                                             int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native compact requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15301,12 +15419,16 @@ std::size_t Program::vulkan_compact_i32_ndarray(Ndarray *values,
                                                 Ndarray *flags,
                                                 Ndarray *output,
                                                 Ndarray *count) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native compact requires TI_WITH_VULKAN=ON.");
   return 0;
 }
 
 std::size_t Program::vulkan_histogram_i32_ndarray(Ndarray *values,
                                                   Ndarray *bins) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native histogram requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15315,6 +15437,8 @@ std::size_t Program::vulkan_histogram_ndarray(Ndarray *values,
                                               Ndarray *bins,
                                               int value_type,
                                               int bin_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native histogram requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15333,6 +15457,8 @@ std::size_t Program::vulkan_reduce_ndarray(Ndarray *values,
                                            Ndarray *output,
                                            int value_type,
                                            int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15343,6 +15469,8 @@ std::size_t Program::vulkan_reduce_member_ndarray(Ndarray *values,
                                                   std::size_t offset,
                                                   std::size_t stride,
                                                   int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15356,6 +15484,8 @@ std::size_t Program::vulkan_reduce_strided_ndarray(
     std::size_t output_offset,
     std::size_t output_stride,
     int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15363,6 +15493,8 @@ std::size_t Program::vulkan_reduce_strided_ndarray(
 std::size_t Program::vulkan_reduce_i32_ndarray(Ndarray *values,
                                                Ndarray *output,
                                                int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15373,6 +15505,8 @@ std::size_t Program::vulkan_check_count_ndarray(Ndarray *values,
                                                 int check_op,
                                                 int lower,
                                                 int upper) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native check_count requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15385,6 +15519,8 @@ std::size_t Program::vulkan_check_count_strided_ndarray(Ndarray *values,
                                                         int check_op,
                                                         int lower,
                                                         int upper) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided check_count requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15396,6 +15532,8 @@ std::size_t Program::vulkan_check_count_dense_field(SNode *values,
                                                     int check_op,
                                                     int lower,
                                                     int upper) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native dense field check_count requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15405,6 +15543,8 @@ std::size_t Program::vulkan_metric_reduce_ndarray(Ndarray *values,
                                                   Ndarray *output,
                                                   int value_type,
                                                   int metric_op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native metric_reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15419,6 +15559,8 @@ std::size_t Program::vulkan_metric_reduce_strided_ndarray(
     std::size_t other_offset,
     std::size_t other_stride,
     int metric_op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided metric_reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15429,6 +15571,8 @@ std::size_t Program::vulkan_metric_reduce_dense_field(SNode *values,
                                                       int value_type,
                                                       std::size_t n,
                                                       int metric_op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native dense field metric_reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15443,6 +15587,8 @@ std::size_t Program::vulkan_metric_reduce_dense_field_strided_ndarray(
     std::size_t array_stride,
     bool field_is_values,
     int metric_op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native mixed metric_reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15472,6 +15618,8 @@ std::size_t Program::vulkan_transform_affine_ndarray(Ndarray *src,
                                                      int value_type,
                                                      double scale,
                                                      double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native transform requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15482,6 +15630,8 @@ std::size_t Program::vulkan_transform_indexed_affine_ndarray(Ndarray *src,
                                                               int value_type,
                                                               double scale,
                                                               double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native indexed transform requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15493,6 +15643,8 @@ std::size_t Program::vulkan_transform_affine_member_ndarray(Ndarray *src,
                                                             std::size_t stride,
                                                             double scale,
                                                             double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided transform requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15507,6 +15659,8 @@ std::size_t Program::vulkan_transform_affine_strided_ndarray(
     std::size_t dst_stride,
     double scale,
     double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided transform requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15522,6 +15676,8 @@ std::size_t Program::vulkan_transform_affine_packed_strided_ndarray(
     std::size_t dst_stride,
     double scale,
     double bias) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native packed strided transform requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15567,6 +15723,8 @@ std::size_t Program::vulkan_zero_dense_fields(
 std::size_t Program::vulkan_add_merge_ndarray(Ndarray *src,
                                               Ndarray *dst,
                                               int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native add-merge requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15579,6 +15737,8 @@ std::size_t Program::vulkan_add_merge_strided_ndarray(
     std::size_t src_stride,
     std::size_t dst_offset,
     std::size_t dst_stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided add-merge requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15587,6 +15747,8 @@ std::size_t Program::vulkan_add_merge_dense_field(Ndarray *src,
                                                   SNode *dst,
                                                   int value_type,
                                                   std::size_t n) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native dense field add-merge requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15612,6 +15774,8 @@ std::size_t Program::vulkan_add_scalar_field_to_dense_field(SNode *src,
 std::size_t Program::vulkan_gather_ndarray(Ndarray *src,
                                            Ndarray *indices,
                                            Ndarray *dst) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native gather requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15625,6 +15789,8 @@ std::size_t Program::vulkan_gather_strided_ndarray(
     std::size_t src_stride,
     std::size_t dst_offset,
     std::size_t dst_stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided gather requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15635,6 +15801,8 @@ std::size_t Program::vulkan_gather_dense_field(SNode *src,
                                                int value_type,
                                                std::size_t src_n,
                                                std::size_t dst_n) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native dense field gather requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15646,6 +15814,8 @@ std::size_t Program::vulkan_gather_dense_field_packed(SNode *src,
                                                       std::size_t src_n,
                                                       std::size_t dst_n,
                                                       int lane_count) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR(
       "Vulkan native packed dense field gather requires TI_WITH_VULKAN=ON.");
   return 0;
@@ -15680,6 +15850,8 @@ std::size_t Program::vulkan_gather_dense_field_indices_field(
 std::size_t Program::vulkan_scatter_ndarray(Ndarray *src,
                                             Ndarray *indices,
                                             Ndarray *dst) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native scatter requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15693,6 +15865,8 @@ std::size_t Program::vulkan_scatter_strided_ndarray(
     std::size_t src_stride,
     std::size_t dst_offset,
     std::size_t dst_stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided scatter requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15703,6 +15877,8 @@ std::size_t Program::vulkan_scatter_dense_field(SNode *src,
                                                 int value_type,
                                                 std::size_t src_n,
                                                 std::size_t dst_n) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native dense field scatter requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15714,6 +15890,8 @@ std::size_t Program::vulkan_scatter_dense_field_packed(SNode *src,
                                                        std::size_t src_n,
                                                        std::size_t dst_n,
                                                        int lane_count) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR(
       "Vulkan native packed dense field scatter requires TI_WITH_VULKAN=ON.");
   return 0;
@@ -15749,6 +15927,8 @@ std::size_t Program::vulkan_scatter_add_ndarray(Ndarray *src,
                                                 Ndarray *indices,
                                                 Ndarray *dst,
                                                 int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native scatter-add requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15759,6 +15939,8 @@ std::size_t Program::vulkan_scatter_add_member_ndarray(Ndarray *src,
                                                        int value_type,
                                                        std::size_t offset,
                                                        std::size_t stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided scatter-add requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15772,6 +15954,8 @@ std::size_t Program::vulkan_scatter_add_strided_ndarray(
     std::size_t src_stride,
     std::size_t dst_offset,
     std::size_t dst_stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided scatter-add requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15782,6 +15966,8 @@ std::size_t Program::vulkan_scatter_add_dense_field(SNode *src,
                                                     int value_type,
                                                     std::size_t src_n,
                                                     std::size_t dst_n) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native dense field scatter-add requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15793,6 +15979,8 @@ std::size_t Program::vulkan_scatter_add_dense_field_packed(SNode *src,
                                                            std::size_t src_n,
                                                            std::size_t dst_n,
                                                            int lane_count) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR(
       "Vulkan native packed dense field scatter-add requires "
       "TI_WITH_VULKAN=ON.");
@@ -15831,6 +16019,8 @@ std::size_t Program::vulkan_bucket_builder_i32_ndarray(Ndarray *keys,
                                                        Ndarray *offsets,
                                                        Ndarray *output,
                                                        Ndarray *cursor) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native bucket builder requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15841,6 +16031,8 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
                                                    Ndarray *output,
                                                    Ndarray *cursor,
                                                    int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native bucket builder requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15853,6 +16045,8 @@ std::size_t Program::vulkan_bucket_builder_dense_field(SNode *keys,
                                                        int value_type,
                                                        std::size_t n,
                                                        std::size_t num_bins) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native dense field bucket builder requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15861,6 +16055,8 @@ std::size_t Program::vulkan_grouped_reduce_i32_atomic_ndarray(Ndarray *keys,
                                                               Ndarray *values,
                                                               Ndarray *output,
                                                               int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native grouped reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15870,6 +16066,8 @@ std::size_t Program::vulkan_grouped_reduce_atomic_ndarray(Ndarray *keys,
                                                           Ndarray *output,
                                                           int value_type,
                                                           int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native grouped reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15894,6 +16092,8 @@ std::size_t Program::vulkan_grouped_reduce_atomic_member_ndarray(
     std::size_t offset,
     std::size_t stride,
     int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided grouped reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15908,6 +16108,8 @@ std::size_t Program::vulkan_grouped_reduce_atomic_strided_ndarray(
     std::size_t output_offset,
     std::size_t output_stride,
     int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided grouped reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15924,6 +16126,8 @@ std::size_t Program::vulkan_grouped_reduce_atomic_strided_keys_ndarray(
     std::size_t output_offset,
     std::size_t output_stride,
     int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native strided grouped reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15935,6 +16139,8 @@ std::size_t Program::vulkan_grouped_reduce_i32_ndarray(Ndarray *keys,
                                                        Ndarray *scratch,
                                                        Ndarray *cursor,
                                                        int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native grouped reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }
@@ -15947,6 +16153,8 @@ std::size_t Program::vulkan_grouped_reduce_ndarray(Ndarray *keys,
                                                    Ndarray *cursor,
                                                    int value_type,
                                                    int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native grouped reduce requires TI_WITH_VULKAN=ON.");
   return 0;
 }

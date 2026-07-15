@@ -513,6 +513,25 @@ void export_lang(py::module &m) {
   py::class_<CompiledKernelData>(
       m, "CompiledKernelData");  // NOLINT(bugprone-unused-raii)
 
+  // Internal F2 validation surface. The public API remains Graph.run() -> None
+  // until CPU/CUDA/Vulkan Ticket semantics and reset/fault lifetime complete
+  // the F2.3 acceptance gate.
+  py::class_<RuntimeCompletion>(m, "_RuntimeCompletion")
+      .def("done", &RuntimeCompletion::done,
+           py::call_guard<py::gil_scoped_release>())
+      .def("wait", &RuntimeCompletion::wait,
+           py::call_guard<py::gil_scoped_release>())
+      .def_property_readonly("backend", [](const RuntimeCompletion &value) {
+        return arch_name(value.backend());
+      })
+      .def_property_readonly("program_domain",
+                             &RuntimeCompletion::program_domain)
+      .def_property_readonly("sequence", &RuntimeCompletion::sequence)
+      .def_property_readonly("has_backend_work",
+                             &RuntimeCompletion::has_backend_work)
+      .def_property_readonly("first_error",
+                             &RuntimeCompletion::first_error_message);
+
   py::class_<Program>(m, "Program")
       .def(py::init<>())
       .def("config", &Program::compile_config,
@@ -574,6 +593,11 @@ void export_lang(py::module &m) {
              return ret;
            })
       .def("synchronize", &Program::synchronize)
+      .def("_record_runtime_completion",
+           &Program::record_runtime_completion,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_debug_runtime_completion_stats",
+           &Program::debug_runtime_completion_stats)
       .def("materialize_runtime", &Program::materialize_runtime)
       .def("make_aot_module_builder", &Program::make_aot_module_builder)
       .def("get_snode_tree_size", &Program::get_snode_tree_size)
@@ -631,6 +655,21 @@ void export_lang(py::module &m) {
           },
           py::arg("dt"), py::return_value_policy::reference)
       .def("delete_argpack", &Program::delete_argpack)
+      .def("delete_texture", &Program::delete_texture)
+      .def("_debug_argpack_resource_stats",
+           &Program::debug_argpack_resource_stats)
+      .def("_debug_argpack_resource_identity",
+           &Program::debug_argpack_resource_identity)
+      .def("_debug_ndarray_resource_stats",
+           &Program::debug_ndarray_resource_stats)
+      .def("_debug_ndarray_resource_identity",
+           &Program::debug_ndarray_resource_identity)
+      .def("_debug_texture_resource_stats",
+           &Program::debug_texture_resource_stats)
+      .def("_debug_texture_resource_identity",
+           &Program::debug_texture_resource_identity)
+      .def("_debug_dense_field_staging_stats",
+           &Program::debug_dense_field_staging_stats)
       .def(
           "create_texture",
           [&](Program *program, BufferFormat fmt, const std::vector<int> &shape)
@@ -2583,10 +2622,34 @@ void export_lang(py::module &m) {
       .def("set_arg_external_array_with_shape",
            &LaunchContextBuilder::set_arg_external_array_with_shape)
       .def("set_arg_argpack", &LaunchContextBuilder::set_arg_argpack)
+      .def("_debug_set_argpack_resource_handle",
+           [](LaunchContextBuilder &ctx, const std::vector<int> &arg_id,
+              std::uint64_t domain, std::uint32_t kind, std::uint32_t index,
+              std::uint32_t generation) {
+             ctx.debug_set_argpack_resource_handle(
+                 arg_id, RuntimeResourceHandle{domain, kind, index,
+                                               generation});
+           })
       .def("set_arg_ndarray", &LaunchContextBuilder::set_arg_ndarray)
       .def("set_arg_ndarray_with_grad",
            &LaunchContextBuilder::set_arg_ndarray_with_grad)
+      .def("_debug_set_ndarray_resource_handle",
+           [](LaunchContextBuilder &ctx, const std::vector<int> &arg_id,
+              std::uint64_t domain, std::uint32_t kind, std::uint32_t index,
+              std::uint32_t generation) {
+             ctx.debug_set_ndarray_resource_handle(
+                 arg_id, RuntimeResourceHandle{domain, kind, index,
+                                               generation});
+           })
       .def("set_arg_texture", &LaunchContextBuilder::set_arg_texture)
+      .def("_debug_set_texture_resource_handle",
+           [](LaunchContextBuilder &ctx, const std::vector<int> &arg_id,
+              std::uint64_t domain, std::uint32_t kind, std::uint32_t index,
+              std::uint32_t generation) {
+             ctx.debug_set_texture_resource_handle(
+                 arg_id, RuntimeResourceHandle{domain, kind, index,
+                                               generation});
+           })
       .def("set_arg_rw_texture", &LaunchContextBuilder::set_arg_rw_texture)
       .def("get_struct_ret_int", &LaunchContextBuilder::get_struct_ret_int)
       .def("get_struct_ret_uint", &LaunchContextBuilder::get_struct_ret_uint)

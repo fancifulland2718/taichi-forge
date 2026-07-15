@@ -10,6 +10,7 @@ from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeErr
 
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
+from taichi_forge.lang import impl
 from tests import test_utils
 
 supported_floating_types = [ti.f32] if platform.system() == "Darwin" else [ti.f32, ti.f64]
@@ -351,6 +352,46 @@ def test_mixed_runtime_arg_cache_updates_dynamic_values():
     assert np.array_equal(dst.to_numpy(), other_np * 4 + 7)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_graph_ndarray_registry_lifetime_after_runtime_arg_gc():
+    sink = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def consume(arr: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        sink[None] += arr[0]
+
+    sym_arr = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "arr", ti.i32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(consume, sym_arr)
+    graph = builder.compile()
+    prog = impl.get_runtime().prog
+    # Graph compilation uses temporary concrete exemplars for specialization;
+    # drain those wrappers before taking the lifecycle baseline.
+    gc.collect()
+    ti.sync()
+    baseline = prog._debug_ndarray_resource_stats()
+
+    arr = ti.ndarray(ti.i32, shape=1)
+    arr.fill(11)
+    graph.run({"arr": arr})
+    launched = prog._debug_ndarray_resource_stats()
+    if impl.current_cfg().arch == ti.cpu:
+        assert launched["inflight"] == baseline["inflight"]
+    else:
+        assert launched["inflight"] == baseline["inflight"] + 1
+
+    del arr
+    gc.collect()
+    ti.sync()
+    completed = prog._debug_ndarray_resource_stats()
+    for key in ("live", "retiring", "leases", "views", "inflight"):
+        assert completed[key] == baseline[key]
+    assert completed["created_total"] == baseline["created_total"] + 1
+    assert completed["retired_total"] == baseline["retired_total"] + 1
+    assert completed["released_total"] == baseline["released_total"] + 1
+    assert sink[None] == 11
+
+
 @test_utils.test(arch=ti.cpu)
 def test_graph_rejects_runtime_arg_key_mismatch():
     @ti.kernel
@@ -550,6 +591,39 @@ def test_reused_sequential_append_freezes_each_version():
     )
     ti.sync()
     assert aot_value.to_numpy()[()] == 3
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_aot_jit_graph_pins_ndarray_runtime_arg_until_sync():
+    sink = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def consume(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in values:
+            ti.atomic_add(sink[None], values[i])
+
+    sym_values = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(consume, sym_values)
+    graph = builder.compile()
+
+    values = ti.ndarray(ti.i32, shape=16)
+    values.fill(3)
+    native_view = values.arr
+    graph._compiled_graph.jit_run(
+        ti.lang.impl.current_cfg(),
+        {"values": native_view},
+    )
+
+    # The high-level wrapper requests retirement immediately. GPU execution is
+    # allowed to finish later, so the low-level JIT/AOT path must keep its own
+    # generation-qualified in-flight lease until Program synchronization.
+    del values
+    gc.collect()
+    ti.sync()
+    assert sink[None] == 48
 
 
 @test_utils.test(arch=ti.cpu)
@@ -1085,6 +1159,52 @@ def test_texture():
     for i in range(res[0]):
         for j in range(res[1]):
             assert test_utils.allclose(pixels[i, j], [0.1, 0.1, 0.1, 1.0])
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_graph_texture_registry_lifetime_after_runtime_arg_gc():
+    @ti.kernel
+    def write(
+        tex: ti.types.rw_texture(
+            num_dimensions=2, fmt=ti.Format.r32f, lod=0
+        ),
+    ):
+        tex.store(ti.Vector([0, 0]), ti.Vector([9.0, 0.0, 0.0, 0.0]))
+
+    sym_tex = ti.graph.Arg(
+        ti.graph.ArgKind.RWTEXTURE,
+        "tex",
+        ndim=2,
+        fmt=ti.Format.r32f,
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(write, sym_tex)
+    graph = builder.compile()
+    prog = impl.get_runtime().prog
+    gc.collect()
+    ti.sync()
+    baseline = prog._debug_texture_resource_stats()
+
+    texture = ti.Texture(ti.Format.r32f, (1, 1))
+    graph.run({"tex": texture})
+    launched = prog._debug_texture_resource_stats()
+    assert launched["inflight"] == baseline["inflight"] + 1
+
+    texture_ref = weakref.ref(texture)
+    del texture
+    gc.collect()
+    assert texture_ref() is None
+    retired = prog._debug_texture_resource_stats()
+    assert retired["views"] == baseline["views"]
+    assert retired["retiring"] == baseline["retiring"] + 1
+
+    ti.sync()
+    completed = prog._debug_texture_resource_stats()
+    for key in ("live", "retiring", "leases", "views", "inflight"):
+        assert completed[key] == baseline[key]
+    assert completed["created_total"] == baseline["created_total"] + 1
+    assert completed["retired_total"] == baseline["retired_total"] + 1
+    assert completed["released_total"] == baseline["released_total"] + 1
 
 
 @test_utils.test(arch=supported_archs_cgraph)

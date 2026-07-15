@@ -1058,15 +1058,31 @@ class Kernel:
         def set_arg_ndarray(indices, v):
             v_primal = v.arr
             v_grad = v.grad.arr if v.grad else None
+            if v_primal is None:
+                raise TaichiRuntimeError(
+                    "Cannot submit an Ndarray after its Taichi runtime has been reset"
+                )
+            if v.grad is not None and v_grad is None:
+                raise TaichiRuntimeError(
+                    "Cannot submit an Ndarray gradient after its Taichi runtime has been reset"
+                )
             if v_grad is None:
                 launch_ctx.set_arg_ndarray(indices, v_primal)
             else:
                 launch_ctx.set_arg_ndarray_with_grad(indices, v_primal, v_grad)
 
         def set_arg_texture(indices, v):
+            if v.tex is None:
+                raise TaichiRuntimeError(
+                    "Cannot submit a Texture after its Taichi runtime has been reset"
+                )
             launch_ctx.set_arg_texture(indices, v.tex)
 
         def set_arg_rw_texture(indices, v):
+            if v.tex is None:
+                raise TaichiRuntimeError(
+                    "Cannot submit a Texture after its Taichi runtime has been reset"
+                )
             launch_ctx.set_arg_rw_texture(indices, v.tex)
 
         def set_arg_ext_array(indices, v, needed):
@@ -1249,7 +1265,12 @@ class Kernel:
                 idx_new = 0
                 for j, (name, anno) in enumerate(needed.members.items()):
                     idx_new += recursive_set_args(anno, type(v[name]), v[name], indices + (idx_new,))
-                launch_ctx.set_arg_argpack(indices, v._ArgPack__argpack)
+                native_argpack = v._ArgPack__argpack
+                if native_argpack is None:
+                    raise TaichiRuntimeError(
+                        "Cannot submit an ArgPack after its Taichi runtime has been reset"
+                    )
+                launch_ctx.set_arg_argpack(indices, native_argpack)
                 return 1
             # Note: do not use sth like "needed == f32". That would be slow.
             if id(needed) in primitive_types.real_type_ids:

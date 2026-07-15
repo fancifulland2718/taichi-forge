@@ -390,6 +390,14 @@ class _GraphRunContext:
         self._args = args
         self._flattened_args = None
 
+    def end(self):
+        # Runtime resource completion is owned by the native Program registry.
+        # Keeping the Python argument dict here after submission only delays
+        # wrapper retirement and can pin arbitrarily large user object graphs.
+        # The generation-qualified flattened fast cache remains reusable.
+        self._args = None
+        self._flattened_args = None
+
     def runtime_args(self):
         return self._args
 
@@ -422,9 +430,17 @@ class _GraphRunContext:
         dynamic_items = []
         for k, v in args.items():
             if isinstance(v, Ndarray):
+                if v.arr is None:
+                    raise TaichiRuntimeError(
+                        "Cannot submit an Ndarray to Graph.run() after its Taichi runtime has been reset"
+                    )
                 signature.append((k, "ndarray", id(v), id(v.arr)))
                 flattened[k] = v.arr
             elif isinstance(v, Texture):
+                if v.tex is None:
+                    raise TaichiRuntimeError(
+                        "Cannot submit a Texture to Graph.run() after its Taichi runtime has been reset"
+                    )
                 signature.append((k, "texture", id(v), id(v.tex)))
                 flattened[k] = v.tex
             elif isinstance(v, Matrix):
@@ -633,8 +649,12 @@ class _GraphExecutable:
         context = self._context
         if context is not None:
             context.begin(args)
-        for node in self.spec.nodes:
-            node.run(context)
+        try:
+            for node in self.spec.nodes:
+                node.run(context)
+        finally:
+            if context is not None:
+                context.end()
 
 
 class _GraphInstance:
@@ -723,7 +743,11 @@ class _GraphInstance:
         context = self._run_context
         if context is not None:
             context.begin(args)
-        self._backend_executable.run(context)
+        try:
+            self._backend_executable.run(context)
+        finally:
+            if context is not None:
+                context.end()
 
     def _run_native_only(self, args):
         for node in self._native_nodes:

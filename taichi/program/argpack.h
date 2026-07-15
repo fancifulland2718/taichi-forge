@@ -26,6 +26,10 @@ class TI_DLL_EXPORT ArgPack {
   DeviceAllocation get_device_allocation() const;
   std::size_t get_nelement() const;
 
+  Program *owning_program() const noexcept {
+    return prog_;
+  }
+
   TypedConstant read(const std::vector<int> &I) const;
   void write(const std::vector<int> &I, TypedConstant val) const;
   void set_arg_int(const std::vector<int> &i, int64 val) const;
@@ -34,7 +38,7 @@ class TI_DLL_EXPORT ArgPack {
   void set_arg_nested_argpack(int i, const ArgPack &val) const;
   void set_arg_nested_argpack_ptr(int i, intptr_t val) const;
 
-  ~ArgPack();
+  ~ArgPack() noexcept;
 
  private:
   Program *prog_{nullptr};

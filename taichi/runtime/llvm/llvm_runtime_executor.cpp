@@ -90,6 +90,7 @@ LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
   }
 #if defined(TI_WITH_CUDA)
   else if (config.arch == Arch::cuda) {
+    auto context_guard = CUDAContext::get_instance().get_guard();
     int num_SMs{1};
     CUDADriver::get_instance().device_get_attribute(
         &num_SMs, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, nullptr);
@@ -218,6 +219,7 @@ void LlvmRuntimeExecutor::print_list_manager_info(void *list_manager,
 void LlvmRuntimeExecutor::synchronize() {
   if (config_.arch == Arch::cuda) {
 #if defined(TI_WITH_CUDA)
+    auto context_guard = CUDAContext::get_instance().get_guard();
     CUDADriver::get_instance().stream_synchronize(nullptr);
 #else
     TI_ERROR("No CUDA support");
@@ -243,6 +245,7 @@ uint64 LlvmRuntimeExecutor::fetch_result_uint64(int i, uint64 *result_buffer) {
   uint64 ret;
   if (config_.arch == Arch::cuda) {
 #if defined(TI_WITH_CUDA)
+    auto context_guard = CUDAContext::get_instance().get_guard();
     CUDADriver::get_instance().memcpy_device_to_host(&ret, result_buffer + i,
                                                      sizeof(uint64));
 #else
@@ -727,6 +730,7 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
                                                          result_buffer);
   if (config_.arch == Arch::cuda) {
 #if defined(TI_WITH_CUDA)
+    auto context_guard = CUDAContext::get_instance().get_guard();
     CUDADriver::get_instance().memset(root_buffer, 0, rounded_size);
 #else
     TI_NOT_IMPLEMENTED
@@ -975,6 +979,7 @@ void LlvmRuntimeExecutor::fill_ndarray(const DeviceAllocation &alloc,
   auto ptr = get_device_alloc_info_ptr(alloc);
   if (config_.arch == Arch::cuda) {
 #if defined(TI_WITH_CUDA)
+    auto context_guard = CUDAContext::get_instance().get_guard();
     CUDADriver::get_instance().memsetd32((void *)ptr, data, size);
 #else
     TI_NOT_IMPLEMENTED

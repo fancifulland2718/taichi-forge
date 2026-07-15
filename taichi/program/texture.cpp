@@ -200,6 +200,15 @@ intptr_t Texture::get_device_allocation_ptr_as_int() const {
 }
 
 void Texture::from_ndarray(Ndarray *ndarray) {
+  TI_ERROR_IF(!ndarray, "Texture upload received a null Ndarray");
+  TI_ERROR_IF(!prog_,
+              "Texture upload from Ndarray requires a Program-owned Texture");
+  TI_ERROR_IF(ndarray->owning_program() != prog_,
+              "Texture upload source Ndarray belongs to another Program");
+  auto resource_guard = prog_->acquire_runtime_resource_submission_guard();
+  auto texture_lease = prog_->acquire_texture_external_lease(this);
+  prog_->validate_ndarrays_for_external_submission({ndarray});
+
   auto semaphore = prog_->flush();
 
   GraphicsDevice *device =
@@ -238,6 +247,12 @@ DevicePtr get_device_ptr(taichi::lang::Program *program, SNode *snode) {
 }
 
 void Texture::from_snode(SNode *snode) {
+  TI_ERROR_IF(!snode, "Texture upload received a null SNode");
+  TI_ERROR_IF(!prog_,
+              "Texture upload from SNode requires a Program-owned Texture");
+  auto tree_guard = prog_->acquire_snode_tree_lifecycle_read_guard();
+  auto resource_guard = prog_->acquire_runtime_resource_submission_guard();
+  auto texture_lease = prog_->acquire_texture_external_lease(this);
   auto semaphore = prog_->flush();
 
   TI_ASSERT(snode->is_path_all_dense);

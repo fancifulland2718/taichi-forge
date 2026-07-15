@@ -14,6 +14,7 @@
 #include <set>
 #include <memory>
 #include <deque>
+#include <unordered_map>
 
 #include "taichi/ui/utils/utils.h"
 #include "taichi/ui/ggui/vertex.h"
@@ -93,12 +94,21 @@ class TI_DLL_EXPORT Renderer {
   const taichi::lang::SurfaceImage &get_render_surface_image() const;
 
  private:
+  using SharedNdarrayResourceLease =
+      std::shared_ptr<taichi::lang::Program::NdarrayResourceLease>;
+  using SharedTextureResourceLease =
+      std::shared_ptr<taichi::lang::Program::TextureResourceLease>;
+
   struct InFlightFrame {
     taichi::lang::StreamSemaphore complete;
     // Kept alive until this frame completes because its acquire wait proves the
     // previous present using the same swapchain image has finished.
     std::vector<taichi::lang::StreamSemaphore> present_waits_after_acquire;
     std::vector<std::unique_ptr<Renderable>> renderables;
+    std::vector<SharedNdarrayResourceLease>
+        ndarray_resource_leases;
+    std::vector<SharedTextureResourceLease>
+        texture_resource_leases;
   };
 
   void resize_lights_ssbo(int new_ssbo_size);
@@ -108,6 +118,11 @@ class TI_DLL_EXPORT Renderer {
   void wait_oldest_frame();
   size_t max_frames_in_flight();
   SetImage *get_set_image_renderable();
+  bool remember_runtime_resource_handle(
+      taichi::lang::RuntimeResourceHandle handle);
+  void retain_field_info(const FieldInfo &field);
+  void retain_renderable_info(const RenderableInfo &info);
+  void retain_texture(taichi::lang::Texture *texture);
   void recycle_renderable_list(std::vector<std::unique_ptr<Renderable>> &list);
   void recycle_renderables(InFlightFrame &frame);
 
@@ -121,6 +136,22 @@ class TI_DLL_EXPORT Renderer {
   std::deque<InFlightFrame> in_flight_frames_;
   std::vector<std::unique_ptr<SetImage>> reusable_set_images_;
   SetImage *pending_set_image_{nullptr};
+  std::vector<taichi::lang::RuntimeResourceHandle>
+      pending_runtime_resource_handles_;
+  std::vector<SharedNdarrayResourceLease>
+      pending_ndarray_resource_leases_;
+  std::vector<SharedTextureResourceLease>
+      pending_texture_resource_leases_;
+  // Weak caches share one native registry lease across overlapping frames.
+  // The registry slot index is bounded and cannot be reused while an older
+  // generation still has an in-flight lease, so stale weak entries are safely
+  // replaced without retaining resources indefinitely.
+  std::unordered_map<std::uint32_t, std::weak_ptr<
+                                        taichi::lang::Program::NdarrayResourceLease>>
+      shared_ndarray_frame_leases_;
+  std::unordered_map<std::uint32_t, std::weak_ptr<
+                                        taichi::lang::Program::TextureResourceLease>>
+      shared_texture_frame_leases_;
 
   DeviceAllocationUnique lights_ssbo_{nullptr};
   unsigned long long lights_ssbo_size{0};

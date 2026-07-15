@@ -561,20 +561,22 @@ class PyTaichi:
         self._ti_func_expansion_profile: bool = bool(
             int(os.environ.get("TI_FUNC_EXPANSION_PROFILE", "0"))
         )
-        self._runtime_object_refs = []
+        # Runtime wrappers need invalidation on reset/SNodeTree retirement, but
+        # dead wrappers must not leave one weakref object per historical
+        # allocation. WeakValueDictionary supports unhashable wrappers by
+        # keying on object identity and removes entries automatically.
+        self._runtime_object_refs = weakref.WeakValueDictionary()
 
     def register_runtime_object(self, obj):
-        self._runtime_object_refs.append(weakref.ref(obj))
+        self._runtime_object_refs[id(obj)] = obj
 
     def begin_snode_tree_destroy(self, dependency):
         notified = []
-        live_refs = []
+        # Hold a stable strong snapshot while callbacks prepare retirement.
+        # WeakValueDictionary itself may shrink as unrelated wrappers die.
+        live_objects = list(self._runtime_object_refs.values())
         try:
-            for ref in self._runtime_object_refs:
-                obj = ref()
-                if obj is None:
-                    continue
-                live_refs.append(ref)
+            for obj in live_objects:
                 retire = getattr(obj, "_retire_snode_tree", None)
                 if retire is not None and retire(dependency):
                     notified.append(obj)
@@ -584,7 +586,6 @@ class PyTaichi:
             # surfacing the original error; the C++ tree is still live here.
             self.cancel_snode_tree_destroy(dependency, reversed(notified))
             raise
-        self._runtime_object_refs = live_refs
         return notified
 
     @staticmethod
@@ -595,12 +596,9 @@ class PyTaichi:
                 cancel(dependency)
 
     def invalidate_runtime_objects(self):
-        refs = self._runtime_object_refs
-        self._runtime_object_refs = []
-        for ref in refs:
-            obj = ref()
-            if obj is None:
-                continue
+        objects = list(self._runtime_object_refs.values())
+        self._runtime_object_refs = weakref.WeakValueDictionary()
+        for obj in objects:
             invalidate = getattr(obj, "_invalidate_runtime", None)
             if invalidate is not None:
                 invalidate()
@@ -813,6 +811,9 @@ def reset():
     window_module = sys.modules.get("taichi_forge.ui.window")
     if window_module is not None:
         window_module._destroy_all_windows()
+    staging_module = sys.modules.get("taichi_forge.ui.staging_buffer")
+    if staging_module is not None:
+        staging_module.clear_staging_caches()
     algorithms_module = sys.modules.get("taichi_forge.algorithms._algorithms")
     if algorithms_module is not None and hasattr(
         algorithms_module, "clear_default_workspaces"

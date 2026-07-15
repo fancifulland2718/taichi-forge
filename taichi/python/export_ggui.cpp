@@ -827,7 +827,8 @@ void export_ggui(py::module &m) {
                     &FieldInfo::set_field_source)
       .def_property("dtype", &FieldInfo::get_dtype, &FieldInfo::set_dtype)
       .def_property("dev_alloc", &FieldInfo::get_dev_alloc,
-                    &FieldInfo::set_dev_alloc);
+                    &FieldInfo::set_dev_alloc)
+      .def("bind_runtime_ndarray", &FieldInfo::bind_runtime_ndarray);
 
   py::enum_<EventType>(m, "EventType")
       .value("Any", EventType::Any)

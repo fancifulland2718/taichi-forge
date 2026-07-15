@@ -1,3 +1,4 @@
+import gc
 from io import BytesIO
 
 import numpy as np
@@ -230,3 +231,113 @@ def test_rw_texture_wrong_ndim():
         match="RWTextureType dimension mismatch for argument tex: expected 1, got 2",
     ) as e:
         write(tex)
+
+
+@test_utils.test(arch=supported_archs_texture)
+def test_texture_registry_keeps_inflight_launch_alive_until_sync():
+    @ti.kernel
+    def write(tex: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32f, lod=0)):
+        tex.store(ti.Vector([0, 0]), ti.Vector([7.0, 0.0, 0.0, 0.0]))
+
+    warmup = ti.Texture(ti.Format.r32f, (1, 1))
+    write(warmup)
+    ti.sync()
+    del warmup
+    gc.collect()
+    ti.sync()
+
+    prog = impl.get_runtime().prog
+    baseline = prog._debug_texture_resource_stats()
+    tex = ti.Texture(ti.Format.r32f, (1, 1))
+    created = prog._debug_texture_resource_stats()
+    assert created["created_total"] == baseline["created_total"] + 1
+    assert created["live"] == baseline["live"] + 1
+    assert created["views"] == baseline["views"] + 1
+    assert created["leases"] == baseline["leases"] + 1
+
+    write(tex)
+    launched = prog._debug_texture_resource_stats()
+    assert launched["inflight"] == baseline["inflight"] + 1
+    assert launched["leases"] == baseline["leases"] + 2
+
+    del tex
+    gc.collect()
+    retired = prog._debug_texture_resource_stats()
+    assert retired["views"] == baseline["views"]
+    assert retired["retiring"] == baseline["retiring"] + 1
+    assert retired["retired_total"] == baseline["retired_total"] + 1
+
+    ti.sync()
+    completed = prog._debug_texture_resource_stats()
+    for key in ("live", "retiring", "leases", "views", "inflight"):
+        assert completed[key] == baseline[key]
+    assert completed["created_total"] == baseline["created_total"] + 1
+    assert completed["retired_total"] == baseline["retired_total"] + 1
+    assert completed["released_total"] == baseline["released_total"] + 1
+
+
+@test_utils.test(arch=supported_archs_texture)
+def test_texture_launch_context_rejects_stale_resource_generation():
+    @ti.kernel
+    def write(tex: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32f, lod=0)):
+        tex.store(ti.Vector([0, 0]), ti.Vector([3.0, 0.0, 0.0, 0.0]))
+
+    old = ti.Texture(ti.Format.r32f, (1, 1))
+    primal = write._primal
+    key = primal.ensure_compiled(old)
+    kernel_cpp = primal.compiled_kernels[key]
+    prog = impl.get_runtime().prog
+    compiled = prog.compile_kernel(
+        prog.config(), prog.get_device_caps(), kernel_cpp
+    )
+    old_identity = prog._debug_texture_resource_identity(old.tex)
+
+    old_native = old.tex
+    old._invalidate_runtime()
+    prog.delete_texture(old_native)
+
+    replacement = ti.Texture(ti.Format.r32f, (1, 1))
+    replacement_identity = prog._debug_texture_resource_identity(
+        replacement.tex
+    )
+    assert replacement_identity["domain"] == old_identity["domain"]
+    assert replacement_identity["index"] == old_identity["index"]
+    assert replacement_identity["generation"] != old_identity["generation"]
+
+    launch_ctx = kernel_cpp.make_launch_context()
+    launch_ctx.set_arg_rw_texture([0], replacement.tex)
+    launch_ctx._debug_set_texture_resource_handle(
+        [0],
+        old_identity["domain"],
+        old_identity["kind"],
+        old_identity["index"],
+        old_identity["generation"],
+    )
+    with pytest.raises(RuntimeError, match="stale or retired Texture"):
+        prog.launch_kernel(compiled, launch_ctx)
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=supported_archs_texture)
+def test_texture_registry_resize_churn_conserves_resources():
+    prog = impl.get_runtime().prog
+    runtime = impl.get_runtime()
+    baseline = prog._debug_texture_resource_stats()
+    baseline_runtime_objects = len(runtime._runtime_object_refs)
+
+    iterations = 256
+    for i in range(iterations):
+        extent = 1 << (i % 5)
+        tex = ti.Texture(ti.Format.rgba8, (extent, extent))
+        del tex
+        if i % 32 == 0:
+            gc.collect()
+    gc.collect()
+
+    completed = prog._debug_texture_resource_stats()
+    for key in ("live", "retiring", "leases", "views", "inflight"):
+        assert completed[key] == baseline[key]
+    assert completed["created_total"] - baseline["created_total"] == iterations
+    assert completed["retired_total"] - baseline["retired_total"] == iterations
+    assert completed["released_total"] - baseline["released_total"] == iterations
+    assert len(runtime._runtime_object_refs) == baseline_runtime_objects

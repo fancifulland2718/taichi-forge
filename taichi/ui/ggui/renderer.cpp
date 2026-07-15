@@ -55,6 +55,7 @@ void Renderer::set_background_color(const glm::vec3 &color) {
 }
 
 void Renderer::set_image(const SetImageInfo &info) {
+  retain_field_info(info.img);
   SetImage *s = pending_set_image_;
   if (!s) {
     s = get_set_image_renderable();
@@ -75,6 +76,7 @@ void Renderer::set_image(const DisplayFrameInfo &info) {
 }
 
 void Renderer::set_image(Texture *tex) {
+  retain_texture(tex);
   SetImage *s = pending_set_image_;
   if (!s) {
     s = get_set_image_renderable();
@@ -85,6 +87,7 @@ void Renderer::set_image(Texture *tex) {
 }
 
 void Renderer::triangles(const TrianglesInfo &info) {
+  retain_renderable_info(info.renderable_info);
   Triangles *triangles =
       get_renderable_of_type<Triangles>(info.renderable_info.vbo_attrs);
   triangles->update_data(info);
@@ -92,12 +95,14 @@ void Renderer::triangles(const TrianglesInfo &info) {
 }
 
 void Renderer::lines(const LinesInfo &info) {
+  retain_renderable_info(info.renderable_info);
   Lines *lines = get_renderable_of_type<Lines>(info.renderable_info.vbo_attrs);
   lines->update_data(info);
   render_queue_.push_back(lines);
 }
 
 void Renderer::circles(const CirclesInfo &info) {
+  retain_renderable_info(info.renderable_info);
   Circles *circles =
       get_renderable_of_type<Circles>(info.renderable_info.vbo_attrs);
   circles->update_data(info);
@@ -105,6 +110,7 @@ void Renderer::circles(const CirclesInfo &info) {
 }
 
 void Renderer::scene_lines(const SceneLinesInfo &info) {
+  retain_renderable_info(info.renderable_info);
   SceneLines *scene_lines =
       get_renderable_of_type<SceneLines>(info.renderable_info.vbo_attrs);
   scene_lines->update_data(info);
@@ -112,12 +118,17 @@ void Renderer::scene_lines(const SceneLinesInfo &info) {
 }
 
 void Renderer::mesh(const MeshInfo &info) {
+  retain_renderable_info(info.renderable_info);
+  if (info.mesh_attribute_info.has_attribute) {
+    retain_field_info(info.mesh_attribute_info.mesh_attribute);
+  }
   Mesh *mesh = get_renderable_of_type<Mesh>(info.renderable_info.vbo_attrs);
   mesh->update_data(info);
   render_queue_.push_back(mesh);
 }
 
 void Renderer::particles(const ParticlesInfo &info) {
+  retain_renderable_info(info.renderable_info);
   Particles *particles =
       get_renderable_of_type<Particles>(info.renderable_info.vbo_attrs);
   particles->update_data(info);
@@ -275,6 +286,9 @@ void Renderer::discard_pending_frame() {
   recycle_renderable_list(renderables_);
   render_queue_.clear();
   pending_set_image_ = nullptr;
+  pending_runtime_resource_handles_.clear();
+  pending_ndarray_resource_leases_.clear();
+  pending_texture_resource_leases_.clear();
 }
 
 size_t Renderer::max_frames_in_flight() {
@@ -294,6 +308,99 @@ SetImage *Renderer::get_set_image_renderable() {
   SetImage *ret = r.get();
   renderables_.push_back(std::move(r));
   return ret;
+}
+
+bool Renderer::remember_runtime_resource_handle(
+    RuntimeResourceHandle handle) {
+  if (!handle) {
+    return false;
+  }
+  if (std::find(pending_runtime_resource_handles_.begin(),
+                pending_runtime_resource_handles_.end(),
+                handle) != pending_runtime_resource_handles_.end()) {
+    return false;
+  }
+  pending_runtime_resource_handles_.push_back(handle);
+  return true;
+}
+
+void Renderer::retain_field_info(const FieldInfo &field) {
+  if (!field.valid || !field.runtime_resource_handle) {
+    return;
+  }
+  Program *owner = field.runtime_resource_program;
+  TI_ERROR_IF(owner == nullptr,
+              "GGUI received an Ndarray identity without an owning Program");
+  TI_ERROR_IF(owner != app_context_.prog(),
+              "GGUI cannot consume an Ndarray owned by another Program");
+  if (!remember_runtime_resource_handle(field.runtime_resource_handle)) {
+    return;
+  }
+  try {
+    SharedNdarrayResourceLease lease;
+    const auto cached =
+        shared_ndarray_frame_leases_.find(field.runtime_resource_handle.index);
+    if (cached != shared_ndarray_frame_leases_.end()) {
+      lease = cached->second.lock();
+      if (lease && (*lease).handle() != field.runtime_resource_handle) {
+        lease.reset();
+      }
+    }
+    if (!lease) {
+      lease = std::make_shared<Program::NdarrayResourceLease>(
+          owner->acquire_ndarray_external_lease(
+              field.runtime_resource_handle));
+      shared_ndarray_frame_leases_[field.runtime_resource_handle.index] =
+          lease;
+    }
+    TI_ERROR_IF(lease->get()->get_device_allocation() != field.dev_alloc,
+                "GGUI Ndarray identity does not match its DeviceAllocation");
+    pending_ndarray_resource_leases_.push_back(std::move(lease));
+  } catch (...) {
+    pending_runtime_resource_handles_.pop_back();
+    throw;
+  }
+}
+
+void Renderer::retain_renderable_info(const RenderableInfo &info) {
+  retain_field_info(info.vbo);
+  if (info.indices.valid) {
+    retain_field_info(info.indices);
+  }
+}
+
+void Renderer::retain_texture(Texture *texture) {
+  if (texture == nullptr || texture->owning_program() == nullptr) {
+    return;
+  }
+  Program *owner = texture->owning_program();
+  TI_ERROR_IF(owner != app_context_.prog(),
+              "GGUI cannot consume a Texture owned by another Program");
+  RuntimeResourceHandle handle = texture->runtime_resource_handle();
+  if (!remember_runtime_resource_handle(handle)) {
+    return;
+  }
+  try {
+    SharedTextureResourceLease lease;
+    const auto cached = shared_texture_frame_leases_.find(handle.index);
+    if (cached != shared_texture_frame_leases_.end()) {
+      lease = cached->second.lock();
+      if (lease && (*lease).handle() != handle) {
+        lease.reset();
+      }
+    }
+    if (!lease) {
+      lease = std::make_shared<Program::TextureResourceLease>(
+          owner->acquire_texture_external_lease(texture));
+      shared_texture_frame_leases_[handle.index] = lease;
+    }
+    TI_ERROR_IF(lease->get() != texture,
+                "GGUI Texture identity does not match its runtime resource");
+    pending_texture_resource_leases_.push_back(std::move(lease));
+  } catch (...) {
+    pending_runtime_resource_handles_.pop_back();
+    throw;
+  }
 }
 
 void Renderer::recycle_renderable_list(
@@ -455,6 +562,11 @@ bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
   frame.complete = render_complete_semaphore_;
   frame.present_waits_after_acquire = std::move(present_waits_after_acquire);
   frame.renderables = std::move(renderables_);
+  frame.ndarray_resource_leases =
+      std::move(pending_ndarray_resource_leases_);
+  frame.texture_resource_leases =
+      std::move(pending_texture_resource_leases_);
+  pending_runtime_resource_handles_.clear();
   in_flight_frames_.push_back(std::move(frame));
   return true;
 }

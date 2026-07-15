@@ -1,4 +1,6 @@
 import copy
+import gc
+import threading
 
 import numpy as np
 import pytest
@@ -1451,6 +1453,253 @@ def test_ndarray_reset():
     del c
     d = ti.Matrix.ndarray(4, 4, ti.f32, shape=(n))
     ti.reset()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_ndarray_registry_retire_waits_for_gpu_sync():
+    sink = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def consume(arr: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        sink[None] += arr[0]
+
+    warmup = ti.ndarray(ti.i32, shape=1)
+    warmup.fill(0)
+    consume(warmup)
+    ti.sync()
+    del warmup
+    gc.collect()
+    ti.sync()
+
+    prog = impl.get_runtime().prog
+    baseline = prog._debug_ndarray_resource_stats()
+    arr = ti.ndarray(ti.i32, shape=1)
+    arr.fill(7)
+    created = prog._debug_ndarray_resource_stats()
+    assert created["created_total"] == baseline["created_total"] + 1
+    assert created["live"] == baseline["live"] + 1
+    assert created["views"] == baseline["views"] + 1
+    assert created["leases"] == baseline["leases"] + 1
+
+    consume(arr)
+    launched = prog._debug_ndarray_resource_stats()
+    if impl.current_cfg().arch == ti.cpu:
+        assert launched["inflight"] == baseline["inflight"]
+        assert launched["leases"] == baseline["leases"] + 1
+    else:
+        assert launched["inflight"] == baseline["inflight"] + 1
+        assert launched["leases"] == baseline["leases"] + 2
+
+    del arr
+    gc.collect()
+    retired = prog._debug_ndarray_resource_stats()
+    assert retired["views"] == baseline["views"]
+    assert retired["retired_total"] == baseline["retired_total"] + 1
+    if impl.current_cfg().arch == ti.cpu:
+        assert retired["released_total"] == baseline["released_total"] + 1
+    else:
+        assert retired["retiring"] == baseline["retiring"] + 1
+        assert retired["released_total"] == baseline["released_total"]
+
+    ti.sync()
+    completed = prog._debug_ndarray_resource_stats()
+    for key in ("live", "retiring", "leases", "views", "inflight"):
+        assert completed[key] == baseline[key]
+    assert completed["created_total"] == baseline["created_total"] + 1
+    assert completed["retired_total"] == baseline["retired_total"] + 1
+    assert completed["released_total"] == baseline["released_total"] + 1
+    assert sink[None] == 7
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_ndarray_registry_concurrent_submit_and_gc():
+    sink = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def consume(arr: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        ti.atomic_add(sink[None], arr[0])
+
+    warmup = ti.ndarray(ti.i32, shape=1)
+    warmup.fill(0)
+    consume(warmup)
+    ti.sync()
+    del warmup
+    gc.collect()
+    ti.sync()
+
+    prog = impl.get_runtime().prog
+    baseline = prog._debug_ndarray_resource_stats()
+    errors = []
+    thread_count = 4
+    iterations = 8
+
+    def worker(worker_id):
+        try:
+            for i in range(iterations):
+                value = worker_id * iterations + i + 1
+                arr = ti.ndarray(ti.i32, shape=1)
+                arr.fill(value)
+                consume(arr)
+                del arr
+                if i % 2 == 0:
+                    gc.collect()
+        except BaseException as exc:
+            errors.append(exc)
+
+    workers = [
+        threading.Thread(target=worker, args=(i,)) for i in range(thread_count)
+    ]
+    for worker_thread in workers:
+        worker_thread.start()
+    for worker_thread in workers:
+        worker_thread.join()
+    assert not errors
+
+    gc.collect()
+    ti.sync()
+    completed = prog._debug_ndarray_resource_stats()
+    expected = thread_count * iterations
+    for key in ("live", "retiring", "leases", "views", "inflight"):
+        assert completed[key] == baseline[key]
+    assert completed["created_total"] - baseline["created_total"] == expected
+    assert completed["retired_total"] - baseline["retired_total"] == expected
+    assert completed["released_total"] - baseline["released_total"] == expected
+    assert sink[None] == expected * (expected + 1) // 2
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_ndarray_registry_more_than_inline_launch_leases():
+    sink = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def consume(
+        a0: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        a1: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        a2: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        a3: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        a4: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        a5: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        a6: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        a7: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        a8: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        sink[None] = (
+            a0[0]
+            + a1[0]
+            + a2[0]
+            + a3[0]
+            + a4[0]
+            + a5[0]
+            + a6[0]
+            + a7[0]
+            + a8[0]
+        )
+
+    arrays = [ti.ndarray(ti.i32, shape=1) for _ in range(9)]
+    for i, arr in enumerate(arrays, 1):
+        arr.fill(i)
+    del arr
+    consume(*arrays)
+    prog = impl.get_runtime().prog
+    launched = prog._debug_ndarray_resource_stats()
+    if impl.current_cfg().arch == ti.cpu:
+        assert launched["inflight"] == 0
+        assert launched["leases"] == launched["views"]
+    else:
+        assert launched["inflight"] == len(arrays)
+        assert launched["leases"] == launched["views"] + len(arrays)
+
+    del arrays
+    gc.collect()
+    ti.sync()
+    completed = prog._debug_ndarray_resource_stats()
+    assert completed["live"] == 0
+    assert completed["retiring"] == 0
+    assert completed["leases"] == 0
+    assert completed["views"] == 0
+    assert completed["inflight"] == 0
+    assert sink[None] == sum(range(1, 10))
+
+
+@test_utils.test(arch=ti.cpu)
+def test_ndarray_launch_context_rejects_stale_resource_generation():
+    @ti.kernel
+    def bump(arr: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        arr[0] += 1
+
+    old = ti.ndarray(ti.i32, shape=1)
+    old.fill(3)
+    primal = bump._primal
+    key = primal.ensure_compiled(old)
+    kernel_cpp = primal.compiled_kernels[key]
+    prog = impl.get_runtime().prog
+    compiled = prog.compile_kernel(
+        prog.config(), prog.get_device_caps(), kernel_cpp
+    )
+    old_identity = prog._debug_ndarray_resource_identity(old.arr)
+
+    old_native = old.arr
+    old._invalidate_runtime()
+    prog.delete_ndarray(old_native)
+
+    replacement = ti.ndarray(ti.i32, shape=1)
+    replacement_identity = prog._debug_ndarray_resource_identity(
+        replacement.arr
+    )
+    assert replacement_identity["domain"] == old_identity["domain"]
+    assert replacement_identity["index"] == old_identity["index"]
+    assert replacement_identity["generation"] != old_identity["generation"]
+
+    # Model the hardest aliasing case deterministically: the context points to
+    # the current view address but carries the generation captured for the
+    # retired occupant of the same registry slot.
+    launch_ctx = kernel_cpp.make_launch_context()
+    launch_ctx.set_arg_ndarray([0], replacement.arr)
+    launch_ctx._debug_set_ndarray_resource_handle(
+        [0],
+        old_identity["domain"],
+        old_identity["kind"],
+        old_identity["index"],
+        old_identity["generation"],
+    )
+    replacement.fill(17)
+    with pytest.raises(RuntimeError, match="stale or retired Ndarray"):
+        prog.launch_kernel(compiled, launch_ctx)
+    assert replacement.to_numpy()[0] == 17
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=ti.cpu)
+def test_ndarray_registry_10k_create_use_release_stress():
+    @ti.kernel
+    def touch(arr: ti.types.ndarray(dtype=ti.i32, ndim=1), value: ti.i32):
+        arr[0] = value
+
+    warmup = ti.ndarray(ti.i32, shape=1)
+    touch(warmup, 0)
+    del warmup
+    gc.collect()
+    prog = impl.get_runtime().prog
+    runtime = impl.get_runtime()
+    baseline = prog._debug_ndarray_resource_stats()
+    baseline_runtime_objects = len(runtime._runtime_object_refs)
+
+    iterations = 10_000
+    for i in range(iterations):
+        arr = ti.ndarray(ti.i32, shape=1)
+        touch(arr, i)
+        del arr
+        if i % 512 == 0:
+            gc.collect()
+    gc.collect()
+
+    completed = prog._debug_ndarray_resource_stats()
+    for key in ("live", "retiring", "leases", "views", "inflight"):
+        assert completed[key] == baseline[key]
+    assert completed["created_total"] - baseline["created_total"] == iterations
+    assert completed["retired_total"] - baseline["retired_total"] == iterations
+    assert completed["released_total"] - baseline["released_total"] == iterations
+    assert len(runtime._runtime_object_refs) == baseline_runtime_objects
 
 
 @pytest.mark.run_in_serial

@@ -19,7 +19,7 @@ ArgPack::ArgPack(Program *prog, const DataType type) : prog_(prog) {
       AllocUsage::Storage | AllocUsage::Uniform);
 }
 
-ArgPack::~ArgPack() {
+ArgPack::~ArgPack() noexcept {
   if (prog_) {
     argpack_alloc_.device->dealloc_memory(argpack_alloc_);
   }

@@ -1,3 +1,5 @@
+import weakref
+
 import numpy as np
 from taichi_forge.types import ndarray as ndarray_type
 from taichi_forge.lang import ops
@@ -9,10 +11,12 @@ from taichi_forge.types.primitive_types import f32, u8, u32
 
 import taichi_forge as ti
 
-vbo_field_cache = {}
+# Source wrappers are weak keys: a staging object must accelerate a live
+# source, not keep every historical Field/Ndarray alive until process exit.
+vbo_field_cache = weakref.WeakKeyDictionary()
 depth_ndarray_cache = {}
-indices_ndarray_cache = {}
-transforms_ndarray_cache = {}
+indices_ndarray_cache = weakref.WeakKeyDictionary()
+transforms_ndarray_cache = weakref.WeakKeyDictionary()
 
 
 def get_depth_ndarray(window):
@@ -21,6 +25,10 @@ def get_depth_ndarray(window):
         depth_arr = ndarray(dtype=ti.f32, shape=w * h)
         depth_ndarray_cache[window] = depth_arr
     return depth_ndarray_cache[window]
+
+
+def remove_window_staging_cache(window):
+    depth_ndarray_cache.pop(window, None)
 
 
 def get_vbo_field(vertices):
@@ -409,12 +417,28 @@ def copy_ndarray_u8_to_rgba8_texture(
 
 # ggui renderer always assumes the input image to be u8 RGBA
 # if the user input is not in this format, a staging ti field is needed
+# NumPy staging is shared by shape and therefore has no source-object owner.
+# Taichi objects use a separate weak-key cache so they cannot pin an old
+# Program generation through a module-global dictionary.
 image_field_cache = {}
-image_texture_cache = {}
-image_packed_ndarray_cache = {}
+_image_object_field_cache = weakref.WeakKeyDictionary()
+image_texture_cache = weakref.WeakKeyDictionary()
+image_packed_ndarray_cache = weakref.WeakKeyDictionary()
 _NUMPY_RGBA8_HOST_PACK_MAX_PIXELS = 1024 * 1024
 _TAICHI_NDARRAY_RGBA8_HOST_PACK_MAX_PIXELS = 128 * 128
 _TAICHI_FIELD_RGBA8_HOST_PACK_MAX_PIXELS = 128 * 128
+
+
+def clear_staging_caches():
+    """Release all GGUI staging state at the current Program boundary."""
+    vbo_field_cache.clear()
+    depth_ndarray_cache.clear()
+    indices_ndarray_cache.clear()
+    transforms_ndarray_cache.clear()
+    image_field_cache.clear()
+    _image_object_field_cache.clear()
+    image_texture_cache.clear()
+    image_packed_ndarray_cache.clear()
 
 
 def _copy_numpy_image_to_rgba8(src, dst, num_components, gray_scale):
@@ -575,12 +599,13 @@ def to_rgba8(image):
             raise Exception("the shape of the image must be of the form (width,height) or (width,height,channels)")
 
     staging_key = image.shape[0:2] if is_numpy else image
+    staging_cache = image_field_cache if is_numpy else _image_object_field_cache
 
-    if staging_key not in image_field_cache:
+    if staging_key not in staging_cache:
         staging_img = np.ndarray(image.shape[0:2], dtype=np.uint32)
-        image_field_cache[staging_key] = staging_img
+        staging_cache[staging_key] = staging_img
     else:
-        staging_img = image_field_cache[staging_key]
+        staging_img = staging_cache[staging_key]
         
     is_ti_ndarray = hasattr(image, 'to_numpy') and not hasattr(image, 'snode')
 

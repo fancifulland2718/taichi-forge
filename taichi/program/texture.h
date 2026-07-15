@@ -5,6 +5,7 @@
 
 #include "taichi/inc/constants.h"
 #include "taichi/ir/type_utils.h"
+#include "taichi/program/runtime_resource_registry.h"
 #include "taichi/rhi/device.h"
 
 namespace taichi::lang {
@@ -47,6 +48,14 @@ class TI_DLL_EXPORT Texture {
     return texture_alloc_;
   }
 
+  Program *owning_program() const noexcept {
+    return prog_;
+  }
+
+  RuntimeResourceHandle runtime_resource_handle() const noexcept {
+    return runtime_resource_handle_;
+  }
+
   ~Texture();
 
   BufferFormat get_buffer_format() const {
@@ -58,6 +67,12 @@ class TI_DLL_EXPORT Texture {
   }
 
  private:
+  friend class Program;
+
+  void bind_runtime_resource_handle(RuntimeResourceHandle handle) noexcept {
+    runtime_resource_handle_ = handle;
+  }
+
   DeviceAllocation texture_alloc_{kDeviceNullAllocation};
   DataType dtype_;
   BufferFormat format_;
@@ -67,6 +82,9 @@ class TI_DLL_EXPORT Texture {
   int depth_;
 
   Program *prog_{nullptr};
+  // Immutable after Program registry publication. Kernel/Graph/GGUI binding
+  // copies this identity and validates it before dereferencing texture_alloc_.
+  RuntimeResourceHandle runtime_resource_handle_;
 };
 
 }  // namespace taichi::lang

@@ -12,6 +12,17 @@ class KernelLauncher {
   virtual void launch_kernel(const CompiledKernelData &compiled_kernel_data,
                              LaunchContextBuilder &ctx) = 0;
 
+  // Cached Graph paths may already own a backend registration handle. The
+  // default preserves non-LLVM backends; LLVM overrides this to avoid taking
+  // the exclusive registration mutex on every steady-state dispatch.
+  virtual void launch_registered_kernel(
+      const CompiledKernelData &compiled_kernel_data,
+      Handle handle,
+      LaunchContextBuilder &ctx) {
+    (void)handle;
+    launch_kernel(compiled_kernel_data, ctx);
+  }
+
   // Explicit SNodeTree destruction is a cold lifecycle transaction. Backends
   // may release registered executable state whose lowered kernels reference
   // |tree_id| after Program has drained host submissions and synchronized the

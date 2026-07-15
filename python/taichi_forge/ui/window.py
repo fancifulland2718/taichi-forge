@@ -9,7 +9,7 @@ from taichi_forge._kernels import (
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.impl import Field, default_cfg, get_runtime
-from taichi_forge.ui.staging_buffer import get_depth_ndarray
+from taichi_forge.ui.staging_buffer import get_depth_ndarray, remove_window_staging_cache
 
 from taichi_forge import f32
 
@@ -239,4 +239,5 @@ class Window:
         window = self.window
         self.window = None
         _active_windows.discard(self)
+        remove_window_staging_cache(window)
         return window.destroy()

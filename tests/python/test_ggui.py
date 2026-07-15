@@ -1,3 +1,4 @@
+import gc
 import os
 import platform
 import pathlib
@@ -6,6 +7,7 @@ import sys
 import textwrap
 import threading
 import time
+import weakref
 
 import numpy as np
 import pytest
@@ -15,11 +17,15 @@ import taichi_forge as ti
 from taichi_forge.lang import impl
 from taichi_forge.lang.misc import is_arch_supported
 from taichi_forge.ui.staging_buffer import (
+    _image_object_field_cache,
+    clear_staging_caches,
     image_field_cache,
     image_packed_ndarray_cache,
+    image_texture_cache,
     to_rgba8,
     to_rgba8_packed_ndarray,
 )
+from taichi_forge.ui.utils import get_field_info
 from tests import test_utils
 from tests.test_utils import verify_image
 
@@ -784,6 +790,118 @@ def test_hidden_window_display_stats_after_set_image():
     assert stats["last_window_submitted"] is False
     assert stats["last_offscreen_submitted"] is True
     window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.cuda, ti.vulkan])
+def test_display_frame_ndarray_survives_gc_until_frame_completion():
+    window = ti.ui.Window("test", (16, 16), show_window=False)
+    canvas = window.get_canvas()
+    prog = impl.get_runtime().prog
+    baseline = prog._debug_ndarray_resource_stats()
+
+    image = ti.ndarray(ti.u32, shape=(16, 16))
+    image.fill(0xFF332211)
+    frame = ti.ui.DisplayFrame.from_packed_u32_ndarray(image)
+    assert canvas.submit_frame(frame) is True
+
+    submitted = prog._debug_ndarray_resource_stats()
+    assert submitted["views"] == baseline["views"] + 1
+    assert submitted["leases"] == baseline["leases"] + 2
+
+    image_ref = weakref.ref(image)
+    del frame, image
+    gc.collect()
+    assert image_ref() is None
+    retired = prog._debug_ndarray_resource_stats()
+    assert retired["views"] == baseline["views"]
+    assert retired["retiring"] == baseline["retiring"] + 1
+
+    assert window.show() is True
+    window.destroy()
+    ti.sync()
+    completed = prog._debug_ndarray_resource_stats()
+    for key in ("live", "retiring", "leases", "views", "inflight"):
+        assert completed[key] == baseline[key]
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.vulkan])
+def test_ggui_rejects_mismatched_ndarray_identity_and_allocation():
+    window = ti.ui.Window("test", (4, 4), show_window=False)
+    first = ti.ndarray(ti.u32, shape=(4, 4))
+    second = ti.ndarray(ti.u32, shape=(4, 4))
+    info = get_field_info(first)
+    info.dev_alloc = second.arr.device_allocation()
+
+    with pytest.raises(
+        RuntimeError,
+        match="GGUI Ndarray identity does not match its DeviceAllocation",
+    ):
+        window.get_canvas().canvas.set_image(info)
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.vulkan])
+def test_display_frame_texture_survives_gc_until_frame_completion():
+    window = ti.ui.Window("test", (16, 16), show_window=False)
+    canvas = window.get_canvas()
+    prog = impl.get_runtime().prog
+    baseline = prog._debug_texture_resource_stats()
+
+    texture = ti.Texture(ti.Format.rgba8, (16, 16))
+    frame = ti.ui.DisplayFrame.from_texture(texture)
+    assert canvas.submit_frame(frame) is True
+
+    submitted = prog._debug_texture_resource_stats()
+    assert submitted["views"] == baseline["views"] + 1
+    assert submitted["leases"] == baseline["leases"] + 2
+
+    texture_ref = weakref.ref(texture)
+    del frame, texture
+    gc.collect()
+    assert texture_ref() is None
+    retired = prog._debug_texture_resource_stats()
+    assert retired["views"] == baseline["views"]
+    assert retired["retiring"] == baseline["retiring"] + 1
+
+    assert window.show() is True
+    window.destroy()
+    ti.sync()
+    completed = prog._debug_texture_resource_stats()
+    for key in ("live", "retiring", "leases", "views", "inflight"):
+        assert completed[key] == baseline[key]
+
+
+@test_utils.test(arch=[ti.vulkan])
+def test_staging_cache_uses_weak_source_ownership():
+    clear_staging_caches()
+    image = ti.Vector.ndarray(4, ti.f32, shape=(2, 2))
+    image.fill([0.0, 0.25, 0.5, 1.0])
+    assert to_rgba8_packed_ndarray(image) is not None
+    assert len(image_packed_ndarray_cache) == 1
+
+    image_ref = weakref.ref(image)
+    del image
+    gc.collect()
+    assert image_ref() is None
+    assert len(image_packed_ndarray_cache) == 0
+
+
+@test_utils.test(arch=[ti.vulkan])
+def test_reset_clears_all_staging_cache_generations():
+    clear_staging_caches()
+    image = ti.Vector.ndarray(4, ti.f32, shape=(2, 2))
+    image.fill([0.0, 0.25, 0.5, 1.0])
+    assert to_rgba8_packed_ndarray(image) is not None
+    assert len(image_packed_ndarray_cache) == 1
+
+    ti.reset()
+    assert not image_field_cache
+    assert not _image_object_field_cache
+    assert not image_texture_cache
+    assert not image_packed_ndarray_cache
 
 
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")

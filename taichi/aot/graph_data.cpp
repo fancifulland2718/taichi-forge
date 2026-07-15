@@ -7,6 +7,8 @@
 #include "taichi/system/profiler.h"
 #include "taichi/ir/type_factory.h"
 
+#include <algorithm>
+#include <array>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -17,7 +19,6 @@
 #endif
 
 #if defined(TI_WITH_CUDA)
-#include <algorithm>
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
@@ -63,6 +64,93 @@ Program *jit_graph_program(const CompiledGraph &graph) {
     }
   }
   return program;
+}
+
+template <typename T, std::size_t InlineCapacity = 4>
+class InlineUniqueViewList {
+ public:
+  void add(const T *view) {
+    const T *const *current = data();
+    for (std::size_t i = 0; i < size(); ++i) {
+      if (current[i] == view) {
+        return;
+      }
+    }
+    if (overflow_.empty() && inline_count_ < InlineCapacity) {
+      inline_[inline_count_++] = view;
+      return;
+    }
+    if (overflow_.empty()) {
+      overflow_.reserve(InlineCapacity * 2);
+      overflow_.insert(overflow_.end(), inline_.begin(),
+                       inline_.begin() + inline_count_);
+    }
+    overflow_.push_back(view);
+  }
+
+  bool empty() const noexcept {
+    return inline_count_ == 0 && overflow_.empty();
+  }
+
+  std::size_t size() const noexcept {
+    return overflow_.empty() ? inline_count_ : overflow_.size();
+  }
+
+  const T *const *data() const noexcept {
+    return overflow_.empty() ? inline_.data() : overflow_.data();
+  }
+
+ private:
+  std::array<const T *, InlineCapacity> inline_{};
+  std::size_t inline_count_{0};
+  std::vector<const T *> overflow_;
+};
+
+struct GraphRuntimeResourceViews {
+  InlineUniqueViewList<Ndarray> ndarrays;
+  InlineUniqueViewList<Texture> textures;
+
+  bool empty() const noexcept {
+    return ndarrays.empty() && textures.empty();
+  }
+};
+
+GraphRuntimeResourceViews graph_runtime_resource_views(
+    const std::unordered_map<std::string, IValue> &args,
+    Program *expected_program) {
+  GraphRuntimeResourceViews views;
+  for (const auto &[name, value] : args) {
+    (void)name;
+    if (value.tag == ArgKind::kNdarray) {
+      auto *view = reinterpret_cast<const Ndarray *>(value.val);
+      TI_ERROR_IF(view == nullptr, "Graph received a null Ndarray runtime arg");
+      Program *owner = view->owning_program();
+      if (owner == nullptr) {
+        // AOT DeviceAllocation-backed views preserve their existing external
+        // ownership contract and never enter a Program registry.
+        continue;
+      }
+      TI_ERROR_IF(expected_program != nullptr && owner != expected_program,
+                  "Graph Ndarray runtime arguments must belong to the Graph's "
+                  "Program");
+      views.ndarrays.add(view);
+      continue;
+    }
+    if (value.tag != ArgKind::kTexture) {
+      continue;
+    }
+    auto *view = reinterpret_cast<const Texture *>(value.val);
+    TI_ERROR_IF(view == nullptr, "Graph received a null Texture runtime arg");
+    Program *owner = view->owning_program();
+    if (owner == nullptr) {
+      continue;
+    }
+    TI_ERROR_IF(expected_program != nullptr && owner != expected_program,
+                "Graph Texture runtime arguments must belong to the Graph's "
+                "Program");
+    views.textures.add(view);
+  }
+  return views;
 }
 
 const CompiledKernelData *get_or_compile_cached_kernel(
@@ -154,6 +242,8 @@ CompiledGraphDispatchRuntimePlan build_cpu_runtime_arg_plan(
     arg_plan.tag = symbolic_arg.tag;
     arg_plan.name = symbolic_arg.name;
     arg_plan.arg_id = {i};
+    arg_plan.arg_buffer_offset =
+        args_type->get_element_offset(arg_plan.arg_id);
     arg_plan.dtype_id = get_primitive_type_id(symbolic_arg.dtype());
     arg_plan.field_dim = symbolic_arg.field_dim;
     arg_plan.element_shape = symbolic_arg.element_shape;
@@ -166,8 +256,6 @@ CompiledGraphDispatchRuntimePlan build_cpu_runtime_arg_plan(
         plan.args.clear();
         return plan;
       }
-      arg_plan.arg_buffer_offset =
-          args_type->get_element_offset(arg_plan.arg_id);
     } else if (symbolic_arg.tag == ArgKind::kNdarray) {
       arg_plan.ndarray_data_ptr_key = append_arg_index(
           arg_plan.arg_id, TypeFactory::DATA_PTR_POS_IN_NDARRAY);
@@ -232,6 +320,16 @@ void init_runtime_context_from_plan(
     }
     ctx.device_allocation_type[arg_plan.arg_id] =
         LaunchContextBuilder::DevAllocType::kNdarray;
+    if (Program *owner = arr->owning_program()) {
+      LaunchContextBuilder::NdarrayResourceRef ref;
+      ref.arg_offset = arg_plan.arg_buffer_offset;
+      ref.owner = owner;
+      ref.data = arr;
+      ref.data_handle = arr->runtime_resource_handle();
+      TI_ERROR_IF(!ref.data_handle,
+                  "Graph received an unregistered Ndarray runtime resource");
+      ctx.ndarray_ptrs.push_back(std::move(ref));
+    }
     size_t total_size = 1;
     for (int j = 0; j < arr->shape.size(); ++j) {
       int32 shape = (int32)arr->shape[j];
@@ -261,10 +359,20 @@ bool try_launch_cached_llvm_kernel(Program *prog,
   }
   KernelLaunchHandle handle;
   handle.set_launch_id(cached.llvm_launch_id);
+  TI_ASSERT(launch_ctx.argpack_ptrs.empty());
+  if (!launch_ctx.ndarray_ptrs.empty()) {
+    prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
+  }
+  if (!launch_ctx.texture_ptrs.empty()) {
+    prog->resolve_texture_launch_context_under_guard(launch_ctx);
+  }
+  // The surrounding Graph transaction already owns both the SNodeTree read
+  // guard and, when needed, the runtime-resource submission guard.
   {
     TI_PROFILER("launch_llvm_kernel");
     launcher->launch_llvm_kernel(handle, launch_ctx);
   }
+  prog->mark_runtime_submission();
   prog->check_runtime_error_after_kernel_launch(compiled);
   return true;
 }
@@ -870,6 +978,8 @@ bool patch_cuda_graph_arguments(
 
     LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
+    prog->resolve_texture_launch_context_under_guard(launch_ctx);
     host_arg_buffers.emplace_back();
     if (!launcher->update_cuda_graph_launch(
             state.packets[i].packet, launch_ctx, host_arg_buffers.back(),
@@ -1080,6 +1190,8 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
 
     LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
+    prog->resolve_texture_launch_context_under_guard(launch_ctx);
     CudaGraphCapturePacket capture_packet(capture_stream);
     capture_packet.launcher = launcher;
     if (!launcher->prepare_cuda_graph_launch(
@@ -1259,6 +1371,8 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
         std::make_unique<LaunchContextBuilder>(dispatch.ti_kernel));
     graph.init_runtime_context(dispatch.symbolic_args, args,
                                *launch_contexts.back());
+    prog->resolve_ndarray_launch_context_under_guard(*launch_contexts.back());
+    prog->resolve_texture_launch_context_under_guard(*launch_contexts.back());
     gfx_dispatches.push_back({handle, launch_contexts.back().get()});
   }
 
@@ -1419,6 +1533,45 @@ void CompiledGraph::run(
     TI_ASSERT(dispatch.compiled_kernel);
     LaunchContextBuilder launch_ctx(dispatch.compiled_kernel);
     init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    Program *program = nullptr;
+    std::vector<const Ndarray *> ndarray_views;
+    std::vector<const Texture *> texture_views;
+    for (const auto &ref : launch_ctx.ndarray_ptrs) {
+      Program *owner = ref.owner;
+      TI_ASSERT(owner != nullptr);
+      TI_ERROR_IF(program != nullptr && owner != program,
+                  "AOT Graph Ndarray arguments span multiple Programs");
+      program = owner;
+      for (const Ndarray *view : {ref.data, ref.grad}) {
+        if (view == nullptr) {
+          continue;
+        }
+        if (std::find(ndarray_views.begin(), ndarray_views.end(), view) ==
+            ndarray_views.end()) {
+          ndarray_views.push_back(view);
+        }
+      }
+    }
+    for (const auto &ref : launch_ctx.texture_ptrs) {
+      Program *owner = ref.owner;
+      TI_ASSERT(owner != nullptr);
+      TI_ERROR_IF(program != nullptr && owner != program,
+                  "AOT Graph runtime resources span multiple Programs");
+      program = owner;
+      if (std::find(texture_views.begin(), texture_views.end(), ref.texture) ==
+          texture_views.end()) {
+        texture_views.push_back(ref.texture);
+      }
+    }
+    std::optional<Program::RuntimeResourceSubmissionGuard> resource_guard;
+    if (program != nullptr) {
+      resource_guard.emplace(
+          program->acquire_runtime_resource_submission_guard());
+      program->retain_ndarrays_for_external_submission(ndarray_views);
+      program->retain_textures_for_external_submission(texture_views);
+      program->resolve_ndarray_launch_context(launch_ctx);
+      program->resolve_texture_launch_context(launch_ctx);
+    }
     // Run cgraph loaded from AOT module
     dispatch.compiled_kernel->launch(launch_ctx);
   }
@@ -1429,10 +1582,26 @@ void CompiledGraph::jit_run(
     const std::unordered_map<std::string, IValue> &args) const {
   Program *program = jit_graph_program(*this);
   std::optional<Program::SNodeTreeLifecycleReadGuard> tree_lifecycle_guard;
+  std::optional<Program::RuntimeResourceGraphScope> resource_guard;
+  std::optional<Program::RuntimeSubmissionScope> completion_scope;
+  GraphRuntimeResourceViews resource_views;
   if (program != nullptr) {
     tree_lifecycle_guard.emplace(
         program->acquire_snode_tree_lifecycle_read_guard());
     program->validate_snode_tree_dependencies(snode_tree_dependencies);
+    resource_views = graph_runtime_resource_views(args, program);
+    if (!resource_views.empty()) {
+      resource_guard.emplace(program->acquire_runtime_resource_graph_scope());
+      if (!resource_views.ndarrays.empty()) {
+        program->retain_ndarrays_for_external_submission(
+            resource_views.ndarrays.data(), resource_views.ndarrays.size());
+      }
+      if (!resource_views.textures.empty()) {
+        program->retain_textures_for_external_submission(
+            resource_views.textures.data(), resource_views.textures.size());
+      }
+    }
+    completion_scope.emplace(program->acquire_runtime_submission_scope());
   }
 #if defined(TI_WITH_CUDA)
   std::unique_lock<std::recursive_mutex> cuda_submission_lock;
@@ -1461,9 +1630,25 @@ void CompiledGraph::jit_run_cached(
     CompiledGraphJITCache &cache) const {
   Program *program = jit_graph_program(*this);
   std::optional<Program::SNodeTreeLifecycleReadGuard> tree_lifecycle_guard;
+  std::optional<Program::RuntimeResourceGraphScope> resource_guard;
+  std::optional<Program::RuntimeSubmissionScope> completion_scope;
+  GraphRuntimeResourceViews resource_views;
   if (program != nullptr) {
     tree_lifecycle_guard.emplace(
         program->acquire_snode_tree_lifecycle_read_guard());
+    resource_views = graph_runtime_resource_views(args, program);
+    if (!resource_views.empty()) {
+      resource_guard.emplace(program->acquire_runtime_resource_graph_scope());
+      if (!resource_views.ndarrays.empty()) {
+        program->retain_ndarrays_for_external_submission(
+            resource_views.ndarrays.data(), resource_views.ndarrays.size());
+      }
+      if (!resource_views.textures.empty()) {
+        program->retain_textures_for_external_submission(
+            resource_views.textures.data(), resource_views.textures.size());
+      }
+    }
+    completion_scope.emplace(program->acquire_runtime_submission_scope());
   }
 #if defined(TI_WITH_CUDA)
   // A graph is one submission transaction. This is required not only while
@@ -1501,12 +1686,16 @@ void CompiledGraph::jit_run_cached(
 #if defined(TI_WITH_CUDA)
   if (compile_config.arch == Arch::cuda &&
       try_run_cuda_graph(*this, compile_config, args, cache)) {
+    TI_ASSERT(program != nullptr);
+    program->mark_runtime_submission();
     return;
   }
 #endif
 #if defined(TI_WITH_VULKAN)
   if (compile_config.arch == Arch::vulkan &&
       try_run_vulkan_graph(*this, compile_config, args, cache)) {
+    TI_ASSERT(program != nullptr);
+    program->mark_runtime_submission();
     return;
   }
 #endif

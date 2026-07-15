@@ -30,6 +30,20 @@ struct FieldInfo {
   DEFINE_PROPERTY(taichi::lang::DataType, dtype);
   DEFINE_PROPERTY(taichi::lang::DeviceAllocation, dev_alloc);
 
+  // Optional high-level identity for deferred consumers such as GGUI. The
+  // DeviceAllocation alone is not an ownership token: its storage may retire
+  // after the Python Ndarray wrapper dies but before show() submits the frame.
+  taichi::lang::Program *runtime_resource_program{nullptr};
+  taichi::lang::RuntimeResourceHandle runtime_resource_handle;
+
+  void bind_runtime_ndarray(const taichi::lang::Ndarray *ndarray) {
+    runtime_resource_program =
+        ndarray != nullptr ? ndarray->owning_program() : nullptr;
+    runtime_resource_handle =
+        ndarray != nullptr ? ndarray->runtime_resource_handle()
+                           : taichi::lang::RuntimeResourceHandle{};
+  }
+
   FieldInfo() {
     valid = false;
   }

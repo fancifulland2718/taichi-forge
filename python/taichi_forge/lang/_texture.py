@@ -115,6 +115,20 @@ class Texture:
         self.tex = None
         self._runtime_prog = None
 
+    def _delete_runtime_texture(self):
+        prog = self._runtime_prog
+        tex = self.tex
+        self._invalidate_runtime()
+        if prog is not None and tex is not None:
+            prog.delete_texture(tex)
+
+    def __del__(self):
+        if impl is not None:
+            try:
+                self._delete_runtime_texture()
+            except Exception:
+                pass
+
     def from_ndarray(self, ndarray):
         """Loads an ndarray to texture.
 

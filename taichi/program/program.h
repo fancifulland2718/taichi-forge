@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -10,12 +11,15 @@
 #include <optional>
 #include <string>
 #include <atomic>
+#include <deque>
 #include <stack>
 #include <shared_mutex>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include <taichi/program/runtime_resource_registry.h>
+#include <taichi/program/runtime_completion.h>
 
 #define TI_RUNTIME_HOST
 #include "taichi/aot/module_builder.h"
@@ -39,6 +43,11 @@
 #include "taichi/ir/mesh.h"
 
 namespace taichi::lang {
+
+class Program;
+namespace runtime_completion_detail {
+Program *&active_runtime_submission_program() noexcept;
+}  // namespace runtime_completion_detail
 
 class StructCompiler;
 
@@ -81,6 +90,49 @@ class TI_DLL_EXPORT Program {
     Program *previous_program_{nullptr};
     std::shared_lock<std::shared_mutex> lock_;
     std::uint64_t epoch_{0};
+  };
+
+  // Graph owns one resource submission transaction around all dispatches.
+  // This scope records that fact thread-locally so nested Program launches can
+  // trust the Graph's already retained runtime arguments instead of repeating
+  // registry lookups for every dispatch.
+  class RuntimeResourceGraphScope {
+   public:
+    RuntimeResourceGraphScope(const RuntimeResourceGraphScope &) = delete;
+    RuntimeResourceGraphScope &operator=(const RuntimeResourceGraphScope &) =
+        delete;
+    RuntimeResourceGraphScope(RuntimeResourceGraphScope &&other) noexcept;
+    RuntimeResourceGraphScope &operator=(RuntimeResourceGraphScope &&) = delete;
+    ~RuntimeResourceGraphScope();
+
+   private:
+    friend class Program;
+    explicit RuntimeResourceGraphScope(Program *program);
+
+    Program *program_{nullptr};
+    Program *previous_program_{nullptr};
+    std::unique_lock<std::recursive_mutex> lock_;
+  };
+
+  // Shared for ordinary submissions, exclusive for completion recording and
+  // Program synchronization. Nested Graph dispatches reuse the outer scope
+  // through a thread-local marker, avoiding one shared_mutex operation per
+  // segment while preserving a linearizable completion boundary.
+  class RuntimeSubmissionScope {
+   public:
+    RuntimeSubmissionScope(const RuntimeSubmissionScope &) = delete;
+    RuntimeSubmissionScope &operator=(const RuntimeSubmissionScope &) = delete;
+    RuntimeSubmissionScope(RuntimeSubmissionScope &&other) noexcept;
+    RuntimeSubmissionScope &operator=(RuntimeSubmissionScope &&) = delete;
+    ~RuntimeSubmissionScope();
+
+   private:
+    friend class Program;
+    explicit RuntimeSubmissionScope(Program *program);
+
+    Program *program_{nullptr};
+    Program *previous_program_{nullptr};
+    bool owns_reader_{false};
   };
 
   uint64 *result_buffer{nullptr};  // Note that this result_buffer is used
@@ -137,6 +189,18 @@ class TI_DLL_EXPORT Program {
   }
 
   void synchronize();
+
+  // F2 internal completion API. Existing kernel calls, Graph.run(), native
+  // primitives and ti.sync() retain their public return values.
+  RuntimeCompletion record_runtime_completion();
+  TI_FORCE_INLINE void mark_runtime_submission() noexcept {
+    // The reader gate supplies ordering once completion tracking is enabled.
+    // Before that, a relaxed atomic publication is enough to distinguish an
+    // empty first record without imposing an RMW on ordinary submissions.
+    runtime_submission_pending_.store(true, std::memory_order_relaxed);
+  }
+  std::unordered_map<std::string, std::uint64_t>
+  debug_runtime_completion_stats() const;
 
   StreamSemaphore flush();
   StreamSemaphore flush_if_pending();
@@ -201,6 +265,11 @@ class TI_DLL_EXPORT Program {
 
   void launch_kernel(const CompiledKernelData &compiled_kernel_data,
                      LaunchContextBuilder &ctx);
+
+  void launch_registered_kernel(
+      const CompiledKernelData &compiled_kernel_data,
+      KernelLaunchHandle handle,
+      LaunchContextBuilder &ctx);
 
   // Python ordinary-kernel fast path. Keep cache lookup/compilation and launch
   // in one SNodeTree lifecycle read transaction so explicit tree destruction
@@ -337,6 +406,57 @@ class TI_DLL_EXPORT Program {
   // this Program's LLVM runtime and is never a process-global worker pool.
   ThreadPool *get_cpu_thread_pool();
 
+  // Internal host-API transaction guard used by native primitives. It does
+  // not wait for GPU completion; it only prevents reset/retire from crossing
+  // the interval in which a native entry point validates and submits work.
+  using RuntimeResourceSubmissionGuard =
+      std::unique_lock<std::recursive_mutex>;
+  using NdarrayResourceRegistry = RuntimeResourceRegistry<Ndarray>;
+  using NdarrayResourceHandle = NdarrayResourceRegistry::Handle;
+  using NdarrayResourceLease = NdarrayResourceRegistry::Lease;
+  using TextureResourceRegistry = RuntimeResourceRegistry<Texture>;
+  using TextureResourceHandle = TextureResourceRegistry::Handle;
+  using TextureResourceLease = TextureResourceRegistry::Lease;
+  RuntimeResourceSubmissionGuard acquire_runtime_resource_submission_guard() {
+    return RuntimeResourceSubmissionGuard(runtime_resource_submission_mutex_);
+  }
+  RuntimeResourceGraphScope acquire_runtime_resource_graph_scope() {
+    return RuntimeResourceGraphScope(this);
+  }
+  RuntimeSubmissionScope acquire_runtime_submission_scope() {
+    return RuntimeSubmissionScope(this);
+  }
+
+  RuntimeResourceHandle capture_argpack_resource_handle(
+      const ArgPack *view) const;
+  // Internal Graph/native bridge. Callers hold the returned submission guard
+  // across backend work, retain runtime arguments once per transaction, and
+  // resolve per-dispatch DeviceAllocation placeholders without changing the
+  // public Graph API.
+  void retain_ndarrays_for_external_submission(
+      const std::vector<const Ndarray *> &views);
+  void retain_ndarrays_for_external_submission(const Ndarray *const *views,
+                                                std::size_t count);
+  void validate_ndarrays_for_external_submission(
+      const std::vector<const Ndarray *> &views);
+  void validate_ndarrays_for_external_submission(const Ndarray *const *views,
+                                                  std::size_t count);
+  void resolve_ndarray_launch_context(LaunchContextBuilder &ctx);
+  void resolve_ndarray_launch_context_under_guard(LaunchContextBuilder &ctx);
+  void retain_textures_for_external_submission(
+      const std::vector<const Texture *> &views);
+  void retain_textures_for_external_submission(const Texture *const *views,
+                                                std::size_t count);
+  void validate_textures_for_external_submission(
+      const std::vector<const Texture *> &views);
+  void validate_textures_for_external_submission(const Texture *const *views,
+                                                  std::size_t count);
+  void resolve_texture_launch_context(LaunchContextBuilder &ctx);
+  void resolve_texture_launch_context_under_guard(LaunchContextBuilder &ctx);
+  NdarrayResourceLease acquire_ndarray_external_lease(
+      RuntimeResourceHandle handle);
+  TextureResourceLease acquire_texture_external_lease(const Texture *view);
+
   // TODO: do we still need result_buffer?
   DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,
                                              uint64 *result_buffer) {
@@ -380,6 +500,25 @@ class TI_DLL_EXPORT Program {
   void delete_ndarray(Ndarray *ndarray);
 
   void delete_argpack(ArgPack *argpack);
+
+  void delete_texture(Texture *texture);
+
+  std::unordered_map<std::string, std::uint64_t>
+  debug_argpack_resource_stats() const;
+  std::unordered_map<std::string, std::uint64_t>
+  debug_argpack_resource_identity(const ArgPack *view) const;
+
+  std::unordered_map<std::string, std::uint64_t>
+  debug_ndarray_resource_stats() const;
+  std::unordered_map<std::string, std::uint64_t>
+  debug_ndarray_resource_identity(const Ndarray *view) const;
+
+  std::unordered_map<std::string, std::uint64_t>
+  debug_texture_resource_stats() const;
+  std::unordered_map<std::string, std::uint64_t>
+  debug_texture_resource_identity(const Texture *view) const;
+  std::unordered_map<std::string, std::uint64_t>
+  debug_dense_field_staging_stats();
 
   Texture *create_texture(BufferFormat buffer_format,
                           const std::vector<int> &shape);
@@ -2239,7 +2378,197 @@ class TI_DLL_EXPORT Program {
   // could store ProgramImpl rather than Program.
 
  private:
-  void recycle_pending_argpacks();
+  class RuntimeSubmissionWriteScope {
+   public:
+    explicit RuntimeSubmissionWriteScope(Program *program);
+    RuntimeSubmissionWriteScope(const RuntimeSubmissionWriteScope &) = delete;
+    RuntimeSubmissionWriteScope &operator=(
+        const RuntimeSubmissionWriteScope &) = delete;
+    ~RuntimeSubmissionWriteScope();
+
+   private:
+    Program *program_;
+  };
+
+  using ArgPackResourceRegistry = RuntimeResourceRegistry<ArgPack>;
+  using ArgPackResourceHandle = ArgPackResourceRegistry::Handle;
+  using ArgPackResourceLease = ArgPackResourceRegistry::Lease;
+
+  static constexpr ArgPackResourceRegistry::Kind kArgPackResourceKind = 1;
+  static constexpr std::size_t kInlineArgPackLaunchLeases = 8;
+
+  class ArgPackLaunchLeases {
+   public:
+    ArgPackLaunchLeases() = default;
+    ArgPackLaunchLeases(const ArgPackLaunchLeases &) = delete;
+    ArgPackLaunchLeases &operator=(const ArgPackLaunchLeases &) = delete;
+    ArgPackLaunchLeases(ArgPackLaunchLeases &&) noexcept = default;
+    ArgPackLaunchLeases &operator=(ArgPackLaunchLeases &&) noexcept = default;
+
+   private:
+    friend class Program;
+    bool contains(ArgPackResourceHandle handle) const noexcept;
+    bool empty() const noexcept;
+    void add(ArgPackResourceLease lease);
+
+    std::array<std::optional<ArgPackResourceLease>,
+               kInlineArgPackLaunchLeases>
+        inline_leases_;
+    std::size_t inline_count_{0};
+    std::vector<ArgPackResourceLease> overflow_leases_;
+  };
+
+  struct ArgPackResourceView {
+    ArgPackResourceHandle handle;
+    ArgPackResourceLease lease;
+  };
+
+  using ArgPackInflightLeaseMap =
+      std::unordered_map<std::uint64_t, ArgPackResourceLease>;
+
+  static constexpr NdarrayResourceRegistry::Kind kNdarrayResourceKind = 2;
+  static constexpr std::size_t kInlineNdarrayLaunchLeases = 8;
+
+  class NdarrayLaunchLeases {
+   public:
+    NdarrayLaunchLeases() = default;
+    NdarrayLaunchLeases(const NdarrayLaunchLeases &) = delete;
+    NdarrayLaunchLeases &operator=(const NdarrayLaunchLeases &) = delete;
+    NdarrayLaunchLeases(NdarrayLaunchLeases &&) noexcept = default;
+    NdarrayLaunchLeases &operator=(NdarrayLaunchLeases &&) noexcept = default;
+
+   private:
+    friend class Program;
+    bool contains(NdarrayResourceHandle handle) const noexcept;
+    bool empty() const noexcept;
+    void add(NdarrayResourceLease lease);
+
+    std::array<std::optional<NdarrayResourceLease>,
+               kInlineNdarrayLaunchLeases>
+        inline_leases_;
+    std::size_t inline_count_{0};
+    std::vector<NdarrayResourceLease> overflow_leases_;
+  };
+
+  struct NdarrayResourceView {
+    NdarrayResourceHandle handle;
+    NdarrayResourceLease lease;
+  };
+
+  using NdarrayInflightLeaseMap =
+      std::unordered_map<std::uint64_t, NdarrayResourceLease>;
+
+  static constexpr TextureResourceRegistry::Kind kTextureResourceKind = 3;
+  static constexpr std::size_t kInlineTextureLaunchLeases = 8;
+
+  class TextureLaunchLeases {
+   public:
+    TextureLaunchLeases() = default;
+    TextureLaunchLeases(const TextureLaunchLeases &) = delete;
+    TextureLaunchLeases &operator=(const TextureLaunchLeases &) = delete;
+    TextureLaunchLeases(TextureLaunchLeases &&) noexcept = default;
+    TextureLaunchLeases &operator=(TextureLaunchLeases &&) noexcept = default;
+
+   private:
+    friend class Program;
+    bool contains(TextureResourceHandle handle) const noexcept;
+    bool empty() const noexcept;
+    void add(TextureResourceLease lease);
+
+    std::array<std::optional<TextureResourceLease>,
+               kInlineTextureLaunchLeases>
+        inline_leases_;
+    std::size_t inline_count_{0};
+    std::vector<TextureResourceLease> overflow_leases_;
+  };
+
+  struct TextureResourceView {
+    TextureResourceHandle handle;
+    TextureResourceLease lease;
+  };
+
+  struct TextureResourceSlotView {
+    const Texture *view{nullptr};
+    TextureResourceHandle handle;
+  };
+
+  using TextureInflightLeaseMap =
+      std::unordered_map<std::uint64_t, TextureResourceLease>;
+
+  struct RuntimeCompletionResourceBatch final
+      : public RuntimeCompletionResources {
+    ArgPackInflightLeaseMap argpacks;
+    NdarrayInflightLeaseMap ndarrays;
+    TextureInflightLeaseMap textures;
+
+    std::size_t retained_resource_count(
+        std::uint32_t kind) const noexcept override;
+    bool empty() const noexcept {
+      return argpacks.empty() && ndarrays.empty() && textures.empty();
+    }
+  };
+
+  struct DenseFieldHostCopyStagingResource {
+    DeviceAllocationUnique upload;
+    std::size_t upload_capacity{0};
+    DeviceAllocationUnique readback;
+    std::size_t readback_capacity{0};
+    std::mutex mutex;
+  };
+
+  using DenseFieldStagingRegistry =
+      RuntimeResourceRegistry<DenseFieldHostCopyStagingResource>;
+  using DenseFieldStagingHandle = DenseFieldStagingRegistry::Handle;
+  using DenseFieldStagingLease = DenseFieldStagingRegistry::Lease;
+  static constexpr DenseFieldStagingRegistry::Kind
+      kDenseFieldStagingResourceKind = 4;
+
+  ArgPackLaunchLeases acquire_argpack_launch_leases(
+      const LaunchContextBuilder &ctx);
+  void pin_argpack_launch_leases(ArgPackLaunchLeases &leases);
+  void release_completed_argpack_leases();
+  void close_argpack_resources();
+  static std::uint64_t argpack_lease_key(ArgPackResourceHandle handle);
+  NdarrayLaunchLeases acquire_ndarray_launch_leases(
+      LaunchContextBuilder &ctx);
+  NdarrayLaunchLeases acquire_ndarray_leases(
+      std::initializer_list<const Ndarray *> views);
+  NdarrayLaunchLeases acquire_ndarray_leases(
+      const std::vector<const Ndarray *> &views);
+  NdarrayLaunchLeases acquire_ndarray_leases(const Ndarray *const *views,
+                                             std::size_t count);
+  void launch_kernel_impl(const CompiledKernelData &compiled_kernel_data,
+                          LaunchContextBuilder &ctx,
+                          const KernelLaunchHandle *registered_handle);
+  void pin_ndarray_launch_leases(NdarrayLaunchLeases &leases);
+  void release_completed_ndarray_leases();
+  void close_ndarray_resources();
+  static std::uint64_t ndarray_lease_key(NdarrayResourceHandle handle);
+  TextureLaunchLeases acquire_texture_launch_leases(
+      LaunchContextBuilder &ctx);
+  TextureLaunchLeases acquire_texture_leases(
+      std::initializer_list<const Texture *> views);
+  TextureLaunchLeases acquire_texture_leases(
+      const std::vector<const Texture *> &views);
+  TextureLaunchLeases acquire_texture_leases(const Texture *const *views,
+                                             std::size_t count);
+  void pin_texture_launch_leases(TextureLaunchLeases &leases);
+  void release_completed_texture_leases();
+  void close_texture_resources();
+  static std::uint64_t texture_lease_key(TextureResourceHandle handle);
+  DenseFieldHostCopyStagingResource &dense_field_staging_resource();
+  void close_dense_field_staging_resource();
+  std::shared_ptr<RuntimeCompletionResourceBatch>
+  detach_runtime_completion_resources();
+  void track_runtime_completion(const RuntimeCompletion &completion);
+  void collect_ready_runtime_completions();
+  void complete_all_runtime_completions() noexcept;
+  std::size_t runtime_completion_resource_count(
+      std::uint32_t kind) const noexcept;
+  void acquire_runtime_submission_reader() noexcept;
+  void release_runtime_submission_reader() noexcept;
+  void acquire_runtime_submission_writer() noexcept;
+  void release_runtime_submission_writer() noexcept;
 
   CompileConfig compile_config_;
 
@@ -2262,25 +2591,97 @@ class TI_DLL_EXPORT Program {
   std::unordered_map<FunctionKey, Function *> function_map_;
 
   std::unique_ptr<ProgramImpl> program_impl_;
-  struct DenseFieldHostCopyStagingCache {
-    DeviceAllocationUnique upload;
-    std::size_t upload_capacity{0};
-    DeviceAllocationUnique readback;
-    std::size_t readback_capacity{0};
-    std::mutex mutex;
-  };
-
-  DenseFieldHostCopyStagingCache dense_field_host_copy_staging_;
+  const std::uint64_t runtime_completion_domain_;
+  // Default kernel/Graph execution only publishes a cheap dirty bit. The
+  // reader/writer gate is activated permanently by the first completion
+  // request, and only temporarily by a legacy Program::synchronize().
+  alignas(64) std::atomic<bool> runtime_completion_tracking_enabled_{false};
+  std::atomic<bool> runtime_submission_pending_{false};
+  std::atomic<std::uint64_t> runtime_submission_gate_{0};
+  static constexpr std::uint64_t kRuntimeSubmissionWriterBit =
+      std::uint64_t{1} << 63;
+  static constexpr std::uint64_t kRuntimeSubmissionReaderMask =
+      ~kRuntimeSubmissionWriterBit;
+  std::atomic<std::uint64_t> runtime_submission_epoch_{0};
+  std::atomic<std::uint64_t> last_runtime_completion_submission_epoch_{0};
+  std::atomic<std::uint64_t> next_runtime_completion_sequence_{1};
+  mutable std::mutex runtime_completion_mutex_;
+  std::deque<RuntimeCompletion> runtime_completions_;
+  static constexpr std::size_t kMaxTrackedRuntimeCompletions = 64;
+  DenseFieldStagingRegistry dense_field_staging_resources_;
+  DenseFieldStagingHandle dense_field_staging_handle_;
+  DenseFieldStagingLease dense_field_staging_lease_;
+  bool dense_field_staging_open_{true};
   float64 total_compilation_time_{0.0};
   static std::atomic<int> num_instances_;
   bool finalized_{false};
   int hash_snode_tree_count_{0};
 
-  // TODO: Move ndarrays_, argpacks_ and textures_ to be managed by runtime
-  std::unordered_map<void *, std::unique_ptr<Ndarray>> ndarrays_;
-  std::unordered_map<void *, std::unique_ptr<ArgPack>> argpacks_;
-  std::unordered_set<ArgPack *> argpacks_pending_deletion_;
-  std::vector<std::unique_ptr<Texture>> textures_;
+  ArgPackResourceRegistry argpack_resources_;
+  mutable std::mutex argpack_lifecycle_mutex_;
+  // One gate covers a submission containing any combination of high-level
+  // resources. Separate per-type gates would require fragile lock ordering.
+  std::recursive_mutex runtime_resource_submission_mutex_;
+  bool argpack_resources_open_{true};
+  std::unordered_map<const ArgPack *, ArgPackResourceView> argpack_views_;
+  ArgPackInflightLeaseMap argpack_inflight_leases_;
+  NdarrayResourceRegistry ndarray_resources_;
+  mutable std::mutex ndarray_lifecycle_mutex_;
+  bool ndarray_resources_open_{true};
+  std::unordered_map<const Ndarray *, NdarrayResourceView> ndarray_views_;
+  NdarrayInflightLeaseMap ndarray_inflight_leases_;
+  TextureResourceRegistry texture_resources_;
+  mutable std::mutex texture_lifecycle_mutex_;
+  bool texture_resources_open_{true};
+  std::unordered_map<const Texture *, TextureResourceView> texture_views_;
+  // Generation-qualified direct index used by ordinary kernel validation.
+  // Pointer lookup remains for delete/external callers that do not carry a
+  // captured handle.
+  std::vector<TextureResourceSlotView> texture_view_slots_;
+  TextureInflightLeaseMap texture_inflight_leases_;
 };
+
+TI_FORCE_INLINE Program::RuntimeSubmissionScope::RuntimeSubmissionScope(
+    Program *program)
+    : program_(program) {
+  if (!program_->runtime_completion_tracking_enabled_.load(
+          std::memory_order_acquire)) {
+    // Before the first completion request there is no writer to exclude and
+    // no nested scope that needs coalescing. Avoid even the TLS accessor so
+    // ordinary kernel/Graph calls pay only the inlined atomic check and dirty
+    // publication.
+    program_ = nullptr;
+    return;
+  }
+  Program *&active_program =
+      runtime_completion_detail::active_runtime_submission_program();
+  previous_program_ = active_program;
+  TI_ASSERT(previous_program_ == nullptr || previous_program_ == program_);
+  if (previous_program_ == nullptr) {
+    program_->acquire_runtime_submission_reader();
+    owns_reader_ = true;
+  }
+  active_program = program_;
+}
+
+TI_FORCE_INLINE Program::RuntimeSubmissionScope::RuntimeSubmissionScope(
+    RuntimeSubmissionScope &&other) noexcept
+    : program_(std::exchange(other.program_, nullptr)),
+      previous_program_(std::exchange(other.previous_program_, nullptr)),
+      owns_reader_(std::exchange(other.owns_reader_, false)) {
+}
+
+TI_FORCE_INLINE Program::RuntimeSubmissionScope::~RuntimeSubmissionScope() {
+  if (program_ == nullptr) {
+    return;
+  }
+  Program *&active_program =
+      runtime_completion_detail::active_runtime_submission_program();
+  TI_ASSERT(active_program == program_);
+  active_program = previous_program_;
+  if (owns_reader_) {
+    program_->release_runtime_submission_reader();
+  }
+}
 
 }  // namespace taichi::lang

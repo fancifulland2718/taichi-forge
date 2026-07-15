@@ -6,6 +6,7 @@
 #include "taichi/inc/constants.h"
 #include "taichi/ir/ir.h"
 #include "taichi/ir/type_utils.h"
+#include "taichi/program/runtime_resource_registry.h"
 #include "taichi/rhi/device.h"
 
 namespace taichi::lang {
@@ -61,6 +62,12 @@ class TI_DLL_EXPORT Ndarray {
   intptr_t get_data_ptr_as_int() const;
   intptr_t get_device_allocation_ptr_as_int() const;
   DeviceAllocation get_device_allocation() const;
+  Program *owning_program() const noexcept {
+    return prog_;
+  }
+  RuntimeResourceHandle runtime_resource_handle() const noexcept {
+    return runtime_resource_handle_;
+  }
   std::size_t get_element_size() const;
   std::size_t get_nelement() const;
   TypedConstant read(const std::vector<int> &I) const;
@@ -77,11 +84,20 @@ class TI_DLL_EXPORT Ndarray {
   ~Ndarray();
 
  private:
+  friend class Program;
+  void bind_runtime_resource_handle(RuntimeResourceHandle handle) noexcept {
+    runtime_resource_handle_ = handle;
+  }
+
   std::size_t nelement_{1};
   std::size_t element_size_{1};
   std::vector<int> total_shape_;
 
   Program *prog_{nullptr};
+  // Immutable after registry publication. Context binding can copy this
+  // generation-qualified identity without repeating the view-map lookup;
+  // launch still validates it before dereferencing the allocation.
+  RuntimeResourceHandle runtime_resource_handle_;
 };
 
 }  // namespace taichi::lang

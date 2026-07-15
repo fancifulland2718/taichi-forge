@@ -4,6 +4,7 @@
 #include "taichi/program/argpack.h"
 #include "taichi/program/texture.h"
 #include "taichi/program/matrix.h"
+#include "taichi/program/runtime_resource_registry.h"
 
 namespace taichi::lang {
 
@@ -17,6 +18,25 @@ class LaunchContextBuilder {
     kTexture = 2,
     kRWTexture = 3,
     kArgPack = 4,
+  };
+
+  struct NdarrayResourceRef {
+    // Byte offset in the immutable callable argument layout. Unlike copying
+    // arg_id, this is allocation-free on every launch and remains an exact
+    // identity for the debug generation-fault hook.
+    int arg_offset{-1};
+    Program *owner{nullptr};
+    const Ndarray *data{nullptr};
+    RuntimeResourceHandle data_handle;
+    const Ndarray *grad{nullptr};
+    RuntimeResourceHandle grad_handle;
+  };
+
+  struct TextureResourceRef {
+    int arg_offset{-1};
+    Program *owner{nullptr};
+    const Texture *texture{nullptr};
+    RuntimeResourceHandle handle;
   };
 
   explicit LaunchContextBuilder(CallableBase *kernel);
@@ -55,6 +75,9 @@ class LaunchContextBuilder {
                         uint64 data_ptr,
                         uint64 grad_ptr);
   void set_argpack_ptr(const std::vector<int> &arg_id, uint64 data_ptr);
+  void debug_set_argpack_resource_handle(
+      const std::vector<int> &arg_id,
+      RuntimeResourceHandle handle);
 
   template <typename T>
   T get_arg(const std::vector<int> &i);
@@ -80,6 +103,12 @@ class LaunchContextBuilder {
   void set_arg_ndarray_with_grad(const std::vector<int> &arg_id,
                                  const Ndarray &arr,
                                  const Ndarray &arr_grad);
+  void debug_set_ndarray_resource_handle(
+      const std::vector<int> &arg_id,
+      RuntimeResourceHandle handle);
+  void debug_set_texture_resource_handle(
+      const std::vector<int> &arg_id,
+      RuntimeResourceHandle handle);
 
   void set_arg_texture_impl(const std::vector<int> &arg_id, intptr_t alloc_ptr);
   void set_arg_texture(const std::vector<int> &arg_id, const Texture &tex);
@@ -138,6 +167,18 @@ class LaunchContextBuilder {
                      const ArgPack *,
                      hashing::Hasher<std::vector<int>>>
       argpack_ptrs;
+  std::unordered_map<std::vector<int>,
+                     RuntimeResourceHandle,
+                     hashing::Hasher<std::vector<int>>>
+      argpack_resource_handles;
+  // Non-owning high-level views. Program resolves these through its
+  // generation-qualified runtime-resource registry immediately before the
+  // backend first dereferences the DeviceAllocation placeholders.
+  // Runtime contexts overwhelmingly bind one or a handful of ndarrays. A
+  // flat vector avoids unordered_map node/bucket/hash work on every launch;
+  // arg_id is retained only for the generation-fault injection debug hook.
+  std::vector<NdarrayResourceRef> ndarray_ptrs;
+  std::vector<TextureResourceRef> texture_ptrs;
 };
 
 }  // namespace taichi::lang

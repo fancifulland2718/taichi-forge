@@ -1,6 +1,7 @@
 import numpy as np
 
 import taichi_forge as ti
+from taichi_forge.lang import impl
 from tests import test_utils
 
 
@@ -177,3 +178,49 @@ def test_from_numpy_non_contiguous():
 
     mat = ti.Matrix.field(3, 4, dtype=ti.i32, shape=(2, 2))
     mat.from_numpy(arr[0:6:3, 0:6:3, 0:3, 0:4])
+
+
+@test_utils.test(arch=[ti.vulkan])
+def test_dense_field_host_staging_capacity_reuse_and_runtime_generation():
+    prog = impl.get_runtime().prog
+    baseline = prog._debug_dense_field_staging_stats()
+    assert baseline["live"] == 1
+    assert baseline["leases"] == 1
+    assert baseline["upload_capacity"] == 0
+    assert baseline["readback_capacity"] == 0
+
+    small_np = np.arange(8, dtype=np.int32)
+    small = ti.field(ti.i32, shape=small_np.shape)
+    small.from_numpy(small_np)
+    np.testing.assert_array_equal(small.to_numpy(), small_np)
+    small_stats = prog._debug_dense_field_staging_stats()
+    assert small_stats["upload_capacity"] == small_np.nbytes
+    assert small_stats["readback_capacity"] == small_np.nbytes
+    assert small_stats["has_upload"] == 1
+    assert small_stats["has_readback"] == 1
+
+    smaller_np = np.arange(4, dtype=np.int32)
+    smaller = ti.field(ti.i32, shape=smaller_np.shape)
+    smaller.from_numpy(smaller_np)
+    np.testing.assert_array_equal(smaller.to_numpy(), smaller_np)
+    reused = prog._debug_dense_field_staging_stats()
+    assert reused["upload_capacity"] == small_stats["upload_capacity"]
+    assert reused["readback_capacity"] == small_stats["readback_capacity"]
+
+    larger_np = np.arange(64, dtype=np.int32)
+    larger = ti.field(ti.i32, shape=larger_np.shape)
+    larger.from_numpy(larger_np)
+    np.testing.assert_array_equal(larger.to_numpy(), larger_np)
+    grown = prog._debug_dense_field_staging_stats()
+    assert grown["upload_capacity"] == larger_np.nbytes
+    assert grown["readback_capacity"] == larger_np.nbytes
+    for key in ("live", "leases", "created_total"):
+        assert grown[key] == baseline[key]
+
+    old_domain = grown["domain"]
+    ti.reset()
+    ti.init(arch=ti.vulkan)
+    replacement = impl.get_runtime().prog._debug_dense_field_staging_stats()
+    assert replacement["domain"] != old_domain
+    assert replacement["upload_capacity"] == 0
+    assert replacement["readback_capacity"] == 0
