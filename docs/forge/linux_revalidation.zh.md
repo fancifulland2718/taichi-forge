@@ -80,6 +80,27 @@ target fallback 的较新设备。验证数值结果、offline-cache target 隔�
 - 对受影响 CUDA regression 运行 `compute-sanitizer --tool memcheck`。只有已知当前 CUDA
   版本支持的 device-side atomic/duplicate-sensitive 用例才追加 `racecheck`。
 
+### Runtime first-fault 与 teardown
+
+F3 first-fault 行为已经取得 Windows CPU/CUDA/Vulkan 与 GGUI 证据，但 Linux release
+证据仍待复测。不得从 Windows 结果推断 Linux teardown 已安全。
+
+- 分别用 GCC/Clang 构建 `taichi_runtime_foundation_tests` 与 Python extension，并覆盖
+  CPU-only、关闭 CUDA、关闭 Vulkan 的配置。共享 reporter 只能使用标准 C++ ownership/
+  atomic，不得引入 Win32 handle 或 NT 依赖；
+- 在 CPU、CUDA、Vulkan 上运行 `tests/python/test_runtime_fault.py`。验证只有一个不可变
+  first fault、completion sequence 归因准确、后续 kernel/Graph/ticket/sync 快速拒绝、
+  faulted GGUI 可析构，以及 synthetic injection 后新 Program 健康；
+- 在 TSAN 下复测并发 first-fault 竞争，并确认健康 finalization 期间只有 finalizer thread
+  可以排空后端，外部 submitter 仍被拒绝；host/resource teardown 追加 ASan/UBSan；
+- CUDA 使用 mock 或一次性受控进程产生 context-fatal Driver 结果。确认 Graph 不走 ordinary
+  duplicate launch，faulted teardown 不再 event/context wait，并且不声称 `ti.reset()`
+  能修复丢失 context；非破坏性覆盖追加 compute-sanitizer；
+- Vulkan 启用 validation 与 synchronization validation。确认
+  out-of-date/suboptimal/not-ready 保持非致命，而 device loss 会拒绝 queue submit、
+  present、fence poll 与后续工作，且不会发生第二次 abort。覆盖 offscreen 与可用的
+  X11/Wayland headed `show() -> destroy() -> reset()`。
+
 ### Dense Field Graph 矩阵
 
 本小节全部仍待 Linux 复测；Windows 结果不能满足这些门禁。

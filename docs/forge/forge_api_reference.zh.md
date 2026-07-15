@@ -420,6 +420,26 @@ owner 仍会保留到后端完成；`ti.sync()` 和 `ti.reset()` 也会安全退
 完成句柄，不是 `asyncio` future、callback scheduler、跨 Graph dependency 对象或跨
 Program 同步原语。
 
+### 致命后端错误与 runtime reset
+
+Forge 会为当前 Program 保留第一次 context/device 级致命后端错误，例如
+`VK_ERROR_DEVICE_LOST`，以及 CUDA illegal address、device assertion、launch
+failure 等执行错误。由于 GPU 异步执行，错误可能最先从 kernel/Graph 调用、
+`SubmissionTicket.done()` / `wait()`、`ti.sync()` 或 GGUI 提交边界出现。
+
+第一次致命错误之后，后续 kernel、Graph、completion recording、同步和 Vulkan
+显示提交都会快速拒绝，并引用同一个 first fault。Forge 不会重试失败 invocation，
+也不会让 teardown 的次生错误覆盖根因。swapchain out-of-date/suboptimal、
+not-ready poll、非法参数、不支持的 capability 与 stale handle 仍属于单次操作错误，
+不会仅凭这些结果 poison Program。
+
+失败或仍在途工作涉及的输出应视为未定义。清理前应先停止应用 producer thread，
+丢弃这些输出，并调用 `ti.reset()` 退役旧 Program。fault-aware teardown 会跳过不安全
+的 queue/event/fence/device wait，同时继续释放 host-owned 状态和可安全析构的后端
+handle。这不是原地恢复：真实 CUDA context loss 或 Vulkan device loss 之后，不保证
+同一进程还能创建可用的后端工作，必要时必须重启进程。旧 Program 的 Graph 和 ticket
+不会重新有效。
+
 ### `Graph.execution_stats()`
 
 返回冻结的 schema v1 `GraphExecutionReport` snapshot。这是稳定公开诊断 API；应用代码

@@ -104,6 +104,33 @@ target separation, capture/recapture/reset, and 1/2/4-submitter telemetry.
   set. Add `racecheck` only to device-side atomic/duplicate-sensitive cases
   whose CUDA-version support is known.
 
+### Runtime first-fault and teardown
+
+F3 first-fault behavior has Windows CPU/CUDA/Vulkan and GGUI evidence, but its
+Linux release evidence remains pending. Do not infer Linux teardown safety
+from the Windows result.
+
+- Build `taichi_runtime_foundation_tests` and the Python extension with GCC
+  and Clang, including CPU-only, CUDA-disabled, and Vulkan-disabled
+  configurations. The shared reporter uses standard C++ ownership/atomics and
+  must not acquire a Win32 handle or NT dependency.
+- Run `tests/python/test_runtime_fault.py` on CPU, CUDA, and Vulkan. Verify
+  one immutable first fault, exact completion sequence attribution, fast
+  rejection of later kernel/Graph/ticket/sync work, faulted GGUI destruction,
+  and a healthy new Program after synthetic injection.
+- Under TSAN, repeat concurrent first-fault reporting and verify that only the
+  finalizer thread may drain a healthy backend while external submitters are
+  rejected. Run host/resource teardown under ASan/UBSan.
+- On CUDA, use a mock or controlled disposable process for a context-fatal
+  Driver result. Confirm no ordinary duplicate Graph launch, no event/context
+  wait during faulted teardown, and no claim that `ti.reset()` repairs the
+  lost context. Add compute-sanitizer to non-destructive coverage.
+- On Vulkan, enable validation and synchronization validation. Verify that
+  out-of-date/suboptimal/not-ready remain nonfatal, while device loss rejects
+  queue submit, present, fence polling, and later work without a second abort.
+  Cover offscreen plus available X11/Wayland headed
+  `show() -> destroy() -> reset()`.
+
 ### Dense Field Graph matrix
 
 This subsection is entirely pending Linux revalidation; Windows results do not

@@ -99,6 +99,13 @@ device。两者都不会默认插入 `ti.sync()`。CPU completion 立即完成�
 event，Vulkan 使用 stream semaphore。极短 GPU invocation 可以在票据返回前完成。完成
 错误具有 sticky 语义，会在后续 `done()`、`wait()` 或 runtime 同步边界抛出。
 
+context-fatal CUDA 错误与 Vulkan device loss 还会成为 Program 不可变的 first
+fault。一旦观察到，后续 `Graph.run()`、`Graph.submit()`、kernel、ticket recording、
+同步与 Vulkan 显示提交都会快速拒绝，不再继续调用后端；失败的 Graph invocation 也
+不会再通过 ordinary dispatch 重试。应先停止 producer，再用 `ti.reset()` 退役旧
+Program；这不承诺恢复已经丢失的 context/device，真实后端丢失后可能必须重启进程。
+详见[致命后端错误与 runtime reset](forge_api_reference.zh.md#致命后端错误与-runtime-reset)。
+
 待完成的 runtime 参数由 Program completion domain 保留；Graph 与 Forge native
 workspace 由 Python runtime owner registry 保留到同一 completion ready，即使调用方已经
 丢弃票据。后续提交、轮询、同步与 reset 都会收集完成项；native completion queue 有界，

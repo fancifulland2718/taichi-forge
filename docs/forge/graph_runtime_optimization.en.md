@@ -123,6 +123,15 @@ Vulkan uses a stream semaphore; a short GPU invocation is allowed to be ready
 before its ticket is returned. Completion errors are sticky and surface from a
 later `done()`, `wait()`, or runtime synchronization boundary.
 
+Context-fatal CUDA errors and Vulkan device loss also become the Program's
+immutable first fault. Once observed, later `Graph.run()`, `Graph.submit()`,
+kernel, ticket-recording, synchronization, and Vulkan display submissions
+fail fast instead of issuing more backend work. A failed Graph invocation is
+never retried through ordinary dispatch. Stop producers and use `ti.reset()`
+to retire the old Program; this does not promise recovery of a lost context or
+device, so a real backend loss may require restarting the process. See
+[Fatal backend errors and runtime reset](forge_api_reference.en.md#fatal-backend-errors-and-runtime-reset).
+
 Pending runtime arguments are retained by the Program completion domain.
 Graphs and Forge native workspaces are retained by the Python runtime owner
 registry until the same completion becomes ready, even if the ticket is

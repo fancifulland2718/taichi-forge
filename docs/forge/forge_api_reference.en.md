@@ -454,6 +454,31 @@ retire pending tickets safely. A ticket is a completion handle, not an
 `asyncio` future, callback scheduler, cross-Graph dependency object, or
 cross-Program synchronization primitive.
 
+### Fatal backend errors and runtime reset
+
+Forge keeps the first context- or device-fatal backend error for the current
+Program. Examples include `VK_ERROR_DEVICE_LOST` and CUDA execution failures
+such as illegal address, device assertion, or launch failure. The error can
+first surface from a kernel or Graph call, `SubmissionTicket.done()` /
+`wait()`, `ti.sync()`, or GGUI submission because GPU execution is
+asynchronous.
+
+After the first fatal error, later kernel, Graph, completion-recording,
+synchronization, and Vulkan display submissions fail fast and refer back to
+that first error. Forge does not retry the failed invocation or replace the
+root cause with teardown errors. Swapchain out-of-date/suboptimal results,
+not-ready polling, invalid arguments, unsupported capabilities, and stale
+handles remain operation-local and do not by themselves poison the Program.
+
+Treat outputs from the failed or still-in-flight work as undefined. Stop
+application producer threads before cleanup, discard those outputs, and call
+`ti.reset()` to retire the old Program. Fault-aware teardown skips unsafe
+queue, event, fence, or device waits while still releasing host-owned state
+and safely destructible backend handles. This is not in-place recovery:
+after a real CUDA context loss or Vulkan device loss, creating usable backend
+work in the same process is not guaranteed and a process restart may be
+required. Graphs and tickets from the old Program never become valid again.
+
 ### `Graph.execution_stats()`
 
 Returns a frozen `GraphExecutionReport` snapshot with schema version 1. The

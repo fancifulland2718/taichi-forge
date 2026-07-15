@@ -203,6 +203,10 @@ profiling, and GGUI device-image staging were already public by `0.4.25`.
 - Hardened CPU/CUDA/Vulkan runtime initialization, whole-kernel submission,
   allocation identity/generation/range validation, mapping/reset lifetimes,
   CUDA-Vulkan external-memory fallback, and CPU scheduler/native replay.
+- Added a Program-owned first-fault domain for context-fatal CUDA errors and
+  Vulkan device loss. Kernel, Graph, ticket, synchronization, and GGUI paths
+  now fail fast with the original cause; fault-aware reset/finalize avoids
+  unsafe backend waits without claiming in-process device recovery.
 - Separated CUDA device capability from LLVM code-generation targets, isolated
   target-specific caches, removed the CUDA-13.2-only iterator dependency,
   hardened the single-runtime-wheel contract, and avoided unused CUDA
