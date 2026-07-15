@@ -13,6 +13,7 @@ from taichi_forge.algorithms._autodiff import (
 )
 from taichi_forge.algorithms._primitive_capabilities import (
     PRIMITIVE_CAPABILITY_SCHEMA_VERSION,
+    PRIMITIVE_DEPENDENCY_CLASSES,
     PrimitiveADCapability,
     PrimitiveCapability,
     PrimitiveMethodCapability,
@@ -737,6 +738,7 @@ def resolve_primitive_capability(name):
                 provider_probes=method.provider_probes,
                 implementation=method.implementation,
                 input_dependent=method.input_dependent,
+                dependency_class=method.dependency_class,
             )
         )
     if auto_index is not None:
@@ -753,6 +755,7 @@ def resolve_primitive_capability(name):
             provider_probes=auto_method.provider_probes,
             implementation=auto_method.implementation,
             input_dependent=auto_method.input_dependent,
+            dependency_class=auto_method.dependency_class,
         )
     return ResolvedPrimitiveCapability(
         schema_version=capability.schema_version,
@@ -16258,6 +16261,7 @@ class PrefixSumExecutor:
 
 
 __all__ = [
+    "PRIMITIVE_DEPENDENCY_CLASSES",
     "PRIMITIVE_CAPABILITY_SCHEMA_VERSION",
     "PrimitiveMethodCapability",
     "PrimitiveADCapability",

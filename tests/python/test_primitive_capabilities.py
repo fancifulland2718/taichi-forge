@@ -44,7 +44,7 @@ def test_static_primitive_capability_catalog_is_complete_and_immutable():
     assert all(
         capability.schema_version
         == ti.algorithms.PRIMITIVE_CAPABILITY_SCHEMA_VERSION
-        == 1
+        == 2
         for capability in capabilities
     )
     assert all(capability.dtypes for capability in capabilities)
@@ -53,6 +53,35 @@ def test_static_primitive_capability_catalog_is_complete_and_immutable():
     assert all(capability.storages for capability in capabilities)
     assert all(capability.operands for capability in capabilities)
     assert all(capability.methods for capability in capabilities)
+    assert ti.algorithms.PRIMITIVE_DEPENDENCY_CLASSES == (
+        "none",
+        "selected_provider",
+        "cuda_driver",
+        "cuda_driver_or_toolkit_runtime",
+        "cuda_toolkit_runtime",
+    )
+    methods_by_family = {
+        capability.name: {method.name: method for method in capability.methods}
+        for capability in capabilities
+    }
+    assert (
+        methods_by_family["scan"]["cuda_cub"].dependency_class
+        == "cuda_toolkit_runtime"
+    )
+    assert (
+        methods_by_family["transform"]["cuda_device"].dependency_class
+        == "cuda_driver_or_toolkit_runtime"
+    )
+    assert (
+        methods_by_family["bucket_builder"]["cuda_device"].dependency_class
+        == "cuda_toolkit_runtime"
+    )
+    assert (
+        methods_by_family["reduce"]["cpu_native"].dependency_class == "none"
+    )
+    assert methods_by_family["reduce"]["auto"].dependency_class == (
+        "selected_provider"
+    )
     assert all(capability.ad.primal == "supported" for capability in capabilities)
     assert all(
         capability.aot == "unsupported_for_native_nodes"
@@ -123,7 +152,7 @@ def test_static_primitive_capability_catalog_is_complete_and_immutable():
     assert sort_methods["vulkan_radix_u32"].provider_probes == ()
     assert sort_methods["vulkan_radix_u32"].implementation == "composite"
     serialized = json.loads(json.dumps(asdict(reduce_capability)))
-    assert serialized["schema_version"] == 1
+    assert serialized["schema_version"] == 2
     assert serialized["operands"][0]["name"] == "values"
     with pytest.raises(FrozenInstanceError):
         reduce_capability.name = "changed"
@@ -246,6 +275,7 @@ def test_resolved_primitive_capability_matches_active_program_probes():
         for method, expected in zip(resolved.methods, expected_methods):
             assert method.input_dependent is True
             assert method.provider_probes == expected.provider_probes
+            assert method.dependency_class == expected.dependency_class
             if method.method == "auto":
                 assert method.program_available is any(
                     candidate.program_available

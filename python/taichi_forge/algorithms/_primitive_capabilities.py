@@ -10,7 +10,15 @@ from types import MappingProxyType
 from typing import Optional, Tuple
 
 
-PRIMITIVE_CAPABILITY_SCHEMA_VERSION = 1
+PRIMITIVE_CAPABILITY_SCHEMA_VERSION = 2
+
+PRIMITIVE_DEPENDENCY_CLASSES = (
+    "none",
+    "selected_provider",
+    "cuda_driver",
+    "cuda_driver_or_toolkit_runtime",
+    "cuda_toolkit_runtime",
+)
 
 
 @dataclass(frozen=True)
@@ -22,6 +30,7 @@ class PrimitiveMethodCapability:
     provider_probes: Tuple[str, ...] = ()
     implementation: str = "native"
     input_dependent: bool = True
+    dependency_class: str = "none"
 
 
 @dataclass(frozen=True)
@@ -91,6 +100,7 @@ class ResolvedPrimitiveMethod:
     provider_probes: Tuple[str, ...]
     implementation: str
     input_dependent: bool
+    dependency_class: str
 
 
 @dataclass(frozen=True)
@@ -121,6 +131,34 @@ _NUMERIC_LAYOUTS = _SCALAR_LAYOUTS + (
     "packed_dense_components",
 )
 
+_CUDA_TOOLKIT_ONLY_PROBES = frozenset(
+    {
+        "cuda_device_bucket_builder_available",
+        "cuda_device_grouped_reduce_available",
+    }
+)
+_CUDA_DRIVER_OR_TOOLKIT_PROBES = frozenset(
+    {
+        "cuda_device_indexed_copy_available",
+        "cuda_device_scatter_add_available",
+        "cuda_device_transform_available",
+    }
+)
+
+
+def _infer_dependency_class(backends, probes):
+    if tuple(backends) != ("cuda",):
+        return "none"
+    if any(
+        probe.startswith("cuda_cub_")
+        or probe in _CUDA_TOOLKIT_ONLY_PROBES
+        for probe in probes
+    ):
+        return "cuda_toolkit_runtime"
+    if any(probe in _CUDA_DRIVER_OR_TOOLKIT_PROBES for probe in probes):
+        return "cuda_driver_or_toolkit_runtime"
+    return "cuda_driver"
+
 
 def _method(
     name,
@@ -129,13 +167,21 @@ def _method(
     *,
     implementation="native",
     input_dependent=True,
+    dependency_class=None,
 ):
+    if dependency_class is None:
+        dependency_class = _infer_dependency_class(backends, probes)
+    if dependency_class not in PRIMITIVE_DEPENDENCY_CLASSES:
+        raise ValueError(
+            f"Unknown primitive dependency class {dependency_class!r}"
+        )
     return PrimitiveMethodCapability(
         name=name,
         backends=tuple(backends),
         provider_probes=tuple(probes),
         implementation=implementation,
         input_dependent=input_dependent,
+        dependency_class=dependency_class,
     )
 
 
@@ -144,6 +190,7 @@ def _auto():
         "auto",
         implementation="dispatcher",
         input_dependent=True,
+        dependency_class="selected_provider",
     )
 
 
@@ -1366,6 +1413,7 @@ def primitive_ad_capability(name):
 
 
 __all__ = [
+    "PRIMITIVE_DEPENDENCY_CLASSES",
     "PRIMITIVE_CAPABILITY_SCHEMA_VERSION",
     "PrimitiveMethodCapability",
     "PrimitiveADCapability",
