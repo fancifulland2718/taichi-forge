@@ -21,6 +21,7 @@
 #include <taichi/program/runtime_resource_registry.h>
 #include <taichi/program/runtime_completion.h>
 #include <taichi/program/runtime_fault.h>
+#include <taichi/program/runtime_trace.h>
 
 #define TI_RUNTIME_HOST
 #include "taichi/aot/module_builder.h"
@@ -232,6 +233,12 @@ class TI_DLL_EXPORT Program {
   RuntimeStatistics &runtime_statistics() noexcept {
     return runtime_fault_domain_->statistics();
   }
+  RuntimeTraceRecorder &runtime_trace() noexcept {
+    return runtime_trace_;
+  }
+  const RuntimeTraceRecorder &runtime_trace() const noexcept {
+    return runtime_trace_;
+  }
   void report_backend_runtime_error(
       const BackendRuntimeError &error,
       std::uint64_t submission_sequence = 0) noexcept {
@@ -256,10 +263,16 @@ class TI_DLL_EXPORT Program {
     // operations; neither imposes cross-counter event ordering.
     mark_runtime_submission_pending();
     runtime_fault_domain_->statistics().record_submission(kind);
+    if (runtime_trace_.enabled()) {
+      runtime_trace_.record_instant(runtime_trace_kind(kind));
+    }
   }
   TI_FORCE_INLINE void record_runtime_submission_stat(
       RuntimeSubmissionKind kind) noexcept {
     runtime_fault_domain_->statistics().record_submission(kind);
+    if (runtime_trace_.enabled()) {
+      runtime_trace_.record_instant(runtime_trace_kind(kind));
+    }
   }
   TI_FORCE_INLINE void record_runtime_submission_failure() noexcept {
     runtime_fault_domain_->statistics().record_submission_failure();
@@ -2663,6 +2676,7 @@ class TI_DLL_EXPORT Program {
   std::unique_ptr<ProgramImpl> program_impl_;
   const std::uint64_t runtime_completion_domain_;
   std::shared_ptr<RuntimeFaultDomain> runtime_fault_domain_;
+  RuntimeTraceRecorder runtime_trace_;
   struct RuntimeBackendTelemetryBaseline {
     std::uint64_t backend_waits{0};
     std::uint64_t backend_wait_ns{0};

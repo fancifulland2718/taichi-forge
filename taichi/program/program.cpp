@@ -93,11 +93,18 @@ thread_local Program *active_runtime_resource_graph_program = nullptr;
 
 class RuntimeProgramSyncStatisticsScope {
  public:
-  explicit RuntimeProgramSyncStatisticsScope(RuntimeStatistics &statistics)
-      : statistics_(statistics), started_(std::chrono::steady_clock::now()) {
+  explicit RuntimeProgramSyncStatisticsScope(Program *program)
+      : statistics_(program->runtime_statistics()),
+        trace_(&program->runtime_trace(),
+               RuntimeTraceEventKind::kProgramSynchronize),
+        started_(std::chrono::steady_clock::now()),
+        uncaught_exceptions_(std::uncaught_exceptions()) {
   }
 
   ~RuntimeProgramSyncStatisticsScope() {
+    if (std::uncaught_exceptions() != uncaught_exceptions_) {
+      trace_.mark_failed();
+    }
     const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now() - started_);
     statistics_.record_program_sync(
@@ -106,7 +113,9 @@ class RuntimeProgramSyncStatisticsScope {
 
  private:
   RuntimeStatistics &statistics_;
+  RuntimeTraceRecorder::Scope trace_;
   std::chrono::steady_clock::time_point started_;
+  int uncaught_exceptions_;
 };
 
 std::atomic<std::uint64_t> next_runtime_resource_domain{1};
@@ -323,6 +332,7 @@ class ScopedRuntimeTransferStatistics {
       : program_(program),
         kind_(kind),
         bytes_(static_cast<std::uint64_t>(bytes)),
+        trace_(&program->runtime_trace(), runtime_trace_kind(kind), bytes_),
         uncaught_exceptions_(std::uncaught_exceptions()) {
   }
 
@@ -332,6 +342,8 @@ class ScopedRuntimeTransferStatistics {
     // separate user-visible transfers.
     if (std::uncaught_exceptions() == uncaught_exceptions_) {
       program_->runtime_statistics().record_transfer(kind_, bytes_);
+    } else {
+      trace_.mark_failed();
     }
   }
 
@@ -344,6 +356,7 @@ class ScopedRuntimeTransferStatistics {
   Program *program_;
   RuntimeTransferKind kind_;
   std::uint64_t bytes_;
+  RuntimeTraceRecorder::Scope trace_;
   int uncaught_exceptions_;
 };
 
@@ -4508,6 +4521,8 @@ Program::Program(Arch desired_arch)
       runtime_completion_domain_(allocate_runtime_resource_domain()),
       runtime_fault_domain_(std::make_shared<RuntimeFaultDomain>(
           desired_arch, runtime_completion_domain_)),
+      runtime_trace_(runtime_fault_domain_->statistics(),
+                     runtime_completion_domain_),
       dense_field_staging_resources_(allocate_runtime_resource_domain()),
       argpack_resources_(allocate_runtime_resource_domain()),
       ndarray_resources_(allocate_runtime_resource_domain()),
@@ -6638,8 +6653,7 @@ Program::debug_texture_resource_identity(const Texture *view) const {
 
 void Program::synchronize() {
   ensure_runtime_submission_allowed("Program synchronize");
-  RuntimeProgramSyncStatisticsScope statistics_scope(
-      runtime_fault_domain_->statistics());
+  RuntimeProgramSyncStatisticsScope statistics_scope(this);
   std::lock_guard<std::recursive_mutex> submission_lock(
       runtime_resource_submission_mutex_);
   const bool tracking_was_enabled =

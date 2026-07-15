@@ -126,7 +126,8 @@ set(TAICHI_RUNTIME_FOUNDATION_TESTS_NAME taichi_runtime_foundation_tests)
 add_executable(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
   tests/cpp/program/runtime_completion_test.cpp
   tests/cpp/program/runtime_fault_test.cpp
-  tests/cpp/program/runtime_statistics_test.cpp)
+  tests/cpp/program/runtime_statistics_test.cpp
+  tests/cpp/program/runtime_trace_test.cpp)
 target_link_libraries(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
   PRIVATE
     taichi_core

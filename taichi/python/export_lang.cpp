@@ -103,6 +103,21 @@ std::size_t checked_buffer_nbytes(const py::buffer_info &info,
   return size * itemsize;
 }
 
+py::dict runtime_trace_snapshot_to_dict(
+    const lang::RuntimeTraceSnapshot &snapshot) {
+  py::dict result;
+  result["program_domain"] = snapshot.program_domain;
+  result["session"] = snapshot.session;
+  result["enabled"] = snapshot.enabled;
+  result["max_threads"] = snapshot.max_threads;
+  result["events_per_thread"] = snapshot.events_per_thread;
+  result["event_capacity"] = snapshot.event_capacity;
+  result["allocated_bytes"] = snapshot.allocated_bytes;
+  result["recorded_events"] = snapshot.recorded_events;
+  result["dropped_events"] = snapshot.dropped_events;
+  return result;
+}
+
 }  // namespace
 
 void export_lang(py::module &m) {
@@ -801,6 +816,37 @@ void export_lang(py::module &m) {
         result["fault"] = std::move(fault);
         result["trace"] = std::move(trace);
         return result;
+      })
+      .def(
+          "_runtime_trace_start",
+          [](Program &program, std::size_t max_threads,
+             std::size_t events_per_thread) {
+            RuntimeTraceSnapshot snapshot;
+            {
+              py::gil_scoped_release release;
+              snapshot =
+                  program.runtime_trace().start(max_threads, events_per_thread);
+            }
+            return runtime_trace_snapshot_to_dict(snapshot);
+          },
+          py::arg("max_threads") = RuntimeTraceRecorder::kDefaultMaxThreads,
+          py::arg("events_per_thread") =
+              RuntimeTraceRecorder::kDefaultEventsPerThread)
+      .def("_runtime_trace_stop", [](Program &program) {
+        RuntimeTraceSnapshot snapshot;
+        {
+          py::gil_scoped_release release;
+          snapshot = program.runtime_trace().stop();
+        }
+        return runtime_trace_snapshot_to_dict(snapshot);
+      })
+      .def("_runtime_trace_snapshot", [](const Program &program) {
+        return runtime_trace_snapshot_to_dict(program.runtime_trace().snapshot());
+      })
+      .def("_runtime_trace_export", [](const Program &program,
+                                        const std::string &path) {
+        py::gil_scoped_release release;
+        return program.runtime_trace().export_chrome_trace(path);
       })
       .def("_record_runtime_completion",
            &Program::record_runtime_completion,
