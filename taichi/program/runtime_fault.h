@@ -5,9 +5,11 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 
 #include "taichi/common/core.h"
 #include "taichi/rhi/arch.h"
+#include "taichi/rhi/backend_error.h"
 #include "taichi/rhi/public_device.h"
 
 namespace taichi::lang {
@@ -57,7 +59,7 @@ struct RuntimeFaultSnapshot {
 // Program-owned, backend-neutral first-fault state. Completion tickets may
 // retain this object after Program teardown, so the record never stores a
 // Program, kernel, Graph, Python-object, or backend-handle pointer.
-class TI_DLL_EXPORT RuntimeFaultDomain {
+class TI_DLL_EXPORT RuntimeFaultDomain final : public BackendFaultReporter {
  public:
   RuntimeFaultDomain(Arch backend, std::uint64_t program_domain) noexcept;
 
@@ -70,17 +72,30 @@ class TI_DLL_EXPORT RuntimeFaultDomain {
            RuntimeLifecycleState::kHealthy;
   }
 
+  bool backend_calls_safe() const noexcept override {
+    return !fatal_observed_.load(std::memory_order_acquire);
+  }
+
+  bool has_fatal_fault() const noexcept {
+    return fatal_observed_.load(std::memory_order_acquire);
+  }
+
   // Returns true only for the call that records the immutable first fault.
   // Faults observed during finalization are retained for diagnostics but do
   // not move the lifecycle back from finalizing/finalized.
   bool report_fatal(RuntimeFaultRecord fault);
+
+  void report_backend_error(const BackendRuntimeError &error,
+                            std::uint64_t submission_sequence) noexcept
+      override;
 
   void begin_finalizing() noexcept;
   void mark_finalized() noexcept;
 
   // Healthy is the only state that accepts new work. This throws directly as
   // TaichiRuntimeError instead of logging repeatedly after the first fault.
-  void throw_if_submission_disallowed(const char *operation) const;
+  void throw_if_submission_disallowed(
+      const char *operation) const override;
 
   RuntimeFaultSnapshot snapshot() const;
 
@@ -90,8 +105,10 @@ class TI_DLL_EXPORT RuntimeFaultDomain {
   const Arch backend_;
   const std::uint64_t program_domain_;
   std::atomic<RuntimeLifecycleState> state_{RuntimeLifecycleState::kHealthy};
+  std::atomic<bool> fatal_observed_{false};
   mutable std::atomic<std::uint64_t> rejected_submissions_{0};
   mutable std::mutex mutex_;
+  std::thread::id finalizer_thread_;
   std::optional<RuntimeFaultRecord> first_fault_;
 };
 

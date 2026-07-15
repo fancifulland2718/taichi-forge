@@ -15079,7 +15079,12 @@ void Program::vulkan_clear_primitive_caches() {
   if (!vulkan_primitive_cache_exists(this)) {
     return;
   }
-  synchronize();
+  // A fatal Vulkan error invalidates the wait/submission path. Cache entries
+  // must still be erased while their Device owner exists; their RHI wrappers
+  // can destroy handles without attempting to recover the lost device.
+  if (!runtime_has_fatal_fault()) {
+    synchronize();
+  }
   vulkan_erase_primitive_caches(this);
 }
 

@@ -145,7 +145,9 @@ Program::acquire_snode_tree_lifecycle_read_guard() {
 Program::RuntimeResourceGraphScope::RuntimeResourceGraphScope(Program *program)
     : program_(program),
       previous_program_(active_runtime_resource_graph_program),
-      lock_(program->runtime_resource_submission_mutex_) {
+      lock_(program->runtime_resource_submission_mutex_, std::defer_lock) {
+  program_->ensure_runtime_submission_allowed("Graph resource submission");
+  lock_.lock();
   TI_ASSERT(previous_program_ == nullptr || previous_program_ == program_);
   active_runtime_resource_graph_program = program_;
 }
@@ -4437,6 +4439,8 @@ std::size_t Program::get_dense_field_stride(SNode *snode,
 Program::Program(Arch desired_arch)
     : snode_rw_accessors_bank_(this),
       runtime_completion_domain_(allocate_runtime_resource_domain()),
+      runtime_fault_domain_(std::make_shared<RuntimeFaultDomain>(
+          desired_arch, runtime_completion_domain_)),
       dense_field_staging_resources_(allocate_runtime_resource_domain()),
       argpack_resources_(allocate_runtime_resource_domain()),
       ndarray_resources_(allocate_runtime_resource_domain()),
@@ -4566,7 +4570,6 @@ Program::Program(Arch desired_arch)
   // Must have handled all the arch fallback logic by this point.
   TI_ASSERT_INFO(num_instances_ == 0, "Only one instance at a time");
   total_compilation_time_ = 0;
-  num_instances_ += 1;
   SNode::counter = 0;
 
   result_buffer = nullptr;
@@ -4581,6 +4584,12 @@ Program::Program(Arch desired_arch)
   }
 
   Timelines::get_instance().set_enabled(config.timeline);
+
+  // Install process-wide backend reporting only after every fallible Program
+  // construction step and the single-instance check have succeeded. A failed
+  // second Program must never overwrite the live Program's reporter.
+  attach_runtime_fault_reporter();
+  num_instances_ += 1;
 
   TI_TRACE("Program ({}) arch={} initialized.", fmt::ptr(this),
            arch_name(config.arch));
@@ -4835,6 +4844,7 @@ void Program::compile_kernels(
 
 void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,
                             LaunchContextBuilder &ctx) {
+  ensure_runtime_submission_allowed("kernel launch");
   if (ctx.argpack_ptrs.empty() && ctx.ndarray_ptrs.empty() &&
       ctx.texture_ptrs.empty()) {
     // Keep the pre-registry ordinary-launch machine path intact. Routing this
@@ -4896,6 +4906,7 @@ void Program::launch_registered_kernel(
     const CompiledKernelData &compiled_kernel_data,
     KernelLaunchHandle handle,
     LaunchContextBuilder &ctx) {
+  ensure_runtime_submission_allowed("registered kernel launch");
   launch_kernel_impl(compiled_kernel_data, ctx, &handle);
 }
 
@@ -5106,6 +5117,8 @@ void Program::check_runtime_error_after_kernel_launch(
 
 void Program::materialize_runtime() {
   program_impl_->materialize_runtime(profiler.get(), &result_buffer);
+  // Some backends create their Device lazily while materializing the runtime.
+  attach_runtime_fault_reporter();
 }
 
 ThreadPool *Program::get_cpu_thread_pool() {
@@ -6033,6 +6046,56 @@ void Program::complete_all_runtime_completions() noexcept {
   }
 }
 
+void Program::fail_all_runtime_completions(
+    const std::string &reason) noexcept {
+  std::deque<RuntimeCompletion> failed;
+  {
+    std::lock_guard<std::mutex> lock(runtime_completion_mutex_);
+    failed.swap(runtime_completions_);
+  }
+  for (const auto &completion : failed) {
+    completion.invalidate_and_release(reason);
+  }
+}
+
+void Program::attach_runtime_fault_reporter() {
+  TI_ASSERT(program_impl_ != nullptr);
+  Device *compute_device = program_impl_->get_compute_device();
+  Device *graphics_device = program_impl_->get_graphics_device();
+  if (compute_device != nullptr) {
+    compute_device->set_backend_fault_reporter(runtime_fault_domain_);
+  }
+  if (graphics_device != nullptr && graphics_device != compute_device) {
+    graphics_device->set_backend_fault_reporter(runtime_fault_domain_);
+  }
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    CUDADriver::get_instance_without_context().set_fault_reporter(
+        runtime_fault_domain_);
+  }
+#endif
+}
+
+void Program::detach_runtime_fault_reporter() noexcept {
+  Device::clear_backend_fault_reporter(runtime_fault_domain_);
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    CUDADriver::get_instance_without_context().clear_fault_reporter(
+        runtime_fault_domain_);
+  }
+#endif
+}
+
+void Program::debug_inject_runtime_fault(
+    std::int64_t backend_code,
+    const std::string &operation,
+    const std::string &message) {
+  const std::uint64_t sequence =
+      next_runtime_completion_sequence_.load(std::memory_order_acquire);
+  runtime_fault_domain_->report_fatal(
+      {compile_config().arch, backend_code, sequence, operation, message});
+}
+
 std::size_t Program::runtime_completion_resource_count(
     std::uint32_t kind) const noexcept {
   std::lock_guard<std::mutex> lock(runtime_completion_mutex_);
@@ -6044,6 +6107,7 @@ std::size_t Program::runtime_completion_resource_count(
 }
 
 RuntimeCompletion Program::record_runtime_completion() {
+  ensure_runtime_submission_allowed("runtime completion recording");
   collect_ready_runtime_completions();
 
   RuntimeCompletion result;
@@ -6095,13 +6159,14 @@ RuntimeCompletion Program::record_runtime_completion() {
         // Existing Driver API symbols are loaded dynamically; no cudart or
         // Toolkit-versioned runtime dependency is introduced.
         result = RuntimeCompletion::from_cuda_stream(
-            runtime_completion_domain_, sequence, nullptr);
+            runtime_completion_domain_, sequence, nullptr,
+            runtime_fault_domain_);
       } else if (compile_config().arch == Arch::vulkan) {
         // A work epoch exists, so flush() intentionally records a fence even
         // when the work came from a replay/native path outside current_cmdlist.
         result = RuntimeCompletion::from_stream_semaphore(
             Arch::vulkan, runtime_completion_domain_, sequence,
-            program_impl_->flush());
+            program_impl_->flush(), runtime_fault_domain_);
       } else {
         // F2's supported contract is CPU/CUDA/Vulkan. Other compiled backends
         // retain their legacy synchronous fallback without a fake token.
@@ -6121,9 +6186,42 @@ RuntimeCompletion Program::record_runtime_completion() {
       last_runtime_completion_submission_epoch_.store(
           submission_epoch, std::memory_order_release);
     } catch (...) {
+      const std::exception_ptr submission_error = std::current_exception();
+      if (runtime_fault_domain_->has_fatal_fault()) {
+        const auto fault = runtime_fault_domain_->snapshot();
+        const std::string reason =
+            fault.first_fault ? fault.first_fault->message
+                              : "Runtime backend entered a fatal state";
+        result.invalidate_and_release(reason);
+        fail_all_runtime_completions(reason);
+        release_completed_argpack_leases();
+        release_completed_ndarray_leases();
+        release_completed_texture_leases();
+        last_runtime_completion_submission_epoch_.store(
+            submission_epoch, std::memory_order_release);
+        std::rethrow_exception(submission_error);
+      }
       // No completion can safely own a partially detached submission. Finish
       // the backend first, then restore the pre-F2 synchronize release rule.
-      program_impl_->synchronize();
+      try {
+        program_impl_->synchronize();
+      } catch (const BackendRuntimeError &sync_error) {
+        runtime_fault_domain_->report_backend_error(sync_error, sequence);
+        if (runtime_fault_domain_->has_fatal_fault()) {
+          const auto fault = runtime_fault_domain_->snapshot();
+          const std::string reason =
+              fault.first_fault ? fault.first_fault->message
+                                : "Runtime backend entered a fatal state";
+          result.invalidate_and_release(reason);
+          fail_all_runtime_completions(reason);
+          release_completed_argpack_leases();
+          release_completed_ndarray_leases();
+          release_completed_texture_leases();
+          last_runtime_completion_submission_epoch_.store(
+              submission_epoch, std::memory_order_release);
+        }
+        throw;
+      }
       result.mark_completed();
       complete_all_runtime_completions();
       release_completed_argpack_leases();
@@ -6155,6 +6253,7 @@ RuntimeCompletion Program::record_runtime_completion() {
 
 std::unique_ptr<Program::RuntimeSubmissionTransaction>
 Program::begin_runtime_submission_transaction() {
+  ensure_runtime_submission_allowed("submission transaction");
   TI_ERROR_IF(finalized_,
               "Cannot begin a submission transaction after Program finalize");
   return std::unique_ptr<RuntimeSubmissionTransaction>(
@@ -6326,6 +6425,7 @@ Program::debug_texture_resource_identity(const Texture *view) const {
 }
 
 void Program::synchronize() {
+  ensure_runtime_submission_allowed("Program synchronize");
   std::lock_guard<std::recursive_mutex> submission_lock(
       runtime_resource_submission_mutex_);
   const bool tracking_was_enabled =
@@ -6333,7 +6433,25 @@ void Program::synchronize() {
           true, std::memory_order_acq_rel);
   {
     RuntimeSubmissionWriteScope completion_submission_scope(this);
-    program_impl_->synchronize();
+    try {
+      program_impl_->synchronize();
+    } catch (const BackendRuntimeError &error) {
+      runtime_fault_domain_->report_backend_error(
+          error, next_runtime_completion_sequence_.load(
+                     std::memory_order_acquire));
+      if (runtime_fault_domain_->has_fatal_fault()) {
+        runtime_submission_pending_.store(false, std::memory_order_release);
+        const auto fault = runtime_fault_domain_->snapshot();
+        const std::string reason =
+            fault.first_fault ? fault.first_fault->message
+                              : "Runtime backend entered a fatal state";
+        fail_all_runtime_completions(reason);
+        release_completed_argpack_leases();
+        release_completed_ndarray_leases();
+        release_completed_texture_leases();
+      }
+      throw;
+    }
     const bool had_submission = runtime_submission_pending_.exchange(
         false, std::memory_order_acq_rel);
     std::uint64_t submission_epoch =
@@ -6358,10 +6476,12 @@ void Program::synchronize() {
 }
 
 StreamSemaphore Program::flush() {
+  ensure_runtime_submission_allowed("Program flush");
   return program_impl_->flush();
 }
 
 StreamSemaphore Program::flush_if_pending() {
+  ensure_runtime_submission_allowed("Program flush");
   if (auto *gfx_program = dynamic_cast<GfxProgramImpl *>(program_impl_.get())) {
     return gfx_program->flush_if_pending();
   }
@@ -6445,49 +6565,127 @@ void Program::finalize() {
     return;
   }
 
-  {
+  runtime_fault_domain_->begin_finalizing();
+
+  bool teardown_warning_reported = false;
+  auto best_effort = [&](const char *step, auto &&operation) {
+    try {
+      operation();
+      return true;
+    } catch (const BackendRuntimeError &error) {
+      runtime_fault_domain_->report_backend_error(error, 0);
+      if (!runtime_fault_domain_->has_fatal_fault() &&
+          !teardown_warning_reported) {
+        teardown_warning_reported = true;
+        TI_WARN("Program finalize step '{}' failed: {}", step, error.what());
+      }
+    } catch (const std::exception &error) {
+      if (!runtime_fault_domain_->has_fatal_fault() &&
+          !teardown_warning_reported) {
+        teardown_warning_reported = true;
+        TI_WARN("Program finalize step '{}' failed: {}", step, error.what());
+      }
+    } catch (...) {
+      if (!runtime_fault_domain_->has_fatal_fault() &&
+          !teardown_warning_reported) {
+        teardown_warning_reported = true;
+        TI_WARN("Program finalize step '{}' failed with an unknown error",
+                step);
+      }
+    }
+    return false;
+  };
+
+  best_effort("close runtime resources", [&] {
     std::lock_guard<std::recursive_mutex> submission_lock(
         runtime_resource_submission_mutex_);
     close_argpack_resources();
     close_ndarray_resources();
     close_texture_resources();
     dense_field_staging_open_ = false;
-  }
+  });
   TI_TRACE("Program finalizing...");
 
-  synchronize();
+  bool synchronized = false;
+  if (!runtime_fault_domain_->has_fatal_fault()) {
+    synchronized = best_effort("backend synchronize", [&] {
+      std::lock_guard<std::recursive_mutex> submission_lock(
+          runtime_resource_submission_mutex_);
+      RuntimeSubmissionWriteScope completion_submission_scope(this);
+      program_impl_->synchronize();
+      const bool had_submission = runtime_submission_pending_.exchange(
+          false, std::memory_order_acq_rel);
+      std::uint64_t submission_epoch =
+          runtime_submission_epoch_.load(std::memory_order_relaxed);
+      if (had_submission) {
+        const std::uint64_t previous = runtime_submission_epoch_.fetch_add(
+            1, std::memory_order_relaxed);
+        TI_ASSERT(previous != (std::numeric_limits<std::uint64_t>::max)());
+        submission_epoch = previous + 1;
+      }
+      complete_all_runtime_completions();
+      release_completed_argpack_leases();
+      release_completed_ndarray_leases();
+      release_completed_texture_leases();
+      last_runtime_completion_submission_epoch_.store(
+          submission_epoch, std::memory_order_release);
+    });
+  }
+  if (!synchronized) {
+    runtime_submission_pending_.store(false, std::memory_order_release);
+    const auto fault = runtime_fault_domain_->snapshot();
+    const std::string reason =
+        fault.first_fault
+            ? fault.first_fault->message
+            : "Program finalized after backend synchronization failed";
+    fail_all_runtime_completions(reason);
+    release_completed_argpack_leases();
+    release_completed_ndarray_leases();
+    release_completed_texture_leases();
+  }
   if (compile_config().arch == Arch::vulkan) {
-    vulkan_clear_primitive_caches();
+    best_effort("clear Vulkan primitive caches",
+                [&] { vulkan_clear_primitive_caches(); });
   }
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
-    cuda::cub_bucket_builder_clear_cache(this);
-    cuda::cub_grouped_reduce_clear_cache(this);
+    best_effort("clear CUDA bucket-builder cache",
+                [&] { cuda::cub_bucket_builder_clear_cache(this); });
+    best_effort("clear CUDA grouped-reduce cache",
+                [&] { cuda::cub_grouped_reduce_clear_cache(this); });
   }
 #endif
-  argpack_resources_.finalize({kArgPackResourceKind});
-  ndarray_resources_.finalize({kNdarrayResourceKind});
-  texture_resources_.finalize({kTextureResourceKind});
-  {
+  best_effort("finalize ArgPack resources",
+              [&] { argpack_resources_.finalize({kArgPackResourceKind}); });
+  best_effort("finalize Ndarray resources",
+              [&] { ndarray_resources_.finalize({kNdarrayResourceKind}); });
+  best_effort("finalize Texture resources",
+              [&] { texture_resources_.finalize({kTextureResourceKind}); });
+  best_effort("close dense-field staging", [&] {
     std::lock_guard<std::recursive_mutex> submission_lock(
         runtime_resource_submission_mutex_);
     close_dense_field_staging_resource();
-  }
+  });
   if (arch_uses_llvm(compile_config().arch) ||
       compile_config().arch == Arch::vulkan) {
-    program_impl_->finalize();
+    best_effort("finalize backend runtime",
+                [&] { program_impl_->finalize(); });
   }
+  detach_runtime_fault_reporter();
 
   Stmt::reset_counter();
 
   finalized_ = true;
   num_instances_ -= 1;
-  program_impl_->dump_cache_data_to_disk();
+  runtime_fault_domain_->mark_finalized();
+  best_effort("write offline cache",
+              [&] { program_impl_->dump_cache_data_to_disk(); });
   compile_config_ = default_compile_config;
   TI_TRACE("Program ({}) finalized_.", fmt::ptr(this));
 
   // Reset memory pool
-  HostMemoryPool::get_instance().reset();
+  best_effort("reset host memory pool",
+              [&] { HostMemoryPool::get_instance().reset(); });
 }
 
 int Program::default_block_dim(const CompileConfig &config) {

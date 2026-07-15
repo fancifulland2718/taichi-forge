@@ -99,10 +99,35 @@ bool RuntimeFaultDomain::report_fatal(RuntimeFaultRecord fault) {
   // could make the immutable first-fault record contradict its domain.
   fault.backend = backend_;
   first_fault_ = std::move(fault);
+  fatal_observed_.store(true, std::memory_order_release);
   if (current == RuntimeLifecycleState::kHealthy) {
     state_.store(RuntimeLifecycleState::kFaulted, std::memory_order_release);
   }
   return true;
+}
+
+void RuntimeFaultDomain::report_backend_error(
+    const BackendRuntimeError &error,
+    std::uint64_t submission_sequence) noexcept {
+  BackendErrorClassification classification =
+      BackendErrorClassification::kOperation;
+  if (error.backend() == Arch::cuda) {
+    classification = classify_cuda_driver_error(
+        static_cast<std::uint32_t>(error.backend_code()));
+  } else if (error.backend() == Arch::vulkan) {
+    classification =
+        classify_vulkan_result(static_cast<std::int32_t>(error.backend_code()));
+  }
+  if (classification != BackendErrorClassification::kFatal) {
+    return;
+  }
+  try {
+    report_fatal({error.backend(), error.backend_code(), submission_sequence,
+                  error.operation(), error.what()});
+  } catch (...) {
+    // Fault reporting must never replace the backend exception or terminate a
+    // destructor. The original typed error still reaches the caller.
+  }
 }
 
 void RuntimeFaultDomain::begin_finalizing() noexcept {
@@ -113,18 +138,33 @@ void RuntimeFaultDomain::begin_finalizing() noexcept {
       current == RuntimeLifecycleState::kFinalized) {
     return;
   }
+  finalizer_thread_ = std::this_thread::get_id();
   state_.store(RuntimeLifecycleState::kFinalizing, std::memory_order_release);
 }
 
 void RuntimeFaultDomain::mark_finalized() noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
   state_.store(RuntimeLifecycleState::kFinalized, std::memory_order_release);
+  finalizer_thread_ = std::thread::id{};
 }
 
 void RuntimeFaultDomain::throw_if_submission_disallowed(
     const char *operation) const {
   if (submission_allowed()) {
     return;
+  }
+  if (!fatal_observed_.load(std::memory_order_acquire) &&
+      state_.load(std::memory_order_acquire) ==
+          RuntimeLifecycleState::kFinalizing) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_.load(std::memory_order_relaxed) ==
+            RuntimeLifecycleState::kFinalizing &&
+        finalizer_thread_ == std::this_thread::get_id()) {
+      // Program has already closed its writer gate. Only the thread that
+      // entered finalization may drain healthy backend work; all external
+      // submitters continue to fail fast.
+      return;
+    }
   }
   rejected_submissions_.fetch_add(1, std::memory_order_relaxed);
   throw TaichiRuntimeError(rejection_message(operation));
@@ -157,7 +197,9 @@ std::string RuntimeFaultDomain::rejection_message(const char *operation) const {
         fault.message.empty() ? "no backend message" : fault.message);
   }
   if (current.state == RuntimeLifecycleState::kFaulted) {
-    message += ". Call ti.reset() to create a new Program/device";
+    message +=
+        ". Call ti.reset() to retire this Program; a real device/context "
+        "loss may require restarting the process before more backend work";
   }
   return message;
 }

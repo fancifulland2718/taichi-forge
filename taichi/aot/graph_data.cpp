@@ -1022,8 +1022,10 @@ bool handle_cuda_graph_driver_failure(CompiledGraphCudaState &state,
     state.stats.last_fallback_reason =
         CompiledGraphFallbackReason::fatal_driver_failure;
     state.stats.last_driver_error = error;
-    TI_ERROR("CUDA graph {} failed with a context-fatal error: {}", stage,
-             get_cuda_error_message(error));
+    throw BackendRuntimeError(
+        Arch::cuda, error, fmt::format("cuda_graph_{}", stage),
+        fmt::format("CUDA graph {} failed with a context-fatal error: {}",
+                    stage, get_cuda_error_message(error)));
   }
 
   if (is_cuda_graph_structural_driver_error(error)) {
@@ -1548,6 +1550,9 @@ void CompiledGraph::run(
         texture_views.push_back(ref.texture);
       }
     }
+    if (program != nullptr) {
+      program->ensure_runtime_submission_allowed("AOT Graph launch");
+    }
     std::optional<Program::RuntimeResourceSubmissionGuard> resource_guard;
     if (program != nullptr) {
       resource_guard.emplace(
@@ -1566,6 +1571,9 @@ void CompiledGraph::jit_run(
     const CompileConfig &compile_config,
     const std::unordered_map<std::string, IValue> &args) const {
   Program *program = jit_graph_program(*this);
+  if (program != nullptr) {
+    program->ensure_runtime_submission_allowed("Graph launch");
+  }
   std::optional<Program::SNodeTreeLifecycleReadGuard> tree_lifecycle_guard;
   std::optional<Program::RuntimeResourceGraphScope> resource_guard;
   std::optional<Program::RuntimeSubmissionScope> completion_scope;
@@ -1612,8 +1620,11 @@ void CompiledGraph::jit_run(
 void CompiledGraph::jit_run_cached(
     const CompileConfig &compile_config,
     const std::unordered_map<std::string, IValue> &args,
-    CompiledGraphJITCache &cache) const {
+    CompiledGraphJITCache &cache) const try {
   Program *program = jit_graph_program(*this);
+  if (program != nullptr) {
+    program->ensure_runtime_submission_allowed("cached Graph launch");
+  }
   std::optional<Program::SNodeTreeLifecycleReadGuard> tree_lifecycle_guard;
   std::optional<Program::RuntimeResourceGraphScope> resource_guard;
   std::optional<Program::RuntimeSubmissionScope> completion_scope;
@@ -1723,6 +1734,12 @@ void CompiledGraph::jit_run_cached(
 #endif
     prog->launch_kernel(*compiled_kernel_data, launch_ctx);
   }
+} catch (const BackendRuntimeError &error) {
+  Program *program = jit_graph_program(*this);
+  if (program != nullptr) {
+    program->report_backend_runtime_error(error);
+  }
+  throw;
 }
 
 // static

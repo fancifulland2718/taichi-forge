@@ -7,6 +7,8 @@
 #include <utility>
 
 #include "taichi/common/logging.h"
+#include "taichi/program/runtime_fault.h"
+#include "taichi/rhi/backend_error.h"
 
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_context.h"
@@ -53,21 +55,43 @@ class StreamSemaphoreCompletion final : public CompletionPrimitive {
 #ifdef TI_WITH_CUDA
 class CudaEventCompletion final : public CompletionPrimitive {
  public:
-  explicit CudaEventCompletion(void *stream) {
+  CudaEventCompletion(void *stream,
+                      std::weak_ptr<RuntimeFaultDomain> fault_domain)
+      : fault_domain_(std::move(fault_domain)) {
     auto context_guard = CUDAContext::get_instance().get_guard();
     auto &driver = CUDADriver::get_instance();
-    driver.event_create(&event_, CU_EVENT_DISABLE_TIMING);
-    try {
-      driver.event_record(event_, stream);
-    } catch (...) {
-      driver.event_destroy.call_with_warning(event_);
+    const std::uint32_t create_result =
+        driver.event_create.call(&event_, CU_EVENT_DISABLE_TIMING);
+    if (create_result != CUDA_SUCCESS) {
+      throw BackendRuntimeError(
+          Arch::cuda, create_result, "event_create",
+          driver.event_create.get_error_message(create_result));
+    }
+    const std::uint32_t record_result =
+        driver.event_record.call(event_, stream);
+    if (record_result != CUDA_SUCCESS) {
+      if (classify_cuda_driver_error(record_result) !=
+          BackendErrorClassification::kFatal) {
+        driver.event_destroy.call_with_warning(event_);
+      }
+      // A fatal context error owns the unrecoverable handle until process
+      // teardown; a nonfatal path destroyed it above.
       event_ = nullptr;
-      throw;
+      throw BackendRuntimeError(
+          Arch::cuda, record_result, "event_record",
+          driver.event_record.get_error_message(record_result));
     }
   }
 
   ~CudaEventCompletion() override {
     if (event_ == nullptr) {
+      return;
+    }
+    if (auto domain = fault_domain_.lock();
+        domain && !domain->backend_calls_safe()) {
+      // CUDA execution faults can make even event destruction fail. The
+      // context owns the handle and will reclaim it at process teardown.
+      event_ = nullptr;
       return;
     }
     try {
@@ -91,16 +115,24 @@ class CudaEventCompletion final : public CompletionPrimitive {
     if (result == CUDA_ERROR_NOT_READY) {
       return false;
     }
-    TI_ERROR("{}", driver.event_query.get_error_message(result));
+    throw BackendRuntimeError(Arch::cuda, result, "event_query",
+                              driver.event_query.get_error_message(result));
   }
 
   void wait() override {
     auto context_guard = CUDAContext::get_instance().get_guard();
-    CUDADriver::get_instance().event_synchronize(event_);
+    auto &driver = CUDADriver::get_instance();
+    const std::uint32_t result = driver.event_synchronize.call(event_);
+    if (result != CUDA_SUCCESS) {
+      throw BackendRuntimeError(
+          Arch::cuda, result, "event_synchronize",
+          driver.event_synchronize.get_error_message(result));
+    }
   }
 
  private:
   void *event_{nullptr};
+  std::weak_ptr<RuntimeFaultDomain> fault_domain_;
 };
 #endif
 
@@ -123,8 +155,13 @@ struct RuntimeCompletion::State {
   State() : status(CompletionStatus::completed) {
   }
 
-  explicit State(std::unique_ptr<CompletionPrimitive> primitive)
-      : status(CompletionStatus::pending), primitive(std::move(primitive)) {
+  State(std::unique_ptr<CompletionPrimitive> primitive,
+        std::shared_ptr<RuntimeFaultDomain> fault_domain,
+        std::uint64_t sequence)
+      : status(CompletionStatus::pending),
+        fault_domain(std::move(fault_domain)),
+        sequence(sequence),
+        primitive(std::move(primitive)) {
     TI_ASSERT(this->primitive != nullptr);
   }
 
@@ -154,6 +191,11 @@ struct RuntimeCompletion::State {
         if (!primitive->is_ready()) {
           return false;
         }
+      } catch (const BackendRuntimeError &error) {
+        report_backend_error_locked(error);
+        record_first_error_locked(std::current_exception(),
+                                  CompletionStatus::failed);
+        throw;
       } catch (...) {
         record_first_error_locked(std::current_exception(),
                                   CompletionStatus::failed);
@@ -193,6 +235,11 @@ struct RuntimeCompletion::State {
       }
       try {
         primitive->wait();
+      } catch (const BackendRuntimeError &error) {
+        report_backend_error_locked(error);
+        record_first_error_locked(std::current_exception(),
+                                  CompletionStatus::failed);
+        throw;
       } catch (...) {
         record_first_error_locked(std::current_exception(),
                                   CompletionStatus::failed);
@@ -281,6 +328,13 @@ struct RuntimeCompletion::State {
     status.store(failure_status, std::memory_order_release);
   }
 
+  void report_backend_error_locked(
+      const BackendRuntimeError &error) noexcept {
+    if (fault_domain) {
+      fault_domain->report_backend_error(error, sequence);
+    }
+  }
+
   [[noreturn]] void rethrow_first_error_locked() const {
     if (first_error) {
       std::rethrow_exception(first_error);
@@ -295,6 +349,8 @@ struct RuntimeCompletion::State {
 
   std::atomic<CompletionStatus> status;
   mutable std::mutex mutex;
+  std::shared_ptr<RuntimeFaultDomain> fault_domain;
+  std::uint64_t sequence{0};
   std::unique_ptr<CompletionPrimitive> primitive;
   std::shared_ptr<RuntimeCompletionResources> resources;
   std::exception_ptr first_error;
@@ -324,28 +380,43 @@ RuntimeCompletion RuntimeCompletion::from_stream_semaphore(
     Arch backend,
     std::uint64_t program_domain,
     std::uint64_t sequence,
-    StreamSemaphore semaphore) {
+    StreamSemaphore semaphore,
+    std::shared_ptr<RuntimeFaultDomain> fault_domain) {
   if (!semaphore) {
     return completed(backend, program_domain, sequence);
   }
   auto primitive =
       std::make_unique<StreamSemaphoreCompletion>(std::move(semaphore));
   return RuntimeCompletion(backend, program_domain, sequence,
-                           std::make_shared<State>(std::move(primitive)));
+                           std::make_shared<State>(std::move(primitive),
+                                                   std::move(fault_domain),
+                                                   sequence));
 }
 
 RuntimeCompletion RuntimeCompletion::from_cuda_stream(
     std::uint64_t program_domain,
     std::uint64_t sequence,
-    void *stream) {
+    void *stream,
+    std::shared_ptr<RuntimeFaultDomain> fault_domain) {
 #ifdef TI_WITH_CUDA
-  auto primitive = std::make_unique<CudaEventCompletion>(stream);
-  return RuntimeCompletion(Arch::cuda, program_domain, sequence,
-                           std::make_shared<State>(std::move(primitive)));
+  try {
+    auto primitive =
+        std::make_unique<CudaEventCompletion>(stream, fault_domain);
+    return RuntimeCompletion(
+        Arch::cuda, program_domain, sequence,
+        std::make_shared<State>(std::move(primitive),
+                                std::move(fault_domain), sequence));
+  } catch (const BackendRuntimeError &error) {
+    if (fault_domain) {
+      fault_domain->report_backend_error(error, sequence);
+    }
+    throw;
+  }
 #else
   (void)program_domain;
   (void)sequence;
   (void)stream;
+  (void)fault_domain;
   TI_ERROR("CUDA runtime completion requested without CUDA support");
 #endif
 }
@@ -392,6 +463,14 @@ void RuntimeCompletion::mark_completed() const noexcept {
 void RuntimeCompletion::invalidate(const std::string &reason) const noexcept {
   if (state_) {
     state_->invalidate(reason);
+  }
+}
+
+void RuntimeCompletion::invalidate_and_release(
+    const std::string &reason) const noexcept {
+  if (state_) {
+    state_->invalidate(reason);
+    state_->mark_completed();
   }
 }
 

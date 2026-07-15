@@ -20,6 +20,7 @@
 
 #include <taichi/program/runtime_resource_registry.h>
 #include <taichi/program/runtime_completion.h>
+#include <taichi/program/runtime_fault.h>
 
 #define TI_RUNTIME_HOST
 #include "taichi/aot/module_builder.h"
@@ -214,6 +215,27 @@ class TI_DLL_EXPORT Program {
   }
 
   void synchronize();
+
+  TI_FORCE_INLINE void ensure_runtime_submission_allowed(
+      const char *operation) const {
+    if (!runtime_fault_domain_->submission_allowed()) {
+      runtime_fault_domain_->throw_if_submission_disallowed(operation);
+    }
+  }
+  bool runtime_has_fatal_fault() const noexcept {
+    return runtime_fault_domain_->has_fatal_fault();
+  }
+  RuntimeFaultSnapshot runtime_fault_snapshot() const {
+    return runtime_fault_domain_->snapshot();
+  }
+  void report_backend_runtime_error(
+      const BackendRuntimeError &error,
+      std::uint64_t submission_sequence = 0) noexcept {
+    runtime_fault_domain_->report_backend_error(error, submission_sequence);
+  }
+  void debug_inject_runtime_fault(std::int64_t backend_code,
+                                  const std::string &operation,
+                                  const std::string &message);
 
   // F2 internal completion API. Existing kernel calls, Graph.run(), native
   // primitives and ti.sync() retain their public return values.
@@ -445,6 +467,7 @@ class TI_DLL_EXPORT Program {
   using TextureResourceHandle = TextureResourceRegistry::Handle;
   using TextureResourceLease = TextureResourceRegistry::Lease;
   RuntimeResourceSubmissionGuard acquire_runtime_resource_submission_guard() {
+    ensure_runtime_submission_allowed("runtime resource submission");
     return RuntimeResourceSubmissionGuard(runtime_resource_submission_mutex_);
   }
   RuntimeResourceGraphScope acquire_runtime_resource_graph_scope() {
@@ -2590,6 +2613,9 @@ class TI_DLL_EXPORT Program {
   void track_runtime_completion(const RuntimeCompletion &completion);
   void collect_ready_runtime_completions();
   void complete_all_runtime_completions() noexcept;
+  void fail_all_runtime_completions(const std::string &reason) noexcept;
+  void attach_runtime_fault_reporter();
+  void detach_runtime_fault_reporter() noexcept;
   std::size_t runtime_completion_resource_count(
       std::uint32_t kind) const noexcept;
   void acquire_runtime_submission_reader() noexcept;
@@ -2619,6 +2645,7 @@ class TI_DLL_EXPORT Program {
 
   std::unique_ptr<ProgramImpl> program_impl_;
   const std::uint64_t runtime_completion_domain_;
+  std::shared_ptr<RuntimeFaultDomain> runtime_fault_domain_;
   // Default kernel/Graph execution only publishes a cheap dirty bit. The
   // reader/writer gate is activated permanently by the first completion
   // request, and only temporarily by a legacy Program::synchronize().
@@ -2671,6 +2698,7 @@ class TI_DLL_EXPORT Program {
 TI_FORCE_INLINE Program::RuntimeSubmissionScope::RuntimeSubmissionScope(
     Program *program)
     : program_(program) {
+  program_->ensure_runtime_submission_allowed("runtime submission");
   if (!program_->runtime_completion_tracking_enabled_.load(
           std::memory_order_acquire)) {
     // Before the first completion request there is no writer to exclude and

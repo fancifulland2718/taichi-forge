@@ -821,8 +821,12 @@ class PyTaichi:
         # too late, after the Python owner had already been destroyed.
         with self._runtime_submission_owner_lock:
             has_submission_owners = bool(self._runtime_submission_owners)
-        if has_submission_owners and self.prog:
+        runtime_faulted = bool(
+            self.prog and self.prog._runtime_has_fatal_fault()
+        )
+        if has_submission_owners and self.prog and not runtime_faulted:
             self.prog.synchronize()
+        if has_submission_owners:
             self.clear_runtime_submission_owners()
         self.invalidate_runtime_objects()
         if self.prog:

@@ -600,6 +600,31 @@ void export_lang(py::module &m) {
              return ret;
            })
       .def("synchronize", &Program::synchronize)
+      .def("_runtime_has_fatal_fault", &Program::runtime_has_fatal_fault)
+      .def("_debug_inject_runtime_fault",
+           &Program::debug_inject_runtime_fault)
+      .def("_debug_runtime_fault_state", [](const Program &program) {
+        const RuntimeFaultSnapshot snapshot = program.runtime_fault_snapshot();
+        py::dict result;
+        result["state"] = runtime_lifecycle_state_name(snapshot.state);
+        result["domain"] = snapshot.program_domain;
+        result["rejected_submissions"] = snapshot.rejected_submissions;
+        if (snapshot.first_fault) {
+          const RuntimeFaultRecord &fault = *snapshot.first_fault;
+          result["backend"] = arch_name(fault.backend);
+          result["backend_code"] = fault.backend_code;
+          result["sequence"] = fault.submission_sequence;
+          result["operation"] = fault.operation;
+          result["message"] = fault.message;
+        } else {
+          result["backend"] = py::none();
+          result["backend_code"] = py::none();
+          result["sequence"] = py::none();
+          result["operation"] = py::none();
+          result["message"] = py::none();
+        }
+        return result;
+      })
       .def("_record_runtime_completion",
            &Program::record_runtime_completion,
            py::call_guard<py::gil_scoped_release>())

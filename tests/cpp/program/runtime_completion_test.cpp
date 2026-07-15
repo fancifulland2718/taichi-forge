@@ -5,6 +5,8 @@
 #include <stdexcept>
 
 #include "taichi/program/runtime_completion.h"
+#include "taichi/program/runtime_fault.h"
+#include "taichi/rhi/backend_error.h"
 
 namespace taichi::lang {
 namespace {
@@ -52,6 +54,19 @@ class CountedResources final : public RuntimeCompletionResources {
  private:
   std::atomic<int> *released_;
   std::size_t count_;
+};
+
+class FatalBackendSemaphore final : public StreamSemaphoreObject {
+ public:
+  bool is_ready() const override {
+    throw BackendRuntimeError(Arch::vulkan, -4, "vkGetFenceStatus",
+                              "injected Vulkan device loss");
+  }
+
+  bool wait() const override {
+    throw BackendRuntimeError(Arch::vulkan, -4, "vkWaitForFences",
+                              "injected Vulkan device loss");
+  }
 };
 
 TEST(RuntimeCompletion, CompletedTokenUsesNoBackendWork) {
@@ -113,6 +128,29 @@ TEST(RuntimeCompletion, ProgramSyncRetiresFaultedResourcesWithoutHidingError) {
   EXPECT_THROW(completion.wait(), std::runtime_error);
   EXPECT_NE(completion.first_error_message().find("fake completion failure"),
             std::string::npos);
+}
+
+TEST(RuntimeCompletion, FatalBackendErrorPoisonsOwningDomainWithSequence) {
+  auto domain = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 81);
+  auto semaphore = std::make_shared<FatalBackendSemaphore>();
+  auto completion = RuntimeCompletion::from_stream_semaphore(
+      Arch::vulkan, 81, 19, semaphore, domain);
+  std::atomic<int> released{0};
+  completion.attach_resources(
+      std::make_shared<CountedResources>(&released, 2));
+
+  EXPECT_THROW(completion.done(), BackendRuntimeError);
+  const RuntimeFaultSnapshot snapshot = domain->snapshot();
+  ASSERT_TRUE(snapshot.first_fault.has_value());
+  EXPECT_EQ(snapshot.state, RuntimeLifecycleState::kFaulted);
+  EXPECT_EQ(snapshot.first_fault->backend_code, -4);
+  EXPECT_EQ(snapshot.first_fault->submission_sequence, 19u);
+  EXPECT_EQ(snapshot.first_fault->operation, "vkGetFenceStatus");
+  EXPECT_EQ(released.load(std::memory_order_relaxed), 0);
+
+  completion.invalidate_and_release("runtime faulted");
+  EXPECT_EQ(released.load(std::memory_order_relaxed), 1);
+  EXPECT_THROW(completion.wait(), BackendRuntimeError);
 }
 
 }  // namespace

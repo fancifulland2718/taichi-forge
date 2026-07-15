@@ -124,6 +124,7 @@ add_test(NAME ${TESTS_NAME} COMMAND ${TESTS_NAME})
 # unrelated mock API change must not hide lifecycle regressions in this layer.
 set(TAICHI_RUNTIME_FOUNDATION_TESTS_NAME taichi_runtime_foundation_tests)
 add_executable(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
+  tests/cpp/program/runtime_completion_test.cpp
   tests/cpp/program/runtime_fault_test.cpp)
 target_link_libraries(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
   PRIVATE

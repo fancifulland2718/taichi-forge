@@ -51,6 +51,7 @@ TEST(RuntimeFault, BackendErrorClassificationIsConservative) {
 TEST(RuntimeFault, FirstFatalFaultIsImmutableAndRejectsSubmission) {
   RuntimeFaultDomain domain(Arch::cuda, 41);
   EXPECT_TRUE(domain.submission_allowed());
+  EXPECT_TRUE(domain.backend_calls_safe());
   EXPECT_EQ(domain.state(), RuntimeLifecycleState::kHealthy);
 
   EXPECT_TRUE(domain.report_fatal({Arch::cuda, CUDA_ERROR_ILLEGAL_ADDRESS, 7,
@@ -59,6 +60,7 @@ TEST(RuntimeFault, FirstFatalFaultIsImmutableAndRejectsSubmission) {
   EXPECT_FALSE(domain.report_fatal(
       {Arch::cuda, CUDA_ERROR_ASSERT, 8, "later", "must not replace"}));
   EXPECT_FALSE(domain.submission_allowed());
+  EXPECT_FALSE(domain.backend_calls_safe());
   EXPECT_EQ(domain.state(), RuntimeLifecycleState::kFaulted);
 
   try {
@@ -71,6 +73,8 @@ TEST(RuntimeFault, FirstFatalFaultIsImmutableAndRejectsSubmission) {
     EXPECT_NE(message.find("code=700"), std::string::npos);
     EXPECT_NE(message.find("completion.wait"), std::string::npos);
     EXPECT_NE(message.find("sequence=7"), std::string::npos);
+    EXPECT_NE(message.find("may require restarting the process"),
+              std::string::npos);
     EXPECT_EQ(message.find("must not replace"), std::string::npos);
   }
 
@@ -133,9 +137,23 @@ TEST(RuntimeFault, FinalizationPreservesButDoesNotCreatePostFinalizedFaults) {
 TEST(RuntimeFault, HealthyFinalizationDoesNotInventAFault) {
   RuntimeFaultDomain domain(Arch::x64, 123);
   domain.begin_finalizing();
+  EXPECT_NO_THROW(
+      domain.throw_if_submission_disallowed("healthy backend drain"));
+  std::atomic<bool> other_thread_rejected{false};
+  std::thread submitter([&] {
+    try {
+      domain.throw_if_submission_disallowed("concurrent Graph submit");
+    } catch (const TaichiRuntimeError &) {
+      other_thread_rejected.store(true, std::memory_order_release);
+    }
+  });
+  submitter.join();
+  EXPECT_TRUE(other_thread_rejected.load(std::memory_order_acquire));
   domain.begin_finalizing();
   domain.mark_finalized();
   domain.mark_finalized();
+  EXPECT_THROW(domain.throw_if_submission_disallowed("late backend drain"),
+               TaichiRuntimeError);
   const RuntimeFaultSnapshot snapshot = domain.snapshot();
   EXPECT_EQ(snapshot.state, RuntimeLifecycleState::kFinalized);
   EXPECT_FALSE(snapshot.first_fault.has_value());

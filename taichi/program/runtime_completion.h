@@ -12,6 +12,8 @@
 
 namespace taichi::lang {
 
+class RuntimeFaultDomain;
+
 // Type-erased owner for resources that must outlive a backend submission.
 // Program provides the concrete batch; RuntimeCompletion only controls when
 // that batch may be released.
@@ -38,10 +40,13 @@ class TI_DLL_EXPORT RuntimeCompletion {
       Arch backend,
       std::uint64_t program_domain,
       std::uint64_t sequence,
-      StreamSemaphore semaphore);
+      StreamSemaphore semaphore,
+      std::shared_ptr<RuntimeFaultDomain> fault_domain = nullptr);
   static RuntimeCompletion from_cuda_stream(std::uint64_t program_domain,
                                             std::uint64_t sequence,
-                                            void *stream);
+                                            void *stream,
+                                            std::shared_ptr<RuntimeFaultDomain>
+                                                fault_domain = nullptr);
 
   bool valid() const noexcept;
   bool done() const;
@@ -65,6 +70,7 @@ class TI_DLL_EXPORT RuntimeCompletion {
       std::shared_ptr<RuntimeCompletionResources> resources) const;
   void mark_completed() const noexcept;
   void invalidate(const std::string &reason) const noexcept;
+  void invalidate_and_release(const std::string &reason) const noexcept;
 
  private:
   struct State;
