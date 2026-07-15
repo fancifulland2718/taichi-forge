@@ -330,6 +330,8 @@ alive across frames.
 | `experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, *, size=None, method="auto", workspace=None)` | Encode consecutive equal integer-key runs into unique keys and i32 lengths. |
 | `experimental_unique(values, output, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | Select the first value from each consecutive equal-value run. |
 | `experimental_unique_by_key(keys, values, unique_keys, unique_values, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | Select one key and the first payload from each consecutive key run. |
+| `experimental_segmented_reduce(values, layout, output, *, op="sum", method="auto", workspace=None)` | Sum each segment described by an immutable `SegmentedLayout`. |
+| `experimental_segmented_scan(values, layout, output, *, inclusive=True, op="sum", method="auto", workspace=None)` | Inclusive or exclusive sum within each segment. |
 | `experimental_reduce(values, output, *, op="sum", method="auto", workspace=None)` | Reduce 1D `values` into scalar `output[0]`. `op` supports `"sum"`, `"min"`, and `"max"` where the selected backend supports them. |
 | `experimental_histogram(values, bins, *, method="auto", workspace=None)` | Histogram integer values into fixed bins. |
 | `experimental_transform(src, dst, *, scale=1, bias=0, method="auto", workspace=None)` | Compute `dst = src * scale + bias`. |
@@ -383,6 +385,65 @@ for RLE, start buffers. The minimum scratch is 4 bytes/item for Unique and
 One workspace is not safe for concurrent calls; give each concurrent producer
 or Graph its own workspace.
 
+#### Segmented Reduce and Scan
+
+`SegmentedLayout` validates reusable topology on the host and normalizes it to
+device-resident i32 offsets and segment IDs:
+
+```python
+layout = ti.algorithms.SegmentedLayout.from_offsets(
+    np.array([0, 4, 4, 11], np.int32),
+    capacity=16,
+)
+workspace = ti.algorithms.SegmentedWorkspace(
+    max_items=16, max_segments=3
+)
+ti.algorithms.experimental_segmented_scan(
+    values, layout, scanned, workspace=workspace
+)
+```
+
+`from_offsets()` requires at least `[0, end]`, starts at zero, accepts
+nondecreasing offsets and repeated offsets for empty segments, and treats the
+last offset as `num_items`. `from_segment_ids(ids, num_segments, size=None,
+capacity=None)` accepts a nondecreasing active prefix of IDs in
+`[0, num_segments)`; missing IDs represent empty segments and the inactive
+fixed-capacity tail is normalized to `-1`. Construction from a Taichi
+array/field reads topology to the host and therefore synchronizes. Construction
+is intended to be outside the hot loop; reuse does not read topology back.
+
+The public properties are `encoding`, `num_items`, `capacity`,
+`num_segments`, `max_segment_length`, and `topology_bytes`. Both operations
+require matching scalar 1D plain ndarrays or root-dense fields with
+`i32/u32/i64/u64/f32/f64` elements. Reduce output has exactly one element per
+segment and must be disjoint from input. Scan output has exactly `capacity`
+elements and may be exactly in-place or disjoint. Only the scan prefix below
+`num_items` is defined; the padded tail is capacity storage, not another
+segment. Matrix fields, StructNdarray views/raw payloads, and sparse SNodes are
+not supported in the first release. Only `op="sum"` is implemented.
+
+Reduce `method="auto"` uses the grouped ndarray provider where possible and
+the stable segment-local `serial` method for dense fields. Integer results are
+exact; grouped floating sum can vary with backend atomic order, while explicit
+`serial` follows stable left-to-right segment order. Reverse AD is supported
+only by the grouped ndarray sum path; FwdMode and serial/dense-field AD reject
+before writing.
+
+Scan accepts `auto`, `serial`, and integer-only `global_scan`. Float scan
+always uses stable left-to-right accumulation. Integer auto uses the
+zero-scratch serial path on CPU/Vulkan and on ordinary short CUDA segments; it
+uses global scan only for a CUDA layout with at least 65,536 active items and
+a segment of at least 4,096 items. The coarse choice is observable through
+`SegmentedWorkspace.last_scan_method`, and explicit `method=` remains
+available for controlled tuning. Scan rejects automatic AD before writing.
+
+`SegmentedWorkspace` reuses child scan/reduce plans and scratch.
+`workspace_bytes_current` / `workspace_bytes_peak` exclude immutable
+`layout.topology_bytes`. A short serial scan needs no workspace allocation;
+global scan may allocate provider scratch and one value per segment. A
+workspace is not concurrently shareable. Share the immutable layout but use
+one workspace per producer or Graph.
+
 ### Device-Side Numeric Checks
 
 These APIs launch device-side checks from Python scope and return a result
@@ -433,6 +494,7 @@ ti.algorithms.experimental_reduce(values, out, workspace=workspace)
 | `SortWorkspace(max_items=None, device=None)` | `sort()`, `sort_by_key()` |
 | `CompactWorkspace(max_items=None)` | `experimental_compact()` |
 | `RunLengthWorkspace(max_items=None)` | `experimental_run_length_encode()`, `experimental_unique()`, `experimental_unique_by_key()` |
+| `SegmentedWorkspace(max_items=None, max_segments=None)` | `experimental_segmented_reduce()`, `experimental_segmented_scan()` |
 | `ReduceWorkspace(max_items=None, cache_native_plans=True)` | `experimental_reduce()` |
 | `HistogramWorkspace(max_items=None, max_bins=None)` | `experimental_histogram()` |
 | `TransformWorkspace(max_items=None, cache_native_plans=True)` | `experimental_transform()` |
@@ -483,6 +545,8 @@ Common methods:
 | `run_length_encode(keys, unique_keys, run_lengths, run_count, *, size=None, method="auto", workspace=None)` | Add a consecutive RLE primitive. |
 | `unique(values, output, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | Add a consecutive unique primitive. |
 | `unique_by_key(keys, values, unique_keys, unique_values, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | Add consecutive unique-by-key with first-payload semantics. |
+| `segmented_reduce(values, layout, output, *, op="sum", method="auto", workspace=None)` | Add a fixed-topology segmented sum. |
+| `segmented_scan(values, layout, output, *, inclusive=True, op="sum", method="auto", workspace=None)` | Add an inclusive/exclusive segmented sum scan. |
 | `bucket_builder(keys, values, offsets, output, *, method="auto", workspace=None)` | Add a bucket-builder primitive. |
 | `grouped_reduce(keys, values, output, *, op="sum", method="auto", workspace=None)` | Add a grouped-reduce primitive. |
 | `clear()` | Clear owned workspaces and captured native plans. |

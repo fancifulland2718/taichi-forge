@@ -138,8 +138,9 @@ F6.1 已取得 Windows CPU/CUDA/Vulkan 的 provider 解析和数值 AD 证据；
   `tests/python/test_primitive_capabilities.py`、
   `tests/python/test_native_primitive_autodiff.py` 与
   `tests/python/test_primitive_plan.py`；
-- 在 `ti.init()` 前校验 F6.1 的 13 个 baseline descriptor 与 F6.2 的 3 个
-  RLE/Unique descriptor、frozen schema-v1 dataclass、alias、逐 operand 合同与
+- 在 `ti.init()` 前校验 F6.1 的 13 个 baseline descriptor、F6.2 的 3 个
+  RLE/Unique descriptor 与 F6.3 的 2 个 segmented descriptor；同时校验
+  frozen schema-v1 dataclass、alias、逐 operand 合同与
   method set 精确一致；每个后端 init 后，把所有
   `ResolvedPrimitiveMethod.provider_probes` 与已安装 Program 逐项比较。缺失的可选
   provider 必须为 false，不能用版本字符串猜测能力；
@@ -173,6 +174,32 @@ F6.2 只复用既有 compact provider，并增加 Python/Taichi-kernel 代码，
   不得把 Windows RTX 5090 的 speedup 外推到 Linux；
 - 复查 CPU-only、CUDA-disabled、Vulkan-disabled、GCC 与 Clang build。F6.2 源码
   不含 Win32/NT-handle 路径，也没有新增 CUDA library/header 依赖。
+
+### 可复用 segmented reduce/scan
+
+F6.3 只在 Python/Taichi-kernel 层组合既有 grouped-reduce、transform 与 scan
+provider，不改变 native runtime ABI，也不要求重新发布
+`taichi-forge-runtime`。以下 Linux 证据全部待复测：
+
+- 用配对的 0.5.x shim/runtime wheel 在 CPU、CUDA、Vulkan 上运行
+  `tests/python/test_segmented_primitives.py`，覆盖 offsets/nondecreasing-ID
+  构造、空/缺失 segment、padded inactive tail、ndarray/field、全部公开 scalar
+  dtype、inclusive/exclusive 与 in-place scan、写入前校验、AD 边界、Graph replay
+  和独立 workspace 的多线程提交；
+- 以 host oracle exact 校验 integer reduce/scan。对 float serial left-to-right
+  tolerance 与 provider-dependent grouped floating reduce 分别验证。
+  grouped ndarray reverse AD 的 tail gradient 必须为零；segmented scan、
+  FwdMode 与 serial reduce AD 必须在写入前拒绝；
+- 覆盖 host 与 Taichi topology 构造，确认公开的一次性同步；hot direct/Graph
+  replay 必须保持 normalized topology 在 device，不读取 count/topology。
+  immutable layout 可共享，但 workspace 不可并发共享；
+- 重跑 1,048,576 item、4,096 个短 segment 的 benchmark 与少量长 segment
+  反例。报告 public/Graph/host median 与 p95、`layout.topology_bytes`、
+  `workspace_bytes_peak` 和 `workspace.last_scan_method`。必须在 Linux
+  验证策略，不能外推 Windows CUDA/Vulkan 阈值或 speedup；
+- 复查 CPU-only、CUDA-disabled、Vulkan-disabled、GCC、Clang、ASan/UBSan 与
+  CPU TSAN build。F6.3 不新增 Win32/NT-handle 代码、CUDA Toolkit header、
+  versioned CUDA library 或新平台分支。
 
 ### Dense Field Graph 矩阵
 

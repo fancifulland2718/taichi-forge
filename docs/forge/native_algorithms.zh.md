@@ -22,6 +22,8 @@
 | `ti.algorithms.experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, ...)` | 完全在 device 上编码连续整数 key run。 |
 | `ti.algorithms.experimental_unique(values, output, count, ...)` | 选择每个连续相等 run 的首项。 |
 | `ti.algorithms.experimental_unique_by_key(keys, values, unique_keys, unique_values, count, ...)` | 选择每个连续 key run 的第一个 payload。 |
+| `ti.algorithms.experimental_segmented_reduce(values, layout, output, ...)` | 无 host round-trip 地 reduce 每个可复用 dense segment。 |
+| `ti.algorithms.experimental_segmented_scan(values, layout, output, ...)` | 在每个可复用 dense segment 内做 inclusive/exclusive scan。 |
 | `ti.algorithms.experimental_reduce(values, output, op="sum", ...)` | 将 values reduce 到 `output[0]`。 |
 | `ti.algorithms.experimental_histogram(values, bins, ...)` | 将整数 values 统计到 bins。 |
 | `ti.algorithms.experimental_transform(src, dst, scale=..., bias=..., ...)` | 元素级 affine transform 和 copy。 |
@@ -89,8 +91,9 @@ method/adjoint 能力与真实调度逐渐漂移。
 - 在 `ti.ad.FwdMode()` 中，transform、reduce-sum、gather、scatter 和 scatter-add
   走可微 helper-kernel fallback；其 JVP 已在 CPU、CUDA、Vulkan 上做回归。
   由于还没有 native forward launcher，显式 native method 会拒绝。
-- scan 与 grouped-reduce 当前会在写入前拒绝 `FwdMode`；它们的现有 fallback
-  不能提供可移植的实数 forward 合同。
+- scan、grouped-reduce、segmented scan 与 segmented reduce 当前会在写入前拒绝
+  `FwdMode`。segmented-reduce reverse AD 只覆盖 grouped ndarray sum；
+  serial/dense-field mode 会拒绝。
 - sort、compact、RLE/Unique、histogram、bucket-builder、device check 与 device
   metric 被明确标为不可微，在写入前拒绝 automatic AD context。应在
   Tape/FwdMode 外完成这类预处理或诊断。
@@ -169,6 +172,96 @@ compile/warmup 不计时，workspace 已复用，测量前没有其他 Python/GP
 process。这是开发证据，不是跨驱动性能保证。CUDA Graph 差异约 38 microseconds，
 记录为通用 native-node replay 开销；F6.2 不为此增加 RLE 专用优化。
 
+## 可复用 Segmented Reduce 与 Scan
+
+Forge 用可复用 `SegmentedLayout` 表达固定容量 dense topology：
+
+```python
+layout = ti.algorithms.SegmentedLayout.from_offsets(
+    np.array([0, 256, 512, 512, 768], np.int32),
+    capacity=1024,
+)
+workspace = ti.algorithms.SegmentedWorkspace(
+    max_items=layout.capacity,
+    max_segments=layout.num_segments,
+)
+ti.algorithms.experimental_segmented_reduce(
+    values, layout, per_segment_sum, workspace=workspace
+)
+ti.algorithms.experimental_segmented_scan(
+    values, layout, scanned, inclusive=True, workspace=workspace
+)
+```
+
+offset 必须从零开始并 nondecreasing；重复 offset 表示空 segment。也可以用
+`from_segment_ids()` 输入 nondecreasing active prefix，并允许缺失 ID。构造器在
+host 校验 topology，再上传 offset 与规范化 ID；若输入来自 Taichi，构造会同步一次。
+在 direct call 或 `PrimitiveSequence` Graph replay 中复用 layout 时保持
+device-resident。
+
+首版支持 `i32/u32/i64/u64/f32/f64` 的 scalar 1D plain ndarray 与 root-dense
+field。values 长度必须等于 layout capacity；reduce output 恰有每 segment 一个值，
+scan output 长度等于 capacity，且只有 active prefix 有定义。空 segment reduce 为零；
+scan 可以 exact in-place 或 disjoint。MatrixField、StructNdarray 与 sparse SNode
+不在当前合同内。
+
+Segmented reduce 当前只实现 sum。ndarray `auto` 组合既有 grouped-reduce provider；
+dense field 与显式 `serial` 按 segment 内 left-to-right 累加。整数 sum exact；
+grouped 浮点 sum 受 method/顺序影响，serial 浮点 sum 保持公开顺序。只有 grouped
+ndarray sum 具有 reverse AD；FwdMode 与 serial AD 都在输出变化前拒绝。
+
+Segmented scan 实现 inclusive/exclusive sum。浮点 scan 始终保持 segment 内
+left-to-right 顺序。Integer `auto` 刻意采用粗粒度策略：CPU/Vulkan 与普通短 CUDA
+segment 使用 zero-scratch serial；只有 active item 至少 65,536，且最长 segment
+至少 4,096 item 的 CUDA layout 才切到 `global_scan`，随后用无竞态的 segment-base
+correction 修正。用户可检查 `workspace.last_scan_method`，或显式选择 `serial` /
+`global_scan`。这是稳定 policy 边界，不承诺该阈值对每种 device 都是最优点。
+
+topology 内存由 `layout.topology_bytes` 单独报告：每个 capacity item 4 bytes，
+每个 offset 4 bytes。Workspace current/peak 只统计可复用执行 scratch。短分段
+serial scan 的 scratch 为零；global scan 可持有 provider storage 与每 segment
+一个 base value。不可变 layout 可跨 Python submission thread 共享，但每个
+producer/Graph 必须使用独立 workspace。
+
+Windows 开发机的代表 workload 为 1,048,576 items、4,096 个长度 256 的 segment；
+每项取 5 个 trial 的 median，每 trial 20 次 hot replay，复用 layout/workspace，
+compile/warmup 不计时。GPU 仅在确认没有其他 Python/GPU compute process 时测量。
+
+| 后端 | reduce public | reduce Graph | host round-trip | host/public |
+| --- | ---: | ---: | ---: | ---: |
+| CPU | 0.770 ms | 0.805 ms | 1.003 ms | 1.30x |
+| CUDA | 0.0756 ms | 0.0736 ms | 2.881 ms | 38.1x |
+| Vulkan | 0.0751 ms | 0.0716 ms | 4.538 ms | 60.4x |
+
+| 后端 | i32 scan public | i32 scan Graph | host round-trip | host/public |
+| --- | ---: | ---: | ---: | ---: |
+| CPU | 0.500 ms | 0.495 ms | 3.108 ms | 6.22x |
+| CUDA | 0.165 ms | 0.161 ms | 6.304 ms | 38.3x |
+| Vulkan | 0.176 ms | 0.187 ms | 8.859 ms | 50.3x |
+
+| 后端 | f32 scan public | f32 scan Graph | host round-trip | host/public |
+| --- | ---: | ---: | ---: | ---: |
+| CPU | 0.604 ms | 0.516 ms | 3.714 ms | 6.15x |
+| CUDA | 0.146 ms | 0.161 ms | 8.008 ms | 54.9x |
+| Vulkan | 0.167 ms | 0.197 ms | 10.237 ms | 61.2x |
+
+不可变 topology 占 4,210,692 bytes；一次性构建/上传在 CPU、CUDA、Vulkan 上分别为
+10.67 ms、17.40 ms、32.56 ms。短分段 scan scratch 为零；CPU grouped reduce
+持有 262,144 bytes，实测 CUDA/Vulkan grouped provider 没有 Python-owned scratch。
+
+为避免只对短 workload 过拟合，只增加了一个 64 segment、每 segment 16,384 items
+的反例：
+
+| 后端 | 显式 global scan | 显式 serial | 实测优选 |
+| --- | ---: | ---: | --- |
+| CPU | 5.984 ms | 0.586 ms | serial，10.2x |
+| CUDA | 0.871 ms | 1.800 ms | global，2.07x |
+| Vulkan | 3.855 ms | 1.597 ms | serial，2.41x |
+
+这些结果只用于支持粗粒度 backend 分派，不是阈值扫参或跨 driver 保证。
+Graph/public 差异属于很小的固定 replay 效应，不足以立项 segmented 专用 fused
+native node。
+
 ## Device-side 数值检查
 
 这些 API 是 Forge 新增公开 API，不是 vanilla Taichi 1.7.4/1.8.0 API。它们必须在
@@ -212,9 +305,9 @@ for _ in range(num_steps):
 ## 与 graph 的关系
 
 Forge 可以把由算法层产出的 DSL-defined native primitive sequence 放进 graph replay。
-`PrimitiveSequence.run_length_encode()`、`unique()` 与
-`unique_by_key()` 会持有固定数组和可复用 `RunLengthWorkspace`；replay 不读取
-device count。
+`PrimitiveSequence.run_length_encode()`、`unique()`、`unique_by_key()`、
+`segmented_reduce()` 与 `segmented_scan()` 会持有固定 array/layout 与可复用
+workspace；replay 不把 device state 读回 Python。
 `DeviceCheckResult`、`DeviceMetricResult` 和 `PrimitiveSequence` 都可以通过
 `GraphBuilder.append_native(...)` 作为 native graph node 追加。graph replay 只更新
 device-side scalar，不会自动把结果读回 Python，也不会把检查结果转换成 graph 内部 host

@@ -228,6 +228,12 @@
   `RunLengthWorkspace`、PrimitiveSequence Graph replay、alias/AD guard、
   StructNdarray payload 与独立 workspace 的多线程提交。实现复用既有 compact
   provider，不增加 runtime-wheel ABI 依赖。
+- 增加可复用 dense `SegmentedLayout` topology，以及 scalar ndarray/root-dense
+  field 的 device-resident segmented sum reduce 与 inclusive/exclusive sum scan。
+  CPU/CUDA/Vulkan 已覆盖空 segment、固定容量 padding、稳定 serial 浮点顺序、
+  grouped-ndarray reverse AD、Graph replay、独立 workspace 并发、scratch/topology
+  统计与粗粒度 backend-aware integer scan 分派。实现组合既有 provider，不增加
+  runtime-wheel ABI 依赖。
 - 增加面向生产形态的 CPU/CUDA/Vulkan 并发、数值、生命周期、内存与 replay
   regression/benchmark。剩余 Linux 发行证据见
   [Linux 复测状态](linux_revalidation.zh.md)。

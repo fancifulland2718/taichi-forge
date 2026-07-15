@@ -174,8 +174,9 @@ Win32/NT-handle path.
   `tests/python/test_primitive_capabilities.py`,
   `tests/python/test_native_primitive_autodiff.py`, and
   `tests/python/test_primitive_plan.py` on CPU, CUDA, and Vulkan.
-- Before `ti.init()`, verify the 13 F6.1 baseline descriptors plus the three
-  F6.2 RLE/Unique descriptors, frozen schema-v1 dataclasses, aliases,
+- Before `ti.init()`, verify the 13 F6.1 baseline descriptors, the three
+  F6.2 RLE/Unique descriptors, and the two F6.3 segmented descriptors; verify
+  frozen schema-v1 dataclasses, aliases,
   role-specific operand contracts, and exact method-set
   parity. After each backend init, compare every
   `ResolvedPrimitiveMethod.provider_probes` result with the installed
@@ -221,6 +222,37 @@ still required:
 - Recheck CPU-only, CUDA-disabled, Vulkan-disabled, GCC, and Clang builds. No
   F6.2 source file contains Win32/NT-handle logic or a new CUDA library/header
   dependency.
+
+### Reusable segmented reduce/scan
+
+F6.3 adds Python/Taichi-kernel composition over existing grouped-reduce,
+transform, and scan providers. It does not change the native runtime ABI and
+does not require republishing `taichi-forge-runtime`. All Linux evidence below
+is pending:
+
+- Run `tests/python/test_segmented_primitives.py` with paired 0.5.x
+  shim/runtime wheels on CPU, CUDA, and Vulkan. Cover offsets and
+  nondecreasing-ID construction, empty/missing segments, padded inactive tail,
+  ndarray/field storage, all public scalar dtypes, inclusive/exclusive and
+  in-place scan, validation-before-write, AD boundaries, Graph replay, and
+  independent-workspace threaded submission.
+- Verify exact integer reduce/scan against a host oracle. Verify float serial
+  left-to-right tolerance separately from grouped floating reduction, whose
+  accumulation order is provider-dependent. Grouped ndarray reverse AD must
+  give zero tail gradients; segmented scan, FwdMode, and serial reduce AD must
+  reject before writing.
+- Confirm construction from host and Taichi topology, including its documented
+  one-time synchronization. Hot direct/Graph replay must keep normalized
+  topology on device and perform no count/topology readback. Immutable layouts
+  may be shared; a workspace is not concurrently shareable.
+- Re-run the 1,048,576-item benchmark with 4,096 short segments and a
+  few-long-segment counterexample. Report public/Graph/host median and p95,
+  `layout.topology_bytes`, `workspace_bytes_peak`, and
+  `workspace.last_scan_method`. Validate the policy on Linux rather than
+  extrapolating Windows CUDA/Vulkan thresholds or speedups.
+- Recheck CPU-only, CUDA-disabled, Vulkan-disabled, GCC, Clang, ASan/UBSan, and
+  CPU TSAN builds. F6.3 adds no Win32/NT-handle code, CUDA Toolkit header,
+  versioned CUDA library, or new platform branch.
 
 ### Dense Field Graph matrix
 

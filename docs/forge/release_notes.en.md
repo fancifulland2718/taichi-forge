@@ -254,6 +254,13 @@ profiling, and GGUI device-image staging were already public by `0.4.25`.
   alias/AD guards, StructNdarray payloads, and independent-workspace
   multithreaded submission are covered on CPU/CUDA/Vulkan. The implementation
   reuses existing compact providers and adds no runtime-wheel ABI dependency.
+- Added reusable dense `SegmentedLayout` topology plus device-resident
+  segmented sum reduce and inclusive/exclusive sum scan for scalar ndarray and
+  root-dense field storage. Empty segments, fixed-capacity padding, stable
+  serial floating order, grouped-ndarray reverse AD, Graph replay, independent
+  workspace concurrency, scratch/topology accounting, and coarse
+  backend-aware integer-scan dispatch are covered on CPU/CUDA/Vulkan. This
+  composes existing providers and adds no runtime-wheel ABI dependency.
 - Added production-shaped CPU/CUDA/Vulkan concurrency, numerical, lifetime,
   memory, and replay regression/benchmark coverage. Remaining Linux release
   evidence is tracked in [Linux revalidation](linux_revalidation.en.md).

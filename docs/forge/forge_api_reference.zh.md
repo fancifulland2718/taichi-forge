@@ -296,6 +296,8 @@ workspace 可以复用 scratch buffer 和 native plan。
 | `experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, *, size=None, method="auto", workspace=None)` | 把连续相等的整数 key run 编码为 unique key 与 i32 length。 |
 | `experimental_unique(values, output, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | 选择每个连续相等 value run 的首项。 |
 | `experimental_unique_by_key(keys, values, unique_keys, unique_values, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | 选择每个连续 key run 的 key 与第一个 payload。 |
+| `experimental_segmented_reduce(values, layout, output, *, op="sum", method="auto", workspace=None)` | 按不可变 `SegmentedLayout` 对每个 segment 求和。 |
+| `experimental_segmented_scan(values, layout, output, *, inclusive=True, op="sum", method="auto", workspace=None)` | 在每个 segment 内执行 inclusive/exclusive sum scan。 |
 | `experimental_reduce(values, output, *, op="sum", method="auto", workspace=None)` | 将 1D `values` reduce 到 scalar `output[0]`。选定后端支持时 `op` 可为 `"sum"`、`"min"`、`"max"`。 |
 | `experimental_histogram(values, bins, *, method="auto", workspace=None)` | 将整数 values 统计到固定 bins。 |
 | `experimental_transform(src, dst, *, scale=1, bias=0, method="auto", workspace=None)` | 计算 `dst = src * scale + bias`。 |
@@ -342,6 +344,58 @@ compact provider 组合；dense-field fallback 使用 `field_scan`。
 Unique 的最低 scratch 为 4 bytes/item，RLE 为 12 bytes/item，此外还需选定 compact
 provider 的临时空间。同一个 workspace 不可被并发调用；每个并发 producer 或 Graph
 应持有独立 workspace。
+
+#### Segmented Reduce 与 Scan
+
+`SegmentedLayout` 在 host 校验可复用 topology，再规范化为 device-resident i32
+offset 与 segment ID：
+
+```python
+layout = ti.algorithms.SegmentedLayout.from_offsets(
+    np.array([0, 4, 4, 11], np.int32),
+    capacity=16,
+)
+workspace = ti.algorithms.SegmentedWorkspace(
+    max_items=16, max_segments=3
+)
+ti.algorithms.experimental_segmented_scan(
+    values, layout, scanned, workspace=workspace
+)
+```
+
+`from_offsets()` 至少需要 `[0, end]`，必须从零开始并保持 nondecreasing；
+重复 offset 表示空 segment，最后一个 offset 是 `num_items`。
+`from_segment_ids(ids, num_segments, size=None, capacity=None)` 接受
+`[0, num_segments)` 范围内、nondecreasing 的 active prefix；缺失 ID 表示空
+segment，固定容量 inactive tail 会规范化为 `-1`。若 topology 来源是 Taichi
+array/field，构造会读回 host 并同步；构造应放在热循环外，后续复用不会读回 topology。
+
+公开属性为 `encoding`、`num_items`、`capacity`、`num_segments`、
+`max_segment_length` 与 `topology_bytes`。两个操作都要求 dtype/shape 匹配的
+scalar 1D plain ndarray，或 root-dense field；元素可为
+`i32/u32/i64/u64/f32/f64`。Reduce output 必须恰有每 segment 一个元素，并与输入
+disjoint；scan output 必须恰为 `capacity`，可 exact in-place 或 disjoint。
+只有 `num_items` 以下的 scan prefix 有定义；padded tail 只是容量 storage，不是额外
+segment。首版不支持 matrix field、StructNdarray view/raw payload 与 sparse SNode，
+也只实现 `op="sum"`。
+
+Reduce 的 `method="auto"` 在可用时让 ndarray 走 grouped provider，dense field
+走保持 segment 内顺序的 `serial`。整数结果 exact；grouped 浮点 sum 可受后端 atomic
+顺序影响，显式 `serial` 则按 segment 内 left-to-right 稳定执行。Reverse AD 只支持
+grouped ndarray sum；FwdMode 和 serial/dense-field AD 都会在写入前拒绝。
+
+Scan 支持 `auto`、`serial` 与仅限 integer 的 `global_scan`。浮点始终使用稳定
+left-to-right 累加。Integer auto 在 CPU/Vulkan 及普通短 CUDA segment 上使用
+zero-scratch serial；只有 CUDA layout 同时具有至少 65,536 个 active item，且最长
+segment 至少 4,096 item 时才选 global scan。粗粒度选择可从
+`SegmentedWorkspace.last_scan_method` 观察；受控调优仍可显式指定 `method=`。
+Scan 的 automatic AD 会在写入前拒绝。
+
+`SegmentedWorkspace` 复用内部 scan/reduce plan 与 scratch。
+`workspace_bytes_current` / `workspace_bytes_peak` 不包含不可变
+`layout.topology_bytes`。短分段 serial scan 不需要 workspace allocation；
+global scan 可能分配 provider scratch 与每 segment 一个 value。同一 workspace
+不可并发共享；可以共享不可变 layout，但每个 producer 或 Graph 应使用独立 workspace。
 
 ### Device-side 数值检查
 
@@ -393,6 +447,7 @@ ti.algorithms.experimental_reduce(values, out, workspace=workspace)
 | `SortWorkspace(max_items=None, device=None)` | `sort()`、`sort_by_key()` |
 | `CompactWorkspace(max_items=None)` | `experimental_compact()` |
 | `RunLengthWorkspace(max_items=None)` | `experimental_run_length_encode()`、`experimental_unique()`、`experimental_unique_by_key()` |
+| `SegmentedWorkspace(max_items=None, max_segments=None)` | `experimental_segmented_reduce()`、`experimental_segmented_scan()` |
 | `ReduceWorkspace(max_items=None, cache_native_plans=True)` | `experimental_reduce()` |
 | `HistogramWorkspace(max_items=None, max_bins=None)` | `experimental_histogram()` |
 | `TransformWorkspace(max_items=None, cache_native_plans=True)` | `experimental_transform()` |
@@ -443,6 +498,8 @@ print(err.to_float())
 | `run_length_encode(keys, unique_keys, run_lengths, run_count, *, size=None, method="auto", workspace=None)` | 添加 consecutive RLE primitive。 |
 | `unique(values, output, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | 添加 consecutive unique primitive。 |
 | `unique_by_key(keys, values, unique_keys, unique_values, count, *, mode="consecutive", size=None, method="auto", workspace=None)` | 添加采用 first-payload 语义的 consecutive unique-by-key。 |
+| `segmented_reduce(values, layout, output, *, op="sum", method="auto", workspace=None)` | 添加固定 topology 的 segmented sum。 |
+| `segmented_scan(values, layout, output, *, inclusive=True, op="sum", method="auto", workspace=None)` | 添加 inclusive/exclusive segmented sum scan。 |
 | `bucket_builder(keys, values, offsets, output, *, method="auto", workspace=None)` | 添加 bucket-builder primitive。 |
 | `grouped_reduce(keys, values, output, *, op="sum", method="auto", workspace=None)` | 添加 grouped-reduce primitive。 |
 | `clear()` | 清理持有的 workspace 和已捕获 native plan。 |

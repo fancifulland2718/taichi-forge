@@ -25,6 +25,8 @@ identified in the [release notes](release_notes.en.md#050) are new to 0.5.0.
 | `ti.algorithms.experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, ...)` | Encode consecutive integer-key runs entirely on device. |
 | `ti.algorithms.experimental_unique(values, output, count, ...)` | Select the first item from every consecutive equal run. |
 | `ti.algorithms.experimental_unique_by_key(keys, values, unique_keys, unique_values, count, ...)` | Select the first payload from every consecutive key run. |
+| `ti.algorithms.experimental_segmented_reduce(values, layout, output, ...)` | Reduce each reusable dense segment without a host round trip. |
+| `ti.algorithms.experimental_segmented_scan(values, layout, output, ...)` | Inclusive/exclusive scan inside each reusable dense segment. |
 | `ti.algorithms.experimental_reduce(values, output, op="sum", ...)` | Reduce values into `output[0]`. |
 | `ti.algorithms.experimental_histogram(values, bins, ...)` | Histogram integer values into bins. |
 | `ti.algorithms.experimental_transform(src, dst, scale=..., bias=..., ...)` | Elementwise affine transform and copy. |
@@ -102,8 +104,9 @@ drifting away from dispatch behavior.
   scatter-add use their differentiable helper-kernel fallback. Their JVPs are
   regression-tested on CPU, CUDA, and Vulkan. Explicit native methods reject
   because native forward launchers are not implemented.
-- Scan and grouped-reduce currently reject `FwdMode` before writing. Their
-  available fallbacks do not provide a portable real-valued forward contract.
+- Scan, grouped-reduce, segmented scan, and segmented reduce currently reject
+  `FwdMode` before writing. Segmented-reduce reverse AD is limited to the
+  grouped ndarray sum path; serial/dense-field mode rejects.
 - Sort, compact, RLE/Unique, histogram, bucket-builder, device checks, and
   device metrics are declared non-differentiable and reject automatic AD
   contexts before writing. Run such preprocessing or diagnostics outside
@@ -198,6 +201,108 @@ cross-driver guarantees. The CUDA Graph delta is about 38 microseconds and is
 recorded as general native-node replay overhead; F6.2 does not add an
 RLE-specific optimization for it.
 
+## Reusable Segmented Reduce and Scan
+
+Forge represents fixed-capacity dense topology with a reusable
+`SegmentedLayout`:
+
+```python
+layout = ti.algorithms.SegmentedLayout.from_offsets(
+    np.array([0, 256, 512, 512, 768], np.int32),
+    capacity=1024,
+)
+workspace = ti.algorithms.SegmentedWorkspace(
+    max_items=layout.capacity,
+    max_segments=layout.num_segments,
+)
+ti.algorithms.experimental_segmented_reduce(
+    values, layout, per_segment_sum, workspace=workspace
+)
+ti.algorithms.experimental_segmented_scan(
+    values, layout, scanned, inclusive=True, workspace=workspace
+)
+```
+
+Offsets start at zero and are nondecreasing; repeated offsets are empty
+segments. Alternatively, `from_segment_ids()` accepts a nondecreasing active
+prefix and permits missing IDs. The constructor validates topology on the host
+and uploads both offsets and normalized IDs. Passing a Taichi source therefore
+synchronizes once at construction. Reusing the layout in direct calls or
+`PrimitiveSequence` Graph replay remains device-resident.
+
+This first release supports scalar 1D plain ndarray and root-dense field
+storage with `i32/u32/i64/u64/f32/f64`. Values have exactly layout capacity;
+reduce output has exactly one value per segment, while scan output has layout
+capacity and only its active prefix is defined. Empty segments reduce to zero.
+Scan can be exactly in-place or disjoint. MatrixField, StructNdarray, and sparse
+SNode forms remain outside this contract.
+
+Segmented reduce currently implements sum. Ndarray `auto` composes the existing
+grouped-reduce provider; dense field and explicit `serial` use left-to-right
+segment-local accumulation. Integer sums are exact. Grouped floating sums are
+method/order dependent, while serial floating sums preserve the documented
+order. Only grouped ndarray sum has reverse AD; FwdMode and serial AD reject
+before output changes.
+
+Segmented scan implements inclusive/exclusive sum. Float scan always preserves
+segment-local left-to-right order. Integer `auto` is intentionally coarse:
+CPU/Vulkan and ordinary short CUDA segments use zero-scratch serial scan.
+CUDA switches to `global_scan` only when there are at least 65,536 active
+items and the longest segment contains at least 4,096 items. The latter runs a
+global provider followed by race-free segment-base correction. Users can
+inspect `workspace.last_scan_method` or explicitly choose `serial` /
+`global_scan`. This is a stable policy boundary, not a promise that the
+threshold is optimal for every device.
+
+Topology memory is reported separately by `layout.topology_bytes`
+(four bytes per capacity item plus four bytes per offset). Workspace current
+and peak report only reusable execution scratch. Short serial scan needs zero
+scratch; global scan can retain provider storage and one base value per
+segment. Immutable layouts may be shared across Python submission threads, but
+each producer/Graph needs an independent workspace.
+
+On the Windows development machine, the representative workload is 1,048,576
+items, 4,096 segments of length 256, five median trials with 20 hot replays
+per trial, reused layout/workspaces, and compilation/warmup excluded. GPU
+measurements are taken only with no other Python/GPU compute process active.
+
+| backend | reduce public | reduce Graph | host round-trip | host/public |
+| --- | ---: | ---: | ---: | ---: |
+| CPU | 0.770 ms | 0.805 ms | 1.003 ms | 1.30x |
+| CUDA | 0.0756 ms | 0.0736 ms | 2.881 ms | 38.1x |
+| Vulkan | 0.0751 ms | 0.0716 ms | 4.538 ms | 60.4x |
+
+| backend | i32 scan public | i32 scan Graph | host round-trip | host/public |
+| --- | ---: | ---: | ---: | ---: |
+| CPU | 0.500 ms | 0.495 ms | 3.108 ms | 6.22x |
+| CUDA | 0.165 ms | 0.161 ms | 6.304 ms | 38.3x |
+| Vulkan | 0.176 ms | 0.187 ms | 8.859 ms | 50.3x |
+
+| backend | f32 scan public | f32 scan Graph | host round-trip | host/public |
+| --- | ---: | ---: | ---: | ---: |
+| CPU | 0.604 ms | 0.516 ms | 3.714 ms | 6.15x |
+| CUDA | 0.146 ms | 0.161 ms | 8.008 ms | 54.9x |
+| Vulkan | 0.167 ms | 0.197 ms | 10.237 ms | 61.2x |
+
+The immutable topology occupies 4,210,692 bytes. Its one-time build/upload was
+10.67 ms on CPU, 17.40 ms on CUDA, and 32.56 ms on Vulkan. Short scan scratch
+was zero; CPU grouped reduce retained 262,144 bytes, while the measured
+CUDA/Vulkan grouped providers retained no Python-owned scratch.
+
+A single counterexample with 64 segments of length 16,384 was used to prevent
+short-workload overfitting:
+
+| backend | explicit global scan | explicit serial | measured preference |
+| --- | ---: | ---: | --- |
+| CPU | 5.984 ms | 0.586 ms | serial, 10.2x |
+| CUDA | 0.871 ms | 1.800 ms | global, 2.07x |
+| Vulkan | 3.855 ms | 1.597 ms | serial, 2.41x |
+
+These measurements justify the coarse backend dispatch; they are not a
+threshold sweep or a cross-driver guarantee. Graph/public differences are
+small fixed replay effects and did not justify a segmented-specific fused
+native node.
+
 ## Device-side Numeric Checks
 
 These APIs are Forge additions. They are not vanilla Taichi 1.7.4/1.8.0 APIs.
@@ -246,9 +351,9 @@ for _ in range(num_steps):
 
 Forge can replay DSL-defined native primitive sequences through graph execution
 when the sequence is produced by Forge's own algorithm layer.
-`PrimitiveSequence.run_length_encode()`, `unique()`, and
-`unique_by_key()` retain fixed arrays and a reusable `RunLengthWorkspace`;
-their device count is not read during replay.
+`PrimitiveSequence.run_length_encode()`, `unique()`, `unique_by_key()`,
+`segmented_reduce()`, and `segmented_scan()` retain fixed arrays/layouts and
+reusable workspaces; replay does not read their device state back to Python.
 `DeviceCheckResult`, `DeviceMetricResult`, and `PrimitiveSequence` can be
 appended as native graph nodes with `GraphBuilder.append_native(...)`. Graph
 replay updates only the device-side scalar. It does not automatically copy the
