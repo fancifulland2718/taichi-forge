@@ -1757,7 +1757,19 @@ VulkanDevice::~VulkanDevice() {
   // be properly deallocated before VulkanDevice destruction. This isn't
   // the most proper fix but is less intrusive compared to other
   // approaches.
-  vkDeviceWaitIdle(device_);
+  if (backend_calls_safe()) {
+    const VkResult wait_result = vkDeviceWaitIdle(device_);
+    if (wait_result != VK_SUCCESS) {
+      try {
+        BackendRuntimeError error(
+            Arch::vulkan, static_cast<std::int64_t>(wait_result),
+            "vkDeviceWaitIdle", "Vulkan device wait failed during teardown");
+        report_backend_error(error);
+      } catch (...) {
+        // A destructor must not replace the first backend failure.
+      }
+    }
+  }
 
   InteropDeviceReleaseCallback interop_device_release = nullptr;
   {
@@ -2297,11 +2309,14 @@ void VulkanDevice::profiler_collect_samplers(
     auto query_pool = sampler.query_pool->query_pool;
 
     uint64_t t[2];
-    BAIL_ON_VK_BAD_RESULT_NO_RETURN(
-        vkGetQueryPoolResults(vk_device(), query_pool, 0, 2,
-                              sizeof(uint64_t) * 2, &t, sizeof(uint64_t),
-                              VK_QUERY_RESULT_64_BIT),
-        "failed to get Vulkan profiler query results");
+    const VkResult query_result = vkGetQueryPoolResults(
+        vk_device(), query_pool, 0, 2, sizeof(uint64_t) * 2, &t,
+        sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+    if (query_result != VK_SUCCESS) {
+      raise_backend_error(static_cast<std::int64_t>(query_result),
+                          "vkGetQueryPoolResults",
+                          "Failed to get Vulkan profiler query results");
+    }
     double duration_ms =
         (t[1] - t[0]) * vk_device_properties_.limits.timestampPeriod /
         1000000.0;
@@ -2362,10 +2377,14 @@ void VulkanDevice::profiler_sync() {
   }
   for (const auto &fence : fences) {
     std::lock_guard<std::mutex> lock(fence->mutex);
-    BAIL_ON_VK_BAD_RESULT_NO_RETURN(
+    const VkResult result =
         vkWaitForFences(fence->device, /*fenceCount=*/1, &fence->fence,
-                        VK_TRUE, UINT64_MAX),
-        "failed to wait for Vulkan profiler fence");
+                        VK_TRUE, UINT64_MAX);
+    if (result != VK_SUCCESS) {
+      raise_backend_error(static_cast<std::int64_t>(result),
+                          "vkWaitForFences",
+                          "Failed to wait for a Vulkan profiler fence");
+    }
   }
 
   profiler_collect_samplers(std::move(samplers));
@@ -2421,6 +2440,9 @@ bool VulkanStreamSemaphoreObject::is_ready() const {
   if (!fence_ref) {
     return false;
   }
+  if (fault_reporter_) {
+    fault_reporter_->throw_if_submission_disallowed("Vulkan fence query");
+  }
   std::lock_guard<std::mutex> lock(fence_ref->mutex);
   VkResult res = vkGetFenceStatus(fence_ref->device, fence_ref->fence);
   if (res == VK_SUCCESS) {
@@ -2429,19 +2451,36 @@ bool VulkanStreamSemaphoreObject::is_ready() const {
   if (res == VK_NOT_READY) {
     return false;
   }
-  BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to query Vulkan fence status");
-  return false;
+  BackendRuntimeError error(Arch::vulkan, static_cast<std::int64_t>(res),
+                            "vkGetFenceStatus",
+                            "Failed to query Vulkan fence status");
+  if (fault_reporter_) {
+    fault_reporter_->report_backend_error(error, 0);
+  }
+  throw error;
 }
 
 bool VulkanStreamSemaphoreObject::wait() const {
   if (!fence_ref) {
     return false;
   }
+  if (fault_reporter_) {
+    fault_reporter_->throw_if_submission_disallowed("Vulkan fence wait");
+  }
   std::lock_guard<std::mutex> lock(fence_ref->mutex);
-  BAIL_ON_VK_BAD_RESULT_NO_RETURN(
-      vkWaitForFences(fence_ref->device, /*fenceCount=*/1, &fence_ref->fence,
-                      VK_TRUE, UINT64_MAX),
-      "failed to wait for Vulkan fence");
+  const VkResult result =
+      vkWaitForFences(fence_ref->device, /*fenceCount=*/1,
+                      &fence_ref->fence, VK_TRUE, UINT64_MAX);
+  if (result != VK_SUCCESS) {
+    BackendRuntimeError error(Arch::vulkan,
+                              static_cast<std::int64_t>(result),
+                              "vkWaitForFences",
+                              "Failed to wait for Vulkan fence");
+    if (fault_reporter_) {
+      fault_reporter_->report_backend_error(error, 0);
+    }
+    throw error;
+  }
   return true;
 }
 
@@ -2474,9 +2513,9 @@ void VulkanStream::retire_completed_cmdbuffers() {
       still_submitted.push_back(std::move(tracked));
       continue;
     }
-    BAIL_ON_VK_BAD_RESULT_NO_RETURN(res,
-                                    "failed to query Vulkan fence status");
-    still_submitted.push_back(std::move(tracked));
+    device_.raise_backend_error(static_cast<std::int64_t>(res),
+                                "vkGetFenceStatus",
+                                "Failed to retire a Vulkan command buffer");
   }
   submitted_cmdbuffers_ = std::move(still_submitted);
 }
@@ -2484,6 +2523,7 @@ void VulkanStream::retire_completed_cmdbuffers() {
 StreamSemaphore VulkanStream::submit(
     CommandList *cmdlist_,
     const std::vector<StreamSemaphore> &wait_semaphores) {
+  device_.throw_if_backend_submission_disallowed("Vulkan queue submit");
   std::lock_guard<std::mutex> submission_lock(submission_mutex_);
   VulkanCommandList *cmdlist = static_cast<VulkanCommandList *>(cmdlist_);
   vkapi::IVkCommandBuffer buffer = cmdlist->finalize();
@@ -2527,12 +2567,16 @@ StreamSemaphore VulkanStream::submit(
   // Resource tracking, check previously submitted commands
   retire_completed_cmdbuffers();
 
+  VkResult submit_result = VK_SUCCESS;
   {
     std::lock_guard<std::mutex> queue_lock(device_.get_queue_mutex(queue_));
-    BAIL_ON_VK_BAD_RESULT_NO_RETURN(
-        vkQueueSubmit(queue_, /*submitCount=*/1, &submit_info,
-                      /*fence=*/fence->fence),
-        "Vulkan device might be lost (vkQueueSubmit failed)");
+    submit_result = vkQueueSubmit(queue_, /*submitCount=*/1, &submit_info,
+                                  /*fence=*/fence->fence);
+  }
+  if (submit_result != VK_SUCCESS) {
+    device_.raise_backend_error(
+        static_cast<std::int64_t>(submit_result), "vkQueueSubmit",
+        "Vulkan queue submission failed");
   }
   submitted_cmdbuffers_.push_back(
       TrackedCmdbuf{fence, buffer, std::move(submit_refs)});
@@ -2540,7 +2584,8 @@ StreamSemaphore VulkanStream::submit(
     sampler.fence = fence;
   }
   device_.profiler_add_samplers(std::move(profiler_samplers));
-  return std::make_shared<VulkanStreamSemaphoreObject>(semaphore, fence);
+  return std::make_shared<VulkanStreamSemaphoreObject>(
+      device_.backend_fault_reporter(), semaphore, fence);
 }
 
 StreamSemaphore VulkanStream::submit_synced(
@@ -2552,6 +2597,7 @@ StreamSemaphore VulkanStream::submit_synced(
 }
 
 void VulkanStream::command_sync() {
+  device_.throw_if_backend_submission_disallowed("Vulkan stream wait");
   std::vector<vkapi::IVkFence> fences;
   {
     std::lock_guard<std::mutex> submission_lock(submission_mutex_);
@@ -2561,10 +2607,14 @@ void VulkanStream::command_sync() {
     }
     for (const auto &fence : fences) {
       std::lock_guard<std::mutex> lock(fence->mutex);
-      BAIL_ON_VK_BAD_RESULT_NO_RETURN(
+      const VkResult result =
           vkWaitForFences(fence->device, /*fenceCount=*/1, &fence->fence,
-                          VK_TRUE, UINT64_MAX),
-          "failed to wait for Vulkan stream fence");
+                          VK_TRUE, UINT64_MAX);
+      if (result != VK_SUCCESS) {
+        device_.raise_backend_error(
+            static_cast<std::int64_t>(result), "vkWaitForFences",
+            "Failed to wait for a Vulkan stream fence");
+      }
     }
     retire_completed_cmdbuffers();
   }
@@ -3469,7 +3519,9 @@ bool VulkanSurface::handle_surface_result(VkResult result,
         RHI_LOG_ERROR(message);
       }
       device_lost_ = true;
-      return false;
+      device_->raise_backend_error(static_cast<std::int64_t>(result),
+                                   operation,
+                                   "Vulkan surface operation lost the device");
     case VulkanSurfaceResult::kError:
       char message[160];
       std::snprintf(message, sizeof(message),
@@ -3525,6 +3577,8 @@ SurfaceImage VulkanSurface::acquire_surface_image() {
     surface_image.image_index = image_index_;
     return surface_image;
   } else {
+    device_->throw_if_backend_submission_disallowed(
+        "Vulkan swapchain image acquire");
     if (swapchain_needs_recreate_ || device_lost_ ||
         swapchain_ == VK_NULL_HANDLE || image_available_.empty()) {
       return surface_image;
@@ -3539,7 +3593,8 @@ SurfaceImage VulkanSurface::acquire_surface_image() {
     image_available_index_ =
         (image_available_index_ + 1) % uint32_t(image_available_.size());
     surface_image.image_available =
-        std::make_shared<VulkanStreamSemaphoreObject>(image_available);
+        std::make_shared<VulkanStreamSemaphoreObject>(
+            device_->backend_fault_reporter(), image_available);
     surface_image.image = swapchain_images_[image_index_];
     surface_image.image_index = image_index_;
     return surface_image;
@@ -3551,6 +3606,9 @@ bool VulkanSurface::try_acquire_surface_image(SurfaceImage *surface_image) {
     *surface_image = acquire_surface_image();
     return true;
   }
+
+  device_->throw_if_backend_submission_disallowed(
+      "Vulkan swapchain image acquire");
 
   if (swapchain_needs_recreate_ || device_lost_ ||
       swapchain_ == VK_NULL_HANDLE || image_available_.empty()) {
@@ -3571,7 +3629,8 @@ bool VulkanSurface::try_acquire_surface_image(SurfaceImage *surface_image) {
   image_available_index_ =
       (image_available_index_ + 1) % uint32_t(image_available_.size());
   surface_image->image_available =
-      std::make_shared<VulkanStreamSemaphoreObject>(image_available);
+      std::make_shared<VulkanStreamSemaphoreObject>(
+          device_->backend_fault_reporter(), image_available);
   surface_image->image = swapchain_images_[image_index_];
   surface_image->image_index = image_index_;
   return true;
@@ -3612,6 +3671,7 @@ void VulkanSurface::present_surface_image(
   if (!config_.native_surface_handle) {
     return;
   }
+  device_->throw_if_backend_submission_disallowed("Vulkan queue present");
   if (device_lost_) {
     return;
   }

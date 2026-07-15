@@ -641,9 +641,13 @@ struct DescPool {
 
 class VulkanStreamSemaphoreObject : public StreamSemaphoreObject {
  public:
-  explicit VulkanStreamSemaphoreObject(vkapi::IVkSemaphore sema,
-                                       vkapi::IVkFence fence = nullptr)
-      : vkapi_ref(sema), fence_ref(fence) {
+  explicit VulkanStreamSemaphoreObject(
+      std::shared_ptr<BackendFaultReporter> fault_reporter,
+      vkapi::IVkSemaphore sema,
+      vkapi::IVkFence fence = nullptr)
+      : fault_reporter_(std::move(fault_reporter)),
+        vkapi_ref(sema),
+        fence_ref(fence) {
   }
   ~VulkanStreamSemaphoreObject() override {
   }
@@ -653,6 +657,9 @@ class VulkanStreamSemaphoreObject : public StreamSemaphoreObject {
 
   vkapi::IVkSemaphore vkapi_ref{nullptr};
   vkapi::IVkFence fence_ref{nullptr};
+
+ private:
+  std::shared_ptr<BackendFaultReporter> fault_reporter_;
 };
 
 class VulkanStream : public Stream {

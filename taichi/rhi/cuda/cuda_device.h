@@ -188,7 +188,8 @@ class CudaDevice : public LlvmDevice {
   };
 
   struct AllocationRecord {
-    AllocationRecord(void *ptr,
+    AllocationRecord(CudaDevice *owner,
+                     void *ptr,
                      size_t size,
                      bool is_imported,
                      bool use_preallocated,
@@ -196,7 +197,8 @@ class CudaDevice : public LlvmDevice {
                      bool use_memory_pool,
                      CUstream stream,
                      std::unique_ptr<MappingState> mapping)
-        : ptr(ptr),
+        : owner(owner),
+          ptr(ptr),
           size(size),
           is_imported(is_imported),
           use_preallocated(use_preallocated),
@@ -224,6 +226,7 @@ class CudaDevice : public LlvmDevice {
 
     void release();
 
+    CudaDevice *owner{nullptr};
     void *ptr{nullptr};
     size_t size{0};
     bool is_imported{false};

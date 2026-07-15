@@ -1026,6 +1026,8 @@ uint64_t *LlvmRuntimeExecutor::get_device_alloc_info_ptr(
 void LlvmRuntimeExecutor::finalize() {
   profiler_ = nullptr;
   if (config_.arch == Arch::cuda || config_.arch == Arch::amdgpu) {
+    const bool backend_calls_safe =
+        llvm_device() == nullptr || llvm_device()->backend_calls_safe();
     preallocated_runtime_objects_allocs_.reset();
     preallocated_runtime_memory_allocs_.reset();
     // Phase 1: extra CUDA sparse-tree pools retained so multiple independent
@@ -1033,16 +1035,18 @@ void LlvmRuntimeExecutor::finalize() {
     per_snode_pool_allocs_.clear();
 
     // Reset runtime memory
-    auto allocated_runtime_memory_allocs_copy =
-        allocated_runtime_memory_allocs_;
-    for (auto &iter : allocated_runtime_memory_allocs_copy) {
-      // The runtime allocation may have already been freed upon explicit
-      // Ndarray/Field destruction Check if the allocation still alive
-      void *ptr = llvm_device()->get_memory_addr(iter.second);
-      if (ptr == nullptr)
-        continue;
+    if (backend_calls_safe) {
+      auto allocated_runtime_memory_allocs_copy =
+          allocated_runtime_memory_allocs_;
+      for (auto &iter : allocated_runtime_memory_allocs_copy) {
+        // The runtime allocation may have already been freed upon explicit
+        // Ndarray/Field destruction. Check if the allocation is still alive.
+        void *ptr = llvm_device()->get_memory_addr(iter.second);
+        if (ptr == nullptr)
+          continue;
 
-      deallocate_memory_on_device(iter.second);
+        deallocate_memory_on_device(iter.second);
+      }
     }
     allocated_runtime_memory_allocs_.clear();
 
@@ -1050,10 +1054,12 @@ void LlvmRuntimeExecutor::finalize() {
     llvm_device()->clear();
 
     // Reset memory pool
-    DeviceMemoryPool::get_instance().reset();
+    if (backend_calls_safe) {
+      DeviceMemoryPool::get_instance().reset();
 
-    // Release unused memory from cuda memory pool
-    synchronize();
+      // Release unused memory from cuda memory pool.
+      synchronize();
+    }
   }
   finalized_ = true;
 }

@@ -575,13 +575,30 @@ GfxRuntime::~GfxRuntime() {
   // destructor may retain the registry object, but it can no longer call back
   // into this runtime after close() returns.
   graph_replay_registry_->close();
-  synchronize_impl(/*check_hash_overflow=*/false);
+  if (device_->backend_calls_safe()) {
+    try {
+      synchronize_impl(/*check_hash_overflow=*/false);
+    } catch (const BackendRuntimeError &error) {
+      // Destructors are noexcept. The reporter preserves the first fatal
+      // backend error; teardown below only destroys host-owned wrappers and
+      // Vulkan handles, without issuing another wait or submission.
+      device_->report_backend_error(error);
+    } catch (const std::exception &error) {
+      TI_WARN("GfxRuntime teardown synchronization failed: {}", error.what());
+    } catch (...) {
+      TI_WARN("GfxRuntime teardown synchronization failed");
+    }
+  }
   graph_replay_states_.clear();
 
   // Write pipeline cache back to disk.
   if (backend_cache_) {
-    uint8_t *cache_data = (uint8_t *)backend_cache_->data();
-    size_t cache_size = backend_cache_->size();
+    uint8_t *cache_data = nullptr;
+    size_t cache_size = 0;
+    if (device_->backend_calls_safe()) {
+      cache_data = (uint8_t *)backend_cache_->data();
+      cache_size = backend_cache_->size();
+    }
     if (cache_data) {
       // C4 (2026-04-26): atomic write — write to <path>.tmp then rename.
       // Avoids leaving a half-written rhi_cache.bin on the disk if the

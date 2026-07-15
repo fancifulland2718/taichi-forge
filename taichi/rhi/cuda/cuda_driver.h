@@ -2,10 +2,12 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 
 #include "taichi/common/dynamic_loader.h"
 #include "taichi/common/core.h"
+#include "taichi/rhi/backend_error.h"
 #include "taichi/rhi/cuda/cuda_types.h"
 
 #if (0)
@@ -142,6 +144,11 @@ class CUDADriverFunction {
     driver_lock_telemetry_ = telemetry;
   }
 
+  void set_fault_reporter_slot(
+      std::shared_ptr<BackendFaultReporter> *fault_reporter_slot) {
+    fault_reporter_slot_ = fault_reporter_slot;
+  }
+
   std::string get_error_message(uint32 err) {
     return get_cuda_error_message(err) +
            fmt::format(" while calling {} ({})", name_, symbol_name_);
@@ -156,7 +163,20 @@ class CUDADriverFunction {
   // Note: CUDA driver API passes everything as value
   void operator()(Args... args) {
     auto err = call(args...);
-    TI_ERROR_IF(err, get_error_message(err));
+    if (!err) {
+      return;
+    }
+    if (fault_reporter_slot_ == nullptr) {
+      TI_ERROR("{}", get_error_message(err));
+    }
+    BackendRuntimeError error(Arch::cuda, err, name_,
+                              get_error_message(err));
+    auto reporter = std::atomic_load_explicit(
+        fault_reporter_slot_, std::memory_order_acquire);
+    if (reporter) {
+      reporter->report_backend_error(error, 0);
+    }
+    throw error;
   }
 
  private:
@@ -166,6 +186,7 @@ class CUDADriverFunction {
   std::string name_, symbol_name_;
   std::mutex *driver_lock_{nullptr};
   CUDASampledLockTelemetry *driver_lock_telemetry_{nullptr};
+  std::shared_ptr<BackendFaultReporter> *fault_reporter_slot_{nullptr};
 };
 
 class CUDADriverBase {
@@ -210,6 +231,11 @@ class CUDADriver : protected CUDADriverBase {
 
   static CUDADriver &get_instance_without_context();
 
+  void set_fault_reporter(
+      std::shared_ptr<BackendFaultReporter> reporter) noexcept;
+  void clear_fault_reporter(
+      const std::shared_ptr<BackendFaultReporter> &reporter) noexcept;
+
   int get_version_major() {
     return version_major_;
   }
@@ -231,6 +257,7 @@ class CUDADriver : protected CUDADriverBase {
 
   std::mutex lock_;
   CUDASampledLockTelemetry lock_telemetry_;
+  std::shared_ptr<BackendFaultReporter> fault_reporter_;
   std::atomic<uint64_t> async_allocation_calls_{0};
   std::atomic<uint64_t> sync_allocation_fallback_calls_{0};
   std::atomic<uint64_t> async_free_calls_{0};

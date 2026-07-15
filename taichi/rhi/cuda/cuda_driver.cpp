@@ -193,7 +193,8 @@ CUDADriver::CUDADriver() {
 #define PER_CUDA_FUNCTION(name, symbol_name, ...) \
   name.set(loader_->load_function(#symbol_name)); \
   name.set_lock(&lock_);                           \
-  name.set_lock_telemetry(&lock_telemetry_);        \
+  name.set_lock_telemetry(&lock_telemetry_);       \
+  name.set_fault_reporter_slot(&fault_reporter_);  \
   name.set_names(#name, #symbol_name);
 #include "taichi/rhi/cuda/cuda_driver_functions.inc.h"
 #undef PER_CUDA_FUNCTION
@@ -211,6 +212,23 @@ CUDADriver &CUDADriver::get_instance() {
   // initialize the CUDA context so that the driver APIs can be called later
   CUDAContext::get_instance();
   return get_instance_without_context();
+}
+
+void CUDADriver::set_fault_reporter(
+    std::shared_ptr<BackendFaultReporter> reporter) noexcept {
+  std::atomic_store_explicit(&fault_reporter_, std::move(reporter),
+                             std::memory_order_release);
+}
+
+void CUDADriver::clear_fault_reporter(
+    const std::shared_ptr<BackendFaultReporter> &reporter) noexcept {
+  auto current =
+      std::atomic_load_explicit(&fault_reporter_, std::memory_order_acquire);
+  if (current == reporter) {
+    std::atomic_store_explicit(&fault_reporter_,
+                               std::shared_ptr<BackendFaultReporter>{},
+                               std::memory_order_release);
+  }
 }
 
 void CUDADriver::malloc_async(void **dev_ptr, size_t size, CUstream stream) {

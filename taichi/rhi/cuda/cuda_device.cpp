@@ -13,7 +13,8 @@ CudaDevice::AllocationRecord::~AllocationRecord() {
 
 CudaDevice::AllocationRecord::AllocationRecord(
     AllocationRecord &&other) noexcept
-    : ptr(other.ptr),
+    : owner(other.owner),
+      ptr(other.ptr),
       size(other.size),
       is_imported(other.is_imported),
       use_preallocated(other.use_preallocated),
@@ -21,6 +22,7 @@ CudaDevice::AllocationRecord::AllocationRecord(
       use_memory_pool(other.use_memory_pool),
       stream(other.stream),
       mapping(std::move(other.mapping)) {
+  other.owner = nullptr;
   other.ptr = nullptr;
 }
 
@@ -28,6 +30,7 @@ CudaDevice::AllocationRecord &CudaDevice::AllocationRecord::operator=(
     AllocationRecord &&other) noexcept {
   if (this != &other) {
     release();
+    owner = other.owner;
     ptr = other.ptr;
     size = other.size;
     is_imported = other.is_imported;
@@ -36,6 +39,7 @@ CudaDevice::AllocationRecord &CudaDevice::AllocationRecord::operator=(
     use_memory_pool = other.use_memory_pool;
     stream = other.stream;
     mapping = std::move(other.mapping);
+    other.owner = nullptr;
     other.ptr = nullptr;
   }
   return *this;
@@ -47,19 +51,32 @@ void CudaDevice::AllocationRecord::release() {
     return;
   }
 
-  auto context_guard = CUDAContext::get_instance().get_guard();
-  if (use_memory_pool) {
-    // cuMemAllocAsync/cuMemFreeAsync require the same stream-ordered
-    // lifetime contract. Cross-stream access must have an explicit CUDA
-    // dependency before the allocation is retired.
-    CUDADriver::get_instance().mem_free_async(ptr, stream);
-  } else if (use_cached) {
-    DeviceMemoryPool::get_instance().release(size,
-                                             static_cast<uint64_t *>(ptr),
-                                             false);
-  } else if (!use_preallocated) {
-    DeviceMemoryPool::get_instance().release(size, ptr, true);
+  try {
+    if (use_memory_pool) {
+      // cuMemAllocAsync/cuMemFreeAsync require the same stream-ordered
+      // lifetime contract. Cross-stream access must have an explicit CUDA
+      // dependency before the allocation is retired.
+      if (owner == nullptr || owner->backend_calls_safe()) {
+        auto context_guard = CUDAContext::get_instance().get_guard();
+        CUDADriver::get_instance().mem_free_async(ptr, stream);
+      }
+    } else if (use_cached) {
+      // This updates only host-side cache metadata and remains safe after a
+      // context-fatal error. Raw CUDA chunks intentionally remain
+      // process-owned because same-context recovery is not supported.
+      DeviceMemoryPool::get_instance().release(
+          size, static_cast<uint64_t *>(ptr), false);
+    } else if (!use_preallocated) {
+      if (owner == nullptr || owner->backend_calls_safe()) {
+        DeviceMemoryPool::get_instance().release(size, ptr, true);
+      }
+    }
+  } catch (...) {
+    // AllocationRecord is destroyed from noexcept owner/destructor paths. A
+    // structured CUDA error has already reached the fault reporter; leaking a
+    // context-owned allocation until process teardown is safer than terminate.
   }
+  owner = nullptr;
   ptr = nullptr;
 }
 
@@ -144,7 +161,7 @@ RhiResult CudaDevice::allocate_memory(const AllocParams &params,
     CUDADriver::get_instance().memset(ptr, 0, params.size);
   }
 
-  AllocationRecord record(ptr, params.size, false, false, false, false,
+  AllocationRecord record(this, ptr, params.size, false, false, false, false,
                           nullptr, std::move(mapping));
   auto [result, alloc_id] = allocations_.emplace(std::move(record));
   if (result != RhiResult::success) {
@@ -178,7 +195,7 @@ DeviceAllocation CudaDevice::allocate_memory_runtime(
     }
   }
 
-  AllocationRecord record(ptr, size, false, true, true,
+  AllocationRecord record(this, ptr, size, false, true, true,
                           params.use_memory_pool, stream, std::move(mapping));
   auto [result, alloc_id] = allocations_.emplace(std::move(record));
   TI_ERROR_IF(result != RhiResult::success,
@@ -429,7 +446,7 @@ DeviceAllocation CudaDevice::import_memory(void *ptr, size_t size) {
   } catch (const std::bad_alloc &) {
     TI_ERROR("Failed to allocate CUDA allocation metadata");
   }
-  AllocationRecord record(ptr, size, true, true, false, false, nullptr,
+  AllocationRecord record(this, ptr, size, true, true, false, false, nullptr,
                           std::move(mapping));
   auto [result, alloc_id] = allocations_.emplace(std::move(record));
   TI_ERROR_IF(result != RhiResult::success,

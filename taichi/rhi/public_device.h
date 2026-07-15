@@ -36,6 +36,7 @@
 
 #include "taichi/rhi/device_capability.h"
 #include "taichi/rhi/arch.h"
+#include "taichi/rhi/backend_error.h"
 
 namespace taichi::lang {
 
@@ -648,6 +649,21 @@ class RHI_DLL_EXPORT Device {
 
  public:
   virtual ~Device() {};
+
+  void set_backend_fault_reporter(
+      std::shared_ptr<BackendFaultReporter> reporter) noexcept;
+  static void clear_backend_fault_reporter(
+      const std::shared_ptr<BackendFaultReporter> &reporter) noexcept;
+  std::shared_ptr<BackendFaultReporter> backend_fault_reporter() const
+      noexcept;
+  bool backend_calls_safe() const noexcept;
+  void throw_if_backend_submission_disallowed(const char *operation) const;
+  void report_backend_error(const BackendRuntimeError &error,
+                            std::uint64_t submission_sequence = 0) const
+      noexcept;
+  [[noreturn]] void raise_backend_error(std::int64_t backend_code,
+                                        std::string operation,
+                                        std::string message) const;
 
   struct AllocParams {
     uint64_t size{0};

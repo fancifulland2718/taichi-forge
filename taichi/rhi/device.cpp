@@ -13,6 +13,73 @@
 #endif  // TI_WITH_VULKAN
 
 namespace taichi::lang {
+namespace {
+
+// Program enforces one live instance process-wide. Keeping the reporter in a
+// process slot avoids changing the ABI/layout of every Device implementation,
+// including objects used across JIT and plugin boundaries. Allocate the slot
+// permanently so static destruction cannot race backend teardown.
+std::shared_ptr<BackendFaultReporter> &process_backend_fault_reporter() {
+  static auto *slot = new std::shared_ptr<BackendFaultReporter>();
+  return *slot;
+}
+
+}  // namespace
+
+void Device::set_backend_fault_reporter(
+    std::shared_ptr<BackendFaultReporter> reporter) noexcept {
+  std::atomic_store_explicit(&process_backend_fault_reporter(),
+                             std::move(reporter), std::memory_order_release);
+}
+
+void Device::clear_backend_fault_reporter(
+    const std::shared_ptr<BackendFaultReporter> &reporter) noexcept {
+  auto &slot = process_backend_fault_reporter();
+  auto current =
+      std::atomic_load_explicit(&slot, std::memory_order_acquire);
+  if (current == reporter) {
+    std::atomic_store_explicit(&slot,
+                               std::shared_ptr<BackendFaultReporter>{},
+                               std::memory_order_release);
+  }
+}
+
+std::shared_ptr<BackendFaultReporter> Device::backend_fault_reporter() const
+    noexcept {
+  return std::atomic_load_explicit(&process_backend_fault_reporter(),
+                                   std::memory_order_acquire);
+}
+
+bool Device::backend_calls_safe() const noexcept {
+  auto reporter = backend_fault_reporter();
+  return !reporter || reporter->backend_calls_safe();
+}
+
+void Device::throw_if_backend_submission_disallowed(
+    const char *operation) const {
+  auto reporter = backend_fault_reporter();
+  if (reporter) {
+    reporter->throw_if_submission_disallowed(operation);
+  }
+}
+
+void Device::report_backend_error(
+    const BackendRuntimeError &error,
+    std::uint64_t submission_sequence) const noexcept {
+  auto reporter = backend_fault_reporter();
+  if (reporter) {
+    reporter->report_backend_error(error, submission_sequence);
+  }
+}
+
+[[noreturn]] void Device::raise_backend_error(std::int64_t backend_code,
+                                              std::string operation,
+                                              std::string message) const {
+  BackendRuntimeError error(arch(), backend_code, std::move(operation),
+                            std::move(message));
+  report_backend_error(error);
+  throw error;
+}
 
 const std::string rhi_result_to_string(RhiResult result) {
   switch (result) {
