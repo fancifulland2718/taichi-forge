@@ -200,8 +200,19 @@ void Window::present_frame() {
 Window::~Window() {
   if (renderer_) {
     renderer_->discard_pending_frame();
-    renderer_->wait_for_in_flight_frames();
-    renderer_->app_context().device().wait_idle();
+    auto &device = renderer_->app_context().device();
+    if (device.backend_calls_safe()) {
+      try {
+        renderer_->wait_for_in_flight_frames();
+        device.wait_idle();
+      } catch (const taichi::lang::BackendRuntimeError &error) {
+        device.report_backend_error(error);
+      } catch (const std::exception &error) {
+        TI_WARN("GGUI window teardown wait failed: {}", error.what());
+      } catch (...) {
+        TI_WARN("GGUI window teardown wait failed");
+      }
+    }
   }
   gui_.reset();
   renderer_.reset();

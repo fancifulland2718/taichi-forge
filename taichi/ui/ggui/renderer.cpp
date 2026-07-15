@@ -256,8 +256,19 @@ void Renderer::scene(SceneBase *scene) {
 
 Renderer::~Renderer() {
   discard_pending_frame();
-  wait_for_in_flight_frames();
-  app_context_.device().wait_idle();
+  auto &device = app_context_.device();
+  if (device.backend_calls_safe()) {
+    try {
+      wait_for_in_flight_frames();
+      device.wait_idle();
+    } catch (const taichi::lang::BackendRuntimeError &error) {
+      device.report_backend_error(error);
+    } catch (const std::exception &error) {
+      TI_WARN("GGUI renderer teardown wait failed: {}", error.what());
+    } catch (...) {
+      TI_WARN("GGUI renderer teardown wait failed");
+    }
+  }
   for (const auto &set_image : reusable_set_images_) {
     erase_direct_set_image_state(set_image.get());
   }

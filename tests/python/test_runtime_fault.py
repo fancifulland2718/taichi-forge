@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 import taichi_forge as ti
@@ -70,3 +71,29 @@ def test_faulted_runtime_rejects_work_and_reset_creates_healthy_program():
     fresh_state = impl.get_runtime().prog._debug_runtime_fault_state()
     assert fresh_state["state"] == "healthy"
     assert fresh_state["message"] is None
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_faulted_vulkan_ggui_destroy_skips_backend_waits():
+    window = ti.ui.Window(
+        "faulted Vulkan GGUI teardown",
+        (64, 64),
+        show_window=False,
+        vsync=False,
+    )
+    canvas = window.get_canvas()
+    canvas.set_image(np.zeros((64, 64, 4), dtype=np.uint8))
+    window.show()
+
+    prog = impl.get_runtime().prog
+    prog._debug_inject_runtime_fault(
+        -4, "injected_show_failure", "injected Vulkan device loss"
+    )
+    with pytest.raises(RuntimeError, match="injected_show_failure"):
+        window.show()
+
+    # Window and Renderer destructors must abandon unsafe backend waits while
+    # still releasing host-side owners. Neither destroy() nor reset() may
+    # terminate the process or replace the first fault.
+    window.destroy()
+    ti.reset()
