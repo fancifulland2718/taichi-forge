@@ -5,7 +5,7 @@
 namespace taichi::lang {
 
 struct CuptiConfig {
-#if defined(TI_WITH_CUDA_TOOLKIT)
+#if defined(TI_WITH_CUPTI)
   uint32_t num_ranges = 1048576;  // max number of kernels traced by CUPTI
   std::vector<std::string> metric_list;
 #endif

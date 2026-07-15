@@ -111,7 +111,12 @@ def _existing_dirs(paths: list[Path]) -> list[Path]:
 
 
 def _dynamic_cuda_runtime_required(cache: dict[str, str]) -> bool:
-    return _enabled(cache.get("TI_WITH_CUDA_TOOLKIT")) and _enabled(
+    primitive_reference = cache.get(
+        "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE"
+    )
+    if primitive_reference is None:
+        primitive_reference = cache.get("TI_WITH_CUDA_TOOLKIT")
+    return _enabled(primitive_reference) and _enabled(
         cache.get("TI_CUDA_CUB_SORT_DYNAMIC_CUDART")
     )
 

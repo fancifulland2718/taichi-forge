@@ -22,20 +22,22 @@ target_include_directories(${CUDA_RHI}
 
 target_link_libraries(${CUDA_RHI} PRIVATE interop_rhi)
 
-if (TI_WITH_CUDA_TOOLKIT)
+if (TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE)
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
 endif()
 
-if (TI_WITH_CUDA_TOOLKIT)
+if (TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE)
   target_sources(${CUDA_RHI} PRIVATE cuda_primitives.cu)
   target_include_directories(${CUDA_RHI} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
   set_source_files_properties(cuda_primitives.cpp
-    PROPERTIES COMPILE_DEFINITIONS TI_WITH_CUDA_TOOLKIT)
+    PROPERTIES COMPILE_DEFINITIONS
+      "TI_WITH_CUDA_TOOLKIT;TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE")
   get_filename_component(TI_CUDA_TOOLKIT_ROOT
     "${CUDAToolkit_INCLUDE_DIRS}/.." ABSOLUTE)
   target_compile_definitions(${CUDA_RHI}
     PRIVATE
+      TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE
       TI_CUDA_TOOLKIT_VERSION_MAJOR=${CUDAToolkit_VERSION_MAJOR}
       TI_CUDA_TOOLKIT_VERSION_MINOR=${CUDAToolkit_VERSION_MINOR})
 
@@ -99,12 +101,14 @@ if (TI_WITH_CUDA_TOOLKIT)
   endif()
 endif()
 
-if (TI_WITH_CUDA_TOOLKIT)
+if (TI_WITH_CUPTI)
   target_include_directories(${CUDA_RHI} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
-  get_filename_component(TI_CUDA_TOOLKIT_ROOT
-    "${CUDAToolkit_INCLUDE_DIRS}/.." ABSOLUTE)
   target_include_directories(${CUDA_RHI}
     PRIVATE
-      "${TI_CUDA_TOOLKIT_ROOT}/extras/CUPTI/include"
+      "${CUDAToolkit_CUPTI_INCLUDE_DIR}"
   )
+  target_compile_definitions(${CUDA_RHI}
+    PRIVATE
+      TI_WITH_CUDA_TOOLKIT_HEADERS
+      TI_WITH_CUPTI)
 endif()

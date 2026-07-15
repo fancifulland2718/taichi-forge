@@ -609,3 +609,29 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
         workflow,
         re.IGNORECASE,
     )
+
+
+def test_dynamic_cudart_requirement_prefers_primitive_reference_switch():
+    assert repair_runtime_wheel._dynamic_cuda_runtime_required(
+        {
+            "TI_WITH_CUDA_TOOLKIT": "OFF",
+            "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE": "ON",
+            "TI_CUDA_CUB_SORT_DYNAMIC_CUDART": "ON",
+        }
+    )
+    assert not repair_runtime_wheel._dynamic_cuda_runtime_required(
+        {
+            "TI_WITH_CUDA_TOOLKIT": "ON",
+            "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE": "OFF",
+            "TI_CUDA_CUB_SORT_DYNAMIC_CUDART": "ON",
+        }
+    )
+
+
+def test_dynamic_cudart_requirement_keeps_legacy_cache_compatibility():
+    assert repair_runtime_wheel._dynamic_cuda_runtime_required(
+        {
+            "TI_WITH_CUDA_TOOLKIT": "ON",
+            "TI_CUDA_CUB_SORT_DYNAMIC_CUDART": "ON",
+        }
+    )

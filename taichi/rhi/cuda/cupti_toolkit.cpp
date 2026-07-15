@@ -3,7 +3,7 @@
 
 // move from cupti_toolkit.h
 // avoid exposing these headers
-#if defined(TI_WITH_CUDA_TOOLKIT)
+#if defined(TI_WITH_CUPTI)
 #include <cupti_target.h>
 #include <cupti_result.h>
 #include <cupti_profiler_target.h>
@@ -46,7 +46,7 @@ bool check_cupti_availability() {
 }
 
 bool check_cupti_privileges() {
-#if defined(TI_WITH_CUDA_TOOLKIT)
+#if defined(TI_WITH_CUPTI)
 
 #define TEMP_CUPTI_API_CALL(api_func_call)                                 \
   do {                                                                     \
@@ -116,7 +116,7 @@ bool check_cupti_privileges() {
 #endif
 }
 
-#if defined(TI_WITH_CUDA_TOOLKIT)
+#if defined(TI_WITH_CUPTI)
 
 // Some of the codes are copied from CUPTI/samples/extensions/
 // and modified to match Taichi's naming conventions

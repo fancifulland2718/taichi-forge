@@ -44,7 +44,7 @@ bool KernelProfilerCUDA::set_profiler_toolkit(std::string toolkit_name) {
   }
   // current toolkit is cuEvent: check CUPTI availability
   else if (tool_ == ProfilingToolkit::event) {
-#if defined(TI_WITH_CUDA_TOOLKIT)
+#if defined(TI_WITH_CUPTI)
     if (check_cupti_availability() && check_cupti_privileges()) {
       if (cupti_toolkit_ == nullptr)
         cupti_toolkit_ = std::make_unique<CuptiToolkit>();

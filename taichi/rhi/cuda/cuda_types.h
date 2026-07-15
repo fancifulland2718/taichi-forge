@@ -1,6 +1,6 @@
 #pragma once
 
-#if defined(TI_WITH_CUDA_TOOLKIT)
+#if defined(TI_WITH_CUDA_TOOLKIT_HEADERS)
 
 #include <cublas_v2.h>
 #include <cuda.h>

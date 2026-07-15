@@ -2,7 +2,14 @@ option(USE_STDCPP "Use -stdlib=libc++" OFF)
 option(TI_WITH_LLVM "Build with LLVM backends" ON)              # wheel-tag: llvm
 option(TI_WITH_METAL "Build with the Metal backend" ON)         # wheel-tag: mtl
 option(TI_WITH_CUDA "Build with the CUDA backend" ON)           # wheel-tag: cu
-option(TI_WITH_CUDA_TOOLKIT "Build with the CUDA toolkit" OFF)  # wheel-tag: cutk
+option(TI_WITH_CUDA_TOOLKIT
+       "Legacy switch: enable the CUDA primitive reference provider" OFF)
+option(TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE
+       "Build the optional CUB/CUDART primitive reference provider"
+       ${TI_WITH_CUDA_TOOLKIT})
+option(TI_WITH_CUPTI
+       "Build the optional CUPTI/NVPerf profiler"
+       OFF)
 if (WIN32)
     option(TI_CUDA_CUB_SORT_DYNAMIC_CUDART
         "Link CUDA CUB sort against dynamic cudart with delay-load" ON)
@@ -101,6 +108,8 @@ if (APPLE)
         message(WARNING "CUDA backend not supported on OS X. Setting TI_WITH_CUDA to OFF.")
     endif()
     set(TI_WITH_CUDA_TOOLKIT OFF)
+    set(TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE OFF)
+    set(TI_WITH_CUPTI OFF)
     if (TI_WITH_OPENGL)
         set(TI_WITH_OPENGL OFF)
         message(WARNING "OpenGL backend not supported on OS X. Setting TI_WITH_OPENGL to OFF.")
@@ -136,11 +145,15 @@ endif()
 if(NOT TI_WITH_LLVM)
     set(TI_WITH_CUDA OFF)
     set(TI_WITH_CUDA_TOOLKIT OFF)
+    set(TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE OFF)
+    set(TI_WITH_CUPTI OFF)
     set(TI_WITH_DX12 OFF)
 endif()
 
 if(NOT TI_WITH_CUDA)
     set(TI_WITH_CUDA_TOOLKIT OFF)
+    set(TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE OFF)
+    set(TI_WITH_CUPTI OFF)
 endif()
 
 # The CUDA driver and toolkit version are independent from the slim libdevice
@@ -678,23 +691,36 @@ target_link_libraries(${CORE_LIBRARY_NAME} PRIVATE taichi_util)
 target_link_libraries(${CORE_LIBRARY_NAME} PRIVATE taichi_common)
 target_link_libraries(${CORE_LIBRARY_NAME} PRIVATE compilation_manager)
 
-if (TI_WITH_CUDA AND TI_WITH_CUDA_TOOLKIT)
+if (TI_WITH_CUDA AND
+        (TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE OR TI_WITH_CUPTI))
     find_package(CUDAToolkit REQUIRED)
     message(STATUS "Found CUDAToolkit ${CUDAToolkit_VERSION}")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DTI_WITH_CUDA_TOOLKIT")
-    include_directories(${CUDAToolkit_INCLUDE_DIRS})
-    target_include_directories(${CORE_LIBRARY_NAME} PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
-    get_filename_component(TI_CUDA_TOOLKIT_ROOT
-        "${CUDAToolkit_INCLUDE_DIRS}/.." ABSOLUTE)
-    find_library(TI_CUDA_CUPTI_LIBRARY
-        NAMES cupti
-        PATHS "${TI_CUDA_TOOLKIT_ROOT}/extras/CUPTI/lib64"
-        NO_DEFAULT_PATH)
-    if (TI_CUDA_CUPTI_LIBRARY)
-        target_link_libraries(${CORE_LIBRARY_NAME} PUBLIC ${TI_CUDA_CUPTI_LIBRARY})
-    else()
-        target_link_libraries(${CORE_LIBRARY_NAME} PUBLIC CUDA::cupti)
+endif()
+
+if (TI_WITH_CUDA AND TI_WITH_CUPTI)
+    include(CheckCXXSourceCompiles)
+    set(_ti_saved_required_includes "${CMAKE_REQUIRED_INCLUDES}")
+    set(CMAKE_REQUIRED_INCLUDES
+        ${CUDAToolkit_INCLUDE_DIRS}
+        ${CUDAToolkit_CUPTI_INCLUDE_DIR})
+    unset(TI_CUPTI_HAS_METRICS_CONTEXT_EVALUATE_API CACHE)
+    check_cxx_source_compiles([=[
+        #include <nvperf_host.h>
+        int main() {
+          NVPW_MetricsContext_EvaluateToGpuValues_Params params{};
+          return params.structSize == 0;
+        }
+    ]=] TI_CUPTI_HAS_METRICS_CONTEXT_EVALUATE_API)
+    set(CMAKE_REQUIRED_INCLUDES "${_ti_saved_required_includes}")
+    unset(_ti_saved_required_includes)
+    if (NOT TI_CUPTI_HAS_METRICS_CONTEXT_EVALUATE_API)
+        message(FATAL_ERROR
+            "TI_WITH_CUPTI=ON requires the legacy NVPerf metrics-context API "
+            "used by Taichi's current CUPTI profiler, but the selected CUDA "
+            "Toolkit does not provide it. Build with TI_WITH_CUPTI=OFF. This "
+            "does not affect the CUDA backend or primitive providers.")
     endif()
+    target_link_libraries(${CORE_LIBRARY_NAME} PUBLIC CUDA::cupti)
 endif()
 
 # SPIR-V codegen is always there, regardless of Vulkan
