@@ -14,6 +14,9 @@ _FAMILIES = (
     "sort",
     "scan",
     "compact",
+    "run_length_encode",
+    "unique",
+    "unique_by_key",
     "reduce",
     "histogram",
     "transform",
@@ -79,6 +82,18 @@ def test_static_primitive_capability_catalog_is_complete_and_immutable():
         ti.algorithms.primitive_capability("sort_by_key")
         is ti.algorithms.primitive_capability("sort")
     )
+    rle = ti.algorithms.primitive_capability("experimental_run_length_encode")
+    assert rle.stability == "stable_consecutive_run_order"
+    assert "host_read_synchronizes" in rle.operands[-1].constraints
+    assert (
+        ti.algorithms.primitive_capability("experimental_unique").ad.forward_ad
+        == "not_differentiable"
+    )
+    unique_by_key = ti.algorithms.primitive_capability("unique_by_key")
+    assert (
+        "matrix_field_payload_i32_only"
+        in unique_by_key.operands[1].constraints
+    )
     sort_methods = {
         method.name: method
         for method in ti.algorithms.primitive_capability("sort").methods
@@ -105,6 +120,15 @@ def test_capability_catalog_is_the_method_validation_source_of_truth():
     )
     assert alg_impl._SUPPORTED_COMPACT_METHODS == _method_names(
         ti.algorithms.primitive_capability("compact")
+    )
+    assert alg_impl._SUPPORTED_RLE_METHODS == _method_names(
+        ti.algorithms.primitive_capability("run_length_encode")
+    )
+    assert alg_impl._SUPPORTED_RLE_METHODS == _method_names(
+        ti.algorithms.primitive_capability("unique")
+    )
+    assert alg_impl._SUPPORTED_RLE_METHODS == _method_names(
+        ti.algorithms.primitive_capability("unique_by_key")
     )
     assert alg_impl._SUPPORTED_REDUCE_METHODS == _method_names(
         ti.algorithms.primitive_capability("reduce")

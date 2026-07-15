@@ -1096,6 +1096,129 @@ def fill_i32_arange_ndarray(out: ndarray_type.ndarray(dtype=i32, ndim=1), N: i32
 
 
 @kernel
+def rle_mark_boundaries_ndarray(
+    keys: ndarray_type.ndarray(ndim=1),
+    flags: ndarray_type.ndarray(dtype=i32, ndim=1),
+    N: i32,
+    capacity: i32,
+):
+    for i in range(capacity):
+        flags[i] = 0
+        if i < N:
+            is_start = i == 0
+            if i > 0:
+                is_start = keys[i] != keys[i - 1]
+            flags[i] = 1 if is_start else 0
+
+
+@kernel
+def rle_mark_boundaries_and_starts_ndarray(
+    keys: ndarray_type.ndarray(ndim=1),
+    flags: ndarray_type.ndarray(dtype=i32, ndim=1),
+    starts: ndarray_type.ndarray(dtype=i32, ndim=1),
+    N: i32,
+    capacity: i32,
+):
+    for i in range(capacity):
+        flags[i] = 0
+        starts[i] = i
+        if i < N:
+            is_start = i == 0
+            if i > 0:
+                is_start = keys[i] != keys[i - 1]
+            flags[i] = 1 if is_start else 0
+
+
+@kernel
+def rle_finalize_lengths_ndarray(
+    starts: ndarray_type.ndarray(dtype=i32, ndim=1),
+    lengths: ndarray_type.ndarray(dtype=i32, ndim=1),
+    count: ndarray_type.ndarray(dtype=i32, ndim=1),
+    N: i32,
+    capacity: i32,
+):
+    run_count = count[0]
+    for i in range(capacity):
+        if i < run_count:
+            end = N
+            if i + 1 < run_count:
+                end = starts[i + 1]
+            lengths[i] = end - starts[i]
+
+
+@kernel
+def rle_reset_count_ndarray(
+    count: ndarray_type.ndarray(dtype=i32, ndim=1),
+):
+    count[0] = 0
+
+
+@kernel
+def rle_mark_boundaries_field(
+    keys: template(),
+    flags: template(),
+    N: i32,
+    capacity: i32,
+):
+    keys_offset = static(keys.snode.ptr.offset if len(keys.snode.ptr.offset) != 0 else 0)
+    flags_offset = static(flags.snode.ptr.offset if len(flags.snode.ptr.offset) != 0 else 0)
+    for i in range(capacity):
+        flags[i + flags_offset] = 0
+        if i < N:
+            is_start = i == 0
+            if i > 0:
+                is_start = keys[i + keys_offset] != keys[i - 1 + keys_offset]
+            flags[i + flags_offset] = 1 if is_start else 0
+
+
+@kernel
+def rle_mark_boundaries_and_starts_field(
+    keys: template(),
+    flags: template(),
+    starts: template(),
+    N: i32,
+    capacity: i32,
+):
+    keys_offset = static(keys.snode.ptr.offset if len(keys.snode.ptr.offset) != 0 else 0)
+    flags_offset = static(flags.snode.ptr.offset if len(flags.snode.ptr.offset) != 0 else 0)
+    starts_offset = static(starts.snode.ptr.offset if len(starts.snode.ptr.offset) != 0 else 0)
+    for i in range(capacity):
+        flags[i + flags_offset] = 0
+        starts[i + starts_offset] = i
+        if i < N:
+            is_start = i == 0
+            if i > 0:
+                is_start = keys[i + keys_offset] != keys[i - 1 + keys_offset]
+            flags[i + flags_offset] = 1 if is_start else 0
+
+
+@kernel
+def rle_finalize_lengths_field(
+    starts: template(),
+    lengths: template(),
+    count: template(),
+    N: i32,
+    capacity: i32,
+):
+    starts_offset = static(starts.snode.ptr.offset if len(starts.snode.ptr.offset) != 0 else 0)
+    lengths_offset = static(
+        lengths.snode.ptr.offset if len(lengths.snode.ptr.offset) != 0 else 0
+    )
+    run_count = count[None]
+    for i in range(capacity):
+        if i < run_count:
+            end = N
+            if i + 1 < run_count:
+                end = starts[i + 1 + starts_offset]
+            lengths[i + lengths_offset] = end - starts[i + starts_offset]
+
+
+@kernel
+def rle_reset_count_field(count: template()):
+    count[None] = 0
+
+
+@kernel
 def compact_flags_to_prefix_field(flags: template(), prefix: template(), N: i32):
     flags_offset = static(flags.snode.ptr.offset if len(flags.snode.ptr.offset) != 0 else 0)
     for i in range(N):
@@ -1203,9 +1326,15 @@ def compact_stable_serial_field_static_n(values, flags, output, count, N):
             output: template(),
             count: template(),
         ):
-            values_offset = static(values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0)
-            flags_offset = static(flags.snode.ptr.offset if len(flags.snode.ptr.offset) != 0 else 0)
-            output_offset = static(output.snode.ptr.offset if len(output.snode.ptr.offset) != 0 else 0)
+            values_offset = static(
+                values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0
+            )
+            flags_offset = static(
+                flags.snode.ptr.offset if len(flags.snode.ptr.offset) != 0 else 0
+            )
+            output_offset = static(
+                output.snode.ptr.offset if len(output.snode.ptr.offset) != 0 else 0
+            )
             count[None] = 0
             loop_config(serialize=True)
             for i in range(N):

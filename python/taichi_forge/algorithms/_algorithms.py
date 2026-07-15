@@ -54,6 +54,14 @@ from taichi_forge._kernels import (
     reduce_i32_field,
     reduce_i32_field_private_count,
     reduce_i32_field_private_reduce,
+    rle_finalize_lengths_field,
+    rle_finalize_lengths_ndarray,
+    rle_mark_boundaries_and_starts_field,
+    rle_mark_boundaries_and_starts_ndarray,
+    rle_mark_boundaries_field,
+    rle_mark_boundaries_ndarray,
+    rle_reset_count_field,
+    rle_reset_count_ndarray,
     scan_add_inclusive,
     scan_add_inclusive_cuda,
     scan_add_inclusive_ndarray,
@@ -121,6 +129,7 @@ _SORT_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _SORT_KEY_TYPE = {u32: 0, i32: 1, f32: 2, u64: 3, i64: 4, f64: 5}
 _SORT_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _SUPPORTED_COMPACT_METHODS = supported_primitive_methods("compact")
+_SUPPORTED_RLE_METHODS = supported_primitive_methods("run_length_encode")
 _SUPPORTED_REDUCE_METHODS = supported_primitive_methods("reduce")
 _SUPPORTED_REDUCE_OPS = {"sum": 0, "min": 1, "max": 2}
 _REDUCE_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
@@ -2219,6 +2228,71 @@ class PrimitiveSequence:
             workspace,
         )
 
+    def run_length_encode(
+        self,
+        keys,
+        unique_keys,
+        run_lengths,
+        run_count,
+        *,
+        size=None,
+        method="auto",
+        workspace=None,
+    ):
+        if workspace is None:
+            workspace = RunLengthWorkspace(max_items=_shape_numel(keys))
+        return self._add_call(
+            "run_length_encode",
+            experimental_run_length_encode,
+            (keys, unique_keys, run_lengths, run_count),
+            {"size": size, "method": method},
+            workspace,
+        )
+
+    def unique(
+        self,
+        values,
+        output,
+        count,
+        *,
+        mode="consecutive",
+        size=None,
+        method="auto",
+        workspace=None,
+    ):
+        if workspace is None:
+            workspace = RunLengthWorkspace(max_items=_shape_numel(values))
+        return self._add_call(
+            "unique",
+            experimental_unique,
+            (values, output, count),
+            {"mode": mode, "size": size, "method": method},
+            workspace,
+        )
+
+    def unique_by_key(
+        self,
+        keys,
+        values,
+        unique_keys,
+        unique_values,
+        count,
+        *,
+        mode="consecutive",
+        size=None,
+        method="auto",
+        workspace=None,
+    ):
+        if workspace is None:
+            workspace = RunLengthWorkspace(max_items=_shape_numel(keys))
+        return self._add_call(
+            "unique_by_key",
+            experimental_unique_by_key,
+            (keys, values, unique_keys, unique_values, count),
+            {"mode": mode, "size": size, "method": method},
+            workspace,
+        )
+
     def bucket_builder(
         self, keys, values, offsets, output, *, method="auto", workspace=None
     ):
@@ -4145,6 +4219,87 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
             return
         key = self._cpu_field_scan_plan_key(values, flags, output, count, n)
         self._cpu_field_scan_plans[key] = True
+
+
+class RunLengthWorkspace:
+    """Reusable flags/run-start storage for consecutive RLE and unique.
+
+    The workspace delegates selection to one CompactWorkspace. Scratch storage
+    follows the key storage kind so ndarray calls stay device-resident and
+    dense-field calls preserve SNode offsets/layout.
+    """
+
+    def __init__(self, max_items=None):
+        self.max_items = max_items
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._scratch_bytes = 0
+        self._buffers = {}
+        self._compact_workspace = CompactWorkspace(max_items=max_items)
+
+    @property
+    def compact_workspace(self):
+        return self._compact_workspace
+
+    def check_shape(self, n):
+        n = int(n)
+        if n < 0:
+            raise ValueError("RunLengthWorkspace expects n >= 0.")
+        if n > 0x7FFFFFFF:
+            raise ValueError(
+                "RunLengthWorkspace supports at most 2^31-1 items because "
+                "run starts, lengths, and count use ti.i32."
+            )
+        if self.max_items is not None and n > self.max_items:
+            raise ValueError(
+                f"Requested {n} run-length items, exceeding "
+                f"max_items={self.max_items}."
+            )
+
+    def _buffer_key(self, keys, n):
+        return ("ndarray" if isinstance(keys, Ndarray) else "dense_field", int(n))
+
+    def _get_buffers(self, keys, n, *, need_starts):
+        self.check_shape(n)
+        key = self._buffer_key(keys, n)
+        buffers = self._buffers.get(key)
+        if buffers is None:
+            if key[0] == "ndarray":
+                flags = ti_ndarray(i32, shape=n)
+            else:
+                flags = field(i32, shape=n)
+            buffers = {"flags": flags}
+            self._buffers[key] = buffers
+            self._scratch_bytes += n * 4
+        if need_starts and "starts" not in buffers:
+            if key[0] == "ndarray":
+                buffers["starts"] = ti_ndarray(i32, shape=n)
+                buffers["run_starts"] = ti_ndarray(i32, shape=n)
+            else:
+                buffers["starts"] = field(i32, shape=n)
+                buffers["run_starts"] = field(i32, shape=n)
+            self._scratch_bytes += n * 8
+        self._update_usage()
+        return buffers
+
+    def _update_usage(self):
+        self.workspace_bytes_current = (
+            self._scratch_bytes
+            + int(self._compact_workspace.workspace_bytes_current)
+        )
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak,
+            self._scratch_bytes
+            + int(self._compact_workspace.workspace_bytes_peak),
+            self.workspace_bytes_current,
+        )
+
+    def clear(self):
+        self._compact_workspace.clear()
+        self._buffers.clear()
+        self._scratch_bytes = 0
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
 
 
 class ReduceWorkspace:
@@ -8598,6 +8753,454 @@ def experimental_compact(
             "experimental_compact()", method, "field_scan"
         )
     _compact_field_scan(values, flags, output, count, workspace, method)
+
+
+_RLE_KEY_DTYPES = (u32, i32, u64, i64)
+
+
+def _rle_uses_ndarray_storage(value):
+    view = _primitive_view(value)
+    return view is not None and not (view.is_dense_field or view.is_scalar_field)
+
+
+def _rle_storage_keys(value):
+    if _is_matrix_field(value):
+        return frozenset(
+            _primitive_plan_object_key(component)
+            for component in _matrix_field_components(value)
+        )
+    return frozenset((_primitive_plan_object_key(value),))
+
+
+def _check_rle_storage_aliases(op_name, inputs, outputs):
+    input_keys = frozenset().union(*(_rle_storage_keys(value) for value in inputs))
+    output_key_sets = tuple(_rle_storage_keys(value) for value in outputs)
+    if any(input_keys.intersection(keys) for keys in output_key_sets):
+        raise ValueError(
+            f"{op_name} does not support input/output aliasing; use distinct "
+            "fixed-capacity output storage."
+        )
+    for index, keys in enumerate(output_key_sets):
+        if any(keys.intersection(other) for other in output_key_sets[index + 1 :]):
+            raise ValueError(f"{op_name} output and count storages must not alias.")
+
+
+def _check_rle_key_output_count(
+    op_name, keys, output, count, method, workspace, size
+):
+    if method not in _SUPPORTED_RLE_METHODS:
+        raise NotImplementedError(f"{op_name} method '{method}' is not implemented.")
+    if not (_is_1d(keys) and _is_1d(output)):
+        raise ValueError(f"{op_name} expects 1D keys and output.")
+    if keys.dtype not in _RLE_KEY_DTYPES:
+        raise TypeError(
+            f"{op_name} currently supports ti.u32, ti.i32, ti.u64, and ti.i64 keys."
+        )
+    if output.dtype != keys.dtype:
+        raise TypeError(f"{op_name} keys and key output dtype must match.")
+    capacity = int(keys.shape[0])
+    if size is None:
+        n = capacity
+    elif isinstance(size, bool) or not isinstance(size, (int, np.integer)):
+        raise TypeError(f"{op_name} size must be a Python integer or None.")
+    else:
+        n = int(size)
+    if n < 0 or n > capacity:
+        raise ValueError(
+            f"{op_name} size must satisfy 0 <= size <= input capacity."
+        )
+    if output.shape[0] < capacity:
+        raise ValueError(f"{op_name} key output capacity must be at least input length.")
+    key_view = _primitive_view(keys)
+    output_view = _primitive_view(output)
+    if key_view is None or output_view is None:
+        raise TypeError(
+            f"{op_name} keys and key output must be ti.ndarray or dense ti.field."
+        )
+    ndarray_mode = _rle_uses_ndarray_storage(keys)
+    if ndarray_mode:
+        if not (
+            isinstance(keys, Ndarray)
+            and not _is_opaque_raw_payload(keys)
+            and isinstance(output, Ndarray)
+            and not _is_opaque_raw_payload(output)
+            and isinstance(count, Ndarray)
+        ):
+            raise TypeError(
+                f"{op_name} ndarray mode requires plain ti.ndarray keys/output "
+                "and a ti.ndarray count."
+            )
+        if not _is_1d(count) or count.shape[0] < 1:
+            raise ValueError(f"{op_name} ndarray count must have shape >= 1.")
+    else:
+        count_view = _primitive_view(count)
+        if not (
+            key_view.is_dense_field
+            and output_view.is_dense_field
+            and count_view is not None
+            and count_view.is_scalar_field
+        ):
+            raise TypeError(
+                f"{op_name} field mode requires dense key/output fields and "
+                "a scalar ti.field count."
+            )
+    if count.dtype != i32:
+        raise TypeError(f"{op_name} count must use ti.i32.")
+    if workspace is not None and not isinstance(workspace, RunLengthWorkspace):
+        raise TypeError("workspace must be a RunLengthWorkspace instance or None.")
+    if workspace is not None:
+        workspace.check_shape(capacity)
+    elif capacity > 0x7FFFFFFF:
+        raise ValueError(
+            f"{op_name} supports at most 2^31-1 items because count uses ti.i32."
+        )
+    return capacity, n, ndarray_mode
+
+
+def _check_rle_payload(
+    op_name,
+    keys,
+    values,
+    unique_values,
+    *,
+    ndarray_mode,
+):
+    if _is_struct_tensor_member_view(values) or _is_struct_tensor_member_view(
+        unique_values
+    ):
+        raise NotImplementedError(
+            f"{op_name} whole vector/matrix StructNdarray member views are not "
+            "supported in the first RLE/Unique release."
+        )
+    if not (_is_1d(values) and _is_1d(unique_values)):
+        raise ValueError(f"{op_name} expects 1D payload input and output.")
+    if values.shape[0] != keys.shape[0]:
+        raise ValueError(f"{op_name} keys and payload input lengths must match.")
+    if unique_values.shape[0] < keys.shape[0]:
+        raise ValueError(
+            f"{op_name} payload output capacity must be at least input length."
+        )
+    if values.dtype != unique_values.dtype:
+        raise TypeError(f"{op_name} payload input/output dtype must match.")
+    if _is_matrix_field(values) or _is_matrix_field(unique_values):
+        if not (_is_matrix_field(values) and _is_matrix_field(unique_values)):
+            raise TypeError(
+                f"{op_name} MatrixField payload input/output must both be "
+                "MatrixField instances."
+            )
+        _check_matching_matrix_fields(op_name, values, unique_values)
+        if values.dtype != i32:
+            raise TypeError(
+                f"{op_name} MatrixField payloads currently support only ti.i32."
+            )
+    values_ndarray = _rle_uses_ndarray_storage(values)
+    output_ndarray = _rle_uses_ndarray_storage(unique_values)
+    if values_ndarray != ndarray_mode or output_ndarray != ndarray_mode:
+        raise TypeError(
+            f"{op_name} keys, payloads, and outputs must use one storage mode."
+        )
+
+
+def _rle_default_workspace(kind, objects, semantic_key, n):
+    return _get_default_workspace(
+        "rle_unique",
+        objects,
+        (kind, *semantic_key, int(n)),
+        lambda: RunLengthWorkspace(max_items=n),
+    )
+
+
+def _rle_reset_count(count, ndarray_mode):
+    if ndarray_mode:
+        rle_reset_count_ndarray(count)
+    else:
+        rle_reset_count_field(count)
+
+
+def _rle_mark_boundaries(keys, flags, n, capacity, ndarray_mode):
+    if ndarray_mode:
+        rle_mark_boundaries_ndarray(keys, flags, n, capacity)
+    else:
+        rle_mark_boundaries_field(keys, flags, n, capacity)
+
+
+def _rle_mark_boundaries_and_starts(
+    keys, flags, starts, n, capacity, ndarray_mode
+):
+    if ndarray_mode:
+        rle_mark_boundaries_and_starts_ndarray(
+            keys, flags, starts, n, capacity
+        )
+    else:
+        rle_mark_boundaries_and_starts_field(
+            keys, flags, starts, n, capacity
+        )
+
+
+def experimental_unique(
+    values,
+    output,
+    count,
+    *,
+    mode="consecutive",
+    size=None,
+    method="auto",
+    workspace=None,
+):
+    """Select the first value from every consecutive equal-value run.
+
+    The operation never sorts or hashes implicitly. For sorted input this is a
+    global sorted unique; for arbitrary input it has std::unique-style stable
+    consecutive semantics. Only output[:count] is defined.
+    """
+
+    reject_unsupported_automatic_ad("unique")
+    if mode != "consecutive":
+        raise ValueError("experimental_unique() currently supports mode='consecutive'.")
+    capacity, n, ndarray_mode = _check_rle_key_output_count(
+        "experimental_unique()",
+        values,
+        output,
+        count,
+        method,
+        workspace,
+        size,
+    )
+    _check_rle_storage_aliases(
+        "experimental_unique()", (values,), (output, count)
+    )
+    if workspace is None:
+        workspace = _rle_default_workspace(
+            "unique",
+            (values, output, count),
+            (mode, size, method),
+            capacity,
+        )
+    workspace.check_shape(capacity)
+    if n == 0:
+        _rle_reset_count(count, ndarray_mode)
+        workspace._update_usage()
+        return workspace
+    buffers = workspace._get_buffers(values, capacity, need_starts=False)
+    flags = buffers["flags"]
+    _check_compact_request(
+        values,
+        flags,
+        output,
+        count,
+        method,
+        workspace.compact_workspace,
+    )
+    _rle_mark_boundaries(values, flags, n, capacity, ndarray_mode)
+    experimental_compact(
+        values,
+        flags,
+        output,
+        count,
+        method=method,
+        workspace=workspace.compact_workspace,
+    )
+    workspace._update_usage()
+    return workspace
+
+
+def experimental_unique_by_key(
+    keys,
+    values,
+    unique_keys,
+    unique_values,
+    count,
+    *,
+    mode="consecutive",
+    size=None,
+    method="auto",
+    workspace=None,
+):
+    """Select one key and the first payload from each consecutive key run."""
+
+    reject_unsupported_automatic_ad("unique_by_key")
+    if mode != "consecutive":
+        raise ValueError(
+            "experimental_unique_by_key() currently supports mode='consecutive'."
+        )
+    capacity, n, ndarray_mode = _check_rle_key_output_count(
+        "experimental_unique_by_key()",
+        keys,
+        unique_keys,
+        count,
+        method,
+        workspace,
+        size,
+    )
+    _check_rle_payload(
+        "experimental_unique_by_key()",
+        keys,
+        values,
+        unique_values,
+        ndarray_mode=ndarray_mode,
+    )
+    _check_rle_storage_aliases(
+        "experimental_unique_by_key()",
+        (keys, values),
+        (unique_keys, unique_values, count),
+    )
+    if workspace is None:
+        workspace = _rle_default_workspace(
+            "unique_by_key",
+            (keys, values, unique_keys, unique_values, count),
+            (mode, size, method),
+            capacity,
+        )
+    workspace.check_shape(capacity)
+    if n == 0:
+        _rle_reset_count(count, ndarray_mode)
+        workspace._update_usage()
+        return workspace
+    buffers = workspace._get_buffers(keys, capacity, need_starts=False)
+    flags = buffers["flags"]
+    _check_compact_request(
+        keys,
+        flags,
+        unique_keys,
+        count,
+        method,
+        workspace.compact_workspace,
+    )
+    _check_compact_request(
+        values,
+        flags,
+        unique_values,
+        count,
+        method,
+        workspace.compact_workspace,
+    )
+    _rle_mark_boundaries(keys, flags, n, capacity, ndarray_mode)
+    experimental_compact(
+        keys,
+        flags,
+        unique_keys,
+        count,
+        method=method,
+        workspace=workspace.compact_workspace,
+    )
+    experimental_compact(
+        values,
+        flags,
+        unique_values,
+        count,
+        method=method,
+        workspace=workspace.compact_workspace,
+    )
+    workspace._update_usage()
+    return workspace
+
+
+def experimental_run_length_encode(
+    keys,
+    unique_keys,
+    run_lengths,
+    run_count,
+    *,
+    size=None,
+    method="auto",
+    workspace=None,
+):
+    """Encode consecutive equal-key runs without host synchronization."""
+
+    reject_unsupported_automatic_ad("run_length_encode")
+    capacity, n, ndarray_mode = _check_rle_key_output_count(
+        "experimental_run_length_encode()",
+        keys,
+        unique_keys,
+        run_count,
+        method,
+        workspace,
+        size,
+    )
+    if not _is_1d(run_lengths):
+        raise ValueError(
+            "experimental_run_length_encode() expects 1D run_lengths."
+        )
+    if run_lengths.dtype != i32:
+        raise TypeError(
+            "experimental_run_length_encode() run_lengths must use ti.i32."
+        )
+    if run_lengths.shape[0] < capacity:
+        raise ValueError(
+            "experimental_run_length_encode() run_lengths capacity must be at "
+            "least input length."
+        )
+    if _rle_uses_ndarray_storage(run_lengths) != ndarray_mode:
+        raise TypeError(
+            "experimental_run_length_encode() keys, outputs, and run_lengths "
+            "must use one storage mode."
+        )
+    _check_rle_storage_aliases(
+        "experimental_run_length_encode()",
+        (keys,),
+        (unique_keys, run_lengths, run_count),
+    )
+    if workspace is None:
+        workspace = _rle_default_workspace(
+            "run_length_encode",
+            (keys, unique_keys, run_lengths, run_count),
+            (size, method),
+            capacity,
+        )
+    workspace.check_shape(capacity)
+    if n == 0:
+        _rle_reset_count(run_count, ndarray_mode)
+        workspace._update_usage()
+        return workspace
+    buffers = workspace._get_buffers(keys, capacity, need_starts=True)
+    flags = buffers["flags"]
+    starts = buffers["starts"]
+    compacted_starts = buffers["run_starts"]
+    _check_compact_request(
+        keys,
+        flags,
+        unique_keys,
+        run_count,
+        method,
+        workspace.compact_workspace,
+    )
+    _check_compact_request(
+        starts,
+        flags,
+        compacted_starts,
+        run_count,
+        method,
+        workspace.compact_workspace,
+    )
+    _rle_mark_boundaries_and_starts(
+        keys, flags, starts, n, capacity, ndarray_mode
+    )
+    experimental_compact(
+        keys,
+        flags,
+        unique_keys,
+        run_count,
+        method=method,
+        workspace=workspace.compact_workspace,
+    )
+    experimental_compact(
+        starts,
+        flags,
+        compacted_starts,
+        run_count,
+        method=method,
+        workspace=workspace.compact_workspace,
+    )
+    if ndarray_mode:
+        rle_finalize_lengths_ndarray(
+            compacted_starts, run_lengths, run_count, n, capacity
+        )
+    else:
+        rle_finalize_lengths_field(
+            compacted_starts, run_lengths, run_count, n, capacity
+        )
+    workspace._update_usage()
+    return workspace
 
 
 def _check_reduce_request(values, output, op, method, workspace):
@@ -14974,6 +15577,7 @@ __all__ = [
     "SortWorkspace",
     "PrefixSumExecutor",
     "CompactWorkspace",
+    "RunLengthWorkspace",
     "ReduceWorkspace",
     "CheckWorkspace",
     "DeviceCheckResult",
@@ -14999,6 +15603,9 @@ __all__ = [
     "get_primitive_diagnostics",
     "clear_default_workspaces",
     "experimental_compact",
+    "experimental_run_length_encode",
+    "experimental_unique",
+    "experimental_unique_by_key",
     "experimental_reduce",
     "experimental_histogram",
     "experimental_transform",
