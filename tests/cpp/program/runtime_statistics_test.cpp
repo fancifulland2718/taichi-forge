@@ -70,7 +70,7 @@ TEST(RuntimeStatistics, ConcurrentCountersRemainExactAndMonotonic) {
 TEST(RuntimeStatistics, CategoriesDoNotAliasEachOther) {
   RuntimeStatistics statistics(Arch::x64, 31);
   statistics.record_submission(RuntimeSubmissionKind::kGraph);
-  statistics.record_submission(RuntimeSubmissionKind::kGraphBackendReplay);
+  statistics.record_submission(RuntimeSubmissionKind::kGraphBackendSubmission);
   statistics.record_submission(RuntimeSubmissionKind::kNative);
   statistics.record_submission_failure();
   statistics.record_program_sync(19);
@@ -86,7 +86,7 @@ TEST(RuntimeStatistics, CategoriesDoNotAliasEachOther) {
   const RuntimeStatisticsSnapshot snapshot = statistics.snapshot();
   EXPECT_EQ(snapshot.submission.kernel_submissions, 0u);
   EXPECT_EQ(snapshot.submission.graph_submissions, 1u);
-  EXPECT_EQ(snapshot.submission.graph_backend_replays, 1u);
+  EXPECT_EQ(snapshot.submission.graph_backend_submissions, 1u);
   EXPECT_EQ(snapshot.submission.native_submissions, 1u);
   EXPECT_EQ(snapshot.submission.failed_submissions, 1u);
   EXPECT_EQ(snapshot.synchronization.program_syncs, 1u);

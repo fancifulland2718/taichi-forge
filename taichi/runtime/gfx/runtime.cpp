@@ -1602,7 +1602,8 @@ GraphReplayStats GfxRuntime::debug_graph_replay_stats(
 
 bool GfxRuntime::try_launch_graph(
     const std::vector<GraphDispatch> &dispatches,
-    uint64_t replay_key) {
+    uint64_t replay_key,
+    RuntimeStatistics *statistics) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   collect_ready_graph_replays();
   TI_ASSERT(replay_key != 0);
@@ -1766,9 +1767,13 @@ bool GfxRuntime::try_launch_graph(
     if (state.diagnostics_enabled) {
       ++state.slot_saturation_fallbacks;
     }
+    if (statistics != nullptr) {
+      statistics->record_graph_slot_saturation_fallback();
+    }
     return reject(GraphReplayFallbackReason::slot_saturated);
   }
 
+  const bool is_recapture = slot->recorded || slot->cmdlist != nullptr;
   slot->args_buffers.resize(prepared.size());
   slot->args_buffer_sizes.resize(prepared.size(), 0);
   SizeMap empty_ext_sizes;
@@ -1807,6 +1812,9 @@ bool GfxRuntime::try_launch_graph(
         device_->get_compute_stream()->submit(slot->cmdlist.get());
     if (state.diagnostics_enabled) {
       ++state.replayed;
+    }
+    if (statistics != nullptr) {
+      statistics->record_graph_replay();
     }
     state.last_path = GraphReplayLastPath::replay;
     return true;
@@ -1941,6 +1949,12 @@ bool GfxRuntime::try_launch_graph(
   slot->completion = device_->get_compute_stream()->submit(slot->cmdlist.get());
   if (state.diagnostics_enabled) {
     ++state.recorded;
+  }
+  if (statistics != nullptr) {
+    statistics->record_graph_capture();
+    if (is_recapture) {
+      statistics->record_graph_recapture();
+    }
   }
   state.last_path = GraphReplayLastPath::record;
   return true;

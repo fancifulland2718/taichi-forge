@@ -27,6 +27,7 @@
 #endif
 
 namespace taichi::lang {
+class RuntimeStatistics;
 namespace gfx {
 
 using namespace taichi::lang::spirv;
@@ -336,7 +337,8 @@ class TI_DLL_EXPORT GfxRuntime {
   };
 
   bool try_launch_graph(const std::vector<GraphDispatch> &dispatches,
-                        uint64_t replay_key);
+                        uint64_t replay_key,
+                        RuntimeStatistics *statistics);
   std::unique_ptr<GraphReplayRegistration> register_graph_replay(
       uint64_t replay_token);
   bool owns_graph_replay_registration(

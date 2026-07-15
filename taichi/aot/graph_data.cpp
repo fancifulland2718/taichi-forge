@@ -1047,7 +1047,8 @@ bool handle_cuda_graph_driver_failure(CompiledGraphCudaState &state,
 bool try_run_cuda_graph(const CompiledGraph &graph,
                         const CompileConfig &compile_config,
                         const std::unordered_map<std::string, IValue> &args,
-                        CompiledGraphJITCache &cache) {
+                        CompiledGraphJITCache &cache,
+                        RuntimeStatistics *statistics) {
   auto *state = get_cuda_graph_state(cache);
   if (state->diagnostics_enabled) {
     state->stats.backend = CompiledGraphBackend::cuda;
@@ -1084,6 +1085,9 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
     if (state->diagnostics_enabled) {
       ++state->stats.exact_replays;
+    }
+    if (statistics != nullptr) {
+      statistics->record_graph_replay();
     }
     return true;
   }
@@ -1132,11 +1136,15 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
       if (state->diagnostics_enabled) {
         ++state->stats.patched_replays;
       }
+      if (statistics != nullptr) {
+        statistics->record_graph_replay();
+      }
       return true;
     }
   }
   // Any partial argument-buffer update is ordered on the default stream.
   // Retiring the old executable synchronizes that stream before recapture.
+  const bool is_recapture = state->has_captured_once;
   state->retire();
   state->signature = std::move(signature->entries);
   state->allocations = signature->allocations;
@@ -1245,6 +1253,12 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
       ++state->stats.zero_arg_captures;
     }
   }
+  if (statistics != nullptr) {
+    statistics->record_graph_capture();
+    if (is_recapture) {
+      statistics->record_graph_recapture();
+    }
+  }
   driver.graph_launch(state->graph_exec.get(), nullptr);
   return true;
 }
@@ -1301,7 +1315,8 @@ CompiledGraphVulkanState *get_vulkan_graph_state(
 bool try_run_vulkan_graph(const CompiledGraph &graph,
                           const CompileConfig &compile_config,
                           const std::unordered_map<std::string, IValue> &args,
-                          CompiledGraphJITCache &cache) {
+                          CompiledGraphJITCache &cache,
+                          RuntimeStatistics *statistics) {
   if (compile_config.debug) {
     auto &stats = cache.vulkan_inline_stats;
     stats.backend = CompiledGraphBackend::vulkan;
@@ -1369,7 +1384,7 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
   auto *runtime = gfx_launcher->runtime();
   auto *state = get_vulkan_graph_state(cache, runtime);
   return runtime->try_launch_graph(
-      gfx_dispatches, state->registration->replay_key());
+      gfx_dispatches, state->registration->replay_key(), statistics);
 }
 
 }  // namespace
@@ -1569,7 +1584,7 @@ void CompiledGraph::run(
 
 void CompiledGraph::jit_run(
     const CompileConfig &compile_config,
-    const std::unordered_map<std::string, IValue> &args) const {
+    const std::unordered_map<std::string, IValue> &args) const try {
   Program *program = jit_graph_program(*this);
   if (program != nullptr) {
     program->ensure_runtime_submission_allowed("Graph launch");
@@ -1615,6 +1630,19 @@ void CompiledGraph::jit_run(
         compile_config, prog->get_device_caps(), *dispatch.ti_kernel);
     prog->launch_kernel(compiled_kernel_data, launch_ctx);
   }
+} catch (const BackendRuntimeError &error) {
+  Program *program = jit_graph_program(*this);
+  if (program != nullptr) {
+    program->record_runtime_submission_failure();
+    program->report_backend_runtime_error(error);
+  }
+  throw;
+} catch (...) {
+  Program *program = jit_graph_program(*this);
+  if (program != nullptr) {
+    program->record_runtime_submission_failure();
+  }
+  throw;
 }
 
 void CompiledGraph::jit_run_cached(
@@ -1680,21 +1708,35 @@ void CompiledGraph::jit_run_cached(
     cache.validated_snode_tree_epoch = tree_lifecycle_guard->epoch();
   }
 #if defined(TI_WITH_CUDA)
-  if (compile_config.arch == Arch::cuda &&
-      try_run_cuda_graph(*this, compile_config, args, cache)) {
-    TI_ASSERT(program != nullptr);
-    program->mark_runtime_submission(
-        RuntimeSubmissionKind::kGraphBackendReplay);
-    return;
+  if (compile_config.arch == Arch::cuda) {
+    if (try_run_cuda_graph(*this, compile_config, args, cache,
+                           program != nullptr
+                               ? &program->runtime_statistics()
+                               : nullptr)) {
+      TI_ASSERT(program != nullptr);
+      program->mark_runtime_submission(
+          RuntimeSubmissionKind::kGraphBackendSubmission);
+      return;
+    }
+    if (program != nullptr) {
+      program->runtime_statistics().record_graph_ordinary_fallback();
+    }
   }
 #endif
 #if defined(TI_WITH_VULKAN)
-  if (compile_config.arch == Arch::vulkan &&
-      try_run_vulkan_graph(*this, compile_config, args, cache)) {
-    TI_ASSERT(program != nullptr);
-    program->mark_runtime_submission(
-        RuntimeSubmissionKind::kGraphBackendReplay);
-    return;
+  if (compile_config.arch == Arch::vulkan) {
+    if (try_run_vulkan_graph(*this, compile_config, args, cache,
+                             program != nullptr
+                                 ? &program->runtime_statistics()
+                                 : nullptr)) {
+      TI_ASSERT(program != nullptr);
+      program->mark_runtime_submission(
+          RuntimeSubmissionKind::kGraphBackendSubmission);
+      return;
+    }
+    if (program != nullptr) {
+      program->runtime_statistics().record_graph_ordinary_fallback();
+    }
   }
 #endif
   if (cache.kernels.size() != dispatches.size()) {
@@ -1739,7 +1781,14 @@ void CompiledGraph::jit_run_cached(
 } catch (const BackendRuntimeError &error) {
   Program *program = jit_graph_program(*this);
   if (program != nullptr) {
+    program->record_runtime_submission_failure();
     program->report_backend_runtime_error(error);
+  }
+  throw;
+} catch (...) {
+  Program *program = jit_graph_program(*this);
+  if (program != nullptr) {
+    program->record_runtime_submission_failure();
   }
   throw;
 }

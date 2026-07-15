@@ -246,12 +246,15 @@ class TI_DLL_EXPORT Program {
   RuntimeCompletion record_runtime_completion();
   std::unique_ptr<RuntimeSubmissionTransaction>
   begin_runtime_submission_transaction();
+  TI_FORCE_INLINE void mark_runtime_submission_pending() noexcept {
+    runtime_submission_pending_.store(true, std::memory_order_relaxed);
+  }
   TI_FORCE_INLINE void mark_runtime_submission(
       RuntimeSubmissionKind kind = RuntimeSubmissionKind::kKernel) noexcept {
     // The reader gate supplies ordering once completion tracking is enabled.
     // The dirty publication and schema-v1 telemetry are independent relaxed
     // operations; neither imposes cross-counter event ordering.
-    runtime_submission_pending_.store(true, std::memory_order_relaxed);
+    mark_runtime_submission_pending();
     runtime_fault_domain_->statistics().record_submission(kind);
   }
   TI_FORCE_INLINE void record_runtime_submission_stat(

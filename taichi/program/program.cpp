@@ -218,7 +218,10 @@ Program::RuntimeSubmissionTransaction::~RuntimeSubmissionTransaction() {
 
 void Program::RuntimeSubmissionTransaction::mark_submission() noexcept {
   if (!finished_) {
-    program_->mark_runtime_submission(RuntimeSubmissionKind::kNative);
+    // Native calls now record their own operation count at the actual Program
+    // method boundary. This transaction only publishes that the native
+    // portion may have left backend work for the completion ticket.
+    program_->mark_runtime_submission_pending();
   }
 }
 

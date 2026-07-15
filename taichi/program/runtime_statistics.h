@@ -22,7 +22,7 @@ struct RuntimeOptionalCounter {
 struct RuntimeSubmissionStatistics {
   std::uint64_t kernel_submissions{0};
   std::uint64_t graph_submissions{0};
-  std::uint64_t graph_backend_replays{0};
+  std::uint64_t graph_backend_submissions{0};
   std::uint64_t native_submissions{0};
   std::uint64_t failed_submissions{0};
 };
@@ -107,7 +107,7 @@ static_assert(std::is_trivially_copyable_v<RuntimeStatisticsSnapshot>);
 enum class RuntimeSubmissionKind : std::uint8_t {
   kKernel,
   kGraph,
-  kGraphBackendReplay,
+  kGraphBackendSubmission,
   kNative,
 };
 
@@ -135,7 +135,8 @@ class TI_DLL_EXPORT RuntimeStatistics final {
     result.program_domain = program_domain_;
     result.submission.kernel_submissions = load(kernel_submissions_);
     result.submission.graph_submissions = load(graph_submissions_);
-    result.submission.graph_backend_replays = load(graph_backend_replays_);
+    result.submission.graph_backend_submissions =
+        load(graph_backend_submissions_);
     result.submission.native_submissions = load(native_submissions_);
     result.submission.failed_submissions = load(failed_submissions_);
     result.synchronization.program_syncs = load(program_syncs_);
@@ -174,8 +175,8 @@ class TI_DLL_EXPORT RuntimeStatistics final {
       case RuntimeSubmissionKind::kGraph:
         add(graph_submissions_, 1);
         break;
-      case RuntimeSubmissionKind::kGraphBackendReplay:
-        add(graph_backend_replays_, 1);
+      case RuntimeSubmissionKind::kGraphBackendSubmission:
+        add(graph_backend_submissions_, 1);
         break;
       case RuntimeSubmissionKind::kNative:
         add(native_submissions_, 1);
@@ -267,7 +268,7 @@ class TI_DLL_EXPORT RuntimeStatistics final {
   const std::uint64_t program_domain_;
   std::atomic<std::uint64_t> kernel_submissions_{0};
   std::atomic<std::uint64_t> graph_submissions_{0};
-  std::atomic<std::uint64_t> graph_backend_replays_{0};
+  std::atomic<std::uint64_t> graph_backend_submissions_{0};
   std::atomic<std::uint64_t> native_submissions_{0};
   std::atomic<std::uint64_t> failed_submissions_{0};
   std::atomic<std::uint64_t> program_syncs_{0};

@@ -1117,6 +1117,7 @@ class Graph:
                     "forward AD and would omit dual propagation. Run the Graph "
                     "outside automatic AD."
                 )
+            runtime.prog._record_runtime_graph_submission()
             # Runtime AD state is process-global rather than thread-local. The
             # signed state closes the window where this native call releases
             # the GIL and another Python thread enters Tape/FwdMode.
@@ -1159,6 +1160,7 @@ class Graph:
                 )
 
             transaction = runtime.prog._begin_runtime_submission_transaction()
+            runtime.prog._record_runtime_graph_submission()
             runtime._active_graph_submissions = submission_state + 1
             try:
                 self._run_impl(args)
