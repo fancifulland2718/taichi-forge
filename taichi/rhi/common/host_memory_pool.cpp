@@ -11,7 +11,7 @@
 namespace taichi::lang {
 
 HostMemoryPool::HostMemoryPool() {
-  allocator_ = std::unique_ptr<UnifiedAllocator>(new UnifiedAllocator());
+  allocator_ = std::unique_ptr<UnifiedAllocator>(new UnifiedAllocator(this));
 
   TI_TRACE("Memory pool created. Default buffer size per allocator = {} MB",
            UnifiedAllocator::default_allocator_size / 1024 / 1024);
@@ -39,10 +39,8 @@ void HostMemoryPool::release(std::size_t size, void *ptr) {
     TI_ERROR("Memory pool is already destroyed");
   }
 
-  if (allocator_->release(size, ptr)) {
-    if (dynamic_cast<UnifiedAllocator *>(allocator_.get())) {
-      deallocate_raw_memory(ptr);  // release raw memory as well
-    }
+  if (void *raw_ptr = allocator_->release(size, ptr)) {
+    deallocate_raw_memory(raw_ptr);  // release raw memory as well
   }
   ++release_count_;
   bytes_released_total_ += size;
@@ -135,7 +133,7 @@ void HostMemoryPool::deallocate_raw_memory(void *ptr) {
 
 void HostMemoryPool::reset() {
   std::lock_guard<std::mutex> _(mut_allocation_);
-  allocator_ = std::unique_ptr<UnifiedAllocator>(new UnifiedAllocator());
+  allocator_ = std::unique_ptr<UnifiedAllocator>(new UnifiedAllocator(this));
 
   const auto ptr_map_copied = raw_memory_chunks_;
   for (auto &ptr : ptr_map_copied) {

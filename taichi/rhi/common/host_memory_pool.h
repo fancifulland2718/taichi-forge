@@ -59,6 +59,7 @@ class TI_DLL_EXPORT HostMemoryPool {
   uint64_t bytes_released_total_{0};
 
   friend class UnifiedAllocator;
+  friend class HostMemoryPoolTestHelper;
 };
 
 }  // namespace taichi::lang
