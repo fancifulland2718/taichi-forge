@@ -7,6 +7,45 @@ from taichi_forge._lib import core as _ti_core
 from tests import test_utils
 
 
+@test_utils.test(arch=[ti.cpu])
+def test_primitive_workspace_control_surface_is_exact_and_safe_to_clear():
+    prog = ti.lang.impl.get_runtime().prog
+    before = prog._primitive_workspace_stats()
+    assert set(before) == {
+        "budget_bytes",
+        "reserved_bytes",
+        "in_use_bytes",
+        "persistent_bytes",
+        "reclaimable_bytes",
+        "over_budget_bytes",
+        "peak_reserved_bytes",
+        "peak_in_use_bytes",
+        "entries",
+        "active_leases",
+        "acquisitions",
+        "cache_hits",
+        "cache_misses",
+        "growth_events",
+        "clear_calls",
+        "cleared_entries",
+        "trim_calls",
+        "evictions",
+        "lock_samples",
+        "lock_contentions",
+        "lock_wait_ns",
+    }
+    assert before["entries"] == 0
+    assert before["reserved_bytes"] == 0
+
+    prog._primitive_workspace_set_budget_bytes(8192)
+    prog._primitive_workspace_clear()
+    after = prog._primitive_workspace_stats()
+    assert after["budget_bytes"] == 8192
+    assert after["entries"] == 0
+    assert after["active_leases"] == 0
+    assert after["clear_calls"] == before["clear_calls"] + 1
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_runtime_statistics_kernel_completion_sync_and_memory():
     @ti.kernel

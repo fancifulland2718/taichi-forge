@@ -219,8 +219,10 @@ def test_scan_with_offset(dtype, N, offset):
 def test_scan_ndarray_cuda_cub():
     N = 4096
 
-    if not impl.get_runtime().prog.cuda_cub_scan_available():
+    prog = impl.get_runtime().prog
+    if not prog.cuda_cub_scan_available():
         pytest.skip("CUDA CUB scan is unavailable in this build/runtime.")
+    before = prog._primitive_workspace_stats()
 
     for dtype, np_dtype in _SCAN_DTYPES:
         arr = ti.ndarray(dtype, shape=N)
@@ -229,7 +231,13 @@ def test_scan_ndarray_cuda_cub():
         ti.algorithms.PrefixSumExecutor(N).run(arr)
         expected = np.cumsum(data, dtype=np_dtype).astype(np_dtype)
         _assert_scan_equal(arr.to_numpy(), expected)
-    assert impl.get_runtime().prog.cuda_cub_scan_workspace_bytes() > 0
+    workspace_bytes = prog.cuda_cub_scan_workspace_bytes()
+    after = prog._primitive_workspace_stats()
+    assert workspace_bytes > 0
+    assert after["entries"] >= before["entries"] + 1
+    assert after["reserved_bytes"] >= before["reserved_bytes"] + workspace_bytes
+    assert after["acquisitions"] >= before["acquisitions"] + len(_SCAN_DTYPES)
+    assert after["active_leases"] == 0
 
 
 @test_utils.test(arch=[ti.cuda])

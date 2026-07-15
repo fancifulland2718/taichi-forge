@@ -118,6 +118,33 @@ py::dict runtime_trace_snapshot_to_dict(
   return result;
 }
 
+py::dict primitive_workspace_snapshot_to_dict(
+    const lang::PrimitiveWorkspaceSnapshot &snapshot) {
+  py::dict result;
+  result["budget_bytes"] = snapshot.budget_bytes;
+  result["reserved_bytes"] = snapshot.reserved_bytes;
+  result["in_use_bytes"] = snapshot.in_use_bytes;
+  result["persistent_bytes"] = snapshot.persistent_bytes;
+  result["reclaimable_bytes"] = snapshot.reclaimable_bytes;
+  result["over_budget_bytes"] = snapshot.over_budget_bytes;
+  result["peak_reserved_bytes"] = snapshot.peak_reserved_bytes;
+  result["peak_in_use_bytes"] = snapshot.peak_in_use_bytes;
+  result["entries"] = snapshot.entries;
+  result["active_leases"] = snapshot.active_leases;
+  result["acquisitions"] = snapshot.acquisitions;
+  result["cache_hits"] = snapshot.cache_hits;
+  result["cache_misses"] = snapshot.cache_misses;
+  result["growth_events"] = snapshot.growth_events;
+  result["clear_calls"] = snapshot.clear_calls;
+  result["cleared_entries"] = snapshot.cleared_entries;
+  result["trim_calls"] = snapshot.trim_calls;
+  result["evictions"] = snapshot.evictions;
+  result["lock_samples"] = snapshot.lock_samples;
+  result["lock_contentions"] = snapshot.lock_contentions;
+  result["lock_wait_ns"] = snapshot.lock_wait_ns;
+  return result;
+}
+
 }  // namespace
 
 void export_lang(py::module &m) {
@@ -857,6 +884,14 @@ void export_lang(py::module &m) {
         result["trace"] = std::move(trace);
         return result;
       })
+      .def("_primitive_workspace_stats", [](const Program &program) {
+        return primitive_workspace_snapshot_to_dict(
+            program.primitive_workspace_snapshot());
+      })
+      .def("_primitive_workspace_set_budget_bytes",
+           &Program::set_primitive_workspace_budget)
+      .def("_primitive_workspace_clear", &Program::clear_primitive_workspaces,
+           py::call_guard<py::gil_scoped_release>())
       .def(
           "_runtime_trace_start",
           [](Program &program, std::size_t max_threads,

@@ -6895,18 +6895,12 @@ void Program::finalize() {
     release_completed_ndarray_leases();
     release_completed_texture_leases();
   }
+  best_effort("clear primitive workspace arena",
+              [&] { primitive_workspace_arena_.clear(); });
   if (compile_config().arch == Arch::vulkan) {
     best_effort("clear Vulkan primitive caches",
                 [&] { vulkan_clear_primitive_caches(); });
   }
-#ifdef TI_WITH_CUDA
-  if (compile_config().arch == Arch::cuda) {
-    best_effort("clear CUDA bucket-builder cache",
-                [&] { cuda::cub_bucket_builder_clear_cache(this); });
-    best_effort("clear CUDA grouped-reduce cache",
-                [&] { cuda::cub_grouped_reduce_clear_cache(this); });
-  }
-#endif
   best_effort("finalize ArgPack resources",
               [&] { argpack_resources_.finalize({kArgPackResourceKind}); });
   best_effort("finalize Ndarray resources",
@@ -6938,6 +6932,22 @@ void Program::finalize() {
   // Reset memory pool
   best_effort("reset host memory pool",
               [&] { HostMemoryPool::get_instance().reset(); });
+}
+
+void Program::clear_primitive_workspaces() {
+  clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::any,
+                                 PrimitiveWorkspaceFamily::any);
+}
+
+void Program::clear_primitive_workspaces_for(
+    PrimitiveWorkspaceBackend backend,
+    PrimitiveWorkspaceFamily family) {
+  ensure_runtime_submission_allowed("primitive workspace clear");
+  // Resource destructors may call backend deallocation APIs. Establish an
+  // explicit completion boundary here instead of letting an arena budget or
+  // cache lookup introduce an invisible wait after enqueue.
+  synchronize();
+  primitive_workspace_arena_.clear(backend, family);
 }
 
 int Program::default_block_dim(const CompileConfig &config) {
@@ -9416,7 +9426,7 @@ std::size_t Program::cuda_device_bucket_builder_ndarray(Ndarray *keys,
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(cursor)),
       static_cast<int>(keys->get_nelement()), static_cast<int>(num_bins),
       static_cast<cuda::CudaBucketBuilderValueType>(value_type),
-      item_words, stream, this);
+      item_words, stream, &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA bucket builder requires building Taichi with TI_WITH_CUDA=ON and "
@@ -9497,7 +9507,7 @@ std::size_t Program::cuda_device_bucket_builder_dense_field(
       keys_ptr, values_ptr, offsets_ptr, output_ptr, cursor_ptr,
       static_cast<int>(n), static_cast<int>(num_bins),
       static_cast<cuda::CudaBucketBuilderValueType>(value_type), item_words,
-      stream, this);
+      stream, &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA dense field bucket builder requires building Taichi with "
@@ -9798,7 +9808,7 @@ std::size_t Program::cuda_device_grouped_reduce_ndarray(Ndarray *keys,
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(cursor)),
       static_cast<int>(keys->get_nelement()), static_cast<int>(num_groups),
       static_cast<cuda::CudaGroupedReduceValueType>(value_type), op,
-      stream, this);
+      stream, &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA grouped reduce requires building Taichi with TI_WITH_CUDA=ON and "
@@ -9869,7 +9879,7 @@ std::size_t Program::cuda_device_grouped_reduce_segmented_strided_keys_ndarray(
       static_cast<int>(n), static_cast<int>(num_groups),
       static_cast<cuda::CudaGroupedReduceValueType>(value_type), keys_offset,
       keys_stride, values_offset, values_stride, output_offset, output_stride,
-      op, stream, this);
+      op, stream, &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA strided segmented grouped reduce requires building Taichi with "
@@ -9960,7 +9970,7 @@ std::size_t Program::cuda_cub_radix_sort_ndarray(Ndarray *keys,
       key_ptr, value_ptr, static_cast<int>(keys->get_nelement()),
       cub_key_type, cub_value_type, cub_mode, cub_nan_policy, has_values,
       has_values ? static_cast<int>(actual_value_size / sizeof(uint32_t)) : 0,
-      stream, this);
+      stream, &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB sort requires building Taichi with TI_WITH_CUDA=ON and "
@@ -10028,7 +10038,7 @@ std::size_t Program::cuda_cub_radix_sort_dense_field(SNode *keys,
       static_cast<cuda::CubSortMode>(mode),
       static_cast<cuda::CubSortNanPolicy>(nan_policy), has_values,
       has_values ? static_cast<int>(value_stride / sizeof(uint32_t)) : 0,
-      stream, this);
+      stream, &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB dense field sort requires building Taichi with TI_WITH_CUDA=ON "
@@ -10039,7 +10049,8 @@ std::size_t Program::cuda_cub_radix_sort_dense_field(SNode *keys,
 void Program::cuda_cub_radix_sort_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
-    cuda::cub_radix_sort_clear_cache(this);
+    clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::cuda,
+                                   PrimitiveWorkspaceFamily::ordering);
   }
 #endif
 }
@@ -10047,7 +10058,8 @@ void Program::cuda_cub_radix_sort_clear_workspace() {
 std::size_t Program::cuda_cub_radix_sort_workspace_bytes() const {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
-    return cuda::cub_radix_sort_cached_bytes(const_cast<Program *>(this));
+    return cuda::cub_radix_sort_cached_bytes(
+        const_cast<PrimitiveWorkspaceArena *>(&primitive_workspace_arena_));
   }
 #endif
   return 0;
@@ -10289,7 +10301,7 @@ std::size_t Program::cuda_cub_inclusive_scan_ndarray(Ndarray *data,
   void *stream = nullptr;
   return cuda::cub_inclusive_scan(
       data_ptr, static_cast<int>(data->get_nelement()), cub_value_type, stream,
-      this);
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB scan requires building Taichi with TI_WITH_CUDA=ON and "
@@ -10338,7 +10350,7 @@ std::size_t Program::cuda_cub_inclusive_reverse_scan_ndarray(Ndarray *data,
   void *stream = nullptr;
   return cuda::cub_inclusive_reverse_scan(
       data_ptr, static_cast<int>(data->get_nelement()), cub_value_type, stream,
-      this);
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB reverse scan requires building Taichi with TI_WITH_CUDA=ON "
@@ -10369,7 +10381,7 @@ std::size_t Program::cuda_cub_inclusive_scan_member_ndarray(
   return cuda::cub_inclusive_scan_strided(
       data_ptr, static_cast<int>(data->get_nelement()),
       static_cast<cuda::CubScanValueType>(value_type), offset, stride, stream,
-      this);
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB strided scan requires building Taichi with TI_WITH_CUDA=ON "
@@ -10402,7 +10414,7 @@ std::size_t Program::cuda_cub_inclusive_reverse_scan_member_ndarray(
   return cuda::cub_inclusive_reverse_scan_strided(
       data_ptr, static_cast<int>(data->get_nelement()),
       static_cast<cuda::CubScanValueType>(value_type), offset, stride, stream,
-      this);
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB reverse strided scan requires building Taichi with "
@@ -10439,7 +10451,8 @@ std::size_t Program::cuda_cub_inclusive_scan_dense_field(SNode *data,
   void *stream = nullptr;
   return cuda::cub_inclusive_scan_strided(
       data_ptr, static_cast<int>(n),
-      static_cast<cuda::CubScanValueType>(value_type), 0, stride, stream, this);
+      static_cast<cuda::CubScanValueType>(value_type), 0, stride, stream,
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB dense field scan requires building Taichi with "
@@ -10481,7 +10494,8 @@ std::size_t Program::cuda_cub_inclusive_reverse_scan_dense_field(
   void *stream = nullptr;
   return cuda::cub_inclusive_reverse_scan_strided(
       data_ptr, static_cast<int>(n),
-      static_cast<cuda::CubScanValueType>(value_type), 0, stride, stream, this);
+      static_cast<cuda::CubScanValueType>(value_type), 0, stride, stream,
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB dense field reverse scan requires building Taichi with "
@@ -10524,7 +10538,7 @@ std::size_t Program::cuda_cub_inclusive_scan_dense_field_packed(
             data_ptr, static_cast<int>(n),
             static_cast<cuda::CubScanValueType>(value_type),
             static_cast<std::size_t>(lane) * value_size, item_bytes, stream,
-            this));
+            &primitive_workspace_arena_));
   }
   return temp_bytes;
 #else
@@ -10573,7 +10587,7 @@ std::size_t Program::cuda_cub_inclusive_reverse_scan_dense_field_packed(
             data_ptr, static_cast<int>(n),
             static_cast<cuda::CubScanValueType>(value_type),
             static_cast<std::size_t>(lane) * value_size, item_bytes, stream,
-            this));
+            &primitive_workspace_arena_));
   }
   return temp_bytes;
 #else
@@ -10586,7 +10600,8 @@ std::size_t Program::cuda_cub_inclusive_reverse_scan_dense_field_packed(
 void Program::cuda_cub_scan_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
-    cuda::cub_inclusive_scan_clear_cache(this);
+    clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::cuda,
+                                   PrimitiveWorkspaceFamily::scan);
   }
 #endif
 }
@@ -10594,7 +10609,8 @@ void Program::cuda_cub_scan_clear_workspace() {
 std::size_t Program::cuda_cub_scan_workspace_bytes() const {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
-    return cuda::cub_inclusive_scan_cached_bytes(const_cast<Program *>(this));
+    return cuda::cub_inclusive_scan_cached_bytes(
+        const_cast<PrimitiveWorkspaceArena *>(&primitive_workspace_arena_));
   }
 #endif
   return 0;
@@ -10670,7 +10686,7 @@ std::size_t Program::cuda_cub_select_ndarray(Ndarray *values,
       values_ptr, flags_ptr, output_ptr, count_ptr,
       static_cast<int>(values->get_nelement()),
       static_cast<cuda::CubSelectValueType>(value_type), item_words, stream,
-      this);
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB select requires building Taichi with TI_WITH_CUDA=ON and "
@@ -10733,7 +10749,7 @@ std::size_t Program::cuda_cub_select_dense_field(SNode *values,
   return cuda::cub_select_flagged(
       values_ptr, flags_ptr, output_ptr, count_ptr, static_cast<int>(n),
       static_cast<cuda::CubSelectValueType>(value_type),
-      static_cast<int>(item_words), stream, this);
+      static_cast<int>(item_words), stream, &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB dense field select requires building Taichi with "
@@ -10753,7 +10769,8 @@ std::size_t Program::cuda_cub_select_i32_ndarray(Ndarray *values,
 void Program::cuda_cub_select_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
-    cuda::cub_select_clear_cache(this);
+    clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::cuda,
+                                   PrimitiveWorkspaceFamily::compact);
   }
 #endif
 }
@@ -10761,7 +10778,8 @@ void Program::cuda_cub_select_clear_workspace() {
 std::size_t Program::cuda_cub_select_workspace_bytes() const {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
-    return cuda::cub_select_cached_bytes(const_cast<Program *>(this));
+    return cuda::cub_select_cached_bytes(
+        const_cast<PrimitiveWorkspaceArena *>(&primitive_workspace_arena_));
   }
 #endif
   return 0;
@@ -10816,7 +10834,7 @@ std::size_t Program::cuda_cub_histogram_ndarray(Ndarray *values,
       static_cast<int>(bins->get_nelement()),
       static_cast<cuda::CubHistogramValueType>(value_type),
       static_cast<cuda::CubHistogramBinType>(bin_type),
-      stream, this);
+      stream, &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB histogram requires building Taichi with TI_WITH_CUDA=ON and "
@@ -10868,7 +10886,8 @@ std::size_t Program::cuda_cub_histogram_dense_field(SNode *values,
   return cuda::cub_histogram_even(
       values_ptr, bins_ptr, static_cast<int>(n), static_cast<int>(num_bins),
       static_cast<cuda::CubHistogramValueType>(value_type),
-      static_cast<cuda::CubHistogramBinType>(bin_type), stream, this);
+      static_cast<cuda::CubHistogramBinType>(bin_type), stream,
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB dense field histogram requires building Taichi with "
@@ -10879,7 +10898,8 @@ std::size_t Program::cuda_cub_histogram_dense_field(SNode *values,
 void Program::cuda_cub_histogram_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
-    cuda::cub_histogram_clear_cache(this);
+    clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::cuda,
+                                   PrimitiveWorkspaceFamily::histogram);
   }
 #endif
 }
@@ -10887,7 +10907,8 @@ void Program::cuda_cub_histogram_clear_workspace() {
 std::size_t Program::cuda_cub_histogram_workspace_bytes() const {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
-    return cuda::cub_histogram_cached_bytes(const_cast<Program *>(this));
+    return cuda::cub_histogram_cached_bytes(
+        const_cast<PrimitiveWorkspaceArena *>(&primitive_workspace_arena_));
   }
 #endif
   return 0;
@@ -10935,7 +10956,8 @@ std::size_t Program::cuda_cub_reduce_ndarray(Ndarray *values,
   return cuda::cub_reduce(values_ptr, output_ptr,
                           static_cast<int>(values->get_nelement()),
                           static_cast<cuda::CubReduceValueType>(value_type),
-                          static_cast<cuda::CubReduceOp>(op), stream, this);
+                          static_cast<cuda::CubReduceOp>(op), stream,
+                          &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB reduce requires building Taichi with TI_WITH_CUDA=ON and "
@@ -10968,7 +10990,8 @@ std::size_t Program::cuda_cub_reduce_member_ndarray(Ndarray *values,
   return cuda::cub_reduce_strided(
       values_ptr, output_ptr, static_cast<int>(values->get_nelement()),
       static_cast<cuda::CubReduceValueType>(value_type), offset, stride,
-      static_cast<cuda::CubReduceOp>(op), stream, this);
+      static_cast<cuda::CubReduceOp>(op), stream,
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB strided reduce requires building Taichi with TI_WITH_CUDA=ON "
@@ -11005,7 +11028,8 @@ std::size_t Program::cuda_cub_reduce_strided_ndarray(
   return cuda::cub_reduce_strided(
       values_ptr, output_ptr, static_cast<int>(values->get_nelement()),
       static_cast<cuda::CubReduceValueType>(value_type), values_offset,
-      values_stride, static_cast<cuda::CubReduceOp>(op), stream, this);
+      values_stride, static_cast<cuda::CubReduceOp>(op), stream,
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB strided reduce requires building Taichi with TI_WITH_CUDA=ON "
@@ -11053,7 +11077,8 @@ std::size_t Program::cuda_cub_reduce_dense_field(SNode *values,
   return cuda::cub_reduce_strided(
       values_ptr, output_ptr, static_cast<int>(n),
       static_cast<cuda::CubReduceValueType>(value_type), 0, stride,
-      static_cast<cuda::CubReduceOp>(op), stream, this);
+      static_cast<cuda::CubReduceOp>(op), stream,
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB dense field reduce requires building Taichi with "
@@ -11114,7 +11139,8 @@ std::size_t Program::cuda_cub_reduce_dense_field_packed(SNode *values,
         cuda::cub_reduce_strided(
             values_ptr, output_ptr + lane_offset, static_cast<int>(n),
             static_cast<cuda::CubReduceValueType>(value_type), lane_offset,
-            item_bytes, static_cast<cuda::CubReduceOp>(op), stream, this));
+            item_bytes, static_cast<cuda::CubReduceOp>(op), stream,
+            &primitive_workspace_arena_));
   }
   return temp_bytes;
 #else
@@ -11127,7 +11153,8 @@ std::size_t Program::cuda_cub_reduce_dense_field_packed(SNode *values,
 void Program::cuda_cub_reduce_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
-    cuda::cub_reduce_clear_cache(this);
+    clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::cuda,
+                                   PrimitiveWorkspaceFamily::reduce);
   }
 #endif
 }
@@ -11135,7 +11162,8 @@ void Program::cuda_cub_reduce_clear_workspace() {
 std::size_t Program::cuda_cub_reduce_workspace_bytes() const {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
-    return cuda::cub_reduce_cached_bytes(const_cast<Program *>(this));
+    return cuda::cub_reduce_cached_bytes(
+        const_cast<PrimitiveWorkspaceArena *>(&primitive_workspace_arena_));
   }
 #endif
   return 0;
@@ -11187,7 +11215,8 @@ std::size_t Program::cuda_cub_check_count_ndarray(Ndarray *values,
   return cuda::cub_check_count(
       values_ptr, output_ptr, static_cast<int>(values->get_nelement()),
       static_cast<cuda::CubReduceValueType>(value_type),
-      static_cast<cuda::CudaCheckOp>(check_op), lower, upper, stream, this);
+      static_cast<cuda::CudaCheckOp>(check_op), lower, upper, stream,
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB check_count requires building Taichi with TI_WITH_CUDA=ON.");
@@ -11244,7 +11273,8 @@ std::size_t Program::cuda_cub_check_count_strided_ndarray(
   return cuda::cub_check_count_strided(
       values_ptr, output_ptr, static_cast<int>(n),
       static_cast<cuda::CubReduceValueType>(value_type), offset, stride,
-      static_cast<cuda::CudaCheckOp>(check_op), lower, upper, stream, this);
+      static_cast<cuda::CudaCheckOp>(check_op), lower, upper, stream,
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB strided check_count requires building Taichi with "
@@ -11303,7 +11333,8 @@ std::size_t Program::cuda_cub_check_count_dense_field(SNode *values,
   return cuda::cub_check_count_strided(
       values_ptr, output_ptr, static_cast<int>(n),
       static_cast<cuda::CubReduceValueType>(value_type), 0, stride,
-      static_cast<cuda::CudaCheckOp>(check_op), lower, upper, stream, this);
+      static_cast<cuda::CudaCheckOp>(check_op), lower, upper, stream,
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB dense field check_count requires building Taichi with "
@@ -11314,7 +11345,8 @@ std::size_t Program::cuda_cub_check_count_dense_field(SNode *values,
 void Program::cuda_cub_check_count_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
-    cuda::cub_check_count_clear_cache(this);
+    clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::cuda,
+                                   PrimitiveWorkspaceFamily::check);
   }
 #endif
 }
@@ -11322,7 +11354,8 @@ void Program::cuda_cub_check_count_clear_workspace() {
 std::size_t Program::cuda_cub_check_count_workspace_bytes() const {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
-    return cuda::cub_check_count_cached_bytes(const_cast<Program *>(this));
+    return cuda::cub_check_count_cached_bytes(
+        const_cast<PrimitiveWorkspaceArena *>(&primitive_workspace_arena_));
   }
 #endif
   return 0;
@@ -11398,7 +11431,8 @@ std::size_t Program::cuda_cub_metric_reduce_ndarray(Ndarray *values,
       values_ptr, other_ptr, output_ptr,
       static_cast<int>(values->get_nelement()),
       static_cast<cuda::CubReduceValueType>(value_type),
-      static_cast<cuda::CudaMetricOp>(metric_op), stream, this);
+      static_cast<cuda::CudaMetricOp>(metric_op), stream,
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB metric_reduce requires building Taichi with TI_WITH_CUDA=ON.");
@@ -11485,7 +11519,8 @@ std::size_t Program::cuda_cub_metric_reduce_strided_ndarray(
       values_ptr, other_ptr, output_ptr, static_cast<int>(n),
       static_cast<cuda::CubReduceValueType>(value_type), values_offset,
       values_stride, other_offset, other_stride,
-      static_cast<cuda::CudaMetricOp>(metric_op), stream, this);
+      static_cast<cuda::CudaMetricOp>(metric_op), stream,
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB strided metric_reduce requires building Taichi with "
@@ -11554,7 +11589,8 @@ std::size_t Program::cuda_cub_metric_reduce_dense_field(SNode *values,
   return cuda::cub_metric_reduce_strided(
       values_ptr, other_ptr, output_ptr, static_cast<int>(n),
       static_cast<cuda::CubReduceValueType>(value_type), 0, values_stride, 0,
-      other_stride, static_cast<cuda::CudaMetricOp>(metric_op), stream, this);
+      other_stride, static_cast<cuda::CudaMetricOp>(metric_op), stream,
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB dense field metric_reduce requires building Taichi with "
@@ -11635,13 +11671,14 @@ std::size_t Program::cuda_cub_metric_reduce_dense_field_strided_ndarray(
         field_ptr, array_ptr, output_ptr, static_cast<int>(n),
         static_cast<cuda::CubReduceValueType>(value_type), 0, field_stride,
         array_offset, array_stride, static_cast<cuda::CudaMetricOp>(metric_op),
-        stream, this);
+        stream, &primitive_workspace_arena_);
   }
   return cuda::cub_metric_reduce_strided(
       array_ptr, field_ptr, output_ptr, static_cast<int>(n),
       static_cast<cuda::CubReduceValueType>(value_type), array_offset,
       array_stride, 0, field_stride,
-      static_cast<cuda::CudaMetricOp>(metric_op), stream, this);
+      static_cast<cuda::CudaMetricOp>(metric_op), stream,
+      &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA CUB mixed metric_reduce requires building Taichi with "
@@ -11652,7 +11689,8 @@ std::size_t Program::cuda_cub_metric_reduce_dense_field_strided_ndarray(
 void Program::cuda_cub_metric_reduce_clear_workspace() {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
-    cuda::cub_metric_reduce_clear_cache(this);
+    clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::cuda,
+                                   PrimitiveWorkspaceFamily::metric);
   }
 #endif
 }
@@ -11660,7 +11698,8 @@ void Program::cuda_cub_metric_reduce_clear_workspace() {
 std::size_t Program::cuda_cub_metric_reduce_workspace_bytes() const {
 #ifdef TI_WITH_CUDA
   if (compile_config().arch == Arch::cuda) {
-    return cuda::cub_metric_reduce_cached_bytes(const_cast<Program *>(this));
+    return cuda::cub_metric_reduce_cached_bytes(
+        const_cast<PrimitiveWorkspaceArena *>(&primitive_workspace_arena_));
   }
 #endif
   return 0;

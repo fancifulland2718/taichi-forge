@@ -1,4 +1,5 @@
 #include "taichi/rhi/cuda/cuda_primitives.h"
+#include "taichi/program/primitive_workspace.h"
 
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
@@ -9,11 +10,9 @@
 #include <iterator>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
-#include <unordered_map>
 
 namespace taichi::lang::cuda {
 namespace {
@@ -523,162 +522,40 @@ struct CubGroupedReduceCache {
   }
 };
 
-std::mutex &get_cache_mutex() {
-  static std::mutex mutex;
-  return mutex;
-}
-
-std::unordered_map<void *, std::unique_ptr<CubSortCache>> &get_caches() {
-  static std::unordered_map<void *, std::unique_ptr<CubSortCache>> caches;
-  return caches;
-}
-
-std::unordered_map<void *, std::unique_ptr<CubScanCache>> &get_scan_caches() {
-  static std::unordered_map<void *, std::unique_ptr<CubScanCache>> caches;
-  return caches;
-}
-
-std::unordered_map<void *, std::unique_ptr<CubSelectCache>> &
-get_select_caches() {
-  static std::unordered_map<void *, std::unique_ptr<CubSelectCache>> caches;
-  return caches;
-}
-
-std::unordered_map<void *, std::unique_ptr<CubReduceCache>> &
-get_reduce_caches() {
-  static std::unordered_map<void *, std::unique_ptr<CubReduceCache>> caches;
-  return caches;
-}
-
-std::unordered_map<void *, std::unique_ptr<CubCheckCountCache>> &
-get_check_count_caches() {
-  static std::unordered_map<void *, std::unique_ptr<CubCheckCountCache>> caches;
-  return caches;
-}
-
-std::unordered_map<void *, std::unique_ptr<CubMetricReduceCache>> &
-get_metric_reduce_caches() {
-  static std::unordered_map<void *, std::unique_ptr<CubMetricReduceCache>>
-      caches;
-  return caches;
-}
-
-std::unordered_map<void *, std::unique_ptr<CubBucketBuilderCache>> &
-get_bucket_builder_caches() {
-  static std::unordered_map<void *, std::unique_ptr<CubBucketBuilderCache>>
-      caches;
-  return caches;
-}
-
-std::unordered_map<void *, std::unique_ptr<CubGroupedReduceCache>> &
-get_grouped_reduce_caches() {
-  static std::unordered_map<void *, std::unique_ptr<CubGroupedReduceCache>>
-      caches;
-  return caches;
-}
-
-CubSortCache &get_cache(void *owner) {
-  static int fallback_owner = 0;
+PrimitiveWorkspaceArena &workspace_arena(void *owner) {
   if (!owner) {
-    owner = &fallback_owner;
+    throw std::invalid_argument(
+        "CUDA primitive workspace requires a Program-owned arena");
   }
-  auto &caches = get_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    it = caches.emplace(owner, std::make_unique<CubSortCache>()).first;
-  }
-  return *it->second;
+  return *static_cast<PrimitiveWorkspaceArena *>(owner);
 }
 
-CubScanCache &get_scan_cache(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  auto &caches = get_scan_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    it = caches.emplace(owner, std::make_unique<CubScanCache>()).first;
-  }
-  return *it->second;
+PrimitiveWorkspaceKey workspace_key(PrimitiveWorkspaceFamily family,
+                                    void *stream) {
+  return {PrimitiveWorkspaceBackend::cuda, family,
+          static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(stream)),
+          0};
 }
 
-CubSelectCache &get_select_cache(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  auto &caches = get_select_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    it = caches.emplace(owner, std::make_unique<CubSelectCache>()).first;
-  }
-  return *it->second;
+template <typename Cache>
+PrimitiveWorkspaceArena::Lease<Cache> acquire_cache(
+    void *owner,
+    PrimitiveWorkspaceFamily family,
+    void *stream) {
+  return workspace_arena(owner).acquire<Cache>(
+      workspace_key(family, stream),
+      [] { return std::make_shared<Cache>(); });
 }
 
-CubReduceCache &get_reduce_cache(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  auto &caches = get_reduce_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    it = caches.emplace(owner, std::make_unique<CubReduceCache>()).first;
-  }
-  return *it->second;
+void clear_cache(void *owner, PrimitiveWorkspaceFamily family) {
+  workspace_arena(owner).clear(PrimitiveWorkspaceBackend::cuda, family);
 }
 
-CubCheckCountCache &get_check_count_cache(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  auto &caches = get_check_count_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    it = caches.emplace(owner, std::make_unique<CubCheckCountCache>()).first;
-  }
-  return *it->second;
-}
-
-CubMetricReduceCache &get_metric_reduce_cache(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  auto &caches = get_metric_reduce_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    it = caches.emplace(owner, std::make_unique<CubMetricReduceCache>()).first;
-  }
-  return *it->second;
-}
-
-CubBucketBuilderCache &get_bucket_builder_cache(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  auto &caches = get_bucket_builder_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    it = caches.emplace(owner, std::make_unique<CubBucketBuilderCache>()).first;
-  }
-  return *it->second;
-}
-
-CubGroupedReduceCache &get_grouped_reduce_cache(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  auto &caches = get_grouped_reduce_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    it = caches.emplace(owner, std::make_unique<CubGroupedReduceCache>()).first;
-  }
-  return *it->second;
+std::size_t cached_bytes(void *owner, PrimitiveWorkspaceFamily family) {
+  return static_cast<std::size_t>(
+      workspace_arena(owner)
+          .snapshot(PrimitiveWorkspaceBackend::cuda, family)
+          .reserved_bytes);
 }
 
 void check_cuda(cudaError_t err, const char *expr, const char *file, int line) {
@@ -2711,8 +2588,9 @@ std::size_t cub_radix_sort_impl(void *keys,
   if (has_values && !values) {
     throw std::runtime_error("CUB sort received a null value pointer");
   }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubSortCache &cache = get_cache(owner);
+  auto cache_lease = acquire_cache<CubSortCache>(
+      owner, PrimitiveWorkspaceFamily::ordering, stream);
+  CubSortCache &cache = *cache_lease;
   if (!has_values) {
     return cub_radix_sort_value_impl<int32_t>(
         cache, keys, values, num_items, key_type, mode, nan_policy, has_values,
@@ -2769,30 +2647,11 @@ std::size_t cub_radix_sort_impl(void *keys,
 }
 
 void cub_radix_sort_clear_cache_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_caches();
-  auto it = caches.find(owner);
-  if (it != caches.end()) {
-    caches.erase(it);
-  }
+  clear_cache(owner, PrimitiveWorkspaceFamily::ordering);
 }
 
 std::size_t cub_radix_sort_cached_bytes_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    return 0;
-  }
-  return it->second->allocated_bytes();
+  return cached_bytes(owner, PrimitiveWorkspaceFamily::ordering);
 }
 
 template <typename T>
@@ -2951,8 +2810,9 @@ std::size_t cub_inclusive_scan_impl(void *data,
   if (!data) {
     throw std::runtime_error("CUB scan received a null data pointer");
   }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubScanCache &cache = get_scan_cache(owner);
+  auto cache_lease = acquire_cache<CubScanCache>(
+      owner, PrimitiveWorkspaceFamily::scan, stream);
+  CubScanCache &cache = *cache_lease;
   switch (value_type) {
     case CubScanValueType::i32:
       return inclusive_scan_typed<int32_t>(cache, data, num_items, stream);
@@ -2978,8 +2838,9 @@ std::size_t cub_inclusive_reverse_scan_impl(void *data,
   if (!data) {
     throw std::runtime_error("CUB reverse scan received a null data pointer");
   }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubScanCache &cache = get_scan_cache(owner);
+  auto cache_lease = acquire_cache<CubScanCache>(
+      owner, PrimitiveWorkspaceFamily::scan, stream);
+  CubScanCache &cache = *cache_lease;
   switch (value_type) {
     case CubScanValueType::i32:
       return inclusive_reverse_scan_typed<int32_t>(
@@ -3013,8 +2874,9 @@ std::size_t cub_inclusive_scan_strided_impl(void *data,
   if (!data) {
     throw std::runtime_error("CUB strided scan received a null data pointer");
   }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubScanCache &cache = get_scan_cache(owner);
+  auto cache_lease = acquire_cache<CubScanCache>(
+      owner, PrimitiveWorkspaceFamily::scan, stream);
+  CubScanCache &cache = *cache_lease;
   switch (value_type) {
     case CubScanValueType::i32:
       return inclusive_scan_strided_typed<int32_t>(
@@ -3049,8 +2911,9 @@ std::size_t cub_inclusive_reverse_scan_strided_impl(void *data,
     throw std::runtime_error(
         "CUB reverse strided scan received a null data pointer");
   }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubScanCache &cache = get_scan_cache(owner);
+  auto cache_lease = acquire_cache<CubScanCache>(
+      owner, PrimitiveWorkspaceFamily::scan, stream);
+  CubScanCache &cache = *cache_lease;
   switch (value_type) {
     case CubScanValueType::i32:
       return inclusive_reverse_scan_strided_typed<int32_t>(
@@ -3075,30 +2938,11 @@ std::size_t cub_inclusive_reverse_scan_strided_impl(void *data,
 }
 
 void cub_inclusive_scan_clear_cache_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_scan_caches();
-  auto it = caches.find(owner);
-  if (it != caches.end()) {
-    caches.erase(it);
-  }
+  clear_cache(owner, PrimitiveWorkspaceFamily::scan);
 }
 
 std::size_t cub_inclusive_scan_cached_bytes_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_scan_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    return 0;
-  }
-  return it->second->allocated_bytes();
+  return cached_bytes(owner, PrimitiveWorkspaceFamily::scan);
 }
 
 int scalar_words(CubSelectValueType value_type);
@@ -3211,8 +3055,9 @@ std::size_t cub_select_flagged_impl(void *values,
                                     int item_words,
                                     void *stream,
                                     void *owner) {
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubSelectCache &cache = get_select_cache(owner);
+  auto cache_lease = acquire_cache<CubSelectCache>(
+      owner, PrimitiveWorkspaceFamily::compact, stream);
+  CubSelectCache &cache = *cache_lease;
   const int expected_words = scalar_words(value_type);
   if (expected_words == 0) {
     throw std::runtime_error("Unsupported CUB select value type");
@@ -3245,30 +3090,11 @@ std::size_t cub_select_flagged_impl(void *values,
 }
 
 void cub_select_clear_cache_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_select_caches();
-  auto it = caches.find(owner);
-  if (it != caches.end()) {
-    caches.erase(it);
-  }
+  clear_cache(owner, PrimitiveWorkspaceFamily::compact);
 }
 
 std::size_t cub_select_cached_bytes_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_select_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    return 0;
-  }
-  return it->second->allocated_bytes();
+  return cached_bytes(owner, PrimitiveWorkspaceFamily::compact);
 }
 
 template <typename T>
@@ -3817,8 +3643,9 @@ std::size_t cub_reduce_impl(void *values,
                             CubReduceOp op,
                             void *stream,
                             void *owner) {
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubReduceCache &cache = get_reduce_cache(owner);
+  auto cache_lease = acquire_cache<CubReduceCache>(
+      owner, PrimitiveWorkspaceFamily::reduce, stream);
+  CubReduceCache &cache = *cache_lease;
   switch (value_type) {
     case CubReduceValueType::i32:
       return reduce_typed<int32_t>(cache, values, output, num_items, op,
@@ -3850,8 +3677,9 @@ std::size_t cub_reduce_strided_impl(void *values,
                                     CubReduceOp op,
                                     void *stream,
                                     void *owner) {
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubReduceCache &cache = get_reduce_cache(owner);
+  auto cache_lease = acquire_cache<CubReduceCache>(
+      owner, PrimitiveWorkspaceFamily::reduce, stream);
+  CubReduceCache &cache = *cache_lease;
   switch (value_type) {
     case CubReduceValueType::i32:
       return reduce_strided_typed<int32_t>(
@@ -3886,8 +3714,9 @@ std::size_t cub_check_count_impl(void *values,
                                  int upper,
                                  void *stream,
                                  void *owner) {
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubCheckCountCache &cache = get_check_count_cache(owner);
+  auto cache_lease = acquire_cache<CubCheckCountCache>(
+      owner, PrimitiveWorkspaceFamily::check, stream);
+  CubCheckCountCache &cache = *cache_lease;
   switch (value_type) {
     case CubReduceValueType::i32:
       return check_count_typed<int32_t>(cache, values, output, num_items,
@@ -3917,30 +3746,11 @@ std::size_t cub_check_count_impl(void *values,
 }
 
 void cub_check_count_clear_cache_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_check_count_caches();
-  auto it = caches.find(owner);
-  if (it != caches.end()) {
-    caches.erase(it);
-  }
+  clear_cache(owner, PrimitiveWorkspaceFamily::check);
 }
 
 std::size_t cub_check_count_cached_bytes_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_check_count_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    return 0;
-  }
-  return it->second->allocated_bytes();
+  return cached_bytes(owner, PrimitiveWorkspaceFamily::check);
 }
 
 std::size_t cub_metric_reduce_impl(void *values,
@@ -3955,8 +3765,9 @@ std::size_t cub_metric_reduce_impl(void *values,
                                    CudaMetricOp op,
                                    void *stream,
                                    void *owner) {
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubMetricReduceCache &cache = get_metric_reduce_cache(owner);
+  auto cache_lease = acquire_cache<CubMetricReduceCache>(
+      owner, PrimitiveWorkspaceFamily::metric, stream);
+  CubMetricReduceCache &cache = *cache_lease;
   switch (value_type) {
     case CubReduceValueType::f32:
       return metric_reduce_typed<float>(cache, values, other, output, num_items,
@@ -3975,57 +3786,19 @@ std::size_t cub_metric_reduce_impl(void *values,
 }
 
 void cub_metric_reduce_clear_cache_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_metric_reduce_caches();
-  auto it = caches.find(owner);
-  if (it != caches.end()) {
-    caches.erase(it);
-  }
+  clear_cache(owner, PrimitiveWorkspaceFamily::metric);
 }
 
 std::size_t cub_metric_reduce_cached_bytes_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_metric_reduce_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    return 0;
-  }
-  return it->second->allocated_bytes();
+  return cached_bytes(owner, PrimitiveWorkspaceFamily::metric);
 }
 
 void cub_reduce_clear_cache_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_reduce_caches();
-  auto it = caches.find(owner);
-  if (it != caches.end()) {
-    caches.erase(it);
-  }
+  clear_cache(owner, PrimitiveWorkspaceFamily::reduce);
 }
 
 std::size_t cub_reduce_cached_bytes_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_reduce_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    return 0;
-  }
-  return it->second->allocated_bytes();
+  return cached_bytes(owner, PrimitiveWorkspaceFamily::reduce);
 }
 
 std::size_t cub_scatter_add_impl(void *src,
@@ -5213,14 +4986,15 @@ std::size_t cub_bucket_builder_impl(void *keys,
   if (item_words <= 0) {
     throw std::runtime_error("CUDA bucket builder expects positive item_words");
   }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubBucketBuilderCache &cache = get_bucket_builder_cache(owner);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  auto cache_lease = acquire_cache<CubBucketBuilderCache>(
+      owner, PrimitiveWorkspaceFamily::bucket, stream);
+  CubBucketBuilderCache &cache = *cache_lease;
   ensure_device_cache(cache);
 
   const int32_t *keys_in = static_cast<const int32_t *>(keys);
   int32_t *offsets_in_out = static_cast<int32_t *>(offsets);
   int32_t *cursor_in_out = static_cast<int32_t *>(cursor);
-  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   const bool use_stream = stream != nullptr;
 
   const std::size_t offsets_bytes =
@@ -5353,15 +5127,16 @@ std::size_t cub_bucket_builder_strided_io_impl(
     throw std::runtime_error(
         "CUDA strided bucket builder received a null pointer");
   }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubBucketBuilderCache &cache = get_bucket_builder_cache(owner);
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  auto cache_lease = acquire_cache<CubBucketBuilderCache>(
+      owner, PrimitiveWorkspaceFamily::bucket, stream);
+  CubBucketBuilderCache &cache = *cache_lease;
   ensure_device_cache(cache);
 
   const uint8_t *keys_in = static_cast<const uint8_t *>(keys);
   const uint8_t *values_in = static_cast<const uint8_t *>(values);
   int32_t *offsets_in_out = static_cast<int32_t *>(offsets);
   int32_t *cursor_in_out = static_cast<int32_t *>(cursor);
-  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   const bool use_stream = stream != nullptr;
 
   const std::size_t offsets_bytes =
@@ -5470,30 +5245,11 @@ std::size_t cub_bucket_builder_i32_impl(void *keys,
 }
 
 void cub_bucket_builder_clear_cache_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_bucket_builder_caches();
-  auto it = caches.find(owner);
-  if (it != caches.end()) {
-    caches.erase(it);
-  }
+  clear_cache(owner, PrimitiveWorkspaceFamily::bucket);
 }
 
 std::size_t cub_bucket_builder_cached_bytes_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_bucket_builder_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    return 0;
-  }
-  return it->second->allocated_bytes();
+  return cached_bytes(owner, PrimitiveWorkspaceFamily::bucket);
 }
 
 template <typename T>
@@ -5617,8 +5373,9 @@ std::size_t cub_grouped_reduce_impl(void *keys,
       stream, owner);
 
   auto *offsets_in = static_cast<int32_t *>(offsets);
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubGroupedReduceCache &cache = get_grouped_reduce_cache(owner);
+  auto cache_lease = acquire_cache<CubGroupedReduceCache>(
+      owner, PrimitiveWorkspaceFamily::grouped, stream);
+  CubGroupedReduceCache &cache = *cache_lease;
   ensure_device_cache(cache);
   switch (value_type) {
     case CudaGroupedReduceValueType::i32:
@@ -5693,8 +5450,9 @@ std::size_t cub_grouped_reduce_strided_io_impl(
 
   auto *offsets_in = static_cast<int32_t *>(offsets);
   auto *output_bytes = static_cast<uint8_t *>(output);
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  CubGroupedReduceCache &cache = get_grouped_reduce_cache(owner);
+  auto cache_lease = acquire_cache<CubGroupedReduceCache>(
+      owner, PrimitiveWorkspaceFamily::grouped, stream);
+  CubGroupedReduceCache &cache = *cache_lease;
   ensure_device_cache(cache);
   switch (value_type) {
     case CudaGroupedReduceValueType::i32:
@@ -6067,30 +5825,11 @@ std::size_t cub_grouped_reduce_atomic_strided_io_impl(
 }
 
 void cub_grouped_reduce_clear_cache_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_grouped_reduce_caches();
-  auto it = caches.find(owner);
-  if (it != caches.end()) {
-    caches.erase(it);
-  }
+  clear_cache(owner, PrimitiveWorkspaceFamily::grouped);
 }
 
 std::size_t cub_grouped_reduce_cached_bytes_impl(void *owner) {
-  static int fallback_owner = 0;
-  if (!owner) {
-    owner = &fallback_owner;
-  }
-  std::lock_guard<std::mutex> lock(get_cache_mutex());
-  auto &caches = get_grouped_reduce_caches();
-  auto it = caches.find(owner);
-  if (it == caches.end()) {
-    return 0;
-  }
-  return it->second->allocated_bytes();
+  return cached_bytes(owner, PrimitiveWorkspaceFamily::grouped);
 }
 
 }  // namespace taichi::lang::cuda

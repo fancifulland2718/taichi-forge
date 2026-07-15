@@ -22,6 +22,7 @@
 #include <taichi/program/runtime_completion.h>
 #include <taichi/program/runtime_fault.h>
 #include <taichi/program/runtime_trace.h>
+#include <taichi/program/primitive_workspace.h>
 
 #define TI_RUNTIME_HOST
 #include "taichi/aot/module_builder.h"
@@ -230,6 +231,21 @@ class TI_DLL_EXPORT Program {
     return runtime_fault_domain_->snapshot();
   }
   RuntimeStatisticsSnapshot runtime_statistics_snapshot();
+  PrimitiveWorkspaceSnapshot primitive_workspace_snapshot() const noexcept {
+    return primitive_workspace_arena_.snapshot();
+  }
+  PrimitiveWorkspaceArena &primitive_workspace_arena() noexcept {
+    return primitive_workspace_arena_;
+  }
+  const PrimitiveWorkspaceArena &primitive_workspace_arena() const noexcept {
+    return primitive_workspace_arena_;
+  }
+  void set_primitive_workspace_budget(std::uint64_t bytes) noexcept {
+    primitive_workspace_arena_.set_budget_bytes(bytes);
+  }
+  void clear_primitive_workspaces();
+  void clear_primitive_workspaces_for(PrimitiveWorkspaceBackend backend,
+                                      PrimitiveWorkspaceFamily family);
   RuntimeStatistics &runtime_statistics() noexcept {
     return runtime_fault_domain_->statistics();
   }
@@ -2677,6 +2693,7 @@ class TI_DLL_EXPORT Program {
   const std::uint64_t runtime_completion_domain_;
   std::shared_ptr<RuntimeFaultDomain> runtime_fault_domain_;
   RuntimeTraceRecorder runtime_trace_;
+  PrimitiveWorkspaceArena primitive_workspace_arena_;
   struct RuntimeBackendTelemetryBaseline {
     std::uint64_t backend_waits{0};
     std::uint64_t backend_wait_ns{0};
