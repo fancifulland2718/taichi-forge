@@ -625,6 +625,139 @@ void export_lang(py::module &m) {
         }
         return result;
       })
+      .def("_runtime_statistics_snapshot", [](Program &program) {
+        const RuntimeStatisticsSnapshot snapshot =
+            program.runtime_statistics_snapshot();
+        auto optional_counter =
+            [](const RuntimeOptionalCounter &counter) -> py::object {
+          if (!counter.available) {
+            return py::none();
+          }
+          return py::int_(counter.value);
+        };
+
+        py::dict submission;
+        submission["kernel_submissions"] =
+            snapshot.submission.kernel_submissions;
+        submission["graph_submissions"] =
+            snapshot.submission.graph_submissions;
+        submission["graph_backend_replays"] =
+            snapshot.submission.graph_backend_replays;
+        submission["native_submissions"] =
+            snapshot.submission.native_submissions;
+        submission["failed_submissions"] =
+            snapshot.submission.failed_submissions;
+
+        py::dict synchronization;
+        synchronization["program_syncs"] =
+            snapshot.synchronization.program_syncs;
+        synchronization["program_sync_wait_ns"] =
+            snapshot.synchronization.program_sync_wait_ns;
+        synchronization["completion_polls"] =
+            snapshot.synchronization.completion_polls;
+        synchronization["completion_waits"] =
+            snapshot.synchronization.completion_waits;
+        synchronization["completion_wait_ns"] =
+            snapshot.synchronization.completion_wait_ns;
+        synchronization["backend_waits"] =
+            optional_counter(snapshot.synchronization.backend_waits);
+        synchronization["backend_wait_ns"] =
+            optional_counter(snapshot.synchronization.backend_wait_ns);
+        synchronization["queue_lock_samples"] =
+            optional_counter(snapshot.synchronization.queue_lock_samples);
+        synchronization["queue_lock_contentions"] =
+            optional_counter(snapshot.synchronization.queue_lock_contentions);
+        synchronization["queue_lock_wait_ns"] =
+            optional_counter(snapshot.synchronization.queue_lock_wait_ns);
+
+        py::dict memory;
+        memory["live_resources"] = snapshot.memory.live_resources;
+        memory["retiring_resources"] = snapshot.memory.retiring_resources;
+        memory["inflight_resources"] = snapshot.memory.inflight_resources;
+        memory["host_requested_live_bytes"] =
+            optional_counter(snapshot.memory.host_requested_live_bytes);
+        memory["host_raw_bytes"] =
+            optional_counter(snapshot.memory.host_raw_bytes);
+        memory["host_capacity_bytes"] =
+            optional_counter(snapshot.memory.host_capacity_bytes);
+        memory["device_requested_live_bytes"] =
+            optional_counter(snapshot.memory.device_requested_live_bytes);
+        memory["device_raw_bytes"] =
+            optional_counter(snapshot.memory.device_raw_bytes);
+        memory["device_cached_bytes"] =
+            optional_counter(snapshot.memory.device_cached_bytes);
+        memory["cuda_mempool_reserved_bytes"] =
+            optional_counter(snapshot.memory.cuda_mempool_reserved_bytes);
+        memory["cuda_mempool_used_bytes"] =
+            optional_counter(snapshot.memory.cuda_mempool_used_bytes);
+
+        py::dict transfer;
+        transfer["host_to_device_bytes"] =
+            snapshot.transfer.host_to_device_bytes;
+        transfer["device_to_host_bytes"] =
+            snapshot.transfer.device_to_host_bytes;
+        transfer["device_to_device_bytes"] =
+            snapshot.transfer.device_to_device_bytes;
+        transfer["cuda_vulkan_direct_bytes"] =
+            snapshot.transfer.cuda_vulkan_direct_bytes;
+        transfer["cuda_vulkan_fallback_bytes"] =
+            snapshot.transfer.cuda_vulkan_fallback_bytes;
+
+        py::dict graph;
+        graph["captures"] = snapshot.graph.captures;
+        graph["recaptures"] = snapshot.graph.recaptures;
+        graph["replays"] = snapshot.graph.replays;
+        graph["ordinary_fallbacks"] =
+            snapshot.graph.ordinary_fallbacks;
+        graph["replay_slot_saturation_fallbacks"] =
+            snapshot.graph.replay_slot_saturation_fallbacks;
+
+        py::dict display;
+        display["accepted_frames"] = snapshot.display.accepted_frames;
+        display["submitted_frames"] = snapshot.display.submitted_frames;
+        display["dropped_frames"] = snapshot.display.dropped_frames;
+        display["staged_frame_bytes"] =
+            snapshot.display.staged_frame_bytes;
+
+        const RuntimeFaultSnapshot fault_snapshot =
+            program.runtime_fault_snapshot();
+        py::dict fault;
+        fault["state"] = runtime_lifecycle_state_name(fault_snapshot.state);
+        fault["first_fatal_faults"] =
+            snapshot.fault.first_fatal_faults;
+        fault["rejected_submissions"] =
+            snapshot.fault.rejected_submissions;
+        if (fault_snapshot.first_fault) {
+          const RuntimeFaultRecord &first = *fault_snapshot.first_fault;
+          py::dict first_fault;
+          first_fault["backend"] = arch_name(first.backend);
+          first_fault["backend_code"] = first.backend_code;
+          first_fault["sequence"] = first.submission_sequence;
+          first_fault["operation"] = first.operation;
+          first_fault["message"] = first.message;
+          fault["first_fault"] = std::move(first_fault);
+        } else {
+          fault["first_fault"] = py::none();
+        }
+
+        py::dict trace;
+        trace["recorded_events"] = snapshot.trace.recorded_events;
+        trace["dropped_events"] = snapshot.trace.dropped_events;
+
+        py::dict result;
+        result["schema_version"] = snapshot.schema_version;
+        result["backend"] = arch_name(snapshot.backend);
+        result["program_domain"] = snapshot.program_domain;
+        result["submission"] = std::move(submission);
+        result["synchronization"] = std::move(synchronization);
+        result["memory"] = std::move(memory);
+        result["transfer"] = std::move(transfer);
+        result["graph"] = std::move(graph);
+        result["display"] = std::move(display);
+        result["fault"] = std::move(fault);
+        result["trace"] = std::move(trace);
+        return result;
+      })
       .def("_record_runtime_completion",
            &Program::record_runtime_completion,
            py::call_guard<py::gil_scoped_release>())

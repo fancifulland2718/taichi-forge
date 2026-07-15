@@ -1,6 +1,7 @@
 #include "taichi/program/runtime_completion.h"
 
 #include <atomic>
+#include <chrono>
 #include <exception>
 #include <mutex>
 #include <stdexcept>
@@ -360,20 +361,24 @@ struct RuntimeCompletion::State {
 RuntimeCompletion::RuntimeCompletion(Arch backend,
                                      std::uint64_t program_domain,
                                      std::uint64_t sequence,
-                                     std::shared_ptr<State> state) noexcept
+                                     std::shared_ptr<State> state,
+                                     std::shared_ptr<RuntimeFaultDomain>
+                                         fault_domain) noexcept
     : backend_(backend),
       program_domain_(program_domain),
       sequence_(sequence),
-      state_(std::move(state)) {
+      state_(std::move(state)),
+      fault_domain_(std::move(fault_domain)) {
 }
 
 RuntimeCompletion RuntimeCompletion::completed(
     Arch backend,
     std::uint64_t program_domain,
-    std::uint64_t sequence) noexcept {
+    std::uint64_t sequence,
+    std::shared_ptr<RuntimeFaultDomain> fault_domain) noexcept {
   static std::shared_ptr<State> completed_state = std::make_shared<State>();
   return RuntimeCompletion(backend, program_domain, sequence,
-                           completed_state);
+                           completed_state, std::move(fault_domain));
 }
 
 RuntimeCompletion RuntimeCompletion::from_stream_semaphore(
@@ -383,14 +388,15 @@ RuntimeCompletion RuntimeCompletion::from_stream_semaphore(
     StreamSemaphore semaphore,
     std::shared_ptr<RuntimeFaultDomain> fault_domain) {
   if (!semaphore) {
-    return completed(backend, program_domain, sequence);
+    return completed(backend, program_domain, sequence,
+                     std::move(fault_domain));
   }
   auto primitive =
       std::make_unique<StreamSemaphoreCompletion>(std::move(semaphore));
+  auto state = std::make_shared<State>(std::move(primitive), fault_domain,
+                                       sequence);
   return RuntimeCompletion(backend, program_domain, sequence,
-                           std::make_shared<State>(std::move(primitive),
-                                                   std::move(fault_domain),
-                                                   sequence));
+                           std::move(state), std::move(fault_domain));
 }
 
 RuntimeCompletion RuntimeCompletion::from_cuda_stream(
@@ -402,10 +408,11 @@ RuntimeCompletion RuntimeCompletion::from_cuda_stream(
   try {
     auto primitive =
         std::make_unique<CudaEventCompletion>(stream, fault_domain);
+    auto state = std::make_shared<State>(std::move(primitive), fault_domain,
+                                         sequence);
     return RuntimeCompletion(
-        Arch::cuda, program_domain, sequence,
-        std::make_shared<State>(std::move(primitive),
-                                std::move(fault_domain), sequence));
+        Arch::cuda, program_domain, sequence, std::move(state),
+        std::move(fault_domain));
   } catch (const BackendRuntimeError &error) {
     if (fault_domain) {
       fault_domain->report_backend_error(error, sequence);
@@ -427,12 +434,33 @@ bool RuntimeCompletion::valid() const noexcept {
 
 bool RuntimeCompletion::done() const {
   TI_ERROR_IF(!valid(), "Invalid runtime completion");
+  if (fault_domain_) {
+    fault_domain_->statistics().record_completion_poll();
+  }
   return state_->done();
 }
 
 void RuntimeCompletion::wait() const {
   TI_ERROR_IF(!valid(), "Invalid runtime completion");
-  state_->wait();
+  if (!fault_domain_) {
+    state_->wait();
+    return;
+  }
+  const auto started = std::chrono::steady_clock::now();
+  try {
+    state_->wait();
+  } catch (...) {
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started);
+    fault_domain_->statistics().record_completion_wait(
+        static_cast<std::uint64_t>(elapsed.count()));
+    throw;
+  }
+  const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now() - started);
+  fault_domain_->statistics().record_completion_wait(
+      static_cast<std::uint64_t>(elapsed.count()));
 }
 
 bool RuntimeCompletion::has_backend_work() const noexcept {

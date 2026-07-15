@@ -1683,7 +1683,8 @@ void CompiledGraph::jit_run_cached(
   if (compile_config.arch == Arch::cuda &&
       try_run_cuda_graph(*this, compile_config, args, cache)) {
     TI_ASSERT(program != nullptr);
-    program->mark_runtime_submission();
+    program->mark_runtime_submission(
+        RuntimeSubmissionKind::kGraphBackendReplay);
     return;
   }
 #endif
@@ -1691,7 +1692,8 @@ void CompiledGraph::jit_run_cached(
   if (compile_config.arch == Arch::vulkan &&
       try_run_vulkan_graph(*this, compile_config, args, cache)) {
     TI_ASSERT(program != nullptr);
-    program->mark_runtime_submission();
+    program->mark_runtime_submission(
+        RuntimeSubmissionKind::kGraphBackendReplay);
     return;
   }
 #endif

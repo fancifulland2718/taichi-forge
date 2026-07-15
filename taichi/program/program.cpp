@@ -22,6 +22,7 @@
 #include "taichi/program/parallel_executor.h"
 #include "taichi/analysis/gather_snode_tree_dependencies.h"
 
+#include <chrono>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -33,6 +34,7 @@
 #endif
 
 #ifdef TI_WITH_LLVM
+#include "taichi/rhi/llvm/device_memory_pool.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/codegen/llvm/struct_llvm.h"
 #endif
@@ -88,6 +90,25 @@ namespace {
 
 thread_local Program *active_snode_tree_lifecycle_program = nullptr;
 thread_local Program *active_runtime_resource_graph_program = nullptr;
+
+class RuntimeProgramSyncStatisticsScope {
+ public:
+  explicit RuntimeProgramSyncStatisticsScope(RuntimeStatistics &statistics)
+      : statistics_(statistics), started_(std::chrono::steady_clock::now()) {
+  }
+
+  ~RuntimeProgramSyncStatisticsScope() {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - started_);
+    statistics_.record_program_sync(
+        static_cast<std::uint64_t>(elapsed.count()));
+  }
+
+ private:
+  RuntimeStatistics &statistics_;
+  std::chrono::steady_clock::time_point started_;
+};
+
 std::atomic<std::uint64_t> next_runtime_resource_domain{1};
 
 std::uint64_t allocate_runtime_resource_domain() {
@@ -197,7 +218,7 @@ Program::RuntimeSubmissionTransaction::~RuntimeSubmissionTransaction() {
 
 void Program::RuntimeSubmissionTransaction::mark_submission() noexcept {
   if (!finished_) {
-    program_->mark_runtime_submission();
+    program_->mark_runtime_submission(RuntimeSubmissionKind::kNative);
   }
 }
 
@@ -6133,7 +6154,7 @@ RuntimeCompletion Program::record_runtime_completion() {
           next_runtime_completion_sequence_.load(std::memory_order_relaxed);
       return RuntimeCompletion::completed(
           compile_config().arch, runtime_completion_domain_,
-          next > 1 ? next - 1 : 0);
+          next > 1 ? next - 1 : 0, runtime_fault_domain_);
     }
 
     const std::uint64_t previous_submission_epoch =
@@ -6154,7 +6175,8 @@ RuntimeCompletion Program::record_runtime_completion() {
         // completed singleton instead of pretending to run a background task.
         program_impl_->synchronize();
         result = RuntimeCompletion::completed(
-            compile_config().arch, runtime_completion_domain_, sequence);
+            compile_config().arch, runtime_completion_domain_, sequence,
+            runtime_fault_domain_);
       } else if (compile_config().arch == Arch::cuda) {
         // Existing Driver API symbols are loaded dynamically; no cudart or
         // Toolkit-versioned runtime dependency is introduced.
@@ -6172,7 +6194,8 @@ RuntimeCompletion Program::record_runtime_completion() {
         // retain their legacy synchronous fallback without a fake token.
         program_impl_->synchronize();
         result = RuntimeCompletion::completed(
-            compile_config().arch, runtime_completion_domain_, sequence);
+            compile_config().arch, runtime_completion_domain_, sequence,
+            runtime_fault_domain_);
       }
 
       if (result.has_backend_work()) {
@@ -6295,6 +6318,49 @@ Program::debug_runtime_completion_stats() const {
       {"retained_textures",
        runtime_completion_resource_count(kTextureResourceKind)},
   };
+}
+
+RuntimeStatisticsSnapshot Program::runtime_statistics_snapshot() {
+  RuntimeStatisticsSnapshot snapshot =
+      runtime_fault_domain_->statistics().snapshot();
+  const auto argpacks = debug_argpack_resource_stats();
+  const auto ndarrays = debug_ndarray_resource_stats();
+  const auto textures = debug_texture_resource_stats();
+  const auto staging = debug_dense_field_staging_stats();
+  auto sum = [&](const char *key) {
+    return argpacks.at(key) + ndarrays.at(key) + textures.at(key) +
+           staging.at(key);
+  };
+  snapshot.memory.live_resources = sum("live");
+  snapshot.memory.retiring_resources = sum("retiring");
+  snapshot.memory.inflight_resources =
+      argpacks.at("inflight") + ndarrays.at("inflight") +
+      textures.at("inflight");
+
+  const HostMemoryPoolStats host =
+      HostMemoryPool::get_instance().get_stats();
+  const std::uint64_t host_live =
+      host.bytes_allocated_total >= host.bytes_released_total
+          ? host.bytes_allocated_total - host.bytes_released_total
+          : 0;
+  snapshot.memory.host_requested_live_bytes = {host_live, true};
+  snapshot.memory.host_raw_bytes = {host.raw_bytes, true};
+  snapshot.memory.host_capacity_bytes = {host.raw_bytes, true};
+
+#ifdef TI_WITH_LLVM
+  if (arch_uses_llvm(compile_config().arch)) {
+    const DeviceMemoryPoolStats device =
+        DeviceMemoryPool::get_instance().get_stats();
+    const std::uint64_t device_live =
+        device.bytes_allocated_total >= device.bytes_released_total
+            ? device.bytes_allocated_total - device.bytes_released_total
+            : 0;
+    snapshot.memory.device_requested_live_bytes = {device_live, true};
+    snapshot.memory.device_raw_bytes = {device.raw_bytes, true};
+    snapshot.memory.device_cached_bytes = {device.cached_bytes, true};
+  }
+#endif
+  return snapshot;
 }
 
 void Program::close_argpack_resources() {
@@ -6426,6 +6492,8 @@ Program::debug_texture_resource_identity(const Texture *view) const {
 
 void Program::synchronize() {
   ensure_runtime_submission_allowed("Program synchronize");
+  RuntimeProgramSyncStatisticsScope statistics_scope(
+      runtime_fault_domain_->statistics());
   std::lock_guard<std::recursive_mutex> submission_lock(
       runtime_resource_submission_mutex_);
   const bool tracking_was_enabled =

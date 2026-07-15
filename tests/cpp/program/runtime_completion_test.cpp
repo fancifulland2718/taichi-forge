@@ -70,18 +70,25 @@ class FatalBackendSemaphore final : public StreamSemaphoreObject {
 };
 
 TEST(RuntimeCompletion, CompletedTokenUsesNoBackendWork) {
-  auto completion = RuntimeCompletion::completed(Arch::x64, 11, 3);
+  auto domain = std::make_shared<RuntimeFaultDomain>(Arch::x64, 11);
+  auto completion =
+      RuntimeCompletion::completed(Arch::x64, 11, 3, domain);
   EXPECT_TRUE(completion.valid());
   EXPECT_TRUE(completion.done());
+  completion.wait();
   EXPECT_FALSE(completion.has_backend_work());
   EXPECT_EQ(completion.program_domain(), 11);
   EXPECT_EQ(completion.sequence(), 3);
+  const auto statistics = domain->statistics().snapshot();
+  EXPECT_EQ(statistics.synchronization.completion_polls, 1u);
+  EXPECT_EQ(statistics.synchronization.completion_waits, 1u);
 }
 
 TEST(RuntimeCompletion, WaitReleasesResourcesExactlyOnce) {
+  auto domain = std::make_shared<RuntimeFaultDomain>(Arch::vulkan, 17);
   auto semaphore = std::make_shared<FakeSemaphore>();
   auto completion = RuntimeCompletion::from_stream_semaphore(
-      Arch::vulkan, 17, 9, semaphore);
+      Arch::vulkan, 17, 9, semaphore, domain);
   std::atomic<int> released{0};
   completion.attach_resources(
       std::make_shared<CountedResources>(&released, 4));
@@ -95,6 +102,9 @@ TEST(RuntimeCompletion, WaitReleasesResourcesExactlyOnce) {
   completion.wait();
   EXPECT_EQ(released.load(std::memory_order_relaxed), 1);
   EXPECT_EQ(semaphore->waits, 1);
+  const auto statistics = domain->statistics().snapshot();
+  EXPECT_EQ(statistics.synchronization.completion_polls, 2u);
+  EXPECT_EQ(statistics.synchronization.completion_waits, 2u);
 }
 
 TEST(RuntimeCompletion, FirstBackendErrorIsSticky) {
@@ -151,6 +161,9 @@ TEST(RuntimeCompletion, FatalBackendErrorPoisonsOwningDomainWithSequence) {
   completion.invalidate_and_release("runtime faulted");
   EXPECT_EQ(released.load(std::memory_order_relaxed), 1);
   EXPECT_THROW(completion.wait(), BackendRuntimeError);
+  const auto statistics = domain->statistics().snapshot();
+  EXPECT_EQ(statistics.synchronization.completion_polls, 1u);
+  EXPECT_EQ(statistics.synchronization.completion_waits, 1u);
 }
 
 }  // namespace

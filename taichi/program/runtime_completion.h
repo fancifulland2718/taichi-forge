@@ -35,7 +35,9 @@ class TI_DLL_EXPORT RuntimeCompletion {
 
   static RuntimeCompletion completed(Arch backend,
                                      std::uint64_t program_domain,
-                                     std::uint64_t sequence) noexcept;
+                                     std::uint64_t sequence,
+                                     std::shared_ptr<RuntimeFaultDomain>
+                                         fault_domain = nullptr) noexcept;
   static RuntimeCompletion from_stream_semaphore(
       Arch backend,
       std::uint64_t program_domain,
@@ -78,12 +80,14 @@ class TI_DLL_EXPORT RuntimeCompletion {
   RuntimeCompletion(Arch backend,
                     std::uint64_t program_domain,
                     std::uint64_t sequence,
-                    std::shared_ptr<State> state) noexcept;
+                    std::shared_ptr<State> state,
+                    std::shared_ptr<RuntimeFaultDomain> fault_domain) noexcept;
 
   Arch backend_{Arch::x64};
   std::uint64_t program_domain_{0};
   std::uint64_t sequence_{0};
   std::shared_ptr<State> state_;
+  std::shared_ptr<RuntimeFaultDomain> fault_domain_;
 };
 
 }  // namespace taichi::lang

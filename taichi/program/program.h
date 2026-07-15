@@ -228,6 +228,10 @@ class TI_DLL_EXPORT Program {
   RuntimeFaultSnapshot runtime_fault_snapshot() const {
     return runtime_fault_domain_->snapshot();
   }
+  RuntimeStatisticsSnapshot runtime_statistics_snapshot();
+  RuntimeStatistics &runtime_statistics() noexcept {
+    return runtime_fault_domain_->statistics();
+  }
   void report_backend_runtime_error(
       const BackendRuntimeError &error,
       std::uint64_t submission_sequence = 0) noexcept {
@@ -242,11 +246,20 @@ class TI_DLL_EXPORT Program {
   RuntimeCompletion record_runtime_completion();
   std::unique_ptr<RuntimeSubmissionTransaction>
   begin_runtime_submission_transaction();
-  TI_FORCE_INLINE void mark_runtime_submission() noexcept {
+  TI_FORCE_INLINE void mark_runtime_submission(
+      RuntimeSubmissionKind kind = RuntimeSubmissionKind::kKernel) noexcept {
     // The reader gate supplies ordering once completion tracking is enabled.
-    // Before that, a relaxed atomic publication is enough to distinguish an
-    // empty first record without imposing an RMW on ordinary submissions.
+    // The dirty publication and schema-v1 telemetry are independent relaxed
+    // operations; neither imposes cross-counter event ordering.
     runtime_submission_pending_.store(true, std::memory_order_relaxed);
+    runtime_fault_domain_->statistics().record_submission(kind);
+  }
+  TI_FORCE_INLINE void record_runtime_submission_stat(
+      RuntimeSubmissionKind kind) noexcept {
+    runtime_fault_domain_->statistics().record_submission(kind);
+  }
+  TI_FORCE_INLINE void record_runtime_submission_failure() noexcept {
+    runtime_fault_domain_->statistics().record_submission_failure();
   }
   std::unordered_map<std::string, std::uint64_t>
   debug_runtime_completion_stats() const;
