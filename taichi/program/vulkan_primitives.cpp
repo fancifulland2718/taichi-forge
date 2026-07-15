@@ -10,7 +10,6 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -1843,6 +1842,10 @@ struct VulkanRadixSortCache {
     clear_allocs();
   }
 
+  size_t allocated_bytes() const noexcept {
+    return cached_bytes;
+  }
+
   void ensure_device_only(Device *dev) {
     if (device == dev) {
       return;
@@ -3646,6 +3649,10 @@ struct VulkanHistogramCache {
     clear_allocs();
   }
 
+  size_t allocated_bytes() const noexcept {
+    return cached_bytes;
+  }
+
   void ensure_pipelines(Device *dev) {
     if (device == dev) {
       return;
@@ -4416,6 +4423,10 @@ struct VulkanCheckCountCache {
     clear_allocs();
   }
 
+  size_t allocated_bytes() const noexcept {
+    return cached_bytes;
+  }
+
   void reset_pipelines() {
     for (auto &pipeline : pipelines) {
       pipeline.reset();
@@ -4482,6 +4493,10 @@ struct VulkanMetricReduceCache {
 
   ~VulkanMetricReduceCache() {
     clear_allocs();
+  }
+
+  size_t allocated_bytes() const noexcept {
+    return cached_bytes;
   }
 
   void reset_pipelines() {
@@ -4566,6 +4581,10 @@ struct VulkanTransformCache {
 
   ~VulkanTransformCache() {
     clear_allocs();
+  }
+
+  size_t allocated_bytes() const noexcept {
+    return cached_bytes;
   }
 
   void ensure_pipelines(Device *dev) {
@@ -4695,6 +4714,10 @@ struct VulkanAddMergeCache {
     clear_allocs();
   }
 
+  size_t allocated_bytes() const noexcept {
+    return cached_bytes;
+  }
+
   void ensure_device(Device *dev) {
     if (device == dev) {
       return;
@@ -4813,6 +4836,10 @@ struct VulkanIndexedCopyCache {
 
   ~VulkanIndexedCopyCache() {
     clear_allocs();
+  }
+
+  size_t allocated_bytes() const noexcept {
+    return cached_bytes;
   }
 
   void reset_binding_replay() {
@@ -5255,6 +5282,10 @@ struct VulkanBucketBuilderCache {
 
   ~VulkanBucketBuilderCache() {
     clear_allocs();
+  }
+
+  size_t allocated_bytes() const noexcept {
+    return cached_bytes;
   }
 
   void ensure_pipelines(Device *dev) {
@@ -5935,217 +5966,86 @@ struct VulkanBucketBuilderCache {
   }
 };
 
-std::mutex g_vulkan_sort_mutex;
-std::unordered_map<void *, std::unique_ptr<VulkanRadixSortCache>>
-    g_vulkan_sort_caches;
-std::mutex g_vulkan_scan_mutex;
-std::unordered_map<void *, std::unique_ptr<VulkanScanCache>>
-    g_vulkan_scan_caches;
-std::mutex g_vulkan_compact_mutex;
-std::unordered_map<void *, std::unique_ptr<VulkanCompactCache>>
-    g_vulkan_compact_caches;
-std::mutex g_vulkan_histogram_mutex;
-std::unordered_map<void *, std::unique_ptr<VulkanHistogramCache>>
-    g_vulkan_histogram_caches;
-std::mutex g_vulkan_reduce_mutex;
-std::unordered_map<void *, std::unique_ptr<VulkanReduceCache>>
-    g_vulkan_reduce_caches;
-std::mutex g_vulkan_check_count_mutex;
-std::unordered_map<void *, std::unique_ptr<VulkanCheckCountCache>>
-    g_vulkan_check_count_caches;
-std::mutex g_vulkan_metric_reduce_mutex;
-std::unordered_map<void *, std::unique_ptr<VulkanMetricReduceCache>>
-    g_vulkan_metric_reduce_caches;
-std::mutex g_vulkan_transform_mutex;
-std::unordered_map<void *, std::unique_ptr<VulkanTransformCache>>
-    g_vulkan_transform_caches;
-std::mutex g_vulkan_add_merge_mutex;
-std::unordered_map<void *, std::unique_ptr<VulkanAddMergeCache>>
-    g_vulkan_add_merge_caches;
-std::mutex g_vulkan_indexed_copy_mutex;
-std::unordered_map<void *, std::unique_ptr<VulkanIndexedCopyCache>>
-    g_vulkan_indexed_copy_caches;
-std::mutex g_vulkan_bucket_builder_mutex;
-std::unordered_map<void *, std::unique_ptr<VulkanBucketBuilderCache>>
-    g_vulkan_bucket_builder_caches;
-
-template <typename CacheMap>
-bool vulkan_cache_exists(CacheMap &caches, std::mutex &mutex, void *owner) {
-  std::lock_guard<std::mutex> guard(mutex);
-  return caches.find(owner) != caches.end();
+template <typename Cache, typename Prepare>
+PrimitiveWorkspaceArena::Lease<Cache> acquire_vulkan_cache(
+    Program *program,
+    PrimitiveWorkspaceFamily family,
+    Prepare prepare) {
+  TI_ERROR_IF(program == nullptr,
+              "Vulkan primitive workspace requires a Program owner");
+  auto lease = program->primitive_workspace_arena().acquire<Cache>(
+      {PrimitiveWorkspaceBackend::vulkan, family, 0, 0},
+      [] { return std::make_shared<Cache>(); });
+  prepare(*lease);
+  return lease;
 }
 
-template <typename CacheMap>
-void vulkan_erase_cache(CacheMap &caches, std::mutex &mutex, void *owner) {
-  std::lock_guard<std::mutex> guard(mutex);
-  caches.erase(owner);
+auto get_cache(Program *program, Device *device) {
+  return acquire_vulkan_cache<VulkanRadixSortCache>(
+      program, PrimitiveWorkspaceFamily::ordering,
+      [device](auto &cache) { cache.ensure_device_only(device); });
 }
 
-template <typename CacheMap>
-void vulkan_clear_cache(Program *program,
-                        CacheMap &caches,
-                        std::mutex &mutex) {
-  if (vulkan_cache_exists(caches, mutex, program)) {
-    program->synchronize();
-    vulkan_erase_cache(caches, mutex, program);
-  }
+auto get_scan_cache(Program *program, Device *device) {
+  return acquire_vulkan_cache<VulkanScanCache>(
+      program, PrimitiveWorkspaceFamily::scan,
+      [device](auto &cache) { cache.ensure_device(device); });
 }
 
-bool vulkan_primitive_cache_exists(void *owner) {
-  return vulkan_cache_exists(g_vulkan_sort_caches, g_vulkan_sort_mutex,
-                             owner) ||
-         vulkan_cache_exists(g_vulkan_scan_caches, g_vulkan_scan_mutex,
-                             owner) ||
-         vulkan_cache_exists(g_vulkan_compact_caches, g_vulkan_compact_mutex,
-                             owner) ||
-         vulkan_cache_exists(g_vulkan_histogram_caches,
-                             g_vulkan_histogram_mutex, owner) ||
-         vulkan_cache_exists(g_vulkan_reduce_caches, g_vulkan_reduce_mutex,
-                             owner) ||
-         vulkan_cache_exists(g_vulkan_check_count_caches,
-                             g_vulkan_check_count_mutex, owner) ||
-         vulkan_cache_exists(g_vulkan_metric_reduce_caches,
-                             g_vulkan_metric_reduce_mutex, owner) ||
-         vulkan_cache_exists(g_vulkan_transform_caches,
-                             g_vulkan_transform_mutex, owner) ||
-         vulkan_cache_exists(g_vulkan_add_merge_caches,
-                             g_vulkan_add_merge_mutex, owner) ||
-         vulkan_cache_exists(g_vulkan_indexed_copy_caches,
-                             g_vulkan_indexed_copy_mutex, owner) ||
-         vulkan_cache_exists(g_vulkan_bucket_builder_caches,
-                             g_vulkan_bucket_builder_mutex, owner);
+auto get_compact_cache(Program *program, Device *device) {
+  return acquire_vulkan_cache<VulkanCompactCache>(
+      program, PrimitiveWorkspaceFamily::compact,
+      [device](auto &cache) { cache.ensure_device(device); });
 }
 
-void vulkan_erase_primitive_caches(void *owner) {
-  vulkan_erase_cache(g_vulkan_sort_caches, g_vulkan_sort_mutex, owner);
-  vulkan_erase_cache(g_vulkan_scan_caches, g_vulkan_scan_mutex, owner);
-  vulkan_erase_cache(g_vulkan_compact_caches, g_vulkan_compact_mutex, owner);
-  vulkan_erase_cache(g_vulkan_histogram_caches, g_vulkan_histogram_mutex,
-                     owner);
-  vulkan_erase_cache(g_vulkan_reduce_caches, g_vulkan_reduce_mutex, owner);
-  vulkan_erase_cache(g_vulkan_check_count_caches,
-                     g_vulkan_check_count_mutex, owner);
-  vulkan_erase_cache(g_vulkan_metric_reduce_caches,
-                     g_vulkan_metric_reduce_mutex, owner);
-  vulkan_erase_cache(g_vulkan_transform_caches, g_vulkan_transform_mutex,
-                     owner);
-  vulkan_erase_cache(g_vulkan_add_merge_caches, g_vulkan_add_merge_mutex,
-                     owner);
-  vulkan_erase_cache(g_vulkan_indexed_copy_caches,
-                     g_vulkan_indexed_copy_mutex, owner);
-  vulkan_erase_cache(g_vulkan_bucket_builder_caches,
-                     g_vulkan_bucket_builder_mutex, owner);
+auto get_histogram_cache(Program *program, Device *device) {
+  return acquire_vulkan_cache<VulkanHistogramCache>(
+      program, PrimitiveWorkspaceFamily::histogram,
+      [device](auto &cache) { cache.ensure_pipelines(device); });
 }
 
-VulkanRadixSortCache &get_cache(void *owner, Device *device) {
-  std::lock_guard<std::mutex> guard(g_vulkan_sort_mutex);
-  auto &cache = g_vulkan_sort_caches[owner];
-  if (!cache) {
-    cache = std::make_unique<VulkanRadixSortCache>();
-  }
-  cache->ensure_device_only(device);
-  return *cache;
+auto get_reduce_cache(Program *program, Device *device) {
+  return acquire_vulkan_cache<VulkanReduceCache>(
+      program, PrimitiveWorkspaceFamily::reduce,
+      [device](auto &cache) { cache.ensure_device(device); });
 }
 
-VulkanScanCache &get_scan_cache(void *owner, Device *device) {
-  std::lock_guard<std::mutex> guard(g_vulkan_scan_mutex);
-  auto &cache = g_vulkan_scan_caches[owner];
-  if (!cache) {
-    cache = std::make_unique<VulkanScanCache>();
-  }
-  cache->ensure_device(device);
-  return *cache;
+auto get_check_count_cache(Program *program, Device *device) {
+  return acquire_vulkan_cache<VulkanCheckCountCache>(
+      program, PrimitiveWorkspaceFamily::check,
+      [device](auto &cache) { cache.ensure_device(device); });
 }
 
-VulkanCompactCache &get_compact_cache(void *owner, Device *device) {
-  std::lock_guard<std::mutex> guard(g_vulkan_compact_mutex);
-  auto &cache = g_vulkan_compact_caches[owner];
-  if (!cache) {
-    cache = std::make_unique<VulkanCompactCache>();
-  }
-  cache->ensure_device(device);
-  return *cache;
+auto get_metric_reduce_cache(Program *program, Device *device) {
+  return acquire_vulkan_cache<VulkanMetricReduceCache>(
+      program, PrimitiveWorkspaceFamily::metric,
+      [device](auto &cache) { cache.ensure_device(device); });
 }
 
-VulkanHistogramCache &get_histogram_cache(void *owner, Device *device) {
-  std::lock_guard<std::mutex> guard(g_vulkan_histogram_mutex);
-  auto &cache = g_vulkan_histogram_caches[owner];
-  if (!cache) {
-    cache = std::make_unique<VulkanHistogramCache>();
-  }
-  cache->ensure_pipelines(device);
-  return *cache;
+auto get_transform_cache(Program *program, Device *device) {
+  return acquire_vulkan_cache<VulkanTransformCache>(
+      program, PrimitiveWorkspaceFamily::transform,
+      [device](auto &cache) { cache.ensure_pipelines(device); });
 }
 
-VulkanReduceCache &get_reduce_cache(void *owner, Device *device) {
-  std::lock_guard<std::mutex> guard(g_vulkan_reduce_mutex);
-  auto &cache = g_vulkan_reduce_caches[owner];
-  if (!cache) {
-    cache = std::make_unique<VulkanReduceCache>();
-  }
-  cache->ensure_device(device);
-  return *cache;
+auto get_add_merge_cache(Program *program, Device *device) {
+  return acquire_vulkan_cache<VulkanAddMergeCache>(
+      program, PrimitiveWorkspaceFamily::scatter_add,
+      [device](auto &cache) { cache.ensure_device(device); });
 }
 
-VulkanCheckCountCache &get_check_count_cache(void *owner, Device *device) {
-  std::lock_guard<std::mutex> guard(g_vulkan_check_count_mutex);
-  auto &cache = g_vulkan_check_count_caches[owner];
-  if (!cache) {
-    cache = std::make_unique<VulkanCheckCountCache>();
-  }
-  cache->ensure_device(device);
-  return *cache;
+auto get_indexed_copy_cache(Program *program, Device *device) {
+  return acquire_vulkan_cache<VulkanIndexedCopyCache>(
+      program, PrimitiveWorkspaceFamily::indexed,
+      [device](auto &cache) { cache.ensure_pipelines(device); });
 }
 
-VulkanMetricReduceCache &get_metric_reduce_cache(void *owner, Device *device) {
-  std::lock_guard<std::mutex> guard(g_vulkan_metric_reduce_mutex);
-  auto &cache = g_vulkan_metric_reduce_caches[owner];
-  if (!cache) {
-    cache = std::make_unique<VulkanMetricReduceCache>();
-  }
-  cache->ensure_device(device);
-  return *cache;
-}
-
-VulkanTransformCache &get_transform_cache(void *owner, Device *device) {
-  std::lock_guard<std::mutex> guard(g_vulkan_transform_mutex);
-  auto &cache = g_vulkan_transform_caches[owner];
-  if (!cache) {
-    cache = std::make_unique<VulkanTransformCache>();
-  }
-  cache->ensure_pipelines(device);
-  return *cache;
-}
-
-VulkanAddMergeCache &get_add_merge_cache(void *owner, Device *device) {
-  std::lock_guard<std::mutex> guard(g_vulkan_add_merge_mutex);
-  auto &cache = g_vulkan_add_merge_caches[owner];
-  if (!cache) {
-    cache = std::make_unique<VulkanAddMergeCache>();
-  }
-  cache->ensure_device(device);
-  return *cache;
-}
-
-VulkanIndexedCopyCache &get_indexed_copy_cache(void *owner, Device *device) {
-  std::lock_guard<std::mutex> guard(g_vulkan_indexed_copy_mutex);
-  auto &cache = g_vulkan_indexed_copy_caches[owner];
-  if (!cache) {
-    cache = std::make_unique<VulkanIndexedCopyCache>();
-  }
-  cache->ensure_pipelines(device);
-  return *cache;
-}
-
-VulkanBucketBuilderCache &get_bucket_builder_cache(void *owner,
-                                                   Device *device) {
-  std::lock_guard<std::mutex> guard(g_vulkan_bucket_builder_mutex);
-  auto &cache = g_vulkan_bucket_builder_caches[owner];
-  if (!cache) {
-    cache = std::make_unique<VulkanBucketBuilderCache>();
-  }
-  cache->ensure_pipelines(device);
-  return *cache;
+auto get_bucket_builder_cache(Program *program, Device *device) {
+  // Bucket construction and grouped reduction intentionally share pipelines
+  // and scratch. Keep one arena entry so reporting does not double-count it.
+  return acquire_vulkan_cache<VulkanBucketBuilderCache>(
+      program, PrimitiveWorkspaceFamily::bucket,
+      [device](auto &cache) { cache.ensure_pipelines(device); });
 }
 
 void dispatch_pipeline(CommandList *cmdlist,
@@ -7678,7 +7578,8 @@ std::size_t vulkan_reduce_storage_impl(Program *program,
 
   Device *device = program->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native reduce requires a compute device.");
-  auto &cache = get_reduce_cache(program, device);
+  auto cache_lease = get_reduce_cache(program, device);
+  auto &cache = *cache_lease;
   const bool use_i32_sum_atomic =
       value_type == 0 && op == 0 && !member_source && !member_destination &&
       get_environ_config("TI_VULKAN_REDUCE_I32_SUM_ATOMIC", 1) != 0;
@@ -7970,7 +7871,8 @@ std::size_t vulkan_check_count_storage_impl(Program *program,
               "UINT32_MAX input items.");
   Device *device = program->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native check_count requires a compute device.");
-  auto &cache = get_check_count_cache(program, device);
+  auto cache_lease = get_check_count_cache(program, device);
+  auto &cache = *cache_lease;
   Pipeline *pipeline = cache.pipeline_for(device, value_type);
   const size_t values_bytes = strided_binding_bytes(n, value_size, offset, stride);
   const size_t output_bytes = sizeof(int32_t);
@@ -8123,7 +8025,8 @@ std::size_t vulkan_metric_reduce_storage_impl(Program *program,
               "UINT32_MAX input items.");
   Device *device = program->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native metric_reduce requires a compute device.");
-  auto &cache = get_metric_reduce_cache(program, device);
+  auto cache_lease = get_metric_reduce_cache(program, device);
+  auto &cache = *cache_lease;
   Pipeline *pipeline = cache.pipeline_for(device, value_type);
   const size_t values_bytes =
       strided_binding_bytes(n, value_size, values_offset, values_stride);
@@ -8348,7 +8251,8 @@ std::size_t vulkan_transform_affine_storage_impl(
   if (!trusted) {
     TI_ERROR_IF(!device, "Vulkan native transform requires a compute device.");
   }
-  auto &cache = get_transform_cache(program, device);
+  auto cache_lease = get_transform_cache(program, device);
+  auto &cache = *cache_lease;
 
   const bool use_dense_i32_affine =
       (value_type == 0 || value_type == 2) && lane_count == 1 &&
@@ -8627,7 +8531,8 @@ std::size_t vulkan_transform_indexed_affine_ndarray_impl(Program *program,
   Device *device = program->get_compute_device();
   TI_ERROR_IF(!device,
               "Vulkan native indexed transform requires a compute device.");
-  auto &cache = get_transform_cache(program, device);
+  auto cache_lease = get_transform_cache(program, device);
+  auto &cache = *cache_lease;
   ShaderResourceSet *bindings = cache.cached_indexed_affine_resource_set();
   Pipeline *pipeline = cache.indexed_pipeline_for(device, value_type);
 
@@ -8725,7 +8630,8 @@ std::size_t vulkan_add_merge_storage_impl(Program *program,
   Device *device = program->get_compute_device();
   TI_ERROR_IF(!device,
               "Vulkan native add-merge requires a compute device.");
-  auto &cache = get_add_merge_cache(program, device);
+  auto cache_lease = get_add_merge_cache(program, device);
+  auto &cache = *cache_lease;
   const uint32_t src_offset_items =
       static_cast<uint32_t>(src_offset / value_size);
   const uint32_t src_stride_items =
@@ -9095,7 +9001,8 @@ std::size_t Program::vulkan_grouped_reduce_atomic_ndarray(Ndarray *keys,
 
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native grouped reduce requires a compute device.");
-  auto &cache = get_bucket_builder_cache(this, device);
+  auto cache_lease = get_bucket_builder_cache(this, device);
+  auto &cache = *cache_lease;
   const DeviceAllocation keys_alloc = keys->ndarray_alloc_;
   const DeviceAllocation values_alloc = values->ndarray_alloc_;
   const DeviceAllocation output_alloc = output->ndarray_alloc_;
@@ -9237,7 +9144,8 @@ std::size_t Program::vulkan_grouped_reduce_atomic_dense_field(
   TI_ERROR_IF(device == nullptr,
               "Vulkan native dense field grouped reduce requires a compute "
               "device.");
-  auto &cache = get_bucket_builder_cache(this, device);
+  auto cache_lease = get_bucket_builder_cache(this, device);
+  auto &cache = *cache_lease;
   const DeviceAllocation keys_alloc{keys_ptr.device, keys_ptr.alloc_id};
   const DeviceAllocation values_alloc{values_ptr.device, values_ptr.alloc_id};
   const DeviceAllocation output_alloc{output_ptr.device, output_ptr.alloc_id};
@@ -9407,7 +9315,8 @@ std::size_t Program::vulkan_grouped_reduce_atomic_strided_keys_ndarray(
   TI_ERROR_IF(device == nullptr,
               "Vulkan native strided grouped reduce requires a compute "
               "device.");
-  auto &cache = get_bucket_builder_cache(this, device);
+  auto cache_lease = get_bucket_builder_cache(this, device);
+  auto &cache = *cache_lease;
   cache.ensure_grouped_reduce_zero_strided_pipeline(value_type);
   cache.ensure_grouped_reduce_atomic_strided_pipeline(value_type);
   const DeviceAllocation keys_alloc = keys->ndarray_alloc_;
@@ -9557,7 +9466,8 @@ std::size_t Program::vulkan_inclusive_scan_ndarray(Ndarray *data,
 
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native scan requires a compute device.");
-  auto &cache = get_scan_cache(this, device);
+  auto cache_lease = get_scan_cache(this, device);
+  auto &cache = *cache_lease;
   return enqueue_vulkan_scan(this, cache, data->ndarray_alloc_, n, value_type,
                              profiler != nullptr);
 }
@@ -9585,7 +9495,8 @@ std::size_t Program::vulkan_inclusive_reverse_scan_ndarray(Ndarray *data,
 
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native reverse scan requires a compute device.");
-  auto &cache = get_scan_cache(this, device);
+  auto cache_lease = get_scan_cache(this, device);
+  auto &cache = *cache_lease;
   return enqueue_vulkan_scan(this, cache, data->ndarray_alloc_, n, value_type,
                              profiler != nullptr, false, 0, 0, 0, true);
 }
@@ -9610,7 +9521,8 @@ std::size_t Program::vulkan_inclusive_scan_member_ndarray(
 
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native strided scan requires a compute device.");
-  auto &cache = get_scan_cache(this, device);
+  auto cache_lease = get_scan_cache(this, device);
+  auto &cache = *cache_lease;
   return enqueue_vulkan_scan(this, cache, data->ndarray_alloc_, n, value_type,
                              profiler != nullptr, true, offset, stride);
 }
@@ -9637,7 +9549,8 @@ std::size_t Program::vulkan_inclusive_reverse_scan_member_ndarray(
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device,
               "Vulkan native strided reverse scan requires a compute device.");
-  auto &cache = get_scan_cache(this, device);
+  auto cache_lease = get_scan_cache(this, device);
+  auto &cache = *cache_lease;
   return enqueue_vulkan_scan(this, cache, data->ndarray_alloc_, n, value_type,
                              profiler != nullptr, true, offset, stride, 0,
                              true);
@@ -9671,7 +9584,8 @@ std::size_t Program::vulkan_inclusive_scan_dense_field(SNode *data,
 
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native dense field scan requires a compute device.");
-  auto &cache = get_scan_cache(this, device);
+  auto cache_lease = get_scan_cache(this, device);
+  auto &cache = *cache_lease;
   DeviceAllocation alloc{ptr.device, ptr.alloc_id};
   if (stride == value_size) {
     return enqueue_vulkan_scan(this, cache, alloc, n, value_type,
@@ -9714,7 +9628,8 @@ std::size_t Program::vulkan_inclusive_reverse_scan_dense_field(SNode *data,
   TI_ERROR_IF(!device,
               "Vulkan native dense field reverse scan requires a compute "
               "device.");
-  auto &cache = get_scan_cache(this, device);
+  auto cache_lease = get_scan_cache(this, device);
+  auto &cache = *cache_lease;
   DeviceAllocation alloc{ptr.device, ptr.alloc_id};
   if (stride == value_size) {
     return enqueue_vulkan_scan(this, cache, alloc, n, value_type,
@@ -9763,7 +9678,8 @@ std::size_t Program::vulkan_inclusive_scan_dense_field_packed(SNode *data,
   TI_ERROR_IF(!device,
               "Vulkan native packed dense field scan requires a compute "
               "device.");
-  auto &cache = get_scan_cache(this, device);
+  auto cache_lease = get_scan_cache(this, device);
+  auto &cache = *cache_lease;
   DeviceAllocation alloc{ptr.device, ptr.alloc_id};
   std::size_t temp_bytes = 0;
   for (int lane = 0; lane < lane_count; ++lane) {
@@ -9816,7 +9732,8 @@ std::size_t Program::vulkan_inclusive_reverse_scan_dense_field_packed(
   TI_ERROR_IF(!device,
               "Vulkan native packed dense field reverse scan requires a "
               "compute device.");
-  auto &cache = get_scan_cache(this, device);
+  auto cache_lease = get_scan_cache(this, device);
+  auto &cache = *cache_lease;
   DeviceAllocation alloc{ptr.device, ptr.alloc_id};
   std::size_t temp_bytes = 0;
   for (int lane = 0; lane < lane_count; ++lane) {
@@ -9879,7 +9796,8 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
 
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native compact requires a compute device.");
-  auto &cache = get_compact_cache(this, device);
+  auto cache_lease = get_compact_cache(this, device);
+  auto &cache = *cache_lease;
   cache.ensure_compact_pipelines(device);
   const size_t prefix_bytes = n * sizeof(int32_t);
   if (cache.has_workspace_allocs() &&
@@ -10071,7 +9989,8 @@ std::size_t Program::vulkan_compact_dense_field(SNode *values,
 
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native dense field compact requires a compute device.");
-  auto &cache = get_compact_cache(this, device);
+  auto cache_lease = get_compact_cache(this, device);
+  auto &cache = *cache_lease;
   cache.ensure_compact_pipelines(device);
   const size_t prefix_bytes = n * sizeof(int32_t);
   if (cache.has_workspace_allocs() &&
@@ -10271,7 +10190,8 @@ std::size_t Program::vulkan_histogram_ndarray(Ndarray *values,
 
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native histogram requires a compute device.");
-  auto &cache = get_histogram_cache(this, device);
+  auto cache_lease = get_histogram_cache(this, device);
+  auto &cache = *cache_lease;
 
   const size_t n = values->get_nelement();
   const size_t num_bins = bins->get_nelement();
@@ -10507,7 +10427,8 @@ std::size_t Program::vulkan_histogram_dense_field(SNode *values,
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device,
               "Vulkan native dense field histogram requires a compute device.");
-  auto &cache = get_histogram_cache(this, device);
+  auto cache_lease = get_histogram_cache(this, device);
+  auto &cache = *cache_lease;
 
   const size_t value_bytes = n * value_size;
   const size_t bin_bytes = num_bins * bin_size;
@@ -11348,7 +11269,8 @@ std::size_t Program::vulkan_gather_ndarray(Ndarray *src,
               "Vulkan native gather word count exceeds UINT32_MAX.");
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native gather requires a compute device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   ShaderResourceSet *bindings = cache.cached_resource_set(false);
   Pipeline *pipeline = cache.indexed_copy_pipeline(false, false);
   const size_t value_bytes = n * item_bytes;
@@ -11430,7 +11352,8 @@ std::size_t Program::vulkan_gather_strided_ndarray(
 
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native strided gather requires a compute device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   cache.ensure_indexed_copy_params();
   ShaderResourceSet *bindings = cache.cached_strided_resource_set(false);
   Pipeline *pipeline = cache.indexed_copy_pipeline(false, true);
@@ -11542,7 +11465,8 @@ std::size_t Program::vulkan_gather_dense_field(SNode *src,
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device,
               "Vulkan native dense field gather requires a compute device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
   const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
   const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
@@ -11701,7 +11625,8 @@ std::size_t Program::vulkan_gather_dense_field_packed(SNode *src,
   TI_ERROR_IF(!device,
               "Vulkan native packed dense field gather requires a compute "
               "device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   ShaderResourceSet *bindings = cache.cached_resource_set(false);
   Pipeline *pipeline = cache.indexed_copy_pipeline(false, false);
   const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
@@ -11797,7 +11722,8 @@ std::size_t Program::vulkan_gather_dense_field_packed_indices_field(
   TI_ERROR_IF(!device,
               "Vulkan native packed dense field gather requires a compute "
               "device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   ShaderResourceSet *bindings = cache.cached_resource_set(false);
   Pipeline *pipeline = cache.indexed_copy_pipeline(false, false);
   const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
@@ -11885,7 +11811,8 @@ std::size_t Program::vulkan_gather_dense_field_indices_field(
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device,
               "Vulkan native dense field gather requires a compute device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
   const DeviceAllocation indices_alloc{indices_ptr.device, indices_ptr.alloc_id};
   const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
@@ -11971,7 +11898,8 @@ std::size_t Program::vulkan_scatter_ndarray(Ndarray *src,
               "Vulkan native scatter word count exceeds UINT32_MAX.");
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native scatter requires a compute device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   ShaderResourceSet *bindings = cache.cached_resource_set(true);
   Pipeline *pipeline = item_words == 1
                            ? cache.indexed_copy_dense_u32_scatter_pipeline()
@@ -12057,7 +11985,8 @@ std::size_t Program::vulkan_scatter_strided_ndarray(
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device,
               "Vulkan native strided scatter requires a compute device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   cache.ensure_indexed_copy_params();
   ShaderResourceSet *bindings = cache.cached_strided_resource_set(true);
   Pipeline *pipeline = cache.indexed_copy_pipeline(true, true);
@@ -12171,7 +12100,8 @@ std::size_t Program::vulkan_scatter_dense_field(SNode *src,
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device,
               "Vulkan native dense field scatter requires a compute device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
   const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
   const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
@@ -12332,7 +12262,8 @@ std::size_t Program::vulkan_scatter_dense_field_packed(SNode *src,
   TI_ERROR_IF(!device,
               "Vulkan native packed dense field scatter requires a compute "
               "device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   ShaderResourceSet *bindings = cache.cached_resource_set(true);
   Pipeline *pipeline = item_words == 1
                            ? cache.indexed_copy_dense_u32_scatter_pipeline()
@@ -12430,7 +12361,8 @@ std::size_t Program::vulkan_scatter_dense_field_packed_indices_field(
   TI_ERROR_IF(!device,
               "Vulkan native packed dense field scatter requires a compute "
               "device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   ShaderResourceSet *bindings = cache.cached_resource_set(true);
   Pipeline *pipeline = item_words == 1
                            ? cache.indexed_copy_dense_u32_scatter_pipeline()
@@ -12521,7 +12453,8 @@ std::size_t Program::vulkan_scatter_dense_field_indices_field(
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device,
               "Vulkan native dense field scatter requires a compute device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
   const DeviceAllocation indices_alloc{indices_ptr.device, indices_ptr.alloc_id};
   const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
@@ -12609,7 +12542,8 @@ std::size_t Program::vulkan_scatter_add_ndarray(Ndarray *src,
   }
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native scatter-add requires a compute device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   ShaderResourceSet *bindings =
       cache.cached_scatter_add_resource_set(value_type);
   Pipeline *pipeline = cache.scatter_add_pipeline(value_type);
@@ -12714,7 +12648,8 @@ std::size_t Program::vulkan_scatter_add_strided_ndarray(
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device,
               "Vulkan native strided scatter-add requires a compute device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   cache.ensure_scatter_add_strided_pipeline(value_type);
   ShaderResourceSet *bindings =
       cache.cached_scatter_add_strided_resource_set(value_type);
@@ -12852,7 +12787,8 @@ std::size_t Program::vulkan_scatter_add_dense_field(SNode *src,
   TI_ERROR_IF(!device,
               "Vulkan native dense field scatter-add requires a compute "
               "device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
   const DeviceAllocation indices_alloc = indices->ndarray_alloc_;
   const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
@@ -13049,7 +12985,8 @@ std::size_t Program::vulkan_scatter_add_dense_field_packed(
   TI_ERROR_IF(!device,
               "Vulkan native packed dense field scatter-add requires a "
               "compute device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   TI_ERROR_IF(
       static_cast<size_t>(lane_count) >
               static_cast<size_t>(std::numeric_limits<uint32_t>::max()) / n ||
@@ -13198,7 +13135,8 @@ std::size_t Program::vulkan_scatter_add_dense_field_packed_indices_field(
   TI_ERROR_IF(!device,
               "Vulkan native packed dense field scatter-add requires a "
               "compute device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   TI_ERROR_IF(
       static_cast<size_t>(lane_count) >
               static_cast<size_t>(std::numeric_limits<uint32_t>::max()) / n ||
@@ -13325,7 +13263,8 @@ std::size_t Program::vulkan_scatter_add_dense_field_indices_field(
   TI_ERROR_IF(!device,
               "Vulkan native dense field scatter-add requires a compute "
               "device.");
-  auto &cache = get_indexed_copy_cache(this, device);
+  auto cache_lease = get_indexed_copy_cache(this, device);
+  auto &cache = *cache_lease;
   const DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
   const DeviceAllocation indices_alloc{indices_ptr.device, indices_ptr.alloc_id};
   const DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
@@ -13452,7 +13391,8 @@ std::size_t Program::vulkan_bucket_builder_ndarray(Ndarray *keys,
 
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native bucket builder requires a compute device.");
-  auto &cache = get_bucket_builder_cache(this, device);
+  auto cache_lease = get_bucket_builder_cache(this, device);
+  auto &cache = *cache_lease;
   const DeviceAllocation keys_alloc = keys->ndarray_alloc_;
   const DeviceAllocation values_alloc = values->ndarray_alloc_;
   const DeviceAllocation offsets_alloc = offsets->ndarray_alloc_;
@@ -13747,7 +13687,8 @@ std::size_t Program::vulkan_bucket_builder_dense_field(SNode *keys,
   TI_ERROR_IF(device == nullptr,
               "Vulkan native dense field bucket builder requires a compute "
               "device.");
-  auto &cache = get_bucket_builder_cache(this, device);
+  auto cache_lease = get_bucket_builder_cache(this, device);
+  auto &cache = *cache_lease;
   const DeviceAllocation keys_alloc{keys_ptr.device, keys_ptr.alloc_id};
   const DeviceAllocation values_alloc{values_ptr.device, values_ptr.alloc_id};
   const DeviceAllocation offsets_alloc{offsets_ptr.device,
@@ -14059,7 +14000,8 @@ std::size_t Program::vulkan_grouped_reduce_ndarray(Ndarray *keys,
                                     value_type);
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native grouped reduce requires a compute device.");
-  auto &cache = get_bucket_builder_cache(this, device);
+  auto cache_lease = get_bucket_builder_cache(this, device);
+  auto &cache = *cache_lease;
   const DeviceAllocation offsets_alloc = offsets->ndarray_alloc_;
   const DeviceAllocation scratch_alloc = scratch->ndarray_alloc_;
   const DeviceAllocation output_alloc = output->ndarray_alloc_;
@@ -14168,7 +14110,8 @@ std::size_t Program::vulkan_radix_sort_u32_ndarray(Ndarray *keys,
   Device *device = program_impl_->get_compute_device();
   TI_ERROR_IF(!device, "Vulkan native radix sort requires a compute device.");
   double start = front ? profile_time_us() : 0.0;
-  auto &cache = get_cache(this, device);
+  auto cache_lease = get_cache(this, device);
+  auto &cache = *cache_lease;
   if (front) {
     front->get_cache_us += profile_time_us() - start;
   }
@@ -15017,49 +14960,53 @@ std::size_t Program::vulkan_radix_sort_u32_dense_field(SNode *keys,
 }
 
 void Program::vulkan_radix_sort_clear_workspace() {
-  vulkan_clear_cache(this, g_vulkan_sort_caches, g_vulkan_sort_mutex);
+  clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::vulkan,
+                                 PrimitiveWorkspaceFamily::ordering);
 }
 
 void Program::vulkan_scan_clear_workspace() {
-  vulkan_clear_cache(this, g_vulkan_scan_caches, g_vulkan_scan_mutex);
+  clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::vulkan,
+                                 PrimitiveWorkspaceFamily::scan);
 }
 
 void Program::vulkan_compact_clear_workspace() {
-  vulkan_clear_cache(this, g_vulkan_compact_caches, g_vulkan_compact_mutex);
+  clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::vulkan,
+                                 PrimitiveWorkspaceFamily::compact);
 }
 
 void Program::vulkan_histogram_clear_workspace() {
-  vulkan_clear_cache(this, g_vulkan_histogram_caches,
-                     g_vulkan_histogram_mutex);
+  clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::vulkan,
+                                 PrimitiveWorkspaceFamily::histogram);
 }
 
 void Program::vulkan_reduce_clear_workspace() {
-  vulkan_clear_cache(this, g_vulkan_reduce_caches, g_vulkan_reduce_mutex);
+  clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::vulkan,
+                                 PrimitiveWorkspaceFamily::reduce);
 }
 
 void Program::vulkan_check_count_clear_workspace() {
-  vulkan_clear_cache(this, g_vulkan_check_count_caches,
-                     g_vulkan_check_count_mutex);
+  clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::vulkan,
+                                 PrimitiveWorkspaceFamily::check);
 }
 
 void Program::vulkan_metric_reduce_clear_workspace() {
-  vulkan_clear_cache(this, g_vulkan_metric_reduce_caches,
-                     g_vulkan_metric_reduce_mutex);
+  clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::vulkan,
+                                 PrimitiveWorkspaceFamily::metric);
 }
 
 void Program::vulkan_transform_clear_workspace() {
-  vulkan_clear_cache(this, g_vulkan_transform_caches,
-                     g_vulkan_transform_mutex);
+  clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::vulkan,
+                                 PrimitiveWorkspaceFamily::transform);
 }
 
 void Program::vulkan_add_merge_clear_workspace() {
-  vulkan_clear_cache(this, g_vulkan_add_merge_caches,
-                     g_vulkan_add_merge_mutex);
+  clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::vulkan,
+                                 PrimitiveWorkspaceFamily::scatter_add);
 }
 
 void Program::vulkan_indexed_copy_clear_workspace() {
-  vulkan_clear_cache(this, g_vulkan_indexed_copy_caches,
-                     g_vulkan_indexed_copy_mutex);
+  clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::vulkan,
+                                 PrimitiveWorkspaceFamily::indexed);
 }
 
 void Program::vulkan_scatter_add_clear_workspace() {
@@ -15067,8 +15014,8 @@ void Program::vulkan_scatter_add_clear_workspace() {
 }
 
 void Program::vulkan_bucket_builder_clear_workspace() {
-  vulkan_clear_cache(this, g_vulkan_bucket_builder_caches,
-                     g_vulkan_bucket_builder_mutex);
+  clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::vulkan,
+                                 PrimitiveWorkspaceFamily::bucket);
 }
 
 void Program::vulkan_grouped_reduce_clear_workspace() {
@@ -15076,7 +15023,9 @@ void Program::vulkan_grouped_reduce_clear_workspace() {
 }
 
 void Program::vulkan_clear_primitive_caches() {
-  if (!vulkan_primitive_cache_exists(this)) {
+  if (primitive_workspace_arena_
+          .snapshot(PrimitiveWorkspaceBackend::vulkan)
+          .entries == 0) {
     return;
   }
   // A fatal Vulkan error invalidates the wait/submission path. Cache entries
@@ -15085,97 +15034,77 @@ void Program::vulkan_clear_primitive_caches() {
   if (!runtime_has_fatal_fault()) {
     synchronize();
   }
-  vulkan_erase_primitive_caches(this);
+  primitive_workspace_arena_.clear(PrimitiveWorkspaceBackend::vulkan);
 }
 
 std::size_t Program::vulkan_radix_sort_workspace_bytes() const {
-  std::lock_guard<std::mutex> guard(g_vulkan_sort_mutex);
-  auto it = g_vulkan_sort_caches.find(const_cast<Program *>(this));
-  if (it == g_vulkan_sort_caches.end()) {
-    return 0;
-  }
-  return it->second->cached_bytes;
+  return primitive_workspace_arena_
+      .snapshot(PrimitiveWorkspaceBackend::vulkan,
+                PrimitiveWorkspaceFamily::ordering)
+      .reserved_bytes;
 }
 
 std::size_t Program::vulkan_scan_workspace_bytes() const {
-  std::lock_guard<std::mutex> guard(g_vulkan_scan_mutex);
-  auto it = g_vulkan_scan_caches.find(const_cast<Program *>(this));
-  if (it == g_vulkan_scan_caches.end()) {
-    return 0;
-  }
-  return it->second->cached_bytes;
+  return primitive_workspace_arena_
+      .snapshot(PrimitiveWorkspaceBackend::vulkan,
+                PrimitiveWorkspaceFamily::scan)
+      .reserved_bytes;
 }
 
 std::size_t Program::vulkan_compact_workspace_bytes() const {
-  std::lock_guard<std::mutex> guard(g_vulkan_compact_mutex);
-  auto it = g_vulkan_compact_caches.find(const_cast<Program *>(this));
-  if (it == g_vulkan_compact_caches.end()) {
-    return 0;
-  }
-  return it->second->cached_bytes;
+  return primitive_workspace_arena_
+      .snapshot(PrimitiveWorkspaceBackend::vulkan,
+                PrimitiveWorkspaceFamily::compact)
+      .reserved_bytes;
 }
 
 std::size_t Program::vulkan_histogram_workspace_bytes() const {
-  std::lock_guard<std::mutex> guard(g_vulkan_histogram_mutex);
-  auto it = g_vulkan_histogram_caches.find(const_cast<Program *>(this));
-  if (it == g_vulkan_histogram_caches.end()) {
-    return 0;
-  }
-  return it->second->cached_bytes;
+  return primitive_workspace_arena_
+      .snapshot(PrimitiveWorkspaceBackend::vulkan,
+                PrimitiveWorkspaceFamily::histogram)
+      .reserved_bytes;
 }
 
 std::size_t Program::vulkan_reduce_workspace_bytes() const {
-  std::lock_guard<std::mutex> guard(g_vulkan_reduce_mutex);
-  auto it = g_vulkan_reduce_caches.find(const_cast<Program *>(this));
-  if (it == g_vulkan_reduce_caches.end()) {
-    return 0;
-  }
-  return it->second->cached_bytes;
+  return primitive_workspace_arena_
+      .snapshot(PrimitiveWorkspaceBackend::vulkan,
+                PrimitiveWorkspaceFamily::reduce)
+      .reserved_bytes;
 }
 
 std::size_t Program::vulkan_check_count_workspace_bytes() const {
-  std::lock_guard<std::mutex> guard(g_vulkan_check_count_mutex);
-  auto it = g_vulkan_check_count_caches.find(const_cast<Program *>(this));
-  if (it == g_vulkan_check_count_caches.end()) {
-    return 0;
-  }
-  return it->second->cached_bytes;
+  return primitive_workspace_arena_
+      .snapshot(PrimitiveWorkspaceBackend::vulkan,
+                PrimitiveWorkspaceFamily::check)
+      .reserved_bytes;
 }
 
 std::size_t Program::vulkan_metric_reduce_workspace_bytes() const {
-  std::lock_guard<std::mutex> guard(g_vulkan_metric_reduce_mutex);
-  auto it = g_vulkan_metric_reduce_caches.find(const_cast<Program *>(this));
-  if (it == g_vulkan_metric_reduce_caches.end()) {
-    return 0;
-  }
-  return it->second->cached_bytes;
+  return primitive_workspace_arena_
+      .snapshot(PrimitiveWorkspaceBackend::vulkan,
+                PrimitiveWorkspaceFamily::metric)
+      .reserved_bytes;
 }
 
 std::size_t Program::vulkan_transform_workspace_bytes() const {
-  std::lock_guard<std::mutex> guard(g_vulkan_transform_mutex);
-  auto it = g_vulkan_transform_caches.find(const_cast<Program *>(this));
-  if (it == g_vulkan_transform_caches.end()) {
-    return 0;
-  }
-  return it->second->cached_bytes;
+  return primitive_workspace_arena_
+      .snapshot(PrimitiveWorkspaceBackend::vulkan,
+                PrimitiveWorkspaceFamily::transform)
+      .reserved_bytes;
 }
 
 std::size_t Program::vulkan_add_merge_workspace_bytes() const {
-  std::lock_guard<std::mutex> guard(g_vulkan_add_merge_mutex);
-  auto it = g_vulkan_add_merge_caches.find(const_cast<Program *>(this));
-  if (it == g_vulkan_add_merge_caches.end()) {
-    return 0;
-  }
-  return it->second->cached_bytes;
+  return primitive_workspace_arena_
+      .snapshot(PrimitiveWorkspaceBackend::vulkan,
+                PrimitiveWorkspaceFamily::scatter_add)
+      .reserved_bytes;
 }
 
 std::size_t Program::vulkan_indexed_copy_workspace_bytes() const {
-  std::lock_guard<std::mutex> guard(g_vulkan_indexed_copy_mutex);
-  auto it = g_vulkan_indexed_copy_caches.find(const_cast<Program *>(this));
-  if (it == g_vulkan_indexed_copy_caches.end()) {
-    return 0;
-  }
-  return it->second->cached_bytes;
+  return primitive_workspace_arena_
+      .snapshot(PrimitiveWorkspaceBackend::vulkan,
+                PrimitiveWorkspaceFamily::indexed)
+      .reserved_bytes;
 }
 
 std::size_t Program::vulkan_scatter_add_workspace_bytes() const {
@@ -15183,12 +15112,10 @@ std::size_t Program::vulkan_scatter_add_workspace_bytes() const {
 }
 
 std::size_t Program::vulkan_bucket_builder_workspace_bytes() const {
-  std::lock_guard<std::mutex> guard(g_vulkan_bucket_builder_mutex);
-  auto it = g_vulkan_bucket_builder_caches.find(const_cast<Program *>(this));
-  if (it == g_vulkan_bucket_builder_caches.end()) {
-    return 0;
-  }
-  return it->second->cached_bytes;
+  return primitive_workspace_arena_
+      .snapshot(PrimitiveWorkspaceBackend::vulkan,
+                PrimitiveWorkspaceFamily::bucket)
+      .reserved_bytes;
 }
 
 std::size_t Program::vulkan_grouped_reduce_workspace_bytes() const {

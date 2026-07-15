@@ -365,6 +365,102 @@ def test_cpu_native_primitives_are_safe_for_two_gil_released_callers():
         assert reduced[0] == n * 5
 
 
+@test_utils.test(arch=ti.vulkan, exclude=[(ti.vulkan, "Darwin")])
+def test_vulkan_native_workspace_arena_is_safe_for_two_callers():
+    """One Program cache may be shared; per-call bindings must not leak."""
+
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_transform_available")
+        and prog.vulkan_transform_available()
+    ):
+        pytest.skip("Vulkan native transform is unavailable in this runtime.")
+
+    impl.get_runtime().materialize()
+    n = 1 << 16
+    iterations = 8
+    source_data = np.arange(n, dtype=np.int32)
+    results = []
+    stats_before = prog._primitive_workspace_stats()
+
+    def make_worker(scale, bias):
+        source = ti.ndarray(ti.i32, shape=n)
+        output = ti.ndarray(ti.i32, shape=n)
+        source.from_numpy(source_data)
+        workspace = ti.algorithms.TransformWorkspace(max_items=n)
+
+        def worker():
+            for _ in range(iterations):
+                ti.algorithms.experimental_transform(
+                    source,
+                    output,
+                    scale=scale,
+                    bias=bias,
+                    method="vulkan_native",
+                    workspace=workspace,
+                )
+            results.append((scale, bias, output.to_numpy()))
+
+        return worker
+
+    _run_concurrently([make_worker(3, 11), make_worker(-2, 7)])
+    assert len(results) == 2
+    for scale, bias, output in results:
+        np.testing.assert_array_equal(output, source_data * scale + bias)
+
+    stats_after = prog._primitive_workspace_stats()
+    assert stats_after["entries"] >= stats_before["entries"] + 1
+    assert (
+        stats_after["acquisitions"]
+        >= stats_before["acquisitions"] + iterations * 2
+    )
+    assert stats_after["active_leases"] == 0
+
+
+@test_utils.test(arch=ti.vulkan, exclude=[(ti.vulkan, "Darwin")])
+def test_vulkan_workspace_clear_cannot_cross_native_enqueue():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "vulkan_transform_available")
+        and prog.vulkan_transform_available()
+    ):
+        pytest.skip("Vulkan native transform is unavailable in this runtime.")
+
+    impl.get_runtime().materialize()
+    n = 1 << 15
+    source_data = np.arange(n, dtype=np.int32)
+    source = ti.ndarray(ti.i32, shape=n)
+    output = ti.ndarray(ti.i32, shape=n)
+    source.from_numpy(source_data)
+    workspace = ti.algorithms.TransformWorkspace(max_items=n)
+    first_submission = threading.Event()
+
+    def submitter():
+        for iteration in range(16):
+            ti.algorithms.experimental_transform(
+                source,
+                output,
+                scale=5,
+                bias=-3,
+                method="vulkan_native",
+                workspace=workspace,
+            )
+            if iteration == 0:
+                first_submission.set()
+
+    def clearer():
+        assert first_submission.wait(timeout=10)
+        for _ in range(8):
+            prog.vulkan_transform_clear_workspace()
+
+    _run_concurrently([submitter, clearer])
+    ti.sync()
+    np.testing.assert_array_equal(output.to_numpy(), source_data * 5 - 3)
+    prog.vulkan_transform_clear_workspace()
+    assert prog.vulkan_transform_workspace_bytes() == 0
+    assert prog._primitive_workspace_stats()["active_leases"] == 0
+
+
 @test_utils.test(arch=ti.cpu, cpu_max_num_threads=4)
 def test_compiled_graph_cache_serializes_two_gil_released_callers():
     """One executable/cache may be shared; run-local arguments must not leak."""

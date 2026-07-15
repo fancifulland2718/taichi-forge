@@ -6942,7 +6942,12 @@ void Program::clear_primitive_workspaces() {
 void Program::clear_primitive_workspaces_for(
     PrimitiveWorkspaceBackend backend,
     PrimitiveWorkspaceFamily family) {
-  ensure_runtime_submission_allowed("primitive workspace clear");
+  // Block native/Graph host submissions before establishing completion. A
+  // synchronize-before-retire sequence alone is unsafe: a caller that had
+  // already acquired a workspace lease could enqueue after the wait returned.
+  // The existing recursive resource-submission domain closes that gap without
+  // adding any lock to ordinary kernel submission.
+  auto submission_guard = acquire_runtime_resource_submission_guard();
   // Resource destructors may call backend deallocation APIs. Establish an
   // explicit completion boundary here instead of letting an arena budget or
   // cache lookup introduce an invisible wait after enqueue.

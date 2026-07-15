@@ -442,10 +442,12 @@ def test_scan_cpu_native_struct_tensor_member_view():
 def test_scan_ndarray_vulkan_native():
     N = 8192
 
-    if not impl.get_runtime().prog.vulkan_scan_available():
+    prog = impl.get_runtime().prog
+    if not prog.vulkan_scan_available():
         pytest.skip("Vulkan native scan is unavailable in this build/runtime.")
 
-    prog = impl.get_runtime().prog
+    before = prog._primitive_workspace_stats()
+    tested = 0
     for dtype, np_dtype in _VULKAN_SCAN_DTYPES:
         value_type = _SCAN_VALUE_TYPE[dtype]
         if hasattr(prog, "vulkan_scan_value_type_available") and not (
@@ -458,7 +460,19 @@ def test_scan_ndarray_vulkan_native():
         ti.algorithms.PrefixSumExecutor(N).run(arr)
         expected = np.cumsum(data, dtype=np_dtype).astype(np_dtype)
         _assert_scan_equal(arr.to_numpy(), expected)
-    assert impl.get_runtime().prog.vulkan_scan_workspace_bytes() > 0
+        tested += 1
+    workspace_bytes = prog.vulkan_scan_workspace_bytes()
+    after = prog._primitive_workspace_stats()
+    assert workspace_bytes > 0
+    assert after["entries"] >= before["entries"] + 1
+    assert after["reserved_bytes"] >= before["reserved_bytes"] + workspace_bytes
+    assert after["acquisitions"] >= before["acquisitions"] + tested
+    assert after["active_leases"] == 0
+    prog.vulkan_scan_clear_workspace()
+    cleared = prog._primitive_workspace_stats()
+    assert prog.vulkan_scan_workspace_bytes() == 0
+    assert cleared["entries"] <= after["entries"] - 1
+    assert cleared["active_leases"] == 0
 
 
 @test_utils.test(arch=[ti.vulkan])

@@ -31,6 +31,12 @@ struct FakeWorkspace {
   std::shared_ptr<std::atomic<std::uint64_t>> destructions;
 };
 
+struct OtherWorkspace {
+  std::size_t allocated_bytes() const noexcept {
+    return 0;
+  }
+};
+
 PrimitiveWorkspaceKey cuda_scan_key(std::uint64_t stream = 0,
                                     std::uint64_t variant = 0) {
   return {PrimitiveWorkspaceBackend::cuda, PrimitiveWorkspaceFamily::scan,
@@ -158,6 +164,80 @@ TEST(PrimitiveWorkspaceArena, ClearDestroysOutsideMetadataDomain) {
         cuda_scan_key(), [] { return std::make_shared<FakeWorkspace>(2); });
     EXPECT_EQ(lease->identity, 2);
   }
+}
+
+TEST(PrimitiveWorkspaceArena, RejectsNullFactoryWithoutPublishingEntry) {
+  PrimitiveWorkspaceArena arena;
+  EXPECT_THROW(
+      arena.acquire<FakeWorkspace>(cuda_scan_key(), [] {
+        return std::shared_ptr<FakeWorkspace>();
+      }),
+      std::invalid_argument);
+
+  const auto stats = arena.snapshot();
+  EXPECT_EQ(stats.entries, 0);
+  EXPECT_EQ(stats.active_leases, 0);
+  EXPECT_EQ(stats.cache_misses, 0);
+}
+
+TEST(PrimitiveWorkspaceArena, TypeMismatchDoesNotCorruptExistingEntry) {
+  PrimitiveWorkspaceArena arena;
+  {
+    auto lease = arena.acquire<FakeWorkspace>(
+        cuda_scan_key(), [] { return std::make_shared<FakeWorkspace>(17); });
+    EXPECT_EQ(lease->identity, 17);
+  }
+
+  EXPECT_THROW(
+      arena.acquire<OtherWorkspace>(
+          cuda_scan_key(), [] { return std::make_shared<OtherWorkspace>(); }),
+      std::logic_error);
+
+  {
+    auto lease = arena.acquire<FakeWorkspace>(
+        cuda_scan_key(), [] { return std::make_shared<FakeWorkspace>(99); });
+    EXPECT_EQ(lease->identity, 17);
+  }
+  const auto stats = arena.snapshot();
+  EXPECT_EQ(stats.entries, 1);
+  EXPECT_EQ(stats.active_leases, 0);
+}
+
+TEST(PrimitiveWorkspaceArena, ClearWaitsForAnActiveLease) {
+  PrimitiveWorkspaceArena arena;
+  std::atomic<bool> lease_acquired{false};
+  std::atomic<bool> release_lease{false};
+  std::atomic<bool> clear_started{false};
+  std::atomic<bool> clear_finished{false};
+
+  std::thread user([&] {
+    auto lease = arena.acquire<FakeWorkspace>(
+        cuda_scan_key(), [] { return std::make_shared<FakeWorkspace>(); });
+    lease_acquired.store(true, std::memory_order_release);
+    while (!release_lease.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+  });
+  while (!lease_acquired.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+
+  std::thread clearer([&] {
+    clear_started.store(true, std::memory_order_release);
+    arena.clear();
+    clear_finished.store(true, std::memory_order_release);
+  });
+  while (!clear_started.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  EXPECT_FALSE(clear_finished.load(std::memory_order_acquire));
+
+  release_lease.store(true, std::memory_order_release);
+  user.join();
+  clearer.join();
+  EXPECT_TRUE(clear_finished.load(std::memory_order_acquire));
+  EXPECT_EQ(arena.snapshot().entries, 0);
 }
 
 }  // namespace
