@@ -392,6 +392,79 @@ def test_graph_ndarray_registry_lifetime_after_runtime_arg_gc():
     assert sink[None] == 11
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_graph_internal_submission_records_one_opt_in_completion():
+    result = ti.ndarray(ti.i32, shape=1)
+
+    @ti.kernel
+    def first(dst: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        dst[0] = 20
+
+    @ti.kernel
+    def second(dst: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        dst[0] += 22
+
+    dst_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(first, dst_arg)
+    builder.dispatch(second, dst_arg)
+    graph = builder.compile()
+    prog = impl.get_runtime().prog
+
+    next_before_run = prog._debug_runtime_completion_stats()["next_sequence"]
+    assert graph.run({"dst": result}) is None
+    next_after_run = prog._debug_runtime_completion_stats()["next_sequence"]
+    assert next_after_run == next_before_run
+
+    ticket = graph._submit_internal({"dst": result})
+    next_after_submit = prog._debug_runtime_completion_stats()["next_sequence"]
+    assert ticket.sequence == next_before_run
+    assert next_after_submit == next_before_run + 1
+    assert ticket.backend == ti_core.arch_name(impl.current_cfg().arch)
+    if impl.current_cfg().arch == ti.cpu:
+        assert not ticket.has_backend_work
+    else:
+        # A short GPU graph may complete during the nonblocking collection at
+        # the end of completion recording. Both pending and already-completed
+        # tokens preserve the same sequence/ordering contract.
+        assert ticket.has_backend_work or ticket.done()
+    ticket.wait()
+    assert result.to_numpy()[0] == 42
+
+
+@test_utils.test(arch=ti.cpu)
+def test_runtime_submission_owner_registry_retains_until_ready():
+    runtime = impl.get_runtime()
+
+    class FakeCompletion:
+        program_domain = -id(runtime)
+        sequence = id(runtime)
+
+        def __init__(self):
+            self.ready = False
+
+        def done(self):
+            return self.ready
+
+    class Owner:
+        pass
+
+    completion = FakeCompletion()
+    owner = Owner()
+    owner_ref = weakref.ref(owner)
+    runtime.retain_runtime_submission_owner(completion, owner)
+    del owner
+    gc.collect()
+    assert owner_ref() is not None
+
+    completion.ready = True
+    runtime.collect_ready_runtime_submission_owners()
+    gc.collect()
+    assert owner_ref() is None
+
+
 @test_utils.test(arch=ti.cpu)
 def test_graph_rejects_runtime_arg_key_mismatch():
     @ti.kernel

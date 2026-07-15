@@ -135,6 +135,31 @@ class TI_DLL_EXPORT Program {
     bool owns_reader_{false};
   };
 
+  // Private F2 bridge used by Graph.submit() plumbing. It keeps one reader
+  // boundary around every Python mixed-Graph segment and records exactly one
+  // completion after the outer boundary is closed. The object must be
+  // finished or destroyed on the thread that created it because the nested
+  // submission marker is thread-local.
+  class RuntimeSubmissionTransaction {
+   public:
+    RuntimeSubmissionTransaction(const RuntimeSubmissionTransaction &) =
+        delete;
+    RuntimeSubmissionTransaction &operator=(
+        const RuntimeSubmissionTransaction &) = delete;
+    ~RuntimeSubmissionTransaction();
+
+    void mark_submission() noexcept;
+    RuntimeCompletion finish();
+
+   private:
+    friend class Program;
+    explicit RuntimeSubmissionTransaction(Program *program);
+
+    Program *program_{nullptr};
+    std::optional<RuntimeSubmissionScope> submission_scope_;
+    bool finished_{false};
+  };
+
   uint64 *result_buffer{nullptr};  // Note that this result_buffer is used
                                    // only for runtime JIT functions (e.g.
                                    // `runtime_memory_allocate_aligned`)
@@ -193,6 +218,8 @@ class TI_DLL_EXPORT Program {
   // F2 internal completion API. Existing kernel calls, Graph.run(), native
   // primitives and ti.sync() retain their public return values.
   RuntimeCompletion record_runtime_completion();
+  std::unique_ptr<RuntimeSubmissionTransaction>
+  begin_runtime_submission_transaction();
   TI_FORCE_INLINE void mark_runtime_submission() noexcept {
     // The reader gate supplies ordering once completion tracking is enabled.
     // Before that, a relaxed atomic publication is enough to distinguish an

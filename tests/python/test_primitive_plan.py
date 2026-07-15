@@ -1,3 +1,6 @@
+import gc
+import weakref
+
 import numpy as np
 import pytest
 import taichi_forge as ti
@@ -744,14 +747,26 @@ def test_graph_native_sequence_joins_disjoint_cgraph_segments(adapter):
         frozenset({"gathered", "dst"}),
     ]
 
-    graph.run({"src": src, "tmp0": tmp0, "gathered": gathered, "dst": dst})
+    assert graph.run(
+        {"src": src, "tmp0": tmp0, "gathered": gathered, "dst": dst}
+    ) is None
     expected = ((src_np + 10) * 2 + 1)[idx_np] - 3
     assert seq.direct_plan_count == 2
     assert np.array_equal(dst.to_numpy(), expected)
 
     src_np = src_np + 5
     src.from_numpy(src_np)
-    graph.run({"src": src, "tmp0": tmp0, "gathered": gathered, "dst": dst})
+    prog = impl.get_runtime().prog
+    next_sequence = prog._debug_runtime_completion_stats()["next_sequence"]
+    ticket = graph._submit_internal(
+        {"src": src, "tmp0": tmp0, "gathered": gathered, "dst": dst}
+    )
+    assert ticket.sequence == next_sequence
+    assert (
+        prog._debug_runtime_completion_stats()["next_sequence"]
+        == next_sequence + 1
+    )
+    ticket.wait()
     expected = ((src_np + 10) * 2 + 1)[idx_np] - 3
     assert np.array_equal(dst.to_numpy(), expected)
 
@@ -778,6 +793,75 @@ def test_graph_native_sequence_joins_disjoint_cgraph_segments(adapter):
                 "extra": 1,
             }
         )
+
+
+@test_utils.test(
+    arch=[ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+)
+def test_graph_internal_submission_retains_native_owner_until_completion():
+    n = 1 << 18
+    src = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(ti.i32, shape=n)
+    src.fill(7)
+
+    sequence = alg_impl.primitive_sequence()
+    sequence.transform(src, dst, scale=3, bias=1)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(sequence)
+    graph = builder.compile()
+
+    ticket = graph._submit_internal({})
+    pending = ticket.has_backend_work
+    if not pending:
+        # Extremely fast CUDA devices may retire even this replay during the
+        # completion recorder's final nonblocking query. In that case there is
+        # no in-flight Python workspace left to retain.
+        assert ticket.done()
+    graph_ref = weakref.ref(graph)
+    del graph
+    del builder
+    del sequence
+    gc.collect()
+    if pending:
+        assert graph_ref() is not None
+
+    ticket.wait()
+    gc.collect()
+    assert graph_ref() is None
+    assert np.all(dst.to_numpy() == 22)
+
+
+@test_utils.test(
+    arch=[ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+)
+def test_graph_internal_submission_owner_is_retired_before_reset():
+    src = ti.ndarray(ti.i32, shape=1 << 18)
+    dst = ti.ndarray(ti.i32, shape=1 << 18)
+    src.fill(5)
+    sequence = alg_impl.primitive_sequence()
+    sequence.transform(src, dst, scale=2, bias=3)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(sequence)
+    graph = builder.compile()
+
+    ticket = graph._submit_internal({})
+    pending = ticket.has_backend_work
+    graph_ref = weakref.ref(graph)
+    del graph
+    del builder
+    del sequence
+    gc.collect()
+    if pending:
+        assert graph_ref() is not None
+
+    # Runtime.clear() synchronizes pending native owners before invalidating
+    # weak Graph wrappers and before Program.finalize() tears down workspaces.
+    ti.reset()
+    gc.collect()
+    assert graph_ref() is None
+    ticket.wait()
 
 
 @test_utils.test(

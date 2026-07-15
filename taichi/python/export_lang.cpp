@@ -532,6 +532,13 @@ void export_lang(py::module &m) {
       .def_property_readonly("first_error",
                              &RuntimeCompletion::first_error_message);
 
+  py::class_<Program::RuntimeSubmissionTransaction>(
+      m, "_RuntimeSubmissionTransaction")
+      .def("_mark_submission",
+           &Program::RuntimeSubmissionTransaction::mark_submission)
+      .def("_finish", &Program::RuntimeSubmissionTransaction::finish,
+           py::call_guard<py::gil_scoped_release>());
+
   py::class_<Program>(m, "Program")
       .def(py::init<>())
       .def("config", &Program::compile_config,
@@ -595,6 +602,9 @@ void export_lang(py::module &m) {
       .def("synchronize", &Program::synchronize)
       .def("_record_runtime_completion",
            &Program::record_runtime_completion,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_begin_runtime_submission_transaction",
+           &Program::begin_runtime_submission_transaction,
            py::call_guard<py::gil_scoped_release>())
       .def("_debug_runtime_completion_stats",
            &Program::debug_runtime_completion_stats)

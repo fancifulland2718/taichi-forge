@@ -3,6 +3,7 @@ import json
 import numbers
 import os
 import sys
+import threading
 import time
 import weakref
 from types import FunctionType, MethodType
@@ -566,9 +567,55 @@ class PyTaichi:
         # allocation. WeakValueDictionary supports unhashable wrappers by
         # keying on object identity and removes entries automatically.
         self._runtime_object_refs = weakref.WeakValueDictionary()
+        # Native Graph nodes own Python workspaces/plans that are not part of
+        # the C++ ndarray/texture completion batch. Keep those owners alive in
+        # a bounded registry even if the user drops a SubmissionTicket early.
+        self._runtime_submission_owner_lock = threading.Lock()
+        self._runtime_submission_owners = {}
 
     def register_runtime_object(self, obj):
         self._runtime_object_refs[id(obj)] = obj
+
+    @staticmethod
+    def _runtime_submission_key(completion):
+        return (completion.program_domain, completion.sequence)
+
+    def retain_runtime_submission_owner(self, completion, owner):
+        key = self._runtime_submission_key(completion)
+        with self._runtime_submission_owner_lock:
+            self._runtime_submission_owners[key] = (completion, owner)
+        # Publish the new owner before driver polling. If an older completion
+        # reports an error, the just-submitted native Graph remains retained
+        # even though its caller observes that sticky backend failure.
+        self.collect_ready_runtime_submission_owners()
+
+    def release_runtime_submission_owner(self, completion):
+        key = self._runtime_submission_key(completion)
+        with self._runtime_submission_owner_lock:
+            current = self._runtime_submission_owners.get(key)
+            if current is not None and current[0] is completion:
+                self._runtime_submission_owners.pop(key, None)
+
+    def collect_ready_runtime_submission_owners(self):
+        # Poll outside the registry lock: CUDA/Vulkan completion queries are
+        # driver calls and pybind releases the GIL around them.
+        with self._runtime_submission_owner_lock:
+            snapshot = tuple(self._runtime_submission_owners.items())
+        ready = []
+        for key, (completion, _owner) in snapshot:
+            if completion.done():
+                ready.append((key, completion))
+        if not ready:
+            return
+        with self._runtime_submission_owner_lock:
+            for key, completion in ready:
+                current = self._runtime_submission_owners.get(key)
+                if current is not None and current[0] is completion:
+                    self._runtime_submission_owners.pop(key, None)
+
+    def clear_runtime_submission_owners(self):
+        with self._runtime_submission_owner_lock:
+            self._runtime_submission_owners.clear()
 
     def begin_snode_tree_destroy(self, dependency):
         notified = []
@@ -768,6 +815,15 @@ class PyTaichi:
             self._signal_handler_registry = _ti_core.HackedSignalRegister()
 
     def clear(self):
+        # Graph invalidation may release a native workspace. If an opt-in
+        # submission still owns one, complete it before invalidating weakly
+        # registered Graph wrappers. Program.finalize() would otherwise sync
+        # too late, after the Python owner had already been destroyed.
+        with self._runtime_submission_owner_lock:
+            has_submission_owners = bool(self._runtime_submission_owners)
+        if has_submission_owners and self.prog:
+            self.prog.synchronize()
+            self.clear_runtime_submission_owners()
         self.invalidate_runtime_objects()
         if self.prog:
             self.prog.finalize()
@@ -782,11 +838,13 @@ class PyTaichi:
         if not _sync_diagnostics_enabled:
             self.materialize()
             self.prog.synchronize()
+            self.clear_runtime_submission_owners()
             return
         start = time.perf_counter()
         try:
             self.materialize()
             self.prog.synchronize()
+            self.clear_runtime_submission_owners()
         finally:
             _sync_diagnostics["count"] += 1
             _sync_diagnostics["total_ms"] += (time.perf_counter() - start) * 1000.0

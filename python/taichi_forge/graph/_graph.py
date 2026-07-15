@@ -1028,6 +1028,38 @@ class GraphBuilder:
         )
 
 
+class _GraphSubmissionCompletion:
+    """Private F2.2 wrapper that couples completion with native ownership."""
+
+    __slots__ = ("_completion", "_runtime")
+
+    def __init__(self, completion, runtime):
+        self._completion = completion
+        self._runtime = runtime
+
+    def done(self):
+        ready = self._completion.done()
+        if ready:
+            self._runtime.release_runtime_submission_owner(self._completion)
+        return ready
+
+    def wait(self):
+        self._completion.wait()
+        self._runtime.release_runtime_submission_owner(self._completion)
+
+    @property
+    def backend(self):
+        return self._completion.backend
+
+    @property
+    def sequence(self):
+        return self._completion.sequence
+
+    @property
+    def has_backend_work(self):
+        return self._completion.has_backend_work
+
+
 class Graph:
     def __init__(self, compiled_graph) -> None:
         self._lifecycle_lock = threading.Lock()
@@ -1091,6 +1123,46 @@ class Graph:
                 self._run_impl(args)
             finally:
                 runtime._active_graph_submissions -= 1
+
+    def _submit_internal(self, args):
+        """F2.2 private completion path; public API is gated on F2.3."""
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            runtime = impl.pytaichi
+            self._spec.validate_runtime_args(args)
+            submission_state = runtime._active_graph_submissions
+            if submission_state < 0:
+                raise TaichiRuntimeError(
+                    "Graph submission cannot start while another Python "
+                    "thread is entering ti.ad.Tape() or ti.ad.FwdMode()."
+                )
+            if runtime.target_tape is not None:
+                raise TaichiRuntimeError(
+                    "Graph submission is primal-only and cannot execute "
+                    "inside an active ti.ad.Tape()."
+                )
+            if runtime.fwd_mode_manager is not None:
+                raise TaichiRuntimeError(
+                    "Graph submission is primal-only and cannot execute "
+                    "inside an active ti.ad.FwdMode()."
+                )
+
+            transaction = runtime.prog._begin_runtime_submission_transaction()
+            runtime._active_graph_submissions = submission_state + 1
+            try:
+                self._run_impl(args)
+                # CGraph/kernel paths publish work themselves. Native plans use
+                # Program methods outside that launch path, so publish once for
+                # the whole native portion without adding work to Graph.run().
+                if self._contains_native_nodes_value:
+                    transaction._mark_submission()
+                completion = transaction._finish()
+            finally:
+                runtime._active_graph_submissions -= 1
+
+            if self._contains_native_nodes_value and completion.has_backend_work:
+                runtime.retain_runtime_submission_owner(completion, self)
+            return _GraphSubmissionCompletion(completion, runtime)
 
     def _instance_for_current_runtime(self):
         key = self._spec.instance_key()

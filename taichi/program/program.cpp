@@ -175,6 +175,40 @@ Program::RuntimeSubmissionWriteScope::~RuntimeSubmissionWriteScope() {
   program_->release_runtime_submission_writer();
 }
 
+Program::RuntimeSubmissionTransaction::RuntimeSubmissionTransaction(
+    Program *program)
+    : program_(program) {
+  TI_ASSERT(program_ != nullptr);
+  // The outer scope must observe tracking enabled so nested kernel/CGraph
+  // launches reuse this reader instead of opening segment-local boundaries.
+  program_->runtime_completion_tracking_enabled_.store(
+      true, std::memory_order_release);
+  submission_scope_.emplace(program_->acquire_runtime_submission_scope());
+}
+
+Program::RuntimeSubmissionTransaction::~RuntimeSubmissionTransaction() {
+  // Exception paths may have submitted an earlier segment. Closing the reader
+  // is sufficient: legacy synchronize/next completion retains responsibility
+  // for any resources already pinned by that segment.
+  submission_scope_.reset();
+}
+
+void Program::RuntimeSubmissionTransaction::mark_submission() noexcept {
+  if (!finished_) {
+    program_->mark_runtime_submission();
+  }
+}
+
+RuntimeCompletion Program::RuntimeSubmissionTransaction::finish() {
+  TI_ERROR_IF(finished_, "Runtime submission transaction already finished");
+  // record_runtime_completion() takes the writer boundary. Never attempt it
+  // while this transaction still owns the corresponding reader.
+  submission_scope_.reset();
+  finished_ = true;
+  Program *program = std::exchange(program_, nullptr);
+  return program->record_runtime_completion();
+}
+
 std::vector<SNodeTreeDependency> Program::snapshot_snode_tree_dependencies(
     const std::vector<int> &tree_ids) const {
   std::shared_lock<std::shared_mutex> lock(snode_tree_lifecycle_mutex_);
@@ -6117,6 +6151,14 @@ RuntimeCompletion Program::record_runtime_completion() {
     collect_ready_runtime_completions();
   }
   return result;
+}
+
+std::unique_ptr<Program::RuntimeSubmissionTransaction>
+Program::begin_runtime_submission_transaction() {
+  TI_ERROR_IF(finalized_,
+              "Cannot begin a submission transaction after Program finalize");
+  return std::unique_ptr<RuntimeSubmissionTransaction>(
+      new RuntimeSubmissionTransaction(this));
 }
 
 std::unordered_map<std::string, std::uint64_t>
