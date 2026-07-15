@@ -192,7 +192,8 @@
 - 增加安全的 CUDA Graph argument patch/capture recovery，以及 Vulkan Graph identity、
   in-flight retirement 和固定八 slot replay fallback。
 - 增加稳定的 `Graph.execution_stats()`、严格 runtime argument 校验、mixed-segment
-  隔离和 Graph/reset/resource 生命周期合同。
+  隔离、Graph/reset/resource 生命周期合同，以及按需启用的 `Graph.submit()` /
+  `SubmissionTicket` 完成跟踪；默认 `Graph.run()` 热路径不变。
 - 增加 Dense Field Graph：静态绑定 scalar/vector/matrix Field、构图期
   `template_args`、带 generation 的 SNodeTree dependency、零参数 CUDA capture、
   显式 AD guard 和 block 级异构多环境模型。

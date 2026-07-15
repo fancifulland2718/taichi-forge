@@ -758,7 +758,7 @@ def test_graph_native_sequence_joins_disjoint_cgraph_segments(adapter):
     src.from_numpy(src_np)
     prog = impl.get_runtime().prog
     next_sequence = prog._debug_runtime_completion_stats()["next_sequence"]
-    ticket = graph._submit_internal(
+    ticket = graph.submit(
         {"src": src, "tmp0": tmp0, "gathered": gathered, "dst": dst}
     )
     assert ticket.sequence == next_sequence
@@ -799,7 +799,7 @@ def test_graph_native_sequence_joins_disjoint_cgraph_segments(adapter):
     arch=[ti.cuda, ti.vulkan],
     exclude=[(ti.vulkan, "Darwin")],
 )
-def test_graph_internal_submission_retains_native_owner_until_completion():
+def test_graph_submit_retains_native_owner_until_completion():
     n = 1 << 18
     src = ti.ndarray(ti.i32, shape=n)
     dst = ti.ndarray(ti.i32, shape=n)
@@ -811,8 +811,8 @@ def test_graph_internal_submission_retains_native_owner_until_completion():
     builder.append_native(sequence)
     graph = builder.compile()
 
-    ticket = graph._submit_internal({})
-    pending = ticket.has_backend_work
+    ticket = graph.submit({})
+    pending = ticket._has_backend_work
     if not pending:
         # Extremely fast CUDA devices may retire even this replay during the
         # completion recorder's final nonblocking query. In that case there is
@@ -836,7 +836,40 @@ def test_graph_internal_submission_retains_native_owner_until_completion():
     arch=[ti.cuda, ti.vulkan],
     exclude=[(ti.vulkan, "Darwin")],
 )
-def test_graph_internal_submission_owner_is_retired_before_reset():
+def test_graph_submit_retains_native_owner_after_ticket_is_dropped():
+    src = ti.ndarray(ti.i32, shape=1 << 18)
+    dst = ti.ndarray(ti.i32, shape=1 << 18)
+    src.fill(4)
+    sequence = alg_impl.primitive_sequence()
+    sequence.transform(src, dst, scale=5, bias=2)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(sequence)
+    graph = builder.compile()
+
+    ticket = graph.submit({})
+    pending = ticket._has_backend_work
+    graph_ref = weakref.ref(graph)
+    del ticket
+    del graph
+    del builder
+    del sequence
+    gc.collect()
+    if pending:
+        assert graph_ref() is not None
+
+    # Program completion tracking, rather than the ticket wrapper, owns the
+    # outstanding work. A later synchronization retires the Python owner too.
+    ti.sync()
+    gc.collect()
+    assert graph_ref() is None
+    assert np.all(dst.to_numpy() == 22)
+
+
+@test_utils.test(
+    arch=[ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+)
+def test_graph_submit_owner_is_retired_before_reset():
     src = ti.ndarray(ti.i32, shape=1 << 18)
     dst = ti.ndarray(ti.i32, shape=1 << 18)
     src.fill(5)
@@ -846,8 +879,8 @@ def test_graph_internal_submission_owner_is_retired_before_reset():
     builder.append_native(sequence)
     graph = builder.compile()
 
-    ticket = graph._submit_internal({})
-    pending = ticket.has_backend_work
+    ticket = graph.submit({})
+    pending = ticket._has_backend_work
     graph_ref = weakref.ref(graph)
     del graph
     del builder

@@ -107,6 +107,31 @@ The CPU path preserves graph semantics and concurrency safety but does not
 pretend to offer CUDA-style device graph launch. CUDA and Vulkan optimizations
 are backend implementation details below the same public API.
 
+## Opt-in completion tickets
+
+`Graph.run(args)` retains its established hot path and return contract.
+Applications that need explicit asynchronous ownership can instead call
+`ticket = Graph.submit(args)`. Submission validates the same exact runtime
+arguments, serializes one Graph invocation at the same host boundary, and
+publishes exactly one Program-local completion after all mixed CGraph and
+native segments have been enqueued.
+
+`ticket.done()` performs a nonblocking backend query; `ticket.wait()` waits for
+that invocation rather than the whole device. Neither method inserts a default
+`ti.sync()`. CPU completion is immediate. CUDA uses a Driver API event and
+Vulkan uses a stream semaphore; a short GPU invocation is allowed to be ready
+before its ticket is returned. Completion errors are sticky and surface from a
+later `done()`, `wait()`, or runtime synchronization boundary.
+
+Pending runtime arguments are retained by the Program completion domain.
+Graphs and Forge native workspaces are retained by the Python runtime owner
+registry until the same completion becomes ready, even if the ticket is
+dropped. Collection occurs on later submission, polling, synchronization, and
+reset; the native completion queue is bounded so abandoned tickets cannot make
+backend tracking grow without limit. This is a deliberately small completion
+API: callbacks, `asyncio` adaptation, cross-Program ordering, and an explicit
+Graph dependency scheduler remain out of scope.
+
 ## CUDA capture and replay
 
 Each CUDA graph executable owns its capture stream, stable argument buffers,

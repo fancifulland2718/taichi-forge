@@ -210,8 +210,9 @@ profiling, and GGUI device-image staging were already public by `0.4.25`.
 - Added safe CUDA Graph argument patching/capture recovery and Vulkan Graph
   identity, in-flight retirement, and fixed eight-slot replay fallback.
 - Added stable `Graph.execution_stats()` diagnostics, strict runtime argument
-  validation, mixed-segment isolation, and Graph/reset/resource lifetime
-  contracts.
+  validation, mixed-segment isolation, Graph/reset/resource lifetime
+  contracts, and opt-in `Graph.submit()` / `SubmissionTicket` completion
+  tracking without changing the default `Graph.run()` hot path.
 - Added Dense Field Graph for statically bound scalar/vector/matrix Fields,
   definition-time `template_args`, generation-qualified SNodeTree
   dependencies, zero-argument CUDA capture, explicit AD guards, and the

@@ -87,6 +87,24 @@ identity、layout、shape、dtype、element shape、SNodeTree generation 与 own
 CPU 路径保持 graph 语义和并发安全，但不伪装成 CUDA 式 device graph launch。CUDA 与
 Vulkan 优化都是同一公开 API 之下的后端实现细节。
 
+## 按需完成票据
+
+`Graph.run(args)` 保持既有热路径与返回合同。需要显式异步 ownership 的应用可以改用
+`ticket = Graph.submit(args)`。它执行同样的精确 runtime 参数校验，在相同 host 边界按
+完整 Graph invocation 排队，并在所有 mixed CGraph/native segment 入队后只发布一个
+Program-local completion。
+
+`ticket.done()` 执行非阻塞后端查询；`ticket.wait()` 只等待本次 invocation，而不是整个
+device。两者都不会默认插入 `ti.sync()`。CPU completion 立即完成；CUDA 使用 Driver API
+event，Vulkan 使用 stream semaphore。极短 GPU invocation 可以在票据返回前完成。完成
+错误具有 sticky 语义，会在后续 `done()`、`wait()` 或 runtime 同步边界抛出。
+
+待完成的 runtime 参数由 Program completion domain 保留；Graph 与 Forge native
+workspace 由 Python runtime owner registry 保留到同一 completion ready，即使调用方已经
+丢弃票据。后续提交、轮询、同步与 reset 都会收集完成项；native completion queue 有界，
+因此遗弃票据不会使后端 tracking 无限制增长。这是刻意保持较小的完成 API：callback、
+`asyncio` 适配、跨 Program 排序与显式 Graph dependency scheduler 均不在当前范围内。
+
 ## CUDA capture 与 replay
 
 每个 CUDA graph executable 持有自己的 capture stream、稳定 argument buffer、resource

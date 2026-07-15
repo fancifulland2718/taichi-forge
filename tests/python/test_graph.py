@@ -393,7 +393,7 @@ def test_graph_ndarray_registry_lifetime_after_runtime_arg_gc():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_graph_internal_submission_records_one_opt_in_completion():
+def test_graph_submit_returns_one_public_completion_ticket():
     result = ti.ndarray(ti.i32, shape=1)
 
     @ti.kernel
@@ -418,19 +418,23 @@ def test_graph_internal_submission_records_one_opt_in_completion():
     next_after_run = prog._debug_runtime_completion_stats()["next_sequence"]
     assert next_after_run == next_before_run
 
-    ticket = graph._submit_internal({"dst": result})
+    ticket = graph.submit({"dst": result})
+    assert isinstance(ticket, ti.graph.SubmissionTicket)
     next_after_submit = prog._debug_runtime_completion_stats()["next_sequence"]
     assert ticket.sequence == next_before_run
     assert next_after_submit == next_before_run + 1
     assert ticket.backend == ti_core.arch_name(impl.current_cfg().arch)
     if impl.current_cfg().arch == ti.cpu:
-        assert not ticket.has_backend_work
+        assert not ticket._has_backend_work
     else:
         # A short GPU graph may complete during the nonblocking collection at
         # the end of completion recording. Both pending and already-completed
         # tokens preserve the same sequence/ordering contract.
-        assert ticket.has_backend_work or ticket.done()
-    ticket.wait()
+        assert ticket._has_backend_work or ticket.done()
+    assert ticket.wait() is None
+    assert ticket.done()
+    assert ticket.done()
+    assert ticket.wait() is None
     assert result.to_numpy()[0] == 42
 
 
@@ -489,6 +493,15 @@ def test_graph_rejects_runtime_arg_key_mismatch():
         graph.run({"value": 3, "out": out, "typo": 1})
     with pytest.raises(TaichiRuntimeError, match=r"Graph\.run\(\) expects a dict"):
         graph.run([out])
+    with pytest.raises(
+        TaichiRuntimeError, match="Missing graph runtime arguments: value"
+    ):
+        graph.submit({"out": out})
+    with pytest.raises(
+        TaichiRuntimeError,
+        match=r"Graph\.submit\(\) expects a dict",
+    ):
+        graph.submit([out])
 
 
 @test_utils.test(arch=ti.cpu)

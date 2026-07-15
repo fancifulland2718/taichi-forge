@@ -366,22 +366,25 @@ graph.run({"slot": 3})
 - `kernel` 通常是 decorated primal kernel；也可传入显式 `kernel.grad` 来构造手工管理的
   gradient Graph，但必须在 `ti.ad.Tape()` / `ti.ad.FwdMode()` 之外运行。
 
-### `GraphBuilder.compile()` 与 `Graph.run(args)`
+### `GraphBuilder.compile()`、`Graph.run(args)` 与 `Graph.submit(args)`
 
 `compile()` 冻结调用时的 dispatch/sequential 定义并返回 runtime-bound `Graph`。
-`run(args)` 提交一次完整 graph invocation。
+`run(args)` 提交一次完整 graph invocation，并保持既有的提交后继续执行返回合同；
+`submit(args)` 使用同一执行路径并返回完成票据。
 
 | API | 合同 |
 | --- | --- |
 | `GraphBuilder.compile()` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。 |
 | `Graph.run(args)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。 |
+| `Graph.submit(args)` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，并返回 `SubmissionTicket`。 |
 | `Graph._prewarm()` | 预热当前 runtime 的 backend plan；这是内部/高级入口，不改变 graph 参数合同。 |
 
 同一个 graph 的并发 host 调用以完整 invocation 为单位排队；不同 graph 不共享该锁。
 该边界不等待 GPU 完成，也不隐含 `ti.sync()`。调用 `ti.reset()` 后必须重新编译 graph。
 销毁任一被引用的 SNodeTree 也会使 Graph stale；构造替代 Field layout 后必须重建 Graph。
 
-`Graph.run()` 是 primal-only。active `ti.ad.Tape()` 或 `ti.ad.FwdMode()` 内调用会抛出
+`Graph.run()` 与 `Graph.submit()` 都是 primal-only。active `ti.ad.Tape()` 或
+`ti.ad.FwdMode()` 内调用会抛出
 `TaichiRuntimeError`，因为 backend Graph invocation 对自动 AD 不透明，否则会静默漏掉
 gradient 或 dual propagation。用户可显式构建 `kernel.grad` Graph 并在上述上下文外手工
 运行；Forge 当前不声明自动 primal/adjoint Graph pair。
@@ -392,6 +395,30 @@ gradient 或 dual propagation。用户可显式构建 `kernel.grad` Graph 并在
 Forge 仍会恢复其中实际的 `ti.graph.Arg` 名称以保持兼容；新代码应使用上面的
 `template_args=` 公共入口。该兼容路径不放宽合同，未声明的 extra key 仍会报错。直接
 访问下划线 AOT/native builder 对象不是公开用户 API。
+
+### `SubmissionTicket`
+
+位置：`taichi_forge.graph`；由 `Graph.submit(args)` 返回。
+
+```python
+ticket = graph.submit(args)
+if not ticket.done():
+    do_independent_host_work()
+ticket.wait()
+```
+
+| API | 合同 |
+| --- | --- |
+| `ticket.done()` | 非阻塞轮询本次 invocation，不做 device-wide synchronization。成功完成后返回 `True`；可重复调用。延迟出现的后端错误会在观察到时抛出。 |
+| `ticket.wait()` | 只等待排序到本次 invocation 的工作；不等价于全局 `ti.sync()`。可重复调用并返回 `None`。 |
+| `ticket.backend` | 只读后端名称，仅用于诊断。 |
+| `ticket.sequence` | Program 内单调递增的只读完成序号，仅用于诊断；它不是可持久化或跨 runtime 的排序 key。 |
+
+CPU 票据返回时已经完成。CUDA/Vulkan 票据可能仍在执行，但极短工作也可能在
+`submit()` 返回前完成。即使应用丢弃票据，runtime 参数 allocation 与 Forge native-node
+owner 仍会保留到后端完成；`ti.sync()` 和 `ti.reset()` 也会安全退役待处理票据。票据只是
+完成句柄，不是 `asyncio` future、callback scheduler、跨 Graph dependency 对象或跨
+Program 同步原语。
 
 ### `Graph.execution_stats()`
 

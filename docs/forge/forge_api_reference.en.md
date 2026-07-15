@@ -389,15 +389,18 @@ Contract:
   object is also accepted for a manually managed gradient Graph; run that
   Graph outside `ti.ad.Tape()` / `ti.ad.FwdMode()`.
 
-### `GraphBuilder.compile()` and `Graph.run(args)`
+### `GraphBuilder.compile()`, `Graph.run(args)`, and `Graph.submit(args)`
 
 `compile()` freezes the dispatch/sequential definition at the call and returns
-a runtime-bound `Graph`. `run(args)` submits one complete graph invocation.
+a runtime-bound `Graph`. `run(args)` submits one complete graph invocation and
+keeps the established fire-and-continue return contract. `submit(args)` uses
+the same execution path and returns a completion ticket.
 
 | API | Contract |
 | --- | --- |
 | `GraphBuilder.compile()` | Later changes to the builder or original `Sequential` do not modify the compiled graph. |
 | `Graph.run(args)` | `args` must be a dictionary with exactly the declared keys; missing or extra keys raise `TaichiRuntimeError`. |
+| `Graph.submit(args)` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, and returns a `SubmissionTicket`. |
 | `Graph._prewarm()` | Warm the current runtime's backend plan; this internal/advanced entry point does not change the argument contract. |
 
 Concurrent host calls on one graph queue at the complete-invocation boundary;
@@ -406,7 +409,8 @@ completion or imply `ti.sync()`. Recompile graphs after `ti.reset()`.
 Destroying any referenced SNodeTree also makes the Graph stale; rebuild it
 after constructing the replacement Field layout.
 
-`Graph.run()` is primal-only. It raises `TaichiRuntimeError` inside an active
+`Graph.run()` and `Graph.submit()` are primal-only. They raise
+`TaichiRuntimeError` inside an active
 `ti.ad.Tape()` or `ti.ad.FwdMode()` because a backend Graph invocation is
 opaque to automatic AD and would otherwise silently omit gradients or dual
 propagation. A user may build an explicit `kernel.grad` Graph and run it
@@ -423,6 +427,32 @@ durable AOT plan, but new code should use the public `template_args=` entry
 point above. This compatibility path does not relax the contract, and
 undeclared extra keys still raise. Direct access to underscored AOT/native
 builder objects is not a public user API.
+
+### `SubmissionTicket`
+
+Location: `taichi_forge.graph`; returned by `Graph.submit(args)`.
+
+```python
+ticket = graph.submit(args)
+if not ticket.done():
+    do_independent_host_work()
+ticket.wait()
+```
+
+| API | Contract |
+| --- | --- |
+| `ticket.done()` | Poll this invocation without a device-wide synchronization. Returns `True` after successful completion; repeated calls are safe. A deferred backend error is raised when observed. |
+| `ticket.wait()` | Wait only for work ordered through this invocation. It does not imply a global `ti.sync()`; repeated calls are safe and return `None`. |
+| `ticket.backend` | Read-only backend name for diagnostics. |
+| `ticket.sequence` | Read-only, Program-local monotonically increasing completion sequence for diagnostics; it is not a portable persistence or cross-runtime ordering key. |
+
+CPU tickets are complete when returned. CUDA and Vulkan tickets may be pending,
+although very short work can finish before `submit()` returns. Runtime argument
+allocations and Forge native-node owners remain valid until backend completion,
+even if application code drops the ticket. `ti.sync()` and `ti.reset()` also
+retire pending tickets safely. A ticket is a completion handle, not an
+`asyncio` future, callback scheduler, cross-Graph dependency object, or
+cross-Program synchronization primitive.
 
 ### `Graph.execution_stats()`
 

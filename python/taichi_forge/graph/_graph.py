@@ -549,10 +549,10 @@ class _GraphSpec:
         )
         self.repeat_count = 0
 
-    def validate_runtime_args(self, args):
+    def validate_runtime_args(self, args, entrypoint="Graph.run"):
         if not isinstance(args, dict):
             raise TaichiRuntimeError(
-                f"Graph.run() expects a dict of runtime arguments, got {type(args)}"
+                f"{entrypoint}() expects a dict of runtime arguments, got {type(args)}"
             )
         if args.keys() == self.runtime_arg_names:
             return
@@ -1028,8 +1028,13 @@ class GraphBuilder:
         )
 
 
-class _GraphSubmissionCompletion:
-    """Private F2.2 wrapper that couples completion with native ownership."""
+class SubmissionTicket:
+    """Completion for one opt-in ``Graph.submit()`` invocation.
+
+    Construct tickets through ``Graph.submit()``. The runtime keeps native
+    Graph ownership valid until backend completion, even when the user drops
+    the ticket without waiting.
+    """
 
     __slots__ = ("_completion", "_runtime")
 
@@ -1056,7 +1061,7 @@ class _GraphSubmissionCompletion:
         return self._completion.sequence
 
     @property
-    def has_backend_work(self):
+    def _has_backend_work(self):
         return self._completion.has_backend_work
 
 
@@ -1124,12 +1129,18 @@ class Graph:
             finally:
                 runtime._active_graph_submissions -= 1
 
-    def _submit_internal(self, args):
-        """F2.2 private completion path; public API is gated on F2.3."""
+    def submit(self, args):
+        """Submit one Graph invocation and return a ``SubmissionTicket``.
+
+        Submission is asynchronous on CUDA/Vulkan when backend work remains;
+        CPU tickets are already complete. The runtime argument, lifecycle,
+        concurrency, and automatic-differentiation rules are identical to
+        ``run()``.
+        """
         with self._lifecycle_lock:
             self._check_runtime_valid()
             runtime = impl.pytaichi
-            self._spec.validate_runtime_args(args)
+            self._spec.validate_runtime_args(args, "Graph.submit")
             submission_state = runtime._active_graph_submissions
             if submission_state < 0:
                 raise TaichiRuntimeError(
@@ -1162,7 +1173,7 @@ class Graph:
 
             if self._contains_native_nodes_value and completion.has_backend_work:
                 runtime.retain_runtime_submission_owner(completion, self)
-            return _GraphSubmissionCompletion(completion, runtime)
+            return SubmissionTicket(completion, runtime)
 
     def _instance_for_current_runtime(self):
         key = self._spec.instance_key()
@@ -1487,6 +1498,7 @@ def Arg(*args, **kwargs):
 __all__ = [
     "GraphBuilder",
     "Graph",
+    "SubmissionTicket",
     "GraphExecutionCounters",
     "GraphExecutionSegmentReport",
     "GraphExecutionReport",
