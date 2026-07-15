@@ -74,7 +74,7 @@ struct RuntimeDisplayStatistics {
   std::uint64_t accepted_frames{0};
   std::uint64_t submitted_frames{0};
   std::uint64_t dropped_frames{0};
-  std::uint64_t staged_frame_bytes{0};
+  std::uint64_t accepted_frame_bytes{0};
 };
 
 struct RuntimeFaultStatistics {
@@ -159,7 +159,8 @@ class TI_DLL_EXPORT RuntimeStatistics final {
     result.display.accepted_frames = load(display_accepted_frames_);
     result.display.submitted_frames = load(display_submitted_frames_);
     result.display.dropped_frames = load(display_dropped_frames_);
-    result.display.staged_frame_bytes = load(display_staged_frame_bytes_);
+    result.display.accepted_frame_bytes =
+        load(display_accepted_frame_bytes_);
     result.fault.first_fatal_faults = load(first_fatal_faults_);
     result.fault.rejected_submissions = load(rejected_submissions_);
     result.trace.recorded_events = load(trace_recorded_events_);
@@ -235,11 +236,11 @@ class TI_DLL_EXPORT RuntimeStatistics final {
   void record_display(bool accepted,
                       bool submitted,
                       bool dropped,
-                      std::uint64_t staged_bytes) noexcept {
+                      std::uint64_t accepted_bytes) noexcept {
     add(display_accepted_frames_, accepted ? 1 : 0);
     add(display_submitted_frames_, submitted ? 1 : 0);
     add(display_dropped_frames_, dropped ? 1 : 0);
-    add(display_staged_frame_bytes_, staged_bytes);
+    add(display_accepted_frame_bytes_, accepted_bytes);
   }
   void record_first_fatal_fault() noexcept {
     add(first_fatal_faults_, 1);
@@ -289,7 +290,7 @@ class TI_DLL_EXPORT RuntimeStatistics final {
   std::atomic<std::uint64_t> display_accepted_frames_{0};
   std::atomic<std::uint64_t> display_submitted_frames_{0};
   std::atomic<std::uint64_t> display_dropped_frames_{0};
-  std::atomic<std::uint64_t> display_staged_frame_bytes_{0};
+  std::atomic<std::uint64_t> display_accepted_frame_bytes_{0};
   std::atomic<std::uint64_t> first_fatal_faults_{0};
   std::atomic<std::uint64_t> rejected_submissions_{0};
   std::atomic<std::uint64_t> trace_recorded_events_{0};

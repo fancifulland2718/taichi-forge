@@ -54,6 +54,15 @@ class Canvas:
             self._set_image_info_cache[key] = info
         return info
 
+    def _record_display_frame_accepted(self, width, height):
+        if self.window is None:
+            return
+        # GGUI consumes a logical RGBA8 image regardless of whether the source
+        # is host memory, packed device storage or a texture. Count that stable
+        # payload once; backend staging/copies are separate telemetry.
+        accepted_frame_bytes = int(width) * int(height) * 4
+        self.window.record_display_frame_accepted(accepted_frame_bytes)
+
     def set_background_color(self, color):
         """Set the background color of this canvas.
 
@@ -91,35 +100,36 @@ class Canvas:
                 img.strides[0],
                 True,
             )
-            if self.window is not None:
-                self.window.record_display_frame_accepted()
+            self._record_display_frame_accepted(img.shape[0], img.shape[1])
             return True
         # FIXME: Remove this hack. Maybe add a query function for whether the texture can be presented
         if is_texture and prog_is_vk:
             self.canvas.set_image_texture(img.tex)
-            if self.window is not None:
-                self.window.record_display_frame_accepted()
+            self._record_display_frame_accepted(img.shape[0], img.shape[1])
             return True
         else:
             if prog_arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan):
                 packed_img = to_rgba8_packed_ndarray(img)
                 if packed_img is not None:
                     self.canvas.set_image(self._get_set_image_info(packed_img))
-                    if self.window is not None:
-                        self.window.record_display_frame_accepted()
+                    self._record_display_frame_accepted(
+                        packed_img.shape[0], packed_img.shape[1]
+                    )
                     return True
             if prog_is_vk:
                 rgba8_texture = to_rgba8_texture(img)
                 if rgba8_texture is not None:
                     self.canvas.set_image_texture(rgba8_texture.tex)
-                    if self.window is not None:
-                        self.window.record_display_frame_accepted()
+                    self._record_display_frame_accepted(
+                        rgba8_texture.shape[0], rgba8_texture.shape[1]
+                    )
                     return True
             staging_img = to_rgba8(img)
             info = self._get_set_image_info(staging_img)
             self.canvas.set_image(info)
-            if self.window is not None:
-                self.window.record_display_frame_accepted()
+            self._record_display_frame_accepted(
+                staging_img.shape[0], staging_img.shape[1]
+            )
             return True
 
     def submit_frame(self, frame):
@@ -141,8 +151,7 @@ class Canvas:
             self.canvas.set_image_texture(frame.texture.tex)
         else:
             raise ValueError(f"unsupported display frame kind: {frame.kind}")
-        if self.window is not None:
-            self.window.record_display_frame_accepted()
+        self._record_display_frame_accepted(frame.width, frame.height)
         return True
 
     def contour(self, scalar_field, cmap_name="plasma", normalize=False):

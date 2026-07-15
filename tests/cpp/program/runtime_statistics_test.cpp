@@ -103,7 +103,7 @@ TEST(RuntimeStatistics, CategoriesDoNotAliasEachOther) {
   EXPECT_EQ(snapshot.display.accepted_frames, 1u);
   EXPECT_EQ(snapshot.display.submitted_frames, 1u);
   EXPECT_EQ(snapshot.display.dropped_frames, 0u);
-  EXPECT_EQ(snapshot.display.staged_frame_bytes, 4096u);
+  EXPECT_EQ(snapshot.display.accepted_frame_bytes, 4096u);
   EXPECT_EQ(snapshot.trace.recorded_events, 7u);
   EXPECT_EQ(snapshot.trace.dropped_events, 2u);
 }

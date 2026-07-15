@@ -1,4 +1,5 @@
 #include "taichi/ui/common/window_base.h"
+#include "taichi/program/runtime_statistics.h"
 #include "taichi/rhi/common/window_system.h"
 
 namespace taichi::ui {
@@ -92,10 +93,21 @@ void WindowBase::clear_display_last_flags() {
   display_stats_.last_reused = false;
 }
 
-void WindowBase::record_display_frame_accepted() {
+void WindowBase::set_runtime_statistics(
+    lang::RuntimeStatistics *runtime_statistics) noexcept {
+  runtime_statistics_ = runtime_statistics;
+}
+
+void WindowBase::record_display_frame_accepted(
+    std::uint64_t accepted_frame_bytes) {
   clear_display_last_flags();
   ++display_stats_.accepted_frames;
   display_stats_.last_accepted = true;
+  if (runtime_statistics_) {
+    runtime_statistics_->record_display(
+        /*accepted=*/true, /*submitted=*/false, /*dropped=*/false,
+        accepted_frame_bytes);
+  }
 }
 
 void WindowBase::record_display_frame_submitted() {
@@ -109,12 +121,20 @@ void WindowBase::record_display_frame_submitted() {
     ++display_stats_.offscreen_submitted_frames;
     display_stats_.last_offscreen_submitted = true;
   }
+  if (runtime_statistics_) {
+    runtime_statistics_->record_display(
+        /*accepted=*/false, /*submitted=*/true, /*dropped=*/false, 0);
+  }
 }
 
 void WindowBase::record_display_frame_dropped() {
   clear_display_last_flags();
   ++display_stats_.dropped_frames;
   display_stats_.last_dropped = true;
+  if (runtime_statistics_) {
+    runtime_statistics_->record_display(
+        /*accepted=*/false, /*submitted=*/false, /*dropped=*/true, 0);
+  }
 }
 
 void WindowBase::record_display_frame_reused() {

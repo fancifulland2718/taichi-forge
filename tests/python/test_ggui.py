@@ -754,10 +754,14 @@ def test_hidden_window_show_after_set_image():
 
 
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
-@test_utils.test(arch=supported_archs)
+@test_utils.test(
+    arch=supported_archs + [ti.cpu],
+    exclude=[(ti.cpu, "Darwin")],
+)
 def test_hidden_window_display_stats_after_set_image():
     window = ti.ui.Window("test", (64, 64), show_window=False)
     canvas = window.get_canvas()
+    prog = impl.get_runtime().prog
 
     img = ti.Vector.field(4, ti.f32, (64, 64))
 
@@ -768,9 +772,11 @@ def test_hidden_window_display_stats_after_set_image():
 
     init_img()
     window.reset_display_stats()
+    runtime_before = prog._runtime_statistics_snapshot()["display"]
     assert window.is_headless_display() is True
     assert canvas.set_image(img) is True
     stats = window.get_display_stats()
+    runtime_after_accept = prog._runtime_statistics_snapshot()["display"]
     assert stats["display_mode"] == "offscreen"
     assert stats["headless"] is True
     assert stats["accepted_frames"] == 1
@@ -778,17 +784,60 @@ def test_hidden_window_display_stats_after_set_image():
     assert stats["window_submitted_frames"] == 0
     assert stats["offscreen_submitted_frames"] == 0
     assert stats["last_accepted"] is True
+    assert (
+        runtime_after_accept["accepted_frames"]
+        - runtime_before["accepted_frames"]
+        == stats["accepted_frames"]
+    )
+    assert (
+        runtime_after_accept["submitted_frames"]
+        - runtime_before["submitted_frames"]
+        == stats["submitted_frames"]
+    )
+    assert (
+        runtime_after_accept["accepted_frame_bytes"]
+        - runtime_before["accepted_frame_bytes"]
+        == 64 * 64 * 4
+    )
+
+    # Headless windows always accept another frame, so exercise the same
+    # dropped-frame callback Canvas uses under headed backpressure directly.
+    window.window.record_display_frame_dropped()
+    stats = window.get_display_stats()
+    runtime_after_drop = prog._runtime_statistics_snapshot()["display"]
+    assert stats["dropped_frames"] == 1
+    assert (
+        runtime_after_drop["dropped_frames"]
+        - runtime_before["dropped_frames"]
+        == stats["dropped_frames"]
+    )
 
     assert window.show() is True
     stats = window.get_display_stats()
+    runtime_after_show = prog._runtime_statistics_snapshot()["display"]
     assert stats["accepted_frames"] == 1
     assert stats["submitted_frames"] == 1
     assert stats["window_submitted_frames"] == 0
     assert stats["offscreen_submitted_frames"] == 1
-    assert stats["dropped_frames"] == 0
+    assert stats["dropped_frames"] == 1
     assert stats["last_submitted"] is True
     assert stats["last_window_submitted"] is False
     assert stats["last_offscreen_submitted"] is True
+    assert (
+        runtime_after_show["accepted_frames"]
+        - runtime_before["accepted_frames"]
+        == stats["accepted_frames"]
+    )
+    assert (
+        runtime_after_show["submitted_frames"]
+        - runtime_before["submitted_frames"]
+        == stats["submitted_frames"]
+    )
+    assert (
+        runtime_after_show["dropped_frames"]
+        - runtime_before["dropped_frames"]
+        == stats["dropped_frames"]
+    )
     window.destroy()
 
 

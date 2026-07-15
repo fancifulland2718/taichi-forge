@@ -19,6 +19,10 @@
 
 struct GLFWwindow;
 
+namespace taichi::lang {
+class RuntimeStatistics;
+}  // namespace taichi::lang
+
 namespace taichi::ui {
 
 struct DisplayStats {
@@ -64,7 +68,8 @@ class WindowBase {
 
   virtual bool can_render_frame();
 
-  virtual void record_display_frame_accepted();
+  virtual void record_display_frame_accepted(
+      std::uint64_t accepted_frame_bytes = 0);
 
   virtual void record_display_frame_dropped();
 
@@ -96,9 +101,13 @@ class WindowBase {
   std::list<Event> events_;
   Event current_event_{EventType::Any, ""};
   DisplayStats display_stats_;
+  lang::RuntimeStatistics *runtime_statistics_{nullptr};
 
  protected:
   explicit WindowBase(AppConfig config);
+
+  void set_runtime_statistics(
+      lang::RuntimeStatistics *runtime_statistics) noexcept;
 
   void set_callbacks();
 

@@ -760,8 +760,8 @@ void export_lang(py::module &m) {
         display["accepted_frames"] = snapshot.display.accepted_frames;
         display["submitted_frames"] = snapshot.display.submitted_frames;
         display["dropped_frames"] = snapshot.display.dropped_frames;
-        display["staged_frame_bytes"] =
-            snapshot.display.staged_frame_bytes;
+        display["accepted_frame_bytes"] =
+            snapshot.display.accepted_frame_bytes;
 
         const RuntimeFaultSnapshot fault_snapshot =
             program.runtime_fault_snapshot();

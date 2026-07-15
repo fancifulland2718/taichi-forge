@@ -31,6 +31,7 @@ Window::Window(Program *prog, const AppConfig &config) : WindowBase(config) {
 }
 
 void Window::init(Program *prog, const AppConfig &config) {
+  set_runtime_statistics(prog ? &prog->runtime_statistics() : nullptr);
   if (config_.show_window) {
     glfwSetFramebufferSizeCallback(glfw_window_, framebuffer_resize_callback);
   }

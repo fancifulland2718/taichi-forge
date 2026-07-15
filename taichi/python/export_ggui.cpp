@@ -628,8 +628,8 @@ struct PyWindow {
     return headless_display_;
   }
 
-  void record_display_frame_accepted() {
-    window->record_display_frame_accepted();
+  void record_display_frame_accepted(uint64_t accepted_frame_bytes = 0) {
+    window->record_display_frame_accepted(accepted_frame_bytes);
   }
 
   void record_display_frame_dropped() {
@@ -733,7 +733,8 @@ void export_ggui(py::module &m) {
       .def("can_render_frame", &PyWindow::can_render_frame)
       .def("is_headless_display", &PyWindow::is_headless_display)
       .def("record_display_frame_accepted",
-           &PyWindow::record_display_frame_accepted)
+           &PyWindow::record_display_frame_accepted,
+           py::arg("accepted_frame_bytes") = 0)
       .def("record_display_frame_dropped",
            &PyWindow::record_display_frame_dropped)
       .def("get_display_stats", &PyWindow::get_display_stats)
