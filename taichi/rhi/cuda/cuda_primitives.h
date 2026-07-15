@@ -2,6 +2,8 @@
 
 #include <cstddef>
 
+#include <taichi/rhi/cuda/primitives/linear_ptx.h>
+
 namespace taichi::lang::cuda {
 
 enum class CubSortKeyType : int {
@@ -89,29 +91,6 @@ enum class CudaMetricOp : int {
   max_abs_delta = 1,
 };
 
-enum class CudaTransformValueType : int {
-  i32 = 0,
-  f32 = 1,
-  u32 = 2,
-  u64 = 3,
-  i64 = 4,
-  f64 = 5,
-};
-
-enum class CudaIndexedCopyOp : int {
-  gather = 0,
-  scatter = 1,
-};
-
-enum class CudaScatterAddValueType : int {
-  i32 = 0,
-  f32 = 1,
-  u32 = 2,
-  u64 = 3,
-  i64 = 4,
-  f64 = 5,
-};
-
 enum class CudaGroupedReduceValueType : int {
   i32 = 0,
   f32 = 1,
@@ -129,15 +108,6 @@ enum class CudaBucketBuilderValueType : int {
   i64 = 4,
   f64 = 5,
 };
-
-bool driver_transform_available();
-
-std::size_t driver_transform_affine(void *src,
-                                    void *dst,
-                                    int num_items,
-                                    CudaTransformValueType value_type,
-                                    double scale,
-                                    double bias);
 
 bool cub_transform_available();
 
@@ -221,24 +191,6 @@ std::size_t cub_add_scaled_strided(void *src,
                                    std::size_t dst_stride,
                                    double scale,
                                    void *stream);
-
-bool driver_indexed_copy_available();
-
-std::size_t driver_indexed_copy(void *src,
-                                void *indices,
-                                void *dst,
-                                int num_items,
-                                int index_bound,
-                                CudaIndexedCopyOp op);
-
-bool driver_scatter_add_available();
-
-std::size_t driver_scatter_add(void *src,
-                               void *indices,
-                               void *dst,
-                               int num_items,
-                               int index_bound,
-                               CudaScatterAddValueType value_type);
 
 bool cub_indexed_copy_available();
 
