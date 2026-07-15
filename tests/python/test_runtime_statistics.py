@@ -239,3 +239,42 @@ def test_runtime_statistics_native_adapter_matches_legacy_diagnostics():
         after_failure["submission"]["failed_submissions"]
         == before_failure["submission"]["failed_submissions"] + 1
     )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_runtime_statistics_bulk_transfer_bytes_are_exact():
+    n = 128
+    payload_bytes = n * np.dtype(np.int32).itemsize
+    src_np = np.arange(n, dtype=np.int32)
+    ndarray_src = ti.ndarray(dtype=ti.i32, shape=n)
+    ndarray_dst = ti.ndarray(dtype=ti.i32, shape=n)
+    field_src = ti.field(dtype=ti.i32, shape=n)
+    field_dst = ti.field(dtype=ti.i32, shape=n)
+    prog = ti.lang.impl.get_runtime().prog
+    before = prog._runtime_statistics_snapshot()
+
+    ndarray_src.from_numpy(src_np)
+    prog.copy_ndarray(ndarray_dst.arr, ndarray_src.arr)
+    ndarray_result = ndarray_dst.to_numpy()
+    field_src.from_numpy(src_np)
+    field_dst.copy_from(field_src)
+    field_result = field_dst.to_numpy()
+
+    after = prog._runtime_statistics_snapshot()
+    assert (
+        after["transfer"]["host_to_device_bytes"]
+        - before["transfer"]["host_to_device_bytes"]
+        == 2 * payload_bytes
+    )
+    assert (
+        after["transfer"]["device_to_host_bytes"]
+        - before["transfer"]["device_to_host_bytes"]
+        == 2 * payload_bytes
+    )
+    assert (
+        after["transfer"]["device_to_device_bytes"]
+        - before["transfer"]["device_to_device_bytes"]
+        == 2 * payload_bytes
+    )
+    assert np.array_equal(ndarray_result, src_np)
+    assert np.array_equal(field_result, src_np)

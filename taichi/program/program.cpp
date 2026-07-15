@@ -304,6 +304,38 @@ class ScopedCpuPrimitiveProgram {
   Program *previous_program_;
 };
 
+class ScopedRuntimeTransferStatistics {
+ public:
+  ScopedRuntimeTransferStatistics(Program *program,
+                                  RuntimeTransferKind kind,
+                                  std::size_t bytes) noexcept
+      : program_(program),
+        kind_(kind),
+        bytes_(static_cast<std::uint64_t>(bytes)),
+        uncaught_exceptions_(std::uncaught_exceptions()) {
+  }
+
+  ~ScopedRuntimeTransferStatistics() {
+    // Count logical payload only after the Program-level operation has
+    // accepted/enqueued the copy. Backend-internal staging and retries are not
+    // separate user-visible transfers.
+    if (std::uncaught_exceptions() == uncaught_exceptions_) {
+      program_->runtime_statistics().record_transfer(kind_, bytes_);
+    }
+  }
+
+  ScopedRuntimeTransferStatistics(const ScopedRuntimeTransferStatistics &) =
+      delete;
+  ScopedRuntimeTransferStatistics &operator=(
+      const ScopedRuntimeTransferStatistics &) = delete;
+
+ private:
+  Program *program_;
+  RuntimeTransferKind kind_;
+  std::uint64_t bytes_;
+  int uncaught_exceptions_;
+};
+
 void update_cpu_scatter_add_workspace_peak(std::size_t bytes) {
   auto current = cpu_scatter_add_workspace_bytes_peak.load(std::memory_order_relaxed);
   while (current < bytes &&
@@ -7143,6 +7175,8 @@ void Program::copy_ndarray_fast(Ndarray *dst, Ndarray *src) {
   if (dst_bytes == 0 || dst == src) {
     return;
   }
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kDeviceToDevice, dst_bytes);
 
   if (compile_config().arch == Arch::vulkan) {
     const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
@@ -7217,6 +7251,8 @@ void Program::copy_ndarray_from_host(Ndarray *dst,
   if (bytes == 0) {
     return;
   }
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kHostToDevice, bytes);
 
   if (arch_is_cpu(compile_config().arch)) {
     auto *dst_ptr = reinterpret_cast<uint8_t *>(
@@ -7251,6 +7287,8 @@ void Program::copy_ndarray_to_host(Ndarray *src,
   if (bytes == 0) {
     return;
   }
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kDeviceToHost, bytes);
 
   if (arch_is_cpu(compile_config().arch)) {
     auto *src_ptr = reinterpret_cast<const uint8_t *>(
@@ -12393,6 +12431,8 @@ void Program::copy_dense_field(SNode *dst,
   if (n > std::numeric_limits<std::size_t>::max() / item_bytes) {
     TI_ERROR("Native dense field copy received an oversized request.");
   }
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kDeviceToDevice, n * item_bytes);
 
   if (arch == Arch::cuda || arch == Arch::vulkan) {
     const std::size_t dst_stride = get_dense_field_stride(dst, item_bytes);
@@ -12501,6 +12541,8 @@ void Program::copy_dense_field_packed(SNode *dst,
   if (n == 0 || dst == src) {
     return;
   }
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kDeviceToDevice, bytes);
   check_dense_field_packed_stride(this, dst, value_type, lane_count,
                                   "Native packed dense field copy");
   check_dense_field_packed_stride(this, src, value_type, lane_count,
@@ -12575,11 +12617,16 @@ void Program::copy_dense_field_from_host(SNode *dst,
   TI_ERROR_IF(item_bytes == 0,
               "Native dense field host copy received an unsupported value "
               "type.");
-  TI_ERROR_IF(src_bytes != n * item_bytes,
+  TI_ERROR_IF(n > std::numeric_limits<std::size_t>::max() / item_bytes,
+              "Native dense field host copy received an oversized request.");
+  const std::size_t expected_bytes = n * item_bytes;
+  TI_ERROR_IF(src_bytes != expected_bytes,
               "Native dense field host copy received mismatched source size.");
   if (n == 0) {
     return;
   }
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kHostToDevice, src_bytes);
   if (arch == Arch::cuda || arch == Arch::vulkan) {
     const std::size_t dst_stride = get_dense_field_stride(dst, item_bytes);
     TI_ERROR_IF(dst_stride != item_bytes,
@@ -12664,6 +12711,8 @@ void Program::copy_dense_field_packed_from_host(SNode *dst,
   if (n == 0) {
     return;
   }
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kHostToDevice, src_bytes);
   check_dense_field_packed_stride(this, dst, value_type, lane_count,
                                   "Native packed dense field host copy");
   if (arch == Arch::cuda || arch == Arch::vulkan) {
@@ -12732,12 +12781,18 @@ void Program::copy_dense_field_to_host(SNode *src,
   TI_ERROR_IF(item_bytes == 0,
               "Native dense field host readback received an unsupported "
               "value type.");
-  TI_ERROR_IF(dst_bytes != n * item_bytes,
+  TI_ERROR_IF(n > std::numeric_limits<std::size_t>::max() / item_bytes,
+              "Native dense field host readback received an oversized "
+              "request.");
+  const std::size_t expected_bytes = n * item_bytes;
+  TI_ERROR_IF(dst_bytes != expected_bytes,
               "Native dense field host readback received mismatched "
               "destination size.");
   if (n == 0) {
     return;
   }
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kDeviceToHost, dst_bytes);
   if (arch == Arch::cuda || arch == Arch::vulkan) {
     const std::size_t src_stride = get_dense_field_stride(src, item_bytes);
     TI_ERROR_IF(src_stride != item_bytes,
@@ -12824,6 +12879,8 @@ void Program::copy_dense_field_packed_to_host(SNode *src,
   if (n == 0) {
     return;
   }
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kDeviceToHost, dst_bytes);
   check_dense_field_packed_stride(this, src, value_type, lane_count,
                                   "Native packed dense field host readback");
   if (arch == Arch::cuda || arch == Arch::vulkan) {

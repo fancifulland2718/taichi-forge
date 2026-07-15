@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -87,6 +88,19 @@ auto tracked_native_program_method(Result (lang::Program::*method)(Args...)) {
       throw;
     }
   };
+}
+
+std::size_t checked_buffer_nbytes(const py::buffer_info &info,
+                                  const char *invalid_message,
+                                  const char *oversized_message) {
+  TI_ERROR_IF(info.ndim < 0 || info.itemsize < 0 || info.size < 0, "{}",
+              invalid_message);
+  const auto size = static_cast<std::size_t>(info.size);
+  const auto itemsize = static_cast<std::size_t>(info.itemsize);
+  TI_ERROR_IF(itemsize != 0 &&
+                  size > std::numeric_limits<std::size_t>::max() / itemsize,
+              "{}", oversized_message);
+  return size * itemsize;
 }
 
 }  // namespace
@@ -1442,14 +1456,14 @@ void export_lang(py::module &m) {
           [](Program &program, SNode *dst, py::buffer src, int value_type,
              std::size_t n) {
             py::buffer_info info = src.request();
-            TI_ERROR_IF(info.ndim < 0 || info.itemsize < 0 || info.size < 0,
-                        "Native dense field host copy received an invalid "
-                        "source buffer.");
             const auto src_ptr =
                 reinterpret_cast<std::uintptr_t>(info.ptr);
-            const std::size_t src_bytes =
-                static_cast<std::size_t>(info.size) *
-                static_cast<std::size_t>(info.itemsize);
+            const std::size_t src_bytes = checked_buffer_nbytes(
+                info,
+                "Native dense field host copy received an invalid source "
+                "buffer.",
+                "Native dense field host copy received an oversized source "
+                "buffer.");
             py::gil_scoped_release release;
             program.copy_dense_field_from_host(dst, src_ptr, src_bytes,
                                                value_type, n);
@@ -1460,14 +1474,14 @@ void export_lang(py::module &m) {
           [](Program &program, SNode *dst, py::buffer src, int value_type,
              std::size_t n, int lane_count) {
             py::buffer_info info = src.request();
-            TI_ERROR_IF(info.ndim < 0 || info.itemsize < 0 || info.size < 0,
-                        "Native packed dense field host copy received an "
-                        "invalid source buffer.");
             const auto src_ptr =
                 reinterpret_cast<std::uintptr_t>(info.ptr);
-            const std::size_t src_bytes =
-                static_cast<std::size_t>(info.size) *
-                static_cast<std::size_t>(info.itemsize);
+            const std::size_t src_bytes = checked_buffer_nbytes(
+                info,
+                "Native packed dense field host copy received an invalid "
+                "source buffer.",
+                "Native packed dense field host copy received an oversized "
+                "source buffer.");
             py::gil_scoped_release release;
             program.copy_dense_field_packed_from_host(
                 dst, src_ptr, src_bytes, value_type, n, lane_count);
@@ -1479,13 +1493,13 @@ void export_lang(py::module &m) {
           [](Program &program, SNode *src, py::buffer dst, int value_type,
              std::size_t n) {
             py::buffer_info info = dst.request();
-            TI_ERROR_IF(info.ndim < 0 || info.itemsize < 0 || info.size < 0,
-                        "Native dense field host readback received an invalid "
-                        "destination buffer.");
             const auto dst_ptr = reinterpret_cast<std::uintptr_t>(info.ptr);
-            const std::size_t dst_bytes =
-                static_cast<std::size_t>(info.size) *
-                static_cast<std::size_t>(info.itemsize);
+            const std::size_t dst_bytes = checked_buffer_nbytes(
+                info,
+                "Native dense field host readback received an invalid "
+                "destination buffer.",
+                "Native dense field host readback received an oversized "
+                "destination buffer.");
             py::gil_scoped_release release;
             program.copy_dense_field_to_host(src, dst_ptr, dst_bytes,
                                              value_type, n);
@@ -1496,13 +1510,13 @@ void export_lang(py::module &m) {
           [](Program &program, SNode *src, py::buffer dst, int value_type,
              std::size_t n, int lane_count) {
             py::buffer_info info = dst.request();
-            TI_ERROR_IF(info.ndim < 0 || info.itemsize < 0 || info.size < 0,
-                        "Native packed dense field host readback received an "
-                        "invalid destination buffer.");
             const auto dst_ptr = reinterpret_cast<std::uintptr_t>(info.ptr);
-            const std::size_t dst_bytes =
-                static_cast<std::size_t>(info.size) *
-                static_cast<std::size_t>(info.itemsize);
+            const std::size_t dst_bytes = checked_buffer_nbytes(
+                info,
+                "Native packed dense field host readback received an invalid "
+                "destination buffer.",
+                "Native packed dense field host readback received an "
+                "oversized destination buffer.");
             py::gil_scoped_release release;
             program.copy_dense_field_packed_to_host(
                 src, dst_ptr, dst_bytes, value_type, n, lane_count);
