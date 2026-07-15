@@ -8,6 +8,7 @@
 #include <thread>
 
 #include "taichi/common/core.h"
+#include "taichi/program/runtime_statistics.h"
 #include "taichi/rhi/arch.h"
 #include "taichi/rhi/backend_error.h"
 #include "taichi/rhi/public_device.h"
@@ -99,14 +100,21 @@ class TI_DLL_EXPORT RuntimeFaultDomain final : public BackendFaultReporter {
 
   RuntimeFaultSnapshot snapshot() const;
 
+  RuntimeStatistics &statistics() noexcept {
+    return statistics_;
+  }
+  const RuntimeStatistics &statistics() const noexcept {
+    return statistics_;
+  }
+
  private:
   std::string rejection_message(const char *operation) const;
 
   const Arch backend_;
   const std::uint64_t program_domain_;
+  mutable RuntimeStatistics statistics_;
   std::atomic<RuntimeLifecycleState> state_{RuntimeLifecycleState::kHealthy};
   std::atomic<bool> fatal_observed_{false};
-  mutable std::atomic<std::uint64_t> rejected_submissions_{0};
   mutable std::mutex mutex_;
   std::thread::id finalizer_thread_;
   std::optional<RuntimeFaultRecord> first_fault_;

@@ -85,7 +85,9 @@ const char *runtime_lifecycle_state_name(RuntimeLifecycleState state) noexcept {
 RuntimeFaultDomain::RuntimeFaultDomain(
     Arch backend,
     std::uint64_t program_domain) noexcept
-    : backend_(backend), program_domain_(program_domain) {
+    : backend_(backend),
+      program_domain_(program_domain),
+      statistics_(backend, program_domain) {
 }
 
 bool RuntimeFaultDomain::report_fatal(RuntimeFaultRecord fault) {
@@ -103,6 +105,7 @@ bool RuntimeFaultDomain::report_fatal(RuntimeFaultRecord fault) {
   if (current == RuntimeLifecycleState::kHealthy) {
     state_.store(RuntimeLifecycleState::kFaulted, std::memory_order_release);
   }
+  statistics_.record_first_fatal_fault();
   return true;
 }
 
@@ -166,7 +169,7 @@ void RuntimeFaultDomain::throw_if_submission_disallowed(
       return;
     }
   }
-  rejected_submissions_.fetch_add(1, std::memory_order_relaxed);
+  statistics_.record_rejected_submission();
   throw TaichiRuntimeError(rejection_message(operation));
 }
 
@@ -176,7 +179,7 @@ RuntimeFaultSnapshot RuntimeFaultDomain::snapshot() const {
   result.state = state_.load(std::memory_order_relaxed);
   result.program_domain = program_domain_;
   result.rejected_submissions =
-      rejected_submissions_.load(std::memory_order_relaxed);
+      statistics_.snapshot().fault.rejected_submissions;
   result.first_fault = first_fault_;
   return result;
 }

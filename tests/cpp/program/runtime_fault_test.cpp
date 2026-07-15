@@ -79,12 +79,15 @@ TEST(RuntimeFault, FirstFatalFaultIsImmutableAndRejectsSubmission) {
   }
 
   const RuntimeFaultSnapshot snapshot = domain.snapshot();
+  const RuntimeStatisticsSnapshot statistics = domain.statistics().snapshot();
   ASSERT_TRUE(snapshot.first_fault.has_value());
   EXPECT_EQ(snapshot.program_domain, 41u);
   EXPECT_EQ(snapshot.rejected_submissions, 1u);
   EXPECT_EQ(snapshot.first_fault->backend_code,
             static_cast<std::int64_t>(CUDA_ERROR_ILLEGAL_ADDRESS));
   EXPECT_EQ(snapshot.first_fault->submission_sequence, 7u);
+  EXPECT_EQ(statistics.fault.first_fatal_faults, 1u);
+  EXPECT_EQ(statistics.fault.rejected_submissions, 1u);
 }
 
 TEST(RuntimeFault, ConcurrentReportsSelectExactlyOneFirstFault) {
