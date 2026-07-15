@@ -364,7 +364,7 @@ def _make_struct_tensor_indexed_copy_case(n=256):
 
 
 @test_utils.test(arch=ti.cpu)
-def test_primitive_descriptor_key_stable_for_rebuilt_dense_views():
+def test_primitive_descriptor_key_stable_for_cached_dense_views():
     n = 16
     payload = ti.types.struct(
         val=ti.i32,
@@ -374,21 +374,21 @@ def test_primitive_descriptor_key_stable_for_rebuilt_dense_views():
 
     scalar_a = struct_arr.field("val")
     scalar_b = struct_arr.field("val")
-    assert scalar_a is not scalar_b
+    assert scalar_a is scalar_b
     assert alg_impl._primitive_plan_object_key(
         scalar_a
     ) == alg_impl._primitive_plan_object_key(scalar_b)
 
     tensor_a = struct_arr.field("vec")
     tensor_b = struct_arr.field("vec")
-    assert tensor_a is not tensor_b
+    assert tensor_a is tensor_b
     assert alg_impl._primitive_plan_object_key(
         tensor_a
     ) == alg_impl._primitive_plan_object_key(tensor_b)
 
     component_a = struct_arr.field("vec", component=0)
     component_b = struct_arr.field("vec", component=0)
-    assert component_a is not component_b
+    assert component_a is component_b
     assert alg_impl._primitive_plan_object_key(
         component_a
     ) == alg_impl._primitive_plan_object_key(component_b)
