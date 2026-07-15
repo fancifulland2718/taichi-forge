@@ -36,6 +36,7 @@ class CUDAContext {
   // from interleaving their host-side setup. It never waits for queued device
   // work on steady-state field/ndarray launches.
   std::recursive_mutex submission_mutex_;
+  CUDASampledRecursiveLockTelemetry submission_lock_telemetry_;
   CUDASampledLockTelemetry lock_telemetry_;
   std::mutex graph_capture_mutex_;
   KernelProfilerBase *profiler_;
@@ -131,11 +132,16 @@ class CUDAContext {
   }
 
   std::unique_lock<std::recursive_mutex> get_submission_lock_guard() {
-    return std::unique_lock<std::recursive_mutex>(submission_mutex_);
+    return submission_lock_telemetry_.acquire(submission_mutex_);
   }
 
   CUDASampledLockTelemetry::Snapshot get_lock_telemetry_snapshot() const {
     return lock_telemetry_.snapshot();
+  }
+
+  CUDASampledRecursiveLockTelemetry::Snapshot
+  get_submission_lock_telemetry_snapshot() const {
+    return submission_lock_telemetry_.snapshot();
   }
 
   std::unique_lock<std::mutex> get_graph_capture_lock_guard() {

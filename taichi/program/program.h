@@ -2630,6 +2630,7 @@ class TI_DLL_EXPORT Program {
   void collect_ready_runtime_completions();
   void complete_all_runtime_completions() noexcept;
   void fail_all_runtime_completions(const std::string &reason) noexcept;
+  void initialize_runtime_backend_telemetry_baseline();
   void attach_runtime_fault_reporter();
   void detach_runtime_fault_reporter() noexcept;
   std::size_t runtime_completion_resource_count(
@@ -2662,6 +2663,14 @@ class TI_DLL_EXPORT Program {
   std::unique_ptr<ProgramImpl> program_impl_;
   const std::uint64_t runtime_completion_domain_;
   std::shared_ptr<RuntimeFaultDomain> runtime_fault_domain_;
+  struct RuntimeBackendTelemetryBaseline {
+    std::uint64_t backend_waits{0};
+    std::uint64_t backend_wait_ns{0};
+    std::uint64_t backend_lock_samples{0};
+    std::uint64_t backend_lock_contentions{0};
+    std::uint64_t backend_lock_sampled_wait_ns{0};
+  };
+  RuntimeBackendTelemetryBaseline runtime_backend_telemetry_baseline_;
   // Default kernel/Graph execution only publishes a cheap dirty bit. The
   // reader/writer gate is activated permanently by the first completion
   // request, and only temporarily by a legacy Program::synchronize().

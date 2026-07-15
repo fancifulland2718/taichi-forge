@@ -125,6 +125,17 @@ std::uint64_t allocate_runtime_resource_domain() {
   }
 }
 
+std::uint64_t saturating_counter_delta(std::uint64_t current,
+                                       std::uint64_t baseline) noexcept {
+  return current >= baseline ? current - baseline : 0;
+}
+
+std::uint64_t saturating_counter_add(std::uint64_t lhs,
+                                     std::uint64_t rhs) noexcept {
+  const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+  return lhs > maximum - rhs ? maximum : lhs + rhs;
+}
+
 void advance_snode_tree_epoch(std::atomic<std::uint64_t> &epoch) {
   const std::uint64_t current = epoch.load(std::memory_order_relaxed);
   TI_ASSERT(current != std::numeric_limits<std::uint64_t>::max());
@@ -4641,6 +4652,8 @@ Program::Program(Arch desired_arch)
 
   Timelines::get_instance().set_enabled(config.timeline);
 
+  initialize_runtime_backend_telemetry_baseline();
+
   // Install process-wide backend reporting only after every fallible Program
   // construction step and the single-instance check have succeeded. A failed
   // second Program must never overwrite the live Program's reporter.
@@ -6382,6 +6395,74 @@ RuntimeStatisticsSnapshot Program::runtime_statistics_snapshot() {
   snapshot.memory.host_raw_bytes = {host.raw_bytes, true};
   snapshot.memory.host_capacity_bytes = {host.raw_bytes, true};
 
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    const auto driver = CUDADriver::get_instance().get_telemetry_snapshot();
+    const auto context =
+        CUDAContext::get_instance().get_lock_telemetry_snapshot();
+    const auto submission =
+        CUDAContext::get_instance().get_submission_lock_telemetry_snapshot();
+    const auto lock_samples = saturating_counter_add(
+        driver.lock.sampled_acquisitions,
+        saturating_counter_add(context.sampled_acquisitions,
+                               submission.sampled_acquisitions));
+    const auto lock_contentions = saturating_counter_add(
+        driver.lock.contended_acquisitions,
+        saturating_counter_add(context.contended_acquisitions,
+                               submission.contended_acquisitions));
+    const auto lock_wait_ns = saturating_counter_add(
+        driver.lock.sampled_wait_ns,
+        saturating_counter_add(context.sampled_wait_ns,
+                               submission.sampled_wait_ns));
+    snapshot.synchronization.backend_waits = {
+        saturating_counter_delta(
+            driver.wait.waits,
+            runtime_backend_telemetry_baseline_.backend_waits),
+        true};
+    snapshot.synchronization.backend_wait_ns = {
+        saturating_counter_delta(
+            driver.wait.wait_ns,
+            runtime_backend_telemetry_baseline_.backend_wait_ns),
+        true};
+    snapshot.synchronization.backend_lock_samples = {
+        saturating_counter_delta(
+            lock_samples,
+            runtime_backend_telemetry_baseline_.backend_lock_samples),
+        true};
+    snapshot.synchronization.backend_lock_contentions = {
+        saturating_counter_delta(
+            lock_contentions,
+            runtime_backend_telemetry_baseline_.backend_lock_contentions),
+        true};
+    snapshot.synchronization.backend_lock_sampled_wait_ns = {
+        saturating_counter_delta(
+            lock_wait_ns,
+            runtime_backend_telemetry_baseline_
+                .backend_lock_sampled_wait_ns),
+        true};
+  }
+#endif
+
+#ifdef TI_WITH_VULKAN
+  if (compile_config().arch == Arch::vulkan) {
+    auto *device = dynamic_cast<vulkan::VulkanDevice *>(
+        program_impl_->get_compute_device());
+    if (device != nullptr) {
+      const auto telemetry = device->runtime_telemetry_snapshot();
+      snapshot.synchronization.backend_waits = {
+          telemetry.wait.waits, true};
+      snapshot.synchronization.backend_wait_ns = {
+          telemetry.wait.wait_ns, true};
+      snapshot.synchronization.backend_lock_samples = {
+          telemetry.queue_lock.sampled_acquisitions, true};
+      snapshot.synchronization.backend_lock_contentions = {
+          telemetry.queue_lock.contended_acquisitions, true};
+      snapshot.synchronization.backend_lock_sampled_wait_ns = {
+          telemetry.queue_lock.sampled_wait_ns, true};
+    }
+  }
+#endif
+
 #ifdef TI_WITH_LLVM
   if (arch_uses_llvm(compile_config().arch)) {
     const DeviceMemoryPoolStats device =
@@ -6396,6 +6477,36 @@ RuntimeStatisticsSnapshot Program::runtime_statistics_snapshot() {
   }
 #endif
   return snapshot;
+}
+
+void Program::initialize_runtime_backend_telemetry_baseline() {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch != Arch::cuda) {
+    return;
+  }
+  const auto driver = CUDADriver::get_instance().get_telemetry_snapshot();
+  const auto context =
+      CUDAContext::get_instance().get_lock_telemetry_snapshot();
+  const auto submission =
+      CUDAContext::get_instance().get_submission_lock_telemetry_snapshot();
+  runtime_backend_telemetry_baseline_.backend_waits = driver.wait.waits;
+  runtime_backend_telemetry_baseline_.backend_wait_ns = driver.wait.wait_ns;
+  runtime_backend_telemetry_baseline_.backend_lock_samples =
+      saturating_counter_add(
+          driver.lock.sampled_acquisitions,
+          saturating_counter_add(context.sampled_acquisitions,
+                                 submission.sampled_acquisitions));
+  runtime_backend_telemetry_baseline_.backend_lock_contentions =
+      saturating_counter_add(
+          driver.lock.contended_acquisitions,
+          saturating_counter_add(context.contended_acquisitions,
+                                 submission.contended_acquisitions));
+  runtime_backend_telemetry_baseline_.backend_lock_sampled_wait_ns =
+      saturating_counter_add(
+          driver.lock.sampled_wait_ns,
+          saturating_counter_add(context.sampled_wait_ns,
+                                 submission.sampled_wait_ns));
+#endif
 }
 
 void Program::close_argpack_resources() {

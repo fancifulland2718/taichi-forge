@@ -2377,9 +2377,12 @@ void VulkanDevice::profiler_sync() {
   }
   for (const auto &fence : fences) {
     std::lock_guard<std::mutex> lock(fence->mutex);
-    const VkResult result =
-        vkWaitForFences(fence->device, /*fenceCount=*/1, &fence->fence,
-                        VK_TRUE, UINT64_MAX);
+    VkResult result = VK_SUCCESS;
+    {
+      ScopedBackendWaitTelemetry wait_scope(&backend_wait_telemetry_);
+      result = vkWaitForFences(fence->device, /*fenceCount=*/1,
+                               &fence->fence, VK_TRUE, UINT64_MAX);
+    }
     if (result != VK_SUCCESS) {
       raise_backend_error(static_cast<std::int64_t>(result),
                           "vkWaitForFences",
@@ -2425,15 +2428,30 @@ void VulkanDevice::wait_idle() {
   }
 }
 
-std::mutex &VulkanDevice::get_queue_mutex(VkQueue queue) {
+std::unique_lock<std::mutex> VulkanDevice::acquire_queue_lock(VkQueue queue) {
   TI_ASSERT(queue != VK_NULL_HANDLE);
   // Compute and graphics can alias queue index 0. Resolve compute first so
-  // aliased handles share one mutex while distinct queues remain independent.
+  // aliased handles share one mutex and one telemetry source while distinct
+  // queues remain independent.
   if (queue == compute_queue_) {
-    return compute_queue_mutex_;
+    return compute_queue_lock_telemetry_.acquire(compute_queue_mutex_);
   }
   TI_ASSERT(queue == graphics_queue_);
-  return graphics_queue_mutex_;
+  return graphics_queue_lock_telemetry_.acquire(graphics_queue_mutex_);
+}
+
+VulkanRuntimeTelemetrySnapshot VulkanDevice::runtime_telemetry_snapshot()
+    const noexcept {
+  const auto compute = compute_queue_lock_telemetry_.snapshot();
+  const auto graphics = graphics_queue_lock_telemetry_.snapshot();
+  return {
+      backend_wait_telemetry_.snapshot(),
+      {
+          compute.sampled_acquisitions + graphics.sampled_acquisitions,
+          compute.contended_acquisitions + graphics.contended_acquisitions,
+          compute.sampled_wait_ns + graphics.sampled_wait_ns,
+      },
+  };
 }
 
 bool VulkanStreamSemaphoreObject::is_ready() const {
@@ -2468,9 +2486,12 @@ bool VulkanStreamSemaphoreObject::wait() const {
     fault_reporter_->throw_if_submission_disallowed("Vulkan fence wait");
   }
   std::lock_guard<std::mutex> lock(fence_ref->mutex);
-  const VkResult result =
-      vkWaitForFences(fence_ref->device, /*fenceCount=*/1,
-                      &fence_ref->fence, VK_TRUE, UINT64_MAX);
+  VkResult result = VK_SUCCESS;
+  {
+    ScopedBackendWaitTelemetry wait_scope(wait_telemetry_);
+    result = vkWaitForFences(fence_ref->device, /*fenceCount=*/1,
+                             &fence_ref->fence, VK_TRUE, UINT64_MAX);
+  }
   if (result != VK_SUCCESS) {
     BackendRuntimeError error(Arch::vulkan,
                               static_cast<std::int64_t>(result),
@@ -2569,7 +2590,7 @@ StreamSemaphore VulkanStream::submit(
 
   VkResult submit_result = VK_SUCCESS;
   {
-    std::lock_guard<std::mutex> queue_lock(device_.get_queue_mutex(queue_));
+    auto queue_lock = device_.acquire_queue_lock(queue_);
     submit_result = vkQueueSubmit(queue_, /*submitCount=*/1, &submit_info,
                                   /*fence=*/fence->fence);
   }
@@ -2585,7 +2606,8 @@ StreamSemaphore VulkanStream::submit(
   }
   device_.profiler_add_samplers(std::move(profiler_samplers));
   return std::make_shared<VulkanStreamSemaphoreObject>(
-      device_.backend_fault_reporter(), semaphore, fence);
+      device_.backend_fault_reporter(), semaphore, fence,
+      device_.backend_wait_telemetry());
 }
 
 StreamSemaphore VulkanStream::submit_synced(
@@ -2607,9 +2629,13 @@ void VulkanStream::command_sync() {
     }
     for (const auto &fence : fences) {
       std::lock_guard<std::mutex> lock(fence->mutex);
-      const VkResult result =
-          vkWaitForFences(fence->device, /*fenceCount=*/1, &fence->fence,
-                          VK_TRUE, UINT64_MAX);
+      VkResult result = VK_SUCCESS;
+      {
+        ScopedBackendWaitTelemetry wait_scope(
+            device_.backend_wait_telemetry());
+        result = vkWaitForFences(fence->device, /*fenceCount=*/1,
+                                 &fence->fence, VK_TRUE, UINT64_MAX);
+      }
       if (result != VK_SUCCESS) {
         device_.raise_backend_error(
             static_cast<std::int64_t>(result), "vkWaitForFences",
@@ -3584,9 +3610,14 @@ SurfaceImage VulkanSurface::acquire_surface_image() {
       return surface_image;
     }
     auto image_available = image_available_[image_available_index_];
-    VkResult res = vkAcquireNextImageKHR(
-        device_->vk_device(), swapchain_, uint64_t(4 * 1e9),
-        image_available->semaphore, VK_NULL_HANDLE, &image_index_);
+    VkResult res = VK_SUCCESS;
+    {
+      ScopedBackendWaitTelemetry wait_scope(
+          device_->backend_wait_telemetry());
+      res = vkAcquireNextImageKHR(
+          device_->vk_device(), swapchain_, uint64_t(4 * 1e9),
+          image_available->semaphore, VK_NULL_HANDLE, &image_index_);
+    }
     if (!handle_surface_result(res, "acquiring the next swapchain image")) {
       return surface_image;
     }
@@ -3594,7 +3625,8 @@ SurfaceImage VulkanSurface::acquire_surface_image() {
         (image_available_index_ + 1) % uint32_t(image_available_.size());
     surface_image.image_available =
         std::make_shared<VulkanStreamSemaphoreObject>(
-            device_->backend_fault_reporter(), image_available);
+            device_->backend_fault_reporter(), image_available, nullptr,
+            device_->backend_wait_telemetry());
     surface_image.image = swapchain_images_[image_index_];
     surface_image.image_index = image_index_;
     return surface_image;
@@ -3630,7 +3662,8 @@ bool VulkanSurface::try_acquire_surface_image(SurfaceImage *surface_image) {
       (image_available_index_ + 1) % uint32_t(image_available_.size());
   surface_image->image_available =
       std::make_shared<VulkanStreamSemaphoreObject>(
-          device_->backend_fault_reporter(), image_available);
+          device_->backend_fault_reporter(), image_available, nullptr,
+          device_->backend_wait_telemetry());
   surface_image->image = swapchain_images_[image_index_];
   surface_image->image_index = image_index_;
   return true;
@@ -3708,8 +3741,8 @@ void VulkanSurface::present_surface_image(
 
   VkResult present_result = VK_SUCCESS;
   {
-    std::lock_guard<std::mutex> queue_lock(
-        device_->get_queue_mutex(device_->graphics_queue()));
+    auto queue_lock =
+        device_->acquire_queue_lock(device_->graphics_queue());
     present_result = vkQueuePresentKHR(device_->graphics_queue(), &presentInfo);
   }
   handle_surface_result(present_result, "presenting a swapchain image");

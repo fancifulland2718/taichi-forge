@@ -1,10 +1,12 @@
 #include "gtest/gtest.h"
 
+#include <mutex>
 #include <thread>
 #include <type_traits>
 #include <vector>
 
 #include "taichi/program/runtime_statistics.h"
+#include "taichi/rhi/common/runtime_telemetry.h"
 
 namespace taichi::lang {
 namespace {
@@ -20,7 +22,7 @@ TEST(RuntimeStatistics, SnapshotSchemaStartsAtMeasuredZero) {
   EXPECT_EQ(snapshot.synchronization.program_syncs, 0u);
   EXPECT_EQ(snapshot.fault.first_fatal_faults, 0u);
   EXPECT_FALSE(snapshot.memory.cuda_mempool_used_bytes.available);
-  EXPECT_FALSE(snapshot.synchronization.queue_lock_samples.available);
+  EXPECT_FALSE(snapshot.synchronization.backend_lock_samples.available);
   EXPECT_TRUE(std::is_standard_layout_v<RuntimeStatisticsSnapshot>);
   EXPECT_TRUE(std::is_trivially_copyable_v<RuntimeStatisticsSnapshot>);
   EXPECT_LE(sizeof(RuntimeStatistics), 512u);
@@ -104,6 +106,29 @@ TEST(RuntimeStatistics, CategoriesDoNotAliasEachOther) {
   EXPECT_EQ(snapshot.display.staged_frame_bytes, 4096u);
   EXPECT_EQ(snapshot.trace.recorded_events, 7u);
   EXPECT_EQ(snapshot.trace.dropped_events, 2u);
+}
+
+TEST(RuntimeTelemetry, SampledUncontendedLockHasBoundedExactSamples) {
+  SampledLockTelemetry<std::mutex> telemetry;
+  std::mutex mutex;
+  for (std::uint64_t i = 0; i < 128; ++i) {
+    auto lock = telemetry.acquire(mutex);
+  }
+
+  const auto snapshot = telemetry.snapshot();
+  EXPECT_EQ(snapshot.sampled_acquisitions, 2u);
+  EXPECT_EQ(snapshot.contended_acquisitions, 0u);
+  EXPECT_EQ(snapshot.sampled_wait_ns, 0u);
+}
+
+TEST(RuntimeTelemetry, BackendWaitCounterAccumulatesExactValues) {
+  BackendWaitTelemetry telemetry;
+  telemetry.record(17);
+  telemetry.record(23);
+
+  const auto snapshot = telemetry.snapshot();
+  EXPECT_EQ(snapshot.waits, 2u);
+  EXPECT_EQ(snapshot.wait_ns, 40u);
 }
 
 }  // namespace

@@ -198,6 +198,12 @@ CUDADriver::CUDADriver() {
   name.set_names(#name, #symbol_name);
 #include "taichi/rhi/cuda/cuda_driver_functions.inc.h"
 #undef PER_CUDA_FUNCTION
+
+  // Only APIs that can block on device progress contribute backend wait time.
+  // The timer starts after acquiring the driver host lock, keeping host-lock
+  // contention and device waiting as separate metrics.
+  stream_synchronize.set_wait_telemetry(&wait_telemetry_);
+  event_synchronize.set_wait_telemetry(&wait_telemetry_);
 }
 
 // This is for initializing the CUDA driver itself

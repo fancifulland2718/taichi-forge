@@ -85,6 +85,107 @@ def test_runtime_statistics_kernel_completion_sync_and_memory():
     assert after_sync["fault"]["first_fault"] is None
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_runtime_statistics_backend_wait_and_lock_adapter():
+    value = ti.field(dtype=ti.i32, shape=())
+
+    @ti.kernel
+    def increment():
+        value[None] += 1
+
+    # Keep compilation and first materialization outside the observation
+    # window. The adapter reports runtime synchronization, not JIT setup.
+    increment()
+    ti.sync()
+    value[None] = 0
+    ti.sync()
+
+    prog = ti.lang.impl.get_runtime().prog
+    before = prog._runtime_statistics_snapshot()["synchronization"]
+    arch = ti.lang.impl.current_cfg().arch
+    optional_keys = (
+        "backend_waits",
+        "backend_wait_ns",
+        "backend_lock_samples",
+        "backend_lock_contentions",
+        "backend_lock_sampled_wait_ns",
+    )
+    if arch == ti.cpu:
+        assert all(before[key] is None for key in optional_keys)
+        return
+
+    assert all(isinstance(before[key], int) for key in optional_keys)
+    legacy_before = None
+    if arch == ti.cuda:
+        legacy_before = {
+            key: int(_ti_core.query_int64(key))
+            for key in (
+                "cuda_driver_lock_sampled_acquisitions",
+                "cuda_driver_lock_contended_acquisitions",
+                "cuda_context_lock_sampled_acquisitions",
+                "cuda_context_lock_contended_acquisitions",
+            )
+        }
+
+    # More than one sampling period guarantees at least one observed backend
+    # lock without changing the 1/64 steady-state policy. Vulkan batches
+    # ordinary kernels into one command list, so explicitly flush there to
+    # exercise real queue acquisitions rather than counting kernel calls.
+    iterations = 72
+    for _ in range(iterations):
+        increment()
+        if arch == ti.vulkan:
+            ti.sync()
+    ti.sync()
+
+    legacy_after = None
+    if arch == ti.cuda:
+        legacy_after = {
+            key: int(_ti_core.query_int64(key)) for key in legacy_before
+        }
+    after = prog._runtime_statistics_snapshot()["synchronization"]
+    assert after["backend_waits"] >= before["backend_waits"] + 1
+    assert after["backend_wait_ns"] >= before["backend_wait_ns"]
+    assert after["backend_lock_samples"] > before["backend_lock_samples"]
+    assert (
+        after["backend_lock_contentions"]
+        >= before["backend_lock_contentions"]
+    )
+    assert (
+        after["backend_lock_contentions"]
+        <= after["backend_lock_samples"]
+    )
+    assert (
+        after["backend_lock_sampled_wait_ns"]
+        >= before["backend_lock_sampled_wait_ns"]
+    )
+    assert value[None] == iterations
+
+    if arch == ti.cuda:
+        legacy_sample_delta = (
+            legacy_after["cuda_driver_lock_sampled_acquisitions"]
+            - legacy_before["cuda_driver_lock_sampled_acquisitions"]
+            + legacy_after["cuda_context_lock_sampled_acquisitions"]
+            - legacy_before["cuda_context_lock_sampled_acquisitions"]
+        )
+        legacy_contention_delta = (
+            legacy_after["cuda_driver_lock_contended_acquisitions"]
+            - legacy_before["cuda_driver_lock_contended_acquisitions"]
+            + legacy_after["cuda_context_lock_contended_acquisitions"]
+            - legacy_before["cuda_context_lock_contended_acquisitions"]
+        )
+        # Unified CUDA telemetry additionally includes the submission mutex.
+        assert (
+            after["backend_lock_samples"] - before["backend_lock_samples"]
+            >= legacy_sample_delta
+        )
+        assert (
+            after["backend_lock_contentions"]
+            - before["backend_lock_contentions"]
+            >= legacy_contention_delta
+        )
+
+
 @test_utils.test(
     arch=[ti.cpu, ti.cuda, ti.vulkan],
     offline_cache=False,

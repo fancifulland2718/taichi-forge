@@ -35,9 +35,9 @@ struct RuntimeSynchronizationStatistics {
   std::uint64_t completion_wait_ns{0};
   RuntimeOptionalCounter backend_waits;
   RuntimeOptionalCounter backend_wait_ns;
-  RuntimeOptionalCounter queue_lock_samples;
-  RuntimeOptionalCounter queue_lock_contentions;
-  RuntimeOptionalCounter queue_lock_wait_ns;
+  RuntimeOptionalCounter backend_lock_samples;
+  RuntimeOptionalCounter backend_lock_contentions;
+  RuntimeOptionalCounter backend_lock_sampled_wait_ns;
 };
 
 struct RuntimeMemoryStatistics {

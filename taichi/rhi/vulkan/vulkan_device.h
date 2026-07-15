@@ -1,6 +1,7 @@
 #pragma once
 
 #include "taichi/rhi/device.h"
+#include "taichi/rhi/common/runtime_telemetry.h"
 #include "taichi/rhi/vulkan/vulkan_api.h"
 #include "taichi/rhi/vulkan/vulkan_utils.h"
 #include "taichi/common/ref_counted_pool.h"
@@ -644,10 +645,12 @@ class VulkanStreamSemaphoreObject : public StreamSemaphoreObject {
   explicit VulkanStreamSemaphoreObject(
       std::shared_ptr<BackendFaultReporter> fault_reporter,
       vkapi::IVkSemaphore sema,
-      vkapi::IVkFence fence = nullptr)
+      vkapi::IVkFence fence = nullptr,
+      BackendWaitTelemetry *wait_telemetry = nullptr)
       : fault_reporter_(std::move(fault_reporter)),
         vkapi_ref(sema),
-        fence_ref(fence) {
+        fence_ref(fence),
+        wait_telemetry_(wait_telemetry) {
   }
   ~VulkanStreamSemaphoreObject() override {
   }
@@ -660,6 +663,14 @@ class VulkanStreamSemaphoreObject : public StreamSemaphoreObject {
 
  private:
   std::shared_ptr<BackendFaultReporter> fault_reporter_;
+  BackendWaitTelemetry *wait_telemetry_{nullptr};
+};
+
+using VulkanQueueLockTelemetry = SampledLockTelemetry<std::mutex>;
+
+struct VulkanRuntimeTelemetrySnapshot {
+  BackendWaitTelemetry::Snapshot wait;
+  VulkanQueueLockTelemetry::Snapshot queue_lock;
 };
 
 class VulkanStream : public Stream {
@@ -784,6 +795,12 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   Stream *get_graphics_stream() override;
 
   void wait_idle() override;
+
+  VulkanRuntimeTelemetrySnapshot runtime_telemetry_snapshot() const noexcept;
+
+  BackendWaitTelemetry *backend_wait_telemetry() noexcept {
+    return &backend_wait_telemetry_;
+  }
 
   std::unique_ptr<Pipeline> create_raster_pipeline(
       const std::vector<PipelineSourceDesc> &src,
@@ -983,7 +1000,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   friend class VulkanStream;
   friend VulkanSurface;
 
-  std::mutex &get_queue_mutex(VkQueue queue);
+  std::unique_lock<std::mutex> acquire_queue_lock(VkQueue queue);
   void create_vma_allocator();
   [[nodiscard]] RhiResult new_descriptor_pool_locked();
   void update_descriptor_sets_locked(
@@ -1002,10 +1019,13 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   VkQueue compute_queue_{VK_NULL_HANDLE};
   uint32_t compute_queue_family_index_{0};
   std::mutex compute_queue_mutex_;
+  VulkanQueueLockTelemetry compute_queue_lock_telemetry_;
 
   VkQueue graphics_queue_{VK_NULL_HANDLE};
   uint32_t graphics_queue_family_index_{0};
   std::mutex graphics_queue_mutex_;
+  VulkanQueueLockTelemetry graphics_queue_lock_telemetry_;
+  BackendWaitTelemetry backend_wait_telemetry_;
 
   struct ThreadLocalStreams;
   std::unique_ptr<ThreadLocalStreams> compute_streams_{nullptr};

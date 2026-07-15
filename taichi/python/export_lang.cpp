@@ -707,12 +707,12 @@ void export_lang(py::module &m) {
             optional_counter(snapshot.synchronization.backend_waits);
         synchronization["backend_wait_ns"] =
             optional_counter(snapshot.synchronization.backend_wait_ns);
-        synchronization["queue_lock_samples"] =
-            optional_counter(snapshot.synchronization.queue_lock_samples);
-        synchronization["queue_lock_contentions"] =
-            optional_counter(snapshot.synchronization.queue_lock_contentions);
-        synchronization["queue_lock_wait_ns"] =
-            optional_counter(snapshot.synchronization.queue_lock_wait_ns);
+        synchronization["backend_lock_samples"] =
+            optional_counter(snapshot.synchronization.backend_lock_samples);
+        synchronization["backend_lock_contentions"] = optional_counter(
+            snapshot.synchronization.backend_lock_contentions);
+        synchronization["backend_lock_sampled_wait_ns"] = optional_counter(
+            snapshot.synchronization.backend_lock_sampled_wait_ns);
 
         py::dict memory;
         memory["live_resources"] = snapshot.memory.live_resources;
