@@ -164,6 +164,36 @@ evidence. Their Linux release evidence remains pending:
   numerical results. Treat sub-noise changes as observational and do not claim
   a speedup from diagnostics.
 
+### Native primitive capability and AD contract
+
+F6.1 has Windows CPU/CUDA/Vulkan provider-resolution and numerical AD evidence.
+Linux release evidence remains pending; the static catalog itself contains no
+Win32/NT-handle path.
+
+- Build/install the paired Linux runtime and shim wheels, then run
+  `tests/python/test_primitive_capabilities.py`,
+  `tests/python/test_native_primitive_autodiff.py`, and
+  `tests/python/test_primitive_plan.py` on CPU, CUDA, and Vulkan.
+- Before `ti.init()`, verify all 13 static family descriptors, frozen schema-v1
+  dataclasses, aliases, role-specific operand contracts, and exact method-set
+  parity. After each backend init, compare every
+  `ResolvedPrimitiveMethod.provider_probes` result with the installed
+  Program. A missing optional provider must be false and must not be converted
+  into a version-string guess.
+- Require exact integer results and the documented floating tolerances. Run the
+  transform/reduce-sum/gather/scatter/scatter-add FwdMode JVP oracle on all
+  three backends; run the existing conditional native Tape backward matrix.
+  Scan/grouped-reduce FwdMode, explicit native methods without forward support,
+  and discrete automatic-AD calls must reject before output changes.
+- Re-run Graph native-node replay and AOT rejection tests so catalog fields do
+  not overstate serialization. Provider resolution is opt-in and must not add
+  probes, allocations, synchronization, or driver calls to ordinary primitive
+  hot replay.
+- Re-run the established primitive baseline rather than creating a new
+  micro-optimization campaign. Record steady median/p95 and workspace peak;
+  investigate only a repeatable regression above 2%. F6.1 makes no speedup
+  claim.
+
 ### Dense Field Graph matrix
 
 This subsection is entirely pending Linux revalidation; Windows results do not

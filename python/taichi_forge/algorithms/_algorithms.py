@@ -5,9 +5,23 @@ import numpy as np
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.algorithms._autodiff import (
+    is_fwd_mode_active,
     is_tape_active,
     native_autodiff_method,
     native_primitive_ad,
+    reject_unsupported_automatic_ad,
+)
+from taichi_forge.algorithms._primitive_capabilities import (
+    PRIMITIVE_CAPABILITY_SCHEMA_VERSION,
+    PrimitiveADCapability,
+    PrimitiveCapability,
+    PrimitiveMethodCapability,
+    PrimitiveOperandCapability,
+    ResolvedPrimitiveCapability,
+    ResolvedPrimitiveMethod,
+    primitive_capabilities,
+    primitive_capability,
+    supported_primitive_methods,
 )
 from taichi_forge._kernels import (
     blit_from_field_to_field,
@@ -89,6 +103,7 @@ from taichi_forge.lang._ndarray import (
     StructNdarrayTensorMemberView,
 )
 from taichi_forge.lang.field import _dense_native_field_layout_supported
+from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.kernel_impl import data_oriented
 from taichi_forge.lang.matrix import Matrix, MatrixField
 from taichi_forge.lang.misc import arm64, cuda, vulkan, x64
@@ -98,35 +113,20 @@ from taichi_forge.graph._native import NativeGraphExecutable, NativeGraphNode
 from taichi_forge.types.primitive_types import f32, f64, i32, i64, u32, u64
 
 _CUDA_CUB_SORT_METHODS = {"cuda_cub_native", "cuda_cub_split32", "cuda_cub_u32"}
-_SUPPORTED_SORT_METHODS = {
-    "auto",
-    "cpu_native",
-    "host_stable",
-    "legacy",
-    "radix_u32",
-    "vulkan_graph_radix_u32",
-    "vulkan_native_radix_u32",
-    "vulkan_radix_u32",
-    *_CUDA_CUB_SORT_METHODS,
-}
+_SUPPORTED_SORT_METHODS = supported_primitive_methods("sort")
 _SUPPORTED_SORT_PRECISIONS = {"exact"}
 _SUPPORTED_NAN_POLICIES = {"last", "bitwise"}
 _SORT_KEY_DTYPES = (u32, i32, f32, u64, i64, f64)
 _SORT_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _SORT_KEY_TYPE = {u32: 0, i32: 1, f32: 2, u64: 3, i64: 4, f64: 5}
 _SORT_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
-_SUPPORTED_REDUCE_METHODS = {
-    "auto",
-    "cuda_cub",
-    "vulkan_native",
-    "cpu_native",
-    "field_atomic",
-}
+_SUPPORTED_COMPACT_METHODS = supported_primitive_methods("compact")
+_SUPPORTED_REDUCE_METHODS = supported_primitive_methods("reduce")
 _SUPPORTED_REDUCE_OPS = {"sum": 0, "min": 1, "max": 2}
 _REDUCE_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _REDUCE_FIELD_DTYPES = (i32, f32)
 _REDUCE_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
-_SUPPORTED_CHECK_METHODS = {"auto", "cuda_cub", "vulkan_native", "cpu_native"}
+_SUPPORTED_CHECK_METHODS = supported_primitive_methods("check")
 _CHECK_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _CHECK_INTEGER_DTYPES = (u32, i32, u64, i64)
 _CHECK_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
@@ -138,77 +138,27 @@ _CHECK_OPS = {
     "not_finite": 4,
     "index_oob": 5,
 }
-_SUPPORTED_METRIC_METHODS = {"auto", "cuda_cub", "vulkan_native", "cpu_native"}
+_SUPPORTED_METRIC_METHODS = supported_primitive_methods("metric")
 _METRIC_VALUE_DTYPES = (f32, f64)
 _METRIC_VALUE_TYPE = {f32: 1, f64: 5}
 _METRIC_OPS = {
     "max_abs": 0,
     "max_abs_delta": 1,
 }
-_SUPPORTED_TRANSFORM_METHODS = {
-    "auto",
-    "cuda_device",
-    "vulkan_native",
-    "cpu_native",
-    "kernel",
-    "field_kernel",
-}
-_SUPPORTED_INDEXED_COPY_METHODS = {
-    "auto",
-    "cuda_device",
-    "vulkan_native",
-    "cpu_native",
-    "kernel",
-    "field_kernel",
-}
+_SUPPORTED_TRANSFORM_METHODS = supported_primitive_methods("transform")
+_SUPPORTED_INDEXED_COPY_METHODS = supported_primitive_methods("gather")
 _INDEXED_COPY_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _INDEXED_COPY_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _INDEXED_COPY_KERNEL_DTYPES = (i32, f32)
-_SUPPORTED_SCATTER_ADD_METHODS = {
-    "auto",
-    "cuda_device",
-    "cuda_two_level",
-    "vulkan_native",
-    "vulkan_two_level",
-    "two_level",
-    "cpu_native",
-    "cpu_two_level",
-    "kernel",
-    "field_kernel",
-}
+_SUPPORTED_SCATTER_ADD_METHODS = supported_primitive_methods("scatter_add")
 _SCATTER_ADD_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _SCATTER_ADD_FIELD_DTYPES = (i32, f32)
 _SCATTER_ADD_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
-_SUPPORTED_BUCKET_BUILDER_METHODS = {
-    "auto",
-    "cuda_device",
-    "cuda_two_level",
-    "vulkan_native",
-    "vulkan_two_level",
-    "two_level",
-    "cpu_native",
-    "cpu_two_level",
-    "kernel",
-    "field_kernel",
-}
+_SUPPORTED_BUCKET_BUILDER_METHODS = supported_primitive_methods("bucket_builder")
 _BUCKET_BUILDER_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _BUCKET_BUILDER_FIELD_DTYPES = (i32,)
 _BUCKET_BUILDER_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
-_SUPPORTED_GROUPED_REDUCE_METHODS = {
-    "auto",
-    "cuda_device",
-    "cuda_segmented",
-    "cuda_two_level",
-    "vulkan_native",
-    "vulkan_segmented",
-    "vulkan_two_level",
-    "segmented",
-    "two_level",
-    "cpu_native",
-    "cpu_two_level",
-    "kernel",
-    "field_kernel",
-}
+_SUPPORTED_GROUPED_REDUCE_METHODS = supported_primitive_methods("grouped_reduce")
 _SUPPORTED_GROUPED_REDUCE_OPS = {"sum": 0}
 _GROUPED_REDUCE_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _GROUPED_REDUCE_FIELD_DTYPES = (i32,)
@@ -219,6 +169,7 @@ _HISTOGRAM_VALUE_DTYPES = (i32, u32)
 _HISTOGRAM_VALUE_TYPE = {i32: 0, u32: 2}
 _HISTOGRAM_BIN_DTYPES = (i32, i64)
 _HISTOGRAM_BIN_TYPE = {i32: 0, i64: 4}
+_SUPPORTED_HISTOGRAM_METHODS = supported_primitive_methods("histogram")
 _REDUCE_FIELD_PRIVATE_MIN_N = 65536
 _REDUCE_FIELD_PRIVATE_CHUNK_SIZE = 2048
 _HISTOGRAM_FIELD_PRIVATE_MIN_N = 65536
@@ -712,6 +663,80 @@ def initialize_native_primitive_dispatch(prog=None):
         cache.available(prog, name)
     for name, args in _NATIVE_PRIMITIVE_VALUE_AVAILABLE_BY_ARCH.get(arch, ()):
         cache.value_available(prog, name, *args, default_if_missing=False)
+
+
+def _primitive_backend_name(arch):
+    if arch == cuda:
+        return "cuda"
+    if arch == vulkan:
+        return "vulkan"
+    if arch in (x64, arm64):
+        return "cpu"
+    return str(arch)
+
+
+def resolve_primitive_capability(name):
+    """Resolve Program-level providers for one static primitive contract.
+
+    The result intentionally stops before request validation. A true
+    program_available value means that the active Program exposes the provider,
+    not that every dtype, rank, layout, or storage combination is accepted.
+    Public primitive calls remain the source of truth for a concrete request.
+    """
+
+    capability = primitive_capability(name)
+    prog = _current_program()
+    if prog is None:
+        raise TaichiRuntimeError(
+            "resolve_primitive_capability() requires ti.init(); use "
+            "primitive_capability() for the backend-independent contract"
+        )
+    backend = _primitive_backend_name(current_cfg().arch)
+    resolved = []
+    auto_index = None
+    for method in capability.methods:
+        if backend not in method.backends:
+            continue
+        if method.name == "auto":
+            auto_index = len(resolved)
+            program_available = False
+        elif method.provider_probes:
+            program_available = all(
+                _prog_available(prog, probe) for probe in method.provider_probes
+            )
+        else:
+            program_available = True
+        resolved.append(
+            ResolvedPrimitiveMethod(
+                method=method.name,
+                backend=backend,
+                program_available=program_available,
+                provider_probes=method.provider_probes,
+                implementation=method.implementation,
+                input_dependent=method.input_dependent,
+            )
+        )
+    if auto_index is not None:
+        auto_available = any(
+            method.program_available
+            for index, method in enumerate(resolved)
+            if index != auto_index
+        )
+        auto_method = resolved[auto_index]
+        resolved[auto_index] = ResolvedPrimitiveMethod(
+            method=auto_method.method,
+            backend=auto_method.backend,
+            program_available=auto_available,
+            provider_probes=auto_method.provider_probes,
+            implementation=auto_method.implementation,
+            input_dependent=auto_method.input_dependent,
+        )
+    return ResolvedPrimitiveCapability(
+        schema_version=capability.schema_version,
+        backend=backend,
+        contract=capability,
+        methods=tuple(resolved),
+    )
 
 
 class _PrimitiveView:
@@ -4721,6 +4746,7 @@ def _native_check_count(
     method="auto",
     workspace=None,
 ):
+    reject_unsupported_automatic_ad("check")
     values_view = _check_numeric_view(
         "index_bounds_check" if check_op == "index_oob" else check_op,
         values,
@@ -4832,6 +4858,7 @@ def _native_metric_reduce(
     method="auto",
     workspace=None,
 ):
+    reject_unsupported_automatic_ad("metric")
     values_view = _metric_numeric_view(metric_op, values)
     if other is not None:
         other_view = _metric_numeric_view(metric_op, other)
@@ -7905,6 +7932,7 @@ def sort(
     odd-even merge implementation.
     """
 
+    reject_unsupported_automatic_ad("sort")
     _check_sort_request(
         keys, values, stable, descending, method, precision, workspace, nan_policy
     )
@@ -8001,6 +8029,7 @@ def sort_by_key(
     back to the host stable path for compatibility.
     """
 
+    reject_unsupported_automatic_ad("sort")
     if order != "lexicographic":
         raise ValueError("sort_by_key() currently only supports order='lexicographic'.")
     if isinstance(key_parts, (list, tuple)):
@@ -8046,13 +8075,6 @@ def sort_by_key(
     )
 
 
-_SUPPORTED_COMPACT_METHODS = {
-    "auto",
-    "cpu_native",
-    "cuda_cub",
-    "field_scan",
-    "vulkan_native",
-}
 _COMPACT_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
 _COMPACT_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 
@@ -8471,6 +8493,7 @@ def experimental_compact(
     payloads. Flags/count are i32.
     """
 
+    reject_unsupported_automatic_ad("compact")
     if _is_struct_tensor_member_view(values) or _is_struct_tensor_member_view(output):
         _check_matching_struct_tensor_member_views("experimental_compact()", values, output)
         if not (isinstance(flags, Ndarray) and isinstance(count, Ndarray)):
@@ -9379,21 +9402,6 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
     _reduce_field_atomic(values, output, op, workspace)
 
 
-_SUPPORTED_HISTOGRAM_METHODS = {
-    "auto",
-    "cuda_cub",
-    "cuda_two_level",
-    "vulkan_native",
-    "vulkan_two_level",
-    "two_level",
-    "cpu_native",
-    "cpu_two_level",
-    "field_atomic",
-    "field_direct",
-    "field_private",
-}
-
-
 def _check_histogram_request(values, bins, method, workspace):
     if method not in _SUPPORTED_HISTOGRAM_METHODS:
         raise NotImplementedError(f"histogram method '{method}' is not implemented.")
@@ -9846,6 +9854,7 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
     values and bins.
     """
 
+    reject_unsupported_automatic_ad("histogram")
     if workspace is not None and isinstance(workspace, HistogramWorkspace):
         if workspace._try_hot_staged_histogram_plan_group(values, bins, method):
             return
@@ -13178,6 +13187,7 @@ def experimental_bucket_builder(
     values as opaque raw payloads.
     """
 
+    reject_unsupported_automatic_ad("bucket_builder")
     if _is_struct_tensor_member_view(values) or _is_struct_tensor_member_view(output):
         _check_matching_struct_tensor_member_views(
             "experimental_bucket_builder()", values, output
@@ -14818,6 +14828,11 @@ class PrefixSumExecutor:
             uniform_kernel(large_arr, ele_nums_pos[i], ele_nums_pos[i + 1])
 
     def run(self, input_arr):
+        if is_fwd_mode_active():
+            raise RuntimeError(
+                "PrefixSumExecutor.run() does not support ti.ad.FwdMode(); "
+                "run scan outside forward automatic differentiation"
+            )
         length = self.sorting_length
         record_scan_ad = _ensure_native_scan_ad_supported(input_arr)
 
@@ -14943,6 +14958,16 @@ class PrefixSumExecutor:
 
 
 __all__ = [
+    "PRIMITIVE_CAPABILITY_SCHEMA_VERSION",
+    "PrimitiveMethodCapability",
+    "PrimitiveADCapability",
+    "PrimitiveOperandCapability",
+    "PrimitiveCapability",
+    "ResolvedPrimitiveMethod",
+    "ResolvedPrimitiveCapability",
+    "primitive_capability",
+    "primitive_capabilities",
+    "resolve_primitive_capability",
     "parallel_sort",
     "sort",
     "sort_by_key",

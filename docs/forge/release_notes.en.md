@@ -240,6 +240,13 @@ profiling, and GGUI device-image staging were already public by `0.4.25`.
   definition-time `template_args`, generation-qualified SNodeTree
   dependencies, zero-argument CUDA capture, explicit AD guards, and the
   block-level heterogeneous-environment model.
+- Added immutable schema-v1 native-primitive capability descriptors and active
+  Program provider resolution. Operand dtype/rank/layout/storage, backend
+  methods, determinism/atomic ordering, AD, Graph/AOT, workspace, and fallback
+  contracts now share the method/AD registry used by dispatch. FwdMode uses
+  verified kernel fallbacks for transform, reduce-sum, gather, scatter, and
+  scatter-add on CPU/CUDA/Vulkan; unsupported native, scan/grouped-reduce, and
+  discrete automatic-AD paths reject before writing.
 - Added production-shaped CPU/CUDA/Vulkan concurrency, numerical, lifetime,
   memory, and replay regression/benchmark coverage. Remaining Linux release
   evidence is tracked in [Linux revalidation](linux_revalidation.en.md).
@@ -248,5 +255,6 @@ Detailed current contracts live in:
 
 - [Graph runtime and optimization](graph_runtime_optimization.en.md)
 - [Dense Field Graph](dense_field_graph.en.md)
+- [Native algorithms](native_algorithms.en.md)
 - [Compilation trade-offs](compilation_tradeoffs.en.md)
 - [Building wheels](build_wheels.en.md)

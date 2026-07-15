@@ -1,19 +1,11 @@
 from dataclasses import dataclass
 from contextlib import contextmanager
-from typing import Callable, Dict, FrozenSet, Optional, Tuple
+from typing import Callable, Dict, Tuple
 
+from taichi_forge.algorithms._primitive_capabilities import (
+    primitive_ad_capability,
+)
 from taichi_forge.lang import impl
-
-
-@dataclass(frozen=True)
-class NativePrimitiveADPolicy:
-    op_name: str
-    native_methods: FrozenSet[str]
-    fallback_method: str
-    differentiable_ops: Optional[FrozenSet[str]] = None
-
-    def supports_op(self, op):
-        return self.differentiable_ops is None or op in self.differentiable_ops
 
 
 @dataclass(frozen=True)
@@ -75,69 +67,6 @@ class NativePrimitiveADBridge:
         return True
 
 
-_POLICIES = {
-    "transform": NativePrimitiveADPolicy(
-        "experimental_transform()",
-        frozenset(("cuda_device", "vulkan_native", "cpu_native")),
-        "kernel",
-    ),
-    "gather": NativePrimitiveADPolicy(
-        "experimental_gather()",
-        frozenset(("cuda_device", "vulkan_native", "cpu_native")),
-        "kernel",
-    ),
-    "scatter": NativePrimitiveADPolicy(
-        "experimental_scatter()",
-        frozenset(("cuda_device", "vulkan_native", "cpu_native")),
-        "kernel",
-    ),
-    "scan": NativePrimitiveADPolicy(
-        "PrefixSumExecutor.run()",
-        frozenset(("cuda_cub", "vulkan_native", "cpu_native")),
-        "kernel",
-    ),
-    "reduce": NativePrimitiveADPolicy(
-        "experimental_reduce()",
-        frozenset(("cuda_cub", "vulkan_native", "cpu_native")),
-        "field_atomic",
-        differentiable_ops=frozenset(("sum",)),
-    ),
-    "scatter_add": NativePrimitiveADPolicy(
-        "experimental_scatter_add()",
-        frozenset(
-            (
-                "cuda_device",
-                "cuda_two_level",
-                "vulkan_native",
-                "vulkan_two_level",
-                "two_level",
-                "cpu_native",
-                "cpu_two_level",
-            )
-        ),
-        "kernel",
-    ),
-    "grouped_reduce": NativePrimitiveADPolicy(
-        "experimental_grouped_reduce()",
-        frozenset(
-            (
-                "cuda_device",
-                "cuda_segmented",
-                "cuda_two_level",
-                "vulkan_native",
-                "vulkan_segmented",
-                "vulkan_two_level",
-                "segmented",
-                "two_level",
-                "cpu_native",
-                "cpu_two_level",
-            )
-        ),
-        "kernel",
-        differentiable_ops=frozenset(("sum",)),
-    ),
-}
-
 native_primitive_ad = NativePrimitiveADBridge()
 _native_backward_depth = 0
 
@@ -161,38 +90,78 @@ def is_tape_active():
     return _native_backward_depth == 0 and active_tape() is not None
 
 
+def is_fwd_mode_active():
+    runtime = impl.get_runtime()
+    return (
+        _native_backward_depth == 0
+        and getattr(runtime, "fwd_mode_manager", None) is not None
+    )
+
+
 def native_autodiff_method(
     kind, method, *, op=None, native_supported=False, tape_active=None
 ):
     """Return the method that preserves AD semantics for a primitive call.
 
-    Outside Tape this is intentionally a no-op. Inside Tape, ``auto`` is routed
-    to the primitive's kernel fallback until a registered native backward exists;
-    explicit native methods fail loudly instead of silently dropping gradients.
+    Outside automatic AD this is intentionally a no-op. Under Tape, auto uses
+    a native method only when the concrete request has a matching backward.
+    Under FwdMode, auto uses the declared kernel fallback because native
+    forward launchers are not yet available. Unsupported explicit methods fail
+    before writing instead of silently dropping gradients.
     """
 
     if tape_active is None:
         tape_active = is_tape_active()
-    if not tape_active:
+    fwd_active = is_fwd_mode_active()
+    if not tape_active and not fwd_active:
         return method
-    policy = _POLICIES.get(kind)
-    if policy is None:
-        return method
+    policy = primitive_ad_capability(kind)
+    entry_point = policy_entry_point(kind)
+    if fwd_active and policy.forward_ad == "unsupported":
+        raise RuntimeError(
+            f"{entry_point} does not support ti.ad.FwdMode(); run this "
+            "primitive outside forward automatic differentiation"
+        )
     if not policy.supports_op(op):
         if method == "auto" or method in policy.native_methods:
+            ad_context = "ti.ad.FwdMode()" if fwd_active else "ti.ad.Tape()"
             raise RuntimeError(
-                f"{policy.op_name} op='{op}' has no native autodiff policy. "
-                "Use a differentiable op or run this primitive outside ti.ad.Tape()."
+                f"{entry_point} op='{op}' has no native autodiff policy. "
+                "Use a differentiable op or run this primitive outside "
+                f"{ad_context}."
             )
         return method
-    if native_supported:
+    if tape_active and native_supported:
         return method
     if method == "auto":
         return policy.fallback_method
     if method in policy.native_methods:
+        ad_context = "ti.ad.FwdMode()" if fwd_active else "ti.ad.Tape()"
         raise RuntimeError(
-            f"{policy.op_name} method='{method}' is disabled inside ti.ad.Tape() "
-            "until a native backward launcher is registered. Use method='auto' "
+            f"{entry_point} method='{method}' is disabled inside {ad_context} "
+            "until the matching native AD launcher is registered. Use method='auto' "
             f"or method='{policy.fallback_method}' to keep Taichi-kernel AD."
         )
     return method
+
+
+def policy_entry_point(kind):
+    from taichi_forge.algorithms._primitive_capabilities import primitive_capability
+
+    return primitive_capability(kind).entry_points[0] + "()"
+
+
+def reject_unsupported_automatic_ad(kind):
+    """Reject a discrete/non-differentiable primitive before it writes output."""
+
+    if is_tape_active():
+        ad_context = "ti.ad.Tape()"
+    elif is_fwd_mode_active():
+        ad_context = "ti.ad.FwdMode()"
+    else:
+        return
+    entry_point = policy_entry_point(kind)
+    raise RuntimeError(
+        f"{entry_point} is not differentiable and cannot run inside "
+        f"{ad_context}; run it before entering automatic AD"
+    )

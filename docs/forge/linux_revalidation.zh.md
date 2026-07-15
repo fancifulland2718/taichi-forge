@@ -129,6 +129,29 @@ F4 runtime statistics/trace 已取得 Windows CPU/CUDA/Vulkan 功能证据，但
   Vulkan 样本、trace allocation bytes、recorded/dropped event 与精确数值结果。
   低于噪声范围的变化只能作为观察值，不得声称诊断功能带来加速。
 
+### Native primitive capability 与 AD 合同
+
+F6.1 已取得 Windows CPU/CUDA/Vulkan 的 provider 解析和数值 AD 证据；Linux release
+证据仍待复测。静态 catalog 本身不含 Win32/NT-handle 路径。
+
+- 构建并安装配对的 Linux runtime/shim wheel，随后在 CPU、CUDA、Vulkan 上运行
+  `tests/python/test_primitive_capabilities.py`、
+  `tests/python/test_native_primitive_autodiff.py` 与
+  `tests/python/test_primitive_plan.py`；
+- 在 `ti.init()` 前校验 13 个静态 family descriptor、frozen schema-v1 dataclass、
+  alias、逐 operand 合同与 method set 精确一致；每个后端 init 后，把所有
+  `ResolvedPrimitiveMethod.provider_probes` 与已安装 Program 逐项比较。缺失的可选
+  provider 必须为 false，不能用版本字符串猜测能力；
+- integer 结果必须 exact，浮点使用公开 tolerance。在三个后端运行
+  transform/reduce-sum/gather/scatter/scatter-add 的 FwdMode JVP oracle，并运行既有
+  conditional native Tape backward 矩阵。scan/grouped-reduce FwdMode、缺少 forward
+  支持的显式 native method、离散 automatic-AD 调用都必须在输出变化前拒绝；
+- 重跑 Graph native-node replay 与 AOT rejection，确保 catalog 不夸大 serialization。
+  provider 解析是 opt-in，不得给普通 primitive 热 replay 增加 probe、allocation、
+  synchronization 或 driver call；
+- 复用既有 primitive baseline，不另开微小优化实验。记录 steady median/p95 与
+  workspace peak；只有可重复超过 2% 的回退才进入诊断。F6.1 不声称带来加速。
+
 ### Dense Field Graph 矩阵
 
 本小节全部仍待 Linux 复测；Windows 结果不能满足这些门禁。

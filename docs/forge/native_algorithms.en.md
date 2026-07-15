@@ -54,6 +54,60 @@ Common explicit method families include:
 Explicit native methods are useful for testing or controlled deployments. They
 should not be used as portability promises across all backends.
 
+## Machine-readable capability contract
+
+Forge 0.5.0 exposes immutable schema-v1 descriptors for every current primitive
+family:
+
+```python
+contract = ti.algorithms.primitive_capability("experimental_reduce")
+for operand in contract.operands:
+    print(operand.name, operand.dtypes, operand.ranks, operand.layouts)
+
+ti.init(arch=ti.vulkan)
+active = ti.algorithms.resolve_primitive_capability("reduce")
+for method in active.methods:
+    print(method.method, method.program_available)
+```
+
+`primitive_capability(name)` and `primitive_capabilities()` are static and may
+be called before `ti.init()`. They report role-specific operand dtype, rank,
+layout, and storage constraints; backend methods; stability, determinism, and
+atomic-order behavior; primal/forward/reverse/explicit-adjoint support; Graph,
+AOT, workspace, and fallback contracts. Entry-point names such as
+`experimental_reduce` are accepted as aliases for their family.
+
+`resolve_primitive_capability(name)` requires an active Program. It filters
+methods to the current CPU/CUDA/Vulkan backend and evaluates the same
+side-effect-free provider probes used by dispatch. A true
+`program_available` value means that the Program contains the provider. It is
+not a promise that an arbitrary dtype/layout request is valid; method entries
+remain `input_dependent=True`, and the public operation performs the final
+request validation before writing.
+
+The catalog is also the source of truth for public `method=` validation and
+native AD policy. This prevents a documented method or adjoint capability from
+drifting away from dispatch behavior.
+
+### Automatic differentiation
+
+- Under `ti.ad.Tape()`, `method="auto"` selects a native primal only when the
+  concrete input also has a complete registered backward. Otherwise it uses
+  the declared kernel fallback; an unsupported explicit native method rejects
+  before writing.
+- Under `ti.ad.FwdMode()`, transform, reduce-sum, gather, scatter, and
+  scatter-add use their differentiable helper-kernel fallback. Their JVPs are
+  regression-tested on CPU, CUDA, and Vulkan. Explicit native methods reject
+  because native forward launchers are not implemented.
+- Scan and grouped-reduce currently reject `FwdMode` before writing. Their
+  available fallbacks do not provide a portable real-valued forward contract.
+- Sort, compact, histogram, bucket-builder, device checks, and device metrics
+  are declared non-differentiable and reject automatic AD contexts before
+  writing. Run such preprocessing or diagnostics outside Tape/FwdMode.
+
+These rules describe automatic AD only. Native Graph nodes remain primal-only,
+and native-node AOT serialization remains unsupported.
+
 ### CUDA runtime portability
 
 CUDA native/CUB providers ship in the platform `taichi-forge-runtime` wheel.

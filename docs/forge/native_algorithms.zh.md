@@ -48,6 +48,53 @@
 
 显式 native method 适合测试或受控部署，不应被当成跨所有后端的可移植承诺。
 
+## 机器可读 capability 合同
+
+Forge 0.5.0 为当前每个 primitive family 公开不可变的 schema-v1 描述：
+
+```python
+contract = ti.algorithms.primitive_capability("experimental_reduce")
+for operand in contract.operands:
+    print(operand.name, operand.dtypes, operand.ranks, operand.layouts)
+
+ti.init(arch=ti.vulkan)
+active = ti.algorithms.resolve_primitive_capability("reduce")
+for method in active.methods:
+    print(method.method, method.program_available)
+```
+
+`primitive_capability(name)` 与 `primitive_capabilities()` 是静态查询，可在
+`ti.init()` 前调用。它们按 operand role 报告 dtype、rank、layout、storage，
+并描述 backend method、稳定性、确定性、atomic 顺序依赖、primal/forward/reverse/
+explicit-adjoint、Graph、AOT、workspace 与 fallback 合同。也可以用
+`experimental_reduce` 等公开入口名作为 family alias。
+
+`resolve_primitive_capability(name)` 要求已有 active Program。它将 method 过滤到
+当前 CPU/CUDA/Vulkan 后端，并执行调度层使用的同一组无副作用 provider probe。
+`program_available=True` 只表示当前 Program 含有该 provider，不表示任意 dtype/
+layout 请求一定有效；method 仍标记 `input_dependent=True`，具体公开操作会在写入前
+完成最终请求校验。
+
+catalog 同时是公开 `method=` 校验与 native AD policy 的单一来源，避免文档中的
+method/adjoint 能力与真实调度逐渐漂移。
+
+### 自动微分
+
+- 在 `ti.ad.Tape()` 中，只有具体输入同时具备完整注册 backward 时，
+  `method="auto"` 才选择 native primal；否则走声明的 kernel fallback。没有
+  backward 的显式 native method 会在写入前拒绝。
+- 在 `ti.ad.FwdMode()` 中，transform、reduce-sum、gather、scatter 和 scatter-add
+  走可微 helper-kernel fallback；其 JVP 已在 CPU、CUDA、Vulkan 上做回归。
+  由于还没有 native forward launcher，显式 native method 会拒绝。
+- scan 与 grouped-reduce 当前会在写入前拒绝 `FwdMode`；它们的现有 fallback
+  不能提供可移植的实数 forward 合同。
+- sort、compact、histogram、bucket-builder、device check 与 device metric 被明确
+  标为不可微，在写入前拒绝 automatic AD context。应在 Tape/FwdMode 外完成这类
+  预处理或诊断。
+
+这些规则只说明 automatic AD。native Graph node 仍是 primal-only，native-node AOT
+serialization 仍不支持。
+
 ### CUDA runtime 可移植性
 
 CUDA native/CUB provider 随平台级 `taichi-forge-runtime` wheel 发行。用户不需要安装本机

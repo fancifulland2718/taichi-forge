@@ -232,6 +232,36 @@ native path, they call CUDA device APIs, native Vulkan code/shaders, or native
 CPU/C++ implementations directly. Otherwise, supported routes fall back to
 Taichi helper kernels.
 
+### Primitive capability queries
+
+| API | Return | Contract |
+| --- | --- | --- |
+| `primitive_capability(name)` | `PrimitiveCapability` | Static immutable schema-v1 contract for one family; valid before `ti.init()`. |
+| `primitive_capabilities()` | tuple of `PrimitiveCapability` | All current families in stable catalog order. |
+| `resolve_primitive_capability(name)` | `ResolvedPrimitiveCapability` | Current Program/backend provider resolution; requires `ti.init()`. |
+
+`PrimitiveCapability` exposes `schema_version`, `name`, `entry_points`,
+aggregate `dtypes/ranks/layouts/storages`, role-specific `operands`,
+`methods`, `stability`, `determinism`, `atomic_order_dependent`, `ad`,
+`graph_replay`, `aot`, `workspace`, and `fallback`. Each
+`PrimitiveOperandCapability` exposes `name`, access mode, dtype/rank/layout/
+storage tuples, and machine-readable constraints. Each
+`PrimitiveMethodCapability` exposes its public method name, backend set,
+provider probes, implementation kind, and whether final support depends on the
+concrete input.
+
+Each `ResolvedPrimitiveMethod` reports `program_available`. This is a
+provider-level result, not concrete request validation. The operation still
+checks dtype, shape, layout, storage, device features, and workspace capacity
+before writing. The returned dataclasses are frozen snapshots.
+
+Automatic-AD behavior is part of the descriptor. Tape keeps the established
+complete-primal-plus-adjoint gate. FwdMode uses verified helper-kernel
+fallbacks for transform, reduce-sum, gather, scatter, and scatter-add; scan and
+grouped-reduce reject. Discrete/non-differentiable families reject automatic AD
+before writing. See [Native algorithms](native_algorithms.en.md) for the full
+matrix.
+
 ### Sort
 
 #### `ti.algorithms.sort(keys, values=None, *, stable=True, descending=False, method="auto", precision="exact", workspace=None)`

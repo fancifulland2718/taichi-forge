@@ -207,6 +207,31 @@ ti.algorithms.experimental_reduce(...)
 CUDA device API、native Vulkan 代码 / shader 或 native CPU/C++ 实现；否则，
 已支持的路线会回退到 Taichi helper kernel。
 
+### Primitive capability 查询
+
+| API | 返回 | 合同 |
+| --- | --- | --- |
+| `primitive_capability(name)` | `PrimitiveCapability` | 单个 family 的静态不可变 schema-v1 合同；可在 `ti.init()` 前调用。 |
+| `primitive_capabilities()` | `PrimitiveCapability` tuple | 按稳定 catalog 顺序返回当前全部 family。 |
+| `resolve_primitive_capability(name)` | `ResolvedPrimitiveCapability` | 当前 Program/backend 的 provider 解析；要求已调用 `ti.init()`。 |
+
+`PrimitiveCapability` 公开 `schema_version`、`name`、`entry_points`、
+聚合 `dtypes/ranks/layouts/storages`、按 role 划分的 `operands`、`methods`、
+`stability`、`determinism`、`atomic_order_dependent`、`ad`、
+`graph_replay`、`aot`、`workspace` 与 `fallback`。
+`PrimitiveOperandCapability` 公开 name、access mode、dtype/rank/layout/storage
+tuple 以及机器可读 constraint；`PrimitiveMethodCapability` 公开 method 名、后端集合、
+provider probe、实现类型，以及最终支持是否依赖具体输入。
+
+每个 `ResolvedPrimitiveMethod` 都提供 `program_available`。它只表示 provider
+层是否可用，不代替具体请求校验；真实操作仍会在写入前检查 dtype、shape、layout、
+storage、device feature 和 workspace capacity。返回的 dataclass 都是 frozen snapshot。
+
+automatic AD 行为也属于 descriptor。Tape 保持既有“完整 primal + adjoint”门控；
+FwdMode 对 transform、reduce-sum、gather、scatter、scatter-add 使用已验证的 helper
+kernel fallback，scan 与 grouped-reduce 明确拒绝；离散/不可微 family 会在写入前
+拒绝 automatic AD。完整矩阵见 [Native 算法](native_algorithms.zh.md)。
+
 ### Sort
 
 #### `ti.algorithms.sort(keys, values=None, *, stable=True, descending=False, method="auto", precision="exact", workspace=None)`

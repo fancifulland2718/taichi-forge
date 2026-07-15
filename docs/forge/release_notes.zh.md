@@ -216,6 +216,12 @@
 - 增加 Dense Field Graph：静态绑定 scalar/vector/matrix Field、构图期
   `template_args`、带 generation 的 SNodeTree dependency、零参数 CUDA capture、
   显式 AD guard 和 block 级异构多环境模型。
+- 增加不可变 schema-v1 native primitive capability 描述与 active Program provider
+  解析。operand dtype/rank/layout/storage、backend method、determinism/atomic 顺序、
+  AD、Graph/AOT、workspace 与 fallback 合同现在和调度共用 method/AD registry。
+  FwdMode 对 transform、reduce-sum、gather、scatter、scatter-add 在 CPU/CUDA/Vulkan
+  上使用已验证 kernel fallback；不支持的 native、scan/grouped-reduce 和离散
+  automatic-AD 路径都会在写入前拒绝。
 - 增加面向生产形态的 CPU/CUDA/Vulkan 并发、数值、生命周期、内存与 replay
   regression/benchmark。剩余 Linux 发行证据见
   [Linux 复测状态](linux_revalidation.zh.md)。
@@ -224,5 +230,6 @@
 
 - [Graph Runtime 与优化](graph_runtime_optimization.zh.md)
 - [Dense Field Graph](dense_field_graph.zh.md)
+- [Native 算法](native_algorithms.zh.md)
 - [编译与高级优化权衡](compilation_tradeoffs.zh.md)
 - [构建 Forge wheel](build_wheels.zh.md)
