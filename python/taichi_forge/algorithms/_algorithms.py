@@ -65,6 +65,14 @@ from taichi_forge._kernels import (
     scan_add_inclusive,
     scan_add_inclusive_cuda,
     scan_add_inclusive_ndarray,
+    segmented_reduce_sum_field,
+    segmented_reduce_sum_ndarray,
+    segmented_scan_apply_bases_field,
+    segmented_scan_apply_bases_ndarray,
+    segmented_scan_gather_bases_field,
+    segmented_scan_gather_bases_ndarray,
+    segmented_scan_sum_serial_field,
+    segmented_scan_sum_serial_ndarray,
     sort_stage,
     sort_copy_key_buffer_to_field_u32,
     sort_copy_key_buffer_to_ndarray_u32,
@@ -130,6 +138,12 @@ _SORT_KEY_TYPE = {u32: 0, i32: 1, f32: 2, u64: 3, i64: 4, f64: 5}
 _SORT_VALUE_TYPE = {i32: 0, f32: 1, u32: 2, u64: 3, i64: 4, f64: 5}
 _SUPPORTED_COMPACT_METHODS = supported_primitive_methods("compact")
 _SUPPORTED_RLE_METHODS = supported_primitive_methods("run_length_encode")
+_SUPPORTED_SEGMENTED_REDUCE_METHODS = supported_primitive_methods(
+    "segmented_reduce"
+)
+_SUPPORTED_SEGMENTED_SCAN_METHODS = supported_primitive_methods("segmented_scan")
+_SEGMENTED_SCAN_CUDA_GLOBAL_MIN_ITEMS = 1 << 16
+_SEGMENTED_SCAN_CUDA_GLOBAL_MIN_SEGMENT_LENGTH = 1 << 12
 _SUPPORTED_REDUCE_METHODS = supported_primitive_methods("reduce")
 _SUPPORTED_REDUCE_OPS = {"sum": 0, "min": 1, "max": 2}
 _REDUCE_VALUE_DTYPES = (u32, i32, f32, u64, i64, f64)
@@ -1301,9 +1315,19 @@ def _default_workspace_context_key():
 def _default_workspace_cache_enabled_for_kind(kind):
     arch = current_cfg().arch
     if arch == cuda:
-        return kind in ("scatter_add", "bucket_builder", "grouped_reduce")
+        return kind in (
+            "scatter_add",
+            "bucket_builder",
+            "grouped_reduce",
+            "segmented",
+        )
     if arch == vulkan:
-        return kind in ("indexed_copy", "bucket_builder", "grouped_reduce")
+        return kind in (
+            "indexed_copy",
+            "bucket_builder",
+            "grouped_reduce",
+            "segmented",
+        )
     return True
 
 
@@ -2290,6 +2314,53 @@ class PrimitiveSequence:
             experimental_unique_by_key,
             (keys, values, unique_keys, unique_values, count),
             {"mode": mode, "size": size, "method": method},
+            workspace,
+        )
+
+    def segmented_reduce(
+        self,
+        values,
+        layout,
+        output,
+        *,
+        op="sum",
+        method="auto",
+        workspace=None,
+    ):
+        if workspace is None:
+            workspace = SegmentedWorkspace(
+                max_items=layout.capacity,
+                max_segments=layout.num_segments,
+            )
+        return self._add_call(
+            "segmented_reduce",
+            experimental_segmented_reduce,
+            (values, layout, output),
+            {"op": op, "method": method},
+            workspace,
+        )
+
+    def segmented_scan(
+        self,
+        values,
+        layout,
+        output,
+        *,
+        inclusive=True,
+        op="sum",
+        method="auto",
+        workspace=None,
+    ):
+        if workspace is None:
+            workspace = SegmentedWorkspace(
+                max_items=layout.capacity,
+                max_segments=layout.num_segments,
+            )
+        return self._add_call(
+            "segmented_scan",
+            experimental_segmented_scan,
+            (values, layout, output),
+            {"inclusive": inclusive, "op": op, "method": method},
             workspace,
         )
 
@@ -4300,6 +4371,348 @@ class RunLengthWorkspace:
         self._scratch_bytes = 0
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
+
+
+def _segmented_host_integer_array(source, name):
+    if isinstance(source, np.ndarray):
+        host = np.asarray(source)
+    elif hasattr(source, "to_numpy"):
+        host = np.asarray(source.to_numpy())
+    else:
+        host = np.asarray(source)
+    if host.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional.")
+    if host.dtype.kind not in ("i", "u"):
+        raise TypeError(f"{name} must contain integer values.")
+    if host.size > 0:
+        if host.dtype.kind == "u":
+            if np.any(host > np.iinfo(np.int32).max):
+                raise ValueError(f"{name} values must fit in ti.i32.")
+        elif np.any(host < np.iinfo(np.int32).min) or np.any(
+            host > np.iinfo(np.int32).max
+        ):
+            raise ValueError(f"{name} values must fit in ti.i32.")
+    return np.asarray(host, dtype=np.int32)
+
+
+class SegmentedLayout:
+    """Immutable, host-validated segment topology normalized onto the device.
+
+    Construction intentionally synchronizes when the source is a Taichi
+    array/field. Reusing the resulting layout keeps segmented operations and
+    Graph replay device-resident.
+    """
+
+    def __init__(
+        self,
+        *,
+        encoding,
+        offsets_host,
+        segment_ids_host,
+        num_items,
+        capacity,
+    ):
+        self._encoding = str(encoding)
+        self._num_items = int(num_items)
+        self._capacity = int(capacity)
+        self._num_segments = int(offsets_host.size - 1)
+        self._max_segment_length = int(
+            np.max(np.diff(offsets_host), initial=0)
+        )
+        self._offsets_host = tuple(int(value) for value in offsets_host)
+        self._offsets = ti_ndarray(i32, shape=self._num_segments + 1)
+        self._segment_ids = ti_ndarray(i32, shape=self._capacity)
+        self._offsets.from_numpy(np.asarray(offsets_host, dtype=np.int32))
+        self._segment_ids.from_numpy(
+            np.asarray(segment_ids_host, dtype=np.int32)
+        )
+        self._topology_bytes = (self._num_segments + 1 + self._capacity) * 4
+
+    @classmethod
+    def from_offsets(cls, offsets, *, capacity=None):
+        """Build a layout from CSR-style offsets.
+
+        Offsets must start at zero, be nondecreasing, and contain at least two
+        entries. The final offset is the active item count. Empty segments are
+        represented by repeated offsets.
+        """
+
+        offsets_host = _segmented_host_integer_array(offsets, "offsets")
+        if offsets_host.size < 2:
+            raise ValueError("offsets must contain at least [0, end].")
+        if int(offsets_host[0]) != 0:
+            raise ValueError("offsets must start at zero.")
+        if np.any(offsets_host[1:] < offsets_host[:-1]):
+            raise ValueError("offsets must be nondecreasing.")
+        num_items = int(offsets_host[-1])
+        if capacity is None:
+            capacity = max(1, num_items)
+        if isinstance(capacity, bool) or not isinstance(
+            capacity, (int, np.integer)
+        ):
+            raise TypeError("capacity must be a Python integer or None.")
+        capacity = int(capacity)
+        if capacity <= 0 or capacity > 0x7FFFFFFF:
+            raise ValueError("capacity must satisfy 1 <= capacity <= 2^31-1.")
+        if num_items > capacity:
+            raise ValueError(
+                "offsets final value must not exceed fixed layout capacity."
+            )
+        num_segments = offsets_host.size - 1
+        ids_host = np.full(capacity, -1, dtype=np.int32)
+        for segment in range(num_segments):
+            begin = int(offsets_host[segment])
+            end = int(offsets_host[segment + 1])
+            ids_host[begin:end] = segment
+        return cls(
+            encoding="offsets",
+            offsets_host=offsets_host,
+            segment_ids_host=ids_host,
+            num_items=num_items,
+            capacity=capacity,
+        )
+
+    @classmethod
+    def from_segment_ids(
+        cls,
+        segment_ids,
+        num_segments,
+        *,
+        size=None,
+        capacity=None,
+    ):
+        """Build a layout from nondecreasing, zero-based segment IDs.
+
+        Missing IDs represent empty segments. The optional `size` selects an
+        active prefix; remaining fixed-capacity entries are normalized to -1.
+        """
+
+        if isinstance(num_segments, bool) or not isinstance(
+            num_segments, (int, np.integer)
+        ):
+            raise TypeError("num_segments must be a Python integer.")
+        num_segments = int(num_segments)
+        if num_segments <= 0 or num_segments > 0x7FFFFFFF:
+            raise ValueError("num_segments must satisfy 1 <= value <= 2^31-1.")
+        source = _segmented_host_integer_array(segment_ids, "segment_ids")
+        source_size = int(source.size)
+        if size is None:
+            size = source_size
+        if isinstance(size, bool) or not isinstance(size, (int, np.integer)):
+            raise TypeError("size must be a Python integer or None.")
+        size = int(size)
+        if size < 0 or size > source_size:
+            raise ValueError("size must satisfy 0 <= size <= segment_ids length.")
+        active = source[:size]
+        if active.size > 0:
+            if np.any(active < 0) or np.any(active >= num_segments):
+                raise ValueError(
+                    "active segment_ids must be in [0, num_segments)."
+                )
+            if np.any(active[1:] < active[:-1]):
+                raise ValueError("active segment_ids must be nondecreasing.")
+        if capacity is None:
+            capacity = max(1, source_size)
+        if isinstance(capacity, bool) or not isinstance(
+            capacity, (int, np.integer)
+        ):
+            raise TypeError("capacity must be a Python integer or None.")
+        capacity = int(capacity)
+        if capacity <= 0 or capacity > 0x7FFFFFFF:
+            raise ValueError("capacity must satisfy 1 <= capacity <= 2^31-1.")
+        if size > capacity:
+            raise ValueError("active segment_ids size must not exceed capacity.")
+        ids_host = np.full(capacity, -1, dtype=np.int32)
+        ids_host[:size] = active
+        counts = np.bincount(active, minlength=num_segments).astype(
+            np.int64, copy=False
+        )
+        offsets_host = np.empty(num_segments + 1, dtype=np.int32)
+        offsets_host[0] = 0
+        offsets_host[1:] = np.cumsum(counts, dtype=np.int64).astype(np.int32)
+        return cls(
+            encoding="segment_ids",
+            offsets_host=offsets_host,
+            segment_ids_host=ids_host,
+            num_items=size,
+            capacity=capacity,
+        )
+
+    @property
+    def encoding(self):
+        return self._encoding
+
+    @property
+    def num_items(self):
+        return self._num_items
+
+    @property
+    def capacity(self):
+        return self._capacity
+
+    @property
+    def num_segments(self):
+        return self._num_segments
+
+    @property
+    def max_segment_length(self):
+        return self._max_segment_length
+
+    @property
+    def topology_bytes(self):
+        return self._topology_bytes
+
+
+class SegmentedWorkspace:
+    """Reusable child workspaces for segmented scan and reduce."""
+
+    def __init__(self, max_items=None, max_segments=None):
+        self.max_items = max_items
+        self.max_segments = max_segments
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._base_buffers = {}
+        self._base_bytes = 0
+        self._scan_executors = {}
+        self._grouped_reduce_workspace = None
+        self._transform_workspace = None
+        self._last_scan_method = None
+
+    @property
+    def last_scan_method(self):
+        """Return the concrete method selected by the latest scan call."""
+
+        return self._last_scan_method
+
+    def check_layout(self, layout):
+        if not isinstance(layout, SegmentedLayout):
+            raise TypeError("layout must be a SegmentedLayout instance.")
+        if self.max_items is not None and layout.capacity > self.max_items:
+            raise ValueError(
+                f"Layout capacity {layout.capacity} exceeds "
+                f"max_items={self.max_items}."
+            )
+        if (
+            self.max_segments is not None
+            and layout.num_segments > self.max_segments
+        ):
+            raise ValueError(
+                f"Layout segment count {layout.num_segments} exceeds "
+                f"max_segments={self.max_segments}."
+            )
+
+    def _get_grouped_reduce_workspace(self, layout):
+        if self._grouped_reduce_workspace is None:
+            self._grouped_reduce_workspace = GroupedReduceWorkspace(
+                max_items=self.max_items,
+                max_groups=self.max_segments,
+            )
+        self._grouped_reduce_workspace.check_shape(
+            layout.capacity, layout.num_segments
+        )
+        return self._grouped_reduce_workspace
+
+    def _get_transform_workspace(self, layout):
+        if self._transform_workspace is None:
+            self._transform_workspace = TransformWorkspace(
+                max_items=self.max_items
+            )
+        self._transform_workspace.check_shape(layout.capacity)
+        return self._transform_workspace
+
+    def _get_scan_executor(self, layout):
+        executor = self._scan_executors.get(layout.capacity)
+        if executor is None:
+            executor = PrefixSumExecutor(layout.capacity)
+            self._scan_executors[layout.capacity] = executor
+        return executor
+
+    def _get_base_buffer(self, dtype, layout):
+        key = (str(dtype), layout.num_segments)
+        bases = self._base_buffers.get(key)
+        if bases is None:
+            bases = ti_ndarray(dtype, shape=layout.num_segments)
+            self._base_buffers[key] = bases
+            self._base_bytes += layout.num_segments * _dtype_nbytes(dtype)
+        return bases
+
+    def _scan_provider_workspace_bytes(self):
+        prog = get_runtime().prog
+        if prog is None:
+            return 0
+        arch = current_cfg().arch
+        if arch == cuda:
+            name = "cuda_cub_scan_workspace_bytes"
+        elif arch == vulkan:
+            name = "vulkan_scan_workspace_bytes"
+        elif arch in (x64, arm64):
+            name = "cpu_scan_workspace_bytes"
+        else:
+            return 0
+        if not _prog_has(prog, name):
+            return 0
+        return int(_prog_method(prog, name)())
+
+    def _update_usage(self, *, include_scan_provider=False):
+        grouped_current = (
+            0
+            if self._grouped_reduce_workspace is None
+            else int(self._grouped_reduce_workspace.workspace_bytes_current)
+        )
+        grouped_peak = (
+            0
+            if self._grouped_reduce_workspace is None
+            else int(self._grouped_reduce_workspace.workspace_bytes_peak)
+        )
+        transform_current = (
+            0
+            if self._transform_workspace is None
+            else int(self._transform_workspace.workspace_bytes_current)
+        )
+        transform_peak = (
+            0
+            if self._transform_workspace is None
+            else int(self._transform_workspace.workspace_bytes_peak)
+        )
+        field_scan_bytes = sum(
+            executor.workspace_length * 4
+            for executor in self._scan_executors.values()
+            if executor.large_arr is not None
+        )
+        self.workspace_bytes_current = (
+            self._base_bytes
+            + grouped_current
+            + transform_current
+            + field_scan_bytes
+        )
+        provider_peak = (
+            self._scan_provider_workspace_bytes()
+            if include_scan_provider
+            else 0
+        )
+        self.workspace_bytes_peak = max(
+            self.workspace_bytes_peak,
+            self._base_bytes
+            + grouped_peak
+            + transform_peak
+            + field_scan_bytes
+            + provider_peak,
+            self.workspace_bytes_current,
+        )
+
+    def clear(self):
+        if self._grouped_reduce_workspace is not None:
+            self._grouped_reduce_workspace.clear()
+        if self._transform_workspace is not None:
+            self._transform_workspace.clear()
+        self._base_buffers.clear()
+        self._scan_executors.clear()
+        self._grouped_reduce_workspace = None
+        self._transform_workspace = None
+        self._base_bytes = 0
+        self.workspace_bytes_current = 0
+        self.workspace_bytes_peak = 0
+        self._last_scan_method = None
 
 
 class ReduceWorkspace:
@@ -9200,6 +9613,290 @@ def experimental_run_length_encode(
             compacted_starts, run_lengths, run_count, n, capacity
         )
     workspace._update_usage()
+    return workspace
+
+
+def _check_segmented_request(
+    op_name,
+    values,
+    layout,
+    output,
+    *,
+    method,
+    workspace,
+    scan,
+):
+    supported_methods = (
+        _SUPPORTED_SEGMENTED_SCAN_METHODS
+        if scan
+        else _SUPPORTED_SEGMENTED_REDUCE_METHODS
+    )
+    if method not in supported_methods:
+        raise NotImplementedError(f"{op_name} method '{method}' is not implemented.")
+    if not isinstance(layout, SegmentedLayout):
+        raise TypeError(f"{op_name} layout must be a SegmentedLayout instance.")
+    if workspace is not None and not isinstance(workspace, SegmentedWorkspace):
+        raise TypeError(
+            f"{op_name} workspace must be a SegmentedWorkspace instance or None."
+        )
+    if workspace is not None:
+        workspace.check_layout(layout)
+    if _is_matrix_field(values) or _is_matrix_field(output):
+        raise NotImplementedError(
+            f"{op_name} scalar values/output are required in the first release."
+        )
+    if (
+        _is_struct_scalar_member_view(values)
+        or _is_struct_scalar_member_view(output)
+        or _is_struct_tensor_member_view(values)
+        or _is_struct_tensor_member_view(output)
+        or _is_opaque_raw_payload(values)
+        or _is_opaque_raw_payload(output)
+    ):
+        raise NotImplementedError(
+            f"{op_name} StructNdarray member/raw payloads are not supported "
+            "in the first release."
+        )
+    if not (_is_1d(values) and _is_1d(output)):
+        raise ValueError(f"{op_name} expects 1D values and output.")
+    if values.dtype not in _SCAN_VALUE_DTYPES or output.dtype != values.dtype:
+        raise TypeError(
+            f"{op_name} expects matching ti.i32/u32/i64/u64/f32/f64 values "
+            "and output."
+        )
+    if int(values.shape[0]) != layout.capacity:
+        raise ValueError(
+            f"{op_name} values length must equal layout capacity "
+            f"{layout.capacity}."
+        )
+    expected_output = layout.capacity if scan else layout.num_segments
+    if int(output.shape[0]) != expected_output:
+        role = "layout capacity" if scan else "layout segment count"
+        raise ValueError(f"{op_name} output length must equal {role}.")
+    values_view = _primitive_view(values)
+    output_view = _primitive_view(output)
+    if values_view is None or output_view is None:
+        raise TypeError(
+            f"{op_name} values/output must be plain ti.ndarray or root dense "
+            "scalar ti.field."
+        )
+    ndarray_mode = isinstance(values, Ndarray) or isinstance(output, Ndarray)
+    if ndarray_mode:
+        if not (
+            isinstance(values, Ndarray)
+            and isinstance(output, Ndarray)
+            and values_view.is_plain_ndarray
+            and output_view.is_plain_ndarray
+        ):
+            raise TypeError(
+                f"{op_name} ndarray mode requires plain ti.ndarray values/output."
+            )
+    elif not (values_view.is_dense_field and output_view.is_dense_field):
+        raise TypeError(
+            f"{op_name} field mode requires root dense scalar fields."
+        )
+    input_keys = _rle_storage_keys(values)
+    output_keys = _rle_storage_keys(output)
+    overlap = bool(input_keys.intersection(output_keys))
+    if scan:
+        if overlap and input_keys != output_keys:
+            raise ValueError(
+                f"{op_name} values/output must be exactly in-place or disjoint."
+            )
+    elif overlap:
+        raise ValueError(f"{op_name} values/output must not alias.")
+    return ndarray_mode, input_keys == output_keys
+
+
+def _segmented_default_workspace(kind, values, layout, output, semantic_key):
+    return _get_default_workspace(
+        "segmented",
+        (values, layout, output),
+        (kind, *semantic_key, layout.capacity, layout.num_segments),
+        lambda: SegmentedWorkspace(
+            max_items=layout.capacity,
+            max_segments=layout.num_segments,
+        ),
+    )
+
+
+def experimental_segmented_reduce(
+    values,
+    layout,
+    output,
+    *,
+    op="sum",
+    method="auto",
+    workspace=None,
+):
+    """Reduce fixed-capacity values over one immutable segment layout.
+
+    `method="grouped"` reuses existing native grouped-reduce providers and is
+    the ndarray fast path. `method="serial"` reduces each segment in stable
+    left-to-right order and is the dense-field/deterministic path.
+    """
+
+    if op != "sum":
+        raise ValueError("experimental_segmented_reduce() currently supports op='sum'.")
+    if is_fwd_mode_active():
+        raise RuntimeError(
+            "experimental_segmented_reduce() does not support ti.ad.FwdMode()."
+        )
+    ndarray_mode, _in_place = _check_segmented_request(
+        "experimental_segmented_reduce()",
+        values,
+        layout,
+        output,
+        method=method,
+        workspace=workspace,
+        scan=False,
+    )
+    use_grouped = method in ("auto", "grouped") and ndarray_mode
+    if method == "grouped" and not ndarray_mode:
+        raise RuntimeError(
+            "experimental_segmented_reduce() method='grouped' requires plain "
+            "ti.ndarray values/output."
+        )
+    if is_tape_active() and not use_grouped:
+        raise RuntimeError(
+            "experimental_segmented_reduce() reverse AD requires the ndarray "
+            "grouped path; serial/dense-field mode is not differentiable."
+        )
+    if workspace is None:
+        workspace = _segmented_default_workspace(
+            "reduce", values, layout, output, (op, method)
+        )
+    workspace.check_layout(layout)
+    if use_grouped:
+        grouped_workspace = workspace._get_grouped_reduce_workspace(layout)
+        experimental_grouped_reduce(
+            layout._segment_ids,
+            values,
+            output,
+            op=op,
+            method="auto",
+            workspace=grouped_workspace,
+        )
+    elif ndarray_mode:
+        segmented_reduce_sum_ndarray(
+            values, layout._offsets, output, layout.num_segments
+        )
+    else:
+        segmented_reduce_sum_field(
+            values, layout._offsets, output, layout.num_segments
+        )
+    workspace._update_usage()
+    return workspace
+
+
+def experimental_segmented_scan(
+    values,
+    layout,
+    output,
+    *,
+    inclusive=True,
+    op="sum",
+    method="auto",
+    workspace=None,
+):
+    """Inclusive/exclusive scan within each immutable segment.
+
+    Floating-point `auto` uses stable segment-local left-to-right accumulation.
+    Integer `auto` uses that path on CPU/Vulkan and for short CUDA segments;
+    sufficiently large CUDA layouts use global native scan plus a race-free
+    two-kernel segment correction.
+    """
+
+    reject_unsupported_automatic_ad("segmented_scan")
+    if op != "sum":
+        raise ValueError("experimental_segmented_scan() currently supports op='sum'.")
+    if not isinstance(inclusive, (bool, np.bool_)):
+        raise TypeError("experimental_segmented_scan() inclusive must be bool.")
+    ndarray_mode, in_place = _check_segmented_request(
+        "experimental_segmented_scan()",
+        values,
+        layout,
+        output,
+        method=method,
+        workspace=workspace,
+        scan=True,
+    )
+    selected_method = method
+    if selected_method == "auto":
+        selected_method = "serial"
+        if (
+            values.dtype not in (f32, f64)
+            and current_cfg().arch == cuda
+            and layout.num_items >= _SEGMENTED_SCAN_CUDA_GLOBAL_MIN_ITEMS
+            and layout.max_segment_length
+            >= _SEGMENTED_SCAN_CUDA_GLOBAL_MIN_SEGMENT_LENGTH
+        ):
+            selected_method = "global_scan"
+    if selected_method == "global_scan" and values.dtype in (f32, f64):
+        raise ValueError(
+            "experimental_segmented_scan() global_scan is integer-only; use "
+            "method='serial' for numerically stable floating-point segments."
+        )
+    if workspace is None:
+        workspace = _segmented_default_workspace(
+            "scan", values, layout, output, (op, method, bool(inclusive))
+        )
+    workspace.check_layout(layout)
+    workspace._last_scan_method = selected_method
+    if selected_method == "serial":
+        if ndarray_mode:
+            segmented_scan_sum_serial_ndarray(
+                values,
+                layout._offsets,
+                output,
+                layout.num_segments,
+                int(inclusive),
+            )
+        else:
+            segmented_scan_sum_serial_field(
+                values,
+                layout._offsets,
+                output,
+                layout.num_segments,
+                int(inclusive),
+            )
+        workspace._update_usage()
+        return workspace
+    if not in_place:
+        experimental_transform(
+            values,
+            output,
+            scale=1,
+            bias=0,
+            method="auto",
+            workspace=workspace._get_transform_workspace(layout),
+        )
+    executor = workspace._get_scan_executor(layout)
+    executor.run(output)
+    bases = workspace._get_base_buffer(values.dtype, layout)
+    if ndarray_mode:
+        segmented_scan_gather_bases_ndarray(
+            output, layout._offsets, bases, layout.num_segments
+        )
+        segmented_scan_apply_bases_ndarray(
+            output,
+            layout._offsets,
+            bases,
+            layout.num_segments,
+            int(inclusive),
+        )
+    else:
+        segmented_scan_gather_bases_field(
+            output, layout._offsets, bases, layout.num_segments
+        )
+        segmented_scan_apply_bases_field(
+            output,
+            layout._offsets,
+            bases,
+            layout.num_segments,
+            int(inclusive),
+        )
+    workspace._update_usage(include_scan_provider=True)
     return workspace
 
 
@@ -15578,6 +16275,8 @@ __all__ = [
     "PrefixSumExecutor",
     "CompactWorkspace",
     "RunLengthWorkspace",
+    "SegmentedLayout",
+    "SegmentedWorkspace",
     "ReduceWorkspace",
     "CheckWorkspace",
     "DeviceCheckResult",
@@ -15606,6 +16305,8 @@ __all__ = [
     "experimental_run_length_encode",
     "experimental_unique",
     "experimental_unique_by_key",
+    "experimental_segmented_reduce",
+    "experimental_segmented_scan",
     "experimental_reduce",
     "experimental_histogram",
     "experimental_transform",

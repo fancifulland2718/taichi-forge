@@ -335,6 +335,18 @@ _RLE_METHODS = (
     _fallback("field_scan"),
 )
 
+_SEGMENTED_REDUCE_METHODS = (
+    _auto(),
+    _method("grouped", implementation="composite"),
+    _fallback("serial"),
+)
+
+_SEGMENTED_SCAN_METHODS = (
+    _auto(),
+    _method("global_scan", implementation="composite"),
+    _fallback("serial"),
+)
+
 _REDUCE_METHODS = (
     _auto(),
     _method("cuda_cub", ("cuda",), ("cuda_cub_reduce_available",)),
@@ -825,6 +837,106 @@ _CAPABILITIES = {
         workspace="required_internal_flags_reusable",
         fallback="field_scan_i32_keys_and_payload",
         layouts=_NUMERIC_LAYOUTS,
+    ),
+    "segmented_reduce": _capability(
+        "segmented_reduce",
+        entry_points=("experimental_segmented_reduce",),
+        dtypes=_SCALAR_DTYPES,
+        storages=("ndarray", "dense_field", "segmented_layout"),
+        operands=(
+            _operand(
+                "values",
+                "read",
+                _SCALAR_DTYPES,
+                ("ndarray", "dense_field"),
+                constraints=("capacity_matches_layout",),
+            ),
+            _operand(
+                "layout",
+                "read",
+                ("i32",),
+                ("segmented_layout",),
+                ranks=(),
+                layouts=("immutable_normalized_topology",),
+                constraints=(
+                    "host_validated_at_construction",
+                    "offsets_or_nondecreasing_ids",
+                ),
+            ),
+            _operand(
+                "output",
+                "write",
+                _SCALAR_DTYPES,
+                ("ndarray", "dense_field"),
+                constraints=(
+                    "same_dtype_as_values",
+                    "one_element_per_segment",
+                ),
+            ),
+        ),
+        methods=_SEGMENTED_REDUCE_METHODS,
+        stability="segment_order_preserved",
+        determinism="integer_exact_float_method_dependent",
+        atomic_order_dependent="grouped_float_only",
+        ad=PrimitiveADCapability(
+            primal="supported",
+            forward_ad="unsupported",
+            reverse_ad="grouped_ndarray_only",
+            explicit_adjoint="grouped_ndarray_only",
+            native_methods=("grouped",),
+            differentiable_ops=("sum",),
+        ),
+        graph_replay="primitive_sequence_native_node",
+        workspace="optional_reusable_layout_separate",
+        fallback="serial_segment_local",
+        layouts=_SCALAR_LAYOUTS,
+    ),
+    "segmented_scan": _capability(
+        "segmented_scan",
+        entry_points=("experimental_segmented_scan",),
+        dtypes=_SCALAR_DTYPES,
+        storages=("ndarray", "dense_field", "segmented_layout"),
+        operands=(
+            _operand(
+                "values",
+                "read",
+                _SCALAR_DTYPES,
+                ("ndarray", "dense_field"),
+                constraints=("capacity_matches_layout",),
+            ),
+            _operand(
+                "layout",
+                "read",
+                ("i32",),
+                ("segmented_layout",),
+                ranks=(),
+                layouts=("immutable_normalized_topology",),
+                constraints=(
+                    "host_validated_at_construction",
+                    "offsets_or_nondecreasing_ids",
+                ),
+            ),
+            _operand(
+                "output",
+                "write",
+                _SCALAR_DTYPES,
+                ("ndarray", "dense_field"),
+                constraints=(
+                    "same_dtype_as_values",
+                    "capacity_matches_layout",
+                    "in_place_or_disjoint",
+                ),
+            ),
+        ),
+        methods=_SEGMENTED_SCAN_METHODS,
+        stability="segment_order_preserved",
+        determinism="integer_exact_float_serial_left_to_right",
+        atomic_order_dependent="never",
+        ad=_ad_none(),
+        graph_replay="primitive_sequence_native_node",
+        workspace="optional_reusable_layout_separate",
+        fallback="serial_segment_local",
+        layouts=_SCALAR_LAYOUTS,
     ),
     "reduce": _capability(
         "reduce",

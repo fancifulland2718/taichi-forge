@@ -1219,6 +1219,197 @@ def rle_reset_count_field(count: template()):
 
 
 @kernel
+def segmented_reduce_sum_ndarray(
+    values: ndarray_type.ndarray(ndim=1),
+    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
+    output: ndarray_type.ndarray(ndim=1),
+    num_segments: i32,
+):
+    for segment in range(num_segments):
+        begin = offsets[segment]
+        end = offsets[segment + 1]
+        if begin < end:
+            acc = values[begin]
+            loop_config(serialize=True)
+            for local_index in range(end - begin - 1):
+                acc += values[begin + local_index + 1]
+            output[segment] = acc
+        else:
+            output[segment] = 0
+
+
+@kernel
+def segmented_reduce_sum_field(
+    values: template(),
+    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
+    output: template(),
+    num_segments: i32,
+):
+    values_offset = static(
+        values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0
+    )
+    output_offset = static(
+        output.snode.ptr.offset if len(output.snode.ptr.offset) != 0 else 0
+    )
+    for segment in range(num_segments):
+        acc = ops.cast(0, values.dtype)
+        begin = offsets[segment]
+        end = offsets[segment + 1]
+        loop_config(serialize=True)
+        for local_index in range(end - begin):
+            acc += values[begin + local_index + values_offset]
+        output[segment + output_offset] = acc
+
+
+@kernel
+def segmented_scan_sum_serial_ndarray(
+    values: ndarray_type.ndarray(ndim=1),
+    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
+    output: ndarray_type.ndarray(ndim=1),
+    num_segments: i32,
+    inclusive: i32,
+):
+    for segment in range(num_segments):
+        begin = offsets[segment]
+        end = offsets[segment + 1]
+        if begin < end:
+            acc = values[begin]
+            if inclusive != 0:
+                output[begin] = acc
+            else:
+                output[begin] = 0
+            loop_config(serialize=True)
+            for local_index in range(end - begin - 1):
+                index = begin + local_index + 1
+                value = values[index]
+                if inclusive != 0:
+                    acc += value
+                    output[index] = acc
+                else:
+                    output[index] = acc
+                    acc += value
+
+
+@kernel
+def segmented_scan_sum_serial_field(
+    values: template(),
+    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
+    output: template(),
+    num_segments: i32,
+    inclusive: i32,
+):
+    values_offset = static(
+        values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0
+    )
+    output_offset = static(
+        output.snode.ptr.offset if len(output.snode.ptr.offset) != 0 else 0
+    )
+    for segment in range(num_segments):
+        acc = ops.cast(0, values.dtype)
+        begin = offsets[segment]
+        end = offsets[segment + 1]
+        loop_config(serialize=True)
+        for local_index in range(end - begin):
+            index = begin + local_index
+            value = values[index + values_offset]
+            if inclusive != 0:
+                acc += value
+                output[index + output_offset] = acc
+            else:
+                output[index + output_offset] = acc
+                acc += value
+
+
+@kernel
+def segmented_scan_gather_bases_ndarray(
+    scanned: ndarray_type.ndarray(ndim=1),
+    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
+    bases: ndarray_type.ndarray(ndim=1),
+    num_segments: i32,
+):
+    for segment in range(num_segments):
+        begin = offsets[segment]
+        if begin > 0:
+            bases[segment] = scanned[begin - 1]
+        else:
+            bases[segment] = 0
+
+
+@kernel
+def segmented_scan_gather_bases_field(
+    scanned: template(),
+    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
+    bases: ndarray_type.ndarray(ndim=1),
+    num_segments: i32,
+):
+    scanned_offset = static(
+        scanned.snode.ptr.offset if len(scanned.snode.ptr.offset) != 0 else 0
+    )
+    for segment in range(num_segments):
+        begin = offsets[segment]
+        base = ops.cast(0, scanned.dtype)
+        if begin > 0:
+            base = scanned[begin - 1 + scanned_offset]
+        bases[segment] = base
+
+
+@kernel
+def segmented_scan_apply_bases_ndarray(
+    scanned: ndarray_type.ndarray(ndim=1),
+    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
+    bases: ndarray_type.ndarray(ndim=1),
+    num_segments: i32,
+    inclusive: i32,
+):
+    for segment in range(num_segments):
+        begin = offsets[segment]
+        end = offsets[segment + 1]
+        base = bases[segment]
+        if inclusive != 0:
+            for local_index in range(end - begin):
+                index = begin + local_index
+                scanned[index] -= base
+        else:
+            loop_config(serialize=True)
+            for reverse_index in range(end - begin):
+                index = end - 1 - reverse_index
+                if index == begin:
+                    scanned[index] = scanned[index] * 0
+                else:
+                    scanned[index] = scanned[index - 1] - base
+
+
+@kernel
+def segmented_scan_apply_bases_field(
+    scanned: template(),
+    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
+    bases: ndarray_type.ndarray(ndim=1),
+    num_segments: i32,
+    inclusive: i32,
+):
+    scanned_offset = static(
+        scanned.snode.ptr.offset if len(scanned.snode.ptr.offset) != 0 else 0
+    )
+    for segment in range(num_segments):
+        begin = offsets[segment]
+        end = offsets[segment + 1]
+        base = bases[segment]
+        if inclusive != 0:
+            for local_index in range(end - begin):
+                index = begin + local_index + scanned_offset
+                scanned[index] -= base
+        else:
+            loop_config(serialize=True)
+            for reverse_index in range(end - begin):
+                logical_index = end - 1 - reverse_index
+                index = logical_index + scanned_offset
+                if logical_index == begin:
+                    scanned[index] = ops.cast(0, scanned.dtype)
+                else:
+                    scanned[index] = scanned[index - 1] - base
+
+
+@kernel
 def compact_flags_to_prefix_field(flags: template(), prefix: template(), N: i32):
     flags_offset = static(flags.snode.ptr.offset if len(flags.snode.ptr.offset) != 0 else 0)
     for i in range(N):

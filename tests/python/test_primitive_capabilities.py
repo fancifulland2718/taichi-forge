@@ -17,6 +17,8 @@ _FAMILIES = (
     "run_length_encode",
     "unique",
     "unique_by_key",
+    "segmented_reduce",
+    "segmented_scan",
     "reduce",
     "histogram",
     "transform",
@@ -94,6 +96,23 @@ def test_static_primitive_capability_catalog_is_complete_and_immutable():
         "matrix_field_payload_i32_only"
         in unique_by_key.operands[1].constraints
     )
+    segmented_reduce = ti.algorithms.primitive_capability(
+        "experimental_segmented_reduce"
+    )
+    assert segmented_reduce.graph_replay == "primitive_sequence_native_node"
+    assert (
+        "host_validated_at_construction"
+        in segmented_reduce.operands[1].constraints
+    )
+    assert segmented_reduce.ad.forward_ad == "unsupported"
+    assert segmented_reduce.ad.reverse_ad == "grouped_ndarray_only"
+    assert segmented_reduce.ad.fallback_method is None
+    assert (
+        ti.algorithms.primitive_capability(
+            "experimental_segmented_scan"
+        ).ad.reverse_ad
+        == "not_differentiable"
+    )
     sort_methods = {
         method.name: method
         for method in ti.algorithms.primitive_capability("sort").methods
@@ -129,6 +148,12 @@ def test_capability_catalog_is_the_method_validation_source_of_truth():
     )
     assert alg_impl._SUPPORTED_RLE_METHODS == _method_names(
         ti.algorithms.primitive_capability("unique_by_key")
+    )
+    assert alg_impl._SUPPORTED_SEGMENTED_REDUCE_METHODS == _method_names(
+        ti.algorithms.primitive_capability("segmented_reduce")
+    )
+    assert alg_impl._SUPPORTED_SEGMENTED_SCAN_METHODS == _method_names(
+        ti.algorithms.primitive_capability("segmented_scan")
     )
     assert alg_impl._SUPPORTED_REDUCE_METHODS == _method_names(
         ti.algorithms.primitive_capability("reduce")
