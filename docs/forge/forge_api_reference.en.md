@@ -93,6 +93,79 @@ Limits:
   hot loop.
 - Availability of C++ pass-level timing depends on the active runtime build.
 
+## `taichi_forge.runtime`
+
+Runtime observability is available as `ti.runtime` after `ti.init()`.
+It reports the current Program generation without changing kernel, Graph, or
+submission semantics.
+
+### `ti.runtime.stats()`
+
+Returns an immutable `RuntimeStatistics` snapshot:
+
+```python
+snapshot = ti.runtime.stats()
+print(snapshot.backend, snapshot.program_domain)
+print(snapshot.submission.kernel_submissions)
+print(snapshot.memory.device_raw_bytes)
+```
+
+The schema groups submission, synchronization, memory, transfer, Graph,
+display, first-fault, and trace counters. Counters are cumulative for one
+Program generation and a snapshot remains valid after a later `ti.reset()`.
+A new Program has a different `program_domain` and fresh counters.
+
+An optional measurement is `None` when the active backend or build cannot
+observe it. Zero means that the measurement is available and no activity was
+observed. In particular, do not convert unavailable device-memory or backend
+wait data into a measured zero. Taking a snapshot does not intentionally wait
+for GPU completion.
+
+### `ti.runtime.capabilities()`
+
+Returns immutable `RuntimeCapabilities` for the active Program. It describes
+which observability mechanisms are implemented, including bounded tracing,
+Chrome trace export, backend wait/lock telemetry, device-memory telemetry, and
+CUDA mempool telemetry. It is not a hardware feature query and does not
+predict whether a particular algorithm or kernel is supported.
+
+### `ti.runtime.trace(path, *, max_threads=16, events_per_thread=4096)`
+
+Creates a one-shot context manager that records bounded host-side runtime
+events and exports Chrome/Perfetto-compatible JSON:
+
+```python
+with ti.runtime.trace("runtime.json") as trace:
+    graph.run(arguments)
+    render_kernel(frame)
+
+print(trace.summary.recorded_events, trace.summary.dropped_events)
+```
+
+Tracing is disabled by default. An enabled session allocates a fixed
+`max_threads * events_per_thread` event buffer; it never grows or blocks
+when full. At most 64 thread shards and 1,048,576 total events are accepted.
+Threads that cannot claim a shard and events that exceed capacity increment
+`dropped_events`.
+
+Current trace events cover host submission, Program synchronization, and bulk
+transfer boundaries. They are not GPU timestamps and do not replace a CUDA,
+Vulkan, or vendor GPU profiler. Trace-on overhead is observable, so use it for
+bounded diagnostic windows rather than leaving it around a production hot
+loop.
+
+Only one runtime trace context may be active in a Python process; nested and
+concurrent contexts are rejected. The context preserves a workload exception
+while still attempting stop/export. If `ti.reset()` occurs inside the
+context, the trace finishes and exports the Program generation active on
+entry; work on a newly initialized Program is not mixed into that session.
+
+The legacy `ti.compile_profile()` and C++ timeline facilities have separate
+owners, schemas, and purposes. Compile profiling measures compilation;
+`ti.runtime.trace()` measures bounded runtime host events. Private Program
+methods whose names begin with `_runtime_` are implementation details, not
+public APIs.
+
 ### `ti.real_func(fn)`
 
 Location: `taichi_forge.lang.kernel_impl`; exported as `ti.real_func`.

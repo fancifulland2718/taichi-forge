@@ -53,7 +53,7 @@ list as the whole history.
 
 | Release | User-visible scope |
 | --- | --- |
-| [0.5.0](docs/forge/release_notes.en.md#050) | Post-`0.4.25` async backend/runtime safety; CUDA/Vulkan Graph replay and lifetime hardening; Dense Field Graph, strict argument/AD contracts, and block-level heterogeneous environments. |
+| [0.5.0](docs/forge/release_notes.en.md#050) | Post-`0.4.25` async backend/runtime safety and bounded observability; CUDA/Vulkan Graph replay and lifetime hardening; Dense Field Graph, strict argument/AD contracts, and block-level heterogeneous environments. |
 | [0.4.25](docs/forge/release_notes.en.md#0425) | GGUI event-pump and empty-ImGui-frame lifecycle fixes. |
 | [0.4.24](docs/forge/release_notes.en.md#0424) | Device-side GGUI image packing and render-cadence improvements. |
 | [0.4.23](docs/forge/release_notes.en.md#0423) | Split runtime/shim packaging, device checks/metrics, Vulkan ArgPack and dense-native fixes. |

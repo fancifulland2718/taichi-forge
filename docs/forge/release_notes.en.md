@@ -207,6 +207,11 @@ profiling, and GGUI device-image staging were already public by `0.4.25`.
   Vulkan device loss. Kernel, Graph, ticket, synchronization, and GGUI paths
   now fail fast with the original cause; fault-aware reset/finalize avoids
   unsafe backend waits without claiming in-process device recovery.
+- Added `ti.runtime.stats()`, `ti.runtime.capabilities()`, and the bounded
+  `ti.runtime.trace()` context. Immutable Program-generation snapshots expose
+  submission, synchronization, memory, transfer, Graph, display, fault, and
+  trace data; unavailable optional measurements remain `None`, and trace
+  export records bounded host events without pretending to be a GPU profiler.
 - Separated CUDA device capability from LLVM code-generation targets, isolated
   target-specific caches, removed the CUDA-13.2-only iterator dependency,
   hardened the single-runtime-wheel contract, and avoided unused CUDA

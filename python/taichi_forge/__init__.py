@@ -10,7 +10,18 @@ from taichi_forge.types.annotations import *
 from taichi_forge.types.primitive_types import *
 
 
-from taichi_forge import ad, algorithms, experimental, graph, linalg, math, sparse, tools, types
+from taichi_forge import (
+    ad,
+    algorithms,
+    experimental,
+    graph,
+    linalg,
+    math,
+    runtime,
+    sparse,
+    tools,
+    types,
+)
 from taichi_forge.tools.compile_profile import compile_profile, CompileProfile  # P-Compile-7
 from taichi_forge.ui import GUI, hex_to_rgb, rgb_to_hex, ui
 

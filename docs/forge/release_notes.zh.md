@@ -189,6 +189,11 @@
 - 增加 Program-owned first-fault domain，统一处理 context-fatal CUDA 错误与 Vulkan
   device loss。kernel、Graph、ticket、同步和 GGUI 路径会引用原始根因快速拒绝；
   fault-aware reset/finalize 跳过不安全后端等待，但不宣称同进程 device 恢复。
+- 增加 `ti.runtime.stats()`、`ti.runtime.capabilities()` 和有界
+  `ti.runtime.trace()` context。不可变的 Program-generation snapshot 公开
+  submission、synchronization、memory、transfer、Graph、display、fault 与 trace
+  数据；不可用的可选测量保持 `None`，trace 导出只记录有界 host event，不伪装成
+  GPU profiler。
 - 分离 CUDA device capability 与 LLVM code-generation target，隔离 target cache，
   移除 CUDA-13.2-only iterator 依赖，加固单 runtime wheel，并避免无返回值 CUDA
   kernel 的无用 result allocation。

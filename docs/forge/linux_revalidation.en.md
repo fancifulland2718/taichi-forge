@@ -131,6 +131,31 @@ from the Windows result.
   Cover offscreen plus available X11/Wayland headed
   `show() -> destroy() -> reset()`.
 
+### Runtime observability and bounded trace
+
+F4 runtime statistics and trace have Windows CPU/CUDA/Vulkan functional
+evidence. Their Linux release evidence remains pending:
+
+- Build `taichi_runtime_foundation_tests` and the Python extension with GCC
+  and Clang in CPU-only, CUDA-disabled, Vulkan-disabled, and full
+  configurations. Run the runtime-statistics and runtime-trace C++ tests under
+  ASan/UBSan; use TSAN for concurrent trace start/stop, session turnover,
+  thread-shard ownership, and Program reset.
+- Run `tests/python/test_runtime_statistics.py`,
+  `tests/python/test_runtime_trace.py`, and
+  `tests/python/test_runtime_public_api.py` on CPU, CUDA, and Vulkan. Verify
+  immutable schema-v1 snapshots, backend-specific `None` availability,
+  Program-domain reset isolation, exception-preserving export, bounded
+  overflow accounting, and valid Chrome/Perfetto JSON.
+- Confirm the implementation uses standard C++ synchronization, TLS, clocks,
+  and file output only; it must not acquire a Win32 handle or depend on Windows
+  path semantics. Exercise non-ASCII and failed export paths on Linux.
+- Run `benchmarks/runtime_trace_bench.py` only after confirming that no other
+  Python process owns the GPU. Record repeated trace-off/trace-on CPU, CUDA,
+  and Vulkan samples, allocated trace bytes, recorded/dropped events, and exact
+  numerical results. Treat sub-noise changes as observational and do not claim
+  a speedup from diagnostics.
+
 ### Dense Field Graph matrix
 
 This subsection is entirely pending Linux revalidation; Windows results do not

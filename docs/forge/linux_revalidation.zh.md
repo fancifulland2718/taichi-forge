@@ -101,6 +101,27 @@ F3 first-fault 行为已经取得 Windows CPU/CUDA/Vulkan 与 GGUI 证据，但 
   present、fence poll 与后续工作，且不会发生第二次 abort。覆盖 offscreen 与可用的
   X11/Wayland headed `show() -> destroy() -> reset()`。
 
+### Runtime 可观测性与有界 trace
+
+F4 runtime statistics/trace 已取得 Windows CPU/CUDA/Vulkan 功能证据，但 Linux
+发行证据仍待复测：
+
+- 分别以 GCC/Clang 构建 `taichi_runtime_foundation_tests` 与 Python extension，
+  覆盖 CPU-only、关闭 CUDA、关闭 Vulkan 及完整配置。runtime-statistics/runtime-trace
+  C++ 测试执行 ASan/UBSan；并发 trace start/stop、session 切换、thread-shard owner
+  与 Program reset 执行 TSAN；
+- 在 CPU、CUDA、Vulkan 上运行 `tests/python/test_runtime_statistics.py`、
+  `tests/python/test_runtime_trace.py` 和
+  `tests/python/test_runtime_public_api.py`。验证不可变 schema-v1 snapshot、
+  backend-specific `None` 可用性、Program-domain reset 隔离、保留 workload
+  exception 的导出、有界 overflow 计数，以及有效的 Chrome/Perfetto JSON；
+- 确认实现只使用标准 C++ synchronization、TLS、clock 和文件输出，不取得 Win32
+  handle，也不依赖 Windows path 语义；在 Linux 覆盖非 ASCII 路径与导出失败；
+- 仅在确认没有其他 Python 进程占用 GPU 后运行
+  `benchmarks/runtime_trace_bench.py`。记录多轮 trace-off/trace-on CPU、CUDA、
+  Vulkan 样本、trace allocation bytes、recorded/dropped event 与精确数值结果。
+  低于噪声范围的变化只能作为观察值，不得声称诊断功能带来加速。
+
 ### Dense Field Graph 矩阵
 
 本小节全部仍待 Linux 复测；Windows 结果不能满足这些门禁。

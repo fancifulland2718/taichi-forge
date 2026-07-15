@@ -40,7 +40,7 @@ Git 源码边界，不把当前 PyPI 文件列表误当成全部历史。
 
 | 版本 | 用户可见范围 |
 | --- | --- |
-| [0.5.0](docs/forge/release_notes.zh.md#050) | `0.4.25` 之后的异步 backend/runtime 安全；CUDA/Vulkan Graph replay 与生命周期加固；Dense Field Graph、严格参数/AD 合同和 block 级异构环境。 |
+| [0.5.0](docs/forge/release_notes.zh.md#050) | `0.4.25` 之后的异步 backend/runtime 安全与有界可观测性；CUDA/Vulkan Graph replay 与生命周期加固；Dense Field Graph、严格参数/AD 合同和 block 级异构环境。 |
 | [0.4.25](docs/forge/release_notes.zh.md#0425) | GGUI 事件泵与空 ImGui frame 生命周期修复。 |
 | [0.4.24](docs/forge/release_notes.zh.md#0424) | device-side GGUI 图像 packing 与渲染 cadence 改进。 |
 | [0.4.23](docs/forge/release_notes.zh.md#0423) | runtime/shim 拆包、device checks/metrics、Vulkan ArgPack 与 dense-native 修复。 |

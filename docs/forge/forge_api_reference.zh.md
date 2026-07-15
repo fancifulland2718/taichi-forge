@@ -86,6 +86,68 @@ prof.dump_chrome_trace("compile.json")
 - 这是开发和诊断 API，不适合保留在热循环中。
 - C++ pass 级计时的可见性依赖当前 runtime 构建。
 
+## `taichi_forge.runtime`
+
+调用 `ti.init()` 后，可通过 `ti.runtime` 使用运行时可观测性 API。它只报告当前
+Program generation，不改变 kernel、Graph 或 submission 语义。
+
+### `ti.runtime.stats()`
+
+返回不可变的 `RuntimeStatistics` snapshot：
+
+```python
+snapshot = ti.runtime.stats()
+print(snapshot.backend, snapshot.program_domain)
+print(snapshot.submission.kernel_submissions)
+print(snapshot.memory.device_raw_bytes)
+```
+
+schema 按 submission、synchronization、memory、transfer、Graph、display、
+first-fault 和 trace 分组。counter 在一个 Program generation 内累计；之后执行
+`ti.reset()` 不会改变已经取得的 snapshot。新 Program 使用不同的
+`program_domain` 和全新的 counter。
+
+当 active backend 或当前构建无法观测某项可选 measurement 时，该字段为 `None`；
+零表示该测量可用，但没有观察到活动。尤其不要把不可用的 device-memory 或 backend
+wait 数据转换成“实测为零”。读取 snapshot 不会有意等待 GPU 完成。
+
+### `ti.runtime.capabilities()`
+
+返回 active Program 的不可变 `RuntimeCapabilities`。它说明当前实现是否提供有界
+trace、Chrome trace 导出、backend wait/lock telemetry、device-memory telemetry 和
+CUDA mempool telemetry。它不是硬件 feature query，也不预测某个算法或 kernel 是否受支持。
+
+### `ti.runtime.trace(path, *, max_threads=16, events_per_thread=4096)`
+
+创建一次性 context manager，记录有界的 host-side runtime event，并导出
+Chrome/Perfetto 兼容 JSON：
+
+```python
+with ti.runtime.trace("runtime.json") as trace:
+    graph.run(arguments)
+    render_kernel(frame)
+
+print(trace.summary.recorded_events, trace.summary.dropped_events)
+```
+
+trace 默认关闭。启用的 session 一次分配固定的
+`max_threads * events_per_thread` event buffer；容量耗尽时不会扩容或阻塞。
+最多允许 64 个 thread shard 和 1,048,576 个总 event。无法取得 shard 的线程和超出
+容量的 event 都累计到 `dropped_events`。
+
+当前 event 覆盖 host submission、Program synchronization 与 bulk transfer 边界。
+它们不是 GPU timestamp，不能替代 CUDA、Vulkan 或厂商 GPU profiler。trace-on 开销
+可观测，因此应只围住有限的诊断窗口，不应长期保留在生产热循环中。
+
+一个 Python 进程同一时间只允许一个 runtime trace context；nested/concurrent context
+会被拒绝。context 会优先保留 workload exception，同时仍尝试 stop/export。若 context
+内执行 `ti.reset()`，最终导出的仍是进入时的 Program generation；之后新初始化
+Program 上的工作不会混入该 session。
+
+旧有 `ti.compile_profile()` 和 C++ timeline 拥有不同 owner、schema 与用途：
+compile profiling 测量编译，`ti.runtime.trace()` 测量有界 runtime host event。
+Program 上以 `_runtime_` 开头的 private method 是实现细节，不属于公开 API。
+
 ### `ti.real_func(fn)`
 
 位置：`taichi_forge.lang.kernel_impl`，导出为 `ti.real_func`。
