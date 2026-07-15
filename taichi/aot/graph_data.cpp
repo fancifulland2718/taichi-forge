@@ -1,5 +1,6 @@
 #include "taichi/aot/graph_data.h"
 #include "taichi/program/program.h"
+#include "taichi/program/runtime_fault.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/texture.h"
 #include "taichi/program/kernel.h"
@@ -995,23 +996,6 @@ bool is_cuda_graph_structural_driver_error(uint32_t error) {
          error == CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED;
 }
 
-bool is_cuda_context_fatal_error(uint32_t error) {
-  switch (error) {
-    case CUDA_ERROR_ILLEGAL_ADDRESS:
-    case CUDA_ERROR_LAUNCH_TIMEOUT:
-    case CUDA_ERROR_ASSERT:
-    case CUDA_ERROR_HARDWARE_STACK_ERROR:
-    case CUDA_ERROR_ILLEGAL_INSTRUCTION:
-    case CUDA_ERROR_MISALIGNED_ADDRESS:
-    case CUDA_ERROR_INVALID_ADDRESS_SPACE:
-    case CUDA_ERROR_INVALID_PC:
-    case CUDA_ERROR_LAUNCH_FAILED:
-      return true;
-    default:
-      return false;
-  }
-}
-
 void mark_cuda_graph_fallback(
     CompiledGraphCudaState &state,
     CompiledGraphFallbackReason reason,
@@ -1032,7 +1016,8 @@ bool handle_cuda_graph_driver_failure(CompiledGraphCudaState &state,
   if (state.diagnostics_enabled) {
     state.stats.last_driver_error = error;
   }
-  if (is_cuda_context_fatal_error(error)) {
+  if (classify_cuda_driver_error(error) ==
+      BackendErrorClassification::kFatal) {
     state.stats.last_path = CompiledGraphExecutionPath::none;
     state.stats.last_fallback_reason =
         CompiledGraphFallbackReason::fatal_driver_failure;

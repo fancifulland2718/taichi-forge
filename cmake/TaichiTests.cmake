@@ -119,6 +119,64 @@ if(LINUX)
 endif()
 add_test(NAME ${TESTS_NAME} COMMAND ${TESTS_NAME})
 
+# Keep the backend-neutral runtime state-machine tests independently runnable.
+# The aggregate executable also compiles backend/compiler mocks, so an
+# unrelated mock API change must not hide lifecycle regressions in this layer.
+set(TAICHI_RUNTIME_FOUNDATION_TESTS_NAME taichi_runtime_foundation_tests)
+add_executable(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
+  tests/cpp/program/runtime_fault_test.cpp)
+target_link_libraries(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
+  PRIVATE
+    taichi_core
+    taichi_common
+    gtest_main)
+if (TI_WITH_OPENGL OR TI_WITH_VULKAN)
+  target_link_libraries(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
+    PRIVATE gfx_runtime)
+endif()
+if (TI_WITH_VULKAN)
+  target_link_libraries(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
+    PRIVATE vulkan_rhi)
+endif()
+if (TI_WITH_OPENGL)
+  target_link_libraries(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
+    PRIVATE opengl_rhi)
+endif()
+if (TI_WITH_DX12)
+  target_link_libraries(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
+    PRIVATE dx12_runtime dx12_rhi)
+endif()
+target_include_directories(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/external/spdlog/include
+    ${PROJECT_SOURCE_DIR}/external/include
+    ${PROJECT_SOURCE_DIR}/external/eigen
+    ${PROJECT_SOURCE_DIR}/external/volk
+    ${PROJECT_SOURCE_DIR}/external/glad/include
+    ${PROJECT_SOURCE_DIR}/external/SPIRV-Tools/include
+    ${PROJECT_SOURCE_DIR}/external/Vulkan-Headers/include)
+target_include_directories(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
+  SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/external/VulkanMemoryAllocator/include)
+if (NOT ANDROID)
+  target_include_directories(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
+    PRIVATE external/glfw/include)
+endif()
+if (WIN32)
+  set_target_properties(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME} PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${TESTS_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${TESTS_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${TESTS_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${TESTS_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${TESTS_OUTPUT_DIR}")
+endif()
+if (LINUX)
+  target_link_options(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME} PUBLIC
+    -Wl,--exclude-libs=ALL -static-libgcc -static-libstdc++)
+endif()
+add_test(NAME ${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
+         COMMAND ${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME})
+
 # Keep the concurrency-sensitive backend regression cases independently
 # runnable.  The main C++ test executable also includes LLVM-only tests, which
 # may be unavailable in a lightweight backend runtime build.
