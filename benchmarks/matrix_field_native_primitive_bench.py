@@ -7,6 +7,17 @@ import time
 
 import numpy as np
 
+try:
+    from benchmarks.gpu_idle_guard import (
+        finalize_performance_measurement,
+        prepare_performance_measurement,
+    )
+except ModuleNotFoundError:
+    from gpu_idle_guard import (
+        finalize_performance_measurement,
+        prepare_performance_measurement,
+    )
+
 
 def _arch_value(ti, name):
     if name == "cpu":
@@ -77,10 +88,15 @@ def main():
     parser.add_argument("--n", type=int, default=4096)
     parser.add_argument("--groups", type=int, default=1024)
     parser.add_argument("--repeats", type=int, default=30)
+    parser.add_argument("--performance", action="store_true")
     args = parser.parse_args()
 
     import taichi_forge as ti
 
+    measurement_context = prepare_performance_measurement(
+        args.arch,
+        requested=args.performance,
+    )
     ti.init(arch=_arch_value(ti, args.arch), offline_cache=True)
 
     n = args.n
@@ -357,6 +373,13 @@ def main():
         "_native_grouped_reduce_plan",
     )
 
+    for result in results:
+        result.update(
+            finalize_performance_measurement(
+                measurement_context,
+                correct=bool(result.get("ok")),
+            )
+        )
     print(json.dumps(results, indent=2, sort_keys=True))
 
 

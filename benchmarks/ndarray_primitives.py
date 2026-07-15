@@ -7,6 +7,17 @@ import numpy as np
 import taichi_forge as ti
 from taichi_forge.lang import impl
 
+try:
+    from benchmarks.gpu_idle_guard import (
+        finalize_performance_measurement,
+        prepare_performance_measurement,
+    )
+except ModuleNotFoundError:
+    from gpu_idle_guard import (
+        finalize_performance_measurement,
+        prepare_performance_measurement,
+    )
+
 
 ARCHES = {
     "cpu": ti.cpu,
@@ -532,6 +543,14 @@ def main():
     parser.add_argument("--method-mode", choices=["native", "auto"], default="native")
     parser.add_argument("--internal-stats", action="store_true")
     parser.add_argument(
+        "--performance",
+        action="store_true",
+        help=(
+            "Produce performance-comparable timings. GPU runs are admitted "
+            "only after verifying no other Python compute process is active."
+        ),
+    )
+    parser.add_argument(
         "--primitive",
         choices=["transform", "scan", "reduce", "sort", "compact", "bucket", "gather", "scatter", "scatter_add", "grouped_reduce", "histogram", "all"],
         default="all",
@@ -541,6 +560,10 @@ def main():
     _WARMUPS = args.warmups
     _INTERNAL_STATS = args.internal_stats
 
+    measurement_context = prepare_performance_measurement(
+        args.arch,
+        requested=args.performance,
+    )
     ti.init(arch=ARCHES[args.arch], offline_cache=False)
     primitives = [
         "transform",
@@ -568,7 +591,21 @@ def main():
             elif primitive == "bucket":
                 method_override = args.bucket_method
             if not _available(args.arch, primitive, method_override):
-                results.append({"arch": args.arch, "n": n, "primitive": primitive, "ok": False, "skipped": True})
+                results.append(
+                    {
+                        "arch": args.arch,
+                        "n": n,
+                        "primitive": primitive,
+                        "ok": False,
+                        "skipped": True,
+                        **finalize_performance_measurement(
+                            measurement_context,
+                            correct=False,
+                            skipped=True,
+                            reason="provider unavailable",
+                        ),
+                    }
+                )
                 continue
             if primitive == "transform":
                 stats = run_transform(args.arch, n, args.repeats)
@@ -592,7 +629,17 @@ def main():
                 stats = run_histogram(args.arch, n, args.repeats, args.histogram_method)
             else:
                 stats = run_bucket(args.arch, n, args.repeats, args.bucket_method)
-            stats.update({"arch": args.arch, "n": n, "method_mode": args.method_mode})
+            stats.update(
+                {
+                    "arch": args.arch,
+                    "n": n,
+                    "method_mode": args.method_mode,
+                    **finalize_performance_measurement(
+                        measurement_context,
+                        correct=bool(stats.get("ok")),
+                    ),
+                }
+            )
             results.append(stats)
     payload = json.dumps(results, indent=2, sort_keys=True)
     if args.output:

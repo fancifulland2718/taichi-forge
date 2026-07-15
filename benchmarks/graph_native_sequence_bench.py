@@ -12,6 +12,17 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    from benchmarks.gpu_idle_guard import (
+        finalize_performance_measurement,
+        prepare_performance_measurement,
+    )
+except ModuleNotFoundError:
+    from gpu_idle_guard import (
+        finalize_performance_measurement,
+        prepare_performance_measurement,
+    )
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT_PREFIX = "GRAPH_NATIVE_SEQUENCE "
@@ -325,12 +336,22 @@ def _native_mode_preflight_skip(ti, mode: str) -> str | None:
 
 
 def _run_child(args) -> dict:
+    measurement_context = prepare_performance_measurement(
+        args.arch,
+        requested=args.performance,
+    )
     ti = _import_taichi(args.package)
     version = str(getattr(ti, "__version__", "unknown"))
     metadata_version = _package_metadata_version(args.package)
     preflight_skip = _native_mode_preflight_skip(ti, args.mode)
     if preflight_skip is not None:
         return {
+            **finalize_performance_measurement(
+                measurement_context,
+                correct=False,
+                skipped=True,
+                reason=preflight_skip,
+            ),
             "package": args.package,
             "ti_version": version,
             "package_metadata_version": metadata_version,
@@ -347,6 +368,12 @@ def _run_child(args) -> dict:
     actual_arch = impl.current_cfg().arch
     if actual_arch != requested_arch:
         return {
+            **finalize_performance_measurement(
+                measurement_context,
+                correct=False,
+                skipped=True,
+                reason="requested arch is not available",
+            ),
             "package": args.package,
             "ti_version": version,
             "package_metadata_version": metadata_version,
@@ -476,6 +503,7 @@ def _run_child(args) -> dict:
 
     ok, max_abs_error = _check(data, dst)
     result = {
+        **measurement_context,
         "package": args.package,
         "ti_version": version,
         "package_metadata_version": metadata_version,
@@ -510,6 +538,12 @@ def _run_child(args) -> dict:
         if instance_debug_info is not None:
             result["graph_instance_debug_info"] = instance_debug_info
     result.update(_stats_ms(samples))
+    result.update(
+        finalize_performance_measurement(
+            measurement_context,
+            correct=bool(result.get("ok")),
+        )
+    )
     return result
 
 
@@ -530,6 +564,7 @@ def _child_command(args, package: str, mode: str) -> list[str]:
         str(args.warmups),
         "--repeats",
         str(args.repeats),
+        *(["--performance"] if args.performance else []),
     ]
 
 
@@ -730,6 +765,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--n", type=int, default=1048576)
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--repeats", type=int, default=10)
+    parser.add_argument("--performance", action="store_true")
     parser.add_argument("--forge-pythonpath", default=str(ROOT / "python"))
     parser.add_argument(
         "--forge-pyd",

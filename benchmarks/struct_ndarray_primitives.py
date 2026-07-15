@@ -7,6 +7,17 @@ import numpy as np
 import taichi_forge as ti
 from taichi_forge.lang import impl
 
+try:
+    from benchmarks.gpu_idle_guard import (
+        finalize_performance_measurement,
+        prepare_performance_measurement,
+    )
+except ModuleNotFoundError:
+    from gpu_idle_guard import (
+        finalize_performance_measurement,
+        prepare_performance_measurement,
+    )
+
 
 ARCHES = {
     "cpu": ti.cpu,
@@ -759,6 +770,7 @@ def main():
     parser.add_argument("--scatter-add-method", default=None)
     parser.add_argument("--method-mode", choices=["native", "auto"], default="native")
     parser.add_argument("--internal-stats", action="store_true")
+    parser.add_argument("--performance", action="store_true")
     parser.add_argument(
         "--primitive",
         choices=[
@@ -782,6 +794,10 @@ def main():
     _WARMUPS = args.warmups
     _INTERNAL_STATS = args.internal_stats
 
+    measurement_context = prepare_performance_measurement(
+        args.arch,
+        requested=args.performance,
+    )
     ti.init(arch=ARCHES[args.arch], offline_cache=False)
     primitives = (
         [
@@ -820,6 +836,12 @@ def main():
                         "primitive": primitive,
                         "ok": False,
                         "skipped": True,
+                        **finalize_performance_measurement(
+                            measurement_context,
+                            correct=False,
+                            skipped=True,
+                            reason="provider unavailable",
+                        ),
                     }
                 )
                 continue
@@ -851,7 +873,16 @@ def main():
                 )
             else:
                 stats = run_bucket(args.arch, n, args.repeats, args.bucket_method)
-            stats.update({"arch": args.arch, "n": n})
+            stats.update(
+                {
+                    "arch": args.arch,
+                    "n": n,
+                    **finalize_performance_measurement(
+                        measurement_context,
+                        correct=bool(stats.get("ok")),
+                    ),
+                }
+            )
             results.append(stats)
     payload = json.dumps(results, indent=2, sort_keys=True)
     if args.output:

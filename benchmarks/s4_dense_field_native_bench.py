@@ -10,6 +10,11 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    from benchmarks.gpu_idle_guard import prepare_performance_measurement
+except ModuleNotFoundError:
+    from gpu_idle_guard import prepare_performance_measurement
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT_PREFIX = "S4_DENSE_FIELD_BENCH "
@@ -585,6 +590,10 @@ def run_child(args: argparse.Namespace) -> int:
 
     _BUCKET_OVERRIDE = args.bucket_override
     _KEY_PATTERN = args.key_pattern
+    measurement_context = prepare_performance_measurement(
+        args.arch,
+        requested=args.performance,
+    )
     ti = _import_taichi(args.package)
     pid = os.getpid()
     sample_gpu = args.arch in ("cuda", "vulkan")
@@ -652,6 +661,7 @@ def run_child(args: argparse.Namespace) -> int:
     internal = _collect_internal_stats(ti, args, expected_sync_calls)
 
     result = {
+        **measurement_context,
         "package": args.package,
         "package_version": ".".join(str(x) for x in ti.__version__[:3]),
         "arch": args.arch,
@@ -757,6 +767,8 @@ def run_matrix(args: argparse.Namespace) -> int:
                         cmd.extend(["--bucket-override", str(args.bucket_override)])
                     if args.internal_stats:
                         cmd.append("--internal-stats")
+                    if args.performance:
+                        cmd.append("--performance")
                     if args.key_pattern != "default":
                         cmd.extend(["--key-pattern", args.key_pattern])
                     print("RUN " + " ".join(cmd), flush=True)
@@ -846,6 +858,8 @@ def run_matrix(args: argparse.Namespace) -> int:
                 "gpu_peak_delta_mb",
                 "gpu_peak_mb",
                 "init_ms",
+                "performance_valid",
+                "gpu_idle_verified",
             ],
         )
         writer.writeheader()
@@ -870,6 +884,12 @@ def run_matrix(args: argparse.Namespace) -> int:
                     "gpu_peak_delta_mb": row["gpu_dedicated_mb"]["peak_delta"],
                     "gpu_peak_mb": row["gpu_dedicated_mb"]["peak"],
                     "init_ms": row["init_ms"],
+                    "performance_valid": row["measurement"][
+                        "performance_valid"
+                    ],
+                    "gpu_idle_verified": (
+                        row["measurement"].get("gpu_idle") or {}
+                    ).get("verified", False),
                 }
             )
     print(f"WROTE {out_dir / 'summary.json'}")
@@ -906,6 +926,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--method-override")
     parser.add_argument("--internal-stats", action="store_true")
+    parser.add_argument("--performance", action="store_true")
     parser.add_argument("--indices-storage", choices=["ndarray", "field"], default="ndarray")
     parser.add_argument("--bucket-override", type=int)
     parser.add_argument(

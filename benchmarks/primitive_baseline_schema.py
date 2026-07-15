@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 
-BASELINE_SCHEMA_VERSION = 1
+BASELINE_SCHEMA_VERSION = 2
 
 BASELINE_COLUMNS = [
     "schema_version",
@@ -13,17 +13,33 @@ BASELINE_COLUMNS = [
     "case",
     "primitive",
     "arch",
+    "environment_os",
+    "environment_python",
+    "environment_gpu",
+    "environment_driver",
     "dtype",
     "n",
     "storage",
     "method",
     "correct",
+    "performance_requested",
+    "performance_valid",
+    "gpu_idle_verified",
+    "gpu_idle_tool",
+    "other_python_gpu_process_count",
+    "other_gpu_compute_process_count",
     "median_us",
     "p95_us",
     "api_return_median_us",
     "repeats",
     "warmup",
     "workspace_bytes_peak",
+    "workspace_bytes_current",
+    "workspace_bytes_persistent",
+    "workspace_bytes_reclaimable",
+    "kernel_launch_count",
+    "queue_submit_count",
+    "sync_count",
     "compile_elapsed_us",
     "compile_kernel_calls",
     "compile_kernel_total_s",
@@ -94,6 +110,9 @@ def _compile_kernel_stats(summary):
 def _case_rows(summary_path, summary):
     compile_info = summary.get("compile", {})
     cache_info = summary.get("cache", {})
+    measurement = summary.get("measurement", {})
+    gpu_idle = measurement.get("gpu_idle") or {}
+    environment = summary.get("environment", {})
     compile_kernel_calls, compile_kernel_total_s = _compile_kernel_stats(summary)
     case_results = summary.get("case_results", {})
     case_names = summary.get("cases") or sorted(case_results)
@@ -103,6 +122,7 @@ def _case_rows(summary_path, summary):
         result = case_results.get(case_name, {})
         timing = result.get("timing", {})
         memory = result.get("memory", {})
+        kernel_profile = result.get("kernel_profile", {})
         primitive = _infer_primitive(summary, case_name)
         rows.append(
             {
@@ -111,11 +131,27 @@ def _case_rows(summary_path, summary):
                 "case": case_name,
                 "primitive": primitive,
                 "arch": summary.get("arch"),
+                "environment_os": environment.get("os"),
+                "environment_python": environment.get("python"),
+                "environment_gpu": environment.get("gpu"),
+                "environment_driver": environment.get("driver"),
                 "dtype": summary.get("dtype"),
                 "n": summary.get("n"),
                 "storage": _storage_for(summary, primitive),
                 "method": _method_for(summary, primitive),
                 "correct": result.get("correct"),
+                "performance_requested": measurement.get(
+                    "performance_requested", False
+                ),
+                "performance_valid": measurement.get("performance_valid", False),
+                "gpu_idle_verified": gpu_idle.get("verified", False),
+                "gpu_idle_tool": gpu_idle.get("tool"),
+                "other_python_gpu_process_count": len(
+                    gpu_idle.get("other_python_processes", ())
+                ),
+                "other_gpu_compute_process_count": len(
+                    gpu_idle.get("other_compute_processes", ())
+                ),
                 "median_us": timing.get("median_us"),
                 "p95_us": timing.get("p95_us"),
                 "api_return_median_us": timing.get("api_return_median_us"),
@@ -124,6 +160,16 @@ def _case_rows(summary_path, summary):
                 "workspace_bytes_peak": memory.get(
                     "workspace_bytes_peak", summary.get("workspace_bytes_peak_sum")
                 ),
+                "workspace_bytes_current": memory.get("workspace_bytes_current"),
+                "workspace_bytes_persistent": memory.get(
+                    "workspace_bytes_persistent"
+                ),
+                "workspace_bytes_reclaimable": memory.get(
+                    "workspace_bytes_reclaimable"
+                ),
+                "kernel_launch_count": kernel_profile.get("record_count"),
+                "queue_submit_count": result.get("queue_submit_count"),
+                "sync_count": result.get("sync_count"),
                 "compile_elapsed_us": compile_info.get("elapsed_us"),
                 "compile_kernel_calls": compile_kernel_calls,
                 "compile_kernel_total_s": compile_kernel_total_s,

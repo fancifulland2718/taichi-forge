@@ -10,6 +10,17 @@ import numpy as np
 
 import taichi_forge as ti
 
+try:
+    from benchmarks.gpu_idle_guard import (
+        finalize_performance_measurement,
+        prepare_performance_measurement,
+    )
+except ModuleNotFoundError:
+    from gpu_idle_guard import (
+        finalize_performance_measurement,
+        prepare_performance_measurement,
+    )
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -213,6 +224,7 @@ def main():
     parser.add_argument("--n", type=int, default=2048)
     parser.add_argument("--warmups", type=int, default=5)
     parser.add_argument("--repeats", type=int, default=30)
+    parser.add_argument("--performance", action="store_true")
     parser.add_argument(
         "--out-dir",
         type=Path,
@@ -222,10 +234,20 @@ def main():
 
     rows = []
     for arch_name in args.arches:
+        measurement_context = prepare_performance_measurement(
+            arch_name,
+            requested=args.performance,
+        )
         for mode in args.modes:
             ti.reset()
             ti.init(arch=_arch(arch_name), offline_cache=False)
             row = _run_mode(arch_name, mode, args.n, args.warmups, args.repeats)
+            row.update(
+                finalize_performance_measurement(
+                    measurement_context,
+                    correct=bool(row.get("ok")),
+                )
+            )
             rows.append(row)
             print(
                 "D6_PRIMITIVE_SEQUENCE "
