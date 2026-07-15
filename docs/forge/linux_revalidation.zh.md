@@ -119,6 +119,9 @@ F4 runtime statistics/trace 已取得 Windows CPU/CUDA/Vulkan 功能证据，但
   allocation/snapshot stress 下验证 capacity/used/available 与
   requested-live/waste 恒等式；RSS/page fault 在 allocator 外部采集，不能把 reserved
   virtual bytes 改名为 committed；
+- 使用 `TI_HOST_ALLOCATOR_ADAPTIVE_CHUNKS` 做 fresh-process adaptive/legacy
+  A/B，验证从 16 MiB 开始的几何 mmap 增长、精确 large mapping、reset/munmap、
+  RSS/VmSize/page fault，以及普通 init/kernel/Graph steady state 无回退；
 - 确认实现只使用标准 C++ synchronization、TLS、clock 和文件输出，不取得 Win32
   handle，也不依赖 Windows path 语义；在 Linux 覆盖非 ASCII 路径与导出失败；
 - 仅在确认没有其他 Python 进程占用 GPU 后运行

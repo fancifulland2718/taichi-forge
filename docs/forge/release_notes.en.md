@@ -217,6 +217,15 @@ profiling, and GGUI device-image staging were already public by `0.4.25`.
   chunk classes, and lifetime peaks. Windows reserve+commit is distinguished
   from Linux anonymous-mapping residency instead of fabricating committed
   bytes.
+- Replaced the fixed 1 GiB host slab with a 16 MiB geometrically growing
+  policy capped at the existing 1 GiB ceiling. Oversized individual requests
+  keep request-sized mappings, while a per-chunk address index and newest-slab
+  search avoid linear-scan regressions as the mapping count grows. An internal
+  environment rollback can restore the legacy policy for release diagnosis.
+  In controlled Windows fresh-process A/B, CPU/Vulkan initialization host
+  commit fell from 1 GiB to 16 MiB; incremental private bytes fell by about
+  97.4% on CPU and 86.8% on Vulkan. Ordinary kernel/Graph median changes stayed
+  within 1.5% across CPU/CUDA/Vulkan; Linux measurement remains pending.
 - Separated CUDA device capability from LLVM code-generation targets, isolated
   target-specific caches, removed the CUDA-13.2-only iterator dependency,
   hardened the single-runtime-wheel contract, and avoided unused CUDA

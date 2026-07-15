@@ -119,13 +119,20 @@ wait 数据转换成“实测为零”。读取 snapshot 不会有意等待 GPU 
 | `reserved_bytes`、`committed_bytes` | 当前 OS mapping 大小；Windows reserve+commit 下两者相等。Linux anonymous mapping 的 residency 需要 OS RSS/page 查询，因此 committed 返回 `None`。 |
 | `capacity_bytes`、`used_bytes`、`available_bytes` | allocator 拥有的容量、包含 alignment 的 bump-cursor 消耗，以及仍可分配的尾部。 |
 | `alignment_waste_bytes`、`unreclaimed_released_bytes`、`wasted_bytes` | 对齐损耗、当前策略无法复用的已释放 slab 字节及两者之和。 |
-| `*_chunk_count` | 当前总数、默认 slab、请求大于默认值的 large mapping 和 exclusive mapping 数。 |
+| `*_chunk_count` | 当前总数、adaptive slab、请求大于下一 slab 的 large mapping 和 exclusive mapping 数。 |
 | `peak_reserved_bytes`、`peak_used_bytes`、`peak_wasted_bytes`、`peak_chunk_count` | host pool lifetime peak；有意跨 Program reset 保留。 |
 
 旧的 flat `host_requested_live_bytes`、`host_raw_bytes` 与
 `host_capacity_bytes` 保留为兼容 alias；新测量代码应优先使用
 `host_allocator`。`ti.tools.memory_pool_stats()` 在旧 dictionary 中公开相同
 host 值；它仍是诊断 snapshot，不是 reset 或 allocator-control API。
+
+默认 host policy 从 16 MiB slab 开始，按几何级数增长到既有 1 GiB 上限；大于
+下一 slab 的单次请求使用按请求大小并包含必要对齐空间的 large mapping，且不推进后续
+小请求的增长序列。
+仅为发行诊断，可在 import/init Taichi 前设置
+`TI_HOST_ALLOCATOR_ADAPTIVE_CHUNKS=0`，恢复旧的固定 1 GiB slab。该环境变量只是
+内部回退门禁，不是稳定的 `ti.init` 参数或长期 allocator-control API。
 
 ### `ti.runtime.capabilities()`
 

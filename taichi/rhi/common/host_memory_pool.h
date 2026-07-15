@@ -60,6 +60,7 @@ class TI_DLL_EXPORT HostMemoryPool {
   HostMemoryPoolStats get_stats();
 
  protected:
+  explicit HostMemoryPool(bool adaptive_chunk_policy);
   void *allocate_raw_memory(std::size_t size);
   void deallocate_raw_memory(void *ptr);
   void update_allocator_peaks_locked();
@@ -70,6 +71,7 @@ class TI_DLL_EXPORT HostMemoryPool {
 
   std::unique_ptr<UnifiedAllocator> allocator_;
   std::mutex mut_allocation_;
+  bool adaptive_chunk_policy_{true};
 
   // R1.c counters; updated under mut_allocation_, no extra atomics.
   uint64_t allocate_count_{0};

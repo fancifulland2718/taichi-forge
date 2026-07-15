@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -26,6 +28,17 @@ class HostMemoryPoolTestHelper {
   }
   static size_t getDefaultAllocatorSize() {
     return UnifiedAllocator::default_allocator_size;
+  }
+  static void setInitialAllocatorSize(std::size_t size) {
+    UnifiedAllocator::initial_allocator_size = size;
+  }
+  static size_t getInitialAllocatorSize() {
+    return UnifiedAllocator::initial_allocator_size;
+  }
+  static std::unique_ptr<HostMemoryPool> createPool(
+      bool adaptive_chunk_policy) {
+    return std::unique_ptr<HostMemoryPool>(
+        new HostMemoryPool(adaptive_chunk_policy));
   }
   static std::vector<std::pair<std::uintptr_t, std::size_t>> getRawChunks(
       HostMemoryPool &pool) {
@@ -77,6 +90,26 @@ class DefaultAllocatorSizeGuard {
 
  private:
   std::size_t old_size_;
+};
+
+class AdaptiveAllocatorSizeGuard {
+ public:
+  AdaptiveAllocatorSizeGuard(std::size_t initial_size,
+                             std::size_t maximum_size)
+      : old_initial_(
+            HostMemoryPoolTestHelper::getInitialAllocatorSize()),
+        old_maximum_(HostMemoryPoolTestHelper::getDefaultAllocatorSize()) {
+    HostMemoryPoolTestHelper::setInitialAllocatorSize(initial_size);
+    HostMemoryPoolTestHelper::setDefaultAllocatorSize(maximum_size);
+  }
+  ~AdaptiveAllocatorSizeGuard() {
+    HostMemoryPoolTestHelper::setInitialAllocatorSize(old_initial_);
+    HostMemoryPoolTestHelper::setDefaultAllocatorSize(old_maximum_);
+  }
+
+ private:
+  std::size_t old_initial_;
+  std::size_t old_maximum_;
 };
 
 void expectAllocationInsideRawChunk(HostMemoryPool &pool,
@@ -305,6 +338,116 @@ TEST(HostMemoryPool, TelemetryClassifiesLargeAndExclusiveChunks) {
   EXPECT_EQ(stats.peak_reserved_bytes, peak_reserved);
   EXPECT_EQ(stats.peak_used_bytes, peak_used);
   EXPECT_EQ(stats.peak_chunks, peak_chunks);
+}
+
+TEST(HostMemoryPool, AdaptiveSlabsGrowGeometricallyAndStopAtMaximum) {
+  AdaptiveAllocatorSizeGuard allocator_size(64, 256);
+  auto pool = HostMemoryPoolTestHelper::createPool(true);
+
+  pool->allocate(64, 1);
+  pool->allocate(128, 1);
+  pool->allocate(256, 1);
+  pool->allocate(256, 1);
+
+  const auto stats = pool->get_stats();
+  EXPECT_EQ(stats.capacity_bytes, 64 + 128 + 256 + 256);
+  EXPECT_EQ(stats.used_bytes, stats.capacity_bytes);
+  EXPECT_EQ(stats.slab_chunks, 4);
+  EXPECT_EQ(stats.large_chunks, 0);
+
+  auto raw_chunks = HostMemoryPoolTestHelper::getRawChunks(*pool);
+  std::vector<std::size_t> sizes;
+  for (const auto &[address, size] : raw_chunks) {
+    (void)address;
+    sizes.push_back(size);
+  }
+  std::sort(sizes.begin(), sizes.end());
+  EXPECT_EQ(sizes, (std::vector<std::size_t>{64, 128, 256, 256}));
+}
+
+TEST(HostMemoryPool, AdaptiveLargeRequestDoesNotInflateNextSlab) {
+  AdaptiveAllocatorSizeGuard allocator_size(64, 256);
+  auto pool = HostMemoryPoolTestHelper::createPool(true);
+
+  pool->allocate(65, 1);
+  auto stats = pool->get_stats();
+  EXPECT_EQ(stats.capacity_bytes, 65);
+  EXPECT_EQ(stats.slab_chunks, 0);
+  EXPECT_EQ(stats.large_chunks, 1);
+
+  pool->allocate(1, 1);
+  stats = pool->get_stats();
+  EXPECT_EQ(stats.capacity_bytes, 65 + 64);
+  EXPECT_EQ(stats.slab_chunks, 1);
+  EXPECT_EQ(stats.large_chunks, 1);
+}
+
+TEST(HostMemoryPool, LegacyPolicyKeepsFixedMaximumSlabsAcrossReset) {
+  AdaptiveAllocatorSizeGuard allocator_size(64, 256);
+  auto pool = HostMemoryPoolTestHelper::createPool(false);
+
+  pool->allocate(1, 1);
+  pool->allocate(255, 1);
+  pool->allocate(1, 1);
+  auto stats = pool->get_stats();
+  EXPECT_EQ(stats.capacity_bytes, 512);
+  EXPECT_EQ(stats.slab_chunks, 2);
+  EXPECT_EQ(stats.large_chunks, 0);
+
+  pool->reset();
+  pool->allocate(1, 1);
+  stats = pool->get_stats();
+  EXPECT_EQ(stats.capacity_bytes, 256);
+  EXPECT_EQ(stats.slab_chunks, 1);
+}
+
+TEST(HostMemoryPool, ExclusiveSwapEraseKeepsReleaseAddressIndexValid) {
+  DefaultAllocatorSizeGuard allocator_size(64);
+  HostMemoryPool pool;
+
+  void *first = pool.allocate(64, 1);
+  void *exclusive = pool.allocate(17, 1, true);
+  void *second = pool.allocate(1, 1);
+  pool.release(17, exclusive);
+  pool.release(1, second);
+
+  auto stats = pool.get_stats();
+  EXPECT_EQ(stats.requested_live_bytes, 64);
+  EXPECT_EQ(stats.unreclaimed_released_bytes, 1);
+  EXPECT_EQ(stats.slab_chunks, 2);
+  EXPECT_EQ(stats.exclusive_chunks, 0);
+
+  pool.release(64, first);
+  stats = pool.get_stats();
+  EXPECT_EQ(stats.requested_live_bytes, 0);
+  EXPECT_EQ(stats.unreclaimed_released_bytes, 65);
+}
+
+TEST(HostMemoryPool, AdaptiveResetChurnRestartsInitialSlab) {
+  AdaptiveAllocatorSizeGuard allocator_size(64, 256);
+  auto pool = HostMemoryPoolTestHelper::createPool(true);
+
+  for (int cycle = 0; cycle < 100; ++cycle) {
+    pool->allocate(64, 1);
+    pool->allocate(128, 1);
+    pool->allocate(300, 1);
+    const auto live = pool->get_stats();
+    EXPECT_EQ(live.capacity_bytes, 64 + 128 + 300);
+    EXPECT_EQ(live.slab_chunks, 2);
+    EXPECT_EQ(live.large_chunks, 1);
+
+    pool->reset();
+    const auto reset = pool->get_stats();
+    EXPECT_EQ(reset.reserved_bytes, 0);
+    EXPECT_EQ(reset.capacity_bytes, 0);
+    EXPECT_EQ(reset.unified_chunks, 0);
+    EXPECT_GE(reset.peak_reserved_bytes, 64 + 128 + 300);
+  }
+
+  pool->allocate(1, 1);
+  const auto restarted = pool->get_stats();
+  EXPECT_EQ(restarted.capacity_bytes, 64);
+  EXPECT_EQ(restarted.slab_chunks, 1);
 }
 
 TEST(HostMemoryPool, ConcurrentTelemetrySnapshotsStayConsistent) {

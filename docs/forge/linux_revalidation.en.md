@@ -151,6 +151,10 @@ evidence. Their Linux release evidence remains pending:
   verify capacity/used/available and requested-live/waste invariants under
   concurrent allocation/snapshot stress, and collect RSS/page faults outside
   the allocator rather than relabeling reserved virtual bytes.
+- Run fresh-process adaptive/legacy A/B with
+  `TI_HOST_ALLOCATOR_ADAPTIVE_CHUNKS`, verify 16 MiB geometric mmap growth,
+  exact large mappings, reset/munmap, RSS/VmSize/page faults, and no regression
+  in ordinary init/kernel/Graph steady state.
 - Confirm the implementation uses standard C++ synchronization, TLS, clocks,
   and file output only; it must not acquire a Win32 handle or depend on Windows
   path semantics. Exercise non-ASCII and failed export paths on Linux.

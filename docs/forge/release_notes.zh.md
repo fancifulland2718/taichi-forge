@@ -198,6 +198,13 @@
   cursor consumption、alignment/已释放不可复用 waste、slab/large/exclusive chunk
   与 lifetime peak。Windows reserve+commit 和 Linux anonymous-mapping residency
   分开表达，不伪造 committed bytes。
+- 将固定 1 GiB host slab 改为从 16 MiB 开始、按几何级数增长并以既有 1 GiB
+  为上限的策略；超出下一 slab 的单次大请求仍使用按请求大小的 mapping，并用每 chunk
+  地址索引和 newest-slab search 避免 mapping 增多后的线性扫描回退；保留仅供发行诊断
+  的内部 legacy policy 回退环境变量。
+  在受控 Windows fresh-process A/B 中，CPU/Vulkan 初始化 host commit 从 1 GiB
+  降到 16 MiB；CPU incremental private bytes 约降低 97.4%，Vulkan 约降低 86.8%。
+  CPU/CUDA/Vulkan 的普通 kernel/Graph median 变化均在 1.5% 内；Linux 测量待复测。
 - 分离 CUDA device capability 与 LLVM code-generation target，隔离 target cache，
   移除 CUDA-13.2-only iterator 依赖，加固单 runtime wheel，并避免无返回值 CUDA
   kernel 的无用 result allocation。

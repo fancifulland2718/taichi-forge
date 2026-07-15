@@ -9,7 +9,9 @@
 namespace taichi::lang {
 
 std::size_t UnifiedAllocator::default_allocator_size =
-    1 << 30;  // 1 GB per allocator
+    1 << 30;  // 1 GiB maximum slab
+std::size_t UnifiedAllocator::initial_allocator_size =
+    16 << 20;  // 16 MiB initial adaptive slab
 
 template <typename T>
 static void swap_erase_vector(std::vector<T> &vec, size_t idx) {
@@ -26,8 +28,18 @@ static void swap_erase_vector(std::vector<T> &vec, size_t idx) {
   // search for reusable memory
 }
 
-UnifiedAllocator::UnifiedAllocator(HostMemoryPool *owner) : owner_(owner) {
+UnifiedAllocator::UnifiedAllocator(HostMemoryPool *owner,
+                                   bool adaptive_chunk_policy)
+    : owner_(owner), adaptive_chunk_policy_(adaptive_chunk_policy) {
   TI_ASSERT(owner_ != nullptr);
+  TI_ERROR_IF(default_allocator_size == 0,
+              "Host allocator maximum slab size must be non-zero");
+  TI_ERROR_IF(initial_allocator_size == 0,
+              "Host allocator initial slab size must be non-zero");
+  next_slab_size_ =
+      adaptive_chunk_policy_
+          ? std::min(initial_allocator_size, default_allocator_size)
+          : default_allocator_size;
 }
 
 bool UnifiedAllocator::checked_add_size(std::size_t lhs,
@@ -63,6 +75,18 @@ bool UnifiedAllocator::align_up(std::uintptr_t value,
   return checked_add_address(value, padding, result);
 }
 
+void UnifiedAllocator::grow_next_slab_size() {
+  if (!adaptive_chunk_policy_ ||
+      next_slab_size_ >= default_allocator_size) {
+    return;
+  }
+  if (next_slab_size_ > default_allocator_size / 2) {
+    next_slab_size_ = default_allocator_size;
+  } else {
+    next_slab_size_ *= 2;
+  }
+}
+
 void *UnifiedAllocator::allocate(std::size_t size,
                                  std::size_t alignment,
                                  bool exclusive) {
@@ -76,10 +100,11 @@ void *UnifiedAllocator::allocate(std::size_t size,
               "Exclusive zero-sized host allocation is not supported");
 
   if (!chunks_.empty() && !exclusive) {
-    // Search for a non-exclusive chunk that has enough space
-    for (size_t chunk_id = 0; chunk_id < chunks_.size(); chunk_id++) {
-      auto &chunk = chunks_[chunk_id];
-      if (chunk.is_exclusive) {
+    // Recent slabs are overwhelmingly likely to own the remaining bump tail.
+    // Large chunks remain request-owned instead of becoming implicit slabs.
+    for (size_t chunk_id = chunks_.size(); chunk_id > 0; --chunk_id) {
+      auto &chunk = chunks_[chunk_id - 1];
+      if (chunk.is_exclusive || chunk.is_large) {
         continue;
       }
       auto head = reinterpret_cast<std::uintptr_t>(chunk.head);
@@ -126,10 +151,16 @@ void *UnifiedAllocator::allocate(std::size_t size,
               alignment);
 
   std::size_t allocation_size = minimum_allocation_size;
+  bool is_large = false;
   if (!exclusive) {
-    // Do not allocate large memory chunks for "exclusive" allocation
-    // to improve memory and allocation efficiency.
-    allocation_size = std::max(allocation_size, default_allocator_size);
+    if (minimum_allocation_size > next_slab_size_) {
+      // A request larger than the next slab gets a request-sized,
+      // alignment-safe mapping and does not inflate the geometric slab
+      // sequence used by later small requests.
+      is_large = true;
+    } else {
+      allocation_size = next_slab_size_;
+    }
   }
   TI_ERROR_IF(allocation_size == 0,
               "Host allocation mapping size must be non-zero");
@@ -155,8 +186,7 @@ void *UnifiedAllocator::allocate(std::size_t size,
   chunk.head = reinterpret_cast<void *>(head);
   chunk.tail = reinterpret_cast<void *>(tail);
   chunk.is_exclusive = exclusive;
-  chunk.is_large =
-      !exclusive && minimum_allocation_size > default_allocator_size;
+  chunk.is_large = is_large;
   chunk.requested_size = size;
   chunk.released_size = 0;
 
@@ -165,6 +195,15 @@ void *UnifiedAllocator::allocate(std::size_t size,
   TI_ASSERT(ret % alignment == 0);
 
   chunks_.emplace_back(std::move(chunk));
+  const auto chunk_index = chunks_.size() - 1;
+  const auto [index_it, index_inserted] =
+      chunk_indices_by_base_.emplace(data, chunk_index);
+  (void)index_it;
+  TI_ASSERT(index_inserted);
+  if (!exclusive && !is_large) {
+    // Advance the policy only after the mapping and chunk insertion succeed.
+    grow_next_slab_size();
+  }
   const auto consumed = head - data;
   const auto alignment_waste = ret - data;
   capacity_bytes_ += allocation_size;
@@ -173,7 +212,7 @@ void *UnifiedAllocator::allocate(std::size_t size,
   requested_live_bytes_ += size;
   if (exclusive) {
     ++exclusive_chunk_count_;
-  } else if (minimum_allocation_size > default_allocator_size) {
+  } else if (is_large) {
     ++large_chunk_count_;
   } else {
     ++slab_chunk_count_;
@@ -185,35 +224,22 @@ void *UnifiedAllocator::release(std::size_t size, void *ptr) {
   // UnifiedAllocator is special in that it never reuses the previously
   // allocated memory We have to release the entire memory chunk to avoid memory
   // leak
-  int remove_idx = -1;
-  int nonexclusive_idx = -1;
-  void *raw_ptr = nullptr;
   const auto released_address = reinterpret_cast<std::uintptr_t>(ptr);
-  for (size_t chunk_idx = 0; chunk_idx < chunks_.size(); chunk_idx++) {
-    auto &chunk = chunks_[chunk_idx];
-
-    if (chunk.is_exclusive && chunk.allocation == ptr) {
-      remove_idx = chunk_idx;
-      raw_ptr = chunk.data;
-      break;
-    }
-    if (!chunk.is_exclusive) {
-      const auto data = reinterpret_cast<std::uintptr_t>(chunk.data);
-      const auto head = reinterpret_cast<std::uintptr_t>(chunk.head);
-      if (released_address >= data &&
-          (released_address < head ||
-           (size == 0 && released_address == head))) {
-        nonexclusive_idx = chunk_idx;
-      }
-    }
+  auto location = chunk_indices_by_base_.upper_bound(released_address);
+  if (location == chunk_indices_by_base_.begin()) {
+    return nullptr;
   }
+  --location;
+  const auto chunk_index = location->second;
+  TI_ASSERT(chunk_index < chunks_.size());
+  auto &chunk = chunks_[chunk_index];
+  const auto data = reinterpret_cast<std::uintptr_t>(chunk.data);
+  const auto head = reinterpret_cast<std::uintptr_t>(chunk.head);
 
-  if (remove_idx != -1) {
-    const auto &chunk = chunks_[remove_idx];
-    const auto data = reinterpret_cast<std::uintptr_t>(chunk.data);
+  if (chunk.is_exclusive && chunk.allocation == ptr) {
+    void *raw_ptr = chunk.data;
     const auto allocation =
         reinterpret_cast<std::uintptr_t>(chunk.allocation);
-    const auto head = reinterpret_cast<std::uintptr_t>(chunk.head);
     const auto tail = reinterpret_cast<std::uintptr_t>(chunk.tail);
     capacity_bytes_ -= tail - data;
     used_bytes_ -= head - data;
@@ -221,13 +247,23 @@ void *UnifiedAllocator::release(std::size_t size, void *ptr) {
     requested_live_bytes_ -=
         std::min<std::uint64_t>(requested_live_bytes_, chunk.requested_size);
     --exclusive_chunk_count_;
-    swap_erase_vector<MemoryChunk>(chunks_, remove_idx);
+    const auto last_index = chunks_.size() - 1;
+    chunk_indices_by_base_.erase(location);
+    if (chunk_index != last_index) {
+      const auto swapped_base = reinterpret_cast<std::uintptr_t>(
+          chunks_[last_index].data);
+      auto swapped_location = chunk_indices_by_base_.find(swapped_base);
+      TI_ASSERT(swapped_location != chunk_indices_by_base_.end());
+      swapped_location->second = chunk_index;
+    }
+    swap_erase_vector<MemoryChunk>(chunks_, chunk_index);
     // MemoryPool is responsible for releasing the raw memory
     return raw_ptr;
   }
 
-  if (nonexclusive_idx != -1) {
-    auto &chunk = chunks_[nonexclusive_idx];
+  if (!chunk.is_exclusive && released_address >= data &&
+      (released_address < head ||
+       (size == 0 && released_address == head))) {
     const auto unreclaimed_capacity =
         chunk.requested_size -
         std::min(chunk.requested_size, chunk.released_size);

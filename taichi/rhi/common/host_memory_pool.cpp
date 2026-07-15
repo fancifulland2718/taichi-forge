@@ -4,6 +4,8 @@
 #include <limits>
 #include <memory>
 
+#include "taichi/util/environ_config.h"
+
 #if defined(TI_PLATFORM_UNIX)
 #include <sys/mman.h>
 #else
@@ -22,11 +24,22 @@ uint64_t saturating_add(uint64_t lhs, uint64_t rhs) {
 
 }  // namespace
 
-HostMemoryPool::HostMemoryPool() {
-  allocator_ = std::unique_ptr<UnifiedAllocator>(new UnifiedAllocator(this));
+HostMemoryPool::HostMemoryPool()
+    : HostMemoryPool(
+          get_environ_config("TI_HOST_ALLOCATOR_ADAPTIVE_CHUNKS", 1) != 0) {
+}
 
-  TI_TRACE("Memory pool created. Default buffer size per allocator = {} MB",
-           UnifiedAllocator::default_allocator_size / 1024 / 1024);
+HostMemoryPool::HostMemoryPool(bool adaptive_chunk_policy)
+    : adaptive_chunk_policy_(adaptive_chunk_policy) {
+  allocator_ = std::unique_ptr<UnifiedAllocator>(
+      new UnifiedAllocator(this, adaptive_chunk_policy_));
+
+  TI_TRACE(
+      "Memory pool created. Adaptive chunks={}, initial slab={} MiB, maximum "
+      "slab={} MiB",
+      adaptive_chunk_policy_,
+      UnifiedAllocator::initial_allocator_size / 1024 / 1024,
+      UnifiedAllocator::default_allocator_size / 1024 / 1024);
 }
 
 void *HostMemoryPool::allocate(std::size_t size,
@@ -185,7 +198,8 @@ void HostMemoryPool::deallocate_raw_memory(void *ptr) {
 
 void HostMemoryPool::reset() {
   std::lock_guard<std::mutex> _(mut_allocation_);
-  allocator_ = std::unique_ptr<UnifiedAllocator>(new UnifiedAllocator(this));
+  allocator_ = std::unique_ptr<UnifiedAllocator>(
+      new UnifiedAllocator(this, adaptive_chunk_policy_));
 
   const auto ptr_map_copied = raw_memory_chunks_;
   for (auto &ptr : ptr_map_copied) {

@@ -9,7 +9,7 @@ import platform
 import time
 from pathlib import Path
 
-import taichi_forge as ti
+ti = None
 
 
 def _windows_memory():
@@ -93,14 +93,25 @@ def _stage(name, started_at=None):
 
 
 def main():
+    global ti
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", choices=("cpu", "cuda", "vulkan"), required=True)
+    parser.add_argument(
+        "--policy", choices=("adaptive", "legacy"), default="adaptive"
+    )
     parser.add_argument("--arrays", type=int, default=256)
     parser.add_argument("--items", type=int, default=4096)
     args = parser.parse_args()
     if args.arrays <= 0 or args.items <= 0:
         parser.error("--arrays and --items must be positive")
 
+    os.environ["TI_HOST_ALLOCATOR_ADAPTIVE_CHUNKS"] = (
+        "1" if args.policy == "adaptive" else "0"
+    )
+    import taichi_forge as ti_module
+
+    ti = ti_module
     arch = {"cpu": ti.cpu, "cuda": ti.cuda, "vulkan": ti.vulkan}[args.arch]
     stages = [_stage("imported")]
 
@@ -151,6 +162,7 @@ def main():
                 "platform": platform.platform(),
                 "pid": os.getpid(),
                 "arch": args.arch,
+                "policy": args.policy,
                 "arrays": args.arrays,
                 "items": args.items,
                 "stages": stages,

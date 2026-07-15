@@ -42,8 +42,10 @@ class UnifiedAllocator {
 
  private:
   static std::size_t default_allocator_size;
+  static std::size_t initial_allocator_size;
 
-  explicit UnifiedAllocator(HostMemoryPool *owner);
+  explicit UnifiedAllocator(HostMemoryPool *owner,
+                            bool adaptive_chunk_policy);
 
   void *allocate(std::size_t size,
                  std::size_t alignment,
@@ -62,10 +64,14 @@ class UnifiedAllocator {
   static bool align_up(std::uintptr_t value,
                        std::size_t alignment,
                        std::uintptr_t *result);
+  void grow_next_slab_size();
 
   HostMemoryPool *owner_{nullptr};
+  bool adaptive_chunk_policy_{true};
+  std::size_t next_slab_size_{0};
 
   std::vector<MemoryChunk> chunks_;
+  std::map<std::uintptr_t, std::size_t> chunk_indices_by_base_;
   std::uint64_t capacity_bytes_{0};
   std::uint64_t used_bytes_{0};
   std::uint64_t alignment_waste_bytes_{0};

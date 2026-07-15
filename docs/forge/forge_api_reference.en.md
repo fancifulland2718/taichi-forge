@@ -130,7 +130,7 @@ for GPU completion.
 | `reserved_bytes`, `committed_bytes` | Current OS mapping size; committed bytes equal reserved bytes for Windows reserve+commit. Linux reports `None` because anonymous-mapping residency needs an OS RSS/page query. |
 | `capacity_bytes`, `used_bytes`, `available_bytes` | Allocator-owned capacity, bump-cursor consumption including alignment, and still-allocatable tails. |
 | `alignment_waste_bytes`, `unreclaimed_released_bytes`, `wasted_bytes` | Alignment loss, released slab bytes that the current policy cannot reuse, and their sum. |
-| `*_chunk_count` | Current total, default slab, request-larger-than-default, and exclusive mapping counts. |
+| `*_chunk_count` | Current total, adaptive slab, request-larger-than-the-next-slab, and exclusive mapping counts. |
 | `peak_reserved_bytes`, `peak_used_bytes`, `peak_wasted_bytes`, `peak_chunk_count` | Host-pool lifetime peaks; they intentionally survive Program reset. |
 
 The older flat `host_requested_live_bytes`, `host_raw_bytes`, and
@@ -138,6 +138,15 @@ The older flat `host_requested_live_bytes`, `host_raw_bytes`, and
 code should prefer `host_allocator`. `ti.tools.memory_pool_stats()` exposes
 the same host values in its legacy dictionary and remains a diagnostic
 snapshot, not a reset or allocator-control API.
+
+The default host policy starts with a 16 MiB slab and grows geometrically up
+to the existing 1 GiB ceiling. A request larger than the next slab receives a
+request-sized, alignment-safe large mapping without advancing that sequence.
+For release
+diagnosis only, setting `TI_HOST_ALLOCATOR_ADAPTIVE_CHUNKS=0` before importing
+or initializing Taichi restores the legacy fixed-1-GiB slab policy. This
+environment switch is an internal rollback gate, not a stable `ti.init`
+option or a long-term allocator-control API.
 
 ### `ti.runtime.capabilities()`
 

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "taichi/rhi/common/host_memory_pool.h"
+#include "taichi/util/environ_config.h"
 
 namespace {
 
@@ -135,6 +136,12 @@ int main(int argc, char **argv) {
     return 2;
   }
 
+  std::cout << "policy="
+            << (taichi::lang::get_environ_config(
+                    "TI_HOST_ALLOCATOR_ADAPTIVE_CHUNKS", 1)
+                        ? "adaptive"
+                        : "legacy")
+            << std::endl;
   report("tiny", trials, iterations * 2,
          [&] { return run_sequential(iterations, false); });
   report("mixed", trials, iterations * 2,
