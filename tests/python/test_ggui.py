@@ -16,7 +16,12 @@ from taichi_forge._lib import core as _ti_core
 import taichi_forge as ti
 from taichi_forge.lang import impl
 from taichi_forge.lang.misc import is_arch_supported
+from taichi_forge.ui.scene import (
+    get_normals_field,
+    normals_field_cache,
+)
 from taichi_forge.ui.staging_buffer import (
+    _NUMPY_IMAGE_FIELD_CACHE_MAX_ENTRIES,
     _image_object_field_cache,
     clear_staging_caches,
     image_field_cache,
@@ -938,19 +943,51 @@ def test_staging_cache_uses_weak_source_ownership():
     assert len(image_packed_ndarray_cache) == 0
 
 
+@test_utils.test(arch=[ti.cpu])
+def test_generated_normals_cache_uses_weak_vertex_ownership():
+    normals_field_cache.clear()
+    vertices = ti.Vector.field(3, ti.f32, shape=3)
+    normals, weights = get_normals_field(vertices)
+    assert normals.shape == (3,)
+    assert weights.shape == (3,)
+    assert len(normals_field_cache) == 1
+
+    vertices_ref = weakref.ref(vertices)
+    del vertices, normals, weights
+    # Materialization consumes PyTaichi's temporary field-validation refs.
+    impl.get_runtime().materialize()
+    gc.collect()
+    assert vertices_ref() is None
+    assert len(normals_field_cache) == 0
+
+
+def test_numpy_image_staging_cache_is_bounded_lru():
+    image_field_cache.clear()
+    for width in range(1, _NUMPY_IMAGE_FIELD_CACHE_MAX_ENTRIES + 2):
+        to_rgba8(np.zeros((width, 2, 4), dtype=np.uint8))
+
+    assert len(image_field_cache) == _NUMPY_IMAGE_FIELD_CACHE_MAX_ENTRIES
+    assert (1, 2) not in image_field_cache
+    assert (_NUMPY_IMAGE_FIELD_CACHE_MAX_ENTRIES + 1, 2) in image_field_cache
+
+
 @test_utils.test(arch=[ti.vulkan])
 def test_reset_clears_all_staging_cache_generations():
     clear_staging_caches()
     image = ti.Vector.ndarray(4, ti.f32, shape=(2, 2))
+    vertices = ti.Vector.field(3, ti.f32, shape=3)
+    get_normals_field(vertices)
     image.fill([0.0, 0.25, 0.5, 1.0])
     assert to_rgba8_packed_ndarray(image) is not None
     assert len(image_packed_ndarray_cache) == 1
+    assert len(normals_field_cache) == 1
 
     ti.reset()
     assert not image_field_cache
     assert not _image_object_field_cache
     assert not image_texture_cache
     assert not image_packed_ndarray_cache
+    assert not normals_field_cache
 
 
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")

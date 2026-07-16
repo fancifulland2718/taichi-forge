@@ -1,4 +1,5 @@
 import weakref
+from collections import OrderedDict
 
 import numpy as np
 from taichi_forge.types import ndarray as ndarray_type
@@ -420,7 +421,8 @@ def copy_ndarray_u8_to_rgba8_texture(
 # NumPy staging is shared by shape and therefore has no source-object owner.
 # Taichi objects use a separate weak-key cache so they cannot pin an old
 # Program generation through a module-global dictionary.
-image_field_cache = {}
+_NUMPY_IMAGE_FIELD_CACHE_MAX_ENTRIES = 8
+image_field_cache = OrderedDict()
 _image_object_field_cache = weakref.WeakKeyDictionary()
 image_texture_cache = weakref.WeakKeyDictionary()
 image_packed_ndarray_cache = weakref.WeakKeyDictionary()
@@ -604,8 +606,12 @@ def to_rgba8(image):
     if staging_key not in staging_cache:
         staging_img = np.ndarray(image.shape[0:2], dtype=np.uint32)
         staging_cache[staging_key] = staging_img
+        if is_numpy and len(staging_cache) > _NUMPY_IMAGE_FIELD_CACHE_MAX_ENTRIES:
+            staging_cache.popitem(last=False)
     else:
         staging_img = staging_cache[staging_key]
+        if is_numpy:
+            staging_cache.move_to_end(staging_key)
         
     is_ti_ndarray = hasattr(image, 'to_numpy') and not hasattr(image, 'snode')
 

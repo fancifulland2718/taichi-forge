@@ -876,6 +876,9 @@ def reset():
     staging_module = sys.modules.get("taichi_forge.ui.staging_buffer")
     if staging_module is not None:
         staging_module.clear_staging_caches()
+    scene_module = sys.modules.get("taichi_forge.ui.scene")
+    if scene_module is not None:
+        scene_module.clear_scene_caches()
     algorithms_module = sys.modules.get("taichi_forge.algorithms._algorithms")
     if algorithms_module is not None and hasattr(
         algorithms_module, "clear_default_workspaces"

@@ -1,4 +1,5 @@
 import warnings
+import weakref
 import taichi_forge
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang.impl import field
@@ -22,7 +23,15 @@ from .staging_buffer import (
 )
 from .utils import check_ggui_availability, get_field_info
 
-normals_field_cache = {}
+# Generated normals are meaningful only while their source vertex field is
+# alive. A strong module-global key used to retain every historical mesh (and
+# the two generated fields) until process exit.
+normals_field_cache = weakref.WeakKeyDictionary()
+
+
+def clear_scene_caches():
+    """Release GGUI scene-derived fields at a Program boundary."""
+    normals_field_cache.clear()
 
 
 def get_normals_field(vertices):

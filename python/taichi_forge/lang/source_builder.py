@@ -1,9 +1,9 @@
-import atexit
 import ctypes
 import os
 import shutil
 import subprocess
 import tempfile
+import weakref
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
@@ -18,19 +18,34 @@ class SourceBuilder:
         self.so = None
         self.mode = None
         self.td = None
+        self._temp_dir_finalizer = None
 
-        def cleanup():
-            if self.td is not None:
-                shutil.rmtree(self.td)
+    def _own_temp_dir(self, path):
+        self.td = path
+        self._temp_dir_finalizer = weakref.finalize(
+            self, shutil.rmtree, path, ignore_errors=True
+        )
 
-        atexit.register(cleanup)
+    def close(self):
+        """Release temporary compiler files owned by this builder."""
+        if self._temp_dir_finalizer is not None:
+            self._temp_dir_finalizer()
+            self._temp_dir_finalizer = None
+        self.td = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
 
     @classmethod
     def from_file(cls, filename, compile_fn=None, _temp_dir=None):
         self = cls()
-        self.td = _temp_dir
-        if self.td is None:
-            self.td = tempfile.mkdtemp()
+        temp_dir = _temp_dir
+        if temp_dir is None:
+            temp_dir = tempfile.mkdtemp()
+        self._own_temp_dir(temp_dir)
 
         if filename.endswith((".cpp", ".c", ".cc")):
             if impl.current_cfg().arch not in [_ti_core.Arch.x64, _ti_core.Arch.cuda]:

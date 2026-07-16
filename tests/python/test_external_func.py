@@ -1,13 +1,43 @@
 import ctypes
+import gc
 import os
 import shutil
 import tempfile
+import weakref
 
 import pytest
 from taichi_forge.lang.util import has_clangpp
 
 import taichi_forge as ti
 from tests import test_utils
+
+
+@test_utils.test(arch=ti.cpu)
+def test_source_builder_releases_owned_temp_dir(tmp_path):
+    bitcode = tmp_path / "empty.bc"
+    bitcode.write_bytes(b"")
+
+    builder = ti.lang.source_builder.SourceBuilder.from_file(str(bitcode))
+    owned_temp_dir = builder.td
+    builder_ref = weakref.ref(builder)
+    assert os.path.isdir(owned_temp_dir)
+
+    del builder
+    gc.collect()
+    assert builder_ref() is None
+    assert not os.path.exists(owned_temp_dir)
+
+
+@test_utils.test(arch=ti.cpu)
+def test_source_builder_context_manager_closes_temp_dir(tmp_path):
+    bitcode = tmp_path / "empty.bc"
+    bitcode.write_bytes(b"")
+
+    with ti.lang.source_builder.SourceBuilder.from_file(str(bitcode)) as builder:
+        owned_temp_dir = builder.td
+        assert os.path.isdir(owned_temp_dir)
+    assert builder.td is None
+    assert not os.path.exists(owned_temp_dir)
 
 
 @pytest.mark.skipif(not has_clangpp(), reason="Clang not installed.")
