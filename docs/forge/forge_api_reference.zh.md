@@ -76,6 +76,19 @@ Forge 当前支持通过 `ti.ad.Tape()` 或手工 `kernel.grad()` 执行一阶 r
 错误；编译期 `ti.static` 特化不代表提供通用高阶控制流保证。显式 gradient Graph 仍属于
 手工管理的一阶操作，必须在 automatic AD context 外运行。
 
+### <code>ti.types.rw_texture</code> 的整数值类型
+
+Vulkan storage image 的 load/store 现在按声明格式的 shader-visible sampled type 工作：
+
+| 格式族 | <code>load()</code> 元素类型 | <code>store()</code> 要求的元素类型 |
+| --- | --- | --- |
+| r16u、rg16u、rgba16u、r32u、rg32u、rgba32u | <code>ti.u32</code> | <code>ti.u32</code> |
+| r16i、rg16i、rgba16i、r32i、rg32i、rgba32i | <code>ti.i32</code> | <code>ti.i32</code> |
+| 已支持的 normalized 与 floating-point 格式 | <code>ti.f32</code> | <code>ti.f32</code> |
+
+这里的 32-bit 类型是 shader ABI，不会改变 image 的物理通道宽度；写入 16-bit image 的值
+仍须落在对应格式可表示的范围内。三通道 RGB storage image 不属于本合同。
+
 ### `ti.compile_profile(clear_on_enter=True)`
 
 位置：`taichi_forge.tools.compile_profile`，导出为 `ti.compile_profile`。返回类型也导出为

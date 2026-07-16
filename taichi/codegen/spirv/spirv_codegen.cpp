@@ -3955,17 +3955,19 @@ class TaskCodegen : public IRVisitor {
     } else if (stmt->op == TextureOpType::kLoad ||
                stmt->op == TextureOpType::kStore) {
       // Image Ops
+      auto *texture_ptr = stmt->texture_ptr->as<TexturePtrStmt>();
+      TI_ASSERT(texture_ptr != nullptr && texture_ptr->is_storage);
       std::vector<spirv::Value> args;
       for (int i = 0; i < stmt->args.size(); i++) {
         args.push_back(ir_->query_value(stmt->args[i]->raw_name()));
       }
       if (stmt->op == TextureOpType::kLoad) {
         // Image Load
-        val = ir_->image_load(tex, args);
+        val = ir_->image_load(tex, args, texture_ptr->format);
         ir_->register_value(stmt->raw_name(), val);
       } else if (stmt->op == TextureOpType::kStore) {
         // Image Store
-        ir_->image_store(tex, args);
+        ir_->image_store(tex, args, texture_ptr->format);
       }
     } else {
       TI_NOT_IMPLEMENTED;
@@ -3986,6 +3988,30 @@ class TaskCodegen : public IRVisitor {
                             ir_->query_value(stmt->args[0]->raw_name()), 2);
     } else if (stmt->func_name == "composite_extract_3") {
       val = ir_->make_value(spv::OpCompositeExtract, ir_->f32_type(),
+                            ir_->query_value(stmt->args[0]->raw_name()), 3);
+    } else if (stmt->func_name == "composite_extract_i32_0") {
+      val = ir_->make_value(spv::OpCompositeExtract, ir_->i32_type(),
+                            ir_->query_value(stmt->args[0]->raw_name()), 0);
+    } else if (stmt->func_name == "composite_extract_i32_1") {
+      val = ir_->make_value(spv::OpCompositeExtract, ir_->i32_type(),
+                            ir_->query_value(stmt->args[0]->raw_name()), 1);
+    } else if (stmt->func_name == "composite_extract_i32_2") {
+      val = ir_->make_value(spv::OpCompositeExtract, ir_->i32_type(),
+                            ir_->query_value(stmt->args[0]->raw_name()), 2);
+    } else if (stmt->func_name == "composite_extract_i32_3") {
+      val = ir_->make_value(spv::OpCompositeExtract, ir_->i32_type(),
+                            ir_->query_value(stmt->args[0]->raw_name()), 3);
+    } else if (stmt->func_name == "composite_extract_u32_0") {
+      val = ir_->make_value(spv::OpCompositeExtract, ir_->u32_type(),
+                            ir_->query_value(stmt->args[0]->raw_name()), 0);
+    } else if (stmt->func_name == "composite_extract_u32_1") {
+      val = ir_->make_value(spv::OpCompositeExtract, ir_->u32_type(),
+                            ir_->query_value(stmt->args[0]->raw_name()), 1);
+    } else if (stmt->func_name == "composite_extract_u32_2") {
+      val = ir_->make_value(spv::OpCompositeExtract, ir_->u32_type(),
+                            ir_->query_value(stmt->args[0]->raw_name()), 2);
+    } else if (stmt->func_name == "composite_extract_u32_3") {
+      val = ir_->make_value(spv::OpCompositeExtract, ir_->u32_type(),
                             ir_->query_value(stmt->args[0]->raw_name()), 3);
     }
 

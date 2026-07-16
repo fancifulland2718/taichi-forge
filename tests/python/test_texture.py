@@ -13,6 +13,21 @@ from tests import test_utils
 supported_archs_texture = [ti.vulkan]
 supported_archs_texture_excluding_load_store = [ti.vulkan, ti.opengl]
 
+integer_storage_image_cases = [
+    (ti.Format.r16u, ti.u32, 1, (1, 0, 0, 0)),
+    (ti.Format.rg16u, ti.u32, 2, (1, 65535, 0, 0)),
+    (ti.Format.rgba16u, ti.u32, 4, (1, 65535, 32768, 7)),
+    (ti.Format.r16i, ti.i32, 1, (-32768, 0, 0, 0)),
+    (ti.Format.rg16i, ti.i32, 2, (-32768, -1, 0, 0)),
+    (ti.Format.rgba16i, ti.i32, 4, (-32768, -1, 1234, 32767)),
+    (ti.Format.r32u, ti.u32, 1, (1, 0, 0, 0)),
+    (ti.Format.rg32u, ti.u32, 2, (1, 0xFFFFFFFF, 0, 0)),
+    (ti.Format.rgba32u, ti.u32, 4, (1, 0xFFFFFFFF, 0x80000000, 7)),
+    (ti.Format.r32i, ti.i32, 1, (-0x80000000, 0, 0, 0)),
+    (ti.Format.rg32i, ti.i32, 2, (-0x80000000, -1, 0, 0)),
+    (ti.Format.rgba32i, ti.i32, 4, (-0x80000000, -1, 1234, 0x7FFFFFFF)),
+]
+
 
 @ti.func
 def taichi_logo(pos: ti.template(), scale: float = 1 / 1.11):
@@ -183,6 +198,47 @@ def test_rw_texture_2d_struct_for():
     write(tex)
     read(tex, arr)
     assert arr.to_numpy().sum() == 128 * 128
+
+
+@pytest.mark.parametrize(
+    "fmt,dtype,num_channels,values", integer_storage_image_cases
+)
+@test_utils.test(arch=supported_archs_texture)
+def test_rw_texture_integer_sampled_types(fmt, dtype, num_channels, values):
+    tex = ti.Texture(fmt, (1, 1))
+    out = ti.ndarray(dtype=dtype, shape=4)
+
+    @ti.kernel
+    def write(
+        tex: ti.types.rw_texture(num_dimensions=2, fmt=fmt, lod=0),
+        v0: dtype,
+        v1: dtype,
+        v2: dtype,
+        v3: dtype,
+    ):
+        tex.store(
+            ti.Vector([0, 0]),
+            ti.Vector([v0, v1, v2, v3]),
+        )
+
+    @ti.kernel
+    def read(
+        tex: ti.types.rw_texture(num_dimensions=2, fmt=fmt, lod=0),
+        out: ti.types.ndarray(dtype=dtype, ndim=1),
+    ):
+        value = tex.load(ti.Vector([0, 0]))
+        for i in ti.static(range(4)):
+            out[i] = value[i]
+
+    write(tex, *values)
+    read(tex, out)
+    np.testing.assert_array_equal(
+        out.to_numpy()[:num_channels],
+        np.asarray(
+            values[:num_channels],
+            dtype=np.uint32 if dtype == ti.u32 else np.int32,
+        ),
+    )
 
 
 @test_utils.test(arch=supported_archs_texture)

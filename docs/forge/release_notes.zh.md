@@ -98,6 +98,9 @@
 - AOT kernel template 现在在 CPU、CUDA、Vulkan 上接受边界明确的 ndarray/external-array
   exemplar。specialization 使用与 capacity 无关的 element/layout ABI key，在编译前拒绝不支持
   或非连续输入，去重相同合同，并使用文件系统安全名称及长 signature 的 SHA-256 fallback。
+- Vulkan storage image 现在根据声明格式选择 f32、i32 或 u32 sampled value；r/rg/rgba
+  16/32-bit 有符号与无符号 image 的 frontend、SPIR-V 和 Vulkan format 合同已经一致，
+  原先 r16u 格式族错误使用 UNORM 的映射已改为 UINT。
 
 ## 0.1.0
 

@@ -128,6 +128,10 @@ retroactively attributed to the 0.5.0 artifact:
   element/layout ABI key, reject unsupported or non-contiguous inputs before
   compilation, deduplicate equal contracts, and use filesystem-safe names
   with a SHA-256 fallback for long signatures.
+- Vulkan storage images now select f32, i32, or u32 sampled values from their
+  declared formats. Signed and unsigned r/rg/rgba 16/32-bit images have matching
+  frontend, SPIR-V, and Vulkan format contracts; the prior r16u-family UNORM
+  mapping has been corrected to UINT.
 
 ## 0.1.0
 

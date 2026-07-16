@@ -15,6 +15,11 @@ class Ndarray;
 class SNode;
 
 std::pair<DataType, uint32_t> buffer_format2type_channels(BufferFormat format);
+// Storage images expose 32-bit shader values even when the backing image uses
+// 8- or 16-bit integer channels. Normalized and floating-point formats expose
+// f32, signed integer formats expose i32, and unsigned integer formats expose
+// u32. This is the shared frontend/SPIR-V contract for image load/store.
+DataType buffer_format2storage_image_sampled_type(BufferFormat format);
 BufferFormat type_channels2buffer_format(const DataType &type,
                                          uint32_t num_channels);
 

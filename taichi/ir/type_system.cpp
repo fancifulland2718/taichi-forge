@@ -169,6 +169,8 @@ PRIM(f64)
 PRIM(u32)
 PRIM(u64)
 DataType i32_void = i32;
+DataType i32_ptr = TypeFactory::get_instance().get_pointer_type(i32, false);
+DataType u32_ptr = TypeFactory::get_instance().get_pointer_type(u32, false);
 DataType f32_ptr = TypeFactory::get_instance().get_pointer_type(f32, false);
 
 #undef PRIM
@@ -297,6 +299,15 @@ void Operations::init_internals() {
   COMPOSITE_EXTRACT(2);
   COMPOSITE_EXTRACT(3);
 #undef COMPOSITE_EXTRACT
+
+#define COMPOSITE_EXTRACT_INT(kind, dt)                                 \
+  PLAIN_OP(composite_extract_##kind##_0, dt, false, dt##_ptr);           \
+  PLAIN_OP(composite_extract_##kind##_1, dt, false, dt##_ptr);           \
+  PLAIN_OP(composite_extract_##kind##_2, dt, false, dt##_ptr);           \
+  PLAIN_OP(composite_extract_##kind##_3, dt, false, dt##_ptr);
+  COMPOSITE_EXTRACT_INT(i32, i32);
+  COMPOSITE_EXTRACT_INT(u32, u32);
+#undef COMPOSITE_EXTRACT_INT
 
 #define INSERT_TRIPLET(dt) \
   PLAIN_OP(insert_triplet_##dt, i32_void, true, u64, i32, i32, dt);

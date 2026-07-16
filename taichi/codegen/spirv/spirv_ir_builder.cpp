@@ -1,4 +1,5 @@
 #include "taichi/codegen/spirv/spirv_ir_builder.h"
+#include "taichi/program/texture.h"
 #include "taichi/rhi/dx/dx_device.h"
 #include "fp16.h"
 
@@ -617,9 +618,9 @@ SType IRBuilder::get_storage_image_type(BufferFormat format,
   }
   spv::ImageFormat spv_format = format2spv.at(format);
 
-  // TODO: Add integer type support
+  const SType sampled_type = get_storage_image_sampled_type(format);
   ib_.begin(spv::OpTypeImage)
-      .add_seq(img_id, f32_type(), dim,
+      .add_seq(img_id, sampled_type, dim,
                /*Depth=*/0, /*Arrayed=*/0, /*MS=*/0, /*Sampled=*/2, spv_format)
       .commit(&global_);
   SType img_t;
@@ -627,6 +628,46 @@ SType IRBuilder::get_storage_image_type(BufferFormat format,
   img_t.flag = TypeKind::kImage;
   storage_image_ptr_tbl_[key] = img_t;
   return img_t;
+}
+
+SType IRBuilder::get_storage_image_sampled_type(BufferFormat format) const {
+  const DataType sampled_type =
+      buffer_format2storage_image_sampled_type(format);
+  if (sampled_type == PrimitiveType::i32) {
+    return t_int32_;
+  }
+  if (sampled_type == PrimitiveType::u32) {
+    return t_uint32_;
+  }
+  TI_ASSERT(sampled_type == PrimitiveType::f32);
+  return t_fp32_;
+}
+
+SType IRBuilder::get_storage_image_texel_type(BufferFormat format) {
+  const DataType sampled_type =
+      buffer_format2storage_image_sampled_type(format);
+  if (sampled_type == PrimitiveType::i32) {
+    if (t_v4_int_.id == 0) {
+      t_v4_int_.id = id_counter_++;
+      ib_.begin(spv::OpTypeVector)
+          .add(t_v4_int_)
+          .add_seq(t_int32_, 4)
+          .commit(&global_);
+    }
+    return t_v4_int_;
+  }
+  if (sampled_type == PrimitiveType::u32) {
+    if (t_v4_uint_.id == 0) {
+      t_v4_uint_.id = id_counter_++;
+      ib_.begin(spv::OpTypeVector)
+          .add(t_v4_uint_)
+          .add_seq(t_uint32_, 4)
+          .commit(&global_);
+    }
+    return t_v4_uint_;
+  }
+  TI_ASSERT(sampled_type == PrimitiveType::f32);
+  return t_v4_fp32_;
 }
 
 SType IRBuilder::get_storage_pointer_type(const SType &value_type) {
@@ -1055,7 +1096,9 @@ Value IRBuilder::fetch_texel(Value texture_var,
   return res_vec4;
 }
 
-Value IRBuilder::image_load(Value image_var, const std::vector<Value> &args) {
+Value IRBuilder::image_load(Value image_var,
+                            const std::vector<Value> &args,
+                            BufferFormat format) {
   auto image = this->load_variable(image_var, image_var.stype);
   Value uv;
   if (args.size() == 1) {
@@ -1068,11 +1111,15 @@ Value IRBuilder::image_load(Value image_var, const std::vector<Value> &args) {
   } else {
     TI_ERROR("Unsupported number of texture coordinates");
   }
-  auto res_vec4 = make_value(spv::OpImageRead, t_v4_fp32_, image, uv);
+  auto res_vec4 =
+      make_value(spv::OpImageRead, get_storage_image_texel_type(format), image,
+                 uv);
   return res_vec4;
 }
 
-void IRBuilder::image_store(Value image_var, const std::vector<Value> &args) {
+void IRBuilder::image_store(Value image_var,
+                            const std::vector<Value> &args,
+                            BufferFormat format) {
   auto image = this->load_variable(image_var, image_var.stype);
   Value uv;
   if (args.size() == 1 + 4) {
@@ -1086,8 +1133,10 @@ void IRBuilder::image_store(Value image_var, const std::vector<Value> &args) {
     TI_ERROR("Unsupported number of image coordinates");
   }
   int base = args.size() - 4;
-  Value data = make_value(spv::OpCompositeConstruct, t_v4_fp32_, args[base],
-                          args[base + 1], args[base + 2], args[base + 3]);
+  Value data =
+      make_value(spv::OpCompositeConstruct,
+                 get_storage_image_texel_type(format), args[base],
+                 args[base + 1], args[base + 2], args[base + 3]);
   make_inst(spv::OpImageWrite, image, uv, data);
 }
 

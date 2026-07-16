@@ -88,6 +88,22 @@ compile-time `ti.static` specialization does not imply a general higher-order
 control-flow guarantee. Explicit gradient Graphs remain manual, first-order
 operations and must run outside automatic AD contexts.
 
+### Integer values in <code>ti.types.rw_texture</code>
+
+On Vulkan, storage-image load/store follows the shader-visible sampled type of
+the declared format:
+
+| Format family | <code>load()</code> element type | Required <code>store()</code> element type |
+| --- | --- | --- |
+| r16u, rg16u, rgba16u, r32u, rg32u, rgba32u | <code>ti.u32</code> | <code>ti.u32</code> |
+| r16i, rg16i, rgba16i, r32i, rg32i, rgba32i | <code>ti.i32</code> | <code>ti.i32</code> |
+| supported normalized and floating-point formats | <code>ti.f32</code> | <code>ti.f32</code> |
+
+The 32-bit value type is the shader ABI; it does not change the physical
+channel width. Values written to a 16-bit image must remain representable by
+that image format. Three-channel RGB storage images are not part of this
+contract.
+
 ### `ti.compile_profile(clear_on_enter=True)`
 
 Location: `taichi_forge.tools.compile_profile`; exported as

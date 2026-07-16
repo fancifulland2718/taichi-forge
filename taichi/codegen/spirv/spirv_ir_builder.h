@@ -362,6 +362,8 @@ class IRBuilder {
   SType get_underlying_image_type(const SType &primitive_type,
                                   int num_dimensions);
   SType get_storage_image_type(BufferFormat format, int num_dimensions);
+  SType get_storage_image_sampled_type(BufferFormat format) const;
+  SType get_storage_image_texel_type(BufferFormat format);
   // Get a value_type[num_elems] type
   SType get_array_type(const SType &value_type, uint32_t num_elems);
   // Get a struct{ value_type[num_elems] } type
@@ -420,9 +422,13 @@ class IRBuilder {
                     const std::vector<Value> &args,
                     Value lod);
 
-  Value image_load(Value image_var, const std::vector<Value> &args);
+  Value image_load(Value image_var,
+                   const std::vector<Value> &args,
+                   BufferFormat format);
 
-  void image_store(Value image_var, const std::vector<Value> &args);
+  void image_store(Value image_var,
+                   const std::vector<Value> &args,
+                   BufferFormat format);
 
   // Declare a new function
   // NOTE: only support void kernel function, i.e. main
@@ -653,6 +659,7 @@ class IRBuilder {
   // gl compute shader related type(s) and variables
   SType t_v2_int_;
   SType t_v3_int_;
+  SType t_v4_int_;
   SType t_v3_uint_;
   SType t_v4_uint_;  // §16.12 (S2): uvec4 result type for OpGroupNonUniformBallot
   SType t_v4_fp32_;

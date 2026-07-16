@@ -582,8 +582,10 @@ class TypeCheck : public IRVisitor {
   }
 
   void visit(InternalFuncStmt *stmt) override {
-    // TODO: support return type specification
-    stmt->ret_type = PrimitiveType::i32;
+    // InternalCallOperation already resolves and records an explicit return
+    // type while flattening. Calls constructed directly retain the i32
+    // default from InternalFuncStmt's constructor.
+    TI_ASSERT(stmt->ret_type != PrimitiveType::unknown);
   }
 
   void visit(BitStructStoreStmt *stmt) override {

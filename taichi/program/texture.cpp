@@ -97,6 +97,50 @@ std::pair<DataType, uint32_t> buffer_format2type_channels(BufferFormat format) {
   }
 }
 
+DataType buffer_format2storage_image_sampled_type(BufferFormat format) {
+  switch (format) {
+    case BufferFormat::r8u:
+    case BufferFormat::rg8u:
+    case BufferFormat::rgba8u:
+    case BufferFormat::r16u:
+    case BufferFormat::rg16u:
+    case BufferFormat::rgba16u:
+    case BufferFormat::r32u:
+    case BufferFormat::rg32u:
+    case BufferFormat::rgba32u:
+      return PrimitiveType::u32;
+    case BufferFormat::r8i:
+    case BufferFormat::rg8i:
+    case BufferFormat::rgba8i:
+    case BufferFormat::r16i:
+    case BufferFormat::rg16i:
+    case BufferFormat::rgba16i:
+    case BufferFormat::r32i:
+    case BufferFormat::rg32i:
+    case BufferFormat::rgba32i:
+      return PrimitiveType::i32;
+    case BufferFormat::r8:
+    case BufferFormat::rg8:
+    case BufferFormat::rgba8:
+    case BufferFormat::rgba8srgb:
+    case BufferFormat::r16:
+    case BufferFormat::rg16:
+    case BufferFormat::rgba16:
+    case BufferFormat::r16f:
+    case BufferFormat::rg16f:
+    case BufferFormat::rgba16f:
+    case BufferFormat::r32f:
+    case BufferFormat::rg32f:
+    case BufferFormat::rgba32f:
+    case BufferFormat::depth16:
+    case BufferFormat::depth32f:
+      return PrimitiveType::f32;
+    default:
+      TI_ERROR("Buffer format {} is not a supported storage image format",
+               static_cast<int>(format));
+  }
+}
+
 BufferFormat type_channels2buffer_format(const DataType &type,
                                          uint32_t num_channels) {
   BufferFormat format;

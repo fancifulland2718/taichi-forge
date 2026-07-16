@@ -3,6 +3,7 @@
 #include "taichi/ir/expression_printer.h"
 #include "taichi/ir/statements.h"
 #include "taichi/program/program.h"
+#include "taichi/program/texture.h"
 #include "taichi/common/exceptions.h"
 
 #include <algorithm>
@@ -1225,6 +1226,10 @@ TextureOpExpression::TextureOpExpression(TextureOpType op,
 void TextureOpExpression::type_check(const CompileConfig *config) {
   TI_ASSERT(texture_ptr.is<TexturePtrExpression>());
   auto ptr = texture_ptr.cast<TexturePtrExpression>();
+  DataType sampled_type =
+      ptr->is_storage
+          ? buffer_format2storage_image_sampled_type(ptr->format)
+          : PrimitiveType::f32;
   if (op == TextureOpType::kSampleLod) {
     // UV, Lod
     if (args.size() != ptr->num_dims + 1) {
@@ -1296,19 +1301,19 @@ void TextureOpExpression::type_check(const CompileConfig *config) {
     for (int i = ptr->num_dims; i < ptr->num_dims + 4; i++) {
       TI_ASSERT_TYPE_CHECKED(args[i]);
       auto arg_type = args[i].get_rvalue_type();
-      if (arg_type != PrimitiveType::f32) {
+      if (arg_type != sampled_type) {
         ErrorEmitter(TaichiTypeError(), this,
-                     fmt::format("Invalid type for texture load: '{}', value "
-                                 "arguments must be f32",
-                                 arg_type->to_string()));
+                     fmt::format("Invalid type for texture store: '{}', value "
+                                 "arguments must be {} for this format",
+                                 arg_type->to_string(),
+                                 sampled_type->to_string()));
       }
     }
   } else {
     TI_ERROR("Invalid TextureOpType");
   }
-  ret_type =
-      TypeFactory::get_instance().get_pointer_type(PrimitiveType::f32,
-                                                   /*is_bit_pointer=*/false);
+  ret_type = TypeFactory::get_instance().get_pointer_type(
+      sampled_type, /*is_bit_pointer=*/false);
 }
 
 void TextureOpExpression::flatten(FlattenContext *ctx) {

@@ -45,6 +45,42 @@ FORMAT2TY_CH = {
 # Reverse lookup by (channel_format, num_channels)
 TY_CH2FORMAT = {v: k for k, v in FORMAT2TY_CH.items()}
 
+_RW_TEXTURE_SIGNED_INTEGER_FORMATS = frozenset(
+    {
+        Format.r8i,
+        Format.rg8i,
+        Format.rgba8i,
+        Format.r16i,
+        Format.rg16i,
+        Format.rgba16i,
+        Format.r32i,
+        Format.rg32i,
+        Format.rgba32i,
+    }
+)
+_RW_TEXTURE_UNSIGNED_INTEGER_FORMATS = frozenset(
+    {
+        Format.r8u,
+        Format.rg8u,
+        Format.rgba8u,
+        Format.r16u,
+        Format.rg16u,
+        Format.rgba16u,
+        Format.r32u,
+        Format.rg32u,
+        Format.rgba32u,
+    }
+)
+
+
+def rw_texture_sampled_type(fmt):
+    """Returns the shader-visible scalar type for storage image load/store."""
+    if fmt in _RW_TEXTURE_SIGNED_INTEGER_FORMATS:
+        return i32
+    if fmt in _RW_TEXTURE_UNSIGNED_INTEGER_FORMATS:
+        return u32
+    return f32
+
 
 class TextureType:
     """Type annotation for Textures.

@@ -6,6 +6,7 @@ from taichi_forge.lang.matrix import Matrix
 from taichi_forge.lang.util import taichi_scope
 from taichi_forge.types import vector
 from taichi_forge.types.primitive_types import f32
+from taichi_forge.types.texture_type import rw_texture_sampled_type
 
 
 def _get_entries(mat):
@@ -45,10 +46,19 @@ class TextureSampler:
 
 
 class RWTextureAccessor:
-    def __init__(self, ptr_expr, num_dims) -> None:
+    def __init__(self, ptr_expr, num_dims, buffer_format) -> None:
         # taichi_python.TexturePtrExpression.
         self.ptr_expr = ptr_expr
         self.num_dims = num_dims
+        self.sampled_type = rw_texture_sampled_type(buffer_format)
+
+    def _extract_component(self, value, index):
+        suffix = f"_{index}"
+        if self.sampled_type != f32:
+            suffix = f"_{self.sampled_type}_{index}"
+        return impl.call_internal(
+            f"composite_extract{suffix}", value, with_runtime_context=False
+        )
 
     @taichi_scope
     def load(self, index):
@@ -56,11 +66,8 @@ class RWTextureAccessor:
         dbg_info = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
         args_group = make_expr_group(*_get_entries(index))
         v = ast_builder.make_texture_op_expr(_ti_core.TextureOpType.kLoad, self.ptr_expr, args_group, dbg_info)
-        r = impl.call_internal("composite_extract_0", v, with_runtime_context=False)
-        g = impl.call_internal("composite_extract_1", v, with_runtime_context=False)
-        b = impl.call_internal("composite_extract_2", v, with_runtime_context=False)
-        a = impl.call_internal("composite_extract_3", v, with_runtime_context=False)
-        return vector(4, f32)([r, g, b, a])
+        values = [self._extract_component(v, i) for i in range(4)]
+        return vector(4, self.sampled_type)(values)
 
     @taichi_scope
     def store(self, index, value):
