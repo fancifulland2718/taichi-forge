@@ -38,6 +38,12 @@
 代码的配置已经进入 Forge offline-cache identity。切换它们应生成或加载独立产物，而
 不是复用不兼容 cache。
 
+在当前未发布的 Forge 源码中，`debug=True` 只会在未显式指定
+`check_out_of_bound` 时启用越界检查。传入 `check_out_of_bound=False`，或设置
+`TI_CHECK_OUT_OF_BOUND=0`，可以单独隔离 bounds-check 成本，同时保留其它 debug
+行为。这是面向诊断或已经验证过的应用 bounds contract 的定向控制，不是通用的生产调优
+默认值：关闭检查后，非法索引将恢复为后端未定义行为。
+
 ## 何时使用 `advanced_optimization=False`
 
 Taichi 官方 global settings 文档说明，关闭 advanced optimization 可以节省编译时间并

@@ -404,6 +404,10 @@ def init(
     spec_cfg = _SpecialConfig()
     env_comp = _EnvironmentConfigurator(kwargs, cfg)
     env_spec = _EnvironmentConfigurator(kwargs, spec_cfg)
+    check_out_of_bound_explicit = (
+        "check_out_of_bound" in kwargs
+        or bool(os.environ.get("TI_CHECK_OUT_OF_BOUND", ""))
+    )
 
     # configure default_fp/ip:
     # TODO: move these stuff to _SpecialConfig too:
@@ -464,6 +468,8 @@ def init(
         if _cast is bool:
             _cast = None
         env_comp.add(key, _cast)
+
+    _ti_core._set_check_out_of_bound_explicit(check_out_of_bound_explicit)
 
     unexpected_keys = kwargs.keys()
 

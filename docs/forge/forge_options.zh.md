@@ -54,6 +54,12 @@
 | `unrolling_hard_limit` | `0`（关） | 每个 `ti.static(for ...)` 的 unroll 迭代上限；超出抛 `TaichiCompilationError`，避免静默吃编译时间。 |
 | `unrolling_kernel_hard_limit` | `0`（关） | 单 kernel 内 unroll 总迭代上限。 |
 | `func_inline_depth_limit` | 上游默认 | `@ti.func` 内联递归深度硬上限。 |
+| `check_out_of_bound` | `False`；未指定且 `debug=True` 时隐式为 `True` | 在支持 assertion 的后端生成越界断言。显式传入 `check_out_of_bound=False`（或 `TI_CHECK_OUT_OF_BOUND=0`）现在会覆盖 debug 默认值，但不会关闭其它 debug 行为。 |
+
+越界检查会改变生成代码，其最终有效布尔值进入 offline-cache key。只有在隔离检查成本，或
+应用已经提供独立验证过的 bounds 合同时，才应显式关闭；此后非法索引将恢复为后端未定义
+行为。CPU 与 CUDA 当前支持生成 assertion；Vulkan 尚未声明 assertion extension，因此会
+警告并关闭该选项。
 
 ### 2.4 Real-function 与内联
 

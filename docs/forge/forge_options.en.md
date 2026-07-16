@@ -51,6 +51,15 @@ All defaults match upstream 1.7.4 unless noted.
 | `unrolling_hard_limit` | `0` (off) | Per-`ti.static(for ...)` unroll iteration cap. Aborts with `TaichiCompilationError` instead of silently consuming compile time. |
 | `unrolling_kernel_hard_limit` | `0` (off) | Total unroll iteration cap across a single kernel. |
 | `func_inline_depth_limit` | upstream default | Hard cap on `@ti.func` inline recursion depth. |
+| `check_out_of_bound` | `False`; implicitly `True` when `debug=True` and unspecified | Enables generated bounds assertions on backends with assertion support. An explicit `check_out_of_bound=False` (or `TI_CHECK_OUT_OF_BOUND=0`) now overrides the debug default without disabling other debug behavior. |
+
+Bounds checks change generated code and are represented by their effective
+boolean value in the offline-cache key. Explicitly disabling them can be useful
+when isolating their cost or when an application supplies an independently
+validated bounds contract, but unsafe indexing then has normal backend-undefined
+behavior. CPU and CUDA currently support generated assertions; Vulkan warns and
+disables this option because that backend does not yet advertise the assertion
+extension.
 
 ### 2.4 Real-function & inlining
 

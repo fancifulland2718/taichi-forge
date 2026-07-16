@@ -50,6 +50,7 @@ CompileConfig::CompileConfig() {
   debug = false;
   cfg_optimization = true;
   check_out_of_bound = false;
+  check_out_of_bound_explicit = false;
   serial_schedule = false;
   simplify_before_lower_access = true;
   lower_access = true;
@@ -106,8 +107,7 @@ CompileConfig::CompileConfig() {
 }
 
 void CompileConfig::fit() {
-  if (debug) {
-    // TODO: allow users to run in debug mode without out-of-bound checks
+  if (debug && !check_out_of_bound_explicit) {
     check_out_of_bound = true;
   }
   if (arch_uses_spirv(arch)) {

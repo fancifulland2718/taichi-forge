@@ -473,6 +473,9 @@ void export_lang(py::module &m) {
 
   m.def("reset_default_compile_config",
         [&]() { default_compile_config = CompileConfig(); });
+  m.def("_set_check_out_of_bound_explicit", [](bool explicit_value) {
+    default_compile_config.check_out_of_bound_explicit = explicit_value;
+  });
 
   m.def(
       "default_compile_config",

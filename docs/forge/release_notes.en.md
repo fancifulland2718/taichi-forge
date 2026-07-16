@@ -15,7 +15,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | current source after the published 0.5.0 runtime boundary | current `master` | driver-only CUDA primitives and bounded Program-owned workspaces |
+| [Unreleased](#unreleased) | current source after the published 0.5.0 runtime boundary | current `master` | driver-only CUDA primitives, bounded workspaces, and runtime safety |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |
 | [0.1.2](#012) | historical source release; artifact may be removed | `fe5844390b` | import fixes and CUDA build option |
@@ -76,6 +76,14 @@ retroactively attributed to the 0.5.0 artifact:
   matrices. Linux wheel/import/dependency scans, compute-sanitizer, and execution
   on each claimed older NVIDIA driver remain required before lowering any
   published driver floor.
+- Hardened debug execution and indexing contracts. CPU assertion failures now
+  cooperatively cancel remaining debug work, publish one coherent first fault,
+  and leave the worker pool reusable. Matrix/vector accesses validate and clamp
+  each logical axis instead of accepting a linearly aliased component, while
+  `assume_in_range` validates supported integer ranges without narrow-integer
+  overflow. An explicit `check_out_of_bound=False` now overrides the implicit
+  `debug=True` bounds default without disabling other debug behavior. Generated
+  assertions remain unavailable on Vulkan; per-axis clamp behavior is supported.
 
 ## 0.1.0
 

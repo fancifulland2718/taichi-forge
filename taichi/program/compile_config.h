@@ -10,6 +10,10 @@ struct CompileConfig {
   bool debug;
   bool cfg_optimization;
   bool check_out_of_bound;
+  // Frontend-only provenance bit. debug=True enables bounds checks only when
+  // neither ti.init(check_out_of_bound=...) nor TI_CHECK_OUT_OF_BOUND
+  // explicitly selected a value.
+  bool check_out_of_bound_explicit{false};
   bool validate_autodiff;
   int simd_width;
   int opt_level;

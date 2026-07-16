@@ -12,7 +12,7 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [未发布](#未发布) | 已发布 0.5.0 runtime 边界之后的当前源码 | 当前 `master` | driver-only CUDA primitive 与有界 Program-owned workspace |
+| [未发布](#未发布) | 已发布 0.5.0 runtime 边界之后的当前源码 | 当前 `master` | driver-only CUDA primitive、有界 workspace 与 runtime 安全 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
 | [0.1.1](#011) | 历史源码版本；发行文件可能已移除 | `c771969781` | `taichi_forge` import 重命名与安装布局修复 |
 | [0.1.2](#012) | 历史源码版本；发行文件可能已移除 | `fe5844390b` | import 修复与 CUDA 构建选项 |
@@ -64,6 +64,12 @@
 - Windows driver-only/reference build 与 primitive 正确性矩阵已经完成。降低任何公开 driver
   下限之前，仍必须补齐 Linux wheel/import/依赖扫描、compute-sanitizer 和每个声明支持的旧
   NVIDIA driver 真机执行。
+- 强化 debug 执行与索引契约。CPU assertion 失败后会协作取消剩余 debug work，发布一致的
+  首个错误，并保持 worker pool 可复用；矩阵/向量访问会逐逻辑轴检查和 clamp，不再接受
+  线性化后碰巧落在存储范围内的别名分量；`assume_in_range` 会在支持的整数范围内避免窄
+  整数溢出地执行验证。显式 `check_out_of_bound=False` 现在可以覆盖 `debug=True` 的隐式
+  bounds 默认值，同时不关闭其它 debug 行为。Vulkan 仍不支持生成 assertion，但已支持
+  逐轴 clamp 行为。
 
 ## 0.1.0
 

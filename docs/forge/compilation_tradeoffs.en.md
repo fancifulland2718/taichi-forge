@@ -44,6 +44,13 @@ and other code-generating options are included in Forge offline-cache identity.
 Changing them should compile or load a separate artifact rather than reuse an
 incompatible one.
 
+On current Unreleased Forge sources, `debug=True` enables bounds checks only
+when `check_out_of_bound` was not explicitly selected. Passing
+`check_out_of_bound=False`, or setting `TI_CHECK_OUT_OF_BOUND=0`, isolates the
+bounds-check cost while retaining the other debug behavior. This is a targeted
+diagnostic or application-contract control, not a general production tuning
+default: an invalid index is backend-undefined once the check is disabled.
+
 ## When to use `advanced_optimization=False`
 
 Taichi's official settings guide says that disabling advanced optimization can

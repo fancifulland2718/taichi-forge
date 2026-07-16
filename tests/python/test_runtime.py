@@ -154,6 +154,49 @@ def test_init_bad_arg():
     with pytest.raises(KeyError):
         ti.init(_test_mode=True, debug=True, foo_bar=233)
 
+
+def test_debug_bounds_default_and_explicit_override():
+    def make_safe_alias_kernel():
+        result = ti.field(ti.i32, shape=())
+
+        @ti.kernel
+        def access_alias():
+            matrix = ti.Matrix([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+            result[None] = matrix[0, 8]
+
+        return result, access_alias
+
+    try:
+        with patch_os_environ_helper({}, excludes=env_configs):
+            ti.init(arch=ti.cpu, debug=True, real_matrix_scalarize=False)
+            assert ti.lang.impl.current_cfg().check_out_of_bound is True
+            _, access_alias = make_safe_alias_kernel()
+            with pytest.raises(AssertionError, match="Out of bound access"):
+                access_alias()
+
+            ti.init(
+                arch=ti.cpu,
+                debug=True,
+                check_out_of_bound=False,
+                real_matrix_scalarize=False,
+            )
+            assert ti.lang.impl.current_cfg().check_out_of_bound is False
+            result, access_alias = make_safe_alias_kernel()
+            access_alias()
+            assert result[None] == 9
+
+            ti.init(arch=ti.cpu, debug=False, check_out_of_bound=True)
+            assert ti.lang.impl.current_cfg().check_out_of_bound is True
+
+        with patch_os_environ_helper(
+            {"TI_CHECK_OUT_OF_BOUND": "0"}, excludes=env_configs
+        ):
+            ti.init(arch=ti.cpu, debug=True)
+            assert ti.lang.impl.current_cfg().check_out_of_bound is False
+    finally:
+        ti.reset()
+
+
 @pytest.mark.parametrize("limit", [0, -1])
 @test_utils.test(arch=ti.cpu)
 def test_kernel_specialization_limit_must_be_positive(limit):
