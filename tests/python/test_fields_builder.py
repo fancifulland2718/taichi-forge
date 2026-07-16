@@ -196,6 +196,36 @@ def test_field_initialize_zero():
     assert b[0] == 0
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_destroyed_field_accessors_do_not_accumulate_frontend_state():
+    prog = ti.lang.impl.get_runtime().prog
+    baseline_kernels = prog._debug_kernel_definition_count()
+    baseline_registrations = prog._debug_kernel_registration_count()
+    baseline_fields = prog._debug_snode_field_mapping_count()
+
+    for value in range(3):
+        fb = ti.FieldsBuilder()
+        field = ti.field(ti.i32)
+        fb.dense(ti.i, 1).place(field)
+        tree = fb.finalize()
+        assert prog._debug_snode_field_mapping_count() == baseline_fields + 1
+
+        field[0] = value
+        assert field[0] == value
+        assert prog._debug_kernel_definition_count() == baseline_kernels + 2
+        assert (
+            prog._debug_kernel_registration_count()
+            == baseline_registrations + 2
+        )
+
+        tree.destroy()
+        assert prog._debug_kernel_definition_count() == baseline_kernels
+        assert (
+            prog._debug_kernel_registration_count() == baseline_registrations
+        )
+        assert prog._debug_snode_field_mapping_count() == baseline_fields
+
+
 @test_utils.test(exclude=[ti.opengl, ti.gles])
 def test_field_builder_place_grad():
     @ti.kernel

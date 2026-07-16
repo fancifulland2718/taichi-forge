@@ -28,6 +28,7 @@
 #include <limits>
 #include <stdexcept>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 
 #ifdef TI_WITH_CUDA
@@ -5268,15 +5269,26 @@ ThreadPool *Program::get_cpu_thread_pool() {
 #endif
 }
 
-static void remove_rw_accessor_cache(
+static void remove_snode_frontend_caches(
     SNode *parent_snode,
-    SNodeRwAccessorsBank *snode_rw_accessors_bank) {
+    SNodeRwAccessorsBank *snode_rw_accessors_bank,
+    SNodeFieldMap *snode_to_fields,
+    std::unordered_set<Kernel *> *retired_accessor_kernels) {
   for (int i = 0; i < (int)parent_snode->ch.size(); i++) {
     auto child_snode = parent_snode->ch[i].get();
     if (child_snode->type == SNodeType::place) {
-      snode_rw_accessors_bank->remove_cached_kernels(child_snode);
+      auto [reader, writer] =
+          snode_rw_accessors_bank->remove_cached_kernels(child_snode);
+      if (reader != nullptr) {
+        retired_accessor_kernels->insert(reader);
+      }
+      if (writer != nullptr) {
+        retired_accessor_kernels->insert(writer);
+      }
+      snode_to_fields->erase(child_snode);
     }
-    remove_rw_accessor_cache(child_snode, snode_rw_accessors_bank);
+    remove_snode_frontend_caches(child_snode, snode_rw_accessors_bank,
+                                 snode_to_fields, retired_accessor_kernels);
   }
 }
 
@@ -5319,8 +5331,11 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
   SNode *root = snode_tree->root();
   const bool contains_hash = snode_tree_contains_hash(root);
 
-  // Traverse SNodeTree to remove all cached RWAccessor kernels
-  remove_rw_accessor_cache(root, &snode_rw_accessors_bank_);
+  std::unordered_set<Kernel *> retired_accessor_kernels;
+  // Remove frontend state keyed by SNode pointers before destroying the root.
+  remove_snode_frontend_caches(root, &snode_rw_accessors_bank_,
+                               &snode_to_fields_,
+                               &retired_accessor_kernels);
 
   // Destroy the root before retiring executable state so an exceptional
   // backend teardown can still leave the old Graph/kernel artifacts intact
@@ -5334,13 +5349,19 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
       tree_id);
   program_impl_->get_kernel_launcher().retire_snode_tree(tree_id);
 
-  // CompiledGraph keeps stable Kernel pointers for its whole Python lifetime.
-  // Do not erase Program::kernels and create a dangling pointer: convert every
-  // affected definition into a small retired shell instead. This releases the
-  // otherwise linear IR/specialization growth during tree-id churn while any
-  // attempted stale compile fails explicitly above.
-  for (auto &kernel : kernels) {
+  // CompiledGraph keeps ordinary Kernel pointers stable for its whole Python
+  // lifetime, so retain those definitions as small retired shells. Accessor
+  // kernels are private to SNodeRwAccessorsBank, whose entries were removed
+  // above; after backend cache retirement they have no remaining observer and
+  // can be deleted instead of accumulating one shell per historical field.
+  for (auto iter = kernels.begin(); iter != kernels.end();) {
+    auto &kernel = *iter;
+    if (retired_accessor_kernels.erase(kernel.get()) != 0) {
+      iter = kernels.erase(iter);
+      continue;
+    }
     if (kernel->ir == nullptr) {
+      ++iter;
       continue;
     }
     const auto dependencies =
@@ -5348,7 +5369,9 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
     if (std::binary_search(dependencies.begin(), dependencies.end(), tree_id)) {
       kernel->retire_definition();
     }
+    ++iter;
   }
+  TI_ASSERT(retired_accessor_kernels.empty());
   if (contains_hash) {
     --hash_snode_tree_count_;
   }

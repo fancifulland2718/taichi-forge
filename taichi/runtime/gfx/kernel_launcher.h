@@ -19,6 +19,7 @@ class KernelLauncher : public lang::KernelLauncher {
   void launch_kernel(const lang::CompiledKernelData &compiled_kernel_data,
                      LaunchContextBuilder &ctx) override;
   void retire_snode_tree(int tree_id) override;
+  std::size_t debug_registered_kernel_count() override;
 
   Handle get_or_register_kernel(
       const lang::CompiledKernelData &compiled_kernel_data);

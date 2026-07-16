@@ -31,6 +31,10 @@ class KernelLauncher {
   virtual void retire_snode_tree(int tree_id) {
   }
 
+  virtual std::size_t debug_registered_kernel_count() {
+    return 0;
+  }
+
   virtual ~KernelLauncher() = default;
 };
 

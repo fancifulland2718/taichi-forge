@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <unordered_map>
 
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/runtime/llvm/kernel_launcher.h"
@@ -26,6 +27,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
   Handle register_llvm_kernel(
       const LLVM::CompiledKernelData &compiled) override;
   void retire_snode_tree(int tree_id) override;
+  std::size_t debug_registered_kernel_count() override;
 
  private:
   // A CPU kernel can contain multiple offloaded tasks that share LLVM runtime
@@ -34,7 +36,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
   // tasks. Serialize at the kernel boundary while retaining full parallelism
   // inside each kernel and asynchronous producer/render host threads.
   std::mutex execution_mutex_;
-  std::vector<std::shared_ptr<const Context>> contexts_;
+  std::unordered_map<int, std::shared_ptr<const Context>> contexts_;
 };
 
 }  // namespace cpu

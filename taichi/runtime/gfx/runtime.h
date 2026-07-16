@@ -263,6 +263,7 @@ class TI_DLL_EXPORT GfxRuntime {
   // pipelines that statically bind the destroyed root allocation. Existing
   // replay registrations survive and can record again for unrelated graphs.
   void retire_snode_tree_kernels(int tree_id);
+  std::size_t debug_registered_kernel_count();
 
   void launch_kernel(KernelHandle handle, LaunchContextBuilder &host_ctx);
 
@@ -553,8 +554,9 @@ class TI_DLL_EXPORT GfxRuntime {
   size_t cmdlist_lazy_submit_min_dispatches_{8};
   bool debug_mode_{false};
 
-  std::vector<std::unique_ptr<CompiledTaichiKernel>> ti_kernels_;
-  std::vector<std::vector<int>> ti_kernel_snode_tree_ids_;
+  std::unordered_map<int, std::unique_ptr<CompiledTaichiKernel>> ti_kernels_;
+  std::unordered_map<int, std::vector<int>> ti_kernel_snode_tree_ids_;
+  int next_ti_kernel_id_{0};
 
   std::unordered_map<DeviceAllocation *, size_t> root_buffers_size_map_;
   std::unordered_map<DeviceAllocationId, ImageLayout> last_image_layouts_;

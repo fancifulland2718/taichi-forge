@@ -51,5 +51,10 @@ void KernelLauncher::retire_snode_tree(int tree_id) {
   config_.gfx_runtime_->retire_snode_tree_kernels(tree_id);
 }
 
+std::size_t KernelLauncher::debug_registered_kernel_count() {
+  std::lock_guard<std::mutex> lock(registration_mutex_);
+  return config_.gfx_runtime_->debug_registered_kernel_count();
+}
+
 }  // namespace gfx
 }  // namespace taichi::lang

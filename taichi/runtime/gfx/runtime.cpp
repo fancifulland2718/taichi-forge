@@ -14,6 +14,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -648,6 +649,7 @@ GfxRuntime::~GfxRuntime() {
     decltype(ti_kernels_) tmp;
     tmp.swap(ti_kernels_);
   }
+  ti_kernel_snode_tree_ids_.clear();
   global_tmps_buffer_.reset();
   listgen_buffer_.reset();
 }
@@ -986,9 +988,25 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
     params.spirv_bins.push_back(std::move(spirv_src));
   }
   KernelHandle res;
-  res.set_launch_id(ti_kernels_.size());
-  ti_kernel_snode_tree_ids_.push_back(std::move(reg_params.snode_tree_ids));
-  ti_kernels_.push_back(std::make_unique<CompiledTaichiKernel>(params));
+  TI_ERROR_IF(next_ti_kernel_id_ == std::numeric_limits<int>::max(),
+              "GFX kernel registration ID space exhausted; call ti.reset().");
+  const int launch_id = next_ti_kernel_id_;
+  auto compiled_kernel = std::make_unique<CompiledTaichiKernel>(params);
+  const auto [kernel_iter, kernel_inserted] =
+      ti_kernels_.emplace(launch_id, std::move(compiled_kernel));
+  TI_ASSERT(kernel_inserted);
+  try {
+    const bool tree_was_inserted =
+        ti_kernel_snode_tree_ids_
+            .emplace(launch_id, std::move(reg_params.snode_tree_ids))
+            .second;
+    TI_ASSERT(tree_was_inserted);
+  } catch (...) {
+    ti_kernels_.erase(kernel_iter);
+    throw;
+  }
+  ++next_ti_kernel_id_;
+  res.set_launch_id(launch_id);
   return res;
 }
 
@@ -1000,24 +1018,35 @@ void GfxRuntime::retire_snode_tree_kernels(int tree_id) {
   // unrelated graphs simply record again on their next run.
   graph_replay_states_.clear();
   TI_ASSERT(ti_kernel_snode_tree_ids_.size() == ti_kernels_.size());
-  for (std::size_t i = 0; i < ti_kernels_.size(); ++i) {
-    const auto &tree_ids = ti_kernel_snode_tree_ids_[i];
-    if (ti_kernels_[i] != nullptr &&
-        std::binary_search(tree_ids.begin(), tree_ids.end(), tree_id)) {
-      ti_kernels_[i].reset();
-      ti_kernel_snode_tree_ids_[i].clear();
+  bool retired_any = false;
+  for (auto iter = ti_kernel_snode_tree_ids_.begin();
+       iter != ti_kernel_snode_tree_ids_.end();) {
+    const auto &tree_ids = iter->second;
+    if (!std::binary_search(tree_ids.begin(), tree_ids.end(), tree_id)) {
+      ++iter;
+      continue;
     }
+    const int launch_id = iter->first;
+    TI_ASSERT(ti_kernels_.erase(launch_id) == 1);
+    iter = ti_kernel_snode_tree_ids_.erase(iter);
+    retired_any = true;
   }
+  if (retired_any) {
+    clear_sparse_list_cache_resident();
+  }
+}
+
+std::size_t GfxRuntime::debug_registered_kernel_count() {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  return ti_kernels_.size();
 }
 
 void GfxRuntime::launch_kernel(KernelHandle handle,
                                LaunchContextBuilder &host_ctx) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
-  TI_ASSERT(handle.get_launch_id() >= 0 &&
-            static_cast<std::size_t>(handle.get_launch_id()) <
-                ti_kernels_.size() &&
-            ti_kernels_[handle.get_launch_id()] != nullptr);
-  auto *ti_kernel = ti_kernels_[handle.get_launch_id()].get();
+  auto kernel_iter = ti_kernels_.find(handle.get_launch_id());
+  TI_ASSERT(handle.get_launch_id() >= 0 && kernel_iter != ti_kernels_.end());
+  auto *ti_kernel = kernel_iter->second.get();
 
 #if defined(__APPLE__)
   if (profiler_) {
@@ -1657,11 +1686,14 @@ bool GfxRuntime::try_launch_graph(
   executable.bind_device(device_);
 
   for (const GraphDispatch &dispatch : dispatches) {
-    if (dispatch.host_ctx == nullptr ||
-        dispatch.handle.get_launch_id() >= ti_kernels_.size()) {
+    if (dispatch.host_ctx == nullptr) {
       return reject();
     }
-    auto *ti_kernel = ti_kernels_[dispatch.handle.get_launch_id()].get();
+    auto kernel_iter = ti_kernels_.find(dispatch.handle.get_launch_id());
+    if (kernel_iter == ti_kernels_.end()) {
+      return reject();
+    }
+    auto *ti_kernel = kernel_iter->second.get();
     if (ti_kernel->get_ret_buffer_size() != 0 ||
         !ti_kernel->runtime_argpack_args().empty()) {
       return reject();
@@ -2339,7 +2371,8 @@ void GfxRuntime::ensure_listgen_buffer_bytes(size_t requested_bytes,
           ? requested_bytes / sizeof(uint32_t) - 1
           : 0;
 
-  for (auto &kernel : ti_kernels_) {
+  for (auto &[launch_id, kernel] : ti_kernels_) {
+    (void)launch_id;
     kernel->set_listgen_buffer(listgen_buffer_.get());
   }
   if (replacing_used_buffer) {

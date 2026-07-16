@@ -10,9 +10,9 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   std::unique_lock<std::mutex> execution_lock(execution_mutex_);
   std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
   std::shared_ptr<const Context> launcher_ctx;
-  TI_ASSERT(handle.get_launch_id() < contexts_.size());
-  launcher_ctx = contexts_[handle.get_launch_id()];
-  TI_ASSERT(launcher_ctx != nullptr);
+  auto iter = contexts_.find(handle.get_launch_id());
+  TI_ASSERT(iter != contexts_.end());
+  launcher_ctx = iter->second;
   auto *executor = get_runtime_executor();
 
   ctx.get_context().runtime = executor->get_llvm_runtime();
@@ -87,7 +87,6 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
   if (!compiled.get_handle()) {
     auto handle = make_handle();
     auto index = handle.get_launch_id();
-    contexts_.resize(index + 1);
 
     auto ctx = std::make_shared<Context>();
     auto *executor = get_runtime_executor();
@@ -113,7 +112,8 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     ctx->snode_tree_ids = compiled.snode_tree_ids();
     ctx->parameters = std::move(parameters);
     ctx->task_funcs = std::move(task_funcs);
-    contexts_[index] = std::move(ctx);
+    const bool was_inserted = contexts_.emplace(index, std::move(ctx)).second;
+    TI_ASSERT(was_inserted);
 
     compiled.set_handle(handle);
   }
@@ -124,16 +124,22 @@ void KernelLauncher::retire_snode_tree(int tree_id) {
   std::unique_lock<std::mutex> execution_lock(execution_mutex_);
   std::unique_lock<std::shared_mutex> registration_lock(registration_mutex());
   auto *executor = get_runtime_executor();
-  for (auto &context : contexts_) {
-    if (context == nullptr ||
-        !std::binary_search(context->snode_tree_ids.begin(),
+  for (auto iter = contexts_.begin(); iter != contexts_.end();) {
+    const auto &context = iter->second;
+    if (!std::binary_search(context->snode_tree_ids.begin(),
                             context->snode_tree_ids.end(), tree_id)) {
+      ++iter;
       continue;
     }
     auto module = context->jit_module;
-    context.reset();
+    iter = contexts_.erase(iter);
     executor->remove_jit_module(module);
   }
+}
+
+std::size_t KernelLauncher::debug_registered_kernel_count() {
+  std::shared_lock<std::shared_mutex> lock(registration_mutex());
+  return contexts_.size();
 }
 
 }  // namespace cpu

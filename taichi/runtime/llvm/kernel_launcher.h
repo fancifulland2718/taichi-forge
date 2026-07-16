@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <mutex>
 #include <shared_mutex>
 
@@ -35,6 +36,9 @@ class KernelLauncher : public lang::KernelLauncher {
 
  protected:
   Handle make_handle() {
+    TI_ERROR_IF(launch_id_counter_ == std::numeric_limits<int>::max(),
+                "LLVM kernel registration ID space exhausted; call "
+                "ti.reset().");
     Handle handle;
     handle.set_launch_id(launch_id_counter_++);
     return handle;

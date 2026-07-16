@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <utility>
 
 #include "taichi/program/kernel.h"
 #include "taichi/ir/snode.h"
@@ -51,9 +52,15 @@ class SNodeRwAccessorsBank {
 
   Accessors get(SNode *snode);
 
-  void remove_cached_kernels(const SNode *snode) {
-    if (snode_to_kernels_.find(snode) != snode_to_kernels_.end())
-      snode_to_kernels_.erase(snode);
+  std::pair<Kernel *, Kernel *> remove_cached_kernels(const SNode *snode) {
+    auto iter = snode_to_kernels_.find(snode);
+    if (iter == snode_to_kernels_.end()) {
+      return {};
+    }
+    std::pair<Kernel *, Kernel *> result{iter->second.reader,
+                                        iter->second.writer};
+    snode_to_kernels_.erase(iter);
+    return result;
   }
 
  private:

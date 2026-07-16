@@ -934,6 +934,15 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("_debug_runtime_completion_stats",
            &Program::debug_runtime_completion_stats)
+      .def("_debug_kernel_definition_count", [](const Program &program) {
+        return program.kernels.size();
+      })
+      .def("_debug_kernel_registration_count", [](Program &program) {
+        return program.get_kernel_launcher().debug_registered_kernel_count();
+      })
+      .def("_debug_snode_field_mapping_count", [](Program &program) {
+        return program.get_snode_to_fields()->size();
+      })
       .def("materialize_runtime", &Program::materialize_runtime)
       .def("make_aot_module_builder", &Program::make_aot_module_builder)
       .def("get_snode_tree_size", &Program::get_snode_tree_size)
