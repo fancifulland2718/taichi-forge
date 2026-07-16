@@ -14,24 +14,72 @@
 # NB: Running Taichi in other modes are likely not supported.
 
 import atexit
+import hashlib
 import inspect
 import os
 import tempfile
+import threading
+from collections import OrderedDict
 
 import dill
 
 _builtin_getfile = inspect.getfile
 _builtin_findsource = inspect.findsource
+_inspect_lock = threading.RLock()
+_MAX_SAVED_INSPECT_FILES = 32
 
 
 def _find_source_with_custom_getfile_func(func, obj):
     """Use a custom function `func` to replace inspect's `getfile`, return the
     source found by the new routine and restore the original `getfile` back.
     """
-    inspect.getfile = func  # replace with our custom func
-    source = inspect.findsource(obj)
-    inspect.getfile = _builtin_getfile  # restore
-    return source
+    with _inspect_lock:
+        inspect.getfile = func  # replace with our custom func
+        try:
+            return inspect.findsource(obj)
+        finally:
+            inspect.getfile = _builtin_getfile  # restore
+
+
+def _unlink_if_present(filename):
+    try:
+        os.unlink(filename)
+    except FileNotFoundError:
+        pass
+
+
+def _get_or_create_blender_source(lines, text_name):
+    # Keep source text out of the process-lifetime key. The bounded digest LRU
+    # avoids retaining every historical Blender text revision in RAM.
+    cache_key = (len(lines), hashlib.sha256(lines.encode("utf-8")).digest())
+    with _inspect_lock:
+        cache = _blender_findsource._saved_inspect_cache  # pylint: disable=no-member
+        filename = cache.get(cache_key)
+        if filename is not None and os.path.exists(filename):
+            cache.move_to_end(cache_key)
+            return filename
+        if filename is not None:
+            del cache[cache_key]
+
+        fd, filename = tempfile.mkstemp(prefix="_Blender_", suffix=f"_{text_name}.py")
+        os.close(fd)
+        with open(filename, "w", encoding="utf-8") as source_file:
+            source_file.write(lines)
+        cache[cache_key] = filename
+
+        while len(cache) > _MAX_SAVED_INSPECT_FILES:
+            _, stale_filename = cache.popitem(last=False)
+            _unlink_if_present(stale_filename)
+        return filename
+
+
+def _cleanup_blender_source_cache():
+    with _inspect_lock:
+        cache = _blender_findsource._saved_inspect_cache  # pylint: disable=no-member
+        filenames = list(cache.values())
+        cache.clear()
+    for filename in filenames:
+        _unlink_if_present(filename)
 
 
 def _blender_get_text_name(filename: str):
@@ -70,18 +118,8 @@ def _blender_findsource(obj):
     lines = bpy.data.texts[text_name].as_string()
     # Now we have found the lines of code.
     # We first check if they are already cached, to avoid file io in each query.
-    try:
-        filename = _blender_findsource._saved_inspect_cache[lines]  # pylint: disable=no-member
-    except KeyError:
-        # Save the code to a valid path.
-        fd, filename = tempfile.mkstemp(prefix="_Blender_", suffix=f"_{text_name}.py")
-        os.close(fd)
-
-        with open(filename, "w") as f:
-            f.write(lines)
-
-        _blender_findsource._saved_inspect_cache[lines] = filename  # pylint: disable=no-member
-        atexit.register(os.unlink, filename)  # Remove file when program exits
+    # Save the current text revision to a bounded temporary-source LRU.
+    filename = _get_or_create_blender_source(lines, text_name)
 
     # Our custom getfile function
     def wrapped_getfile(ob):
@@ -93,7 +131,8 @@ def _blender_findsource(obj):
     return _find_source_with_custom_getfile_func(wrapped_getfile, obj)
 
 
-_blender_findsource._saved_inspect_cache = {}
+_blender_findsource._saved_inspect_cache = OrderedDict()
+atexit.register(_cleanup_blender_source_cache)
 
 
 def _Python_IPython_findsource(obj):
@@ -111,7 +150,9 @@ def _Python_IPython_findsource(obj):
                 if ip is not None:
                     # So we are in IPython's cell magic
                     session_id = ip.history_manager.get_last_session_id()
-                    fd, filename = tempfile.mkstemp(prefix="_IPython_", suffix=f"_{session_id}.py")
+                    fd, filename = tempfile.mkstemp(
+                        prefix="_IPython_", suffix=f"_{session_id}.py"
+                    )
                     os.close(fd)
                     # The latest lines of code can be retrived from here
                     lines = ip.history_manager._i00
@@ -124,12 +165,16 @@ def _Python_IPython_findsource(obj):
                     lines_stripped = lines[index:]
                     lines_stripped = lines_stripped.split(maxsplit=1)[1]
 
-                    with open(filename, "w") as f:
-                        f.write(lines_stripped)
+                    try:
+                        with open(filename, "w", encoding="utf-8") as source_file:
+                            source_file.write(lines_stripped)
 
-                    atexit.register(os.unlink, filename)  # Remove the file after the program exits
-                    func = lambda obj: filename
-                    return _find_source_with_custom_getfile_func(func, obj)
+                        func = lambda obj: filename
+                        return _find_source_with_custom_getfile_func(func, obj)
+                    finally:
+                        # The returned source lines already own their text.
+                        # Do not retain one temp file and atexit hook per query.
+                        _unlink_if_present(filename)
 
             except ImportError:
                 pass
@@ -164,11 +209,13 @@ https://github.com/taichi-dev/taichi/issues"
 
 class _InspectContextManager:
     def __enter__(self):
+        _inspect_lock.acquire()
         inspect.findsource = _custom_findsource
         return self
 
     def __exit__(self, *_):
         inspect.findsource = _builtin_findsource
+        _inspect_lock.release()
 
 
 def getsourcelines(obj):
