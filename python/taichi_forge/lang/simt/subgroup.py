@@ -1,4 +1,15 @@
+from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
+from taichi_forge.lang.exception import TaichiCompilationError
+
+
+def _not_implemented(operation):
+    arch = impl.current_cfg().arch
+    raise TaichiCompilationError(
+        f"ti.simt.subgroup.{operation} is unavailable on "
+        f"{_ti_core.arch_name(arch)} (support status: not implemented; "
+        "no backend lowering is registered)"
+    )
 
 
 def barrier():
@@ -14,23 +25,19 @@ def elect():
 
 
 def all_true(cond):
-    # TODO
-    pass
+    _not_implemented("all_true")
 
 
 def any_true(cond):
-    # TODO
-    pass
+    _not_implemented("any_true")
 
 
 def all_equal(value):
-    # TODO
-    pass
+    _not_implemented("all_equal")
 
 
 def broadcast_first(value):
-    # TODO
-    pass
+    _not_implemented("broadcast_first")
 
 
 def broadcast(value, index):
@@ -102,38 +109,31 @@ def inclusive_xor(value):
 
 
 def exclusive_add(value):
-    # TODO
-    pass
+    _not_implemented("exclusive_add")
 
 
 def exclusive_mul(value):
-    # TODO
-    pass
+    _not_implemented("exclusive_mul")
 
 
 def exclusive_min(value):
-    # TODO
-    pass
+    _not_implemented("exclusive_min")
 
 
 def exclusive_max(value):
-    # TODO
-    pass
+    _not_implemented("exclusive_max")
 
 
 def exclusive_and(value):
-    # TODO
-    pass
+    _not_implemented("exclusive_and")
 
 
 def exclusive_or(value):
-    # TODO
-    pass
+    _not_implemented("exclusive_or")
 
 
 def exclusive_xor(value):
-    # TODO
-    pass
+    _not_implemented("exclusive_xor")
 
 
 def shuffle(value, index):
@@ -141,8 +141,7 @@ def shuffle(value, index):
 
 
 def shuffle_xor(value, mask):
-    # TODO
-    pass
+    _not_implemented("shuffle_xor")
 
 
 def shuffle_up(value, offset):

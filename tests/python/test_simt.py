@@ -1,10 +1,48 @@
 import numpy as np
 import pytest
 from pytest import approx
+from taichi_forge._lib import core as _ti_core
+from taichi_forge.lang import impl
 from taichi_forge.lang.simt import subgroup
 
 import taichi_forge as ti
 from tests import test_utils
+from taichi_forge.lang.exception import TaichiCompilationError
+
+
+_UNIMPLEMENTED_SUBGROUP_OPERATIONS = [
+    ("all_true", subgroup.all_true, (1,)),
+    ("any_true", subgroup.any_true, (1,)),
+    ("all_equal", subgroup.all_equal, (1,)),
+    ("broadcast_first", subgroup.broadcast_first, (1,)),
+    ("exclusive_add", subgroup.exclusive_add, (1,)),
+    ("exclusive_mul", subgroup.exclusive_mul, (1,)),
+    ("exclusive_min", subgroup.exclusive_min, (1,)),
+    ("exclusive_max", subgroup.exclusive_max, (1,)),
+    ("exclusive_and", subgroup.exclusive_and, (1,)),
+    ("exclusive_or", subgroup.exclusive_or, (1,)),
+    ("exclusive_xor", subgroup.exclusive_xor, (1,)),
+    ("shuffle_xor", subgroup.shuffle_xor, (1, 1)),
+]
+
+
+@pytest.mark.parametrize(
+    "operation,subgroup_op,args", _UNIMPLEMENTED_SUBGROUP_OPERATIONS
+)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_unimplemented_subgroup_operations_fail_during_compilation(
+    operation, subgroup_op, args
+):
+    @ti.kernel
+    def invoke():
+        subgroup_op(*args)
+
+    with pytest.raises(
+        TaichiCompilationError,
+        match=rf"ti\.simt\.subgroup\.{operation}.*support status: not implemented",
+    ) as error:
+        invoke()
+    assert _ti_core.arch_name(impl.current_cfg().arch) in str(error.value)
 
 
 @test_utils.test(arch=ti.cuda)
