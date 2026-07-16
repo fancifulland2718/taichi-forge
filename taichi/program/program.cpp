@@ -5429,7 +5429,28 @@ SNodeTree *Program::add_snode_tree(std::unique_ptr<SNode> root,
   return snode_trees_[id].get();
 }
 
+std::vector<int> Program::get_active_snode_tree_ids() const {
+  std::shared_lock<std::shared_mutex> lifecycle_lock(
+      snode_tree_lifecycle_mutex_);
+  TI_ASSERT(snode_tree_active_.size() == snode_trees_.size());
+  std::vector<int> active_ids;
+  active_ids.reserve(snode_trees_.size() - free_snode_tree_ids_.size());
+  for (std::size_t tree_id = 0; tree_id < snode_trees_.size(); ++tree_id) {
+    if (snode_tree_active_[tree_id]) {
+      active_ids.push_back(static_cast<int>(tree_id));
+    }
+  }
+  return active_ids;
+}
+
 SNode *Program::get_snode_root(int tree_id) {
+  std::shared_lock<std::shared_mutex> lifecycle_lock(
+      snode_tree_lifecycle_mutex_);
+  TI_ERROR_IF(tree_id < 0 ||
+                  static_cast<std::size_t>(tree_id) >= snode_trees_.size() ||
+                  !snode_tree_active_[tree_id],
+              "SNodeTree id={} is no longer active.", tree_id);
+  TI_ASSERT(snode_trees_[tree_id] != nullptr);
   return snode_trees_[tree_id]->root();
 }
 

@@ -307,6 +307,8 @@ class TI_DLL_EXPORT Program {
 
   int get_snode_tree_size();
 
+  std::vector<int> get_active_snode_tree_ids() const;
+
   SNodeTreeLifecycleReadGuard acquire_snode_tree_lifecycle_read_guard();
 
   std::vector<SNodeTreeDependency> snapshot_snode_tree_dependencies(

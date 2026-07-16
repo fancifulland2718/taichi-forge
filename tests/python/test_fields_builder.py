@@ -226,6 +226,49 @@ def test_destroyed_field_accessors_do_not_accumulate_frontend_state():
         assert prog._debug_snode_field_mapping_count() == baseline_fields
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_finalized_roots_only_include_active_snode_trees():
+    prog = ti.lang.impl.get_runtime().prog
+
+    first_builder = ti.FieldsBuilder()
+    first = ti.field(ti.f32, needs_grad=True)
+    first_builder.dense(ti.i, 4).place(first, first.grad)
+    first_tree = first_builder.finalize()
+    first_id = first_tree.id
+
+    second_builder = ti.FieldsBuilder()
+    second = ti.field(ti.f32, needs_grad=True)
+    second_builder.dense(ti.i, 4).place(second, second.grad)
+    second_tree = second_builder.finalize()
+
+    assert {
+        root._snode_tree_id for root in ti.FieldsBuilder._finalized_roots()
+    } == {first_id, second_tree.id}
+
+    first_tree.destroy()
+    with pytest.raises(RuntimeError, match="no longer active"):
+        prog.get_snode_root(first_id)
+    assert [
+        root._snode_tree_id for root in ti.FieldsBuilder._finalized_roots()
+    ] == [second_tree.id]
+
+    replacement_builder = ti.FieldsBuilder()
+    replacement = ti.field(ti.f32, needs_grad=True)
+    replacement_builder.dense(ti.i, 4).place(replacement, replacement.grad)
+    replacement_tree = replacement_builder.finalize()
+    assert replacement_tree.id == first_id
+
+    ti.ad.clear_all_gradients()
+    active_ids = {
+        root._snode_tree_id for root in ti.FieldsBuilder._finalized_roots()
+    }
+    assert {replacement_tree.id, second_tree.id} <= active_ids
+    assert sum(
+        root._snode_tree_id == first_id
+        for root in ti.FieldsBuilder._finalized_roots()
+    ) == 1
+
+
 @test_utils.test(exclude=[ti.opengl, ti.gles])
 def test_field_builder_place_grad():
     @ti.kernel

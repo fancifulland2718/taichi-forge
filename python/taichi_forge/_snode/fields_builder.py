@@ -41,20 +41,18 @@ class FieldsBuilder:
         self.empty = True
         impl.get_runtime().initialize_fields_builder(self)
 
-    # TODO: move this into SNodeTree
     @classmethod
     def _finalized_roots(cls):
-        """Gets all the roots of the finalized SNodeTree.
+        """Gets the roots of all currently active finalized SNodeTrees.
 
         Returns:
-            A list of the roots of the finalized SNodeTree.
+            A list of roots whose native SNodeTrees are still active.
         """
-        roots_ptr = []
-        size = impl.get_runtime().prog.get_snode_tree_size()
-        for i in range(size):
-            res = impl.get_runtime().prog.get_snode_root(i)
-            roots_ptr.append(snode.SNode(res))
-        return roots_ptr
+        prog = impl.get_runtime().prog
+        return [
+            snode.SNode(prog.get_snode_root(tree_id))
+            for tree_id in prog.get_active_snode_tree_ids()
+        ]
 
     # TODO: move this to SNodeTree class.
     def deactivate_all(self):
