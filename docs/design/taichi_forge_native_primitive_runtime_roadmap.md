@@ -1,6 +1,6 @@
 # Taichi Forge 原生算法运行时整理与优化规划
 
-> 状态：内部规划，尚未承诺为公开 API 或发行时间表
+> 状态：N0--N9 实现与 Windows 本机收口完成；Linux/旧 driver 外部复测仍是发行门禁
 > 基线日期：2026-07-16
 > 适用范围：Windows/Linux，CUDA/Vulkan/CPU，稠密 ndarray 与稠密 field
 > 不纳入本规划：稀疏 SNode、公开 tile/block/warp DSL、异构多环境调度器、新后端
@@ -497,3 +497,90 @@ N0-N3 是不可跳过的基础。N4-N6 提供最高兼容性/性能 ROI；N7 排
 - 风险、未覆盖平台和回滚方式。
 
 本文件在 N8 前保持内部使用，不加入公开文档导航和 release note。达到发行切换节点后，再把稳定的用户可见行为合并整理到独立的中英文原生算法文档、构建指南和版本更新说明中，避免把中间实验方案对外承诺为长期 API。
+
+## 11. 执行记录与最终决策（2026-07-16）
+
+### 11.1 节点落地
+
+| 节点 | 结果 | 主要提交/边界 |
+| --- | --- | --- |
+| N0 | 完成 | `a0dc5f1cf` 规划；`73b9736e2` dependency class/capability；`be3f9ff5e` GPU idle guard。 |
+| N1--N2 | 完成 | `462dfee04` provider 源重命名；`665c4aa1b` Toolkit reference/CUPTI 隔离；标准配置不编译 CUB/CUDART。 |
+| N3 | 完成 | `d7ae4f3fa` CUDA Program-owned arena；`519e06a78` Vulkan Program ownership；无 process-global owner map。 |
+| N4 | 完成 | `975787d4f`/`3c06961cf` linear 与 diagnostics PTX；dependency class 为 `driver_only`。 |
+| N5--N7 | 完成并按 stop rule 收口 | `3036b6c8e`/`cf4b7dc14`/`f22174e85` 正确性 provider；`264da1eb4` tiled scan；`6f02ad06f` fused compact；`2e6114da0` hierarchical 4-bit stable radix。 |
+| V1 | 完成当前安全高 ROI 范围 | `45a214e95` fence-safe resource-set recycle；不引入 queue-wide wait 或无界 ring。Linux validation/multi-vendor 证据外置。 |
+| P1 | 完成当前安全高 ROI 范围 | `2bdf4b71b` Program-owned bounded scratch；每 family/worker 8 MiB retention、8--64 MiB transient、超限保持 serial fallback。 |
+| N8 | 完成源码与 workflow | `0999bbbdf` driver-only runtime wheel；`cbabc6241` auto 不选择 CUB；`e576cc2cd` 双语发行边界。旧 0.5.0 bundled-CUDART wheel 仅作为兼容输入。 |
+| N9 | 完成本机实现与文档 | `574e4f76c` diagnostics、per-thread implicit cache、stress；`05dba0430` 中英文 public docs；本节与 release checklist 完成收口。 |
+
+规划中的“完整完成”指代码、Windows 可执行验证、发布门禁和外部复测说明均已落地；它不把
+无法在本机执行的 Linux、compute-sanitizer、Vulkan validation/multi-vendor 或旧 driver
+真机结果伪装成通过。那些项目仍按 `linux_revalidation.*.md` 阻断相应发行声明。
+
+### 11.2 最终 CUDA 性能与存储证据
+
+环境：Windows 10 build 26200、RTX 5090、NVIDIA driver 610.62、Python 3.10.11；
+1,048,576 个 i32 item；30 sample，每 sample 20 次 hot submission 后同步；benchmark
+和 `nvidia-smi` 均确认没有其它 Python/GPU compute process。reference 来自单独的 CUDA
+13.2 CUB build，不属于标准 wheel。结果正确性使用独立 NumPy oracle。
+
+| Primitive | driver median | CUB median | driver/CUB 吞吐 | 门槛 | driver workspace | 结论 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| scan | 0.0272 ms | 0.0190 ms | 69.8% | 90% | 4 KiB | 未达；保留 tiled safe provider。 |
+| reduce-sum | 0.0228 ms | 0.0193 ms | 84.6% | 90% | 4 KiB | 未达；绝对差约 3.5 us，不做边缘调参。 |
+| histogram-256 | 0.1243 ms | 0.1215 ms | 97.7% | 90% | 0 | 达标并收口。 |
+| stable compact | 0.0279 ms | 0.0228 ms | 81.8% | 80% | 4.00 MiB | 首轮门槛达标并收口。 |
+| stable i32 key/value sort | 0.4883 ms | 0.1491 ms | 30.5% | 80% | 28.06 MiB | 未达；相较旧 1-bit 结构显著改善，但 one-sweep 留后续。 |
+
+结构优化过程中的独立证据：compact batch-100 median 从约 0.0441 ms 降到 0.0267 ms；
+5 秒、2 host thread、每次 1,048,576 item 的综合 primitive stress 在 4-bit sort 后完成
+`3805/3862` 次 worker iteration，而旧 1-bit 路径的 3 秒样本为约 `587/592` 次。
+driver-only sort workspace 从 29,364,224 bytes 增至 29,426,176 bytes（约 0.21%），
+换取 pass 数和全数组 scan 的大幅下降。
+
+### 11.3 门槛偏差与默认 provider 决策
+
+N5/N7 原始文字把 CUB 百分比既作为性能目标又作为 `auto` 切换硬门槛。实现期确认这两个
+要求在标准 wheel 上冲突：CUB 不能进入发行依赖，而 host round-trip/host stable 对异步物理
+引擎是更差且会同步的默认路径。因此最终决策是：
+
+1. `auto` 选择已通过独立 oracle、并发和 workspace 验证的 driver-only provider；
+2. 未达 CUB 门槛必须公开报告，不得描述成性能等价；
+3. histogram/compact 达标后立即停止；reduce 的微秒级差距不继续调参；
+4. scan/sort 只有在 one-sweep、pass fusion 或其它结构方案同时保持低 PTX、旧 driver 和
+   有界状态时才重新立项，不以 device-specific 参数树堆叠复杂度；
+5. CUB 只保留为不发布 reference，正确性规范仍是独立 oracle。
+
+这是一项显式的兼容性/异步性优先决策，不是悄悄放宽测量结果。
+
+### 11.4 N9 可观测性、回滚和清理时间表
+
+- `get_primitive_runtime_diagnostics(reset=False)` 与
+  `get_primitive_workspace_statistics()` 是 schema-v1、无 device wait 的 opt-in snapshot；
+  Program provider bytes 与 Python logical bytes 不可相加。
+- `workspace=None` cache 以 Program + Python thread 为 context，默认 64 entry/context、16
+  context/process；达到上限时新 context uncached，不驱逐 foreign in-flight resource。
+- `clear_default_workspaces()`、workspace `clear()` 与 `ti.reset()` 的支持边界要求 producer
+  已停止；metadata 锁不覆盖 GPU enqueue、wait 或 backend allocation destruction。
+- 显式 `cuda_cub*` 至少保留一个公开发行周期并保持 warning；只有在 reference CI、迁移文档
+  和 downstream 搜索都证明不再需要时，才在明确版本边界删除。标准 wheel 从现在起不含它。
+- 已发布 bundled-CUDART runtime 的 loader/repair/validator 兼容不设仓促删除日期；新上传候选
+  必须严格 `driver-only`。这两个 dependency class 不能混为同一个发行证据。
+- 回滚 driver provider 只需把 `auto` 路由切回 portable/host safe provider 或固定上一 runtime
+  wheel；不得静默映射显式 `cuda_cub*` 到语义不同的实现。native runtime 源码变化要求发布
+  新 runtime wheel，shim-only 更新不能替代二进制回滚。
+
+### 11.5 本机验证与外部待办
+
+Windows 已完成：Clang 14 PTX 可复现生成、release extension 增量构建、scan 72/72、compact
+25/28（3 项按 reference capability 跳过）、sort 68/80（12 项按 capability 跳过）、
+runtime diagnostics/cache focused tests、CPU/CUDA/Vulkan production stress，以及 GPU 空闲条件
+下的统一性能矩阵。N9 最终发行测试和 wheel dependency scan 的实际结果在本次收尾命令后
+写入提交说明，不在规划中预先伪造。
+
+Linux/旧 driver 仍待：GCC/Clang 标准配置、manylinux raw/repaired wheel、ELF
+`DT_NEEDED`/RPATH、无 Toolkit import、真实 CUDA module-load、30--60 秒 CPU/CUDA/Vulkan
+stress、compute-sanitizer、TSAN/ASan/UBSan、Vulkan validation/同步 validation、X11/Wayland
+headed GGUI、multi-vendor Vulkan，以及每个公开最低 driver 节点。完成前不降低公开 driver
+下限，也不声称 Windows 性能可外推到 Linux。

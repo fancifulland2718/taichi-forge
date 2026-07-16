@@ -91,6 +91,11 @@ PyPI 申请短期 token，**无需手动维护任何 secret**。
 - driver-only 依赖扫描不能替代旧 driver 真机执行。修改最低驱动声明前必须完成
   [Linux 复测清单](../forge/linux_revalidation.zh.md)和目标旧 driver 实测。
 
+修改 `taichi/rhi/cuda/primitives/`、Program primitive arena、Vulkan native cache 或 CPU
+native scratch 的提交会改变 native runtime，必须先发布同版本的新 runtime wheel；shim-only
+workflow 无法携带这些二进制更新。只改 Python 包装、测试或文档时才可复用已经发布且 ABI/
+行为匹配的 runtime。不得为了避免重发 runtime 而把 native provider 复制进 shim wheel。
+
 `publish_pypi.yml` 不应重新编译 C++ runtime，也不应重新安装 CUDA Toolkit。它只从目标
 PyPI/TestPyPI 下载指定版本的 `taichi-forge-runtime` wheel，解包 link artifacts，然后构建
 各 Python 版本的 pybind shim wheel。
@@ -194,8 +199,22 @@ git push origin v0.5.0
 
 ```powershell
 python -m pytest tests/python/test_runtime_packaging_cuda_version.py -q
+python -m pytest tests/python/test_runtime_statistics.py tests/python/test_primitive_plan.py -q
 python -m py_compile scripts/repair_runtime_wheel.py scripts/validate_runtime_wheel.py scripts/validate_shim_wheel.py scripts/validate_installed_runtime.py
 ```
+
+在各后端可用的 release-equivalent build/安装环境运行至少 30 秒生产尺度 primitive stress；
+CUDA/Vulkan 执行前先确认没有其它 Python/GPU compute process：
+
+```text
+python tests/python/native_primitive_runtime_stress.py --arch cpu --seconds 30 --threads 4 --items 1048576
+python tests/python/native_primitive_runtime_stress.py --arch cuda --seconds 30 --threads 4 --items 1048576
+python tests/python/native_primitive_runtime_stress.py --arch vulkan --seconds 30 --threads 4 --items 1048576
+```
+
+要求 `result=pass`、空 fallback、正确 dependency class、clear 后 provider bytes 为 0。
+stress 输出的 `performance=not_measured` 是预期值；它是正确性/并发/lifetime 门禁，不应被
+包装成性能结果。性能结论只能由带 `--performance` idle guard 的 benchmark 单独产生。
 
 workflow 产出后，必须对最终上传候选运行：
 
