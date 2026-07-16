@@ -567,6 +567,15 @@ print(err.to_float())
 
 参考：[Native 算法](native_algorithms.zh.md)。
 
+## AOT API
+
+### `ti.aot.Module(arch=None, caps=None)`
+
+当前 Forge AOT 只支持 same-target 编译。省略 `arch` 时使用 active runtime arch；显式值
+必须与 `ti.init()` 选择的 arch 相同。不匹配时会在创建 backend builder 前抛出
+`TaichiRuntimeError`。Forge 不会静默替换请求的 target，当前也不声明支持 cross-arch
+编译。
+
 ## Graph API
 
 Dense Field 专属 layout、生命周期、并发、AD 与后端行为见

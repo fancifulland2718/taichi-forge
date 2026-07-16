@@ -107,6 +107,10 @@ retroactively attributed to the 0.5.0 artifact:
   before compilation/submission. Tape no longer runs adjoints after its body
   raises, and dynamic early-return control flow remains an explicit frontend
   rejection rather than an incomplete derivative.
+- AOT module creation now enforces its actual same-target contract. Passing an
+  `arch` different from the active `ti.init()` architecture raises before the
+  backend builder is created instead of warning and silently changing the
+  requested artifact target.
 
 ## 0.1.0
 

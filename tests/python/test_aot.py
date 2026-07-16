@@ -653,13 +653,13 @@ def test_devcap_weird_user_input():
         )
 
 
-@test_utils.test(arch=[ti.vulkan])
-def test_module_arch_fallback():
-    with pytest.warns(
-        Warning,
-        match=r"AOT compilation to a different arch than the current one is not yet supported, switching",
+@test_utils.test(arch=[ti.cpu])
+def test_module_arch_mismatch_rejected():
+    with pytest.raises(
+        ti.TaichiRuntimeError,
+        match=r"same-target compilation only.*requested Arch\.vulkan.*active runtime is Arch\.x64",
     ):
-        m = ti.aot.Module(ti.cpu)
+        ti.aot.Module(ti.vulkan)
 
 
 @test_utils.test(arch=[ti.vulkan])

@@ -625,6 +625,16 @@ first.
 
 See also [Native algorithms](native_algorithms.en.md).
 
+## AOT APIs
+
+### `ti.aot.Module(arch=None, caps=None)`
+
+Current Forge AOT compilation is same-target only. Omitting `arch` uses the
+active runtime architecture; an explicit value must equal the architecture
+selected by `ti.init()`. A mismatch raises `TaichiRuntimeError` before creating
+the backend builder. Forge does not silently replace the requested target and
+does not currently claim cross-architecture compilation.
+
 ## Graph APIs
 
 Dense Field-specific layouts, lifetime, concurrency, AD, and backend behavior

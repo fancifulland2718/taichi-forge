@@ -260,7 +260,10 @@ Currently `ti.vulkan`, `ti.opengl`, `ti.x86` and `ti.cuda` are supported. `ti.me
 
 ### Does Taichi support generating shaders for different deployment targets?
 
-Yes, you can specify the target device capabilities in `ti.aot.Module(arch=, caps=[])`. Future support for compiling to a different architecture from `ti.init()` is planned.
+You can specify target device capabilities in `ti.aot.Module(arch=, caps=[])`,
+but the module architecture must match the active `ti.init()` architecture.
+Forge rejects a different `arch` instead of silently compiling for the current
+runtime. Cross-architecture compilation is not currently supported.
 
 ### Are Taichi compiled artifacts versioned?
 

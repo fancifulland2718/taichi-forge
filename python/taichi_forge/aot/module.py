@@ -1,6 +1,5 @@
 import datetime
 import os
-import warnings
 from contextlib import contextmanager
 from glob import glob
 from pathlib import Path, PurePosixPath
@@ -97,11 +96,12 @@ class Module:
         if arch is None:
             arch = curr_arch
         elif arch != curr_arch:
-            # TODO: we'll support this eventually but not yet...
-            warnings.warn(
-                f"AOT compilation to a different arch than the current one is not yet supported, switching to {curr_arch}"
+            raise TaichiRuntimeError(
+                "ti.aot.Module() currently supports same-target compilation "
+                f"only: requested {arch}, but the active runtime is {curr_arch}. "
+                "Initialize Taichi with the requested arch before creating the "
+                "module; cross-arch compilation is not supported."
             )
-            arch = curr_arch
 
         self._arch = arch
         self._kernels = []

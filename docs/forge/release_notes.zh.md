@@ -85,6 +85,8 @@
   路径已在 CPU/CUDA/Vulkan 验证；嵌套 context、Tape 内手工 reverse 和
   forward-on-reverse 现在会在编译/提交前拒绝。Tape 正文抛出异常后不再对不完整 trace
   运行 adjoint；动态 early-return CFG 继续由前端明确拒绝，不会产生不完整梯度。
+- AOT module 创建现在强制执行实际的 same-target 合同。传入与 active `ti.init()` arch
+  不同的 `arch` 会在 backend builder 创建前报错，不再 warning 后静默替换 artifact target。
 
 ## 0.1.0
 
