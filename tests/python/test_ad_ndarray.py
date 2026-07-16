@@ -1479,6 +1479,27 @@ def test_torch_explicit_grad_access_allocates_grad():
     assert result[0] == 0.0
 
 
+@pytest.mark.skipif(not has_pytorch(), reason="Pytorch not installed.")
+@test_utils.test(arch=[ti.vulkan])
+def test_torch_external_grad_readback_vulkan():
+    @ti.kernel
+    def primal(x: ti.types.ndarray(), y: ti.types.ndarray()):
+        for i in x:
+            y[i] = 3.0 * x[i]
+
+    x = torch.arange(8, dtype=torch.float32, requires_grad=True)
+    y = torch.zeros(8, dtype=torch.float32, requires_grad=True)
+
+    primal(x, y)
+    assert x.grad is None
+    assert y.grad is None
+
+    y.grad = torch.ones_like(y)
+    primal.grad(x, y)
+
+    assert torch.all(x.grad == 3.0)
+
+
 @test_utils.test(arch=archs_support_ndarray_ad)
 def test_ad_vector_arg():
     N = 10

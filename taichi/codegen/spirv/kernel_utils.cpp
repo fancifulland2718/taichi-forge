@@ -66,6 +66,7 @@ KernelContextAttributes::KernelContextAttributes(
     const DeviceCapabilityConfig *caps)
     : args_bytes_(0), rets_bytes_(0) {
   arr_access.reserve(kernel.nested_parameters.size());
+  grad_arr_access.reserve(kernel.nested_parameters.size());
   arg_attribs_vec_.reserve(kernel.nested_parameters.size());
   // TODO: We should be able to limit Kernel args and rets to be primitive types
   // as well but let's leave that as a followup up PR.
@@ -101,6 +102,7 @@ KernelContextAttributes::KernelContextAttributes(
     aa.ptype = ka.ptype;
     arg_attribs_vec_.push_back({k, aa});
     arr_access.push_back({k, irpass::ExternalPtrAccess(0)});
+    grad_arr_access.push_back({k, irpass::ExternalPtrAccess(0)});
   }
   // TODO:
   //  ret_attribs_vec_ and this if loop is redundant now. Remove it in a follow

@@ -96,6 +96,19 @@ class HostDeviceContextBlitter {
             std::memcpy(device_arr_ptr, host_ptr, ext_arr_size.at(indices));
             device_->unmap(buffer);
           }
+          if (array_arg.grad_access != 0) {
+            DeviceAllocation grad_buffer =
+                ext_arrays.at(array_arg.grad_ptr_indices);
+            void *device_grad_ptr{nullptr};
+            TI_ASSERT(device_->map(grad_buffer, &device_grad_ptr) ==
+                      RhiResult::success);
+            const void *host_grad_ptr =
+                host_ctx_.array_ptrs[array_arg.grad_ptr_indices];
+            TI_ASSERT(host_grad_ptr != nullptr);
+            std::memcpy(device_grad_ptr, host_grad_ptr,
+                        ext_arr_size.at(indices));
+            device_->unmap(grad_buffer);
+          }
         }
         // Substitute in the device address.
 
@@ -105,14 +118,17 @@ class HostDeviceContextBlitter {
                 DeviceCapability::spirv_has_physical_storage_buffer)) {
           uint64_t addr =
               device_->get_memory_physical_pointer(ext_arrays.at(indices));
-          uint64_t grad_addr =
-              (uint64)host_ctx_.array_ptrs[array_arg.grad_ptr_indices];
+          uint64_t grad_addr = 0;
           if (alloc_type == LaunchContextBuilder::DevAllocType::kNdarray &&
               host_ctx_.array_ptrs[array_arg.grad_ptr_indices] != nullptr) {
             auto grad_alloc =
                 *(DeviceAllocation *)(
                     host_ctx_.array_ptrs[array_arg.grad_ptr_indices]);
             grad_addr = device_->get_memory_physical_pointer(grad_alloc);
+          } else if (alloc_type == LaunchContextBuilder::DevAllocType::kNone &&
+                     array_arg.grad_access != 0) {
+            grad_addr = device_->get_memory_physical_pointer(
+                ext_arrays.at(array_arg.grad_ptr_indices));
           }
           host_ctx_.set_ndarray_ptrs(indices, addr, grad_addr);
         }
@@ -153,6 +169,15 @@ class HostDeviceContextBlitter {
           readback_host_ptrs.push_back(
               host_ctx_.array_ptrs[array_arg.data_ptr_indices]);
           // TODO: readback grad_ptrs as well once ndarray ad is supported
+          readback_sizes.push_back(ext_arr_size.at(indices));
+          require_sync = true;
+        }
+        if (array_arg.grad_access &
+            uint32_t(irpass::ExternalPtrAccess::WRITE)) {
+          readback_dev_ptrs.push_back(
+              ext_arrays.at(array_arg.grad_ptr_indices).get_ptr(0));
+          readback_host_ptrs.push_back(
+              host_ctx_.array_ptrs[array_arg.grad_ptr_indices]);
           readback_sizes.push_back(ext_arr_size.at(indices));
           require_sync = true;
         }
@@ -394,6 +419,12 @@ CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
     for (const auto &access : ctx_attribs.arr_access) {
       if (access.first == indices) {
         array_arg.access = uint32_t(access.second);
+        break;
+      }
+    }
+    for (const auto &access : ctx_attribs.grad_arr_access) {
+      if (access.first == indices) {
+        array_arg.grad_access = uint32_t(access.second);
         break;
       }
     }
@@ -1185,6 +1216,23 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
           any_arrays[indices] = *allocated.get();
           any_arrays[array_arg.data_ptr_indices] = *allocated.get();
           ctx_buffers_.push_back(std::move(allocated));
+          if (array_arg.grad_access != 0) {
+            auto grad_it =
+                host_ctx.array_ptrs.find(array_arg.grad_ptr_indices);
+            TI_ERROR_IF(
+                grad_it == host_ctx.array_ptrs.end() ||
+                    grad_it->second == nullptr,
+                "External ndarray gradient storage is required by this "
+                "GFX kernel but no gradient pointer was supplied");
+            auto [grad_allocated, grad_res] =
+                device_->allocate_memory_unique(
+                    {alloc_size, /*host_write=*/true, /*host_read=*/false,
+                     /*export_sharing=*/false, AllocUsage::Storage});
+            TI_ASSERT_INFO(grad_res == RhiResult::success,
+                           "Failed to allocate external ndarray gradient buffer");
+            any_arrays[array_arg.grad_ptr_indices] = *grad_allocated.get();
+            ctx_buffers_.push_back(std::move(grad_allocated));
+          }
         }
     }
 

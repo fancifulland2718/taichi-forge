@@ -74,6 +74,10 @@
   `zeros_like` gradient。Forge 只在 reverse/forward AD、Tape 或 kernel 内显式访问 `.grad`
   时延迟分配对应 tensor 大小的 gradient，并且不会替换用户已有的 gradient。因此纯 primal
   调用可为每个受影响 tensor 避免一份同尺寸分配，同时保留既有 AD 路径。
+- GFX kernel 现在分别记录 external array 的 primal 与 gradient 访问。Vulkan 会把 host
+  gradient 放入独立 device buffer，并且只在 grad kernel 确实写入时回读；device
+  `ti.ndarray` gradient 继续直接使用 device allocation。Torch gradient 的 shape、dtype、
+  contiguous layout 或 device 不匹配会在 launch 前被拒绝，不再返回伪正确或不安全梯度。
 
 ## 0.1.0
 

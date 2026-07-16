@@ -27,6 +27,7 @@ class ExternalPtrAccessVisitor : public BasicStmtVisitor {
   std::unordered_map<std::vector<int>,
                      ExternalPtrAccess,
                      hashing::Hasher<std::vector<int>>> &map_;
+  bool is_grad_;
 
  public:
   using BasicStmtVisitor::visit;
@@ -34,8 +35,9 @@ class ExternalPtrAccessVisitor : public BasicStmtVisitor {
   explicit ExternalPtrAccessVisitor(
       std::unordered_map<std::vector<int>,
                          ExternalPtrAccess,
-                         hashing::Hasher<std::vector<int>>> &map)
-      : map_(map) {
+                         hashing::Hasher<std::vector<int>>> &map,
+      bool is_grad)
+      : map_(map), is_grad_(is_grad) {
   }
 
   void visit(GlobalLoadStmt *stmt) override {
@@ -43,6 +45,8 @@ class ExternalPtrAccessVisitor : public BasicStmtVisitor {
       return;
 
     ExternalPtrStmt *src = stmt->src->cast<ExternalPtrStmt>();
+    if (src->is_grad != is_grad_)
+      return;
     ArgLoadStmt *arg = src->base_ptr->cast<ArgLoadStmt>();
     if (map_.find(arg->arg_id) != map_.end()) {
       map_[arg->arg_id] = map_[arg->arg_id] | ExternalPtrAccess::READ;
@@ -56,6 +60,8 @@ class ExternalPtrAccessVisitor : public BasicStmtVisitor {
       return;
 
     ExternalPtrStmt *dst = stmt->dest->cast<ExternalPtrStmt>();
+    if (dst->is_grad != is_grad_)
+      return;
     ArgLoadStmt *arg = dst->base_ptr->cast<ArgLoadStmt>();
     if (map_.find(arg->arg_id) != map_.end()) {
       map_[arg->arg_id] = map_[arg->arg_id] | ExternalPtrAccess::WRITE;
@@ -70,6 +76,8 @@ class ExternalPtrAccessVisitor : public BasicStmtVisitor {
 
     // Atomics modifies existing state (therefore both read & write)
     ExternalPtrStmt *dst = stmt->dest->cast<ExternalPtrStmt>();
+    if (dst->is_grad != is_grad_)
+      return;
     ArgLoadStmt *arg = dst->base_ptr->cast<ArgLoadStmt>();
     map_[arg->arg_id] = ExternalPtrAccess::WRITE | ExternalPtrAccess::READ;
   }
@@ -91,10 +99,17 @@ std::unordered_map<std::vector<int>,
                    ExternalPtrAccess,
                    hashing::Hasher<std::vector<int>>>
 detect_external_ptr_access_in_task(OffloadedStmt *offload) {
+  return detect_external_ptr_access_in_task(offload, /*is_grad=*/false);
+}
+
+std::unordered_map<std::vector<int>,
+                   ExternalPtrAccess,
+                   hashing::Hasher<std::vector<int>>>
+detect_external_ptr_access_in_task(OffloadedStmt *offload, bool is_grad) {
   std::unordered_map<std::vector<int>, ExternalPtrAccess,
                      hashing::Hasher<std::vector<int>>>
       map;
-  ExternalPtrAccessVisitor v(map);
+  ExternalPtrAccessVisitor v(map, is_grad);
   offload->accept(&v);
   return map;
 }

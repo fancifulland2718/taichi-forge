@@ -90,6 +90,12 @@ retroactively attributed to the 0.5.0 artifact:
   `.grad` access, and reuses an existing user gradient without replacement. A
   primal-only call therefore avoids one same-sized allocation per affected
   tensor while preserving the established AD paths.
+- GFX kernels now track primal and gradient external-array access separately.
+  Vulkan stages a host gradient into its own device buffer and reads it back
+  only when the grad kernel writes it; device `ti.ndarray` gradients remain
+  direct device allocations. Torch grad shape, dtype, contiguity, and device
+  mismatches are rejected before launch instead of producing a false or unsafe
+  gradient.
 
 ## 0.1.0
 

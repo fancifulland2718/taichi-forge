@@ -377,12 +377,15 @@ class KernelContextAttributes {
 
   std::vector<std::pair<std::vector<int>, irpass::ExternalPtrAccess>>
       arr_access;
+  std::vector<std::pair<std::vector<int>, irpass::ExternalPtrAccess>>
+      grad_arr_access;
 
   TI_IO_DEF(arg_attribs_vec_,
             ret_attribs_vec_,
             args_bytes_,
             rets_bytes_,
             arr_access,
+            grad_arr_access,
             args_type_,
             rets_type_,
             argpack_types_);

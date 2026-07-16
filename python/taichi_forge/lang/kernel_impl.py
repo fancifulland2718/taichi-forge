@@ -1188,7 +1188,8 @@ class Kernel:
 
                     def get_call_back(u, v):
                         def call_back():
-                            u.copy_(v)
+                            with torch.no_grad():
+                                u.copy_(v)
 
                         return call_back
 
@@ -1212,8 +1213,24 @@ class Kernel:
                             raise ValueError(
                                 "Non contiguous gradient tensors are not supported, please call tensor.grad.contiguous() before passing it into taichi kernel."
                             )
+                        if v.grad.shape != v.shape:
+                            raise ValueError(
+                                "Gradient tensor shape must match its primal tensor: "
+                                f"got grad shape {tuple(v.grad.shape)} and primal shape {tuple(v.shape)}"
+                            )
+                        if v.grad.dtype != v.dtype:
+                            raise ValueError(
+                                "Gradient tensor dtype must match its primal tensor: "
+                                f"got grad dtype {v.grad.dtype} and primal dtype {v.dtype}"
+                            )
+                        if v.grad.device != v.device:
+                            raise ValueError(
+                                "Gradient tensor device must match its primal tensor: "
+                                f"got grad device {v.grad.device} and primal device {v.device}"
+                            )
 
                     tmp = v
+                    tmp_grad = v.grad
                     if (str(v.device) != "cpu") and not (
                         str(v.device).startswith("cuda") and taichi_arch == _ti_core.Arch.cuda
                     ):
@@ -1223,13 +1240,17 @@ class Kernel:
                         host_v = v.to(device="cpu", copy=True)
                         tmp = host_v
                         callbacks.append(get_call_back(v, host_v))
+                        if v.grad is not None:
+                            host_grad = v.grad.to(device="cpu", copy=True)
+                            tmp_grad = host_grad
+                            callbacks.append(get_call_back(v.grad, host_grad))
 
                     launch_ctx.set_arg_external_array_with_shape(
                         indices,
                         int(tmp.data_ptr()),
                         tmp.element_size() * tmp.nelement(),
                         array_shape,
-                        int(v.grad.data_ptr()) if v.grad is not None else 0,
+                        int(tmp_grad.data_ptr()) if tmp_grad is not None else 0,
                     )
                 else:
                     raise TaichiRuntimeTypeError(

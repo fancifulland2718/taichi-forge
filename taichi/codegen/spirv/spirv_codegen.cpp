@@ -361,6 +361,10 @@ class TaskCodegen : public IRVisitor {
                        irpass::ExternalPtrAccess,
                        hashing::Hasher<std::vector<int>>>
         arr_access;
+    std::unordered_map<std::vector<int>,
+                       irpass::ExternalPtrAccess,
+                       hashing::Hasher<std::vector<int>>>
+        grad_arr_access;
   };
 
   Result run() {
@@ -396,6 +400,8 @@ class TaskCodegen : public IRVisitor {
     res.spirv_code = ir_->finalize();
     res.task_attribs = std::move(task_attribs_);
     res.arr_access = irpass::detect_external_ptr_access_in_task(task_ir_);
+    res.grad_arr_access =
+        irpass::detect_external_ptr_access_in_task(task_ir_, /*is_grad=*/true);
 
     return res;
   }
@@ -7214,6 +7220,10 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
                        irpass::ExternalPtrAccess,
                        hashing::Hasher<std::vector<int>>>
         arr_access;
+    std::unordered_map<std::vector<int>,
+                       irpass::ExternalPtrAccess,
+                       hashing::Hasher<std::vector<int>>>
+        grad_arr_access;
   };
   std::vector<TaskOut> outs(n);
 
@@ -7305,6 +7315,7 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
     outs[i].spv = std::move(optimized_spv);
     outs[i].attribs = std::move(task_res.task_attribs);
     outs[i].arr_access = std::move(task_res.arr_access);
+    outs[i].grad_arr_access = std::move(task_res.grad_arr_access);
   };
 
   // Single-task kernels always go through the serial path: thread-spawn
@@ -7375,6 +7386,13 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
   for (int i = 0; i < n; ++i) {
     for (auto &[id, access] : outs[i].arr_access) {
       for (auto &arr_access_element : ctx_attribs_.arr_access) {
+        if (arr_access_element.first == id) {
+          arr_access_element.second = arr_access_element.second | access;
+        }
+      }
+    }
+    for (auto &[id, access] : outs[i].grad_arr_access) {
+      for (auto &arr_access_element : ctx_attribs_.grad_arr_access) {
         if (arr_access_element.first == id) {
           arr_access_element.second = arr_access_element.second | access;
         }

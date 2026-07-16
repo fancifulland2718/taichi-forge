@@ -211,6 +211,11 @@ std::unordered_map<std::vector<int>,
                    hashing::Hasher<std::vector<int>>>
 detect_external_ptr_access_in_task(OffloadedStmt *offload);
 
+std::unordered_map<std::vector<int>,
+                   ExternalPtrAccess,
+                   hashing::Hasher<std::vector<int>>>
+detect_external_ptr_access_in_task(OffloadedStmt *offload, bool is_grad);
+
 // compile_to_offloads does the basic compilation to create all the offloaded
 // tasks of a Taichi kernel.
 void compile_to_offloads(IRNode *ir,

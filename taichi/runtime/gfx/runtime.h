@@ -107,6 +107,7 @@ class CompiledTaichiKernel {
     std::vector<int> data_ptr_indices;
     std::vector<int> grad_ptr_indices;
     uint32_t access{0};
+    uint32_t grad_access{0};
   };
 
   enum class BufferBindingKind : uint8_t {
