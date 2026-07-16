@@ -38,7 +38,7 @@ def _method_for(arch_name, primitive):
         if primitive == "sort":
             return "cuda_cub_native"
         if primitive == "compact":
-            return "cuda_cub"
+            return "cuda_device"
         return "cuda_device"
     if arch_name == "vulkan":
         return "vulkan_native_radix_u32" if primitive == "sort" else "vulkan_native"
@@ -96,9 +96,16 @@ def _available(arch_name, primitive, method=None):
                 and prog.cuda_device_indexed_copy_available()
             )
         if primitive == "compact":
+            if method == "cuda_cub":
+                return (
+                    hasattr(prog, "cuda_cub_select_available")
+                    and prog.cuda_cub_select_available()
+                    and hasattr(prog, "cuda_device_indexed_copy_available")
+                    and prog.cuda_device_indexed_copy_available()
+                )
             return (
-                hasattr(prog, "cuda_cub_select_available")
-                and prog.cuda_cub_select_available()
+                hasattr(prog, "cuda_device_compact_available")
+                and prog.cuda_device_compact_available()
                 and hasattr(prog, "cuda_device_indexed_copy_available")
                 and prog.cuda_device_indexed_copy_available()
             )
@@ -318,7 +325,7 @@ def run_sort(arch_name, n, repeats):
     return stats
 
 
-def run_compact(arch_name, n, repeats):
+def run_compact(arch_name, n, repeats, method_override=None):
     data = _values(n)
     flags_np = ((np.arange(n) % 3 == 0) | (np.arange(n) % 17 == 0)).astype(np.int32)
     values = ti.ndarray(ti.i32, shape=n)
@@ -330,7 +337,7 @@ def run_compact(arch_name, n, repeats):
     output.fill(0)
     count.fill(0)
     workspace = ti.algorithms.CompactWorkspace(max_items=n)
-    method = _method_for(arch_name, "compact")
+    method = method_override or _method_for(arch_name, "compact")
 
     def body():
         ti.algorithms.experimental_compact(values, flags, output, count, method=method, workspace=workspace)
@@ -545,6 +552,7 @@ def main():
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--output", default=None)
     parser.add_argument("--bucket-method", default=None)
+    parser.add_argument("--compact-method", default=None)
     parser.add_argument("--grouped-reduce-method", default=None)
     parser.add_argument("--histogram-method", default=None)
     parser.add_argument("--scatter-add-method", default=None)
@@ -598,6 +606,8 @@ def main():
                 method_override = args.histogram_method
             elif primitive == "bucket":
                 method_override = args.bucket_method
+            elif primitive == "compact":
+                method_override = args.compact_method
             if not _available(args.arch, primitive, method_override):
                 results.append(
                     {
@@ -624,7 +634,9 @@ def main():
             elif primitive == "sort":
                 stats = run_sort(args.arch, n, args.repeats)
             elif primitive == "compact":
-                stats = run_compact(args.arch, n, args.repeats)
+                stats = run_compact(
+                    args.arch, n, args.repeats, args.compact_method
+                )
             elif primitive == "gather":
                 stats = run_indexed_copy(args.arch, n, args.repeats, scatter=False)
             elif primitive == "scatter":

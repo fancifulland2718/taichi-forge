@@ -240,6 +240,7 @@ _NATIVE_PRIMITIVE_PROG_METHOD_TOKENS = (
 _NATIVE_PRIMITIVE_AVAILABLE_BY_ARCH = {
     cuda: (
         "cuda_device_histogram_available",
+        "cuda_device_compact_available",
         "cuda_device_reduce_available",
         "cuda_device_scan_available",
         "cuda_cub_histogram_available",
@@ -4048,8 +4049,8 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
     """Workspace for experimental stable flag compaction.
 
     The field path keeps a Forge-kernel prefix buffer plus a PrefixSumExecutor.
-    CUDA ndarray fast path uses CUB DeviceSelect and reports the cached CUB temp
-    storage through Program.
+    CUDA ndarray and dense-field fast paths use the Driver-only compact
+    provider. CUB DeviceSelect remains an explicit reference method.
     """
 
     def __init__(self, max_items=None):
@@ -4182,10 +4183,12 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
             and isinstance(count, Ndarray)
         )
         if arch == cuda:
-            if ndarray and method in ("auto", "cuda_cub"):
+            if ndarray and method in ("auto", "cuda_device"):
+                return "cuda_device"
+            if ndarray and method == "cuda_cub":
                 return "cuda_cub"
-            if dense_field and method in ("auto", "field_scan"):
-                return "cuda_cub"
+            if dense_field and method in ("auto", "field_scan", "cuda_device"):
+                return "cuda_device"
         if arch == vulkan:
             if ndarray and method in ("auto", "vulkan_native"):
                 return "vulkan_native"
@@ -4219,6 +4222,8 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
             return dense_field_plan
         if method == "cuda_cub":
             return plan.backend == "cuda_cub" and not dense_field_plan
+        if method == "cuda_device":
+            return plan.backend == "cuda_device"
         if method == "vulkan_native":
             return plan.backend == "vulkan_native" and not dense_field_plan
         if method == "cpu_native":
@@ -8804,7 +8809,7 @@ def _check_compact_request(values, flags, output, count, method, workspace):
             and count.shape == ()
         )
         dense_field_native_mode = False
-        if count_is_scalar_field and method in ("auto", "field_scan"):
+        if count_is_scalar_field and method in ("auto", "field_scan", "cuda_device"):
             values_view = _primitive_view(values)
             flags_view = _primitive_view(flags)
             output_view = _primitive_view(output)
@@ -8835,6 +8840,46 @@ def _check_compact_request(values, flags, output, count, method, workspace):
             )
     if workspace is not None and not isinstance(workspace, CompactWorkspace):
         raise TypeError("workspace must be a CompactWorkspace instance or None.")
+
+
+def _try_cuda_device_compact(values, flags, output, count, workspace):
+    if current_cfg().arch != cuda:
+        return False
+    if not (
+        isinstance(values, Ndarray)
+        and isinstance(flags, Ndarray)
+        and isinstance(output, Ndarray)
+        and isinstance(count, Ndarray)
+    ):
+        return False
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not _prog_available(prog, "cuda_device_compact_available"):
+        return False
+    method = _prog_method(prog, "cuda_device_compact_ndarray")
+    if method is None:
+        return False
+    value_type = _raw_payload_value_type(
+        values, _COMPACT_VALUE_TYPE, "experimental_compact()"
+    )
+    call_args = (values.arr, flags.arr, output.arr, count.arr, value_type)
+    temp_bytes = method(*call_args)
+    if workspace is not None:
+        workspace._record_native_compact_plan(
+            "cuda_device",
+            "cuda_device_compact_ndarray",
+            values,
+            flags,
+            output,
+            count,
+            value_type,
+            call_args,
+            values.shape[0],
+            prog,
+        )
+        workspace._mark_native_compact_backend_active("cuda_device", temp_bytes)
+    return True
 
 
 def _try_cuda_cub_compact(values, flags, output, count, workspace):
@@ -8988,15 +9033,9 @@ def _try_native_dense_field_compact(values, flags, output, count, workspace, n):
         available_name = "cpu_compact_available"
         backend = "cpu_native"
     elif arch == cuda:
-        if not (
-            values_view.stride == value_size
-            and flags_view.stride == 4
-            and output_view.stride == value_size
-        ):
-            return False
-        method_name = "cuda_cub_select_dense_field"
-        available_name = "cuda_cub_select_available"
-        backend = "cuda_cub"
+        method_name = "cuda_device_compact_dense_field"
+        available_name = "cuda_device_compact_available"
+        backend = "cuda_device"
     elif arch == vulkan:
         if not (
             values_view.stride == value_size
@@ -9184,8 +9223,6 @@ def experimental_compact(
             return
 
     _check_compact_request(values, flags, output, count, method, workspace)
-    if values.shape[0] == 0:
-        return
     if workspace is None:
         workspace = _get_default_workspace(
             "compact",
@@ -9201,6 +9238,15 @@ def experimental_compact(
         values, flags, output, count, method
     ):
         return
+    if method in ("auto", "cuda_device") and _try_cuda_device_compact(
+        values, flags, output, count, workspace
+    ):
+        return
+    if method == "cuda_device":
+        raise RuntimeError(
+            "method='cuda_device' requires CUDA ndarray or dense field inputs "
+            "and the Driver compact provider."
+        )
     if method in ("auto", "cuda_cub") and _try_cuda_cub_compact(
         values, flags, output, count, workspace
     ):
@@ -14721,8 +14767,8 @@ def experimental_bucket_builder(
     if method in ("cuda_device", "cuda_two_level"):
         raise RuntimeError(
             f"experimental_bucket_builder() method='{method}' requires CUDA "
-            "ndarray or contiguous dense field inputs and CUDA toolkit "
-            "bucket-builder support."
+            "ndarray or dense field inputs and the CUDA Driver bucket-builder "
+            "provider."
         )
     if aggregation_backend in ("vulkan_native", "vulkan_two_level") and _try_vulkan_bucket_builder(
         keys, values, offsets, output, workspace, num_bins

@@ -1437,6 +1437,19 @@ void export_lang(py::module &m) {
            tracked_native_program_method(&Program::cuda_cub_inclusive_reverse_scan_dense_field_packed),
            py::arg("data"), py::arg("value_type"), py::arg("n"),
            py::arg("lane_count"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_compact_available",
+           &Program::cuda_device_compact_available)
+      .def("cuda_device_compact_ndarray",
+           tracked_native_program_method(&Program::cuda_device_compact_ndarray),
+           py::arg("values"), py::arg("flags"), py::arg("output"),
+           py::arg("count"), py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_compact_dense_field",
+           tracked_native_program_method(
+               &Program::cuda_device_compact_dense_field),
+           py::arg("values"), py::arg("flags"), py::arg("output"),
+           py::arg("count"), py::arg("value_type"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_select_available", &Program::cuda_cub_select_available)
       .def("cuda_cub_select_clear_workspace",
            &Program::cuda_cub_select_clear_workspace,

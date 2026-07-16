@@ -71,7 +71,7 @@ def test_static_primitive_capability_catalog_is_complete_and_immutable():
     for family in ("check", "metric"):
         assert methods_by_family[family]["cuda_device"].dependency_class == "cuda_driver"
         assert methods_by_family[family]["cuda_cub"].dependency_class == "cuda_toolkit_runtime"
-    assert methods_by_family["bucket_builder"]["cuda_device"].dependency_class == "cuda_toolkit_runtime"
+    assert methods_by_family["bucket_builder"]["cuda_device"].dependency_class == "cuda_driver"
     assert methods_by_family["reduce"]["cpu_native"].dependency_class == "none"
     assert methods_by_family["reduce"]["auto"].dependency_class == ("selected_provider")
     assert all(capability.ad.primal == "supported" for capability in capabilities)

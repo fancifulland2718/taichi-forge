@@ -131,17 +131,8 @@ _NUMERIC_LAYOUTS = _SCALAR_LAYOUTS + (
     "packed_dense_components",
 )
 
-_CUDA_TOOLKIT_ONLY_PROBES = frozenset(
-    {
-        "cuda_device_bucket_builder_available",
-        "cuda_device_grouped_reduce_available",
-    }
-)
-_CUDA_DRIVER_OR_TOOLKIT_PROBES = frozenset(
-    {
-        "cuda_device_scatter_add_available",
-    }
-)
+_CUDA_TOOLKIT_ONLY_PROBES = frozenset()
+_CUDA_DRIVER_OR_TOOLKIT_PROBES = frozenset()
 
 
 def _infer_dependency_class(backends, probes):
@@ -353,6 +344,7 @@ _SCAN_METHODS = (
 _COMPACT_METHODS = (
     _auto(),
     _method("cpu_native", ("cpu",), ("cpu_compact_available",)),
+    _method("cuda_device", ("cuda",), ("cuda_device_compact_available",)),
     _method("cuda_cub", ("cuda",), ("cuda_cub_select_available",)),
     _fallback("field_scan"),
     _method("vulkan_native", ("vulkan",), ("vulkan_compact_available",)),
@@ -360,6 +352,12 @@ _COMPACT_METHODS = (
 
 _RLE_METHODS = (
     _auto(),
+    _method(
+        "cuda_device",
+        ("cuda",),
+        ("cuda_device_compact_available",),
+        implementation="composite",
+    ),
     _method(
         "cuda_cub",
         ("cuda",),
@@ -465,7 +463,7 @@ _SCATTER_ADD_METHODS = (
     _method(
         "cuda_two_level",
         ("cuda",),
-        ("cuda_device_scatter_add_available", "cuda_cub_reduce_available"),
+        ("cuda_device_scatter_add_available",),
     ),
     _method(
         "vulkan_native",
@@ -498,7 +496,7 @@ _BUCKET_BUILDER_METHODS = (
     _method(
         "cuda_two_level",
         ("cuda",),
-        ("cuda_device_bucket_builder_available", "cuda_cub_scan_available"),
+        ("cuda_device_bucket_builder_available",),
     ),
     _method(
         "vulkan_native",
@@ -539,7 +537,7 @@ _GROUPED_REDUCE_METHODS = (
     _method(
         "cuda_two_level",
         ("cuda",),
-        ("cuda_device_grouped_reduce_available", "cuda_cub_reduce_available"),
+        ("cuda_device_grouped_reduce_available",),
     ),
     _method(
         "vulkan_native",

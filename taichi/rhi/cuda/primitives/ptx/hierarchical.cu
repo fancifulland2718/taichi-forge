@@ -520,3 +520,319 @@ DEFINE_HISTOGRAM_KERNEL(histogram_i32_i32, i32, i32)
 DEFINE_HISTOGRAM_KERNEL(histogram_u32_i32, u32, i32)
 DEFINE_HISTOGRAM_KERNEL(histogram_i32_i64, i32, i64)
 DEFINE_HISTOGRAM_KERNEL(histogram_u32_i64, u32, i64)
+
+__device__ u32 atomic_add_u32(u32 *address, u32 value) {
+  u32 old;
+  asm volatile("atom.global.add.u32 %0, [%1], %2;"
+               : "=r"(old)
+               : "l"(address), "r"(value));
+  return old;
+}
+
+__device__ u64 atomic_add_u64(u64 *address, u64 value) {
+  u64 old;
+  asm volatile("atom.global.add.u64 %0, [%1], %2;"
+               : "=l"(old)
+               : "l"(address), "l"(value));
+  return old;
+}
+
+__device__ float atomic_add_f32(float *address, float value) {
+  float old;
+  asm volatile("atom.global.add.f32 %0, [%1], %2;"
+               : "=f"(old)
+               : "l"(address), "f"(value));
+  return old;
+}
+
+__device__ u64 atomic_cas_u64(u64 *address, u64 compare, u64 value) {
+  u64 old;
+  asm volatile("atom.global.cas.b64 %0, [%1], %2, %3;"
+               : "=l"(old)
+               : "l"(address), "l"(compare), "l"(value));
+  return old;
+}
+
+__device__ double atomic_add_f64(double *address, double value) {
+  u64 *bits = reinterpret_cast<u64 *>(address);
+  u64 observed = *bits;
+  while (true) {
+    const u64 expected = observed;
+    const double updated = bit_cast<double>(expected) + value;
+    observed = atomic_cas_u64(bits, expected, bit_cast<u64>(updated));
+    if (observed == expected) {
+      return bit_cast<double>(expected);
+    }
+  }
+}
+
+template <typename T>
+__device__ void atomic_add_value(T *address, T value);
+
+template <>
+__device__ void atomic_add_value(i32 *address, i32 value) {
+  atomic_add_i32(address, value);
+}
+template <>
+__device__ void atomic_add_value(u32 *address, u32 value) {
+  atomic_add_u32(address, value);
+}
+template <>
+__device__ void atomic_add_value(float *address, float value) {
+  atomic_add_f32(address, value);
+}
+template <>
+__device__ void atomic_add_value(i64 *address, i64 value) {
+  atomic_add_i64(address, value);
+}
+template <>
+__device__ void atomic_add_value(u64 *address, u64 value) {
+  atomic_add_u64(address, value);
+}
+template <>
+__device__ void atomic_add_value(double *address, double value) {
+  atomic_add_f64(address, value);
+}
+
+template <typename T>
+__device__ void add_strided_impl(const u8 *src,
+                                 u64 src_offset,
+                                 u64 src_stride,
+                                 u8 *dst,
+                                 u64 dst_offset,
+                                 u64 dst_stride,
+                                 u32 n) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < n) {
+    const T lhs = load_strided<T>(dst, dst_offset, dst_stride, index);
+    const T rhs = load_strided<T>(src, src_offset, src_stride, index);
+    store_strided<T>(dst, dst_offset, dst_stride, index, add_values(lhs, rhs));
+  }
+}
+
+template <typename T>
+__device__ void add_scaled_strided_impl(const u8 *src,
+                                        u64 src_offset,
+                                        u64 src_stride,
+                                        u8 *dst,
+                                        u64 dst_offset,
+                                        u64 dst_stride,
+                                        u32 n,
+                                        double scale) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < n) {
+    const T lhs = load_strided<T>(dst, dst_offset, dst_stride, index);
+    const T rhs = load_strided<T>(src, src_offset, src_stride, index);
+    store_strided<T>(dst, dst_offset, dst_stride, index,
+                     lhs + rhs * static_cast<T>(scale));
+  }
+}
+
+template <typename T>
+__device__ void scatter_add_strided_impl(const u8 *src,
+                                         u64 src_offset,
+                                         u64 src_stride,
+                                         const u8 *indices,
+                                         u64 indices_offset,
+                                         u64 indices_stride,
+                                         u8 *dst,
+                                         u64 dst_offset,
+                                         u64 dst_stride,
+                                         u32 n,
+                                         u32 index_bound) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= n) {
+    return;
+  }
+  const i32 key =
+      load_strided<i32>(indices, indices_offset, indices_stride, index);
+  if (key >= 0 && static_cast<u32>(key) < index_bound) {
+    T *target = reinterpret_cast<T *>(dst + dst_offset +
+                                      static_cast<u64>(key) * dst_stride);
+    atomic_add_value(target,
+                     load_strided<T>(src, src_offset, src_stride, index));
+  }
+}
+
+template <typename T>
+__device__ void zero_strided_impl(u8 *dst,
+                                  u64 dst_offset,
+                                  u64 dst_stride,
+                                  u32 n) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < n) {
+    store_strided<T>(dst, dst_offset, dst_stride, index, static_cast<T>(0));
+  }
+}
+
+template <typename T>
+__device__ void gather_add_strided_impl(const u8 *src,
+                                        u64 src_offset,
+                                        u64 src_stride,
+                                        const u8 *indices,
+                                        u64 indices_offset,
+                                        u64 indices_stride,
+                                        u8 *dst,
+                                        u64 dst_offset,
+                                        u64 dst_stride,
+                                        u32 n,
+                                        u32 index_bound) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= n) {
+    return;
+  }
+  const i32 key =
+      load_strided<i32>(indices, indices_offset, indices_stride, index);
+  if (key >= 0 && static_cast<u32>(key) < index_bound) {
+    const T lhs = load_strided<T>(dst, dst_offset, dst_stride, index);
+    const T rhs =
+        load_strided<T>(src, src_offset, src_stride, static_cast<u32>(key));
+    store_strided<T>(dst, dst_offset, dst_stride, index, lhs + rhs);
+  }
+}
+
+#define DEFINE_ADD_KERNEL(NAME, TYPE)                                      \
+  extern "C" __global__ void NAME(const u8 *src, u64 src_offset,           \
+                                  u64 src_stride, u8 *dst, u64 dst_offset, \
+                                  u64 dst_stride, u32 n) {                 \
+    add_strided_impl<TYPE>(src, src_offset, src_stride, dst, dst_offset,   \
+                           dst_stride, n);                                 \
+  }
+
+#define DEFINE_SCATTER_ADD_KERNEL(NAME, TYPE)                               \
+  extern "C" __global__ void NAME(                                          \
+      const u8 *src, u64 src_offset, u64 src_stride, const u8 *indices,     \
+      u64 indices_offset, u64 indices_stride, u8 *dst, u64 dst_offset,      \
+      u64 dst_stride, u32 n, u32 index_bound) {                             \
+    scatter_add_strided_impl<TYPE>(src, src_offset, src_stride, indices,    \
+                                   indices_offset, indices_stride, dst,     \
+                                   dst_offset, dst_stride, n, index_bound); \
+  }
+
+#define DEFINE_ADD_SCALED_KERNEL(NAME, TYPE)                               \
+  extern "C" __global__ void NAME(const u8 *src, u64 src_offset,           \
+                                  u64 src_stride, u8 *dst, u64 dst_offset, \
+                                  u64 dst_stride, u32 n, double scale) {   \
+    add_scaled_strided_impl<TYPE>(src, src_offset, src_stride, dst,        \
+                                  dst_offset, dst_stride, n, scale);       \
+  }
+
+#define DEFINE_ZERO_KERNEL(NAME, TYPE)                                     \
+  extern "C" __global__ void NAME(u8 *dst, u64 dst_offset, u64 dst_stride, \
+                                  u32 n) {                                 \
+    zero_strided_impl<TYPE>(dst, dst_offset, dst_stride, n);               \
+  }
+
+#define DEFINE_GATHER_ADD_KERNEL(NAME, TYPE)                               \
+  extern "C" __global__ void NAME(                                         \
+      const u8 *src, u64 src_offset, u64 src_stride, const u8 *indices,    \
+      u64 indices_offset, u64 indices_stride, u8 *dst, u64 dst_offset,     \
+      u64 dst_stride, u32 n, u32 index_bound) {                            \
+    gather_add_strided_impl<TYPE>(src, src_offset, src_stride, indices,    \
+                                  indices_offset, indices_stride, dst,     \
+                                  dst_offset, dst_stride, n, index_bound); \
+  }
+
+#define DEFINE_TYPED_LINEAR_KERNELS(SUFFIX, TYPE)               \
+  DEFINE_ADD_KERNEL(add_strided_##SUFFIX, TYPE)                 \
+  DEFINE_SCATTER_ADD_KERNEL(scatter_add_strided_##SUFFIX, TYPE) \
+  DEFINE_ZERO_KERNEL(zero_strided_##SUFFIX, TYPE)
+
+DEFINE_TYPED_LINEAR_KERNELS(i32, i32)
+DEFINE_TYPED_LINEAR_KERNELS(u32, u32)
+DEFINE_TYPED_LINEAR_KERNELS(f32, float)
+DEFINE_TYPED_LINEAR_KERNELS(i64, i64)
+DEFINE_TYPED_LINEAR_KERNELS(u64, u64)
+DEFINE_TYPED_LINEAR_KERNELS(f64, double)
+DEFINE_ADD_SCALED_KERNEL(add_scaled_strided_f32, float)
+DEFINE_ADD_SCALED_KERNEL(add_scaled_strided_f64, double)
+DEFINE_GATHER_ADD_KERNEL(gather_add_strided_f32, float)
+DEFINE_GATHER_ADD_KERNEL(gather_add_strided_f64, double)
+
+extern "C" __global__ void normalize_flags_i32(const u8 *flags,
+                                               u64 flags_offset,
+                                               u64 flags_stride,
+                                               i32 *prefix,
+                                               u32 n) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < n) {
+    prefix[index] =
+        load_strided<i32>(flags, flags_offset, flags_stride, index) != 0 ? 1
+                                                                         : 0;
+  }
+}
+
+extern "C" __global__ void compact_scatter_words(const u8 *values,
+                                                 u64 values_offset,
+                                                 u64 values_stride,
+                                                 const i32 *prefix,
+                                                 u8 *output,
+                                                 u64 output_offset,
+                                                 u64 output_stride,
+                                                 i32 *count,
+                                                 u64 count_offset,
+                                                 u32 n,
+                                                 u32 item_words) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < n && prefix[index] != (index == 0 ? 0 : prefix[index - 1])) {
+    const u32 output_index = static_cast<u32>(prefix[index] - 1);
+    const u32 *src = reinterpret_cast<const u32 *>(
+        values + values_offset + static_cast<u64>(index) * values_stride);
+    u32 *dst =
+        reinterpret_cast<u32 *>(output + output_offset +
+                                static_cast<u64>(output_index) * output_stride);
+    for (u32 word = 0; word < item_words; ++word) {
+      dst[word] = src[word];
+    }
+  }
+  if (index == n - 1u) {
+    *reinterpret_cast<i32 *>(reinterpret_cast<u8 *>(count) + count_offset) =
+        prefix[index];
+  }
+}
+
+extern "C" __global__ void copy_i32_strided(const u8 *src,
+                                            u64 src_offset,
+                                            u64 src_stride,
+                                            u8 *dst,
+                                            u64 dst_offset,
+                                            u64 dst_stride,
+                                            u32 n) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < n) {
+    store_strided<i32>(dst, dst_offset, dst_stride, index,
+                       load_strided<i32>(src, src_offset, src_stride, index));
+  }
+}
+
+extern "C" __global__ void bucket_scatter_words(const u8 *keys,
+                                                u64 keys_offset,
+                                                u64 keys_stride,
+                                                const u8 *values,
+                                                u64 values_offset,
+                                                u64 values_stride,
+                                                u8 *output,
+                                                u64 output_offset,
+                                                u64 output_stride,
+                                                i32 *cursor,
+                                                u32 n,
+                                                u32 num_bins,
+                                                u32 item_words) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= n) {
+    return;
+  }
+  const i32 key = load_strided<i32>(keys, keys_offset, keys_stride, index);
+  if (key < 0 || static_cast<u32>(key) >= num_bins) {
+    return;
+  }
+  const i32 output_index = atomic_add_i32(cursor + key, 1);
+  const u32 *src = reinterpret_cast<const u32 *>(
+      values + values_offset + static_cast<u64>(index) * values_stride);
+  u32 *dst = reinterpret_cast<u32 *>(
+      output + output_offset +
+      static_cast<u64>(static_cast<u32>(output_index)) * output_stride);
+  for (u32 word = 0; word < item_words; ++word) {
+    dst[word] = src[word];
+  }
+}

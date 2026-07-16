@@ -3125,12 +3125,6 @@ std::size_t primitive_value_type_size(int value_type) {
 }
 
 #ifdef TI_WITH_CUDA
-bool cuda_driver_scatter_add_value_type(int value_type) {
-  return value_type == static_cast<int>(cuda::CudaScatterAddValueType::i32) ||
-         value_type == static_cast<int>(cuda::CudaScatterAddValueType::f32) ||
-         value_type == static_cast<int>(cuda::CudaScatterAddValueType::u32);
-}
-
 std::size_t cuda_scatter_add_contiguous(void *src,
                                         void *indices,
                                         void *dst,
@@ -3143,21 +3137,12 @@ std::size_t cuda_scatter_add_contiguous(void *src,
   TI_ERROR_IF(dst_n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA scatter-add currently supports destination sizes up to "
               "INT_MAX items.");
-  const auto typed_value_type =
-      static_cast<cuda::CudaScatterAddValueType>(value_type);
-  if (cuda_driver_scatter_add_value_type(value_type) &&
-      cuda::driver_scatter_add_available()) {
-    return cuda::driver_scatter_add(src, indices, dst, static_cast<int>(n),
-                                    static_cast<int>(dst_n),
-                                    typed_value_type);
-  }
-  TI_ERROR_IF(!cuda::cub_scatter_add_available(),
-              "CUDA scatter-add for this dtype/layout requires "
-              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
   void *stream = nullptr;
-  return cuda::cub_scatter_add(src, indices, dst, static_cast<int>(n),
-                               static_cast<int>(dst_n), typed_value_type,
-                               stream);
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  return cuda::driver_scatter_add_strided(
+      src, indices, dst, static_cast<int>(n), static_cast<int>(dst_n),
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, value_size, 0,
+      sizeof(std::int32_t), 0, value_size, stream);
 }
 #endif
 
@@ -7737,7 +7722,8 @@ std::size_t Program::cuda_device_zero_dense_field(SNode *dst,
 
 bool Program::cuda_device_add_merge_available() const {
 #ifdef TI_WITH_CUDA
-  return compile_config().arch == Arch::cuda && cuda::cub_add_merge_available();
+  return compile_config().arch == Arch::cuda &&
+         cuda::driver_hierarchical_available();
 #else
   return false;
 #endif
@@ -7766,21 +7752,19 @@ std::size_t Program::cuda_device_add_merge_ndarray(Ndarray *src,
   if (src->get_nelement() == 0 || lanes == 0) {
     return 0;
   }
-  TI_ERROR_IF(src->get_nelement() >
-                  static_cast<std::size_t>(std::numeric_limits<int>::max()) /
-                      lanes,
-              "CUDA add-merge currently supports at most INT_MAX items.");
+  TI_ERROR_IF(
+      src->get_nelement() >
+          static_cast<std::size_t>(std::numeric_limits<int>::max()) / lanes,
+      "CUDA add-merge currently supports at most INT_MAX items.");
   const std::size_t scalar_items = src->get_nelement() * lanes;
 #ifdef TI_WITH_CUDA
-  TI_ERROR_IF(!cuda::cub_add_merge_available(),
-              "CUDA add-merge requires TI_WITH_CUDA_TOOLKIT=ON and a "
-              "discoverable CUDA runtime.");
   void *stream = nullptr;
-  return cuda::cub_add_merge(
+  return cuda::driver_add_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
       static_cast<int>(scalar_items),
-      static_cast<cuda::CudaTransformValueType>(value_type), stream);
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, value_size, 0,
+      value_size, stream);
 #else
   TI_ERROR("CUDA add-merge requires TI_WITH_CUDA=ON.");
 #endif
@@ -7813,31 +7797,28 @@ std::size_t Program::cuda_device_add_scaled_ndarray(Ndarray *src,
   if (src->get_nelement() == 0 || lanes == 0) {
     return 0;
   }
-  TI_ERROR_IF(src->get_nelement() >
-                  static_cast<std::size_t>(std::numeric_limits<int>::max()) /
-                      lanes,
-              "CUDA scaled-add currently supports at most INT_MAX items.");
+  TI_ERROR_IF(
+      src->get_nelement() >
+          static_cast<std::size_t>(std::numeric_limits<int>::max()) / lanes,
+      "CUDA scaled-add currently supports at most INT_MAX items.");
   const std::size_t scalar_items = src->get_nelement() * lanes;
 #ifdef TI_WITH_CUDA
-  TI_ERROR_IF(!cuda::cub_add_merge_available(),
-              "CUDA scaled-add requires TI_WITH_CUDA_TOOLKIT=ON and a "
-              "discoverable CUDA runtime.");
   void *stream = nullptr;
-  return cuda::cub_add_scaled(
+  return cuda::driver_add_scaled_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
       static_cast<int>(scalar_items),
-      static_cast<cuda::CudaTransformValueType>(value_type), scale, stream);
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, value_size, 0,
+      value_size, scale, stream);
 #else
   TI_ERROR("CUDA scaled-add requires TI_WITH_CUDA=ON.");
 #endif
 }
 
-std::size_t Program::cuda_device_add_scalar_ndarray_to_ndarray(
-    Ndarray *src,
-    Ndarray *dst,
-    int value_type,
-    double scale) {
+std::size_t Program::cuda_device_add_scalar_ndarray_to_ndarray(Ndarray *src,
+                                                               Ndarray *dst,
+                                                               int value_type,
+                                                               double scale) {
   auto native_ndarray_submission_guard =
       acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
@@ -7865,11 +7846,8 @@ std::size_t Program::cuda_device_add_scalar_ndarray_to_ndarray(
               "CUDA scalar-to-ndarray add currently supports at most INT_MAX "
               "items.");
 #ifdef TI_WITH_CUDA
-  TI_ERROR_IF(!cuda::cub_add_merge_available(),
-              "CUDA scalar-to-ndarray add requires TI_WITH_CUDA_TOOLKIT=ON "
-              "and a discoverable CUDA runtime.");
   void *stream = nullptr;
-  return cuda::cub_add_scaled_strided(
+  return cuda::driver_add_scaled_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
       static_cast<int>(dst->get_nelement()),
@@ -7902,15 +7880,13 @@ std::size_t Program::cuda_device_add_merge_strided_ndarray(
               "CUDA strided add-merge currently supports at most INT_MAX "
               "items.");
 #ifdef TI_WITH_CUDA
-  TI_ERROR_IF(!cuda::cub_add_merge_available(),
-              "CUDA strided add-merge requires TI_WITH_CUDA_TOOLKIT=ON and a "
-              "discoverable CUDA runtime.");
   void *stream = nullptr;
-  return cuda::cub_add_merge_strided(
+  return cuda::driver_add_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
-      static_cast<int>(n), static_cast<cuda::CudaTransformValueType>(value_type),
-      src_offset, src_stride, dst_offset, dst_stride, stream);
+      static_cast<int>(n),
+      static_cast<cuda::CudaTransformValueType>(value_type), src_offset,
+      src_stride, dst_offset, dst_stride, stream);
 #else
   TI_ERROR("CUDA strided add-merge requires TI_WITH_CUDA=ON.");
 #endif
@@ -7924,7 +7900,8 @@ std::size_t Program::cuda_device_add_merge_dense_field(Ndarray *src,
       acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA dense field add-merge is only available on CUDA.");
-  TI_ERROR_IF(!src || !dst, "CUDA dense field add-merge received a null input.");
+  TI_ERROR_IF(!src || !dst,
+              "CUDA dense field add-merge received a null input.");
   const std::size_t value_size = primitive_value_type_size(value_type);
   TI_ERROR_IF(value_size == 0,
               "CUDA dense field add-merge received an unsupported value type.");
@@ -7942,27 +7919,17 @@ std::size_t Program::cuda_device_add_merge_dense_field(Ndarray *src,
               "CUDA dense field add-merge received an invalid field stride.");
 #ifdef TI_WITH_CUDA
   auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
-    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
-                op_name);
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.", op_name);
     DeviceAllocation alloc{ptr.device, ptr.alloc_id};
     auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
-    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
-                op_name);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.", op_name);
     return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
   };
   void *src_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src));
   DevicePtr dst_ptr = get_dense_field_device_ptr(dst);
   void *dst_raw = raw_ptr(dst_ptr, "CUDA dense field add-merge");
-  TI_ERROR_IF(!cuda::cub_add_merge_available(),
-              "CUDA dense field add-merge requires TI_WITH_CUDA_TOOLKIT=ON and "
-              "a discoverable CUDA runtime.");
   void *stream = nullptr;
-  if (dst_stride == value_size) {
-    return cuda::cub_add_merge(
-        src_ptr, dst_raw, static_cast<int>(n),
-        static_cast<cuda::CudaTransformValueType>(value_type), stream);
-  }
-  return cuda::cub_add_merge_strided(
+  return cuda::driver_add_strided(
       src_ptr, dst_raw, static_cast<int>(n),
       static_cast<cuda::CudaTransformValueType>(value_type), 0, value_size, 0,
       dst_stride, stream);
@@ -7999,23 +7966,18 @@ std::size_t Program::cuda_device_add_scaled_dense_field(SNode *src,
               "CUDA dense field scaled-add received an invalid field stride.");
 #ifdef TI_WITH_CUDA
   auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
-    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
-                op_name);
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.", op_name);
     DeviceAllocation alloc{ptr.device, ptr.alloc_id};
     auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
-    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
-                op_name);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.", op_name);
     return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
   };
   void *src_raw =
       raw_ptr(get_dense_field_device_ptr(src), "CUDA dense field scaled-add");
   void *dst_raw =
       raw_ptr(get_dense_field_device_ptr(dst), "CUDA dense field scaled-add");
-  TI_ERROR_IF(!cuda::cub_add_merge_available(),
-              "CUDA dense field scaled-add requires TI_WITH_CUDA_TOOLKIT=ON "
-              "and a discoverable CUDA runtime.");
   void *stream = nullptr;
-  return cuda::cub_add_scaled_strided(
+  return cuda::driver_add_scaled_strided(
       src_raw, dst_raw, static_cast<int>(n),
       static_cast<cuda::CudaTransformValueType>(value_type), 0, src_stride, 0,
       dst_stride, scale, stream);
@@ -8046,23 +8008,18 @@ std::size_t Program::cuda_device_add_scalar_field_to_dense_field(
               "CUDA scalar-to-dense add received an invalid field stride.");
 #ifdef TI_WITH_CUDA
   auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
-    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
-                op_name);
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.", op_name);
     DeviceAllocation alloc{ptr.device, ptr.alloc_id};
     auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
-    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
-                op_name);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.", op_name);
     return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
   };
   void *src_raw =
       raw_ptr(get_dense_field_device_ptr(src), "CUDA scalar-to-dense add");
   void *dst_raw =
       raw_ptr(get_dense_field_device_ptr(dst), "CUDA scalar-to-dense add");
-  TI_ERROR_IF(!cuda::cub_add_merge_available(),
-              "CUDA scalar-to-dense add requires TI_WITH_CUDA_TOOLKIT=ON and "
-              "a discoverable CUDA runtime.");
   void *stream = nullptr;
-  return cuda::cub_add_merge_strided(
+  return cuda::driver_add_strided(
       src_raw, dst_raw, static_cast<int>(n),
       static_cast<cuda::CudaTransformValueType>(value_type), 0, 0, 0,
       dst_stride, stream);
@@ -8474,23 +8431,21 @@ std::size_t Program::cuda_device_gather_add_ndarray(Ndarray *src,
   if (indices->get_nelement() == 0 || src->get_nelement() == 0) {
     return 0;
   }
-  TI_ERROR_IF(indices->get_nelement() >
-                  static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+  TI_ERROR_IF(indices->get_nelement() > static_cast<std::size_t>(
+                                            std::numeric_limits<int>::max()) ||
                   src->get_nelement() >
                       static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA gather-add currently supports at most INT_MAX items.");
 #ifdef TI_WITH_CUDA
-  TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
-              "CUDA gather-add requires TI_WITH_CUDA_TOOLKIT=ON and a "
-              "discoverable CUDA runtime.");
   void *stream = nullptr;
-  return cuda::cub_gather_add(
+  return cuda::driver_gather_add_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
       static_cast<int>(indices->get_nelement()),
       static_cast<int>(src->get_nelement()),
-      static_cast<cuda::CudaTransformValueType>(value_type), stream);
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, value_size, 0,
+      sizeof(std::int32_t), 0, value_size, stream);
 #else
   TI_ERROR("CUDA gather-add requires TI_WITH_CUDA=ON.");
 #endif
@@ -8518,22 +8473,20 @@ std::size_t Program::cuda_device_gather_add_dense_field(SNode *src,
   if (n == 0 || src_n == 0) {
     return 0;
   }
-  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
-                  src_n >
-                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
-              "CUDA dense field gather-add currently supports at most "
-              "INT_MAX items.");
+  TI_ERROR_IF(
+      n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+          src_n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+      "CUDA dense field gather-add currently supports at most "
+      "INT_MAX items.");
   const std::size_t value_size = primitive_value_type_size(value_type);
   const std::size_t src_stride = get_dense_field_stride(src, value_size);
   const std::size_t dst_stride = get_dense_field_stride(dst, value_size);
 #ifdef TI_WITH_CUDA
   auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
-    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
-                op_name);
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.", op_name);
     DeviceAllocation alloc{ptr.device, ptr.alloc_id};
     auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
-    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
-                op_name);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.", op_name);
     return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
   };
   void *src_ptr =
@@ -8542,15 +8495,12 @@ std::size_t Program::cuda_device_gather_add_dense_field(SNode *src,
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
   void *dst_ptr =
       raw_ptr(get_dense_field_device_ptr(dst), "CUDA dense field gather-add");
-  TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
-              "CUDA dense field gather-add requires TI_WITH_CUDA_TOOLKIT=ON "
-              "and a discoverable CUDA runtime.");
   void *stream = nullptr;
-  return cuda::cub_gather_add_strided(
+  return cuda::driver_gather_add_strided(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
       static_cast<int>(src_n),
       static_cast<cuda::CudaTransformValueType>(value_type), 0, src_stride, 0,
-      dst_stride, stream);
+      sizeof(std::int32_t), 0, dst_stride, stream);
 #else
   TI_ERROR("CUDA dense field gather-add requires TI_WITH_CUDA=ON.");
 #endif
@@ -8578,41 +8528,36 @@ std::size_t Program::cuda_device_gather_add_dense_field_indices_field(
   if (indices_n == 0 || src_n == 0) {
     return 0;
   }
-  TI_ERROR_IF(indices_n >
-                      static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
-                  src_n >
-                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
-              "CUDA dense field gather-add currently supports at most "
-              "INT_MAX items.");
+  TI_ERROR_IF(
+      indices_n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+          src_n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+      "CUDA dense field gather-add currently supports at most "
+      "INT_MAX items.");
   const std::size_t value_size = primitive_value_type_size(value_type);
   const std::size_t src_stride = get_dense_field_stride(src, value_size);
+  const std::size_t indices_stride =
+      get_dense_field_stride(indices, sizeof(std::int32_t));
   const std::size_t dst_stride = get_dense_field_stride(dst, value_size);
 #ifdef TI_WITH_CUDA
   auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
-    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
-                op_name);
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.", op_name);
     DeviceAllocation alloc{ptr.device, ptr.alloc_id};
     auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
-    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
-                op_name);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.", op_name);
     return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
   };
   void *src_ptr =
       raw_ptr(get_dense_field_device_ptr(src), "CUDA dense field gather-add");
-  void *indices_ptr =
-      raw_ptr(get_dense_field_device_ptr(indices),
-              "CUDA dense field gather-add");
+  void *indices_ptr = raw_ptr(get_dense_field_device_ptr(indices),
+                              "CUDA dense field gather-add");
   void *dst_ptr =
       raw_ptr(get_dense_field_device_ptr(dst), "CUDA dense field gather-add");
-  TI_ERROR_IF(!cuda::cub_indexed_copy_available(),
-              "CUDA dense field gather-add requires TI_WITH_CUDA_TOOLKIT=ON "
-              "and a discoverable CUDA runtime.");
   void *stream = nullptr;
-  return cuda::cub_gather_add_strided(
+  return cuda::driver_gather_add_strided(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(indices_n),
       static_cast<int>(src_n),
       static_cast<cuda::CudaTransformValueType>(value_type), 0, src_stride, 0,
-      dst_stride, stream);
+      indices_stride, 0, dst_stride, stream);
 #else
   TI_ERROR("CUDA dense field gather-add requires TI_WITH_CUDA=ON.");
 #endif
@@ -8975,8 +8920,7 @@ std::size_t Program::cuda_device_scatter_dense_field_indices_field(
 bool Program::cuda_device_scatter_add_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&
-         (cuda::driver_scatter_add_available() ||
-          cuda::cub_scatter_add_available());
+         cuda::driver_hierarchical_available();
 #else
   return false;
 #endif
@@ -8989,7 +8933,7 @@ std::size_t Program::cuda_device_scatter_add_ndarray(Ndarray *src,
   auto native_ndarray_submission_guard =
       acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
-              "CUDA toolkit scatter-add is only available on CUDA.");
+              "CUDA scatter-add is only available on CUDA.");
   TI_ERROR_IF(!src || !indices || !dst,
               "CUDA toolkit scatter-add received a null ndarray.");
   TI_ERROR_IF(src->shape.size() != 1 || indices->shape.size() != 1 ||
@@ -9053,14 +8997,14 @@ std::size_t Program::cuda_device_scatter_add_member_ndarray(
               "destination sizes up to INT_MAX items.");
 #ifdef TI_WITH_CUDA
   void *stream = nullptr;
-  return cuda::cub_scatter_add_strided(
+  return cuda::driver_scatter_add_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
       static_cast<int>(indices->get_nelement()),
       static_cast<int>(dst->get_nelement()),
-      static_cast<cuda::CudaScatterAddValueType>(value_type), offset, stride,
-      stream);
+      static_cast<cuda::CudaTransformValueType>(value_type), offset, stride, 0,
+      sizeof(std::int32_t), offset, stride, stream);
 #else
   TI_ERROR(
       "CUDA strided scatter-add requires building Taichi with TI_WITH_CUDA=ON "
@@ -9094,14 +9038,14 @@ std::size_t Program::cuda_device_scatter_add_strided_ndarray(
               "destination sizes up to INT_MAX items.");
 #ifdef TI_WITH_CUDA
   void *stream = nullptr;
-  return cuda::cub_scatter_add_strided_io(
+  return cuda::driver_scatter_add_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(src)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(dst)),
       static_cast<int>(indices->get_nelement()),
       static_cast<int>(dst->get_nelement()),
-      static_cast<cuda::CudaScatterAddValueType>(value_type), src_offset,
-      src_stride, dst_offset, dst_stride, stream);
+      static_cast<cuda::CudaTransformValueType>(value_type), src_offset,
+      src_stride, 0, sizeof(std::int32_t), dst_offset, dst_stride, stream);
 #else
   TI_ERROR(
       "CUDA strided scatter-add requires building Taichi with TI_WITH_CUDA=ON "
@@ -9129,8 +9073,7 @@ std::size_t Program::cuda_device_scatter_add_dense_field(SNode *src,
   TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA toolkit dense field scatter-add currently supports at "
               "most INT_MAX source items.");
-  TI_ERROR_IF(dst_n >
-                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+  TI_ERROR_IF(dst_n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA toolkit dense field scatter-add currently supports "
               "destination sizes up to INT_MAX items.");
   const std::size_t value_size = primitive_value_type_size(value_type);
@@ -9138,12 +9081,10 @@ std::size_t Program::cuda_device_scatter_add_dense_field(SNode *src,
   const std::size_t dst_stride = get_dense_field_stride(dst, value_size);
 #ifdef TI_WITH_CUDA
   auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
-    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
-                op_name);
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.", op_name);
     DeviceAllocation alloc{ptr.device, ptr.alloc_id};
     auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
-    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
-                op_name);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.", op_name);
     return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
   };
   void *src_ptr = raw_ptr(get_dense_field_device_ptr(src),
@@ -9152,19 +9093,12 @@ std::size_t Program::cuda_device_scatter_add_dense_field(SNode *src,
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
   void *dst_ptr = raw_ptr(get_dense_field_device_ptr(dst),
                           "CUDA toolkit dense field scatter-add");
-  if (src_stride == value_size && dst_stride == value_size) {
-    return cuda_scatter_add_contiguous(src_ptr, indices_ptr, dst_ptr, n, dst_n,
-                                       value_type);
-  }
-  TI_ERROR_IF(!cuda::cub_scatter_add_available(),
-              "CUDA strided dense field scatter-add requires "
-              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
   void *stream = nullptr;
-  return cuda::cub_scatter_add_strided_io(
+  return cuda::driver_scatter_add_strided(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
       static_cast<int>(dst_n),
-      static_cast<cuda::CudaScatterAddValueType>(value_type), 0, src_stride, 0,
-      dst_stride, stream);
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, src_stride, 0,
+      sizeof(std::int32_t), 0, dst_stride, stream);
 #else
   TI_ERROR(
       "CUDA dense field scatter-add requires building Taichi with "
@@ -9193,21 +9127,20 @@ std::size_t Program::cuda_device_scatter_add_dense_field_indices_field(
   TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA toolkit dense field scatter-add currently supports at "
               "most INT_MAX source items.");
-  TI_ERROR_IF(dst_n >
-                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+  TI_ERROR_IF(dst_n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA toolkit dense field scatter-add currently supports "
               "destination sizes up to INT_MAX items.");
   const std::size_t value_size = primitive_value_type_size(value_type);
   const std::size_t src_stride = get_dense_field_stride(src, value_size);
+  const std::size_t indices_stride =
+      get_dense_field_stride(indices, sizeof(std::int32_t));
   const std::size_t dst_stride = get_dense_field_stride(dst, value_size);
 #ifdef TI_WITH_CUDA
   auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
-    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
-                op_name);
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.", op_name);
     DeviceAllocation alloc{ptr.device, ptr.alloc_id};
     auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
-    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
-                op_name);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.", op_name);
     return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
   };
   void *src_ptr = raw_ptr(get_dense_field_device_ptr(src),
@@ -9216,19 +9149,12 @@ std::size_t Program::cuda_device_scatter_add_dense_field_indices_field(
                               "CUDA toolkit dense field scatter-add");
   void *dst_ptr = raw_ptr(get_dense_field_device_ptr(dst),
                           "CUDA toolkit dense field scatter-add");
-  if (src_stride == value_size && dst_stride == value_size) {
-    return cuda_scatter_add_contiguous(src_ptr, indices_ptr, dst_ptr, n, dst_n,
-                                       value_type);
-  }
-  TI_ERROR_IF(!cuda::cub_scatter_add_available(),
-              "CUDA strided dense field scatter-add requires "
-              "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
   void *stream = nullptr;
-  return cuda::cub_scatter_add_strided_io(
+  return cuda::driver_scatter_add_strided(
       src_ptr, indices_ptr, dst_ptr, static_cast<int>(n),
       static_cast<int>(dst_n),
-      static_cast<cuda::CudaScatterAddValueType>(value_type), 0, src_stride, 0,
-      dst_stride, stream);
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, src_stride, 0,
+      indices_stride, 0, dst_stride, stream);
 #else
   TI_ERROR(
       "CUDA dense field scatter-add requires building Taichi with "
@@ -9239,7 +9165,7 @@ std::size_t Program::cuda_device_scatter_add_dense_field_indices_field(
 bool Program::cuda_device_bucket_builder_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&
-         cuda::cub_bucket_builder_available();
+         cuda::driver_hierarchical_available();
 #else
   return false;
 #endif
@@ -9274,46 +9200,50 @@ std::size_t Program::cuda_device_bucket_builder_ndarray(Ndarray *keys,
               "CUDA toolkit bucket builder expects 1D ndarrays.");
   TI_ERROR_IF(keys->get_nelement() != values->get_nelement(),
               "CUDA toolkit bucket builder keys and values sizes differ.");
-  TI_ERROR_IF(offsets->get_nelement() < 2,
-              "CUDA toolkit bucket builder offsets must contain num_bins + 1 items.");
+  TI_ERROR_IF(
+      offsets->get_nelement() < 2,
+      "CUDA toolkit bucket builder offsets must contain num_bins + 1 items.");
   const std::size_t num_bins = offsets->get_nelement() - 1;
   TI_ERROR_IF(cursor->get_nelement() < num_bins,
               "CUDA toolkit bucket builder cursor is smaller than num_bins.");
-  TI_ERROR_IF(output->get_nelement() < values->get_nelement(),
-              "CUDA toolkit bucket builder output is smaller than input values.");
+  TI_ERROR_IF(
+      output->get_nelement() < values->get_nelement(),
+      "CUDA toolkit bucket builder output is smaller than input values.");
   const std::size_t expected_size = primitive_value_type_size(value_type);
-  TI_ERROR_IF(expected_size == 0,
-              "CUDA toolkit bucket builder received an unsupported value type.");
+  TI_ERROR_IF(
+      expected_size == 0,
+      "CUDA toolkit bucket builder received an unsupported value type.");
   const std::size_t item_bytes = values->get_element_size();
-  TI_ERROR_IF(keys->get_element_size() != sizeof(int32_t) ||
-                  offsets->get_element_size() != sizeof(int32_t) ||
-                  item_bytes == 0 ||
-                  item_bytes % sizeof(uint32_t) != 0 ||
-                  output->get_element_size() != item_bytes ||
-                  cursor->get_element_size() != sizeof(int32_t),
-              "CUDA toolkit bucket builder dtype does not match value type or "
-              "keys/offsets/cursor are not i32, or payload is not 4-byte aligned.");
-  TI_ERROR_IF(keys->get_nelement() >
-                  static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()) ||
-                  num_bins > static_cast<std::size_t>(
-                                 std::numeric_limits<uint32_t>::max()),
-              "CUDA bucket builder input is too large for u32 launch parameters.");
+  TI_ERROR_IF(
+      keys->get_element_size() != sizeof(int32_t) ||
+          offsets->get_element_size() != sizeof(int32_t) || item_bytes == 0 ||
+          item_bytes % sizeof(uint32_t) != 0 ||
+          output->get_element_size() != item_bytes ||
+          cursor->get_element_size() != sizeof(int32_t),
+      "CUDA toolkit bucket builder dtype does not match value type or "
+      "keys/offsets/cursor are not i32, or payload is not 4-byte aligned.");
+  TI_ERROR_IF(
+      keys->get_nelement() >
+              static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()) ||
+          num_bins >
+              static_cast<std::size_t>(std::numeric_limits<uint32_t>::max()),
+      "CUDA bucket builder input is too large for u32 launch parameters.");
   const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
-  TI_ERROR_IF(keys->get_nelement() >
-                  static_cast<std::size_t>(std::numeric_limits<int>::max() /
-                                           item_words),
-              "CUDA bucket builder word count exceeds INT_MAX.");
+  TI_ERROR_IF(
+      keys->get_nelement() > static_cast<std::size_t>(
+                                 std::numeric_limits<int>::max() / item_words),
+      "CUDA bucket builder word count exceeds INT_MAX.");
 #ifdef TI_WITH_CUDA
   void *stream = nullptr;
-  return cuda::cub_bucket_builder(
+  return cuda::driver_bucket_builder_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(offsets)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(cursor)),
       static_cast<int>(keys->get_nelement()), static_cast<int>(num_bins),
-      static_cast<cuda::CudaBucketBuilderValueType>(value_type),
-      item_words, stream, &primitive_workspace_arena_);
+      item_words, 0, sizeof(std::int32_t), 0, item_bytes, 0,
+      sizeof(std::int32_t), 0, item_bytes, stream, &primitive_workspace_arena_);
 #else
   TI_ERROR(
       "CUDA bucket builder requires building Taichi with TI_WITH_CUDA=ON and "
@@ -9340,8 +9270,7 @@ std::size_t Program::cuda_device_bucket_builder_dense_field(
   TI_ERROR_IF(num_bins == 0,
               "CUDA toolkit dense field bucket builder expects at least one "
               "bucket.");
-  TI_ERROR_IF(cursor->shape.size() != 1 ||
-                  cursor->get_nelement() < num_bins ||
+  TI_ERROR_IF(cursor->shape.size() != 1 || cursor->get_nelement() < num_bins ||
                   cursor->get_element_size() != sizeof(int32_t),
               "CUDA toolkit dense field bucket builder cursor must be a 1D "
               "i32 ndarray with at least num_bins items.");
@@ -9354,29 +9283,26 @@ std::size_t Program::cuda_device_bucket_builder_dense_field(
   const std::size_t offsets_stride =
       get_dense_field_stride(offsets, sizeof(int32_t));
   const std::size_t output_stride = get_dense_field_stride(output, item_bytes);
-  TI_ERROR_IF(keys_stride != sizeof(int32_t) ||
-                  values_stride != item_bytes ||
+  TI_ERROR_IF(keys_stride != sizeof(int32_t) || values_stride != item_bytes ||
                   offsets_stride != sizeof(int32_t) ||
                   output_stride != item_bytes,
               "CUDA toolkit dense field bucket builder requires contiguous "
               "keys, values, offsets, and output fields.");
-  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
-                  num_bins >
-                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
-              "CUDA dense field bucket builder input is too large for int "
-              "launch parameters.");
+  TI_ERROR_IF(
+      n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+          num_bins > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+      "CUDA dense field bucket builder input is too large for int "
+      "launch parameters.");
   const int item_words = static_cast<int>(item_bytes / sizeof(uint32_t));
   TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max() /
                                            item_words),
               "CUDA dense field bucket builder word count exceeds INT_MAX.");
 #ifdef TI_WITH_CUDA
   auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
-    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
-                op_name);
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.", op_name);
     DeviceAllocation alloc{ptr.device, ptr.alloc_id};
     auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
-    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
-                op_name);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.", op_name);
     return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
   };
   void *keys_ptr = raw_ptr(get_dense_field_device_ptr(keys),
@@ -9390,10 +9316,10 @@ std::size_t Program::cuda_device_bucket_builder_dense_field(
   void *cursor_ptr =
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(cursor));
   void *stream = nullptr;
-  return cuda::cub_bucket_builder(
+  return cuda::driver_bucket_builder_strided(
       keys_ptr, values_ptr, offsets_ptr, output_ptr, cursor_ptr,
-      static_cast<int>(n), static_cast<int>(num_bins),
-      static_cast<cuda::CudaBucketBuilderValueType>(value_type), item_words,
+      static_cast<int>(n), static_cast<int>(num_bins), item_words, 0,
+      keys_stride, 0, values_stride, 0, offsets_stride, 0, output_stride,
       stream, &primitive_workspace_arena_);
 #else
   TI_ERROR(
@@ -9405,7 +9331,7 @@ std::size_t Program::cuda_device_bucket_builder_dense_field(
 bool Program::cuda_device_grouped_reduce_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&
-         cuda::cub_grouped_reduce_available();
+         cuda::driver_hierarchical_available();
 #else
   return false;
 #endif
@@ -9448,19 +9374,21 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_ndarray(Ndarray *keys,
                   output->get_element_size() != expected_size,
               "CUDA grouped reduce value type or i32 key size mismatch.");
   TI_ERROR_IF(op != 0, "CUDA grouped reduce currently supports only sum.");
-  TI_ERROR_IF(keys->get_nelement() >
-                      static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
-                  num_groups >
-                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
-              "CUDA grouped reduce input is too large for int launch parameters.");
+  TI_ERROR_IF(
+      keys->get_nelement() >
+              static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+          num_groups >
+              static_cast<std::size_t>(std::numeric_limits<int>::max()),
+      "CUDA grouped reduce input is too large for int launch parameters.");
 #ifdef TI_WITH_CUDA
   void *stream = nullptr;
-  return cuda::cub_grouped_reduce_atomic(
+  return cuda::driver_grouped_reduce_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
       static_cast<int>(keys->get_nelement()), static_cast<int>(num_groups),
-      static_cast<cuda::CudaGroupedReduceValueType>(value_type), op, stream);
+      static_cast<cuda::CudaTransformValueType>(value_type), 0,
+      sizeof(std::int32_t), 0, expected_size, 0, expected_size, stream);
 #else
   TI_ERROR(
       "CUDA grouped reduce requires building Taichi with TI_WITH_CUDA=ON and "
@@ -9490,11 +9418,9 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_dense_field(
   const std::size_t keys_stride = get_dense_field_stride(keys, sizeof(int32_t));
   const std::size_t values_stride = get_dense_field_stride(values, value_size);
   const std::size_t output_stride = get_dense_field_stride(output, value_size);
-  TI_ERROR_IF(keys_stride != sizeof(int32_t) ||
-                  values_stride != value_size ||
-                  output_stride != value_size,
-              "CUDA dense field grouped reduce requires contiguous keys, "
-              "values, and output fields.");
+  TI_ERROR_IF(keys_stride < sizeof(int32_t) || values_stride < value_size ||
+                  output_stride < value_size,
+              "CUDA dense field grouped reduce received an invalid stride.");
   TI_ERROR_IF(op != 0, "CUDA dense field grouped reduce supports only sum.");
   TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
                   num_groups >
@@ -9503,12 +9429,10 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_dense_field(
               "launch parameters.");
 #ifdef TI_WITH_CUDA
   auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
-    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.",
-                op_name);
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.", op_name);
     DeviceAllocation alloc{ptr.device, ptr.alloc_id};
     auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
-    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
-                op_name);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.", op_name);
     return static_cast<void *>(reinterpret_cast<uint8_t *>(base) + ptr.offset);
   };
   void *keys_ptr = raw_ptr(get_dense_field_device_ptr(keys),
@@ -9518,10 +9442,11 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_dense_field(
   void *output_ptr = raw_ptr(get_dense_field_device_ptr(output),
                              "CUDA dense field grouped reduce");
   void *stream = nullptr;
-  return cuda::cub_grouped_reduce_atomic(
+  return cuda::driver_grouped_reduce_strided(
       keys_ptr, values_ptr, output_ptr, static_cast<int>(n),
       static_cast<int>(num_groups),
-      static_cast<cuda::CudaGroupedReduceValueType>(value_type), op, stream);
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, keys_stride, 0,
+      values_stride, 0, output_stride, stream);
 #else
   TI_ERROR(
       "CUDA dense field grouped reduce requires building Taichi with "
@@ -9544,21 +9469,21 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_member_ndarray(
   check_grouped_reduce_member_request("CUDA", keys, values, output, value_type,
                                       offset, stride, op);
   const std::size_t num_groups = output->get_nelement();
-  TI_ERROR_IF(keys->get_nelement() >
-                      static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+  TI_ERROR_IF(keys->get_nelement() > static_cast<std::size_t>(
+                                         std::numeric_limits<int>::max()) ||
                   num_groups >
                       static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA strided grouped reduce input is too large for int launch "
               "parameters.");
 #ifdef TI_WITH_CUDA
   void *stream = nullptr;
-  return cuda::cub_grouped_reduce_atomic_strided(
+  return cuda::driver_grouped_reduce_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
       static_cast<int>(keys->get_nelement()), static_cast<int>(num_groups),
-      static_cast<cuda::CudaGroupedReduceValueType>(value_type), offset,
-      stride, op, stream);
+      static_cast<cuda::CudaTransformValueType>(value_type), 0,
+      sizeof(std::int32_t), offset, stride, offset, stride, stream);
 #else
   TI_ERROR(
       "CUDA strided grouped reduce requires building Taichi with "
@@ -9603,22 +9528,22 @@ std::size_t Program::cuda_device_grouped_reduce_atomic_strided_keys_ndarray(
       "CUDA", keys, values, output, value_type, keys_offset, keys_stride,
       values_offset, values_stride, output_offset, output_stride, op);
   const std::size_t num_groups = output->get_nelement();
-  TI_ERROR_IF(keys->get_nelement() >
-                      static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+  TI_ERROR_IF(keys->get_nelement() > static_cast<std::size_t>(
+                                         std::numeric_limits<int>::max()) ||
                   num_groups >
                       static_cast<std::size_t>(std::numeric_limits<int>::max()),
               "CUDA strided grouped reduce input is too large for int launch "
               "parameters.");
 #ifdef TI_WITH_CUDA
   void *stream = nullptr;
-  return cuda::cub_grouped_reduce_atomic_strided_io(
+  return cuda::driver_grouped_reduce_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
       static_cast<int>(keys->get_nelement()), static_cast<int>(num_groups),
-      static_cast<cuda::CudaGroupedReduceValueType>(value_type), keys_offset,
+      static_cast<cuda::CudaTransformValueType>(value_type), keys_offset,
       keys_stride, values_offset, values_stride, output_offset, output_stride,
-      op, stream);
+      stream);
 #else
   TI_ERROR(
       "CUDA strided grouped reduce requires building Taichi with "
@@ -9679,23 +9604,21 @@ std::size_t Program::cuda_device_grouped_reduce_ndarray(Ndarray *keys,
                   cursor->get_element_size() != sizeof(int32_t),
               "CUDA grouped reduce value type or i32 metadata size mismatch.");
   TI_ERROR_IF(op != 0, "CUDA grouped reduce currently supports only sum.");
-  TI_ERROR_IF(keys->get_nelement() >
-                      static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
-                  num_groups >
-                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
-              "CUDA grouped reduce input is too large for int launch parameters.");
+  TI_ERROR_IF(
+      keys->get_nelement() >
+              static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+          num_groups >
+              static_cast<std::size_t>(std::numeric_limits<int>::max()),
+      "CUDA grouped reduce input is too large for int launch parameters.");
 #ifdef TI_WITH_CUDA
   void *stream = nullptr;
-  return cuda::cub_grouped_reduce(
+  return cuda::driver_grouped_reduce_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
-      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(offsets)),
-      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(scratch)),
-      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(cursor)),
       static_cast<int>(keys->get_nelement()), static_cast<int>(num_groups),
-      static_cast<cuda::CudaGroupedReduceValueType>(value_type), op,
-      stream, &primitive_workspace_arena_);
+      static_cast<cuda::CudaTransformValueType>(value_type), 0,
+      sizeof(std::int32_t), 0, expected_size, 0, expected_size, stream);
 #else
   TI_ERROR(
       "CUDA grouped reduce requires building Taichi with TI_WITH_CUDA=ON and "
@@ -9745,10 +9668,11 @@ std::size_t Program::cuda_device_grouped_reduce_segmented_strided_keys_ndarray(
               "CUDA strided segmented grouped reduce cursor is smaller than "
               "num_groups.");
   const std::size_t expected_size = primitive_value_type_size(value_type);
-  TI_ERROR_IF(offsets->get_element_size() != sizeof(int32_t) ||
-                  scratch->get_element_size() != expected_size ||
-                  cursor->get_element_size() != sizeof(int32_t),
-              "CUDA strided segmented grouped reduce workspace dtype mismatch.");
+  TI_ERROR_IF(
+      offsets->get_element_size() != sizeof(int32_t) ||
+          scratch->get_element_size() != expected_size ||
+          cursor->get_element_size() != sizeof(int32_t),
+      "CUDA strided segmented grouped reduce workspace dtype mismatch.");
   TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
                   num_groups >
                       static_cast<std::size_t>(std::numeric_limits<int>::max()),
@@ -9756,17 +9680,14 @@ std::size_t Program::cuda_device_grouped_reduce_segmented_strided_keys_ndarray(
               "int launch parameters.");
 #ifdef TI_WITH_CUDA
   void *stream = nullptr;
-  return cuda::cub_grouped_reduce_strided_io(
+  return cuda::driver_grouped_reduce_strided(
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
-      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(offsets)),
-      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(scratch)),
-      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(cursor)),
       static_cast<int>(n), static_cast<int>(num_groups),
-      static_cast<cuda::CudaGroupedReduceValueType>(value_type), keys_offset,
+      static_cast<cuda::CudaTransformValueType>(value_type), keys_offset,
       keys_stride, values_offset, values_stride, output_offset, output_stride,
-      op, stream, &primitive_workspace_arena_);
+      stream);
 #else
   TI_ERROR(
       "CUDA strided segmented grouped reduce requires building Taichi with "
@@ -10814,6 +10735,115 @@ std::size_t Program::cuda_cub_scan_workspace_bytes() const {
   }
 #endif
   return 0;
+}
+
+bool Program::cuda_device_compact_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::driver_hierarchical_available();
+#else
+  return false;
+#endif
+}
+std::size_t Program::cuda_device_compact_ndarray(Ndarray *values,
+                                                 Ndarray *flags,
+                                                 Ndarray *output,
+                                                 Ndarray *count,
+                                                 int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver compact is only available on CUDA.");
+  TI_ERROR_IF(!values || !flags || !output || !count,
+              "CUDA Driver compact received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || flags->shape.size() != 1 ||
+                  output->shape.size() != 1 || count->shape.size() != 1,
+              "CUDA Driver compact expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() != flags->get_nelement() ||
+                  values->get_nelement() > output->get_nelement(),
+              "CUDA Driver compact expects matching values/flags and "
+              "sufficient output capacity.");
+  TI_ERROR_IF(count->get_nelement() < 1,
+              "CUDA Driver compact count must contain at least one item.");
+  const std::size_t expected_value_bytes =
+      primitive_value_type_size(value_type);
+  TI_ERROR_IF(expected_value_bytes == 0,
+              "CUDA Driver compact received an unsupported value type.");
+  const std::size_t item_bytes = values->get_element_size();
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(std::uint32_t) != 0 ||
+                  output->get_element_size() != item_bytes ||
+                  flags->get_element_size() != sizeof(std::int32_t) ||
+                  count->get_element_size() != sizeof(std::int32_t),
+              "CUDA Driver compact received mismatched dtypes or a payload "
+              "that is not 4-byte aligned.");
+  TI_ERROR_IF(values->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver compact supports at most INT_MAX items.");
+  const int item_words = static_cast<int>(item_bytes / sizeof(std::uint32_t));
+#ifdef TI_WITH_CUDA
+  return cuda::driver_compact_strided(
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(flags)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output)),
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(count)),
+      static_cast<int>(values->get_nelement()), item_words, 0, item_bytes, 0,
+      sizeof(std::int32_t), 0, item_bytes, 0, nullptr,
+      &primitive_workspace_arena_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+std::size_t Program::cuda_device_compact_dense_field(SNode *values,
+                                                     SNode *flags,
+                                                     SNode *output,
+                                                     SNode *count,
+                                                     int value_type,
+                                                     std::size_t n) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver dense-field compact is only available on CUDA.");
+  TI_ERROR_IF(!values || !flags || !output || !count,
+              "CUDA Driver dense-field compact received a null field.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver dense-field compact supports at most INT_MAX "
+              "items.");
+  const std::size_t item_bytes = primitive_value_type_size(value_type);
+  TI_ERROR_IF(item_bytes == 0 || item_bytes % sizeof(std::uint32_t) != 0,
+              "CUDA Driver dense-field compact received an unsupported value "
+              "type.");
+  const std::size_t values_stride = get_dense_field_stride(values, item_bytes);
+  const std::size_t flags_stride =
+      get_dense_field_stride(flags, sizeof(std::int32_t));
+  const std::size_t output_stride = get_dense_field_stride(output, item_bytes);
+  const std::size_t count_stride =
+      get_dense_field_stride(count, sizeof(std::int32_t));
+  TI_ERROR_IF(
+      values_stride < item_bytes || flags_stride < sizeof(std::int32_t) ||
+          output_stride < item_bytes || count_stride < sizeof(std::int32_t),
+      "CUDA Driver dense-field compact received an invalid stride.");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense-field device.", op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense-field pointer.", op_name);
+    return static_cast<void *>(reinterpret_cast<std::uint8_t *>(base) +
+                               ptr.offset);
+  };
+  return cuda::driver_compact_strided(
+      raw_ptr(get_dense_field_device_ptr(values),
+              "CUDA Driver dense-field compact"),
+      raw_ptr(get_dense_field_device_ptr(flags),
+              "CUDA Driver dense-field compact"),
+      raw_ptr(get_dense_field_device_ptr(output),
+              "CUDA Driver dense-field compact"),
+      raw_ptr(get_dense_field_device_ptr(count),
+              "CUDA Driver dense-field compact"),
+      static_cast<int>(n), static_cast<int>(item_bytes / sizeof(std::uint32_t)),
+      0, values_stride, 0, flags_stride, 0, output_stride, 0, nullptr,
+      &primitive_workspace_arena_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
 }
 
 bool Program::cuda_cub_select_available() const {
@@ -16216,9 +16246,8 @@ std::size_t Program::add_merge_dense_field_packed(SNode *src,
   TI_ERROR_IF(value_size == 0,
               "Native packed dense field add-merge received an unsupported "
               "value type.");
-  const std::size_t scalar_items =
-      dense_field_packed_scalar_items(n, lane_count,
-                                      "Native packed dense field add-merge");
+  const std::size_t scalar_items = dense_field_packed_scalar_items(
+      n, lane_count, "Native packed dense field add-merge");
   if (n == 0) {
     return 0;
   }
@@ -16253,24 +16282,22 @@ std::size_t Program::add_merge_dense_field_packed(SNode *src,
                             "CUDA packed dense field add-merge");
     void *dst_raw = raw_ptr(get_dense_field_device_ptr(dst),
                             "CUDA packed dense field add-merge");
-    TI_ERROR_IF(!cuda::cub_add_merge_available(),
-                "CUDA packed dense field add-merge requires "
-                "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
     void *stream = nullptr;
-    return cuda::cub_add_merge(
+    return cuda::driver_add_strided(
         src_raw, dst_raw, static_cast<int>(scalar_items),
-        static_cast<cuda::CudaTransformValueType>(value_type), stream);
+        static_cast<cuda::CudaTransformValueType>(value_type), 0, value_size, 0,
+        value_size, stream);
 #else
     TI_ERROR("CUDA packed dense field add-merge requires TI_WITH_CUDA=ON.");
 #endif
   }
 
-  const auto *src_ptr = map_cpu_dense_field_packed(
-      this, src, value_type, n, lane_count,
-      "CPU native packed dense field add-merge");
-  auto *dst_ptr = map_cpu_dense_field_packed(
-      this, dst, value_type, n, lane_count,
-      "CPU native packed dense field add-merge");
+  const auto *src_ptr =
+      map_cpu_dense_field_packed(this, src, value_type, n, lane_count,
+                                 "CPU native packed dense field add-merge");
+  auto *dst_ptr =
+      map_cpu_dense_field_packed(this, dst, value_type, n, lane_count,
+                                 "CPU native packed dense field add-merge");
   const int max_threads =
       std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
   const int chunk_items = 32768;
@@ -16346,26 +16373,25 @@ std::size_t Program::scatter_add_dense_field_packed(SNode *src,
   TI_ERROR_IF(value_size == 0,
               "Native packed dense field scatter-add received an unsupported "
               "value type.");
-  const std::size_t item_bytes =
-      dense_field_packed_bytes(value_type, 1, lane_count,
-                               "Native packed dense field scatter-add");
+  const std::size_t item_bytes = dense_field_packed_bytes(
+      value_type, 1, lane_count, "Native packed dense field scatter-add");
   check_dense_field_packed_stride(this, src, value_type, lane_count,
                                   "Native packed dense field scatter-add");
   check_dense_field_packed_stride(this, dst, value_type, lane_count,
                                   "Native packed dense field scatter-add");
 
   if (arch == Arch::vulkan) {
-    return vulkan_scatter_add_dense_field_packed(
-        src, indices, dst, value_type, src_n, dst_n, lane_count);
+    return vulkan_scatter_add_dense_field_packed(src, indices, dst, value_type,
+                                                 src_n, dst_n, lane_count);
   }
 
   if (arch == Arch::cuda) {
 #ifdef TI_WITH_CUDA
-    TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
-                    dst_n >
-                        static_cast<std::size_t>(std::numeric_limits<int>::max()),
-                "CUDA packed dense field scatter-add currently supports up "
-                "to INT_MAX items.");
+    TI_ERROR_IF(
+        n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+            dst_n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+        "CUDA packed dense field scatter-add currently supports up "
+        "to INT_MAX items.");
     TI_ERROR_IF(static_cast<std::size_t>(lane_count) >
                     static_cast<std::size_t>(std::numeric_limits<int>::max()),
                 "CUDA packed dense field scatter-add received an invalid "
@@ -16386,26 +16412,28 @@ std::size_t Program::scatter_add_dense_field_packed(SNode *src,
         reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(indices));
     void *dst_raw = raw_ptr(get_dense_field_device_ptr(dst),
                             "CUDA packed dense field scatter-add");
-    TI_ERROR_IF(!cuda::cub_scatter_add_available(),
-                "CUDA packed dense field scatter-add requires "
-                "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
     void *stream = nullptr;
-    return cuda::cub_scatter_add_packed_strided_io(
-        src_raw, indices_ptr, dst_raw, static_cast<int>(n),
-        static_cast<int>(dst_n), lane_count,
-        static_cast<cuda::CudaScatterAddValueType>(value_type), 0, item_bytes,
-        0, item_bytes, stream);
+    for (int lane = 0; lane < lane_count; ++lane) {
+      const std::size_t lane_offset =
+          static_cast<std::size_t>(lane) * value_size;
+      cuda::driver_scatter_add_strided(
+          src_raw, indices_ptr, dst_raw, static_cast<int>(n),
+          static_cast<int>(dst_n),
+          static_cast<cuda::CudaTransformValueType>(value_type), lane_offset,
+          item_bytes, 0, sizeof(std::int32_t), lane_offset, item_bytes, stream);
+    }
+    return 0;
 #else
     TI_ERROR("CUDA packed dense field scatter-add requires TI_WITH_CUDA=ON.");
 #endif
   }
 
-  const auto *src_ptr = map_cpu_dense_field_packed(
-      this, src, value_type, src_n, lane_count,
-      "CPU native packed dense field scatter-add");
-  auto *dst_ptr = map_cpu_dense_field_packed(
-      this, dst, value_type, dst_n, lane_count,
-      "CPU native packed dense field scatter-add");
+  const auto *src_ptr =
+      map_cpu_dense_field_packed(this, src, value_type, src_n, lane_count,
+                                 "CPU native packed dense field scatter-add");
+  auto *dst_ptr =
+      map_cpu_dense_field_packed(this, dst, value_type, dst_n, lane_count,
+                                 "CPU native packed dense field scatter-add");
   auto *indices_ptr =
       reinterpret_cast<const int32_t *>(get_ndarray_data_ptr_as_int(indices));
   const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
@@ -16414,28 +16442,28 @@ std::size_t Program::scatter_add_dense_field_packed(SNode *src,
   switch (value_type) {
     case 0:
       return cpu_scatter_add_packed_strided_io_typed<int32_t>(
-          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
-          dst_n, lane_count, max_threads, target_threads);
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n, dst_n,
+          lane_count, max_threads, target_threads);
     case 1:
       return cpu_scatter_add_packed_strided_io_typed<float>(
-          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
-          dst_n, lane_count, max_threads, target_threads);
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n, dst_n,
+          lane_count, max_threads, target_threads);
     case 2:
       return cpu_scatter_add_packed_strided_io_typed<uint32_t>(
-          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
-          dst_n, lane_count, max_threads, target_threads);
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n, dst_n,
+          lane_count, max_threads, target_threads);
     case 3:
       return cpu_scatter_add_packed_strided_io_typed<uint64_t>(
-          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
-          dst_n, lane_count, max_threads, target_threads);
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n, dst_n,
+          lane_count, max_threads, target_threads);
     case 4:
       return cpu_scatter_add_packed_strided_io_typed<int64_t>(
-          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
-          dst_n, lane_count, max_threads, target_threads);
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n, dst_n,
+          lane_count, max_threads, target_threads);
     case 5:
       return cpu_scatter_add_packed_strided_io_typed<double>(
-          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
-          dst_n, lane_count, max_threads, target_threads);
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n, dst_n,
+          lane_count, max_threads, target_threads);
     default:
       TI_ERROR(
           "Native packed dense field scatter-add received an unsupported "
@@ -16472,17 +16500,16 @@ std::size_t Program::scatter_add_dense_field_packed_indices_field(
   TI_ERROR_IF(value_size == 0,
               "Native packed dense field scatter-add received an unsupported "
               "value type.");
-  const std::size_t item_bytes =
-      dense_field_packed_bytes(value_type, 1, lane_count,
-                               "Native packed dense field scatter-add");
+  const std::size_t item_bytes = dense_field_packed_bytes(
+      value_type, 1, lane_count, "Native packed dense field scatter-add");
   check_dense_field_packed_stride(this, src, value_type, lane_count,
                                   "Native packed dense field scatter-add");
   check_dense_field_packed_stride(this, dst, value_type, lane_count,
                                   "Native packed dense field scatter-add");
-  TI_ERROR_IF(get_dense_field_stride(indices, sizeof(int32_t)) !=
-                  sizeof(int32_t),
-              "Native packed dense field scatter-add requires contiguous i32 "
-              "field indices.");
+  TI_ERROR_IF(
+      get_dense_field_stride(indices, sizeof(int32_t)) != sizeof(int32_t),
+      "Native packed dense field scatter-add requires contiguous i32 "
+      "field indices.");
 
   if (arch == Arch::vulkan) {
     return vulkan_scatter_add_dense_field_packed_indices_field(
@@ -16491,11 +16518,11 @@ std::size_t Program::scatter_add_dense_field_packed_indices_field(
 
   if (arch == Arch::cuda) {
 #ifdef TI_WITH_CUDA
-    TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
-                    dst_n >
-                        static_cast<std::size_t>(std::numeric_limits<int>::max()),
-                "CUDA packed dense field scatter-add currently supports up "
-                "to INT_MAX items.");
+    TI_ERROR_IF(
+        n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+            dst_n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+        "CUDA packed dense field scatter-add currently supports up "
+        "to INT_MAX items.");
     TI_ERROR_IF(static_cast<std::size_t>(lane_count) >
                     static_cast<std::size_t>(std::numeric_limits<int>::max()),
                 "CUDA packed dense field scatter-add received an invalid "
@@ -16516,29 +16543,31 @@ std::size_t Program::scatter_add_dense_field_packed_indices_field(
                                 "CUDA packed dense field scatter-add");
     void *dst_raw = raw_ptr(get_dense_field_device_ptr(dst),
                             "CUDA packed dense field scatter-add");
-    TI_ERROR_IF(!cuda::cub_scatter_add_available(),
-                "CUDA packed dense field scatter-add requires "
-                "TI_WITH_CUDA_TOOLKIT=ON and a discoverable CUDA runtime.");
     void *stream = nullptr;
-    return cuda::cub_scatter_add_packed_strided_io(
-        src_raw, indices_raw, dst_raw, static_cast<int>(n),
-        static_cast<int>(dst_n), lane_count,
-        static_cast<cuda::CudaScatterAddValueType>(value_type), 0, item_bytes,
-        0, item_bytes, stream);
+    for (int lane = 0; lane < lane_count; ++lane) {
+      const std::size_t lane_offset =
+          static_cast<std::size_t>(lane) * value_size;
+      cuda::driver_scatter_add_strided(
+          src_raw, indices_raw, dst_raw, static_cast<int>(n),
+          static_cast<int>(dst_n),
+          static_cast<cuda::CudaTransformValueType>(value_type), lane_offset,
+          item_bytes, 0, sizeof(std::int32_t), lane_offset, item_bytes, stream);
+    }
+    return 0;
 #else
     TI_ERROR("CUDA packed dense field scatter-add requires TI_WITH_CUDA=ON.");
 #endif
   }
 
-  const auto *src_ptr = map_cpu_dense_field_packed(
-      this, src, value_type, src_n, lane_count,
-      "CPU native packed dense field scatter-add");
-  const auto *indices_ptr_bytes = map_cpu_dense_field(
-      this, indices, 0, indices_n, "CPU native packed dense field scatter-add",
-      nullptr);
-  auto *dst_ptr = map_cpu_dense_field_packed(
-      this, dst, value_type, dst_n, lane_count,
-      "CPU native packed dense field scatter-add");
+  const auto *src_ptr =
+      map_cpu_dense_field_packed(this, src, value_type, src_n, lane_count,
+                                 "CPU native packed dense field scatter-add");
+  const auto *indices_ptr_bytes =
+      map_cpu_dense_field(this, indices, 0, indices_n,
+                          "CPU native packed dense field scatter-add", nullptr);
+  auto *dst_ptr =
+      map_cpu_dense_field_packed(this, dst, value_type, dst_n, lane_count,
+                                 "CPU native packed dense field scatter-add");
   const auto *indices_ptr =
       reinterpret_cast<const int32_t *>(indices_ptr_bytes);
   const int max_threads = std::max(1, compile_config().cpu_max_num_threads);
@@ -16547,28 +16576,28 @@ std::size_t Program::scatter_add_dense_field_packed_indices_field(
   switch (value_type) {
     case 0:
       return cpu_scatter_add_packed_strided_io_typed<int32_t>(
-          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
-          dst_n, lane_count, max_threads, target_threads);
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n, dst_n,
+          lane_count, max_threads, target_threads);
     case 1:
       return cpu_scatter_add_packed_strided_io_typed<float>(
-          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
-          dst_n, lane_count, max_threads, target_threads);
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n, dst_n,
+          lane_count, max_threads, target_threads);
     case 2:
       return cpu_scatter_add_packed_strided_io_typed<uint32_t>(
-          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
-          dst_n, lane_count, max_threads, target_threads);
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n, dst_n,
+          lane_count, max_threads, target_threads);
     case 3:
       return cpu_scatter_add_packed_strided_io_typed<uint64_t>(
-          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
-          dst_n, lane_count, max_threads, target_threads);
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n, dst_n,
+          lane_count, max_threads, target_threads);
     case 4:
       return cpu_scatter_add_packed_strided_io_typed<int64_t>(
-          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
-          dst_n, lane_count, max_threads, target_threads);
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n, dst_n,
+          lane_count, max_threads, target_threads);
     case 5:
       return cpu_scatter_add_packed_strided_io_typed<double>(
-          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n,
-          dst_n, lane_count, max_threads, target_threads);
+          src_ptr, 0, item_bytes, indices_ptr, dst_ptr, 0, item_bytes, n, dst_n,
+          lane_count, max_threads, target_threads);
     default:
       TI_ERROR(
           "Native packed dense field scatter-add received an unsupported "

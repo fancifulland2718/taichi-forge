@@ -30,8 +30,17 @@ struct KernelSet {
   std::array<void *, 6> scan{};
   std::array<void *, 6> uniform_add{};
   std::array<void *, 6> reduce{};
+  std::array<void *, 6> add{};
+  std::array<void *, 2> add_scaled{};
+  std::array<void *, 2> gather_add{};
+  std::array<void *, 6> scatter_add{};
+  std::array<void *, 6> zero{};
   std::array<void *, 2> zero_bins{};
   std::array<std::array<void *, 2>, 2> histogram{};
+  void *normalize_flags{nullptr};
+  void *compact_scatter{nullptr};
+  void *copy_i32{nullptr};
+  void *bucket_scatter{nullptr};
 };
 
 std::once_flag kernel_set_once;
@@ -73,12 +82,22 @@ void load_kernel_set_once() {
     const std::string scan_name = std::string("scan_blocks_") + suffixes[i];
     const std::string uniform_name = std::string("uniform_add_") + suffixes[i];
     const std::string reduce_name = std::string("reduce_blocks_") + suffixes[i];
+    const std::string add_name = std::string("add_strided_") + suffixes[i];
+    const std::string scatter_add_name =
+        std::string("scatter_add_strided_") + suffixes[i];
+    const std::string zero_name = std::string("zero_strided_") + suffixes[i];
     driver.module_get_function(&kernel_set.scan[i], kernel_set.module,
                                scan_name.c_str());
     driver.module_get_function(&kernel_set.uniform_add[i], kernel_set.module,
                                uniform_name.c_str());
     driver.module_get_function(&kernel_set.reduce[i], kernel_set.module,
                                reduce_name.c_str());
+    driver.module_get_function(&kernel_set.add[i], kernel_set.module,
+                               add_name.c_str());
+    driver.module_get_function(&kernel_set.scatter_add[i], kernel_set.module,
+                               scatter_add_name.c_str());
+    driver.module_get_function(&kernel_set.zero[i], kernel_set.module,
+                               zero_name.c_str());
   }
   driver.module_get_function(&kernel_set.zero_bins[0], kernel_set.module,
                              "zero_bins_i32");
@@ -92,6 +111,22 @@ void load_kernel_set_once() {
                              "histogram_i32_i64");
   driver.module_get_function(&kernel_set.histogram[1][1], kernel_set.module,
                              "histogram_u32_i64");
+  driver.module_get_function(&kernel_set.normalize_flags, kernel_set.module,
+                             "normalize_flags_i32");
+  driver.module_get_function(&kernel_set.compact_scatter, kernel_set.module,
+                             "compact_scatter_words");
+  driver.module_get_function(&kernel_set.copy_i32, kernel_set.module,
+                             "copy_i32_strided");
+  driver.module_get_function(&kernel_set.bucket_scatter, kernel_set.module,
+                             "bucket_scatter_words");
+  driver.module_get_function(&kernel_set.add_scaled[0], kernel_set.module,
+                             "add_scaled_strided_f32");
+  driver.module_get_function(&kernel_set.add_scaled[1], kernel_set.module,
+                             "add_scaled_strided_f64");
+  driver.module_get_function(&kernel_set.gather_add[0], kernel_set.module,
+                             "gather_add_strided_f32");
+  driver.module_get_function(&kernel_set.gather_add[1], kernel_set.module,
+                             "gather_add_strided_f64");
 }
 
 KernelSet &kernels() {
@@ -451,6 +486,382 @@ std::size_t driver_histogram_strided(void *values,
                                      "cuda_driver_histogram", histogram_args,
                                      {}, item_grid, kBlockDim, 0, stream);
   return 0;
+}
+
+std::size_t driver_add_strided(void *src,
+                               void *dst,
+                               int num_items,
+                               CudaTransformValueType value_type,
+                               std::size_t src_offset,
+                               std::size_t src_stride,
+                               std::size_t dst_offset,
+                               std::size_t dst_stride,
+                               void *stream) {
+  TI_ERROR_IF(num_items < 0, "CUDA Driver add expects non-negative num_items.");
+  const std::size_t value_size = value_type_size(value_type);
+  TI_ERROR_IF((num_items > 0 && (!src || !dst)) ||
+                  (src_stride != 0 && src_stride < value_size) ||
+                  dst_stride < value_size,
+              "CUDA Driver add received an invalid pointer or stride.");
+  if (num_items == 0) {
+    return 0;
+  }
+  void *src_arg = src;
+  void *dst_arg = dst;
+  std::uint64_t src_offset_arg = src_offset;
+  std::uint64_t src_stride_arg = src_stride;
+  std::uint64_t dst_offset_arg = dst_offset;
+  std::uint64_t dst_stride_arg = dst_stride;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::vector<void *> args{&src_arg,  &src_offset_arg, &src_stride_arg,
+                           &dst_arg,  &dst_offset_arg, &dst_stride_arg,
+                           &count_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().add[value_type_index(value_type)], "cuda_driver_add", args, {},
+      grid, kBlockDim, 0, stream);
+  return 0;
+}
+
+std::size_t driver_add_scaled_strided(void *src,
+                                      void *dst,
+                                      int num_items,
+                                      CudaTransformValueType value_type,
+                                      std::size_t src_offset,
+                                      std::size_t src_stride,
+                                      std::size_t dst_offset,
+                                      std::size_t dst_stride,
+                                      double scale,
+                                      void *stream) {
+  TI_ERROR_IF(value_type != CudaTransformValueType::f32 &&
+                  value_type != CudaTransformValueType::f64,
+              "CUDA Driver scaled add supports only f32/f64.");
+  TI_ERROR_IF(num_items < 0,
+              "CUDA Driver scaled add expects non-negative num_items.");
+  const std::size_t value_size = value_type_size(value_type);
+  TI_ERROR_IF((num_items > 0 && (!src || !dst)) ||
+                  (src_stride != 0 && src_stride < value_size) ||
+                  dst_stride < value_size,
+              "CUDA Driver scaled add received an invalid pointer or stride.");
+  if (num_items == 0) {
+    return 0;
+  }
+  void *src_arg = src;
+  void *dst_arg = dst;
+  std::uint64_t src_offset_arg = src_offset;
+  std::uint64_t src_stride_arg = src_stride;
+  std::uint64_t dst_offset_arg = dst_offset;
+  std::uint64_t dst_stride_arg = dst_stride;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  double scale_arg = scale;
+  std::vector<void *> args{&src_arg,   &src_offset_arg, &src_stride_arg,
+                           &dst_arg,   &dst_offset_arg, &dst_stride_arg,
+                           &count_arg, &scale_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  const std::size_t type_index =
+      value_type == CudaTransformValueType::f32 ? 0 : 1;
+  CUDAContext::get_instance().launch(kernels().add_scaled[type_index],
+                                     "cuda_driver_add_scaled", args, {}, grid,
+                                     kBlockDim, 0, stream);
+  return 0;
+}
+
+std::size_t driver_scatter_add_strided(void *src,
+                                       void *indices,
+                                       void *dst,
+                                       int num_items,
+                                       int index_bound,
+                                       CudaTransformValueType value_type,
+                                       std::size_t src_offset,
+                                       std::size_t src_stride,
+                                       std::size_t indices_offset,
+                                       std::size_t indices_stride,
+                                       std::size_t dst_offset,
+                                       std::size_t dst_stride,
+                                       void *stream) {
+  TI_ERROR_IF(num_items < 0 || index_bound < 0,
+              "CUDA Driver scatter-add received a negative size.");
+  const std::size_t value_size = value_type_size(value_type);
+  TI_ERROR_IF((num_items > 0 && (!src || !indices || !dst)) ||
+                  src_stride < value_size ||
+                  indices_stride < sizeof(std::int32_t) ||
+                  dst_stride < value_size,
+              "CUDA Driver scatter-add received an invalid pointer or stride.");
+  if (num_items == 0 || index_bound == 0) {
+    return 0;
+  }
+  void *src_arg = src;
+  void *indices_arg = indices;
+  void *dst_arg = dst;
+  std::uint64_t src_offset_arg = src_offset;
+  std::uint64_t src_stride_arg = src_stride;
+  std::uint64_t indices_offset_arg = indices_offset;
+  std::uint64_t indices_stride_arg = indices_stride;
+  std::uint64_t dst_offset_arg = dst_offset;
+  std::uint64_t dst_stride_arg = dst_stride;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::uint32_t bound_arg = static_cast<std::uint32_t>(index_bound);
+  std::vector<void *> args{
+      &src_arg,     &src_offset_arg,     &src_stride_arg,
+      &indices_arg, &indices_offset_arg, &indices_stride_arg,
+      &dst_arg,     &dst_offset_arg,     &dst_stride_arg,
+      &count_arg,   &bound_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().scatter_add[value_type_index(value_type)],
+      "cuda_driver_scatter_add", args, {}, grid, kBlockDim, 0, stream);
+  return 0;
+}
+
+std::size_t driver_gather_add_strided(void *src,
+                                      void *indices,
+                                      void *dst,
+                                      int num_items,
+                                      int index_bound,
+                                      CudaTransformValueType value_type,
+                                      std::size_t src_offset,
+                                      std::size_t src_stride,
+                                      std::size_t indices_offset,
+                                      std::size_t indices_stride,
+                                      std::size_t dst_offset,
+                                      std::size_t dst_stride,
+                                      void *stream) {
+  TI_ERROR_IF(value_type != CudaTransformValueType::f32 &&
+                  value_type != CudaTransformValueType::f64,
+              "CUDA Driver gather-add supports only f32/f64.");
+  TI_ERROR_IF(num_items < 0 || index_bound < 0,
+              "CUDA Driver gather-add received a negative size.");
+  const std::size_t value_size = value_type_size(value_type);
+  TI_ERROR_IF((num_items > 0 && (!src || !indices || !dst)) ||
+                  src_stride < value_size ||
+                  indices_stride < sizeof(std::int32_t) ||
+                  dst_stride < value_size,
+              "CUDA Driver gather-add received an invalid pointer or stride.");
+  if (num_items == 0 || index_bound == 0) {
+    return 0;
+  }
+  void *src_arg = src;
+  void *indices_arg = indices;
+  void *dst_arg = dst;
+  std::uint64_t src_offset_arg = src_offset;
+  std::uint64_t src_stride_arg = src_stride;
+  std::uint64_t indices_offset_arg = indices_offset;
+  std::uint64_t indices_stride_arg = indices_stride;
+  std::uint64_t dst_offset_arg = dst_offset;
+  std::uint64_t dst_stride_arg = dst_stride;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::uint32_t bound_arg = static_cast<std::uint32_t>(index_bound);
+  std::vector<void *> args{
+      &src_arg,     &src_offset_arg,     &src_stride_arg,
+      &indices_arg, &indices_offset_arg, &indices_stride_arg,
+      &dst_arg,     &dst_offset_arg,     &dst_stride_arg,
+      &count_arg,   &bound_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  const std::size_t type_index =
+      value_type == CudaTransformValueType::f32 ? 0 : 1;
+  CUDAContext::get_instance().launch(kernels().gather_add[type_index],
+                                     "cuda_driver_gather_add", args, {}, grid,
+                                     kBlockDim, 0, stream);
+  return 0;
+}
+
+std::size_t driver_zero_strided(void *dst,
+                                int num_items,
+                                CudaTransformValueType value_type,
+                                std::size_t dst_offset,
+                                std::size_t dst_stride,
+                                void *stream) {
+  TI_ERROR_IF(num_items < 0,
+              "CUDA Driver zero expects non-negative num_items.");
+  const std::size_t value_size = value_type_size(value_type);
+  TI_ERROR_IF((num_items > 0 && !dst) || dst_stride < value_size,
+              "CUDA Driver zero received an invalid pointer or stride.");
+  if (num_items == 0) {
+    return 0;
+  }
+  void *dst_arg = dst;
+  std::uint64_t dst_offset_arg = dst_offset;
+  std::uint64_t dst_stride_arg = dst_stride;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::vector<void *> args{&dst_arg, &dst_offset_arg, &dst_stride_arg,
+                           &count_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().zero[value_type_index(value_type)], "cuda_driver_zero", args,
+      {}, grid, kBlockDim, 0, stream);
+  return 0;
+}
+
+std::size_t driver_compact_strided(void *values,
+                                   void *flags,
+                                   void *output,
+                                   void *count,
+                                   int num_items,
+                                   int item_words,
+                                   std::size_t values_offset,
+                                   std::size_t values_stride,
+                                   std::size_t flags_offset,
+                                   std::size_t flags_stride,
+                                   std::size_t output_offset,
+                                   std::size_t output_stride,
+                                   std::size_t count_offset,
+                                   void *stream,
+                                   PrimitiveWorkspaceArena *workspace_arena) {
+  TI_ERROR_IF(num_items < 0 || item_words <= 0,
+              "CUDA Driver compact received an invalid size.");
+  const std::size_t item_bytes =
+      static_cast<std::size_t>(item_words) * sizeof(std::uint32_t);
+  TI_ERROR_IF(!count || (num_items > 0 && (!values || !flags || !output)) ||
+                  values_stride < item_bytes ||
+                  flags_stride < sizeof(std::int32_t) ||
+                  output_stride < item_bytes,
+              "CUDA Driver compact received an invalid pointer or stride.");
+  if (num_items == 0) {
+    return driver_zero_strided(count, 1, CudaTransformValueType::i32,
+                               count_offset, sizeof(std::int32_t), stream);
+  }
+  auto workspace = acquire_workspace(workspace_arena,
+                                     PrimitiveWorkspaceFamily::compact, stream);
+  workspace->ensure(static_cast<std::size_t>(num_items) * sizeof(std::int32_t));
+  void *prefix = workspace->data();
+  void *flags_arg = flags;
+  std::uint64_t flags_offset_arg = flags_offset;
+  std::uint64_t flags_stride_arg = flags_stride;
+  void *prefix_arg = prefix;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::vector<void *> normalize_args{&flags_arg, &flags_offset_arg,
+                                     &flags_stride_arg, &prefix_arg,
+                                     &count_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().normalize_flags, "cuda_driver_compact_flags", normalize_args,
+      {}, grid, kBlockDim, 0, stream);
+  const std::size_t scan_bytes = driver_inclusive_scan_strided(
+      prefix, num_items, CudaTransformValueType::i32, 0, sizeof(std::int32_t),
+      false, stream, workspace_arena);
+
+  void *values_arg = values;
+  std::uint64_t values_offset_arg = values_offset;
+  std::uint64_t values_stride_arg = values_stride;
+  void *output_arg = output;
+  std::uint64_t output_offset_arg = output_offset;
+  std::uint64_t output_stride_arg = output_stride;
+  void *count_output_arg = count;
+  std::uint64_t count_offset_arg = count_offset;
+  std::uint32_t words_arg = static_cast<std::uint32_t>(item_words);
+  std::vector<void *> scatter_args{
+      &values_arg,        &values_offset_arg, &values_stride_arg,
+      &prefix_arg,        &output_arg,        &output_offset_arg,
+      &output_stride_arg, &count_output_arg,  &count_offset_arg,
+      &count_arg,         &words_arg};
+  CUDAContext::get_instance().launch(
+      kernels().compact_scatter, "cuda_driver_compact_scatter", scatter_args,
+      {}, grid, kBlockDim, 0, stream);
+  return workspace->allocated_bytes() + scan_bytes;
+}
+
+std::size_t driver_bucket_builder_strided(
+    void *keys,
+    void *values,
+    void *offsets,
+    void *output,
+    void *cursor,
+    int num_items,
+    int num_bins,
+    int item_words,
+    std::size_t keys_offset,
+    std::size_t keys_stride,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t offsets_offset,
+    std::size_t offsets_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    void *stream,
+    PrimitiveWorkspaceArena *workspace_arena) {
+  TI_ERROR_IF(num_items < 0 || num_bins <= 0 || item_words <= 0,
+              "CUDA Driver bucket builder received an invalid size.");
+  const std::size_t item_bytes =
+      static_cast<std::size_t>(item_words) * sizeof(std::uint32_t);
+  TI_ERROR_IF(
+      !keys || !values || !offsets || !output || !cursor ||
+          keys_stride < sizeof(std::int32_t) || values_stride < item_bytes ||
+          offsets_stride < sizeof(std::int32_t) || output_stride < item_bytes,
+      "CUDA Driver bucket builder received an invalid pointer or "
+      "stride.");
+  driver_zero_strided(offsets, 1, CudaTransformValueType::i32, offsets_offset,
+                      offsets_stride, stream);
+  driver_histogram_strided(
+      keys, offsets, num_items, num_bins, CudaTransformValueType::i32,
+      CudaTransformValueType::i32, keys_offset, keys_stride,
+      offsets_offset + offsets_stride, offsets_stride, stream);
+  const std::size_t scan_bytes = driver_inclusive_scan_strided(
+      offsets, num_bins + 1, CudaTransformValueType::i32, offsets_offset,
+      offsets_stride, false, stream, workspace_arena);
+
+  void *offsets_arg = offsets;
+  std::uint64_t offsets_offset_arg = offsets_offset;
+  std::uint64_t offsets_stride_arg = offsets_stride;
+  void *cursor_arg = cursor;
+  std::uint64_t cursor_offset_arg = 0;
+  std::uint64_t cursor_stride_arg = sizeof(std::int32_t);
+  std::uint32_t bins_arg = static_cast<std::uint32_t>(num_bins);
+  std::vector<void *> copy_args{
+      &offsets_arg, &offsets_offset_arg, &offsets_stride_arg,
+      &cursor_arg,  &cursor_offset_arg,  &cursor_stride_arg,
+      &bins_arg};
+  const unsigned bins_grid = (bins_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(kernels().copy_i32,
+                                     "cuda_driver_bucket_cursor", copy_args, {},
+                                     bins_grid, kBlockDim, 0, stream);
+
+  if (num_items > 0) {
+    void *keys_arg = keys;
+    std::uint64_t keys_offset_arg = keys_offset;
+    std::uint64_t keys_stride_arg = keys_stride;
+    void *values_arg = values;
+    std::uint64_t values_offset_arg = values_offset;
+    std::uint64_t values_stride_arg = values_stride;
+    void *output_arg = output;
+    std::uint64_t output_offset_arg = output_offset;
+    std::uint64_t output_stride_arg = output_stride;
+    std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+    std::uint32_t words_arg = static_cast<std::uint32_t>(item_words);
+    std::vector<void *> scatter_args{
+        &keys_arg,   &keys_offset_arg,   &keys_stride_arg,
+        &values_arg, &values_offset_arg, &values_stride_arg,
+        &output_arg, &output_offset_arg, &output_stride_arg,
+        &cursor_arg, &count_arg,         &bins_arg,
+        &words_arg};
+    const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+    CUDAContext::get_instance().launch(
+        kernels().bucket_scatter, "cuda_driver_bucket_scatter", scatter_args,
+        {}, grid, kBlockDim, 0, stream);
+  }
+  return scan_bytes;
+}
+
+std::size_t driver_grouped_reduce_strided(void *keys,
+                                          void *values,
+                                          void *output,
+                                          int num_items,
+                                          int num_groups,
+                                          CudaTransformValueType value_type,
+                                          std::size_t keys_offset,
+                                          std::size_t keys_stride,
+                                          std::size_t values_offset,
+                                          std::size_t values_stride,
+                                          std::size_t output_offset,
+                                          std::size_t output_stride,
+                                          void *stream) {
+  TI_ERROR_IF(num_items < 0 || num_groups <= 0,
+              "CUDA Driver grouped reduce received an invalid size.");
+  driver_zero_strided(output, num_groups, value_type, output_offset,
+                      output_stride, stream);
+  return driver_scatter_add_strided(values, keys, output, num_items, num_groups,
+                                    value_type, values_offset, values_stride,
+                                    keys_offset, keys_stride, output_offset,
+                                    output_stride, stream);
 }
 
 }  // namespace taichi::lang::cuda

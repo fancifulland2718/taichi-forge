@@ -1113,6 +1113,21 @@ class TI_DLL_EXPORT Program {
 
   std::size_t cuda_cub_scan_workspace_bytes() const;
 
+  bool cuda_device_compact_available() const;
+
+  std::size_t cuda_device_compact_ndarray(Ndarray *values,
+                                          Ndarray *flags,
+                                          Ndarray *output,
+                                          Ndarray *count,
+                                          int value_type);
+
+  std::size_t cuda_device_compact_dense_field(SNode *values,
+                                              SNode *flags,
+                                              SNode *output,
+                                              SNode *count,
+                                              int value_type,
+                                              std::size_t n);
+
   bool cuda_cub_select_available() const;
 
   std::size_t cuda_cub_select_ndarray(Ndarray *values,

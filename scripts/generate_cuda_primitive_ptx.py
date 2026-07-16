@@ -21,6 +21,17 @@ REQUIRED_ENTRIES = (
     "histogram_u32_i32",
     "histogram_i32_i64",
     "histogram_u32_i64",
+    *(f"add_strided_{suffix}" for suffix in SUFFIXES),
+    "add_scaled_strided_f32",
+    "add_scaled_strided_f64",
+    "gather_add_strided_f32",
+    "gather_add_strided_f64",
+    *(f"scatter_add_strided_{suffix}" for suffix in SUFFIXES),
+    *(f"zero_strided_{suffix}" for suffix in SUFFIXES),
+    "normalize_flags_i32",
+    "compact_scatter_words",
+    "copy_i32_strided",
+    "bucket_scatter_words",
 )
 
 
