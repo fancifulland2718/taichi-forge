@@ -594,6 +594,14 @@ destroy 后留下的 tree 空洞，构建时会明确拒绝，不生成含糊 ar
 get_root_size() 视图仍返回第一棵 root；多 tree loader 必须使用 get_root_sizes()。
 该合同仍只支持稠密 AOT field，不包含稀疏 SNode AOT。
 
+AOT kernel template 实例化现在在 CPU、CUDA、Vulkan 上接受 ndarray exemplar。支持普通
+scalar/vector/matrix Taichi ndarray、C-contiguous NumPy array 与 contiguous Torch tensor。
+specialization key 会记录 element dtype/shape、logical ndim、AOS contiguous byte stride、
+gradient presence 与 boundary mode；runtime capacity 不进入 key，因此不同长度但 ABI 相同的
+array 会复用一个 artifact。SOA 或结构化 ndarray view、非连续 host array、texture 与任意
+Python 对象会在编译前明确拒绝。key 使用文件系统安全的 __tmpl__ 约定；UTF-8 signature
+超过 180 bytes 时使用确定性 SHA-256 key，避免 Windows path length 失败。
+
 ## Graph API
 
 Dense Field 专属 layout、生命周期、并发、AD 与后端行为见

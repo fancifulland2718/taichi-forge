@@ -117,6 +117,130 @@ def test_save_template_kernel():
             json.load(json_file)
 
 
+@test_utils.test(arch=[ti.vulkan], offline_cache=False)
+def test_aot_ndarray_kernel_template_contract():
+    device_arr = ti.ndarray(ti.f32, shape=8)
+    host_arr = np.zeros(32, dtype=np.float32)
+
+    @ti.kernel
+    def scale(
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        factor: ti.template(),
+    ):
+        for i in x:
+            x[i] *= factor
+
+    module = ti.aot.Module()
+    with module.add_kernel_template(scale) as kernel_template:
+        kernel_template.instantiate(x=device_arr, factor=2)
+        # Runtime capacity and keyword order do not create another artifact
+        # specialization when the ndarray ABI is unchanged.
+        kernel_template.instantiate(factor=2, x=host_arr)
+        kernel_template.instantiate(factor=3, x=host_arr)
+
+        with pytest.raises(
+            ti.TaichiCompilationError, match="must be C-contiguous"
+        ):
+            kernel_template.instantiate(
+                x=np.zeros((4, 4), dtype=np.float32)[:, ::2],
+                factor=4,
+            )
+        with pytest.raises(
+            ti.TaichiCompilationError,
+            match="must be a Taichi ndarray",
+        ):
+            kernel_template.instantiate(x=[0.0] * 8, factor=5)
+
+    @ti.kernel
+    def shift_vector(
+        x: ti.types.ndarray(dtype=ti.math.vec3, ndim=1),
+    ):
+        for i in x:
+            x[i] += ti.Vector([1.0, 2.0, 3.0])
+
+    with module.add_kernel_template(shift_vector) as kernel_template:
+        kernel_template.instantiate(
+            x=np.zeros((5, 3), dtype=np.float32)
+        )
+
+    @ti.kernel
+    def combine(
+        lhs: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        rhs: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for i in lhs:
+            lhs[i] += rhs[i]
+
+    with module.add_kernel_template(combine) as kernel_template:
+        kernel_template.instantiate(lhs=device_arr, rhs=device_arr)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        module.save(tmpdir)
+        with open(
+            os.path.join(tmpdir, "metadata.json"), encoding="utf-8"
+        ) as metadata_file:
+            metadata = json.load(metadata_file)
+
+    names = [
+        kernel["name"]
+        for kernel in metadata["kernels"]
+        if kernel["name"].startswith("scale__tmpl__")
+    ]
+    assert len(names) == 2
+    descriptor = (
+        "x=ndarray-dtype_f32-ndim_1-element_shape_scalar-layout_aos-"
+        "stride_bytes_4-needs_grad_0-boundary_"
+    )
+    assert all(descriptor in name for name in names)
+    assert any("factor=2__" in name for name in names)
+    assert any("factor=3__" in name for name in names)
+    vector_names = [
+        kernel["name"]
+        for kernel in metadata["kernels"]
+        if kernel["name"].startswith("shift_vector__tmpl__")
+    ]
+    assert len(vector_names) == 1
+    assert (
+        "element_shape_3-layout_aos-stride_bytes_12" in vector_names[0]
+    )
+    hashed_names = [
+        kernel["name"]
+        for kernel in metadata["kernels"]
+        if kernel["name"].startswith("combine__tmpl__")
+    ]
+    assert len(hashed_names) == 1
+    assert hashed_names[0].startswith("combine__tmpl__sha256_")
+    assert len(hashed_names[0].removeprefix("combine__tmpl__sha256_")) == 64
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_llvm_aot_ndarray_kernel_template_contract():
+    values = ti.ndarray(ti.i32, shape=16)
+
+    @ti.kernel
+    def apply(
+        x: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        increment: ti.template(),
+    ):
+        for i in x:
+            x[i] += increment
+
+    module = ti.aot.Module()
+    with module.add_kernel_template(apply) as kernel_template:
+        kernel_template.instantiate(x=values, increment=7)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        module.save(tmpdir)
+        with open(
+            os.path.join(tmpdir, "metadata.json"), encoding="utf-8"
+        ) as metadata_file:
+            serialized_metadata = metadata_file.read()
+
+    assert "apply__tmpl__x=ndarray-" in serialized_metadata
+    assert "element_shape_scalar" in serialized_metadata
+    assert "increment=7__" in serialized_metadata
+
+
 @test_utils.test(arch=[ti.opengl, ti.vulkan])
 def test_non_dense_snode():
     n = 8

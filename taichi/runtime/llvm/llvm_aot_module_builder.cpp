@@ -95,6 +95,12 @@ void LlvmAotModuleBuilder::add_per_backend(const std::string &identifier,
   cache_.kernels[identifier] = std::move(kcache);
 }
 
+void LlvmAotModuleBuilder::add_per_backend_tmpl(const std::string &identifier,
+                                                const std::string &key,
+                                                Kernel *kernel) {
+  add_per_backend(identifier + "__tmpl__" + key, kernel);
+}
+
 void LlvmAotModuleBuilder::add_field_per_backend(const std::string &identifier,
                                                  const SNode *rep_snode,
                                                  bool is_scalar,

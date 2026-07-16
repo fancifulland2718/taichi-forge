@@ -162,7 +162,7 @@ void AotModuleBuilderImpl::add_per_backend_tmpl(const std::string &identifier,
       key,
       compiled.metadata.num_snode_trees,
       ti_aot_data_.root_buffer_sizes.size());
-  compiled.metadata.kernel_attribs.name = identifier + "|" + key;
+  compiled.metadata.kernel_attribs.name = identifier + "__tmpl__" + key;
   ti_aot_data_.kernels.push_back(compiled.metadata.kernel_attribs);
   ti_aot_data_.kernel_metadata.push_back(
       {compiled.metadata.num_snode_trees,

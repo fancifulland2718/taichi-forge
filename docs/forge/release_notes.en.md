@@ -123,6 +123,11 @@ retroactively attributed to the 0.5.0 artifact:
   artifact root and registers kernels with the recorded count instead of
   hard-coding one tree. Non-contiguous live tree ids fail at build time;
   sparse SNode AOT remains unsupported.
+- AOT kernel templates now accept bounded ndarray/external-array exemplars on
+  CPU, CUDA, and Vulkan. Specializations use a capacity-independent
+  element/layout ABI key, reject unsupported or non-contiguous inputs before
+  compilation, deduplicate equal contracts, and use filesystem-safe names
+  with a SHA-256 fallback for long signatures.
 
 ## 0.1.0
 

@@ -660,6 +660,17 @@ legacy C++ get_root_size() view still returns the first root; multi-tree
 loaders must use get_root_sizes(). This support remains limited to dense AOT
 fields; sparse SNode AOT is outside this contract.
 
+AOT kernel-template instantiation accepts ndarray exemplars on CPU, CUDA, and
+Vulkan. Supported exemplars are ordinary scalar/vector/matrix Taichi ndarrays,
+C-contiguous NumPy arrays, and contiguous Torch tensors. The specialization
+key records element dtype/shape, logical ndim, AOS contiguous byte stride,
+gradient presence, and boundary mode. Runtime capacity is deliberately
+excluded, so the same ABI at different lengths reuses one artifact. SOA or
+structured ndarray views, non-contiguous host arrays, textures, and arbitrary
+Python objects fail before compilation. Keys use the filesystem-safe
+__tmpl__ convention; signatures over 180 UTF-8 bytes use a deterministic
+SHA-256 key to avoid Windows path-length failures.
+
 ## Graph APIs
 
 Dense Field-specific layouts, lifetime, concurrency, AD, and backend behavior

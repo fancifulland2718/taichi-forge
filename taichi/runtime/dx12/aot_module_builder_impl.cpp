@@ -66,7 +66,7 @@ void AotModuleBuilderImpl::add_per_backend_tmpl(const std::string &identifier,
                                                 const std::string &key,
                                                 Kernel *kernel) {
   // FIXME: share code with add_per_backend.
-  auto tmpl_identifier = identifier + "|" + key;
+  auto tmpl_identifier = identifier + "__tmpl__" + key;
 
   auto &dxil_codes = module_data.dxil_codes[tmpl_identifier];
   auto &compiled_kernel = module_data.kernels[tmpl_identifier];

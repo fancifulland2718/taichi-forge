@@ -1,18 +1,27 @@
 import datetime
+import hashlib
 import os
 from contextlib import contextmanager
 from glob import glob
 from pathlib import Path, PurePosixPath
 from shutil import rmtree
 from tempfile import mkdtemp
+from urllib.parse import quote
 from zipfile import ZipFile
 
+import numpy as np
+
+from taichi_forge._lib import core as _ti_core
 from taichi_forge.aot.utils import produce_injected_args, produce_injected_args_from_template
 from taichi_forge.lang import impl, kernel_impl
-from taichi_forge.lang.exception import TaichiRuntimeError
+from taichi_forge.lang._ndarray import Ndarray, StructNdarray
+from taichi_forge.lang.enums import Layout
+from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeError
 from taichi_forge.lang.field import ScalarField
 from taichi_forge.lang.matrix import MatrixField
 from taichi_forge.types.annotations import template
+from taichi_forge.types.ndarray_type import NdarrayType
+from taichi_forge.types.texture_type import RWTextureType, TextureType
 
 import taichi_forge
 
@@ -21,18 +30,86 @@ class KernelTemplate:
     def __init__(self, kernel_fn, aot_module):
         self._kernel_fn = kernel_fn
         self._aot_module = aot_module
+        self._instantiated_keys = set()
+
+    @staticmethod
+    def _key_atom(value):
+        return quote(str(value), safe="-_.")
 
     @staticmethod
     def keygen(v, key_p, fields):
         if isinstance(v, (int, float, bool)):
-            key_p += "=" + str(v) + ","
+            key_p += "=" + KernelTemplate._key_atom(v) + "__"
             return key_p
         for ky, val in fields:
             if val is v:
-                key_p += "=" + ky + ","
+                key_p += "=" + KernelTemplate._key_atom(ky) + "__"
                 return key_p
         raise RuntimeError(
             "Arg type must be of type int/float/boolean" f" or taichi field. Type {str(type(v))}" " is not supported"
+        )
+
+    @staticmethod
+    def _ndarray_keygen(v, anno, arg_name):
+        if isinstance(v, StructNdarray):
+            raise TaichiCompilationError(
+                f"AOT ndarray template argument {arg_name} does not support "
+                "StructNdarray; use a scalar/vector/matrix ndarray"
+            )
+
+        if isinstance(v, Ndarray):
+            if v.layout != Layout.AOS:
+                raise TaichiCompilationError(
+                    f"AOT ndarray template argument {arg_name} must use "
+                    "Layout.AOS"
+                )
+        elif isinstance(v, np.ndarray):
+            if not v.flags.c_contiguous:
+                raise TaichiCompilationError(
+                    f"AOT external array template argument {arg_name} must "
+                    "be C-contiguous"
+                )
+        elif kernel_impl.has_pytorch():
+            import torch  # pylint: disable=C0415
+
+            if not isinstance(v, torch.Tensor):
+                raise TaichiCompilationError(
+                    f"AOT ndarray template argument {arg_name} must be a "
+                    "Taichi ndarray, NumPy ndarray, or Torch tensor"
+                )
+            if not v.is_contiguous():
+                raise TaichiCompilationError(
+                    f"AOT external array template argument {arg_name} must "
+                    "be contiguous"
+                )
+        else:
+            raise TaichiCompilationError(
+                f"AOT ndarray template argument {arg_name} must be a Taichi "
+                "ndarray or NumPy ndarray"
+            )
+
+        feature = kernel_impl.TaichiCallableTemplateMapper.extract_arg(
+            v, anno, arg_name
+        )
+        element_type = feature[0]
+        if not hasattr(element_type, "to_string"):
+            element_type = kernel_impl.to_taichi_type(v.dtype)
+        dtype_name = element_type.to_string()
+        if hasattr(element_type, "get_shape"):
+            element_shape = tuple(element_type.get_shape())
+        elif hasattr(element_type, "shape") and callable(element_type.shape):
+            element_shape = tuple(element_type.shape())
+        else:
+            element_shape = ()
+        stride_bytes = _ti_core.data_type_size(element_type)
+        shape_key = "x".join(str(x) for x in element_shape) or "scalar"
+        return (
+            "ndarray-"
+            f"dtype_{KernelTemplate._key_atom(dtype_name)}-"
+            f"ndim_{feature[1]}-element_shape_{shape_key}-layout_aos-"
+            f"stride_bytes_{stride_bytes}-"
+            f"needs_grad_{int(bool(feature[2]))}-"
+            f"boundary_{int(feature[3])}"
         )
 
     def instantiate(self, **kwargs):
@@ -41,23 +118,57 @@ class KernelTemplate:
         assert isinstance(kernel, kernel_impl.Kernel)
         injected_args = []
         key_p = ""
-        anno_index = 0
-        template_args = {}
-
-        for index, (key, value) in enumerate(kwargs.items()):
-            template_args[index] = (key, value)
+        required = {
+            arg.name
+            for arg in kernel.arguments
+            if isinstance(arg.annotation, (template, NdarrayType))
+        }
+        provided = set(kwargs)
+        missing = sorted(required - provided)
+        unknown = sorted(provided - required)
+        if missing:
+            raise TaichiCompilationError(
+                "Missing AOT kernel template arguments: " + ", ".join(missing)
+            )
+        if unknown:
+            raise TaichiCompilationError(
+                "Unexpected AOT kernel template arguments: "
+                + ", ".join(unknown)
+            )
 
         for arg in kernel.arguments:
             if isinstance(arg.annotation, template):
-                (k, v) = template_args[anno_index]
-                key_p += k
+                v = kwargs[arg.name]
+                key_p += arg.name
                 key_p = self.keygen(v, key_p, self._aot_module._fields.items())
                 injected_args.append(v)
-                anno_index += 1
+            elif isinstance(arg.annotation, NdarrayType):
+                v = kwargs[arg.name]
+                key_p += (
+                    arg.name
+                    + "="
+                    + self._ndarray_keygen(v, arg.annotation, arg.name)
+                    + "__"
+                )
+                injected_args.append(v)
+            elif isinstance(arg.annotation, (TextureType, RWTextureType)):
+                raise TaichiCompilationError(
+                    "AOT kernel templates do not support texture "
+                    f"specialization ({arg.name}); use Module.add_kernel() "
+                    "with template_args"
+                )
             else:
                 injected_args.append(0)
+        if len(key_p.encode("utf-8")) > 180:
+            key_p = (
+                "sha256_"
+                + hashlib.sha256(key_p.encode("utf-8")).hexdigest()
+            )
+        if key_p in self._instantiated_keys:
+            return
         kernel.ensure_compiled(*injected_args)
         self._aot_module._aot_builder.add_kernel_template(name, key_p, kernel.kernel_cpp)
+        self._instantiated_keys.add(key_p)
 
         # kernel AOT
         self._aot_module._kernels.append(kernel)
@@ -216,8 +327,10 @@ class Module:
             >>> with m.add_kernel_template(bar_tmpl) as kt:
             >>>   kt.instantiate(a=x, b=y)
 
-        TODO:
-          * Support external array
+        Ndarray parameters may be specialized with a Taichi ndarray, a
+        C-contiguous NumPy array, or a contiguous Torch tensor exemplar.
+        Specialization keys describe element/layout ABI but do not include
+        runtime shape extents.
         """
         kt = KernelTemplate(kernel_fn, self)
         yield kt
