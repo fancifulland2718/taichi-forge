@@ -22,7 +22,7 @@ Taichi supports the following quantized data types:
 
 ### Quantized integers
 
-Quantized integers in Taichi are represented in the [two's complement](https://en.wikipedia.org/wiki/Two's_complement) format but can contain arbitrary number of bits.
+Quantized integers in Taichi are represented in the [two's complement](https://en.wikipedia.org/wiki/Two's_complement) format. Taichi Forge's public constructor accepts widths from 1 through 32 bits; wider types are rejected before backend compilation.
 
 - To define a 10-bit signed integer type:
 

@@ -1418,6 +1418,11 @@ def _make_arg_ndarray(kwargs: Dict[str, Any]):
             f"Tag ArgKind.NDARRAY requires a concrete scalar, vector, matrix, "
             f"or struct element type, but found {dtype}."
         )
+    if descriptor.category == "tensor" and len(descriptor.shape) not in (1, 2):
+        raise TaichiRuntimeError(
+            "Graph ndarray tensor elements support vector (rank 1) and "
+            f"matrix (rank 2) types only, but got shape {descriptor.shape}."
+        )
     if descriptor.category == "struct":
         raise TaichiRuntimeError(
             "Graph StructNdarray arguments are not supported by the current "

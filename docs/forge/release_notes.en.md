@@ -144,6 +144,12 @@ retroactively attributed to the 0.5.0 artifact:
   contracts rather than Python object identities. The 0.5.x flat Matrix and
   nested symbolic-list adapters remain accepted; genuinely mismatched rank-2
   shapes are rejected, and the 128-byte runtime limit is checked before copying.
+- Unsupported rank>2 ndarray elements and out-of-contract quant widths now fail
+  in Python/type validation. Quant float mirrors its native exp/significand and
+  f32-compute limits without C++ assertions; arbitrary-stride external arrays
+  remain explicit rejections. Graph texture descriptors validate dimension and
+  RW format before compilation. LLVM 20 signed constants now preserve their
+  fixed-width bit patterns instead of aborting on signed quant host access.
 
 ## 0.1.0
 

@@ -60,6 +60,29 @@ def test_matrix_arg_uses_canonical_tensor_shape():
     assert tuple(matrix_arg.element_dtype().shape()) == (2, 4)
 
 
+def test_rank_three_ndarray_tensor_descriptor_rejected_early():
+    tensor_type = ti_core.get_type_factory_instance().get_tensor_type(
+        [2, 3, 4], ti.f32
+    )
+    with pytest.raises(ValueError, match="rank 1.*rank 2"):
+        ti.types.ndarray(dtype=tensor_type, ndim=1)
+    with pytest.raises(TaichiRuntimeError, match="rank 1.*rank 2"):
+        ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY,
+            "tensor_arg",
+            tensor_type,
+            ndim=1,
+        )
+    with pytest.raises(RuntimeError, match="rank-1 vector.*rank-2 matrix"):
+        ti_core.Arg(
+            ti.graph.ArgKind.NDARRAY,
+            "tensor_arg",
+            tensor_type,
+            1,
+            [],
+        )
+
+
 def test_legacy_matrix_symbolic_arg_adapter_is_bounded():
     from taichi_forge.graph._graph import flatten_args
 
@@ -180,6 +203,43 @@ def test_graph_matrix_injection_cache_uses_structural_key():
     assert first[0] is second[0]
     assert first[1] == 1
     assert second[1] == 2
+
+
+@test_utils.test(arch=ti.cpu)
+def test_graph_rwtexture_descriptor_mismatch_rejected_before_compile():
+    from taichi_forge.aot.utils import produce_injected_args_for_graph
+
+    @ti.kernel
+    def write(
+        tex: ti.types.rw_texture(
+            num_dimensions=2, fmt=ti.Format.r32f, lod=0
+        ),
+    ):
+        pass
+
+    bad_format = ti.graph.Arg(
+        ti.graph.ArgKind.RWTEXTURE,
+        "tex",
+        ndim=2,
+        fmt=ti.Format.rgba8,
+    )
+    with pytest.raises(
+        TaichiCompilationError,
+        match="RWTexture format mismatch",
+    ):
+        produce_injected_args_for_graph(write._primal, (bad_format,))
+
+    bad_ndim = ti.graph.Arg(
+        ti.graph.ArgKind.RWTEXTURE,
+        "tex",
+        ndim=3,
+        fmt=ti.Format.r32f,
+    )
+    with pytest.raises(
+        TaichiCompilationError,
+        match="RWTexture descriptor mismatch",
+    ):
+        produce_injected_args_for_graph(write._primal, (bad_ndim,))
 
 
 @test_utils.test(arch=supported_archs_cgraph)

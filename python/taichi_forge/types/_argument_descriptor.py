@@ -185,8 +185,14 @@ def describe_symbolic_arg(symbolic_arg):
             "texture", ndim=len(symbolic_arg.texture_shape)
         )
     if tag == _ti_core.ArgKind.RWTEXTURE:
+        from taichi_forge.types.texture_type import TY_CH2FORMAT
+
         return ArgumentTypeDescriptor(
-            "rw_texture", ndim=len(symbolic_arg.texture_shape)
+            "rw_texture",
+            ndim=len(symbolic_arg.texture_shape),
+            fmt=TY_CH2FORMAT[
+                (symbolic_arg.channel_format(), symbolic_arg.num_channels)
+            ],
         )
     return ArgumentTypeDescriptor(
         "scalar", describe_element_type(symbolic_arg.element_dtype())

@@ -6,6 +6,27 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+def test_quant_type_creation_limits_fail_in_python():
+    with pytest.raises(ValueError, match=r"bits.*\[1, 32\]"):
+        ti.types.quant.int(bits=33)
+    with pytest.raises(ValueError, match=r"fixed-point bits.*\[1, 32\]"):
+        ti.types.quant.fixed(bits=0)
+    with pytest.raises(
+        ValueError, match=r"exponent bits.*\[1, 8\]"
+    ):
+        ti.types.quant.float(exp=9, frac=10)
+    with pytest.raises(
+        ValueError, match=r"significand bits.*\[1, 24\]"
+    ):
+        ti.types.quant.float(exp=5, frac=25, signed=True)
+    with pytest.raises(
+        ValueError, match=r"significand bits.*\[1, 23\]"
+    ):
+        ti.types.quant.float(exp=5, frac=24, signed=False)
+    with pytest.raises(ValueError, match=r"require compute=ti.f32"):
+        ti.types.quant.float(exp=5, frac=10, compute=ti.f64)
+
+
 @pytest.mark.parametrize("max_num_bits", [32, 64])
 @test_utils.test(require=ti.extension.quant)
 def test_quant_float_unsigned(max_num_bits):

@@ -82,6 +82,18 @@ class NdarrayType:
         self.needs_grad = needs_grad
         self.boundary = to_boundary_enum(boundary)
         self._element_descriptor = describe_element_type(self.dtype)
+        if (
+            self._element_descriptor.category == "tensor"
+            and (
+                self._element_descriptor.shape is None
+                or len(self._element_descriptor.shape) not in (1, 2)
+            )
+        ):
+            raise ValueError(
+                "Ndarray tensor elements support vector (rank 1) and matrix "
+                f"(rank 2) types only, but got shape "
+                f"{self._element_descriptor.shape}."
+            )
 
     def check_matched(self, ndarray_type: NdarrayTypeMetadata, arg_name: str):
         actual_descriptor = describe_element_type(ndarray_type.element_type)

@@ -3,11 +3,26 @@ This module defines generators of quantized types.
 For more details, read https://yuanming.taichi_forge.graphics/publication/2021-quantaichi/quantaichi.pdf.
 """
 
+import numbers
+
 from taichi_forge._lib.utils import ti_python_core as _ti_python_core
 from taichi_forge.lang import impl
-from taichi_forge.types.primitive_types import i32
+from taichi_forge.types.primitive_types import f32, i32
 
 _type_factory = _ti_python_core.get_type_factory_instance()
+
+
+def _validate_bit_count(name, value, maximum):
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, numbers.Integral)
+        or value < 1
+        or value > maximum
+    ):
+        raise ValueError(
+            f"Quantized {name} must be an integer in [1, {maximum}], "
+            f"but got {value}."
+        )
 
 
 def int(bits, signed=True, compute=None):  # pylint: disable=W0622
@@ -21,6 +36,7 @@ def int(bits, signed=True, compute=None):  # pylint: disable=W0622
     Returns:
         DataType: The specified type.
     """
+    _validate_bit_count("bits", bits, 32)
     if compute is None:
         compute = impl.get_runtime().default_ip if signed else impl.get_runtime().default_up
     if isinstance(compute, _ti_python_core.DataType):
@@ -41,11 +57,11 @@ def fixed(bits, signed=True, max_value=1.0, compute=None, scale=None):
     Returns:
         DataType: The specified type.
     """
+    _validate_bit_count("fixed-point bits", bits, 32)
     if compute is None:
         compute = impl.get_runtime().default_fp
     if isinstance(compute, _ti_python_core.DataType):
         compute = compute.get_ptr()
-    # TODO: handle cases with bits > 32
     underlying_type = int(bits=bits, signed=signed, compute=i32)
     if scale is None:
         if signed:
@@ -67,13 +83,20 @@ def float(exp, frac, signed=True, compute=None):  # pylint: disable=W0622
     Returns:
         DataType: The specified type.
     """
+    _validate_bit_count("floating-point exponent bits", exp, 8)
+    maximum_frac = 24 if signed else 23
+    _validate_bit_count("floating-point fraction/significand bits", frac, maximum_frac)
     if compute is None:
         compute = impl.get_runtime().default_fp
+    if compute != f32:
+        raise ValueError(
+            "Quantized floating-point types, including shared-exponent "
+            "fields, require compute=ti.f32."
+        )
     if isinstance(compute, _ti_python_core.DataType):
         compute = compute.get_ptr()
     # Exponent is always unsigned
     exp_type = int(bits=exp, signed=False, compute=i32)
-    # TODO: handle cases with frac > 32
     frac_type = int(bits=frac, signed=signed, compute=i32)
     return _type_factory.get_quant_float_type(frac_type, exp_type, compute)
 

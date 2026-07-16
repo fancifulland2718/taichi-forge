@@ -104,6 +104,23 @@ channel width. Values written to a 16-bit image must remain representable by
 that image format. Three-channel RGB storage images are not part of this
 contract.
 
+### Argument and quantized-type boundaries
+
+- Ndarray tensor elements are scalar, rank-1 vector, or rank-2 matrix values.
+  Arbitrary rank tensor elements are rejected by ordinary kernel annotations,
+  Graph, and low-level Graph Args before backend compilation. StructNdarray is
+  supported by ordinary kernels but not by the current serialized Graph schema.
+- Quantized integer and fixed-point widths are in `[1, 32]`. Quantized float
+  exponent width is in `[1, 8]`; its significand field is at most 24 bits when
+  signed and 23 bits when unsigned, and its compute type must be `ti.f32`.
+  A `ti.f64` quant-float/shared-exponent contract is not supported.
+- External NumPy/Torch arrays must be contiguous. C-contiguous values are used
+  directly; Fortran-contiguous NumPy arrays use an explicit copy/copy-back
+  adapter. Arbitrary-stride views are rejected instead of reaching a backend
+  `TI_NOT_IMPLEMENTED` path.
+- Graph sampled textures validate dimension, and Graph RWTextures validate both
+  dimension and format against the kernel annotation before compilation.
+
 ### `ti.compile_profile(clear_on_enter=True)`
 
 Location: `taichi_forge.tools.compile_profile`; exported as

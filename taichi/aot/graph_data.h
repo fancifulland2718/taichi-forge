@@ -99,9 +99,16 @@ struct Arg {
     }
     DataType scalar_dtype = dtype;
     if (dtype->is<TensorType>()) {
+      TI_ERROR_IF(tag == ArgKind::kScalar,
+                  "Scalar Graph argument {} cannot use a TensorType dtype",
+                  name);
       TI_ERROR_IF(tag == ArgKind::kTexture || tag == ArgKind::kRWTexture,
                   "Texture Graph arguments cannot use a TensorType dtype");
       const auto inferred_shape = dtype->as<TensorType>()->get_shape();
+      TI_ERROR_IF(inferred_shape.empty() || inferred_shape.size() > 2,
+                  "Graph argument {} supports rank-1 vector and rank-2 matrix "
+                  "tensor types only, but got shape {}",
+                  name, inferred_shape);
       TI_ERROR_IF(!this->element_shape.empty() &&
                       this->element_shape != inferred_shape,
                   "Graph argument {} specifies conflicting tensor shapes",

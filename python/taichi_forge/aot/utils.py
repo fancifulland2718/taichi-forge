@@ -86,8 +86,31 @@ def _produce_injected_arg(arg, symbolic_arg=None, has_symbolic_arg=False):
         return ScalarNdarray(dtype, shape)
 
     if isinstance(anno, RWTextureType):
+        if has_symbolic_arg:
+            expected = describe_annotation(anno)
+            actual = describe_symbolic_arg(symbolic_arg)
+            if actual.kind != "rw_texture" or actual.ndim != expected.ndim:
+                raise TaichiCompilationError(
+                    f"RWTexture descriptor mismatch for argument {arg.name}: "
+                    f"expected ndim={expected.ndim}, got {actual.kind} "
+                    f"ndim={actual.ndim}."
+                )
+            if actual.fmt != expected.fmt:
+                raise TaichiCompilationError(
+                    f"RWTexture format mismatch for argument {arg.name}: "
+                    f"expected {expected.fmt}, got {actual.fmt}."
+                )
         return Texture(anno.fmt, (2,) * anno.num_dimensions)
     if isinstance(anno, TextureType):
+        if has_symbolic_arg:
+            expected = describe_annotation(anno)
+            actual = describe_symbolic_arg(symbolic_arg)
+            if actual.kind != "texture" or actual.ndim != expected.ndim:
+                raise TaichiCompilationError(
+                    f"Texture descriptor mismatch for argument {arg.name}: "
+                    f"expected ndim={expected.ndim}, got {actual.kind} "
+                    f"ndim={actual.ndim}."
+                )
         return Texture(Format.rgba8, (2,) * anno.num_dimensions)
     if isinstance(anno, MatrixType):
         if has_symbolic_arg:

@@ -110,6 +110,11 @@
   cache 按相同结构合同复用，不再依赖 Python 对象 identity。0.5.x 的 flat Matrix 和嵌套
   symbolic-list adapter 继续兼容；真实的 rank-2 shape 不匹配会明确拒绝，128-byte 运行时
   上限也会在复制数据前检查。
+- 不支持的 rank>2 ndarray element 与超出合同的 quant width 现在由 Python/type validation
+  fail-fast。quant float 会按 native exp/significand 与 f32-compute 边界明确报错，不再触发 C++
+  assertion；任意 stride 外部 array 继续明确拒绝。Graph texture descriptor 会在编译前校验
+  dimension 和 RW format。LLVM 20 signed constant 现在保留固定宽度 bit pattern，signed quant
+  host access 不再导致进程 abort。
 
 ## 0.1.0
 

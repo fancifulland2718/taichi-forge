@@ -89,6 +89,20 @@ Vulkan storage image 的 load/store 现在按声明格式的 shader-visible samp
 这里的 32-bit 类型是 shader ABI，不会改变 image 的物理通道宽度；写入 16-bit image 的值
 仍须落在对应格式可表示的范围内。三通道 RGB storage image 不属于本合同。
 
+### 参数与量化类型边界
+
+- ndarray tensor element 只支持 scalar、rank-1 vector 和 rank-2 matrix。任意 rank tensor
+  element 会在普通 kernel annotation、Graph 和低层 Graph Arg 入口统一拒绝，不会进入 backend
+  编译。StructNdarray 受普通 kernel 支持，但当前序列化 Graph schema 尚不支持。
+- quant integer/fixed-point width 范围为 `[1, 32]`。quant float exponent width 范围为
+  `[1, 8]`；significand field 在 signed 时最多 24 bits、unsigned 时最多 23 bits，compute type
+  必须是 `ti.f32`。不支持 `ti.f64` quant-float/shared-exponent 合同。
+- 外部 NumPy/Torch array 必须 contiguous。C-contiguous value 直接使用；Fortran-contiguous
+  NumPy array 走显式 copy/copy-back adapter；任意 stride view 会在进入 backend
+  `TI_NOT_IMPLEMENTED` 路径之前明确拒绝。
+- Graph sampled texture 会校验 dimension；Graph RWTexture 会在编译前同时校验 dimension 与
+  format 是否匹配 kernel annotation。
+
 ### `ti.compile_profile(clear_on_enter=True)`
 
 位置：`taichi_forge.tools.compile_profile`，导出为 `ti.compile_profile`。返回类型也导出为
