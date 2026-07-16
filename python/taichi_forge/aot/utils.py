@@ -1,4 +1,3 @@
-import weakref
 from typing import Any
 
 from taichi_forge.lang._ndarray import Ndarray, ScalarNdarray
@@ -170,34 +169,21 @@ def produce_injected_args_for_graph(
             "Graph template_args must be a dict keyed by kernel argument name"
         )
 
+    template_keys = frozenset(template_args)
+    symbolic_key = tuple(
+        describe_symbolic_arg(arg).structural_key()
+        for arg in symbolic_args
+    )
     cache = getattr(kernel, "_graph_template_injection_cache", None)
-    symbolic_refs_match = False
-    if cache is not None and len(cache[1]) == len(symbolic_args):
-        symbolic_refs = cache[1]
-        if not symbolic_args:
-            symbolic_refs_match = True
-        elif len(symbolic_args) == 1:
-            symbolic_refs_match = (
-                symbolic_refs[0]() is symbolic_args[0]
-            )
-        else:
-            symbolic_refs_match = all(
-                symbolic_ref() is symbolic_arg
-                for symbolic_ref, symbolic_arg in zip(
-                    symbolic_refs, symbolic_args
-                )
-            )
     if (
         cache is not None
-        and cache[0] == template_args.keys()
-        and symbolic_refs_match
+        and cache[0] == template_keys
+        and cache[1] == symbolic_key
     ):
         return [
             template_args[value] if kind == "template" else value
             for kind, value in cache[2]
         ]
-
-    template_keys = frozenset(template_args)
 
     arguments_by_name = {arg.name: arg for arg in kernel.arguments}
     unknown = sorted(set(template_args) - set(arguments_by_name))
@@ -267,22 +253,17 @@ def produce_injected_args_for_graph(
         for arg in kernel.arguments
     )
     if cacheable:
-        try:
-            symbolic_refs = tuple(weakref.ref(arg) for arg in symbolic_args)
-        except TypeError:
-            pass
-        else:
-            actions = tuple(
-                ("template", arg.name)
-                if isinstance(arg.annotation, template)
-                else ("static", injected)
-                for arg, injected in zip(kernel.arguments, injected_args)
-            )
-            kernel._graph_template_injection_cache = (
-                template_keys,
-                symbolic_refs,
-                actions,
-            )
+        actions = tuple(
+            ("template", arg.name)
+            if isinstance(arg.annotation, template)
+            else ("static", injected)
+            for arg, injected in zip(kernel.arguments, injected_args)
+        )
+        kernel._graph_template_injection_cache = (
+            template_keys,
+            symbolic_key,
+            actions,
+        )
     return injected_args
 
 

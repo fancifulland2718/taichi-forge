@@ -895,16 +895,21 @@ def gen_cpp_kernel(kernel_fn, args, *, template_args=None):
 
 
 def flatten_args(args):
-    unzipped_args = []
-    # Tuple for matrix args
-    # FIXME remove this when native Matrix type is ready
+    """Normalize symbolic args while accepting the pre-native Matrix adapter."""
+
+    normalized_args = []
     for arg in args:
         if isinstance(arg, list):
-            for sublist in arg:
-                unzipped_args.extend(sublist)
+            if not all(isinstance(row, (list, tuple)) for row in arg):
+                raise TaichiRuntimeError(
+                    "Legacy Matrix Graph arguments must be a nested list of "
+                    "symbolic scalar arguments"
+                )
+            for row in arg:
+                normalized_args.extend(row)
         else:
-            unzipped_args.append(arg)
-    return unzipped_args
+            normalized_args.append(arg)
+    return normalized_args
 
 
 def _runtime_arg_names(args):
@@ -1432,9 +1437,12 @@ def _make_arg_matrix(kwargs: Dict[str, Any]):
     _check_args(kwargs, allowed_kwargs)
     name = kwargs["name"]
     dtype = kwargs["dtype"]
-    if not isinstance(dtype, MatrixType):
+    descriptor = describe_element_type(dtype)
+    if not isinstance(dtype, MatrixType) or descriptor.category != "tensor":
         raise TaichiRuntimeError(f"Tag ArgKind.MATRIX must specify matrix type, but got {dtype}.")
-    return _ti_core.Arg(ArgKind.MATRIX, f"{name}", dtype.dtype, 0, [dtype.n, dtype.m])
+    return _ti_core.Arg(
+        ArgKind.MATRIX, f"{name}", descriptor.logical_type, 0, []
+    )
 
 
 def _make_arg_texture(kwargs: Dict[str, Any]):

@@ -1818,21 +1818,11 @@ void CompiledGraph::init_runtime_context(
                   "field_dim={} but got an ndarray with field_dim={}",
                   symbolic_arg.name, symbolic_arg.field_dim, arr->shape.size());
 
-      // CGraph uses aot::Arg as symbolic argument, which represents
-      // TensorType via combination of element_shape and PrimitiveTypeID
-      // Therefore we only check for element_type for now.
-      //
-      // TODO(zhanlue): Replace all "element_shape + PrimitiveType" use cases
-      // with direct use of "TensorType",
-      //                In the end, "element_shape" should only appear inside
-      //                TensorType and nowhere else.
-      //
-      //                This refactor includes aot::Arg, kernel::Arg,
-      //                MetalDataType, and more...
-      DataType symbolic_arg_primitive_dtype = symbolic_arg.dtype();
-      if (symbolic_arg.dtype()->is<TensorType>()) {
+      DataType symbolic_arg_element_dtype = symbolic_arg.element_dtype();
+      DataType symbolic_arg_primitive_dtype = symbolic_arg_element_dtype;
+      if (symbolic_arg_element_dtype->is<TensorType>()) {
         symbolic_arg_primitive_dtype =
-            symbolic_arg.dtype()->cast<TensorType>()->get_element_type();
+            symbolic_arg_element_dtype->cast<TensorType>()->get_element_type();
       }
 
       DataType arr_primitive_dtype = arr->dtype;
@@ -1883,12 +1873,48 @@ void CompiledGraph::init_runtime_context(
       TI_ASSERT(ival.tag == aot::ArgKind::kMatrix);
       Matrix *mat = reinterpret_cast<Matrix *>(ival.val);
 
-      uint32_t symbolic_arg_size = (uint32_t)(symbolic_arg.element_shape[0] *
-                                              symbolic_arg.element_shape[1]);
+      TI_ERROR_IF(symbolic_arg.element_shape.empty() ||
+                      symbolic_arg.element_shape.size() > 2,
+                  "Matrix argument {} has unsupported element shape {}",
+                  symbolic_arg.name, symbolic_arg.element_shape);
+      uint64_t symbolic_arg_size = 1;
+      for (int dimension : symbolic_arg.element_shape) {
+        TI_ERROR_IF(dimension <= 0,
+                    "Matrix argument {} has invalid element shape {}",
+                    symbolic_arg.name, symbolic_arg.element_shape);
+        symbolic_arg_size *= static_cast<uint64_t>(dimension);
+      }
       TI_ERROR_IF(symbolic_arg_size != mat->length(),
                   "Dispatch node is compiled for argument {} with "
                   "size={} but got a matrix with size={}",
                   symbolic_arg.name, symbolic_arg_size, mat->length());
+      if (mat->ndim() != 0) {
+        bool shape_matches = mat->ndim() == symbolic_arg.element_shape.size();
+        if (shape_matches) {
+          for (uint32_t axis = 0; axis < mat->ndim(); ++axis) {
+            shape_matches &=
+                mat->shape(axis) == symbolic_arg.element_shape[axis];
+          }
+        }
+        // AOT graphs produced before the native vector descriptor encoded a
+        // vector as [N, 1]. Keep that 0.5.x representation readable while new
+        // Graph Args use the canonical rank-1 [N] tensor shape.
+        const bool legacy_vector_shape =
+            mat->ndim() == 1 && symbolic_arg.element_shape.size() == 2 &&
+            symbolic_arg.element_shape[1] == 1 &&
+            mat->shape(0) == symbolic_arg.element_shape[0];
+        // Matrix values historically accepted a flat ti.Matrix([...]) whose
+        // length matched an NxM annotation. Keep that source-compatible form,
+        // but reject a genuinely rank-2 value with transposed dimensions.
+        const bool legacy_flat_matrix =
+            mat->ndim() == 1 && symbolic_arg.element_shape.size() == 2 &&
+            mat->shape(0) == symbolic_arg_size;
+        TI_ERROR_IF(!shape_matches && !legacy_vector_shape &&
+                        !legacy_flat_matrix,
+                    "Dispatch node is compiled for Matrix argument {} with "
+                    "shape={} but got rank {} runtime data",
+                    symbolic_arg.name, symbolic_arg.element_shape, mat->ndim());
+      }
       TI_ERROR_IF(mat->length() * data_type_size(mat->dtype()) > 128,
                   "Matrix size={} is out of bound",
                   mat->length() * data_type_size(mat->dtype()));

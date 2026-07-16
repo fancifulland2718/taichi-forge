@@ -106,6 +106,10 @@
   vector、matrix、ndarray、texture 与 StructNdarray。Graph ndarray metadata 会端到端
   保留 tensor element type；StructNdarray 继续受普通 kernel 支持，但在序列化 Graph
   schema 能表达结构化 element 之前会由 Graph 明确拒绝。
+- Matrix/Vector Graph 参数现在分别使用规范的 rank-2/rank-1 tensor shape；Graph injection
+  cache 按相同结构合同复用，不再依赖 Python 对象 identity。0.5.x 的 flat Matrix 和嵌套
+  symbolic-list adapter 继续兼容；真实的 rank-2 shape 不匹配会明确拒绝，128-byte 运行时
+  上限也会在复制数据前检查。
 
 ## 0.1.0
 

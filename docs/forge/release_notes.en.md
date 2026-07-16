@@ -139,6 +139,11 @@ retroactively attributed to the 0.5.0 artifact:
   arguments. Graph ndarray metadata preserves tensor element types end to end;
   StructNdarray remains supported by ordinary kernels and is rejected explicitly
   by Graph until its serialized schema can represent structured elements.
+- Matrix and vector Graph arguments now use canonical rank-2 and rank-1 tensor
+  shapes internally, and Graph injection caches reuse equal structural
+  contracts rather than Python object identities. The 0.5.x flat Matrix and
+  nested symbolic-list adapters remain accepted; genuinely mismatched rank-2
+  shapes are rejected, and the 128-byte runtime limit is checked before copying.
 
 ## 0.1.0
 

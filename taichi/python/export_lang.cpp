@@ -2900,6 +2900,18 @@ void export_lang(py::module &m) {
         std::vector<Matrix> matrices;
         // Reserve to avoid changes in element addresses
         matrices.reserve(self->args.size());
+        auto matrix_dimensions = [](const py::buffer_info &buffer_info) {
+          TI_ERROR_IF(buffer_info.ndim < 1 || buffer_info.ndim > 2,
+                      "Graph Matrix runtime arguments must have rank 1 or 2, "
+                      "but got rank {}",
+                      buffer_info.ndim);
+          return std::array<uint32_t, 3>{
+              static_cast<uint32_t>(buffer_info.ndim),
+              static_cast<uint32_t>(buffer_info.shape[0]),
+              buffer_info.ndim == 2
+                  ? static_cast<uint32_t>(buffer_info.shape[1])
+                  : 0};
+        };
         for (const auto &[arg_name, arg] : self->args) {
           auto tag = arg.tag;
           TI_ASSERT(pyargs.contains(arg_name.c_str()));
@@ -2918,12 +2930,19 @@ void export_lang(py::module &m) {
             auto type_id = arg.dtype()->as<PrimitiveType>()->type;
             switch (type_id) {
               case PrimitiveTypeID::f16: {
-                auto arr = pyarg.cast<py::array_t<float32>>();
+                auto arr = pyarg.cast<py::array_t<
+                    float32, py::array::c_style | py::array::forcecast>>();
                 py::buffer_info buffer_info = arr.request();
                 auto length = buffer_info.size;
                 auto ptr = reinterpret_cast<intptr_t>(buffer_info.ptr);
+                auto dimensions = matrix_dimensions(buffer_info);
+                auto byte_size = sizeof(uint16) * length;
+                TI_ERROR_IF(byte_size > 128,
+                            "Graph Matrix runtime argument {} uses {} bytes; "
+                            "the limit is 128 bytes",
+                            arg_name, byte_size);
 
-                std::unique_ptr<char[]> data(new char[128]);
+                std::unique_ptr<char[]> data(new char[byte_size]);
                 for (uint32_t i = 0; i < length; i++) {
                   uint16 half = fp16_ieee_from_fp32_value(
                       reinterpret_cast<float32 *>(ptr)[i]);
@@ -2933,25 +2952,34 @@ void export_lang(py::module &m) {
 
                 matrices.emplace_back(Matrix(
                     length, arg.dtype(),
-                    reinterpret_cast<intptr_t>(matrix_buffers.back().get())));
+                    reinterpret_cast<intptr_t>(matrix_buffers.back().get()),
+                    dimensions[0], dimensions[1], dimensions[2]));
                 args.insert({arg_name, aot::IValue::create(matrices.back())});
                 break;
               }
 #define PER_C_TYPE(type, ctype)                                           \
   case PrimitiveTypeID::type: {                                           \
-    auto arr = pyarg.cast<py::array_t<ctype>>();                          \
+    auto arr = pyarg.cast<py::array_t<                                   \
+        ctype, py::array::c_style | py::array::forcecast>>();            \
     py::buffer_info buffer_info = arr.request();                          \
     auto length = buffer_info.size;                                       \
     auto ptr = reinterpret_cast<intptr_t>(buffer_info.ptr);               \
-                                                                          \
-    std::unique_ptr<char[]> data(new char[128]);                          \
+    auto dimensions = matrix_dimensions(buffer_info);                     \
+    auto byte_size = sizeof(ctype) * length;                              \
+    TI_ERROR_IF(byte_size > 128,                                          \
+                "Graph Matrix runtime argument {} uses {} bytes; the "    \
+                "limit is 128 bytes",                                    \
+                arg_name, byte_size);                                     \
+                                                                           \
+    std::unique_ptr<char[]> data(new char[byte_size]);                    \
     std::memcpy(data.get(), reinterpret_cast<char *>(ptr),                \
-                sizeof(ctype) * length);                                  \
+                byte_size);                                               \
     matrix_buffers.emplace_back(std::move(data));                         \
                                                                           \
     matrices.emplace_back(                                                \
         Matrix(length, arg.dtype(),                                       \
-               reinterpret_cast<intptr_t>(matrix_buffers.back().get()))); \
+               reinterpret_cast<intptr_t>(matrix_buffers.back().get()),   \
+               dimensions[0], dimensions[1], dimensions[2]));            \
     args.insert({arg_name, aot::IValue::create(matrices.back())});        \
     break;                                                                \
   }

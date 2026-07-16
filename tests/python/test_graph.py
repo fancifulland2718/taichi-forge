@@ -42,6 +42,39 @@ def test_ndarray_arg_tensor_descriptor_roundtrip():
     assert matrix_arg.element_dtype().element_type() == ti.i32
 
 
+def test_matrix_arg_uses_canonical_tensor_shape():
+    vector_arg = ti.graph.Arg(
+        ti.graph.ArgKind.MATRIX,
+        "vector_arg",
+        ti.types.vector(3, ti.f32),
+    )
+    assert tuple(vector_arg.element_shape) == (3,)
+    assert tuple(vector_arg.element_dtype().shape()) == (3,)
+
+    matrix_arg = ti.graph.Arg(
+        ti.graph.ArgKind.MATRIX,
+        "matrix_arg",
+        ti.types.matrix(2, 4, ti.i32),
+    )
+    assert tuple(matrix_arg.element_shape) == (2, 4)
+    assert tuple(matrix_arg.element_dtype().shape()) == (2, 4)
+
+
+def test_legacy_matrix_symbolic_arg_adapter_is_bounded():
+    from taichi_forge.graph._graph import flatten_args
+
+    entries = [
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, f"entry_{i}", ti.f32)
+        for i in range(4)
+    ]
+    assert flatten_args(([entries[:2], entries[2:]],)) == entries
+    with pytest.raises(
+        TaichiRuntimeError,
+        match="must be a nested list",
+    ):
+        flatten_args((entries,))
+
+
 def test_graph_struct_ndarray_descriptor_rejected_explicitly():
     element = ti.types.struct(value=ti.f32, index=ti.i32)
     with pytest.raises(
@@ -89,6 +122,64 @@ def test_ndarray_tensor_descriptor_runtime_binding():
     np.testing.assert_array_equal(
         matrices.to_numpy(), np.array([[[1, 2], [3, 4]]], dtype=np.int32)
     )
+
+
+@test_utils.test(arch=ti.cpu)
+def test_matrix_runtime_shape_is_not_flattened_by_element_count():
+    matrix_type = ti.types.matrix(2, 3, ti.i32)
+
+    @ti.kernel
+    def consume(value: matrix_type, out: ti.types.ndarray(ti.i32, ndim=1)):
+        out[0] = value[0, 0]
+
+    value_arg = ti.graph.Arg(
+        ti.graph.ArgKind.MATRIX, "value", matrix_type
+    )
+    out_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(consume, value_arg, out_arg)
+    graph = builder.compile()
+    out = ti.ndarray(ti.i32, shape=1)
+
+    with pytest.raises(RuntimeError, match="Matrix argument value with shape"):
+        graph.run(
+            {
+                "value": ti.Matrix([[1, 2], [3, 4], [5, 6]], ti.i32),
+                "out": out,
+            }
+        )
+
+
+@test_utils.test(arch=ti.cpu)
+def test_graph_matrix_injection_cache_uses_structural_key():
+    from taichi_forge.aot.utils import produce_injected_args_for_graph
+
+    vector_type = ti.types.vector(3, ti.i32)
+
+    @ti.kernel
+    def consume(value: vector_type, factor: ti.template()):
+        pass
+
+    first_arg = ti.graph.Arg(
+        ti.graph.ArgKind.MATRIX, "value", vector_type
+    )
+    second_arg = ti.graph.Arg(
+        ti.graph.ArgKind.MATRIX, "other_name", vector_type
+    )
+    first = produce_injected_args_for_graph(
+        consume._primal, (first_arg,), template_args={"factor": 1}
+    )
+    cache = consume._primal._graph_template_injection_cache
+    second = produce_injected_args_for_graph(
+        consume._primal, (second_arg,), template_args={"factor": 2}
+    )
+
+    assert cache[1] == consume._primal._graph_template_injection_cache[1]
+    assert first[0] is second[0]
+    assert first[1] == 1
+    assert second[1] == 2
 
 
 @test_utils.test(arch=supported_archs_cgraph)

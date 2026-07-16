@@ -56,6 +56,19 @@ class ElementTypeDescriptor:
         )
         return f"tensor{self.shape}<{scalar}>"
 
+    def structural_key(self):
+        scalar_key = (
+            self.scalar_type.to_string()
+            if self.scalar_type is not None
+            else None
+        )
+        logical_key = (
+            self.logical_type.to_string()
+            if self.category == "struct" and self.logical_type is not None
+            else None
+        )
+        return (self.category, scalar_key, self.shape, logical_key)
+
 
 @dataclass(frozen=True)
 class ArgumentTypeDescriptor:
@@ -66,6 +79,15 @@ class ArgumentTypeDescriptor:
     ndim: Optional[int] = None
     needs_grad: Optional[bool] = None
     fmt: object = None
+
+    def structural_key(self):
+        return (
+            self.kind,
+            self.element.structural_key() if self.element is not None else None,
+            self.ndim,
+            self.needs_grad,
+            str(self.fmt) if self.fmt is not None else None,
+        )
 
 
 def describe_element_type(dtype):
