@@ -126,7 +126,9 @@ MatrixOfMatrixPtrStmt::MatrixOfMatrixPtrStmt(const std::vector<Stmt *> &stmts,
 
 MatrixPtrStmt::MatrixPtrStmt(Stmt *origin_input,
                              Stmt *offset_input,
-                             const DebugInfo &dbg_info) {
+                             const DebugInfo &dbg_info,
+                             std::vector<Stmt *> component_indices)
+    : component_indices(std::move(component_indices)) {
   origin = origin_input;
   offset = offset_input;
   this->dbg_info = dbg_info;

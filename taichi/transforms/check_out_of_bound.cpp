@@ -1,14 +1,13 @@
 #include "taichi/ir/ir.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
+#include "taichi/ir/type_utils.h"
 #include "taichi/ir/visitors.h"
 #include "taichi/transforms/check_out_of_bound.h"
 #include "taichi/transforms/utils.h"
 #include <set>
 
 namespace taichi::lang {
-
-// TODO: also check RangeAssumptionStmt
 
 class CheckOutOfBound : public BasicStmtVisitor {
  public:
@@ -30,14 +29,13 @@ class CheckOutOfBound : public BasicStmtVisitor {
   }
 
   void visit(SNodeOpStmt *stmt) override {
-    if (stmt->ptr != nullptr) {
-      TI_ASSERT(stmt->ptr->is<GlobalPtrStmt>());
-      // We have already done the check on its ptr argument. No need to do
-      // anything here.
-      return;
-    }
-
-    // TODO: implement bound check here for other situations.
+    TI_ASSERT_INFO(stmt->ptr != nullptr,
+                   "SNodeOpStmt {} must carry a GlobalPtrStmt before access "
+                   "lowering",
+                   snode_op_type_name(stmt->op_type));
+    TI_ASSERT(stmt->ptr->is<GlobalPtrStmt>());
+    // The GlobalPtrStmt visitor checks every source index. There are no
+    // supported ptr-less SNodeOpStmt construction paths.
   }
 
   void visit(ExternalPtrStmt *stmt) override {
@@ -160,13 +158,109 @@ class CheckOutOfBound : public BasicStmtVisitor {
     set_done(stmt);
   }
 
-  // TODO: As offset information per dimension is lacking, only the accumulated
-  // index is checked.
+  void visit(RangeAssumptionStmt *stmt) override {
+    if (is_done(stmt)) {
+      return;
+    }
+
+    auto data_type = stmt->input->ret_type;
+    if (!data_type->is<PrimitiveType>() || !is_integral(data_type) ||
+        data_type_bits(data_type) > 32) {
+      // The value-diff analysis currently consumes i32-style ranges. Avoid
+      // manufacturing overflow-prone checks for i64/u64 until the hint itself
+      // has a wider arithmetic contract.
+      set_done(stmt);
+      return;
+    }
+
+    auto new_stmts = VecStatement();
+    auto widen_to_i64 = [&](Stmt *value) {
+      auto *cast = new_stmts.push_back<UnaryOpStmt>(
+          UnaryOpType::cast_value, value);
+      cast->cast_type = PrimitiveType::i64;
+      return cast;
+    };
+
+    auto *input = widen_to_i64(stmt->input);
+    auto *base = widen_to_i64(stmt->base);
+    auto *low = new_stmts.push_back<ConstStmt>(
+        TypedConstant(PrimitiveType::i64, (int64)stmt->low));
+    auto *high = new_stmts.push_back<ConstStmt>(
+        TypedConstant(PrimitiveType::i64, (int64)stmt->high));
+    auto *lower = new_stmts.push_back<BinaryOpStmt>(
+        BinaryOpType::add, base, low);
+    auto *upper = new_stmts.push_back<BinaryOpStmt>(
+        BinaryOpType::add, base, high);
+    auto *above_lower = new_stmts.push_back<BinaryOpStmt>(
+        BinaryOpType::cmp_ge, input, lower);
+    auto *below_upper = new_stmts.push_back<BinaryOpStmt>(
+        BinaryOpType::cmp_lt, input, upper);
+    auto *in_range = new_stmts.push_back<BinaryOpStmt>(
+        BinaryOpType::bit_and, above_lower, below_upper);
+
+    auto msg = fmt::format(
+        "(kernel={}) assume_in_range contract violated: expected "
+        "base{:+d} <= value < base{:+d}, got value=%d base=%d\n{}",
+        kernel_name, stmt->low, stmt->high, stmt->get_tb());
+    new_stmts.push_back<AssertStmt>(
+        in_range, msg, std::vector<Stmt *>{stmt->input, stmt->base});
+    modifier.insert_before(stmt, std::move(new_stmts));
+    set_done(stmt);
+  }
+
   void visit(MatrixPtrStmt *stmt) override {
     if (is_done(stmt) || !stmt->offset_used_as_index())
       return;
 
     auto const &matrix_shape = stmt->get_origin_shape();
+    if (stmt->component_indices.size() == matrix_shape.size()) {
+      auto new_stmts = VecStatement();
+      Stmt *result =
+          new_stmts.push_back<ConstStmt>(TypedConstant(true));
+      std::vector<Stmt *> args;
+
+      for (int i = 0; i < matrix_shape.size(); i++) {
+        auto *index = stmt->component_indices[i];
+        auto *zero = new_stmts.push_back<ConstStmt>(
+            TypedConstant(index->ret_type, 0));
+        auto *upper = new_stmts.push_back<ConstStmt>(
+            TypedConstant(index->ret_type, matrix_shape[i]));
+        auto *above_lower = new_stmts.push_back<BinaryOpStmt>(
+            BinaryOpType::cmp_ge, index, zero);
+        auto *below_upper = new_stmts.push_back<BinaryOpStmt>(
+            BinaryOpType::cmp_lt, index, upper);
+        auto *axis_in_range = new_stmts.push_back<BinaryOpStmt>(
+            BinaryOpType::bit_and, above_lower, below_upper);
+        result = new_stmts.push_back<BinaryOpStmt>(
+            BinaryOpType::bit_and, result, axis_in_range);
+        args.push_back(index);
+      }
+
+      std::string msg =
+          fmt::format("(kernel={}) Out of bound access to a [", kernel_name);
+      for (int i = 0; i < matrix_shape.size(); i++) {
+        if (i > 0) {
+          msg += ", ";
+        }
+        msg += std::to_string(matrix_shape[i]);
+      }
+      msg += "] matrix with indices [";
+      for (int i = 0; i < matrix_shape.size(); i++) {
+        if (i > 0) {
+          msg += ", ";
+        }
+        msg += "%d";
+      }
+      msg += "]\n" + stmt->get_tb();
+
+      new_stmts.push_back<AssertStmt>(result, msg, args);
+      modifier.insert_before(stmt, std::move(new_stmts));
+      set_done(stmt);
+      return;
+    }
+
+    // MatrixPtrStmts synthesized after frontend lowering only carry a linear
+    // offset. Keep the legacy total-size guard for those internal accesses.
     int max_valid_index = 1;
     for (int i = 0; i < matrix_shape.size(); i++) {
       max_valid_index *= matrix_shape[i];

@@ -27,6 +27,3 @@ def test_gathering():
 @test_utils.test(require=ti.extension.bls)
 def test_gathering_offset():
     bls_particle_grid(N=128, ppc=10, block_size=8, scatter=False, use_offset=True)
-
-
-# TODO: debug mode behavior of assume_in_range

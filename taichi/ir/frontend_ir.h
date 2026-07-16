@@ -683,6 +683,7 @@ class IndexExpression : public Expression {
   // index expressions ret_shape will be left empty.
   std::vector<ExprGroup> indices_group;
   std::vector<int> ret_shape;
+  bool preserve_component_indices{false};
 
   IndexExpression(const Expr &var,
                   const ExprGroup &indices,

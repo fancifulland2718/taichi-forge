@@ -2042,8 +2042,9 @@ def test_ndarray_oob_clamp():
             x3[i, j] = [[i, j], [i + 1, j + 1]]
     assert test_mat_arr(x3, -1, 0) == 1
     assert test_mat_arr(x3, 1, -1) == 2
-    assert test_mat_arr(x3, 2, 0) == 3
+    assert test_mat_arr(x3, 2, 0) == 2
     assert test_mat_arr(x3, 1, 2) == 3
+    assert test_mat_arr(x3, 0, 8) == 2
 
 
 @test_utils.test(arch=supported_archs_taichi_ndarray)

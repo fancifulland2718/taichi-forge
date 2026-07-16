@@ -727,7 +727,8 @@ Stmt *make_tensor_access_single_element(Expression::FlattenContext *ctx,
                                         Stmt *var_stmt,
                                         const ExprGroup &indices,
                                         const std::vector<int> &shape,
-                                        const DebugInfo &dbg_info) {
+                                        const DebugInfo &dbg_info,
+                                        bool preserve_component_indices) {
   bool needs_dynamic_index = false;
   for (int i = 0; i < (int)indices.size(); ++i) {
     if (!indices[i].is<ConstExpression>()) {
@@ -735,10 +736,14 @@ Stmt *make_tensor_access_single_element(Expression::FlattenContext *ctx,
     }
   }
   Stmt *offset_stmt = nullptr;
-  if (needs_dynamic_index) {
+  std::vector<Stmt *> component_indices;
+  if (preserve_component_indices || needs_dynamic_index) {
     offset_stmt = ctx->push_back<ConstStmt>(TypedConstant(0));
     for (int i = 0; i < (int)indices.size(); ++i) {
       auto index_stmt = flatten_rvalue(indices[i], ctx);
+      if (preserve_component_indices) {
+        component_indices.push_back(index_stmt);
+      }
       Stmt *shape_stmt = ctx->push_back<ConstStmt>(TypedConstant(shape[i]));
       Stmt *mul_stmt = ctx->push_back<BinaryOpStmt>(BinaryOpType::mul,
                                                     offset_stmt, shape_stmt);
@@ -753,7 +758,8 @@ Stmt *make_tensor_access_single_element(Expression::FlattenContext *ctx,
     }
     offset_stmt = ctx->push_back<ConstStmt>(TypedConstant(offset));
   }
-  return ctx->push_back<MatrixPtrStmt>(var_stmt, offset_stmt, dbg_info);
+  return ctx->push_back<MatrixPtrStmt>(
+      var_stmt, offset_stmt, dbg_info, std::move(component_indices));
 }
 
 Stmt *make_tensor_access(Expression::FlattenContext *ctx,
@@ -761,7 +767,8 @@ Stmt *make_tensor_access(Expression::FlattenContext *ctx,
                          const std::vector<ExprGroup> &indices_group,
                          DataType ret_type,
                          std::vector<int> shape,
-                         const DebugInfo &dbg_info) {
+                         const DebugInfo &dbg_info,
+                         bool preserve_component_indices) {
   auto var_stmt = flatten_lvalue(var, ctx);
   if (!var->is_lvalue()) {
     auto alloca_stmt = ctx->push_back<AllocaStmt>(var.get_rvalue_type());
@@ -776,12 +783,14 @@ Stmt *make_tensor_access(Expression::FlattenContext *ctx,
     std::vector<Stmt *> stmts;
     for (auto &indices : indices_group) {
       stmts.push_back(make_tensor_access_single_element(ctx, var_stmt, indices,
-                                                        shape, dbg_info));
+                                                        shape, dbg_info,
+                                                        preserve_component_indices));
     }
     return ctx->push_back<MatrixOfMatrixPtrStmt>(stmts, ret_type);
   }
   return make_tensor_access_single_element(ctx, var_stmt, indices_group[0],
-                                           shape, dbg_info);
+                                           shape, dbg_info,
+                                           preserve_component_indices);
 }
 
 void MatrixExpression::type_check(const CompileConfig *config) {
@@ -877,7 +886,7 @@ static void field_validation(FieldExpression *field_expr, int index_dim) {
   }
 }
 
-void IndexExpression::type_check(const CompileConfig *) {
+void IndexExpression::type_check(const CompileConfig *config) {
   // TODO: Change to type-based solution
   // Currently, dimension compatibility check happens in Python
   TI_ASSERT(indices_group.size() == std::accumulate(begin(ret_shape),
@@ -961,6 +970,20 @@ void IndexExpression::type_check(const CompileConfig *) {
                                  expr_type->to_string(), i));
     }
   }
+
+  preserve_component_indices =
+      config != nullptr && config->check_out_of_bound;
+  if (is_tensor()) {
+    Expr root = var;
+    while (root.is<IndexExpression>()) {
+      root = root.cast<IndexExpression>()->var;
+    }
+    if (root.is<ExternalTensorExpression>() &&
+        root.cast<ExternalTensorExpression>()->boundary ==
+            BoundaryMode::kClamp) {
+      preserve_component_indices = true;
+    }
+  }
 }
 
 void IndexExpression::flatten(FlattenContext *ctx) {
@@ -975,7 +998,8 @@ void IndexExpression::flatten(FlattenContext *ctx) {
   } else if (is_tensor()) {
     stmt = make_tensor_access(
         ctx, var, indices_group, ret_type,
-        var->ret_type.ptr_removed()->as<TensorType>()->get_shape(), dbg_info);
+        var->ret_type.ptr_removed()->as<TensorType>()->get_shape(), dbg_info,
+        preserve_component_indices);
   } else {
     ErrorEmitter(
         TaichiIndexError(), this,

@@ -1,5 +1,6 @@
 import math
 import operator
+import re
 
 import numpy as np
 import pytest
@@ -1291,13 +1292,13 @@ def test_matrix_oob():
     with pytest.raises(AssertionError, match=r"Out of bound access"):
         access_mat(-1, 0)
 
-    # TODO: As offset information per dimension is lacking, only the accumulated index is checked. These tests will not raise even if the individual indices are incorrect.
-    # with pytest.raises(AssertionError, match=r"Out of bound access"):
-    #    access_mat(0, 8)
-    # with pytest.raises(AssertionError, match=r"Out of bound access"):
-    #    access_mat(-1, 10)
-    # with pytest.raises(AssertionError, match=r"Out of bound access"):
-    #    access_mat(3, -1)
+    # These aliases have an in-range flattened offset but an invalid component.
+    with pytest.raises(AssertionError, match=re.escape("indices [0, 8]")):
+        access_mat(0, 8)
+    with pytest.raises(AssertionError, match=re.escape("indices [-1, 10]")):
+        access_mat(-1, 10)
+    with pytest.raises(AssertionError, match=re.escape("indices [3, -1]")):
+        access_mat(3, -1)
 
 
 @pytest.mark.parametrize("dtype", [ti.i32, ti.f32, ti.i64, ti.f64])

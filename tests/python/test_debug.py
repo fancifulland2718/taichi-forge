@@ -126,3 +126,22 @@ def test_not_out_of_bound_with_offset():
         x[3, 7] = 2
 
     func()
+
+
+@test_utils.test(require=ti.extension.assertion, debug=True, gdb_trigger=False)
+def test_assume_in_range_debug_contract():
+    result = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def assume(value: ti.i32, base: ti.i32):
+        result[None] = ti.assume_in_range(value, base, -2, 2)
+
+    assume(8, 10)
+    assert result[None] == 8
+    assume(11, 10)
+    assert result[None] == 11
+
+    with pytest.raises(AssertionError, match="assume_in_range contract violated"):
+        assume(7, 10)
+    with pytest.raises(AssertionError, match="assume_in_range contract violated"):
+        assume(12, 10)

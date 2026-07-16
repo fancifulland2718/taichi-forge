@@ -50,8 +50,6 @@ class HandleExternalPtrBound : public BasicStmtVisitor {
     }
   }
 
-  // TODO: As offset information per dimension is lacking, only the accumulated
-  // index is checked.
   void visit(MatrixPtrStmt *stmt) override {
     if (is_done(stmt) || !stmt->offset_used_as_index())
       return;
@@ -59,6 +57,39 @@ class HandleExternalPtrBound : public BasicStmtVisitor {
     if (stmt->origin->is<ExternalPtrStmt>() &&
         stmt->origin->as<ExternalPtrStmt>()->boundary == BoundaryMode::kClamp) {
       auto const &matrix_shape = stmt->get_origin_shape();
+      if (stmt->component_indices.size() == matrix_shape.size()) {
+        auto new_stmts = VecStatement();
+        Stmt *linear_index =
+            new_stmts.push_back<ConstStmt>(TypedConstant(0));
+
+        for (int i = 0; i < matrix_shape.size(); i++) {
+          auto *index = stmt->component_indices[i];
+          auto *zero = new_stmts.push_back<ConstStmt>(
+              TypedConstant(index->ret_type, 0));
+          auto *valid_upper = new_stmts.push_back<ConstStmt>(
+              TypedConstant(index->ret_type, matrix_shape[i] - 1));
+          auto *checked_index = new_stmts.push_back<BinaryOpStmt>(
+              BinaryOpType::max, index, zero);
+          checked_index = new_stmts.push_back<BinaryOpStmt>(
+              BinaryOpType::min, checked_index, valid_upper);
+          stmt->component_indices[i] = checked_index;
+
+          auto *axis_size = new_stmts.push_back<ConstStmt>(
+              TypedConstant(matrix_shape[i]));
+          linear_index = new_stmts.push_back<BinaryOpStmt>(
+              BinaryOpType::mul, linear_index, axis_size);
+          linear_index = new_stmts.push_back<BinaryOpStmt>(
+              BinaryOpType::add, linear_index, checked_index);
+        }
+
+        stmt->offset = linear_index;
+        modifier.insert_before(stmt, std::move(new_stmts));
+        set_done(stmt);
+        return;
+      }
+
+      // Internal MatrixPtrStmts created without source-axis metadata retain
+      // the legacy linear clamp as a conservative fallback.
       int max_valid_index = 1;
       for (int i = 0; i < matrix_shape.size(); i++) {
         max_valid_index *= matrix_shape[i];

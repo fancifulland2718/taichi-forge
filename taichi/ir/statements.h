@@ -525,8 +525,12 @@ class MatrixPtrStmt : public Stmt {
  public:
   Stmt *origin{nullptr};
   Stmt *offset{nullptr};
+  std::vector<Stmt *> component_indices;
 
-  MatrixPtrStmt(Stmt *, Stmt *, const DebugInfo & = DebugInfo());
+  MatrixPtrStmt(Stmt *,
+                Stmt *,
+                const DebugInfo & = DebugInfo(),
+                std::vector<Stmt *> component_indices = {});
 
   /* TODO(zhanlue/yi): Unify semantics of offset in MatrixPtrStmt
 
@@ -567,7 +571,7 @@ class MatrixPtrStmt : public Stmt {
 
   bool common_statement_eliminable() const override;
 
-  TI_STMT_DEF_FIELDS(ret_type, origin, offset);
+  TI_STMT_DEF_FIELDS(ret_type, origin, offset, component_indices);
   TI_DEFINE_ACCEPT_AND_CLONE
 };
 
