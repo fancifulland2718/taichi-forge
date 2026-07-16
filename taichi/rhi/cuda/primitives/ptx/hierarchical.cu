@@ -33,6 +33,20 @@ __device__ void block_barrier() {
   asm volatile("bar.sync 0;" : : : "memory");
 }
 
+__device__ u32 warp_ballot(i32 predicate) {
+  u32 result;
+  asm("{ .reg .pred p; setp.ne.s32 p, %1, 0; vote.ballot.b32 %0, p; }"
+      : "=r"(result)
+      : "r"(predicate));
+  return result;
+}
+
+__device__ u32 popc(u32 value) {
+  u32 result;
+  asm("popc.b32 %0, %1;" : "=r"(result) : "r"(value));
+  return result;
+}
+
 template <typename T>
 __device__ T shfl_up(T value, u32 delta);
 
@@ -1063,72 +1077,213 @@ DEFINE_RADIX_INIT_KERNEL(radix_init_u64, u64, u64)
 DEFINE_RADIX_INIT_KERNEL(radix_init_f64, double, u64)
 
 template <typename T>
-__device__ void radix_zero_flags_impl(const T *keys,
-                                      i32 *prefix,
-                                      u32 n,
-                                      u32 bit) {
-  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index < n) {
-    prefix[index] = ((keys[index] >> bit) & static_cast<T>(1)) == 0 ? 1 : 0;
+__device__ void radix_rank4_impl(const T *keys,
+                                 u32 *local_ranks,
+                                 u32 *block_histogram,
+                                 u32 n,
+                                 u32 block_count,
+                                 u32 shift,
+                                 u32 *warp_counts,
+                                 u32 *digit_chunk_bases) {
+  const u32 tid = threadIdx.x;
+  const u32 lane = tid & 31u;
+  const u32 warp = tid >> 5;
+  const u32 block = blockIdx.x;
+  const u32 block_begin = block * 1024u;
+  if (tid < 16u) {
+    digit_chunk_bases[tid] = 0u;
+  }
+  block_barrier();
+
+  for (u32 item = 0; item < 4u; ++item) {
+    const u32 index = block_begin + item * 256u + tid;
+    const bool valid = index < n;
+    const u32 digit =
+        valid ? static_cast<u32>((keys[index] >> shift) & static_cast<T>(15))
+              : 0u;
+    u32 peer_mask = 0u;
+    for (u32 candidate = 0; candidate < 16u; ++candidate) {
+      const u32 mask =
+          warp_ballot(valid && digit == candidate ? 1 : 0);
+      if (lane == 31u) {
+        warp_counts[warp * 16u + candidate] = popc(mask);
+      }
+      if (digit == candidate) {
+        peer_mask = mask;
+      }
+    }
+    block_barrier();
+
+    if (valid) {
+      u32 rank = digit_chunk_bases[digit] + 1u;
+      for (u32 previous_warp = 0; previous_warp < warp; ++previous_warp) {
+        rank += warp_counts[previous_warp * 16u + digit];
+      }
+      const u32 lane_mask = lane == 0u ? 0u : (1u << lane) - 1u;
+      rank += popc(peer_mask & lane_mask);
+      local_ranks[index] = rank;
+    }
+    block_barrier();
+
+    if (tid < 16u) {
+      u32 chunk_count = 0u;
+      for (u32 source_warp = 0; source_warp < 8u; ++source_warp) {
+        chunk_count += warp_counts[source_warp * 16u + tid];
+      }
+      digit_chunk_bases[tid] += chunk_count;
+      if (item == 3u) {
+        block_histogram[tid * block_count + block] =
+            digit_chunk_bases[tid];
+      }
+    }
+    block_barrier();
+  }
+}
+
+#define DEFINE_RADIX_RANK4_KERNEL(NAME, TYPE)                              \
+  extern "C" __global__ void NAME(const TYPE *keys, u32 *local_ranks,     \
+                                   u32 *block_histogram, u32 n,            \
+                                   u32 block_count, u32 shift) {           \
+    __shared__ u32 warp_counts[8 * 16];                                    \
+    __shared__ u32 digit_chunk_bases[16];                                  \
+    radix_rank4_impl(keys, local_ranks, block_histogram, n, block_count,   \
+                     shift, warp_counts, digit_chunk_bases);               \
+  }
+
+DEFINE_RADIX_RANK4_KERNEL(radix_rank4_u32, u32)
+DEFINE_RADIX_RANK4_KERNEL(radix_rank4_u64, u64)
+
+extern "C" __global__ void radix_hist_scan(u32 *histogram,
+                                           u32 count_per_digit,
+                                           u32 *tile_sums,
+                                           u32 tile_count) {
+  __shared__ u32 warp_sums[8];
+  __shared__ u32 tile_base;
+  const u32 tid = threadIdx.x;
+  const u32 lane = tid & 31u;
+  const u32 warp = tid >> 5;
+  const u32 digit = blockIdx.x / tile_count;
+  const u32 tile = blockIdx.x - digit * tile_count;
+  const u32 tile_begin = digit * count_per_digit + tile * 1024u;
+  if (tid == 0u) {
+    tile_base = 0u;
+  }
+  block_barrier();
+
+  for (u32 item = 0; item < 4u; ++item) {
+    const u32 chunk_base = tile_base;
+    block_barrier();
+    const u32 item_in_digit = tile * 1024u + item * 256u + tid;
+    const u32 index = tile_begin + item * 256u + tid;
+    u32 value =
+        item_in_digit < count_per_digit ? histogram[index] : 0u;
+    value = warp_inclusive_sum(value);
+    if (lane == 31u) {
+      warp_sums[warp] = value;
+    }
+    block_barrier();
+    if (warp == 0u) {
+      u32 warp_value = lane < 8u ? warp_sums[lane] : 0u;
+      warp_value = warp_inclusive_sum(warp_value);
+      if (lane < 8u) {
+        warp_sums[lane] = warp_value;
+      }
+    }
+    block_barrier();
+    if (warp > 0u) {
+      value += warp_sums[warp - 1u];
+    }
+    value += chunk_base;
+    if (item_in_digit < count_per_digit) {
+      histogram[index] = value;
+    }
+    if (tid == 255u) {
+      tile_base = value;
+    }
+    block_barrier();
+  }
+  if (tid == 255u && tile_sums != nullptr) {
+    tile_sums[digit * tile_count + tile] = tile_base;
+  }
+}
+
+extern "C" __global__ void radix_hist_uniform(u32 *histogram,
+                                              u32 count_per_digit,
+                                              const u32 *tile_prefix,
+                                              u32 tile_count) {
+  const u32 blocks_per_digit = (count_per_digit + 255u) / 256u;
+  const u32 digit = blockIdx.x / blocks_per_digit;
+  const u32 chunk = blockIdx.x - digit * blocks_per_digit;
+  const u32 item = chunk * 256u + threadIdx.x;
+  if (item >= count_per_digit) {
+    return;
+  }
+  const u32 tile = item >> 10;
+  if (tile != 0u) {
+    histogram[digit * count_per_digit + item] +=
+        tile_prefix[digit * tile_count + tile - 1u];
+  }
+}
+
+extern "C" __global__ void radix_digit_bases(const u32 *block_histogram,
+                                             u32 block_count,
+                                             u32 *digit_bases) {
+  __shared__ u32 totals[16];
+  const u32 digit = threadIdx.x;
+  if (digit < 16u) {
+    totals[digit] =
+        block_histogram[digit * block_count + block_count - 1u];
+  }
+  block_barrier();
+  if (digit < 16u) {
+    u32 base = 0u;
+    for (u32 previous = 0; previous < digit; ++previous) {
+      base += totals[previous];
+    }
+    digit_bases[digit] = base;
   }
 }
 
 template <typename T>
-__device__ void radix_scatter_impl(const T *keys_in,
-                                   const u32 *indices_in,
-                                   const i32 *prefix,
-                                   T *keys_out,
-                                   u32 *indices_out,
-                                   u32 n,
-                                   u32 bit) {
+__device__ void radix_scatter4_impl(const T *keys_in,
+                                    const u32 *indices_in,
+                                    const u32 *local_ranks,
+                                    const u32 *block_histogram,
+                                    const u32 *digit_bases,
+                                    T *keys_out,
+                                    u32 *indices_out,
+                                    u32 n,
+                                    u32 block_count,
+                                    u32 shift) {
   const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
   if (index >= n) {
     return;
   }
-  const u32 zero_count = static_cast<u32>(prefix[n - 1u]);
-  const u32 zeros_through = static_cast<u32>(prefix[index]);
-  const bool is_zero = ((keys_in[index] >> bit) & static_cast<T>(1)) == 0;
+  const T key = keys_in[index];
+  const u32 digit =
+      static_cast<u32>((key >> shift) & static_cast<T>(15));
+  const u32 block = index >> 10;
+  const u32 block_base =
+      block == 0u ? 0u
+                  : block_histogram[digit * block_count + block - 1u];
   const u32 output_index =
-      is_zero ? zeros_through - 1u : zero_count + index - zeros_through;
-  keys_out[output_index] = keys_in[index];
+      digit_bases[digit] + block_base + local_ranks[index] - 1u;
+  keys_out[output_index] = key;
   indices_out[output_index] = indices_in[index];
 }
 
-extern "C" __global__ void radix_zero_flags_u32(const u32 *keys,
-                                                i32 *prefix,
-                                                u32 n,
-                                                u32 bit) {
-  radix_zero_flags_impl(keys, prefix, n, bit);
-}
+#define DEFINE_RADIX_SCATTER4_KERNEL(NAME, TYPE)                            \
+  extern "C" __global__ void NAME(                                         \
+      const TYPE *keys_in, const u32 *indices_in, const u32 *local_ranks,   \
+      const u32 *block_histogram, const u32 *digit_bases, TYPE *keys_out,   \
+      u32 *indices_out, u32 n, u32 block_count, u32 shift) {                \
+    radix_scatter4_impl(keys_in, indices_in, local_ranks, block_histogram,  \
+                        digit_bases, keys_out, indices_out, n, block_count, \
+                        shift);                                             \
+  }
 
-extern "C" __global__ void radix_zero_flags_u64(const u64 *keys,
-                                                i32 *prefix,
-                                                u32 n,
-                                                u32 bit) {
-  radix_zero_flags_impl(keys, prefix, n, bit);
-}
-
-extern "C" __global__ void radix_scatter_u32(const u32 *keys_in,
-                                             const u32 *indices_in,
-                                             const i32 *prefix,
-                                             u32 *keys_out,
-                                             u32 *indices_out,
-                                             u32 n,
-                                             u32 bit) {
-  radix_scatter_impl(keys_in, indices_in, prefix, keys_out, indices_out, n,
-                     bit);
-}
-
-extern "C" __global__ void radix_scatter_u64(const u64 *keys_in,
-                                             const u32 *indices_in,
-                                             const i32 *prefix,
-                                             u64 *keys_out,
-                                             u32 *indices_out,
-                                             u32 n,
-                                             u32 bit) {
-  radix_scatter_impl(keys_in, indices_in, prefix, keys_out, indices_out, n,
-                     bit);
-}
+DEFINE_RADIX_SCATTER4_KERNEL(radix_scatter4_u32, u32)
+DEFINE_RADIX_SCATTER4_KERNEL(radix_scatter4_u64, u64)
 
 extern "C" __global__ void radix_gather_words(const u8 *src,
                                               u64 src_offset,

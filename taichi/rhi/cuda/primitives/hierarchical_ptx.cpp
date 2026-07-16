@@ -27,6 +27,9 @@ constexpr std::uint32_t kScanBlockShift = 8;
 constexpr std::uint32_t kScanTileShift = 10;
 constexpr std::uint32_t kReduceItemsPerThread = 4;
 constexpr std::uint32_t kReduceTileItems = kBlockDim * kReduceItemsPerThread;
+constexpr std::uint32_t kRadixBitsPerPass = 4;
+constexpr std::uint32_t kRadixDigits = 1u << kRadixBitsPerPass;
+constexpr std::uint32_t kRadixItemsPerBlock = 1024;
 constexpr std::uint64_t kWorkspaceVariant = 0x4452565054580001ull;
 
 struct KernelSet {
@@ -47,8 +50,11 @@ struct KernelSet {
   void *copy_i32{nullptr};
   void *bucket_scatter{nullptr};
   std::array<void *, 6> radix_init{};
-  std::array<void *, 2> radix_zero_flags{};
-  std::array<void *, 2> radix_scatter{};
+  std::array<void *, 2> radix_rank4{};
+  void *radix_hist_scan{nullptr};
+  void *radix_hist_uniform{nullptr};
+  void *radix_digit_bases{nullptr};
+  std::array<void *, 2> radix_scatter4{};
   void *radix_gather_words{nullptr};
   void *radix_copy_words{nullptr};
 };
@@ -172,14 +178,20 @@ void load_kernel_set_once() {
     driver.module_get_function(&kernel_set.radix_init[i], kernel_set.module,
                                radix_init_name.c_str());
   }
-  driver.module_get_function(&kernel_set.radix_zero_flags[0], kernel_set.module,
-                             "radix_zero_flags_u32");
-  driver.module_get_function(&kernel_set.radix_zero_flags[1], kernel_set.module,
-                             "radix_zero_flags_u64");
-  driver.module_get_function(&kernel_set.radix_scatter[0], kernel_set.module,
-                             "radix_scatter_u32");
-  driver.module_get_function(&kernel_set.radix_scatter[1], kernel_set.module,
-                             "radix_scatter_u64");
+  driver.module_get_function(&kernel_set.radix_rank4[0], kernel_set.module,
+                             "radix_rank4_u32");
+  driver.module_get_function(&kernel_set.radix_rank4[1], kernel_set.module,
+                             "radix_rank4_u64");
+  driver.module_get_function(&kernel_set.radix_hist_scan, kernel_set.module,
+                             "radix_hist_scan");
+  driver.module_get_function(&kernel_set.radix_hist_uniform,
+                             kernel_set.module, "radix_hist_uniform");
+  driver.module_get_function(&kernel_set.radix_digit_bases,
+                             kernel_set.module, "radix_digit_bases");
+  driver.module_get_function(&kernel_set.radix_scatter4[0], kernel_set.module,
+                             "radix_scatter4_u32");
+  driver.module_get_function(&kernel_set.radix_scatter4[1], kernel_set.module,
+                             "radix_scatter4_u64");
   driver.module_get_function(&kernel_set.radix_gather_words, kernel_set.module,
                              "radix_gather_words");
   driver.module_get_function(&kernel_set.radix_copy_words, kernel_set.module,
@@ -1023,8 +1035,35 @@ std::size_t driver_stable_radix_sort_strided(
       reserve(checked_bytes(sizeof(std::uint32_t)));
   const std::size_t indices_b_offset =
       reserve(checked_bytes(sizeof(std::uint32_t)));
-  const std::size_t prefix_offset =
+  const std::size_t local_ranks_offset =
       reserve(checked_bytes(sizeof(std::int32_t)));
+  const std::uint32_t radix_block_count =
+      (static_cast<std::uint32_t>(num_items) + kRadixItemsPerBlock - 1u) /
+      kRadixItemsPerBlock;
+  std::array<std::uint32_t, 8> histogram_counts{};
+  std::array<std::size_t, 8> histogram_offsets{};
+  std::size_t histogram_level_count = 0;
+  std::uint32_t histogram_count = radix_block_count;
+  for (;;) {
+    TI_ASSERT(histogram_level_count < histogram_counts.size());
+    TI_ERROR_IF(
+        histogram_count >
+            std::numeric_limits<std::size_t>::max() /
+                (kRadixDigits * sizeof(std::uint32_t)),
+        "CUDA Driver stable sort histogram workspace size overflow.");
+    histogram_counts[histogram_level_count] = histogram_count;
+    histogram_offsets[histogram_level_count] = reserve(
+        static_cast<std::size_t>(histogram_count) * kRadixDigits *
+        sizeof(std::uint32_t));
+    ++histogram_level_count;
+    if (histogram_count <= 1u) {
+      break;
+    }
+    histogram_count =
+        (histogram_count + kScanTileItems - 1u) / kScanTileItems;
+  }
+  const std::size_t digit_bases_offset =
+      reserve(kRadixDigits * sizeof(std::uint32_t));
   const std::size_t keys_output_offset = reserve(checked_bytes(key_size));
   const std::size_t values_output_offset =
       has_values ? reserve(checked_bytes(value_size)) : cursor;
@@ -1037,7 +1076,12 @@ std::size_t driver_stable_radix_sort_strided(
   void *sortable_b = base + sortable_b_offset;
   void *indices_a = base + indices_a_offset;
   void *indices_b = base + indices_b_offset;
-  void *prefix = base + prefix_offset;
+  void *local_ranks = base + local_ranks_offset;
+  std::array<void *, 8> histogram_levels{};
+  for (std::size_t level = 0; level < histogram_level_count; ++level) {
+    histogram_levels[level] = base + histogram_offsets[level];
+  }
+  void *digit_bases = base + digit_bases_offset;
   void *keys_output = base + keys_output_offset;
   void *values_output =
       has_values ? static_cast<void *>(base + values_output_offset) : nullptr;
@@ -1062,28 +1106,69 @@ std::size_t driver_stable_radix_sort_strided(
                                      grid, kBlockDim, 0, stream);
 
   const std::uint32_t bit_count = static_cast<std::uint32_t>(key_size * 8);
-  std::size_t scan_bytes = 0;
-  for (std::uint32_t bit = 0; bit < bit_count; ++bit) {
+  std::uint32_t radix_block_count_arg = radix_block_count;
+  for (std::uint32_t bit = 0; bit < bit_count;
+       bit += kRadixBitsPerPass) {
     void *keys_in_arg = sortable_a;
-    void *prefix_arg = prefix;
-    std::vector<void *> flag_args{&keys_in_arg, &prefix_arg, &count_arg, &bit};
+    void *local_ranks_arg = local_ranks;
+    void *block_histogram_arg = histogram_levels[0];
+    std::vector<void *> rank_args{&keys_in_arg, &local_ranks_arg,
+                                  &block_histogram_arg, &count_arg,
+                                  &radix_block_count_arg, &bit};
     CUDAContext::get_instance().launch(
-        kernel.radix_zero_flags[width_index], "cuda_driver_radix_zero_flags",
-        flag_args, {}, grid, kBlockDim, 0, stream);
-    scan_bytes = std::max(
-        scan_bytes, driver_inclusive_scan_strided_for_family(
-                        prefix, num_items, CudaTransformValueType::i32, 0,
-                        sizeof(std::int32_t), false, stream, workspace_arena,
-                        PrimitiveWorkspaceFamily::ordering_aux));
+        kernel.radix_rank4[width_index], "cuda_driver_radix_rank4", rank_args,
+        {}, radix_block_count, kBlockDim, 0, stream);
+
+    for (std::size_t level = 0; level < histogram_level_count; ++level) {
+      void *histogram_arg = histogram_levels[level];
+      std::uint32_t histogram_count_arg = histogram_counts[level];
+      std::uint32_t tile_count_arg =
+          (histogram_count_arg + kScanTileItems - 1u) / kScanTileItems;
+      void *tile_sums_arg = level + 1 < histogram_level_count
+                                ? histogram_levels[level + 1]
+                                : nullptr;
+      std::vector<void *> scan_args{&histogram_arg, &histogram_count_arg,
+                                    &tile_sums_arg, &tile_count_arg};
+      const unsigned scan_grid = kRadixDigits * tile_count_arg;
+      CUDAContext::get_instance().launch(
+          kernel.radix_hist_scan, "cuda_driver_radix_hist_scan", scan_args,
+          {}, scan_grid, kBlockDim, 0, stream);
+    }
+    for (std::size_t level = histogram_level_count; level > 1; --level) {
+      const std::size_t target_level = level - 2;
+      const std::size_t prefix_level = level - 1;
+      void *histogram_arg = histogram_levels[target_level];
+      std::uint32_t histogram_count_arg = histogram_counts[target_level];
+      void *tile_prefix_arg = histogram_levels[prefix_level];
+      std::uint32_t tile_count_arg = histogram_counts[prefix_level];
+      std::vector<void *> uniform_args{
+          &histogram_arg, &histogram_count_arg, &tile_prefix_arg,
+          &tile_count_arg};
+      const unsigned blocks_per_digit =
+          (histogram_count_arg + kBlockDim - 1u) / kBlockDim;
+      CUDAContext::get_instance().launch(
+          kernel.radix_hist_uniform, "cuda_driver_radix_hist_uniform",
+          uniform_args, {}, kRadixDigits * blocks_per_digit, kBlockDim, 0,
+          stream);
+    }
+
+    void *digit_bases_arg = digit_bases;
+    std::vector<void *> base_args{&block_histogram_arg,
+                                  &radix_block_count_arg, &digit_bases_arg};
+    CUDAContext::get_instance().launch(
+        kernel.radix_digit_bases, "cuda_driver_radix_digit_bases", base_args,
+        {}, 1, kBlockDim, 0, stream);
 
     void *indices_in_arg = indices_a;
     void *keys_out_arg = sortable_b;
     void *indices_out_arg = indices_b;
     std::vector<void *> scatter_args{
-        &keys_in_arg,     &indices_in_arg, &prefix_arg, &keys_out_arg,
-        &indices_out_arg, &count_arg,      &bit};
+        &keys_in_arg,          &indices_in_arg,       &local_ranks_arg,
+        &block_histogram_arg, &digit_bases_arg,      &keys_out_arg,
+        &indices_out_arg,     &count_arg,             &radix_block_count_arg,
+        &bit};
     CUDAContext::get_instance().launch(
-        kernel.radix_scatter[width_index], "cuda_driver_radix_scatter",
+        kernel.radix_scatter4[width_index], "cuda_driver_radix_scatter4",
         scatter_args, {}, grid, kBlockDim, 0, stream);
     std::swap(sortable_a, sortable_b);
     std::swap(indices_a, indices_b);
@@ -1129,7 +1214,7 @@ std::size_t driver_stable_radix_sort_strided(
     launch_copy(values_output, values, values_offset, values_stride,
                 static_cast<std::uint32_t>(value_words));
   }
-  return workspace->allocated_bytes() + scan_bytes;
+  return workspace->allocated_bytes();
 }
 
 }  // namespace taichi::lang::cuda

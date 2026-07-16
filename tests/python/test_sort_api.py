@@ -735,8 +735,10 @@ def test_sort_cuda_device_concurrent_program_workspace_leases():
 
 
 @test_utils.test(arch=[ti.cuda])
-def test_sort_cuda_device_non_power_of_two_stability():
-    n = 65539
+def test_sort_cuda_device_large_hierarchical_stability():
+    # More than 1024 radix blocks forces a second histogram-scan level while
+    # the odd tail exercises the final partial block.
+    n = (1 << 20) + 1025
     keys_np = (
         (np.arange(n, dtype=np.int64) * 48271 + 17) % 4093 - 2046
     ).astype(np.int32)
