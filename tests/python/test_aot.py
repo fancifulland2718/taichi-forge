@@ -702,7 +702,15 @@ def test_sequential_dispatch():
     g_init = g_init_builder.compile()
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        from taichi_forge.lang import impl
+
+        active_trees = tuple(
+            impl.get_runtime().prog.get_active_snode_tree_ids()
+        )
         m = ti.aot.Module()
+        assert tuple(
+            impl.get_runtime().prog.get_active_snode_tree_ids()
+        ) == active_trees
         m.add_graph("g_init", g_init)
         m.save(tmpdir)
         with open(os.path.join(tmpdir, "metadata.json"), "r") as json_file:

@@ -733,6 +733,13 @@ class PyTaichi:
     def _finalize_root_fb_for_aot():
         if _root_fb.finalized:
             raise RuntimeError("AOT: can only finalize the root FieldsBuilder once")
+        if _root_fb.empty and get_runtime().prog.get_active_snode_tree_ids():
+            # The first kernel materialization already created the required
+            # empty root layout. Finalizing the fresh trailing builder here
+            # would append an unused SNodeTree after the kernel was compiled,
+            # so its serialized layout count could no longer match the kernel
+            # metadata captured by GFX backends.
+            return
         _root_fb._finalize_for_aot()
 
     @staticmethod
