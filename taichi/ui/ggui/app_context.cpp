@@ -195,7 +195,10 @@ Pipeline *AppContext::get_raster_pipeline(const RasterPipelineConfig &config) {
     const std::vector<VertexInputBinding> vertex_inputs = {
         {/*binding=*/0, sizeof(Vertex),
          /*instance=*/config.vbo_instanced}};
-    // TODO: consider using uint8 for colors and normals
+    // Keep the existing VBO and shader ABI lossless and backend-neutral. Packed
+    // normals/colors need an end-to-end format contract plus measured upload,
+    // conversion, precision, and vertex-bandwidth tradeoffs; changing only the
+    // input declaration would silently reinterpret existing Vertex data.
     const std::vector<VertexInputAttribute> vertex_attribs = {
         {/*location=*/0, /*binding=*/0,
          /*format=*/BufferFormat::rgb32f,

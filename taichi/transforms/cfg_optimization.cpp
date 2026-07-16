@@ -27,8 +27,12 @@ bool cfg_optimization(
       result_modified = true;
     }
   }
-  // TODO: implement cfg->dead_instruction_elimination()
-  die(root);  // remove unused allocas
+  // die() is the canonical side-effect-aware SSA dead-instruction pass and
+  // already removes unused allocas after CFG forwarding/store elimination.
+  // A second CFG-liveness DCE is intentionally not maintained without a
+  // profiled missed pattern; duplicating the pass would add compile latency and
+  // another alias/AD correctness surface.
+  die(root);
   return result_modified;
 }
 }  // namespace irpass

@@ -35,10 +35,9 @@ struct VulkanQueueFamilyIndices {
   std::optional<uint32_t> compute_family;
   std::optional<uint32_t> graphics_family;
   std::optional<uint32_t> present_family;
-  // TODO: While it is the case that all COMPUTE/GRAPHICS queue also support
-  // TRANSFER by default, maye there are some performance benefits to find a
-  // TRANSFER-dedicated queue family.
-  // https://vulkan-tutorial.com/Vertex_buffers/Staging_buffer#page_Transfer-queue
+  // Compute/graphics families already support transfer operations. A separate
+  // family is deliberately not selected without an end-to-end ownership and
+  // overlap policy; merely discovering one cannot safely speed up copies.
 
   bool is_complete() const {
     return compute_family.has_value();

@@ -2340,7 +2340,11 @@ RhiResult VulkanDevice::readback_data(
 void VulkanDevice::memcpy_internal(DevicePtr dst,
                                    DevicePtr src,
                                    uint64_t size) {
-  // TODO: always create a queue specifically for transfer
+  // Compute queues are guaranteed to support transfer commands. A dedicated
+  // transfer family would also require queue-family ownership transitions and
+  // a measured copy/compute overlap policy; keep small internal copies on the
+  // existing externally synchronized compute queue until such a workload is
+  // demonstrated.
   Stream *stream = get_compute_stream();
   auto [cmd, res] = stream->new_command_list_unique();
   TI_ASSERT(res == RhiResult::success);

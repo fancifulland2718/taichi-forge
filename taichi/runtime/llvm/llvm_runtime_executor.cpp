@@ -239,8 +239,11 @@ void LlvmRuntimeExecutor::synchronize() {
 }
 
 uint64 LlvmRuntimeExecutor::fetch_result_uint64(int i, uint64 *result_buffer) {
-  // TODO: We are likely doing more synchronization than necessary. Simplify the
-  // sync logic when we fetch the result.
+  // Runtime JIT calls share this device result buffer and the legacy default
+  // stream. Waiting that stream is therefore part of the buffer-reuse contract;
+  // a freshly recorded event would serialize the same work with extra event
+  // overhead. Ordinary kernel return values use their per-launch result buffer
+  // and asynchronous copy path instead.
   synchronize();
   uint64 ret;
   if (config_.arch == Arch::cuda) {

@@ -295,7 +295,10 @@ KernelProfilerBase::TaskHandle EventToolkit::start_with_handle(
     // Note that CUDA driver API only allows querying relative time difference
     // between two events, therefore we need to manually build a mapping
     // between GPU and CPU time.
-    // TODO: periodically reinitialize for more accuracy.
+    // Keep one stable base for all records owned by this toolkit. Periodic
+    // replacement would require storing a calibration segment per record;
+    // otherwise records queued before replacement would be mapped with the
+    // wrong base.
     int n_iters = 100;
     // Warm up CUDA driver, and use the final event as the base event.
     for (int i = 0; i < n_iters; i++) {
@@ -306,7 +309,9 @@ KernelProfilerBase::TaskHandle EventToolkit::start_with_handle(
       auto final_t = Time::get_time();
       if (i == n_iters - 1) {
         base_event_ = e;
-        // TODO: figure out a better way to synchronize CPU and GPU time.
+        // CUDA events expose relative GPU time only. This one-time offset is a
+        // legacy timeline approximation, not a duration measurement contract;
+        // replacing it requires a versioned, multi-segment calibration model.
         constexpr float64 cuda_time_offset = 3e-4;
         // Since event recording and synchronization can take 5 us, it's hard
         // to exactly measure the real event time. Also note there seems to be
