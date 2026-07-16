@@ -26,6 +26,7 @@ def _write_runtime_wheel(
     misplaced_cudart: bool = False,
     auditwheel_layout: bool = False,
     duplicate_raw_cudart: bool = False,
+    dependency_class: str = "toolkit-reference",
 ) -> None:
     dist_info = f"taichi_forge_runtime-{version}.dist-info"
     native = "taichi_forge_runtime/_lib/runtime_native"
@@ -49,20 +50,23 @@ def _write_runtime_wheel(
             f"Metadata-Version: 2.1\nName: taichi-forge-runtime\nVersion: {version}\n",
         )
         zf.writestr(f"{dist_info}/RECORD", "")
-        zf.writestr(f"{native}/cuda_runtime_major.txt", f"{cuda_major}\n")
         zf.writestr(f"{native}/{runtime_name}", b"runtime")
-        if misplaced_cudart:
-            cudart_dir = "unrelated_package"
-        elif auditwheel_layout:
-            cudart_dir = "taichi_forge_runtime.libs"
-        else:
-            cudart_dir = native
-        zf.writestr(f"{cudart_dir}/{cudart_name}", b"cudart")
-        if duplicate_raw_cudart:
-            zf.writestr(
-                f"{native}/libcudart.so.{cuda_major}",
-                b"redundant raw cudart",
-            )
+        if dependency_class == "toolkit-reference":
+            zf.writestr(f"{native}/cuda_runtime_major.txt", f"{cuda_major}\n")
+            if misplaced_cudart:
+                cudart_dir = "unrelated_package"
+            elif auditwheel_layout:
+                cudart_dir = "taichi_forge_runtime.libs"
+            else:
+                cudart_dir = native
+            zf.writestr(f"{cudart_dir}/{cudart_name}", b"cudart")
+            if duplicate_raw_cudart:
+                zf.writestr(
+                    f"{native}/libcudart.so.{cuda_major}",
+                    b"redundant raw cudart",
+                )
+        elif dependency_class != "driver-only":
+            raise ValueError(f"unknown dependency class: {dependency_class}")
         if platform == "windows":
             zf.writestr(f"{native}/taichi_runtime.lib", b"import library")
         if extra_cudart_major is not None:
@@ -226,6 +230,45 @@ def test_installed_runtime_validator_requires_matching_distribution_versions(
         validate_installed_runtime._validate_distribution_versions()
 
 
+def test_installed_runtime_validator_accepts_driver_only_package(
+    monkeypatch, tmp_path
+):
+    package = tmp_path / "taichi_forge_runtime"
+    package.mkdir()
+    monkeypatch.setattr(
+        validate_installed_runtime, "_runtime_package_dirs", lambda: [package]
+    )
+    monkeypatch.setattr(
+        validate_installed_runtime.platform, "system", lambda: "Linux"
+    )
+    monkeypatch.delenv("TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH", raising=False)
+
+    assert validate_installed_runtime._validate_packaged_cuda_runtime() == (
+        None,
+        None,
+    )
+
+
+def test_installed_runtime_validator_rejects_unannounced_packaged_cudart(
+    monkeypatch, tmp_path
+):
+    package = tmp_path / "taichi_forge_runtime"
+    package.mkdir()
+    libs = tmp_path / "taichi_forge_runtime.libs"
+    libs.mkdir()
+    (libs / "libcudart-deadbeef.so.13.2.75").write_bytes(b"")
+    monkeypatch.setattr(
+        validate_installed_runtime, "_runtime_package_dirs", lambda: [package]
+    )
+    monkeypatch.setattr(
+        validate_installed_runtime.platform, "system", lambda: "Linux"
+    )
+    monkeypatch.delenv("TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH", raising=False)
+
+    with pytest.raises(RuntimeError, match="undiscovered CUDART"):
+        validate_installed_runtime._validate_packaged_cuda_runtime()
+
+
 def test_shared_wheel_validator_accepts_windows_and_manylinux_pair(tmp_path):
     windows = tmp_path / "taichi_forge_runtime-0.4.3-py3-none-win_amd64.whl"
     linux = (
@@ -249,6 +292,73 @@ def test_shared_wheel_validator_accepts_windows_and_manylinux_pair(tmp_path):
     )
 
     assert {info.platform for info in infos} == {"windows", "manylinux"}
+
+
+def test_shared_wheel_validator_accepts_driver_only_pair(tmp_path):
+    windows = tmp_path / "taichi_forge_runtime-0.5.1-py3-none-win_amd64.whl"
+    linux = (
+        tmp_path
+        / "taichi_forge_runtime-0.5.1-py3-none-manylinux_2_35_x86_64.whl"
+    )
+    _write_runtime_wheel(
+        windows,
+        platform="windows",
+        version="0.5.1",
+        cuda_major=0,
+        dependency_class="driver-only",
+    )
+    _write_runtime_wheel(
+        linux,
+        platform="manylinux",
+        version="0.5.1",
+        cuda_major=0,
+        hashed_runtime=True,
+        dependency_class="driver-only",
+    )
+
+    infos = validate_runtime_wheel.validate_runtime_wheels(
+        tmp_path,
+        "pair",
+        expected_dependency_class="driver-only",
+    )
+
+    assert {info.dependency_class for info in infos} == {"driver-only"}
+    assert {info.cuda_major for info in infos} == {None}
+
+
+def test_shared_wheel_validator_rejects_reference_when_driver_only_required(
+    tmp_path,
+):
+    wheel = tmp_path / "taichi_forge_runtime-0.5.1-py3-none-win_amd64.whl"
+    _write_runtime_wheel(
+        wheel, platform="windows", version="0.5.1", cuda_major=13
+    )
+
+    with pytest.raises(RuntimeError, match="dependency class mismatch"):
+        validate_runtime_wheel.inspect_runtime_wheel(
+            wheel, expected_dependency_class="driver-only"
+        )
+
+
+def test_manylinux_normalizer_accepts_driver_only_wheel(tmp_path):
+    wheel = (
+        tmp_path
+        / "taichi_forge_runtime-0.5.1-py3-none-manylinux_2_35_x86_64.whl"
+    )
+    _write_runtime_wheel(
+        wheel,
+        platform="manylinux",
+        version="0.5.1",
+        cuda_major=0,
+        dependency_class="driver-only",
+    )
+
+    repair_runtime_wheel.normalize_manylinux_wheel(wheel)
+
+    info = validate_runtime_wheel.inspect_runtime_wheel(
+        wheel, expected_dependency_class="driver-only"
+    )
+    assert info.cuda_major is None
 
 
 def test_manylinux_normalizer_prunes_raw_cudart_and_rewrites_record(tmp_path):
@@ -602,6 +712,18 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
     assert "--wheel-dir dist-runtime --platform windows" in workflow
     assert "--wheel-dir dist --platform pair" in workflow
     assert "auditwheel show wheelhouse-runtime/*.whl" in workflow
+    assert workflow.count("--dependency-class driver-only") == 4
+    assert workflow.count("TI_WITH_CUDA_TOOLKIT:BOOL=OFF") == 4
+    assert (
+        workflow.count(
+            "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF"
+        )
+        == 4
+    )
+    assert "CUDA_TOOLKIT_VERSION" not in workflow
+    assert "Jimver/cuda-toolkit" not in workflow
+    assert "CUDAToolkit_NVCC_EXECUTABLE" not in workflow
+    assert "Reject implicit CUDA Toolkit shared-library imports" in workflow
     assert "Reject implicit CUDA Toolkit DLL imports" in workflow
     assert "cudart64_|cupti64_|nvrtc64_" in workflow
     assert not re.search(
@@ -609,6 +731,22 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
         workflow,
         re.IGNORECASE,
     )
+
+
+def test_cuda_toolkit_reference_workflow_is_non_publishing_and_separate():
+    workflow = (
+        REPO_ROOT
+        / ".github"
+        / "workflows"
+        / "test_cuda_toolkit_reference.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=ON" in workflow
+    assert "--dependency-class toolkit-reference" in workflow
+    assert "Jimver/cuda-toolkit" in workflow
+    assert "publish_runtime_pypi.yml" in workflow
+    assert "gh-action-pypi-publish" not in workflow
+    assert "actions/upload-artifact" not in workflow
 
 
 def test_dynamic_cudart_requirement_prefers_primitive_reference_switch():

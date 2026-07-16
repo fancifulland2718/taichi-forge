@@ -22,7 +22,8 @@ class RuntimeWheelInfo:
     path: Path
     platform: str
     version: str
-    cuda_major: int
+    dependency_class: str
+    cuda_major: int | None
 
 
 def _wheel_platform(wheel: Path) -> str:
@@ -49,8 +50,19 @@ def _cudart_major(platform: str, name: str) -> int | None:
 
 
 def inspect_runtime_wheel(
-    wheel: Path, expected_cuda_major: int | None = None
+    wheel: Path,
+    expected_cuda_major: int | None = None,
+    expected_dependency_class: str = "either",
 ) -> RuntimeWheelInfo:
+    if expected_dependency_class not in {
+        "driver-only",
+        "toolkit-reference",
+        "either",
+    }:
+        raise ValueError(
+            "expected_dependency_class must be driver-only, "
+            "toolkit-reference, or either"
+        )
     platform = _wheel_platform(wheel)
     if not wheel.name.startswith("taichi_forge_runtime-"):
         raise RuntimeError(f"Unexpected runtime distribution name: {wheel.name}")
@@ -84,21 +96,10 @@ def inspect_runtime_wheel(
             )
 
         manifests = [name for name in names if name == MANIFEST]
-        if len(manifests) != 1:
+        if len(manifests) > 1:
             raise RuntimeError(
-                f"Expected one CUDA runtime manifest in {wheel.name}, "
+                f"Expected at most one CUDA runtime manifest in {wheel.name}, "
                 f"found {manifests}"
-            )
-        major_text = zf.read(manifests[0]).decode("ascii").strip()
-        if not major_text.isdigit() or int(major_text) <= 0:
-            raise RuntimeError(
-                f"Invalid CUDA runtime manifest in {wheel.name}: {major_text!r}"
-            )
-        cuda_major = int(major_text)
-        if expected_cuda_major is not None and cuda_major != expected_cuda_major:
-            raise RuntimeError(
-                f"CUDA runtime major mismatch in {wheel.name}: "
-                f"expected={expected_cuda_major}, manifest={cuda_major}"
             )
 
         cudarts = []
@@ -106,24 +107,55 @@ def inspect_runtime_wheel(
             major = _cudart_major(platform, Path(name).name)
             if major is not None:
                 cudarts.append((name, major))
-        if len(cudarts) != 1 or cudarts[0][1] != cuda_major:
-            raise RuntimeError(
-                f"Expected one CUDART matching manifest major {cuda_major} in "
-                f"{wheel.name}, found {cudarts}"
-            )
-        cudart_path = cudarts[0][0]
         runtime_native_prefix = f"{PACKAGE}/_lib/runtime_native/"
         auditwheel_prefix = f"{PACKAGE}.libs/"
-        if not (
-            cudart_path.startswith(runtime_native_prefix)
-            or (
-                platform == "manylinux"
-                and cudart_path.startswith(auditwheel_prefix)
-            )
+        cuda_major = None
+        if manifests:
+            major_text = zf.read(manifests[0]).decode("ascii").strip()
+            if not major_text.isdigit() or int(major_text) <= 0:
+                raise RuntimeError(
+                    f"Invalid CUDA runtime manifest in {wheel.name}: "
+                    f"{major_text!r}"
+                )
+            cuda_major = int(major_text)
+            if len(cudarts) != 1 or cudarts[0][1] != cuda_major:
+                raise RuntimeError(
+                    f"Expected one CUDART matching manifest major {cuda_major} "
+                    f"in {wheel.name}, found {cudarts}"
+                )
+            cudart_path = cudarts[0][0]
+            if not (
+                cudart_path.startswith(runtime_native_prefix)
+                or (
+                    platform == "manylinux"
+                    and cudart_path.startswith(auditwheel_prefix)
+                )
+            ):
+                raise RuntimeError(
+                    f"CUDART is outside the runtime package in {wheel.name}: "
+                    f"{cudart_path}"
+                )
+            dependency_class = "toolkit-reference"
+        else:
+            if cudarts:
+                raise RuntimeError(
+                    f"Driver-only runtime wheel {wheel.name} contains CUDART "
+                    f"without a manifest: {cudarts}"
+                )
+            dependency_class = "driver-only"
+
+        if (
+            expected_dependency_class != "either"
+            and dependency_class != expected_dependency_class
         ):
             raise RuntimeError(
-                f"CUDART is outside the runtime package in {wheel.name}: "
-                f"{cudart_path}"
+                f"Runtime dependency class mismatch in {wheel.name}: "
+                f"expected={expected_dependency_class}, actual={dependency_class}"
+            )
+        if expected_cuda_major is not None and cuda_major != expected_cuda_major:
+            raise RuntimeError(
+                f"CUDA runtime major mismatch in {wheel.name}: "
+                f"expected={expected_cuda_major}, manifest={cuda_major}"
             )
 
         if platform == "windows":
@@ -169,13 +201,16 @@ def inspect_runtime_wheel(
                 f"{wrong_entries}"
             )
 
-    return RuntimeWheelInfo(wheel, platform, version, cuda_major)
+    return RuntimeWheelInfo(
+        wheel, platform, version, dependency_class, cuda_major
+    )
 
 
 def validate_runtime_wheels(
     wheel_dir: Path,
     expected_platform: str,
     expected_cuda_major: int | None = None,
+    expected_dependency_class: str = "either",
 ) -> list[RuntimeWheelInfo]:
     wheels = sorted(wheel_dir.glob("*.whl"))
     expected_count = 2 if expected_platform == "pair" else 1
@@ -184,7 +219,14 @@ def validate_runtime_wheels(
             f"Expected {expected_count} runtime wheel(s) in {wheel_dir}, "
             f"found {[wheel.name for wheel in wheels]}"
         )
-    infos = [inspect_runtime_wheel(wheel, expected_cuda_major) for wheel in wheels]
+    infos = [
+        inspect_runtime_wheel(
+            wheel,
+            expected_cuda_major,
+            expected_dependency_class,
+        )
+        for wheel in wheels
+    ]
     if expected_platform == "pair":
         platforms = sorted(info.platform for info in infos)
         if platforms != ["manylinux", "windows"]:
@@ -195,11 +237,17 @@ def validate_runtime_wheels(
         versions = {info.version for info in infos}
         if len(versions) != 1:
             raise RuntimeError(f"Runtime wheel versions differ: {sorted(versions)}")
+        dependency_classes = {info.dependency_class for info in infos}
+        if len(dependency_classes) != 1:
+            raise RuntimeError(
+                "Runtime wheel dependency classes differ: "
+                f"{sorted(dependency_classes)}"
+            )
         cuda_majors = {info.cuda_major for info in infos}
         if len(cuda_majors) != 1:
             raise RuntimeError(
                 "Runtime wheel CUDART majors differ: "
-                f"{sorted(cuda_majors)}"
+                f"{sorted(str(major) for major in cuda_majors)}"
             )
     elif infos[0].platform != expected_platform:
         raise RuntimeError(
@@ -218,18 +266,37 @@ def main() -> None:
         required=True,
     )
     parser.add_argument("--cuda-major", type=int)
+    parser.add_argument(
+        "--dependency-class",
+        choices=["driver-only", "toolkit-reference", "either"],
+        default="either",
+        help=(
+            "Required CUDA runtime dependency class. Standard release "
+            "workflows must use driver-only; either preserves validation of "
+            "already-published legacy wheels."
+        ),
+    )
     args = parser.parse_args()
 
     try:
         infos = validate_runtime_wheels(
-            args.wheel_dir, args.platform, args.cuda_major
+            args.wheel_dir,
+            args.platform,
+            args.cuda_major,
+            args.dependency_class,
         )
     except (OSError, RuntimeError, UnicodeError) as exc:
         raise SystemExit(str(exc)) from exc
     for info in infos:
+        suffix = (
+            f", bundled CUDART major={info.cuda_major}"
+            if info.cuda_major is not None
+            else ", bundled CUDART=none"
+        )
         print(
             f"Validated {info.path.name}: platform={info.platform}, "
-            f"version={info.version}, bundled CUDART major={info.cuda_major}"
+            f"version={info.version}, dependency={info.dependency_class}"
+            f"{suffix}"
         )
 
 

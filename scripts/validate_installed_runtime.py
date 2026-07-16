@@ -76,10 +76,34 @@ def _packaged_cuda_runtime_major(path: Path) -> int:
     return int(match.group(1))
 
 
-def _validate_packaged_cuda_runtime() -> tuple[Path, int]:
+def _packaged_cudart_candidates() -> list[Path]:
+    candidates = []
+    for package_dir in _runtime_package_dirs():
+        roots = [package_dir, package_dir.parent / f"{package_dir.name}.libs"]
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for path in root.rglob("*"):
+                if not path.is_file():
+                    continue
+                try:
+                    _packaged_cuda_runtime_major(path)
+                except RuntimeError:
+                    continue
+                candidates.append(path.resolve())
+    return sorted(set(candidates))
+
+
+def _validate_packaged_cuda_runtime() -> tuple[Path | None, int | None]:
     candidate = os.environ.get("TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH", "")
     if not candidate:
-        raise RuntimeError("the installed runtime did not discover bundled CUDART")
+        stray = _packaged_cudart_candidates()
+        if stray:
+            raise RuntimeError(
+                "installed driver-only runtime contains undiscovered CUDART: "
+                f"{stray}"
+            )
+        return None, None
     path = Path(candidate)
     if not path.is_file():
         raise RuntimeError(f"the discovered bundled CUDART does not exist: {path}")
@@ -131,10 +155,11 @@ def main() -> None:
     version = _validate_distribution_versions()
     cudart, cudart_major = _validate_packaged_cuda_runtime()
     _validate_cpu_native_ad()
-    print(
-        f"installed runtime validation passed for {version}; "
-        f"bundled CUDART major {cudart_major}: {cudart}"
-    )
+    if cudart is None:
+        dependency = "driver-only; bundled CUDART=none"
+    else:
+        dependency = f"legacy bundled CUDART major {cudart_major}: {cudart}"
+    print(f"installed runtime validation passed for {version}; {dependency}")
 
 
 if __name__ == "__main__":

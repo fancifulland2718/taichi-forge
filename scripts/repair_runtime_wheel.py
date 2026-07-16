@@ -304,7 +304,7 @@ def _rewrite_wheel(wheel: Path, root: Path) -> None:
 
 
 def normalize_manylinux_wheel(wheel: Path) -> None:
-    """Remove the raw CUDART copy superseded by auditwheel's hashed copy."""
+    """Normalize legacy CUDART or prove a driver-only wheel contains none."""
     with tempfile.TemporaryDirectory(prefix="taichi-manylinux-wheel-") as td:
         root = Path(td)
         with ZipFile(wheel) as zf:
@@ -313,9 +313,23 @@ def normalize_manylinux_wheel(wheel: Path) -> None:
         native_dir = root / PACKAGE / "_lib" / "runtime_native"
         manifest = native_dir / CUDA_RUNTIME_MAJOR_MANIFEST
         if not manifest.is_file():
-            raise SystemExit(
-                f"CUDA runtime manifest is missing from repaired wheel: {manifest}"
+            cudarts = [
+                path
+                for path in sorted(root.rglob("*"))
+                if path.is_file()
+                and _manylinux_cuda_runtime_major_from_name(path.name) is not None
+            ]
+            if cudarts:
+                raise SystemExit(
+                    "Driver-only manylinux wheel contains CUDART without a "
+                    "manifest: "
+                    f"{[path.relative_to(root) for path in cudarts]}"
+                )
+            print(
+                "Verified driver-only manylinux runtime wheel without CUDART: "
+                f"{wheel}"
             )
+            return
         major_text = manifest.read_text(encoding="ascii").strip()
         if not major_text.isdigit() or int(major_text) <= 0:
             raise SystemExit(

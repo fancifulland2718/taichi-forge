@@ -29,10 +29,6 @@ permissions:
 env:
   TI_SKIP_VERSION_CHECK: "ON"
   TI_CI: "1"
-  # Runtime wheels bind against the CUDART built and packaged by this workflow;
-  # end users do not need a system CUDA Toolkit. Keep the version in one
-  # overridable setting while older-Toolkit compatibility is validated.
-  CUDA_TOOLKIT_VERSION: "13.2.0"
   LLVM20_WIN_URL: ${{ vars.LLVM20_WIN_URL }}
   LLVM20_LINUX_MANYLINUX_URL: ${{ vars.LLVM20_LINUX_MANYLINUX_URL }}
 
@@ -65,8 +61,9 @@ jobs:
         -DTI_WITH_VULKAN:BOOL=ON
         -DTI_WITH_OPENGL:BOOL=ON
         -DTI_WITH_CUDA:BOOL=ON
-        -DTI_WITH_CUDA_TOOLKIT:BOOL=ON
-        -DTI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON
+        -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF
+        -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF
+        -DTI_WITH_CUPTI:BOOL=OFF
         -DTI_WITH_LLVM:BOOL=ON
         -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON
         -DTI_WITH_C_API:BOOL=OFF
@@ -89,23 +86,6 @@ jobs:
             build-essential ninja-build ccache libxrandr-dev \
             libxinerama-dev libxcursor-dev libxi-dev libx11-dev \
             libxrender-dev libgl-dev libtinfo-dev libxml2-dev
-
-      - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.35
-        with:
-          cuda: ${{ env.CUDA_TOOLKIT_VERSION }}
-          method: network
-          log-file-suffix: linux-runtime.txt
-
-      - name: Validate CUDA Toolkit
-        run: |
-          set -euo pipefail
-          nvcc -V | tee /tmp/nvcc-version.txt
-          IFS='.' read -r cuda_major cuda_minor _ <<< "${CUDA_TOOLKIT_VERSION}"
-          expected_release="${cuda_major}.${cuda_minor}"
-          grep -E "release ${expected_release//./\\.}([,[:space:]]|$)" /tmp/nvcc-version.txt
-          test -n "${CUDA_PATH:-}"
-          test -x "$CUDA_PATH/bin/nvcc"
 
       - name: Install Vulkan SDK deps
         env:
@@ -173,10 +153,10 @@ jobs:
             echo "::error::CMakeCache.txt was not generated."
             exit 1
           fi
-          grep -F "TI_WITH_CUDA_TOOLKIT:BOOL=ON" "$cache"
-          grep -F "TI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON" "$cache"
+          grep -F "TI_WITH_CUDA_TOOLKIT:BOOL=OFF" "$cache"
+          grep -F "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF" "$cache"
+          grep -F "TI_WITH_CUPTI:BOOL=OFF" "$cache"
           grep -F "TI_WITH_VULKAN:BOOL=ON" "$cache"
-          grep -F "CUDAToolkit_NVCC_EXECUTABLE:" "$cache"
 
       - name: Repair runtime wheel contents
         run: |
@@ -192,9 +172,20 @@ jobs:
       - name: Validate runtime wheel contents
         run: |
           set -euo pipefail
-          cuda_major="${CUDA_TOOLKIT_VERSION%%.*}"
           python scripts/validate_runtime_wheel.py \
-            --wheel-dir dist-runtime --platform linux --cuda-major "$cuda_major"
+            --wheel-dir dist-runtime --platform linux \
+            --dependency-class driver-only
+
+      - name: Reject implicit CUDA Toolkit shared-library imports
+        run: |
+          set -euo pipefail
+          runtime_so="$(find _skbuild -name libtaichi_runtime.so -type f | sort | head -n 1)"
+          test -n "$runtime_so"
+          readelf -d "$runtime_so" | tee /tmp/runtime-needed.txt
+          if grep -Ei 'NEEDED.*lib(cudart|cupti|nvrtc|cublas|cusparse|curand|cufft|cusolver|nvjitlink)' /tmp/runtime-needed.txt; then
+            echo "::error::libtaichi_runtime.so has an implicit CUDA Toolkit dependency."
+            exit 1
+          fi
 
       - name: Audit runtime wheel
         run: |
@@ -206,10 +197,9 @@ jobs:
           python scripts/repair_runtime_wheel.py \
             --wheel-dir wheelhouse-runtime --platform manylinux
           auditwheel show wheelhouse-runtime/*.whl
-          cuda_major="${CUDA_TOOLKIT_VERSION%%.*}"
           python scripts/validate_runtime_wheel.py \
             --wheel-dir wheelhouse-runtime --platform manylinux \
-            --cuda-major "$cuda_major"
+            --dependency-class driver-only
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -227,8 +217,9 @@ jobs:
         -DTI_WITH_VULKAN:BOOL=ON
         -DTI_WITH_OPENGL:BOOL=ON
         -DTI_WITH_CUDA:BOOL=ON
-        -DTI_WITH_CUDA_TOOLKIT:BOOL=ON
-        -DTI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON
+        -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF
+        -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF
+        -DTI_WITH_CUPTI:BOOL=OFF
         -DTI_WITH_LLVM:BOOL=ON
         -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON
         -DTI_WITH_C_API:BOOL=OFF
@@ -251,35 +242,6 @@ jobs:
 
       - name: Install Ninja
         uses: seanmiddleditch/gha-setup-ninja@v5
-
-      - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.35
-        with:
-          cuda: ${{ env.CUDA_TOOLKIT_VERSION }}
-          method: network
-          log-file-suffix: windows-runtime.txt
-
-      - name: Validate CUDA Toolkit
-        shell: pwsh
-        run: |
-          $nvccVersion = (nvcc -V) -join "`n"
-          $nvccVersion
-          $versionParts = $env:CUDA_TOOLKIT_VERSION.Split(".")
-          $expectedRelease = "$($versionParts[0]).$($versionParts[1])"
-          $expectedPattern = "release\s+$([regex]::Escape($expectedRelease))([,\s]|$)"
-          if ($nvccVersion -notmatch $expectedPattern) {
-            Write-Error "Expected CUDA Toolkit $expectedRelease, got: $nvccVersion"
-            exit 1
-          }
-          if (-not $env:CUDA_PATH) {
-            Write-Error "CUDA_PATH was not configured by the CUDA Toolkit action."
-            exit 1
-          }
-          $nvcc = Join-Path $env:CUDA_PATH "bin\nvcc.exe"
-          if (-not (Test-Path $nvcc)) {
-            Write-Error "nvcc.exe was not found under CUDA_PATH: $nvcc"
-            exit 1
-          }
 
       - name: Install Vulkan SDK
         shell: pwsh
@@ -334,10 +296,10 @@ jobs:
           }
           $content = Get-Content -Path $cache.FullName -Raw
           foreach ($expected in @(
-              "TI_WITH_CUDA_TOOLKIT:BOOL=ON",
-              "TI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON",
-              "TI_WITH_VULKAN:BOOL=ON",
-              "CUDAToolkit_NVCC_EXECUTABLE:"
+              "TI_WITH_CUDA_TOOLKIT:BOOL=OFF",
+              "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF",
+              "TI_WITH_CUPTI:BOOL=OFF",
+              "TI_WITH_VULKAN:BOOL=ON"
             )) {
             if (-not $content.Contains($expected)) {
               Write-Error "Expected CMake cache entry was not found: $expected"
@@ -361,9 +323,9 @@ jobs:
       - name: Validate runtime wheel contents
         shell: pwsh
         run: |
-          $cudaMajor = $env:CUDA_TOOLKIT_VERSION.Split('.')[0]
           python scripts/validate_runtime_wheel.py `
-            --wheel-dir dist-runtime --platform windows --cuda-major $cudaMajor
+            --wheel-dir dist-runtime --platform windows `
+            --dependency-class driver-only
 
       - name: Reject implicit CUDA Toolkit DLL imports
         shell: pwsh
@@ -418,7 +380,8 @@ jobs:
           mkdir -p dist
           find artifacts -type f -name '*.whl' -exec cp -v {} dist/ \;
           python scripts/validate_runtime_wheel.py \
-            --wheel-dir dist --platform pair
+            --wheel-dir dist --platform pair \
+            --dependency-class driver-only
           ls -la dist/
 
       - name: Publish to TestPyPI
