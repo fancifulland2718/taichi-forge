@@ -132,8 +132,37 @@ void make_thread_local_offload(OffloadedStmt *offload, bool *modified) {
 
   std::size_t tls_offset = 0;
 
-  // TODO: sort thread local storage variables according to dtype_size to
-  // reduce buffer fragmentation.
+  auto packed_tls_size = [](const auto &values) {
+    std::size_t offset = 0;
+    for (const auto &value : values) {
+      const auto size =
+          data_type_size(value.first->ret_type.ptr_removed());
+      TI_ASSERT(size > 0);
+      offset += (size - offset % size) % size;
+      offset += size;
+    }
+    return offset;
+  };
+
+  // A larger value first removes padding for the common power-of-two scalar
+  // reductions (for example, f32 followed by f64 shrinks from 16 to 12
+  // bytes). Tensor byte sizes are not necessarily powers of two, however, so
+  // blindly sorting can make a layout larger. Keep the deterministic original
+  // order unless the candidate is strictly smaller. stable_sort also preserves
+  // the order of reductions with the same dtype, including multiple pointer
+  // statements that may alias the same destination.
+  auto packed_reduction_values = valid_reduction_values;
+  std::stable_sort(
+      packed_reduction_values.begin(), packed_reduction_values.end(),
+      [](const auto &lhs, const auto &rhs) {
+        return data_type_size(lhs.first->ret_type.ptr_removed()) >
+               data_type_size(rhs.first->ret_type.ptr_removed());
+      });
+  if (packed_tls_size(packed_reduction_values) <
+      packed_tls_size(valid_reduction_values)) {
+    valid_reduction_values = std::move(packed_reduction_values);
+  }
+
   if (!valid_reduction_values.empty()) {
     *modified = true;
   }

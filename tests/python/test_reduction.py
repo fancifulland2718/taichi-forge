@@ -122,6 +122,26 @@ def test_reduction_single_f64(op):
     _test_reduction_single(ti.f64, lambda x, y: x == approx(y, 1e-12), op)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], require=ti.extension.data64)
+def test_mixed_dtype_global_reduction_tls_layout():
+    total_f32 = ti.field(ti.f32, shape=())
+    total_f64 = ti.field(ti.f64, shape=())
+
+    @ti.kernel
+    def reduce():
+        for i in range(1024):
+            # Keep f32 first: the unoptimized 4-byte/8-byte layout needs 16
+            # bytes, while the guarded size-descending candidate needs 12.
+            total_f32[None] += ti.cast(i, ti.f32)
+            total_f64[None] += ti.cast(i, ti.f64) * 0.5
+
+    reduce()
+
+    expected = 1024 * 1023 // 2
+    assert total_f32[None] == expected
+    assert total_f64[None] == expected * 0.5
+
+
 @test_utils.test()
 def test_reduction_different_scale():
     @ti.kernel
