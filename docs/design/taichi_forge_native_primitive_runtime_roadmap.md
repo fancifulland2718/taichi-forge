@@ -573,14 +573,16 @@ N5/N7 原始文字把 CUB 百分比既作为性能目标又作为 `auto` 切换�
 
 ### 11.5 本机验证与外部待办
 
-Windows 已完成：Clang 14 PTX 可复现生成、release extension 增量构建、scan 72/72、compact
-25/28（3 项按 reference capability 跳过）、sort 68/80（12 项按 capability 跳过）、
-runtime diagnostics/cache focused tests、CPU/CUDA/Vulkan production stress，以及 GPU 空闲条件
-下的统一性能矩阵。N9 最终发行测试和 wheel dependency scan 的实际结果在本次收尾命令后
-写入提交说明，不在规划中预先伪造。
+Windows 已完成：Clang 14 PTX 可复现生成、无 Toolkit/reference/CUPTI 的独立 Release
+源码构建、scan 72/72、compact 25/28（3 项按 reference capability 跳过）、sort 68/80
+（12 项按 capability 跳过）、runtime diagnostics/cache focused tests、CPU/CUDA/Vulkan
+production stress，以及 GPU 空闲条件下的统一性能矩阵。本机不再单独 repair、隔离安装或
+模拟发布 Windows wheel；Windows/Linux wheel 的最终内容、安装和动态依赖门禁统一由
+GitHub Actions 发行 workflow 执行，避免把本机环境当成发布环境证据。
 
-Linux/旧 driver 仍待：GCC/Clang 标准配置、manylinux raw/repaired wheel、ELF
-`DT_NEEDED`/RPATH、无 Toolkit import、真实 CUDA module-load、30--60 秒 CPU/CUDA/Vulkan
+Linux/旧 driver 仍待 GitHub Actions/真机回报：GCC/Clang 标准配置、manylinux
+raw/repaired wheel、ELF `DT_NEEDED`/RPATH、无 Toolkit import、真实 CUDA module-load、
+30--60 秒 CPU/CUDA/Vulkan
 stress、compute-sanitizer、TSAN/ASan/UBSan、Vulkan validation/同步 validation、X11/Wayland
 headed GGUI、multi-vendor Vulkan，以及每个公开最低 driver 节点。完成前不降低公开 driver
 下限，也不声称 Windows 性能可外推到 Linux。
