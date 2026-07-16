@@ -283,7 +283,6 @@ def test_fractal_f16():
     paint(0.03)
 
 
-# TODO(): Vulkan support
 @pytest.mark.sm70
 @test_utils.test(arch=[ti.cpu, ti.cuda])
 def test_atomic_add_f16():
@@ -304,7 +303,6 @@ def test_atomic_add_f16():
     assert f[0] == test_utils.approx(f[1], rel=1e-3)
 
 
-# TODO(): Vulkan support
 @pytest.mark.sm70
 @test_utils.test(arch=[ti.cpu, ti.cuda])
 def test_atomic_max_f16():
@@ -325,7 +323,6 @@ def test_atomic_max_f16():
     assert f[0] == test_utils.approx(f[1], rel=1e-3)
 
 
-# TODO(): Vulkan support
 @pytest.mark.sm70
 @test_utils.test(arch=[ti.cpu, ti.cuda])
 def test_atomic_min_f16():
@@ -344,6 +341,47 @@ def test_atomic_min_f16():
 
     foo()
     assert f[0] == test_utils.approx(f[1], rel=1e-3)
+
+
+@test_utils.test(arch=[ti.vulkan], debug=True)
+def test_atomic_f16_vulkan_capability_contract():
+    values = ti.field(dtype=ti.f16, shape=3)
+
+    @ti.kernel
+    def atomic_add():
+        for _ in range(64):
+            values[0] += 1.0
+
+    @ti.kernel
+    def atomic_min():
+        for i in range(64):
+            ti.atomic_min(values[1], ti.cast(i, ti.f16))
+
+    @ti.kernel
+    def atomic_max():
+        for i in range(64):
+            ti.atomic_max(values[2], ti.cast(i, ti.f16))
+
+    def run_or_check_unsupported(kernel, operation):
+        try:
+            kernel()
+        except RuntimeError as exc:
+            assert (
+                f"Vulkan f16 atomic {operation} is unsupported on this device"
+                in str(exc)
+            )
+            return False
+        return True
+
+    values[0] = 0
+    values[1] = 100
+    values[2] = -100
+    if run_or_check_unsupported(atomic_add, "add"):
+        assert values[0] == 64
+    if run_or_check_unsupported(atomic_min, "min"):
+        assert values[1] == 0
+    if run_or_check_unsupported(atomic_max, "max"):
+        assert values[2] == 63
 
 
 @pytest.mark.sm70

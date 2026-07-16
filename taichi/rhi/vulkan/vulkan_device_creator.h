@@ -23,6 +23,14 @@ namespace vulkan {
 
 class VulkanDevice;
 
+namespace detail {
+
+void record_shader_atomic_float2_capabilities(
+    DeviceCapabilityConfig &caps,
+    const VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT &features);
+
+}  // namespace detail
+
 struct VulkanQueueFamilyIndices {
   std::optional<uint32_t> compute_family;
   std::optional<uint32_t> graphics_family;

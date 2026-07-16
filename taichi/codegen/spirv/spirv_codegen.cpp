@@ -4216,24 +4216,53 @@ class TaskCodegen : public IRVisitor {
     // Shared arrays have already created an accesschain, use it directly.
     const bool dest_is_ptr = dest_val.stype.flag == TypeKind::kPtr;
 
-    if (dt->is_primitive(PrimitiveTypeID::f64)) {
-      if (caps_->get(DeviceCapability::spirv_has_atomic_float64_add) &&
-          stmt->op_type == AtomicOpType::add) {
-        addr_ptr = at_buffer(stmt->dest, dt);
-      } else {
-        addr_ptr = dest_is_ptr
-                       ? dest_val
-                       : at_buffer(stmt->dest, ir_->get_taichi_uint_type(dt));
+    const auto has_native_float_atomic = [&]() {
+      const bool is_add_or_sub = stmt->op_type == AtomicOpType::add ||
+                                 stmt->op_type == AtomicOpType::sub;
+      const bool is_min_or_max = stmt->op_type == AtomicOpType::min ||
+                                 stmt->op_type == AtomicOpType::max;
+      if (dt->is_primitive(PrimitiveTypeID::f16)) {
+        return (is_add_or_sub &&
+                caps_->get(
+                    DeviceCapability::spirv_has_atomic_float16_add)) ||
+               (is_min_or_max &&
+                caps_->get(
+                    DeviceCapability::spirv_has_atomic_float16_minmax));
       }
-    } else if (dt->is_primitive(PrimitiveTypeID::f32)) {
-      if (caps_->get(DeviceCapability::spirv_has_atomic_float_add) &&
-          stmt->op_type == AtomicOpType::add) {
-        addr_ptr = at_buffer(stmt->dest, dt);
-      } else {
-        addr_ptr = dest_is_ptr
-                       ? dest_val
-                       : at_buffer(stmt->dest, ir_->get_taichi_uint_type(dt));
+      if (dt->is_primitive(PrimitiveTypeID::f32)) {
+        return (is_add_or_sub &&
+                caps_->get(DeviceCapability::spirv_has_atomic_float_add)) ||
+               (is_min_or_max &&
+                caps_->get(
+                    DeviceCapability::spirv_has_atomic_float_minmax));
       }
+      if (dt->is_primitive(PrimitiveTypeID::f64)) {
+        return (is_add_or_sub &&
+                caps_->get(
+                    DeviceCapability::spirv_has_atomic_float64_add)) ||
+               (is_min_or_max &&
+                caps_->get(
+                    DeviceCapability::spirv_has_atomic_float64_minmax));
+      }
+      return false;
+    };
+    const bool use_native_float_atomic =
+        is_real(dt) && has_native_float_atomic();
+
+    TI_ERROR_IF(
+        dt->is_primitive(PrimitiveTypeID::f16) &&
+            !use_native_float_atomic,
+        "Vulkan f16 atomic {} is unsupported on this device; f16 has no "
+        "valid integer CAS fallback and requires the matching native Vulkan "
+        "atomic-float feature.",
+        atomic_op_type_name(stmt->op_type));
+
+    if (use_native_float_atomic) {
+      addr_ptr = dest_is_ptr ? dest_val : at_buffer(stmt->dest, dt);
+    } else if (is_real(dt)) {
+      addr_ptr = dest_is_ptr
+                     ? dest_val
+                     : at_buffer(stmt->dest, ir_->get_taichi_uint_type(dt));
     } else {
       addr_ptr = dest_is_ptr ? dest_val : at_buffer(stmt->dest, dt);
     }
@@ -4241,31 +4270,20 @@ class TaskCodegen : public IRVisitor {
     auto ret_type = ir_->get_primitive_type(dt);
 
     if (is_real(dt)) {
-      spv::Op atomic_fp_op;
-      if (stmt->op_type == AtomicOpType::add) {
+      spv::Op atomic_fp_op = spv::OpNop;
+      if (stmt->op_type == AtomicOpType::add ||
+          stmt->op_type == AtomicOpType::sub) {
         atomic_fp_op = spv::OpAtomicFAddEXT;
+        if (stmt->op_type == AtomicOpType::sub) {
+          data = ir_->make_value(spv::OpFNegate, data.stype, data);
+        }
+      } else if (stmt->op_type == AtomicOpType::min) {
+        atomic_fp_op = spv::OpAtomicFMinEXT;
+      } else if (stmt->op_type == AtomicOpType::max) {
+        atomic_fp_op = spv::OpAtomicFMaxEXT;
       }
 
-      bool use_native_atomics = false;
-
-      if (dt->is_primitive(PrimitiveTypeID::f64)) {
-        if (caps_->get(DeviceCapability::spirv_has_atomic_float64_add) &&
-            stmt->op_type == AtomicOpType::add) {
-          use_native_atomics = true;
-        }
-      } else if (dt->is_primitive(PrimitiveTypeID::f32)) {
-        if (caps_->get(DeviceCapability::spirv_has_atomic_float_add) &&
-            stmt->op_type == AtomicOpType::add) {
-          use_native_atomics = true;
-        }
-      } else if (dt->is_primitive(PrimitiveTypeID::f16)) {
-        if (caps_->get(DeviceCapability::spirv_has_atomic_float16_add) &&
-            stmt->op_type == AtomicOpType::add) {
-          use_native_atomics = true;
-        }
-      }
-
-      if (use_native_atomics) {
+      if (use_native_float_atomic) {
         val =
             ir_->make_value(atomic_fp_op, ir_->get_primitive_type(dt), addr_ptr,
                             /*scope=*/ir_->const_i32_one_,

@@ -1,4 +1,5 @@
 #include "gtest/gtest.h"
+#include "taichi/codegen/spirv/spirv_ir_builder.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/rhi/vulkan/vulkan_device_creator.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
@@ -10,11 +11,97 @@
 
 #include <array>
 #include <atomic>
+#include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 using namespace taichi;
 using namespace lang;
+
+namespace {
+
+std::unordered_set<uint32_t> spirv_capabilities(
+    const std::vector<uint32_t> &module) {
+  std::unordered_set<uint32_t> capabilities;
+  for (std::size_t offset = 5; offset < module.size();) {
+    const uint32_t instruction = module[offset];
+    const uint32_t word_count = instruction >> 16;
+    const uint32_t opcode = instruction & 0xffffu;
+    if (word_count == 0 || offset + word_count > module.size()) {
+      break;
+    }
+    if (opcode == spv::OpCapability && word_count == 2) {
+      capabilities.insert(module[offset + 1]);
+    }
+    offset += word_count;
+  }
+  return capabilities;
+}
+
+bool spirv_contains_string(const std::vector<uint32_t> &module,
+                           std::string_view expected) {
+  const std::string_view bytes(
+      reinterpret_cast<const char *>(module.data()),
+      module.size() * sizeof(uint32_t));
+  return bytes.find(expected) != std::string_view::npos;
+}
+
+std::vector<uint32_t> make_spirv_header(
+    const DeviceCapabilityConfig &caps) {
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  return builder.finalize();
+}
+
+}  // namespace
+
+TEST(VulkanDeviceCapabilityTest, AtomicFloat2FeaturesMapIndependently) {
+  VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT features{};
+  features.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_2_FEATURES_EXT;
+  features.shaderBufferFloat16AtomicAdd = VK_TRUE;
+  features.shaderBufferFloat64AtomicMinMax = VK_TRUE;
+
+  DeviceCapabilityConfig caps;
+  vulkan::detail::record_shader_atomic_float2_capabilities(caps, features);
+
+  EXPECT_EQ(caps.get(DeviceCapability::spirv_has_atomic_float16_add), 1u);
+  EXPECT_EQ(caps.get(DeviceCapability::spirv_has_atomic_float64_minmax), 1u);
+  EXPECT_EQ(caps.get(DeviceCapability::spirv_has_atomic_float_add), 0u);
+  EXPECT_EQ(caps.get(DeviceCapability::spirv_has_atomic_float16), 0u);
+  EXPECT_EQ(caps.get(DeviceCapability::spirv_has_atomic_float16_minmax), 0u);
+  EXPECT_EQ(caps.get(DeviceCapability::spirv_has_atomic_float_minmax), 0u);
+}
+
+TEST(VulkanDeviceCapabilityTest, AtomicFloatHeaderMatchesScalarWidth) {
+  DeviceCapabilityConfig caps;
+  caps.set(DeviceCapability::spirv_version, 0x10300);
+  caps.set(DeviceCapability::spirv_has_float16, true);
+  caps.set(DeviceCapability::spirv_has_float64, true);
+  caps.set(DeviceCapability::spirv_has_atomic_float16_add, true);
+  caps.set(DeviceCapability::spirv_has_atomic_float64_minmax, true);
+
+  const auto module = make_spirv_header(caps);
+  const auto capabilities = spirv_capabilities(module);
+  EXPECT_TRUE(capabilities.count(spv::CapabilityAtomicFloat16AddEXT));
+  EXPECT_TRUE(capabilities.count(spv::CapabilityAtomicFloat64MinMaxEXT));
+  EXPECT_FALSE(capabilities.count(spv::CapabilityAtomicFloat32AddEXT));
+  EXPECT_TRUE(
+      spirv_contains_string(module, "SPV_EXT_shader_atomic_float16_add"));
+  EXPECT_TRUE(
+      spirv_contains_string(module, "SPV_EXT_shader_atomic_float_min_max"));
+  EXPECT_FALSE(
+      spirv_contains_string(module, "SPV_EXT_shader_atomic_float_add"));
+
+  DeviceCapabilityConfig float64_add_caps;
+  float64_add_caps.set(DeviceCapability::spirv_version, 0x10300);
+  float64_add_caps.set(DeviceCapability::spirv_has_float64, true);
+  float64_add_caps.set(DeviceCapability::spirv_has_atomic_float64_add, true);
+  const auto float64_add_module = make_spirv_header(float64_add_caps);
+  EXPECT_TRUE(spirv_contains_string(float64_add_module,
+                                   "SPV_EXT_shader_atomic_float_add"));
+}
 
 TEST(VulkanDeviceTest, ConcurrentQueueSubmissions) {
   if (!vulkan::is_vulkan_api_available()) {

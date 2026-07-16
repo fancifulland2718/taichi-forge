@@ -32,6 +32,12 @@ void IRBuilder::init_header() {
         .commit(&header_);
   }
 
+  if (caps_->get(cap::spirv_has_atomic_float16_add)) {
+    ib_.begin(spv::OpCapability)
+        .add(spv::CapabilityAtomicFloat16AddEXT)
+        .commit(&header_);
+  }
+
   if (caps_->get(cap::spirv_has_atomic_float_add)) {
     ib_.begin(spv::OpCapability)
         .add(spv::CapabilityAtomicFloat32AddEXT)
@@ -41,6 +47,18 @@ void IRBuilder::init_header() {
   if (caps_->get(cap::spirv_has_atomic_float_minmax)) {
     ib_.begin(spv::OpCapability)
         .add(spv::CapabilityAtomicFloat32MinMaxEXT)
+        .commit(&header_);
+  }
+
+  if (caps_->get(cap::spirv_has_atomic_float64_minmax)) {
+    ib_.begin(spv::OpCapability)
+        .add(spv::CapabilityAtomicFloat64MinMaxEXT)
+        .commit(&header_);
+  }
+
+  if (caps_->get(cap::spirv_has_atomic_float16_minmax)) {
+    ib_.begin(spv::OpCapability)
+        .add(spv::CapabilityAtomicFloat16MinMaxEXT)
         .commit(&header_);
   }
 
@@ -137,13 +155,22 @@ void IRBuilder::init_header() {
         .commit(&header_);
   }
 
-  if (caps_->get(cap::spirv_has_atomic_float_add)) {
+  if (caps_->get(cap::spirv_has_atomic_float_add) ||
+      caps_->get(cap::spirv_has_atomic_float64_add)) {
     ib_.begin(spv::OpExtension)
         .add("SPV_EXT_shader_atomic_float_add")
         .commit(&header_);
   }
 
-  if (caps_->get(cap::spirv_has_atomic_float_minmax)) {
+  if (caps_->get(cap::spirv_has_atomic_float16_add)) {
+    ib_.begin(spv::OpExtension)
+        .add("SPV_EXT_shader_atomic_float16_add")
+        .commit(&header_);
+  }
+
+  if (caps_->get(cap::spirv_has_atomic_float16_minmax) ||
+      caps_->get(cap::spirv_has_atomic_float_minmax) ||
+      caps_->get(cap::spirv_has_atomic_float64_minmax)) {
     ib_.begin(spv::OpExtension)
         .add("SPV_EXT_shader_atomic_float_min_max")
         .commit(&header_);

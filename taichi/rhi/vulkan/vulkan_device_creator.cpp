@@ -230,6 +230,26 @@ size_t get_device_score(VkPhysicalDevice device, VkSurfaceKHR surface) {
 
 }  // namespace
 
+void detail::record_shader_atomic_float2_capabilities(
+    DeviceCapabilityConfig &caps,
+    const VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT &features) {
+  if (features.shaderBufferFloat16AtomicAdd) {
+    caps.set(DeviceCapability::spirv_has_atomic_float16_add, true);
+  }
+  if (features.shaderBufferFloat16AtomicMinMax) {
+    caps.set(DeviceCapability::spirv_has_atomic_float16_minmax, true);
+  }
+  if (features.shaderBufferFloat16Atomics) {
+    caps.set(DeviceCapability::spirv_has_atomic_float16, true);
+  }
+  if (features.shaderBufferFloat32AtomicMinMax) {
+    caps.set(DeviceCapability::spirv_has_atomic_float_minmax, true);
+  }
+  if (features.shaderBufferFloat64AtomicMinMax) {
+    caps.set(DeviceCapability::spirv_has_atomic_float64_minmax, true);
+  }
+}
+
 VulkanDeviceCreator::VulkanDeviceCreator(
     const VulkanDeviceCreator::Params &params)
     : params_(params) {
@@ -547,7 +567,6 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       physical_device_, nullptr, &extension_count, extension_properties.data());
 
   bool has_swapchain = false;
-  bool has_present_mode_fifo_latest_ready = false;
   // VK_KHR_external_memory became core in Vulkan 1.1.  Exporting the memory
   // object still needs the platform-specific handle extension, so report the
   // capability only when both pieces are available on the device we create.
@@ -615,10 +634,12 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (name == VK_KHR_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME ||
                name == VK_EXT_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME) {
-      if (!has_present_mode_fifo_latest_ready) {
-        has_present_mode_fifo_latest_ready = true;
-        enabled_extensions.push_back(ext.extensionName);
-      }
+      // Some Windows drivers advertise both the original EXT extension and
+      // its KHR alias. The feature structure has the same sType for both, but
+      // validation still requires the corresponding advertised parent name.
+      // Enable both names when both are present instead of depending on
+      // enumeration order.
+      enabled_extensions.push_back(ext.extensionName);
     } else if (name == VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME &&
                params_.enable_validation_layer) {
       // VK_KHR_shader_non_semantic_info isn't supported on molten-vk.
@@ -791,21 +812,8 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
     if (CHECK_EXTENSION(VK_EXT_SHADER_ATOMIC_FLOAT_2_EXTENSION_NAME)) {
       features2.pNext = &shader_atomic_float_2_feature;
       vkGetPhysicalDeviceFeatures2KHR(physical_device_, &features2);
-      if (shader_atomic_float_2_feature.shaderBufferFloat16AtomicAdd) {
-        caps.set(DeviceCapability::spirv_has_atomic_float_add, true);
-      }
-      if (shader_atomic_float_2_feature.shaderBufferFloat16AtomicMinMax) {
-        caps.set(DeviceCapability::spirv_has_atomic_float16_minmax, true);
-      }
-      if (shader_atomic_float_2_feature.shaderBufferFloat16Atomics) {
-        caps.set(DeviceCapability::spirv_has_atomic_float16, true);
-      }
-      if (shader_atomic_float_2_feature.shaderBufferFloat32AtomicMinMax) {
-        caps.set(DeviceCapability::spirv_has_atomic_float_minmax, true);
-      }
-      if (shader_atomic_float_2_feature.shaderBufferFloat64AtomicMinMax) {
-        caps.set(DeviceCapability::spirv_has_atomic_float64_minmax, true);
-      }
+      detail::record_shader_atomic_float2_capabilities(
+          caps, shader_atomic_float_2_feature);
       *pNextEnd = &shader_atomic_float_2_feature;
       pNextEnd = &shader_atomic_float_2_feature.pNext;
     }
@@ -913,8 +921,6 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
         pNextEnd = &present_mode_fifo_latest_ready_feature.pNext;
       }
     }
-
-    // TODO: add atomic min/max feature
   }
 
   if (params_.enable_validation_layer) {
