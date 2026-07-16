@@ -78,6 +78,13 @@ FunctionCreationGuard::~FunctionCreationGuard() {
 
 namespace {
 
+llvm::APInt fixed_width_apint(unsigned bit_width, uint64_t value) {
+  // LLVM 20 validates the value before the narrow APInt constructor can
+  // truncate it. Build a full uint64 bit pattern first, then truncate
+  // explicitly so negative Taichi integers preserve their low bits.
+  return llvm::APInt(64, value, false).zextOrTrunc(bit_width);
+}
+
 class CodeGenStmtGuard {
  public:
   using Getter = std::function<llvm::BasicBlock *(void)>;
@@ -1283,31 +1290,31 @@ void TaskCodeGenLLVM::visit(ConstStmt *stmt) {
         llvm::ConstantFP::get(*llvm_context, llvm::APFloat(val.val_float64()));
   } else if (val.dt->is_primitive(PrimitiveTypeID::u1)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
-        *llvm_context, llvm::APInt(1, (uint64)val.val_uint1(), false));
+        *llvm_context, fixed_width_apint(1, (uint64)val.val_uint1()));
   } else if (val.dt->is_primitive(PrimitiveTypeID::i8)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
-        *llvm_context, llvm::APInt(8, (uint64)val.val_int8(), false));
+        *llvm_context, fixed_width_apint(8, (uint64)val.val_int8()));
   } else if (val.dt->is_primitive(PrimitiveTypeID::u8)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
-        *llvm_context, llvm::APInt(8, (uint64)val.val_uint8(), false));
+        *llvm_context, fixed_width_apint(8, (uint64)val.val_uint8()));
   } else if (val.dt->is_primitive(PrimitiveTypeID::i16)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
-        *llvm_context, llvm::APInt(16, (uint64)val.val_int16(), false));
+        *llvm_context, fixed_width_apint(16, (uint64)val.val_int16()));
   } else if (val.dt->is_primitive(PrimitiveTypeID::u16)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
-        *llvm_context, llvm::APInt(16, (uint64)val.val_uint16(), false));
+        *llvm_context, fixed_width_apint(16, (uint64)val.val_uint16()));
   } else if (val.dt->is_primitive(PrimitiveTypeID::i32)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
-        *llvm_context, llvm::APInt(32, (uint64)val.val_int32(), false));
+        *llvm_context, fixed_width_apint(32, (uint64)val.val_int32()));
   } else if (val.dt->is_primitive(PrimitiveTypeID::u32)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
-        *llvm_context, llvm::APInt(32, (uint64)val.val_uint32(), false));
+        *llvm_context, fixed_width_apint(32, (uint64)val.val_uint32()));
   } else if (val.dt->is_primitive(PrimitiveTypeID::i64)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
-        *llvm_context, llvm::APInt(64, (uint64)val.val_int64(), false));
+        *llvm_context, fixed_width_apint(64, (uint64)val.val_int64()));
   } else if (val.dt->is_primitive(PrimitiveTypeID::u64)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
-        *llvm_context, llvm::APInt(64, val.val_uint64(), false));
+        *llvm_context, fixed_width_apint(64, val.val_uint64()));
   } else {
     TI_P(data_type_name(val.dt));
     TI_NOT_IMPLEMENTED;

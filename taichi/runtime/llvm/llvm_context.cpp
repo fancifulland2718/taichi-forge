@@ -75,6 +75,10 @@ namespace {
 
 std::atomic<std::uint64_t> next_thread_data_registry_id{1};
 
+llvm::APInt fixed_width_apint(unsigned bit_width, uint64_t value) {
+  return llvm::APInt(64, value, false).zextOrTrunc(bit_width);
+}
+
 }  // namespace
 
 TaichiLLVMContext::TaichiLLVMContext(const CompileConfig &config, Arch arch)
@@ -720,11 +724,11 @@ llvm::Value *TaichiLLVMContext::get_constant(DataType dt, T t) {
              : llvm::ConstantInt::getFalse(*ctx);
   } else if (is_integral(dt)) {
     // APInt stores a fixed-width bit pattern. Passing a negative C++ value
-    // through uint64_t with isSigned=true makes LLVM 20 assert before it can
-    // truncate to the requested width. Unsigned construction preserves the
-    // same low bits for both signed and unsigned Taichi integer constants.
+    // through uint64_t makes LLVM 20 validate the untruncated value first.
+    // Construct at 64 bits and explicitly truncate so signed and unsigned
+    // Taichi constants preserve the same low-bit contract.
     return llvm::ConstantInt::get(
-        *ctx, llvm::APInt(data_type_bits(dt), (uint64_t)t, false));
+        *ctx, fixed_width_apint(data_type_bits(dt), (uint64_t)t));
   } else {
     TI_NOT_IMPLEMENTED
   }
@@ -750,12 +754,14 @@ llvm::Value *TaichiLLVMContext::get_constant(T t) {
              : llvm::ConstantInt::getFalse(*ctx);
   } else if (std::is_same_v<TargetType, int32> ||
              std::is_same_v<TargetType, uint32>) {
-    return llvm::ConstantInt::get(*ctx, llvm::APInt(32, (uint64)t, false));
+    return llvm::ConstantInt::get(*ctx,
+                                  fixed_width_apint(32, (uint64)t));
   } else if (std::is_same_v<TargetType, int64> ||
              std::is_same_v<TargetType, std::size_t> ||
              std::is_same_v<TargetType, uint64>) {
     static_assert(sizeof(std::size_t) == sizeof(uint64));
-    return llvm::ConstantInt::get(*ctx, llvm::APInt(64, (uint64)t, false));
+    return llvm::ConstantInt::get(*ctx,
+                                  fixed_width_apint(64, (uint64)t));
   } else {
     TI_NOT_IMPLEMENTED
   }
