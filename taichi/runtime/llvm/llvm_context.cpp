@@ -719,13 +719,12 @@ llvm::Value *TaichiLLVMContext::get_constant(DataType dt, T t) {
     return t ? llvm::ConstantInt::getTrue(*ctx)
              : llvm::ConstantInt::getFalse(*ctx);
   } else if (is_integral(dt)) {
-    if (is_signed(dt)) {
-      return llvm::ConstantInt::get(
-          *ctx, llvm::APInt(data_type_bits(dt), (uint64_t)t, true));
-    } else {
-      return llvm::ConstantInt::get(
-          *ctx, llvm::APInt(data_type_bits(dt), (uint64_t)t, false));
-    }
+    // APInt stores a fixed-width bit pattern. Passing a negative C++ value
+    // through uint64_t with isSigned=true makes LLVM 20 assert before it can
+    // truncate to the requested width. Unsigned construction preserves the
+    // same low bits for both signed and unsigned Taichi integer constants.
+    return llvm::ConstantInt::get(
+        *ctx, llvm::APInt(data_type_bits(dt), (uint64_t)t, false));
   } else {
     TI_NOT_IMPLEMENTED
   }
@@ -751,12 +750,12 @@ llvm::Value *TaichiLLVMContext::get_constant(T t) {
              : llvm::ConstantInt::getFalse(*ctx);
   } else if (std::is_same_v<TargetType, int32> ||
              std::is_same_v<TargetType, uint32>) {
-    return llvm::ConstantInt::get(*ctx, llvm::APInt(32, (uint64)t, true));
+    return llvm::ConstantInt::get(*ctx, llvm::APInt(32, (uint64)t, false));
   } else if (std::is_same_v<TargetType, int64> ||
              std::is_same_v<TargetType, std::size_t> ||
              std::is_same_v<TargetType, uint64>) {
     static_assert(sizeof(std::size_t) == sizeof(uint64));
-    return llvm::ConstantInt::get(*ctx, llvm::APInt(64, (uint64)t, true));
+    return llvm::ConstantInt::get(*ctx, llvm::APInt(64, (uint64)t, false));
   } else {
     TI_NOT_IMPLEMENTED
   }

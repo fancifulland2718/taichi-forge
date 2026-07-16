@@ -1286,25 +1286,25 @@ void TaskCodeGenLLVM::visit(ConstStmt *stmt) {
         *llvm_context, llvm::APInt(1, (uint64)val.val_uint1(), false));
   } else if (val.dt->is_primitive(PrimitiveTypeID::i8)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
-        *llvm_context, llvm::APInt(8, (uint64)val.val_int8(), true));
+        *llvm_context, llvm::APInt(8, (uint64)val.val_int8(), false));
   } else if (val.dt->is_primitive(PrimitiveTypeID::u8)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
         *llvm_context, llvm::APInt(8, (uint64)val.val_uint8(), false));
   } else if (val.dt->is_primitive(PrimitiveTypeID::i16)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
-        *llvm_context, llvm::APInt(16, (uint64)val.val_int16(), true));
+        *llvm_context, llvm::APInt(16, (uint64)val.val_int16(), false));
   } else if (val.dt->is_primitive(PrimitiveTypeID::u16)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
         *llvm_context, llvm::APInt(16, (uint64)val.val_uint16(), false));
   } else if (val.dt->is_primitive(PrimitiveTypeID::i32)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
-        *llvm_context, llvm::APInt(32, (uint64)val.val_int32(), true));
+        *llvm_context, llvm::APInt(32, (uint64)val.val_int32(), false));
   } else if (val.dt->is_primitive(PrimitiveTypeID::u32)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
         *llvm_context, llvm::APInt(32, (uint64)val.val_uint32(), false));
   } else if (val.dt->is_primitive(PrimitiveTypeID::i64)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
-        *llvm_context, llvm::APInt(64, (uint64)val.val_int64(), true));
+        *llvm_context, llvm::APInt(64, (uint64)val.val_int64(), false));
   } else if (val.dt->is_primitive(PrimitiveTypeID::u64)) {
     llvm_val[stmt] = llvm::ConstantInt::get(
         *llvm_context, llvm::APInt(64, val.val_uint64(), false));
