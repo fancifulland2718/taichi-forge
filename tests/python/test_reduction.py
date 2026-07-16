@@ -142,6 +142,26 @@ def test_mixed_dtype_global_reduction_tls_layout():
     assert total_f64[None] == expected * 0.5
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_mixed_scalar_tensor_reduction_tls_layout():
+    total = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def reduce() -> ti.types.vector(2, ti.i32):
+        local = ti.Vector([0, 0])
+        for _ in range(64):
+            # The global scalar slot is collected before the 8-byte tensor
+            # temporary: the old 4+8 layout needs 16 bytes, the candidate 12.
+            total[None] += 1
+            local += ti.Vector([1, 2])
+        return local
+
+    result = reduce()
+
+    assert total[None] == 64
+    assert tuple(result) == (64, 128)
+
+
 @test_utils.test()
 def test_reduction_different_scale():
     @ti.kernel
