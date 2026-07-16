@@ -49,6 +49,20 @@ ti.compile_kernels([
 
 别名：`ti.parallel_compile(kernels)`。
 
+### 扩展的 `ti.ad.FwdMode` field seed
+
+当前未发布的 Forge 源码允许把一个 dense `ScalarField`、`VectorField` 或
+`MatrixField` 作为 `param` 参数组；该 field 必须具有 dual storage。`seed` 可以是：
+
+- shape 为 `param.shape + element_shape` 的 array；scalar、vector、matrix field 的
+  `element_shape` 分别是 `()`、`(n,)`、`(n, m)`；或
+- 元素总数相同的一维 sequence，按 C row-major 顺序解释，field index 位于 element
+  index 之前。
+
+这一 host 合同对 AoS/SoA placement 相同，并覆盖 0D 与 ND field。只有整个参数组恰好包含
+一个 scalar value 时才提供默认 seed。每个 `FwdMode` context 仍只接受一个参数组；多个
+参数组应分别运行多个 context。loss entry 仍须为 scalar field。
+
 ### `ti.compile_profile(clear_on_enter=True)`
 
 位置：`taichi_forge.tools.compile_profile`，导出为 `ti.compile_profile`。返回类型也导出为

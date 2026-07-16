@@ -54,6 +54,23 @@ Limits:
 
 Alias: `ti.parallel_compile(kernels)`.
 
+### Extended `ti.ad.FwdMode` field seeds
+
+Current Unreleased Forge sources accept one dense `ScalarField`, `VectorField`,
+or `MatrixField` as the `param` group. The field must have dual storage. `seed`
+may be either:
+
+- an array shaped as `param.shape + element_shape`, where `element_shape` is
+  `()` for scalar, `(n,)` for vector, and `(n, m)` for matrix fields; or
+- a flat sequence with the same number of values, interpreted in C row-major
+  order with field indices before element indices.
+
+This host contract is identical for AoS and SoA placement and covers 0-D and
+N-D fields. The default seed is available only when the whole parameter group
+contains one scalar value. `FwdMode` still accepts exactly one parameter group
+per context; use multiple contexts for multiple groups. Loss entries remain
+scalar fields.
+
 ### `ti.compile_profile(clear_on_enter=True)`
 
 Location: `taichi_forge.tools.compile_profile`; exported as

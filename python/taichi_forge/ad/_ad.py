@@ -5,7 +5,7 @@ gradient computation task.
 """
 
 import warnings
-from functools import reduce
+from math import prod
 
 import numpy as np
 import taichi_forge.types.primitive_types as types
@@ -17,6 +17,7 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.kernel_impl import kernel
 from taichi_forge.lang.snode import SNode
+from taichi_forge.lang.util import to_numpy_type
 from taichi_forge.types import ndarray, template
 
 from taichi_forge import _snode
@@ -665,52 +666,74 @@ class FwdMode:
         for ls in self.loss:
             assert isinstance(ls, ScalarField)
 
-        # Currently we only support only one N-D field as a group of parameters,
+        # Currently we support only one N-D field as a group of parameters,
         # which is sufficient for computing Jacobian-vector product(Jvp).
         # For cases with multiple groups of parameters, it requires to run the forward ad multiple times,
         # which is out of scope of the current design for this interface.
 
-        # TODO: support vector field and matrix field
-        assert isinstance(self.param, ScalarField)
+        from taichi_forge.lang.matrix import MatrixField  # pylint: disable=C0415
 
-        def shape_flatten(shape):
-            return reduce((lambda x, y: x * y), list(shape))
-
-        # Handle 0-D field
-        if len(self.param.shape) != 0:
-            parameters_shape_flatten = shape_flatten(self.param.shape)
+        if isinstance(self.param, ScalarField):
+            element_shape = ()
+        elif isinstance(self.param, MatrixField):
+            element_shape = (
+                (self.param.n,)
+                if self.param.ndim == 1
+                else (self.param.n, self.param.m)
+            )
+            member_dtypes = tuple(
+                ScalarField(member).dtype for member in self.param.vars
+            )
+            if any(dtype != member_dtypes[0] for dtype in member_dtypes[1:]):
+                raise TaichiRuntimeError(
+                    "ti.ad.FwdMode() requires a homogeneous VectorField/MatrixField parameter dtype"
+                )
         else:
-            parameters_shape_flatten = 1
+            raise TaichiRuntimeError(
+                "ti.ad.FwdMode() param must be a ScalarField, VectorField, or MatrixField"
+            )
+        if self.param.dual is None:
+            raise TaichiRuntimeError(
+                "ti.ad.FwdMode() parameter has no dual storage; create it with needs_dual=True or ti.root.lazy_dual()"
+            )
 
-        if not self.seed:
-            if parameters_shape_flatten == 1:
+        seed_shape = tuple(self.param.shape) + element_shape
+        parameter_count = prod(seed_shape) if seed_shape else 1
+
+        if self.seed is None:
+            if parameter_count == 1:
                 # Compute the derivative respect to the first variable by default
                 self.seed = [1.0]
             else:
                 raise RuntimeError(
                     "`seed` is not set for non 0-D field, please specify."
-                    " `seed` is a list to specify which parameters the computed derivatives respect to. The length of the `seed` should be same to that of the `parameters`"
+                    " `seed` may be a flat sequence or an array shaped like the parameter field plus its element shape."
                     " E.g. Given a loss `loss = ti.field(float, shape=3)`, parameter `x = ti.field(float, shape=3)`"
                     "      seed = [0, 0, 1] indicates compute derivative respect to the third element of `x`."
                     "      seed = [1, 1, 1] indicates compute the sum of derivatives respect to all three element of `x`, i.e., Jacobian-vector product(Jvp) for each element in `loss`"
                 )
-        else:
-            assert parameters_shape_flatten == len(self.seed)
+
+        seed_array = np.asarray(self.seed, dtype=to_numpy_type(self.param.dtype))
+        if seed_array.shape != seed_shape:
+            if seed_array.ndim != 1 or seed_array.size != parameter_count:
+                raise RuntimeError(
+                    "ti.ad.FwdMode() seed shape mismatch: expected "
+                    f"{seed_shape} or a flat sequence of length {parameter_count}, "
+                    f"got {seed_array.shape}"
+                )
+            seed_array = seed_array.reshape(seed_shape)
+        self._seed_array = np.ascontiguousarray(seed_array)
 
         # Clear gradients
         if self.clear_gradients:
             clear_all_gradients(gradient_type=SNodeGradType.DUAL)
 
-        # Set seed for each variable
-        if len(self.seed) == 1:
-            if len(self.param.shape) == 0:
-                # e.g., x= ti.field(float, shape = ())
-                self.param.dual[None] = 1.0 * self.seed[0]
-            else:
-                # e.g., ti.root.dense(ti.i, 1).place(x.dual)
-                self.param.dual[0] = 1.0 * self.seed[0]
+        # Host seed order is field indices followed by row-major element
+        # indices. MatrixField.from_numpy abstracts over AoS and SoA storage.
+        if seed_shape:
+            self.param.dual.from_numpy(self._seed_array)
         else:
-            self.param.dual.from_numpy(np.array(self.seed, dtype=np.float32))
+            self.param.dual[None] = self._seed_array.item()
 
         # Attach the context manager to the runtime
         self.runtime.fwd_mode_manager = self
@@ -735,16 +758,7 @@ class FwdMode:
         self.kernels_recovered = True
 
     def clear_seed(self):
-        # clear seed values
-        if len(self.seed) == 1:
-            if len(self.param.shape) == 0:
-                # e.g., x= ti.field(float, shape = ())
-                self.param.dual[None] = 0.0
-            else:
-                # e.g., ti.root.dense(ti.i, 1).place(x.dual)
-                self.param.dual[0] = 0.0
-        else:
-            self.param.dual.fill(0)
+        self.param.dual.fill(0)
 
 
 __all__ = [

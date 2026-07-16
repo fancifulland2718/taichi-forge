@@ -78,6 +78,9 @@
   gradient 放入独立 device buffer，并且只在 grad kernel 确实写入时回读；device
   `ti.ndarray` gradient 继续直接使用 device allocation。Torch gradient 的 shape、dtype、
   contiguous layout 或 device 不匹配会在 launch 前被拒绝，不再返回伪正确或不安全梯度。
+- 将 `ti.ad.FwdMode` 参数 seed 从 scalar field 扩展到 CPU、CUDA、Vulkan 的 dense vector
+  与 matrix field。shaped seed 使用 `field_shape + element_shape`，flat seed 使用 row-major
+  顺序；该合同不依赖 AoS/SoA layout，并保留每个 context 只接受一个参数组的既有边界。
 
 ## 0.1.0
 

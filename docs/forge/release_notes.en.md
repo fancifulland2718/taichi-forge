@@ -96,6 +96,11 @@ retroactively attributed to the 0.5.0 artifact:
   direct device allocations. Torch grad shape, dtype, contiguity, and device
   mismatches are rejected before launch instead of producing a false or unsafe
   gradient.
+- Extended `ti.ad.FwdMode` parameter seeding from scalar fields to dense vector
+  and matrix fields on CPU, CUDA, and Vulkan. Shaped seeds follow
+  `field_shape + element_shape`; flat seeds use row-major order. The contract is
+  layout-independent across AoS/SoA and retains the existing one-parameter-
+  group boundary.
 
 ## 0.1.0
 

@@ -1,4 +1,6 @@
 import taichi_forge as ti
+import numpy as np
+import pytest
 from tests import test_utils
 
 
@@ -123,3 +125,63 @@ def test_clear_all_dual_field():
         with ti.ad.FwdMode(loss=loss, param=x):
             clear_dual_test()
         assert y.dual[None] == 4.0
+
+
+@pytest.mark.parametrize("layout", [ti.Layout.AOS, ti.Layout.SOA])
+@test_utils.test()
+def test_fwd_vector_field_seed_layout(layout):
+    param = ti.Vector.field(
+        3, ti.f32, shape=(2,), needs_dual=True, layout=layout
+    )
+    loss = ti.field(ti.f32, shape=(2,), needs_dual=True)
+    seed = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], np.float32)
+
+    @ti.kernel
+    def evaluate():
+        for i in loss:
+            loss[i] = (
+                param[i][0] + 2.0 * param[i][1] + 4.0 * param[i][2]
+            )
+
+    with ti.ad.FwdMode(loss=loss, param=param, seed=seed):
+        evaluate()
+
+    np.testing.assert_allclose(loss.dual.to_numpy(), [17.0, 38.0])
+    np.testing.assert_array_equal(param.dual.to_numpy(), np.zeros((2, 3)))
+
+
+@pytest.mark.parametrize("layout", [ti.Layout.AOS, ti.Layout.SOA])
+@test_utils.test()
+def test_fwd_zero_dim_matrix_field_flat_seed(layout):
+    param = ti.Matrix.field(
+        2, 2, ti.f32, shape=(), needs_dual=True, layout=layout
+    )
+    loss = ti.field(ti.f32, shape=(), needs_dual=True)
+
+    @ti.kernel
+    def evaluate():
+        value = param[None]
+        loss[None] = (
+            value[0, 0]
+            + 2.0 * value[0, 1]
+            + 3.0 * value[1, 0]
+            + 4.0 * value[1, 1]
+        )
+
+    with ti.ad.FwdMode(
+        loss=loss, param=param, seed=[1.0, 2.0, 3.0, 4.0]
+    ):
+        evaluate()
+
+    assert loss.dual[None] == 30.0
+    np.testing.assert_array_equal(param.dual.to_numpy(), np.zeros((2, 2)))
+
+
+@test_utils.test(arch=ti.cpu)
+def test_fwd_matrix_field_seed_shape_mismatch():
+    param = ti.Vector.field(2, ti.f32, shape=(2,), needs_dual=True)
+    loss = ti.field(ti.f32, shape=(), needs_dual=True)
+
+    with pytest.raises(RuntimeError, match="seed shape mismatch"):
+        with ti.ad.FwdMode(loss=loss, param=param, seed=[[1.0, 2.0, 3.0]]):
+            pass
