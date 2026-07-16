@@ -537,7 +537,11 @@ class PyTaichi:
         # directions without a device wait or global Graph submission lock.
         self._active_graph_submissions = 0
         self.grad_replaced = False
-        self.kernels = kernels or []
+        self.kernels = weakref.WeakSet() if kernels is None else kernels
+        # Cold specialization creation is serialized so the global safety
+        # budget remains exact even when separate Python threads compile.
+        self._kernel_compilation_lock = threading.RLock()
+        self.kernel_specialization_limit = 1024
         self._signal_handler_registry = None
         self.unfinalized_fields_builder = {}
         # P3 — frontend IR size-control knobs. Default 0 = disabled (no
@@ -660,7 +664,7 @@ class PyTaichi:
         self._materialize_dirty = True
 
     def clear_compiled_functions(self):
-        for k in self.kernels:
+        for k in tuple(self.kernels):
             k.compiled_kernels.clear()
 
     def finalize_fields_builder(self, builder):
@@ -677,7 +681,7 @@ class PyTaichi:
 
     def get_num_compiled_functions(self):
         count = 0
-        for k in self.kernels:
+        for k in tuple(self.kernels):
             count += len(k.compiled_kernels)
         return count
 
@@ -887,7 +891,7 @@ def reset():
     pytaichi.clear()
     pytaichi = PyTaichi(old_kernels)
     _runtime_generation += 1
-    for k in old_kernels:
+    for k in tuple(old_kernels):
         k.reset()
     _ti_core.reset_default_compile_config()
 

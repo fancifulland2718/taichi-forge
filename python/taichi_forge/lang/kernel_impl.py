@@ -842,6 +842,14 @@ class TaichiCallableTemplateMapper:
 
         arg_features, key = self._extract_features_and_key(args)
         if key not in self.mapping:
+            limit = impl.get_runtime().kernel_specialization_limit
+            if len(self.mapping) >= limit:
+                raise TaichiRuntimeError(
+                    "Callable specialization mapping reached "
+                    f"kernel_specialization_limit={limit}. Reuse a finite "
+                    "set of template arguments, call ti.reset(), or raise "
+                    "the positive limit in ti.init()."
+                )
             self.mapping[key] = self._next_mapping_id
             self._next_mapping_id += 1
         return self.mapping[key], arg_features
@@ -908,7 +916,7 @@ class Kernel:
             if isinstance(arg.annotation, template):
                 self.template_slot_locations.append(i)
         self.mapper = TaichiCallableTemplateMapper(self.arguments, self.template_slot_locations)
-        impl.get_runtime().kernels.append(self)
+        impl.get_runtime().kernels.add(self)
         self.reset()
         self.kernel_cpp = None
         self.compiled_kernels = {}
@@ -993,6 +1001,26 @@ class Kernel:
         if key in self.compiled_kernels:
             return
 
+        # Program owns every C++ Kernel for the whole runtime and compiled
+        # Graphs keep stable Kernel pointers, so transparent LRU deletion is
+        # unsafe. Bound only the cold cache-miss path; cached launches remain
+        # lock-free and continue to work after the budget is reached.
+        with self.runtime._kernel_compilation_lock:
+            if key in self.compiled_kernels:
+                return
+            limit = self.runtime.kernel_specialization_limit
+            compiled = self.runtime.get_num_compiled_functions()
+            if compiled >= limit:
+                raise TaichiRuntimeError(
+                    "Runtime compiled specialization budget reached "
+                    f"kernel_specialization_limit={limit}. Existing "
+                    "specializations remain usable; reuse stable template "
+                    "arguments, call ti.reset(), or raise the positive limit "
+                    "in ti.init()."
+                )
+            self._materialize_uncached(key, args, arg_features)
+
+    def _materialize_uncached(self, key, args, arg_features):
         kernel_name = f"{self.func.__name__}_c{self.kernel_counter}_{key[1]}"
         _logging.trace(f"Compiling kernel {kernel_name} in {self.autodiff_mode}...")
 

@@ -287,6 +287,10 @@ class _SpecialConfig:
         # on every kernel call (useful as a fallback if a user codepath ever
         # bypasses the dirty markers).
         self.materialize_fast_path = True
+        # Positive runtime budget for compiled @ti.kernel specializations.
+        # Stable C++ Kernel pointers make transparent Graph-safe eviction
+        # unavailable, so new cache misses fail clearly at this boundary.
+        self.kernel_specialization_limit = 1024
 
 
 def prepare_sandbox():
@@ -444,6 +448,13 @@ def init(
     env_spec.add("unrolling_kernel_hard_limit")
     env_spec.add("func_inline_depth_limit")
     env_spec.add("materialize_fast_path")
+    env_spec.add("kernel_specialization_limit", int)
+
+    if spec_cfg.kernel_specialization_limit <= 0:
+        raise ValueError(
+            "kernel_specialization_limit must be a positive integer, got "
+            f"{spec_cfg.kernel_specialization_limit}"
+        )
 
     # compiler configurations (ti.cfg):
     for key in dir(cfg):
@@ -469,6 +480,7 @@ def init(
         impl.get_runtime().unrolling_kernel_hard_limit = spec_cfg.unrolling_kernel_hard_limit
         impl.get_runtime().func_inline_depth_limit = spec_cfg.func_inline_depth_limit
         impl.get_runtime()._materialize_fast_path = spec_cfg.materialize_fast_path
+        impl.get_runtime().kernel_specialization_limit = spec_cfg.kernel_specialization_limit
         _logging.set_logging_level(spec_cfg.log_level.lower())
 
     # select arch (backend):

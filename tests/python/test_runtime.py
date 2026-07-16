@@ -61,6 +61,7 @@ init_args = {
     "simplify_before_lower_access": [True, TF],
     "simplify_after_lower_access": [True, TF],
     "kernel_profiler": [False, TF],
+    "kernel_specialization_limit": [1024, [8, 2048]],
     "check_out_of_bound": [False, TF],
     "print_accessor_ir": [False, TF],
     "print_struct_llvm_ir": [False, TF],
@@ -76,6 +77,7 @@ env_configs = ["TI_" + key.upper() for key in init_args.keys()]
 special_init_cfgs = [
     "log_level",
     "gdb_trigger",
+    "kernel_specialization_limit",
 ]
 
 
@@ -151,6 +153,13 @@ def test_init_arch(arch):
 def test_init_bad_arg():
     with pytest.raises(KeyError):
         ti.init(_test_mode=True, debug=True, foo_bar=233)
+
+@pytest.mark.parametrize("limit", [0, -1])
+@test_utils.test(arch=ti.cpu)
+def test_kernel_specialization_limit_must_be_positive(limit):
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        ti.init(_test_mode=True, kernel_specialization_limit=limit)
+
 
 
 @pytest.mark.parametrize(

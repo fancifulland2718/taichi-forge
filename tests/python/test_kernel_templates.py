@@ -1,3 +1,7 @@
+import gc
+import weakref
+
+import pytest
 import taichi_forge as ti
 from tests import test_utils
 
@@ -127,3 +131,40 @@ def test_func_template2():
     for i in range(16):
         for j in range(16):
             assert b[i, j] == 1.0
+
+
+@test_utils.test(arch=ti.cpu)
+def test_dead_kernel_definitions_leave_runtime_registry():
+    runtime = ti.lang.impl.get_runtime()
+    baseline = len(runtime.kernels)
+
+    @ti.kernel
+    def temporary(value: ti.i32) -> ti.i32:
+        return value
+
+    primal_ref = weakref.ref(temporary._primal)
+    adjoint_ref = weakref.ref(temporary._adjoint)
+    assert len(runtime.kernels) == baseline + 2
+
+    del temporary
+    gc.collect()
+
+    assert primal_ref() is None
+    assert adjoint_ref() is None
+    assert len(runtime.kernels) == baseline
+
+
+@test_utils.test(arch=ti.cpu, kernel_specialization_limit=2)
+def test_kernel_specialization_budget_preserves_cache_hits():
+    @ti.kernel
+    def identity(value: ti.template()) -> ti.i32:
+        return value
+
+    assert identity(11) == 11
+    assert identity(22) == 22
+    with pytest.raises(ti.TaichiRuntimeError, match="kernel_specialization_limit=2"):
+        identity(33)
+
+    # Reaching the budget blocks only a new cache miss. Existing compiled
+    # specializations remain valid for Graph and asynchronous launch users.
+    assert identity(22) == 22
