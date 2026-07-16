@@ -115,6 +115,10 @@
   assertion；任意 stride 外部 array 继续明确拒绝。Graph texture descriptor 会在编译前校验
   dimension 和 RW format。LLVM 20 signed constant 现在保留固定宽度 bit pattern，signed quant
   host access 不再导致进程 abort。
+- 混合类型全局归约的 TLS 布局现在会尝试稳定的按大小重排，但只有候选布局严格减少
+  scratch bytes 时才采用；例如同一 offload 中依次出现 f32、f64 reduction 时，每个 TLS 实例
+  的 TLS 从 16 bytes 降为 12 bytes。相同 dtype 的归约次序保持不变，tensor 等非二次幂
+  大小若不能受益则保留原布局，不增加 runtime 分支或额外设备同步。
 
 ## 0.1.0
 

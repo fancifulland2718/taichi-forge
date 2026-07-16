@@ -150,6 +150,12 @@ retroactively attributed to the 0.5.0 artifact:
   remain explicit rejections. Graph texture descriptors validate dimension and
   RW format before compilation. LLVM 20 signed constants now preserve their
   fixed-width bit patterns instead of aborting on signed quant host access.
+- Mixed-type global reductions now try a stable size-ordered TLS layout, but
+  adopt it only when it strictly reduces scratch bytes. For example, f32 then
+  f64 reductions in one offload use 12 bytes per TLS instance instead of 16.
+  Equal-dtype reduction order remains stable, and non-power-of-two tensor
+  layouts keep their original order when the candidate cannot help. This adds
+  no runtime branch or device synchronization.
 
 ## 0.1.0
 
