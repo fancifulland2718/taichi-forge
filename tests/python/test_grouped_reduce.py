@@ -339,6 +339,42 @@ def test_experimental_grouped_reduce_cpu_native_ndarray_wide_dtypes():
     _run_struct_tensor_member_grouped_reduce("two_level")
 
 
+@test_utils.test(arch=ti.cpu, cpu_max_num_threads=4)
+def test_experimental_grouped_reduce_cpu_scratch_is_reused_and_clearable():
+    n = 1 << 18
+    groups = 1024
+    keys = ti.ndarray(ti.i32, shape=n)
+    values = ti.ndarray(ti.i32, shape=n)
+    output = ti.ndarray(ti.i32, shape=groups)
+    keys.from_numpy(np.arange(n, dtype=np.int32) % groups)
+    values.from_numpy(np.ones(n, dtype=np.int32))
+    output.fill(0)
+    workspace = ti.algorithms.GroupedReduceWorkspace(
+        max_items=n, max_groups=groups
+    )
+
+    ti.algorithms.experimental_grouped_reduce(
+        keys, values, output, method="cpu_native", workspace=workspace
+    )
+    prog = impl.get_runtime().prog
+    first_reserved = prog.cpu_grouped_reduce_workspace_bytes()
+    assert 0 < first_reserved <= 8 << 20
+    assert workspace._cpu_native_active
+
+    output.fill(0)
+    ti.algorithms.experimental_grouped_reduce(
+        keys, values, output, method="cpu_native", workspace=workspace
+    )
+    assert prog.cpu_grouped_reduce_workspace_bytes() == first_reserved
+    np.testing.assert_array_equal(
+        output.to_numpy(), np.full(groups, n // groups, dtype=np.int32)
+    )
+
+    workspace.clear()
+    assert prog.cpu_grouped_reduce_workspace_bytes() == 0
+    assert not workspace._cpu_native_active
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_experimental_grouped_reduce_two_level_plan_reuse_cpu():
     workspace = _run_struct_tensor_member_grouped_reduce("two_level", repeat=True)

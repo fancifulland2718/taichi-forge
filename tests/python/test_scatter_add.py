@@ -533,6 +533,68 @@ def test_experimental_scatter_add_cpu_native_ndarray_wide_dtypes():
     assert impl.get_runtime().prog.cpu_scatter_add_workspace_bytes() == 0
 
 
+@test_utils.test(arch=ti.cpu, cpu_max_num_threads=4)
+def test_experimental_scatter_add_cpu_scratch_is_reused_and_clearable():
+    n = 1 << 18
+    groups = 1024
+    values = ti.ndarray(ti.i32, shape=n)
+    indices = ti.ndarray(ti.i32, shape=n)
+    output = ti.ndarray(ti.i32, shape=groups)
+    values.from_numpy(np.ones(n, dtype=np.int32))
+    indices.from_numpy(np.arange(n, dtype=np.int32) % groups)
+    output.fill(0)
+    workspace = ti.algorithms.ScatterAddWorkspace(
+        max_items=n, max_groups=groups
+    )
+
+    ti.algorithms.experimental_scatter_add(
+        values, indices, output, method="cpu_native", workspace=workspace
+    )
+    prog = impl.get_runtime().prog
+    first_reserved = prog.cpu_scatter_add_workspace_bytes()
+    assert 0 < first_reserved <= 8 << 20
+    assert workspace._cpu_native_active
+
+    output.fill(0)
+    ti.algorithms.experimental_scatter_add(
+        values, indices, output, method="cpu_native", workspace=workspace
+    )
+    assert prog.cpu_scatter_add_workspace_bytes() == first_reserved
+    np.testing.assert_array_equal(
+        output.to_numpy(), np.full(groups, n // groups, dtype=np.int32)
+    )
+
+    workspace.clear()
+    assert prog.cpu_scatter_add_workspace_bytes() == 0
+    assert not workspace._cpu_native_active
+
+    # A production-size high-cardinality destination may need a much larger
+    # per-worker matrix. It remains call-scoped instead of permanently raising
+    # the Program's resident scratch high-water mark.
+    large_n = 1 << 20
+    large_values = ti.ndarray(ti.i32, shape=large_n)
+    large_indices = ti.ndarray(ti.i32, shape=large_n)
+    large_output = ti.ndarray(ti.i32, shape=large_n)
+    large_values.fill(1)
+    large_indices.from_numpy(np.arange(large_n, dtype=np.int32))
+    large_output.fill(0)
+    large_workspace = ti.algorithms.ScatterAddWorkspace(
+        max_items=large_n, max_groups=large_n
+    )
+    ti.algorithms.experimental_scatter_add(
+        large_values,
+        large_indices,
+        large_output,
+        method="cpu_native",
+        workspace=large_workspace,
+    )
+    assert large_workspace.workspace_bytes_peak > 8 << 20
+    assert prog.cpu_scatter_add_workspace_bytes() == 0
+    np.testing.assert_array_equal(
+        large_output.to_numpy(), np.ones(large_n, dtype=np.int32)
+    )
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_scatter_add_two_level_ndarray_struct_and_dense_dst():
     cases = [

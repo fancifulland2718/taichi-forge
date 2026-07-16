@@ -23,6 +23,7 @@
 #include "taichi/analysis/gather_snode_tree_dependencies.h"
 
 #include <chrono>
+#include <cstddef>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -302,8 +303,9 @@ void Program::validate_snode_tree_dependencies(
 std::atomic<int> Program::num_instances_;
 
 namespace {
-std::atomic<std::size_t> cpu_scatter_add_workspace_bytes_peak{0};
-std::atomic<std::size_t> cpu_grouped_reduce_workspace_bytes_peak{0};
+constexpr std::size_t kCpuPrimitiveMaxLocalWorkspaceBytes = 64ull << 20;
+constexpr std::size_t kCpuPrimitiveRetainedScratchBytes = 8ull << 20;
+std::atomic<std::uint64_t> next_cpu_primitive_execution_domain{1};
 
 thread_local Program *active_cpu_primitive_program = nullptr;
 
@@ -361,21 +363,81 @@ class ScopedRuntimeTransferStatistics {
   int uncaught_exceptions_;
 };
 
-void update_cpu_scatter_add_workspace_peak(std::size_t bytes) {
-  auto current = cpu_scatter_add_workspace_bytes_peak.load(std::memory_order_relaxed);
-  while (current < bytes &&
-         !cpu_scatter_add_workspace_bytes_peak.compare_exchange_weak(
-             current, bytes, std::memory_order_relaxed)) {
-  }
+std::uint64_t cpu_primitive_execution_domain() {
+  thread_local const std::uint64_t domain =
+      next_cpu_primitive_execution_domain.fetch_add(1,
+                                                    std::memory_order_relaxed);
+  return domain;
 }
 
-void update_cpu_grouped_reduce_workspace_peak(std::size_t bytes) {
-  auto current =
-      cpu_grouped_reduce_workspace_bytes_peak.load(std::memory_order_relaxed);
-  while (current < bytes &&
-         !cpu_grouped_reduce_workspace_bytes_peak.compare_exchange_weak(
-             current, bytes, std::memory_order_relaxed)) {
+struct CpuPrimitiveScratch {
+  std::unique_ptr<std::max_align_t[]> storage;
+  std::size_t capacity_words{0};
+
+  std::size_t allocated_bytes() const noexcept {
+    return capacity_words * sizeof(std::max_align_t);
   }
+
+  template <typename T>
+  T *zeroed(std::size_t items) {
+    TI_ERROR_IF(items > std::numeric_limits<std::size_t>::max() / sizeof(T),
+                "CPU primitive scratch size overflowed.");
+    const std::size_t bytes = items * sizeof(T);
+    const std::size_t words =
+        (bytes + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t);
+    if (words > capacity_words) {
+      storage = std::make_unique<std::max_align_t[]>(words);
+      capacity_words = words;
+    }
+    auto *result = reinterpret_cast<T *>(storage.get());
+    std::fill_n(result, items, T{});
+    return result;
+  }
+};
+
+template <typename T>
+class CpuPrimitiveScratchBuffer {
+ public:
+  CpuPrimitiveScratchBuffer(PrimitiveWorkspaceFamily family,
+                            std::size_t items) {
+    TI_ERROR_IF(items > std::numeric_limits<std::size_t>::max() / sizeof(T),
+                "CPU primitive scratch size overflowed.");
+    const std::size_t bytes = items * sizeof(T);
+    if (bytes <= kCpuPrimitiveRetainedScratchBytes) {
+      TI_ASSERT(active_cpu_primitive_program != nullptr);
+      auto lease =
+          active_cpu_primitive_program->primitive_workspace_arena()
+              .acquire<CpuPrimitiveScratch>(
+                  {PrimitiveWorkspaceBackend::cpu, family,
+                   cpu_primitive_execution_domain(), 0},
+                  [] { return std::make_shared<CpuPrimitiveScratch>(); });
+      retained_ = std::make_unique<ScratchLease>(std::move(lease));
+      data_ = retained_->operator->()->template zeroed<T>(items);
+      return;
+    }
+    transient_.assign(items, T{});
+    data_ = transient_.data();
+  }
+
+  T *data() const noexcept {
+    return data_;
+  }
+
+ private:
+  using ScratchLease =
+      PrimitiveWorkspaceArena::Lease<CpuPrimitiveScratch>;
+  std::unique_ptr<ScratchLease> retained_;
+  std::vector<T> transient_;
+  T *data_{nullptr};
+};
+
+std::size_t cpu_primitive_workspace_bytes(
+    const Program *program,
+    PrimitiveWorkspaceFamily family) {
+  return static_cast<std::size_t>(
+      program->primitive_workspace_arena()
+          .snapshot(PrimitiveWorkspaceBackend::cpu, family)
+          .reserved_bytes);
 }
 
 uint32_t cpu_sortable_f32_key(float value, int nan_policy) {
@@ -2336,12 +2398,13 @@ std::size_t cpu_scatter_add_typed(const T *src_ptr,
                                   int target_threads) {
   TI_ERROR_IF(!src_ptr || !dst_ptr,
               "CPU native scatter-add received a null data pointer.");
-  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
   const std::size_t workspace_bytes =
       static_cast<std::size_t>(target_threads) * dst_items * sizeof(T);
-  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
-    std::vector<T> partial(static_cast<std::size_t>(target_threads) * dst_items,
-                           T{});
+  if (target_threads > 1 &&
+      workspace_bytes <= kCpuPrimitiveMaxLocalWorkspaceBytes) {
+    CpuPrimitiveScratchBuffer<T> partial(
+        PrimitiveWorkspaceFamily::scatter_add,
+        static_cast<std::size_t>(target_threads) * dst_items);
     CpuScatterAddTaskContext<T> ctx;
     ctx.src = src_ptr;
     ctx.indices = indices_ptr;
@@ -2355,7 +2418,6 @@ std::size_t cpu_scatter_add_typed(const T *src_ptr,
              cpu_scatter_add_count_task<T>);
     pool->run(target_threads, target_threads, &ctx,
              cpu_scatter_add_merge_task<T>);
-    update_cpu_scatter_add_workspace_peak(workspace_bytes);
     return workspace_bytes;
   }
   for (std::size_t i = 0; i < n; ++i) {
@@ -2379,12 +2441,13 @@ std::size_t cpu_scatter_add_strided_typed(const uint8_t *src_ptr,
                                           int target_threads) {
   TI_ERROR_IF(!src_ptr || !dst_ptr,
               "CPU native strided scatter-add received a null data pointer.");
-  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
   const std::size_t workspace_bytes =
       static_cast<std::size_t>(target_threads) * dst_items * sizeof(T);
-  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
-    std::vector<T> partial(static_cast<std::size_t>(target_threads) * dst_items,
-                           T{});
+  if (target_threads > 1 &&
+      workspace_bytes <= kCpuPrimitiveMaxLocalWorkspaceBytes) {
+    CpuPrimitiveScratchBuffer<T> partial(
+        PrimitiveWorkspaceFamily::scatter_add,
+        static_cast<std::size_t>(target_threads) * dst_items);
     CpuStridedScatterAddTaskContext<T> ctx;
     ctx.src = src_ptr;
     ctx.indices = indices_ptr;
@@ -2400,7 +2463,6 @@ std::size_t cpu_scatter_add_strided_typed(const uint8_t *src_ptr,
              cpu_strided_scatter_add_count_task<T>);
     pool->run(target_threads, target_threads, &ctx,
              cpu_strided_scatter_add_merge_task<T>);
-    update_cpu_scatter_add_workspace_peak(workspace_bytes);
     return workspace_bytes;
   }
   for (std::size_t i = 0; i < n; ++i) {
@@ -2428,13 +2490,13 @@ std::size_t cpu_scatter_add_strided_io_typed(const uint8_t *src_ptr,
                                              int target_threads) {
   TI_ERROR_IF(!src_ptr || !dst_ptr,
               "CPU native strided scatter-add received a null data pointer.");
-  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
   const std::size_t workspace_bytes =
       static_cast<std::size_t>(target_threads) * dst_items * sizeof(T);
-  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
-    std::vector<T> partial(static_cast<std::size_t>(target_threads) *
-                               dst_items,
-                           T{});
+  if (target_threads > 1 &&
+      workspace_bytes <= kCpuPrimitiveMaxLocalWorkspaceBytes) {
+    CpuPrimitiveScratchBuffer<T> partial(
+        PrimitiveWorkspaceFamily::scatter_add,
+        static_cast<std::size_t>(target_threads) * dst_items);
     CpuStridedScatterAddIoTaskContext<T> ctx;
     ctx.src = src_ptr;
     ctx.indices = indices_ptr;
@@ -2452,7 +2514,6 @@ std::size_t cpu_scatter_add_strided_io_typed(const uint8_t *src_ptr,
              cpu_strided_scatter_add_io_count_task<T>);
     pool->run(target_threads, target_threads, &ctx,
              cpu_strided_scatter_add_io_merge_task<T>);
-    update_cpu_scatter_add_workspace_peak(workspace_bytes);
     return workspace_bytes;
   }
   for (std::size_t i = 0; i < n; ++i) {
@@ -2486,7 +2547,6 @@ std::size_t cpu_scatter_add_packed_strided_io_typed(
               "CPU native packed scatter-add received a null data pointer.");
   TI_ERROR_IF(lane_count <= 0,
               "CPU native packed scatter-add received an invalid lane count.");
-  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
   const auto lanes = static_cast<std::size_t>(lane_count);
   TI_ERROR_IF(dst_items >
                   std::numeric_limits<std::size_t>::max() / lanes,
@@ -2502,8 +2562,10 @@ std::size_t cpu_scatter_add_packed_strided_io_typed(
                   std::numeric_limits<std::size_t>::max() / sizeof(T),
               "CPU native packed scatter-add workspace byte size overflowed.");
   const std::size_t workspace_bytes = workspace_items * sizeof(T);
-  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
-    std::vector<T> partial(workspace_items, T{});
+  if (target_threads > 1 &&
+      workspace_bytes <= kCpuPrimitiveMaxLocalWorkspaceBytes) {
+    CpuPrimitiveScratchBuffer<T> partial(
+        PrimitiveWorkspaceFamily::scatter_add, workspace_items);
     CpuPackedScatterAddIoTaskContext<T> ctx;
     ctx.src = src_ptr;
     ctx.indices = indices_ptr;
@@ -2522,7 +2584,6 @@ std::size_t cpu_scatter_add_packed_strided_io_typed(
              cpu_packed_scatter_add_io_count_task<T>);
     pool->run(target_threads, target_threads, &ctx,
              cpu_packed_scatter_add_io_merge_task<T>);
-    update_cpu_scatter_add_workspace_peak(workspace_bytes);
     return workspace_bytes;
   }
   for (std::size_t i = 0; i < n; ++i) {
@@ -2628,12 +2689,12 @@ std::size_t cpu_bucket_builder_typed(const int32_t *keys_ptr,
   const int target_threads = static_cast<int>(
       std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
                             static_cast<std::size_t>(max_threads)));
-  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
   const std::size_t parallel_workspace =
       static_cast<std::size_t>(target_threads) * num_bins * sizeof(int32_t) *
       2;
   const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads) &&
-                            parallel_workspace <= kMaxWorkspaceBytes;
+                            parallel_workspace <=
+                                kCpuPrimitiveMaxLocalWorkspaceBytes;
 
   if (use_parallel) {
     std::vector<int32_t> partial(
@@ -2723,12 +2784,12 @@ std::size_t cpu_bucket_builder_raw(const int32_t *keys_ptr,
   const int target_threads = static_cast<int>(
       std::min<std::size_t>((n + chunk_items - 1) / chunk_items,
                             static_cast<std::size_t>(max_threads)));
-  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
   const std::size_t parallel_workspace =
       static_cast<std::size_t>(target_threads) * num_bins * sizeof(int32_t) *
       2;
   const bool use_parallel = cpu_use_parallel_aggregation(n, target_threads) &&
-                            parallel_workspace <= kMaxWorkspaceBytes;
+                            parallel_workspace <=
+                                kCpuPrimitiveMaxLocalWorkspaceBytes;
 
   if (use_parallel) {
     std::vector<int32_t> partial(
@@ -2959,13 +3020,13 @@ std::size_t cpu_grouped_reduce_typed(const int32_t *keys_ptr,
   if (n == 0) {
     return 0;
   }
-  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
   const std::size_t workspace_bytes =
       static_cast<std::size_t>(target_threads) * num_groups * sizeof(T);
-  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
-    std::vector<T> partial(static_cast<std::size_t>(target_threads) *
-                               num_groups,
-                           T{});
+  if (target_threads > 1 &&
+      workspace_bytes <= kCpuPrimitiveMaxLocalWorkspaceBytes) {
+    CpuPrimitiveScratchBuffer<T> partial(
+        PrimitiveWorkspaceFamily::grouped,
+        static_cast<std::size_t>(target_threads) * num_groups);
     CpuGroupedReduceTaskContext<T> ctx;
     ctx.keys = keys_ptr;
     ctx.values = values_ptr;
@@ -2979,7 +3040,6 @@ std::size_t cpu_grouped_reduce_typed(const int32_t *keys_ptr,
              cpu_grouped_reduce_count_task<T>);
     pool->run(target_threads, target_threads, &ctx,
              cpu_grouped_reduce_merge_task<T>);
-    update_cpu_grouped_reduce_workspace_peak(workspace_bytes);
     return workspace_bytes;
   }
 
@@ -3008,13 +3068,13 @@ std::size_t cpu_grouped_reduce_strided_typed(const int32_t *keys_ptr,
   if (n == 0) {
     return 0;
   }
-  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
   const std::size_t workspace_bytes =
       static_cast<std::size_t>(target_threads) * num_groups * sizeof(T);
-  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
-    std::vector<T> partial(static_cast<std::size_t>(target_threads) *
-                               num_groups,
-                           T{});
+  if (target_threads > 1 &&
+      workspace_bytes <= kCpuPrimitiveMaxLocalWorkspaceBytes) {
+    CpuPrimitiveScratchBuffer<T> partial(
+        PrimitiveWorkspaceFamily::grouped,
+        static_cast<std::size_t>(target_threads) * num_groups);
     CpuStridedGroupedReduceTaskContext<T> ctx;
     ctx.keys = keys_ptr;
     ctx.values = values_ptr;
@@ -3030,7 +3090,6 @@ std::size_t cpu_grouped_reduce_strided_typed(const int32_t *keys_ptr,
              cpu_strided_grouped_reduce_count_task<T>);
     pool->run(target_threads, target_threads, &ctx,
              cpu_strided_grouped_reduce_merge_task<T>);
-    update_cpu_grouped_reduce_workspace_peak(workspace_bytes);
     return workspace_bytes;
   }
 
@@ -3069,13 +3128,13 @@ std::size_t cpu_grouped_reduce_strided_io_typed(const uint8_t *keys_ptr,
   if (n == 0) {
     return 0;
   }
-  constexpr std::size_t kMaxWorkspaceBytes = 64ull << 20;
   const std::size_t workspace_bytes =
       static_cast<std::size_t>(target_threads) * num_groups * sizeof(T);
-  if (target_threads > 1 && workspace_bytes <= kMaxWorkspaceBytes) {
-    std::vector<T> partial(static_cast<std::size_t>(target_threads) *
-                               num_groups,
-                           T{});
+  if (target_threads > 1 &&
+      workspace_bytes <= kCpuPrimitiveMaxLocalWorkspaceBytes) {
+    CpuPrimitiveScratchBuffer<T> partial(
+        PrimitiveWorkspaceFamily::grouped,
+        static_cast<std::size_t>(target_threads) * num_groups);
     CpuStridedGroupedReduceIoTaskContext<T> ctx;
     ctx.keys = keys_ptr;
     ctx.values = values_ptr;
@@ -3095,7 +3154,6 @@ std::size_t cpu_grouped_reduce_strided_io_typed(const uint8_t *keys_ptr,
              cpu_strided_grouped_reduce_io_count_task<T>);
     pool->run(target_threads, target_threads, &ctx,
              cpu_strided_grouped_reduce_io_merge_task<T>);
-    update_cpu_grouped_reduce_workspace_peak(workspace_bytes);
     return workspace_bytes;
   }
 
@@ -18240,7 +18298,13 @@ std::size_t Program::cpu_scatter_add_dense_field_indices_field(
 }
 
 std::size_t Program::cpu_scatter_add_workspace_bytes() const {
-  return cpu_scatter_add_workspace_bytes_peak.load(std::memory_order_relaxed);
+  return cpu_primitive_workspace_bytes(
+      this, PrimitiveWorkspaceFamily::scatter_add);
+}
+
+void Program::cpu_scatter_add_clear_workspace() {
+  primitive_workspace_arena_.clear(PrimitiveWorkspaceBackend::cpu,
+                                   PrimitiveWorkspaceFamily::scatter_add);
 }
 
 bool Program::cpu_bucket_builder_available() const {
@@ -18767,7 +18831,13 @@ std::size_t Program::cpu_grouped_reduce_strided_keys_ndarray(
 }
 
 std::size_t Program::cpu_grouped_reduce_workspace_bytes() const {
-  return cpu_grouped_reduce_workspace_bytes_peak.load(std::memory_order_relaxed);
+  return cpu_primitive_workspace_bytes(this,
+                                       PrimitiveWorkspaceFamily::grouped);
+}
+
+void Program::cpu_grouped_reduce_clear_workspace() {
+  primitive_workspace_arena_.clear(PrimitiveWorkspaceBackend::cpu,
+                                   PrimitiveWorkspaceFamily::grouped);
 }
 
 std::pair<const ArgPackType *, size_t>

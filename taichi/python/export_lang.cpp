@@ -2067,6 +2067,9 @@ void export_lang(py::module &m) {
        .def("cpu_scatter_add_available", &Program::cpu_scatter_add_available)
        .def("cpu_scatter_add_workspace_bytes",
             &Program::cpu_scatter_add_workspace_bytes)
+       .def("cpu_scatter_add_clear_workspace",
+            &Program::cpu_scatter_add_clear_workspace,
+            py::call_guard<py::gil_scoped_release>())
        .def("cpu_scatter_add_ndarray", tracked_native_program_method(&Program::cpu_scatter_add_ndarray),
             py::arg("src"), py::arg("indices"), py::arg("dst"),
             py::arg("value_type"), py::call_guard<py::gil_scoped_release>())
@@ -2139,6 +2142,9 @@ void export_lang(py::module &m) {
             py::arg("op"), py::call_guard<py::gil_scoped_release>())
        .def("cpu_grouped_reduce_workspace_bytes",
             &Program::cpu_grouped_reduce_workspace_bytes)
+       .def("cpu_grouped_reduce_clear_workspace",
+            &Program::cpu_grouped_reduce_clear_workspace,
+            py::call_guard<py::gil_scoped_release>())
        .def("cpu_grouped_reduce_i32_ndarray",
             tracked_native_program_method(&Program::cpu_grouped_reduce_i32_ndarray), py::arg("keys"),
             py::arg("values"), py::arg("output"), py::arg("op"),

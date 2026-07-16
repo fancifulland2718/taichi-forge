@@ -6372,9 +6372,10 @@ class IndexedCopyWorkspace:
 class ScatterAddWorkspace:
     """Workspace metadata for experimental indexed scatter-add.
 
-    Native paths currently use no extra device workspace. The object mirrors the
-    other experimental primitive workspaces so future segmented or bucketed
-    implementations can report temporary storage without changing the API.
+    CPU-native paths may reuse bounded, Program-owned host scratch for parallel
+    partial sums. Larger host scratch remains call-scoped, while GPU-native
+    storage is owned by its backend. This object reports that storage and makes
+    retained state explicitly clearable without exposing backend allocations.
     """
 
     def __init__(self, max_items=None, max_groups=None):
@@ -6382,6 +6383,7 @@ class ScatterAddWorkspace:
         self.max_groups = max_groups
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
+        self._cpu_native_active = False
         self._vulkan_native_active = False
         self._native_scatter_add_plan = None
         self._native_scatter_add_plans = {}
@@ -6463,6 +6465,8 @@ class ScatterAddWorkspace:
 
     def _mark_native_scatter_add_backend_active(self, backend, temp_bytes):
         temp_bytes = 0 if temp_bytes is None else temp_bytes
+        if backend and backend.startswith("cpu_"):
+            self._cpu_native_active = True
         if backend and backend.startswith("vulkan_"):
             self._vulkan_native_active = True
         self.workspace_bytes_current = max(self.workspace_bytes_current, temp_bytes)
@@ -6804,6 +6808,11 @@ class ScatterAddWorkspace:
         return scratch
 
     def clear(self):
+        if self._cpu_native_active:
+            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            _call_optional_prog_method(prog, "cpu_scatter_add_clear_workspace")
         if self._vulkan_native_active:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -6816,6 +6825,7 @@ class ScatterAddWorkspace:
             self._two_level_transform_workspace.clear()
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
+        self._cpu_native_active = False
         self._vulkan_native_active = False
         self._native_scatter_add_plan = None
         self._native_scatter_add_plans.clear()
@@ -7023,8 +7033,10 @@ class GroupedReduceWorkspace:
     """Workspace for experimental grouped reductions.
 
     Native paths build fixed-bin bucket ranges and then reduce each bucket.
-    The Python-owned ndarrays keep the external API call free of repeated
-    allocation once the workspace is reused.
+    Python-owned ndarrays cover staged paths; CPU-native parallel partials use
+    bounded, Program-owned host scratch, and GPU-native storage stays
+    backend-owned. Reusing this object avoids repeated allocation while keeping
+    retained state observable and explicitly clearable.
     """
 
     def __init__(self, max_items=None, max_groups=None):
@@ -7046,6 +7058,7 @@ class GroupedReduceWorkspace:
         self._staged_member_buffers = {}
         self._staged_member_transform_workspace = None
         self._packed_scatter_add_workspace = None
+        self._cpu_native_active = False
         self._vulkan_native_active = False
 
     def check_shape(self, n, num_groups):
@@ -7059,6 +7072,11 @@ class GroupedReduceWorkspace:
             )
 
     def clear(self):
+        if self._cpu_native_active:
+            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            _call_optional_prog_method(prog, "cpu_grouped_reduce_clear_workspace")
         if self._vulkan_native_active:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -7077,6 +7095,7 @@ class GroupedReduceWorkspace:
             self._packed_scatter_add_workspace.clear()
         self._packed_scatter_add_workspace = None
         self._clear_native_grouped_reduce_plans()
+        self._cpu_native_active = False
         self._vulkan_native_active = False
 
     def _reserve_bytes(self, bytes_used):
@@ -7096,6 +7115,8 @@ class GroupedReduceWorkspace:
         self._packed_grouped_reduce_plan_groups.clear()
 
     def _mark_native_grouped_reduce_backend_active(self, backend, temp_bytes):
+        if backend.startswith("cpu_"):
+            self._cpu_native_active = True
         if backend.startswith("vulkan_"):
             self._vulkan_native_active = True
         self.workspace_bytes_peak = max(

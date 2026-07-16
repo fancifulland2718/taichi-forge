@@ -1932,6 +1932,8 @@ class TI_DLL_EXPORT Program {
 
   std::size_t cpu_scatter_add_workspace_bytes() const;
 
+  void cpu_scatter_add_clear_workspace();
+
   bool cpu_bucket_builder_available() const;
 
   std::size_t cpu_bucket_builder_i32_ndarray(Ndarray *keys,
@@ -2008,6 +2010,8 @@ class TI_DLL_EXPORT Program {
                                              int op);
 
   std::size_t cpu_grouped_reduce_workspace_bytes() const;
+
+  void cpu_grouped_reduce_clear_workspace();
 
   bool vulkan_radix_sort_available() const;
 
