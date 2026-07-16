@@ -635,6 +635,20 @@ selected by `ti.init()`. A mismatch raises `TaichiRuntimeError` before creating
 the backend builder. Forge does not silently replace the requested target and
 does not currently claim cross-architecture compilation.
 
+CUDA AOT uses an explicit artifact target instead of treating the build GPU as
+the distribution contract. The default target is compute capability 60 with
+its derived PTX 50 floor. Select a newer exact target with, for example,
+`caps=[ti.DeviceCapability.cuda_compute_capability(86)]`. The target must be at
+least 60 and must be supported exactly by Forge's bundled LLVM NVPTX backend.
+Forge records both values in `aot_metadata.json`; the LLVM AOT loader validates
+the active device and its selected PTX target before registering any kernel.
+Choosing a newer target can enable target-specific codegen but deliberately
+narrows the set of loadable GPUs. This mechanism uses the CUDA Driver API and
+does not add a CUDART or CUDA Toolkit runtime dependency. CUDA LLVM AOT
+artifacts created before this metadata contract must be rebuilt; the loader
+rejects a missing sidecar rather than guessing requirements from the build
+machine.
+
 ## Graph APIs
 
 Dense Field-specific layouts, lifetime, concurrency, AD, and backend behavior

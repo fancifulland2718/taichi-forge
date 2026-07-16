@@ -576,6 +576,16 @@ print(err.to_float())
 `TaichiRuntimeError`。Forge 不会静默替换请求的 target，当前也不声明支持 cross-arch
 编译。
 
+CUDA AOT 使用显式 artifact target，不把构建机 GPU 当作发行合同。默认 target 为 compute
+capability 60，并派生 PTX 50 下限；可通过例如
+`caps=[ti.DeviceCapability.cuda_compute_capability(86)]` 选择更高的精确 target。target 必须
+不低于 60，并且必须是 Forge 内置 LLVM NVPTX backend 精确支持的值。Forge 会把 compute
+capability 与 PTX 写入 `aot_metadata.json`；LLVM AOT loader 在注册任何 kernel 前验证 active
+device 及其选定 PTX target。更高 target 可以开放 target-specific codegen，但会有意缩小可
+加载 GPU 范围。该机制只使用 CUDA Driver API，不增加 CUDART 或 CUDA Toolkit runtime 依赖。
+此 metadata 合同建立前生成的 CUDA LLVM AOT artifact 必须重新构建；loader 会拒绝缺失
+sidecar 的产物，而不会根据构建机猜测能力要求。
+
 ## Graph API
 
 Dense Field 专属 layout、生命周期、并发、AD 与后端行为见

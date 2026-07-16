@@ -97,6 +97,10 @@ class CUDAContext {
     return codegen_compute_capability_;
   }
 
+  int get_ptx_version() const {
+    return ptx_version_;
+  }
+
   bool supports_mem_pool() const {
     return supports_mem_pool_;
   }

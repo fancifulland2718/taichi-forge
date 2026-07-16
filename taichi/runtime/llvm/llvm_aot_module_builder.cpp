@@ -1,17 +1,77 @@
 #include "taichi/runtime/llvm/llvm_aot_module_builder.h"
 
 #include <algorithm>
+#include <fstream>
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
+#include "taichi/runtime/llvm/llvm_aot_metadata.h"
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
+#include "taichi/rhi/cuda/cuda_capability.h"
 
 namespace taichi::lang {
+
+LlvmAotModuleBuilder::LlvmAotModuleBuilder(
+    KernelCompilationManager &compilation_manager,
+    const CompileConfig &compile_config,
+    LlvmProgramImpl *prog,
+    const DeviceCapabilityConfig &caps)
+    : compilation_manager_(compilation_manager),
+      compile_config_(compile_config),
+      prog_(prog),
+      caps_(caps) {
+  if (compile_config_.arch != Arch::cuda) {
+    return;
+  }
+
+  constexpr int kDefaultCudaAotComputeCapability = 60;
+  int target = caps_.contains(DeviceCapability::cuda_compute_capability)
+                   ? static_cast<int>(caps_.get(
+                         DeviceCapability::cuda_compute_capability))
+                   : kDefaultCudaAotComputeCapability;
+  const auto resolution =
+      cuda::detail::resolve_compute_capability_target(target);
+  TI_ERROR_IF(
+      target < kDefaultCudaAotComputeCapability ||
+          resolution.codegen_compute_capability != target,
+      "Unsupported CUDA AOT target compute capability {}. Choose an exact "
+      "LLVM-supported target at or above 60.",
+      target);
+
+  if (caps_.contains(DeviceCapability::cuda_ptx_version)) {
+    TI_ERROR_IF(
+        caps_.get(DeviceCapability::cuda_ptx_version) !=
+            static_cast<uint32_t>(resolution.ptx_version),
+        "CUDA AOT target {} requires PTX {}, but caps requested PTX {}.",
+        target, resolution.ptx_version,
+        caps_.get(DeviceCapability::cuda_ptx_version));
+  }
+  caps_.set(DeviceCapability::cuda_compute_capability, target);
+  caps_.set(DeviceCapability::cuda_ptx_version, resolution.ptx_version);
+}
 
 void LlvmAotModuleBuilder::dump(const std::string &output_dir,
                                 const std::string &filename) const {
   LlvmOfflineCacheFileWriter writer;
   writer.set_data(std::move(cache_));
   writer.dump(output_dir);
+
+  if (compile_config_.arch == Arch::cuda) {
+    LLVM::LlvmAotMetadata metadata;
+    for (const auto capability : {
+             DeviceCapability::cuda_compute_capability,
+             DeviceCapability::cuda_ptx_version,
+         }) {
+      metadata.required_caps[to_string(capability)] = caps_.get(capability);
+    }
+    const std::string json =
+        liong::json::print(liong::json::serialize(metadata));
+    std::fstream f(
+        taichi::join_path(output_dir, LLVM::kLlvmAotMetadataFilename),
+                   std::ios::trunc | std::ios::out);
+    TI_ERROR_IF(!f.is_open(), "Cannot write CUDA AOT metadata in {}",
+                output_dir);
+    f.write(json.data(), json.size());
+  }
 
   dump_graph(output_dir);
 }
@@ -69,7 +129,7 @@ void LlvmAotModuleBuilder::add_field_per_backend(const std::string &identifier,
 
 LLVMCompiledKernel LlvmAotModuleBuilder::compile_kernel(Kernel *kernel) {
   const auto &ckd =
-      compilation_manager_.load_or_compile(compile_config_, {}, *kernel);
+      compilation_manager_.load_or_compile(compile_config_, caps_, *kernel);
   TI_ASSERT(arch_uses_llvm(ckd.arch()));
   return dynamic_cast<const LLVM::CompiledKernelData &>(ckd)
       .get_internal_data()

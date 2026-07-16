@@ -43,8 +43,8 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   LLVM::CompiledKernelData::InternalData data;
   auto codegen = [&]() {
     TI_COMPILE_PROFILER("cpp.compile.llvm.codegen_create");
-    return KernelCodeGen::create(compile_config, &kernel_def, &chi_ir,
-                                 *config_.tlctx);
+    return KernelCodeGen::create(compile_config, device_caps, &kernel_def,
+                                 &chi_ir, *config_.tlctx);
   }();
   data.compiled_data = [&]() {
     TI_COMPILE_PROFILER("cpp.compile.llvm.emit_module");

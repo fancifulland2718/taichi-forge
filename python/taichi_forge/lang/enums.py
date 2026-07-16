@@ -43,5 +43,11 @@ class DeviceCapability:
     spirv_has_non_semantic_info = "spirv_has_non_semantic_info"
     spirv_has_no_integer_wrap_decoration = "spirv_has_no_integer_wrap_decoration"
 
+    @staticmethod
+    def cuda_compute_capability(value):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("CUDA compute capability must be a positive integer such as 60, 86, or 90")
+        return f"cuda_compute_capability={value}"
+
 
 __all__ = ["Layout", "AutodiffMode", "SNodeGradType", "Format", "DeviceCapability"]

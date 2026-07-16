@@ -1,8 +1,51 @@
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
+
+#include <fstream>
+#include <iterator>
+
 #include "taichi/runtime/llvm/aot_graph_data.h"
+#include "taichi/rhi/cuda/cuda_context.h"
 
 namespace taichi::lang {
 namespace LLVM {
+
+LlvmAotModule::LlvmAotModule(
+    const std::string &module_path,
+    LlvmRuntimeExecutor *executor,
+    std::unique_ptr<LLVM::KernelLauncher> kernel_launcher)
+    : executor_(executor),
+      kernel_launcher_(std::move(kernel_launcher)),
+      cache_reader_(LlvmOfflineCacheFileReader::make(module_path)) {
+  TI_ASSERT(executor_ != nullptr);
+
+  if (executor_->get_config().arch == Arch::cuda) {
+    const std::string metadata_path =
+        taichi::join_path(module_path, kLlvmAotMetadataFilename);
+    std::ifstream stream(metadata_path, std::ios::in | std::ios::binary);
+    TI_ERROR_IF(!stream.is_open(),
+                "CUDA AOT artifact is missing required capability metadata "
+                "at {}. Rebuild the artifact with the current Forge AOT "
+                "compiler.",
+                metadata_path);
+    const std::string contents((std::istreambuf_iterator<char>(stream)),
+                               std::istreambuf_iterator<char>());
+    LlvmAotMetadata metadata;
+    auto json = liong::json::parse(contents.data(),
+                                   contents.data() + contents.size());
+    liong::json::deserialize(json, metadata);
+    for (const auto &[key, value] : metadata.required_caps) {
+      required_caps_.set(str2devcap(key), value);
+    }
+
+    const auto &cuda_context = CUDAContext::get_instance();
+    validate_cuda_aot_metadata(metadata,
+                               cuda_context.get_compute_capability(),
+                               cuda_context.get_ptx_version());
+  }
+
+  const std::string graph_path = fmt::format("{}/graphs.tcb", module_path);
+  read_from_binary_file(graphs_, graph_path);
+}
 
 FunctionType LlvmAotModule::convert_module_to_function(
     const std::string &name,

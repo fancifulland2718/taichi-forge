@@ -36,6 +36,7 @@ KernelCodeGen::KernelCodeGen(const CompileConfig &compile_config,
 
 std::unique_ptr<KernelCodeGen> KernelCodeGen::create(
     const CompileConfig &compile_config,
+    const DeviceCapabilityConfig &device_caps,
     const Kernel *kernel,
     IRNode *ir,
     TaichiLLVMContext &tlctx) {
@@ -46,8 +47,8 @@ std::unique_ptr<KernelCodeGen> KernelCodeGen::create(
                                               tlctx);
   } else if (arch == Arch::cuda) {
 #if defined(TI_WITH_CUDA)
-    return std::make_unique<KernelCodeGenCUDA>(compile_config, kernel, ir,
-                                               tlctx);
+    return std::make_unique<KernelCodeGenCUDA>(
+        compile_config, device_caps, kernel, ir, tlctx);
 #else
     TI_NOT_IMPLEMENTED
 #endif

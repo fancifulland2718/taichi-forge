@@ -3,6 +3,9 @@
 
 namespace taichi::lang {
 
+// Keep both conversions generated from the shared capability list. This also
+// makes additions visible to incremental builds whose dependency scanner does
+// not track macro-included .inc files reliably on every toolchain.
 DeviceCapability str2devcap(const std::string_view &name) {
 #define PER_DEVICE_CAPABILITY(x) \
   if (#x == name)                \

@@ -653,6 +653,54 @@ def test_devcap_weird_user_input():
         )
 
 
+def test_cuda_aot_capability_argument_validation():
+    assert (
+        ti.DeviceCapability.cuda_compute_capability(86)
+        == "cuda_compute_capability=86"
+    )
+    for invalid in (True, 0, -1, 8.6, "86"):
+        with pytest.raises(ValueError, match="positive integer"):
+            ti.DeviceCapability.cuda_compute_capability(invalid)
+
+
+@test_utils.test(arch=[ti.cuda], offline_cache=False)
+def test_cuda_aot_explicit_capability_metadata():
+    values = ti.field(ti.f32, shape=1)
+
+    @ti.kernel
+    def accumulate():
+        for _ in range(8):
+            values[0] += 1.0
+
+    module = ti.aot.Module(
+        caps=[ti.DeviceCapability.cuda_compute_capability(60)]
+    )
+    module.add_kernel(accumulate)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        module.save(tmpdir)
+        with open(
+            os.path.join(tmpdir, "aot_metadata.json"), encoding="utf-8"
+        ) as metadata_file:
+            metadata = json.load(metadata_file)
+        required_caps = {
+            entry["key"]: entry["value"]
+            for entry in metadata["required_caps"]
+        }
+        assert required_caps == {
+            "cuda_compute_capability": 60,
+            "cuda_ptx_version": 50,
+        }
+
+
+
+@test_utils.test(arch=[ti.cuda], offline_cache=False)
+def test_cuda_aot_rejects_unsupported_target_capability():
+    with pytest.raises(RuntimeError, match="Unsupported CUDA AOT target"):
+        ti.aot.Module(
+            caps=[ti.DeviceCapability.cuda_compute_capability(65)]
+        )
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_module_arch_mismatch_rejected():
     with pytest.raises(

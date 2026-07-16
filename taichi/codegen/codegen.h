@@ -51,6 +51,7 @@ class KernelCodeGen {
 
   static std::unique_ptr<KernelCodeGen> create(
       const CompileConfig &compile_config,
+      const DeviceCapabilityConfig &device_caps,
       const Kernel *kernel,
       IRNode *ir,
       TaichiLLVMContext &tlctx);

@@ -2,6 +2,7 @@
 
 #include "taichi/aot/module_loader.h"
 #include "taichi/runtime/llvm/kernel_launcher.h"
+#include "taichi/runtime/llvm/llvm_aot_metadata.h"
 #include "taichi/runtime/llvm/llvm_runtime_executor.h"
 
 namespace taichi::lang {
@@ -19,15 +20,7 @@ class LlvmAotModule final : public aot::Module {
  public:
   explicit LlvmAotModule(const std::string &module_path,
                          LlvmRuntimeExecutor *executor,
-                         std::unique_ptr<LLVM::KernelLauncher> kernel_launcher)
-      : executor_(executor),
-        kernel_launcher_(std::move(kernel_launcher)),
-        cache_reader_(LlvmOfflineCacheFileReader::make(module_path)) {
-    TI_ASSERT(executor_ != nullptr);
-
-    const std::string graph_path = fmt::format("{}/graphs.tcb", module_path);
-    read_from_binary_file(graphs_, graph_path);
-  }
+                         std::unique_ptr<LLVM::KernelLauncher> kernel_launcher);
 
   Arch arch() const override {
     return executor_->get_config().arch;
@@ -39,6 +32,10 @@ class LlvmAotModule final : public aot::Module {
 
   size_t get_root_size() const override {
     return 0;
+  }
+
+  const DeviceCapabilityConfig &get_required_caps() const override {
+    return required_caps_;
   }
 
   LlvmRuntimeExecutor *const get_runtime_executor() {
@@ -86,6 +83,7 @@ class LlvmAotModule final : public aot::Module {
   LlvmRuntimeExecutor *const executor_{nullptr};
   std::unique_ptr<LLVM::KernelLauncher> kernel_launcher_{nullptr};
   std::unique_ptr<LlvmOfflineCacheFileReader> cache_reader_{nullptr};
+  DeviceCapabilityConfig required_caps_;
 
   // To prevent repeated SNodeTree initialization
   std::unordered_set<int> initialized_snode_tree_ids;

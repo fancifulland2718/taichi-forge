@@ -111,6 +111,13 @@ retroactively attributed to the 0.5.0 artifact:
   `arch` different from the active `ti.init()` architecture raises before the
   backend builder is created instead of warning and silently changing the
   requested artifact target.
+- CUDA LLVM AOT now compiles against an explicit, cache-keyed target capability
+  (SM 60 / PTX 50 by default) instead of consulting the build GPU inside
+  target-sensitive codegen. Artifacts record compute/PTX requirements in a
+  sidecar, and the loader rejects an insufficient device before kernel
+  registration. Newer exact targets are opt-in and add no Toolkit/CUDART
+  runtime dependency. CUDA LLVM AOT artifacts made before this sidecar contract
+  must be rebuilt.
 
 ## 0.1.0
 

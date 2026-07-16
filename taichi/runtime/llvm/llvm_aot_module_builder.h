@@ -10,11 +10,8 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
  public:
   explicit LlvmAotModuleBuilder(KernelCompilationManager &compilation_manager,
                                 const CompileConfig &compile_config,
-                                LlvmProgramImpl *prog)
-      : compilation_manager_(compilation_manager),
-        compile_config_(compile_config),
-        prog_(prog) {
-  }
+                                LlvmProgramImpl *prog,
+                                const DeviceCapabilityConfig &caps);
 
   void dump(const std::string &output_dir,
             const std::string &filename) const override;
@@ -37,6 +34,7 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
   KernelCompilationManager &compilation_manager_;
   const CompileConfig &compile_config_;
   LlvmProgramImpl *prog_ = nullptr;
+  DeviceCapabilityConfig caps_;
 };
 
 }  // namespace taichi::lang

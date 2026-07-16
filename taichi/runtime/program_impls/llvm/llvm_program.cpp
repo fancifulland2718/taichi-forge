@@ -80,7 +80,7 @@ std::unique_ptr<AotModuleBuilder> LlvmProgramImpl::make_aot_module_builder(
   if (config->arch == Arch::x64 || config->arch == Arch::arm64 ||
       config->arch == Arch::cuda) {
     return std::make_unique<LlvmAotModuleBuilder>(
-        get_kernel_compilation_manager(), *config, this);
+        get_kernel_compilation_manager(), *config, this, caps);
   }
 
 #if defined(TI_WITH_DX12)

@@ -87,6 +87,11 @@
   运行 adjoint；动态 early-return CFG 继续由前端明确拒绝，不会产生不完整梯度。
 - AOT module 创建现在强制执行实际的 same-target 合同。传入与 active `ti.init()` arch
   不同的 `arch` 会在 backend builder 创建前报错，不再 warning 后静默替换 artifact target。
+- CUDA LLVM AOT 现在针对显式、进入 cache key 的 target capability 编译（默认 SM 60 / PTX
+  50），target-sensitive codegen 不再读取构建机 GPU。artifact 会在 sidecar 中记录
+  compute/PTX 要求，loader 在 kernel 注册前拒绝能力不足的 device；更高的精确 target 需要
+  显式选择，且不增加 Toolkit/CUDART runtime 依赖。此 sidecar 合同建立前生成的 CUDA LLVM
+  AOT artifact 必须重新构建。
 
 ## 0.1.0
 

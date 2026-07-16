@@ -42,10 +42,16 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
 
   explicit TaskCodeGenCUDA(int id,
                            const CompileConfig &config,
+                           const DeviceCapabilityConfig &device_caps,
                            TaichiLLVMContext &tlctx,
                            const Kernel *kernel,
                            IRNode *ir = nullptr)
-      : TaskCodeGenLLVM(id, config, tlctx, kernel, ir) {
+      : TaskCodeGenLLVM(id, config, tlctx, kernel, ir),
+        target_compute_capability_(
+            device_caps.contains(DeviceCapability::cuda_compute_capability)
+                ? static_cast<int>(device_caps.get(
+                      DeviceCapability::cuda_compute_capability))
+                : CUDAContext::get_instance().get_compute_capability()) {
   }
 
   llvm::Value *create_print(std::string tag,
@@ -395,19 +401,14 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
     auto dest_type = atomic_stmt->dest->ret_type.ptr_removed();
     auto val_type = atomic_stmt->val->ret_type;
 
-    // Half2 atomic_add is supported starting from sm_60
-    //
-    // TODO(zhanlue): Add capability support & validation for CUDA AOT
-    //
-    // For now, the following code may potentially cause trouble for CUDA AOT.
-    // With half2 vectorization enabled, if one compiles the code on GPU with
-    // caps >= 60, then distribute it to runtime machine with GPU caps < 60,
-    // it's likely gonna crash
+    // Half2 atomic_add is supported starting from sm_60. CUDA AOT passes an
+    // explicit target capability; ordinary JIT falls back to the current
+    // device capability.
 
     std::string cuda_library_path = get_custom_cuda_library_path();
-    int cap = CUDAContext::get_instance().get_compute_capability();
     if (is_half2(dest_type) && is_half2(val_type) &&
-        atomic_stmt->op_type == AtomicOpType::add && cap >= 60 &&
+        atomic_stmt->op_type == AtomicOpType::add &&
+        target_compute_capability_ >= 60 &&
         !cuda_library_path.empty()) {
       /*
         Half2 optimization for float16 atomic add
@@ -816,6 +817,8 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
   }
 
  private:
+  int target_compute_capability_{0};
+
   std::tuple<llvm::Value *, llvm::Value *> get_spmd_info() override {
     auto thread_idx =
         builder->CreateIntrinsic(Intrinsic::nvvm_read_ptx_sreg_tid_x, {}, {});
@@ -830,8 +833,8 @@ LLVMCompiledTask KernelCodeGenCUDA::compile_task(
     const CompileConfig &config,
     std::unique_ptr<llvm::Module> &&module,
     IRNode *block) {
-  TaskCodeGenCUDA gen(task_codegen_id, config, get_taichi_llvm_context(),
-                      kernel, block);
+  TaskCodeGenCUDA gen(task_codegen_id, config, device_caps_,
+                      get_taichi_llvm_context(), kernel, block);
   return gen.run_compilation();
 }
 
