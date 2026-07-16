@@ -59,6 +59,8 @@ class TaskCodeGenCPU : public TaskCodeGenLLVM {
            llvm::PointerType::get(*llvm_context, 0),
            tlctx->get_data_type<int>()});
 
+      emit_cpu_debug_fault_guard();
+
       auto loop_var = create_entry_block_alloca(PrimitiveType::i32);
       loop_vars_llvm[stmt].push_back(loop_var);
       builder->CreateStore(get_arg(2), loop_var);
@@ -71,7 +73,10 @@ class TaskCodeGenCPU : public TaskCodeGenLLVM {
 
     auto [begin, end] = get_range_for_bounds(stmt);
 
-    call("cpu_parallel_range_for", get_arg(0),
+    const char *scheduler = compile_config.debug
+                                ? "cpu_parallel_range_for_cancellable"
+                                : "cpu_parallel_range_for";
+    call(scheduler, get_arg(0),
          tlctx->get_constant(stmt->num_cpu_threads), begin, end,
          tlctx->get_constant(step), tlctx->get_constant(stmt->block_dim),
          tls_prologue, body, epilogue, tlctx->get_constant(stmt->tls_size));
@@ -86,6 +91,8 @@ class TaskCodeGenCPU : public TaskCodeGenLLVM {
           {llvm::PointerType::get(get_runtime_type("RuntimeContext"), 0),
            llvm::PointerType::get(*llvm_context, 0),
            tlctx->get_data_type<int>()});
+
+      emit_cpu_debug_fault_guard();
 
       for (int i = 0; i < stmt->mesh_prologue->size(); i++) {
         auto &s = stmt->mesh_prologue->statements[i];
@@ -176,6 +183,7 @@ class TaskCodeGenCPU : public TaskCodeGenLLVM {
       call("LLVMRuntime_profiler_start", get_runtime(),
            builder->CreateGlobalStringPtr(offloaded_task_name));
     }
+    emit_cpu_debug_fault_guard();
     if (stmt->task_type == Type::serial) {
       stmt->body->accept(this);
     } else if (stmt->task_type == Type::range_for) {

@@ -347,6 +347,8 @@ class TaskCodeGenLLVM : public IRVisitor, public LLVMModuleBuilder {
       std::vector<llvm::Type *> argument_types,
       const std::string &func_name = "function_body");
 
+  void emit_cpu_debug_fault_guard();
+
   std::tuple<llvm::Value *, llvm::Value *> get_range_for_bounds(
       OffloadedStmt *stmt);
 

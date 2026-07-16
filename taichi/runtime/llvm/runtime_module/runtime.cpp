@@ -635,6 +635,11 @@ struct LLVMRuntime {
   }
 };
 
+u1 runtime_has_error(LLVMRuntime *runtime) {
+  return __atomic_load_n(&runtime->error_code,
+                         std::memory_order::memory_order_acquire) != 0;
+}
+
 // TODO: are these necessary?
 STRUCT_FIELD_ARRAY(LLVMRuntime, element_lists);
 STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_dirty_epoch);
@@ -774,8 +779,12 @@ Ptr get_temporary_pointer(LLVMRuntime *runtime, u64 offset) {
 }
 
 void runtime_retrieve_and_reset_error_code(LLVMRuntime *runtime) {
-  runtime->set_result(taichi_result_buffer_error_id, runtime->error_code);
-  runtime->error_code = 0;
+  runtime->set_result(taichi_result_buffer_error_id,
+                      atomic_exchange_i64(&runtime->error_code, 0));
+}
+
+u1 LLVMRuntime_has_error(LLVMRuntime *runtime) {
+  return runtime_has_error(runtime);
 }
 
 void runtime_retrieve_error_message(LLVMRuntime *runtime, int i) {
@@ -901,38 +910,29 @@ void taichi_assert_format(LLVMRuntime *runtime,
 #endif
   if (!enable_assert || test != 0)
     return;
-  if (!runtime->error_code) {
-    locked_task(&runtime->error_message_lock, [&] {
-      if (!runtime->error_code) {
-        runtime->error_code = 1;  // Assertion failure
-
-        memset(runtime->error_message_template, 0,
-               taichi_error_message_max_length);
-        memcpy(runtime->error_message_template, format,
-               std::min(taichi_strlen(format),
-                        taichi_error_message_max_length - 1));
-        for (int i = 0; i < num_arguments; i++) {
-          runtime->error_message_arguments[i] = arguments[i];
-        }
-      }
-    });
+  if (!runtime_has_error(runtime)) {
+    locked_task(
+        &runtime->error_message_lock,
+        [&] {
+          memset(runtime->error_message_template, 0,
+                 taichi_error_message_max_length);
+          memcpy(runtime->error_message_template, format,
+                 std::min(taichi_strlen(format),
+                          taichi_error_message_max_length - 1));
+          for (int i = 0; i < num_arguments; i++) {
+            runtime->error_message_arguments[i] = arguments[i];
+          }
+          // Publish the fault only after its message is complete. The atomic
+          // flag is also the cooperative-cancellation signal on CPU.
+          atomic_exchange_i64(&runtime->error_code, 1);
+        },
+        [&] { return !runtime_has_error(runtime); });
   }
 #if ARCH_cuda
   // Kill this CUDA thread.
   asm("exit;");
 #elif ARCH_amdgpu
   asm("S_ENDPGM");
-  // TODO: properly kill this CPU thread here, considering the containing
-  // ThreadPool structure.
-
-  // std::terminate();
-
-  // Note that std::terminate() will throw an signal 6
-  // (Aborted), which will be caught by Taichi's signal handler. The assert
-  // failure message will NOT be properly printed since Taichi exits after
-  // receiving that signal. It is better than nothing when debugging the
-  // runtime, since otherwise the whole program may crash if the kernel
-  // continues after assertion failure.
 #endif
 }
 
@@ -1749,6 +1749,42 @@ void cpu_parallel_range_for_task(void *range_context,
     ctx.epilogue(ctx.context, tls_ptr);
 }
 
+void cpu_parallel_range_for_cancellable_task(void *range_context,
+                                             int thread_id,
+                                             int task_id) {
+  auto ctx = *(range_task_helper_context *)range_context;
+  if (runtime_has_error(ctx.context->runtime)) {
+    return;
+  }
+
+  alignas(8) char tls_buffer[ctx.tls_size];
+  auto tls_ptr = &tls_buffer[0];
+  if (ctx.prologue) {
+    ctx.prologue(ctx.context, tls_ptr);
+  }
+
+  RuntimeContext this_thread_context = *ctx.context;
+  this_thread_context.cpu_thread_id = thread_id;
+  if (ctx.step == 1) {
+    int block_start = ctx.begin + task_id * ctx.block_size;
+    int block_end = std::min(block_start + ctx.block_size, ctx.end);
+    for (int i = block_start;
+         i < block_end && !runtime_has_error(ctx.context->runtime); i++) {
+      ctx.body(&this_thread_context, tls_ptr, i);
+    }
+  } else if (ctx.step == -1) {
+    int block_start = ctx.end - task_id * ctx.block_size;
+    int block_end = std::max(ctx.begin, block_start * ctx.block_size);
+    for (int i = block_start - 1;
+         i >= block_end && !runtime_has_error(ctx.context->runtime); i--) {
+      ctx.body(&this_thread_context, tls_ptr, i);
+    }
+  }
+  if (ctx.epilogue && !runtime_has_error(ctx.context->runtime)) {
+    ctx.epilogue(ctx.context, tls_ptr);
+  }
+}
+
 void cpu_parallel_range_for(RuntimeContext *context,
                             int num_threads,
                             int begin,
@@ -1777,6 +1813,36 @@ void cpu_parallel_range_for(RuntimeContext *context,
   runtime->parallel_for(runtime->thread_pool,
                         (end - begin + block_dim - 1) / block_dim, num_threads,
                         &ctx, cpu_parallel_range_for_task);
+}
+
+void cpu_parallel_range_for_cancellable(RuntimeContext *context,
+                                        int num_threads,
+                                        int begin,
+                                        int end,
+                                        int step,
+                                        int block_dim,
+                                        range_for_xlogue prologue,
+                                        RangeForTaskFunc *body,
+                                        range_for_xlogue epilogue,
+                                        std::size_t tls_size) {
+  range_task_helper_context ctx;
+  ctx.context = context;
+  ctx.prologue = prologue;
+  ctx.tls_size = tls_size;
+  ctx.body = body;
+  ctx.epilogue = epilogue;
+  ctx.begin = begin;
+  ctx.end = end;
+  ctx.step = step;
+  if (step != 1 && step != -1) {
+    taichi_printf(context->runtime, "step must not be %d\n", step);
+    exit(-1);
+  }
+  ctx.block_size = block_dim;
+  auto runtime = context->runtime;
+  runtime->parallel_for(runtime->thread_pool,
+                        (end - begin + block_dim - 1) / block_dim, num_threads,
+                        &ctx, cpu_parallel_range_for_cancellable_task);
 }
 
 void gpu_parallel_range_for(RuntimeContext *context,

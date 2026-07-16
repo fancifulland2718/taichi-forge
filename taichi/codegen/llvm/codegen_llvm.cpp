@@ -1611,7 +1611,9 @@ void TaskCodeGenLLVM::visit(AssertStmt *stmt) {
 
   std::vector<llvm::Value *> args;
   args.emplace_back(get_runtime());
-  args.emplace_back(builder->CreateIsNotNull(llvm_val[stmt->cond]));
+  auto *assertion_succeeded =
+      builder->CreateIsNotNull(llvm_val[stmt->cond]);
+  args.emplace_back(assertion_succeeded);
   args.emplace_back(builder->CreateGlobalStringPtr(stmt->text));
 
   for (int i = 0; i < stmt->args.size(); i++) {
@@ -1641,6 +1643,13 @@ void TaskCodeGenLLVM::visit(AssertStmt *stmt) {
                          {tlctx->get_constant(0), tlctx->get_constant(0)}));
 
   llvm_val[stmt] = call("taichi_assert_format", std::move(args));
+
+  if (arch_is_cpu(current_arch()) && compile_config.debug) {
+    auto *continue_block =
+        llvm::BasicBlock::Create(*llvm_context, "assert_continue", func);
+    builder->CreateCondBr(assertion_succeeded, continue_block, final_block);
+    builder->SetInsertPoint(continue_block);
+  }
 }
 
 void TaskCodeGenLLVM::visit(SNodeOpStmt *stmt) {
@@ -2476,6 +2485,8 @@ void TaskCodeGenLLVM::create_offload_struct_for(OffloadedStmt *stmt) {
         tlctx->get_data_type<int>(),
     });
 
+    emit_cpu_debug_fault_guard();
+
     body = guard.body;
 
     /* Function structure:
@@ -2963,6 +2974,19 @@ FunctionCreationGuard TaskCodeGenLLVM::get_function_creation_guard(
   return FunctionCreationGuard(this, argument_types, func_name);
 }
 
+void TaskCodeGenLLVM::emit_cpu_debug_fault_guard() {
+  if (!arch_is_cpu(current_arch()) || !compile_config.debug) {
+    return;
+  }
+
+  auto *execute =
+      llvm::BasicBlock::Create(*llvm_context, "fault_free", func);
+  auto *has_fault = builder->CreateIsNotNull(
+      call("LLVMRuntime_has_error", get_runtime()));
+  builder->CreateCondBr(has_fault, final_block, execute);
+  builder->SetInsertPoint(execute);
+}
+
 void TaskCodeGenLLVM::initialize_context() {
   TI_ASSERT(tlctx != nullptr);
   llvm_context = tlctx->get_this_thread_context();
@@ -3123,6 +3147,7 @@ llvm::Value *TaskCodeGenLLVM::create_xlogue(std::unique_ptr<Block> &block) {
 
   if (block) {
     auto guard = get_function_creation_guard(get_xlogue_argument_types());
+    emit_cpu_debug_fault_guard();
     block->accept(this);
     xlogue = guard.body;
   } else {
@@ -3141,6 +3166,7 @@ llvm::Value *TaskCodeGenLLVM::create_mesh_xlogue(
 
   if (block) {
     auto guard = get_function_creation_guard(get_mesh_xlogue_argument_types());
+    emit_cpu_debug_fault_guard();
     block->accept(this);
     xlogue = guard.body;
   } else {

@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from taichi_forge.lang.misc import get_host_arch_list
 
@@ -60,8 +62,6 @@ def test_assert_message_formatted():
 
     with pytest.raises(AssertionError, match=r"x\[10\] expect=0 got=42"):
         assert_formatted()
-    # TODO: note that we are not fully polished to be able to recover from
-    # assertion failures...
     with pytest.raises(AssertionError, match=r"y = 0.5"):
         assert_float()
 
@@ -87,8 +87,6 @@ def test_assert_message_formatted_fstring():
 
     with pytest.raises(AssertionError, match=r"x\[10\] expect=0 got=42"):
         assert_formatted()
-    # TODO: note that we are not fully polished to be able to recover from
-    # assertion failures...
     with pytest.raises(AssertionError, match=r"y = 0.5"):
         assert_float()
 
@@ -105,6 +103,88 @@ def test_assert_ok():
         assert 10 <= x <= 20
 
     func()
+
+
+@test_utils.test(
+    arch=ti.cpu,
+    debug=True,
+    gdb_trigger=False,
+    cpu_max_num_threads=1,
+)
+def test_cpu_assert_cancels_current_range_and_struct_work_items():
+    n = 128
+    range_before = ti.field(ti.i32, shape=n)
+    range_after = ti.field(ti.i32, shape=n)
+    struct_before = ti.field(ti.i32, shape=n)
+    struct_after = ti.field(ti.i32, shape=n)
+    recovered = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def fail_range():
+        ti.loop_config(block_dim=64)
+        for i in range(n):
+            range_before[i] = 1
+            assert i != 7, "range failure %d" % i
+            range_after[i] = 1
+
+    @ti.kernel
+    def fail_struct():
+        for i in struct_before:
+            struct_before[i] = 1
+            assert i != 7, "struct failure %d" % i
+            struct_after[i] = 1
+
+    @ti.kernel
+    def recover():
+        recovered[None] = 123
+
+    with pytest.raises(ti.TaichiAssertionError, match="range failure 7"):
+        fail_range()
+    assert range_before[7] == 1
+    assert range_after[7] == 0
+    assert sum(range_before.to_numpy()) == 8
+    assert sum(range_after.to_numpy()) == 7
+
+    with pytest.raises(ti.TaichiAssertionError, match="struct failure 7"):
+        fail_struct()
+    assert struct_before[7] == 1
+    assert struct_after[7] == 0
+    assert sum(struct_before.to_numpy()) == 8
+    assert sum(struct_after.to_numpy()) == 7
+
+    recover()
+    assert recovered[None] == 123
+
+
+@test_utils.test(
+    arch=ti.cpu,
+    debug=True,
+    gdb_trigger=False,
+    cpu_max_num_threads=8,
+)
+def test_cpu_assert_keeps_first_multithreaded_fault_coherent_and_recovers():
+    recovered = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def fail_parallel():
+        ti.loop_config(block_dim=1)
+        for i in range(4096):
+            assert i == 0, "failure i=%d pair=%d" % (i, i * 2)
+
+    @ti.kernel
+    def recover(value: ti.i32):
+        recovered[None] = value
+
+    for attempt in range(4):
+        with pytest.raises(ti.TaichiAssertionError) as error:
+            fail_parallel()
+        match = re.search(r"failure i=(\d+) pair=(\d+)", str(error.value))
+        assert match is not None
+        index, pair = map(int, match.groups())
+        assert pair == index * 2
+
+        recover(attempt + 1)
+        assert recovered[None] == attempt + 1
 
 
 @test_utils.test(
