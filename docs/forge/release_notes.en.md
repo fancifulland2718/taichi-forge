@@ -101,6 +101,12 @@ retroactively attributed to the 0.5.0 artifact:
   `field_shape + element_shape`; flat seeds use row-major order. The contract is
   layout-independent across AoS/SoA and retains the existing one-parameter-
   group boundary.
+- Defined the automatic-differentiation order boundary explicitly. First-order
+  Tape, manual reverse, and FwdMode paths are verified across CPU/CUDA/Vulkan;
+  nested contexts, manual reverse inside Tape, and forward-on-reverse now fail
+  before compilation/submission. Tape no longer runs adjoints after its body
+  raises, and dynamic early-return control flow remains an explicit frontend
+  rejection rather than an incomplete derivative.
 
 ## 0.1.0
 

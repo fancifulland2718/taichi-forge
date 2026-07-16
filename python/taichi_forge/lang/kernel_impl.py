@@ -1507,12 +1507,28 @@ class Kernel:
     def __call__(self, *args, **kwargs):
         args = _process_args(self, args, kwargs)
 
+        # A reverse kernel is already the result of one AD transform.  Running
+        # it while an automatic AD context is active would request an
+        # unverified higher-order transform (FwdMode) or mutate gradients that
+        # the enclosing Tape owns.  Reject both cases before compilation or
+        # device submission instead of relying on an assertion in FwdMode or
+        # silently producing an incomplete derivative in Tape.
+        if self.autodiff_mode == AutodiffMode.REVERSE:
+            if self.runtime.fwd_mode_manager is not None:
+                raise TaichiRuntimeError(
+                    "Forward-on-reverse automatic differentiation is not "
+                    "supported; call kernel.grad() outside ti.ad.FwdMode()."
+                )
+            if self.runtime.target_tape is not None:
+                raise TaichiRuntimeError(
+                    "Manual reverse kernel execution inside ti.ad.Tape() is "
+                    "not supported; let the Tape run recorded adjoints when "
+                    "the context exits."
+                )
+
         # Transform the primal kernel to forward mode grad kernel
         # then recover to primal when exiting the forward mode manager
         if self.runtime.fwd_mode_manager and not self.runtime.grad_replaced:
-            # TODO: if we would like to compute 2nd-order derivatives by forward-on-reverse in a nested context manager fashion,
-            # i.e., a `Tape` nested in the `FwdMode`, we can transform the kernels with `mode_original == AutodiffMode.REVERSE` only,
-            # to avoid duplicate computation for 1st-order derivatives
             self.runtime.fwd_mode_manager.insert(self)
 
         # Both the class kernels and the plain-function kernels are unified now.

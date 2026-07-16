@@ -71,6 +71,23 @@ contains one scalar value. `FwdMode` still accepts exactly one parameter group
 per context; use multiple contexts for multiple groups. Loss entries remain
 scalar fields.
 
+### Automatic-differentiation order boundary
+
+Forge currently supports first-order reverse AD through `ti.ad.Tape()` or a
+manual `kernel.grad()` call, and first-order forward AD through
+`ti.ad.FwdMode()`. First-order forward and reverse results are regression-tested
+against finite differences on CPU, CUDA, and Vulkan.
+
+Arbitrary higher-order AD is not part of the current contract. Nested or
+concurrent Tape/FwdMode contexts, `kernel.grad()` inside Tape, and
+forward-on-reverse (`kernel.grad()` inside FwdMode) raise `TaichiRuntimeError`
+before compiling or submitting the unsupported operation. A Tape whose body
+raises performs cleanup but does not run adjoints from a partial primal trace.
+Dynamic `return` inside a non-static `if` or loop remains a frontend error;
+compile-time `ti.static` specialization does not imply a general higher-order
+control-flow guarantee. Explicit gradient Graphs remain manual, first-order
+operations and must run outside automatic AD contexts.
+
 ### `ti.compile_profile(clear_on_enter=True)`
 
 Location: `taichi_forge.tools.compile_profile`; exported as

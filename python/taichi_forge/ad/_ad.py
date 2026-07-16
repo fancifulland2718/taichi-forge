@@ -187,7 +187,8 @@ class Tape:
             self.grad_checker = GradChecker(loss, grad_check)
 
     def __enter__(self):
-        assert not self.entered, "Tape can be entered only once."
+        if self.entered:
+            raise TaichiRuntimeError("A ti.ad.Tape() instance can be entered only once.")
         submission_state = self.runtime._active_graph_submissions
         if submission_state > 0:
             raise TaichiRuntimeError(
@@ -254,19 +255,28 @@ class Tape:
 
     def __exit__(self, _type, value, tb):
         self.runtime.target_tape = None
-        if self.eval_on_exit:
-            self.grad()
-        for calls, mode in zip(self.calls, self.modes):
-            if mode is not None:
-                calls[0].autodiff_mode = mode
+        try:
+            # Do not launch adjoints after the context body failed.  Besides
+            # masking the original exception, those kernels would consume a
+            # potentially partial primal trace.
+            if self.eval_on_exit and _type is None:
+                self.grad()
+        finally:
+            for calls, mode in zip(self.calls, self.modes):
+                if mode is not None:
+                    calls[0].autodiff_mode = mode
 
     def insert(self, func, args):
         # Kernels with mode `AutodiffMode.NONE` and `AutodiffMode.VALIDATION` are all forward kernels.
         # The difference is there are `assert` for global data access rule check in VALIDATION kernels.
-        assert func.autodiff_mode in (
+        if func.autodiff_mode not in (
             AutodiffMode.NONE,
             AutodiffMode.VALIDATION,
-        ), "Inserted funcs should be forward kernels."
+        ):
+            raise TaichiRuntimeError(
+                "ti.ad.Tape() can record only primal kernels; higher-order "
+                "automatic differentiation is not supported."
+            )
         self.modes.append(func.autodiff_mode)
         if self.validation:
             func.autodiff_mode = AutodiffMode.VALIDATION
@@ -635,7 +645,10 @@ class FwdMode:
         self.clear_gradients = clear_gradients
 
     def __enter__(self):
-        assert not self.entered, "Forward mode manager can be entered only once."
+        if self.entered:
+            raise TaichiRuntimeError(
+                "A ti.ad.FwdMode() instance can be entered only once."
+            )
         submission_state = self.runtime._active_graph_submissions
         if submission_state > 0:
             raise TaichiRuntimeError(
@@ -744,9 +757,14 @@ class FwdMode:
         self.recover_kernels()
 
     def insert(self, func):
-        assert (
-            func.autodiff_mode == AutodiffMode.NONE or func.autodiff_mode == AutodiffMode.FORWARD
-        ), "Inserted funcs should be forward or grad kernels (forward mode)."
+        if func.autodiff_mode not in (
+            AutodiffMode.NONE,
+            AutodiffMode.FORWARD,
+        ):
+            raise TaichiRuntimeError(
+                "ti.ad.FwdMode() can transform only primal kernels; "
+                "forward-on-reverse automatic differentiation is not supported."
+            )
         self.modes.append(func.autodiff_mode)
         func.autodiff_mode = AutodiffMode.FORWARD
         self.calls.append((func))

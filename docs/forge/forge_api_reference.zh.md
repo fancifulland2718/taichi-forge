@@ -63,6 +63,19 @@ ti.compile_kernels([
 一个 scalar value 时才提供默认 seed。每个 `FwdMode` context 仍只接受一个参数组；多个
 参数组应分别运行多个 context。loss entry 仍须为 scalar field。
 
+### 自动微分阶数边界
+
+Forge 当前支持通过 `ti.ad.Tape()` 或手工 `kernel.grad()` 执行一阶 reverse AD，并支持
+通过 `ti.ad.FwdMode()` 执行一阶 forward AD；CPU、CUDA、Vulkan 上的一阶 forward/reverse
+结果均通过有限差分回归验证。
+
+任意高阶 AD 不属于当前合同。嵌套或并发的 Tape/FwdMode context、Tape 内调用
+`kernel.grad()`，以及 FwdMode 内调用 `kernel.grad()` 所构成的 forward-on-reverse，都会在
+编译或提交不受支持的操作前抛出 `TaichiRuntimeError`。Tape 正文若抛出异常，只清理状态，
+不会对不完整 primal trace 执行 adjoint。非静态 `if` 或 loop 内的动态 `return` 仍是前端
+错误；编译期 `ti.static` 特化不代表提供通用高阶控制流保证。显式 gradient Graph 仍属于
+手工管理的一阶操作，必须在 automatic AD context 外运行。
+
 ### `ti.compile_profile(clear_on_enter=True)`
 
 位置：`taichi_forge.tools.compile_profile`，导出为 `ti.compile_profile`。返回类型也导出为

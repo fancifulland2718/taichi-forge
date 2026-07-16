@@ -81,6 +81,10 @@
 - 将 `ti.ad.FwdMode` 参数 seed 从 scalar field 扩展到 CPU、CUDA、Vulkan 的 dense vector
   与 matrix field。shaped seed 使用 `field_shape + element_shape`，flat seed 使用 row-major
   顺序；该合同不依赖 AoS/SoA layout，并保留每个 context 只接受一个参数组的既有边界。
+- 明确定义 automatic differentiation 的阶数边界：一阶 Tape、手工 reverse 与 FwdMode
+  路径已在 CPU/CUDA/Vulkan 验证；嵌套 context、Tape 内手工 reverse 和
+  forward-on-reverse 现在会在编译/提交前拒绝。Tape 正文抛出异常后不再对不完整 trace
+  运行 adjoint；动态 early-return CFG 继续由前端明确拒绝，不会产生不完整梯度。
 
 ## 0.1.0
 
