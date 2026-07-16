@@ -1,4 +1,5 @@
 import gc
+import threading
 import weakref
 
 import numpy as np
@@ -524,6 +525,50 @@ def test_default_workspace_cache_clears_on_reset():
     assert alg_impl._default_workspace_caches
     ti.reset()
     assert not alg_impl._default_workspace_caches
+
+
+@test_utils.test(arch=ti.cpu)
+def test_default_workspace_cache_is_owned_per_python_thread():
+    n = 16
+    src = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(ti.i32, shape=n)
+    barrier = threading.Barrier(2)
+    workspaces = []
+    failures = []
+    result_lock = threading.Lock()
+    alg_impl.clear_default_workspaces()
+
+    def acquire_workspace():
+        try:
+            barrier.wait(timeout=10)
+            workspace = alg_impl._get_default_workspace(
+                "transform",
+                (src, dst),
+                ("transform", "auto", n, 2, 1),
+                lambda: alg_impl.TransformWorkspace(max_items=n),
+            )
+            with result_lock:
+                workspaces.append(workspace)
+        except BaseException as exc:
+            with result_lock:
+                failures.append(exc)
+
+    threads = [threading.Thread(target=acquire_workspace) for _ in range(2)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+        assert all(not thread.is_alive() for thread in threads)
+        assert failures == []
+        assert len(workspaces) == 2
+        assert workspaces[0] is not workspaces[1]
+        statistics = alg_impl.get_primitive_workspace_statistics()
+        assert statistics["default_cache"]["context_count"] == 2
+        assert statistics["default_cache"]["entry_count"] == 2
+        assert statistics["default_cache"]["ownership"] == "per_python_thread"
+    finally:
+        alg_impl.clear_default_workspaces()
 
 @test_utils.test(arch=ti.cpu)
 def test_primitive_sequence_prewarm_replays_native_plans():

@@ -1,4 +1,5 @@
 import os
+import threading
 import warnings
 from collections import OrderedDict
 
@@ -211,6 +212,8 @@ _primitive_diagnostics_enabled = bool(
     int(os.environ.get("TAICHI_FORGE_PRIMITIVE_DIAGNOSTICS", "0"))
 )
 _primitive_diagnostic_counts = {}
+_primitive_provider_fallback_counts = {}
+_primitive_diagnostics_lock = threading.RLock()
 
 
 def _warn_cuda_toolkit_reference_method(method):
@@ -418,7 +421,8 @@ def reset_legacy_helper_auto_fallback_policy():
 
 
 def clear_legacy_helper_fallback_counts():
-    _legacy_helper_fallback_counts.clear()
+    with _primitive_diagnostics_lock:
+        _legacy_helper_fallback_counts.clear()
 
 
 def legacy_helper_fallback_counting_enabled():
@@ -433,24 +437,36 @@ def set_legacy_helper_fallback_counting_enabled(enabled, clear=False):
 
 
 def get_legacy_helper_fallback_counts(reset=False):
-    counts = dict(_legacy_helper_fallback_counts)
-    if reset:
-        clear_legacy_helper_fallback_counts()
+    with _primitive_diagnostics_lock:
+        counts = dict(_legacy_helper_fallback_counts)
+        if reset:
+            _legacy_helper_fallback_counts.clear()
     return counts
 
 
 def _record_legacy_helper_fallback(op_name, method, explicit_method):
     if method == "auto" and not legacy_helper_auto_fallback_enabled():
+        if _primitive_diagnostics_enabled:
+            _record_primitive_diagnostic(
+                "provider.rejection.legacy_helper_auto_disabled"
+            )
         raise RuntimeError(
             f"{op_name} method='auto' reached legacy Taichi-kernel fallback, "
             "but auto fallback is disabled. Use an available native method, "
             f"pass method='{explicit_method}' explicitly, or re-enable "
             f"{_LEGACY_HELPER_AUTO_FALLBACK_ENV}."
         )
-    if not _legacy_helper_fallback_counting_enabled:
-        return
     key = (op_name, method)
-    _legacy_helper_fallback_counts[key] = _legacy_helper_fallback_counts.get(key, 0) + 1
+    with _primitive_diagnostics_lock:
+        if _primitive_diagnostics_enabled:
+            fallback_key = (op_name, method, explicit_method)
+            _primitive_provider_fallback_counts[fallback_key] = (
+                _primitive_provider_fallback_counts.get(fallback_key, 0) + 1
+            )
+        if _legacy_helper_fallback_counting_enabled:
+            _legacy_helper_fallback_counts[key] = (
+                _legacy_helper_fallback_counts.get(key, 0) + 1
+            )
 
 
 def _should_record_legacy_helper_fallback(method):
@@ -458,27 +474,105 @@ def _should_record_legacy_helper_fallback(method):
 
 
 def clear_primitive_diagnostics():
-    _primitive_diagnostic_counts.clear()
+    with _primitive_diagnostics_lock:
+        _primitive_diagnostic_counts.clear()
+        _primitive_provider_fallback_counts.clear()
 
 
 def set_primitive_diagnostics_enabled(enabled, clear=False):
     global _primitive_diagnostics_enabled
-    _primitive_diagnostics_enabled = bool(enabled)
-    if clear:
-        clear_primitive_diagnostics()
+    with _primitive_diagnostics_lock:
+        _primitive_diagnostics_enabled = bool(enabled)
+        if clear:
+            _primitive_diagnostic_counts.clear()
+            _primitive_provider_fallback_counts.clear()
 
 
 def get_primitive_diagnostics(reset=False):
-    counts = dict(_primitive_diagnostic_counts)
-    if reset:
-        clear_primitive_diagnostics()
+    with _primitive_diagnostics_lock:
+        counts = dict(_primitive_diagnostic_counts)
+        if reset:
+            _primitive_diagnostic_counts.clear()
+            _primitive_provider_fallback_counts.clear()
     return counts
 
 
 def _record_primitive_diagnostic(name, amount=1):
-    _primitive_diagnostic_counts[name] = (
-        _primitive_diagnostic_counts.get(name, 0) + amount
+    with _primitive_diagnostics_lock:
+        _primitive_diagnostic_counts[name] = (
+            _primitive_diagnostic_counts.get(name, 0) + amount
+        )
+
+
+def _primitive_provider_dependency_class(name):
+    if name.startswith(("cuda_cub_", "cuda_toolkit_")):
+        return "toolkit_reference"
+    if name.startswith("cuda_device_"):
+        return "driver_only"
+    return "none"
+
+
+def get_primitive_runtime_diagnostics(reset=False):
+    """Return an opt-in, synchronization-free primitive runtime snapshot.
+
+    Provider invocation counts are exact for the interval in which primitive
+    diagnostics were enabled. A caller that needs to explain one automatic
+    choice should clear diagnostics, execute that call, and then read this
+    snapshot. Reading the snapshot does not wait for submitted device work.
+    """
+
+    with _primitive_diagnostics_lock:
+        counters = dict(_primitive_diagnostic_counts)
+        fallback_counts = dict(_primitive_provider_fallback_counts)
+        enabled = _primitive_diagnostics_enabled
+        if reset:
+            _primitive_diagnostic_counts.clear()
+            _primitive_provider_fallback_counts.clear()
+
+    provider_counts = {}
+    prefixes = ("program_method.invoke.", "native_plan.invoke.")
+    ignored_names = {"calls", "missing"}
+    ignored_suffixes = (
+        "_available",
+        "_clear_workspace",
+        "_workspace_bytes",
     )
+    for key, count in counters.items():
+        for prefix in prefixes:
+            if not key.startswith(prefix):
+                continue
+            name = key[len(prefix) :]
+            if name in ignored_names or name.endswith(ignored_suffixes):
+                break
+            provider_counts[name] = provider_counts.get(name, 0) + int(count)
+            break
+
+    providers = tuple(
+        {
+            "provider": name,
+            "dependency_class": _primitive_provider_dependency_class(name),
+            "count": provider_counts[name],
+        }
+        for name in sorted(provider_counts)
+    )
+    fallbacks = tuple(
+        {
+            "operation": key[0],
+            "requested_method": key[1],
+            "selected_fallback": key[2],
+            "count": fallback_counts[key],
+        }
+        for key in sorted(fallback_counts)
+    )
+    return {
+        "schema_version": 1,
+        "enabled": enabled,
+        "backend": _primitive_backend_name(current_cfg().arch),
+        "providers": providers,
+        "fallbacks": fallbacks,
+        "counters": counters,
+        "workspace": get_primitive_workspace_statistics(),
+    }
 
 
 def _is_opaque_raw_payload(arr):
@@ -663,7 +757,20 @@ def _prog_method_descriptor(prog, name):
 
 
 def _prog_method(prog, name):
-    return _program_capabilities(prog).method(prog, name)
+    method = _program_capabilities(prog).method(prog, name)
+    if (
+        method is None
+        or not _primitive_diagnostics_enabled
+        or not _is_native_primitive_prog_method_name(name)
+    ):
+        return method
+
+    def invoke_with_diagnostics(*args, **kwargs):
+        _record_primitive_diagnostic("program_method.invoke.calls")
+        _record_primitive_diagnostic(f"program_method.invoke.{name}")
+        return method(*args, **kwargs)
+
+    return invoke_with_diagnostics
 
 
 def _invoke_prog_method_result(prog, name, *args):
@@ -1313,7 +1420,11 @@ def _read_nonnegative_int_env(name, default):
 _DEFAULT_WORKSPACE_CACHE_LIMIT = _read_nonnegative_int_env(
     "TAICHI_FORGE_DEFAULT_WORKSPACE_CACHE_LIMIT", 64
 )
-_default_workspace_caches = {}
+_DEFAULT_WORKSPACE_CONTEXT_LIMIT = _read_nonnegative_int_env(
+    "TAICHI_FORGE_DEFAULT_WORKSPACE_CONTEXT_LIMIT", 16
+)
+_default_workspace_caches = OrderedDict()
+_default_workspace_cache_lock = threading.RLock()
 
 
 def _clear_workspace_safely(workspace):
@@ -1324,19 +1435,31 @@ def _clear_workspace_safely(workspace):
 
 
 def clear_default_workspaces():
-    """Release implicit workspaces cached for workspace=None public calls."""
+    """Release implicit workspaces cached for workspace=None public calls.
 
-    for cache in list(_default_workspace_caches.values()):
+    The caller must first quiesce primitive submissions. Cache metadata is
+    detached atomically, but clearing an explicitly in-use workspace is not a
+    supported concurrent operation.
+    """
+
+    with _default_workspace_cache_lock:
+        caches = list(_default_workspace_caches.values())
+        _default_workspace_caches.clear()
+    for cache in caches:
         for workspace in list(cache.values()):
             _clear_workspace_safely(workspace)
         cache.clear()
-    _default_workspace_caches.clear()
     _clear_program_capability_caches()
 
 
 def _default_workspace_context_key():
     runtime = get_runtime()
-    return (id(runtime), current_cfg().arch)
+    return (
+        id(runtime),
+        id(runtime.prog),
+        current_cfg().arch,
+        threading.get_ident(),
+    )
 
 
 def _default_workspace_cache_enabled_for_kind(kind):
@@ -1359,18 +1482,26 @@ def _default_workspace_cache_enabled_for_kind(kind):
 
 
 def _default_workspace_cache_for_current_program(kind):
-    if _DEFAULT_WORKSPACE_CACHE_LIMIT <= 0:
+    if (
+        _DEFAULT_WORKSPACE_CACHE_LIMIT <= 0
+        or _DEFAULT_WORKSPACE_CONTEXT_LIMIT <= 0
+    ):
         return None
     if not _default_workspace_cache_enabled_for_kind(kind):
         return None
     context_key = _default_workspace_context_key()
-    cache = _default_workspace_caches.get(context_key)
-    if cache is None:
-        if len(_default_workspace_caches) > 16:
-            clear_default_workspaces()
+    with _default_workspace_cache_lock:
+        cache = _default_workspace_caches.get(context_key)
+        if cache is not None:
+            _default_workspace_caches.move_to_end(context_key)
+            return cache
+        if len(_default_workspace_caches) >= _DEFAULT_WORKSPACE_CONTEXT_LIMIT:
+            # Do not evict or clear a foreign thread's cache. New threads use
+            # an uncached workspace until the next quiescent clear/reset.
+            return None
         cache = OrderedDict()
         _default_workspace_caches[context_key] = cache
-    return cache
+        return cache
 
 
 def _default_workspace_key(kind, objects, semantic_key):
@@ -1388,22 +1519,123 @@ def _get_default_workspace(kind, objects, semantic_key, factory):
         workspace._default_workspace_cache_active = False
         return workspace
     cache_key = _default_workspace_key(kind, objects, semantic_key)
-    workspace = cache.get(cache_key)
-    if workspace is not None:
-        cache.move_to_end(cache_key)
-        workspace._default_workspace_cache_active = True
-        return workspace
-    while len(cache) >= _DEFAULT_WORKSPACE_CACHE_LIMIT:
-        _, old_workspace = cache.popitem(last=False)
-        _clear_workspace_safely(old_workspace)
+    with _default_workspace_cache_lock:
+        workspace = cache.get(cache_key)
+        if workspace is not None:
+            cache.move_to_end(cache_key)
+            workspace._default_workspace_cache_active = True
+            return workspace
+
     workspace = factory()
-    workspace._default_workspace_cache_active = True
-    cache[cache_key] = workspace
-    return workspace
+    with _default_workspace_cache_lock:
+        # A quiescent reset/explicit clear may have detached this context while
+        # the workspace factory allocated its buffers.
+        if not any(
+            candidate is cache for candidate in _default_workspace_caches.values()
+        ):
+            workspace._default_workspace_cache_active = False
+            return workspace
+        existing = cache.get(cache_key)
+        if existing is not None:
+            cache.move_to_end(cache_key)
+            existing._default_workspace_cache_active = True
+            _clear_workspace_safely(workspace)
+            return existing
+        while len(cache) >= _DEFAULT_WORKSPACE_CACHE_LIMIT:
+            # Do not call clear() here: the evicted workspace may still be
+            # referenced by an asynchronous submission that just returned.
+            cache.popitem(last=False)
+        workspace._default_workspace_cache_active = True
+        cache[cache_key] = workspace
+        return workspace
 
 
 def _workspace_uses_default_cache(workspace):
     return bool(getattr(workspace, "_default_workspace_cache_active", False))
+
+
+def get_primitive_workspace_statistics():
+    """Snapshot Program-retained and Python logical primitive workspace bytes.
+
+    The two byte domains are intentionally separate and must not be added:
+    multiple Python workspaces may share the same Program-owned provider arena.
+    CUDA Toolkit-reference and driver-only providers also share one arena per
+    primitive family, so reference provider names are reported as aliases of
+    the canonical driver provider instead of being counted twice.
+    This metadata query does not synchronize submitted backend work.
+    """
+
+    runtime = get_runtime()
+    prog = runtime.prog
+    backend = _primitive_backend_name(current_cfg().arch)
+    provider_prefixes = {
+        "cpu": ("cpu_",),
+        "cuda": ("cuda_",),
+        "vulkan": ("vulkan_",),
+    }.get(backend, ())
+    provider_aliases = {}
+    if backend == "cuda":
+        provider_aliases = {
+            "cuda_cub_check_count": "cuda_device_check_count",
+            "cuda_cub_histogram": "cuda_device_histogram",
+            "cuda_cub_metric_reduce": "cuda_device_metric_reduce",
+            "cuda_cub_radix_sort": "cuda_device_radix_sort",
+            "cuda_cub_reduce": "cuda_device_reduce",
+            "cuda_cub_scan": "cuda_device_scan",
+            "cuda_cub_select": "cuda_device_compact",
+        }
+    provider_bytes = {}
+    provider_errors = {}
+    if prog is not None:
+        workspace_methods = {
+            name
+            for name in dir(type(prog))
+            if name.endswith("_workspace_bytes")
+            and _is_native_primitive_prog_method_name(name)
+            and name.startswith(provider_prefixes)
+        }
+        for name in sorted(workspace_methods):
+            provider = name[: -len("_workspace_bytes")]
+            canonical_provider = provider_aliases.get(provider, provider)
+            canonical_method = f"{canonical_provider}_workspace_bytes"
+            if provider != canonical_provider and canonical_method in workspace_methods:
+                continue
+            try:
+                provider_bytes[canonical_provider] = int(getattr(prog, name)())
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                provider_errors[name] = type(exc).__name__
+
+    logical_current = 0
+    logical_peak = 0
+    entry_count = 0
+    with _default_workspace_cache_lock:
+        context_count = len(_default_workspace_caches)
+        for cache in _default_workspace_caches.values():
+            entry_count += len(cache)
+            for workspace in cache.values():
+                logical_current += int(
+                    getattr(workspace, "workspace_bytes_current", 0)
+                )
+                logical_peak += int(getattr(workspace, "workspace_bytes_peak", 0))
+
+    return {
+        "schema_version": 1,
+        "initialized": prog is not None,
+        "backend": backend,
+        "program_provider_bytes": dict(sorted(provider_bytes.items())),
+        "program_provider_bytes_total": sum(provider_bytes.values()),
+        "program_provider_aliases": dict(sorted(provider_aliases.items())),
+        "program_provider_errors": dict(sorted(provider_errors.items())),
+        "default_cache": {
+            "context_count": context_count,
+            "entry_count": entry_count,
+            "logical_workspace_bytes_current": logical_current,
+            "logical_workspace_bytes_peak": logical_peak,
+            "entry_limit_per_context": _DEFAULT_WORKSPACE_CACHE_LIMIT,
+            "context_limit": _DEFAULT_WORKSPACE_CONTEXT_LIMIT,
+            "ownership": "per_python_thread",
+        },
+    }
 
 
 def _default_workspace_replay_enabled(workspace, kind):
@@ -8180,9 +8412,10 @@ def _cuda_cub_sort_native(
     prog = impl.get_runtime().prog
     if not _prog_available(prog, "cuda_cub_radix_sort_available"):
         raise RuntimeError(
-            f"method='{method}' requires CUDA CUB sort support, the bundled "
-            "CUDA runtime from the platform taichi-forge-runtime wheel, and "
-            "a compatible NVIDIA driver."
+            f"method='{method}' requires a reference-enabled developer build, "
+            "an explicitly configured CUDART, and a compatible NVIDIA driver. "
+            "Standard runtime wheels intentionally omit this deprecated "
+            "Toolkit reference provider."
         )
     key_type = _SORT_KEY_TYPE[keys.dtype]
     value_type = (
@@ -16667,6 +16900,8 @@ __all__ = [
     "clear_primitive_diagnostics",
     "set_primitive_diagnostics_enabled",
     "get_primitive_diagnostics",
+    "get_primitive_runtime_diagnostics",
+    "get_primitive_workspace_statistics",
     "clear_default_workspaces",
     "experimental_compact",
     "experimental_run_length_encode",

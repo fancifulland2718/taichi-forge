@@ -1,3 +1,5 @@
+import threading
+
 import numpy as np
 import pytest
 
@@ -392,6 +394,148 @@ def test_runtime_statistics_native_adapter_matches_legacy_diagnostics():
     assert (
         after_failure["submission"]["failed_submissions"]
         == before_failure["submission"]["failed_submissions"] + 1
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_primitive_runtime_diagnostics_explain_cached_provider_without_sync():
+    n = 64
+    src_np = np.arange(n, dtype=np.int32)
+    src = ti.ndarray(ti.i32, shape=n)
+    dst = ti.ndarray(ti.i32, shape=n)
+    sort_keys = ti.ndarray(ti.i32, shape=n)
+    sort_values = ti.ndarray(ti.i32, shape=n)
+    src.from_numpy(src_np)
+    sort_keys_np = ((src_np * 17) % 41 - 20).astype(np.int32)
+    sort_values_np = np.arange(n, dtype=np.int32)
+    sort_keys.from_numpy(sort_keys_np)
+    sort_values.from_numpy(sort_values_np)
+    workspace = alg_impl.TransformWorkspace(max_items=n)
+    sort_workspace = alg_impl.SortWorkspace(max_items=n)
+    expected_provider = {
+        ti.cpu: "cpu_transform_affine_ndarray",
+        ti.cuda: "cuda_device_transform_affine_ndarray",
+        ti.vulkan: "vulkan_transform_affine_ndarray_trusted",
+    }[ti.lang.impl.current_cfg().arch]
+    expected_dependency = {
+        ti.cpu: "none",
+        ti.cuda: "driver_only",
+        ti.vulkan: "none",
+    }[ti.lang.impl.current_cfg().arch]
+    expected_sort_provider = {
+        ti.cpu: "cpu_stable_sort_ndarray",
+        ti.cuda: "cuda_device_radix_sort_ndarray",
+        ti.vulkan: "vulkan_radix_sort_u32_ndarray",
+    }[ti.lang.impl.current_cfg().arch]
+
+    # Prewarm and record the native replay plan before opening the diagnostic
+    # interval. This keeps the assertion independent of cold descriptor probes.
+    alg_impl.experimental_transform(
+        src, dst, scale=5, bias=-3, method="auto", workspace=workspace
+    )
+    alg_impl.set_primitive_diagnostics_enabled(True, clear=True)
+    try:
+        prog = ti.lang.impl.get_runtime().prog
+        before_sync = prog._runtime_statistics_snapshot()["synchronization"]
+        alg_impl.experimental_transform(
+            src, dst, scale=5, bias=-3, method="auto", workspace=workspace
+        )
+        alg_impl.sort(
+            sort_keys,
+            sort_values,
+            method="auto",
+            workspace=sort_workspace,
+        )
+        diagnostics = alg_impl.get_primitive_runtime_diagnostics()
+        after_sync = prog._runtime_statistics_snapshot()["synchronization"]
+    finally:
+        alg_impl.set_primitive_diagnostics_enabled(False, clear=True)
+
+    providers = {item["provider"]: item for item in diagnostics["providers"]}
+    assert diagnostics["schema_version"] == 1
+    assert diagnostics["enabled"] is True
+    assert providers[expected_provider]["dependency_class"] == expected_dependency
+    assert providers[expected_provider]["count"] == 1
+    assert (
+        providers[expected_sort_provider]["dependency_class"]
+        == expected_dependency
+    )
+    assert providers[expected_sort_provider]["count"] == 1
+    assert diagnostics["fallbacks"] == ()
+    assert diagnostics["workspace"]["schema_version"] == 1
+    assert (
+        diagnostics["workspace"]["default_cache"]["ownership"]
+        == "per_python_thread"
+    )
+    workspace_statistics = diagnostics["workspace"]
+    assert workspace_statistics["program_provider_bytes_total"] == sum(
+        workspace_statistics["program_provider_bytes"].values()
+    )
+    if ti.lang.impl.current_cfg().arch == ti.cuda:
+        assert workspace_statistics["program_provider_aliases"] == {
+            "cuda_cub_check_count": "cuda_device_check_count",
+            "cuda_cub_histogram": "cuda_device_histogram",
+            "cuda_cub_metric_reduce": "cuda_device_metric_reduce",
+            "cuda_cub_radix_sort": "cuda_device_radix_sort",
+            "cuda_cub_reduce": "cuda_device_reduce",
+            "cuda_cub_scan": "cuda_device_scan",
+            "cuda_cub_select": "cuda_device_compact",
+        }
+        assert not any(
+            name.startswith("cuda_cub_")
+            for name in workspace_statistics["program_provider_bytes"]
+        )
+    assert after_sync["program_syncs"] == before_sync["program_syncs"]
+    assert after_sync["completion_waits"] == before_sync["completion_waits"]
+    ti.sync()
+    np.testing.assert_array_equal(dst.to_numpy(), src_np * 5 - 3)
+    order = np.argsort(sort_keys_np, kind="stable")
+    np.testing.assert_array_equal(sort_keys.to_numpy(), sort_keys_np[order])
+    np.testing.assert_array_equal(sort_values.to_numpy(), sort_values_np[order])
+
+
+def test_primitive_diagnostic_counter_is_exact_under_host_concurrency():
+    thread_count = 4
+    iterations = 2000
+
+    def record_many():
+        for _ in range(iterations):
+            alg_impl._record_primitive_diagnostic("test.concurrent")
+
+    alg_impl.set_primitive_diagnostics_enabled(True, clear=True)
+    try:
+        threads = [
+            threading.Thread(target=record_many) for _ in range(thread_count)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert all(not thread.is_alive() for thread in threads)
+        assert alg_impl.get_primitive_diagnostics()["test.concurrent"] == (
+            thread_count * iterations
+        )
+    finally:
+        alg_impl.set_primitive_diagnostics_enabled(False, clear=True)
+
+
+@test_utils.test(arch=ti.cpu)
+def test_primitive_runtime_diagnostics_reports_legacy_fallback_route():
+    alg_impl.set_primitive_diagnostics_enabled(True, clear=True)
+    try:
+        alg_impl._record_legacy_helper_fallback(
+            "test_fallback()", "auto", "kernel"
+        )
+        diagnostics = alg_impl.get_primitive_runtime_diagnostics()
+    finally:
+        alg_impl.set_primitive_diagnostics_enabled(False, clear=True)
+    assert diagnostics["fallbacks"] == (
+        {
+            "operation": "test_fallback()",
+            "requested_method": "auto",
+            "selected_fallback": "kernel",
+            "count": 1,
+        },
     )
 
 
