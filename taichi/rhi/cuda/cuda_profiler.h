@@ -59,6 +59,7 @@ class KernelProfilerCUDA : public KernelProfilerBase {
   std::unique_ptr<CuptiToolkit> cupti_toolkit_{nullptr};
   std::vector<std::string> metric_list_;
   uint32_t records_size_after_sync_{0};
+  std::size_t records_size_after_statistics_{0};
 };
 
 // default profiling toolkit
@@ -68,7 +69,9 @@ class EventToolkit {
                      std::vector<KernelProfileTracedRecord> &traced_records);
   KernelProfilerBase::TaskHandle start_with_handle(
       const std::string &kernel_name);
-  void update_timeline(std::vector<KernelProfileTracedRecord> &traced_records);
+  void update_timeline(
+      uint32_t first_record,
+      const std::vector<KernelProfileTracedRecord> &traced_records);
   void clear() {
     event_records_.clear();
   }

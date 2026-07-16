@@ -149,7 +149,10 @@ void KernelProfilerCUDA::stop(KernelProfilerBase::TaskHandle handle) {
 }
 
 bool KernelProfilerCUDA::statistics_on_traced_records() {
-  for (auto &record : traced_records_) {
+  TI_ASSERT(records_size_after_statistics_ <= traced_records_.size());
+  for (std::size_t record_index = records_size_after_statistics_;
+       record_index < traced_records_.size(); ++record_index) {
+    const auto &record = traced_records_[record_index];
     auto it =
         std::find_if(statistical_results_.begin(), statistical_results_.end(),
                      [&](KernelProfileStatisticalResult &result) {
@@ -162,6 +165,7 @@ bool KernelProfilerCUDA::statistics_on_traced_records() {
     it->insert_record(record.kernel_elapsed_time_in_ms);
     total_time_ms_ += record.kernel_elapsed_time_in_ms;
   }
+  records_size_after_statistics_ = traced_records_.size();
 
   return true;
 }
@@ -173,12 +177,14 @@ void KernelProfilerCUDA::sync() {
 void KernelProfilerCUDA::update() {
   if (tool_ == ProfilingToolkit::event) {
     event_toolkit_->update_record(records_size_after_sync_, traced_records_);
-    event_toolkit_->update_timeline(traced_records_);
-    statistics_on_traced_records();  // TODO: deprecated
+    event_toolkit_->update_timeline(records_size_after_sync_, traced_records_);
+    statistics_on_traced_records();
     event_toolkit_->clear();
   } else if (tool_ == ProfilingToolkit::cupti) {
-    cupti_toolkit_->update_record(records_size_after_sync_, traced_records_);
-    statistics_on_traced_records();  // TODO: deprecated
+    TI_ERROR_IF(!cupti_toolkit_->update_record(records_size_after_sync_,
+                                                traced_records_),
+                "CUPTI failed to update kernel profiler records");
+    statistics_on_traced_records();
     this->reinit_with_metrics(metric_list_);
   }
 
@@ -190,6 +196,7 @@ void KernelProfilerCUDA::clear() {
   update();
   total_time_ms_ = 0;
   records_size_after_sync_ = 0;
+  records_size_after_statistics_ = 0;
   traced_records_.clear();
   statistical_results_.clear();
 }
@@ -337,10 +344,13 @@ void EventToolkit::update_record(
 }
 
 void EventToolkit::update_timeline(
-    std::vector<KernelProfileTracedRecord> &traced_records) {
+    uint32_t first_record,
+    const std::vector<KernelProfileTracedRecord> &traced_records) {
   if (Timelines::get_instance().get_enabled()) {
     auto &timeline = Timeline::get_this_thread_instance();
-    for (auto &record : traced_records) {
+    for (std::size_t record_index = first_record;
+         record_index < traced_records.size(); ++record_index) {
+      const auto &record = traced_records[record_index];
       // param of insert_event() :
       // struct TimelineEvent @ taichi/taichi/system/timeline.h
       timeline.insert_event({record.name, /*param_name=begin*/ true,
@@ -366,7 +376,8 @@ void EventToolkit::update_record(
   TI_NOT_IMPLEMENTED;
 }
 void EventToolkit::update_timeline(
-    std::vector<KernelProfileTracedRecord> &traced_records) {
+    uint32_t first_record,
+    const std::vector<KernelProfileTracedRecord> &traced_records) {
   TI_NOT_IMPLEMENTED;
 }
 #endif
