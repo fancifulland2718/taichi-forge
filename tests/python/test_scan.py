@@ -233,6 +233,22 @@ def test_scan_ndarray_cuda_device():
     assert after["active_leases"] == 0
 
 
+@test_utils.test(arch=[ti.cuda])
+def test_scan_ndarray_cuda_device_large_tiled_direct():
+    n = 1 << 20
+    prog = impl.get_runtime().prog
+    if not prog.cuda_device_scan_available():
+        pytest.skip("CUDA Driver scan is unavailable in this build/runtime.")
+    arr = ti.ndarray(ti.i32, shape=n)
+    arr.from_numpy(np.ones(n, dtype=np.int32))
+
+    prog.cuda_device_inclusive_scan_ndarray(arr.arr, _SCAN_VALUE_TYPE[ti.i32])
+
+    np.testing.assert_array_equal(
+        arr.to_numpy(), np.arange(1, n + 1, dtype=np.int32)
+    )
+
+
 @pytest.mark.parametrize("N", [255, 256, 257, 65537])
 @test_utils.test(arch=[ti.cuda])
 def test_scan_ndarray_cuda_device_reverse_boundaries(N):

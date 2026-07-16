@@ -21,6 +21,10 @@ namespace taichi::lang::cuda {
 namespace {
 
 constexpr std::uint32_t kBlockDim = 256;
+constexpr std::uint32_t kScanItemsPerThread = 4;
+constexpr std::uint32_t kScanTileItems = kBlockDim * kScanItemsPerThread;
+constexpr std::uint32_t kScanBlockShift = 8;
+constexpr std::uint32_t kScanTileShift = 10;
 constexpr std::uint32_t kReduceItemsPerThread = 4;
 constexpr std::uint32_t kReduceTileItems = kBlockDim * kReduceItemsPerThread;
 constexpr std::uint64_t kWorkspaceVariant = 0x4452565054580001ull;
@@ -28,6 +32,7 @@ constexpr std::uint64_t kWorkspaceVariant = 0x4452565054580001ull;
 struct KernelSet {
   void *module{nullptr};
   std::array<void *, 6> scan{};
+  std::array<void *, 6> scan_tiled{};
   std::array<void *, 6> uniform_add{};
   std::array<void *, 6> reduce{};
   std::array<void *, 6> add{};
@@ -107,6 +112,8 @@ void load_kernel_set_once() {
                                                  "u64", "i64", "f64"};
   for (std::size_t i = 0; i < suffixes.size(); ++i) {
     const std::string scan_name = std::string("scan_blocks_") + suffixes[i];
+    const std::string scan_tiled_name =
+        std::string("scan_tiles_") + suffixes[i];
     const std::string uniform_name = std::string("uniform_add_") + suffixes[i];
     const std::string reduce_name = std::string("reduce_blocks_") + suffixes[i];
     const std::string add_name = std::string("add_strided_") + suffixes[i];
@@ -115,6 +122,8 @@ void load_kernel_set_once() {
     const std::string zero_name = std::string("zero_strided_") + suffixes[i];
     driver.module_get_function(&kernel_set.scan[i], kernel_set.module,
                                scan_name.c_str());
+    driver.module_get_function(&kernel_set.scan_tiled[i], kernel_set.module,
+                               scan_tiled_name.c_str());
     driver.module_get_function(&kernel_set.uniform_add[i], kernel_set.module,
                                uniform_name.c_str());
     driver.module_get_function(&kernel_set.reduce[i], kernel_set.module,
@@ -275,7 +284,7 @@ struct LevelLayout {
 LevelLayout scan_layout(std::uint32_t num_items, std::size_t value_size) {
   LevelLayout layout;
   std::uint32_t count =
-      (num_items + kBlockDim - 1u) / static_cast<std::uint32_t>(kBlockDim);
+      (num_items + kScanTileItems - 1u) / kScanTileItems;
   while (count > 1u) {
     TI_ASSERT(layout.level_count < layout.counts.size());
     layout.bytes = (layout.bytes + 255u) & ~std::size_t{255u};
@@ -283,7 +292,7 @@ LevelLayout scan_layout(std::uint32_t num_items, std::size_t value_size) {
     layout.offsets[layout.level_count] = layout.bytes;
     layout.bytes += static_cast<std::size_t>(count) * value_size;
     ++layout.level_count;
-    count = (count + kBlockDim - 1u) / kBlockDim;
+    count = (count + kScanTileItems - 1u) / kScanTileItems;
   }
   return layout;
 }
@@ -337,6 +346,8 @@ std::size_t driver_inclusive_scan_strided_for_family(
   }
 
   const std::uint32_t n = static_cast<std::uint32_t>(num_items);
+  const auto type_index = value_type_index(value_type);
+  auto &kernel = kernels();
   const auto layout = scan_layout(n, value_size);
   std::optional<PrimitiveWorkspaceArena::Lease<DriverWorkspace>> workspace;
   std::array<void *, 8> level_ptrs{};
@@ -349,8 +360,6 @@ std::size_t driver_inclusive_scan_strided_for_family(
     }
   }
 
-  const auto type_index = value_type_index(value_type);
-  auto &kernel = kernels();
   auto launch_scan = [&](void *values, std::uint64_t values_offset,
                          std::uint64_t values_stride, std::uint32_t count,
                          void *sums, std::int32_t reverse_order) {
@@ -360,8 +369,12 @@ std::size_t driver_inclusive_scan_strided_for_family(
     std::vector<void *> args{&values_arg,   &values_offset, &values_stride,
                              &count,        &sums_arg,      &sums_offset,
                              &reverse_order};
-    const unsigned grid = (count + kBlockDim - 1u) / kBlockDim;
-    CUDAContext::get_instance().launch(kernel.scan[type_index],
+    const bool use_tiled = count > kBlockDim;
+    const std::uint32_t tile_items =
+        use_tiled ? kScanTileItems : kBlockDim;
+    const unsigned grid = (count + tile_items - 1u) / tile_items;
+    CUDAContext::get_instance().launch(
+        use_tiled ? kernel.scan_tiled[type_index] : kernel.scan[type_index],
                                        "cuda_driver_scan_blocks", args, {},
                                        grid, kBlockDim, 0, stream);
   };
@@ -371,9 +384,11 @@ std::size_t driver_inclusive_scan_strided_for_family(
     void *values_arg = values;
     void *sums_arg = sums;
     std::uint64_t sums_offset = 0;
+    std::uint32_t tile_shift =
+        count > kBlockDim ? kScanTileShift : kScanBlockShift;
     std::vector<void *> args{&values_arg,   &values_offset, &values_stride,
                              &count,        &sums_arg,      &sums_offset,
-                             &reverse_order};
+                             &reverse_order, &tile_shift};
     const unsigned grid = (count + kBlockDim - 1u) / kBlockDim;
     CUDAContext::get_instance().launch(kernel.uniform_add[type_index],
                                        "cuda_driver_scan_uniform_add", args, {},

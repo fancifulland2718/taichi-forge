@@ -13,6 +13,7 @@ import tempfile
 SUFFIXES = ("i32", "u32", "f32", "i64", "u64", "f64")
 REQUIRED_ENTRIES = (
     *(f"scan_blocks_{suffix}" for suffix in SUFFIXES),
+    *(f"scan_tiles_{suffix}" for suffix in SUFFIXES),
     *(f"uniform_add_{suffix}" for suffix in SUFFIXES),
     *(f"reduce_blocks_{suffix}" for suffix in SUFFIXES),
     "zero_bins_i32",
@@ -102,6 +103,17 @@ def main() -> None:
     if not source.is_file():
         raise FileNotFoundError(f"CUDA primitive source not found: {source}")
 
+    help_result = subprocess.run(
+        [str(args.clang), "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    supports_ptx_feature = "--cuda-feature" in (
+        help_result.stdout + help_result.stderr
+    )
+    ptx_feature = ["--cuda-feature=+ptx40"] if supports_ptx_feature else []
+
     with tempfile.TemporaryDirectory(prefix="taichi-cuda-primitive-ptx-") as tmp:
         ptx_path = pathlib.Path(tmp) / "hierarchical.ptx"
         subprocess.run(
@@ -115,6 +127,7 @@ def main() -> None:
                 "-nocudainc",
                 "-nocudalib",
                 "--cuda-gpu-arch=sm_50",
+                *ptx_feature,
                 "-S",
                 str(source),
                 "-o",

@@ -322,18 +322,81 @@ __device__ void scan_blocks_impl(u8 *values,
 }
 
 template <typename T>
+__device__ void scan_tiles_impl(u8 *values,
+                                u64 offset,
+                                u64 stride,
+                                u32 n,
+                                u8 *block_sums,
+                                u64 sums_offset,
+                                i32 reverse,
+                                T *warp_sums,
+                                T *tile_base) {
+  const u32 tid = threadIdx.x;
+  const u32 lane = tid & 31u;
+  const u32 warp = tid >> 5;
+  const u32 block = blockIdx.x;
+  const u32 tile_begin = block * 1024u;
+  if (tid == 0u) {
+    *tile_base = identity<T>(0);
+  }
+  block_barrier();
+
+  for (u32 item = 0; item < 4u; ++item) {
+    const T chunk_base = *tile_base;
+    // Every warp must snapshot the previous chunk total before warp 7 can
+    // publish the current chunk total.
+    block_barrier();
+    const u32 index = tile_begin + item * 256u + tid;
+    const u32 physical_index = reverse != 0 ? n - 1u - index : index;
+    T value = index < n
+                  ? load_strided<T>(values, offset, stride, physical_index)
+                  : identity<T>(0);
+    value = warp_inclusive_sum(value);
+    if (lane == 31u) {
+      warp_sums[warp] = value;
+    }
+    block_barrier();
+
+    if (warp == 0u) {
+      T warp_value = lane < 8u ? warp_sums[lane] : identity<T>(0);
+      warp_value = warp_inclusive_sum(warp_value);
+      if (lane < 8u) {
+        warp_sums[lane] = warp_value;
+      }
+    }
+    block_barrier();
+
+    if (warp > 0u) {
+      value = combine(value, warp_sums[warp - 1u], 0);
+    }
+    value = combine(chunk_base, value, 0);
+    if (index < n) {
+      store_strided<T>(values, offset, stride, physical_index, value);
+    }
+    if (tid == 255u) {
+      *tile_base = value;
+    }
+    block_barrier();
+  }
+  if (tid == 255u && block_sums != nullptr) {
+    store_strided<T>(block_sums, sums_offset, sizeof(T), block, *tile_base);
+  }
+}
+
+template <typename T>
 __device__ void uniform_add_impl(u8 *values,
                                  u64 offset,
                                  u64 stride,
                                  u32 n,
                                  const u8 *block_sums,
                                  u64 sums_offset,
-                                 i32 reverse) {
+                                 i32 reverse,
+                                 u32 tile_shift) {
   const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
   if (index >= n) {
     return;
   }
-  const u32 block = index >> 8;
+  const u32 block = index >> tile_shift;
   if (block == 0u) {
     return;
   }
@@ -392,12 +455,22 @@ __device__ void reduce_blocks_impl(const u8 *values,
                            reverse, warp_sums);                                \
   }
 
+#define DEFINE_SCAN_TILE_KERNEL(NAME, TYPE)                                   \
+  extern "C" __global__ void NAME(u8 *values, u64 offset, u64 stride, u32 n,  \
+                                  u8 *block_sums, u64 sums_offset,            \
+                                  i32 reverse) {                              \
+    __shared__ TYPE warp_sums[8];                                             \
+    __shared__ TYPE tile_base;                                                \
+    scan_tiles_impl<TYPE>(values, offset, stride, n, block_sums, sums_offset, \
+                          reverse, warp_sums, &tile_base);                    \
+  }
+
 #define DEFINE_UNIFORM_KERNEL(NAME, TYPE)                                      \
   extern "C" __global__ void NAME(u8 *values, u64 offset, u64 stride, u32 n,   \
                                   const u8 *block_sums, u64 sums_offset,       \
-                                  i32 reverse) {                               \
+                                  i32 reverse, u32 tile_shift) {               \
     uniform_add_impl<TYPE>(values, offset, stride, n, block_sums, sums_offset, \
-                           reverse);                                           \
+                           reverse, tile_shift);                               \
   }
 
 #define DEFINE_REDUCE_KERNEL(NAME, TYPE)                                       \
@@ -415,6 +488,13 @@ DEFINE_SCAN_KERNEL(scan_blocks_f32, float)
 DEFINE_SCAN_KERNEL(scan_blocks_i64, i64)
 DEFINE_SCAN_KERNEL(scan_blocks_u64, u64)
 DEFINE_SCAN_KERNEL(scan_blocks_f64, double)
+
+DEFINE_SCAN_TILE_KERNEL(scan_tiles_i32, i32)
+DEFINE_SCAN_TILE_KERNEL(scan_tiles_u32, u32)
+DEFINE_SCAN_TILE_KERNEL(scan_tiles_f32, float)
+DEFINE_SCAN_TILE_KERNEL(scan_tiles_i64, i64)
+DEFINE_SCAN_TILE_KERNEL(scan_tiles_u64, u64)
+DEFINE_SCAN_TILE_KERNEL(scan_tiles_f64, double)
 
 DEFINE_UNIFORM_KERNEL(uniform_add_i32, i32)
 DEFINE_UNIFORM_KERNEL(uniform_add_u32, u32)
