@@ -1,5 +1,8 @@
 #include "taichi/system/profiler.h"
+#include "taichi/util/environ_config.h"
 #include "spdlog/fmt/bundled/color.h"
+
+#include <algorithm>
 
 #include <atomic>
 #include <cstdlib>
@@ -50,12 +53,16 @@ struct ProfilerRecordNode {
     return total_time / (float64)total_elements;
   }
 
-  ProfilerRecordNode *get_child(const std::string &name) {
+  ProfilerRecordNode *find_child(const std::string &name) {
     for (auto &ch : childs) {
       if (ch->name == name) {
         return ch.get();
       }
     }
+    return nullptr;
+  }
+
+  ProfilerRecordNode *create_child(const std::string &name) {
     childs.push_back(std::make_unique<ProfilerRecordNode>(name, this));
     return childs.back().get();
   }
@@ -68,7 +75,8 @@ class ProfilerRecords {
   int current_depth;
   bool enabled;
 
-  explicit ProfilerRecords(const std::string &name) {
+  ProfilerRecords(const std::string &name, std::size_t node_capacity)
+      : node_capacity_(node_capacity) {
     root = std::make_unique<ProfilerRecordNode>(
         fmt::format("[Profiler {}]", name), nullptr);
     current_node = root.get();
@@ -81,6 +89,9 @@ class ProfilerRecords {
     current_node = root.get();
     current_depth = 0;
     enabled = true;
+    node_count_ = 1;
+    dropped_depth_ = 0;
+    dropped_scope_samples_ = 0;
   }
 
   void print(ProfilerRecordNode *node, int depth);
@@ -88,43 +99,115 @@ class ProfilerRecords {
   void print() {
     fmt::print(fg(fmt::color::cyan), std::string(80, '>') + "\n");
     print(root.get(), 0);
+    if (dropped_scope_samples_ != 0) {
+      fmt::print(fg(fmt::color::yellow),
+                 "{} profiler samples omitted after reaching the {}-node "
+                 "memory budget.\n",
+                 dropped_scope_samples_, node_capacity_);
+    }
     fmt::print(fg(fmt::color::cyan), std::string(80, '>') + "\n");
   }
 
+  void merge_from(const ProfilerRecords &other) {
+    merge_node(root.get(), other.root.get());
+    dropped_scope_samples_ += other.dropped_scope_samples_;
+  }
+
   void insert_sample(float64 time) {
-    if (!enabled)
+    if (!enabled || dropped_depth_ != 0) {
+      if (dropped_depth_ != 0) {
+        dropped_scope_samples_ += 1;
+      }
       return;
+    }
     current_node->insert_sample(time);
   }
 
   void insert_sample(float64 time, uint64 tpe) {
-    if (!enabled)
+    if (!enabled || dropped_depth_ != 0) {
+      if (dropped_depth_ != 0) {
+        dropped_scope_samples_ += 1;
+      }
       return;
+    }
     current_node->insert_sample(time, tpe);
   }
 
-  void push(const std::string name) {
+  void push(const std::string &name) {
     if (!enabled)
       return;
-    current_node = current_node->get_child(name);
+    if (dropped_depth_ != 0) {
+      dropped_depth_ += 1;
+      return;
+    }
+    auto *child = current_node->find_child(name);
+    if (child == nullptr) {
+      if (node_count_ >= node_capacity_) {
+        dropped_depth_ = 1;
+        return;
+      }
+      child = current_node->create_child(name);
+      node_count_ += 1;
+    }
+    current_node = child;
     current_depth += 1;
   }
 
   void pop() {
     if (!enabled)
       return;
+    if (dropped_depth_ != 0) {
+      dropped_depth_ -= 1;
+      return;
+    }
     current_node = current_node->parent;
     current_depth -= 1;
   }
 
   static ProfilerRecords &get_this_thread_instance() {
-    // Use a raw pointer so that it lives together with the process
-    static thread_local ProfilerRecords *profiler_records = nullptr;
-    if (profiler_records == nullptr) {
-      profiler_records = Profiling::get_instance().get_this_thread_profiler();
+    struct ThreadProfilerLease {
+      std::thread::id id;
+      ProfilerRecords *records{nullptr};
+
+      ~ThreadProfilerLease() {
+        if (records != nullptr) {
+          Profiling::get_instance().retire_thread_profiler(id, records);
+        }
+      }
+    };
+    static thread_local ThreadProfilerLease lease;
+    if (lease.records == nullptr) {
+      lease.id = std::this_thread::get_id();
+      lease.records = Profiling::get_instance().get_this_thread_profiler();
     }
-    return *profiler_records;
+    return *lease.records;
   }
+ private:
+  void merge_node(ProfilerRecordNode *destination,
+                  const ProfilerRecordNode *source) {
+    destination->total_time += source->total_time;
+    destination->num_samples += source->num_samples;
+    destination->total_elements += source->total_elements;
+    destination->account_tpe =
+        destination->account_tpe || source->account_tpe;
+    for (const auto &source_child : source->childs) {
+      auto *destination_child = destination->find_child(source_child->name);
+      if (destination_child == nullptr) {
+        if (node_count_ >= node_capacity_) {
+          dropped_scope_samples_ += source_child->num_samples;
+          continue;
+        }
+        destination_child = destination->create_child(source_child->name);
+        node_count_ += 1;
+      }
+      merge_node(destination_child, source_child.get());
+    }
+  }
+
+  const std::size_t node_capacity_;
+  std::size_t node_count_{1};
+  std::size_t dropped_depth_{0};
+  std::uint64_t dropped_scope_samples_{0};
 };
 
 void ProfilerRecords::print(ProfilerRecordNode *node, int depth) {
@@ -275,6 +358,23 @@ ConditionalScopedProfiler::ConditionalScopedProfiler(std::string name) {
   }
 }
 
+Profiling::Profiling() {
+  const int configured_trace_events = lang::get_environ_config(
+      "TI_COMPILE_PROFILE_MAX_EVENTS",
+      static_cast<int>(kDefaultTraceEventCapacity));
+  trace_event_capacity_.store(
+      std::clamp<std::size_t>(
+          static_cast<std::size_t>(std::max(1, configured_trace_events)), 1,
+          kMaximumTraceEventCapacity),
+      std::memory_order_relaxed);
+  const int configured_nodes = lang::get_environ_config(
+      "TI_PROFILE_MAX_NODES",
+      static_cast<int>(kDefaultProfilerNodeCapacity));
+  profiler_node_capacity_ = std::clamp<std::size_t>(
+      static_cast<std::size_t>(std::max(1, configured_nodes)), 1,
+      kMaximumProfilerNodeCapacity);
+}
+
 Profiling &Profiling::get_instance() {
   static auto prof = new Profiling;
   return *prof;
@@ -286,26 +386,56 @@ ProfilerRecords *Profiling::get_this_thread_profiler() {
   std::stringstream ss;
   ss << id;
   if (profilers_.find(id) == profilers_.end()) {
-    // Note: thread id may be reused
-    profilers_[id] = new ProfilerRecords(fmt::format("thread {}", ss.str()));
+    profilers_[id] = new ProfilerRecords(
+        fmt::format("thread {}", ss.str()), profiler_node_capacity_);
   }
   return profilers_[id];
 }
 
+void Profiling::retire_thread_profiler(std::thread::id id,
+                                       ProfilerRecords *profiler) {
+  std::lock_guard<std::mutex> _(mut_);
+  auto found = profilers_.find(id);
+  TI_ASSERT(found != profilers_.end() && found->second == profiler);
+  if (retired_profiler_ == nullptr) {
+    retired_profiler_ =
+        new ProfilerRecords("retired threads", profiler_node_capacity_);
+  }
+  retired_profiler_->merge_from(*profiler);
+  profilers_.erase(found);
+  delete profiler;
+}
+
+std::size_t Profiling::live_profiler_count() {
+  std::lock_guard<std::mutex> _(mut_);
+  return profilers_.size();
+}
+
 void Profiling::print_profile_info() {
   std::lock_guard<std::mutex> _(mut_);
+  if (retired_profiler_ != nullptr) {
+    retired_profiler_->print();
+  }
   for (auto p : profilers_) {
     p.second->print();
   }
 }
 
 void Profiling::clear_profile_info() {
-  std::lock_guard<std::mutex> _(mut_);
-  for (auto p : profilers_) {
-    p.second->clear();
+  {
+    std::lock_guard<std::mutex> _(mut_);
+    if (retired_profiler_ != nullptr) {
+      retired_profiler_->clear();
+    }
+    for (auto p : profilers_) {
+      p.second->clear();
+    }
   }
-  std::lock_guard<std::mutex> _t(trace_mut_);
-  trace_events_.clear();
+  {
+    std::lock_guard<std::mutex> _(trace_mut_);
+    trace_events_.clear();
+    dropped_trace_events_.store(0, std::memory_order_relaxed);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -369,7 +499,33 @@ bool Profiling::is_tracing_enabled() {
 
 void Profiling::record_trace_event(TraceEvent &&ev) {
   std::lock_guard<std::mutex> _(trace_mut_);
+  if (trace_events_.size() >=
+      trace_event_capacity_.load(std::memory_order_relaxed)) {
+    dropped_trace_events_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   trace_events_.push_back(std::move(ev));
+}
+
+std::size_t Profiling::trace_event_capacity() const {
+  return trace_event_capacity_.load(std::memory_order_relaxed);
+}
+
+std::size_t Profiling::trace_event_count() {
+  std::lock_guard<std::mutex> _(trace_mut_);
+  return trace_events_.size();
+}
+
+std::uint64_t Profiling::dropped_trace_event_count() const {
+  return dropped_trace_events_.load(std::memory_order_relaxed);
+}
+
+void Profiling::set_trace_event_capacity_for_testing(std::size_t capacity) {
+  TI_ASSERT(capacity >= 1 && capacity <= kMaximumTraceEventCapacity);
+  std::lock_guard<std::mutex> _(trace_mut_);
+  trace_events_.clear();
+  dropped_trace_events_.store(0, std::memory_order_relaxed);
+  trace_event_capacity_.store(capacity, std::memory_order_relaxed);
 }
 
 namespace {
@@ -432,6 +588,9 @@ bool Profiling::export_csv(const std::string &path) {
   }
   os << "thread,path,calls,total_s,avg_s,tpe_s\n";
   std::lock_guard<std::mutex> _(mut_);
+  if (retired_profiler_ != nullptr) {
+    write_csv_node(os, "retired", "", retired_profiler_->root.get());
+  }
   for (auto &p : profilers_) {
     std::stringstream tid_ss;
     tid_ss << p.first;
@@ -448,6 +607,13 @@ bool Profiling::export_chrome_trace(const std::string &path) {
   // Chrome Trace "JSON Array Format": bare array of events.
   os << "[\n";
   std::lock_guard<std::mutex> _(trace_mut_);
+  const auto dropped =
+      dropped_trace_events_.load(std::memory_order_relaxed);
+  if (dropped != 0) {
+    TI_WARN("Compile trace reached its {}-event memory budget; {} later "
+            "events were dropped.",
+            trace_event_capacity(), dropped);
+  }
   bool first = true;
   for (const auto &ev : trace_events_) {
     if (!first) {

@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <vector>
 #include <map>
 #include <memory>
@@ -65,9 +67,18 @@ struct TraceEvent {
 // A profiling system for multithreaded applications
 class Profiling {
  public:
+  static constexpr std::size_t kDefaultTraceEventCapacity = 131072;
+  static constexpr std::size_t kMaximumTraceEventCapacity = 1048576;
+  static constexpr std::size_t kDefaultProfilerNodeCapacity = 16384;
+  static constexpr std::size_t kMaximumProfilerNodeCapacity = 131072;
+
+  Profiling();
+
   void print_profile_info();
   void clear_profile_info();
   ProfilerRecords *get_this_thread_profiler();
+  void retire_thread_profiler(std::thread::id id,
+                              ProfilerRecords *profiler);
 
   // Phase 0': flat dumps of the scoped profiler state.
   //   export_csv          — recursive flatten of the per-thread tree.
@@ -96,12 +107,23 @@ class Profiling {
 
   static Profiling &get_instance();
 
+  std::size_t live_profiler_count();
+  std::size_t trace_event_capacity() const;
+  std::size_t trace_event_count();
+  std::uint64_t dropped_trace_event_count() const;
+  void set_trace_event_capacity_for_testing(std::size_t capacity);
+
  private:
   std::mutex mut_;
   std::unordered_map<std::thread::id, ProfilerRecords *> profilers_;
+  ProfilerRecords *retired_profiler_{nullptr};
+  std::size_t profiler_node_capacity_{kDefaultProfilerNodeCapacity};
 
   std::mutex trace_mut_;
   std::vector<TraceEvent> trace_events_;
+  std::atomic<std::size_t> trace_event_capacity_{
+      kDefaultTraceEventCapacity};
+  std::atomic<std::uint64_t> dropped_trace_events_{0};
 };
 
 #define TI_PROFILER(name) taichi::ScopedProfiler _profiler_##__LINE__(name);

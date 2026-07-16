@@ -9,6 +9,8 @@
 #include "gtest/gtest.h"
 
 #include "taichi/program/runtime_trace.h"
+#include "taichi/system/profiler.h"
+#include "taichi/system/timeline.h"
 
 namespace taichi::lang {
 namespace {
@@ -187,6 +189,77 @@ TEST(RuntimeTrace, RejectsUnboundedConfigurations) {
   EXPECT_ANY_THROW(trace.start(2,
                                RuntimeTraceRecorder::kMaximumTotalEvents));
   EXPECT_EQ(trace.snapshot().allocated_bytes, 0);
+}
+
+TEST(DiagnosticMemory, TimelineDropsEventsAfterGlobalBudget) {
+  auto &timelines = ::taichi::Timelines::get_instance();
+  timelines.set_event_capacity_for_testing(16);
+  timelines.set_enabled(true);
+
+  std::vector<std::thread> workers;
+  for (int thread_index = 0; thread_index < 8; ++thread_index) {
+    workers.emplace_back([thread_index] {
+      auto &timeline = ::taichi::Timeline::get_this_thread_instance();
+      timeline.set_name(std::to_string(thread_index));
+      for (int event_index = 0; event_index < 4; ++event_index) {
+        timeline.insert_event(
+            {"bounded", true, ::taichi::Time::get_time(), "worker"});
+      }
+    });
+  }
+  for (std::thread &worker : workers) {
+    worker.join();
+  }
+
+  EXPECT_EQ(timelines.recorded_event_count(), 16);
+  EXPECT_EQ(timelines.dropped_event_count(), 16);
+  timelines.set_enabled(false);
+  timelines.set_event_capacity_for_testing(
+      ::taichi::Timelines::kDefaultEventCapacity);
+}
+
+TEST(DiagnosticMemory, CompileTraceDropsEventsAfterBudget) {
+  auto &profiling = ::taichi::Profiling::get_instance();
+  profiling.set_trace_event_capacity_for_testing(8);
+
+  for (int event_index = 0; event_index < 12; ++event_index) {
+    profiling.record_trace_event(
+        {"bounded", 0, static_cast<double>(event_index), 1.0});
+  }
+
+  EXPECT_EQ(profiling.trace_event_count(), 8);
+  EXPECT_EQ(profiling.dropped_trace_event_count(), 4);
+  profiling.set_trace_event_capacity_for_testing(
+      ::taichi::Profiling::kDefaultTraceEventCapacity);
+}
+
+TEST(DiagnosticMemory, ExitedThreadProfilersAreRetired) {
+  auto &profiling = ::taichi::Profiling::get_instance();
+  ::taichi::Profiling::set_tracing_runtime_override(false);
+  const auto baseline = profiling.live_profiler_count();
+
+  std::atomic<int> ready{0};
+  std::atomic<bool> go{false};
+  std::vector<std::thread> workers;
+  for (int thread_index = 0; thread_index < 32; ++thread_index) {
+    workers.emplace_back([&] {
+      ready.fetch_add(1, std::memory_order_release);
+      while (!go.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      ::taichi::ScopedProfiler scope("transient worker");
+    });
+  }
+  while (ready.load(std::memory_order_acquire) != 32) {
+    std::this_thread::yield();
+  }
+  go.store(true, std::memory_order_release);
+  for (std::thread &worker : workers) {
+    worker.join();
+  }
+
+  EXPECT_EQ(profiling.live_profiler_count(), baseline);
+  ::taichi::Profiling::clear_tracing_runtime_override();
 }
 
 }  // namespace

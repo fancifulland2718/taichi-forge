@@ -1,6 +1,40 @@
 #include "taichi/system/timeline.h"
+#include "taichi/util/environ_config.h"
+
+#include <algorithm>
 
 namespace taichi {
+
+Timelines::Timelines() {
+  const int configured = lang::get_environ_config(
+      "TI_TIMELINE_MAX_EVENTS", static_cast<int>(kDefaultEventCapacity));
+  event_capacity_.store(
+      std::clamp<std::size_t>(static_cast<std::size_t>(std::max(1, configured)),
+                              1, kMaximumEventCapacity),
+      std::memory_order_relaxed);
+}
+
+bool Timelines::try_reserve_event() {
+  const auto capacity = event_capacity_.load(std::memory_order_relaxed);
+  auto recorded = recorded_events_.load(std::memory_order_relaxed);
+  while (recorded < capacity) {
+    if (recorded_events_.compare_exchange_weak(
+            recorded, recorded + 1, std::memory_order_relaxed,
+            std::memory_order_relaxed)) {
+      return true;
+    }
+  }
+  dropped_events_.fetch_add(1, std::memory_order_relaxed);
+  return false;
+}
+
+std::size_t Timelines::event_capacity() const {
+  return event_capacity_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t Timelines::recorded_event_count() const {
+  return recorded_events_.load(std::memory_order_relaxed);
+}
 
 std::string TimelineEvent::to_json() {
   std::string json{"{"};
@@ -33,8 +67,10 @@ void Timeline::clear() {
   events_.clear();
 }
 void Timeline::insert_event(const TimelineEvent &e) {
-  if (!Timelines::get_instance().get_enabled())
+  auto &timelines = Timelines::get_instance();
+  if (!timelines.get_enabled() || !timelines.try_reserve_event()) {
     return;
+  }
   std::lock_guard<std::mutex> _(mut_);
   events_.push_back(e);
 }
@@ -77,6 +113,8 @@ void Timelines::clear() {
   for (auto timeline : timelines_) {
     timeline->clear();
   }
+  recorded_events_.store(0, std::memory_order_relaxed);
+  dropped_events_.store(0, std::memory_order_relaxed);
 }
 
 void Timelines::save(const std::string &filename) {
@@ -89,6 +127,12 @@ void Timelines::save(const std::string &filename) {
   }
   if (!ends_with(filename, ".json")) {
     TI_WARN("Timeline filename {} should end with '.json'.", filename);
+  }
+  const auto dropped = dropped_events_.load(std::memory_order_relaxed);
+  if (dropped != 0) {
+    TI_WARN("Timeline reached its {}-event memory budget; {} later events "
+            "were dropped.",
+            event_capacity(), dropped);
   }
   std::ofstream fout(filename);
   fout << "[";
@@ -114,12 +158,22 @@ void Timelines::remove_timeline(Timeline *timeline) {
   trash(std::remove(timelines_.begin(), timelines_.end(), timeline));
 }
 
-bool Timelines::get_enabled() {
-  return enabled_;
+bool Timelines::get_enabled() const {
+  return enabled_.load(std::memory_order_relaxed);
 }
 
 void Timelines::set_enabled(bool enabled) {
-  enabled_ = enabled;
+  enabled_.store(enabled, std::memory_order_relaxed);
+}
+
+std::uint64_t Timelines::dropped_event_count() const {
+  return dropped_events_.load(std::memory_order_relaxed);
+}
+
+void Timelines::set_event_capacity_for_testing(std::size_t capacity) {
+  TI_ASSERT(capacity >= 1 && capacity <= kMaximumEventCapacity);
+  clear();
+  event_capacity_.store(capacity, std::memory_order_relaxed);
 }
 
 }  // namespace taichi

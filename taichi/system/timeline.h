@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <vector>
 #include <mutex>
 
@@ -58,7 +60,14 @@ class Timeline {
 // A timeline system for multi-threaded applications
 class Timelines {
  public:
+  static constexpr std::size_t kDefaultEventCapacity = 65536;
+  static constexpr std::size_t kMaximumEventCapacity = 1048576;
+
+  Timelines();
+
   static Timelines &get_instance();
+
+  bool try_reserve_event();
 
   void insert_events(const std::vector<TimelineEvent> &events);
 
@@ -72,15 +81,26 @@ class Timelines {
 
   void save(const std::string &filename);
 
-  bool get_enabled();
+  bool get_enabled() const;
 
   void set_enabled(bool enabled);
+
+  std::size_t event_capacity() const;
+
+  std::uint64_t recorded_event_count() const;
+
+  std::uint64_t dropped_event_count() const;
+
+  void set_event_capacity_for_testing(std::size_t capacity);
 
  private:
   std::mutex mut_;
   std::vector<TimelineEvent> events_;
   std::vector<Timeline *> timelines_;
-  bool enabled_{false};
+  std::atomic<std::size_t> event_capacity_{kDefaultEventCapacity};
+  std::atomic<std::uint64_t> recorded_events_{0};
+  std::atomic<std::uint64_t> dropped_events_{0};
+  std::atomic<bool> enabled_{false};
 };
 
 #define TI_TIMELINE(name) \
