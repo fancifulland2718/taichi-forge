@@ -2,7 +2,7 @@
 
 本文是 R8 runtime 加固后仍需在 Linux 上完成的 release 验证矩阵。它是测试计划，**不**表示这些
 路径已经在 Linux 通过。请在干净的 x86_64 Linux runner 上，以目标发布依赖运行，并记录 GPU、
-driver、Vulkan loader、窗口系统以及（构建 native method 时）CUDA Toolkit。
+driver、Vulkan loader、窗口系统；只有运行隔离的 reference workflow 时才记录 CUDA Toolkit。
 
 该矩阵是 0.5.x runtime 更新的发布门槛。已经在 0.4.25 或更早版本公开的功能，只有在
 0.5.x 实现或打包发生变化、需要重新取得 Linux 证据时才会列入，不应被理解为 0.5.0 新增。
@@ -24,23 +24,27 @@ driver、Vulkan loader、窗口系统以及（构建 native method 时）CUDA To
 
 这验证了包更新随附 libdevice asset 时无需再依赖源码中写死的新版本号。
 
-### 单 runtime wheel 与 CUDA 驱动兼容边界
+### 单 driver-only runtime wheel 与 CUDA 驱动兼容边界
 
-以最终候选 `CUDA_TOOLKIT_VERSION` 构建 runtime workflow，并对 auditwheel 处理后的上传候选
-执行以下检查：
+以关闭 Toolkit primitive reference 和 CUPTI 的标准 runtime workflow 构建，并对
+auditwheel 处理后的上传候选执行以下检查：
 
 - Linux 只产出一个项目名为 `taichi-forge-runtime` 的 manylinux wheel；distribution、版本、
   extra 和 wheel tag 都不带 `cu11` / `cu12` / `cu13` 后缀；
-- wheel 中恰好包含一个 `libtaichi_runtime.so`、一个 `cuda_runtime_major.txt`，以及一个与清单
-  major 一致的 `libcudart.so.<major>*` 或 auditwheel hash 名；检查 `DT_NEEDED`、RPATH 和实际
-  loader 路径均指向包内库；
-- 在无 CUDA Toolkit 的干净环境安装 wheel，运行 CUDA native scan/reduce/sort、device-check、
-  native AD、reset 和 workspace 稳定性矩阵；
-- 若候选基线低于当前默认 CUDA 13.2，必须在目标旧 driver 上运行相同 wheel。只在新 driver
-  编译或执行通过，不能证明最低 driver 已降低。
+- wheel 中恰好包含一个 `libtaichi_runtime.so`，不含 `cuda_runtime_major.txt`，也不含原名
+  或 auditwheel hash 后的 CUDART；检查 `DT_NEEDED`、RPATH 和真实 loader path 均不解析到
+  CUDA Toolkit runtime library；
+- 对 raw/repaired wheel 运行
+  `scripts/validate_runtime_wheel.py --dependency-class driver-only`；在无 CUDA Toolkit 的
+  环境安装后运行 CUDA native scan/reduce/sort、compact、histogram、device-check、
+  native AD、reset、workspace clear/stability 与 1/2/4 submitter；
+- 在每个声明支持的旧 driver 上安装同一个 wheel。driver-only 依赖扫描或只在新 driver 上运行
+  都不能证明最低 driver 已降低；PTX/module-load 失败要与 device capability 分开记录；
+- 在没有 NVIDIA driver/Toolkit 的机器安装配对 wheel，运行 CPU/Vulkan smoke，证明无关后端
+  不会加载 CUDA library。
 
-这个矩阵可以用 11.8/12.x 候选做内部验证，但最终只发布一套通过门槛的 Linux wheel，不建立
-按 CUDA 版本分叉的包系列。
+可选 CUDA 13.2 CUB/CUDART reference workflow 仍然不发布，只用于差分证据，且不能改变标准
+wheel；发行不建立 CUDA 版本化包系列。
 
 ### CUDA 执行、graph 与 allocator 路径
 
@@ -70,13 +74,15 @@ target fallback 的较新设备。验证数值结果、offline-cache target 隔�
   逐次同步的 p50/p95 类样本与批量提交吞吐。交替绑定同结构 ndarray 并改变 scalar，
   要求结果正确、内存有界，且相对强制重捕获基线有可测收益；同时运行 scalar/matrix
   patch、结构变化重捕获、allocation generation 和双 host caller 回归；
-- 额外以 `TI_WITH_CUDA_TOOLKIT=OFF` 编译一个 CUDA-enabled safety target。CUDA graph
-  event/query 必须只依赖 Forge 动态 Driver API 声明即可编译，不得要求 Toolkit header。
-  这是附加可移植性门槛，不能替代启用 Toolkit 集成的正式 runtime wheel 构建；
+- 用 `TI_WITH_CUDA_TOOLKIT=OFF`、
+  `TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE=OFF` 和 `TI_WITH_CUPTI=OFF`
+  编译 release-equivalent CUDA target。CUDA graph event/query 和 native primitive
+  必须只依赖 Forge 动态 Driver API 声明，不得要求 Toolkit header；这就是正式 runtime
+  wheel 配置；
 - 分别以 GCC 和 Clang 编译受影响 graph 源码。`/EHsc` 前置只属于 MSVC；Linux flag 与
   exception ABI 必须保持不变，capture 中的异常仍必须在展开前结束活动 capture；
-- 以 `TI_WITH_CUDA_TOOLKIT=ON` 和 dynamic CUDART 构建，并实际覆盖 native CUB reduce。
-  该可选路径不可用的 runner 必须报告既有 fallback，不能被计为 CUB 覆盖；
+- 单独运行不发布的 Toolkit-reference workflow，把显式、已弃用的 CUB provider 当作差分
+  oracle。标准构建没有这些 provider 是预期行为，不能报告成生产 fallback；
 - 对受影响 CUDA regression 运行 `compute-sanitizer --tool memcheck`。只有已知当前 CUDA
   版本支持的 device-side atomic/duplicate-sensitive 用例才追加 `racecheck`。
 
@@ -286,3 +292,7 @@ AddressSanitizer/UBSan 覆盖析构、reset 与 range-validation。integer copy/
 sanitizer diagnostics。缺少可选 capability 只有在 fallback 被明确执行且结果正确时才可接受。任何
 device loss、sanitizer finding、synchronization-validation error、stale-cache result 或数值不一致
 均阻断发布，直到完成诊断。
+
+当前源码 checkout 已完成 driver-only 实现和 Windows 功能矩阵。Linux wheel 构建/import、
+ELF 依赖扫描、真实 GPU primitive/concurrency、compute-sanitizer 与目标旧 driver 执行仍明确
+待复测；记录完成前不声明更低的 Linux driver 下限。

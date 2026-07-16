@@ -66,14 +66,15 @@ PyPI 申请短期 token，**无需手动维护任何 secret**。
 `publish_pypi.yml` 已经用 `${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}` 优先
 使用它。
 
-### 1.6 单一平台 runtime wheel 与 CUDA 构建基线
+### 1.6 单一平台 driver-only runtime wheel
 
-`publish_runtime_pypi.yml` 是唯一需要安装 CUDA Toolkit 的发布 workflow。它构建平台级
-`taichi-forge-runtime` wheel，并启用：
+`publish_runtime_pypi.yml` 构建不依赖 CUDA Toolkit runtime 的平台级
+`taichi-forge-runtime` wheel，并显式启用：
 
 ```text
--DTI_WITH_CUDA_TOOLKIT:BOOL=ON
--DTI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON
+-DTI_WITH_CUDA_TOOLKIT:BOOL=OFF
+-DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF
+-DTI_WITH_CUPTI:BOOL=OFF
 ```
 
 完整的用户侧合同和版本边界见 [构建 Wheel](../forge/build_wheels.zh.md)。维护者在本 workflow
@@ -81,13 +82,14 @@ PyPI 申请短期 token，**无需手动维护任何 secret**。
 
 - 每个平台恰好一个 `taichi-forge-runtime` wheel，不创建 `cu11` / `cu12` / `cu13` 包、extra、
   版本后缀或 wheel tag；
-- Windows/Linux wheel 都包含唯一 native runtime、唯一动态 CUDART 和
-  `cuda_runtime_major.txt`，并通过 `scripts/validate_runtime_wheel.py`；Linux 必须验证
-  auditwheel 后的最终候选。auditwheel 生成 hashed `.libs` CUDART 后，workflow 会删除
-  已被替代的 raw CUDART、重写 `RECORD`，再执行 `auditwheel show` 和单副本校验；
-- `CUDA_TOOLKIT_VERSION` 当前默认 `13.2.0`，只作为可替换的内部构建基线。降低前必须完成
-  [Linux 复测清单](../forge/linux_revalidation.zh.md)和目标旧 driver 实测，不能只凭编译成功
-  修改对外最低驱动声明。
+- Windows/Linux wheel 都只包含唯一 native runtime，不包含
+  `cuda_runtime_major.txt` 或 CUDART，并通过
+  `scripts/validate_runtime_wheel.py --dependency-class driver-only`；Linux 必须验证
+  auditwheel 后的最终候选没有重新引入 CUDART；
+- `.github/workflows/test_cuda_toolkit_reference.yml` 可以用 Toolkit 13.2 构建 CUB/CUDART
+  对照 provider，但它不上传 wheel，也不能改变标准发行产物；
+- driver-only 依赖扫描不能替代旧 driver 真机执行。修改最低驱动声明前必须完成
+  [Linux 复测清单](../forge/linux_revalidation.zh.md)和目标旧 driver 实测。
 
 `publish_pypi.yml` 不应重新编译 C++ runtime，也不应重新安装 CUDA Toolkit。它只从目标
 PyPI/TestPyPI 下载指定版本的 `taichi-forge-runtime` wheel，解包 link artifacts，然后构建
@@ -172,10 +174,9 @@ git push origin v0.5.0
 | Release step 成功但 asset 为空 | artifact download 失败 / path 不对 | 看 `Gather wheels` step 输出，确认 `dist/*.whl` 确实存在 |
 | shim workflow 下载 runtime 失败 | 同版本 `taichi-forge-runtime` 尚未发布到目标索引 | 先运行 `publish_runtime_pypi.yml`，并确认目标是同一个 `pypi` / `testpypi` |
 | fork 触发 workflow 没有 id-token | fork 的 `pull_request` 默认没 OIDC 权限 | 改用 `workflow_dispatch` 或从 canonical repo 发起 |
-| Linux runtime 编译报缺少 CUDA/CCCL 头文件 | 所选 Toolkit 与 native 实现仍有未移除的版本专属依赖 | 保持单一包名不变；补齐兼容 adapter，并在该 Toolkit 的 Linux 构建中复测 |
-| Windows CUDA 版本校验误报 | `nvcc -V` 是多行输出，或校验字符串被硬编码 | 把输出 join 成字符串，并从 `CUDA_TOOLKIT_VERSION` 推导 `major.minor` |
-| runtime wheel 缺 CUDART 或 `cuda_runtime_major.txt` | runtime 构建没有启用动态 cudart，或 repair/打包路径错误 | 检查 `TI_WITH_CUDA_TOOLKIT`、`TI_CUDA_CUB_SORT_DYNAMIC_CUDART` 和 wheel contents validate step |
-| manylinux wheel 出现 raw 与 hashed 两份 CUDART | auditwheel 已复制并改写依赖，但 raw 数据文件副本尚未规范化 | 确认 auditwheel 后运行 `repair_runtime_wheel.py --platform manylinux`，再执行 `auditwheel show` 和严格校验 |
+| 标准 runtime 编译意外寻找 CUDA/CCCL 头文件 | production target 错误依赖了 Toolkit-reference source | 确认三个标准 flag 均为 OFF，并把 CUB/CUDART source 只留在独立 reference target |
+| driver-only runtime wheel 出现 CUDART 或 manifest | release target 或 auditwheel 意外引入 Toolkit runtime 依赖 | 检查 CMake cache、PE import/ELF `DT_NEEDED` 与 `--dependency-class driver-only` 校验 |
+| 旧 0.5.0 runtime wheel 被 validator 拒绝 | 对历史包错误使用了新发行的严格 dependency class | 兼容/repair 工具使用默认 `either`；只有新上传候选强制 `driver-only` |
 | Linux shim 导入时报 `llvm::DisableABIBreakingChecks` 未定义 | prebuilt shim 只使用 LLVM headers 且不链接 LLVMSupport，却没有关闭 header 的 link sentinel | 保持 runtime/shim 分包边界；确认 Linux shim 定义 `LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1`，并让 `validate_shim_wheel.py` 拒绝残留 sentinel 的 wheel |
 
 ## 4. 和 LLVM 20 的关系
@@ -199,12 +200,13 @@ python -m py_compile scripts/repair_runtime_wheel.py scripts/validate_runtime_wh
 workflow 产出后，必须对最终上传候选运行：
 
 ```text
-python scripts/validate_runtime_wheel.py --wheel-dir <runtime-wheel-dir> --platform pair
+python scripts/validate_runtime_wheel.py --wheel-dir <runtime-wheel-dir> --platform pair --dependency-class driver-only
 python scripts/validate_shim_wheel.py --wheel-dir <one-shim-wheel-dir> --platform <windows-or-manylinux>
 ```
 
 随后让 pip 按 shim wheel 的 `Requires-Dist` 安装其 Python 依赖和本地同版本 runtime wheel，
 运行 `pip check`；不得在最终安装验证中使用 `--no-deps`。再到仓库目录之外运行
-`scripts/validate_installed_runtime.py`，并确认实际 CUDART 来自 runtime package。正式发布
+`scripts/validate_installed_runtime.py`，并确认新候选没有 CUDART/manifest；历史 0.5.0
+包内 CUDART wheel 只属于兼容路径。正式发布
 还必须完成 [Linux 复测清单](../forge/linux_revalidation.zh.md) 中适用于发布环境的 GPU、
 sanitizer、GGUI/interop 和性能稳定性门槛；仅 `import` 或 smoke test 不足以替代这些检查。

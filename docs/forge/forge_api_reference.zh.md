@@ -338,7 +338,7 @@ field 模式使用 scalar i32 field。只有 count 以下的输出有效；Pytho
 才同步该 scalar。input/output alias 会在提交前拒绝；这些离散操作也会在写入前拒绝
 Tape/FwdMode。
 
-`method="auto"` 把 boundary kernel 与既有 CPU native、CUDA CUB 或 Vulkan native
+`method="auto"` 把 boundary kernel 与既有 CPU native、CUDA driver-only 或 Vulkan native
 compact provider 组合；dense-field fallback 使用 `field_scan`。
 `RunLengthWorkspace(max_items=None)` 复用 flags，并在 RLE 时复用 start buffer。
 Unique 的最低 scratch 为 4 bytes/item，RLE 为 12 bytes/item，此外还需选定 compact

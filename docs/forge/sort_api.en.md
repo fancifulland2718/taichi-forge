@@ -34,21 +34,27 @@ This API is Forge-only. Code that must run unchanged on vanilla Taichi should co
 
 With `method="auto"`:
 
-- CUDA: uses the native CUDA CUB DeviceRadixSort path when the CUDA toolkit sort support and runtime library are available. This is the default CUDA fast path. `cuda_cub_split32` is not selected automatically.
+- CUDA: uses Forge's stable driver-only radix provider. It is built on the
+  dynamically loaded CUDA Driver API and does not require CUB, CUDART, or a
+  local CUDA Toolkit. `cuda_cub_split32` is never selected automatically.
 - Vulkan: uses the native Vulkan radix8 sorter for supported 1D `ti.ndarray` `i32/u32` keys and optional `i32` payload values.
 - Other cases: falls back to a host stable sort.
 
 Explicit methods:
 
-- `method="cuda_cub_native"`: force CUDA CUB native sortable-key sort.
-- `method="cuda_cub_split32"`: opt in to split32 exact sorting for supported 64-bit key types.
+- `method="cuda_device"`: force the standard driver-only CUDA radix
+  provider.
+- `method="cuda_cub_native"` / `method="cuda_cub_split32"`: deprecated
+  development-reference methods. They are available only in a build configured
+  with `TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE=ON`, emit
+  `DeprecationWarning`, and are not included in standard runtime wheels.
 - `method="vulkan_native_radix_u32"`: force the current Vulkan radix8 path for supported 32-bit ndarray keys.
 - `method="host_stable"`: force the host stable fallback.
 - `method="legacy"`: use the vanilla-compatible odd-even merge implementation.
 
 ## Supported Fast Paths
 
-CUDA native fast path:
+CUDA driver-only fast path:
 
 - Keys: `ti.u32`, `ti.i32`, `ti.f32`, `ti.u64`, `ti.i64`, `ti.f64`
 - Values: optional `ti.i32`

@@ -378,7 +378,7 @@ Python synchronizes that scalar. Input/output aliasing is rejected before
 submission. These discrete operations reject Tape/FwdMode before writing.
 
 `method="auto"` composes a boundary kernel with the existing CPU native,
-CUDA CUB, or Vulkan native compact provider; dense-field fallback uses
+CUDA driver-only, or Vulkan native compact provider; dense-field fallback uses
 `field_scan`. `RunLengthWorkspace(max_items=None)` owns reusable flags and,
 for RLE, start buffers. The minimum scratch is 4 bytes/item for Unique and
 12 bytes/item for RLE, plus the selected compact provider's temporary storage.

@@ -47,7 +47,8 @@
 常见显式 method 家族包括：
 
 - `cpu_native`
-- 可用时的 CUDA native/CUB method
+- CUDA driver-only native method
+- 仅在 reference-enabled 开发构建中存在的、已弃用 CUDA CUB reference method
 - 可用时的 Vulkan native method
 - sort 类操作的 `host_stable` 或 legacy fallback method
 
@@ -103,11 +104,19 @@ serialization 仍不支持。
 
 ### CUDA runtime 可移植性
 
-CUDA native/CUB provider 随平台级 `taichi-forge-runtime` wheel 发行。用户不需要安装本机
-CUDA Toolkit，也不需要选择 CUDA 版本化包；`method="auto"` 仍以运行时 capability 为准，
-不支持时走既有正确 fallback。显式 CUDA native method 在 provider 或 driver 不兼容时会清晰
-拒绝。构建 Toolkit、包内 CUDART 与最低 driver 是不同边界；当前默认构建基线和降低门槛前的
-验证要求见 [构建 Wheel](build_wheels.zh.md)，尚待 Linux 实测的项目见
+当前源码中的标准 CUDA primitive provider 使用动态加载的 CUDA Driver API 和 Forge 自有
+kernel。标准 runtime wheel 不依赖 CUB/CUDART，用户不需要本机 CUDA Toolkit；项目按操作系统
+各发布一个 runtime wheel，不按 CUDA 版本分叉。`method="auto"` 永远不会选择 Toolkit
+reference provider。
+
+显式 `cuda_cub` / `cuda_cub_*` method 已成为弃用的开发参考路径：只由独立 reference
+workflow 编译，调用时发出 warning，标准 runtime wheel 不包含它们。已经发布、仍采用 0.5.0
+包内 CUDART 布局的 runtime wheel 会继续被 loader 兼容，但不能把它当成新 driver-only
+dependency class 的发行证据。
+
+driver-only 消除了 CUDA Runtime 动态库依赖，但本身不能证明最低 NVIDIA driver 已降低。
+PTX 是否可加载以及任何 driver 下限声明，仍必须在目标旧 driver 上真实执行。当前构建边界见
+[构建 Wheel](build_wheels.zh.md)，Linux 和旧 driver 的待补证据见
 [Linux 复测状态](linux_revalidation.zh.md)。
 
 ## 数据合同
@@ -293,6 +302,11 @@ buffer 和后端 replay plan。
 多数 native 算法接受 `workspace=` 或返回可复用 workspace。复用 workspace 可以让后端 scratch
 buffer 和 native plan 跨帧或跨重复调用存活，是热循环推荐写法。除非具体 workspace
 明确提供同步，否则并发调用必须使用独立 workspace。
+
+GPU scratch 归 active Program 的 primitive arena 所有，通过既有 workspace clear/reset API
+回收，不再保存在 process-global owner map。CPU primitive scratch 对每个算法族、每个 worker
+thread 最多保留 8 MiB；8 MiB 到 64 MiB 使用瞬时分配，超过 64 MiB 保持既有 serial
+fallback。这是驻留上界策略，不表示每次操作的峰值临时空间都不超过 8 MiB。
 
 ```python
 workspace = None

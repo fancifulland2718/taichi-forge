@@ -1,7 +1,8 @@
 # Taichi Forge Release Notes
 
 This is the canonical version index for Taichi Forge user-visible changes.
-The current source release is `0.5.0`; `0.4.25` is the final public
+The declared package version is `0.5.0`; current `master` also contains the
+explicitly separated Unreleased changes below. `0.4.25` is the final public
 `0.4.x` baseline.
 
 PyPI storage is limited, so some nonessential older distributions have been
@@ -14,6 +15,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
+| [Unreleased](#unreleased) | current source after the published 0.5.0 runtime boundary | current `master` | driver-only CUDA primitives and bounded Program-owned workspaces |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |
 | [0.1.2](#012) | historical source release; artifact may be removed | `fe5844390b` | import fixes and CUDA build option |
@@ -35,7 +37,31 @@ grouped under the behavior they shipped.
 | [0.4.23](#0423) | retained on PyPI | `1f36185c7` | split runtime/shim packaging, device checks, Vulkan fixes |
 | [0.4.24](#0424) | retained on PyPI | `f8dfb3e2a` | GGUI device-image staging and render cadence |
 | [0.4.25](#0425) | retained on PyPI; final public 0.4.x baseline | `7dad067ca` | GGUI event-pump and ImGui lifecycle fixes |
-| [0.5.0](#050) | current source release | current `master` | async runtime safety, Graph replay/lifetime work, Dense Field Graph |
+| [0.5.0](#050) | published runtime source boundary | `95626e8036` | async runtime safety, Graph replay/lifetime work, Dense Field Graph |
+
+## Unreleased
+
+These changes are after the published 0.5.0 runtime source boundary and are not
+retroactively attributed to the 0.5.0 artifact:
+
+- Replaced automatic CUDA native-primitive dispatch with Forge-owned,
+  driver-only providers for diagnostics, scan/reduce/histogram, composite
+  primitives, and stable radix sorting. The standard runtime no longer links or
+  bundles CUB/CUDART; explicit `cuda_cub*` methods are deprecated and isolated
+  in a non-publishing Toolkit-reference workflow.
+- Moved CUDA and Vulkan primitive resources into Program-owned arenas with
+  bounded leases and explicit clear/statistics paths. Vulkan recycles completed
+  descriptor/resource sets without queue-wide waits; CPU retains at most 8 MiB
+  of primitive scratch per family/worker and uses bounded transient/fallback
+  policies for larger requests.
+- Changed future standard runtime-wheel validation to the `driver-only`
+  dependency class while retaining loader, repair, and validation compatibility
+  for already-published 0.5.0 bundled-CUDART wheels. The project still publishes
+  one runtime wheel per operating system, not per CUDA version.
+- Completed the Windows driver-only/reference build and primitive correctness
+  matrices. Linux wheel/import/dependency scans, compute-sanitizer, and execution
+  on each claimed older NVIDIA driver remain required before lowering any
+  published driver floor.
 
 ## 0.1.0
 

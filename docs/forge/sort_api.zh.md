@@ -33,21 +33,25 @@ ti.algorithms.sort(
 
 当 `method="auto"` 时：
 
-- CUDA：在 CUDA toolkit sort 支持和运行时库可用时，默认使用 CUDA CUB DeviceRadixSort native 路径。`cuda_cub_split32` 不会被自动选择。
+- CUDA：默认使用 Forge 自有的 stable driver-only radix provider。该路径只依赖动态加载的
+  CUDA Driver API，不要求 CUB、CUDART 或本机 CUDA Toolkit；
+  `cuda_cub_split32` 永远不会被自动选择。
 - Vulkan：对受支持的一维 `ti.ndarray` `i32/u32` key 和可选 `i32` payload，使用当前 native radix8 sorter。
 - 其它组合：回退到 host stable sort。
 
 显式方法：
 
-- `method="cuda_cub_native"`：强制 CUDA CUB native sortable-key sort。
-- `method="cuda_cub_split32"`：显式启用受支持 64-bit key 类型的 split32 exact sort。
+- `method="cuda_device"`：强制标准 driver-only CUDA radix provider。
+- `method="cuda_cub_native"` / `method="cuda_cub_split32"`：仅供开发期参考的弃用
+  method。只有以 `TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE=ON` 构建时才可用，调用会产生
+  `DeprecationWarning`，标准 runtime wheel 不包含这些 provider。
 - `method="vulkan_native_radix_u32"`：强制当前 Vulkan radix8 路径，仅支持 32-bit ndarray key。
 - `method="host_stable"`：强制 host stable fallback。
 - `method="legacy"`：使用与标准兼容的 odd-even merge 实现。
 
 ## 快路径支持范围
 
-CUDA native fast path：
+CUDA driver-only fast path：
 
 - Keys：`ti.u32`、`ti.i32`、`ti.f32`、`ti.u64`、`ti.i64`、`ti.f64`
 - Values：可选 `ti.i32`

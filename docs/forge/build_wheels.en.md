@@ -74,8 +74,9 @@ Base release build `CMAKE_ARGS`:
 The `taichi-forge-runtime` workflow appends these runtime-only flags:
 
 ```bash
--DTI_WITH_CUDA_TOOLKIT:BOOL=ON
--DTI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON
+-DTI_WITH_CUDA_TOOLKIT:BOOL=OFF
+-DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF
+-DTI_WITH_CUPTI:BOOL=OFF
 ```
 
 The workflow also sets:
@@ -100,57 +101,57 @@ It is not a driver or Toolkit version probe. A release validation job should
 assert that a built runtime wheel contains exactly one such asset and that its
 major version matches this value after installation.
 
-## CUDA Toolkit for Native Methods
+## CUDA dependency classes
 
-Forge native CUDA primitive methods are built into the single platform runtime
-distribution. A release publishes one `taichi-forge-runtime` wheel for Windows
-and one for Linux; the distribution name, dependency and wheel tag never carry
-a CUDA version suffix. The Toolkit selected by `CUDA_TOOLKIT_VERSION` is an
-internal build baseline, not a separate package variant.
+Current source builds the standard CUDA runtime and native primitive providers
+against Forge's dynamically loaded Driver API. Building or installing the
+standard runtime wheel does not require a CUDA Toolkit, CUB, CUDART, CUPTI, or a
+CUDA-versioned Python package. A release still publishes exactly one
+`taichi-forge-runtime` wheel for Windows and one for Linux; the distribution
+name, dependency, extras, and wheel tag never carry a `cu11`, `cu12`, or
+`cu13` suffix.
 
-The current workflow default remains CUDA Toolkit `13.2.0` while lower-baseline
-release validation is in progress. Native iterator adapters are implemented in
-the repository and no longer require the CUDA-13.2-only `<cuda/iterator>`
-header. The workflow verifies `nvcc -V` against `CUDA_TOOLKIT_VERSION` and
-packages exactly one matching dynamic CUDART plus
-`cuda_runtime_major.txt`. Depending on the selected baseline, examples are:
+`scripts/validate_runtime_wheel.py --dependency-class driver-only` is the
+standard release gate. It verifies project/version identity, one native runtime,
+no `cuda_runtime_major.txt`, no bundled CUDART, and no native dependency on a
+Toolkit runtime library. The Windows and Linux release workflows additionally
+scan PE imports or ELF `DT_NEEDED` entries before upload. Auditwheel may bundle
+ordinary non-system libraries, but it must not introduce CUDART into the
+driver-only candidate.
 
-- Windows: `cudart64_<major>.dll`
-- Linux: `libcudart.so.<major>*` (auditwheel may hash the filename)
+Already-published 0.5.0 runtime wheels used the earlier bundled-CUDART layout.
+The Python loader, repair helper, and validators continue to recognize those
+artifacts for installation and repair compatibility. This does not relax the
+driver-only requirement for a newly built standard upload candidate. The
+validator's default `either` mode exists for compatibility tooling; release
+workflows select `driver-only` explicitly.
 
-`scripts/validate_runtime_wheel.py` is the shared release gate for the raw
-Linux wheel, the auditwheel-repaired manylinux wheel, the Windows wheel, and
-the final Windows+Linux pair. It verifies project/version identity, one native
-runtime, one matching CUDART/manifest, and equal CUDART majors across the pair.
-On Linux, `auditwheel repair` hashes the DT_NEEDED CUDART into
-`taichi_forge_runtime.libs` but can leave the raw wheel's data-file copy in
-`runtime_native`. The workflow therefore verifies the hashed copy against the
-manifest, removes the superseded raw copy, rewrites `RECORD`, and only then
-runs the manylinux validator. A release wheel must contain exactly one CUDART.
+The optional `.github/workflows/test_cuda_toolkit_reference.yml` workflow is a
+non-publishing developer target. It may install a recent Toolkit (currently
+13.2), compile CUB/CUDART comparison providers with
+`TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE=ON`, and run differential or
+performance tests. Those binaries are not standard runtime payloads and
+explicit `cuda_cub*` methods are deprecated. CUPTI/NVPerf is likewise an
+independent developer/profiler capability, not a primitive or release
+dependency.
+
 After installing both distributions, `scripts/validate_installed_runtime.py`
-also requires equal shim/runtime versions and verifies that the selected
-CUDART path belongs to the runtime package (or its auditwheel `.libs` directory).
-The install validation resolves the shim wheel's declared Python dependencies
-from the package index, uses the local runtime wheel, and runs `pip check` before
-importing from outside the repository. Each CPython build runs
+requires equal shim/runtime versions. Install validation resolves the shim
+wheel's declared Python dependencies, uses the local runtime wheel, runs
+`pip check`, and imports from outside the checkout. Each CPython build runs
 `scripts/validate_shim_wheel.py` to reject missing direct Python dependencies,
-duplicated runtime payloads, or a mismatched runtime dependency. The Windows runtime job
-also rejects implicit Toolkit DLL imports in `taichi_runtime.dll`; the bundled
-CUDART is discovered and loaded explicitly from the runtime package instead.
-The prebuilt Linux shim uses LLVM headers only and intentionally does not link
-LLVMSupport, so it disables LLVM's link sentinel with the header's supported
-`LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING` mode. Wheel validation rejects any
-Linux extension that still contains an LLVM Enable/Disable ABI sentinel; the
-full native runtime retains normal LLVM ABI checks.
+duplicated runtime payloads, or a mismatched runtime dependency. The prebuilt
+Linux shim uses LLVM headers only and intentionally does not link LLVMSupport,
+so it disables LLVM's link sentinel with the header-supported
+`LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING` mode. Wheel validation rejects an
+extension that still contains an LLVM Enable/Disable ABI sentinel; the full
+native runtime retains normal LLVM ABI checks.
 
-The Python shim reads the manifest and locates that bundled library; callers do
-not select a CUDA-specific extra or package. Installing `taichi-forge` therefore
-does not require a local CUDA Toolkit. Building the runtime wheel does require
-the selected Toolkit. A lower driver floor is obtained by validating and then
-lowering the one build baseline, not by publishing parallel `cu11`, `cu12`, or
-`cu13` wheels. Do not claim a lower driver floor until that wheel has passed GPU
-tests on the target driver range; Toolkit 11.8/12.x and Linux validation remain
-release gates.
+Removing CUDART avoids making the build Toolkit a user-side runtime dependency,
+but does not by itself establish a lower NVIDIA driver floor. PTX/module loading
+and the complete primitive matrix must pass on each claimed target driver.
+Linux and older-driver evidence still pending is tracked in
+[Linux revalidation](linux_revalidation.en.md).
 
 ## LLVM 20
 
@@ -213,14 +214,6 @@ export LD_LIBRARY_PATH="$VULKAN_SDK/lib:${LD_LIBRARY_PATH:-}"
 export PATH="$VULKAN_SDK/bin:$PATH"
 ```
 
-Install CUDA Toolkit `13.2.0` for runtime wheel builds and verify `nvcc`:
-
-```bash
-nvcc -V
-# The output must match CUDA_TOOLKIT_VERSION major.minor
-# (current default: release 13.2)
-```
-
 Install Python build packages:
 
 ```bash
@@ -234,7 +227,7 @@ python scripts/sync_runtime_dependency.py
 Build the platform runtime wheel once:
 
 ```bash
-CMAKE_ARGS="$BASE_CMAKE_ARGS -DTI_WITH_CUDA_TOOLKIT:BOOL=ON -DTI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON" \
+CMAKE_ARGS="$BASE_CMAKE_ARGS -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF -DTI_WITH_CUPTI:BOOL=OFF" \
 python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 ```
 
@@ -266,7 +259,6 @@ Required tools:
 - MSVC x64 developer environment.
 - Ninja.
 - Vulkan SDK `1.4.304.1`.
-- CUDA Toolkit `13.2.0` for platform runtime wheel builds.
 - Prebuilt LLVM 20 archive from `LLVM20_WIN_URL`, or a local LLVM 20 build.
 
 Install Python build packages:
@@ -280,18 +272,16 @@ Set paths:
 
 ```powershell
 $env:VULKAN_SDK = "C:\VulkanSDK\1.4.304.1"
-$env:CUDA_PATH = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
-$env:PATH = "$env:CUDA_PATH\bin;$env:VULKAN_SDK\Bin;$env:PATH"
+$env:PATH = "$env:VULKAN_SDK\Bin;$env:PATH"
 $env:LLVM_DIR = "C:\path\to\dist\taichi-llvm-20\lib\cmake\llvm"
 $baseCmakeArgs = "-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CUDA:BOOL=ON -DTI_WITH_LLVM:BOOL=ON -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON -DTI_WITH_C_API:BOOL=OFF -DTI_BUILD_TESTS:BOOL=OFF"
-nvcc -V
 python scripts\sync_runtime_dependency.py
 ```
 
 Build the platform runtime wheel once:
 
 ```powershell
-$env:CMAKE_ARGS = "$baseCmakeArgs -DTI_WITH_CUDA_TOOLKIT:BOOL=ON -DTI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON"
+$env:CMAKE_ARGS = "$baseCmakeArgs -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF -DTI_WITH_CUPTI:BOOL=OFF"
 python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 ```
 

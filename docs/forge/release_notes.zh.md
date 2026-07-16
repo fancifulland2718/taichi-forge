@@ -1,7 +1,8 @@
 # Taichi Forge 版本更新说明
 
-本文是 Taichi Forge 用户可见更新的唯一版本索引。当前源码版本是 `0.5.0`；
-`0.4.25` 是最后一个公开的 `0.4.x` 基线。
+本文是 Taichi Forge 用户可见更新的唯一版本索引。当前声明的包版本是 `0.5.0`；
+`master` 还包含下方明确分开的“未发布”更新。`0.4.25` 是最后一个公开的
+`0.4.x` 基线。
 
 由于 PyPI 项目容量有限，部分不再重要的旧发行文件已经移除。因此，当前 PyPI 列表中
 找不到某个版本，并不表示它从未存在。下表的源码边界是长期历史锚点；仅涉及打包、CI、
@@ -11,6 +12,7 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
+| [未发布](#未发布) | 已发布 0.5.0 runtime 边界之后的当前源码 | 当前 `master` | driver-only CUDA primitive 与有界 Program-owned workspace |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
 | [0.1.1](#011) | 历史源码版本；发行文件可能已移除 | `c771969781` | `taichi_forge` import 重命名与安装布局修复 |
 | [0.1.2](#012) | 历史源码版本；发行文件可能已移除 | `fe5844390b` | import 修复与 CUDA 构建选项 |
@@ -32,7 +34,26 @@
 | [0.4.23](#0423) | PyPI 当前保留 | `1f36185c7` | runtime/shim 拆包、device checks、Vulkan 修复 |
 | [0.4.24](#0424) | PyPI 当前保留 | `f8dfb3e2a` | GGUI device-image staging 与渲染 cadence |
 | [0.4.25](#0425) | PyPI 当前保留；最后一个公开 0.4.x 基线 | `7dad067ca` | GGUI 事件泵与 ImGui 生命周期修复 |
-| [0.5.0](#050) | 当前源码版本 | 当前 `master` | 异步 runtime 安全、Graph replay/lifetime、Dense Field Graph |
+| [0.5.0](#050) | 已发布 runtime 源码边界 | `95626e8036` | 异步 runtime 安全、Graph replay/lifetime、Dense Field Graph |
+
+## 未发布
+
+以下内容晚于已发布的 0.5.0 runtime 源码边界，不会追溯写成 0.5.0 产物行为：
+
+- 将 CUDA native primitive 的自动调度切换到 Forge 自有 driver-only provider，覆盖诊断、
+  scan/reduce/histogram、组合 primitive 与 stable radix sort。标准 runtime 不再链接或
+  打包 CUB/CUDART；显式 `cuda_cub*` method 已弃用，并隔离到不发布产物的
+  Toolkit-reference workflow。
+- 将 CUDA/Vulkan primitive 资源迁入 Program-owned arena，提供有界 lease 与显式
+  clear/statistics。Vulkan 在不做 queue-wide wait 的前提下回收已完成 descriptor/resource
+  set；CPU 每个算法族/worker 最多保留 8 MiB primitive scratch，更大请求采用有界瞬时分配
+  和 fallback 策略。
+- 后续标准 runtime wheel 改用 `driver-only` dependency class 门禁，同时继续兼容已经发布的
+  0.5.0 包内 CUDART wheel 的 loader、repair 与验证。项目仍按操作系统各发布一个 runtime
+  wheel，不按 CUDA 版本分叉。
+- Windows driver-only/reference build 与 primitive 正确性矩阵已经完成。降低任何公开 driver
+  下限之前，仍必须补齐 Linux wheel/import/依赖扫描、compute-sanitizer 和每个声明支持的旧
+  NVIDIA driver 真机执行。
 
 ## 0.1.0
 

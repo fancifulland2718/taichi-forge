@@ -66,8 +66,9 @@ python -I -m build --wheel --no-isolation
 `taichi-forge-runtime` workflow 还会追加这些仅用于 runtime 的参数：
 
 ```bash
--DTI_WITH_CUDA_TOOLKIT:BOOL=ON
--DTI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON
+-DTI_WITH_CUDA_TOOLKIT:BOOL=OFF
+-DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF
+-DTI_WITH_CUPTI:BOOL=OFF
 ```
 
 workflow 还设置：
@@ -89,46 +90,45 @@ native runtime 会打包唯一一个 `slim_libdevice.<major>.bc` 兼容 asset。
 asset 的兼容版本，不是 driver 或 Toolkit 版本探测。发布验证应确认构建出的 runtime wheel
 恰好包含一个这样的 asset，且安装后它的主版本与该查询值一致。
 
-## Native 方法的 CUDA Toolkit 要求
+## CUDA 依赖类别
 
-Forge 的 CUDA native primitive 方法会构建进唯一的平台 runtime 发行包。一次发行只发布
-一个 Windows `taichi-forge-runtime` wheel 和一个 Linux wheel；发行名、依赖名和 wheel tag
-都不得带 CUDA 版本后缀。`CUDA_TOOLKIT_VERSION` 选择的 Toolkit 只是内部构建基线，不会
-形成另一套包。
+当前源码中的标准 CUDA runtime 和 native primitive provider 只依赖 Forge 动态加载的
+Driver API。构建或安装标准 runtime wheel 不需要 CUDA Toolkit、CUB、CUDART、CUPTI，
+也不需要 CUDA 版本化 Python 包。发行仍然只为 Windows、Linux 各发布一个
+`taichi-forge-runtime` wheel；distribution、依赖、extra 和 wheel tag 均不带
+`cu11` / `cu12` / `cu13` 后缀。
 
-较低基线的发行验证完成前，workflow 默认值仍为 CUDA Toolkit `13.2.0`。native iterator
-adapter 已改为仓库内实现，不再依赖 CUDA 13.2 专属的 `<cuda/iterator>` 头文件。workflow
-会依据 `CUDA_TOOLKIT_VERSION` 校验 `nvcc -V`，并打包唯一一个匹配的动态 CUDART 和
-`cuda_runtime_major.txt`。随所选基线不同，文件形式为：
+`scripts/validate_runtime_wheel.py --dependency-class driver-only` 是标准发行门禁：
+核对项目名/版本、唯一 native runtime、没有 `cuda_runtime_major.txt`、没有包内
+CUDART，并确认 native binary 不依赖 Toolkit runtime library。Windows/Linux workflow
+还会在上传前分别扫描 PE import 或 ELF `DT_NEEDED`。auditwheel 可以打包普通非系统库，
+但不得把 CUDART 引入 driver-only 候选。
 
-- Windows：`cudart64_<major>.dll`
-- Linux：`libcudart.so.<major>*`（auditwheel 可能给文件名加 hash）
+已经发布的 0.5.0 runtime wheel 使用旧的包内 CUDART 布局。Python loader、repair helper
+与 validator 会继续识别这类产物，保证安装和修复兼容；这不会放宽新标准上传候选的
+driver-only 要求。validator 默认的 `either` 模式只服务兼容工具，发行 workflow 会显式
+选择 `driver-only`。
 
-`scripts/validate_runtime_wheel.py` 是 raw Linux wheel、auditwheel 修复后的 manylinux
-wheel、Windows wheel 和最终 Windows+Linux 成对产物共用的发行门禁。它会核对项目名/版本、
-唯一 native runtime、唯一且与清单一致的 CUDART，以及两个系统包的 CUDART major 相同。
-在 Linux 上，`auditwheel repair` 会把 DT_NEEDED 的 CUDART 加 hash 后放入
-`taichi_forge_runtime.libs`，但可能保留 raw wheel 在 `runtime_native` 中的数据文件副本。
-因此 workflow 会先核对 hashed 副本与 manifest、删除已被替代的 raw 副本并重写
-`RECORD`，然后才运行 manylinux 校验；最终发行 wheel 必须只包含一份 CUDART。
-两个 distribution 安装后，`scripts/validate_installed_runtime.py` 还会要求 shim/runtime
-版本相同，并确认实际选择的 CUDART 路径属于 runtime 包或其 auditwheel `.libs` 目录。
-安装验证会从包索引解析 shim wheel 声明的 Python 依赖、使用本地 runtime wheel，并在离开
-仓库目录执行 import 前运行 `pip check`。每个 CPython 构建都会运行
-`scripts/validate_shim_wheel.py`，拒绝缺失的直接 Python 依赖、重复的 runtime payload 或
-不匹配的 runtime 依赖。Windows runtime job 还会拒绝
-`taichi_runtime.dll` 对 Toolkit DLL 的隐式导入；包内 CUDART 必须从
-runtime package 显式发现并加载。
-Linux prebuilt shim 只使用 LLVM headers，且刻意不链接 LLVMSupport，因此使用该 header
-正式支持的 `LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING` 模式关闭 link sentinel。wheel
-校验会拒绝仍包含 LLVM Enable/Disable ABI sentinel 的 Linux extension；完整 native runtime
-仍保留正常的 LLVM ABI 检查。
+可选的 `.github/workflows/test_cuda_toolkit_reference.yml` 是不发布产物的开发 target。
+它可以安装较新的 Toolkit（当前为 13.2），以
+`TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE=ON` 编译 CUB/CUDART 对照 provider，
+再执行差分或性能验证。这些 binary 不属于标准 runtime payload，显式 `cuda_cub*`
+method 也已经弃用。CUPTI/NVPerf 同样是独立开发/profiler 能力，不是 primitive 或发行依赖。
 
-Python shim 会读取清单并定位这份随包库，调用方无需选择 CUDA 专属 extra 或包。用户安装
-`taichi-forge` 因此不需要本机 CUDA Toolkit；只有构建 runtime wheel 时才需要所选 Toolkit。
-降低驱动版本门槛应通过验证并下调这一处构建基线完成，不能发布平行的 `cu11`、`cu12`、
-`cu13` wheel。在目标驱动范围完成 GPU 实测前不得宣称更低的驱动下限；Toolkit 11.8/12.x
-以及 Linux 实包验证仍是发行门槛。
+两个 distribution 安装后，`scripts/validate_installed_runtime.py` 要求 shim/runtime
+版本一致。安装验证从包索引解析 shim 声明的 Python 依赖，使用本地 runtime wheel，运行
+`pip check`，并在仓库目录外 import。每个 CPython 构建都会运行
+`scripts/validate_shim_wheel.py`，拒绝缺失的直接 Python 依赖、重复 runtime payload 或
+不匹配的 runtime 依赖。Linux prebuilt shim 只使用 LLVM headers，且刻意不链接
+LLVMSupport，因此通过 header 支持的
+`LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING` 模式关闭 link sentinel；wheel 校验会拒绝
+仍包含 LLVM Enable/Disable ABI sentinel 的 extension，完整 native runtime 仍保留正常
+LLVM ABI 检查。
+
+去除 CUDART 可以避免把构建 Toolkit 变成用户侧运行依赖，但本身不能证明最低 NVIDIA
+driver 已降低。PTX/module load 与完整 primitive 矩阵仍要在每个声明支持的目标 driver
+上通过。尚待补齐的 Linux 与旧 driver 证据见
+[Linux 复测状态](linux_revalidation.zh.md)。
 
 ## LLVM 20
 
@@ -190,14 +190,6 @@ export LD_LIBRARY_PATH="$VULKAN_SDK/lib:${LD_LIBRARY_PATH:-}"
 export PATH="$VULKAN_SDK/bin:$PATH"
 ```
 
-构建 runtime wheel 还需要安装 CUDA Toolkit `13.2.0`，并确认 `nvcc` 版本：
-
-```bash
-nvcc -V
-# 输出必须匹配 CUDA_TOOLKIT_VERSION 的 major.minor
-# （当前默认：release 13.2）
-```
-
 安装 Python 构建包：
 
 ```bash
@@ -211,7 +203,7 @@ python scripts/sync_runtime_dependency.py
 平台 runtime wheel 只需要构建一次：
 
 ```bash
-CMAKE_ARGS="$BASE_CMAKE_ARGS -DTI_WITH_CUDA_TOOLKIT:BOOL=ON -DTI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON" \
+CMAKE_ARGS="$BASE_CMAKE_ARGS -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF -DTI_WITH_CUPTI:BOOL=OFF" \
 python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 ```
 
@@ -243,7 +235,6 @@ Ubuntu 22.04 使用 glibc 2.35。若需要更低 manylinux tag，应改在对应
 - MSVC x64 developer environment。
 - Ninja。
 - Vulkan SDK `1.4.304.1`。
-- 平台 runtime wheel 构建需要 CUDA Toolkit `13.2.0`。
 - 来自 `LLVM20_WIN_URL` 的预构建 LLVM 20，或本地 LLVM 20 构建。
 
 安装 Python 构建包：
@@ -257,18 +248,16 @@ python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2
 
 ```powershell
 $env:VULKAN_SDK = "C:\VulkanSDK\1.4.304.1"
-$env:CUDA_PATH = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
-$env:PATH = "$env:CUDA_PATH\bin;$env:VULKAN_SDK\Bin;$env:PATH"
+$env:PATH = "$env:VULKAN_SDK\Bin;$env:PATH"
 $env:LLVM_DIR = "C:\path\to\dist\taichi-llvm-20\lib\cmake\llvm"
 $baseCmakeArgs = "-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CUDA:BOOL=ON -DTI_WITH_LLVM:BOOL=ON -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON -DTI_WITH_C_API:BOOL=OFF -DTI_BUILD_TESTS:BOOL=OFF"
-nvcc -V
 python scripts\sync_runtime_dependency.py
 ```
 
 平台 runtime wheel 只需要构建一次：
 
 ```powershell
-$env:CMAKE_ARGS = "$baseCmakeArgs -DTI_WITH_CUDA_TOOLKIT:BOOL=ON -DTI_CUDA_CUB_SORT_DYNAMIC_CUDART:BOOL=ON"
+$env:CMAKE_ARGS = "$baseCmakeArgs -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF -DTI_WITH_CUPTI:BOOL=OFF"
 python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 ```
 

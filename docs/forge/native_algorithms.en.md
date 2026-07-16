@@ -52,7 +52,8 @@ Otherwise it preserves correctness through a generic or host fallback.
 Common explicit method families include:
 
 - `cpu_native`
-- CUDA native/CUB methods where available
+- CUDA driver-only native methods
+- deprecated CUDA CUB reference methods in reference-enabled developer builds
 - Vulkan native methods where available
 - `host_stable` or legacy fallback methods for sort-like operations
 
@@ -117,15 +118,24 @@ and native-node AOT serialization remains unsupported.
 
 ### CUDA runtime portability
 
-CUDA native/CUB providers ship in the platform `taichi-forge-runtime` wheel.
-Users do not install a local CUDA Toolkit or select a CUDA-versioned package.
-`method="auto"` still checks runtime capabilities and uses the established
-correct fallback when unsupported; an explicit CUDA native method rejects
-clearly when its provider or driver is incompatible. The build Toolkit, bundled
-CUDART, and minimum driver are separate boundaries. See
-[Building wheels](build_wheels.en.md) for the current baseline and the gates for
-lowering it, and [Linux revalidation](linux_revalidation.en.md) for outstanding
-Linux evidence.
+The standard CUDA primitive providers in current source use the dynamically
+loaded CUDA Driver API and Forge-owned kernels. Standard runtime wheels contain
+no CUB or CUDART dependency, users do not install a local CUDA Toolkit, and the
+project publishes one runtime wheel per operating system rather than one wheel
+per CUDA version. `method="auto"` never selects a Toolkit-reference provider.
+
+The explicit `cuda_cub` / `cuda_cub_*` methods are deprecated development
+references. They are compiled only by the separate reference workflow, warn
+when called, and are absent from standard runtime wheels. Runtime wheels already
+published with 0.5.0's bundled-CUDART layout remain loadable for compatibility;
+they are not evidence for the new driver-only dependency class.
+
+Driver-only removes the CUDA Runtime library dependency but does not by itself
+prove a lower minimum NVIDIA driver. PTX acceptance and every claimed driver
+floor still require execution on the target driver. See
+[Building wheels](build_wheels.en.md) for the current build boundary and
+[Linux revalidation](linux_revalidation.en.md) for outstanding Linux and
+older-driver evidence.
 
 ## Data Contracts
 
@@ -338,6 +348,13 @@ workspace. Reusing workspaces keeps backend scratch buffers and native plans
 alive across frames or repeated calls. This is the preferred pattern for hot
 loops. Concurrent calls must use independent workspaces unless the individual
 workspace explicitly documents synchronization.
+
+GPU scratch is owned by the active Program's primitive arena and is reclaimed
+by the existing workspace clear/reset APIs; cached resources are not kept in
+process-global owner maps. CPU primitive scratch retains at most 8 MiB per
+family and worker thread, uses transient allocations from 8 through 64 MiB, and
+keeps the established serial fallback above 64 MiB. These are bounded retention
+policies, not promises that every operation's peak temporary storage is 8 MiB.
 
 ```python
 workspace = None

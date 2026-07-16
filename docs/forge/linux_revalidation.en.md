@@ -4,7 +4,7 @@ This is the remaining Linux release-validation matrix after the R8 runtime
 hardening work. It is deliberately a test plan, not a claim that these paths
 have passed on Linux. Run it on a clean x86_64 Linux runner with the intended
 release dependencies and record the GPU, driver, Vulkan loader, window system,
-and CUDA Toolkit (when used to build native methods).
+and CUDA Toolkit only when running the isolated reference workflow.
 
 This matrix is a release gate for the 0.5.x runtime changes. Historical
 features that already shipped in 0.4.25 or earlier are listed here only when a
@@ -32,27 +32,31 @@ following:
 This verifies that a package may update its bundled libdevice asset without a
 source edit that hardcodes a new version.
 
-### Single runtime wheel and CUDA driver boundary
+### Single driver-only runtime wheel and CUDA driver boundary
 
-Build the runtime workflow with the final candidate `CUDA_TOOLKIT_VERSION`,
-then validate the upload candidate after auditwheel repair:
+Build the standard runtime workflow with Toolkit primitive references and CUPTI
+disabled, then validate the upload candidate after auditwheel repair:
 
 - Linux produces exactly one manylinux wheel whose project is
   `taichi-forge-runtime`; its distribution, version, extras, and wheel tag have
   no `cu11` / `cu12` / `cu13` suffix.
-- The wheel contains exactly one `libtaichi_runtime.so`, one
-  `cuda_runtime_major.txt`, and one `libcudart.so.<major>*` or auditwheel-hashed
-  equivalent matching the manifest. Verify `DT_NEEDED`, RPATH, and the actual
-  loader path all resolve to the bundled library.
-- Install the wheel without a CUDA Toolkit and run CUDA native scan/reduce/sort,
-  device checks, native AD, reset, and workspace-stability coverage.
-- If the candidate baseline is below the current CUDA 13.2 default, run that
-  same wheel on the target older driver. A build or run only on a new driver
-  does not prove a lower minimum driver.
+- The wheel contains exactly one `libtaichi_runtime.so`, no
+  `cuda_runtime_major.txt`, and no bundled or auditwheel-hashed CUDART. Verify
+  `DT_NEEDED`, RPATH, and the actual loader path do not resolve any CUDA
+  Toolkit runtime library.
+- Run `scripts/validate_runtime_wheel.py --dependency-class driver-only` on
+  the raw and repaired wheels. Install without a CUDA Toolkit and run CUDA
+  native scan/reduce/sort, compact, histogram, device checks, native AD, reset,
+  workspace clear/stability, and 1/2/4-submitter coverage.
+- Install the same wheel on every claimed older-driver target. A driver-only
+  dependency scan or a run only on a new driver does not prove a lower minimum
+  driver; record PTX/module-load failures separately from device capability.
+- In a machine with no NVIDIA driver or Toolkit, import the paired wheel and run
+  CPU/Vulkan smoke to prove CUDA libraries are not loaded by unrelated backends.
 
-CUDA 11.8/12.x candidates may be built for internal validation, but the release
-still publishes only the single Linux wheel that passes these gates; it does
-not create CUDA-versioned package families.
+The optional CUDA 13.2 CUB/CUDART reference workflow remains non-publishing and
+must not alter the standard wheel. It can provide differential results, but the
+release does not create CUDA-versioned package families.
 
 ### CUDA execution, graph, and allocator paths
 
@@ -88,18 +92,19 @@ target separation, capture/recapture/reset, and 1/2/4-submitter telemetry.
   require correct results, bounded memory, and a measurable improvement over
   the forced-recapture baseline. Also run the scalar/matrix patch, structural
   recapture, allocation-generation, and two-host-caller regressions.
-- Compile one CUDA-enabled safety target with `TI_WITH_CUDA_TOOLKIT=OFF`.
-  CUDA graph event/query support must build from Forge''s dynamic Driver-API
-  declarations without Toolkit headers. This is an additional portability
-  gate and does not replace the release-wheel build with Toolkit integration.
+- Compile the release-equivalent CUDA target with `TI_WITH_CUDA_TOOLKIT=OFF`,
+  `TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE=OFF`, and `TI_WITH_CUPTI=OFF`.
+  CUDA graph event/query and native primitives must build from Forge's dynamic
+  Driver-API declarations without Toolkit headers. This is the formal runtime
+  wheel configuration.
 - Build the affected graph sources with both GCC and Clang. The `/EHsc`
   prerequisite is MSVC-only; Linux flags and exception ABI must remain
   unchanged, and an exception raised during capture must still terminate the
   active capture before unwinding.
-- Build with `TI_WITH_CUDA_TOOLKIT=ON` and dynamic CUDART, then exercise the
-  native CUB reduction path. A runner where that optional path is unavailable
-  must report the established fallback rather than being counted as CUB
-  coverage.
+- Separately run the non-publishing Toolkit-reference workflow and exercise the
+  explicit deprecated CUB providers as differential oracles. Their absence is
+  expected in a standard build and must not be reported as a production
+  fallback.
 - Run `compute-sanitizer --tool memcheck` for the affected CUDA regression
   set. Add `racecheck` only to device-side atomic/duplicate-sensitive cases
   whose CUDA-version support is known.
@@ -367,3 +372,9 @@ driver versions, and any validation-layer or sanitizer diagnostics. A missing
 optional capability is acceptable only when the tested fallback is explicit
 and correct. A device loss, sanitizer finding, synchronization-validation
 error, stale-cache result, or result mismatch blocks release until diagnosed.
+
+The driver-only implementation and Windows functional matrix are complete in
+the source checkout. Linux wheel construction/import, ELF dependency scans,
+physical-GPU primitive/concurrency tests, compute-sanitizer, and target
+older-driver execution remain explicitly pending; no lower Linux driver floor
+is claimed until that record is filled.
