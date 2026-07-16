@@ -84,6 +84,12 @@ retroactively attributed to the 0.5.0 artifact:
   overflow. An explicit `check_out_of_bound=False` now overrides the implicit
   `debug=True` bounds default without disabling other debug behavior. Generated
   assertions remain unavailable on Vulkan; per-axis clamp behavior is supported.
+- External PyTorch tensors no longer receive a full `zeros_like` gradient merely
+  because a primal kernel sees `requires_grad=True`. Forge allocates the tensor-
+  sized gradient lazily for reverse/forward AD, Tape, or an explicit in-kernel
+  `.grad` access, and reuses an existing user gradient without replacement. A
+  primal-only call therefore avoids one same-sized allocation per affected
+  tensor while preserving the established AD paths.
 
 ## 0.1.0
 

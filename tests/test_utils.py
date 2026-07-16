@@ -309,7 +309,8 @@ def torch_op(*, output_shapes=[(1,)]):
                 if not isinstance(outputs, tuple):
                     outputs = (outputs,)
                 for i in inputs:
-                    i.grad.fill_(0)
+                    if i.grad is not None:
+                        i.grad.fill_(0)
                 for i, g in zip(outputs, grad_outputs):
                     i.grad = g
                 f.grad(*inputs, *outputs)

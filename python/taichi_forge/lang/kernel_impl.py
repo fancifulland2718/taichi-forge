@@ -929,6 +929,14 @@ class Kernel:
     def reset(self):
         self.runtime = impl.get_runtime()
         self.compiled_kernels = {}
+        self._external_grad_accesses = {}
+        self._materializing_external_grad_accesses = set()
+
+    def _mark_external_grad_access(self, arg_indices):
+        # Called by AnyArray.grad while the Python AST is being materialized.
+        # Compilation is serialized by Runtime._kernel_compilation_lock, so a
+        # per-Kernel set is sufficient and adds no steady-launch locking.
+        self._materializing_external_grad_accesses.add(arg_indices)
 
     def extract_arguments(self):
         sig = inspect.signature(self.func)
@@ -1062,7 +1070,19 @@ class Kernel:
                 self.runtime.current_kernel = None
                 self.runtime.compiling_callable = None
 
-        taichi_kernel = impl.get_runtime().prog.create_kernel(taichi_ast_generator, kernel_name, self.autodiff_mode)
+        self._materializing_external_grad_accesses.clear()
+        try:
+            taichi_kernel = impl.get_runtime().prog.create_kernel(
+                taichi_ast_generator, kernel_name, self.autodiff_mode
+            )
+        except Exception:
+            self._materializing_external_grad_accesses.clear()
+            raise
+        if self._materializing_external_grad_accesses:
+            self._external_grad_accesses[key] = frozenset(
+                self._materializing_external_grad_accesses
+            )
+        self._materializing_external_grad_accesses.clear()
         # P-Compile-6: apply per-kernel compile_tier override (if set on the
         # decorator). Stored on the C++ Kernel; consumed in
         # Program::compile_kernel by copying CompileConfig and overriding the
@@ -1073,7 +1093,13 @@ class Kernel:
         assert key not in self.compiled_kernels
         self.compiled_kernels[key] = taichi_kernel
 
-    def launch_kernel(self, t_kernel, *args):
+    def launch_kernel(
+        self,
+        t_kernel,
+        *args,
+        _allocate_all_external_grad=False,
+        _explicit_external_grad_args=frozenset(),
+    ):
         assert len(args) == len(self.arguments), f"{len(self.arguments)} arguments needed but {len(args)} provided"
 
         tmps = []
@@ -1166,11 +1192,18 @@ class Kernel:
 
                         return call_back
 
-                    # FIXME: only allocate when launching grad kernel
-                    if v.requires_grad and v.grad is None:
+                    needs_grad_pointer = (
+                        _allocate_all_external_grad and v.requires_grad
+                    ) or indices in _explicit_external_grad_args
+                    if needs_grad_pointer and v.grad is None:
+                        if not v.requires_grad:
+                            raise ValueError(
+                                "Kernel explicitly accesses a Torch tensor gradient, "
+                                "but the tensor has requires_grad=False and no .grad tensor."
+                            )
                         v.grad = torch.zeros_like(v)
 
-                    if v.requires_grad:
+                    if v.grad is not None:
                         if not isinstance(v.grad, torch.Tensor):
                             raise ValueError(
                                 f"Expecting torch.Tensor for gradient tensor, but getting {v.grad.__class__.__name__} instead"
@@ -1478,7 +1511,19 @@ class Kernel:
             impl.current_cfg().opt_level = 1
         key = self.ensure_compiled(*args)
         kernel_cpp = self.compiled_kernels[key]
-        return self.launch_kernel(kernel_cpp, *args)
+        allocate_all_external_grad = (
+            self.autodiff_mode != AutodiffMode.NONE
+            or self.runtime.target_tape is not None
+            or self.runtime.fwd_mode_manager is not None
+        )
+        return self.launch_kernel(
+            kernel_cpp,
+            *args,
+            _allocate_all_external_grad=allocate_all_external_grad,
+            _explicit_external_grad_args=self._external_grad_accesses.get(
+                key, frozenset()
+            ),
+        )
 
 
 # For a Taichi class definition like below:

@@ -3530,6 +3530,11 @@ void export_lang(py::module &m) {
     return expr.cast<ExternalTensorExpression>()->needs_grad;
   });
 
+  m.def("get_external_tensor_arg_id", [](const Expr &expr) {
+    TI_ASSERT(expr.is<ExternalTensorExpression>());
+    return expr.cast<ExternalTensorExpression>()->arg_id;
+  });
+
   m.def("get_external_tensor_element_type", [](const Expr &expr) {
     TI_ASSERT(expr.is<ExternalTensorExpression>());
     auto external_tensor_expr = expr.cast<ExternalTensorExpression>();

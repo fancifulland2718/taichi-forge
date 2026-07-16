@@ -70,6 +70,10 @@
   整数溢出地执行验证。显式 `check_out_of_bound=False` 现在可以覆盖 `debug=True` 的隐式
   bounds 默认值，同时不关闭其它 debug 行为。Vulkan 仍不支持生成 assertion，但已支持
   逐轴 clamp 行为。
+- 外部 PyTorch tensor 不再仅因 primal kernel 看到 `requires_grad=True` 就分配完整
+  `zeros_like` gradient。Forge 只在 reverse/forward AD、Tape 或 kernel 内显式访问 `.grad`
+  时延迟分配对应 tensor 大小的 gradient，并且不会替换用户已有的 gradient。因此纯 primal
+  调用可为每个受影响 tensor 避免一份同尺寸分配，同时保留既有 AD 路径。
 
 ## 0.1.0
 

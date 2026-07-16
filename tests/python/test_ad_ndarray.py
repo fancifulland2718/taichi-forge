@@ -1432,10 +1432,51 @@ def test_torch_needs_grad_false():
 
     test(x, y)
 
-    y.grad.fill_(1.0)
+    # A primal launch no longer materializes Torch gradients merely because
+    # requires_grad=True. Supply the output seed explicitly before .grad().
+    y.grad = torch.ones_like(y)
     test.grad(x, y)
     for i in range(N):
         assert x.grad[i] == 0.0
+
+
+@pytest.mark.skipif(not has_pytorch(), reason="Pytorch not installed.")
+@test_utils.test(arch=archs_support_torch_ndarray_ad)
+def test_torch_grad_is_allocated_only_when_needed():
+    @ti.kernel
+    def primal(x: ti.types.ndarray(), y: ti.types.ndarray()):
+        for i in x:
+            y[i] = 2.0 * x[i]
+
+    x = torch.arange(4, dtype=torch.float32, requires_grad=True)
+    y = torch.zeros(4, dtype=torch.float32, requires_grad=True)
+
+    primal(x, y)
+    assert x.grad is None
+    assert y.grad is None
+
+    output_grad = torch.ones_like(y)
+    y.grad = output_grad
+    primal.grad(x, y)
+    assert y.grad is output_grad
+    assert torch.all(x.grad == 2.0)
+
+
+@pytest.mark.skipif(not has_pytorch(), reason="Pytorch not installed.")
+@test_utils.test(arch=archs_support_torch_ndarray_ad)
+def test_torch_explicit_grad_access_allocates_grad():
+    @ti.kernel
+    def read_grad(x: ti.types.ndarray(), result: ti.types.ndarray()):
+        result[0] = x.grad[0]
+
+    x = torch.ones(1, dtype=torch.float32, requires_grad=True)
+    result = torch.ones(1, dtype=torch.float32)
+    assert x.grad is None
+
+    read_grad(x, result)
+
+    assert x.grad is not None
+    assert result[0] == 0.0
 
 
 @test_utils.test(arch=archs_support_ndarray_ad)
