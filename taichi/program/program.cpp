@@ -24,8 +24,10 @@
 
 #include <chrono>
 #include <cstddef>
+#include <functional>
 #include <limits>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 #ifdef TI_WITH_CUDA
@@ -305,7 +307,7 @@ std::atomic<int> Program::num_instances_;
 namespace {
 constexpr std::size_t kCpuPrimitiveMaxLocalWorkspaceBytes = 64ull << 20;
 constexpr std::size_t kCpuPrimitiveRetainedScratchBytes = 8ull << 20;
-std::atomic<std::uint64_t> next_cpu_primitive_execution_domain{1};
+constexpr std::uint64_t kCpuPrimitiveExecutionDomainSlots = 16;
 
 thread_local Program *active_cpu_primitive_program = nullptr;
 
@@ -364,9 +366,12 @@ class ScopedRuntimeTransferStatistics {
 };
 
 std::uint64_t cpu_primitive_execution_domain() {
+  // Keep retained scratch proportional to supported concurrent callers, not
+  // to every short-lived Python thread that has ever touched this Program.
+  // PrimitiveWorkspaceArena already serializes callers that hash to one slot.
   thread_local const std::uint64_t domain =
-      next_cpu_primitive_execution_domain.fetch_add(1,
-                                                    std::memory_order_relaxed);
+      1 + std::hash<std::thread::id>{}(std::this_thread::get_id()) %
+              kCpuPrimitiveExecutionDomainSlots;
   return domain;
 }
 
@@ -4818,10 +4823,10 @@ const CompiledKernelData *Program::find_cached_kernel(
 // 4. Thread-safety:
 //    - `KernelCompilationManager::load_or_compile` is guarded by its own
 //      cache_mutex_ (P5.a) so concurrent cache hits/inserts are safe.
-//    - LLVM: TaichiLLVMContext maintains per-thread_id state under
-//      thread_map_mut_; first-touch on a worker lazily clones the runtime
-//      module + struct_modules from the main thread (which is already
-//      quiescent after materialize_runtime).
+//    - LLVM: TaichiLLVMContext maintains per-thread state in a synchronized
+//      registry; first-touch on a worker lazily clones the runtime module +
+//      struct_modules from the main thread (which is already quiescent after
+//      materialize_runtime). Exited workers retire their registry entries.
 //    - CUDA: `cuModuleLoadDataEx` is serialized by CUDAContext::get_lock_guard
 //      inside JITSessionCUDA; all optimization runs in parallel.
 //    - Vulkan: SPIR-V codegen touches no shared state.

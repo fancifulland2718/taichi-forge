@@ -690,6 +690,8 @@ class VulkanStream : public Stream {
 
   void command_sync() override;
 
+  std::size_t debug_in_flight_command_buffer_count();
+
  private:
   struct TrackedCmdbuf {
     vkapi::IVkFence fence;
@@ -698,6 +700,7 @@ class VulkanStream : public Stream {
   };
 
   void retire_completed_cmdbuffers();
+  void apply_in_flight_backpressure();
 
   VulkanDevice &device_;
   VkQueue queue_;
@@ -795,6 +798,8 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   Stream *get_graphics_stream() override;
 
   void wait_idle() override;
+
+  std::pair<size_t, size_t> debug_stream_cache_counts();
 
   VulkanRuntimeTelemetrySnapshot runtime_telemetry_snapshot() const noexcept;
 
@@ -1028,8 +1033,8 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   BackendWaitTelemetry backend_wait_telemetry_;
 
   struct ThreadLocalStreams;
-  std::unique_ptr<ThreadLocalStreams> compute_streams_{nullptr};
-  std::unique_ptr<ThreadLocalStreams> graphics_streams_{nullptr};
+  std::shared_ptr<ThreadLocalStreams> compute_streams_{nullptr};
+  std::shared_ptr<ThreadLocalStreams> graphics_streams_{nullptr};
 
   // Memory allocation
   struct AllocationInternal {

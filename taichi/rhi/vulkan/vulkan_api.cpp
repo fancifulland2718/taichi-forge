@@ -28,6 +28,7 @@ DeviceObjVkCommandBuffer::~DeviceObjVkCommandBuffer() {
     TI_ASSERT(descriptor_set->recording_use_count > 0);
     --descriptor_set->recording_use_count;
   }
+  std::lock_guard<std::mutex> lock(ref_pool->mutex);
   if (this->level == VK_COMMAND_BUFFER_LEVEL_PRIMARY) {
     ref_pool->free_primary.push(buffer);
   } else {
@@ -207,6 +208,7 @@ IVkCommandPool create_command_pool(VkDevice device,
 IVkCommandBuffer allocate_command_buffer(IVkCommandPool pool,
                                          VkCommandBufferLevel level) {
   VkCommandBuffer cmdbuf{VK_NULL_HANDLE};
+  std::lock_guard<std::mutex> lock(pool->mutex);
 
   if (level == VK_COMMAND_BUFFER_LEVEL_PRIMARY && pool->free_primary.size()) {
     cmdbuf = pool->free_primary.top();

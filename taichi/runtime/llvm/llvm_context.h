@@ -5,9 +5,12 @@
 // and invoking compiled functions (kernels).
 // Designed to be multithreaded for parallel compilation.
 
-#include <mutex>
+#include <cstdint>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <thread>
+#include <unordered_map>
 
 #include "taichi/util/lang_util.h"
 #include "taichi/runtime/llvm/llvm_fwd.h"
@@ -34,6 +37,25 @@ class TaichiLLVMContext {
     explicit ThreadLocalData(std::unique_ptr<llvm::orc::ThreadSafeContext> ctx);
     ~ThreadLocalData();
   };
+
+  struct ThreadDataRegistry {
+    explicit ThreadDataRegistry(std::uint64_t registry_id)
+        : id(registry_id) {
+    }
+
+    const std::uint64_t id;
+    mutable std::mutex mutex;
+    std::unordered_map<std::thread::id, std::unique_ptr<ThreadLocalData>> data;
+  };
+
+  struct ThreadExitRegistration {
+    ThreadExitRegistration(std::weak_ptr<ThreadDataRegistry> registry,
+                           std::thread::id thread_id);
+    ~ThreadExitRegistration();
+
+    std::weak_ptr<ThreadDataRegistry> registry;
+    std::thread::id thread_id;
+  };
   const CompileConfig &config_;
 
  public:
@@ -55,7 +77,7 @@ class TaichiLLVMContext {
   //   * Storing references/pointers to llvm::Type* obtained from this
   //     context across threads.
   // For all per-thread codegen / optimize / verify / print work, route
-  // through get_this_thread_context() (see ThreadLocalData per_thread_data_).
+  // through get_this_thread_context() (see ThreadDataRegistry).
   std::unique_ptr<ThreadLocalData> linking_context_data{nullptr};
 
   TaichiLLVMContext(const CompileConfig &config, Arch arch);
@@ -65,6 +87,8 @@ class TaichiLLVMContext {
   llvm::LLVMContext *get_this_thread_context();
 
   llvm::orc::ThreadSafeContext *get_this_thread_thread_safe_context();
+
+  std::size_t debug_thread_local_data_count() const;
 
   /**
    * Updates the LLVM module of the JIT compiled SNode structs.
@@ -166,16 +190,17 @@ class TaichiLLVMContext {
       llvm::Module *module);
 
   ThreadLocalData *get_this_thread_data();
+  static void register_thread_exit(
+      const std::shared_ptr<ThreadDataRegistry> &registry,
+      std::thread::id thread_id);
 
-  std::unordered_map<std::thread::id, std::unique_ptr<ThreadLocalData>>
-      per_thread_data_;
+  std::shared_ptr<ThreadDataRegistry> thread_data_registry_;
 
   Arch arch_;
   llvm::DataLayout data_layout_{""};
   std::thread::id main_thread_id_;
   ThreadLocalData *main_thread_data_{nullptr};
   std::mutex mut_;
-  std::mutex thread_map_mut_;
   // V8.c introduced linking_mut_ to serialise link_compiled_tasks() against
   // the shared linking_context_data->llvm_context. V8.d (2026-04-26)
   // refactored link_compiled_tasks() to operate entirely on per-thread

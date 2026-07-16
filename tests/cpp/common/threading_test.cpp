@@ -7,6 +7,12 @@
 
 #include "taichi/system/threading.h"
 
+#ifdef TI_WITH_LLVM
+#include "taichi/program/compile_config.h"
+#include "taichi/rhi/arch.h"
+#include "taichi/runtime/llvm/llvm_context.h"
+#endif
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -222,6 +228,44 @@ TEST(ThreadPoolTest, WorkerExceptionCompletesJobAndPoolRemainsUsable) {
   pool.run(8, 2, &completed, count_task);
   EXPECT_EQ(completed.load(std::memory_order_relaxed), 8);
 }
+
+#ifdef TI_WITH_LLVM
+TEST(LLVMContextThreadData, ReleasesExitedWorkerContexts) {
+  lang::CompileConfig config;
+  lang::TaichiLLVMContext context(config, host_arch());
+  EXPECT_EQ(context.debug_thread_local_data_count(), 1u);
+
+  constexpr int kThreadCount = 32;
+  std::atomic<int> ready{0};
+  std::atomic<bool> release{false};
+  std::atomic<bool> valid{true};
+  std::vector<std::thread> threads;
+  threads.reserve(kThreadCount);
+
+  for (int i = 0; i < kThreadCount; ++i) {
+    threads.emplace_back([&] {
+      if (context.get_this_thread_context() == nullptr) {
+        valid.store(false, std::memory_order_relaxed);
+      }
+      ready.fetch_add(1, std::memory_order_release);
+      while (!release.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+    });
+  }
+
+  while (ready.load(std::memory_order_acquire) != kThreadCount) {
+    std::this_thread::yield();
+  }
+  EXPECT_EQ(context.debug_thread_local_data_count(), kThreadCount + 1);
+  release.store(true, std::memory_order_release);
+  for (auto &thread : threads) {
+    thread.join();
+  }
+  EXPECT_TRUE(valid.load(std::memory_order_relaxed));
+  EXPECT_EQ(context.debug_thread_local_data_count(), 1u);
+}
+#endif
 
 }  // namespace
 }  // namespace taichi

@@ -1,5 +1,7 @@
 // A llvm backend helper
 
+#include <atomic>
+
 #include "taichi/runtime/llvm/llvm_context.h"
 
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -69,8 +71,18 @@ namespace taichi::lang {
 
 using namespace llvm;
 
+namespace {
+
+std::atomic<std::uint64_t> next_thread_data_registry_id{1};
+
+}  // namespace
+
 TaichiLLVMContext::TaichiLLVMContext(const CompileConfig &config, Arch arch)
-    : config_(config), arch_(arch) {
+    : config_(config),
+      thread_data_registry_(std::make_shared<ThreadDataRegistry>(
+          next_thread_data_registry_id.fetch_add(1,
+                                                 std::memory_order_relaxed))),
+      arch_(arch) {
   TI_TRACE("Creating Taichi llvm context for arch: {}", arch_name(arch));
   main_thread_id_ = std::this_thread::get_id();
   main_thread_data_ = get_this_thread_data();
@@ -682,7 +694,9 @@ void TaichiLLVMContext::add_struct_module(std::unique_ptr<Module> module,
   linking_context_data->struct_modules[tree_id] =
       clone_module_to_context(module.get(), linking_context_data->llvm_context);
 
-  for (auto &[id, data] : per_thread_data_) {
+  auto registry = thread_data_registry_;
+  std::lock_guard<std::mutex> registry_lock(registry->mutex);
+  for (auto &[id, data] : registry->data) {
     if (id == std::this_thread::get_id()) {
       continue;
     }
@@ -874,18 +888,67 @@ void TaichiLLVMContext::eliminate_unused_functions(
   manager.run(*module, ana);
 }
 
-TaichiLLVMContext::ThreadLocalData *TaichiLLVMContext::get_this_thread_data() {
-  std::lock_guard<std::mutex> _(thread_map_mut_);
-  auto tid = std::this_thread::get_id();
-  if (per_thread_data_.find(tid) == per_thread_data_.end()) {
-    std::stringstream ss;
-    ss << tid;
-    TI_TRACE("Creating thread local data for thread {}", ss.str());
-    per_thread_data_[tid] = std::make_unique<ThreadLocalData>(
-        std::make_unique<llvm::orc::ThreadSafeContext>(
-            std::make_unique<llvm::LLVMContext>()));
+TaichiLLVMContext::ThreadExitRegistration::ThreadExitRegistration(
+    std::weak_ptr<ThreadDataRegistry> registry_,
+    std::thread::id thread_id_)
+    : registry(std::move(registry_)), thread_id(thread_id_) {
+}
+
+TaichiLLVMContext::ThreadExitRegistration::~ThreadExitRegistration() {
+  auto owner = registry.lock();
+  if (!owner) {
+    return;
   }
-  return per_thread_data_[tid].get();
+  std::lock_guard<std::mutex> lock(owner->mutex);
+  owner->data.erase(thread_id);
+}
+
+void TaichiLLVMContext::register_thread_exit(
+    const std::shared_ptr<ThreadDataRegistry> &registry,
+    std::thread::id thread_id) {
+  thread_local std::unordered_map<
+      std::uint64_t, std::unique_ptr<ThreadExitRegistration>>
+      registrations;
+  for (auto it = registrations.begin(); it != registrations.end();) {
+    if (it->second->registry.expired()) {
+      it = registrations.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  if (registrations.find(registry->id) == registrations.end()) {
+    registrations.emplace(
+        registry->id,
+        std::make_unique<ThreadExitRegistration>(registry, thread_id));
+  }
+}
+
+TaichiLLVMContext::ThreadLocalData *TaichiLLVMContext::get_this_thread_data() {
+  auto registry = thread_data_registry_;
+  const auto tid = std::this_thread::get_id();
+  ThreadLocalData *result = nullptr;
+  bool inserted = false;
+  {
+    std::lock_guard<std::mutex> lock(registry->mutex);
+    auto iter = registry->data.find(tid);
+    if (iter == registry->data.end()) {
+      std::stringstream ss;
+      ss << tid;
+      TI_TRACE("Creating thread local data for thread {}", ss.str());
+      auto candidate = std::make_unique<ThreadLocalData>(
+          std::make_unique<llvm::orc::ThreadSafeContext>(
+              std::make_unique<llvm::LLVMContext>()));
+      result = candidate.get();
+      registry->data.emplace(tid, std::move(candidate));
+      inserted = true;
+    } else {
+      result = iter->second.get();
+    }
+  }
+  if (inserted && tid != main_thread_id_) {
+    register_thread_exit(registry, tid);
+  }
+  return result;
 }
 
 llvm::LLVMContext *TaichiLLVMContext::get_this_thread_context() {
@@ -899,6 +962,12 @@ TaichiLLVMContext::get_this_thread_thread_safe_context() {
   get_this_thread_context();  // make sure the context is created
   ThreadLocalData *data = get_this_thread_data();
   return data->thread_safe_llvm_context.get();
+}
+
+std::size_t TaichiLLVMContext::debug_thread_local_data_count() const {
+  auto registry = thread_data_registry_;
+  std::lock_guard<std::mutex> lock(registry->mutex);
+  return registry->data.size();
 }
 
 template llvm::Value *TaichiLLVMContext::get_constant(float32 t);
@@ -967,11 +1036,13 @@ void TaichiLLVMContext::init_runtime_module(llvm::Module *runtime_module) {
 
 void TaichiLLVMContext::delete_snode_tree(int id) {
   TI_ASSERT(linking_context_data->struct_modules.erase(id));
-  for (auto &[thread_id, data] : per_thread_data_) {
+  auto registry = thread_data_registry_;
+  std::lock_guard<std::mutex> registry_lock(registry->mutex);
+  for (auto &entry : registry->data) {
     // A worker may have acquired thread-local LLVM state without ever
     // compiling a kernel that needs this tree. Such a context legitimately
     // has no cloned struct module to erase.
-    data->struct_modules.erase(id);
+    entry.second->struct_modules.erase(id);
   }
 }
 

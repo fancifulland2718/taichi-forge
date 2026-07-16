@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -1714,14 +1715,103 @@ vkapi::IVkCommandBuffer VulkanCommandList::finalize() {
   return buffer_;
 }
 
+namespace {
+
+constexpr std::size_t kVulkanMaxInFlightCommandBuffersPerStream = 64;
+std::atomic<std::uint64_t> next_vulkan_stream_registry_id{1};
+
+}  // namespace
+
 struct VulkanDevice::ThreadLocalStreams {
+  struct ThreadExitRegistration {
+    ThreadExitRegistration(std::weak_ptr<ThreadLocalStreams> streams,
+                           std::thread::id thread_id);
+    ~ThreadExitRegistration();
+
+    std::weak_ptr<ThreadLocalStreams> streams;
+    std::thread::id thread_id;
+  };
+
+  ThreadLocalStreams(std::uint64_t registry_id,
+                     std::thread::id owner_thread_id)
+      : id(registry_id), owner_thread_id(owner_thread_id) {
+  }
+
+  void register_thread_exit(
+      const std::shared_ptr<ThreadLocalStreams> &owner,
+      std::thread::id thread_id);
+  void retire(std::thread::id thread_id) noexcept;
+
+  const std::uint64_t id;
+  const std::thread::id owner_thread_id;
   std::mutex map_mutex;
   unordered_map<std::thread::id, std::unique_ptr<VulkanStream>> map;
 };
 
+VulkanDevice::ThreadLocalStreams::ThreadExitRegistration::
+    ThreadExitRegistration(std::weak_ptr<ThreadLocalStreams> streams_,
+                           std::thread::id thread_id_)
+    : streams(std::move(streams_)), thread_id(thread_id_) {
+}
+
+VulkanDevice::ThreadLocalStreams::ThreadExitRegistration::
+    ~ThreadExitRegistration() {
+  if (auto owner = streams.lock()) {
+    owner->retire(thread_id);
+  }
+}
+
+void VulkanDevice::ThreadLocalStreams::register_thread_exit(
+    const std::shared_ptr<ThreadLocalStreams> &owner,
+    std::thread::id thread_id) {
+  if (thread_id == owner_thread_id) {
+    return;
+  }
+  thread_local unordered_map<
+      std::uint64_t, std::unique_ptr<ThreadExitRegistration>>
+      registrations;
+  for (auto it = registrations.begin(); it != registrations.end();) {
+    if (it->second->streams.expired()) {
+      it = registrations.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  if (registrations.find(id) == registrations.end()) {
+    registrations.emplace(
+        id, std::make_unique<ThreadExitRegistration>(owner, thread_id));
+  }
+}
+
+void VulkanDevice::ThreadLocalStreams::retire(
+    std::thread::id thread_id) noexcept {
+  std::unique_ptr<VulkanStream> stream;
+  {
+    std::lock_guard<std::mutex> lock(map_mutex);
+    const auto found = map.find(thread_id);
+    if (found == map.end()) {
+      return;
+    }
+    stream = std::move(found->second);
+    map.erase(found);
+  }
+  try {
+    stream->command_sync();
+  } catch (...) {
+    // Thread-exit cleanup must not terminate the process. The stream already
+    // reports backend failures through the owning device before throwing.
+  }
+}
+
 VulkanDevice::VulkanDevice()
-    : compute_streams_(std::make_unique<ThreadLocalStreams>()),
-      graphics_streams_(std::make_unique<ThreadLocalStreams>()) {
+    : compute_streams_(std::make_shared<ThreadLocalStreams>(
+          next_vulkan_stream_registry_id.fetch_add(
+              1, std::memory_order_relaxed),
+          std::this_thread::get_id())),
+      graphics_streams_(std::make_shared<ThreadLocalStreams>(
+          next_vulkan_stream_registry_id.fetch_add(
+              1, std::memory_order_relaxed),
+          std::this_thread::get_id())) {
   DeviceCapabilityConfig caps{};
   caps.set(DeviceCapability::spirv_version, 0x10000);
   set_caps(std::move(caps));
@@ -2252,17 +2342,27 @@ void VulkanDevice::memcpy_internal(DevicePtr dst,
 }
 
 Stream *VulkanDevice::get_compute_stream() {
-  auto tid = std::this_thread::get_id();
-  auto &streams = *compute_streams_;
-  std::lock_guard<std::mutex> lock(streams.map_mutex);
-  auto &stream_map = streams.map;
-  auto iter = stream_map.find(tid);
-  if (iter == stream_map.end()) {
-    stream_map[tid] = std::make_unique<VulkanStream>(
-        *this, compute_queue_, compute_queue_family_index_);
-    return stream_map.at(tid).get();
+  const auto streams = compute_streams_;
+  const auto thread_id = std::this_thread::get_id();
+  VulkanStream *result = nullptr;
+  bool inserted = false;
+  {
+    std::lock_guard<std::mutex> lock(streams->map_mutex);
+    auto iter = streams->map.find(thread_id);
+    if (iter == streams->map.end()) {
+      auto stream = std::make_unique<VulkanStream>(
+          *this, compute_queue_, compute_queue_family_index_);
+      result = stream.get();
+      streams->map.emplace(thread_id, std::move(stream));
+      inserted = true;
+    } else {
+      result = iter->second.get();
+    }
   }
-  return iter->second.get();
+  if (inserted) {
+    streams->register_thread_exit(streams, thread_id);
+  }
+  return result;
 }
 
 void VulkanCommandList::begin_profiler_scope(const std::string &kernel_name) {
@@ -2404,28 +2504,44 @@ VulkanDevice::profiler_flush_sampled_time() {
 }
 
 Stream *VulkanDevice::get_graphics_stream() {
-  auto tid = std::this_thread::get_id();
-  auto &streams = *graphics_streams_;
-  std::lock_guard<std::mutex> lock(streams.map_mutex);
-  auto &stream_map = streams.map;
-  auto iter = stream_map.find(tid);
-  if (iter == stream_map.end()) {
-    stream_map[tid] = std::make_unique<VulkanStream>(
-        *this, graphics_queue_, graphics_queue_family_index_);
-    return stream_map.at(tid).get();
+  const auto streams = graphics_streams_;
+  const auto thread_id = std::this_thread::get_id();
+  VulkanStream *result = nullptr;
+  bool inserted = false;
+  {
+    std::lock_guard<std::mutex> lock(streams->map_mutex);
+    auto iter = streams->map.find(thread_id);
+    if (iter == streams->map.end()) {
+      auto stream = std::make_unique<VulkanStream>(
+          *this, graphics_queue_, graphics_queue_family_index_);
+      result = stream.get();
+      streams->map.emplace(thread_id, std::move(stream));
+      inserted = true;
+    } else {
+      result = iter->second.get();
+    }
   }
-  return iter->second.get();
+  if (inserted) {
+    streams->register_thread_exit(streams, thread_id);
+  }
+  return result;
 }
 
 void VulkanDevice::wait_idle() {
   std::scoped_lock lock(compute_streams_->map_mutex,
                         graphics_streams_->map_mutex);
-  for (auto &[tid, stream] : compute_streams_->map) {
-    stream->command_sync();
+  for (auto &entry : compute_streams_->map) {
+    entry.second->command_sync();
   }
-  for (auto &[tid, stream] : graphics_streams_->map) {
-    stream->command_sync();
+  for (auto &entry : graphics_streams_->map) {
+    entry.second->command_sync();
   }
+}
+
+std::pair<size_t, size_t> VulkanDevice::debug_stream_cache_counts() {
+  std::scoped_lock lock(compute_streams_->map_mutex,
+                        graphics_streams_->map_mutex);
+  return {compute_streams_->map.size(), graphics_streams_->map.size()};
 }
 
 std::unique_lock<std::mutex> VulkanDevice::acquire_queue_lock(VkQueue queue) {
@@ -2540,6 +2656,33 @@ void VulkanStream::retire_completed_cmdbuffers() {
   }
   submitted_cmdbuffers_ = std::move(still_submitted);
 }
+void VulkanStream::apply_in_flight_backpressure() {
+  if (submitted_cmdbuffers_.size() <
+      kVulkanMaxInFlightCommandBuffersPerStream) {
+    return;
+  }
+
+  // A producer can otherwise enqueue faster than the device completes work
+  // forever, retaining one command buffer, fence, semaphore and resource set
+  // per submission. Waiting for only the oldest fence keeps normal async
+  // execution unchanged while bounding that host-side backlog.
+  const auto &oldest_fence = submitted_cmdbuffers_.front().fence;
+  VkResult result = VK_SUCCESS;
+  {
+    std::lock_guard<std::mutex> lock(oldest_fence->mutex);
+    ScopedBackendWaitTelemetry wait_scope(device_.backend_wait_telemetry());
+    result = vkWaitForFences(oldest_fence->device, /*fenceCount=*/1,
+                             &oldest_fence->fence, VK_TRUE, UINT64_MAX);
+  }
+  if (result != VK_SUCCESS) {
+    device_.raise_backend_error(
+        static_cast<std::int64_t>(result), "vkWaitForFences",
+        "Failed to apply Vulkan in-flight submission backpressure");
+  }
+  retire_completed_cmdbuffers();
+  TI_ASSERT(submitted_cmdbuffers_.size() <
+            kVulkanMaxInFlightCommandBuffersPerStream);
+}
 
 StreamSemaphore VulkanStream::submit(
     CommandList *cmdlist_,
@@ -2587,6 +2730,7 @@ StreamSemaphore VulkanStream::submit(
 
   // Resource tracking, check previously submitted commands
   retire_completed_cmdbuffers();
+  apply_in_flight_backpressure();
 
   VkResult submit_result = VK_SUCCESS;
   {
@@ -2647,6 +2791,12 @@ void VulkanStream::command_sync() {
   // The fences above make only this stream's query results available. Do not
   // drain or wait for profiler work submitted by another stream.
   device_.profiler_sync_fences(fences);
+}
+
+std::size_t VulkanStream::debug_in_flight_command_buffer_count() {
+  std::lock_guard<std::mutex> submission_lock(submission_mutex_);
+  retire_completed_cmdbuffers();
+  return submitted_cmdbuffers_.size();
 }
 
 std::unique_ptr<Pipeline> VulkanDevice::create_raster_pipeline(

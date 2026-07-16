@@ -89,6 +89,7 @@ struct DeviceObjVkCommandPool : public DeviceObj {
   uint32_t queue_family_index{0};
   std::stack<VkCommandBuffer> free_primary;
   std::stack<VkCommandBuffer> free_secondary;
+  std::mutex mutex;
   ~DeviceObjVkCommandPool() override;
 };
 using IVkCommandPool = std::shared_ptr<DeviceObjVkCommandPool>;

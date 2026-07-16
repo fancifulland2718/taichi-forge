@@ -365,6 +365,65 @@ def test_cpu_native_primitives_are_safe_for_two_gil_released_callers():
         assert reduced[0] == n * 5
 
 
+@test_utils.test(arch=ti.cpu, cpu_max_num_threads=4)
+def test_cpu_native_workspace_does_not_grow_with_historical_threads():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cpu_scatter_add_available")
+        and prog.cpu_scatter_add_available()
+    ):
+        pytest.skip("CPU native scatter-add support is unavailable.")
+
+    impl.get_runtime().materialize()
+    n = 1 << 18
+    groups = 64
+    worker_count = 32
+    indices_np = np.arange(n, dtype=np.int32) % groups
+    workspaces = []
+    outputs = []
+    workers = []
+
+    for _ in range(worker_count):
+        values = ti.ndarray(ti.i32, shape=n)
+        indices = ti.ndarray(ti.i32, shape=n)
+        output = ti.ndarray(ti.i32, shape=groups)
+        values.fill(1)
+        indices.from_numpy(indices_np)
+        output.fill(0)
+        workspace = ti.algorithms.ScatterAddWorkspace(
+            max_items=n, max_groups=groups
+        )
+        workspaces.append(workspace)
+        outputs.append(output)
+
+        def worker(
+            values=values,
+            indices=indices,
+            output=output,
+            workspace=workspace,
+        ):
+            ti.algorithms.experimental_scatter_add(
+                values,
+                indices,
+                output,
+                method="cpu_native",
+                workspace=workspace,
+            )
+
+        workers.append(worker)
+
+    _run_concurrently(workers)
+    snapshot = prog._primitive_workspace_stats()
+    assert 0 < snapshot["entries"] <= 16
+    for output in outputs:
+        np.testing.assert_array_equal(
+            output.to_numpy(), np.full(groups, n // groups, dtype=np.int32)
+        )
+
+    workspaces[0].clear()
+    assert prog._primitive_workspace_stats()["entries"] == 0
+
+
 @test_utils.test(arch=ti.vulkan, exclude=[(ti.vulkan, "Darwin")])
 def test_vulkan_native_workspace_arena_is_safe_for_two_callers():
     """One Program cache may be shared; per-call bindings must not leak."""

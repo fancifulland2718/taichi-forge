@@ -26,8 +26,10 @@ TEST(VulkanDeviceTest, ConcurrentQueueSubmissions) {
   auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(params);
   auto *device = static_cast<vulkan::VulkanDevice *>(creator->device());
 
-  constexpr int kThreadCount = 4;
-  constexpr int kSubmitCount = 128;
+  // Exited callers must retire their per-thread streams instead of retaining
+  // one command pool and submission tracker per historical host thread.
+  constexpr int kThreadCount = 32;
+  constexpr int kSubmitCount = 16;
   std::atomic<int> ready{0};
   std::atomic<bool> start{false};
   std::atomic<bool> succeeded{true};
@@ -68,6 +70,35 @@ TEST(VulkanDeviceTest, ConcurrentQueueSubmissions) {
 
   EXPECT_TRUE(succeeded.load(std::memory_order_relaxed));
   device->wait_idle();
+  const auto [compute_streams, graphics_streams] =
+      device->debug_stream_cache_counts();
+  EXPECT_EQ(compute_streams, 0u);
+  EXPECT_EQ(graphics_streams, 0u);
+}
+
+TEST(VulkanDeviceTest, BoundsInFlightCommandBuffers) {
+  if (!vulkan::is_vulkan_api_available()) {
+    return;
+  }
+
+  vulkan::VulkanDeviceCreator::Params params;
+  params.api_version = std::nullopt;
+  auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(params);
+  auto *device = static_cast<vulkan::VulkanDevice *>(creator->device());
+  auto *stream =
+      static_cast<vulkan::VulkanStream *>(device->get_compute_stream());
+
+  constexpr int kSubmitCount = 256;
+  for (int submit_index = 0; submit_index < kSubmitCount; ++submit_index) {
+    auto [cmdlist, result] = stream->new_command_list_unique();
+    ASSERT_EQ(result, RhiResult::success);
+    ASSERT_NE(cmdlist, nullptr);
+    ASSERT_TRUE(stream->submit(cmdlist.get()));
+    EXPECT_LE(stream->debug_in_flight_command_buffer_count(), 64u);
+  }
+
+  stream->command_sync();
+  EXPECT_EQ(stream->debug_in_flight_command_buffer_count(), 0u);
 }
 
 TEST(VulkanDeviceTest, ConcurrentDescriptorAndRenderPassCreation) {
