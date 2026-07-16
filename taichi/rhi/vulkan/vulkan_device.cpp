@@ -18,6 +18,7 @@
 
 #include "taichi/rhi/vulkan/vulkan_common.h"
 #include "taichi/rhi/vulkan/vulkan_utils.h"
+#include "taichi/util/environ_config.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
 
@@ -1812,6 +1813,12 @@ VulkanDevice::VulkanDevice()
           next_vulkan_stream_registry_id.fetch_add(
               1, std::memory_order_relaxed),
           std::this_thread::get_id())) {
+  const int configured_profiler_records = get_environ_config(
+      "TI_KERNEL_PROFILER_MAX_RECORDS", 131072);
+  profiler_record_capacity_ = std::clamp<size_t>(
+      static_cast<size_t>(std::max(1, configured_profiler_records)), 1,
+      kMaximumProfilerRecordCapacity);
+
   DeviceCapabilityConfig caps{};
   caps.set(DeviceCapability::spirv_version, 0x10000);
   set_caps(std::move(caps));
@@ -2379,13 +2386,13 @@ void VulkanCommandList::end_profiler_scope() {
   auto scope = std::move(profiler_scopes_.back());
   profiler_scopes_.pop_back();
   auto pool = scope.query_pool;
+  ti_device_->profiler_reserve_samplers(1);
   vkCmdWriteTimestamp(buffer_->buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                       pool->query_pool, 1);
   buffer_->refs.push_back(pool);
   completed_profiler_samplers_.push_back(
       {std::move(scope.kernel_name), pool, nullptr});
   ++profiler_sampler_reservations_;
-  ti_device_->profiler_reserve_samplers(1);
 }
 
 std::vector<VulkanProfilerSampler>

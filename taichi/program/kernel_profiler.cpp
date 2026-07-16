@@ -1,5 +1,6 @@
 #include "kernel_profiler.h"
 
+#include "taichi/util/environ_config.h"
 #include "taichi/system/timer.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/rhi/cuda/cuda_profiler.h"
@@ -8,6 +9,39 @@
 #include "taichi/rhi/amdgpu/amdgpu_profiler.h"
 
 namespace taichi::lang {
+
+KernelProfilerBase::KernelProfilerBase() {
+  const int configured = get_environ_config(
+      "TI_KERNEL_PROFILER_MAX_RECORDS",
+      static_cast<int>(kDefaultRecordCapacity));
+  record_capacity_ = std::clamp<std::size_t>(
+      static_cast<std::size_t>(std::max(1, configured)), 1,
+      kMaximumRecordCapacity);
+}
+
+void KernelProfilerBase::ensure_record_capacity() const {
+  TI_ERROR_IF(
+      traced_records_.size() >= record_capacity_,
+      "Kernel profiler reached its {}-record memory budget. Call "
+      "ti.profiler.clear_kernel_profiler_info() periodically or raise "
+      "TI_KERNEL_PROFILER_MAX_RECORDS (maximum {}).",
+      record_capacity_, kMaximumRecordCapacity);
+}
+
+std::size_t KernelProfilerBase::record_capacity() const {
+  return record_capacity_;
+}
+
+std::size_t KernelProfilerBase::record_count() const {
+  return traced_records_.size();
+}
+
+void KernelProfilerBase::set_record_capacity_for_testing(
+    std::size_t capacity) {
+  TI_ASSERT(capacity >= 1 && capacity <= kMaximumRecordCapacity);
+  TI_ASSERT(traced_records_.empty());
+  record_capacity_ = capacity;
+}
 
 void KernelProfileStatisticalResult::insert_record(double t) {
   if (counter == 0) {
@@ -69,6 +103,7 @@ double KernelProfilerBase::get_total_time() const {
 
 void KernelProfilerBase::insert_record(const std::string &kernel_name,
                                        double duration_ms) {
+  ensure_record_capacity();
   // Trace record
   KernelProfileTracedRecord record;
   record.name = kernel_name;
@@ -111,23 +146,7 @@ class DefaultProfiler : public KernelProfilerBase {
   void stop() override {
     auto t = Time::get_time() - start_t_;
     auto ms = t * 1000.0;
-    // trace record
-    KernelProfileTracedRecord record;
-    record.name = event_name_;
-    record.kernel_elapsed_time_in_ms = ms;
-    traced_records_.push_back(record);
-    // count record
-    auto it =
-        std::find_if(statistical_results_.begin(), statistical_results_.end(),
-                     [&](KernelProfileStatisticalResult &r) {
-                       return r.name == event_name_;
-                     });
-    if (it == statistical_results_.end()) {
-      statistical_results_.emplace_back(event_name_);
-      it = std::prev(statistical_results_.end());
-    }
-    it->insert_record(ms);
-    total_time_ms_ += ms;
+    insert_record(event_name_, ms);
   }
 
  private:

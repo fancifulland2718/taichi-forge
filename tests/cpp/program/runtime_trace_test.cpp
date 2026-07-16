@@ -9,6 +9,7 @@
 #include "gtest/gtest.h"
 
 #include "taichi/program/runtime_trace.h"
+#include "taichi/program/kernel_profiler.h"
 #include "taichi/system/profiler.h"
 #include "taichi/system/timeline.h"
 
@@ -260,6 +261,21 @@ TEST(DiagnosticMemory, ExitedThreadProfilersAreRetired) {
 
   EXPECT_EQ(profiling.live_profiler_count(), baseline);
   ::taichi::Profiling::clear_tracing_runtime_override();
+}
+
+TEST(DiagnosticMemory, KernelProfilerRejectsUnboundedRawHistory) {
+  auto profiler = make_profiler(Arch::x64, true);
+  ASSERT_NE(profiler, nullptr);
+  profiler->set_record_capacity_for_testing(2);
+
+  profiler->insert_record("first", 1.0);
+  profiler->insert_record("second", 2.0);
+  EXPECT_EQ(profiler->record_count(), 2);
+  EXPECT_ANY_THROW(profiler->insert_record("overflow", 3.0));
+  EXPECT_EQ(profiler->record_count(), 2);
+
+  profiler->clear();
+  EXPECT_EQ(profiler->record_count(), 0);
 }
 
 }  // namespace

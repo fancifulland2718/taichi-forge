@@ -971,6 +971,13 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   // Profiler support
   void profiler_reserve_samplers(size_t count) {
     std::lock_guard<std::mutex> lock(profiler_mutex_);
+    const size_t retained =
+        profiler_pending_sampler_count_ + sampled_records_.size();
+    TI_ERROR_IF(count > profiler_record_capacity_ ||
+                    retained > profiler_record_capacity_ - count,
+                "Vulkan kernel profiler reached its {}-record memory budget. "
+                "Synchronize and clear kernel profiler info periodically.",
+                profiler_record_capacity_);
     profiler_pending_sampler_count_ += count;
   }
 
@@ -1141,6 +1148,9 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   // Profiler support
   std::mutex profiler_mutex_;
   size_t profiler_pending_sampler_count_{0};
+  size_t profiler_record_capacity_{131072};
+  static constexpr size_t kMaximumProfilerRecordCapacity = 1048576;
+
   std::vector<VulkanProfilerSampler> samplers_;
   std::vector<std::pair<std::string, double>> sampled_records_;
 };

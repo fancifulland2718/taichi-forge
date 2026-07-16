@@ -101,6 +101,7 @@ void KernelProfilerCUDA::trace(KernelProfilerBase::TaskHandle &task_handle,
                                uint32_t grid_size,
                                uint32_t block_size,
                                uint32_t dynamic_smem_size) {
+  ensure_record_capacity();
   int register_per_thread = 0;
   int static_shared_mem_per_block = 0;
   int max_active_blocks_per_multiprocessor = 0;

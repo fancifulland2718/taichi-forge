@@ -45,11 +45,19 @@ struct KernelProfileStatisticalResult {
 
 class KernelProfilerBase {
  protected:
+  void ensure_record_capacity() const;
+
   std::vector<KernelProfileTracedRecord> traced_records_;
   std::vector<KernelProfileStatisticalResult> statistical_results_;
   double total_time_ms_{0};
+  std::size_t record_capacity_{131072};
 
  public:
+  static constexpr std::size_t kDefaultRecordCapacity = 131072;
+  static constexpr std::size_t kMaximumRecordCapacity = 1048576;
+
+  KernelProfilerBase();
+
   // Needed for the CUDA backend since we need to know which task to "stop"
   using TaskHandle = void *;
 
@@ -92,6 +100,10 @@ class KernelProfilerBase {
   std::vector<KernelProfileTracedRecord> get_traced_records() {
     return traced_records_;
   }
+
+  std::size_t record_capacity() const;
+  std::size_t record_count() const;
+  void set_record_capacity_for_testing(std::size_t capacity);
 
   double get_total_time() const;
 
