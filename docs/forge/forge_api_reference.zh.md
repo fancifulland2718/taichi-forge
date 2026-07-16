@@ -586,6 +586,14 @@ device 及其选定 PTX target。更高 target 可以开放 target-specific code
 此 metadata 合同建立前生成的 CUDA LLVM AOT artifact 必须重新构建；loader 会拒绝缺失
 sidecar 的产物，而不会根据构建机猜测能力要求。
 
+GFX AOT artifact 现在显式保存稠密 SNodeTree layout identity。metadata.json 会记录每个
+artifact-local root buffer 的大小、每个 field 所属的 tree id，以及每个 kernel 已排序的 tree
+依赖。C API loader 会分配全部已序列化 root，并把记录的 tree 数传给 kernel 注册，不再假定
+只有一个 root。artifact-local id 必须连续，且不编码进程内 tree generation；若 runtime 存在
+destroy 后留下的 tree 空洞，构建时会明确拒绝，不生成含糊 artifact。旧 C++
+get_root_size() 视图仍返回第一棵 root；多 tree loader 必须使用 get_root_sizes()。
+该合同仍只支持稠密 AOT field，不包含稀疏 SNode AOT。
+
 ## Graph API
 
 Dense Field 专属 layout、生命周期、并发、AD 与后端行为见

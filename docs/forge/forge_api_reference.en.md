@@ -649,6 +649,17 @@ artifacts created before this metadata contract must be rebuilt; the loader
 rejects a missing sidecar rather than guessing requirements from the build
 machine.
 
+GFX AOT artifacts now preserve dense SNodeTree layout identity explicitly.
+metadata.json stores every artifact-local root-buffer size, each field's tree
+id, and each kernel's sorted tree dependencies. The C API loader allocates all
+serialized roots and passes the recorded tree count to kernel registration;
+it no longer assumes one root. Artifact-local ids must be contiguous and do
+not encode process-local tree generations. A runtime with destroyed-tree holes
+is rejected at build time instead of producing an ambiguous artifact. The
+legacy C++ get_root_size() view still returns the first root; multi-tree
+loaders must use get_root_sizes(). This support remains limited to dense AOT
+fields; sparse SNode AOT is outside this contract.
+
 ## Graph APIs
 
 Dense Field-specific layouts, lifetime, concurrency, AD, and backend behavior

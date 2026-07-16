@@ -701,6 +701,58 @@ def test_cuda_aot_rejects_unsupported_target_capability():
         )
 
 
+@test_utils.test(arch=[ti.vulkan], offline_cache=False)
+def test_gfx_aot_multitree_metadata():
+    first_builder = ti.FieldsBuilder()
+    first = ti.field(ti.i32)
+    first_builder.dense(ti.i, 4).place(first)
+    first_tree = first_builder.finalize()
+
+    second_builder = ti.FieldsBuilder()
+    second = ti.field(ti.f32)
+    second_builder.dense(ti.i, 7).place(second)
+    second_tree = second_builder.finalize()
+
+    assert (first_tree.id, second_tree.id) == (0, 1)
+
+    @ti.kernel
+    def update():
+        for i in first:
+            first[i] += ti.cast(second[i], ti.i32)
+
+    module = ti.aot.Module()
+    module.add_field("first", first)
+    module.add_field("second", second)
+    module.add_kernel(update)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        module.save(tmpdir)
+        with open(
+            os.path.join(tmpdir, "metadata.json"), encoding="utf-8"
+        ) as metadata_file:
+            metadata = json.load(metadata_file)
+
+    assert metadata["metadata_version"] == 1
+    # AOT materialization may finalize the otherwise empty default root after
+    # the two explicit FieldsBuilder trees. Its zero-byte slot remains part of
+    # the stable artifact-local id space, while the kernel dependency list
+    # names only the trees it actually uses.
+    assert len(metadata["root_buffer_sizes"]) >= 2
+    assert metadata["root_buffer_sizes"][0] > 0
+    assert metadata["root_buffer_sizes"][1] > 0
+    assert metadata["root_buffer_size"] == metadata["root_buffer_sizes"][0]
+    assert {
+        field["field_name"]: field["snode_tree_id"]
+        for field in metadata["fields"]
+    } == {"first": 0, "second": 1}
+    assert metadata["kernel_metadata"] == [
+        {
+            "num_snode_trees": len(metadata["root_buffer_sizes"]),
+            "used_snode_tree_ids": [0, 1],
+        }
+    ]
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_module_arch_mismatch_rejected():
     with pytest.raises(

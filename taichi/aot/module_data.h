@@ -12,6 +12,7 @@ namespace aot {
 
 struct CompiledFieldData {
   std::string field_name;
+  int snode_tree_id{0};
   uint32_t dtype{0};
   std::string dtype_name;
   size_t mem_offset_in_parent{0};
@@ -20,6 +21,7 @@ struct CompiledFieldData {
   std::vector<int> element_shape;
 
   TI_IO_DEF(field_name,
+            snode_tree_id,
             dtype,
             dtype_name,
             mem_offset_in_parent,

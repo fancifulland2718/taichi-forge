@@ -19,11 +19,24 @@ AotModuleBuilderImpl::AotModuleBuilderImpl(
       compilation_manager_(compilation_manager),
       config_(compile_config),
       caps_(caps) {
+  ti_aot_data_.metadata_version = TaichiAotData::kMetadataVersion;
   for (const auto &pair : caps.to_inner()) {
     ti_aot_data_.required_caps[to_string(pair.first)] = pair.second;
   }
-  if (!compiled_structs.empty()) {
-    ti_aot_data_.root_buffer_size = compiled_structs[0].root_size;
+  ti_aot_data_.root_buffer_sizes.reserve(compiled_structs.size());
+  for (std::size_t tree_id = 0; tree_id < compiled_structs.size(); ++tree_id) {
+    const auto &compiled = compiled_structs[tree_id];
+    TI_ERROR_IF(
+        compiled.root == nullptr ||
+            compiled.root->get_snode_tree_id() != static_cast<int>(tree_id),
+        "GFX AOT requires active SNodeTrees with contiguous artifact-local "
+        "ids [0, N). Tree slot {} is empty or has a different runtime id; "
+        "rebuild the module from a clean runtime after destroyed trees.",
+        tree_id);
+    ti_aot_data_.root_buffer_sizes.push_back(compiled.root_size);
+  }
+  if (!ti_aot_data_.root_buffer_sizes.empty()) {
+    ti_aot_data_.root_buffer_size = ti_aot_data_.root_buffer_sizes.front();
   }
 }
 
@@ -76,8 +89,19 @@ void AotModuleBuilderImpl::add_per_backend(const std::string &identifier,
   const auto &spirv_ckd = dynamic_cast<const spirv::CompiledKernelData &>(ckd);
 
   auto compiled = spirv_ckd.get_internal_data();
+  TI_ERROR_IF(
+      compiled.metadata.num_snode_trees !=
+          ti_aot_data_.root_buffer_sizes.size(),
+      "GFX AOT kernel '{}' was compiled for {} SNodeTrees, but the artifact "
+      "contains {} layouts.",
+      identifier,
+      compiled.metadata.num_snode_trees,
+      ti_aot_data_.root_buffer_sizes.size());
   compiled.metadata.kernel_attribs.name = identifier;
   ti_aot_data_.kernels.push_back(compiled.metadata.kernel_attribs);
+  ti_aot_data_.kernel_metadata.push_back(
+      {compiled.metadata.num_snode_trees,
+       compiled.metadata.used_snode_tree_ids});
   ti_aot_data_.spirv_codes.push_back(compiled.src.spirv_src);
 }
 
@@ -96,11 +120,20 @@ void AotModuleBuilderImpl::add_field_per_backend(const std::string &identifier,
   TI_ERROR_IF(!all_fields_are_dense_in_container(rep_snode->parent),
               "AOT: only supports dense field");
 
+  const int tree_id = rep_snode->get_snode_tree_id();
+  TI_ERROR_IF(tree_id < 0 ||
+                  static_cast<std::size_t>(tree_id) >=
+                      compiled_structs_.size() ||
+                  compiled_structs_[tree_id].root == nullptr,
+              "AOT field '{}' belongs to inactive SNodeTree id {}.",
+              identifier,
+              tree_id);
   const auto &dense_desc =
-      compiled_structs_[0].snode_descriptors.at(rep_snode->parent->id);
+      compiled_structs_[tree_id].snode_descriptors.at(rep_snode->parent->id);
 
   aot::CompiledFieldData field_data;
   field_data.field_name = identifier;
+  field_data.snode_tree_id = tree_id;
   field_data.is_scalar = is_scalar;
   field_data.dtype = static_cast<int>(dt->cast<PrimitiveType>()->type);
   field_data.dtype_name = dt.to_string();
@@ -120,8 +153,20 @@ void AotModuleBuilderImpl::add_per_backend_tmpl(const std::string &identifier,
   const auto &spirv_ckd = dynamic_cast<const spirv::CompiledKernelData &>(ckd);
 
   auto compiled = spirv_ckd.get_internal_data();
+  TI_ERROR_IF(
+      compiled.metadata.num_snode_trees !=
+          ti_aot_data_.root_buffer_sizes.size(),
+      "GFX AOT kernel template '{}|{}' was compiled for {} SNodeTrees, but "
+      "the artifact contains {} layouts.",
+      identifier,
+      key,
+      compiled.metadata.num_snode_trees,
+      ti_aot_data_.root_buffer_sizes.size());
   compiled.metadata.kernel_attribs.name = identifier + "|" + key;
   ti_aot_data_.kernels.push_back(compiled.metadata.kernel_attribs);
+  ti_aot_data_.kernel_metadata.push_back(
+      {compiled.metadata.num_snode_trees,
+       compiled.metadata.used_snode_tree_ids});
   ti_aot_data_.spirv_codes.push_back(compiled.src.spirv_src);
 }
 

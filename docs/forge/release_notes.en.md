@@ -118,6 +118,11 @@ retroactively attributed to the 0.5.0 artifact:
   registration. Newer exact targets are opt-in and add no Toolkit/CUDART
   runtime dependency. CUDA LLVM AOT artifacts made before this sidecar contract
   must be rebuilt.
+- GFX AOT metadata now carries all dense root-buffer sizes, per-field tree ids,
+  and per-kernel SNodeTree dependencies. The C API loader allocates every
+  artifact root and registers kernels with the recorded count instead of
+  hard-coding one tree. Non-contiguous live tree ids fail at build time;
+  sparse SNode AOT remains unsupported.
 
 ## 0.1.0
 

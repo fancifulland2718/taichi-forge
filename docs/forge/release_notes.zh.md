@@ -92,6 +92,9 @@
   compute/PTX 要求，loader 在 kernel 注册前拒绝能力不足的 device；更高的精确 target 需要
   显式选择，且不增加 Toolkit/CUDART runtime 依赖。此 sidecar 合同建立前生成的 CUDA LLVM
   AOT artifact 必须重新构建。
+- GFX AOT metadata 现在保存全部稠密 root buffer 大小、每 field 的 tree id 和每 kernel 的
+  SNodeTree 依赖。C API loader 会分配所有 artifact root，并按记录的 tree 数注册 kernel，不再
+  硬编码单 tree；非连续 live tree id 在构建时 fail-fast，稀疏 SNode AOT 仍不在支持范围内。
 
 ## 0.1.0
 

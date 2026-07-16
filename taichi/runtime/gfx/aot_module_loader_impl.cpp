@@ -1,6 +1,7 @@
 #include "taichi/runtime/gfx/aot_module_loader_impl.h"
 
 #include <fstream>
+#include <algorithm>
 #include <type_traits>
 
 #include "taichi/runtime/gfx/runtime.h"
@@ -44,6 +45,78 @@ class AotModuleImpl : public aot::Module {
           (const char *)metadata_json.data(),
           (const char *)(metadata_json.data() + metadata_json.size()));
       liong::json::deserialize(json, ti_aot_data_);
+    }
+
+    if (ti_aot_data_.metadata_version == 0) {
+      // Backward-compatible view for legacy single-tree artifacts.
+      ti_aot_data_.root_buffer_sizes = {ti_aot_data_.root_buffer_size};
+      if (!ti_aot_data_.kernel_metadata.empty()) {
+        mark_corrupted();
+        TI_WARN("Legacy GFX AOT artifact contains unexpected kernel metadata");
+        return;
+      }
+      ti_aot_data_.kernel_metadata.resize(
+          ti_aot_data_.kernels.size(),
+          AotKernelMetadata{/*num_snode_trees=*/1,
+                            /*used_snode_tree_ids=*/{0}});
+    } else if (ti_aot_data_.metadata_version !=
+               TaichiAotData::kMetadataVersion) {
+      mark_corrupted();
+      TI_WARN("Unsupported GFX AOT metadata version {}",
+              ti_aot_data_.metadata_version);
+      return;
+    } else {
+      const size_t compatibility_root_size =
+          ti_aot_data_.root_buffer_sizes.empty()
+              ? 0
+              : ti_aot_data_.root_buffer_sizes.front();
+      if (ti_aot_data_.root_buffer_size != compatibility_root_size) {
+        mark_corrupted();
+        TI_WARN("GFX AOT first-root compatibility size is inconsistent");
+        return;
+      }
+    }
+    if (ti_aot_data_.kernel_metadata.size() !=
+        ti_aot_data_.kernels.size()) {
+      mark_corrupted();
+      TI_WARN("GFX AOT kernel metadata count does not match kernel count");
+      return;
+    }
+    for (std::size_t i = 0; i < ti_aot_data_.kernel_metadata.size(); ++i) {
+      const auto &metadata = ti_aot_data_.kernel_metadata[i];
+      if (metadata.num_snode_trees !=
+          ti_aot_data_.root_buffer_sizes.size()) {
+        mark_corrupted();
+        TI_WARN("GFX AOT kernel {} has an inconsistent SNodeTree count", i);
+        return;
+      }
+      if (!std::is_sorted(metadata.used_snode_tree_ids.begin(),
+                          metadata.used_snode_tree_ids.end()) ||
+          std::adjacent_find(metadata.used_snode_tree_ids.begin(),
+                             metadata.used_snode_tree_ids.end()) !=
+              metadata.used_snode_tree_ids.end() ||
+          std::any_of(metadata.used_snode_tree_ids.begin(),
+                      metadata.used_snode_tree_ids.end(),
+                      [this](int tree_id) {
+                        return tree_id < 0 ||
+                               static_cast<std::size_t>(tree_id) >=
+                                   ti_aot_data_.root_buffer_sizes.size();
+                      })) {
+        mark_corrupted();
+        TI_WARN("GFX AOT kernel {} has invalid SNodeTree dependencies", i);
+        return;
+      }
+    }
+    for (const auto &field : ti_aot_data_.fields) {
+      if (field.snode_tree_id < 0 ||
+          static_cast<std::size_t>(field.snode_tree_id) >=
+              ti_aot_data_.root_buffer_sizes.size()) {
+        mark_corrupted();
+        TI_WARN("GFX AOT field '{}' has invalid SNodeTree id {}",
+                field.field_name,
+                field.snode_tree_id);
+        return;
+      }
     }
 
     for (int i = 0; i < ti_aot_data_.kernels.size(); ++i) {
@@ -106,6 +179,9 @@ class AotModuleImpl : public aot::Module {
   size_t get_root_size() const override {
     return ti_aot_data_.root_buffer_size;
   }
+  std::vector<size_t> get_root_sizes() const override {
+    return ti_aot_data_.root_buffer_sizes;
+  }
 
   // Module metadata
   Arch arch() const override {
@@ -133,10 +209,10 @@ class AotModuleImpl : public aot::Module {
       if (ti_aot_data_.kernels[i].name == name) {
         kernel.kernel_attribs = ti_aot_data_.kernels[i];
         kernel.task_spirv_source_codes = ti_aot_data_.spirv_codes[i];
-        // We don't have to store the number of SNodeTree in |ti_aot_data_| yet,
-        // because right now we only support a single SNodeTree during AOT.
-        // TODO: Support multiple SNodeTrees in AOT.
-        kernel.num_snode_trees = 1;
+        kernel.num_snode_trees =
+            ti_aot_data_.kernel_metadata[i].num_snode_trees;
+        kernel.snode_tree_ids =
+            ti_aot_data_.kernel_metadata[i].used_snode_tree_ids;
         return true;
       }
     }

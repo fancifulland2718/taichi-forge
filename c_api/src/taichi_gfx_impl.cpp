@@ -28,8 +28,9 @@ Error GfxRuntime::create_aot_module(const taichi::io::VirtualDir *dir,
     }
   }
 
-  size_t root_size = aot_module->get_root_size();
-  params.runtime->add_root_buffer(root_size);
+  for (size_t root_size : aot_module->get_root_sizes()) {
+    params.runtime->add_root_buffer(root_size);
+  }
   out = (TiAotModule) new AotModule(*this, std::move(aot_module));
   return Error();
 }
