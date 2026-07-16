@@ -1,4 +1,5 @@
 import os
+import warnings
 from collections import OrderedDict
 
 import numpy as np
@@ -132,6 +133,7 @@ from taichi_forge.graph._native import NativeGraphExecutable, NativeGraphNode
 from taichi_forge.types.primitive_types import f32, f64, i32, i64, u32, u64
 
 _CUDA_CUB_SORT_METHODS = {"cuda_cub_native", "cuda_cub_split32", "cuda_cub_u32"}
+_CUDA_TOOLKIT_REFERENCE_METHODS = _CUDA_CUB_SORT_METHODS | {"cuda_cub"}
 _SUPPORTED_SORT_METHODS = supported_primitive_methods("sort")
 _SUPPORTED_SORT_PRECISIONS = {"exact"}
 _SUPPORTED_NAN_POLICIES = {"last", "bitwise"}
@@ -209,6 +211,19 @@ _primitive_diagnostics_enabled = bool(
     int(os.environ.get("TAICHI_FORGE_PRIMITIVE_DIAGNOSTICS", "0"))
 )
 _primitive_diagnostic_counts = {}
+
+
+def _warn_cuda_toolkit_reference_method(method):
+    if method not in _CUDA_TOOLKIT_REFERENCE_METHODS:
+        return
+    warnings.warn(
+        f"method={method!r} is a deprecated CUDA Toolkit reference path. "
+        "Application code should use method='auto' or method='cuda_device'; "
+        "reference methods are absent from standard runtime wheels and may be "
+        "removed in a future release.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
 _NATIVE_PRIMITIVE_PROG_METHOD_PREFIXES = (
     "cpu_",
     "cuda_",
@@ -4074,8 +4089,8 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
         self._native_compact_plan = None
         self._native_compact_plans = {}
         self._init_order_apply_workspace("compact")
+        self._cuda_device_active = False
         self._cuda_cub_active = False
-        self._cuda_cub_scan_active = False
         self._vulkan_native_active = False
 
     def clear(self):
@@ -4084,11 +4099,12 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
 
             prog = impl.get_runtime().prog
             _call_optional_prog_method(prog, "cuda_cub_select_clear_workspace")
-        if self._cuda_cub_scan_active:
+        if self._cuda_device_active:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
-            _call_optional_prog_method(prog, "cuda_cub_scan_clear_workspace")
+            _call_optional_prog_method(prog, "cuda_device_compact_clear_workspace")
+            _call_optional_prog_method(prog, "cuda_device_scan_clear_workspace")
         if self._vulkan_native_active:
             from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
@@ -4102,8 +4118,8 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
         self._native_compact_plan = None
         self._native_compact_plans.clear()
         self._clear_order_apply_workspace()
+        self._cuda_device_active = False
         self._cuda_cub_active = False
-        self._cuda_cub_scan_active = False
         self._vulkan_native_active = False
 
     def _get_field_buffers(self, n):
@@ -4214,7 +4230,9 @@ class CompactWorkspace(_OrderApplyWorkspaceMixin):
 
     def _mark_native_compact_backend_active(self, backend, temp_bytes):
         temp_bytes = 0 if temp_bytes is None else temp_bytes
-        if backend == "cuda_cub":
+        if backend == "cuda_device":
+            self._cuda_device_active = True
+        elif backend == "cuda_cub":
             self._cuda_cub_active = True
         elif backend == "vulkan_native":
             self._vulkan_native_active = True
@@ -4684,7 +4702,7 @@ class SegmentedWorkspace:
             return 0
         arch = current_cfg().arch
         if arch == cuda:
-            name = "cuda_cub_scan_workspace_bytes"
+            name = "cuda_device_scan_workspace_bytes"
         elif arch == vulkan:
             name = "vulkan_scan_workspace_bytes"
         elif arch in (x64, arm64):
@@ -4747,6 +4765,9 @@ class SegmentedWorkspace:
             self._grouped_reduce_workspace.clear()
         if self._transform_workspace is not None:
             self._transform_workspace.clear()
+        prog = get_runtime().prog
+        if prog is not None and current_cfg().arch == cuda:
+            _call_optional_prog_method(prog, "cuda_device_scan_clear_workspace")
         self._base_buffers.clear()
         self._scan_executors.clear()
         self._grouped_reduce_workspace = None
@@ -5021,7 +5042,8 @@ class CheckWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._result_i32_ndarray = None
-        self._cuda_active = False
+        self._cuda_device_active = False
+        self._cuda_cub_active = False
         self._vulkan_active = False
         self._native_check_plan = None
         self._native_check_plans = {}
@@ -5030,7 +5052,9 @@ class CheckWorkspace:
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         prog = impl.get_runtime().prog
-        if self._cuda_active:
+        if self._cuda_device_active:
+            _call_optional_prog_method(prog, "cuda_device_check_count_clear_workspace")
+        if self._cuda_cub_active:
             _call_optional_prog_method(prog, "cuda_cub_check_count_clear_workspace")
         if self._vulkan_active:
             _call_optional_prog_method(prog, "vulkan_check_count_clear_workspace")
@@ -5039,7 +5063,8 @@ class CheckWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._result_i32_ndarray = None
-        self._cuda_active = False
+        self._cuda_device_active = False
+        self._cuda_cub_active = False
         self._vulkan_active = False
         self._native_check_plan = None
         self._native_check_plans.clear()
@@ -5072,8 +5097,10 @@ class CheckWorkspace:
 
     def _mark_native_check_backend_active(self, backend, temp_bytes):
         self._native_workspace_bytes = int(temp_bytes or 0)
-        if backend == "cuda_cub":
-            self._cuda_active = True
+        if backend == "cuda_device":
+            self._cuda_device_active = True
+        elif backend == "cuda_cub":
+            self._cuda_cub_active = True
         elif backend == "vulkan_native":
             self._vulkan_active = True
         self._refresh_workspace_bytes()
@@ -5144,7 +5171,8 @@ class MetricWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._result_ndarrays = {}
-        self._cuda_active = False
+        self._cuda_device_active = False
+        self._cuda_cub_active = False
         self._vulkan_active = False
         self._native_metric_plan = None
         self._native_metric_plans = {}
@@ -5153,7 +5181,9 @@ class MetricWorkspace:
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         prog = impl.get_runtime().prog
-        if self._cuda_active:
+        if self._cuda_device_active:
+            _call_optional_prog_method(prog, "cuda_device_metric_reduce_clear_workspace")
+        if self._cuda_cub_active:
             _call_optional_prog_method(prog, "cuda_cub_metric_reduce_clear_workspace")
         if self._vulkan_active:
             _call_optional_prog_method(prog, "vulkan_metric_reduce_clear_workspace")
@@ -5162,7 +5192,8 @@ class MetricWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._result_ndarrays.clear()
-        self._cuda_active = False
+        self._cuda_device_active = False
+        self._cuda_cub_active = False
         self._vulkan_active = False
         self._native_metric_plan = None
         self._native_metric_plans.clear()
@@ -5197,8 +5228,10 @@ class MetricWorkspace:
 
     def _mark_native_metric_backend_active(self, backend, temp_bytes):
         self._native_workspace_bytes = int(temp_bytes or 0)
-        if backend == "cuda_cub":
-            self._cuda_active = True
+        if backend == "cuda_device":
+            self._cuda_device_active = True
+        elif backend == "cuda_cub":
+            self._cuda_cub_active = True
         elif backend == "vulkan_native":
             self._vulkan_active = True
         self._refresh_workspace_bytes()
@@ -5323,6 +5356,7 @@ def _check_count_backend(method):
             f"Unsupported device check method '{method}'. Supported methods: "
             f"{sorted(_SUPPORTED_CHECK_METHODS)}"
         )
+    _warn_cuda_toolkit_reference_method(method)
     arch = current_cfg().arch
     if method == "cuda_cub":
         return "cuda_cub" if arch == cuda else None
@@ -5347,6 +5381,7 @@ def _metric_reduce_backend(method):
             f"Unsupported device metric method '{method}'. Supported methods: "
             f"{sorted(_SUPPORTED_METRIC_METHODS)}"
         )
+    _warn_cuda_toolkit_reference_method(method)
     arch = current_cfg().arch
     if method == "cuda_cub":
         return "cuda_cub" if arch == cuda else None
@@ -5781,7 +5816,13 @@ class HistogramWorkspace:
         self._staged_member_transform_workspace = None
 
     def clear(self):
-        self._cuda_device_active = False
+        if self._cuda_device_active:
+            from taichi_forge.lang import (
+                impl,
+            )  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            _call_optional_prog_method(prog, "cuda_device_histogram_clear_workspace")
         if self._cuda_cub_active:
             from taichi_forge.lang import (
                 impl,
@@ -8713,6 +8754,7 @@ def sort(
     odd-even merge implementation.
     """
 
+    _warn_cuda_toolkit_reference_method(method)
     reject_unsupported_automatic_ad("sort")
     _check_sort_request(
         keys, values, stable, descending, method, precision, workspace, nan_policy
@@ -8823,6 +8865,7 @@ def sort_by_key(
     back to the host stable path for compatibility.
     """
 
+    _warn_cuda_toolkit_reference_method(method)
     reject_unsupported_automatic_ad("sort")
     if order != "lexicographic":
         raise ValueError("sort_by_key() currently only supports order='lexicographic'.")
@@ -9233,7 +9276,7 @@ def _native_prefix_scan_available_for_current_arch():
     prog = impl.get_runtime().prog
     arch = current_cfg().arch
     if arch == cuda:
-        return _prog_available(prog, "cuda_cub_scan_available")
+        return _prog_available(prog, "cuda_device_scan_available")
     if arch == vulkan:
         return _prog_available(prog, "vulkan_scan_available")
     return False
@@ -9250,9 +9293,9 @@ def _compact_field_native_prefix_scan(values, flags, output, count, workspace, n
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         prog = impl.get_runtime().prog
-        if _prog_has(prog, "cuda_cub_scan_workspace_bytes"):
-            workspace._cuda_cub_scan_active = True
-            scan_bytes = int(_prog_method(prog, "cuda_cub_scan_workspace_bytes")())
+        if _prog_has(prog, "cuda_device_scan_workspace_bytes"):
+            workspace._cuda_device_active = True
+            scan_bytes = int(_prog_method(prog, "cuda_device_scan_workspace_bytes")())
             workspace.workspace_bytes_peak = max(
                 workspace.workspace_bytes_peak,
                 workspace.workspace_bytes_current + scan_bytes,
@@ -9321,6 +9364,7 @@ def experimental_compact(
     payloads. Flags/count are i32.
     """
 
+    _warn_cuda_toolkit_reference_method(method)
     reject_unsupported_automatic_ad("compact")
     if _is_struct_tensor_member_view(values) or _is_struct_tensor_member_view(output):
         _check_matching_struct_tensor_member_views("experimental_compact()", values, output)
@@ -9398,7 +9442,7 @@ def experimental_compact(
             "method='cuda_device' requires CUDA ndarray or dense field inputs "
             "and the Driver compact provider."
         )
-    if method in ("auto", "cuda_cub") and _try_cuda_cub_compact(
+    if method == "cuda_cub" and _try_cuda_cub_compact(
         values, flags, output, count, workspace
     ):
         return
@@ -9634,6 +9678,7 @@ def experimental_unique(
     consecutive semantics. Only output[:count] is defined.
     """
 
+    _warn_cuda_toolkit_reference_method(method)
     reject_unsupported_automatic_ad("unique")
     if mode != "consecutive":
         raise ValueError("experimental_unique() currently supports mode='consecutive'.")
@@ -9698,6 +9743,7 @@ def experimental_unique_by_key(
 ):
     """Select one key and the first payload from each consecutive key run."""
 
+    _warn_cuda_toolkit_reference_method(method)
     reject_unsupported_automatic_ad("unique_by_key")
     if mode != "consecutive":
         raise ValueError(
@@ -9787,6 +9833,7 @@ def experimental_run_length_encode(
 ):
     """Encode consecutive equal-key runs without host synchronization."""
 
+    _warn_cuda_toolkit_reference_method(method)
     reject_unsupported_automatic_ad("run_length_encode")
     capacity, n, ndarray_mode = _check_rle_key_output_count(
         "experimental_run_length_encode()",
@@ -10003,6 +10050,7 @@ def experimental_segmented_reduce(
     left-to-right order and is the dense-field/deterministic path.
     """
 
+    _warn_cuda_toolkit_reference_method(method)
     if op != "sum":
         raise ValueError("experimental_segmented_reduce() currently supports op='sum'.")
     if is_fwd_mode_active():
@@ -10074,6 +10122,7 @@ def experimental_segmented_scan(
     two-kernel segment correction.
     """
 
+    _warn_cuda_toolkit_reference_method(method)
     reject_unsupported_automatic_ad("segmented_scan")
     if op != "sum":
         raise ValueError("experimental_segmented_scan() currently supports op='sum'.")
@@ -10809,6 +10858,7 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
     supports i32/f32.
     """
 
+    _warn_cuda_toolkit_reference_method(method)
     ad_active = is_tape_active()
     method = native_autodiff_method(
         "reduce",
@@ -11461,6 +11511,7 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
     values and bins.
     """
 
+    _warn_cuda_toolkit_reference_method(method)
     reject_unsupported_automatic_ad("histogram")
     if workspace is not None and isinstance(workspace, HistogramWorkspace):
         if workspace._try_hot_staged_histogram_plan_group(values, bins, method):
@@ -12360,6 +12411,7 @@ def experimental_transform(
     offset semantics and remains 1D-only.
     """
 
+    _warn_cuda_toolkit_reference_method(method)
     ad_active = is_tape_active()
     method = native_autodiff_method(
         "transform",
@@ -13420,6 +13472,7 @@ def experimental_gather(src, indices, dst, *, method="auto", workspace=None):
     and CPU. Field/SNode inputs use Forge kernels.
     """
 
+    _warn_cuda_toolkit_reference_method(method)
     ad_active = is_tape_active()
     method = native_autodiff_method(
         "gather",
@@ -13446,6 +13499,7 @@ def experimental_scatter(src, indices, dst, *, method="auto", workspace=None):
     primitives.
     """
 
+    _warn_cuda_toolkit_reference_method(method)
     ad_active = is_tape_active()
     method = native_autodiff_method(
         "scatter",
@@ -14172,6 +14226,7 @@ def experimental_scatter_add(src, indices, dst, *, method="auto", workspace=None
     backend atomics; floating-point accumulation order is backend-dependent.
     """
 
+    _warn_cuda_toolkit_reference_method(method)
     ad_active = is_tape_active()
     method = native_autodiff_method(
         "scatter_add",
@@ -14796,6 +14851,7 @@ def experimental_bucket_builder(
     values as opaque raw payloads.
     """
 
+    _warn_cuda_toolkit_reference_method(method)
     reject_unsupported_automatic_ad("bucket_builder")
     if _is_struct_tensor_member_view(values) or _is_struct_tensor_member_view(output):
         _check_matching_struct_tensor_member_views(
@@ -15734,6 +15790,7 @@ def experimental_grouped_reduce(
     fallback stays in Forge kernels.
     """
 
+    _warn_cuda_toolkit_reference_method(method)
     ad_active = is_tape_active()
     method = native_autodiff_method(
         "grouped_reduce",

@@ -250,6 +250,12 @@ def test_cuda_device_diagnostics_use_driver_provider():
     assert np.isinf(metric.to_float())
     assert check_workspace._native_check_plan.backend == "cuda_device"
     assert metric_workspace._native_metric_plan.backend == "cuda_device"
+    assert check_workspace._cuda_device_active
+    assert metric_workspace._cuda_device_active
+    check_workspace.clear()
+    metric_workspace.clear()
+    assert not check_workspace._cuda_device_active
+    assert not metric_workspace._cuda_device_active
 
 
 @test_utils.test(

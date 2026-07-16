@@ -11056,6 +11056,28 @@ std::size_t Program::cuda_device_compact_dense_field(SNode *values,
 #endif
 }
 
+void Program::cuda_device_compact_clear_workspace() {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::cuda,
+                                   PrimitiveWorkspaceFamily::compact);
+  }
+#endif
+}
+
+std::size_t Program::cuda_device_compact_workspace_bytes() const {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    return static_cast<std::size_t>(
+        primitive_workspace_arena_
+            .snapshot(PrimitiveWorkspaceBackend::cuda,
+                      PrimitiveWorkspaceFamily::compact)
+            .reserved_bytes);
+  }
+#endif
+  return 0;
+}
+
 bool Program::cuda_cub_select_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda && cuda::cub_select_available();
@@ -11327,6 +11349,28 @@ std::size_t Program::cuda_device_histogram_dense_field(
 #else
   TI_NOT_IMPLEMENTED;
 #endif
+}
+
+void Program::cuda_device_histogram_clear_workspace() {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::cuda,
+                                   PrimitiveWorkspaceFamily::histogram);
+  }
+#endif
+}
+
+std::size_t Program::cuda_device_histogram_workspace_bytes() const {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    return static_cast<std::size_t>(
+        primitive_workspace_arena_
+            .snapshot(PrimitiveWorkspaceBackend::cuda,
+                      PrimitiveWorkspaceFamily::histogram)
+            .reserved_bytes);
+  }
+#endif
+  return 0;
 }
 
 bool Program::cuda_cub_histogram_available() const {

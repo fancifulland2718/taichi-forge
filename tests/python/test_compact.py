@@ -175,6 +175,19 @@ def test_experimental_compact_cuda_cub_struct_tensor_member_views():
     _run_struct_tensor_member_compact("cuda_cub")
 
 
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_compact_cuda_auto_never_selects_cub_reference():
+    prog = impl.get_runtime().prog
+    if not prog.cuda_device_compact_available():
+        pytest.skip("CUDA Driver compact is unavailable in this build/runtime.")
+
+    workspace = _run_ndarray_compact(ti.i32, np.int32, "auto")
+
+    assert workspace._native_compact_plan.backend == "cuda_device"
+    assert workspace._cuda_device_active
+    assert not workspace._cuda_cub_active
+
+
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_compact_vulkan_native_struct_tensor_member_views():
     prog = impl.get_runtime().prog
@@ -304,15 +317,16 @@ def test_experimental_compact_dense_field_native_f32_no_helper():
 
 
 @test_utils.test(arch=[ti.cuda])
-def test_experimental_compact_cuda_field_scan_uses_cub_native_workspace():
+def test_experimental_compact_cuda_field_scan_uses_driver_workspace():
     n = 4096
     values = ti.field(ti.i32, shape=n)
     flags = ti.field(ti.i32, shape=n)
     output = ti.field(ti.i32, shape=n)
     count = ti.field(ti.i32, shape=())
 
-    if not impl.get_runtime().prog.cuda_cub_select_available():
-        pytest.skip("CUDA CUB select is unavailable in this build/runtime.")
+    prog = impl.get_runtime().prog
+    if not prog.cuda_device_compact_available():
+        pytest.skip("CUDA Driver compact is unavailable in this build/runtime.")
 
     @ti.kernel
     def fill():
@@ -332,7 +346,10 @@ def test_experimental_compact_cuda_field_scan_uses_cub_native_workspace():
     assert count[None] == expected.shape[0]
     assert np.array_equal(output.to_numpy()[: expected.shape[0]], expected)
     assert workspace.workspace_bytes_peak > 0
-    assert impl.get_runtime().prog.cuda_cub_select_workspace_bytes() > 0
+    assert prog.cuda_device_compact_workspace_bytes() > 0
+    workspace.clear()
+    assert prog.cuda_device_compact_workspace_bytes() == 0
+    assert prog.cuda_device_scan_workspace_bytes() == 0
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

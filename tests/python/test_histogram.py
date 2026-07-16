@@ -182,6 +182,9 @@ def test_experimental_histogram_cuda_device_storage_and_dtypes():
             _run_struct_member_histogram(dtype, np_dtype, bin_dtype, bin_np_dtype, "cuda_device")
     assert workspace._cuda_device_active
     assert workspace._native_histogram_plan.backend == "cuda_device"
+    workspace.clear()
+    assert not workspace._cuda_device_active
+    assert prog.cuda_device_histogram_workspace_bytes() == 0
 
 
 @test_utils.test(arch=[ti.cuda])

@@ -1147,6 +1147,10 @@ class TI_DLL_EXPORT Program {
                                               int value_type,
                                               std::size_t n);
 
+  void cuda_device_compact_clear_workspace();
+
+  std::size_t cuda_device_compact_workspace_bytes() const;
+
   bool cuda_cub_select_available() const;
 
   std::size_t cuda_cub_select_ndarray(Ndarray *values,
@@ -1184,6 +1188,10 @@ class TI_DLL_EXPORT Program {
                                                  int bin_type,
                                                  std::size_t n,
                                                  std::size_t num_bins);
+
+  void cuda_device_histogram_clear_workspace();
+
+  std::size_t cuda_device_histogram_workspace_bytes() const;
 
   bool cuda_cub_histogram_available() const;
 

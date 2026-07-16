@@ -1482,6 +1482,11 @@ void export_lang(py::module &m) {
            py::arg("values"), py::arg("flags"), py::arg("output"),
            py::arg("count"), py::arg("value_type"), py::arg("n"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_compact_clear_workspace",
+           &Program::cuda_device_compact_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_compact_workspace_bytes",
+           &Program::cuda_device_compact_workspace_bytes)
       .def("cuda_cub_select_available", &Program::cuda_cub_select_available)
       .def("cuda_cub_select_clear_workspace",
            &Program::cuda_cub_select_clear_workspace,
@@ -1513,6 +1518,11 @@ void export_lang(py::module &m) {
            py::arg("values"), py::arg("bins"), py::arg("value_type"),
            py::arg("bin_type"), py::arg("n"), py::arg("num_bins"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_histogram_clear_workspace",
+           &Program::cuda_device_histogram_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_histogram_workspace_bytes",
+           &Program::cuda_device_histogram_workspace_bytes)
       .def("cuda_cub_histogram_available",
            &Program::cuda_cub_histogram_available)
       .def("cuda_cub_histogram_clear_workspace",

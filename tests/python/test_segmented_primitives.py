@@ -241,6 +241,11 @@ def test_segmented_integer_scan_auto_dispatch_is_coarse_and_observable():
         result.reshape(-1, segment_length)[:, -1],
         np.full(long_layout.num_segments, segment_length, dtype=np.int32),
     )
+    if ti.lang.impl.current_cfg().arch == ti.cuda:
+        prog = ti.lang.impl.get_runtime().prog
+        assert prog.cuda_device_scan_workspace_bytes() > 0
+        long_workspace.clear()
+        assert prog.cuda_device_scan_workspace_bytes() == 0
 
 
 @test_utils.test(

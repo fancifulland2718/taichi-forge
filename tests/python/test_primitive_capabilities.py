@@ -36,6 +36,14 @@ def _method_names(capability):
     return frozenset(method.name for method in capability.methods)
 
 
+@pytest.mark.parametrize("method", ["cuda_cub", "cuda_cub_native"])
+def test_cuda_toolkit_reference_methods_are_deprecated(method):
+    with pytest.warns(
+        DeprecationWarning, match="deprecated CUDA Toolkit reference path"
+    ):
+        alg_impl._warn_cuda_toolkit_reference_method(method)
+
+
 def test_static_primitive_capability_catalog_is_complete_and_immutable():
     ti.reset()
     capabilities = ti.algorithms.primitive_capabilities()
