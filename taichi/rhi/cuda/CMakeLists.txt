@@ -9,6 +9,7 @@ target_sources(${CUDA_RHI}
     cuda_driver.cpp
     cuda_profiler.cpp
     cuda_primitives.cpp
+    primitives/hierarchical_ptx.cpp
     primitives/linear_ptx.cpp
     cupti_toolkit.cpp
   )

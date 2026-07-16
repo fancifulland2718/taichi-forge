@@ -41,6 +41,18 @@ def fill_ndarray_matrix(ndarray: ndarray_type.ndarray(), val: template()):
 
 
 @kernel
+def add_ndarray_to_ndarray(src: ndarray_type.ndarray(), dst: ndarray_type.ndarray(), n: i32):
+    for i in range(n):
+        dst[i] += src[i]
+
+
+@kernel
+def add_scalar_field_to_dense_field(src: template(), dst: template(), n: i32):
+    for i in range(n):
+        dst[i] += src[None]
+
+
+@kernel
 def tensor_to_ext_arr(tensor: template(), arr: ndarray_type.ndarray()):
     # default value of offset is [], replace it with [0] * len
     offset = static(tensor.snode.ptr.offset if len(tensor.snode.ptr.offset) != 0 else [0] * len(tensor.shape))

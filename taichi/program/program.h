@@ -1027,6 +1027,51 @@ class TI_DLL_EXPORT Program {
                                           bool descending,
                                           int nan_policy);
 
+  bool cuda_device_scan_available() const;
+
+  std::size_t cuda_device_inclusive_scan_ndarray(Ndarray *data,
+                                                  int value_type);
+
+  std::size_t cuda_device_inclusive_reverse_scan_ndarray(Ndarray *data,
+                                                          int value_type);
+
+  std::size_t cuda_device_inclusive_scan_member_ndarray(
+      Ndarray *data,
+      int value_type,
+      std::size_t offset,
+      std::size_t stride);
+
+  std::size_t cuda_device_inclusive_reverse_scan_member_ndarray(
+      Ndarray *data,
+      int value_type,
+      std::size_t offset,
+      std::size_t stride);
+
+  std::size_t cuda_device_inclusive_scan_dense_field(SNode *data,
+                                                      int value_type,
+                                                      std::size_t n);
+
+  std::size_t cuda_device_inclusive_reverse_scan_dense_field(
+      SNode *data,
+      int value_type,
+      std::size_t n);
+
+  std::size_t cuda_device_inclusive_scan_dense_field_packed(
+      SNode *data,
+      int value_type,
+      std::size_t n,
+      int lane_count);
+
+  std::size_t cuda_device_inclusive_reverse_scan_dense_field_packed(
+      SNode *data,
+      int value_type,
+      std::size_t n,
+      int lane_count);
+
+  void cuda_device_scan_clear_workspace();
+
+  std::size_t cuda_device_scan_workspace_bytes() const;
+
   bool cuda_cub_scan_available() const;
 
   std::size_t cuda_cub_inclusive_scan_ndarray(Ndarray *data, int value_type);
@@ -1092,6 +1137,20 @@ class TI_DLL_EXPORT Program {
 
   std::size_t cuda_cub_select_workspace_bytes() const;
 
+  bool cuda_device_histogram_available() const;
+
+  std::size_t cuda_device_histogram_ndarray(Ndarray *values,
+                                             Ndarray *bins,
+                                             int value_type,
+                                             int bin_type);
+
+  std::size_t cuda_device_histogram_dense_field(SNode *values,
+                                                 SNode *bins,
+                                                 int value_type,
+                                                 int bin_type,
+                                                 std::size_t n,
+                                                 std::size_t num_bins);
+
   bool cuda_cub_histogram_available() const;
 
   std::size_t cuda_cub_histogram_ndarray(Ndarray *values,
@@ -1111,6 +1170,47 @@ class TI_DLL_EXPORT Program {
   void cuda_cub_histogram_clear_workspace();
 
   std::size_t cuda_cub_histogram_workspace_bytes() const;
+
+  bool cuda_device_reduce_available() const;
+
+  std::size_t cuda_device_reduce_ndarray(Ndarray *values,
+                                          Ndarray *output,
+                                          int value_type,
+                                          int op);
+
+  std::size_t cuda_device_reduce_member_ndarray(Ndarray *values,
+                                                 Ndarray *output,
+                                                 int value_type,
+                                                 std::size_t offset,
+                                                 std::size_t stride,
+                                                 int op);
+
+  std::size_t cuda_device_reduce_strided_ndarray(
+      Ndarray *values,
+      Ndarray *output,
+      int value_type,
+      std::size_t values_offset,
+      std::size_t values_stride,
+      std::size_t output_offset,
+      std::size_t output_stride,
+      int op);
+
+  std::size_t cuda_device_reduce_dense_field(SNode *values,
+                                              SNode *output,
+                                              int value_type,
+                                              std::size_t n,
+                                              int op);
+
+  std::size_t cuda_device_reduce_dense_field_packed(SNode *values,
+                                                     SNode *output,
+                                                     int value_type,
+                                                     std::size_t n,
+                                                     int lane_count,
+                                                     int op);
+
+  void cuda_device_reduce_clear_workspace();
+
+  std::size_t cuda_device_reduce_workspace_bytes() const;
 
   bool cuda_cub_reduce_available() const;
 

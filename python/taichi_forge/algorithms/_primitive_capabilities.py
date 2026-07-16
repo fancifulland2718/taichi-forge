@@ -343,6 +343,7 @@ _SORT_METHODS = (
 
 _SCAN_METHODS = (
     _auto(),
+    _method("cuda_device", ("cuda",), ("cuda_device_scan_available",)),
     _method("cuda_cub", ("cuda",), ("cuda_cub_scan_available",)),
     _method("vulkan_native", ("vulkan",), ("vulkan_scan_available",)),
     _method("cpu_native", ("cpu",), ("cpu_scan_available",)),
@@ -394,6 +395,7 @@ _SEGMENTED_SCAN_METHODS = (
 
 _REDUCE_METHODS = (
     _auto(),
+    _method("cuda_device", ("cuda",), ("cuda_device_reduce_available",)),
     _method("cuda_cub", ("cuda",), ("cuda_cub_reduce_available",)),
     _method("vulkan_native", ("vulkan",), ("vulkan_reduce_available",)),
     _method("cpu_native", ("cpu",), ("cpu_reduce_available",)),
@@ -402,6 +404,7 @@ _REDUCE_METHODS = (
 
 _HISTOGRAM_METHODS = (
     _auto(),
+    _method("cuda_device", ("cuda",), ("cuda_device_histogram_available",)),
     _method("cuda_cub", ("cuda",), ("cuda_cub_histogram_available",)),
     _method(
         "cuda_two_level",
@@ -667,7 +670,7 @@ _CAPABILITIES = {
         determinism="integer_exact_float_tree_dependent",
         atomic_order_dependent="never",
         ad=_ad_reverse_no_forward(
-            ("cuda_cub", "vulkan_native", "cpu_native"),
+            ("cuda_device", "cuda_cub", "vulkan_native", "cpu_native"),
             "kernel",
         ),
         workspace="required_prefix_sum_executor",
@@ -1020,7 +1023,7 @@ _CAPABILITIES = {
         determinism="integer_exact_float_method_dependent",
         atomic_order_dependent="method_dependent",
         ad=_ad_reverse(
-            ("cuda_cub", "vulkan_native", "cpu_native"),
+            ("cuda_device", "cuda_cub", "vulkan_native", "cpu_native"),
             "field_atomic",
             ("sum",),
         ),

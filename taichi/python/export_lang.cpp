@@ -1361,6 +1361,44 @@ void export_lang(py::module &m) {
            py::arg("keys"), py::arg("key_type"), py::arg("n"),
            py::arg("descending"), py::arg("nan_policy"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_scan_available", &Program::cuda_device_scan_available)
+      .def("cuda_device_scan_clear_workspace",
+           &Program::cuda_device_scan_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_scan_workspace_bytes",
+           &Program::cuda_device_scan_workspace_bytes)
+      .def("cuda_device_inclusive_scan_ndarray",
+           tracked_native_program_method(&Program::cuda_device_inclusive_scan_ndarray),
+           py::arg("data"), py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_inclusive_reverse_scan_ndarray",
+           tracked_native_program_method(&Program::cuda_device_inclusive_reverse_scan_ndarray),
+           py::arg("data"), py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_inclusive_scan_member_ndarray",
+           tracked_native_program_method(&Program::cuda_device_inclusive_scan_member_ndarray),
+           py::arg("data"), py::arg("value_type"), py::arg("offset"),
+           py::arg("stride"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_inclusive_reverse_scan_member_ndarray",
+           tracked_native_program_method(&Program::cuda_device_inclusive_reverse_scan_member_ndarray),
+           py::arg("data"), py::arg("value_type"), py::arg("offset"),
+           py::arg("stride"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_inclusive_scan_dense_field",
+           tracked_native_program_method(&Program::cuda_device_inclusive_scan_dense_field),
+           py::arg("data"), py::arg("value_type"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_inclusive_reverse_scan_dense_field",
+           tracked_native_program_method(&Program::cuda_device_inclusive_reverse_scan_dense_field),
+           py::arg("data"), py::arg("value_type"), py::arg("n"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_inclusive_scan_dense_field_packed",
+           tracked_native_program_method(&Program::cuda_device_inclusive_scan_dense_field_packed),
+           py::arg("data"), py::arg("value_type"), py::arg("n"),
+           py::arg("lane_count"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_inclusive_reverse_scan_dense_field_packed",
+           tracked_native_program_method(&Program::cuda_device_inclusive_reverse_scan_dense_field_packed),
+           py::arg("data"), py::arg("value_type"), py::arg("n"),
+           py::arg("lane_count"), py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_scan_available", &Program::cuda_cub_scan_available)
       .def("cuda_cub_scan_clear_workspace",
            &Program::cuda_cub_scan_clear_workspace,
@@ -1418,6 +1456,18 @@ void export_lang(py::module &m) {
            tracked_native_program_method(&Program::cuda_cub_select_i32_ndarray), py::arg("values"),
            py::arg("flags"), py::arg("output"), py::arg("count"),
            py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_histogram_available",
+           &Program::cuda_device_histogram_available)
+      .def("cuda_device_histogram_ndarray",
+           tracked_native_program_method(&Program::cuda_device_histogram_ndarray),
+           py::arg("values"), py::arg("bins"), py::arg("value_type"),
+           py::arg("bin_type") = 0,
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_histogram_dense_field",
+           tracked_native_program_method(&Program::cuda_device_histogram_dense_field),
+           py::arg("values"), py::arg("bins"), py::arg("value_type"),
+           py::arg("bin_type"), py::arg("n"), py::arg("num_bins"),
+           py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_histogram_available",
            &Program::cuda_cub_histogram_available)
       .def("cuda_cub_histogram_clear_workspace",
@@ -1436,6 +1486,38 @@ void export_lang(py::module &m) {
            tracked_native_program_method(&Program::cuda_cub_histogram_dense_field), py::arg("values"),
            py::arg("bins"), py::arg("value_type"), py::arg("bin_type"),
            py::arg("n"), py::arg("num_bins"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_reduce_available",
+           &Program::cuda_device_reduce_available)
+      .def("cuda_device_reduce_clear_workspace",
+           &Program::cuda_device_reduce_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_reduce_workspace_bytes",
+           &Program::cuda_device_reduce_workspace_bytes)
+      .def("cuda_device_reduce_ndarray",
+           tracked_native_program_method(&Program::cuda_device_reduce_ndarray),
+           py::arg("values"), py::arg("output"), py::arg("value_type"),
+           py::arg("op"), py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_reduce_member_ndarray",
+           tracked_native_program_method(&Program::cuda_device_reduce_member_ndarray),
+           py::arg("values"), py::arg("output"), py::arg("value_type"),
+           py::arg("offset"), py::arg("stride"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_reduce_strided_ndarray",
+           tracked_native_program_method(&Program::cuda_device_reduce_strided_ndarray),
+           py::arg("values"), py::arg("output"), py::arg("value_type"),
+           py::arg("values_offset"), py::arg("values_stride"),
+           py::arg("output_offset"), py::arg("output_stride"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_reduce_dense_field",
+           tracked_native_program_method(&Program::cuda_device_reduce_dense_field),
+           py::arg("values"), py::arg("output"), py::arg("value_type"),
+           py::arg("n"), py::arg("op"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_reduce_dense_field_packed",
+           tracked_native_program_method(&Program::cuda_device_reduce_dense_field_packed),
+           py::arg("values"), py::arg("output"), py::arg("value_type"),
+           py::arg("n"), py::arg("lane_count"), py::arg("op"),
            py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_reduce_available", &Program::cuda_cub_reduce_available)
       .def("cuda_cub_reduce_clear_workspace",

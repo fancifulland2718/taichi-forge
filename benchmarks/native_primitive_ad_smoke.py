@@ -59,8 +59,8 @@ def _workspace_snapshot():
     prog = impl.get_runtime().prog
     rows = {}
     for name in (
-        "cuda_cub_scan_workspace_bytes",
-        "cuda_cub_reduce_workspace_bytes",
+        "cuda_device_scan_workspace_bytes",
+        "cuda_device_reduce_workspace_bytes",
         "vulkan_scan_workspace_bytes",
         "vulkan_reduce_workspace_bytes",
         "cpu_scan_workspace_bytes",

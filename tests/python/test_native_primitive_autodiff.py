@@ -14,10 +14,7 @@ def _require_cuda_capability(name, description):
     available = hasattr(prog, name) and getattr(prog, name)()
     if available:
         return
-    message = (
-        f"CUDA {description} is unavailable. Native Tape coverage requires "
-        "a Toolkit-enabled runtime and its packaged CUDA runtime library."
-    )
+    message = f"CUDA {description} is unavailable. Native Tape coverage requires " "the corresponding runtime provider."
     if os.environ.get("TI_REQUIRE_CUDA_NATIVE_AD_CAPABILITIES") == "1":
         pytest.fail(message)
     pytest.skip(message)
@@ -41,14 +38,11 @@ def _native_copy_method_for_arch():
 def _native_reduce_method_for_arch():
     arch = impl.current_cfg().arch
     if arch == ti.cuda:
-        _require_cuda_capability("cuda_cub_reduce_available", "native reduce")
-        return "cuda_cub"
+        _require_cuda_capability("cuda_device_reduce_available", "native reduce")
+        return "cuda_device"
     if arch == ti.vulkan:
         prog = impl.get_runtime().prog
-        if not (
-            hasattr(prog, "vulkan_reduce_available")
-            and prog.vulkan_reduce_available()
-        ):
+        if not (hasattr(prog, "vulkan_reduce_available") and prog.vulkan_reduce_available()):
             pytest.skip("Vulkan native reduce is unavailable.")
         return "vulkan_native"
     return "cpu_native"
@@ -93,7 +87,7 @@ def _require_native_grouped_reduce_for_arch():
 
 def _require_native_scan_for_arch():
     if impl.current_cfg().arch == ti.cuda:
-        _require_cuda_capability("cuda_cub_scan_available", "native scan")
+        _require_cuda_capability("cuda_device_scan_available", "native scan")
 
 
 def test_native_autodiff_no_tape_keeps_method(monkeypatch):

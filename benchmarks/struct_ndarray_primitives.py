@@ -37,7 +37,7 @@ def _method_for(arch_name, primitive):
     if arch_name == "cuda":
         if primitive == "sort":
             return "cuda_cub_native"
-        if primitive in ("compact", "histogram", "reduce"):
+        if primitive == "compact":
             return "cuda_cub"
         return "cuda_device"
     if arch_name == "vulkan":
@@ -80,32 +80,20 @@ def _available(arch_name, primitive, method=None):
                     and hasattr(prog, "cpu_add_merge_available")
                     and prog.cpu_add_merge_available()
                 )
-            return (
-                hasattr(prog, "cpu_scatter_add_available")
-                and prog.cpu_scatter_add_available()
-            )
+            return hasattr(prog, "cpu_scatter_add_available") and prog.cpu_scatter_add_available()
         if primitive == "grouped_reduce":
-            return (
-                hasattr(prog, "cpu_grouped_reduce_available")
-                and prog.cpu_grouped_reduce_available()
-            )
+            return hasattr(prog, "cpu_grouped_reduce_available") and prog.cpu_grouped_reduce_available()
         if primitive == "histogram":
-            return (
-                hasattr(prog, "cpu_histogram_available")
-                and prog.cpu_histogram_available()
-            )
+            return hasattr(prog, "cpu_histogram_available") and prog.cpu_histogram_available()
     if arch_name == "cuda":
         if primitive == "transform":
-            return (
-                hasattr(prog, "cuda_toolkit_transform_available")
-                and prog.cuda_toolkit_transform_available()
-            )
+            return hasattr(prog, "cuda_device_transform_available") and prog.cuda_device_transform_available()
         if primitive == "sort":
             return (
                 hasattr(prog, "cuda_cub_radix_sort_available")
                 and prog.cuda_cub_radix_sort_available()
-                and hasattr(prog, "cuda_toolkit_transform_available")
-                and prog.cuda_toolkit_transform_available()
+                and hasattr(prog, "cuda_device_transform_available")
+                and prog.cuda_device_transform_available()
                 and hasattr(prog, "cuda_device_indexed_copy_available")
                 and prog.cuda_device_indexed_copy_available()
             )
@@ -126,17 +114,11 @@ def _available(arch_name, primitive, method=None):
                 and prog.cuda_device_indexed_copy_available()
             )
         if primitive in ("gather", "scatter"):
-            return (
-                hasattr(prog, "cuda_device_indexed_copy_available")
-                and prog.cuda_device_indexed_copy_available()
-            )
+            return hasattr(prog, "cuda_device_indexed_copy_available") and prog.cuda_device_indexed_copy_available()
         if primitive == "scan":
-            return hasattr(prog, "cuda_cub_scan_available") and prog.cuda_cub_scan_available()
+            return hasattr(prog, "cuda_device_scan_available") and prog.cuda_device_scan_available()
         if primitive == "reduce":
-            return (
-                hasattr(prog, "cuda_cub_reduce_available")
-                and prog.cuda_cub_reduce_available()
-            )
+            return hasattr(prog, "cuda_device_reduce_available") and prog.cuda_device_reduce_available()
         if primitive == "scatter_add":
             if method in ("two_level", "cuda_two_level"):
                 return (
@@ -145,26 +127,14 @@ def _available(arch_name, primitive, method=None):
                     and hasattr(prog, "cuda_device_add_merge_available")
                     and prog.cuda_device_add_merge_available()
                 )
-            return (
-                hasattr(prog, "cuda_device_scatter_add_available")
-                and prog.cuda_device_scatter_add_available()
-            )
+            return hasattr(prog, "cuda_device_scatter_add_available") and prog.cuda_device_scatter_add_available()
         if primitive == "grouped_reduce":
-            return (
-                hasattr(prog, "cuda_device_grouped_reduce_available")
-                and prog.cuda_device_grouped_reduce_available()
-            )
+            return hasattr(prog, "cuda_device_grouped_reduce_available") and prog.cuda_device_grouped_reduce_available()
         if primitive == "histogram":
-            return (
-                hasattr(prog, "cuda_cub_histogram_available")
-                and prog.cuda_cub_histogram_available()
-            )
+            return hasattr(prog, "cuda_device_histogram_available") and prog.cuda_device_histogram_available()
     if arch_name == "vulkan":
         if primitive == "transform":
-            return (
-                hasattr(prog, "vulkan_transform_available")
-                and prog.vulkan_transform_available()
-            )
+            return hasattr(prog, "vulkan_transform_available") and prog.vulkan_transform_available()
         if primitive == "sort":
             return (
                 hasattr(prog, "vulkan_radix_sort_available")
@@ -189,10 +159,7 @@ def _available(arch_name, primitive, method=None):
                 and prog.vulkan_indexed_copy_available()
             )
         if primitive in ("gather", "scatter"):
-            return (
-                hasattr(prog, "vulkan_indexed_copy_available")
-                and prog.vulkan_indexed_copy_available()
-            )
+            return hasattr(prog, "vulkan_indexed_copy_available") and prog.vulkan_indexed_copy_available()
         if primitive == "scan":
             return hasattr(prog, "vulkan_scan_available") and prog.vulkan_scan_available()
         if primitive == "reduce":
@@ -207,15 +174,9 @@ def _available(arch_name, primitive, method=None):
                     and hasattr(prog, "vulkan_transform_available")
                     and prog.vulkan_transform_available()
                 )
-            return (
-                hasattr(prog, "vulkan_scatter_add_available")
-                and prog.vulkan_scatter_add_available()
-            )
+            return hasattr(prog, "vulkan_scatter_add_available") and prog.vulkan_scatter_add_available()
         if primitive == "grouped_reduce":
-            return (
-                hasattr(prog, "vulkan_grouped_reduce_available")
-                and prog.vulkan_grouped_reduce_available()
-            )
+            return hasattr(prog, "vulkan_grouped_reduce_available") and prog.vulkan_grouped_reduce_available()
         if primitive == "histogram":
             return (
                 hasattr(prog, "vulkan_histogram_available")
@@ -232,11 +193,13 @@ def _runtime_workspace_peak(arch_name, primitive):
     if primitive == "scan":
         candidates = [
             f"{arch_name}_scan_workspace_bytes",
+            "cuda_device_scan_workspace_bytes",
             "cuda_cub_scan_workspace_bytes",
         ]
     elif primitive == "reduce":
         candidates = [
             f"{arch_name}_reduce_workspace_bytes",
+            "cuda_device_reduce_workspace_bytes",
             "cuda_cub_reduce_workspace_bytes",
         ]
     for name in candidates:

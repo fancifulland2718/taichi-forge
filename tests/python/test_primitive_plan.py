@@ -73,8 +73,8 @@ def _require_native_scan_for_current_arch():
     arch = impl.current_cfg().arch
     prog = impl.get_runtime().prog
     if arch == ti.cuda:
-        if not prog.cuda_cub_scan_available():
-            pytest.skip("CUDA CUB native scan is unavailable in this build/runtime.")
+        if not prog.cuda_device_scan_available():
+            pytest.skip("CUDA Driver scan is unavailable in this build/runtime.")
         return
     if arch == ti.vulkan:
         if not prog.vulkan_scan_available():
@@ -472,7 +472,6 @@ def test_prog_method_descriptor_cache_invokes_without_bound_lookup():
     )
     assert missing_plan.method_descriptor is None
     assert missing_plan.invoke(prog) is None
-
 
 
 @test_utils.test(arch=ti.cpu)

@@ -73,17 +73,11 @@ def _native_reduce_method_for_current_arch():
             pytest.skip("CPU native reduce is unavailable.")
         return "cpu_native", "cpu_reduce_dense_field"
     if arch == ti.cuda:
-        if not (
-            hasattr(prog, "cuda_cub_reduce_available")
-            and prog.cuda_cub_reduce_available()
-        ):
-            pytest.skip("CUDA CUB reduce is unavailable.")
-        return "cuda_cub", "cuda_cub_reduce_dense_field"
+        if not (hasattr(prog, "cuda_device_reduce_available") and prog.cuda_device_reduce_available()):
+            pytest.skip("CUDA Driver reduce is unavailable.")
+        return "cuda_device", "cuda_device_reduce_dense_field"
     if arch == ti.vulkan:
-        if not (
-            hasattr(prog, "vulkan_reduce_available")
-            and prog.vulkan_reduce_available()
-        ):
+        if not (hasattr(prog, "vulkan_reduce_available") and prog.vulkan_reduce_available()):
             pytest.skip("Vulkan native reduce is unavailable.")
         return "vulkan_native", "vulkan_reduce_dense_field"
     pytest.skip("native reduce is unavailable on this arch.")
@@ -185,6 +179,31 @@ def _run_struct_tensor_member_reduce_case(n, dtype, np_dtype, method, workspace)
         assert result["tag"][0] == out_host["tag"][0]
     assert len(workspace._native_reduce_plan_groups) >= 6
     assert np.array_equal(values.to_numpy()["tag"], host["tag"])
+
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_reduce_cuda_device_dtypes_and_storage():
+    n = 4096
+    prog = impl.get_runtime().prog
+    if not prog.cuda_device_reduce_available():
+        pytest.skip("CUDA Driver reduce is unavailable in this build/runtime.")
+
+    workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+    for dtype, np_dtype, _value_type in _REDUCE_DTYPE_CASES:
+        _run_ndarray_reduce_case(n, dtype, np_dtype, "cuda_device", workspace)
+        _run_struct_member_reduce_case(n, dtype, np_dtype, "cuda_device", workspace)
+        _run_dense_field_reduce_case(n, dtype, np_dtype, "cuda_device", workspace)
+    assert workspace.workspace_bytes_peak > 0
+    assert workspace._cuda_device_active
+    assert workspace._native_reduce_plan.backend == "cuda_device"
+
+
+@pytest.mark.parametrize("n", [1, 256, 257, 65537])
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_reduce_cuda_device_block_boundaries(n):
+    if not impl.get_runtime().prog.cuda_device_reduce_available():
+        pytest.skip("CUDA Driver reduce is unavailable in this build/runtime.")
+    workspace = ti.algorithms.ReduceWorkspace(max_items=n)
+    _run_ndarray_reduce_case(n, ti.i32, np.int32, "cuda_device", workspace)
 
 
 @test_utils.test(arch=[ti.cuda])

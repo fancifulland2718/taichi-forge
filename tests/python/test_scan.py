@@ -117,17 +117,11 @@ def _native_scan_method_for_current_arch():
             pytest.skip("CPU native scan is unavailable.")
         return "cpu_native", "cpu_inclusive_scan_dense_field_packed"
     if arch == ti.cuda:
-        if not (
-            hasattr(prog, "cuda_cub_scan_available")
-            and prog.cuda_cub_scan_available()
-        ):
-            pytest.skip("CUDA CUB scan is unavailable.")
-        return "cuda_cub", "cuda_cub_inclusive_scan_dense_field_packed"
+        if not (hasattr(prog, "cuda_device_scan_available") and prog.cuda_device_scan_available()):
+            pytest.skip("CUDA Driver scan is unavailable.")
+        return "cuda_device", "cuda_device_inclusive_scan_dense_field_packed"
     if arch == ti.vulkan:
-        if not (
-            hasattr(prog, "vulkan_scan_available")
-            and prog.vulkan_scan_available()
-        ):
+        if not (hasattr(prog, "vulkan_scan_available") and prog.vulkan_scan_available()):
             pytest.skip("Vulkan native scan is unavailable.")
         return "vulkan_native", "vulkan_inclusive_scan_dense_field_packed"
     pytest.skip("native scan is unavailable on this arch.")
@@ -214,14 +208,13 @@ def test_scan_with_offset(dtype, N, offset):
         cur_sum += arr_aux[i + offset]
         assert arr[i + offset] == cur_sum
 
-
 @test_utils.test(arch=[ti.cuda])
-def test_scan_ndarray_cuda_cub():
+def test_scan_ndarray_cuda_device():
     N = 4096
 
     prog = impl.get_runtime().prog
-    if not prog.cuda_cub_scan_available():
-        pytest.skip("CUDA CUB scan is unavailable in this build/runtime.")
+    if not prog.cuda_device_scan_available():
+        pytest.skip("CUDA Driver scan is unavailable in this build/runtime.")
     before = prog._primitive_workspace_stats()
 
     for dtype, np_dtype in _SCAN_DTYPES:
@@ -231,7 +224,7 @@ def test_scan_ndarray_cuda_cub():
         ti.algorithms.PrefixSumExecutor(N).run(arr)
         expected = np.cumsum(data, dtype=np_dtype).astype(np_dtype)
         _assert_scan_equal(arr.to_numpy(), expected)
-    workspace_bytes = prog.cuda_cub_scan_workspace_bytes()
+    workspace_bytes = prog.cuda_device_scan_workspace_bytes()
     after = prog._primitive_workspace_stats()
     assert workspace_bytes > 0
     assert after["entries"] >= before["entries"] + 1
@@ -240,27 +233,43 @@ def test_scan_ndarray_cuda_cub():
     assert after["active_leases"] == 0
 
 
+@pytest.mark.parametrize("N", [255, 256, 257, 65537])
 @test_utils.test(arch=[ti.cuda])
-def test_scan_cuda_cub_struct_member_view():
+def test_scan_ndarray_cuda_device_reverse_boundaries(N):
+    prog = impl.get_runtime().prog
+    if not prog.cuda_device_scan_available():
+        pytest.skip("CUDA Driver scan is unavailable in this build/runtime.")
+
+    for dtype, np_dtype in _SCAN_DTYPES:
+        arr = ti.ndarray(dtype, shape=N)
+        data = _scan_values(N, np_dtype)
+        arr.from_numpy(data)
+        prog.cuda_device_inclusive_reverse_scan_ndarray(arr.arr, _SCAN_VALUE_TYPE[dtype])
+        expected = np.cumsum(data[::-1], dtype=np_dtype)[::-1].astype(np_dtype)
+        _assert_scan_equal(arr.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_scan_cuda_device_struct_member_view():
     N = 4096
 
-    if not impl.get_runtime().prog.cuda_cub_scan_available():
-        pytest.skip("CUDA CUB scan is unavailable in this build/runtime.")
+    if not impl.get_runtime().prog.cuda_device_scan_available():
+        pytest.skip("CUDA Driver scan is unavailable in this build/runtime.")
 
     for dtype, np_dtype in _SCAN_DTYPES:
         _run_struct_member_scan_case(N, dtype, np_dtype)
-    assert impl.get_runtime().prog.cuda_cub_scan_workspace_bytes() > 0
+    assert impl.get_runtime().prog.cuda_device_scan_workspace_bytes() > 0
 
 
 @test_utils.test(arch=[ti.cuda])
-def test_scan_cuda_cub_struct_tensor_member_view():
+def test_scan_cuda_device_struct_tensor_member_view():
     N = 4096
 
-    if not impl.get_runtime().prog.cuda_cub_scan_available():
-        pytest.skip("CUDA CUB scan is unavailable in this build/runtime.")
+    if not impl.get_runtime().prog.cuda_device_scan_available():
+        pytest.skip("CUDA Driver scan is unavailable in this build/runtime.")
 
     _run_struct_tensor_member_scan_case(N)
-    assert impl.get_runtime().prog.cuda_cub_scan_workspace_bytes() > 0
+    assert impl.get_runtime().prog.cuda_device_scan_workspace_bytes() > 0
 
 
 @test_utils.test(arch=[ti.cpu])
@@ -344,13 +353,12 @@ def test_scan_dense_field_cpu_native_executor_replay():
 def test_scan_native_dense_matrix_field_packed():
     _run_dense_matrix_field_scan_case()
 
-
 @test_utils.test(arch=[ti.cuda])
-def test_scan_dense_field_cuda_cub():
+def test_scan_dense_field_cuda_device():
     N = 4096
 
-    if not impl.get_runtime().prog.cuda_cub_scan_available():
-        pytest.skip("CUDA CUB scan is unavailable in this build/runtime.")
+    if not impl.get_runtime().prog.cuda_device_scan_available():
+        pytest.skip("CUDA Driver scan is unavailable in this build/runtime.")
 
     for dtype, np_dtype in _SCAN_DTYPES:
         arr = ti.field(dtype, shape=N)
@@ -359,15 +367,15 @@ def test_scan_dense_field_cuda_cub():
         ti.algorithms.PrefixSumExecutor(N).run(arr)
         expected = np.cumsum(data, dtype=np_dtype).astype(np_dtype)
         _assert_scan_equal(arr.to_numpy(), expected)
-    assert impl.get_runtime().prog.cuda_cub_scan_workspace_bytes() > 0
+    assert impl.get_runtime().prog.cuda_device_scan_workspace_bytes() > 0
 
 
 @test_utils.test(arch=[ti.cuda])
-def test_scan_dense_field_cuda_cub_executor_replay():
+def test_scan_dense_field_cuda_device_executor_replay():
     N = 128
 
-    if not impl.get_runtime().prog.cuda_cub_scan_available():
-        pytest.skip("CUDA CUB scan is unavailable in this build/runtime.")
+    if not impl.get_runtime().prog.cuda_device_scan_available():
+        pytest.skip("CUDA Driver scan is unavailable in this build/runtime.")
 
     arr = ti.field(ti.i32, shape=N)
     executor = ti.algorithms.PrefixSumExecutor(N)
@@ -378,7 +386,7 @@ def test_scan_dense_field_cuda_cub_executor_replay():
         expected = np.cumsum(data, dtype=np.int32).astype(np.int32)
         _assert_scan_equal(arr.to_numpy(), expected)
     assert executor._native_scan_plan is not None
-    assert executor._native_scan_plan.backend == "cuda_cub"
+    assert executor._native_scan_plan.backend == "cuda_device"
 
 
 @test_utils.test(arch=[ti.cpu])

@@ -157,6 +157,32 @@ def test_experimental_histogram_field_atomic():
         else:
             assert workspace.workspace_bytes_peak == 0
 
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_histogram_cuda_device_storage_and_dtypes():
+    n = 8192
+    num_bins = 64
+    prog = impl.get_runtime().prog
+    if not prog.cuda_device_histogram_available():
+        pytest.skip("CUDA Driver histogram is unavailable in this build/runtime.")
+
+    workspace = ti.algorithms.HistogramWorkspace(max_items=n, max_bins=num_bins)
+    for dtype, np_dtype in _HISTOGRAM_DTYPES:
+        for bin_dtype, bin_np_dtype in _HISTOGRAM_BIN_DTYPES:
+            values = ti.ndarray(dtype, shape=n)
+            bins = ti.ndarray(bin_dtype, shape=num_bins)
+            for mode in range(3):
+                values_np = _histogram_values(n, num_bins, np_dtype, mode)
+                values.from_numpy(values_np)
+                ti.algorithms.experimental_histogram(values, bins, method="cuda_device", workspace=workspace)
+                assert np.array_equal(
+                    bins.to_numpy(),
+                    _histogram_expected(values_np, num_bins, bin_np_dtype),
+                )
+            _run_dense_field_histogram(dtype, np_dtype, bin_dtype, bin_np_dtype, "cuda_device")
+            _run_struct_member_histogram(dtype, np_dtype, bin_dtype, bin_np_dtype, "cuda_device")
+    assert workspace._cuda_device_active
+    assert workspace._native_histogram_plan.backend == "cuda_device"
+
 
 @test_utils.test(arch=[ti.cuda])
 def test_experimental_histogram_cuda_cub_ndarray():
@@ -175,27 +201,19 @@ def test_experimental_histogram_cuda_cub_ndarray():
                 values_np = _histogram_values(n, num_bins, np_dtype, mode)
                 values.from_numpy(values_np)
                 bins.from_numpy(np.full(num_bins, -1, dtype=bin_np_dtype))
-                ti.algorithms.experimental_histogram(
-                    values, bins, method="auto", workspace=workspace
-                )
+                ti.algorithms.experimental_histogram(values, bins, method="cuda_cub", workspace=workspace)
                 assert np.array_equal(
                     bins.to_numpy(),
                     _histogram_expected(values_np, num_bins, bin_np_dtype),
                 )
                 bins.from_numpy(np.full(num_bins, -1, dtype=bin_np_dtype))
-                ti.algorithms.experimental_histogram(
-                    values, bins, method="two_level", workspace=workspace
-                )
+                ti.algorithms.experimental_histogram(values, bins, method="two_level", workspace=workspace)
                 assert np.array_equal(
                     bins.to_numpy(),
                     _histogram_expected(values_np, num_bins, bin_np_dtype),
                 )
-            _run_dense_field_histogram(
-                dtype, np_dtype, bin_dtype, bin_np_dtype, "cuda_two_level"
-            )
-            _run_struct_member_histogram(
-                dtype, np_dtype, bin_dtype, bin_np_dtype, "cuda_two_level"
-            )
+            _run_dense_field_histogram(dtype, np_dtype, bin_dtype, bin_np_dtype, "cuda_two_level")
+            _run_struct_member_histogram(dtype, np_dtype, bin_dtype, bin_np_dtype, "cuda_two_level")
     assert workspace._cuda_cub_active
     assert workspace._native_histogram_plan is not None
 

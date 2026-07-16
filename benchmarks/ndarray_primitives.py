@@ -37,7 +37,7 @@ def _method_for(arch_name, primitive):
     if arch_name == "cuda":
         if primitive == "sort":
             return "cuda_cub_native"
-        if primitive in ("compact", "histogram", "reduce"):
+        if primitive == "compact":
             return "cuda_cub"
         return "cuda_device"
     if arch_name == "vulkan":
@@ -87,10 +87,7 @@ def _available(arch_name, primitive, method=None):
             return hasattr(prog, "cpu_histogram_available") and prog.cpu_histogram_available()
     if arch_name == "cuda":
         if primitive == "transform":
-            return (
-                hasattr(prog, "cuda_device_transform_available")
-                and prog.cuda_device_transform_available()
-            )
+            return hasattr(prog, "cuda_device_transform_available") and prog.cuda_device_transform_available()
         if primitive == "sort":
             return (
                 hasattr(prog, "cuda_cub_radix_sort_available")
@@ -115,9 +112,9 @@ def _available(arch_name, primitive, method=None):
         if primitive in ("gather", "scatter"):
             return hasattr(prog, "cuda_device_indexed_copy_available") and prog.cuda_device_indexed_copy_available()
         if primitive == "scan":
-            return hasattr(prog, "cuda_cub_scan_available") and prog.cuda_cub_scan_available()
+            return hasattr(prog, "cuda_device_scan_available") and prog.cuda_device_scan_available()
         if primitive == "reduce":
-            return hasattr(prog, "cuda_cub_reduce_available") and prog.cuda_cub_reduce_available()
+            return hasattr(prog, "cuda_device_reduce_available") and prog.cuda_device_reduce_available()
         if primitive == "scatter_add":
             if method in ("two_level", "cuda_two_level"):
                 return (
@@ -130,7 +127,7 @@ def _available(arch_name, primitive, method=None):
         if primitive == "grouped_reduce":
             return hasattr(prog, "cuda_device_grouped_reduce_available") and prog.cuda_device_grouped_reduce_available()
         if primitive == "histogram":
-            return hasattr(prog, "cuda_cub_histogram_available") and prog.cuda_cub_histogram_available()
+            return hasattr(prog, "cuda_device_histogram_available") and prog.cuda_device_histogram_available()
     if arch_name == "vulkan":
         if primitive == "transform":
             return hasattr(prog, "vulkan_transform_available") and prog.vulkan_transform_available()
@@ -181,9 +178,17 @@ def _runtime_workspace_peak(arch_name, primitive):
     prog = impl.get_runtime().prog
     candidates = []
     if primitive == "scan":
-        candidates = [f"{arch_name}_scan_workspace_bytes", "cuda_cub_scan_workspace_bytes"]
+        candidates = [
+            f"{arch_name}_scan_workspace_bytes",
+            "cuda_device_scan_workspace_bytes",
+            "cuda_cub_scan_workspace_bytes",
+        ]
     elif primitive == "reduce":
-        candidates = [f"{arch_name}_reduce_workspace_bytes", "cuda_cub_reduce_workspace_bytes"]
+        candidates = [
+            f"{arch_name}_reduce_workspace_bytes",
+            "cuda_device_reduce_workspace_bytes",
+            "cuda_cub_reduce_workspace_bytes",
+        ]
     for name in candidates:
         if hasattr(prog, name):
             return getattr(prog, name)()

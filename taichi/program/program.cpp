@@ -31,6 +31,7 @@
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/rhi/cuda/cuda_primitives.h"
+#include "taichi/rhi/cuda/primitives/hierarchical_ptx.h"
 #endif
 
 #ifdef TI_WITH_LLVM
@@ -10138,6 +10139,319 @@ std::size_t Program::cpu_stable_sort_dense_field(SNode *keys,
   }
 }
 
+bool Program::cuda_device_scan_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::driver_hierarchical_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_device_inclusive_scan_ndarray(Ndarray *data,
+                                                        int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver scan is only available on CUDA.");
+  TI_ERROR_IF(!data, "CUDA Driver scan received a null ndarray.");
+  TI_ERROR_IF(data->shape.size() != 1,
+              "CUDA Driver scan currently expects a 1D ndarray.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0 || data->get_element_size() != value_size,
+              "CUDA Driver scan dtype does not match its value type.");
+  TI_ERROR_IF(data->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver scan currently supports at most INT_MAX items.");
+  if (data->get_nelement() <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  auto *data_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(data));
+  return cuda::driver_inclusive_scan_strided(
+      data_ptr, static_cast<int>(data->get_nelement()),
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, value_size,
+      false, nullptr, &primitive_workspace_arena_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+std::size_t Program::cuda_device_inclusive_reverse_scan_ndarray(
+    Ndarray *data,
+    int value_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver reverse scan is only available on CUDA.");
+  TI_ERROR_IF(!data, "CUDA Driver reverse scan received a null ndarray.");
+  TI_ERROR_IF(data->shape.size() != 1,
+              "CUDA Driver reverse scan currently expects a 1D ndarray.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0 || data->get_element_size() != value_size,
+              "CUDA Driver reverse scan dtype does not match its value type.");
+  TI_ERROR_IF(data->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver reverse scan supports at most INT_MAX items.");
+  if (data->get_nelement() <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  auto *data_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(data));
+  return cuda::driver_inclusive_scan_strided(
+      data_ptr, static_cast<int>(data->get_nelement()),
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, value_size,
+      true, nullptr, &primitive_workspace_arena_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+std::size_t Program::cuda_device_inclusive_scan_member_ndarray(
+    Ndarray *data,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver strided scan is only available on CUDA.");
+  check_scan_member_request("CUDA Driver", data, value_type, offset, stride);
+  TI_ERROR_IF(data->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver strided scan supports at most INT_MAX items.");
+  if (data->get_nelement() <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  auto *data_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(data));
+  return cuda::driver_inclusive_scan_strided(
+      data_ptr, static_cast<int>(data->get_nelement()),
+      static_cast<cuda::CudaTransformValueType>(value_type), offset, stride,
+      false, nullptr, &primitive_workspace_arena_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+std::size_t Program::cuda_device_inclusive_reverse_scan_member_ndarray(
+    Ndarray *data,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver reverse strided scan is only available on CUDA.");
+  check_scan_member_request("CUDA Driver reverse", data, value_type, offset,
+                            stride);
+  TI_ERROR_IF(data->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver reverse strided scan supports at most INT_MAX "
+              "items.");
+  if (data->get_nelement() <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  auto *data_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(data));
+  return cuda::driver_inclusive_scan_strided(
+      data_ptr, static_cast<int>(data->get_nelement()),
+      static_cast<cuda::CudaTransformValueType>(value_type), offset, stride,
+      true, nullptr, &primitive_workspace_arena_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+std::size_t Program::cuda_device_inclusive_scan_dense_field(
+    SNode *data,
+    int value_type,
+    std::size_t n) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver dense field scan is only available on CUDA.");
+  TI_ERROR_IF(!data, "CUDA Driver scan received a null dense field.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver dense field scan supports at most INT_MAX items.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA Driver dense field scan received an unsupported type.");
+  const std::size_t stride = get_dense_field_stride(data, value_size);
+  TI_ERROR_IF(stride < value_size,
+              "CUDA Driver dense field scan received an invalid stride.");
+  if (n <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  DevicePtr device_ptr = get_dense_field_device_ptr(data);
+  DeviceAllocation allocation{device_ptr.device, device_ptr.alloc_id};
+  auto *base = program_impl_->get_device_alloc_info_ptr(allocation);
+  TI_ERROR_IF(!base,
+              "CUDA Driver dense field scan received a null data pointer.");
+  auto *data_ptr = reinterpret_cast<std::uint8_t *>(base) + device_ptr.offset;
+  return cuda::driver_inclusive_scan_strided(
+      data_ptr, static_cast<int>(n),
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, stride, false,
+      nullptr, &primitive_workspace_arena_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+std::size_t Program::cuda_device_inclusive_reverse_scan_dense_field(
+    SNode *data,
+    int value_type,
+    std::size_t n) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver reverse dense field scan is only available on "
+              "CUDA.");
+  TI_ERROR_IF(!data,
+              "CUDA Driver reverse scan received a null dense field.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver reverse dense field scan supports at most INT_MAX "
+              "items.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA Driver reverse dense field scan received an unsupported "
+              "type.");
+  const std::size_t stride = get_dense_field_stride(data, value_size);
+  TI_ERROR_IF(stride < value_size,
+              "CUDA Driver reverse dense field scan received an invalid "
+              "stride.");
+  if (n <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  DevicePtr device_ptr = get_dense_field_device_ptr(data);
+  DeviceAllocation allocation{device_ptr.device, device_ptr.alloc_id};
+  auto *base = program_impl_->get_device_alloc_info_ptr(allocation);
+  TI_ERROR_IF(!base,
+              "CUDA Driver reverse dense field scan received a null data "
+              "pointer.");
+  auto *data_ptr = reinterpret_cast<std::uint8_t *>(base) + device_ptr.offset;
+  return cuda::driver_inclusive_scan_strided(
+      data_ptr, static_cast<int>(n),
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, stride, true,
+      nullptr, &primitive_workspace_arena_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+std::size_t Program::cuda_device_inclusive_scan_dense_field_packed(
+    SNode *data,
+    int value_type,
+    std::size_t n,
+    int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver packed dense field scan is only available on "
+              "CUDA.");
+  TI_ERROR_IF(!data,
+              "CUDA Driver packed scan received a null dense field.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver packed scan supports at most INT_MAX items.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  const std::size_t item_bytes = dense_field_packed_bytes(
+      value_type, 1, lane_count, "CUDA Driver packed dense field scan");
+  check_dense_field_packed_stride(this, data, value_type, lane_count,
+                                  "CUDA Driver packed dense field scan");
+  if (n <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  DevicePtr device_ptr = get_dense_field_device_ptr(data);
+  DeviceAllocation allocation{device_ptr.device, device_ptr.alloc_id};
+  auto *base = program_impl_->get_device_alloc_info_ptr(allocation);
+  TI_ERROR_IF(!base,
+              "CUDA Driver packed scan received a null data pointer.");
+  auto *data_ptr = reinterpret_cast<std::uint8_t *>(base) + device_ptr.offset;
+  std::size_t workspace_bytes = 0;
+  for (int lane = 0; lane < lane_count; ++lane) {
+    workspace_bytes = std::max(
+        workspace_bytes,
+        cuda::driver_inclusive_scan_strided(
+            data_ptr, static_cast<int>(n),
+            static_cast<cuda::CudaTransformValueType>(value_type),
+            static_cast<std::size_t>(lane) * value_size, item_bytes, false,
+            nullptr, &primitive_workspace_arena_));
+  }
+  return workspace_bytes;
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+std::size_t Program::cuda_device_inclusive_reverse_scan_dense_field_packed(
+    SNode *data,
+    int value_type,
+    std::size_t n,
+    int lane_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver reverse packed dense field scan is only available "
+              "on CUDA.");
+  TI_ERROR_IF(!data,
+              "CUDA Driver reverse packed scan received a null field.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver reverse packed scan supports at most INT_MAX "
+              "items.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  const std::size_t item_bytes = dense_field_packed_bytes(
+      value_type, 1, lane_count,
+      "CUDA Driver reverse packed dense field scan");
+  check_dense_field_packed_stride(
+      this, data, value_type, lane_count,
+      "CUDA Driver reverse packed dense field scan");
+  if (n <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  DevicePtr device_ptr = get_dense_field_device_ptr(data);
+  DeviceAllocation allocation{device_ptr.device, device_ptr.alloc_id};
+  auto *base = program_impl_->get_device_alloc_info_ptr(allocation);
+  TI_ERROR_IF(!base,
+              "CUDA Driver reverse packed scan received a null data pointer.");
+  auto *data_ptr = reinterpret_cast<std::uint8_t *>(base) + device_ptr.offset;
+  std::size_t workspace_bytes = 0;
+  for (int lane = 0; lane < lane_count; ++lane) {
+    workspace_bytes = std::max(
+        workspace_bytes,
+        cuda::driver_inclusive_scan_strided(
+            data_ptr, static_cast<int>(n),
+            static_cast<cuda::CudaTransformValueType>(value_type),
+            static_cast<std::size_t>(lane) * value_size, item_bytes, true,
+            nullptr, &primitive_workspace_arena_));
+  }
+  return workspace_bytes;
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+void Program::cuda_device_scan_clear_workspace() {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::cuda,
+                                   PrimitiveWorkspaceFamily::scan);
+  }
+#endif
+}
+
+std::size_t Program::cuda_device_scan_workspace_bytes() const {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    return static_cast<std::size_t>(
+        primitive_workspace_arena_
+            .snapshot(PrimitiveWorkspaceBackend::cuda,
+                      PrimitiveWorkspaceFamily::scan)
+            .reserved_bytes);
+  }
+#endif
+  return 0;
+}
+
 bool Program::cuda_cub_scan_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&
@@ -10671,6 +10985,110 @@ std::size_t Program::cuda_cub_select_workspace_bytes() const {
   return 0;
 }
 
+bool Program::cuda_device_histogram_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::driver_hierarchical_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_device_histogram_ndarray(Ndarray *values,
+                                                   Ndarray *bins,
+                                                   int value_type,
+                                                   int bin_type) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver histogram is only available on CUDA.");
+  TI_ERROR_IF(!values || !bins,
+              "CUDA Driver histogram received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || bins->shape.size() != 1,
+              "CUDA Driver histogram currently expects 1D ndarrays.");
+  TI_ERROR_IF(value_type != 0 && value_type != 2,
+              "CUDA Driver histogram supports only i32/u32 bin ids.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  const std::size_t bin_size = histogram_bin_type_size(bin_type);
+  TI_ERROR_IF(bin_size == 0,
+              "CUDA Driver histogram supports only i32/i64 counters.");
+  TI_ERROR_IF(values->get_element_size() != value_size ||
+                  bins->get_element_size() != bin_size,
+              "CUDA Driver histogram received mismatched dtypes.");
+  TI_ERROR_IF(bins->get_nelement() == 0,
+              "CUDA Driver histogram expects at least one bin.");
+  TI_ERROR_IF(values->get_nelement() >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  bins->get_nelement() >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver histogram supports at most INT_MAX items/bins.");
+#ifdef TI_WITH_CUDA
+  auto *values_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
+  auto *bins_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(bins));
+  return cuda::driver_histogram_strided(
+      values_ptr, bins_ptr, static_cast<int>(values->get_nelement()),
+      static_cast<int>(bins->get_nelement()),
+      static_cast<cuda::CudaTransformValueType>(value_type),
+      static_cast<cuda::CudaTransformValueType>(bin_type), 0, value_size, 0,
+      bin_size, nullptr);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+std::size_t Program::cuda_device_histogram_dense_field(
+    SNode *values,
+    SNode *bins,
+    int value_type,
+    int bin_type,
+    std::size_t n,
+    std::size_t num_bins) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver dense field histogram is only available on CUDA.");
+  TI_ERROR_IF(!values || !bins,
+              "CUDA Driver dense field histogram received a null field.");
+  TI_ERROR_IF(value_type != 0 && value_type != 2,
+              "CUDA Driver histogram supports only i32/u32 bin ids.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  const std::size_t bin_size = histogram_bin_type_size(bin_type);
+  TI_ERROR_IF(bin_size == 0,
+              "CUDA Driver histogram supports only i32/i64 counters.");
+  TI_ERROR_IF(num_bins == 0,
+              "CUDA Driver histogram expects at least one bin.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  num_bins >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver histogram supports at most INT_MAX items/bins.");
+  const std::size_t value_stride =
+      get_dense_field_stride(values, value_size);
+  const std::size_t bin_stride = get_dense_field_stride(bins, bin_size);
+  TI_ERROR_IF(value_stride < value_size || bin_stride < bin_size,
+              "CUDA Driver histogram received an invalid field stride.");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.", op_name);
+    DeviceAllocation allocation{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(allocation);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<std::uint8_t *>(base) +
+                               ptr.offset);
+  };
+  void *values_ptr = raw_ptr(get_dense_field_device_ptr(values),
+                             "CUDA Driver dense field histogram");
+  void *bins_ptr = raw_ptr(get_dense_field_device_ptr(bins),
+                           "CUDA Driver dense field histogram");
+  return cuda::driver_histogram_strided(
+      values_ptr, bins_ptr, static_cast<int>(n), static_cast<int>(num_bins),
+      static_cast<cuda::CudaTransformValueType>(value_type),
+      static_cast<cuda::CudaTransformValueType>(bin_type), 0, value_stride, 0,
+      bin_stride, nullptr);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
 bool Program::cuda_cub_histogram_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda && cuda::cub_histogram_available();
@@ -10795,6 +11213,247 @@ std::size_t Program::cuda_cub_histogram_workspace_bytes() const {
   if (compile_config().arch == Arch::cuda) {
     return cuda::cub_histogram_cached_bytes(
         const_cast<PrimitiveWorkspaceArena *>(&primitive_workspace_arena_));
+  }
+#endif
+  return 0;
+}
+
+bool Program::cuda_device_reduce_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::driver_hierarchical_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_device_reduce_ndarray(Ndarray *values,
+                                                Ndarray *output,
+                                                int value_type,
+                                                int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver reduce is only available on CUDA.");
+  TI_ERROR_IF(!values || !output,
+              "CUDA Driver reduce received a null ndarray.");
+  TI_ERROR_IF(values->shape.size() != 1 || output->shape.size() != 1,
+              "CUDA Driver reduce currently expects 1D ndarrays.");
+  TI_ERROR_IF(values->get_nelement() == 0 || output->get_nelement() == 0,
+              "CUDA Driver reduce requires non-empty input/output.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0 || values->get_element_size() != value_size ||
+                  output->get_element_size() != value_size,
+              "CUDA Driver reduce received mismatched dtypes.");
+  TI_ERROR_IF(op < 0 || op > 2,
+              "CUDA Driver reduce received an unsupported operation.");
+  TI_ERROR_IF(values->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver reduce supports at most INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  auto *values_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
+  auto *output_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
+  return cuda::driver_reduce_strided(
+      values_ptr, output_ptr, static_cast<int>(values->get_nelement()),
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, value_size, 0,
+      value_size, static_cast<cuda::CudaHierarchicalReduceOp>(op), nullptr,
+      &primitive_workspace_arena_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+std::size_t Program::cuda_device_reduce_member_ndarray(
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t offset,
+    std::size_t stride,
+    int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver strided reduce is only available on CUDA.");
+  check_reduce_member_request("CUDA Driver", values, output, value_type,
+                              offset, stride, op);
+  TI_ERROR_IF(values->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver strided reduce supports at most INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  auto *values_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
+  auto *output_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
+  return cuda::driver_reduce_strided(
+      values_ptr, output_ptr, static_cast<int>(values->get_nelement()),
+      static_cast<cuda::CudaTransformValueType>(value_type), offset, stride, 0,
+      output->get_element_size(),
+      static_cast<cuda::CudaHierarchicalReduceOp>(op), nullptr,
+      &primitive_workspace_arena_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+std::size_t Program::cuda_device_reduce_strided_ndarray(
+    Ndarray *values,
+    Ndarray *output,
+    int value_type,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    std::size_t output_offset,
+    std::size_t output_stride,
+    int op) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver strided reduce is only available on CUDA.");
+  check_reduce_strided_request("CUDA Driver", values, output, value_type,
+                               values_offset, values_stride, output_offset,
+                               output_stride, op);
+  TI_ERROR_IF(values->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver strided reduce supports at most INT_MAX items.");
+#ifdef TI_WITH_CUDA
+  auto *values_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
+  auto *output_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
+  return cuda::driver_reduce_strided(
+      values_ptr, output_ptr, static_cast<int>(values->get_nelement()),
+      static_cast<cuda::CudaTransformValueType>(value_type), values_offset,
+      values_stride, output_offset, output_stride,
+      static_cast<cuda::CudaHierarchicalReduceOp>(op), nullptr,
+      &primitive_workspace_arena_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+std::size_t Program::cuda_device_reduce_dense_field(SNode *values,
+                                                    SNode *output,
+                                                    int value_type,
+                                                    std::size_t n,
+                                                    int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver dense field reduce is only available on CUDA.");
+  TI_ERROR_IF(!values || !output,
+              "CUDA Driver dense field reduce received a null field.");
+  TI_ERROR_IF(n == 0 ||
+                  n > static_cast<std::size_t>(
+                          std::numeric_limits<int>::max()),
+              "CUDA Driver dense field reduce requires 1..INT_MAX items.");
+  TI_ERROR_IF(op < 0 || op > 2,
+              "CUDA Driver dense field reduce received an unsupported op.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(value_size == 0,
+              "CUDA Driver dense field reduce received an unsupported type.");
+  const std::size_t values_stride =
+      get_dense_field_stride(values, value_size);
+  const std::size_t output_stride =
+      get_dense_field_stride(output, value_size);
+  TI_ERROR_IF(values_stride < value_size || output_stride < value_size,
+              "CUDA Driver dense field reduce received an invalid stride.");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.", op_name);
+    DeviceAllocation allocation{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(allocation);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return static_cast<void *>(reinterpret_cast<std::uint8_t *>(base) +
+                               ptr.offset);
+  };
+  void *values_ptr = raw_ptr(get_dense_field_device_ptr(values),
+                             "CUDA Driver dense field reduce");
+  void *output_ptr = raw_ptr(get_dense_field_device_ptr(output),
+                             "CUDA Driver dense field reduce");
+  return cuda::driver_reduce_strided(
+      values_ptr, output_ptr, static_cast<int>(n),
+      static_cast<cuda::CudaTransformValueType>(value_type), 0, values_stride,
+      0, output_stride, static_cast<cuda::CudaHierarchicalReduceOp>(op),
+      nullptr, &primitive_workspace_arena_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+std::size_t Program::cuda_device_reduce_dense_field_packed(
+    SNode *values,
+    SNode *output,
+    int value_type,
+    std::size_t n,
+    int lane_count,
+    int op) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver packed dense field reduce is only available on "
+              "CUDA.");
+  TI_ERROR_IF(!values || !output,
+              "CUDA Driver packed reduce received a null field.");
+  TI_ERROR_IF(n == 0 ||
+                  n > static_cast<std::size_t>(
+                          std::numeric_limits<int>::max()),
+              "CUDA Driver packed reduce requires 1..INT_MAX items.");
+  TI_ERROR_IF(op < 0 || op > 2,
+              "CUDA Driver packed reduce received an unsupported op.");
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  const std::size_t item_bytes = dense_field_packed_bytes(
+      value_type, 1, lane_count, "CUDA Driver packed dense field reduce");
+  check_dense_field_packed_stride(this, values, value_type, lane_count,
+                                  "CUDA Driver packed dense field reduce");
+  check_dense_field_packed_stride(this, output, value_type, lane_count,
+                                  "CUDA Driver packed dense field reduce");
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense field device.", op_name);
+    DeviceAllocation allocation{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(allocation);
+    TI_ERROR_IF(!base, "{} received a null dense field data pointer.",
+                op_name);
+    return reinterpret_cast<std::uint8_t *>(base) + ptr.offset;
+  };
+  auto *values_ptr = raw_ptr(get_dense_field_device_ptr(values),
+                             "CUDA Driver packed dense field reduce");
+  auto *output_ptr = raw_ptr(get_dense_field_device_ptr(output),
+                             "CUDA Driver packed dense field reduce");
+  std::size_t workspace_bytes = 0;
+  for (int lane = 0; lane < lane_count; ++lane) {
+    const std::size_t lane_offset =
+        static_cast<std::size_t>(lane) * value_size;
+    workspace_bytes = std::max(
+        workspace_bytes,
+        cuda::driver_reduce_strided(
+            values_ptr, output_ptr, static_cast<int>(n),
+            static_cast<cuda::CudaTransformValueType>(value_type), lane_offset,
+            item_bytes, lane_offset, item_bytes,
+            static_cast<cuda::CudaHierarchicalReduceOp>(op), nullptr,
+            &primitive_workspace_arena_));
+  }
+  return workspace_bytes;
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+void Program::cuda_device_reduce_clear_workspace() {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    clear_primitive_workspaces_for(PrimitiveWorkspaceBackend::cuda,
+                                   PrimitiveWorkspaceFamily::reduce);
+  }
+#endif
+}
+
+std::size_t Program::cuda_device_reduce_workspace_bytes() const {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    return static_cast<std::size_t>(
+        primitive_workspace_arena_
+            .snapshot(PrimitiveWorkspaceBackend::cuda,
+                      PrimitiveWorkspaceFamily::reduce)
+            .reserved_bytes);
   }
 #endif
   return 0;

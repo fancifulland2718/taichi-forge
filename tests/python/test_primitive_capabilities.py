@@ -42,9 +42,7 @@ def test_static_primitive_capability_catalog_is_complete_and_immutable():
 
     assert tuple(capability.name for capability in capabilities) == _FAMILIES
     assert all(
-        capability.schema_version
-        == ti.algorithms.PRIMITIVE_CAPABILITY_SCHEMA_VERSION
-        == 2
+        capability.schema_version == ti.algorithms.PRIMITIVE_CAPABILITY_SCHEMA_VERSION == 2
         for capability in capabilities
     )
     assert all(capability.dtypes for capability in capabilities)
@@ -61,50 +59,25 @@ def test_static_primitive_capability_catalog_is_complete_and_immutable():
         "cuda_toolkit_runtime",
     )
     methods_by_family = {
-        capability.name: {method.name: method for method in capability.methods}
-        for capability in capabilities
+        capability.name: {method.name: method for method in capability.methods} for capability in capabilities
     }
-    assert (
-        methods_by_family["scan"]["cuda_cub"].dependency_class
-        == "cuda_toolkit_runtime"
-    )
-    assert (
-        methods_by_family["transform"]["cuda_device"].dependency_class
-        == "cuda_driver"
-    )
+    assert methods_by_family["scan"]["cuda_cub"].dependency_class == "cuda_toolkit_runtime"
+    for family in ("scan", "reduce", "histogram"):
+        assert methods_by_family[family]["cuda_device"].dependency_class == "cuda_driver"
+        assert methods_by_family[family]["cuda_cub"].dependency_class == "cuda_toolkit_runtime"
+    assert methods_by_family["transform"]["cuda_device"].dependency_class == "cuda_driver"
     for family in ("gather", "scatter"):
-        assert (
-            methods_by_family[family]["cuda_device"].dependency_class
-            == "cuda_driver"
-        )
+        assert methods_by_family[family]["cuda_device"].dependency_class == "cuda_driver"
     for family in ("check", "metric"):
-        assert (
-            methods_by_family[family]["cuda_device"].dependency_class
-            == "cuda_driver"
-        )
-        assert (
-            methods_by_family[family]["cuda_cub"].dependency_class
-            == "cuda_toolkit_runtime"
-        )
-    assert (
-        methods_by_family["bucket_builder"]["cuda_device"].dependency_class
-        == "cuda_toolkit_runtime"
-    )
-    assert (
-        methods_by_family["reduce"]["cpu_native"].dependency_class == "none"
-    )
-    assert methods_by_family["reduce"]["auto"].dependency_class == (
-        "selected_provider"
-    )
+        assert methods_by_family[family]["cuda_device"].dependency_class == "cuda_driver"
+        assert methods_by_family[family]["cuda_cub"].dependency_class == "cuda_toolkit_runtime"
+    assert methods_by_family["bucket_builder"]["cuda_device"].dependency_class == "cuda_toolkit_runtime"
+    assert methods_by_family["reduce"]["cpu_native"].dependency_class == "none"
+    assert methods_by_family["reduce"]["auto"].dependency_class == ("selected_provider")
     assert all(capability.ad.primal == "supported" for capability in capabilities)
-    assert all(
-        capability.aot == "unsupported_for_native_nodes"
-        for capability in capabilities
-    )
+    assert all(capability.aot == "unsupported_for_native_nodes" for capability in capabilities)
 
-    reduce_capability = ti.algorithms.primitive_capability(
-        "ti.algorithms.experimental_reduce()"
-    )
+    reduce_capability = ti.algorithms.primitive_capability("ti.algorithms.experimental_reduce()")
     assert reduce_capability.name == "reduce"
     assert reduce_capability.ad.differentiable_ops == ("sum",)
     assert tuple(operand.name for operand in reduce_capability.operands) == (
@@ -119,47 +92,22 @@ def test_static_primitive_capability_catalog_is_complete_and_immutable():
     scatter = ti.algorithms.primitive_capability("scatter")
     assert "unique" in scatter.operands[1].constraints
     assert ti.algorithms.primitive_capability("scan").ad.forward_ad == "unsupported"
-    assert (
-        ti.algorithms.primitive_capability("grouped_reduce").ad.forward_ad
-        == "unsupported"
-    )
-    assert (
-        ti.algorithms.primitive_capability("sort_by_key")
-        is ti.algorithms.primitive_capability("sort")
-    )
+    assert ti.algorithms.primitive_capability("grouped_reduce").ad.forward_ad == "unsupported"
+    assert ti.algorithms.primitive_capability("sort_by_key") is ti.algorithms.primitive_capability("sort")
     rle = ti.algorithms.primitive_capability("experimental_run_length_encode")
     assert rle.stability == "stable_consecutive_run_order"
     assert "host_read_synchronizes" in rle.operands[-1].constraints
-    assert (
-        ti.algorithms.primitive_capability("experimental_unique").ad.forward_ad
-        == "not_differentiable"
-    )
+    assert ti.algorithms.primitive_capability("experimental_unique").ad.forward_ad == "not_differentiable"
     unique_by_key = ti.algorithms.primitive_capability("unique_by_key")
-    assert (
-        "matrix_field_payload_i32_only"
-        in unique_by_key.operands[1].constraints
-    )
-    segmented_reduce = ti.algorithms.primitive_capability(
-        "experimental_segmented_reduce"
-    )
+    assert "matrix_field_payload_i32_only" in unique_by_key.operands[1].constraints
+    segmented_reduce = ti.algorithms.primitive_capability("experimental_segmented_reduce")
     assert segmented_reduce.graph_replay == "primitive_sequence_native_node"
-    assert (
-        "host_validated_at_construction"
-        in segmented_reduce.operands[1].constraints
-    )
+    assert "host_validated_at_construction" in segmented_reduce.operands[1].constraints
     assert segmented_reduce.ad.forward_ad == "unsupported"
     assert segmented_reduce.ad.reverse_ad == "grouped_ndarray_only"
     assert segmented_reduce.ad.fallback_method is None
-    assert (
-        ti.algorithms.primitive_capability(
-            "experimental_segmented_scan"
-        ).ad.reverse_ad
-        == "not_differentiable"
-    )
-    sort_methods = {
-        method.name: method
-        for method in ti.algorithms.primitive_capability("sort").methods
-    }
+    assert ti.algorithms.primitive_capability("experimental_segmented_scan").ad.reverse_ad == "not_differentiable"
+    sort_methods = {method.name: method for method in ti.algorithms.primitive_capability("sort").methods}
     assert sort_methods["radix_u32"].backends == ("cuda", "vulkan")
     assert sort_methods["vulkan_graph_radix_u32"].provider_probes == ()
     assert sort_methods["vulkan_graph_radix_u32"].implementation == "composite"

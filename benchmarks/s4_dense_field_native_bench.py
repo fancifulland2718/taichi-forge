@@ -84,7 +84,7 @@ def _method_for(arch_name: str, op_name: str) -> str:
     if arch_name == "cpu":
         return "cpu_native"
     if arch_name == "cuda":
-        return "cuda_cub" if op_name in ("reduce", "histogram") else "cuda_device"
+        return "cuda_device"
     if arch_name == "vulkan":
         return "vulkan_native"
     raise ValueError(arch_name)

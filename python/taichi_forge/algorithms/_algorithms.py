@@ -25,6 +25,8 @@ from taichi_forge.algorithms._primitive_capabilities import (
     supported_primitive_methods,
 )
 from taichi_forge._kernels import (
+    add_ndarray_to_ndarray,
+    add_scalar_field_to_dense_field,
     blit_from_field_to_field,
     bucket_copy_offsets_to_cursor_field,
     bucket_copy_offsets_to_cursor_ndarray,
@@ -237,6 +239,9 @@ _NATIVE_PRIMITIVE_PROG_METHOD_TOKENS = (
 )
 _NATIVE_PRIMITIVE_AVAILABLE_BY_ARCH = {
     cuda: (
+        "cuda_device_histogram_available",
+        "cuda_device_reduce_available",
+        "cuda_device_scan_available",
         "cuda_cub_histogram_available",
         "cuda_cub_radix_sort_available",
         "cuda_cub_check_count_available",
@@ -2792,6 +2797,19 @@ def _ad_native_accum(src, dst, n):
     method = _native_add_merge_method_for_current_arch()
     if _try_native_add_merge(src, dst, method, workspace, value_type, n):
         return
+    src_view = _primitive_view(src)
+    dst_view = _primitive_view(dst)
+    if (
+        src_view is not None
+        and dst_view is not None
+        and src_view.is_plain_ndarray
+        and dst_view.is_plain_ndarray
+        and src_view.dtype == dst_view.dtype
+        and _shape_tuple(src) == _shape_tuple(dst)
+        and int(_shape_numel(src)) == int(n)
+    ):
+        add_ndarray_to_ndarray(src, dst, n)
+        return
     if not _ad_native_identity_scatter_supported(src, dst):
         raise RuntimeError(
             "native autodiff accumulation requires a supported native "
@@ -3464,7 +3482,7 @@ def _native_ad_scatter_backward(src, indices, dst):
 def _native_scan_ad_backend_label():
     arch = current_cfg().arch
     if arch == cuda:
-        return "cuda_cub"
+        return "cuda_device"
     if arch == vulkan:
         return "vulkan_native"
     if arch in (x64, arm64):
@@ -3538,9 +3556,9 @@ def _native_ad_scan_backward(input_arr):
         prog = impl.get_runtime().prog
         arch = current_cfg().arch
         if arch == cuda:
-            if not _prog_available(prog, "cuda_cub_scan_available"):
+            if not _prog_available(prog, "cuda_device_scan_available"):
                 return
-            method_name = "cuda_cub_inclusive_reverse_scan_dense_field_packed"
+            method_name = "cuda_device_inclusive_reverse_scan_dense_field_packed"
         elif arch == vulkan:
             if not _prog_available(prog, "vulkan_scan_available"):
                 return
@@ -3575,16 +3593,16 @@ def _native_ad_scan_backward(input_arr):
     prog = impl.get_runtime().prog
     arch = current_cfg().arch
     if arch == cuda:
-        if not _prog_available(prog, "cuda_cub_scan_available"):
+        if not _prog_available(prog, "cuda_device_scan_available"):
             return
         if view.is_dense_field:
-            method_name = "cuda_cub_inclusive_reverse_scan_dense_field"
+            method_name = "cuda_device_inclusive_reverse_scan_dense_field"
             call_args = (view.snode, value_type, view.num_elements)
         elif view.is_struct_scalar_member:
-            method_name = "cuda_cub_inclusive_reverse_scan_member_ndarray"
+            method_name = "cuda_device_inclusive_reverse_scan_member_ndarray"
             call_args = (view.payload_arr, value_type, view.offset, view.stride)
         else:
-            method_name = "cuda_cub_inclusive_reverse_scan_ndarray"
+            method_name = "cuda_device_inclusive_reverse_scan_ndarray"
             call_args = (view.payload_arr, value_type)
     elif arch == vulkan:
         if not _prog_available(prog, "vulkan_scan_available"):
@@ -3664,6 +3682,9 @@ def _native_ad_reduce_backward(values, output):
         return
     n = values_grad.shape[0]
     if _ad_native_scalar_to_dense_accum(output_grad, values_grad, n):
+        return
+    if _ad_native_scalar_to_dense_supported(output_grad, values_grad, n):
+        add_scalar_field_to_dense_field(output_grad, values_grad, n)
         return
     if _ad_native_scalar_to_ndarray_accum(output_grad, values_grad, n):
         return
@@ -4723,8 +4744,8 @@ class SegmentedWorkspace:
 class ReduceWorkspace:
     """Workspace for experimental reductions.
 
-    CUDA ndarray fast path uses CUB DeviceReduce. Field/SNode fallback stays in
-    Forge kernels to preserve layout and offset semantics.
+    CUDA production paths use the Driver-only Forge provider. Explicit
+    ``cuda_cub`` remains a Toolkit reference path.
     """
 
     def __init__(self, max_items=None, cache_native_plans=True):
@@ -4733,6 +4754,7 @@ class ReduceWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._field_buffers = {}
+        self._cuda_device_active = False
         self._cuda_cub_active = False
         self._vulkan_native_active = False
         self._native_reduce_plan = None
@@ -4741,19 +4763,31 @@ class ReduceWorkspace:
         self._native_reduce_plan_groups = {}
 
     def clear(self):
+        if self._cuda_device_active:
+            from taichi_forge.lang import (
+                impl,
+            )  # pylint: disable=import-outside-toplevel
+
+            prog = impl.get_runtime().prog
+            _call_optional_prog_method(prog, "cuda_device_reduce_clear_workspace")
         if self._cuda_cub_active:
-            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+            from taichi_forge.lang import (
+                impl,
+            )  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
             _call_optional_prog_method(prog, "cuda_cub_reduce_clear_workspace")
         if self._vulkan_native_active:
-            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+            from taichi_forge.lang import (
+                impl,
+            )  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
             _call_optional_prog_method(prog, "vulkan_reduce_clear_workspace")
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._field_buffers.clear()
+        self._cuda_device_active = False
         self._cuda_cub_active = False
         self._vulkan_native_active = False
         self._native_reduce_plan = None
@@ -4769,7 +4803,9 @@ class ReduceWorkspace:
 
     def _native_reduce_backend_for_method(self, method):
         arch = current_cfg().arch
-        if arch == cuda and method in ("auto", "cuda_cub"):
+        if arch == cuda and method in ("auto", "cuda_device"):
+            return "cuda_device"
+        if arch == cuda and method == "cuda_cub":
             return "cuda_cub"
         if arch == vulkan and method in ("auto", "vulkan_native"):
             return "vulkan_native"
@@ -4779,7 +4815,9 @@ class ReduceWorkspace:
 
     def _mark_native_reduce_backend_active(self, backend, temp_bytes):
         temp_bytes = 0 if temp_bytes is None else temp_bytes
-        if backend == "cuda_cub":
+        if backend == "cuda_device":
+            self._cuda_device_active = True
+        elif backend == "cuda_cub":
             self._cuda_cub_active = True
         elif backend == "vulkan_native":
             self._vulkan_native_active = True
@@ -5703,7 +5741,8 @@ check = _DeviceCheckNamespace()
 class HistogramWorkspace:
     """Workspace for experimental fixed-bin histogram.
 
-    CUDA ndarray fast path uses CUB DeviceHistogram. Vulkan ndarray fast path
+    CUDA production paths use the Driver-only Forge provider; explicit
+    ``cuda_cub`` remains a Toolkit reference path. Vulkan ndarray fast path
     uses native compute shaders. Field fallback uses Forge kernels, selecting a
     zero-workspace direct path for small inputs and a chunk-private path for
     larger fixed-bin histograms.
@@ -5715,6 +5754,7 @@ class HistogramWorkspace:
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._field_buffers = {}
+        self._cuda_device_active = False
         self._cuda_cub_active = False
         self._vulkan_native_active = False
         self._native_histogram_plan = None
@@ -5725,19 +5765,25 @@ class HistogramWorkspace:
         self._staged_member_transform_workspace = None
 
     def clear(self):
+        self._cuda_device_active = False
         if self._cuda_cub_active:
-            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+            from taichi_forge.lang import (
+                impl,
+            )  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
             _call_optional_prog_method(prog, "cuda_cub_histogram_clear_workspace")
         if self._vulkan_native_active:
-            from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+            from taichi_forge.lang import (
+                impl,
+            )  # pylint: disable=import-outside-toplevel
 
             prog = impl.get_runtime().prog
             _call_optional_prog_method(prog, "vulkan_histogram_clear_workspace")
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._field_buffers.clear()
+        self._cuda_device_active = False
         self._cuda_cub_active = False
         self._vulkan_native_active = False
         self._native_histogram_plan = None
@@ -5779,6 +5825,11 @@ class HistogramWorkspace:
         return self._field_buffers[key]
 
     def _native_histogram_backend_for_method(self, method):
+        if current_cfg().arch == cuda:
+            if method in ("auto", "cuda_device"):
+                return "cuda_device"
+            if method in ("cuda_cub", "cuda_two_level"):
+                return "cuda_cub"
         backend = _aggregation_backend_for_method(
             method,
             cuda_native=("cuda_cub",),
@@ -5798,7 +5849,9 @@ class HistogramWorkspace:
 
     def _mark_native_histogram_backend_active(self, backend, temp_bytes):
         temp_bytes = 0 if temp_bytes is None else temp_bytes
-        if backend == "cuda_cub":
+        if backend == "cuda_device":
+            self._cuda_device_active = True
+        elif backend == "cuda_cub":
             self._cuda_cub_active = True
         if backend == "vulkan_native":
             self._vulkan_native_active = True
@@ -9936,7 +9989,7 @@ def _check_reduce_request(values, output, op, method, workspace):
         and output_view is not None
         and values_view.is_dense_field
         and output_view.is_scalar_field
-        and method in ("auto", "cuda_cub", "vulkan_native", "cpu_native")
+        and method in ("auto", "cuda_device", "cuda_cub", "vulkan_native", "cpu_native")
     )
     if (
         isinstance(values, Ndarray)
@@ -9960,7 +10013,9 @@ def _check_reduce_request(values, output, op, method, workspace):
                 "experimental_reduce() ndarray mode currently supports ti.u32, "
                 "ti.i32, ti.f32, ti.u64, ti.i64, and ti.f64."
             )
-        raise TypeError("experimental_reduce() field mode currently supports ti.i32 and ti.f32.")
+        raise TypeError(
+            "experimental_reduce() field mode currently supports ti.i32 and ti.f32."
+        )
     if output.dtype != values.dtype:
         raise TypeError("experimental_reduce() values and output dtype must match.")
     if (
@@ -10020,11 +10075,12 @@ def _try_native_dense_matrix_field_reduce(values, output, op, method, workspace)
 
     impl.get_runtime().materialize()
     prog = impl.get_runtime().prog
-    if arch == cuda and method in ("auto", "cuda_cub"):
-        backend = "cuda_cub"
-        if not _prog_available(prog, "cuda_cub_reduce_available"):
+    if arch == cuda and method in ("auto", "cuda_device", "cuda_cub"):
+        backend = "cuda_cub" if method == "cuda_cub" else "cuda_device"
+        prefix = "cuda_cub" if backend == "cuda_cub" else "cuda_device"
+        if not _prog_available(prog, f"{prefix}_reduce_available"):
             return False
-        method_name = "cuda_cub_reduce_dense_field_packed"
+        method_name = f"{prefix}_reduce_dense_field_packed"
     elif arch == vulkan and method in ("auto", "vulkan_native"):
         backend = "vulkan_native"
         if not _prog_available(prog, "vulkan_reduce_available"):
@@ -10073,10 +10129,13 @@ def _try_native_dense_matrix_field_reduce(values, output, op, method, workspace)
         workspace._mark_native_reduce_backend_active(backend, temp_bytes)
     return True
 
-
-def _try_cuda_cub_reduce(values, output, op, workspace):
+def _try_cuda_reduce_provider(values, output, op, workspace, backend):
     if current_cfg().arch != cuda:
         return False
+    if backend not in ("cuda_device", "cuda_cub"):
+        raise ValueError(f"unsupported CUDA reduce provider: {backend}")
+    prefix = "cuda_device" if backend == "cuda_device" else "cuda_cub"
+    available_name = f"{prefix}_reduce_available"
     values_view = _primitive_view(values)
     output_view = _primitive_view(output)
     if (
@@ -10089,9 +10148,10 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
 
         impl.get_runtime().materialize()
         prog = impl.get_runtime().prog
-        if not _prog_available(prog, "cuda_cub_reduce_available"):
+        if not _prog_available(prog, available_name):
             return False
-        method = _prog_method(prog, "cuda_cub_reduce_dense_field")
+        method_name = f"{prefix}_reduce_dense_field"
+        method = _prog_method(prog, method_name)
         if method is None:
             return False
         temp_bytes = method(
@@ -10105,8 +10165,8 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
             value_type = _reduce_value_type(values_view.dtype)
             op_id = _SUPPORTED_REDUCE_OPS[op]
             workspace._record_native_reduce_plan(
-                "cuda_cub",
-                "cuda_cub_reduce_dense_field",
+                backend,
+                method_name,
                 values,
                 output,
                 value_type,
@@ -10121,7 +10181,7 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
                 values_view.num_elements,
                 prog,
             )
-            workspace._mark_native_reduce_backend_active("cuda_cub", temp_bytes)
+            workspace._mark_native_reduce_backend_active(backend, temp_bytes)
         return True
     values_is_member = _is_struct_scalar_member_view(values)
     output_is_member = _is_struct_scalar_member_view(output)
@@ -10134,9 +10194,10 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         prog = impl.get_runtime().prog
-        if not _prog_available(prog, "cuda_cub_reduce_available"):
+        if not _prog_available(prog, available_name):
             return False
-        method = _prog_method(prog, "cuda_cub_reduce_strided_ndarray")
+        method_name = f"{prefix}_reduce_strided_ndarray"
+        method = _prog_method(prog, method_name)
         if method is None:
             return False
         values_arr, values_offset, values_stride = _scalar_ndarray_payload(values)
@@ -10153,8 +10214,8 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
         )
         if workspace is not None:
             workspace._record_native_reduce_plan(
-                "cuda_cub",
-                "cuda_cub_reduce_strided_ndarray",
+                backend,
+                method_name,
                 values,
                 output,
                 _reduce_value_type(values.dtype),
@@ -10172,25 +10233,29 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
                 values.shape[0],
                 prog,
             )
-            workspace._mark_native_reduce_backend_active("cuda_cub", temp_bytes)
+            workspace._mark_native_reduce_backend_active(backend, temp_bytes)
         return True
     if not (isinstance(values, Ndarray) and isinstance(output, Ndarray)):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not _prog_available(prog, "cuda_cub_reduce_available"):
+    if not _prog_available(prog, available_name):
         return False
-    method = _prog_method(prog, "cuda_cub_reduce_ndarray")
+    method_name = f"{prefix}_reduce_ndarray"
+    method = _prog_method(prog, method_name)
     if method is None:
         return False
     temp_bytes = method(
-        values.arr, output.arr, _reduce_value_type(values.dtype), _SUPPORTED_REDUCE_OPS[op]
+        values.arr,
+        output.arr,
+        _reduce_value_type(values.dtype),
+        _SUPPORTED_REDUCE_OPS[op],
     )
     if workspace is not None:
         workspace._record_native_reduce_plan(
-            "cuda_cub",
-            "cuda_cub_reduce_ndarray",
+            backend,
+            method_name,
             values,
             output,
             _reduce_value_type(values.dtype),
@@ -10204,8 +10269,16 @@ def _try_cuda_cub_reduce(values, output, op, workspace):
             values.shape[0],
             prog,
         )
-        workspace._mark_native_reduce_backend_active("cuda_cub", temp_bytes)
+        workspace._mark_native_reduce_backend_active(backend, temp_bytes)
     return True
+
+
+def _try_cuda_device_reduce(values, output, op, workspace):
+    return _try_cuda_reduce_provider(values, output, op, workspace, "cuda_device")
+
+
+def _try_cuda_cub_reduce(values, output, op, workspace):
+    return _try_cuda_reduce_provider(values, output, op, workspace, "cuda_cub")
 
 
 def _try_vulkan_reduce(values, output, op, workspace):
@@ -10531,8 +10604,9 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
     """Reduce a 1D array into a scalar output.
 
     This experimental primitive currently supports ``sum``, ``min``, and
-    ``max`` for u32/i32/f32/u64/i64/f64 ndarray values. CUDA ndarray input
-    uses CUB DeviceReduce when available. Vulkan ndarray input uses native
+    ``max`` for u32/i32/f32/u64/i64/f64 ndarray values. CUDA uses the
+    Driver-only Forge provider; ``cuda_cub`` is an explicit reference path.
+    Vulkan ndarray input uses native
     compute shaders for supported device types. CPU ndarray input uses a host
     native path. Field/SNode fallback stays in Forge kernels and currently
     supports i32/f32.
@@ -10607,7 +10681,9 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
         return workspace
 
     if _is_struct_tensor_member_view(values) or _is_struct_tensor_member_view(output):
-        _check_matching_struct_tensor_member_views("experimental_reduce()", values, output)
+        _check_matching_struct_tensor_member_views(
+            "experimental_reduce()", values, output
+        )
         if values.shape[0] <= 0:
             raise ValueError("experimental_reduce() expects at least one input item.")
         if output.shape[0] < 1:
@@ -10667,14 +10743,22 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
             lambda: ReduceWorkspace(max_items=values.shape[0]),
         )
     workspace.check_shape(values.shape[0])
-    if _default_workspace_replay_enabled(workspace, "reduce") and workspace._try_native_reduce_plan(
-        values, output, op, method
-    ):
+    if _default_workspace_replay_enabled(
+        workspace, "reduce"
+    ) and workspace._try_native_reduce_plan(values, output, op, method):
         _record_native_reduce_ad(values, output, op)
         return workspace
-    if method in ("auto", "cuda_cub") and _try_cuda_cub_reduce(
+    if method in ("auto", "cuda_device") and _try_cuda_device_reduce(
         values, output, op, workspace
     ):
+        _record_native_reduce_ad(values, output, op)
+        return
+    if method == "cuda_device":
+        raise RuntimeError(
+            "method='cuda_device' requires CUDA ndarray or dense field inputs "
+            "and the Driver-only reduce provider."
+        )
+    if method == "cuda_cub" and _try_cuda_cub_reduce(values, output, op, workspace):
         _record_native_reduce_ad(values, output, op)
         return
     if method == "cuda_cub":
@@ -10713,9 +10797,7 @@ def experimental_reduce(values, output, *, op="sum", method="auto", workspace=No
             "an available native CPU/CUDA/Vulkan reduce fast path."
         )
     if _should_record_legacy_helper_fallback(method):
-        _record_legacy_helper_fallback(
-            "experimental_reduce()", method, "field_atomic"
-        )
+        _record_legacy_helper_fallback("experimental_reduce()", method, "field_atomic")
     _reduce_field_atomic(values, output, op, workspace)
 
 
@@ -10807,10 +10889,12 @@ def _dense_histogram_fields_are_contiguous(values_view, bins_view):
         and bins_view.stride == _dtype_nbytes(bins_view.dtype)
     )
 
-
-def _try_cuda_cub_histogram(values, bins, workspace):
+def _try_cuda_histogram_provider(values, bins, workspace, backend):
     if current_cfg().arch != cuda:
         return False
+    if backend not in ("cuda_device", "cuda_cub"):
+        raise ValueError(f"unsupported CUDA histogram provider: {backend}")
+    prefix = "cuda_device" if backend == "cuda_device" else "cuda_cub"
     values_view = _primitive_view(values)
     bins_view = _primitive_view(bins)
     dense_field_mode = (
@@ -10820,25 +10904,26 @@ def _try_cuda_cub_histogram(values, bins, workspace):
         and bins_view.is_dense_field
     )
     if not (
-        (isinstance(values, Ndarray) and isinstance(bins, Ndarray))
-        or dense_field_mode
+        (isinstance(values, Ndarray) and isinstance(bins, Ndarray)) or dense_field_mode
     ):
         return False
     from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
     prog = impl.get_runtime().prog
-    if not _prog_available(prog, "cuda_cub_histogram_available"):
+    if not _prog_available(prog, f"{prefix}_histogram_available"):
         return False
     value_type = _histogram_value_type(values.dtype)
     bin_type = _histogram_bin_type(bins.dtype)
     if workspace is not None and workspace._try_native_histogram_plan(
-        values, bins, "cuda_two_level", value_type, bin_type
+        values, bins, backend, value_type, bin_type
     ):
         return True
     if dense_field_mode:
-        if not _dense_histogram_fields_are_contiguous(values_view, bins_view):
+        if backend == "cuda_cub" and not _dense_histogram_fields_are_contiguous(
+            values_view, bins_view
+        ):
             return False
-        method_name = "cuda_cub_histogram_dense_field"
+        method_name = f"{prefix}_histogram_dense_field"
         method = _prog_method(prog, method_name)
         if method is None:
             return False
@@ -10851,11 +10936,11 @@ def _try_cuda_cub_histogram(values, bins, workspace):
             bins_view.num_elements,
         )
         temp_bytes = method(*call_args)
-    elif _prog_has(prog, "cuda_cub_histogram_ndarray"):
-        method_name = "cuda_cub_histogram_ndarray"
+    elif _prog_has(prog, f"{prefix}_histogram_ndarray"):
+        method_name = f"{prefix}_histogram_ndarray"
         call_args = (values.arr, bins.arr, value_type, bin_type)
         temp_bytes = _prog_method(prog, method_name)(*call_args)
-    elif value_type == 0 and bin_type == 0:
+    elif backend == "cuda_cub" and value_type == 0 and bin_type == 0:
         method_name = "cuda_cub_histogram_i32_ndarray"
         method = _prog_method(prog, method_name)
         if method is None:
@@ -10865,9 +10950,9 @@ def _try_cuda_cub_histogram(values, bins, workspace):
     else:
         return False
     if workspace is not None:
-        workspace._mark_native_histogram_backend_active("cuda_cub", temp_bytes)
+        workspace._mark_native_histogram_backend_active(backend, temp_bytes)
         workspace._record_native_histogram_plan(
-            "cuda_cub",
+            backend,
             method_name,
             values,
             bins,
@@ -10878,6 +10963,14 @@ def _try_cuda_cub_histogram(values, bins, workspace):
             prog,
         )
     return True
+
+
+def _try_cuda_device_histogram(values, bins, workspace):
+    return _try_cuda_histogram_provider(values, bins, workspace, "cuda_device")
+
+
+def _try_cuda_cub_histogram(values, bins, workspace):
+    return _try_cuda_histogram_provider(values, bins, workspace, "cuda_cub")
 
 
 def _try_vulkan_histogram(values, bins, workspace):
@@ -11103,8 +11196,7 @@ def _try_staged_histogram(values, bins, method, workspace, aggregation_backend):
     ):
         return False
     if not (
-        _is_struct_scalar_member_view(values)
-        or _is_struct_scalar_member_view(bins)
+        _is_struct_scalar_member_view(values) or _is_struct_scalar_member_view(bins)
     ):
         return False
     value_type = _histogram_value_type(values.dtype)
@@ -11124,11 +11216,12 @@ def _try_staged_histogram(values, bins, method, workspace, aggregation_backend):
     bins_is_member = _is_struct_scalar_member_view(bins)
     staged_bins = bins
     if bins_is_member:
-        staged_bins = workspace._get_staged_member_buffer(
-            "bins", bins.dtype, num_bins
-        )
+        staged_bins = workspace._get_staged_member_buffer("bins", bins.dtype, num_bins)
     if aggregation_backend in ("cuda_native", "cuda_two_level"):
-        ok = _try_cuda_cub_histogram(staged_values, staged_bins, workspace)
+        if method in ("auto", "cuda_device"):
+            ok = _try_cuda_device_histogram(staged_values, staged_bins, workspace)
+        else:
+            ok = _try_cuda_cub_histogram(staged_values, staged_bins, workspace)
     elif aggregation_backend in ("vulkan_native", "vulkan_two_level"):
         ok = _try_vulkan_histogram(staged_values, staged_bins, workspace)
     elif aggregation_backend in ("cpu_native", "cpu_two_level"):
@@ -11201,12 +11294,14 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
             "histogram",
             (values, bins),
             ("histogram", method, int(values.shape[0]), int(bins.shape[0])),
-            lambda: HistogramWorkspace(max_items=values.shape[0], max_bins=bins.shape[0]),
+            lambda: HistogramWorkspace(
+                max_items=values.shape[0], max_bins=bins.shape[0]
+            ),
         )
     workspace.check_shape(values.shape[0], bins.shape[0])
     aggregation_backend = _aggregation_backend_for_method(
         method,
-        cuda_native=("cuda_cub",),
+        cuda_native=("cuda_device", "cuda_cub"),
         cuda_two_level=("cuda_two_level",),
         vulkan_native=("vulkan_native",),
         vulkan_two_level=("vulkan_two_level",),
@@ -11220,31 +11315,45 @@ def experimental_histogram(values, bins, *, method="auto", workspace=None):
             values, bins, method, value_type, bin_type, n, num_bins
         ):
             return
-        if workspace._try_native_histogram_plan(values, bins, method, value_type, bin_type):
+        if workspace._try_native_histogram_plan(
+            values, bins, method, value_type, bin_type
+        ):
             return
     if _try_staged_histogram(values, bins, method, workspace, aggregation_backend):
         return
-    if aggregation_backend in ("cuda_native", "cuda_two_level") and _try_cuda_cub_histogram(
-        values, bins, workspace
-    ):
-        return
+    if aggregation_backend in ("cuda_native", "cuda_two_level"):
+        if method in ("auto", "cuda_device") and _try_cuda_device_histogram(
+            values, bins, workspace
+        ):
+            return
+        if method in ("cuda_cub", "cuda_two_level") and _try_cuda_cub_histogram(
+            values, bins, workspace
+        ):
+            return
+    if method == "cuda_device":
+        raise RuntimeError(
+            "method='cuda_device' requires CUDA ndarray or dense field inputs "
+            "and the Driver-only histogram provider."
+        )
     if method in ("cuda_cub", "cuda_two_level"):
         raise RuntimeError(
             f"method='{method}' requires CUDA ndarray or contiguous dense field "
             "inputs and available CUB DeviceHistogram."
         )
-    if aggregation_backend in ("vulkan_native", "vulkan_two_level") and _try_vulkan_histogram(
-        values, bins, workspace
-    ):
+    if aggregation_backend in (
+        "vulkan_native",
+        "vulkan_two_level",
+    ) and _try_vulkan_histogram(values, bins, workspace):
         return
     if method in ("vulkan_native", "vulkan_two_level"):
         raise RuntimeError(
             f"method='{method}' requires Vulkan ndarray or contiguous dense "
             "field inputs and available native histogram."
         )
-    if aggregation_backend in ("cpu_native", "cpu_two_level") and _try_cpu_native_histogram(
-        values, bins, workspace
-    ):
+    if aggregation_backend in (
+        "cpu_native",
+        "cpu_two_level",
+    ) and _try_cpu_native_histogram(values, bins, workspace):
         return
     if method in ("cpu_native", "cpu_two_level"):
         raise RuntimeError(
@@ -15806,7 +15915,7 @@ class PrefixSumExecutor:
     def _native_scan_backend_for_arch(self):
         arch = current_cfg().arch
         if arch == cuda:
-            return "cuda_cub"
+            return "cuda_device"
         if arch == vulkan:
             return "vulkan_native"
         if arch in [x64, arm64]:
@@ -15899,10 +16008,10 @@ class PrefixSumExecutor:
         prog = impl.get_runtime().prog
         arch = current_cfg().arch
         if arch == cuda:
-            backend = "cuda_cub"
-            if not _prog_available(prog, "cuda_cub_scan_available"):
+            backend = "cuda_device"
+            if not _prog_available(prog, "cuda_device_scan_available"):
                 return False
-            method_name = "cuda_cub_inclusive_scan_dense_field_packed"
+            method_name = "cuda_device_inclusive_scan_dense_field_packed"
         elif arch == vulkan:
             backend = "vulkan_native"
             if not _prog_available(prog, "vulkan_scan_available"):
@@ -15929,7 +16038,7 @@ class PrefixSumExecutor:
         )
         return True
 
-    def _try_cuda_cub_scan(self, input_arr):
+    def _try_cuda_device_scan(self, input_arr):
         if current_cfg().arch != cuda:
             return False
         view = _primitive_view(input_arr)
@@ -15940,49 +16049,50 @@ class PrefixSumExecutor:
         if view.is_dense_field:
             impl.get_runtime().materialize()
         prog = impl.get_runtime().prog
-        if not _prog_available(prog, "cuda_cub_scan_available"):
+        if not _prog_available(prog, "cuda_device_scan_available"):
             return False
         value_type = self._scan_value_type(view.dtype)
         if view.is_dense_field:
-            method = _prog_method(prog, "cuda_cub_inclusive_scan_dense_field")
+            method = _prog_method(prog, "cuda_device_inclusive_scan_dense_field")
             if method is None:
                 return False
             method(view.snode, value_type, view.num_elements)
             self._record_native_scan_plan(
-                "cuda_cub",
-                "cuda_cub_inclusive_scan_dense_field",
+                "cuda_device",
+                "cuda_device_inclusive_scan_dense_field",
                 input_arr,
                 view,
                 (view.snode, value_type, view.num_elements),
                 prog,
             )
         elif view.is_struct_scalar_member:
-            method = _prog_method(prog, "cuda_cub_inclusive_scan_member_ndarray")
+            method = _prog_method(prog, "cuda_device_inclusive_scan_member_ndarray")
             if method is None:
                 return False
             method(view.payload_arr, value_type, view.offset, view.stride)
             self._record_native_scan_plan(
-                "cuda_cub",
-                "cuda_cub_inclusive_scan_member_ndarray",
+                "cuda_device",
+                "cuda_device_inclusive_scan_member_ndarray",
                 input_arr,
                 view,
                 (view.payload_arr, value_type, view.offset, view.stride),
                 prog,
             )
         else:
-            method = _prog_method(prog, "cuda_cub_inclusive_scan_ndarray")
+            method = _prog_method(prog, "cuda_device_inclusive_scan_ndarray")
             if method is None:
                 return False
             method(view.payload_arr, value_type)
             self._record_native_scan_plan(
-                "cuda_cub",
-                "cuda_cub_inclusive_scan_ndarray",
+                "cuda_device",
+                "cuda_device_inclusive_scan_ndarray",
                 input_arr,
                 view,
                 (view.payload_arr, value_type),
                 prog,
             )
         return True
+
 
     def _try_vulkan_native_scan(self, input_arr):
         if current_cfg().arch != vulkan:
@@ -16156,7 +16266,7 @@ class PrefixSumExecutor:
                 raise RuntimeError(
                     "PrefixSumExecutor vector/matrix field input supports "
                     "only ti.i32/ti.u32/ti.f32/ti.i64/ti.u64/ti.f64."
-            )
+                )
             backend = self._native_scan_backend_for_arch()
             component_plans = []
             components = tuple(_matrix_field_components(input_arr))
@@ -16212,9 +16322,8 @@ class PrefixSumExecutor:
             if view.storage == "struct_ndarray":
                 _reject_struct_numeric_primitive("PrefixSumExecutor.run()")
             if (
-                (view.is_native_numeric_dense or view.is_dense_field)
-                and view.dtype not in _SCAN_VALUE_DTYPES
-            ):
+                view.is_native_numeric_dense or view.is_dense_field
+            ) and view.dtype not in _SCAN_VALUE_DTYPES:
                 raise RuntimeError(
                     "PrefixSumExecutor ndarray input supports only "
                     "ti.i32/ti.u32/ti.f32/ti.i64/ti.u64/ti.f64."
@@ -16223,7 +16332,7 @@ class PrefixSumExecutor:
             raise RuntimeError(
                 "PrefixSumExecutor field input currently supports only ti.i32."
             )
-        if self._try_cuda_cub_scan(input_arr):
+        if self._try_cuda_device_scan(input_arr):
             if record_scan_ad:
                 _record_native_scan_ad(input_arr)
             return

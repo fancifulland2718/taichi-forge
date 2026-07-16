@@ -92,7 +92,7 @@ def _method_for(arch_name: str, op_name: str, method_mode: str = "native") -> st
     if arch_name == "cpu":
         return "cpu_native"
     if arch_name == "cuda":
-        return "cuda_cub" if op_name in ("scan", "reduce") else "cuda_device"
+        return "cuda_device"
     if arch_name == "vulkan":
         return "vulkan_native"
     raise ValueError(arch_name)
@@ -113,9 +113,7 @@ def _available(ti, arch_name: str, op_name: str, storage: str) -> tuple[bool, st
         if storage == "struct_tensor_member" and op_name == "transform":
             name = "cpu_transform_affine_packed_strided_ndarray"
             return (
-                hasattr(prog, "cpu_transform_available")
-                and prog.cpu_transform_available()
-                and hasattr(prog, name)
+                hasattr(prog, "cpu_transform_available") and prog.cpu_transform_available() and hasattr(prog, name)
             ), name
         names = {
             "scan": "cpu_scan_available",
@@ -129,15 +127,13 @@ def _available(ti, arch_name: str, op_name: str, storage: str) -> tuple[bool, st
         return hasattr(prog, name) and getattr(prog, name)(), name
     if arch_name == "cuda":
         if op_name == "scan":
-            name = "cuda_cub_scan_available"
+            name = "cuda_device_scan_available"
         elif op_name == "reduce":
-            name = "cuda_cub_reduce_available"
+            name = "cuda_device_reduce_available"
         elif op_name in ("gather", "scatter"):
             name = "cuda_device_indexed_copy_available"
         elif op_name == "scatter_add":
             name = "cuda_device_scatter_add_available"
-        elif storage in ("struct_member", "struct_tensor_member"):
-            name = "cuda_toolkit_transform_available"
         else:
             name = "cuda_device_transform_available"
         ok = hasattr(prog, name) and getattr(prog, name)()
@@ -188,12 +184,12 @@ def _runtime_workspace_peak(arch_name: str, op_name: str) -> int:
     if op_name == "scan":
         candidates = [
             f"{arch_name}_scan_workspace_bytes",
-            "cuda_cub_scan_workspace_bytes",
+            "cuda_device_scan_workspace_bytes",
         ]
     elif op_name == "reduce":
         candidates = [
             f"{arch_name}_reduce_workspace_bytes",
-            "cuda_cub_reduce_workspace_bytes",
+            "cuda_device_reduce_workspace_bytes",
         ]
     elif op_name in ("gather", "scatter"):
         candidates = [
