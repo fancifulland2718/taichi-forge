@@ -95,7 +95,8 @@
 - GFX AOT metadata 现在保存全部稠密 root buffer 大小、每 field 的 tree id 和每 kernel 的
   SNodeTree 依赖。C API loader 会分配所有 artifact root，并按记录的 tree 数注册 kernel，不再
   硬编码单 tree；非连续 live tree id 在构建时 fail-fast，稀疏 SNode AOT 仍不在支持范围内。
-  kernel materialize 后创建 module 不再追加编译 metadata 中不存在、也未被使用的尾部空 root。
+  显式 tree 已提供有效 layout 时，AOT module 创建前后的首次 kernel materialize 都不会再追加
+  metadata 中不存在、也未被使用的尾部空 root；完全无 field 的首次 kernel 仍保留默认空 root。
 - AOT kernel template 现在在 CPU、CUDA、Vulkan 上接受边界明确的 ndarray/external-array
   exemplar。specialization 使用与 capacity 无关的 element/layout ABI key，在编译前拒绝不支持
   或非连续输入，去重相同合同，并使用文件系统安全名称及长 signature 的 SHA-256 fallback。

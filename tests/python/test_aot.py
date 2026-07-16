@@ -865,11 +865,10 @@ def test_gfx_aot_multitree_metadata():
             metadata = json.load(metadata_file)
 
     assert metadata["metadata_version"] == 1
-    # AOT materialization may finalize the otherwise empty default root after
-    # the two explicit FieldsBuilder trees. Its zero-byte slot remains part of
-    # the stable artifact-local id space, while the kernel dependency list
-    # names only the trees it actually uses.
-    assert len(metadata["root_buffer_sizes"]) >= 2
+    # The two explicit FieldsBuilder trees already provide valid layouts.
+    # First kernel materialization must not append an unused default empty root
+    # after the AOT builder has captured its artifact-local id space.
+    assert len(metadata["root_buffer_sizes"]) == 2
     assert metadata["root_buffer_sizes"][0] > 0
     assert metadata["root_buffer_sizes"][1] > 0
     assert metadata["root_buffer_size"] == metadata["root_buffer_sizes"][0]

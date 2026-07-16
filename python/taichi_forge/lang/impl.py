@@ -713,11 +713,16 @@ class PyTaichi:
     def materialize_root_fb(is_first_call):
         if root.finalized:
             return
-        if not is_first_call and root.empty:
+        if root.empty and (
+            not is_first_call
+            or get_runtime().prog.get_active_snode_tree_ids()
+        ):
             # We have to forcefully finalize when `is_first_call` is True (even
-            # if the root itself is empty), so that there is a valid struct
-            # llvm::Module, if no field has been declared before the first kernel
-            # invocation. Example case:
+            # if the root itself is empty) only when no explicit FieldsBuilder
+            # tree exists. An active explicit tree already provides a valid
+            # struct llvm::Module; appending a default empty tree would change
+            # GFX kernel metadata after an AOT builder snapshot. Field-free
+            # example:
             # https://github.com/taichi-dev/taichi/blob/27bb1dc3227d9273a79fcb318fdb06fd053068f5/tests/python/test_ad_basics.py#L260-L266
             return
 

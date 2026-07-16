@@ -122,9 +122,10 @@ retroactively attributed to the 0.5.0 artifact:
   and per-kernel SNodeTree dependencies. The C API loader allocates every
   artifact root and registers kernels with the recorded count instead of
   hard-coding one tree. Non-contiguous live tree ids fail at build time;
-  sparse SNode AOT remains unsupported. Creating a module after kernel
-  materialization no longer appends an unused trailing empty root that was not
-  present in the compiled kernel metadata.
+  sparse SNode AOT remains unsupported. When explicit trees already provide a
+  valid layout, first kernel materialization neither before nor after AOT
+  module creation appends an unused trailing empty root absent from metadata.
+  A field-free first kernel still receives the required default empty root.
 - AOT kernel templates now accept bounded ndarray/external-array exemplars on
   CPU, CUDA, and Vulkan. Specializations use a capacity-independent
   element/layout ABI key, reject unsupported or non-contiguous inputs before

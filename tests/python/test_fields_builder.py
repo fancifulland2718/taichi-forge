@@ -269,6 +269,40 @@ def test_finalized_roots_only_include_active_snode_trees():
     ) == 1
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_first_kernel_reuses_explicit_fields_builder_layouts():
+    builder = ti.FieldsBuilder()
+    value = ti.field(ti.i32)
+    builder.dense(ti.i, 4).place(value)
+    tree = builder.finalize()
+    prog = ti.lang.impl.get_runtime().prog
+
+    assert prog.get_active_snode_tree_ids() == [tree.id]
+
+    @ti.kernel
+    def initialize():
+        for i in value:
+            value[i] = i + 1
+
+    initialize()
+
+    assert prog.get_active_snode_tree_ids() == [tree.id]
+    assert value.to_numpy().tolist() == [1, 2, 3, 4]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_field_free_first_kernel_materializes_default_root():
+    prog = ti.lang.impl.get_runtime().prog
+    assert prog.get_active_snode_tree_ids() == []
+
+    @ti.kernel
+    def constant() -> ti.i32:
+        return 7
+
+    assert constant() == 7
+    assert prog.get_active_snode_tree_ids() == [0]
+
+
 @test_utils.test(exclude=[ti.opengl, ti.gles])
 def test_field_builder_place_grad():
     @ti.kernel
