@@ -120,6 +120,10 @@ void *UnifiedAllocator::allocate(std::size_t size,
         continue;
       }
 
+      TI_ERROR_IF(
+          size > std::numeric_limits<std::size_t>::max() -
+                     chunk.requested_size,
+          "Host allocator per-chunk requested size overflowed");
       // The subtraction check above proves this addition cannot overflow.
       const auto old_head = head;
       TI_ASSERT(checked_add_address(ret, size, &head));
@@ -130,8 +134,10 @@ void *UnifiedAllocator::allocate(std::size_t size,
       TI_ASSERT(consumed <= capacity_bytes_ - used_bytes_);
       used_bytes_ += consumed;
       alignment_waste_bytes_ += alignment_waste;
+      chunk.alignment_waste_size += alignment_waste;
       requested_live_bytes_ += size;
       chunk.requested_size += size;
+      chunk.has_zero_size_allocation |= size == 0;
       return reinterpret_cast<void *>(ret);
     }
   }
@@ -187,8 +193,10 @@ void *UnifiedAllocator::allocate(std::size_t size,
   chunk.tail = reinterpret_cast<void *>(tail);
   chunk.is_exclusive = exclusive;
   chunk.is_large = is_large;
+  chunk.has_zero_size_allocation = size == 0;
   chunk.requested_size = size;
   chunk.released_size = 0;
+  chunk.alignment_waste_size = ret - data;
 
   TI_ASSERT(chunk.data != nullptr);
   TI_ASSERT(uint64(chunk.data) % HostMemoryPool::page_size == 0);
@@ -220,6 +228,55 @@ void *UnifiedAllocator::allocate(std::size_t size,
   return reinterpret_cast<void *>(ret);
 }
 
+void *UnifiedAllocator::release_chunk(std::size_t chunk_index) {
+  TI_ASSERT(chunk_index < chunks_.size());
+  const auto &chunk = chunks_[chunk_index];
+  void *raw_ptr = chunk.data;
+  const auto data = reinterpret_cast<std::uintptr_t>(chunk.data);
+  const auto head = reinterpret_cast<std::uintptr_t>(chunk.head);
+  const auto tail = reinterpret_cast<std::uintptr_t>(chunk.tail);
+  const auto capacity = tail - data;
+  const auto consumed = head - data;
+  const auto remaining_request =
+      chunk.requested_size - chunk.released_size;
+
+  TI_ASSERT(capacity <= capacity_bytes_);
+  TI_ASSERT(consumed <= used_bytes_);
+  TI_ASSERT(chunk.alignment_waste_size <= alignment_waste_bytes_);
+  TI_ASSERT(chunk.released_size <= unreclaimed_released_bytes_);
+  TI_ASSERT(remaining_request <= requested_live_bytes_);
+  capacity_bytes_ -= capacity;
+  used_bytes_ -= consumed;
+  alignment_waste_bytes_ -= chunk.alignment_waste_size;
+  unreclaimed_released_bytes_ -= chunk.released_size;
+  requested_live_bytes_ -= remaining_request;
+  if (chunk.is_exclusive) {
+    TI_ASSERT(exclusive_chunk_count_ > 0);
+    --exclusive_chunk_count_;
+  } else if (chunk.is_large) {
+    TI_ASSERT(large_chunk_count_ > 0);
+    --large_chunk_count_;
+  } else {
+    TI_ASSERT(slab_chunk_count_ > 0);
+    --slab_chunk_count_;
+  }
+
+  const auto location = chunk_indices_by_base_.find(data);
+  TI_ASSERT(location != chunk_indices_by_base_.end());
+  const auto last_index = chunks_.size() - 1;
+  chunk_indices_by_base_.erase(location);
+  if (chunk_index != last_index) {
+    const auto swapped_base =
+        reinterpret_cast<std::uintptr_t>(chunks_[last_index].data);
+    auto swapped_location = chunk_indices_by_base_.find(swapped_base);
+    TI_ASSERT(swapped_location != chunk_indices_by_base_.end());
+    swapped_location->second = chunk_index;
+  }
+  swap_erase_vector<MemoryChunk>(chunks_, chunk_index);
+  // HostMemoryPool releases the raw mapping after this metadata is removed.
+  return raw_ptr;
+}
+
 void *UnifiedAllocator::release(std::size_t size, void *ptr) {
   // UnifiedAllocator is special in that it never reuses the previously
   // allocated memory We have to release the entire memory chunk to avoid memory
@@ -237,28 +294,7 @@ void *UnifiedAllocator::release(std::size_t size, void *ptr) {
   const auto head = reinterpret_cast<std::uintptr_t>(chunk.head);
 
   if (chunk.is_exclusive && chunk.allocation == ptr) {
-    void *raw_ptr = chunk.data;
-    const auto allocation =
-        reinterpret_cast<std::uintptr_t>(chunk.allocation);
-    const auto tail = reinterpret_cast<std::uintptr_t>(chunk.tail);
-    capacity_bytes_ -= tail - data;
-    used_bytes_ -= head - data;
-    alignment_waste_bytes_ -= allocation - data;
-    requested_live_bytes_ -=
-        std::min<std::uint64_t>(requested_live_bytes_, chunk.requested_size);
-    --exclusive_chunk_count_;
-    const auto last_index = chunks_.size() - 1;
-    chunk_indices_by_base_.erase(location);
-    if (chunk_index != last_index) {
-      const auto swapped_base = reinterpret_cast<std::uintptr_t>(
-          chunks_[last_index].data);
-      auto swapped_location = chunk_indices_by_base_.find(swapped_base);
-      TI_ASSERT(swapped_location != chunk_indices_by_base_.end());
-      swapped_location->second = chunk_index;
-    }
-    swap_erase_vector<MemoryChunk>(chunks_, chunk_index);
-    // MemoryPool is responsible for releasing the raw memory
-    return raw_ptr;
+    return release_chunk(chunk_index);
   }
 
   if (!chunk.is_exclusive && released_address >= data &&
@@ -273,6 +309,11 @@ void *UnifiedAllocator::release(std::size_t size, void *ptr) {
     unreclaimed_released_bytes_ += released;
     requested_live_bytes_ -=
         std::min(requested_live_bytes_, released);
+    if (chunk.requested_size != 0 &&
+        chunk.released_size == chunk.requested_size &&
+        !chunk.has_zero_size_allocation) {
+      return release_chunk(chunk_index);
+    }
   }
 
   return nullptr;

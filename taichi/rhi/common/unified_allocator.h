@@ -18,12 +18,14 @@ class UnifiedAllocator {
   struct MemoryChunk {
     bool is_exclusive;
     bool is_large;
+    bool has_zero_size_allocation;
     void *data;
     void *allocation;
     void *head;
     void *tail;
     std::size_t requested_size;
     std::size_t released_size;
+    std::size_t alignment_waste_size;
   };
 
   struct Statistics {
@@ -65,6 +67,7 @@ class UnifiedAllocator {
                        std::size_t alignment,
                        std::uintptr_t *result);
   void grow_next_slab_size();
+  void *release_chunk(std::size_t chunk_index);
 
   HostMemoryPool *owner_{nullptr};
   bool adaptive_chunk_policy_{true};

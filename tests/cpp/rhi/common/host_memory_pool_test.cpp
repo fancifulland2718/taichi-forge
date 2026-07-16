@@ -244,6 +244,12 @@ TEST(HostMemoryPool, NonExclusiveZeroSizeKeepsExistingContract) {
   expectAllocationInsideRawChunk(pool, zero1, 0);
   expectAllocationInsideRawChunk(pool, first_byte, 1);
   expectUnifiedChunksConsistent(pool);
+
+  pool.release(1, first_byte);
+  const auto stats = pool.get_stats();
+  EXPECT_EQ(stats.raw_chunks, 1);
+  EXPECT_EQ(stats.requested_live_bytes, 0);
+  EXPECT_EQ(stats.unreclaimed_released_bytes, 1);
 }
 
 TEST(HostMemoryPool, AllocatorTelemetrySeparatesCapacityAndWaste) {
@@ -291,9 +297,32 @@ TEST(HostMemoryPool, AllocatorTelemetrySeparatesCapacityAndWaste) {
   pool.release(1, aligned);
   stats = pool.get_stats();
   EXPECT_EQ(stats.requested_live_bytes, 0);
-  EXPECT_EQ(stats.unreclaimed_released_bytes, 4);
-  EXPECT_EQ(stats.wasted_bytes, 9);
-  EXPECT_EQ(stats.used_bytes, stats.wasted_bytes);
+  EXPECT_EQ(stats.raw_chunks, 0);
+  EXPECT_EQ(stats.reserved_bytes, 0);
+  EXPECT_EQ(stats.capacity_bytes, 0);
+  EXPECT_EQ(stats.used_bytes, 0);
+  EXPECT_EQ(stats.alignment_waste_bytes, 0);
+  EXPECT_EQ(stats.unreclaimed_released_bytes, 0);
+  EXPECT_EQ(stats.wasted_bytes, 0);
+  EXPECT_EQ(stats.slab_chunks, 0);
+  EXPECT_EQ(stats.unified_chunks, 0);
+  EXPECT_EQ(stats.peak_wasted_bytes, 8);
+}
+
+TEST(HostMemoryPool, FullyReleasedLargeChunkReturnsRawMapping) {
+  DefaultAllocatorSizeGuard allocator_size(64);
+  HostMemoryPool pool;
+
+  void *large = pool.allocate(65, 16);
+  EXPECT_EQ(pool.get_stats().large_chunks, 1);
+  pool.release(65, large);
+
+  const auto stats = pool.get_stats();
+  EXPECT_EQ(stats.raw_chunks, 0);
+  EXPECT_EQ(stats.raw_bytes, 0);
+  EXPECT_EQ(stats.unified_chunks, 0);
+  EXPECT_EQ(stats.large_chunks, 0);
+  EXPECT_EQ(stats.requested_live_bytes, 0);
 }
 
 TEST(HostMemoryPool, TelemetryClassifiesLargeAndExclusiveChunks) {
@@ -413,14 +442,54 @@ TEST(HostMemoryPool, ExclusiveSwapEraseKeepsReleaseAddressIndexValid) {
 
   auto stats = pool.get_stats();
   EXPECT_EQ(stats.requested_live_bytes, 64);
-  EXPECT_EQ(stats.unreclaimed_released_bytes, 1);
-  EXPECT_EQ(stats.slab_chunks, 2);
+  EXPECT_EQ(stats.unreclaimed_released_bytes, 0);
+  EXPECT_EQ(stats.slab_chunks, 1);
   EXPECT_EQ(stats.exclusive_chunks, 0);
 
   pool.release(64, first);
   stats = pool.get_stats();
   EXPECT_EQ(stats.requested_live_bytes, 0);
-  EXPECT_EQ(stats.unreclaimed_released_bytes, 65);
+  EXPECT_EQ(stats.raw_chunks, 0);
+  EXPECT_EQ(stats.unified_chunks, 0);
+}
+
+TEST(HostMemoryPool, NonExclusiveSwapEraseKeepsReleaseIndexValid) {
+  DefaultAllocatorSizeGuard allocator_size(64);
+  HostMemoryPool pool;
+
+  void *first = pool.allocate(64, 1);
+  void *middle = pool.allocate(64, 1);
+  void *last = pool.allocate(64, 1);
+  pool.release(64, middle);
+  EXPECT_EQ(pool.get_stats().raw_chunks, 2);
+
+  pool.release(64, last);
+  pool.release(64, first);
+  const auto stats = pool.get_stats();
+  EXPECT_EQ(stats.raw_chunks, 0);
+  EXPECT_EQ(stats.unified_chunks, 0);
+  EXPECT_EQ(stats.requested_live_bytes, 0);
+}
+
+TEST(HostMemoryPool, ReleaseChurnDoesNotRetainRawMappings) {
+  DefaultAllocatorSizeGuard allocator_size(64);
+  HostMemoryPool pool;
+
+  constexpr int kCycles = 200;
+  for (int cycle = 0; cycle < kCycles; ++cycle) {
+    void *ptr = pool.allocate(64, 1);
+    EXPECT_EQ(pool.get_stats().raw_chunks, 1);
+    pool.release(64, ptr);
+    const auto stats = pool.get_stats();
+    EXPECT_EQ(stats.raw_chunks, 0);
+    EXPECT_EQ(stats.raw_bytes, 0);
+    EXPECT_EQ(stats.unified_chunks, 0);
+  }
+
+  const auto stats = pool.get_stats();
+  EXPECT_EQ(stats.allocate_count, kCycles);
+  EXPECT_EQ(stats.release_count, kCycles);
+  EXPECT_EQ(stats.peak_chunks, 1);
 }
 
 TEST(HostMemoryPool, AdaptiveResetChurnRestartsInitialSlab) {
@@ -503,6 +572,8 @@ TEST(HostMemoryPool, ConcurrentTelemetrySnapshotsStayConsistent) {
   EXPECT_EQ(stats.release_count,
             kThreadCount * kAllocationsPerThread);
   EXPECT_EQ(stats.requested_live_bytes, 0);
+  EXPECT_EQ(stats.raw_chunks, 0);
+  EXPECT_EQ(stats.unified_chunks, 0);
   EXPECT_EQ(stats.wasted_bytes, stats.used_bytes);
   EXPECT_GT(stats.peak_requested_live_bytes, 0);
   EXPECT_GE(stats.peak_used_bytes, stats.used_bytes);
