@@ -9695,6 +9695,158 @@ std::size_t Program::cuda_device_grouped_reduce_segmented_strided_keys_ndarray(
 #endif
 }
 
+bool Program::cuda_device_radix_sort_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::driver_hierarchical_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_device_radix_sort_ndarray(Ndarray *keys,
+                                                    Ndarray *values,
+                                                    int key_type,
+                                                    int value_type,
+                                                    int nan_policy) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver stable sort is only available on CUDA.");
+  TI_ERROR_IF(!keys || keys->shape.size() != 1,
+              "CUDA Driver stable sort expects a 1D keys ndarray.");
+  const bool has_values = values != nullptr;
+  TI_ERROR_IF(has_values && (values->shape.size() != 1 ||
+                             values->get_nelement() != keys->get_nelement()),
+              "CUDA Driver stable sort expects a matching 1D values ndarray.");
+  const std::size_t expected_key_size = sort_key_type_size(key_type);
+  TI_ERROR_IF(
+      expected_key_size == 0 || keys->get_element_size() != expected_key_size,
+      "CUDA Driver stable sort key dtype does not match key_type.");
+  TI_ERROR_IF(nan_policy < 0 || nan_policy > 1,
+              "CUDA Driver stable sort received an unsupported NaN policy.");
+  const std::size_t expected_value_size = primitive_value_type_size(value_type);
+  const std::size_t actual_value_size =
+      has_values ? values->get_element_size() : 0;
+  TI_ERROR_IF(
+      has_values && (expected_value_size == 0 || actual_value_size == 0 ||
+                     actual_value_size % sizeof(std::uint32_t) != 0),
+      "CUDA Driver stable sort value payload must be 4-byte aligned.");
+  TI_ERROR_IF(keys->get_nelement() >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver stable sort supports at most INT_MAX items.");
+  if (keys->get_nelement() <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  return cuda::driver_stable_radix_sort_strided(
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(keys)),
+      has_values ? reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values))
+                 : nullptr,
+      static_cast<int>(keys->get_nelement()),
+      static_cast<cuda::CudaDriverSortKeyType>(key_type),
+      has_values ? static_cast<int>(actual_value_size / sizeof(std::uint32_t))
+                 : 0,
+      0, expected_key_size, 0, actual_value_size, has_values, nan_policy,
+      nullptr, &primitive_workspace_arena_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+std::size_t Program::cuda_device_radix_sort_dense_field(SNode *keys,
+                                                        SNode *values,
+                                                        int key_type,
+                                                        int value_type,
+                                                        std::size_t n,
+                                                        int nan_policy) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Driver dense-field stable sort is only available on CUDA.");
+  TI_ERROR_IF(!keys, "CUDA Driver dense-field stable sort received null keys.");
+  TI_ERROR_IF(n > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA Driver dense-field stable sort supports at most INT_MAX "
+              "items.");
+  const std::size_t expected_key_size = sort_key_type_size(key_type);
+  TI_ERROR_IF(expected_key_size == 0,
+              "CUDA Driver dense-field stable sort received an unsupported "
+              "key type.");
+  TI_ERROR_IF(nan_policy < 0 || nan_policy > 1,
+              "CUDA Driver dense-field stable sort received an unsupported "
+              "NaN policy.");
+  const bool has_values = values != nullptr;
+  const std::size_t value_size = primitive_value_type_size(value_type);
+  TI_ERROR_IF(has_values && value_size == 0,
+              "CUDA Driver dense-field stable sort received an unsupported "
+              "value type.");
+  const std::size_t keys_stride =
+      get_dense_field_stride(keys, expected_key_size);
+  const std::size_t values_stride =
+      has_values ? get_dense_field_stride(values, value_size) : 0;
+  TI_ERROR_IF(keys_stride < expected_key_size ||
+                  (has_values && values_stride < value_size),
+              "CUDA Driver dense-field stable sort received an invalid "
+              "field stride.");
+  if (n <= 1) {
+    return 0;
+  }
+#ifdef TI_WITH_CUDA
+  auto raw_ptr = [this](DevicePtr ptr, const char *op_name) {
+    TI_ERROR_IF(!ptr.device, "{} received a null dense-field device.", op_name);
+    DeviceAllocation alloc{ptr.device, ptr.alloc_id};
+    auto *base = program_impl_->get_device_alloc_info_ptr(alloc);
+    TI_ERROR_IF(!base, "{} received a null dense-field pointer.", op_name);
+    return static_cast<void *>(reinterpret_cast<std::uint8_t *>(base) +
+                               ptr.offset);
+  };
+  return cuda::driver_stable_radix_sort_strided(
+      raw_ptr(get_dense_field_device_ptr(keys),
+              "CUDA Driver dense-field stable sort"),
+      has_values ? raw_ptr(get_dense_field_device_ptr(values),
+                           "CUDA Driver dense-field stable sort")
+                 : nullptr,
+      static_cast<int>(n), static_cast<cuda::CudaDriverSortKeyType>(key_type),
+      has_values ? static_cast<int>(value_size / sizeof(std::uint32_t)) : 0, 0,
+      keys_stride, 0, values_stride, has_values, nan_policy, nullptr,
+      &primitive_workspace_arena_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+void Program::cuda_device_radix_sort_clear_workspace() {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    auto submission_guard = acquire_runtime_resource_submission_guard();
+    synchronize();
+    primitive_workspace_arena_.clear(PrimitiveWorkspaceBackend::cuda,
+                                     PrimitiveWorkspaceFamily::ordering);
+    primitive_workspace_arena_.clear(PrimitiveWorkspaceBackend::cuda,
+                                     PrimitiveWorkspaceFamily::ordering_aux);
+  }
+#endif
+}
+
+std::size_t Program::cuda_device_radix_sort_workspace_bytes() const {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    const auto ordering = static_cast<std::size_t>(
+        primitive_workspace_arena_
+            .snapshot(PrimitiveWorkspaceBackend::cuda,
+                      PrimitiveWorkspaceFamily::ordering)
+            .reserved_bytes);
+    const auto auxiliary = static_cast<std::size_t>(
+        primitive_workspace_arena_
+            .snapshot(PrimitiveWorkspaceBackend::cuda,
+                      PrimitiveWorkspaceFamily::ordering_aux)
+            .reserved_bytes);
+    return ordering + auxiliary;
+  }
+#endif
+  return 0;
+}
+
 bool Program::cuda_cub_radix_sort_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&

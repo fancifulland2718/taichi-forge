@@ -32,6 +32,13 @@ REQUIRED_ENTRIES = (
     "compact_scatter_words",
     "copy_i32_strided",
     "bucket_scatter_words",
+    *(f"radix_init_{suffix}" for suffix in SUFFIXES),
+    "radix_zero_flags_u32",
+    "radix_zero_flags_u64",
+    "radix_scatter_u32",
+    "radix_scatter_u64",
+    "radix_gather_words",
+    "radix_copy_words",
 )
 
 

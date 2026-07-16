@@ -836,3 +836,199 @@ extern "C" __global__ void bucket_scatter_words(const u8 *keys,
     dst[word] = src[word];
   }
 }
+
+template <typename T>
+__device__ u32 sortable_key32(T value, i32 nan_policy);
+
+template <>
+__device__ u32 sortable_key32<u32>(u32 value, i32) {
+  return value;
+}
+
+template <>
+__device__ u32 sortable_key32<i32>(i32 value, i32) {
+  return static_cast<u32>(value) ^ 0x80000000u;
+}
+
+template <>
+__device__ u32 sortable_key32<float>(float value, i32 nan_policy) {
+  const u32 bits = bit_cast<u32>(value);
+  constexpr u32 sign = 0x80000000u;
+  const u32 magnitude = bits & 0x7fffffffu;
+  if (nan_policy == 0 && magnitude > 0x7f800000u) {
+    return 0xffffffffu;
+  }
+  if (nan_policy == 0 && magnitude == 0u) {
+    return sign;
+  }
+  return (bits & sign) != 0u ? ~bits : bits ^ sign;
+}
+
+template <typename T>
+__device__ u64 sortable_key64(T value, i32 nan_policy);
+
+template <>
+__device__ u64 sortable_key64<u64>(u64 value, i32) {
+  return value;
+}
+
+template <>
+__device__ u64 sortable_key64<i64>(i64 value, i32) {
+  return static_cast<u64>(value) ^ 0x8000000000000000ull;
+}
+
+template <>
+__device__ u64 sortable_key64<double>(double value, i32 nan_policy) {
+  const u64 bits = bit_cast<u64>(value);
+  constexpr u64 sign = 0x8000000000000000ull;
+  const u64 magnitude = bits & 0x7fffffffffffffffull;
+  if (nan_policy == 0 && magnitude > 0x7ff0000000000000ull) {
+    return 0xffffffffffffffffull;
+  }
+  if (nan_policy == 0 && magnitude == 0ull) {
+    return sign;
+  }
+  return (bits & sign) != 0ull ? ~bits : bits ^ sign;
+}
+
+template <typename T, typename SortableT>
+__device__ void radix_init_impl(const u8 *keys,
+                                u64 keys_offset,
+                                u64 keys_stride,
+                                SortableT *sortable,
+                                u32 *indices,
+                                u32 n,
+                                i32 nan_policy) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= n) {
+    return;
+  }
+  const T key = load_strided<T>(keys, keys_offset, keys_stride, index);
+  if constexpr (sizeof(SortableT) == sizeof(u32)) {
+    sortable[index] = sortable_key32<T>(key, nan_policy);
+  } else {
+    sortable[index] = sortable_key64<T>(key, nan_policy);
+  }
+  indices[index] = index;
+}
+
+#define DEFINE_RADIX_INIT_KERNEL(NAME, KEY_TYPE, SORTABLE_TYPE)             \
+  extern "C" __global__ void NAME(const u8 *keys, u64 keys_offset,          \
+                                  u64 keys_stride, SORTABLE_TYPE *sortable, \
+                                  u32 *indices, u32 n, i32 nan_policy) {    \
+    radix_init_impl<KEY_TYPE, SORTABLE_TYPE>(                               \
+        keys, keys_offset, keys_stride, sortable, indices, n, nan_policy);  \
+  }
+
+DEFINE_RADIX_INIT_KERNEL(radix_init_i32, i32, u32)
+DEFINE_RADIX_INIT_KERNEL(radix_init_u32, u32, u32)
+DEFINE_RADIX_INIT_KERNEL(radix_init_f32, float, u32)
+DEFINE_RADIX_INIT_KERNEL(radix_init_i64, i64, u64)
+DEFINE_RADIX_INIT_KERNEL(radix_init_u64, u64, u64)
+DEFINE_RADIX_INIT_KERNEL(radix_init_f64, double, u64)
+
+template <typename T>
+__device__ void radix_zero_flags_impl(const T *keys,
+                                      i32 *prefix,
+                                      u32 n,
+                                      u32 bit) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < n) {
+    prefix[index] = ((keys[index] >> bit) & static_cast<T>(1)) == 0 ? 1 : 0;
+  }
+}
+
+template <typename T>
+__device__ void radix_scatter_impl(const T *keys_in,
+                                   const u32 *indices_in,
+                                   const i32 *prefix,
+                                   T *keys_out,
+                                   u32 *indices_out,
+                                   u32 n,
+                                   u32 bit) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= n) {
+    return;
+  }
+  const u32 zero_count = static_cast<u32>(prefix[n - 1u]);
+  const u32 zeros_through = static_cast<u32>(prefix[index]);
+  const bool is_zero = ((keys_in[index] >> bit) & static_cast<T>(1)) == 0;
+  const u32 output_index =
+      is_zero ? zeros_through - 1u : zero_count + index - zeros_through;
+  keys_out[output_index] = keys_in[index];
+  indices_out[output_index] = indices_in[index];
+}
+
+extern "C" __global__ void radix_zero_flags_u32(const u32 *keys,
+                                                i32 *prefix,
+                                                u32 n,
+                                                u32 bit) {
+  radix_zero_flags_impl(keys, prefix, n, bit);
+}
+
+extern "C" __global__ void radix_zero_flags_u64(const u64 *keys,
+                                                i32 *prefix,
+                                                u32 n,
+                                                u32 bit) {
+  radix_zero_flags_impl(keys, prefix, n, bit);
+}
+
+extern "C" __global__ void radix_scatter_u32(const u32 *keys_in,
+                                             const u32 *indices_in,
+                                             const i32 *prefix,
+                                             u32 *keys_out,
+                                             u32 *indices_out,
+                                             u32 n,
+                                             u32 bit) {
+  radix_scatter_impl(keys_in, indices_in, prefix, keys_out, indices_out, n,
+                     bit);
+}
+
+extern "C" __global__ void radix_scatter_u64(const u64 *keys_in,
+                                             const u32 *indices_in,
+                                             const i32 *prefix,
+                                             u64 *keys_out,
+                                             u32 *indices_out,
+                                             u32 n,
+                                             u32 bit) {
+  radix_scatter_impl(keys_in, indices_in, prefix, keys_out, indices_out, n,
+                     bit);
+}
+
+extern "C" __global__ void radix_gather_words(const u8 *src,
+                                              u64 src_offset,
+                                              u64 src_stride,
+                                              const u32 *indices,
+                                              u32 *dst,
+                                              u32 n,
+                                              u32 item_words) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= n) {
+    return;
+  }
+  const u32 source_index = indices[index];
+  const u32 *source = reinterpret_cast<const u32 *>(
+      src + src_offset + static_cast<u64>(source_index) * src_stride);
+  u32 *output = dst + static_cast<u64>(index) * item_words;
+  for (u32 word = 0; word < item_words; ++word) {
+    output[word] = source[word];
+  }
+}
+
+extern "C" __global__ void radix_copy_words(const u32 *src,
+                                            u8 *dst,
+                                            u64 dst_offset,
+                                            u64 dst_stride,
+                                            u32 n,
+                                            u32 item_words) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= n) {
+    return;
+  }
+  const u32 *source = src + static_cast<u64>(index) * item_words;
+  u32 *output = reinterpret_cast<u32 *>(dst + dst_offset +
+                                        static_cast<u64>(index) * dst_stride);
+  for (u32 word = 0; word < item_words; ++word) {
+    output[word] = source[word];
+  }
+}

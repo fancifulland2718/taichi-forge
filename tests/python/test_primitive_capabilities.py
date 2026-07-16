@@ -108,6 +108,9 @@ def test_static_primitive_capability_catalog_is_complete_and_immutable():
     assert segmented_reduce.ad.fallback_method is None
     assert ti.algorithms.primitive_capability("experimental_segmented_scan").ad.reverse_ad == "not_differentiable"
     sort_methods = {method.name: method for method in ti.algorithms.primitive_capability("sort").methods}
+    assert sort_methods["cuda_device"].provider_probes == (
+        "cuda_device_radix_sort_available",
+    )
     assert sort_methods["radix_u32"].backends == ("cuda", "vulkan")
     assert sort_methods["vulkan_graph_radix_u32"].provider_probes == ()
     assert sort_methods["vulkan_graph_radix_u32"].implementation == "composite"

@@ -16,6 +16,15 @@ enum class CudaHierarchicalReduceOp : int {
   max = 2,
 };
 
+enum class CudaDriverSortKeyType : int {
+  u32 = 0,
+  i32 = 1,
+  f32 = 2,
+  u64 = 3,
+  i64 = 4,
+  f64 = 5,
+};
+
 bool driver_hierarchical_available();
 
 std::size_t driver_inclusive_scan_strided(
@@ -157,5 +166,20 @@ std::size_t driver_grouped_reduce_strided(void *keys,
                                           std::size_t output_offset,
                                           std::size_t output_stride,
                                           void *stream);
+
+std::size_t driver_stable_radix_sort_strided(
+    void *keys,
+    void *values,
+    int num_items,
+    CudaDriverSortKeyType key_type,
+    int value_words,
+    std::size_t keys_offset,
+    std::size_t keys_stride,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    bool has_values,
+    int nan_policy,
+    void *stream,
+    PrimitiveWorkspaceArena *workspace_arena);
 
 }  // namespace taichi::lang::cuda

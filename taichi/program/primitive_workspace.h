@@ -37,6 +37,7 @@ enum class PrimitiveWorkspaceFamily : std::uint16_t {
   grouped = 10,
   histogram = 11,
   transform = 12,
+  ordering_aux = 13,
 };
 
 struct PrimitiveWorkspaceKey {

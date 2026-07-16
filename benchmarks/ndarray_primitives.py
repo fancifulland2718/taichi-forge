@@ -36,7 +36,7 @@ def _method_for(arch_name, primitive):
         return "cpu_native"
     if arch_name == "cuda":
         if primitive == "sort":
-            return "cuda_cub_native"
+            return "cuda_device"
         if primitive == "compact":
             return "cuda_device"
         return "cuda_device"
@@ -89,9 +89,14 @@ def _available(arch_name, primitive, method=None):
         if primitive == "transform":
             return hasattr(prog, "cuda_device_transform_available") and prog.cuda_device_transform_available()
         if primitive == "sort":
+            if method in ("cuda_cub_native", "cuda_cub_split32"):
+                return (
+                    hasattr(prog, "cuda_cub_radix_sort_available")
+                    and prog.cuda_cub_radix_sort_available()
+                )
             return (
-                hasattr(prog, "cuda_cub_radix_sort_available")
-                and prog.cuda_cub_radix_sort_available()
+                hasattr(prog, "cuda_device_radix_sort_available")
+                and prog.cuda_device_radix_sort_available()
                 and hasattr(prog, "cuda_device_indexed_copy_available")
                 and prog.cuda_device_indexed_copy_available()
             )
@@ -302,7 +307,7 @@ def run_transform(arch_name, n, repeats):
     return stats
 
 
-def run_sort(arch_name, n, repeats):
+def run_sort(arch_name, n, repeats, method_override=None):
     values_np = _values(n)
     keys_np = ((np.arange(n, dtype=np.int32) * 37) % max(n, 1)) - (n // 2)
     keys = ti.ndarray(ti.i32, shape=n)
@@ -310,7 +315,7 @@ def run_sort(arch_name, n, repeats):
     keys.from_numpy(keys_np)
     values.from_numpy(values_np)
     workspace = ti.algorithms.SortWorkspace(max_items=n)
-    method = _method_for(arch_name, "sort")
+    method = method_override or _method_for(arch_name, "sort")
 
     def body():
         ti.algorithms.sort(keys, values, method=method, workspace=workspace)
@@ -556,6 +561,7 @@ def main():
     parser.add_argument("--grouped-reduce-method", default=None)
     parser.add_argument("--histogram-method", default=None)
     parser.add_argument("--scatter-add-method", default=None)
+    parser.add_argument("--sort-method", default=None)
     parser.add_argument("--method-mode", choices=["native", "auto"], default="native")
     parser.add_argument("--internal-stats", action="store_true")
     parser.add_argument(
@@ -608,6 +614,8 @@ def main():
                 method_override = args.bucket_method
             elif primitive == "compact":
                 method_override = args.compact_method
+            elif primitive == "sort":
+                method_override = args.sort_method
             if not _available(args.arch, primitive, method_override):
                 results.append(
                     {
@@ -632,7 +640,9 @@ def main():
             elif primitive == "reduce":
                 stats = run_reduce(args.arch, n, args.repeats)
             elif primitive == "sort":
-                stats = run_sort(args.arch, n, args.repeats)
+                stats = run_sort(
+                    args.arch, n, args.repeats, args.sort_method
+                )
             elif primitive == "compact":
                 stats = run_compact(
                     args.arch, n, args.repeats, args.compact_method

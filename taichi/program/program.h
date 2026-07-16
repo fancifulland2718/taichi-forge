@@ -989,6 +989,25 @@ class TI_DLL_EXPORT Program {
       std::size_t output_stride,
       int op);
 
+  bool cuda_device_radix_sort_available() const;
+
+  std::size_t cuda_device_radix_sort_ndarray(Ndarray *keys,
+                                             Ndarray *values,
+                                             int key_type,
+                                             int value_type,
+                                             int nan_policy);
+
+  std::size_t cuda_device_radix_sort_dense_field(SNode *keys,
+                                                 SNode *values,
+                                                 int key_type,
+                                                 int value_type,
+                                                 std::size_t n,
+                                                 int nan_policy);
+
+  void cuda_device_radix_sort_clear_workspace();
+
+  std::size_t cuda_device_radix_sort_workspace_bytes() const;
+
   bool cuda_cub_radix_sort_available() const;
 
   std::size_t cuda_cub_radix_sort_ndarray(Ndarray *keys,

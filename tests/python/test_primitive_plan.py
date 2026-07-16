@@ -57,9 +57,9 @@ def _native_sort_method_for_current_arch():
     arch = impl.current_cfg().arch
     prog = impl.get_runtime().prog
     if arch == ti.cuda:
-        if not prog.cuda_cub_radix_sort_available():
-            pytest.skip("CUDA CUB native sort is unavailable in this build/runtime.")
-        return "cuda_cub_native"
+        if not prog.cuda_device_radix_sort_available():
+            pytest.skip("CUDA Driver stable sort is unavailable in this build/runtime.")
+        return "cuda_device"
     if arch == ti.vulkan:
         if not prog.vulkan_radix_sort_available():
             pytest.skip("Vulkan native sort is unavailable in this build/runtime.")

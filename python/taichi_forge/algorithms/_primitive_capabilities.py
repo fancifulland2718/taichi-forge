@@ -316,6 +316,11 @@ _SORT_METHODS = (
         implementation="composite",
     ),
     _method(
+        "cuda_device",
+        ("cuda",),
+        ("cuda_device_radix_sort_available",),
+    ),
+    _method(
         "cuda_cub_native",
         ("cuda",),
         ("cuda_cub_radix_sort_available",),

@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 import numpy as np
 
@@ -592,6 +594,165 @@ def test_sort_cuda_cub_wide_exact_methods(method):
     assert values.to_numpy().tolist() == [2, 5, 3, 0, 4, 1]
 
 
+@pytest.mark.parametrize("key_dtype,np_dtype", _SORT_KEY_DTYPE_CASES)
+@test_utils.test(arch=[ti.cuda])
+def test_sort_cuda_device_key_dtypes(key_dtype, np_dtype):
+    prog = impl.get_runtime().prog
+    if not prog.cuda_device_radix_sort_available():
+        pytest.skip("CUDA Driver stable sort is unavailable.")
+    keys_np = _sort_key_values(np_dtype)
+    values_np = np.arange(keys_np.shape[0], dtype=np.int64) * 10 - 3
+    order = _expected_sort_order(keys_np)
+    keys = ti.ndarray(key_dtype, shape=keys_np.shape[0])
+    values = ti.ndarray(ti.i64, shape=keys_np.shape[0])
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+
+    ti.algorithms.sort(keys, values, method="cuda_device")
+
+    actual_keys = keys.to_numpy()
+    if np.issubdtype(np_dtype, np.floating):
+        bit_dtype = np.uint32 if np_dtype == np.float32 else np.uint64
+        assert np.array_equal(
+            actual_keys.view(bit_dtype), keys_np[order].view(bit_dtype)
+        )
+    else:
+        assert np.array_equal(actual_keys, keys_np[order])
+    assert np.array_equal(values.to_numpy(), values_np[order])
+
+
+@pytest.mark.parametrize("value_dtype,np_dtype", _SORT_VALUE_DTYPE_CASES)
+@test_utils.test(arch=[ti.cuda])
+def test_sort_cuda_device_payload_dtypes(value_dtype, np_dtype):
+    _run_sort_payload_dtype_case("cuda_device", value_dtype, np_dtype)
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_sort_cuda_device_vector_payload():
+    _run_sort_vector_payload_case("cuda_device")
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_sort_cuda_device_dense_field_and_workspace_clear():
+    prog = impl.get_runtime().prog
+    if not prog.cuda_device_radix_sort_available():
+        pytest.skip("CUDA Driver stable sort is unavailable.")
+    workspace = _run_dense_field_sort_case("cuda_device")
+    assert workspace._cuda_device_active
+    assert prog.cuda_device_radix_sort_workspace_bytes() > 0
+    assert prog.cuda_device_scan_workspace_bytes() == 0
+    workspace.clear()
+    assert prog.cuda_device_radix_sort_workspace_bytes() == 0
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_sort_cuda_device_multipart_and_tensor_member():
+    prog = impl.get_runtime().prog
+    if not prog.cuda_device_radix_sort_available():
+        pytest.skip("CUDA Driver stable sort is unavailable.")
+    _run_sort_by_key_native_ndarray_case("cuda_device")
+    _run_sort_struct_tensor_member_host_case("cuda_device")
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_sort_cuda_device_bitwise_nan_policy():
+    raw = np.array(
+        [
+            0x7FC00001,
+            0x80000000,
+            0x00000000,
+            0xFFC00002,
+            0x3F800000,
+            0xBF800000,
+            0x7FC00001,
+        ],
+        dtype=np.uint32,
+    )
+    keys_np = raw.view(np.float32)
+    sortable = np.where(
+        (raw & np.uint32(0x80000000)) != 0,
+        ~raw,
+        raw ^ np.uint32(0x80000000),
+    ).astype(np.uint32)
+    order = np.argsort(sortable, kind="stable")
+    values_np = np.arange(raw.shape[0], dtype=np.int32)
+    keys = ti.ndarray(ti.f32, shape=raw.shape[0])
+    values = ti.ndarray(ti.i32, shape=raw.shape[0])
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+
+    ti.algorithms.sort(
+        keys, values, method="cuda_device", nan_policy="bitwise"
+    )
+
+    assert np.array_equal(keys.to_numpy().view(np.uint32), raw[order])
+    assert np.array_equal(values.to_numpy(), values_np[order])
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_sort_cuda_device_concurrent_program_workspace_leases():
+    if not impl.get_runtime().prog.cuda_device_radix_sort_available():
+        pytest.skip("CUDA Driver stable sort is unavailable.")
+    n = 4096
+    arrays = []
+    expected = []
+    for worker in range(4):
+        keys_np = (
+            (np.arange(n, dtype=np.int32) * (17 + worker * 2)) % 1021 - 510
+        ).astype(np.int32)
+        values_np = np.arange(n, dtype=np.int32) + worker * n
+        order = np.argsort(keys_np, kind="stable")
+        keys = ti.ndarray(ti.i32, shape=n)
+        values = ti.ndarray(ti.i32, shape=n)
+        keys.from_numpy(keys_np)
+        values.from_numpy(values_np)
+        arrays.append((keys, values))
+        expected.append((keys_np[order], values_np[order]))
+
+    barrier = threading.Barrier(len(arrays))
+    errors = []
+
+    def run(pair):
+        try:
+            barrier.wait()
+            ti.algorithms.sort(pair[0], pair[1], method="cuda_device")
+        except BaseException as exc:  # Preserve worker failures for the caller.
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(pair,)) for pair in arrays]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert all(not thread.is_alive() for thread in threads)
+    assert not errors
+    ti.sync()
+    for (keys, values), (expected_keys, expected_values) in zip(
+        arrays, expected
+    ):
+        assert np.array_equal(keys.to_numpy(), expected_keys)
+        assert np.array_equal(values.to_numpy(), expected_values)
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_sort_cuda_device_non_power_of_two_stability():
+    n = 65539
+    keys_np = (
+        (np.arange(n, dtype=np.int64) * 48271 + 17) % 4093 - 2046
+    ).astype(np.int32)
+    values_np = np.arange(n, dtype=np.int32)
+    order = np.argsort(keys_np, kind="stable")
+    keys = ti.ndarray(ti.i32, shape=n)
+    values = ti.ndarray(ti.i32, shape=n)
+    keys.from_numpy(keys_np)
+    values.from_numpy(values_np)
+
+    ti.algorithms.sort(keys, values, method="cuda_device")
+
+    assert np.array_equal(keys.to_numpy(), keys_np[order])
+    assert np.array_equal(values.to_numpy(), values_np[order])
+
+
 @pytest.mark.parametrize("value_dtype,np_dtype", _SORT_VALUE_DTYPE_CASES)
 @test_utils.test(arch=[ti.cuda])
 def test_sort_cuda_cub_payload_dtypes(value_dtype, np_dtype):
@@ -731,6 +892,15 @@ def test_sort_workspace_metadata_only():
 
     with pytest.raises(ValueError):
         workspace.reserve(n=17)
+
+
+@test_utils.test(arch=[ti.cpu])
+def test_sort_workspace_max_items_rejects_execution_over_capacity():
+    keys = ti.ndarray(ti.i32, shape=17)
+    keys.from_numpy(np.arange(16, -1, -1, dtype=np.int32))
+    workspace = ti.algorithms.SortWorkspace(max_items=16)
+    with pytest.raises(ValueError, match="exceeding max_items=16"):
+        ti.algorithms.sort(keys, workspace=workspace)
 
 
 @test_utils.test(arch=[ti.cpu])

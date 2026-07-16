@@ -1297,6 +1297,38 @@ void export_lang(py::module &m) {
             py::arg("values_stride"), py::arg("output_offset"),
             py::arg("output_stride"), py::arg("op"),
             py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_radix_sort_available",
+           &Program::cuda_device_radix_sort_available)
+      .def("cuda_device_radix_sort_clear_workspace",
+           &Program::cuda_device_radix_sort_clear_workspace,
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_radix_sort_workspace_bytes",
+           &Program::cuda_device_radix_sort_workspace_bytes)
+      .def("cuda_device_radix_sort_ndarray",
+           tracked_native_program_method(&Program::cuda_device_radix_sort_ndarray),
+           py::arg("keys"), py::arg("values"), py::arg("key_type"),
+           py::arg("value_type"), py::arg("nan_policy"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_radix_sort_keys_ndarray",
+           [](Program *program, Ndarray *keys, int key_type, int nan_policy) {
+             return program->cuda_device_radix_sort_ndarray(
+                 keys, nullptr, key_type, 0, nan_policy);
+           },
+           py::arg("keys"), py::arg("key_type"), py::arg("nan_policy"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_radix_sort_dense_field",
+           tracked_native_program_method(&Program::cuda_device_radix_sort_dense_field),
+           py::arg("keys"), py::arg("values"), py::arg("key_type"),
+           py::arg("value_type"), py::arg("n"), py::arg("nan_policy"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("cuda_device_radix_sort_keys_dense_field",
+           [](Program *program, SNode *keys, int key_type, std::size_t n,
+              int nan_policy) {
+             return program->cuda_device_radix_sort_dense_field(
+                 keys, nullptr, key_type, 0, n, nan_policy);
+           },
+           py::arg("keys"), py::arg("key_type"), py::arg("n"),
+           py::arg("nan_policy"), py::call_guard<py::gil_scoped_release>())
       .def("cuda_cub_radix_sort_available",
            &Program::cuda_cub_radix_sort_available)
       .def("cuda_cub_radix_sort_clear_workspace",

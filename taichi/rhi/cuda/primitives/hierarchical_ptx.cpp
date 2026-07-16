@@ -41,6 +41,11 @@ struct KernelSet {
   void *compact_scatter{nullptr};
   void *copy_i32{nullptr};
   void *bucket_scatter{nullptr};
+  std::array<void *, 6> radix_init{};
+  std::array<void *, 2> radix_zero_flags{};
+  std::array<void *, 2> radix_scatter{};
+  void *radix_gather_words{nullptr};
+  void *radix_copy_words{nullptr};
 };
 
 std::once_flag kernel_set_once;
@@ -67,6 +72,28 @@ std::size_t value_type_size(CudaTransformValueType value_type) {
   }
   TI_ERROR("Unsupported CUDA hierarchical primitive value type.");
   return 0;
+}
+
+std::size_t sort_key_type_size(CudaDriverSortKeyType key_type) {
+  switch (key_type) {
+    case CudaDriverSortKeyType::u32:
+    case CudaDriverSortKeyType::i32:
+    case CudaDriverSortKeyType::f32:
+      return sizeof(std::uint32_t);
+    case CudaDriverSortKeyType::u64:
+    case CudaDriverSortKeyType::i64:
+    case CudaDriverSortKeyType::f64:
+      return sizeof(std::uint64_t);
+  }
+  TI_ERROR("Unsupported CUDA Driver stable-sort key type.");
+  return 0;
+}
+
+std::size_t sort_key_type_index(CudaDriverSortKeyType key_type) {
+  const int index = static_cast<int>(key_type);
+  TI_ERROR_IF(index < 0 || index >= 6,
+              "CUDA Driver stable sort received an unsupported key type.");
+  return static_cast<std::size_t>(index);
 }
 
 void load_kernel_set_once() {
@@ -127,6 +154,26 @@ void load_kernel_set_once() {
                              "gather_add_strided_f32");
   driver.module_get_function(&kernel_set.gather_add[1], kernel_set.module,
                              "gather_add_strided_f64");
+  constexpr std::array<const char *, 6> sort_suffixes{"u32", "i32", "f32",
+                                                      "u64", "i64", "f64"};
+  for (std::size_t i = 0; i < sort_suffixes.size(); ++i) {
+    const std::string radix_init_name =
+        std::string("radix_init_") + sort_suffixes[i];
+    driver.module_get_function(&kernel_set.radix_init[i], kernel_set.module,
+                               radix_init_name.c_str());
+  }
+  driver.module_get_function(&kernel_set.radix_zero_flags[0], kernel_set.module,
+                             "radix_zero_flags_u32");
+  driver.module_get_function(&kernel_set.radix_zero_flags[1], kernel_set.module,
+                             "radix_zero_flags_u64");
+  driver.module_get_function(&kernel_set.radix_scatter[0], kernel_set.module,
+                             "radix_scatter_u32");
+  driver.module_get_function(&kernel_set.radix_scatter[1], kernel_set.module,
+                             "radix_scatter_u64");
+  driver.module_get_function(&kernel_set.radix_gather_words, kernel_set.module,
+                             "radix_gather_words");
+  driver.module_get_function(&kernel_set.radix_copy_words, kernel_set.module,
+                             "radix_copy_words");
 }
 
 KernelSet &kernels() {
@@ -269,7 +316,7 @@ bool driver_hierarchical_available() {
   return CUDADriver::get_instance_without_context().detected();
 }
 
-std::size_t driver_inclusive_scan_strided(
+std::size_t driver_inclusive_scan_strided_for_family(
     void *data,
     int num_items,
     CudaTransformValueType value_type,
@@ -277,7 +324,8 @@ std::size_t driver_inclusive_scan_strided(
     std::size_t stride,
     bool reverse,
     void *stream,
-    PrimitiveWorkspaceArena *workspace_arena) {
+    PrimitiveWorkspaceArena *workspace_arena,
+    PrimitiveWorkspaceFamily workspace_family) {
   TI_ERROR_IF(num_items < 0,
               "CUDA Driver scan expects non-negative num_items.");
   TI_ERROR_IF(!data, "CUDA Driver scan received a null data pointer.");
@@ -293,8 +341,8 @@ std::size_t driver_inclusive_scan_strided(
   std::optional<PrimitiveWorkspaceArena::Lease<DriverWorkspace>> workspace;
   std::array<void *, 8> level_ptrs{};
   if (layout.level_count != 0) {
-    workspace.emplace(acquire_workspace(
-        workspace_arena, PrimitiveWorkspaceFamily::scan, stream));
+    workspace.emplace(
+        acquire_workspace(workspace_arena, workspace_family, stream));
     (*workspace)->ensure(layout.bytes);
     for (std::size_t i = 0; i < layout.level_count; ++i) {
       level_ptrs[i] = byte_offset((*workspace)->data(), layout.offsets[i]);
@@ -351,6 +399,20 @@ std::size_t driver_inclusive_scan_strided(
     return (*workspace)->allocated_bytes();
   }
   return 0;
+}
+
+std::size_t driver_inclusive_scan_strided(
+    void *data,
+    int num_items,
+    CudaTransformValueType value_type,
+    std::size_t offset,
+    std::size_t stride,
+    bool reverse,
+    void *stream,
+    PrimitiveWorkspaceArena *workspace_arena) {
+  return driver_inclusive_scan_strided_for_family(
+      data, num_items, value_type, offset, stride, reverse, stream,
+      workspace_arena, PrimitiveWorkspaceFamily::scan);
 }
 
 std::size_t driver_reduce_strided(void *values,
@@ -862,6 +924,173 @@ std::size_t driver_grouped_reduce_strided(void *keys,
                                     value_type, values_offset, values_stride,
                                     keys_offset, keys_stride, output_offset,
                                     output_stride, stream);
+}
+
+std::size_t driver_stable_radix_sort_strided(
+    void *keys,
+    void *values,
+    int num_items,
+    CudaDriverSortKeyType key_type,
+    int value_words,
+    std::size_t keys_offset,
+    std::size_t keys_stride,
+    std::size_t values_offset,
+    std::size_t values_stride,
+    bool has_values,
+    int nan_policy,
+    void *stream,
+    PrimitiveWorkspaceArena *workspace_arena) {
+  TI_ERROR_IF(num_items < 0 || (has_values && value_words <= 0),
+              "CUDA Driver stable sort received an invalid size.");
+  TI_ERROR_IF(nan_policy != 0 && nan_policy != 1,
+              "CUDA Driver stable sort received an invalid NaN policy.");
+  const std::size_t key_size = sort_key_type_size(key_type);
+  const std::size_t key_words = key_size / sizeof(std::uint32_t);
+  const std::size_t value_size =
+      static_cast<std::size_t>(std::max(value_words, 0)) *
+      sizeof(std::uint32_t);
+  TI_ERROR_IF((num_items > 0 && (!keys || (has_values && !values))) ||
+                  keys_stride < key_size ||
+                  (has_values && values_stride < value_size),
+              "CUDA Driver stable sort received an invalid pointer or stride.");
+  if (num_items <= 1) {
+    return 0;
+  }
+
+  const std::size_t n = static_cast<std::size_t>(num_items);
+  auto checked_bytes = [n](std::size_t item_size) {
+    TI_ERROR_IF(item_size != 0 &&
+                    n > std::numeric_limits<std::size_t>::max() / item_size,
+                "CUDA Driver stable sort workspace size overflow.");
+    return n * item_size;
+  };
+  std::size_t cursor = 0;
+  auto reserve = [&cursor](std::size_t bytes) {
+    constexpr std::size_t alignment = 256;
+    TI_ERROR_IF(
+        cursor > std::numeric_limits<std::size_t>::max() - (alignment - 1),
+        "CUDA Driver stable sort workspace alignment overflow.");
+    cursor = (cursor + alignment - 1) & ~(alignment - 1);
+    TI_ERROR_IF(bytes > std::numeric_limits<std::size_t>::max() - cursor,
+                "CUDA Driver stable sort workspace size overflow.");
+    const std::size_t offset = cursor;
+    cursor += bytes;
+    return offset;
+  };
+
+  const std::size_t sortable_a_offset = reserve(checked_bytes(key_size));
+  const std::size_t sortable_b_offset = reserve(checked_bytes(key_size));
+  const std::size_t indices_a_offset =
+      reserve(checked_bytes(sizeof(std::uint32_t)));
+  const std::size_t indices_b_offset =
+      reserve(checked_bytes(sizeof(std::uint32_t)));
+  const std::size_t prefix_offset =
+      reserve(checked_bytes(sizeof(std::int32_t)));
+  const std::size_t keys_output_offset = reserve(checked_bytes(key_size));
+  const std::size_t values_output_offset =
+      has_values ? reserve(checked_bytes(value_size)) : cursor;
+
+  auto workspace = acquire_workspace(
+      workspace_arena, PrimitiveWorkspaceFamily::ordering, stream);
+  workspace->ensure(cursor);
+  auto *base = static_cast<std::uint8_t *>(workspace->data());
+  void *sortable_a = base + sortable_a_offset;
+  void *sortable_b = base + sortable_b_offset;
+  void *indices_a = base + indices_a_offset;
+  void *indices_b = base + indices_b_offset;
+  void *prefix = base + prefix_offset;
+  void *keys_output = base + keys_output_offset;
+  void *values_output =
+      has_values ? static_cast<void *>(base + values_output_offset) : nullptr;
+
+  auto &kernel = kernels();
+  const std::size_t type_index = sort_key_type_index(key_type);
+  const std::size_t width_index = key_size == sizeof(std::uint32_t) ? 0 : 1;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+
+  void *keys_arg = keys;
+  std::uint64_t keys_offset_arg = keys_offset;
+  std::uint64_t keys_stride_arg = keys_stride;
+  void *sortable_arg = sortable_a;
+  void *indices_arg = indices_a;
+  std::int32_t nan_policy_arg = nan_policy;
+  std::vector<void *> init_args{
+      &keys_arg,    &keys_offset_arg, &keys_stride_arg, &sortable_arg,
+      &indices_arg, &count_arg,       &nan_policy_arg};
+  CUDAContext::get_instance().launch(kernel.radix_init[type_index],
+                                     "cuda_driver_radix_init", init_args, {},
+                                     grid, kBlockDim, 0, stream);
+
+  const std::uint32_t bit_count = static_cast<std::uint32_t>(key_size * 8);
+  std::size_t scan_bytes = 0;
+  for (std::uint32_t bit = 0; bit < bit_count; ++bit) {
+    void *keys_in_arg = sortable_a;
+    void *prefix_arg = prefix;
+    std::vector<void *> flag_args{&keys_in_arg, &prefix_arg, &count_arg, &bit};
+    CUDAContext::get_instance().launch(
+        kernel.radix_zero_flags[width_index], "cuda_driver_radix_zero_flags",
+        flag_args, {}, grid, kBlockDim, 0, stream);
+    scan_bytes = std::max(
+        scan_bytes, driver_inclusive_scan_strided_for_family(
+                        prefix, num_items, CudaTransformValueType::i32, 0,
+                        sizeof(std::int32_t), false, stream, workspace_arena,
+                        PrimitiveWorkspaceFamily::ordering_aux));
+
+    void *indices_in_arg = indices_a;
+    void *keys_out_arg = sortable_b;
+    void *indices_out_arg = indices_b;
+    std::vector<void *> scatter_args{
+        &keys_in_arg,     &indices_in_arg, &prefix_arg, &keys_out_arg,
+        &indices_out_arg, &count_arg,      &bit};
+    CUDAContext::get_instance().launch(
+        kernel.radix_scatter[width_index], "cuda_driver_radix_scatter",
+        scatter_args, {}, grid, kBlockDim, 0, stream);
+    std::swap(sortable_a, sortable_b);
+    std::swap(indices_a, indices_b);
+  }
+
+  auto launch_gather = [&](void *src, std::size_t src_offset,
+                           std::size_t src_stride, void *dst,
+                           std::uint32_t item_words) {
+    void *src_arg = src;
+    std::uint64_t src_offset_arg = src_offset;
+    std::uint64_t src_stride_arg = src_stride;
+    void *indices_arg = indices_a;
+    void *dst_arg = dst;
+    std::vector<void *> args{&src_arg,     &src_offset_arg, &src_stride_arg,
+                             &indices_arg, &dst_arg,        &count_arg,
+                             &item_words};
+    CUDAContext::get_instance().launch(kernel.radix_gather_words,
+                                       "cuda_driver_radix_gather", args, {},
+                                       grid, kBlockDim, 0, stream);
+  };
+  auto launch_copy = [&](void *src, void *dst, std::size_t dst_offset,
+                         std::size_t dst_stride, std::uint32_t item_words) {
+    void *src_arg = src;
+    void *dst_arg = dst;
+    std::uint64_t dst_offset_arg = dst_offset;
+    std::uint64_t dst_stride_arg = dst_stride;
+    std::vector<void *> args{&src_arg,        &dst_arg,   &dst_offset_arg,
+                             &dst_stride_arg, &count_arg, &item_words};
+    CUDAContext::get_instance().launch(kernel.radix_copy_words,
+                                       "cuda_driver_radix_copy", args, {}, grid,
+                                       kBlockDim, 0, stream);
+  };
+
+  launch_gather(keys, keys_offset, keys_stride, keys_output,
+                static_cast<std::uint32_t>(key_words));
+  if (has_values) {
+    launch_gather(values, values_offset, values_stride, values_output,
+                  static_cast<std::uint32_t>(value_words));
+  }
+  launch_copy(keys_output, keys, keys_offset, keys_stride,
+              static_cast<std::uint32_t>(key_words));
+  if (has_values) {
+    launch_copy(values_output, values, values_offset, values_stride,
+                static_cast<std::uint32_t>(value_words));
+  }
+  return workspace->allocated_bytes() + scan_bytes;
 }
 
 }  // namespace taichi::lang::cuda

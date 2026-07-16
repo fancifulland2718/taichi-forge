@@ -242,6 +242,7 @@ _NATIVE_PRIMITIVE_AVAILABLE_BY_ARCH = {
         "cuda_device_histogram_available",
         "cuda_device_compact_available",
         "cuda_device_reduce_available",
+        "cuda_device_radix_sort_available",
         "cuda_device_scan_available",
         "cuda_cub_histogram_available",
         "cuda_cub_radix_sort_available",
@@ -3942,6 +3943,7 @@ class SortWorkspace(_OrderApplyWorkspaceMixin):
         self._vulkan_graph_u32_buffers = {}
         self._vulkan_graph_u32_execs = {}
         self._init_order_apply_workspace("sort")
+        self._cuda_device_active = False
         self._cuda_cub_active = False
         self._vulkan_native_active = False
 
@@ -3958,6 +3960,8 @@ class SortWorkspace(_OrderApplyWorkspaceMixin):
         return self
 
     def clear(self):
+        if self._cuda_device_active:
+            self._clear_cuda_device_backend_workspace()
         if self._cuda_cub_active:
             self._clear_cuda_cub_backend_workspace()
         if self._vulkan_native_active:
@@ -3969,8 +3973,15 @@ class SortWorkspace(_OrderApplyWorkspaceMixin):
         self._vulkan_graph_u32_buffers.clear()
         self._vulkan_graph_u32_execs.clear()
         self._clear_order_apply_workspace()
+        self._cuda_device_active = False
         self._cuda_cub_active = False
         self._vulkan_native_active = False
+
+    def _clear_cuda_device_backend_workspace(self):
+        from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+        prog = impl.get_runtime().prog
+        _call_optional_prog_method(prog, "cuda_device_radix_sort_clear_workspace")
 
     def _clear_cuda_cub_backend_workspace(self):
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
@@ -7562,6 +7573,15 @@ def _check_sort_request(
         )
     if workspace is not None and not isinstance(workspace, SortWorkspace):
         raise TypeError("workspace must be a SortWorkspace instance or None.")
+    if (
+        workspace is not None
+        and workspace.max_items is not None
+        and keys.shape[0] > workspace.max_items
+    ):
+        raise ValueError(
+            f"Requested {keys.shape[0]} sort items, exceeding "
+            f"max_items={workspace.max_items}."
+        )
 
 
 def _stable_sort_order(keys_np, descending=False, nan_policy="last"):
@@ -7993,6 +8013,69 @@ def _cpu_native_stable_sort(keys, values=None, workspace=None, descending=False,
         )
 
 
+def _cuda_device_sort_native(
+    keys,
+    values=None,
+    workspace=None,
+    nan_policy="last",
+):
+    if current_cfg().arch != cuda:
+        raise RuntimeError("method='cuda_device' is supported only on CUDA.")
+    if not isinstance(keys, Ndarray):
+        raise NotImplementedError(
+            "method='cuda_device' currently supports only 1D ti.ndarray keys."
+        )
+    if values is not None and not isinstance(values, Ndarray):
+        raise NotImplementedError(
+            "method='cuda_device' currently supports only ti.ndarray payloads."
+        )
+    if keys.dtype not in _SORT_KEY_DTYPES:
+        raise TypeError(
+            "method='cuda_device' supports ti.u32, ti.i32, ti.f32, ti.u64, "
+            "ti.i64, and ti.f64 keys."
+        )
+    if values is not None and not _supports_opaque_raw_payload(
+        values, _SORT_VALUE_DTYPES
+    ):
+        raise TypeError(
+            "method='cuda_device' supports scalar numeric and "
+            "StructNdarray payloads."
+        )
+    if keys.shape[0] <= 1:
+        return
+    from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
+
+    prog = impl.get_runtime().prog
+    if not _prog_available(prog, "cuda_device_radix_sort_available"):
+        raise RuntimeError(
+            "method='cuda_device' requires the CUDA Driver stable-sort provider."
+        )
+    key_type = _SORT_KEY_TYPE[keys.dtype]
+    value_type = (
+        _raw_payload_value_type(values, _SORT_VALUE_TYPE, "sort()")
+        if values is not None
+        else 0
+    )
+    nan_policy_id = {"last": 0, "bitwise": 1}[nan_policy]
+    temp_bytes = (
+        _prog_method(prog, "cuda_device_radix_sort_ndarray")(
+            keys.arr, values.arr, key_type, value_type, nan_policy_id
+        )
+        if values is not None
+        else _prog_method(prog, "cuda_device_radix_sort_keys_ndarray")(
+            keys.arr, key_type, nan_policy_id
+        )
+    )
+    if workspace is not None:
+        workspace._cuda_device_active = True
+        workspace.workspace_bytes_current = max(
+            workspace.workspace_bytes_current, temp_bytes
+        )
+        workspace.workspace_bytes_peak = max(
+            workspace.workspace_bytes_peak, workspace.workspace_bytes_current
+        )
+
+
 def _cuda_cub_sort_native(
     keys,
     values=None,
@@ -8070,8 +8153,10 @@ def _member_sort_backend_method(method):
     arch = current_cfg().arch
     if method == "cpu_native" or (method == "auto" and arch in (x64, arm64)):
         return "cpu_native", "cpu_native"
-    if method in _CUDA_CUB_SORT_METHODS or (method == "auto" and arch == cuda):
-        return "cuda_cub_native" if method == "auto" else method, "cuda_device"
+    if method == "cuda_device" or (method == "auto" and arch == cuda):
+        return "cuda_device", "cuda_device"
+    if method in _CUDA_CUB_SORT_METHODS:
+        return method, "cuda_device"
     if method in ("vulkan_native_radix_u32", "vulkan_radix_u32") or (
         method == "auto" and arch == vulkan
     ):
@@ -8347,13 +8432,43 @@ def _try_native_dense_field_sort(
         if method_obj is None:
             return False
         temp_bytes = method_obj(*call_args)
-    elif arch == cuda and method in _CUDA_CUB_SORT_METHODS.union({"auto"}):
+    elif arch == cuda and method in ("auto", "cuda_device"):
+        if descending:
+            return False
+        if not _prog_available(prog, "cuda_device_radix_sort_available"):
+            return False
+        if values is None:
+            method_obj = _prog_method(
+                prog, "cuda_device_radix_sort_keys_dense_field"
+            )
+            call_args = (
+                key_view.snode,
+                key_type,
+                n,
+                {"last": 0, "bitwise": 1}[nan_policy],
+            )
+        else:
+            method_obj = _prog_method(prog, "cuda_device_radix_sort_dense_field")
+            call_args = (
+                key_view.snode,
+                value_view.snode,
+                key_type,
+                value_type,
+                n,
+                {"last": 0, "bitwise": 1}[nan_policy],
+            )
+        if method_obj is None:
+            return False
+        temp_bytes = method_obj(*call_args)
+    elif arch == cuda and method in _CUDA_CUB_SORT_METHODS:
         if descending:
             return False
         if not _prog_available(prog, "cuda_cub_radix_sort_available"):
             return False
         if values is None:
-            method_obj = _prog_method(prog, "cuda_cub_radix_sort_keys_dense_field")
+            method_obj = _prog_method(
+                prog, "cuda_cub_radix_sort_keys_dense_field"
+            )
             call_args = (
                 key_view.snode,
                 key_type,
@@ -8400,7 +8515,10 @@ def _try_native_dense_field_sort(
         return False
     if workspace is not None:
         if arch == cuda:
-            workspace._cuda_cub_active = True
+            if method in ("auto", "cuda_device"):
+                workspace._cuda_device_active = True
+            else:
+                workspace._cuda_cub_active = True
         elif arch == vulkan:
             workspace._vulkan_native_active = True
         workspace.workspace_bytes_current = max(
@@ -8525,12 +8643,11 @@ def _auto_sort(keys, values=None, workspace=None, nan_policy="last", descending=
         from taichi_forge.lang import impl  # pylint: disable=import-outside-toplevel
 
         prog = impl.get_runtime().prog
-        if _prog_available(prog, "cuda_cub_radix_sort_available"):
-            _cuda_cub_sort_native(
+        if _prog_available(prog, "cuda_device_radix_sort_available"):
+            _cuda_device_sort_native(
                 keys,
                 values,
                 workspace=workspace,
-                method="cuda_cub_native",
                 nan_policy=nan_policy,
             )
             return
@@ -8569,7 +8686,7 @@ def sort(
     """Sort keys, optionally carrying a value payload.
 
     This is a Taichi Forge extension. `auto` selects the native CPU stable sort,
-    native CUDA CUB DeviceRadixSort path on CUDA when available, the native
+    CUDA Driver stable radix fallback on CUDA when available, the native
     Vulkan radix8 path for supported ndarray key dtypes on Vulkan, and otherwise
     falls back to a host stable sort. Use ``method="legacy"`` for the original
     odd-even merge implementation.
@@ -8636,6 +8753,19 @@ def sort(
         ):
             return
         _vulkan_native_radix_sort_u32(
+            keys, values, workspace=workspace, nan_policy=nan_policy
+        )
+    elif method == "cuda_device":
+        if _try_native_dense_field_sort(
+            keys,
+            values,
+            method=method,
+            workspace=workspace,
+            descending=descending,
+            nan_policy=nan_policy,
+        ):
+            return
+        _cuda_device_sort_native(
             keys, values, workspace=workspace, nan_policy=nan_policy
         )
     elif method in _CUDA_CUB_SORT_METHODS:

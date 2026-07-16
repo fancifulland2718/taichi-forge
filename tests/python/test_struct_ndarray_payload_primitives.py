@@ -187,6 +187,17 @@ def test_struct_ndarray_payload_cuda_native_primitives():
     _run_struct_bucket_builder("cuda_device")
 
 
+@test_utils.test(arch=[ti.cuda])
+def test_struct_ndarray_payload_cuda_driver_sort():
+    prog = impl.get_runtime().prog
+    if not (
+        hasattr(prog, "cuda_device_radix_sort_available")
+        and prog.cuda_device_radix_sort_available()
+    ):
+        pytest.skip("CUDA Driver raw-payload sort is unavailable.")
+    _run_struct_sort("cuda_device")
+
+
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_struct_ndarray_payload_vulkan_native_primitives():
     prog = impl.get_runtime().prog
