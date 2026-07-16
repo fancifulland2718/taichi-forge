@@ -2848,12 +2848,14 @@ void export_lang(py::module &m) {
                     std::vector<int>>(),
            py::arg("tag"), py::arg("name"), py::arg("channel_format"),
            py::arg("num_channels"), py::arg("shape"))
+      .def_readonly("tag", &aot::Arg::tag)
       .def_readonly("name", &aot::Arg::name)
       .def_readonly("element_shape", &aot::Arg::element_shape)
       .def_readonly("texture_shape", &aot::Arg::element_shape)
       .def_readonly("field_dim", &aot::Arg::field_dim)
       .def_readonly("num_channels", &aot::Arg::num_channels)
       .def("dtype", &aot::Arg::dtype)
+      .def("element_dtype", &aot::Arg::element_dtype)
       .def("channel_format", &aot::Arg::dtype);
 
   py::class_<Node>(m, "Node");  // NOLINT(bugprone-unused-raii)

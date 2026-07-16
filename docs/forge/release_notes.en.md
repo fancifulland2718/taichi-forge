@@ -132,6 +132,11 @@ retroactively attributed to the 0.5.0 artifact:
   declared formats. Signed and unsigned r/rg/rgba 16/32-bit images have matching
   frontend, SPIR-V, and Vulkan format contracts; the prior r16u-family UNORM
   mapping has been corrected to UINT.
+- Kernel launch, Graph, and AOT type checks now share one internal structural
+  descriptor for scalar, vector, matrix, ndarray, texture, and StructNdarray
+  arguments. Graph ndarray metadata preserves tensor element types end to end;
+  StructNdarray remains supported by ordinary kernels and is rejected explicitly
+  by Graph until its serialized schema can represent structured elements.
 
 ## 0.1.0
 

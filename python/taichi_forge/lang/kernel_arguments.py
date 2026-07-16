@@ -9,8 +9,8 @@ from taichi_forge.lang.expr import Expr
 from taichi_forge.lang.matrix import MatrixType
 from taichi_forge.lang.struct import StructType
 from taichi_forge.lang.util import cook_dtype
+from taichi_forge.types._argument_descriptor import describe_element_type
 from taichi_forge.types.primitive_types import RefType, u64
-from taichi_forge.types.compound_types import CompoundType
 
 
 class KernelArgument:
@@ -74,11 +74,12 @@ def get_type_for_kernel_args(dtype, name):
     if isinstance(dtype, StructType):
         elements = []
         for k, element_type in dtype.members.items():
-            if isinstance(element_type, CompoundType):
+            descriptor = describe_element_type(element_type)
+            if descriptor.category in ("tensor", "struct"):
                 new_dtype = get_type_for_kernel_args(element_type, k)
                 elements.append([new_dtype, k])
             else:
-                elements.append([element_type, k])
+                elements.append([descriptor.logical_type, k])
         return _ti_core.get_type_factory_instance().get_struct_type(elements)
     # Assuming dtype is a primitive type
     return dtype

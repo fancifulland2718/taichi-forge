@@ -12,21 +12,21 @@ from taichi_forge.lang.matrix import (
     VectorNdarray,
     VectorType,
 )
-from taichi_forge.lang.util import cook_dtype
 from taichi_forge.types.annotations import template
 from taichi_forge.types.ndarray_type import NdarrayType
+from taichi_forge.types._argument_descriptor import (
+    describe_annotation,
+    describe_element_type,
+    describe_symbolic_arg,
+    python_compound_type,
+)
 from taichi_forge.types.texture_type import RWTextureType, TextureType
 
 template_types = (NdarrayType, TextureType, template)
 
 
 def check_type_match(lhs, rhs):
-    if isinstance(lhs, MatrixType) and isinstance(rhs, MatrixType):
-        return lhs.n == rhs.n and lhs.m == rhs.m and (lhs.dtype == rhs.dtype or lhs.dtype is None or rhs.dtype is None)
-    if isinstance(lhs, MatrixType) or isinstance(rhs, MatrixType):
-        return False
-
-    return cook_dtype(lhs) == cook_dtype(rhs)
+    return describe_element_type(lhs).matches(describe_element_type(rhs))
 
 
 def produce_injected_args_from_template(kernel, template_args):
@@ -52,25 +52,9 @@ def _produce_injected_arg(arg, symbolic_arg=None, has_symbolic_arg=False):
     anno = arg.annotation
     if isinstance(anno, NdarrayType):
         if has_symbolic_arg:
-            # TODO: reconstruct dtype to be TensorType from taichi_core instead
-            # of the Python ones.
-            element_dim = len(symbolic_arg.element_shape)
-            if element_dim == 0 or symbolic_arg.element_shape == (1,):
-                dtype = symbolic_arg.dtype()
-            elif element_dim == 1:
-                dtype = VectorType(
-                    symbolic_arg.element_shape[0], symbolic_arg.dtype()
-                )
-            elif element_dim == 2:
-                dtype = MatrixType(
-                    symbolic_arg.element_shape[0],
-                    symbolic_arg.element_shape[1],
-                    2,
-                    symbolic_arg.dtype(),
-                )
-            else:
-                raise TaichiCompilationError("Not supported")
-            ndim = symbolic_arg.field_dim
+            symbolic_descriptor = describe_symbolic_arg(symbolic_arg)
+            dtype = python_compound_type(symbolic_descriptor.element)
+            ndim = symbolic_descriptor.ndim
         else:
             ndim = anno.ndim
             dtype = anno.dtype
@@ -81,10 +65,16 @@ def _produce_injected_arg(arg, symbolic_arg=None, has_symbolic_arg=False):
                 f"annotated ndim={anno.ndim}"
             )
 
-        if anno.dtype is not None and not check_type_match(dtype, anno.dtype):
+        expected_descriptor = describe_annotation(anno)
+        if (
+            anno.dtype is not None
+            and not expected_descriptor.element.matches(dtype)
+        ):
             raise TaichiCompilationError(
-                f" Arg {arg.name}'s dtype {dtype.to_string()} doesn't match "
-                f"kernel's annotated dtype={anno.dtype.to_string()}"
+                f" Arg {arg.name}'s dtype "
+                f"{describe_element_type(dtype).display_name()} doesn't match "
+                f"kernel's annotated dtype="
+                f"{expected_descriptor.element.display_name()}"
             )
 
         shape = (2,) * ndim
@@ -102,21 +92,26 @@ def _produce_injected_arg(arg, symbolic_arg=None, has_symbolic_arg=False):
         return Texture(Format.rgba8, (2,) * anno.num_dimensions)
     if isinstance(anno, MatrixType):
         if has_symbolic_arg:
-            symbolic_mat_n = symbolic_arg.element_shape[0]
-            symbolic_mat_m = symbolic_arg.element_shape[1]
-            if symbolic_mat_m != anno.m or symbolic_mat_n != anno.n:
+            expected = describe_annotation(anno).element
+            actual = describe_symbolic_arg(symbolic_arg).element
+            if not expected.matches(actual):
                 raise RuntimeError(
-                    f"Matrix dimension mismatch, expected ({anno.n}, "
-                    f"{anno.m}) but dispatched shape ({symbolic_mat_n}, "
-                    f"{symbolic_mat_m})."
+                    f"Matrix descriptor mismatch, expected "
+                    f"{expected.display_name()} but dispatched "
+                    f"{actual.display_name()}."
                 )
         return Matrix([0] * anno.n * anno.m, dt=anno.dtype)
 
-    dtype = symbolic_arg.dtype() if has_symbolic_arg else anno
-    if not check_type_match(dtype, anno):
+    dtype = (
+        describe_symbolic_arg(symbolic_arg).element
+        if has_symbolic_arg
+        else describe_element_type(anno)
+    )
+    expected = describe_element_type(anno)
+    if not expected.matches(dtype):
         raise TaichiCompilationError(
-            f" Arg {arg.name}'s dtype {dtype.to_string()} doesn't match "
-            f"kernel's annotated dtype={anno.to_string()}"
+            f" Arg {arg.name}'s dtype {dtype.display_name()} doesn't match "
+            f"kernel's annotated dtype={expected.display_name()}"
         )
     # For primitive types, we can just inject a dummy value.
     return 0
@@ -141,13 +136,11 @@ def _validate_graph_template_exemplar(arg, symbolic_arg, exemplar):
             raise TaichiCompilationError(
                 f"Graph template exemplar {arg.name} must be a Taichi ndarray"
             )
-        symbolic_element_shape = tuple(symbolic_arg.element_shape)
-        if symbolic_element_shape == (1,):
-            symbolic_element_shape = ()
+        symbolic_descriptor = describe_symbolic_arg(symbolic_arg)
+        exemplar_descriptor = describe_element_type(exemplar.element_type)
         if (
-            len(exemplar.shape) != symbolic_arg.field_dim
-            or tuple(exemplar.element_shape) != symbolic_element_shape
-            or not check_type_match(exemplar.dtype, symbolic_arg.dtype())
+            len(exemplar.shape) != symbolic_descriptor.ndim
+            or not symbolic_descriptor.element.matches(exemplar_descriptor)
         ):
             raise TaichiCompilationError(
                 f"Graph template exemplar {arg.name} does not match its "

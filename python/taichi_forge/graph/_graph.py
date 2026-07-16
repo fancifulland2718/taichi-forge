@@ -10,6 +10,9 @@ from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang._texture import Texture
 from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeError
 from taichi_forge.lang.matrix import Matrix, MatrixType
+from taichi_forge.types._argument_descriptor import (
+    describe_element_type,
+)
 from taichi_forge.types.texture_type import FORMAT2TY_CH, TY_CH2FORMAT
 from taichi_forge.graph._native import compile_native_graph_node
 
@@ -1323,15 +1326,7 @@ def _deprecate_arg_args(kwargs: Dict[str, Any]):
             )
 
     if tag == ArgKind.NDARRAY:
-        if "element_shape" not in kwargs:
-            if "dtype" in kwargs:
-                dtype = kwargs["dtype"]
-                if isinstance(dtype, MatrixType):
-                    kwargs["dtype"] = dtype.dtype
-                    kwargs["element_shape"] = dtype.get_shape()
-                else:
-                    kwargs["element_shape"] = ()
-        else:
+        if "element_shape" in kwargs:
             raise TaichiRuntimeError(
                 "The element_shape argument for ndarray is deprecated in v1.6.0, and it is removed in v1.7.0. "
                 "Please use vector or matrix data type instead."
@@ -1393,9 +1388,12 @@ def _make_arg_scalar(kwargs: Dict[str, Any]):
     _check_args(kwargs, allowed_kwargs)
     name = kwargs["name"]
     dtype = kwargs["dtype"]
-    if isinstance(dtype, MatrixType):
+    descriptor = describe_element_type(dtype)
+    if descriptor.category != "scalar":
         raise TaichiRuntimeError(f"Tag ArgKind.SCALAR must specify a scalar type, but found {type(dtype)}.")
-    return _ti_core.Arg(ArgKind.SCALAR, name, dtype, 0, [])
+    return _ti_core.Arg(
+        ArgKind.SCALAR, name, descriptor.logical_type, 0, []
+    )
 
 
 def _make_arg_ndarray(kwargs: Dict[str, Any]):
@@ -1404,16 +1402,25 @@ def _make_arg_ndarray(kwargs: Dict[str, Any]):
         "name",
         "dtype",
         "ndim",
-        "element_shape",
     ]
     _check_args(kwargs, allowed_kwargs)
     name = kwargs["name"]
     ndim = kwargs["ndim"]
     dtype = kwargs["dtype"]
-    element_shape = kwargs["element_shape"]
-    if isinstance(dtype, MatrixType):
-        raise TaichiRuntimeError(f"Tag ArgKind.NDARRAY must specify a scalar type, but found {dtype}.")
-    return _ti_core.Arg(ArgKind.NDARRAY, name, dtype, ndim, element_shape)
+    descriptor = describe_element_type(dtype)
+    if not descriptor.is_complete:
+        raise TaichiRuntimeError(
+            f"Tag ArgKind.NDARRAY requires a concrete scalar, vector, matrix, "
+            f"or struct element type, but found {dtype}."
+        )
+    if descriptor.category == "struct":
+        raise TaichiRuntimeError(
+            "Graph StructNdarray arguments are not supported by the current "
+            "serialized Graph schema."
+        )
+    return _ti_core.Arg(
+        ArgKind.NDARRAY, name, descriptor.logical_type, ndim, []
+    )
 
 
 def _make_arg_matrix(kwargs: Dict[str, Any]):

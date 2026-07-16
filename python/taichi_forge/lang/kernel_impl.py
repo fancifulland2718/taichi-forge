@@ -50,6 +50,7 @@ from taichi_forge.types import (
     texture_type,
 )
 from taichi_forge.types.compound_types import CompoundType
+from taichi_forge.types._argument_descriptor import describe_annotation
 from taichi_forge.types.utils import is_signed
 
 from taichi_forge import _logging
@@ -651,23 +652,25 @@ class TaichiCallableTemplateMapper:
                 for index, (name, dtype) in enumerate(anno.members.items())
             )
         if isinstance(anno, texture_type.TextureType):
+            descriptor = describe_annotation(anno)
             if not isinstance(arg, taichi_forge.lang._texture.Texture):
                 raise TaichiRuntimeTypeError(f"Argument {arg_name} must be a texture, got {type(arg)}")
-            if arg.num_dims != anno.num_dimensions:
+            if arg.num_dims != descriptor.ndim:
                 raise TaichiRuntimeTypeError(
-                    f"TextureType dimension mismatch for argument {arg_name}: expected {anno.num_dimensions}, got {arg.num_dims}"
+                    f"TextureType dimension mismatch for argument {arg_name}: expected {descriptor.ndim}, got {arg.num_dims}"
                 )
             return (arg.num_dims,)
         if isinstance(anno, texture_type.RWTextureType):
+            descriptor = describe_annotation(anno)
             if not isinstance(arg, taichi_forge.lang._texture.Texture):
                 raise TaichiRuntimeTypeError(f"Argument {arg_name} must be a texture, got {type(arg)}")
-            if arg.num_dims != anno.num_dimensions:
+            if arg.num_dims != descriptor.ndim:
                 raise TaichiRuntimeTypeError(
-                    f"RWTextureType dimension mismatch for argument {arg_name}: expected {anno.num_dimensions}, got {arg.num_dims}"
+                    f"RWTextureType dimension mismatch for argument {arg_name}: expected {descriptor.ndim}, got {arg.num_dims}"
                 )
-            if arg.fmt != anno.fmt:
+            if arg.fmt != descriptor.fmt:
                 raise TaichiRuntimeTypeError(
-                    f"RWTextureType format mismatch for argument {arg_name}: expected {anno.fmt}, got {arg.fmt}"
+                    f"RWTextureType format mismatch for argument {arg_name}: expected {descriptor.fmt}, got {arg.fmt}"
                 )
             # (penguinliong) '0' is the assumed LOD level. We currently don't
             # support mip-mapping.

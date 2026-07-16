@@ -101,6 +101,10 @@
 - Vulkan storage image 现在根据声明格式选择 f32、i32 或 u32 sampled value；r/rg/rgba
   16/32-bit 有符号与无符号 image 的 frontend、SPIR-V 和 Vulkan format 合同已经一致，
   原先 r16u 格式族错误使用 UNORM 的映射已改为 UINT。
+- kernel launch、Graph 与 AOT 的类型检查现在共享同一个内部结构描述，统一覆盖 scalar、
+  vector、matrix、ndarray、texture 与 StructNdarray。Graph ndarray metadata 会端到端
+  保留 tensor element type；StructNdarray 继续受普通 kernel 支持，但在序列化 Graph
+  schema 能表达结构化 element 之前会由 Graph 明确拒绝。
 
 ## 0.1.0
 

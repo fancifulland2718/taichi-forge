@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <utility>
 #include "taichi/ir/type.h"
+#include "taichi/ir/type_factory.h"
 #include "taichi/program/callable.h"
 #include "taichi/aot/module_data.h"
 #include "taichi/program/compile_config.h"
@@ -96,11 +97,37 @@ struct Arg {
     } else {
       field_dim = dim;
     }
-    dtype_id = dtype->as<PrimitiveType>()->type;
+    DataType scalar_dtype = dtype;
+    if (dtype->is<TensorType>()) {
+      TI_ERROR_IF(tag == ArgKind::kTexture || tag == ArgKind::kRWTexture,
+                  "Texture Graph arguments cannot use a TensorType dtype");
+      const auto inferred_shape = dtype->as<TensorType>()->get_shape();
+      TI_ERROR_IF(!this->element_shape.empty() &&
+                      this->element_shape != inferred_shape,
+                  "Graph argument {} specifies conflicting tensor shapes",
+                  name);
+      this->element_shape = inferred_shape;
+      scalar_dtype = dtype->as<TensorType>()->get_element_type();
+    }
+    TI_ERROR_IF(!scalar_dtype->is<PrimitiveType>(),
+                "Graph argument {} requires a primitive or tensor dtype",
+                name);
+    dtype_id = scalar_dtype->as<PrimitiveType>()->type;
   }
 
   DataType dtype() const {
     return PrimitiveType::get(dtype_id);
+  }
+
+  DataType element_dtype() const {
+    TI_ERROR_IF(tag == ArgKind::kTexture || tag == ArgKind::kRWTexture,
+                "Texture Graph arguments do not expose an element dtype");
+    DataType scalar_dtype = dtype();
+    if (element_shape.empty()) {
+      return scalar_dtype;
+    }
+    return TypeFactory::get_instance().create_tensor_type(element_shape,
+                                                           scalar_dtype);
   }
 
   bool operator==(const Arg &other) const {

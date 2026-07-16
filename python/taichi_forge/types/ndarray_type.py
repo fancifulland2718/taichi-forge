@@ -1,6 +1,6 @@
 from taichi_forge.lang.enums import Layout, to_boundary_enum
-from taichi_forge.types.compound_types import CompoundType, matrix, vector
-from taichi_forge.lang import util
+from taichi_forge.types.compound_types import matrix, vector
+from taichi_forge.types._argument_descriptor import describe_element_type
 
 
 class NdarrayTypeMetadata:
@@ -15,7 +15,8 @@ class NdarrayTypeMetadata:
 #                with respect to element_dim and element_shape.
 #                Remove this function when the two args are totally deprecated.
 def _make_matrix_dtype_from_element_shape(element_dim, element_shape, primitive_dtype):
-    if isinstance(primitive_dtype, CompoundType):
+    primitive_descriptor = describe_element_type(primitive_dtype)
+    if primitive_descriptor.category in ("tensor", "struct"):
         raise TypeError(f'Cannot specifiy matrix dtype "{primitive_dtype}" and element shape or dim at the same time.')
 
     # Scalars
@@ -80,25 +81,21 @@ class NdarrayType:
         self.layout = Layout.AOS
         self.needs_grad = needs_grad
         self.boundary = to_boundary_enum(boundary)
+        self._element_descriptor = describe_element_type(self.dtype)
 
     def check_matched(self, ndarray_type: NdarrayTypeMetadata, arg_name: str):
-        # FIXME(Haidong) Cannot use Vector/MatrixType due to circular import
-        # Use the CompuoundType instead to determine the specific typs.
-        # TODO Replace CompoundType with MatrixType and VectorType
-
-        # Check dtype match
-        if isinstance(self.dtype, CompoundType):
-            if not self.dtype.check_matched(ndarray_type.element_type):
+        actual_descriptor = describe_element_type(ndarray_type.element_type)
+        if not self._element_descriptor.matches(actual_descriptor):
+            if self._element_descriptor.category in ("tensor", "struct"):
                 raise ValueError(
-                    f"Invalid value for argument {arg_name} - required element type: {self.dtype.to_string()}, but {ndarray_type.element_type.to_string()} is provided"
+                    f"Invalid value for argument {arg_name} - required element type: "
+                    f"{self._element_descriptor.display_name()}, but "
+                    f"{actual_descriptor.display_name()} is provided"
                 )
-        else:
-            if self.dtype is not None:
-                # Check dtype match for scalar.
-                if not util.cook_dtype(self.dtype) == ndarray_type.element_type:
-                    raise TypeError(
-                        f"Expect element type {self.dtype} for argument {arg_name}, but get {ndarray_type.element_type}"
-                    )
+            raise TypeError(
+                f"Expect element type {self.dtype} for argument {arg_name}, "
+                f"but get {ndarray_type.element_type}"
+            )
 
         # Check ndim match
         if self.ndim is not None and ndarray_type.shape is not None and self.ndim != len(ndarray_type.shape):

@@ -18,6 +18,79 @@ supported_floating_types = [ti.f32] if platform.system() == "Darwin" else [ti.f3
 supported_archs_cgraph = [ti.vulkan, ti.opengl]
 
 
+def test_ndarray_arg_tensor_descriptor_roundtrip():
+    vector_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY,
+        "vector_arg",
+        ti.types.vector(3, ti.f32),
+        ndim=2,
+    )
+    assert vector_arg.dtype() == ti.f32
+    assert tuple(vector_arg.element_shape) == (3,)
+    assert tuple(vector_arg.element_dtype().shape()) == (3,)
+    assert vector_arg.element_dtype().element_type() == ti.f32
+
+    matrix_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY,
+        "matrix_arg",
+        ti.types.matrix(2, 4, ti.i32),
+        ndim=1,
+    )
+    assert matrix_arg.dtype() == ti.i32
+    assert tuple(matrix_arg.element_shape) == (2, 4)
+    assert tuple(matrix_arg.element_dtype().shape()) == (2, 4)
+    assert matrix_arg.element_dtype().element_type() == ti.i32
+
+
+def test_graph_struct_ndarray_descriptor_rejected_explicitly():
+    element = ti.types.struct(value=ti.f32, index=ti.i32)
+    with pytest.raises(
+        TaichiRuntimeError,
+        match="Graph StructNdarray arguments are not supported",
+    ):
+        ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY,
+            "struct_arg",
+            element,
+            ndim=1,
+        )
+
+
+@test_utils.test(arch=supported_archs_cgraph)
+def test_ndarray_tensor_descriptor_runtime_binding():
+    vector_type = ti.types.vector(3, ti.f32)
+    matrix_type = ti.types.matrix(2, 2, ti.i32)
+
+    @ti.kernel
+    def fill(
+        vectors: ti.types.ndarray(dtype=vector_type, ndim=1),
+        matrices: ti.types.ndarray(dtype=matrix_type, ndim=1),
+    ):
+        vectors[0] = ti.Vector([1.0, 2.0, 3.0])
+        matrices[0] = ti.Matrix([[1, 2], [3, 4]])
+
+    vector_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "vectors", vector_type, ndim=1
+    )
+    matrix_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "matrices", matrix_type, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(fill, vector_arg, matrix_arg)
+    graph = builder.compile()
+
+    vectors = ti.Vector.ndarray(3, dtype=ti.f32, shape=1)
+    matrices = ti.Matrix.ndarray(2, 2, dtype=ti.i32, shape=1)
+    graph.run({"vectors": vectors, "matrices": matrices})
+
+    np.testing.assert_array_equal(
+        vectors.to_numpy(), np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+    )
+    np.testing.assert_array_equal(
+        matrices.to_numpy(), np.array([[[1, 2], [3, 4]]], dtype=np.int32)
+    )
+
+
 @test_utils.test(arch=supported_archs_cgraph)
 def test_ndarray_int():
     n = 4
