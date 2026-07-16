@@ -9,6 +9,10 @@ from urllib import request
 from taichi_forge._lib import core as _ti_core
 
 
+_version_check_lock = threading.Lock()
+_version_check_started = False
+
+
 def check_version(cur_uuid):
     # Check Taichi version for the user.
     major = _ti_core.get_version_major()
@@ -91,11 +95,23 @@ def try_check_version():
 
 
 def start_version_check_thread():
+    global _version_check_started
     skip = os.environ.get("TI_SKIP_VERSION_CHECK")
-    if skip != "ON":
-        # We don't join this thread because we do not wish to block users.
-        check_version_thread = threading.Thread(target=try_check_version, daemon=True)
+    if skip == "ON":
+        return
+
+    # ti.init() may be called repeatedly after ti.reset(). The weekly check is
+    # process-wide, so do not accumulate overlapping daemon threads when the
+    # filesystem or network is slow. Keep the lock through start() so a failed
+    # thread creation leaves the next init free to retry.
+    with _version_check_lock:
+        if _version_check_started:
+            return
+        check_version_thread = threading.Thread(
+            target=try_check_version, daemon=True
+        )
         check_version_thread.start()
+        _version_check_started = True
 
 
 __all__ = []
