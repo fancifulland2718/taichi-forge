@@ -1009,7 +1009,7 @@ class Kernel:
             if key in self.compiled_kernels:
                 return
             limit = self.runtime.kernel_specialization_limit
-            compiled = self.runtime.get_num_compiled_functions()
+            compiled = self.runtime._compiled_specialization_count
             if compiled >= limit:
                 raise TaichiRuntimeError(
                     "Runtime compiled specialization budget reached "
@@ -1019,6 +1019,7 @@ class Kernel:
                     "in ti.init()."
                 )
             self._materialize_uncached(key, args, arg_features)
+            self.runtime._compiled_specialization_count += 1
 
     def _materialize_uncached(self, key, args, arg_features):
         kernel_name = f"{self.func.__name__}_c{self.kernel_counter}_{key[1]}"

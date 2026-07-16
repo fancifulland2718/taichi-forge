@@ -542,6 +542,11 @@ class PyTaichi:
         # budget remains exact even when separate Python threads compile.
         self._kernel_compilation_lock = threading.RLock()
         self.kernel_specialization_limit = 1024
+        # Program owns every native Kernel until ti.reset(), even after the
+        # defining Python Kernel is garbage-collected or its cache is cleared
+        # by SNodeTree destruction. Keep a monotonic runtime-lifetime count so
+        # dropping Python wrappers cannot bypass the native memory budget.
+        self._compiled_specialization_count = 0
         self._signal_handler_registry = None
         self.unfinalized_fields_builder = {}
         # P3 — frontend IR size-control knobs. Default 0 = disabled (no
@@ -680,10 +685,7 @@ class PyTaichi:
             )
 
     def get_num_compiled_functions(self):
-        count = 0
-        for k in tuple(self.kernels):
-            count += len(k.compiled_kernels)
-        return count
+        return self._compiled_specialization_count
 
     def src_info_guard(self, info):
         return SrcInfoGuard(self.src_info_stack, info)

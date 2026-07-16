@@ -168,3 +168,21 @@ def test_kernel_specialization_budget_preserves_cache_hits():
     # Reaching the budget blocks only a new cache miss. Existing compiled
     # specializations remain valid for Graph and asynchronous launch users.
     assert identity(22) == 22
+
+
+@test_utils.test(arch=ti.cpu, kernel_specialization_limit=1)
+def test_dead_kernel_definition_cannot_reclaim_native_specialization_budget():
+    @ti.kernel
+    def temporary() -> ti.i32:
+        return 1
+
+    assert temporary() == 1
+    del temporary
+    gc.collect()
+
+    @ti.kernel
+    def replacement() -> ti.i32:
+        return 2
+
+    with pytest.raises(ti.TaichiRuntimeError, match="kernel_specialization_limit=1"):
+        replacement()
