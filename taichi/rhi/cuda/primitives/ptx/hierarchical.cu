@@ -829,33 +829,88 @@ DEFINE_ADD_SCALED_KERNEL(add_scaled_strided_f64, double)
 DEFINE_GATHER_ADD_KERNEL(gather_add_strided_f32, float)
 DEFINE_GATHER_ADD_KERNEL(gather_add_strided_f64, double)
 
-extern "C" __global__ void normalize_flags_i32(const u8 *flags,
-                                               u64 flags_offset,
-                                               u64 flags_stride,
-                                               i32 *prefix,
-                                               u32 n) {
-  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index < n) {
-    prefix[index] =
-        load_strided<i32>(flags, flags_offset, flags_stride, index) != 0 ? 1
-                                                                         : 0;
+extern "C" __global__ void compact_rank_tiles_i32(const u8 *flags,
+                                                  u64 flags_offset,
+                                                  u64 flags_stride,
+                                                  i32 *local_prefix,
+                                                  i32 *tile_counts,
+                                                  u32 n) {
+  __shared__ i32 warp_sums[8];
+  __shared__ i32 tile_base;
+  const u32 tid = threadIdx.x;
+  const u32 lane = tid & 31u;
+  const u32 warp = tid >> 5;
+  const u32 tile = blockIdx.x;
+  const u32 tile_begin = tile * 1024u;
+  if (tid == 0u) {
+    tile_base = 0;
+  }
+  block_barrier();
+
+  for (u32 item = 0; item < 4u; ++item) {
+    const i32 chunk_base = tile_base;
+    block_barrier();
+    const u32 index = tile_begin + item * 256u + tid;
+    i32 value = index < n &&
+                        load_strided<i32>(flags, flags_offset, flags_stride,
+                                          index) != 0
+                    ? 1
+                    : 0;
+    value = warp_inclusive_sum(value);
+    if (lane == 31u) {
+      warp_sums[warp] = value;
+    }
+    block_barrier();
+    if (warp == 0u) {
+      i32 warp_value = lane < 8u ? warp_sums[lane] : 0;
+      warp_value = warp_inclusive_sum(warp_value);
+      if (lane < 8u) {
+        warp_sums[lane] = warp_value;
+      }
+    }
+    block_barrier();
+    if (warp > 0u) {
+      value += warp_sums[warp - 1u];
+    }
+    value += chunk_base;
+    if (index < n) {
+      local_prefix[index] = value;
+    }
+    if (tid == 255u) {
+      tile_base = value;
+    }
+    block_barrier();
+  }
+  if (tid == 255u) {
+    tile_counts[tile] = tile_base;
   }
 }
 
-extern "C" __global__ void compact_scatter_words(const u8 *values,
-                                                 u64 values_offset,
-                                                 u64 values_stride,
-                                                 const i32 *prefix,
-                                                 u8 *output,
-                                                 u64 output_offset,
-                                                 u64 output_stride,
-                                                 i32 *count,
-                                                 u64 count_offset,
-                                                 u32 n,
-                                                 u32 item_words) {
+extern "C" __global__ void compact_scatter_tiled_words(
+    const u8 *values,
+    u64 values_offset,
+    u64 values_stride,
+    const i32 *local_prefix,
+    const i32 *tile_counts,
+    u8 *output,
+    u64 output_offset,
+    u64 output_stride,
+    i32 *count,
+    u64 count_offset,
+    u32 n,
+    u32 item_words) {
   const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index < n && prefix[index] != (index == 0 ? 0 : prefix[index - 1])) {
-    const u32 output_index = static_cast<u32>(prefix[index] - 1);
+  if (index >= n) {
+    return;
+  }
+  const u32 tile = index >> 10;
+  const u32 tile_begin = tile << 10;
+  const i32 local_previous =
+      index == tile_begin ? 0 : local_prefix[index - 1u];
+  const i32 local = local_prefix[index];
+  const i32 tile_base = tile == 0u ? 0 : tile_counts[tile - 1u];
+  if (local != local_previous) {
+    const u32 output_index = static_cast<u32>(tile_base + local - 1);
     const u32 *src = reinterpret_cast<const u32 *>(
         values + values_offset + static_cast<u64>(index) * values_stride);
     u32 *dst =
@@ -867,7 +922,7 @@ extern "C" __global__ void compact_scatter_words(const u8 *values,
   }
   if (index == n - 1u) {
     *reinterpret_cast<i32 *>(reinterpret_cast<u8 *>(count) + count_offset) =
-        prefix[index];
+        tile_base + local;
   }
 }
 

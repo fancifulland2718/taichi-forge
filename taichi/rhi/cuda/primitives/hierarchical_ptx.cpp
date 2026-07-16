@@ -42,8 +42,8 @@ struct KernelSet {
   std::array<void *, 6> zero{};
   std::array<void *, 2> zero_bins{};
   std::array<std::array<void *, 2>, 2> histogram{};
-  void *normalize_flags{nullptr};
-  void *compact_scatter{nullptr};
+  void *compact_rank_tiles{nullptr};
+  void *compact_scatter_tiled{nullptr};
   void *copy_i32{nullptr};
   void *bucket_scatter{nullptr};
   std::array<void *, 6> radix_init{};
@@ -147,10 +147,11 @@ void load_kernel_set_once() {
                              "histogram_i32_i64");
   driver.module_get_function(&kernel_set.histogram[1][1], kernel_set.module,
                              "histogram_u32_i64");
-  driver.module_get_function(&kernel_set.normalize_flags, kernel_set.module,
-                             "normalize_flags_i32");
-  driver.module_get_function(&kernel_set.compact_scatter, kernel_set.module,
-                             "compact_scatter_words");
+  driver.module_get_function(&kernel_set.compact_rank_tiles,
+                             kernel_set.module, "compact_rank_tiles_i32");
+  driver.module_get_function(&kernel_set.compact_scatter_tiled,
+                             kernel_set.module,
+                             "compact_scatter_tiled_words");
   driver.module_get_function(&kernel_set.copy_i32, kernel_set.module,
                              "copy_i32_strided");
   driver.module_get_function(&kernel_set.bucket_scatter, kernel_set.module,
@@ -797,25 +798,46 @@ std::size_t driver_compact_strided(void *values,
     return driver_zero_strided(count, 1, CudaTransformValueType::i32,
                                count_offset, sizeof(std::int32_t), stream);
   }
+  const std::size_t prefix_bytes =
+      static_cast<std::size_t>(num_items) * sizeof(std::int32_t);
+  const std::size_t tile_count =
+      (static_cast<std::size_t>(num_items) + kScanTileItems - 1u) /
+      kScanTileItems;
+  const std::size_t tile_counts_offset =
+      (prefix_bytes + 255u) & ~std::size_t{255u};
+  TI_ERROR_IF(tile_count >
+                  (std::numeric_limits<std::size_t>::max() -
+                   tile_counts_offset) /
+                      sizeof(std::int32_t),
+              "CUDA Driver compact workspace size overflow.");
+  const std::size_t required_bytes =
+      tile_counts_offset + tile_count * sizeof(std::int32_t);
   auto workspace = acquire_workspace(workspace_arena,
                                      PrimitiveWorkspaceFamily::compact, stream);
-  workspace->ensure(static_cast<std::size_t>(num_items) * sizeof(std::int32_t));
-  void *prefix = workspace->data();
+  workspace->ensure(required_bytes);
+  auto *workspace_base = static_cast<std::uint8_t *>(workspace->data());
+  void *prefix = workspace_base;
+  void *tile_counts = workspace_base + tile_counts_offset;
   void *flags_arg = flags;
   std::uint64_t flags_offset_arg = flags_offset;
   std::uint64_t flags_stride_arg = flags_stride;
   void *prefix_arg = prefix;
+  void *tile_counts_arg = tile_counts;
   std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
-  std::vector<void *> normalize_args{&flags_arg, &flags_offset_arg,
-                                     &flags_stride_arg, &prefix_arg,
-                                     &count_arg};
-  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  std::vector<void *> rank_args{&flags_arg, &flags_offset_arg,
+                                &flags_stride_arg, &prefix_arg,
+                                &tile_counts_arg, &count_arg};
+  const unsigned tile_grid = static_cast<unsigned>(tile_count);
   CUDAContext::get_instance().launch(
-      kernels().normalize_flags, "cuda_driver_compact_flags", normalize_args,
-      {}, grid, kBlockDim, 0, stream);
-  const std::size_t scan_bytes = driver_inclusive_scan_strided(
-      prefix, num_items, CudaTransformValueType::i32, 0, sizeof(std::int32_t),
-      false, stream, workspace_arena);
+      kernels().compact_rank_tiles, "cuda_driver_compact_rank_tiles",
+      rank_args, {}, tile_grid, kBlockDim, 0, stream);
+  const std::size_t scan_bytes =
+      tile_count > 1
+          ? driver_inclusive_scan_strided(
+                tile_counts, static_cast<int>(tile_count),
+                CudaTransformValueType::i32, 0, sizeof(std::int32_t), false,
+                stream, workspace_arena)
+          : 0;
 
   void *values_arg = values;
   std::uint64_t values_offset_arg = values_offset;
@@ -828,12 +850,14 @@ std::size_t driver_compact_strided(void *values,
   std::uint32_t words_arg = static_cast<std::uint32_t>(item_words);
   std::vector<void *> scatter_args{
       &values_arg,        &values_offset_arg, &values_stride_arg,
-      &prefix_arg,        &output_arg,        &output_offset_arg,
+      &prefix_arg,        &tile_counts_arg,   &output_arg,
+      &output_offset_arg,
       &output_stride_arg, &count_output_arg,  &count_offset_arg,
       &count_arg,         &words_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
-      kernels().compact_scatter, "cuda_driver_compact_scatter", scatter_args,
-      {}, grid, kBlockDim, 0, stream);
+      kernels().compact_scatter_tiled, "cuda_driver_compact_scatter",
+      scatter_args, {}, grid, kBlockDim, 0, stream);
   return workspace->allocated_bytes() + scan_bytes;
 }
 

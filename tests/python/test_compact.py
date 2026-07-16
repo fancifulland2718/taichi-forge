@@ -188,6 +188,35 @@ def test_experimental_compact_cuda_auto_never_selects_cub_reference():
     assert not workspace._cuda_cub_active
 
 
+@test_utils.test(arch=[ti.cuda])
+def test_experimental_compact_cuda_device_large_tiled_direct():
+    n = (1 << 20) + 257
+    prog = impl.get_runtime().prog
+    if not prog.cuda_device_compact_available():
+        pytest.skip("CUDA Driver compact is unavailable in this build/runtime.")
+
+    values_np = np.arange(n, dtype=np.int32) * 3 - 17
+    flags_np = np.where(
+        (np.arange(n) % 5 == 0) | (np.arange(n) % 7 == 0), -3, 0
+    ).astype(np.int32)
+    values = ti.ndarray(ti.i32, shape=n)
+    flags = ti.ndarray(ti.i32, shape=n)
+    output = ti.ndarray(ti.i32, shape=n)
+    count = ti.ndarray(ti.i32, shape=1)
+    values.from_numpy(values_np)
+    flags.from_numpy(flags_np)
+    count.fill(-1)
+
+    prog.cuda_device_compact_ndarray(
+        values.arr, flags.arr, output.arr, count.arr, 0
+    )
+
+    expected = values_np[flags_np != 0]
+    actual_count = int(count.to_numpy()[0])
+    assert actual_count == expected.shape[0]
+    np.testing.assert_array_equal(output.to_numpy()[:actual_count], expected)
+
+
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_compact_vulkan_native_struct_tensor_member_views():
     prog = impl.get_runtime().prog
