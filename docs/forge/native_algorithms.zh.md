@@ -119,6 +119,31 @@ PTX 是否可加载以及任何 driver 下限声明，仍必须在目标旧 driv
 [构建 Wheel](build_wheels.zh.md)，Linux 和旧 driver 的待补证据见
 [Linux 复测状态](linux_revalidation.zh.md)。
 
+### 当前 CUDA 性能证据与边界
+
+当前源码使用 1024-item tiled scan、fused tiled compact rank，以及稳定的分层 4-bit
+LSD radix sort。它们都由低版本 PTX 和动态 CUDA Driver API 执行，不引入 Toolkit
+runtime 依赖。下面是 Windows 开发机（RTX 5090、driver 610.62、Python 3.10.11）上
+1,048,576 个 i32 item 的一次统一 hot-path 证据：每项 30 个 sample，每个 sample
+批量提交 20 次后同步并折算单次 median；测量前 idle guard 确认没有其它 Python 或 GPU
+compute process。CUB 只来自不发布的 CUDA 13.2 reference build，正确性另由 NumPy
+oracle 验证。
+
+| Primitive | driver-only median | CUB reference median | 相对吞吐 | 规划门槛 | driver workspace |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| scan | 0.0272 ms | 0.0190 ms | 69.8% | 90% | 4 KiB |
+| reduce-sum | 0.0228 ms | 0.0193 ms | 84.6% | 90% | 4 KiB |
+| histogram-256 | 0.1243 ms | 0.1215 ms | 97.7% | 90% | 0 |
+| stable compact | 0.0279 ms | 0.0228 ms | 81.8% | 80% | 4.00 MiB |
+| stable i32 key/value sort | 0.4883 ms | 0.1491 ms | 30.5% | 80% | 28.06 MiB |
+
+histogram 和 compact 达到本轮门槛；scan、reduce 和 sort 没有。标准 wheel 仍选择正确、
+异步且 driver-only 的 Forge provider，因为 CUB 不能成为发行依赖，而 host round-trip
+也不是物理引擎热路径的合理默认值。这不是与 CUB 等速的声明。继续逼近 scan/sort
+需要 one-sweep 或设备特化算法，会扩大 PTX、状态机和旧驱动验证面，因此本轮按停止规则
+收口为后续独立机会，不为边缘百分比继续堆叠路径。上述数字只用于说明当前取舍，不是
+跨设备、跨驱动性能保证。
+
 ## 数据合同
 
 - Dense 1D `ti.ndarray` 是主要 native 算法 ABI。
@@ -308,6 +333,17 @@ GPU scratch 归 active Program 的 primitive arena 所有，通过既有 workspa
 thread 最多保留 8 MiB；8 MiB 到 64 MiB 使用瞬时分配，超过 64 MiB 保持既有 serial
 fallback。这是驻留上界策略，不表示每次操作的峰值临时空间都不超过 8 MiB。
 
+当公开调用传入 `workspace=None` 时，允许缓存的算法会按 active Program 和 Python
+submission thread 分离隐式 workspace。每个 thread context 默认最多 64 个 entry，整个
+进程默认最多 16 个 context；可分别用
+`TAICHI_FORGE_DEFAULT_WORKSPACE_CACHE_LIMIT` 和
+`TAICHI_FORGE_DEFAULT_WORKSPACE_CONTEXT_LIMIT` 在启动前调低或关闭。达到 context 上限的
+新 thread 使用不缓存 workspace，不会驱逐或清理另一个 thread 可能仍在异步使用的资源。
+
+`clear_default_workspaces()` 只应在 primitive submission 已静止时调用。它会先原子分离
+cache metadata，再在锁外清理资源；并发清理正在使用的显式或隐式 workspace 不属于支持
+合同。`ti.reset()` 已建立同类静止边界并清理这些 cache。
+
 ```python
 workspace = None
 for _ in range(num_steps):
@@ -315,6 +351,23 @@ for _ in range(num_steps):
         src, dst, scale=2.0, bias=1.0, method="auto", workspace=workspace
     )
 ```
+
+可观测性是 opt-in 且读取时不等待 device：
+
+```python
+ti.algorithms.set_primitive_diagnostics_enabled(True, clear=True)
+ti.algorithms.experimental_transform(src, dst, method="auto")
+snapshot = ti.algorithms.get_primitive_runtime_diagnostics()
+print(snapshot["providers"], snapshot["fallbacks"])
+print(ti.algorithms.get_primitive_workspace_statistics())
+```
+
+两个 snapshot 都使用 `schema_version=1`。runtime diagnostics 报告 provider、
+`dependency_class`、fallback 和原始 counter；workspace snapshot 分开报告 Program-owned
+provider bytes 与 Python 默认 cache 的逻辑 current/peak bytes。二者可能引用同一底层资源，
+不能相加。CUDA CUB reference 名称作为 canonical driver family 的 alias 报告，避免重复
+计数。读取这些 metadata 不调用 `ti.sync()`；要证明某一次自动选择，应先清空并只执行该
+调用，再读取 snapshot。
 
 ## 与 graph 的关系
 

@@ -517,7 +517,7 @@ print(err.to_float())
 
 | API | 用途 |
 | --- | --- |
-| `clear_default_workspaces()` | 清空进程级默认算法 workspace cache。 |
+| `clear_default_workspaces()` | 在 submission 静止后清空按 Program/Python thread 隔离的默认 workspace cache。 |
 | `legacy_helper_auto_fallback_enabled()` | 查询 legacy helper fallback 是否启用。 |
 | `set_legacy_helper_auto_fallback_enabled(enabled)` | 启用或关闭自动 legacy helper fallback。 |
 | `reset_legacy_helper_auto_fallback_policy()` | 恢复默认 fallback 策略。 |
@@ -528,8 +528,15 @@ print(err.to_float())
 | `clear_primitive_diagnostics()` | 清空 primitive diagnostics。 |
 | `set_primitive_diagnostics_enabled(enabled, clear=False)` | 启用 primitive diagnostics，可选清空旧记录。 |
 | `get_primitive_diagnostics(reset=False)` | 读取 primitive diagnostics。 |
+| `get_primitive_runtime_diagnostics(reset=False)` | 返回 schema-v1 provider/dependency/fallback/counter/workspace snapshot；不等待 device。 |
+| `get_primitive_workspace_statistics()` | 返回 schema-v1 Program provider bytes、alias/error 与 per-thread 默认 cache 逻辑统计；不等待 device。 |
 
-这些辅助 API 主要用于验证和部署诊断，不是性能关键热循环 API。
+这些辅助 API 主要用于验证和部署诊断，不是性能关键热循环 API。runtime diagnostics
+只有在 `set_primitive_diagnostics_enabled(True)` 的区间内才保证 provider 调用计数完整。
+`get_primitive_workspace_statistics()` 的 `program_provider_bytes*` 与
+`default_cache.logical_workspace_bytes_*` 是不同所有权视图，可能引用同一资源，不能相加。
+`clear_default_workspaces()` 不支持与正在使用同一 workspace 的提交并发；应先停止 producer
+并建立静止边界。
 
 参考：[Native 算法](native_algorithms.zh.md)。
 

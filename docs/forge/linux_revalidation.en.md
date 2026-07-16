@@ -58,6 +58,49 @@ The optional CUDA 13.2 CUB/CUDART reference workflow remains non-publishing and
 must not alter the standard wheel. It can provide differential results, but the
 release does not create CUDA-versioned package families.
 
+### Native primitive runtime, workspaces, and performance closeout
+
+All N9 checks below remain pending on Linux. Use a fresh process per backend;
+run GPU stress for 30--60 seconds when the validation/sanitizer environment
+allows it:
+
+```bash
+python tests/python/native_primitive_runtime_stress.py --arch cpu --seconds 30 --threads 4 --items 1048576
+python tests/python/native_primitive_runtime_stress.py --arch cuda --seconds 30 --threads 4 --items 1048576
+python tests/python/native_primitive_runtime_stress.py --arch vulkan --seconds 30 --threads 4 --items 1048576
+```
+
+- Every run must report `result=pass` and empty `fallbacks`. CUDA providers
+  must all report `dependency_class=driver_only`; CPU/Vulkan must report
+  `none`.
+- Join producers before clearing. `workspace_before_clear` may contain bounded
+  provider bytes, while
+  `workspace_after_clear.program_provider_bytes_total` must be zero. Concurrent
+  clearing is not a supported usage pattern.
+- Check the per-Python-thread default-cache context/entry limits. A new thread
+  beyond the context limit must use an uncached workspace instead of evicting a
+  foreign in-flight workspace.
+- Add `compute-sanitizer --tool memcheck` for CUDA, TSAN for CPU arena/cache
+  concurrency, and Vulkan validation plus synchronization validation.
+- On every target older driver, the same standard wheel must module-load and
+  execute tiled scan, fused compact, and hierarchical 4-bit stable radix.
+  Inspecting PTX/ELF or running only on a new driver does not replace this gate.
+
+Produce performance conclusions only when both `nvidia-smi` and the benchmark
+idle guard confirm no other Python/GPU compute process:
+
+```bash
+python benchmarks/ndarray_primitives.py --arch cuda --sizes 1024,65536,1048576 --repeats 30 --warmups 5 --primitive all --method-mode native --performance
+```
+
+Record median, p95, provider, workspace, and idle evidence. A standard wheel
+does not contain CUB, so its release gate checks for unexpected regression
+against the previous candidate on the same host. Run CUB comparison separately
+in the non-publishing reference workflow. Windows RTX 5090 numbers are not a
+Linux threshold. Scan/reduce/sort currently miss their Windows CUB gates; that
+known performance boundary must not be mislabeled as a Linux failure or an
+older-driver incompatibility.
+
 ### CUDA execution, graph, and allocator paths
 
 On a Linux NVIDIA driver supported by the release, run the C++ backend safety

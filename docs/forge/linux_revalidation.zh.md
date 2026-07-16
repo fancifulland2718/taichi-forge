@@ -46,6 +46,40 @@ auditwheel 处理后的上传候选执行以下检查：
 可选 CUDA 13.2 CUB/CUDART reference workflow 仍然不发布，只用于差分证据，且不能改变标准
 wheel；发行不建立 CUDA 版本化包系列。
 
+### Native primitive runtime、workspace 与性能收口
+
+以下 N9 验证在 Linux 上仍全部待执行。每个后端使用 fresh process；GPU 后端的 30--60 秒
+stress 应在 validation/sanitizer 环境允许的最长时间运行：
+
+```bash
+python tests/python/native_primitive_runtime_stress.py --arch cpu --seconds 30 --threads 4 --items 1048576
+python tests/python/native_primitive_runtime_stress.py --arch cuda --seconds 30 --threads 4 --items 1048576
+python tests/python/native_primitive_runtime_stress.py --arch vulkan --seconds 30 --threads 4 --items 1048576
+```
+
+- 每次必须返回 `result=pass`、空 `fallbacks`，CUDA provider 的
+  `dependency_class` 必须全部是 `driver_only`；CPU/Vulkan 必须是 `none`；
+- producer join 后再 clear。`workspace_before_clear` 应有有界 provider bytes，
+  `workspace_after_clear.program_provider_bytes_total` 必须为 0；不得把并发 clear 作为支持用法；
+- 检查 per-Python-thread 默认 cache 的 context/entry 上限，以及达到 context 上限后新 thread
+  使用 uncached workspace，而不是驱逐 foreign in-flight workspace；
+- 对 CUDA 加跑 `compute-sanitizer --tool memcheck`；对 CPU arena/cache 并发路径使用 TSAN，
+  对 Vulkan 开启 validation 与 synchronization validation；
+- 同一 standard wheel 必须在每个目标旧 driver 上真实 module-load 并执行 tiled scan、fused
+  compact 与分层 4-bit stable radix。只检查 PTX 文本、ELF 或新 driver 运行不能替代该项。
+
+性能只在 `nvidia-smi` 与 benchmark idle guard 都确认没有其它 Python/GPU compute process
+时产生结论：
+
+```bash
+python benchmarks/ndarray_primitives.py --arch cuda --sizes 1024,65536,1048576 --repeats 30 --warmups 5 --primitive all --method-mode native --performance
+```
+
+记录 median、p95、provider、workspace 和 idle evidence。标准 wheel 不含 CUB，因此 release
+gate 只检查相对同机上一候选没有非预期回退；CUB 对照必须在不发布的 reference workflow
+单独执行。Windows RTX 5090 的数字不能作为 Linux 门槛。scan/reduce/sort 当前尚未达到
+Windows CUB 门槛，这是已知性能边界，不得误写成 Linux 失败或旧 driver 不兼容。
+
 ### CUDA 执行、graph 与 allocator 路径
 
 在发布支持的 Linux NVIDIA driver 和真实 GPU 上运行 C++ backend safety target 与 CUDA

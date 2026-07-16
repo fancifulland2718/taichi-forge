@@ -565,7 +565,7 @@ Limits:
 
 | API | Purpose |
 | --- | --- |
-| `clear_default_workspaces()` | Clear the process-level default algorithm workspace cache. |
+| `clear_default_workspaces()` | After submissions quiesce, clear default workspace caches isolated by Program and Python thread. |
 | `legacy_helper_auto_fallback_enabled()` | Query whether legacy helper fallback is enabled. |
 | `set_legacy_helper_auto_fallback_enabled(enabled)` | Enable or disable automatic legacy helper fallback. |
 | `reset_legacy_helper_auto_fallback_policy()` | Restore the default fallback policy. |
@@ -576,9 +576,18 @@ Limits:
 | `clear_primitive_diagnostics()` | Clear primitive diagnostics. |
 | `set_primitive_diagnostics_enabled(enabled, clear=False)` | Enable primitive diagnostics and optionally clear existing records. |
 | `get_primitive_diagnostics(reset=False)` | Read primitive diagnostics. |
+| `get_primitive_runtime_diagnostics(reset=False)` | Return a schema-v1 provider/dependency/fallback/counter/workspace snapshot without waiting for the device. |
+| `get_primitive_workspace_statistics()` | Return schema-v1 Program provider bytes, aliases/errors, and logical per-thread default-cache statistics without waiting for the device. |
 
 These helpers are intended for validation and deployment diagnostics. They are
-not performance-critical hot-loop APIs.
+not performance-critical hot-loop APIs. Provider invocation counts are complete
+only for an interval where `set_primitive_diagnostics_enabled(True)` was active.
+The `program_provider_bytes*` and `default_cache.logical_workspace_bytes_*`
+fields returned by `get_primitive_workspace_statistics()` are different
+ownership views that can refer to the same resource and must not be added.
+`clear_default_workspaces()` is not supported concurrently with submissions
+using the same workspace; stop producers and establish a quiescent boundary
+first.
 
 See also [Native algorithms](native_algorithms.en.md).
 

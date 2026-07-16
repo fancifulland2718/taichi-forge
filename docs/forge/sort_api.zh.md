@@ -36,7 +36,7 @@ ti.algorithms.sort(
 - CUDA：默认使用 Forge 自有的 stable driver-only radix provider。该路径只依赖动态加载的
   CUDA Driver API，不要求 CUB、CUDART 或本机 CUDA Toolkit；
   `cuda_cub_split32` 永远不会被自动选择。
-- Vulkan：对受支持的一维 `ti.ndarray` `i32/u32` key 和可选 `i32` payload，使用当前 native radix8 sorter。
+- Vulkan：对受支持的一维 dense key/payload 使用当前 native radix8 sorter。
 - 其它组合：回退到 host stable sort。
 
 显式方法：
@@ -54,20 +54,27 @@ ti.algorithms.sort(
 CUDA driver-only fast path：
 
 - Keys：`ti.u32`、`ti.i32`、`ti.f32`、`ti.u64`、`ti.i64`、`ti.f64`
-- Values：可选 `ti.i32`
-- 容器：一维 `ti.ndarray`
+- Values：可选标量数值、vector/tensor ndarray 或 4-byte 对齐的 StructNdarray raw payload
+- 容器：一维 `ti.ndarray`，以及 capability 明确接受的 root-dense scalar field
+- 实现：每 pass 4 bit 的 stable LSD radix；每 block 处理 1024 项，并分层扫描 16 路
+  block histogram。嵌入 PTX 以 sm_50/PTX 4.0 为兼容目标，不包含 CUDA Toolkit header
+  或 runtime call。
 
 Vulkan native fast path：
 
-- Keys：`ti.u32`、`ti.i32`
-- Values：可选 `ti.i32`
-- 容器：一维 `ti.ndarray`
+- Keys：`ti.u32`、`ti.i32`、`ti.f32`、`ti.u64`、`ti.i64`、`ti.f64`
+- Values：可选的受支持数值或 raw payload
+- 容器：一维 `ti.ndarray`，以及 capability 明确接受的 root-dense field
 
 未覆盖的组合会通过 host stable fallback 保持正确性；如果用户显式指定某个后端专用 method，则不满足条件时会报错。
 
 ## 语义说明
 
-- 当前默认语义是 stable ascending sort。
-- `descending=True` 尚未实现。
+- 默认语义是 stable ascending sort。`descending=True` 在 CPU native/host 路径可用；
+  GPU `auto` 会回退到 host stable，显式 GPU native method 会在写入前拒绝。
 - `nan_policy="last"` 是默认策略；`nan_policy="bitwise"` 需要后端 sortable-key 路径支持。
 - `SortWorkspace` 可复用 backend scratch allocation，适合重复排序场景。
+- CUDA driver-only sort 已通过所有公开 key dtype、NaN bitwise、重复 key/payload stability、
+  dense field、两层 histogram 和多 host submitter 回归。它优先保证单一 wheel、旧 PTX
+  兼容面和异步执行，并不声称达到 CUB 吞吐；当前统一性能证据见
+  [Native 算法](native_algorithms.zh.md#当前-cuda-性能证据与边界)。

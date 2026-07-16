@@ -54,6 +54,20 @@ retroactively attributed to the 0.5.0 artifact:
   descriptor/resource sets without queue-wide waits; CPU retains at most 8 MiB
   of primitive scratch per family/worker and uses bounded transient/fallback
   policies for larger requests.
+- Added opt-in schema-v1 `get_primitive_runtime_diagnostics()` and
+  `get_primitive_workspace_statistics()` snapshots. Provider dependencies,
+  fallbacks, Program provider bytes, and per-Python-thread default caches are
+  observable without a device synchronization. `workspace=None` caches default
+  to 64 entries per context and 16 process-wide contexts; explicit clearing
+  requires quiescent submissions.
+- Changed CUDA scan to a 1,024-item tiled hierarchy, fused compact flag
+  normalization with local ranks so only tile counts are scanned, and replaced
+  one-bit stable sort passes with hierarchical 4-bit LSD radix passes. Windows
+  million-item correctness, two-host-submitter stress, and idle-guarded
+  reference comparisons are complete. Histogram and compact meet this
+  iteration's gates; the remaining scan/reduce/sort gap to CUB is recorded as a
+  future structural opportunity instead of adding device-specific branches for
+  marginal tuning.
 - Changed future standard runtime-wheel validation to the `driver-only`
   dependency class while retaining loader, repair, and validation compatibility
   for already-published 0.5.0 bundled-CUDART wheels. The project still publishes

@@ -48,6 +48,16 @@
   clear/statistics。Vulkan 在不做 queue-wide wait 的前提下回收已完成 descriptor/resource
   set；CPU 每个算法族/worker 最多保留 8 MiB primitive scratch，更大请求采用有界瞬时分配
   和 fallback 策略。
+- 新增 opt-in `get_primitive_runtime_diagnostics()` 与
+  `get_primitive_workspace_statistics()` schema-v1 snapshot；provider dependency、fallback、
+  Program provider bytes 和 per-Python-thread 默认 cache 可观测，读取不增加 device sync。
+  `workspace=None` cache 默认限制为每 context 64 项、全进程 16 个 context；显式 clear
+  要求 submission 已静止。
+- 将 CUDA scan 改为 1024-item tiled hierarchy，将 compact 的 flag normalize 与局部 rank
+  融合并只扫描 tile count；stable sort 从 1-bit pass 改为分层 4-bit LSD radix。Windows
+  百万元素正确性、两 host submitter stress 与 idle-guarded reference 对照已完成；histogram
+  与 compact 达到本轮门槛，scan/reduce/sort 的剩余 CUB 差距明确保留为后续结构性机会，
+  不继续以设备特化分支追逐边缘收益。
 - 后续标准 runtime wheel 改用 `driver-only` dependency class 门禁，同时继续兼容已经发布的
   0.5.0 包内 CUDART wheel 的 loader、repair 与验证。项目仍按操作系统各发布一个 runtime
   wheel，不按 CUDA 版本分叉。

@@ -137,6 +137,36 @@ floor still require execution on the target driver. See
 [Linux revalidation](linux_revalidation.en.md) for outstanding Linux and
 older-driver evidence.
 
+### Current CUDA performance evidence and boundary
+
+The current source uses a 1,024-item tiled scan, fused tiled compact ranks,
+and a stable hierarchical 4-bit LSD radix sort. All execute through low-version
+PTX and the dynamically loaded CUDA Driver API, without a Toolkit runtime
+dependency. The table is one unified hot-path result from the Windows
+development host (RTX 5090, driver 610.62, Python 3.10.11) at 1,048,576 i32
+items. Each entry is the per-call median of 30 samples, with 20 submissions per
+sample before synchronization. The idle guard found no other Python or GPU
+compute process. CUB came only from the non-publishing CUDA 13.2 reference
+build; correctness was checked separately against NumPy oracles.
+
+| Primitive | driver-only median | CUB reference median | Relative throughput | Roadmap gate | Driver workspace |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| scan | 0.0272 ms | 0.0190 ms | 69.8% | 90% | 4 KiB |
+| reduce-sum | 0.0228 ms | 0.0193 ms | 84.6% | 90% | 4 KiB |
+| histogram-256 | 0.1243 ms | 0.1215 ms | 97.7% | 90% | 0 |
+| stable compact | 0.0279 ms | 0.0228 ms | 81.8% | 80% | 4.00 MiB |
+| stable i32 key/value sort | 0.4883 ms | 0.1491 ms | 30.5% | 80% | 28.06 MiB |
+
+Histogram and compact meet this iteration's gates; scan, reduce, and sort do
+not. Standard wheels still select the correct, asynchronous, driver-only Forge
+provider because CUB cannot be a release dependency and a host round trip is
+not a reasonable physics-engine hot-path default. This is not a claim of CUB
+parity. Closing the remaining scan/sort gap requires one-sweep or
+device-specialized algorithms, which would expand PTX, state-machine, and
+older-driver validation cost. This iteration therefore stops at the structural
+improvement boundary and records further work separately. These numbers
+explain the tradeoff; they are not a cross-device or cross-driver guarantee.
+
 ## Data Contracts
 
 - Dense 1D `ti.ndarray` inputs are the primary native algorithm ABI.
@@ -356,6 +386,21 @@ family and worker thread, uses transient allocations from 8 through 64 MiB, and
 keeps the established serial fallback above 64 MiB. These are bounded retention
 policies, not promises that every operation's peak temporary storage is 8 MiB.
 
+For public calls with `workspace=None`, cacheable algorithms isolate implicit
+workspaces by active Program and Python submission thread. Each thread context
+holds at most 64 entries by default, and the process holds at most 16 contexts.
+Set `TAICHI_FORGE_DEFAULT_WORKSPACE_CACHE_LIMIT` and
+`TAICHI_FORGE_DEFAULT_WORKSPACE_CONTEXT_LIMIT` before startup to lower or
+disable those bounds. A new thread beyond the context limit uses an uncached
+workspace; it never evicts or clears a foreign thread's resource that may still
+be referenced by asynchronous work.
+
+Call `clear_default_workspaces()` only after primitive submissions are
+quiescent. It atomically detaches cache metadata and clears resources outside
+the metadata lock; concurrently clearing an explicitly or implicitly in-use
+workspace is outside the supported contract. `ti.reset()` establishes the same
+kind of quiescent boundary and clears these caches.
+
 ```python
 workspace = None
 for _ in range(num_steps):
@@ -363,6 +408,25 @@ for _ in range(num_steps):
         src, dst, scale=2.0, bias=1.0, method="auto", workspace=workspace
     )
 ```
+
+Observability is opt-in and metadata reads do not wait for the device:
+
+```python
+ti.algorithms.set_primitive_diagnostics_enabled(True, clear=True)
+ti.algorithms.experimental_transform(src, dst, method="auto")
+snapshot = ti.algorithms.get_primitive_runtime_diagnostics()
+print(snapshot["providers"], snapshot["fallbacks"])
+print(ti.algorithms.get_primitive_workspace_statistics())
+```
+
+Both snapshots use `schema_version=1`. Runtime diagnostics report providers,
+their `dependency_class`, fallbacks, and raw counters. The workspace snapshot
+keeps Program-owned provider bytes separate from logical current/peak bytes in
+the Python default cache. The domains can refer to the same underlying
+resource and must not be added. CUDA CUB reference names are reported as
+aliases of canonical driver families to avoid double counting. Reading this
+metadata does not call `ti.sync()`. To explain one automatic choice, clear the
+interval, execute only that call, and then read the snapshot.
 
 ## Graph Interaction
 
