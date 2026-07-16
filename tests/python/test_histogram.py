@@ -340,7 +340,6 @@ def test_experimental_histogram_vulkan_native_i64_bins_capability():
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_experimental_histogram_vulkan_native_resource_replay_ring_wrap(monkeypatch):
     monkeypatch.setenv("TI_VULKAN_RESOURCE_REPLAY_RING_SIZE", "2")
-    monkeypatch.setenv("TI_VULKAN_RESOURCE_REPLAY_RING_MAX_SIZE", "2")
     n = 8192
     num_bins = 64
     values = ti.ndarray(ti.i32, shape=n)
@@ -350,6 +349,29 @@ def test_experimental_histogram_vulkan_native_resource_replay_ring_wrap(monkeypa
         pytest.skip("Vulkan native histogram is unavailable in this build/runtime.")
 
     workspace = ti.algorithms.HistogramWorkspace(max_items=n, max_bins=num_bins)
+
+    # Warm allocation/pipeline creation before observing ring wraps. Rebinding
+    # a pinned resource-set wrapper must allocate/reuse the exact descriptor
+    # set through the RHI cache, not force a Program/device synchronization.
+    values.from_numpy(_histogram_values(n, num_bins, np.int32, 0))
+    bins.fill(0)
+    ti.algorithms.experimental_histogram(
+        values, bins, method="vulkan_native", workspace=workspace
+    )
+    ti.sync()
+    waits_before = impl.get_runtime().prog._runtime_statistics_snapshot()[
+        "synchronization"
+    ]["backend_waits"]
+    for _ in range(8):
+        ti.algorithms.experimental_histogram(
+            values, bins, method="vulkan_native", workspace=workspace
+        )
+    waits_after = impl.get_runtime().prog._runtime_statistics_snapshot()[
+        "synchronization"
+    ]["backend_waits"]
+    if waits_before is not None and waits_after is not None:
+        assert waits_after == waits_before
+
     for step in range(6):
         values_np = _histogram_values(n, num_bins, np.int32, step % 3)
         values.from_numpy(values_np)

@@ -120,7 +120,6 @@ def test_vulkan_native_primitive_cache_reset_after_mixed_use():
 @test_utils.test(arch=[ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_vulkan_native_batch2_resource_replay_ring_wrap(monkeypatch):
     monkeypatch.setenv("TI_VULKAN_RESOURCE_REPLAY_RING_SIZE", "2")
-    monkeypatch.setenv("TI_VULKAN_RESOURCE_REPLAY_RING_MAX_SIZE", "2")
     monkeypatch.setenv("TI_VULKAN_REDUCE_I32_SUM_ATOMIC", "0")
     monkeypatch.setenv("TI_VULKAN_REDUCE_SINGLE_SHARED_MAX_N", "0")
     monkeypatch.setenv("TI_VULKAN_COMPACT_FUSE_MAX_N", "0")

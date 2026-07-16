@@ -38,14 +38,6 @@ size_t vulkan_resource_replay_ring_capacity(size_t requested = 1) {
   return std::max(base, requested);
 }
 
-size_t vulkan_resource_replay_ring_max_capacity(size_t requested = 1) {
-  const int configured =
-      get_environ_config("TI_VULKAN_RESOURCE_REPLAY_RING_MAX_SIZE", 128);
-  const size_t cap =
-      static_cast<size_t>(std::max(1, configured));
-  return std::max(vulkan_resource_replay_ring_capacity(requested), cap);
-}
-
 struct VulkanResourceSetRing {
   Device *device{nullptr};
   std::vector<std::unique_ptr<ShaderResourceSet>> sets;
@@ -69,33 +61,11 @@ struct VulkanResourceSetRing {
     capacity = vulkan_resource_replay_ring_capacity(requested);
   }
 
-  bool needs_reuse_wait(Device *dev, size_t requested) const {
-    if (device != dev) {
-      return false;
+  void rewind_for(size_t requested) {
+    TI_ASSERT(requested <= capacity);
+    if (cursor > capacity - requested) {
+      cursor = 0;
     }
-    const size_t effective_capacity =
-        std::max(capacity, vulkan_resource_replay_ring_capacity(requested));
-    return sets.size() >= effective_capacity &&
-           cursor + requested > effective_capacity;
-  }
-
-  bool grow_to_avoid_reuse_wait(size_t requested) {
-    const size_t max_capacity =
-        vulkan_resource_replay_ring_max_capacity(requested);
-    if (capacity >= max_capacity) {
-      return false;
-    }
-    const size_t doubled_capacity =
-        capacity == 0 ? requested : std::max(capacity * 2, requested);
-    const size_t required_capacity =
-        std::max({vulkan_resource_replay_ring_capacity(requested),
-                  cursor + requested, doubled_capacity});
-    capacity = std::min(max_capacity, required_capacity);
-    return cursor + requested <= capacity;
-  }
-
-  void rewind() {
-    cursor = 0;
   }
 
   std::pair<ShaderResourceSet *, size_t> next_slot(Device *dev) {
@@ -265,11 +235,12 @@ struct VulkanResourceSetReplayRing {
       hot_valid = false;
     }
     ring.ensure_device(dev, requested);
-    if (ring.needs_reuse_wait(dev, requested) &&
-        !ring.grow_to_avoid_reuse_wait(requested)) {
-      program->synchronize();
-      ring.rewind();
-    }
+    // VulkanResourceSet::finalize() replaces a descriptor set while its old
+    // instance is pinned by a recorded or submitted command buffer. Reusing a
+    // wrapper slot therefore does not require a device wait: the command
+    // buffer owns the exact descriptor set it recorded until fence retirement.
+    ring.rewind_for(requested);
+    (void)program;
     if (replays.size() < ring.capacity) {
       replays.resize(ring.capacity);
     }
@@ -336,11 +307,8 @@ void prepare_resource_set_replay(Program *program,
     return;
   }
   ring.ensure_device(device, requested);
-  if (ring.needs_reuse_wait(device, requested) &&
-      !ring.grow_to_avoid_reuse_wait(requested)) {
-    program->synchronize();
-    ring.rewind();
-  }
+  ring.rewind_for(requested);
+  (void)program;
   ring.ensure_preallocated(device, requested);
 }
 
