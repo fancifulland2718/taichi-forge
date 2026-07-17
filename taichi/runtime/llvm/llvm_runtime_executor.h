@@ -169,12 +169,11 @@ class LlvmRuntimeExecutor {
   std::unordered_map<DeviceAllocationId, DeviceAllocation>
       allocated_runtime_memory_allocs_;
 
-  // Phase 1 (2026-05): older CUDA sparse-tree pool buffers retained after
-  // runtime_memory_chunk is rebound for another materialized sparse SNodeTree.
-  // The current tree pool is held by preallocated_runtime_memory_allocs_;
-  // previous tree pools live here until finalize(). Empty when the per-tree
-  // auto-sized CUDA sparse pool path is not used.
-  std::vector<DeviceAllocationUnique> per_snode_pool_allocs_;
+  // Auto-sized per-SNode CUDA pools are owned by their SNodeTree. Runtime
+  // NodeManagers and element lists keep addresses into these buffers while
+  // the tree is active; explicit tree destruction releases the matching
+  // allocation after Program has synchronized outstanding work.
+  std::unordered_map<int, DeviceAllocationUnique> sparse_tree_pool_allocs_;
 
   // good buddy
   friend LlvmProgramImpl;

@@ -554,6 +554,13 @@ void initialize_rand_state(RandState *state, u32 i) {
 
 struct NodeManager;
 
+#if !ARCH_cuda && !ARCH_amdgpu
+struct RecycledDirectAmbient {
+  Ptr ptr;
+  std::size_t size;
+};
+#endif
+
 struct PreallocatedMemoryChunk {
   Ptr preallocated_head = nullptr;
   Ptr preallocated_tail = nullptr;
@@ -583,6 +590,14 @@ struct LLVMRuntime {
   i32 element_list_clean_parent_version[taichi_max_num_snodes];
   NodeManager *node_allocators[taichi_max_num_snodes];
   Ptr ambient_elements[taichi_max_num_snodes];
+#if !ARCH_cuda && !ARCH_amdgpu
+  ListManager *recycled_element_lists[taichi_max_num_snodes];
+  i32 recycled_element_list_count;
+  NodeManager *recycled_node_allocators[taichi_max_num_snodes];
+  i32 recycled_node_allocator_count;
+  RecycledDirectAmbient recycled_direct_ambients[taichi_max_num_snodes];
+  i32 recycled_direct_ambient_count;
+#endif
   Ptr temporaries;
   RandState *rand_states;
 
@@ -759,6 +774,131 @@ struct NodeManager {
     recycled_list->clear();
   }
 };
+
+#if !ARCH_cuda && !ARCH_amdgpu
+void reset_list_manager_for_reuse(ListManager *list, bool zero_chunks) {
+  list->lock = 0;
+  list->num_elements = 0;
+  list->backing_chunk = nullptr;
+  if (!zero_chunks) {
+    return;
+  }
+  const std::size_t chunk_bytes =
+      list->max_num_elements_per_chunk * list->element_size;
+  for (std::size_t i = 0; i < ListManager::max_num_chunks; ++i) {
+    if (list->chunks[i] == nullptr) {
+      break;
+    }
+    std::memset(list->chunks[i], 0, chunk_bytes);
+  }
+}
+
+ListManager *acquire_element_list(LLVMRuntime *runtime) {
+  if (runtime->recycled_element_list_count == 0) {
+    return runtime->create<ListManager>(runtime, sizeof(Element), 1024 * 64);
+  }
+  ListManager *list =
+      runtime->recycled_element_lists[--runtime->recycled_element_list_count];
+  reset_list_manager_for_reuse(list, false);
+  return list;
+}
+
+NodeManager *acquire_node_manager(LLVMRuntime *runtime,
+                                  std::size_t node_size,
+                                  int chunk_num_elements) {
+  for (int i = runtime->recycled_node_allocator_count - 1; i >= 0; --i) {
+    NodeManager *manager = runtime->recycled_node_allocators[i];
+    if (manager->element_size != node_size ||
+        manager->chunk_num_elements != chunk_num_elements) {
+      continue;
+    }
+    runtime->recycled_node_allocators[i] =
+        runtime->recycled_node_allocators[
+            --runtime->recycled_node_allocator_count];
+    manager->lock = 0;
+    manager->free_list_used = 0;
+    manager->recycle_list_size_backup = 0;
+    manager->dedicated_chunk = {};
+    manager->has_dedicated = false;
+    reset_list_manager_for_reuse(manager->free_list, false);
+    reset_list_manager_for_reuse(manager->recycled_list, false);
+    reset_list_manager_for_reuse(manager->data_list, true);
+    return manager;
+  }
+  return runtime->create<NodeManager>(runtime, node_size, chunk_num_elements);
+}
+
+Ptr acquire_direct_ambient(LLVMRuntime *runtime, std::size_t node_size) {
+  for (int i = runtime->recycled_direct_ambient_count - 1; i >= 0; --i) {
+    const auto ambient = runtime->recycled_direct_ambients[i];
+    if (ambient.size != node_size) {
+      continue;
+    }
+    runtime->recycled_direct_ambients[i] =
+        runtime->recycled_direct_ambients[
+            --runtime->recycled_direct_ambient_count];
+    std::memset(ambient.ptr, 0, node_size);
+    return ambient.ptr;
+  }
+  return runtime->allocate_aligned(runtime->runtime_memory_chunk, node_size, 8,
+                                   true /*request*/);
+}
+#endif
+
+extern "C" void runtime_destroy_snode_resources(
+    LLVMRuntime *runtime,
+    int snode_id,
+    int has_element_list,
+    int has_node_allocator,
+    int has_direct_ambient,
+    std::size_t direct_ambient_size) {
+#if !ARCH_cuda && !ARCH_amdgpu
+  if (has_element_list) {
+    taichi_assert_runtime(
+        runtime,
+        runtime->recycled_element_list_count < taichi_max_num_snodes,
+        "Recycled element-list capacity exceeded.");
+    ListManager *list = runtime->element_lists[snode_id];
+    reset_list_manager_for_reuse(list, false);
+    runtime->recycled_element_lists[runtime->recycled_element_list_count++] =
+        list;
+    runtime->element_lists[snode_id] = nullptr;
+  }
+
+  if (has_node_allocator) {
+    taichi_assert_runtime(
+        runtime,
+        runtime->recycled_node_allocator_count < taichi_max_num_snodes,
+        "Recycled NodeManager capacity exceeded.");
+    NodeManager *manager = runtime->node_allocators[snode_id];
+    runtime->recycled_node_allocators[
+        runtime->recycled_node_allocator_count++] = manager;
+    runtime->node_allocators[snode_id] = nullptr;
+  } else if (has_direct_ambient && direct_ambient_size > 0) {
+    taichi_assert_runtime(
+        runtime,
+        runtime->recycled_direct_ambient_count < taichi_max_num_snodes,
+        "Recycled ambient capacity exceeded.");
+    runtime->recycled_direct_ambients[
+        runtime->recycled_direct_ambient_count++] = {
+        runtime->ambient_elements[snode_id], direct_ambient_size};
+  }
+
+  runtime->ambient_elements[snode_id] = nullptr;
+  runtime->element_list_dirty_epoch[snode_id] = 1;
+  runtime->element_list_dirty_flag[snode_id] = 1;
+  runtime->element_list_version[snode_id] = 0;
+  runtime->element_list_clean_epoch[snode_id] = 0;
+  runtime->element_list_clean_parent_version[snode_id] = 0;
+#else
+  (void)runtime;
+  (void)snode_id;
+  (void)has_element_list;
+  (void)has_node_allocator;
+  (void)has_direct_ambient;
+  (void)direct_ambient_size;
+#endif
+}
 
 extern "C" {
 
@@ -1071,6 +1211,11 @@ void runtime_initialize(
 
   runtime->total_requested_memory = 0;
   runtime_hash_probe_stats_reset(runtime);
+#if !ARCH_cuda && !ARCH_amdgpu
+  runtime->recycled_element_list_count = 0;
+  runtime->recycled_node_allocator_count = 0;
+  runtime->recycled_direct_ambient_count = 0;
+#endif
 
   runtime->temporaries = (Ptr)runtime->allocate_aligned(
       runtime->runtime_objects_chunk, taichi_global_tmp_buffer_size,
@@ -1132,8 +1277,12 @@ void runtime_initialize_snodes(LLVMRuntime *runtime,
   }
   for (int i = root_id; i < root_id + num_snodes; i++) {
     // TODO: some SNodes do not actually need an element list.
+#if !ARCH_cuda && !ARCH_amdgpu
+    runtime->element_lists[i] = acquire_element_list(runtime);
+#else
     runtime->element_lists[i] =
         runtime->create<ListManager>(runtime, sizeof(Element), 1024 * 64);
+#endif
   }
   Element elem;
   elem.loop_bounds[0] = 0;
@@ -1161,8 +1310,13 @@ void LLVMRuntime_initialize_thread_pool(LLVMRuntime *runtime,
 void runtime_NodeAllocator_initialize(LLVMRuntime *runtime,
                                       int snode_id,
                                       std::size_t node_size) {
+#if !ARCH_cuda && !ARCH_amdgpu
+  runtime->node_allocators[snode_id] =
+      acquire_node_manager(runtime, node_size, 1024 * 16);
+#else
   runtime->node_allocators[snode_id] =
       runtime->create<NodeManager>(runtime, node_size, 1024 * 16);
+#endif
 }
 
 // Phase 1-D (2026-05): initialize a NodeAllocator with a custom
@@ -1174,8 +1328,13 @@ void runtime_NodeAllocator_initialize_ex(LLVMRuntime *runtime,
                                           int snode_id,
                                           std::size_t node_size,
                                           int chunk_num_elements) {
+#if !ARCH_cuda && !ARCH_amdgpu
+  runtime->node_allocators[snode_id] =
+      acquire_node_manager(runtime, node_size, chunk_num_elements);
+#else
   runtime->node_allocators[snode_id] =
       runtime->create<NodeManager>(runtime, node_size, chunk_num_elements);
+#endif
 }
 
 void runtime_allocate_ambient(LLVMRuntime *runtime,
@@ -1189,8 +1348,12 @@ void runtime_allocate_ambient(LLVMRuntime *runtime,
 void runtime_allocate_ambient_direct(LLVMRuntime *runtime,
                                      int snode_id,
                                      std::size_t node_size) {
+#if !ARCH_cuda && !ARCH_amdgpu
+  auto ambient = acquire_direct_ambient(runtime, node_size);
+#else
   auto ambient = runtime->allocate_aligned(runtime->runtime_memory_chunk,
                                           node_size, 8, true /*request*/);
+#endif
   std::memset(ambient, 0, node_size);
   runtime->ambient_elements[snode_id] = ambient;
 }

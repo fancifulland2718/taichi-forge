@@ -442,6 +442,7 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
   // (inside the CUDA device-memory if-block) and consumed during
   // NodeAllocator init (outside that block).
   std::vector<std::pair<int, int>> snode_chunk_elems;
+  DeviceAllocationUnique *sparse_tree_pool_alloc = nullptr;
   for (size_t i = 0; i < snode_metas.size(); i++) {
     if (snode_metas[i].type != SNodeType::dense &&
         snode_metas[i].type != SNodeType::place &&
@@ -692,17 +693,14 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
             global_region / 1048576.0, total_buffer / 1048576.0,
             snode_entries.size());
 
-        // Allocate one contiguous device buffer for this sparse SNodeTree.
-        // Multiple independent sparse trees can coexist in one CUDA Program;
-        // keep older tree pools alive because existing NodeManagers,
-        // element-list chunks, and deterministic pointer slots still point
-        // into them after runtime_memory_chunk is rebound for the new tree.
-        if (preallocated_runtime_memory_allocs_ != nullptr) {
-          per_snode_pool_allocs_.push_back(
-            std::move(preallocated_runtime_memory_allocs_));
-        }
-        void *buf = preallocate_memory(
-            total_buffer, preallocated_runtime_memory_allocs_);
+        // Allocate one contiguous device buffer owned by this sparse
+        // SNodeTree. Multiple active trees coexist through independent map
+        // entries; destroy_snode_tree() erases only the synchronized tree.
+        auto [pool_it, inserted] =
+            sparse_tree_pool_allocs_.try_emplace(tree_id);
+        TI_ASSERT(inserted);
+        void *buf = preallocate_memory(total_buffer, pool_it->second);
+        sparse_tree_pool_alloc = &pool_it->second;
         // Initialize runtime_memory_chunk to cover only the global region.
         auto *const runtime_jit2 = get_runtime_jit_module();
         runtime_jit2->call<void *, std::size_t, void *>(
@@ -797,7 +795,7 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       config_.cuda_sparse_pool_auto_size &&
       config_.device_memory_fraction == 0 &&
       config_.cuda_sparse_pool_size_GB == 0 &&
-      preallocated_runtime_memory_allocs_ != nullptr) {
+      sparse_tree_pool_alloc != nullptr && *sparse_tree_pool_alloc != nullptr) {
     // Mirror runtime.cpp constants (same as auto-size block above).
     constexpr std::size_t kBaseline = 32UL << 20;
     constexpr std::size_t kMgrBytes = (128UL << 10) * sizeof(void *) + 4096;
@@ -873,8 +871,8 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
         snode_pools.push_back({snode_metas[i].id, data_bytes});
     }
     if (!snode_pools.empty()) {
-      void *buf_base = llvm_device()->get_memory_addr(
-          *preallocated_runtime_memory_allocs_);
+      void *buf_base =
+          llvm_device()->get_memory_addr(**sparse_tree_pool_alloc);
       std::size_t offset = global_region;
       for (const auto &p : snode_pools) {
         void *region_ptr = static_cast<char *>(buf_base) + offset;
@@ -1036,9 +1034,7 @@ void LlvmRuntimeExecutor::finalize() {
         llvm_device() == nullptr || llvm_device()->backend_calls_safe();
     preallocated_runtime_objects_allocs_.reset();
     preallocated_runtime_memory_allocs_.reset();
-    // Phase 1: extra CUDA sparse-tree pools retained so multiple independent
-    // sparse SNodeTrees can coexist safely.
-    per_snode_pool_allocs_.clear();
+    sparse_tree_pool_allocs_.clear();
 
     // Reset runtime memory
     if (backend_calls_safe) {
@@ -1264,8 +1260,35 @@ void LlvmRuntimeExecutor::materialize_runtime(KernelProfilerBase *profiler,
 }
 
 void LlvmRuntimeExecutor::destroy_snode_tree(SNodeTree *snode_tree) {
+  if (arch_is_cpu(config_.arch)) {
+    std::vector<SNode *> snodes;
+    bool all_dense = config_.demote_dense_struct_fors;
+    std::function<void(SNode *)> collect = [&](SNode *snode) {
+      snodes.push_back(snode);
+      if (snode->type != SNodeType::dense &&
+          snode->type != SNodeType::place &&
+          snode->type != SNodeType::root) {
+        all_dense = false;
+      }
+      for (const auto &child : snode->ch) {
+        collect(child.get());
+      }
+    };
+    collect(snode_tree->root());
+
+    auto *runtime_jit = get_runtime_jit_module();
+    for (SNode *snode : snodes) {
+      runtime_jit
+          ->call<void *, int, int, int, int, std::size_t>(
+              "runtime_destroy_snode_resources", llvm_runtime_, snode->id,
+              all_dense ? 0 : 1, is_gc_able(snode->type) ? 1 : 0,
+              snode->type == SNodeType::hash ? 1 : 0,
+              snode->type == SNodeType::hash ? snode->cell_size_bytes : 0);
+    }
+  }
   get_llvm_context()->delete_snode_tree(snode_tree->id());
   snode_tree_buffer_manager_->destroy(snode_tree);
+  sparse_tree_pool_allocs_.erase(snode_tree->id());
 }
 
 Device *LlvmRuntimeExecutor::get_compute_device() {
