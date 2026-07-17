@@ -9,6 +9,8 @@
 
 #include "Eigen/Sparse"
 
+#include <mutex>
+
 namespace taichi::lang {
 
 class SparseMatrix;
@@ -321,11 +323,22 @@ class CuSparseMatrix : public SparseMatrix {
   void mmwrite(const std::string &filename) override;
 
  private:
+  void reset_spmv_resources();
+
   cusparseSpMatDescr_t matrix_{nullptr};
   void *csr_row_ptr_{nullptr};
   void *csr_col_ind_{nullptr};
   void *csr_val_{nullptr};
   int nnz_{0};
+  std::mutex spmv_mutex_;
+  cusparseHandle_t spmv_handle_{nullptr};
+  cusparseDnVecDescr_t spmv_vec_x_{nullptr};
+  cusparseDnVecDescr_t spmv_vec_y_{nullptr};
+  size_t spmv_x_ptr_{0};
+  size_t spmv_y_ptr_{0};
+  void *spmv_buffer_{nullptr};
+  size_t spmv_buffer_size_{0};
+  bool spmv_buffer_initialized_{false};
 };
 
 std::unique_ptr<SparseMatrix> make_sparse_matrix(

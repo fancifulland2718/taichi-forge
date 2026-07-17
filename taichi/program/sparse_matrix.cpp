@@ -456,8 +456,30 @@ void CuSparseMatrix::build_csr_from_coo(void *coo_row_ptr,
 #endif
 }
 
+void CuSparseMatrix::reset_spmv_resources() {
+#if defined(TI_WITH_CUDA)
+  if (spmv_vec_x_)
+    CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_x_);
+  if (spmv_vec_y_)
+    CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_y_);
+  if (spmv_handle_)
+    CUSPARSEDriver::get_instance().cpDestroy(spmv_handle_);
+  if (spmv_buffer_)
+    CUDADriver::get_instance().mem_free(spmv_buffer_);
+  spmv_vec_x_ = nullptr;
+  spmv_vec_y_ = nullptr;
+  spmv_handle_ = nullptr;
+  spmv_buffer_ = nullptr;
+  spmv_x_ptr_ = 0;
+  spmv_y_ptr_ = 0;
+  spmv_buffer_size_ = 0;
+  spmv_buffer_initialized_ = false;
+#endif
+}
+
 CuSparseMatrix::~CuSparseMatrix() {
 #if defined(TI_WITH_CUDA)
+  reset_spmv_resources();
   if (matrix_)
     CUSPARSEDriver::get_instance().cpDestroySpMat(matrix_);
   if (csr_row_ptr_)
@@ -756,31 +778,38 @@ std::unique_ptr<SparseMatrix> CuSparseMatrix::transpose() const {
 
 void CuSparseMatrix::spmv(size_t dX, size_t dY) {
 #if defined(TI_WITH_CUDA)
-  cusparseDnVecDescr_t vecX, vecY;
-  CUSPARSEDriver::get_instance().cpCreateDnVec(&vecX, cols_, (void *)dX,
-                                               CUDA_R_32F);
-  CUSPARSEDriver::get_instance().cpCreateDnVec(&vecY, rows_, (void *)dY,
-                                               CUDA_R_32F);
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  if (!spmv_handle_)
+    CUSPARSEDriver::get_instance().cpCreate(&spmv_handle_);
+  if (!spmv_vec_x_ || spmv_x_ptr_ != dX) {
+    if (spmv_vec_x_)
+      CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_x_);
+    CUSPARSEDriver::get_instance().cpCreateDnVec(&spmv_vec_x_, cols_,
+                                                 (void *)dX, CUDA_R_32F);
+    spmv_x_ptr_ = dX;
+  }
+  if (!spmv_vec_y_ || spmv_y_ptr_ != dY) {
+    if (spmv_vec_y_)
+      CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_y_);
+    CUSPARSEDriver::get_instance().cpCreateDnVec(&spmv_vec_y_, rows_,
+                                                 (void *)dY, CUDA_R_32F);
+    spmv_y_ptr_ = dY;
+  }
 
-  cusparseHandle_t cusparse_handle;
-  CUSPARSEDriver::get_instance().cpCreate(&cusparse_handle);
   float alpha = 1.0f, beta = 0.0f;
-  size_t bufferSize = 0;
-  CUSPARSEDriver::get_instance().cpSpMV_bufferSize(
-      cusparse_handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matrix_, vecX,
-      &beta, vecY, CUDA_R_32F, CUSPARSE_SPMV_CSR_ALG1, &bufferSize);
-
-  void *dBuffer = nullptr;
-  if (bufferSize > 0)
-    CUDADriver::get_instance().malloc(&dBuffer, bufferSize);
+  if (!spmv_buffer_initialized_) {
+    CUSPARSEDriver::get_instance().cpSpMV_bufferSize(
+        spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matrix_,
+        spmv_vec_x_, &beta, spmv_vec_y_, CUDA_R_32F,
+        CUSPARSE_SPMV_CSR_ALG1, &spmv_buffer_size_);
+    if (spmv_buffer_size_ > 0)
+      CUDADriver::get_instance().malloc(&spmv_buffer_, spmv_buffer_size_);
+    spmv_buffer_initialized_ = true;
+  }
   CUSPARSEDriver::get_instance().cpSpMV(
-      cusparse_handle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matrix_, vecX,
-      &beta, vecY, CUDA_R_32F, CUSPARSE_SPMV_CSR_ALG1, dBuffer);
-
-  CUSPARSEDriver::get_instance().cpDestroyDnVec(vecX);
-  CUSPARSEDriver::get_instance().cpDestroyDnVec(vecY);
-  CUSPARSEDriver::get_instance().cpDestroy(cusparse_handle);
-  CUDADriver::get_instance().mem_free(dBuffer);
+      spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matrix_,
+      spmv_vec_x_, &beta, spmv_vec_y_, CUDA_R_32F,
+      CUSPARSE_SPMV_CSR_ALG1, spmv_buffer_);
 #endif
 }
 

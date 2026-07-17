@@ -448,6 +448,17 @@ def test_gpu_sparse_matrix():
     for i in range(4):
         assert Y[i] == h_Y[i]
 
+    # Reuse the same matrix plan with different input and output addresses.
+    X2 = ti.ndarray(shape=num_cols, dtype=ti_dtype)
+    X2.from_numpy(2.0 * h_X)
+    Y2 = A @ X2
+    for i in range(4):
+        assert Y2[i] == 2.0 * h_Y[i]
+
+    Y3 = A @ X
+    for i in range(4):
+        assert Y3[i] == h_Y[i]
+
 
 @pytest.mark.parametrize("N", [5])
 @test_utils.test(arch=ti.cuda)
