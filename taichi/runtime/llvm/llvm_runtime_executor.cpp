@@ -1070,62 +1070,6 @@ void LlvmRuntimeExecutor::finalize() {
   finalized_ = true;
 }
 
-std::vector<std::pair<int, int>>
-LlvmRuntimeExecutor::query_snode_pool_watermarks() {
-  std::vector<std::pair<int, int>> results;
-  if (!llvm_runtime_ || !use_device_memory_pool())
-    return results;
-
-  auto *runtime_jit = get_runtime_jit_module();
-  // Allocate a small host-visible buffer for the result (2 × uint64 per SNode)
-  constexpr int kMaxSnodes = 32;
-  constexpr std::size_t kBufSize = kMaxSnodes * 2 * sizeof(uint64_t);
-  LlvmDevice::LlvmRuntimeAllocParams buf_params;
-  buf_params.size = kBufSize;
-  buf_params.host_write = false;
-  buf_params.host_read = true;
-  buf_params.export_sharing = false;
-  buf_params.usage = AllocUsage::Storage;
-  buf_params.runtime_jit = runtime_jit;
-  buf_params.runtime = (LLVMRuntime *)llvm_runtime_;
-  buf_params.result_buffer = nullptr;
-  buf_params.use_memory_pool = false;
-  auto buf_alloc = llvm_device()->allocate_memory_runtime(buf_params);
-
-  void *buf = llvm_device()->get_memory_addr(buf_alloc);
-  if (!buf) return results;
-  std::memset(buf, 0, kBufSize);
-
-  int idx = 0;
-  // Iterate over all SNode types and call the runtime watermark function.
-  // The snode_metas from field_cache_data would be ideal, but since we're
-  // after initialization, we iterate the known gc-able types.
-  // Instead, use a simpler approach: call the runtime function for each
-  // possible snode_id in node_allocators range.
-  for (int snode_id = 0; snode_id < kMaxSnodes; snode_id++) {
-    Ptr permille_ptr = (Ptr)((char *)buf + (idx * 2) * sizeof(uint64_t));
-    Ptr used_ptr = (Ptr)((char *)buf + (idx * 2 + 1) * sizeof(uint64_t));
-    runtime_jit->call<void *, int, Ptr, Ptr>(
-        "runtime_NodeAllocator_get_watermark", llvm_runtime_, snode_id,
-        permille_ptr, used_ptr);
-    idx++;
-    if (idx >= kMaxSnodes) break;
-  }
-
-  synchronize();
-
-  uint64_t *data = (uint64_t *)buf;
-  for (int i = 0; i < idx; i++) {
-    uint64_t permille = data[i * 2];
-    if (permille > 0) {
-      results.push_back({i, (int)permille});
-    }
-  }
-
-  llvm_device()->dealloc_memory(buf_alloc);
-  return results;
-}
-
 LlvmRuntimeExecutor::~LlvmRuntimeExecutor() {
   if (!finalized_) {
     finalize();

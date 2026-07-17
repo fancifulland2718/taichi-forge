@@ -176,11 +176,6 @@ class LlvmRuntimeExecutor {
   // auto-sized CUDA sparse pool path is not used.
   std::vector<DeviceAllocationUnique> per_snode_pool_allocs_;
 
-  // Phase 1 (2026-05): query per-SNode pool usage watermark.
-  // Returns vector of (snode_id, permille_used) for diagnostics.
-  // Requires an active CUDA context and initialized runtime.
-  std::vector<std::pair<int, int>> query_snode_pool_watermarks();
-
   // good buddy
   friend LlvmProgramImpl;
   friend SNodeTreeBufferManager;
