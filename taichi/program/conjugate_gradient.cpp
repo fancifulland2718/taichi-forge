@@ -20,14 +20,51 @@ void CUCG::init_solver() {
 
 CUCG::~CUCG() {
 #if defined(TI_WITH_CUDA)
+  release_workspace();
   if (handle_) {
     CUBLASDriver::get_instance().cubDestroy(handle_);
   }
 #endif
 }
 
+void CUCG::ensure_workspace(int size) {
+#if defined(TI_WITH_CUDA)
+  if (workspace_size_ == size && workspace_ax_ && workspace_r_ &&
+      workspace_p_) {
+    return;
+  }
+  release_workspace();
+  if (size <= 0) {
+    return;
+  }
+  CUDADriver::get_instance().malloc((void **)&workspace_ax_,
+                                    sizeof(float) * size);
+  CUDADriver::get_instance().malloc((void **)&workspace_r_,
+                                    sizeof(float) * size);
+  CUDADriver::get_instance().malloc((void **)&workspace_p_,
+                                    sizeof(float) * size);
+  workspace_size_ = size;
+#endif
+}
+
+void CUCG::release_workspace() {
+#if defined(TI_WITH_CUDA)
+  if (workspace_ax_)
+    CUDADriver::get_instance().mem_free(workspace_ax_);
+  if (workspace_r_)
+    CUDADriver::get_instance().mem_free(workspace_r_);
+  if (workspace_p_)
+    CUDADriver::get_instance().mem_free(workspace_p_);
+  workspace_ax_ = nullptr;
+  workspace_r_ = nullptr;
+  workspace_p_ = nullptr;
+  workspace_size_ = 0;
+#endif
+}
+
 void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
 #if defined(TI_WITH_CUDA)
+  std::lock_guard<std::mutex> lock(solve_mutex_);
   is_success_ = false;
   iterations_ = 0;
   initial_residual_norm_ = 0.0;
@@ -38,12 +75,10 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
   size_t db = prog->get_ndarray_data_ptr_as_int(&b);
   int m = A.num_rows();
 
-  float *d_Ax = nullptr;
-  float *d_r = nullptr;
-  float *d_p = nullptr;
-  CUDADriver::get_instance().malloc((void **)&d_Ax, sizeof(float) * m);
-  CUDADriver::get_instance().malloc((void **)&d_r, sizeof(float) * m);
-  CUDADriver::get_instance().malloc((void **)&d_p, sizeof(float) * m);
+  ensure_workspace(m);
+  float *d_Ax = workspace_ax_;
+  float *d_r = workspace_r_;
+  float *d_p = workspace_p_;
 
   // r = b
   CUDADriver::get_instance().memcpy_device_to_device((void *)d_r, (void *)db,
@@ -102,9 +137,6 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
   is_success_ = !breakdown && std::isfinite(r1) &&
                 residual_norm_ <= static_cast<double>(tol_);
 
-  CUDADriver::get_instance().mem_free(d_Ax);
-  CUDADriver::get_instance().mem_free(d_r);
-  CUDADriver::get_instance().mem_free(d_p);
 #endif
 }
 

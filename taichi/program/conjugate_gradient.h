@@ -6,6 +6,7 @@
 #include "Eigen/IterativeLinearSolvers"
 
 #include <cmath>
+#include <mutex>
 
 namespace taichi::lang {
 template <typename EigenT, typename DT>
@@ -130,6 +131,9 @@ class CUCG {
 
  private:
   void init_solver();
+  void ensure_workspace(int size);
+  void release_workspace();
+
   cublasHandle_t handle_{nullptr};
   SparseMatrix &A_;
   int max_iters_{0};
@@ -139,6 +143,11 @@ class CUCG {
   int iterations_{0};
   double initial_residual_norm_{0.0};
   double residual_norm_{0.0};
+  std::mutex solve_mutex_;
+  float *workspace_ax_{nullptr};
+  float *workspace_r_{nullptr};
+  float *workspace_p_{nullptr};
+  int workspace_size_{0};
 };
 
 std::unique_ptr<CUCG> make_cucg_solver(SparseMatrix &A,

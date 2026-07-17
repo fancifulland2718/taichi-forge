@@ -39,7 +39,6 @@ def test_cg(ti_dtype):
     for i in range(n):
         assert x[i] == test_utils.approx(res[i], rel=1.0)
 
-
 @pytest.mark.parametrize("ti_dtype", [ti.f32])
 @test_utils.test(arch=[ti.cuda])
 def test_cg_cuda(ti_dtype):
@@ -73,6 +72,13 @@ def test_cg_cuda(ti_dtype):
     assert cg._last_solve_info.residual_norm <= atol
     for i in range(n):
         assert x[i] == test_utils.approx(res[i], rel=1.0)
+
+    # A second solve reuses the solver-owned CUDA workspace.
+    x_repeated, repeated_exit_code = cg.solve()
+    assert repeated_exit_code
+    assert cg._last_solve_info.converged
+    for i in range(n):
+        assert x_repeated[i] == test_utils.approx(res[i], rel=1.0)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda])
