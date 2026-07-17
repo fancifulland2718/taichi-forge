@@ -79,6 +79,7 @@ struct LlvmOfflineCache {
       int64_t vk_max_active_hint{-1};
       int64_t hash_expected_active_hint{-1};
       int64_t num_cells_per_container{1};
+      int64_t total_num_cells_from_root{1};
 
       TI_IO_DEF(id,
                 type,
@@ -86,7 +87,8 @@ struct LlvmOfflineCache {
                 chunk_size,
                 vk_max_active_hint,
                 hash_expected_active_hint,
-                num_cells_per_container);
+                num_cells_per_container,
+                total_num_cells_from_root);
     };
 
     int tree_id{0};

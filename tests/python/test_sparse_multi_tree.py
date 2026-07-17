@@ -89,3 +89,33 @@ def test_cuda_independent_sparse_trees_keep_existing_pool_alive():
     assert before > 0.0
     assert second > 0.0
     assert abs(after - before * 3.0) < 1e-3
+
+
+@test_utils.test(
+    arch=ti.cuda,
+    offline_cache=False,
+    cuda_sparse_pool_auto_size=True,
+    cuda_sparse_per_snode_pool=True,
+)
+def test_cuda_nested_pointer_auto_pool_uses_global_cell_bound():
+    n = 128
+    x = ti.field(ti.i32)
+    ti.root.pointer(ti.i, n).pointer(ti.j, n).place(x)
+
+    @ti.kernel
+    def activate_all():
+        for i, j in ti.ndrange(n, n):
+            x[i, j] = i * n + j + 1
+
+    @ti.kernel
+    def checksum() -> ti.i32:
+        total = 0
+        for i, j in x:
+            total += x[i, j]
+        return total
+
+    activate_all()
+    ti.sync()
+
+    count = n * n
+    assert checksum() == count * (count + 1) // 2

@@ -119,6 +119,11 @@ void LlvmProgramImpl::cache_field(int snode_tree_id,
         snodes[i]->hash_expected_active_hint;
     snode_cache_data.num_cells_per_container =
         snodes[i]->num_cells_per_container;
+    snode_cache_data.total_num_cells_from_root = 1;
+    for (int axis = 0; axis < taichi_max_num_indices; ++axis) {
+      snode_cache_data.total_num_cells_from_root *=
+          snodes[i]->extractors[axis].num_elements_from_root;
+    }
 
     ret.snode_metas.emplace_back(std::move(snode_cache_data));
   }

@@ -591,9 +591,11 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
         constexpr int kHintHeadroomChunks = 1;
         std::size_t data_chunks = std::size_t(1 + kHeadroomChunks);
         // Phase 0.5 / Phase 1-B (2026-05): when the user provided
-        // `vk_max_active=N` use it directly; otherwise auto-hint from
-        // `num_cells_per_container` – the physical upper bound of
-        // simultaneously active cells that the SNode tree can hold.
+        // `vk_max_active=N` use it directly; otherwise size from the
+        // global number of cells represented by this SNode. Using only
+        // `num_cells_per_container` under-sizes nested pointer/dynamic
+        // nodes because the same container is instantiated once per active
+        // parent cell.
         // This eliminates over-provisioning for sparse workloads
         // (e.g. MPM with 495 pointer cells getting 8192-slot chunks).
         // A kHintHeadroomChunks margin is reserved for GC/recycle
@@ -601,7 +603,7 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
         // runtime cooperative grow (Phase 2).
         int64_t effective = snode_metas[i].vk_max_active_hint;
         if (effective <= 0) {
-          effective = snode_metas[i].num_cells_per_container;
+          effective = snode_metas[i].total_num_cells_from_root;
         }
         if (effective > 0) {
           int64_t lower_bound = snode_metas[i].num_cells_per_container > 0
@@ -847,11 +849,12 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       std::size_t chunk_bytes = chunk_elems * node_size;
       global_region += std::size_t(kMgrsPerNode) * kMgrBytes;
       std::size_t data_chunks = std::size_t(1 + kHeadroomChunks);
-      // Phase 1-B (2026-05): auto-hint from num_cells_per_container
-      // when no explicit vk_max_active_hint is set.
+      // Phase 1-B (2026-05): size from the global cell bound when no
+      // explicit vk_max_active_hint is set. A per-container bound is not
+      // sufficient for nested sparse nodes.
       int64_t effective = snode_metas[i].vk_max_active_hint;
       if (effective <= 0) {
-        effective = snode_metas[i].num_cells_per_container;
+        effective = snode_metas[i].total_num_cells_from_root;
       }
       if (effective > 0) {
         int64_t lb = snode_metas[i].num_cells_per_container > 0
