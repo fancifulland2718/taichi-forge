@@ -81,6 +81,13 @@ class SparseMatrix {
                                   int nnz) {
     TI_NOT_IMPLEMENTED;
   }
+  virtual int num_nonzero() const {
+    TI_NOT_IMPLEMENTED;
+    return 0;
+  }
+  virtual void update_values(Program *prog, const Ndarray &values) {
+    TI_NOT_IMPLEMENTED;
+  }
   inline const int num_rows() const {
     return rows_;
   }
@@ -218,6 +225,12 @@ class EigenSparseMatrix : public SparseMatrix {
 
   void spmv(Program *prog, const Ndarray &x, const Ndarray &y);
 
+  int num_nonzero() const override {
+    return static_cast<int>(matrix_.nonZeros());
+  }
+
+  void update_values(Program *prog, const Ndarray &values) override;
+
  private:
   EigenMatrix matrix_;
 };
@@ -319,6 +332,12 @@ class CuSparseMatrix : public SparseMatrix {
   int get_nnz() const {
     return nnz_;
   }
+
+  int num_nonzero() const override {
+    return nnz_;
+  }
+
+  void update_values(Program *prog, const Ndarray &values) override;
 
   void mmwrite(const std::string &filename) override;
 

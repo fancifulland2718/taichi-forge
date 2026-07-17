@@ -176,6 +176,23 @@ class SparseMatrix:
         """The shape of the sparse matrix."""
         return (self.n, self.m)
 
+    def _num_nonzero(self):
+        """Returns the internal compressed pattern size."""
+        return self.matrix.num_nonzero()
+
+    def _update_values(self, values):
+        """Updates compressed values without rebuilding the sparse pattern.
+
+        This is an internal A1 foundation API. Values must be a scalar
+        Taichi ndarray with one entry per stored nonzero, ordered exactly like
+        the matrix compressed storage (CSR on CUDA; selected row or column
+        major storage on CPU). Row and column indices, the cuSPARSE matrix
+        descriptor, and persistent SpMV resources remain unchanged.
+        """
+        if not isinstance(values, Ndarray):
+            raise TaichiRuntimeError("SparseMatrix value-only update expects a Taichi ndarray.")
+        self.matrix.update_values(get_runtime().prog, values.arr)
+
     def build_from_ndarray(self, ndarray):
         """Build the sparse matrix from a ndarray.
 

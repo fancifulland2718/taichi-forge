@@ -1,5 +1,6 @@
 #include "taichi/program/sparse_matrix.h"
 
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -313,6 +314,29 @@ void EigenSparseMatrix<EigenMatrix>::spmv(Program *prog,
   }
 }
 
+template <class EigenMatrix>
+void EigenSparseMatrix<EigenMatrix>::update_values(
+    Program *prog,
+    const Ndarray &values) {
+  const auto nnz = static_cast<std::size_t>(matrix_.nonZeros());
+  const auto value_bytes = data_type_size(dtype_);
+  TI_ERROR_IF(values.get_element_data_type() != dtype_ ||
+                  !values.get_element_shape().empty() ||
+                  values.get_nelement() != nnz ||
+                  values.get_element_size() != value_bytes,
+              "SparseMatrix value-only update expects exactly {} scalar {} "
+              "values in storage order, got {} element(s) of {} byte(s).",
+              nnz, data_type_name(dtype_), values.get_nelement(),
+              values.get_element_size());
+  matrix_.makeCompressed();
+  if (nnz == 0) {
+    return;
+  }
+  auto src = prog->get_ndarray_data_ptr_as_int(&values);
+  std::memcpy(matrix_.valuePtr(), reinterpret_cast<const void *>(src),
+              nnz * value_bytes);
+}
+
 INSTANTIATE_SPMV(float32, ColMajor)
 INSTANTIATE_SPMV(float32, RowMajor)
 INSTANTIATE_SPMV(float64, ColMajor)
@@ -474,6 +498,29 @@ void CuSparseMatrix::reset_spmv_resources() {
   spmv_y_ptr_ = 0;
   spmv_buffer_size_ = 0;
   spmv_buffer_initialized_ = false;
+#endif
+}
+
+void CuSparseMatrix::update_values(Program *prog, const Ndarray &values) {
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(dtype_ != PrimitiveType::f32,
+              "CUDA SparseMatrix value-only update supports f32 only.");
+  TI_ERROR_IF(values.get_element_data_type() != dtype_ ||
+                  !values.get_element_shape().empty() ||
+                  values.get_nelement() != static_cast<std::size_t>(nnz_) ||
+                  values.get_element_size() != sizeof(float32),
+              "CUDA SparseMatrix value-only update expects exactly {} scalar "
+              "f32 values in CSR order, got {} element(s) of {} byte(s).",
+              nnz_, values.get_nelement(), values.get_element_size());
+  if (nnz_ == 0) {
+    return;
+  }
+  auto src = prog->get_ndarray_data_ptr_as_int(&values);
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  CUDADriver::get_instance().memcpy_device_to_device(
+      csr_val_, reinterpret_cast<void *>(src), nnz_ * sizeof(float32));
+#else
+  TI_NOT_IMPLEMENTED;
 #endif
 }
 

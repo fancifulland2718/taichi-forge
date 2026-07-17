@@ -3879,6 +3879,8 @@ void export_lang(py::module &m) {
       .def("mmwrite", &SparseMatrix::mmwrite)
       .def("num_rows", &SparseMatrix::num_rows)
       .def("num_cols", &SparseMatrix::num_cols)
+      .def("num_nonzero", &SparseMatrix::num_nonzero)
+      .def("update_values", &SparseMatrix::update_values)
       .def("get_data_type", &SparseMatrix::get_data_type);
 
 #define MAKE_SPARSE_MATRIX(TYPE, STORAGE, VTYPE)                             \

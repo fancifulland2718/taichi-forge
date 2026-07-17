@@ -168,6 +168,49 @@ def test_sparse_matrix_element_modify(dtype, storage_format):
     ],
 )
 @test_utils.test(arch=ti.cpu)
+def test_sparse_matrix_value_only_update(dtype, storage_format):
+    n = 8
+    builder = ti.linalg.SparseMatrixBuilder(
+        n, n, max_num_triplets=n, dtype=dtype, storage_format=storage_format
+    )
+
+    @ti.kernel
+    def fill_pattern(A: ti.types.sparse_matrix_builder()):
+        for i in range(n):
+            A[i, i] += i + 1
+
+    fill_pattern(builder)
+    A = builder.build()
+    values = ti.ndarray(dtype=dtype, shape=n)
+
+    @ti.kernel
+    def fill_values(v: ti.types.ndarray()):
+        for i in range(n):
+            v[i] = 2 * (i + 1)
+
+    fill_values(values)
+    assert A._num_nonzero() == n
+    A._update_values(values)
+    for i in range(n):
+        assert A[i, i] == 2 * (i + 1)
+
+    wrong_size = ti.ndarray(dtype=dtype, shape=n - 1)
+    with pytest.raises(Exception, match="expects exactly"):
+        A._update_values(wrong_size)
+    for i in range(n):
+        assert A[i, i] == 2 * (i + 1)
+
+
+@pytest.mark.parametrize(
+    "dtype, storage_format",
+    [
+        (ti.f32, "col_major"),
+        (ti.f32, "row_major"),
+        (ti.f64, "col_major"),
+        (ti.f64, "row_major"),
+    ],
+)
+@test_utils.test(arch=ti.cpu)
 def test_sparse_matrix_addition(dtype, storage_format):
     n = 8
     Abuilder = ti.linalg.SparseMatrixBuilder(n, n, max_num_triplets=100, dtype=dtype, storage_format=storage_format)
@@ -458,6 +501,23 @@ def test_gpu_sparse_matrix():
     Y3 = A @ X
     for i in range(4):
         assert Y3[i] == h_Y[i]
+
+    # Update CSR values in place. The row/column pattern and warm cuSPARSE
+    # descriptor/workspace remain valid.
+    values2 = ti.ndarray(shape=num_triplets, dtype=ti_dtype)
+    values2.from_numpy(2.0 * coo_val)
+    assert A._num_nonzero() == num_triplets
+    A._update_values(values2)
+    Y4 = A @ X
+    for i in range(4):
+        assert Y4[i] == 2.0 * h_Y[i]
+
+    wrong_size = ti.ndarray(shape=num_triplets - 1, dtype=ti_dtype)
+    with pytest.raises(Exception, match="expects exactly"):
+        A._update_values(wrong_size)
+    Y5 = A @ X
+    for i in range(4):
+        assert Y5[i] == 2.0 * h_Y[i]
 
 
 @pytest.mark.parametrize("N", [5])
