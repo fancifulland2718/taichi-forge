@@ -54,6 +54,7 @@
 | `unrolling_hard_limit` | `0`（关） | 每个 `ti.static(for ...)` 的 unroll 迭代上限；超出抛 `TaichiCompilationError`，避免静默吃编译时间。 |
 | `unrolling_kernel_hard_limit` | `0`（关） | 单 kernel 内 unroll 总迭代上限。 |
 | `func_inline_depth_limit` | 上游默认 | `@ti.func` 内联递归深度硬上限。 |
+| `kernel_specialization_limit` | `1024` | 当前 Program generation 允许编译的 `@ti.kernel` specialization 总预算。达到正整数上限后，已有 specialization 继续运行，新的 cache miss 明确失败；只在应用确实需要且能够约束模板参数集合时调高。`ti.reset()` 会创建新 generation。 |
 | `check_out_of_bound` | `False`；未指定且 `debug=True` 时隐式为 `True` | 在支持 assertion 的后端生成越界断言。显式传入 `check_out_of_bound=False`（或 `TI_CHECK_OUT_OF_BOUND=0`）现在会覆盖 debug 默认值，但不会关闭其它 debug 行为。 |
 
 越界检查会改变生成代码，其最终有效布尔值进入 offline-cache key。只有在隔离检查成本，或
@@ -137,6 +138,7 @@
 |---|---|---|---|
 | `TI_VULKAN_POOL_FRACTION` | `(0.0, 1.0]` | `1.0` | 缩减每个 `pointer` SNode 的物理 cell pool 到 `max(num_cells_per_container, round(total × fraction))`。越界 activate 走既有 `cap_v` silent-inactive 守卫。非法 / `≤ 0` / `> 1` 回退 `1.0`。详细语义见 [sparse_snode_on_vulkan.zh.md](sparse_snode_on_vulkan.zh.md)。 |
 | `TI_VULKAN_QUANT` | `0` / `1` | `0` | **0.3.0 新增**。等价于 `ti.init(arch=ti.vulkan, vulkan_quant_experimental=True)`。开启后 `quant_array` 与 `BitpackedFields` / `bit_struct` 的读、写、`ti.atomic_add` 均可用。`QuantFloat` 共享指数、非 add 原子明确不支持。OFF 时行为与 vanilla 1.7.4 相同。 |
+| `TI_KERNEL_PROFILER_MAX_RECORDS` | `1`–`1048576` | `131072` | kernel profiler raw record 的进程内预算；达到上限时明确报错，不继续增长。长期 profiling 应定期调用 `ti.profiler.clear_kernel_profiler_info()`；只在确认 host-memory 预算后调高。 |
 
 > 上游 taichi 已有的环境变量（`TI_ARCH` / `TI_DEVICE_MEMORY_GB` 等）保持原行为，不在此重列。
 

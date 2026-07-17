@@ -76,6 +76,37 @@ retroactively attributed to the 0.5.0 artifact:
   matrices. Linux wheel/import/dependency scans, compute-sanitizer, and execution
   on each claimed older NVIDIA driver remain required before lowering any
   published driver floor.
+
+### Bounded host memory and runtime lifetimes
+
+- The host allocator now unmaps a non-exclusive chunk after all valid requests
+  in that chunk have been released, while removing its capacity, cursor,
+  alignment-waste, and released-byte accounting. Repeated creation and release
+  of large/adaptive chunks no longer retains every historical OS mapping;
+  chunks with live allocations remain owned as required.
+- Process-lifetime internal histories that could previously keep growing now
+  have explicit budgets. Blender temporary source files use a 32-entry LRU and
+  remove evictions; compile/timeline traces, raw kernel-profiler records, and
+  Python kernel specializations are bounded. A Program compiles at most 1,024
+  specializations by default. Existing specializations remain usable at the
+  limit, while a new cache miss fails clearly instead of consuming more host
+  memory.
+- Repeated `ti.init()`/`ti.reset()` lifecycles no longer retain launchers,
+  accessors, frontend field mappings, or GFX runtime state for destroyed
+  SNodeTrees. Python runtime-object registration uses weak references and the
+  version-check thread starts at most once per process. Ordinary kernel, Graph,
+  and UI runtime paths create no persistent helper subprocess; applications
+  remain responsible for joining or terminating multiprocessing workers they
+  create.
+- These changes close runtime-owned unbounded-history sources; they are not a
+  process-wide RSS limit. Live user fields, ndarrays, and Graphs, partially live
+  allocator chunks, a finite specialization set, driver/context high-water
+  marks, and the on-disk offline cache can still consume workload-proportional
+  resources. See [Forge API reference](forge_api_reference.en.md#memory-growth-and-ownership-boundaries)
+  and [Forge options](forge_options.en.md) for diagnostics and controls.
+
+### TODO contract completion and explicit support boundaries
+
 - Hardened debug execution and indexing contracts. CPU assertion failures now
   cooperatively cancel remaining debug work, publish one coherent first fault,
   and leave the worker pool reusable. Matrix/vector accesses validate and clamp

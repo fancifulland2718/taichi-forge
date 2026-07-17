@@ -64,6 +64,30 @@
 - Windows driver-only/reference build 与 primitive 正确性矩阵已经完成。降低任何公开 driver
   下限之前，仍必须补齐 Linux wheel/import/依赖扫描、compute-sanitizer 和每个声明支持的旧
   NVIDIA driver 真机执行。
+
+### 宿主内存与运行时生命周期有界化
+
+- Host allocator 现在会在 non-exclusive chunk 中的有效请求全部 release 后解除对应 OS
+  mapping，并同步扣除 capacity、cursor、alignment waste 与 released-byte 统计。反复创建并
+  释放 large/adaptive chunk 不再让进程保留每一份历史 mapping；仍有 live allocation 的
+  chunk 按所有权合同继续保留。
+- 将此前可能随进程寿命增长的内部记录改为有界合同：Blender 临时源码使用 32 项 LRU 并
+  清理淘汰文件；compile/timeline trace、kernel-profiler raw record 与 Python kernel
+  specialization 都有固定预算。当前 Program 默认最多编译 1024 个 specialization；达到
+  上限后，已有 specialization 仍可使用，新的 cache miss 会明确失败，而不是继续吃掉
+  host memory。
+- 重复 `ti.init()`/`ti.reset()` 的生命周期不再保留已销毁 SNodeTree 的 launcher、accessor、
+  frontend field 映射或 GFX runtime state；Python runtime object registry 使用弱引用，版本
+  检查线程每个进程最多启动一次。普通 kernel、Graph 与 UI runtime 不创建持久 helper
+  subprocess；应用自己启动的 multiprocessing worker 仍由应用负责 join/terminate。
+- 这些修复关闭的是 runtime-owned 的无界历史增长源，不是全进程 RSS 上限。用户仍持有的
+  field/ndarray/Graph、尚未完全释放的 allocator chunk、有限 specialization 集、driver/
+  context high-water mark 与磁盘 offline cache 都可能按真实 workload 占用资源。诊断与
+  配置边界见 [Forge API 参考](forge_api_reference.zh.md#内存增长与所有权边界)和
+  [Forge 选项](forge_options.zh.md)。
+
+### TODO 合同补全与明确支持边界
+
 - 强化 debug 执行与索引契约。CPU assertion 失败后会协作取消剩余 debug work，发布一致的
   首个错误，并保持 worker pool 可复用；矩阵/向量访问会逐逻辑轴检查和 clamp，不再接受
   线性化后碰巧落在存储范围内的别名分量；`assume_in_range` 会在支持的整数范围内避免窄

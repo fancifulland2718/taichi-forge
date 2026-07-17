@@ -51,6 +51,7 @@ All defaults match upstream 1.7.4 unless noted.
 | `unrolling_hard_limit` | `0` (off) | Per-`ti.static(for ...)` unroll iteration cap. Aborts with `TaichiCompilationError` instead of silently consuming compile time. |
 | `unrolling_kernel_hard_limit` | `0` (off) | Total unroll iteration cap across a single kernel. |
 | `func_inline_depth_limit` | upstream default | Hard cap on `@ti.func` inline recursion depth. |
+| `kernel_specialization_limit` | `1024` | Total compiled `@ti.kernel` specialization budget for the current Program generation. Existing specializations keep running at the positive limit, while new cache misses fail clearly. Raise it only for an application with a deliberately finite template-argument set. `ti.reset()` creates a new generation. |
 | `check_out_of_bound` | `False`; implicitly `True` when `debug=True` and unspecified | Enables generated bounds assertions on backends with assertion support. An explicit `check_out_of_bound=False` (or `TI_CHECK_OUT_OF_BOUND=0`) now overrides the debug default without disabling other debug behavior. |
 
 Bounds checks change generated code and are represented by their effective
@@ -140,6 +141,7 @@ production configuration:
 |---|---|---|---|
 | `TI_VULKAN_POOL_FRACTION` | `(0.0, 1.0]` | `1.0` | Shrinks each `pointer` SNode's physical cell pool to `max(num_cells_per_container, round(total × fraction))`. Out-of-capacity activates fall through the existing `cap_v` silent-inactive guard. Invalid / `≤ 0` / `> 1` falls back to `1.0`. Detailed semantics: see [sparse_snode_on_vulkan.en.md](sparse_snode_on_vulkan.en.md). |
 | `TI_VULKAN_QUANT` | `0` / `1` | `0` | **New in 0.3.0.** Equivalent to `ti.init(arch=ti.vulkan, vulkan_quant_experimental=True)`. When ON, `quant_array` and `BitpackedFields` / `bit_struct` read, write, and `ti.atomic_add` are all available on Vulkan. `QuantFloat` shared-exponent and non-add atomics are explicitly not supported. OFF preserves vanilla 1.7.4 behaviour. |
+| `TI_KERNEL_PROFILER_MAX_RECORDS` | `1`–`1048576` | `131072` | In-process raw-record budget for the kernel profiler. Reaching it reports a clear error instead of growing further. Long sessions should call `ti.profiler.clear_kernel_profiler_info()` periodically; raise the limit only after budgeting host memory. |
 
 > Other environment variables documented in upstream Taichi remain unchanged (`TI_ARCH`, `TI_DEVICE_MEMORY_GB`, etc.). They are not re-listed here.
 

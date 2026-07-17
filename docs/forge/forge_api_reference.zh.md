@@ -188,6 +188,30 @@ host 值；它仍是诊断 snapshot，不是 reset 或 allocator-control API。
 `TI_HOST_ALLOCATOR_ADAPTIVE_CHUNKS=0`，恢复旧的固定 1 GiB slab。该环境变量只是
 内部回退门禁，不是稳定的 `ti.init` 参数或长期 allocator-control API。
 
+#### 内存增长与所有权边界
+
+当前 runtime 对其持有的长期状态执行以下有界合同：
+
+- non-exclusive host allocator chunk 的有效请求全部 release 后，OS mapping 会被解除；
+  部分仍存活的 chunk 不会为了降低 RSS 而使指针失效。
+- Python kernel specialization 默认每个 Program generation 最多 1024 个，可通过
+  `ti.init(kernel_specialization_limit=...)` 设置正整数预算。达到预算后，已编译路径继续
+  可用；只拒绝新的 specialization。`ti.reset()` 建立新的 Program generation 和预算。
+- 临时源码 LRU、compile/timeline trace 与 kernel-profiler raw history 都有固定容量；容量
+  用尽时采用淘汰、drop 计数或明确错误，不进行无界扩容。需要长期 profiler 时应定期调用
+  `ti.profiler.clear_kernel_profiler_info()`。
+- 已销毁 SNodeTree 的执行状态在安全同步边界回收，Python runtime object registry 不强持有
+  已死亡 wrapper；每周版本检查线程每个 Python 进程最多启动一次。
+
+普通 `ti.init()`、kernel、Graph 和 UI runtime 使用进程内 worker thread，不启动持久 helper
+subprocess。`ti` CLI、诊断工具、source builder 或应用显式创建的子进程属于调用方可见的
+独立操作；应用仍须管理自己创建的 multiprocessing worker。
+
+“有界”不等于 RSS 恒定。活跃 field/ndarray/Graph、仍有 live allocation 的 chunk、driver
+context/pool 高水位和用户选择的 specialization 数量仍占用内存；磁盘 offline cache 也不是
+host RSS。判断泄漏时应同时观察 `requested_live_bytes`、当前/峰值 chunk 统计、OS RSS 及应用
+对象生命周期，而不是只看进程曾达到的峰值。
+
 ### `ti.runtime.capabilities()`
 
 返回 active Program 的不可变 `RuntimeCapabilities`。它说明当前实现是否提供有界

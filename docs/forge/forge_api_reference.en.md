@@ -215,6 +215,41 @@ or initializing Taichi restores the legacy fixed-1-GiB slab policy. This
 environment switch is an internal rollback gate, not a stable `ti.init`
 option or a long-term allocator-control API.
 
+#### Memory growth and ownership boundaries
+
+The current runtime applies these bounded contracts to long-lived state that
+it owns:
+
+- An OS mapping is released after every valid request in a non-exclusive host
+  allocator chunk has been released. A partially live chunk is not unmapped at
+  the cost of invalidating pointers.
+- Python kernel specialization defaults to 1,024 compiled entries per Program
+  generation. Set a positive budget with
+  `ti.init(kernel_specialization_limit=...)`. At the limit, compiled paths keep
+  working and only new specializations are rejected. `ti.reset()` establishes a
+  new Program generation and budget.
+- Temporary-source LRUs, compile/timeline traces, and raw kernel-profiler
+  history have fixed capacities. Capacity exhaustion evicts, counts drops, or
+  reports a clear error instead of growing without bound. Long-running profiler
+  sessions should call `ti.profiler.clear_kernel_profiler_info()` periodically.
+- Execution state for a destroyed SNodeTree is reclaimed at a safe
+  synchronization boundary, the Python runtime-object registry does not hold
+  dead wrappers strongly, and the weekly version-check thread starts at most
+  once per Python process.
+
+Ordinary `ti.init()`, kernel, Graph, and UI runtime paths use in-process worker
+threads and do not launch persistent helper subprocesses. The `ti` CLI,
+diagnostic tools, source builder, and application-created child processes are
+explicit caller-visible operations; applications still own the lifetime of
+their multiprocessing workers.
+
+Bounded does not mean constant RSS. Live fields, ndarrays, and Graphs, chunks
+with live allocations, driver context/pool high-water marks, and the selected
+number of specializations still consume memory. The on-disk offline cache is
+not host RSS. Leak diagnosis should compare `requested_live_bytes`, current and
+peak chunk statistics, OS RSS, and application object lifetimes instead of
+using the process peak alone.
+
 ### `ti.runtime.capabilities()`
 
 Returns immutable `RuntimeCapabilities` for the active Program. It describes
