@@ -1249,6 +1249,47 @@ class TaskCodegen : public IRVisitor {
     return ir_->struct_array_access(u32_t, buffer, len_word_idx);
   }
 
+  void record_sparse_allocator_overflow(int root_id,
+                                        const SNode *sn,
+                                        SparseOverflowKind kind,
+                                        uint32_t capacity) {
+    auto u32_t = ir_->u32_type();
+    mark_buffer_access(BufferType::HashOverflow,
+                       BufferBind::kAccessReadWrite);
+    auto diag_buffer =
+        get_buffer_value(BufferType::HashOverflow, PrimitiveType::u32);
+    auto diag_count_ptr =
+        ir_->struct_array_access(u32_t, diag_buffer, ir_->const_i32_zero_);
+    auto old_diag_count = ir_->make_value(
+        spv::OpAtomicIAdd, u32_t, diag_count_ptr,
+        /*scope=*/ir_->const_i32_one_,
+        /*semantics=*/ir_->const_i32_zero_,
+        ir_->uint_immediate_number(u32_t, 1));
+    auto first_sample = ir_->make_value(
+        spv::OpIEqual, ir_->bool_type(), old_diag_count,
+        ir_->uint_immediate_number(u32_t, 0));
+    auto sample_lbl = ir_->new_label();
+    auto after_sample = ir_->new_label();
+    ir_->make_inst(spv::OpSelectionMerge, after_sample,
+                   spv::SelectionControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, first_sample, sample_lbl,
+                   after_sample);
+
+    ir_->start_label(sample_lbl);
+    auto store_diag = [&](uint32_t idx, uint32_t value) {
+      auto ptr = ir_->struct_array_access(
+          u32_t, diag_buffer, ir_->uint_immediate_number(u32_t, idx));
+      ir_->store_variable(ptr, ir_->uint_immediate_number(u32_t, value));
+    };
+    store_diag(1, static_cast<uint32_t>(root_id));
+    store_diag(2, static_cast<uint32_t>(sn->id));
+    store_diag(3, capacity);
+    store_diag(4, 0);
+    store_diag(5, static_cast<uint32_t>(kind));
+    ir_->make_inst(spv::OpBranch, after_sample);
+    ir_->start_label(after_sample);
+  }
+
   spirv::Value dynamic_cell_byte_offset(spirv::Value parent_byte_offset,
                                         const SNodeDescriptor &desc,
                                         spirv::Value index) {
@@ -1321,10 +1362,26 @@ class TaskCodegen : public IRVisitor {
 
   void dynamic_activate_cells(spirv::Value buffer,
                               spirv::Value parent_byte_offset,
+                              int root_id,
+                              const SNode *sn,
                               const SNodeDescriptor &desc,
                               spirv::Value len_ptr,
                               spirv::Value index) {
     auto u32_t = ir_->u32_type();
+    const uint32_t capacity =
+        static_cast<uint32_t>(sn->num_cells_per_container);
+    auto cap = ir_->uint_immediate_number(u32_t, capacity);
+    auto in_range =
+        ir_->make_value(spv::OpULessThan, ir_->bool_type(), index, cap);
+    auto activate_label = ir_->new_label();
+    auto overflow_label = ir_->new_label();
+    auto after_activate = ir_->new_label();
+    ir_->make_inst(spv::OpSelectionMerge, after_activate,
+                   spv::SelectionControlMaskNone);
+    ir_->make_inst(spv::OpBranchConditional, in_range, activate_label,
+                   overflow_label);
+
+    ir_->start_label(activate_label);
     auto index_plus_one = ir_->add(index, ir_->uint_immediate_number(u32_t, 1));
     auto old_len = ir_->make_value(spv::OpAtomicUMax, u32_t, len_ptr,
                                    /*scope=*/ir_->const_i32_one_,
@@ -1347,6 +1404,13 @@ class TaskCodegen : public IRVisitor {
     hash_device_memory_barrier();
     ir_->make_inst(spv::OpBranch, after_zero);
     ir_->start_label(after_zero);
+    ir_->make_inst(spv::OpBranch, after_activate);
+
+    ir_->start_label(overflow_label);
+    record_sparse_allocator_overflow(root_id, sn,
+                                     SparseOverflowKind::Dynamic, capacity);
+    ir_->make_inst(spv::OpBranch, after_activate);
+    ir_->start_label(after_activate);
   }
 
   spirv::Value hash_load_stable_state(spirv::Value state_ptr) {
@@ -2111,6 +2175,50 @@ class TaskCodegen : public IRVisitor {
       // assign to these two variables before falling through.
       spirv::Value new_slot;
       spirv::Label winner_terminator_label;
+      auto publish_pointer_slot = [&](spirv::Value slot) {
+        auto slot_valid = ir_->make_value(
+            spv::OpINotEqual, ir_->bool_type(), slot, zero_v);
+        auto publish_label = ir_->new_label();
+        auto overflow_label = ir_->new_label();
+        auto after_publish = ir_->new_label();
+        ir_->make_inst(spv::OpSelectionMerge, after_publish,
+                       spv::SelectionControlMaskNone);
+        ir_->make_inst(spv::OpBranchConditional, slot_valid, publish_label,
+                       overflow_label);
+
+        ir_->start_label(publish_label);
+        auto publish_cell_stride_v =
+            ir_->uint_immediate_number(u32_t, contract.cell_stride_bytes);
+        auto publish_pool_offset_v =
+            ir_->uint_immediate_number(u32_t, contract.pool_data_offset);
+        auto publish_effective_slot =
+            ir_->sub(slot, ir_->uint_immediate_number(u32_t, 1));
+        auto publish_cell_offset = ir_->add(
+            publish_pool_offset_v,
+            ir_->mul(publish_effective_slot, publish_cell_stride_v));
+        if (contract.cell_stride_bytes % 4 == 0) {
+          zero_u32_region(pool_meta_buffer, publish_cell_offset,
+                          contract.cell_stride_bytes,
+                          "Vulkan pointer CAS-marker zero-init");
+          hash_device_memory_barrier();
+        }
+        ir_->make_inst(spv::OpAtomicStore, slot_ptr,
+                       /*scope=*/ir_->const_i32_one_,
+                       /*semantics=*/ir_->const_i32_zero_, slot);
+        ir_->make_inst(spv::OpBranch, after_publish);
+
+        ir_->start_label(overflow_label);
+        record_sparse_allocator_overflow(
+            root_id, sn, SparseOverflowKind::Pointer,
+            contract.pool_capacity);
+        // Release waiters without publishing an out-of-range pool slot.
+        ir_->make_inst(spv::OpAtomicStore, slot_ptr,
+                       /*scope=*/ir_->const_i32_one_,
+                       /*semantics=*/ir_->const_i32_zero_, zero_v);
+        ir_->make_inst(spv::OpBranch, after_publish);
+        ir_->start_label(after_publish);
+        return after_publish;
+      };
       if (contract.has_freelist) {
         // G1.b (2026-04-30 → B-2.a 2026-05): try to pop a recycled slot
         // off the freelist before bumping the watermark. The freelist is a
@@ -2195,14 +2303,12 @@ class TaskCodegen : public IRVisitor {
                                       /*scope=*/ir_->const_i32_one_,
                                       /*semantics=*/ir_->const_i32_zero_,
                                       ir_->uint_immediate_number(u32_t, 1));
-        // C-1.b (2026-05): no in_cap clamp here. OOC writes (old_wm >= cap)
-        // produce new_slot >= cap+1, leading to OOB pool_data access. The
-        // SSBO range check in the driver surfaces this as device-lost
-        // (matches CPU/CUDA assert(slot < cap) semantics; honest hardware
-        // OOM rather than silent fallback to slot 0).
-        (void)cap_v;
-        auto new_slot_bump =
+        auto in_cap = ir_->make_value(spv::OpULessThan, ir_->bool_type(),
+                                      old_wm, cap_v);
+        auto candidate =
             ir_->add(old_wm, ir_->uint_immediate_number(u32_t, 1));
+        auto new_slot_bump = ir_->make_value(
+            spv::OpSelect, u32_t, in_cap, candidate, zero_v);
         ir_->make_inst(spv::OpBranch, publish_lbl);
 
         // fl_merge: freelist pop succeeded; new_slot = fhead_cur (the
@@ -2215,61 +2321,21 @@ class TaskCodegen : public IRVisitor {
         ir_->start_label(publish_lbl);
         new_slot = ir_->make_value(spv::OpPhi, u32_t, new_slot_bump,
                                    bump_lbl, fhead_cur, fl_merge_lbl);
-        auto publish_cell_stride_v =
-            ir_->uint_immediate_number(u32_t, contract.cell_stride_bytes);
-        auto publish_pool_offset_v =
-            ir_->uint_immediate_number(u32_t, contract.pool_data_offset);
-        auto publish_effective_slot =
-            ir_->sub(new_slot, ir_->uint_immediate_number(u32_t, 1));
-        auto publish_cell_offset = ir_->add(
-            publish_pool_offset_v,
-            ir_->mul(publish_effective_slot, publish_cell_stride_v));
-        if (contract.cell_stride_bytes % 4 == 0) {
-          zero_u32_region(pool_meta_buffer, publish_cell_offset,
-                          contract.cell_stride_bytes,
-                          "Vulkan pointer CAS-marker zero-init");
-          hash_device_memory_barrier();
-        }
-        // Publish the resolved slot. Loser's spin will see this on its
-        // next atomicLoad iteration and exit.
-        ir_->make_inst(spv::OpAtomicStore, slot_ptr,
-                       /*scope=*/ir_->const_i32_one_,
-                       /*semantics=*/ir_->const_i32_zero_, new_slot);
+        winner_terminator_label = publish_pointer_slot(new_slot);
         ir_->make_inst(spv::OpBranch, alloc_done_label);
-        // For OpPhi at alloc_done_label: winner block's terminator is in
-        // publish_lbl, so the predecessor passed to phi must be
-        // publish_lbl.
-        winner_terminator_label = publish_lbl;
       } else {
         auto old_wm = ir_->make_value(spv::OpAtomicIAdd, u32_t, wm_ptr,
                                       /*scope=*/ir_->const_i32_one_,
                                       /*semantics=*/ir_->const_i32_zero_,
                                       ir_->uint_immediate_number(u32_t, 1));
-        // C-1.b (2026-05): no OOC clamp; see bump_lbl branch above.
-        (void)cap_v;
-        new_slot = ir_->add(old_wm, ir_->uint_immediate_number(u32_t, 1));
-        auto publish_cell_stride_v =
-            ir_->uint_immediate_number(u32_t, contract.cell_stride_bytes);
-        auto publish_pool_offset_v =
-            ir_->uint_immediate_number(u32_t, contract.pool_data_offset);
-        auto publish_effective_slot =
-            ir_->sub(new_slot, ir_->uint_immediate_number(u32_t, 1));
-        auto publish_cell_offset = ir_->add(
-            publish_pool_offset_v,
-            ir_->mul(publish_effective_slot, publish_cell_stride_v));
-        if (contract.cell_stride_bytes % 4 == 0) {
-          zero_u32_region(pool_meta_buffer, publish_cell_offset,
-                          contract.cell_stride_bytes,
-                          "Vulkan pointer CAS-marker zero-init");
-          hash_device_memory_barrier();
-        }
-        // Publish the resolved slot. Loser's spin will see this on its
-        // next atomicLoad iteration and exit.
-        ir_->make_inst(spv::OpAtomicStore, slot_ptr,
-                       /*scope=*/ir_->const_i32_one_,
-                       /*semantics=*/ir_->const_i32_zero_, new_slot);
+        auto in_cap = ir_->make_value(spv::OpULessThan, ir_->bool_type(),
+                                      old_wm, cap_v);
+        auto candidate =
+            ir_->add(old_wm, ir_->uint_immediate_number(u32_t, 1));
+        new_slot = ir_->make_value(spv::OpSelect, u32_t, in_cap, candidate,
+                                   zero_v);
+        winner_terminator_label = publish_pointer_slot(new_slot);
         ir_->make_inst(spv::OpBranch, alloc_done_label);
-        winner_terminator_label = winner_label;
       }
 
       // ---- waiter ----
@@ -2338,19 +2404,37 @@ class TaskCodegen : public IRVisitor {
                                     ir_->uint_immediate_number(u32_t, 1));
       auto cap_v = ir_->uint_immediate_number(
           u32_t, contract.pool_capacity);
-      // C-1.b (2026-05): no OOC clamp; see CasMarker branch comment.
-      (void)cap_v;
+      auto in_cap = ir_->make_value(spv::OpULessThan, ir_->bool_type(),
+                                    old_wm, cap_v);
       auto new_slot = ir_->add(old_wm, ir_->uint_immediate_number(u32_t, 1));
+      auto safe_new_slot = ir_->make_value(
+          spv::OpSelect, u32_t, in_cap, new_slot,
+          ir_->uint_immediate_number(u32_t, 0));
       auto cas_old = ir_->make_value(
           spv::OpAtomicCompareExchange, u32_t, slot_ptr,
           /*scope=*/ir_->const_i32_one_,
           /*semantics_eq=*/ir_->const_i32_zero_,
-          /*semantics_uneq=*/ir_->const_i32_zero_, new_slot,
+          /*semantics_uneq=*/ir_->const_i32_zero_, safe_new_slot,
           ir_->uint_immediate_number(u32_t, 0));
       auto we_won = ir_->make_value(spv::OpIEqual, ir_->bool_type(), cas_old,
                                     ir_->uint_immediate_number(u32_t, 0));
-      auto alloc_slot = ir_->make_value(spv::OpSelect, u32_t, we_won, new_slot,
-                                        cas_old);
+      auto claimed_slot = ir_->make_value(
+          spv::OpSelect, u32_t, we_won, safe_new_slot, cas_old);
+      auto alloc_slot = ir_->make_value(spv::OpSelect, u32_t, in_cap,
+                                        claimed_slot, cas_old);
+      auto overflow = ir_->make_value(spv::OpLogicalNot, ir_->bool_type(),
+                                      in_cap);
+      auto overflow_label = ir_->new_label();
+      auto after_overflow_label = ir_->new_label();
+      ir_->make_inst(spv::OpSelectionMerge, after_overflow_label,
+                     spv::SelectionControlMaskNone);
+      ir_->make_inst(spv::OpBranchConditional, overflow, overflow_label,
+                     after_overflow_label);
+      ir_->start_label(overflow_label);
+      record_sparse_allocator_overflow(
+          root_id, sn, SparseOverflowKind::Pointer, contract.pool_capacity);
+      ir_->make_inst(spv::OpBranch, after_overflow_label);
+      ir_->start_label(after_overflow_label);
       ir_->make_inst(spv::OpBranch, merge_label);
 
       // use path
@@ -2358,9 +2442,9 @@ class TaskCodegen : public IRVisitor {
       ir_->make_inst(spv::OpBranch, merge_label);
 
       ir_->start_label(merge_label);
-      // Phi(alloc_slot from alloc_label, cur_slot from use_label)
-      final_slot = ir_->make_value(spv::OpPhi, u32_t, alloc_slot, alloc_label,
-                                   cur_slot, use_label);
+      final_slot =
+          ir_->make_value(spv::OpPhi, u32_t, alloc_slot,
+                          after_overflow_label, cur_slot, use_label);
       }
     } else {
       final_slot = ir_->load_variable(slot_ptr, u32_t);
@@ -2402,16 +2486,16 @@ class TaskCodegen : public IRVisitor {
     // G10-P2 (2026-04-30 → B-2.a 2026-05): for inactive reads
     // (do_activate=false), route the byte offset to the per-pointer-SNode
     // ambient zone instead of pool[0]. The ambient zone is cell_stride
-    // bytes of zero-initialized memory at contract.ambient_offset,
-    // never written by any kernel; this matches LLVM's ambient_val_addr
-    // semantics so that x[inactive_idx] reads as 0. do_activate=true keeps
-    // the pool[0] fallback for OOC writes (silent loss, documented).
+    // bytes of zero-initialized memory at contract.ambient_offset. Inactive
+    // reads match LLVM's ambient_val_addr semantics. Overflowing activation
+    // also routes its failed write to this safe cell until the synchronization
+    // boundary reports the recorded capacity error.
     // Gating moved from compile-time `#if TI_VULKAN_POINTER_AMBIENT_ZONE`
     // to runtime `contract.has_ambient_zone` (B-2.a). Layout is still
     // gated by the same compile-time macro in snode_struct_compiler, so
     // contract.has_ambient_zone == (macro defined) at this stage; B-2.b
     // will make the gate fully runtime via CompileConfig.
-    if (contract.has_ambient_zone && !do_activate) {
+    if (contract.has_ambient_zone) {
       auto ambient_offset_v = ir_->uint_immediate_number(
           u32_t, contract.ambient_offset);
       cell_byte_offset = ir_->make_value(
@@ -2797,7 +2881,8 @@ class TaskCodegen : public IRVisitor {
       } else if (stmt->op_type == SNodeOpType::activate) {
         auto idx =
             ir_->cast(u32_t, ir_->query_value(stmt->val->raw_name()));
-        dynamic_activate_cells(root_buffer, parent_val, desc, len_ptr, idx);
+        dynamic_activate_cells(root_buffer, parent_val, root_id, stmt->snode,
+                               desc, len_ptr, idx);
       } else if (stmt->op_type == SNodeOpType::allocate) {
         // ti.append: i = atomicAdd(length, 1); store i to alloca; the
         // resulting cell address is parent_val + i * cell_stride.
@@ -2806,12 +2891,38 @@ class TaskCodegen : public IRVisitor {
             /*scope=*/ir_->const_i32_one_,
             /*semantics=*/ir_->const_i32_zero_,
             ir_->uint_immediate_number(u32_t, 1));
+        const uint32_t capacity = static_cast<uint32_t>(
+            stmt->snode->num_cells_per_container);
+        auto cap = ir_->uint_immediate_number(u32_t, capacity);
+        auto in_range =
+            ir_->make_value(spv::OpULessThan, ir_->bool_type(), idx, cap);
+        auto append_label = ir_->new_label();
+        auto overflow_label = ir_->new_label();
+        auto after_append = ir_->new_label();
+        ir_->make_inst(spv::OpSelectionMerge, after_append,
+                       spv::SelectionControlMaskNone);
+        ir_->make_inst(spv::OpBranchConditional, in_range, append_label,
+                       overflow_label);
+        ir_->start_label(append_label);
         dynamic_zero_cell(root_buffer, parent_val, desc, idx);
         hash_device_memory_barrier();
+        ir_->make_inst(spv::OpBranch, after_append);
+        ir_->start_label(overflow_label);
+        (void)ir_->make_value(spv::OpAtomicUMin, u32_t, len_ptr,
+                              /*scope=*/ir_->const_i32_one_,
+                              /*semantics=*/ir_->const_i32_zero_, cap);
+        record_sparse_allocator_overflow(
+            root_id, stmt->snode, SparseOverflowKind::Dynamic, capacity);
+        ir_->make_inst(spv::OpBranch, after_append);
+        ir_->start_label(after_append);
+        auto safe_idx = ir_->make_value(
+            spv::OpSelect, u32_t, in_range, idx,
+            ir_->uint_immediate_number(u32_t, 0));
         auto alloca_ptr = ir_->query_value(stmt->val->raw_name());
-        auto idx_i32 = ir_->cast(ir_->i32_type(), idx);
+        auto idx_i32 = ir_->cast(ir_->i32_type(), safe_idx);
         ir_->store_variable(alloca_ptr, idx_i32);
-        auto cell_addr = dynamic_cell_byte_offset(parent_val, desc, idx);
+        auto cell_addr =
+            dynamic_cell_byte_offset(parent_val, desc, safe_idx);
         ir_->register_value(stmt->raw_name(), cell_addr);
       } else {
         TI_NOT_IMPLEMENTED;
@@ -2867,8 +2978,8 @@ class TaskCodegen : public IRVisitor {
         auto input_index_val = ir_->cast(
             u32_t, ir_->query_value(stmt->input_index->raw_name()));
         auto len_ptr = dynamic_length_ptr(dyn_buffer, parent_val, desc);
-        dynamic_activate_cells(dyn_buffer, parent_val, desc, len_ptr,
-                               input_index_val);
+        dynamic_activate_cells(dyn_buffer, parent_val, root_id, sn, desc,
+                               len_ptr, input_index_val);
 #else
         TI_NOT_IMPLEMENTED;
 #endif
@@ -2900,6 +3011,23 @@ class TaskCodegen : public IRVisitor {
           ir_->query_value(stmt->input_index->raw_name());
       val = hash_lookup_or_activate(parent_val, root_id, sn, input_index_val,
                                     /*do_activate=*/stmt->activate);
+    } else if (sn->type == SNodeType::dynamic) {
+      const auto &desc =
+          compiled_structs_[root_id].snode_descriptors.at(sn->id);
+      auto u32_t = ir_->u32_type();
+      auto input_index_val = ir_->cast(
+          u32_t, ir_->query_value(stmt->input_index->raw_name()));
+      auto cap = ir_->uint_immediate_number(
+          u32_t, static_cast<uint32_t>(sn->num_cells_per_container));
+      auto in_range = ir_->make_value(spv::OpULessThan, ir_->bool_type(),
+                                      input_index_val, cap);
+      auto safe_index = stmt->activate
+                            ? ir_->make_value(
+                                  spv::OpSelect, u32_t, in_range,
+                                  input_index_val,
+                                  ir_->uint_immediate_number(u32_t, 0))
+                            : input_index_val;
+      val = dynamic_cell_byte_offset(parent_val, desc, safe_index);
     } else if (sn->type == SNodeType::quant_array) {
       // G9.2 (2026-04-30): all user cells in a quant_array share ONE
       // physical word inside the parent cell, so the byte address does

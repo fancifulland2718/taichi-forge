@@ -294,9 +294,9 @@ class StructCompiler {
       if (policy_.ambient_zone) {
         // G10-P2: 零初始化 cell-sized ambient zone。pointer_lookup_or_activate
         // (do_activate=false) 在 slot==0 时返回此偏移，使 inactive 读结果
-        // 恒为 0（与 LLVM ambient_val_addr 语义一致）。从未被任何 kernel
-        // 写入；零初始化由池 buffer 的 fill(0) 或 root buffer 的 memset(0)
-        // 提供（按 indep_pool 决定）。
+        // 恒为 0（与 LLVM ambient_val_addr 语义一致）。容量溢出的失败写会暂时
+        // 路由到这里，并在下一同步边界报错；初始零值由池 buffer 的 fill(0)
+        // 或 root buffer 的 memset(0) 提供（按 indep_pool 决定）。
         cursor = (cursor + 3u) & ~size_t(3);
         c.has_ambient_zone = true;
         c.ambient_offset = static_cast<uint32_t>(cursor);

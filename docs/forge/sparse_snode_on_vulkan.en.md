@@ -67,9 +67,7 @@ LLVM cpu / cuda guarantees that reading an inactive sparse cell returns the dtyp
 
 **0.3.0 behavior (replaced)**: inactive reads were routed to the *real* address of pool slot 0. Once any kernel legitimately activated and wrote to cell 0, every inactive read returned cell-0's actual data — typical symptom: an SDF ray-march reading garbage values > 500 in empty voxels.
 
-**0.3.1 fix**: [`spirv_codegen.cpp` `pointer_lookup_or_activate(do_activate=false)`](../../taichi/codegen/spirv/spirv_codegen.cpp) now redirects inactive reads to an ambient zone appended at the end of the root buffer (per pointer SNode, `cell_stride` bytes of zero memory, memset at startup, never written by any kernel). All three backends now byte-equivalently return 0 for inactive reads. Acceptance test: [tests/p4/g10_inactive_read_zero.py](../../tests/p4/g10_inactive_read_zero.py). The CMake option `TI_VULKAN_POINTER_AMBIENT_ZONE` (default ON) gates the new path; turning it OFF restores 0.3.0 slot-0 fallback.
-
-**Remaining limitation**: inactive **writes** (out-of-capacity OOC) keep the documented silent-loss slot-0 path described in §3.1; this fix only changes inactive-read semantics.
+**0.3.1 fix**: [`spirv_codegen.cpp` `pointer_lookup_or_activate(do_activate=false)`](../../taichi/codegen/spirv/spirv_codegen.cpp) now redirects inactive reads to an ambient zone appended at the end of the root buffer (per pointer SNode, `cell_stride` bytes of zero memory, memset at startup). All three backends now byte-equivalently return 0 for inactive reads. Acceptance test: [tests/p4/g10_inactive_read_zero.py](../../tests/p4/g10_inactive_read_zero.py). The CMake option `TI_VULKAN_POINTER_AMBIENT_ZONE` (default ON) gates the new path; turning it OFF restores 0.3.0 slot-0 fallback.
 
 ### ✅ Fixed bug 2 (0.3.2, 2026-05-02): 3D pointer **full activation** device-lost
 
@@ -104,18 +102,18 @@ Acceptance test: [tests/p4/g10p1_user_repro.py](../../tests/p4/g10p1_user_repro.
 
 ### 3.1 Pointer / dynamic capacity is **statically sized at compile time**
 
-This is the biggest semantic difference from the LLVM backends. Vanilla LLVM treats each cell as a chunk on `node_allocators`, growing the pool on demand at run time. Vulkan has **no device-side dynamic allocator**, so every cell is reserved up front in the root buffer.
+This is the biggest semantic difference from the LLVM backends. Vanilla LLVM treats each cell as a chunk on `node_allocators`, growing the pool on demand at run time. Vulkan has **no device-side dynamic allocator**, so capacity is reserved up front in statically sized backing buffers.
 
 Consequences:
 
-- **Activates beyond the static capacity are silently dropped (silent inactive).** This is enforced by the `cap_v` guard. The kernel does not crash, does not write out-of-bounds, but the write **does not take effect**.
-- **There is no run-time error.** Diagnose by reading back `ti.length()` or `ti.is_active()`.
+- **Activates/appends beyond the static capacity are rejected without an out-of-bounds pool access.**
+- **The next synchronization boundary raises a run-time error** identifying pointer versus dynamic overflow, the root/SNode ids, and the configured capacity. Increase the pointer `vk_max_active` hint (or remove pool shrinking), or increase the declared dynamic capacity.
 
 Example:
 
 ```python
 # pointer(N=32) followed by dense(M=8) → physical capacity = 32 cells.
-# Activating more than 32 distinct values of `i` in one frame drops the excess.
+# Activating more than 32 distinct values of `i` reports overflow at sync.
 ptr = ti.root.pointer(ti.i, 32)
 blk = ptr.dense(ti.j, 8)
 blk.place(x)
@@ -147,18 +145,18 @@ python your_app.py
 - Debugging or development;
 - The workload activates the entire set before deactivating any (peak == total).
 
-**Safe degradation**: activates beyond the shrunk capacity also fall under the silent-inactive guard (same mechanism as §3.1).
+**Safe failure**: activation beyond the shrunk capacity is address-clamped and reported at the next synchronization boundary (same mechanism as §3.1).
 
 ### 3.3 Dynamic SNode protocol differs from LLVM
 
 The Vulkan `dynamic` uses a **flat-array + length-suffix** protocol:
 
 - Container layout: `[data: cell_stride × N][length: u32]`;
-- `ti.append(field, [i], val)` = `OpAtomicIAdd(length, 1)` + cell write;
+- `ti.append(field, [i], val)` = bounded atomic length increment + cell write;
 - `ti.length(field, [i])` = `OpAtomicLoad(length)`;
 - `ti.deactivate(dynamic_node, [i])` = `OpAtomicStore(length, 0)`;
 - No chunk list. Total capacity equals the static `N`.
-- Appends past `N` are silently dropped under the same `cap_v` guard.
+- Appends past `N` are address-clamped and reported at the next synchronization boundary.
 
 Numerical results match LLVM exactly across the regression suite.
 
@@ -191,10 +189,10 @@ blk.dense(ti.ij, 8).place(x)
 
 Rules:
 
-- The kwarg is honored only on the Vulkan backend; other backends ignore it (with a warn-once on first use).
+- The kwarg sets Vulkan pointer capacity and also guides CUDA sparse-pool sizing; CPU allocation remains demand-driven.
 - 4-tier fallback priority: `vk_max_active` (kwarg) > `vulkan_pointer_pool_fraction` (`ti.init` kwarg) > `TI_VULKAN_POOL_FRACTION` (env var) > worst-case reservation.
 - Floor: the value is clamped up to `num_cells_per_container` so the deactivate freelist can hold at least one cell.
-- Out-of-capacity: silent inactive (same as §3.1), no exception.
+- Out-of-capacity: the address is safely clamped and the next synchronization boundary raises a diagnostic error (same as §3.1).
 - Nested pointers: each level can be hinted independently — `outer = ti.root.pointer(ti.ij, OUTER, vk_max_active=N1); inner = outer.pointer(ti.ij, MID, vk_max_active=N2)`.
 
 ---

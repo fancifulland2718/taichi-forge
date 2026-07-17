@@ -16,6 +16,15 @@ class SNode;
 
 namespace spirv {
 
+// Shared six-u32 diagnostic record kind. BufferType::HashOverflow keeps its
+// historical enum value/name for offline-cache stability, but the buffer now
+// reports all fixed-capacity sparse allocator failures.
+enum class SparseOverflowKind : uint32_t {
+  Hash = 0,
+  Pointer = 1,
+  Dynamic = 2,
+};
+
 /**
  * Per offloaded task attributes.
  */
@@ -40,9 +49,9 @@ struct TaskAttributes {
     // the value sits at the END of the enum to preserve offline-cache hash
     // stability for existing kernels (which serialize BufferType as int).
     NodeAllocatorPool,
-    // H4.11: small runtime diagnostics buffer for hash SNode overflow in
-    // parent-instance layouts where no single host-static root-buffer offset
-    // can represent all tables.
+    // H4.11: small runtime diagnostics buffer for fixed-capacity sparse SNode
+    // overflow. The historical name and enum position are retained for
+    // offline-cache stability.
     HashOverflow,
   };
 

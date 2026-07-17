@@ -319,7 +319,7 @@ GraphReplayStats GraphReplayRegistration::debug_stats() const {
 }
 
 constexpr size_t kGtmpBufferSize = 1024 * 1024;
-constexpr size_t kHashOverflowBufferSize = 5 * sizeof(uint32_t);
+constexpr size_t kHashOverflowBufferSize = 6 * sizeof(uint32_t);
 constexpr size_t kListGenBufferSize = 32 << 20;
 constexpr size_t kListGenMinBufferSize = sizeof(uint32_t);
 constexpr size_t kListGenAutoSlackEntries = 1024;
@@ -940,7 +940,7 @@ void GfxRuntime::check_hash_overflow_counters() {
   if (!hash_overflow_buffer_) {
     return;
   }
-  std::array<uint32_t, 5> aggregate{};
+  std::array<uint32_t, 6> aggregate{};
   std::array<void *, 1> aggregate_host_ptrs{aggregate.data()};
   std::array<DevicePtr, 1> aggregate_ptrs{
       hash_overflow_buffer_->get_ptr(0)};
@@ -949,9 +949,26 @@ void GfxRuntime::check_hash_overflow_counters() {
       aggregate_ptrs.data(), aggregate_host_ptrs.data(),
       aggregate_sizes.data(), int(aggregate_ptrs.size()));
   TI_ERROR_IF(aggregate_status != RhiResult::success,
-              "Failed to read non-root Hash SNode overflow diagnostics.");
+              "Failed to read sparse SNode overflow diagnostics.");
   if (aggregate[0] == 0) {
     return;
+  }
+  const auto overflow_kind =
+      static_cast<spirv::SparseOverflowKind>(aggregate[5]);
+  if (overflow_kind == spirv::SparseOverflowKind::Pointer) {
+    hash_overflow_error_reported_ = true;
+    TI_ERROR(
+        "Pointer SNode pool overflow on root {} SNode {}. The configured "
+        "capacity is {} cells. Increase vk_max_active or remove the reduced "
+        "capacity hint before materialization.",
+        aggregate[1], aggregate[2], aggregate[3]);
+  }
+  if (overflow_kind == spirv::SparseOverflowKind::Dynamic) {
+    hash_overflow_error_reported_ = true;
+    TI_ERROR(
+        "Dynamic SNode capacity overflow on root {} SNode {}. The configured "
+        "capacity is {} cells.",
+        aggregate[1], aggregate[2], aggregate[3]);
   }
   uint32_t active_count = 0;
   uint32_t tombstone_count = 0;

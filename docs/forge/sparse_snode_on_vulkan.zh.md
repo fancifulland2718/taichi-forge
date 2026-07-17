@@ -67,9 +67,7 @@ LLVM cpu/cuda 后端：读取 inactive 稀疏 cell **保证返回该 dtype 的�
 
 **0.3.0 行为（已被替换）**：inactive 读路由到 pool 第 0 号槽的真实地址。一旦 cell-0 被任何 kernel 合法激活并写入，**所有 inactive 读都会返回 cell-0 的真实数据**——典型表现：SDF ray-march 在空 voxel 读到 > 500 的脏值。
 
-**0.3.1 修复**：[`spirv_codegen.cpp` `pointer_lookup_or_activate(do_activate=false)`](../../taichi/codegen/spirv/spirv_codegen.cpp) 现把 inactive 读重定向到 root buffer 末尾的 ambient zone（per pointer SNode 一段 `cell_stride` 字节零内存，启动时 memset 零，永不被 kernel 写）。三后端 inactive 读字节等价返回 0。验收脚本：[tests/p4/g10_inactive_read_zero.py](../../tests/p4/g10_inactive_read_zero.py)。CMake 选项 `TI_VULKAN_POINTER_AMBIENT_ZONE`（默认 ON）控制此路径；OFF 时还原 0.3.0 slot-0 fallback。
-
-**仍保留的限制**：inactive **写**（容量越界 OOC）保留 silent-loss slot-0 路径，与 §3.1 documented behavior 一致；本次修复**只改正 inactive 读语义**。
+**0.3.1 修复**：[`spirv_codegen.cpp` `pointer_lookup_or_activate(do_activate=false)`](../../taichi/codegen/spirv/spirv_codegen.cpp) 现把 inactive 读重定向到 root buffer 末尾的 ambient zone（per pointer SNode 一段 `cell_stride` 字节零内存，启动时 memset 零）。三后端 inactive 读字节等价返回 0。验收脚本：[tests/p4/g10_inactive_read_zero.py](../../tests/p4/g10_inactive_read_zero.py)。CMake 选项 `TI_VULKAN_POINTER_AMBIENT_ZONE`（默认 ON）控制此路径；OFF 时还原 0.3.0 slot-0 fallback。
 
 ### ✅ 已修复 Bug 2（0.3.2，2026-05-02）：3D pointer **全激活** device-lost
 
@@ -104,18 +102,18 @@ LLVM cpu/cuda 后端：读取 inactive 稀疏 cell **保证返回该 dtype 的�
 
 ### 3.1 Pointer / Dynamic 的 capacity 是**编译期静态**的
 
-**与 LLVM 后端最大的语义差**：vanilla LLVM 把每个 cell 当成 `node_allocators` 上的动态 chunk，运行时按需扩容；Vulkan 后端**没有 device-side 动态分配器**，所有 cell 在 root buffer 中静态预留。
+**与 LLVM 后端最大的语义差**：vanilla LLVM 把每个 cell 当成 `node_allocators` 上的动态 chunk，运行时按需扩容；Vulkan 后端**没有 device-side 动态分配器**，capacity 会在静态定长的 backing buffer 中预留。
 
 后果：
 
-- **超出 capacity 的 activate 会被静默丢弃（silent inactive）**。这是经过 `cap_v` 守卫的安全降级——内核不会崩溃、不会越界写，但写入**不会生效**。
-- **没有运行时报错**。要排查需自己加 `ti.length()` / `ti.is_active()` 检查。
+- **超出静态 capacity 的 activate/append 会被拒绝，不会访问 pool 越界地址。**
+- **下一个同步边界会抛出运行时错误**，标明 pointer/dynamic 类型、root/SNode id 与配置容量。pointer 应增大 `vk_max_active`（或取消池缩容），dynamic 应增大声明容量。
 
 例：
 
 ```python
 # pointer(N=32) 后跟 dense(M=8) → 物理 capacity = 32 cells。
-# 超过 32 个独立 i 在同一帧内被 activate 时，多余的会被丢弃。
+# 超过 32 个独立 i 被 activate 时，会在同步边界报告 overflow。
 ptr = ti.root.pointer(ti.i, 32)
 blk = ptr.dense(ti.j, 8)
 blk.place(x)
@@ -147,18 +145,18 @@ python your_app.py
 - 测试 / 调试阶段；
 - 单帧内有"先激活全集再 deactivate" 的工作流（峰值激活数 = 全集）。
 
-**安全降级**：超过缩减后 capacity 的 activate 同样 silent inactive（与 §3.1 同机制）。
+**安全失败**：超过缩减后 capacity 的 activate 会被地址钳制，并在下一个同步边界报错（与 §3.1 同机制）。
 
 ### 3.3 Dynamic SNode 协议差异
 
 Vulkan 上的 `dynamic` 使用 **flat-array + length 后缀** 协议：
 
 - 容器布局：`[data: cell_stride × N][length: u32]`；
-- `ti.append(field, [i], val)` = `OpAtomicIAdd(length, 1)` + 写入 cell；
+- `ti.append(field, [i], val)` = 有容量边界的原子 length 增长 + 写入 cell；
 - `ti.length(field, [i])` = `OpAtomicLoad(length)`；
 - `ti.deactivate(dynamic_node, [i])` = `OpAtomicStore(length, 0)`；
 - 不支持 chunk 链；总容量 = 编译期静态 N。
-- 超过 N 的 append 会被 silent dropped（同样 `cap_v` 守卫）。
+- 超过 N 的 append 会被地址钳制，并在下一个同步边界报错。
 
 数值结果与 LLVM 完全等价（已通过完整回归集验证）。
 
@@ -191,10 +189,10 @@ blk.dense(ti.ij, 8).place(x)
 
 规则：
 
-- kwarg 仅在 Vulkan 后端生效；其他后端忽略并 warn-once。
+- kwarg 决定 Vulkan pointer 容量，也会指导 CUDA sparse-pool sizing；CPU 仍按需分配。
 - 4 级 fallback 优先级：`vk_max_active` (kwarg) > `vulkan_pointer_pool_fraction`（`ti.init` kwarg）> `TI_VULKAN_POOL_FRACTION` (env var) > 最坏情况预留。
 - 容量下限锁死 = 该 pointer 容器单 cell 数（`num_cells_per_container`），低于此值会被强制提升以保证 deactivate-freelist 至少能容纳一个 cell。
-- 超容时的行为：silent inactive（与 §3.1 一致），不抛异常。
+- 超容时的行为：地址会安全钳制，并在下一个同步边界抛出诊断错误（与 §3.1 一致）。
 - 嵌套 pointer 上每层独立标注：`outer = ti.root.pointer(ti.ij, OUTER, vk_max_active=N1); inner = outer.pointer(ti.ij, MID, vk_max_active=N2)`。
 
 ---
