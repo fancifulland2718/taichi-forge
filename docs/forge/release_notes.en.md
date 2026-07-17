@@ -15,7 +15,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | current source after the published 0.5.0 runtime boundary | current `master` | driver-only CUDA primitives, bounded workspaces, and runtime safety |
+| [Unreleased](#unreleased) | current source after the published 0.5.0 runtime boundary | current `master` | driver-only CUDA primitives, bounded host-memory/lifetimes, and TODO contract completion |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |
 | [0.1.2](#012) | historical source release; artifact may be removed | `fe5844390b` | import fixes and CUDA build option |
@@ -107,6 +107,27 @@ retroactively attributed to the 0.5.0 artifact:
 
 ### TODO contract completion and explicit support boundaries
 
+- This work completes legacy items with defined correctness, safety, or
+  production value in the shared CPU/CUDA/Vulkan frontend, IR, AD, AOT,
+  runtime, and RHI. It is not a mechanical deletion of every `TODO` comment.
+  A full tile/block/warp/subgroup DSL, heterogeneous multi-device runtime,
+  sparse-specific work, and new capabilities for other backends remain outside
+  this scope. Their entry points must report unsupported/fail fast rather than
+  pretend success through an empty implementation or silent fallback.
+- Completed foundational lifecycle, capability, and observability contracts.
+  Field/AD enumeration now returns only active SNodeTrees, so a destroyed
+  generation cannot re-enter execution. Vulkan advertises f16/f32/f64
+  atomic-add capabilities independently and does not present an unsupported
+  feature as native. CUDA profiler updates aggregate only records created since
+  the previous query, making repeated queries idempotent. Twelve unimplemented
+  subgroup operations now report the operation, architecture, and support state
+  at compile time instead of returning `None` from Python `pass` bodies.
+- The native Windows build and targeted CPU/CUDA/Vulkan matrices are complete;
+  GPU cases ran only while no other Python/GPU compute process was active.
+  Linux GCC/Clang, headless Vulkan validation, CUDA driver-only
+  import/execution, and real Torch AD remain pre-release revalidation items in
+  the [Linux checklist](linux_revalidation.en.md). Windows results are not
+  presented as cross-platform proof.
 - Hardened debug execution and indexing contracts. CPU assertion failures now
   cooperatively cancel remaining debug work, publish one coherent first fault,
   and leave the worker pool reusable. Matrix/vector accesses validate and clamp

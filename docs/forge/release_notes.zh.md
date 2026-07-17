@@ -12,7 +12,7 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [未发布](#未发布) | 已发布 0.5.0 runtime 边界之后的当前源码 | 当前 `master` | driver-only CUDA primitive、有界 workspace 与 runtime 安全 |
+| [未发布](#未发布) | 已发布 0.5.0 runtime 边界之后的当前源码 | 当前 `master` | driver-only CUDA primitive、宿主内存/生命周期有界化与 TODO 合同补全 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
 | [0.1.1](#011) | 历史源码版本；发行文件可能已移除 | `c771969781` | `taichi_forge` import 重命名与安装布局修复 |
 | [0.1.2](#012) | 历史源码版本；发行文件可能已移除 | `fe5844390b` | import 修复与 CUDA 构建选项 |
@@ -88,6 +88,19 @@
 
 ### TODO 合同补全与明确支持边界
 
+- 本轮补全的是 CPU、CUDA、Vulkan 共享前端、IR、AD、AOT、runtime 与 RHI 中已经具有明确
+  正确性、安全性或生产价值的遗留项，不是机械删除所有 `TODO` 注释。完整 tile/block/warp/
+  subgroup DSL、异构多设备 runtime、稀疏专项和其它后端的新能力仍在当前范围之外；相关入口
+  必须明确返回 unsupported/fail-fast，不能用空实现或静默降级伪装成功。
+- 补齐 lifecycle/capability/observability 的基础合同：field/AD 枚举只返回 active
+  SNodeTree，已销毁 generation 不再重新进入执行；Vulkan 分开声明 f16/f32/f64 atomic-add
+  capability，unsupported feature 不会冒充 native 支持；CUDA profiler 只累计上次 query 后的
+  新 record，重复查询保持幂等；12 个尚未实现的 subgroup operation 在编译期报告操作名、
+  arch 与支持状态，不再由 Python `pass` 返回 `None`。
+- Windows 原生构建和 CPU/CUDA/Vulkan 定向矩阵已经完成；GPU 用例只在没有其它 Python/GPU
+  compute process 时运行。Linux GCC/Clang、headless Vulkan validation、CUDA driver-only
+  import/execution 与真实 Torch AD 仍属于发布前复测项，详见
+  [Linux 复测清单](linux_revalidation.zh.md)，不会用 Windows 结果替代跨平台结论。
 - 强化 debug 执行与索引契约。CPU assertion 失败后会协作取消剩余 debug work，发布一致的
   首个错误，并保持 worker pool 可复用；矩阵/向量访问会逐逻辑轴检查和 clamp，不再接受
   线性化后碰巧落在存储范围内的别名分量；`assume_in_range` 会在支持的整数范围内避免窄
