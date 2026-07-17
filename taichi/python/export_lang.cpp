@@ -3981,7 +3981,12 @@ void export_lang(py::module &m) {
       .def("set_x_ndarray", &CG<Eigen::VectorXf, float>::set_x_ndarray)
       .def("set_b", &CG<Eigen::VectorXf, float>::set_b)
       .def("set_b_ndarray", &CG<Eigen::VectorXf, float>::set_b_ndarray)
-      .def("is_success", &CG<Eigen::VectorXf, float>::is_success);
+      .def("is_success", &CG<Eigen::VectorXf, float>::is_success)
+      .def("get_iterations", &CG<Eigen::VectorXf, float>::get_iterations)
+      .def("get_initial_residual_norm",
+           &CG<Eigen::VectorXf, float>::get_initial_residual_norm)
+      .def("get_residual_norm",
+           &CG<Eigen::VectorXf, float>::get_residual_norm);
   py::class_<CG<Eigen::VectorXd, double>>(m, "CGd")
       .def(py::init<SparseMatrix &, int, double, bool>())
       .def("solve", &CG<Eigen::VectorXd, double>::solve)
@@ -3990,17 +3995,27 @@ void export_lang(py::module &m) {
       .def("get_x", &CG<Eigen::VectorXd, double>::get_x)
       .def("set_b_ndarray", &CG<Eigen::VectorXd, double>::set_b_ndarray)
       .def("set_b", &CG<Eigen::VectorXd, double>::set_b)
-      .def("is_success", &CG<Eigen::VectorXd, double>::is_success);
+      .def("is_success", &CG<Eigen::VectorXd, double>::is_success)
+      .def("get_iterations", &CG<Eigen::VectorXd, double>::get_iterations)
+      .def("get_initial_residual_norm",
+           &CG<Eigen::VectorXd, double>::get_initial_residual_norm)
+      .def("get_residual_norm",
+           &CG<Eigen::VectorXd, double>::get_residual_norm);
   m.def("make_float_cg_solver", [](SparseMatrix &A, int max_iters, float tol,
                                    bool verbose) {
     return make_cg_solver<Eigen::VectorXf, float>(A, max_iters, tol, verbose);
   });
-  m.def("make_double_cg_solver", [](SparseMatrix &A, int max_iters, float tol,
+  m.def("make_double_cg_solver", [](SparseMatrix &A, int max_iters, double tol,
                                     bool verbose) {
     return make_cg_solver<Eigen::VectorXd, double>(A, max_iters, tol, verbose);
   });
 
-  py::class_<CUCG>(m, "CUCG").def("solve", &CUCG::solve);
+  py::class_<CUCG>(m, "CUCG")
+      .def("solve", &CUCG::solve)
+      .def("is_success", &CUCG::is_success)
+      .def("get_iterations", &CUCG::get_iterations)
+      .def("get_initial_residual_norm", &CUCG::get_initial_residual_norm)
+      .def("get_residual_norm", &CUCG::get_residual_norm);
   m.def("make_cucg_solver", make_cucg_solver);
 
   // Mesh Class

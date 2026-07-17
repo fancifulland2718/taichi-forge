@@ -5,11 +5,13 @@
 
 #include "Eigen/IterativeLinearSolvers"
 
+#include <cmath>
+
 namespace taichi::lang {
 template <typename EigenT, typename DT>
 class CG {
  public:
-  CG(SparseMatrix &A, int max_iters, float tol, bool verbose)
+  CG(SparseMatrix &A, int max_iters, DT tol, bool verbose)
       : A_(A), max_iters_(max_iters), tol_(tol), verbose_(verbose) {
     x_ = EigenT::Zero(A_.num_cols());
     b_ = EigenT::Zero(A_.num_rows());
@@ -38,26 +40,44 @@ class CG {
                              Eigen::Lower | Eigen::Upper>
         cg;
     cg.setMaxIterations(max_iters_);
-    cg.setTolerance(tol_);
     EigenSparseMatrix<Eigen::SparseMatrix<DT>> &A =
         static_cast<EigenSparseMatrix<Eigen::SparseMatrix<DT>> &>(A_);
     Eigen::SparseMatrix<DT> *A_eigen =
         (Eigen::SparseMatrix<DT> *)A.get_matrix();
+    initial_residual_norm_ = ((*A_eigen) * x_ - b_).norm();
+    const auto b_norm = b_.norm();
+    cg.setTolerance(b_norm > 0 ? tol_ / b_norm : tol_);
     cg.compute(*A_eigen);
-    x_ = cg.solve(b_);
+    x_ = cg.solveWithGuess(b_, x_);
+    iterations_ = cg.iterations();
+    residual_norm_ = ((*A_eigen) * x_ - b_).norm();
     if (verbose_) {
-      std::cout << "#iterations:     " << cg.iterations() << std::endl;
+      std::cout << "#iterations:     " << iterations_ << std::endl;
       std::cout << "estimated error: " << cg.error() << std::endl;
+      std::cout << "residual norm:   " << residual_norm_ << std::endl;
     }
-    is_success_ = !(cg.info());
+    is_success_ = cg.info() == Eigen::Success &&
+                  std::isfinite(residual_norm_) && residual_norm_ <= tol_;
   }
 
   EigenT &get_x() {
     return x_;
   }
 
-  bool is_success() {
+  bool is_success() const {
     return is_success_;
+  }
+
+  int get_iterations() const {
+    return iterations_;
+  }
+
+  double get_initial_residual_norm() const {
+    return initial_residual_norm_;
+  }
+
+  double get_residual_norm() const {
+    return residual_norm_;
   }
 
  private:
@@ -68,12 +88,15 @@ class CG {
   DT tol_{0.0f};
   bool verbose_{false};
   bool is_success_{false};
+  int iterations_{0};
+  double initial_residual_norm_{0.0};
+  double residual_norm_{0.0};
 };
 
 template <typename EigenT, typename DT>
 std::unique_ptr<CG<EigenT, DT>> make_cg_solver(SparseMatrix &A,
                                                int max_iters,
-                                               float tol,
+                                               DT tol,
                                                bool verbose) {
   return std::make_unique<CG<EigenT, DT>>(A, max_iters, tol, verbose);
 }
@@ -85,16 +108,37 @@ class CUCG {
     init_solver();
   }
 
+  ~CUCG();
+
   void solve(Program *prog, const Ndarray &x, const Ndarray &b);
+
+  bool is_success() const {
+    return is_success_;
+  }
+
+  int get_iterations() const {
+    return iterations_;
+  }
+
+  double get_initial_residual_norm() const {
+    return initial_residual_norm_;
+  }
+
+  double get_residual_norm() const {
+    return residual_norm_;
+  }
 
  private:
   void init_solver();
-  cublasHandle_t handle_;
+  cublasHandle_t handle_{nullptr};
   SparseMatrix &A_;
   int max_iters_{0};
   float tol_{0.0f};
   bool verbose_{false};
   bool is_success_{false};
+  int iterations_{0};
+  double initial_residual_norm_{0.0};
+  double residual_norm_{0.0};
 };
 
 std::unique_ptr<CUCG> make_cucg_solver(SparseMatrix &A,
