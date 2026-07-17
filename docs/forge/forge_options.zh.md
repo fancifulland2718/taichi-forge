@@ -77,15 +77,16 @@
 
 ### 2.6 CUDA sparse 内存池
 
-默认 CUDA sparse SNode 动态分配 pool 沿用 vanilla 1.7.4 语义：pool 大小 = `device_memory_GB`（或设了 `device_memory_fraction` 时为 `device_memory_fraction × total_VRAM`）。两个可选路径可定制：
+Forge 默认从已物化的 SNode 树推导 CUDA sparse SNode pool，并在同一块 owning allocation 内为每个可分配 SNode 切出独立数据区。显式设置 `device_memory_fraction` 或 `cuda_sparse_pool_size_GB` 时仍切换到对应的固定预算路径。
 
 | 参数 | 默认 | 用途 |
 |---|---|---|
-| `cuda_sparse_pool_size_GB` | `0.0`（沿用 `device_memory_GB`） | 显式 pool 大小（GiB）。设为正值则跳过其它调尺路径——需要将 sparse pool 与 `device_memory_GB` 解耦时使用。 |
-| `cuda_sparse_pool_auto_size` | `False` | 可选启用的启发式自动调尺。`True` 且 `device_memory_fraction == 0` 且 `cuda_sparse_pool_size_GB == 0` 三者同时成立时，pool 从 SNode 树推导（启发式：每个 gc-able snode × 1024 chunks），封顶为 `device_memory_GB`，封底为 `cuda_sparse_pool_size_floor_MiB`。默认 `False` 保留 vanilla 1.7.4 语义。开启前必须验证启发式能覆盖工作负载的 `NodeAllocator` activation 巅值；MPM-shape sparse 树可能需调高 `cuda_sparse_pool_size_floor_MiB` 或直接使用 `cuda_sparse_pool_size_GB`。 |
-| `cuda_sparse_pool_size_floor_MiB` | `128` | 自动调尺下限（MiB）。每个 `NodeAllocator` chunk 约 16 MiB，128 MiB ≈ 8 chunk。`cuda_sparse_pool_auto_size=False` 时无效。 |
+| `cuda_sparse_pool_size_GB` | `0.0`（无显式 override） | 显式 pool 大小（GiB）。设为正值则跳过其它调尺路径——需要固定 sparse-pool 预算时使用。 |
+| `cuda_sparse_pool_auto_size` | `True` | 当 `device_memory_fraction == 0` 且 `cuda_sparse_pool_size_GB == 0` 时，按每个可分配 SNode 的全局 cell 上界、实际 `NodeManager` chunk 几何、list 元数据和有界 GC/重复激活余量推导 pool。`device_memory_GB` 只作 warn-only 合理性阈值，不会把推导结果静默截断到不足容量。 |
+| `cuda_sparse_per_snode_pool` | `True` | 在自动调尺路径中，为每个可分配 SNode 切出独立数据区，同时保留共享的全局元数据/list 区；隔离嵌套 allocator 压力，但不会为每个 SNode 增加一次 CUDA allocation。 |
+| `cuda_sparse_pool_size_floor_MiB` | `0` | 推导 pool 的可选用户下限（MiB）。全局元数据/list baseline 与 per-SNode chunk 预算始终计入，因此默认不再追加防御性 floor；绕过 auto-size 时无效。 |
 
-`device_memory_fraction > 0` 与 `cuda_sparse_pool_size_GB > 0` 仍然完全跳过自动调尺。
+`device_memory_fraction > 0` 与 `cuda_sparse_pool_size_GB > 0` 都会完全绕过自动调尺。`vk_max_active` 可降低单个 SNode 的 expected-active 上界；未给 hint 时使用该 SNode 从 root 展开的全局 cell 数，而不是单个父容器的大小。
 
 ### 2.7 Sparse struct-for / listgen 优化
 

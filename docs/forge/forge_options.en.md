@@ -77,15 +77,16 @@ extension.
 
 ### 2.6 CUDA sparse memory pool
 
-By default the CUDA sparse SNode dynamic-allocation pool inherits the vanilla 1.7.4 sizing rule: it equals `device_memory_GB` (or `device_memory_fraction × total_VRAM` when set). Two opt-in paths customise this:
+By default Forge derives the CUDA sparse SNode pool from the materialized SNode tree and carves a dedicated data region for each allocatable SNode inside one owning allocation. Explicit `device_memory_fraction` or `cuda_sparse_pool_size_GB` still selects the corresponding fixed-budget path.
 
 | Kwarg | Default | Purpose |
 |---|---|---|
-| `cuda_sparse_pool_size_GB` | `0.0` (use `device_memory_GB`) | Explicit pool size in GiB. Positive values bypass every other sizing path — use when you need the sparse pool decoupled from `device_memory_GB`. |
-| `cuda_sparse_pool_auto_size` | `False` | Opt-in heuristic auto-sizing. When `True` **and** `device_memory_fraction == 0` **and** `cuda_sparse_pool_size_GB == 0`, the pool is derived from the SNode tree (heuristic per gc-able snode × 1024 chunks), capped by `device_memory_GB`, floored at `cuda_sparse_pool_size_floor_MiB`. Default `False` preserves vanilla 1.7.4 semantics. Verify the heuristic covers your workload's `NodeAllocator` activation peak before turning it on; MPM-shaped sparse trees may need higher `cuda_sparse_pool_size_floor_MiB` or explicit `cuda_sparse_pool_size_GB`. |
-| `cuda_sparse_pool_size_floor_MiB` | `128` | Floor (MiB) for the auto-sized pool. Each `NodeAllocator` chunk is ~16 MiB, so 128 MiB ≈ 8 chunks. No-op when `cuda_sparse_pool_auto_size=False`. |
+| `cuda_sparse_pool_size_GB` | `0.0` (no explicit override) | Explicit pool size in GiB. Positive values bypass every other sizing path — use when you need a fixed sparse-pool budget. |
+| `cuda_sparse_pool_auto_size` | `True` | When `device_memory_fraction == 0` and `cuda_sparse_pool_size_GB == 0`, derive the pool from each allocatable SNode's global cell bound, actual `NodeManager` chunk geometry, list metadata, and bounded GC/re-activation headroom. `device_memory_GB` is a warn-only sanity threshold; the derived size is not silently clamped below the required capacity. |
+| `cuda_sparse_per_snode_pool` | `True` | With auto-sizing, carve one dedicated data region per allocatable SNode while retaining a shared global metadata/list region. This isolates nested allocator demand without adding one CUDA allocation per SNode. |
+| `cuda_sparse_pool_size_floor_MiB` | `0` | Optional user floor (MiB) for the derived pool. The global metadata/list baseline and per-SNode chunk budgets are always included, so no additional defensive floor is applied by default. No-op when auto-sizing is bypassed. |
 
-`device_memory_fraction > 0` and `cuda_sparse_pool_size_GB > 0` both still bypass auto-sizing entirely.
+`device_memory_fraction > 0` and `cuda_sparse_pool_size_GB > 0` both bypass auto-sizing entirely. `vk_max_active` can lower a per-SNode expected-active bound, while the no-hint path uses the global number of cells represented by that SNode (not just one parent's container).
 
 ### 2.7 Sparse struct-for / listgen optimisations
 

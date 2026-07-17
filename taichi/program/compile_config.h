@@ -474,16 +474,14 @@ struct CompileConfig {
   // == 0` and `cuda_sparse_pool_size_GB == 0`), derive the cuda sparse pool
   // size from the SNode tree by mirroring the device-side `NodeManager`
   // chunk geometry (3 ListManager + (1 + headroom) data chunks per gc-able
-  // snode, plus baseline). `device_memory_GB` becomes a sanity ceiling
-  // (warn-and-clamp), no longer a silent cap.
+  // snode, plus baseline). `device_memory_GB` becomes a warn-only sanity
+  // threshold, no longer a silent cap.
   //
-  // Default `false` preserves vanilla taichi 1.7.4 semantics where
-  // `device_memory_GB` is the actual sparse-pool size. Opt in to save
-  // memory on tiny SNode trees; for unusually deep activation patterns
-  // (more chunks per NodeManager than the headroom covers), raise
-  // `cuda_sparse_pool_size_floor_MiB` or set `cuda_sparse_pool_size_GB`
-  // explicitly. Earlier `* 1024` heuristic (pre-v2) was bogus and is the
-  // reason this knob defaults off until each user validates their workload.
+  // Default `true` uses the SNode-wide active-cell bound, NodeManager chunk
+  // geometry, list metadata, and bounded GC headroom. Explicit
+  // `device_memory_fraction` / `cuda_sparse_pool_size_GB` still bypass this
+  // path. `device_memory_GB` is a warning threshold for the derived size,
+  // not a silent clamp that can recreate a device-side OOM.
   bool cuda_sparse_pool_auto_size{true};
 
   // Phase 1 (2026-05-06): carve per-SNode data regions from within the
