@@ -338,7 +338,9 @@ bool CUBLASDriver::load_cublas() {
    * it would confict with torch's cublas. When using libcublas.so.11, the
    * torch's cublas will be loaded.
    */
-  cublas_loaded_ = try_load_lib_any_version("cublas", "64_", {11, 12, 10});
+  const int cuda_version = CUDADriver::get_instance().get_version_major();
+  cublas_loaded_ = try_load_lib_any_version(
+      "cublas", "64_", {cuda_version, cuda_version - 1, 11, 10});
   if (!cublas_loaded_) {
     return false;
   }
