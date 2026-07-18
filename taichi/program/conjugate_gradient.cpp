@@ -1,4 +1,5 @@
 #include "conjugate_gradient.h"
+#include "cuda_sparse_bicgstab.h"
 #include "sparse_preconditioner.h"
 
 #include <algorithm>
@@ -423,6 +424,591 @@ std::unique_ptr<CUCG> make_cuda_block_jacobi_pcg_solver(
   return std::make_unique<CUCG>(program, A, preconditioner, max_iters,
                                 absolute_tolerance, verbose,
                                 relative_tolerance);
+}
+
+CudaSparseBiCGSTABPlan::CudaSparseBiCGSTABPlan(
+    Program *program,
+    SparseMatrix &matrix,
+    int max_iterations,
+    float absolute_tolerance,
+    bool verbose,
+    float relative_tolerance)
+    : program_(program),
+      matrix_(matrix),
+      max_iterations_(max_iterations),
+      absolute_tolerance_(absolute_tolerance),
+      relative_tolerance_(relative_tolerance),
+      verbose_(verbose) {
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(!program_ || !arch_is_cuda(program_->compile_config().arch),
+              "CUDA fixed BiCGSTAB requires an active CUDA Program.");
+  const auto operator_stats = matrix_.debug_runtime_statistics();
+  csr_matrix_ = dynamic_cast<CuSparseMatrix *>(&matrix_);
+  bsr_matrix_ = dynamic_cast<CuSparseBsrMatrix *>(&matrix_);
+  const bool is_public_fixed =
+      operator_stats.backend_family == "cuda" &&
+      operator_stats.provider_name == "cusparse" &&
+      operator_stats.pattern_storage_shared &&
+      operator_stats.pattern_builds == 0 &&
+      ((csr_matrix_ && operator_stats.storage_format == "csr") ||
+       (bsr_matrix_ && operator_stats.storage_format == "bsr"));
+  TI_ERROR_IF(!is_public_fixed,
+              "CUDA fixed BiCGSTAB requires a caller-owned shared CSR/BSR "
+              "pattern with pattern_builds=0.");
+  TI_ERROR_IF(matrix_.num_rows() <= 0 ||
+                  matrix_.num_rows() != matrix_.num_cols(),
+              "CUDA fixed BiCGSTAB requires a non-empty square matrix.");
+  TI_ERROR_IF(matrix_.get_data_type() != PrimitiveType::f32,
+              "CUDA fixed BiCGSTAB currently requires f32 values.");
+  validate_controls();
+  auto &cublas = CUBLASDriver::get_instance();
+  if (!cublas.is_loaded() && !cublas.load_cublas()) {
+    TI_ERROR("Failed to load cublas library!");
+  }
+  cublas.cubCreate(&handle_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+CudaSparseBiCGSTABPlan::~CudaSparseBiCGSTABPlan() {
+#if defined(TI_WITH_CUDA)
+  release_workspace();
+  if (handle_) {
+    CUBLASDriver::get_instance().cubDestroy(handle_);
+  }
+#endif
+}
+
+void CudaSparseBiCGSTABPlan::validate_controls() const {
+  TI_ERROR_IF(max_iterations_ < 0,
+              "CUDA fixed BiCGSTAB requires non-negative max iterations.");
+  TI_ERROR_IF(!std::isfinite(absolute_tolerance_) ||
+                  !std::isfinite(relative_tolerance_) ||
+                  absolute_tolerance_ < 0.0f ||
+                  relative_tolerance_ < 0.0f ||
+                  (absolute_tolerance_ == 0.0f &&
+                   relative_tolerance_ == 0.0f),
+              "CUDA fixed BiCGSTAB requires finite non-negative atol and "
+              "rtol with at least one positive tolerance.");
+}
+
+void CudaSparseBiCGSTABPlan::ensure_workspace(int size) {
+#if defined(TI_WITH_CUDA)
+  if (workspace_size_ == size && residual_ && shadow_residual_ &&
+      direction_ && operator_direction_ && intermediate_residual_ &&
+      operator_intermediate_) {
+    workspace_reuses_++;
+    return;
+  }
+  release_workspace();
+  if (size <= 0) {
+    return;
+  }
+  auto &cuda = CUDADriver::get_instance();
+  const std::size_t bytes = static_cast<std::size_t>(size) * sizeof(float32);
+  try {
+    cuda.malloc(reinterpret_cast<void **>(&residual_), bytes);
+    cuda.malloc(reinterpret_cast<void **>(&shadow_residual_), bytes);
+    cuda.malloc(reinterpret_cast<void **>(&direction_), bytes);
+    cuda.malloc(reinterpret_cast<void **>(&operator_direction_), bytes);
+    cuda.malloc(reinterpret_cast<void **>(&intermediate_residual_), bytes);
+    cuda.malloc(reinterpret_cast<void **>(&operator_intermediate_), bytes);
+  } catch (...) {
+    release_workspace();
+    throw;
+  }
+  workspace_size_ = size;
+  workspace_builds_++;
+#endif
+}
+
+void CudaSparseBiCGSTABPlan::release_workspace() {
+#if defined(TI_WITH_CUDA)
+  auto &cuda = CUDADriver::get_instance();
+  if (residual_) {
+    cuda.mem_free(residual_);
+  }
+  if (shadow_residual_) {
+    cuda.mem_free(shadow_residual_);
+  }
+  if (direction_) {
+    cuda.mem_free(direction_);
+  }
+  if (operator_direction_) {
+    cuda.mem_free(operator_direction_);
+  }
+  if (intermediate_residual_) {
+    cuda.mem_free(intermediate_residual_);
+  }
+  if (operator_intermediate_) {
+    cuda.mem_free(operator_intermediate_);
+  }
+  residual_ = nullptr;
+  shadow_residual_ = nullptr;
+  direction_ = nullptr;
+  operator_direction_ = nullptr;
+  intermediate_residual_ = nullptr;
+  operator_intermediate_ = nullptr;
+  workspace_size_ = 0;
+#endif
+}
+
+void CudaSparseBiCGSTABPlan::apply_operator(std::uintptr_t input,
+                                            std::uintptr_t output) {
+  if (csr_matrix_) {
+    csr_matrix_->spmv(input, output);
+  } else if (bsr_matrix_) {
+    bsr_matrix_->spmv(input, output);
+  } else {
+    TI_ERROR("CUDA fixed BiCGSTAB received an unsupported operator.");
+  }
+  operator_apply_calls_++;
+}
+
+void CudaSparseBiCGSTABPlan::copy_vector(float *destination,
+                                         const float *source,
+                                         int size) {
+#if defined(TI_WITH_CUDA)
+  const auto bytes = static_cast<std::size_t>(size) * sizeof(float32);
+  CUDADriver::get_instance().memcpy_device_to_device(
+      destination, const_cast<float *>(source), bytes);
+  device_to_device_bytes_ += bytes;
+#endif
+}
+
+float CudaSparseBiCGSTABPlan::dot(const float *left,
+                                  const float *right,
+                                  int size) {
+  float result = 0.0f;
+#if defined(TI_WITH_CUDA)
+  // A newly created CUBLAS handle uses host pointer mode. cubSdot therefore
+  // returns the scalar to host memory and synchronizes before each recurrence
+  // decision; keep all three costs explicit in the probe telemetry.
+  CUBLASDriver::get_instance().cubSdot(handle_, size, left, 1, right, 1,
+                                       &result);
+  host_scalar_reductions_++;
+  host_scalar_readbacks_++;
+  host_synchronizations_++;
+  device_to_host_bytes_ += sizeof(float32);
+#endif
+  return result;
+}
+
+bool CudaSparseBiCGSTABPlan::vector_is_finite(const float *vector,
+                                              int size) {
+  const float squared_norm = dot(vector, vector, size);
+  return std::isfinite(squared_norm) && squared_norm >= 0.0f;
+}
+
+float CudaSparseBiCGSTABPlan::true_residual_squared(const float *x,
+                                                    const float *b,
+                                                    int size) {
+#if defined(TI_WITH_CUDA)
+  copy_vector(residual_, b, size);
+  apply_operator(reinterpret_cast<std::uintptr_t>(x),
+                 reinterpret_cast<std::uintptr_t>(operator_direction_));
+  const float minus_one = -1.0f;
+  CUBLASDriver::get_instance().cubSaxpy(
+      handle_, size, &minus_one, operator_direction_, 1, residual_, 1);
+#endif
+  return dot(residual_, residual_, size);
+}
+
+bool CudaSparseBiCGSTABPlan::refresh_true_residual(const float *x,
+                                                   const float *b,
+                                                   int size) {
+  const float residual_squared = true_residual_squared(x, b, size);
+  if (!std::isfinite(residual_squared) || residual_squared < 0.0f ||
+      !vector_is_finite(x, size)) {
+    residual_norm_ = std::numeric_limits<double>::infinity();
+    return false;
+  }
+  residual_norm_ = std::sqrt(static_cast<double>(residual_squared));
+  return std::isfinite(residual_norm_);
+}
+
+void CudaSparseBiCGSTABPlan::finish_solve() {
+  total_iterations_ += static_cast<std::uint64_t>(iterations_);
+  if (verbose_) {
+    fmt::print("#iterations:     {}\n", iterations_);
+    fmt::print("residual norm:   {}\n", residual_norm_);
+  }
+}
+
+void CudaSparseBiCGSTABPlan::solve(Program *program,
+                                   const Ndarray &x,
+                                   const Ndarray &b) {
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(program != program_,
+              "CUDA fixed BiCGSTAB requires its construction Program.");
+  const int size = matrix_.num_rows();
+  auto check_vector = [&](const char *role, const Ndarray &array) {
+    TI_ERROR_IF(array.shape.size() != 1 ||
+                    array.get_element_data_type() != PrimitiveType::f32 ||
+                    !array.get_element_shape().empty() ||
+                    array.get_element_size() != sizeof(float32) ||
+                    array.get_nelement() != static_cast<std::size_t>(size),
+                "CUDA fixed BiCGSTAB {} must contain exactly {} scalar f32 "
+                "entries.",
+                role, size);
+  };
+  check_vector("solution", x);
+  check_vector("right-hand side", b);
+  TI_ERROR_IF(x.get_device_allocation() == b.get_device_allocation(),
+              "CUDA fixed BiCGSTAB solution and RHS must not alias.");
+
+  std::lock_guard<std::mutex> lock(solve_mutex_);
+  const auto operator_stats = matrix_.debug_runtime_statistics();
+  solve_calls_++;
+  last_solve_pattern_version_ = operator_stats.pattern_version;
+  last_solve_numeric_version_ = operator_stats.numeric_version;
+  status_ = SparseSolveStatus::kNotRun;
+  iterations_ = 0;
+  initial_residual_norm_ = 0.0;
+  residual_norm_ = 0.0;
+  relative_reference_norm_ = 0.0;
+  effective_tolerance_ = static_cast<double>(absolute_tolerance_);
+  ensure_workspace(size);
+
+  auto *solution = reinterpret_cast<float *>(
+      program->get_ndarray_data_ptr_as_int(&x));
+  const auto *rhs = reinterpret_cast<const float *>(
+      program->get_ndarray_data_ptr_as_int(&b));
+  const float rhs_squared = dot(rhs, rhs, size);
+  if (!std::isfinite(rhs_squared) || rhs_squared < 0.0f ||
+      !vector_is_finite(solution, size)) {
+    initial_residual_norm_ = std::numeric_limits<double>::infinity();
+    residual_norm_ = initial_residual_norm_;
+    status_ = SparseSolveStatus::kBreakdown;
+    finish_solve();
+    return;
+  }
+  relative_reference_norm_ =
+      std::sqrt(static_cast<double>(rhs_squared));
+  effective_tolerance_ = std::max(
+      static_cast<double>(absolute_tolerance_),
+      static_cast<double>(relative_tolerance_) *
+          relative_reference_norm_);
+  const float initial_residual_squared =
+      true_residual_squared(solution, rhs, size);
+  if (!std::isfinite(initial_residual_squared) ||
+      initial_residual_squared < 0.0f ||
+      !std::isfinite(effective_tolerance_)) {
+    initial_residual_norm_ = std::numeric_limits<double>::infinity();
+    residual_norm_ = initial_residual_norm_;
+    status_ = SparseSolveStatus::kBreakdown;
+    finish_solve();
+    return;
+  }
+  initial_residual_norm_ =
+      std::sqrt(static_cast<double>(initial_residual_squared));
+  residual_norm_ = initial_residual_norm_;
+  if (initial_residual_norm_ <= effective_tolerance_) {
+    status_ = SparseSolveStatus::kConverged;
+    finish_solve();
+    return;
+  }
+  if (max_iterations_ == 0) {
+    status_ = SparseSolveStatus::kMaxIterations;
+    finish_solve();
+    return;
+  }
+  if (rhs_squared == 0.0f) {
+    CUDADriver::get_instance().memset(
+        solution, 0,
+        static_cast<std::size_t>(size) * sizeof(float32));
+    residual_norm_ = 0.0;
+    status_ = SparseSolveStatus::kConverged;
+    finish_solve();
+    return;
+  }
+
+  auto &cublas = CUBLASDriver::get_instance();
+  auto representable_float = [](double value) {
+    return std::isfinite(value) &&
+           std::abs(value) <=
+               static_cast<double>(std::numeric_limits<float>::max());
+  };
+  copy_vector(shadow_residual_, residual_, size);
+  double rho_old = 1.0;
+  double alpha = 1.0;
+  double omega = 1.0;
+  bool fresh_direction = true;
+  bool terminated = false;
+
+  for (int iteration = 0; iteration < max_iterations_; ++iteration) {
+    double rho = static_cast<double>(
+        dot(shadow_residual_, residual_, size));
+    if (!std::isfinite(rho)) {
+      status_ = SparseSolveStatus::kBreakdown;
+      terminated = true;
+      break;
+    }
+    if (rho == 0.0) {
+      if (!refresh_true_residual(solution, rhs, size)) {
+        status_ = SparseSolveStatus::kBreakdown;
+        terminated = true;
+        break;
+      }
+      if (residual_norm_ <= effective_tolerance_) {
+        status_ = SparseSolveStatus::kConverged;
+        terminated = true;
+        break;
+      }
+      copy_vector(shadow_residual_, residual_, size);
+      rho = static_cast<double>(dot(shadow_residual_, residual_, size));
+      if (!std::isfinite(rho) || rho <= 0.0) {
+        status_ = SparseSolveStatus::kBreakdown;
+        terminated = true;
+        break;
+      }
+      rho_old = 1.0;
+      alpha = 1.0;
+      omega = 1.0;
+      fresh_direction = true;
+    }
+
+    if (fresh_direction) {
+      copy_vector(direction_, residual_, size);
+      fresh_direction = false;
+    } else {
+      if (rho_old == 0.0 || omega == 0.0) {
+        status_ = SparseSolveStatus::kBreakdown;
+        terminated = true;
+        break;
+      }
+      const double beta_value = (rho / rho_old) * (alpha / omega);
+      if (!representable_float(beta_value)) {
+        status_ = SparseSolveStatus::kBreakdown;
+        terminated = true;
+        break;
+      }
+      const float minus_omega = static_cast<float>(-omega);
+      cublas.cubSaxpy(handle_, size, &minus_omega, operator_direction_, 1,
+                      direction_, 1);
+      const float beta = static_cast<float>(beta_value);
+      cublas.cubSscal(handle_, size, &beta, direction_, 1);
+      const float one = 1.0f;
+      cublas.cubSaxpy(handle_, size, &one, residual_, 1, direction_, 1);
+    }
+
+    apply_operator(reinterpret_cast<std::uintptr_t>(direction_),
+                   reinterpret_cast<std::uintptr_t>(operator_direction_));
+    const double alpha_denominator = static_cast<double>(
+        dot(shadow_residual_, operator_direction_, size));
+    if (!std::isfinite(alpha_denominator) ||
+        alpha_denominator == 0.0) {
+      status_ = SparseSolveStatus::kBreakdown;
+      terminated = true;
+      break;
+    }
+    alpha = rho / alpha_denominator;
+    if (!representable_float(alpha)) {
+      status_ = SparseSolveStatus::kBreakdown;
+      terminated = true;
+      break;
+    }
+    copy_vector(intermediate_residual_, residual_, size);
+    const float minus_alpha = static_cast<float>(-alpha);
+    cublas.cubSaxpy(handle_, size, &minus_alpha, operator_direction_, 1,
+                    intermediate_residual_, 1);
+    const float intermediate_squared = dot(
+        intermediate_residual_, intermediate_residual_, size);
+    if (!std::isfinite(intermediate_squared) ||
+        intermediate_squared < 0.0f) {
+      status_ = SparseSolveStatus::kBreakdown;
+      terminated = true;
+      break;
+    }
+    const double intermediate_norm =
+        std::sqrt(static_cast<double>(intermediate_squared));
+    if (intermediate_norm <= effective_tolerance_) {
+      const float alpha_f32 = static_cast<float>(alpha);
+      cublas.cubSaxpy(handle_, size, &alpha_f32, direction_, 1, solution, 1);
+      iterations_ = iteration + 1;
+      if (!refresh_true_residual(solution, rhs, size)) {
+        status_ = SparseSolveStatus::kBreakdown;
+        terminated = true;
+        break;
+      }
+      if (residual_norm_ <= effective_tolerance_) {
+        status_ = SparseSolveStatus::kConverged;
+        terminated = true;
+        break;
+      }
+      copy_vector(shadow_residual_, residual_, size);
+      rho_old = 1.0;
+      alpha = 1.0;
+      omega = 1.0;
+      fresh_direction = true;
+      continue;
+    }
+
+    apply_operator(reinterpret_cast<std::uintptr_t>(intermediate_residual_),
+                   reinterpret_cast<std::uintptr_t>(operator_intermediate_));
+    const double omega_denominator = static_cast<double>(
+        dot(operator_intermediate_, operator_intermediate_, size));
+    const double omega_numerator = static_cast<double>(
+        dot(operator_intermediate_, intermediate_residual_, size));
+    if (!std::isfinite(omega_denominator) || omega_denominator < 0.0 ||
+        !std::isfinite(omega_numerator)) {
+      status_ = SparseSolveStatus::kBreakdown;
+      terminated = true;
+      break;
+    }
+    if (omega_denominator == 0.0) {
+      const float alpha_f32 = static_cast<float>(alpha);
+      cublas.cubSaxpy(handle_, size, &alpha_f32, direction_, 1, solution, 1);
+      iterations_ = iteration + 1;
+      status_ = refresh_true_residual(solution, rhs, size) &&
+                        residual_norm_ <= effective_tolerance_
+                    ? SparseSolveStatus::kConverged
+                    : SparseSolveStatus::kBreakdown;
+      terminated = true;
+      break;
+    }
+    omega = omega_numerator / omega_denominator;
+    if (!representable_float(omega)) {
+      status_ = SparseSolveStatus::kBreakdown;
+      terminated = true;
+      break;
+    }
+    const float alpha_f32 = static_cast<float>(alpha);
+    const float omega_f32 = static_cast<float>(omega);
+    cublas.cubSaxpy(handle_, size, &alpha_f32, direction_, 1, solution, 1);
+    cublas.cubSaxpy(handle_, size, &omega_f32,
+                    intermediate_residual_, 1, solution, 1);
+    iterations_ = iteration + 1;
+    if (!vector_is_finite(solution, size)) {
+      status_ = SparseSolveStatus::kBreakdown;
+      terminated = true;
+      break;
+    }
+    copy_vector(residual_, intermediate_residual_, size);
+    const float minus_omega = -omega_f32;
+    cublas.cubSaxpy(handle_, size, &minus_omega, operator_intermediate_, 1,
+                    residual_, 1);
+    const float recurrence_squared = dot(residual_, residual_, size);
+    if (!std::isfinite(recurrence_squared) || recurrence_squared < 0.0f) {
+      status_ = SparseSolveStatus::kBreakdown;
+      terminated = true;
+      break;
+    }
+    const double recurrence_norm =
+        std::sqrt(static_cast<double>(recurrence_squared));
+    if (recurrence_norm <= effective_tolerance_) {
+      if (!refresh_true_residual(solution, rhs, size)) {
+        status_ = SparseSolveStatus::kBreakdown;
+        terminated = true;
+        break;
+      }
+      if (residual_norm_ <= effective_tolerance_) {
+        status_ = SparseSolveStatus::kConverged;
+        terminated = true;
+        break;
+      }
+      copy_vector(shadow_residual_, residual_, size);
+      rho_old = 1.0;
+      alpha = 1.0;
+      omega = 1.0;
+      fresh_direction = true;
+      continue;
+    }
+    if (omega == 0.0) {
+      status_ = refresh_true_residual(solution, rhs, size) &&
+                        residual_norm_ <= effective_tolerance_
+                    ? SparseSolveStatus::kConverged
+                    : SparseSolveStatus::kBreakdown;
+      terminated = true;
+      break;
+    }
+    rho_old = rho;
+  }
+
+  if (!terminated) {
+    if (!refresh_true_residual(solution, rhs, size)) {
+      status_ = SparseSolveStatus::kBreakdown;
+    } else if (residual_norm_ <= effective_tolerance_) {
+      status_ = SparseSolveStatus::kConverged;
+    } else {
+      status_ = SparseSolveStatus::kMaxIterations;
+    }
+  } else if (status_ == SparseSolveStatus::kBreakdown) {
+    refresh_true_residual(solution, rhs, size);
+  }
+  finish_solve();
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+SparseSolvePlanRuntimeStatistics
+CudaSparseBiCGSTABPlan::debug_runtime_statistics() const {
+  std::lock_guard<std::mutex> lock(solve_mutex_);
+  const auto operator_stats = matrix_.debug_runtime_statistics();
+  SparseSolvePlanRuntimeStatistics result;
+  result.backend_family = "cuda";
+  result.method = "bicgstab_identity_host_scalar_probe";
+  result.dtype = "f32";
+  result.rows = matrix_.num_rows();
+  result.cols = matrix_.num_cols();
+  result.max_iterations = max_iterations_;
+  result.absolute_tolerance = static_cast<double>(absolute_tolerance_);
+  result.relative_tolerance = static_cast<double>(relative_tolerance_);
+  result.last_relative_reference_norm = relative_reference_norm_;
+  result.last_effective_tolerance = effective_tolerance_;
+  result.operator_pattern_version = operator_stats.pattern_version;
+  result.operator_numeric_version = operator_stats.numeric_version;
+  result.last_solve_pattern_version = last_solve_pattern_version_;
+  result.last_solve_numeric_version = last_solve_numeric_version_;
+  result.operator_pattern_changed_since_last_solve =
+      solve_calls_ > 0 && result.operator_pattern_version !=
+                              result.last_solve_pattern_version;
+  result.operator_numeric_changed_since_last_solve =
+      solve_calls_ > 0 && result.operator_numeric_version !=
+                              result.last_solve_numeric_version;
+  result.solve_calls = solve_calls_;
+  result.total_iterations = total_iterations_;
+  result.workspace_builds = workspace_builds_;
+  result.workspace_reuses = workspace_reuses_;
+  result.operator_apply_calls = operator_apply_calls_;
+  result.operator_apply_calls_available = true;
+  result.preconditioner_method = "identity";
+  result.preconditioner_apply_calls = 0;
+  result.preconditioner_apply_calls_available = true;
+  result.preconditioner_ownership_scope = "none";
+  result.host_scalar_reductions = host_scalar_reductions_;
+  result.host_scalar_readbacks = host_scalar_readbacks_;
+  result.host_synchronizations = host_synchronizations_;
+  result.persistent_vector_count = workspace_size_ > 0 ? 6 : 0;
+  result.persistent_vector_reserved_bytes =
+      static_cast<std::uint64_t>(result.persistent_vector_count) *
+      static_cast<std::uint64_t>(workspace_size_) * sizeof(float32);
+  result.persistent_scalar_count = 0;
+  result.persistent_scalar_reserved_bytes = 0;
+  result.cublas_handle_count = handle_ != nullptr ? 1 : 0;
+  result.solver_state_rebuilt_each_solve = false;
+  result.transient_solver_workspace_bytes = 0;
+  result.transient_solver_workspace_bytes_available = true;
+  result.fixed_iteration_only = false;
+  result.bounded_masked_execution = false;
+  result.device_to_device_bytes = device_to_device_bytes_;
+  result.device_to_host_bytes = device_to_host_bytes_;
+  return result;
+}
+
+std::unique_ptr<CudaSparseBiCGSTABPlan>
+make_cuda_fixed_sparse_bicgstab_plan(
+    Program *program,
+    SparseMatrix &matrix,
+    int max_iterations,
+    float absolute_tolerance,
+    bool verbose,
+    float relative_tolerance) {
+  return std::make_unique<CudaSparseBiCGSTABPlan>(
+      program, matrix, max_iterations, absolute_tolerance, verbose,
+      relative_tolerance);
 }
 
 CpuSparseCGPlan::CpuSparseCGPlan(
