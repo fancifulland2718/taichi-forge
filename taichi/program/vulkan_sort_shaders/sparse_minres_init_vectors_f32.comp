@@ -1,0 +1,64 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer State {
+  uint words[];
+} state_buf;
+layout(set = 0, binding = 1, std430) buffer Solution {
+  float data[];
+} solution_buf;
+layout(set = 0, binding = 2, std430) buffer Residual {
+  float data[];
+} residual_buf;
+layout(set = 0, binding = 3, std430) writeonly buffer VOld {
+  float data[];
+} v_old_buf;
+layout(set = 0, binding = 4, std430) writeonly buffer V {
+  float data[];
+} v_buf;
+layout(set = 0, binding = 5, std430) writeonly buffer POlder {
+  float data[];
+} p_older_buf;
+layout(set = 0, binding = 6, std430) writeonly buffer POld {
+  float data[];
+} p_old_buf;
+layout(set = 0, binding = 7, std430) writeonly buffer P {
+  float data[];
+} p_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint unused0;
+  uint unused1;
+  uint unused2;
+} params;
+
+const uint BETA = 5u;
+const uint STATUS = 20u;
+const uint ACTION = 22u;
+const uint STATUS_ACTIVE = 0u;
+const uint ACTION_ZERO_RHS = 2u;
+
+void main() {
+  bool is_active = state_buf.words[STATUS] == STATUS_ACTIVE;
+  bool zero_rhs = state_buf.words[ACTION] == ACTION_ZERO_RHS;
+  float beta = uintBitsToFloat(state_buf.words[BETA]);
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint index = gl_GlobalInvocationID.x;
+  while (index < params.n) {
+    float solution = zero_rhs ? 0.0 : solution_buf.data[index];
+    float residual = zero_rhs ? 0.0 : residual_buf.data[index];
+    solution_buf.data[index] = solution;
+    residual_buf.data[index] = residual;
+    v_old_buf.data[index] = 0.0;
+    v_buf.data[index] = is_active ? residual / beta : 0.0;
+    p_older_buf.data[index] = 0.0;
+    p_old_buf.data[index] = 0.0;
+    p_buf.data[index] = 0.0;
+    if (params.n - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+}

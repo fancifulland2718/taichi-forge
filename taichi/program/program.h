@@ -2446,6 +2446,47 @@ class TI_DLL_EXPORT Program {
       Ndarray *residual,
       std::size_t n);
 
+  std::size_t vulkan_sparse_minres_scalar(Ndarray *state,
+                                          std::uint32_t stage,
+                                          std::uint32_t iteration,
+                                          float absolute_tolerance,
+                                          float relative_tolerance);
+
+  std::size_t vulkan_sparse_minres_init_vectors(
+      Ndarray *state,
+      Ndarray *solution,
+      Ndarray *residual,
+      Ndarray *v_old,
+      Ndarray *v,
+      Ndarray *p_older,
+      Ndarray *p_old,
+      Ndarray *p,
+      std::size_t n);
+
+  std::size_t vulkan_sparse_minres_lanczos_beta(Ndarray *state,
+                                                Ndarray *v_old,
+                                                Ndarray *v_new,
+                                                std::size_t n);
+
+  std::size_t vulkan_sparse_minres_lanczos_alpha(Ndarray *state,
+                                                 Ndarray *v,
+                                                 Ndarray *v_new,
+                                                 std::size_t n);
+
+  std::size_t vulkan_sparse_minres_direction(Ndarray *state,
+                                             Ndarray *v,
+                                             Ndarray *p_older,
+                                             Ndarray *p_old,
+                                             Ndarray *p,
+                                             Ndarray *solution,
+                                             std::size_t n);
+
+  std::size_t vulkan_sparse_minres_shift(Ndarray *state,
+                                         Ndarray *v_old,
+                                         Ndarray *v,
+                                         Ndarray *v_new,
+                                         std::size_t n);
+
   void vulkan_sparse_algebra_clear_workspace();
 
   std::size_t vulkan_sparse_algebra_workspace_bytes() const;

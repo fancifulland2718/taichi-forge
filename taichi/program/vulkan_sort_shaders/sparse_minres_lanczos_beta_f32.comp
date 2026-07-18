@@ -1,0 +1,40 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer State {
+  uint words[];
+} state_buf;
+layout(set = 0, binding = 1, std430) readonly buffer VOld {
+  float data[];
+} v_old_buf;
+layout(set = 0, binding = 2, std430) buffer VNew {
+  float data[];
+} v_new_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint unused0;
+  uint unused1;
+  uint unused2;
+} params;
+
+const uint BETA = 5u;
+const uint STATUS = 20u;
+const uint STATUS_ACTIVE = 0u;
+
+void main() {
+  if (state_buf.words[STATUS] != STATUS_ACTIVE) {
+    return;
+  }
+  float beta = uintBitsToFloat(state_buf.words[BETA]);
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint index = gl_GlobalInvocationID.x;
+  while (index < params.n) {
+    v_new_buf.data[index] -= beta * v_old_buf.data[index];
+    if (params.n - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+}

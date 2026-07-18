@@ -1,0 +1,64 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer State {
+  uint words[];
+} state_buf;
+layout(set = 0, binding = 1, std430) readonly buffer V {
+  float data[];
+} v_buf;
+layout(set = 0, binding = 2, std430) buffer POlder {
+  float data[];
+} p_older_buf;
+layout(set = 0, binding = 3, std430) buffer POld {
+  float data[];
+} p_old_buf;
+layout(set = 0, binding = 4, std430) buffer P {
+  float data[];
+} p_buf;
+layout(set = 0, binding = 5, std430) buffer Solution {
+  float data[];
+} solution_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint unused0;
+  uint unused1;
+  uint unused2;
+} params;
+
+const uint R2 = 16u;
+const uint R3 = 17u;
+const uint R1 = 18u;
+const uint TAU = 19u;
+const uint STATUS = 20u;
+const uint ACTION = 22u;
+const uint STATUS_ACTIVE = 0u;
+const uint ACTION_NORMAL = 0u;
+
+void main() {
+  if (state_buf.words[STATUS] != STATUS_ACTIVE ||
+      state_buf.words[ACTION] != ACTION_NORMAL) {
+    return;
+  }
+  float r2 = uintBitsToFloat(state_buf.words[R2]);
+  float r3 = uintBitsToFloat(state_buf.words[R3]);
+  float r1 = uintBitsToFloat(state_buf.words[R1]);
+  float tau = uintBitsToFloat(state_buf.words[TAU]);
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint index = gl_GlobalInvocationID.x;
+  while (index < params.n) {
+    float current = p_buf.data[index];
+    float old = p_old_buf.data[index];
+    float next = (v_buf.data[index] - r2 * current - r3 * old) / r1;
+    p_older_buf.data[index] = old;
+    p_old_buf.data[index] = current;
+    p_buf.data[index] = next;
+    solution_buf.data[index] += tau * next;
+    if (params.n - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+}

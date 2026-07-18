@@ -460,6 +460,180 @@ def test_sparse_minres_rejects_operator_owned_bsr_adapter():
         ti.linalg.SparseMINRES(matrix, np.ones(4, dtype=np.float32))
 
 
+@pytest.mark.parametrize("storage_format", ["csr", "bsr"])
+@test_utils.test(arch=[ti.vulkan], offline_cache=False)
+def test_private_vulkan_fixed_minres_solves_and_reuses_workspace(
+    storage_format,
+):
+    dense = np.asarray(
+        [
+            [4.0, 0.0, 1.0, 0.0],
+            [0.0, 3.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    if storage_format == "csr":
+        matrix = _fixed_csr_matrix(dense, ti.f32)
+        updated_host = _compressed_nonzeros(dense * 2, "row_major").astype(
+            np.float32
+        )
+    else:
+        matrix, dense, values_host = _fixed_bsr_kkt(ti.f32)
+        updated_host = values_host * 2
+
+    contract = matrix._get_format_contract()
+    assert not contract["operations"]["public_minres"]
+    expected = np.asarray([-0.5, 1.25, 2.0, -1.5], dtype=np.float32)
+    rhs_host = dense @ expected
+    initial_host = np.asarray(
+        [0.25, -0.5, 0.5, 0.25], dtype=np.float32
+    )
+    rhs = ti.ndarray(dtype=ti.f32, shape=4)
+    solution = ti.ndarray(dtype=ti.f32, shape=4)
+    rhs.from_numpy(rhs_host)
+    solution.from_numpy(initial_host)
+    prog = ti.lang.impl.get_runtime().prog
+    max_iterations = 12
+    plan = ti._lib.core._make_vulkan_fixed_sparse_minres_plan(
+        prog, matrix.matrix, max_iterations, 2e-4, False
+    )
+
+    plan.solve(prog, solution.arr, rhs.arr)
+    assert plan.get_status() == 2
+    assert 1 <= plan.get_iterations() <= 4
+    assert dict(plan._get_last_result())["termination_reason"] == "converged"
+    np.testing.assert_allclose(
+        solution.to_numpy(), expected, rtol=2e-4, atol=2e-4
+    )
+    first = plan._debug_runtime_stats()
+    matrix_first = matrix._debug_runtime_stats()
+    assert first["identity"]["method"] == (
+        "minres_identity_bounded_true_residual_probe"
+    )
+    assert first["identity"]["preconditioner_method"] == "identity"
+    assert first["operations"]["workspace_builds"] == 1
+    assert first["operations"]["workspace_reuses"] == 0
+    assert first["operations"]["operator_apply_calls"] == (
+        2 + 2 * max_iterations
+    )
+    assert first["operations"]["host_scalar_reductions"] == 0
+    assert first["operations"]["device_scalar_operations"] == (
+        7 + 6 * max_iterations
+    )
+    assert first["operations"]["host_scalar_readbacks"] == 24
+    assert first["operations"]["host_synchronizations"] == 1
+    assert first["operations"]["bounded_masked_execution"]
+    assert not first["operations"]["fixed_iteration_only"]
+    assert first["resources"]["persistent_vector_count"] == 7
+    assert first["resources"]["persistent_vector_reserved_bytes"] == 112
+    assert first["resources"]["persistent_scalar_count"] == 24
+    assert first["resources"]["persistent_scalar_reserved_bytes"] == 96
+    assert first["resources"]["cublas_handle_count"] == 0
+    assert first["resources"]["transient_solver_workspace_bytes"] == 0
+    assert first["transfers"]["device_to_host_bytes"] == 96
+    assert first["transfers"]["device_to_device_bytes"] == (
+        (max_iterations + 2) * 4 * 4
+    )
+    assert matrix_first["operations"]["pattern_builds"] == 0
+    assert matrix_first["resources"]["pattern_storage_shared"]
+
+    updated = ti.ndarray(dtype=ti.f32, shape=updated_host.size)
+    updated.from_numpy(updated_host)
+    matrix.update_values(updated)
+    solution.fill(0)
+    plan.solve(prog, solution.arr, rhs.arr)
+    assert plan.get_status() == 2
+    np.testing.assert_allclose(
+        solution.to_numpy(), expected * 0.5, rtol=2e-4, atol=2e-4
+    )
+    second = plan._debug_runtime_stats()
+    assert second["operations"]["workspace_builds"] == 1
+    assert second["operations"]["workspace_reuses"] == 1
+    assert second["identity"]["operator_numeric_version"] == 2
+
+    solution.from_numpy(expected * 0.5)
+    plan.solve(prog, solution.arr, rhs.arr)
+    assert plan.get_status() == 2
+    assert plan.get_iterations() == 0
+    np.testing.assert_array_equal(solution.to_numpy(), expected * 0.5)
+
+    rhs.fill(0)
+    solution.fill(1)
+    plan.solve(prog, solution.arr, rhs.arr)
+    assert plan.get_status() == 2
+    assert plan.get_iterations() == 0
+    np.testing.assert_array_equal(
+        solution.to_numpy(), np.zeros(4, dtype=np.float32)
+    )
+    final = plan._debug_runtime_stats()
+    assert final["operations"]["solve_calls"] == 4
+    assert final["operations"]["workspace_builds"] == 1
+    assert final["operations"]["workspace_reuses"] == 3
+    assert final["operations"]["host_synchronizations"] == 4
+
+
+@test_utils.test(arch=[ti.vulkan], offline_cache=False)
+def test_private_vulkan_fixed_minres_happy_breakdown_and_boundaries():
+    identity = _fixed_csr_matrix(np.eye(2, dtype=np.float32), ti.f32)
+    rhs = ti.ndarray(dtype=ti.f32, shape=2)
+    solution = ti.ndarray(dtype=ti.f32, shape=2)
+    rhs_host = np.asarray([2.0, -3.0], dtype=np.float32)
+    rhs.from_numpy(rhs_host)
+    solution.fill(0)
+    prog = ti.lang.impl.get_runtime().prog
+    happy = ti._lib.core._make_vulkan_fixed_sparse_minres_plan(
+        prog, identity.matrix, 4, 1e-6, False
+    )
+
+    happy.solve(prog, solution.arr, rhs.arr)
+    assert happy.get_status() == 2
+    assert happy.get_iterations() == 1
+    np.testing.assert_allclose(
+        solution.to_numpy(), rhs_host, rtol=1e-6, atol=1e-6
+    )
+
+    row_offsets = ti.ndarray(dtype=ti.i32, shape=3)
+    column_indices = ti.ndarray(dtype=ti.i32, shape=2)
+    values = ti.ndarray(dtype=ti.f32, shape=2)
+    row_offsets.from_numpy(np.asarray([0, 1, 2], dtype=np.int32))
+    column_indices.from_numpy(np.asarray([0, 1], dtype=np.int32))
+    values.from_numpy(np.zeros(2, dtype=np.float32))
+    zero = ti.linalg.SparsePattern.csr(
+        2, 2, row_offsets, column_indices
+    ).matrix(values)
+    solution.fill(0)
+    breakdown = ti._lib.core._make_vulkan_fixed_sparse_minres_plan(
+        prog, zero.matrix, 4, 1e-6, False
+    )
+    breakdown.solve(prog, solution.arr, rhs.arr)
+    assert breakdown.get_status() == 1
+    result = dict(breakdown._get_last_result())
+    assert result["termination_reason"] == "breakdown"
+    assert result["iterations"] == 0
+    assert np.isfinite(result["residual_norm"])
+    np.testing.assert_array_equal(
+        solution.to_numpy(), np.zeros(2, dtype=np.float32)
+    )
+
+    zero_iteration = ti._lib.core._make_vulkan_fixed_sparse_minres_plan(
+        prog, zero.matrix, 0, 1e-6, False
+    )
+    zero_iteration.solve(prog, solution.arr, rhs.arr)
+    assert zero_iteration.get_status() == 0
+    assert zero_iteration.get_iterations() == 0
+
+    builder_matrix = _build_matrix(np.eye(2, dtype=np.float32), ti.f32)
+    with pytest.raises(
+        RuntimeError,
+        match="caller-owned shared CSR/BSR pattern with pattern_builds=0",
+    ):
+        ti._lib.core._make_vulkan_fixed_sparse_minres_plan(
+            prog, builder_matrix.matrix, 4, 1e-6, False
+        )
+
+
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_sparse_minres_rejects_gpu_without_host_fallback():
     matrix = _build_matrix(
