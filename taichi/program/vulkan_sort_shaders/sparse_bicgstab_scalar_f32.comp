@@ -1,0 +1,288 @@
+#version 450
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0, std430) buffer State {
+  uint words[];
+} state_buf;
+
+layout(push_constant) uniform Params {
+  uint stage;
+  uint iteration;
+  float absolute_tolerance;
+  float relative_tolerance;
+} params;
+
+const uint INITIAL_RR = 0u;
+const uint B2 = 1u;
+const uint X2 = 2u;
+const uint RHO = 3u;
+const uint RR = 4u;
+const uint RHO_OLD = 5u;
+const uint ALPHA = 6u;
+const uint OMEGA = 7u;
+const uint BETA = 8u;
+const uint ALPHA_DENOMINATOR = 9u;
+const uint S2 = 10u;
+const uint TT = 11u;
+const uint TS = 12u;
+const uint TRUE2 = 13u;
+const uint TOLERANCE2 = 14u;
+
+const uint STATUS = 16u;
+const uint COMPLETED = 17u;
+const uint ACTION = 18u;
+const uint FIRST = 19u;
+
+const uint STATUS_ACTIVE = 0u;
+const uint STATUS_BREAKDOWN = 1u;
+const uint STATUS_CONVERGED = 2u;
+
+const uint ACTION_NORMAL = 0u;
+const uint ACTION_ALPHA_RESTART = 1u;
+const uint ACTION_ALPHA_TERMINAL = 2u;
+const uint ACTION_MASKED = 3u;
+const uint ACTION_FRESH = 4u;
+const uint ACTION_ZERO_RHS = 5u;
+
+const uint STAGE_INIT = 0u;
+const uint STAGE_PREPARE = 1u;
+const uint STAGE_ALPHA = 2u;
+const uint STAGE_OMEGA = 3u;
+const uint STAGE_FINALIZE_ITERATION = 4u;
+const uint STAGE_FINISH = 5u;
+
+float load_f32(uint index) {
+  return uintBitsToFloat(state_buf.words[index]);
+}
+
+void store_f32(uint index, float value) {
+  state_buf.words[index] = floatBitsToUint(value);
+}
+
+bool invalid_nonnegative(float value) {
+  return isnan(value) || isinf(value) || value < 0.0;
+}
+
+void set_breakdown() {
+  state_buf.words[STATUS] = STATUS_BREAKDOWN;
+  state_buf.words[ACTION] = ACTION_MASKED;
+  store_f32(BETA, 0.0);
+}
+
+void initialize_state() {
+  float initial_rr = load_f32(INITIAL_RR);
+  float b2 = load_f32(B2);
+  float x2 = load_f32(X2);
+  state_buf.words[STATUS] = STATUS_ACTIVE;
+  state_buf.words[COMPLETED] = 0u;
+  state_buf.words[ACTION] = ACTION_FRESH;
+  state_buf.words[FIRST] = 1u;
+  store_f32(RR, initial_rr);
+  store_f32(RHO_OLD, 1.0);
+  store_f32(ALPHA, 1.0);
+  store_f32(OMEGA, 1.0);
+  store_f32(BETA, 0.0);
+
+  if (invalid_nonnegative(initial_rr) || invalid_nonnegative(b2) ||
+      invalid_nonnegative(x2)) {
+    set_breakdown();
+    return;
+  }
+  float reference_norm = sqrt(b2);
+  float effective_tolerance = max(
+      params.absolute_tolerance,
+      params.relative_tolerance * reference_norm);
+  float tolerance2 = effective_tolerance * effective_tolerance;
+  if (isnan(effective_tolerance) || isinf(effective_tolerance) ||
+      invalid_nonnegative(tolerance2)) {
+    set_breakdown();
+    return;
+  }
+  store_f32(TOLERANCE2, tolerance2);
+  if (initial_rr <= tolerance2) {
+    state_buf.words[STATUS] = STATUS_CONVERGED;
+    state_buf.words[ACTION] = ACTION_ALPHA_TERMINAL;
+  } else if (b2 == 0.0) {
+    state_buf.words[STATUS] = STATUS_CONVERGED;
+    state_buf.words[ACTION] = ACTION_ZERO_RHS;
+  }
+}
+
+void prepare_direction() {
+  if (state_buf.words[STATUS] != STATUS_ACTIVE) {
+    state_buf.words[ACTION] = ACTION_MASKED;
+    store_f32(BETA, 0.0);
+    return;
+  }
+  float rho = load_f32(RHO);
+  float rr = load_f32(RR);
+  if (isnan(rho) || isinf(rho) || invalid_nonnegative(rr)) {
+    set_breakdown();
+    return;
+  }
+  if (rho == 0.0) {
+    if (rr <= load_f32(TOLERANCE2)) {
+      state_buf.words[STATUS] = STATUS_CONVERGED;
+      state_buf.words[ACTION] = ACTION_MASKED;
+      return;
+    }
+    rho = rr;
+    store_f32(RHO, rho);
+    store_f32(BETA, 0.0);
+    state_buf.words[ACTION] = ACTION_FRESH;
+    state_buf.words[FIRST] = 0u;
+    return;
+  }
+  if (state_buf.words[FIRST] != 0u) {
+    store_f32(BETA, 0.0);
+    state_buf.words[ACTION] = ACTION_FRESH;
+    state_buf.words[FIRST] = 0u;
+    return;
+  }
+  float rho_old = load_f32(RHO_OLD);
+  float alpha = load_f32(ALPHA);
+  float omega = load_f32(OMEGA);
+  if (isnan(rho_old) || isinf(rho_old) || rho_old == 0.0 ||
+      isnan(alpha) || isinf(alpha) || isnan(omega) || isinf(omega) ||
+      omega == 0.0) {
+    set_breakdown();
+    return;
+  }
+  float beta = (rho / rho_old) * (alpha / omega);
+  if (isnan(beta) || isinf(beta)) {
+    set_breakdown();
+    return;
+  }
+  store_f32(BETA, beta);
+  state_buf.words[ACTION] = ACTION_NORMAL;
+}
+
+void prepare_alpha() {
+  if (state_buf.words[STATUS] != STATUS_ACTIVE) {
+    state_buf.words[ACTION] = ACTION_MASKED;
+    return;
+  }
+  float rho = load_f32(RHO);
+  float denominator = load_f32(ALPHA_DENOMINATOR);
+  if (isnan(rho) || isinf(rho) || isnan(denominator) ||
+      isinf(denominator) || denominator == 0.0) {
+    set_breakdown();
+    return;
+  }
+  float alpha = rho / denominator;
+  if (isnan(alpha) || isinf(alpha)) {
+    set_breakdown();
+    return;
+  }
+  store_f32(ALPHA, alpha);
+  state_buf.words[ACTION] = ACTION_NORMAL;
+}
+
+void prepare_omega() {
+  if (state_buf.words[STATUS] != STATUS_ACTIVE ||
+      state_buf.words[ACTION] != ACTION_NORMAL) {
+    state_buf.words[ACTION] = ACTION_MASKED;
+    return;
+  }
+  float s2 = load_f32(S2);
+  float tt = load_f32(TT);
+  float ts = load_f32(TS);
+  float true2 = load_f32(TRUE2);
+  float candidate_x2 = load_f32(X2);
+  if (invalid_nonnegative(s2) || invalid_nonnegative(tt) ||
+      isnan(ts) || isinf(ts) || invalid_nonnegative(true2) ||
+      invalid_nonnegative(candidate_x2)) {
+    set_breakdown();
+    return;
+  }
+  float tolerance2 = load_f32(TOLERANCE2);
+  if (s2 <= tolerance2) {
+    state_buf.words[COMPLETED] = params.iteration + 1u;
+    if (true2 <= tolerance2) {
+      state_buf.words[STATUS] = STATUS_CONVERGED;
+      state_buf.words[ACTION] = ACTION_ALPHA_TERMINAL;
+    } else {
+      state_buf.words[ACTION] = ACTION_ALPHA_RESTART;
+      state_buf.words[FIRST] = 1u;
+      store_f32(RHO_OLD, 1.0);
+      store_f32(ALPHA, 1.0);
+      store_f32(OMEGA, 1.0);
+      store_f32(BETA, 0.0);
+    }
+    return;
+  }
+  if (tt == 0.0) {
+    state_buf.words[COMPLETED] = params.iteration + 1u;
+    state_buf.words[STATUS] =
+        true2 <= tolerance2 ? STATUS_CONVERGED : STATUS_BREAKDOWN;
+    state_buf.words[ACTION] = ACTION_ALPHA_TERMINAL;
+    return;
+  }
+  float omega = ts / tt;
+  if (isnan(omega) || isinf(omega)) {
+    set_breakdown();
+    return;
+  }
+  store_f32(OMEGA, omega);
+  state_buf.words[ACTION] = ACTION_NORMAL;
+}
+
+void finalize_iteration() {
+  if (state_buf.words[ACTION] != ACTION_NORMAL ||
+      state_buf.words[STATUS] != STATUS_ACTIVE) {
+    return;
+  }
+  float true2 = load_f32(TRUE2);
+  float x2 = load_f32(X2);
+  if (invalid_nonnegative(true2) || invalid_nonnegative(x2)) {
+    set_breakdown();
+    return;
+  }
+  state_buf.words[COMPLETED] = params.iteration + 1u;
+  if (true2 <= load_f32(TOLERANCE2)) {
+    state_buf.words[STATUS] = STATUS_CONVERGED;
+    return;
+  }
+  if (load_f32(OMEGA) == 0.0) {
+    set_breakdown();
+    return;
+  }
+  store_f32(RHO_OLD, load_f32(RHO));
+}
+
+void finish_state() {
+  float true2 = load_f32(TRUE2);
+  float x2 = load_f32(X2);
+  float tolerance2 = load_f32(TOLERANCE2);
+  if (invalid_nonnegative(true2) || invalid_nonnegative(x2) ||
+      invalid_nonnegative(tolerance2)) {
+    set_breakdown();
+    return;
+  }
+  if (state_buf.words[STATUS] == STATUS_CONVERGED) {
+    if (true2 > tolerance2) {
+      set_breakdown();
+    }
+    return;
+  }
+  if (state_buf.words[STATUS] == STATUS_ACTIVE && true2 <= tolerance2) {
+    state_buf.words[STATUS] = STATUS_CONVERGED;
+  }
+}
+
+void main() {
+  if (params.stage == STAGE_INIT) {
+    initialize_state();
+  } else if (params.stage == STAGE_PREPARE) {
+    prepare_direction();
+  } else if (params.stage == STAGE_ALPHA) {
+    prepare_alpha();
+  } else if (params.stage == STAGE_OMEGA) {
+    prepare_omega();
+  } else if (params.stage == STAGE_FINALIZE_ITERATION) {
+    finalize_iteration();
+  } else if (params.stage == STAGE_FINISH) {
+    finish_state();
+  }
+}

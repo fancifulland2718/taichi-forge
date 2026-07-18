@@ -1,0 +1,66 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer State {
+  uint words[];
+} state_buf;
+layout(set = 0, binding = 1, std430) readonly buffer Residual {
+  float data[];
+} residual_buf;
+layout(set = 0, binding = 2, std430) buffer ShadowResidual {
+  float data[];
+} shadow_buf;
+layout(set = 0, binding = 3, std430) buffer Direction {
+  float data[];
+} direction_buf;
+layout(set = 0, binding = 4, std430) readonly buffer AppliedDirection {
+  float data[];
+} applied_direction_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint unused0;
+  uint unused1;
+  uint unused2;
+} params;
+
+const uint BETA = 8u;
+const uint OMEGA = 7u;
+const uint STATUS = 16u;
+const uint ACTION = 18u;
+const uint STATUS_ACTIVE = 0u;
+const uint ACTION_NORMAL = 0u;
+const uint ACTION_FRESH = 4u;
+
+float load_f32(uint index) {
+  return uintBitsToFloat(state_buf.words[index]);
+}
+
+void main() {
+  uint status = state_buf.words[STATUS];
+  uint action = state_buf.words[ACTION];
+  if (status != STATUS_ACTIVE ||
+      (action != ACTION_NORMAL && action != ACTION_FRESH)) {
+    return;
+  }
+  float beta = load_f32(BETA);
+  float omega = load_f32(OMEGA);
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint index = gl_GlobalInvocationID.x;
+  while (index < params.n) {
+    float residual = residual_buf.data[index];
+    if (action == ACTION_FRESH) {
+      shadow_buf.data[index] = residual;
+      direction_buf.data[index] = residual;
+    } else {
+      direction_buf.data[index] =
+          residual + beta * (direction_buf.data[index] -
+                             omega * applied_direction_buf.data[index]);
+    }
+    if (params.n - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+}

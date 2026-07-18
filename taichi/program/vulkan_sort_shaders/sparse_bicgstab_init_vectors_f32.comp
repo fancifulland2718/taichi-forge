@@ -1,0 +1,55 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer State {
+  uint words[];
+} state_buf;
+layout(set = 0, binding = 1, std430) buffer Solution {
+  float data[];
+} solution_buf;
+layout(set = 0, binding = 2, std430) buffer Residual {
+  float data[];
+} residual_buf;
+layout(set = 0, binding = 3, std430) writeonly buffer ShadowResidual {
+  float data[];
+} shadow_buf;
+layout(set = 0, binding = 4, std430) writeonly buffer Direction {
+  float data[];
+} direction_buf;
+layout(set = 0, binding = 5, std430) writeonly buffer IntermediateResidual {
+  float data[];
+} intermediate_buf;
+layout(set = 0, binding = 6, std430) writeonly buffer CandidateSolution {
+  float data[];
+} candidate_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint unused0;
+  uint unused1;
+  uint unused2;
+} params;
+
+const uint ACTION = 18u;
+const uint ACTION_ZERO_RHS = 5u;
+
+void main() {
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint index = gl_GlobalInvocationID.x;
+  bool zero_rhs = state_buf.words[ACTION] == ACTION_ZERO_RHS;
+  while (index < params.n) {
+    float solution = zero_rhs ? 0.0 : solution_buf.data[index];
+    float residual = zero_rhs ? 0.0 : residual_buf.data[index];
+    solution_buf.data[index] = solution;
+    residual_buf.data[index] = residual;
+    shadow_buf.data[index] = residual;
+    direction_buf.data[index] = residual;
+    intermediate_buf.data[index] = 0.0;
+    candidate_buf.data[index] = solution;
+    if (params.n - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+}

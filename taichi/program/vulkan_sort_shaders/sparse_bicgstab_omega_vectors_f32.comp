@@ -1,0 +1,71 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer State {
+  uint words[];
+} state_buf;
+layout(set = 0, binding = 1, std430) readonly buffer IntermediateResidual {
+  float data[];
+} intermediate_buf;
+layout(set = 0, binding = 2, std430) readonly buffer AppliedIntermediate {
+  float data[];
+} applied_intermediate_buf;
+layout(set = 0, binding = 3, std430) readonly buffer TrueResidual {
+  float data[];
+} true_residual_buf;
+layout(set = 0, binding = 4, std430) readonly buffer CandidateSolution {
+  float data[];
+} candidate_buf;
+layout(set = 0, binding = 5, std430) buffer Solution {
+  float data[];
+} solution_buf;
+layout(set = 0, binding = 6, std430) buffer Residual {
+  float data[];
+} residual_buf;
+layout(set = 0, binding = 7, std430) buffer ShadowResidual {
+  float data[];
+} shadow_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint unused0;
+  uint unused1;
+  uint unused2;
+} params;
+
+const uint OMEGA = 7u;
+const uint ACTION = 18u;
+const uint ACTION_NORMAL = 0u;
+const uint ACTION_ALPHA_RESTART = 1u;
+const uint ACTION_ALPHA_TERMINAL = 2u;
+
+void main() {
+  uint action = state_buf.words[ACTION];
+  if (action != ACTION_NORMAL && action != ACTION_ALPHA_RESTART &&
+      action != ACTION_ALPHA_TERMINAL) {
+    return;
+  }
+  float omega = uintBitsToFloat(state_buf.words[OMEGA]);
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint index = gl_GlobalInvocationID.x;
+  while (index < params.n) {
+    if (action == ACTION_NORMAL) {
+      solution_buf.data[index] =
+          candidate_buf.data[index] + omega * intermediate_buf.data[index];
+      residual_buf.data[index] =
+          intermediate_buf.data[index] -
+          omega * applied_intermediate_buf.data[index];
+    } else {
+      solution_buf.data[index] = candidate_buf.data[index];
+      residual_buf.data[index] = true_residual_buf.data[index];
+      if (action == ACTION_ALPHA_RESTART) {
+        shadow_buf.data[index] = true_residual_buf.data[index];
+      }
+    }
+    if (params.n - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+}

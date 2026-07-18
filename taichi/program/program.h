@@ -2362,6 +2362,12 @@ class TI_DLL_EXPORT Program {
                                 Ndarray *output,
                                 std::size_t n);
 
+  std::size_t vulkan_sparse_dot_to_state_slot(Ndarray *x,
+                                              Ndarray *y,
+                                              Ndarray *state,
+                                              std::size_t state_slot,
+                                              std::size_t n);
+
   std::size_t vulkan_sparse_norm(Ndarray *x,
                                  Ndarray *output,
                                  std::size_t n);
@@ -2388,6 +2394,57 @@ class TI_DLL_EXPORT Program {
                                         Ndarray *completed_iterations,
                                         float tolerance_squared,
                                         std::uint32_t iteration);
+
+  std::size_t vulkan_sparse_bicgstab_scalar(Ndarray *state,
+                                            std::uint32_t stage,
+                                            std::uint32_t iteration,
+                                            float absolute_tolerance,
+                                            float relative_tolerance);
+
+  std::size_t vulkan_sparse_bicgstab_init_vectors(
+      Ndarray *state,
+      Ndarray *solution,
+      Ndarray *residual,
+      Ndarray *shadow_residual,
+      Ndarray *direction,
+      Ndarray *intermediate_residual,
+      Ndarray *candidate_solution,
+      std::size_t n);
+
+  std::size_t vulkan_sparse_bicgstab_direction(
+      Ndarray *state,
+      Ndarray *residual,
+      Ndarray *shadow_residual,
+      Ndarray *direction,
+      Ndarray *operator_direction,
+      std::size_t n);
+
+  std::size_t vulkan_sparse_bicgstab_alpha_vectors(
+      Ndarray *state,
+      Ndarray *residual,
+      Ndarray *direction,
+      Ndarray *operator_direction,
+      Ndarray *solution,
+      Ndarray *candidate_solution,
+      Ndarray *intermediate_residual,
+      std::size_t n);
+
+  std::size_t vulkan_sparse_bicgstab_omega_vectors(
+      Ndarray *state,
+      Ndarray *intermediate_residual,
+      Ndarray *operator_intermediate,
+      Ndarray *true_residual,
+      Ndarray *candidate_solution,
+      Ndarray *solution,
+      Ndarray *residual,
+      Ndarray *shadow_residual,
+      std::size_t n);
+
+  std::size_t vulkan_sparse_bicgstab_replace_residual(
+      Ndarray *state,
+      Ndarray *true_residual,
+      Ndarray *residual,
+      std::size_t n);
 
   void vulkan_sparse_algebra_clear_workspace();
 

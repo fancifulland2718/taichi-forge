@@ -38,6 +38,7 @@
 #include "taichi/program/sparse_bicgstab.h"
 #include "taichi/program/sparse_fixed_bicgstab.h"
 #include "taichi/program/cuda_sparse_bicgstab.h"
+#include "taichi/program/vulkan_sparse_bicgstab.h"
 #include "taichi/program/sparse_minres.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/runtime/gfx/runtime.h"
@@ -5356,6 +5357,40 @@ void export_lang(py::module &m) {
          float absolute_tolerance, bool verbose,
          float relative_tolerance) {
         return make_cuda_fixed_sparse_bicgstab_plan(
+            program, matrix, max_iterations, absolute_tolerance, verbose,
+            relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("matrix"),
+      py::arg("max_iterations"), py::arg("absolute_tolerance"),
+      py::arg("verbose"), py::arg("relative_tolerance") = 0.0f);
+  py::class_<VulkanSparseBiCGSTABPlan>(m,
+                                       "VulkanSparseBiCGSTABPlan")
+      .def("solve", &VulkanSparseBiCGSTABPlan::solve)
+      .def("is_success", &VulkanSparseBiCGSTABPlan::is_success)
+      .def("get_status", &VulkanSparseBiCGSTABPlan::get_status)
+      .def("get_iterations", &VulkanSparseBiCGSTABPlan::get_iterations)
+      .def("get_initial_residual_norm",
+           &VulkanSparseBiCGSTABPlan::get_initial_residual_norm)
+      .def("get_residual_norm",
+           &VulkanSparseBiCGSTABPlan::get_residual_norm)
+      .def("_get_last_result",
+           [sparse_solve_result_to_dict](
+               const VulkanSparseBiCGSTABPlan &plan) {
+             return sparse_solve_result_to_dict(plan.get_last_result());
+           })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](
+               const VulkanSparseBiCGSTABPlan &plan) {
+             return sparse_solve_plan_stats_to_dict(
+                 plan.debug_runtime_statistics());
+           });
+  m.def(
+      "_make_vulkan_fixed_sparse_bicgstab_plan",
+      [](Program *program, SparseMatrix &matrix, int max_iterations,
+         float absolute_tolerance, bool verbose,
+         float relative_tolerance) {
+        return make_vulkan_fixed_sparse_bicgstab_plan(
             program, matrix, max_iterations, absolute_tolerance, verbose,
             relative_tolerance);
       },
