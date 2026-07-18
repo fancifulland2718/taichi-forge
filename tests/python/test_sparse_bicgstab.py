@@ -708,10 +708,10 @@ def test_private_vulkan_fixed_bicgstab_solves_and_reuses_workspace(
         7 + 14 * max_iterations
     )
     assert first["operations"]["host_scalar_readbacks"] == 20
-    assert first["operations"]["host_synchronizations"] == 1
-    assert not first["operations"]["host_synchronizations_exact"]
+    assert first["operations"]["host_synchronizations"] >= 1
+    assert first["operations"]["host_synchronizations_exact"]
     assert first["operations"]["host_synchronization_scope"] == (
-        "explicit_plan_only"
+        "program_syncs_during_solve"
     )
     assert first["operations"]["bounded_masked_execution"]
     assert not first["operations"]["fixed_iteration_only"]
@@ -767,7 +767,9 @@ def test_private_vulkan_fixed_bicgstab_solves_and_reuses_workspace(
     assert final["operations"]["solve_calls"] == 4
     assert final["operations"]["workspace_builds"] == 1
     assert final["operations"]["workspace_reuses"] == 3
-    assert final["operations"]["host_synchronizations"] == 4
+    assert final["operations"]["host_synchronizations"] == (
+        first["operations"]["host_synchronizations"] + 3
+    )
 
 
 @test_utils.test(arch=[ti.vulkan], offline_cache=False)

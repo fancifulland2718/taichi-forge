@@ -182,6 +182,8 @@ void VulkanSparseBiCGSTABPlan::solve(Program *program,
   std::lock_guard<std::mutex> lock(solve_mutex_);
   auto submission_guard =
       program->acquire_runtime_resource_submission_guard();
+  const std::uint64_t program_syncs_before =
+      program->runtime_statistics().snapshot().synchronization.program_syncs;
   const Ndarray *resources[] = {
       &x,
       &b,
@@ -357,7 +359,9 @@ void VulkanSparseBiCGSTABPlan::solve(Program *program,
   device_scalar_operations_ +=
       7 + 14 * static_cast<std::uint64_t>(max_iterations_);
   host_scalar_readbacks_ += kStateWordCount;
-  host_synchronizations_ += 1;
+  const std::uint64_t program_syncs_after =
+      program->runtime_statistics().snapshot().synchronization.program_syncs;
+  host_synchronizations_ += program_syncs_after - program_syncs_before;
   device_to_device_bytes_ +=
       static_cast<std::uint64_t>(2 * max_iterations_ + 2) *
       static_cast<std::uint64_t>(n) * sizeof(float32);
@@ -412,8 +416,8 @@ VulkanSparseBiCGSTABPlan::debug_runtime_statistics() const {
   result.device_scalar_operations = device_scalar_operations_;
   result.host_scalar_readbacks = host_scalar_readbacks_;
   result.host_synchronizations = host_synchronizations_;
-  result.host_synchronizations_exact = false;
-  result.host_synchronization_scope = "explicit_plan_only";
+  result.host_synchronizations_exact = true;
+  result.host_synchronization_scope = "program_syncs_during_solve";
   result.persistent_vector_count = 8;
   result.persistent_vector_reserved_bytes =
       8 * static_cast<std::uint64_t>(matrix_.num_rows()) * sizeof(float32);
