@@ -54,7 +54,8 @@ class VulkanSparseBiCGSTABPlan {
   void validate_controls() const;
   void apply_operator(Program *program,
                       const Ndarray &input,
-                      const Ndarray &output);
+                      const Ndarray &output,
+                      bool masked);
   void release_workspace();
 
   Program *program_{nullptr};
@@ -87,6 +88,7 @@ class VulkanSparseBiCGSTABPlan {
   std::uint64_t workspace_builds_{0};
   std::uint64_t workspace_reuses_{0};
   std::uint64_t operator_apply_calls_{0};
+  std::uint64_t masked_operator_dispatches_{0};
   std::uint64_t device_scalar_operations_{0};
   std::uint64_t host_scalar_readbacks_{0};
   std::uint64_t host_synchronizations_{0};

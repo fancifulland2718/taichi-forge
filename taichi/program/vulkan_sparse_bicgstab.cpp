@@ -134,15 +134,27 @@ void VulkanSparseBiCGSTABPlan::validate_controls() const {
 void VulkanSparseBiCGSTABPlan::apply_operator(
     Program *program,
     const Ndarray &input,
-    const Ndarray &output) {
+    const Ndarray &output,
+    bool masked) {
   if (csr_matrix_) {
-    csr_matrix_->nd_spmv(program, input, output);
+    if (masked) {
+      csr_matrix_->nd_spmv_masked(
+          program, input, output, *state_, kStatus);
+    } else {
+      csr_matrix_->nd_spmv(program, input, output);
+    }
   } else if (bsr_matrix_) {
-    bsr_matrix_->nd_spmv(program, input, output);
+    if (masked) {
+      bsr_matrix_->nd_spmv_masked(
+          program, input, output, *state_, kStatus);
+    } else {
+      bsr_matrix_->nd_spmv(program, input, output);
+    }
   } else {
     TI_ERROR("Vulkan fixed BiCGSTAB received an unsupported operator.");
   }
   operator_apply_calls_++;
+  masked_operator_dispatches_ += masked ? 1 : 0;
 }
 
 void VulkanSparseBiCGSTABPlan::solve(Program *program,
@@ -204,7 +216,7 @@ void VulkanSparseBiCGSTABPlan::solve(Program *program,
   auto *mutable_b = const_cast<Ndarray *>(&b);
   program->fill_ndarray_fast_u32(state_, 0);
   program->copy_ndarray_fast(residual_, mutable_b);
-  apply_operator(program, x, *operator_intermediate_);
+  apply_operator(program, x, *operator_intermediate_, false);
   program->vulkan_sparse_axpy(operator_intermediate_, residual_, n, -1.0f);
   program->vulkan_sparse_dot_to_state_slot(
       residual_, residual_, state_, kInitialResidualSquared, n);
@@ -229,7 +241,7 @@ void VulkanSparseBiCGSTABPlan::solve(Program *program,
     program->vulkan_sparse_bicgstab_direction(
         state_, residual_, shadow_residual_, direction_,
         operator_direction_, n);
-    apply_operator(program, *direction_, *operator_direction_);
+    apply_operator(program, *direction_, *operator_direction_, true);
     program->vulkan_sparse_dot_to_state_slot(
         shadow_residual_, operator_direction_, state_, kAlphaDenominator, n);
     program->vulkan_sparse_bicgstab_scalar(
@@ -245,7 +257,8 @@ void VulkanSparseBiCGSTABPlan::solve(Program *program,
         candidate_solution_, candidate_solution_, state_, kSolutionSquared,
         n);
 
-    apply_operator(program, *candidate_solution_, *operator_intermediate_);
+    apply_operator(program, *candidate_solution_, *operator_intermediate_,
+                   true);
     program->copy_ndarray_fast(true_residual_, mutable_b);
     program->vulkan_sparse_axpy(
         operator_intermediate_, true_residual_, n, -1.0f);
@@ -253,7 +266,7 @@ void VulkanSparseBiCGSTABPlan::solve(Program *program,
         true_residual_, true_residual_, state_, kTrueResidualSquared, n);
 
     apply_operator(program, *intermediate_residual_,
-                   *operator_intermediate_);
+                   *operator_intermediate_, true);
     program->vulkan_sparse_dot_to_state_slot(
         operator_intermediate_, operator_intermediate_, state_,
         kOperatorIntermediateSquared, n);
@@ -268,7 +281,7 @@ void VulkanSparseBiCGSTABPlan::solve(Program *program,
         true_residual_, candidate_solution_, mutable_x, residual_,
         shadow_residual_, n);
 
-    apply_operator(program, x, *operator_intermediate_);
+    apply_operator(program, x, *operator_intermediate_, true);
     program->copy_ndarray_fast(true_residual_, mutable_b);
     program->vulkan_sparse_axpy(
         operator_intermediate_, true_residual_, n, -1.0f);
@@ -283,7 +296,7 @@ void VulkanSparseBiCGSTABPlan::solve(Program *program,
         state_, true_residual_, residual_, n);
   }
 
-  apply_operator(program, x, *operator_intermediate_);
+  apply_operator(program, x, *operator_intermediate_, false);
   program->copy_ndarray_fast(true_residual_, mutable_b);
   program->vulkan_sparse_axpy(
       operator_intermediate_, true_residual_, n, -1.0f);
@@ -389,6 +402,8 @@ VulkanSparseBiCGSTABPlan::debug_runtime_statistics() const {
   result.workspace_reuses = workspace_reuses_;
   result.operator_apply_calls = operator_apply_calls_;
   result.operator_apply_calls_available = true;
+  result.operator_apply_call_scope = "scheduled_dispatches";
+  result.masked_operator_dispatches = masked_operator_dispatches_;
   result.preconditioner_method = "identity";
   result.preconditioner_apply_calls = 0;
   result.preconditioner_apply_calls_available = true;

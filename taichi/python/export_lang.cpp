@@ -4757,6 +4757,10 @@ void export_lang(py::module &m) {
             stats.operator_apply_calls_available
                 ? py::cast(stats.operator_apply_calls)
                 : py::none();
+        operations["operator_apply_call_scope"] =
+            stats.operator_apply_call_scope;
+        operations["masked_operator_dispatches"] =
+            stats.masked_operator_dispatches;
         operations["host_scalar_reductions"] =
             stats.host_scalar_reductions;
         operations["device_scalar_operations"] =

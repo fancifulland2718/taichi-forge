@@ -697,6 +697,12 @@ def test_private_vulkan_fixed_bicgstab_solves_and_reuses_workspace(
     assert first["operations"]["operator_apply_calls"] == (
         2 + 4 * max_iterations
     )
+    assert first["operations"]["operator_apply_call_scope"] == (
+        "scheduled_dispatches"
+    )
+    assert first["operations"]["masked_operator_dispatches"] == (
+        4 * max_iterations
+    )
     assert first["operations"]["host_scalar_reductions"] == 0
     assert first["operations"]["device_scalar_operations"] == (
         7 + 14 * max_iterations

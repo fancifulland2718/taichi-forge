@@ -120,15 +120,27 @@ void VulkanSparseMINRESPlan::validate_controls() const {
 
 void VulkanSparseMINRESPlan::apply_operator(Program *program,
                                             const Ndarray &input,
-                                            const Ndarray &output) {
+                                            const Ndarray &output,
+                                            bool masked) {
   if (csr_matrix_) {
-    csr_matrix_->nd_spmv(program, input, output);
+    if (masked) {
+      csr_matrix_->nd_spmv_masked(
+          program, input, output, *state_, kStatus);
+    } else {
+      csr_matrix_->nd_spmv(program, input, output);
+    }
   } else if (bsr_matrix_) {
-    bsr_matrix_->nd_spmv(program, input, output);
+    if (masked) {
+      bsr_matrix_->nd_spmv_masked(
+          program, input, output, *state_, kStatus);
+    } else {
+      bsr_matrix_->nd_spmv(program, input, output);
+    }
   } else {
     TI_ERROR("Vulkan fixed MINRES received an unsupported operator.");
   }
   operator_apply_calls_++;
+  masked_operator_dispatches_ += masked ? 1 : 0;
 }
 
 void VulkanSparseMINRESPlan::solve(Program *program,
@@ -180,7 +192,7 @@ void VulkanSparseMINRESPlan::solve(Program *program,
   auto *mutable_x = const_cast<Ndarray *>(&x);
   auto *mutable_b = const_cast<Ndarray *>(&b);
   program->fill_ndarray_fast_u32(state_, 0);
-  apply_operator(program, x, *v_new_);
+  apply_operator(program, x, *v_new_, false);
   program->copy_ndarray_fast(residual_, mutable_b);
   program->vulkan_sparse_axpy(v_new_, residual_, n, -1.0f);
   program->vulkan_sparse_dot_to_state_slot(
@@ -195,7 +207,7 @@ void VulkanSparseMINRESPlan::solve(Program *program,
       state_, mutable_x, residual_, v_old_, v_, p_older_, p_old_, p_, n);
 
   for (int iteration = 0; iteration < max_iterations_; ++iteration) {
-    apply_operator(program, *v_, *v_new_);
+    apply_operator(program, *v_, *v_new_, true);
     program->vulkan_sparse_minres_lanczos_beta(
         state_, v_old_, v_new_, n);
     program->vulkan_sparse_dot_to_state_slot(
@@ -211,7 +223,7 @@ void VulkanSparseMINRESPlan::solve(Program *program,
         state_, v_, p_older_, p_old_, p_, mutable_x, n);
     program->vulkan_sparse_minres_shift(state_, v_old_, v_, v_new_, n);
 
-    apply_operator(program, x, *v_new_);
+    apply_operator(program, x, *v_new_, true);
     program->copy_ndarray_fast(residual_, mutable_b);
     program->vulkan_sparse_axpy(v_new_, residual_, n, -1.0f);
     program->vulkan_sparse_dot_to_state_slot(
@@ -223,7 +235,7 @@ void VulkanSparseMINRESPlan::solve(Program *program,
         absolute_tolerance_, relative_tolerance_);
   }
 
-  apply_operator(program, x, *v_new_);
+  apply_operator(program, x, *v_new_, false);
   program->copy_ndarray_fast(residual_, mutable_b);
   program->vulkan_sparse_axpy(v_new_, residual_, n, -1.0f);
   program->vulkan_sparse_dot_to_state_slot(
@@ -328,6 +340,8 @@ VulkanSparseMINRESPlan::debug_runtime_statistics() const {
   result.workspace_reuses = workspace_reuses_;
   result.operator_apply_calls = operator_apply_calls_;
   result.operator_apply_calls_available = true;
+  result.operator_apply_call_scope = "scheduled_dispatches";
+  result.masked_operator_dispatches = masked_operator_dispatches_;
   result.preconditioner_method = "identity";
   result.preconditioner_apply_calls = 0;
   result.preconditioner_apply_calls_available = true;

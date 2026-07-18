@@ -518,6 +518,12 @@ def test_private_vulkan_fixed_minres_solves_and_reuses_workspace(
     assert first["operations"]["operator_apply_calls"] == (
         2 + 2 * max_iterations
     )
+    assert first["operations"]["operator_apply_call_scope"] == (
+        "scheduled_dispatches"
+    )
+    assert first["operations"]["masked_operator_dispatches"] == (
+        2 * max_iterations
+    )
     assert first["operations"]["host_scalar_reductions"] == 0
     assert first["operations"]["device_scalar_operations"] == (
         7 + 6 * max_iterations

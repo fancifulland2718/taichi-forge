@@ -887,6 +887,12 @@ static const uint32_t kCsrSpmvF32Spv[] =
 static const uint32_t kBsrSpmvF32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/bsr_spmv_f32.comp.spv.h"
     ;
+static const uint32_t kCsrSpmvMaskedF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/csr_spmv_masked_f32.comp.spv.h"
+    ;
+static const uint32_t kBsrSpmvMaskedF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/bsr_spmv_masked_f32.comp.spv.h"
+    ;
 static const uint32_t kReduceI32MinSingleSpv[] =
 #include "taichi/program/vulkan_sort_shaders/reduce_i32_min_single.comp.spv.h"
     ;
@@ -4612,6 +4618,8 @@ struct VulkanSparseAlgebraCache {
   DeviceAllocation partial{kDeviceNullAllocation};
   std::unique_ptr<Pipeline> csr_spmv_f32;
   std::unique_ptr<Pipeline> bsr_spmv_f32;
+  std::unique_ptr<Pipeline> csr_spmv_masked_f32;
+  std::unique_ptr<Pipeline> bsr_spmv_masked_f32;
   std::unique_ptr<Pipeline> sparse_axpy_f32;
   std::unique_ptr<Pipeline> sparse_diagonal_apply_f32;
   std::unique_ptr<Pipeline> sparse_block_diagonal_apply_f32;
@@ -4642,6 +4650,8 @@ struct VulkanSparseAlgebraCache {
   std::unique_ptr<Pipeline> sparse_assembly_finalize_control;
   VulkanResourceSetReplayRing<5> csr_spmv_bindings;
   VulkanResourceSetReplayRing<5> bsr_spmv_bindings;
+  VulkanResourceSetReplayRing<6> csr_spmv_masked_bindings;
+  VulkanResourceSetReplayRing<6> bsr_spmv_masked_bindings;
   VulkanResourceSetReplayRing<2> sparse_axpy_bindings;
   VulkanResourceSetReplayRing<3> sparse_diagonal_apply_bindings;
   VulkanResourceSetReplayRing<3> sparse_block_diagonal_apply_bindings;
@@ -4672,6 +4682,8 @@ struct VulkanSparseAlgebraCache {
   VulkanResourceSetReplayRing<2> sparse_assembly_finalize_control_bindings;
   VulkanCommandReplayCache csr_spmv_command_replay;
   VulkanCommandReplayCache bsr_spmv_command_replay;
+  VulkanCommandReplayCache csr_spmv_masked_command_replay;
+  VulkanCommandReplayCache bsr_spmv_masked_command_replay;
   VulkanCommandReplayCache sparse_axpy_command_replay;
   VulkanCommandReplayCache sparse_diagonal_apply_command_replay;
   VulkanCommandReplayCache sparse_block_diagonal_apply_command_replay;
@@ -4704,6 +4716,8 @@ struct VulkanSparseAlgebraCache {
   void reset_resource_sets() {
     csr_spmv_bindings.reset();
     bsr_spmv_bindings.reset();
+    csr_spmv_masked_bindings.reset();
+    bsr_spmv_masked_bindings.reset();
     sparse_axpy_bindings.reset();
     sparse_diagonal_apply_bindings.reset();
     sparse_block_diagonal_apply_bindings.reset();
@@ -4734,6 +4748,8 @@ struct VulkanSparseAlgebraCache {
     sparse_assembly_finalize_control_bindings.reset();
     csr_spmv_command_replay.reset();
     bsr_spmv_command_replay.reset();
+    csr_spmv_masked_command_replay.reset();
+    bsr_spmv_masked_command_replay.reset();
     sparse_axpy_command_replay.reset();
     sparse_diagonal_apply_command_replay.reset();
     sparse_block_diagonal_apply_command_replay.reset();
@@ -4785,6 +4801,8 @@ struct VulkanSparseAlgebraCache {
   void reset_pipelines() {
     csr_spmv_f32.reset();
     bsr_spmv_f32.reset();
+    csr_spmv_masked_f32.reset();
+    bsr_spmv_masked_f32.reset();
     sparse_axpy_f32.reset();
     sparse_diagonal_apply_f32.reset();
     sparse_block_diagonal_apply_f32.reset();
@@ -4844,6 +4862,26 @@ struct VulkanSparseAlgebraCache {
           "vulkan_bsr_spmv_f32");
     }
     return bsr_spmv_f32.get();
+  }
+
+  Pipeline *csr_spmv_masked_pipeline(Device *dev) {
+    ensure_device(dev);
+    if (!csr_spmv_masked_f32) {
+      csr_spmv_masked_f32 = create_pipeline_from_spv(
+          dev, kCsrSpmvMaskedF32Spv, sizeof(kCsrSpmvMaskedF32Spv),
+          "vulkan_csr_spmv_masked_f32");
+    }
+    return csr_spmv_masked_f32.get();
+  }
+
+  Pipeline *bsr_spmv_masked_pipeline(Device *dev) {
+    ensure_device(dev);
+    if (!bsr_spmv_masked_f32) {
+      bsr_spmv_masked_f32 = create_pipeline_from_spv(
+          dev, kBsrSpmvMaskedF32Spv, sizeof(kBsrSpmvMaskedF32Spv),
+          "vulkan_bsr_spmv_masked_f32");
+    }
+    return bsr_spmv_masked_f32.get();
   }
 
   Pipeline *sparse_axpy_pipeline(Device *dev) {
@@ -5233,6 +5271,56 @@ struct VulkanSparseAlgebraCache {
             rw_buffer_request(values, 0, values_bytes),
             rw_buffer_request(x, 0, x_bytes),
             rw_buffer_request(y, 0, y_bytes)});
+  }
+
+  VulkanReplayResourceSet<6> bind_csr_spmv_masked(
+      Program *program,
+      DeviceAllocation row_offsets,
+      size_t row_offsets_bytes,
+      DeviceAllocation column_indices,
+      size_t column_indices_bytes,
+      DeviceAllocation values,
+      size_t values_bytes,
+      DeviceAllocation x,
+      size_t x_bytes,
+      DeviceAllocation y,
+      size_t y_bytes,
+      DeviceAllocation state,
+      size_t state_bytes) {
+    return csr_spmv_masked_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 6>{
+            rw_buffer_request(row_offsets, 0, row_offsets_bytes),
+            rw_buffer_request(column_indices, 0, column_indices_bytes),
+            rw_buffer_request(values, 0, values_bytes),
+            rw_buffer_request(x, 0, x_bytes),
+            rw_buffer_request(y, 0, y_bytes),
+            rw_buffer_request(state, 0, state_bytes)});
+  }
+
+  VulkanReplayResourceSet<6> bind_bsr_spmv_masked(
+      Program *program,
+      DeviceAllocation row_offsets,
+      size_t row_offsets_bytes,
+      DeviceAllocation column_indices,
+      size_t column_indices_bytes,
+      DeviceAllocation values,
+      size_t values_bytes,
+      DeviceAllocation x,
+      size_t x_bytes,
+      DeviceAllocation y,
+      size_t y_bytes,
+      DeviceAllocation state,
+      size_t state_bytes) {
+    return bsr_spmv_masked_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 6>{
+            rw_buffer_request(row_offsets, 0, row_offsets_bytes),
+            rw_buffer_request(column_indices, 0, column_indices_bytes),
+            rw_buffer_request(values, 0, values_bytes),
+            rw_buffer_request(x, 0, x_bytes),
+            rw_buffer_request(y, 0, y_bytes),
+            rw_buffer_request(state, 0, state_bytes)});
   }
 
   VulkanReplayResourceSet<2> bind_sparse_axpy(Program *program,
@@ -8957,6 +9045,325 @@ std::size_t Program::vulkan_bsr_spmv(Ndarray *row_offsets,
   command_key.push_ptr(pipeline);
   command_key.push_ptr(bindings);
   if (!cache.bsr_spmv_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes, record_spmv)) {
+    enqueue_compute_op_lambda(record_spmv, {});
+  }
+  return 0;
+}
+
+std::size_t Program::vulkan_csr_spmv_masked(
+    Ndarray *row_offsets,
+    Ndarray *column_indices,
+    Ndarray *values,
+    Ndarray *x,
+    Ndarray *y,
+    Ndarray *state,
+    std::size_t status_word,
+    std::size_t rows,
+    std::size_t cols,
+    std::size_t nnz) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_sparse_algebra_available(),
+              "Vulkan masked CSR SpMV is only available on Vulkan.");
+  TI_ERROR_IF(!row_offsets || !x || !y || !state ||
+                  (nnz > 0 && (!column_indices || !values)),
+              "Vulkan masked CSR SpMV received inconsistent storage for "
+              "nnz {}.",
+              nnz);
+  TI_ERROR_IF(rows == 0 || cols == 0,
+              "Vulkan masked CSR SpMV requires non-empty dimensions.");
+  TI_ERROR_IF(rows > std::numeric_limits<uint32_t>::max() ||
+                  cols > std::numeric_limits<uint32_t>::max() ||
+                  nnz > std::numeric_limits<uint32_t>::max() ||
+                  status_word > std::numeric_limits<uint32_t>::max(),
+              "Vulkan masked CSR SpMV dimensions or status word exceed "
+              "UINT32_MAX.");
+  const auto scalar_i32 = [](const Ndarray *array) {
+    return array->shape.size() == 1 &&
+           array->get_element_data_type() == PrimitiveType::i32 &&
+           array->get_element_shape().empty() &&
+           array->get_element_size() == sizeof(int32_t);
+  };
+  const auto scalar_f32 = [](const Ndarray *array) {
+    return array->shape.size() == 1 &&
+           array->get_element_data_type() == PrimitiveType::f32 &&
+           array->get_element_shape().empty() &&
+           array->get_element_size() == sizeof(float32);
+  };
+  const bool scalar_u32_state =
+      state->shape.size() == 1 &&
+      state->get_element_data_type() == PrimitiveType::u32 &&
+      state->get_element_shape().empty() &&
+      state->get_element_size() == sizeof(uint32_t) &&
+      status_word < state->get_nelement();
+  TI_ERROR_IF(!scalar_u32_state,
+              "Vulkan masked CSR SpMV state must contain status_word as a "
+              "scalar u32 entry.");
+  TI_ERROR_IF(!scalar_i32(row_offsets) ||
+                  row_offsets->get_nelement() != rows + 1,
+              "Vulkan masked CSR SpMV row offsets must contain rows + 1 "
+              "scalar i32 entries.");
+  TI_ERROR_IF(!scalar_f32(x) || x->get_nelement() != cols ||
+                  !scalar_f32(y) || y->get_nelement() != rows,
+              "Vulkan masked CSR SpMV expects scalar f32 x/y vectors "
+              "matching the matrix dimensions.");
+  TI_ERROR_IF(x->get_device_allocation() == y->get_device_allocation(),
+              "Vulkan masked CSR SpMV does not support aliased x/y "
+              "buffers.");
+  if (nnz == 0) {
+    // The zero operator has no matrix work to suppress. Keep its output
+    // deterministic without requiring valid zero-length descriptor buffers.
+    fill_ndarray_fast_u32(y, 0);
+    return 0;
+  }
+  TI_ERROR_IF(!scalar_i32(column_indices) ||
+                  column_indices->get_nelement() != nnz,
+              "Vulkan masked CSR SpMV column indices must contain nnz "
+              "scalar i32 entries.");
+  TI_ERROR_IF(!scalar_f32(values) || values->get_nelement() != nnz,
+              "Vulkan masked CSR SpMV values must contain nnz scalar f32 "
+              "entries.");
+
+  const auto row_offsets_alloc = row_offsets->get_device_allocation();
+  const auto column_indices_alloc = column_indices->get_device_allocation();
+  const auto values_alloc = values->get_device_allocation();
+  const auto x_alloc = x->get_device_allocation();
+  const auto y_alloc = y->get_device_allocation();
+  const auto state_alloc = state->get_device_allocation();
+  TI_ERROR_IF(state_alloc == row_offsets_alloc ||
+                  state_alloc == column_indices_alloc ||
+                  state_alloc == values_alloc || state_alloc == x_alloc ||
+                  state_alloc == y_alloc,
+              "Vulkan masked CSR SpMV state must not alias matrix or vector "
+              "storage.");
+  const Ndarray *resources[] = {row_offsets, column_indices, values,
+                                x,           y,              state};
+  retain_ndarrays_for_external_submission(resources, std::size(resources));
+  const size_t row_offsets_bytes = (rows + 1) * sizeof(int32_t);
+  const size_t column_indices_bytes = nnz * sizeof(int32_t);
+  const size_t values_bytes = nnz * sizeof(float32);
+  const size_t x_bytes = cols * sizeof(float32);
+  const size_t y_bytes = rows * sizeof(float32);
+  const size_t state_bytes =
+      state->get_nelement() * state->get_element_size();
+
+  Device *device = get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan masked CSR SpMV requires a compute device.");
+  auto cache_lease = get_sparse_algebra_cache(this, device);
+  auto &cache = *cache_lease;
+  Pipeline *pipeline = cache.csr_spmv_masked_pipeline(device);
+  ShaderResourceSet *bindings =
+      cache
+          .bind_csr_spmv_masked(
+              this, row_offsets_alloc, row_offsets_bytes,
+              column_indices_alloc, column_indices_bytes, values_alloc,
+              values_bytes, x_alloc, x_bytes, y_alloc, y_bytes, state_alloc,
+              state_bytes)
+          .bindings;
+  const std::array<uint32_t, 4> param_words{
+      static_cast<uint32_t>(rows), static_cast<uint32_t>(cols),
+      static_cast<uint32_t>(nnz), static_cast<uint32_t>(status_word)};
+  const uint32_t push_bytes =
+      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
+  constexpr std::size_t kMaxDispatchGroups = 65535;
+  const uint32_t groups = static_cast<uint32_t>(std::min(
+      kMaxDispatchGroups, (rows + kBlockSize - 1) / kBlockSize));
+  const bool profiler_scopes = profiler != nullptr;
+  auto record_spmv =
+      [y_alloc, y_bytes, pipeline, bindings, param_words, push_bytes, groups,
+       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        dispatch_pipeline_with_push_constants(
+            cmdlist, pipeline, bindings, param_words.data(), push_bytes,
+            groups, 1, 1,
+            profiler_scopes ? "vulkan_csr_spmv_masked_f32" : nullptr);
+        cmdlist->buffer_barrier(y_alloc.get_ptr(0), y_bytes);
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(240);
+  push_vulkan_command_key_range(command_key, row_offsets_alloc, 0,
+                                row_offsets_bytes);
+  push_vulkan_command_key_range(command_key, column_indices_alloc, 0,
+                                column_indices_bytes);
+  push_vulkan_command_key_range(command_key, values_alloc, 0, values_bytes);
+  push_vulkan_command_key_range(command_key, x_alloc, 0, x_bytes);
+  push_vulkan_command_key_range(command_key, y_alloc, 0, y_bytes);
+  push_vulkan_command_key_range(command_key, state_alloc, 0, state_bytes);
+  for (uint32_t word : param_words) {
+    command_key.push(word);
+  }
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.csr_spmv_masked_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes, record_spmv)) {
+    enqueue_compute_op_lambda(record_spmv, {});
+  }
+  return 0;
+}
+
+std::size_t Program::vulkan_bsr_spmv_masked(
+    Ndarray *row_offsets,
+    Ndarray *column_indices,
+    Ndarray *values,
+    Ndarray *x,
+    Ndarray *y,
+    Ndarray *state,
+    std::size_t status_word,
+    std::size_t block_rows,
+    std::size_t block_cols,
+    std::size_t block_nnz,
+    std::size_t block_size) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_sparse_algebra_available(),
+              "Vulkan masked BSR SpMV is only available on Vulkan.");
+  TI_ERROR_IF(!row_offsets || !column_indices || !values || !x || !y ||
+                  !state,
+              "Vulkan masked BSR SpMV received a null storage buffer.");
+  TI_ERROR_IF(block_rows == 0 || block_cols == 0 || block_nnz == 0,
+              "Vulkan masked BSR SpMV requires non-empty dimensions and "
+              "storage.");
+  TI_ERROR_IF(block_size != 2 && block_size != 3 && block_size != 6 &&
+                  block_size != 12,
+              "Vulkan masked BSR SpMV supports block sizes 2, 3, 6, and "
+              "12, got {}.",
+              block_size);
+  TI_ERROR_IF(block_rows > std::numeric_limits<uint32_t>::max() ||
+                  block_cols > std::numeric_limits<uint32_t>::max() ||
+                  block_nnz > std::numeric_limits<uint32_t>::max() ||
+                  status_word > std::numeric_limits<uint32_t>::max(),
+              "Vulkan masked BSR SpMV dimensions or status word exceed "
+              "UINT32_MAX.");
+  TI_ERROR_IF(
+      block_rows > std::numeric_limits<std::size_t>::max() / block_size ||
+          block_cols > std::numeric_limits<std::size_t>::max() / block_size ||
+          block_nnz > std::numeric_limits<std::size_t>::max() / block_size /
+                          block_size,
+      "Vulkan masked BSR SpMV scalar dimensions overflow size_t.");
+  const std::size_t rows = block_rows * block_size;
+  const std::size_t cols = block_cols * block_size;
+  const std::size_t value_count = block_nnz * block_size * block_size;
+  TI_ERROR_IF(rows > std::numeric_limits<uint32_t>::max() ||
+                  cols > std::numeric_limits<uint32_t>::max() ||
+                  value_count > std::numeric_limits<uint32_t>::max(),
+              "Vulkan masked BSR SpMV scalar dimensions exceed "
+              "UINT32_MAX.");
+  const auto scalar_i32 = [](const Ndarray *array) {
+    return array->shape.size() == 1 &&
+           array->get_element_data_type() == PrimitiveType::i32 &&
+           array->get_element_shape().empty() &&
+           array->get_element_size() == sizeof(int32_t);
+  };
+  const auto scalar_f32 = [](const Ndarray *array) {
+    return array->shape.size() == 1 &&
+           array->get_element_data_type() == PrimitiveType::f32 &&
+           array->get_element_shape().empty() &&
+           array->get_element_size() == sizeof(float32);
+  };
+  const bool scalar_u32_state =
+      state->shape.size() == 1 &&
+      state->get_element_data_type() == PrimitiveType::u32 &&
+      state->get_element_shape().empty() &&
+      state->get_element_size() == sizeof(uint32_t) &&
+      status_word < state->get_nelement();
+  TI_ERROR_IF(!scalar_u32_state,
+              "Vulkan masked BSR SpMV state must contain status_word as a "
+              "scalar u32 entry.");
+  TI_ERROR_IF(!scalar_i32(row_offsets) ||
+                  row_offsets->get_nelement() != block_rows + 1,
+              "Vulkan masked BSR SpMV row offsets must contain block_rows "
+              "+ 1 scalar i32 entries.");
+  TI_ERROR_IF(!scalar_i32(column_indices) ||
+                  column_indices->get_nelement() != block_nnz,
+              "Vulkan masked BSR SpMV column indices must contain "
+              "block_nnz scalar i32 entries.");
+  TI_ERROR_IF(!scalar_f32(values) ||
+                  values->get_nelement() != value_count,
+              "Vulkan masked BSR SpMV values have an invalid shape.");
+  TI_ERROR_IF(!scalar_f32(x) || x->get_nelement() != cols ||
+                  !scalar_f32(y) || y->get_nelement() != rows,
+              "Vulkan masked BSR SpMV expects scalar f32 x/y vectors "
+              "matching the scalar matrix dimensions.");
+  TI_ERROR_IF(x->get_device_allocation() == y->get_device_allocation(),
+              "Vulkan masked BSR SpMV does not support aliased x/y "
+              "buffers.");
+
+  const auto row_offsets_alloc = row_offsets->get_device_allocation();
+  const auto column_indices_alloc = column_indices->get_device_allocation();
+  const auto values_alloc = values->get_device_allocation();
+  const auto x_alloc = x->get_device_allocation();
+  const auto y_alloc = y->get_device_allocation();
+  const auto state_alloc = state->get_device_allocation();
+  TI_ERROR_IF(state_alloc == row_offsets_alloc ||
+                  state_alloc == column_indices_alloc ||
+                  state_alloc == values_alloc || state_alloc == x_alloc ||
+                  state_alloc == y_alloc,
+              "Vulkan masked BSR SpMV state must not alias matrix or vector "
+              "storage.");
+  const Ndarray *resources[] = {row_offsets, column_indices, values,
+                                x,           y,              state};
+  retain_ndarrays_for_external_submission(resources, std::size(resources));
+  const size_t row_offsets_bytes =
+      (block_rows + 1) * sizeof(int32_t);
+  const size_t column_indices_bytes = block_nnz * sizeof(int32_t);
+  const size_t values_bytes = value_count * sizeof(float32);
+  const size_t x_bytes = cols * sizeof(float32);
+  const size_t y_bytes = rows * sizeof(float32);
+  const size_t state_bytes =
+      state->get_nelement() * state->get_element_size();
+
+  Device *device = get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan masked BSR SpMV requires a compute device.");
+  auto cache_lease = get_sparse_algebra_cache(this, device);
+  auto &cache = *cache_lease;
+  Pipeline *pipeline = cache.bsr_spmv_masked_pipeline(device);
+  ShaderResourceSet *bindings =
+      cache
+          .bind_bsr_spmv_masked(
+              this, row_offsets_alloc, row_offsets_bytes,
+              column_indices_alloc, column_indices_bytes, values_alloc,
+              values_bytes, x_alloc, x_bytes, y_alloc, y_bytes, state_alloc,
+              state_bytes)
+          .bindings;
+  const std::array<uint32_t, 8> param_words{
+      static_cast<uint32_t>(block_rows),
+      static_cast<uint32_t>(block_cols),
+      static_cast<uint32_t>(block_nnz),
+      static_cast<uint32_t>(block_size),
+      static_cast<uint32_t>(status_word), 0u, 0u, 0u};
+  const uint32_t push_bytes =
+      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
+  constexpr std::size_t kMaxDispatchGroups = 65535;
+  const uint32_t groups = static_cast<uint32_t>(std::min(
+      kMaxDispatchGroups, (rows + kBlockSize - 1) / kBlockSize));
+  const bool profiler_scopes = profiler != nullptr;
+  auto record_spmv =
+      [y_alloc, y_bytes, pipeline, bindings, param_words, push_bytes, groups,
+       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        dispatch_pipeline_with_push_constants(
+            cmdlist, pipeline, bindings, param_words.data(), push_bytes,
+            groups, 1, 1,
+            profiler_scopes ? "vulkan_bsr_spmv_masked_f32" : nullptr);
+        cmdlist->buffer_barrier(y_alloc.get_ptr(0), y_bytes);
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(241);
+  push_vulkan_command_key_range(command_key, row_offsets_alloc, 0,
+                                row_offsets_bytes);
+  push_vulkan_command_key_range(command_key, column_indices_alloc, 0,
+                                column_indices_bytes);
+  push_vulkan_command_key_range(command_key, values_alloc, 0, values_bytes);
+  push_vulkan_command_key_range(command_key, x_alloc, 0, x_bytes);
+  push_vulkan_command_key_range(command_key, y_alloc, 0, y_bytes);
+  push_vulkan_command_key_range(command_key, state_alloc, 0, state_bytes);
+  for (uint32_t word : param_words) {
+    command_key.push(word);
+  }
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.bsr_spmv_masked_command_replay.submit_or_record(
           this, device, command_key, profiler_scopes, record_spmv)) {
     enqueue_compute_op_lambda(record_spmv, {});
   }
@@ -18901,6 +19308,37 @@ std::size_t Program::vulkan_bsr_spmv(Ndarray *row_offsets,
                                      std::size_t block_cols,
                                      std::size_t block_nnz,
                                      std::size_t block_size) {
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::vulkan_csr_spmv_masked(
+    Ndarray *row_offsets,
+    Ndarray *column_indices,
+    Ndarray *values,
+    Ndarray *x,
+    Ndarray *y,
+    Ndarray *state,
+    std::size_t status_word,
+    std::size_t rows,
+    std::size_t cols,
+    std::size_t nnz) {
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::vulkan_bsr_spmv_masked(
+    Ndarray *row_offsets,
+    Ndarray *column_indices,
+    Ndarray *values,
+    Ndarray *x,
+    Ndarray *y,
+    Ndarray *state,
+    std::size_t status_word,
+    std::size_t block_rows,
+    std::size_t block_cols,
+    std::size_t block_nnz,
+    std::size_t block_size) {
   TI_NOT_IMPLEMENTED;
   return 0;
 }

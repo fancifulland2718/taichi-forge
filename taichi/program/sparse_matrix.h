@@ -984,6 +984,11 @@ class VulkanSparseMatrix final : public SparseMatrix {
   ~VulkanSparseMatrix() override;
 
   void nd_spmv(Program *prog, const Ndarray &x, const Ndarray &y);
+  void nd_spmv_masked(Program *prog,
+                      const Ndarray &x,
+                      const Ndarray &y,
+                      const Ndarray &state,
+                      std::size_t status_word);
   void update_values(Program *prog, const Ndarray &values) override;
   SparseMatrixRuntimeStatistics debug_runtime_statistics() const override;
 
@@ -1032,6 +1037,11 @@ class VulkanSparseBsrMatrix final : public SparseMatrix {
   ~VulkanSparseBsrMatrix() override;
 
   void nd_spmv(Program *prog, const Ndarray &x, const Ndarray &y);
+  void nd_spmv_masked(Program *prog,
+                      const Ndarray &x,
+                      const Ndarray &y,
+                      const Ndarray &state,
+                      std::size_t status_word);
   void update_values(Program *prog, const Ndarray &values) override;
   SparseMatrixRuntimeStatistics debug_runtime_statistics() const override;
 

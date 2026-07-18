@@ -3325,6 +3325,35 @@ void VulkanSparseMatrix::nd_spmv(Program *prog,
 #endif
 }
 
+void VulkanSparseMatrix::nd_spmv_masked(Program *prog,
+                                        const Ndarray &x,
+                                        const Ndarray &y,
+                                        const Ndarray &state,
+                                        std::size_t status_word) {
+#if defined(TI_WITH_VULKAN)
+  TI_ERROR_IF(prog != program_,
+              "Internal masked Vulkan CSR SpMV requires its owning "
+              "Program.");
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  prog->vulkan_csr_spmv_masked(
+      const_cast<Ndarray *>(get_row_offsets()),
+      const_cast<Ndarray *>(get_column_indices()), values_,
+      const_cast<Ndarray *>(&x), const_cast<Ndarray *>(&y),
+      const_cast<Ndarray *>(&state), status_word, rows_, cols_, nnz_);
+  // Matrix telemetry counts scheduled SpMV dispatches. The solver telemetry
+  // identifies bounded masked execution separately.
+  record_spmv_call();
+  if (spmv_plan_initialized_) {
+    record_spmv_plan_reuse();
+  } else {
+    record_spmv_plan_build();
+    spmv_plan_initialized_ = true;
+  }
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
 void VulkanSparseMatrix::update_values(Program *prog,
                                        const Ndarray &values) {
 #if defined(TI_WITH_VULKAN)
@@ -3488,6 +3517,34 @@ void VulkanSparseBsrMatrix::nd_spmv(Program *prog,
       const_cast<Ndarray *>(pattern_->vulkan_column_indices()), values_,
       const_cast<Ndarray *>(&x), const_cast<Ndarray *>(&y), block_rows_,
       block_cols_, block_nnz_, block_size_);
+  record_spmv_call();
+  if (spmv_plan_initialized_) {
+    record_spmv_plan_reuse();
+  } else {
+    record_spmv_plan_build();
+    spmv_plan_initialized_ = true;
+  }
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+void VulkanSparseBsrMatrix::nd_spmv_masked(Program *prog,
+                                           const Ndarray &x,
+                                           const Ndarray &y,
+                                           const Ndarray &state,
+                                           std::size_t status_word) {
+#if defined(TI_WITH_VULKAN)
+  TI_ERROR_IF(prog != program_,
+              "Internal masked Vulkan BSR SpMV requires its owning "
+              "Program.");
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  prog->vulkan_bsr_spmv_masked(
+      const_cast<Ndarray *>(pattern_->vulkan_row_offsets()),
+      const_cast<Ndarray *>(pattern_->vulkan_column_indices()), values_,
+      const_cast<Ndarray *>(&x), const_cast<Ndarray *>(&y),
+      const_cast<Ndarray *>(&state), status_word, block_rows_, block_cols_,
+      block_nnz_, block_size_);
   record_spmv_call();
   if (spmv_plan_initialized_) {
     record_spmv_plan_reuse();

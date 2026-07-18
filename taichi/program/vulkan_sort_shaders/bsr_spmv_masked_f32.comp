@@ -1,0 +1,73 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer RowOffsets {
+  uint data[];
+} row_offsets_buf;
+layout(set = 0, binding = 1, std430) readonly buffer ColumnIndices {
+  uint data[];
+} column_indices_buf;
+layout(set = 0, binding = 2, std430) readonly buffer Values {
+  float data[];
+} values_buf;
+layout(set = 0, binding = 3, std430) readonly buffer X {
+  float data[];
+} x_buf;
+layout(set = 0, binding = 4, std430) writeonly buffer Y {
+  float data[];
+} y_buf;
+layout(set = 0, binding = 5, std430) readonly buffer State {
+  uint words[];
+} state_buf;
+
+layout(push_constant) uniform Params {
+  uint block_rows;
+  uint block_cols;
+  uint block_nnz;
+  uint block_size;
+  uint status_word;
+  uint unused0;
+  uint unused1;
+  uint unused2;
+} params;
+
+void main() {
+  if (state_buf.words[params.status_word] != 0u) {
+    return;
+  }
+  uint scalar_rows = params.block_rows * params.block_size;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint scalar_row = gl_GlobalInvocationID.x;
+  while (scalar_row < scalar_rows) {
+    uint block_row = scalar_row / params.block_size;
+    uint local_row = scalar_row % params.block_size;
+    uint begin = row_offsets_buf.data[block_row];
+    uint end = row_offsets_buf.data[block_row + 1u];
+    if (begin > end || end > params.block_nnz) {
+      y_buf.data[scalar_row] = uintBitsToFloat(0x7fc00000u);
+    } else {
+      float sum = 0.0;
+      for (uint offset = begin; offset < end; ++offset) {
+        uint block_column = column_indices_buf.data[offset];
+        if (block_column >= params.block_cols) {
+          sum = uintBitsToFloat(0x7fc00000u);
+          break;
+        }
+        uint value_base =
+            (offset * params.block_size + local_row) * params.block_size;
+        uint x_base = block_column * params.block_size;
+        for (uint local_column = 0; local_column < params.block_size;
+             ++local_column) {
+          sum += values_buf.data[value_base + local_column] *
+                 x_buf.data[x_base + local_column];
+        }
+      }
+      y_buf.data[scalar_row] = sum;
+    }
+    if (scalar_rows - scalar_row <= stride) {
+      break;
+    }
+    scalar_row += stride;
+  }
+}

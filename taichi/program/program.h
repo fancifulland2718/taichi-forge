@@ -2340,6 +2340,29 @@ class TI_DLL_EXPORT Program {
                               std::size_t block_nnz,
                               std::size_t block_size);
 
+  std::size_t vulkan_csr_spmv_masked(Ndarray *row_offsets,
+                                     Ndarray *column_indices,
+                                     Ndarray *values,
+                                     Ndarray *x,
+                                     Ndarray *y,
+                                     Ndarray *state,
+                                     std::size_t status_word,
+                                     std::size_t rows,
+                                     std::size_t cols,
+                                     std::size_t nnz);
+
+  std::size_t vulkan_bsr_spmv_masked(Ndarray *row_offsets,
+                                     Ndarray *column_indices,
+                                     Ndarray *values,
+                                     Ndarray *x,
+                                     Ndarray *y,
+                                     Ndarray *state,
+                                     std::size_t status_word,
+                                     std::size_t block_rows,
+                                     std::size_t block_cols,
+                                     std::size_t block_nnz,
+                                     std::size_t block_size);
+
   std::size_t vulkan_sparse_axpy(Ndarray *x,
                                  Ndarray *y,
                                  std::size_t n,

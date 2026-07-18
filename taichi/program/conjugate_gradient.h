@@ -74,6 +74,8 @@ struct SparseSolvePlanRuntimeStatistics {
   std::uint64_t workspace_reuses{0};
   std::uint64_t operator_apply_calls{0};
   bool operator_apply_calls_available{false};
+  std::string operator_apply_call_scope{"executed_operator_calls"};
+  std::uint64_t masked_operator_dispatches{0};
   std::uint64_t host_scalar_reductions{0};
   std::uint64_t device_scalar_operations{0};
   std::uint64_t host_scalar_readbacks{0};
