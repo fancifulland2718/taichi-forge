@@ -524,6 +524,10 @@ def test_private_vulkan_fixed_minres_solves_and_reuses_workspace(
     )
     assert first["operations"]["host_scalar_readbacks"] == 24
     assert first["operations"]["host_synchronizations"] == 1
+    assert not first["operations"]["host_synchronizations_exact"]
+    assert first["operations"]["host_synchronization_scope"] == (
+        "explicit_plan_only"
+    )
     assert first["operations"]["bounded_masked_execution"]
     assert not first["operations"]["fixed_iteration_only"]
     assert first["resources"]["persistent_vector_count"] == 7
@@ -532,6 +536,13 @@ def test_private_vulkan_fixed_minres_solves_and_reuses_workspace(
     assert first["resources"]["persistent_scalar_reserved_bytes"] == 96
     assert first["resources"]["cublas_handle_count"] == 0
     assert first["resources"]["transient_solver_workspace_bytes"] == 0
+    assert first["resources"]["shared_primitive_workspace_bytes"] == (
+        prog._vulkan_sparse_algebra_workspace_bytes()
+        + prog.vulkan_reduce_workspace_bytes()
+    )
+    assert first["resources"][
+        "shared_primitive_workspace_ownership_scope"
+    ] == "program_sparse_algebra_and_reduce_cache"
     assert first["transfers"]["device_to_host_bytes"] == 96
     assert first["transfers"]["device_to_device_bytes"] == (
         (max_iterations + 2) * 4 * 4

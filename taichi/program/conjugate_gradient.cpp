@@ -981,6 +981,9 @@ CudaSparseBiCGSTABPlan::debug_runtime_statistics() const {
   result.host_scalar_reductions = host_scalar_reductions_;
   result.host_scalar_readbacks = host_scalar_readbacks_;
   result.host_synchronizations = host_synchronizations_;
+  result.host_synchronizations_exact = true;
+  result.host_synchronization_scope =
+      "cublas_host_pointer_reductions";
   result.persistent_vector_count = workspace_size_ > 0 ? 6 : 0;
   result.persistent_vector_reserved_bytes =
       static_cast<std::uint64_t>(result.persistent_vector_count) *

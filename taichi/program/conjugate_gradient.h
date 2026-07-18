@@ -78,6 +78,8 @@ struct SparseSolvePlanRuntimeStatistics {
   std::uint64_t device_scalar_operations{0};
   std::uint64_t host_scalar_readbacks{0};
   std::uint64_t host_synchronizations{0};
+  bool host_synchronizations_exact{true};
+  std::string host_synchronization_scope{"plan_reported"};
   bool fixed_iteration_only{false};
   bool bounded_masked_execution{false};
   std::string preconditioner_method{"identity"};
@@ -94,6 +96,9 @@ struct SparseSolvePlanRuntimeStatistics {
   bool solver_state_rebuilt_each_solve{false};
   std::uint64_t transient_solver_workspace_bytes{0};
   bool transient_solver_workspace_bytes_available{false};
+  std::uint64_t shared_primitive_workspace_bytes{0};
+  bool shared_primitive_workspace_bytes_available{false};
+  std::string shared_primitive_workspace_ownership_scope{"none"};
 
   std::uint64_t device_to_device_bytes{0};
   std::uint64_t device_to_host_bytes{0};

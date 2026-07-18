@@ -4765,6 +4765,10 @@ void export_lang(py::module &m) {
             stats.host_scalar_readbacks;
         operations["host_synchronizations"] =
             stats.host_synchronizations;
+        operations["host_synchronizations_exact"] =
+            stats.host_synchronizations_exact;
+        operations["host_synchronization_scope"] =
+            stats.host_synchronization_scope;
         operations["fixed_iteration_only"] =
             stats.fixed_iteration_only;
         operations["bounded_masked_execution"] =
@@ -4795,6 +4799,12 @@ void export_lang(py::module &m) {
             stats.transient_solver_workspace_bytes_available
                 ? py::cast(stats.transient_solver_workspace_bytes)
                 : py::none();
+        resources["shared_primitive_workspace_bytes"] =
+            stats.shared_primitive_workspace_bytes_available
+                ? py::cast(stats.shared_primitive_workspace_bytes)
+                : py::none();
+        resources["shared_primitive_workspace_ownership_scope"] =
+            stats.shared_primitive_workspace_ownership_scope;
         resources["ownership_scope"] =
             "solve_plan_vectors_scalars_and_provider_handle";
         resources["excluded"] =

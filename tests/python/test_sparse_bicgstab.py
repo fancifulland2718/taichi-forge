@@ -546,6 +546,10 @@ def test_private_cuda_fixed_bicgstab_solves_and_reuses_workspace(
     assert first["operations"]["host_synchronizations"] == first[
         "operations"
     ]["host_scalar_reductions"]
+    assert first["operations"]["host_synchronizations_exact"]
+    assert first["operations"]["host_synchronization_scope"] == (
+        "cublas_host_pointer_reductions"
+    )
     assert first["operations"]["device_scalar_operations"] == 0
     assert not first["operations"]["bounded_masked_execution"]
     assert first["resources"]["persistent_vector_count"] == 6
@@ -553,6 +557,7 @@ def test_private_cuda_fixed_bicgstab_solves_and_reuses_workspace(
     assert first["resources"]["persistent_scalar_count"] == 0
     assert first["resources"]["cublas_handle_count"] == 1
     assert first["resources"]["transient_solver_workspace_bytes"] == 0
+    assert first["resources"]["shared_primitive_workspace_bytes"] is None
     assert first["transfers"]["device_to_host_bytes"] == (
         4 * first["operations"]["host_scalar_readbacks"]
     )
@@ -698,6 +703,10 @@ def test_private_vulkan_fixed_bicgstab_solves_and_reuses_workspace(
     )
     assert first["operations"]["host_scalar_readbacks"] == 20
     assert first["operations"]["host_synchronizations"] == 1
+    assert not first["operations"]["host_synchronizations_exact"]
+    assert first["operations"]["host_synchronization_scope"] == (
+        "explicit_plan_only"
+    )
     assert first["operations"]["bounded_masked_execution"]
     assert not first["operations"]["fixed_iteration_only"]
     assert first["resources"]["persistent_vector_count"] == 8
@@ -706,6 +715,13 @@ def test_private_vulkan_fixed_bicgstab_solves_and_reuses_workspace(
     assert first["resources"]["persistent_scalar_reserved_bytes"] == 80
     assert first["resources"]["cublas_handle_count"] == 0
     assert first["resources"]["transient_solver_workspace_bytes"] == 0
+    assert first["resources"]["shared_primitive_workspace_bytes"] == (
+        prog._vulkan_sparse_algebra_workspace_bytes()
+        + prog.vulkan_reduce_workspace_bytes()
+    )
+    assert first["resources"][
+        "shared_primitive_workspace_ownership_scope"
+    ] == "program_sparse_algebra_and_reduce_cache"
     assert first["transfers"]["device_to_host_bytes"] == 80
     assert first["transfers"]["device_to_device_bytes"] == (
         (2 * max_iterations + 2) * 4 * 4

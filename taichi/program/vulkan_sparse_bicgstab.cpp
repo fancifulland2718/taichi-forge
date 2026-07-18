@@ -397,6 +397,8 @@ VulkanSparseBiCGSTABPlan::debug_runtime_statistics() const {
   result.device_scalar_operations = device_scalar_operations_;
   result.host_scalar_readbacks = host_scalar_readbacks_;
   result.host_synchronizations = host_synchronizations_;
+  result.host_synchronizations_exact = false;
+  result.host_synchronization_scope = "explicit_plan_only";
   result.persistent_vector_count = 8;
   result.persistent_vector_reserved_bytes =
       8 * static_cast<std::uint64_t>(matrix_.num_rows()) * sizeof(float32);
@@ -407,6 +409,12 @@ VulkanSparseBiCGSTABPlan::debug_runtime_statistics() const {
   result.solver_state_rebuilt_each_solve = false;
   result.transient_solver_workspace_bytes = 0;
   result.transient_solver_workspace_bytes_available = true;
+  result.shared_primitive_workspace_bytes =
+      program_->vulkan_sparse_algebra_workspace_bytes() +
+      program_->vulkan_reduce_workspace_bytes();
+  result.shared_primitive_workspace_bytes_available = true;
+  result.shared_primitive_workspace_ownership_scope =
+      "program_sparse_algebra_and_reduce_cache";
   result.fixed_iteration_only = false;
   result.bounded_masked_execution = true;
   result.device_to_device_bytes = device_to_device_bytes_;
