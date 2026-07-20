@@ -106,6 +106,12 @@ CompileConfig::CompileConfig() {
   hash_snode_compact_child_pool = false;
 }
 
+bool CompileConfig::cuda_pointer_deterministic_pool_enabled() const {
+  return arch == Arch::cuda && cuda_pointer_deterministic_slot &&
+         cuda_sparse_per_snode_pool && cuda_sparse_pool_auto_size &&
+         device_memory_fraction == 0 && cuda_sparse_pool_size_GB == 0;
+}
+
 void CompileConfig::fit() {
   if (debug && !check_out_of_bound_explicit) {
     check_out_of_bound = true;

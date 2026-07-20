@@ -946,6 +946,164 @@ void export_lang(py::module &m) {
       .def("_debug_snode_field_mapping_count", [](Program &program) {
         return program.get_snode_to_fields()->size();
       })
+      .def("_debug_sparse_snode_tree_stats",
+           [](Program &program, int tree_id) {
+             SparseSNodeTreeStatistics snapshot;
+             {
+               py::gil_scoped_release release;
+               snapshot =
+                   program.debug_sparse_snode_tree_statistics(tree_id);
+             }
+             const auto optional_counter =
+                 [](const RuntimeOptionalCounter &counter) -> py::object {
+               if (!counter.available) {
+                 return py::none();
+               }
+               return py::int_(counter.value);
+             };
+             const auto &source = snapshot.memory;
+             py::dict memory;
+             memory["tree_owned_reserved_bytes"] =
+                 optional_counter(source.tree_owned_reserved_bytes);
+             memory["root_reserved_bytes"] =
+                 optional_counter(source.root_reserved_bytes);
+             memory["sparse_pool_reserved_bytes"] =
+                 optional_counter(source.sparse_pool_reserved_bytes);
+             memory["runtime_metadata_requested_bytes"] =
+                 optional_counter(source.runtime_metadata_requested_bytes);
+             memory["direct_ambient_requested_bytes"] =
+                 optional_counter(source.direct_ambient_requested_bytes);
+             memory["allocator_payload_reserved_bytes"] =
+                 optional_counter(source.allocator_payload_reserved_bytes);
+             memory["allocator_payload_used_bytes"] =
+                 optional_counter(source.allocator_payload_used_bytes);
+             memory["allocator_bookkeeping_reserved_bytes"] =
+                 optional_counter(
+                     source.allocator_bookkeeping_reserved_bytes);
+             memory["active_list_reserved_bytes"] =
+                 optional_counter(source.active_list_reserved_bytes);
+             memory["active_list_used_bytes"] =
+                 optional_counter(source.active_list_used_bytes);
+             memory["allocator_in_use_elements"] =
+                 optional_counter(source.allocator_in_use_elements);
+             memory["allocator_free_elements"] =
+                 optional_counter(source.allocator_free_elements);
+             memory["allocator_recycled_elements"] =
+                 optional_counter(source.allocator_recycled_elements);
+             memory["shared_listgen_workspace_reserved_bytes"] =
+                 optional_counter(
+                     source.shared_listgen_workspace_reserved_bytes);
+             memory["tree_owned_scope"] = source.tree_owned_scope;
+             memory["runtime_resource_scope"] =
+                 source.runtime_resource_scope;
+             memory["shared_listgen_workspace_scope"] =
+                 source.shared_listgen_workspace_scope;
+
+             py::list listgen_nodes;
+             std::uint64_t requests = 0;
+             std::uint64_t rebuilds = 0;
+             std::uint64_t reuse_hits = 0;
+             std::uint64_t invalidations = 0;
+             std::uint64_t resident_evictions = 0;
+             std::uint64_t candidate_slots = 0;
+             std::uint64_t scanned_elements = 0;
+             std::uint64_t emitted_elements = 0;
+             std::uint64_t serial_rebuilds = 0;
+             std::uint64_t parallel_rebuilds = 0;
+             bool candidate_slots_available = true;
+             bool resident_evictions_available = true;
+             bool scanned_elements_available = true;
+             bool emitted_elements_available = true;
+             bool serial_rebuilds_available = true;
+             bool parallel_rebuilds_available = true;
+             for (const auto &node : snapshot.listgen.nodes) {
+               py::dict item;
+               item["snode_id"] = node.snode_id;
+               item["parent_snode_id"] = node.parent_snode_id;
+               item["requests"] = node.requests;
+               item["rebuilds"] = node.rebuilds;
+               item["reuse_hits"] = node.reuse_hits;
+               item["invalidations"] = node.invalidations;
+               item["resident_evictions"] =
+                   optional_counter(node.resident_evictions);
+               item["candidate_slots_dispatched"] =
+                   optional_counter(node.candidate_slots_dispatched);
+               item["scanned_elements"] =
+                   optional_counter(node.scanned_elements);
+               item["emitted_elements"] =
+                   optional_counter(node.emitted_elements);
+               item["serial_rebuilds"] =
+                   optional_counter(node.serial_rebuilds);
+               item["parallel_rebuilds"] =
+                   optional_counter(node.parallel_rebuilds);
+               item["last_rebuild_reason"] = node.last_rebuild_reason;
+               listgen_nodes.append(std::move(item));
+               requests += node.requests;
+               rebuilds += node.rebuilds;
+               reuse_hits += node.reuse_hits;
+               invalidations += node.invalidations;
+               resident_evictions_available &=
+                   node.resident_evictions.available;
+               resident_evictions += node.resident_evictions.value;
+               candidate_slots_available &=
+                   node.candidate_slots_dispatched.available;
+               candidate_slots += node.candidate_slots_dispatched.value;
+               scanned_elements_available &= node.scanned_elements.available;
+               scanned_elements += node.scanned_elements.value;
+               emitted_elements_available &= node.emitted_elements.available;
+               emitted_elements += node.emitted_elements.value;
+               serial_rebuilds_available &= node.serial_rebuilds.available;
+               serial_rebuilds += node.serial_rebuilds.value;
+               parallel_rebuilds_available &= node.parallel_rebuilds.available;
+               parallel_rebuilds += node.parallel_rebuilds.value;
+             }
+             py::dict listgen_totals;
+             listgen_totals["requests"] = requests;
+             listgen_totals["rebuilds"] = rebuilds;
+             listgen_totals["reuse_hits"] = reuse_hits;
+             listgen_totals["invalidations"] = invalidations;
+             listgen_totals["resident_evictions"] =
+                 resident_evictions_available && !snapshot.listgen.nodes.empty()
+                     ? py::cast(resident_evictions)
+                     : py::none();
+             listgen_totals["candidate_slots_dispatched"] =
+                 candidate_slots_available && !snapshot.listgen.nodes.empty()
+                     ? py::cast(candidate_slots)
+                     : py::none();
+             listgen_totals["scanned_elements"] =
+                 scanned_elements_available && !snapshot.listgen.nodes.empty()
+                     ? py::cast(scanned_elements)
+                     : py::none();
+             listgen_totals["emitted_elements"] =
+                 emitted_elements_available && !snapshot.listgen.nodes.empty()
+                     ? py::cast(emitted_elements)
+                     : py::none();
+             listgen_totals["serial_rebuilds"] =
+                 serial_rebuilds_available && !snapshot.listgen.nodes.empty()
+                     ? py::cast(serial_rebuilds)
+                     : py::none();
+             listgen_totals["parallel_rebuilds"] =
+                 parallel_rebuilds_available && !snapshot.listgen.nodes.empty()
+                     ? py::cast(parallel_rebuilds)
+                     : py::none();
+             py::dict listgen;
+             listgen["available"] = snapshot.listgen.available;
+             listgen["totals"] = std::move(listgen_totals);
+             listgen["nodes"] = std::move(listgen_nodes);
+
+             py::dict result;
+             result["schema_version"] = 1;
+             result["tree_id"] = snapshot.tree_id;
+             result["generation"] = snapshot.generation;
+             result["layout_fingerprint"] = snapshot.layout_fingerprint;
+             result["backend"] = arch_name(snapshot.backend);
+             result["memory"] = std::move(memory);
+             result["listgen"] = std::move(listgen);
+             return result;
+           })
+      .def("_debug_reset_sparse_listgen_stats",
+           &Program::debug_reset_sparse_listgen_statistics,
+           py::call_guard<py::gil_scoped_release>())
       .def("materialize_runtime", &Program::materialize_runtime)
       .def("make_aot_module_builder", &Program::make_aot_module_builder)
       .def("get_snode_tree_size", &Program::get_snode_tree_size)
@@ -3881,6 +4039,69 @@ void export_lang(py::module &m) {
       .def("num_cols", &SparseMatrix::num_cols)
       .def("num_nonzero", &SparseMatrix::num_nonzero)
       .def("update_values", &SparseMatrix::update_values)
+      .def("_debug_runtime_stats", [](const SparseMatrix &matrix) {
+        const auto stats = matrix.debug_runtime_statistics();
+        py::dict identity;
+        identity["backend_family"] = stats.backend_family;
+        identity["storage_format"] = stats.storage_format;
+        identity["dtype"] = stats.dtype;
+        identity["rows"] = stats.rows;
+        identity["cols"] = stats.cols;
+        identity["nnz"] = stats.nnz;
+        identity["pattern_version"] = stats.pattern_version;
+        identity["numeric_version"] = stats.numeric_version;
+
+        py::dict operations;
+        operations["pattern_builds"] = stats.pattern_builds;
+        operations["numeric_updates"] = stats.numeric_updates;
+        operations["numeric_update_bytes"] = stats.numeric_update_bytes;
+        operations["spmv_calls"] = stats.spmv_calls;
+        operations["spmv_plan_builds"] = stats.spmv_plan_builds;
+        operations["spmv_plan_reuses"] = stats.spmv_plan_reuses;
+        operations["spmv_handle_creations"] =
+            stats.spmv_handle_creations;
+        operations["dense_vector_descriptor_creations"] =
+            stats.dense_vector_descriptor_creations;
+        operations["dense_vector_descriptor_rebinds"] =
+            stats.dense_vector_descriptor_rebinds;
+        operations["spmv_workspace_allocations"] =
+            stats.spmv_workspace_allocations;
+
+        py::dict resources;
+        resources["pattern_reserved_bytes"] =
+            stats.pattern_reserved_bytes;
+        resources["values_reserved_bytes"] = stats.values_reserved_bytes;
+        resources["spmv_workspace_reserved_bytes"] =
+            stats.spmv_workspace_reserved_bytes;
+        resources["operator_owned_reserved_bytes"] =
+            stats.operator_owned_reserved_bytes;
+        resources["matrix_descriptor_count"] =
+            stats.matrix_descriptor_count;
+        resources["dense_vector_descriptor_count"] =
+            stats.dense_vector_descriptor_count;
+        resources["spmv_handle_count"] = stats.spmv_handle_count;
+        resources["opaque_provider_resource_bytes"] = py::none();
+        resources["ownership_scope"] =
+            "matrix_pattern_values_and_persistent_spmv_plan";
+        resources["excluded"] =
+            "builder_staging_transients_input_output_vectors_and_solver_"
+            "workspace";
+
+        py::dict transfers;
+        transfers["host_to_device_bytes"] = stats.host_to_device_bytes;
+        transfers["device_to_host_bytes"] = stats.device_to_host_bytes;
+        transfers["device_to_device_bytes"] =
+            stats.device_to_device_bytes;
+        transfers["scope"] = "direct_backend_copies_attributed_to_operator";
+
+        py::dict result;
+        result["schema_version"] = 1;
+        result["identity"] = std::move(identity);
+        result["operations"] = std::move(operations);
+        result["resources"] = std::move(resources);
+        result["transfers"] = std::move(transfers);
+        return result;
+      })
       .def("get_data_type", &SparseMatrix::get_data_type);
 
 #define MAKE_SPARSE_MATRIX(TYPE, STORAGE, VTYPE)                             \
@@ -3975,10 +4196,77 @@ void export_lang(py::module &m) {
   m.def("make_cusparse_solver", &make_cusparse_solver);
 
   // Conjugate Gradient solver
+  auto sparse_solve_plan_stats_to_dict =
+      [](const SparseSolvePlanRuntimeStatistics &stats) {
+        py::dict identity;
+        identity["backend_family"] = stats.backend_family;
+        identity["method"] = stats.method;
+        identity["dtype"] = stats.dtype;
+        identity["rows"] = stats.rows;
+        identity["cols"] = stats.cols;
+        identity["max_iterations"] = stats.max_iterations;
+        identity["absolute_tolerance"] = stats.absolute_tolerance;
+        identity["operator_pattern_version"] =
+            stats.operator_pattern_version;
+        identity["operator_numeric_version"] =
+            stats.operator_numeric_version;
+        identity["last_solve_pattern_version"] =
+            stats.last_solve_pattern_version;
+        identity["last_solve_numeric_version"] =
+            stats.last_solve_numeric_version;
+        identity["operator_pattern_changed_since_last_solve"] =
+            stats.operator_pattern_changed_since_last_solve;
+        identity["operator_numeric_changed_since_last_solve"] =
+            stats.operator_numeric_changed_since_last_solve;
+
+        py::dict operations;
+        operations["solve_calls"] = stats.solve_calls;
+        operations["total_iterations"] = stats.total_iterations;
+        operations["workspace_builds"] = stats.workspace_builds;
+        operations["workspace_reuses"] = stats.workspace_reuses;
+        operations["operator_apply_calls"] =
+            stats.operator_apply_calls_available
+                ? py::cast(stats.operator_apply_calls)
+                : py::none();
+        operations["host_scalar_reductions"] =
+            stats.host_scalar_reductions;
+
+        py::dict resources;
+        resources["persistent_vector_count"] =
+            stats.persistent_vector_count;
+        resources["persistent_vector_reserved_bytes"] =
+            stats.persistent_vector_reserved_bytes;
+        resources["cublas_handle_count"] = stats.cublas_handle_count;
+        resources["opaque_provider_resource_bytes"] = py::none();
+        resources["solver_state_rebuilt_each_solve"] =
+            stats.solver_state_rebuilt_each_solve;
+        resources["transient_solver_workspace_bytes"] =
+            stats.transient_solver_workspace_bytes_available
+                ? py::cast(stats.transient_solver_workspace_bytes)
+                : py::none();
+        resources["ownership_scope"] =
+            "solve_plan_vectors_and_provider_handle";
+        resources["excluded"] =
+            "operator_resources_rhs_solution_and_caller_vectors";
+
+        py::dict transfers;
+        transfers["device_to_device_bytes"] =
+            stats.device_to_device_bytes;
+        transfers["scope"] = "copies_issued_directly_by_solve_plan";
+
+        py::dict result;
+        result["schema_version"] = 1;
+        result["identity"] = std::move(identity);
+        result["operations"] = std::move(operations);
+        result["resources"] = std::move(resources);
+        result["transfers"] = std::move(transfers);
+        return result;
+      };
   py::class_<CG<Eigen::VectorXf, float>>(m, "CGf")
       .def(py::init<SparseMatrix &, int, float, bool>())
       .def("solve", &CG<Eigen::VectorXf, float>::solve)
       .def("set_x", &CG<Eigen::VectorXf, float>::set_x)
+      .def("reset_x", &CG<Eigen::VectorXf, float>::reset_x)
       .def("get_x", &CG<Eigen::VectorXf, float>::get_x)
       .def("set_x_ndarray", &CG<Eigen::VectorXf, float>::set_x_ndarray)
       .def("set_b", &CG<Eigen::VectorXf, float>::set_b)
@@ -3988,11 +4276,17 @@ void export_lang(py::module &m) {
       .def("get_initial_residual_norm",
            &CG<Eigen::VectorXf, float>::get_initial_residual_norm)
       .def("get_residual_norm",
-           &CG<Eigen::VectorXf, float>::get_residual_norm);
+           &CG<Eigen::VectorXf, float>::get_residual_norm)
+      .def("_debug_runtime_stats", [sparse_solve_plan_stats_to_dict](
+                                         const CG<Eigen::VectorXf, float> &cg) {
+        return sparse_solve_plan_stats_to_dict(
+            cg.debug_runtime_statistics());
+      });
   py::class_<CG<Eigen::VectorXd, double>>(m, "CGd")
       .def(py::init<SparseMatrix &, int, double, bool>())
       .def("solve", &CG<Eigen::VectorXd, double>::solve)
       .def("set_x", &CG<Eigen::VectorXd, double>::set_x)
+      .def("reset_x", &CG<Eigen::VectorXd, double>::reset_x)
       .def("set_x_ndarray", &CG<Eigen::VectorXd, double>::set_x_ndarray)
       .def("get_x", &CG<Eigen::VectorXd, double>::get_x)
       .def("set_b_ndarray", &CG<Eigen::VectorXd, double>::set_b_ndarray)
@@ -4002,7 +4296,12 @@ void export_lang(py::module &m) {
       .def("get_initial_residual_norm",
            &CG<Eigen::VectorXd, double>::get_initial_residual_norm)
       .def("get_residual_norm",
-           &CG<Eigen::VectorXd, double>::get_residual_norm);
+           &CG<Eigen::VectorXd, double>::get_residual_norm)
+      .def("_debug_runtime_stats", [sparse_solve_plan_stats_to_dict](
+                                         const CG<Eigen::VectorXd, double> &cg) {
+        return sparse_solve_plan_stats_to_dict(
+            cg.debug_runtime_statistics());
+      });
   m.def("make_float_cg_solver", [](SparseMatrix &A, int max_iters, float tol,
                                    bool verbose) {
     return make_cg_solver<Eigen::VectorXf, float>(A, max_iters, tol, verbose);
@@ -4017,7 +4316,12 @@ void export_lang(py::module &m) {
       .def("is_success", &CUCG::is_success)
       .def("get_iterations", &CUCG::get_iterations)
       .def("get_initial_residual_norm", &CUCG::get_initial_residual_norm)
-      .def("get_residual_norm", &CUCG::get_residual_norm);
+      .def("get_residual_norm", &CUCG::get_residual_norm)
+      .def("_debug_runtime_stats", [sparse_solve_plan_stats_to_dict](
+                                         const CUCG &cg) {
+        return sparse_solve_plan_stats_to_dict(
+            cg.debug_runtime_statistics());
+      });
   m.def("make_cucg_solver", make_cucg_solver);
 
   // Mesh Class

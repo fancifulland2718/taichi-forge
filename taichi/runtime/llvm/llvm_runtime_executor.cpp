@@ -1,15 +1,21 @@
 #include "taichi/runtime/llvm/llvm_runtime_executor.h"
 
 #include "taichi/rhi/common/host_memory_pool.h"
+#include "taichi/runtime/llvm/list_manager_constants.h"
 #include "taichi/runtime/llvm/llvm_offline_cache.h"
+#include "taichi/runtime/llvm/sparse_tree_statistics.h"
 
+#include <algorithm>
+#include <limits>
 #include <mutex>
+#include <unordered_map>
 #include "taichi/rhi/cpu/cpu_device.h"
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/platform/cuda/detect_cuda.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/rhi/llvm/device_memory_pool.h"
 
+#include <array>
 #if defined(TI_WITH_CUDA)
 #include "taichi/rhi/cuda/cuda_context.h"
 #endif
@@ -33,6 +39,27 @@ void *host_allocate_aligned(HostMemoryPool *memory_pool,
   return memory_pool->allocate(size, alignment);
 }
 
+void host_release(HostMemoryPool *memory_pool,
+                  std::size_t size,
+                  void *ptr) {
+  memory_pool->release(size, ptr);
+}
+
+std::size_t direct_ambient_size(SNodeType type,
+                                std::size_t cell_size_bytes,
+                                std::size_t chunk_size) {
+  if (type == SNodeType::pointer) {
+    return std::max(cell_size_bytes, sizeof(int32));
+  }
+  if (type == SNodeType::dynamic) {
+    return sizeof(void *) + cell_size_bytes * chunk_size;
+  }
+  if (type == SNodeType::hash) {
+    return cell_size_bytes;
+  }
+  return 0;
+}
+
 }  // namespace
 
 LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
@@ -49,6 +76,13 @@ LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
     } else {
       // CUDA runtime created successfully
       use_device_memory_pool_ = CUDAContext::get_instance().supports_mem_pool();
+      if (!use_device_memory_pool_ &&
+          config.cuda_pointer_deterministic_slot) {
+        TI_WARN(
+            "cuda_pointer_deterministic_slot requires CUDA device-memory-pool "
+            "support; falling back to NodeManager allocation.");
+        config.cuda_pointer_deterministic_slot = false;
+      }
     }
 #else
     TI_WARN("Taichi is not compiled with CUDA.");
@@ -275,11 +309,148 @@ std::size_t LlvmRuntimeExecutor::get_snode_num_dynamically_allocated(
   auto node_allocator =
       runtime_query<void *>("LLVMRuntime_get_node_allocators", result_buffer,
                             llvm_runtime_, snode->id);
+  auto deterministic_capacity = runtime_query<int32>(
+      "NodeManager_get_deterministic_capacity", result_buffer,
+      node_allocator);
+  if (deterministic_capacity > 0) {
+    return (std::size_t)runtime_query<int32>(
+        "NodeManager_get_deterministic_peak", result_buffer, node_allocator);
+  }
   auto data_list = runtime_query<void *>("NodeManager_get_data_list",
                                          result_buffer, node_allocator);
 
   return (std::size_t)runtime_query<int32>("ListManager_get_num_elements",
                                            result_buffer, data_list);
+}
+
+void LlvmRuntimeExecutor::begin_cpu_sparse_listgen_work() {
+  TI_ASSERT(arch_is_cpu(config_.arch));
+  get_runtime_jit_module()->call<void *>("runtime_sparse_listgen_work_begin",
+                                        llvm_runtime_);
+}
+
+LlvmRuntimeExecutor::CpuSparseListgenWork
+LlvmRuntimeExecutor::read_cpu_sparse_listgen_work() {
+  TI_ASSERT(arch_is_cpu(config_.arch));
+  std::uint64_t result[5] = {0, 0, 0, 0, 0};
+  get_runtime_jit_module()->call<void *, std::uint64_t *>(
+      "runtime_sparse_listgen_work_read", llvm_runtime_, result);
+  return {
+      result[0] != 0,
+      result[1],
+      result[2],
+      result[3] == 2,
+      result[4] != 0,
+  };
+}
+
+SparseSNodeTreeMemoryStatistics
+LlvmRuntimeExecutor::get_snode_tree_memory_statistics(
+    SNodeTree *snode_tree,
+    uint64 *result_buffer) {
+  TI_ASSERT(snode_tree != nullptr);
+  TI_ASSERT(result_buffer != nullptr);
+
+  std::vector<SNode *> snodes;
+  bool all_dense = config_.demote_dense_struct_fors;
+  std::uint64_t direct_ambient_bytes = 0;
+  std::function<void(SNode *)> collect = [&](SNode *snode) {
+    snodes.push_back(snode);
+    if (snode->type != SNodeType::dense &&
+        snode->type != SNodeType::place &&
+        snode->type != SNodeType::root) {
+      all_dense = false;
+    }
+    direct_ambient_bytes += direct_ambient_size(
+        snode->type, snode->cell_size_bytes, snode->chunk_size);
+    for (const auto &child : snode->ch) {
+      collect(child.get());
+    }
+  };
+  collect(snode_tree->root());
+
+  auto *runtime_jit = get_runtime_jit_module();
+  runtime_jit->call<uint64 *>("runtime_sparse_tree_statistics_reset",
+                              result_buffer);
+  for (SNode *snode : snodes) {
+    runtime_jit->call<void *, int, int, uint64 *>(
+        "runtime_sparse_snode_statistics_collect", llvm_runtime_, snode->id,
+        all_dense ? 0 : 1, result_buffer);
+  }
+  synchronize();
+
+  std::array<uint64, kLlvmSparseTreeStatisticCount> raw{};
+  if (config_.arch == Arch::cuda) {
+#if defined(TI_WITH_CUDA)
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    CUDADriver::get_instance().memcpy_device_to_host(
+        raw.data(), result_buffer, sizeof(raw));
+#else
+    TI_NOT_IMPLEMENTED;
+#endif
+  } else if (config_.arch == Arch::amdgpu) {
+#if defined(TI_WITH_AMDGPU)
+    AMDGPUDriver::get_instance().memcpy_device_to_host(
+        raw.data(), result_buffer, sizeof(raw));
+#else
+    TI_NOT_IMPLEMENTED;
+#endif
+  } else {
+    std::memcpy(raw.data(), result_buffer, sizeof(raw));
+  }
+
+  std::uint64_t shared_listgen_workspace_bytes = 0;
+  if (arch_is_cpu(config_.arch)) {
+    runtime_jit->call<void *, std::uint64_t *>(
+        "runtime_cpu_parallel_listgen_workspace_statistics", llvm_runtime_,
+        &shared_listgen_workspace_bytes);
+  }
+
+  const auto exact = [](std::uint64_t value) {
+    return RuntimeOptionalCounter{value, true};
+  };
+  SparseSNodeTreeMemoryStatistics result;
+  const std::uint64_t root_bytes =
+      snode_tree_buffer_manager_->get_size(snode_tree->id());
+  const auto pool_it = sparse_tree_pool_sizes_.find(snode_tree->id());
+  const std::uint64_t sparse_pool_bytes =
+      pool_it == sparse_tree_pool_sizes_.end() ? 0 : pool_it->second;
+  result.root_reserved_bytes = exact(root_bytes);
+  result.sparse_pool_reserved_bytes = exact(sparse_pool_bytes);
+  result.tree_owned_reserved_bytes = exact(root_bytes + sparse_pool_bytes);
+  result.runtime_metadata_requested_bytes =
+      exact(raw[kLlvmSparseRuntimeMetadataRequestedBytes]);
+  result.direct_ambient_requested_bytes = exact(direct_ambient_bytes);
+  result.allocator_payload_reserved_bytes =
+      exact(raw[kLlvmSparseAllocatorPayloadReservedBytes]);
+  result.allocator_payload_used_bytes =
+      exact(raw[kLlvmSparseAllocatorPayloadUsedBytes]);
+  result.allocator_bookkeeping_reserved_bytes =
+      exact(raw[kLlvmSparseAllocatorBookkeepingReservedBytes]);
+  result.active_list_reserved_bytes =
+      exact(raw[kLlvmSparseActiveListReservedBytes]);
+  result.active_list_used_bytes =
+      exact(raw[kLlvmSparseActiveListUsedBytes]);
+  result.allocator_in_use_elements =
+      exact(raw[kLlvmSparseAllocatorInUseElements]);
+  result.allocator_free_elements =
+      exact(raw[kLlvmSparseAllocatorFreeElements]);
+  result.allocator_recycled_elements =
+      exact(raw[kLlvmSparseAllocatorRecycledElements]);
+  result.shared_listgen_workspace_reserved_bytes =
+      exact(shared_listgen_workspace_bytes);
+  result.tree_owned_scope =
+      config_.arch == Arch::cuda
+          ? "exclusive_root_and_auto_sized_sparse_pool"
+          : "exclusive_root_only";
+  result.runtime_resource_scope =
+      config_.arch == Arch::cuda
+          ? "tree_logical_resources_in_cuda_runtime_pool"
+          : "tree_logical_resources_in_program_reuse_pool";
+  result.shared_listgen_workspace_scope =
+      arch_is_cpu(config_.arch) ? "program_shared_capacity_not_tree_owned"
+                                : "not_used";
+  return result;
 }
 
 void LlvmRuntimeExecutor::reset_hash_snode_probe_stats(uint64 *result_buffer) {
@@ -437,11 +608,6 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
   const int root_id = field_cache_data.root_id;
 
   bool all_dense = config_.demote_dense_struct_fors;
-  // Phase 1-D (2026-05): optimal chunk_num_elements per gc-able SNode.
-  // Declared at function scope because it's populated during auto-size
-  // (inside the CUDA device-memory if-block) and consumed during
-  // NodeAllocator init (outside that block).
-  std::vector<std::pair<int, int>> snode_chunk_elems;
   DeviceAllocationUnique *sparse_tree_pool_alloc = nullptr;
   for (size_t i = 0; i < snode_metas.size(); i++) {
     if (snode_metas[i].type != SNodeType::dense &&
@@ -449,6 +615,264 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
         snode_metas[i].type != SNodeType::root) {
       all_dense = false;
       break;
+    }
+  }
+  struct NodePoolGeometry {
+    std::size_t node_size;
+    std::size_t chunk_elements;
+    std::size_t data_chunks;
+  };
+  std::unordered_map<int, NodePoolGeometry> node_pool_geometries;
+  const bool use_cuda_auto_pool_geometry =
+      config_.arch == Arch::cuda && use_device_memory_pool() &&
+      config_.cuda_sparse_pool_auto_size &&
+      config_.device_memory_fraction == 0 &&
+      config_.cuda_sparse_pool_size_GB == 0 && !all_dense;
+  if (use_cuda_auto_pool_geometry) {
+    constexpr std::size_t kNodeMgrChunkElementsDefault = 16UL * 1024;
+    constexpr std::size_t kNodeMgrMaxChunkBytes = 128UL << 20;
+    constexpr int kHintHeadroomChunks = 1;
+    for (const auto &meta : snode_metas) {
+      if (!is_gc_able(meta.type)) {
+        continue;
+      }
+      std::size_t element_size = meta.cell_size_bytes;
+      if (meta.type == SNodeType::pointer) {
+        element_size = std::max(element_size, sizeof(int32));
+      }
+      if (element_size == 0) {
+        continue;
+      }
+      const std::size_t node_size =
+          meta.type == SNodeType::pointer
+              ? element_size
+              : sizeof(void *) + element_size * meta.chunk_size;
+      std::size_t chunk_elements = kNodeMgrChunkElementsDefault;
+      while (chunk_elements > 1 &&
+             chunk_elements * node_size > kNodeMgrMaxChunkBytes) {
+        chunk_elements /= 2;
+      }
+      if (meta.num_cells_per_container > 0) {
+        const std::size_t desired =
+            std::size_t(meta.num_cells_per_container) * 2;
+        std::size_t tight = 1024;
+        while (tight < desired) {
+          tight *= 2;
+        }
+        if (tight < chunk_elements) {
+          chunk_elements = tight;
+        }
+      }
+      int64_t effective = meta.vk_max_active_hint;
+      if (effective <= 0) {
+        effective = meta.total_num_cells_from_root;
+      }
+      std::size_t data_chunks = 3;
+      if (effective > 0) {
+        const int64_t lower_bound =
+            meta.num_cells_per_container > 0
+                ? meta.num_cells_per_container
+                : 1;
+        const std::size_t needed_chunks =
+            (std::size_t(std::max<int64_t>(effective, lower_bound)) +
+             chunk_elements - 1) /
+            chunk_elements;
+        data_chunks =
+            std::max<std::size_t>(needed_chunks, 1) +
+            std::size_t(kHintHeadroomChunks);
+      }
+      node_pool_geometries.emplace(
+          meta.id,
+          NodePoolGeometry{node_size, chunk_elements, data_chunks});
+    }
+  }
+  const std::size_t element_list_snode_count =
+      std::count_if(snode_metas.begin(), snode_metas.end(), [](const auto &meta) {
+        return meta.type != SNodeType::place;
+      });
+  // A non-hash Element covers at most 1024 cells in one child container, so
+  // its list-entry upper bound is:
+  //   expected active parent cells * ceil(cells_per_container / 1024).
+  // Propagate explicit pointer/hash hints through dense descendants. Expected
+  // activity selects chunk granularity; separate capacity/budget propagation
+  // below keeps CUDA list storage aligned with its allocator pool geometry.
+  std::unordered_map<int, std::uint64_t> expected_active_cells;
+  std::unordered_map<int, std::uint64_t> capacity_active_cells;
+  std::unordered_map<int, std::uint64_t> budget_active_cells;
+  std::unordered_map<int, std::size_t> element_list_chunk_elements;
+  std::unordered_map<int, std::uint64_t> element_list_pool_entries;
+  for (const auto &meta : snode_metas) {
+    const std::uint64_t total_cells =
+        meta.total_num_cells_from_root > 0
+            ? std::uint64_t(meta.total_num_cells_from_root)
+            : 1;
+    const std::uint64_t cells_per_container =
+        meta.num_cells_per_container > 0
+            ? std::uint64_t(meta.num_cells_per_container)
+            : 1;
+    std::uint64_t parent_active_cells = 1;
+    std::uint64_t parent_capacity_cells = 1;
+    std::uint64_t parent_budget_cells = 1;
+    if (meta.parent_id >= 0) {
+      auto parent = expected_active_cells.find(meta.parent_id);
+      parent_active_cells = parent == expected_active_cells.end()
+                                ? total_cells
+                                : parent->second;
+      auto capacity_parent = capacity_active_cells.find(meta.parent_id);
+      parent_capacity_cells =
+          capacity_parent == capacity_active_cells.end()
+              ? total_cells
+              : capacity_parent->second;
+      auto budget_parent = budget_active_cells.find(meta.parent_id);
+      parent_budget_cells =
+          budget_parent == budget_active_cells.end()
+              ? total_cells
+              : budget_parent->second;
+    }
+
+    std::uint64_t active_cells = total_cells;
+    std::uint64_t capacity_cells = total_cells;
+    std::uint64_t budget_cells = total_cells;
+    if (meta.type == SNodeType::root) {
+      active_cells = 1;
+      capacity_cells = 1;
+      budget_cells = 1;
+    } else if (parent_active_cells <=
+               total_cells / cells_per_container) {
+      active_cells = parent_active_cells * cells_per_container;
+    }
+    if (meta.type != SNodeType::root &&
+        parent_capacity_cells <= total_cells / cells_per_container) {
+      capacity_cells = parent_capacity_cells * cells_per_container;
+    }
+    if (meta.type != SNodeType::root &&
+        parent_budget_cells <= total_cells / cells_per_container) {
+      budget_cells = parent_budget_cells * cells_per_container;
+    }
+    if (meta.vk_max_active_hint > 0) {
+      active_cells = std::min(
+          active_cells, std::uint64_t(meta.vk_max_active_hint));
+    }
+    if (meta.type == SNodeType::hash && meta.vk_max_active_hint > 0) {
+      // Hash stores its derived table capacity in vk_max_active_hint. Pointer
+      // uses the same field only as a CUDA sizing hint, not a hard limit.
+      capacity_cells = std::min(
+          capacity_cells, std::uint64_t(meta.vk_max_active_hint));
+      budget_cells = capacity_cells;
+    }
+    if (meta.type == SNodeType::hash &&
+        meta.hash_expected_active_hint > 0) {
+      active_cells = std::min(
+          active_cells, std::uint64_t(meta.hash_expected_active_hint));
+    }
+    auto geometry = node_pool_geometries.find(meta.id);
+    if (geometry != node_pool_geometries.end()) {
+      const std::uint64_t physical_cells =
+          std::uint64_t(geometry->second.data_chunks) *
+          std::uint64_t(geometry->second.chunk_elements);
+      budget_cells =
+          std::min(capacity_cells, std::max(active_cells, physical_cells));
+    }
+    expected_active_cells[meta.id] = active_cells;
+    capacity_active_cells[meta.id] = capacity_cells;
+    budget_active_cells[meta.id] = budget_cells;
+
+    std::uint64_t expected_entries = 1;
+    std::uint64_t capacity_entries = 1;
+    std::uint64_t budget_entries = 1;
+    if (meta.type == SNodeType::hash) {
+      expected_entries = active_cells;
+      // Hash expected_active selects a useful chunk granularity, while the
+      // derived table capacity remains the hard upper bound for live slots.
+      capacity_entries = capacity_cells;
+      budget_entries = budget_cells;
+    } else if (meta.type != SNodeType::root) {
+      const std::uint64_t slices_per_container =
+          (cells_per_container - 1) / taichi_listgen_max_element_size + 1;
+      if (parent_active_cells >
+          std::numeric_limits<std::uint64_t>::max() /
+              slices_per_container) {
+        expected_entries = std::numeric_limits<std::uint64_t>::max();
+      } else {
+        expected_entries = parent_active_cells * slices_per_container;
+      }
+      if (parent_capacity_cells >
+          std::numeric_limits<std::uint64_t>::max() /
+              slices_per_container) {
+        capacity_entries = std::numeric_limits<std::uint64_t>::max();
+      } else {
+        capacity_entries = parent_capacity_cells * slices_per_container;
+      }
+      if (parent_budget_cells >
+          std::numeric_limits<std::uint64_t>::max() /
+              slices_per_container) {
+        budget_entries = std::numeric_limits<std::uint64_t>::max();
+      } else {
+        budget_entries = parent_budget_cells * slices_per_container;
+      }
+    }
+    const std::uint64_t list_entries =
+        std::min<std::uint64_t>(expected_entries,
+                                kLlvmElementListMaxChunkElements);
+    const std::size_t target = std::size_t(std::max<std::uint64_t>(
+        kLlvmElementListMinChunkElements,
+        std::min<std::uint64_t>(list_entries,
+                                kLlvmElementListMaxChunkElements)));
+    std::size_t chunk_elements = kLlvmElementListMinChunkElements;
+    while (chunk_elements < target) {
+      chunk_elements *= 2;
+    }
+    element_list_chunk_elements[meta.id] = chunk_elements;
+    element_list_pool_entries[meta.id] =
+        std::max<std::uint64_t>(
+            std::min(capacity_entries, budget_entries), 1);
+  }
+
+  // CUDA's auto-sized pool is fixed for the lifetime of one SNodeTree. Budget
+  // every traversal list from the same expected-plus-one-allocator-chunk
+  // physical bound as NodeManager instead of hiding all future list payload
+  // behind a fixed global headroom. Hash lists use the derived table capacity,
+  // which is already their hard live-slot bound. This keeps pointer hints as
+  // sizing hints and prevents traversal storage from becoming the tighter
+  // implicit limit.
+  std::size_t element_list_pool_budget_bytes = 0;
+  if (use_cuda_auto_pool_geometry) {
+    constexpr std::size_t kElementBytes =
+        sizeof(std::uint64_t) +
+        (2 + taichi_max_num_indices) * sizeof(std::int32_t);
+    for (const auto &meta : snode_metas) {
+      if (meta.type == SNodeType::place) {
+        continue;
+      }
+      const std::size_t chunk_elements =
+          element_list_chunk_elements.at(meta.id);
+      const std::uint64_t pool_entries =
+          element_list_pool_entries.at(meta.id);
+      const std::uint64_t list_manager_capacity =
+          std::min<std::uint64_t>(
+              std::numeric_limits<std::int32_t>::max(),
+              std::uint64_t(kLlvmListManagerMaxNumChunks) *
+                  std::uint64_t(chunk_elements));
+      const std::uint64_t representable_capacity =
+          std::min(pool_entries, list_manager_capacity);
+      if (pool_entries > representable_capacity) {
+        TI_WARN(
+            "SNode {} traversal-list capacity {} exceeds ListManager's "
+            "representable capacity {}; budget is clamped to the runtime "
+            "limit. Reduce the logical domain or provide a tighter active "
+            "capacity hint.",
+            meta.id, pool_entries, list_manager_capacity);
+      }
+      const std::uint64_t budget_entries =
+          std::min(pool_entries, representable_capacity);
+      const std::size_t chunks =
+          std::size_t((budget_entries + chunk_elements - 1) / chunk_elements);
+      const std::size_t payload_bytes =
+          chunks * chunk_elements * kElementBytes;
+      const std::size_t directory_bytes =
+          llvm_list_manager_directory_pages_for_chunks(chunks) *
+          kLlvmListManagerDirectoryAllocationBudgetBytes;
+      element_list_pool_budget_bytes += payload_bytes + directory_bytes;
     }
   }
 
@@ -462,9 +886,9 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
     // causing silent OOM in `allocate_from_reserved_memory` even with
     // `device_memory_GB` raised (the cap was the actual bug surface).
     //
-    // Default OFF preserves vanilla taichi 1.7.4 semantics
-    // (`pool_size = device_memory_GB * 1GiB`). Opt-in is now safe for the
-    // SNode shapes covered by the per-NodeManager headroom below.
+    // Explicit fixed-pool settings preserve the legacy
+    // `pool_size = device_memory_GB * 1GiB` path. The default auto path uses
+    // the SNode and traversal geometries computed here.
     std::size_t override_size = 0;
     // Phase 1: per-SNode pool entries, populated during auto-size loop
     // and consumed in the NodeAllocator init loop below.
@@ -480,158 +904,70 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
         config_.cuda_sparse_pool_auto_size &&
         config_.device_memory_fraction == 0 &&
         config_.cuda_sparse_pool_size_GB == 0;
-    if (config_.cuda_sparse_pool_auto_size &&
-        config_.device_memory_fraction == 0 &&
-        config_.cuda_sparse_pool_size_GB == 0) {
+    if (use_cuda_auto_pool_geometry) {
       // Mirror runtime.cpp constants:
       //   * runtime_NodeAllocator_initialize: chunk_num_elements = 16 * 1024
       //   * NodeManager ctor: while (chunk_elements > 1 &&
       //         chunk_elements * element_size > 128 MiB) chunk_elements /= 2
-      // ListManager has `Ptr chunks[128 * 1024]` (= 1 MiB on 64-bit) plus
-      // small POD fields; allocate_aligned uses 4 KiB pages. Each NodeManager
-      // creates 3 ListManager instances (free / recycled / data). At first
+      // ListManager keeps the first 16 chunk pointers inline and grows the
+      // remaining index through 1024-pointer directory pages. Each
+      // NodeManager creates 3 instances (free / recycled / data). At first
       // activation, only the data_list's first chunk is touched.
-      constexpr std::size_t kNodeMgrChunkElementsDefault = 16UL * 1024;
-      constexpr std::size_t kNodeMgrMaxChunkBytes = 128UL << 20;
       constexpr std::size_t kListManagerBytes =
-          (128UL << 10) * sizeof(void *) + 4096;
+          kLlvmListManagerFixedAllocationBudgetBytes;
       constexpr int kListManagersPerNodeManager = 3;
-      // Headroom: extra data_list chunks beyond the first. 2 covers typical
-      // gc / re-activation cycles; raise via cuda_sparse_pool_size_floor_MiB
-      // if a workload activates more chunks per NodeManager.
-      constexpr int kHeadroomChunks = 2;
       // Baseline for misc allocations (LLVMRuntime fields, NodeManager
       // structs themselves, ambient_elements, rand_states, etc).
       constexpr std::size_t kBaselineBytes = 32UL << 20;
 
       std::size_t auto_size = kBaselineBytes;
-      // Phase 1-E (2026-05): runtime_initialize_snodes creates ONE
-      // element_list (ListManager, ~1 MiB struct) per SNode in the tree,
-      // not just per gc_able SNode. With workloads that place many
-      // fields on a single bitmasked node (e.g. 9 fields on one
-      // pointer.bitmasked → ~25 snodes), the unaccounted element_list
-      // metadata easily exceeds the 24 MiB headroom and triggers
-      // `Out of CUDA pre-allocated memory` during snode init. Add the
-      // per-snode element_list budget here so the global region scales
-      // with snode_metas.size().
-      auto_size += snode_metas.size() * kListManagerBytes;
+      // Only structural SNodes participate in listgen/struct-for traversal.
+      // A place SNode is field storage, never a list parent or child, so do not
+      // reserve its ~1 MiB ListManager metadata.
+      auto_size += element_list_snode_count * kListManagerBytes;
+      auto_size += element_list_pool_budget_bytes;
       // Phase 1-E (2026-05): emit a budget breakdown so users can see
       // how much of the global pool is consumed by per-SNode element_list
-      // metadata vs. data regions vs. headroom. Useful for diagnosing
+      // metadata vs. explicit capacity payload. Useful for diagnosing
       // implicit allocation pressure on large SNode trees.
       TI_TRACE(
           "Phase-1-E element_list budget: {} SNode(s) × {:.2f} MiB = "
-          "{:.2f} MiB",
-          snode_metas.size(), kListManagerBytes / 1048576.0,
-          (snode_metas.size() * kListManagerBytes) / 1048576.0);
+          "{:.2f} MiB metadata + {:.2f} MiB capacity payload",
+          element_list_snode_count, kListManagerBytes / 1048576.0,
+          (element_list_snode_count * kListManagerBytes) / 1048576.0,
+          element_list_pool_budget_bytes / 1048576.0);
       for (size_t i = 0; i < snode_metas.size(); i++) {
         if (!is_gc_able(snode_metas[i].type))
           continue;
-        std::size_t element_size = snode_metas[i].cell_size_bytes;
-        // Phase 1 (2026-05): mirror runtime_NodeAllocator_initialize's
-        // pointer handling: cell_size_bytes is 0 for pointer SNode (the
-        // slot size is inferred at runtime), but the data chunk geometry
-        // still uses sizeof(int32) per slot. Without this, pointer
-        // SNode types are silently excluded from per-snode-pool sizing
-        // and their ListManager data allocations fall through to the
-        // (now undersized) global pool, causing OOM.
-        if (snode_metas[i].type == SNodeType::pointer && element_size == 0) {
-          element_size = sizeof(int32);
-        }
-        if (element_size == 0)
+        auto geometry = node_pool_geometries.find(snode_metas[i].id);
+        if (geometry == node_pool_geometries.end()) {
           continue;
-        // Compute node_size exactly as the NodeAllocator init code does:
-        //   pointer → node_size = element_size  (single-element allocator)
-        //   dynamic → node_size = sizeof(void*) + element_size * chunk_size
-        std::size_t node_size;
-        if (snode_metas[i].type == SNodeType::pointer) {
-          node_size = element_size;
-        } else {
-          node_size =
-              sizeof(void *) + element_size * snode_metas[i].chunk_size;
         }
-        // Phase 1-D (2026-05): compute optimal chunk_elements. Start from
-        // the default and halve for the 128 MiB ceiling, then further
-        // tighten if num_cells_per_container is much smaller.
-        std::size_t chunk_elements = kNodeMgrChunkElementsDefault;
-        while (chunk_elements > 1 &&
-               chunk_elements * node_size > kNodeMgrMaxChunkBytes) {
-          chunk_elements /= 2;
-        }
-        // Tighten: if the physical cell count is far below chunk capacity,
-        // shrink chunk_elements to ∼2× num_cells (power-of-2, ≥1024).
-        // This dramatically cuts per-chunk VRAM for sparse workloads while
-        // leaving room for GC/recycle transient overcommit.
-        int64_t n_cells = snode_metas[i].num_cells_per_container;
-        if (n_cells > 0) {
-          std::size_t desired = (std::size_t)n_cells * 2;
-          // round up to next power of 2, floor 1024
-          std::size_t tight = 1024;
-          while (tight < desired) tight *= 2;
-          if (tight < chunk_elements) chunk_elements = tight;
-        }
+        const std::size_t node_size = geometry->second.node_size;
+        const std::size_t chunk_elements =
+            geometry->second.chunk_elements;
+        const std::size_t data_chunks = geometry->second.data_chunks;
         std::size_t chunk_bytes = chunk_elements * node_size;
         auto_size += std::size_t(kListManagersPerNodeManager) * kListManagerBytes;
-        // Phase 0.5 (2026-05): when the user provided
-        // `vk_max_active=N` on the SNode, size the per-NodeManager data
-        // region to fit ceil(N / chunk_elements) chunks plus a small
-        // safety margin (kHintHeadroomChunks) instead of the legacy
-        // worst-case (1 + kHeadroomChunks) chunks. Lower-bound is one
-        // `num_cells_per_container` (a single container must always fit).
-        // Default (-1) keeps the legacy worst-case path bit-for-bit.
-        //
-        // The hint headroom (1 chunk) covers gc/re-activation transient
-        // overcommit and miscellaneous runtime allocations that draw from
-        // the same preallocated pool; setting it to 0 produced silent
-        // `allocate_from_reserved_memory: Out of CUDA pre-allocated
-        // memory` errors on workloads where the dominant chunk is large
-        // (>50 MiB) and only a single chunk gets reserved. With +1 chunk,
-        // savings vs legacy = 1 chunk per gc-able SNode (typically the
-        // largest one) which still meaningfully reduces footprint when
-        // chunks are big but activations are sparse.
-        constexpr int kHintHeadroomChunks = 1;
-        std::size_t data_chunks = std::size_t(1 + kHeadroomChunks);
-        // Phase 0.5 / Phase 1-B (2026-05): when the user provided
-        // `vk_max_active=N` use it directly; otherwise size from the
-        // global number of cells represented by this SNode. Using only
-        // `num_cells_per_container` under-sizes nested pointer/dynamic
-        // nodes because the same container is instantiated once per active
-        // parent cell.
-        // This eliminates over-provisioning for sparse workloads
-        // (e.g. MPM with 495 pointer cells getting 8192-slot chunks).
-        // A kHintHeadroomChunks margin is reserved for GC/recycle
-        // transient overcommit and as an extension point for future
-        // runtime cooperative grow (Phase 2).
-        int64_t effective = snode_metas[i].vk_max_active_hint;
-        if (effective <= 0) {
-          effective = snode_metas[i].total_num_cells_from_root;
-        }
-        if (effective > 0) {
-          int64_t lower_bound = snode_metas[i].num_cells_per_container > 0
-                                    ? snode_metas[i].num_cells_per_container
-                                    : 1;
-          int64_t eff = std::max<int64_t>(effective, lower_bound);
-          std::size_t needed_chunks =
-              (std::size_t(eff) + chunk_elements - 1) / chunk_elements;
-          data_chunks = std::max<std::size_t>(needed_chunks, 1) +
-                        std::size_t(kHintHeadroomChunks);
-        }
         // The dedicated pool backs all three ListManagers. data_list chunks
         // dominate, but legacy deactivate/GC can also touch recycled_list and
         // free_list index chunks. Budget those tiny index chunks explicitly so
         // all-OFF behavior remains safe when per-SNode pools are enabled.
         std::size_t index_bytes =
             std::size_t(2) * data_chunks * chunk_elements * sizeof(int32);
-        auto_size += data_chunks * chunk_bytes + index_bytes;
-        // Phase 1-D: record optimal chunk_elements for NodeAllocator init
-        snode_chunk_elems.push_back(
-            {snode_metas[i].id, (int)chunk_elements});
+        const std::size_t directory_bytes =
+            std::size_t(kListManagersPerNodeManager) *
+            llvm_list_manager_directory_pages_for_chunks(data_chunks) *
+            kLlvmListManagerDirectoryAllocationBudgetBytes;
+        auto_size +=
+            data_chunks * chunk_bytes + index_bytes + directory_bytes;
         // Phase 1: collect per-SNode sizing for buffer carving
         if (do_per_snode_pool) {
           snode_entries.push_back(
               {snode_metas[i].id,
                std::size_t(kListManagersPerNodeManager) * kListManagerBytes,
-               data_chunks * chunk_bytes + index_bytes, chunk_bytes});
+               data_chunks * chunk_bytes + index_bytes + directory_bytes,
+               chunk_bytes});
         }
       }
       // User-tunable lower bound (defensive floor for tiny SNode trees).
@@ -658,20 +994,16 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       override_size = auto_size;
 
       // Phase 1 (2026-05): carve per-SNode data regions from a single
-      // buffer instead of using a monolithic global pool. The global
-      // region (runtime_memory_chunk) shrinks to baseline + metadata +
-      // headroom; each SNode's data region is a sub-range of the same
-      // allocation, addressed via its own PreallocatedMemoryChunk.
-      // Total VRAM = global_region + Σ(data_regions) ≈ auto_size + 16 MiB.
+      // buffer instead of using a monolithic global pool. The global region
+      // contains the baseline, runtime/list metadata and the explicit
+      // traversal-list capacity budget; each SNode's data region is a
+      // sub-range of the same allocation.
       if (do_per_snode_pool && !snode_entries.empty()) {
-        constexpr std::size_t kPerSnodePoolGlobalHeadroom = 24UL << 20;
-        // Phase 1-E (2026-05): include per-SNode element_list metadata
-        // budget (one ListManager per SNode in the tree). This mirrors
-        // the addition in `auto_size` above and prevents snode-init OOM
-        // on trees with many leaf places.
+        // Include only traversal-participating SNode element-list metadata.
         std::size_t global_region = kBaselineBytes +
-                                    kPerSnodePoolGlobalHeadroom +
-                                    snode_metas.size() * kListManagerBytes;
+                                    element_list_pool_budget_bytes +
+                                    element_list_snode_count *
+                                        kListManagerBytes;
         std::size_t total_buffer = global_region;
         for (const auto &e : snode_entries) {
           global_region += e.metadata_bytes;
@@ -699,6 +1031,9 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
         auto [pool_it, inserted] =
             sparse_tree_pool_allocs_.try_emplace(tree_id);
         TI_ASSERT(inserted);
+        const bool size_inserted =
+            sparse_tree_pool_sizes_.try_emplace(tree_id, total_buffer).second;
+        TI_ASSERT(size_inserted);
         void *buf = preallocate_memory(total_buffer, pool_it->second);
         sparse_tree_pool_alloc = &pool_it->second;
         // Initialize runtime_memory_chunk to cover only the global region.
@@ -753,9 +1088,25 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
 
   snode_tree_allocs_[tree_id] = alloc;
 
+  for (const auto &meta : snode_metas) {
+    runtime_jit->call<void *, int>("runtime_reset_snode_slot", llvm_runtime_,
+                                   meta.id);
+  }
   runtime_jit->call<void *, std::size_t, int, int, int, std::size_t, Ptr>(
       "runtime_initialize_snodes", llvm_runtime_, root_size, root_id,
-      (int)snode_metas.size(), tree_id, rounded_size, root_buffer, all_dense);
+      (int)snode_metas.size(), tree_id, rounded_size, root_buffer,
+      element_list_chunk_elements.at(root_id), all_dense);
+
+  if (!all_dense) {
+    for (const auto &meta : snode_metas) {
+      if (meta.id == root_id || meta.type == SNodeType::place) {
+        continue;
+      }
+      runtime_jit->call<void *, int, std::size_t>(
+          "runtime_initialize_snode_element_list", llvm_runtime_, meta.id,
+          element_list_chunk_elements.at(meta.id));
+    }
+  }
 
   for (size_t i = 0; i < snode_metas.size(); i++) {
     if (is_gc_able(snode_metas[i].type)) {
@@ -773,100 +1124,68 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       // Phase 1-D: look up optimal chunk_num_elements computed during
       // auto-size; if not found, fall back to the legacy default.
       int chunk_elems = 1024 * 16;  // legacy default
-      for (size_t j = 0; j < snode_chunk_elems.size(); j++) {
-        if (snode_chunk_elems[j].first == snode_id) {
-          chunk_elems = snode_chunk_elems[j].second; break;
-        }
+      auto geometry = node_pool_geometries.find(snode_id);
+      if (geometry != node_pool_geometries.end()) {
+        chunk_elems = int(geometry->second.chunk_elements);
       }
       TI_TRACE("Initializing allocator for snode {} (node size {}, chunk_elems {})",
                snode_id, node_size, chunk_elems);
       runtime_jit->call<void *, int, std::size_t, int>(
           "runtime_NodeAllocator_initialize_ex", llvm_runtime_, snode_id,
           node_size, chunk_elems);
+      if (config_.cuda_pointer_deterministic_pool_enabled() &&
+          snode_metas[i].type == SNodeType::pointer &&
+          snode_metas[i].num_cells_per_container ==
+              snode_metas[i].total_num_cells_from_root) {
+        TI_ASSERT(snode_metas[i].num_cells_per_container <=
+                  std::numeric_limits<int>::max());
+        runtime_jit->call<void *, int, int>(
+            "runtime_NodeAllocator_set_deterministic_capacity", llvm_runtime_,
+            snode_id, (int)snode_metas[i].num_cells_per_container);
+      }
     }
   }
 
   // Phase 1 (2026-05): after all NodeAllocators are initialized, assign
   // each gc-able SNode its dedicated data region carved from the global
-  // pool buffer. Re-computes per-SNode sizes from snode_metas using the
-  // same formula as the auto-size loop above.
+  // pool buffer using the same precomputed geometry as auto-size.
   if (config_.arch == Arch::cuda && use_device_memory_pool() &&
       config_.cuda_sparse_per_snode_pool &&
       config_.cuda_sparse_pool_auto_size &&
       config_.device_memory_fraction == 0 &&
       config_.cuda_sparse_pool_size_GB == 0 &&
       sparse_tree_pool_alloc != nullptr && *sparse_tree_pool_alloc != nullptr) {
-    // Mirror runtime.cpp constants (same as auto-size block above).
     constexpr std::size_t kBaseline = 32UL << 20;
-    constexpr std::size_t kMgrBytes = (128UL << 10) * sizeof(void *) + 4096;
+    constexpr std::size_t kMgrBytes =
+        kLlvmListManagerFixedAllocationBudgetBytes;
     constexpr int kMgrsPerNode = 3;
-    constexpr std::size_t kHeadroom = 24UL << 20;
-    constexpr std::size_t kChunkElems = 16UL * 1024;
-    constexpr std::size_t kMaxChunk = 128UL << 20;
-    constexpr int kHeadroomChunks = 2;
-    constexpr int kHintHeadroomChunks = 1;
 
-    // Phase 1-E (2026-05): account for per-SNode element_list metadata
-    // (one ListManager per SNode in the tree, ~1 MiB each), which lives
-    // in the global region. Without this, the carved global_region can
-    // be too small when a sparse tree has many leaf places (e.g. 9
-    // fields on one bitmasked node), causing snode-init OOM.
+    // Account only for structural SNodes which own an element list.
     std::size_t global_region =
-        kBaseline + kHeadroom + snode_metas.size() * kMgrBytes;
+        kBaseline + element_list_pool_budget_bytes +
+        element_list_snode_count * kMgrBytes;
     std::vector<std::pair<int, std::size_t>> snode_pools;  // (id, data_bytes)
     for (size_t i = 0; i < snode_metas.size(); i++) {
       if (!is_gc_able(snode_metas[i].type))
         continue;
-      std::size_t elem_sz = snode_metas[i].cell_size_bytes;
-      // Phase 1 (2026-05): mirror NodeAllocator init's pointer handling.
-      if (snode_metas[i].type == SNodeType::pointer) {
-        elem_sz = std::max(elem_sz, (std::size_t)sizeof(int32));
-      }
-      if (elem_sz == 0)
+      auto geometry = node_pool_geometries.find(snode_metas[i].id);
+      if (geometry == node_pool_geometries.end()) {
         continue;
-      // Compute node_size exactly as the NodeAllocator init does:
-      // pointer → elem_sz; dynamic → sizeof(void*) + elem_sz * chunk_size
-      std::size_t node_size;
-      if (snode_metas[i].type == SNodeType::pointer) {
-        node_size = elem_sz;
-      } else {
-        node_size =
-            sizeof(void *) + elem_sz * snode_metas[i].chunk_size;
       }
-      // Phase 1-D: tighten chunk_elems as in the auto-size block above.
-      std::size_t chunk_elems = kChunkElems;
-      while (chunk_elems > 1 && chunk_elems * node_size > kMaxChunk)
-        chunk_elems /= 2;
-      int64_t n_cells = snode_metas[i].num_cells_per_container;
-      if (n_cells > 0) {
-        std::size_t desired = (std::size_t)n_cells * 2;
-        std::size_t tight = 1024;
-        while (tight < desired) tight *= 2;
-        if (tight < chunk_elems) chunk_elems = tight;
-      }
+      const std::size_t node_size = geometry->second.node_size;
+      const std::size_t chunk_elems =
+          geometry->second.chunk_elements;
+      const std::size_t data_chunks = geometry->second.data_chunks;
       std::size_t chunk_bytes = chunk_elems * node_size;
       global_region += std::size_t(kMgrsPerNode) * kMgrBytes;
-      std::size_t data_chunks = std::size_t(1 + kHeadroomChunks);
-      // Phase 1-B (2026-05): size from the global cell bound when no
-      // explicit vk_max_active_hint is set. A per-container bound is not
-      // sufficient for nested sparse nodes.
-      int64_t effective = snode_metas[i].vk_max_active_hint;
-      if (effective <= 0) {
-        effective = snode_metas[i].total_num_cells_from_root;
-      }
-      if (effective > 0) {
-        int64_t lb = snode_metas[i].num_cells_per_container > 0
-                         ? snode_metas[i].num_cells_per_container
-                         : 1;
-        int64_t eff = std::max<int64_t>(effective, lb);
-        std::size_t need =
-            (std::size_t(eff) + chunk_elems - 1) / chunk_elems;
-        data_chunks =
-            std::max<std::size_t>(need, 1) + std::size_t(kHintHeadroomChunks);
-      }
       std::size_t index_bytes =
           std::size_t(2) * data_chunks * chunk_elems * sizeof(int32);
-      std::size_t data_bytes = data_chunks * chunk_bytes + index_bytes;
+      const std::size_t directory_bytes =
+          std::size_t(kMgrsPerNode) *
+          llvm_list_manager_directory_pages_for_chunks(data_chunks) *
+          kLlvmListManagerDirectoryAllocationBudgetBytes;
+      std::size_t data_bytes =
+          data_chunks * chunk_bytes + index_bytes + directory_bytes;
       if (data_bytes > 0)
         snode_pools.push_back({snode_metas[i].id, data_bytes});
     }
@@ -886,37 +1205,19 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
     }
   }
 
-  // Allocate ambient elements after per-SNode dedicated pools are installed.
-  // Otherwise the first data_list chunk of a large pointer/dynamic SNode is
-  // charged to the smaller global region and can OOM during field creation
-  // before the dedicated pool has a chance to take over. Hash SNodes do not
-  // use NodeAllocator, so they get one directly allocated zero cell.
+  // Ambient cells serve inactive reads and are not dynamically active payload.
+  // Allocate them directly so allocator high-water, GC and free/recycled lists
+  // describe user activation only.
   for (size_t i = 0; i < snode_metas.size(); i++) {
-    if (is_gc_able(snode_metas[i].type) ||
-        snode_metas[i].type == SNodeType::hash) {
-      const auto snode_id = snode_metas[i].id;
-      auto element_size = snode_metas[i].cell_size_bytes;
-      if (snode_metas[i].type == SNodeType::hash) {
-        TI_TRACE("Allocating ambient element for hash snode {} (node size {})",
-                 snode_id, element_size);
-        runtime_jit->call<void *, int, std::size_t>(
-            "runtime_allocate_ambient_direct", llvm_runtime_, snode_id,
-            element_size);
-        continue;
-      }
-      if (snode_metas[i].type == SNodeType::pointer) {
-        element_size = std::max(element_size, (std::size_t)sizeof(int32));
-      }
-      std::size_t node_size;
-      if (snode_metas[i].type == SNodeType::pointer) {
-        node_size = element_size;
-      } else {
-        node_size = sizeof(void *) + element_size * snode_metas[i].chunk_size;
-      }
-      TI_TRACE("Allocating ambient element for snode {} (node size {})",
-               snode_id, node_size);
-      runtime_jit->call<void *, int>("runtime_allocate_ambient", llvm_runtime_,
-                                     snode_id, node_size);
+    const std::size_t node_size = direct_ambient_size(
+        snode_metas[i].type, snode_metas[i].cell_size_bytes,
+        snode_metas[i].chunk_size);
+    if (node_size > 0) {
+      TI_TRACE("Allocating direct ambient for snode {} (node size {})",
+               snode_metas[i].id, node_size);
+      runtime_jit->call<void *, int, std::size_t>(
+          "runtime_allocate_ambient_direct", llvm_runtime_,
+          snode_metas[i].id, node_size);
     }
   }
 
@@ -924,10 +1225,15 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       config_.cuda_sparse_per_snode_pool &&
       config_.cuda_sparse_pool_auto_size &&
       config_.device_memory_fraction == 0 &&
-      config_.cuda_sparse_pool_size_GB == 0 && !all_dense) {
-    runtime_jit->call<void *, int, int>(
-        "runtime_element_lists_set_backing_pool", llvm_runtime_, root_id,
-        (int)snode_metas.size());
+       config_.cuda_sparse_pool_size_GB == 0 && !all_dense) {
+    runtime_jit->call<void *>("runtime_element_lists_prepare_backing_pool",
+                              llvm_runtime_);
+    for (const auto &meta : snode_metas) {
+      runtime_jit->call<void *, int>("runtime_element_list_set_backing_pool",
+                                     llvm_runtime_, meta.id);
+    }
+    runtime_jit->call<void *>("runtime_element_lists_finalize_backing_pool",
+                              llvm_runtime_);
   }
 }
 
@@ -1035,6 +1341,7 @@ void LlvmRuntimeExecutor::finalize() {
     preallocated_runtime_objects_allocs_.reset();
     preallocated_runtime_memory_allocs_.reset();
     sparse_tree_pool_allocs_.clear();
+    sparse_tree_pool_sizes_.clear();
 
     // Reset runtime memory
     if (backend_calls_safe) {
@@ -1238,6 +1545,9 @@ void LlvmRuntimeExecutor::materialize_runtime(KernelProfilerBase *profiler,
 
   if (arch_use_host_memory(config_.arch)) {
     auto *const thread_pool = get_cpu_thread_pool();
+    runtime_jit->call<void *, void *>(
+        "LLVMRuntime_set_host_releaser", llvm_runtime_,
+        (void *)&host_release);
     runtime_jit->call<void *, void *, void *>(
         "LLVMRuntime_initialize_thread_pool", llvm_runtime_, thread_pool,
         (void *)ThreadPool::static_run);
@@ -1277,18 +1587,30 @@ void LlvmRuntimeExecutor::destroy_snode_tree(SNodeTree *snode_tree) {
     collect(snode_tree->root());
 
     auto *runtime_jit = get_runtime_jit_module();
+    for (std::size_t i = 0; i < snodes.size(); ++i) {
+      SNode *snode = snodes[i];
+      const std::size_t ambient_size = direct_ambient_size(
+          snode->type, snode->cell_size_bytes, snode->chunk_size);
+      runtime_jit->call<void *, int, std::size_t, int, int>(
+          "runtime_prepare_snode_tree_destroy", llvm_runtime_, snode->id,
+          ambient_size, i == 0 ? 1 : 0,
+          i + 1 == snodes.size() ? 1 : 0);
+    }
     for (SNode *snode : snodes) {
+      const std::size_t ambient_size = direct_ambient_size(
+          snode->type, snode->cell_size_bytes, snode->chunk_size);
       runtime_jit
           ->call<void *, int, int, int, int, std::size_t>(
               "runtime_destroy_snode_resources", llvm_runtime_, snode->id,
-              all_dense ? 0 : 1, is_gc_able(snode->type) ? 1 : 0,
-              snode->type == SNodeType::hash ? 1 : 0,
-              snode->type == SNodeType::hash ? snode->cell_size_bytes : 0);
+              !all_dense && snode->type != SNodeType::place ? 1 : 0,
+              is_gc_able(snode->type) ? 1 : 0,
+              ambient_size > 0 ? 1 : 0, ambient_size);
     }
   }
   get_llvm_context()->delete_snode_tree(snode_tree->id());
   snode_tree_buffer_manager_->destroy(snode_tree);
   sparse_tree_pool_allocs_.erase(snode_tree->id());
+  sparse_tree_pool_sizes_.erase(snode_tree->id());
 }
 
 Device *LlvmRuntimeExecutor::get_compute_device() {

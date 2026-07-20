@@ -50,6 +50,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
       const LLVM::CompiledKernelData &compiled) override;
   void retire_snode_tree(int tree_id) override;
   std::size_t debug_registered_kernel_count() override;
+  void debug_reset_sparse_listgen_statistics() override;
+  SparseSNodeTreeListgenStatistics debug_sparse_listgen_statistics(
+      const std::vector<int> &snode_ids) override;
   bool prepare_cuda_graph_launch(Handle handle,
                                  LaunchContextBuilder &ctx,
                                  GraphLaunchPacket &packet,
@@ -80,6 +83,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
   // async host callers preserve submission order without a global launch lock.
   std::mutex sparse_list_mutex_;
   std::unordered_map<int, SparseListState> sparse_list_states_;
+  bool sparse_listgen_telemetry_enabled_{false};
+  std::unordered_map<int, SparseListgenNodeStatistics>
+      sparse_listgen_telemetry_;
   std::unordered_map<int, std::shared_ptr<const Context>> contexts_;
 };
 

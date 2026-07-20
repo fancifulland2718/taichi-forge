@@ -265,6 +265,9 @@ class TI_DLL_EXPORT GfxRuntime {
   // replay registrations survive and can record again for unrelated graphs.
   void retire_snode_tree_kernels(int tree_id);
   std::size_t debug_registered_kernel_count();
+  void debug_reset_sparse_listgen_statistics();
+  SparseSNodeTreeListgenStatistics debug_sparse_listgen_statistics(
+      const std::vector<int> &snode_ids);
 
   void launch_kernel(KernelHandle handle, LaunchContextBuilder &host_ctx);
 
@@ -494,6 +497,9 @@ class TI_DLL_EXPORT GfxRuntime {
   };
   bool listgen_reuse_adaptive_{false};
   std::unordered_map<int, SparseListState> sparse_list_states_;
+  bool sparse_listgen_telemetry_enabled_{false};
+  std::unordered_map<int, SparseListgenNodeStatistics>
+      sparse_listgen_telemetry_;
   std::unordered_map<int, std::unordered_set<int>> child_lists_by_parent_;
   int64 sparse_list_global_dirty_epoch_{0};
   int resident_sparse_list_snode_id_{-1};

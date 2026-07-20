@@ -82,7 +82,35 @@ class Kernel;
 //  15 - DF3 (2026-07). Compiled-kernel metadata records the generation-safe
 //       SNodeTree dependencies consumed by Graph lifecycle validation. Older
 //       artifacts do not contain that metadata and must not be reused.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 15;
+//  16 - S2 sparse-memory modernization (2026-07). LLVM ListManager replaces
+//       its embedded 128K chunk-pointer table with inline pointers plus
+//       grow-on-demand directory pages. Cached LLVM kernels embed the old
+//       ListManager field offsets, so they must recompile against the new ABI.
+//  17 - S2 adaptive element-list chunks (2026-07). Field cache metadata now
+//       records each SNode parent id, and LLVMRuntime expands its recycled-list
+//       table into bounded chunk-size classes. Old metadata and embedded
+//       LLVMRuntime offsets are incompatible with this layout.
+//  18 - S2 direct ambient allocation (2026-07). NodeManager records
+//       deterministic-slot capacity/current/peak counters so sparse allocator
+//       telemetry no longer relies on an ambient element in data_list. Cached
+//       CUDA kernels embed NodeManager offsets and must recompile.
+//  19 - S2 traversal-list capacity budgeting (2026-07). CUDA deterministic
+//       pointer lowering now requires an auto-sized per-SNode dedicated pool;
+//       monolithic and explicit fixed-pool configurations use NodeManager.
+//       Old cached kernels may contain the unsafe unconditional fast path.
+//  20 - S3 CPU listgen work attribution (2026-07). CPU LLVMRuntime appends
+//       debug task-local scanned/emitted counters, and listgen helpers branch
+//       to counter-enabled implementations. Recompile cached CPU listgen tasks
+//       so private telemetry observes the same runtime ABI and behavior.
+//  21 - S3 CPU parallel listgen (2026-07). Generic nonroot listgen can call the
+//       host ThreadPool for deterministic count/prefix/fill and LLVMRuntime
+//       appends a Program-shared offsets workspace and execution strategy.
+//       Cached CPU listgen tasks must include the new gated runtime path.
+//  22 - S3 CPU stable-topology list reuse (2026-07). CPU StructMeta now enables
+//       the existing exact dirty-epoch/parent-version contract, and LLVMRuntime
+//       appends a task-local reuse signal for debug attribution. Cached CPU
+//       kernels must recompile with listgen reuse enabled.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 22;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

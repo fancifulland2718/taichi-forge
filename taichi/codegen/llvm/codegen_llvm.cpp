@@ -199,7 +199,7 @@ class PurePointerDeactivateDetector : public BasicStmtVisitor {
 bool is_cuda_pointer_bulk_reset_task(const CompileConfig &config,
                                      OffloadedStmt *stmt) {
   if (config.arch != Arch::cuda || !config.cuda_pointer_fast_reset ||
-      !config.cuda_pointer_deterministic_slot || stmt == nullptr ||
+      !config.cuda_pointer_deterministic_pool_enabled() || stmt == nullptr ||
       stmt->task_type != OffloadedStmt::TaskType::struct_for ||
       stmt->snode == nullptr || !is_single_instance_pointer_snode(stmt->snode) ||
       stmt->tls_prologue != nullptr || stmt->tls_epilogue != nullptr ||
@@ -462,7 +462,7 @@ std::unique_ptr<RuntimeObject> TaskCodeGenLLVM::emit_struct_meta_object(
     // (c) CUDA backend only. Falls through silently if any
     // condition fails — Pointer_activate uses legacy path.
     bool det_slot = false;
-    if (compile_config.cuda_pointer_deterministic_slot && compile_config.arch == Arch::cuda) {
+    if (compile_config.cuda_pointer_deterministic_pool_enabled()) {
       int64 total_from_root = 1;
       for (int j = 0; j < taichi_max_num_indices; j++) {
         total_from_root *= snode->extractors[j].num_elements_from_root;
@@ -530,9 +530,15 @@ void TaskCodeGenLLVM::emit_struct_meta_base(const std::string &name,
   common.set("element_size", tlctx->get_constant((uint64)element_size));
   common.set("max_num_elements",
              tlctx->get_constant(snode->max_num_elements()));
-  common.set("listgen_reuse",
-             tlctx->get_constant(compile_config.arch == Arch::cuda &&
-                                 compile_config.cuda_listgen_reuse));
+  // CPU uses the same exact runtime dirty-epoch and parent-list-version
+  // contract as CUDA. CPU keeps launching the tiny clear/listgen task shells,
+  // but the runtime returns before touching a current list.
+  common.set(
+      "listgen_reuse",
+      tlctx->get_constant(
+          arch_is_cpu(compile_config.arch) ||
+          (compile_config.arch == Arch::cuda &&
+           compile_config.cuda_listgen_reuse)));
   common.set("context", get_context());
 
   /*
@@ -1423,9 +1429,8 @@ void TaskCodeGenLLVM::emit_gc(OffloadedStmt *stmt) {
   // the struct-for kernel; bitmask is zeroed by bitmasked deactivation.
   // The NodeManager free/recycled/data lists are never touched by the
   // deterministic allocation path — GC is a no-op. Skipping saves ~170 us.
-  if (compile_config.arch == Arch::cuda &&
-      compile_config.cuda_pointer_fast_reset &&
-      compile_config.cuda_pointer_deterministic_slot &&
+  if (compile_config.cuda_pointer_fast_reset &&
+      compile_config.cuda_pointer_deterministic_pool_enabled() &&
       snode->type == SNodeType::pointer) {
     int64 total_from_root = 1;
     for (int j = 0; j < taichi_max_num_indices; j++) {
@@ -2356,6 +2361,7 @@ std::string TaskCodeGenLLVM::init_offloaded_task_function(OffloadedStmt *stmt,
                                 task_kernel_name, module.get());
 
   current_task = std::make_unique<OffloadedTask>(task_kernel_name);
+  annotate_current_task_metadata(stmt);
 
   for (auto &arg : func->args()) {
     kernel_args.push_back(&arg);
@@ -2380,8 +2386,11 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
   current_task->may_mutate_sparse_topology = mutation.may_mutate;
   current_task->sparse_mutation_snode_id = mutation.snode_id;
 
-  if (!(compile_config.arch == Arch::cuda &&
-        compile_config.cuda_listgen_reuse)) {
+  const bool needs_sparse_list_metadata =
+      arch_is_cpu(compile_config.arch) ||
+      (compile_config.arch == Arch::cuda &&
+       compile_config.cuda_listgen_reuse);
+  if (!needs_sparse_list_metadata) {
     return;
   }
 

@@ -26,7 +26,7 @@ from gpu_idle_guard import (  # noqa: E402
 )
 
 
-SCHEMA = "taichi_forge.sparse_snode_lifecycle.v1"
+SCHEMA = "taichi_forge.sparse_snode_lifecycle.v2"
 PHASES = (
     "create",
     "materialize",
@@ -81,6 +81,19 @@ def _runtime_snapshot(ti) -> dict:
     runtime = asdict(ti.runtime.stats())
     pools = ti.tools.memory_pool_stats()
     prog = ti.lang.impl.get_runtime().prog
+    active_tree_ids = list(prog.get_active_snode_tree_ids())
+    tree_stats = {}
+    for tree_id in active_tree_ids:
+        snapshot = dict(prog._debug_sparse_snode_tree_stats(tree_id))
+        snapshot["memory"] = dict(snapshot["memory"])
+        snapshot["listgen"] = dict(snapshot["listgen"])
+        snapshot["listgen"]["totals"] = dict(
+            snapshot["listgen"]["totals"]
+        )
+        snapshot["listgen"]["nodes"] = [
+            dict(node) for node in snapshot["listgen"]["nodes"]
+        ]
+        tree_stats[str(tree_id)] = snapshot
     return {
         "runtime_statistics_schema_version": runtime["schema_version"],
         "runtime_counters": {
@@ -103,7 +116,8 @@ def _runtime_snapshot(ti) -> dict:
             },
         },
         "lifecycle": {
-            "active_snode_tree_ids": list(prog.get_active_snode_tree_ids()),
+            "active_snode_tree_ids": active_tree_ids,
+            "snode_trees": tree_stats,
             "snode_field_mappings": int(
                 prog._debug_snode_field_mapping_count()
             ),
@@ -139,6 +153,8 @@ def _phase_sample(ti, callback) -> dict:
     ti.sync()
     duration_ns = time.perf_counter_ns() - started
     after = _runtime_snapshot(ti)
+    before_trees = before["lifecycle"]["snode_trees"]
+    after_trees = after["lifecycle"]["snode_trees"]
     return {
         "duration_ns": duration_ns,
         "runtime_counter_delta": _numeric_delta(
@@ -157,6 +173,20 @@ def _phase_sample(ti, callback) -> dict:
         },
         "lifecycle_before": before["lifecycle"],
         "lifecycle_after": after["lifecycle"],
+        "tree_memory_delta": {
+            tree_id: _numeric_delta(
+                before_trees[tree_id]["memory"],
+                after_trees[tree_id]["memory"],
+            )
+            for tree_id in sorted(before_trees.keys() & after_trees.keys())
+        },
+        "tree_listgen_delta": {
+            tree_id: _numeric_delta(
+                before_trees[tree_id]["listgen"]["totals"],
+                after_trees[tree_id]["listgen"]["totals"],
+            )
+            for tree_id in sorted(before_trees.keys() & after_trees.keys())
+        },
     }
 
 
@@ -263,6 +293,7 @@ def run_initialized(
     clear_accumulator()
     ti.sync()
 
+    ti.lang.impl.get_runtime().prog._debug_reset_sparse_listgen_stats()
     baseline = _runtime_snapshot(ti)
     phase_samples = {phase: [] for phase in PHASES}
     iteration_records = []
@@ -422,7 +453,7 @@ def run_initialized(
 
     return {
         "schema": SCHEMA,
-        "schema_version": 1,
+        "schema_version": 2,
         "arch": arch_name,
         "correct": True,
         "config": {
@@ -437,7 +468,12 @@ def run_initialized(
             "runtime_statistics_schema_version": (
                 baseline["runtime_statistics_schema_version"]
             ),
-            "memory_scope": "program_aggregate",
+            "memory_scope": "program_aggregate_plus_tree_inventory",
+            "program_memory_scope": "program_aggregate",
+            "tree_memory_scope": (
+                "tree_owned allocations plus backend-available logical "
+                "runtime resources"
+            ),
             "phase_scope": "callback_plus_backend_sync",
             "cold_struct_for_scope": (
                 "precompiled struct-for listgen plus body plus sync after "
@@ -449,15 +485,77 @@ def run_initialized(
             "body_direct_lookup_scope": (
                 "precompiled direct lookup range body plus sync"
             ),
-            "per_tree_memory_available": False,
+            "per_tree_memory_available": True,
+            "per_tree_listgen_decisions_available": True,
+            "per_tree_memory_contract": {
+                "all_backends_exact": [
+                    "tree_owned_reserved_bytes",
+                    "root_reserved_bytes",
+                    "sparse_pool_reserved_bytes",
+                ],
+                "llvm_exact": [
+                    "runtime_metadata_requested_bytes",
+                    "direct_ambient_requested_bytes",
+                    "allocator_payload_reserved_bytes",
+                    "allocator_payload_used_bytes",
+                    "allocator_bookkeeping_reserved_bytes",
+                    "active_list_reserved_bytes",
+                    "active_list_used_bytes",
+                    "allocator_in_use_elements",
+                    "allocator_free_elements",
+                    "allocator_recycled_elements",
+                ],
+                "program_shared": [
+                    "shared_listgen_workspace_reserved_bytes",
+                ],
+                "overlap_rule": (
+                    "LLVM logical runtime resources may be backed by the "
+                    "reported tree-owned CUDA pool or Program CPU reuse "
+                    "pool and must not be added to tree_owned_reserved_bytes"
+                ),
+            },
             "unavailable": [
-                "per_tree_metadata_reserved_bytes",
-                "per_tree_payload_reserved_committed_used_peak_bytes",
-                "per_tree_active_list_reserved_used_peak_bytes",
-                "per_tree_reclaimable_bytes",
-                "listgen_scanned_emitted_reuse_hit_rebuild_reason",
-                "vulkan_tree_local_device_requested_live_bytes",
+                "per_tree_payload_committed_peak_bytes",
+                "per_tree_active_list_peak_bytes",
+                "per_tree_reclaimable_or_releasable_bytes",
+                "llvm_candidate_slots_dispatched",
+                "gfx_tree_local_metadata_payload_active_list_split",
             ],
+            "listgen_contract": {
+                "all_backends_exact": [
+                    "requests",
+                    "rebuilds",
+                    "reuse_hits",
+                    "invalidations",
+                    "last_rebuild_reason",
+                ],
+                "gfx_exact": [
+                    "candidate_slots_dispatched",
+                    "resident_evictions",
+                ],
+                "cpu_exact": [
+                    "scanned_elements",
+                    "emitted_elements",
+                    "serial_rebuilds",
+                    "parallel_rebuilds",
+                ],
+                "cpu_work_units": {
+                    "scanned_elements": (
+                        "activity candidates plus hash buckets inspected"
+                    ),
+                    "emitted_elements": "active-list Element records appended",
+                },
+                "cpu_parallel_gate": (
+                    "nonroot generic listgen only; at least 64 parent-list "
+                    "entries, 65536 candidate slots, two CPU threads, and "
+                    "at most 64 MiB of shared prefix offsets"
+                ),
+                "decision_identity": "requests == rebuilds + reuse_hits",
+                "counter_scope": "cumulative_since_debug_reset",
+                "normal_path_overhead": (
+                    "disabled until the private debug reset is called"
+                ),
+            },
         },
         "phase_order": list(PHASES),
         "phase_summary": {

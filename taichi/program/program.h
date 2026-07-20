@@ -309,6 +309,10 @@ class TI_DLL_EXPORT Program {
 
   std::vector<int> get_active_snode_tree_ids() const;
 
+  SparseSNodeTreeStatistics debug_sparse_snode_tree_statistics(int tree_id);
+
+  void debug_reset_sparse_listgen_statistics();
+
   SNodeTreeLifecycleReadGuard acquire_snode_tree_lifecycle_read_guard();
 
   std::vector<SNodeTreeDependency> snapshot_snode_tree_dependencies(

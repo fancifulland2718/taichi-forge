@@ -12,6 +12,7 @@
 #include "taichi/runtime/llvm/llvm_context.h"
 #include "taichi/struct/snode_tree.h"
 #include "taichi/program/compile_config.h"
+#include "taichi/program/sparse_runtime_statistics.h"
 
 #include "taichi/system/threading.h"
 
@@ -35,6 +36,14 @@ class CpuDevice;
 
 class LlvmRuntimeExecutor {
  public:
+  struct CpuSparseListgenWork {
+    bool available{false};
+    std::uint64_t scanned_elements{0};
+    std::uint64_t emitted_elements{0};
+    bool parallel{false};
+    bool reused{false};
+  };
+
   LlvmRuntimeExecutor(CompileConfig &config, KernelProfilerBase *profiler);
   virtual ~LlvmRuntimeExecutor();
   /**
@@ -77,6 +86,12 @@ class LlvmRuntimeExecutor {
   // Lazily creates the host scheduler for CPU execution. CUDA/AMDGPU callers
   // receive nullptr and therefore never create unrelated CPU worker threads.
   ThreadPool *get_cpu_thread_pool();
+
+  // Debug-only CPU helpers. KernelLauncher calls begin immediately before a
+  // serial listgen offloaded task and reads the task-local sample immediately
+  // afterwards. CUDA/AMDGPU never call these host-pointer APIs.
+  void begin_cpu_sparse_listgen_work();
+  CpuSparseListgenWork read_cpu_sparse_listgen_work();
 
   LlvmDevice *llvm_device();
 
@@ -146,6 +161,9 @@ class LlvmRuntimeExecutor {
   void destroy_snode_tree(SNodeTree *snode_tree);
   std::size_t get_snode_num_dynamically_allocated(SNode *snode,
                                                   uint64 *result_buffer);
+  SparseSNodeTreeMemoryStatistics get_snode_tree_memory_statistics(
+      SNodeTree *snode_tree,
+      uint64 *result_buffer);
   void reset_hash_snode_probe_stats(uint64 *result_buffer);
   std::vector<int64> get_hash_snode_probe_stats(uint64 *result_buffer);
 
@@ -174,6 +192,7 @@ class LlvmRuntimeExecutor {
   // the tree is active; explicit tree destruction releases the matching
   // allocation after Program has synchronized outstanding work.
   std::unordered_map<int, DeviceAllocationUnique> sparse_tree_pool_allocs_;
+  std::unordered_map<int, std::size_t> sparse_tree_pool_sizes_;
 
   // good buddy
   friend LlvmProgramImpl;

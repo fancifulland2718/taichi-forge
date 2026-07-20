@@ -56,3 +56,48 @@ def test_non_dfs_snode_order():
 
     foo()  # Just make sure it doesn't crash
     ti.sync()
+
+
+@test_utils.test(
+    arch=ti.cuda,
+    offline_cache=False,
+    cuda_sparse_pool_auto_size=True,
+    cuda_sparse_per_snode_pool=True,
+    cuda_pointer_deterministic_slot=True,
+)
+def test_cuda_duplicate_pointer_and_bitmasked_activation():
+    value = ti.field(ti.i32)
+    pointer = ti.root.pointer(ti.i, 4)
+    bitmasked = pointer.bitmasked(ti.i, 32)
+    bitmasked.place(value)
+
+    workers = 8192
+    active_cells = 16
+
+    @ti.kernel
+    def scatter():
+        for worker in range(workers):
+            ti.atomic_add(value[worker % active_cells], 1)
+
+    @ti.kernel
+    def reduce() -> ti.i32:
+        total = 0
+        for i in value:
+            total += value[i]
+        return total
+
+    scatter()
+    assert reduce() == workers
+
+    # Topology-stable writes take the read-only active fast path.
+    scatter()
+    assert reduce() == 2 * workers
+
+    # Exercise both leaf-only and whole-pointer reactivation.
+    bitmasked.deactivate_all()
+    scatter()
+    assert reduce() == workers
+
+    pointer.deactivate_all()
+    scatter()
+    assert reduce() == workers

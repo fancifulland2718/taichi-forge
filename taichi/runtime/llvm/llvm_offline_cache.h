@@ -66,6 +66,7 @@ struct LlvmOfflineCache {
   struct FieldCacheData {
     struct SNodeCacheData {
       int id{0};
+      int parent_id{-1};
       SNodeType type = SNodeType::undefined;
       size_t cell_size_bytes{0};
       size_t chunk_size{0};
@@ -82,6 +83,7 @@ struct LlvmOfflineCache {
       int64_t total_num_cells_from_root{1};
 
       TI_IO_DEF(id,
+                parent_id,
                 type,
                 cell_size_bytes,
                 chunk_size,

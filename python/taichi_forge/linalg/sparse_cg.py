@@ -47,14 +47,6 @@ class SparseCG:
                 self.cg_solver = _ti_core.make_double_cg_solver(A.matrix, max_iter, atol, True)
             else:
                 raise TaichiRuntimeError(f"Unsupported CG dtype: {self.dtype}")
-            if isinstance(b, Ndarray):
-                self.cg_solver.set_b_ndarray(get_runtime().prog, b.arr)
-            elif isinstance(b, np.ndarray):
-                self.cg_solver.set_b(b)
-            if isinstance(x0, Ndarray):
-                self.cg_solver.set_x_ndarray(get_runtime().prog, x0.arr)
-            elif isinstance(x0, np.ndarray):
-                self.cg_solver.set_x(x0)
         else:
             raise TaichiRuntimeError(f"Unsupported CG arch: {self.ti_arch}")
 
@@ -73,6 +65,20 @@ class SparseCG:
                 self._record_solve_info(converged)
                 return x, converged
             raise TaichiRuntimeError(f"Unsupported CG RHS type: {type(self.b)}")
+        if isinstance(self.b, Ndarray):
+            self.cg_solver.set_b_ndarray(get_runtime().prog, self.b.arr)
+        elif isinstance(self.b, np.ndarray):
+            self.cg_solver.set_b(self.b)
+        else:
+            raise TaichiRuntimeError(f"Unsupported CG RHS type: {type(self.b)}")
+        if isinstance(self.x0, Ndarray):
+            self.cg_solver.set_x_ndarray(get_runtime().prog, self.x0.arr)
+        elif isinstance(self.x0, np.ndarray):
+            self.cg_solver.set_x(self.x0)
+        elif self.x0 is None:
+            self.cg_solver.reset_x()
+        else:
+            raise TaichiRuntimeError(f"Unsupported CG initial guess type: {type(self.x0)}")
         self.cg_solver.solve()
         converged = self.cg_solver.is_success()
         self._record_solve_info(converged)
@@ -85,3 +91,10 @@ class SparseCG:
             initial_residual_norm=self.cg_solver.get_initial_residual_norm(),
             residual_norm=self.cg_solver.get_residual_norm(),
         )
+
+    def _debug_runtime_stats(self):
+        """Returns private solve-plan resource and operation telemetry."""
+        snapshot = dict(self.cg_solver._debug_runtime_stats())
+        for section in ("identity", "operations", "resources", "transfers"):
+            snapshot[section] = dict(snapshot[section])
+        return snapshot

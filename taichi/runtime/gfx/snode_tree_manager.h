@@ -4,6 +4,7 @@
 
 #include "taichi/rhi/device.h"
 #include "taichi/codegen/spirv/snode_struct_compiler.h"
+#include "taichi/program/sparse_runtime_statistics.h"
 #include "taichi/struct/snode_tree.h"
 
 namespace taichi::lang {
@@ -35,6 +36,9 @@ class SNodeTreeManager {
   size_t get_field_in_tree_offset(int tree_id, const SNode *child);
 
   DevicePtr get_snode_tree_device_ptr(int tree_id);
+
+  SparseSNodeTreeMemoryStatistics get_memory_statistics(
+      SNodeTree *snode_tree) const;
 
  private:
   GfxRuntime *const runtime_;

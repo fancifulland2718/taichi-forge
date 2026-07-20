@@ -56,5 +56,15 @@ std::size_t KernelLauncher::debug_registered_kernel_count() {
   return config_.gfx_runtime_->debug_registered_kernel_count();
 }
 
+void KernelLauncher::debug_reset_sparse_listgen_statistics() {
+  config_.gfx_runtime_->debug_reset_sparse_listgen_statistics();
+}
+
+SparseSNodeTreeListgenStatistics
+KernelLauncher::debug_sparse_listgen_statistics(
+    const std::vector<int> &snode_ids) {
+  return config_.gfx_runtime_->debug_sparse_listgen_statistics(snode_ids);
+}
+
 }  // namespace gfx
 }  // namespace taichi::lang

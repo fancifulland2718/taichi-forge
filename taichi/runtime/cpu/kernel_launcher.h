@@ -14,9 +14,15 @@ class KernelLauncher : public LLVM::KernelLauncher {
 
   struct Context {
     using TaskFunc = int32 (*)(void *);
+    struct SparseTaskMetadata {
+      int sparse_list_op{OffloadedTask::kSparseListOpNone};
+      int snode_id{-1};
+      int parent_snode_id{-1};
+    };
     JITModule *jit_module{nullptr};
     std::vector<int> snode_tree_ids;
     std::vector<TaskFunc> task_funcs;
+    std::vector<SparseTaskMetadata> sparse_task_metadata;
     std::vector<std::pair<std::vector<int>, Callable::Parameter>> parameters;
   };
 
@@ -28,6 +34,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
       const LLVM::CompiledKernelData &compiled) override;
   void retire_snode_tree(int tree_id) override;
   std::size_t debug_registered_kernel_count() override;
+  void debug_reset_sparse_listgen_statistics() override;
+  SparseSNodeTreeListgenStatistics debug_sparse_listgen_statistics(
+      const std::vector<int> &snode_ids) override;
 
  private:
   // A CPU kernel can contain multiple offloaded tasks that share LLVM runtime
@@ -37,6 +46,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
   // inside each kernel and asynchronous producer/render host threads.
   std::mutex execution_mutex_;
   std::unordered_map<int, std::shared_ptr<const Context>> contexts_;
+  bool sparse_listgen_telemetry_enabled_{false};
+  std::unordered_map<int, SparseListgenNodeStatistics>
+      sparse_listgen_telemetry_;
 };
 
 }  // namespace cpu

@@ -9,11 +9,50 @@
 
 #include "Eigen/Sparse"
 
+#include <atomic>
+#include <cstdint>
 #include <mutex>
 
 namespace taichi::lang {
 
 class SparseMatrix;
+
+// Private diagnostic inventory for the algebraic sparse operator boundary.
+// Persistent matrix/SpMV resources are operator-owned; input/output ndarrays
+// and solver Krylov vectors are deliberately excluded.
+struct SparseMatrixRuntimeStatistics {
+  std::string backend_family{"unknown"};
+  std::string storage_format{"unknown"};
+  std::string dtype{"unknown"};
+  int rows{0};
+  int cols{0};
+  int nnz{0};
+
+  std::uint64_t pattern_version{0};
+  std::uint64_t numeric_version{0};
+  std::uint64_t pattern_builds{0};
+  std::uint64_t numeric_updates{0};
+  std::uint64_t numeric_update_bytes{0};
+  std::uint64_t spmv_calls{0};
+  std::uint64_t spmv_plan_builds{0};
+  std::uint64_t spmv_plan_reuses{0};
+  std::uint64_t spmv_handle_creations{0};
+  std::uint64_t dense_vector_descriptor_creations{0};
+  std::uint64_t dense_vector_descriptor_rebinds{0};
+  std::uint64_t spmv_workspace_allocations{0};
+
+  std::uint64_t pattern_reserved_bytes{0};
+  std::uint64_t values_reserved_bytes{0};
+  std::uint64_t spmv_workspace_reserved_bytes{0};
+  std::uint64_t operator_owned_reserved_bytes{0};
+  std::uint64_t matrix_descriptor_count{0};
+  std::uint64_t dense_vector_descriptor_count{0};
+  std::uint64_t spmv_handle_count{0};
+
+  std::uint64_t host_to_device_bytes{0};
+  std::uint64_t device_to_host_bytes{0};
+  std::uint64_t device_to_device_bytes{0};
+};
 
 class SparseMatrixBuilder {
  public:
@@ -88,6 +127,13 @@ class SparseMatrix {
   virtual void update_values(Program *prog, const Ndarray &values) {
     TI_NOT_IMPLEMENTED;
   }
+  virtual SparseMatrixRuntimeStatistics debug_runtime_statistics() const;
+
+  // Assembly helpers use direct backend copies which do not flow through a
+  // Program launch. Attribute those bytes to the resulting operator here.
+  void record_transfer_bytes(std::uint64_t host_to_device,
+                             std::uint64_t device_to_host,
+                             std::uint64_t device_to_device);
   inline const int num_rows() const {
     return rows_;
   }
@@ -123,9 +169,38 @@ class SparseMatrix {
   }
 
  protected:
+  SparseMatrixRuntimeStatistics make_runtime_statistics(
+      const std::string &backend_family,
+      const std::string &storage_format) const;
+  void record_pattern_build();
+  void record_numeric_update(std::uint64_t bytes);
+  void record_spmv_call();
+  void record_spmv_plan_build();
+  void record_spmv_plan_reuse();
+  void record_spmv_handle_creation();
+  void record_dense_vector_descriptor_creation(bool rebind);
+  void record_spmv_workspace_allocation();
+
   int rows_{0};
   int cols_{0};
   DataType dtype_{PrimitiveType::f32};
+
+ private:
+  std::atomic<std::uint64_t> pattern_version_{0};
+  std::atomic<std::uint64_t> numeric_version_{0};
+  std::atomic<std::uint64_t> pattern_builds_{0};
+  std::atomic<std::uint64_t> numeric_updates_{0};
+  std::atomic<std::uint64_t> numeric_update_bytes_{0};
+  std::atomic<std::uint64_t> spmv_calls_{0};
+  std::atomic<std::uint64_t> spmv_plan_builds_{0};
+  std::atomic<std::uint64_t> spmv_plan_reuses_{0};
+  std::atomic<std::uint64_t> spmv_handle_creations_{0};
+  std::atomic<std::uint64_t> dense_vector_descriptor_creations_{0};
+  std::atomic<std::uint64_t> dense_vector_descriptor_rebinds_{0};
+  std::atomic<std::uint64_t> spmv_workspace_allocations_{0};
+  std::atomic<std::uint64_t> host_to_device_bytes_{0};
+  std::atomic<std::uint64_t> device_to_host_bytes_{0};
+  std::atomic<std::uint64_t> device_to_device_bytes_{0};
 };
 
 template <class EigenMatrix>
@@ -137,13 +212,16 @@ class EigenSparseMatrix : public SparseMatrix {
   EigenSparseMatrix(EigenSparseMatrix &sm)
       : SparseMatrix(sm.num_rows(), sm.num_cols(), sm.dtype_),
         matrix_(sm.matrix_) {
+    record_pattern_build();
   }
   EigenSparseMatrix(EigenSparseMatrix &&sm)
       : SparseMatrix(sm.num_rows(), sm.num_cols(), sm.dtype_),
         matrix_(sm.matrix_) {
+    record_pattern_build();
   }
   explicit EigenSparseMatrix(const EigenMatrix &em)
       : SparseMatrix(em.rows(), em.cols()), matrix_(em) {
+    record_pattern_build();
   }
 
   ~EigenSparseMatrix() override = default;
@@ -164,6 +242,7 @@ class EigenSparseMatrix : public SparseMatrix {
 
   virtual EigenSparseMatrix &operator+=(const EigenSparseMatrix &other) {
     this->matrix_ += other.matrix_;
+    record_pattern_build();
     return *this;
   };
 
@@ -174,6 +253,7 @@ class EigenSparseMatrix : public SparseMatrix {
 
   virtual EigenSparseMatrix &operator-=(const EigenSparseMatrix &other) {
     this->matrix_ -= other.matrix_;
+    record_pattern_build();
     return *this;
   }
 
@@ -184,6 +264,9 @@ class EigenSparseMatrix : public SparseMatrix {
 
   virtual EigenSparseMatrix &operator*=(float scale) {
     this->matrix_ *= scale;
+    record_numeric_update(
+        static_cast<std::uint64_t>(matrix_.nonZeros()) *
+        data_type_size(dtype_));
     return *this;
   }
 
@@ -216,10 +299,14 @@ class EigenSparseMatrix : public SparseMatrix {
   template <typename T>
   void set_element(int row, int col, T value) {
     matrix_.coeffRef(row, col) = value;
+    // coeffRef may insert a new entry. Treat it as a pattern mutation rather
+    // than trying to infer insertion from Eigen's compressed state.
+    record_pattern_build();
   }
 
   template <class VT>
   VT mat_vec_mul(const Eigen::Ref<const VT> &b) {
+    record_spmv_call();
     return matrix_ * b;
   }
 
@@ -230,6 +317,24 @@ class EigenSparseMatrix : public SparseMatrix {
   }
 
   void update_values(Program *prog, const Ndarray &values) override;
+
+  SparseMatrixRuntimeStatistics debug_runtime_statistics() const override {
+    auto result = make_runtime_statistics(
+        "cpu", EigenMatrix::IsRowMajor ? "csr" : "csc");
+    using StorageIndex = typename EigenMatrix::StorageIndex;
+    using Scalar = typename EigenMatrix::Scalar;
+    const auto allocated =
+        static_cast<std::uint64_t>(matrix_.data().allocatedSize());
+    const auto outer = static_cast<std::uint64_t>(matrix_.outerSize());
+    result.nnz = static_cast<int>(matrix_.nonZeros());
+    result.pattern_reserved_bytes =
+        (outer + 1 + allocated + (matrix_.isCompressed() ? 0 : outer)) *
+        sizeof(StorageIndex);
+    result.values_reserved_bytes = allocated * sizeof(Scalar);
+    result.operator_owned_reserved_bytes = result.pattern_reserved_bytes +
+                                           result.values_reserved_bytes;
+    return result;
+  }
 
  private:
   EigenMatrix matrix_;
@@ -262,6 +367,7 @@ class CuSparseMatrix : public SparseMatrix {
         csr_col_ind_(csr_col_ind),
         csr_val_(csr_val),
         nnz_(nnz) {
+    record_pattern_build();
   }
   CuSparseMatrix(const CuSparseMatrix &sm)
       : SparseMatrix(sm.rows_, sm.cols_, sm.dtype_), matrix_(sm.matrix_) {
@@ -339,6 +445,8 @@ class CuSparseMatrix : public SparseMatrix {
 
   void update_values(Program *prog, const Ndarray &values) override;
 
+  SparseMatrixRuntimeStatistics debug_runtime_statistics() const override;
+
   void mmwrite(const std::string &filename) override;
 
  private:
@@ -349,7 +457,7 @@ class CuSparseMatrix : public SparseMatrix {
   void *csr_col_ind_{nullptr};
   void *csr_val_{nullptr};
   int nnz_{0};
-  std::mutex spmv_mutex_;
+  mutable std::mutex spmv_mutex_;
   cusparseHandle_t spmv_handle_{nullptr};
   cusparseDnVecDescr_t spmv_vec_x_{nullptr};
   cusparseDnVecDescr_t spmv_vec_y_{nullptr};

@@ -80,6 +80,96 @@ T2 get_element_from_csr(int row,
 
 namespace taichi::lang {
 
+SparseMatrixRuntimeStatistics SparseMatrix::make_runtime_statistics(
+    const std::string &backend_family,
+    const std::string &storage_format) const {
+  SparseMatrixRuntimeStatistics result;
+  result.backend_family = backend_family;
+  result.storage_format = storage_format;
+  result.dtype = data_type_name(dtype_);
+  result.rows = rows_;
+  result.cols = cols_;
+  result.pattern_version = pattern_version_.load(std::memory_order_relaxed);
+  result.numeric_version = numeric_version_.load(std::memory_order_relaxed);
+  result.pattern_builds = pattern_builds_.load(std::memory_order_relaxed);
+  result.numeric_updates = numeric_updates_.load(std::memory_order_relaxed);
+  result.numeric_update_bytes =
+      numeric_update_bytes_.load(std::memory_order_relaxed);
+  result.spmv_calls = spmv_calls_.load(std::memory_order_relaxed);
+  result.spmv_plan_builds =
+      spmv_plan_builds_.load(std::memory_order_relaxed);
+  result.spmv_plan_reuses =
+      spmv_plan_reuses_.load(std::memory_order_relaxed);
+  result.spmv_handle_creations =
+      spmv_handle_creations_.load(std::memory_order_relaxed);
+  result.dense_vector_descriptor_creations =
+      dense_vector_descriptor_creations_.load(std::memory_order_relaxed);
+  result.dense_vector_descriptor_rebinds =
+      dense_vector_descriptor_rebinds_.load(std::memory_order_relaxed);
+  result.spmv_workspace_allocations =
+      spmv_workspace_allocations_.load(std::memory_order_relaxed);
+  result.host_to_device_bytes =
+      host_to_device_bytes_.load(std::memory_order_relaxed);
+  result.device_to_host_bytes =
+      device_to_host_bytes_.load(std::memory_order_relaxed);
+  result.device_to_device_bytes =
+      device_to_device_bytes_.load(std::memory_order_relaxed);
+  return result;
+}
+
+SparseMatrixRuntimeStatistics SparseMatrix::debug_runtime_statistics() const {
+  return make_runtime_statistics("unknown", "unknown");
+}
+
+void SparseMatrix::record_transfer_bytes(std::uint64_t host_to_device,
+                                         std::uint64_t device_to_host,
+                                         std::uint64_t device_to_device) {
+  host_to_device_bytes_.fetch_add(host_to_device, std::memory_order_relaxed);
+  device_to_host_bytes_.fetch_add(device_to_host, std::memory_order_relaxed);
+  device_to_device_bytes_.fetch_add(device_to_device,
+                                    std::memory_order_relaxed);
+}
+
+void SparseMatrix::record_pattern_build() {
+  pattern_builds_.fetch_add(1, std::memory_order_relaxed);
+  pattern_version_.fetch_add(1, std::memory_order_relaxed);
+  numeric_version_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void SparseMatrix::record_numeric_update(std::uint64_t bytes) {
+  numeric_updates_.fetch_add(1, std::memory_order_relaxed);
+  numeric_update_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+  numeric_version_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void SparseMatrix::record_spmv_call() {
+  spmv_calls_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void SparseMatrix::record_spmv_plan_build() {
+  spmv_plan_builds_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void SparseMatrix::record_spmv_plan_reuse() {
+  spmv_plan_reuses_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void SparseMatrix::record_spmv_handle_creation() {
+  spmv_handle_creations_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void SparseMatrix::record_dense_vector_descriptor_creation(bool rebind) {
+  dense_vector_descriptor_creations_.fetch_add(1, std::memory_order_relaxed);
+  if (rebind) {
+    dense_vector_descriptor_rebinds_.fetch_add(1,
+                                               std::memory_order_relaxed);
+  }
+}
+
+void SparseMatrix::record_spmv_workspace_allocation() {
+  spmv_workspace_allocations_.fetch_add(1, std::memory_order_relaxed);
+}
+
 SparseMatrixBuilder::SparseMatrixBuilder(int rows,
                                          int cols,
                                          int max_num_triplets,
@@ -243,6 +333,9 @@ std::unique_ptr<SparseMatrix> SparseMatrixBuilder::build_cuda() {
   CUDADriver::get_instance().memcpy_host_to_device(
       value_device, (void *)value_host, entry_size * sizeof(float32));
   sm->build_csr_from_coo(row_device, col_device, value_device, entry_size);
+  sm->record_transfer_bytes(
+      entry_size * (sizeof(int) + sizeof(int) + sizeof(float32)),
+      sizeof(int) + len * sizeof(float32), 0);
   clear();
   free(row_host);
   free(col_host);
@@ -292,6 +385,7 @@ void EigenSparseMatrix<EigenMatrix>::build_triplets(void *triplets_adr) {
   } else {
     TI_ERROR("Unsupported sparse matrix data type {}!", sdtype);
   }
+  record_pattern_build();
 }
 
 template <class EigenMatrix>
@@ -300,6 +394,7 @@ void EigenSparseMatrix<EigenMatrix>::spmv(Program *prog,
                                           const Ndarray &y) {
   size_t dX = prog->get_ndarray_data_ptr_as_int(&x);
   size_t dY = prog->get_ndarray_data_ptr_as_int(&y);
+  record_spmv_call();
   std::string sdtype = taichi::lang::data_type_name(dtype_);
   if (sdtype == "f32") {
     Eigen::Map<Eigen::VectorXf>((float *)dY, rows_) =
@@ -329,6 +424,7 @@ void EigenSparseMatrix<EigenMatrix>::update_values(
               nnz, data_type_name(dtype_), values.get_nelement(),
               values.get_element_size());
   matrix_.makeCompressed();
+  record_numeric_update(nnz * value_bytes);
   if (nnz == 0) {
     return;
   }
@@ -477,6 +573,8 @@ void CuSparseMatrix::build_csr_from_coo(void *coo_row_ptr,
   csr_col_ind_ = coo_col_ptr;
   csr_val_ = coo_values_ptr;
   nnz_ = nnz;
+  record_transfer_bytes(0, 0, nnz * sizeof(float));
+  record_pattern_build();
 #endif
 }
 
@@ -510,8 +608,10 @@ void CuSparseMatrix::update_values(Program *prog, const Ndarray &values) {
                   values.get_nelement() != static_cast<std::size_t>(nnz_) ||
                   values.get_element_size() != sizeof(float32),
               "CUDA SparseMatrix value-only update expects exactly {} scalar "
-              "f32 values in CSR order, got {} element(s) of {} byte(s).",
-              nnz_, values.get_nelement(), values.get_element_size());
+               "f32 values in CSR order, got {} element(s) of {} byte(s).",
+               nnz_, values.get_nelement(), values.get_element_size());
+  record_numeric_update(
+      static_cast<std::uint64_t>(nnz_) * sizeof(float32));
   if (nnz_ == 0) {
     return;
   }
@@ -519,6 +619,7 @@ void CuSparseMatrix::update_values(Program *prog, const Ndarray &values) {
   std::lock_guard<std::mutex> lock(spmv_mutex_);
   CUDADriver::get_instance().memcpy_device_to_device(
       csr_val_, reinterpret_cast<void *>(src), nnz_ * sizeof(float32));
+  record_transfer_bytes(0, 0, nnz_ * sizeof(float32));
 #else
   TI_NOT_IMPLEMENTED;
 #endif
@@ -826,37 +927,75 @@ std::unique_ptr<SparseMatrix> CuSparseMatrix::transpose() const {
 void CuSparseMatrix::spmv(size_t dX, size_t dY) {
 #if defined(TI_WITH_CUDA)
   std::lock_guard<std::mutex> lock(spmv_mutex_);
-  if (!spmv_handle_)
+  record_spmv_call();
+  if (!spmv_handle_) {
     CUSPARSEDriver::get_instance().cpCreate(&spmv_handle_);
+    record_spmv_handle_creation();
+  }
   if (!spmv_vec_x_ || spmv_x_ptr_ != dX) {
+    const bool rebind = spmv_vec_x_ != nullptr;
     if (spmv_vec_x_)
       CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_x_);
     CUSPARSEDriver::get_instance().cpCreateDnVec(&spmv_vec_x_, cols_,
                                                  (void *)dX, CUDA_R_32F);
     spmv_x_ptr_ = dX;
+    record_dense_vector_descriptor_creation(rebind);
   }
   if (!spmv_vec_y_ || spmv_y_ptr_ != dY) {
+    const bool rebind = spmv_vec_y_ != nullptr;
     if (spmv_vec_y_)
       CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_y_);
     CUSPARSEDriver::get_instance().cpCreateDnVec(&spmv_vec_y_, rows_,
                                                  (void *)dY, CUDA_R_32F);
     spmv_y_ptr_ = dY;
+    record_dense_vector_descriptor_creation(rebind);
   }
 
   float alpha = 1.0f, beta = 0.0f;
   if (!spmv_buffer_initialized_) {
+    record_spmv_plan_build();
     CUSPARSEDriver::get_instance().cpSpMV_bufferSize(
         spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matrix_,
         spmv_vec_x_, &beta, spmv_vec_y_, CUDA_R_32F,
         CUSPARSE_SPMV_CSR_ALG1, &spmv_buffer_size_);
-    if (spmv_buffer_size_ > 0)
+    if (spmv_buffer_size_ > 0) {
       CUDADriver::get_instance().malloc(&spmv_buffer_, spmv_buffer_size_);
+      record_spmv_workspace_allocation();
+    }
     spmv_buffer_initialized_ = true;
+  } else {
+    record_spmv_plan_reuse();
   }
   CUSPARSEDriver::get_instance().cpSpMV(
       spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matrix_,
       spmv_vec_x_, &beta, spmv_vec_y_, CUDA_R_32F,
       CUSPARSE_SPMV_CSR_ALG1, spmv_buffer_);
+#endif
+}
+
+SparseMatrixRuntimeStatistics CuSparseMatrix::debug_runtime_statistics() const {
+#if defined(TI_WITH_CUDA)
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  auto result = make_runtime_statistics("cuda", "csr");
+  result.nnz = nnz_;
+  result.pattern_reserved_bytes =
+      (static_cast<std::uint64_t>(rows_) + 1 +
+       static_cast<std::uint64_t>(nnz_)) *
+      sizeof(int);
+  result.values_reserved_bytes =
+      static_cast<std::uint64_t>(nnz_) * sizeof(float32);
+  result.spmv_workspace_reserved_bytes =
+      spmv_buffer_initialized_ ? spmv_buffer_size_ : 0;
+  result.operator_owned_reserved_bytes = result.pattern_reserved_bytes +
+                                         result.values_reserved_bytes +
+                                         result.spmv_workspace_reserved_bytes;
+  result.matrix_descriptor_count = matrix_ != nullptr ? 1 : 0;
+  result.dense_vector_descriptor_count =
+      (spmv_vec_x_ != nullptr ? 1 : 0) + (spmv_vec_y_ != nullptr ? 1 : 0);
+  result.spmv_handle_count = spmv_handle_ != nullptr ? 1 : 0;
+  return result;
+#else
+  return make_runtime_statistics("cuda", "csr");
 #endif
 }
 

@@ -100,3 +100,78 @@ def test_sparse_matrix_vector_multiplication3(dtype, storage_format):
     res = np.array([28, 36, 44, 52, 60, 68, 76, 84])
     for i in range(n):
         assert x[i] == res[i]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda])
+def test_sparse_matrix_operator_runtime_statistics():
+    n = 4
+    builder = ti.linalg.SparseMatrixBuilder(
+        n, n, max_num_triplets=n, dtype=ti.f32, storage_format="row_major"
+    )
+
+    @ti.kernel
+    def fill(matrix: ti.types.sparse_matrix_builder()):
+        for i in range(n):
+            matrix[i, i] += i + 1
+
+    fill(builder)
+    matrix = builder.build()
+    before = matrix._debug_runtime_stats()
+    identity = before["identity"]
+    resources = before["resources"]
+    operations = before["operations"]
+    assert before["schema_version"] == 1
+    assert identity["backend_family"] in ("cpu", "cuda")
+    assert identity["rows"] == n
+    assert identity["cols"] == n
+    assert identity["nnz"] == n
+    assert identity["pattern_version"] == 1
+    assert identity["numeric_version"] == 1
+    assert operations["pattern_builds"] == 1
+    assert resources["pattern_reserved_bytes"] > 0
+    assert resources["values_reserved_bytes"] >= n * 4
+    assert resources["operator_owned_reserved_bytes"] == (
+        resources["pattern_reserved_bytes"]
+        + resources["values_reserved_bytes"]
+        + resources["spmv_workspace_reserved_bytes"]
+    )
+
+    x = ti.ndarray(dtype=ti.f32, shape=n)
+    y = ti.ndarray(dtype=ti.f32, shape=n)
+    x.fill(1)
+    prog = ti.lang.impl.get_runtime().prog
+    matrix.matrix.spmv(prog, x.arr, y.arr)
+    matrix.matrix.spmv(prog, x.arr, y.arr)
+    ti.sync()
+
+    after_spmv = matrix._debug_runtime_stats()
+    operations = after_spmv["operations"]
+    resources = after_spmv["resources"]
+    assert operations["spmv_calls"] == 2
+    if identity["backend_family"] == "cpu":
+        assert operations["spmv_plan_builds"] == 0
+        assert operations["spmv_plan_reuses"] == 0
+        assert resources["spmv_workspace_reserved_bytes"] == 0
+        assert resources["matrix_descriptor_count"] == 0
+    else:
+        assert operations["spmv_plan_builds"] == 1
+        assert operations["spmv_plan_reuses"] == 1
+        assert operations["spmv_handle_creations"] == 1
+        assert operations["dense_vector_descriptor_creations"] == 2
+        assert operations["dense_vector_descriptor_rebinds"] == 0
+        assert resources["matrix_descriptor_count"] == 1
+        assert resources["dense_vector_descriptor_count"] == 2
+        assert resources["spmv_handle_count"] == 1
+        assert after_spmv["transfers"]["host_to_device_bytes"] > 0
+        assert after_spmv["transfers"]["device_to_host_bytes"] > 0
+
+    values = ti.ndarray(dtype=ti.f32, shape=n)
+    values.fill(2)
+    matrix._update_values(values)
+    updated = matrix._debug_runtime_stats()
+    assert updated["identity"]["pattern_version"] == 1
+    assert updated["identity"]["numeric_version"] == 2
+    assert updated["operations"]["numeric_updates"] == 1
+    assert updated["operations"]["numeric_update_bytes"] == n * 4
+    if identity["backend_family"] == "cuda":
+        assert updated["transfers"]["device_to_device_bytes"] >= n * 4

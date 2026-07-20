@@ -5443,6 +5443,44 @@ std::vector<int> Program::get_active_snode_tree_ids() const {
   return active_ids;
 }
 
+SparseSNodeTreeStatistics Program::debug_sparse_snode_tree_statistics(
+    int tree_id) {
+  std::shared_lock<std::shared_mutex> lifecycle_lock(
+      snode_tree_lifecycle_mutex_);
+  TI_ERROR_IF(tree_id < 0 ||
+                  static_cast<std::size_t>(tree_id) >= snode_trees_.size() ||
+                  static_cast<std::size_t>(tree_id) >=
+                      snode_tree_active_.size() ||
+                  !snode_tree_active_[tree_id] ||
+                  snode_trees_[tree_id] == nullptr,
+              "SNodeTree id={} is no longer active.", tree_id);
+
+  SNodeTree *tree = snode_trees_[tree_id].get();
+  SparseSNodeTreeStatistics result;
+  result.tree_id = tree_id;
+  result.generation = tree->generation();
+  result.layout_fingerprint = tree->layout_fingerprint();
+  result.backend = compile_config().arch;
+  result.memory = program_impl_->get_snode_tree_memory_statistics(
+      tree, result_buffer);
+  std::vector<int> snode_ids;
+  std::function<void(SNode *)> collect_snode_ids = [&](SNode *snode) {
+    snode_ids.push_back(snode->id);
+    for (const auto &child : snode->ch) {
+      collect_snode_ids(child.get());
+    }
+  };
+  collect_snode_ids(tree->root());
+  std::sort(snode_ids.begin(), snode_ids.end());
+  result.listgen = program_impl_->get_kernel_launcher()
+                       .debug_sparse_listgen_statistics(snode_ids);
+  return result;
+}
+
+void Program::debug_reset_sparse_listgen_statistics() {
+  program_impl_->get_kernel_launcher().debug_reset_sparse_listgen_statistics();
+}
+
 SNode *Program::get_snode_root(int tree_id) {
   std::shared_lock<std::shared_mutex> lifecycle_lock(
       snode_tree_lifecycle_mutex_);

@@ -9,6 +9,7 @@
 #include "taichi/program/snode_expr_utils.h"
 #include "taichi/program/kernel_profiler.h"
 #include "taichi/program/kernel_launcher.h"
+#include "taichi/program/sparse_runtime_statistics.h"
 #include "taichi/rhi/device.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/codegen/kernel_compiler.h"
@@ -59,6 +60,12 @@ class ProgramImpl {
   virtual std::size_t get_snode_num_dynamically_allocated(
       SNode *snode,
       uint64 *result_buffer) = 0;
+
+  virtual SparseSNodeTreeMemoryStatistics get_snode_tree_memory_statistics(
+      SNodeTree *snode_tree,
+      uint64 *result_buffer) {
+    return {};
+  }
 
   virtual void reset_hash_snode_probe_stats(uint64 *result_buffer) {
   }

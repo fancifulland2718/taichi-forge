@@ -18,10 +18,29 @@ void Bitmasked_activate(Ptr meta, Ptr node, int i) {
   auto data_section_size = element_size * num_elements;
   auto mask_begin = (u32 *)(node + data_section_size);
   u32 bit = 1UL << (i % 32);
+#if ARCH_cuda
+  volatile u32 *mask_word = &mask_begin[i / 32];
+  if ((*mask_word & bit) != 0) {
+    return;
+  }
+  // A data-cell address uniquely identifies (container, i). Coalesce only
+  // exact duplicate activations; combining different bits would require a
+  // masked warp OR reduction and a separate capability/fallback contract.
+  u32 mask = cuda_active_mask();
+  uint64 cell = (uint64)(node + (std::size_t)element_size * (std::size_t)i);
+  if (cuda_warp_is_representative(mask, cell)) {
+    u32 prev = atomic_or_u32((u32 *)mask_word, bit);
+    if ((prev & bit) == 0) {
+      mark_element_lists_dirty_if_reuse(smeta);
+    }
+  }
+  warp_barrier(mask);
+#else
   u32 prev = atomic_or_u32(&mask_begin[i / 32], bit);
   if ((prev & bit) == 0) {
     mark_element_lists_dirty_if_reuse(smeta);
   }
+#endif
 }
 
 void Bitmasked_deactivate(Ptr meta, Ptr node, int i) {

@@ -52,6 +52,14 @@ class GfxProgramImpl : public ProgramImpl {
     snode_tree_mgr_->destroy_snode_tree(snode_tree);
   }
 
+  SparseSNodeTreeMemoryStatistics get_snode_tree_memory_statistics(
+      SNodeTree *snode_tree,
+      uint64 *result_buffer) override {
+    (void)result_buffer;
+    TI_ASSERT(snode_tree_mgr_ != nullptr);
+    return snode_tree_mgr_->get_memory_statistics(snode_tree);
+  }
+
   DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,
                                              uint64 *result_buffer) override;
   DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,

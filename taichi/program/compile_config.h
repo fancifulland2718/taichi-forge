@@ -211,9 +211,13 @@ struct CompileConfig {
   // When true, eligible pointer SNodes (num_cells_per_container ==
   // total_num_cells_from_root, i.e. single-instance) skip the device-side
   // NodeManager bump allocator and use `atomicCAS(slot, 0, pool_base + i *
-  // element_size)` to activate. Requires `cuda_sparse_per_snode_pool == true`
-  // (Phase 1-D) for the dedicated pool region. Gate is checked at codegen
-  // time; ineligible SNodes silently fall back to the legacy
+  // element_size)` to activate. Requires the default auto-sized per-SNode
+  // pool path (`cuda_sparse_per_snode_pool && cuda_sparse_pool_auto_size`,
+  // with no explicit fraction/size override) because the address comes from
+  // its dedicated pool region. CUDA device-memory-pool support is also
+  // required and disables the flag during executor initialization if absent.
+  // Gate is checked at codegen time; ineligible configurations and SNodes
+  // silently fall back to the legacy
   // NodeManager::allocate path. Default true: CS matrix 2026-05-07 shows
   // consistent positive gain on pointer rebuild workloads while neutral on
   // topology-stable struct-for reuse cases.
@@ -550,6 +554,7 @@ struct CompileConfig {
 
   CompileConfig();
 
+  bool cuda_pointer_deterministic_pool_enabled() const;
   void fit();
 };
 

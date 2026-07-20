@@ -26,6 +26,15 @@ int64 KernelLauncher::get_sparse_list_version(int snode_id) const {
 }
 
 bool KernelLauncher::sparse_list_task_is_current(const OffloadedTask &task) {
+  SparseListgenNodeStatistics *telemetry = nullptr;
+  if (sparse_listgen_telemetry_enabled_ &&
+      task.sparse_list_op == OffloadedTask::kSparseListOpListgen &&
+      task.sparse_list_snode_id >= 0) {
+    telemetry = &sparse_listgen_telemetry_[task.sparse_list_snode_id];
+    telemetry->snode_id = task.sparse_list_snode_id;
+    telemetry->parent_snode_id = task.sparse_list_parent_snode_id;
+    ++telemetry->requests;
+  }
   if (task.sparse_list_op == OffloadedTask::kSparseListOpNone ||
       task.sparse_list_snode_id < 0 ||
       task.sparse_list_parent_snode_id < 0) {
@@ -34,6 +43,9 @@ bool KernelLauncher::sparse_list_task_is_current(const OffloadedTask &task) {
 
   auto it = sparse_list_states_.find(task.sparse_list_snode_id);
   if (it == sparse_list_states_.end()) {
+    if (telemetry != nullptr) {
+      telemetry->last_rebuild_reason = "cold";
+    }
     if (listgen_reuse_adaptive_) {
       auto &state = sparse_list_states_[task.sparse_list_snode_id];
       record_sparse_list_reuse_sample(state, /*would_skip=*/false);
@@ -46,6 +58,20 @@ bool KernelLauncher::sparse_list_task_is_current(const OffloadedTask &task) {
                    get_sparse_list_version(
                      task.sparse_list_parent_snode_id);
   record_sparse_list_reuse_sample(state, would_skip);
+  if (telemetry != nullptr) {
+    if (would_skip && !state.adaptive_disabled) {
+      ++telemetry->reuse_hits;
+    } else if (state.clean_epoch != state.dirty_epoch) {
+      telemetry->last_rebuild_reason = "topology_dirty";
+    } else if (state.clean_parent_version !=
+               get_sparse_list_version(task.sparse_list_parent_snode_id)) {
+      telemetry->last_rebuild_reason = "parent_version_changed";
+    } else if (state.adaptive_disabled) {
+      telemetry->last_rebuild_reason = "adaptive_reuse_disabled";
+    } else {
+      telemetry->last_rebuild_reason = "not_current";
+    }
+  }
   return would_skip && !state.adaptive_disabled;
 }
 
@@ -88,6 +114,13 @@ void KernelLauncher::mark_sparse_list_task_launched(
     return;
   }
 
+  if (sparse_listgen_telemetry_enabled_) {
+    auto &telemetry = sparse_listgen_telemetry_[task.sparse_list_snode_id];
+    telemetry.snode_id = task.sparse_list_snode_id;
+    telemetry.parent_snode_id = task.sparse_list_parent_snode_id;
+    ++telemetry.rebuilds;
+  }
+
   auto &state = sparse_list_states_[task.sparse_list_snode_id];
   state.clean_epoch = state.dirty_epoch;
   state.clean_parent_version =
@@ -99,10 +132,21 @@ void KernelLauncher::invalidate_sparse_list_cache(
     int sparse_mutation_snode_id) {
   if (sparse_mutation_snode_id >= 0) {
     sparse_list_states_[sparse_mutation_snode_id].dirty_epoch++;
+    if (sparse_listgen_telemetry_enabled_) {
+      auto &telemetry =
+          sparse_listgen_telemetry_[sparse_mutation_snode_id];
+      telemetry.snode_id = sparse_mutation_snode_id;
+      ++telemetry.invalidations;
+    }
     return;
   }
   for (auto &kv : sparse_list_states_) {
     kv.second.dirty_epoch++;
+    if (sparse_listgen_telemetry_enabled_) {
+      auto &telemetry = sparse_listgen_telemetry_[kv.first];
+      telemetry.snode_id = kv.first;
+      ++telemetry.invalidations;
+    }
   }
 }
 
@@ -527,12 +571,18 @@ void KernelLauncher::retire_snode_tree(int tree_id) {
   std::unique_lock<std::shared_mutex> registration_lock(registration_mutex());
   auto *executor = get_runtime_executor();
   bool retired_any = false;
+  std::vector<int> retired_sparse_snode_ids;
   for (auto iter = contexts_.begin(); iter != contexts_.end();) {
     const auto &context = iter->second;
     if (!std::binary_search(context->snode_tree_ids.begin(),
                             context->snode_tree_ids.end(), tree_id)) {
       ++iter;
       continue;
+    }
+    for (const auto &task : context->offloaded_tasks) {
+      if (task.sparse_list_snode_id >= 0) {
+        retired_sparse_snode_ids.push_back(task.sparse_list_snode_id);
+      }
     }
     auto module = context->jit_module;
     iter = contexts_.erase(iter);
@@ -542,12 +592,42 @@ void KernelLauncher::retire_snode_tree(int tree_id) {
   if (retired_any) {
     std::lock_guard<std::mutex> sparse_lock(sparse_list_mutex_);
     sparse_list_states_.clear();
+    for (int snode_id : retired_sparse_snode_ids) {
+      sparse_listgen_telemetry_.erase(snode_id);
+    }
   }
 }
 
 std::size_t KernelLauncher::debug_registered_kernel_count() {
   std::shared_lock<std::shared_mutex> lock(registration_mutex());
   return contexts_.size();
+}
+
+void KernelLauncher::debug_reset_sparse_listgen_statistics() {
+  std::lock_guard<std::mutex> lock(sparse_list_mutex_);
+  sparse_listgen_telemetry_.clear();
+  sparse_listgen_telemetry_enabled_ = true;
+}
+
+SparseSNodeTreeListgenStatistics
+KernelLauncher::debug_sparse_listgen_statistics(
+    const std::vector<int> &snode_ids) {
+  std::lock_guard<std::mutex> lock(sparse_list_mutex_);
+  SparseSNodeTreeListgenStatistics result;
+  result.available = sparse_listgen_telemetry_enabled_;
+  if (!result.available) {
+    return result;
+  }
+  for (const auto &[snode_id, telemetry] : sparse_listgen_telemetry_) {
+    if (std::binary_search(snode_ids.begin(), snode_ids.end(), snode_id)) {
+      result.nodes.push_back(telemetry);
+    }
+  }
+  std::sort(result.nodes.begin(), result.nodes.end(),
+            [](const auto &lhs, const auto &rhs) {
+              return lhs.snode_id < rhs.snode_id;
+            });
+  return result;
 }
 
 }  // namespace cuda

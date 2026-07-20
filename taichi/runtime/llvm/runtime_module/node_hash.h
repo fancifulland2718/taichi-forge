@@ -394,16 +394,23 @@ inline void Hash_append_list_element(HashMeta *child,
   Hash_refine_key(child, key, &elem->pcoord);
 }
 
-void element_listgen_root_hash(LLVMRuntime *runtime,
-                               StructMeta *parent,
-                               StructMeta *child_) {
+extern "C++" {
+template <bool RecordWork>
+void element_listgen_root_hash_impl(LLVMRuntime *runtime,
+                                    StructMeta *parent,
+                                    StructMeta *child_) {
   if (child_->listgen_reuse &&
       element_list_is_current(runtime, parent, child_)) {
+    record_sparse_listgen_work<RecordWork>(runtime, 0, 0, true);
     return;
   }
   auto child = (HashMeta *)child_;
   auto parent_list = runtime->element_lists[parent->snode_id];
   auto child_list = runtime->element_lists[child->snode_id];
+  int child_list_size_before = 0;
+  if constexpr (RecordWork) {
+    child_list_size_before = child_list->size();
+  }
   auto parent_lookup_element = parent->lookup_element;
   auto child_from_parent_element = child->from_parent_element;
 
@@ -447,19 +454,45 @@ void element_listgen_root_hash(LLVMRuntime *runtime,
   if (child->listgen_reuse) {
     mark_element_list_current(runtime, parent, child_);
   }
+  if constexpr (RecordWork) {
+    record_sparse_listgen_work<RecordWork>(
+        runtime, static_cast<uint64>(scan_count),
+        static_cast<uint64>(child_list->size() - child_list_size_before));
+  }
+}
+}  // extern "C++"
+
+void element_listgen_root_hash(LLVMRuntime *runtime,
+                               StructMeta *parent,
+                               StructMeta *child_) {
+#if !ARCH_cuda && !ARCH_amdgpu
+  if (runtime->sparse_listgen_work_recording) {
+    element_listgen_root_hash_impl<true>(runtime, parent, child_);
+    return;
+  }
+#endif
+  element_listgen_root_hash_impl<false>(runtime, parent, child_);
 }
 
-void element_listgen_nonroot_hash(LLVMRuntime *runtime,
-                                  StructMeta *parent,
-                                  StructMeta *child_) {
+extern "C++" {
+template <bool RecordWork>
+void element_listgen_nonroot_hash_impl(LLVMRuntime *runtime,
+                                       StructMeta *parent,
+                                       StructMeta *child_) {
   if (child_->listgen_reuse &&
       element_list_is_current(runtime, parent, child_)) {
+    record_sparse_listgen_work<RecordWork>(runtime, 0, 0, true);
     return;
   }
   auto child = (HashMeta *)child_;
   auto parent_list = runtime->element_lists[parent->snode_id];
   int num_parent_elements = parent_list->size();
   auto child_list = runtime->element_lists[child->snode_id];
+  int child_list_size_before = 0;
+  uint64 scanned_elements = 0;
+  if constexpr (RecordWork) {
+    child_list_size_before = child_list->size();
+  }
   auto parent_refine_coordinates = parent->refine_coordinates;
   auto parent_is_active = parent->is_active;
   auto parent_lookup_element = parent->lookup_element;
@@ -482,6 +515,9 @@ void element_listgen_nonroot_hash(LLVMRuntime *runtime,
     int j_lower = element.loop_bounds[0] + j_start;
     int j_higher = element.loop_bounds[1];
     for (int j = j_lower; j < j_higher; j += j_step) {
+      if constexpr (RecordWork) {
+        ++scanned_elements;
+      }
       PhysicalCoordinates refined_coord;
       parent_refine_coordinates(&element.pcoord, &refined_coord, j);
       if (!parent_is_active((Ptr)parent, element.element, j)) {
@@ -508,6 +544,9 @@ void element_listgen_nonroot_hash(LLVMRuntime *runtime,
           use_active_slots = true;
         }
       }
+      if constexpr (RecordWork) {
+        scanned_elements += static_cast<uint64>(scan_count);
+      }
 
       for (i32 scan_i = 0; scan_i < scan_count; scan_i++) {
         i32 bucket = use_active_slots
@@ -525,19 +564,45 @@ void element_listgen_nonroot_hash(LLVMRuntime *runtime,
   if (child->listgen_reuse) {
     mark_element_list_current(runtime, parent, child_);
   }
+  if constexpr (RecordWork) {
+    record_sparse_listgen_work<RecordWork>(
+        runtime, scanned_elements,
+        static_cast<uint64>(child_list->size() - child_list_size_before));
+  }
+}
+}  // extern "C++"
+
+void element_listgen_nonroot_hash(LLVMRuntime *runtime,
+                                  StructMeta *parent,
+                                  StructMeta *child_) {
+#if !ARCH_cuda && !ARCH_amdgpu
+  if (runtime->sparse_listgen_work_recording) {
+    element_listgen_nonroot_hash_impl<true>(runtime, parent, child_);
+    return;
+  }
+#endif
+  element_listgen_nonroot_hash_impl<false>(runtime, parent, child_);
 }
 
-void element_listgen_nonroot_hash_parent_hash(LLVMRuntime *runtime,
-                                              StructMeta *parent,
-                                              StructMeta *child_) {
+extern "C++" {
+template <bool RecordWork>
+void element_listgen_nonroot_hash_parent_hash_impl(LLVMRuntime *runtime,
+                                                   StructMeta *parent,
+                                                   StructMeta *child_) {
   if (child_->listgen_reuse &&
       element_list_is_current(runtime, parent, child_)) {
+    record_sparse_listgen_work<RecordWork>(runtime, 0, 0, true);
     return;
   }
   auto child = (HashMeta *)child_;
   auto parent_list = runtime->element_lists[parent->snode_id];
   int num_parent_elements = parent_list->size();
   auto child_list = runtime->element_lists[child->snode_id];
+  int child_list_size_before = 0;
+  uint64 scanned_elements = 0;
+  if constexpr (RecordWork) {
+    child_list_size_before = child_list->size();
+  }
   auto parent_lookup_element = parent->lookup_element;
   auto child_from_parent_element = child->from_parent_element;
 
@@ -573,6 +638,9 @@ void element_listgen_nonroot_hash_parent_hash(LLVMRuntime *runtime,
         use_active_slots = true;
       }
     }
+    if constexpr (RecordWork) {
+      scanned_elements += static_cast<uint64>(scan_count);
+    }
 
     for (i32 scan_i = 0; scan_i < scan_count; scan_i++) {
       i32 bucket = use_active_slots
@@ -589,4 +657,24 @@ void element_listgen_nonroot_hash_parent_hash(LLVMRuntime *runtime,
   if (child->listgen_reuse) {
     mark_element_list_current(runtime, parent, child_);
   }
+  if constexpr (RecordWork) {
+    record_sparse_listgen_work<RecordWork>(
+        runtime, scanned_elements,
+        static_cast<uint64>(child_list->size() - child_list_size_before));
+  }
+}
+}  // extern "C++"
+
+void element_listgen_nonroot_hash_parent_hash(LLVMRuntime *runtime,
+                                              StructMeta *parent,
+                                              StructMeta *child_) {
+#if !ARCH_cuda && !ARCH_amdgpu
+  if (runtime->sparse_listgen_work_recording) {
+    element_listgen_nonroot_hash_parent_hash_impl<true>(runtime, parent,
+                                                        child_);
+    return;
+  }
+#endif
+  element_listgen_nonroot_hash_parent_hash_impl<false>(runtime, parent,
+                                                       child_);
 }

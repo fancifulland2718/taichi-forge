@@ -695,16 +695,48 @@ int64 GfxRuntime::get_sparse_list_version(int snode_id) const {
 
 bool GfxRuntime::sparse_list_task_is_current(
     const TaskAttributes &attribs) {
-  if (!listgen_reuse_ ||
-      attribs.sparse_list_op != TaskAttributes::kSparseListOpListgen ||
-      attribs.sparse_list_snode_id < 0 ||
-      attribs.sparse_list_parent_snode_id < 0 ||
-      resident_sparse_list_snode_id_ != attribs.sparse_list_snode_id) {
+  const bool is_listgen =
+      attribs.sparse_list_op == TaskAttributes::kSparseListOpListgen &&
+      attribs.sparse_list_snode_id >= 0 &&
+      attribs.sparse_list_parent_snode_id >= 0;
+  SparseListgenNodeStatistics *telemetry = nullptr;
+  if (sparse_listgen_telemetry_enabled_ && is_listgen) {
+    telemetry = &sparse_listgen_telemetry_[attribs.sparse_list_snode_id];
+    telemetry->snode_id = attribs.sparse_list_snode_id;
+    telemetry->parent_snode_id = attribs.sparse_list_parent_snode_id;
+    ++telemetry->requests;
+    if (!telemetry->resident_evictions.available) {
+      telemetry->resident_evictions = {0, true};
+    }
+  }
+  if (!is_listgen) {
+    return false;
+  }
+  if (!listgen_reuse_) {
+    if (telemetry != nullptr) {
+      telemetry->last_rebuild_reason = "reuse_disabled";
+    }
+    return false;
+  }
+  if (resident_sparse_list_snode_id_ != attribs.sparse_list_snode_id) {
+    if (telemetry != nullptr) {
+      const bool cold =
+          sparse_list_states_.find(attribs.sparse_list_snode_id) ==
+          sparse_list_states_.end();
+      telemetry->last_rebuild_reason =
+          cold ? "cold" : "resident_list_evicted";
+      if (!cold) {
+        ++telemetry->resident_evictions.value;
+      }
+    }
     return false;
   }
 
   auto it = sparse_list_states_.find(attribs.sparse_list_snode_id);
   if (it == sparse_list_states_.end()) {
+    if (telemetry != nullptr) {
+      telemetry->last_rebuild_reason = "cold";
+    }
     if (listgen_reuse_adaptive_) {
       auto &state = sparse_list_states_[attribs.sparse_list_snode_id];
       record_sparse_list_reuse_sample(state, /*would_skip=*/false);
@@ -719,6 +751,23 @@ bool GfxRuntime::sparse_list_task_is_current(
                    get_sparse_list_version(
                      attribs.sparse_list_parent_snode_id);
   record_sparse_list_reuse_sample(state, would_skip);
+  if (telemetry != nullptr) {
+    if (would_skip && !state.adaptive_disabled) {
+      ++telemetry->reuse_hits;
+    } else if (state.clean_epoch != state.dirty_epoch) {
+      telemetry->last_rebuild_reason = "topology_dirty";
+    } else if (state.global_dirty_seen != sparse_list_global_dirty_epoch_) {
+      telemetry->last_rebuild_reason = "global_topology_dirty";
+    } else if (state.clean_parent_version !=
+               get_sparse_list_version(
+                   attribs.sparse_list_parent_snode_id)) {
+      telemetry->last_rebuild_reason = "parent_version_changed";
+    } else if (state.adaptive_disabled) {
+      telemetry->last_rebuild_reason = "adaptive_reuse_disabled";
+    } else {
+      telemetry->last_rebuild_reason = "not_current";
+    }
+  }
   return would_skip && !state.adaptive_disabled;
 }
 
@@ -755,7 +804,24 @@ void GfxRuntime::record_sparse_list_reuse_sample(SparseListState &state,
 
 void GfxRuntime::mark_sparse_list_task_launched(
     const TaskAttributes &attribs) {
-  if (!listgen_reuse_ || attribs.task_type != OffloadedTaskType::listgen) {
+  if (attribs.task_type != OffloadedTaskType::listgen) {
+    return;
+  }
+  if (sparse_listgen_telemetry_enabled_ &&
+      attribs.sparse_list_snode_id >= 0) {
+    auto &telemetry =
+        sparse_listgen_telemetry_[attribs.sparse_list_snode_id];
+    telemetry.snode_id = attribs.sparse_list_snode_id;
+    telemetry.parent_snode_id = attribs.sparse_list_parent_snode_id;
+    ++telemetry.rebuilds;
+    const std::uint64_t candidates = static_cast<std::uint64_t>(
+        std::max(attribs.advisory_total_num_threads, 0));
+    if (!telemetry.candidate_slots_dispatched.available) {
+      telemetry.candidate_slots_dispatched = {0, true};
+    }
+    telemetry.candidate_slots_dispatched.value += candidates;
+  }
+  if (!listgen_reuse_) {
     return;
   }
   if (attribs.sparse_list_op != TaskAttributes::kSparseListOpListgen ||
@@ -794,6 +860,14 @@ void GfxRuntime::invalidate_sparse_list_cache(int sparse_mutation_snode_id) {
   }
   if (sparse_mutation_snode_id < 0) {
     sparse_list_global_dirty_epoch_++;
+    if (sparse_listgen_telemetry_enabled_) {
+      for (const auto &[snode_id, state] : sparse_list_states_) {
+        (void)state;
+        auto &telemetry = sparse_listgen_telemetry_[snode_id];
+        telemetry.snode_id = snode_id;
+        ++telemetry.invalidations;
+      }
+    }
     return;
   }
 
@@ -817,6 +891,11 @@ void GfxRuntime::invalidate_sparse_list_cache(int sparse_mutation_snode_id) {
     auto it = sparse_list_states_.find(snode_id);
     if (it != sparse_list_states_.end()) {
       it->second.dirty_epoch++;
+      if (sparse_listgen_telemetry_enabled_) {
+        auto &telemetry = sparse_listgen_telemetry_[snode_id];
+        telemetry.snode_id = snode_id;
+        ++telemetry.invalidations;
+      }
     }
   }
 }
@@ -1067,6 +1146,7 @@ void GfxRuntime::retire_snode_tree_kernels(int tree_id) {
   graph_replay_states_.clear();
   TI_ASSERT(ti_kernel_snode_tree_ids_.size() == ti_kernels_.size());
   bool retired_any = false;
+  std::vector<int> retired_sparse_snode_ids;
   for (auto iter = ti_kernel_snode_tree_ids_.begin();
        iter != ti_kernel_snode_tree_ids_.end();) {
     const auto &tree_ids = iter->second;
@@ -1075,18 +1155,57 @@ void GfxRuntime::retire_snode_tree_kernels(int tree_id) {
       continue;
     }
     const int launch_id = iter->first;
+    const auto kernel_it = ti_kernels_.find(launch_id);
+    TI_ASSERT(kernel_it != ti_kernels_.end());
+    for (const auto &attribs :
+         kernel_it->second->ti_kernel_attribs().tasks_attribs) {
+      if (attribs.sparse_list_snode_id >= 0) {
+        retired_sparse_snode_ids.push_back(
+            attribs.sparse_list_snode_id);
+      }
+    }
     TI_ASSERT(ti_kernels_.erase(launch_id) == 1);
     iter = ti_kernel_snode_tree_ids_.erase(iter);
     retired_any = true;
   }
   if (retired_any) {
     clear_sparse_list_cache_resident();
+    for (int snode_id : retired_sparse_snode_ids) {
+      sparse_listgen_telemetry_.erase(snode_id);
+    }
   }
 }
 
 std::size_t GfxRuntime::debug_registered_kernel_count() {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   return ti_kernels_.size();
+}
+
+void GfxRuntime::debug_reset_sparse_listgen_statistics() {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  sparse_listgen_telemetry_.clear();
+  sparse_listgen_telemetry_enabled_ = true;
+}
+
+SparseSNodeTreeListgenStatistics
+GfxRuntime::debug_sparse_listgen_statistics(
+    const std::vector<int> &snode_ids) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  SparseSNodeTreeListgenStatistics result;
+  result.available = sparse_listgen_telemetry_enabled_;
+  if (!result.available) {
+    return result;
+  }
+  for (const auto &[snode_id, telemetry] : sparse_listgen_telemetry_) {
+    if (std::binary_search(snode_ids.begin(), snode_ids.end(), snode_id)) {
+      result.nodes.push_back(telemetry);
+    }
+  }
+  std::sort(result.nodes.begin(), result.nodes.end(),
+            [](const auto &lhs, const auto &rhs) {
+              return lhs.snode_id < rhs.snode_id;
+            });
+  return result;
 }
 
 void GfxRuntime::launch_kernel(KernelHandle handle,

@@ -111,6 +111,8 @@ void LlvmProgramImpl::cache_field(int snode_tree_id,
   for (size_t i = 0; i < snodes.size(); i++) {
     LlvmOfflineCache::FieldCacheData::SNodeCacheData snode_cache_data;
     snode_cache_data.id = snodes[i]->id;
+    snode_cache_data.parent_id =
+        snodes[i]->parent == nullptr ? -1 : snodes[i]->parent->id;
     snode_cache_data.type = snodes[i]->type;
     snode_cache_data.cell_size_bytes = snodes[i]->cell_size_bytes;
     snode_cache_data.chunk_size = snodes[i]->chunk_size;

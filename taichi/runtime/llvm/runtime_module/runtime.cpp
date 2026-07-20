@@ -25,6 +25,8 @@
 #include "taichi/inc/constants.h"
 #include "taichi/inc/cuda_kernel_utils.inc.h"
 #include "taichi/math/arithmetic.h"
+#include "taichi/runtime/llvm/list_manager_constants.h"
+#include "taichi/runtime/llvm/sparse_tree_statistics.h"
 
 struct RuntimeContext;
 using assert_failed_type = void (*)(const char *);
@@ -40,6 +42,7 @@ using host_vsnprintf_type = int (*)(char *,
                                     const char *,
                                     std::va_list);
 using host_allocator_type = void *(*)(void *, std::size_t, std::size_t);
+using host_releaser_type = void (*)(void *, std::size_t, void *);
 using RangeForTaskFunc = void(RuntimeContext *, const char *tls, int i);
 using MeshForTaskFunc = void(RuntimeContext *, const char *tls, uint32_t i);
 using parallel_for_type = void (*)(void *thread_pool,
@@ -429,8 +432,16 @@ struct PreallocatedMemoryChunk;
 // TODO: there are many i32 types in this class, which may be an issue if there
 // are >= 2 ** 31 elements.
 struct ListManager {
-  static constexpr std::size_t max_num_chunks = 128 * 1024;
-  Ptr chunks[max_num_chunks];
+  static constexpr std::size_t max_num_chunks =
+      kLlvmListManagerMaxNumChunks;
+  static constexpr i32 inline_num_chunks =
+      (i32)kLlvmListManagerInlineChunks;
+  static constexpr i32 chunks_per_directory =
+      (i32)kLlvmListManagerChunksPerDirectory;
+  static constexpr i32 num_chunk_directories =
+      (i32)kLlvmListManagerDirectoryCount;
+  Ptr inline_chunks[kLlvmListManagerInlineChunks]{};
+  Ptr chunk_directories[kLlvmListManagerDirectoryCount]{};
   std::size_t element_size{0};
   std::size_t max_num_elements_per_chunk;
   i32 log2chunk_num_elements;
@@ -475,10 +486,38 @@ struct ListManager {
 
   void touch_chunk(int chunk_id);
 
+  Ptr get_chunk_ptr(i32 chunk_id) {
+    if (chunk_id < inline_num_chunks) {
+      return inline_chunks[chunk_id];
+    }
+    const i32 relative = chunk_id - inline_num_chunks;
+    const i32 directory_id = relative / chunks_per_directory;
+    const i32 directory_offset = relative % chunks_per_directory;
+    auto directory = (Ptr *)chunk_directories[directory_id];
+    return directory == nullptr ? nullptr : directory[directory_offset];
+  }
+
   i32 get_num_active_chunks() {
     i32 counter = 0;
-    for (int i = 0; i < max_num_chunks; i++) {
-      counter += (chunks[i] != nullptr);
+    for (int i = 0; i < inline_num_chunks; i++) {
+      counter += (inline_chunks[i] != nullptr);
+    }
+    for (int i = 0; i < num_chunk_directories; i++) {
+      auto directory = (Ptr *)chunk_directories[i];
+      if (directory == nullptr) {
+        continue;
+      }
+      for (int j = 0; j < chunks_per_directory; j++) {
+        counter += (directory[j] != nullptr);
+      }
+    }
+    return counter;
+  }
+
+  i32 get_num_active_chunk_directories() {
+    i32 counter = 0;
+    for (int i = 0; i < num_chunk_directories; i++) {
+      counter += (chunk_directories[i] != nullptr);
     }
     return counter;
   }
@@ -492,7 +531,7 @@ struct ListManager {
   }
 
   Ptr get_element_ptr(i32 i) {
-    return chunks[i >> log2chunk_num_elements] +
+    return get_chunk_ptr(i >> log2chunk_num_elements) +
            element_size * (i & ((1 << log2chunk_num_elements) - 1));
   }
 
@@ -512,11 +551,29 @@ struct ListManager {
 
   i32 ptr2index(Ptr ptr) {
     auto chunk_size = max_num_elements_per_chunk * element_size;
-    for (int i = 0; i < max_num_chunks; i++) {
-      taichi_assert_runtime(runtime, chunks[i] != nullptr, "ptr not found.");
-      if (chunks[i] <= ptr && ptr < chunks[i] + chunk_size) {
+    for (int i = 0; i < inline_num_chunks; i++) {
+      auto chunk = inline_chunks[i];
+      taichi_assert_runtime(runtime, chunk != nullptr, "ptr not found.");
+      if (chunk <= ptr && ptr < chunk + chunk_size) {
         return (i << log2chunk_num_elements) +
-               i32((ptr - chunks[i]) / element_size);
+               i32((ptr - chunk) / element_size);
+      }
+    }
+    for (int directory_id = 0; directory_id < num_chunk_directories;
+         directory_id++) {
+      auto directory = (Ptr *)chunk_directories[directory_id];
+      taichi_assert_runtime(runtime, directory != nullptr, "ptr not found.");
+      for (int directory_offset = 0;
+           directory_offset < chunks_per_directory; directory_offset++) {
+        auto chunk = directory[directory_offset];
+        taichi_assert_runtime(runtime, chunk != nullptr, "ptr not found.");
+        if (chunk <= ptr && ptr < chunk + chunk_size) {
+          const i32 chunk_id = inline_num_chunks +
+                               directory_id * chunks_per_directory +
+                               directory_offset;
+          return (chunk_id << log2chunk_num_elements) +
+                 i32((ptr - chunk) / element_size);
+        }
       }
     }
     return -1;
@@ -591,7 +648,8 @@ struct LLVMRuntime {
   NodeManager *node_allocators[taichi_max_num_snodes];
   Ptr ambient_elements[taichi_max_num_snodes];
 #if !ARCH_cuda && !ARCH_amdgpu
-  ListManager *recycled_element_lists[taichi_max_num_snodes];
+  ListManager *recycled_element_lists[taichi_max_num_snodes *
+                                      kLlvmElementListChunkSizeClasses];
   i32 recycled_element_list_count;
   NodeManager *recycled_node_allocators[taichi_max_num_snodes];
   i32 recycled_node_allocator_count;
@@ -634,6 +692,30 @@ struct LLVMRuntime {
   i32 hash_lookup_probe_total;
   i32 hash_lookup_probe_max;
 
+#if !ARCH_cuda && !ARCH_amdgpu
+  // Appended so existing LLVMRuntime field offsets stay stable. CPU SNodeTree
+  // teardown uses these to bound process-wide sparse payload retained for
+  // reconstruction without changing CUDA/AMDGPU allocation behavior.
+  host_releaser_type host_releaser;
+  std::size_t recycled_sparse_payload_bytes;
+  std::size_t destroying_tree_sparse_payload_bytes;
+  bool release_current_tree_sparse_payload;
+#endif
+  PreallocatedMemoryChunk *materializing_element_list_backing_chunk;
+#if !ARCH_cuda && !ARCH_amdgpu
+  // CPU listgen telemetry is debug-only. Keep just one task-local sample in
+  // the runtime: KernelLauncher serializes offloaded tasks and accumulates the
+  // sample immediately after each listgen task. This avoids a fixed per-SNode
+  // counter array and any atomics in the listgen scan loops.
+  bool sparse_listgen_work_recording;
+  bool sparse_listgen_work_available;
+  uint64 sparse_listgen_scanned_elements;
+  uint64 sparse_listgen_emitted_elements;
+  i32 sparse_listgen_execution_strategy;
+  ListManager *cpu_parallel_listgen_offsets;
+  bool sparse_listgen_reused;
+#endif
+
   template <typename T>
   void set_result(std::size_t i, T t) {
     static_assert(sizeof(T) <= sizeof(uint64));
@@ -672,6 +754,9 @@ STRUCT_FIELD(LLVMRuntime, host_vsnprintf);
 STRUCT_FIELD(LLVMRuntime, profiler);
 STRUCT_FIELD(LLVMRuntime, profiler_start);
 STRUCT_FIELD(LLVMRuntime, profiler_stop);
+#if !ARCH_cuda && !ARCH_amdgpu
+STRUCT_FIELD(LLVMRuntime, host_releaser);
+#endif
 
 // NodeManager of node S (hash, pointer) managers the memory allocation of S_ch
 // It makes use of three ListManagers.
@@ -682,6 +767,9 @@ struct NodeManager {
   i32 element_size;
   i32 chunk_num_elements;
   i32 free_list_used;
+  i32 deterministic_capacity;
+  i32 deterministic_active;
+  i32 deterministic_peak;
 
   ListManager *free_list, *recycled_list, *data_list;
   i32 recycle_list_size_backup;
@@ -710,6 +798,9 @@ struct NodeManager {
     }
     this->chunk_num_elements = chunk_num_elements;
     free_list_used = 0;
+    deterministic_capacity = 0;
+    deterministic_active = 0;
+    deterministic_peak = 0;
     free_list = runtime->create<ListManager>(runtime, sizeof(list_data_type),
                                              chunk_num_elements);
     recycled_list = runtime->create<ListManager>(
@@ -776,6 +867,65 @@ struct NodeManager {
 };
 
 #if !ARCH_cuda && !ARCH_amdgpu
+std::size_t list_manager_dynamic_storage_bytes(ListManager *list) {
+  if (list == nullptr) {
+    return 0;
+  }
+  const std::size_t chunk_bytes =
+      list->max_num_elements_per_chunk * list->element_size;
+  return std::size_t(list->get_num_active_chunks()) * chunk_bytes +
+         std::size_t(list->get_num_active_chunk_directories()) *
+             kLlvmListManagerDirectoryPageBytes;
+}
+
+std::size_t node_manager_dynamic_storage_bytes(NodeManager *manager) {
+  if (manager == nullptr) {
+    return 0;
+  }
+  return list_manager_dynamic_storage_bytes(manager->free_list) +
+         list_manager_dynamic_storage_bytes(manager->recycled_list) +
+         list_manager_dynamic_storage_bytes(manager->data_list);
+}
+
+void subtract_recycled_sparse_payload(LLVMRuntime *runtime,
+                                        std::size_t bytes) {
+  taichi_assert_runtime(
+      runtime, runtime->recycled_sparse_payload_bytes >= bytes,
+      "Recycled sparse payload accounting underflow.");
+  runtime->recycled_sparse_payload_bytes -= bytes;
+}
+
+void release_list_manager_dynamic_storage(LLVMRuntime *runtime,
+                                          ListManager *list) {
+  taichi_assert_runtime(runtime, runtime->host_releaser != nullptr,
+                        "Host sparse payload releaser is not initialized.");
+  const std::size_t chunk_bytes =
+      list->max_num_elements_per_chunk * list->element_size;
+  for (int i = 0; i < ListManager::inline_num_chunks; ++i) {
+    if (list->inline_chunks[i] != nullptr) {
+      runtime->host_releaser(runtime->memory_pool, chunk_bytes,
+                             list->inline_chunks[i]);
+      list->inline_chunks[i] = nullptr;
+    }
+  }
+  for (int i = 0; i < ListManager::num_chunk_directories; ++i) {
+    auto directory = (Ptr *)list->chunk_directories[i];
+    if (directory == nullptr) {
+      continue;
+    }
+    for (int j = 0; j < ListManager::chunks_per_directory; ++j) {
+      if (directory[j] != nullptr) {
+        runtime->host_releaser(runtime->memory_pool, chunk_bytes,
+                               directory[j]);
+        directory[j] = nullptr;
+      }
+    }
+    runtime->host_releaser(runtime->memory_pool,
+                           kLlvmListManagerDirectoryPageBytes, directory);
+    list->chunk_directories[i] = nullptr;
+  }
+}
+
 void reset_list_manager_for_reuse(ListManager *list, bool zero_chunks) {
   list->lock = 0;
   list->num_elements = 0;
@@ -785,22 +935,41 @@ void reset_list_manager_for_reuse(ListManager *list, bool zero_chunks) {
   }
   const std::size_t chunk_bytes =
       list->max_num_elements_per_chunk * list->element_size;
-  for (std::size_t i = 0; i < ListManager::max_num_chunks; ++i) {
-    if (list->chunks[i] == nullptr) {
-      break;
+  for (int i = 0; i < ListManager::inline_num_chunks; ++i) {
+    if (list->inline_chunks[i] != nullptr) {
+      std::memset(list->inline_chunks[i], 0, chunk_bytes);
     }
-    std::memset(list->chunks[i], 0, chunk_bytes);
+  }
+  for (int i = 0; i < ListManager::num_chunk_directories; ++i) {
+    auto directory = (Ptr *)list->chunk_directories[i];
+    if (directory == nullptr) {
+      continue;
+    }
+    for (int j = 0; j < ListManager::chunks_per_directory; ++j) {
+      if (directory[j] != nullptr) {
+        std::memset(directory[j], 0, chunk_bytes);
+      }
+    }
   }
 }
 
-ListManager *acquire_element_list(LLVMRuntime *runtime) {
-  if (runtime->recycled_element_list_count == 0) {
-    return runtime->create<ListManager>(runtime, sizeof(Element), 1024 * 64);
+ListManager *acquire_element_list(LLVMRuntime *runtime,
+                                  std::size_t chunk_num_elements) {
+  for (int i = runtime->recycled_element_list_count - 1; i >= 0; --i) {
+    ListManager *list = runtime->recycled_element_lists[i];
+    if (list->max_num_elements_per_chunk != chunk_num_elements) {
+      continue;
+    }
+    runtime->recycled_element_lists[i] =
+        runtime->recycled_element_lists[
+            --runtime->recycled_element_list_count];
+    subtract_recycled_sparse_payload(
+        runtime, list_manager_dynamic_storage_bytes(list));
+    reset_list_manager_for_reuse(list, false);
+    return list;
   }
-  ListManager *list =
-      runtime->recycled_element_lists[--runtime->recycled_element_list_count];
-  reset_list_manager_for_reuse(list, false);
-  return list;
+  return runtime->create<ListManager>(runtime, sizeof(Element),
+                                      chunk_num_elements);
 }
 
 NodeManager *acquire_node_manager(LLVMRuntime *runtime,
@@ -815,8 +984,13 @@ NodeManager *acquire_node_manager(LLVMRuntime *runtime,
     runtime->recycled_node_allocators[i] =
         runtime->recycled_node_allocators[
             --runtime->recycled_node_allocator_count];
+    subtract_recycled_sparse_payload(
+        runtime, node_manager_dynamic_storage_bytes(manager));
     manager->lock = 0;
     manager->free_list_used = 0;
+    manager->deterministic_capacity = 0;
+    manager->deterministic_active = 0;
+    manager->deterministic_peak = 0;
     manager->recycle_list_size_backup = 0;
     manager->dedicated_chunk = {};
     manager->has_dedicated = false;
@@ -837,6 +1011,7 @@ Ptr acquire_direct_ambient(LLVMRuntime *runtime, std::size_t node_size) {
     runtime->recycled_direct_ambients[i] =
         runtime->recycled_direct_ambients[
             --runtime->recycled_direct_ambient_count];
+    subtract_recycled_sparse_payload(runtime, ambient.size);
     std::memset(ambient.ptr, 0, node_size);
     return ambient.ptr;
   }
@@ -844,6 +1019,41 @@ Ptr acquire_direct_ambient(LLVMRuntime *runtime, std::size_t node_size) {
                                    true /*request*/);
 }
 #endif
+
+extern "C" void runtime_prepare_snode_tree_destroy(
+    LLVMRuntime *runtime,
+    int snode_id,
+    std::size_t direct_ambient_bytes,
+    int first_snode,
+    int last_snode) {
+#if !ARCH_cuda && !ARCH_amdgpu
+  if (first_snode != 0) {
+    runtime->destroying_tree_sparse_payload_bytes = 0;
+  }
+  runtime->destroying_tree_sparse_payload_bytes += direct_ambient_bytes;
+  runtime->destroying_tree_sparse_payload_bytes +=
+      list_manager_dynamic_storage_bytes(runtime->element_lists[snode_id]);
+  runtime->destroying_tree_sparse_payload_bytes +=
+      node_manager_dynamic_storage_bytes(runtime->node_allocators[snode_id]);
+
+  if (last_snode != 0) {
+    const std::size_t tree_payload_bytes =
+        runtime->destroying_tree_sparse_payload_bytes;
+    const std::size_t budget = kLlvmHostSparseRecycledPayloadBudgetBytes;
+    runtime->release_current_tree_sparse_payload =
+        runtime->host_releaser != nullptr &&
+        (tree_payload_bytes > budget ||
+         runtime->recycled_sparse_payload_bytes >
+             budget - tree_payload_bytes);
+  }
+#else
+  (void)runtime;
+  (void)snode_id;
+  (void)direct_ambient_bytes;
+  (void)first_snode;
+  (void)last_snode;
+#endif
+}
 
 extern "C" void runtime_destroy_snode_resources(
     LLVMRuntime *runtime,
@@ -856,9 +1066,17 @@ extern "C" void runtime_destroy_snode_resources(
   if (has_element_list) {
     taichi_assert_runtime(
         runtime,
-        runtime->recycled_element_list_count < taichi_max_num_snodes,
+        runtime->recycled_element_list_count <
+            taichi_max_num_snodes * kLlvmElementListChunkSizeClasses,
         "Recycled element-list capacity exceeded.");
     ListManager *list = runtime->element_lists[snode_id];
+    const std::size_t list_bytes =
+        list_manager_dynamic_storage_bytes(list);
+    if (runtime->release_current_tree_sparse_payload) {
+      release_list_manager_dynamic_storage(runtime, list);
+    } else {
+      runtime->recycled_sparse_payload_bytes += list_bytes;
+    }
     reset_list_manager_for_reuse(list, false);
     runtime->recycled_element_lists[runtime->recycled_element_list_count++] =
         list;
@@ -871,17 +1089,34 @@ extern "C" void runtime_destroy_snode_resources(
         runtime->recycled_node_allocator_count < taichi_max_num_snodes,
         "Recycled NodeManager capacity exceeded.");
     NodeManager *manager = runtime->node_allocators[snode_id];
+    const std::size_t manager_bytes =
+        node_manager_dynamic_storage_bytes(manager);
+    if (runtime->release_current_tree_sparse_payload) {
+      release_list_manager_dynamic_storage(runtime, manager->free_list);
+      release_list_manager_dynamic_storage(runtime, manager->recycled_list);
+      release_list_manager_dynamic_storage(runtime, manager->data_list);
+    } else {
+      runtime->recycled_sparse_payload_bytes += manager_bytes;
+    }
     runtime->recycled_node_allocators[
         runtime->recycled_node_allocator_count++] = manager;
     runtime->node_allocators[snode_id] = nullptr;
-  } else if (has_direct_ambient && direct_ambient_size > 0) {
-    taichi_assert_runtime(
-        runtime,
-        runtime->recycled_direct_ambient_count < taichi_max_num_snodes,
-        "Recycled ambient capacity exceeded.");
-    runtime->recycled_direct_ambients[
-        runtime->recycled_direct_ambient_count++] = {
-        runtime->ambient_elements[snode_id], direct_ambient_size};
+  }
+
+  if (has_direct_ambient && direct_ambient_size > 0) {
+    if (runtime->release_current_tree_sparse_payload) {
+      runtime->host_releaser(runtime->memory_pool, direct_ambient_size,
+                             runtime->ambient_elements[snode_id]);
+    } else {
+      taichi_assert_runtime(
+          runtime,
+          runtime->recycled_direct_ambient_count < taichi_max_num_snodes,
+          "Recycled ambient capacity exceeded.");
+      runtime->recycled_direct_ambients[
+          runtime->recycled_direct_ambient_count++] = {
+          runtime->ambient_elements[snode_id], direct_ambient_size};
+      runtime->recycled_sparse_payload_bytes += direct_ambient_size;
+    }
   }
 
   runtime->ambient_elements[snode_id] = nullptr;
@@ -944,6 +1179,85 @@ void runtime_ListManager_get_num_active_chunks(LLVMRuntime *runtime,
                       list_manager->get_num_active_chunks());
 }
 
+void runtime_sparse_tree_statistics_reset(uint64 *result) {
+  for (int i = 0; i < kLlvmSparseTreeStatisticCount; ++i) {
+    result[i] = 0;
+  }
+}
+
+void runtime_sparse_snode_statistics_collect(LLVMRuntime *runtime,
+                                             int snode_id,
+                                             int has_element_lists,
+                                             uint64 *result) {
+  if (has_element_lists != 0) {
+    ListManager *active_list = runtime->element_lists[snode_id];
+    if (active_list != nullptr) {
+      const uint64 chunk_bytes =
+          uint64(active_list->max_num_elements_per_chunk) *
+          uint64(active_list->element_size);
+      result[kLlvmSparseRuntimeMetadataRequestedBytes] +=
+          sizeof(ListManager) +
+          uint64(active_list->get_num_active_chunk_directories()) *
+              kLlvmListManagerDirectoryPageBytes;
+      result[kLlvmSparseActiveListReservedBytes] +=
+          uint64(active_list->get_num_active_chunks()) * chunk_bytes;
+      result[kLlvmSparseActiveListUsedBytes] +=
+          uint64(active_list->size()) * uint64(active_list->element_size);
+    }
+  }
+
+  NodeManager *allocator = runtime->node_allocators[snode_id];
+  if (allocator == nullptr) {
+    return;
+  }
+  ListManager *data = allocator->data_list;
+  ListManager *free = allocator->free_list;
+  ListManager *recycled = allocator->recycled_list;
+  result[kLlvmSparseRuntimeMetadataRequestedBytes] +=
+      sizeof(NodeManager) + 3 * sizeof(ListManager) +
+      uint64(data->get_num_active_chunk_directories() +
+             free->get_num_active_chunk_directories() +
+             recycled->get_num_active_chunk_directories()) *
+          kLlvmListManagerDirectoryPageBytes;
+
+  if (allocator->deterministic_capacity > 0) {
+    const i64 active = max_i32(allocator->deterministic_active, 0);
+    const i64 peak = max_i32(allocator->deterministic_peak, active);
+    result[kLlvmSparseAllocatorPayloadReservedBytes] +=
+        uint64(allocator->deterministic_capacity) *
+        uint64(allocator->element_size);
+    result[kLlvmSparseAllocatorPayloadUsedBytes] +=
+        uint64(active) * uint64(allocator->element_size);
+    result[kLlvmSparseAllocatorInUseElements] += uint64(active);
+    result[kLlvmSparseAllocatorFreeElements] += uint64(peak - active);
+    return;
+  }
+
+  const uint64 data_chunk_bytes =
+      uint64(data->max_num_elements_per_chunk) * uint64(data->element_size);
+  const uint64 free_chunk_bytes =
+      uint64(free->max_num_elements_per_chunk) * uint64(free->element_size);
+  const uint64 recycled_chunk_bytes =
+      uint64(recycled->max_num_elements_per_chunk) *
+      uint64(recycled->element_size);
+  result[kLlvmSparseAllocatorPayloadReservedBytes] +=
+      uint64(data->get_num_active_chunks()) * data_chunk_bytes;
+  result[kLlvmSparseAllocatorBookkeepingReservedBytes] +=
+      uint64(free->get_num_active_chunks()) * free_chunk_bytes +
+      uint64(recycled->get_num_active_chunks()) * recycled_chunk_bytes;
+
+  const i64 free_elements =
+      max_i32(free->size() - allocator->free_list_used, 0);
+  const i64 recycled_elements = recycled->size();
+  const i64 in_use_elements =
+      std::max(i64(data->size()) - free_elements - recycled_elements, i64(0));
+  result[kLlvmSparseAllocatorInUseElements] += uint64(in_use_elements);
+  result[kLlvmSparseAllocatorFreeElements] += uint64(free_elements);
+  result[kLlvmSparseAllocatorRecycledElements] += uint64(recycled_elements);
+  result[kLlvmSparseAllocatorPayloadUsedBytes] +=
+      uint64(in_use_elements) * uint64(data->element_size);
+}
+
 RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, node_allocators);
 RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_lists);
 RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_dirty_epoch);
@@ -984,6 +1298,8 @@ RUNTIME_STRUCT_FIELD(NodeManager, free_list);
 RUNTIME_STRUCT_FIELD(NodeManager, recycled_list);
 RUNTIME_STRUCT_FIELD(NodeManager, data_list);
 RUNTIME_STRUCT_FIELD(NodeManager, free_list_used);
+RUNTIME_STRUCT_FIELD(NodeManager, deterministic_capacity);
+RUNTIME_STRUCT_FIELD(NodeManager, deterministic_peak);
 
 RUNTIME_STRUCT_FIELD(ListManager, num_elements);
 RUNTIME_STRUCT_FIELD(ListManager, max_num_elements_per_chunk);
@@ -1210,11 +1526,23 @@ void runtime_initialize(
   runtime->memory_pool = memory_pool;
 
   runtime->total_requested_memory = 0;
+  runtime->materializing_element_list_backing_chunk = nullptr;
   runtime_hash_probe_stats_reset(runtime);
 #if !ARCH_cuda && !ARCH_amdgpu
   runtime->recycled_element_list_count = 0;
   runtime->recycled_node_allocator_count = 0;
   runtime->recycled_direct_ambient_count = 0;
+  runtime->host_releaser = nullptr;
+  runtime->recycled_sparse_payload_bytes = 0;
+  runtime->destroying_tree_sparse_payload_bytes = 0;
+  runtime->release_current_tree_sparse_payload = false;
+  runtime->sparse_listgen_work_recording = false;
+  runtime->sparse_listgen_work_available = false;
+  runtime->sparse_listgen_scanned_elements = 0;
+  runtime->sparse_listgen_emitted_elements = 0;
+  runtime->sparse_listgen_execution_strategy = 0;
+  runtime->cpu_parallel_listgen_offsets = nullptr;
+  runtime->sparse_listgen_reused = false;
 #endif
 
   runtime->temporaries = (Ptr)runtime->allocate_aligned(
@@ -1258,6 +1586,66 @@ void runtime_initialize_rand_states_serial(LLVMRuntime *runtime,
   }
 }
 
+#if !ARCH_cuda && !ARCH_amdgpu
+void runtime_sparse_listgen_work_begin(LLVMRuntime *runtime) {
+  runtime->sparse_listgen_work_recording = true;
+  runtime->sparse_listgen_work_available = false;
+  runtime->sparse_listgen_scanned_elements = 0;
+  runtime->sparse_listgen_emitted_elements = 0;
+  runtime->sparse_listgen_execution_strategy = 0;
+  runtime->sparse_listgen_reused = false;
+}
+
+void runtime_sparse_listgen_work_read(LLVMRuntime *runtime, uint64 *result) {
+  result[0] = runtime->sparse_listgen_work_available ? 1 : 0;
+  result[1] = runtime->sparse_listgen_scanned_elements;
+  result[2] = runtime->sparse_listgen_emitted_elements;
+  result[3] = static_cast<uint64>(runtime->sparse_listgen_execution_strategy);
+  result[4] = runtime->sparse_listgen_reused ? 1 : 0;
+}
+
+void runtime_cpu_parallel_listgen_workspace_statistics(LLVMRuntime *runtime,
+                                                       uint64 *result) {
+  auto workspace = runtime->cpu_parallel_listgen_offsets;
+  if (workspace == nullptr) {
+    result[0] = 0;
+    return;
+  }
+  result[0] = sizeof(ListManager) +
+              static_cast<uint64>(workspace->get_num_active_chunks()) *
+                  workspace->max_num_elements_per_chunk *
+                  workspace->element_size +
+              static_cast<uint64>(
+                  workspace->get_num_active_chunk_directories()) *
+                  kLlvmListManagerDirectoryPageBytes;
+}
+#endif
+
+void runtime_initialize_snode_element_list(LLVMRuntime *runtime,
+                                           const int snode_id,
+                                           std::size_t chunk_num_elements) {
+  taichi_assert_runtime(runtime, runtime->element_lists[snode_id] == nullptr,
+                        "SNode element list initialized twice.");
+#if !ARCH_cuda && !ARCH_amdgpu
+  runtime->element_lists[snode_id] =
+      acquire_element_list(runtime, chunk_num_elements);
+#else
+  runtime->element_lists[snode_id] = runtime->create<ListManager>(
+      runtime, sizeof(Element), chunk_num_elements);
+#endif
+}
+
+void runtime_reset_snode_slot(LLVMRuntime *runtime, const int snode_id) {
+  runtime->element_lists[snode_id] = nullptr;
+  runtime->node_allocators[snode_id] = nullptr;
+  runtime->ambient_elements[snode_id] = nullptr;
+  runtime->element_list_dirty_epoch[snode_id] = 1;
+  runtime->element_list_dirty_flag[snode_id] = 1;
+  runtime->element_list_version[snode_id] = 0;
+  runtime->element_list_clean_epoch[snode_id] = 0;
+  runtime->element_list_clean_parent_version[snode_id] = 0;
+}
+
 void runtime_initialize_snodes(LLVMRuntime *runtime,
                                std::size_t root_size,
                                const int root_id,
@@ -1265,25 +1653,23 @@ void runtime_initialize_snodes(LLVMRuntime *runtime,
                                const int snode_tree_id,
                                std::size_t rounded_size,
                                Ptr ptr,
+                               std::size_t root_list_chunk_num_elements,
                                bool all_dense) {
   // For Metal runtime, we have to make sure that both the beginning address
   // and the size of the root buffer memory are aligned to page size.
   runtime->root_mem_sizes[snode_tree_id] = rounded_size;
   runtime->roots[snode_tree_id] = ptr;
+  // SNode ids are globally unique but one tree's ids need not be contiguous:
+  // the default root can gain children after another FieldsBuilder finalizes.
+  // The executor resets each actual id before entering this function.
+  (void)num_snodes;
   // runtime->request_allocate_aligned ready to use
   // initialize the root node element list
   if (all_dense) {
     return;
   }
-  for (int i = root_id; i < root_id + num_snodes; i++) {
-    // TODO: some SNodes do not actually need an element list.
-#if !ARCH_cuda && !ARCH_amdgpu
-    runtime->element_lists[i] = acquire_element_list(runtime);
-#else
-    runtime->element_lists[i] =
-        runtime->create<ListManager>(runtime, sizeof(Element), 1024 * 64);
-#endif
-  }
+  runtime_initialize_snode_element_list(runtime, root_id,
+                                        root_list_chunk_num_elements);
   Element elem;
   elem.loop_bounds[0] = 0;
   elem.loop_bounds[1] = 1;
@@ -1337,14 +1723,6 @@ void runtime_NodeAllocator_initialize_ex(LLVMRuntime *runtime,
 #endif
 }
 
-void runtime_allocate_ambient(LLVMRuntime *runtime,
-                              int snode_id,
-                              std::size_t node_size) {
-  auto ambient = runtime->node_allocators[snode_id]->allocate();
-  std::memset(ambient, 0, node_size);
-  runtime->ambient_elements[snode_id] = ambient;
-}
-
 void runtime_allocate_ambient_direct(LLVMRuntime *runtime,
                                      int snode_id,
                                      std::size_t node_size) {
@@ -1370,32 +1748,51 @@ void runtime_NodeAllocator_set_dedicated_pool(LLVMRuntime *runtime,
   runtime->node_allocators[snode_id]->set_dedicated_pool(ptr, size);
 }
 
+void runtime_NodeAllocator_set_deterministic_capacity(LLVMRuntime *runtime,
+                                                      int snode_id,
+                                                      int capacity) {
+  auto allocator = runtime->node_allocators[snode_id];
+  allocator->deterministic_capacity = capacity;
+  allocator->deterministic_active = 0;
+  allocator->deterministic_peak = 0;
+}
+
 // CUDA auto-sized per-SNode pools are allocated per materialized sparse
 // SNodeTree. `runtime_memory_chunk` is rebound to the next tree's global
 // region when another sparse tree is materialized, so element lists from the
 // current tree must not keep allocating future chunks from that mutable global
 // runtime pointer. Snapshot the remaining global region into a stable chunk and
 // route this tree's element-list chunk allocations there.
-void runtime_element_lists_set_backing_pool(LLVMRuntime *runtime,
-                                            int root_id,
-                                            int num_snodes) {
+void runtime_element_lists_prepare_backing_pool(LLVMRuntime *runtime) {
   if (runtime->runtime_memory_chunk.preallocated_size == 0) {
+    runtime->materializing_element_list_backing_chunk = nullptr;
     return;
   }
 
   auto backing = runtime->create<PreallocatedMemoryChunk>();
   *backing = runtime->runtime_memory_chunk;
-  for (int i = root_id; i < root_id + num_snodes; i++) {
-    if (runtime->element_lists[i] != nullptr) {
-      runtime->element_lists[i]->backing_chunk = backing;
-    }
-  }
+  runtime->materializing_element_list_backing_chunk = backing;
+}
 
+void runtime_element_list_set_backing_pool(LLVMRuntime *runtime,
+                                           int snode_id) {
+  if (runtime->materializing_element_list_backing_chunk != nullptr &&
+      runtime->element_lists[snode_id] != nullptr) {
+    runtime->element_lists[snode_id]->backing_chunk =
+        runtime->materializing_element_list_backing_chunk;
+  }
+}
+
+void runtime_element_lists_finalize_backing_pool(LLVMRuntime *runtime) {
+  if (runtime->materializing_element_list_backing_chunk == nullptr) {
+    return;
+  }
   // Prevent accidental fallback allocations from overlapping with the
   // tree-owned element-list region. The host will rebind runtime_memory_chunk
   // before materializing the next CUDA sparse tree.
   runtime->runtime_memory_chunk.preallocated_head =
       runtime->runtime_memory_chunk.preallocated_tail;
+  runtime->materializing_element_list_backing_chunk = nullptr;
 }
 
 void mutex_lock_i32(Ptr mutex) {
@@ -1641,16 +2038,44 @@ void clear_list(LLVMRuntime *runtime, StructMeta *parent, StructMeta *child) {
 
 // For the root node there is only one container,
 // therefore we use a special kernel for more parallelism.
-void element_listgen_root(LLVMRuntime *runtime,
-                          StructMeta *parent,
-                          StructMeta *child) {
+extern "C++" {
+template <bool RecordWork>
+void record_sparse_listgen_work(LLVMRuntime *runtime,
+                                uint64 scanned_elements,
+                                uint64 emitted_elements,
+                                bool reused = false) {
+#if !ARCH_cuda && !ARCH_amdgpu
+  if constexpr (RecordWork) {
+    runtime->sparse_listgen_work_available = true;
+    runtime->sparse_listgen_scanned_elements += scanned_elements;
+    runtime->sparse_listgen_emitted_elements += emitted_elements;
+    runtime->sparse_listgen_execution_strategy = reused ? 0 : 1;
+    runtime->sparse_listgen_reused = reused;
+  }
+#else
+  (void)runtime;
+  (void)scanned_elements;
+  (void)emitted_elements;
+  (void)reused;
+#endif
+}
+
+template <bool RecordWork>
+void element_listgen_root_impl(LLVMRuntime *runtime,
+                               StructMeta *parent,
+                               StructMeta *child) {
   if (child->listgen_reuse && element_list_is_current(runtime, parent, child)) {
+    record_sparse_listgen_work<RecordWork>(runtime, 0, 0, true);
     return;
   }
   // If there's just one element in the parent list, we need to use the blocks
   // (instead of threads) to split the parent container
   auto parent_list = runtime->element_lists[parent->snode_id];
   auto child_list = runtime->element_lists[child->snode_id];
+  int child_list_size_before = 0;
+  if constexpr (RecordWork) {
+    child_list_size_before = child_list->size();
+  }
   // Cache the func pointers here for better compiler optimization
   auto parent_lookup_element = parent->lookup_element;
   auto child_get_num_elements = child->get_num_elements;
@@ -1694,17 +2119,209 @@ void element_listgen_root(LLVMRuntime *runtime,
   if (child->listgen_reuse) {
     mark_element_list_current(runtime, parent, child);
   }
+  if constexpr (RecordWork) {
+    record_sparse_listgen_work<RecordWork>(
+        runtime, static_cast<uint64>(ch_num_elements),
+        static_cast<uint64>(child_list->size() - child_list_size_before));
+  }
+}
+}  // extern "C++"
+
+void element_listgen_root(LLVMRuntime *runtime,
+                          StructMeta *parent,
+                          StructMeta *child) {
+#if !ARCH_cuda && !ARCH_amdgpu
+  if (runtime->sparse_listgen_work_recording) {
+    element_listgen_root_impl<true>(runtime, parent, child);
+    return;
+  }
+#endif
+  element_listgen_root_impl<false>(runtime, parent, child);
 }
 
-void element_listgen_nonroot(LLVMRuntime *runtime,
-                             StructMeta *parent,
-                             StructMeta *child) {
+#if !ARCH_cuda && !ARCH_amdgpu
+extern "C++" {
+constexpr i32 kCpuParallelListgenMinParentElements = 64;
+constexpr uint64 kCpuParallelListgenMinCandidateSlots = 65536;
+constexpr i32 kCpuParallelListgenOffsetChunkElements = 1024;
+constexpr std::size_t kCpuParallelListgenMaxWorkspaceBytes = 64 * 1024 * 1024;
+
+struct CpuParallelListgenContext {
+  StructMeta *parent;
+  StructMeta *child;
+  ListManager *parent_list;
+  ListManager *child_list;
+  ListManager *output_offsets;
+};
+
+void cpu_parallel_listgen_count(void *context_, int thread_id, int i) {
+  (void)thread_id;
+  auto context = (CpuParallelListgenContext *)context_;
+  auto element = context->parent_list->get<Element>(i);
+  i32 output_count = 0;
+  for (int j = element.loop_bounds[0]; j < element.loop_bounds[1]; ++j) {
+    if (!context->parent->is_active((Ptr)context->parent, element.element, j)) {
+      continue;
+    }
+    auto ch_element = context->parent->lookup_element(
+        (Ptr)context->parent, element.element, j);
+    ch_element = context->child->from_parent_element((Ptr)ch_element);
+    const i32 ch_num_elements =
+        context->child->get_num_elements((Ptr)context->child, ch_element);
+    if (ch_num_elements > 0) {
+      output_count +=
+          1 + (ch_num_elements - 1) / taichi_listgen_max_element_size;
+    }
+  }
+  context->output_offsets->get<i32>(i + 1) = output_count;
+}
+
+void cpu_parallel_listgen_fill(void *context_, int thread_id, int i) {
+  (void)thread_id;
+  auto context = (CpuParallelListgenContext *)context_;
+  auto element = context->parent_list->get<Element>(i);
+  i32 output_index = context->output_offsets->get<i32>(i);
+  const i32 output_end = context->output_offsets->get<i32>(i + 1);
+  for (int j = element.loop_bounds[0]; j < element.loop_bounds[1]; ++j) {
+    PhysicalCoordinates refined_coord;
+    context->parent->refine_coordinates(&element.pcoord, &refined_coord, j);
+    if (!context->parent->is_active((Ptr)context->parent, element.element, j)) {
+      continue;
+    }
+    auto ch_element = context->parent->lookup_element(
+        (Ptr)context->parent, element.element, j);
+    ch_element = context->child->from_parent_element((Ptr)ch_element);
+    const i32 ch_num_elements =
+        context->child->get_num_elements((Ptr)context->child, ch_element);
+    const i32 ch_element_size =
+        std::min(ch_num_elements, taichi_listgen_max_element_size);
+    for (int ch_lower = 0; ch_lower < ch_num_elements;
+         ch_lower += ch_element_size) {
+      auto &output = context->child_list->get<Element>(output_index++);
+      output.element = ch_element;
+      output.loop_bounds[0] = ch_lower;
+      output.loop_bounds[1] =
+          std::min(ch_lower + ch_element_size, ch_num_elements);
+      output.pcoord = refined_coord;
+    }
+  }
+  taichi_assert_runtime(context->child_list->runtime,
+                        output_index == output_end,
+                        "Parallel listgen count/fill mismatch.");
+}
+
+bool element_listgen_nonroot_parallel(LLVMRuntime *runtime,
+                                      StructMeta *parent,
+                                      StructMeta *child,
+                                      uint64 *scanned_elements,
+                                      uint64 *emitted_elements) {
+  auto parent_list = runtime->element_lists[parent->snode_id];
+  const i32 num_parent_elements = parent_list->size();
+  if (runtime->parallel_for == nullptr || runtime->thread_pool == nullptr ||
+      runtime->num_rand_states <= 1 ||
+      num_parent_elements < kCpuParallelListgenMinParentElements) {
+    return false;
+  }
+  const std::size_t num_offsets =
+      static_cast<std::size_t>(num_parent_elements) + 1;
+  if (num_offsets >
+      kCpuParallelListgenMaxWorkspaceBytes / sizeof(i32)) {
+    return false;
+  }
+
+  uint64 candidates = 0;
+  for (int i = 0; i < num_parent_elements; ++i) {
+    const auto &element = parent_list->get<Element>(i);
+    candidates +=
+        static_cast<uint64>(element.loop_bounds[1] - element.loop_bounds[0]);
+  }
+  if (candidates < kCpuParallelListgenMinCandidateSlots) {
+    return false;
+  }
+
+  if (runtime->cpu_parallel_listgen_offsets == nullptr) {
+    runtime->cpu_parallel_listgen_offsets = runtime->create<ListManager>(
+        runtime, sizeof(i32), kCpuParallelListgenOffsetChunkElements);
+  }
+  auto output_offsets = runtime->cpu_parallel_listgen_offsets;
+  const i32 last_offset_chunk =
+      (static_cast<i32>(num_offsets) - 1) >>
+      output_offsets->log2chunk_num_elements;
+  for (int chunk_id = 0; chunk_id <= last_offset_chunk; ++chunk_id) {
+    output_offsets->touch_chunk(chunk_id);
+  }
+  output_offsets->resize(static_cast<i32>(num_offsets));
+  output_offsets->get<i32>(0) =
+      runtime->element_lists[child->snode_id]->size();
+
+  CpuParallelListgenContext context{
+      parent,
+      child,
+      parent_list,
+      runtime->element_lists[child->snode_id],
+      output_offsets,
+  };
+  runtime->parallel_for(runtime->thread_pool, num_parent_elements,
+                        runtime->num_rand_states, &context,
+                        cpu_parallel_listgen_count);
+
+  bool overflow = false;
+  for (int i = 0; i < num_parent_elements; ++i) {
+    const uint64 next =
+        static_cast<uint64>(output_offsets->get<i32>(i)) +
+        static_cast<uint64>(output_offsets->get<i32>(i + 1));
+    if (next > 0x7fffffffULL) {
+      overflow = true;
+      break;
+    }
+    output_offsets->get<i32>(i + 1) = static_cast<i32>(next);
+  }
+  if (overflow) {
+    taichi_assert_runtime(runtime, false,
+                          "Parallel listgen output exceeds i32 capacity.");
+    return true;
+  }
+
+  auto child_list = context.child_list;
+  const i32 output_begin = output_offsets->get<i32>(0);
+  const i32 output_end = output_offsets->get<i32>(num_parent_elements);
+  if (output_end > output_begin) {
+    const i32 first_chunk = output_begin >> child_list->log2chunk_num_elements;
+    const i32 last_chunk =
+        (output_end - 1) >> child_list->log2chunk_num_elements;
+    for (int chunk_id = first_chunk; chunk_id <= last_chunk; ++chunk_id) {
+      child_list->touch_chunk(chunk_id);
+    }
+  }
+  child_list->resize(output_end);
+  runtime->parallel_for(runtime->thread_pool, num_parent_elements,
+                        runtime->num_rand_states, &context,
+                        cpu_parallel_listgen_fill);
+
+  *scanned_elements = candidates;
+  *emitted_elements = static_cast<uint64>(output_end - output_begin);
+  return true;
+}
+}  // extern "C++"
+#endif
+
+extern "C++" {
+template <bool RecordWork>
+void element_listgen_nonroot_impl(LLVMRuntime *runtime,
+                                  StructMeta *parent,
+                                  StructMeta *child) {
   if (child->listgen_reuse && element_list_is_current(runtime, parent, child)) {
+    record_sparse_listgen_work<RecordWork>(runtime, 0, 0, true);
     return;
   }
   auto parent_list = runtime->element_lists[parent->snode_id];
   int num_parent_elements = parent_list->size();
   auto child_list = runtime->element_lists[child->snode_id];
+  int child_list_size_before = 0;
+  uint64 scanned_elements = 0;
+  if constexpr (RecordWork) {
+    child_list_size_before = child_list->size();
+  }
   // Cache the func pointers here for better compiler optimization
   auto parent_refine_coordinates = parent->refine_coordinates;
   auto parent_is_active = parent->is_active;
@@ -1728,6 +2345,9 @@ void element_listgen_nonroot(LLVMRuntime *runtime,
     auto element = parent_list->get<Element>(i);
     int j_lower = element.loop_bounds[0] + j_start;
     int j_higher = element.loop_bounds[1];
+    if constexpr (RecordWork) {
+      scanned_elements += static_cast<uint64>(j_higher - j_lower);
+    }
     for (int j = j_lower; j < j_higher; j += j_step) {
       PhysicalCoordinates refined_coord;
       parent_refine_coordinates(&element.pcoord, &refined_coord, j);
@@ -1754,6 +2374,46 @@ void element_listgen_nonroot(LLVMRuntime *runtime,
   if (child->listgen_reuse) {
     mark_element_list_current(runtime, parent, child);
   }
+  if constexpr (RecordWork) {
+    record_sparse_listgen_work<RecordWork>(
+        runtime, scanned_elements,
+        static_cast<uint64>(child_list->size() - child_list_size_before));
+  }
+}
+}  // extern "C++"
+
+void element_listgen_nonroot(LLVMRuntime *runtime,
+                             StructMeta *parent,
+                             StructMeta *child) {
+#if !ARCH_cuda && !ARCH_amdgpu
+  if (child->listgen_reuse && element_list_is_current(runtime, parent, child)) {
+    if (runtime->sparse_listgen_work_recording) {
+      record_sparse_listgen_work<true>(runtime, 0, 0, true);
+    }
+    return;
+  }
+  uint64 scanned_elements = 0;
+  uint64 emitted_elements = 0;
+  if (element_listgen_nonroot_parallel(runtime, parent, child,
+                                       &scanned_elements,
+                                       &emitted_elements)) {
+    if (child->listgen_reuse) {
+      mark_element_list_current(runtime, parent, child);
+    }
+    if (runtime->sparse_listgen_work_recording) {
+      runtime->sparse_listgen_work_available = true;
+      runtime->sparse_listgen_scanned_elements += scanned_elements;
+      runtime->sparse_listgen_emitted_elements += emitted_elements;
+      runtime->sparse_listgen_execution_strategy = 2;
+    }
+    return;
+  }
+  if (runtime->sparse_listgen_work_recording) {
+    element_listgen_nonroot_impl<true>(runtime, parent, child);
+    return;
+  }
+#endif
+  element_listgen_nonroot_impl<false>(runtime, parent, child);
 }
 
 using BlockTask = void(RuntimeContext *, char *, Element *, int, int);
@@ -2133,21 +2793,42 @@ i32 linear_thread_idx(RuntimeContext *context) {
 #include "node_bitmasked.h"
 
 void ListManager::touch_chunk(int chunk_id) {
-  taichi_assert_runtime(runtime, chunk_id < max_num_chunks,
+  taichi_assert_runtime(runtime,
+                        chunk_id >= 0 &&
+                            (std::size_t)chunk_id < max_num_chunks,
                         "List manager out of chunks.");
-  if (!chunks[chunk_id]) {
+  if (!get_chunk_ptr(chunk_id)) {
     locked_task(&lock, [&] {
       // may have been allocated during lock contention
-      if (!chunks[chunk_id]) {
+      if (!get_chunk_ptr(chunk_id)) {
+        Ptr *chunk_slot;
+        PreallocatedMemoryChunk &mc =
+            backing_chunk ? *backing_chunk : runtime->runtime_memory_chunk;
+        if (chunk_id < inline_num_chunks) {
+          chunk_slot = &inline_chunks[chunk_id];
+        } else {
+          const i32 relative = chunk_id - inline_num_chunks;
+          const i32 directory_id = relative / chunks_per_directory;
+          const i32 directory_offset = relative % chunks_per_directory;
+          if (chunk_directories[directory_id] == nullptr) {
+            auto directory = runtime->allocate_aligned(
+                mc, kLlvmListManagerDirectoryPageBytes,
+                kLlvmListManagerAllocationAlignment, true /*request*/);
+            std::memset(directory, 0, kLlvmListManagerDirectoryPageBytes);
+            grid_memfence();
+            atomic_exchange_u64((u64 *)&chunk_directories[directory_id],
+                                (u64)directory);
+          }
+          chunk_slot =
+              &((Ptr *)chunk_directories[directory_id])[directory_offset];
+        }
         grid_memfence();
         // Phase 1 (2026-05): route data allocations to per-SNode dedicated
         // chunk when set, otherwise fall back to global runtime_memory_chunk.
-        PreallocatedMemoryChunk &mc =
-            backing_chunk ? *backing_chunk : runtime->runtime_memory_chunk;
         auto chunk_ptr = runtime->allocate_aligned(
             mc, max_num_elements_per_chunk * element_size, 4096,
             true /*request*/);
-        atomic_exchange_u64((u64 *)&chunks[chunk_id], (u64)chunk_ptr);
+        atomic_exchange_u64((u64 *)chunk_slot, (u64)chunk_ptr);
       }
     });
   }

@@ -102,6 +102,13 @@ class LlvmProgramImpl : public ProgramImpl {
     return runtime_exec_->destroy_snode_tree(snode_tree);
   }
 
+  SparseSNodeTreeMemoryStatistics get_snode_tree_memory_statistics(
+      SNodeTree *snode_tree,
+      uint64 *result_buffer) override {
+    return runtime_exec_->get_snode_tree_memory_statistics(snode_tree,
+                                                           result_buffer);
+  }
+
   template <typename T>
   T fetch_result(int i, uint64 *result_buffer) {
     return runtime_exec_->fetch_result<T>(i, result_buffer);

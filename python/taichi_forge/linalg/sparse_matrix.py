@@ -193,6 +193,13 @@ class SparseMatrix:
             raise TaichiRuntimeError("SparseMatrix value-only update expects a Taichi ndarray.")
         self.matrix.update_values(get_runtime().prog, values.arr)
 
+    def _debug_runtime_stats(self):
+        """Returns private operator-owned resource and operation telemetry."""
+        snapshot = dict(self.matrix._debug_runtime_stats())
+        for section in ("identity", "operations", "resources", "transfers"):
+            snapshot[section] = dict(snapshot[section])
+        return snapshot
+
     def build_from_ndarray(self, ndarray):
         """Build the sparse matrix from a ndarray.
 

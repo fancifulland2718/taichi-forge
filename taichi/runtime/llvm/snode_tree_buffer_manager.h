@@ -23,9 +23,12 @@ class SNodeTreeBufferManager {
 
   void destroy(SNodeTree *snode_tree);
 
+  std::size_t get_size(int snode_tree_id) const;
+
  private:
   LlvmRuntimeExecutor *runtime_exec_;
   std::map<int, DeviceAllocation> snode_tree_id_to_device_alloc_;
+  std::map<int, std::size_t> snode_tree_id_to_size_;
 };
 
 }  // namespace taichi::lang

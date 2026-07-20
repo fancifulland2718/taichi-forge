@@ -2,6 +2,7 @@
 
 #include "taichi/codegen/compiled_kernel_data.h"
 #include "taichi/program/launch_context_builder.h"
+#include "taichi/program/sparse_runtime_statistics.h"
 
 namespace taichi::lang {
 
@@ -33,6 +34,15 @@ class KernelLauncher {
 
   virtual std::size_t debug_registered_kernel_count() {
     return 0;
+  }
+
+  virtual void debug_reset_sparse_listgen_statistics() {
+  }
+
+  virtual SparseSNodeTreeListgenStatistics
+  debug_sparse_listgen_statistics(const std::vector<int> &snode_ids) {
+    (void)snode_ids;
+    return {};
   }
 
   virtual ~KernelLauncher() = default;

@@ -152,9 +152,11 @@ class SNode:
                 the sparse pool to ``ceil(hint / chunk_elements) * chunk_bytes``
                 instead of the per-NodeManager worst-case, dramatically
                 reducing first-activation footprint for large dense parents.
-                The CPU LLVM backend allocates on demand and ignores this
-                hint. Out-of-range values are clamped (with a warning) on
-                Vulkan; CUDA only enforces the per-container lower bound.
+                LLVM backends also use it to choose downstream traversal-list
+                chunk geometry. CPU sparse payload still allocates on demand,
+                so this is not a hard CPU storage capacity. Out-of-range
+                values are clamped (with a warning) on Vulkan; CUDA only
+                enforces the per-container lower bound.
 
         Returns:
             The added :class:`~taichi_forge.lang.SNode` instance.
@@ -169,19 +171,6 @@ class SNode:
         if not isinstance(vk_max_active, numbers.Integral) or vk_max_active <= 0:
             raise TaichiRuntimeError(
                 f"vk_max_active must be a positive integer, got {vk_max_active!r}."
-            )
-        # Phase 0.5 (2026-05): warn only when the hint will truly be ignored
-        # (CPU LLVM allocates on demand). Vulkan and CUDA both honor the
-        # hint; CUDA path consumes it via cuda_sparse_pool_auto_size during
-        # initialize_llvm_runtime_snodes.
-        cur_arch = impl.current_cfg().arch
-        if cur_arch != _ti_core.vulkan and cur_arch != _ti_core.cuda:
-            warnings.warn(
-                f"vk_max_active={vk_max_active} is set on a backend that "
-                f"does not consume the hint (arch={cur_arch}); the value "
-                "will be ignored. Vulkan and CUDA are the consumers; the "
-                "CPU LLVM backend allocates sparse storage on demand.",
-                stacklevel=2,
             )
         return SNode(self.ptr.pointer_with_hint(axes, dimensions, int(vk_max_active), dbg))
 

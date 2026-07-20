@@ -86,7 +86,7 @@ Forge 默认从已物化的 SNode 树推导 CUDA sparse SNode pool，并在同�
 | `cuda_sparse_per_snode_pool` | `True` | 在自动调尺路径中，为每个可分配 SNode 切出独立数据区，同时保留共享的全局元数据/list 区；隔离嵌套 allocator 压力，但不会为每个 SNode 增加一次 CUDA allocation。 |
 | `cuda_sparse_pool_size_floor_MiB` | `0` | 推导 pool 的可选用户下限（MiB）。全局元数据/list baseline 与 per-SNode chunk 预算始终计入，因此默认不再追加防御性 floor；绕过 auto-size 时无效。 |
 
-`device_memory_fraction > 0` 与 `cuda_sparse_pool_size_GB > 0` 都会完全绕过自动调尺。`vk_max_active` 可降低单个 SNode 的 expected-active 上界；未给 hint 时使用该 SNode 从 root 展开的全局 cell 数，而不是单个父容器的大小。
+`device_memory_fraction > 0` 与 `cuda_sparse_pool_size_GB > 0` 都会完全绕过自动调尺。`vk_max_active` 可降低单个 SNode 的 expected-active 上界；未给 hint 时使用该 SNode 从 root 展开的全局 cell 数，而不是单个父容器的大小。在 CPU/其他 LLVM 后端，该 hint 不限制按需增长的 sparse payload 容量，只用于选择下游 traversal element-list 的 chunk 几何。
 
 ### 2.7 Sparse struct-for / listgen 优化
 

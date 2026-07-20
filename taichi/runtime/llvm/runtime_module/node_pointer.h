@@ -13,7 +13,7 @@ inline bool Pointer_compare_exchange_u64(volatile u64 *dest,
                                          u64 expected,
                                          u64 desired) {
   return __atomic_compare_exchange(
-      dest, &expected, &desired, true, std::memory_order::memory_order_seq_cst,
+      dest, &expected, &desired, false, std::memory_order::memory_order_seq_cst,
       std::memory_order::memory_order_seq_cst);
 }
 
@@ -21,7 +21,7 @@ i32 Pointer_get_num_elements(Ptr meta, Ptr node) {
   return ((StructMeta *)meta)->max_num_elements;
 }
 
-bool is_representative(uint32 mask, uint64 value) {
+bool cuda_warp_is_representative(uint32 mask, uint64 value) {
 #if defined(ARCH_cuda)
   // If many threads in the mask share the same value, simply
   // elect one thread to return true and let others return false.
@@ -58,11 +58,22 @@ void Pointer_activate(Ptr meta_, Ptr node, int i) {
   // num_cells_per_container) maps to a unique pool slot. The host has
   // pre-allocated and zero-filled a contiguous pool. We compute the target
   // address deterministically and publish it with a single atomicCAS.
-  // All concurrent threads that reach this slot compute the same address,
-  // so the CAS winner publishes it and losers see the same value.
-  // No lock, no warp election, no barrier — replaces ~15 lines of the
-  // legacy path.
+  // Duplicate lanes first elect one representative; the cross-warp CAS
+  // winner publishes the address and all contenders observe the same value.
+  // This keeps the legacy allocator lock and recycle lists out of the path.
   if (((PointerMeta *)meta)->deterministic_slot) {
+    // The common topology-stable path only needs a load. On a cold slot,
+    // elect one lane per target slot so duplicate writers in the same warp do
+    // not all issue the same CAS. Cross-warp publication remains protected by
+    // the original strong CAS + busy sentinel protocol.
+    u64 published = *(volatile u64 *)data_ptr;
+    if (published != 0) {
+      while (published == pointer_slot_busy) {
+        published = *(volatile u64 *)data_ptr;
+      }
+      return;
+    }
+    u32 mask = cuda_active_mask();
     auto rt = meta->context->runtime;
     auto nm = rt->node_allocators[meta->snode_id];
     // CS-2: deterministic pool carved from the TAIL of the dedicated chunk.
@@ -74,16 +85,21 @@ void Pointer_activate(Ptr meta_, Ptr node, int i) {
         (Ptr)((uint64_t)nm->dedicated_chunk.preallocated_tail - det_bytes);
     Ptr pool_cell =
         (Ptr)((uint64_t)pool_base + (uint64_t)i * meta->element_size);
-    if (Pointer_compare_exchange_u64((volatile u64 *)data_ptr, 0,
-                                     pointer_slot_busy)) {
-      std::memset(pool_cell, 0, meta->element_size);
-      grid_memfence();
-      atomic_exchange_u64((u64 *)data_ptr, (u64)pool_cell);
-      mark_element_lists_dirty_if_reuse(meta);
-    } else {
-      while (*(volatile u64 *)data_ptr == pointer_slot_busy) {
+    if (cuda_warp_is_representative(mask, (u64)data_ptr)) {
+      if (Pointer_compare_exchange_u64((volatile u64 *)data_ptr, 0,
+                                       pointer_slot_busy)) {
+        std::memset(pool_cell, 0, meta->element_size);
+        auto active = atomic_add_i32(&nm->deterministic_active, 1) + 1;
+        atomic_max_i32(&nm->deterministic_peak, active);
+        grid_memfence();
+        atomic_exchange_u64((u64 *)data_ptr, (u64)pool_cell);
+        mark_element_lists_dirty_if_reuse(meta);
+      } else {
+        while (*(volatile u64 *)data_ptr == pointer_slot_busy) {
+        }
       }
     }
+    warp_barrier(mask);
     return;
   }
 
@@ -92,7 +108,7 @@ void Pointer_activate(Ptr meta_, Ptr node, int i) {
   if (*data_ptr == nullptr) {
     // The cuda_ calls will return 0 or do noop on CPUs
     u32 mask = cuda_active_mask();
-    if (is_representative(mask, (u64)lock)) {
+    if (cuda_warp_is_representative(mask, (u64)lock)) {
       locked_task(
           lock,
           [&] {
@@ -122,9 +138,14 @@ void Pointer_deactivate(Ptr meta, Ptr node, int i) {
   if (data_ptr != nullptr) {
     auto smeta = (StructMeta *)meta;
     if (((PointerMeta *)smeta)->deterministic_slot) {
-      // Fast path: just clear the slot. No lock, no recycle, no GC.
-      data_ptr = nullptr;
-      mark_element_lists_dirty_if_reuse(smeta);
+      // Fast path: clear once and maintain current/peak allocation telemetry.
+      auto previous = atomic_exchange_u64((u64 *)&data_ptr, 0);
+      if (previous != 0 && previous != pointer_slot_busy) {
+        auto rt = smeta->context->runtime;
+        auto nm = rt->node_allocators[smeta->snode_id];
+        atomic_add_i32(&nm->deterministic_active, -1);
+        mark_element_lists_dirty_if_reuse(smeta);
+      }
       return;
     }
     // Legacy path: lock + recycle for GC
@@ -151,6 +172,8 @@ void Pointer_reset_all(Ptr meta, Ptr node) {
   Ptr *slot_base = (Ptr *)(node + 8 * num_elements);
   if (block_idx() == 0 && thread_idx() == 0) {
     mark_element_lists_dirty_if_reuse(smeta);
+    auto rt = smeta->context->runtime;
+    rt->node_allocators[smeta->snode_id]->deterministic_active = 0;
   }
   int linear = block_idx() * block_dim() + thread_idx();
   for (int i = linear; i < num_elements; i += block_dim() * grid_dim()) {

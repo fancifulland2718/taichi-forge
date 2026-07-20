@@ -86,7 +86,7 @@ By default Forge derives the CUDA sparse SNode pool from the materialized SNode 
 | `cuda_sparse_per_snode_pool` | `True` | With auto-sizing, carve one dedicated data region per allocatable SNode while retaining a shared global metadata/list region. This isolates nested allocator demand without adding one CUDA allocation per SNode. |
 | `cuda_sparse_pool_size_floor_MiB` | `0` | Optional user floor (MiB) for the derived pool. The global metadata/list baseline and per-SNode chunk budgets are always included, so no additional defensive floor is applied by default. No-op when auto-sizing is bypassed. |
 
-`device_memory_fraction > 0` and `cuda_sparse_pool_size_GB > 0` both bypass auto-sizing entirely. `vk_max_active` can lower a per-SNode expected-active bound, while the no-hint path uses the global number of cells represented by that SNode (not just one parent's container).
+`device_memory_fraction > 0` and `cuda_sparse_pool_size_GB > 0` both bypass auto-sizing entirely. `vk_max_active` can lower a per-SNode expected-active bound, while the no-hint path uses the global number of cells represented by that SNode (not just one parent's container). On CPU and other LLVM backends, the hint does not cap the on-demand sparse payload; it only selects downstream traversal element-list chunk geometry.
 
 ### 2.7 Sparse struct-for / listgen optimisations
 

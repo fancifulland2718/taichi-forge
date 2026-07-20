@@ -166,6 +166,98 @@ def test_vulkan_listgen_reuse_sparse_struct_for_smoke():
     vulkan_listgen_reuse=True,
     offline_cache=False,
 )
+def test_vulkan_listgen_reports_cross_snode_resident_evictions():
+    n = 512
+    x = ti.field(ti.i32)
+    x_builder = ti.FieldsBuilder()
+    x_builder.bitmasked(ti.i, n).place(x)
+    x_tree = x_builder.finalize()
+
+    y = ti.field(ti.i32)
+    y_builder = ti.FieldsBuilder()
+    y_builder.bitmasked(ti.i, n).place(y)
+    y_tree = y_builder.finalize()
+
+    @ti.kernel
+    def fill():
+        for i in range(n):
+            if i % 17 == 3:
+                x[i] = i + 1
+            if i % 19 == 5:
+                y[i] = i + 2
+
+    @ti.kernel
+    def sum_x() -> ti.i64:
+        total = ti.cast(0, ti.i64)
+        for i in x:
+            total += x[i]
+        return total
+
+    @ti.kernel
+    def sum_y() -> ti.i64:
+        total = ti.cast(0, ti.i64)
+        for i in y:
+            total += y[i]
+        return total
+
+    expected_x = sum(i + 1 for i in range(n) if i % 17 == 3)
+    expected_y = sum(i + 2 for i in range(n) if i % 19 == 5)
+    fill()
+
+    # Compile both readers and leave y's list resident before resetting the
+    # private counters. The measured x/x/y/x sequence contains one same-list
+    # reuse and, with today's single workspace, three cross-SNode evictions.
+    assert sum_x() == expected_x
+    assert sum_y() == expected_y
+    prog = ti.lang.impl.get_runtime().prog
+    prog._debug_reset_sparse_listgen_stats()
+
+    assert sum_x() == expected_x
+    assert sum_x() == expected_x
+    assert sum_y() == expected_y
+    assert sum_x() == expected_x
+
+    snapshots = [
+        dict(prog._debug_sparse_snode_tree_stats(tree.id))["listgen"]
+        for tree in (x_tree, y_tree)
+    ]
+    nodes = [node for snapshot in snapshots for node in snapshot["nodes"]]
+    totals = {
+        key: sum(dict(snapshot["totals"])[key] for snapshot in snapshots)
+        for key in (
+            "requests",
+            "rebuilds",
+            "reuse_hits",
+            "resident_evictions",
+        )
+    }
+    assert totals["requests"] == 4
+    assert totals["requests"] == totals["rebuilds"] + totals["reuse_hits"]
+    assert totals["reuse_hits"] >= 1
+    assert totals["resident_evictions"] == sum(
+        node["resident_evictions"] for node in nodes
+    )
+    assert totals["resident_evictions"] == totals["rebuilds"]
+    assert all(
+        node["resident_evictions"] == node["rebuilds"]
+        for node in nodes
+    )
+    assert all(
+        node["last_rebuild_reason"] == "resident_list_evicted"
+        for node in nodes
+        if node["rebuilds"] > 0
+    )
+
+    x_tree.destroy()
+    y_tree.destroy()
+
+
+@test_utils.test(
+    arch=ti.vulkan,
+    vulkan_sparse_experimental=True,
+    vulkan_listgen_reuse=True,
+    offline_cache=False,
+)
 def test_vulkan_listgen_reuse_parent_deactivate_invalidates_child():
     n = 256
     block = 16

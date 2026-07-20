@@ -20,6 +20,9 @@ class KernelLauncher : public lang::KernelLauncher {
                      LaunchContextBuilder &ctx) override;
   void retire_snode_tree(int tree_id) override;
   std::size_t debug_registered_kernel_count() override;
+  void debug_reset_sparse_listgen_statistics() override;
+  SparseSNodeTreeListgenStatistics debug_sparse_listgen_statistics(
+      const std::vector<int> &snode_ids) override;
 
   Handle get_or_register_kernel(
       const lang::CompiledKernelData &compiled_kernel_data);
