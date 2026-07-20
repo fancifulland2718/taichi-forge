@@ -4677,7 +4677,7 @@ Program::Program(Arch desired_arch)
   // Phase 1c-D: propagate the user's vulkan_sparse_experimental opt-in to
   // the process-global extension table BEFORE any is_extension_supported()
   // query (the very next block already calls it for Extension::assertion).
-  // Sticky once true; OR'd with the legacy TI_VULKAN_SPARSE env var.
+  // Replaced for each Program; OR'd with legacy TI_VULKAN_SPARSE=1.
   set_vulkan_sparse_experimental(config.vulkan_sparse_experimental);
   // §13 (2026-05-02): default for vulkan_sparse_experimental is now true.
   // Emit a one-shot informational warning whenever the experimental sparse

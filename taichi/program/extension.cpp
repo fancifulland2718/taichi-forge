@@ -15,20 +15,22 @@ namespace {
 // legacy env var TI_VULKAN_SPARSE=1 is kept as a compatibility fallback so
 // existing scripts and CI invocations continue to work unchanged.
 //
-// The flag is sticky once turned on for two reasons:
-//   1. is_extension_supported() is called during static init from snode.py
-//      module loading paths and from compile_to_offloads passes that don't
-//      have direct config access; a global "latched" flag matches the
-//      original env-var semantics exactly.
-//   2. There is at most one Program instance at a time (program.cpp:142
-//      TI_ASSERT_INFO num_instances_ == 0), so cross-Program leakage is a
-//      non-issue: each ti.init() resets the program before constructing the
-//      next one, which re-applies the flag from the new CompileConfig.
-bool &vulkan_sparse_flag() {
-  static bool flag = []() {
+// is_extension_supported() is also called from paths without direct Program
+// config access, so the effective value is process-global while a Program is
+// alive. Each Program construction must nevertheless replace the previous
+// config value: otherwise ti.reset(); ti.init(..., False) cannot honor the
+// documented opt-out after a default-enabled Vulkan Program. The legacy env
+// var remains a process-level force-enable compatibility path.
+bool legacy_vulkan_sparse_enabled() {
+  static const bool enabled = []() {
     const char *v = std::getenv("TI_VULKAN_SPARSE");
     return v != nullptr && std::strcmp(v, "1") == 0;
   }();
+  return enabled;
+}
+
+bool &vulkan_sparse_flag() {
+  static bool flag = legacy_vulkan_sparse_enabled();
   return flag;
 }
 
@@ -55,13 +57,11 @@ bool vulkan_quant_experimental_enabled() {
 }  // namespace
 
 void set_vulkan_sparse_experimental(bool enabled) {
-  // OR-set: turning the flag on via either the env var or the CompileConfig
-  // is sticky for the rest of the process. We never silently turn it off
-  // here, because doing so would break cached SNode struct layouts that
-  // were already produced with sparse=true.
-  if (enabled) {
-    vulkan_sparse_flag() = true;
-  }
+  // Only one Program may exist at a time. Replacing the prior Program's value
+  // is therefore safe and makes the explicit opt-out reliable across reset.
+  // TI_VULKAN_SPARSE=1 intentionally remains a force-enable compatibility
+  // path for existing scripts.
+  vulkan_sparse_flag() = enabled || legacy_vulkan_sparse_enabled();
 }
 
 void set_vulkan_quant_experimental(bool enabled) {

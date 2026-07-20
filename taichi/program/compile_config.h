@@ -71,7 +71,9 @@ struct CompileConfig {
   // pyd. A one-shot TI_WARN at Program ctor advertises the experimental
   // status whenever the path is actually exercised on Arch::vulkan. Users
   // can opt out via ti.init(vulkan_sparse_experimental=False) which fully
-  // restores the vanilla 1.7.4 "reject sparse on Vulkan" behaviour.
+  // restores the vanilla 1.7.4 "reject sparse on Vulkan" behaviour, including
+  // after ti.reset(), unless the legacy TI_VULKAN_SPARSE=1 force-enable path
+  // is present.
   bool vulkan_sparse_experimental{true};
   // G9.1 (taichi-forge 0.3.0): opt-in for the experimental quant_array /
   // bit_struct path on the Vulkan backend. Default false matches vanilla
