@@ -531,6 +531,13 @@ class CpuSparseCGPlan {
                int max_iterations,
                double absolute_tolerance,
                double relative_tolerance = 0.0);
+  CpuSparseCGPlan(Program *program,
+                  CompiledKernelLinearOperator &matrix,
+                  CompiledKernelPreconditionerPlan &preconditioner,
+                  int max_iterations,
+                  double absolute_tolerance,
+                  double relative_tolerance = 0.0);
+  ~CpuSparseCGPlan();
 
   void solve(Program *program, const Ndarray &x, const Ndarray &b);
 
@@ -567,21 +574,29 @@ class CpuSparseCGPlan {
   void solve_typed(Program *program,
                    T *x,
                    const T *b,
-                   std::array<std::vector<T>, 4> &workspace);
+                   const std::array<T *, 4> &workspace,
+                   const Ndarray &solution_array);
   CpuSparseCGPlan(Program *program,
                SparseMatrix &matrix,
                SparseJacobiPreconditionerPlan *scalar_preconditioner,
                SparseBlockJacobiPreconditionerPlan *block_preconditioner,
+               CompiledKernelPreconditionerPlan
+                   *compiled_kernel_preconditioner,
                int max_iterations,
                double absolute_tolerance,
                double relative_tolerance);
   void validate_preconditioner(Program *program) const;
   void apply_operator_cpu_raw(Program *program,
                               std::uintptr_t input,
-                              std::uintptr_t output);
+                              std::uintptr_t output,
+                              const Ndarray *input_array,
+                              const Ndarray *output_array);
   void apply_preconditioner_cpu_raw(Program *program,
                                     std::uintptr_t input,
-                                    std::uintptr_t output);
+                                    std::uintptr_t output,
+                                    const Ndarray *input_array,
+                                    const Ndarray *output_array);
+  void release_compiled_workspace();
 
   Program *program_{nullptr};
   SparseMatrix *matrix_{nullptr};
@@ -589,12 +604,15 @@ class CpuSparseCGPlan {
   CpuSparseBsrMatrix *bsr_matrix_{nullptr};
   SparseJacobiPreconditionerPlan *scalar_preconditioner_{nullptr};
   SparseBlockJacobiPreconditionerPlan *block_preconditioner_{nullptr};
+  CompiledKernelLinearOperator *compiled_kernel_operator_{nullptr};
+  CompiledKernelPreconditionerPlan *compiled_kernel_preconditioner_{nullptr};
   DataType dtype_{PrimitiveType::f32};
   int max_iterations_{0};
   double absolute_tolerance_{0.0};
   double relative_tolerance_{0.0};
   std::array<std::vector<float32>, 4> workspace_f32_;
   std::array<std::vector<float64>, 4> workspace_f64_;
+  std::array<Ndarray *, 4> compiled_workspace_{};
   mutable std::mutex solve_mutex_;
   bool has_solved_{false};
   SparseSolveStatus status_{SparseSolveStatus::kNotRun};
@@ -630,6 +648,14 @@ std::unique_ptr<CpuSparseCGPlan> make_cpu_block_jacobi_pcg_solver(
     Program *program,
     SparseMatrix &matrix,
     SparseBlockJacobiPreconditionerPlan &preconditioner,
+    int max_iterations,
+    double absolute_tolerance,
+    double relative_tolerance = 0.0);
+
+std::unique_ptr<CpuSparseCGPlan> make_cpu_compiled_kernel_pcg_solver(
+    Program *program,
+    CompiledKernelLinearOperator &matrix,
+    CompiledKernelPreconditionerPlan &preconditioner,
     int max_iterations,
     double absolute_tolerance,
     double relative_tolerance = 0.0);

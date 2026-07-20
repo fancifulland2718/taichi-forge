@@ -571,7 +571,7 @@ CpuSparseCGPlan::CpuSparseCGPlan(
     int max_iterations,
     double absolute_tolerance,
     double relative_tolerance)
-    : CpuSparseCGPlan(program, matrix, &preconditioner, nullptr,
+    : CpuSparseCGPlan(program, matrix, &preconditioner, nullptr, nullptr,
                       max_iterations, absolute_tolerance,
                       relative_tolerance) {
 }
@@ -583,7 +583,19 @@ CpuSparseCGPlan::CpuSparseCGPlan(
     int max_iterations,
     double absolute_tolerance,
     double relative_tolerance)
-    : CpuSparseCGPlan(program, matrix, nullptr, &preconditioner,
+    : CpuSparseCGPlan(program, matrix, nullptr, &preconditioner, nullptr,
+                      max_iterations, absolute_tolerance,
+                      relative_tolerance) {
+}
+
+CpuSparseCGPlan::CpuSparseCGPlan(
+    Program *program,
+    CompiledKernelLinearOperator &matrix,
+    CompiledKernelPreconditionerPlan &preconditioner,
+    int max_iterations,
+    double absolute_tolerance,
+    double relative_tolerance)
+    : CpuSparseCGPlan(program, matrix, nullptr, nullptr, &preconditioner,
                       max_iterations, absolute_tolerance,
                       relative_tolerance) {
 }
@@ -593,6 +605,7 @@ CpuSparseCGPlan::CpuSparseCGPlan(
     SparseMatrix &matrix,
     SparseJacobiPreconditionerPlan *scalar_preconditioner,
     SparseBlockJacobiPreconditionerPlan *block_preconditioner,
+    CompiledKernelPreconditionerPlan *compiled_kernel_preconditioner,
     int max_iterations,
     double absolute_tolerance,
     double relative_tolerance)
@@ -600,27 +613,39 @@ CpuSparseCGPlan::CpuSparseCGPlan(
       matrix_(&matrix),
       scalar_preconditioner_(scalar_preconditioner),
       block_preconditioner_(block_preconditioner),
+      compiled_kernel_preconditioner_(compiled_kernel_preconditioner),
       dtype_(matrix.get_data_type()),
       max_iterations_(max_iterations),
       absolute_tolerance_(absolute_tolerance),
       relative_tolerance_(relative_tolerance) {
   TI_ERROR_IF(!program_ || !arch_is_cpu(program_->compile_config().arch),
               "CPU sparse PCG requires an active CPU Program.");
-  TI_ERROR_IF((scalar_preconditioner_ == nullptr) ==
-                  (block_preconditioner_ == nullptr),
-              "CPU sparse PCG requires exactly one Jacobi preconditioner.");
+  const int preconditioner_count = (scalar_preconditioner_ ? 1 : 0) +
+                                   (block_preconditioner_ ? 1 : 0) +
+                                   (compiled_kernel_preconditioner_ ? 1 : 0);
+  TI_ERROR_IF(preconditioner_count != 1,
+              "CPU sparse PCG requires exactly one preconditioner.");
   csr_matrix_ = dynamic_cast<CpuSparseCsrMatrix *>(&matrix);
   bsr_matrix_ = dynamic_cast<CpuSparseBsrMatrix *>(&matrix);
+  compiled_kernel_operator_ =
+      dynamic_cast<CompiledKernelLinearOperator *>(&matrix);
   TI_ERROR_IF(
       (scalar_preconditioner_ && !csr_matrix_) ||
-          (block_preconditioner_ && !bsr_matrix_),
+          (block_preconditioner_ && !bsr_matrix_) ||
+          (compiled_kernel_preconditioner_ && !compiled_kernel_operator_),
       "CPU sparse PCG requires fixed CPU CSR with scalar Jacobi or fixed CPU "
-      "BSR with block-Jacobi.");
+      "BSR with block-Jacobi, or a compiled-kernel target and "
+      "preconditioner.");
+  TI_ERROR_IF(compiled_kernel_operator_ &&
+                  compiled_kernel_operator_->owning_program() != program_,
+              "CPU compiled-kernel PCG requires its owning Program.");
   TI_ERROR_IF(matrix_->num_rows() <= 0 ||
                   matrix_->num_rows() != matrix_->num_cols(),
               "CPU sparse PCG requires a non-empty square matrix.");
-  TI_ERROR_IF(dtype_ != PrimitiveType::f32 &&
-                  dtype_ != PrimitiveType::f64,
+  TI_ERROR_IF((compiled_kernel_operator_ && dtype_ != PrimitiveType::f32) ||
+                  (!compiled_kernel_operator_ &&
+                   dtype_ != PrimitiveType::f32 &&
+                   dtype_ != PrimitiveType::f64),
               "CPU sparse PCG requires f32 or f64 values.");
   TI_ERROR_IF(max_iterations_ < 0,
               "CPU sparse PCG requires non-negative max iterations.");
@@ -635,7 +660,18 @@ CpuSparseCGPlan::CpuSparseCGPlan(
   validate_preconditioner(program_);
   const std::size_t rows =
       static_cast<std::size_t>(matrix_->num_rows());
-  if (dtype_ == PrimitiveType::f32) {
+  if (compiled_kernel_operator_) {
+    try {
+      for (auto &vector : compiled_workspace_) {
+        vector = program_->create_ndarray(
+            PrimitiveType::f32, {matrix_->num_rows()},
+            ExternalArrayLayout::kNull, false);
+      }
+    } catch (...) {
+      release_compiled_workspace();
+      throw;
+    }
+  } else if (dtype_ == PrimitiveType::f32) {
     for (auto &vector : workspace_f32_) {
       vector.resize(rows);
     }
@@ -646,31 +682,65 @@ CpuSparseCGPlan::CpuSparseCGPlan(
   }
 }
 
+CpuSparseCGPlan::~CpuSparseCGPlan() {
+  release_compiled_workspace();
+}
+
+void CpuSparseCGPlan::release_compiled_workspace() {
+  if (!program_) {
+    return;
+  }
+  for (auto &vector : compiled_workspace_) {
+    if (vector) {
+      program_->delete_ndarray(vector);
+      vector = nullptr;
+    }
+  }
+}
+
 void CpuSparseCGPlan::validate_preconditioner(Program *program) const {
   if (scalar_preconditioner_) {
     scalar_preconditioner_->validate_compatible(program, *matrix_);
-  } else {
+  } else if (block_preconditioner_) {
     block_preconditioner_->validate_compatible(program, *matrix_);
+  } else {
+    compiled_kernel_preconditioner_->validate_compatible(
+        program, *compiled_kernel_operator_);
   }
 }
 
 void CpuSparseCGPlan::apply_operator_cpu_raw(Program *program,
                                              std::uintptr_t input,
-                                             std::uintptr_t output) {
+                                             std::uintptr_t output,
+                                             const Ndarray *input_array,
+                                             const Ndarray *output_array) {
   if (csr_matrix_) {
     csr_matrix_->spmv_cpu_raw(program, input, output);
-  } else {
+  } else if (bsr_matrix_) {
     bsr_matrix_->spmv_cpu_raw(program, input, output);
+  } else {
+    TI_ERROR_IF(!input_array || !output_array,
+                "CPU compiled-kernel PCG requires registered ndarray "
+                "workspace views.");
+    compiled_kernel_operator_->nd_spmv(program, *input_array, *output_array);
   }
 }
 
 void CpuSparseCGPlan::apply_preconditioner_cpu_raw(Program *program,
                                                    std::uintptr_t input,
-                                                   std::uintptr_t output) {
+                                                   std::uintptr_t output,
+                                                   const Ndarray *input_array,
+                                                   const Ndarray *output_array) {
   if (scalar_preconditioner_) {
     scalar_preconditioner_->apply_cpu_raw(program, input, output);
-  } else {
+  } else if (block_preconditioner_) {
     block_preconditioner_->apply_cpu_raw(program, input, output);
+  } else {
+    TI_ERROR_IF(!input_array || !output_array,
+                "CPU compiled-kernel preconditioning requires registered "
+                "ndarray workspace views.");
+    compiled_kernel_preconditioner_->apply(
+        program, *compiled_kernel_operator_, *input_array, *output_array);
   }
 }
 
@@ -679,12 +749,16 @@ void CpuSparseCGPlan::solve_typed(
     Program *program,
     T *x,
     const T *b,
-    std::array<std::vector<T>, 4> &workspace) {
+    const std::array<T *, 4> &workspace,
+    const Ndarray &solution_array) {
   const int rows = matrix_->num_rows();
-  T *ax = workspace[0].data();
-  T *residual = workspace[1].data();
-  T *direction = workspace[2].data();
-  T *preconditioned_residual = workspace[3].data();
+  T *ax = workspace[0];
+  T *residual = workspace[1];
+  T *direction = workspace[2];
+  T *preconditioned_residual = workspace[3];
+  auto registered_workspace = [&](int index) -> const Ndarray * {
+    return compiled_kernel_operator_ ? compiled_workspace_[index] : nullptr;
+  };
   auto dot = [&](const T *lhs, const T *rhs) {
     double result = 0.0;
     for (int index = 0; index < rows; ++index) {
@@ -713,8 +787,11 @@ void CpuSparseCGPlan::solve_typed(
     }
   }
 
-  apply_operator_cpu_raw(program, reinterpret_cast<std::uintptr_t>(x),
-                         reinterpret_cast<std::uintptr_t>(ax));
+  apply_operator_cpu_raw(
+      program, reinterpret_cast<std::uintptr_t>(x),
+      reinterpret_cast<std::uintptr_t>(ax),
+      compiled_kernel_operator_ ? &solution_array : nullptr,
+      registered_workspace(0));
   operator_apply_calls_++;
   for (int index = 0; index < rows; ++index) {
     residual[index] = b[index] - ax[index];
@@ -738,7 +815,8 @@ void CpuSparseCGPlan::solve_typed(
 
   apply_preconditioner_cpu_raw(
       program, reinterpret_cast<std::uintptr_t>(residual),
-      reinterpret_cast<std::uintptr_t>(preconditioned_residual));
+      reinterpret_cast<std::uintptr_t>(preconditioned_residual),
+      registered_workspace(1), registered_workspace(3));
   preconditioner_apply_calls_++;
   double rho = dot(residual, preconditioned_residual);
   if (!std::isfinite(rho) || rho <= 0.0) {
@@ -752,7 +830,8 @@ void CpuSparseCGPlan::solve_typed(
   while (iterations_ < max_iterations_ && rr > tolerance_squared) {
     apply_operator_cpu_raw(
         program, reinterpret_cast<std::uintptr_t>(direction),
-        reinterpret_cast<std::uintptr_t>(ax));
+        reinterpret_cast<std::uintptr_t>(ax), registered_workspace(2),
+        registered_workspace(0));
     operator_apply_calls_++;
     const double p_ap = dot(direction, ax);
     if (!std::isfinite(p_ap) || p_ap <= 0.0) {
@@ -784,7 +863,8 @@ void CpuSparseCGPlan::solve_typed(
 
     apply_preconditioner_cpu_raw(
         program, reinterpret_cast<std::uintptr_t>(residual),
-        reinterpret_cast<std::uintptr_t>(preconditioned_residual));
+        reinterpret_cast<std::uintptr_t>(preconditioned_residual),
+        registered_workspace(1), registered_workspace(3));
     preconditioner_apply_calls_++;
     const double next_rho = dot(residual, preconditioned_residual);
     if (!std::isfinite(next_rho) || next_rho <= 0.0) {
@@ -837,6 +917,11 @@ void CpuSparseCGPlan::solve(Program *program,
   };
   validate_vector("solution", x);
   validate_vector("right-hand side", b);
+  TI_ERROR_IF(compiled_kernel_operator_ &&
+                  (x.owning_program() != program_ ||
+                   b.owning_program() != program_),
+              "CPU compiled-kernel PCG requires solution and RHS owned by "
+              "its construction Program.");
   const auto solution = program_->get_ndarray_data_ptr_as_int(&x);
   const auto rhs = program_->get_ndarray_data_ptr_as_int(&b);
   TI_ERROR_IF(solution == rhs,
@@ -844,6 +929,11 @@ void CpuSparseCGPlan::solve(Program *program,
 
   std::lock_guard<std::mutex> lock(solve_mutex_);
   auto numeric_guard = matrix_->acquire_numeric_access_guard();
+  SparseMatrix::NumericAccessGuard preconditioner_numeric_guard;
+  if (compiled_kernel_preconditioner_) {
+    preconditioner_numeric_guard =
+        compiled_kernel_preconditioner_->acquire_numeric_access_guard();
+  }
   validate_preconditioner(program);
   const auto operator_stats = matrix_->debug_runtime_statistics();
   if (has_solved_) {
@@ -861,13 +951,27 @@ void CpuSparseCGPlan::solve(Program *program,
   relative_reference_norm_ = 0.0;
   effective_tolerance_ = absolute_tolerance_;
   if (dtype_ == PrimitiveType::f32) {
-    solve_typed(
-        program, reinterpret_cast<float32 *>(solution),
-        reinterpret_cast<const float32 *>(rhs), workspace_f32_);
+    std::array<float32 *, 4> workspace{};
+    if (compiled_kernel_operator_) {
+      for (int index = 0; index < 4; ++index) {
+        workspace[index] = reinterpret_cast<float32 *>(
+            program_->get_ndarray_data_ptr_as_int(
+                compiled_workspace_[index]));
+      }
+    } else {
+      for (int index = 0; index < 4; ++index) {
+        workspace[index] = workspace_f32_[index].data();
+      }
+    }
+    solve_typed(program, reinterpret_cast<float32 *>(solution),
+                reinterpret_cast<const float32 *>(rhs), workspace, x);
   } else {
-    solve_typed(
-        program, reinterpret_cast<float64 *>(solution),
-        reinterpret_cast<const float64 *>(rhs), workspace_f64_);
+    std::array<float64 *, 4> workspace{};
+    for (int index = 0; index < 4; ++index) {
+      workspace[index] = workspace_f64_[index].data();
+    }
+    solve_typed(program, reinterpret_cast<float64 *>(solution),
+                reinterpret_cast<const float64 *>(rhs), workspace, x);
   }
   total_iterations_ += static_cast<std::uint64_t>(iterations_);
 }
@@ -878,8 +982,10 @@ CpuSparseCGPlan::debug_runtime_statistics() const {
   const auto operator_stats = matrix_->debug_runtime_statistics();
   SparseSolvePlanRuntimeStatistics result;
   result.backend_family = "cpu";
-  result.method =
-      scalar_preconditioner_ ? "pcg_jacobi" : "pcg_block_jacobi";
+  result.method = compiled_kernel_preconditioner_
+                      ? "pcg_compiled_kernel"
+                  : scalar_preconditioner_ ? "pcg_jacobi"
+                                           : "pcg_block_jacobi";
   result.dtype = data_type_name(dtype_);
   result.rows = matrix_->num_rows();
   result.cols = matrix_->num_cols();
@@ -905,7 +1011,10 @@ CpuSparseCGPlan::debug_runtime_statistics() const {
   result.operator_apply_calls = operator_apply_calls_;
   result.operator_apply_calls_available = true;
   result.preconditioner_method =
-      scalar_preconditioner_ ? "jacobi" : "block_jacobi";
+      compiled_kernel_preconditioner_
+          ? "compiled_kernel_inverse_apply"
+      : scalar_preconditioner_ ? "jacobi"
+                               : "block_jacobi";
   result.preconditioner_apply_calls = preconditioner_apply_calls_;
   result.host_scalar_reductions = host_scalar_reductions_;
   result.fixed_iteration_only = false;
@@ -936,6 +1045,18 @@ std::unique_ptr<CpuSparseCGPlan> make_cpu_block_jacobi_pcg_solver(
     Program *program,
     SparseMatrix &matrix,
     SparseBlockJacobiPreconditionerPlan &preconditioner,
+    int max_iterations,
+    double absolute_tolerance,
+    double relative_tolerance) {
+  return std::make_unique<CpuSparseCGPlan>(
+      program, matrix, preconditioner, max_iterations,
+      absolute_tolerance, relative_tolerance);
+}
+
+std::unique_ptr<CpuSparseCGPlan> make_cpu_compiled_kernel_pcg_solver(
+    Program *program,
+    CompiledKernelLinearOperator &matrix,
+    CompiledKernelPreconditionerPlan &preconditioner,
     int max_iterations,
     double absolute_tolerance,
     double relative_tolerance) {

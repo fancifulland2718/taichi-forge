@@ -5480,6 +5480,14 @@ void export_lang(py::module &m) {
       py::arg("preconditioner"), py::arg("max_iterations"),
       py::arg("absolute_tolerance"),
       py::arg("relative_tolerance") = 0.0);
+  m.def(
+      "_make_cpu_compiled_kernel_pcg_solver",
+      make_cpu_compiled_kernel_pcg_solver,
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("matrix"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0);
 
   py::class_<VulkanCGIterationPlan>(m, "VulkanCGIterationPlan")
       .def("solve", &VulkanCGIterationPlan::solve)
