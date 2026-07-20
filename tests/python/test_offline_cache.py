@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from os import listdir, rmdir, stat
 from os.path import join
 from tempfile import mkdtemp
@@ -60,7 +61,10 @@ def current_thread_ext_options():
 
 def cache_files_cnt():
     try:
-        return len(listdir(tmp_offline_cache_file_path()))
+        return sum(
+            not name.endswith(".lock")
+            for name in listdir(tmp_offline_cache_file_path())
+        )
     except FileNotFoundError:
         return 0
 
@@ -93,6 +97,166 @@ def test_offline_cache_disabled_does_not_touch_locked_cache(tmp_path):
     proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, env=env, check=False)
     assert proc.returncode == 0, proc.stderr
     assert "Lock " not in proc.stdout + proc.stderr
+
+
+def test_offline_cache_metadata_lock_recovers_after_owner_is_killed(
+    tmp_path,
+):
+    cache_dir = tmp_path / "ticache"
+    cache_script = tmp_path / "offline_cache_crash_recovery_smoke.py"
+    cache_lines = [
+        "import taichi_forge as ti",
+        f"ti.init(arch=ti.cpu, offline_cache=True, offline_cache_file_path={str(cache_dir)!r})",
+        "@ti.kernel",
+        "def k() -> ti.i32:",
+        "    return 7",
+        "assert k() == 7",
+        "ti.reset()",
+    ]
+    cache_script.write_text(chr(10).join(cache_lines) + chr(10))
+    owner_lines = [
+        "import os, pathlib, sys, time",
+        "lock_path = pathlib.Path(sys.argv[1])",
+        "ready_path = pathlib.Path(sys.argv[2])",
+        "handle = lock_path.open('a+b', buffering=0)",
+        "handle.seek(0, os.SEEK_END)",
+        "handle.write(b'\\0') if handle.tell() == 0 else None",
+        "handle.seek(0)",
+        "if os.name == 'nt':",
+        "    import msvcrt",
+        "    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)",
+        "else:",
+        "    import fcntl",
+        "    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)",
+        "ready_path.write_text('locked')",
+        "time.sleep(60)",
+    ]
+    owner_code = chr(10).join(owner_lines)
+    env = os.environ.copy()
+    env["TI_SKIP_VERSION_CHECK"] = "ON"
+    env["PYTHONPATH"] = os.pathsep.join(
+        [
+            os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "..", "python")
+            ),
+            env.get("PYTHONPATH", ""),
+        ]
+    )
+
+    def run_cache():
+        return subprocess.run(
+            [sys.executable, str(cache_script)],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+    populate = run_cache()
+    assert populate.returncode == 0, populate.stderr
+    metadata_files = list(cache_dir.glob("ticache_*_s*.tcb"))
+    assert len(metadata_files) == 1
+    lock_path = metadata_files[0].with_suffix(".lock")
+    ready_path = tmp_path / "metadata_lock_ready"
+    owner = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            owner_code,
+            str(lock_path),
+            str(ready_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        deadline = time.monotonic() + 10.0
+        while not ready_path.exists() and owner.poll() is None:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        if not ready_path.exists():
+            if owner.poll() is None:
+                owner.kill()
+            _, stderr = owner.communicate(timeout=5)
+            pytest.fail(f"metadata lock owner did not start: {stderr}")
+
+        held = run_cache()
+        held_output = held.stdout + held.stderr
+        assert held.returncode == 0, held.stderr
+        assert "metadata lock" in held_output
+        assert "busy" in held_output
+
+        owner.kill()
+        owner.wait(timeout=10)
+        recovered = run_cache()
+        recovered_output = recovered.stdout + recovered.stderr
+        assert recovered.returncode == 0, recovered.stderr
+        assert "metadata lock" not in recovered_output
+        assert lock_path.exists()
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait(timeout=10)
+
+
+def test_offline_cache_reuses_stale_metadata_lock_file(tmp_path):
+    cache_dir = tmp_path / "ticache"
+    script = tmp_path / "offline_cache_stale_lock_smoke.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import taichi_forge as ti",
+                (
+                    "ti.init(arch=ti.cpu, offline_cache=True, "
+                    f"offline_cache_file_path={str(cache_dir)!r})"
+                ),
+                "@ti.kernel",
+                "def k() -> ti.i32:",
+                "    return 7",
+                "assert k() == 7",
+                "ti.reset()",
+            ]
+        )
+    )
+    env = os.environ.copy()
+    env["TI_SKIP_VERSION_CHECK"] = "ON"
+    env["PYTHONPATH"] = os.pathsep.join(
+        [
+            os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "..", "python")
+            ),
+            env.get("PYTHONPATH", ""),
+        ]
+    )
+
+    populate = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert populate.returncode == 0, populate.stderr
+    metadata_files = list(cache_dir.glob("ticache_*_s*.tcb"))
+    assert len(metadata_files) == 1
+    lock_path = metadata_files[0].with_suffix(".lock")
+    lock_path.write_bytes(b"")
+
+    reuse = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    output = reuse.stdout + reuse.stderr
+    assert reuse.returncode == 0, reuse.stderr
+    assert "Lock " not in output
+    assert "metadata lock" not in output
+    assert lock_path.exists()
 
 
 @ti.kernel

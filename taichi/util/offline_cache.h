@@ -33,7 +33,20 @@ constexpr int kMetadataLockDelayMs = 50;
 constexpr int kMetadataLockTryCount = 40;
 
 inline bool lock_metadata_file(const std::string &path) {
-  return lock_with_file(path, kMetadataLockDelayMs, kMetadataLockTryCount);
+  return lock_with_file_handle(path, kMetadataLockDelayMs,
+                               kMetadataLockTryCount);
+}
+
+inline bool unlock_metadata_file(const std::string &path) {
+  return unlock_file_handle(path);
+}
+
+inline RaiiCleanup make_metadata_unlocker(const std::string &path) {
+  return make_cleanup([path]() {
+    if (!unlock_metadata_file(path)) {
+      TI_WARN("Unlock metadata file {} failed.", path);
+    }
+  });
 }
 
 enum CleanCacheFlags {
@@ -197,11 +210,8 @@ class CacheCleaner {
       }
       auto _ = make_cleanup([&lock_path]() {
         TI_DEBUG("Stop cleaning cache");
-        if (!unlock_with_file(lock_path)) {
-          TI_WARN(
-              "Unlock {} failed. You can remove this .lock file manually and "
-              "try again.",
-              lock_path);
+        if (!unlock_metadata_file(lock_path)) {
+          TI_WARN("Unlock metadata file {} failed.", lock_path);
         }
       });
       TI_DEBUG("Start cleaning cache");

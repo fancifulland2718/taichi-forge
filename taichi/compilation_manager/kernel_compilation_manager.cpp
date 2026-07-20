@@ -122,11 +122,12 @@ void KernelCompilationManager::ensure_metadata_loaded_locked(Arch arch) {
   auto lock_path = join_path(config_.offline_cache_path, metadata_lock_name_);
   if (path_exists(filepath)) {
     if (offline_cache::lock_metadata_file(lock_path)) {
-      auto _ = make_unlocker(lock_path);
+      auto _ = offline_cache::make_metadata_unlocker(lock_path);
       offline_cache::load_metadata_with_checking(cached_data_, filepath);
     } else {
       TI_WARN(
-          "Lock {} failed. Please run 'ti cache clean -p {}' and try again.",
+          "Offline-cache metadata lock {} is busy; skipping metadata load "
+          "from {}.",
           lock_path, config_.offline_cache_path);
     }
   }
@@ -271,14 +272,15 @@ void KernelCompilationManager::dump() {
   auto lock_path = join_path(config_.offline_cache_path, metadata_lock_name_);
 
   if (!offline_cache::lock_metadata_file(lock_path)) {
-    TI_WARN("Lock {} failed. Please run 'ti cache clean -p {}' and try again.",
+    TI_WARN("Offline-cache metadata lock {} is busy; skipping metadata dump "
+            "to {}.",
             lock_path, config_.offline_cache_path);
     caching_kernels_.clear();  // Ignore the caching kernels
     updated_data_.clear();
     return;
   }
 
-  auto _ = make_unlocker(lock_path);
+  auto _ = offline_cache::make_metadata_unlocker(lock_path);
   CacheData data;
   data.version[0] = TI_VERSION_MAJOR;
   data.version[1] = TI_VERSION_MINOR;
