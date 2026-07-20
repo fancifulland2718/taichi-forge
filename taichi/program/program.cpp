@@ -20,7 +20,6 @@
 #include "taichi/rhi/cpu/cpu_device.h"
 #endif
 #include "taichi/program/parallel_executor.h"
-#include "taichi/analysis/gather_snode_tree_dependencies.h"
 
 #include <chrono>
 #include <cstddef>
@@ -4794,6 +4793,7 @@ const CompiledKernelData &Program::compile_kernel(
   const auto effective_config =
       make_effective_kernel_compile_config(compile_config, kernel_def);
   const auto &ckd = mgr.load_or_compile(effective_config, caps, kernel_def);
+  kernel_def.set_snode_tree_dependencies(ckd.snode_tree_ids());
   total_compilation_time_ += Time::get_time() - start_t;
   return ckd;
 }
@@ -4806,8 +4806,13 @@ const CompiledKernelData *Program::find_cached_kernel(
     return nullptr;
   }
   auto &mgr = program_impl_->get_kernel_compilation_manager();
-  return mgr.find_cached_kernel(kernel_key, kernel_def, compile_config.arch,
-                                compile_config.offline_cache);
+  const auto *compiled = mgr.find_cached_kernel(
+      kernel_key, kernel_def, compile_config.arch,
+      compile_config.offline_cache);
+  if (compiled != nullptr) {
+    kernel_def.set_snode_tree_dependencies(compiled->snode_tree_ids());
+  }
+  return compiled;
 }
 
 // P5.b: batch / parallel kernel compilation.
@@ -4939,7 +4944,8 @@ void Program::compile_kernels(
     for (auto *k : *compile_jobs) {
       const auto effective_config =
           make_effective_kernel_compile_config(compile_config, *k);
-      mgr.load_or_compile(effective_config, caps, *k);
+      const auto &compiled = mgr.load_or_compile(effective_config, caps, *k);
+      k->set_snode_tree_dependencies(compiled.snode_tree_ids());
     }
     total_compilation_time_ += Time::get_time() - start_t;
     return;
@@ -4957,7 +4963,9 @@ void Program::compile_kernels(
         try {
           const auto effective_config =
               make_effective_kernel_compile_config(compile_config, *k);
-          mgr.load_or_compile(effective_config, caps, *k);
+          const auto &compiled =
+              mgr.load_or_compile(effective_config, caps, *k);
+          k->set_snode_tree_dependencies(compiled.snode_tree_ids());
         } catch (...) {
           std::lock_guard<std::mutex> g(err_mu);
           if (!first_error) {
@@ -5360,12 +5368,11 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
       iter = kernels.erase(iter);
       continue;
     }
-    if (kernel->ir == nullptr) {
+    if (kernel->definition_retired()) {
       ++iter;
       continue;
     }
-    const auto dependencies =
-        irpass::analysis::gather_snode_tree_dependencies(*kernel);
+    const auto &dependencies = kernel->snode_tree_dependencies();
     if (std::binary_search(dependencies.begin(), dependencies.end(), tree_id)) {
       kernel->retire_definition();
     }

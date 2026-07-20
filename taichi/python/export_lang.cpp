@@ -944,6 +944,27 @@ void export_lang(py::module &m) {
       .def("_debug_kernel_definition_count", [](const Program &program) {
         return program.kernels.size();
       })
+      .def("_debug_kernel_lifecycle_stats", [](Program &program) {
+        std::size_t live_definitions = 0;
+        std::size_t retired_shells = 0;
+        for (const auto &kernel : program.kernels) {
+          if (kernel->ir == nullptr) {
+            ++retired_shells;
+          } else {
+            ++live_definitions;
+          }
+        }
+        py::dict result;
+        result["total_slots"] = program.kernels.size();
+        result["live_definitions"] = live_definitions;
+        result["retired_shells"] = retired_shells;
+        result["retired_shell_inline_bytes_lower_bound"] =
+            retired_shells * sizeof(Kernel);
+        result["retired_shell_total_owned_bytes_reported"] = false;
+        result["registered_executables"] =
+            program.get_kernel_launcher().debug_registered_kernel_count();
+        return result;
+      })
       .def("_debug_kernel_registration_count", [](Program &program) {
         return program.get_kernel_launcher().debug_registered_kernel_count();
       })
@@ -3476,6 +3497,7 @@ void export_lang(py::module &m) {
       .def("finalize_rets", &Kernel::finalize_rets)
       .def("finalize_params", &Kernel::finalize_params)
       .def("make_launch_context", &Kernel::make_launch_context)
+      .def("definition_retired", &Kernel::definition_retired)
       .def("set_compile_tier_override",
            &Kernel::set_compile_tier_override)
       .def("clear_compile_tier_override",

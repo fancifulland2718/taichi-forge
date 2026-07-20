@@ -670,7 +670,14 @@ class PyTaichi:
 
     def clear_compiled_functions(self):
         for k in tuple(self.kernels):
-            k.compiled_kernels.clear()
+            retired = tuple(
+                key
+                for key, kernel in k.compiled_kernels.items()
+                if kernel.definition_retired()
+            )
+            for key in retired:
+                k.compiled_kernels.pop(key, None)
+                k._external_grad_accesses.pop(key, None)
 
     def finalize_fields_builder(self, builder):
         self.unfinalized_fields_builder.pop(builder)

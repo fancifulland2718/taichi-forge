@@ -161,6 +161,7 @@ void Kernel::retire_definition() {
   kernel_key_valid_ = false;
   offline_cache_body_.reset();
   compile_tier_override_.reset();
+  std::vector<int>().swap(snode_tree_dependencies_);
 }
 
 void Kernel::init(Program &program,

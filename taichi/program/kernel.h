@@ -72,6 +72,19 @@ class TI_DLL_EXPORT Kernel : public Callable {
 
   const std::optional<std::string> &get_compile_tier_override() const;
 
+  const std::vector<int> &snode_tree_dependencies() const {
+    return snode_tree_dependencies_;
+  }
+
+  void set_snode_tree_dependencies(
+      const std::vector<int> &dependencies) const {
+    snode_tree_dependencies_ = dependencies;
+  }
+
+  bool definition_retired() const {
+    return ir == nullptr;
+  }
+
   // Preserve the Kernel object's address for stale Graph/AOT plans while
   // releasing the frontend/lowered IR and specialization metadata that can no
   // longer be compiled after an explicitly bound SNodeTree is destroyed.
@@ -89,6 +102,7 @@ class TI_DLL_EXPORT Kernel : public Callable {
   mutable bool kernel_key_valid_{false};
   mutable std::optional<std::string> offline_cache_body_;
   std::optional<std::string> compile_tier_override_;
+  mutable std::vector<int> snode_tree_dependencies_;
 };
 
 }  // namespace taichi::lang

@@ -39,8 +39,9 @@ class SNodeTree:
         # cannot leave a live-looking wrapper around a destroyed native tree.
         self._mark_destroyed()
 
-        # FieldExpression holds a SNode* to the place-SNode associated with a SNodeTree
-        # Therefore, we have to recompile all the kernels after destroying a SNodeTree
+        # Drop only specializations whose compiled dependency set references
+        # this tree. Unrelated specializations remain reusable; their backend
+        # registrations and frontend definitions are still live.
         runtime.clear_compiled_functions()
 
     def _mark_destroyed(self):
