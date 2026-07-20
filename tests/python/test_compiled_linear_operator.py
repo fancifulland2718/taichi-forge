@@ -42,6 +42,166 @@ def _make_compiled_diagonal_operator(diagonal):
     return program, operator
 
 
+def _make_compiled_diagonal_preconditioner(program, target, diagonal):
+    inverse_program, inverse_operator = _make_compiled_diagonal_operator(
+        1.0 / np.asarray(diagonal, dtype=np.float32)
+    )
+    assert inverse_program is program
+    preconditioner = ti._lib.core._make_compiled_kernel_preconditioner_plan(
+        program,
+        target,
+        inverse_operator,
+        True,
+    )
+    return preconditioner, inverse_operator
+
+
+def _make_compiled_pcg_plan(program, operator, preconditioner):
+    arch = impl.current_cfg().arch
+    if arch == ti.cpu:
+        return (
+            ti._lib.core._make_cpu_compiled_kernel_pcg_solver(
+                program, operator, preconditioner, 16, 1e-6, 0.0
+            ),
+            "pcg_compiled_kernel",
+        )
+    if arch == ti.cuda:
+        return (
+            ti._lib.core._make_cuda_compiled_kernel_pcg_solver(
+                program, operator, preconditioner, 16, 1e-5, False, 0.0
+            ),
+            "pcg_compiled_kernel",
+        )
+    return (
+        ti._lib.core._make_vulkan_compiled_kernel_pcg_convergence_plan(
+            program, operator, preconditioner, 16, 1e-5
+        ),
+        "pcg_compiled_kernel_bounded_masked_probe",
+    )
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_compiled_kernel_cg_reuses_persistent_workspace():
+    diagonal = np.asarray([2.0, 3.0, 5.0, 7.0], dtype=np.float32)
+    program, operator = _make_compiled_diagonal_operator(diagonal)
+    plan = ti._lib.core._make_cuda_compiled_kernel_cg_solver(
+        program, operator, 16, 1e-5, False, 0.0
+    )
+    solution = ti.ndarray(ti.f32, shape=diagonal.size)
+    rhs = ti.ndarray(ti.f32, shape=diagonal.size)
+    exact_solutions = (
+        np.asarray([0.5, -1.0, 2.0, 1.5], dtype=np.float32),
+        np.asarray([-2.0, 0.25, 1.25, 3.0], dtype=np.float32),
+    )
+    for exact in exact_solutions:
+        solution.fill(0.0)
+        rhs.from_numpy(diagonal * exact)
+        plan.solve(program, solution.arr, rhs.arr)
+        assert plan.is_success()
+        np.testing.assert_allclose(solution.to_numpy(), exact, rtol=2e-4, atol=2e-4)
+
+    stats = plan._debug_runtime_stats()
+    assert stats["identity"]["method"] == "cg_compiled_kernel"
+    assert stats["identity"]["preconditioner_method"] == "identity"
+    assert stats["operations"]["solve_calls"] == 2
+    assert stats["operations"]["workspace_builds"] == 1
+    assert stats["operations"]["workspace_reuses"] == 1
+    assert stats["operations"]["preconditioner_apply_calls"] == 0
+    assert stats["resources"]["persistent_vector_count"] == 3
+    assert stats["resources"]["persistent_vector_reserved_bytes"] == (
+        diagonal.size * 12
+    )
+    assert stats["resources"]["cublas_handle_count"] == 1
+    assert not stats["resources"]["external_preconditioner"]
+    assert not stats["resources"]["solver_state_rebuilt_each_solve"]
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    offline_cache=False,
+)
+def test_compiled_kernel_pcg_reuses_persistent_workspace():
+    diagonal = np.asarray([2.0, 3.0, 5.0, 7.0], dtype=np.float32)
+    program, operator = _make_compiled_diagonal_operator(diagonal)
+    preconditioner, inverse_operator = _make_compiled_diagonal_preconditioner(
+        program, operator, diagonal
+    )
+    plan, expected_method = _make_compiled_pcg_plan(program, operator, preconditioner)
+
+    solution = ti.ndarray(ti.f32, shape=diagonal.size)
+    rhs = ti.ndarray(ti.f32, shape=diagonal.size)
+    exact_solutions = (
+        np.asarray([0.5, -1.0, 2.0, 1.5], dtype=np.float32),
+        np.asarray([-2.0, 0.25, 1.25, 3.0], dtype=np.float32),
+    )
+    for exact in exact_solutions:
+        solution.fill(0.0)
+        rhs.from_numpy(diagonal * exact)
+        plan.solve(program, solution.arr, rhs.arr)
+        assert plan.is_success()
+        np.testing.assert_allclose(solution.to_numpy(), exact, rtol=2e-4, atol=2e-4)
+
+    stats = plan._debug_runtime_stats()
+    preconditioner_stats = preconditioner._debug_runtime_stats()
+    inverse_stats = inverse_operator._debug_runtime_stats()
+    assert stats["identity"]["method"] == expected_method
+    assert stats["identity"]["preconditioner_method"] == (
+        "compiled_kernel_inverse_apply"
+    )
+    assert stats["operations"]["solve_calls"] == 2
+    assert stats["operations"]["workspace_builds"] == 1
+    assert stats["operations"]["workspace_reuses"] == 1
+    assert stats["operations"]["preconditioner_apply_calls"] > 0
+    assert stats["resources"]["persistent_vector_count"] == 4
+    assert stats["resources"]["persistent_vector_reserved_bytes"] == (
+        diagonal.size * 16
+    )
+    assert not stats["resources"]["solver_state_rebuilt_each_solve"]
+    assert preconditioner_stats["operations"]["apply_calls"] == (
+        stats["operations"]["preconditioner_apply_calls"]
+    )
+    assert not preconditioner_stats["identity"]["operator_stale"]
+    assert not preconditioner_stats["identity"]["preconditioner_stale"]
+    assert inverse_stats["operations"]["spmv_calls"] == (
+        stats["operations"]["preconditioner_apply_calls"]
+    )
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    offline_cache=False,
+)
+def test_compiled_kernel_pcg_rejects_stale_target_generation():
+    diagonal = np.asarray([2.0, 3.0, 5.0, 7.0], dtype=np.float32)
+    program, operator = _make_compiled_diagonal_operator(diagonal)
+    preconditioner, _ = _make_compiled_diagonal_preconditioner(
+        program, operator, diagonal
+    )
+    plan, _ = _make_compiled_pcg_plan(program, operator, preconditioner)
+    updated_numeric = ti.ndarray(ti.f32, shape=diagonal.size)
+    updated_numeric.from_numpy(diagonal * 2.0)
+    operator.update_numeric_data(program, updated_numeric.arr, 1, 1)
+
+    solution = ti.ndarray(ti.f32, shape=diagonal.size)
+    rhs = ti.ndarray(ti.f32, shape=diagonal.size)
+    solution.fill(29.0)
+    rhs.fill(1.0)
+    with pytest.raises(RuntimeError, match="preconditioner is stale"):
+        plan.solve(program, solution.arr, rhs.arr)
+    np.testing.assert_array_equal(
+        solution.to_numpy(),
+        np.full(diagonal.size, 29.0, dtype=np.float32),
+    )
+
+    plan_stats = plan._debug_runtime_stats()
+    preconditioner_stats = preconditioner._debug_runtime_stats()
+    assert plan_stats["operations"]["solve_calls"] == 0
+    assert plan_stats["operations"]["preconditioner_apply_calls"] == 0
+    assert preconditioner_stats["identity"]["operator_stale"]
+    assert not preconditioner_stats["identity"]["preconditioner_stale"]
+    assert preconditioner_stats["operations"]["apply_calls"] == 0
+
+
 @test_utils.test(
     arch=[ti.cpu, ti.cuda, ti.vulkan],
     offline_cache=False,
