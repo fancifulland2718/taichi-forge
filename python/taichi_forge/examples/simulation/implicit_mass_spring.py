@@ -39,6 +39,8 @@ class Cloth:
         self.KBuilder = ti.linalg.SparseMatrixBuilder(2 * self.NV, 2 * self.NV, max_num_triplets=10000)
         self.init_mass_sp(self.MassBuilder)
         self.M = self.MassBuilder.build()
+        self.solver = ti.linalg.SparseSolver(solver_type="LDLT")
+        self.solver_pattern_analyzed = False
         self.fix_vertex = [self.N, self.NV - 1]
         self.Jf = ti.Matrix.field(2, 2, ti.f32, len(self.fix_vertex))  # fix constraint hessian
 
@@ -200,12 +202,14 @@ class Cloth:
         Kv = K @ self.vel_1D
         self.compute_b(self.b, self.force_1D, Kv, h)
 
-        # Sparse solver
-        solver = ti.linalg.SparseSolver(solver_type="LDLT")
-        solver.analyze_pattern(A)
-        solver.factorize(A)
+        # The spring graph is fixed, so symbolic analysis is a one-time
+        # topology operation while factorization consumes each step's values.
+        if not self.solver_pattern_analyzed:
+            self.solver.analyze_pattern(A)
+            self.solver_pattern_analyzed = True
+        self.solver.factorize(A)
         # Solve the linear system
-        dv = solver.solve(self.b)
+        dv = self.solver.solve(self.b)
         self.updatePosVel(h, dv)
 
     def display(self, gui, radius=5, color=0xFFFFFF):

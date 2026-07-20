@@ -85,20 +85,27 @@ if use_sparse_matrix:
     def fill_laplacian_matrix(A: ti.types.sparse_matrix_builder()):
         for i, j in ti.ndrange(res, res):
             row = i * res + j
-            center = 0.0
-            if j != 0:
-                A[row, row - 1] += -1.0
-                center += 1.0
-            if j != res - 1:
-                A[row, row + 1] += -1.0
-                center += 1.0
-            if i != 0:
-                A[row, row - res] += -1.0
-                center += 1.0
-            if i != res - 1:
-                A[row, row + res] += -1.0
-                center += 1.0
-            A[row, row] += center
+            if row == 0:
+                # Fix one pressure gauge so the Neumann graph Laplacian is
+                # positive-definite and valid for the LLT solver below.
+                A[row, row] += 1.0
+            else:
+                center = 0.0
+                if j != 0:
+                    center += 1.0
+                    if row - 1 != 0:
+                        A[row, row - 1] += -1.0
+                if j != res - 1:
+                    center += 1.0
+                    A[row, row + 1] += -1.0
+                if i != 0:
+                    center += 1.0
+                    if row - res != 0:
+                        A[row, row - res] += -1.0
+                if i != res - 1:
+                    center += 1.0
+                    A[row, row + res] += -1.0
+                A[row, row] += center
 
     N = res * res
     K = ti.linalg.SparseMatrixBuilder(N, N, max_num_triplets=N * 6)
@@ -251,7 +258,11 @@ def enhance_vorticity(vf: ti.template(), cf: ti.template()):
 @ti.kernel
 def copy_divergence(div_in: ti.template(), div_out: ti.types.ndarray()):
     for I in ti.grouped(div_in):
-        div_out[I[0] * res + I[1]] = -div_in[I]
+        row = I[0] * res + I[1]
+        if row == 0:
+            div_out[row] = 0.0
+        else:
+            div_out[row] = -div_in[I]
 
 
 @ti.kernel
