@@ -70,6 +70,8 @@ from taichi_forge._kernels import (
     scan_add_inclusive,
     scan_add_inclusive_cuda,
     scan_add_inclusive_ndarray,
+    segmented_layout_finalize_device_counts,
+    segmented_layout_prepare_device_counts,
     segmented_reduce_sum_field,
     segmented_reduce_sum_ndarray,
     segmented_scan_apply_bases_field,
@@ -119,6 +121,7 @@ from taichi_forge.lang.impl import (
 )
 from taichi_forge.lang._ndarray import (
     Ndarray,
+    ScalarNdarray,
     StructNdarray,
     StructNdarrayScalarMemberView,
     StructNdarrayTensorMemberView,
@@ -4719,6 +4722,220 @@ class SegmentedLayout:
             np.asarray(segment_ids_host, dtype=np.int32)
         )
         self._topology_bytes = (self._num_segments + 1 + self._capacity) * 4
+        self._runtime_prog = get_runtime().prog
+        self._device_generation_stats = None
+
+    @classmethod
+    def _from_device_counts(
+        cls,
+        counts,
+        *,
+        num_items,
+        max_segment_length,
+        capacity=None,
+    ):
+        """Build an exact layout from device-resident per-segment counts.
+
+        This private construction path performs count validation, an inclusive
+        device scan, and deterministic segment-ID fill. Only three i32 control
+        values are copied to the host before publication; topology payloads
+        remain device-resident.
+        """
+
+        role = "SegmentedLayout._from_device_counts counts"
+        if not isinstance(counts, ScalarNdarray):
+            raise TaichiRuntimeError(
+                f"{role} must be a scalar Taichi ndarray on the current "
+                "runtime; no NumPy or host fallback was performed."
+            )
+        runtime = get_runtime()
+        prog = runtime.prog
+        if counts.arr is None or counts._runtime_prog is not prog:
+            raise TaichiRuntimeError(
+                f"{role} cannot be used after its Taichi runtime has been "
+                "reset."
+            )
+        if counts.dtype != i32 or len(counts.shape) != 1:
+            raise TaichiRuntimeError(
+                f"{role} must be a one-dimensional ti.i32 ndarray."
+            )
+        num_segments = int(counts.shape[0])
+        if num_segments <= 0:
+            raise ValueError("device counts must contain at least one segment.")
+
+        def normalize_integer(value, name):
+            if isinstance(value, bool) or not isinstance(
+                value, (int, np.integer)
+            ):
+                raise TypeError(f"{name} must be a Python integer.")
+            return int(value)
+
+        num_items = normalize_integer(num_items, "num_items")
+        max_segment_length = normalize_integer(
+            max_segment_length, "max_segment_length"
+        )
+        if num_items < 0 or num_items > 0x7FFFFFFF:
+            raise ValueError("num_items must satisfy 0 <= value <= 2^31-1.")
+        if max_segment_length < 0 or max_segment_length > 0x7FFFFFFF:
+            raise ValueError(
+                "max_segment_length must satisfy 0 <= value <= 2^31-1."
+            )
+        if num_segments * max_segment_length > 0x7FFFFFFF:
+            raise ValueError(
+                "num_segments * max_segment_length must fit in ti.i32 so "
+                "device prefix sums cannot overflow."
+            )
+        if capacity is None:
+            capacity = max(1, num_items)
+        capacity = normalize_integer(capacity, "capacity")
+        if capacity <= 0 or capacity > 0x7FFFFFFF:
+            raise ValueError("capacity must satisfy 1 <= capacity <= 2^31-1.")
+        if num_items > capacity:
+            raise ValueError("num_items must not exceed fixed layout capacity.")
+
+        arch = current_cfg().arch
+        if arch == cuda:
+            scan_available = "cuda_device_scan_available"
+        elif arch == vulkan:
+            scan_available = "vulkan_scan_available"
+        elif arch in (x64, arm64):
+            scan_available = "cpu_scan_available"
+        else:
+            raise TaichiRuntimeError(
+                "SegmentedLayout._from_device_counts supports only "
+                "CPU/CUDA/Vulkan native scan providers."
+            )
+        if not _prog_available(prog, scan_available):
+            raise TaichiRuntimeError(
+                "SegmentedLayout._from_device_counts requires the current "
+                "backend native scan provider."
+            )
+
+        offsets = ti_ndarray(i32, shape=num_segments + 1)
+        segment_ids = ti_ndarray(i32, shape=capacity)
+        control = ti_ndarray(i32, shape=3)
+        offsets.fill(0)
+        segment_ids.fill(-1)
+        control.fill(0)
+        segmented_layout_prepare_device_counts(
+            counts,
+            offsets,
+            control,
+            num_segments,
+            max_segment_length,
+        )
+        PrefixSumExecutor(num_segments + 1).run(offsets)
+        segmented_layout_finalize_device_counts(
+            offsets,
+            segment_ids,
+            control,
+            num_segments,
+            capacity,
+            num_items,
+        )
+        control_host = control.to_numpy()
+        status = int(control_host[0])
+        observed_items = int(control_host[1])
+        actual_max_segment_length = int(control_host[2])
+        if status & 1:
+            raise TaichiRuntimeError(
+                "device counts must satisfy 0 <= count <= "
+                f"max_segment_length ({max_segment_length}); no layout was "
+                "published."
+            )
+        if status & 2:
+            raise TaichiRuntimeError(
+                "device counts summed to "
+                f"{observed_items}, expected exact num_items={num_items}; "
+                "no layout was published."
+            )
+
+        shared_scan_workspace_bytes = None
+        detailed_stats = getattr(
+            prog, "_primitive_workspace_detailed_stats", None
+        )
+        if detailed_stats is not None:
+            workspace_snapshot = detailed_stats()
+            shared_scan_workspace_bytes = sum(
+                int(group["reserved_bytes"])
+                for group in workspace_snapshot["groups"]
+                if group["family"] == "scan"
+            )
+
+        self = cls.__new__(cls)
+        self._encoding = "device_counts"
+        self._num_items = num_items
+        self._capacity = capacity
+        self._num_segments = num_segments
+        self._max_segment_length = actual_max_segment_length
+        self._offsets_host = None
+        self._offsets = offsets
+        self._segment_ids = segment_ids
+        self._topology_bytes = (num_segments + 1 + capacity) * 4
+        self._runtime_prog = prog
+        self._device_generation_stats = {
+            "schema_version": 1,
+            "generation": {
+                "encoding": "device_counts",
+                "num_segments": num_segments,
+                "num_items": num_items,
+                "capacity": capacity,
+                "max_segment_length": actual_max_segment_length,
+            },
+            "resources": {
+                "borrowed_counts_bytes": num_segments * 4,
+                "owned_offsets_bytes": (num_segments + 1) * 4,
+                "owned_segment_ids_bytes": capacity * 4,
+                "owned_topology_bytes": self._topology_bytes,
+                "construction_control_bytes": 12,
+                "construction_explicit_array_peak_bytes_excluding_shared_workspace": (
+                    self._topology_bytes + 12
+                ),
+                "device_to_host_control_bytes": 12,
+                "device_to_host_payload_bytes": 0,
+                "device_kernel_published_topology_bytes": self._topology_bytes,
+                "shared_scan_workspace_bytes_at_publish": (
+                    shared_scan_workspace_bytes
+                ),
+            },
+            "contract": {
+                "counts_ownership": "borrowed_during_build",
+                "counts_retained_after_build": False,
+                "topology_ownership": "layout_generation",
+                "construction_sync_count": 1,
+                "payload_device_to_host": False,
+                "failure_publishes_partial_layout": False,
+                "row_local_order": "caller_fill_order",
+                "shared_scan_workspace_ownership_scope": (
+                    "program_scan_arena"
+                ),
+                "shared_scan_workspace_in_explicit_capacity": False,
+                "explicit_array_bytes_are_logical_payload": True,
+                "runtime_allocator_overhead_reported": False,
+                "total_owned_bytes_reported": False,
+            },
+        }
+        return self
+
+    def _require_current_runtime(self):
+        if (
+            self._runtime_prog is not get_runtime().prog
+            or self._offsets.arr is None
+            or self._segment_ids.arr is None
+        ):
+            raise TaichiRuntimeError(
+                "SegmentedLayout cannot be used after its Taichi runtime has "
+                "been reset."
+            )
+
+    def _debug_device_generation_stats(self):
+        self._require_current_runtime()
+        if self._device_generation_stats is None:
+            return None
+        return {
+            key: dict(value) if isinstance(value, dict) else value
+            for key, value in self._device_generation_stats.items()
+        }
 
     @classmethod
     def from_offsets(cls, offsets, *, capacity=None):
@@ -4879,6 +5096,7 @@ class SegmentedWorkspace:
     def check_layout(self, layout):
         if not isinstance(layout, SegmentedLayout):
             raise TypeError("layout must be a SegmentedLayout instance.")
+        layout._require_current_runtime()
         if self.max_items is not None and layout.capacity > self.max_items:
             raise ValueError(
                 f"Layout capacity {layout.capacity} exceeds "
@@ -10182,6 +10400,7 @@ def _check_segmented_request(
         raise NotImplementedError(f"{op_name} method '{method}' is not implemented.")
     if not isinstance(layout, SegmentedLayout):
         raise TypeError(f"{op_name} layout must be a SegmentedLayout instance.")
+    layout._require_current_runtime()
     if workspace is not None and not isinstance(workspace, SegmentedWorkspace):
         raise TypeError(
             f"{op_name} workspace must be a SegmentedWorkspace instance or None."

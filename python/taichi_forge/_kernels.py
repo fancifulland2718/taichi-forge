@@ -1231,6 +1231,54 @@ def rle_reset_count_field(count: template()):
 
 
 @kernel
+def segmented_layout_prepare_device_counts(
+    counts: ndarray_type.ndarray(dtype=i32, ndim=1),
+    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
+    control: ndarray_type.ndarray(dtype=i32, ndim=1),
+    num_segments: i32,
+    max_segment_length: i32,
+):
+    for segment in range(num_segments):
+        count = counts[segment]
+        safe_count = 0
+        if 0 <= count and count <= max_segment_length:
+            safe_count = count
+            ops.atomic_max(control[2], count)
+        else:
+            ops.atomic_or(control[0], 1)
+        offsets[segment + 1] = safe_count
+
+
+@kernel
+def segmented_layout_finalize_device_counts(
+    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
+    segment_ids: ndarray_type.ndarray(dtype=i32, ndim=1),
+    control: ndarray_type.ndarray(dtype=i32, ndim=1),
+    num_segments: i32,
+    capacity: i32,
+    expected_items: i32,
+):
+    observed_items = offsets[num_segments]
+    for segment in range(num_segments):
+        if segment == 0:
+            control[1] = observed_items
+            if observed_items != expected_items:
+                ops.atomic_or(control[0], 2)
+        begin = offsets[segment]
+        end = offsets[segment + 1]
+        valid = (
+            control[0] == 0
+            and observed_items == expected_items
+            and 0 <= begin
+            and begin <= end
+            and end <= capacity
+        )
+        if valid:
+            for local_index in range(end - begin):
+                segment_ids[begin + local_index] = segment
+
+
+@kernel
 def segmented_reduce_sum_ndarray(
     values: ndarray_type.ndarray(ndim=1),
     offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
