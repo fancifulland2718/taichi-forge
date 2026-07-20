@@ -89,7 +89,32 @@ def test_compiled_graph_operator_runs_data_dependent_dispatches():
     ti.sync()
     np.testing.assert_allclose(output_array.to_numpy(), 2.0 * diagonal * second_input)
 
+    updated_numeric = ti.ndarray(ti.f32, shape=size)
+    old_generation_output = ti.ndarray(ti.f32, shape=size)
+    new_generation_output = ti.ndarray(ti.f32, shape=size)
+    updated_diagonal = diagonal * 1.5
+    updated_numeric.from_numpy(updated_diagonal)
+    operator.spmv(program, input_array.arr, old_generation_output.arr)
+    operator.update_numeric_data(
+        program,
+        {"numeric": updated_numeric.arr},
+        1,
+        1,
+    )
+    operator.spmv(program, input_array.arr, new_generation_output.arr)
+    ti.sync()
+    np.testing.assert_allclose(
+        old_generation_output.to_numpy(), 2.0 * diagonal * second_input
+    )
+    np.testing.assert_allclose(
+        new_generation_output.to_numpy(),
+        2.0 * updated_diagonal * second_input,
+    )
+
     stats = operator._debug_runtime_stats()
+    contract = ti.linalg.SparseMatrix(sm=operator)._get_format_contract()
+    assert contract["constraints"]["matrix_free_provider_private"]
+    assert not contract["constraints"]["silent_format_fallback"]
     expected_backend = {
         ti.cpu: "cpu",
         ti.cuda: "cuda",
@@ -98,10 +123,16 @@ def test_compiled_graph_operator_runs_data_dependent_dispatches():
     assert stats["identity"]["backend_family"] == expected_backend
     assert stats["identity"]["storage_format"] == "matrix_free_graph"
     assert stats["provider"]["name"] == "forge_compiled_graph"
-    assert stats["operations"]["spmv_calls"] == 2
-    assert stats["operations"]["spmv_plan_builds"] == 1
-    assert stats["operations"]["spmv_plan_reuses"] == 2
+    assert stats["identity"]["pattern_version"] == 1
+    assert stats["identity"]["numeric_version"] == 2
+    assert stats["operations"]["numeric_updates"] == 1
+    assert stats["operations"]["numeric_update_bytes"] == size * 4
+    assert stats["operations"]["spmv_calls"] == 4
+    assert stats["operations"]["spmv_plan_builds"] == 2
+    assert stats["operations"]["spmv_plan_reuses"] == 4
     assert stats["operations"]["spmv_workspace_allocations"] == 1
     assert stats["resources"]["spmv_workspace_reserved_bytes"] == size * 4
     assert stats["resources"]["operator_owned_reserved_bytes"] == size * 12
+    assert stats["resources"]["numeric_update_peak_temporary_bytes"] == size * 4
     assert stats["transfers"]["device_to_host_bytes"] == 0
+    assert stats["transfers"]["device_to_device_bytes"] == size * 16

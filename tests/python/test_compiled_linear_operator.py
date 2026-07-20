@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 import taichi_forge as ti
 from taichi_forge.lang import impl
@@ -39,6 +40,80 @@ def _make_compiled_diagonal_operator(diagonal):
         numeric.arr,
     )
     return program, operator
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    offline_cache=False,
+)
+def test_compiled_kernel_numeric_update_preserves_inflight_generation():
+    diagonal = np.asarray([2.0, 3.0, 5.0, 7.0], dtype=np.float32)
+    updated_diagonal = diagonal * 1.5
+    program, operator = _make_compiled_diagonal_operator(diagonal)
+    input_array = ti.ndarray(ti.f32, shape=diagonal.size)
+    first_output = ti.ndarray(ti.f32, shape=diagonal.size)
+    second_output = ti.ndarray(ti.f32, shape=diagonal.size)
+    updated_numeric = ti.ndarray(ti.f32, shape=diagonal.size)
+    input_host = np.asarray([1.0, -2.0, 0.5, 3.0], dtype=np.float32)
+    input_array.from_numpy(input_host)
+    updated_numeric.from_numpy(updated_diagonal)
+
+    operator.spmv(program, input_array.arr, first_output.arr)
+    operator.update_numeric_data(program, updated_numeric.arr, 1, 1)
+    operator.spmv(program, input_array.arr, second_output.arr)
+    ti.sync()
+
+    np.testing.assert_allclose(first_output.to_numpy(), diagonal * input_host)
+    np.testing.assert_allclose(second_output.to_numpy(), updated_diagonal * input_host)
+    stats = operator._debug_runtime_stats()
+    contract = ti.linalg.SparseMatrix(sm=operator)._get_format_contract()
+    assert contract["constraints"]["matrix_free_provider_private"]
+    assert not contract["constraints"]["silent_format_fallback"]
+    assert stats["identity"]["pattern_version"] == 1
+    assert stats["identity"]["numeric_version"] == 2
+    assert stats["operations"]["numeric_updates"] == 1
+    assert stats["operations"]["numeric_update_bytes"] == diagonal.size * 4
+    assert stats["operations"]["spmv_calls"] == 2
+    assert stats["operations"]["spmv_plan_builds"] == 1
+    assert stats["operations"]["spmv_plan_reuses"] == 2
+    assert stats["resources"]["operator_owned_reserved_bytes"] == (diagonal.size * 8)
+    assert stats["transfers"]["device_to_host_bytes"] == 0
+    assert stats["transfers"]["device_to_device_bytes"] == diagonal.size * 12
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    offline_cache=False,
+)
+def test_compiled_kernel_operator_rejects_reset_without_mutation():
+    diagonal = np.asarray([2.0, 3.0, 5.0, 7.0], dtype=np.float32)
+    program, operator = _make_compiled_diagonal_operator(diagonal)
+    input_array = ti.ndarray(ti.f32, shape=diagonal.size)
+    output_array = ti.ndarray(ti.f32, shape=diagonal.size)
+    input_array.fill(1.0)
+    output_array.fill(0.0)
+    operator.spmv(program, input_array.arr, output_array.arr)
+    ti.sync()
+    np.testing.assert_allclose(output_array.to_numpy(), diagonal)
+
+    arch = impl.current_cfg().arch
+    ti.reset()
+    ti.init(arch=arch, enable_fallback=False, offline_cache=False)
+    replacement_input = ti.ndarray(ti.f32, shape=diagonal.size)
+    replacement_output = ti.ndarray(ti.f32, shape=diagonal.size)
+    replacement_input.fill(1.0)
+    replacement_output.fill(23.0)
+    with pytest.raises(RuntimeError, match="requires its owning Program"):
+        operator.spmv(
+            impl.get_runtime().prog,
+            replacement_input.arr,
+            replacement_output.arr,
+        )
+    ti.sync()
+    np.testing.assert_array_equal(
+        replacement_output.to_numpy(),
+        np.full(diagonal.size, 23.0, dtype=np.float32),
+    )
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
