@@ -55,18 +55,26 @@ class SparseSolver:
         if isinstance(sparse_matrix, SparseMatrix):
             sparse_matrix._ensure_valid()
             sparse_matrix._require_operation("public_direct_solver")
-            self.matrix = sparse_matrix
+            if sparse_matrix.dtype != self.dtype:
+                raise TaichiRuntimeError(
+                    f"The SparseSolver's dtype {self.dtype} is not consistent with the SparseMatrix's dtype {sparse_matrix.dtype}."
+                )
             taichi_arch = taichi_forge.lang.impl.get_runtime().prog.config().arch
             if taichi_arch == _ti_core.Arch.x64 or taichi_arch == _ti_core.Arch.arm64:
                 self.solver.compute(sparse_matrix.matrix)
             elif taichi_arch == _ti_core.Arch.cuda:
-                self.analyze_pattern(self.matrix)
-                self.factorize(self.matrix)
+                self.analyze_pattern(sparse_matrix)
+                self.factorize(sparse_matrix)
+            self.matrix = sparse_matrix
         else:
             self._type_assert(sparse_matrix)
 
     def analyze_pattern(self, sparse_matrix):
-        """Reorder the nonzero elements of the matrix, such that the factorization step creates less fill-in.
+        """Analyze and reorder a sparse pattern for later numeric factorizations.
+
+        A later factorize() may use another matrix only when its complete
+        compressed index pattern is identical. Pattern changes require a new
+        call to analyze_pattern().
 
         Args:
             sparse_matrix (SparseMatrix): The sparse matrix to be analyzed.
@@ -74,17 +82,22 @@ class SparseSolver:
         if isinstance(sparse_matrix, SparseMatrix):
             sparse_matrix._ensure_valid()
             sparse_matrix._require_operation("public_direct_solver")
-            self.matrix = sparse_matrix
-            if self.matrix.dtype != self.dtype:
+            if sparse_matrix.dtype != self.dtype:
                 raise TaichiRuntimeError(
-                    f"The SparseSolver's dtype {self.dtype} is not consistent with the SparseMatrix's dtype {self.matrix.dtype}."
+                    f"The SparseSolver's dtype {self.dtype} is not consistent with the SparseMatrix's dtype {sparse_matrix.dtype}."
                 )
             self.solver.analyze_pattern(sparse_matrix.matrix)
+            self.matrix = sparse_matrix
         else:
             self._type_assert(sparse_matrix)
 
     def factorize(self, sparse_matrix):
-        """Do the factorization step
+        """Factorize new values for the pattern most recently analyzed.
+
+        The matrix may be a different object, but its complete sparse pattern
+        must match the matrix passed to analyze_pattern(). Calling
+        update_values() after this method makes the factorization stale until
+        factorize() is called again.
 
         Args:
             sparse_matrix (SparseMatrix): The sparse matrix to be factorized.
@@ -92,8 +105,12 @@ class SparseSolver:
         if isinstance(sparse_matrix, SparseMatrix):
             sparse_matrix._ensure_valid()
             sparse_matrix._require_operation("public_direct_solver")
-            self.matrix = sparse_matrix
+            if sparse_matrix.dtype != self.dtype:
+                raise TaichiRuntimeError(
+                    f"The SparseSolver's dtype {self.dtype} is not consistent with the SparseMatrix's dtype {sparse_matrix.dtype}."
+                )
             self.solver.factorize(sparse_matrix.matrix)
+            self.matrix = sparse_matrix
         else:
             self._type_assert(sparse_matrix)
 
@@ -108,6 +125,7 @@ class SparseSolver:
         if self.matrix is None:
             raise TaichiRuntimeError("Please call compute() before calling solve().")
         self.matrix._ensure_valid()
+        self.solver.validate_factorization(self.matrix.matrix)
         if isinstance(b, Field):
             return self.solver.solve(b.to_numpy())
         if isinstance(b, np.ndarray):

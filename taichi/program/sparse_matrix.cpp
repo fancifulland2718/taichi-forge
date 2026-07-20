@@ -84,6 +84,14 @@ T2 get_element_from_csr(int row,
 
 namespace taichi::lang {
 
+namespace {
+std::atomic<std::uint64_t> next_sparse_matrix_id{1};
+}  // namespace
+
+std::uint64_t allocate_sparse_matrix_id() {
+  return next_sparse_matrix_id.fetch_add(1, std::memory_order_relaxed);
+}
+
 SparseMatrixRuntimeStatistics SparseMatrix::make_runtime_statistics(
     const std::string &backend_family,
     const std::string &storage_format) const {

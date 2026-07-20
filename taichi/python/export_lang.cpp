@@ -4620,6 +4620,7 @@ void export_lang(py::module &m) {
       .def("compute", &SparseSolver::compute)
       .def("analyze_pattern", &SparseSolver::analyze_pattern)
       .def("factorize", &SparseSolver::factorize)
+      .def("validate_factorization", &SparseSolver::validate_factorization)
       .def("info", &SparseSolver::info);
 
 #define REGISTER_EIGEN_SOLVER(dt, type, order, fd)                           \

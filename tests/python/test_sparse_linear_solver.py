@@ -13,6 +13,123 @@ Therefore, A_psd is modified from A * A^T to A * A^T + np.eye(n) to improve stab
 """
 
 
+def _build_direct_solver_matrix(values, storage_format="col_major"):
+    values = np.asarray(values, dtype=np.float32)
+    rows, cols = values.shape
+    builder = ti.linalg.SparseMatrixBuilder(
+        rows,
+        cols,
+        max_num_triplets=rows * cols,
+        dtype=ti.f32,
+        storage_format=storage_format,
+    )
+
+    @ti.kernel
+    def fill(
+        matrix_builder: ti.types.sparse_matrix_builder(),
+        matrix_values: ti.types.ndarray(),
+    ):
+        for i, j in ti.ndrange(rows, cols):
+            if matrix_values[i, j] != 0.0:
+                matrix_builder[i, j] += matrix_values[i, j]
+
+    fill(builder, values)
+    return builder.build()
+
+
+@pytest.mark.parametrize("storage_format", ["col_major", "row_major"])
+@test_utils.test(arch=ti.cpu)
+def test_sparse_solver_reuses_exact_symbolic_pattern(storage_format):
+    dense_a = np.array(
+        [[4.0, -1.0, 0.0], [-1.0, 4.0, -1.0], [0.0, -1.0, 3.0]],
+        dtype=np.float32,
+    )
+    dense_b = np.array(
+        [[6.0, -2.0, 0.0], [-2.0, 5.0, -1.0], [0.0, -1.0, 4.0]],
+        dtype=np.float32,
+    )
+    dense_changed_pattern = dense_b.copy()
+    dense_changed_pattern[0, 2] = 0.25
+    a = _build_direct_solver_matrix(dense_a, storage_format)
+    b_matrix = _build_direct_solver_matrix(dense_b, storage_format)
+    changed_pattern = _build_direct_solver_matrix(
+        dense_changed_pattern, storage_format
+    )
+    rhs = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+
+    solver = ti.linalg.SparseSolver(dtype=ti.f32, solver_type="LLT")
+    solver.analyze_pattern(a)
+    solver.factorize(a)
+    assert np.allclose(solver.solve(rhs), np.linalg.solve(dense_a, rhs))
+
+    solver.factorize(b_matrix)
+    expected_b = np.linalg.solve(dense_b, rhs)
+    assert np.allclose(solver.solve(rhs), expected_b)
+
+    with pytest.raises(
+        RuntimeError, match="requires the same sparse pattern"
+    ):
+        solver.factorize(changed_pattern)
+    assert np.allclose(solver.solve(rhs), expected_b)
+
+    b_matrix[0, 0] = 7.0
+    with pytest.raises(RuntimeError, match="factorization is stale"):
+        solver.solve(rhs)
+    dense_b[0, 0] = 7.0
+    solver.factorize(b_matrix)
+    assert np.allclose(solver.solve(rhs), np.linalg.solve(dense_b, rhs))
+
+
+@test_utils.test(arch=ti.cpu)
+def test_sparse_solver_factorize_requires_analysis():
+    matrix = _build_direct_solver_matrix(np.eye(2, dtype=np.float32))
+    solver = ti.linalg.SparseSolver(dtype=ti.f32, solver_type="LLT")
+    with pytest.raises(RuntimeError, match="analyze_pattern.*first"):
+        solver.factorize(matrix)
+
+
+@test_utils.test(arch=ti.cuda)
+def test_cuda_sparse_solver_refreshes_values_for_reused_pattern():
+    dense_a = np.array(
+        [[4.0, -1.0, 0.0], [-1.0, 4.0, -1.0], [0.0, -1.0, 3.0]],
+        dtype=np.float32,
+    )
+    dense_b = np.array(
+        [[6.0, -2.0, 0.0], [-2.0, 5.0, -1.0], [0.0, -1.0, 4.0]],
+        dtype=np.float32,
+    )
+    dense_changed_pattern = dense_b.copy()
+    dense_changed_pattern[0, 2] = 0.25
+    a = _build_direct_solver_matrix(dense_a)
+    b_matrix = _build_direct_solver_matrix(dense_b)
+    changed_pattern = _build_direct_solver_matrix(dense_changed_pattern)
+    rhs = ti.ndarray(dtype=ti.f32, shape=3)
+    rhs.from_numpy(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+
+    solver = ti.linalg.SparseSolver(dtype=ti.f32, solver_type="LLT")
+    solver.analyze_pattern(a)
+    solver.factorize(a)
+    assert np.allclose(
+        solver.solve(rhs).to_numpy(),
+        np.linalg.solve(dense_a, rhs.to_numpy()),
+        rtol=5.0e-3,
+    )
+
+    solver.factorize(b_matrix)
+    expected_b = np.linalg.solve(dense_b, rhs.to_numpy())
+    assert np.allclose(
+        solver.solve(rhs).to_numpy(), expected_b, rtol=5.0e-3
+    )
+
+    with pytest.raises(
+        RuntimeError, match="requires the same sparse pattern"
+    ):
+        solver.factorize(changed_pattern)
+    assert np.allclose(
+        solver.solve(rhs).to_numpy(), expected_b, rtol=5.0e-3
+    )
+
+
 @pytest.mark.parametrize("dtype", [ti.f32, ti.f64])
 @pytest.mark.parametrize("solver_type", ["LLT", "LDLT", "LU"])
 @pytest.mark.parametrize("ordering", ["AMD", "COLAMD"])

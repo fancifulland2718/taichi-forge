@@ -2,6 +2,8 @@
 
 #include "sparse_solver.h"
 
+#include <cstring>
+#include <optional>
 #include <unordered_map>
 
 namespace taichi::lang {
@@ -91,15 +93,42 @@ struct key_hash {
 
 namespace taichi::lang {
 
+void SparseSolver::invalidate_factorization() {
+  factorization_recorded_ = false;
+  factorized_matrix_id_ = 0;
+  factorized_pattern_version_ = 0;
+  factorized_numeric_version_ = 0;
+}
+
+void SparseSolver::record_factorization(const SparseMatrix &sm) {
+  factorization_recorded_ = true;
+  factorized_matrix_id_ = sm.matrix_id();
+  factorized_pattern_version_ = sm.pattern_version();
+  factorized_numeric_version_ = sm.numeric_version();
+}
+
+void SparseSolver::validate_factorization(const SparseMatrix &sm) const {
+  TI_ERROR_IF(
+      !factorization_recorded_,
+      "SparseSolver has no successful numeric factorization. Call compute() "
+      "or factorize() before solve().");
+  TI_ERROR_IF(factorized_matrix_id_ != sm.matrix_id() ||
+                  factorized_pattern_version_ != sm.pattern_version() ||
+                  factorized_numeric_version_ != sm.numeric_version(),
+              "SparseSolver factorization is stale because the matrix or its "
+              "pattern/numeric version changed. Call factorize() again before "
+              "solve().");
+}
+
 namespace {
 
 const void *require_cpu_eigen_matrix(const SparseMatrix &matrix) {
   const auto stats = matrix.debug_runtime_statistics();
-  TI_ERROR_IF(stats.backend_family != "cpu" ||
-                  (stats.storage_format != "csr" &&
-                   stats.storage_format != "csc"),
-              "CPU sparse direct solvers currently require an Eigen "
-              "CSR/CSC matrix.");
+  TI_ERROR_IF(
+      stats.backend_family != "cpu" || stats.provider_name != "eigen" ||
+          (stats.storage_format != "csr" && stats.storage_format != "csc"),
+      "CPU sparse direct solvers currently require an Eigen "
+      "CSR/CSC matrix.");
   const void *provider_matrix = matrix.get_matrix();
   TI_ERROR_IF(provider_matrix == nullptr,
               "CPU sparse direct solver received an unavailable Eigen "
@@ -117,29 +146,76 @@ const CuSparseMatrix &require_cuda_csr_matrix(const SparseMatrix &matrix) {
 }  // namespace
 
 #define GET_EM(sm)                                                        \
-  const EigenMatrix *mat = static_cast<const EigenMatrix *>(              \
-      require_cpu_eigen_matrix(sm));
+  const auto em_stats = sm.debug_runtime_statistics();                    \
+  const void *provider_matrix = require_cpu_eigen_matrix(sm);             \
+  using RowMajorEigenMatrix =                                             \
+      Eigen::SparseMatrix<typename EigenMatrix::Scalar, Eigen::RowMajor>; \
+  std::optional<EigenMatrix> canonical_matrix;                            \
+  const EigenMatrix *mat = nullptr;                                       \
+  if (em_stats.storage_format == "csc") {                                 \
+    mat = static_cast<const EigenMatrix *>(provider_matrix);              \
+  } else {                                                                \
+    canonical_matrix.emplace(                                             \
+        *static_cast<const RowMajorEigenMatrix *>(provider_matrix));      \
+    mat = &*canonical_matrix;                                             \
+  }
+
+template <class EigenSolver, class EigenMatrix>
+void EigenSparseSolver<EigenSolver, EigenMatrix>::remember_pattern(
+    const EigenMatrix &matrix) {
+  analyzed_pattern_.clear();
+  analyzed_pattern_.reserve(static_cast<std::size_t>(matrix.nonZeros()));
+  for (int outer = 0; outer < matrix.outerSize(); ++outer) {
+    for (typename EigenMatrix::InnerIterator it(matrix, outer); it; ++it) {
+      analyzed_pattern_.emplace_back(it.row(), it.col());
+    }
+  }
+  pattern_analyzed_ = true;
+}
+
+template <class EigenSolver, class EigenMatrix>
+void EigenSparseSolver<EigenSolver, EigenMatrix>::require_same_pattern(
+    const EigenMatrix &matrix) const {
+  TI_ERROR_IF(!pattern_analyzed_,
+              "SparseSolver factorize() requires analyze_pattern() first.");
+  TI_ERROR_IF(
+      static_cast<std::size_t>(matrix.nonZeros()) != analyzed_pattern_.size(),
+      "SparseSolver factorize() requires the same sparse pattern that was "
+      "passed to analyze_pattern(); the nonzero count changed.");
+  std::size_t ordinal = 0;
+  for (int outer = 0; outer < matrix.outerSize(); ++outer) {
+    for (typename EigenMatrix::InnerIterator it(matrix, outer); it; ++it) {
+      TI_ERROR_IF(
+          analyzed_pattern_[ordinal] != std::make_pair(it.row(), it.col()),
+          "SparseSolver factorize() requires the same sparse pattern that "
+          "was passed to analyze_pattern(); an index changed.");
+      ++ordinal;
+    }
+  }
+}
 
 template <class EigenSolver, class EigenMatrix>
 bool EigenSparseSolver<EigenSolver, EigenMatrix>::compute(
     const SparseMatrix &sm) {
-  if (!is_initialized_) {
-    SparseSolver::init_solver(sm.num_rows(), sm.num_cols(), sm.get_data_type());
-  }
+  invalidate_factorization();
+  SparseSolver::init_solver(sm.num_rows(), sm.num_cols(), sm.get_data_type());
   GET_EM(sm);
+  remember_pattern(*mat);
   solver_.compute(*mat);
   if (solver_.info() != Eigen::Success) {
     return false;
-  } else
+  } else {
+    record_factorization(sm);
     return true;
+  }
 }
 template <class EigenSolver, class EigenMatrix>
 void EigenSparseSolver<EigenSolver, EigenMatrix>::analyze_pattern(
     const SparseMatrix &sm) {
-  if (!is_initialized_) {
-    SparseSolver::init_solver(sm.num_rows(), sm.num_cols(), sm.get_data_type());
-  }
+  invalidate_factorization();
+  SparseSolver::init_solver(sm.num_rows(), sm.num_cols(), sm.get_data_type());
   GET_EM(sm);
+  remember_pattern(*mat);
   solver_.analyzePattern(*mat);
 }
 
@@ -147,7 +223,12 @@ template <class EigenSolver, class EigenMatrix>
 void EigenSparseSolver<EigenSolver, EigenMatrix>::factorize(
     const SparseMatrix &sm) {
   GET_EM(sm);
+  require_same_pattern(*mat);
+  invalidate_factorization();
   solver_.factorize(*mat);
+  if (solver_.info() == Eigen::Success) {
+    record_factorization(sm);
+  }
 }
 
 template <class EigenSolver, class EigenMatrix>
@@ -181,6 +262,7 @@ void EigenSparseSolver<EigenSolver, EigenMatrix>::solve_rf(
     const SparseMatrix &sm,
     const Ndarray &b,
     const Ndarray &x) {
+  validate_factorization(sm);
   size_t db = prog->get_ndarray_data_ptr_as_int(&b);
   size_t dX = prog->get_ndarray_data_ptr_as_int(&x);
   Eigen::Map<T>((V *)dX, rows_) = solver_.solve(Eigen::Map<T>((V *)db, cols_));
@@ -219,6 +301,70 @@ void CuSparseSolver::init_solver() {
   }
 #endif
 }
+
+void CuSparseSolver::clear_analysis_resources() {
+#if defined(TI_WITH_CUDA)
+  if (h_Q_ != nullptr)
+    free(h_Q_);
+  if (h_csrRowPtrB_ != nullptr)
+    free(h_csrRowPtrB_);
+  if (h_csrColIndB_ != nullptr)
+    free(h_csrColIndB_);
+  if (h_csrValB_ != nullptr)
+    free(h_csrValB_);
+  if (h_mapBfromA_ != nullptr)
+    free(h_mapBfromA_);
+  if (cpu_buffer_ != nullptr)
+    free(cpu_buffer_);
+  if (info_ != nullptr)
+    CUSOLVERDriver::get_instance().csSpDestroyCsrcholInfo(info_);
+  if (lu_info_ != nullptr)
+    CUSOLVERDriver::get_instance().csSpDestroyCsrluInfoHost(lu_info_);
+  if (cusolver_handle_ != nullptr)
+    CUSOLVERDriver::get_instance().csSpDestory(cusolver_handle_);
+  if (cusparse_handel_ != nullptr)
+    CUSPARSEDriver::get_instance().cpDestroy(cusparse_handel_);
+  if (descr_ != nullptr)
+    CUSPARSEDriver::get_instance().cpDestroyMatDescr(descr_);
+  if (gpu_buffer_ != nullptr)
+    CUDADriver::get_instance().mem_free(gpu_buffer_);
+  if (d_Q_ != nullptr)
+    CUDADriver::get_instance().mem_free(d_Q_);
+  if (d_csrRowPtrB_ != nullptr)
+    CUDADriver::get_instance().mem_free(d_csrRowPtrB_);
+  if (d_csrColIndB_ != nullptr)
+    CUDADriver::get_instance().mem_free(d_csrColIndB_);
+  if (d_csrValB_ != nullptr)
+    CUDADriver::get_instance().mem_free(d_csrValB_);
+#endif
+  h_Q_ = nullptr;
+  h_csrRowPtrB_ = nullptr;
+  h_csrColIndB_ = nullptr;
+  h_csrValB_ = nullptr;
+  h_mapBfromA_ = nullptr;
+  cpu_buffer_ = nullptr;
+  info_ = nullptr;
+  lu_info_ = nullptr;
+  cusolver_handle_ = nullptr;
+  cusparse_handel_ = nullptr;
+  descr_ = nullptr;
+  gpu_buffer_ = nullptr;
+  d_Q_ = nullptr;
+  d_csrRowPtrB_ = nullptr;
+  d_csrColIndB_ = nullptr;
+  d_csrValB_ = nullptr;
+  analyzed_csr_row_ptr_.clear();
+  analyzed_csr_col_ind_.clear();
+  analyzed_matrix_id_ = 0;
+  analyzed_pattern_version_ = 0;
+  analyzed_shared_pattern_id_ = 0;
+  loaded_matrix_id_ = 0;
+  loaded_numeric_version_ = 0;
+  is_analyzed_ = false;
+  is_factorized_ = false;
+  invalidate_factorization();
+}
+
 void CuSparseSolver::reorder(const CuSparseMatrix &A) {
 #if defined(TI_WITH_CUDA)
   size_t rowsA = A.num_rows();
@@ -234,12 +380,10 @@ void CuSparseSolver::reorder(const CuSparseMatrix &A) {
                                               CUSPARSE_MATRIX_TYPE_GENERAL);
   CUSPARSEDriver::get_instance().cpSetMatIndexBase(descr_,
                                                    CUSPARSE_INDEX_BASE_ZERO);
-  float *h_csrValA = nullptr;
   h_Q_ = (int *)malloc(sizeof(int) * colsA);
   h_csrRowPtrB_ = (int *)malloc(sizeof(int) * (rowsA + 1));
   h_csrColIndB_ = (int *)malloc(sizeof(int) * nnzA);
   h_csrValB_ = (float *)malloc(sizeof(float) * nnzA);
-  h_csrValA = (float *)malloc(sizeof(float) * nnzA);
   h_mapBfromA_ = (int *)malloc(sizeof(int) * nnzA);
   assert(nullptr != h_Q_);
   assert(nullptr != h_csrRowPtrB_);
@@ -247,12 +391,18 @@ void CuSparseSolver::reorder(const CuSparseMatrix &A) {
   assert(nullptr != h_csrValB_);
   assert(nullptr != h_mapBfromA_);
 
-  CUDADriver::get_instance().memcpy_device_to_host(h_csrRowPtrB_, d_csrRowPtrA,
-                                                   sizeof(int) * (rowsA + 1));
-  CUDADriver::get_instance().memcpy_device_to_host(h_csrColIndB_, d_csrColIndA,
-                                                   sizeof(int) * nnzA);
-  CUDADriver::get_instance().memcpy_device_to_host(h_csrValA, d_csrValA,
-                                                   sizeof(float) * nnzA);
+  analyzed_csr_row_ptr_.resize(rowsA + 1);
+  analyzed_csr_col_ind_.resize(nnzA);
+  std::vector<float> h_csr_val_a(nnzA);
+  CUDADriver::get_instance().memcpy_device_to_host(
+      analyzed_csr_row_ptr_.data(), d_csrRowPtrA, sizeof(int) * (rowsA + 1));
+  CUDADriver::get_instance().memcpy_device_to_host(
+      analyzed_csr_col_ind_.data(), d_csrColIndA, sizeof(int) * nnzA);
+  CUDADriver::get_instance().memcpy_device_to_host(
+      h_csr_val_a.data(), d_csrValA, sizeof(float) * nnzA);
+  std::memcpy(h_csrRowPtrB_, analyzed_csr_row_ptr_.data(),
+              sizeof(int) * (rowsA + 1));
+  std::memcpy(h_csrColIndB_, analyzed_csr_col_ind_.data(), sizeof(int) * nnzA);
 
   // compoute h_Q_
   CUSOLVERDriver::get_instance().csSpXcsrsymamdHost(cusolver_handle_, rowsA,
@@ -275,7 +425,7 @@ void CuSparseSolver::reorder(const CuSparseMatrix &A) {
       h_csrColIndB_, h_Q_, h_Q_, h_mapBfromA_, buffer_cpu);
   // B = A( mapBfromA )
   for (int j = 0; j < nnzA; j++) {
-    h_csrValB_[j] = h_csrValA[h_mapBfromA_[j]];
+    h_csrValB_[j] = h_csr_val_a[h_mapBfromA_[j]];
   }
   CUDADriver::get_instance().malloc((void **)&d_csrRowPtrB_,
                                     sizeof(int) * (rowsA + 1));
@@ -288,14 +438,79 @@ void CuSparseSolver::reorder(const CuSparseMatrix &A) {
       (void *)d_csrColIndB_, (void *)h_csrColIndB_, sizeof(int) * nnzA);
   CUDADriver::get_instance().memcpy_host_to_device(
       (void *)d_csrValB_, (void *)h_csrValB_, sizeof(float) * nnzA);
-  free(h_csrValA);
   free(buffer_cpu);
+  const auto stats = A.debug_runtime_statistics();
+  analyzed_matrix_id_ = A.matrix_id();
+  analyzed_pattern_version_ = A.pattern_version();
+  analyzed_shared_pattern_id_ = stats.shared_pattern_id;
+  loaded_matrix_id_ = A.matrix_id();
+  loaded_numeric_version_ = A.numeric_version();
+#endif
+}
+
+void CuSparseSolver::validate_analyzed_pattern(const CuSparseMatrix &A) const {
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(!is_analyzed_,
+              "SparseSolver factorize() requires analyze_pattern() first.");
+  const auto stats = A.debug_runtime_statistics();
+  TI_ERROR_IF(A.num_rows() != rows_ || A.num_cols() != cols_ ||
+                  A.get_data_type() != dtype_ ||
+                  A.get_nnz() != static_cast<int>(analyzed_csr_col_ind_.size()),
+              "SparseSolver factorize() requires the same sparse pattern "
+              "that was passed to analyze_pattern(); shape, dtype, or "
+              "nonzero count changed.");
+  if (A.matrix_id() == analyzed_matrix_id_ &&
+      A.pattern_version() == analyzed_pattern_version_) {
+    return;
+  }
+  if (analyzed_shared_pattern_id_ != 0 &&
+      stats.shared_pattern_id == analyzed_shared_pattern_id_) {
+    return;
+  }
+  std::vector<int> row_ptr(analyzed_csr_row_ptr_.size());
+  std::vector<int> col_ind(analyzed_csr_col_ind_.size());
+  CUDADriver::get_instance().memcpy_device_to_host(
+      row_ptr.data(), A.get_row_ptr(), sizeof(int) * row_ptr.size());
+  CUDADriver::get_instance().memcpy_device_to_host(
+      col_ind.data(), A.get_col_ind(), sizeof(int) * col_ind.size());
+  TI_ERROR_IF(
+      row_ptr != analyzed_csr_row_ptr_ || col_ind != analyzed_csr_col_ind_,
+      "SparseSolver factorize() requires the same sparse pattern that was "
+      "passed to analyze_pattern(); a CSR index changed.");
+#else
+  TI_NOT_IMPLEMENTED
+#endif
+}
+
+void CuSparseSolver::refresh_factorization_values(const CuSparseMatrix &A) {
+#if defined(TI_WITH_CUDA)
+  if (loaded_matrix_id_ == A.matrix_id() &&
+      loaded_numeric_version_ == A.numeric_version()) {
+    return;
+  }
+  const auto nnz = static_cast<std::size_t>(A.get_nnz());
+  std::vector<float> values(nnz);
+  CUDADriver::get_instance().memcpy_device_to_host(
+      values.data(), A.get_val_ptr(), sizeof(float) * nnz);
+  for (std::size_t j = 0; j < nnz; ++j) {
+    h_csrValB_[j] = values[h_mapBfromA_[j]];
+  }
+  if (solver_type_ == SolverType::Cholesky) {
+    CUDADriver::get_instance().memcpy_host_to_device(d_csrValB_, h_csrValB_,
+                                                     sizeof(float) * nnz);
+  }
+  loaded_matrix_id_ = A.matrix_id();
+  loaded_numeric_version_ = A.numeric_version();
+#else
+  TI_NOT_IMPLEMENTED
 #endif
 }
 
 // Reference:
 // https://github.com/NVIDIA/cuda-samples/blob/master/Samples/4_CUDA_Libraries/cuSolverSp_LowlevelCholesky/cuSolverSp_LowlevelCholesky.cpp
 void CuSparseSolver::analyze_pattern(const SparseMatrix &sm) {
+  clear_analysis_resources();
+  SparseSolver::init_solver(sm.num_rows(), sm.num_cols(), sm.get_data_type());
   switch (solver_type_) {
     case SolverType::Cholesky:
       analyze_pattern_cholesky(sm);
@@ -353,6 +568,11 @@ void CuSparseSolver::analyze_pattern_lu(const SparseMatrix &sm) {
 #endif
 }
 void CuSparseSolver::factorize(const SparseMatrix &sm) {
+  const CuSparseMatrix &A = require_cuda_csr_matrix(sm);
+  validate_analyzed_pattern(A);
+  refresh_factorization_values(A);
+  invalidate_factorization();
+  is_factorized_ = false;
   switch (solver_type_) {
     case SolverType::Cholesky:
       factorize_cholesky(sm);
@@ -362,6 +582,9 @@ void CuSparseSolver::factorize(const SparseMatrix &sm) {
       break;
     default:
       TI_NOT_IMPLEMENTED
+  }
+  if (is_factorized_) {
+    record_factorization(sm);
   }
 }
 void CuSparseSolver::factorize_cholesky(const SparseMatrix &sm) {
@@ -378,6 +601,10 @@ void CuSparseSolver::factorize_cholesky(const SparseMatrix &sm) {
       cusolver_handle_, rowsA, nnzA, descr_, d_csrValB_, d_csrRowPtrB_,
       d_csrColIndB_, info_, &size_internal, &size_chol);
 
+  if (gpu_buffer_ != nullptr) {
+    CUDADriver::get_instance().mem_free(gpu_buffer_);
+    gpu_buffer_ = nullptr;
+  }
   if (size_chol > 0)
     CUDADriver::get_instance().malloc(&gpu_buffer_, sizeof(char) * size_chol);
 
@@ -434,6 +661,7 @@ void CuSparseSolver::solve_rf(Program *prog,
                               const SparseMatrix &sm,
                               const Ndarray &b,
                               const Ndarray &x) {
+  validate_factorization(sm);
   switch (solver_type_) {
     case SolverType::Cholesky:
       solve_cholesky(prog, sm, b, x);
@@ -596,40 +824,7 @@ std::unique_ptr<SparseSolver> make_sparse_solver(DataType dt,
 }
 
 CuSparseSolver::~CuSparseSolver() {
-#if defined(TI_WITH_CUDA)
-  if (h_Q_ != nullptr)
-    free(h_Q_);
-  if (h_csrRowPtrB_ != nullptr)
-    free(h_csrRowPtrB_);
-  if (h_csrColIndB_ != nullptr)
-    free(h_csrColIndB_);
-  if (h_csrValB_ != nullptr)
-    free(h_csrValB_);
-  if (h_mapBfromA_ != nullptr)
-    free(h_mapBfromA_);
-  if (cpu_buffer_ != nullptr)
-    free(cpu_buffer_);
-  if (info_ != nullptr)
-    CUSOLVERDriver::get_instance().csSpDestroyCsrcholInfo(info_);
-  if (lu_info_ != nullptr)
-    CUSOLVERDriver::get_instance().csSpDestroyCsrluInfoHost(lu_info_);
-  if (cusolver_handle_ != nullptr)
-    CUSOLVERDriver::get_instance().csSpDestory(cusolver_handle_);
-  if (cusparse_handel_ != nullptr)
-    CUSPARSEDriver::get_instance().cpDestroy(cusparse_handel_);
-  if (descr_ != nullptr)
-    CUSPARSEDriver::get_instance().cpDestroyMatDescr(descr_);
-  if (gpu_buffer_ != nullptr)
-    CUDADriver::get_instance().mem_free(gpu_buffer_);
-  if (d_Q_ != nullptr)
-    CUDADriver::get_instance().mem_free(d_Q_);
-  if (d_csrRowPtrB_ != nullptr)
-    CUDADriver::get_instance().mem_free(d_csrRowPtrB_);
-  if (d_csrColIndB_ != nullptr)
-    CUDADriver::get_instance().mem_free(d_csrColIndB_);
-  if (d_csrValB_ != nullptr)
-    CUDADriver::get_instance().mem_free(d_csrValB_);
-#endif
+  clear_analysis_resources();
 }
 std::unique_ptr<SparseSolver> make_cusparse_solver(
     DataType dt,

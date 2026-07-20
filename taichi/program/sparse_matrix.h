@@ -19,6 +19,8 @@
 namespace taichi::lang {
 
 class SparseMatrix;
+std::uint64_t allocate_sparse_matrix_id();
+
 class CudaSparseAssemblyPlan;
 class VulkanSparseAssemblyPlan;
 
@@ -229,6 +231,18 @@ class SparseMatrix {
     return dtype_;
   }
 
+  inline std::uint64_t matrix_id() const {
+    return matrix_id_;
+  }
+
+  inline std::uint64_t pattern_version() const {
+    return pattern_version_.load(std::memory_order_relaxed);
+  }
+
+  inline std::uint64_t numeric_version() const {
+    return numeric_version_.load(std::memory_order_relaxed);
+  }
+
   template <class T>
   T get_element(int row, int col) {
     TI_NOT_IMPLEMENTED;
@@ -262,6 +276,7 @@ class SparseMatrix {
   DataType dtype_{PrimitiveType::f32};
 
  private:
+  const std::uint64_t matrix_id_{allocate_sparse_matrix_id()};
   std::atomic<std::uint64_t> pattern_version_{0};
   std::atomic<std::uint64_t> numeric_version_{0};
   std::atomic<std::uint64_t> pattern_builds_{0};

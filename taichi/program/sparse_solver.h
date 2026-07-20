@@ -6,6 +6,10 @@
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/program/program.h"
 
+#include <cstdint>
+#include <utility>
+#include <vector>
+
 #define DECLARE_EIGEN_LLT_SOLVER(dt, type, order)                    \
   typedef EigenSparseSolver<                                         \
       Eigen::Simplicial##type<Eigen::SparseMatrix<dt>, Eigen::Lower, \
@@ -27,6 +31,13 @@ class SparseSolver {
   int cols_{0};
   DataType dtype_{PrimitiveType::f32};
   bool is_initialized_{false};
+  bool factorization_recorded_{false};
+  std::uint64_t factorized_matrix_id_{0};
+  std::uint64_t factorized_pattern_version_{0};
+  std::uint64_t factorized_numeric_version_{0};
+
+  void invalidate_factorization();
+  void record_factorization(const SparseMatrix &sm);
 
  public:
   virtual ~SparseSolver() = default;
@@ -34,17 +45,24 @@ class SparseSolver {
     rows_ = rows;
     cols_ = cols;
     dtype_ = dtype;
+    is_initialized_ = true;
   }
   virtual bool compute(const SparseMatrix &sm) = 0;
   virtual void analyze_pattern(const SparseMatrix &sm) = 0;
   virtual void factorize(const SparseMatrix &sm) = 0;
   virtual bool info() = 0;
+  void validate_factorization(const SparseMatrix &sm) const;
 };
 
 template <class EigenSolver, class EigenMatrix>
 class EigenSparseSolver : public SparseSolver {
  private:
   EigenSolver solver_;
+  bool pattern_analyzed_{false};
+  std::vector<std::pair<int, int>> analyzed_pattern_;
+
+  void remember_pattern(const EigenMatrix &matrix);
+  void require_same_pattern(const EigenMatrix &matrix) const;
 
  public:
   ~EigenSparseSolver() override = default;
@@ -101,6 +119,14 @@ class CuSparseSolver : public SparseSolver {
   int *d_csrRowPtrB_{nullptr}; /* <int> n+1 */
   int *d_csrColIndB_{nullptr}; /* <int> nnzA */
   float *d_csrValB_{nullptr};  /* <float> nnzA */
+  std::vector<int> analyzed_csr_row_ptr_;
+  std::vector<int> analyzed_csr_col_ind_;
+  std::uint64_t analyzed_matrix_id_{0};
+  std::uint64_t analyzed_pattern_version_{0};
+  std::uint64_t analyzed_shared_pattern_id_{0};
+  std::uint64_t loaded_matrix_id_{0};
+  std::uint64_t loaded_numeric_version_{0};
+
  public:
   CuSparseSolver();
   explicit CuSparseSolver(SolverType solver_type) : solver_type_(solver_type) {
@@ -124,7 +150,10 @@ class CuSparseSolver : public SparseSolver {
 
  private:
   void init_solver();
+  void clear_analysis_resources();
   void reorder(const CuSparseMatrix &sm);
+  void validate_analyzed_pattern(const CuSparseMatrix &sm) const;
+  void refresh_factorization_values(const CuSparseMatrix &sm);
   void analyze_pattern_cholesky(const SparseMatrix &sm);
   void analyze_pattern_lu(const SparseMatrix &sm);
   void factorize_cholesky(const SparseMatrix &sm);
