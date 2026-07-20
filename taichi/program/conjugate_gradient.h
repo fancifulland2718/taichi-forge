@@ -756,7 +756,7 @@ class VulkanCGIterationPlan {
   int fixed_iterations_{0};
   float absolute_tolerance_{0.0f};
   bool adaptive_{false};
-  bool compiled_kernel_operator_{false};
+  CompiledKernelLinearOperator *compiled_kernel_operator_{nullptr};
   Ndarray *ap_{nullptr};
   Ndarray *residual_{nullptr};
   Ndarray *direction_{nullptr};

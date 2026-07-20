@@ -1194,7 +1194,8 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
   fixed_iterations_ = max_iterations;
   absolute_tolerance_ = absolute_tolerance;
   adaptive_ = adaptive;
-  compiled_kernel_operator_ = allow_compiled_kernel_operator;
+  compiled_kernel_operator_ =
+      allow_compiled_kernel_operator ? compiled_kernel_operator : nullptr;
   const int n = matrix.num_rows();
   auto create_vector = [&]() {
     return program->create_ndarray(PrimitiveType::f32, {n},
@@ -1288,6 +1289,8 @@ void VulkanCGIterationPlan::apply_operator(Program *program,
     csr_matrix_->nd_spmv(program, input, output);
   } else if (bsr_matrix_) {
     bsr_matrix_->nd_spmv(program, input, output);
+  } else if (compiled_kernel_operator_) {
+    compiled_kernel_operator_->nd_spmv(program, input, output);
   } else {
     TI_ERROR("Vulkan CG received an unsupported sparse operator.");
   }
