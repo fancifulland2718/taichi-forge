@@ -8330,8 +8330,9 @@ std::size_t Program::vulkan_csr_spmv(Ndarray *row_offsets,
       static_cast<uint32_t>(nnz), 0u};
   const uint32_t push_bytes =
       static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
-  const uint32_t groups =
-      static_cast<uint32_t>((rows + kBlockSize - 1) / kBlockSize);
+  constexpr std::size_t kMaxDispatchGroups = 65535;
+  const uint32_t groups = static_cast<uint32_t>(std::min(
+      kMaxDispatchGroups, (rows + kBlockSize - 1) / kBlockSize));
   const bool profiler_scopes = profiler != nullptr;
   auto record_spmv =
       [y_alloc, y_bytes, pipeline, bindings, param_words, push_bytes, groups,
@@ -8469,8 +8470,9 @@ std::size_t Program::vulkan_bsr_spmv(Ndarray *row_offsets,
       static_cast<uint32_t>(block_size)};
   const uint32_t push_bytes =
       static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
-  const uint32_t groups =
-      static_cast<uint32_t>((rows + kBlockSize - 1) / kBlockSize);
+  constexpr std::size_t kMaxDispatchGroups = 65535;
+  const uint32_t groups = static_cast<uint32_t>(std::min(
+      kMaxDispatchGroups, (rows + kBlockSize - 1) / kBlockSize));
   const bool profiler_scopes = profiler != nullptr;
   auto record_spmv =
       [y_alloc, y_bytes, pipeline, bindings, param_words, push_bytes, groups,

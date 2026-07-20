@@ -30,26 +30,28 @@ layout(push_constant) uniform Params {
 } params;
 
 void main() {
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
   uint row = gl_GlobalInvocationID.x;
-  if (row >= params.rows) {
-    return;
-  }
-
-  uint begin = row_offsets_buf.data[row];
-  uint end = row_offsets_buf.data[row + 1u];
-  if (begin > end || end > params.nnz) {
-    y_buf.data[row] = uintBitsToFloat(0x7fc00000u);
-    return;
-  }
-
-  float sum = 0.0;
-  for (uint offset = begin; offset < end; ++offset) {
-    uint column = column_indices_buf.data[offset];
-    if (column >= params.cols) {
-      sum = uintBitsToFloat(0x7fc00000u);
+  while (row < params.rows) {
+    uint begin = row_offsets_buf.data[row];
+    uint end = row_offsets_buf.data[row + 1u];
+    if (begin > end || end > params.nnz) {
+      y_buf.data[row] = uintBitsToFloat(0x7fc00000u);
+    } else {
+      float sum = 0.0;
+      for (uint offset = begin; offset < end; ++offset) {
+        uint column = column_indices_buf.data[offset];
+        if (column >= params.cols) {
+          sum = uintBitsToFloat(0x7fc00000u);
+          break;
+        }
+        sum += values_buf.data[offset] * x_buf.data[column];
+      }
+      y_buf.data[row] = sum;
+    }
+    if (params.rows - row <= stride) {
       break;
     }
-    sum += values_buf.data[offset] * x_buf.data[column];
+    row += stride;
   }
-  y_buf.data[row] = sum;
 }

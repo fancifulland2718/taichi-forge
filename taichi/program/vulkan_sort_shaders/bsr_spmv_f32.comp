@@ -30,36 +30,38 @@ layout(push_constant) uniform Params {
 } params;
 
 void main() {
-  uint scalar_row = gl_GlobalInvocationID.x;
   uint scalar_rows = params.block_rows * params.block_size;
-  if (scalar_row >= scalar_rows) {
-    return;
-  }
-
-  uint block_row = scalar_row / params.block_size;
-  uint local_row = scalar_row % params.block_size;
-  uint begin = row_offsets_buf.data[block_row];
-  uint end = row_offsets_buf.data[block_row + 1u];
-  if (begin > end || end > params.block_nnz) {
-    y_buf.data[scalar_row] = uintBitsToFloat(0x7fc00000u);
-    return;
-  }
-
-  float sum = 0.0;
-  for (uint offset = begin; offset < end; ++offset) {
-    uint block_column = column_indices_buf.data[offset];
-    if (block_column >= params.block_cols) {
-      sum = uintBitsToFloat(0x7fc00000u);
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint scalar_row = gl_GlobalInvocationID.x;
+  while (scalar_row < scalar_rows) {
+    uint block_row = scalar_row / params.block_size;
+    uint local_row = scalar_row % params.block_size;
+    uint begin = row_offsets_buf.data[block_row];
+    uint end = row_offsets_buf.data[block_row + 1u];
+    if (begin > end || end > params.block_nnz) {
+      y_buf.data[scalar_row] = uintBitsToFloat(0x7fc00000u);
+    } else {
+      float sum = 0.0;
+      for (uint offset = begin; offset < end; ++offset) {
+        uint block_column = column_indices_buf.data[offset];
+        if (block_column >= params.block_cols) {
+          sum = uintBitsToFloat(0x7fc00000u);
+          break;
+        }
+        uint value_base =
+            (offset * params.block_size + local_row) * params.block_size;
+        uint x_base = block_column * params.block_size;
+        for (uint local_column = 0; local_column < params.block_size;
+             ++local_column) {
+          sum += values_buf.data[value_base + local_column] *
+                 x_buf.data[x_base + local_column];
+        }
+      }
+      y_buf.data[scalar_row] = sum;
+    }
+    if (scalar_rows - scalar_row <= stride) {
       break;
     }
-    uint value_base =
-        (offset * params.block_size + local_row) * params.block_size;
-    uint x_base = block_column * params.block_size;
-    for (uint local_column = 0; local_column < params.block_size;
-         ++local_column) {
-      sum += values_buf.data[value_base + local_column] *
-             x_buf.data[x_base + local_column];
-    }
+    scalar_row += stride;
   }
-  y_buf.data[scalar_row] = sum;
 }
