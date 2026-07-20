@@ -116,6 +116,114 @@ def test_cuda_compiled_kernel_cg_reuses_persistent_workspace():
     assert not stats["resources"]["solver_state_rebuilt_each_solve"]
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_cpu_compiled_kernel_cg_uses_operator_action():
+    diagonal = np.asarray([2.0, 3.0, 5.0, 7.0], dtype=np.float32)
+    program, operator = _make_compiled_diagonal_operator(diagonal)
+    plan = ti._lib.core._make_cpu_operator_cg_solver(program, operator, 16, 1e-6, 0.0)
+    solution = ti.ndarray(ti.f32, shape=diagonal.size)
+    rhs = ti.ndarray(ti.f32, shape=diagonal.size)
+    exact_solutions = (
+        np.asarray([0.5, -1.0, 2.0, 1.5], dtype=np.float32),
+        np.asarray([-2.0, 0.25, 1.25, 3.0], dtype=np.float32),
+    )
+    for exact in exact_solutions:
+        solution.fill(0.0)
+        rhs.from_numpy(diagonal * exact)
+        plan.solve(program, solution.arr, rhs.arr)
+        assert plan.is_success()
+        np.testing.assert_allclose(solution.to_numpy(), exact, rtol=2e-4, atol=2e-4)
+
+    updated_diagonal = diagonal * 1.5
+    updated_numeric = ti.ndarray(ti.f32, shape=diagonal.size)
+    updated_numeric.from_numpy(updated_diagonal)
+    operator.update_numeric_data(program, updated_numeric.arr, 1, 1)
+    updated_exact = np.asarray([1.25, -0.5, 0.75, 2.0], dtype=np.float32)
+    solution.fill(0.0)
+    rhs.from_numpy(updated_diagonal * updated_exact)
+    plan.solve(program, solution.arr, rhs.arr)
+    assert plan.is_success()
+    np.testing.assert_allclose(solution.to_numpy(), updated_exact, rtol=2e-4, atol=2e-4)
+
+    row_offsets = ti.ndarray(ti.i32, shape=diagonal.size + 1)
+    column_indices = ti.ndarray(ti.i32, shape=diagonal.size)
+    csr_values = ti.ndarray(ti.f32, shape=diagonal.size)
+    row_offsets.from_numpy(np.arange(diagonal.size + 1, dtype=np.int32))
+    column_indices.from_numpy(np.arange(diagonal.size, dtype=np.int32))
+    csr_values.from_numpy(updated_diagonal)
+    pattern = program._create_csr_pattern(
+        diagonal.size,
+        diagonal.size,
+        row_offsets.arr,
+        column_indices.arr,
+    )
+    csr_operator = program._create_csr_matrix_from_pattern(pattern, csr_values.arr)
+    csr_plan = ti._lib.core._make_cpu_operator_cg_solver(
+        program, csr_operator, 16, 1e-6, 0.0
+    )
+    csr_solution = ti.ndarray(ti.f32, shape=diagonal.size)
+    csr_solution.fill(0.0)
+    csr_plan.solve(program, csr_solution.arr, rhs.arr)
+    assert csr_plan.is_success()
+    dense_solution = np.linalg.solve(
+        np.diag(updated_diagonal.astype(np.float64)),
+        rhs.to_numpy().astype(np.float64),
+    )
+    np.testing.assert_allclose(
+        csr_solution.to_numpy(), dense_solution, rtol=2e-4, atol=2e-4
+    )
+    np.testing.assert_allclose(
+        csr_solution.to_numpy(), solution.to_numpy(), rtol=2e-4, atol=2e-4
+    )
+
+    stats = plan._debug_runtime_stats()
+    operator_stats = operator._debug_runtime_stats()
+    csr_stats = csr_operator._debug_runtime_stats()
+    csr_plan_stats = csr_plan._debug_runtime_stats()
+    assert stats["identity"]["method"] == "cg_operator_action"
+    assert stats["identity"]["preconditioner_method"] == "identity"
+    assert stats["operations"]["solve_calls"] == 3
+    assert stats["operations"]["workspace_builds"] == 1
+    assert stats["operations"]["workspace_reuses"] == 2
+    assert stats["operations"]["operator_apply_calls"] > 0
+    assert stats["operations"]["preconditioner_apply_calls"] == 0
+    assert stats["resources"]["persistent_vector_count"] == 4
+    assert stats["resources"]["persistent_vector_reserved_bytes"] == (
+        diagonal.size * 16
+    )
+    assert not stats["resources"]["external_preconditioner"]
+    assert stats["resources"]["preconditioner_ownership_scope"] == "none"
+    assert operator_stats["operations"]["spmv_calls"] == (
+        stats["operations"]["operator_apply_calls"]
+    )
+    assert operator_stats["identity"]["numeric_version"] == 2
+    assert csr_plan_stats["identity"]["method"] == "cg_operator_action"
+    assert csr_stats["operations"]["spmv_calls"] == (
+        csr_plan_stats["operations"]["operator_apply_calls"]
+    )
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_cpu_operator_cg_rejects_reset_without_mutation():
+    diagonal = np.asarray([2.0, 3.0, 5.0, 7.0], dtype=np.float32)
+    program, operator = _make_compiled_diagonal_operator(diagonal)
+    plan = ti._lib.core._make_cpu_operator_cg_solver(program, operator, 16, 1e-6, 0.0)
+
+    ti.reset()
+    ti.init(arch=ti.cpu, enable_fallback=False, offline_cache=False)
+    replacement_program = impl.get_runtime().prog
+    solution = ti.ndarray(ti.f32, shape=diagonal.size)
+    rhs = ti.ndarray(ti.f32, shape=diagonal.size)
+    solution.fill(31.0)
+    rhs.fill(1.0)
+    with pytest.raises(RuntimeError, match="construction Program"):
+        plan.solve(replacement_program, solution.arr, rhs.arr)
+    np.testing.assert_array_equal(
+        solution.to_numpy(),
+        np.full(diagonal.size, 31.0, dtype=np.float32),
+    )
+
+
 @test_utils.test(
     arch=[ti.cpu, ti.cuda, ti.vulkan],
     offline_cache=False,

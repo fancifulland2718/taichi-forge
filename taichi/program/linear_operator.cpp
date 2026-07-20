@@ -8,6 +8,7 @@
 #include "taichi/common/core.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program.h"
+#include "taichi/program/sparse_matrix.h"
 
 namespace taichi::lang {
 namespace {
@@ -367,6 +368,56 @@ OperatorAction make_dense_reference_operator_action(
         } else {
           apply(float64{});
         }
+      });
+}
+
+OperatorAction make_cpu_sparse_matrix_operator_action(Program *program,
+                                                      SparseMatrix &matrix) {
+  TI_ERROR_IF(!program || !arch_is_cpu(program->compile_config().arch),
+              "CPU SparseMatrix operator actions require an active CPU "
+              "Program.");
+  const auto initial = matrix.debug_runtime_statistics();
+  const bool native_stored =
+      initial.provider_name == "forge_cpu_native" &&
+      (initial.storage_format == "csr" || initial.storage_format == "bsr");
+  const bool compiled_action =
+      (initial.provider_name == "forge_compiled_taichi_kernel" &&
+       initial.storage_format == "matrix_free_kernel") ||
+      (initial.provider_name == "forge_compiled_graph" &&
+       initial.storage_format == "matrix_free_graph");
+  const bool supported_provider =
+      initial.backend_family == "cpu" &&
+      (native_stored || compiled_action);
+  TI_ERROR_IF(!supported_provider,
+              "CPU SparseMatrix operator action does not support backend "
+              "'{}' with storage format '{}'; no fallback was performed.",
+              initial.backend_family, initial.storage_format);
+  OperatorDescriptor descriptor;
+  descriptor.domain = {matrix.get_data_type(),
+                       static_cast<std::size_t>(matrix.num_cols())};
+  descriptor.range = {matrix.get_data_type(),
+                      static_cast<std::size_t>(matrix.num_rows())};
+  const std::string provider_name =
+      initial.provider_name.empty()
+          ? "cpu_" + initial.storage_format + "_compat"
+          : initial.provider_name;
+  return OperatorAction(
+      descriptor, OperatorCapabilities{}, provider_name,
+      [program, &matrix] {
+        const auto statistics = matrix.debug_runtime_statistics();
+        return OperatorResourceStamp{reinterpret_cast<std::uintptr_t>(program),
+                                     1, statistics.pattern_version,
+                                     statistics.numeric_version,
+                                     matrix.matrix_id()};
+      },
+      [program, &matrix](OperatorApplyMode mode,
+                         const OperatorVectorView &input,
+                         const OperatorVectorView &output) {
+        TI_ERROR_IF(mode != OperatorApplyMode::forward || !input.ndarray ||
+                        !output.ndarray,
+                    "CPU SparseMatrix compatibility action requires "
+                    "forward ndarray views; no fallback was performed.");
+        matrix.nd_spmv(program, *input.ndarray, *output.ndarray);
       });
 }
 

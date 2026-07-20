@@ -52,6 +52,30 @@ def test_cg(ti_dtype):
     for i in range(n):
         assert x[i] == test_utils.approx(res[i], rel=1.0)
 
+
+@test_utils.test(arch=[ti.cpu])
+def test_cpu_operator_action_rejects_legacy_eigen_provider_at_construction():
+    builder = ti.linalg.SparseMatrixBuilder(
+        2, 2, max_num_triplets=2, dtype=ti.f32
+    )
+
+    @ti.kernel
+    def fill(matrix: ti.types.sparse_matrix_builder()):
+        for i in range(2):
+            matrix[i, i] += i + 2
+
+    fill(builder)
+    matrix = builder.build()
+    program = ti.lang.impl.get_runtime().prog
+    with pytest.raises(
+        RuntimeError,
+        match="does not support backend 'cpu' with storage format 'cs[rc]'",
+    ):
+        ti._lib.core._make_cpu_operator_cg_solver(
+            program, matrix.matrix, 8, 1e-6, 0.0
+        )
+
+
 @pytest.mark.parametrize("ti_dtype", [ti.f32])
 @test_utils.test(arch=[ti.cuda])
 def test_cg_cuda(ti_dtype):

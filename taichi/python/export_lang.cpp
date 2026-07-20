@@ -5499,6 +5499,18 @@ void export_lang(py::module &m) {
            });
   m.attr("CpuBsrCGPlan") = m.attr("CpuSparseCGPlan");
   m.def(
+      "_make_cpu_operator_cg_solver",
+      [](Program *program, SparseMatrix &matrix, int max_iterations,
+         double absolute_tolerance, double relative_tolerance) {
+        return make_cpu_operator_cg_solver(
+            program, matrix, max_iterations, absolute_tolerance,
+            relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("matrix"),
+      py::arg("max_iterations"), py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0);
+  m.def(
       "_make_cpu_jacobi_pcg_solver",
       [](Program *program, SparseMatrix &matrix,
          SparseJacobiPreconditionerPlan &preconditioner,

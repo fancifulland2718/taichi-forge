@@ -13,6 +13,7 @@ namespace taichi::lang {
 
 class Ndarray;
 class Program;
+class SparseMatrix;
 
 enum class OperatorInnerProductKind : std::uint8_t {
   euclidean,
@@ -153,5 +154,10 @@ class OperatorPlan {
 OperatorAction make_dense_reference_operator_action(
     OperatorDescriptor descriptor,
     std::vector<double> row_major_values);
+
+// Internal compatibility adapter used while stored and compiled providers
+// still expose their apply primitive through SparseMatrix::nd_spmv().
+OperatorAction make_cpu_sparse_matrix_operator_action(Program *program,
+                                                      SparseMatrix &matrix);
 
 }  // namespace taichi::lang

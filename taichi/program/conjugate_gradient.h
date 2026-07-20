@@ -19,6 +19,7 @@ namespace taichi::lang {
 class SparseJacobiPreconditionerPlan;
 class SparseBlockJacobiPreconditionerPlan;
 class CompiledKernelPreconditionerPlan;
+class OperatorPlan;
 
 enum class SparseSolveStatus : int {
   kNotRun = -1,
@@ -520,6 +521,11 @@ std::unique_ptr<CUCG> make_cuda_compiled_kernel_pcg_solver(
 class CpuSparseCGPlan {
  public:
   CpuSparseCGPlan(Program *program,
+                  SparseMatrix &matrix,
+                  int max_iterations,
+                  double absolute_tolerance,
+                  double relative_tolerance = 0.0);
+  CpuSparseCGPlan(Program *program,
                SparseMatrix &matrix,
                SparseJacobiPreconditionerPlan &preconditioner,
                int max_iterations,
@@ -570,49 +576,46 @@ class CpuSparseCGPlan {
   SparseSolvePlanRuntimeStatistics debug_runtime_statistics() const;
 
  private:
+  struct PreconditionerBinding;
+
   template <typename T>
-  void solve_typed(Program *program,
-                   T *x,
+  void solve_typed(T *x,
                    const T *b,
                    const std::array<T *, 4> &workspace,
                    const Ndarray &solution_array);
   CpuSparseCGPlan(Program *program,
-               SparseMatrix &matrix,
-               SparseJacobiPreconditionerPlan *scalar_preconditioner,
-               SparseBlockJacobiPreconditionerPlan *block_preconditioner,
-               CompiledKernelPreconditionerPlan
-                   *compiled_kernel_preconditioner,
-               int max_iterations,
-               double absolute_tolerance,
-               double relative_tolerance);
+                  SparseMatrix &matrix,
+                  std::unique_ptr<PreconditionerBinding> preconditioner,
+                  int max_iterations,
+                  double absolute_tolerance,
+                  double relative_tolerance);
+  static std::unique_ptr<PreconditionerBinding> bind_preconditioner(
+      Program *program,
+      SparseMatrix &matrix,
+      SparseJacobiPreconditionerPlan &preconditioner);
+  static std::unique_ptr<PreconditionerBinding> bind_preconditioner(
+      Program *program,
+      SparseMatrix &matrix,
+      SparseBlockJacobiPreconditionerPlan &preconditioner);
+  static std::unique_ptr<PreconditionerBinding> bind_preconditioner(
+      Program *program,
+      CompiledKernelLinearOperator &matrix,
+      CompiledKernelPreconditionerPlan &preconditioner);
   void validate_preconditioner(Program *program) const;
-  void apply_operator_cpu_raw(Program *program,
-                              std::uintptr_t input,
-                              std::uintptr_t output,
-                              const Ndarray *input_array,
-                              const Ndarray *output_array);
-  void apply_preconditioner_cpu_raw(Program *program,
-                                    std::uintptr_t input,
-                                    std::uintptr_t output,
-                                    const Ndarray *input_array,
-                                    const Ndarray *output_array);
-  void release_compiled_workspace();
+  void apply_operator(const Ndarray &input, const Ndarray &output);
+  void apply_preconditioner(const Ndarray &input, const Ndarray &output);
+  void release_workspace();
 
   Program *program_{nullptr};
   SparseMatrix *matrix_{nullptr};
-  CpuSparseCsrMatrix *csr_matrix_{nullptr};
-  CpuSparseBsrMatrix *bsr_matrix_{nullptr};
-  SparseJacobiPreconditionerPlan *scalar_preconditioner_{nullptr};
-  SparseBlockJacobiPreconditionerPlan *block_preconditioner_{nullptr};
-  CompiledKernelLinearOperator *compiled_kernel_operator_{nullptr};
-  CompiledKernelPreconditionerPlan *compiled_kernel_preconditioner_{nullptr};
+  std::unique_ptr<PreconditionerBinding> preconditioner_binding_;
+  std::unique_ptr<OperatorPlan> operator_plan_;
+  std::unique_ptr<OperatorPlan> preconditioner_plan_;
   DataType dtype_{PrimitiveType::f32};
   int max_iterations_{0};
   double absolute_tolerance_{0.0};
   double relative_tolerance_{0.0};
-  std::array<std::vector<float32>, 4> workspace_f32_;
-  std::array<std::vector<float64>, 4> workspace_f64_;
-  std::array<Ndarray *, 4> compiled_workspace_{};
+  std::array<Ndarray *, 4> workspace_{};
   mutable std::mutex solve_mutex_;
   bool has_solved_{false};
   SparseSolveStatus status_{SparseSolveStatus::kNotRun};
@@ -635,6 +638,13 @@ class CpuSparseCGPlan {
 // Preserve the old private C++ name while the implementation now serves both
 // fixed CSR/scalar-Jacobi and BSR/block-Jacobi operators.
 using CpuBsrCGPlan = CpuSparseCGPlan;
+
+std::unique_ptr<CpuSparseCGPlan> make_cpu_operator_cg_solver(
+    Program *program,
+    SparseMatrix &matrix,
+    int max_iterations,
+    double absolute_tolerance,
+    double relative_tolerance = 0.0);
 
 std::unique_ptr<CpuSparseCGPlan> make_cpu_jacobi_pcg_solver(
     Program *program,
