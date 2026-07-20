@@ -877,7 +877,42 @@ canvas.submit_frame(frame)
 
 参考：[显示帧提交](display_frame.zh.md)。
 
+## `taichi_forge.linalg` 稀疏线性代数
+
+该模块提供 fixed CSR/BSR pattern、value-only update、scale-aware iterative
+convergence、CPU MINRES/BiCGSTAB，以及经过验证的 symbolic factorization 复用合同。
+完整用法与后端矩阵见
+[稀疏 runtime 与线性代数](sparse_runtime_and_linear_algebra.zh.md)。
+
+| API | 用途 | 支持边界 |
+| --- | --- | --- |
+| `ti.linalg.SparsePattern.csr(rows, cols, row_offsets, column_indices)` | 从当前 runtime 的 `i32` ndarray 创建 immutable scalar CSR pattern。 | CPU values 支持 `f32/f64`；CUDA/Vulkan 支持 `f32`。每行 index 必须有序、唯一且在范围内。 |
+| `ti.linalg.SparsePattern.bsr(block_rows, block_cols, block_size, row_offsets, column_indices)` | 创建 immutable BSR pattern。 | block size 为 2、3、6 或 12；solver 支持面窄于 SpMV。 |
+| `pattern.matrix(values)` / `SparseMatrix.from_pattern(pattern, values)` | 为共享 immutable indices 绑定独立 numeric values。 | `values` 是当前 runtime 的一维 scalar Taichi ndarray。 |
+| `matrix.update_values(values)` | 不重建 indices，只替换 compressed values。 | stored scalar 数量和 compressed order 必须不变。 |
+| `ti.linalg.SparseCG(A, b, ..., atol, preconditioner, rtol)` | 求解 SPD 系统并返回 `(x, converged)`。 | CPU mutable/fixed CSR/BSR；CUDA scalar CSR/fixed BSR；Vulkan 无公开 stored CG。 |
+| `ti.linalg.SparseMINRES(A, b, ..., atol, rtol)` | 求解显式存储的对称不定系统。 | CPU mutable/fixed CSR/BSR、`f32/f64`；identity preconditioner。 |
+| `ti.linalg.SparseBiCGSTAB(A, b, ..., atol, rtol)` | 求解显式存储的非对称系统。 | CPU mutable/fixed CSR/BSR、`f32/f64`。 |
+| `ti.linalg.SparseSolver` | 直接 LLT/LDLT/LU 分解和求解。 | CPU mutable Eigen provider 与文档列出的 CUDA scalar-CSR 路径；Vulkan 不支持。 |
+
+迭代收敛条件为
+`||b - A x||_2 <= max(atol, rtol * ||b||_2)`。Taichi 不会自动推断
+symmetry 或 positive definiteness；不支持的 format/backend 会明确失败，不做 host
+fallback。
+
+只有完整 compressed index pattern 相同，`SparseSolver.analyze_pattern(A)`
+才能跨 `factorize(B)` 复用。factorization 后更新 values 会使分解 stale，
+必须重新执行 `factorize()`。pattern、matrix、ndarray 和 solver 都属于
+Program generation，执行 `ti.reset()` 后全部失效。
+
 ## 稀疏布局 API
+
+按workload选择布局及功能状态见
+[稀疏布局选择指南](sparse_layout_selection.zh.md)。
+物理operator与solver选择见
+[物理稀疏算子与求解器选择指南](physics_sparse_solver_selection.zh.md)。
+构造、求解、生命周期和后端表见
+[稀疏 runtime 与线性代数](sparse_runtime_and_linear_algebra.zh.md)。
 
 ### `SNode.hash(...)` 和 `FieldsBuilder.hash(...)`
 
@@ -905,13 +940,15 @@ hash(axes, dimensions, *, max_active=None, expected_active=None,
 | `axes` | 此 SNode 覆盖的 axis。 |
 | `dimensions` | 逻辑尺寸。 |
 | `expected_active` | 预期活跃元素数；capacity 从 load factor 推导。 |
-| `max_active` | 类似最大活跃数的 sizing 输入。 |
+| `max_active` | `expected_active` 的兼容别名；它是调尺输入，不是活跃 entry 的硬上限。 |
 | `capacity` | 显式物理 capacity。 |
 | `hash_load_factor` | per-node load factor 覆盖。 |
 
 局限：
 
 - `expected_active`、`max_active`、`capacity` 必须且只能提供一个。
+- `expected_active` 与 `max_active` 用于推导 table slots；只有最终物理 table
+  capacity 是硬边界。
 - 公开支持后端为 CPU、CUDA、Vulkan。
 - capacity 在 JIT 前固定；没有自动 grow / rehash 路径。
 - `hash` 不支持挂在 `quant_array` 或 `bit_struct` 等 quantized layout 下。

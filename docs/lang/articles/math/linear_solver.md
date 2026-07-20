@@ -6,13 +6,17 @@ sidebar_position: 3
 
 Solving linear equations is a common task in scientific computing. Taichi provides basic direct and iterative linear solvers for
 various simulation scenarios. Currently, there are two categories of linear solvers available:
+For the consolidated Forge backend/format/dtype matrix and update/reset
+contracts, see the bilingual
+[Sparse runtime and linear algebra guide](../../../forge/sparse_runtime_and_linear_algebra.en.md).
 1. Solvers built for `SparseMatrix`, including:
 - Direct solver `SparseSolver`
 - Iterative (conjugate-gradient method) solver `SparseCG`
 - Iterative (minimum-residual method) solver `SparseMINRES`
 - Iterative (biconjugate-gradient stabilized method) solver `SparseBiCGSTAB`
 2. Solvers built for `LinearOperator`
-- Iterative (matrix-free conjugate-gradient method) solver `MatrixfreeCG`
+- Iterative (matrix-free conjugate-gradient method) solver `MatrixFreeCG`
+- Iterative (matrix-free BiCGSTAB method) solver `MatrixFreeBICGSTAB`
 
 It's important to understand that those solvers are built for specific matrix
 properties and storage providers. `SparseCG` is for symmetric

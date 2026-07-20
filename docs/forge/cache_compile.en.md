@@ -54,6 +54,29 @@ Use `compile_tier="fast"` for iteration speed when exact peak runtime
 performance is not required, and `compile_tier="full"` for the most conservative
 legacy optimization pipeline.
 
+## Metadata Lock Lifetime
+
+Offline-cache metadata uses an operating-system advisory lock. The corresponding
+empty `.lock` file is persistent and may remain in the cache directory after a
+clean shutdown. File existence does not mean that another process owns the lock.
+The owner keeps an OS file handle open only while loading or dumping metadata;
+normal unlock and abnormal process termination both release ownership through
+the operating system. A later process can therefore reuse a lock file left by a
+terminated process without deleting the compiled cache.
+
+While a live process owns the advisory lock, another process skips that
+metadata load/dump and reports that the lock is busy; it does not treat the
+file's mere existence as ownership. After the owner exits or is killed, the
+next process can acquire the same persistent file.
+
+This change applies only to metadata coordination. Compiled cache artifacts
+retain their existing exclusive-create publication protocol, so two writers
+cannot silently overwrite the same artifact.
+
+Do not manually remove lock files while Forge processes are running. `ti cache
+clean -p <path>` remains an explicit idle-cache maintenance command, not a lock
+recovery requirement.
+
 ## Boundaries
 
 - Cache reuse is not an incremental compiler for arbitrary source edits. If a

@@ -995,7 +995,44 @@ engine loop.
 
 See also [Display frame submission](display_frame.en.md).
 
+## `taichi_forge.linalg` Sparse Linear Algebra
+
+The module provides fixed CSR/BSR patterns, value-only updates, scale-aware
+iterative convergence, CPU MINRES/BiCGSTAB, and validated symbolic
+factorization reuse. The complete usage and backend matrix is in
+[Sparse runtime and linear algebra](sparse_runtime_and_linear_algebra.en.md).
+
+| API | Purpose | Supported boundary |
+| --- | --- | --- |
+| `ti.linalg.SparsePattern.csr(rows, cols, row_offsets, column_indices)` | Create an immutable scalar CSR pattern from current-runtime `i32` ndarrays. | CPU `f32/f64` values; CUDA/Vulkan `f32` values. Indices are sorted, unique, and in range per row. |
+| `ti.linalg.SparsePattern.bsr(block_rows, block_cols, block_size, row_offsets, column_indices)` | Create an immutable BSR pattern. | Block size 2, 3, 6, or 12. Solver support is narrower than SpMV support. |
+| `pattern.matrix(values)` / `SparseMatrix.from_pattern(pattern, values)` | Bind independent numeric values to shared immutable indices. | `values` is a one-dimensional scalar Taichi ndarray on the current runtime. |
+| `matrix.update_values(values)` | Replace compressed values without rebuilding indices. | Stored scalar count and compressed order must remain unchanged. |
+| `ti.linalg.SparseCG(A, b, ..., atol, preconditioner, rtol)` | Solve an SPD system and return `(x, converged)`. | CPU mutable/fixed CSR/BSR; CUDA scalar CSR/fixed BSR; no Vulkan stored CG. |
+| `ti.linalg.SparseMINRES(A, b, ..., atol, rtol)` | Solve an explicitly stored symmetric-indefinite system. | CPU mutable/fixed CSR/BSR, `f32/f64`; identity preconditioner. |
+| `ti.linalg.SparseBiCGSTAB(A, b, ..., atol, rtol)` | Solve an explicitly stored nonsymmetric system. | CPU mutable/fixed CSR/BSR, `f32/f64`. |
+| `ti.linalg.SparseSolver` | Direct LLT/LDLT/LU factorization and solve. | CPU mutable Eigen providers and documented CUDA scalar-CSR route; no Vulkan. |
+
+Iterative convergence uses
+`||b - A x||_2 <= max(atol, rtol * ||b||_2)`. Taichi does not infer
+symmetry or positive definiteness. Unsupported format/backend operations fail
+without a host fallback.
+
+`SparseSolver.analyze_pattern(A)` may be reused across
+`factorize(B)` calls only when the complete compressed index pattern
+is identical. A value update after factorization makes the factorization stale
+until `factorize()` runs again. All patterns, matrices, ndarrays, and
+solvers are Program-generation objects and become invalid after
+`ti.reset()`.
+
 ## Sparse Layout APIs
+
+For workload-level layout selection and feature status, see
+[Choosing a sparse layout](sparse_layout_selection.en.md).
+For physics operator and solver selection, see
+[Choosing sparse operators and solvers](physics_sparse_solver_selection.en.md).
+For construction, solve, lifecycle, and backend tables, see
+[Sparse runtime and linear algebra](sparse_runtime_and_linear_algebra.en.md).
 
 ### `SNode.hash(...)` and `FieldsBuilder.hash(...)`
 
@@ -1023,13 +1060,15 @@ Parameters:
 | `axes` | Axis or axes covered by this SNode. |
 | `dimensions` | Logical dimensions. |
 | `expected_active` | Expected number of active entries; capacity is derived from the load factor. |
-| `max_active` | Alias-like sizing input for the maximum active count. |
+| `max_active` | Compatibility alias for `expected_active`; it is a sizing input, not a hard active-entry limit. |
 | `capacity` | Explicit physical capacity. |
 | `hash_load_factor` | Per-node load factor override. |
 
 Limits:
 
 - Exactly one of `expected_active`, `max_active`, or `capacity` must be given.
+- `expected_active` and `max_active` derive table slots; only the resulting
+  physical table capacity is a hard bound.
 - Supported public backends are CPU, CUDA, and Vulkan.
 - Capacity is fixed before JIT; there is no automatic grow/rehash path.
 - `hash` is not supported under quantized layouts such as `quant_array` or

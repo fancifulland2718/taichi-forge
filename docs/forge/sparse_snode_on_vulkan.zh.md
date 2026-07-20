@@ -177,7 +177,7 @@ LLVM 后端 struct-for（`for I in field:`）按 SNode 树拓扑序遍历活跃 
 
 规避：用 `ti.atomic_add` 或在 reduce 前先排序。
 
-### 3.7 显式声明 pointer 容量上限：`vk_max_active`（容量决议 hint）
+### 3.7 显式声明 Vulkan pointer 容量：`vk_max_active`
 
 用于嵌套 pointer 或大 N 但稀疏度低的工作流。给定 `pointer(ti.ij, N)` SNode，默认按最坏情况预留 `N²` cell 到 root buffer；若你确知该层级的稳态最大活跃数远小于此，可显式提示：
 
@@ -189,9 +189,14 @@ blk.dense(ti.ij, 8).place(x)
 
 规则：
 
-- kwarg 决定 Vulkan pointer 容量，也会指导 CUDA sparse-pool sizing；CPU 仍按需分配。
+- 这个kwarg有意保留backend-specific语义：它决定Vulkan固定pointer容量；在CUDA
+  只指导sparse-pool sizing，并不是精确的per-SNode语义硬上限（推导出的有限CUDA
+  pool仍可能显式耗尽）；CPU sparse payload仍按需分配，只用它选择traversal-list
+  chunk geometry。
 - 4 级 fallback 优先级：`vk_max_active` (kwarg) > `vulkan_pointer_pool_fraction`（`ti.init` kwarg）> `TI_VULKAN_POOL_FRACTION` (env var) > 最坏情况预留。
 - 容量下限锁死 = 该 pointer 容器单 cell 数（`num_cells_per_container`），低于此值会被强制提升以保证 deactivate-freelist 至少能容纳一个 cell。
+- 高于Vulkan推导worst-case的值会被保留而不是向下钳制；若对应buffer无法分配，
+  runtime会显式报告allocation OOM。
 - 超容时的行为：地址会安全钳制，并在下一个同步边界抛出诊断错误（与 §3.1 一致）。
 - 嵌套 pointer 上每层独立标注：`outer = ti.root.pointer(ti.ij, OUTER, vk_max_active=N1); inner = outer.pointer(ti.ij, MID, vk_max_active=N2)`。
 
@@ -231,8 +236,8 @@ python tests\p4\vulkan_pointer_smoke.py
 
 | 现象 | 可能原因 | 处置 |
 |---|---|---|
-| 写入静默丢失，`ti.length()` 显示 < 实际激活次数 | 超出编译期 capacity（§3.1 / §3.3） | 增大 SNode 维度 N，或减少同帧并发 activate。 |
-| `TI_VULKAN_POOL_FRACTION=0.5` 后部分 cell 写入丢失 | 缩减后 capacity 不够（§3.2） | 调高 fraction，或恢复默认 1.0。 |
+| `ti.sync()` 报告 pointer/dynamic capacity overflow | activate/append 超出配置的静态 capacity（§3.1 / §3.3）；越界地址已安全钳制 | 增大 `vk_max_active` / N，或减少并发 activate。不能把失败后的原位mutation当作已发布snapshot继续使用。 |
+| 设置 `TI_VULKAN_POOL_FRACTION=0.5` 后 `ti.sync()` 报告 pointer pool overflow | 缩减后 capacity 不够（§3.2） | 调高 fraction，或恢复默认 1.0。 |
 | `Hash SNode is experimental` 警告 | 第一次使用默认开启的实验性 `hash` API | 这是预期提示。阅读 §6 / [hash_snode.zh.md](hash_snode.zh.md)；如需禁用，传入 `ti.init(hash_snode_experimental=False)`。 |
 | `ti.sync()` 附近报告 hash overflow | distinct hash key 超出固定 table 容量 | 增大 `expected_active` / `capacity`，或降低 `hash_load_factor`。 |
 | Vulkan 上首次启动很慢，第二次秒开 | offline cache 首次编译 | 正常行为；第二次起命中 cache。 |
@@ -297,5 +302,6 @@ ti.root.hash(ti.ij, (4096, 4096), expected_active=8192).place(x)
 
 ## 9. 参考
 
+- 稀疏布局选择指南：[sparse_layout_selection.zh.md](sparse_layout_selection.zh.md)
 - 本 fork 新增编译/运行时/架构/现代化选项一览：[forge_options.zh.md](forge_options.zh.md)
 - 测试代码：本仓库 `tests/p4/vulkan_*.py` 与 `tests/p4/g*.py`

@@ -177,7 +177,7 @@ The LLVM backend traverses active cells in struct-for (`for I in field:`) follow
 
 Workaround: use `ti.atomic_add`, or sort before reducing.
 
-### 3.7 Declaring an explicit pointer capacity: `vk_max_active`
+### 3.7 Declaring a Vulkan pointer capacity: `vk_max_active`
 
 Useful for nested pointer trees and large-`N` low-sparsity workloads. Given `pointer(ti.ij, N)`, the default behavior reserves `N²` cells worst-case in the root buffer; if you know the steady-state activate count is much lower, the hint shrinks the pool:
 
@@ -189,9 +189,16 @@ blk.dense(ti.ij, 8).place(x)
 
 Rules:
 
-- The kwarg sets Vulkan pointer capacity and also guides CUDA sparse-pool sizing; CPU allocation remains demand-driven.
+- The kwarg is deliberately backend-specific. It determines Vulkan's fixed
+  pointer capacity, guides CUDA sparse-pool sizing without becoming a
+  precise per-SNode hard semantic limit there (the derived finite CUDA pool
+  can still exhaust explicitly), and only selects traversal-list chunk
+  geometry on CPU, where sparse payload still allocates on demand.
 - 4-tier fallback priority: `vk_max_active` (kwarg) > `vulkan_pointer_pool_fraction` (`ti.init` kwarg) > `TI_VULKAN_POOL_FRACTION` (env var) > worst-case reservation.
 - Floor: the value is clamped up to `num_cells_per_container` so the deactivate freelist can hold at least one cell.
+- Values above Vulkan's derived worst-case estimate are honored rather than
+  clamped down; allocation fails explicitly if the resulting buffer cannot be
+  created.
 - Out-of-capacity: the address is safely clamped and the next synchronization boundary raises a diagnostic error (same as §3.1).
 - Nested pointers: each level can be hinted independently — `outer = ti.root.pointer(ti.ij, OUTER, vk_max_active=N1); inner = outer.pointer(ti.ij, MID, vk_max_active=N2)`.
 
@@ -231,8 +238,8 @@ python tests\p4\vulkan_pointer_smoke.py
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| Writes silently lost; `ti.length()` < expected | Beyond static capacity (§3.1 / §3.3) | Increase `N`, or reduce per-frame concurrent activates. |
-| Some writes lost after setting `TI_VULKAN_POOL_FRACTION=0.5` | Shrunk capacity insufficient (§3.2) | Raise the fraction, or unset to restore `1.0`. |
+| `ti.sync()` reports pointer/dynamic capacity overflow | An activation or append exceeded the configured static capacity (§3.1 / §3.3); the attempted out-of-capacity address was safely clamped | Increase `vk_max_active` / `N`, or reduce concurrent activation. Do not continue as if the mutation were a published snapshot. |
+| `ti.sync()` reports pointer pool overflow after `TI_VULKAN_POOL_FRACTION=0.5` | The shrunk capacity is too small (§3.2) | Raise the fraction or restore the default `1.0`. |
 | `Hash SNode is experimental` warning | First use of the default-enabled experimental `hash` API | Expected. Review §6 / [hash_snode.en.md](hash_snode.en.md), or pass `ti.init(hash_snode_experimental=False)` to disable `hash`. |
 | Hash overflow error at `ti.sync()` | More distinct hash keys than the fixed table can hold | Increase `expected_active` / `capacity`, or lower `hash_load_factor`. |
 | Vulkan first launch slow, second launch fast | Offline cache cold compile | Expected; subsequent runs hit the cache. |
@@ -297,5 +304,6 @@ Regression baselines: [tests/p4/g9_quant_baseline.py](https://github.com/taichi-
 
 ## 9. References
 
+- Sparse layout selection: [sparse_layout_selection.en.md](sparse_layout_selection.en.md)
 - New compile-time / run-time / architecture / modernization options in this fork: [forge_options.en.md](forge_options.en.md)
 - Tests: `tests/p4/vulkan_*.py` and `tests/p4/g*.py` in this repository.

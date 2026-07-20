@@ -48,6 +48,23 @@ ti.compile_kernels([
 开发迭代优先时可使用 `compile_tier="fast"`；需要最保守 legacy 优化管线时使用
 `compile_tier="full"`。
 
+## Metadata lock 生命周期
+
+Offline-cache metadata 使用操作系统 advisory lock。对应的空 `.lock` 文件是持久文件，
+正常退出后仍可能保留在 cache 目录中；文件存在不表示仍有进程持锁。owner 只在加载或
+写回 metadata 时保持 OS 文件句柄，正常 unlock 与进程异常终止都会由操作系统释放所有权。
+因此，后续进程可以直接复用异常进程留下的 lock 文件，不需要删除已编译 cache。
+
+live process 持有 advisory lock 时，另一个进程会跳过本次 metadata load/dump 并报告
+lock busy，不会把文件存在本身当作所有权。owner 正常退出或被强制终止后，下一个进程可以
+直接取得同一个持久文件上的 lock。
+
+该修改只影响 metadata coordination。compiled cache artifact 继续使用原有 exclusive
+create 发布协议，两个 writer 不能无声覆盖同一 artifact。
+
+Forge 进程仍在运行时不要手动删除 lock 文件。`ti cache clean -p <path>` 仍是要求 cache
+空闲的显式维护命令，不再是恢复孤儿锁的必要步骤。
+
 ## 边界
 
 - 缓存复用不是任意源码小改的增量编译器。如果代码改动改变 IR、specialization、dtype、shape、layout 或后端配置，受影响编译产物必须重建。

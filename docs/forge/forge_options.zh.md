@@ -137,7 +137,7 @@ Forge 默认从已物化的 SNode 树推导 CUDA sparse SNode pool，并在同�
 
 | 变量 | 取值 | 默认 | 用途 |
 |---|---|---|---|
-| `TI_VULKAN_POOL_FRACTION` | `(0.0, 1.0]` | `1.0` | 缩减每个 `pointer` SNode 的物理 cell pool 到 `max(num_cells_per_container, round(total × fraction))`。越界 activate 走既有 `cap_v` silent-inactive 守卫。非法 / `≤ 0` / `> 1` 回退 `1.0`。详细语义见 [sparse_snode_on_vulkan.zh.md](sparse_snode_on_vulkan.zh.md)。 |
+| `TI_VULKAN_POOL_FRACTION` | `(0.0, 1.0]` | `1.0` | 缩减每个 `pointer` SNode 的物理 cell pool 到 `max(num_cells_per_container, round(total × fraction))`。越界地址会被安全钳制，并在下一个同步边界抛出诊断。非法 / `≤ 0` / `> 1` 回退 `1.0`。详细语义见 [sparse_snode_on_vulkan.zh.md](sparse_snode_on_vulkan.zh.md)。 |
 | `TI_VULKAN_QUANT` | `0` / `1` | `0` | **0.3.0 新增**。等价于 `ti.init(arch=ti.vulkan, vulkan_quant_experimental=True)`。开启后 `quant_array` 与 `BitpackedFields` / `bit_struct` 的读、写、`ti.atomic_add` 均可用。`QuantFloat` 共享指数、非 add 原子明确不支持。OFF 时行为与 vanilla 1.7.4 相同。 |
 | `TI_KERNEL_PROFILER_MAX_RECORDS` | `1`–`1048576` | `131072` | kernel profiler raw record 的进程内预算；达到上限时明确报错，不继续增长。长期 profiling 应定期调用 `ti.profiler.clear_kernel_profiler_info()`；只在确认 host-memory 预算后调高。 |
 
@@ -217,4 +217,5 @@ Vulkan ImGui 后端已迁移到新的 `ImGui_ImplVulkan_InitInfo` 布局（`Rend
 ## 9. 另见
 
 - Sparse SNode on Vulkan 使用指南：[sparse_snode_on_vulkan.zh.md](sparse_snode_on_vulkan.zh.md)
+- 稀疏布局选择指南：[sparse_layout_selection.zh.md](sparse_layout_selection.zh.md)
 - Hash SNode 使用指南：[hash_snode.zh.md](hash_snode.zh.md)

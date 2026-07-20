@@ -38,7 +38,7 @@ ti.root.hash(ti.ij, (4096, 4096), expected_active=8192).place(x)
 | Argument | Meaning |
 |---|---|
 | `expected_active=N` | Preferred form. The table is sized from `ceil(N / hash_load_factor)`, then rounded up to a power of two. |
-| `max_active=N` | Compatibility alias for `expected_active`. Prefer `expected_active` in new code. |
+| `max_active=N` | Compatibility alias for `expected_active`. It derives the same table slots and is not a hard active-entry limit. Prefer `expected_active` in new code. |
 | `capacity=N` | Explicit table slot count. Rounded up to a power of two. |
 
 Optional:
@@ -50,6 +50,8 @@ Optional:
 Rules:
 
 - You must pass exactly one of `expected_active`, `max_active`, or `capacity`.
+- `expected_active` and its `max_active` alias are sizing inputs. The hard
+  physical bound is the derived power-of-two table slot count.
 - The logical domain product must fit in 32-bit signed range.
 - Explicit `capacity` may be rounded up to the next power of two.
 - If `expected_active` exceeds the logical domain size, the SNode is still legal but wastes table slots.
@@ -221,5 +223,6 @@ Hash SNode is best treated as an experimental sparse storage tool, not as a gene
 
 ## 9. See also
 
+- Sparse layout selection: [sparse_layout_selection.en.md](sparse_layout_selection.en.md)
 - Forge option reference: [forge_options.en.md](forge_options.en.md)
 - Vulkan sparse SNode guide: [sparse_snode_on_vulkan.en.md](sparse_snode_on_vulkan.en.md)

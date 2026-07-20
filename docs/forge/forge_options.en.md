@@ -140,7 +140,7 @@ production configuration:
 
 | Variable | Range | Default | Purpose |
 |---|---|---|---|
-| `TI_VULKAN_POOL_FRACTION` | `(0.0, 1.0]` | `1.0` | Shrinks each `pointer` SNode's physical cell pool to `max(num_cells_per_container, round(total × fraction))`. Out-of-capacity activates fall through the existing `cap_v` silent-inactive guard. Invalid / `≤ 0` / `> 1` falls back to `1.0`. Detailed semantics: see [sparse_snode_on_vulkan.en.md](sparse_snode_on_vulkan.en.md). |
+| `TI_VULKAN_POOL_FRACTION` | `(0.0, 1.0]` | `1.0` | Shrinks each `pointer` SNode's physical cell pool to `max(num_cells_per_container, round(total × fraction))`. Out-of-capacity addresses are safely clamped and the next synchronization boundary raises a diagnostic. Invalid / `≤ 0` / `> 1` falls back to `1.0`. Detailed semantics: see [sparse_snode_on_vulkan.en.md](sparse_snode_on_vulkan.en.md). |
 | `TI_VULKAN_QUANT` | `0` / `1` | `0` | **New in 0.3.0.** Equivalent to `ti.init(arch=ti.vulkan, vulkan_quant_experimental=True)`. When ON, `quant_array` and `BitpackedFields` / `bit_struct` read, write, and `ti.atomic_add` are all available on Vulkan. `QuantFloat` shared-exponent and non-add atomics are explicitly not supported. OFF preserves vanilla 1.7.4 behaviour. |
 | `TI_KERNEL_PROFILER_MAX_RECORDS` | `1`–`1048576` | `131072` | In-process raw-record budget for the kernel profiler. Reaching it reports a clear error instead of growing further. Long sessions should call `ti.profiler.clear_kernel_profiler_info()` periodically; raise the limit only after budgeting host memory. |
 
@@ -222,4 +222,5 @@ These are not user-tunable; they ship enabled by default. Listed for visibility 
 ## 9. See also
 
 - Sparse SNode on Vulkan user guide: [sparse_snode_on_vulkan.en.md](sparse_snode_on_vulkan.en.md)
+- Sparse layout selection guide: [sparse_layout_selection.en.md](sparse_layout_selection.en.md)
 - Hash SNode user guide: [hash_snode.en.md](hash_snode.en.md)

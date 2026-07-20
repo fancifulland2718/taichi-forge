@@ -5,6 +5,8 @@ sidebar_position: 2
 # Sparse Matrix
 
 Sparse matrices are frequently involved in solving linear systems in science and engineering. Taichi provides sparse matrix APIs on the CPU, CUDA, and Vulkan backends, with backend- and format-specific capabilities described below.
+For the consolidated Forge backend/format matrix and lifecycle rules, see the bilingual
+[Sparse runtime and linear algebra guide](../../../forge/sparse_runtime_and_linear_algebra.en.md).
 
 To assemble a scalar CSR matrix from triplets, follow these three steps:
 

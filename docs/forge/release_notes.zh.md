@@ -12,7 +12,7 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [未发布](#未发布) | 已发布 0.5.0 runtime 边界之后的当前源码 | 当前 `master` | driver-only CUDA primitive、宿主内存/生命周期有界化与 TODO 合同补全 |
+| [未发布](#未发布) | 已发布 0.5.0 runtime 边界之后的当前源码 | 当前 `master` | 稀疏 runtime/线性代数、driver-only CUDA primitive、宿主内存/生命周期有界化与 TODO 合同补全 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
 | [0.1.1](#011) | 历史源码版本；发行文件可能已移除 | `c771969781` | `taichi_forge` import 重命名与安装布局修复 |
 | [0.1.2](#012) | 历史源码版本；发行文件可能已移除 | `fe5844390b` | import 修复与 CUDA 构建选项 |
@@ -39,6 +39,40 @@
 ## 未发布
 
 以下内容晚于已发布的 0.5.0 runtime 源码边界，不会追溯写成 0.5.0 产物行为：
+
+- Offline-cache metadata lock 改为由打开文件句柄持有的操作系统 advisory lock。进程
+  终止会自动释放所有权，因此持久 `.lock` 文件不再导致反复的 load/dump 警告，也不再
+  要求删除已编译 cache 状态。
+
+### 稀疏 runtime 与线性代数现代化
+
+- 通过按需增长 active-list metadata、自适应 traversal-list chunk、独立 ambient
+  allocation、有界 traversal/recycle budget 和正确保留 non-contiguous SNode slot，
+  降低 sparse runtime 固定开销。CPU listgen 使用并行执行，稳定拓扑可复用生成的
+  list；CUDA 合并重复 activation；Vulkan 对常驻 traversal list 设置上界。
+- 增加 CPU、CUDA、Vulkan 上经过验证的 scalar sparse assembly。builder insertion
+  有明确上界，CUDA/Vulkan transactional 地发布完整 CSR generation；unsupported
+  format 明确失败，matrix ownership 在 `ti.reset()` 时保持安全。
+- 增加 immutable `SparsePattern.csr()` 与
+  `SparsePattern.bsr()`。多个 matrix 共享 canonical indices，各自持有独立 numeric
+  buffer；`update_values()` 不重建 topology，只替换 values。BSR 支持 2、3、6、12
+  block size 和 rectangular SpMV operator。CPU values 支持 `f32/f64`，
+  CUDA/Vulkan fixed storage 使用 `f32`。
+- 扩展 `SparseCG`：增加 relative tolerance、显式 scalar Jacobi、fixed CPU
+  CSR/BSR 和 fixed CUDA BSR provider。fixed provider 复用 solve workspace，并在
+  value update 后只自动刷新 numeric Jacobi/block-Jacobi state。
+- 增加 CPU `SparseMINRES`，用于完整显式对称不定 CSR/BSR；增加 CPU
+  `SparseBiCGSTAB`，用于非对称 CSR/BSR。迭代 solver 根据真实残差合同
+  `||b-Ax|| <= max(atol, rtol*||b||)` 报告收敛；CUDA/Vulkan stored MINRES 和
+  BiCGSTAB 仍不支持。
+- 强化 direct solver symbolic reuse：只有完整 compressed index pattern 相同，
+  `factorize()` 才能复用已分析 pattern；factorization 后更新 values 会使分解
+  stale，必须刷新后才能 solve。stable-fluid example 固定 pressure gauge，implicit
+  mass-spring example 跨 value-only step 复用 symbolic analysis。
+- 完整用户流程、特性、backend/format/dtype 矩阵、失败语义和生命周期规则见
+  [稀疏 runtime 与线性代数](sparse_runtime_and_linear_algebra.zh.md)，并可参考
+  [稀疏布局选择指南](sparse_layout_selection.zh.md)与
+  [物理稀疏 solver 选择指南](physics_sparse_solver_selection.zh.md)。
 
 - 将 CUDA native primitive 的自动调度切换到 Forge 自有 driver-only provider，覆盖诊断、
   scan/reduce/histogram、组合 primitive 与 stable radix sort。标准 runtime 不再链接或

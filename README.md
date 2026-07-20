@@ -90,9 +90,17 @@ English public docs are grouped by use case:
 
 ### Data structures and display
 
+- [Choosing a sparse layout](docs/forge/sparse_layout_selection.en.md)
 - [Vulkan sparse SNode](docs/forge/sparse_snode_on_vulkan.en.md)
 - [Hash SNode](docs/forge/hash_snode.en.md)
 - [Display frame submission](docs/forge/display_frame.en.md)
+
+### Physics and linear algebra
+
+- [Sparse runtime and linear algebra: API, backend matrix, and lifecycle](docs/forge/sparse_runtime_and_linear_algebra.en.md)
+- [Choosing sparse operators and solvers for physics workloads](docs/forge/physics_sparse_solver_selection.en.md)
+- [Linear solvers](docs/lang/articles/math/linear_solver.md)
+- [Sparse matrices and fixed patterns](docs/lang/articles/math/sparse_matrix.md)
 
 ### Compilation, packaging, and platforms
 

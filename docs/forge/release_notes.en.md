@@ -15,7 +15,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | current source after the published 0.5.0 runtime boundary | current `master` | driver-only CUDA primitives, bounded host-memory/lifetimes, and TODO contract completion |
+| [Unreleased](#unreleased) | current source after the published 0.5.0 runtime boundary | current `master` | sparse runtime/linear algebra, driver-only CUDA primitives, bounded host-memory/lifetimes, and TODO contract completion |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |
 | [0.1.2](#012) | historical source release; artifact may be removed | `fe5844390b` | import fixes and CUDA build option |
@@ -43,6 +43,49 @@ grouped under the behavior they shipped.
 
 These changes are after the published 0.5.0 runtime source boundary and are not
 retroactively attributed to the 0.5.0 artifact:
+
+- Offline-cache metadata locks now use operating-system advisory locks held by
+  an open file handle. Process termination releases ownership automatically, so
+  a persistent `.lock` file no longer causes repeated load/dump warnings or
+  requires deleting compiled cache state.
+
+### Sparse runtime and linear algebra modernization
+
+- Reduced fixed sparse-runtime overhead with on-demand active-list metadata,
+  adaptive traversal-list chunks, separate ambient allocation, bounded
+  traversal/recycle budgets, and correct non-contiguous SNode slots. CPU list
+  generation is parallel and stable sparse topologies reuse generated lists;
+  CUDA coalesces duplicate activation; Vulkan bounds resident traversal lists.
+- Added validated scalar sparse assembly on CPU, CUDA, and Vulkan. Builder
+  insertion is bounded, CUDA/Vulkan assembly publishes a completed CSR
+  generation transactionally, unsupported formats fail explicitly, and matrix
+  ownership is safe across `ti.reset()`.
+- Added immutable `SparsePattern.csr()` and
+  `SparsePattern.bsr()` storage. Multiple matrices share canonical indices
+  while owning independent numeric buffers; `update_values()` replaces values
+  without rebuilding topology. BSR supports block sizes 2, 3, 6, and 12, plus
+  rectangular SpMV operators. CPU values support `f32/f64`;
+  CUDA/Vulkan fixed storage uses `f32`.
+- Extended `SparseCG` with relative tolerance, explicit scalar Jacobi,
+  fixed CPU CSR/BSR, and fixed CUDA BSR providers. Fixed providers reuse solve
+  workspace and automatically refresh only numeric Jacobi/block-Jacobi state
+  after a value update.
+- Added CPU `SparseMINRES` for complete symmetric-indefinite
+  CSR/BSR systems and CPU `SparseBiCGSTAB` for nonsymmetric CSR/BSR systems.
+  Iterative solvers report convergence from the true residual contract
+  `||b-Ax|| <= max(atol, rtol*||b||)`; CUDA/Vulkan stored MINRES and
+  BiCGSTAB remain unsupported.
+- Hardened direct-solver symbolic reuse. `factorize()` may reuse an analyzed
+  pattern only when the complete compressed index pattern is identical, and a
+  value update after factorization makes the factorization stale until it is
+  refreshed. The stable-fluid example pins its pressure gauge, and the
+  implicit mass-spring example now reuses symbolic analysis across value-only
+  steps.
+- The user workflow, feature set, backend/format/dtype matrix, failure
+  semantics, and lifecycle rules are documented in
+  [Sparse runtime and linear algebra](sparse_runtime_and_linear_algebra.en.md).
+  See also [layout selection](sparse_layout_selection.en.md) and
+  [physics solver selection](physics_sparse_solver_selection.en.md).
 
 - Replaced automatic CUDA native-primitive dispatch with Forge-owned,
   driver-only providers for diagnostics, scan/reduce/histogram, composite

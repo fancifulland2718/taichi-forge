@@ -38,7 +38,7 @@ ti.root.hash(ti.ij, (4096, 4096), expected_active=8192).place(x)
 | 参数 | 含义 |
 |---|---|
 | `expected_active=N` | 推荐写法。Table 大小由 `ceil(N / hash_load_factor)` 推出，再向上取到 2 的幂。 |
-| `max_active=N` | `expected_active` 的兼容别名。新代码建议使用 `expected_active`。 |
+| `max_active=N` | `expected_active` 的兼容别名，会推导出相同 table slots，并不是活跃 entry 的硬上限。新代码建议使用 `expected_active`。 |
 | `capacity=N` | 显式 table slot 数。会向上取到 2 的幂。 |
 
 可选参数：
@@ -50,6 +50,8 @@ ti.root.hash(ti.ij, (4096, 4096), expected_active=8192).place(x)
 规则：
 
 - 必须在 `expected_active`、`max_active`、`capacity` 中恰好选择一个。
+- `expected_active` 及其 `max_active` 别名都是调尺输入；真正的物理硬边界是
+  推导出的 2 的幂 table slot 数。
 - 逻辑坐标域乘积必须落在 32-bit signed 范围内。
 - 显式 `capacity` 可能被向上取整到 2 的幂。
 - 如果 `expected_active` 大于逻辑域大小，SNode 仍合法，但会浪费 table slot。
@@ -221,5 +223,6 @@ Hash SNode 应被视为实验性的稀疏存储工具，而不是通用 GPU hash
 
 ## 9. 参见
 
+- 稀疏布局选择指南：[sparse_layout_selection.zh.md](sparse_layout_selection.zh.md)
 - Forge 选项总览：[forge_options.zh.md](forge_options.zh.md)
 - Vulkan 稀疏 SNode 指南：[sparse_snode_on_vulkan.zh.md](sparse_snode_on_vulkan.zh.md)
