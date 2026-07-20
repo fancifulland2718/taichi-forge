@@ -18,6 +18,7 @@ namespace taichi::lang {
 
 class SparseJacobiPreconditionerPlan;
 class SparseBlockJacobiPreconditionerPlan;
+class CompiledKernelPreconditionerPlan;
 
 enum class SparseSolveStatus : int {
   kNotRun = -1,
@@ -377,6 +378,13 @@ class CUCG {
        float absolute_tolerance,
        bool verbose,
        float relative_tolerance = 0.0f);
+  CUCG(Program *program,
+       CompiledKernelLinearOperator &A,
+       CompiledKernelPreconditionerPlan *preconditioner,
+       int max_iters,
+       float absolute_tolerance,
+       bool verbose,
+       float relative_tolerance = 0.0f);
 
   ~CUCG();
 
@@ -414,18 +422,28 @@ class CUCG {
  private:
   void init_solver();
   void validate_controls() const;
-  void ensure_workspace(int size);
+  void ensure_workspace(Program *program, int size);
   void release_workspace();
   bool has_preconditioner() const;
   void validate_preconditioner(Program *program) const;
-  void apply_preconditioner(Program *program, float *input, float *output);
-  void apply_operator(std::uintptr_t input, std::uintptr_t output);
+  void apply_preconditioner(Program *program,
+                            float *input,
+                            float *output,
+                            const Ndarray *input_array,
+                            const Ndarray *output_array);
+  void apply_operator(Program *program,
+                      std::uintptr_t input,
+                      std::uintptr_t output,
+                      const Ndarray *input_array,
+                      const Ndarray *output_array);
 
   cublasHandle_t handle_{nullptr};
   Program *program_{nullptr};
   SparseMatrix &A_;
   SparseJacobiPreconditionerPlan *preconditioner_{nullptr};
   SparseBlockJacobiPreconditionerPlan *block_preconditioner_{nullptr};
+  CompiledKernelLinearOperator *compiled_kernel_operator_{nullptr};
+  CompiledKernelPreconditionerPlan *compiled_kernel_preconditioner_{nullptr};
   int max_iters_{0};
   float absolute_tolerance_{0.0f};
   float relative_tolerance_{0.0f};
@@ -441,6 +459,10 @@ class CUCG {
   float *workspace_r_{nullptr};
   float *workspace_p_{nullptr};
   float *workspace_z_{nullptr};
+  Ndarray *workspace_ax_ndarray_{nullptr};
+  Ndarray *workspace_r_ndarray_{nullptr};
+  Ndarray *workspace_p_ndarray_{nullptr};
+  Ndarray *workspace_z_ndarray_{nullptr};
   int workspace_size_{0};
   std::uint64_t solve_calls_{0};
   std::uint64_t total_iterations_{0};
@@ -473,6 +495,23 @@ std::unique_ptr<CUCG> make_cuda_block_jacobi_pcg_solver(
     Program *program,
     SparseMatrix &A,
     SparseBlockJacobiPreconditionerPlan &preconditioner,
+    int max_iters,
+    float absolute_tolerance,
+    bool verbose,
+    float relative_tolerance = 0.0f);
+
+std::unique_ptr<CUCG> make_cuda_compiled_kernel_cg_solver(
+    Program *program,
+    CompiledKernelLinearOperator &A,
+    int max_iters,
+    float absolute_tolerance,
+    bool verbose,
+    float relative_tolerance = 0.0f);
+
+std::unique_ptr<CUCG> make_cuda_compiled_kernel_pcg_solver(
+    Program *program,
+    CompiledKernelLinearOperator &A,
+    CompiledKernelPreconditionerPlan &preconditioner,
     int max_iters,
     float absolute_tolerance,
     bool verbose,
@@ -616,6 +655,16 @@ class VulkanCGIterationPlan {
       SparseBlockJacobiPreconditionerPlan &preconditioner,
       int max_iterations,
       float absolute_tolerance);
+  VulkanCGIterationPlan(Program *program,
+                        CompiledKernelLinearOperator &matrix,
+                        int max_iterations,
+                        float absolute_tolerance);
+  VulkanCGIterationPlan(
+      Program *program,
+      CompiledKernelLinearOperator &matrix,
+      CompiledKernelPreconditionerPlan &preconditioner,
+      int max_iterations,
+      float absolute_tolerance);
   ~VulkanCGIterationPlan();
 
   void solve(Program *program, const Ndarray &x, const Ndarray &b);
@@ -655,9 +704,12 @@ class VulkanCGIterationPlan {
                         int max_iterations,
                         float absolute_tolerance,
                         bool adaptive,
+                        bool allow_compiled_kernel_operator,
                         SparseJacobiPreconditionerPlan *preconditioner,
                         SparseBlockJacobiPreconditionerPlan
-                            *block_preconditioner);
+                            *block_preconditioner,
+                        CompiledKernelPreconditionerPlan
+                            *compiled_kernel_preconditioner);
   bool has_preconditioner() const;
   void validate_preconditioner(Program *program) const;
   void apply_preconditioner(Program *program,
@@ -674,9 +726,11 @@ class VulkanCGIterationPlan {
   VulkanSparseBsrMatrix *bsr_matrix_{nullptr};
   SparseJacobiPreconditionerPlan *preconditioner_{nullptr};
   SparseBlockJacobiPreconditionerPlan *block_preconditioner_{nullptr};
+  CompiledKernelPreconditionerPlan *compiled_kernel_preconditioner_{nullptr};
   int fixed_iterations_{0};
   float absolute_tolerance_{0.0f};
   bool adaptive_{false};
+  bool compiled_kernel_operator_{false};
   Ndarray *ap_{nullptr};
   Ndarray *residual_{nullptr};
   Ndarray *direction_{nullptr};
@@ -738,6 +792,21 @@ make_vulkan_block_jacobi_pcg_convergence_plan(
     Program *program,
     SparseMatrix &matrix,
     SparseBlockJacobiPreconditionerPlan &preconditioner,
+    int max_iterations,
+    float absolute_tolerance);
+
+std::unique_ptr<VulkanCGIterationPlan>
+make_vulkan_compiled_kernel_cg_convergence_plan(
+    Program *program,
+    CompiledKernelLinearOperator &matrix,
+    int max_iterations,
+    float absolute_tolerance);
+
+std::unique_ptr<VulkanCGIterationPlan>
+make_vulkan_compiled_kernel_pcg_convergence_plan(
+    Program *program,
+    CompiledKernelLinearOperator &matrix,
+    CompiledKernelPreconditionerPlan &preconditioner,
     int max_iterations,
     float absolute_tolerance);
 }  // namespace taichi::lang

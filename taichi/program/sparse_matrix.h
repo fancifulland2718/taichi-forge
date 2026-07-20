@@ -23,6 +23,9 @@ std::uint64_t allocate_sparse_matrix_id();
 
 class CudaSparseAssemblyPlan;
 class VulkanSparseAssemblyPlan;
+class Kernel;
+class CompiledKernelData;
+class LaunchContextBuilder;
 
 // Private diagnostic inventory for the algebraic sparse operator boundary.
 // Persistent matrix/SpMV resources are operator-owned; input/output ndarrays
@@ -201,10 +204,25 @@ class SparseMatrix {
     TI_NOT_IMPLEMENTED;
     return 0;
   }
+  // Internal ndarray operator hook shared by fixed and matrix-free providers.
+  // Unsupported matrix types retain the default hard failure.
+  virtual void nd_spmv(Program *prog,
+                       const Ndarray &x,
+                       const Ndarray &y) {
+    TI_NOT_IMPLEMENTED;
+  }
   virtual void update_values(Program *prog, const Ndarray &values) {
     TI_NOT_IMPLEMENTED;
   }
   virtual SparseMatrixRuntimeStatistics debug_runtime_statistics() const;
+
+  // Fixed-pattern applies, value refreshes, preconditioner refreshes and
+  // Krylov solves share one recursive transaction gate. A solve may retain
+  // one numeric snapshot while nested operator applies reacquire the gate.
+  using NumericAccessGuard = std::unique_lock<std::recursive_mutex>;
+  NumericAccessGuard acquire_numeric_access_guard() const {
+    return NumericAccessGuard(numeric_access_mutex_);
+  }
 
   // Assembly helpers use direct backend copies which do not flow through a
   // Program launch. Attribute those bytes to the resulting operator here.
@@ -276,6 +294,7 @@ class SparseMatrix {
   DataType dtype_{PrimitiveType::f32};
 
  private:
+  mutable std::recursive_mutex numeric_access_mutex_;
   const std::uint64_t matrix_id_{allocate_sparse_matrix_id()};
   std::atomic<std::uint64_t> pattern_version_{0};
   std::atomic<std::uint64_t> numeric_version_{0};
@@ -292,6 +311,69 @@ class SparseMatrix {
   std::atomic<std::uint64_t> host_to_device_bytes_{0};
   std::atomic<std::uint64_t> device_to_host_bytes_{0};
   std::atomic<std::uint64_t> device_to_device_bytes_{0};
+};
+
+// Internal shell-style ndarray operator backed by one Program-owned compiled
+// Taichi kernel. The operator snapshots immutable topology data and may own a
+// separately versioned numeric snapshot for value-only updates. Public sparse
+// capabilities stay disabled until a solver explicitly accepts this provider
+// contract.
+class CompiledKernelLinearOperator final : public SparseMatrix {
+ public:
+  CompiledKernelLinearOperator(Program *program,
+                               Kernel &kernel,
+                               int size,
+                               std::uint64_t topology_version,
+                               std::uint64_t numeric_version,
+                               const Ndarray &operator_data);
+  CompiledKernelLinearOperator(Program *program,
+                               Kernel &kernel,
+                               int size,
+                               std::uint64_t topology_version,
+                               std::uint64_t numeric_version,
+                               const Ndarray &topology_data,
+                               const Ndarray &numeric_data);
+  ~CompiledKernelLinearOperator() override;
+
+  void nd_spmv(Program *program,
+               const Ndarray &input,
+               const Ndarray &output) override;
+  void update_numeric_data(Program *program,
+                           const Ndarray &numeric_data,
+                           std::uint64_t expected_topology_version,
+                           std::uint64_t expected_numeric_version);
+  SparseMatrixRuntimeStatistics debug_runtime_statistics() const override;
+
+  Program *owning_program() const {
+    return program_;
+  }
+
+  int num_nonzero() const override {
+    return 0;
+  }
+
+ private:
+  CompiledKernelLinearOperator(Program *program,
+                               Kernel &kernel,
+                               int size,
+                               std::uint64_t topology_version,
+                               std::uint64_t numeric_version,
+                               const Ndarray &topology_data,
+                               const Ndarray *numeric_data);
+
+  Program *program_{nullptr};
+  Kernel *kernel_{nullptr};
+  const CompiledKernelData *compiled_kernel_{nullptr};
+  Ndarray *topology_data_{nullptr};
+  Ndarray *numeric_data_{nullptr};
+  std::unique_ptr<LaunchContextBuilder> launch_context_;
+  std::uint64_t topology_data_bytes_{0};
+  std::uint64_t numeric_data_bytes_{0};
+  std::size_t input_arg_index_{2};
+  std::size_t output_arg_index_{3};
+  std::uint64_t topology_version_{0};
+  std::uint64_t numeric_version_{0};
+  mutable std::mutex spmv_mutex_;
 };
 
 // Backend-neutral immutable sparse topology. Concrete providers may keep

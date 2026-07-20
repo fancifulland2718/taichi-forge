@@ -1336,4 +1336,143 @@ make_sparse_block_jacobi_preconditioner_plan(Program *program,
                                                                matrix);
 }
 
+CompiledKernelPreconditionerPlan::CompiledKernelPreconditionerPlan(
+    Program *program,
+    CompiledKernelLinearOperator &target_operator,
+    CompiledKernelLinearOperator &inverse_apply_operator,
+    bool assume_symmetric_positive_definite) {
+  TI_ERROR_IF(!program || !assume_symmetric_positive_definite,
+              "Compiled-kernel preconditioners require an owning Program "
+              "and an explicit symmetric-positive-definite contract.");
+  TI_ERROR_IF(&target_operator == &inverse_apply_operator,
+              "Compiled-kernel preconditioners require a distinct "
+              "inverse-apply operator.");
+  TI_ERROR_IF(target_operator.owning_program() != program ||
+                  inverse_apply_operator.owning_program() != program,
+              "Compiled-kernel preconditioner operators must belong to the "
+              "same Program.");
+  TI_ERROR_IF(target_operator.num_rows() != inverse_apply_operator.num_rows() ||
+                  target_operator.num_cols() !=
+                      inverse_apply_operator.num_cols() ||
+                  target_operator.get_data_type() != PrimitiveType::f32 ||
+                  inverse_apply_operator.get_data_type() !=
+                      PrimitiveType::f32,
+              "Compiled-kernel preconditioners require matching non-empty "
+              "square f32 target and inverse-apply operators.");
+
+  auto target_guard = target_operator.acquire_numeric_access_guard();
+  auto inverse_guard = inverse_apply_operator.acquire_numeric_access_guard();
+  const auto target_stats = target_operator.debug_runtime_statistics();
+  const auto inverse_stats = inverse_apply_operator.debug_runtime_statistics();
+  program_ = program;
+  target_operator_ = &target_operator;
+  inverse_apply_operator_ = &inverse_apply_operator;
+  target_pattern_version_at_build_ = target_stats.pattern_version;
+  target_numeric_version_at_build_ = target_stats.numeric_version;
+  inverse_pattern_version_at_build_ = inverse_stats.pattern_version;
+  inverse_numeric_version_at_build_ = inverse_stats.numeric_version;
+}
+
+void CompiledKernelPreconditionerPlan::validate_compatible_locked(
+    Program *program,
+    const CompiledKernelLinearOperator &target_operator) const {
+  TI_ERROR_IF(program != program_ || &target_operator != target_operator_,
+              "Compiled-kernel preconditioner must be used with its "
+              "construction Program and target operator.");
+  const auto target_stats = target_operator_->debug_runtime_statistics();
+  const auto inverse_stats =
+      inverse_apply_operator_->debug_runtime_statistics();
+  TI_ERROR_IF(
+      target_stats.pattern_version != target_pattern_version_at_build_ ||
+          target_stats.numeric_version != target_numeric_version_at_build_ ||
+          inverse_stats.pattern_version != inverse_pattern_version_at_build_ ||
+          inverse_stats.numeric_version != inverse_numeric_version_at_build_,
+      "Compiled-kernel preconditioner is stale: target version changed from "
+      "({}, {}) to ({}, {}) or inverse-apply version changed from ({}, {}) "
+      "to ({}, {}); rebuild the preconditioner plan.",
+      target_pattern_version_at_build_, target_numeric_version_at_build_,
+      target_stats.pattern_version, target_stats.numeric_version,
+      inverse_pattern_version_at_build_, inverse_numeric_version_at_build_,
+      inverse_stats.pattern_version, inverse_stats.numeric_version);
+}
+
+void CompiledKernelPreconditionerPlan::validate_compatible(
+    Program *program,
+    const CompiledKernelLinearOperator &target_operator) const {
+  auto target_guard = target_operator_->acquire_numeric_access_guard();
+  auto inverse_guard = inverse_apply_operator_->acquire_numeric_access_guard();
+  std::lock_guard<std::mutex> lock(apply_mutex_);
+  validate_compatible_locked(program, target_operator);
+}
+
+void CompiledKernelPreconditionerPlan::apply(
+    Program *program,
+    const CompiledKernelLinearOperator &target_operator,
+    const Ndarray &input,
+    const Ndarray &output) {
+  auto target_guard = target_operator_->acquire_numeric_access_guard();
+  auto inverse_guard = inverse_apply_operator_->acquire_numeric_access_guard();
+  std::lock_guard<std::mutex> lock(apply_mutex_);
+  validate_compatible_locked(program, target_operator);
+  inverse_apply_operator_->nd_spmv(program, input, output);
+  apply_calls_++;
+}
+
+SparseMatrix::NumericAccessGuard
+CompiledKernelPreconditionerPlan::acquire_numeric_access_guard() const {
+  return inverse_apply_operator_->acquire_numeric_access_guard();
+}
+
+SparsePreconditionerPlanRuntimeStatistics
+CompiledKernelPreconditionerPlan::debug_runtime_statistics() const {
+  auto target_guard = target_operator_->acquire_numeric_access_guard();
+  auto inverse_guard = inverse_apply_operator_->acquire_numeric_access_guard();
+  std::lock_guard<std::mutex> lock(apply_mutex_);
+  const auto target_stats = target_operator_->debug_runtime_statistics();
+  const auto inverse_stats =
+      inverse_apply_operator_->debug_runtime_statistics();
+  SparsePreconditionerPlanRuntimeStatistics result;
+  result.backend_family = target_stats.backend_family;
+  result.method = "compiled_kernel_inverse_apply";
+  result.dtype = "f32";
+  result.rows = target_operator_->num_rows();
+  result.operator_pattern_version_at_build =
+      target_pattern_version_at_build_;
+  result.operator_numeric_version_at_build =
+      target_numeric_version_at_build_;
+  result.operator_pattern_version_current = target_stats.pattern_version;
+  result.operator_numeric_version_current = target_stats.numeric_version;
+  result.operator_stale =
+      target_stats.pattern_version != target_pattern_version_at_build_ ||
+      target_stats.numeric_version != target_numeric_version_at_build_;
+  result.preconditioner_pattern_version_at_build =
+      inverse_pattern_version_at_build_;
+  result.preconditioner_numeric_version_at_build =
+      inverse_numeric_version_at_build_;
+  result.preconditioner_pattern_version_current =
+      inverse_stats.pattern_version;
+  result.preconditioner_numeric_version_current =
+      inverse_stats.numeric_version;
+  result.preconditioner_stale =
+      inverse_stats.pattern_version != inverse_pattern_version_at_build_ ||
+      inverse_stats.numeric_version != inverse_numeric_version_at_build_;
+  result.apply_calls = apply_calls_;
+  result.persistent_inverse_count = 0;
+  result.persistent_inverse_reserved_bytes = 0;
+  result.numeric_refresh_supported = false;
+  result.in_place_apply_supported = false;
+  return result;
+}
+
+std::unique_ptr<CompiledKernelPreconditionerPlan>
+make_compiled_kernel_preconditioner_plan(
+    Program *program,
+    CompiledKernelLinearOperator &target_operator,
+    CompiledKernelLinearOperator &inverse_apply_operator,
+    bool assume_symmetric_positive_definite) {
+  return std::make_unique<CompiledKernelPreconditionerPlan>(
+      program, target_operator, inverse_apply_operator,
+      assume_symmetric_positive_definite);
+}
+
 }  // namespace taichi::lang

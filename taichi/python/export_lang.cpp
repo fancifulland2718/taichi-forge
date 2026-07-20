@@ -1171,6 +1171,27 @@ void export_lang(py::module &m) {
                  program, rows, cols, row_offsets, column_indices);
            },
            py::keep_alive<0, 1>())
+      .def("_create_compiled_kernel_linear_operator",
+           [](Program *program, Kernel &kernel, int size,
+              std::uint64_t topology_version,
+              std::uint64_t numeric_version,
+              const Ndarray &operator_data) -> std::unique_ptr<SparseMatrix> {
+             return std::make_unique<CompiledKernelLinearOperator>(
+                 program, kernel, size, topology_version, numeric_version,
+                 operator_data);
+           },
+           py::keep_alive<0, 1>())
+      .def("_create_compiled_kernel_linear_operator_with_numeric_data",
+           [](Program *program, Kernel &kernel, int size,
+              std::uint64_t topology_version,
+              std::uint64_t numeric_version,
+              const Ndarray &topology_data,
+              const Ndarray &numeric_data) -> std::unique_ptr<SparseMatrix> {
+             return std::make_unique<CompiledKernelLinearOperator>(
+                 program, kernel, size, topology_version, numeric_version,
+                 topology_data, numeric_data);
+           },
+           py::keep_alive<0, 1>())
       .def("_create_csr_matrix_from_pattern",
            [](Program *program, std::shared_ptr<SparseCsrPattern> pattern,
               const Ndarray &values) -> std::unique_ptr<SparseMatrix> {
@@ -4429,6 +4450,12 @@ void export_lang(py::module &m) {
   py::class_<CpuSparseBsrMatrix, SparseMatrix>(m, "CpuSparseBsrMatrix")
       .def("spmv", &CpuSparseBsrMatrix::nd_spmv);
 
+  py::class_<CompiledKernelLinearOperator, SparseMatrix>(
+      m, "CompiledKernelLinearOperator")
+      .def("spmv", &CompiledKernelLinearOperator::nd_spmv)
+      .def("update_numeric_data",
+           &CompiledKernelLinearOperator::update_numeric_data);
+
   py::class_<CuSparseMatrix, SparseMatrix>(m, "CuSparseMatrix")
       .def(py::init<int, int, DataType>())
       .def(py::init<const CuSparseMatrix &>())
@@ -4837,6 +4864,15 @@ void export_lang(py::module &m) {
         identity["operator_numeric_version_current"] =
             stats.operator_numeric_version_current;
         identity["operator_stale"] = stats.operator_stale;
+        identity["preconditioner_pattern_version_at_build"] =
+            stats.preconditioner_pattern_version_at_build;
+        identity["preconditioner_numeric_version_at_build"] =
+            stats.preconditioner_numeric_version_at_build;
+        identity["preconditioner_pattern_version_current"] =
+            stats.preconditioner_pattern_version_current;
+        identity["preconditioner_numeric_version_current"] =
+            stats.preconditioner_numeric_version_current;
+        identity["preconditioner_stale"] = stats.preconditioner_stale;
 
         py::dict operations;
         operations["apply_calls"] = stats.apply_calls;
@@ -4858,9 +4894,15 @@ void export_lang(py::module &m) {
             stats.refresh_peak_temporary_host_bytes;
         resources["refresh_peak_temporary_device_bytes"] =
             stats.refresh_peak_temporary_device_bytes;
-        resources["ownership_scope"] = "preconditioner_inverse";
+        const bool external_inverse_operator =
+            stats.method == "compiled_kernel_inverse_apply";
+        resources["ownership_scope"] =
+            external_inverse_operator ? "external_inverse_operator"
+                                      : "preconditioner_inverse";
         resources["excluded"] =
-            "operator_input_output_and_program_shared_cache";
+            external_inverse_operator
+                ? "target_inverse_operators_input_output_and_program_shared_cache"
+                : "operator_input_output_and_program_shared_cache";
 
         py::dict transfers;
         transfers["construction_device_to_host_bytes"] =
@@ -4928,6 +4970,21 @@ void export_lang(py::module &m) {
   m.def("_make_sparse_block_jacobi_preconditioner_plan",
         make_sparse_block_jacobi_preconditioner_plan,
         py::keep_alive<0, 1>(), py::keep_alive<0, 2>());
+  py::class_<CompiledKernelPreconditionerPlan>(
+      m, "CompiledKernelPreconditionerPlan")
+      .def("apply", &CompiledKernelPreconditionerPlan::apply)
+      .def("_debug_runtime_stats",
+           [sparse_preconditioner_stats_to_dict](
+               const CompiledKernelPreconditionerPlan &plan) {
+             return sparse_preconditioner_stats_to_dict(
+                 plan.debug_runtime_statistics());
+           });
+  m.def("_make_compiled_kernel_preconditioner_plan",
+        make_compiled_kernel_preconditioner_plan,
+        py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+        py::keep_alive<0, 3>(), py::arg("program"),
+        py::arg("target_operator"), py::arg("inverse_apply_operator"),
+        py::arg("assume_symmetric_positive_definite"));
   py::class_<CG<Eigen::VectorXf, float>>(m, "CGf")
       .def(py::init<SparseMatrix &, int, float, bool>())
       .def("solve", &CG<Eigen::VectorXf, float>::solve)
@@ -5359,6 +5416,21 @@ void export_lang(py::module &m) {
       py::arg("preconditioner"), py::arg("max_iterations"),
       py::arg("absolute_tolerance"), py::arg("verbose"),
       py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_cuda_compiled_kernel_cg_solver",
+      make_cuda_compiled_kernel_cg_solver,
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("matrix"),
+      py::arg("max_iterations"), py::arg("absolute_tolerance"),
+      py::arg("verbose"), py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_cuda_compiled_kernel_pcg_solver",
+      make_cuda_compiled_kernel_pcg_solver,
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("matrix"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("verbose"),
+      py::arg("relative_tolerance") = 0.0f);
 
   py::class_<CpuSparseCGPlan>(m, "CpuSparseCGPlan")
       .def("solve", &CpuSparseCGPlan::solve)
@@ -5439,6 +5511,13 @@ void export_lang(py::module &m) {
         py::keep_alive<0, 3>());
   m.def("_make_vulkan_block_jacobi_pcg_convergence_plan",
         make_vulkan_block_jacobi_pcg_convergence_plan,
+        py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+        py::keep_alive<0, 3>());
+  m.def("_make_vulkan_compiled_kernel_cg_convergence_plan",
+        make_vulkan_compiled_kernel_cg_convergence_plan,
+        py::keep_alive<0, 1>(), py::keep_alive<0, 2>());
+  m.def("_make_vulkan_compiled_kernel_pcg_convergence_plan",
+        make_vulkan_compiled_kernel_pcg_convergence_plan,
         py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
         py::keep_alive<0, 3>());
 

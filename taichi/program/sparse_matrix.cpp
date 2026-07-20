@@ -13,6 +13,8 @@
 
 #include "Eigen/Dense"
 #include "Eigen/SparseLU"
+#include "taichi/ir/type_factory.h"
+#include "taichi/program/kernel.h"
 
 #define BUILD(TYPE)                                                         \
   {                                                                         \
@@ -185,6 +187,302 @@ void SparseMatrix::record_dense_vector_descriptor_creation(bool rebind) {
 
 void SparseMatrix::record_spmv_workspace_allocation() {
   spmv_workspace_allocations_.fetch_add(1, std::memory_order_relaxed);
+}
+
+namespace {
+
+bool is_scalar_kernel_parameter(const CallableBase::Parameter &parameter,
+                                DataType dtype) {
+  return parameter.ptype == ParameterType::kScalar &&
+         !parameter.is_array && parameter.get_dtype() == dtype;
+}
+
+bool is_scalar_ndarray_kernel_parameter(
+    const CallableBase::Parameter &parameter,
+    DataType dtype,
+    std::size_t dimensions) {
+  const DataType expected_type(
+      TypeFactory::get_instance().get_ndarray_struct_type(
+          dtype, static_cast<int>(dimensions), false));
+  return parameter.ptype == ParameterType::kNdarray && parameter.is_array &&
+         !parameter.needs_grad && parameter.get_dtype() == expected_type &&
+         parameter.get_element_shape().empty() &&
+         parameter.total_dim == dimensions;
+}
+
+std::string compiled_operator_backend_family(Arch arch) {
+  if (arch_is_cpu(arch)) {
+    return "cpu";
+  }
+  if (arch_is_cuda(arch)) {
+    return "cuda";
+  }
+  if (arch == Arch::vulkan) {
+    return "vulkan";
+  }
+  return arch_name(arch);
+}
+
+void validate_compiled_operator_data(Program *program,
+                                     const Ndarray &data,
+                                     const char *role) {
+  TI_ERROR_IF(data.owning_program() != program ||
+                  !data.get_element_shape().empty() || data.shape.empty() ||
+                  data.get_nelement() == 0,
+              "Compiled-kernel linear operator {} must be a non-empty "
+              "scalar ndarray owned by the same Program.",
+              role);
+}
+
+}  // namespace
+
+CompiledKernelLinearOperator::CompiledKernelLinearOperator(
+    Program *program,
+    Kernel &kernel,
+    int size,
+    std::uint64_t topology_version,
+    std::uint64_t numeric_version,
+    const Ndarray &operator_data)
+    : CompiledKernelLinearOperator(program, kernel, size, topology_version,
+                                   numeric_version, operator_data, nullptr) {
+}
+
+CompiledKernelLinearOperator::CompiledKernelLinearOperator(
+    Program *program,
+    Kernel &kernel,
+    int size,
+    std::uint64_t topology_version,
+    std::uint64_t numeric_version,
+    const Ndarray &topology_data,
+    const Ndarray &numeric_data)
+    : CompiledKernelLinearOperator(program, kernel, size, topology_version,
+                                   numeric_version, topology_data,
+                                   &numeric_data) {
+}
+
+CompiledKernelLinearOperator::CompiledKernelLinearOperator(
+    Program *program,
+    Kernel &kernel,
+    int size,
+    std::uint64_t topology_version,
+    std::uint64_t numeric_version,
+    const Ndarray &topology_data,
+    const Ndarray *numeric_data)
+    : SparseMatrix(size, size, PrimitiveType::f32) {
+  TI_ERROR_IF(!program || size <= 0 || topology_version == 0 ||
+                  numeric_version == 0,
+              "Compiled-kernel linear operators require an owning Program, "
+              "positive size, and positive topology/numeric versions.");
+  const Arch arch = program->compile_config().arch;
+  TI_ERROR_IF(!arch_is_cpu(arch) && !arch_is_cuda(arch) &&
+                  arch != Arch::vulkan,
+              "Compiled-kernel linear operators support CPU, CUDA, and "
+              "Vulkan only; got {}. No fallback was performed.",
+              arch_name(arch));
+  TI_ERROR_IF(kernel.program != program || kernel.arch != arch,
+              "Compiled-kernel linear operator kernels must belong to the "
+              "same Program and backend.");
+  validate_compiled_operator_data(program, topology_data, "topology data");
+  if (numeric_data) {
+    validate_compiled_operator_data(program, *numeric_data, "numeric data");
+  }
+
+  const auto &parameters = kernel.parameter_list;
+  const DataType topology_dtype = topology_data.get_element_data_type();
+  const bool has_numeric_data = numeric_data != nullptr;
+  const std::size_t input_arg_index = has_numeric_data ? 3 : 2;
+  const std::size_t output_arg_index = input_arg_index + 1;
+  bool valid_abi =
+      parameters.size() == output_arg_index + 1 && kernel.rets.empty() &&
+      is_scalar_kernel_parameter(parameters[0], PrimitiveType::i32) &&
+      is_scalar_ndarray_kernel_parameter(
+          parameters[1], topology_dtype, topology_data.shape.size());
+  if (has_numeric_data) {
+    valid_abi =
+        valid_abi &&
+        is_scalar_ndarray_kernel_parameter(
+            parameters[2], numeric_data->get_element_data_type(),
+            numeric_data->shape.size());
+  }
+  valid_abi =
+      valid_abi && is_scalar_ndarray_kernel_parameter(
+                       parameters[input_arg_index], PrimitiveType::f32, 1) &&
+      is_scalar_ndarray_kernel_parameter(parameters[output_arg_index],
+                                         PrimitiveType::f32, 1);
+  if (has_numeric_data) {
+    TI_ERROR_IF(!valid_abi,
+                "Compiled-kernel linear operator ABI must be exactly "
+                "(i32 active_size, scalar topology_data ndarray, scalar "
+                "numeric_data ndarray, f32[1D] input, f32[1D] output) with "
+                "no return values.");
+  } else {
+    TI_ERROR_IF(!valid_abi,
+                "Compiled-kernel linear operator ABI must be exactly "
+                "(i32 active_size, scalar operator_data ndarray, f32[1D] "
+                "input, f32[1D] output) with no return values.");
+  }
+
+  const auto &compiled = program->compile_kernel(
+      program->compile_config(), program->get_device_caps(), kernel);
+  TI_ERROR_IF(!compiled.snode_tree_ids().empty(),
+              "Compiled-kernel linear operators must not depend on any "
+              "SNodeTree; use explicit topology/numeric ndarray arguments.");
+
+  Ndarray *owned_topology_data = nullptr;
+  Ndarray *owned_numeric_data = nullptr;
+  std::unique_ptr<LaunchContextBuilder> launch_context;
+  try {
+    owned_topology_data = program->create_ndarray(
+        topology_dtype, topology_data.shape, topology_data.layout, false);
+    program->copy_ndarray_fast(
+        owned_topology_data, const_cast<Ndarray *>(&topology_data));
+    if (has_numeric_data) {
+      owned_numeric_data = program->create_ndarray(
+          numeric_data->get_element_data_type(), numeric_data->shape,
+          numeric_data->layout, false);
+      program->copy_ndarray_fast(
+          owned_numeric_data, const_cast<Ndarray *>(numeric_data));
+    }
+    launch_context = std::make_unique<LaunchContextBuilder>(&kernel);
+    launch_context->set_arg_int({0}, size);
+    launch_context->set_arg_ndarray({1}, *owned_topology_data);
+    if (has_numeric_data) {
+      launch_context->set_arg_ndarray({2}, *owned_numeric_data);
+    }
+  } catch (...) {
+    if (owned_numeric_data) {
+      program->delete_ndarray(owned_numeric_data);
+    }
+    if (owned_topology_data) {
+      program->delete_ndarray(owned_topology_data);
+    }
+    throw;
+  }
+
+  program_ = program;
+  kernel_ = &kernel;
+  compiled_kernel_ = &compiled;
+  topology_data_ = owned_topology_data;
+  numeric_data_ = owned_numeric_data;
+  launch_context_ = std::move(launch_context);
+  topology_data_bytes_ = static_cast<std::uint64_t>(
+      topology_data.get_nelement() * topology_data.get_element_size());
+  numeric_data_bytes_ =
+      numeric_data
+          ? static_cast<std::uint64_t>(numeric_data->get_nelement() *
+                                       numeric_data->get_element_size())
+          : 0;
+  input_arg_index_ = input_arg_index;
+  output_arg_index_ = output_arg_index;
+  topology_version_ = topology_version;
+  numeric_version_ = numeric_version;
+  record_pattern_build();
+  record_spmv_plan_build();
+  record_transfer_bytes(0, 0,
+                        topology_data_bytes_ + numeric_data_bytes_);
+}
+
+CompiledKernelLinearOperator::~CompiledKernelLinearOperator() {
+  if (program_ && numeric_data_) {
+    program_->delete_ndarray(numeric_data_);
+  }
+  if (program_ && topology_data_) {
+    program_->delete_ndarray(topology_data_);
+  }
+}
+
+void CompiledKernelLinearOperator::nd_spmv(Program *program,
+                                           const Ndarray &input,
+                                           const Ndarray &output) {
+  TI_ERROR_IF(program != program_,
+              "Compiled-kernel linear operator apply requires its owning "
+              "Program; no fallback was performed.");
+  auto validate_vector = [&](const char *role, const Ndarray &array) {
+    TI_ERROR_IF(array.owning_program() != program_ ||
+                    array.get_element_data_type() != PrimitiveType::f32 ||
+                    !array.get_element_shape().empty() ||
+                    array.shape.size() != 1 ||
+                    array.get_nelement() != static_cast<std::size_t>(rows_),
+                "Compiled-kernel linear operator {} must contain exactly {} "
+                "scalar f32 entries owned by the same Program.",
+                role, rows_);
+  };
+  validate_vector("input", input);
+  validate_vector("output", output);
+  TI_ERROR_IF(input.get_device_allocation_ptr_as_int() ==
+                  output.get_device_allocation_ptr_as_int(),
+              "Compiled-kernel linear operator input and output must not "
+              "alias.");
+
+  auto numeric_guard = acquire_numeric_access_guard();
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  // CPU launchers lower kNdarray placeholders to raw pointers in place. Rebind
+  // every ndarray slot before reuse so the persistent context is backend-
+  // neutral and generation validation observes only the current resources.
+  launch_context_->set_arg_ndarray({1}, *topology_data_);
+  if (numeric_data_) {
+    launch_context_->set_arg_ndarray({2}, *numeric_data_);
+  }
+  launch_context_->set_arg_ndarray(
+      {static_cast<int>(input_arg_index_)}, input);
+  launch_context_->set_arg_ndarray(
+      {static_cast<int>(output_arg_index_)}, output);
+  record_spmv_call();
+  record_spmv_plan_reuse();
+  program_->launch_kernel(*compiled_kernel_, *launch_context_);
+}
+
+void CompiledKernelLinearOperator::update_numeric_data(
+    Program *program,
+    const Ndarray &numeric_data,
+    std::uint64_t expected_topology_version,
+    std::uint64_t expected_numeric_version) {
+  TI_ERROR_IF(program != program_ || !numeric_data_,
+              "Compiled-kernel numeric update requires the owning Program "
+              "and a dual-resource operator.");
+  validate_compiled_operator_data(program, numeric_data, "numeric update");
+
+  auto numeric_guard = acquire_numeric_access_guard();
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  TI_ERROR_IF(expected_topology_version != topology_version_ ||
+                  expected_numeric_version != numeric_version_,
+              "Compiled-kernel numeric update version mismatch: expected "
+              "topology/numeric ({}, {}), current ({}, {}).",
+              expected_topology_version, expected_numeric_version,
+              topology_version_, numeric_version_);
+  TI_ERROR_IF(numeric_version_ == std::numeric_limits<std::uint64_t>::max(),
+              "Compiled-kernel numeric version overflow.");
+  TI_ERROR_IF(numeric_data.get_element_data_type() !=
+                      numeric_data_->get_element_data_type() ||
+                  numeric_data.shape != numeric_data_->shape ||
+                  numeric_data.layout != numeric_data_->layout,
+              "Compiled-kernel numeric update must preserve dtype, shape, "
+              "and layout.");
+
+  program_->copy_ndarray_fast(numeric_data_,
+                              const_cast<Ndarray *>(&numeric_data));
+  numeric_version_++;
+  record_numeric_update(numeric_data_bytes_);
+  record_transfer_bytes(0, 0, numeric_data_bytes_);
+}
+
+SparseMatrixRuntimeStatistics
+CompiledKernelLinearOperator::debug_runtime_statistics() const {
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  auto result = make_runtime_statistics(
+      compiled_operator_backend_family(program_->compile_config().arch),
+      "matrix_free_kernel");
+  result.provider_name = "forge_compiled_taichi_kernel";
+  result.pattern_version = topology_version_;
+  result.numeric_version = numeric_version_;
+  result.nnz = 0;
+  result.pattern_reserved_bytes = topology_data_bytes_;
+  result.values_reserved_bytes = numeric_data_bytes_;
+  result.operator_owned_reserved_bytes =
+      topology_data_bytes_ + numeric_data_bytes_;
+  result.operator_exclusive_reserved_bytes =
+      topology_data_bytes_ + numeric_data_bytes_;
+  return result;
 }
 
 SparseMatrixBuilder::SparseMatrixBuilder(int rows,

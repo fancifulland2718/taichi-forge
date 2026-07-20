@@ -47,8 +47,34 @@ CUCG::CUCG(Program *program,
   init_solver();
 }
 
+CUCG::CUCG(Program *program,
+           CompiledKernelLinearOperator &A,
+           CompiledKernelPreconditionerPlan *preconditioner,
+           int max_iters,
+           float absolute_tolerance,
+           bool verbose,
+           float relative_tolerance)
+    : program_(program),
+      A_(A),
+      compiled_kernel_operator_(&A),
+      compiled_kernel_preconditioner_(preconditioner),
+      max_iters_(max_iters),
+      absolute_tolerance_(absolute_tolerance),
+      relative_tolerance_(relative_tolerance),
+      verbose_(verbose) {
+  TI_ERROR_IF(!program_ || program_->compile_config().arch != Arch::cuda ||
+                  A.owning_program() != program_,
+              "CUDA compiled-kernel CG requires its owning CUDA Program.");
+  validate_controls();
+  if (compiled_kernel_preconditioner_) {
+    compiled_kernel_preconditioner_->validate_compatible(program_, A);
+  }
+  init_solver();
+}
+
 bool CUCG::has_preconditioner() const {
-  return preconditioner_ != nullptr || block_preconditioner_ != nullptr;
+  return preconditioner_ != nullptr || block_preconditioner_ != nullptr ||
+         compiled_kernel_preconditioner_ != nullptr;
 }
 
 void CUCG::validate_controls() const {
@@ -69,12 +95,17 @@ void CUCG::validate_preconditioner(Program *program) const {
     preconditioner_->validate_compatible(program, A_);
   } else if (block_preconditioner_) {
     block_preconditioner_->validate_compatible(program, A_);
+  } else if (compiled_kernel_preconditioner_) {
+    compiled_kernel_preconditioner_->validate_compatible(
+        program, *compiled_kernel_operator_);
   }
 }
 
 void CUCG::apply_preconditioner(Program *program,
                                 float *input,
-                                float *output) {
+                                float *output,
+                                const Ndarray *input_array,
+                                const Ndarray *output_array) {
   if (preconditioner_) {
     preconditioner_->apply_cuda_raw(
         program, reinterpret_cast<std::uintptr_t>(input),
@@ -83,16 +114,31 @@ void CUCG::apply_preconditioner(Program *program,
     block_preconditioner_->apply_cuda_raw(
         program, reinterpret_cast<std::uintptr_t>(input),
         reinterpret_cast<std::uintptr_t>(output));
+  } else if (compiled_kernel_preconditioner_) {
+    TI_ERROR_IF(!input_array || !output_array,
+                "CUDA compiled-kernel preconditioning requires registered "
+                "ndarray workspace views.");
+    compiled_kernel_preconditioner_->apply(
+        program, *compiled_kernel_operator_, *input_array, *output_array);
   } else {
     TI_ERROR("CUDA CG has no preconditioner to apply.");
   }
 }
 
-void CUCG::apply_operator(std::uintptr_t input, std::uintptr_t output) {
+void CUCG::apply_operator(Program *program,
+                          std::uintptr_t input,
+                          std::uintptr_t output,
+                          const Ndarray *input_array,
+                          const Ndarray *output_array) {
   if (auto *csr = dynamic_cast<CuSparseMatrix *>(&A_)) {
     csr->spmv(input, output);
   } else if (auto *bsr = dynamic_cast<CuSparseBsrMatrix *>(&A_)) {
     bsr->spmv(input, output);
+  } else if (compiled_kernel_operator_) {
+    TI_ERROR_IF(!input_array || !output_array,
+                "CUDA compiled-kernel CG requires registered ndarray "
+                "workspace views.");
+    compiled_kernel_operator_->nd_spmv(program, *input_array, *output_array);
   } else {
     TI_ERROR("CUDA CG received an unsupported sparse operator.");
   }
@@ -122,7 +168,7 @@ CUCG::~CUCG() {
 #endif
 }
 
-void CUCG::ensure_workspace(int size) {
+void CUCG::ensure_workspace(Program *program, int size) {
 #if defined(TI_WITH_CUDA)
   if (workspace_size_ == size && workspace_ax_ && workspace_r_ &&
       workspace_p_ && (!has_preconditioner() || workspace_z_)) {
@@ -131,6 +177,39 @@ void CUCG::ensure_workspace(int size) {
   }
   release_workspace();
   if (size <= 0) {
+    return;
+  }
+  if (compiled_kernel_operator_) {
+    TI_ERROR_IF(program != program_,
+                "CUDA compiled-kernel CG workspace requires its owning "
+                "Program.");
+    auto create_vector = [&]() {
+      return program->create_ndarray(PrimitiveType::f32, {size},
+                                     ExternalArrayLayout::kNull, false);
+    };
+    try {
+      workspace_ax_ndarray_ = create_vector();
+      workspace_r_ndarray_ = create_vector();
+      workspace_p_ndarray_ = create_vector();
+      if (has_preconditioner()) {
+        workspace_z_ndarray_ = create_vector();
+      }
+      workspace_ax_ = reinterpret_cast<float *>(
+          program->get_ndarray_data_ptr_as_int(workspace_ax_ndarray_));
+      workspace_r_ = reinterpret_cast<float *>(
+          program->get_ndarray_data_ptr_as_int(workspace_r_ndarray_));
+      workspace_p_ = reinterpret_cast<float *>(
+          program->get_ndarray_data_ptr_as_int(workspace_p_ndarray_));
+      if (workspace_z_ndarray_) {
+        workspace_z_ = reinterpret_cast<float *>(
+            program->get_ndarray_data_ptr_as_int(workspace_z_ndarray_));
+      }
+    } catch (...) {
+      release_workspace();
+      throw;
+    }
+    workspace_size_ = size;
+    workspace_builds_++;
     return;
   }
   CUDADriver::get_instance().malloc((void **)&workspace_ax_,
@@ -150,14 +229,26 @@ void CUCG::ensure_workspace(int size) {
 
 void CUCG::release_workspace() {
 #if defined(TI_WITH_CUDA)
-  if (workspace_ax_)
+  if (workspace_ax_ndarray_ && program_)
+    program_->delete_ndarray(workspace_ax_ndarray_);
+  else if (workspace_ax_)
     CUDADriver::get_instance().mem_free(workspace_ax_);
-  if (workspace_r_)
+  if (workspace_r_ndarray_ && program_)
+    program_->delete_ndarray(workspace_r_ndarray_);
+  else if (workspace_r_)
     CUDADriver::get_instance().mem_free(workspace_r_);
-  if (workspace_p_)
+  if (workspace_p_ndarray_ && program_)
+    program_->delete_ndarray(workspace_p_ndarray_);
+  else if (workspace_p_)
     CUDADriver::get_instance().mem_free(workspace_p_);
-  if (workspace_z_)
+  if (workspace_z_ndarray_ && program_)
+    program_->delete_ndarray(workspace_z_ndarray_);
+  else if (workspace_z_)
     CUDADriver::get_instance().mem_free(workspace_z_);
+  workspace_ax_ndarray_ = nullptr;
+  workspace_r_ndarray_ = nullptr;
+  workspace_p_ndarray_ = nullptr;
+  workspace_z_ndarray_ = nullptr;
   workspace_ax_ = nullptr;
   workspace_r_ = nullptr;
   workspace_p_ = nullptr;
@@ -169,6 +260,18 @@ void CUCG::release_workspace() {
 void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
 #if defined(TI_WITH_CUDA)
   std::lock_guard<std::mutex> lock(solve_mutex_);
+  TI_ERROR_IF(
+      compiled_kernel_operator_ &&
+          (prog != program_ || x.owning_program() != program_ ||
+           b.owning_program() != program_),
+      "CUDA compiled-kernel CG requires solution and RHS ndarrays owned by "
+      "its construction Program.");
+  auto numeric_guard = A_.acquire_numeric_access_guard();
+  SparseMatrix::NumericAccessGuard preconditioner_numeric_guard;
+  if (compiled_kernel_preconditioner_) {
+    preconditioner_numeric_guard =
+        compiled_kernel_preconditioner_->acquire_numeric_access_guard();
+  }
   if (has_preconditioner()) {
     TI_ERROR_IF(prog != program_,
                 "CUDA preconditioned CG must be solved by its construction "
@@ -191,7 +294,7 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
   size_t db = prog->get_ndarray_data_ptr_as_int(&b);
   int m = A_.num_rows();
 
-  ensure_workspace(m);
+  ensure_workspace(prog, m);
   float *d_Ax = workspace_ax_;
   float *d_r = workspace_r_;
   float *d_p = workspace_p_;
@@ -203,7 +306,7 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
   device_to_device_bytes_ += sizeof(float) * m;
 
   // Ax = A @ x
-  apply_operator(dX, size_t(d_Ax));
+  apply_operator(prog, dX, size_t(d_Ax), &x, workspace_ax_ndarray_);
   operator_apply_calls_++;
 
   // r = r - Ax = b - Ax
@@ -246,7 +349,8 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
       effective_tolerance_ * effective_tolerance_;
   if (!breakdown && has_preconditioner() && r1 > tolerance_squared &&
       max_iters_ > 0) {
-    apply_preconditioner(prog, d_r, d_z);
+    apply_preconditioner(prog, d_r, d_z, workspace_r_ndarray_,
+                         workspace_z_ndarray_);
     preconditioner_apply_calls_++;
     CUBLASDriver::get_instance().cubSdot(handle_, m, d_r, 1, d_z, 1,
                                          &rho);
@@ -275,7 +379,8 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
     }
 
     // Ap = A @ p
-    apply_operator(size_t(d_p), size_t(d_Ax));
+    apply_operator(prog, size_t(d_p), size_t(d_Ax), workspace_p_ndarray_,
+                   workspace_ax_ndarray_);
     operator_apply_calls_++;
     // dot = p @ Ap
     CUBLASDriver::get_instance().cubSdot(handle_, m, d_p, 1, d_Ax, 1, &dot);
@@ -306,7 +411,8 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
     iterations_++;
     if (has_preconditioner() && std::isfinite(r1) &&
         r1 > tolerance_squared && iterations_ < max_iters_) {
-      apply_preconditioner(prog, d_r, d_z);
+      apply_preconditioner(prog, d_r, d_z, workspace_r_ndarray_,
+                           workspace_z_ndarray_);
       preconditioner_apply_calls_++;
       CUBLASDriver::get_instance().cubSdot(handle_, m, d_r, 1, d_z, 1,
                                            &rho);
@@ -338,7 +444,15 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
   const auto operator_stats = A_.debug_runtime_statistics();
   SparseSolvePlanRuntimeStatistics result;
   result.backend_family = "cuda";
-  if (has_preconditioner()) {
+  if (compiled_kernel_operator_) {
+    result.method = has_preconditioner() ? "pcg_compiled_kernel"
+                                         : "cg_compiled_kernel";
+    result.preconditioner_method =
+        has_preconditioner() ? "compiled_kernel_inverse_apply" : "identity";
+    result.external_preconditioner = has_preconditioner();
+    result.preconditioner_ownership_scope =
+        has_preconditioner() ? "external_plan" : "none";
+  } else if (has_preconditioner()) {
     result.method =
         block_preconditioner_ ? "pcg_block_jacobi" : "pcg_jacobi";
     result.preconditioner_method =
@@ -421,6 +535,31 @@ std::unique_ptr<CUCG> make_cuda_block_jacobi_pcg_solver(
     bool verbose,
     float relative_tolerance) {
   return std::make_unique<CUCG>(program, A, preconditioner, max_iters,
+                                absolute_tolerance, verbose,
+                                relative_tolerance);
+}
+
+std::unique_ptr<CUCG> make_cuda_compiled_kernel_cg_solver(
+    Program *program,
+    CompiledKernelLinearOperator &A,
+    int max_iters,
+    float absolute_tolerance,
+    bool verbose,
+    float relative_tolerance) {
+  return std::make_unique<CUCG>(program, A, nullptr, max_iters,
+                                absolute_tolerance, verbose,
+                                relative_tolerance);
+}
+
+std::unique_ptr<CUCG> make_cuda_compiled_kernel_pcg_solver(
+    Program *program,
+    CompiledKernelLinearOperator &A,
+    CompiledKernelPreconditionerPlan &preconditioner,
+    int max_iters,
+    float absolute_tolerance,
+    bool verbose,
+    float relative_tolerance) {
+  return std::make_unique<CUCG>(program, A, &preconditioner, max_iters,
                                 absolute_tolerance, verbose,
                                 relative_tolerance);
 }
@@ -704,6 +843,7 @@ void CpuSparseCGPlan::solve(Program *program,
               "CPU sparse PCG solution and RHS must not alias.");
 
   std::lock_guard<std::mutex> lock(solve_mutex_);
+  auto numeric_guard = matrix_->acquire_numeric_access_guard();
   validate_preconditioner(program);
   const auto operator_stats = matrix_->debug_runtime_statistics();
   if (has_solved_) {
@@ -808,7 +948,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
     SparseMatrix &matrix,
     int fixed_iterations)
     : VulkanCGIterationPlan(program, matrix, fixed_iterations, 0.0f, false,
-                            nullptr, nullptr) {
+                            false, nullptr, nullptr, nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
@@ -816,7 +956,8 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
                                              int max_iterations,
     float absolute_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
-                            absolute_tolerance, true, nullptr, nullptr) {
+                            absolute_tolerance, true, false, nullptr,
+                            nullptr, nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(
@@ -826,8 +967,8 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
     int max_iterations,
     float absolute_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
-                            absolute_tolerance, true, &preconditioner,
-                            nullptr) {
+                            absolute_tolerance, true, false,
+                            &preconditioner, nullptr, nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(
@@ -837,7 +978,28 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
     int max_iterations,
     float absolute_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
-                            absolute_tolerance, true, nullptr,
+                            absolute_tolerance, true, false, nullptr,
+                            &preconditioner, nullptr) {
+}
+
+VulkanCGIterationPlan::VulkanCGIterationPlan(
+    Program *program,
+    CompiledKernelLinearOperator &matrix,
+    int max_iterations,
+    float absolute_tolerance)
+    : VulkanCGIterationPlan(program, matrix, max_iterations,
+                            absolute_tolerance, true, true, nullptr, nullptr,
+                            nullptr) {
+}
+
+VulkanCGIterationPlan::VulkanCGIterationPlan(
+    Program *program,
+    CompiledKernelLinearOperator &matrix,
+    CompiledKernelPreconditionerPlan &preconditioner,
+    int max_iterations,
+    float absolute_tolerance)
+    : VulkanCGIterationPlan(program, matrix, max_iterations,
+                            absolute_tolerance, true, true, nullptr, nullptr,
                             &preconditioner) {
 }
 
@@ -846,19 +1008,34 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
                                              int max_iterations,
                                              float absolute_tolerance,
                                              bool adaptive,
+                                             bool allow_compiled_kernel_operator,
                                              SparseJacobiPreconditionerPlan
                                                  *preconditioner,
                                              SparseBlockJacobiPreconditionerPlan
-                                                 *block_preconditioner) {
+                                                 *block_preconditioner,
+                                             CompiledKernelPreconditionerPlan
+                                                 *compiled_kernel_preconditioner) {
 #if defined(TI_WITH_VULKAN)
   TI_ERROR_IF(!program || program->compile_config().arch != Arch::vulkan,
               "Vulkan CG iteration plans require an active Vulkan Program.");
   auto *vulkan_csr = dynamic_cast<VulkanSparseMatrix *>(&matrix);
   auto *vulkan_bsr = dynamic_cast<VulkanSparseBsrMatrix *>(&matrix);
-  TI_ERROR_IF(preconditioner && block_preconditioner,
+  auto *compiled_kernel_operator =
+      dynamic_cast<CompiledKernelLinearOperator *>(&matrix);
+  const int preconditioner_count = (preconditioner ? 1 : 0) +
+                                   (block_preconditioner ? 1 : 0) +
+                                   (compiled_kernel_preconditioner ? 1 : 0);
+  TI_ERROR_IF(preconditioner_count > 1,
               "Vulkan CG iteration plans accept at most one "
               "preconditioner.");
-  if (block_preconditioner) {
+  if (allow_compiled_kernel_operator) {
+    TI_ERROR_IF(!compiled_kernel_operator || preconditioner ||
+                    block_preconditioner ||
+                    compiled_kernel_operator->owning_program() != program,
+                "Private Vulkan compiled-kernel CG requires its owning "
+                "compiled-kernel operator and either identity or a "
+                "compiled-kernel preconditioner.");
+  } else if (block_preconditioner) {
     TI_ERROR_IF(!vulkan_bsr,
                 "Vulkan block-Jacobi PCG requires an internal Vulkan BSR "
                 "matrix.");
@@ -886,12 +1063,14 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
   bsr_matrix_ = vulkan_bsr;
   preconditioner_ = preconditioner;
   block_preconditioner_ = block_preconditioner;
+  compiled_kernel_preconditioner_ = compiled_kernel_preconditioner;
   if (has_preconditioner()) {
     validate_preconditioner(program_);
   }
   fixed_iterations_ = max_iterations;
   absolute_tolerance_ = absolute_tolerance;
   adaptive_ = adaptive;
+  compiled_kernel_operator_ = allow_compiled_kernel_operator;
   const int n = matrix.num_rows();
   auto create_vector = [&]() {
     return program->create_ndarray(PrimitiveType::f32, {n},
@@ -937,7 +1116,8 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
 }
 
 bool VulkanCGIterationPlan::has_preconditioner() const {
-  return preconditioner_ != nullptr || block_preconditioner_ != nullptr;
+  return preconditioner_ != nullptr || block_preconditioner_ != nullptr ||
+         compiled_kernel_preconditioner_ != nullptr;
 }
 
 void VulkanCGIterationPlan::validate_preconditioner(Program *program) const {
@@ -945,6 +1125,14 @@ void VulkanCGIterationPlan::validate_preconditioner(Program *program) const {
     preconditioner_->validate_compatible(program, *matrix_);
   } else if (block_preconditioner_) {
     block_preconditioner_->validate_compatible(program, *matrix_);
+  } else if (compiled_kernel_preconditioner_) {
+    auto *compiled_kernel_operator =
+        dynamic_cast<CompiledKernelLinearOperator *>(matrix_);
+    TI_ERROR_IF(!compiled_kernel_operator,
+                "Compiled-kernel preconditioning requires a compiled-kernel "
+                "target operator.");
+    compiled_kernel_preconditioner_->validate_compatible(
+        program, *compiled_kernel_operator);
   }
 }
 
@@ -956,6 +1144,14 @@ void VulkanCGIterationPlan::apply_preconditioner(
     preconditioner_->apply(program, input, output);
   } else if (block_preconditioner_) {
     block_preconditioner_->apply(program, input, output);
+  } else if (compiled_kernel_preconditioner_) {
+    auto *compiled_kernel_operator =
+        dynamic_cast<CompiledKernelLinearOperator *>(matrix_);
+    TI_ERROR_IF(!compiled_kernel_operator,
+                "Compiled-kernel preconditioning requires a compiled-kernel "
+                "target operator.");
+    compiled_kernel_preconditioner_->apply(
+        program, *compiled_kernel_operator, input, output);
   } else {
     TI_ERROR("Vulkan CG has no preconditioner to apply.");
   }
@@ -1000,6 +1196,7 @@ void VulkanCGIterationPlan::solve(Program *program,
               "Vulkan CG iteration plan solution and RHS must not alias.");
 
   std::lock_guard<std::mutex> lock(solve_mutex_);
+  auto numeric_guard = matrix_->acquire_numeric_access_guard();
   if (has_preconditioner()) {
     validate_preconditioner(program);
   }
@@ -1164,7 +1361,12 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
   SparseSolvePlanRuntimeStatistics result;
   result.backend_family = "vulkan";
   if (has_preconditioner()) {
-    if (block_preconditioner_) {
+    if (compiled_kernel_preconditioner_) {
+      result.method =
+          adaptive_ ? "pcg_compiled_kernel_bounded_masked_probe"
+                    : "pcg_compiled_kernel_fixed_iteration_probe";
+      result.preconditioner_method = "compiled_kernel_inverse_apply";
+    } else if (block_preconditioner_) {
       result.method =
           adaptive_ ? "pcg_block_jacobi_bounded_masked_probe"
                     : "pcg_block_jacobi_fixed_iteration_probe";
@@ -1175,8 +1377,14 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
       result.preconditioner_method = "jacobi";
     }
   } else {
-    result.method = adaptive_ ? "cg_bounded_masked_probe"
-                              : "cg_fixed_iteration_probe";
+    if (compiled_kernel_operator_) {
+      result.method = adaptive_
+                          ? "cg_compiled_kernel_bounded_masked_probe"
+                          : "cg_compiled_kernel_fixed_iteration_probe";
+    } else {
+      result.method = adaptive_ ? "cg_bounded_masked_probe"
+                                : "cg_fixed_iteration_probe";
+    }
   }
   result.dtype = "f32";
   result.rows = matrix_->num_rows();
@@ -1294,5 +1502,26 @@ make_vulkan_block_jacobi_pcg_convergence_plan(
   return std::make_unique<VulkanCGIterationPlan>(
       program, matrix, preconditioner, max_iterations,
       absolute_tolerance);
+}
+
+std::unique_ptr<VulkanCGIterationPlan>
+make_vulkan_compiled_kernel_cg_convergence_plan(
+    Program *program,
+    CompiledKernelLinearOperator &matrix,
+    int max_iterations,
+    float absolute_tolerance) {
+  return std::make_unique<VulkanCGIterationPlan>(
+      program, matrix, max_iterations, absolute_tolerance);
+}
+
+std::unique_ptr<VulkanCGIterationPlan>
+make_vulkan_compiled_kernel_pcg_convergence_plan(
+    Program *program,
+    CompiledKernelLinearOperator &matrix,
+    CompiledKernelPreconditionerPlan &preconditioner,
+    int max_iterations,
+    float absolute_tolerance) {
+  return std::make_unique<VulkanCGIterationPlan>(
+      program, matrix, preconditioner, max_iterations, absolute_tolerance);
 }
 }  // namespace taichi::lang

@@ -21,6 +21,11 @@ struct SparsePreconditionerPlanRuntimeStatistics {
   std::uint64_t operator_pattern_version_current{0};
   std::uint64_t operator_numeric_version_current{0};
   bool operator_stale{false};
+  std::uint64_t preconditioner_pattern_version_at_build{0};
+  std::uint64_t preconditioner_numeric_version_at_build{0};
+  std::uint64_t preconditioner_pattern_version_current{0};
+  std::uint64_t preconditioner_numeric_version_current{0};
+  bool preconditioner_stale{false};
   std::uint64_t apply_calls{0};
   std::uint64_t persistent_inverse_count{0};
   std::uint64_t persistent_inverse_reserved_bytes{0};
@@ -153,5 +158,51 @@ class SparseBlockJacobiPreconditionerPlan final {
 std::unique_ptr<SparseBlockJacobiPreconditionerPlan>
 make_sparse_block_jacobi_preconditioner_plan(Program *program,
                                              SparseMatrix &matrix);
+
+// Internal matrix-free preconditioner contract. The target operator and the
+// independently compiled inverse-apply operator keep their own storage and
+// version streams; this plan only binds them transactionally. No diagonal,
+// block structure, symmetry, or positive-definiteness is inferred from opaque
+// operator data.
+class CompiledKernelPreconditionerPlan final {
+ public:
+  CompiledKernelPreconditionerPlan(
+      Program *program,
+      CompiledKernelLinearOperator &target_operator,
+      CompiledKernelLinearOperator &inverse_apply_operator,
+      bool assume_symmetric_positive_definite);
+
+  void validate_compatible(
+      Program *program,
+      const CompiledKernelLinearOperator &target_operator) const;
+  void apply(Program *program,
+             const CompiledKernelLinearOperator &target_operator,
+             const Ndarray &input,
+             const Ndarray &output);
+  SparseMatrix::NumericAccessGuard acquire_numeric_access_guard() const;
+  SparsePreconditionerPlanRuntimeStatistics debug_runtime_statistics() const;
+
+ private:
+  void validate_compatible_locked(
+      Program *program,
+      const CompiledKernelLinearOperator &target_operator) const;
+
+  Program *program_{nullptr};
+  CompiledKernelLinearOperator *target_operator_{nullptr};
+  CompiledKernelLinearOperator *inverse_apply_operator_{nullptr};
+  std::uint64_t target_pattern_version_at_build_{0};
+  std::uint64_t target_numeric_version_at_build_{0};
+  std::uint64_t inverse_pattern_version_at_build_{0};
+  std::uint64_t inverse_numeric_version_at_build_{0};
+  mutable std::mutex apply_mutex_;
+  std::uint64_t apply_calls_{0};
+};
+
+std::unique_ptr<CompiledKernelPreconditionerPlan>
+make_compiled_kernel_preconditioner_plan(
+    Program *program,
+    CompiledKernelLinearOperator &target_operator,
+    CompiledKernelLinearOperator &inverse_apply_operator,
+    bool assume_symmetric_positive_definite);
 
 }  // namespace taichi::lang

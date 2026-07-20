@@ -258,7 +258,7 @@ void LaunchContextBuilder::set_arg_ndarray(const std::vector<int> &arg_id,
     ref.data_handle = arr.runtime_resource_handle();
     TI_ERROR_IF(!ref.data_handle,
                 "Cannot bind an unregistered Ndarray runtime resource");
-    ndarray_ptrs.push_back(std::move(ref));
+    bind_ndarray_resource_ref(std::move(ref));
   }
   TI_ASSERT_INFO(arr.shape.size() <= taichi_max_num_indices,
                  "External array cannot have > {max_num_indices} indices");
@@ -319,12 +319,25 @@ void LaunchContextBuilder::set_arg_ndarray_with_grad(
     ref.grad_handle = arr_grad.runtime_resource_handle();
     TI_ERROR_IF(!ref.data_handle || !ref.grad_handle,
                 "Cannot bind an unregistered Ndarray runtime resource");
-    ndarray_ptrs.push_back(std::move(ref));
+    bind_ndarray_resource_ref(std::move(ref));
   }
   TI_ASSERT_INFO(arr.shape.size() <= taichi_max_num_indices,
                  "External array cannot have > {max_num_indices} indices");
   set_arg_ndarray_impl(arg_id, arr.get_device_allocation_ptr_as_int(), arr.shape,
                        arr_grad.get_device_allocation_ptr_as_int());
+}
+
+void LaunchContextBuilder::bind_ndarray_resource_ref(
+    NdarrayResourceRef ref) {
+  const auto found = std::find_if(
+      ndarray_ptrs.begin(), ndarray_ptrs.end(), [&](const auto &current) {
+        return current.arg_offset == ref.arg_offset;
+      });
+  if (found == ndarray_ptrs.end()) {
+    ndarray_ptrs.push_back(std::move(ref));
+  } else {
+    *found = std::move(ref);
+  }
 }
 
 void LaunchContextBuilder::debug_set_ndarray_resource_handle(

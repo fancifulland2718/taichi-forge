@@ -98,6 +98,9 @@ class LaunchContextBuilder {
                             intptr_t devalloc_ptr,
                             const std::vector<int> &shape,
                             intptr_t devalloc_ptr_grad = 0);
+  // Rebinding the same argument slot replaces its generation-qualified
+  // resource ref, allowing a launch context to be reused without retaining a
+  // stale view from an earlier submission.
   void set_arg_ndarray(const std::vector<int> &arg_id, const Ndarray &arr);
   void set_arg_argpack(const std::vector<int> &arg_id, const ArgPack &argpack);
   void set_arg_ndarray_with_grad(const std::vector<int> &arg_id,
@@ -127,6 +130,7 @@ class LaunchContextBuilder {
   RuntimeContext &get_context();
 
  private:
+  void bind_ndarray_resource_ref(NdarrayResourceRef ref);
   TypedConstant fetch_ret_impl(int offset, const Type *dt);
   CallableBase *kernel_;
   std::unique_ptr<RuntimeContext> owned_ctx_;
