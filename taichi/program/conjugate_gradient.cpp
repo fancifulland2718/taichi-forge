@@ -447,8 +447,11 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
   if (compiled_kernel_operator_) {
     result.method = has_preconditioner() ? "pcg_compiled_kernel"
                                          : "cg_compiled_kernel";
-    result.preconditioner_method =
-        has_preconditioner() ? "compiled_kernel_inverse_apply" : "identity";
+    result.preconditioner_method = compiled_kernel_preconditioner_
+                                       ? compiled_kernel_preconditioner_
+                                             ->debug_runtime_statistics()
+                                             .method
+                                       : "identity";
     result.external_preconditioner = has_preconditioner();
     result.preconditioner_ownership_scope =
         has_preconditioner() ? "external_plan" : "none";
@@ -1012,7 +1015,7 @@ CpuSparseCGPlan::debug_runtime_statistics() const {
   result.operator_apply_calls_available = true;
   result.preconditioner_method =
       compiled_kernel_preconditioner_
-          ? "compiled_kernel_inverse_apply"
+          ? compiled_kernel_preconditioner_->debug_runtime_statistics().method
       : scalar_preconditioner_ ? "jacobi"
                                : "block_jacobi";
   result.preconditioner_apply_calls = preconditioner_apply_calls_;
@@ -1486,7 +1489,8 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
       result.method =
           adaptive_ ? "pcg_compiled_kernel_bounded_masked_probe"
                     : "pcg_compiled_kernel_fixed_iteration_probe";
-      result.preconditioner_method = "compiled_kernel_inverse_apply";
+      result.preconditioner_method =
+          compiled_kernel_preconditioner_->debug_runtime_statistics().method;
     } else if (block_preconditioner_) {
       result.method =
           adaptive_ ? "pcg_block_jacobi_bounded_masked_probe"

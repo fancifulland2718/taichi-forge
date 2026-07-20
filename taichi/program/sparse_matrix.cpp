@@ -13,6 +13,7 @@
 
 #include "Eigen/Dense"
 #include "Eigen/SparseLU"
+#include "taichi/aot/graph_data.h"
 #include "taichi/ir/type_factory.h"
 #include "taichi/program/kernel.h"
 
@@ -482,6 +483,383 @@ CompiledKernelLinearOperator::debug_runtime_statistics() const {
       topology_data_bytes_ + numeric_data_bytes_;
   result.operator_exclusive_reserved_bytes =
       topology_data_bytes_ + numeric_data_bytes_;
+  return result;
+}
+
+CompiledGraphLinearOperator::CompiledGraphLinearOperator(
+    Program *program,
+    const aot::CompiledGraph &graph,
+    int size,
+    std::uint64_t topology_version,
+    std::uint64_t numeric_version,
+    FixedI32Arguments fixed_i32_arguments,
+    NdarrayArguments topology_arguments,
+    NdarrayArguments numeric_arguments,
+    NdarrayArguments workspace_arguments)
+    : SparseMatrix(size, size, PrimitiveType::f32) {
+  TI_ERROR_IF(!program || size <= 0 || topology_version == 0 ||
+                  numeric_version == 0,
+              "Compiled-graph linear operators require an owning Program, "
+              "positive size, and positive topology/numeric versions.");
+  const Arch arch = program->compile_config().arch;
+  TI_ERROR_IF(!arch_is_cpu(arch) && !arch_is_cuda(arch) &&
+                  arch != Arch::vulkan,
+              "Compiled-graph linear operators support CPU, CUDA, and "
+              "Vulkan only; got {}. No fallback was performed.",
+              arch_name(arch));
+  TI_ERROR_IF(graph.dispatches.empty(),
+              "Compiled-graph linear operators require at least one "
+              "kernel dispatch.");
+  TI_ERROR_IF(!graph.snode_tree_dependencies.empty(),
+              "Compiled-graph linear operators must not depend on any "
+              "SNodeTree; use explicit ndarray arguments.");
+  for (const auto &dispatch : graph.dispatches) {
+    TI_ERROR_IF(!dispatch.ti_kernel || dispatch.ti_kernel->program != program ||
+                    dispatch.ti_kernel->arch != arch ||
+                    !dispatch.snode_tree_dependencies.empty(),
+                "Compiled-graph linear operator dispatches must be JIT "
+                "kernels owned by the same Program/backend with no SNodeTree "
+                "dependencies.");
+  }
+  TI_ERROR_IF(topology_arguments.empty(),
+              "Compiled-graph linear operators require at least one explicit "
+              "topology ndarray snapshot.");
+
+  enum class ArgumentRole {
+    input,
+    output,
+    fixed_i32,
+    topology,
+    numeric,
+    workspace,
+  };
+  std::unordered_map<std::string, ArgumentRole> roles;
+  auto register_role = [&](const std::string &name, ArgumentRole role) {
+    TI_ERROR_IF(name.empty() || !roles.emplace(name, role).second,
+                "Compiled-graph linear operator argument names must be "
+                "non-empty and assigned exactly one role; duplicate '{}'.",
+                name);
+  };
+  register_role("input", ArgumentRole::input);
+  register_role("output", ArgumentRole::output);
+  for (const auto &[name, value] : fixed_i32_arguments) {
+    (void)value;
+    register_role(name, ArgumentRole::fixed_i32);
+  }
+  auto register_ndarrays = [&](const NdarrayArguments &arguments,
+                               ArgumentRole role) {
+    for (const auto &[name, source] : arguments) {
+      TI_ERROR_IF(!source || source->owning_program() != program ||
+                      !source->get_element_shape().empty() ||
+                      source->shape.empty() || source->get_nelement() == 0,
+                  "Compiled-graph linear operator fixed ndarray argument '{}' "
+                  "must be a non-empty scalar ndarray owned by the same "
+                  "Program.",
+                  name);
+      register_role(name, role);
+    }
+  };
+  register_ndarrays(topology_arguments, ArgumentRole::topology);
+  register_ndarrays(numeric_arguments, ArgumentRole::numeric);
+  register_ndarrays(workspace_arguments, ArgumentRole::workspace);
+  TI_ERROR_IF(roles.size() != graph.args.size(),
+              "Compiled-graph linear operator ABI requires exactly reserved "
+              "f32 input/output plus every supplied fixed argument; graph has "
+              "{} arguments but {} roles were supplied.",
+              graph.args.size(), roles.size());
+
+  auto source_for_role = [&](const std::string &name,
+                             ArgumentRole role) -> const Ndarray * {
+    const NdarrayArguments *arguments = nullptr;
+    if (role == ArgumentRole::topology) {
+      arguments = &topology_arguments;
+    } else if (role == ArgumentRole::numeric) {
+      arguments = &numeric_arguments;
+    } else if (role == ArgumentRole::workspace) {
+      arguments = &workspace_arguments;
+    }
+    if (!arguments) {
+      return nullptr;
+    }
+    const auto found = arguments->find(name);
+    return found == arguments->end() ? nullptr : found->second;
+  };
+  for (const auto &[name, argument] : graph.args) {
+    const auto role_it = roles.find(name);
+    TI_ERROR_IF(role_it == roles.end(),
+                "Compiled-graph linear operator graph argument '{}' has no "
+                "fixed or dynamic role.",
+                name);
+    const auto role = role_it->second;
+    if (role == ArgumentRole::input || role == ArgumentRole::output) {
+      TI_ERROR_IF(argument.tag != aot::ArgKind::kNdarray ||
+                      argument.dtype() != PrimitiveType::f32 ||
+                      !argument.element_shape.empty() ||
+                      argument.field_dim != 1,
+                  "Compiled-graph linear operator reserved '{}' argument must "
+                  "be a scalar f32 one-dimensional ndarray.",
+                  name);
+    } else if (role == ArgumentRole::fixed_i32) {
+      TI_ERROR_IF(argument.tag != aot::ArgKind::kScalar ||
+                      argument.dtype() != PrimitiveType::i32,
+                  "Compiled-graph linear operator fixed scalar '{}' must be "
+                  "i32.",
+                  name);
+    } else {
+      const Ndarray *source = source_for_role(name, role);
+      TI_ASSERT(source != nullptr);
+      TI_ERROR_IF(argument.tag != aot::ArgKind::kNdarray ||
+                      argument.dtype() != source->get_element_data_type() ||
+                      !argument.element_shape.empty() ||
+                      argument.field_dim != source->shape.size(),
+                  "Compiled-graph linear operator fixed ndarray '{}' does not "
+                  "match the graph scalar dtype/rank declaration.",
+                  name);
+    }
+  }
+
+  auto owned_graph = std::make_unique<aot::CompiledGraph>(graph);
+  auto owned_cache = std::make_unique<aot::CompiledGraphJITCache>();
+  std::vector<OwnedNdarrayArgument> owned_arguments;
+  auto snapshot_arguments = [&](const NdarrayArguments &arguments,
+                                NdarrayRole role,
+                                std::uint64_t *reserved_bytes) {
+    for (const auto &[name, source] : arguments) {
+      Ndarray *owned = program->create_ndarray(
+          source->get_element_data_type(), source->shape, source->layout,
+          false);
+      try {
+        program->copy_ndarray_fast(owned, const_cast<Ndarray *>(source));
+        owned_arguments.push_back({name, owned, role});
+      } catch (...) {
+        program->delete_ndarray(owned);
+        throw;
+      }
+      *reserved_bytes += static_cast<std::uint64_t>(
+          source->get_nelement() * source->get_element_size());
+    }
+  };
+
+  std::uint64_t topology_bytes = 0;
+  std::uint64_t numeric_bytes = 0;
+  std::uint64_t workspace_bytes = 0;
+  try {
+    snapshot_arguments(topology_arguments, NdarrayRole::topology,
+                       &topology_bytes);
+    snapshot_arguments(numeric_arguments, NdarrayRole::numeric,
+                       &numeric_bytes);
+    snapshot_arguments(workspace_arguments, NdarrayRole::workspace,
+                       &workspace_bytes);
+  } catch (...) {
+    for (auto &argument : owned_arguments) {
+      program->delete_ndarray(argument.value);
+    }
+    throw;
+  }
+
+  program_ = program;
+  graph_ = std::move(owned_graph);
+  cache_ = std::move(owned_cache);
+  fixed_i32_arguments_ = std::move(fixed_i32_arguments);
+  owned_ndarray_arguments_ = std::move(owned_arguments);
+  topology_reserved_bytes_ = topology_bytes;
+  numeric_reserved_bytes_ = numeric_bytes;
+  workspace_reserved_bytes_ = workspace_bytes;
+  topology_version_ = topology_version;
+  numeric_version_ = numeric_version;
+  record_pattern_build();
+  record_spmv_plan_build();
+  for (std::size_t i = 0; i < workspace_arguments.size(); ++i) {
+    record_spmv_workspace_allocation();
+  }
+  record_transfer_bytes(0, 0,
+                        topology_bytes + numeric_bytes + workspace_bytes);
+}
+
+CompiledGraphLinearOperator::~CompiledGraphLinearOperator() {
+  if (cache_) {
+    cache_->clear_runtime_state();
+    cache_.reset();
+  }
+  graph_.reset();
+  if (program_) {
+    for (auto &argument : owned_ndarray_arguments_) {
+      if (argument.value) {
+        program_->delete_ndarray(argument.value);
+      }
+    }
+  }
+}
+
+void CompiledGraphLinearOperator::nd_spmv(Program *program,
+                                          const Ndarray &input,
+                                          const Ndarray &output) {
+  TI_ERROR_IF(program != program_,
+              "Compiled-graph linear operator apply requires its owning "
+              "Program; no fallback was performed.");
+  auto validate_vector = [&](const char *role, const Ndarray &array) {
+    TI_ERROR_IF(array.owning_program() != program_ ||
+                    array.get_element_data_type() != PrimitiveType::f32 ||
+                    !array.get_element_shape().empty() ||
+                    array.shape.size() != 1 ||
+                    array.get_nelement() != static_cast<std::size_t>(rows_),
+                "Compiled-graph linear operator {} must contain exactly {} "
+                "scalar f32 entries owned by the same Program.",
+                role, rows_);
+  };
+  validate_vector("input", input);
+  validate_vector("output", output);
+  TI_ERROR_IF(input.get_device_allocation_ptr_as_int() ==
+                  output.get_device_allocation_ptr_as_int(),
+              "Compiled-graph linear operator input and output must not "
+              "alias.");
+
+  auto numeric_guard = acquire_numeric_access_guard();
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  std::unordered_map<std::string, aot::IValue> arguments;
+  arguments.reserve(2 + fixed_i32_arguments_.size() +
+                    owned_ndarray_arguments_.size());
+  arguments.emplace("input", aot::IValue::create(input));
+  arguments.emplace("output", aot::IValue::create(output));
+  for (const auto &[name, value] : fixed_i32_arguments_) {
+    arguments.emplace(name, aot::IValue::create(value));
+  }
+  for (const auto &argument : owned_ndarray_arguments_) {
+    arguments.emplace(argument.name, aot::IValue::create(*argument.value));
+  }
+  record_spmv_call();
+  record_spmv_plan_reuse();
+  graph_->jit_run_cached(program_->compile_config(), arguments, *cache_);
+}
+
+void CompiledGraphLinearOperator::update_numeric_arguments(
+    Program *program,
+    NdarrayArguments numeric_arguments,
+    std::uint64_t expected_topology_version,
+    std::uint64_t expected_numeric_version) {
+  TI_ERROR_IF(program != program_,
+              "Compiled-graph numeric update requires the owning Program.");
+
+  auto numeric_guard = acquire_numeric_access_guard();
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  TI_ERROR_IF(expected_topology_version != topology_version_ ||
+                  expected_numeric_version != numeric_version_,
+              "Compiled-graph numeric update version mismatch: expected "
+              "topology/numeric ({}, {}), current ({}, {}).",
+              expected_topology_version, expected_numeric_version,
+              topology_version_, numeric_version_);
+  TI_ERROR_IF(numeric_version_ == std::numeric_limits<std::uint64_t>::max(),
+              "Compiled-graph numeric version overflow.");
+
+  const std::size_t numeric_count = static_cast<std::size_t>(std::count_if(
+      owned_ndarray_arguments_.begin(), owned_ndarray_arguments_.end(),
+      [](const OwnedNdarrayArgument &argument) {
+        return argument.role == NdarrayRole::numeric;
+      }));
+  TI_ERROR_IF(numeric_count == 0 || numeric_arguments.size() != numeric_count,
+              "Compiled-graph numeric update requires the complete numeric "
+              "role set of {} arguments; received {}.",
+              numeric_count, numeric_arguments.size());
+  for (const auto &argument : owned_ndarray_arguments_) {
+    if (argument.role != NdarrayRole::numeric) {
+      continue;
+    }
+    const auto found = numeric_arguments.find(argument.name);
+    TI_ERROR_IF(found == numeric_arguments.end(),
+                "Compiled-graph numeric update is missing role '{}'.",
+                argument.name);
+    const Ndarray *source = found->second;
+    TI_ERROR_IF(!source || source->owning_program() != program_ ||
+                    !source->get_element_shape().empty() ||
+                    source->shape.empty() || source->get_nelement() == 0,
+                "Compiled-graph numeric update role '{}' must be a non-empty "
+                "scalar ndarray owned by the same Program.",
+                argument.name);
+    TI_ERROR_IF(source->get_element_data_type() !=
+                        argument.value->get_element_data_type() ||
+                    source->shape != argument.value->shape ||
+                    source->layout != argument.value->layout,
+                "Compiled-graph numeric update role '{}' must preserve "
+                "dtype, shape, and layout.",
+                argument.name);
+  }
+
+  std::vector<OwnedNdarrayArgument> replacements;
+  replacements.reserve(numeric_count);
+  try {
+    for (const auto &argument : owned_ndarray_arguments_) {
+      if (argument.role != NdarrayRole::numeric) {
+        continue;
+      }
+      const Ndarray *source = numeric_arguments.at(argument.name);
+      Ndarray *replacement = program_->create_ndarray(
+          source->get_element_data_type(), source->shape, source->layout,
+          false);
+      try {
+        program_->copy_ndarray_fast(replacement,
+                                    const_cast<Ndarray *>(source));
+        replacements.push_back(
+            {argument.name, replacement, NdarrayRole::numeric});
+      } catch (...) {
+        program_->delete_ndarray(replacement);
+        throw;
+      }
+    }
+  } catch (...) {
+    for (auto &replacement : replacements) {
+      program_->delete_ndarray(replacement.value);
+    }
+    throw;
+  }
+
+  std::vector<Ndarray *> retired;
+  retired.reserve(numeric_count);
+  cache_->clear_runtime_state();
+  std::size_t replacement_index = 0;
+  for (auto &argument : owned_ndarray_arguments_) {
+    if (argument.role != NdarrayRole::numeric) {
+      continue;
+    }
+    TI_ASSERT(replacement_index < replacements.size());
+    auto &replacement = replacements[replacement_index++];
+    TI_ASSERT(replacement.name == argument.name &&
+              replacement.value != nullptr);
+    retired.push_back(argument.value);
+    argument.value = replacement.value;
+    replacement.value = nullptr;
+  }
+  TI_ASSERT(replacement_index == replacements.size());
+  numeric_version_++;
+  numeric_update_peak_temporary_bytes_ =
+      std::max(numeric_update_peak_temporary_bytes_, numeric_reserved_bytes_);
+  record_numeric_update(numeric_reserved_bytes_);
+  record_spmv_plan_build();
+  record_transfer_bytes(0, 0, numeric_reserved_bytes_);
+  for (Ndarray *argument : retired) {
+    program_->delete_ndarray(argument);
+  }
+}
+
+SparseMatrixRuntimeStatistics
+CompiledGraphLinearOperator::debug_runtime_statistics() const {
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  auto result = make_runtime_statistics(
+      compiled_operator_backend_family(program_->compile_config().arch),
+      "matrix_free_graph");
+  result.provider_name = "forge_compiled_graph";
+  result.pattern_version = topology_version_;
+  result.numeric_version = numeric_version_;
+  result.nnz = 0;
+  result.pattern_reserved_bytes = topology_reserved_bytes_;
+  result.values_reserved_bytes = numeric_reserved_bytes_;
+  result.spmv_workspace_reserved_bytes = workspace_reserved_bytes_;
+  result.operator_owned_reserved_bytes = topology_reserved_bytes_ +
+                                         numeric_reserved_bytes_ +
+                                         workspace_reserved_bytes_;
+  result.operator_exclusive_reserved_bytes =
+      result.operator_owned_reserved_bytes;
+  result.numeric_update_peak_temporary_bytes =
+      numeric_update_peak_temporary_bytes_;
   return result;
 }
 

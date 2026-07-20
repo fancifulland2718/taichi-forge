@@ -1190,6 +1190,32 @@ void export_lang(py::module &m) {
              return std::make_unique<CompiledKernelLinearOperator>(
                  program, kernel, size, topology_version, numeric_version,
                  topology_data, numeric_data);
+            },
+            py::keep_alive<0, 1>())
+      .def("_create_compiled_graph_linear_operator",
+           [](Program *program, const aot::CompiledGraph &graph, int size,
+              std::uint64_t topology_version,
+              std::uint64_t numeric_version, const py::dict &fixed_i32_args,
+              const py::dict &topology_args, const py::dict &numeric_args,
+              const py::dict &workspace_args) -> std::unique_ptr<SparseMatrix> {
+             CompiledGraphLinearOperator::FixedI32Arguments fixed_i32;
+             for (const auto &item : fixed_i32_args) {
+               fixed_i32.emplace(py::cast<std::string>(item.first),
+                                 py::cast<std::int32_t>(item.second));
+             }
+             auto parse_ndarrays = [](const py::dict &arguments) {
+               CompiledGraphLinearOperator::NdarrayArguments result;
+               for (const auto &item : arguments) {
+                 result.emplace(py::cast<std::string>(item.first),
+                                &py::cast<const Ndarray &>(item.second));
+               }
+               return result;
+             };
+             return std::make_unique<CompiledGraphLinearOperator>(
+                 program, graph, size, topology_version, numeric_version,
+                 std::move(fixed_i32), parse_ndarrays(topology_args),
+                 parse_ndarrays(numeric_args),
+                 parse_ndarrays(workspace_args));
            },
            py::keep_alive<0, 1>())
       .def("_create_csr_matrix_from_pattern",
@@ -4343,6 +4369,8 @@ void export_lang(py::module &m) {
             stats.spmv_workspace_reserved_bytes;
         resources["operator_owned_reserved_bytes"] =
             stats.operator_owned_reserved_bytes;
+        resources["numeric_update_peak_temporary_bytes"] =
+            stats.numeric_update_peak_temporary_bytes;
         resources["operator_exclusive_reserved_bytes"] =
             stats.pattern_storage_shared
                 ? stats.operator_exclusive_reserved_bytes
@@ -4455,6 +4483,25 @@ void export_lang(py::module &m) {
       .def("spmv", &CompiledKernelLinearOperator::nd_spmv)
       .def("update_numeric_data",
            &CompiledKernelLinearOperator::update_numeric_data);
+
+  py::class_<CompiledGraphLinearOperator, SparseMatrix>(
+      m, "CompiledGraphLinearOperator")
+      .def("spmv", &CompiledGraphLinearOperator::nd_spmv)
+      .def(
+          "update_numeric_data",
+          [](CompiledGraphLinearOperator &operator_, Program *program,
+             const py::dict &numeric_args,
+             std::uint64_t expected_topology_version,
+             std::uint64_t expected_numeric_version) {
+            CompiledGraphLinearOperator::NdarrayArguments numeric;
+            for (const auto &item : numeric_args) {
+              numeric.emplace(py::cast<std::string>(item.first),
+                              &py::cast<const Ndarray &>(item.second));
+            }
+            operator_.update_numeric_arguments(
+                program, std::move(numeric), expected_topology_version,
+                expected_numeric_version);
+          });
 
   py::class_<CuSparseMatrix, SparseMatrix>(m, "CuSparseMatrix")
       .def(py::init<int, int, DataType>())
@@ -4895,7 +4942,8 @@ void export_lang(py::module &m) {
         resources["refresh_peak_temporary_device_bytes"] =
             stats.refresh_peak_temporary_device_bytes;
         const bool external_inverse_operator =
-            stats.method == "compiled_kernel_inverse_apply";
+            stats.method == "compiled_kernel_inverse_apply" ||
+            stats.method == "compiled_graph_inverse_apply";
         resources["ownership_scope"] =
             external_inverse_operator ? "external_inverse_operator"
                                       : "preconditioner_inverse";

@@ -549,6 +549,15 @@ class SparseMatrix:
         storage_format = identity["storage_format"]
         provider_name = stats["provider"]["name"]
         is_bsr = storage_format == "bsr"
+        is_matrix_free_kernel = (
+            storage_format == "matrix_free_kernel"
+            and provider_name == "forge_compiled_taichi_kernel"
+        )
+        is_matrix_free_graph = (
+            storage_format == "matrix_free_graph"
+            and provider_name == "forge_compiled_graph"
+        )
+        is_matrix_free = is_matrix_free_kernel or is_matrix_free_graph
         is_cpu_eigen = provider_name == "eigen" and storage_format in (
             "csr",
             "csc",
@@ -595,19 +604,44 @@ class SparseMatrix:
                 "block_size": identity["block_size"],
             },
             "pattern": {
-                "ownership": ("shared_immutable" if resources["pattern_storage_shared"] else "operator_copy"),
-                "mutability": ("provider_mutable" if is_cpu_eigen else "fixed"),
-                "canonical_compressed_indices": True,
-                "empty_supported": not is_bsr and not resources["pattern_storage_shared"],
-                "value_order": ("block_row_major_dense_row_major" if is_bsr else "provider_compressed_order"),
+                "ownership": (
+                    "typed_operator_snapshot"
+                    if is_matrix_free
+                    else (
+                        "shared_immutable"
+                        if resources["pattern_storage_shared"]
+                        else "operator_copy"
+                    )
+                ),
+                "mutability": (
+                    "provider_mutable" if is_cpu_eigen else "fixed"
+                ),
+                "canonical_compressed_indices": not is_matrix_free,
+                "empty_supported": not is_matrix_free
+                and not is_bsr
+                and not resources["pattern_storage_shared"],
+                "value_order": (
+                    "typed_resource_roles"
+                    if is_matrix_free
+                    else (
+                        "block_row_major_dense_row_major"
+                        if is_bsr
+                        else "provider_compressed_order"
+                    )
+                ),
                 "numeric_update_preserves_pattern": True,
-                "numeric_update_requires_same_stored_scalar_count": True,
+                "numeric_update_requires_same_stored_scalar_count": (
+                    not is_matrix_free
+                ),
+                "numeric_update_requires_complete_typed_role_set": (
+                    is_matrix_free_graph
+                ),
             },
             "operations": {
                 "ndarray_spmv": True,
                 "numpy_spmv": is_cpu_eigen,
                 "field_spmv_via_host": is_cpu_eigen,
-                "value_update": True,
+                "value_update": not is_matrix_free,
                 "element_read": is_cpu_eigen or is_cuda_csr,
                 "element_write": is_cpu_eigen,
                 "to_string": is_cpu_eigen or is_cuda_csr,
@@ -644,6 +678,9 @@ class SparseMatrix:
                 "block_solver_requires_square": is_bsr,
                 "public_builder_available": scalar_public,
                 "public_bsr_available": is_bsr,
+                "matrix_free_provider": is_matrix_free,
+                "matrix_free_provider_private": is_matrix_free,
+                "matrix_free_public_cg": False,
                 "silent_format_fallback": False,
             },
         }

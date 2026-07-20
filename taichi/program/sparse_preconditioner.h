@@ -159,17 +159,17 @@ std::unique_ptr<SparseBlockJacobiPreconditionerPlan>
 make_sparse_block_jacobi_preconditioner_plan(Program *program,
                                              SparseMatrix &matrix);
 
-// Internal matrix-free preconditioner contract. The target operator and the
-// independently compiled inverse-apply operator keep their own storage and
-// version streams; this plan only binds them transactionally. No diagonal,
-// block structure, symmetry, or positive-definiteness is inferred from opaque
-// operator data.
+// Internal matrix-free preconditioner contract. The compiled-kernel target
+// operator and an independently compiled kernel or Graph inverse-apply
+// provider keep their own storage and version streams; this plan only binds
+// them transactionally. No diagonal, block structure, symmetry, or
+// positive-definiteness is inferred from opaque operator data.
 class CompiledKernelPreconditionerPlan final {
  public:
   CompiledKernelPreconditionerPlan(
       Program *program,
       CompiledKernelLinearOperator &target_operator,
-      CompiledKernelLinearOperator &inverse_apply_operator,
+      SparseMatrix &inverse_apply_operator,
       bool assume_symmetric_positive_definite);
 
   void validate_compatible(
@@ -189,7 +189,7 @@ class CompiledKernelPreconditionerPlan final {
 
   Program *program_{nullptr};
   CompiledKernelLinearOperator *target_operator_{nullptr};
-  CompiledKernelLinearOperator *inverse_apply_operator_{nullptr};
+  SparseMatrix *inverse_apply_operator_{nullptr};
   std::uint64_t target_pattern_version_at_build_{0};
   std::uint64_t target_numeric_version_at_build_{0};
   std::uint64_t inverse_pattern_version_at_build_{0};
@@ -202,7 +202,7 @@ std::unique_ptr<CompiledKernelPreconditionerPlan>
 make_compiled_kernel_preconditioner_plan(
     Program *program,
     CompiledKernelLinearOperator &target_operator,
-    CompiledKernelLinearOperator &inverse_apply_operator,
+    SparseMatrix &inverse_apply_operator,
     bool assume_symmetric_positive_definite);
 
 }  // namespace taichi::lang

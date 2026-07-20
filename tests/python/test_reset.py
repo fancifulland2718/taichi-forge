@@ -165,6 +165,122 @@ def test_reset_rejects_public_sparse_pattern_and_matrix():
     gc.collect()
 
 
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    offline_cache=False,
+)
+def test_reset_rejects_matrix_free_graph_adapter_before_native_access():
+    size = 4
+    topology = ti.ndarray(ti.i32, shape=size)
+    numeric = ti.ndarray(ti.f32, shape=size)
+    input_array = ti.ndarray(ti.f32, shape=size)
+    topology.from_numpy(np.arange(size, dtype=np.int32))
+    numeric.from_numpy(np.asarray([2.0, 3.0, 4.0, 5.0], dtype=np.float32))
+    input_array.from_numpy(
+        np.asarray([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    )
+
+    @ti.kernel
+    def apply_diagonal(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(active_size):
+            y[index] = numeric_data[index] * x[topology_data[index]]
+
+    sym_active_size = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "active_size", ti.i32
+    )
+    sym_topology = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "topology", ti.i32, ndim=1
+    )
+    sym_numeric = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "numeric", ti.f32, ndim=1
+    )
+    sym_input = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1
+    )
+    sym_output = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        apply_diagonal,
+        sym_active_size,
+        sym_topology,
+        sym_numeric,
+        sym_input,
+        sym_output,
+    )
+    graph = builder.compile()
+    prog = impl.get_runtime().prog
+    arch = impl.current_cfg().arch
+    core = prog._create_compiled_graph_linear_operator(
+        graph._compiled_graph,
+        size,
+        1,
+        1,
+        {"active_size": size},
+        {"topology": topology.arr},
+        {"numeric": numeric.arr},
+        {},
+    )
+    operator = ti.linalg.SparseMatrix(sm=core)
+    contract = operator._get_format_contract()
+    assert contract["identity"]["storage_format"] == "matrix_free_graph"
+    assert contract["pattern"]["ownership"] == "typed_operator_snapshot"
+    assert not contract["pattern"]["canonical_compressed_indices"]
+    assert contract["pattern"][
+        "numeric_update_requires_complete_typed_role_set"
+    ]
+    assert contract["operations"]["ndarray_spmv"]
+    assert not contract["operations"]["value_update"]
+    assert not contract["operations"]["public_cg"]
+    assert contract["constraints"]["matrix_free_provider_private"]
+
+    result = operator @ input_array
+    ti.sync()
+    np.testing.assert_array_equal(
+        result.to_numpy(),
+        np.asarray([2.0, 6.0, 12.0, 20.0], dtype=np.float32),
+    )
+    with pytest.raises(
+        TaichiRuntimeError,
+        match="operation 'public_cg'.*matrix_free_graph",
+    ):
+        ti.linalg.SparseCG(operator, input_array)
+
+    ti.reset()
+    ti.init(arch=arch, enable_fallback=False, offline_cache=False)
+    replacement_input = ti.ndarray(ti.f32, shape=size)
+    replacement_output = ti.ndarray(ti.f32, shape=size)
+    replacement_input.fill(1.0)
+    replacement_output.fill(23.0)
+    with pytest.raises(
+        TaichiRuntimeError,
+        match="SparseMatrix cannot be used after its Taichi runtime has been reset",
+    ):
+        operator @ replacement_input
+    with pytest.raises(RuntimeError, match="requires its owning Program"):
+        core.spmv(
+            impl.get_runtime().prog,
+            replacement_input.arr,
+            replacement_output.arr,
+        )
+    ti.sync()
+    np.testing.assert_array_equal(
+        replacement_output.to_numpy(),
+        np.full(size, 23.0, dtype=np.float32),
+    )
+
+    del operator, core, result, graph
+    del topology, numeric, input_array
+    gc.collect()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_reset_retires_inflight_argpack():
     sink = ti.field(ti.i32, shape=())

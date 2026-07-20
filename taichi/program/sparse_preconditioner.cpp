@@ -1339,18 +1339,29 @@ make_sparse_block_jacobi_preconditioner_plan(Program *program,
 CompiledKernelPreconditionerPlan::CompiledKernelPreconditionerPlan(
     Program *program,
     CompiledKernelLinearOperator &target_operator,
-    CompiledKernelLinearOperator &inverse_apply_operator,
+    SparseMatrix &inverse_apply_operator,
     bool assume_symmetric_positive_definite) {
   TI_ERROR_IF(!program || !assume_symmetric_positive_definite,
               "Compiled-kernel preconditioners require an owning Program "
               "and an explicit symmetric-positive-definite contract.");
-  TI_ERROR_IF(&target_operator == &inverse_apply_operator,
+  auto *compiled_kernel_inverse =
+      dynamic_cast<CompiledKernelLinearOperator *>(&inverse_apply_operator);
+  auto *compiled_graph_inverse =
+      dynamic_cast<CompiledGraphLinearOperator *>(&inverse_apply_operator);
+  TI_ERROR_IF(!compiled_kernel_inverse && !compiled_graph_inverse,
+              "Compiled-kernel preconditioners require an inverse-apply "
+              "provider backed by a compiled kernel or compiled Graph.");
+  Program *inverse_program = compiled_kernel_inverse
+                                 ? compiled_kernel_inverse->owning_program()
+                                 : compiled_graph_inverse->owning_program();
+  TI_ERROR_IF(static_cast<SparseMatrix *>(&target_operator) ==
+                  &inverse_apply_operator,
               "Compiled-kernel preconditioners require a distinct "
               "inverse-apply operator.");
   TI_ERROR_IF(target_operator.owning_program() != program ||
-                  inverse_apply_operator.owning_program() != program,
-              "Compiled-kernel preconditioner operators must belong to the "
-              "same Program.");
+                  inverse_program != program,
+              "Compiled-kernel target and inverse-apply providers must "
+              "belong to the same Program.");
   TI_ERROR_IF(target_operator.num_rows() != inverse_apply_operator.num_rows() ||
                   target_operator.num_cols() !=
                       inverse_apply_operator.num_cols() ||
@@ -1433,7 +1444,10 @@ CompiledKernelPreconditionerPlan::debug_runtime_statistics() const {
       inverse_apply_operator_->debug_runtime_statistics();
   SparsePreconditionerPlanRuntimeStatistics result;
   result.backend_family = target_stats.backend_family;
-  result.method = "compiled_kernel_inverse_apply";
+  result.method =
+      dynamic_cast<CompiledGraphLinearOperator *>(inverse_apply_operator_)
+          ? "compiled_graph_inverse_apply"
+          : "compiled_kernel_inverse_apply";
   result.dtype = "f32";
   result.rows = target_operator_->num_rows();
   result.operator_pattern_version_at_build =
@@ -1468,7 +1482,7 @@ std::unique_ptr<CompiledKernelPreconditionerPlan>
 make_compiled_kernel_preconditioner_plan(
     Program *program,
     CompiledKernelLinearOperator &target_operator,
-    CompiledKernelLinearOperator &inverse_apply_operator,
+    SparseMatrix &inverse_apply_operator,
     bool assume_symmetric_positive_definite) {
   return std::make_unique<CompiledKernelPreconditionerPlan>(
       program, target_operator, inverse_apply_operator,

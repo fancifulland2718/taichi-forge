@@ -13,7 +13,9 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 namespace taichi::lang {
@@ -26,6 +28,10 @@ class VulkanSparseAssemblyPlan;
 class Kernel;
 class CompiledKernelData;
 class LaunchContextBuilder;
+namespace aot {
+struct CompiledGraph;
+struct CompiledGraphJITCache;
+}  // namespace aot
 
 // Private diagnostic inventory for the algebraic sparse operator boundary.
 // Persistent matrix/SpMV resources are operator-owned; input/output ndarrays
@@ -66,6 +72,7 @@ struct SparseMatrixRuntimeStatistics {
   std::uint64_t spmv_workspace_reserved_bytes{0};
   std::uint64_t operator_owned_reserved_bytes{0};
   std::uint64_t operator_exclusive_reserved_bytes{0};
+  std::uint64_t numeric_update_peak_temporary_bytes{0};
   std::uint64_t shared_pattern_id{0};
   std::uint64_t shared_pattern_operator_references{0};
   bool pattern_storage_shared{false};
@@ -371,6 +378,74 @@ class CompiledKernelLinearOperator final : public SparseMatrix {
   std::uint64_t numeric_data_bytes_{0};
   std::size_t input_arg_index_{2};
   std::size_t output_arg_index_{3};
+  std::uint64_t topology_version_{0};
+  std::uint64_t numeric_version_{0};
+  mutable std::mutex spmv_mutex_;
+};
+
+// Internal square f32 operator backed by a fixed multi-kernel CGraph. The
+// provider accepts only fixed i32 scalars, owned scalar ndarray snapshots, and
+// reserved dynamic input/output vectors. Ndarray roles remain explicit so
+// topology, numeric data, and mutable workspace are not conflated in memory
+// telemetry. Public sparse capabilities stay disabled.
+class CompiledGraphLinearOperator final : public SparseMatrix {
+ public:
+  using FixedI32Arguments = std::unordered_map<std::string, std::int32_t>;
+  using NdarrayArguments =
+      std::unordered_map<std::string, const Ndarray *>;
+
+  CompiledGraphLinearOperator(
+      Program *program,
+      const aot::CompiledGraph &graph,
+      int size,
+      std::uint64_t topology_version,
+      std::uint64_t numeric_version,
+      FixedI32Arguments fixed_i32_arguments,
+      NdarrayArguments topology_arguments,
+      NdarrayArguments numeric_arguments,
+      NdarrayArguments workspace_arguments);
+  ~CompiledGraphLinearOperator() override;
+
+  void nd_spmv(Program *program,
+               const Ndarray &input,
+               const Ndarray &output) override;
+  void update_numeric_arguments(
+      Program *program,
+      NdarrayArguments numeric_arguments,
+      std::uint64_t expected_topology_version,
+      std::uint64_t expected_numeric_version);
+  SparseMatrixRuntimeStatistics debug_runtime_statistics() const override;
+
+  Program *owning_program() const {
+    return program_;
+  }
+
+  int num_nonzero() const override {
+    return 0;
+  }
+
+ private:
+  enum class NdarrayRole {
+    topology,
+    numeric,
+    workspace,
+  };
+
+  struct OwnedNdarrayArgument {
+    std::string name;
+    Ndarray *value{nullptr};
+    NdarrayRole role{NdarrayRole::topology};
+  };
+
+  Program *program_{nullptr};
+  std::unique_ptr<aot::CompiledGraph> graph_;
+  std::unique_ptr<aot::CompiledGraphJITCache> cache_;
+  FixedI32Arguments fixed_i32_arguments_;
+  std::vector<OwnedNdarrayArgument> owned_ndarray_arguments_;
+  std::uint64_t topology_reserved_bytes_{0};
+  std::uint64_t numeric_reserved_bytes_{0};
+  std::uint64_t workspace_reserved_bytes_{0};
+  std::uint64_t numeric_update_peak_temporary_bytes_{0};
   std::uint64_t topology_version_{0};
   std::uint64_t numeric_version_{0};
   mutable std::mutex spmv_mutex_;
