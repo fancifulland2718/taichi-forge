@@ -1,0 +1,65 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Rows {
+  int rows[];
+};
+layout(set = 0, binding = 1) readonly buffer Columns {
+  int columns[];
+};
+layout(set = 0, binding = 2) readonly buffer Values {
+  float values[];
+};
+layout(set = 0, binding = 3) writeonly buffer Keys {
+  uint64_t keys[];
+};
+layout(set = 0, binding = 4) writeonly buffer SortedValues {
+  float sorted_values[];
+};
+layout(set = 0, binding = 5) buffer ActiveCount {
+  int active_count[];
+};
+layout(set = 0, binding = 6) buffer Control {
+  int control[];
+};
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint num_rows;
+  uint num_columns;
+  uint reserved;
+} params;
+
+void set_status(int value) {
+  atomicCompSwap(control[0], 0, -value);
+}
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= params.n) {
+    return;
+  }
+  if (i == 0u) {
+    active_count[0] = int(params.n);
+  }
+  int row = rows[i];
+  int column = columns[i];
+  float value = values[i];
+  if (row < 0 || column < 0 || uint(row) >= params.num_rows ||
+      uint(column) >= params.num_columns) {
+    set_status(1);
+    keys[i] = ~uint64_t(0);
+    sorted_values[i] = 0.0;
+    return;
+  }
+  if (isnan(value) || isinf(value)) {
+    set_status(2);
+    keys[i] = ~uint64_t(0);
+    sorted_values[i] = 0.0;
+    return;
+  }
+  keys[i] = (uint64_t(uint(row)) << 32) | uint64_t(uint(column));
+  sorted_values[i] = value;
+}

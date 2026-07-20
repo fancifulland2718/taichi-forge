@@ -30,15 +30,23 @@ void DynamicLoader::load_dll(const std::string &dll_path) {
 #endif
 }
 
-void *DynamicLoader::load_function(const std::string &func_name) {
+void *DynamicLoader::load_function_optional(const std::string &func_name) {
   TI_ASSERT_INFO(loaded(), "DLL not opened");
 #ifdef WIN32
-  auto func = (void *)GetProcAddress((HMODULE)dll_, func_name.c_str());
+  return (void *)GetProcAddress((HMODULE)dll_, func_name.c_str());
 #else
+  // POSIX only defines dlsym() failure through dlerror(). Clear any stale
+  // error before lookup, then consume this lookup's error without surfacing it
+  // for an optional capability.
+  dlerror();
   auto func = dlsym(dll_, func_name.c_str());
   const char *dlsym_error = dlerror();
-  TI_ERROR_IF(dlsym_error, "Cannot load function: {}", dlsym_error);
+  return dlsym_error == nullptr ? func : nullptr;
 #endif
+}
+
+void *DynamicLoader::load_function(const std::string &func_name) {
+  auto func = load_function_optional(func_name);
   TI_ERROR_IF(!func, "Function {} not found", func_name);
   return func;
 }

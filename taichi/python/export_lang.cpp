@@ -32,8 +32,12 @@
 #include "taichi/codegen/spirv/spv_stats.h"
 #include "taichi/python/snode_registry.h"
 #include "taichi/program/sparse_matrix.h"
+#include "taichi/program/sparse_preconditioner.h"
 #include "taichi/program/sparse_solver.h"
 #include "taichi/program/conjugate_gradient.h"
+#include "taichi/program/sparse_bicgstab.h"
+#include "taichi/program/sparse_fixed_bicgstab.h"
+#include "taichi/program/sparse_minres.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/ir/mesh.h"
@@ -1120,7 +1124,7 @@ void export_lang(py::module &m) {
           py::return_value_policy::reference)
       .def("create_function", &Program::create_function,
            py::return_value_policy::reference)
-      .def("create_sparse_matrix",
+       .def("create_sparse_matrix",
            [](Program *program, int n, int m, DataType dtype,
               std::string storage_format) {
              TI_ERROR_IF(!arch_is_cpu(program->compile_config().arch) &&
@@ -1128,9 +1132,156 @@ void export_lang(py::module &m) {
                          "SparseMatrix only supports CPU and CUDA for now.");
              if (arch_is_cpu(program->compile_config().arch))
                return make_sparse_matrix(n, m, dtype, storage_format);
-             else
-               return make_cu_sparse_matrix(n, m, dtype);
-           })
+              else
+                return make_cu_sparse_matrix(n, m, dtype);
+            })
+      .def("_create_bsr_pattern",
+           [](Program *program, int block_rows, int block_cols, int block_size,
+              const Ndarray &row_offsets, const Ndarray &column_indices) {
+             return std::make_shared<SparseBsrPattern>(
+                 program, block_rows, block_cols, block_size, row_offsets,
+                 column_indices);
+           },
+           py::keep_alive<0, 1>())
+      .def("_create_csr_pattern",
+           [](Program *program, int rows, int cols,
+              const Ndarray &row_offsets, const Ndarray &column_indices) {
+             return std::make_shared<SparseCsrPattern>(
+                 program, rows, cols, row_offsets, column_indices);
+           },
+           py::keep_alive<0, 1>())
+      .def("_create_csr_matrix_from_pattern",
+           [](Program *program, std::shared_ptr<SparseCsrPattern> pattern,
+              const Ndarray &values) -> std::unique_ptr<SparseMatrix> {
+             TI_ERROR_IF(!pattern || pattern->program() != program,
+                         "Internal CSR operator construction requires a "
+                         "pattern owned by the same Program.");
+             if (arch_is_cpu(program->compile_config().arch)) {
+               return std::make_unique<CpuSparseCsrMatrix>(
+                   std::move(pattern), values);
+             }
+             if (arch_is_cuda(program->compile_config().arch)) {
+               return std::make_unique<CuSparseMatrix>(
+                   std::move(pattern), values);
+             }
+             if (program->compile_config().arch == Arch::vulkan) {
+               return std::make_unique<VulkanSparseMatrix>(
+                   std::move(pattern), values);
+             }
+             TI_ERROR(
+                 "Internal CSR operators support CPU, CUDA, and Vulkan "
+                 "backends, got {}.",
+                 arch_name(program->compile_config().arch));
+           },
+           py::keep_alive<0, 1>())
+      .def("_create_bsr_matrix_from_pattern",
+           [](Program *program, std::shared_ptr<SparseBsrPattern> pattern,
+              const Ndarray &values) -> std::unique_ptr<SparseMatrix> {
+             TI_ERROR_IF(!pattern || pattern->program() != program,
+                         "Internal BSR operator construction requires a "
+                         "pattern owned by the same Program.");
+             if (arch_is_cpu(program->compile_config().arch)) {
+               return std::make_unique<CpuSparseBsrMatrix>(
+                   std::move(pattern), values);
+             }
+             if (arch_is_cuda(program->compile_config().arch)) {
+               return std::make_unique<CuSparseBsrMatrix>(
+                   std::move(pattern), values);
+             }
+             if (program->compile_config().arch == Arch::vulkan) {
+               return std::make_unique<VulkanSparseBsrMatrix>(
+                   std::move(pattern), values);
+             }
+             TI_ERROR(
+                 "Internal BSR operators support CPU, CUDA, and Vulkan "
+                 "backends, got {}.",
+                 arch_name(program->compile_config().arch));
+           },
+           py::keep_alive<0, 1>())
+      .def("_create_cpu_bsr_matrix",
+           [](Program *program, int block_rows, int block_cols, int block_size,
+              const Ndarray &row_offsets, const Ndarray &column_indices,
+              const Ndarray &values) {
+             TI_ERROR_IF(!arch_is_cpu(program->compile_config().arch),
+                         "Internal CPU BSR matrices require a CPU backend.");
+             return std::make_unique<CpuSparseBsrMatrix>(
+                 program, block_rows, block_cols, block_size, row_offsets,
+                 column_indices, values);
+           },
+           py::keep_alive<0, 1>())
+      .def("_create_cuda_bsr_matrix",
+           [](Program *program, int block_rows, int block_cols, int block_size,
+              const Ndarray &row_offsets, const Ndarray &column_indices,
+              const Ndarray &values) {
+             TI_ERROR_IF(!arch_is_cuda(program->compile_config().arch),
+                         "Internal BSR matrices require the CUDA backend.");
+             return std::make_unique<CuSparseBsrMatrix>(
+                 program, block_rows, block_cols, block_size, row_offsets,
+                 column_indices, values);
+           },
+           py::keep_alive<0, 1>())
+      .def("_create_vulkan_csr_matrix",
+           [](Program *program, int rows, int cols, const Ndarray &row_offsets,
+              const Ndarray &column_indices, const Ndarray &values) {
+             TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
+                         "Internal Vulkan CSR matrices require the Vulkan "
+                         "backend.");
+             return std::make_unique<VulkanSparseMatrix>(
+                 program, rows, cols, row_offsets, column_indices, values);
+           },
+           py::keep_alive<0, 1>())
+      .def("_create_vulkan_bsr_matrix",
+           [](Program *program, int block_rows, int block_cols, int block_size,
+              const Ndarray &row_offsets, const Ndarray &column_indices,
+              const Ndarray &values) {
+             TI_ERROR_IF(program->compile_config().arch != Arch::vulkan,
+                         "Internal Vulkan BSR matrices require the Vulkan "
+                         "backend.");
+             return std::make_unique<VulkanSparseBsrMatrix>(
+                 program, block_rows, block_cols, block_size, row_offsets,
+                 column_indices, values);
+           },
+           py::keep_alive<0, 1>())
+      .def("_vulkan_sparse_assembly_available",
+           &Program::vulkan_sparse_assembly_available)
+      .def("_cuda_sparse_assembly_available",
+           &Program::cuda_sparse_assembly_available)
+      .def("_vulkan_sparse_axpy",
+           tracked_native_program_method(&Program::vulkan_sparse_axpy),
+           py::arg("x"), py::arg("y"), py::arg("n"),
+           py::arg("alpha"))
+      .def("_vulkan_sparse_dot",
+           tracked_native_program_method(&Program::vulkan_sparse_dot),
+           py::arg("x"), py::arg("y"), py::arg("output"),
+           py::arg("n"))
+      .def("_vulkan_sparse_norm",
+           tracked_native_program_method(&Program::vulkan_sparse_norm),
+           py::arg("x"), py::arg("output"), py::arg("n"))
+      .def("_vulkan_sparse_scalar_divide",
+           tracked_native_program_method(
+               &Program::vulkan_sparse_scalar_divide),
+           py::arg("numerator"), py::arg("denominator"),
+           py::arg("quotient"), py::arg("status"))
+      .def("_vulkan_sparse_cg_update",
+           tracked_native_program_method(&Program::vulkan_sparse_cg_update),
+           py::arg("direction"), py::arg("applied_direction"),
+           py::arg("alpha"), py::arg("solution"),
+           py::arg("residual"), py::arg("n"))
+      .def("_vulkan_sparse_cg_direction",
+           tracked_native_program_method(
+               &Program::vulkan_sparse_cg_direction),
+           py::arg("residual"), py::arg("beta"),
+           py::arg("direction"), py::arg("n"))
+      .def("_vulkan_sparse_convergence",
+           tracked_native_program_method(
+               &Program::vulkan_sparse_convergence),
+           py::arg("residual_squared"), py::arg("status"),
+           py::arg("completed_iterations"),
+           py::arg("tolerance_squared"), py::arg("iteration"))
+      .def("_vulkan_sparse_algebra_clear_workspace",
+           &Program::vulkan_sparse_algebra_clear_workspace)
+      .def("_vulkan_sparse_algebra_workspace_bytes",
+           &Program::vulkan_sparse_algebra_workspace_bytes)
       .def("make_sparse_matrix_from_ndarray",
            [](Program *program, SparseMatrix &sm, const Ndarray &ndarray) {
              TI_ERROR_IF(!arch_is_cpu(program->compile_config().arch) &&
@@ -4022,9 +4173,67 @@ void export_lang(py::module &m) {
              return builder->delete_ndarray(prog);
            })
       .def("get_ndarray_data_ptr", &SparseMatrixBuilder::get_ndarray_data_ptr)
+      .def("get_ndarray", &SparseMatrixBuilder::get_ndarray,
+           py::return_value_policy::reference)
       .def("build", &SparseMatrixBuilder::build)
       .def("build_cuda", &SparseMatrixBuilder::build_cuda)
+      .def("build_vulkan", &SparseMatrixBuilder::build_vulkan)
       .def("get_addr", [](SparseMatrixBuilder *mat) { return uint64(mat); });
+
+  py::class_<SparsePattern, std::shared_ptr<SparsePattern>>(m,
+                                                            "SparsePattern");
+  auto sparse_pattern_runtime_stats =
+      [](const SparsePattern &pattern) {
+        const auto stats = pattern.debug_runtime_statistics();
+        py::dict identity;
+        identity["backend_family"] = stats.backend_family;
+        identity["storage_format"] = stats.storage_format;
+        identity["index_dtype"] = stats.index_dtype;
+        identity["value_order"] = stats.value_order;
+        identity["rows"] = stats.rows;
+        identity["cols"] = stats.cols;
+        identity["nnz"] = stats.nnz;
+        identity["block_rows"] = stats.block_rows;
+        identity["block_cols"] = stats.block_cols;
+        identity["block_size"] = stats.block_size;
+        identity["block_nnz"] = stats.block_nnz;
+        identity["pattern_id"] = stats.pattern_id;
+        identity["pattern_version"] = stats.pattern_version;
+
+        py::dict lifecycle;
+        lifecycle["immutable"] = stats.immutable;
+        lifecycle["pattern_builds"] = stats.pattern_builds;
+        lifecycle["operator_references"] = stats.operator_references;
+        lifecycle["program_bound"] = true;
+
+        py::dict resources;
+        resources["pattern_reserved_bytes"] =
+            stats.pattern_reserved_bytes;
+        resources["ownership_scope"] =
+            "shared_immutable_pattern_storage";
+        resources["sum_once_across_operators"] = true;
+
+        py::dict transfers;
+        transfers["host_to_device_bytes"] = stats.host_to_device_bytes;
+        transfers["device_to_host_bytes"] = stats.device_to_host_bytes;
+        transfers["device_to_device_bytes"] =
+            stats.device_to_device_bytes;
+        transfers["scope"] = "pattern_creation_only";
+
+        py::dict result;
+        result["schema_version"] = 1;
+        result["identity"] = std::move(identity);
+        result["lifecycle"] = std::move(lifecycle);
+        result["resources"] = std::move(resources);
+        result["transfers"] = std::move(transfers);
+        return result;
+      };
+  py::class_<SparseCsrPattern, SparsePattern,
+             std::shared_ptr<SparseCsrPattern>>(m, "SparseCsrPattern")
+      .def("_debug_runtime_stats", sparse_pattern_runtime_stats);
+  py::class_<SparseBsrPattern, SparsePattern,
+             std::shared_ptr<SparseBsrPattern>>(m, "SparseBsrPattern")
+      .def("_debug_runtime_stats", sparse_pattern_runtime_stats);
 
   py::class_<SparseMatrix>(m, "SparseMatrix")
       .def(py::init<>())
@@ -4048,8 +4257,24 @@ void export_lang(py::module &m) {
         identity["rows"] = stats.rows;
         identity["cols"] = stats.cols;
         identity["nnz"] = stats.nnz;
+        if (stats.block_size > 0) {
+          identity["block_rows"] = stats.block_rows;
+          identity["block_cols"] = stats.block_cols;
+          identity["block_size"] = stats.block_size;
+          identity["block_nnz"] = stats.block_nnz;
+        } else {
+          identity["block_rows"] = py::none();
+          identity["block_cols"] = py::none();
+          identity["block_size"] = py::none();
+          identity["block_nnz"] = py::none();
+        }
         identity["pattern_version"] = stats.pattern_version;
         identity["numeric_version"] = stats.numeric_version;
+        if (stats.pattern_storage_shared) {
+          identity["pattern_id"] = stats.shared_pattern_id;
+        } else {
+          identity["pattern_id"] = py::none();
+        }
 
         py::dict operations;
         operations["pattern_builds"] = stats.pattern_builds;
@@ -4075,6 +4300,20 @@ void export_lang(py::module &m) {
             stats.spmv_workspace_reserved_bytes;
         resources["operator_owned_reserved_bytes"] =
             stats.operator_owned_reserved_bytes;
+        resources["operator_exclusive_reserved_bytes"] =
+            stats.pattern_storage_shared
+                ? stats.operator_exclusive_reserved_bytes
+                : stats.operator_owned_reserved_bytes;
+        resources["pattern_storage_shared"] =
+            stats.pattern_storage_shared;
+        if (stats.pattern_storage_shared) {
+          resources["shared_pattern_operator_references"] =
+              stats.shared_pattern_operator_references;
+        } else {
+          resources["shared_pattern_operator_references"] = py::none();
+        }
+        resources["sum_operator_owned_bytes_across_operators_safe"] =
+            !stats.pattern_storage_shared;
         resources["matrix_descriptor_count"] =
             stats.matrix_descriptor_count;
         resources["dense_vector_descriptor_count"] =
@@ -4082,7 +4321,9 @@ void export_lang(py::module &m) {
         resources["spmv_handle_count"] = stats.spmv_handle_count;
         resources["opaque_provider_resource_bytes"] = py::none();
         resources["ownership_scope"] =
-            "matrix_pattern_values_and_persistent_spmv_plan";
+            stats.pattern_storage_shared
+                ? "matrix_values_plan_and_shared_pattern_reference"
+                : "matrix_pattern_values_and_persistent_spmv_plan";
         resources["excluded"] =
             "builder_staging_transients_input_output_vectors_and_solver_"
             "workspace";
@@ -4094,12 +4335,34 @@ void export_lang(py::module &m) {
             stats.device_to_device_bytes;
         transfers["scope"] = "direct_backend_copies_attributed_to_operator";
 
+        py::dict provider;
+        provider["name"] = stats.provider_name;
+        if (stats.provider_version_major >= 0 &&
+            stats.provider_version_minor >= 0 &&
+            stats.provider_version_patch >= 0) {
+          py::dict version;
+          version["major"] = stats.provider_version_major;
+          version["minor"] = stats.provider_version_minor;
+          version["patch"] = stats.provider_version_patch;
+          provider["library_version"] = std::move(version);
+        } else {
+          provider["library_version"] = py::none();
+        }
+        provider["bsr_descriptor_available"] =
+            stats.provider_bsr_descriptor_available;
+        provider["generic_bsr_spmv_available"] =
+            stats.provider_generic_bsr_spmv_available;
+        provider["selected_storage_format"] = stats.storage_format;
+        provider["capability_scope"] =
+            "loaded_library_symbols_and_version_not_performance";
+
         py::dict result;
         result["schema_version"] = 1;
         result["identity"] = std::move(identity);
         result["operations"] = std::move(operations);
         result["resources"] = std::move(resources);
         result["transfers"] = std::move(transfers);
+        result["provider"] = std::move(provider);
         return result;
       })
       .def("get_data_type", &SparseMatrix::get_data_type);
@@ -4139,6 +4402,11 @@ void export_lang(py::module &m) {
   MAKE_SPARSE_MATRIX(64, ColMajor, d);
   MAKE_SPARSE_MATRIX(64, RowMajor, d);
 
+  py::class_<CpuSparseCsrMatrix, SparseMatrix>(m, "CpuSparseCsrMatrix")
+      .def("spmv", &CpuSparseCsrMatrix::nd_spmv);
+  py::class_<CpuSparseBsrMatrix, SparseMatrix>(m, "CpuSparseBsrMatrix")
+      .def("spmv", &CpuSparseBsrMatrix::nd_spmv);
+
   py::class_<CuSparseMatrix, SparseMatrix>(m, "CuSparseMatrix")
       .def(py::init<int, int, DataType>())
       .def(py::init<const CuSparseMatrix &>())
@@ -4151,6 +4419,202 @@ void export_lang(py::module &m) {
       .def("transpose", &CuSparseMatrix::transpose)
       .def("get_element", &CuSparseMatrix::get_element)
       .def("to_string", &CuSparseMatrix::to_string);
+
+  py::class_<CuSparseBsrMatrix, SparseMatrix>(m, "CuSparseBsrMatrix")
+      .def("spmv", &CuSparseBsrMatrix::nd_spmv);
+
+  py::class_<VulkanSparseMatrix, SparseMatrix>(m, "VulkanSparseMatrix")
+      .def("spmv", &VulkanSparseMatrix::nd_spmv);
+  py::class_<VulkanSparseBsrMatrix, SparseMatrix>(
+      m, "VulkanSparseBsrMatrix")
+      .def("spmv", &VulkanSparseBsrMatrix::nd_spmv);
+
+  py::class_<VulkanSparseAssemblyPlan>(m, "VulkanSparseAssemblyPlan")
+      .def("build", &VulkanSparseAssemblyPlan::build,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_debug_runtime_stats",
+           [](const VulkanSparseAssemblyPlan &plan) {
+             const auto stats = plan.debug_runtime_statistics();
+             py::dict identity;
+             identity["backend_family"] = "vulkan";
+             identity["method"] = "radix_sort_segment_reduce_csr";
+             identity["rows"] = stats.rows;
+             identity["cols"] = stats.cols;
+             identity["triplet_capacity"] = stats.capacity;
+
+             py::dict status;
+             status["last_status"] = stats.last_status;
+             status["last_input_triplets"] = stats.last_input_triplets;
+             status["last_unique_nnz"] = stats.last_unique_nnz;
+             status["last_duplicate_triplets"] =
+                 stats.last_duplicate_triplets;
+             status["codes"] = py::dict(
+                 "ok"_a = 0, "index_out_of_range"_a = 1,
+                 "nonfinite_input"_a = 2,
+                 "nonfinite_duplicate_sum"_a = 3,
+                 "invalid_device_state"_a = 4,
+                 "active_count_exceeds_capacity"_a = 5,
+                 "publish_failed"_a = 6);
+
+             py::dict operations;
+             operations["build_calls"] = stats.build_calls;
+             operations["successful_builds"] = stats.successful_builds;
+             operations["failed_builds"] = stats.failed_builds;
+             operations["workspace_builds"] = stats.workspace_builds;
+             operations["workspace_reuses"] = stats.workspace_reuses;
+             operations["workspace_growth_synchronizations"] =
+                 stats.workspace_growth_synchronizations;
+             operations["host_synchronizations"] =
+                 stats.host_synchronizations;
+             operations["host_control_readbacks"] =
+                 stats.host_control_readbacks;
+             operations["host_scalar_readbacks"] =
+                 stats.host_scalar_readbacks;
+
+             py::dict resources;
+             resources["persistent_workspace_reserved_bytes"] =
+                 stats.persistent_workspace_reserved_bytes;
+             resources["shared_radix_sort_workspace_reserved_bytes"] =
+                 stats.shared_radix_sort_workspace_reserved_bytes;
+             resources["shared_scan_workspace_reserved_bytes"] =
+                 stats.shared_scan_workspace_reserved_bytes;
+             resources["last_output_pattern_bytes"] =
+                 stats.last_output_pattern_bytes;
+             resources["last_output_value_bytes"] =
+                 stats.last_output_value_bytes;
+             resources["workspace_ownership"] =
+                 "plan_staging_plus_program_shared_sort_scan";
+
+             py::dict transfers;
+             transfers["device_to_host_bytes"] =
+                 stats.device_to_host_bytes;
+             transfers["device_to_device_bytes"] =
+                 stats.device_to_device_bytes;
+             transfers["host_to_device_bytes"] = 0;
+             transfers["device_payload_readback_bytes"] = 0;
+
+             py::dict contract;
+             contract["fixed_capacity"] = true;
+             contract["device_resident_triplet_payload"] = true;
+             contract["transactional_publish"] = true;
+             contract["exact_sized_published_csr"] = true;
+             contract["sorted_unique_columns_per_row"] = true;
+             contract["duplicate_reduce_order"] =
+                 "sorted_segment_sequential";
+             contract["control_readback_bytes_per_build"] = 8;
+             contract["public_sparse_builder"] = false;
+             contract["bsr_output"] = false;
+
+             py::dict result;
+             result["schema_version"] = 1;
+             result["identity"] = std::move(identity);
+             result["status"] = std::move(status);
+             result["operations"] = std::move(operations);
+             result["resources"] = std::move(resources);
+             result["transfers"] = std::move(transfers);
+             result["contract"] = std::move(contract);
+             return result;
+           });
+  m.def("_make_vulkan_sparse_assembly_plan",
+        [](Program *program, int rows, int cols, int capacity) {
+          return std::make_unique<VulkanSparseAssemblyPlan>(
+              program, rows, cols, capacity);
+        });
+
+  py::class_<CudaSparseAssemblyPlan>(m, "CudaSparseAssemblyPlan")
+      .def("build", &CudaSparseAssemblyPlan::build,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_debug_runtime_stats",
+           [](const CudaSparseAssemblyPlan &plan) {
+             const auto stats = plan.debug_runtime_statistics();
+             py::dict identity;
+             identity["backend_family"] = "cuda";
+             identity["method"] = "radix_sort_segment_reduce_csr";
+             identity["rows"] = stats.rows;
+             identity["cols"] = stats.cols;
+             identity["triplet_capacity"] = stats.capacity;
+
+             py::dict status;
+             status["last_status"] = stats.last_status;
+             status["last_input_triplets"] = stats.last_input_triplets;
+             status["last_unique_nnz"] = stats.last_unique_nnz;
+             status["last_duplicate_triplets"] =
+                 stats.last_duplicate_triplets;
+             status["codes"] = py::dict(
+                 "ok"_a = 0, "index_out_of_range"_a = 1,
+                 "nonfinite_input"_a = 2,
+                 "nonfinite_duplicate_sum"_a = 3,
+                 "invalid_device_state"_a = 4,
+                 "active_count_out_of_range"_a = 5,
+                 "publish_failed"_a = 6);
+
+             py::dict operations;
+             operations["build_calls"] = stats.build_calls;
+             operations["successful_builds"] = stats.successful_builds;
+             operations["failed_builds"] = stats.failed_builds;
+             operations["workspace_builds"] = stats.workspace_builds;
+             operations["workspace_reuses"] = stats.workspace_reuses;
+             operations["workspace_growth_synchronizations"] =
+                 stats.workspace_growth_synchronizations;
+             operations["host_synchronizations"] =
+                 stats.host_synchronizations;
+             operations["host_control_readbacks"] =
+                 stats.host_control_readbacks;
+             operations["host_scalar_readbacks"] =
+                 stats.host_scalar_readbacks;
+
+             py::dict resources;
+             resources["persistent_workspace_reserved_bytes"] =
+                 stats.persistent_workspace_reserved_bytes;
+             resources["shared_radix_sort_workspace_reserved_bytes"] =
+                 stats.shared_radix_sort_workspace_reserved_bytes;
+             resources["shared_scan_workspace_reserved_bytes"] =
+                 stats.shared_scan_workspace_reserved_bytes;
+             resources["last_output_pattern_bytes"] =
+                 stats.last_output_pattern_bytes;
+             resources["last_output_value_bytes"] =
+                 stats.last_output_value_bytes;
+             resources["workspace_ownership"] =
+                 "plan_staging_plus_program_shared_sort_scan";
+
+             py::dict transfers;
+             transfers["device_to_host_bytes"] =
+                 stats.device_to_host_bytes;
+             transfers["device_to_device_bytes"] =
+                 stats.device_to_device_bytes;
+             transfers["host_to_device_bytes"] = 0;
+             transfers["device_payload_readback_bytes"] = 0;
+
+             py::dict contract;
+             contract["fixed_capacity"] = true;
+             contract["device_active_count"] = true;
+             contract["empty_matrix"] = true;
+             contract["device_resident_triplet_payload"] = true;
+             contract["transactional_publish"] = true;
+             contract["exact_sized_published_csr"] = true;
+             contract["sorted_unique_columns_per_row"] = true;
+             contract["duplicate_reduce_order"] =
+                 "stable_sorted_segment_sequential";
+             contract["control_readback_bytes_per_build"] = 8;
+             contract["public_sparse_builder"] = true;
+             contract["bsr_output"] = false;
+             contract["cuda_toolkit_required"] = false;
+
+             py::dict result;
+             result["schema_version"] = 1;
+             result["identity"] = std::move(identity);
+             result["status"] = std::move(status);
+             result["operations"] = std::move(operations);
+             result["resources"] = std::move(resources);
+             result["transfers"] = std::move(transfers);
+             result["contract"] = std::move(contract);
+             return result;
+           });
+  m.def("_make_cuda_sparse_assembly_plan",
+        [](Program *program, int rows, int cols, int capacity) {
+          return std::make_unique<CudaSparseAssemblyPlan>(
+              program, rows, cols, capacity);
+        });
 
   py::class_<SparseSolver>(m, "SparseSolver")
       .def("compute", &SparseSolver::compute)
@@ -4196,6 +4660,38 @@ void export_lang(py::module &m) {
   m.def("make_cusparse_solver", &make_cusparse_solver);
 
   // Conjugate Gradient solver
+  auto sparse_solve_result_to_dict = [](const SparseSolveResult &result) {
+    const char *termination_reason = "not_run";
+    switch (result.status) {
+      case SparseSolveStatus::kMaxIterations:
+        termination_reason = "max_iterations";
+        break;
+      case SparseSolveStatus::kBreakdown:
+        termination_reason = "breakdown";
+        break;
+      case SparseSolveStatus::kConverged:
+        termination_reason = "converged";
+        break;
+      case SparseSolveStatus::kNotRun:
+        break;
+    }
+    py::dict snapshot;
+    snapshot["status_code"] = static_cast<int>(result.status);
+    snapshot["termination_reason"] = termination_reason;
+    snapshot["converged"] = result.converged();
+    snapshot["breakdown"] = result.breakdown();
+    snapshot["reached_max_iterations"] =
+        result.reached_max_iterations();
+    snapshot["iterations"] = result.iterations;
+    snapshot["initial_residual_norm"] = result.initial_residual_norm;
+    snapshot["residual_norm"] = result.residual_norm;
+    snapshot["absolute_tolerance"] = result.absolute_tolerance;
+    snapshot["relative_tolerance"] = result.relative_tolerance;
+    snapshot["relative_reference_norm"] =
+        result.relative_reference_norm;
+    snapshot["effective_tolerance"] = result.effective_tolerance;
+    return snapshot;
+  };
   auto sparse_solve_plan_stats_to_dict =
       [](const SparseSolvePlanRuntimeStatistics &stats) {
         py::dict identity;
@@ -4206,6 +4702,13 @@ void export_lang(py::module &m) {
         identity["cols"] = stats.cols;
         identity["max_iterations"] = stats.max_iterations;
         identity["absolute_tolerance"] = stats.absolute_tolerance;
+        identity["relative_tolerance"] = stats.relative_tolerance;
+        identity["last_relative_reference_norm"] =
+            stats.last_relative_reference_norm;
+        identity["last_effective_tolerance"] =
+            stats.last_effective_tolerance;
+        identity["preconditioner_method"] =
+            stats.preconditioner_method;
         identity["operator_pattern_version"] =
             stats.operator_pattern_version;
         identity["operator_numeric_version"] =
@@ -4230,13 +4733,35 @@ void export_lang(py::module &m) {
                 : py::none();
         operations["host_scalar_reductions"] =
             stats.host_scalar_reductions;
+        operations["device_scalar_operations"] =
+            stats.device_scalar_operations;
+        operations["host_scalar_readbacks"] =
+            stats.host_scalar_readbacks;
+        operations["host_synchronizations"] =
+            stats.host_synchronizations;
+        operations["fixed_iteration_only"] =
+            stats.fixed_iteration_only;
+        operations["bounded_masked_execution"] =
+            stats.bounded_masked_execution;
+        operations["preconditioner_apply_calls"] =
+            stats.preconditioner_apply_calls_available
+                ? py::cast(stats.preconditioner_apply_calls)
+                : py::none();
 
         py::dict resources;
         resources["persistent_vector_count"] =
             stats.persistent_vector_count;
         resources["persistent_vector_reserved_bytes"] =
             stats.persistent_vector_reserved_bytes;
+        resources["persistent_scalar_count"] =
+            stats.persistent_scalar_count;
+        resources["persistent_scalar_reserved_bytes"] =
+            stats.persistent_scalar_reserved_bytes;
         resources["cublas_handle_count"] = stats.cublas_handle_count;
+        resources["external_preconditioner"] =
+            stats.external_preconditioner;
+        resources["preconditioner_ownership_scope"] =
+            stats.preconditioner_ownership_scope;
         resources["opaque_provider_resource_bytes"] = py::none();
         resources["solver_state_rebuilt_each_solve"] =
             stats.solver_state_rebuilt_each_solve;
@@ -4245,13 +4770,17 @@ void export_lang(py::module &m) {
                 ? py::cast(stats.transient_solver_workspace_bytes)
                 : py::none();
         resources["ownership_scope"] =
-            "solve_plan_vectors_and_provider_handle";
+            "solve_plan_vectors_scalars_and_provider_handle";
         resources["excluded"] =
             "operator_resources_rhs_solution_and_caller_vectors";
 
         py::dict transfers;
         transfers["device_to_device_bytes"] =
             stats.device_to_device_bytes;
+        transfers["device_to_host_bytes"] =
+            stats.device_to_host_bytes;
+        transfers["host_to_device_bytes"] =
+            stats.host_to_device_bytes;
         transfers["scope"] = "copies_issued_directly_by_solve_plan";
 
         py::dict result;
@@ -4262,6 +4791,120 @@ void export_lang(py::module &m) {
         result["transfers"] = std::move(transfers);
         return result;
       };
+  auto sparse_preconditioner_stats_to_dict =
+      [](const SparsePreconditionerPlanRuntimeStatistics &stats) {
+        py::dict identity;
+        identity["backend_family"] = stats.backend_family;
+        identity["method"] = stats.method;
+        identity["dtype"] = stats.dtype;
+        identity["rows"] = stats.rows;
+        if (stats.block_size > 0) {
+          identity["block_rows"] = stats.block_rows;
+          identity["block_size"] = stats.block_size;
+        } else {
+          identity["block_rows"] = py::none();
+          identity["block_size"] = py::none();
+        }
+        identity["operator_pattern_version_at_build"] =
+            stats.operator_pattern_version_at_build;
+        identity["operator_numeric_version_at_build"] =
+            stats.operator_numeric_version_at_build;
+        identity["operator_pattern_version_current"] =
+            stats.operator_pattern_version_current;
+        identity["operator_numeric_version_current"] =
+            stats.operator_numeric_version_current;
+        identity["operator_stale"] = stats.operator_stale;
+
+        py::dict operations;
+        operations["apply_calls"] = stats.apply_calls;
+        operations["numeric_refresh_calls"] =
+            stats.numeric_refresh_calls;
+        operations["numeric_refresh_successes"] =
+            stats.numeric_refresh_successes;
+        operations["numeric_refresh_noops"] =
+            stats.numeric_refresh_noops;
+        operations["numeric_refresh_failures"] =
+            stats.numeric_refresh_failures;
+
+        py::dict resources;
+        resources["persistent_inverse_count"] =
+            stats.persistent_inverse_count;
+        resources["persistent_inverse_reserved_bytes"] =
+            stats.persistent_inverse_reserved_bytes;
+        resources["refresh_peak_temporary_host_bytes"] =
+            stats.refresh_peak_temporary_host_bytes;
+        resources["refresh_peak_temporary_device_bytes"] =
+            stats.refresh_peak_temporary_device_bytes;
+        resources["ownership_scope"] = "preconditioner_inverse";
+        resources["excluded"] =
+            "operator_input_output_and_program_shared_cache";
+
+        py::dict transfers;
+        transfers["construction_device_to_host_bytes"] =
+            stats.construction_device_to_host_bytes;
+        transfers["construction_host_to_device_bytes"] =
+            stats.construction_host_to_device_bytes;
+        transfers["construction_host_synchronizations"] =
+            stats.construction_host_synchronizations;
+        transfers["refresh_device_to_host_bytes"] =
+            stats.refresh_device_to_host_bytes;
+        transfers["refresh_host_to_device_bytes"] =
+            stats.refresh_host_to_device_bytes;
+        transfers["refresh_host_synchronizations"] =
+            stats.refresh_host_synchronizations;
+        transfers["apply_host_transfer_bytes"] = 0;
+
+        py::dict contract;
+        contract["fixed_csr_only"] = stats.method == "jacobi";
+        contract["fixed_bsr_only"] = stats.method == "block_jacobi";
+        contract["in_place_apply_supported"] =
+            stats.in_place_apply_supported;
+        contract["numeric_refresh_supported"] =
+            stats.numeric_refresh_supported;
+        contract["numeric_update_requires_refresh"] =
+            stats.numeric_refresh_supported;
+        contract["numeric_update_requires_rebuild"] =
+            !stats.numeric_refresh_supported;
+        contract["pattern_update_requires_rebuild"] = true;
+        contract["public_solver_integration"] = false;
+
+        py::dict result;
+        result["schema_version"] = 2;
+        result["identity"] = std::move(identity);
+        result["operations"] = std::move(operations);
+        result["resources"] = std::move(resources);
+        result["transfers"] = std::move(transfers);
+        result["contract"] = std::move(contract);
+        return result;
+      };
+  py::class_<SparseJacobiPreconditionerPlan>(
+      m, "SparseJacobiPreconditionerPlan")
+      .def("_refresh_numeric",
+           &SparseJacobiPreconditionerPlan::refresh_numeric)
+      .def("apply", &SparseJacobiPreconditionerPlan::apply)
+      .def("_debug_runtime_stats",
+           [sparse_preconditioner_stats_to_dict](
+               const SparseJacobiPreconditionerPlan &plan) {
+             return sparse_preconditioner_stats_to_dict(
+                 plan.debug_runtime_statistics());
+           });
+  m.def("_make_sparse_jacobi_preconditioner_plan",
+        make_sparse_jacobi_preconditioner_plan, py::keep_alive<0, 1>(),
+        py::keep_alive<0, 2>());
+  py::class_<SparseBlockJacobiPreconditionerPlan>(
+      m, "SparseBlockJacobiPreconditionerPlan")
+      .def("apply", &SparseBlockJacobiPreconditionerPlan::apply)
+      .def("_refresh_numeric",
+           &SparseBlockJacobiPreconditionerPlan::refresh_numeric)
+      .def("_debug_runtime_stats",
+           [sparse_preconditioner_stats_to_dict](
+               const SparseBlockJacobiPreconditionerPlan &plan) {
+             return sparse_preconditioner_stats_to_dict(
+                 plan.debug_runtime_statistics());
+           });
+  m.def("_make_sparse_block_jacobi_preconditioner_plan",
+        make_sparse_block_jacobi_preconditioner_plan,
+        py::keep_alive<0, 1>(), py::keep_alive<0, 2>());
   py::class_<CG<Eigen::VectorXf, float>>(m, "CGf")
       .def(py::init<SparseMatrix &, int, float, bool>())
       .def("solve", &CG<Eigen::VectorXf, float>::solve)
@@ -4272,11 +4915,16 @@ void export_lang(py::module &m) {
       .def("set_b", &CG<Eigen::VectorXf, float>::set_b)
       .def("set_b_ndarray", &CG<Eigen::VectorXf, float>::set_b_ndarray)
       .def("is_success", &CG<Eigen::VectorXf, float>::is_success)
+      .def("get_status", &CG<Eigen::VectorXf, float>::get_status)
       .def("get_iterations", &CG<Eigen::VectorXf, float>::get_iterations)
       .def("get_initial_residual_norm",
            &CG<Eigen::VectorXf, float>::get_initial_residual_norm)
       .def("get_residual_norm",
            &CG<Eigen::VectorXf, float>::get_residual_norm)
+      .def("_get_last_result", [sparse_solve_result_to_dict](
+                                    const CG<Eigen::VectorXf, float> &cg) {
+        return sparse_solve_result_to_dict(cg.get_last_result());
+      })
       .def("_debug_runtime_stats", [sparse_solve_plan_stats_to_dict](
                                          const CG<Eigen::VectorXf, float> &cg) {
         return sparse_solve_plan_stats_to_dict(
@@ -4292,37 +4940,484 @@ void export_lang(py::module &m) {
       .def("set_b_ndarray", &CG<Eigen::VectorXd, double>::set_b_ndarray)
       .def("set_b", &CG<Eigen::VectorXd, double>::set_b)
       .def("is_success", &CG<Eigen::VectorXd, double>::is_success)
+      .def("get_status", &CG<Eigen::VectorXd, double>::get_status)
       .def("get_iterations", &CG<Eigen::VectorXd, double>::get_iterations)
       .def("get_initial_residual_norm",
            &CG<Eigen::VectorXd, double>::get_initial_residual_norm)
       .def("get_residual_norm",
            &CG<Eigen::VectorXd, double>::get_residual_norm)
+      .def("_get_last_result", [sparse_solve_result_to_dict](
+                                    const CG<Eigen::VectorXd, double> &cg) {
+        return sparse_solve_result_to_dict(cg.get_last_result());
+      })
       .def("_debug_runtime_stats", [sparse_solve_plan_stats_to_dict](
                                          const CG<Eigen::VectorXd, double> &cg) {
         return sparse_solve_plan_stats_to_dict(
             cg.debug_runtime_statistics());
       });
-  m.def("make_float_cg_solver", [](SparseMatrix &A, int max_iters, float tol,
-                                   bool verbose) {
-    return make_cg_solver<Eigen::VectorXf, float>(A, max_iters, tol, verbose);
-  });
-  m.def("make_double_cg_solver", [](SparseMatrix &A, int max_iters, double tol,
-                                    bool verbose) {
-    return make_cg_solver<Eigen::VectorXd, double>(A, max_iters, tol, verbose);
-  });
+  m.def(
+      "make_float_cg_solver",
+      [](SparseMatrix &A, int max_iters, float absolute_tolerance,
+         bool verbose, float relative_tolerance) {
+        return make_cg_solver<Eigen::VectorXf, float>(
+            A, max_iters, absolute_tolerance, verbose,
+            relative_tolerance);
+      },
+      py::arg("matrix"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("verbose"),
+      py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "make_double_cg_solver",
+      [](SparseMatrix &A, int max_iters, double absolute_tolerance,
+         bool verbose, double relative_tolerance) {
+        return make_cg_solver<Eigen::VectorXd, double>(
+            A, max_iters, absolute_tolerance, verbose,
+            relative_tolerance);
+      },
+      py::arg("matrix"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("verbose"),
+      py::arg("relative_tolerance") = 0.0);
+
+  py::class_<SparseBiCGSTAB<Eigen::VectorXf, float>>(
+      m, "SparseBiCGSTABf")
+      .def("solve", &SparseBiCGSTAB<Eigen::VectorXf, float>::solve)
+      .def("set_x", &SparseBiCGSTAB<Eigen::VectorXf, float>::set_x)
+      .def("reset_x", &SparseBiCGSTAB<Eigen::VectorXf, float>::reset_x)
+      .def("get_x", &SparseBiCGSTAB<Eigen::VectorXf, float>::get_x)
+      .def("set_x_ndarray",
+           &SparseBiCGSTAB<Eigen::VectorXf, float>::set_x_ndarray)
+      .def("set_b", &SparseBiCGSTAB<Eigen::VectorXf, float>::set_b)
+      .def("set_b_ndarray",
+           &SparseBiCGSTAB<Eigen::VectorXf, float>::set_b_ndarray)
+      .def("is_success",
+           &SparseBiCGSTAB<Eigen::VectorXf, float>::is_success)
+      .def("get_status",
+           &SparseBiCGSTAB<Eigen::VectorXf, float>::get_status)
+      .def("get_iterations",
+           &SparseBiCGSTAB<Eigen::VectorXf, float>::get_iterations)
+      .def("get_initial_residual_norm",
+           &SparseBiCGSTAB<Eigen::VectorXf,
+                           float>::get_initial_residual_norm)
+      .def("get_residual_norm",
+           &SparseBiCGSTAB<Eigen::VectorXf, float>::get_residual_norm)
+      .def("_get_last_result",
+           [sparse_solve_result_to_dict](
+               const SparseBiCGSTAB<Eigen::VectorXf, float> &solver) {
+             return sparse_solve_result_to_dict(solver.get_last_result());
+           })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](
+               const SparseBiCGSTAB<Eigen::VectorXf, float> &solver) {
+             return sparse_solve_plan_stats_to_dict(
+                 solver.debug_runtime_statistics());
+           });
+  py::class_<SparseBiCGSTAB<Eigen::VectorXd, double>>(
+      m, "SparseBiCGSTABd")
+      .def("solve", &SparseBiCGSTAB<Eigen::VectorXd, double>::solve)
+      .def("set_x", &SparseBiCGSTAB<Eigen::VectorXd, double>::set_x)
+      .def("reset_x", &SparseBiCGSTAB<Eigen::VectorXd, double>::reset_x)
+      .def("get_x", &SparseBiCGSTAB<Eigen::VectorXd, double>::get_x)
+      .def("set_x_ndarray",
+           &SparseBiCGSTAB<Eigen::VectorXd, double>::set_x_ndarray)
+      .def("set_b", &SparseBiCGSTAB<Eigen::VectorXd, double>::set_b)
+      .def("set_b_ndarray",
+           &SparseBiCGSTAB<Eigen::VectorXd, double>::set_b_ndarray)
+      .def("is_success",
+           &SparseBiCGSTAB<Eigen::VectorXd, double>::is_success)
+      .def("get_status",
+           &SparseBiCGSTAB<Eigen::VectorXd, double>::get_status)
+      .def("get_iterations",
+           &SparseBiCGSTAB<Eigen::VectorXd, double>::get_iterations)
+      .def("get_initial_residual_norm",
+           &SparseBiCGSTAB<Eigen::VectorXd,
+                           double>::get_initial_residual_norm)
+      .def("get_residual_norm",
+           &SparseBiCGSTAB<Eigen::VectorXd, double>::get_residual_norm)
+      .def("_get_last_result",
+           [sparse_solve_result_to_dict](
+               const SparseBiCGSTAB<Eigen::VectorXd, double> &solver) {
+             return sparse_solve_result_to_dict(solver.get_last_result());
+           })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](
+               const SparseBiCGSTAB<Eigen::VectorXd, double> &solver) {
+             return sparse_solve_plan_stats_to_dict(
+                 solver.debug_runtime_statistics());
+           });
+  m.def(
+      "make_float_sparse_bicgstab_solver",
+      [](SparseMatrix &matrix, int max_iterations,
+         float absolute_tolerance, bool verbose,
+         float relative_tolerance) {
+        return std::make_unique<SparseBiCGSTAB<Eigen::VectorXf, float>>(
+            matrix, max_iterations, absolute_tolerance, verbose,
+            relative_tolerance);
+      },
+      py::arg("matrix"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("verbose"),
+      py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "make_double_sparse_bicgstab_solver",
+      [](SparseMatrix &matrix, int max_iterations,
+         double absolute_tolerance, bool verbose,
+         double relative_tolerance) {
+        return std::make_unique<SparseBiCGSTAB<Eigen::VectorXd, double>>(
+            matrix, max_iterations, absolute_tolerance, verbose,
+            relative_tolerance);
+      },
+      py::arg("matrix"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("verbose"),
+      py::arg("relative_tolerance") = 0.0);
+
+  py::class_<FixedSparseBiCGSTAB<Eigen::VectorXf, float>>(
+      m, "FixedSparseBiCGSTABf")
+      .def("solve", &FixedSparseBiCGSTAB<Eigen::VectorXf, float>::solve)
+      .def("set_x", &FixedSparseBiCGSTAB<Eigen::VectorXf, float>::set_x)
+      .def("reset_x",
+           &FixedSparseBiCGSTAB<Eigen::VectorXf, float>::reset_x)
+      .def("get_x", &FixedSparseBiCGSTAB<Eigen::VectorXf, float>::get_x)
+      .def("set_x_ndarray",
+           &FixedSparseBiCGSTAB<Eigen::VectorXf, float>::set_x_ndarray)
+      .def("set_b", &FixedSparseBiCGSTAB<Eigen::VectorXf, float>::set_b)
+      .def("set_b_ndarray",
+           &FixedSparseBiCGSTAB<Eigen::VectorXf, float>::set_b_ndarray)
+      .def("is_success",
+           &FixedSparseBiCGSTAB<Eigen::VectorXf, float>::is_success)
+      .def("get_status",
+           &FixedSparseBiCGSTAB<Eigen::VectorXf, float>::get_status)
+      .def("get_iterations",
+           &FixedSparseBiCGSTAB<Eigen::VectorXf, float>::get_iterations)
+      .def("get_initial_residual_norm",
+           &FixedSparseBiCGSTAB<Eigen::VectorXf,
+                                float>::get_initial_residual_norm)
+      .def("get_residual_norm",
+           &FixedSparseBiCGSTAB<Eigen::VectorXf,
+                                float>::get_residual_norm)
+      .def("_get_last_result",
+           [sparse_solve_result_to_dict](
+               const FixedSparseBiCGSTAB<Eigen::VectorXf, float> &solver) {
+             return sparse_solve_result_to_dict(solver.get_last_result());
+           })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](
+               const FixedSparseBiCGSTAB<Eigen::VectorXf, float> &solver) {
+             return sparse_solve_plan_stats_to_dict(
+                 solver.debug_runtime_statistics());
+           });
+  py::class_<FixedSparseBiCGSTAB<Eigen::VectorXd, double>>(
+      m, "FixedSparseBiCGSTABd")
+      .def("solve", &FixedSparseBiCGSTAB<Eigen::VectorXd, double>::solve)
+      .def("set_x", &FixedSparseBiCGSTAB<Eigen::VectorXd, double>::set_x)
+      .def("reset_x",
+           &FixedSparseBiCGSTAB<Eigen::VectorXd, double>::reset_x)
+      .def("get_x", &FixedSparseBiCGSTAB<Eigen::VectorXd, double>::get_x)
+      .def("set_x_ndarray",
+           &FixedSparseBiCGSTAB<Eigen::VectorXd, double>::set_x_ndarray)
+      .def("set_b", &FixedSparseBiCGSTAB<Eigen::VectorXd, double>::set_b)
+      .def("set_b_ndarray",
+           &FixedSparseBiCGSTAB<Eigen::VectorXd, double>::set_b_ndarray)
+      .def("is_success",
+           &FixedSparseBiCGSTAB<Eigen::VectorXd, double>::is_success)
+      .def("get_status",
+           &FixedSparseBiCGSTAB<Eigen::VectorXd, double>::get_status)
+      .def("get_iterations",
+           &FixedSparseBiCGSTAB<Eigen::VectorXd, double>::get_iterations)
+      .def("get_initial_residual_norm",
+           &FixedSparseBiCGSTAB<Eigen::VectorXd,
+                                double>::get_initial_residual_norm)
+      .def("get_residual_norm",
+           &FixedSparseBiCGSTAB<Eigen::VectorXd,
+                                double>::get_residual_norm)
+      .def("_get_last_result",
+           [sparse_solve_result_to_dict](
+               const FixedSparseBiCGSTAB<Eigen::VectorXd, double> &solver) {
+             return sparse_solve_result_to_dict(solver.get_last_result());
+           })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](
+               const FixedSparseBiCGSTAB<Eigen::VectorXd, double> &solver) {
+             return sparse_solve_plan_stats_to_dict(
+                 solver.debug_runtime_statistics());
+           });
+  m.def(
+      "_make_float_cpu_fixed_sparse_bicgstab_solver",
+      [](Program *program, SparseMatrix &matrix, int max_iterations,
+         float absolute_tolerance, bool verbose,
+         float relative_tolerance) {
+        return std::make_unique<
+            FixedSparseBiCGSTAB<Eigen::VectorXf, float>>(
+            program, matrix, max_iterations, absolute_tolerance, verbose,
+            relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("matrix"),
+      py::arg("max_iterations"), py::arg("absolute_tolerance"),
+      py::arg("verbose"), py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_double_cpu_fixed_sparse_bicgstab_solver",
+      [](Program *program, SparseMatrix &matrix, int max_iterations,
+         double absolute_tolerance, bool verbose,
+         double relative_tolerance) {
+        return std::make_unique<
+            FixedSparseBiCGSTAB<Eigen::VectorXd, double>>(
+            program, matrix, max_iterations, absolute_tolerance, verbose,
+            relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("matrix"),
+      py::arg("max_iterations"), py::arg("absolute_tolerance"),
+      py::arg("verbose"), py::arg("relative_tolerance") = 0.0);
+
+  py::class_<SparseMINRES<Eigen::VectorXf, float>>(m, "SparseMINRESf")
+      .def("solve", &SparseMINRES<Eigen::VectorXf, float>::solve)
+      .def("set_x", &SparseMINRES<Eigen::VectorXf, float>::set_x)
+      .def("reset_x", &SparseMINRES<Eigen::VectorXf, float>::reset_x)
+      .def("get_x", &SparseMINRES<Eigen::VectorXf, float>::get_x)
+      .def("set_x_ndarray",
+           &SparseMINRES<Eigen::VectorXf, float>::set_x_ndarray)
+      .def("set_b", &SparseMINRES<Eigen::VectorXf, float>::set_b)
+      .def("set_b_ndarray",
+           &SparseMINRES<Eigen::VectorXf, float>::set_b_ndarray)
+      .def("is_success", &SparseMINRES<Eigen::VectorXf, float>::is_success)
+      .def("get_status", &SparseMINRES<Eigen::VectorXf, float>::get_status)
+      .def("get_iterations",
+           &SparseMINRES<Eigen::VectorXf, float>::get_iterations)
+      .def("get_initial_residual_norm",
+           &SparseMINRES<Eigen::VectorXf,
+                         float>::get_initial_residual_norm)
+      .def("get_residual_norm",
+           &SparseMINRES<Eigen::VectorXf, float>::get_residual_norm)
+      .def("_get_last_result",
+           [sparse_solve_result_to_dict](
+               const SparseMINRES<Eigen::VectorXf, float> &solver) {
+             return sparse_solve_result_to_dict(solver.get_last_result());
+           })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](
+               const SparseMINRES<Eigen::VectorXf, float> &solver) {
+             return sparse_solve_plan_stats_to_dict(
+                 solver.debug_runtime_statistics());
+           });
+  py::class_<SparseMINRES<Eigen::VectorXd, double>>(m, "SparseMINRESd")
+      .def("solve", &SparseMINRES<Eigen::VectorXd, double>::solve)
+      .def("set_x", &SparseMINRES<Eigen::VectorXd, double>::set_x)
+      .def("reset_x", &SparseMINRES<Eigen::VectorXd, double>::reset_x)
+      .def("get_x", &SparseMINRES<Eigen::VectorXd, double>::get_x)
+      .def("set_x_ndarray",
+           &SparseMINRES<Eigen::VectorXd, double>::set_x_ndarray)
+      .def("set_b", &SparseMINRES<Eigen::VectorXd, double>::set_b)
+      .def("set_b_ndarray",
+           &SparseMINRES<Eigen::VectorXd, double>::set_b_ndarray)
+      .def("is_success", &SparseMINRES<Eigen::VectorXd, double>::is_success)
+      .def("get_status", &SparseMINRES<Eigen::VectorXd, double>::get_status)
+      .def("get_iterations",
+           &SparseMINRES<Eigen::VectorXd, double>::get_iterations)
+      .def("get_initial_residual_norm",
+           &SparseMINRES<Eigen::VectorXd,
+                         double>::get_initial_residual_norm)
+      .def("get_residual_norm",
+           &SparseMINRES<Eigen::VectorXd, double>::get_residual_norm)
+      .def("_get_last_result",
+           [sparse_solve_result_to_dict](
+               const SparseMINRES<Eigen::VectorXd, double> &solver) {
+             return sparse_solve_result_to_dict(solver.get_last_result());
+           })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](
+               const SparseMINRES<Eigen::VectorXd, double> &solver) {
+             return sparse_solve_plan_stats_to_dict(
+                 solver.debug_runtime_statistics());
+           });
+  m.def(
+      "make_float_sparse_minres_solver",
+      [](SparseMatrix &matrix, int max_iterations,
+         float absolute_tolerance, bool verbose,
+         float relative_tolerance) {
+        return std::make_unique<SparseMINRES<Eigen::VectorXf, float>>(
+            matrix, max_iterations, absolute_tolerance, verbose,
+            relative_tolerance);
+      },
+      py::arg("matrix"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("verbose"),
+      py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "make_double_sparse_minres_solver",
+      [](SparseMatrix &matrix, int max_iterations,
+         double absolute_tolerance, bool verbose,
+         double relative_tolerance) {
+        return std::make_unique<SparseMINRES<Eigen::VectorXd, double>>(
+            matrix, max_iterations, absolute_tolerance, verbose,
+            relative_tolerance);
+      },
+      py::arg("matrix"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("verbose"),
+      py::arg("relative_tolerance") = 0.0);
+  m.def(
+      "_make_float_cpu_fixed_sparse_minres_solver",
+      [](Program *program, SparseMatrix &matrix, int max_iterations,
+         float absolute_tolerance, bool verbose,
+         float relative_tolerance) {
+        return std::make_unique<SparseMINRES<Eigen::VectorXf, float>>(
+            program, matrix, max_iterations, absolute_tolerance, verbose,
+            relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("matrix"),
+      py::arg("max_iterations"), py::arg("absolute_tolerance"),
+      py::arg("verbose"), py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_double_cpu_fixed_sparse_minres_solver",
+      [](Program *program, SparseMatrix &matrix, int max_iterations,
+         double absolute_tolerance, bool verbose,
+         double relative_tolerance) {
+        return std::make_unique<SparseMINRES<Eigen::VectorXd, double>>(
+            program, matrix, max_iterations, absolute_tolerance, verbose,
+            relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("matrix"),
+      py::arg("max_iterations"), py::arg("absolute_tolerance"),
+      py::arg("verbose"), py::arg("relative_tolerance") = 0.0);
 
   py::class_<CUCG>(m, "CUCG")
       .def("solve", &CUCG::solve)
       .def("is_success", &CUCG::is_success)
+      .def("get_status", &CUCG::get_status)
       .def("get_iterations", &CUCG::get_iterations)
       .def("get_initial_residual_norm", &CUCG::get_initial_residual_norm)
       .def("get_residual_norm", &CUCG::get_residual_norm)
+      .def("_get_last_result", [sparse_solve_result_to_dict](const CUCG &cg) {
+        return sparse_solve_result_to_dict(cg.get_last_result());
+      })
       .def("_debug_runtime_stats", [sparse_solve_plan_stats_to_dict](
                                          const CUCG &cg) {
         return sparse_solve_plan_stats_to_dict(
             cg.debug_runtime_statistics());
       });
-  m.def("make_cucg_solver", make_cucg_solver);
+  m.def(
+      "make_cucg_solver",
+      [](SparseMatrix &matrix, int max_iterations,
+         float absolute_tolerance, bool verbose,
+         float relative_tolerance) {
+        return make_cucg_solver(matrix, max_iterations,
+                                absolute_tolerance, verbose,
+                                relative_tolerance);
+      },
+      py::arg("matrix"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("verbose"),
+      py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_cuda_jacobi_pcg_solver",
+      [](Program *program, SparseMatrix &matrix,
+         SparseJacobiPreconditionerPlan &preconditioner,
+         int max_iterations, float absolute_tolerance, bool verbose,
+         float relative_tolerance) {
+        return make_cuda_jacobi_pcg_solver(
+            program, matrix, preconditioner, max_iterations,
+            absolute_tolerance, verbose, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("matrix"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("verbose"),
+      py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_cuda_block_jacobi_pcg_solver",
+      [](Program *program, SparseMatrix &matrix,
+         SparseBlockJacobiPreconditionerPlan &preconditioner,
+         int max_iterations, float absolute_tolerance, bool verbose,
+         float relative_tolerance) {
+        return make_cuda_block_jacobi_pcg_solver(
+            program, matrix, preconditioner, max_iterations,
+            absolute_tolerance, verbose, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("matrix"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("verbose"),
+      py::arg("relative_tolerance") = 0.0f);
+
+  py::class_<CpuSparseCGPlan>(m, "CpuSparseCGPlan")
+      .def("solve", &CpuSparseCGPlan::solve)
+      .def("is_success", &CpuSparseCGPlan::is_success)
+      .def("get_status", &CpuSparseCGPlan::get_status)
+      .def("get_iterations", &CpuSparseCGPlan::get_iterations)
+      .def("get_initial_residual_norm",
+           &CpuSparseCGPlan::get_initial_residual_norm)
+      .def("get_residual_norm", &CpuSparseCGPlan::get_residual_norm)
+      .def("_get_last_result",
+           [sparse_solve_result_to_dict](const CpuSparseCGPlan &plan) {
+             return sparse_solve_result_to_dict(plan.get_last_result());
+           })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](const CpuSparseCGPlan &plan) {
+             return sparse_solve_plan_stats_to_dict(
+                 plan.debug_runtime_statistics());
+           });
+  m.attr("CpuBsrCGPlan") = m.attr("CpuSparseCGPlan");
+  m.def(
+      "_make_cpu_jacobi_pcg_solver",
+      [](Program *program, SparseMatrix &matrix,
+         SparseJacobiPreconditionerPlan &preconditioner,
+         int max_iterations, double absolute_tolerance,
+         double relative_tolerance) {
+        return make_cpu_jacobi_pcg_solver(
+            program, matrix, preconditioner, max_iterations,
+            absolute_tolerance, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("matrix"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0);
+  m.def(
+      "_make_cpu_block_jacobi_pcg_solver",
+      [](Program *program, SparseMatrix &matrix,
+         SparseBlockJacobiPreconditionerPlan &preconditioner,
+         int max_iterations, double absolute_tolerance,
+         double relative_tolerance) {
+        return make_cpu_block_jacobi_pcg_solver(
+            program, matrix, preconditioner, max_iterations,
+            absolute_tolerance, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("matrix"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0);
+
+  py::class_<VulkanCGIterationPlan>(m, "VulkanCGIterationPlan")
+      .def("solve", &VulkanCGIterationPlan::solve)
+      .def("is_success", &VulkanCGIterationPlan::is_success)
+      .def("get_iterations",
+           &VulkanCGIterationPlan::get_iterations)
+      .def("get_initial_residual_norm",
+           &VulkanCGIterationPlan::get_initial_residual_norm)
+      .def("get_residual_norm",
+           &VulkanCGIterationPlan::get_residual_norm)
+      .def("get_status", &VulkanCGIterationPlan::get_status)
+      .def("_get_last_result", [sparse_solve_result_to_dict](
+                                    const VulkanCGIterationPlan &plan) {
+        return sparse_solve_result_to_dict(plan.get_last_result());
+      })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](
+               const VulkanCGIterationPlan &plan) {
+             return sparse_solve_plan_stats_to_dict(
+                 plan.debug_runtime_statistics());
+           });
+  m.def("_make_vulkan_cg_iteration_plan",
+        make_vulkan_cg_iteration_plan);
+  m.def("_make_vulkan_cg_convergence_plan",
+        make_vulkan_cg_convergence_plan);
+  m.def("_make_vulkan_jacobi_pcg_convergence_plan",
+        make_vulkan_jacobi_pcg_convergence_plan,
+        py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+        py::keep_alive<0, 3>());
+  m.def("_make_vulkan_block_jacobi_pcg_convergence_plan",
+        make_vulkan_block_jacobi_pcg_convergence_plan,
+        py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+        py::keep_alive<0, 3>());
 
   // Mesh Class
   // Mesh related.

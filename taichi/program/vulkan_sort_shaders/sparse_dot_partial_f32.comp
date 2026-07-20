@@ -1,0 +1,55 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer X {
+  float data[];
+} x_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer Y {
+  float data[];
+} y_buf;
+
+layout(set = 0, binding = 2, std430) writeonly buffer Partials {
+  float data[];
+} partials_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint unused_items_per_group;
+  uint unused0;
+  uint unused1;
+} params;
+
+shared float partial_sum[256];
+
+void main() {
+  uint local_index = gl_LocalInvocationID.x;
+  uint block_begin = gl_WorkGroupID.x * 1024u;
+  uint block_stride = gl_NumWorkGroups.x * 1024u;
+  float sum = 0.0;
+  while (block_begin < params.n) {
+    uint block_size = min(1024u, params.n - block_begin);
+    uint block_end = block_begin + block_size;
+    for (uint index = block_begin + local_index; index < block_end;
+         index += 256u) {
+      sum += x_buf.data[index] * y_buf.data[index];
+    }
+    if (params.n - block_begin <= block_stride) {
+      break;
+    }
+    block_begin += block_stride;
+  }
+  partial_sum[local_index] = sum;
+  barrier();
+
+  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+    if (local_index < stride) {
+      partial_sum[local_index] += partial_sum[local_index + stride];
+    }
+    barrier();
+  }
+  if (local_index == 0u) {
+    partials_buf.data[gl_WorkGroupID.x] = partial_sum[0];
+  }
+}

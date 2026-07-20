@@ -1,0 +1,35 @@
+#version 450
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Numerator {
+  float data[];
+} numerator_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer Denominator {
+  float data[];
+} denominator_buf;
+
+layout(set = 0, binding = 2, std430) writeonly buffer Quotient {
+  float data[];
+} quotient_buf;
+
+layout(set = 0, binding = 3, std430) buffer Status {
+  int data[];
+} status_buf;
+
+void main() {
+  if (status_buf.data[0] != 0) {
+    quotient_buf.data[0] = 0.0;
+    return;
+  }
+  float numerator = numerator_buf.data[0];
+  float denominator = denominator_buf.data[0];
+  if (isnan(numerator) || isinf(numerator) || numerator < 0.0 ||
+      isnan(denominator) || isinf(denominator) || denominator <= 0.0) {
+    status_buf.data[0] = 1;
+    quotient_buf.data[0] = 0.0;
+    return;
+  }
+  quotient_buf.data[0] = numerator / denominator;
+}

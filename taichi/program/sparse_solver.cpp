@@ -91,8 +91,34 @@ struct key_hash {
 
 namespace taichi::lang {
 
-#define GET_EM(sm) \
-  const EigenMatrix *mat = (const EigenMatrix *)(sm.get_matrix());
+namespace {
+
+const void *require_cpu_eigen_matrix(const SparseMatrix &matrix) {
+  const auto stats = matrix.debug_runtime_statistics();
+  TI_ERROR_IF(stats.backend_family != "cpu" ||
+                  (stats.storage_format != "csr" &&
+                   stats.storage_format != "csc"),
+              "CPU sparse direct solvers currently require an Eigen "
+              "CSR/CSC matrix.");
+  const void *provider_matrix = matrix.get_matrix();
+  TI_ERROR_IF(provider_matrix == nullptr,
+              "CPU sparse direct solver received an unavailable Eigen "
+              "matrix provider.");
+  return provider_matrix;
+}
+
+const CuSparseMatrix &require_cuda_csr_matrix(const SparseMatrix &matrix) {
+  const auto *csr = dynamic_cast<const CuSparseMatrix *>(&matrix);
+  TI_ERROR_IF(csr == nullptr,
+              "CUDA sparse direct solvers currently require a CSR matrix.");
+  return *csr;
+}
+
+}  // namespace
+
+#define GET_EM(sm)                                                        \
+  const EigenMatrix *mat = static_cast<const EigenMatrix *>(              \
+      require_cpu_eigen_matrix(sm));
 
 template <class EigenSolver, class EigenMatrix>
 bool EigenSparseSolver<EigenSolver, EigenMatrix>::compute(
@@ -284,8 +310,7 @@ void CuSparseSolver::analyze_pattern(const SparseMatrix &sm) {
 void CuSparseSolver::analyze_pattern_cholesky(const SparseMatrix &sm) {
 #if defined(TI_WITH_CUDA)
   // Retrive the info of the sparse matrix
-  SparseMatrix &sm_no_cv = const_cast<SparseMatrix &>(sm);
-  CuSparseMatrix &A = static_cast<CuSparseMatrix &>(sm_no_cv);
+  const CuSparseMatrix &A = require_cuda_csr_matrix(sm);
 
   // step 1: reorder the sparse matrix
   reorder(A);
@@ -307,8 +332,7 @@ void CuSparseSolver::analyze_pattern_cholesky(const SparseMatrix &sm) {
 void CuSparseSolver::analyze_pattern_lu(const SparseMatrix &sm) {
 #if defined(TI_WITH_CUDA)
   // Retrive the info of the sparse matrix
-  SparseMatrix &sm_no_cv = const_cast<SparseMatrix &>(sm);
-  CuSparseMatrix &A = static_cast<CuSparseMatrix &>(sm_no_cv);
+  const CuSparseMatrix &A = require_cuda_csr_matrix(sm);
 
   // step 1: reorder the sparse matrix
   reorder(A);
@@ -343,10 +367,9 @@ void CuSparseSolver::factorize(const SparseMatrix &sm) {
 void CuSparseSolver::factorize_cholesky(const SparseMatrix &sm) {
 #if defined(TI_WITH_CUDA)
   // Retrive the info of the sparse matrix
-  SparseMatrix *sm_no_cv = const_cast<SparseMatrix *>(&sm);
-  CuSparseMatrix *A = static_cast<CuSparseMatrix *>(sm_no_cv);
-  size_t rowsA = A->num_rows();
-  size_t nnzA = A->get_nnz();
+  const CuSparseMatrix &A = require_cuda_csr_matrix(sm);
+  size_t rowsA = A.num_rows();
+  size_t nnzA = A.get_nnz();
 
   size_t size_internal = 0;
   size_t size_chol = 0;  // size of working space for csrlu
@@ -376,10 +399,9 @@ void CuSparseSolver::factorize_cholesky(const SparseMatrix &sm) {
 void CuSparseSolver::factorize_lu(const SparseMatrix &sm) {
 #if defined(TI_WITH_CUDA)
   // Retrive the info of the sparse matrix
-  SparseMatrix *sm_no_cv = const_cast<SparseMatrix *>(&sm);
-  CuSparseMatrix *A = static_cast<CuSparseMatrix *>(sm_no_cv);
-  size_t rowsA = A->num_rows();
-  size_t nnzA = A->get_nnz();
+  const CuSparseMatrix &A = require_cuda_csr_matrix(sm);
+  size_t rowsA = A.num_rows();
+  size_t nnzA = A.get_nnz();
   // step 4: workspace for LU(B)
   size_t size_lu = 0;
   size_t buffer_size = 0;
@@ -436,10 +458,9 @@ void CuSparseSolver::solve_cholesky(Program *prog,
     factorize(sm);
   }
   // Retrive the info of the sparse matrix
-  SparseMatrix *sm_no_cv = const_cast<SparseMatrix *>(&sm);
-  CuSparseMatrix *A = static_cast<CuSparseMatrix *>(sm_no_cv);
-  size_t rowsA = A->num_rows();
-  size_t colsA = A->num_cols();
+  const CuSparseMatrix &A = require_cuda_csr_matrix(sm);
+  size_t rowsA = A.num_rows();
+  size_t colsA = A.num_cols();
   size_t d_b = prog->get_ndarray_data_ptr_as_int(&b);
   size_t d_x = prog->get_ndarray_data_ptr_as_int(&x);
 
@@ -497,10 +518,9 @@ void CuSparseSolver::solve_lu(Program *prog,
   }
 
   // Retrive the info of the sparse matrix
-  SparseMatrix *sm_no_cv = const_cast<SparseMatrix *>(&sm);
-  CuSparseMatrix *A = static_cast<CuSparseMatrix *>(sm_no_cv);
-  size_t rowsA = A->num_rows();
-  size_t colsA = A->num_cols();
+  const CuSparseMatrix &A = require_cuda_csr_matrix(sm);
+  size_t rowsA = A.num_rows();
+  size_t colsA = A.num_cols();
 
   // step 7: solve L*U*x = b
   size_t d_b = prog->get_ndarray_data_ptr_as_int(&b);

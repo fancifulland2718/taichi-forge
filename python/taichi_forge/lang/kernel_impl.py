@@ -1329,8 +1329,11 @@ class Kernel:
             needed.set_kernel_struct_args(v, launch_ctx, indices)
 
         def set_arg_sparse_matrix_builder(indices, v):
-            # Pass only the base pointer of the ti.types.sparse_matrix_builder() argument
-            launch_ctx.set_arg_uint(indices, v._get_ndarray_addr())
+            if self.runtime.prog.config().arch == _ti_core.Arch.vulkan:
+                launch_ctx.set_arg_ndarray(indices, v._get_ndarray())
+            else:
+                # LLVM backends consume the builder through a raw pointer.
+                launch_ctx.set_arg_uint(indices, v._get_ndarray_addr())
 
         def set_arg_struct_member_ndarray(indices, v):
             launch_ctx.set_arg_ndarray(indices, v.base.arr)

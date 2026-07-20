@@ -1,0 +1,45 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InverseBlocks {
+  float data[];
+} inverse_blocks_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer InputVector {
+  float data[];
+} input_buf;
+
+layout(set = 0, binding = 2, std430) writeonly buffer OutputVector {
+  float data[];
+} output_buf;
+
+layout(push_constant) uniform Params {
+  uint block_rows;
+  uint block_size;
+  uint unused0;
+  uint unused1;
+} params;
+
+void main() {
+  uint block_row = gl_GlobalInvocationID.x;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  while (block_row < params.block_rows) {
+    float local_input[12];
+    uint vector_base = block_row * params.block_size;
+    uint block_base = block_row * params.block_size * params.block_size;
+    for (uint column = 0; column < params.block_size; ++column) {
+      local_input[column] = input_buf.data[vector_base + column];
+    }
+    for (uint row = 0; row < params.block_size; ++row) {
+      float sum = 0.0;
+      for (uint column = 0; column < params.block_size; ++column) {
+        sum += inverse_blocks_buf.data[
+                   block_base + row * params.block_size + column] *
+               local_input[column];
+      }
+      output_buf.data[vector_base + row] = sum;
+    }
+    block_row += stride;
+  }
+}

@@ -1,8 +1,47 @@
-from math import sqrt
+import math
+import operator
 
 from taichi_forge.lang.exception import TaichiRuntimeError, TaichiTypeError
 
 import taichi_forge as ti
+
+
+def _validate_solver_controls(solver_name, tol, maxiter):
+    if isinstance(tol, bool):
+        raise TaichiRuntimeError(
+            f"{solver_name} tol must be a finite positive number"
+        )
+    try:
+        tolerance = float(tol)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TaichiRuntimeError(
+            f"{solver_name} tol must be a finite positive number"
+        ) from exc
+    if not math.isfinite(tolerance) or tolerance <= 0.0:
+        raise TaichiRuntimeError(
+            f"{solver_name} tol must be a finite positive number"
+        )
+    if isinstance(maxiter, bool):
+        raise TaichiRuntimeError(
+            f"{solver_name} maxiter must be a non-negative integer"
+        )
+    try:
+        maximum_iterations = operator.index(maxiter)
+    except TypeError as exc:
+        raise TaichiRuntimeError(
+            f"{solver_name} maxiter must be a non-negative integer"
+        ) from exc
+    if maximum_iterations < 0:
+        raise TaichiRuntimeError(
+            f"{solver_name} maxiter must be a non-negative integer"
+        )
+    return tolerance, maximum_iterations
+
+
+def _residual_norm(residual_squared):
+    if not math.isfinite(residual_squared) or residual_squared < 0.0:
+        return None
+    return math.sqrt(residual_squared)
 
 
 @ti.data_oriented
@@ -20,16 +59,20 @@ def MatrixFreeCG(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
     """Matrix-free conjugate-gradient solver.
 
     Use conjugate-gradient method to solve the linear system Ax = b, where A is implicitly
-    represented as a LinearOperator.
+    represented as a LinearOperator. A must be symmetric positive-definite;
+    this property is supplied by the caller and is not checked automatically.
 
     Args:
         A (LinearOperator): The coefficient matrix A of the linear system.
         b (Field): The right-hand side of the linear system.
         x (Field): The initial guess for the solution.
-        maxiter (int): Maximum number of iterations.
-        atol: Tolerance(absolute) for convergence.
+        tol (float): Positive absolute tolerance for ``||b - A x||_2``.
+        maxiter (int): Non-negative maximum number of iterations. Zero only
+            checks the initial residual.
         quiet (bool): Switch to turn on/off iteration log.
     """
+
+    tol, maxiter = _validate_solver_controls("MatrixFreeCG", tol, maxiter)
 
     if b.dtype != x.dtype:
         raise TaichiTypeError(f"Dtype mismatch b.dtype({b.dtype}) != x.dtype({x.dtype}).")
@@ -99,12 +142,13 @@ def MatrixFreeCG(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
         A._matvec(x, Ax)
         init()
         initial_rTr = reduce(r, r)
+        initial_residual_norm = _residual_norm(initial_rTr)
         if not quiet:
-            print(f">>> Initial residual = {initial_rTr:e}")
+            print(f">>> Initial residual = {initial_residual_norm!r}")
         old_rTr = initial_rTr
         new_rTr = initial_rTr
         update_p()
-        if sqrt(initial_rTr) >= tol:  # Do nothing if the initial residual is small enough
+        if initial_residual_norm is not None and initial_residual_norm > tol:
             # -- Main loop --
             for i in range(maxiter):
                 A._matvec(p, Ap)  # compute Ap = A x p
@@ -113,28 +157,37 @@ def MatrixFreeCG(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
                 update_x()
                 update_r()
                 new_rTr = reduce(r, r)
-                if sqrt(new_rTr) < tol:
+                new_residual_norm = _residual_norm(new_rTr)
+                if new_residual_norm is None or new_residual_norm <= tol:
                     if not quiet:
-                        print(">>> Conjugate Gradient method converged.")
-                        print(f">>> #iterations {i}")
+                        if new_residual_norm is not None:
+                            print(">>> Conjugate Gradient method converged.")
+                            print(f">>> #iterations {i}")
                     break
                 beta[None] = new_rTr / old_rTr
                 update_p()
                 old_rTr = new_rTr
                 if not quiet:
-                    print(f">>> Iter = {i+1:4}, Residual = {sqrt(new_rTr):e}")
-        if new_rTr >= tol:
+                    print(
+                        f">>> Iter = {i+1:4}, Residual = "
+                        f"{new_residual_norm:e}"
+                    )
+        final_residual_norm = _residual_norm(new_rTr)
+        if final_residual_norm is None or final_residual_norm > tol:
             if not quiet:
                 print(
-                    f">>> Conjugate Gradient method failed to converge in {maxiter} iterations: Residual = {sqrt(new_rTr):e}"
+                    ">>> Conjugate Gradient method failed to converge in "
+                    f"{maxiter} iterations: Residual = "
+                    f"{final_residual_norm!r}"
                 )
             succeeded = False
         return succeeded
 
-    succeeded = solve()
-    vector_fields_snode_tree.destroy()
-    scalar_snode_tree.destroy()
-    return succeeded
+    try:
+        return solve()
+    finally:
+        vector_fields_snode_tree.destroy()
+        scalar_snode_tree.destroy()
 
 
 def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
@@ -147,10 +200,15 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
         A (LinearOperator): The coefficient matrix A of the linear system.
         b (Field): The right-hand side of the linear system.
         x (Field): The initial guess for the solution.
-        maxiter (int): Maximum number of iterations.
-        atol: Tolerance(absolute) for convergence.
+        tol (float): Positive absolute tolerance for ``||b - A x||_2``.
+        maxiter (int): Non-negative maximum number of iterations. Zero only
+            checks the initial residual.
         quiet (bool): Switch to turn on/off iteration log.
     """
+
+    tol, maxiter = _validate_solver_controls(
+        "MatrixFreeBICGSTAB", tol, maxiter
+    )
 
     if b.dtype != x.dtype:
         raise TaichiTypeError(f"Dtype mismatch b.dtype({b.dtype}) != x.dtype({x.dtype}).")
@@ -257,10 +315,11 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
         A._matvec(x, Ax)
         init()
         initial_rTr = reduce(r, r)
+        initial_residual_norm = _residual_norm(initial_rTr)
         rTr = initial_rTr
         if not quiet:
-            print(f">>> Initial residual = {initial_rTr:e}")
-        if sqrt(initial_rTr) >= tol:  # Do nothing if the initial residual is small enough
+            print(f">>> Initial residual = {initial_residual_norm!r}")
+        if initial_residual_norm is not None and initial_residual_norm > tol:
             for i in range(maxiter):
                 rho[None] = reduce(r, r_tld)
                 if rho[None] == 0.0:
@@ -287,20 +346,33 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
                 update_x()
                 update_r()
                 rTr = reduce(r, r)
+                residual_norm = _residual_norm(rTr)
                 if not quiet:
-                    print(f">>> Iter = {i+1:4}, Residual = {sqrt(rTr):e}")
-                if sqrt(rTr) < tol:
+                    print(
+                        f">>> Iter = {i+1:4}, Residual = "
+                        f"{residual_norm!r}"
+                    )
+                if residual_norm is None or residual_norm <= tol:
                     if not quiet:
-                        print(f">>> BICGSTAB method converged at #iterations {i}")
+                        if residual_norm is not None:
+                            print(
+                                ">>> BICGSTAB method converged at "
+                                f"#iterations {i}"
+                            )
                     break
                 rho_1[None] = rho[None]
-        if rTr >= tol:
+        final_residual_norm = _residual_norm(rTr)
+        if final_residual_norm is None or final_residual_norm > tol:
             if not quiet:
-                print(f">>> BICGSTAB failed to converge in {maxiter} iterations: Residual = {sqrt(rTr):e}")
+                print(
+                    f">>> BICGSTAB failed to converge in {maxiter} "
+                    f"iterations: Residual = {final_residual_norm!r}"
+                )
             succeeded = False
         return succeeded
 
-    succeeded = solve()
-    vector_fields_snode_tree.destroy()
-    scalar_snode_tree.destroy()
-    return succeeded
+    try:
+        return solve()
+    finally:
+        vector_fields_snode_tree.destroy()
+        scalar_snode_tree.destroy()

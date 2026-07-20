@@ -21,6 +21,11 @@ class DynamicLoader {
  public:
   explicit DynamicLoader(const std::string &dll_path);
 
+  // Returns nullptr when the symbol is not exported. This is intended for
+  // versioned provider capabilities whose absence must not make the whole
+  // shared library unusable.
+  void *load_function_optional(const std::string &func_name);
+
   void *load_function(const std::string &func_name);
 
   template <typename T>

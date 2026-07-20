@@ -843,6 +843,45 @@ DEFINE_ADD_SCALED_KERNEL(add_scaled_strided_f64, double)
 DEFINE_GATHER_ADD_KERNEL(gather_add_strided_f32, float)
 DEFINE_GATHER_ADD_KERNEL(gather_add_strided_f64, double)
 
+extern "C" __global__ void sparse_diagonal_apply_f32(
+    const float *inverse_diagonal,
+    const float *input,
+    float *output,
+    u32 n) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < n) {
+    output[index] = inverse_diagonal[index] * input[index];
+  }
+}
+
+extern "C" __global__ void sparse_block_diagonal_apply_f32(
+    const float *inverse_blocks,
+    const float *input,
+    float *output,
+    u32 block_rows,
+    u32 block_size) {
+  const u32 block_row = blockIdx.x * blockDim.x + threadIdx.x;
+  if (block_row >= block_rows) {
+    return;
+  }
+  float local_input[12] = {0.0f};
+  float local_output[12] = {0.0f};
+  const u32 vector_base = block_row * block_size;
+  const u32 block_base = block_row * block_size * block_size;
+  for (u32 column = 0; column < block_size; ++column) {
+    local_input[column] = input[vector_base + column];
+  }
+  for (u32 row = 0; row < block_size; ++row) {
+    for (u32 column = 0; column < block_size; ++column) {
+      local_output[row] += inverse_blocks[
+          block_base + row * block_size + column] * local_input[column];
+    }
+  }
+  for (u32 row = 0; row < block_size; ++row) {
+    output[vector_base + row] = local_output[row];
+  }
+}
+
 extern "C" __global__ void compact_rank_tiles_i32(const u8 *flags,
                                                   u64 flags_offset,
                                                   u64 flags_stride,
@@ -1320,5 +1359,296 @@ extern "C" __global__ void radix_copy_words(const u32 *src,
                                         static_cast<u64>(index) * dst_stride);
   for (u32 word = 0; word < item_words; ++word) {
     output[word] = source[word];
+  }
+}
+
+__device__ bool sparse_assembly_finite(float value) {
+  return (bit_cast<u32>(value) & 0x7f800000u) != 0x7f800000u;
+}
+
+__device__ void sparse_assembly_set_first_status(i32 *status, i32 code) {
+  u32 previous;
+  asm volatile("atom.global.cas.b32 %0, [%1], %2, %3;"
+               : "=r"(previous)
+               : "l"(status), "r"(0u),
+                 "r"(static_cast<u32>(-code))
+               : "memory");
+}
+
+__device__ void sparse_assembly_atomic_add(u32 *address, u32 value) {
+  u32 previous;
+  asm volatile("atom.global.add.u32 %0, [%1], %2;"
+               : "=r"(previous)
+               : "l"(address), "r"(value)
+               : "memory");
+}
+
+extern "C" __global__ void sparse_assembly_pack_validate(
+    const i32 *triplet_rows,
+    const i32 *triplet_columns,
+    const float *triplet_values,
+    u64 *sorted_keys,
+    float *sorted_values,
+    i32 *active_count,
+    i32 *control,
+    u32 n,
+    u32 rows,
+    u32 columns) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= n) {
+    return;
+  }
+  if (index == 0u) {
+    active_count[0] = static_cast<i32>(n);
+  }
+  i32 row = triplet_rows[index];
+  i32 column = triplet_columns[index];
+  float value = triplet_values[index];
+  const bool valid_index = row >= 0 && column >= 0 &&
+                           static_cast<u32>(row) < rows &&
+                           static_cast<u32>(column) < columns;
+  if (!valid_index) {
+    sparse_assembly_set_first_status(control, 1);
+    row = 0;
+    column = 0;
+  }
+  if (!sparse_assembly_finite(value)) {
+    sparse_assembly_set_first_status(control, 2);
+    value = 0.0f;
+  }
+  sorted_keys[index] =
+      (static_cast<u64>(static_cast<u32>(row)) << 32) |
+      static_cast<u32>(column);
+  sorted_values[index] = value;
+}
+
+extern "C" __global__ void sparse_assembly_pack_packed_validate(
+    const u32 *packed_triplets,
+    u64 *sorted_keys,
+    float *sorted_values,
+    i32 *active_count,
+    i32 *control,
+    u32 capacity,
+    u32 rows,
+    u32 columns) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= capacity) {
+    return;
+  }
+  const i32 raw_count = static_cast<i32>(packed_triplets[0]);
+  const u32 header_capacity = packed_triplets[1];
+  const bool valid_count =
+      raw_count >= 0 && static_cast<u32>(raw_count) <= capacity &&
+      header_capacity == capacity;
+  const u32 count = valid_count ? static_cast<u32>(raw_count) : 0u;
+  if (index == 0u) {
+    active_count[0] = static_cast<i32>(count);
+    if (!valid_count) {
+      control[1] = raw_count;
+      sparse_assembly_set_first_status(control, 5);
+    }
+  }
+  if (index >= count) {
+    sorted_keys[index] = ~static_cast<u64>(0);
+    sorted_values[index] = 0.0f;
+    return;
+  }
+  const u32 *triplet = packed_triplets + 2u + index * 3u;
+  i32 row = static_cast<i32>(triplet[0]);
+  i32 column = static_cast<i32>(triplet[1]);
+  float value = bit_cast<float>(triplet[2]);
+  const bool valid_index = row >= 0 && column >= 0 &&
+                           static_cast<u32>(row) < rows &&
+                           static_cast<u32>(column) < columns;
+  if (!valid_index) {
+    sparse_assembly_set_first_status(control, 1);
+    row = 0;
+    column = 0;
+  }
+  if (!sparse_assembly_finite(value)) {
+    sparse_assembly_set_first_status(control, 2);
+    value = 0.0f;
+  }
+  sorted_keys[index] =
+      (static_cast<u64>(static_cast<u32>(row)) << 32) |
+      static_cast<u32>(column);
+  sorted_values[index] = value;
+}
+
+extern "C" __global__ void sparse_assembly_mark_segments(
+    const u64 *sorted_keys,
+    i32 *segment_ids,
+    const i32 *active_count,
+    i32 *control,
+    u32 capacity) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= capacity) {
+    return;
+  }
+  const i32 active = active_count[0];
+  if (active < 0 || static_cast<u32>(active) > capacity) {
+    if (index == 0u) {
+      sparse_assembly_set_first_status(control, 4);
+    }
+    segment_ids[index] = 0;
+    return;
+  }
+  segment_ids[index] =
+      index < static_cast<u32>(active) &&
+              (index == 0u ||
+               sorted_keys[index] != sorted_keys[index - 1u])
+          ? 1
+          : 0;
+}
+
+extern "C" __global__ void sparse_assembly_scatter_segments(
+    const u64 *sorted_keys,
+    const i32 *segment_ids,
+    u64 *unique_keys,
+    i32 *segment_offsets,
+    const i32 *active_count,
+    i32 *control,
+    u32 capacity) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= capacity) {
+    return;
+  }
+  const i32 active = active_count[0];
+  if (active < 0 || static_cast<u32>(active) > capacity) {
+    if (index == 0u) {
+      sparse_assembly_set_first_status(control, 4);
+      control[1] = 0;
+    }
+    return;
+  }
+  if (active == 0) {
+    if (index == 0u) {
+      segment_offsets[0] = 0;
+      if (control[0] == 0) {
+        control[1] = 0;
+      }
+    }
+    return;
+  }
+  if (index >= static_cast<u32>(active)) {
+    return;
+  }
+  const bool starts_segment =
+      index == 0u || sorted_keys[index] != sorted_keys[index - 1u];
+  const i32 segment_id = segment_ids[index];
+  if (starts_segment) {
+    if (segment_id <= 0 ||
+        static_cast<u32>(segment_id) > static_cast<u32>(active)) {
+      sparse_assembly_set_first_status(control, 4);
+    } else {
+      const u32 segment = static_cast<u32>(segment_id - 1);
+      unique_keys[segment] = sorted_keys[index];
+      segment_offsets[segment] = static_cast<i32>(index);
+    }
+  }
+  if (index + 1u == static_cast<u32>(active)) {
+    if (segment_id <= 0 ||
+        static_cast<u32>(segment_id) > static_cast<u32>(active)) {
+      sparse_assembly_set_first_status(control, 4);
+      control[1] = 0;
+    } else {
+      segment_offsets[segment_id] = active;
+      control[1] = segment_id;
+    }
+  }
+}
+
+extern "C" __global__ void sparse_assembly_reduce_segments(
+    const float *sorted_values,
+    const i32 *segment_offsets,
+    float *unique_values,
+    const i32 *active_count,
+    i32 *control,
+    u32 capacity) {
+  const u32 segment = blockIdx.x * blockDim.x + threadIdx.x;
+  const i32 active = active_count[0];
+  const i32 unique_count = control[1];
+  if (active < 0 || static_cast<u32>(active) > capacity ||
+      unique_count < 0 || unique_count > active) {
+    if (segment == 0u) {
+      sparse_assembly_set_first_status(control, 4);
+    }
+    return;
+  }
+  if (active == 0) {
+    return;
+  }
+  if (segment >= static_cast<u32>(unique_count)) {
+    return;
+  }
+  const i32 begin = segment_offsets[segment];
+  const i32 end = segment_offsets[segment + 1u];
+  if (begin < 0 || end <= begin || end > active) {
+    sparse_assembly_set_first_status(control, 4);
+    unique_values[segment] = 0.0f;
+    return;
+  }
+  float sum = 0.0f;
+  for (i32 index = begin; index < end; ++index) {
+    sum += sorted_values[index];
+  }
+  if (!sparse_assembly_finite(sum)) {
+    sparse_assembly_set_first_status(control, 3);
+    sum = 0.0f;
+  }
+  unique_values[segment] = sum;
+}
+
+extern "C" __global__ void sparse_assembly_emit_csr(
+    const u64 *unique_keys,
+    i32 *row_offsets,
+    i32 *column_indices,
+    const i32 *active_count,
+    i32 *control,
+    u32 capacity,
+    u32 rows,
+    u32 columns) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  const i32 active = active_count[0];
+  const i32 unique_count = control[1];
+  if (active < 0 || static_cast<u32>(active) > capacity ||
+      unique_count < 0 || unique_count > active) {
+    if (index == 0u) {
+      sparse_assembly_set_first_status(control, 4);
+    }
+    return;
+  }
+  if (active == 0) {
+    return;
+  }
+  if (index >= static_cast<u32>(unique_count)) {
+    return;
+  }
+  const u64 key = unique_keys[index];
+  const u32 row = static_cast<u32>(key >> 32);
+  const u32 column = static_cast<u32>(key);
+  if (row >= rows || column >= columns) {
+    sparse_assembly_set_first_status(control, 4);
+    return;
+  }
+  column_indices[index] = static_cast<i32>(column);
+  sparse_assembly_atomic_add(
+      reinterpret_cast<u32 *>(row_offsets + row + 1u), 1u);
+}
+
+extern "C" __global__ void sparse_assembly_finalize_control(
+    const i32 *active_count,
+    i32 *control,
+    u32 capacity) {
+  if (blockIdx.x != 0u || threadIdx.x != 0u) {
+    return;
+  }
+  const i32 active = active_count[0];
+  if (active < 0 || static_cast<u32>(active) > capacity) {
+    sparse_assembly_set_first_status(control, 4);
+    return;
+  }
+  if (control[0] == 0) {
+    control[0] = active;
   }
 }

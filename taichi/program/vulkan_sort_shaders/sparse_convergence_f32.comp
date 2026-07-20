@@ -1,0 +1,38 @@
+#version 450
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer ResidualSquared {
+  float data[];
+} residual_squared_buf;
+
+layout(set = 0, binding = 1, std430) buffer Status {
+  int data[];
+} status_buf;
+
+layout(set = 0, binding = 2, std430) buffer CompletedIterations {
+  int data[];
+} completed_iterations_buf;
+
+layout(push_constant) uniform Params {
+  float tolerance_squared;
+  uint completed_iterations;
+  uint unused0;
+  uint unused1;
+} params;
+
+void main() {
+  if (status_buf.data[0] != 0) {
+    return;
+  }
+  float residual_squared = residual_squared_buf.data[0];
+  if (isnan(residual_squared) || isinf(residual_squared) ||
+      residual_squared < 0.0) {
+    status_buf.data[0] = 1;
+    return;
+  }
+  completed_iterations_buf.data[0] = int(params.completed_iterations);
+  if (residual_squared <= params.tolerance_squared) {
+    status_buf.data[0] = 2;
+  }
+}

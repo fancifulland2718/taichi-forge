@@ -9840,6 +9840,186 @@ std::size_t Program::cuda_device_grouped_reduce_segmented_strided_keys_ndarray(
 #endif
 }
 
+bool Program::cuda_sparse_assembly_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::driver_hierarchical_available();
+#else
+  return false;
+#endif
+}
+
+CudaSparseAssemblyDispatchInfo Program::cuda_sparse_assemble_csr(
+    Ndarray *packed_triplets,
+    Ndarray *triplet_rows,
+    Ndarray *triplet_columns,
+    Ndarray *triplet_values,
+    Ndarray *sorted_keys,
+    Ndarray *sorted_values,
+    Ndarray *segment_ids,
+    Ndarray *unique_keys,
+    Ndarray *segment_offsets,
+    Ndarray *unique_values,
+    Ndarray *row_offsets,
+    Ndarray *column_indices,
+    Ndarray *active_count,
+    Ndarray *control,
+    std::size_t capacity,
+    std::size_t rows,
+    std::size_t cols) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!cuda_sparse_assembly_available(),
+              "CUDA sparse assembly requires the Driver hierarchical "
+              "primitive provider.");
+  TI_ERROR_IF(capacity == 0 ||
+                  capacity >=
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA sparse assembly capacity must be in [1, INT_MAX).");
+  TI_ERROR_IF(rows == 0 || cols == 0 ||
+                  rows >=
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                  cols >
+                      static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "CUDA sparse assembly rows must be in [1, INT_MAX), and "
+              "columns in [1, INT_MAX].");
+  const bool packed_input = packed_triplets != nullptr;
+  TI_ERROR_IF(
+      packed_input
+          ? (triplet_rows || triplet_columns || triplet_values)
+          : (!triplet_rows || !triplet_columns || !triplet_values),
+      "CUDA sparse assembly requires exactly one input layout: packed "
+      "builder storage or three separate triplet arrays.");
+  std::vector<Ndarray *> arrays{
+      sorted_keys,     sorted_values,  segment_ids, unique_keys,
+      segment_offsets, unique_values,  row_offsets, column_indices,
+      active_count,    control};
+  if (packed_input) {
+    arrays.push_back(packed_triplets);
+  } else {
+    arrays.push_back(triplet_rows);
+    arrays.push_back(triplet_columns);
+    arrays.push_back(triplet_values);
+  }
+  for (Ndarray *array : arrays) {
+    TI_ERROR_IF(!array, "CUDA sparse assembly received a null ndarray.");
+    TI_ERROR_IF(array->shape.size() != 1 ||
+                    !array->get_element_shape().empty(),
+                "CUDA sparse assembly expects scalar 1D ndarrays.");
+  }
+  auto check_array = [](const char *name, Ndarray *array, DataType dtype,
+                        std::size_t count, std::size_t item_bytes) {
+    TI_ERROR_IF(array->get_element_data_type() != dtype ||
+                    array->get_nelement() != count ||
+                    array->get_element_size() != item_bytes,
+                "CUDA sparse assembly {} has an unexpected dtype, shape, or "
+                "byte width; expected exactly {} scalar entries.",
+                name, count);
+  };
+  if (packed_input) {
+    check_array("packed triplets", packed_triplets, PrimitiveType::f32,
+                capacity * 3 + 2, sizeof(float32));
+  } else {
+    check_array("triplet rows", triplet_rows, PrimitiveType::i32, capacity,
+                sizeof(int32_t));
+    check_array("triplet columns", triplet_columns, PrimitiveType::i32,
+                capacity, sizeof(int32_t));
+    check_array("triplet values", triplet_values, PrimitiveType::f32,
+                capacity, sizeof(float32));
+  }
+  check_array("sorted keys", sorted_keys, PrimitiveType::u64, capacity,
+              sizeof(uint64_t));
+  check_array("sorted values", sorted_values, PrimitiveType::f32, capacity,
+              sizeof(float32));
+  check_array("segment ids", segment_ids, PrimitiveType::i32, capacity,
+              sizeof(int32_t));
+  check_array("unique keys", unique_keys, PrimitiveType::u64, capacity,
+              sizeof(uint64_t));
+  check_array("segment offsets", segment_offsets, PrimitiveType::i32,
+              capacity + 1, sizeof(int32_t));
+  check_array("unique values", unique_values, PrimitiveType::f32, capacity,
+              sizeof(float32));
+  check_array("row offsets", row_offsets, PrimitiveType::i32, rows + 1,
+              sizeof(int32_t));
+  check_array("column indices", column_indices, PrimitiveType::i32, capacity,
+              sizeof(int32_t));
+  check_array("active count", active_count, PrimitiveType::i32, 1,
+              sizeof(int32_t));
+  check_array("control", control, PrimitiveType::i32, 2, sizeof(int32_t));
+
+  std::vector<DeviceAllocation> allocs(arrays.size());
+  for (std::size_t i = 0; i < arrays.size(); ++i) {
+    allocs[i] = arrays[i]->get_device_allocation();
+    for (std::size_t j = 0; j < i; ++j) {
+      TI_ERROR_IF(allocs[i] == allocs[j],
+                  "CUDA sparse assembly buffers must not alias.");
+    }
+  }
+
+#ifdef TI_WITH_CUDA
+  auto ptr = [this](Ndarray *array) {
+    return reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(array));
+  };
+  constexpr auto i32_type = cuda::CudaTransformValueType::i32;
+  constexpr auto u64_key_type = cuda::CudaDriverSortKeyType::u64;
+  void *stream = nullptr;
+  const int capacity_i = static_cast<int>(capacity);
+  const int rows_i = static_cast<int>(rows);
+  const int cols_i = static_cast<int>(cols);
+
+  cuda::driver_zero_strided(ptr(control), 2, i32_type, 0, sizeof(int32_t),
+                            stream);
+  if (packed_input) {
+    cuda::driver_sparse_assembly_pack_packed_validate(
+        ptr(packed_triplets), ptr(sorted_keys), ptr(sorted_values),
+        ptr(active_count), ptr(control), capacity_i, rows_i, cols_i, stream);
+  } else {
+    cuda::driver_sparse_assembly_pack_validate(
+        ptr(triplet_rows), ptr(triplet_columns), ptr(triplet_values),
+        ptr(sorted_keys), ptr(sorted_values), ptr(active_count), ptr(control),
+        capacity_i, rows_i, cols_i, stream);
+  }
+
+  CudaSparseAssemblyDispatchInfo result;
+  result.radix_sort_workspace_bytes =
+      cuda::driver_stable_radix_sort_strided(
+          ptr(sorted_keys), ptr(sorted_values), capacity_i, u64_key_type, 1, 0,
+          sizeof(uint64_t), 0, sizeof(float32), true, 0, stream,
+          &primitive_workspace_arena_);
+
+  cuda::driver_sparse_assembly_mark_segments(
+      ptr(sorted_keys), ptr(segment_ids), ptr(active_count), ptr(control),
+      capacity_i, stream);
+  result.scan_workspace_bytes = cuda::driver_inclusive_scan_strided(
+      ptr(segment_ids), capacity_i, i32_type, 0, sizeof(int32_t), false,
+      stream, &primitive_workspace_arena_);
+  cuda::driver_sparse_assembly_scatter_segments(
+      ptr(sorted_keys), ptr(segment_ids), ptr(unique_keys),
+      ptr(segment_offsets), ptr(active_count), ptr(control), capacity_i,
+      stream);
+  cuda::driver_sparse_assembly_reduce_segments(
+      ptr(sorted_values), ptr(segment_offsets), ptr(unique_values),
+      ptr(active_count), ptr(control), capacity_i, stream);
+
+  cuda::driver_zero_strided(ptr(row_offsets), rows_i + 1, i32_type, 0,
+                            sizeof(int32_t), stream);
+  cuda::driver_sparse_assembly_emit_csr(
+      ptr(unique_keys), ptr(row_offsets), ptr(column_indices),
+      ptr(active_count), ptr(control), capacity_i, rows_i, cols_i, stream);
+  result.scan_workspace_bytes = cuda::driver_inclusive_scan_strided(
+      ptr(row_offsets), rows_i + 1, i32_type, 0, sizeof(int32_t), false,
+      stream, &primitive_workspace_arena_);
+  cuda::driver_sparse_assembly_finalize_control(
+      ptr(active_count), ptr(control), capacity_i, stream);
+  // Driver workspaces retain every replaced generation until Program
+  // teardown. Growth therefore does not require an assembly-local sync.
+  result.workspace_growth_synchronized = false;
+  return result;
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
 bool Program::cuda_device_radix_sort_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&

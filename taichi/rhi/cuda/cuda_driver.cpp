@@ -1,6 +1,7 @@
 #include "taichi/rhi/cuda/cuda_driver.h"
 
 #include <cstdlib>
+#include <tuple>
 
 #include "taichi/common/dynamic_loader.h"
 #include "taichi/rhi/cuda/cuda_context.h"
@@ -288,6 +289,50 @@ bool CUSPARSEDriver::load_cusparse() {
   name.set_names(#name, #symbol_name);
 #include "taichi/rhi/cuda/cusparse_functions.inc.h"
 #undef PER_CUSPARSE_FUNCTION
+
+  // New cuSPARSE matrix formats and operations are introduced independently
+  // from the CUDA driver ABI. Probe them as optional capabilities so that an
+  // older, otherwise fully usable cuSPARSE library still loads.
+  cp_get_property_.set(
+      loader_->load_function_optional("cusparseGetProperty"));
+  cp_get_property_.set_lock(&lock_);
+  cp_get_property_.set_names("cp_get_property_", "cusparseGetProperty");
+
+  capabilities_ = {};
+  if (cp_get_property_.available()) {
+    // libraryPropertyType is a shared CUDA-library enum with stable values:
+    // MAJOR_VERSION=0, MINOR_VERSION=1, PATCH_LEVEL=2.
+    constexpr int kMajorVersion = 0;
+    constexpr int kMinorVersion = 1;
+    constexpr int kPatchLevel = 2;
+    const auto query_property = [&](int property, int &value) {
+      if (cp_get_property_.call(property, &value) != 0) {
+        value = -1;
+      }
+    };
+    query_property(kMajorVersion, capabilities_.library_version_major);
+    query_property(kMinorVersion, capabilities_.library_version_minor);
+    query_property(kPatchLevel, capabilities_.library_version_patch);
+  }
+
+  cpCreateBsr.set(loader_->load_function_optional("cusparseCreateBsr"));
+  cpCreateBsr.set_lock(&lock_);
+  cpCreateBsr.set_names("cpCreateBsr", "cusparseCreateBsr");
+  capabilities_.bsr_descriptor_available = cpCreateBsr.available();
+  const auto version_at_least = [&](int major, int minor, int patch) {
+    const auto actual = std::make_tuple(
+        capabilities_.library_version_major,
+        capabilities_.library_version_minor,
+        capabilities_.library_version_patch);
+    return actual >= std::make_tuple(major, minor, patch);
+  };
+  // Generic SpMV did not accept a BSR descriptor until CUDA Toolkit 13.0
+  // Update 1, whose independently versioned cuSPARSE component is 12.6.3.
+  // Descriptor construction alone is therefore not an execution capability
+  // on an older cuSPARSE provider.
+  capabilities_.generic_bsr_spmv_available =
+      capabilities_.bsr_descriptor_available && cpSpMV.available() &&
+      version_at_least(12, 6, 3);
   return cusparse_loaded_;
 }
 

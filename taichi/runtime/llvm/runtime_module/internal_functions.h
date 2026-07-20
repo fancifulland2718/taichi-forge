@@ -13,11 +13,17 @@
   do {                                                                    \
     auto base_ptr = reinterpret_cast<int##T *>(base_ptr_);                \
     int##T *num_triplets = base_ptr;                                      \
-    auto data_base_ptr = base_ptr + 1;                                    \
+    const auto max_num_triplets = base_ptr[1];                            \
+    auto data_base_ptr = base_ptr + 2;                                    \
     auto triplet_id = atomic_add_i##T(num_triplets, 1);                   \
-    data_base_ptr[triplet_id * 3] = i;                                    \
-    data_base_ptr[triplet_id * 3 + 1] = j;                                \
-    data_base_ptr[triplet_id * 3 + 2] = taichi_union_cast<int##T>(value); \
+    if (triplet_id >= max_num_triplets) {                                 \
+      atomic_exchange_i##T(num_triplets, max_num_triplets + 1);           \
+    } else {                                                              \
+      data_base_ptr[triplet_id * 3] = i;                                  \
+      data_base_ptr[triplet_id * 3 + 1] = j;                              \
+      data_base_ptr[triplet_id * 3 + 2] =                                 \
+          taichi_union_cast<int##T>(value);                               \
+    }                                                                     \
   } while (0);
 
 i32 do_nothing(RuntimeContext *context) {

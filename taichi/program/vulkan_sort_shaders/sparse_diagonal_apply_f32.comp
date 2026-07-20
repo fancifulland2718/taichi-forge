@@ -1,0 +1,32 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InverseDiagonal {
+  float data[];
+} inverse_diagonal_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer InputVector {
+  float data[];
+} input_buf;
+
+layout(set = 0, binding = 2, std430) writeonly buffer OutputVector {
+  float data[];
+} output_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint unused0;
+  uint unused1;
+  uint unused2;
+} params;
+
+void main() {
+  uint index = gl_GlobalInvocationID.x;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  while (index < params.n) {
+    output_buf.data[index] =
+        inverse_diagonal_buf.data[index] * input_buf.data[index];
+    index += stride;
+  }
+}

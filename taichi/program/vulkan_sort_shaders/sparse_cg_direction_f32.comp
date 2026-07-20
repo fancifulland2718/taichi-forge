@@ -1,0 +1,36 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Residual {
+  float data[];
+} residual_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer Beta {
+  float data[];
+} beta_buf;
+
+layout(set = 0, binding = 2, std430) buffer Direction {
+  float data[];
+} direction_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint unused0;
+  uint unused1;
+  uint unused2;
+} params;
+
+void main() {
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint index = gl_GlobalInvocationID.x;
+  float beta = beta_buf.data[0];
+  while (index < params.n) {
+    direction_buf.data[index] =
+        residual_buf.data[index] + beta * direction_buf.data[index];
+    if (params.n - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+}

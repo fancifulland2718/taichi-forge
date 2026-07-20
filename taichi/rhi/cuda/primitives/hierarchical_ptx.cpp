@@ -43,6 +43,8 @@ struct KernelSet {
   std::array<void *, 2> gather_add{};
   std::array<void *, 6> scatter_add{};
   std::array<void *, 6> zero{};
+  void *sparse_diagonal_apply_f32{nullptr};
+  void *sparse_block_diagonal_apply_f32{nullptr};
   std::array<void *, 2> zero_bins{};
   std::array<std::array<void *, 2>, 2> histogram{};
   void *compact_rank_tiles{nullptr};
@@ -57,6 +59,13 @@ struct KernelSet {
   std::array<void *, 2> radix_scatter4{};
   void *radix_gather_words{nullptr};
   void *radix_copy_words{nullptr};
+  void *sparse_assembly_pack_validate{nullptr};
+  void *sparse_assembly_pack_packed_validate{nullptr};
+  void *sparse_assembly_mark_segments{nullptr};
+  void *sparse_assembly_scatter_segments{nullptr};
+  void *sparse_assembly_reduce_segments{nullptr};
+  void *sparse_assembly_emit_csr{nullptr};
+  void *sparse_assembly_finalize_control{nullptr};
 };
 
 std::once_flag kernel_set_once;
@@ -166,6 +175,12 @@ void load_kernel_set_once() {
                              "add_scaled_strided_f32");
   driver.module_get_function(&kernel_set.add_scaled[1], kernel_set.module,
                              "add_scaled_strided_f64");
+  driver.module_get_function(&kernel_set.sparse_diagonal_apply_f32,
+                             kernel_set.module,
+                             "sparse_diagonal_apply_f32");
+  driver.module_get_function(&kernel_set.sparse_block_diagonal_apply_f32,
+                             kernel_set.module,
+                             "sparse_block_diagonal_apply_f32");
   driver.module_get_function(&kernel_set.gather_add[0], kernel_set.module,
                              "gather_add_strided_f32");
   driver.module_get_function(&kernel_set.gather_add[1], kernel_set.module,
@@ -196,6 +211,26 @@ void load_kernel_set_once() {
                              "radix_gather_words");
   driver.module_get_function(&kernel_set.radix_copy_words, kernel_set.module,
                              "radix_copy_words");
+  driver.module_get_function(&kernel_set.sparse_assembly_pack_validate,
+                             kernel_set.module,
+                             "sparse_assembly_pack_validate");
+  driver.module_get_function(
+      &kernel_set.sparse_assembly_pack_packed_validate, kernel_set.module,
+      "sparse_assembly_pack_packed_validate");
+  driver.module_get_function(&kernel_set.sparse_assembly_mark_segments,
+                             kernel_set.module,
+                             "sparse_assembly_mark_segments");
+  driver.module_get_function(&kernel_set.sparse_assembly_scatter_segments,
+                             kernel_set.module,
+                             "sparse_assembly_scatter_segments");
+  driver.module_get_function(&kernel_set.sparse_assembly_reduce_segments,
+                             kernel_set.module,
+                             "sparse_assembly_reduce_segments");
+  driver.module_get_function(&kernel_set.sparse_assembly_emit_csr,
+                             kernel_set.module, "sparse_assembly_emit_csr");
+  driver.module_get_function(&kernel_set.sparse_assembly_finalize_control,
+                             kernel_set.module,
+                             "sparse_assembly_finalize_control");
 }
 
 KernelSet &kernels() {
@@ -975,6 +1010,260 @@ std::size_t driver_grouped_reduce_strided(void *keys,
                                     value_type, values_offset, values_stride,
                                     keys_offset, keys_stride, output_offset,
                                     output_stride, stream);
+}
+
+void driver_sparse_diagonal_apply_f32(void *inverse_diagonal,
+                                      void *input,
+                                      void *output,
+                                      int num_items,
+                                      void *stream) {
+  TI_ERROR_IF(num_items <= 0 || !inverse_diagonal || !input || !output,
+              "CUDA Driver sparse diagonal apply received an invalid size "
+              "or pointer.");
+  void *inverse_arg = inverse_diagonal;
+  void *input_arg = input;
+  void *output_arg = output;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::vector<void *> args{
+      &inverse_arg, &input_arg, &output_arg, &count_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_diagonal_apply_f32,
+      "cuda_driver_sparse_diagonal_apply_f32", args, {}, grid, kBlockDim, 0,
+      stream);
+}
+
+void driver_sparse_block_diagonal_apply_f32(void *inverse_blocks,
+                                            void *input,
+                                            void *output,
+                                            int block_rows,
+                                            int block_size,
+                                            void *stream) {
+  TI_ERROR_IF(block_rows <= 0 ||
+                  (block_size != 2 && block_size != 3 && block_size != 6 &&
+                   block_size != 12) ||
+                  !inverse_blocks || !input || !output,
+              "CUDA Driver sparse block diagonal apply received invalid "
+              "geometry or a null pointer.");
+  void *inverse_arg = inverse_blocks;
+  void *input_arg = input;
+  void *output_arg = output;
+  std::uint32_t block_rows_arg =
+      static_cast<std::uint32_t>(block_rows);
+  std::uint32_t block_size_arg =
+      static_cast<std::uint32_t>(block_size);
+  std::vector<void *> args{&inverse_arg, &input_arg, &output_arg,
+                           &block_rows_arg, &block_size_arg};
+  const unsigned grid =
+      (block_rows_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_block_diagonal_apply_f32,
+      "cuda_driver_sparse_block_diagonal_apply_f32", args, {}, grid,
+      kBlockDim, 0, stream);
+}
+
+void driver_sparse_assembly_pack_validate(void *triplet_rows,
+                                          void *triplet_columns,
+                                          void *triplet_values,
+                                          void *sorted_keys,
+                                          void *sorted_values,
+                                          void *active_count,
+                                          void *control,
+                                          int num_items,
+                                          int rows,
+                                          int columns,
+                                          void *stream) {
+  TI_ERROR_IF(num_items <= 0 || rows <= 0 || columns <= 0,
+              "CUDA Driver sparse assembly pack received an invalid size.");
+  TI_ERROR_IF(!triplet_rows || !triplet_columns || !triplet_values ||
+                  !sorted_keys || !sorted_values || !active_count || !control,
+              "CUDA Driver sparse assembly pack received a null pointer.");
+  void *triplet_rows_arg = triplet_rows;
+  void *triplet_columns_arg = triplet_columns;
+  void *triplet_values_arg = triplet_values;
+  void *sorted_keys_arg = sorted_keys;
+  void *sorted_values_arg = sorted_values;
+  void *active_count_arg = active_count;
+  void *control_arg = control;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::uint32_t rows_arg = static_cast<std::uint32_t>(rows);
+  std::uint32_t columns_arg = static_cast<std::uint32_t>(columns);
+  std::vector<void *> args{
+      &triplet_rows_arg, &triplet_columns_arg, &triplet_values_arg,
+      &sorted_keys_arg,  &sorted_values_arg,   &active_count_arg,
+      &control_arg,      &count_arg,           &rows_arg,
+      &columns_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_assembly_pack_validate,
+      "cuda_driver_sparse_assembly_pack_validate", args, {}, grid, kBlockDim,
+      0, stream);
+}
+
+void driver_sparse_assembly_pack_packed_validate(void *packed_triplets,
+                                                 void *sorted_keys,
+                                                 void *sorted_values,
+                                                 void *active_count,
+                                                 void *control,
+                                                 int capacity,
+                                                 int rows,
+                                                 int columns,
+                                                 void *stream) {
+  TI_ERROR_IF(capacity <= 0 || rows <= 0 || columns <= 0,
+              "CUDA Driver packed sparse assembly received an invalid size.");
+  TI_ERROR_IF(!packed_triplets || !sorted_keys || !sorted_values ||
+                  !active_count || !control,
+              "CUDA Driver packed sparse assembly received a null pointer.");
+  void *packed_triplets_arg = packed_triplets;
+  void *sorted_keys_arg = sorted_keys;
+  void *sorted_values_arg = sorted_values;
+  void *active_count_arg = active_count;
+  void *control_arg = control;
+  std::uint32_t capacity_arg = static_cast<std::uint32_t>(capacity);
+  std::uint32_t rows_arg = static_cast<std::uint32_t>(rows);
+  std::uint32_t columns_arg = static_cast<std::uint32_t>(columns);
+  std::vector<void *> args{
+      &packed_triplets_arg, &sorted_keys_arg, &sorted_values_arg,
+      &active_count_arg,    &control_arg,     &capacity_arg,
+      &rows_arg,            &columns_arg};
+  const unsigned grid = (capacity_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_assembly_pack_packed_validate,
+      "cuda_driver_sparse_assembly_pack_packed_validate", args, {}, grid,
+      kBlockDim, 0, stream);
+}
+
+void driver_sparse_assembly_mark_segments(void *sorted_keys,
+                                          void *segment_ids,
+                                          void *active_count,
+                                          void *control,
+                                          int capacity,
+                                          void *stream) {
+  TI_ERROR_IF(capacity <= 0 || !sorted_keys || !segment_ids ||
+                  !active_count || !control,
+              "CUDA Driver sparse assembly segment marking received an "
+              "invalid size or pointer.");
+  void *sorted_keys_arg = sorted_keys;
+  void *segment_ids_arg = segment_ids;
+  void *active_count_arg = active_count;
+  void *control_arg = control;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(capacity);
+  std::vector<void *> args{
+      &sorted_keys_arg, &segment_ids_arg, &active_count_arg, &control_arg,
+      &count_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_assembly_mark_segments,
+      "cuda_driver_sparse_assembly_mark_segments", args, {}, grid, kBlockDim,
+      0, stream);
+}
+
+void driver_sparse_assembly_scatter_segments(void *sorted_keys,
+                                             void *segment_ids,
+                                             void *unique_keys,
+                                             void *segment_offsets,
+                                             void *active_count,
+                                             void *control,
+                                             int capacity,
+                                             void *stream) {
+  TI_ERROR_IF(capacity <= 0 || !sorted_keys || !segment_ids || !unique_keys ||
+                  !segment_offsets || !active_count || !control,
+              "CUDA Driver sparse assembly segment scatter received an "
+              "invalid size or pointer.");
+  void *sorted_keys_arg = sorted_keys;
+  void *segment_ids_arg = segment_ids;
+  void *unique_keys_arg = unique_keys;
+  void *segment_offsets_arg = segment_offsets;
+  void *active_count_arg = active_count;
+  void *control_arg = control;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(capacity);
+  std::vector<void *> args{
+      &sorted_keys_arg,     &segment_ids_arg, &unique_keys_arg,
+      &segment_offsets_arg, &active_count_arg, &control_arg,
+      &count_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_assembly_scatter_segments,
+      "cuda_driver_sparse_assembly_scatter_segments", args, {}, grid,
+      kBlockDim, 0, stream);
+}
+
+void driver_sparse_assembly_reduce_segments(void *sorted_values,
+                                            void *segment_offsets,
+                                            void *unique_values,
+                                            void *active_count,
+                                            void *control,
+                                            int capacity,
+                                            void *stream) {
+  TI_ERROR_IF(capacity <= 0 || !sorted_values || !segment_offsets ||
+                  !unique_values || !active_count || !control,
+              "CUDA Driver sparse assembly segment reduction received an "
+              "invalid size or pointer.");
+  void *sorted_values_arg = sorted_values;
+  void *segment_offsets_arg = segment_offsets;
+  void *unique_values_arg = unique_values;
+  void *active_count_arg = active_count;
+  void *control_arg = control;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(capacity);
+  std::vector<void *> args{
+      &sorted_values_arg, &segment_offsets_arg, &unique_values_arg,
+      &active_count_arg, &control_arg, &count_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_assembly_reduce_segments,
+      "cuda_driver_sparse_assembly_reduce_segments", args, {}, grid,
+      kBlockDim, 0, stream);
+}
+
+void driver_sparse_assembly_emit_csr(void *unique_keys,
+                                     void *row_offsets,
+                                     void *column_indices,
+                                     void *active_count,
+                                     void *control,
+                                     int capacity,
+                                     int rows,
+                                     int columns,
+                                     void *stream) {
+  TI_ERROR_IF(capacity <= 0 || rows <= 0 || columns <= 0 || !unique_keys ||
+                  !row_offsets || !column_indices || !active_count ||
+                  !control,
+              "CUDA Driver sparse assembly CSR emit received an invalid size "
+              "or pointer.");
+  void *unique_keys_arg = unique_keys;
+  void *row_offsets_arg = row_offsets;
+  void *column_indices_arg = column_indices;
+  void *active_count_arg = active_count;
+  void *control_arg = control;
+  std::uint32_t capacity_arg = static_cast<std::uint32_t>(capacity);
+  std::uint32_t rows_arg = static_cast<std::uint32_t>(rows);
+  std::uint32_t columns_arg = static_cast<std::uint32_t>(columns);
+  std::vector<void *> args{
+      &unique_keys_arg, &row_offsets_arg, &column_indices_arg,
+      &active_count_arg, &control_arg, &capacity_arg, &rows_arg,
+      &columns_arg};
+  const unsigned grid = (capacity_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_assembly_emit_csr,
+      "cuda_driver_sparse_assembly_emit_csr", args, {}, grid, kBlockDim, 0,
+      stream);
+}
+
+void driver_sparse_assembly_finalize_control(void *active_count,
+                                             void *control,
+                                             int capacity,
+                                             void *stream) {
+  TI_ERROR_IF(capacity <= 0 || !active_count || !control,
+              "CUDA Driver sparse assembly finalize received an invalid size "
+              "or pointer.");
+  void *active_count_arg = active_count;
+  void *control_arg = control;
+  std::uint32_t capacity_arg = static_cast<std::uint32_t>(capacity);
+  std::vector<void *> args{
+      &active_count_arg, &control_arg, &capacity_arg};
+  CUDAContext::get_instance().launch(
+      kernels().sparse_assembly_finalize_control,
+      "cuda_driver_sparse_assembly_finalize_control", args, {}, 1, 1, 0,
+      stream);
 }
 
 std::size_t driver_stable_radix_sort_strided(

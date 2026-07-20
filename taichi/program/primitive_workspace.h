@@ -38,6 +38,7 @@ enum class PrimitiveWorkspaceFamily : std::uint16_t {
   histogram = 11,
   transform = 12,
   ordering_aux = 13,
+  sparse_algebra = 14,
 };
 
 struct PrimitiveWorkspaceKey {

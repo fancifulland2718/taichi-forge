@@ -10,7 +10,7 @@ from taichi_forge.lang.matrix import MatrixType
 from taichi_forge.lang.struct import StructType
 from taichi_forge.lang.util import cook_dtype
 from taichi_forge.types._argument_descriptor import describe_element_type
-from taichi_forge.types.primitive_types import RefType, u64
+from taichi_forge.types.primitive_types import RefType, i32, u64
 
 
 class KernelArgument:
@@ -28,6 +28,24 @@ class SparseMatrixEntry:
         self.dtype = dtype
 
     def _augassign(self, value, op):
+        if isinstance(self.ptr, AnyArray):
+            from taichi_forge.lang._sparse_builder_ops import (
+                insert_triplet_i32_storage,
+            )
+
+            if op == "Add":
+                insert_triplet_i32_storage(
+                    self.ptr, self.i, self.j, ops.cast(value, self.dtype)
+                )
+            elif op == "Sub":
+                insert_triplet_i32_storage(
+                    self.ptr, self.i, self.j, -ops.cast(value, self.dtype)
+                )
+            else:
+                assert False, (
+                    "Only operations '+=' and '-=' are supported on sparse matrices."
+                )
+            return
         call_func = f"insert_triplet_{self.dtype}"
         if op == "Add":
             taichi_forge.lang.impl.call_internal(call_func, self.ptr, self.i, self.j, ops.cast(value, self.dtype))
@@ -116,6 +134,17 @@ def decl_argpack_arg(argpacktype, member_dict):
 
 def decl_sparse_matrix(dtype, name):
     value_type = cook_dtype(dtype)
+    if impl.current_cfg().arch == _ti_core.Arch.vulkan:
+        return SparseMatrixProxy(
+            decl_ndarray_arg(
+                i32,
+                1,
+                name,
+                False,
+                _ti_core.BoundaryMode.UNSAFE,
+            ),
+            value_type,
+        )
     ptr_type = cook_dtype(u64)
     # Treat the sparse matrix argument as a scalar since we only need to pass in the base pointer
     arg_id = impl.get_runtime().compiling_callable.insert_scalar_param(ptr_type, name)

@@ -27,6 +27,8 @@ REQUIRED_ENTRIES = (
     "add_scaled_strided_f64",
     "gather_add_strided_f32",
     "gather_add_strided_f64",
+    "sparse_diagonal_apply_f32",
+    "sparse_block_diagonal_apply_f32",
     *(f"scatter_add_strided_{suffix}" for suffix in SUFFIXES),
     *(f"zero_strided_{suffix}" for suffix in SUFFIXES),
     "compact_rank_tiles_i32",
@@ -43,6 +45,13 @@ REQUIRED_ENTRIES = (
     "radix_scatter4_u64",
     "radix_gather_words",
     "radix_copy_words",
+    "sparse_assembly_pack_validate",
+    "sparse_assembly_pack_packed_validate",
+    "sparse_assembly_mark_segments",
+    "sparse_assembly_scatter_segments",
+    "sparse_assembly_reduce_segments",
+    "sparse_assembly_emit_csr",
+    "sparse_assembly_finalize_control",
 )
 
 

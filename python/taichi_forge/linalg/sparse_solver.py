@@ -53,6 +53,8 @@ class SparseSolver:
             sparse_matrix (SparseMatrix): The sparse matrix to be computed.
         """
         if isinstance(sparse_matrix, SparseMatrix):
+            sparse_matrix._ensure_valid()
+            sparse_matrix._require_operation("public_direct_solver")
             self.matrix = sparse_matrix
             taichi_arch = taichi_forge.lang.impl.get_runtime().prog.config().arch
             if taichi_arch == _ti_core.Arch.x64 or taichi_arch == _ti_core.Arch.arm64:
@@ -70,6 +72,8 @@ class SparseSolver:
             sparse_matrix (SparseMatrix): The sparse matrix to be analyzed.
         """
         if isinstance(sparse_matrix, SparseMatrix):
+            sparse_matrix._ensure_valid()
+            sparse_matrix._require_operation("public_direct_solver")
             self.matrix = sparse_matrix
             if self.matrix.dtype != self.dtype:
                 raise TaichiRuntimeError(
@@ -86,6 +90,8 @@ class SparseSolver:
             sparse_matrix (SparseMatrix): The sparse matrix to be factorized.
         """
         if isinstance(sparse_matrix, SparseMatrix):
+            sparse_matrix._ensure_valid()
+            sparse_matrix._require_operation("public_direct_solver")
             self.matrix = sparse_matrix
             self.solver.factorize(sparse_matrix.matrix)
         else:
@@ -101,6 +107,7 @@ class SparseSolver:
         """
         if self.matrix is None:
             raise TaichiRuntimeError("Please call compute() before calling solve().")
+        self.matrix._ensure_valid()
         if isinstance(b, Field):
             return self.solver.solve(b.to_numpy())
         if isinstance(b, np.ndarray):

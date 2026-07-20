@@ -117,6 +117,19 @@ std::size_t driver_zero_strided(void *dst,
                                 std::size_t dst_stride,
                                 void *stream);
 
+void driver_sparse_diagonal_apply_f32(void *inverse_diagonal,
+                                      void *input,
+                                      void *output,
+                                      int num_items,
+                                      void *stream);
+
+void driver_sparse_block_diagonal_apply_f32(void *inverse_blocks,
+                                            void *input,
+                                            void *output,
+                                            int block_rows,
+                                            int block_size,
+                                            void *stream);
+
 std::size_t driver_compact_strided(void *values,
                                    void *flags,
                                    void *output,
@@ -166,6 +179,67 @@ std::size_t driver_grouped_reduce_strided(void *keys,
                                           std::size_t output_offset,
                                           std::size_t output_stride,
                                           void *stream);
+
+void driver_sparse_assembly_pack_validate(void *triplet_rows,
+                                          void *triplet_columns,
+                                          void *triplet_values,
+                                          void *sorted_keys,
+                                          void *sorted_values,
+                                          void *active_count,
+                                          void *control,
+                                          int num_items,
+                                          int rows,
+                                          int columns,
+                                          void *stream);
+
+void driver_sparse_assembly_pack_packed_validate(void *packed_triplets,
+                                                 void *sorted_keys,
+                                                 void *sorted_values,
+                                                 void *active_count,
+                                                 void *control,
+                                                 int capacity,
+                                                 int rows,
+                                                 int columns,
+                                                 void *stream);
+
+void driver_sparse_assembly_mark_segments(void *sorted_keys,
+                                          void *segment_ids,
+                                          void *active_count,
+                                          void *control,
+                                          int capacity,
+                                          void *stream);
+
+void driver_sparse_assembly_scatter_segments(void *sorted_keys,
+                                             void *segment_ids,
+                                             void *unique_keys,
+                                             void *segment_offsets,
+                                             void *active_count,
+                                             void *control,
+                                             int capacity,
+                                             void *stream);
+
+void driver_sparse_assembly_reduce_segments(void *sorted_values,
+                                            void *segment_offsets,
+                                            void *unique_values,
+                                            void *active_count,
+                                            void *control,
+                                            int capacity,
+                                            void *stream);
+
+void driver_sparse_assembly_emit_csr(void *unique_keys,
+                                     void *row_offsets,
+                                     void *column_indices,
+                                     void *active_count,
+                                     void *control,
+                                     int capacity,
+                                     int rows,
+                                     int columns,
+                                     void *stream);
+
+void driver_sparse_assembly_finalize_control(void *active_count,
+                                             void *control,
+                                             int capacity,
+                                             void *stream);
 
 std::size_t driver_stable_radix_sort_strided(
     void *keys,

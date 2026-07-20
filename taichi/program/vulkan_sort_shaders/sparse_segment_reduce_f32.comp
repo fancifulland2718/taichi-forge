@@ -1,0 +1,62 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Values {
+  float values[];
+};
+layout(set = 0, binding = 1) readonly buffer SegmentOffsets {
+  int segment_offsets[];
+};
+layout(set = 0, binding = 2) writeonly buffer OutputValues {
+  float output_values[];
+};
+layout(set = 0, binding = 3) readonly buffer ActiveCount {
+  int active_count[];
+};
+layout(set = 0, binding = 4) buffer Control {
+  int control[];
+};
+
+layout(push_constant) uniform Params {
+  uint capacity;
+  uint reserved0;
+  uint reserved1;
+  uint reserved2;
+} params;
+
+void set_status(int value) {
+  atomicCompSwap(control[0], 0, -value);
+}
+
+void main() {
+  uint segment = gl_GlobalInvocationID.x;
+  int active_items = active_count[0];
+  int unique_count = control[1];
+  if (active_items < 0 || uint(active_items) > params.capacity ||
+      unique_count < 0 || unique_count > active_items) {
+    if (segment == 0u) {
+      set_status(4);
+    }
+    return;
+  }
+  if (active_items == 0 || segment >= uint(unique_count) ||
+      segment >= params.capacity) {
+    return;
+  }
+  int begin = segment_offsets[segment];
+  int end = segment_offsets[segment + 1u];
+  if (begin < 0 || end <= begin || end > active_items) {
+    set_status(4);
+    return;
+  }
+  float sum = 0.0;
+  for (int i = begin; i < end; ++i) {
+    sum += values[i];
+  }
+  if (isnan(sum) || isinf(sum)) {
+    set_status(3);
+    return;
+  }
+  output_values[segment] = sum;
+}

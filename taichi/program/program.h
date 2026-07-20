@@ -47,6 +47,18 @@
 
 namespace taichi::lang {
 
+struct VulkanSparseAssemblyDispatchInfo {
+  std::size_t radix_sort_workspace_bytes{0};
+  std::size_t scan_workspace_bytes{0};
+  bool workspace_growth_synchronized{false};
+};
+
+struct CudaSparseAssemblyDispatchInfo {
+  std::size_t radix_sort_workspace_bytes{0};
+  std::size_t scan_workspace_bytes{0};
+  bool workspace_growth_synchronized{false};
+};
+
 class Program;
 namespace runtime_completion_detail {
 Program *&active_runtime_submission_program() noexcept;
@@ -994,6 +1006,27 @@ class TI_DLL_EXPORT Program {
       std::size_t output_offset,
       std::size_t output_stride,
       int op);
+
+  bool cuda_sparse_assembly_available() const;
+
+  CudaSparseAssemblyDispatchInfo cuda_sparse_assemble_csr(
+      Ndarray *packed_triplets,
+      Ndarray *triplet_rows,
+      Ndarray *triplet_columns,
+      Ndarray *triplet_values,
+      Ndarray *sorted_keys,
+      Ndarray *sorted_values,
+      Ndarray *segment_ids,
+      Ndarray *unique_keys,
+      Ndarray *segment_offsets,
+      Ndarray *unique_values,
+      Ndarray *row_offsets,
+      Ndarray *column_indices,
+      Ndarray *active_count,
+      Ndarray *control,
+      std::size_t capacity,
+      std::size_t rows,
+      std::size_t cols);
 
   bool cuda_device_radix_sort_available() const;
 
@@ -2260,6 +2293,105 @@ class TI_DLL_EXPORT Program {
   void vulkan_metric_reduce_clear_workspace();
 
   std::size_t vulkan_metric_reduce_workspace_bytes() const;
+
+  bool vulkan_sparse_algebra_available() const;
+
+  bool vulkan_sparse_assembly_available() const;
+
+  VulkanSparseAssemblyDispatchInfo vulkan_sparse_assemble_csr(
+      Ndarray *packed_triplets,
+      Ndarray *triplet_rows,
+      Ndarray *triplet_columns,
+      Ndarray *triplet_values,
+      Ndarray *sorted_keys,
+      Ndarray *sorted_values,
+      Ndarray *segment_ids,
+      Ndarray *unique_keys,
+      Ndarray *segment_offsets,
+      Ndarray *unique_values,
+      Ndarray *row_offsets,
+      Ndarray *column_indices,
+      Ndarray *active_count,
+      Ndarray *control,
+      std::size_t capacity,
+      std::size_t rows,
+      std::size_t cols);
+
+  void vulkan_copy_ndarray_prefix(Ndarray *dst,
+                                  Ndarray *src,
+                                  std::size_t bytes);
+
+  std::size_t vulkan_csr_spmv(Ndarray *row_offsets,
+                              Ndarray *column_indices,
+                              Ndarray *values,
+                              Ndarray *x,
+                              Ndarray *y,
+                              std::size_t rows,
+                              std::size_t cols,
+                              std::size_t nnz);
+
+  std::size_t vulkan_bsr_spmv(Ndarray *row_offsets,
+                              Ndarray *column_indices,
+                              Ndarray *values,
+                              Ndarray *x,
+                              Ndarray *y,
+                              std::size_t block_rows,
+                              std::size_t block_cols,
+                              std::size_t block_nnz,
+                              std::size_t block_size);
+
+  std::size_t vulkan_sparse_axpy(Ndarray *x,
+                                 Ndarray *y,
+                                 std::size_t n,
+                                 float alpha);
+
+  std::size_t vulkan_sparse_diagonal_apply(Ndarray *inverse_diagonal,
+                                           Ndarray *input,
+                                           Ndarray *output,
+                                           std::size_t n);
+
+  std::size_t vulkan_sparse_block_diagonal_apply(
+      Ndarray *inverse_blocks,
+      Ndarray *input,
+      Ndarray *output,
+      std::size_t block_rows,
+      std::size_t block_size);
+
+  std::size_t vulkan_sparse_dot(Ndarray *x,
+                                Ndarray *y,
+                                Ndarray *output,
+                                std::size_t n);
+
+  std::size_t vulkan_sparse_norm(Ndarray *x,
+                                 Ndarray *output,
+                                 std::size_t n);
+
+  std::size_t vulkan_sparse_scalar_divide(Ndarray *numerator,
+                                          Ndarray *denominator,
+                                          Ndarray *quotient,
+                                          Ndarray *status);
+
+  std::size_t vulkan_sparse_cg_update(Ndarray *direction,
+                                      Ndarray *applied_direction,
+                                      Ndarray *alpha,
+                                      Ndarray *solution,
+                                      Ndarray *residual,
+                                      std::size_t n);
+
+  std::size_t vulkan_sparse_cg_direction(Ndarray *residual,
+                                         Ndarray *beta,
+                                         Ndarray *direction,
+                                         std::size_t n);
+
+  std::size_t vulkan_sparse_convergence(Ndarray *residual_squared,
+                                        Ndarray *status,
+                                        Ndarray *completed_iterations,
+                                        float tolerance_squared,
+                                        std::uint32_t iteration);
+
+  void vulkan_sparse_algebra_clear_workspace();
+
+  std::size_t vulkan_sparse_algebra_workspace_bytes() const;
 
   bool vulkan_transform_available() const;
 

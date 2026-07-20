@@ -55,3 +55,50 @@ def test_matrixfree_bicgstab(ti_dtype):
     # for more details.
     result = check_solution(Ax, b, tol=1e-6)
     assert result
+
+
+@pytest.mark.parametrize(
+    ("rhs_value", "expected"), [(0.005, True), (0.05, False)]
+)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[vk_on_mac])
+def test_matrixfree_bicgstab_uses_absolute_residual_norm_at_zero_iterations(
+    rhs_value, expected
+):
+    x = ti.field(dtype=ti.f32, shape=1)
+    b = ti.field(dtype=ti.f32, shape=1)
+
+    @ti.kernel
+    def initialize(value: ti.f32):
+        x[0] = 0.0
+        b[0] = value
+
+    @ti.kernel
+    def identity(value: ti.template(), output: ti.template()):
+        output[0] = value[0]
+
+    initialize(rhs_value)
+    assert (
+        MatrixFreeBICGSTAB(
+            LinearOperator(identity),
+            b,
+            x,
+            tol=0.01,
+            maxiter=0,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("tol", "maxiter", "message"),
+    [
+        (0.0, 0, "tol must be a finite positive number"),
+        (1e-3, -1, "maxiter must be a non-negative integer"),
+    ],
+)
+@test_utils.test(arch=[ti.cpu])
+def test_matrixfree_bicgstab_rejects_invalid_solver_controls(
+    tol, maxiter, message
+):
+    with pytest.raises(RuntimeError, match=message):
+        MatrixFreeBICGSTAB(None, None, None, tol=tol, maxiter=maxiter)

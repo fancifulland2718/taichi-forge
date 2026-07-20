@@ -1,0 +1,28 @@
+#version 450
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer ActiveCount {
+  int active_count[];
+};
+layout(set = 0, binding = 1) buffer Control {
+  int control[];
+};
+
+layout(push_constant) uniform Params {
+  uint capacity;
+  uint reserved0;
+  uint reserved1;
+  uint reserved2;
+} params;
+
+void main() {
+  int active_items = active_count[0];
+  if (active_items < 0 || uint(active_items) > params.capacity) {
+    atomicCompSwap(control[0], 0, -4);
+    return;
+  }
+  if (control[0] == 0) {
+    control[0] = active_items;
+  }
+}

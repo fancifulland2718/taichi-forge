@@ -479,6 +479,11 @@ typedef enum {
 } cusparseIndexType_t;
 
 typedef enum {
+  CUSPARSE_ORDER_COL = 1,
+  CUSPARSE_ORDER_ROW = 2
+} cusparseOrder_t;
+
+typedef enum {
   CUSPARSE_INDEX_BASE_ZERO = 0,
   CUSPARSE_INDEX_BASE_ONE = 1
 } cusparseIndexBase_t;
@@ -525,7 +530,8 @@ typedef enum {
   CUSPARSE_SPMV_COO_ALG1 = 1,
   CUSPARSE_SPMV_CSR_ALG1 = 2,
   CUSPARSE_SPMV_CSR_ALG2 = 3,
-  CUSPARSE_SPMV_COO_ALG2 = 4
+  CUSPARSE_SPMV_COO_ALG2 = 4,
+  CUSPARSE_SPMV_BSR_ALG1 = 6
 } cusparseSpMVAlg_t;
 
 typedef enum {

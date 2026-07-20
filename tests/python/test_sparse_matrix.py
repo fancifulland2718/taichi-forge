@@ -1,7 +1,236 @@
+import numpy as np
 import pytest
 
 import taichi_forge as ti
+from taichi_forge.lang.exception import TaichiRuntimeError
 from tests import test_utils
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_sparse_matrix_builder_rejects_unimplemented_format_without_building():
+    n = 4
+    builder = ti.linalg.SparseMatrixBuilder(
+        n, n, max_num_triplets=n, dtype=ti.f32
+    )
+
+    with pytest.raises(TaichiRuntimeError, match="supports CSR only"):
+        builder.build(_format="BSR")
+
+    @ti.kernel
+    def fill(matrix: ti.types.sparse_matrix_builder()):
+        for i in range(n):
+            matrix[i, i] += i + 1
+
+    fill(builder)
+    matrix = builder.build(_format="csr")
+    assert matrix._num_nonzero() == n
+    contract = matrix._get_format_contract()
+    assert contract["schema_version"] == 1
+    assert contract["identity"]["storage_format"] in ("csr", "csc")
+    assert contract["identity"]["index_dtype"] == "i32"
+    assert contract["pattern"]["empty_supported"]
+    assert contract["operations"]["ndarray_spmv"]
+    assert contract["constraints"]["public_builder_available"]
+    assert not contract["constraints"]["public_bsr_available"]
+    assert not contract["constraints"]["silent_format_fallback"]
+
+
+@pytest.mark.parametrize("dtype", [ti.f32, ti.f64])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_cpu_sparse_builder_rejects_oversized_count_and_remains_reusable(dtype):
+    empty_builder = ti.linalg.SparseMatrixBuilder(1, 1, dtype=dtype)
+    assert empty_builder.build()._num_nonzero() == 0
+
+    builder = ti.linalg.SparseMatrixBuilder(
+        2, 2, max_num_triplets=1, dtype=dtype
+    )
+
+    @ti.kernel
+    def overflow(matrix: ti.types.sparse_matrix_builder()):
+        matrix[0, 0] += 1.0
+        matrix[1, 1] += 2.0
+
+    overflow(builder)
+
+    with pytest.raises(RuntimeError, match="triplet count 2 exceeds capacity"):
+        builder.build()
+
+    @ti.kernel
+    def fill(matrix: ti.types.sparse_matrix_builder()):
+        matrix[1, 1] += 4.0
+
+    fill(builder)
+    matrix = builder.build()
+    assert matrix._num_nonzero() == 1
+    assert matrix[1, 1] == pytest.approx(4.0)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_sparse_builder_bounds_insertion_and_remains_reusable():
+    builder = ti.linalg.SparseMatrixBuilder(
+        2, 2, max_num_triplets=1, dtype=ti.f32
+    )
+
+    @ti.kernel
+    def overflow(matrix: ti.types.sparse_matrix_builder()):
+        matrix[0, 0] += 1.0
+        matrix[1, 1] += 2.0
+
+    overflow(builder)
+    with pytest.raises(RuntimeError, match="triplet count 2 exceeds capacity"):
+        builder.build()
+
+    @ti.kernel
+    def fill(matrix: ti.types.sparse_matrix_builder()):
+        matrix[1, 1] += 4.0
+
+    fill(builder)
+    matrix = builder.build()
+    assert matrix._num_nonzero() == 1
+    assert matrix[1, 1] == pytest.approx(4.0)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_public_builder_uses_active_count_and_publishes_exact_csr():
+    builder = ti.linalg.SparseMatrixBuilder(
+        3, 3, max_num_triplets=8, dtype=ti.f32
+    )
+
+    @ti.kernel
+    def fill(matrix: ti.types.sparse_matrix_builder()):
+        matrix[0, 0] += 1.25
+        matrix[2, 1] += -3.0
+        matrix[0, 0] += 2.75
+
+    fill(builder)
+    matrix = builder.build()
+    assert matrix._num_nonzero() == 2
+    assert matrix[0, 0] == pytest.approx(4.0)
+    assert matrix[2, 1] == pytest.approx(-3.0)
+    stats = matrix._debug_runtime_stats()
+    assert stats["resources"]["pattern_reserved_bytes"] == 24
+    assert stats["resources"]["values_reserved_bytes"] == 8
+    assert stats["transfers"]["device_to_host_bytes"] == 0
+    assert stats["transfers"]["host_to_device_bytes"] == 0
+    assert stats["transfers"]["device_to_device_bytes"] == 32
+
+    empty = builder.build()
+    assert empty._num_nonzero() == 0
+    assert matrix[0, 0] == pytest.approx(4.0)
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_sparse_builder_bounds_insertion_and_remains_reusable():
+    builder = ti.linalg.SparseMatrixBuilder(
+        2, 2, max_num_triplets=1, dtype=ti.f32
+    )
+
+    @ti.kernel
+    def overflow(matrix: ti.types.sparse_matrix_builder()):
+        matrix[0, 0] += 1.0
+        matrix[1, 1] += 2.0
+
+    overflow(builder)
+    with pytest.raises(RuntimeError, match="triplet count 2 exceeds capacity"):
+        builder.build()
+
+    @ti.kernel
+    def fill(matrix: ti.types.sparse_matrix_builder()):
+        matrix[1, 1] += 4.0
+
+    fill(builder)
+    matrix = builder.build()
+    x = ti.ndarray(dtype=ti.f32, shape=2)
+    x.from_numpy(np.asarray([2.0, 3.0], dtype=np.float32))
+    y = matrix @ x
+    np.testing.assert_allclose(
+        y.to_numpy(), [0.0, 12.0], rtol=1e-6, atol=1e-6
+    )
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_public_builder_uses_active_count_and_publishes_exact_csr():
+    builder = ti.linalg.SparseMatrixBuilder(
+        3, 3, max_num_triplets=8, dtype=ti.f32
+    )
+
+    @ti.kernel
+    def fill(matrix: ti.types.sparse_matrix_builder()):
+        matrix[0, 0] += 1.25
+        matrix[2, 1] += -3.0
+        matrix[0, 0] += 2.75
+
+    fill(builder)
+    matrix = builder.build()
+    assert matrix._num_nonzero() == 2
+    x = ti.ndarray(dtype=ti.f32, shape=3)
+    x.from_numpy(np.asarray([2.0, 5.0, 7.0], dtype=np.float32))
+    y = matrix @ x
+    np.testing.assert_allclose(
+        y.to_numpy(), np.asarray([8.0, 0.0, -15.0], dtype=np.float32)
+    )
+    stats = matrix._debug_runtime_stats()
+    assert stats["resources"]["pattern_reserved_bytes"] == 24
+    assert stats["resources"]["values_reserved_bytes"] == 8
+    assert stats["transfers"]["device_to_host_bytes"] == 0
+    assert stats["transfers"]["host_to_device_bytes"] == 0
+    assert stats["transfers"]["device_to_device_bytes"] == 32
+
+    empty = builder.build()
+    assert empty._num_nonzero() == 0
+    empty_y = empty @ x
+    np.testing.assert_allclose(
+        empty_y.to_numpy(), np.zeros(3, dtype=np.float32)
+    )
+    old_y = matrix @ x
+    np.testing.assert_allclose(
+        old_y.to_numpy(), np.asarray([8.0, 0.0, -15.0], dtype=np.float32)
+    )
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_cpu_sparse_builder_is_validated_deterministic_and_transactional():
+    builder = ti.linalg.SparseMatrixBuilder(
+        2, 2, max_num_triplets=3, dtype=ti.f32
+    )
+
+    @ti.kernel
+    def fill_invalid_index(matrix: ti.types.sparse_matrix_builder()):
+        matrix[2, 0] += 1.0
+
+    fill_invalid_index(builder)
+    with pytest.raises(RuntimeError, match="outside matrix dimensions"):
+        builder.build()
+
+    @ti.kernel
+    def fill_nonfinite(matrix: ti.types.sparse_matrix_builder()):
+        matrix[0, 0] += ti.cast(float("inf"), ti.f32)
+
+    fill_nonfinite(builder)
+    with pytest.raises(RuntimeError, match="contains a non-finite value"):
+        builder.build()
+
+    @ti.kernel
+    def fill_duplicate_overflow(matrix: ti.types.sparse_matrix_builder()):
+        matrix[0, 0] += ti.cast(3.0e38, ti.f32)
+        matrix[0, 0] += ti.cast(3.0e38, ti.f32)
+
+    fill_duplicate_overflow(builder)
+    with pytest.raises(RuntimeError, match="duplicate sum.*non-finite"):
+        builder.build()
+
+    @ti.kernel
+    def fill_order_sensitive_duplicates(
+        matrix: ti.types.sparse_matrix_builder(),
+    ):
+        matrix[0, 0] += ti.cast(1.0e20, ti.f32)
+        matrix[0, 0] += ti.cast(-1.0e20, ti.f32)
+        matrix[0, 0] += 3.0
+
+    fill_order_sensitive_duplicates(builder)
+    matrix = builder.build()
+    assert matrix._num_nonzero() == 1
+    assert matrix[0, 0] == pytest.approx(3.0)
 
 
 @pytest.mark.parametrize(
@@ -229,6 +458,7 @@ def test_sparse_matrix_addition(dtype, storage_format):
     A = Abuilder.build()
     B = Bbuilder.build()
     C = A + B
+    assert C.dtype == dtype
     for i in range(n):
         for j in range(n):
             assert C[i, j] == 2 * i
@@ -262,6 +492,7 @@ def test_sparse_matrix_subtraction(dtype, storage_format):
     A = Abuilder.build()
     B = Bbuilder.build()
     C = A - B
+    assert C.dtype == dtype
     for i in range(n):
         for j in range(n):
             assert C[i, j] == 2 * j
@@ -289,6 +520,7 @@ def test_sparse_matrix_scalar_multiplication(dtype, storage_format):
     fill(Abuilder)
     A = Abuilder.build()
     B = A * 3.0
+    assert B.dtype == dtype
     for i in range(n):
         for j in range(n):
             assert B[i, j] == 3 * (i + j)
@@ -316,6 +548,7 @@ def test_sparse_matrix_transpose(dtype, storage_format):
     fill(Abuilder)
     A = Abuilder.build()
     B = A.transpose()
+    assert B.dtype == dtype
     for i in range(n):
         for j in range(n):
             assert B[i, j] == A[j, i]
@@ -590,3 +823,140 @@ def test_gpu_sparse_matrix_ops(N):
     H = A @ B.transpose()
     S8 = S1 @ S2.T
     verify(S8, H)
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    offline_cache=False,
+)
+def test_public_bsr_pattern_matrix_spmv_update_and_sharing():
+    row_offsets_host = np.asarray([0, 1, 2], dtype=np.int32)
+    column_indices_host = np.asarray([0, 1], dtype=np.int32)
+    row_offsets = ti.ndarray(dtype=ti.i32, shape=3)
+    column_indices = ti.ndarray(dtype=ti.i32, shape=2)
+    row_offsets.from_numpy(row_offsets_host)
+    column_indices.from_numpy(column_indices_host)
+    pattern = ti.linalg.SparsePattern.bsr(
+        block_rows=2,
+        block_cols=2,
+        block_size=2,
+        row_offsets=row_offsets,
+        column_indices=column_indices,
+    )
+    assert pattern.shape == (4, 4)
+    assert pattern.block_shape == (2, 2)
+    assert pattern.block_size == 2
+    assert pattern.num_blocks == 2
+    assert pattern.storage_format == "bsr"
+
+    identity_values = np.tile(np.eye(2, dtype=np.float32).reshape(-1), 2)
+    values_a = ti.ndarray(dtype=ti.f32, shape=8)
+    values_b = ti.ndarray(dtype=ti.f32, shape=8)
+    values_a.from_numpy(identity_values)
+    values_b.from_numpy(2.0 * identity_values)
+    try:
+        matrix_a = pattern.matrix(values_a)
+        matrix_b = ti.linalg.SparseMatrix.from_pattern(pattern, values_b)
+    except RuntimeError as exc:
+        if ti.lang.impl.current_cfg().arch == ti.cuda and "does not support generic BSR SpMV" in str(exc):
+            pytest.skip("loaded cuSPARSE provider lacks generic BSR SpMV")
+        raise
+
+    vector_host = np.asarray([1.0, -2.0, 3.0, -4.0], dtype=np.float32)
+    vector = ti.ndarray(dtype=ti.f32, shape=4)
+    vector.from_numpy(vector_host)
+    np.testing.assert_allclose((matrix_a @ vector).to_numpy(), vector_host)
+    np.testing.assert_allclose((matrix_b @ vector).to_numpy(), 2.0 * vector_host)
+
+    matrix_a.update_values(values_b)
+    np.testing.assert_allclose((matrix_a @ vector).to_numpy(), 2.0 * vector_host)
+    contract = matrix_a._get_format_contract()
+    supports_public_cg = ti.lang.impl.current_cfg().arch in (ti.cpu, ti.cuda)
+    assert contract["pattern"]["ownership"] == "shared_immutable"
+    assert contract["operations"]["public_cg"] == supports_public_cg
+    assert not contract["operations"]["public_direct_solver"]
+    assert not contract["operations"]["public_jacobi_selection"]
+    assert (
+        contract["operations"]["public_block_jacobi_selection"]
+        == supports_public_cg
+    )
+    assert contract["constraints"]["public_bsr_available"]
+    assert not contract["constraints"]["public_builder_available"]
+    assert not contract["constraints"]["silent_format_fallback"]
+    pattern_stats = pattern._debug_runtime_stats()
+    stats_a = matrix_a._debug_runtime_stats()
+    stats_b = matrix_b._debug_runtime_stats()
+    assert pattern_stats["lifecycle"]["operator_references"] == 2
+    assert stats_a["identity"]["pattern_id"] == pattern_stats["identity"]["pattern_id"]
+    assert stats_b["identity"]["pattern_id"] == pattern_stats["identity"]["pattern_id"]
+    assert stats_a["identity"]["numeric_version"] == 2
+    assert stats_b["identity"]["numeric_version"] == 1
+
+    with pytest.raises(TaichiRuntimeError, match="no NumPy or host fallback"):
+        pattern.matrix(identity_values)
+    rank_two_values = ti.ndarray(dtype=ti.f32, shape=(2, 4))
+    with pytest.raises(TaichiRuntimeError, match="one-dimensional"):
+        pattern.matrix(rank_two_values)
+
+
+@test_utils.test(arch=[ti.cpu], offline_cache=False)
+def test_public_cpu_bsr_pattern_supports_f64_values():
+    row_offsets = ti.ndarray(dtype=ti.i32, shape=2)
+    column_indices = ti.ndarray(dtype=ti.i32, shape=1)
+    row_offsets.from_numpy(np.asarray([0, 1], dtype=np.int32))
+    column_indices.from_numpy(np.asarray([0], dtype=np.int32))
+    pattern = ti.linalg.SparsePattern.bsr(1, 1, 2, row_offsets, column_indices)
+    values = ti.ndarray(dtype=ti.f64, shape=4)
+    values.from_numpy(np.eye(2, dtype=np.float64).reshape(-1))
+    matrix = pattern.matrix(values)
+    vector_host = np.asarray([1.25, -2.5], dtype=np.float64)
+    vector = ti.ndarray(dtype=ti.f64, shape=2)
+    vector.from_numpy(vector_host)
+    np.testing.assert_allclose((matrix @ vector).to_numpy(), vector_host)
+    assert matrix.dtype == ti.f64
+
+
+@test_utils.test(arch=[ti.cpu], offline_cache=False)
+def test_public_cpu_rectangular_bsr_keeps_solver_operations_disabled():
+    row_offsets = ti.ndarray(dtype=ti.i32, shape=3)
+    column_indices = ti.ndarray(dtype=ti.i32, shape=2)
+    row_offsets.from_numpy(np.asarray([0, 1, 2], dtype=np.int32))
+    column_indices.from_numpy(np.asarray([0, 2], dtype=np.int32))
+    pattern = ti.linalg.SparsePattern.bsr(
+        2, 3, 2, row_offsets, column_indices
+    )
+    values = ti.ndarray(dtype=ti.f32, shape=8)
+    values.from_numpy(np.tile(np.eye(2, dtype=np.float32).reshape(-1), 2))
+    matrix = pattern.matrix(values)
+    contract = matrix._get_format_contract()
+    assert matrix.shape == (4, 6)
+    assert not contract["operations"]["public_cg"]
+    assert not contract["operations"]["public_block_jacobi_selection"]
+    assert not contract["operations"]["public_direct_solver"]
+    with pytest.raises(
+        TaichiRuntimeError,
+        match="operation 'public_cg'.*no fallback was performed",
+    ):
+        ti.linalg.SparseCG(matrix, np.ones(4, dtype=np.float32))
+
+
+@test_utils.test(arch=[ti.cpu], offline_cache=False)
+def test_public_bsr_pattern_rejects_numpy_indices_without_fallback():
+    with pytest.raises(TaichiRuntimeError, match="cannot be constructed directly"):
+        ti.linalg.SparsePattern()
+
+    with pytest.raises(TaichiRuntimeError, match="no NumPy or host fallback"):
+        ti.linalg.SparsePattern.bsr(
+            1,
+            1,
+            2,
+            np.asarray([0, 1], dtype=np.int32),
+            np.asarray([0], dtype=np.int32),
+        )
+
+    row_offsets = ti.ndarray(dtype=ti.i32, shape=2)
+    column_indices = ti.ndarray(dtype=ti.i32, shape=1)
+    with pytest.raises(TaichiRuntimeError, match="block_size must be one of"):
+        ti.linalg.SparsePattern.bsr(1, 1, 4, row_offsets, column_indices)
+    with pytest.raises(TaichiRuntimeError, match="must be an integer"):
+        ti.linalg.SparsePattern.bsr(1.5, 1, 2, row_offsets, column_indices)

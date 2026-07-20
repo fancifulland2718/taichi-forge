@@ -1,0 +1,30 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer X {
+  float data[];
+} x_buf;
+
+layout(set = 0, binding = 1, std430) buffer Y {
+  float data[];
+} y_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  float alpha;
+  uint unused0;
+  uint unused1;
+} params;
+
+void main() {
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint index = gl_GlobalInvocationID.x;
+  while (index < params.n) {
+    y_buf.data[index] += params.alpha * x_buf.data[index];
+    if (params.n - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+}

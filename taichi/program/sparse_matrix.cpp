@@ -1,11 +1,15 @@
 #include "taichi/program/sparse_matrix.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "Eigen/Dense"
 #include "Eigen/SparseLU"
@@ -136,6 +140,11 @@ void SparseMatrix::record_pattern_build() {
   numeric_version_.fetch_add(1, std::memory_order_relaxed);
 }
 
+void SparseMatrix::record_pattern_reference() {
+  pattern_version_.fetch_add(1, std::memory_order_relaxed);
+  numeric_version_.fetch_add(1, std::memory_order_relaxed);
+}
+
 void SparseMatrix::record_numeric_update(std::uint64_t bytes) {
   numeric_updates_.fetch_add(1, std::memory_order_relaxed);
   numeric_update_bytes_.fetch_add(bytes, std::memory_order_relaxed);
@@ -181,29 +190,77 @@ SparseMatrixBuilder::SparseMatrixBuilder(int rows,
       dtype_(dtype),
       storage_format_(storage_format) {
   auto element_size = data_type_size(dtype);
-  TI_ASSERT((element_size == 4 || element_size == 8));
+  TI_ERROR_IF(rows <= 0 || cols <= 0,
+              "SparseMatrixBuilder rows and columns must be positive.");
+  TI_ERROR_IF(max_num_triplets < 0 ||
+                  max_num_triplets >
+                      (std::numeric_limits<int>::max() - 1) / 3,
+              "SparseMatrixBuilder max_num_triplets must be in [0, {}].",
+              (std::numeric_limits<int>::max() - 1) / 3);
+  TI_ERROR_IF(element_size != 4 && element_size != 8,
+              "SparseMatrixBuilder supports only 32-bit and 64-bit floating "
+              "point values.");
 }
 
 SparseMatrixBuilder::~SparseMatrixBuilder() = default;
 
 void SparseMatrixBuilder::create_ndarray(Program *prog) {
-  ndarray_data_base_ptr_ = prog->create_ndarray(
-      dtype_, std::vector<int>{3 * (int)max_num_triplets_ + 1});
-  ndarray_data_ptr_ = prog->get_ndarray_data_ptr_as_int(ndarray_data_base_ptr_);
+  TI_ERROR_IF(!prog, "SparseMatrixBuilder requires an active Program.");
+  TI_ERROR_IF(ndarray_data_base_ptr_ || program_,
+              "SparseMatrixBuilder storage has already been created.");
+  const bool descriptor_storage = prog->compile_config().arch == Arch::vulkan;
+  TI_ERROR_IF(descriptor_storage && dtype_ != PrimitiveType::f32,
+              "Vulkan sparse matrix builders support f32 values only.");
+  const DataType storage_dtype =
+      descriptor_storage ? PrimitiveType::i32 : dtype_;
+  const auto element_size = data_type_size(storage_dtype);
+  auto *storage = prog->create_ndarray(
+      storage_dtype, std::vector<int>{3 * (int)max_num_triplets_ + 2});
+  ndarray_data_base_ptr_ = storage;
+  program_ = prog;
+  ndarray_data_ptr_ = prog->get_ndarray_data_ptr_as_int(storage);
+  storage->write_int(std::vector<int>{0}, 0);
+  TypedConstant raw_capacity(storage_dtype);
+  if (element_size == sizeof(int32_t)) {
+    raw_capacity.val_i32 = static_cast<int32_t>(max_num_triplets_);
+  } else {
+    raw_capacity.val_i64 = static_cast<int64_t>(max_num_triplets_);
+  }
+  storage->write(std::vector<int>{1}, raw_capacity);
 }
 
 void SparseMatrixBuilder::delete_ndarray(Program *prog) {
+  if (!ndarray_data_base_ptr_) {
+    return;
+  }
+  TI_ERROR_IF(!prog || prog != program_,
+              "SparseMatrixBuilder storage must be deleted by its owning "
+              "Program.");
+  cuda_assembly_plan_.reset();
+  vulkan_assembly_plan_.reset();
   prog->delete_ndarray(ndarray_data_base_ptr_);
+  ndarray_data_base_ptr_ = nullptr;
+  ndarray_data_ptr_ = 0;
+  program_ = nullptr;
+  num_triplets_ = 0;
+  built_ = false;
 }
 
 template <typename T, typename G>
 void SparseMatrixBuilder::print_triplets_template() {
+  TI_ERROR_IF(!ndarray_data_base_ptr_,
+              "SparseMatrixBuilder storage is not available.");
   auto ptr = get_ndarray_data_ptr();
   G *data = reinterpret_cast<G *>(ptr);
-  num_triplets_ = data[0];
+  const G raw_count = data[0];
+  TI_ERROR_IF(raw_count < 0 ||
+                  static_cast<uint64>(raw_count) > max_num_triplets_,
+              "SparseMatrixBuilder triplet count {} exceeds capacity {}.",
+              raw_count, max_num_triplets_);
+  num_triplets_ = static_cast<uint64>(raw_count);
   fmt::print("n={}, m={}, num_triplets={} (max={})\n", rows_, cols_,
              num_triplets_, max_num_triplets_);
-  data += 1;
+  data += 2;
   for (int i = 0; i < num_triplets_; i++) {
     fmt::print("[{}, {}] = {}\n", data[i * 3], data[i * 3 + 1],
                taichi_union_cast<T>(data[i * 3 + 2]));
@@ -227,19 +284,27 @@ void SparseMatrixBuilder::print_triplets_eigen() {
 
 void SparseMatrixBuilder::print_triplets_cuda() {
 #ifdef TI_WITH_CUDA
+  TI_ERROR_IF(!ndarray_data_base_ptr_,
+              "SparseMatrixBuilder storage is not available.");
+  int32_t raw_count = 0;
   CUDADriver::get_instance().memcpy_device_to_host(
-      &num_triplets_, (void *)get_ndarray_data_ptr(), sizeof(int));
+      &raw_count, (void *)get_ndarray_data_ptr(), sizeof(raw_count));
+  TI_ERROR_IF(raw_count < 0 ||
+                  static_cast<uint64>(raw_count) > max_num_triplets_,
+              "SparseMatrixBuilder triplet count {} exceeds capacity {}.",
+              raw_count, max_num_triplets_);
+  num_triplets_ = static_cast<uint64>(raw_count);
   fmt::print("n={}, m={}, num_triplets={} (max={})\n", rows_, cols_,
              num_triplets_, max_num_triplets_);
-  auto len = 3 * num_triplets_ + 1;
+  auto len = 3 * num_triplets_ + 2;
   std::vector<float32> trips(len);
   CUDADriver::get_instance().memcpy_device_to_host(
       (void *)trips.data(), (void *)get_ndarray_data_ptr(),
       len * sizeof(float32));
   for (auto i = 0; i < num_triplets_; i++) {
-    int row = taichi_union_cast<int>(trips[3 * i + 1]);
-    int col = taichi_union_cast<int>(trips[3 * i + 2]);
-    auto val = trips[i * 3 + 3];
+    int row = taichi_union_cast<int>(trips[3 * i + 2]);
+    int col = taichi_union_cast<int>(trips[3 * i + 3]);
+    auto val = trips[i * 3 + 4];
     fmt::print("[{}, {}] = {}\n", row, col, val);
   }
 #endif
@@ -249,104 +314,171 @@ intptr_t SparseMatrixBuilder::get_ndarray_data_ptr() const {
   return ndarray_data_ptr_;
 }
 
+Ndarray *SparseMatrixBuilder::get_ndarray() const {
+  TI_ERROR_IF(!ndarray_data_base_ptr_,
+              "SparseMatrixBuilder storage is not available.");
+  return ndarray_data_base_ptr_;
+}
+
+template <typename T>
+struct BuilderEntry {
+  int row{0};
+  int column{0};
+  T value{0};
+  uint64 ordinal{0};
+};
+
 template <typename T, typename G>
-void SparseMatrixBuilder::build_template(std::unique_ptr<SparseMatrix> &m) {
-  using V = Eigen::Triplet<T>;
-  std::vector<V> triplets;
+std::unique_ptr<SparseMatrix> SparseMatrixBuilder::build_template() {
+  TI_ERROR_IF(!ndarray_data_base_ptr_ || !program_,
+              "SparseMatrixBuilder storage is not available.");
   auto ptr = get_ndarray_data_ptr();
   G *data = reinterpret_cast<G *>(ptr);
-  num_triplets_ = data[0];
-  data += 1;
-  for (int i = 0; i < num_triplets_; i++) {
-    triplets.push_back(
-        V(data[i * 3], data[i * 3 + 1], taichi_union_cast<T>(data[i * 3 + 2])));
+  const G raw_count = data[0];
+  TI_ERROR_IF(raw_count < 0 ||
+                  static_cast<uint64>(raw_count) > max_num_triplets_,
+              "SparseMatrixBuilder triplet count {} exceeds capacity {}.",
+              raw_count, max_num_triplets_);
+  num_triplets_ = static_cast<uint64>(raw_count);
+  data += 2;
+  std::vector<BuilderEntry<T>> entries;
+  entries.reserve(static_cast<std::size_t>(num_triplets_));
+  for (uint64 i = 0; i < num_triplets_; ++i) {
+    const G row = data[i * 3];
+    const G column = data[i * 3 + 1];
+    const T value = taichi_union_cast<T>(data[i * 3 + 2]);
+    TI_ERROR_IF(row < 0 || row >= static_cast<G>(rows_) || column < 0 ||
+                    column >= static_cast<G>(cols_),
+                "SparseMatrixBuilder triplet {} index [{}, {}] is outside "
+                "matrix dimensions [{}, {}].",
+                i, row, column, rows_, cols_);
+    TI_ERROR_IF(!std::isfinite(value),
+                "SparseMatrixBuilder triplet {} contains a non-finite value.",
+                i);
+    entries.push_back(
+        {static_cast<int>(row), static_cast<int>(column), value, i});
   }
-  m->build_triplets(static_cast<void *>(&triplets));
-  clear();
+  std::sort(entries.begin(), entries.end(),
+            [](const BuilderEntry<T> &left, const BuilderEntry<T> &right) {
+              if (left.row != right.row)
+                return left.row < right.row;
+              if (left.column != right.column)
+                return left.column < right.column;
+              return left.ordinal < right.ordinal;
+            });
+
+  using Triplet = Eigen::Triplet<T>;
+  std::vector<Triplet> triplets;
+  triplets.reserve(entries.size());
+  for (std::size_t begin = 0; begin < entries.size();) {
+    std::size_t end = begin + 1;
+    T sum = entries[begin].value;
+    while (end < entries.size() && entries[end].row == entries[begin].row &&
+           entries[end].column == entries[begin].column) {
+      sum += entries[end].value;
+      TI_ERROR_IF(!std::isfinite(sum),
+                  "SparseMatrixBuilder duplicate sum at [{}, {}] is "
+                  "non-finite.",
+                  entries[begin].row, entries[begin].column);
+      ++end;
+    }
+    triplets.emplace_back(entries[begin].row, entries[begin].column, sum);
+    begin = end;
+  }
+  auto matrix = make_sparse_matrix(rows_, cols_, dtype_, storage_format_);
+  matrix->build_triplets(static_cast<void *>(&triplets));
+  return matrix;
 }
 
 std::unique_ptr<SparseMatrix> SparseMatrixBuilder::build() {
-  TI_ASSERT(built_ == false);
+  TI_ERROR_IF(built_, "SparseMatrixBuilder build is already in progress.");
   built_ = true;
-  auto sm = make_sparse_matrix(rows_, cols_, dtype_, storage_format_);
-  auto element_size = data_type_size(dtype_);
-  switch (element_size) {
-    case 4:
-      build_template<float32, int32>(sm);
-      break;
-    case 8:
-      build_template<float64, int64>(sm);
-      break;
-    default:
-      TI_ERROR("Unsupported sparse matrix data type!");
-      break;
+  try {
+    std::unique_ptr<SparseMatrix> matrix;
+    const auto element_size = data_type_size(dtype_);
+    switch (element_size) {
+      case 4:
+        matrix = build_template<float32, int32>();
+        break;
+      case 8:
+        matrix = build_template<float64, int64>();
+        break;
+      default:
+        TI_ERROR("Unsupported sparse matrix data type!");
+    }
+    clear();
+    return matrix;
+  } catch (...) {
+    clear();
+    throw;
   }
-  return sm;
 }
 
 std::unique_ptr<SparseMatrix> SparseMatrixBuilder::build_cuda() {
-  TI_ASSERT(built_ == false);
+  TI_ERROR_IF(built_, "SparseMatrixBuilder build is already in progress.");
   built_ = true;
-  auto sm = make_cu_sparse_matrix(rows_, cols_, dtype_);
 #ifdef TI_WITH_CUDA
-  CUDADriver::get_instance().memcpy_device_to_host(
-      &num_triplets_, (void *)get_ndarray_data_ptr(), sizeof(int));
-  auto len = 3 * num_triplets_ + 1;
-  std::vector<float32> trips(len);
-  CUDADriver::get_instance().memcpy_device_to_host(
-      (void *)trips.data(), (void *)get_ndarray_data_ptr(),
-      len * sizeof(float32));
-  std::unordered_map<int, std::tuple<int, int, float32>> entries;
-  for (auto i = 0; i < num_triplets_; i++) {
-    int row = taichi_union_cast<int>(trips[3 * i + 1]);
-    int col = taichi_union_cast<int>(trips[3 * i + 2]);
-    auto val = trips[i * 3 + 3];
-    auto e_idx = row * cols_ + col;
-    if (entries.find(e_idx) == entries.end()) {
-      entries[e_idx] = std::make_tuple(row, col, val);
-    } else {
-      auto [r, c, v] = entries[e_idx];
-      entries[e_idx] = std::make_tuple(r, c, v + val);
+  try {
+    TI_ERROR_IF(!ndarray_data_base_ptr_ || !program_,
+                "SparseMatrixBuilder storage is not available.");
+    TI_ERROR_IF(dtype_ != PrimitiveType::f32,
+                "CUDA sparse assembly supports f32 values only.");
+    TI_ERROR_IF(max_num_triplets_ == 0,
+                "CUDA sparse assembly requires a positive triplet "
+                "capacity.");
+    if (!cuda_assembly_plan_) {
+      cuda_assembly_plan_ = std::make_unique<CudaSparseAssemblyPlan>(
+          program_, rows_, cols_, static_cast<int>(max_num_triplets_));
     }
+    auto matrix =
+        cuda_assembly_plan_->build_packed(program_, *ndarray_data_base_ptr_);
+    clear();
+    return matrix;
+  } catch (...) {
+    clear();
+    throw;
   }
-  auto entry_size = entries.size();
-  int *row_host = (int *)malloc(sizeof(int) * entry_size);
-  int *col_host = (int *)malloc(sizeof(int) * entry_size);
-  float32 *value_host = (float32 *)malloc(sizeof(float32) * entry_size);
-  int count = 0;
-  for (auto entry : entries) {
-    auto [row, col, value] = entry.second;
-    row_host[count] = row;
-    col_host[count] = col;
-    value_host[count] = value;
-    count++;
-  }
-  void *row_device = nullptr, *col_device = nullptr, *value_device = nullptr;
-  CUDADriver::get_instance().malloc(&row_device, entry_size * sizeof(int));
-  CUDADriver::get_instance().malloc(&col_device, entry_size * sizeof(int));
-  CUDADriver::get_instance().malloc(&value_device,
-                                    entry_size * sizeof(float32));
-  CUDADriver::get_instance().memcpy_host_to_device(row_device, (void *)row_host,
-                                                   entry_size * sizeof(int));
-  CUDADriver::get_instance().memcpy_host_to_device(col_device, (void *)col_host,
-                                                   entry_size * sizeof(int));
-  CUDADriver::get_instance().memcpy_host_to_device(
-      value_device, (void *)value_host, entry_size * sizeof(float32));
-  sm->build_csr_from_coo(row_device, col_device, value_device, entry_size);
-  sm->record_transfer_bytes(
-      entry_size * (sizeof(int) + sizeof(int) + sizeof(float32)),
-      sizeof(int) + len * sizeof(float32), 0);
+#else
   clear();
-  free(row_host);
-  free(col_host);
-  free(value_host);
+  TI_NOT_IMPLEMENTED;
 #endif
-  return sm;
+}
+
+std::unique_ptr<SparseMatrix> SparseMatrixBuilder::build_vulkan() {
+  TI_ERROR_IF(built_, "SparseMatrixBuilder build is already in progress.");
+  built_ = true;
+#ifdef TI_WITH_VULKAN
+  try {
+    TI_ERROR_IF(!ndarray_data_base_ptr_ || !program_,
+                "SparseMatrixBuilder storage is not available.");
+    TI_ERROR_IF(dtype_ != PrimitiveType::f32,
+                "Vulkan sparse assembly supports f32 values only.");
+    TI_ERROR_IF(max_num_triplets_ == 0,
+                "Vulkan sparse assembly requires a positive triplet "
+                "capacity.");
+    if (!vulkan_assembly_plan_) {
+      vulkan_assembly_plan_ = std::make_unique<VulkanSparseAssemblyPlan>(
+          program_, rows_, cols_, static_cast<int>(max_num_triplets_));
+    }
+    auto matrix = vulkan_assembly_plan_->build_packed(
+        program_, *ndarray_data_base_ptr_);
+    clear();
+    return matrix;
+  } catch (...) {
+    clear();
+    throw;
+  }
+#else
+  clear();
+  TI_NOT_IMPLEMENTED;
+#endif
 }
 
 void SparseMatrixBuilder::clear() {
   built_ = false;
-  ndarray_data_base_ptr_->write_int(std::vector<int>{0}, 0);
+  if (ndarray_data_base_ptr_) {
+    ndarray_data_base_ptr_->write_int(std::vector<int>{0}, 0);
+  }
   num_triplets_ = 0;
 }
 
@@ -460,6 +592,1064 @@ std::unique_ptr<SparseMatrix> make_sparse_matrix(
              storage_format);
 }
 
+namespace {
+
+std::atomic<std::uint64_t> next_sparse_pattern_id{1};
+
+void validate_compressed_host_pattern(
+    const char *storage_format,
+    int compressed_rows,
+    int columns,
+    std::size_t nnz,
+    const std::vector<int32_t> &row_offsets,
+    const std::vector<int32_t> &column_indices) {
+  TI_ERROR_IF(row_offsets.size() !=
+                      static_cast<std::size_t>(compressed_rows) + 1 ||
+                  column_indices.size() != nnz,
+              "{} host pattern validation received inconsistent storage "
+              "sizes.",
+              storage_format);
+  TI_ERROR_IF(row_offsets.front() != 0 ||
+                  row_offsets.back() != static_cast<int32_t>(nnz),
+              "{} row offsets must start at 0 and end at the stored count "
+              "{}.",
+              storage_format, nnz);
+  for (int row = 0; row < compressed_rows; ++row) {
+    const int32_t begin = row_offsets[row];
+    const int32_t end = row_offsets[row + 1];
+    TI_ERROR_IF(begin < 0 || end < begin ||
+                    end > static_cast<int32_t>(nnz),
+                "{} row offsets are not monotone at row {}.",
+                storage_format, row);
+    int32_t previous_column = -1;
+    for (int32_t offset = begin; offset < end; ++offset) {
+      const int32_t column = column_indices[offset];
+      TI_ERROR_IF(column < 0 || column >= columns,
+                  "{} column {} at offset {} is outside [0, {}).",
+                  storage_format, column, offset, columns);
+      TI_ERROR_IF(column <= previous_column,
+                  "{} columns must be strictly increasing and unique "
+                  "within row {}, got {} after {}.",
+                  storage_format, row, column, previous_column);
+      previous_column = column;
+    }
+  }
+}
+
+}  // namespace
+
+SparseCsrPattern::SparseCsrPattern(Program *program,
+                                   int rows,
+                                   int cols,
+                                   const Ndarray &row_offsets,
+                                   const Ndarray &column_indices) {
+  TI_ERROR_IF(!program,
+              "Internal CSR patterns require an active Program.");
+  const Arch arch = program->compile_config().arch;
+  TI_ERROR_IF(!arch_is_cpu(arch) && !arch_is_cuda(arch) &&
+                  arch != Arch::vulkan,
+              "Internal CSR patterns support CPU, CUDA, and Vulkan backends, "
+              "got {}.",
+              arch_name(arch));
+  TI_ERROR_IF(rows <= 0 || cols <= 0,
+              "Internal CSR patterns require positive dimensions, got {} x "
+              "{}.",
+              rows, cols);
+  TI_ERROR_IF(row_offsets.get_element_data_type() != PrimitiveType::i32 ||
+                  !row_offsets.get_element_shape().empty() ||
+                  row_offsets.get_nelement() !=
+                      static_cast<std::size_t>(rows) + 1 ||
+                  row_offsets.get_element_size() != sizeof(int32_t),
+              "Internal CSR pattern row offsets must contain exactly {} "
+              "scalar i32 entries.",
+              rows + 1);
+  TI_ERROR_IF(column_indices.get_element_data_type() != PrimitiveType::i32 ||
+                  !column_indices.get_element_shape().empty() ||
+                  column_indices.get_element_size() != sizeof(int32_t),
+              "Internal CSR pattern column indices must be a scalar i32 "
+              "ndarray.");
+
+  const std::size_t nnz_size = column_indices.get_nelement();
+  TI_ERROR_IF(nnz_size == 0,
+              "Internal CSR patterns currently require at least one stored "
+              "entry.");
+  TI_ERROR_IF(nnz_size >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "Internal CSR pattern nnz exceeds the i32 limit.");
+
+  const auto row_bytes =
+      (static_cast<std::size_t>(rows) + 1) * sizeof(int32_t);
+  const auto column_bytes = nnz_size * sizeof(int32_t);
+  if (arch_is_cpu(arch)) {
+    cpu_row_offsets_.resize(static_cast<std::size_t>(rows) + 1);
+    cpu_column_indices_.resize(nnz_size);
+    const auto source_row_offsets = reinterpret_cast<const void *>(
+        program->get_ndarray_data_ptr_as_int(&row_offsets));
+    const auto source_column_indices = reinterpret_cast<const void *>(
+        program->get_ndarray_data_ptr_as_int(&column_indices));
+    std::memcpy(cpu_row_offsets_.data(), source_row_offsets, row_bytes);
+    std::memcpy(cpu_column_indices_.data(), source_column_indices,
+                column_bytes);
+    validate_compressed_host_pattern(
+        "CSR", rows, cols, nnz_size, cpu_row_offsets_, cpu_column_indices_);
+  } else if (arch_is_cuda(arch)) {
+#if defined(TI_WITH_CUDA)
+    std::vector<int32_t> host_row_offsets(
+        static_cast<std::size_t>(rows) + 1);
+    std::vector<int32_t> host_column_indices(nnz_size);
+    auto source_row_offsets = reinterpret_cast<void *>(
+        program->get_ndarray_data_ptr_as_int(&row_offsets));
+    auto source_column_indices = reinterpret_cast<void *>(
+        program->get_ndarray_data_ptr_as_int(&column_indices));
+    CUDADriver::get_instance().memcpy_device_to_host(
+        host_row_offsets.data(), source_row_offsets, row_bytes);
+    CUDADriver::get_instance().memcpy_device_to_host(
+        host_column_indices.data(), source_column_indices, column_bytes);
+    validate_compressed_host_pattern(
+        "CSR", rows, cols, nnz_size, host_row_offsets, host_column_indices);
+
+    void *owned_row_offsets = nullptr;
+    void *owned_column_indices = nullptr;
+    try {
+      CUDADriver::get_instance().malloc(&owned_row_offsets, row_bytes);
+      CUDADriver::get_instance().malloc(&owned_column_indices, column_bytes);
+      CUDADriver::get_instance().memcpy_device_to_device(
+          owned_row_offsets, source_row_offsets, row_bytes);
+      CUDADriver::get_instance().memcpy_device_to_device(
+          owned_column_indices, source_column_indices, column_bytes);
+    } catch (...) {
+      if (owned_column_indices) {
+        CUDADriver::get_instance().mem_free.call_with_warning(
+            owned_column_indices);
+      }
+      if (owned_row_offsets) {
+        CUDADriver::get_instance().mem_free.call_with_warning(
+            owned_row_offsets);
+      }
+      throw;
+    }
+    cuda_row_offsets_ = owned_row_offsets;
+    cuda_column_indices_ = owned_column_indices;
+    device_to_host_bytes_ = row_bytes + column_bytes;
+    device_to_device_bytes_ = row_bytes + column_bytes;
+#else
+    TI_NOT_IMPLEMENTED;
+#endif
+  } else {
+#if defined(TI_WITH_VULKAN)
+    std::vector<int32_t> host_row_offsets(
+        static_cast<std::size_t>(rows) + 1);
+    std::vector<int32_t> host_column_indices(nnz_size);
+    program->copy_ndarray_to_host(const_cast<Ndarray *>(&row_offsets),
+                                  host_row_offsets.data(), row_bytes);
+    program->copy_ndarray_to_host(const_cast<Ndarray *>(&column_indices),
+                                  host_column_indices.data(), column_bytes);
+    validate_compressed_host_pattern(
+        "CSR", rows, cols, nnz_size, host_row_offsets, host_column_indices);
+
+    Ndarray *owned_row_offsets = nullptr;
+    Ndarray *owned_column_indices = nullptr;
+    try {
+      owned_row_offsets = program->create_ndarray(
+          PrimitiveType::i32, {rows + 1}, ExternalArrayLayout::kNull, false);
+      owned_column_indices = program->create_ndarray(
+          PrimitiveType::i32, {static_cast<int>(nnz_size)},
+          ExternalArrayLayout::kNull, false);
+      auto submission_guard =
+          program->acquire_runtime_resource_submission_guard();
+      const Ndarray *copy_resources[] = {
+          owned_row_offsets, &row_offsets, owned_column_indices,
+          &column_indices};
+      program->retain_ndarrays_for_external_submission(
+          copy_resources, std::size(copy_resources));
+      program->copy_ndarray_fast(owned_row_offsets,
+                                 const_cast<Ndarray *>(&row_offsets));
+      program->copy_ndarray_fast(owned_column_indices,
+                                 const_cast<Ndarray *>(&column_indices));
+    } catch (...) {
+      if (owned_column_indices) {
+        program->delete_ndarray(owned_column_indices);
+      }
+      if (owned_row_offsets) {
+        program->delete_ndarray(owned_row_offsets);
+      }
+      throw;
+    }
+    vulkan_row_offsets_ = owned_row_offsets;
+    vulkan_column_indices_ = owned_column_indices;
+    device_to_host_bytes_ = row_bytes + column_bytes;
+    device_to_device_bytes_ = row_bytes + column_bytes;
+#else
+    TI_NOT_IMPLEMENTED;
+#endif
+  }
+
+  program_ = program;
+  arch_ = arch;
+  rows_ = rows;
+  cols_ = cols;
+  nnz_ = static_cast<int>(nnz_size);
+  pattern_id_ =
+      next_sparse_pattern_id.fetch_add(1, std::memory_order_relaxed);
+}
+
+SparseCsrPattern::~SparseCsrPattern() {
+#if defined(TI_WITH_CUDA)
+  if (arch_is_cuda(arch_)) {
+    if (cuda_column_indices_) {
+      CUDADriver::get_instance().mem_free.call_with_warning(
+          cuda_column_indices_);
+    }
+    if (cuda_row_offsets_) {
+      CUDADriver::get_instance().mem_free.call_with_warning(cuda_row_offsets_);
+    }
+  }
+#endif
+#if defined(TI_WITH_VULKAN)
+  if (arch_ == Arch::vulkan && program_) {
+    if (vulkan_column_indices_) {
+      program_->delete_ndarray(vulkan_column_indices_);
+    }
+    if (vulkan_row_offsets_) {
+      program_->delete_ndarray(vulkan_row_offsets_);
+    }
+  }
+#endif
+}
+
+std::uint64_t SparseCsrPattern::pattern_reserved_bytes() const {
+  if (arch_is_cpu(arch_)) {
+    return (static_cast<std::uint64_t>(cpu_row_offsets_.capacity()) +
+            static_cast<std::uint64_t>(cpu_column_indices_.capacity())) *
+           sizeof(int32_t);
+  }
+  return (static_cast<std::uint64_t>(rows_) + 1 +
+          static_cast<std::uint64_t>(nnz_)) *
+         sizeof(int32_t);
+}
+
+const std::vector<int32_t> &SparseCsrPattern::cpu_row_offsets() const {
+  TI_ERROR_IF(!arch_is_cpu(arch_),
+              "CPU CSR row offsets require a CPU-owned pattern.");
+  return cpu_row_offsets_;
+}
+
+const std::vector<int32_t> &SparseCsrPattern::cpu_column_indices() const {
+  TI_ERROR_IF(!arch_is_cpu(arch_),
+              "CPU CSR column indices require a CPU-owned pattern.");
+  return cpu_column_indices_;
+}
+
+void *SparseCsrPattern::cuda_row_offsets() const {
+  TI_ERROR_IF(!arch_is_cuda(arch_),
+              "CUDA CSR row offsets require a CUDA-owned pattern.");
+  return cuda_row_offsets_;
+}
+
+void *SparseCsrPattern::cuda_column_indices() const {
+  TI_ERROR_IF(!arch_is_cuda(arch_),
+              "CUDA CSR column indices require a CUDA-owned pattern.");
+  return cuda_column_indices_;
+}
+
+const Ndarray *SparseCsrPattern::vulkan_row_offsets() const {
+  TI_ERROR_IF(arch_ != Arch::vulkan,
+              "Vulkan CSR row offsets require a Vulkan-owned pattern.");
+  return vulkan_row_offsets_;
+}
+
+const Ndarray *SparseCsrPattern::vulkan_column_indices() const {
+  TI_ERROR_IF(arch_ != Arch::vulkan,
+              "Vulkan CSR column indices require a Vulkan-owned pattern.");
+  return vulkan_column_indices_;
+}
+
+void SparseCsrPattern::retain_operator_reference() {
+  operator_references_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void SparseCsrPattern::release_operator_reference() {
+  const auto previous =
+      operator_references_.fetch_sub(1, std::memory_order_relaxed);
+  TI_ASSERT(previous > 0);
+}
+
+SparsePatternRuntimeStatistics
+SparseCsrPattern::debug_runtime_statistics() const {
+  SparsePatternRuntimeStatistics result;
+  result.backend_family =
+      arch_is_cpu(arch_) ? "cpu" : (arch_is_cuda(arch_) ? "cuda" : "vulkan");
+  result.storage_format = "csr";
+  result.index_dtype = "i32";
+  result.value_order = "row_major_compressed";
+  result.rows = rows_;
+  result.cols = cols_;
+  result.nnz = nnz_;
+  result.pattern_id = pattern_id_;
+  result.pattern_version = 1;
+  result.pattern_builds = 1;
+  result.operator_references = operator_references();
+  result.immutable = true;
+  result.pattern_reserved_bytes = pattern_reserved_bytes();
+  result.device_to_host_bytes = device_to_host_bytes_;
+  result.device_to_device_bytes = device_to_device_bytes_;
+  return result;
+}
+
+CpuSparseCsrMatrix::CpuSparseCsrMatrix(
+    std::shared_ptr<SparseCsrPattern> pattern,
+    const Ndarray &values,
+    bool pattern_built_for_operator) {
+  TI_ERROR_IF(!pattern || !arch_is_cpu(pattern->arch()) ||
+                  !pattern->program(),
+              "Internal CPU CSR matrices require a CPU-owned pattern.");
+  Program *prog = pattern->program();
+  const DataType value_dtype = values.get_element_data_type();
+  TI_ERROR_IF((value_dtype != PrimitiveType::f32 &&
+               value_dtype != PrimitiveType::f64) ||
+                  !values.get_element_shape().empty() ||
+                  values.get_element_size() != data_type_size(value_dtype),
+              "Internal CPU CSR values must be a scalar f32 or f64 ndarray.");
+  const std::size_t value_count = static_cast<std::size_t>(pattern->nnz());
+  TI_ERROR_IF(values.get_nelement() != value_count,
+              "Internal CPU CSR values must contain exactly {} scalar {} "
+              "entries, got {}.",
+              value_count, data_type_name(value_dtype),
+              values.get_nelement());
+
+  const auto source_values = reinterpret_cast<const void *>(
+      prog->get_ndarray_data_ptr_as_int(&values));
+  if (value_dtype == PrimitiveType::f32) {
+    values_f32_.resize(value_count);
+    std::memcpy(values_f32_.data(), source_values,
+                value_count * sizeof(float32));
+  } else {
+    values_f64_.resize(value_count);
+    std::memcpy(values_f64_.data(), source_values,
+                value_count * sizeof(float64));
+  }
+  program_ = prog;
+  rows_ = pattern->num_rows();
+  cols_ = pattern->num_cols();
+  dtype_ = value_dtype;
+  nnz_ = pattern->nnz();
+  pattern_ = std::move(pattern);
+  if (pattern_built_for_operator) {
+    record_pattern_build();
+  } else {
+    record_pattern_reference();
+  }
+  pattern_->retain_operator_reference();
+}
+
+CpuSparseCsrMatrix::~CpuSparseCsrMatrix() {
+  if (pattern_) {
+    pattern_->release_operator_reference();
+  }
+}
+
+namespace {
+template <typename T>
+void cpu_csr_spmv(const std::vector<int32_t> &row_offsets,
+                  const std::vector<int32_t> &column_indices,
+                  const T *values,
+                  const T *x,
+                  T *y,
+                  int rows) {
+  for (int row = 0; row < rows; ++row) {
+    T sum = static_cast<T>(0);
+    for (int32_t offset = row_offsets[row];
+         offset < row_offsets[row + 1]; ++offset) {
+      sum += values[offset] * x[column_indices[offset]];
+    }
+    y[row] = sum;
+  }
+}
+}  // namespace
+
+void CpuSparseCsrMatrix::nd_spmv(Program *prog,
+                                 const Ndarray &x,
+                                 const Ndarray &y) {
+  TI_ERROR_IF(prog != program_ || !arch_is_cpu(prog->compile_config().arch),
+              "Internal CPU CSR SpMV requires its owning CPU Program.");
+  auto validate_vector = [&](const char *role, const Ndarray &array,
+                             int elements) {
+    TI_ERROR_IF(array.get_element_data_type() != dtype_ ||
+                    !array.get_element_shape().empty() ||
+                    array.shape.size() != 1 ||
+                    array.get_nelement() !=
+                        static_cast<std::size_t>(elements) ||
+                    array.get_element_size() != data_type_size(dtype_),
+                "Internal CPU CSR SpMV {} must contain exactly {} scalar {} "
+                "entries.",
+                role, elements, data_type_name(dtype_));
+  };
+  validate_vector("input", x, cols_);
+  validate_vector("output", y, rows_);
+  const auto input = prog->get_ndarray_data_ptr_as_int(&x);
+  const auto output = prog->get_ndarray_data_ptr_as_int(&y);
+  TI_ERROR_IF(input == output,
+              "Internal CPU CSR SpMV input and output must not alias.");
+  spmv_cpu_raw(prog, input, output);
+}
+
+void CpuSparseCsrMatrix::spmv_cpu_raw(Program *prog,
+                                      std::uintptr_t input,
+                                      std::uintptr_t output) {
+  TI_ERROR_IF(prog != program_ || !arch_is_cpu(prog->compile_config().arch) ||
+                  input == 0 || output == 0 || input == output,
+              "Internal CPU CSR raw SpMV requires its owning CPU Program "
+              "and distinct non-null input/output pointers.");
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  record_spmv_call();
+  if (spmv_plan_initialized_) {
+    record_spmv_plan_reuse();
+  } else {
+    record_spmv_plan_build();
+    spmv_plan_initialized_ = true;
+  }
+  if (dtype_ == PrimitiveType::f32) {
+    cpu_csr_spmv(pattern_->cpu_row_offsets(),
+                 pattern_->cpu_column_indices(), values_f32_.data(),
+                 reinterpret_cast<const float32 *>(input),
+                 reinterpret_cast<float32 *>(output), rows_);
+  } else {
+    cpu_csr_spmv(pattern_->cpu_row_offsets(),
+                 pattern_->cpu_column_indices(), values_f64_.data(),
+                 reinterpret_cast<const float64 *>(input),
+                 reinterpret_cast<float64 *>(output), rows_);
+  }
+}
+
+void CpuSparseCsrMatrix::update_values(Program *prog,
+                                       const Ndarray &values) {
+  TI_ERROR_IF(prog != program_ || !arch_is_cpu(prog->compile_config().arch),
+              "Internal CPU CSR value updates require the owning CPU "
+              "Program.");
+  const std::size_t value_bytes = data_type_size(dtype_);
+  TI_ERROR_IF(values.get_element_data_type() != dtype_ ||
+                  !values.get_element_shape().empty() ||
+                  values.get_nelement() !=
+                      static_cast<std::size_t>(nnz_) ||
+                  values.get_element_size() != value_bytes,
+              "Internal CPU CSR value updates require exactly {} scalar {} "
+              "entries.",
+              nnz_, data_type_name(dtype_));
+  const auto source = reinterpret_cast<const void *>(
+      prog->get_ndarray_data_ptr_as_int(&values));
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  if (dtype_ == PrimitiveType::f32) {
+    std::memcpy(values_f32_.data(), source,
+                static_cast<std::size_t>(nnz_) * sizeof(float32));
+  } else {
+    std::memcpy(values_f64_.data(), source,
+                static_cast<std::size_t>(nnz_) * sizeof(float64));
+  }
+  record_numeric_update(static_cast<std::uint64_t>(nnz_) * value_bytes);
+}
+
+SparseMatrixRuntimeStatistics
+CpuSparseCsrMatrix::debug_runtime_statistics() const {
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  auto result = make_runtime_statistics("cpu", "csr");
+  result.provider_name = "forge_cpu_native";
+  result.nnz = nnz_;
+  result.pattern_reserved_bytes = pattern_->pattern_reserved_bytes();
+  const std::uint64_t value_capacity =
+      dtype_ == PrimitiveType::f32
+          ? static_cast<std::uint64_t>(values_f32_.capacity())
+          : static_cast<std::uint64_t>(values_f64_.capacity());
+  result.values_reserved_bytes = value_capacity * data_type_size(dtype_);
+  result.operator_owned_reserved_bytes =
+      result.pattern_reserved_bytes + result.values_reserved_bytes;
+  result.operator_exclusive_reserved_bytes = result.values_reserved_bytes;
+  result.shared_pattern_id = pattern_->pattern_id();
+  result.shared_pattern_operator_references =
+      pattern_->operator_references();
+  result.pattern_storage_shared = true;
+  return result;
+}
+
+SparseBsrPattern::SparseBsrPattern(Program *program,
+                                   int block_rows,
+                                   int block_cols,
+                                   int block_size,
+                                   const Ndarray &row_offsets,
+                                   const Ndarray &column_indices) {
+  TI_ERROR_IF(!program,
+              "Internal BSR patterns require an active Program.");
+  const Arch arch = program->compile_config().arch;
+  TI_ERROR_IF(!arch_is_cpu(arch) && !arch_is_cuda(arch) &&
+                  arch != Arch::vulkan,
+              "Internal BSR patterns support CPU, CUDA, and Vulkan backends, "
+              "got {}.",
+              arch_name(arch));
+  TI_ERROR_IF(block_rows <= 0 || block_cols <= 0,
+              "Internal BSR patterns require positive block dimensions, got "
+              "{} x {}.",
+              block_rows, block_cols);
+  TI_ERROR_IF(block_size != 2 && block_size != 3 && block_size != 6 &&
+                  block_size != 12,
+              "Internal BSR patterns support block sizes 2, 3, 6, and 12, "
+              "got {}.",
+              block_size);
+  TI_ERROR_IF(row_offsets.get_element_data_type() != PrimitiveType::i32 ||
+                  !row_offsets.get_element_shape().empty() ||
+                  row_offsets.get_nelement() !=
+                      static_cast<std::size_t>(block_rows) + 1 ||
+                  row_offsets.get_element_size() != sizeof(int32_t),
+              "Internal BSR pattern row offsets must contain exactly {} "
+              "scalar i32 entries.",
+              block_rows + 1);
+  TI_ERROR_IF(column_indices.get_element_data_type() != PrimitiveType::i32 ||
+                  !column_indices.get_element_shape().empty() ||
+                  column_indices.get_element_size() != sizeof(int32_t),
+              "Internal BSR pattern column indices must be a scalar i32 "
+              "ndarray.");
+
+  const std::size_t block_nnz_size = column_indices.get_nelement();
+  TI_ERROR_IF(block_nnz_size == 0,
+              "Internal BSR patterns currently require at least one block.");
+  TI_ERROR_IF(block_nnz_size >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "Internal BSR pattern block count exceeds the i32 limit.");
+  const std::size_t block_width = static_cast<std::size_t>(block_size);
+  TI_ERROR_IF(block_nnz_size >
+                  std::numeric_limits<std::size_t>::max() / block_width /
+                      block_width,
+              "Internal BSR pattern value count overflows size_t.");
+  const std::size_t value_count =
+      block_nnz_size * block_width * block_width;
+  TI_ERROR_IF(
+      static_cast<std::uint64_t>(block_rows) * block_size >
+              static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
+          static_cast<std::uint64_t>(block_cols) * block_size >
+              static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
+          value_count >
+              static_cast<std::size_t>(std::numeric_limits<int>::max()),
+      "Internal BSR pattern scalar dimensions exceed the i32 SparseMatrix "
+      "limit.");
+
+  const auto row_bytes =
+      (static_cast<std::size_t>(block_rows) + 1) * sizeof(int32_t);
+  const auto column_bytes = block_nnz_size * sizeof(int32_t);
+  if (arch_is_cpu(arch)) {
+    cpu_row_offsets_.resize(static_cast<std::size_t>(block_rows) + 1);
+    cpu_column_indices_.resize(block_nnz_size);
+    const auto source_row_offsets = reinterpret_cast<const void *>(
+        program->get_ndarray_data_ptr_as_int(&row_offsets));
+    const auto source_column_indices = reinterpret_cast<const void *>(
+        program->get_ndarray_data_ptr_as_int(&column_indices));
+    std::memcpy(cpu_row_offsets_.data(), source_row_offsets, row_bytes);
+    std::memcpy(cpu_column_indices_.data(), source_column_indices,
+                column_bytes);
+    validate_compressed_host_pattern(
+        "BSR", block_rows, block_cols, block_nnz_size, cpu_row_offsets_,
+        cpu_column_indices_);
+  } else if (arch_is_cuda(arch)) {
+#if defined(TI_WITH_CUDA)
+    std::vector<int32_t> host_row_offsets(
+        static_cast<std::size_t>(block_rows) + 1);
+    std::vector<int32_t> host_column_indices(block_nnz_size);
+    auto source_row_offsets = reinterpret_cast<void *>(
+        program->get_ndarray_data_ptr_as_int(&row_offsets));
+    auto source_column_indices = reinterpret_cast<void *>(
+        program->get_ndarray_data_ptr_as_int(&column_indices));
+    CUDADriver::get_instance().memcpy_device_to_host(
+        host_row_offsets.data(), source_row_offsets, row_bytes);
+    CUDADriver::get_instance().memcpy_device_to_host(
+        host_column_indices.data(), source_column_indices, column_bytes);
+    validate_compressed_host_pattern(
+        "BSR", block_rows, block_cols, block_nnz_size, host_row_offsets,
+        host_column_indices);
+
+    void *owned_row_offsets = nullptr;
+    void *owned_column_indices = nullptr;
+    try {
+      CUDADriver::get_instance().malloc(&owned_row_offsets, row_bytes);
+      CUDADriver::get_instance().malloc(&owned_column_indices, column_bytes);
+      CUDADriver::get_instance().memcpy_device_to_device(
+          owned_row_offsets, source_row_offsets, row_bytes);
+      CUDADriver::get_instance().memcpy_device_to_device(
+          owned_column_indices, source_column_indices, column_bytes);
+    } catch (...) {
+      if (owned_column_indices) {
+        CUDADriver::get_instance().mem_free.call_with_warning(
+            owned_column_indices);
+      }
+      if (owned_row_offsets) {
+        CUDADriver::get_instance().mem_free.call_with_warning(
+            owned_row_offsets);
+      }
+      throw;
+    }
+    cuda_row_offsets_ = owned_row_offsets;
+    cuda_column_indices_ = owned_column_indices;
+    device_to_host_bytes_ = row_bytes + column_bytes;
+    device_to_device_bytes_ = row_bytes + column_bytes;
+#else
+    TI_NOT_IMPLEMENTED;
+#endif
+  } else {
+#if defined(TI_WITH_VULKAN)
+    std::vector<int32_t> host_row_offsets(
+        static_cast<std::size_t>(block_rows) + 1);
+    std::vector<int32_t> host_column_indices(block_nnz_size);
+    program->copy_ndarray_to_host(const_cast<Ndarray *>(&row_offsets),
+                                  host_row_offsets.data(), row_bytes);
+    program->copy_ndarray_to_host(const_cast<Ndarray *>(&column_indices),
+                                  host_column_indices.data(), column_bytes);
+    validate_compressed_host_pattern(
+        "BSR", block_rows, block_cols, block_nnz_size, host_row_offsets,
+        host_column_indices);
+
+    Ndarray *owned_row_offsets = nullptr;
+    Ndarray *owned_column_indices = nullptr;
+    try {
+      owned_row_offsets = program->create_ndarray(
+          PrimitiveType::i32, {block_rows + 1}, ExternalArrayLayout::kNull,
+          false);
+      owned_column_indices = program->create_ndarray(
+          PrimitiveType::i32, {static_cast<int>(block_nnz_size)},
+          ExternalArrayLayout::kNull, false);
+      auto submission_guard =
+          program->acquire_runtime_resource_submission_guard();
+      const Ndarray *copy_resources[] = {
+          owned_row_offsets, &row_offsets, owned_column_indices,
+          &column_indices};
+      program->retain_ndarrays_for_external_submission(
+          copy_resources, std::size(copy_resources));
+      program->copy_ndarray_fast(owned_row_offsets,
+                                 const_cast<Ndarray *>(&row_offsets));
+      program->copy_ndarray_fast(owned_column_indices,
+                                 const_cast<Ndarray *>(&column_indices));
+    } catch (...) {
+      if (owned_column_indices) {
+        program->delete_ndarray(owned_column_indices);
+      }
+      if (owned_row_offsets) {
+        program->delete_ndarray(owned_row_offsets);
+      }
+      throw;
+    }
+    vulkan_row_offsets_ = owned_row_offsets;
+    vulkan_column_indices_ = owned_column_indices;
+    device_to_host_bytes_ = row_bytes + column_bytes;
+    device_to_device_bytes_ = row_bytes + column_bytes;
+#else
+    TI_NOT_IMPLEMENTED;
+#endif
+  }
+
+  program_ = program;
+  arch_ = arch;
+  rows_ = block_rows * block_size;
+  cols_ = block_cols * block_size;
+  block_rows_ = block_rows;
+  block_cols_ = block_cols;
+  block_size_ = block_size;
+  block_nnz_ = static_cast<int>(block_nnz_size);
+  scalar_nnz_ = static_cast<int>(value_count);
+  value_count_ = value_count;
+  pattern_id_ =
+      next_sparse_pattern_id.fetch_add(1, std::memory_order_relaxed);
+}
+
+SparseBsrPattern::~SparseBsrPattern() {
+#if defined(TI_WITH_CUDA)
+  if (arch_is_cuda(arch_)) {
+    if (cuda_column_indices_) {
+      CUDADriver::get_instance().mem_free.call_with_warning(
+          cuda_column_indices_);
+    }
+    if (cuda_row_offsets_) {
+      CUDADriver::get_instance().mem_free.call_with_warning(cuda_row_offsets_);
+    }
+  }
+#endif
+#if defined(TI_WITH_VULKAN)
+  if (arch_ == Arch::vulkan && program_) {
+    if (vulkan_column_indices_) {
+      program_->delete_ndarray(vulkan_column_indices_);
+    }
+    if (vulkan_row_offsets_) {
+      program_->delete_ndarray(vulkan_row_offsets_);
+    }
+  }
+#endif
+}
+
+std::uint64_t SparseBsrPattern::pattern_reserved_bytes() const {
+  if (arch_is_cpu(arch_)) {
+    return (static_cast<std::uint64_t>(cpu_row_offsets_.capacity()) +
+            static_cast<std::uint64_t>(cpu_column_indices_.capacity())) *
+           sizeof(int32_t);
+  }
+  return (static_cast<std::uint64_t>(block_rows_) + 1 +
+          static_cast<std::uint64_t>(block_nnz_)) *
+         sizeof(int32_t);
+}
+
+const std::vector<int32_t> &SparseBsrPattern::cpu_row_offsets() const {
+  TI_ERROR_IF(!arch_is_cpu(arch_),
+              "CPU BSR row offsets require a CPU-owned pattern.");
+  return cpu_row_offsets_;
+}
+
+const std::vector<int32_t> &SparseBsrPattern::cpu_column_indices() const {
+  TI_ERROR_IF(!arch_is_cpu(arch_),
+              "CPU BSR column indices require a CPU-owned pattern.");
+  return cpu_column_indices_;
+}
+
+void *SparseBsrPattern::cuda_row_offsets() const {
+  TI_ERROR_IF(!arch_is_cuda(arch_),
+              "CUDA BSR row offsets require a CUDA-owned pattern.");
+  return cuda_row_offsets_;
+}
+
+void *SparseBsrPattern::cuda_column_indices() const {
+  TI_ERROR_IF(!arch_is_cuda(arch_),
+              "CUDA BSR column indices require a CUDA-owned pattern.");
+  return cuda_column_indices_;
+}
+
+const Ndarray *SparseBsrPattern::vulkan_row_offsets() const {
+  TI_ERROR_IF(arch_ != Arch::vulkan,
+              "Vulkan BSR row offsets require a Vulkan-owned pattern.");
+  return vulkan_row_offsets_;
+}
+
+const Ndarray *SparseBsrPattern::vulkan_column_indices() const {
+  TI_ERROR_IF(arch_ != Arch::vulkan,
+              "Vulkan BSR column indices require a Vulkan-owned pattern.");
+  return vulkan_column_indices_;
+}
+
+void SparseBsrPattern::retain_operator_reference() {
+  operator_references_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void SparseBsrPattern::release_operator_reference() {
+  const auto previous =
+      operator_references_.fetch_sub(1, std::memory_order_relaxed);
+  TI_ASSERT(previous > 0);
+}
+
+SparsePatternRuntimeStatistics
+SparseBsrPattern::debug_runtime_statistics() const {
+  SparsePatternRuntimeStatistics result;
+  result.backend_family =
+      arch_is_cpu(arch_) ? "cpu" : (arch_is_cuda(arch_) ? "cuda" : "vulkan");
+  result.storage_format = "bsr";
+  result.index_dtype = "i32";
+  result.value_order = "block_row_major_dense_row_major";
+  result.rows = rows_;
+  result.cols = cols_;
+  result.nnz = scalar_nnz_;
+  result.block_rows = block_rows_;
+  result.block_cols = block_cols_;
+  result.block_size = block_size_;
+  result.block_nnz = block_nnz_;
+  result.pattern_id = pattern_id_;
+  result.pattern_version = 1;
+  result.pattern_builds = 1;
+  result.operator_references = operator_references();
+  result.immutable = true;
+  result.pattern_reserved_bytes = pattern_reserved_bytes();
+  result.device_to_host_bytes = device_to_host_bytes_;
+  result.device_to_device_bytes = device_to_device_bytes_;
+  return result;
+}
+
+CpuSparseBsrMatrix::CpuSparseBsrMatrix(
+    Program *prog,
+    int block_rows,
+    int block_cols,
+    int block_size,
+    const Ndarray &row_offsets,
+    const Ndarray &column_indices,
+    const Ndarray &values)
+    : CpuSparseBsrMatrix(
+          std::make_shared<SparseBsrPattern>(
+              prog, block_rows, block_cols, block_size, row_offsets,
+              column_indices),
+          values,
+          true) {
+}
+
+CpuSparseBsrMatrix::CpuSparseBsrMatrix(
+    std::shared_ptr<SparseBsrPattern> pattern,
+    const Ndarray &values,
+    bool pattern_built_for_operator) {
+  TI_ERROR_IF(!pattern || !arch_is_cpu(pattern->arch()) ||
+                  !pattern->program(),
+              "Internal CPU BSR matrices require a CPU-owned pattern.");
+  Program *prog = pattern->program();
+  const DataType value_dtype = values.get_element_data_type();
+  TI_ERROR_IF((value_dtype != PrimitiveType::f32 &&
+               value_dtype != PrimitiveType::f64) ||
+                  !values.get_element_shape().empty() ||
+                  values.get_element_size() != data_type_size(value_dtype),
+              "Internal CPU BSR values must be a scalar f32 or f64 "
+              "ndarray.");
+
+  const std::size_t value_count = pattern->value_count();
+  TI_ERROR_IF(values.get_nelement() != value_count,
+              "Internal CPU BSR values must contain exactly {} scalar {} "
+              "entries for {} dense {} x {} blocks, got {}.",
+              value_count, data_type_name(value_dtype), pattern->block_nnz(),
+              pattern->block_size(), pattern->block_size(),
+              values.get_nelement());
+
+  const auto source_values = reinterpret_cast<const void *>(
+      prog->get_ndarray_data_ptr_as_int(&values));
+  if (value_dtype == PrimitiveType::f32) {
+    values_f32_.resize(value_count);
+    std::memcpy(values_f32_.data(), source_values,
+                value_count * sizeof(float32));
+  } else {
+    values_f64_.resize(value_count);
+    std::memcpy(values_f64_.data(), source_values,
+                value_count * sizeof(float64));
+  }
+  program_ = prog;
+  rows_ = pattern->num_rows();
+  cols_ = pattern->num_cols();
+  dtype_ = value_dtype;
+  block_rows_ = pattern->block_rows();
+  block_cols_ = pattern->block_cols();
+  block_size_ = pattern->block_size();
+  block_nnz_ = pattern->block_nnz();
+  scalar_nnz_ = pattern->scalar_nnz();
+  value_count_ = value_count;
+  pattern_ = std::move(pattern);
+  if (pattern_built_for_operator) {
+    record_pattern_build();
+  } else {
+    record_pattern_reference();
+  }
+  pattern_->retain_operator_reference();
+}
+
+CpuSparseBsrMatrix::~CpuSparseBsrMatrix() {
+  if (pattern_) {
+    pattern_->release_operator_reference();
+  }
+}
+
+namespace {
+template <typename T>
+void cpu_bsr_spmv(const std::vector<int32_t> &row_offsets,
+                  const std::vector<int32_t> &column_indices,
+                  const T *values,
+                  const T *x,
+                  T *y,
+                  int block_rows,
+                  int block_size) {
+  const std::size_t block_width =
+      static_cast<std::size_t>(block_size * block_size);
+  for (int block_row = 0; block_row < block_rows; ++block_row) {
+    for (int local_row = 0; local_row < block_size; ++local_row) {
+      T sum = static_cast<T>(0);
+      for (int32_t offset = row_offsets[block_row];
+           offset < row_offsets[block_row + 1]; ++offset) {
+        const int32_t block_column = column_indices[offset];
+        const T *block =
+            values + static_cast<std::size_t>(offset) * block_width;
+        const T *input =
+            x + static_cast<std::size_t>(block_column) * block_size;
+        for (int local_column = 0; local_column < block_size;
+             ++local_column) {
+          sum += block[local_row * block_size + local_column] *
+                 input[local_column];
+        }
+      }
+      y[block_row * block_size + local_row] = sum;
+    }
+  }
+}
+}  // namespace
+
+void CpuSparseBsrMatrix::nd_spmv(Program *prog,
+                                 const Ndarray &x,
+                                 const Ndarray &y) {
+  TI_ERROR_IF(prog != program_ || !arch_is_cpu(prog->compile_config().arch),
+              "Internal CPU BSR SpMV requires its owning CPU Program.");
+  auto validate_vector = [&](const char *role, const Ndarray &array,
+                             int elements) {
+    TI_ERROR_IF(array.get_element_data_type() != dtype_ ||
+                    !array.get_element_shape().empty() ||
+                    array.shape.size() != 1 ||
+                    array.get_nelement() !=
+                        static_cast<std::size_t>(elements) ||
+                    array.get_element_size() != data_type_size(dtype_),
+                "Internal CPU BSR SpMV {} must contain exactly {} scalar {} "
+                "entries.",
+                role, elements, data_type_name(dtype_));
+  };
+  validate_vector("input", x, cols_);
+  validate_vector("output", y, rows_);
+  const auto input = prog->get_ndarray_data_ptr_as_int(&x);
+  const auto output = prog->get_ndarray_data_ptr_as_int(&y);
+  TI_ERROR_IF(input == output,
+              "Internal CPU BSR SpMV input and output must not alias.");
+  spmv_cpu_raw(prog, input, output);
+}
+
+void CpuSparseBsrMatrix::spmv_cpu_raw(Program *prog,
+                                      std::uintptr_t input,
+                                      std::uintptr_t output) {
+  TI_ERROR_IF(prog != program_ || !arch_is_cpu(prog->compile_config().arch) ||
+                  input == 0 || output == 0 || input == output,
+              "Internal CPU BSR raw SpMV requires its owning CPU Program "
+              "and distinct non-null input/output pointers.");
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  record_spmv_call();
+  if (spmv_plan_initialized_) {
+    record_spmv_plan_reuse();
+  } else {
+    record_spmv_plan_build();
+    spmv_plan_initialized_ = true;
+  }
+  if (dtype_ == PrimitiveType::f32) {
+    cpu_bsr_spmv(pattern_->cpu_row_offsets(),
+                 pattern_->cpu_column_indices(), values_f32_.data(),
+                 reinterpret_cast<const float32 *>(input),
+                 reinterpret_cast<float32 *>(output), block_rows_,
+                 block_size_);
+  } else {
+    cpu_bsr_spmv(pattern_->cpu_row_offsets(),
+                 pattern_->cpu_column_indices(), values_f64_.data(),
+                 reinterpret_cast<const float64 *>(input),
+                 reinterpret_cast<float64 *>(output), block_rows_,
+                 block_size_);
+  }
+}
+
+void CpuSparseBsrMatrix::update_values(Program *prog,
+                                       const Ndarray &values) {
+  TI_ERROR_IF(prog != program_ || !arch_is_cpu(prog->compile_config().arch),
+              "Internal CPU BSR value updates require the owning CPU "
+              "Program.");
+  const std::size_t value_bytes = data_type_size(dtype_);
+  TI_ERROR_IF(values.get_element_data_type() != dtype_ ||
+                  !values.get_element_shape().empty() ||
+                  values.get_nelement() != value_count_ ||
+                  values.get_element_size() != value_bytes,
+              "Internal CPU BSR value updates require exactly {} scalar {} "
+              "entries.",
+              value_count_, data_type_name(dtype_));
+  const auto source = reinterpret_cast<const void *>(
+      prog->get_ndarray_data_ptr_as_int(&values));
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  if (dtype_ == PrimitiveType::f32) {
+    std::memcpy(values_f32_.data(), source,
+                value_count_ * sizeof(float32));
+  } else {
+    std::memcpy(values_f64_.data(), source,
+                value_count_ * sizeof(float64));
+  }
+  record_numeric_update(value_count_ * value_bytes);
+}
+
+SparseMatrixRuntimeStatistics
+CpuSparseBsrMatrix::debug_runtime_statistics() const {
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  auto result = make_runtime_statistics("cpu", "bsr");
+  result.provider_name = "forge_cpu_native";
+  result.nnz = scalar_nnz_;
+  result.block_rows = block_rows_;
+  result.block_cols = block_cols_;
+  result.block_size = block_size_;
+  result.block_nnz = block_nnz_;
+  result.pattern_reserved_bytes = pattern_->pattern_reserved_bytes();
+  const std::uint64_t value_capacity =
+      dtype_ == PrimitiveType::f32
+          ? static_cast<std::uint64_t>(values_f32_.capacity())
+          : static_cast<std::uint64_t>(values_f64_.capacity());
+  result.values_reserved_bytes = value_capacity * data_type_size(dtype_);
+  result.operator_owned_reserved_bytes =
+      result.pattern_reserved_bytes + result.values_reserved_bytes;
+  result.operator_exclusive_reserved_bytes = result.values_reserved_bytes;
+  result.shared_pattern_id = pattern_->pattern_id();
+  result.shared_pattern_operator_references =
+      pattern_->operator_references();
+  result.pattern_storage_shared = true;
+  return result;
+}
+
+CuSparseMatrix::CuSparseMatrix(
+    std::shared_ptr<SparseCsrPattern> pattern,
+    const Ndarray &values,
+    bool pattern_built_for_operator) {
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(!pattern || !arch_is_cuda(pattern->arch()) ||
+                  !pattern->program(),
+              "Internal CUDA CSR matrices require a CUDA-owned pattern.");
+  Program *prog = pattern->program();
+  auto &cusparse = CUSPARSEDriver::get_instance();
+  if (!cusparse.is_loaded() && !cusparse.load_cusparse()) {
+    TI_ERROR("Failed to load cusparse library!");
+  }
+  TI_ERROR_IF(values.get_element_data_type() != PrimitiveType::f32 ||
+                  !values.get_element_shape().empty() ||
+                  values.get_element_size() != sizeof(float32),
+              "Internal CUDA CSR values must be a scalar f32 ndarray.");
+  const std::size_t value_count = static_cast<std::size_t>(pattern->nnz());
+  TI_ERROR_IF(values.get_nelement() != value_count,
+              "Internal CUDA CSR values must contain exactly {} scalar f32 "
+              "entries, got {}.",
+              value_count, values.get_nelement());
+
+  const auto value_bytes = value_count * sizeof(float32);
+  auto source_values =
+      reinterpret_cast<void *>(prog->get_ndarray_data_ptr_as_int(&values));
+  void *owned_values = nullptr;
+  cusparseSpMatDescr_t matrix = nullptr;
+  try {
+    CUDADriver::get_instance().malloc(&owned_values, value_bytes);
+    CUDADriver::get_instance().memcpy_device_to_device(
+        owned_values, source_values, value_bytes);
+    cusparse.cpCreateCsr(
+        &matrix, pattern->num_rows(), pattern->num_cols(), pattern->nnz(),
+        pattern->cuda_row_offsets(), pattern->cuda_column_indices(),
+        owned_values, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+  } catch (...) {
+    if (matrix) {
+      cusparse.cpDestroySpMat.call_with_warning(matrix);
+    }
+    if (owned_values) {
+      CUDADriver::get_instance().mem_free.call_with_warning(owned_values);
+    }
+    throw;
+  }
+
+  rows_ = pattern->num_rows();
+  cols_ = pattern->num_cols();
+  dtype_ = PrimitiveType::f32;
+  nnz_ = pattern->nnz();
+  csr_row_ptr_ = pattern->cuda_row_offsets();
+  csr_col_ind_ = pattern->cuda_column_indices();
+  csr_val_ = owned_values;
+  pattern_ = std::move(pattern);
+  matrix_ = matrix;
+  if (pattern_built_for_operator) {
+    record_transfer_bytes(
+        0, pattern_->device_to_host_bytes(),
+        pattern_->device_to_device_bytes() + value_bytes);
+    record_pattern_build();
+  } else {
+    record_transfer_bytes(0, 0, value_bytes);
+    record_pattern_reference();
+  }
+  pattern_->retain_operator_reference();
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
 std::unique_ptr<SparseMatrix> make_cu_sparse_matrix(int rows,
                                                     int cols,
                                                     DataType dt) {
@@ -474,9 +1664,12 @@ std::unique_ptr<SparseMatrix> make_cu_sparse_matrix(cusparseSpMatDescr_t mat,
                                                     void *csr_row_ptr,
                                                     void *csr_col_ind,
                                                     void *csr_val_,
-                                                    int nnz) {
+                                                    int nnz,
+                                                    std::uint64_t
+                                                        device_to_device_bytes) {
   return std::unique_ptr<SparseMatrix>(std::make_unique<CuSparseMatrix>(
-      mat, rows, cols, dt, csr_row_ptr, csr_col_ind, csr_val_, nnz));
+      mat, rows, cols, dt, csr_row_ptr, csr_col_ind, csr_val_, nnz,
+      device_to_device_bytes));
 }
 
 template <typename T>
@@ -601,6 +1794,9 @@ void CuSparseMatrix::reset_spmv_resources() {
 
 void CuSparseMatrix::update_values(Program *prog, const Ndarray &values) {
 #if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(pattern_ && prog != pattern_->program(),
+              "Internal shared CUDA CSR value updates require the owning "
+              "Program.");
   TI_ERROR_IF(dtype_ != PrimitiveType::f32,
               "CUDA SparseMatrix value-only update supports f32 only.");
   TI_ERROR_IF(values.get_element_data_type() != dtype_ ||
@@ -630,12 +1826,14 @@ CuSparseMatrix::~CuSparseMatrix() {
   reset_spmv_resources();
   if (matrix_)
     CUSPARSEDriver::get_instance().cpDestroySpMat(matrix_);
-  if (csr_row_ptr_)
+  if (csr_row_ptr_ && !pattern_)
     CUDADriver::get_instance().mem_free(csr_row_ptr_);
-  if (csr_col_ind_)
+  if (csr_col_ind_ && !pattern_)
     CUDADriver::get_instance().mem_free(csr_col_ind_);
   if (csr_val_)
     CUDADriver::get_instance().mem_free(csr_val_);
+  if (pattern_)
+    pattern_->release_operator_reference();
 #endif
 }
 
@@ -977,6 +2175,15 @@ SparseMatrixRuntimeStatistics CuSparseMatrix::debug_runtime_statistics() const {
 #if defined(TI_WITH_CUDA)
   std::lock_guard<std::mutex> lock(spmv_mutex_);
   auto result = make_runtime_statistics("cuda", "csr");
+  const auto provider = CUSPARSEDriver::get_instance().capabilities();
+  result.provider_name = "cusparse";
+  result.provider_version_major = provider.library_version_major;
+  result.provider_version_minor = provider.library_version_minor;
+  result.provider_version_patch = provider.library_version_patch;
+  result.provider_bsr_descriptor_available =
+      provider.bsr_descriptor_available;
+  result.provider_generic_bsr_spmv_available =
+      provider.generic_bsr_spmv_available;
   result.nnz = nnz_;
   result.pattern_reserved_bytes =
       (static_cast<std::uint64_t>(rows_) + 1 +
@@ -989,6 +2196,14 @@ SparseMatrixRuntimeStatistics CuSparseMatrix::debug_runtime_statistics() const {
   result.operator_owned_reserved_bytes = result.pattern_reserved_bytes +
                                          result.values_reserved_bytes +
                                          result.spmv_workspace_reserved_bytes;
+  if (pattern_) {
+    result.operator_exclusive_reserved_bytes =
+        result.values_reserved_bytes + result.spmv_workspace_reserved_bytes;
+    result.shared_pattern_id = pattern_->pattern_id();
+    result.shared_pattern_operator_references =
+        pattern_->operator_references();
+    result.pattern_storage_shared = true;
+  }
   result.matrix_descriptor_count = matrix_ != nullptr ? 1 : 0;
   result.dense_vector_descriptor_count =
       (spmv_vec_x_ != nullptr ? 1 : 0) + (spmv_vec_y_ != nullptr ? 1 : 0);
@@ -997,6 +2212,1335 @@ SparseMatrixRuntimeStatistics CuSparseMatrix::debug_runtime_statistics() const {
 #else
   return make_runtime_statistics("cuda", "csr");
 #endif
+}
+
+CuSparseBsrMatrix::CuSparseBsrMatrix(Program *prog,
+                                     int block_rows,
+                                     int block_cols,
+                                     int block_size,
+                                     const Ndarray &row_offsets,
+                                     const Ndarray &column_indices,
+                                     const Ndarray &values)
+    : CuSparseBsrMatrix(
+          std::make_shared<SparseBsrPattern>(
+              prog, block_rows, block_cols, block_size, row_offsets,
+              column_indices),
+          values,
+          true) {
+}
+
+CuSparseBsrMatrix::CuSparseBsrMatrix(
+    std::shared_ptr<SparseBsrPattern> pattern,
+    const Ndarray &values,
+    bool pattern_built_for_operator) {
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(!pattern || !arch_is_cuda(pattern->arch()) ||
+                  !pattern->program(),
+              "Internal BSR matrices require a CUDA-owned pattern.");
+  Program *prog = pattern->program();
+  auto &cusparse = CUSPARSEDriver::get_instance();
+  if (!cusparse.is_loaded() && !cusparse.load_cusparse()) {
+    TI_ERROR("Failed to load cusparse library!");
+  }
+  const auto provider = cusparse.capabilities();
+  TI_ERROR_IF(!provider.generic_bsr_spmv_available,
+              "The loaded cuSPARSE provider does not support generic BSR "
+              "SpMV (requires cusparseCreateBsr and cuSPARSE >= 12.6.3).");
+  TI_ERROR_IF(values.get_element_data_type() != PrimitiveType::f32 ||
+                  !values.get_element_shape().empty() ||
+                  values.get_element_size() != sizeof(float32),
+              "Internal BSR values must be a scalar f32 ndarray.");
+
+  const auto value_count = pattern->value_count();
+  TI_ERROR_IF(values.get_nelement() != value_count,
+              "Internal BSR values must contain exactly {} scalar f32 "
+              "entries for {} dense {} x {} blocks, got {}.",
+              value_count, pattern->block_nnz(), pattern->block_size(),
+              pattern->block_size(), values.get_nelement());
+
+  const auto value_bytes = value_count * sizeof(float32);
+  auto source_values =
+      reinterpret_cast<void *>(prog->get_ndarray_data_ptr_as_int(&values));
+
+  void *owned_values = nullptr;
+  cusparseSpMatDescr_t matrix = nullptr;
+  try {
+    CUDADriver::get_instance().malloc(&owned_values, value_bytes);
+    CUDADriver::get_instance().memcpy_device_to_device(
+        owned_values, source_values, value_bytes);
+    cusparse.cpCreateBsr(
+        &matrix, pattern->block_rows(), pattern->block_cols(),
+        pattern->block_nnz(), pattern->block_size(), pattern->block_size(),
+        pattern->cuda_row_offsets(), pattern->cuda_column_indices(),
+        owned_values,
+        CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO,
+        CUDA_R_32F, CUSPARSE_ORDER_ROW);
+  } catch (...) {
+    if (matrix)
+      cusparse.cpDestroySpMat.call_with_warning(matrix);
+    if (owned_values)
+      CUDADriver::get_instance().mem_free.call_with_warning(owned_values);
+    throw;
+  }
+
+  rows_ = pattern->num_rows();
+  cols_ = pattern->num_cols();
+  dtype_ = PrimitiveType::f32;
+  block_rows_ = pattern->block_rows();
+  block_cols_ = pattern->block_cols();
+  block_size_ = pattern->block_size();
+  block_nnz_ = pattern->block_nnz();
+  scalar_nnz_ = pattern->scalar_nnz();
+  value_count_ = value_count;
+  pattern_ = std::move(pattern);
+  matrix_ = matrix;
+  values_ = owned_values;
+  if (pattern_built_for_operator) {
+    record_transfer_bytes(
+        0, pattern_->device_to_host_bytes(),
+        pattern_->device_to_device_bytes() + value_bytes);
+    record_pattern_build();
+  } else {
+    record_transfer_bytes(0, 0, value_bytes);
+    record_pattern_reference();
+  }
+  pattern_->retain_operator_reference();
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+void CuSparseBsrMatrix::reset_spmv_resources() {
+#if defined(TI_WITH_CUDA)
+  if (spmv_vec_x_)
+    CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_x_);
+  if (spmv_vec_y_)
+    CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_y_);
+  if (spmv_handle_)
+    CUSPARSEDriver::get_instance().cpDestroy(spmv_handle_);
+  if (spmv_buffer_)
+    CUDADriver::get_instance().mem_free(spmv_buffer_);
+  spmv_vec_x_ = nullptr;
+  spmv_vec_y_ = nullptr;
+  spmv_handle_ = nullptr;
+  spmv_buffer_ = nullptr;
+  spmv_x_ptr_ = 0;
+  spmv_y_ptr_ = 0;
+  spmv_buffer_size_ = 0;
+  spmv_buffer_initialized_ = false;
+#endif
+}
+
+CuSparseBsrMatrix::~CuSparseBsrMatrix() {
+#if defined(TI_WITH_CUDA)
+  reset_spmv_resources();
+  if (matrix_)
+    CUSPARSEDriver::get_instance().cpDestroySpMat(matrix_);
+  if (values_)
+    CUDADriver::get_instance().mem_free(values_);
+  if (pattern_)
+    pattern_->release_operator_reference();
+#endif
+}
+
+void CuSparseBsrMatrix::spmv(size_t dX, size_t dY) {
+#if defined(TI_WITH_CUDA)
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  record_spmv_call();
+  if (!spmv_handle_) {
+    CUSPARSEDriver::get_instance().cpCreate(&spmv_handle_);
+    record_spmv_handle_creation();
+  }
+  if (!spmv_vec_x_ || spmv_x_ptr_ != dX) {
+    const bool rebind = spmv_vec_x_ != nullptr;
+    if (spmv_vec_x_)
+      CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_x_);
+    CUSPARSEDriver::get_instance().cpCreateDnVec(&spmv_vec_x_, cols_,
+                                                 reinterpret_cast<void *>(dX),
+                                                 CUDA_R_32F);
+    spmv_x_ptr_ = dX;
+    record_dense_vector_descriptor_creation(rebind);
+  }
+  if (!spmv_vec_y_ || spmv_y_ptr_ != dY) {
+    const bool rebind = spmv_vec_y_ != nullptr;
+    if (spmv_vec_y_)
+      CUSPARSEDriver::get_instance().cpDestroyDnVec(spmv_vec_y_);
+    CUSPARSEDriver::get_instance().cpCreateDnVec(&spmv_vec_y_, rows_,
+                                                 reinterpret_cast<void *>(dY),
+                                                 CUDA_R_32F);
+    spmv_y_ptr_ = dY;
+    record_dense_vector_descriptor_creation(rebind);
+  }
+
+  float alpha = 1.0f;
+  float beta = 0.0f;
+  if (!spmv_buffer_initialized_) {
+    record_spmv_plan_build();
+    CUSPARSEDriver::get_instance().cpSpMV_bufferSize(
+        spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matrix_,
+        spmv_vec_x_, &beta, spmv_vec_y_, CUDA_R_32F,
+        CUSPARSE_SPMV_BSR_ALG1, &spmv_buffer_size_);
+    if (spmv_buffer_size_ > 0) {
+      CUDADriver::get_instance().malloc(&spmv_buffer_, spmv_buffer_size_);
+      record_spmv_workspace_allocation();
+    }
+    spmv_buffer_initialized_ = true;
+  } else {
+    record_spmv_plan_reuse();
+  }
+  CUSPARSEDriver::get_instance().cpSpMV(
+      spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matrix_,
+      spmv_vec_x_, &beta, spmv_vec_y_, CUDA_R_32F,
+      CUSPARSE_SPMV_BSR_ALG1, spmv_buffer_);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+void CuSparseBsrMatrix::nd_spmv(Program *prog,
+                                const Ndarray &x,
+                                const Ndarray &y) {
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(!prog || prog != pattern_->program() ||
+                  !arch_is_cuda(prog->compile_config().arch),
+              "Internal BSR SpMV requires its owning CUDA Program.");
+  TI_ERROR_IF(x.get_element_data_type() != PrimitiveType::f32 ||
+                  !x.get_element_shape().empty() ||
+                  x.get_nelement() != static_cast<std::size_t>(cols_) ||
+                  y.get_element_data_type() != PrimitiveType::f32 ||
+                  !y.get_element_shape().empty() ||
+                  y.get_nelement() != static_cast<std::size_t>(rows_),
+              "Internal BSR SpMV expects scalar f32 vectors with shapes ({},) "
+              "and ({},).",
+              cols_, rows_);
+  spmv(prog->get_ndarray_data_ptr_as_int(&x),
+       prog->get_ndarray_data_ptr_as_int(&y));
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+void CuSparseBsrMatrix::update_values(Program *prog, const Ndarray &values) {
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(!prog || prog != pattern_->program() ||
+                  !arch_is_cuda(prog->compile_config().arch),
+              "Internal BSR value updates require the owning CUDA Program.");
+  TI_ERROR_IF(values.get_element_data_type() != PrimitiveType::f32 ||
+                  !values.get_element_shape().empty() ||
+                  values.get_nelement() != value_count_ ||
+                  values.get_element_size() != sizeof(float32),
+              "Internal BSR value update expects exactly {} scalar f32 "
+              "entries in block-row-major order.",
+              value_count_);
+  const auto bytes = value_count_ * sizeof(float32);
+  auto source =
+      reinterpret_cast<void *>(prog->get_ndarray_data_ptr_as_int(&values));
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  CUDADriver::get_instance().memcpy_device_to_device(values_, source, bytes);
+  record_numeric_update(bytes);
+  record_transfer_bytes(0, 0, bytes);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+SparseMatrixRuntimeStatistics
+CuSparseBsrMatrix::debug_runtime_statistics() const {
+#if defined(TI_WITH_CUDA)
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  auto result = make_runtime_statistics("cuda", "bsr");
+  const auto provider = CUSPARSEDriver::get_instance().capabilities();
+  result.provider_name = "cusparse";
+  result.provider_version_major = provider.library_version_major;
+  result.provider_version_minor = provider.library_version_minor;
+  result.provider_version_patch = provider.library_version_patch;
+  result.provider_bsr_descriptor_available =
+      provider.bsr_descriptor_available;
+  result.provider_generic_bsr_spmv_available =
+      provider.generic_bsr_spmv_available;
+  result.nnz = scalar_nnz_;
+  result.block_rows = block_rows_;
+  result.block_cols = block_cols_;
+  result.block_size = block_size_;
+  result.block_nnz = block_nnz_;
+  result.pattern_reserved_bytes = pattern_->pattern_reserved_bytes();
+  result.values_reserved_bytes =
+      static_cast<std::uint64_t>(value_count_) * sizeof(float32);
+  result.spmv_workspace_reserved_bytes =
+      spmv_buffer_initialized_ ? spmv_buffer_size_ : 0;
+  result.operator_owned_reserved_bytes = result.pattern_reserved_bytes +
+                                         result.values_reserved_bytes +
+                                         result.spmv_workspace_reserved_bytes;
+  result.operator_exclusive_reserved_bytes =
+      result.values_reserved_bytes + result.spmv_workspace_reserved_bytes;
+  result.shared_pattern_id = pattern_->pattern_id();
+  result.shared_pattern_operator_references =
+      pattern_->operator_references();
+  result.pattern_storage_shared = true;
+  result.matrix_descriptor_count = matrix_ != nullptr ? 1 : 0;
+  result.dense_vector_descriptor_count =
+      (spmv_vec_x_ != nullptr ? 1 : 0) + (spmv_vec_y_ != nullptr ? 1 : 0);
+  result.spmv_handle_count = spmv_handle_ != nullptr ? 1 : 0;
+  return result;
+#else
+  return make_runtime_statistics("cuda", "bsr");
+#endif
+}
+
+VulkanSparseMatrix::VulkanSparseMatrix(
+    std::shared_ptr<SparseCsrPattern> pattern,
+    const Ndarray &values,
+    bool pattern_built_for_operator) {
+#if defined(TI_WITH_VULKAN)
+  TI_ERROR_IF(!pattern || pattern->arch() != Arch::vulkan ||
+                  !pattern->program(),
+              "Internal Vulkan CSR matrices require a Vulkan-owned pattern.");
+  Program *prog = pattern->program();
+  TI_ERROR_IF(!prog->vulkan_sparse_algebra_available(),
+              "Vulkan fixed-pattern sparse algebra is unavailable.");
+  TI_ERROR_IF(values.get_element_data_type() != PrimitiveType::f32 ||
+                  !values.get_element_shape().empty() ||
+                  values.get_element_size() != sizeof(float32),
+              "Internal Vulkan CSR values must be a scalar f32 ndarray.");
+  const std::size_t value_count = static_cast<std::size_t>(pattern->nnz());
+  TI_ERROR_IF(values.get_nelement() != value_count,
+              "Internal Vulkan CSR values must contain exactly {} scalar "
+              "f32 entries, got {}.",
+              value_count, values.get_nelement());
+
+  const auto value_bytes = value_count * sizeof(float32);
+  Ndarray *owned_values = nullptr;
+  try {
+    owned_values = prog->create_ndarray(
+        PrimitiveType::f32, {static_cast<int>(value_count)},
+        ExternalArrayLayout::kNull, false);
+    auto submission_guard =
+        prog->acquire_runtime_resource_submission_guard();
+    const Ndarray *copy_resources[] = {owned_values, &values};
+    prog->retain_ndarrays_for_external_submission(
+        copy_resources, std::size(copy_resources));
+    prog->copy_ndarray_fast(owned_values,
+                            const_cast<Ndarray *>(&values));
+  } catch (...) {
+    if (owned_values) {
+      prog->delete_ndarray(owned_values);
+    }
+    throw;
+  }
+
+  rows_ = pattern->num_rows();
+  cols_ = pattern->num_cols();
+  dtype_ = PrimitiveType::f32;
+  program_ = prog;
+  nnz_ = pattern->nnz();
+  pattern_ = std::move(pattern);
+  values_ = owned_values;
+  if (pattern_built_for_operator) {
+    record_transfer_bytes(
+        0, pattern_->device_to_host_bytes(),
+        pattern_->device_to_device_bytes() + value_bytes);
+    record_pattern_build();
+  } else {
+    record_transfer_bytes(0, 0, value_bytes);
+    record_pattern_reference();
+  }
+  pattern_->retain_operator_reference();
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+VulkanSparseMatrix::VulkanSparseMatrix(Program *prog,
+                                       int rows,
+                                       int cols,
+                                       const Ndarray &row_offsets,
+                                       const Ndarray &column_indices,
+                                       const Ndarray &values) {
+#if defined(TI_WITH_VULKAN)
+  TI_ERROR_IF(!prog || prog->compile_config().arch != Arch::vulkan,
+              "Internal Vulkan CSR matrices require an active Vulkan "
+              "Program.");
+  TI_ERROR_IF(!prog->vulkan_sparse_algebra_available(),
+              "Vulkan fixed-pattern sparse algebra is unavailable.");
+  TI_ERROR_IF(rows <= 0 || cols <= 0,
+              "Internal Vulkan CSR matrices require positive dimensions, got "
+              "{} x {}.",
+              rows, cols);
+  TI_ERROR_IF(row_offsets.get_element_data_type() != PrimitiveType::i32 ||
+                  !row_offsets.get_element_shape().empty() ||
+                  row_offsets.get_nelement() !=
+                      static_cast<std::size_t>(rows) + 1 ||
+                  row_offsets.get_element_size() != sizeof(int32_t),
+              "Internal Vulkan CSR row offsets must contain exactly {} scalar "
+              "i32 entries.",
+              rows + 1);
+  TI_ERROR_IF(column_indices.get_element_data_type() != PrimitiveType::i32 ||
+                  !column_indices.get_element_shape().empty() ||
+                  column_indices.get_element_size() != sizeof(int32_t),
+              "Internal Vulkan CSR column indices must be a scalar i32 "
+              "ndarray.");
+  TI_ERROR_IF(values.get_element_data_type() != PrimitiveType::f32 ||
+                  !values.get_element_shape().empty() ||
+                  values.get_element_size() != sizeof(float32),
+              "Internal Vulkan CSR values must be a scalar f32 ndarray.");
+  const auto nnz_size = column_indices.get_nelement();
+  TI_ERROR_IF(nnz_size == 0,
+              "Internal Vulkan CSR matrices currently require at least one "
+              "stored value.");
+  TI_ERROR_IF(nnz_size >
+                  static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "Internal Vulkan CSR nnz exceeds the i32 implementation limit.");
+  TI_ERROR_IF(values.get_nelement() != nnz_size,
+              "Internal Vulkan CSR values must contain exactly {} scalar f32 "
+              "entries, got {}.",
+              nnz_size, values.get_nelement());
+
+  const auto row_bytes =
+      (static_cast<std::size_t>(rows) + 1) * sizeof(int32_t);
+  const auto column_bytes = nnz_size * sizeof(int32_t);
+  const auto value_bytes = nnz_size * sizeof(float32);
+  std::vector<int32_t> host_row_offsets(
+      static_cast<std::size_t>(rows) + 1);
+  std::vector<int32_t> host_column_indices(nnz_size);
+  prog->copy_ndarray_to_host(const_cast<Ndarray *>(&row_offsets),
+                             host_row_offsets.data(), row_bytes);
+  prog->copy_ndarray_to_host(const_cast<Ndarray *>(&column_indices),
+                             host_column_indices.data(), column_bytes);
+  TI_ERROR_IF(host_row_offsets.front() != 0 ||
+                  host_row_offsets.back() != static_cast<int32_t>(nnz_size),
+              "Internal Vulkan CSR row offsets must start at 0 and end at nnz "
+              "{}.",
+              nnz_size);
+  for (int row = 0; row < rows; ++row) {
+    const int32_t begin = host_row_offsets[row];
+    const int32_t end = host_row_offsets[row + 1];
+    TI_ERROR_IF(begin < 0 || end < begin ||
+                    end > static_cast<int32_t>(nnz_size),
+                "Internal Vulkan CSR row offsets are not monotone at row {}.",
+                row);
+    int32_t previous_column = -1;
+    for (int32_t offset = begin; offset < end; ++offset) {
+      const int32_t column = host_column_indices[offset];
+      TI_ERROR_IF(column < 0 || column >= cols,
+                  "Internal Vulkan CSR column {} at offset {} is outside [0, "
+                  "{}).",
+                  column, offset, cols);
+      TI_ERROR_IF(column <= previous_column,
+                  "Internal Vulkan CSR columns must be strictly increasing "
+                  "and unique within row {}, got {} after {}.",
+                  row, column, previous_column);
+      previous_column = column;
+    }
+  }
+
+  Ndarray *owned_row_offsets = nullptr;
+  Ndarray *owned_column_indices = nullptr;
+  Ndarray *owned_values = nullptr;
+  try {
+    owned_row_offsets = prog->create_ndarray(
+        PrimitiveType::i32, {rows + 1}, ExternalArrayLayout::kNull, false);
+    owned_column_indices = prog->create_ndarray(
+        PrimitiveType::i32, {static_cast<int>(nnz_size)},
+        ExternalArrayLayout::kNull, false);
+    owned_values = prog->create_ndarray(
+        PrimitiveType::f32, {static_cast<int>(nnz_size)},
+        ExternalArrayLayout::kNull, false);
+    auto submission_guard = prog->acquire_runtime_resource_submission_guard();
+    const Ndarray *copy_resources[] = {
+        owned_row_offsets, &row_offsets, owned_column_indices,
+        &column_indices,   owned_values, &values};
+    prog->retain_ndarrays_for_external_submission(
+        copy_resources, std::size(copy_resources));
+    prog->copy_ndarray_fast(owned_row_offsets,
+                            const_cast<Ndarray *>(&row_offsets));
+    prog->copy_ndarray_fast(owned_column_indices,
+                            const_cast<Ndarray *>(&column_indices));
+    prog->copy_ndarray_fast(owned_values, const_cast<Ndarray *>(&values));
+  } catch (...) {
+    if (owned_values)
+      prog->delete_ndarray(owned_values);
+    if (owned_column_indices)
+      prog->delete_ndarray(owned_column_indices);
+    if (owned_row_offsets)
+      prog->delete_ndarray(owned_row_offsets);
+    throw;
+  }
+
+  rows_ = rows;
+  cols_ = cols;
+  dtype_ = PrimitiveType::f32;
+  program_ = prog;
+  nnz_ = static_cast<int>(nnz_size);
+  row_offsets_ = owned_row_offsets;
+  column_indices_ = owned_column_indices;
+  values_ = owned_values;
+  record_transfer_bytes(0, row_bytes + column_bytes,
+                        row_bytes + column_bytes + value_bytes);
+  record_pattern_build();
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+VulkanSparseMatrix::VulkanSparseMatrix(
+    Program *prog,
+    int rows,
+    int cols,
+    int nnz,
+    Ndarray *owned_row_offsets,
+    Ndarray *owned_column_indices,
+    Ndarray *owned_values,
+    std::uint64_t device_to_device_bytes) {
+#if defined(TI_WITH_VULKAN)
+  TI_ERROR_IF(!prog || prog->compile_config().arch != Arch::vulkan,
+              "Device-assembled Vulkan CSR matrices require an active Vulkan "
+              "Program.");
+  TI_ERROR_IF(!prog->vulkan_sparse_assembly_available(),
+              "Device-assembled Vulkan CSR matrices require Vulkan "
+              "shaderInt64 support.");
+  TI_ERROR_IF(rows <= 0 || cols <= 0 || nnz < 0,
+              "Device-assembled Vulkan CSR matrices require positive "
+              "dimensions and nonnegative nnz.");
+  TI_ERROR_IF(!owned_row_offsets ||
+                  (nnz > 0 && (!owned_column_indices || !owned_values)) ||
+                  (nnz == 0 && (owned_column_indices || owned_values)),
+              "Device-assembled Vulkan CSR matrices received inconsistent "
+              "owned storage for nnz {}.",
+              nnz);
+  TI_ERROR_IF(
+      owned_row_offsets->get_element_data_type() != PrimitiveType::i32 ||
+          !owned_row_offsets->get_element_shape().empty() ||
+          owned_row_offsets->get_nelement() !=
+              static_cast<std::size_t>(rows) + 1 ||
+          owned_row_offsets->get_element_size() != sizeof(int32_t),
+      "Device-assembled Vulkan CSR row offsets have an invalid shape or "
+      "dtype.");
+  TI_ERROR_IF(
+      nnz > 0 &&
+          (owned_column_indices->get_element_data_type() !=
+               PrimitiveType::i32 ||
+           !owned_column_indices->get_element_shape().empty() ||
+           owned_column_indices->get_nelement() !=
+               static_cast<std::size_t>(nnz) ||
+           owned_column_indices->get_element_size() != sizeof(int32_t)),
+      "Device-assembled Vulkan CSR columns have an invalid shape or dtype.");
+  TI_ERROR_IF(
+      nnz > 0 &&
+          (owned_values->get_element_data_type() != PrimitiveType::f32 ||
+           !owned_values->get_element_shape().empty() ||
+           owned_values->get_nelement() != static_cast<std::size_t>(nnz) ||
+           owned_values->get_element_size() != sizeof(float32)),
+      "Device-assembled Vulkan CSR values have an invalid shape or dtype.");
+
+  rows_ = rows;
+  cols_ = cols;
+  dtype_ = PrimitiveType::f32;
+  program_ = prog;
+  nnz_ = nnz;
+  row_offsets_ = owned_row_offsets;
+  column_indices_ = owned_column_indices;
+  values_ = owned_values;
+  record_transfer_bytes(0, 0, device_to_device_bytes);
+  record_pattern_build();
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+VulkanSparseAssemblyPlan::VulkanSparseAssemblyPlan(Program *program,
+                                                   int rows,
+                                                   int cols,
+                                                   int capacity)
+    : program_(program), rows_(rows), cols_(cols), capacity_(capacity) {
+#if defined(TI_WITH_VULKAN)
+  TI_ERROR_IF(!program || program->compile_config().arch != Arch::vulkan,
+              "Vulkan sparse assembly plans require an active Vulkan "
+              "Program.");
+  TI_ERROR_IF(!program->vulkan_sparse_assembly_available(),
+              "Vulkan sparse assembly plans require Vulkan shaderInt64 "
+              "support.");
+  TI_ERROR_IF(rows <= 0 || cols <= 0 || capacity <= 0 ||
+                  rows >= std::numeric_limits<int>::max() ||
+                  capacity >= std::numeric_limits<int>::max(),
+              "Vulkan sparse assembly rows, columns, and capacity must be "
+              "positive, with rows/capacity below INT_MAX.");
+  auto create = [&](DataType dtype, int count) {
+    return program->create_ndarray(dtype, {count}, ExternalArrayLayout::kNull,
+                                   false);
+  };
+  try {
+    sorted_keys_ = create(PrimitiveType::u64, capacity);
+    sorted_values_ = create(PrimitiveType::f32, capacity);
+    segment_ids_ = create(PrimitiveType::i32, capacity);
+    unique_keys_ = create(PrimitiveType::u64, capacity);
+    segment_offsets_ = create(PrimitiveType::i32, capacity + 1);
+    unique_values_ = create(PrimitiveType::f32, capacity);
+    row_offsets_ = create(PrimitiveType::i32, rows + 1);
+    column_indices_ = create(PrimitiveType::i32, capacity);
+    active_count_ = create(PrimitiveType::i32, 1);
+    control_ = create(PrimitiveType::i32, 2);
+  } catch (...) {
+    delete_workspace();
+    throw;
+  }
+  statistics_.rows = rows;
+  statistics_.cols = cols;
+  statistics_.capacity = capacity;
+  statistics_.persistent_workspace_reserved_bytes =
+      static_cast<std::uint64_t>(capacity) * 36 +
+      static_cast<std::uint64_t>(rows) * sizeof(int32_t) + 20;
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+VulkanSparseAssemblyPlan::~VulkanSparseAssemblyPlan() {
+  delete_workspace();
+}
+
+void VulkanSparseAssemblyPlan::delete_workspace() noexcept {
+#if defined(TI_WITH_VULKAN)
+  if (!program_) {
+    return;
+  }
+  auto destroy = [&](Ndarray *&array) {
+    if (array) {
+      program_->delete_ndarray(array);
+      array = nullptr;
+    }
+  };
+  destroy(control_);
+  destroy(active_count_);
+  destroy(column_indices_);
+  destroy(row_offsets_);
+  destroy(unique_values_);
+  destroy(segment_offsets_);
+  destroy(unique_keys_);
+  destroy(segment_ids_);
+  destroy(sorted_values_);
+  destroy(sorted_keys_);
+#endif
+}
+
+std::unique_ptr<VulkanSparseMatrix> VulkanSparseAssemblyPlan::build(
+    Program *program,
+    const Ndarray &triplet_rows,
+    const Ndarray &triplet_columns,
+    const Ndarray &triplet_values) {
+  return build_internal(program, nullptr, &triplet_rows, &triplet_columns,
+                        &triplet_values);
+}
+
+std::unique_ptr<VulkanSparseMatrix> VulkanSparseAssemblyPlan::build_packed(
+    Program *program,
+    const Ndarray &packed_triplets) {
+  return build_internal(program, &packed_triplets, nullptr, nullptr, nullptr);
+}
+
+std::unique_ptr<VulkanSparseMatrix> VulkanSparseAssemblyPlan::build_internal(
+    Program *program,
+    const Ndarray *packed_triplets,
+    const Ndarray *triplet_rows,
+    const Ndarray *triplet_columns,
+    const Ndarray *triplet_values) {
+#if defined(TI_WITH_VULKAN)
+  std::lock_guard<std::mutex> lock(mutex_);
+  TI_ERROR_IF(program != program_,
+              "Vulkan sparse assembly requires its owning Program.");
+  auto check_input = [&](const char *name, const Ndarray *array,
+                         DataType dtype, std::size_t count,
+                         std::size_t item_bytes) {
+    TI_ERROR_IF(!array || array->shape.size() != 1 ||
+                    !array->get_element_shape().empty() ||
+                    array->get_element_data_type() != dtype ||
+                    array->get_nelement() != count ||
+                    array->get_element_size() != item_bytes,
+                "Vulkan sparse assembly {} must contain exactly {} scalar "
+                "entries with the required dtype.",
+                name, count);
+  };
+  if (packed_triplets) {
+    TI_ERROR_IF(triplet_rows || triplet_columns || triplet_values,
+                "Packed Vulkan sparse assembly cannot also receive separate "
+                "triplet arrays.");
+    check_input("packed builder storage", packed_triplets,
+                PrimitiveType::i32,
+                static_cast<std::size_t>(capacity_) * 3 + 2,
+                sizeof(int32_t));
+  } else {
+    check_input("rows", triplet_rows, PrimitiveType::i32, capacity_,
+                sizeof(int32_t));
+    check_input("columns", triplet_columns, PrimitiveType::i32, capacity_,
+                sizeof(int32_t));
+    check_input("values", triplet_values, PrimitiveType::f32, capacity_,
+                sizeof(float32));
+  }
+
+  statistics_.build_calls++;
+  if (statistics_.workspace_builds == 0) {
+    statistics_.workspace_builds = 1;
+  } else {
+    statistics_.workspace_reuses++;
+  }
+  const auto dispatch = program->vulkan_sparse_assemble_csr(
+      const_cast<Ndarray *>(packed_triplets),
+      const_cast<Ndarray *>(triplet_rows),
+      const_cast<Ndarray *>(triplet_columns),
+      const_cast<Ndarray *>(triplet_values), sorted_keys_, sorted_values_,
+      segment_ids_, unique_keys_, segment_offsets_, unique_values_,
+      row_offsets_, column_indices_, active_count_, control_,
+      static_cast<std::size_t>(capacity_), static_cast<std::size_t>(rows_),
+      static_cast<std::size_t>(cols_));
+  statistics_.shared_radix_sort_workspace_reserved_bytes =
+      dispatch.radix_sort_workspace_bytes;
+  statistics_.shared_scan_workspace_reserved_bytes =
+      dispatch.scan_workspace_bytes;
+  if (dispatch.workspace_growth_synchronized) {
+    statistics_.workspace_growth_synchronizations++;
+  }
+
+  program->synchronize();
+  statistics_.host_synchronizations++;
+  std::array<int32_t, 2> control_host{0, 0};
+  program->copy_ndarray_to_host(control_, control_host.data(),
+                                sizeof(control_host));
+  statistics_.host_control_readbacks++;
+  statistics_.host_scalar_readbacks += 2;
+  statistics_.device_to_host_bytes += sizeof(control_host);
+  const int encoded_status = control_host[0];
+  int status = encoded_status < 0 ? -encoded_status : 0;
+  const int input_triplets = encoded_status >= 0 ? encoded_status : 0;
+  const int unique_nnz = control_host[1];
+  if (status == 0 &&
+      (input_triplets < 0 || input_triplets > capacity_ || unique_nnz < 0 ||
+       unique_nnz > input_triplets)) {
+    status = 4;
+  }
+  statistics_.last_status = status;
+  statistics_.last_input_triplets = status == 0 ? input_triplets : 0;
+  statistics_.last_unique_nnz = status == 0 ? unique_nnz : 0;
+  statistics_.last_duplicate_triplets =
+      status == 0 ? input_triplets - unique_nnz : 0;
+  if (status != 0) {
+    statistics_.failed_builds++;
+    if (status == 5) {
+      TI_ERROR("SparseMatrixBuilder triplet count {} exceeds capacity {}.",
+               control_host[1], capacity_);
+    }
+    const char *reason =
+        status == 1   ? "triplet index outside matrix dimensions"
+        : status == 2 ? "non-finite input value"
+        : status == 3 ? "non-finite duplicate sum"
+        : status == 5 ? "active triplet count exceeds plan capacity"
+                      : "invalid device segment/count state";
+    TI_ERROR("Vulkan sparse assembly failed before publish (status {}): {}.",
+             status, reason);
+  }
+
+  Ndarray *owned_row_offsets = nullptr;
+  Ndarray *owned_column_indices = nullptr;
+  Ndarray *owned_values = nullptr;
+  try {
+    owned_row_offsets = program->create_ndarray(
+        PrimitiveType::i32, {rows_ + 1}, ExternalArrayLayout::kNull, false);
+    if (unique_nnz > 0) {
+      owned_column_indices = program->create_ndarray(
+          PrimitiveType::i32, {unique_nnz}, ExternalArrayLayout::kNull, false);
+      owned_values = program->create_ndarray(
+          PrimitiveType::f32, {unique_nnz}, ExternalArrayLayout::kNull, false);
+    }
+    const std::size_t row_bytes =
+        (static_cast<std::size_t>(rows_) + 1) * sizeof(int32_t);
+    const std::size_t column_bytes =
+        static_cast<std::size_t>(unique_nnz) * sizeof(int32_t);
+    const std::size_t value_bytes =
+        static_cast<std::size_t>(unique_nnz) * sizeof(float32);
+    program->vulkan_copy_ndarray_prefix(owned_row_offsets, row_offsets_,
+                                        row_bytes);
+    if (column_bytes > 0) {
+      program->vulkan_copy_ndarray_prefix(
+          owned_column_indices, column_indices_, column_bytes);
+    }
+    if (value_bytes > 0) {
+      program->vulkan_copy_ndarray_prefix(owned_values, unique_values_,
+                                          value_bytes);
+    }
+    const std::uint64_t output_copy_bytes =
+        static_cast<std::uint64_t>(row_bytes + column_bytes + value_bytes);
+    auto matrix = std::make_unique<VulkanSparseMatrix>(
+        program, rows_, cols_, unique_nnz, owned_row_offsets,
+        owned_column_indices, owned_values, output_copy_bytes);
+    owned_row_offsets = nullptr;
+    owned_column_indices = nullptr;
+    owned_values = nullptr;
+    statistics_.successful_builds++;
+    statistics_.device_to_device_bytes += output_copy_bytes;
+    statistics_.last_output_pattern_bytes = row_bytes + column_bytes;
+    statistics_.last_output_value_bytes = value_bytes;
+    return matrix;
+  } catch (...) {
+    statistics_.failed_builds++;
+    statistics_.last_status = 6;
+    statistics_.last_input_triplets = 0;
+    statistics_.last_unique_nnz = 0;
+    statistics_.last_duplicate_triplets = 0;
+    if (owned_values)
+      program->delete_ndarray(owned_values);
+    if (owned_column_indices)
+      program->delete_ndarray(owned_column_indices);
+    if (owned_row_offsets)
+      program->delete_ndarray(owned_row_offsets);
+    throw;
+  }
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+SparseAssemblyRuntimeStatistics
+VulkanSparseAssemblyPlan::debug_runtime_statistics() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return statistics_;
+}
+
+CudaSparseAssemblyPlan::CudaSparseAssemblyPlan(Program *program,
+                                               int rows,
+                                               int cols,
+                                               int capacity)
+    : program_(program), rows_(rows), cols_(cols), capacity_(capacity) {
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(!program || program->compile_config().arch != Arch::cuda,
+              "CUDA sparse assembly plans require an active CUDA Program.");
+  TI_ERROR_IF(!program->cuda_sparse_assembly_available(),
+              "CUDA sparse assembly plans require the Driver hierarchical "
+              "primitive provider.");
+  TI_ERROR_IF(!CUSPARSEDriver::get_instance().load_cusparse(),
+              "CUDA sparse assembly plans require a loadable cuSPARSE "
+              "provider.");
+  TI_ERROR_IF(rows <= 0 || cols <= 0 || capacity <= 0 ||
+                  rows >= std::numeric_limits<int>::max() ||
+                  capacity >= std::numeric_limits<int>::max(),
+              "CUDA sparse assembly rows, columns, and capacity must be "
+              "positive, with rows/capacity below INT_MAX.");
+  auto create = [&](DataType dtype, int count) {
+    return program->create_ndarray(dtype, {count}, ExternalArrayLayout::kNull,
+                                   false);
+  };
+  try {
+    sorted_keys_ = create(PrimitiveType::u64, capacity);
+    sorted_values_ = create(PrimitiveType::f32, capacity);
+    segment_ids_ = create(PrimitiveType::i32, capacity);
+    unique_keys_ = create(PrimitiveType::u64, capacity);
+    segment_offsets_ = create(PrimitiveType::i32, capacity + 1);
+    unique_values_ = create(PrimitiveType::f32, capacity);
+    row_offsets_ = create(PrimitiveType::i32, rows + 1);
+    column_indices_ = create(PrimitiveType::i32, capacity);
+    active_count_ = create(PrimitiveType::i32, 1);
+    control_ = create(PrimitiveType::i32, 2);
+  } catch (...) {
+    delete_workspace();
+    throw;
+  }
+  statistics_.rows = rows;
+  statistics_.cols = cols;
+  statistics_.capacity = capacity;
+  statistics_.persistent_workspace_reserved_bytes =
+      static_cast<std::uint64_t>(capacity) * 36 +
+      static_cast<std::uint64_t>(rows) * sizeof(int32_t) + 20;
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+CudaSparseAssemblyPlan::~CudaSparseAssemblyPlan() {
+  delete_workspace();
+}
+
+void CudaSparseAssemblyPlan::delete_workspace() noexcept {
+#if defined(TI_WITH_CUDA)
+  if (!program_) {
+    return;
+  }
+  auto destroy = [&](Ndarray *&array) {
+    if (array) {
+      program_->delete_ndarray(array);
+      array = nullptr;
+    }
+  };
+  destroy(control_);
+  destroy(active_count_);
+  destroy(column_indices_);
+  destroy(row_offsets_);
+  destroy(unique_values_);
+  destroy(segment_offsets_);
+  destroy(unique_keys_);
+  destroy(segment_ids_);
+  destroy(sorted_values_);
+  destroy(sorted_keys_);
+#endif
+}
+
+std::unique_ptr<CuSparseMatrix> CudaSparseAssemblyPlan::build(
+    Program *program,
+    const Ndarray &triplet_rows,
+    const Ndarray &triplet_columns,
+    const Ndarray &triplet_values) {
+  return build_internal(program, nullptr, &triplet_rows, &triplet_columns,
+                        &triplet_values);
+}
+
+std::unique_ptr<CuSparseMatrix> CudaSparseAssemblyPlan::build_packed(
+    Program *program,
+    const Ndarray &packed_triplets) {
+  return build_internal(program, &packed_triplets, nullptr, nullptr, nullptr);
+}
+
+std::unique_ptr<CuSparseMatrix> CudaSparseAssemblyPlan::build_internal(
+    Program *program,
+    const Ndarray *packed_triplets,
+    const Ndarray *triplet_rows,
+    const Ndarray *triplet_columns,
+    const Ndarray *triplet_values) {
+#if defined(TI_WITH_CUDA)
+  std::lock_guard<std::mutex> lock(mutex_);
+  TI_ERROR_IF(program != program_,
+              "CUDA sparse assembly requires its owning Program.");
+  auto check_input = [&](const char *name, const Ndarray *array,
+                         DataType dtype, std::size_t count,
+                         std::size_t item_bytes) {
+    TI_ERROR_IF(!array || array->shape.size() != 1 ||
+                    !array->get_element_shape().empty() ||
+                    array->get_element_data_type() != dtype ||
+                    array->get_nelement() != count ||
+                    array->get_element_size() != item_bytes,
+                "CUDA sparse assembly {} must contain exactly {} scalar "
+                "entries with the required dtype.",
+                name, count);
+  };
+  if (packed_triplets) {
+    TI_ERROR_IF(triplet_rows || triplet_columns || triplet_values,
+                "Packed CUDA sparse assembly cannot also receive separate "
+                "triplet arrays.");
+    check_input("packed builder storage", packed_triplets,
+                PrimitiveType::f32,
+                static_cast<std::size_t>(capacity_) * 3 + 2,
+                sizeof(float32));
+  } else {
+    check_input("rows", triplet_rows, PrimitiveType::i32, capacity_,
+                sizeof(int32_t));
+    check_input("columns", triplet_columns, PrimitiveType::i32, capacity_,
+                sizeof(int32_t));
+    check_input("values", triplet_values, PrimitiveType::f32, capacity_,
+                sizeof(float32));
+  }
+
+  statistics_.build_calls++;
+  if (statistics_.workspace_builds == 0) {
+    statistics_.workspace_builds = 1;
+  } else {
+    statistics_.workspace_reuses++;
+  }
+  const auto dispatch = program->cuda_sparse_assemble_csr(
+      const_cast<Ndarray *>(packed_triplets),
+      const_cast<Ndarray *>(triplet_rows),
+      const_cast<Ndarray *>(triplet_columns),
+      const_cast<Ndarray *>(triplet_values), sorted_keys_, sorted_values_,
+      segment_ids_, unique_keys_, segment_offsets_, unique_values_,
+      row_offsets_, column_indices_, active_count_, control_,
+      static_cast<std::size_t>(capacity_), static_cast<std::size_t>(rows_),
+      static_cast<std::size_t>(cols_));
+  statistics_.shared_radix_sort_workspace_reserved_bytes =
+      dispatch.radix_sort_workspace_bytes;
+  statistics_.shared_scan_workspace_reserved_bytes =
+      dispatch.scan_workspace_bytes;
+  if (dispatch.workspace_growth_synchronized) {
+    statistics_.workspace_growth_synchronizations++;
+  }
+
+  program->synchronize();
+  statistics_.host_synchronizations++;
+  std::array<int32_t, 2> control_host{0, 0};
+  program->copy_ndarray_to_host(control_, control_host.data(),
+                                sizeof(control_host));
+  statistics_.host_control_readbacks++;
+  statistics_.host_scalar_readbacks += 2;
+  statistics_.device_to_host_bytes += sizeof(control_host);
+  const int encoded_status = control_host[0];
+  int status = encoded_status < 0 ? -encoded_status : 0;
+  const int input_triplets = encoded_status >= 0 ? encoded_status : 0;
+  const int unique_nnz = control_host[1];
+  if (status == 0 &&
+      (input_triplets < 0 || input_triplets > capacity_ || unique_nnz < 0 ||
+       unique_nnz > input_triplets)) {
+    status = 4;
+  }
+  statistics_.last_status = status;
+  statistics_.last_input_triplets = status == 0 ? input_triplets : 0;
+  statistics_.last_unique_nnz = status == 0 ? unique_nnz : 0;
+  statistics_.last_duplicate_triplets =
+      status == 0 ? input_triplets - unique_nnz : 0;
+  if (status != 0) {
+    statistics_.failed_builds++;
+    if (status == 5) {
+      TI_ERROR("SparseMatrixBuilder triplet count {} exceeds capacity {}.",
+               control_host[1], capacity_);
+    }
+    const char *reason =
+        status == 1   ? "triplet index outside matrix dimensions"
+        : status == 2 ? "non-finite input value"
+        : status == 3 ? "non-finite duplicate sum"
+        : status == 5 ? "active triplet count exceeds plan capacity"
+                      : "invalid device segment/count state";
+    TI_ERROR("CUDA sparse assembly failed before publish (status {}): {}.",
+             status, reason);
+  }
+
+  void *owned_row_offsets = nullptr;
+  void *owned_column_indices = nullptr;
+  void *owned_values = nullptr;
+  cusparseSpMatDescr_t matrix = nullptr;
+  try {
+    const std::size_t row_bytes =
+        (static_cast<std::size_t>(rows_) + 1) * sizeof(int32_t);
+    const std::size_t column_bytes =
+        static_cast<std::size_t>(unique_nnz) * sizeof(int32_t);
+    const std::size_t value_bytes =
+        static_cast<std::size_t>(unique_nnz) * sizeof(float32);
+    CUDADriver::get_instance().malloc(&owned_row_offsets, row_bytes);
+    if (column_bytes > 0) {
+      CUDADriver::get_instance().malloc(&owned_column_indices, column_bytes);
+    }
+    if (value_bytes > 0) {
+      CUDADriver::get_instance().malloc(&owned_values, value_bytes);
+    }
+    CUDADriver::get_instance().memcpy_device_to_device(
+        owned_row_offsets,
+        reinterpret_cast<void *>(
+            program->get_ndarray_data_ptr_as_int(row_offsets_)),
+        row_bytes);
+    if (column_bytes > 0) {
+      CUDADriver::get_instance().memcpy_device_to_device(
+          owned_column_indices,
+          reinterpret_cast<void *>(
+              program->get_ndarray_data_ptr_as_int(column_indices_)),
+          column_bytes);
+    }
+    if (value_bytes > 0) {
+      CUDADriver::get_instance().memcpy_device_to_device(
+          owned_values,
+          reinterpret_cast<void *>(
+              program->get_ndarray_data_ptr_as_int(unique_values_)),
+          value_bytes);
+    }
+    CUSPARSEDriver::get_instance().cpCreateCsr(
+        &matrix, rows_, cols_, unique_nnz, owned_row_offsets,
+        owned_column_indices, owned_values, CUSPARSE_INDEX_32I,
+        CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    const std::uint64_t output_copy_bytes =
+        static_cast<std::uint64_t>(row_bytes + column_bytes + value_bytes);
+    auto result = std::make_unique<CuSparseMatrix>(
+        matrix, rows_, cols_, PrimitiveType::f32, owned_row_offsets,
+        owned_column_indices, owned_values, unique_nnz, output_copy_bytes);
+    matrix = nullptr;
+    owned_row_offsets = nullptr;
+    owned_column_indices = nullptr;
+    owned_values = nullptr;
+    statistics_.successful_builds++;
+    statistics_.device_to_device_bytes += output_copy_bytes;
+    statistics_.last_output_pattern_bytes = row_bytes + column_bytes;
+    statistics_.last_output_value_bytes = value_bytes;
+    return result;
+  } catch (...) {
+    statistics_.failed_builds++;
+    statistics_.last_status = 6;
+    statistics_.last_input_triplets = 0;
+    statistics_.last_unique_nnz = 0;
+    statistics_.last_duplicate_triplets = 0;
+    if (matrix)
+      CUSPARSEDriver::get_instance().cpDestroySpMat(matrix);
+    if (owned_values)
+      CUDADriver::get_instance().mem_free(owned_values);
+    if (owned_column_indices)
+      CUDADriver::get_instance().mem_free(owned_column_indices);
+    if (owned_row_offsets)
+      CUDADriver::get_instance().mem_free(owned_row_offsets);
+    throw;
+  }
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+SparseAssemblyRuntimeStatistics
+CudaSparseAssemblyPlan::debug_runtime_statistics() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return statistics_;
+}
+
+VulkanSparseMatrix::~VulkanSparseMatrix() {
+#if defined(TI_WITH_VULKAN)
+  if (!program_) {
+    return;
+  }
+  if (values_)
+    program_->delete_ndarray(values_);
+  if (column_indices_ && !pattern_)
+    program_->delete_ndarray(column_indices_);
+  if (row_offsets_ && !pattern_)
+    program_->delete_ndarray(row_offsets_);
+  if (pattern_)
+    pattern_->release_operator_reference();
+#endif
+}
+
+void VulkanSparseMatrix::nd_spmv(Program *prog,
+                                 const Ndarray &x,
+                                 const Ndarray &y) {
+#if defined(TI_WITH_VULKAN)
+  TI_ERROR_IF(prog != program_,
+              "Internal Vulkan CSR SpMV requires its owning Program.");
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  prog->vulkan_csr_spmv(
+      const_cast<Ndarray *>(get_row_offsets()),
+      const_cast<Ndarray *>(get_column_indices()), values_,
+      const_cast<Ndarray *>(&x), const_cast<Ndarray *>(&y), rows_, cols_,
+      nnz_);
+  record_spmv_call();
+  if (spmv_plan_initialized_) {
+    record_spmv_plan_reuse();
+  } else {
+    record_spmv_plan_build();
+    spmv_plan_initialized_ = true;
+  }
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+void VulkanSparseMatrix::update_values(Program *prog,
+                                       const Ndarray &values) {
+#if defined(TI_WITH_VULKAN)
+  TI_ERROR_IF(prog != program_,
+              "Internal Vulkan CSR value updates require the owning Program.");
+  TI_ERROR_IF(values.get_element_data_type() != PrimitiveType::f32 ||
+                  !values.get_element_shape().empty() ||
+                  values.get_nelement() != static_cast<std::size_t>(nnz_) ||
+                  values.get_element_size() != sizeof(float32),
+              "Internal Vulkan CSR value update expects exactly {} scalar "
+              "f32 entries in row-major compressed order.",
+              nnz_);
+  const auto bytes = static_cast<std::size_t>(nnz_) * sizeof(float32);
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  if (nnz_ == 0) {
+    record_numeric_update(0);
+    return;
+  }
+  auto submission_guard = prog->acquire_runtime_resource_submission_guard();
+  const Ndarray *copy_resources[] = {values_, &values};
+  prog->retain_ndarrays_for_external_submission(
+      copy_resources, std::size(copy_resources));
+  prog->copy_ndarray_fast(values_, const_cast<Ndarray *>(&values));
+  record_numeric_update(bytes);
+  record_transfer_bytes(0, 0, bytes);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+SparseMatrixRuntimeStatistics
+VulkanSparseMatrix::debug_runtime_statistics() const {
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  auto result = make_runtime_statistics("vulkan", "csr");
+  result.provider_name = "forge_vulkan_native";
+  result.nnz = nnz_;
+  result.pattern_reserved_bytes =
+      (static_cast<std::uint64_t>(rows_) + 1 +
+       static_cast<std::uint64_t>(nnz_)) *
+      sizeof(int32_t);
+  result.values_reserved_bytes =
+      static_cast<std::uint64_t>(nnz_) * sizeof(float32);
+  result.operator_owned_reserved_bytes =
+      result.pattern_reserved_bytes + result.values_reserved_bytes;
+  if (pattern_) {
+    result.operator_exclusive_reserved_bytes = result.values_reserved_bytes;
+    result.shared_pattern_id = pattern_->pattern_id();
+    result.shared_pattern_operator_references =
+        pattern_->operator_references();
+    result.pattern_storage_shared = true;
+  }
+  return result;
+}
+
+VulkanSparseBsrMatrix::VulkanSparseBsrMatrix(
+    Program *prog,
+    int block_rows,
+    int block_cols,
+    int block_size,
+    const Ndarray &row_offsets,
+    const Ndarray &column_indices,
+    const Ndarray &values)
+    : VulkanSparseBsrMatrix(
+          std::make_shared<SparseBsrPattern>(
+              prog, block_rows, block_cols, block_size, row_offsets,
+              column_indices),
+          values,
+          true) {
+}
+
+VulkanSparseBsrMatrix::VulkanSparseBsrMatrix(
+    std::shared_ptr<SparseBsrPattern> pattern,
+    const Ndarray &values,
+    bool pattern_built_for_operator) {
+#if defined(TI_WITH_VULKAN)
+  TI_ERROR_IF(!pattern || pattern->arch() != Arch::vulkan ||
+                  !pattern->program(),
+              "Internal Vulkan BSR matrices require a Vulkan-owned pattern.");
+  Program *prog = pattern->program();
+  TI_ERROR_IF(!prog->vulkan_sparse_algebra_available(),
+              "Vulkan fixed-pattern sparse algebra is unavailable.");
+  TI_ERROR_IF(values.get_element_data_type() != PrimitiveType::f32 ||
+                  !values.get_element_shape().empty() ||
+                  values.get_element_size() != sizeof(float32),
+              "Internal Vulkan BSR values must be a scalar f32 ndarray.");
+
+  const auto value_count = pattern->value_count();
+  TI_ERROR_IF(values.get_nelement() != value_count,
+              "Internal Vulkan BSR values must contain exactly {} scalar "
+              "f32 entries for {} dense {} x {} blocks, got {}.",
+              value_count, pattern->block_nnz(), pattern->block_size(),
+              pattern->block_size(), values.get_nelement());
+
+  const auto value_bytes = value_count * sizeof(float32);
+  Ndarray *owned_values = nullptr;
+  try {
+    owned_values = prog->create_ndarray(
+        PrimitiveType::f32, {static_cast<int>(value_count)},
+        ExternalArrayLayout::kNull, false);
+    auto submission_guard =
+        prog->acquire_runtime_resource_submission_guard();
+    const Ndarray *copy_resources[] = {owned_values, &values};
+    prog->retain_ndarrays_for_external_submission(
+        copy_resources, std::size(copy_resources));
+    prog->copy_ndarray_fast(owned_values,
+                            const_cast<Ndarray *>(&values));
+  } catch (...) {
+    if (owned_values)
+      prog->delete_ndarray(owned_values);
+    throw;
+  }
+
+  rows_ = pattern->num_rows();
+  cols_ = pattern->num_cols();
+  dtype_ = PrimitiveType::f32;
+  program_ = prog;
+  block_rows_ = pattern->block_rows();
+  block_cols_ = pattern->block_cols();
+  block_size_ = pattern->block_size();
+  block_nnz_ = pattern->block_nnz();
+  scalar_nnz_ = pattern->scalar_nnz();
+  value_count_ = value_count;
+  pattern_ = std::move(pattern);
+  values_ = owned_values;
+  if (pattern_built_for_operator) {
+    record_transfer_bytes(
+        0, pattern_->device_to_host_bytes(),
+        pattern_->device_to_device_bytes() + value_bytes);
+    record_pattern_build();
+  } else {
+    record_transfer_bytes(0, 0, value_bytes);
+    record_pattern_reference();
+  }
+  pattern_->retain_operator_reference();
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+VulkanSparseBsrMatrix::~VulkanSparseBsrMatrix() {
+#if defined(TI_WITH_VULKAN)
+  if (!program_) {
+    return;
+  }
+  if (values_)
+    program_->delete_ndarray(values_);
+  if (pattern_)
+    pattern_->release_operator_reference();
+#endif
+}
+
+void VulkanSparseBsrMatrix::nd_spmv(Program *prog,
+                                    const Ndarray &x,
+                                    const Ndarray &y) {
+#if defined(TI_WITH_VULKAN)
+  TI_ERROR_IF(prog != program_,
+              "Internal Vulkan BSR SpMV requires its owning Program.");
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  prog->vulkan_bsr_spmv(
+      const_cast<Ndarray *>(pattern_->vulkan_row_offsets()),
+      const_cast<Ndarray *>(pattern_->vulkan_column_indices()), values_,
+      const_cast<Ndarray *>(&x), const_cast<Ndarray *>(&y), block_rows_,
+      block_cols_, block_nnz_, block_size_);
+  record_spmv_call();
+  if (spmv_plan_initialized_) {
+    record_spmv_plan_reuse();
+  } else {
+    record_spmv_plan_build();
+    spmv_plan_initialized_ = true;
+  }
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+void VulkanSparseBsrMatrix::update_values(Program *prog,
+                                          const Ndarray &values) {
+#if defined(TI_WITH_VULKAN)
+  TI_ERROR_IF(prog != program_,
+              "Internal Vulkan BSR value updates require the owning "
+              "Program.");
+  TI_ERROR_IF(values.get_element_data_type() != PrimitiveType::f32 ||
+                  !values.get_element_shape().empty() ||
+                  values.get_nelement() != value_count_ ||
+                  values.get_element_size() != sizeof(float32),
+              "Internal Vulkan BSR value update expects exactly {} scalar "
+              "f32 entries in block-row-major order.",
+              value_count_);
+  const auto bytes = value_count_ * sizeof(float32);
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  auto submission_guard =
+      prog->acquire_runtime_resource_submission_guard();
+  const Ndarray *copy_resources[] = {values_, &values};
+  prog->retain_ndarrays_for_external_submission(
+      copy_resources, std::size(copy_resources));
+  prog->copy_ndarray_fast(values_, const_cast<Ndarray *>(&values));
+  record_numeric_update(bytes);
+  record_transfer_bytes(0, 0, bytes);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+SparseMatrixRuntimeStatistics
+VulkanSparseBsrMatrix::debug_runtime_statistics() const {
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  auto result = make_runtime_statistics("vulkan", "bsr");
+  result.provider_name = "forge_vulkan_native";
+  result.nnz = scalar_nnz_;
+  result.block_rows = block_rows_;
+  result.block_cols = block_cols_;
+  result.block_size = block_size_;
+  result.block_nnz = block_nnz_;
+  result.pattern_reserved_bytes = pattern_->pattern_reserved_bytes();
+  result.values_reserved_bytes =
+      static_cast<std::uint64_t>(value_count_) * sizeof(float32);
+  result.operator_owned_reserved_bytes =
+      result.pattern_reserved_bytes + result.values_reserved_bytes;
+  result.operator_exclusive_reserved_bytes = result.values_reserved_bytes;
+  result.shared_pattern_id = pattern_->pattern_id();
+  result.shared_pattern_operator_references =
+      pattern_->operator_references();
+  result.pattern_storage_shared = true;
+  return result;
 }
 
 void CuSparseMatrix::nd_spmv(Program *prog,

@@ -11,11 +11,16 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <mutex>
+#include <type_traits>
+#include <vector>
 
 namespace taichi::lang {
 
 class SparseMatrix;
+class CudaSparseAssemblyPlan;
+class VulkanSparseAssemblyPlan;
 
 // Private diagnostic inventory for the algebraic sparse operator boundary.
 // Persistent matrix/SpMV resources are operator-owned; input/output ndarrays
@@ -24,9 +29,19 @@ struct SparseMatrixRuntimeStatistics {
   std::string backend_family{"unknown"};
   std::string storage_format{"unknown"};
   std::string dtype{"unknown"};
+  std::string provider_name{"unknown"};
+  int provider_version_major{-1};
+  int provider_version_minor{-1};
+  int provider_version_patch{-1};
+  bool provider_bsr_descriptor_available{false};
+  bool provider_generic_bsr_spmv_available{false};
   int rows{0};
   int cols{0};
   int nnz{0};
+  int block_rows{0};
+  int block_cols{0};
+  int block_size{0};
+  int block_nnz{0};
 
   std::uint64_t pattern_version{0};
   std::uint64_t numeric_version{0};
@@ -45,6 +60,10 @@ struct SparseMatrixRuntimeStatistics {
   std::uint64_t values_reserved_bytes{0};
   std::uint64_t spmv_workspace_reserved_bytes{0};
   std::uint64_t operator_owned_reserved_bytes{0};
+  std::uint64_t operator_exclusive_reserved_bytes{0};
+  std::uint64_t shared_pattern_id{0};
+  std::uint64_t shared_pattern_operator_references{0};
+  bool pattern_storage_shared{false};
   std::uint64_t matrix_descriptor_count{0};
   std::uint64_t dense_vector_descriptor_count{0};
   std::uint64_t spmv_handle_count{0};
@@ -52,6 +71,55 @@ struct SparseMatrixRuntimeStatistics {
   std::uint64_t host_to_device_bytes{0};
   std::uint64_t device_to_host_bytes{0};
   std::uint64_t device_to_device_bytes{0};
+};
+
+struct SparsePatternRuntimeStatistics {
+  std::string backend_family{"unknown"};
+  std::string storage_format{"unknown"};
+  std::string index_dtype{"unknown"};
+  std::string value_order{"unknown"};
+  int rows{0};
+  int cols{0};
+  int nnz{0};
+  int block_rows{0};
+  int block_cols{0};
+  int block_size{0};
+  int block_nnz{0};
+  std::uint64_t pattern_id{0};
+  std::uint64_t pattern_version{0};
+  std::uint64_t pattern_builds{0};
+  std::uint64_t operator_references{0};
+  bool immutable{false};
+  std::uint64_t pattern_reserved_bytes{0};
+  std::uint64_t host_to_device_bytes{0};
+  std::uint64_t device_to_host_bytes{0};
+  std::uint64_t device_to_device_bytes{0};
+};
+
+struct SparseAssemblyRuntimeStatistics {
+  int rows{0};
+  int cols{0};
+  int capacity{0};
+  int last_status{0};
+  int last_input_triplets{0};
+  int last_unique_nnz{0};
+  int last_duplicate_triplets{0};
+  std::uint64_t build_calls{0};
+  std::uint64_t successful_builds{0};
+  std::uint64_t failed_builds{0};
+  std::uint64_t workspace_builds{0};
+  std::uint64_t workspace_reuses{0};
+  std::uint64_t workspace_growth_synchronizations{0};
+  std::uint64_t host_synchronizations{0};
+  std::uint64_t host_control_readbacks{0};
+  std::uint64_t host_scalar_readbacks{0};
+  std::uint64_t device_to_host_bytes{0};
+  std::uint64_t device_to_device_bytes{0};
+  std::uint64_t persistent_workspace_reserved_bytes{0};
+  std::uint64_t shared_radix_sort_workspace_reserved_bytes{0};
+  std::uint64_t shared_scan_workspace_reserved_bytes{0};
+  std::uint64_t last_output_pattern_bytes{0};
+  std::uint64_t last_output_value_bytes{0};
 };
 
 class SparseMatrixBuilder {
@@ -72,15 +140,19 @@ class SparseMatrixBuilder {
 
   intptr_t get_ndarray_data_ptr() const;
 
+  Ndarray *get_ndarray() const;
+
   std::unique_ptr<SparseMatrix> build();
 
   std::unique_ptr<SparseMatrix> build_cuda();
+
+  std::unique_ptr<SparseMatrix> build_vulkan();
 
   void clear();
 
  private:
   template <typename T, typename G>
-  void build_template(std::unique_ptr<SparseMatrix> &);
+  std::unique_ptr<SparseMatrix> build_template();
 
   template <typename T, typename G>
   void print_triplets_template();
@@ -95,6 +167,9 @@ class SparseMatrixBuilder {
   bool built_{false};
   DataType dtype_{PrimitiveType::f32};
   std::string storage_format_{"col_major"};
+  Program *program_{nullptr};
+  std::unique_ptr<CudaSparseAssemblyPlan> cuda_assembly_plan_;
+  std::unique_ptr<VulkanSparseAssemblyPlan> vulkan_assembly_plan_;
 };
 
 class SparseMatrix {
@@ -173,6 +248,7 @@ class SparseMatrix {
       const std::string &backend_family,
       const std::string &storage_format) const;
   void record_pattern_build();
+  void record_pattern_reference();
   void record_numeric_update(std::uint64_t bytes);
   void record_spmv_call();
   void record_spmv_plan_build();
@@ -203,6 +279,94 @@ class SparseMatrix {
   std::atomic<std::uint64_t> device_to_device_bytes_{0};
 };
 
+// Backend-neutral immutable sparse topology. Concrete providers may keep
+// different physical storage while exposing one ownership/version contract.
+class SparsePattern {
+ public:
+  virtual ~SparsePattern() = default;
+  virtual Program *program() const = 0;
+  virtual Arch arch() const = 0;
+  virtual int num_rows() const = 0;
+  virtual int num_cols() const = 0;
+  virtual SparsePatternRuntimeStatistics debug_runtime_statistics() const = 0;
+};
+
+// Backend-neutral immutable scalar CSR topology shared by one or more
+// numeric operators. CPU owns canonical host vectors, CUDA owns raw device
+// index buffers, and Vulkan owns Program-managed index ndarrays.
+class SparseCsrPattern final : public SparsePattern {
+ public:
+  SparseCsrPattern(Program *program,
+                   int rows,
+                   int cols,
+                   const Ndarray &row_offsets,
+                   const Ndarray &column_indices);
+  ~SparseCsrPattern() override;
+
+  Program *program() const override {
+    return program_;
+  }
+
+  Arch arch() const override {
+    return arch_;
+  }
+
+  int num_rows() const override {
+    return rows_;
+  }
+
+  int num_cols() const override {
+    return cols_;
+  }
+
+  int nnz() const {
+    return nnz_;
+  }
+
+  std::uint64_t pattern_id() const {
+    return pattern_id_;
+  }
+
+  std::uint64_t pattern_reserved_bytes() const;
+  std::uint64_t device_to_host_bytes() const {
+    return device_to_host_bytes_;
+  }
+  std::uint64_t device_to_device_bytes() const {
+    return device_to_device_bytes_;
+  }
+  std::uint64_t operator_references() const {
+    return operator_references_.load(std::memory_order_relaxed);
+  }
+
+  const std::vector<int32_t> &cpu_row_offsets() const;
+  const std::vector<int32_t> &cpu_column_indices() const;
+  void *cuda_row_offsets() const;
+  void *cuda_column_indices() const;
+  const Ndarray *vulkan_row_offsets() const;
+  const Ndarray *vulkan_column_indices() const;
+
+  void retain_operator_reference();
+  void release_operator_reference();
+  SparsePatternRuntimeStatistics debug_runtime_statistics() const override;
+
+ private:
+  Program *program_{nullptr};
+  Arch arch_;
+  int rows_{0};
+  int cols_{0};
+  int nnz_{0};
+  std::uint64_t pattern_id_{0};
+  std::vector<int32_t> cpu_row_offsets_;
+  std::vector<int32_t> cpu_column_indices_;
+  void *cuda_row_offsets_{nullptr};
+  void *cuda_column_indices_{nullptr};
+  Ndarray *vulkan_row_offsets_{nullptr};
+  Ndarray *vulkan_column_indices_{nullptr};
+  std::atomic<std::uint64_t> operator_references_{0};
+  std::uint64_t device_to_host_bytes_{0};
+  std::uint64_t device_to_device_bytes_{0};
+};
+
 template <class EigenMatrix>
 class EigenSparseMatrix : public SparseMatrix {
  public:
@@ -220,7 +384,12 @@ class EigenSparseMatrix : public SparseMatrix {
     record_pattern_build();
   }
   explicit EigenSparseMatrix(const EigenMatrix &em)
-      : SparseMatrix(em.rows(), em.cols()), matrix_(em) {
+      : SparseMatrix(
+            em.rows(), em.cols(),
+            std::is_same_v<typename EigenMatrix::Scalar, float64>
+                ? DataType(PrimitiveType::f64)
+                : DataType(PrimitiveType::f32)),
+        matrix_(em) {
     record_pattern_build();
   }
 
@@ -321,6 +490,7 @@ class EigenSparseMatrix : public SparseMatrix {
   SparseMatrixRuntimeStatistics debug_runtime_statistics() const override {
     auto result = make_runtime_statistics(
         "cpu", EigenMatrix::IsRowMajor ? "csr" : "csc");
+    result.provider_name = "eigen";
     using StorageIndex = typename EigenMatrix::StorageIndex;
     using Scalar = typename EigenMatrix::Scalar;
     const auto allocated =
@@ -338,6 +508,225 @@ class EigenSparseMatrix : public SparseMatrix {
 
  private:
   EigenMatrix matrix_;
+};
+
+// Fixed-pattern scalar CSR operator for CPU. It keeps the existing mutable
+// Eigen SparseMatrix/Builder contract separate while sharing canonical
+// compressed indices and owning only numeric values.
+class CpuSparseCsrMatrix final : public SparseMatrix {
+ public:
+  CpuSparseCsrMatrix(std::shared_ptr<SparseCsrPattern> pattern,
+                     const Ndarray &values,
+                     bool pattern_built_for_operator = false);
+  ~CpuSparseCsrMatrix() override;
+
+  void nd_spmv(Program *prog, const Ndarray &x, const Ndarray &y);
+  void spmv_cpu_raw(Program *prog,
+                    std::uintptr_t input,
+                    std::uintptr_t output);
+  void update_values(Program *prog, const Ndarray &values) override;
+  SparseMatrixRuntimeStatistics debug_runtime_statistics() const override;
+
+  int num_nonzero() const override {
+    return nnz_;
+  }
+
+  const std::vector<int32_t> &get_row_offsets() const {
+    return pattern_->cpu_row_offsets();
+  }
+
+  const std::vector<int32_t> &get_column_indices() const {
+    return pattern_->cpu_column_indices();
+  }
+
+  const void *get_values() const {
+    return dtype_ == PrimitiveType::f32
+               ? static_cast<const void *>(values_f32_.data())
+               : static_cast<const void *>(values_f64_.data());
+  }
+
+ private:
+  Program *program_{nullptr};
+  int nnz_{0};
+  std::shared_ptr<SparseCsrPattern> pattern_;
+  std::vector<float32> values_f32_;
+  std::vector<float64> values_f64_;
+  mutable std::mutex spmv_mutex_;
+  bool spmv_plan_initialized_{false};
+};
+
+// Internal immutable BSR topology shared by one or more numeric operators.
+// CPU owns canonical host vectors, CUDA owns raw device index buffers, and
+// Vulkan owns Program-managed index ndarrays.
+class SparseBsrPattern final : public SparsePattern {
+ public:
+  SparseBsrPattern(Program *program,
+                   int block_rows,
+                   int block_cols,
+                   int block_size,
+                   const Ndarray &row_offsets,
+                   const Ndarray &column_indices);
+  ~SparseBsrPattern() override;
+
+  Program *program() const override {
+    return program_;
+  }
+
+  Arch arch() const override {
+    return arch_;
+  }
+
+  int num_rows() const override {
+    return rows_;
+  }
+
+  int num_cols() const override {
+    return cols_;
+  }
+
+  int block_rows() const {
+    return block_rows_;
+  }
+
+  int block_cols() const {
+    return block_cols_;
+  }
+
+  int block_size() const {
+    return block_size_;
+  }
+
+  int block_nnz() const {
+    return block_nnz_;
+  }
+
+  int scalar_nnz() const {
+    return scalar_nnz_;
+  }
+
+  std::size_t value_count() const {
+    return value_count_;
+  }
+
+  std::uint64_t pattern_id() const {
+    return pattern_id_;
+  }
+
+  std::uint64_t pattern_reserved_bytes() const;
+  std::uint64_t device_to_host_bytes() const {
+    return device_to_host_bytes_;
+  }
+  std::uint64_t device_to_device_bytes() const {
+    return device_to_device_bytes_;
+  }
+  std::uint64_t operator_references() const {
+    return operator_references_.load(std::memory_order_relaxed);
+  }
+
+  const std::vector<int32_t> &cpu_row_offsets() const;
+  const std::vector<int32_t> &cpu_column_indices() const;
+  void *cuda_row_offsets() const;
+  void *cuda_column_indices() const;
+  const Ndarray *vulkan_row_offsets() const;
+  const Ndarray *vulkan_column_indices() const;
+
+  void retain_operator_reference();
+  void release_operator_reference();
+  SparsePatternRuntimeStatistics debug_runtime_statistics() const override;
+
+ private:
+  Program *program_{nullptr};
+  Arch arch_;
+  int rows_{0};
+  int cols_{0};
+  int block_rows_{0};
+  int block_cols_{0};
+  int block_size_{0};
+  int block_nnz_{0};
+  int scalar_nnz_{0};
+  std::size_t value_count_{0};
+  std::uint64_t pattern_id_{0};
+  std::vector<int32_t> cpu_row_offsets_;
+  std::vector<int32_t> cpu_column_indices_;
+  void *cuda_row_offsets_{nullptr};
+  void *cuda_column_indices_{nullptr};
+  Ndarray *vulkan_row_offsets_{nullptr};
+  Ndarray *vulkan_column_indices_{nullptr};
+  std::atomic<std::uint64_t> operator_references_{0};
+  std::uint64_t device_to_host_bytes_{0};
+  std::uint64_t device_to_device_bytes_{0};
+};
+
+// Internal CPU-only fixed-pattern BSR baseline. Blocks are stored row-major
+// and remain distinct from the public scalar CSR/CSC Builder contract.
+class CpuSparseBsrMatrix final : public SparseMatrix {
+ public:
+  CpuSparseBsrMatrix(Program *prog,
+                     int block_rows,
+                     int block_cols,
+                     int block_size,
+                     const Ndarray &row_offsets,
+                     const Ndarray &column_indices,
+                     const Ndarray &values);
+  CpuSparseBsrMatrix(std::shared_ptr<SparseBsrPattern> pattern,
+                     const Ndarray &values,
+                     bool pattern_built_for_operator = false);
+  ~CpuSparseBsrMatrix() override;
+
+  void nd_spmv(Program *prog, const Ndarray &x, const Ndarray &y);
+  void spmv_cpu_raw(Program *prog,
+                    std::uintptr_t input,
+                    std::uintptr_t output);
+  void update_values(Program *prog, const Ndarray &values) override;
+  SparseMatrixRuntimeStatistics debug_runtime_statistics() const override;
+
+  int num_nonzero() const override {
+    return scalar_nnz_;
+  }
+
+  int get_block_rows() const {
+    return block_rows_;
+  }
+
+  int get_block_cols() const {
+    return block_cols_;
+  }
+
+  int get_block_size() const {
+    return block_size_;
+  }
+
+  int get_block_nnz() const {
+    return block_nnz_;
+  }
+
+  const std::vector<int32_t> &get_block_row_offsets() const {
+    return pattern_->cpu_row_offsets();
+  }
+
+  const std::vector<int32_t> &get_block_column_indices() const {
+    return pattern_->cpu_column_indices();
+  }
+
+  const void *get_block_values() const {
+    return dtype_ == PrimitiveType::f32
+               ? static_cast<const void *>(values_f32_.data())
+               : static_cast<const void *>(values_f64_.data());
+  }
+
+ private:
+  Program *program_{nullptr};
+  int block_rows_{0};
+  int block_cols_{0};
+  int block_size_{0};
+  int block_nnz_{0};
+  int scalar_nnz_{0};
+  std::size_t value_count_{0};
+  std::shared_ptr<SparseBsrPattern> pattern_;
+  std::vector<float32> values_f32_;
+  std::vector<float64> values_f64_;
+  mutable std::mutex spmv_mutex_;
+  bool spmv_plan_initialized_{false};
 };
 
 class CuSparseMatrix : public SparseMatrix {
@@ -360,7 +749,8 @@ class CuSparseMatrix : public SparseMatrix {
                           void *csr_row_ptr,
                           void *csr_col_ind,
                           void *csr_val,
-                          int nnz)
+                          int nnz,
+                          std::uint64_t device_to_device_bytes = 0)
       : SparseMatrix(rows, cols, dt),
         matrix_(A),
         csr_row_ptr_(csr_row_ptr),
@@ -368,7 +758,11 @@ class CuSparseMatrix : public SparseMatrix {
         csr_val_(csr_val),
         nnz_(nnz) {
     record_pattern_build();
+    record_transfer_bytes(0, 0, device_to_device_bytes);
   }
+  CuSparseMatrix(std::shared_ptr<SparseCsrPattern> pattern,
+                 const Ndarray &values,
+                 bool pattern_built_for_operator = false);
   CuSparseMatrix(const CuSparseMatrix &sm)
       : SparseMatrix(sm.rows_, sm.cols_, sm.dtype_), matrix_(sm.matrix_) {
   }
@@ -457,6 +851,7 @@ class CuSparseMatrix : public SparseMatrix {
   void *csr_col_ind_{nullptr};
   void *csr_val_{nullptr};
   int nnz_{0};
+  std::shared_ptr<SparseCsrPattern> pattern_;
   mutable std::mutex spmv_mutex_;
   cusparseHandle_t spmv_handle_{nullptr};
   cusparseDnVecDescr_t spmv_vec_x_{nullptr};
@@ -466,6 +861,307 @@ class CuSparseMatrix : public SparseMatrix {
   void *spmv_buffer_{nullptr};
   size_t spmv_buffer_size_{0};
   bool spmv_buffer_initialized_{false};
+};
+
+// Internal CUDA-only prototype for already-compressed, square dense blocks.
+// Public SparseMatrixBuilder format selection intentionally remains CSR-only
+// until assembly, solver, and cross-provider contracts are complete.
+class CuSparseBsrMatrix final : public SparseMatrix {
+ public:
+  CuSparseBsrMatrix(Program *prog,
+                    int block_rows,
+                    int block_cols,
+                    int block_size,
+                    const Ndarray &row_offsets,
+                    const Ndarray &column_indices,
+                    const Ndarray &values);
+  CuSparseBsrMatrix(std::shared_ptr<SparseBsrPattern> pattern,
+                    const Ndarray &values,
+                    bool pattern_built_for_operator = false);
+  ~CuSparseBsrMatrix() override;
+
+  void nd_spmv(Program *prog, const Ndarray &x, const Ndarray &y);
+  void spmv(size_t x, size_t y);
+  void update_values(Program *prog, const Ndarray &values) override;
+  SparseMatrixRuntimeStatistics debug_runtime_statistics() const override;
+
+  int num_nonzero() const override {
+    return scalar_nnz_;
+  }
+
+  const void *get_matrix() const override {
+    return &matrix_;
+  }
+
+  int get_block_rows() const {
+    return block_rows_;
+  }
+
+  int get_block_cols() const {
+    return block_cols_;
+  }
+
+  int get_block_size() const {
+    return block_size_;
+  }
+
+  int get_block_nnz() const {
+    return block_nnz_;
+  }
+
+  void *get_block_row_offsets() const {
+    return pattern_->cuda_row_offsets();
+  }
+
+  void *get_block_column_indices() const {
+    return pattern_->cuda_column_indices();
+  }
+
+  void *get_block_values() const {
+    return values_;
+  }
+
+ private:
+  void reset_spmv_resources();
+
+  int block_rows_{0};
+  int block_cols_{0};
+  int block_size_{0};
+  int block_nnz_{0};
+  int scalar_nnz_{0};
+  std::size_t value_count_{0};
+  std::shared_ptr<SparseBsrPattern> pattern_;
+  cusparseSpMatDescr_t matrix_{nullptr};
+  void *values_{nullptr};
+  mutable std::mutex spmv_mutex_;
+  cusparseHandle_t spmv_handle_{nullptr};
+  cusparseDnVecDescr_t spmv_vec_x_{nullptr};
+  cusparseDnVecDescr_t spmv_vec_y_{nullptr};
+  size_t spmv_x_ptr_{0};
+  size_t spmv_y_ptr_{0};
+  void *spmv_buffer_{nullptr};
+  size_t spmv_buffer_size_{0};
+  bool spmv_buffer_initialized_{false};
+};
+
+// Internal Vulkan-only fixed-pattern CSR baseline. Pattern/value storage is
+// owned by Program-managed ndarrays so asynchronous command replay retains
+// generation-qualified resources through completion.
+class VulkanSparseMatrix final : public SparseMatrix {
+ public:
+  VulkanSparseMatrix(Program *prog,
+                     int rows,
+                     int cols,
+                     const Ndarray &row_offsets,
+                     const Ndarray &column_indices,
+                     const Ndarray &values);
+  VulkanSparseMatrix(std::shared_ptr<SparseCsrPattern> pattern,
+                     const Ndarray &values,
+                     bool pattern_built_for_operator = false);
+  VulkanSparseMatrix(Program *prog,
+                     int rows,
+                     int cols,
+                     int nnz,
+                     Ndarray *owned_row_offsets,
+                     Ndarray *owned_column_indices,
+                     Ndarray *owned_values,
+                     std::uint64_t device_to_device_bytes);
+  ~VulkanSparseMatrix() override;
+
+  void nd_spmv(Program *prog, const Ndarray &x, const Ndarray &y);
+  void update_values(Program *prog, const Ndarray &values) override;
+  SparseMatrixRuntimeStatistics debug_runtime_statistics() const override;
+
+  int num_nonzero() const override {
+    return nnz_;
+  }
+
+  const Ndarray *get_row_offsets() const {
+    return pattern_ ? pattern_->vulkan_row_offsets() : row_offsets_;
+  }
+
+  const Ndarray *get_column_indices() const {
+    return pattern_ ? pattern_->vulkan_column_indices() : column_indices_;
+  }
+
+  const Ndarray *get_values() const {
+    return values_;
+  }
+
+ private:
+  Program *program_{nullptr};
+  int nnz_{0};
+  std::shared_ptr<SparseCsrPattern> pattern_;
+  Ndarray *row_offsets_{nullptr};
+  Ndarray *column_indices_{nullptr};
+  Ndarray *values_{nullptr};
+  mutable std::mutex spmv_mutex_;
+  bool spmv_plan_initialized_{false};
+};
+
+// Internal Vulkan-only fixed-pattern BSR baseline. It mirrors the CUDA
+// 2/3/6/12 block contract while keeping Program-owned ndarray storage and
+// generation-qualified command replay.
+class VulkanSparseBsrMatrix final : public SparseMatrix {
+ public:
+  VulkanSparseBsrMatrix(Program *prog,
+                        int block_rows,
+                        int block_cols,
+                        int block_size,
+                        const Ndarray &row_offsets,
+                        const Ndarray &column_indices,
+                        const Ndarray &values);
+  VulkanSparseBsrMatrix(std::shared_ptr<SparseBsrPattern> pattern,
+                        const Ndarray &values,
+                        bool pattern_built_for_operator = false);
+  ~VulkanSparseBsrMatrix() override;
+
+  void nd_spmv(Program *prog, const Ndarray &x, const Ndarray &y);
+  void update_values(Program *prog, const Ndarray &values) override;
+  SparseMatrixRuntimeStatistics debug_runtime_statistics() const override;
+
+  int num_nonzero() const override {
+    return scalar_nnz_;
+  }
+
+  int get_block_rows() const {
+    return block_rows_;
+  }
+
+  int get_block_cols() const {
+    return block_cols_;
+  }
+
+  int get_block_size() const {
+    return block_size_;
+  }
+
+  int get_block_nnz() const {
+    return block_nnz_;
+  }
+
+  const Ndarray *get_block_row_offsets() const {
+    return pattern_->vulkan_row_offsets();
+  }
+
+  const Ndarray *get_block_column_indices() const {
+    return pattern_->vulkan_column_indices();
+  }
+
+  const Ndarray *get_block_values() const {
+    return values_;
+  }
+
+ private:
+  Program *program_{nullptr};
+  int block_rows_{0};
+  int block_cols_{0};
+  int block_size_{0};
+  int block_nnz_{0};
+  int scalar_nnz_{0};
+  std::size_t value_count_{0};
+  std::shared_ptr<SparseBsrPattern> pattern_;
+  Ndarray *values_{nullptr};
+  mutable std::mutex spmv_mutex_;
+  bool spmv_plan_initialized_{false};
+};
+
+// Private Vulkan-only bounded triplet assembly plan. Separate triplet arrays
+// and packed public-builder storage stay device-resident; only an 8-byte
+// active-or-status/unique-count control record is read at transactional
+// finalize. Successful builds publish exact-sized CSR buffers, while failed
+// builds leave every previously returned matrix intact.
+class VulkanSparseAssemblyPlan final {
+ public:
+  VulkanSparseAssemblyPlan(Program *program,
+                           int rows,
+                           int cols,
+                           int capacity);
+  ~VulkanSparseAssemblyPlan();
+
+  std::unique_ptr<VulkanSparseMatrix> build(Program *program,
+                                             const Ndarray &triplet_rows,
+                                             const Ndarray &triplet_columns,
+                                             const Ndarray &triplet_values);
+  std::unique_ptr<VulkanSparseMatrix> build_packed(
+      Program *program,
+      const Ndarray &packed_triplets);
+  SparseAssemblyRuntimeStatistics debug_runtime_statistics() const;
+
+ private:
+  void delete_workspace() noexcept;
+  std::unique_ptr<VulkanSparseMatrix> build_internal(
+      Program *program,
+      const Ndarray *packed_triplets,
+      const Ndarray *triplet_rows,
+      const Ndarray *triplet_columns,
+      const Ndarray *triplet_values);
+
+  Program *program_{nullptr};
+  int rows_{0};
+  int cols_{0};
+  int capacity_{0};
+  Ndarray *sorted_keys_{nullptr};
+  Ndarray *sorted_values_{nullptr};
+  Ndarray *segment_ids_{nullptr};
+  Ndarray *unique_keys_{nullptr};
+  Ndarray *segment_offsets_{nullptr};
+  Ndarray *unique_values_{nullptr};
+  Ndarray *row_offsets_{nullptr};
+  Ndarray *column_indices_{nullptr};
+  Ndarray *active_count_{nullptr};
+  Ndarray *control_{nullptr};
+  mutable std::mutex mutex_;
+  SparseAssemblyRuntimeStatistics statistics_;
+};
+
+// Private CUDA-only bounded triplet assembly plan. It mirrors the Vulkan
+// transaction contract while using Toolkit-free Driver PTX for validation,
+// sorting support, segment reduction, and CSR emission. Only the final 8-byte
+// status/count record reaches the host before exact-sized cuSPARSE ownership
+// is published.
+class CudaSparseAssemblyPlan final {
+ public:
+  CudaSparseAssemblyPlan(Program *program,
+                         int rows,
+                         int cols,
+                         int capacity);
+  ~CudaSparseAssemblyPlan();
+
+  std::unique_ptr<CuSparseMatrix> build(Program *program,
+                                       const Ndarray &triplet_rows,
+                                       const Ndarray &triplet_columns,
+                                       const Ndarray &triplet_values);
+  std::unique_ptr<CuSparseMatrix> build_packed(
+      Program *program,
+      const Ndarray &packed_triplets);
+  SparseAssemblyRuntimeStatistics debug_runtime_statistics() const;
+
+ private:
+  void delete_workspace() noexcept;
+  std::unique_ptr<CuSparseMatrix> build_internal(
+      Program *program,
+      const Ndarray *packed_triplets,
+      const Ndarray *triplet_rows,
+      const Ndarray *triplet_columns,
+      const Ndarray *triplet_values);
+
+  Program *program_{nullptr};
+  int rows_{0};
+  int cols_{0};
+  int capacity_{0};
+  Ndarray *sorted_keys_{nullptr};
+  Ndarray *sorted_values_{nullptr};
+  Ndarray *segment_ids_{nullptr};
+  Ndarray *unique_keys_{nullptr};
+  Ndarray *segment_offsets_{nullptr};
+  Ndarray *unique_values_{nullptr};
+  Ndarray *row_offsets_{nullptr};
+  Ndarray *column_indices_{nullptr};
+  Ndarray *active_count_{nullptr};
+  Ndarray *control_{nullptr};
+  mutable std::mutex mutex_;
+  SparseAssemblyRuntimeStatistics statistics_;
 };
 
 std::unique_ptr<SparseMatrix> make_sparse_matrix(
@@ -483,7 +1179,10 @@ std::unique_ptr<SparseMatrix> make_cu_sparse_matrix(cusparseSpMatDescr_t mat,
                                                     void *csr_row_ptr,
                                                     void *csr_col_ind,
                                                     void *csr_val_,
-                                                    int nnz);
+                                                    int nnz,
+                                                    std::uint64_t
+                                                        device_to_device_bytes =
+                                                            0);
 
 void make_sparse_matrix_from_ndarray(Program *prog,
                                      SparseMatrix &sm,

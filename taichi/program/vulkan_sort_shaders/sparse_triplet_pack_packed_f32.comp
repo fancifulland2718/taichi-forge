@@ -1,0 +1,71 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer PackedTriplets {
+  int packed_triplets[];
+};
+layout(set = 0, binding = 1) writeonly buffer Keys {
+  uint64_t keys[];
+};
+layout(set = 0, binding = 2) writeonly buffer SortedValues {
+  float sorted_values[];
+};
+layout(set = 0, binding = 3) buffer ActiveCount {
+  int active_count[];
+};
+layout(set = 0, binding = 4) buffer Control {
+  int control[];
+};
+
+layout(push_constant) uniform Params {
+  uint capacity;
+  uint num_rows;
+  uint num_columns;
+  uint reserved;
+} params;
+
+void set_status(int value) {
+  atomicCompSwap(control[0], 0, -value);
+}
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= params.capacity) {
+    return;
+  }
+  int raw_count = packed_triplets[0];
+  int header_capacity = packed_triplets[1];
+  bool valid_count = raw_count >= 0 && uint(raw_count) <= params.capacity &&
+                     header_capacity == int(params.capacity);
+  uint count = valid_count ? uint(raw_count) : 0u;
+  if (i == 0u) {
+    active_count[0] = int(count);
+    if (!valid_count) {
+      control[1] = raw_count;
+      set_status(5);
+    }
+  }
+  if (i >= count) {
+    keys[i] = ~uint64_t(0);
+    sorted_values[i] = 0.0;
+    return;
+  }
+  uint base = 2u + i * 3u;
+  int row = packed_triplets[base];
+  int column = packed_triplets[base + 1u];
+  float value = intBitsToFloat(packed_triplets[base + 2u]);
+  if (row < 0 || column < 0 || uint(row) >= params.num_rows ||
+      uint(column) >= params.num_columns) {
+    set_status(1);
+    row = 0;
+    column = 0;
+  }
+  if (isnan(value) || isinf(value)) {
+    set_status(2);
+    value = 0.0;
+  }
+  keys[i] = (uint64_t(uint(row)) << 32) | uint64_t(uint(column));
+  sorted_values[i] = value;
+}

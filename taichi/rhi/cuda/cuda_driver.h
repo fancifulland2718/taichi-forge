@@ -90,6 +90,10 @@ class CUDADriverFunction {
     function_ = (func_type *)func_ptr;
   }
 
+  bool available() const {
+    return function_ != nullptr;
+  }
+
   uint32 call(Args... args) {
     TI_ASSERT(function_ != nullptr);
     TI_ASSERT(driver_lock_ != nullptr);
@@ -248,6 +252,14 @@ class CUDADriver : protected CUDADriverBase {
   int version_minor_{0};
 };
 
+struct CUSPARSEProviderCapabilities {
+  int library_version_major{-1};
+  int library_version_minor{-1};
+  int library_version_patch{-1};
+  bool bsr_descriptor_available{false};
+  bool generic_bsr_spmv_available{false};
+};
+
 class CUSPARSEDriver : protected CUDADriverBase {
  public:
   static CUSPARSEDriver &get_instance();
@@ -257,7 +269,29 @@ class CUSPARSEDriver : protected CUDADriverBase {
 #include "taichi/rhi/cuda/cusparse_functions.inc.h"
 #undef PER_CUSPARSE_FUNCTION
 
+  // BSR is an optional generic API capability. Keeping this out of the
+  // mandatory function table preserves compatibility with older providers.
+  CUDADriverFunction<cusparseSpMatDescr_t *,
+                     int64_t,
+                     int64_t,
+                     int64_t,
+                     int64_t,
+                     int64_t,
+                     void *,
+                     void *,
+                     void *,
+                     cusparseIndexType_t,
+                     cusparseIndexType_t,
+                     cusparseIndexBase_t,
+                     cudaDataType,
+                     cusparseOrder_t>
+      cpCreateBsr;
+
   bool load_cusparse();
+
+  CUSPARSEProviderCapabilities capabilities() const {
+    return capabilities_;
+  }
 
   inline bool is_loaded() {
     return cusparse_loaded_;
@@ -267,6 +301,8 @@ class CUSPARSEDriver : protected CUDADriverBase {
   CUSPARSEDriver();
   std::mutex lock_;
   bool cusparse_loaded_{false};
+  CUDADriverFunction<int, int *> cp_get_property_;
+  CUSPARSEProviderCapabilities capabilities_;
 };
 
 class CUSOLVERDriver : protected CUDADriverBase {

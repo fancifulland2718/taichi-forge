@@ -1,0 +1,55 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer RowOffsets {
+  uint data[];
+} row_offsets_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer ColumnIndices {
+  uint data[];
+} column_indices_buf;
+
+layout(set = 0, binding = 2, std430) readonly buffer Values {
+  float data[];
+} values_buf;
+
+layout(set = 0, binding = 3, std430) readonly buffer X {
+  float data[];
+} x_buf;
+
+layout(set = 0, binding = 4, std430) writeonly buffer Y {
+  float data[];
+} y_buf;
+
+layout(push_constant) uniform Params {
+  uint rows;
+  uint cols;
+  uint nnz;
+  uint unused0;
+} params;
+
+void main() {
+  uint row = gl_GlobalInvocationID.x;
+  if (row >= params.rows) {
+    return;
+  }
+
+  uint begin = row_offsets_buf.data[row];
+  uint end = row_offsets_buf.data[row + 1u];
+  if (begin > end || end > params.nnz) {
+    y_buf.data[row] = uintBitsToFloat(0x7fc00000u);
+    return;
+  }
+
+  float sum = 0.0;
+  for (uint offset = begin; offset < end; ++offset) {
+    uint column = column_indices_buf.data[offset];
+    if (column >= params.cols) {
+      sum = uintBitsToFloat(0x7fc00000u);
+      break;
+    }
+    sum += values_buf.data[offset] * x_buf.data[column];
+  }
+  y_buf.data[row] = sum;
+}
