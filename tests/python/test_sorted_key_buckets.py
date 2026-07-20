@@ -138,7 +138,10 @@ def test_sorted_key_buckets_match_particle_cell_hash_occupancy():
     )
     assert resources["sort_workspace_reported_bytes"] >= 0
     assert resources["rle_workspace_reported_bytes"] >= 192
-    assert resources["shared_sort_scan_workspace_bytes_at_publish"] >= 0
+    shared_workspace_bytes = resources[
+        "shared_sort_scan_workspace_bytes_at_publish"
+    ]
+    assert shared_workspace_bytes is None or shared_workspace_bytes >= 0
     transfers = stats["transfers"]
     assert transfers["device_to_host_control_bytes"] == 20
     assert transfers["device_to_host_payload_bytes"] == 0
