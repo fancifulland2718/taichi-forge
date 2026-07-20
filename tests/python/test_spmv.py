@@ -162,8 +162,10 @@ def test_sparse_matrix_operator_runtime_statistics():
         assert resources["matrix_descriptor_count"] == 1
         assert resources["dense_vector_descriptor_count"] == 2
         assert resources["spmv_handle_count"] == 1
-        assert after_spmv["transfers"]["host_to_device_bytes"] > 0
-        assert after_spmv["transfers"]["device_to_host_bytes"] > 0
+        # CUDA transactional assembly keeps builder payloads device-resident.
+        assert after_spmv["transfers"]["host_to_device_bytes"] == 0
+        assert after_spmv["transfers"]["device_to_host_bytes"] == 0
+        assert after_spmv["transfers"]["device_to_device_bytes"] > 0
 
     values = ti.ndarray(dtype=ti.f32, shape=n)
     values.fill(2)
