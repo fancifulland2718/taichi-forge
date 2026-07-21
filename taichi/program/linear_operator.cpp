@@ -2026,6 +2026,16 @@ OperatorBinding make_cpu_program_kernel_operator_binding(
   return matrix.make_operator_binding();
 }
 
+OperatorBinding make_cpu_program_graph_operator_binding(
+    Program *program,
+    CompiledGraphLinearOperator &matrix) {
+  TI_ERROR_IF(!program || !arch_is_cpu(program->compile_config().arch) ||
+                  matrix.owning_program() != program,
+              "CPU program-graph binding requires its owning CPU Program.");
+  return matrix.make_operator_binding(
+      OperatorExecutionKind::explicit_sequence);
+}
+
 OperatorBinding make_cuda_csr_operator_binding(Program *program,
                                                CuSparseMatrix &matrix) {
   return make_gpu_typed_operator_binding(
@@ -2054,6 +2064,21 @@ OperatorBinding make_cuda_program_kernel_operator_binding(
               "CUDA program-kernel binding requires its owning CUDA "
               "Program.");
   return matrix.make_operator_binding();
+}
+
+OperatorBinding make_cuda_program_graph_operator_binding(
+    Program *program,
+    CompiledGraphLinearOperator &matrix,
+    OperatorExecutionKind execution_kind) {
+  TI_ERROR_IF(!program || program->compile_config().arch != Arch::cuda ||
+                  matrix.owning_program() != program,
+              "CUDA program-graph binding requires its owning CUDA Program.");
+  TI_ERROR_IF(execution_kind != OperatorExecutionKind::compiled_graph &&
+                  execution_kind != OperatorExecutionKind::runtime_capture,
+              "CUDA program-graph bindings require compiled_graph or "
+              "runtime_capture execution; got '{}'.",
+              operator_execution_kind_name(execution_kind));
+  return matrix.make_operator_binding(execution_kind);
 }
 
 OperatorBinding make_vulkan_csr_operator_binding(Program *program,
@@ -2089,6 +2114,17 @@ OperatorBinding make_vulkan_program_kernel_operator_binding(
               "Vulkan program-kernel binding requires its owning Vulkan "
               "Program.");
   return matrix.make_operator_binding();
+}
+
+OperatorBinding make_vulkan_program_graph_operator_binding(
+    Program *program,
+    CompiledGraphLinearOperator &matrix) {
+  TI_ERROR_IF(!program || program->compile_config().arch != Arch::vulkan ||
+                  matrix.owning_program() != program,
+              "Vulkan program-graph binding requires its owning Vulkan "
+              "Program.");
+  return matrix.make_operator_binding(
+      OperatorExecutionKind::compiled_graph);
 }
 
 }  // namespace taichi::lang

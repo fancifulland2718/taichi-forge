@@ -892,9 +892,64 @@ CompiledGraphLinearOperator::~CompiledGraphLinearOperator() {
   }
 }
 
-void CompiledGraphLinearOperator::nd_spmv(Program *program,
-                                          const Ndarray &input,
-                                          const Ndarray &output) {
+struct CompiledGraphLinearOperator::ExecutionState {
+  explicit ExecutionState(OperatorExecutionKind requested_kind)
+      : kind(requested_kind) {
+    if (kind == OperatorExecutionKind::compiled_graph ||
+        kind == OperatorExecutionKind::runtime_capture) {
+      cache = std::make_unique<aot::CompiledGraphJITCache>();
+      // Graph diagnostics are opt-in. Enable them before the first submission
+      // so the plan reports complete capture/replay counters rather than a
+      // best-effort snapshot that starts after the first solve.
+      cache->debug_graph_stats();
+    }
+  }
+
+  ~ExecutionState() {
+    if (cache) {
+      cache->clear_runtime_state();
+    }
+  }
+
+  OperatorExecutionKind kind{OperatorExecutionKind::direct};
+  std::unique_ptr<aot::CompiledGraphJITCache> cache;
+  std::atomic<std::uint64_t> direct_submissions{0};
+  std::atomic<std::uint64_t> sequence_submissions{0};
+  std::atomic<std::uint64_t> graph_submissions{0};
+  std::atomic<std::uint64_t> capture_submissions{0};
+};
+
+namespace {
+
+OperatorBackendExecutionPath operator_backend_path(
+    aot::CompiledGraphExecutionPath path) {
+  switch (path) {
+    case aot::CompiledGraphExecutionPath::ordinary_fallback:
+      return OperatorBackendExecutionPath::ordinary_graph_fallback;
+    case aot::CompiledGraphExecutionPath::cuda_capture:
+      return OperatorBackendExecutionPath::cuda_capture;
+    case aot::CompiledGraphExecutionPath::cuda_exact_replay:
+      return OperatorBackendExecutionPath::cuda_exact_replay;
+    case aot::CompiledGraphExecutionPath::cuda_patched_replay:
+      return OperatorBackendExecutionPath::cuda_patched_replay;
+    case aot::CompiledGraphExecutionPath::vulkan_record:
+      return OperatorBackendExecutionPath::vulkan_record;
+    case aot::CompiledGraphExecutionPath::vulkan_replay:
+      return OperatorBackendExecutionPath::vulkan_replay;
+    case aot::CompiledGraphExecutionPath::none:
+      return OperatorBackendExecutionPath::unavailable;
+  }
+  TI_UNREACHABLE;
+}
+
+}  // namespace
+
+void CompiledGraphLinearOperator::apply_with_execution(
+    Program *program,
+    const Ndarray &input,
+    const Ndarray &output,
+    OperatorExecutionKind execution_kind,
+    aot::CompiledGraphJITCache *cache) {
   TI_ERROR_IF(program != program_,
               "Compiled-graph linear operator apply requires its owning "
               "Program; no fallback was performed.");
@@ -930,7 +985,140 @@ void CompiledGraphLinearOperator::nd_spmv(Program *program,
   }
   record_spmv_call();
   record_spmv_plan_reuse();
-  graph_->jit_run_cached(program_->compile_config(), arguments, *cache_);
+  switch (execution_kind) {
+    case OperatorExecutionKind::direct:
+    case OperatorExecutionKind::explicit_sequence:
+      graph_->jit_run(program_->compile_config(), arguments);
+      break;
+    case OperatorExecutionKind::compiled_graph:
+    case OperatorExecutionKind::runtime_capture:
+      TI_ERROR_IF(!cache,
+                  "Compiled Graph execution requires a plan-owned cache.");
+      graph_->jit_run_cached(program_->compile_config(), arguments, *cache);
+      break;
+  }
+}
+
+void CompiledGraphLinearOperator::nd_spmv(Program *program,
+                                          const Ndarray &input,
+                                          const Ndarray &output) {
+  apply_with_execution(program, input, output,
+                       OperatorExecutionKind::compiled_graph, cache_.get());
+}
+
+OperatorBinding CompiledGraphLinearOperator::make_operator_binding(
+    OperatorExecutionKind execution_kind) {
+  const Arch arch = program_->compile_config().arch;
+  OperatorCapabilities capabilities;
+  capabilities.asynchronous_submit = !arch_is_cpu(arch);
+  capabilities.explicit_sequence = true;
+  capabilities.compiled_graph = arch_is_cuda(arch) || arch == Arch::vulkan;
+  capabilities.runtime_capture = arch_is_cuda(arch);
+  capabilities.binding_rebind = true;
+  capabilities.persistent_workspace = true;
+
+  // Validate before allocating a cache. Unsupported requests are explicit;
+  // selecting Graph or capture must never silently become ordinary launches.
+  bool supported = execution_kind == OperatorExecutionKind::direct;
+  switch (execution_kind) {
+    case OperatorExecutionKind::direct:
+      supported = true;
+      break;
+    case OperatorExecutionKind::explicit_sequence:
+      supported = capabilities.explicit_sequence;
+      break;
+    case OperatorExecutionKind::compiled_graph:
+      supported = capabilities.compiled_graph;
+      break;
+    case OperatorExecutionKind::runtime_capture:
+      supported = capabilities.runtime_capture;
+      break;
+  }
+  TI_ERROR_IF(!supported,
+              "Compiled-graph operator execution '{}' is unsupported on "
+              "backend '{}'; no fallback was performed.",
+              operator_execution_kind_name(execution_kind), arch_name(arch));
+
+  auto state = std::make_shared<ExecutionState>(execution_kind);
+  OperatorDescriptor descriptor;
+  descriptor.domain = {PrimitiveType::f32,
+                       static_cast<std::size_t>(cols_)};
+  descriptor.range = {PrimitiveType::f32,
+                      static_cast<std::size_t>(rows_)};
+  constexpr const char *provider_name = "program_bound_multi_kernel";
+  auto action = OperatorAction(
+      descriptor, capabilities, provider_name,
+      [this] {
+        const auto statistics = debug_runtime_statistics();
+        return OperatorResourceStamp{
+            reinterpret_cast<std::uintptr_t>(program_),
+            program_->runtime_program_generation(),
+            1,
+            statistics.pattern_version,
+            statistics.numeric_version,
+            matrix_id()};
+      },
+      [this, state](OperatorApplyMode mode,
+                    const OperatorVectorView &input,
+                    const OperatorVectorView &output) {
+        TI_ERROR_IF(mode != OperatorApplyMode::forward,
+                    "Compiled-graph operator bindings support forward apply "
+                    "only.");
+        TI_ERROR_IF(!input.ndarray || !output.ndarray,
+                    "Compiled-graph operator bindings require ndarray "
+                    "input/output views.");
+        switch (state->kind) {
+          case OperatorExecutionKind::direct:
+            state->direct_submissions.fetch_add(1,
+                                                std::memory_order_relaxed);
+            break;
+          case OperatorExecutionKind::explicit_sequence:
+            state->sequence_submissions.fetch_add(1,
+                                                  std::memory_order_relaxed);
+            break;
+          case OperatorExecutionKind::compiled_graph:
+            state->graph_submissions.fetch_add(1,
+                                               std::memory_order_relaxed);
+            break;
+          case OperatorExecutionKind::runtime_capture:
+            state->capture_submissions.fetch_add(1,
+                                                 std::memory_order_relaxed);
+            break;
+        }
+        apply_with_execution(program_, *input.ndarray, *output.ndarray,
+                             state->kind, state->cache.get());
+      });
+  auto binding = OperatorBinding(std::move(action), [this] {
+    return OperatorResourceLease::hold(acquire_numeric_access_guard());
+  });
+  return binding.with_execution_lowering(
+      execution_kind, [state] {
+        OperatorBinding::ExecutionRuntimeStatistics result;
+        result.sequence_submissions =
+            state->sequence_submissions.load(std::memory_order_relaxed);
+        result.compiled_graph_submissions =
+            state->graph_submissions.load(std::memory_order_relaxed);
+        result.runtime_capture_submissions =
+            state->capture_submissions.load(std::memory_order_relaxed);
+        if (state->kind == OperatorExecutionKind::direct) {
+          result.last_backend_path = OperatorBackendExecutionPath::direct;
+        } else if (state->kind ==
+                   OperatorExecutionKind::explicit_sequence) {
+          result.last_backend_path =
+              OperatorBackendExecutionPath::explicit_sequence;
+        } else if (state->cache) {
+          const auto snapshot = state->cache->debug_graph_stats();
+          result.last_backend_path =
+              operator_backend_path(snapshot.stats.last_path);
+          result.backend_captures =
+              snapshot.stats.captures + snapshot.stats.records;
+          result.backend_replays = snapshot.stats.exact_replays +
+                                   snapshot.stats.patched_replays +
+                                   snapshot.stats.replays;
+          result.ordinary_fallbacks = snapshot.stats.ordinary_fallbacks;
+        }
+        return result;
+      });
 }
 
 void CompiledGraphLinearOperator::update_numeric_arguments(

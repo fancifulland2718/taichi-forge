@@ -23,6 +23,7 @@ class CuSparseBsrMatrix;
 class VulkanSparseMatrix;
 class VulkanSparseBsrMatrix;
 class CompiledKernelLinearOperator;
+class CompiledGraphLinearOperator;
 
 enum class OperatorInnerProductKind : std::uint8_t {
   euclidean,
@@ -574,6 +575,9 @@ OperatorBinding make_cpu_fixed_sparse_operator_binding(
 OperatorBinding make_cpu_program_kernel_operator_binding(
     Program *program,
     CompiledKernelLinearOperator &matrix);
+OperatorBinding make_cpu_program_graph_operator_binding(
+    Program *program,
+    CompiledGraphLinearOperator &matrix);
 OperatorBinding make_cuda_csr_operator_binding(Program *program,
                                                CuSparseMatrix &matrix);
 OperatorBinding make_cuda_bsr_operator_binding(Program *program,
@@ -581,6 +585,11 @@ OperatorBinding make_cuda_bsr_operator_binding(Program *program,
 OperatorBinding make_cuda_program_kernel_operator_binding(
     Program *program,
     CompiledKernelLinearOperator &matrix);
+OperatorBinding make_cuda_program_graph_operator_binding(
+    Program *program,
+    CompiledGraphLinearOperator &matrix,
+    OperatorExecutionKind execution_kind =
+        OperatorExecutionKind::compiled_graph);
 OperatorBinding make_vulkan_csr_operator_binding(Program *program,
                                                  VulkanSparseMatrix &matrix);
 OperatorBinding make_vulkan_bsr_operator_binding(Program *program,
@@ -588,5 +597,8 @@ OperatorBinding make_vulkan_bsr_operator_binding(Program *program,
 OperatorBinding make_vulkan_program_kernel_operator_binding(
     Program *program,
     CompiledKernelLinearOperator &matrix);
+OperatorBinding make_vulkan_program_graph_operator_binding(
+    Program *program,
+    CompiledGraphLinearOperator &matrix);
 
 }  // namespace taichi::lang

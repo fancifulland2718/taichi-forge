@@ -31,6 +31,7 @@ class LaunchContextBuilder;
 class OperatorBinding;
 class OperatorPinnedAction;
 class OperatorResourceGenerationPublisher;
+enum class OperatorExecutionKind : std::uint8_t;
 struct OperatorResourceStamp;
 namespace aot {
 struct CompiledGraph;
@@ -409,8 +410,10 @@ class CompiledKernelLinearOperator final : public SparseMatrix {
 };
 
 // Internal square f32 operator backed by a fixed multi-kernel CGraph. The
-// provider accepts only fixed i32 scalars, owned scalar ndarray snapshots, and
-// reserved dynamic input/output vectors. Ndarray roles remain explicit so
+// graph is an execution representation of one mathematical operator, not a
+// solver-facing provider family. Bindings may select ordinary launches, an
+// explicit dispatch sequence, compiled Graph replay, or CUDA runtime capture
+// without changing provider identity. Ndarray roles remain explicit so
 // topology, numeric data, and mutable workspace are not conflated in memory
 // telemetry. Public sparse capabilities stay disabled.
 class CompiledGraphLinearOperator final : public SparseMatrix {
@@ -434,6 +437,8 @@ class CompiledGraphLinearOperator final : public SparseMatrix {
   void nd_spmv(Program *program,
                const Ndarray &input,
                const Ndarray &output) override;
+  OperatorBinding make_operator_binding(
+      OperatorExecutionKind execution_kind);
   void update_numeric_arguments(
       Program *program,
       NdarrayArguments numeric_arguments,
@@ -450,6 +455,8 @@ class CompiledGraphLinearOperator final : public SparseMatrix {
   }
 
  private:
+  struct ExecutionState;
+
   enum class NdarrayRole {
     topology,
     numeric,
@@ -461,6 +468,12 @@ class CompiledGraphLinearOperator final : public SparseMatrix {
     Ndarray *value{nullptr};
     NdarrayRole role{NdarrayRole::topology};
   };
+
+  void apply_with_execution(Program *program,
+                            const Ndarray &input,
+                            const Ndarray &output,
+                            OperatorExecutionKind execution_kind,
+                            aot::CompiledGraphJITCache *cache);
 
   Program *program_{nullptr};
   std::unique_ptr<aot::CompiledGraph> graph_;
