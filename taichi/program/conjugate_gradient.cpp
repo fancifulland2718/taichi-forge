@@ -69,6 +69,11 @@ std::unique_ptr<PreconditionerPlan> make_fixed_preconditioner_plan(
     CompiledKernelPreconditionerPlan &preconditioner,
     std::string provider_name,
     std::string method);
+std::unique_ptr<PreconditionerPlan> make_fixed_preconditioner_plan(
+    Program *program,
+    OperatorPlan &target_plan,
+    ExperimentalLinearOperatorHandle &preconditioner,
+    std::string method);
 void append_operator_plan_statistics(
     const OperatorPlan &plan,
     bool preconditioner,
@@ -245,6 +250,36 @@ CUCG::CUCG(Program *program,
 }
 
 CUCG::CUCG(Program *program,
+           CompiledKernelLinearOperator &A,
+           ExperimentalLinearOperatorHandle &preconditioner,
+           int max_iters,
+           float absolute_tolerance,
+           bool verbose,
+           float relative_tolerance)
+    : program_(program),
+      A_(A),
+      compiled_kernel_operator_(&A),
+      operator_preconditioner_(&preconditioner),
+      max_iters_(max_iters),
+      absolute_tolerance_(absolute_tolerance),
+      relative_tolerance_(relative_tolerance),
+      verbose_(verbose) {
+  TI_ERROR_IF(!program_ || program_->compile_config().arch != Arch::cuda ||
+                  A.owning_program() != program_ ||
+                  preconditioner.program() != program_,
+              "CUDA LinearOperator PCG requires A and M owned by the same "
+              "CUDA Program.");
+  validate_controls();
+  operator_plan_ = std::make_unique<OperatorPlan>(
+      program_, with_legacy_cg_traits(
+                    make_cuda_program_kernel_operator_binding(program_, A)));
+  preconditioner_plan_ = make_fixed_preconditioner_plan(
+      program_, *operator_plan_, preconditioner, "linear_operator");
+  validate_cg_plan(*operator_plan_, preconditioner_plan_.get());
+  init_solver();
+}
+
+CUCG::CUCG(Program *program,
            CompiledGraphLinearOperator &A,
            int max_iters,
            float absolute_tolerance,
@@ -269,8 +304,7 @@ CUCG::CUCG(Program *program,
 }
 
 bool CUCG::has_preconditioner() const {
-  return preconditioner_ != nullptr || block_preconditioner_ != nullptr ||
-         compiled_kernel_preconditioner_ != nullptr;
+  return preconditioner_plan_ != nullptr;
 }
 
 void CUCG::validate_controls() const {
@@ -690,11 +724,8 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
                                          : (compiled_graph_operator_
                                                 ? "cg_compiled_graph"
                                                 : "cg_compiled_kernel");
-    result.preconditioner_method = compiled_kernel_preconditioner_
-                                       ? compiled_kernel_preconditioner_
-                                             ->debug_runtime_statistics()
-                                             .method
-                                       : "identity";
+    result.preconditioner_method =
+        preconditioner_plan_ ? preconditioner_plan_->method() : "identity";
     result.external_preconditioner = has_preconditioner();
     result.preconditioner_ownership_scope =
         has_preconditioner() ? "external_plan" : "none";
@@ -830,6 +861,20 @@ std::unique_ptr<CUCG> make_cuda_compiled_kernel_pcg_solver(
     bool verbose,
     float relative_tolerance) {
   return std::make_unique<CUCG>(program, A, &preconditioner, max_iters,
+                                absolute_tolerance, verbose,
+                                relative_tolerance);
+}
+
+std::unique_ptr<CUCG>
+make_cuda_experimental_linear_operator_pcg_solver(
+    Program *program,
+    CompiledKernelLinearOperator &A,
+    ExperimentalLinearOperatorHandle &preconditioner,
+    int max_iters,
+    float absolute_tolerance,
+    bool verbose,
+    float relative_tolerance) {
+  return std::make_unique<CUCG>(program, A, preconditioner, max_iters,
                                 absolute_tolerance, verbose,
                                 relative_tolerance);
 }
@@ -1079,6 +1124,49 @@ std::unique_ptr<PreconditionerPlan> make_fixed_preconditioner_plan(
   return plan;
 }
 
+void validate_fixed_linear_operator_preconditioner(
+    Program *program,
+    const OperatorDescriptor &target_descriptor,
+    ExperimentalLinearOperatorHandle &preconditioner) {
+  TI_ERROR_IF(!program || preconditioner.program() != program,
+              "LinearOperator preconditioner must belong to the target "
+              "Program generation.");
+  const auto &descriptor = preconditioner.descriptor();
+  TI_ERROR_IF(descriptor.domain != target_descriptor.range ||
+                  descriptor.range != target_descriptor.domain,
+              "LinearOperator preconditioner must map the target range "
+              "back to its domain.");
+  const auto &traits = preconditioner.mathematical_traits();
+  TI_ERROR_IF(!traits.self_adjoint.known() ||
+                  !traits.self_adjoint.value ||
+                  !traits.positive_definite.known() ||
+                  !traits.positive_definite.value ||
+                  (traits.singular.known() && traits.singular.value),
+              "Fixed-linear PCG requires the preconditioner operator to "
+              "have trusted self_adjoint=True, positive_definite=True, "
+              "and non-singular traits.");
+}
+
+std::unique_ptr<PreconditionerPlan> make_fixed_preconditioner_plan(
+    Program *program,
+    OperatorPlan &target_plan,
+    ExperimentalLinearOperatorHandle &preconditioner,
+    std::string method) {
+  validate_fixed_linear_operator_preconditioner(
+      program, target_plan.descriptor(), preconditioner);
+  auto plan = std::make_unique<PreconditionerPlan>(
+      program, target_plan.descriptor(), preconditioner.binding(),
+      PreconditionerBehavior::fixed_linear, std::move(method),
+      [program, &preconditioner](const OperatorResourceStamp &, bool) {
+        TI_ERROR_IF(preconditioner.program() != program,
+                    "LinearOperator preconditioner changed Program "
+                    "generation.");
+      });
+  auto target_generation = target_plan.pin();
+  plan->setup(target_generation);
+  return plan;
+}
+
 void append_operator_plan_statistics(
     const OperatorPlan &plan,
     bool preconditioner,
@@ -1203,6 +1291,32 @@ CpuSparseCGPlan::bind_preconditioner(
       "compiled_kernel_inverse_apply"});
 }
 
+std::unique_ptr<CpuSparseCGPlan::PreconditionerBinding>
+CpuSparseCGPlan::bind_preconditioner(
+    Program *program,
+    ExperimentalLinearOperatorHandle &preconditioner) {
+  TI_ERROR_IF(preconditioner.program() != program,
+              "CPU LinearOperator preconditioner must belong to the "
+              "construction Program.");
+  const auto &traits = preconditioner.mathematical_traits();
+  TI_ERROR_IF(!traits.self_adjoint.known() ||
+                  !traits.self_adjoint.value ||
+                  !traits.positive_definite.known() ||
+                  !traits.positive_definite.value ||
+                  (traits.singular.known() && traits.singular.value),
+              "Fixed-linear PCG requires the preconditioner operator to "
+              "have trusted self_adjoint=True, positive_definite=True, "
+              "and non-singular traits.");
+  return std::make_unique<PreconditionerBinding>(PreconditionerBinding{
+      preconditioner.binding(),
+      [program, &preconditioner](const OperatorResourceStamp &, bool) {
+        TI_ERROR_IF(preconditioner.program() != program,
+                    "LinearOperator preconditioner changed Program "
+                    "generation.");
+      },
+      "linear_operator"});
+}
+
 CpuSparseCGPlan::CpuSparseCGPlan(Program *program,
                                  SparseMatrix &matrix,
                                  int max_iterations,
@@ -1273,6 +1387,22 @@ CpuSparseCGPlan::CpuSparseCGPlan(
     : CpuSparseCGPlan(program,
                       operator_handle.binding(),
                       nullptr,
+                      max_iterations,
+                      absolute_tolerance,
+                      relative_tolerance,
+                      false) {
+}
+
+CpuSparseCGPlan::CpuSparseCGPlan(
+    Program *program,
+    ExperimentalLinearOperatorHandle &operator_handle,
+    ExperimentalLinearOperatorHandle &preconditioner,
+    int max_iterations,
+    double absolute_tolerance,
+    double relative_tolerance)
+    : CpuSparseCGPlan(program,
+                      operator_handle.binding(),
+                      bind_preconditioner(program, preconditioner),
                       max_iterations,
                       absolute_tolerance,
                       relative_tolerance,
@@ -1699,6 +1829,19 @@ make_cpu_experimental_linear_operator_cg_solver(
       relative_tolerance);
 }
 
+std::unique_ptr<CpuSparseCGPlan>
+make_cpu_experimental_linear_operator_pcg_solver(
+    Program *program,
+    ExperimentalLinearOperatorHandle &operator_handle,
+    ExperimentalLinearOperatorHandle &preconditioner,
+    int max_iterations,
+    double absolute_tolerance,
+    double relative_tolerance) {
+  return std::make_unique<CpuSparseCGPlan>(
+      program, operator_handle, preconditioner, max_iterations,
+      absolute_tolerance, relative_tolerance);
+}
+
 std::unique_ptr<CpuSparseCGPlan> make_cpu_jacobi_pcg_solver(
     Program *program,
     SparseMatrix &matrix,
@@ -1739,7 +1882,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
     SparseMatrix &matrix,
     int fixed_iterations)
     : VulkanCGIterationPlan(program, matrix, fixed_iterations, 0.0f, false,
-                            false, false, nullptr, nullptr, nullptr) {
+                            false, false, nullptr, nullptr, nullptr, nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
@@ -1748,7 +1891,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
     float absolute_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
                             absolute_tolerance, true, false, false, nullptr,
-                            nullptr, nullptr) {
+                            nullptr, nullptr, nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(
@@ -1759,7 +1902,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
     float absolute_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
                             absolute_tolerance, true, false, false,
-                            &preconditioner, nullptr, nullptr) {
+                            &preconditioner, nullptr, nullptr, nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(
@@ -1770,7 +1913,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
     float absolute_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
                             absolute_tolerance, true, false, false, nullptr,
-                            &preconditioner, nullptr) {
+                            &preconditioner, nullptr, nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(
@@ -1780,7 +1923,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
     float absolute_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
                             absolute_tolerance, true, true, false, nullptr,
-                            nullptr, nullptr) {
+                            nullptr, nullptr, nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(
@@ -1790,7 +1933,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
     float absolute_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
                             absolute_tolerance, true, false, true, nullptr,
-                            nullptr, nullptr) {
+                            nullptr, nullptr, nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(
@@ -1801,7 +1944,18 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
     float absolute_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
                             absolute_tolerance, true, true, false, nullptr,
-                            nullptr, &preconditioner) {
+                            nullptr, &preconditioner, nullptr) {
+}
+
+VulkanCGIterationPlan::VulkanCGIterationPlan(
+    Program *program,
+    CompiledKernelLinearOperator &matrix,
+    ExperimentalLinearOperatorHandle &preconditioner,
+    int max_iterations,
+    float absolute_tolerance)
+    : VulkanCGIterationPlan(program, matrix, max_iterations,
+                            absolute_tolerance, true, true, false, nullptr,
+                            nullptr, nullptr, &preconditioner) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
@@ -1816,7 +1970,9 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
                                              SparseBlockJacobiPreconditionerPlan
                                                  *block_preconditioner,
                                              CompiledKernelPreconditionerPlan
-                                                 *compiled_kernel_preconditioner) {
+                                                 *compiled_kernel_preconditioner,
+                                             ExperimentalLinearOperatorHandle
+                                                 *operator_preconditioner) {
 #if defined(TI_WITH_VULKAN)
   TI_ERROR_IF(!program || program->compile_config().arch != Arch::vulkan,
               "Vulkan CG iteration plans require an active Vulkan Program.");
@@ -1828,7 +1984,8 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
       dynamic_cast<CompiledGraphLinearOperator *>(&matrix);
   const int preconditioner_count = (preconditioner ? 1 : 0) +
                                    (block_preconditioner ? 1 : 0) +
-                                   (compiled_kernel_preconditioner ? 1 : 0);
+                                   (compiled_kernel_preconditioner ? 1 : 0) +
+                                   (operator_preconditioner ? 1 : 0);
   TI_ERROR_IF(preconditioner_count > 1,
               "Vulkan CG iteration plans accept at most one "
               "preconditioner.");
@@ -1878,6 +2035,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
   preconditioner_ = preconditioner;
   block_preconditioner_ = block_preconditioner;
   compiled_kernel_preconditioner_ = compiled_kernel_preconditioner;
+  operator_preconditioner_ = operator_preconditioner;
   compiled_kernel_operator_ =
       allow_compiled_kernel_operator ? compiled_kernel_operator : nullptr;
   compiled_graph_operator_ =
@@ -1919,6 +2077,10 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
         program_, *operator_plan_, *compiled_kernel_operator_,
         *compiled_kernel_preconditioner_,
         "vulkan_compiled_inverse_apply", "compiled_kernel_inverse_apply");
+  } else if (operator_preconditioner_) {
+    preconditioner_plan_ = make_fixed_preconditioner_plan(
+        program_, *operator_plan_, *operator_preconditioner_,
+        "linear_operator");
   }
   validate_cg_plan(*operator_plan_, preconditioner_plan_.get());
   const int n = matrix.num_rows();
@@ -1966,8 +2128,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
 }
 
 bool VulkanCGIterationPlan::has_preconditioner() const {
-  return preconditioner_ != nullptr || block_preconditioner_ != nullptr ||
-         compiled_kernel_preconditioner_ != nullptr;
+  return preconditioner_plan_ != nullptr;
 }
 
 void VulkanCGIterationPlan::apply_preconditioner(
@@ -2202,7 +2363,12 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
   SparseSolvePlanRuntimeStatistics result;
   result.backend_family = "vulkan";
   if (has_preconditioner()) {
-    if (compiled_kernel_preconditioner_) {
+    if (operator_preconditioner_) {
+      result.method =
+          adaptive_ ? "pcg_linear_operator_bounded_masked_probe"
+                    : "pcg_linear_operator_fixed_iteration_probe";
+      result.preconditioner_method = preconditioner_plan_->method();
+    } else if (compiled_kernel_preconditioner_) {
       result.method =
           adaptive_ ? "pcg_compiled_kernel_bounded_masked_probe"
                     : "pcg_compiled_kernel_fixed_iteration_probe";
@@ -2393,6 +2559,17 @@ make_vulkan_compiled_kernel_pcg_convergence_plan(
     Program *program,
     CompiledKernelLinearOperator &matrix,
     CompiledKernelPreconditionerPlan &preconditioner,
+    int max_iterations,
+    float absolute_tolerance) {
+  return std::make_unique<VulkanCGIterationPlan>(
+      program, matrix, preconditioner, max_iterations, absolute_tolerance);
+}
+
+std::unique_ptr<VulkanCGIterationPlan>
+make_vulkan_experimental_linear_operator_pcg_convergence_plan(
+    Program *program,
+    CompiledKernelLinearOperator &matrix,
+    ExperimentalLinearOperatorHandle &preconditioner,
     int max_iterations,
     float absolute_tolerance) {
   return std::make_unique<VulkanCGIterationPlan>(

@@ -169,6 +169,63 @@ def test_experimental_stored_jacobi_pcg():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_experimental_fixed_linear_operator_pcg():
+    experimental = ti.linalg.experimental
+    size = 4
+    topology = ti.ndarray(ti.i32, shape=size)
+    topology.from_numpy(np.arange(size, dtype=np.int32))
+    diagonal = _vector([2.0, 3.0, 5.0, 7.0])
+    inverse = _vector(1.0 / diagonal.to_numpy())
+
+    @ti.kernel
+    def diagonal_apply(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(active_size):
+            y[index] = numeric_data[index] * x[topology_data[index]]
+
+    traits = experimental.OperatorTraits.spd()
+    operator = experimental.LinearOperator.from_kernel(
+        diagonal_apply, size, topology, numeric=diagonal, traits=traits
+    )
+    preconditioner = experimental.LinearOperator.from_kernel(
+        diagonal_apply, size, topology, numeric=inverse, traits=traits
+    )
+    exact = np.asarray([0.5, -1.0, 2.0, 1.5], dtype=np.float32)
+    rhs = _vector(diagonal.to_numpy() * exact)
+    plan = experimental.SolvePlan(
+        operator,
+        method="pcg",
+        preconditioner=preconditioner,
+        max_iterations=8,
+        atol=1e-5,
+    )
+
+    first = plan.solve(rhs)
+    second = plan.solve(rhs)
+    assert first.converged and second.converged
+    np.testing.assert_allclose(second.solution.to_numpy(), exact, rtol=2e-4)
+    stats = plan.statistics()
+    assert stats["identity"]["preconditioner_method"] == "linear_operator"
+    assert stats["identity"]["preconditioner_behavior"] == "fixed_linear"
+    assert stats["operations"]["preconditioner_apply_calls"] > 0
+    assert stats["operations"]["preconditioner_update_noops"] == 2
+    assert stats["resources"]["external_preconditioner"]
+
+    operator.update_numeric(
+        _vector(2.0 * diagonal.to_numpy()),
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    with pytest.raises(RuntimeError, match="generation does not match"):
+        plan.solve(_vector(2.0 * diagonal.to_numpy() * exact))
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_experimental_graph_provider_apply_and_cg():
     experimental = ti.linalg.experimental
     size = 4

@@ -647,8 +647,11 @@ class SolvePlan:
     """Persistent CG, PCG, or BiCGSTAB execution plan.
 
     ``pcg`` accepts fixed stored CSR/BSR providers with explicit ``"jacobi"``
-    or ``"block_jacobi"`` selection. BiCGSTAB is CPU-only. Vulkan uses a
-    bounded masked convergence plan and currently supports absolute tolerance.
+    or ``"block_jacobi"`` selection. It also accepts a trusted SPD
+    :class:`LinearOperator` as a fixed-linear preconditioner. GPU custom
+    preconditioners currently require compiled-kernel A and M providers.
+    BiCGSTAB is CPU-only. Vulkan uses a bounded masked convergence plan and
+    currently supports absolute tolerance.
     """
 
     def __init__(
@@ -713,6 +716,44 @@ class SolvePlan:
             )
         if singular["known"] and singular["value"] is True:
             raise TaichiRuntimeError("CG/PCG rejects singular operators")
+
+    def _require_fixed_linear_preconditioner(self, preconditioner):
+        preconditioner._ensure_valid()
+        if preconditioner._program is not self._program:
+            raise TaichiRuntimeError(
+                "preconditioner must belong to the SolvePlan runtime"
+            )
+        expected_shape = (self.operator.shape[1], self.operator.shape[0])
+        if preconditioner.shape != expected_shape:
+            raise TaichiRuntimeError(
+                "preconditioner must map the operator range back to its "
+                "domain"
+            )
+        if preconditioner.dtype != self.operator.dtype:
+            raise TaichiRuntimeError(
+                "operator and preconditioner must have the same dtype"
+            )
+        traits = preconditioner._metadata_snapshot["traits"]
+        self_adjoint = dict(traits["self_adjoint"])
+        positive_definite = dict(traits["positive_definite"])
+        singular = dict(traits["singular"])
+        if not self_adjoint["known"] or self_adjoint["value"] is not True:
+            raise TaichiRuntimeError(
+                "fixed-linear PCG requires preconditioner "
+                "self_adjoint=True"
+            )
+        if (
+            not positive_definite["known"]
+            or positive_definite["value"] is not True
+        ):
+            raise TaichiRuntimeError(
+                "fixed-linear PCG requires preconditioner "
+                "positive_definite=True"
+            )
+        if singular["known"] and singular["value"] is True:
+            raise TaichiRuntimeError(
+                "fixed-linear PCG rejects singular preconditioners"
+            )
 
     def _build_solver(self):
         arch = self._program.config().arch
@@ -816,9 +857,62 @@ class SolvePlan:
                 )
             raise TaichiRuntimeError("unsupported SolvePlan backend")
 
+        if isinstance(self.preconditioner, LinearOperator):
+            self._require_fixed_linear_preconditioner(self.preconditioner)
+            if arch in cpu_arches:
+                factory = (
+                    _ti_core._make_cpu_experimental_linear_operator_pcg_solver
+                )
+                return factory(
+                    self._program,
+                    self.operator._handle,
+                    self.preconditioner._handle,
+                    self.max_iterations,
+                    self.atol,
+                    self.rtol,
+                )
+            if (
+                kind != "kernel"
+                or self.preconditioner._provider_kind != "kernel"
+            ):
+                raise TaichiRuntimeError(
+                    "GPU fixed-linear PCG currently requires compiled-kernel "
+                    "A and M providers"
+                )
+            if arch == _ti_core.Arch.cuda:
+                factory = (
+                    _ti_core._make_cuda_experimental_linear_operator_pcg_solver
+                )
+                return factory(
+                    self._program,
+                    core,
+                    self.preconditioner._handle,
+                    self.max_iterations,
+                    self.atol,
+                    False,
+                    self.rtol,
+                )
+            if arch == _ti_core.Arch.vulkan:
+                if self.rtol != 0.0:
+                    raise TaichiRuntimeError(
+                        "Vulkan SolvePlan supports absolute tolerance only"
+                    )
+                factory = (
+                    _ti_core._make_vulkan_experimental_linear_operator_pcg_convergence_plan
+                )
+                return factory(
+                    self._program,
+                    core,
+                    self.preconditioner._handle,
+                    self.max_iterations,
+                    self.atol,
+                )
+            raise TaichiRuntimeError("unsupported PCG backend")
+
         if not isinstance(self.preconditioner, str):
             raise TaichiRuntimeError(
-                "PCG requires preconditioner='jacobi' or 'block_jacobi'"
+                "PCG requires a fixed LinearOperator or "
+                "preconditioner='jacobi'/'block_jacobi'"
             )
         preconditioner = self.preconditioner.casefold()
         if preconditioner not in ("jacobi", "block_jacobi"):

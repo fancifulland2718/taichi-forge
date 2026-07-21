@@ -455,6 +455,13 @@ class CUCG {
        bool verbose,
        float relative_tolerance = 0.0f);
   CUCG(Program *program,
+       CompiledKernelLinearOperator &A,
+       ExperimentalLinearOperatorHandle &preconditioner,
+       int max_iters,
+       float absolute_tolerance,
+       bool verbose,
+       float relative_tolerance = 0.0f);
+  CUCG(Program *program,
        CompiledGraphLinearOperator &A,
        int max_iters,
        float absolute_tolerance,
@@ -529,6 +536,7 @@ class CUCG {
   CompiledKernelLinearOperator *compiled_kernel_operator_{nullptr};
   CompiledGraphLinearOperator *compiled_graph_operator_{nullptr};
   CompiledKernelPreconditionerPlan *compiled_kernel_preconditioner_{nullptr};
+  ExperimentalLinearOperatorHandle *operator_preconditioner_{nullptr};
   int max_iters_{0};
   float absolute_tolerance_{0.0f};
   float relative_tolerance_{0.0f};
@@ -610,6 +618,16 @@ std::unique_ptr<CUCG> make_cuda_compiled_kernel_pcg_solver(
     bool verbose,
     float relative_tolerance = 0.0f);
 
+std::unique_ptr<CUCG>
+make_cuda_experimental_linear_operator_pcg_solver(
+    Program *program,
+    CompiledKernelLinearOperator &A,
+    ExperimentalLinearOperatorHandle &preconditioner,
+    int max_iters,
+    float absolute_tolerance,
+    bool verbose,
+    float relative_tolerance = 0.0f);
+
 class CpuSparseCGPlan {
  public:
   CpuSparseCGPlan(Program *program,
@@ -637,6 +655,12 @@ class CpuSparseCGPlan {
                   double relative_tolerance = 0.0);
   CpuSparseCGPlan(Program *program,
                   ExperimentalLinearOperatorHandle &operator_handle,
+                  int max_iterations,
+                  double absolute_tolerance,
+                  double relative_tolerance = 0.0);
+  CpuSparseCGPlan(Program *program,
+                  ExperimentalLinearOperatorHandle &operator_handle,
+                  ExperimentalLinearOperatorHandle &preconditioner,
                   int max_iterations,
                   double absolute_tolerance,
                   double relative_tolerance = 0.0);
@@ -701,6 +725,9 @@ class CpuSparseCGPlan {
       Program *program,
       CompiledKernelLinearOperator &matrix,
       CompiledKernelPreconditionerPlan &preconditioner);
+  static std::unique_ptr<PreconditionerBinding> bind_preconditioner(
+      Program *program,
+      ExperimentalLinearOperatorHandle &preconditioner);
   void apply_operator(const OperatorPinnedAction &generation,
                       const Ndarray &input,
                       const Ndarray &output);
@@ -754,6 +781,15 @@ std::unique_ptr<CpuSparseCGPlan>
 make_cpu_experimental_linear_operator_cg_solver(
     Program *program,
     ExperimentalLinearOperatorHandle &operator_handle,
+    int max_iterations,
+    double absolute_tolerance,
+    double relative_tolerance = 0.0);
+
+std::unique_ptr<CpuSparseCGPlan>
+make_cpu_experimental_linear_operator_pcg_solver(
+    Program *program,
+    ExperimentalLinearOperatorHandle &operator_handle,
+    ExperimentalLinearOperatorHandle &preconditioner,
     int max_iterations,
     double absolute_tolerance,
     double relative_tolerance = 0.0);
@@ -817,6 +853,12 @@ class VulkanCGIterationPlan {
       CompiledKernelPreconditionerPlan &preconditioner,
       int max_iterations,
       float absolute_tolerance);
+  VulkanCGIterationPlan(
+      Program *program,
+      CompiledKernelLinearOperator &matrix,
+      ExperimentalLinearOperatorHandle &preconditioner,
+      int max_iterations,
+      float absolute_tolerance);
   ~VulkanCGIterationPlan();
 
   void solve(Program *program, const Ndarray &x, const Ndarray &b);
@@ -862,7 +904,9 @@ class VulkanCGIterationPlan {
                         SparseBlockJacobiPreconditionerPlan
                             *block_preconditioner,
                         CompiledKernelPreconditionerPlan
-                            *compiled_kernel_preconditioner);
+                            *compiled_kernel_preconditioner,
+                        ExperimentalLinearOperatorHandle
+                            *operator_preconditioner);
   bool has_preconditioner() const;
   void apply_preconditioner(Program *program,
                             const OperatorPinnedAction &generation,
@@ -883,6 +927,7 @@ class VulkanCGIterationPlan {
   SparseJacobiPreconditionerPlan *preconditioner_{nullptr};
   SparseBlockJacobiPreconditionerPlan *block_preconditioner_{nullptr};
   CompiledKernelPreconditionerPlan *compiled_kernel_preconditioner_{nullptr};
+  ExperimentalLinearOperatorHandle *operator_preconditioner_{nullptr};
   int fixed_iterations_{0};
   float absolute_tolerance_{0.0f};
   bool adaptive_{false};
@@ -972,6 +1017,14 @@ make_vulkan_compiled_kernel_pcg_convergence_plan(
     Program *program,
     CompiledKernelLinearOperator &matrix,
     CompiledKernelPreconditionerPlan &preconditioner,
+    int max_iterations,
+    float absolute_tolerance);
+
+std::unique_ptr<VulkanCGIterationPlan>
+make_vulkan_experimental_linear_operator_pcg_convergence_plan(
+    Program *program,
+    CompiledKernelLinearOperator &matrix,
+    ExperimentalLinearOperatorHandle &preconditioner,
     int max_iterations,
     float absolute_tolerance);
 }  // namespace taichi::lang

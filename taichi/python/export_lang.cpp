@@ -5793,6 +5793,14 @@ void export_lang(py::module &m) {
       py::arg("preconditioner"), py::arg("max_iterations"),
       py::arg("absolute_tolerance"), py::arg("verbose"),
       py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_cuda_experimental_linear_operator_pcg_solver",
+      make_cuda_experimental_linear_operator_pcg_solver,
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("matrix"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("verbose"),
+      py::arg("relative_tolerance") = 0.0f);
 
   py::class_<CpuSparseCGPlan>(m, "CpuSparseCGPlan")
       .def("solve", &CpuSparseCGPlan::solve)
@@ -5830,6 +5838,14 @@ void export_lang(py::module &m) {
       py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
       py::arg("program"), py::arg("operator"),
       py::arg("max_iterations"), py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0);
+  m.def(
+      "_make_cpu_experimental_linear_operator_pcg_solver",
+      make_cpu_experimental_linear_operator_pcg_solver,
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"),
       py::arg("relative_tolerance") = 0.0);
   m.def(
       "_make_cpu_jacobi_pcg_solver",
@@ -5910,6 +5926,10 @@ void export_lang(py::module &m) {
         py::keep_alive<0, 1>(), py::keep_alive<0, 2>());
   m.def("_make_vulkan_compiled_kernel_pcg_convergence_plan",
         make_vulkan_compiled_kernel_pcg_convergence_plan,
+        py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+        py::keep_alive<0, 3>());
+  m.def("_make_vulkan_experimental_linear_operator_pcg_convergence_plan",
+        make_vulkan_experimental_linear_operator_pcg_convergence_plan,
         py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
         py::keep_alive<0, 3>());
 
