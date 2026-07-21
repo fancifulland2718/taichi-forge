@@ -79,6 +79,67 @@ void append_preconditioner_plan_statistics(
 
 }  // namespace
 
+const char *sparse_solve_execution_policy_name(
+    SparseSolveExecutionPolicy policy) {
+  switch (policy) {
+    case SparseSolveExecutionPolicy::host_each_iteration:
+      return "host_each_iteration";
+    case SparseSolveExecutionPolicy::host_check_every_k:
+      return "host_check_every_k";
+    case SparseSolveExecutionPolicy::fixed_budget_masked:
+      return "fixed_budget_masked";
+    case SparseSolveExecutionPolicy::device_convergent:
+      return "device_convergent";
+  }
+  return "unknown";
+}
+
+SparseSolveExecutionCapabilities sparse_solve_execution_capabilities(
+    Arch arch) {
+  SparseSolveExecutionCapabilities result;
+  if (arch_is_cpu(arch)) {
+    result.host_each_iteration = true;
+  } else if (arch == Arch::cuda) {
+    result.host_each_iteration = true;
+  } else if (arch == Arch::vulkan) {
+    result.fixed_budget_masked = true;
+  }
+  return result;
+}
+
+void validate_sparse_solve_execution_policy(
+    Arch arch,
+    SparseSolveExecutionPolicy policy,
+    int host_check_interval) {
+  TI_ERROR_IF(host_check_interval <= 0,
+              "Solver host-check interval must be positive.");
+  TI_ERROR_IF(policy !=
+                      SparseSolveExecutionPolicy::host_check_every_k &&
+                  host_check_interval != 1,
+              "Only host_check_every_k accepts a host-check interval other "
+              "than one.");
+  const auto capabilities = sparse_solve_execution_capabilities(arch);
+  bool supported = false;
+  switch (policy) {
+    case SparseSolveExecutionPolicy::host_each_iteration:
+      supported = capabilities.host_each_iteration;
+      break;
+    case SparseSolveExecutionPolicy::host_check_every_k:
+      supported = capabilities.host_check_every_k;
+      break;
+    case SparseSolveExecutionPolicy::fixed_budget_masked:
+      supported = capabilities.fixed_budget_masked;
+      break;
+    case SparseSolveExecutionPolicy::device_convergent:
+      supported = capabilities.device_convergent;
+      break;
+  }
+  TI_ERROR_IF(!supported,
+              "Solver execution policy '{}' is unsupported on backend '{}'; "
+              "no fallback was performed.",
+              sparse_solve_execution_policy_name(policy), arch_name(arch));
+}
+
 CUCG::CUCG(SparseMatrix &A,
            int max_iters,
            float absolute_tolerance,
@@ -189,6 +250,8 @@ bool CUCG::has_preconditioner() const {
 }
 
 void CUCG::validate_controls() const {
+  validate_sparse_solve_execution_policy(
+      Arch::cuda, SparseSolveExecutionPolicy::host_each_iteration);
   TI_ERROR_IF(max_iters_ < 0,
               "CUDA SparseCG requires non-negative max iterations.");
   TI_ERROR_IF(!std::isfinite(absolute_tolerance_) ||
@@ -967,6 +1030,31 @@ void append_operator_plan_statistics(
   statistics.operator_action_provider = plan.provider_name();
   statistics.operator_asynchronous_submit =
       plan.capabilities().asynchronous_submit;
+  statistics.operator_execution_kind =
+      operator_execution_kind_name(plan.execution_kind());
+  statistics.operator_backend_execution_path =
+      operator_backend_execution_path_name(
+          plan_statistics.last_backend_path);
+  statistics.operator_execution_plan_builds =
+      plan_statistics.execution_plan_builds;
+  statistics.operator_execution_plan_reuses =
+      plan_statistics.execution_plan_reuses;
+  statistics.operator_binding_rebinds =
+      plan_statistics.binding_rebinds;
+  statistics.operator_sequence_submissions =
+      plan_statistics.sequence_submissions;
+  statistics.operator_compiled_graph_submissions =
+      plan_statistics.compiled_graph_submissions;
+  statistics.operator_runtime_capture_submissions =
+      plan_statistics.runtime_capture_submissions;
+  statistics.operator_backend_captures =
+      plan_statistics.backend_captures;
+  statistics.operator_backend_replays =
+      plan_statistics.backend_replays;
+  statistics.operator_ordinary_fallbacks =
+      plan_statistics.ordinary_fallbacks;
+  statistics.operator_cache_invalidations =
+      plan_statistics.cache_invalidations;
   statistics.operator_generation_pins = plan_statistics.generation_pins;
   statistics.operator_generation_changes =
       plan_statistics.generation_changes;
@@ -1113,6 +1201,9 @@ CpuSparseCGPlan::CpuSparseCGPlan(
       relative_tolerance_(relative_tolerance) {
   TI_ERROR_IF(!program_ || !arch_is_cpu(program_->compile_config().arch),
               "CPU operator CG/PCG requires an active CPU Program.");
+  validate_sparse_solve_execution_policy(
+      program_->compile_config().arch,
+      SparseSolveExecutionPolicy::host_each_iteration);
   const auto &descriptor = operator_binding.action().descriptor();
   TI_ERROR_IF(descriptor.domain.scalar_type !=
                       descriptor.range.scalar_type ||
@@ -2025,6 +2116,13 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
   result.device_scalar_operations = device_scalar_operations_;
   result.host_scalar_readbacks = host_scalar_readbacks_;
   result.host_synchronizations = host_synchronizations_;
+  result.solver_execution_policy =
+      adaptive_ ? sparse_solve_execution_policy_name(
+                      SparseSolveExecutionPolicy::fixed_budget_masked)
+                : "fixed_budget";
+  result.host_check_interval =
+      adaptive_ ? fixed_iterations_ : 0;
+  result.solver_graph_enabled = false;
   result.fixed_iteration_only = !adaptive_;
   result.bounded_masked_execution = adaptive_;
   result.persistent_vector_count = has_preconditioner() ? 4 : 3;

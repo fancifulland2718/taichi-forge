@@ -77,6 +77,107 @@ TEST(LinearOperator, BindingPinsLeaseBeforeReadingResourceStamp) {
   EXPECT_EQ(order[1], 2);
 }
 
+TEST(LinearOperator, ExecutionLoweringIsIndependentFromProviderIdentity) {
+  const OperatorSpaceDesc space =
+      scalar_space(PrimitiveType::f32, 2);
+  const OperatorDescriptor descriptor{space, space};
+  OperatorCapabilities capabilities;
+  capabilities.explicit_sequence = true;
+  capabilities.binding_rebind = true;
+  OperatorAction action(
+      descriptor, capabilities, "semantic_scale_provider",
+      [] { return OperatorResourceStamp{}; },
+      [](OperatorApplyMode mode, const OperatorVectorView &input,
+         const OperatorVectorView &output) {
+        ASSERT_EQ(mode, OperatorApplyMode::forward);
+        const auto *source =
+            reinterpret_cast<const float *>(input.data);
+        auto *target = reinterpret_cast<float *>(output.data);
+        target[0] = 2.0f * source[0];
+        target[1] = 2.0f * source[1];
+      });
+  OperatorPlan plan(
+      nullptr,
+      OperatorBinding(action).with_execution_lowering(
+          OperatorExecutionKind::explicit_sequence));
+  EXPECT_EQ(plan.provider_name(), "semantic_scale_provider");
+  EXPECT_EQ(plan.execution_kind(),
+            OperatorExecutionKind::explicit_sequence);
+  EXPECT_TRUE(plan.capabilities().explicit_sequence);
+
+  std::array<float, 2> first_input{1.0f, -2.0f};
+  std::array<float, 2> first_output{};
+  std::array<float, 2> second_input{3.0f, 4.0f};
+  std::array<float, 2> second_output{};
+  plan.submit(
+      {OperatorApplyMode::forward,
+       OperatorVectorView::from_const_host(first_input.data(), space),
+       nullptr,
+       OperatorVectorView::from_mutable_host(first_output.data(), space)});
+  plan.submit(
+      {OperatorApplyMode::forward,
+       OperatorVectorView::from_const_host(second_input.data(), space),
+       nullptr,
+       OperatorVectorView::from_mutable_host(second_output.data(), space)});
+  EXPECT_EQ(first_output, (std::array<float, 2>{2.0f, -4.0f}));
+  EXPECT_EQ(second_output, (std::array<float, 2>{6.0f, 8.0f}));
+
+  const auto statistics = plan.debug_runtime_statistics();
+  EXPECT_EQ(statistics.execution_kind,
+            OperatorExecutionKind::explicit_sequence);
+  EXPECT_EQ(statistics.last_backend_path,
+            OperatorBackendExecutionPath::explicit_sequence);
+  EXPECT_EQ(statistics.execution_plan_builds, 1u);
+  EXPECT_EQ(statistics.execution_plan_reuses, 2u);
+  EXPECT_EQ(statistics.binding_rebinds, 1u);
+
+  EXPECT_ANY_THROW(OperatorPlan(
+      nullptr,
+      OperatorBinding(std::move(action)).with_execution_lowering(
+          OperatorExecutionKind::compiled_graph)));
+}
+
+TEST(LinearOperator, SolverExecutionPolicyCapabilitiesAreExplicit) {
+  const auto cpu =
+      sparse_solve_execution_capabilities(Arch::x64);
+  EXPECT_TRUE(cpu.host_each_iteration);
+  EXPECT_FALSE(cpu.host_check_every_k);
+  EXPECT_FALSE(cpu.fixed_budget_masked);
+  EXPECT_FALSE(cpu.device_convergent);
+  EXPECT_NO_THROW(validate_sparse_solve_execution_policy(
+      Arch::x64,
+      SparseSolveExecutionPolicy::host_each_iteration));
+  EXPECT_ANY_THROW(validate_sparse_solve_execution_policy(
+      Arch::x64,
+      SparseSolveExecutionPolicy::host_check_every_k, 4));
+
+  const auto cuda =
+      sparse_solve_execution_capabilities(Arch::cuda);
+  EXPECT_TRUE(cuda.host_each_iteration);
+  EXPECT_FALSE(cuda.host_check_every_k);
+  EXPECT_FALSE(cuda.fixed_budget_masked);
+  EXPECT_FALSE(cuda.device_convergent);
+  EXPECT_NO_THROW(validate_sparse_solve_execution_policy(
+      Arch::cuda,
+      SparseSolveExecutionPolicy::host_each_iteration));
+  EXPECT_ANY_THROW(validate_sparse_solve_execution_policy(
+      Arch::cuda,
+      SparseSolveExecutionPolicy::device_convergent));
+
+  const auto vulkan =
+      sparse_solve_execution_capabilities(Arch::vulkan);
+  EXPECT_FALSE(vulkan.host_each_iteration);
+  EXPECT_FALSE(vulkan.host_check_every_k);
+  EXPECT_TRUE(vulkan.fixed_budget_masked);
+  EXPECT_FALSE(vulkan.device_convergent);
+  EXPECT_NO_THROW(validate_sparse_solve_execution_policy(
+      Arch::vulkan,
+      SparseSolveExecutionPolicy::fixed_budget_masked));
+  EXPECT_ANY_THROW(validate_sparse_solve_execution_policy(
+      Arch::vulkan,
+      SparseSolveExecutionPolicy::host_each_iteration));
+}
+
 TEST(LinearOperator, SubmissionTicketRetainsPinnedGeneration) {
   int releases = 0;
   const OperatorResourceStamp stamp{0, 0, 1, 2, 3, 4};

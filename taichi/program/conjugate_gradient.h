@@ -31,6 +31,30 @@ enum class SparseSolveStatus : int {
   kConverged = 2,
 };
 
+enum class SparseSolveExecutionPolicy : std::uint8_t {
+  host_each_iteration,
+  host_check_every_k,
+  fixed_budget_masked,
+  device_convergent,
+};
+
+const char *sparse_solve_execution_policy_name(
+    SparseSolveExecutionPolicy policy);
+
+struct SparseSolveExecutionCapabilities {
+  bool host_each_iteration{false};
+  bool host_check_every_k{false};
+  bool fixed_budget_masked{false};
+  bool device_convergent{false};
+};
+
+SparseSolveExecutionCapabilities sparse_solve_execution_capabilities(
+    Arch arch);
+void validate_sparse_solve_execution_policy(
+    Arch arch,
+    SparseSolveExecutionPolicy policy,
+    int host_check_interval = 1);
+
 struct SparseSolveResult {
   SparseSolveStatus status{SparseSolveStatus::kNotRun};
   int iterations{0};
@@ -74,6 +98,18 @@ struct SparseSolvePlanRuntimeStatistics {
   bool operator_numeric_changed_since_last_solve{false};
   std::string operator_action_provider{"unavailable"};
   bool operator_asynchronous_submit{false};
+  std::string operator_execution_kind{"direct"};
+  std::string operator_backend_execution_path{"unavailable"};
+  std::uint64_t operator_execution_plan_builds{0};
+  std::uint64_t operator_execution_plan_reuses{0};
+  std::uint64_t operator_binding_rebinds{0};
+  std::uint64_t operator_sequence_submissions{0};
+  std::uint64_t operator_compiled_graph_submissions{0};
+  std::uint64_t operator_runtime_capture_submissions{0};
+  std::uint64_t operator_backend_captures{0};
+  std::uint64_t operator_backend_replays{0};
+  std::uint64_t operator_ordinary_fallbacks{0};
+  std::uint64_t operator_cache_invalidations{0};
   std::uint64_t operator_generation_pins{0};
   std::uint64_t operator_generation_changes{0};
   std::uint64_t operator_numeric_generation_changes{0};
@@ -103,6 +139,9 @@ struct SparseSolvePlanRuntimeStatistics {
   std::uint64_t device_scalar_operations{0};
   std::uint64_t host_scalar_readbacks{0};
   std::uint64_t host_synchronizations{0};
+  std::string solver_execution_policy{"host_each_iteration"};
+  int host_check_interval{1};
+  bool solver_graph_enabled{false};
   bool fixed_iteration_only{false};
   bool bounded_masked_execution{false};
   std::string preconditioner_method{"identity"};

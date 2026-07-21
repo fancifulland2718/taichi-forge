@@ -155,6 +155,45 @@ bool OperatorSpaceDesc::operator==(const OperatorSpaceDesc &other) const {
          inner_product_kind == other.inner_product_kind;
 }
 
+const char *operator_execution_kind_name(OperatorExecutionKind kind) {
+  switch (kind) {
+    case OperatorExecutionKind::direct:
+      return "direct";
+    case OperatorExecutionKind::explicit_sequence:
+      return "explicit_sequence";
+    case OperatorExecutionKind::compiled_graph:
+      return "compiled_graph";
+    case OperatorExecutionKind::runtime_capture:
+      return "runtime_capture";
+  }
+  return "unknown";
+}
+
+const char *operator_backend_execution_path_name(
+    OperatorBackendExecutionPath path) {
+  switch (path) {
+    case OperatorBackendExecutionPath::unavailable:
+      return "unavailable";
+    case OperatorBackendExecutionPath::direct:
+      return "direct";
+    case OperatorBackendExecutionPath::explicit_sequence:
+      return "explicit_sequence";
+    case OperatorBackendExecutionPath::ordinary_graph_fallback:
+      return "ordinary_graph_fallback";
+    case OperatorBackendExecutionPath::cuda_capture:
+      return "cuda_capture";
+    case OperatorBackendExecutionPath::cuda_exact_replay:
+      return "cuda_exact_replay";
+    case OperatorBackendExecutionPath::cuda_patched_replay:
+      return "cuda_patched_replay";
+    case OperatorBackendExecutionPath::vulkan_record:
+      return "vulkan_record";
+    case OperatorBackendExecutionPath::vulkan_replay:
+      return "vulkan_replay";
+  }
+  return "unknown";
+}
+
 OperatorMathematicalTraits make_spd_operator_traits(
     OperatorTraitProvenance provenance,
     OperatorDependencyMask validity_scope) {
@@ -201,6 +240,23 @@ bool same_mathematical_traits(const OperatorMathematicalTraits &left,
          same_trait_claim(left.positive_semidefinite,
                           right.positive_semidefinite) &&
          same_trait_claim(left.singular, right.singular);
+}
+
+void validate_operator_execution_kind(
+    const OperatorCapabilities &capabilities,
+    OperatorExecutionKind kind) {
+  bool supported = kind == OperatorExecutionKind::direct;
+  if (kind == OperatorExecutionKind::explicit_sequence) {
+    supported = capabilities.explicit_sequence;
+  } else if (kind == OperatorExecutionKind::compiled_graph) {
+    supported = capabilities.compiled_graph;
+  } else if (kind == OperatorExecutionKind::runtime_capture) {
+    supported = capabilities.runtime_capture;
+  }
+  TI_ERROR_IF(!supported,
+              "Operator execution lowering '{}' is unsupported by this "
+              "binding; no fallback was performed.",
+              operator_execution_kind_name(kind));
 }
 
 }  // namespace
@@ -616,12 +672,43 @@ OperatorBinding OperatorBinding::with_mathematical_traits(
     OperatorMathematicalTraits mathematical_traits) const {
   auto source = *this;
   auto metadata = action_.with_mathematical_traits(mathematical_traits);
-  return OperatorBinding::from_generation_publisher(
+  auto result = OperatorBinding::from_generation_publisher(
       std::move(metadata),
       [source = std::move(source),
        mathematical_traits = std::move(mathematical_traits)] {
         return source.pin().with_mathematical_traits(mathematical_traits);
       });
+  result.execution_kind_ = execution_kind_;
+  result.execution_statistics_ = execution_statistics_;
+  return result;
+}
+
+OperatorBinding OperatorBinding::with_execution_lowering(
+    OperatorExecutionKind execution_kind,
+    ExecutionRuntimeStatisticsFn execution_statistics) const {
+  auto result = *this;
+  result.execution_kind_ = execution_kind;
+  result.execution_statistics_ = std::move(execution_statistics);
+  return result;
+}
+
+OperatorExecutionKind OperatorBinding::execution_kind() const {
+  return execution_kind_;
+}
+
+OperatorBinding::ExecutionRuntimeStatistics
+OperatorBinding::execution_runtime_statistics() const {
+  if (execution_statistics_) {
+    return execution_statistics_();
+  }
+  ExecutionRuntimeStatistics result;
+  if (execution_kind_ == OperatorExecutionKind::direct) {
+    result.last_backend_path = OperatorBackendExecutionPath::direct;
+  } else if (execution_kind_ == OperatorExecutionKind::explicit_sequence) {
+    result.last_backend_path =
+        OperatorBackendExecutionPath::explicit_sequence;
+  }
+  return result;
 }
 
 OperatorResourceLease OperatorBinding::acquire_resource_lease() const {
@@ -664,6 +751,10 @@ OperatorPlan::OperatorPlan(Program *program,
       binding_(std::move(binding)),
       dependencies_(dependencies),
       planned_stamp_(binding_.action().resource_stamp()) {
+  validate_operator_execution_kind(binding_.action().capabilities(),
+                                   binding_.execution_kind());
+  statistics_.execution_plan_builds = 1;
+  statistics_.execution_kind = binding_.execution_kind();
   TI_ERROR_IF(program_ && !arch_is_cpu(program_->compile_config().arch) &&
                   !arch_is_cuda(program_->compile_config().arch) &&
                   program_->compile_config().arch != Arch::vulkan,
@@ -702,6 +793,10 @@ const OperatorCapabilities &OperatorPlan::capabilities() const {
 
 const std::string &OperatorPlan::provider_name() const {
   return binding_.action().provider_name();
+}
+
+OperatorExecutionKind OperatorPlan::execution_kind() const {
+  return binding_.execution_kind();
 }
 
 OperatorDependencyMask OperatorPlan::dependencies() const {
@@ -982,6 +1077,15 @@ OperatorSubmission OperatorPlan::submit(const OperatorPinnedAction &pinned,
     validate_view(*request.addend, expected_output, program_, "addend", false);
   }
 
+  if (has_vector_binding_ &&
+      (last_input_binding_ != request.input.allocation_identity ||
+       last_output_binding_ != request.output.allocation_identity)) {
+    statistics_.binding_rebinds++;
+  }
+  has_vector_binding_ = true;
+  last_input_binding_ = request.input.allocation_identity;
+  last_output_binding_ = request.output.allocation_identity;
+  statistics_.execution_plan_reuses++;
   statistics_.submissions++;
   const auto &action = pinned;
   if (request.alpha == 1.0 && request.beta == 0.0) {
@@ -1017,7 +1121,19 @@ OperatorSubmission OperatorPlan::submit(const OperatorPinnedAction &pinned,
 }
 
 OperatorPlanRuntimeStatistics OperatorPlan::debug_runtime_statistics() const {
-  return statistics_;
+  auto result = statistics_;
+  const auto execution = binding_.execution_runtime_statistics();
+  result.last_backend_path = execution.last_backend_path;
+  result.sequence_submissions = execution.sequence_submissions;
+  result.compiled_graph_submissions =
+      execution.compiled_graph_submissions;
+  result.runtime_capture_submissions =
+      execution.runtime_capture_submissions;
+  result.backend_captures = execution.backend_captures;
+  result.backend_replays = execution.backend_replays;
+  result.ordinary_fallbacks = execution.ordinary_fallbacks;
+  result.cache_invalidations = execution.cache_invalidations;
+  return result;
 }
 
 OperatorAction make_dense_reference_operator_action(

@@ -33,6 +33,30 @@ enum class OperatorApplyMode : std::uint8_t {
   adjoint,
 };
 
+enum class OperatorExecutionKind : std::uint8_t {
+  direct,
+  explicit_sequence,
+  compiled_graph,
+  runtime_capture,
+};
+
+const char *operator_execution_kind_name(OperatorExecutionKind kind);
+
+enum class OperatorBackendExecutionPath : std::uint8_t {
+  unavailable,
+  direct,
+  explicit_sequence,
+  ordinary_graph_fallback,
+  cuda_capture,
+  cuda_exact_replay,
+  cuda_patched_replay,
+  vulkan_record,
+  vulkan_replay,
+};
+
+const char *operator_backend_execution_path_name(
+    OperatorBackendExecutionPath path);
+
 struct OperatorSpaceDesc {
   DataType scalar_type{PrimitiveType::unknown};
   std::size_t scalar_extent{0};
@@ -56,6 +80,11 @@ struct OperatorCapabilities {
   bool adjoint_apply{false};
   bool native_generalized_apply{false};
   bool asynchronous_submit{false};
+  bool explicit_sequence{false};
+  bool compiled_graph{false};
+  bool runtime_capture{false};
+  bool binding_rebind{false};
+  bool persistent_workspace{false};
 };
 
 using OperatorDependencyMask = std::uint32_t;
@@ -331,6 +360,19 @@ class OperatorBinding {
  public:
   using AcquireResourceLeaseFn = std::function<OperatorResourceLease()>;
   using AcquirePinnedActionFn = std::function<OperatorPinnedAction()>;
+  struct ExecutionRuntimeStatistics {
+    OperatorBackendExecutionPath last_backend_path{
+        OperatorBackendExecutionPath::unavailable};
+    std::uint64_t sequence_submissions{0};
+    std::uint64_t compiled_graph_submissions{0};
+    std::uint64_t runtime_capture_submissions{0};
+    std::uint64_t backend_captures{0};
+    std::uint64_t backend_replays{0};
+    std::uint64_t ordinary_fallbacks{0};
+    std::uint64_t cache_invalidations{0};
+  };
+  using ExecutionRuntimeStatisticsFn =
+      std::function<ExecutionRuntimeStatistics()>;
 
   explicit OperatorBinding(OperatorAction action,
                            AcquireResourceLeaseFn acquire_resource_lease = {});
@@ -342,6 +384,11 @@ class OperatorBinding {
   const OperatorAction &action() const;
   OperatorBinding with_mathematical_traits(
       OperatorMathematicalTraits mathematical_traits) const;
+  OperatorBinding with_execution_lowering(
+      OperatorExecutionKind execution_kind,
+      ExecutionRuntimeStatisticsFn execution_statistics = {}) const;
+  OperatorExecutionKind execution_kind() const;
+  ExecutionRuntimeStatistics execution_runtime_statistics() const;
   OperatorResourceLease acquire_resource_lease() const;
   OperatorPinnedAction pin() const;
 
@@ -353,6 +400,8 @@ class OperatorBinding {
   OperatorAction action_;
   AcquireResourceLeaseFn acquire_resource_lease_;
   AcquirePinnedActionFn acquire_pinned_action_;
+  OperatorExecutionKind execution_kind_{OperatorExecutionKind::direct};
+  ExecutionRuntimeStatisticsFn execution_statistics_;
 };
 
 struct OperatorPlanRuntimeStatistics {
@@ -367,6 +416,19 @@ struct OperatorPlanRuntimeStatistics {
   std::uint64_t numeric_generation_changes{0};
   std::uint64_t binding_generation_changes{0};
   std::uint64_t invalidations{0};
+  std::uint64_t execution_plan_builds{0};
+  std::uint64_t execution_plan_reuses{0};
+  std::uint64_t binding_rebinds{0};
+  OperatorExecutionKind execution_kind{OperatorExecutionKind::direct};
+  OperatorBackendExecutionPath last_backend_path{
+      OperatorBackendExecutionPath::unavailable};
+  std::uint64_t sequence_submissions{0};
+  std::uint64_t compiled_graph_submissions{0};
+  std::uint64_t runtime_capture_submissions{0};
+  std::uint64_t backend_captures{0};
+  std::uint64_t backend_replays{0};
+  std::uint64_t ordinary_fallbacks{0};
+  std::uint64_t cache_invalidations{0};
 };
 
 class OperatorPlan {
@@ -387,6 +449,7 @@ class OperatorPlan {
   const OperatorMathematicalTraits &mathematical_traits() const;
   const OperatorCapabilities &capabilities() const;
   const std::string &provider_name() const;
+  OperatorExecutionKind execution_kind() const;
   OperatorDependencyMask dependencies() const;
   OperatorResourceStamp resource_stamp() const;
   OperatorResourceLease acquire_resource_lease() const;
@@ -411,6 +474,9 @@ class OperatorPlan {
   OperatorResourceStamp planned_stamp_;
   OperatorResourceStamp last_pinned_stamp_;
   bool has_pinned_generation_{false};
+  bool has_vector_binding_{false};
+  std::uintptr_t last_input_binding_{0};
+  std::uintptr_t last_output_binding_{0};
   std::unique_ptr<Scratch> forward_scratch_;
   std::unique_ptr<Scratch> adjoint_scratch_;
   OperatorPlanRuntimeStatistics statistics_;

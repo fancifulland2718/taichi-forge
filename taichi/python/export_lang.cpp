@@ -4820,6 +4820,15 @@ void export_lang(py::module &m) {
             stats.operator_action_provider;
         identity["operator_asynchronous_submit"] =
             stats.operator_asynchronous_submit;
+        identity["operator_execution_kind"] =
+            stats.operator_execution_kind;
+        identity["operator_backend_execution_path"] =
+            stats.operator_backend_execution_path;
+        identity["solver_execution_policy"] =
+            stats.solver_execution_policy;
+        identity["host_check_interval"] = stats.host_check_interval;
+        identity["solver_graph_enabled"] =
+            stats.solver_graph_enabled;
         identity["preconditioner_action_provider"] =
             stats.preconditioner_action_provider;
         identity["preconditioner_behavior"] =
@@ -4874,6 +4883,26 @@ void export_lang(py::module &m) {
             stats.operator_binding_generation_changes;
         operations["operator_plan_invalidations"] =
             stats.operator_plan_invalidations;
+        operations["operator_execution_plan_builds"] =
+            stats.operator_execution_plan_builds;
+        operations["operator_execution_plan_reuses"] =
+            stats.operator_execution_plan_reuses;
+        operations["operator_binding_rebinds"] =
+            stats.operator_binding_rebinds;
+        operations["operator_sequence_submissions"] =
+            stats.operator_sequence_submissions;
+        operations["operator_compiled_graph_submissions"] =
+            stats.operator_compiled_graph_submissions;
+        operations["operator_runtime_capture_submissions"] =
+            stats.operator_runtime_capture_submissions;
+        operations["operator_backend_captures"] =
+            stats.operator_backend_captures;
+        operations["operator_backend_replays"] =
+            stats.operator_backend_replays;
+        operations["operator_ordinary_fallbacks"] =
+            stats.operator_ordinary_fallbacks;
+        operations["operator_cache_invalidations"] =
+            stats.operator_cache_invalidations;
         operations["preconditioner_generation_pins"] =
             stats.preconditioner_generation_pins;
         operations["preconditioner_generation_changes"] =
