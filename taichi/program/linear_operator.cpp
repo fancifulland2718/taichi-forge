@@ -2187,6 +2187,12 @@ OperatorBinding ExperimentalLinearOperatorHandle::binding() const {
   return binding_;
 }
 
+std::unique_ptr<ExperimentalLinearOperatorSession>
+ExperimentalLinearOperatorHandle::begin_session() {
+  return std::make_unique<ExperimentalLinearOperatorSession>(
+      program_, plan_.get(), plan_->pin());
+}
+
 void ExperimentalLinearOperatorHandle::apply(Program *program,
                                              const Ndarray &input,
                                              const Ndarray &output) {
@@ -2201,6 +2207,54 @@ void ExperimentalLinearOperatorHandle::apply(Program *program,
        OperatorVectorView::from_ndarray(program_, output,
                                         descriptor.range, true)});
   submission.wait();
+}
+
+ExperimentalLinearOperatorSession::ExperimentalLinearOperatorSession(
+    Program *program,
+    OperatorPlan *plan,
+    OperatorPinnedAction generation)
+    : program_(program), plan_(plan), generation_(std::move(generation)) {
+  TI_ERROR_IF(!program_ || !plan_,
+              "LinearOperator session requires a live operator plan.");
+}
+
+ExperimentalLinearOperatorSession::~ExperimentalLinearOperatorSession() {
+  if (submitted_ && program_) {
+    try {
+      program_->synchronize();
+    } catch (...) {
+      // Destruction cannot surface a backend error. Program diagnostics keep
+      // the fault observable, matching OperatorSubmission destruction.
+    }
+  }
+}
+
+void ExperimentalLinearOperatorSession::submit(Program *program,
+                                               const Ndarray &input,
+                                               const Ndarray &output) {
+  TI_ERROR_IF(program != program_,
+              "LinearOperator session must use its construction Program.");
+  const auto &descriptor = plan_->descriptor();
+  (void)plan_->submit(
+      generation_,
+      {OperatorApplyMode::forward,
+       OperatorVectorView::from_ndarray(program_, input, descriptor.domain,
+                                        false),
+       nullptr,
+       OperatorVectorView::from_ndarray(program_, output, descriptor.range,
+                                        true)});
+  submitted_ = true;
+}
+
+void ExperimentalLinearOperatorSession::wait() {
+  if (submitted_) {
+    program_->synchronize();
+    submitted_ = false;
+  }
+}
+
+void ExperimentalLinearOperatorSession::mark_synchronized() {
+  submitted_ = false;
 }
 
 OperatorBinding make_program_sparse_operator_binding(Program *program,

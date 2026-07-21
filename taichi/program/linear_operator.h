@@ -507,6 +507,8 @@ class ExperimentalLinearOperatorHandle {
   OperatorPlanRuntimeStatistics debug_runtime_statistics() const;
   OperatorBinding binding() const;
 
+  std::unique_ptr<class ExperimentalLinearOperatorSession> begin_session();
+
   void apply(Program *program,
              const Ndarray &input,
              const Ndarray &output);
@@ -515,6 +517,34 @@ class ExperimentalLinearOperatorHandle {
   Program *program_{nullptr};
   OperatorBinding binding_;
   std::unique_ptr<OperatorPlan> plan_;
+};
+
+// A solve-scoped pinned generation used by iterative plans that interleave
+// provider submissions with backend-native recurrence kernels. It is private
+// to the Python experimental API: ordinary LinearOperator.apply() remains a
+// synchronous boundary.
+class ExperimentalLinearOperatorSession {
+ public:
+  ExperimentalLinearOperatorSession(Program *program,
+                                    OperatorPlan *plan,
+                                    OperatorPinnedAction generation);
+  ExperimentalLinearOperatorSession(
+      const ExperimentalLinearOperatorSession &) = delete;
+  ExperimentalLinearOperatorSession &operator=(
+      const ExperimentalLinearOperatorSession &) = delete;
+  ~ExperimentalLinearOperatorSession();
+
+  void submit(Program *program,
+              const Ndarray &input,
+              const Ndarray &output);
+  void wait();
+  void mark_synchronized();
+
+ private:
+  Program *program_{nullptr};
+  OperatorPlan *plan_{nullptr};
+  OperatorPinnedAction generation_;
+  bool submitted_{false};
 };
 
 enum class PreconditionerBehavior : std::uint8_t {

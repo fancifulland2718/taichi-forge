@@ -1154,7 +1154,17 @@ class SolvePlan:
         return dict(self._solver._debug_runtime_stats())
 
 
+# Imported last because the batched implementation deliberately reuses the
+# validated LinearOperator helpers above without extending OperatorSpaceDesc.
+from taichi_forge.linalg._batched_solver import (  # noqa: E402
+    BatchedSolvePlan,
+    BatchedSolveResult,
+)
+
+
 __all__ = [
+    "BatchedSolvePlan",
+    "BatchedSolveResult",
     "LinearOperator",
     "OperatorCapabilities",
     "OperatorTraits",

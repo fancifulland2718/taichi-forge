@@ -5101,11 +5101,23 @@ void export_lang(py::module &m) {
         return result;
       };
 
+  py::class_<ExperimentalLinearOperatorSession>(
+      m, "ExperimentalLinearOperatorSession")
+      .def("_submit", &ExperimentalLinearOperatorSession::submit,
+           py::keep_alive<1, 2>(), py::arg("program"), py::arg("input"),
+           py::arg("output"))
+      .def("_wait", &ExperimentalLinearOperatorSession::wait)
+      .def("_mark_synchronized",
+           &ExperimentalLinearOperatorSession::mark_synchronized);
+
   py::class_<ExperimentalLinearOperatorHandle>(
       m, "ExperimentalLinearOperatorHandle")
       .def("_apply", &ExperimentalLinearOperatorHandle::apply,
            py::keep_alive<1, 2>(), py::arg("program"),
            py::arg("input"), py::arg("output"))
+      .def("_begin_session",
+           &ExperimentalLinearOperatorHandle::begin_session,
+           py::keep_alive<0, 1>())
       .def("_metadata", [](const ExperimentalLinearOperatorHandle &handle) {
         const auto &descriptor = handle.descriptor();
         const auto &capabilities = handle.capabilities();
