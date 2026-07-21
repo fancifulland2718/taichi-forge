@@ -2392,7 +2392,9 @@ class TI_DLL_EXPORT Program {
   std::size_t vulkan_sparse_convergence(Ndarray *residual_squared,
                                         Ndarray *status,
                                         Ndarray *completed_iterations,
-                                        float tolerance_squared,
+                                        Ndarray *rhs_squared,
+                                        float absolute_tolerance,
+                                        float relative_tolerance,
                                         std::uint32_t iteration);
 
   void vulkan_sparse_algebra_clear_workspace();

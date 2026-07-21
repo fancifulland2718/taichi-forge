@@ -170,12 +170,15 @@ TEST(LinearOperator, SolverExecutionPolicyCapabilitiesAreExplicit) {
   const auto vulkan =
       sparse_solve_execution_capabilities(Arch::vulkan);
   EXPECT_FALSE(vulkan.host_each_iteration);
-  EXPECT_FALSE(vulkan.host_check_every_k);
+  EXPECT_TRUE(vulkan.host_check_every_k);
   EXPECT_TRUE(vulkan.fixed_budget_masked);
   EXPECT_FALSE(vulkan.device_convergent);
   EXPECT_NO_THROW(validate_sparse_solve_execution_policy(
       Arch::vulkan,
       SparseSolveExecutionPolicy::fixed_budget_masked));
+  EXPECT_NO_THROW(validate_sparse_solve_execution_policy(
+      Arch::vulkan,
+      SparseSolveExecutionPolicy::host_check_every_k, 4));
   EXPECT_ANY_THROW(validate_sparse_solve_execution_policy(
       Arch::vulkan,
       SparseSolveExecutionPolicy::host_each_iteration));

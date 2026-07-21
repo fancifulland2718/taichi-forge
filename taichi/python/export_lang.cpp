@@ -1345,7 +1345,8 @@ void export_lang(py::module &m) {
                &Program::vulkan_sparse_convergence),
            py::arg("residual_squared"), py::arg("status"),
            py::arg("completed_iterations"),
-           py::arg("tolerance_squared"), py::arg("iteration"))
+           py::arg("rhs_squared"), py::arg("absolute_tolerance"),
+           py::arg("relative_tolerance"), py::arg("iteration"))
       .def("_vulkan_sparse_algebra_clear_workspace",
            &Program::vulkan_sparse_algebra_clear_workspace)
       .def("_vulkan_sparse_algebra_workspace_bytes",
@@ -5905,6 +5906,24 @@ void export_lang(py::module &m) {
 
   py::class_<VulkanCGIterationPlan>(m, "VulkanCGIterationPlan")
       .def("solve", &VulkanCGIterationPlan::solve)
+      .def(
+          "_configure_execution_policy",
+          [](VulkanCGIterationPlan &cg, const std::string &policy,
+             int check_interval) {
+            SparseSolveExecutionPolicy native_policy;
+            if (policy == "host_check_every_k") {
+              native_policy =
+                  SparseSolveExecutionPolicy::host_check_every_k;
+            } else if (policy == "fixed_budget_masked") {
+              native_policy =
+                  SparseSolveExecutionPolicy::fixed_budget_masked;
+            } else {
+              TI_ERROR("Unsupported Vulkan CG execution policy '{}'.",
+                       policy);
+            }
+            cg.configure_execution_policy(native_policy, check_interval);
+          },
+          py::arg("policy"), py::arg("check_interval"))
       .def("is_success", &VulkanCGIterationPlan::is_success)
       .def("get_iterations",
            &VulkanCGIterationPlan::get_iterations)
@@ -5926,29 +5945,50 @@ void export_lang(py::module &m) {
   m.def("_make_vulkan_cg_iteration_plan",
         make_vulkan_cg_iteration_plan);
   m.def("_make_vulkan_cg_convergence_plan",
-        make_vulkan_cg_convergence_plan);
+        make_vulkan_cg_convergence_plan, py::keep_alive<0, 1>(),
+        py::keep_alive<0, 2>(), py::arg("program"), py::arg("matrix"),
+        py::arg("max_iterations"), py::arg("absolute_tolerance"),
+        py::arg("relative_tolerance") = 0.0f);
   m.def("_make_vulkan_jacobi_pcg_convergence_plan",
         make_vulkan_jacobi_pcg_convergence_plan,
         py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
-        py::keep_alive<0, 3>());
+        py::keep_alive<0, 3>(), py::arg("program"), py::arg("matrix"),
+        py::arg("preconditioner"), py::arg("max_iterations"),
+        py::arg("absolute_tolerance"),
+        py::arg("relative_tolerance") = 0.0f);
   m.def("_make_vulkan_block_jacobi_pcg_convergence_plan",
         make_vulkan_block_jacobi_pcg_convergence_plan,
         py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
-        py::keep_alive<0, 3>());
+        py::keep_alive<0, 3>(), py::arg("program"), py::arg("matrix"),
+        py::arg("preconditioner"), py::arg("max_iterations"),
+        py::arg("absolute_tolerance"),
+        py::arg("relative_tolerance") = 0.0f);
   m.def("_make_vulkan_compiled_kernel_cg_convergence_plan",
         make_vulkan_compiled_kernel_cg_convergence_plan,
-        py::keep_alive<0, 1>(), py::keep_alive<0, 2>());
+        py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+        py::arg("program"), py::arg("matrix"),
+        py::arg("max_iterations"), py::arg("absolute_tolerance"),
+        py::arg("relative_tolerance") = 0.0f);
   m.def("_make_vulkan_compiled_graph_cg_convergence_plan",
         make_vulkan_compiled_graph_cg_convergence_plan,
-        py::keep_alive<0, 1>(), py::keep_alive<0, 2>());
+        py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+        py::arg("program"), py::arg("matrix"),
+        py::arg("max_iterations"), py::arg("absolute_tolerance"),
+        py::arg("relative_tolerance") = 0.0f);
   m.def("_make_vulkan_compiled_kernel_pcg_convergence_plan",
         make_vulkan_compiled_kernel_pcg_convergence_plan,
         py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
-        py::keep_alive<0, 3>());
+        py::keep_alive<0, 3>(), py::arg("program"), py::arg("matrix"),
+        py::arg("preconditioner"), py::arg("max_iterations"),
+        py::arg("absolute_tolerance"),
+        py::arg("relative_tolerance") = 0.0f);
   m.def("_make_vulkan_experimental_linear_operator_pcg_convergence_plan",
         make_vulkan_experimental_linear_operator_pcg_convergence_plan,
         py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
-        py::keep_alive<0, 3>());
+        py::keep_alive<0, 3>(), py::arg("program"), py::arg("matrix"),
+        py::arg("preconditioner"), py::arg("max_iterations"),
+        py::arg("absolute_tolerance"),
+        py::arg("relative_tolerance") = 0.0f);
 
   // Mesh Class
   // Mesh related.

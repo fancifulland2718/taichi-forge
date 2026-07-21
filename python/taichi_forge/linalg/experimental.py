@@ -650,8 +650,8 @@ class SolvePlan:
     or ``"block_jacobi"`` selection. It also accepts a trusted SPD
     :class:`LinearOperator` as a fixed-linear preconditioner. GPU custom
     preconditioners currently require compiled-kernel A and M providers.
-    BiCGSTAB is CPU-only. Vulkan uses a bounded masked convergence plan and
-    currently supports absolute tolerance.
+    BiCGSTAB is CPU-only. Vulkan supports bounded masked execution or
+    chunked host convergence checks, including relative tolerance.
     """
 
     def __init__(
@@ -731,12 +731,18 @@ class SolvePlan:
                 )
             expected_interval = 4 if policy == "host_check_every_k" else 1
         elif arch == _ti_core.Arch.vulkan:
-            if policy != "fixed_budget_masked":
+            if policy not in (
+                "fixed_budget_masked",
+                "host_check_every_k",
+            ):
                 raise TaichiRuntimeError(
-                    "Vulkan SolvePlan currently supports "
-                    "fixed_budget_masked only"
+                    "Vulkan SolvePlan supports fixed_budget_masked or "
+                    "host_check_every_k"
                 )
-            expected_interval = self.max_iterations
+            expected_interval = (
+                4 if policy == "host_check_every_k"
+                else self.max_iterations
+            )
         else:
             raise TaichiRuntimeError("unsupported SolvePlan backend")
         if check_interval is None:
@@ -757,7 +763,7 @@ class SolvePlan:
             )
         if policy == "host_check_every_k" and check_interval not in (4, 8):
             raise TaichiRuntimeError(
-                "CUDA host_check_every_k currently supports K=4 or K=8"
+                "host_check_every_k currently supports K=4 or K=8"
             )
         return policy, check_interval
 
@@ -765,6 +771,13 @@ class SolvePlan:
         solver._configure_execution_policy(
             self.execution_policy, self.check_interval
         )
+        return solver
+
+    def _configure_vulkan_solver(self, solver):
+        if self.execution_policy == "host_check_every_k":
+            solver._configure_execution_policy(
+                self.execution_policy, self.check_interval
+            )
         return solver
 
     def _require_spd(self):
@@ -906,10 +919,6 @@ class SolvePlan:
                     )
                 )
             if arch == _ti_core.Arch.vulkan:
-                if self.rtol != 0.0:
-                    raise TaichiRuntimeError(
-                        "Vulkan SolvePlan supports absolute tolerance only"
-                    )
                 if kind == "kernel":
                     factory = (
                         _ti_core._make_vulkan_compiled_kernel_cg_convergence_plan
@@ -924,11 +933,14 @@ class SolvePlan:
                     raise TaichiRuntimeError(
                         "GPU SolvePlan does not lower composed operators"
                     )
-                return factory(
-                    self._program,
-                    core,
-                    self.max_iterations,
-                    self.atol,
+                return self._configure_vulkan_solver(
+                    factory(
+                        self._program,
+                        core,
+                        self.max_iterations,
+                        self.atol,
+                        self.rtol,
+                    )
                 )
             raise TaichiRuntimeError("unsupported SolvePlan backend")
 
@@ -970,19 +982,18 @@ class SolvePlan:
                     )
                 )
             if arch == _ti_core.Arch.vulkan:
-                if self.rtol != 0.0:
-                    raise TaichiRuntimeError(
-                        "Vulkan SolvePlan supports absolute tolerance only"
-                    )
                 factory = (
                     _ti_core._make_vulkan_experimental_linear_operator_pcg_convergence_plan
                 )
-                return factory(
-                    self._program,
-                    core,
-                    self.preconditioner._handle,
-                    self.max_iterations,
-                    self.atol,
+                return self._configure_vulkan_solver(
+                    factory(
+                        self._program,
+                        core,
+                        self.preconditioner._handle,
+                        self.max_iterations,
+                        self.atol,
+                        self.rtol,
+                    )
                 )
             raise TaichiRuntimeError("unsupported PCG backend")
 
@@ -999,10 +1010,6 @@ class SolvePlan:
         if kind != "stored":
             raise TaichiRuntimeError(
                 "experimental PCG supports fixed stored CSR/BSR providers only"
-            )
-        if arch == _ti_core.Arch.vulkan and self.rtol != 0.0:
-            raise TaichiRuntimeError(
-                "Vulkan SolvePlan supports absolute tolerance only"
             )
         contract = self.operator._source._get_format_contract()
         storage = contract["identity"]["storage_format"]
@@ -1040,12 +1047,15 @@ class SolvePlan:
                     )
                 )
             if arch == _ti_core.Arch.vulkan:
-                return _ti_core._make_vulkan_jacobi_pcg_convergence_plan(
-                    self._program,
-                    core,
-                    self._native_preconditioner,
-                    self.max_iterations,
-                    self.atol,
+                return self._configure_vulkan_solver(
+                    _ti_core._make_vulkan_jacobi_pcg_convergence_plan(
+                        self._program,
+                        core,
+                        self._native_preconditioner,
+                        self.max_iterations,
+                        self.atol,
+                        self.rtol,
+                    )
                 )
             raise TaichiRuntimeError("unsupported PCG backend")
 
@@ -1076,12 +1086,15 @@ class SolvePlan:
                 )
             )
         if arch == _ti_core.Arch.vulkan:
-            return _ti_core._make_vulkan_block_jacobi_pcg_convergence_plan(
-                self._program,
-                core,
-                self._native_preconditioner,
-                self.max_iterations,
-                self.atol,
+            return self._configure_vulkan_solver(
+                _ti_core._make_vulkan_block_jacobi_pcg_convergence_plan(
+                    self._program,
+                    core,
+                    self._native_preconditioner,
+                    self.max_iterations,
+                    self.atol,
+                    self.rtol,
+                )
             )
         raise TaichiRuntimeError("unsupported PCG backend")
 

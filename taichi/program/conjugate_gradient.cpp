@@ -109,6 +109,7 @@ SparseSolveExecutionCapabilities sparse_solve_execution_capabilities(
     result.host_each_iteration = true;
     result.host_check_every_k = true;
   } else if (arch == Arch::vulkan) {
+    result.host_check_every_k = true;
     result.fixed_budget_masked = true;
   }
   return result;
@@ -2093,17 +2094,19 @@ std::unique_ptr<CpuSparseCGPlan> make_cpu_compiled_kernel_pcg_solver(
 VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
     SparseMatrix &matrix,
     int fixed_iterations)
-    : VulkanCGIterationPlan(program, matrix, fixed_iterations, 0.0f, false,
-                            false, false, nullptr, nullptr, nullptr, nullptr) {
+    : VulkanCGIterationPlan(program, matrix, fixed_iterations, 0.0f, 0.0f,
+                            false, false, false, nullptr, nullptr, nullptr,
+                            nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
                                              SparseMatrix &matrix,
                                              int max_iterations,
-    float absolute_tolerance)
+                                             float absolute_tolerance,
+                                             float relative_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
-                            absolute_tolerance, true, false, false, nullptr,
-                            nullptr, nullptr, nullptr) {
+                            absolute_tolerance, relative_tolerance, true,
+                            false, false, nullptr, nullptr, nullptr, nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(
@@ -2111,9 +2114,11 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
     SparseMatrix &matrix,
     SparseJacobiPreconditionerPlan &preconditioner,
     int max_iterations,
-    float absolute_tolerance)
+    float absolute_tolerance,
+    float relative_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
-                            absolute_tolerance, true, false, false,
+                            absolute_tolerance, relative_tolerance, true,
+                            false, false,
                             &preconditioner, nullptr, nullptr, nullptr) {
 }
 
@@ -2122,30 +2127,34 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
     SparseMatrix &matrix,
     SparseBlockJacobiPreconditionerPlan &preconditioner,
     int max_iterations,
-    float absolute_tolerance)
+    float absolute_tolerance,
+    float relative_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
-                            absolute_tolerance, true, false, false, nullptr,
-                            &preconditioner, nullptr, nullptr) {
+                            absolute_tolerance, relative_tolerance, true,
+                            false, false, nullptr, &preconditioner, nullptr,
+                            nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(
     Program *program,
     CompiledKernelLinearOperator &matrix,
     int max_iterations,
-    float absolute_tolerance)
+    float absolute_tolerance,
+    float relative_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
-                            absolute_tolerance, true, true, false, nullptr,
-                            nullptr, nullptr, nullptr) {
+                            absolute_tolerance, relative_tolerance, true,
+                            true, false, nullptr, nullptr, nullptr, nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(
     Program *program,
     CompiledGraphLinearOperator &matrix,
     int max_iterations,
-    float absolute_tolerance)
+    float absolute_tolerance,
+    float relative_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
-                            absolute_tolerance, true, false, true, nullptr,
-                            nullptr, nullptr, nullptr) {
+                            absolute_tolerance, relative_tolerance, true,
+                            false, true, nullptr, nullptr, nullptr, nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(
@@ -2153,10 +2162,12 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
     CompiledKernelLinearOperator &matrix,
     CompiledKernelPreconditionerPlan &preconditioner,
     int max_iterations,
-    float absolute_tolerance)
+    float absolute_tolerance,
+    float relative_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
-                            absolute_tolerance, true, true, false, nullptr,
-                            nullptr, &preconditioner, nullptr) {
+                            absolute_tolerance, relative_tolerance, true,
+                            true, false, nullptr, nullptr, &preconditioner,
+                            nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(
@@ -2164,16 +2175,19 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
     CompiledKernelLinearOperator &matrix,
     ExperimentalLinearOperatorHandle &preconditioner,
     int max_iterations,
-    float absolute_tolerance)
+    float absolute_tolerance,
+    float relative_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
-                            absolute_tolerance, true, true, false, nullptr,
-                            nullptr, nullptr, &preconditioner) {
+                            absolute_tolerance, relative_tolerance, true,
+                            true, false, nullptr, nullptr, nullptr,
+                            &preconditioner) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
                                              SparseMatrix &matrix,
                                              int max_iterations,
                                              float absolute_tolerance,
+                                             float relative_tolerance,
                                              bool adaptive,
                                              bool allow_compiled_kernel_operator,
                                              bool allow_compiled_graph_operator,
@@ -2236,10 +2250,13 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
               "Vulkan CG iteration plans require positive max iterations.");
   TI_ERROR_IF(adaptive &&
                   (!std::isfinite(absolute_tolerance) ||
-                   absolute_tolerance <= 0.0f ||
-                   !std::isfinite(absolute_tolerance * absolute_tolerance)),
-              "Adaptive Vulkan CG plans require a finite positive absolute "
-              "tolerance.");
+                   !std::isfinite(relative_tolerance) ||
+                   absolute_tolerance < 0.0f ||
+                   relative_tolerance < 0.0f ||
+                   (absolute_tolerance == 0.0f &&
+                    relative_tolerance == 0.0f)),
+              "Adaptive Vulkan CG plans require finite non-negative atol "
+              "and rtol with at least one positive tolerance.");
   program_ = program;
   matrix_ = &matrix;
   csr_matrix_ = vulkan_csr;
@@ -2254,6 +2271,8 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
       allow_compiled_graph_operator ? compiled_graph_operator : nullptr;
   fixed_iterations_ = max_iterations;
   absolute_tolerance_ = absolute_tolerance;
+  relative_tolerance_ = relative_tolerance;
+  host_check_interval_ = max_iterations;
   adaptive_ = adaptive;
   if (compiled_graph_operator_) {
     operator_plan_ = std::make_unique<OperatorPlan>(
@@ -2316,6 +2335,9 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
       preconditioned_residual_ = create_vector();
     }
     initial_rr_ = create_f32_scalar();
+    if (adaptive_) {
+      rhs_squared_ = create_f32_scalar();
+    }
     rr_a_ = create_f32_scalar();
     rr_b_ = create_f32_scalar();
     p_ap_ = create_f32_scalar();
@@ -2341,6 +2363,24 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
 
 bool VulkanCGIterationPlan::has_preconditioner() const {
   return preconditioner_plan_ != nullptr;
+}
+
+void VulkanCGIterationPlan::configure_execution_policy(
+    SparseSolveExecutionPolicy policy,
+    int host_check_interval) {
+  std::lock_guard<std::mutex> lock(solve_mutex_);
+  TI_ERROR_IF(solve_calls_ != 0,
+              "Vulkan CG execution policy must be configured before solve.");
+  validate_sparse_solve_execution_policy(Arch::vulkan, policy,
+                                         host_check_interval);
+  TI_ERROR_IF(policy == SparseSolveExecutionPolicy::host_check_every_k &&
+                  host_check_interval != 4 && host_check_interval != 8,
+              "Vulkan host_check_every_k currently supports K=4 or K=8.");
+  execution_policy_ = policy;
+  host_check_interval_ =
+      policy == SparseSolveExecutionPolicy::host_check_every_k
+          ? host_check_interval
+          : fixed_iterations_;
 }
 
 void VulkanCGIterationPlan::apply_preconditioner(
@@ -2419,7 +2459,7 @@ void VulkanCGIterationPlan::solve(Program *program,
       direction_,  preconditioned_residual_,  initial_rr_, rr_a_, rr_b_,
       p_ap_,       alpha_,      beta_,        residual_norm_scalar_,
       status_scalar_,           zero_status_scalar_,
-      completed_iterations_scalar_};
+      completed_iterations_scalar_, rhs_squared_};
   program->retain_ndarrays_for_external_submission(
       resources, std::size(resources));
   const auto operator_stamp = operator_generation.resource_stamp();
@@ -2436,6 +2476,8 @@ void VulkanCGIterationPlan::solve(Program *program,
   status_ = static_cast<int>(SparseSolveStatus::kMaxIterations);
   initial_residual_norm_ = 0.0;
   residual_norm_ = 0.0;
+  relative_reference_norm_ = 0.0;
+  effective_tolerance_ = static_cast<double>(absolute_tolerance_);
 
   auto *mutable_x = const_cast<Ndarray *>(&x);
   auto *mutable_b = const_cast<Ndarray *>(&b);
@@ -2448,66 +2490,117 @@ void VulkanCGIterationPlan::solve(Program *program,
   apply_operator(program, operator_generation, x, *ap_);
   program->vulkan_sparse_axpy(ap_, residual_, n, -1.0f);
   program->vulkan_sparse_dot(residual_, residual_, initial_rr_, n);
+  bool initial_terminal = false;
+  std::uint64_t solve_host_readbacks = 0;
+  std::uint64_t solve_host_synchronizations = 0;
+  std::uint64_t solve_device_to_host_bytes = 0;
+  const bool host_check_every_k =
+      adaptive_ &&
+      execution_policy_ == SparseSolveExecutionPolicy::host_check_every_k;
   if (adaptive_) {
-    const float tolerance_squared =
-        absolute_tolerance_ * absolute_tolerance_;
+    program->vulkan_sparse_dot(mutable_b, mutable_b, rhs_squared_, n);
     program->vulkan_sparse_convergence(
         initial_rr_, status_scalar_, completed_iterations_scalar_,
-        tolerance_squared, 0);
+        rhs_squared_, absolute_tolerance_, relative_tolerance_, 0);
+    if (host_check_every_k) {
+      int32_t initial_status_host = 0;
+      int32_t initial_completed_host = 0;
+      program->synchronize();
+      program->copy_ndarray_to_host(status_scalar_, &initial_status_host,
+                                    sizeof(initial_status_host));
+      program->copy_ndarray_to_host(completed_iterations_scalar_,
+                                    &initial_completed_host,
+                                    sizeof(initial_completed_host));
+      solve_host_readbacks += 2;
+      solve_host_synchronizations += 1;
+      solve_device_to_host_bytes += 2 * sizeof(int32_t);
+      initial_terminal = initial_status_host != 0;
+    }
   }
-  if (has_preconditioner()) {
-    apply_preconditioner(program, preconditioner_generation, *residual_,
-                         *preconditioned_residual_);
-    program->vulkan_sparse_dot(residual_, preconditioned_residual_, rr_a_,
-                               n);
-    program->copy_ndarray_fast(direction_, preconditioned_residual_);
-  } else {
-    program->copy_ndarray_fast(rr_a_, initial_rr_);
-    program->copy_ndarray_fast(direction_, residual_);
+  std::uint64_t preconditioner_applies_this_solve = 0;
+  if (!initial_terminal) {
+    if (has_preconditioner()) {
+      apply_preconditioner(program, preconditioner_generation, *residual_,
+                           *preconditioned_residual_);
+      preconditioner_applies_this_solve++;
+      program->vulkan_sparse_dot(residual_, preconditioned_residual_, rr_a_,
+                                 n);
+      program->copy_ndarray_fast(direction_, preconditioned_residual_);
+    } else {
+      program->copy_ndarray_fast(rr_a_, initial_rr_);
+      program->copy_ndarray_fast(direction_, residual_);
+    }
   }
 
   Ndarray *current_rr = rr_a_;
   Ndarray *next_rr = rr_b_;
-  for (int iteration = 0; iteration < fixed_iterations_; ++iteration) {
-    apply_operator(program, operator_generation, *direction_, *ap_);
-    program->vulkan_sparse_dot(direction_, ap_, p_ap_, n);
-    program->vulkan_sparse_scalar_divide(current_rr, p_ap_, alpha_,
-                                         status_scalar_);
-    program->vulkan_sparse_cg_update(direction_, ap_, alpha_, mutable_x,
-                                     residual_, n);
-    if (has_preconditioner()) {
-      program->vulkan_sparse_dot(residual_, residual_,
-                                 residual_norm_scalar_, n);
-      if (adaptive_) {
-        const float tolerance_squared =
-            absolute_tolerance_ * absolute_tolerance_;
-        program->vulkan_sparse_convergence(
-            residual_norm_scalar_, status_scalar_,
-            completed_iterations_scalar_, tolerance_squared,
-            static_cast<std::uint32_t>(iteration + 1));
-      }
-      apply_preconditioner(program, preconditioner_generation, *residual_,
-                           *preconditioned_residual_);
-      program->vulkan_sparse_dot(residual_, preconditioned_residual_,
-                                 next_rr, n);
-    } else {
-      program->vulkan_sparse_dot(residual_, residual_, next_rr, n);
-      if (adaptive_) {
-        const float tolerance_squared =
-            absolute_tolerance_ * absolute_tolerance_;
-        program->vulkan_sparse_convergence(
-            next_rr, status_scalar_, completed_iterations_scalar_,
-            tolerance_squared,
-            static_cast<std::uint32_t>(iteration + 1));
-      }
+  int executed_this_solve = 0;
+  bool terminal = initial_terminal;
+  while (!terminal && executed_this_solve < fixed_iterations_) {
+    const int chunk_iterations =
+        host_check_every_k
+            ? std::min(host_check_interval_,
+                       fixed_iterations_ - executed_this_solve)
+            : fixed_iterations_ - executed_this_solve;
+    if (host_check_every_k) {
+      solver_chunk_direct_submissions_++;
     }
-    if (iteration + 1 < fixed_iterations_) {
-      program->vulkan_sparse_scalar_divide(next_rr, current_rr, beta_,
+    for (int local_iteration = 0; local_iteration < chunk_iterations;
+         ++local_iteration) {
+      const int iteration = executed_this_solve;
+      apply_operator(program, operator_generation, *direction_, *ap_);
+      program->vulkan_sparse_dot(direction_, ap_, p_ap_, n);
+      program->vulkan_sparse_scalar_divide(current_rr, p_ap_, alpha_,
                                            status_scalar_);
-      program->vulkan_sparse_cg_direction(
-          has_preconditioner() ? preconditioned_residual_ : residual_, beta_,
-          direction_, n);
-      std::swap(current_rr, next_rr);
+      program->vulkan_sparse_cg_update(direction_, ap_, alpha_, mutable_x,
+                                       residual_, n);
+      if (has_preconditioner()) {
+        program->vulkan_sparse_dot(residual_, residual_,
+                                   residual_norm_scalar_, n);
+        if (adaptive_) {
+          program->vulkan_sparse_convergence(
+              residual_norm_scalar_, status_scalar_,
+              completed_iterations_scalar_, rhs_squared_,
+              absolute_tolerance_, relative_tolerance_,
+              static_cast<std::uint32_t>(iteration + 1));
+        }
+        apply_preconditioner(program, preconditioner_generation, *residual_,
+                             *preconditioned_residual_);
+        preconditioner_applies_this_solve++;
+        program->vulkan_sparse_dot(residual_, preconditioned_residual_,
+                                   next_rr, n);
+      } else {
+        program->vulkan_sparse_dot(residual_, residual_, next_rr, n);
+        if (adaptive_) {
+          program->vulkan_sparse_convergence(
+              next_rr, status_scalar_, completed_iterations_scalar_,
+              rhs_squared_, absolute_tolerance_, relative_tolerance_,
+              static_cast<std::uint32_t>(iteration + 1));
+        }
+      }
+      if (iteration + 1 < fixed_iterations_) {
+        program->vulkan_sparse_scalar_divide(next_rr, current_rr, beta_,
+                                             status_scalar_);
+        program->vulkan_sparse_cg_direction(
+            has_preconditioner() ? preconditioned_residual_ : residual_,
+            beta_, direction_, n);
+        std::swap(current_rr, next_rr);
+      }
+      executed_this_solve++;
+    }
+    if (host_check_every_k) {
+      int32_t chunk_status_host = 0;
+      int32_t chunk_completed_host = 0;
+      program->synchronize();
+      program->copy_ndarray_to_host(status_scalar_, &chunk_status_host,
+                                    sizeof(chunk_status_host));
+      program->copy_ndarray_to_host(completed_iterations_scalar_,
+                                    &chunk_completed_host,
+                                    sizeof(chunk_completed_host));
+      solve_host_readbacks += 2;
+      solve_host_synchronizations += 1;
+      solve_device_to_host_bytes += 2 * sizeof(int32_t);
+      terminal = chunk_status_host != 0;
     }
   }
   program->vulkan_sparse_norm(residual_, residual_norm_scalar_, n);
@@ -2516,6 +2609,7 @@ void VulkanCGIterationPlan::solve(Program *program,
   float residual_norm_host = 0.0f;
   int32_t status_host = 0;
   int32_t completed_iterations_host = fixed_iterations_;
+  float rhs_squared_host = 0.0f;
   program->synchronize();
   program->copy_ndarray_to_host(initial_rr_, &initial_rr_host,
                                 sizeof(initial_rr_host));
@@ -2527,12 +2621,33 @@ void VulkanCGIterationPlan::solve(Program *program,
     program->copy_ndarray_to_host(completed_iterations_scalar_,
                                   &completed_iterations_host,
                                   sizeof(completed_iterations_host));
+    if (relative_tolerance_ > 0.0f) {
+      program->copy_ndarray_to_host(rhs_squared_, &rhs_squared_host,
+                                    sizeof(rhs_squared_host));
+    }
   }
+  solve_host_readbacks +=
+      adaptive_ ? (relative_tolerance_ > 0.0f ? 5 : 4) : 3;
+  solve_host_synchronizations += 1;
+  solve_device_to_host_bytes +=
+      2 * sizeof(float32) +
+      (adaptive_ ? (relative_tolerance_ > 0.0f ? sizeof(float32) : 0) +
+                       2 * sizeof(int32_t)
+                 : sizeof(int32_t));
   initial_residual_norm_ =
       std::isfinite(initial_rr_host) && initial_rr_host >= 0.0f
           ? std::sqrt(static_cast<double>(initial_rr_host))
           : std::numeric_limits<double>::quiet_NaN();
   residual_norm_ = static_cast<double>(residual_norm_host);
+  if (adaptive_ && relative_tolerance_ > 0.0f &&
+      std::isfinite(rhs_squared_host) && rhs_squared_host >= 0.0f) {
+    relative_reference_norm_ =
+        std::sqrt(static_cast<double>(rhs_squared_host));
+  }
+  effective_tolerance_ =
+      std::max(static_cast<double>(absolute_tolerance_),
+               static_cast<double>(relative_tolerance_) *
+                   relative_reference_norm_);
   status_ = status_host;
   iterations_ = adaptive_ ? completed_iterations_host : fixed_iterations_;
   const bool finite_residuals = std::isfinite(initial_residual_norm_) &&
@@ -2540,29 +2655,27 @@ void VulkanCGIterationPlan::solve(Program *program,
   is_success_ =
       adaptive_
           ? status_ == static_cast<int>(SparseSolveStatus::kConverged) &&
-                finite_residuals && residual_norm_ <= absolute_tolerance_
+                finite_residuals && residual_norm_ <= effective_tolerance_
           : status_ ==
                     static_cast<int>(SparseSolveStatus::kMaxIterations) &&
                 finite_residuals;
   total_iterations_ += static_cast<std::uint64_t>(iterations_);
-  executed_iterations_ +=
-      static_cast<std::uint64_t>(fixed_iterations_);
+  executed_iterations_ += static_cast<std::uint64_t>(executed_this_solve);
   operator_apply_calls_ +=
-      static_cast<std::uint64_t>(fixed_iterations_ + 1);
+      static_cast<std::uint64_t>(executed_this_solve + 1);
   if (has_preconditioner()) {
-    preconditioner_apply_calls_ +=
-        static_cast<std::uint64_t>(fixed_iterations_ + 1);
+    preconditioner_apply_calls_ += preconditioner_applies_this_solve;
   }
   device_scalar_operations_ += static_cast<std::uint64_t>(
-      4 * fixed_iterations_ - 2 + (adaptive_ ? fixed_iterations_ + 1 : 0) +
-      (has_preconditioner() ? fixed_iterations_ + 1 : 0));
-  host_scalar_readbacks_ += adaptive_ ? 4 : 3;
-  host_synchronizations_ += 1;
+      (executed_this_solve > 0 ? 4 * executed_this_solve - 2 : 0) +
+      (adaptive_ ? executed_this_solve + 2 : 0) +
+      (has_preconditioner() ? preconditioner_applies_this_solve : 0));
+  host_scalar_readbacks_ += solve_host_readbacks;
+  host_synchronizations_ += solve_host_synchronizations;
   device_to_device_bytes_ +=
       2 * static_cast<std::uint64_t>(n) * sizeof(float32) +
       (adaptive_ ? 3 : 2) * sizeof(uint32_t);
-  device_to_host_bytes_ +=
-      2 * sizeof(float32) + (adaptive_ ? 2 : 1) * sizeof(int32_t);
+  device_to_host_bytes_ += solve_device_to_host_bytes;
 #else
   TI_NOT_IMPLEMENTED;
 #endif
@@ -2615,10 +2728,9 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
   result.cols = matrix_->num_cols();
   result.max_iterations = fixed_iterations_;
   result.absolute_tolerance = static_cast<double>(absolute_tolerance_);
-  result.relative_tolerance = 0.0;
-  result.last_relative_reference_norm = 0.0;
-  result.last_effective_tolerance =
-      static_cast<double>(absolute_tolerance_);
+  result.relative_tolerance = static_cast<double>(relative_tolerance_);
+  result.last_relative_reference_norm = relative_reference_norm_;
+  result.last_effective_tolerance = effective_tolerance_;
   result.operator_pattern_version = operator_stats.pattern_version;
   result.operator_numeric_version = operator_stats.numeric_version;
   result.last_solve_pattern_version = last_solve_pattern_version_;
@@ -2643,15 +2755,24 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
   result.device_scalar_operations = device_scalar_operations_;
   result.host_scalar_readbacks = host_scalar_readbacks_;
   result.host_synchronizations = host_synchronizations_;
-  result.solver_execution_policy =
-      adaptive_ ? sparse_solve_execution_policy_name(
-                      SparseSolveExecutionPolicy::fixed_budget_masked)
+  result.requested_solver_execution_policy =
+      adaptive_ ? sparse_solve_execution_policy_name(execution_policy_)
                 : "fixed_budget";
-  result.host_check_interval =
-      adaptive_ ? fixed_iterations_ : 0;
+  result.solver_execution_policy =
+      adaptive_ ? sparse_solve_execution_policy_name(execution_policy_)
+                : "fixed_budget";
+  result.host_check_interval = adaptive_ ? host_check_interval_ : 0;
+  result.solver_chunk_builds = solver_chunk_builds_;
+  result.solver_chunk_reuses = solver_chunk_reuses_;
+  result.solver_chunk_direct_submissions =
+      solver_chunk_direct_submissions_;
   result.solver_graph_enabled = false;
   result.solver_replay_unavailable_reason =
-      "fixed_budget_not_chunked";
+      adaptive_ &&
+              execution_policy_ ==
+                  SparseSolveExecutionPolicy::host_check_every_k
+          ? "combined_solver_sequence_not_composable"
+          : "not_requested";
   result.solver_scalar_location = "device";
   result.solver_stream_policy = "program_submission_order";
   result.fixed_iteration_only = !adaptive_;
@@ -2660,9 +2781,10 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
   result.persistent_vector_reserved_bytes =
       result.persistent_vector_count *
       static_cast<std::uint64_t>(matrix_->num_rows()) * sizeof(float32);
-  result.persistent_scalar_count = adaptive_ ? 10 : 9;
+  result.persistent_scalar_count = adaptive_ ? 11 : 9;
   result.persistent_scalar_reserved_bytes =
-      7 * sizeof(float32) + (adaptive_ ? 3 : 2) * sizeof(int32_t);
+      (adaptive_ ? 8 : 7) * sizeof(float32) +
+      (adaptive_ ? 3 : 2) * sizeof(int32_t);
   result.external_preconditioner = has_preconditioner();
   result.preconditioner_ownership_scope =
       has_preconditioner() ? "external_plan" : "none";
@@ -2698,6 +2820,7 @@ void VulkanCGIterationPlan::release_workspace() {
   release(rr_b_);
   release(rr_a_);
   release(initial_rr_);
+  release(rhs_squared_);
   release(preconditioned_residual_);
   release(direction_);
   release(residual_);
@@ -2717,9 +2840,11 @@ std::unique_ptr<VulkanCGIterationPlan> make_vulkan_cg_convergence_plan(
     Program *program,
     SparseMatrix &matrix,
     int max_iterations,
-    float absolute_tolerance) {
+    float absolute_tolerance,
+    float relative_tolerance) {
   return std::make_unique<VulkanCGIterationPlan>(
-      program, matrix, max_iterations, absolute_tolerance);
+      program, matrix, max_iterations, absolute_tolerance,
+      relative_tolerance);
 }
 
 std::unique_ptr<VulkanCGIterationPlan>
@@ -2728,10 +2853,11 @@ make_vulkan_jacobi_pcg_convergence_plan(
     SparseMatrix &matrix,
     SparseJacobiPreconditionerPlan &preconditioner,
     int max_iterations,
-    float absolute_tolerance) {
+    float absolute_tolerance,
+    float relative_tolerance) {
   return std::make_unique<VulkanCGIterationPlan>(
       program, matrix, preconditioner, max_iterations,
-      absolute_tolerance);
+      absolute_tolerance, relative_tolerance);
 }
 
 std::unique_ptr<VulkanCGIterationPlan>
@@ -2740,10 +2866,11 @@ make_vulkan_block_jacobi_pcg_convergence_plan(
     SparseMatrix &matrix,
     SparseBlockJacobiPreconditionerPlan &preconditioner,
     int max_iterations,
-    float absolute_tolerance) {
+    float absolute_tolerance,
+    float relative_tolerance) {
   return std::make_unique<VulkanCGIterationPlan>(
       program, matrix, preconditioner, max_iterations,
-      absolute_tolerance);
+      absolute_tolerance, relative_tolerance);
 }
 
 std::unique_ptr<VulkanCGIterationPlan>
@@ -2751,9 +2878,11 @@ make_vulkan_compiled_kernel_cg_convergence_plan(
     Program *program,
     CompiledKernelLinearOperator &matrix,
     int max_iterations,
-    float absolute_tolerance) {
+    float absolute_tolerance,
+    float relative_tolerance) {
   return std::make_unique<VulkanCGIterationPlan>(
-      program, matrix, max_iterations, absolute_tolerance);
+      program, matrix, max_iterations, absolute_tolerance,
+      relative_tolerance);
 }
 
 std::unique_ptr<VulkanCGIterationPlan>
@@ -2761,9 +2890,11 @@ make_vulkan_compiled_graph_cg_convergence_plan(
     Program *program,
     CompiledGraphLinearOperator &matrix,
     int max_iterations,
-    float absolute_tolerance) {
+    float absolute_tolerance,
+    float relative_tolerance) {
   return std::make_unique<VulkanCGIterationPlan>(
-      program, matrix, max_iterations, absolute_tolerance);
+      program, matrix, max_iterations, absolute_tolerance,
+      relative_tolerance);
 }
 
 std::unique_ptr<VulkanCGIterationPlan>
@@ -2772,9 +2903,11 @@ make_vulkan_compiled_kernel_pcg_convergence_plan(
     CompiledKernelLinearOperator &matrix,
     CompiledKernelPreconditionerPlan &preconditioner,
     int max_iterations,
-    float absolute_tolerance) {
+    float absolute_tolerance,
+    float relative_tolerance) {
   return std::make_unique<VulkanCGIterationPlan>(
-      program, matrix, preconditioner, max_iterations, absolute_tolerance);
+      program, matrix, preconditioner, max_iterations, absolute_tolerance,
+      relative_tolerance);
 }
 
 std::unique_ptr<VulkanCGIterationPlan>
@@ -2783,8 +2916,10 @@ make_vulkan_experimental_linear_operator_pcg_convergence_plan(
     CompiledKernelLinearOperator &matrix,
     ExperimentalLinearOperatorHandle &preconditioner,
     int max_iterations,
-    float absolute_tolerance) {
+    float absolute_tolerance,
+    float relative_tolerance) {
   return std::make_unique<VulkanCGIterationPlan>(
-      program, matrix, preconditioner, max_iterations, absolute_tolerance);
+      program, matrix, preconditioner, max_iterations, absolute_tolerance,
+      relative_tolerance);
 }
 }  // namespace taichi::lang

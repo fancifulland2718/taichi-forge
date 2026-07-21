@@ -585,7 +585,7 @@ def test_device_fixed_csr_jacobi_pcg_composition_and_stale_version():
     else:
         assert pcg_stats["operations"]["host_synchronizations"] == 1
         assert pcg_stats["operations"]["host_scalar_readbacks"] == 4
-        assert pcg_stats["operations"]["device_scalar_operations"] == 96
+        assert pcg_stats["operations"]["device_scalar_operations"] == 97
     assert pcg_stats["resources"]["external_preconditioner"]
     assert pcg_stats["resources"]["preconditioner_ownership_scope"] == (
         "external_plan"

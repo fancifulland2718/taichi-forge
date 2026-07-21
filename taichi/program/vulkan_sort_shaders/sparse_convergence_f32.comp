@@ -14,11 +14,15 @@ layout(set = 0, binding = 2, std430) buffer CompletedIterations {
   int data[];
 } completed_iterations_buf;
 
+layout(set = 0, binding = 3, std430) readonly buffer RhsSquared {
+  float data[];
+} rhs_squared_buf;
+
 layout(push_constant) uniform Params {
-  float tolerance_squared;
+  float absolute_tolerance;
+  float relative_tolerance;
   uint completed_iterations;
-  uint unused0;
-  uint unused1;
+  uint unused;
 } params;
 
 void main() {
@@ -31,8 +35,25 @@ void main() {
     status_buf.data[0] = 1;
     return;
   }
+  float relative_reference_norm = 0.0;
+  if (params.relative_tolerance > 0.0) {
+    float rhs_squared = rhs_squared_buf.data[0];
+    if (isnan(rhs_squared) || isinf(rhs_squared) || rhs_squared < 0.0) {
+      status_buf.data[0] = 1;
+      return;
+    }
+    relative_reference_norm = sqrt(rhs_squared);
+  }
+  float effective_tolerance = max(
+      params.absolute_tolerance,
+      params.relative_tolerance * relative_reference_norm);
+  float tolerance_squared = effective_tolerance * effective_tolerance;
+  if (isnan(tolerance_squared) || isinf(tolerance_squared)) {
+    status_buf.data[0] = 1;
+    return;
+  }
   completed_iterations_buf.data[0] = int(params.completed_iterations);
-  if (residual_squared <= params.tolerance_squared) {
+  if (residual_squared <= tolerance_squared) {
     status_buf.data[0] = 2;
   }
 }

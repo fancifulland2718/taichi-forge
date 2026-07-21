@@ -848,39 +848,46 @@ class VulkanCGIterationPlan {
   VulkanCGIterationPlan(Program *program,
                         SparseMatrix &matrix,
                         int max_iterations,
-                        float absolute_tolerance);
+                        float absolute_tolerance,
+                        float relative_tolerance = 0.0f);
   VulkanCGIterationPlan(
       Program *program,
       SparseMatrix &matrix,
       SparseJacobiPreconditionerPlan &preconditioner,
       int max_iterations,
-      float absolute_tolerance);
+      float absolute_tolerance,
+      float relative_tolerance = 0.0f);
   VulkanCGIterationPlan(
       Program *program,
       SparseMatrix &matrix,
       SparseBlockJacobiPreconditionerPlan &preconditioner,
       int max_iterations,
-      float absolute_tolerance);
+      float absolute_tolerance,
+      float relative_tolerance = 0.0f);
   VulkanCGIterationPlan(Program *program,
                         CompiledKernelLinearOperator &matrix,
                         int max_iterations,
-                        float absolute_tolerance);
+                        float absolute_tolerance,
+                        float relative_tolerance = 0.0f);
   VulkanCGIterationPlan(Program *program,
                         CompiledGraphLinearOperator &matrix,
                         int max_iterations,
-                        float absolute_tolerance);
+                        float absolute_tolerance,
+                        float relative_tolerance = 0.0f);
   VulkanCGIterationPlan(
       Program *program,
       CompiledKernelLinearOperator &matrix,
       CompiledKernelPreconditionerPlan &preconditioner,
       int max_iterations,
-      float absolute_tolerance);
+      float absolute_tolerance,
+      float relative_tolerance = 0.0f);
   VulkanCGIterationPlan(
       Program *program,
       CompiledKernelLinearOperator &matrix,
       ExperimentalLinearOperatorHandle &preconditioner,
       int max_iterations,
-      float absolute_tolerance);
+      float absolute_tolerance,
+      float relative_tolerance = 0.0f);
   ~VulkanCGIterationPlan();
 
   void solve(Program *program, const Ndarray &x, const Ndarray &b);
@@ -908,17 +915,22 @@ class VulkanCGIterationPlan {
   SparseSolveResult get_last_result() const {
     return {static_cast<SparseSolveStatus>(status_), iterations_,
             initial_residual_norm_, residual_norm_,
-            static_cast<double>(absolute_tolerance_), 0.0, 0.0,
-            static_cast<double>(absolute_tolerance_)};
+            static_cast<double>(absolute_tolerance_),
+            static_cast<double>(relative_tolerance_),
+            relative_reference_norm_, effective_tolerance_};
   }
 
   SparseSolvePlanRuntimeStatistics debug_runtime_statistics() const;
+
+  void configure_execution_policy(SparseSolveExecutionPolicy policy,
+                                  int host_check_interval);
 
  private:
   VulkanCGIterationPlan(Program *program,
                         SparseMatrix &matrix,
                         int max_iterations,
                         float absolute_tolerance,
+                        float relative_tolerance,
                         bool adaptive,
                         bool allow_compiled_kernel_operator,
                         bool allow_compiled_graph_operator,
@@ -952,7 +964,11 @@ class VulkanCGIterationPlan {
   ExperimentalLinearOperatorHandle *operator_preconditioner_{nullptr};
   int fixed_iterations_{0};
   float absolute_tolerance_{0.0f};
+  float relative_tolerance_{0.0f};
   bool adaptive_{false};
+  SparseSolveExecutionPolicy execution_policy_{
+      SparseSolveExecutionPolicy::fixed_budget_masked};
+  int host_check_interval_{1};
   CompiledKernelLinearOperator *compiled_kernel_operator_{nullptr};
   CompiledGraphLinearOperator *compiled_graph_operator_{nullptr};
   Ndarray *ap_{nullptr};
@@ -960,6 +976,7 @@ class VulkanCGIterationPlan {
   Ndarray *direction_{nullptr};
   Ndarray *preconditioned_residual_{nullptr};
   Ndarray *initial_rr_{nullptr};
+  Ndarray *rhs_squared_{nullptr};
   Ndarray *rr_a_{nullptr};
   Ndarray *rr_b_{nullptr};
   Ndarray *p_ap_{nullptr};
@@ -976,9 +993,14 @@ class VulkanCGIterationPlan {
   int status_{static_cast<int>(SparseSolveStatus::kNotRun)};
   double initial_residual_norm_{0.0};
   double residual_norm_{0.0};
+  double relative_reference_norm_{0.0};
+  double effective_tolerance_{0.0};
   std::uint64_t solve_calls_{0};
   std::uint64_t total_iterations_{0};
   std::uint64_t executed_iterations_{0};
+  std::uint64_t solver_chunk_builds_{0};
+  std::uint64_t solver_chunk_reuses_{0};
+  std::uint64_t solver_chunk_direct_submissions_{0};
   std::uint64_t workspace_builds_{1};
   std::uint64_t workspace_reuses_{0};
   std::uint64_t operator_apply_calls_{0};
@@ -1002,7 +1024,8 @@ std::unique_ptr<VulkanCGIterationPlan> make_vulkan_cg_convergence_plan(
     Program *program,
     SparseMatrix &matrix,
     int max_iterations,
-    float absolute_tolerance);
+    float absolute_tolerance,
+    float relative_tolerance = 0.0f);
 
 std::unique_ptr<VulkanCGIterationPlan>
 make_vulkan_jacobi_pcg_convergence_plan(
@@ -1010,7 +1033,8 @@ make_vulkan_jacobi_pcg_convergence_plan(
     SparseMatrix &matrix,
     SparseJacobiPreconditionerPlan &preconditioner,
     int max_iterations,
-    float absolute_tolerance);
+    float absolute_tolerance,
+    float relative_tolerance = 0.0f);
 
 std::unique_ptr<VulkanCGIterationPlan>
 make_vulkan_block_jacobi_pcg_convergence_plan(
@@ -1018,21 +1042,24 @@ make_vulkan_block_jacobi_pcg_convergence_plan(
     SparseMatrix &matrix,
     SparseBlockJacobiPreconditionerPlan &preconditioner,
     int max_iterations,
-    float absolute_tolerance);
+    float absolute_tolerance,
+    float relative_tolerance = 0.0f);
 
 std::unique_ptr<VulkanCGIterationPlan>
 make_vulkan_compiled_kernel_cg_convergence_plan(
     Program *program,
     CompiledKernelLinearOperator &matrix,
     int max_iterations,
-    float absolute_tolerance);
+    float absolute_tolerance,
+    float relative_tolerance = 0.0f);
 
 std::unique_ptr<VulkanCGIterationPlan>
 make_vulkan_compiled_graph_cg_convergence_plan(
     Program *program,
     CompiledGraphLinearOperator &matrix,
     int max_iterations,
-    float absolute_tolerance);
+    float absolute_tolerance,
+    float relative_tolerance = 0.0f);
 
 std::unique_ptr<VulkanCGIterationPlan>
 make_vulkan_compiled_kernel_pcg_convergence_plan(
@@ -1040,7 +1067,8 @@ make_vulkan_compiled_kernel_pcg_convergence_plan(
     CompiledKernelLinearOperator &matrix,
     CompiledKernelPreconditionerPlan &preconditioner,
     int max_iterations,
-    float absolute_tolerance);
+    float absolute_tolerance,
+    float relative_tolerance = 0.0f);
 
 std::unique_ptr<VulkanCGIterationPlan>
 make_vulkan_experimental_linear_operator_pcg_convergence_plan(
@@ -1048,5 +1076,6 @@ make_vulkan_experimental_linear_operator_pcg_convergence_plan(
     CompiledKernelLinearOperator &matrix,
     ExperimentalLinearOperatorHandle &preconditioner,
     int max_iterations,
-    float absolute_tolerance);
+    float absolute_tolerance,
+    float relative_tolerance = 0.0f);
 }  // namespace taichi::lang

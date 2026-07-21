@@ -4602,7 +4602,7 @@ struct VulkanSparseAlgebraCache {
   VulkanResourceSetReplayRing<4> sparse_scalar_divide_bindings;
   VulkanResourceSetReplayRing<5> sparse_cg_update_bindings;
   VulkanResourceSetReplayRing<3> sparse_cg_direction_bindings;
-  VulkanResourceSetReplayRing<3> sparse_convergence_bindings;
+  VulkanResourceSetReplayRing<4> sparse_convergence_bindings;
   VulkanResourceSetReplayRing<7> sparse_triplet_pack_bindings;
   VulkanResourceSetReplayRing<5> sparse_triplet_pack_packed_bindings;
   VulkanResourceSetReplayRing<4> sparse_segment_flags_bindings;
@@ -5113,17 +5113,19 @@ struct VulkanSparseAlgebraCache {
             rw_buffer_request(direction, 0, vector_bytes)});
   }
 
-  VulkanReplayResourceSet<3> bind_sparse_convergence(
+  VulkanReplayResourceSet<4> bind_sparse_convergence(
       Program *program,
       DeviceAllocation residual_squared,
       DeviceAllocation status,
-      DeviceAllocation completed_iterations) {
+      DeviceAllocation completed_iterations,
+      DeviceAllocation rhs_squared) {
     return sparse_convergence_bindings.bind(
         program, device,
-        std::array<VulkanRwBufferBindingRequest, 3>{
+        std::array<VulkanRwBufferBindingRequest, 4>{
             rw_buffer_request(residual_squared, 0, sizeof(float32)),
             rw_buffer_request(status, 0, sizeof(int32_t)),
-            rw_buffer_request(completed_iterations, 0, sizeof(int32_t))});
+            rw_buffer_request(completed_iterations, 0, sizeof(int32_t)),
+            rw_buffer_request(rhs_squared, 0, sizeof(float32))});
   }
 
   VulkanReplayResourceSet<7> bind_sparse_triplet_pack(
@@ -10812,26 +10814,35 @@ std::size_t Program::vulkan_sparse_convergence(
     Ndarray *residual_squared,
     Ndarray *status,
     Ndarray *completed_iterations,
-    float tolerance_squared,
+    Ndarray *rhs_squared,
+    float absolute_tolerance,
+    float relative_tolerance,
     std::uint32_t iteration) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(!vulkan_sparse_algebra_available(),
               "Vulkan sparse convergence is only available on Vulkan.");
-  TI_ERROR_IF(!std::isfinite(tolerance_squared) || tolerance_squared < 0.0f,
-              "Vulkan sparse convergence requires a finite non-negative "
-              "squared tolerance.");
+  TI_ERROR_IF(!std::isfinite(absolute_tolerance) ||
+                  !std::isfinite(relative_tolerance) ||
+                  absolute_tolerance < 0.0f || relative_tolerance < 0.0f ||
+                  (absolute_tolerance == 0.0f &&
+                   relative_tolerance == 0.0f),
+              "Vulkan sparse convergence requires finite non-negative atol "
+              "and rtol with at least one positive tolerance.");
   check_vulkan_sparse_f32_output(residual_squared);
+  check_vulkan_sparse_f32_output(rhs_squared);
   check_vulkan_sparse_i32_status(status);
   check_vulkan_sparse_i32_status(completed_iterations);
-  const std::array<DeviceAllocation, 3> allocs{
+  const std::array<DeviceAllocation, 4> allocs{
       residual_squared->get_device_allocation(),
       status->get_device_allocation(),
-      completed_iterations->get_device_allocation()};
+      completed_iterations->get_device_allocation(),
+      rhs_squared->get_device_allocation()};
   TI_ERROR_IF(allocs[0] == allocs[1] || allocs[0] == allocs[2] ||
-                  allocs[1] == allocs[2],
+                  allocs[0] == allocs[3] || allocs[1] == allocs[2] ||
+                  allocs[1] == allocs[3] || allocs[2] == allocs[3],
               "Vulkan sparse convergence buffers must not alias.");
   const Ndarray *resources[] = {residual_squared, status,
-                                completed_iterations};
+                                completed_iterations, rhs_squared};
   retain_ndarrays_for_external_submission(resources, std::size(resources));
   Device *device = get_compute_device();
   TI_ERROR_IF(!device,
@@ -10840,10 +10851,12 @@ std::size_t Program::vulkan_sparse_convergence(
   auto &cache = *cache_lease;
   Pipeline *pipeline = cache.sparse_convergence_pipeline(device);
   ShaderResourceSet *bindings =
-      cache.bind_sparse_convergence(this, allocs[0], allocs[1], allocs[2])
+      cache.bind_sparse_convergence(this, allocs[0], allocs[1], allocs[2],
+                                    allocs[3])
           .bindings;
   const std::array<uint32_t, 4> param_words{
-      vulkan_sparse_f32_word(tolerance_squared), iteration, 0u, 0u};
+      vulkan_sparse_f32_word(absolute_tolerance),
+      vulkan_sparse_f32_word(relative_tolerance), iteration, 0u};
   const uint32_t push_bytes =
       static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
   const bool profiler_scopes = profiler != nullptr;
@@ -10861,6 +10874,7 @@ std::size_t Program::vulkan_sparse_convergence(
   push_vulkan_command_key_range(command_key, allocs[0], 0, sizeof(float32));
   push_vulkan_command_key_range(command_key, allocs[1], 0, sizeof(int32_t));
   push_vulkan_command_key_range(command_key, allocs[2], 0, sizeof(int32_t));
+  push_vulkan_command_key_range(command_key, allocs[3], 0, sizeof(float32));
   for (uint32_t word : param_words) {
     command_key.push(word);
   }
@@ -17422,7 +17436,9 @@ std::size_t Program::vulkan_sparse_convergence(
     Ndarray *residual_squared,
     Ndarray *status,
     Ndarray *completed_iterations,
-    float tolerance_squared,
+    Ndarray *rhs_squared,
+    float absolute_tolerance,
+    float relative_tolerance,
     std::uint32_t iteration) {
   TI_NOT_IMPLEMENTED;
   return 0;

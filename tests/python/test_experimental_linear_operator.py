@@ -326,6 +326,84 @@ def test_cuda_experimental_host_check_cg_chunk_contract():
     assert breakdown_stats["executed_iterations"] == 4
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_experimental_host_check_relative_cg_chunk_contract():
+    experimental = ti.linalg.experimental
+    size = 24
+    topology = ti.ndarray(ti.i32, shape=size)
+    topology.from_numpy(np.arange(size, dtype=np.int32))
+    diagonal_host = np.resize(
+        np.asarray([2.0, 3.0, 5.0], dtype=np.float32), size
+    )
+    diagonal = _vector(diagonal_host)
+
+    @ti.kernel
+    def diagonal_apply(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(active_size):
+            y[index] = numeric_data[index] * x[topology_data[index]]
+
+    operator = experimental.LinearOperator.from_kernel(
+        diagonal_apply,
+        size,
+        topology,
+        numeric=diagonal,
+        traits=experimental.OperatorTraits.spd(),
+    )
+    exact = np.linspace(-1.0, 1.0, size, dtype=np.float32)
+    rhs_host = diagonal_host * exact
+    rhs = _vector(rhs_host)
+    relative_tolerance = 1e-5
+
+    for check_interval in (4, 8):
+        plan = experimental.SolvePlan(
+            operator,
+            max_iterations=16,
+            atol=0.0,
+            rtol=relative_tolerance,
+            execution_policy="host_check_every_k",
+            check_interval=check_interval,
+        )
+        result = plan.solve(rhs)
+        assert result.converged
+        np.testing.assert_allclose(
+            result.solution.to_numpy(), exact, rtol=2e-4, atol=2e-4
+        )
+        stats = plan.statistics()
+        identity = stats["identity"]
+        operations = stats["operations"]
+        chunks = operations["solver_chunk_direct_submissions"]
+        expected_reference = np.linalg.norm(rhs_host)
+        assert identity["solver_execution_policy"] == "host_check_every_k"
+        assert identity["host_check_interval"] == check_interval
+        assert identity["relative_tolerance"] == pytest.approx(
+            relative_tolerance
+        )
+        assert identity["last_relative_reference_norm"] == pytest.approx(
+            expected_reference, rel=2e-5
+        )
+        assert identity["last_effective_tolerance"] == pytest.approx(
+            relative_tolerance * expected_reference, rel=2e-5
+        )
+        assert operations["operator_apply_calls"] == (
+            1 + operations["executed_iterations"]
+        )
+        assert operations["executed_iterations"] >= result.iterations
+        assert operations["wasted_iterations"] <= check_interval - 1
+        assert operations["host_synchronizations"] == 2 + chunks
+        assert operations["host_scalar_readbacks"] == 7 + 2 * chunks
+        assert not identity["solver_graph_enabled"]
+        assert (
+            identity["solver_replay_unavailable_reason"]
+            == "combined_solver_sequence_not_composable"
+        )
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_experimental_graph_provider_apply_and_cg():
     experimental = ti.linalg.experimental

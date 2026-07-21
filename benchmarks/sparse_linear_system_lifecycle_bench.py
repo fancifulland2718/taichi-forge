@@ -650,14 +650,14 @@ def _vulkan_operator_only_report(ti, n):
         and adaptive_final["operations"]["host_scalar_readbacks"] == 8
         and adaptive_final["operations"]["host_scalar_reductions"] == 0
         and adaptive_final["operations"]["device_scalar_operations"]
-        == 38
+        == 40
         and adaptive_final["operations"]["bounded_masked_execution"]
         and not adaptive_final["operations"]["fixed_iteration_only"]
-        and adaptive_final["resources"]["persistent_scalar_count"] == 10
+        and adaptive_final["resources"]["persistent_scalar_count"] == 11
         and adaptive_final["resources"][
             "persistent_scalar_reserved_bytes"
         ]
-        == 40
+        == 44
     )
     expected_pattern_bytes = (n + 1 + nnz) * 4
     expected_value_bytes = nnz * 4

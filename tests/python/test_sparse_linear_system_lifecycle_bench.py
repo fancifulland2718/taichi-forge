@@ -200,7 +200,7 @@ def test_vulkan_sparse_linear_system_capability_is_explicit():
     assert adaptive_final["operations"]["host_synchronizations"] == 2
     assert adaptive_final["operations"]["host_scalar_readbacks"] == 8
     assert adaptive_final["operations"]["bounded_masked_execution"]
-    assert adaptive_final["resources"]["persistent_scalar_count"] == 10
+    assert adaptive_final["resources"]["persistent_scalar_count"] == 11
     assembly = report["assembly_probe"]
     assert assembly["supported"]
     assert assembly["correct"]
@@ -672,11 +672,11 @@ def test_vulkan_bounded_convergence_plan_states():
     assert first["operations"]["bounded_masked_execution"]
     assert first["operations"]["operator_apply_calls"] == 17
     assert first["operations"]["total_iterations"] == first_iterations
-    assert first["operations"]["device_scalar_operations"] == 79
+    assert first["operations"]["device_scalar_operations"] == 80
     assert first["operations"]["host_synchronizations"] == 1
     assert first["operations"]["host_scalar_readbacks"] == 4
-    assert first["resources"]["persistent_scalar_count"] == 10
-    assert first["resources"]["persistent_scalar_reserved_bytes"] == 40
+    assert first["resources"]["persistent_scalar_count"] == 11
+    assert first["resources"]["persistent_scalar_reserved_bytes"] == 44
 
     solution.from_numpy(np.zeros(n, dtype=np.float32))
     rhs.from_numpy(np.zeros(n, dtype=np.float32))
