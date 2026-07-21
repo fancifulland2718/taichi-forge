@@ -123,11 +123,10 @@ struct OperatorVectorView {
                                          const Ndarray &array,
                                          const OperatorSpaceDesc &space,
                                          bool writable);
-  static OperatorVectorView from_device_pointer(
-      Program *program,
-      std::uintptr_t data,
-      const OperatorSpaceDesc &space,
-      bool writable);
+  static OperatorVectorView from_device_pointer(Program *program,
+                                                std::uintptr_t data,
+                                                const OperatorSpaceDesc &space,
+                                                bool writable);
 };
 
 struct OperatorApplyRequest {
@@ -148,8 +147,7 @@ class OperatorResourceLease {
 
   template <typename Lease>
   static OperatorResourceLease hold(Lease lease) {
-    return OperatorResourceLease(
-        std::make_shared<Lease>(std::move(lease)));
+    return OperatorResourceLease(std::make_shared<Lease>(std::move(lease)));
   }
 
   explicit operator bool() const {
@@ -266,8 +264,7 @@ class OperatorResourceGenerationPublisher {
       const OperatorResourceGenerationPublisher &) = delete;
   ~OperatorResourceGenerationPublisher();
 
-  void publish(OperatorAction action,
-               OperatorResourceLease resources = {});
+  void publish(OperatorAction action, OperatorResourceLease resources = {});
   OperatorPinnedAction acquire() const;
   void retire_current();
   OperatorResourceGenerationStatistics debug_statistics() const;
@@ -279,13 +276,11 @@ class OperatorResourceGenerationPublisher {
 
 class OperatorBinding {
  public:
-  using AcquireResourceLeaseFn =
-      std::function<OperatorResourceLease()>;
+  using AcquireResourceLeaseFn = std::function<OperatorResourceLease()>;
   using AcquirePinnedActionFn = std::function<OperatorPinnedAction()>;
 
-  explicit OperatorBinding(
-      OperatorAction action,
-      AcquireResourceLeaseFn acquire_resource_lease = {});
+  explicit OperatorBinding(OperatorAction action,
+                           AcquireResourceLeaseFn acquire_resource_lease = {});
 
   static OperatorBinding from_generation_publisher(
       OperatorAction metadata_action,
@@ -321,16 +316,14 @@ struct OperatorPlanRuntimeStatistics {
 
 class OperatorPlan {
  public:
-  OperatorPlan(
-      Program *program,
-      OperatorAction action,
-      OperatorDependencyMask dependencies =
-          operator_plan_schema_dependencies());
-  OperatorPlan(
-      Program *program,
-      OperatorBinding binding,
-      OperatorDependencyMask dependencies =
-          operator_plan_schema_dependencies());
+  OperatorPlan(Program *program,
+               OperatorAction action,
+               OperatorDependencyMask dependencies =
+                   operator_plan_schema_dependencies());
+  OperatorPlan(Program *program,
+               OperatorBinding binding,
+               OperatorDependencyMask dependencies =
+                   operator_plan_schema_dependencies());
   OperatorPlan(const OperatorPlan &) = delete;
   OperatorPlan &operator=(const OperatorPlan &) = delete;
   ~OperatorPlan();
@@ -367,6 +360,65 @@ class OperatorPlan {
   OperatorPlanRuntimeStatistics statistics_;
 };
 
+enum class PreconditionerBehavior : std::uint8_t {
+  fixed_linear,
+  variable_linear,
+  nonlinear,
+};
+
+struct PreconditionerPlanRuntimeStatistics {
+  std::uint64_t setup_calls{0};
+  std::uint64_t update_calls{0};
+  std::uint64_t update_successes{0};
+  std::uint64_t update_noops{0};
+  std::uint64_t update_failures{0};
+  std::uint64_t target_generation_changes{0};
+};
+
+// Internal lifecycle wrapper for an approximate-inverse OperatorAction. The
+// target generation remains pinned while the provider updates and pins its
+// corresponding action generation, so a solver can consume one immutable
+// target/preconditioner pair for the whole solve.
+class PreconditionerPlan {
+ public:
+  using UpdateFn =
+      std::function<void(const OperatorResourceStamp &, bool target_changed)>;
+
+  PreconditionerPlan(Program *program,
+                     OperatorDescriptor target_descriptor,
+                     OperatorBinding action_binding,
+                     PreconditionerBehavior behavior,
+                     std::string method,
+                     UpdateFn update);
+  PreconditionerPlan(const PreconditionerPlan &) = delete;
+  PreconditionerPlan &operator=(const PreconditionerPlan &) = delete;
+  ~PreconditionerPlan();
+
+  void setup(const OperatorPinnedAction &target_generation);
+  OperatorPinnedAction update_and_pin(
+      const OperatorPinnedAction &target_generation);
+  const OperatorPlan &action() const;
+  OperatorPlan &action();
+  PreconditionerBehavior behavior() const;
+  const std::string &method() const;
+  PreconditionerPlanRuntimeStatistics debug_runtime_statistics() const;
+
+ private:
+  OperatorPinnedAction update_and_pin_impl(
+      const OperatorPinnedAction &target_generation,
+      bool setup);
+
+  Program *program_{nullptr};
+  OperatorDescriptor target_descriptor_;
+  std::unique_ptr<OperatorPlan> action_plan_;
+  PreconditionerBehavior behavior_{PreconditionerBehavior::fixed_linear};
+  std::string method_;
+  UpdateFn update_;
+  bool is_setup_{false};
+  OperatorResourceStamp target_stamp_;
+  PreconditionerPlanRuntimeStatistics statistics_;
+};
+
 OperatorAction make_dense_reference_operator_action(
     OperatorDescriptor descriptor,
     std::vector<double> row_major_values);
@@ -385,12 +437,10 @@ OperatorBinding make_cuda_bsr_operator_binding(Program *program,
 OperatorBinding make_cuda_program_kernel_operator_binding(
     Program *program,
     CompiledKernelLinearOperator &matrix);
-OperatorBinding make_vulkan_csr_operator_binding(
-    Program *program,
-    VulkanSparseMatrix &matrix);
-OperatorBinding make_vulkan_bsr_operator_binding(
-    Program *program,
-    VulkanSparseBsrMatrix &matrix);
+OperatorBinding make_vulkan_csr_operator_binding(Program *program,
+                                                 VulkanSparseMatrix &matrix);
+OperatorBinding make_vulkan_bsr_operator_binding(Program *program,
+                                                 VulkanSparseBsrMatrix &matrix);
 OperatorBinding make_vulkan_program_kernel_operator_binding(
     Program *program,
     CompiledKernelLinearOperator &matrix);

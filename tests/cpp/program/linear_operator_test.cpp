@@ -64,11 +64,10 @@ TEST(LinearOperator, BindingPinsLeaseBeforeReadingResourceStamp) {
       },
       [](OperatorApplyMode, const OperatorVectorView &,
          const OperatorVectorView &) {});
-  OperatorBinding binding(
-      std::move(action), [&order] {
-        order.push_back(1);
-        return OperatorResourceLease{};
-      });
+  OperatorBinding binding(std::move(action), [&order] {
+    order.push_back(1);
+    return OperatorResourceLease{};
+  });
 
   auto generation = binding.pin();
   ASSERT_TRUE(generation);
@@ -80,10 +79,9 @@ TEST(LinearOperator, BindingPinsLeaseBeforeReadingResourceStamp) {
 TEST(LinearOperator, SubmissionTicketRetainsPinnedGeneration) {
   int releases = 0;
   const OperatorResourceStamp stamp{0, 0, 1, 2, 3, 4};
-  OperatorBinding binding(
-      make_scale_action(stamp, 2.0f), [&releases] {
-        return OperatorResourceLease::hold(LeaseProbe(&releases));
-      });
+  OperatorBinding binding(make_scale_action(stamp, 2.0f), [&releases] {
+    return OperatorResourceLease::hold(LeaseProbe(&releases));
+  });
   OperatorPlan plan(nullptr, std::move(binding));
   const auto &descriptor = plan.descriptor();
   std::array<float, 2> input{2.0f, 3.0f};
@@ -92,8 +90,7 @@ TEST(LinearOperator, SubmissionTicketRetainsPinnedGeneration) {
   {
     auto submission = plan.submit(
         {OperatorApplyMode::forward,
-         OperatorVectorView::from_const_host(input.data(),
-                                             descriptor.domain),
+         OperatorVectorView::from_const_host(input.data(), descriptor.domain),
          nullptr,
          OperatorVectorView::from_mutable_host(output.data(),
                                                descriptor.range)});
@@ -114,10 +111,10 @@ TEST(LinearOperator, SubmissionTicketRetainsPinnedGeneration) {
 #ifdef TI_WITH_LLVM
 TEST(LinearOperator, AsyncCapableStandaloneSubmitRecordsCompletion) {
   Program program(Arch::x64);
-  auto *input = program.create_ndarray(
-      PrimitiveType::f32, {2}, ExternalArrayLayout::kNull, false);
-  auto *output = program.create_ndarray(
-      PrimitiveType::f32, {2}, ExternalArrayLayout::kNull, false);
+  auto *input = program.create_ndarray(PrimitiveType::f32, {2},
+                                       ExternalArrayLayout::kNull, false);
+  auto *output = program.create_ndarray(PrimitiveType::f32, {2},
+                                        ExternalArrayLayout::kNull, false);
   const OperatorSpaceDesc space = scalar_space(PrimitiveType::f32, 2);
   OperatorCapabilities capabilities;
   capabilities.asynchronous_submit = true;
@@ -125,9 +122,12 @@ TEST(LinearOperator, AsyncCapableStandaloneSubmitRecordsCompletion) {
   OperatorAction action(
       {space, space}, capabilities, "cpu_async_probe",
       [&program] {
-        return OperatorResourceStamp{
-            reinterpret_cast<std::uintptr_t>(&program),
-            program.runtime_program_generation(), 1, 1, 1, 1};
+        return OperatorResourceStamp{reinterpret_cast<std::uintptr_t>(&program),
+                                     program.runtime_program_generation(),
+                                     1,
+                                     1,
+                                     1,
+                                     1};
       },
       [](OperatorApplyMode mode, const OperatorVectorView &source,
          const OperatorVectorView &target) {
@@ -137,10 +137,9 @@ TEST(LinearOperator, AsyncCapableStandaloneSubmitRecordsCompletion) {
         dst[0] = 3.0f * src[0];
         dst[1] = 3.0f * src[1];
       });
-  OperatorBinding binding(
-      std::move(action), [&releases] {
-        return OperatorResourceLease::hold(LeaseProbe(&releases));
-      });
+  OperatorBinding binding(std::move(action), [&releases] {
+    return OperatorResourceLease::hold(LeaseProbe(&releases));
+  });
   OperatorPlan plan(&program, std::move(binding));
   const std::array<float, 2> source{2.0f, -4.0f};
   program.copy_ndarray_from_host(input, source.data(), sizeof(source));
@@ -206,17 +205,15 @@ TEST(LinearOperator, PublishedGenerationRemainsUsableUntilPinRelease) {
   OperatorResourceGenerationPublisher publisher;
   int release_count = 0;
   OperatorResourceStamp first_stamp{11, 101, 1, 1, 1, 1};
-  publisher.publish(
-      make_scale_action(first_stamp, 2.0f),
-      OperatorResourceLease::hold(LeaseProbe(&release_count)));
+  publisher.publish(make_scale_action(first_stamp, 2.0f),
+                    OperatorResourceLease::hold(LeaseProbe(&release_count)));
   auto first = publisher.acquire();
 
   OperatorResourceStamp second_stamp = first_stamp;
   second_stamp.numeric_revision++;
   second_stamp.binding_revision++;
-  publisher.publish(
-      make_scale_action(second_stamp, 3.0f),
-      OperatorResourceLease::hold(LeaseProbe(&release_count)));
+  publisher.publish(make_scale_action(second_stamp, 3.0f),
+                    OperatorResourceLease::hold(LeaseProbe(&release_count)));
   auto second = publisher.acquire();
   auto statistics = publisher.debug_statistics();
   EXPECT_EQ(statistics.published, 2u);
@@ -313,14 +310,107 @@ TEST(LinearOperator, PlanPinsNewNumericGenerationWithoutSchemaRebuild) {
   EXPECT_EQ(plan.debug_runtime_statistics().invalidations, 1u);
 }
 
+TEST(LinearOperator, FixedLinearPreconditionerTracksTargetGeneration) {
+  OperatorResourceGenerationPublisher target_publisher;
+  OperatorResourceGenerationPublisher preconditioner_publisher;
+  OperatorResourceStamp stamp{13, 104, 1, 2, 3, 4};
+  auto target_metadata = make_scale_action(stamp, 2.0f);
+  auto preconditioner_metadata = make_scale_action(stamp, 0.5f);
+  target_publisher.publish(target_metadata);
+  preconditioner_publisher.publish(preconditioner_metadata);
+  OperatorPlan target_plan(nullptr, OperatorBinding::from_generation_publisher(
+                                        target_metadata, [&target_publisher] {
+                                          return target_publisher.acquire();
+                                        }));
+  int refreshes = 0;
+  PreconditionerPlan preconditioner_plan(
+      nullptr, target_plan.descriptor(),
+      OperatorBinding::from_generation_publisher(
+          preconditioner_metadata,
+          [&preconditioner_publisher] {
+            return preconditioner_publisher.acquire();
+          }),
+      PreconditionerBehavior::fixed_linear, "inverse_scale",
+      [&](const OperatorResourceStamp &target_stamp, bool changed) {
+        if (!changed ||
+            target_stamp.numeric_revision == stamp.numeric_revision) {
+          return;
+        }
+        refreshes++;
+        preconditioner_publisher.publish(
+            make_scale_action(target_stamp, 0.25f));
+      });
+
+  auto first_target = target_plan.pin();
+  preconditioner_plan.setup(first_target);
+  auto first_preconditioner = preconditioner_plan.update_and_pin(first_target);
+  EXPECT_EQ(first_preconditioner.resource_stamp().numeric_revision, 3u);
+
+  auto next_stamp = stamp;
+  next_stamp.numeric_revision++;
+  next_stamp.binding_revision++;
+  target_publisher.publish(make_scale_action(next_stamp, 4.0f));
+  auto next_target = target_plan.pin();
+  auto next_preconditioner = preconditioner_plan.update_and_pin(next_target);
+  EXPECT_EQ(refreshes, 1);
+  EXPECT_EQ(next_preconditioner.resource_stamp().numeric_revision, 4u);
+
+  std::array<float, 2> input{4.0f, -8.0f};
+  std::array<float, 2> first_output{};
+  std::array<float, 2> next_output{};
+  const auto space = scalar_space(PrimitiveType::f32, 2);
+  first_preconditioner.apply_overwrite(
+      OperatorApplyMode::forward,
+      OperatorVectorView::from_const_host(input.data(), space),
+      OperatorVectorView::from_mutable_host(first_output.data(), space));
+  next_preconditioner.apply_overwrite(
+      OperatorApplyMode::forward,
+      OperatorVectorView::from_const_host(input.data(), space),
+      OperatorVectorView::from_mutable_host(next_output.data(), space));
+  EXPECT_EQ(first_output, (std::array<float, 2>{2.0f, -4.0f}));
+  EXPECT_EQ(next_output, (std::array<float, 2>{1.0f, -2.0f}));
+
+  const auto statistics = preconditioner_plan.debug_runtime_statistics();
+  EXPECT_EQ(statistics.setup_calls, 1u);
+  EXPECT_EQ(statistics.update_calls, 2u);
+  EXPECT_EQ(statistics.update_successes, 1u);
+  EXPECT_EQ(statistics.update_noops, 1u);
+  EXPECT_EQ(statistics.target_generation_changes, 1u);
+}
+
+TEST(LinearOperator, PreconditionerRejectsUnsupportedBehaviorAndStaleAction) {
+  const OperatorResourceStamp stamp{13, 105, 1, 1, 1, 1};
+  auto target_action = make_scale_action(stamp, 2.0f);
+  auto preconditioner_action = make_scale_action(stamp, 0.5f);
+  OperatorPlan target_plan(nullptr, OperatorBinding(target_action));
+
+  EXPECT_ANY_THROW(PreconditionerPlan(
+      nullptr, target_plan.descriptor(), OperatorBinding(preconditioner_action),
+      PreconditionerBehavior::variable_linear, "variable",
+      [](const OperatorResourceStamp &, bool) {}));
+
+  PreconditionerPlan stale_plan(nullptr, target_plan.descriptor(),
+                                OperatorBinding(preconditioner_action),
+                                PreconditionerBehavior::fixed_linear, "stale",
+                                [](const OperatorResourceStamp &, bool) {});
+  auto target = target_plan.pin();
+  stale_plan.setup(target);
+
+  auto changed_stamp = stamp;
+  changed_stamp.numeric_revision++;
+  auto changed_target_action = make_scale_action(changed_stamp, 3.0f);
+  OperatorPlan changed_target(nullptr, std::move(changed_target_action));
+  EXPECT_ANY_THROW(stale_plan.update_and_pin(changed_target.pin()));
+  EXPECT_EQ(stale_plan.debug_runtime_statistics().update_failures, 1u);
+}
+
 TEST(LinearOperator, BindingTypeErasesProviderResourceLease) {
   OperatorDescriptor descriptor{scalar_space(PrimitiveType::f32, 2),
                                 scalar_space(PrimitiveType::f32, 2)};
   int acquire_count = 0;
   int release_count = 0;
   OperatorBinding binding(
-      make_dense_reference_operator_action(
-          descriptor, {1.0, 0.0, 0.0, 1.0}),
+      make_dense_reference_operator_action(descriptor, {1.0, 0.0, 0.0, 1.0}),
       [&] {
         acquire_count++;
         return OperatorResourceLease::hold(LeaseProbe(&release_count));

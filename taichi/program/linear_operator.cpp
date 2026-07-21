@@ -60,8 +60,7 @@ void validate_view(const OperatorVectorView &view,
                    Program *program,
                    const char *role,
                    bool require_writable) {
-  TI_ERROR_IF(view.space != expected ||
-                  (view.data == 0 && !view.ndarray) ||
+  TI_ERROR_IF(view.space != expected || (view.data == 0 && !view.ndarray) ||
                   view.allocation_identity == 0 ||
                   (require_writable && !view.writable),
               "Operator {} view does not match its declared space or "
@@ -261,10 +260,9 @@ OperatorResourceLease::OperatorResourceLease(std::shared_ptr<void> state)
     : state_(std::move(state)) {
 }
 
-OperatorPinnedAction::OperatorPinnedAction(
-    OperatorAction action,
-    OperatorResourceStamp stamp,
-    OperatorResourceLease resource_lease)
+OperatorPinnedAction::OperatorPinnedAction(OperatorAction action,
+                                           OperatorResourceStamp stamp,
+                                           OperatorResourceLease resource_lease)
     : action_(std::make_shared<OperatorAction>(std::move(action))),
       stamp_(stamp),
       resource_lease_(std::move(resource_lease)) {
@@ -302,10 +300,9 @@ void OperatorPinnedAction::apply_overwrite(
   action_->apply_overwrite(mode, input, output);
 }
 
-OperatorSubmission::OperatorSubmission(
-    OperatorPinnedAction generation,
-    RuntimeCompletion completion,
-    bool synchronous)
+OperatorSubmission::OperatorSubmission(OperatorPinnedAction generation,
+                                       RuntimeCompletion completion,
+                                       bool synchronous)
     : resource_stamp(generation.resource_stamp()),
       completed_synchronously(synchronous),
       generation_(std::move(generation)),
@@ -383,8 +380,7 @@ struct OperatorResourceGenerationPublisher::Impl {
 };
 
 OperatorResourceGenerationPublisher::OperatorResourceGenerationPublisher()
-    : impl_(std::make_unique<Impl>(
-          allocate_operator_generation_domain())) {
+    : impl_(std::make_unique<Impl>(allocate_operator_generation_domain())) {
 }
 
 OperatorResourceGenerationPublisher::~OperatorResourceGenerationPublisher() {
@@ -398,22 +394,19 @@ void OperatorResourceGenerationPublisher::publish(
     OperatorAction action,
     OperatorResourceLease resources) {
   const auto stamp = action.resource_stamp();
-  TI_ERROR_IF((stamp.program_identity == 0) !=
-                  (stamp.program_generation == 0),
+  TI_ERROR_IF((stamp.program_identity == 0) != (stamp.program_generation == 0),
               "Operator generation Program identity and generation must "
               "either both be present or both be absent.");
   std::lock_guard<std::mutex> lock(impl_->mutex);
   auto [result, next] = impl_->registry.emplace(
-      kOperatorGenerationKind, std::move(action), stamp,
-      std::move(resources));
+      kOperatorGenerationKind, std::move(action), stamp, std::move(resources));
   TI_ERROR_IF(result != OperatorGenerationRegistry::Result::kSuccess,
               "Unable to publish immutable operator resource generation.");
   const auto previous = impl_->current;
   impl_->current = next;
   if (previous) {
     const auto retire_result = impl_->registry.retire(previous);
-    TI_ERROR_IF(retire_result !=
-                    OperatorGenerationRegistry::Result::kSuccess,
+    TI_ERROR_IF(retire_result != OperatorGenerationRegistry::Result::kSuccess,
                 "Unable to retire replaced operator resource generation.");
   }
 }
@@ -424,14 +417,12 @@ OperatorPinnedAction OperatorResourceGenerationPublisher::acquire() const {
               "Operator resource generation publisher has no current "
               "generation.");
   auto [result, lease] = impl_->registry.acquire(impl_->current);
-  TI_ERROR_IF(result != OperatorGenerationRegistry::Result::kSuccess ||
-                  !lease,
+  TI_ERROR_IF(result != OperatorGenerationRegistry::Result::kSuccess || !lease,
               "Unable to pin current operator resource generation.");
   auto action = lease->action;
   const auto stamp = lease->stamp;
-  return OperatorPinnedAction(
-      std::move(action), stamp,
-      OperatorResourceLease::hold(std::move(lease)));
+  return OperatorPinnedAction(std::move(action), stamp,
+                              OperatorResourceLease::hold(std::move(lease)));
 }
 
 void OperatorResourceGenerationPublisher::retire_current() {
@@ -439,8 +430,8 @@ void OperatorResourceGenerationPublisher::retire_current() {
     return;
   }
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  const auto current = std::exchange(
-      impl_->current, OperatorGenerationRegistry::Handle{});
+  const auto current =
+      std::exchange(impl_->current, OperatorGenerationRegistry::Handle{});
   if (!current) {
     return;
   }
@@ -458,17 +449,15 @@ OperatorResourceGenerationPublisher::debug_statistics() const {
           static_cast<bool>(impl_->current)};
 }
 
-OperatorBinding::OperatorBinding(
-    OperatorAction action,
-    AcquireResourceLeaseFn acquire_resource_lease)
+OperatorBinding::OperatorBinding(OperatorAction action,
+                                 AcquireResourceLeaseFn acquire_resource_lease)
     : action_(std::move(action)),
       acquire_resource_lease_(std::move(acquire_resource_lease)) {
 }
 
-OperatorBinding::OperatorBinding(
-    OperatorAction metadata_action,
-    AcquirePinnedActionFn acquire_pinned_action,
-    bool generation_bound)
+OperatorBinding::OperatorBinding(OperatorAction metadata_action,
+                                 AcquirePinnedActionFn acquire_pinned_action,
+                                 bool generation_bound)
     : action_(std::move(metadata_action)),
       acquire_pinned_action_(std::move(acquire_pinned_action)) {
   TI_ERROR_IF(!generation_bound || !acquire_pinned_action_,
@@ -516,8 +505,7 @@ struct OperatorPlan::Scratch {
 OperatorPlan::OperatorPlan(Program *program,
                            OperatorAction action,
                            OperatorDependencyMask dependencies)
-    : OperatorPlan(program, OperatorBinding(std::move(action)),
-                   dependencies) {
+    : OperatorPlan(program, OperatorBinding(std::move(action)), dependencies) {
 }
 
 OperatorPlan::OperatorPlan(Program *program,
@@ -584,21 +572,18 @@ OperatorPinnedAction OperatorPlan::pin() {
               "Operator generation changed descriptor or provider identity "
               "without rebuilding its binding.");
   const auto stamp = pinned.resource_stamp();
-  const auto invalidation = evaluate_operator_plan_invalidation(
-      planned_stamp_, stamp, dependencies_);
+  const auto invalidation =
+      evaluate_operator_plan_invalidation(planned_stamp_, stamp, dependencies_);
   statistics_.generation_pins++;
   if (has_pinned_generation_) {
-    const auto changes =
-        operator_resource_changes(last_pinned_stamp_, stamp);
+    const auto changes = operator_resource_changes(last_pinned_stamp_, stamp);
     if (changes != 0) {
       statistics_.generation_changes++;
     }
-    if (changes & operator_dependency(
-                      OperatorResourceDependency::numeric)) {
+    if (changes & operator_dependency(OperatorResourceDependency::numeric)) {
       statistics_.numeric_generation_changes++;
     }
-    if (changes & operator_dependency(
-                      OperatorResourceDependency::binding)) {
+    if (changes & operator_dependency(OperatorResourceDependency::binding)) {
       statistics_.binding_generation_changes++;
     }
   }
@@ -610,13 +595,149 @@ OperatorPinnedAction OperatorPlan::pin() {
   TI_ERROR_IF(
       invalidation.kind == OperatorPlanInvalidationKind::program_invalid,
       "OperatorPlan belongs to a stale Program generation.");
-  TI_ERROR_IF(
-      invalidation.kind == OperatorPlanInvalidationKind::rebuild,
-      "OperatorPlan dependencies changed and require plan rebuild.");
+  TI_ERROR_IF(invalidation.kind == OperatorPlanInvalidationKind::rebuild,
+              "OperatorPlan dependencies changed and require plan rebuild.");
   TI_ERROR_IF(
       invalidation.kind == OperatorPlanInvalidationKind::refresh_binding,
       "OperatorPlan binding identity changed and requires refresh.");
   return pinned;
+}
+
+namespace {
+
+void validate_preconditioner_descriptor(
+    const OperatorDescriptor &target,
+    const OperatorDescriptor &preconditioner) {
+  TI_ERROR_IF(target.domain != target.range,
+              "PreconditionerPlan requires a square target operator.");
+  TI_ERROR_IF(preconditioner.domain != target.range ||
+                  preconditioner.range != target.domain,
+              "PreconditionerPlan action must map the target range back to "
+              "its domain.");
+}
+
+void validate_preconditioner_generation_pair(
+    const OperatorPinnedAction &target,
+    const OperatorPinnedAction &preconditioner) {
+  const auto target_stamp = target.resource_stamp();
+  const auto preconditioner_stamp = preconditioner.resource_stamp();
+  TI_ERROR_IF(
+      target_stamp.program_identity != preconditioner_stamp.program_identity ||
+          target_stamp.program_generation !=
+              preconditioner_stamp.program_generation ||
+          target_stamp.schema_revision !=
+              preconditioner_stamp.schema_revision ||
+          target_stamp.topology_revision !=
+              preconditioner_stamp.topology_revision ||
+          target_stamp.numeric_revision !=
+              preconditioner_stamp.numeric_revision,
+      "PreconditionerPlan action generation does not match the pinned target "
+      "operator generation.");
+}
+
+}  // namespace
+
+PreconditionerPlan::PreconditionerPlan(Program *program,
+                                       OperatorDescriptor target_descriptor,
+                                       OperatorBinding action_binding,
+                                       PreconditionerBehavior behavior,
+                                       std::string method,
+                                       UpdateFn update)
+    : program_(program),
+      target_descriptor_(std::move(target_descriptor)),
+      action_plan_(
+          std::make_unique<OperatorPlan>(program, std::move(action_binding))),
+      behavior_(behavior),
+      method_(std::move(method)),
+      update_(std::move(update)) {
+  validate_space(target_descriptor_.domain, "preconditioner target domain");
+  validate_space(target_descriptor_.range, "preconditioner target range");
+  validate_preconditioner_descriptor(target_descriptor_,
+                                     action_plan_->descriptor());
+  TI_ERROR_IF(behavior_ != PreconditionerBehavior::fixed_linear,
+              "M3 PreconditionerPlan implements fixed-linear behavior only.");
+  TI_ERROR_IF(method_.empty() || !update_,
+              "PreconditionerPlan requires a method name and update "
+              "callback.");
+}
+
+PreconditionerPlan::~PreconditionerPlan() = default;
+
+void PreconditionerPlan::setup(const OperatorPinnedAction &target_generation) {
+  TI_ERROR_IF(is_setup_, "PreconditionerPlan setup may only run once.");
+  (void)update_and_pin_impl(target_generation, true);
+}
+
+OperatorPinnedAction PreconditionerPlan::update_and_pin(
+    const OperatorPinnedAction &target_generation) {
+  TI_ERROR_IF(!is_setup_,
+              "PreconditionerPlan must be setup before update/action use.");
+  return update_and_pin_impl(target_generation, false);
+}
+
+OperatorPinnedAction PreconditionerPlan::update_and_pin_impl(
+    const OperatorPinnedAction &target_generation,
+    bool setup) {
+  TI_ERROR_IF(!target_generation,
+              "PreconditionerPlan requires a pinned target generation.");
+  TI_ERROR_IF(
+      target_generation.descriptor().domain != target_descriptor_.domain ||
+          target_generation.descriptor().range != target_descriptor_.range,
+      "PreconditionerPlan target descriptor changed after plan "
+      "construction.");
+  const auto target_stamp = target_generation.resource_stamp();
+  const bool target_changed =
+      !setup && operator_resource_changes(target_stamp_, target_stamp) != 0;
+  if (setup) {
+    statistics_.setup_calls++;
+  } else {
+    statistics_.update_calls++;
+    if (target_changed) {
+      statistics_.target_generation_changes++;
+    }
+  }
+  try {
+    update_(target_stamp, setup || target_changed);
+    auto preconditioner_generation = action_plan_->pin();
+    validate_preconditioner_generation_pair(target_generation,
+                                            preconditioner_generation);
+    target_stamp_ = target_stamp;
+    is_setup_ = true;
+    if (!setup) {
+      if (target_changed) {
+        statistics_.update_successes++;
+      } else {
+        statistics_.update_noops++;
+      }
+    }
+    return preconditioner_generation;
+  } catch (...) {
+    if (!setup) {
+      statistics_.update_failures++;
+    }
+    throw;
+  }
+}
+
+const OperatorPlan &PreconditionerPlan::action() const {
+  return *action_plan_;
+}
+
+OperatorPlan &PreconditionerPlan::action() {
+  return *action_plan_;
+}
+
+PreconditionerBehavior PreconditionerPlan::behavior() const {
+  return behavior_;
+}
+
+const std::string &PreconditionerPlan::method() const {
+  return method_;
+}
+
+PreconditionerPlanRuntimeStatistics
+PreconditionerPlan::debug_runtime_statistics() const {
+  return statistics_;
 }
 
 OperatorVectorView OperatorPlan::scratch_for(const OperatorSpaceDesc &space,
@@ -688,9 +809,8 @@ OperatorSubmission OperatorPlan::submit(const OperatorApplyRequest &request) {
                             synchronous);
 }
 
-OperatorSubmission OperatorPlan::submit(
-    const OperatorPinnedAction &pinned,
-    const OperatorApplyRequest &request) {
+OperatorSubmission OperatorPlan::submit(const OperatorPinnedAction &pinned,
+                                        const OperatorApplyRequest &request) {
   TI_ERROR_IF(!std::isfinite(request.alpha) || !std::isfinite(request.beta),
               "Operator generalized apply coefficients must be finite.");
   const auto &expected_input = input_space(descriptor(), request.mode);
@@ -712,13 +832,11 @@ OperatorSubmission OperatorPlan::submit(
   if (request.alpha == 1.0 && request.beta == 0.0) {
     action.apply_overwrite(request.mode, request.input, request.output);
     statistics_.primitive_apply_calls++;
-    return OperatorSubmission(
-        pinned, RuntimeCompletion{},
-        !capabilities().asynchronous_submit);
+    return OperatorSubmission(pinned, RuntimeCompletion{},
+                              !capabilities().asynchronous_submit);
   }
 
-  TI_ERROR_IF(program_ &&
-                  !arch_is_cpu(program_->compile_config().arch),
+  TI_ERROR_IF(program_ && !arch_is_cpu(program_->compile_config().arch),
               "Generalized operator lowering is unavailable on this GPU "
               "backend; only overwrite apply is supported and no host "
               "fallback was performed.");
@@ -805,11 +923,10 @@ OperatorAction make_dense_reference_operator_action(
 namespace {
 
 template <typename Provider>
-OperatorBinding make_cpu_typed_operator_binding(
-    Program *program,
-    Provider &provider,
-    const char *expected_provider,
-    const char *expected_storage) {
+OperatorBinding make_cpu_typed_operator_binding(Program *program,
+                                                Provider &provider,
+                                                const char *expected_provider,
+                                                const char *expected_storage) {
   TI_ERROR_IF(!program || !arch_is_cpu(program->compile_config().arch),
               "CPU operator bindings require an active CPU Program.");
   const auto initial = provider.debug_runtime_statistics();
@@ -822,23 +939,20 @@ OperatorBinding make_cpu_typed_operator_binding(
               expected_provider, expected_storage, initial.provider_name,
               initial.backend_family, initial.storage_format);
   OperatorDescriptor descriptor;
-  descriptor.domain = {
-      provider.get_data_type(),
-      static_cast<std::size_t>(provider.num_cols())};
-  descriptor.range = {
-      provider.get_data_type(),
-      static_cast<std::size_t>(provider.num_rows())};
+  descriptor.domain = {provider.get_data_type(),
+                       static_cast<std::size_t>(provider.num_cols())};
+  descriptor.range = {provider.get_data_type(),
+                      static_cast<std::size_t>(provider.num_rows())};
   auto action = OperatorAction(
       descriptor, OperatorCapabilities{}, expected_provider,
       [program, &provider] {
         const auto statistics = provider.debug_runtime_statistics();
-        return OperatorResourceStamp{
-            reinterpret_cast<std::uintptr_t>(program),
-            program->runtime_program_generation(),
-            1,
-            statistics.pattern_version,
-            statistics.numeric_version,
-            provider.matrix_id()};
+        return OperatorResourceStamp{reinterpret_cast<std::uintptr_t>(program),
+                                     program->runtime_program_generation(),
+                                     1,
+                                     statistics.pattern_version,
+                                     statistics.numeric_version,
+                                     provider.matrix_id()};
       },
       [program, &provider](OperatorApplyMode mode,
                            const OperatorVectorView &input,
@@ -849,22 +963,19 @@ OperatorBinding make_cpu_typed_operator_binding(
                     "no fallback was performed.");
         provider.nd_spmv(program, *input.ndarray, *output.ndarray);
       });
-  return OperatorBinding(
-      std::move(action), [&provider] {
-        return OperatorResourceLease::hold(
-            provider.acquire_numeric_access_guard());
-      });
+  return OperatorBinding(std::move(action), [&provider] {
+    return OperatorResourceLease::hold(provider.acquire_numeric_access_guard());
+  });
 }
 
 template <typename Provider, typename Apply>
-OperatorBinding make_gpu_typed_operator_binding(
-    Program *program,
-    Provider &provider,
-    Arch expected_arch,
-    const char *expected_backend,
-    const char *expected_provider,
-    const char *expected_storage,
-    Apply apply) {
+OperatorBinding make_gpu_typed_operator_binding(Program *program,
+                                                Provider &provider,
+                                                Arch expected_arch,
+                                                const char *expected_backend,
+                                                const char *expected_provider,
+                                                const char *expected_storage,
+                                                Apply apply) {
   TI_ERROR_IF(!program || program->compile_config().arch != expected_arch,
               "{} operator bindings require their owning {} Program.",
               expected_backend, expected_backend);
@@ -879,53 +990,48 @@ OperatorBinding make_gpu_typed_operator_binding(
               initial.provider_name, initial.backend_family,
               initial.storage_format);
   OperatorDescriptor descriptor;
-  descriptor.domain = {
-      provider.get_data_type(),
-      static_cast<std::size_t>(provider.num_cols())};
-  descriptor.range = {
-      provider.get_data_type(),
-      static_cast<std::size_t>(provider.num_rows())};
+  descriptor.domain = {provider.get_data_type(),
+                       static_cast<std::size_t>(provider.num_cols())};
+  descriptor.range = {provider.get_data_type(),
+                      static_cast<std::size_t>(provider.num_rows())};
   OperatorCapabilities capabilities;
   capabilities.asynchronous_submit = true;
   auto action = OperatorAction(
       descriptor, capabilities, expected_provider,
       [program, &provider] {
         const auto statistics = provider.debug_runtime_statistics();
-        return OperatorResourceStamp{
-            reinterpret_cast<std::uintptr_t>(program),
-            program->runtime_program_generation(),
-            1,
-            statistics.pattern_version,
-            statistics.numeric_version,
-            provider.matrix_id()};
+        return OperatorResourceStamp{reinterpret_cast<std::uintptr_t>(program),
+                                     program->runtime_program_generation(),
+                                     1,
+                                     statistics.pattern_version,
+                                     statistics.numeric_version,
+                                     provider.matrix_id()};
       },
-      [apply = std::move(apply)](
-          OperatorApplyMode mode, const OperatorVectorView &input,
-          const OperatorVectorView &output) {
+      [apply = std::move(apply)](OperatorApplyMode mode,
+                                 const OperatorVectorView &input,
+                                 const OperatorVectorView &output) {
         TI_ERROR_IF(mode != OperatorApplyMode::forward,
                     "GPU sparse operator bindings support forward apply "
                     "only.");
         apply(input, output);
       });
-  return OperatorBinding(
-      std::move(action), [&provider] {
-        return OperatorResourceLease::hold(
-            provider.acquire_numeric_access_guard());
-      });
+  return OperatorBinding(std::move(action), [&provider] {
+    return OperatorResourceLease::hold(provider.acquire_numeric_access_guard());
+  });
 }
 
 }  // namespace
 
 OperatorBinding make_cpu_csr_operator_binding(Program *program,
                                               CpuSparseCsrMatrix &matrix) {
-  return make_cpu_typed_operator_binding(
-      program, matrix, "forge_cpu_native", "csr");
+  return make_cpu_typed_operator_binding(program, matrix, "forge_cpu_native",
+                                         "csr");
 }
 
 OperatorBinding make_cpu_bsr_operator_binding(Program *program,
                                               CpuSparseBsrMatrix &matrix) {
-  return make_cpu_typed_operator_binding(
-      program, matrix, "forge_cpu_native", "bsr");
+  return make_cpu_typed_operator_binding(program, matrix, "forge_cpu_native",
+                                         "bsr");
 }
 
 OperatorBinding make_cpu_program_kernel_operator_binding(
@@ -967,13 +1073,12 @@ OperatorBinding make_cuda_program_kernel_operator_binding(
   return matrix.make_operator_binding();
 }
 
-OperatorBinding make_vulkan_csr_operator_binding(
-    Program *program,
-    VulkanSparseMatrix &matrix) {
+OperatorBinding make_vulkan_csr_operator_binding(Program *program,
+                                                 VulkanSparseMatrix &matrix) {
   return make_gpu_typed_operator_binding(
-      program, matrix, Arch::vulkan, "vulkan", "forge_vulkan_native",
-      "csr", [program, &matrix](const OperatorVectorView &input,
-                                const OperatorVectorView &output) {
+      program, matrix, Arch::vulkan, "vulkan", "forge_vulkan_native", "csr",
+      [program, &matrix](const OperatorVectorView &input,
+                         const OperatorVectorView &output) {
         TI_ERROR_IF(!input.ndarray || !output.ndarray,
                     "Vulkan CSR operator binding requires ndarray views.");
         matrix.nd_spmv(program, *input.ndarray, *output.ndarray);
@@ -984,9 +1089,9 @@ OperatorBinding make_vulkan_bsr_operator_binding(
     Program *program,
     VulkanSparseBsrMatrix &matrix) {
   return make_gpu_typed_operator_binding(
-      program, matrix, Arch::vulkan, "vulkan", "forge_vulkan_native",
-      "bsr", [program, &matrix](const OperatorVectorView &input,
-                                const OperatorVectorView &output) {
+      program, matrix, Arch::vulkan, "vulkan", "forge_vulkan_native", "bsr",
+      [program, &matrix](const OperatorVectorView &input,
+                         const OperatorVectorView &output) {
         TI_ERROR_IF(!input.ndarray || !output.ndarray,
                     "Vulkan BSR operator binding requires ndarray views.");
         matrix.nd_spmv(program, *input.ndarray, *output.ndarray);
