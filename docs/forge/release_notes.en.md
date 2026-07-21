@@ -90,6 +90,13 @@ retroactively attributed to the 0.5.0 artifact:
   tolerance while retaining fixed-budget masked execution as its compatible
   default. Logical, executed, and wasted iterations and host checks are
   reported separately.
+- Added homogeneous independent batched f32 CG/PCG on CPU, CUDA, and Vulkan.
+  Each contiguous system has independent tolerance, status, iteration, and
+  residual state; fixed stored and compiled-kernel A/M providers are
+  qualified. CUDA/Vulkan fixed-budget plans also provide `submit()`,
+  `SolveSubmission`, and explicit workspace cloning for bounded concurrent
+  execution. Execution-policy capabilities and unsupported reasons are
+  queryable; conditional device-convergent execution is not enabled.
 - Hardened direct-solver symbolic reuse. `factorize()` may reuse an analyzed
   pattern only when the complete compressed index pattern is identical, and a
   value update after factorization makes the factorization stale until it is

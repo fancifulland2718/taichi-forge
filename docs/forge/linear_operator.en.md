@@ -271,6 +271,12 @@ faster choice depends on vector size, operator cost, iteration count, driver,
 and backend. Unsupported policies and intervals fail during plan
 construction; they do not silently fall back.
 
+`plan.execution_capabilities()` reports the policy matrix and a structured
+reason for unavailable conditional execution. `"device_convergent"` is not a
+supported policy on the current CPU, CUDA, or Vulkan solver paths. An explicit
+request fails without changing to host checks or fixed-budget execution, and
+backend availability never changes a plan's default policy automatically.
+
 ## Independent batched CG and PCG
 
 `BatchedSolvePlan` solves a homogeneous batch of independent SPD systems with
@@ -343,6 +349,45 @@ per-environment recurrence, tolerance, and status state. Caller-owned RHS,
 solution, initial guess, and provider resources are excluded from these plan
 workspace counts.
 
+### Asynchronous fixed-budget submission
+
+CUDA and Vulkan batch plans using `execution_policy="fixed_budget_masked"`
+can submit the complete masked iteration budget without materializing terminal
+state at the call boundary:
+
+```python
+plan = ti.linalg.experimental.BatchedSolvePlan(
+    operator,
+    batch_size=B,
+    independent_systems=True,
+    max_iterations=8,
+    atol=1e-6,
+    execution_policy="fixed_budget_masked",
+)
+
+submission = plan.submit(rhs_flat, out=x_flat)
+# Submit independent application work here.
+submission.wait()
+result = submission.result()
+```
+
+`SolveSubmission.done()` observes backend completion without releasing the
+workspace slot. `wait()` waits when necessary, materializes the complete
+per-system terminal snapshot, and releases the slot. `result()` performs the
+same operation when needed and returns the immutable `BatchedSolveResult`.
+The submission retains the exact A/M generations, input/output ndarrays,
+workspace, and backend completion until this boundary. Backend failures are
+re-raised by `wait()` and `result()`; `ti.reset()` waits for retained backend
+work and makes an outstanding ticket explicitly stale.
+
+One `BatchedSolvePlan` owns one submission slot. Submitting again before the
+pending ticket is completed and materialized fails instead of sharing Krylov
+vectors. Use `clone = plan.clone_workspace()` when independent submissions
+must be in flight concurrently. Each clone owns another complete set of CG or
+PCG workspace vectors and state. Chunked host-check policies and CPU plans are
+not qualified for `submit()`; a call fails explicitly rather than moving a
+synchronous loop to a worker thread.
+
 This API is independent batching. It is not global-scalar CG over an
 implicitly coupled block matrix, multi-RHS CG, block CG, or another block
 Krylov method. Coupled systems require an operator and solver whose mathematics
@@ -370,6 +415,8 @@ model that coupling explicitly.
 | PCG + block-Jacobi | Fixed BSR, `f32/f64` | Fixed BSR, `f32` | Fixed BSR, `f32` |
 | PCG + fixed-linear operator | Supported providers, `f32/f64` | Compiled-kernel A/M, `f32` | Compiled-kernel A/M, `f32` |
 | Independent batched CG/PCG | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
+| Batched fixed-budget submission | Unsupported | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
+| Device-convergent conditional execution | Unsupported | Unsupported | Unsupported |
 | BiCGSTAB | Any supported CPU operator, `f32/f64` | Unsupported | Unsupported |
 
 MINRES and direct factorization remain stored-matrix APIs.

@@ -77,6 +77,11 @@
   或 8 iteration 检查收敛；Vulkan 支持相同 chunk size 与 relative tolerance，同时保留
   fixed-budget masked execution 作为兼容默认值。logical、executed、wasted iteration
   与 host check 会分别报告。
+- 增加 CPU、CUDA 与 Vulkan 上的同构独立批量 f32 CG/PCG。每个连续系统拥有独立
+  tolerance、status、iteration 与 residual state；fixed stored 和 compiled-kernel A/M
+  provider 已完成资格验证。CUDA/Vulkan fixed-budget plan 还提供 `submit()`、
+  `SolveSubmission` 与显式 workspace clone，用于有界并发执行。执行策略 capability 与
+  unsupported reason 可查询；当前未启用 device-convergent 条件执行。
 - 强化 direct solver symbolic reuse：只有完整 compressed index pattern 相同，
   `factorize()` 才能复用已分析 pattern；factorization 后更新 values 会使分解
   stale，必须刷新后才能 solve。stable-fluid example 固定 pressure gauge，implicit

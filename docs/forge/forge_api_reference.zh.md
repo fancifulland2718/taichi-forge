@@ -902,8 +902,12 @@ operator API 另见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.m
 | `operator.scaled(...)`、`operator + other`、`.compose(...)`、`.adjoint()`、`block_diagonal(...)`、`identity(...)` | 构造最小线性算子代数。 | CPU composition；adjoint 需要显式 capability。 |
 | `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=...)` | 构造 persistent CG、PCG 或 CPU BiCGSTAB plan。 | PCG 可用内置 Jacobi/block-Jacobi 或可信 fixed-linear operator；CUDA/Vulkan 支持 K=4/8 的 `host_check_every_k` 与 absolute/relative tolerance。 |
 | `plan.solve(rhs, initial_guess=None, out=None)` | 返回 immutable `SolveResult`，包含 solution 与 terminal residual/status 字段。 | 一维 scalar Taichi ndarray；禁止 RHS/output alias 和 host staging。 |
+| `plan.execution_capabilities()` | 返回 backend/provider 执行策略矩阵与结构化 unsupported reason。 | 当前不支持 `device_convergent`；显式请求不会 fallback，也不会自动改变 policy。 |
 | `ti.linalg.experimental.BatchedSolvePlan(operator, batch_size, independent_systems=True, ...)` | 在连续扁平分区上构造同构、相互独立的 f32 CG/PCG plan。 | CPU/CUDA/Vulkan；逐系统 tolerance、status 与 iteration count；已验证 fixed stored 或 compiled-kernel A/M。 |
 | `batch_plan.solve(rhs_flat, initial_guess=None, out=None)` | 返回扁平 solution 与逐系统 immutable `BatchedSolveResult` tuple。 | 只表示 independent direct-sum system；不是 multi-RHS 或 block Krylov。 |
+| `batch_plan.submit(rhs_flat, initial_guess=None, out=None)` | 提交一次 solve 并返回 `SolveSubmission`。 | CUDA/Vulkan 的 `fixed_budget_masked`；一个 plan-owned slot；精确 generation 与 array 保留到 completion。 |
+| `SolveSubmission.done()` / `.wait()` / `.result()` | 观察 completion、生成 terminal state 并返回 `BatchedSolveResult`。 | `done()` 不释放 slot；`wait()`/`result()` 抛出 backend error 并释放 slot。 |
+| `batch_plan.clone_workspace()` | 创建具有独立 Krylov state 的等价 plan。 | 并发 submission 必须使用；每个 clone 拥有另一套完整 workspace。 |
 | `operator.statistics()` / `plan.statistics()` | 返回 provider/plan execution 与 workspace 诊断。 | diagnostic snapshot，不属于数值结果。 |
 
 迭代收敛条件为

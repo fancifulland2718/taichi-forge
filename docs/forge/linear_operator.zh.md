@@ -244,6 +244,11 @@ tail。Vulkan fixed-budget execution 可以执行完整的 `max_iterations`，�
 较快选择取决于 vector size、operator 成本、iteration count、driver 与 backend。不受支持
 的 policy 或 interval 会在 plan 构造时失败，不会静默 fallback。
 
+`plan.execution_capabilities()` 返回执行策略矩阵，以及条件执行不可用时的结构化原因。
+当前 CPU、CUDA 和 Vulkan solver 路径均不支持 `"device_convergent"`。显式请求会直接
+失败，不会切换为 host check 或 fixed-budget execution；backend 能力也不会自动改变 plan
+的默认策略。
+
 ## 独立批量 CG 与 PCG
 
 `BatchedSolvePlan` 使用一个持久 plan 求解一组同构、相互独立的 SPD 系统。它接受 shape
@@ -305,6 +310,40 @@ provider system iteration、active efficiency、host check、transfer 和 persis
 四个；此外还保留逐环境 recurrence、tolerance 与 status state。调用方拥有的 RHS、
 solution、initial guess 和 provider resource 不计入这些 plan workspace 数字。
 
+### 异步 fixed-budget submission
+
+使用 `execution_policy="fixed_budget_masked"` 的 CUDA/Vulkan batch plan 可以提交完整的
+masked iteration budget，而不在调用返回前读取 terminal state：
+
+```python
+plan = ti.linalg.experimental.BatchedSolvePlan(
+    operator,
+    batch_size=B,
+    independent_systems=True,
+    max_iterations=8,
+    atol=1e-6,
+    execution_policy="fixed_budget_masked",
+)
+
+submission = plan.submit(rhs_flat, out=x_flat)
+# 在这里提交应用中无依赖的工作。
+submission.wait()
+result = submission.result()
+```
+
+`SolveSubmission.done()` 只观察 backend completion，不释放 workspace slot。`wait()` 在
+需要时等待、生成完整逐系统 terminal snapshot，并释放 slot；`result()` 在需要时执行
+相同操作并返回 immutable `BatchedSolveResult`。submission 会保留精确的 A/M
+generation、input/output ndarray、workspace 和 backend completion，直到这一完成边界。
+backend error 会由 `wait()` / `result()` 重新抛出；`ti.reset()` 会先等待已保留的 backend
+work，再把尚未完成取值的 ticket 明确标记为 stale。
+
+一个 `BatchedSolvePlan` 只拥有一个 submission slot。在 pending ticket 完成并生成结果前
+再次提交会失败，不会共享 Krylov vector。需要多个独立 in-flight submission 时，使用
+`clone = plan.clone_workspace()`；每个 clone 都拥有另一套完整 CG/PCG workspace vector
+与 state。chunked host-check policy 和 CPU plan 没有通过 `submit()` 资格；调用会明确
+失败，而不是把同步循环移动到 worker thread。
+
 该 API 表示 independent batching，不是对隐式耦合 block matrix 使用 global-scalar CG，
 也不是 multi-RHS CG、block CG 或其它 block Krylov 方法。耦合系统必须使用在数学上显式
 表达该耦合关系的 operator 与 solver。
@@ -331,6 +370,8 @@ solution、initial guess 和 provider resource 不计入这些 plan workspace �
 | PCG + block-Jacobi | fixed BSR，`f32/f64` | fixed BSR，`f32` | fixed BSR，`f32` |
 | PCG + fixed-linear operator | 受支持 provider，`f32/f64` | compiled-kernel A/M，`f32` | compiled-kernel A/M，`f32` |
 | 独立批量 CG/PCG | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` |
+| 批量 fixed-budget submission | 不支持 | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` |
+| device-convergent 条件执行 | 不支持 | 不支持 | 不支持 |
 | BiCGSTAB | 任意受支持 CPU operator，`f32/f64` | 不支持 | 不支持 |
 
 MINRES 和 direct factorization 继续使用 stored-matrix API。
