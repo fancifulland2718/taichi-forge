@@ -5716,6 +5716,23 @@ void export_lang(py::module &m) {
 
   py::class_<CUCG>(m, "CUCG")
       .def("solve", &CUCG::solve)
+      .def(
+          "_configure_execution_policy",
+          [](CUCG &cg, const std::string &policy, int check_interval) {
+            SparseSolveExecutionPolicy native_policy;
+            if (policy == "host_each_iteration") {
+              native_policy =
+                  SparseSolveExecutionPolicy::host_each_iteration;
+            } else if (policy == "host_check_every_k") {
+              native_policy =
+                  SparseSolveExecutionPolicy::host_check_every_k;
+            } else {
+              TI_ERROR("Unsupported CUDA CG execution policy '{}'.",
+                       policy);
+            }
+            cg.configure_execution_policy(native_policy, check_interval);
+          },
+          py::arg("policy"), py::arg("check_interval"))
       .def("is_success", &CUCG::is_success)
       .def("get_status", &CUCG::get_status)
       .def("get_iterations", &CUCG::get_iterations)

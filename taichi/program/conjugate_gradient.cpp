@@ -1,6 +1,7 @@
 #include "conjugate_gradient.h"
 #include "linear_operator.h"
 #include "sparse_preconditioner.h"
+#include "taichi/rhi/cuda/primitives/solver_ptx.h"
 
 #include <algorithm>
 #include <functional>
@@ -106,6 +107,7 @@ SparseSolveExecutionCapabilities sparse_solve_execution_capabilities(
     result.host_each_iteration = true;
   } else if (arch == Arch::cuda) {
     result.host_each_iteration = true;
+    result.host_check_every_k = true;
   } else if (arch == Arch::vulkan) {
     result.fixed_budget_masked = true;
   }
@@ -307,6 +309,21 @@ bool CUCG::has_preconditioner() const {
   return preconditioner_plan_ != nullptr;
 }
 
+void CUCG::configure_execution_policy(
+    SparseSolveExecutionPolicy policy,
+    int host_check_interval) {
+  std::lock_guard<std::mutex> lock(solve_mutex_);
+  TI_ERROR_IF(solve_calls_ != 0,
+              "CUDA CG execution policy must be configured before solve.");
+  validate_sparse_solve_execution_policy(Arch::cuda, policy,
+                                         host_check_interval);
+  TI_ERROR_IF(policy == SparseSolveExecutionPolicy::host_check_every_k &&
+                  host_check_interval != 4 && host_check_interval != 8,
+              "CUDA host_check_every_k currently supports K=4 or K=8.");
+  execution_policy_ = policy;
+  host_check_interval_ = host_check_interval;
+}
+
 void CUCG::validate_controls() const {
   validate_sparse_solve_execution_policy(
       Arch::cuda, SparseSolveExecutionPolicy::host_each_iteration);
@@ -445,9 +462,15 @@ CUCG::~CUCG() {
 
 void CUCG::ensure_workspace(Program *program, int size) {
 #if defined(TI_WITH_CUDA)
+  const bool needs_scalars =
+      execution_policy_ == SparseSolveExecutionPolicy::host_check_every_k;
   if (workspace_size_ == size && workspace_ax_ && workspace_r_ &&
-      workspace_p_ && (!has_preconditioner() || workspace_z_)) {
+      workspace_p_ && (!has_preconditioner() || workspace_z_) &&
+      (!needs_scalars || workspace_scalars_)) {
     workspace_reuses_++;
+    if (needs_scalars) {
+      solver_chunk_reuses_++;
+    }
     return;
   }
   release_workspace();
@@ -479,12 +502,19 @@ void CUCG::ensure_workspace(Program *program, int size) {
         workspace_z_ = reinterpret_cast<float *>(
             program->get_ndarray_data_ptr_as_int(workspace_z_ndarray_));
       }
+      if (needs_scalars) {
+        CUDADriver::get_instance().malloc(
+            &workspace_scalars_, sizeof(cuda::CudaCGScalarState));
+      }
     } catch (...) {
       release_workspace();
       throw;
     }
     workspace_size_ = size;
     workspace_builds_++;
+    if (needs_scalars) {
+      solver_chunk_builds_++;
+    }
     return;
   }
   CUDADriver::get_instance().malloc((void **)&workspace_ax_,
@@ -496,6 +526,11 @@ void CUCG::ensure_workspace(Program *program, int size) {
   if (has_preconditioner()) {
     CUDADriver::get_instance().malloc((void **)&workspace_z_,
                                       sizeof(float) * size);
+  }
+  if (needs_scalars) {
+    CUDADriver::get_instance().malloc(
+        &workspace_scalars_, sizeof(cuda::CudaCGScalarState));
+    solver_chunk_builds_++;
   }
   workspace_size_ = size;
   workspace_builds_++;
@@ -520,6 +555,8 @@ void CUCG::release_workspace() {
     program_->delete_ndarray(workspace_z_ndarray_);
   else if (workspace_z_)
     CUDADriver::get_instance().mem_free(workspace_z_);
+  if (workspace_scalars_)
+    CUDADriver::get_instance().mem_free(workspace_scalars_);
   workspace_ax_ndarray_ = nullptr;
   workspace_r_ndarray_ = nullptr;
   workspace_p_ndarray_ = nullptr;
@@ -528,7 +565,147 @@ void CUCG::release_workspace() {
   workspace_r_ = nullptr;
   workspace_p_ = nullptr;
   workspace_z_ = nullptr;
+  workspace_scalars_ = nullptr;
   workspace_size_ = 0;
+#endif
+}
+
+void CUCG::solve_device_scalar(
+    Program *prog,
+    const Ndarray &x,
+    const Ndarray &b,
+    const OperatorPinnedAction &operator_generation,
+    const OperatorPinnedAction &preconditioner_generation) {
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(!workspace_scalars_ || !cuda::driver_cg_scalar_available(),
+              "CUDA host-check CG requires the device scalar primitive.");
+  auto *state =
+      static_cast<cuda::CudaCGScalarState *>(workspace_scalars_);
+  auto &driver = CUDADriver::get_instance();
+  auto &cublas = CUBLASDriver::get_instance();
+  cublas.cubSetPointerMode(handle_, CUBLAS_POINTER_MODE_DEVICE);
+  cublasPointerMode_t pointer_mode = CUBLAS_POINTER_MODE_HOST;
+  cublas.cubGetPointerMode(handle_, &pointer_mode);
+  TI_ERROR_IF(pointer_mode != CUBLAS_POINTER_MODE_DEVICE,
+              "CUDA host-check CG could not enable device pointer mode.");
+  cublas_device_pointer_mode_ = true;
+
+  cuda::CudaCGScalarState host_state;
+  host_state.absolute_tolerance = absolute_tolerance_;
+  host_state.relative_tolerance = relative_tolerance_;
+  host_state.has_preconditioner = has_preconditioner() ? 1 : 0;
+  driver.memcpy_host_to_device(state, &host_state, sizeof(host_state));
+  host_to_device_bytes_ += sizeof(host_state);
+
+  const auto d_x = prog->get_ndarray_data_ptr_as_int(&x);
+  const auto d_b = prog->get_ndarray_data_ptr_as_int(&b);
+  const int rows = A_.num_rows();
+  auto *d_ax = workspace_ax_;
+  auto *d_r = workspace_r_;
+  auto *d_p = workspace_p_;
+  auto *d_z = workspace_z_;
+  auto read_state = [&]() {
+    driver.memcpy_device_to_host(&host_state, state, sizeof(host_state));
+    host_scalar_readbacks_++;
+    host_synchronizations_++;
+    device_to_host_bytes_ += sizeof(host_state);
+  };
+
+  driver.memcpy_device_to_device(d_r, reinterpret_cast<void *>(d_b),
+                                 sizeof(float) * rows);
+  device_to_device_bytes_ += sizeof(float) * rows;
+  apply_operator(prog, operator_generation, d_x,
+                 reinterpret_cast<std::uintptr_t>(d_ax), &x,
+                 workspace_ax_ndarray_);
+  operator_apply_calls_++;
+  cublas.cubSaxpy(handle_, rows, &state->negative_one, d_ax, 1, d_r, 1);
+  cublas.cubSdot(handle_, rows, d_r, 1, d_r, 1, &state->rr_current);
+  device_scalar_operations_++;
+  if (relative_tolerance_ > 0.0f) {
+    const auto *rhs = reinterpret_cast<const float *>(d_b);
+    cublas.cubSdot(handle_, rows, rhs, 1, rhs, 1, &state->rhs_squared);
+    device_scalar_operations_++;
+  }
+  cuda::driver_cg_initialize(state, solver_stream_);
+  device_scalar_operations_++;
+  read_state();
+
+  if (host_state.active != 0 && max_iters_ > 0) {
+    if (has_preconditioner()) {
+      apply_preconditioner(prog, preconditioner_generation, d_r, d_z,
+                           workspace_r_ndarray_, workspace_z_ndarray_);
+      preconditioner_apply_calls_++;
+      cublas.cubSdot(handle_, rows, d_r, 1, d_z, 1,
+                     &state->rho_current);
+      cuda::driver_cg_validate_rho(state, solver_stream_);
+      device_scalar_operations_ += 2;
+    }
+    driver.memcpy_device_to_device(
+        d_p, has_preconditioner() ? d_z : d_r, sizeof(float) * rows);
+    device_to_device_bytes_ += sizeof(float) * rows;
+  }
+
+  int issued_iterations = 0;
+  while (host_state.active != 0 && issued_iterations < max_iters_) {
+    const int chunk_iterations =
+        std::min(host_check_interval_, max_iters_ - issued_iterations);
+    solver_chunk_direct_submissions_++;
+    for (int chunk_index = 0; chunk_index < chunk_iterations;
+         ++chunk_index) {
+      apply_operator(prog, operator_generation,
+                     reinterpret_cast<std::uintptr_t>(d_p),
+                     reinterpret_cast<std::uintptr_t>(d_ax),
+                     workspace_p_ndarray_, workspace_ax_ndarray_);
+      operator_apply_calls_++;
+      cublas.cubSdot(handle_, rows, d_p, 1, d_ax, 1, &state->p_ap);
+      cuda::driver_cg_prepare_alpha(state, solver_stream_);
+      cublas.cubSaxpy(handle_, rows, &state->alpha, d_p, 1,
+                      reinterpret_cast<float *>(d_x), 1);
+      cublas.cubSaxpy(handle_, rows, &state->negative_alpha, d_ax, 1, d_r,
+                      1);
+      cublas.cubSdot(handle_, rows, d_r, 1, d_r, 1, &state->rr_next);
+      cuda::driver_cg_finish_iteration(state, solver_stream_);
+      device_scalar_operations_ += 4;
+
+      if (has_preconditioner()) {
+        apply_preconditioner(prog, preconditioner_generation, d_r, d_z,
+                             workspace_r_ndarray_, workspace_z_ndarray_);
+        preconditioner_apply_calls_++;
+        cublas.cubSdot(handle_, rows, d_r, 1, d_z, 1,
+                       &state->rho_next);
+        device_scalar_operations_++;
+      }
+      cuda::driver_cg_prepare_direction(state, solver_stream_);
+      device_scalar_operations_++;
+      cublas.cubSscal(handle_, rows, &state->beta, d_p, 1);
+      cublas.cubSaxpy(handle_, rows, &state->source_scale,
+                      has_preconditioner() ? d_z : d_r, 1, d_p, 1);
+      issued_iterations++;
+      executed_iterations_++;
+    }
+    read_state();
+    if (verbose_) {
+      fmt::print("chunk: {}, completed: {}, rr: {}\n",
+                 solver_chunk_direct_submissions_,
+                 host_state.completed_iterations, host_state.rr_current);
+    }
+  }
+
+  iterations_ = host_state.completed_iterations;
+  initial_residual_norm_ =
+      std::isfinite(host_state.initial_rr) && host_state.initial_rr >= 0.0f
+          ? std::sqrt(static_cast<double>(host_state.initial_rr))
+          : std::numeric_limits<double>::quiet_NaN();
+  residual_norm_ =
+      std::isfinite(host_state.rr_current) && host_state.rr_current >= 0.0f
+          ? std::sqrt(static_cast<double>(host_state.rr_current))
+          : std::numeric_limits<double>::quiet_NaN();
+  relative_reference_norm_ = host_state.relative_reference_norm;
+  effective_tolerance_ = host_state.effective_tolerance;
+  status_ = static_cast<SparseSolveStatus>(host_state.status);
+  total_iterations_ += static_cast<std::uint64_t>(iterations_);
+#else
+  TI_NOT_IMPLEMENTED;
 #endif
 }
 
@@ -569,6 +746,12 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
   int m = A_.num_rows();
 
   ensure_workspace(prog, m);
+  if (execution_policy_ ==
+      SparseSolveExecutionPolicy::host_check_every_k) {
+    solve_device_scalar(prog, x, b, operator_generation,
+                        preconditioner_generation);
+    return;
+  }
   float *d_Ax = workspace_ax_;
   float *d_r = workspace_r_;
   float *d_p = workspace_p_;
@@ -760,14 +943,35 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
   result.solve_calls = solve_calls_;
   result.total_iterations = total_iterations_;
   result.logical_iterations = total_iterations_;
-  result.executed_iterations = total_iterations_;
-  result.wasted_iterations = 0;
+  result.executed_iterations =
+      execution_policy_ == SparseSolveExecutionPolicy::host_check_every_k
+          ? executed_iterations_
+          : total_iterations_;
+  result.wasted_iterations =
+      result.executed_iterations - result.logical_iterations;
   result.workspace_builds = workspace_builds_;
   result.workspace_reuses = workspace_reuses_;
   result.operator_apply_calls = operator_apply_calls_;
   result.operator_apply_calls_available = true;
   result.preconditioner_apply_calls = preconditioner_apply_calls_;
   result.host_scalar_reductions = host_scalar_reductions_;
+  result.device_scalar_operations = device_scalar_operations_;
+  result.host_scalar_readbacks = host_scalar_readbacks_;
+  result.host_synchronizations = host_synchronizations_;
+  result.requested_solver_execution_policy =
+      sparse_solve_execution_policy_name(execution_policy_);
+  result.solver_execution_policy =
+      sparse_solve_execution_policy_name(execution_policy_);
+  result.host_check_interval = host_check_interval_;
+  result.solver_chunk_builds = solver_chunk_builds_;
+  result.solver_chunk_reuses = solver_chunk_reuses_;
+  result.solver_chunk_direct_submissions =
+      solver_chunk_direct_submissions_;
+  result.solver_graph_enabled = false;
+  result.solver_replay_unavailable_reason =
+      execution_policy_ == SparseSolveExecutionPolicy::host_check_every_k
+          ? "legacy_default_stream_not_capture_qualified"
+          : "not_requested";
   result.persistent_vector_count =
       workspace_ax_ != nullptr && workspace_r_ != nullptr &&
               workspace_p_ != nullptr &&
@@ -782,9 +986,17 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
   result.cublas_handle_count = handle_ != nullptr ? 1 : 0;
   result.cublas_stream_bound = cublas_stream_bound_;
   result.cublas_device_pointer_mode = cublas_device_pointer_mode_;
-  result.solver_scalar_location = "host";
+  result.solver_scalar_location =
+      execution_policy_ == SparseSolveExecutionPolicy::host_check_every_k
+          ? "device"
+          : "host";
   result.solver_stream_policy = "legacy_default_stream";
+  result.persistent_scalar_count = workspace_scalars_ ? 23 : 0;
+  result.persistent_scalar_reserved_bytes =
+      workspace_scalars_ ? sizeof(cuda::CudaCGScalarState) : 0;
   result.device_to_device_bytes = device_to_device_bytes_;
+  result.device_to_host_bytes = device_to_host_bytes_;
+  result.host_to_device_bytes = host_to_device_bytes_;
   if (operator_plan_) {
     append_operator_plan_statistics(*operator_plan_, false, result);
   }

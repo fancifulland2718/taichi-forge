@@ -501,6 +501,9 @@ class CUCG {
 
   SparseSolvePlanRuntimeStatistics debug_runtime_statistics() const;
 
+  void configure_execution_policy(SparseSolveExecutionPolicy policy,
+                                  int host_check_interval);
+
  private:
   void init_solver();
   void validate_controls() const;
@@ -520,6 +523,12 @@ class CUCG {
                       std::uintptr_t output,
                       const Ndarray *input_array,
                       const Ndarray *output_array);
+  void solve_device_scalar(
+      Program *program,
+      const Ndarray &x,
+      const Ndarray &b,
+      const OperatorPinnedAction &operator_generation,
+      const OperatorPinnedAction &preconditioner_generation);
 
   cublasHandle_t handle_{nullptr};
   CUstream solver_stream_{nullptr};
@@ -556,7 +565,11 @@ class CUCG {
   Ndarray *workspace_r_ndarray_{nullptr};
   Ndarray *workspace_p_ndarray_{nullptr};
   Ndarray *workspace_z_ndarray_{nullptr};
+  void *workspace_scalars_{nullptr};
   int workspace_size_{0};
+  SparseSolveExecutionPolicy execution_policy_{
+      SparseSolveExecutionPolicy::host_each_iteration};
+  int host_check_interval_{1};
   std::uint64_t solve_calls_{0};
   std::uint64_t total_iterations_{0};
   std::uint64_t workspace_builds_{0};
@@ -564,7 +577,16 @@ class CUCG {
   std::uint64_t operator_apply_calls_{0};
   std::uint64_t preconditioner_apply_calls_{0};
   std::uint64_t host_scalar_reductions_{0};
+  std::uint64_t device_scalar_operations_{0};
+  std::uint64_t host_scalar_readbacks_{0};
+  std::uint64_t host_synchronizations_{0};
+  std::uint64_t executed_iterations_{0};
+  std::uint64_t solver_chunk_builds_{0};
+  std::uint64_t solver_chunk_reuses_{0};
+  std::uint64_t solver_chunk_direct_submissions_{0};
   std::uint64_t device_to_device_bytes_{0};
+  std::uint64_t device_to_host_bytes_{0};
+  std::uint64_t host_to_device_bytes_{0};
   std::uint64_t last_solve_pattern_version_{0};
   std::uint64_t last_solve_numeric_version_{0};
 };

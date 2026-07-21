@@ -197,12 +197,18 @@ def test_experimental_fixed_linear_operator_pcg():
     )
     exact = np.asarray([0.5, -1.0, 2.0, 1.5], dtype=np.float32)
     rhs = _vector(diagonal.to_numpy() * exact)
+    plan_options = {}
+    if impl.current_cfg().arch == ti.cuda:
+        plan_options.update(
+            execution_policy="host_check_every_k", check_interval=4
+        )
     plan = experimental.SolvePlan(
         operator,
         method="pcg",
         preconditioner=preconditioner,
         max_iterations=8,
         atol=1e-5,
+        **plan_options,
     )
 
     first = plan.solve(rhs)
@@ -215,6 +221,12 @@ def test_experimental_fixed_linear_operator_pcg():
     assert stats["operations"]["preconditioner_apply_calls"] > 0
     assert stats["operations"]["preconditioner_update_noops"] == 2
     assert stats["resources"]["external_preconditioner"]
+    if impl.current_cfg().arch == ti.cuda:
+        assert stats["operations"]["host_scalar_reductions"] == 0
+        assert stats["operations"]["wasted_iterations"] == 6
+        assert stats["operations"]["executed_iterations"] == 8
+        assert stats["operations"]["logical_iterations"] == 2
+        assert stats["resources"]["cublas_device_pointer_mode"]
 
     operator.update_numeric(
         _vector(2.0 * diagonal.to_numpy()),
@@ -223,6 +235,95 @@ def test_experimental_fixed_linear_operator_pcg():
     )
     with pytest.raises(RuntimeError, match="generation does not match"):
         plan.solve(_vector(2.0 * diagonal.to_numpy() * exact))
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_experimental_host_check_cg_chunk_contract():
+    experimental = ti.linalg.experimental
+    size = 24
+    topology = ti.ndarray(ti.i32, shape=size)
+    topology.from_numpy(np.arange(size, dtype=np.int32))
+    diagonal_host = np.resize(
+        np.asarray([2.0, 3.0, 5.0], dtype=np.float32), size
+    )
+    diagonal = _vector(diagonal_host)
+
+    @ti.kernel
+    def diagonal_apply(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(active_size):
+            y[index] = numeric_data[index] * x[topology_data[index]]
+
+    operator = experimental.LinearOperator.from_kernel(
+        diagonal_apply,
+        size,
+        topology,
+        numeric=diagonal,
+        traits=experimental.OperatorTraits.spd(),
+    )
+    exact = np.linspace(-1.0, 1.0, size, dtype=np.float32)
+    rhs = _vector(diagonal_host * exact)
+    host_result = experimental.SolvePlan(
+        operator, max_iterations=16, atol=1e-6
+    ).solve(rhs)
+    assert host_result.converged
+    for check_interval in (4, 8):
+        plan = experimental.SolvePlan(
+            operator,
+            max_iterations=16,
+            atol=1e-6,
+            execution_policy="host_check_every_k",
+            check_interval=check_interval,
+        )
+        result = plan.solve(rhs)
+        assert result.converged
+        assert result.iterations == host_result.iterations
+        assert result.residual_norm == pytest.approx(
+            host_result.residual_norm, rel=2e-5, abs=2e-7
+        )
+        np.testing.assert_allclose(
+            result.solution.to_numpy(), exact, rtol=2e-4, atol=2e-4
+        )
+        stats = plan.statistics()
+        operations = stats["operations"]
+        assert operations["host_scalar_reductions"] == 0
+        assert operations["host_scalar_readbacks"] == (
+            1 + operations["solver_chunk_direct_submissions"]
+        )
+        assert operations["operator_apply_calls"] == (
+            1 + operations["executed_iterations"]
+        )
+        assert operations["executed_iterations"] >= result.iterations
+        assert operations["wasted_iterations"] <= check_interval - 1
+        assert stats["identity"]["solver_scalar_location"] == "device"
+        assert not stats["identity"]["solver_graph_enabled"]
+        assert stats["resources"]["persistent_scalar_reserved_bytes"] == 92
+
+        zero = plan.solve(_vector(np.zeros(size, dtype=np.float32)))
+        assert zero.converged and zero.iterations == 0
+
+    operator.update_numeric(
+        _vector(-diagonal_host),
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    breakdown_plan = experimental.SolvePlan(
+        operator,
+        max_iterations=8,
+        atol=1e-6,
+        execution_policy="host_check_every_k",
+        check_interval=4,
+    )
+    breakdown = breakdown_plan.solve(rhs)
+    assert breakdown.breakdown and breakdown.iterations == 0
+    breakdown_stats = breakdown_plan.statistics()["operations"]
+    assert breakdown_stats["logical_iterations"] == 0
+    assert breakdown_stats["executed_iterations"] == 4
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

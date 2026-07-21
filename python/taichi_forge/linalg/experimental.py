@@ -663,6 +663,8 @@ class SolvePlan:
         max_iterations=50,
         atol=1e-6,
         rtol=0.0,
+        execution_policy=None,
+        check_interval=None,
     ):
         if not isinstance(operator, LinearOperator):
             raise TypeError("operator must be experimental.LinearOperator")
@@ -684,6 +686,11 @@ class SolvePlan:
         self.rtol = rtol
         self.preconditioner = preconditioner
         self._program = _current_program()
+        self.execution_policy, self.check_interval = (
+            self._normalize_execution_policy(
+                execution_policy, check_interval
+            )
+        )
         self._native_preconditioner = None
         self._solver = self._build_solver()
         get_runtime().register_runtime_object(self)
@@ -695,6 +702,70 @@ class SolvePlan:
         self._native_preconditioner = None
         self.operator = None
         self._program = None
+
+    def _normalize_execution_policy(self, policy, check_interval):
+        arch = self._program.config().arch
+        cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
+        if policy is None:
+            if arch == _ti_core.Arch.vulkan:
+                policy = "fixed_budget_masked"
+            else:
+                policy = "host_each_iteration"
+        if not isinstance(policy, str):
+            raise TaichiRuntimeError("execution_policy must be a string")
+        policy = policy.casefold()
+        if arch in cpu_arches:
+            if policy != "host_each_iteration":
+                raise TaichiRuntimeError(
+                    "CPU SolvePlan supports host_each_iteration only"
+                )
+            expected_interval = 1
+        elif arch == _ti_core.Arch.cuda:
+            if policy not in (
+                "host_each_iteration",
+                "host_check_every_k",
+            ):
+                raise TaichiRuntimeError(
+                    "CUDA SolvePlan supports host_each_iteration or "
+                    "host_check_every_k"
+                )
+            expected_interval = 4 if policy == "host_check_every_k" else 1
+        elif arch == _ti_core.Arch.vulkan:
+            if policy != "fixed_budget_masked":
+                raise TaichiRuntimeError(
+                    "Vulkan SolvePlan currently supports "
+                    "fixed_budget_masked only"
+                )
+            expected_interval = self.max_iterations
+        else:
+            raise TaichiRuntimeError("unsupported SolvePlan backend")
+        if check_interval is None:
+            check_interval = expected_interval
+        if isinstance(check_interval, bool):
+            raise TaichiRuntimeError("check_interval must be a positive integer")
+        try:
+            check_interval = _operator.index(check_interval)
+        except TypeError as exc:
+            raise TaichiRuntimeError(
+                "check_interval must be a positive integer"
+            ) from exc
+        if check_interval <= 0:
+            raise TaichiRuntimeError("check_interval must be a positive integer")
+        if policy != "host_check_every_k" and check_interval != expected_interval:
+            raise TaichiRuntimeError(
+                "check_interval is configurable only for host_check_every_k"
+            )
+        if policy == "host_check_every_k" and check_interval not in (4, 8):
+            raise TaichiRuntimeError(
+                "CUDA host_check_every_k currently supports K=4 or K=8"
+            )
+        return policy, check_interval
+
+    def _configure_cuda_solver(self, solver):
+        solver._configure_execution_policy(
+            self.execution_policy, self.check_interval
+        )
+        return solver
 
     def _require_spd(self):
         traits = self.operator._metadata_snapshot["traits"]
@@ -811,24 +882,28 @@ class SolvePlan:
                             "CUDA identity CG supports CSR, compiled-kernel, "
                             "and compiled-Graph providers"
                         )
-                    return _ti_core.make_cucg_solver(
+                    return self._configure_cuda_solver(
+                        _ti_core.make_cucg_solver(
+                            core,
+                            self.max_iterations,
+                            self.atol,
+                            False,
+                            self.rtol,
+                        )
+                    )
+                else:
+                    raise TaichiRuntimeError(
+                        "GPU SolvePlan does not lower composed operators"
+                    )
+                return self._configure_cuda_solver(
+                    factory(
+                        self._program,
                         core,
                         self.max_iterations,
                         self.atol,
                         False,
                         self.rtol,
                     )
-                else:
-                    raise TaichiRuntimeError(
-                        "GPU SolvePlan does not lower composed operators"
-                    )
-                return factory(
-                    self._program,
-                    core,
-                    self.max_iterations,
-                    self.atol,
-                    False,
-                    self.rtol,
                 )
             if arch == _ti_core.Arch.vulkan:
                 if self.rtol != 0.0:
@@ -883,14 +958,16 @@ class SolvePlan:
                 factory = (
                     _ti_core._make_cuda_experimental_linear_operator_pcg_solver
                 )
-                return factory(
-                    self._program,
-                    core,
-                    self.preconditioner._handle,
-                    self.max_iterations,
-                    self.atol,
-                    False,
-                    self.rtol,
+                return self._configure_cuda_solver(
+                    factory(
+                        self._program,
+                        core,
+                        self.preconditioner._handle,
+                        self.max_iterations,
+                        self.atol,
+                        False,
+                        self.rtol,
+                    )
                 )
             if arch == _ti_core.Arch.vulkan:
                 if self.rtol != 0.0:
@@ -951,14 +1028,16 @@ class SolvePlan:
                     self.rtol,
                 )
             if arch == _ti_core.Arch.cuda:
-                return _ti_core._make_cuda_jacobi_pcg_solver(
-                    self._program,
-                    core,
-                    self._native_preconditioner,
-                    self.max_iterations,
-                    self.atol,
-                    False,
-                    self.rtol,
+                return self._configure_cuda_solver(
+                    _ti_core._make_cuda_jacobi_pcg_solver(
+                        self._program,
+                        core,
+                        self._native_preconditioner,
+                        self.max_iterations,
+                        self.atol,
+                        False,
+                        self.rtol,
+                    )
                 )
             if arch == _ti_core.Arch.vulkan:
                 return _ti_core._make_vulkan_jacobi_pcg_convergence_plan(
@@ -985,14 +1064,16 @@ class SolvePlan:
                 self.rtol,
             )
         if arch == _ti_core.Arch.cuda:
-            return _ti_core._make_cuda_block_jacobi_pcg_solver(
-                self._program,
-                core,
-                self._native_preconditioner,
-                self.max_iterations,
-                self.atol,
-                False,
-                self.rtol,
+            return self._configure_cuda_solver(
+                _ti_core._make_cuda_block_jacobi_pcg_solver(
+                    self._program,
+                    core,
+                    self._native_preconditioner,
+                    self.max_iterations,
+                    self.atol,
+                    False,
+                    self.rtol,
+                )
             )
         if arch == _ti_core.Arch.vulkan:
             return _ti_core._make_vulkan_block_jacobi_pcg_convergence_plan(

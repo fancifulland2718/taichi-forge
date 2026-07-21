@@ -154,12 +154,15 @@ TEST(LinearOperator, SolverExecutionPolicyCapabilitiesAreExplicit) {
   const auto cuda =
       sparse_solve_execution_capabilities(Arch::cuda);
   EXPECT_TRUE(cuda.host_each_iteration);
-  EXPECT_FALSE(cuda.host_check_every_k);
+  EXPECT_TRUE(cuda.host_check_every_k);
   EXPECT_FALSE(cuda.fixed_budget_masked);
   EXPECT_FALSE(cuda.device_convergent);
   EXPECT_NO_THROW(validate_sparse_solve_execution_policy(
       Arch::cuda,
       SparseSolveExecutionPolicy::host_each_iteration));
+  EXPECT_NO_THROW(validate_sparse_solve_execution_policy(
+      Arch::cuda,
+      SparseSolveExecutionPolicy::host_check_every_k, 4));
   EXPECT_ANY_THROW(validate_sparse_solve_execution_policy(
       Arch::cuda,
       SparseSolveExecutionPolicy::device_convergent));
