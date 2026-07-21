@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <mutex>
 #include <utility>
@@ -299,6 +300,55 @@ void OperatorPinnedAction::apply_overwrite(
     const OperatorVectorView &output) const {
   TI_ERROR_IF(!action_, "Operator generation pin is empty.");
   action_->apply_overwrite(mode, input, output);
+}
+
+OperatorSubmission::OperatorSubmission(
+    OperatorPinnedAction generation,
+    RuntimeCompletion completion,
+    bool synchronous)
+    : resource_stamp(generation.resource_stamp()),
+      completed_synchronously(synchronous),
+      generation_(std::move(generation)),
+      completion_(std::move(completion)) {
+}
+
+OperatorSubmission::OperatorSubmission(OperatorSubmission &&other) noexcept
+    : resource_stamp(other.resource_stamp),
+      completed_synchronously(other.completed_synchronously),
+      generation_(std::move(other.generation_)),
+      completion_(std::move(other.completion_)) {
+  other.completed_synchronously = true;
+}
+
+OperatorSubmission::~OperatorSubmission() {
+  if (!completed_synchronously && completion_.valid()) {
+    try {
+      completion_.wait();
+    } catch (...) {
+      // Destruction cannot report an asynchronous backend error. The shared
+      // RuntimeFaultDomain keeps it observable through Program diagnostics.
+    }
+  }
+}
+
+bool OperatorSubmission::done() const {
+  if (completed_synchronously) {
+    return true;
+  }
+  TI_ERROR_IF(!completion_.valid(),
+              "Pinned OperatorPlan submission uses an externally managed "
+              "completion boundary.");
+  return completion_.done();
+}
+
+void OperatorSubmission::wait() const {
+  if (completed_synchronously) {
+    return;
+  }
+  TI_ERROR_IF(!completion_.valid(),
+              "Pinned OperatorPlan submission uses an externally managed "
+              "completion boundary.");
+  completion_.wait();
 }
 
 namespace {
@@ -614,7 +664,28 @@ void OperatorPlan::release_scratch(Scratch &scratch) {
 
 OperatorSubmission OperatorPlan::submit(const OperatorApplyRequest &request) {
   auto pinned = pin();
-  return submit(pinned, request);
+  if (!program_ || !capabilities().asynchronous_submit) {
+    return submit(pinned, request);
+  }
+
+  auto transaction = program_->begin_runtime_submission_transaction();
+  try {
+    (void)submit(pinned, request);
+  } catch (...) {
+    const auto submission_error = std::current_exception();
+    transaction->mark_submission();
+    try {
+      auto completion = transaction->finish();
+      completion.wait();
+    } catch (...) {
+    }
+    std::rethrow_exception(submission_error);
+  }
+  transaction->mark_submission();
+  auto completion = transaction->finish();
+  const bool synchronous = !completion.has_backend_work();
+  return OperatorSubmission(std::move(pinned), std::move(completion),
+                            synchronous);
 }
 
 OperatorSubmission OperatorPlan::submit(
@@ -641,7 +712,9 @@ OperatorSubmission OperatorPlan::submit(
   if (request.alpha == 1.0 && request.beta == 0.0) {
     action.apply_overwrite(request.mode, request.input, request.output);
     statistics_.primitive_apply_calls++;
-    return {pinned.resource_stamp(), true};
+    return OperatorSubmission(
+        pinned, RuntimeCompletion{},
+        !capabilities().asynchronous_submit);
   }
 
   TI_ERROR_IF(program_ &&
@@ -667,7 +740,7 @@ OperatorSubmission OperatorPlan::submit(
     axpby<float64>(applied_ptr, addend, request.output, request.alpha,
                    request.beta);
   }
-  return {pinned.resource_stamp(), true};
+  return OperatorSubmission(pinned, RuntimeCompletion{}, true);
 }
 
 OperatorPlanRuntimeStatistics OperatorPlan::debug_runtime_statistics() const {

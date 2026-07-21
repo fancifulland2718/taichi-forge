@@ -6,6 +6,8 @@
 #include <vector>
 
 #include "taichi/program/linear_operator.h"
+#include "taichi/program/ndarray.h"
+#include "taichi/program/program.h"
 
 namespace taichi::lang {
 namespace {
@@ -74,6 +76,95 @@ TEST(LinearOperator, BindingPinsLeaseBeforeReadingResourceStamp) {
   EXPECT_EQ(order[0], 1);
   EXPECT_EQ(order[1], 2);
 }
+
+TEST(LinearOperator, SubmissionTicketRetainsPinnedGeneration) {
+  int releases = 0;
+  const OperatorResourceStamp stamp{0, 0, 1, 2, 3, 4};
+  OperatorBinding binding(
+      make_scale_action(stamp, 2.0f), [&releases] {
+        return OperatorResourceLease::hold(LeaseProbe(&releases));
+      });
+  OperatorPlan plan(nullptr, std::move(binding));
+  const auto &descriptor = plan.descriptor();
+  std::array<float, 2> input{2.0f, 3.0f};
+  std::array<float, 2> output{};
+
+  {
+    auto submission = plan.submit(
+        {OperatorApplyMode::forward,
+         OperatorVectorView::from_const_host(input.data(),
+                                             descriptor.domain),
+         nullptr,
+         OperatorVectorView::from_mutable_host(output.data(),
+                                               descriptor.range)});
+    EXPECT_TRUE(submission.completed_synchronously);
+    EXPECT_TRUE(submission.done());
+    EXPECT_EQ(submission.resource_stamp.numeric_revision, 3u);
+    EXPECT_EQ(releases, 0);
+    auto moved = std::move(submission);
+    EXPECT_TRUE(moved.done());
+    EXPECT_EQ(releases, 0);
+  }
+
+  EXPECT_EQ(releases, 1);
+  EXPECT_FLOAT_EQ(output[0], 4.0f);
+  EXPECT_FLOAT_EQ(output[1], 6.0f);
+}
+
+#ifdef TI_WITH_LLVM
+TEST(LinearOperator, AsyncCapableStandaloneSubmitRecordsCompletion) {
+  Program program(Arch::x64);
+  auto *input = program.create_ndarray(
+      PrimitiveType::f32, {2}, ExternalArrayLayout::kNull, false);
+  auto *output = program.create_ndarray(
+      PrimitiveType::f32, {2}, ExternalArrayLayout::kNull, false);
+  const OperatorSpaceDesc space = scalar_space(PrimitiveType::f32, 2);
+  OperatorCapabilities capabilities;
+  capabilities.asynchronous_submit = true;
+  int releases = 0;
+  OperatorAction action(
+      {space, space}, capabilities, "cpu_async_probe",
+      [&program] {
+        return OperatorResourceStamp{
+            reinterpret_cast<std::uintptr_t>(&program),
+            program.runtime_program_generation(), 1, 1, 1, 1};
+      },
+      [](OperatorApplyMode mode, const OperatorVectorView &source,
+         const OperatorVectorView &target) {
+        ASSERT_EQ(mode, OperatorApplyMode::forward);
+        const auto *src = reinterpret_cast<const float *>(source.data);
+        auto *dst = reinterpret_cast<float *>(target.data);
+        dst[0] = 3.0f * src[0];
+        dst[1] = 3.0f * src[1];
+      });
+  OperatorBinding binding(
+      std::move(action), [&releases] {
+        return OperatorResourceLease::hold(LeaseProbe(&releases));
+      });
+  OperatorPlan plan(&program, std::move(binding));
+  const std::array<float, 2> source{2.0f, -4.0f};
+  program.copy_ndarray_from_host(input, source.data(), sizeof(source));
+
+  {
+    auto submission = plan.submit(
+        {OperatorApplyMode::forward,
+         OperatorVectorView::from_ndarray(&program, *input, space, false),
+         nullptr,
+         OperatorVectorView::from_ndarray(&program, *output, space, true)});
+    EXPECT_TRUE(submission.completed_synchronously);
+    EXPECT_TRUE(submission.done());
+    EXPECT_EQ(releases, 0);
+  }
+  EXPECT_EQ(releases, 1);
+
+  std::array<float, 2> result{};
+  program.copy_ndarray_to_host(output, result.data(), sizeof(result));
+  EXPECT_FLOAT_EQ(result[0], 6.0f);
+  EXPECT_FLOAT_EQ(result[1], -12.0f);
+  program.delete_ndarray(output);
+  program.delete_ndarray(input);
+}
+#endif
 
 TEST(LinearOperator, DependencyMaskClassifiesPlanInvalidation) {
   OperatorResourceStamp planned{11, 101, 2, 3, 4, 5};

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "taichi/ir/type.h"
+#include "taichi/program/runtime_completion.h"
 
 namespace taichi::lang {
 
@@ -138,11 +139,6 @@ struct OperatorApplyRequest {
   double beta{0.0};
 };
 
-struct OperatorSubmission {
-  OperatorResourceStamp resource_stamp;
-  bool completed_synchronously{true};
-};
-
 // Type-erased ownership for one provider transaction. Bindings use this to
 // keep provider-specific locks and snapshots alive without exposing their
 // concrete types to plans or solvers.
@@ -218,6 +214,36 @@ class OperatorPinnedAction {
   std::shared_ptr<OperatorAction> action_;
   OperatorResourceStamp stamp_;
   OperatorResourceLease resource_lease_;
+};
+
+// Move-only submission ticket. An asynchronous ticket retains the exact
+// action/resource generation until its backend completion is observed. If a
+// caller discards a pending ticket, destruction waits before releasing the
+// generation; internal solve plans instead retain one explicit pin across all
+// of their submissions and synchronize at the solve boundary.
+class OperatorSubmission {
+ public:
+  OperatorSubmission() = default;
+  OperatorSubmission(const OperatorSubmission &) = delete;
+  OperatorSubmission &operator=(const OperatorSubmission &) = delete;
+  OperatorSubmission(OperatorSubmission &&other) noexcept;
+  OperatorSubmission &operator=(OperatorSubmission &&) = delete;
+  ~OperatorSubmission();
+
+  bool done() const;
+  void wait() const;
+
+  OperatorResourceStamp resource_stamp;
+  bool completed_synchronously{true};
+
+ private:
+  friend class OperatorPlan;
+  OperatorSubmission(OperatorPinnedAction generation,
+                     RuntimeCompletion completion,
+                     bool completed_synchronously);
+
+  OperatorPinnedAction generation_;
+  RuntimeCompletion completion_;
 };
 
 struct OperatorResourceGenerationStatistics {
@@ -316,7 +342,10 @@ class OperatorPlan {
   OperatorResourceStamp resource_stamp() const;
   OperatorResourceLease acquire_resource_lease() const;
   OperatorPinnedAction pin();
+  // Owns a completion ticket for one standalone submission.
   OperatorSubmission submit(const OperatorApplyRequest &request);
+  // Hot-loop form: the caller retains |pinned| and owns the backend
+  // synchronization/completion boundary for the whole operation sequence.
   OperatorSubmission submit(const OperatorPinnedAction &pinned,
                             const OperatorApplyRequest &request);
   OperatorPlanRuntimeStatistics debug_runtime_statistics() const;
