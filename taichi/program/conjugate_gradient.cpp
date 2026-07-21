@@ -244,6 +244,30 @@ CUCG::CUCG(Program *program,
   init_solver();
 }
 
+CUCG::CUCG(Program *program,
+           CompiledGraphLinearOperator &A,
+           int max_iters,
+           float absolute_tolerance,
+           bool verbose,
+           float relative_tolerance)
+    : program_(program),
+      A_(A),
+      compiled_graph_operator_(&A),
+      max_iters_(max_iters),
+      absolute_tolerance_(absolute_tolerance),
+      relative_tolerance_(relative_tolerance),
+      verbose_(verbose) {
+  TI_ERROR_IF(!program_ || program_->compile_config().arch != Arch::cuda ||
+                  A.owning_program() != program_,
+              "CUDA compiled-graph CG requires its owning CUDA Program.");
+  validate_controls();
+  operator_plan_ = std::make_unique<OperatorPlan>(
+      program_, with_legacy_cg_traits(
+                    make_cuda_program_graph_operator_binding(program_, A)));
+  validate_cg_plan(*operator_plan_, nullptr);
+  init_solver();
+}
+
 bool CUCG::has_preconditioner() const {
   return preconditioner_ != nullptr || block_preconditioner_ != nullptr ||
          compiled_kernel_preconditioner_ != nullptr;
@@ -371,9 +395,9 @@ void CUCG::ensure_workspace(Program *program, int size) {
   if (size <= 0) {
     return;
   }
-  if (compiled_kernel_operator_) {
+  if (compiled_kernel_operator_ || compiled_graph_operator_) {
     TI_ERROR_IF(program != program_,
-                "CUDA compiled-kernel CG workspace requires its owning "
+                "CUDA program-bound CG workspace requires its owning "
                 "Program.");
     auto create_vector = [&]() {
       return program->create_ndarray(PrimitiveType::f32, {size},
@@ -453,10 +477,10 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
 #if defined(TI_WITH_CUDA)
   std::lock_guard<std::mutex> lock(solve_mutex_);
   TI_ERROR_IF(
-      compiled_kernel_operator_ &&
+      (compiled_kernel_operator_ || compiled_graph_operator_) &&
           (prog != program_ || x.owning_program() != program_ ||
            b.owning_program() != program_),
-      "CUDA compiled-kernel CG requires solution and RHS ndarrays owned by "
+      "CUDA program-bound CG requires solution and RHS ndarrays owned by "
       "its construction Program.");
   ensure_operator_plan(prog);
   auto operator_generation = operator_plan_->pin();
@@ -636,9 +660,11 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
   const auto operator_stats = A_.debug_runtime_statistics();
   SparseSolvePlanRuntimeStatistics result;
   result.backend_family = "cuda";
-  if (compiled_kernel_operator_) {
+  if (compiled_kernel_operator_ || compiled_graph_operator_) {
     result.method = has_preconditioner() ? "pcg_compiled_kernel"
-                                         : "cg_compiled_kernel";
+                                         : (compiled_graph_operator_
+                                                ? "cg_compiled_graph"
+                                                : "cg_compiled_kernel");
     result.preconditioner_method = compiled_kernel_preconditioner_
                                        ? compiled_kernel_preconditioner_
                                              ->debug_runtime_statistics()
@@ -752,6 +778,17 @@ std::unique_ptr<CUCG> make_cuda_compiled_kernel_cg_solver(
                                 relative_tolerance);
 }
 
+std::unique_ptr<CUCG> make_cuda_compiled_graph_cg_solver(
+    Program *program,
+    CompiledGraphLinearOperator &A,
+    int max_iters,
+    float absolute_tolerance,
+    bool verbose,
+    float relative_tolerance) {
+  return std::make_unique<CUCG>(program, A, max_iters, absolute_tolerance,
+                                verbose, relative_tolerance);
+}
+
 std::unique_ptr<CUCG> make_cuda_compiled_kernel_pcg_solver(
     Program *program,
     CompiledKernelLinearOperator &A,
@@ -790,6 +827,10 @@ OperatorBinding bind_cpu_operator_compatibility(Program *program,
   if (auto *kernel =
           dynamic_cast<CompiledKernelLinearOperator *>(&matrix)) {
     return make_cpu_program_kernel_operator_binding(program, *kernel);
+  }
+  if (auto *graph =
+          dynamic_cast<CompiledGraphLinearOperator *>(&matrix)) {
+    return make_cpu_program_graph_operator_binding(program, *graph);
   }
   const auto statistics = matrix.debug_runtime_statistics();
   TI_ERROR(
@@ -1629,7 +1670,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
     SparseMatrix &matrix,
     int fixed_iterations)
     : VulkanCGIterationPlan(program, matrix, fixed_iterations, 0.0f, false,
-                            false, nullptr, nullptr, nullptr) {
+                            false, false, nullptr, nullptr, nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
@@ -1637,7 +1678,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
                                              int max_iterations,
     float absolute_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
-                            absolute_tolerance, true, false, nullptr,
+                            absolute_tolerance, true, false, false, nullptr,
                             nullptr, nullptr) {
 }
 
@@ -1648,7 +1689,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
     int max_iterations,
     float absolute_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
-                            absolute_tolerance, true, false,
+                            absolute_tolerance, true, false, false,
                             &preconditioner, nullptr, nullptr) {
 }
 
@@ -1659,7 +1700,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
     int max_iterations,
     float absolute_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
-                            absolute_tolerance, true, false, nullptr,
+                            absolute_tolerance, true, false, false, nullptr,
                             &preconditioner, nullptr) {
 }
 
@@ -1669,8 +1710,18 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
     int max_iterations,
     float absolute_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
-                            absolute_tolerance, true, true, nullptr, nullptr,
-                            nullptr) {
+                            absolute_tolerance, true, true, false, nullptr,
+                            nullptr, nullptr) {
+}
+
+VulkanCGIterationPlan::VulkanCGIterationPlan(
+    Program *program,
+    CompiledGraphLinearOperator &matrix,
+    int max_iterations,
+    float absolute_tolerance)
+    : VulkanCGIterationPlan(program, matrix, max_iterations,
+                            absolute_tolerance, true, false, true, nullptr,
+                            nullptr, nullptr) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(
@@ -1680,8 +1731,8 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
     int max_iterations,
     float absolute_tolerance)
     : VulkanCGIterationPlan(program, matrix, max_iterations,
-                            absolute_tolerance, true, true, nullptr, nullptr,
-                            &preconditioner) {
+                            absolute_tolerance, true, true, false, nullptr,
+                            nullptr, &preconditioner) {
 }
 
 VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
@@ -1690,6 +1741,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
                                              float absolute_tolerance,
                                              bool adaptive,
                                              bool allow_compiled_kernel_operator,
+                                             bool allow_compiled_graph_operator,
                                              SparseJacobiPreconditionerPlan
                                                  *preconditioner,
                                              SparseBlockJacobiPreconditionerPlan
@@ -1703,12 +1755,17 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
   auto *vulkan_bsr = dynamic_cast<VulkanSparseBsrMatrix *>(&matrix);
   auto *compiled_kernel_operator =
       dynamic_cast<CompiledKernelLinearOperator *>(&matrix);
+  auto *compiled_graph_operator =
+      dynamic_cast<CompiledGraphLinearOperator *>(&matrix);
   const int preconditioner_count = (preconditioner ? 1 : 0) +
                                    (block_preconditioner ? 1 : 0) +
                                    (compiled_kernel_preconditioner ? 1 : 0);
   TI_ERROR_IF(preconditioner_count > 1,
               "Vulkan CG iteration plans accept at most one "
               "preconditioner.");
+  TI_ERROR_IF(allow_compiled_kernel_operator &&
+                  allow_compiled_graph_operator,
+              "Vulkan CG cannot select two program-bound operator kinds.");
   if (allow_compiled_kernel_operator) {
     TI_ERROR_IF(!compiled_kernel_operator || preconditioner ||
                     block_preconditioner ||
@@ -1716,6 +1773,13 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
                 "Private Vulkan compiled-kernel CG requires its owning "
                 "compiled-kernel operator and either identity or a "
                 "compiled-kernel preconditioner.");
+  } else if (allow_compiled_graph_operator) {
+    TI_ERROR_IF(!compiled_graph_operator || preconditioner ||
+                    block_preconditioner ||
+                    compiled_kernel_preconditioner ||
+                    compiled_graph_operator->owning_program() != program,
+                "Private Vulkan compiled-graph CG requires its owning "
+                "compiled-graph operator and identity preconditioning.");
   } else if (block_preconditioner) {
     TI_ERROR_IF(!vulkan_bsr,
                 "Vulkan block-Jacobi PCG requires an internal Vulkan BSR "
@@ -1747,10 +1811,17 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
   compiled_kernel_preconditioner_ = compiled_kernel_preconditioner;
   compiled_kernel_operator_ =
       allow_compiled_kernel_operator ? compiled_kernel_operator : nullptr;
+  compiled_graph_operator_ =
+      allow_compiled_graph_operator ? compiled_graph_operator : nullptr;
   fixed_iterations_ = max_iterations;
   absolute_tolerance_ = absolute_tolerance;
   adaptive_ = adaptive;
-  if (compiled_kernel_operator_) {
+  if (compiled_graph_operator_) {
+    operator_plan_ = std::make_unique<OperatorPlan>(
+        program_, with_legacy_cg_traits(
+                      make_vulkan_program_graph_operator_binding(
+                          program_, *compiled_graph_operator_)));
+  } else if (compiled_kernel_operator_) {
     operator_plan_ = std::make_unique<OperatorPlan>(
         program_, with_legacy_cg_traits(
                       make_vulkan_program_kernel_operator_binding(
@@ -2077,7 +2148,11 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
       result.preconditioner_method = "jacobi";
     }
   } else {
-    if (compiled_kernel_operator_) {
+    if (compiled_graph_operator_) {
+      result.method = adaptive_
+                          ? "cg_compiled_graph_bounded_masked_probe"
+                          : "cg_compiled_graph_fixed_iteration_probe";
+    } else if (compiled_kernel_operator_) {
       result.method = adaptive_
                           ? "cg_compiled_kernel_bounded_masked_probe"
                           : "cg_compiled_kernel_fixed_iteration_probe";
@@ -2219,6 +2294,16 @@ std::unique_ptr<VulkanCGIterationPlan>
 make_vulkan_compiled_kernel_cg_convergence_plan(
     Program *program,
     CompiledKernelLinearOperator &matrix,
+    int max_iterations,
+    float absolute_tolerance) {
+  return std::make_unique<VulkanCGIterationPlan>(
+      program, matrix, max_iterations, absolute_tolerance);
+}
+
+std::unique_ptr<VulkanCGIterationPlan>
+make_vulkan_compiled_graph_cg_convergence_plan(
+    Program *program,
+    CompiledGraphLinearOperator &matrix,
     int max_iterations,
     float absolute_tolerance) {
   return std::make_unique<VulkanCGIterationPlan>(

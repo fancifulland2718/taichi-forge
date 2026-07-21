@@ -438,6 +438,12 @@ class CUCG {
        float absolute_tolerance,
        bool verbose,
        float relative_tolerance = 0.0f);
+  CUCG(Program *program,
+       CompiledGraphLinearOperator &A,
+       int max_iters,
+       float absolute_tolerance,
+       bool verbose,
+       float relative_tolerance = 0.0f);
 
   ~CUCG();
 
@@ -502,6 +508,7 @@ class CUCG {
   SparseJacobiPreconditionerPlan *preconditioner_{nullptr};
   SparseBlockJacobiPreconditionerPlan *block_preconditioner_{nullptr};
   CompiledKernelLinearOperator *compiled_kernel_operator_{nullptr};
+  CompiledGraphLinearOperator *compiled_graph_operator_{nullptr};
   CompiledKernelPreconditionerPlan *compiled_kernel_preconditioner_{nullptr};
   int max_iters_{0};
   float absolute_tolerance_{0.0f};
@@ -562,6 +569,14 @@ std::unique_ptr<CUCG> make_cuda_block_jacobi_pcg_solver(
 std::unique_ptr<CUCG> make_cuda_compiled_kernel_cg_solver(
     Program *program,
     CompiledKernelLinearOperator &A,
+    int max_iters,
+    float absolute_tolerance,
+    bool verbose,
+    float relative_tolerance = 0.0f);
+
+std::unique_ptr<CUCG> make_cuda_compiled_graph_cg_solver(
+    Program *program,
+    CompiledGraphLinearOperator &A,
     int max_iters,
     float absolute_tolerance,
     bool verbose,
@@ -759,6 +774,10 @@ class VulkanCGIterationPlan {
                         CompiledKernelLinearOperator &matrix,
                         int max_iterations,
                         float absolute_tolerance);
+  VulkanCGIterationPlan(Program *program,
+                        CompiledGraphLinearOperator &matrix,
+                        int max_iterations,
+                        float absolute_tolerance);
   VulkanCGIterationPlan(
       Program *program,
       CompiledKernelLinearOperator &matrix,
@@ -805,6 +824,7 @@ class VulkanCGIterationPlan {
                         float absolute_tolerance,
                         bool adaptive,
                         bool allow_compiled_kernel_operator,
+                        bool allow_compiled_graph_operator,
                         SparseJacobiPreconditionerPlan *preconditioner,
                         SparseBlockJacobiPreconditionerPlan
                             *block_preconditioner,
@@ -834,6 +854,7 @@ class VulkanCGIterationPlan {
   float absolute_tolerance_{0.0f};
   bool adaptive_{false};
   CompiledKernelLinearOperator *compiled_kernel_operator_{nullptr};
+  CompiledGraphLinearOperator *compiled_graph_operator_{nullptr};
   Ndarray *ap_{nullptr};
   Ndarray *residual_{nullptr};
   Ndarray *direction_{nullptr};
@@ -902,6 +923,13 @@ std::unique_ptr<VulkanCGIterationPlan>
 make_vulkan_compiled_kernel_cg_convergence_plan(
     Program *program,
     CompiledKernelLinearOperator &matrix,
+    int max_iterations,
+    float absolute_tolerance);
+
+std::unique_ptr<VulkanCGIterationPlan>
+make_vulkan_compiled_graph_cg_convergence_plan(
+    Program *program,
+    CompiledGraphLinearOperator &matrix,
     int max_iterations,
     float absolute_tolerance);
 
